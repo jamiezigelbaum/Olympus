@@ -216,6 +216,45 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
     if (slot) slot.textContent = message;
   }
 
+  function errorCode(result: OlympusDashboardControlResult): string | undefined {
+    const error = result.body.error;
+    if (!error || typeof error !== 'object' || Array.isArray(error)) return undefined;
+    const code = (error as Record<string, unknown>).code;
+    return typeof code === 'string' ? code : undefined;
+  }
+
+  /**
+   * A change that only a session opened on this computer may make (the first-run
+   * privacy choice, local models): the session is fine, it is just not local yet.
+   * Say so and offer the unlock in place; the person presses it, then the form is sent again.
+   */
+  function askLocalUnlock(form: HTMLFormElement): void {
+    say(form, 'Unlock on this computer to save this.');
+    if (!options.transport.openLocalControls) return;
+    const slot = form.querySelector('[data-action-message]');
+    if (!slot || slot.parentElement?.querySelector('[data-unlock-here]')) return;
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'btn';
+    button.setAttribute('data-unlock-here', '');
+    button.textContent = 'Unlock on this computer';
+    button.addEventListener('click', () => {
+      button.disabled = true;
+      void (async () => {
+        let opened = false;
+        try { opened = await options.transport.openLocalControls!(); } catch { opened = false; }
+        if (!opened) {
+          button.disabled = false;
+          say(form, 'Could not unlock. Open this dashboard in a browser on this computer and try again.');
+          return;
+        }
+        button.remove();
+        form.requestSubmit();
+      })();
+    });
+    slot.after(button);
+  }
+
   function errorMessage(result: OlympusDashboardControlResult): string {
     const error = result.body.error;
     if (error && typeof error === 'object' && !Array.isArray(error)) {
@@ -543,6 +582,7 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
     }
     if (result.status === 401 || result.status === 403) {
       closeAuthorizationTab(authorizationTab);
+      if (result.status === 403 && errorCode(result) === 'mac_dashboard_only') { askLocalUnlock(form); return; }
       if (options.authority === 'worker-session') {
         csrfToken = '';
         say(form, 'The control session expired — open dashboard controls again, then try again.');

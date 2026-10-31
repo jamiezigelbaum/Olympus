@@ -944,6 +944,16 @@ export function standaloneDashboardControllerScript(
             var response = await fetch('/dashboard/control/session/local', {
               method: 'POST', credentials: 'same-origin', cache: 'no-store',
             });
+            // The local session is a new one: later requests carry its CSRF token, not the launch session's,
+            // and the poll expects its marker (the server's hash of that token), so it does not reload the page.
+            var body = await json(response);
+            if (response.ok && typeof body.csrf_token === 'string') {
+              csrfToken = body.csrf_token;
+              try {
+                var digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode('olympus-dashboard-session-marker\\u0000' + csrfToken));
+                sessionMarker = Array.from(new Uint8Array(digest)).map(function (b) { return b.toString(16).padStart(2, '0'); }).join('').slice(0, 24);
+              } catch (error) {}
+            }
             return response.ok;
           },
           async messaging(operation, params) {
