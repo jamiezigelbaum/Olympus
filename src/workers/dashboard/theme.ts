@@ -378,8 +378,15 @@ td { padding: 7px 10px 7px 0; border-bottom: 1px solid var(--line2); color: var(
 .setrow .blurb { color: var(--t2); font-size: var(--fs-body); }
 .setrow .blurb .caveat { color: var(--warn); font-weight: 600; }
 .setrow .blurb details.howto { color: var(--t3); font-size: var(--fs-caption); }
-.rowform { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.rowform { display: flex; gap: 12px; align-items: center; flex-wrap: nowrap; }
 .keyfield { background: var(--bg); border: 1px solid var(--field); border-radius: 7px; color: var(--t1); font: inherit; font-size: var(--fs-body); padding: 5px 10px; width: 190px; }
+.actionrow, .setupactions { display: flex; flex-direction: row; align-items: center; justify-content: flex-start; gap: 12px; }
+.actionrow > form { margin: 0 !important; }
+.actionrow > .primary, .setupactions > .primary { order: -1; }
+.setupactions { margin-top: 24px; }
+@media (max-width: 480px) {
+  .actionrow, .setupactions, .rowform { flex-direction: column; align-items: stretch; }
+}
 .keyfield::placeholder { color: var(--t4); }
 .keyfield:focus-visible { outline: 2px solid var(--link); outline-offset: 1px; }
 .actmsg { color: var(--t3); font-size: var(--fs-caption); }
