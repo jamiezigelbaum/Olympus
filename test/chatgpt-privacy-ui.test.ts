@@ -1212,15 +1212,29 @@ describe('privacy sheet persistence boundaries', () => {
 });
 
 test('privacy summary follows every description keystroke even when topics and save availability stay the same', async () => {
-  const { host } = await openPrivacy({ description: 'my diary' });
+  const { host, saves } = await openPrivacy({ description: 'my diary' });
+  const details = () => host.doc.querySelector('details') as HTMLDetailsElement;
+  details().open = true;
+  details().dispatchEvent(new host.win.Event('toggle') as unknown as Event);
   const type = (value: string) => {
     const area = host.doc.querySelector('textarea')!;
     area.value = value;
     area.dispatchEvent(new host.win.Event('input') as unknown as Event);
   };
   type('my diary and a');
+  const area = host.doc.querySelector('textarea')!;
   type('my diary and letters');
+  // This edit must update the visible summary without redrawing the textarea.
+  expect(host.doc.querySelector('textarea')).toBe(area);
   expect(host.doc.querySelector('[data-key="privacy:summary"]')!.textContent).toBe('my diary and letters');
+  details().open = false;
+  details().dispatchEvent(new host.win.Event('toggle') as unknown as Event);
+  expect(host.doc.querySelector('[data-key="privacy:summary"]')!.textContent).toBe('my diary and letters');
+  saveDraft(host);
+  host.button(W.confirm).click();
+  await host.settle();
+  expect(saves).toHaveLength(1);
+  expect(saves[0].description).toBe('my diary and letters');
 });
 
 test('the save bar follows pending covered edits, including reverting to the saved description', async () => {
