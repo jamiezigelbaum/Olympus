@@ -300,6 +300,15 @@ async function prepareSource(): Promise<never> {
   // qualified on; the restart below applies it. Upgrades already have a choice.
   const before = readPolicy();
   if (before && isPendingPrivacyPolicy(before.json as Parameters<typeof isPendingPrivacyPolicy>[0])) {
+    // First, the agent-led path must still ask, with local-first recommended.
+    const asked = olympus(['setup', '--privacy-options']);
+    let offer: { state?: string; options?: Array<{ id?: string; recommended?: boolean }> } = {};
+    try { offer = JSON.parse(asked.stdout); } catch { /* reported below */ }
+    const recommended = offer.options?.filter((option) => option.recommended).map((option) => option.id) ?? [];
+    if (asked.code !== 0 || offer.state !== 'pending' || recommended.join() !== 'local-first') {
+      emit({ ok: false, step: 'privacy-choice', detail: `a fresh install did not ask for the privacy choice with local-first recommended: ${asked.stdout.slice(0, 200) || asked.stderr.slice(0, 200)}` });
+    }
+    say('fresh install asks for the privacy choice, local-first recommended');
     const saved = saveFirstRunPrivacyChoice(p.sovereigntyPath, 'no-sensitive');
     if (!saved.ok || !saved.changed) emit({ ok: false, step: 'privacy-choice', detail: 'the first-run privacy choice could not be saved' });
     say('first-run privacy choice saved: no-sensitive');
