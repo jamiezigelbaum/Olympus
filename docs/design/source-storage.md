@@ -391,7 +391,10 @@ that opens files inside an account folder:
   backfills locator indexes in bounded windows and resumes cleanup, even with the
   scheduler off. Search, status and extraction stay closed until cleanup reports
   complete; persistent failures keep the local-files lane unavailable while
-  retries continue. Every pull still waits for the cleanup run and idle barrier.
+  retries continue. Only confirmed deletions count as recovery progress; failed
+  deletions back off and report once. Locator readiness is checked through the
+  walk and before completion. Every pull still waits for the cleanup run and idle
+  barrier.
   Shutdown stops scheduler/adoption work before closing extraction queues, and a
   closed extraction runtime cannot create a runner for a later source. Retained
   archive targets cannot open a source lane after shutdown begins.

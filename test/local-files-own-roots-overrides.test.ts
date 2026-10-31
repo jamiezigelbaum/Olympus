@@ -12,6 +12,7 @@
 //     judged path by path with the case rules of its volume.
 
 import { afterEach, describe, expect, test } from 'bun:test';
+import { Database } from 'bun:sqlite';
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -645,6 +646,89 @@ describe('5. what an earlier version indexed inside an own folder', () => {
     return { secure, lane };
   }
   const sleep = (ms: number) => new Promise<void>((resolve) => { setTimeout(resolve, ms); });
+
+  test.each([1, 50])('failed deletions report no removal progress and repeated failure only once (limit %s)', async (maxItems) => {
+    const { secure, lane } = await tierLaneHolding([[secret, 'zzsecretbody'], [budget, 'zzbudgetbody']]);
+    const sync = lane.set.sync.bind(lane.set);
+    lane.set.sync = (connector, options, run) => sync({ ...connector, async *listItems() { yield { items: [], done: true }; } }, options, run);
+    const messages: string[] = [];
+    const cleanup = createLocalFilesOwnRootsCleanup({ tierSet: lane.set, context: ownContext(), maxItems, log: message => messages.push(message) });
+    const results = [await cleanup.run(), await cleanup.run(), await cleanup.run()];
+    expect(results).toEqual(Array.from({ length: 3 }, () => ({ removed: 0, complete: false })));
+    expect(messages.filter(message => message.includes('did not remove'))).toHaveLength(1);
+    expect(present(secure, secret)).toBe(true);
+    expect(present(secure, budget)).toBe(true);
+  });
+
+  test('real failed deletion recovery increases retry delay to its cap without log flooding', async () => {
+    const { secure, lane } = await tierLaneHolding([[secret, 'zzsecretbody']]);
+    const sync = lane.set.sync.bind(lane.set);
+    lane.set.sync = (connector, options, run) => sync({ ...connector, async *listItems() { yield { items: [], done: true }; } }, options, run);
+    const messages: string[] = [];
+    const cleanup = createLocalFilesOwnRootsCleanup({ tierSet: lane.set, context: ownContext(), log: message => messages.push(message) });
+    const delays: number[] = [];
+    const pending: Array<{ handle: object; callback: () => void }> = [];
+    const setTimeoutImpl = ((callback: () => void, delay: number) => {
+      const handle = { unref() {} };
+      delays.push(delay);
+      pending.push({ handle, callback });
+      return handle;
+    }) as unknown as typeof setTimeout;
+    const clearTimeoutImpl = ((handle: unknown) => {
+      const index = pending.findIndex(entry => entry.handle === handle);
+      if (index >= 0) pending.splice(index, 1);
+    }) as typeof clearTimeout;
+    const recovery = createLocalFilesOwnRootsRecovery({ cleanup, stores: () => lane.set.openStores(), retryMs: 10, maxRetryMs: 80, setTimeoutImpl, clearTimeoutImpl });
+    try {
+      await recovery.initial;
+      for (let pass = 0; pass < 4; pass++) {
+        expect(pending).toHaveLength(1);
+        pending.shift()!.callback();
+        const deadline = Date.now() + 1000;
+        while (!pending.length && Date.now() < deadline) await new Promise<void>(resolve => setImmediate(resolve));
+      }
+      expect(delays).toEqual([10, 20, 40, 80, 80]);
+      expect(messages.filter(message => message.includes('did not remove'))).toHaveLength(1);
+      expect(recovery.ready()).toBe(false);
+      expect(present(secure, secret)).toBe(true);
+    } finally { recovery.close(); }
+    expect(pending).toHaveLength(0);
+  });
+
+  test('repeated deletion exceptions are reported once and a later successful pass still cleans', async () => {
+    const { secure, lane } = await tierLaneHolding([[secret, 'zzsecretbody'], [budget, 'zzbudgetbody']]);
+    const sync = lane.set.sync.bind(lane.set);
+    lane.set.sync = async () => { throw new Error('synthetic deletion failure'); };
+    const messages: string[] = [];
+    const cleanup = createLocalFilesOwnRootsCleanup({ tierSet: lane.set, context: ownContext(), log: message => messages.push(message) });
+    for (let pass = 0; pass < 3; pass++) expect(await cleanup.run()).toEqual({ removed: 0, complete: false });
+    expect(messages).toHaveLength(1);
+    lane.set.sync = sync;
+    expect(await cleanup.run()).toEqual({ removed: 1, complete: true });
+    expect(present(secure, secret)).toBe(false);
+    expect(present(secure, budget)).toBe(true);
+  });
+
+  test('an index that becomes unready during a walk cannot certify cleanup complete', async () => {
+    const { secure, lane } = await tierLaneHolding([[secret, 'zzsecretbody'], [budget, 'zzbudgetbody']]);
+    const page = secure.pageActiveItemsUnderLocatorIfIndexed.bind(secure);
+    let invalidated = false;
+    secure.pageActiveItemsUnderLocatorIfIndexed = (input) => {
+      if (!invalidated) {
+        invalidated = true;
+        const db = new Database(secure.dbPath);
+        try { db.exec('DELETE FROM item_locator_identities; UPDATE locator_identity_index_state SET completed = 0, cursor_item_pk = 0'); } finally { db.close(); }
+      }
+      return page(input);
+    };
+    const cleanup = createLocalFilesOwnRootsCleanup({ tierSet: lane.set, context: ownContext() });
+    expect(await cleanup.run()).toEqual({ removed: 0, complete: false });
+    expect(present(secure, secret)).toBe(true);
+    await secure.ensureLocatorIdentityIndexReady();
+    expect(await cleanup.run()).toEqual({ removed: 1, complete: true });
+    expect(present(secure, secret)).toBe(false);
+    expect(present(secure, budget)).toBe(true);
+  });
 
   test('goes through the lane\'s tier set, and moves no folder\'s cursor', async () => {
     const { secure, lane } = await tierLaneHolding([[secret, 'zzsecretbody the session token'], [budget, 'zzbudgetbody']]);

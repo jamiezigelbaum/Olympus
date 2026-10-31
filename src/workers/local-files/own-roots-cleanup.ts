@@ -100,6 +100,19 @@ export function createLocalFilesOwnRootsCleanup(options: LocalFilesOwnRootsClean
   let running: Promise<LocalFilesOwnRootsCleanupResult> | undefined;
   let removedNow = 0;
   let toldWaiting = false;
+  let toldRemovalFailure = false;
+  const resetWalks = (): void => { for (const walk of walks) { walk.done = false; delete walk.after; } };
+  const reportRemovalFailure = (message: string): void => {
+    if (!toldRemovalFailure) options.log?.(message);
+    toldRemovalFailure = true;
+  };
+  const waitForIndex = (): LocalFilesOwnRootsCleanupResult => {
+    if (!toldWaiting) options.log?.('The index of stored paths is still being prepared; what is inside Olympus\'s own folders is removed at the next run.');
+    toldWaiting = true;
+    resetWalks();
+    return { removed: removedNow, complete: false };
+  };
+  const lookupsReady = (): boolean => view.lookupsReady?.() ?? true;
 
   const inside = (locatorUri: string): boolean => {
     try { return isInsideOwnRoot(locatorUri, context); } catch { return false; }
@@ -123,20 +136,16 @@ export function createLocalFilesOwnRootsCleanup(options: LocalFilesOwnRootsClean
   };
 
   const once = async (): Promise<LocalFilesOwnRootsCleanupResult> => {
-    if (view.lookupsReady && !view.lookupsReady()) {
-      // Asked again with every pass until it is ready: said once.
-      if (!toldWaiting) options.log?.('The index of stored paths is still being prepared; what is inside Olympus\'s own folders is removed at the next run.');
-      toldWaiting = true;
-      return { removed: 0, complete: false };
-    }
+    removedNow = 0;
+    if (!lookupsReady()) return waitForIndex();
     const started = Date.now();
     const timeUp = (): boolean => Date.now() - started >= maxMs;
-    removedNow = 0;
     let scanned = 0;
-    let kept = 0;
+    let attempted = 0;
     for (const walk of walks) {
       while (!walk.done) {
-        if (timeUp() || removedNow >= maxItems || scanned >= maxScanned) return { removed: removedNow, complete: false };
+        if (timeUp() || attempted >= maxItems || scanned >= maxScanned) return { removed: removedNow, complete: false };
+        if (!lookupsReady()) return waitForIndex();
         const page = walk.store.pageActiveItemsUnderLocatorIfIndexed({
           provider: LOCAL_FILES_PROVIDER,
           accountScope: LOCAL_FILES_ACCOUNT_SCOPE,
@@ -144,17 +153,25 @@ export function createLocalFilesOwnRootsCleanup(options: LocalFilesOwnRootsClean
           limit: pageSize,
           ...(walk.after !== undefined ? { after: walk.after } : {}),
         });
+        if (!lookupsReady()) return waitForIndex();
         scanned += page.items.length;
         const hits = page.items.filter((item) => inside(item.locatorUri));
         for (let index = 0; index < hits.length;) {
           // A page cut short here is read again from its start: what was removed is no longer listed.
-          if (timeUp() || removedNow >= maxItems) return { removed: removedNow, complete: false };
-          const batch = hits.slice(index, index + Math.min(batchSize, maxItems - removedNow));
+          if (timeUp() || attempted >= maxItems) return { removed: removedNow, complete: false };
+          const batch = hits.slice(index, index + Math.min(batchSize, maxItems - attempted));
           await remove(batch);
-          removedNow += batch.length;
+          attempted += batch.length;
+          const kept = batch.filter((item) => walk.store.itemPresence(item.identity).active).length;
+          removedNow += batch.length - kept;
           index += batch.length;
-          // A deletion the store did not take is left for the next run; it is not asked for again in this one.
-          kept += batch.filter((item) => walk.store.itemPresence(item.identity).active).length;
+          // No progress is claimed for attempted deletions. Keep failed rows in the
+          // next walk even if this run's count/time bound was reached by the batch.
+          if (kept > 0) {
+            reportRemovalFailure('The store did not remove some items inside Olympus\'s own folders; they are tried again at the next run.');
+            resetWalks();
+            return { removed: removedNow, complete: false };
+          }
         }
         if (page.next === undefined) walk.done = true;
         else walk.after = page.next;
@@ -162,11 +179,9 @@ export function createLocalFilesOwnRootsCleanup(options: LocalFilesOwnRootsClean
         await new Promise<void>((resolve) => { setImmediate(resolve); });
       }
     }
-    if (kept > 0) {
-      options.log?.('The store did not remove some items inside Olympus\'s own folders; they are tried again at the next run.');
-      for (const walk of walks) { walk.done = false; delete walk.after; }
-      return { removed: removedNow, complete: false };
-    }
+    // An empty projection from a concurrently invalidated index is not proof
+    // that the own folders are empty. Start the walk again after backfill.
+    if (!lookupsReady()) return waitForIndex();
     finished = true;
     return { removed: removedNow, complete: true };
   };
@@ -176,8 +191,9 @@ export function createLocalFilesOwnRootsCleanup(options: LocalFilesOwnRootsClean
       if (finished) return Promise.resolve({ removed: 0, complete: true });
       running ??= once()
         .catch((error): LocalFilesOwnRootsCleanupResult => {
-          options.log?.(`Items inside Olympus's own folders could not be removed this run (${error instanceof Error ? error.name : 'error'}); they are tried again at the next.`);
-          return { removed: 0, complete: false };
+          resetWalks();
+          reportRemovalFailure(`Items inside Olympus's own folders could not be removed this run (${error instanceof Error ? error.name : 'error'}); they are tried again at the next.`);
+          return { removed: removedNow, complete: false };
         })
         .finally(() => { running = undefined; });
       // The caller waits no longer than the time bound, whatever the store is doing: a batch in flight
@@ -210,11 +226,15 @@ export function createLocalFilesOwnRootsRecovery(options: {
   stores(): readonly Pick<LocalConnectorStore, 'locatorIdentityIndexReady' | 'ensureLocatorIdentityIndexReady'>[];
   retryMs?: number;
   maxRetryMs?: number;
+  setTimeoutImpl?: typeof setTimeout;
+  clearTimeoutImpl?: typeof clearTimeout;
   log?(message: string): void;
 }): LocalFilesOwnRootsRecovery {
   let closed = false;
   let complete = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
+  const setTimer = options.setTimeoutImpl ?? setTimeout;
+  const clearTimer = options.clearTimeoutImpl ?? clearTimeout;
   const retryMs = Math.max(1, options.retryMs ?? 25);
   const maxRetryMs = Math.max(retryMs, options.maxRetryMs ?? 1000);
   let delay = retryMs;
@@ -226,7 +246,7 @@ export function createLocalFilesOwnRootsRecovery(options: {
       options.log?.('Local-file reads wait until cleanup of Olympus-owned folders completes; recovery continues in the background.');
     }
     if (progress) delay = retryMs;
-    timer = setTimeout(() => { timer = undefined; void recover(); }, delay);
+    timer = setTimer(() => { timer = undefined; void recover(); }, delay);
     timer.unref();
     delay = Math.min(maxRetryMs, delay * 2);
   };
@@ -265,7 +285,7 @@ export function createLocalFilesOwnRootsRecovery(options: {
     close() {
       closed = true;
       complete = false;
-      if (timer) clearTimeout(timer);
+      if (timer) clearTimer(timer);
       timer = undefined;
     },
   };
