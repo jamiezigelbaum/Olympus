@@ -2832,6 +2832,7 @@ export async function main(): Promise<void> {
   let refreshableReadwiseRuntime: ReturnType<typeof createRefreshableReadwiseConnectorStoreRuntime> | undefined;
   let readwiseConnectorStore: LocalConnectorStore | undefined;
   const mountReadwise = (): void => {
+    if (sourceRuntimeClosed) throw new Error('Source runtime is closed.');
     if (refreshableReadwiseRuntime) return;
     refreshableReadwiseRuntime = createRefreshableReadwiseConnectorStoreRuntime({
       enabled: readwiseConnectorStoreLane.enabled,
@@ -2868,6 +2869,7 @@ export async function main(): Promise<void> {
   let refreshableXBookmarksRuntime: ReturnType<typeof createRefreshableXBookmarksConnectorStoreRuntime> | undefined;
   let xBookmarksConnectorStore: LocalConnectorStore | undefined;
   const mountXBookmarks = (): void => {
+    if (sourceRuntimeClosed) throw new Error('Source runtime is closed.');
     if (refreshableXBookmarksRuntime) return;
     refreshableXBookmarksRuntime = createRefreshableXBookmarksConnectorStoreRuntime({
       enabled: xBookmarksConnectorStoreLane.enabled,
@@ -2913,6 +2915,7 @@ export async function main(): Promise<void> {
   let gmailSecureConnectorStore: LocalConnectorStore | undefined;
   let gmailTierLane: ReturnType<typeof tierLane> | undefined;
   const mountGmail = (): void => {
+    if (sourceRuntimeClosed) throw new Error('Source runtime is closed.');
     if (gmailInternalConnectorStore) return;
     gmailInternalConnectorStore = gmailConnectorStoreLane.enabled
       ? openConnectorStore({ sourceId: GMAIL_SOURCE_ID }, {
@@ -3105,6 +3108,7 @@ export async function main(): Promise<void> {
   let googleDriveSecureConnectorStore: LocalConnectorStore | undefined;
   let googleDriveTierLane: ReturnType<typeof tierLane> | undefined;
   const mountGoogleDrive = (): void => {
+    if (sourceRuntimeClosed) throw new Error('Source runtime is closed.');
     if (googleDriveInternalConnectorStore) return;
     googleDriveInternalConnectorStore = googleDriveConnectorStoreLane.enabled
       ? openConnectorStore({ sourceId: GOOGLE_DRIVE_SOURCE_ID }, {
@@ -3162,6 +3166,7 @@ export async function main(): Promise<void> {
   let dropboxTierLane: ReturnType<typeof createDropboxTierLane> | undefined;
   let dropboxExtractionView: ReturnType<typeof tieredExtractionView> | undefined;
   const mountDropbox = (): void => {
+    if (sourceRuntimeClosed) throw new Error('Source runtime is closed.');
     if (dropboxConnectorStore) return;
     dropboxConnectorStore = dropboxConnectorStoreLane.enabled
       ? createDropboxConnectorStore(process.env, { policy: dropboxIngestionPolicy })
@@ -3231,6 +3236,7 @@ export async function main(): Promise<void> {
   let localFilesTierLane: ReturnType<typeof createLocalFilesTierLane> | undefined;
   let localFilesExtractionView: ReturnType<typeof tieredExtractionView> | undefined;
   const mountLocalFiles = (): void => {
+    if (sourceRuntimeClosed) throw new Error('Source runtime is closed.');
     if (localFilesConnectorStore) return;
     localFilesConnectorStore = localFilesConnectorStoreLane.enabled
       ? createLocalFilesConnectorStore(process.env, { policy: localFilesIngestionPolicy })
@@ -3369,6 +3375,7 @@ export async function main(): Promise<void> {
   let whatsappSecretLocations: SecretLocationsIndex | undefined;
   let whatsappTierSet: TieredStoreSet | undefined;
   const mountWhatsApp = (): void => {
+    if (sourceRuntimeClosed) throw new Error('Source runtime is closed.');
     if (whatsappConnectorStore) return;
     whatsappConnectorStore = whatsappConnectorStoreLane.enabled
       ? createWhatsAppConnectorStore(process.env)
@@ -3451,9 +3458,10 @@ export async function main(): Promise<void> {
   let telegramConnectorStores: ReturnType<typeof createTelegramConnectorStores> | undefined;
   let telegramTierLane: ReturnType<typeof tierLane> | undefined;
   let telegramConnectorStoreSync: TelegramConnectorStoreSyncHandler | undefined;
-  const mountTelegram = (forImport = false): void => {
+  const mountTelegram = (): void => {
+    if (sourceRuntimeClosed) throw new Error('Source runtime is closed.');
     if (telegramConnectorStores) return;
-    telegramConnectorStores = telegramConnectorStoreLane.enabled || forImport
+    telegramConnectorStores = telegramConnectorStoreLane.enabled
       ? createTelegramConnectorStores(process.env)
       : undefined;
     telegramTierLane = telegramConnectorStores
@@ -3482,10 +3490,10 @@ export async function main(): Promise<void> {
   };
   // Register source knowledge before pairing or mounting: preview and saved-import resumption
   // can find the target without creating stores. An approved import opens the same canonical lane.
-  archiveSourceTargets.register(telegramArchiveTarget({
+  if (telegramConnectorStoreLane.enabled) archiveSourceTargets.register(telegramArchiveTarget({
     account: TELEGRAM_PERSONAL_ACCOUNT_SCOPE,
     lane: () => {
-      mountTelegram(true);
+      mountTelegram();
       if (!telegramConnectorStoreSync) throw new Error('Telegram stores are unavailable.');
       return telegramConnectorStoreSync.archiveTarget().lane({ sourceId: TELEGRAM_MESSAGES_SOURCE_ID, slot: '1' }, process.env);
     },
@@ -3501,14 +3509,14 @@ export async function main(): Promise<void> {
     if (sourceRuntimeClosed) return;
     const connected = (provider: ConnectedCredentialHandle['provider'], capability: string): boolean =>
       activeCredentialHandle(handles, { provider, capability }) !== undefined;
-    if (gmailConnectorStoreLane.enabled && (sourceHasStores(GMAIL_SOURCE_ID) || connected('gmail', 'gmail.email.sync'))) mountGmail();
-    if (googleDriveConnectorStoreLane.enabled && (sourceHasStores(GOOGLE_DRIVE_SOURCE_ID) || connected('google_drive', 'google_drive.docs.sync'))) mountGoogleDrive();
-    if (dropboxConnectorStoreLane.enabled && (sourceHasStores(DROPBOX_FILES_SOURCE_ID) || connected('dropbox', 'dropbox.files.sync'))) mountDropbox();
-    if (localFilesConnectorStoreLane.enabled && (sourceHasStores(LOCAL_FILES_SOURCE_ID) || fileSourceScopeAuthority?.policyRef(LOCAL_FILES_SOURCE_ID))) mountLocalFiles();
-    if (whatsappConnectorStoreLane.enabled && (sourceHasStores(WHATSAPP_PERSONAL_SOURCE_ID) || connected('whatsapp_personal', 'whatsapp.personal.messages.sync'))) mountWhatsApp();
-    if (telegramConnectorStoreLane.enabled && (sourceHasStores(TELEGRAM_MESSAGES_SOURCE_ID) || connected('telegram', 'telegram.messages.sync'))) mountTelegram();
-    if (readwiseConnectorStoreLane.enabled && (sourceHasStores(READWISE_SOURCE_ID) || connected('readwise', 'readwise.sync'))) mountReadwise();
-    if (xBookmarksConnectorStoreLane.enabled && (sourceHasStores(X_BOOKMARKS_SOURCE_ID) || connected('x', 'x.bookmarks.sync'))) mountXBookmarks();
+    if (!gmailInternalConnectorStore && gmailConnectorStoreLane.enabled && (sourceHasStores(GMAIL_SOURCE_ID) || connected('gmail', 'gmail.email.sync'))) mountGmail();
+    if (!googleDriveInternalConnectorStore && googleDriveConnectorStoreLane.enabled && (sourceHasStores(GOOGLE_DRIVE_SOURCE_ID) || connected('google_drive', 'google_drive.docs.sync'))) mountGoogleDrive();
+    if (!dropboxConnectorStore && dropboxConnectorStoreLane.enabled && (sourceHasStores(DROPBOX_FILES_SOURCE_ID) || connected('dropbox', 'dropbox.files.sync'))) mountDropbox();
+    if (!localFilesConnectorStore && localFilesConnectorStoreLane.enabled && (sourceHasStores(LOCAL_FILES_SOURCE_ID) || fileSourceScopeAuthority?.policyRef(LOCAL_FILES_SOURCE_ID))) mountLocalFiles();
+    if (!whatsappConnectorStore && whatsappConnectorStoreLane.enabled && (sourceHasStores(WHATSAPP_PERSONAL_SOURCE_ID) || connected('whatsapp_personal', 'whatsapp.personal.messages.sync'))) mountWhatsApp();
+    if (!telegramConnectorStores && telegramConnectorStoreLane.enabled && (sourceHasStores(TELEGRAM_MESSAGES_SOURCE_ID) || connected('telegram', 'telegram.messages.sync'))) mountTelegram();
+    if (!readwiseConnectorStore && readwiseConnectorStoreLane.enabled && (sourceHasStores(READWISE_SOURCE_ID) || connected('readwise', 'readwise.sync'))) mountReadwise();
+    if (!xBookmarksConnectorStore && xBookmarksConnectorStoreLane.enabled && (sourceHasStores(X_BOOKMARKS_SOURCE_ID) || connected('x', 'x.bookmarks.sync'))) mountXBookmarks();
     mountConfiguredSourceStores();
   };
   mountSourceLanes(connectedHandles);
@@ -3532,20 +3540,19 @@ export async function main(): Promise<void> {
   // identities before opening any declared store so the declaration can add a
   // principal without replacing the lane handle or opening the SQLite file a
   // second time.
-  const configuredConnectorStoreMounts = parseConnectorStoreMountsFromEnv(
-    process.env.OLYMPUS_SOURCE_INDEX_CONNECTOR_STORES_JSON,
-    {
-      existingOnly: true,
-      collidingStores: laneConnectorStores,
-      registeredCorpora: sourceCorpusRegistry.list(),
-      storeOwner: lifecycleStoreFileOwner(process.env),
-    },
-  );
+  let configuredMountStores: readonly LocalConnectorStore[] = laneConnectorStores;
+  const discoverConfiguredStores = createConnectorStoreMountDiscovery(process.env.OLYMPUS_SOURCE_INDEX_CONNECTOR_STORES_JSON, {
+    stores: () => configuredMountStores,
+    registeredCorpora: () => sourceCorpusRegistry.list(),
+    storeOwner: () => lifecycleStoreFileOwner(process.env),
+  });
+  const configuredConnectorStoreMounts = discoverConfiguredStores();
   const configuredConnectorStores = configuredConnectorStoreMounts.map((mount) => mount.store);
   const connectorStores = mergeConnectorStores([
     ...configuredConnectorStores,
     ...laneConnectorStores,
   ]);
+  configuredMountStores = connectorStores;
   const readConnectorStores = connectorStores;
 
   // The source-neutral extraction factory. Off unless its roster names a corpus
@@ -4059,10 +4066,7 @@ export async function main(): Promise<void> {
   for (const stores of earlySourceStores.splice(0)) sourceLaneMounted(stores);
   mountConfiguredSourceStores = (): void => {
     if (sourceRuntimeClosed) return;
-    const mounts = parseConnectorStoreMountsFromEnv(process.env.OLYMPUS_SOURCE_INDEX_CONNECTOR_STORES_JSON, {
-      existingOnly: true, collidingStores: connectorStores, registeredCorpora: sourceCorpusRegistry.list(),
-      storeOwner: lifecycleStoreFileOwner(process.env),
-    });
+    const mounts = discoverConfiguredStores();
     for (const mount of mounts) {
       if (!connectorStores.includes(mount.store)) sourceLaneMounted([mount.store]);
       adoptConfiguredPrincipal(mount);
@@ -7826,6 +7830,55 @@ export function parseConnectorStoreMountsFromEnv(
   raw: string | undefined,
   options: ConnectorStoreMountParsingOptions = {},
 ): ConnectorStoreMount[] {
+  return mountConnectorStoreDeclarations(compileConnectorStoreMountDeclarations(raw, options), options);
+}
+
+/** Compile fixed configuration once; only pending absent files need probes on reads. */
+export function createConnectorStoreMountDiscovery(raw: string | undefined, options: {
+  stores(): readonly LocalConnectorStore[];
+  registeredCorpora(): NonNullable<ConnectorStoreMountParsingOptions['registeredCorpora']>;
+  storeOwner(): StoreFileOwner;
+  reportFailure?(message: string): void;
+}): () => ConnectorStoreMount[] {
+  const reported = new Set<string>();
+  const reportFailure = (message: string): void => {
+    const label = message.split(' skipped:')[0]!;
+    if (reported.has(label)) return;
+    reported.add(label);
+    (options.reportFailure ?? console.error)(message);
+  };
+  const declarations = compileConnectorStoreMountDeclarations(raw, { reportFailure });
+  const registeredCorpora = options.registeredCorpora();
+  let previousStores: readonly LocalConnectorStore[] | undefined;
+  let pending: readonly ValidatedConnectorStoreMountDeclaration[] = declarations;
+  return () => {
+    const stores = options.stores();
+    if (!previousStores || previousStores.length !== stores.length || stores.some((store, i) => store !== previousStores![i])) {
+      pending = declarations;
+      previousStores = [...stores];
+    }
+    if (!pending.length) return [];
+    const byCorpus = new Map(stores.map(store => [store.corpusId, store]));
+    const ready: ValidatedConnectorStoreMountDeclaration[] = [];
+    const absent: ValidatedConnectorStoreMountDeclaration[] = [];
+    for (const declaration of pending) {
+      const placed = hasFolderLayout(storageAccountForCorpus(declaration, registeredCorpora).sourceId);
+      if (byCorpus.has(declaration.corpusId) || (!placed && (!declaration.dbPath || existsSync(declaration.dbPath)))) ready.push(declaration);
+      else absent.push(declaration);
+    }
+    pending = absent;
+    if (!ready.length) return [];
+    return mountConnectorStoreDeclarations(ready, {
+      existingOnly: true, collidingStores: stores, registeredCorpora: options.registeredCorpora(),
+      storeOwner: options.storeOwner(), reportFailure,
+    });
+  };
+}
+
+function compileConnectorStoreMountDeclarations(
+  raw: string | undefined,
+  options: ConnectorStoreMountParsingOptions,
+): ValidatedConnectorStoreMountDeclaration[] {
   const value = raw?.trim();
   if (!value) return [];
   let parsed: unknown;
@@ -7839,16 +7892,6 @@ export function parseConnectorStoreMountsFromEnv(
   }
 
   const reportFailure = options.reportFailure ?? ((message: string) => console.error(message));
-  const collidingStoresByCorpusId = new Map(
-    (options.collidingStores ?? []).map((store) => [store.corpusId, store]),
-  );
-  // The resource being fenced is the SQLite file, and corpusId is the field an
-  // operator varies when adding a mount. Keyed on corpusId alone, a new id over
-  // an existing dbPath skips the identity check entirely and opens a second
-  // handle that relabels the same rows with a different family/trustDomain.
-  const ownerCorpusIdByDbPath = new Map(
-    (options.collidingStores ?? []).map((store) => [store.dbPath, store.corpusId]),
-  );
   const declarations: ValidatedConnectorStoreMountDeclaration[] = [];
   // Validate every declaration before opening any SQLite store. A malformed
   // later entry therefore cannot strand a handle opened for an earlier one.
@@ -7868,6 +7911,24 @@ export function parseConnectorStoreMountsFromEnv(
     }
   }
 
+  return declarations;
+}
+
+function mountConnectorStoreDeclarations(
+  declarations: readonly ValidatedConnectorStoreMountDeclaration[],
+  options: ConnectorStoreMountParsingOptions,
+): ConnectorStoreMount[] {
+  const reportFailure = options.reportFailure ?? ((message: string) => console.error(message));
+  const collidingStoresByCorpusId = new Map(
+    (options.collidingStores ?? []).map((store) => [store.corpusId, store]),
+  );
+  // The resource being fenced is the SQLite file, and corpusId is the field an
+  // operator varies when adding a mount. Keyed on corpusId alone, a new id over
+  // an existing dbPath skips the identity check entirely and opens a second
+  // handle that relabels the same rows with a different family/trustDomain.
+  const ownerCorpusIdByDbPath = new Map(
+    (options.collidingStores ?? []).map((store) => [store.dbPath, store.corpusId]),
+  );
   const mounts: ConnectorStoreMount[] = [];
   for (const declaration of declarations) {
     try {

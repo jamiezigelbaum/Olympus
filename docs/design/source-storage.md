@@ -379,11 +379,15 @@ that opens files inside an account folder:
   deleted, disconnected source therefore stays absent across restart.
   Status, search and answers discover newly ingested declared stores even
   without the scheduler; declarations only fill missing principals and account
-  scopes, never replace the source lane's authority. Archive targets register
-  before pairing and resolve their source lane only when an import uses it.
+  scopes, never replace the source lane's authority. Declarations are validated
+  once, failures report once per declaration, and reads probe only pending files;
+  ownership scans run when a file appears or the mounted roster changes. Enabled
+  archive targets register before pairing and resolve their source lane only
+  when an import uses it; disabling Telegram keeps its exports under Archives.
   An individually enabled file lane retains extraction when search is disabled.
   Shutdown stops scheduler/adoption work before closing extraction queues, and a
-  closed extraction runtime cannot create a runner for a later source.
+  closed extraction runtime cannot create a runner for a later source. Retained
+  archive targets cannot open a source lane after shutdown begins.
 
 **Owner lock.** The worker takes an exclusive kernel lock (`flock(2)` on
 `<data>/data-owner.lock`, released by the kernel on death;

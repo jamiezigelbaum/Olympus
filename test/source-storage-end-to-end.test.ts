@@ -270,6 +270,77 @@ describe('source storage, end to end on this host', () => {
     }, 180_000);
   }
 
+  test('malformed mount declarations are reported once across repeated read refreshes', async () => {
+    const env: Env = { ...freshHome(), OLYMPUS_WORKER_SCHEDULER_ENABLED: 'false', OLYMPUS_SOURCE_INDEX_CONNECTOR_STORES_JSON: JSON.stringify([{ corpusId: 'secure_local.reflect.notes', family: 'typo', trustDomain: 'secure_local' }]) };
+    const worker = await boot(env);
+    try {
+      expect(worker.output(), listening(worker)).toContain('worker listening');
+      for (let i = 0; i < 10; i++) expect((await ask(env, worker, '/v1/source/index/status', {})).status).toBe(200);
+      expect(worker.errors().match(/Connector-store mount secure_local\.reflect\.notes skipped:/g) ?? []).toHaveLength(1);
+    } finally { await worker.stop(); }
+  }, 180_000);
+
+  test('an explicitly disabled Telegram lane leaves an export under Archives without source stores', async () => {
+    const env: Env = { ...freshHome(), OLYMPUS_SOURCE_INDEX_TELEGRAM_CONNECTOR_STORES_ENABLED: 'false', OLYMPUS_WORKER_SCHEDULER_ENABLED: 'false' };
+    const resultPath = join(env.HOME!, 'disabled-target.json');
+    const preload = join(env.HOME!, 'disabled-target.ts');
+    writeFileSync(preload, `
+      import { archiveSourceTargets } from ${JSON.stringify(join(REPO, 'src/workers/archive-import/source-targets.ts'))};
+      import { Database } from 'bun:sqlite';
+      import { createArchiveImportRuntime } from ${JSON.stringify(join(REPO, 'src/workers/archive-import/runtime.ts'))};
+      import { pullArchiveImport } from ${JSON.stringify(join(REPO, 'src/workers/archive-import/sync.ts'))};
+      import { telegramChat, telegramJson, telegramSingleChatExport, telegramText, writeTelegramExport } from ${JSON.stringify(join(REPO, 'test/support/archive-fixtures-telegram.ts'))};
+      import { writeFileSync } from 'node:fs';
+      setTimeout(async () => {
+        const registered = !!archiveSourceTargets.forSource('telegram.messages');
+        if (registered) { writeFileSync(${JSON.stringify(resultPath)}, JSON.stringify({ registered })); return; }
+        const dir = ${JSON.stringify(join(env.HOME!, 'fixture-export'))};
+        writeTelegramExport(dir, telegramJson(telegramSingleChatExport(telegramChat({ name: 'Synthetic', type: 'personal_chat', id: 42, messages: [telegramText(1, 'Synthetic archive item')] }))));
+        const runtime = createArchiveImportRuntime({ env: process.env });
+        const started = runtime.start(dir);
+        if (started.kind !== 'started') throw new Error(started.kind);
+        for (let i = 0; i < 20; i++) {
+          const result = await pullArchiveImport({ state: runtime.state, lane: runtime.lane('chat'), archiveId: started.archive.archive_id, targets: runtime.targets });
+          if (!result.continueSoon) break;
+        }
+        writeFileSync(${JSON.stringify(resultPath)}, JSON.stringify({ registered, target: started.archive.target ?? null, archived: runtime.existingLanes().some(lane => lane.set.openStores().some(store => { const db = new Database(store.dbPath, { readonly: true }); try { return db.query('SELECT COUNT(*) AS n FROM items').get().n > 0; } finally { db.close(); } })) }));
+      }, 2000);
+    `);
+    const worker = await boot(env, preload);
+    try {
+      expect(worker.output(), listening(worker)).toContain('worker listening');
+      const deadline = Date.now() + 10_000;
+      while (!existsSync(resultPath) && Date.now() < deadline) await Bun.sleep(100);
+      expect(existsSync(resultPath), worker.errors()).toBe(true);
+      expect(JSON.parse(readFileSync(resultPath, 'utf8'))).toEqual({ registered: false, target: null, archived: true });
+      expect(existsSync(resolvedStorePath('telegram.messages', 'internal', env))).toBe(false);
+      expect(existsSync(resolvedStorePath('telegram.messages', 'secure_local', env))).toBe(false);
+    } finally { await worker.stop(); }
+  }, 180_000);
+
+  for (const sourceId of ['telegram.messages', 'gmail.email', 'whatsapp.personal.messages']) test(`a retained lazy ${sourceId} archive target cannot open stores after shutdown`, async () => {
+    const env: Env = { ...freshHome(), OLYMPUS_WORKER_SCHEDULER_ENABLED: 'false' };
+    const resultPath = join(env.HOME!, 'closed-target.json');
+    const preload = join(env.HOME!, 'closed-target.ts');
+    writeFileSync(preload, `
+      import { archiveSourceTargets } from ${JSON.stringify(join(REPO, 'src/workers/archive-import/source-targets.ts'))};
+      import { writeFileSync } from 'node:fs';
+      process.on('SIGTERM', () => queueMicrotask(() => {
+        try {
+          const target = archiveSourceTargets.forSource(${JSON.stringify(sourceId)});
+          if (!target) throw new Error('target missing');
+          target.lane({ sourceId: ${JSON.stringify(sourceId)}, slot: '1' }, process.env);
+          writeFileSync(${JSON.stringify(resultPath)}, JSON.stringify({ opened: true }));
+        } catch (error) { writeFileSync(${JSON.stringify(resultPath)}, JSON.stringify({ error: String(error) })); }
+      }));
+    `);
+    const worker = await boot(env, preload);
+    expect(worker.output(), listening(worker)).toContain('worker listening');
+    await worker.stop();
+    expect(JSON.parse(readFileSync(resultPath, 'utf8'))).toMatchObject({ error: expect.stringMatching(/closed/i) });
+    expect(existsSync(resolvedStorePath(sourceId, 'internal', env))).toBe(false);
+  }, 180_000);
+
   test('Telegram registers its archive target before pairing and opens its source lane only on import', async () => {
     const env = freshHome();
     const resultPath = join(env.HOME!, 'telegram-target.json');

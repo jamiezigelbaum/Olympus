@@ -204050,6 +204050,7 @@ __export(exports_server2, {
   createReadwiseConnectorStoreRuntime: () => createReadwiseConnectorStoreRuntime,
   createFileExtractionLocalVlmClientFromEnv: () => createFileExtractionLocalVlmClientFromEnv,
   createEmailSourceConnectorFromEnv: () => createEmailSourceConnectorFromEnv,
+  createConnectorStoreMountDiscovery: () => createConnectorStoreMountDiscovery,
   createCloudSourceIndexEmbeddingProviderFromEnv: () => createCloudSourceIndexEmbeddingProviderFromEnv,
   createAnalystForSovereigntyProfile: () => createAnalystForSovereigntyProfile,
   connectorStoreLaneHandle: () => connectorStoreLaneHandle,
@@ -205482,6 +205483,8 @@ async function main() {
   let refreshableReadwiseRuntime;
   let readwiseConnectorStore;
   const mountReadwise = () => {
+    if (sourceRuntimeClosed)
+      throw new Error("Source runtime is closed.");
     if (refreshableReadwiseRuntime)
       return;
     refreshableReadwiseRuntime = createRefreshableReadwiseConnectorStoreRuntime({
@@ -205510,6 +205513,8 @@ async function main() {
   let refreshableXBookmarksRuntime;
   let xBookmarksConnectorStore;
   const mountXBookmarks = () => {
+    if (sourceRuntimeClosed)
+      throw new Error("Source runtime is closed.");
     if (refreshableXBookmarksRuntime)
       return;
     refreshableXBookmarksRuntime = createRefreshableXBookmarksConnectorStoreRuntime({
@@ -205542,6 +205547,8 @@ async function main() {
   let gmailSecureConnectorStore;
   let gmailTierLane;
   const mountGmail = () => {
+    if (sourceRuntimeClosed)
+      throw new Error("Source runtime is closed.");
     if (gmailInternalConnectorStore)
       return;
     gmailInternalConnectorStore = gmailConnectorStoreLane.enabled ? openConnectorStore({ sourceId: GMAIL_SOURCE_ID }, {
@@ -205692,6 +205699,8 @@ ${key2}`;
   let googleDriveSecureConnectorStore;
   let googleDriveTierLane;
   const mountGoogleDrive = () => {
+    if (sourceRuntimeClosed)
+      throw new Error("Source runtime is closed.");
     if (googleDriveInternalConnectorStore)
       return;
     googleDriveInternalConnectorStore = googleDriveConnectorStoreLane.enabled ? openConnectorStore({ sourceId: GOOGLE_DRIVE_SOURCE_ID }, {
@@ -205735,6 +205744,8 @@ ${key2}`;
   let dropboxTierLane;
   let dropboxExtractionView;
   const mountDropbox = () => {
+    if (sourceRuntimeClosed)
+      throw new Error("Source runtime is closed.");
     if (dropboxConnectorStore)
       return;
     dropboxConnectorStore = dropboxConnectorStoreLane.enabled ? createDropboxConnectorStore(process.env, { policy: dropboxIngestionPolicy }) : undefined;
@@ -205776,6 +205787,8 @@ ${key2}`;
   let localFilesTierLane;
   let localFilesExtractionView;
   const mountLocalFiles = () => {
+    if (sourceRuntimeClosed)
+      throw new Error("Source runtime is closed.");
     if (localFilesConnectorStore)
       return;
     localFilesConnectorStore = localFilesConnectorStoreLane.enabled ? createLocalFilesConnectorStore(process.env, { policy: localFilesIngestionPolicy }) : undefined;
@@ -205878,6 +205891,8 @@ ${key2}`;
   let whatsappSecretLocations;
   let whatsappTierSet;
   const mountWhatsApp = () => {
+    if (sourceRuntimeClosed)
+      throw new Error("Source runtime is closed.");
     if (whatsappConnectorStore)
       return;
     whatsappConnectorStore = whatsappConnectorStoreLane.enabled ? createWhatsAppConnectorStore(process.env) : undefined;
@@ -205939,10 +205954,12 @@ ${key2}`;
   let telegramConnectorStores;
   let telegramTierLane;
   let telegramConnectorStoreSync;
-  const mountTelegram = (forImport = false) => {
+  const mountTelegram = () => {
+    if (sourceRuntimeClosed)
+      throw new Error("Source runtime is closed.");
     if (telegramConnectorStores)
       return;
-    telegramConnectorStores = telegramConnectorStoreLane.enabled || forImport ? createTelegramConnectorStores(process.env) : undefined;
+    telegramConnectorStores = telegramConnectorStoreLane.enabled ? createTelegramConnectorStores(process.env) : undefined;
     telegramTierLane = telegramConnectorStores ? tierLane({
       account: { sourceId: TELEGRAM_MESSAGES_SOURCE_ID },
       internal: telegramConnectorStores.internal,
@@ -205960,16 +205977,17 @@ ${key2}`;
     if (telegramConnectorStores)
       sourceLaneMounted([telegramConnectorStores.internal, telegramConnectorStores.secureLocal]);
   };
-  archiveSourceTargets.register(telegramArchiveTarget({
-    account: TELEGRAM_PERSONAL_ACCOUNT_SCOPE,
-    lane: () => {
-      mountTelegram(true);
-      if (!telegramConnectorStoreSync)
-        throw new Error("Telegram stores are unavailable.");
-      return telegramConnectorStoreSync.archiveTarget().lane({ sourceId: TELEGRAM_MESSAGES_SOURCE_ID, slot: "1" }, process.env);
-    },
-    liveSince: () => telegramConnectorStoreSync?.archiveTarget().liveSince?.({ sourceId: TELEGRAM_MESSAGES_SOURCE_ID, slot: "1" }, process.env)
-  }));
+  if (telegramConnectorStoreLane.enabled)
+    archiveSourceTargets.register(telegramArchiveTarget({
+      account: TELEGRAM_PERSONAL_ACCOUNT_SCOPE,
+      lane: () => {
+        mountTelegram();
+        if (!telegramConnectorStoreSync)
+          throw new Error("Telegram stores are unavailable.");
+        return telegramConnectorStoreSync.archiveTarget().lane({ sourceId: TELEGRAM_MESSAGES_SOURCE_ID, slot: "1" }, process.env);
+      },
+      liveSince: () => telegramConnectorStoreSync?.archiveTarget().liveSince?.({ sourceId: TELEGRAM_MESSAGES_SOURCE_ID, slot: "1" }, process.env)
+    }));
   const telegramSpoolChanges = createSpoolChangeSubscription(defaultTelegramCaptureSpoolDir(process.env));
   const whatsappSpoolChanges = createSpoolChangeSubscription(defaultWhatsAppSpoolDir(process.env));
   const telegramCaptureMaxItems = parseOptionalPositiveInteger(process.env.OLYMPUS_TELEGRAM_SPOOL_DRAIN_MAX_ITEMS, "OLYMPUS_TELEGRAM_SPOOL_DRAIN_MAX_ITEMS");
@@ -205977,21 +205995,21 @@ ${key2}`;
     if (sourceRuntimeClosed)
       return;
     const connected2 = (provider, capability) => activeCredentialHandle(handles, { provider, capability }) !== undefined;
-    if (gmailConnectorStoreLane.enabled && (sourceHasStores(GMAIL_SOURCE_ID) || connected2("gmail", "gmail.email.sync")))
+    if (!gmailInternalConnectorStore && gmailConnectorStoreLane.enabled && (sourceHasStores(GMAIL_SOURCE_ID) || connected2("gmail", "gmail.email.sync")))
       mountGmail();
-    if (googleDriveConnectorStoreLane.enabled && (sourceHasStores(GOOGLE_DRIVE_SOURCE_ID) || connected2("google_drive", "google_drive.docs.sync")))
+    if (!googleDriveInternalConnectorStore && googleDriveConnectorStoreLane.enabled && (sourceHasStores(GOOGLE_DRIVE_SOURCE_ID) || connected2("google_drive", "google_drive.docs.sync")))
       mountGoogleDrive();
-    if (dropboxConnectorStoreLane.enabled && (sourceHasStores(DROPBOX_FILES_SOURCE_ID) || connected2("dropbox", "dropbox.files.sync")))
+    if (!dropboxConnectorStore && dropboxConnectorStoreLane.enabled && (sourceHasStores(DROPBOX_FILES_SOURCE_ID) || connected2("dropbox", "dropbox.files.sync")))
       mountDropbox();
-    if (localFilesConnectorStoreLane.enabled && (sourceHasStores(LOCAL_FILES_SOURCE_ID) || fileSourceScopeAuthority?.policyRef(LOCAL_FILES_SOURCE_ID)))
+    if (!localFilesConnectorStore && localFilesConnectorStoreLane.enabled && (sourceHasStores(LOCAL_FILES_SOURCE_ID) || fileSourceScopeAuthority?.policyRef(LOCAL_FILES_SOURCE_ID)))
       mountLocalFiles();
-    if (whatsappConnectorStoreLane.enabled && (sourceHasStores(WHATSAPP_PERSONAL_SOURCE_ID) || connected2("whatsapp_personal", "whatsapp.personal.messages.sync")))
+    if (!whatsappConnectorStore && whatsappConnectorStoreLane.enabled && (sourceHasStores(WHATSAPP_PERSONAL_SOURCE_ID) || connected2("whatsapp_personal", "whatsapp.personal.messages.sync")))
       mountWhatsApp();
-    if (telegramConnectorStoreLane.enabled && (sourceHasStores(TELEGRAM_MESSAGES_SOURCE_ID) || connected2("telegram", "telegram.messages.sync")))
+    if (!telegramConnectorStores && telegramConnectorStoreLane.enabled && (sourceHasStores(TELEGRAM_MESSAGES_SOURCE_ID) || connected2("telegram", "telegram.messages.sync")))
       mountTelegram();
-    if (readwiseConnectorStoreLane.enabled && (sourceHasStores(READWISE_SOURCE_ID) || connected2("readwise", "readwise.sync")))
+    if (!readwiseConnectorStore && readwiseConnectorStoreLane.enabled && (sourceHasStores(READWISE_SOURCE_ID) || connected2("readwise", "readwise.sync")))
       mountReadwise();
-    if (xBookmarksConnectorStoreLane.enabled && (sourceHasStores(X_BOOKMARKS_SOURCE_ID) || connected2("x", "x.bookmarks.sync")))
+    if (!xBookmarksConnectorStore && xBookmarksConnectorStoreLane.enabled && (sourceHasStores(X_BOOKMARKS_SOURCE_ID) || connected2("x", "x.bookmarks.sync")))
       mountXBookmarks();
     mountConfiguredSourceStores();
   };
@@ -206008,17 +206026,19 @@ ${key2}`;
     ...telegramConnectorStores ? [telegramConnectorStores.internal, telegramConnectorStores.secureLocal] : [],
     ...whatsappConnectorStore ? [whatsappConnectorStore] : []
   ];
-  const configuredConnectorStoreMounts = parseConnectorStoreMountsFromEnv(process.env.OLYMPUS_SOURCE_INDEX_CONNECTOR_STORES_JSON, {
-    existingOnly: true,
-    collidingStores: laneConnectorStores,
-    registeredCorpora: sourceCorpusRegistry2.list(),
-    storeOwner: lifecycleStoreFileOwner(process.env)
+  let configuredMountStores = laneConnectorStores;
+  const discoverConfiguredStores = createConnectorStoreMountDiscovery(process.env.OLYMPUS_SOURCE_INDEX_CONNECTOR_STORES_JSON, {
+    stores: () => configuredMountStores,
+    registeredCorpora: () => sourceCorpusRegistry2.list(),
+    storeOwner: () => lifecycleStoreFileOwner(process.env)
   });
+  const configuredConnectorStoreMounts = discoverConfiguredStores();
   const configuredConnectorStores = configuredConnectorStoreMounts.map((mount) => mount.store);
   const connectorStores = mergeConnectorStores([
     ...configuredConnectorStores,
     ...laneConnectorStores
   ]);
+  configuredMountStores = connectorStores;
   const readConnectorStores = connectorStores;
   const configuredFileExtractionCorpora = parseFileExtractionCorporaEnv(process.env.OLYMPUS_FILE_EXTRACTION_CORPORA_JSON);
   const dropboxExtractionScopes = dropboxPolicyFullExtractionScopeKeys(dropboxIngestionPolicy);
@@ -206405,12 +206425,7 @@ ${key2}`;
   mountConfiguredSourceStores = () => {
     if (sourceRuntimeClosed)
       return;
-    const mounts = parseConnectorStoreMountsFromEnv(process.env.OLYMPUS_SOURCE_INDEX_CONNECTOR_STORES_JSON, {
-      existingOnly: true,
-      collidingStores: connectorStores,
-      registeredCorpora: sourceCorpusRegistry2.list(),
-      storeOwner: lifecycleStoreFileOwner(process.env)
-    });
+    const mounts = discoverConfiguredStores();
     for (const mount of mounts) {
       if (!connectorStores.includes(mount.store))
         sourceLaneMounted([mount.store]);
@@ -208965,6 +208980,52 @@ function commaSeparatedEnv(value2) {
   return (value2 ?? "").split(/,|\|\|/).map((item) => item.trim()).filter(Boolean);
 }
 function parseConnectorStoreMountsFromEnv(raw, options = {}) {
+  return mountConnectorStoreDeclarations(compileConnectorStoreMountDeclarations(raw, options), options);
+}
+function createConnectorStoreMountDiscovery(raw, options) {
+  const reported = new Set;
+  const reportFailure = (message2) => {
+    const label = message2.split(" skipped:")[0];
+    if (reported.has(label))
+      return;
+    reported.add(label);
+    (options.reportFailure ?? console.error)(message2);
+  };
+  const declarations = compileConnectorStoreMountDeclarations(raw, { reportFailure });
+  const registeredCorpora = options.registeredCorpora();
+  let previousStores;
+  let pending = declarations;
+  return () => {
+    const stores = options.stores();
+    if (!previousStores || previousStores.length !== stores.length || stores.some((store, i2) => store !== previousStores[i2])) {
+      pending = declarations;
+      previousStores = [...stores];
+    }
+    if (!pending.length)
+      return [];
+    const byCorpus = new Map(stores.map((store) => [store.corpusId, store]));
+    const ready = [];
+    const absent = [];
+    for (const declaration of pending) {
+      const placed = hasFolderLayout(storageAccountForCorpus(declaration, registeredCorpora).sourceId);
+      if (byCorpus.has(declaration.corpusId) || !placed && (!declaration.dbPath || existsSync98(declaration.dbPath)))
+        ready.push(declaration);
+      else
+        absent.push(declaration);
+    }
+    pending = absent;
+    if (!ready.length)
+      return [];
+    return mountConnectorStoreDeclarations(ready, {
+      existingOnly: true,
+      collidingStores: stores,
+      registeredCorpora: options.registeredCorpora(),
+      storeOwner: options.storeOwner(),
+      reportFailure
+    });
+  };
+}
+function compileConnectorStoreMountDeclarations(raw, options) {
   const value2 = raw?.trim();
   if (!value2)
     return [];
@@ -208978,8 +209039,6 @@ function parseConnectorStoreMountsFromEnv(raw, options = {}) {
     throw new Error("OLYMPUS_SOURCE_INDEX_CONNECTOR_STORES_JSON must be a JSON array.");
   }
   const reportFailure = options.reportFailure ?? ((message2) => console.error(message2));
-  const collidingStoresByCorpusId = new Map((options.collidingStores ?? []).map((store) => [store.corpusId, store]));
-  const ownerCorpusIdByDbPath = new Map((options.collidingStores ?? []).map((store) => [store.dbPath, store.corpusId]));
   const declarations = [];
   for (const [index, entry] of parsed.entries()) {
     const declaredCorpusIdValue = entry && typeof entry === "object" ? entry.corpusId : undefined;
@@ -208992,6 +209051,12 @@ function parseConnectorStoreMountsFromEnv(raw, options = {}) {
       reportFailure(`Connector-store mount ${label} skipped: ${detail}`);
     }
   }
+  return declarations;
+}
+function mountConnectorStoreDeclarations(declarations, options) {
+  const reportFailure = options.reportFailure ?? ((message2) => console.error(message2));
+  const collidingStoresByCorpusId = new Map((options.collidingStores ?? []).map((store) => [store.corpusId, store]));
+  const ownerCorpusIdByDbPath = new Map((options.collidingStores ?? []).map((store) => [store.dbPath, store.corpusId]));
   const mounts = [];
   for (const declaration of declarations) {
     try {
