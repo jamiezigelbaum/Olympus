@@ -45171,7 +45171,13 @@ function chatgptPrivacyProgram(kit, makeLogic) {
     return L.lowers(s.rules, s.description, s.savedDescription);
   }
   function save() {
-    if (!s || !s.loaded || s.saving || !canSave())
+    if (!s || !s.loaded || s.saving)
+      return;
+    if (s.server) {
+      kit.render("privacy:conflict:apply");
+      return;
+    }
+    if (!canSave())
       return;
     const shown = L.withShownAnswers(s.description);
     if (shown !== s.description) {

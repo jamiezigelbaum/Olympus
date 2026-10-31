@@ -722,6 +722,45 @@ describe('saving', () => {
     expect(host.text()).toContain(W.saved);
   });
 
+  test('Remove and Undo stay visible during an unresolved conflict and Apply sends only visible changes', async () => {
+    const sent: any[] = [];
+    const { host } = await openPrivacy({
+      rules: SAVED_RULES,
+      setResult: (args) => {
+        sent.push(args);
+        if (sent.length === 1) return privacyResult('their words', SAVED_RULES, 0, { revision: 'rev2', status: 'conflict' });
+        return privacyResult(args.description, args.rules, 0, { status: 'saved' });
+      },
+    });
+    host.button('Remove Medical Records').click();
+    host.button(W.confirm).click();
+    await host.settle();
+    expect(host.text()).toContain(W.conflict);
+
+    host.button('Remove Lawyer Letters').click();
+    expect(host.text()).toContain('Removed: Lawyer Letters');
+    host.button('Undo removing Lawyer Letters').click();
+    expect(host.text()).not.toContain('Removed: Lawyer Letters');
+    expect(host.button('Remove Lawyer Letters').disabled).toBe(false);
+    host.button('Remove doctor@clinic.example').click();
+    expect(host.text()).toContain('Removed: doctor@clinic.example');
+    expect(host.button('Undo removing doctor@clinic.example').disabled).toBe(false);
+    expect(host.text()).toContain('Removed: Medical Records');
+    expect(host.text()).toContain(W.conflict);
+    expect(sent).toHaveLength(1);
+
+    host.button(W.applyAgain).click();
+    expect(sent).toHaveLength(1);
+    host.button(W.confirm).click();
+    await host.settle();
+    expect(sent).toHaveLength(2);
+    expect(sent[1].revision).toBe('rev2');
+    expect(sent[1].description).toBe('their words');
+    expect(sent[1].rules).toEqual([SAVED_RULES[1]]);
+    expect(typeof sent[1].confirmation).toBe('string');
+    expect(host.text()).toContain(W.saved);
+  });
+
   test('a label renamed elsewhere is the same rule: removing it survives the conflict replay', async () => {
     const before = [{ kind: 'label', source_id: 'gmail.email', key: 'Label_9', value: 'Old name' }];
     const after = [
