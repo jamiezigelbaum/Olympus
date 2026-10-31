@@ -385,6 +385,9 @@ that opens files inside an account folder:
   archive targets register before pairing and resolve their source lane only
   when an import uses it; disabling Telegram keeps its exports under Archives.
   An individually enabled file lane retains extraction when search is disabled.
+  Local-files own-root cleanup starts with its lane, including without an approved
+  scope. Startup awaits its first bounded run; a late mount withholds reads until
+  that run settles, and every pull waits for the cleanup run and idle barrier.
   Shutdown stops scheduler/adoption work before closing extraction queues, and a
   closed extraction runtime cannot create a runner for a later source. Retained
   archive targets cannot open a source lane after shutdown begins.

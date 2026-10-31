@@ -205782,6 +205782,9 @@ ${key2}`;
   const localFilesConnectorStoreLane = sourceIndexLaneAccountDecision(sourceIndexLaneStorageDecision(process.env, "OLYMPUS_SOURCE_INDEX_LOCAL_FILES_CONNECTOR_STORE_ENABLED", sourceIndexReadEnabled), { sourceId: LOCAL_FILES_SOURCE_ID });
   const localFilesIngestionPolicy = defaultLocalFilesIngestionPolicy();
   const localFilesScopeRef = fileSourceScopeAuthority ? fileSourceScopeAuthority.policyRef(LOCAL_FILES_SOURCE_ID) : undefined;
+  let localFilesOwnRootsCleanup;
+  let localFilesInitialCleanup;
+  let localFilesReadReady = false;
   let localFilesConnectorStore;
   let localFilesSecretLocations;
   let localFilesTierLane;
@@ -205818,6 +205821,12 @@ ${key2}`;
       });
     }
     localFilesExtractionView = localFilesTierLane ? tieredExtractionView(localFilesTierLane.set) : undefined;
+    if (localFilesTierLane) {
+      localFilesOwnRootsCleanup = createLocalFilesOwnRootsCleanup({ tierSet: localFilesTierLane.set, context: localFilesExclusionContext, log: (message2) => console.warn(`[local-files] ${message2}`) });
+      localFilesInitialCleanup = localFilesOwnRootsCleanup.run().then(() => {
+        localFilesReadReady = true;
+      });
+    }
     if (localFilesConnectorStore)
       sourceLaneMounted([localFilesConnectorStore]);
   };
@@ -205829,17 +205838,13 @@ ${key2}`;
     volumeIgnoresCase: (volumeId, path) => localFilesVolumes.ignoresCase(volumeId, path)
   };
   const localFilesWatchIgnore = watchIgnoreGlobs(localFilesExclusionContext);
-  let localFilesOwnRootsCleanup = localFilesConnectorStore && localFilesTierLane ? createLocalFilesOwnRootsCleanup({
-    tierSet: localFilesTierLane.set,
-    context: localFilesExclusionContext,
-    log: (message2) => console.warn(`[local-files] ${message2}`)
-  }) : undefined;
   let localFilesSyncCache;
   const localFilesSyncFor = (ref) => {
     if (!localFilesConnectorStore || !localFilesTierLane || !fileSourceScopeAuthority)
       return;
-    localFilesOwnRootsCleanup ??= createLocalFilesOwnRootsCleanup({ tierSet: localFilesTierLane.set, context: localFilesExclusionContext, log: (message2) => console.warn(`[local-files] ${message2}`) });
     const ownRootsCleanup = localFilesOwnRootsCleanup;
+    if (!ownRootsCleanup)
+      return;
     const key2 = `${ref.accountGeneration}:${ref.revision}`;
     if (localFilesSyncCache?.key === key2)
       return localFilesSyncCache.handler;
@@ -205852,10 +205857,10 @@ ${key2}`;
       hub: localFilesWatchHub,
       snapshotDir: localFilesWatchDir(process.env),
       ignore: localFilesWatchIgnore,
-      ...ownRootsCleanup ? { beforePull: async () => {
+      beforePull: async () => {
         await ownRootsCleanup.run();
         await ownRootsCleanup.idle();
-      } } : {},
+      },
       ...localFilesEmbeddingProvider && isApprovedSecureSourceEmbeddingProvider(localFilesEmbeddingProvider) ? { embeddingProvider: scopeBoundEmbeddingProvider(localFilesEmbeddingProvider, fileSourceScopeAuthority, ref) } : {}
     });
     localFilesSyncCache = { key: key2, handler };
@@ -206291,6 +206296,8 @@ ${key2}`;
     adoptConfiguredPrincipal(mount);
   const connectorStoreReadScope = (store) => {
     const sourceId = isDropboxTierStore(store) ? "dropbox.files" : isLocalFilesTierStore(store) ? LOCAL_FILES_SOURCE_ID : store === googleDriveInternalConnectorStore || store === googleDriveSecureConnectorStore || store.corpusId === GOOGLE_DRIVE_PUBLIC_CONNECTOR_CORPUS_ID && store === googleDriveTierLane?.publicStore?.current() ? "google_drive.docs" : Object.values(EVERNOTE_TIER_CORPUS_IDS).includes(store.corpusId) ? EVERNOTE_SOURCE_ID : undefined;
+    if (sourceId === LOCAL_FILES_SOURCE_ID && !localFilesReadReady)
+      return { allowed: false };
     if (!sourceId)
       return { allowed: true, contentAllowed: true };
     const approval = fileSourceScopeAuthority?.snapshot(sourceId);
@@ -208386,7 +208393,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
       }
     })), withWorkerBearerAuth(withEngineBriefRoute2(worker.fetch, { view: (signal) => engineBriefView(chatgptSurface, signal) }), { authToken, requireOwnerSocket: !!socketPath, sessionSecret: dashboardSessionSecret.secret }))))))), !!socketPath)
   };
-  await localFilesOwnRootsCleanup?.run();
+  await localFilesInitialCleanup;
   const startServer = () => socketPath ? Bun.serve({ unix: socketPath, fetch(request, server2) {
     server2.timeout(request, 0);
     if (new URL(request.url).pathname === DESKTOP_OWNER_OPEN_PATH) {

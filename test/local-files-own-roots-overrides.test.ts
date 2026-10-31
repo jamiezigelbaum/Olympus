@@ -618,11 +618,18 @@ describe('5. what an earlier version indexed inside an own folder', () => {
     // Read scopes come from the saved approval alone: no second argument.
     expect(server).not.toMatch(/fileSourceScope(?:Content|Metadata)Filters\([^()]*,/);
     expect(server).not.toContain('alwaysExcluded');
-    const cleanup = server.indexOf('await localFilesOwnRootsCleanup?.run()');
+    const cleanup = server.indexOf('await localFilesInitialCleanup;');
     expect(cleanup).toBeGreaterThan(0);
     expect(cleanup).toBeLessThan(server.indexOf('const startServer = '));
     // And each pass asks again, so a clean-up cut short goes on, and starts only once no batch is in flight.
-    expect(server).toContain('beforePull: async () => { await localFilesOwnRootsCleanup.run(); await localFilesOwnRootsCleanup.idle(); }');
+    const syncFactory = server.slice(server.indexOf('const localFilesSyncFor = '), server.indexOf('const localFilesApprovedScopePaths = '));
+    expect(syncFactory).toContain('const ownRootsCleanup = localFilesOwnRootsCleanup;');
+    expect(syncFactory).toContain('if (!ownRootsCleanup) return undefined;');
+    expect(syncFactory).toContain('beforePull: async () => { await ownRootsCleanup.run(); await ownRootsCleanup.idle(); }');
+    const mount = server.slice(server.indexOf('const mountLocalFiles = '), server.indexOf('const isLocalFilesTierStore = '));
+    expect(mount).toContain('localFilesOwnRootsCleanup = createLocalFilesOwnRootsCleanup(');
+    expect(mount).toContain('localFilesInitialCleanup = localFilesOwnRootsCleanup.run()');
+    expect(server).toContain('sourceId === LOCAL_FILES_SOURCE_ID && !localFilesReadReady');
   });
 
   /** A real tier lane (its stores on disk) whose secure store holds `files`. */
@@ -704,6 +711,39 @@ describe('5. what an earlier version indexed inside an own folder', () => {
     await cleanup.idle();
     expect(inFlight).toBe(false);
     expect(present(secure, secret)).toBe(false);
+  });
+
+  test('each provider pull waits for its cleanup barrier, including a repeated pass', async () => {
+    const base = tempBase();
+    const docs = join(base, 'docs');
+    mkdirSync(docs, { recursive: true });
+    writeFileSync(join(docs, 'a.txt'), 'Synthetic user file');
+    const store = await indexedStore([]);
+    const approval = choose(docs);
+    const decide = (path: string) => decideLocalFilesPath(approval, path, contextFor({ HOME: base }));
+    const events: string[] = [];
+    const scope: LocalFilesContentScope = {
+      generation, revision, assertCurrent() { events.push('scope'); }, decide,
+      snapshotDecider: () => decide, roots: () => localFilesRoots(approval),
+    };
+    let release: (() => void) | undefined;
+    const handler = createLocalFilesProviderStoreSyncHandler({
+      store, tierSet: localFilesTestTierSet(store), scope, volumes: new VolumeResolver(), snapshotDir: join(base, 'watch'),
+      beforePull: async () => {
+        events.push('cleanup-start');
+        await new Promise<void>(resolve => { release = resolve; });
+        events.push('cleanup-idle');
+      },
+    });
+    for (let pass = 0; pass < 2; pass++) {
+      events.length = 0;
+      const pull = handler.pull({ approved_scope_key: `${LOCAL_FILES_POLICY_SOURCE}:${docs}` });
+      await new Promise<void>(resolve => setImmediate(resolve));
+      expect(events).toEqual(['cleanup-start']);
+      release!();
+      await pull;
+      expect(events.slice(0, 2)).toEqual(['cleanup-start', 'cleanup-idle']);
+    }
   });
 
   test('is bounded by count, and what is left goes with the next pass of a chosen folder', async () => {

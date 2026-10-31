@@ -3231,6 +3231,9 @@ export async function main(): Promise<void> {
   const localFilesScopeRef = fileSourceScopeAuthority
     ? fileSourceScopeAuthority.policyRef(LOCAL_FILES_SOURCE_ID)
     : undefined;
+  let localFilesOwnRootsCleanup: ReturnType<typeof createLocalFilesOwnRootsCleanup> | undefined;
+  let localFilesInitialCleanup: Promise<void> | undefined;
+  let localFilesReadReady = false;
   let localFilesConnectorStore: LocalConnectorStore | undefined;
   let localFilesSecretLocations: SecretLocationsIndex | undefined;
   let localFilesTierLane: ReturnType<typeof createLocalFilesTierLane> | undefined;
@@ -3278,6 +3281,12 @@ export async function main(): Promise<void> {
       });
     }
     localFilesExtractionView = localFilesTierLane ? tieredExtractionView(localFilesTierLane.set) : undefined;
+    if (localFilesTierLane) {
+      localFilesOwnRootsCleanup = createLocalFilesOwnRootsCleanup({ tierSet: localFilesTierLane.set, context: localFilesExclusionContext, log: (message) => console.warn(`[local-files] ${message}`) });
+      // A late mount can expose old rows while its first bounded cleanup is in flight.
+      // The same read scope protects every reader until this first run settles.
+      localFilesInitialCleanup = localFilesOwnRootsCleanup.run().then(() => { localFilesReadReady = true; });
+    }
     if (localFilesConnectorStore) sourceLaneMounted([localFilesConnectorStore]);
   };
   const isLocalFilesTierStore = (store: LocalConnectorStore): boolean => store === localFilesConnectorStore
@@ -3297,18 +3306,11 @@ export async function main(): Promise<void> {
   // Olympus's own folders are never indexed, and what an earlier version indexed
   // inside one (a folder the person had chosen by name) is removed here: before
   // the worker answers anything, and again with each pass until none is left.
-  let localFilesOwnRootsCleanup = localFilesConnectorStore && localFilesTierLane
-    ? createLocalFilesOwnRootsCleanup({
-        tierSet: localFilesTierLane.set,
-        context: localFilesExclusionContext,
-        log: (message) => console.warn(`[local-files] ${message}`),
-      })
-    : undefined;
   let localFilesSyncCache: { key: string; handler: ReturnType<typeof createLocalFilesProviderStoreSyncHandler> } | undefined;
   const localFilesSyncFor = (ref: SourceScopePolicyRef) => {
     if (!localFilesConnectorStore || !localFilesTierLane || !fileSourceScopeAuthority) return undefined;
-    localFilesOwnRootsCleanup ??= createLocalFilesOwnRootsCleanup({ tierSet: localFilesTierLane.set, context: localFilesExclusionContext, log: (message) => console.warn(`[local-files] ${message}`) });
     const ownRootsCleanup = localFilesOwnRootsCleanup;
+    if (!ownRootsCleanup) return undefined;
     const key = `${ref.accountGeneration}:${ref.revision}`;
     if (localFilesSyncCache?.key === key) return localFilesSyncCache.handler;
     // The watch folder is the account's raw state, written only from here on. The store is open
@@ -3323,9 +3325,7 @@ export async function main(): Promise<void> {
       snapshotDir: localFilesWatchDir(process.env),
       ignore: localFilesWatchIgnore,
       // A pass writes the same stores: it starts only once no clean-up batch is still in flight.
-      ...(ownRootsCleanup
-        ? { beforePull: async () => { await ownRootsCleanup.run(); await ownRootsCleanup.idle(); } }
-        : {}),
+      beforePull: async () => { await ownRootsCleanup.run(); await ownRootsCleanup.idle(); },
       ...(localFilesEmbeddingProvider && isApprovedSecureSourceEmbeddingProvider(localFilesEmbeddingProvider)
         ? { embeddingProvider: scopeBoundEmbeddingProvider(localFilesEmbeddingProvider, fileSourceScopeAuthority, ref) }
         : {}),
@@ -3926,6 +3926,7 @@ export async function main(): Promise<void> {
       : Object.values(EVERNOTE_TIER_CORPUS_IDS).includes(store.corpusId)
         ? EVERNOTE_SOURCE_ID
         : undefined;
+    if (sourceId === LOCAL_FILES_SOURCE_ID && !localFilesReadReady) return { allowed: false };
     if (!sourceId) return { allowed: true, contentAllowed: true };
     const approval = fileSourceScopeAuthority?.snapshot(sourceId);
     if (!approval || approval.status !== 'approved') return { allowed: false };
@@ -6794,7 +6795,7 @@ export async function main(): Promise<void> {
   };
   // Nothing is answered from the local files index before what an earlier version
   // indexed inside Olympus's own folders is gone (own-roots-cleanup.ts).
-  await localFilesOwnRootsCleanup?.run();
+  await localFilesInitialCleanup;
   const startServer = () => socketPath
     ? Bun.serve({ unix: socketPath, fetch(request, server) {
         server.timeout(request, 0);

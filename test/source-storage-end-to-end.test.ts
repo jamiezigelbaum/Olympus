@@ -31,6 +31,8 @@ import {
   sharedDataPath,
   type AccountRawName,
 } from '../src/core/olympus-layout.ts';
+import { localFilesItemId } from '../src/workers/local-files/connector.ts';
+import type { SourceConnector } from '../src/core/contracts.ts';
 import { resolvedStorePath } from '../src/core/source-placement.ts';
 import { readSourceRegistry } from '../src/core/source-registry.ts';
 import { TierLedger } from '../src/workers/classification/tier-ledger.ts';
@@ -250,6 +252,27 @@ async function seedPreFolderInstall(env: Env): Promise<Record<string, string>> {
   return stores;
 }
 
+async function seedOldLocalOwnItem(env: Env, observation?: { accountGeneration: string; scopeRevision: string }): Promise<{ dbPath: string; ownPath: string }> {
+  const dbPath = resolvedStorePath('local.files', 'secure_local', env);
+  const ownPath = join(env.XDG_CONFIG_HOME!, 'olympus', 'old-own-data.txt');
+  const store = new LocalConnectorStore({ dbPath, corpusId: 'secure_local.local.files', family: 'file', trustDomain: 'secure_local' });
+  const items = [[ownPath, 'zzownhistory synthetic old index item'], [join(env.HOME!, 'Documents', 'kept.txt'), 'zzuserhistory synthetic user item']].map(([path, text]) => {
+    const id = localFilesItemId(path!);
+    return {
+      identity: { family: 'file' as const, provider: 'local_files', accountScope: 'this_computer', providerItemId: id, providerFileId: id, localItemId: `this_computer:${id}`, sourceVersion: 'v1' },
+      mimeType: 'text/plain', content: { kind: 'text' as const, text: text! },
+      metadata: { entryKind: 'file', deleted: false, name: path!.split('/').at(-1)!, locatorUri: path!, pathDisplay: path! }, fetchedAt: '2026-10-24T10:00:00.000Z',
+    };
+  });
+  const connector: SourceConnector = { id: 'local.files.old-index', family: 'file', async authenticate() {}, async *listItems() { yield { items, done: true }; }, async fetchItem(id) { return items.find(item => item.identity.localItemId === id)!; }, classificationSignals() { return {}; } };
+  try { await store.syncFromConnector(connector, { fetchContent: true, ...(observation ? { sourceScopeObservation: () => observation } : {}) }); } finally { store.close(); }
+  return { dbPath, ownPath };
+}
+function ownItemStillActive(dbPath: string, ownPath: string): boolean {
+  const db = new Database(dbPath, { readonly: true });
+  try { return (db.query('SELECT COUNT(*) AS n FROM items WHERE tombstoned = 0 AND provider_item_id = ?').get(localFilesItemId(ownPath)) as { n: number }).n > 0; } finally { db.close(); }
+}
+
 describe('source storage, end to end on this host', () => {
   for (const read of ['status', 'search'] as const) {
     test(`a declared store ingested after boot is discovered by ${read} with the scheduler off`, async () => {
@@ -269,6 +292,53 @@ describe('source storage, end to end on this host', () => {
       } finally { await worker.stop(); }
     }, 180_000);
   }
+
+  test('startup cleans existing local-file own-root history even without an approved scope', async () => {
+    const env: Env = { ...freshHome(), OLYMPUS_WORKER_SCHEDULER_ENABLED: 'false' };
+    const { dbPath, ownPath } = await seedOldLocalOwnItem(env);
+    expect(ownItemStillActive(dbPath, ownPath)).toBe(true);
+    const worker = await boot(env);
+    try {
+      expect(worker.output(), listening(worker)).toContain('worker listening');
+      expect(ownItemStillActive(dbPath, ownPath)).toBe(false);
+    } finally { await worker.stop(); }
+  }, 180_000);
+
+  test('late local-file mount cleans old own-root history before allowing reads', async () => {
+    const env: Env = { ...freshHome(), OLYMPUS_WORKER_SCHEDULER_ENABLED: 'false' };
+    const registryPath = join(env.HOME!, '.config', 'olympus', 'handles.json');
+    env.OLYMPUS_CREDENTIAL_HANDLE_REGISTRY_PATH = registryPath;
+    const preload = join(env.HOME!, 'slow-own-cleanup.ts');
+    writeFileSync(preload, `
+      import { LocalConnectorStore } from ${JSON.stringify(join(REPO, 'src/workers/connector-store/index.ts'))};
+      const sync = LocalConnectorStore.prototype.syncFromConnector;
+      LocalConnectorStore.prototype.syncFromConnector = async function(connector, ...args) {
+        if (connector.id.includes('local.files.own-roots-cleanup')) await Bun.sleep(1500);
+        return sync.call(this, connector, ...args);
+      };
+    `);
+    const worker = await boot(env, preload);
+    try {
+      expect(worker.output(), listening(worker)).toContain('worker listening');
+      expect(existsSync(resolvedStorePath('local.files', 'secure_local', env))).toBe(false);
+      connectThisComputerSource(registryPath, 'local.files');
+      const authority = new FileSourceScopeAuthority({ registryPath });
+      const pending = authority.snapshot('local.files');
+      authority.approve({ sourceId: 'local.files', accountGeneration: pending.accountGeneration!, expectedRevision: pending.revision, selections: [{ key: env.HOME!, state: 'ingest' }], wholeAccount: false, explicitWholeAccountConfirmation: false });
+      const approved = authority.snapshot('local.files');
+      const { dbPath, ownPath } = await seedOldLocalOwnItem(env, { accountGeneration: approved.accountGeneration!, scopeRevision: approved.revision });
+      const lane = { corpus_id: 'secure_local.local.files', provider: 'local_files', account_scope: 'this_computer', approved_scope_key: `local_files.this_computer:${env.HOME!}` };
+      expect((await ask(env, worker, '/v1/source/index/files/plan', lane)).status).toBe(200);
+      expect(ownItemStillActive(dbPath, ownPath)).toBe(true); // Deliberately slow deletion is still running.
+      const during = await ask(env, worker, '/v1/source/index/search', { corpus_id: lane.corpus_id, approved_scope_key: lane.approved_scope_key, query: 'zzownhistory' });
+      expect(during.json.hits ?? []).toEqual([]);
+      const deadline = Date.now() + 10_000;
+      while (ownItemStillActive(dbPath, ownPath) && Date.now() < deadline) await Bun.sleep(100);
+      expect(ownItemStillActive(dbPath, ownPath), worker.errors()).toBe(false);
+      expect((await ask(env, worker, '/v1/source/index/search', { corpus_id: lane.corpus_id, approved_scope_key: lane.approved_scope_key, query: 'zzownhistory' })).json.hits).toEqual([]);
+      expect((await ask(env, worker, '/v1/source/index/search', { corpus_id: lane.corpus_id, approved_scope_key: lane.approved_scope_key, query: 'zzuserhistory' })).json.hits).toHaveLength(1);
+    } finally { await worker.stop(); }
+  }, 180_000);
 
   test('malformed mount declarations are reported once across repeated read refreshes', async () => {
     const env: Env = { ...freshHome(), OLYMPUS_WORKER_SCHEDULER_ENABLED: 'false', OLYMPUS_SOURCE_INDEX_CONNECTOR_STORES_JSON: JSON.stringify([{ corpusId: 'secure_local.reflect.notes', family: 'typo', trustDomain: 'secure_local' }]) };
@@ -347,7 +417,9 @@ describe('source storage, end to end on this host', () => {
     const preload = join(env.HOME!, 'check-telegram-target.ts');
     writeFileSync(preload, `
       import { archiveSourceTargets } from ${JSON.stringify(join(REPO, 'src/workers/archive-import/source-targets.ts'))};
-      import { resolvedStorePath } from ${JSON.stringify(join(REPO, 'src/core/source-placement.ts'))};
+      import { localFilesItemId } from '../src/workers/local-files/connector.ts';
+import type { SourceConnector } from '../src/core/contracts.ts';
+import { resolvedStorePath } from ${JSON.stringify(join(REPO, 'src/core/source-placement.ts'))};
       import { existsSync, writeFileSync } from 'node:fs';
       const deadline = Date.now() + 10000;
       const tick = setInterval(() => {
