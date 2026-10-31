@@ -12350,7 +12350,7 @@ export interface ConnectorStoreCorpusAdapterOptions {
   store: LocalConnectorStore;
   embeddingProvider?: SourceEmbeddingProvider;
   retrievalMode?: 'keyword' | 'hybrid';
-  /** Selects the stricter Private-search OR precision policy. */
+  /** Trusted local-answer wiring can opt into the broader OR policy. */
   localKeywordFallback?: boolean | 'private_search';
   /** Absolute cosine floor for hybrid vector-lane rows; sub-bar semantic similarity is not evidence. */
   semanticRelevanceBar?: number;
@@ -13002,7 +13002,7 @@ function relaxEmptyLocalKeywordLane(
   ftsOptions: { prefix?: boolean; locate?: boolean } = {},
 ): ReturnType<typeof connectorStoreKeywordLaneRows> {
   if (strict.rows.length > 0) return strict;
-  const relaxed = connectorStoreKeywordLaneRows(store, query, limit, accountScope, filters, { ...ftsOptions, relaxed: true, privatePrecision: enabled === 'private_search' });
+  const relaxed = connectorStoreKeywordLaneRows(store, query, limit, accountScope, filters, { ...ftsOptions, relaxed: true, privatePrecision: enabled !== true });
   // OR matches are ranked, but never claim every concept of the question matched.
   return { ...relaxed, completeItemIds: new Set() };
 }

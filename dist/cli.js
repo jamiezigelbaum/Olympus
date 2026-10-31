@@ -30229,7 +30229,7 @@ function connectorStoreKeywordLaneRows(store, query, limit, accountScope, filter
 function relaxEmptyLocalKeywordLane(store, query, limit, accountScope, filters, strict, enabled, ftsOptions = {}) {
   if (strict.rows.length > 0)
     return strict;
-  const relaxed = connectorStoreKeywordLaneRows(store, query, limit, accountScope, filters, { ...ftsOptions, relaxed: true, privatePrecision: enabled === "private_search" });
+  const relaxed = connectorStoreKeywordLaneRows(store, query, limit, accountScope, filters, { ...ftsOptions, relaxed: true, privatePrecision: enabled !== true });
   return { ...relaxed, completeItemIds: new Set };
 }
 function connectorStoreRowHasContent(row) {
