@@ -1,3 +1,5 @@
+import { existsSync, readFileSync } from 'node:fs';
+import { isPendingPrivacyPolicy, saveFirstRunPrivacyChoice } from './first-run-privacy.ts';
 import { PRIVACY_PRESET_LABELS } from './privacy-language.ts';
 import { randomBytes } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
@@ -129,7 +131,7 @@ export const VENICE_PITCH_TEXT = [
   `Private source answers follow your choice: ${PRIVACY_PRESET_LABELS['local-first']} tries your local lane first; ${PRIVACY_PRESET_LABELS['private-cloud-only']} has no local-model requirement.`,
   'In v0.4, Venice uses its ordinary API with a live-catalog Private or plain TEE model. Olympus does not provide or qualify E2EE out of the box; custom integrations are user-owned.',
   'Semantic search uses a small model built into Olympus: it downloads once, runs on this computer, and needs no account or key. Gemini, a local embedding server, or a Venice Private embedding model are opt-in; Private content never goes to ordinary cloud embedding providers.',
-  `Choosing ${PRIVACY_PRESET_LABELS['no-sensitive']} keeps Private meaning search on this computer without configuring an agent answer lane.`,
+  `Choosing ${PRIVACY_PRESET_LABELS['no-sensitive']} lets you search Private items and use Ask privately on this computer. Connected agents cannot use Private items to answer.`,
 ] as const;
 
 export function runSetupDependencyCheck(input: {
@@ -249,11 +251,22 @@ export async function runSetupWizard(options: SetupWizardOptions): Promise<Setup
   if (options.dryRun) {
     managedWorker = installManagedWorkerFiles(workerOptions(options, workerToken));
   } else {
-    writeSovereigntyConfigFile({
-      config: presetConfig,
-      path: sovereigntyPath,
-      ...(options.force !== undefined ? { force: options.force } : {}),
-    });
+    let pending = false;
+    if (existsSync(sovereigntyPath)) {
+      try { pending = isPendingPrivacyPolicy(JSON.parse(readFileSync(sovereigntyPath, 'utf8')) as SovereigntyConfig); }
+      catch { /* Existing unreadable policies remain the normal writer's refusal. */ }
+    }
+    if (pending) {
+      if (cloudLane !== 'subscription') throw new OperationError('invalid_params', 'Choose the Private-answer mode before changing the Personal cloud lane.');
+      const saved = saveFirstRunPrivacyChoice(sovereigntyPath, options.preset);
+      if (!saved.ok || !saved.changed) throw new OperationError('invalid_params', 'The privacy choice changed elsewhere. Review the current policy before continuing.');
+    } else {
+      writeSovereigntyConfigFile({
+        config: presetConfig,
+        path: sovereigntyPath,
+        ...(options.force !== undefined ? { force: options.force } : {}),
+      });
+    }
     wroteSovereignty = true;
     // Writing the unit and walking away left the operator with an inactive
     // worker and a guide whose next step was to verify it was running

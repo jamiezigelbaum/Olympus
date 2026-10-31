@@ -1,3 +1,4 @@
+import { seedEngineSovereignty } from '../src/core/engine-service.ts';
 import { createHash } from 'node:crypto';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -20,6 +21,17 @@ import {
 } from '../src/core/worker-service.ts';
 
 describe('olympus setup wizard', () => {
+  test('agent setup commits an outstanding first-run choice through the shared policy save', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'olympus-first-setup-'));
+    try {
+      const sovereigntyPath = join(dir, 'sovereignty.json');
+      seedEngineSovereignty(sovereigntyPath);
+      const result = await runIsolatedSetupWizard({ preset: 'local-only', yes: true, sovereigntyPath, platform: 'linux', homeDir: dir, workingDirectory: dir, dependencyCheck: healthyDependencyCheck });
+      expect(result.sovereignty.wrote).toBe(true);
+      expect(JSON.parse(readFileSync(sovereigntyPath, 'utf8'))).toEqual(loadSovereigntyPreset('local-only'));
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
   test('runs non-interactive end-to-end against temp files and records secure-off as a user choice', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'olympus-setup-test-'));
     const sovereigntyPath = join(dir, 'sovereignty.json');
@@ -49,8 +61,8 @@ describe('olympus setup wizard', () => {
       expect(pitch).toContain('Semantic search uses a small model built into Olympus');
       expect(pitch).toContain('needs no account or key');
       expect(pitch).toContain('Private content never goes to ordinary cloud embedding providers');
-      expect(pitch).toContain("Choosing Private meaning search on this computer keeps Private meaning search on this computer without configuring an agent answer lane");
-      expect(result.presetLabel).toBe("Private meaning search on this computer");
+      expect(pitch).toContain("Choosing Private answers only in Olympus lets you search Private items and use Ask privately on this computer. Connected agents cannot use Private items to answer.");
+      expect(result.presetLabel).toBe("Private answers only in Olympus");
       expect(pitch).not.toContain('Venice E2EE can be connected');
       expect(pitch).not.toContain('E2EE and Anonymized models are refused');
       expect(result.secureTierDecision).toBe('secure_off_user_choice');

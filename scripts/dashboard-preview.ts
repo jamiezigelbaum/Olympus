@@ -1,3 +1,4 @@
+import { createPendingPrivacyPolicy } from '../src/core/first-run-privacy.ts';
 import { remotePrivateNote, REMOTE_SECRET_NOTE } from '../src/core/remote-result.ts';
 import { privateAnswerPageHtml } from '../src/workers/chatgpt/private-answer-resource.ts';
 import { importPanelPublicKey, padPrivateAnswerPlaintext, sealPrivateAnswer } from '../src/workers/chatgpt/private-answer-crypto.ts';
@@ -20,6 +21,7 @@ import { loadSovereigntyPreset } from '../src/core/sovereignty.ts';
 //   /dashboard?state=secret-notice  ChatGPT private panel and remote verdict
 //   /dashboard?keys | ?agents | ?private-answers | ?connector
 //                the computer's own pages, as the worker renders them.
+//   &sheet=first-run|first-run-local|first-run-no-sensitive&step=1..3 with state=first-run
 //   &sheet=dropbox|venice&step=1..5 opens a setup fixture without starting OAuth.
 //   &waiting=0..9  how many private inbox questions appear (default 3; remembered):
 //                the Private answers list and the panel's Needs you line.
@@ -380,6 +382,11 @@ export function buildDashboardPreviewOptions(state: string): Pick<ChatGptDashboa
 }
 
 export function buildDashboardPreviewView(state: string): SourceDashboardViewModel {
+  if (state === 'first-run') {
+    const view = buildDashboardPreviewView('fresh');
+    view.model_setup = new ModelSetupService({ config: createPendingPrivacyPolicy(), credentialState: () => 'missing', autoCheck: false }).getStatus();
+    return view;
+  }
   if (state.startsWith('privacy-')) return buildDashboardPreviewView('full');
   if (state === 'review' || state === 'review-unconfigured' || state === 'review-indexing') return reviewPreview(state);
   if (state === 'models') {
@@ -1694,7 +1701,7 @@ export const DASHBOARD_PREVIEW_STATES = [
   'inbox-failed', 'secret-notice', 'secret-inbox',
   'review', 'review-unconfigured', 'review-indexing', 'privacy-edit', 'privacy-empty', 'privacy-description-editing', 'privacy-questions', 'privacy-conflict',
   'privacy-add-kind', 'privacy-add-pick', 'privacy-add-confirm', 'privacy-details', 'privacy-add-folder', 'privacy-add-label',
-  'models', 'models-applying', 'first-install', 'gmail-scope-pending', 'tier-migration', 'partial', 'fresh', 'full', 'dropbox-initial', 'dropbox-update',
+  'first-run', 'models', 'models-applying', 'first-install', 'gmail-scope-pending', 'tier-migration', 'partial', 'fresh', 'full', 'dropbox-initial', 'dropbox-update',
   'connect-google-full', 'connect-google-error', 'connect-x-error', 'telegram-setup', 'telegram-pair-api-id', 'telegram-pair-api-hash',
   'connect-google', 'connect-google-loopback', 'connect-dropbox', 'connect-x',
   'connect-venice', 'connect-dropbox-connecting', 'connect-dropbox-refused', 'connect-dropbox-publisher', 'connect-google-publisher',
@@ -1887,6 +1894,11 @@ function pickerAutoScript(spec: string): string {
 
 /** The dashboard tool's result for a preview state, with the computer's Index faster state (and waiting questions, unlocked). */
 export function setupPreviewScript(name: string | null, step: string | null): string {
+  if (name === 'first-run' || name === 'first-run-local' || name === 'first-run-no-sensitive') {
+    const choice = name === 'first-run-local' ? 'local-only' : name === 'first-run-no-sensitive' ? 'no-sensitive' : 'local-first';
+    const index = Math.max(1, Math.min(3, Number(step) || 1));
+    return `<script>window.addEventListener('DOMContentLoaded',async function(){var sheet=document.querySelector('[data-first-run-sheet]');if(!sheet)return;if(${index}>1){sheet.querySelector('input[value="${choice}"]').checked=true;sheet.querySelector('[data-setup-submit]').click();for(var i=0;i<100&& !sheet.querySelector('[data-setup-panel]').hidden;i++)await new Promise(r=>setTimeout(r,20));if(${index}>2&&${JSON.stringify(choice)}!=='no-sensitive')sheet.querySelector('[data-setup-next]').click();}sheet.scrollIntoView({block:'start'});});</script>`;
+  }
   const sheets: Record<string, { selector: string; count: number }> = {
     dropbox: { selector: '#connect-dropbox-files', count: 5 },
     venice: { selector: '[data-setup-steps]:has([name="source"][value="venice"])', count: 3 },
@@ -2117,6 +2129,11 @@ if (import.meta.main) {
     if (request.method === 'POST' && url.pathname === '/dashboard/agents/revoke') {
       return Response.json({ ok: true, status_message: 'Preview only: nothing was revoked.' });
     }
+    // First-run controls are synthetic preview state, never persisted to a policy.
+    if (state === 'first-run' && request.method === 'POST' && ['/dashboard/models/first-run-privacy', '/dashboard/models/check'].includes(url.pathname)) {
+      if (!previewUnlocked) return Response.json({ ok: false }, { status: 403 });
+      return Response.json({ ok: true }, { headers: { 'set-cookie': 'olympus_preview_first_run=saved; Path=/; SameSite=Strict' } });
+    }
     if (request.method === 'POST' && url.pathname.startsWith('/dashboard/messaging/')) {
       const fixture = previewMessagingFixture(state);
       const input = await request.json() as { source?: unknown };
@@ -2162,12 +2179,17 @@ if (import.meta.main) {
           ...(unlocked ? { csrfToken: 'preview-csrf-token' } : {}),
         }), COMPUTER_HOST_PAGE_CSP), cookies);
       }
+      const pageView = view(pageState);
+      if (pageState === 'first-run' && request.headers.get('sec-fetch-dest') !== 'document' && /olympus_preview_first_run=saved/.test(request.headers.get('cookie') ?? '')) {
+        pageView.model_setup = { ready: true, checked_at: '', cards: [] };
+      }
+      if (pageState === 'first-run' && request.headers.get('sec-fetch-dest') === 'document') cookies.push('olympus_preview_first_run=; Path=/; Max-Age=0');
       if (page === 'keys' && unlocked && previewMessagingFixture(pageState)) {
         return withCookies(html(renderMessagingPreviewPage(pageState) + setupPreviewScript(url.searchParams.get('sheet'), url.searchParams.get('step')), undefined, url.searchParams.get('theme')), cookies);
       }
       return withCookies(html(renderDashboardLocalPage(page, {
         url,
-        view: view(pageState),
+        view: pageView,
         options: {
           now: NOW,
           ...(unlocked ? { controlSessionCsrfToken: 'preview-csrf-token' } : {}),

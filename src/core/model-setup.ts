@@ -1,3 +1,4 @@
+import { isPendingPrivacyPolicy } from './first-run-privacy.ts';
 import { modelEndpointFetch } from './model-transport.ts';
 import { fetchBoundedText, isAbortError } from './http-timeout.ts';
 import type {
@@ -18,6 +19,7 @@ export interface ModelSetupCard {
 export interface ModelSetupView {
   ready: boolean;
   checked_at: string;
+  privacy_choice_pending?: boolean;
   cards: ModelSetupCard[];
   attention?: string;
 }
@@ -183,7 +185,22 @@ export class ModelSetupService {
     if (gemini.length > 0) cards.push(this.credentialCard('gemini', gemini));
 
     const venice = required.filter(({ profile }) => profile.provider === 'venice');
-    if (venice.length > 0) cards.push(this.credentialCard('venice', venice));
+    if (venice.length > 0) {
+      const card = this.credentialCard('venice', venice);
+      // A missing fallback key must not prevent the local first member of an
+      // ordered Private pool from serving. Other Venice uses remain required.
+      const pool = this.config.routes.secure_local?.pool;
+      const optional = card.state === 'not_configured' && pool?.order?.length
+        && pool.order[0] !== undefined
+        && this.config.modelProfiles[pool.order[0]]?.provider === 'local-openai-compatible'
+        && venice.every(({ id }) => pool.order!.includes(id)
+          && !(['public_safe', 'internal'] as const).some(domain => {
+            const route = this.config.routes[domain];
+            return route?.mode !== 'disabled' && (route?.pool?.members ?? route?.analyst ?? []).includes(id);
+          })
+          && !Object.values(this.config.retrieval.trustDomains).some(policy => policy?.embeddingProfile === id && isActiveEmbeddingMode(policy.activationMode)));
+      cards.push(optional ? { ...card, required: false, detail: 'Optional fallback: add a Venice key when you want to use Venice.' } : card);
+    }
 
     const local = required.filter(({ profile }) => profile.provider === 'local-openai-compatible');
     if (local.length > 0) cards.push(this.localCard(local));
@@ -191,7 +208,8 @@ export class ModelSetupService {
     const additional = required.filter(({ profile }) => !['google-gemini', 'venice', 'local-openai-compatible', 'openclaw-infer'].includes(profile.provider));
     const additionalReady = this.aggregateCredentialState(additional) === 'ready';
     return {
-      ready: additionalReady && cards.every((card) => card.state === 'ready'),
+      ready: !isPendingPrivacyPolicy(this.config) && additionalReady && cards.every((card) => !card.required || card.state === 'ready'),
+      ...(isPendingPrivacyPolicy(this.config) ? { privacy_choice_pending: true } : {}),
       ...(!additionalReady ? { attention: 'An additional model provider in your policy needs agent-assisted setup. These key forms manage Gemini and Venice only.' } : {}),
       checked_at: this.now().toISOString(),
       cards,

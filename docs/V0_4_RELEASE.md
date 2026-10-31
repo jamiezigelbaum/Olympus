@@ -20,6 +20,25 @@ Centerpiece: the signed, notarized Mac helper under OCU (olympus-ops #64), so
 Files on this computer reads Desktop, Documents, Downloads and iCloud Drive.
 Built first, so it never waits on the rest.
 
+**First-run Private answers (owner decision 2026-10-31).** Supersedes the
+2026-10-14 decision A's silent `no-sensitive` seed for new standalone installs:
+they ask the owner to choose, with `local-first` recommended. Until the choice,
+the policy must keep data on the computer. Existing policies and the narrow
+1.0.0 default migration remain unchanged. Local-first may use Venice only after
+the owner chooses it and adds a key; without a key the built-in model answers
+locally. The agent walkthrough and dashboard share the choice and save path. The pending choice is an explicit durable policy marker; unrelated model
+settings cannot clear it. Until consent, one transport gate denies remote
+source reads, including picker metadata, while the authenticated local
+computer dashboard can browse. Agent setup and engine installation share the
+installed-policy state resolver, preserving environment-backed, inline
+and custom-path upgrades without asking again. Ambient shell keys and abandoned
+config files do not count as an installation. Legacy worker detection uses the
+platform service path (including Linux XDG overrides), then resolves its inline,
+custom-file or environment policy. The shared doctor operation skips source
+diagnostics before consent across CLI, native and stdio MCP while retaining
+non-source health checks. Pending setup shows the choice
+before profile editing and refuses profile writes, preserving any saved rules.
+
 In scope:
 - Mac install and sign-in: #579 (Safari pop-up), #624 and #578 (doctor
   checks the runtime Olympus uses), verify #631 on Mac.
@@ -215,7 +234,8 @@ stay after 1.0.
 - **Standalone engine on the Mac.** `olympus engine
   install|status|restart|logs|uninstall` runs and supervises the worker as a
   per-user LaunchAgent, with no OpenClaw. A fresh install is keyless: it
-  seeds the `no-sensitive` preset with the built-in models.
+  formerly seeded the `no-sensitive` preset with the built-in models; the
+  2026-10-31 first-run decision above supersedes that silent choice.
 - **Relay v2** at one fixed host, `mcp.olympusplugin.ai` (Hetzner
   `olympus-relay-1`, Caddy TLS): one WSS session per install, per-request
   routing, static OAuth metadata, the authorize bridge, a Mac-offline

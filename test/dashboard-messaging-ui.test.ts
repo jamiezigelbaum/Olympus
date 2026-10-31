@@ -1,4 +1,5 @@
 import { expect, test } from 'bun:test';
+import { Window } from 'happy-dom';
 import { renderMessagingCard } from '../src/workers/dashboard/messaging.ts';
 
 test('only a local control session gets pairing and chat-scope controls', () => {
@@ -38,7 +39,20 @@ test('a bearer dashboard offers a local controls entry without any credential fi
   expect(html).not.toContain('<input');
 });
 
-test('messaging card keeps pair, choose chats and cancel in one action row', () => {
-  const html = renderMessagingCard('telegram', true);
+test('WhatsApp keeps pair, choose chats and cancel in one action row', () => {
+  const html = renderMessagingCard('whatsapp', true);
   expect(html).toMatch(/class="actionrow">[\s\S]*data-messaging-kind="start"[\s\S]*data-messaging-kind="chats"[\s\S]*data-messaging-kind="cancel"[\s\S]*?<\/div><div data-messaging-view>/);
+});
+
+
+test('Telegram keeps pair and choose chats side by side outside its setup sheet', () => {
+  const window = new Window();
+  window.document.body.innerHTML = renderMessagingCard('telegram', true);
+  const pair = window.document.querySelector('[data-sheet-toggle="#telegram-setup"]')!;
+  const chats = window.document.querySelector('[data-messaging-kind="chats"]')!;
+  expect(pair.parentElement).toBe(chats.parentElement);
+  expect(pair.parentElement!.classList.contains('actionrow')).toBe(true);
+  const sheet = window.document.querySelector('#telegram-setup')!;
+  expect(sheet.closest('.actionrow')).toBeNull();
+  expect(sheet.querySelector('[data-messaging-kind="cancel"]')!.hasAttribute('hidden')).toBe(true);
 });

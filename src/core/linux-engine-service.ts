@@ -129,7 +129,7 @@ export function systemdMust(exec: EngineExec, args: string[]): string {
 import { randomBytes, createHash, randomUUID } from 'node:crypto';
 import { writePrivateFileAtomicSync, removeFileDurablySync, syncDirectorySync } from './atomic-file.ts';
 import { createLinuxPrivateDirectory, legacyLinuxSettings, isLegacyLinuxSetting, LEGACY_LINUX_SETTINGS_DIRECTORIES, LEGACY_LINUX_POLICY_FILES, linuxEngineEnvironment, linuxEngineLayoutsEqual, preflightLinuxEngineLayout, publishLinuxEngineReceipt, readLinuxEngineReceipt, resolveLinuxEngineLayout } from './linux-engine-layout.ts';
-import { engineBuildIdentity, engineServicePaths, reconcileEngineConfig, seedEngineSovereignty, resolveEngineProgram, waitForQuietEngine, waitForEngineHealthy,
+import { resolveInstallationPrivacyState, engineBuildIdentity, engineServicePaths, reconcileEngineConfig, seedEngineSovereignty, resolveEngineProgram, waitForQuietEngine, waitForEngineHealthy,
  type EngineInstallOptions, type EngineInstallResult, type EngineServiceOptions, type EngineHealthDeps, type EngineHealthProof, type EngineLifecycleCheckpoint, type EngineRollbackResult } from './engine-service.ts';
 import { reapRecordedEngineChildren, readEngineChildren, parseProcessTable } from './engine-children.ts';
 import type { EngineChildReapDeps } from './engine-children.ts';
@@ -885,7 +885,8 @@ export function installLinuxEngine(options: EngineInstallOptions): EngineInstall
   assertLegacySettingDestinations(l);
   assertLegacySettingOverrides(l,options.env??process.env);
   const before=inspectSystemdEngine(l,exec); assertKnown(before);
-  if(options.dryRun) return {...base,wrote_plist:false,wrote_config:false,wrote_worker_env:false,sovereignty:{action:existsSync(l.sovereigntyPath)?'present':'would_seed',path:l.sovereigntyPath},action:'dry_run'};
+  const privacyState = resolveInstallationPrivacyState({ homeDir: l.home, paths, env: options.env ?? process.env });
+  if(options.dryRun) return {...base,wrote_plist:false,wrote_config:false,wrote_worker_env:false,sovereignty:{action:existsSync(l.sovereigntyPath)?'present':privacyState.state==='not_installed'?'would_seed':'skipped',path:l.sovereigntyPath,...(privacyState.reason?{reason:privacyState.reason}:{})},action:'dry_run'};
   requireLinuxApprovalTransport(source);
   const existingReceipt=readLinuxEngineReceipt(l.receiptPath);
   const observedLinger=readEngineLinger(exec,options.uid);
@@ -932,7 +933,8 @@ export function installLinuxEngine(options: EngineInstallOptions): EngineInstall
    for(const path of [paths.logPath,paths.errorLogPath]) { assertLinuxManagedPath(path); if(!existsSync(path)) writePrivateFileAtomicSync(path,''); }
    const oldUnit=optionalText(l.unitPath),oldProgram=currentProgram(l);
    if(oldUnit && oldProgram && oldProgram.build!==program.build) writePrivateFileAtomicSync(join(l.stateDir,'service-previous.json'),JSON.stringify({program:oldProgram,unit:oldUnit,config:readFileSync(l.configPath,'utf8')}));
-   const config=reconcileEngineConfig(l.configPath), seeded=seedEngineSovereignty(l.sovereigntyPath);
+   const existingWithoutPolicy = !existsSync(l.sovereigntyPath) && (existingReceipt?.installationState === 'installed' || privacyState.state !== 'not_installed');
+   const config=reconcileEngineConfig(l.configPath), seeded=existingWithoutPolicy ? undefined : seedEngineSovereignty(l.sovereigntyPath);
    let wroteEnv=false;
    if(!existsSync(l.workerEnvPath)) { writePrivateFileAtomicSync(l.workerEnvPath,`OLYMPUS_WORKER_AUTH_TOKEN='${randomBytes(32).toString('base64url')}'\nOLYMPUS_SOURCE_INDEX_ANSWER_ENABLED=true\n`); wroteEnv=true; }
    lifecycleCheckpoint(options,'config_published');
@@ -957,7 +959,7 @@ export function installLinuxEngine(options: EngineInstallOptions): EngineInstall
    refreshMachineArtifacts(l);
    const warnings=[...base.warnings];
    warnings.push(`Installed in your user directories. Address this layout with ${Object.entries(linuxEngineEnvironment(l)).filter(([k])=>k.startsWith('XDG_')).map(([k,v])=>`${k}='${v.replace(/'/g,`'\\''`)}'`).join(' ')}.`);
-   return {...base,program,plist:unit,warnings,wrote_plist:changed,wrote_config:config.wrote,wrote_worker_env:wroteEnv,sovereignty:{action:seeded?'seeded' as const:'present' as const,path:l.sovereigntyPath,...(seeded?{preset:seeded}:{})},action:before.active?'restarted' as const:'bootstrapped' as const};
+   return {...base,program,plist:unit,warnings,wrote_plist:changed,wrote_config:config.wrote,wrote_worker_env:wroteEnv,sovereignty:{action:existingWithoutPolicy?'skipped' as const:seeded?'seeded' as const:'present' as const,path:l.sovereigntyPath,...(existingWithoutPolicy?{reason:'An existing engine installation has no policy file; its current policy is preserved.'}:{}),...(seeded?{preset:seeded}:{})},action:before.active?'restarted' as const:'bootstrapped' as const};
   } catch(error) {
    try { restoreInstallTransaction(l,exec,options); }
    catch(recoveryError) { throw new Error(`Linux install failed (${String(error)}), and recovery failed (${String(recoveryError)}). The durable journal was retained.`); }

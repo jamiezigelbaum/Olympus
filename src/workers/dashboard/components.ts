@@ -575,27 +575,29 @@ export interface DashboardConnectSheetInput {
 }
 
 /** A provider-neutral walkthrough. The last step contains the existing connect form. */
-export function setupStepsSheet(input: { id: string; provider: string; steps: readonly DashboardSetupStep[]; finalForm: (formId: string) => string; submitLabel?: string; redirect?: string; guided?: boolean; footer?: string; initialStep?: number }): string {
+export function setupStepsSheet(input: { id: string; provider: string; steps: readonly DashboardSetupStep[]; finalForm: (formId: string) => string; submitLabel?: string; redirect?: string; guided?: boolean; footer?: string; initialStep?: number; stepContent?: readonly string[]; stepActions?: readonly ({ formId: string; label: string } | undefined)[]; footerContent?: string }): string {
   const id = safeId(input.id);
   const count = input.steps.length;
   const current = input.initialStep ?? 0;
   const formId = `${id}-form`;
+  const initialAction = input.stepActions?.[0];
   const panels = input.steps.map((step, index) => {
     const url = step.link && safeExternalHref(step.link.url);
     const link = url ? `<button type="button" class="btn primary" data-setup-open="${escapeHtml(url)}">${escapeHtml(step.button_label ?? `Open this page in ${input.provider}${input.guided ? ' ↗' : ''}`)}</button>` : '';
     const extraLinks = (step.links ?? []).map(link => { const href = safeExternalHref(link.url); return href ? `<p><a class="ext" href="${escapeHtml(href)}" target="_blank" rel="noopener noreferrer">${escapeHtml(link.label)} ↗</a></p>` : ''; }).join('');
     const redirect = step.redirect_uri && input.redirect
       ? `<div class="promptbox" id="${id}-redirect">${escapeHtml(input.redirect)}</div><button class="btn" type="button" data-copy-target="#${id}-redirect">Copy redirect URI</button><span data-copy-status aria-live="polite"></span>` : '';
+    const action = input.stepActions?.[index];
     const instructions = step.instructions
       ? `<ol class="steps">${step.instructions.map(click => `<li>${escapeHtml(click).replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')}</li>`).join('')}</ol>`
       : step.text ? `<p>${escapeHtml(step.text)}</p>` : '';
     const heading = input.guided ? 'h2' : 'h4';
-    return `<div data-setup-panel${index !== current ? ' hidden' : ''}><${heading}>${escapeHtml(step.title ?? `Step ${index + 1}`)}</${heading}>${instructions}${link}${extraLinks}${redirect}${step.return_note ? `<p class="setupnote">${escapeHtml(step.return_note)}</p>` : ''}${index === count - 1 ? input.finalForm(formId) : ''}</div>`;
+    return `<div data-setup-panel${action ? ` data-setup-form="${escapeHtml(action.formId)}" data-setup-label="${escapeHtml(action.label)}"` : ''}${index !== current ? ' hidden' : ''}><${heading}>${escapeHtml(step.title ?? `Step ${index + 1}`)}</${heading}>${instructions}${link}${extraLinks}${redirect}${step.return_note ? `<p class="setupnote">${escapeHtml(step.return_note)}</p>` : ''}${input.stepContent?.[index] ?? ''}${index === count - 1 ? input.finalForm(formId) : ''}</div>`;
   }).join('');
   const progress = input.guided
     ? `<div class="setupsegments" role="progressbar" aria-label="Setup progress" aria-valuemin="1" aria-valuemax="${count}" aria-valuenow="${current + 1}">${input.steps.map((_, i) => `<span data-setup-segment${i <= current ? ' class="filled"' : ''}></span>`).join('')}</div>`
     : `<progress data-setup-progress max="${count}" value="${current + 1}"></progress>`;
-  return `<div data-setup-steps${input.guided ? ' data-setup-guided' : ''}>${progress}<p data-setup-counter>${input.guided ? `STEP ${current + 1} OF ${count}` : `Step ${current + 1} of ${count}`}</p>${panels}<div class="setupactions actionrow" data-setup-actions><button class="btn" type="button" data-setup-back${current === 0 ? ' disabled' : ''}>Back</button><button class="btn primary" type="button" data-setup-next${current === count - 1 ? ' hidden' : ''}>I've done this, next</button><button class="btn primary" type="submit" form="${formId}" data-setup-submit${current === count - 1 ? '' : ' hidden'}>${escapeHtml(input.submitLabel ?? 'Connect')}</button></div>${input.footer ? `<p class="setupfooter">${escapeHtml(input.footer)}</p>` : ''}</div>`;
+  return `<div data-setup-steps${input.guided ? ' data-setup-guided' : ''}>${progress}<p data-setup-counter>${input.guided ? `STEP ${current + 1} OF ${count}` : `Step ${current + 1} of ${count}`}</p>${panels}<div class="setupactions actionrow" data-setup-actions><button class="btn" type="button" data-setup-back${current === 0 ? ' disabled' : ''}>Back</button><button class="btn primary" type="button" data-setup-next${current === count - 1 || initialAction ? ' hidden' : ''}>I've done this, next</button><button class="btn primary" type="submit" form="${escapeHtml(initialAction?.formId ?? formId)}" data-setup-submit${current === count - 1 || initialAction ? '' : ' hidden'}>${escapeHtml(initialAction?.label ?? input.submitLabel ?? 'Connect')}</button>${input.footerContent ?? ''}</div>${input.footer ? `<p class="setupfooter">${escapeHtml(input.footer)}</p>` : ''}</div>`;
 }
 
 /**
@@ -914,7 +916,11 @@ export function standaloneDashboardControllerScript(
       function route(params) {
         var action = params.action;
         if (action === 'start_oauth') return ['/dashboard/connect/oauth/start', withoutAction(params)];
+        if (action === 'discover_local_models') return ['/dashboard/models/local/discover', withoutAction(params)];
+        if (action === 'test_local_models') return ['/dashboard/models/local/test', withoutAction(params)];
+        if (action === 'save_local_answer_model') return ['/dashboard/models/local/save', withoutAction(params)];
         if (action === 'check_model_setup') return ['/dashboard/models/check', {}];
+        if (action === 'save_first_run_privacy') return ['/dashboard/models/first-run-privacy', withoutAction(params)];
         if (action === 'connect_api_key') return ['/dashboard/connect/api-key', withoutAction(params)];
         if (action === 'connect_this_computer') return ['/dashboard/connect/this-computer', withoutAction(params)];
         if (action === 'mint_agent_pairing_code') return ['/dashboard/agents/pairing-code', {}];

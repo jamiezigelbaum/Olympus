@@ -1,3 +1,4 @@
+import { PRIVATE_ANSWER_OPTIONS } from '../src/core/privacy-language.ts';
 /**
  * The ChatGPT page's privacy setup and the dashboard's Privacy row, driven
  * against a fake MCP Apps host that serves the dashboard, privacy and scope
@@ -1193,6 +1194,46 @@ describe('words', () => {
     await host.settle();
     expect(host.text()).not.toMatch(/public/i);
   });
+});
+
+
+test('Escape leaves the pending first-run chooser without opening a profile sheet', async () => {
+  const pending = { pending: true as const, options: PRIVATE_ANSWER_OPTIONS };
+  const { host, saves } = await openPrivacy({
+    getResult: () => privacyToolResult({ configured: false, description: '', rules: [], pendingCount: 0, revision: 'rev1', privateAnswerChoice: pending }, 'current', 'owner-token'),
+  });
+  expect(host.text()).toContain('How should Olympus answer with Private items?');
+  host.doc.dispatchEvent(new host.win.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }) as unknown as Event);
+  await host.settle();
+  expect(host.doc.querySelectorAll('.privacy')).toHaveLength(0);
+  expect(host.doc.querySelectorAll('.privacy-sheet')).toHaveLength(0);
+  expect(host.doc.querySelector('textarea')).toBeNull();
+  expect(saves).toHaveLength(0);
+  host.button('Set up').click();
+  await host.settle();
+  expect(host.text()).toContain('How should Olympus answer with Private items?');
+});
+
+test('pending first-run opens the shared mode choice before any profile edit', async () => {
+  const saves: any[] = [];
+  const pending = { pending: true as const, options: PRIVATE_ANSWER_OPTIONS };
+  const { host } = await openPrivacy({
+    getResult: () => privacyToolResult({ configured: false, description: '', rules: [], pendingCount: 0, revision: 'rev1', privateAnswerChoice: pending }, 'current', 'owner-token'),
+    setResult: args => {
+      saves.push(args);
+      return privacyToolResult({ configured: true, description: args.description ?? 'Health', rules: [], pendingCount: 0, revision: 'rev2', ...(!args.private_answer_mode ? { privateAnswerChoice: pending } : {}) }, 'saved', 'choice-token');
+    },
+  });
+  expect(host.doc.querySelector('textarea')).toBeNull();
+  expect(saves).toHaveLength(0);
+  expect(host.text()).toContain('How should Olympus answer with Private items?');
+  expect(host.text()).toContain('Recommended');
+  for (const option of PRIVATE_ANSWER_OPTIONS) expect(host.text()).toContain(option.label);
+  expect((host.doc.querySelector('input[value="local-first"]') as unknown as HTMLInputElement).checked).toBe(true);
+  host.button('Save Private-answer mode').click();
+  await host.settle();
+  expect(saves[0]).toEqual({ private_answer_mode: 'local-first', revision: 'rev1', confirmation: 'owner-token' });
+  expect(host.text()).not.toContain('How should Olympus answer with Private items?');
 });
 
 describe('privacy step sheet', () => {

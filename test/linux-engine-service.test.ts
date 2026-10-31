@@ -445,3 +445,14 @@ for (const stale of [true, false]) test.skipIf(process.platform !== 'linux')(`en
   else{expect(()=>restartEngine(actual)).toThrow('still listening');expect(lstatSync(path).ino).toBe(inode);}
  }finally{await listener?.stop(true);}
 },10000);
+
+
+test('dry-run preserves an installed engine without a default policy', () => {
+ const l=layout(), checkout=packageAt(l.home,'v1');
+ publishLinuxEngineReceipt(l);
+ mkdirSync(dirname(l.configPath),{recursive:true,mode:0o700});
+ writeFileSync(l.configPath,JSON.stringify({}));
+ const exec:EngineExec=(c,a)=>c==='systemctl'&&a.includes('--version')?good('systemd 256'):a.includes('--property=Version')?good('256'):good('LoadState=not-found');
+ const result=installEngine({platform:'linux',homeDir:l.home,env:linuxEngineEnvironment(l),uid:1000,exec,fromCheckout:checkout,bunBin:runtimeAt(l.home),dryRun:true});
+ expect(result.sovereignty.action).toBe('skipped');
+});
