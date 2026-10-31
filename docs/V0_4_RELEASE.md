@@ -5,6 +5,42 @@ Status: active
 Owner: Olympus product owner
 Planning authority: this document defines release scope, sequence, and completion: Olympus 1.0 first, then the 0.4 record. It supersedes dated CTO planning handoffs and migration plans. [`CONTRACTS.md`](CONTRACTS.md) remains the architecture authority.
 
+## 1.3.0 The Mac release (owner decision 2026-10-31)
+
+Releases are now themed and bundled (owner, 2026-10-31): a minor release
+about every two weeks with scope agreed up front and frozen when the build
+starts; patch releases only for security, data loss or a privacy leak, a
+broken install or upgrade, or a directory-reviewer blocker. One full release
+check on the final candidate. Listing updates ride only on a tested minor
+release; the demo box is updated right after the tag, before any upload.
+
+Centerpiece: the signed, notarized Mac helper under OCU (olympus-ops #64), so
+Files on this computer reads Desktop, Documents, Downloads and iCloud Drive.
+Built first, so it never waits on the rest.
+
+In scope:
+- Mac install and sign-in: #579 (Safari pop-up), #624 and #578 (doctor
+  checks the runtime Olympus uses), verify #631 on Mac.
+- Fresh-install bugs: #588 (Telegram capture on standalone), #591
+  (Local-only with no model server).
+- Messaging: #608 and #621 (pair and choose chats from the dashboard card,
+  Telegram reads chats started after pairing), #609 (WhatsApp delay), #638
+  (re-check one chat), #619 (chat search ranking).
+- Privacy judging and rules: #636, #633, #618.
+- Trust: #615 and olympus-ops #67 (Delete all removes everything), #616
+  (Evernote asks View only), #617.
+- Remote answers and notices: #590, #611, #622, #623, #603, #612, #620, #594.
+- Engine: #630, #604; PR #481.
+- Own Google app made smooth on the dashboard (#581): a guided path that
+  replaces the help-page steps, led with once the shared app nears Google's
+  100-user cap. Design probes go to the owner before build.
+- ChatGPT listing update from the tested build: #628 tagline, crowned-mountain
+  icon, Secrets wording (a new OpenAI review).
+
+Not in 1.3: frontier consult C5 (owner, 2026-10-31: skip for 1.3; C1–C4b
+stay inert on main), Evernote live sync unless it lands before the freeze
+(#568, #559, #554), #599, #570, #626 (research runs alongside), #138.
+
 ## 1.1.0 Private answers inbox (owner decision 2026-10-14)
 
 Commit-only implementation in `claude/private-answers-inbox`; do not land
