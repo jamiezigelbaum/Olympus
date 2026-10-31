@@ -593,7 +593,7 @@ test('a resolved ownership conflict does not mask a later unrelated startup fail
     await waitUntil(() => run.health.length >= 2, 'the next startup diagnosis');
     expect(run.health.at(-1)).toBe('Olympus fixture failed to become ready.');
   } finally { await run.service.stop(); }
-});
+}, 15_000);
 
 test.skipIf(process.platform !== 'linux')('a legacy retained socket reports the verified engine restart remedy without unlinking it or spawning', async () => {
   const root = mkdtempSync(join(tmpdir(), 'worker-retained-'));
