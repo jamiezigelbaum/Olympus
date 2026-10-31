@@ -145488,6 +145488,7 @@ function mountDashboardController(options) {
   }, { once: true });
   const messagingTimers = new Map;
   const messagingBusy = new WeakSet;
+  const messagingQueued = new Map;
   const messagingSeen = new Set;
   function resumeMessaging() {
     messagingTimers.forEach((timer, card) => {
@@ -145501,8 +145502,15 @@ function mountDashboardController(options) {
     });
   }
   async function messagingRequest(card, operation, extra = {}) {
-    if (!canWrite || disposed || !options.transport.messaging || messagingBusy.has(card))
+    if (!canWrite || disposed || !options.transport.messaging)
       return;
+    if (messagingBusy.has(card)) {
+      if (operation !== "status")
+        messagingQueued.set(card, () => {
+          messagingRequest(card, operation, extra);
+        });
+      return;
+    }
     const source = card.dataset.messagingSource;
     if (source !== "telegram" && source !== "whatsapp")
       return;
@@ -145712,6 +145720,10 @@ function mountDashboardController(options) {
         status.textContent = "Could not reach pairing on this computer. Try again.";
     } finally {
       messagingBusy.delete(card);
+      const queued = messagingQueued.get(card);
+      messagingQueued.delete(card);
+      if (queued && !disposed)
+        queued();
     }
   }
   function submitMessaging(form) {
@@ -154746,8 +154758,9 @@ function telegramSetupSheet() {
 }
 function renderMessagingCard(source, localSession) {
   const label = source === "telegram" ? "Telegram" : "WhatsApp";
+  const sourceId = source === "telegram" ? "telegram.messages" : "whatsapp.personal.messages";
   const form = (kind, text4) => `<form method="dialog" data-messaging-kind="${kind}"><button class="btn${kind === "start" ? " primary" : ""}" type="submit">${text4}</button></form>`;
-  return `<section id="agent-${source}-personal" class="messaging-card" aria-hidden="false" data-source="${source === "telegram" ? "telegram.messages" : "whatsapp.personal.messages"}" data-messaging-source="${source}"><h3>${escapeHtml2(label)}</h3>` + (source === "whatsapp" ? "<p>The chat list includes saved contacts and groups and may omit unsaved chats. Choose all chats to include those.</p>" : "") + "<p>Pairing alone does not start capture. After pairing, choose which chats Olympus reads. Each message is classified on its own; choosing a chat does not set its privacy tier.</p>" + (!localSession ? '<p>Open dashboard controls on this computer to pair and choose chats.</p><form method="dialog" data-messaging-open-controls><button class="btn" type="submit">Open controls on this computer</button><span data-action-message role="status"></span></form></section>' : source === "telegram" ? `<div class="actionrow"><button class="btn primary" type="button" data-sheet-toggle="#telegram-setup" aria-controls="telegram-setup" aria-expanded="false">Pair Telegram</button>${form("chats", "Choose chats")}</div>${telegramSetupSheet()}</section>` : `<div class="actionrow">${form("start", `Pair ${label}`)}${form("chats", "Choose chats")}${form("cancel", "Cancel pairing")}</div><div data-messaging-view><p data-messaging-status role="status" aria-live="polite"></p><img data-messaging-qr hidden alt="Scan this QR code in WhatsApp to link Olympus" width="256" height="256"><div data-messaging-input></div><div data-messaging-chats></div></div></section>`);
+  return `<section id="agent-${source}-personal" class="messaging-card" aria-hidden="false" data-source="${sourceId}" data-source-id="${sourceId}" data-messaging-source="${source}"><h3>${escapeHtml2(label)}</h3>` + (source === "whatsapp" ? "<p>The chat list includes saved contacts and groups and may omit unsaved chats. Choose all chats to include those.</p>" : "") + "<p>Pairing alone does not start capture. After pairing, choose which chats Olympus reads. Each message is classified on its own; choosing a chat does not set its privacy tier.</p>" + (!localSession ? '<p>Open dashboard controls on this computer to pair and choose chats.</p><form method="dialog" data-messaging-open-controls><button class="btn" type="submit">Open controls on this computer</button><span data-action-message role="status"></span></form></section>' : source === "telegram" ? `<div class="actionrow"><button class="btn primary" type="button" data-sheet-toggle="#telegram-setup" aria-controls="telegram-setup" aria-expanded="false">Pair Telegram</button>${form("chats", "Choose chats")}</div>${telegramSetupSheet()}</section>` : `<div class="actionrow">${form("start", `Pair ${label}`)}${form("chats", "Choose chats")}${form("cancel", "Cancel pairing")}</div><div data-messaging-view><p data-messaging-status role="status" aria-live="polite"></p><img data-messaging-qr hidden alt="Scan this QR code in WhatsApp to link Olympus" width="256" height="256"><div data-messaging-input></div><div data-messaging-chats></div></div></section>`);
 }
 var init_messaging = __esm(() => {
   init_components();

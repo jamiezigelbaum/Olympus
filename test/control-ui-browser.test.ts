@@ -137,6 +137,16 @@ describe('OAuth browser handoff', () => {
       controller.dispose();
     });
   }
+  test('a Telegram deep link opens the pairing sheet on the messaging card', () => {
+    happyWindow.location.hash = '#olympus-open=connect.telegram';
+    const root = document.createElement('div');
+    root.innerHTML = renderMessagingCard('telegram', true);
+    document.body.append(root);
+    const controller = mountDashboardController({ root, transport: { control: noControl }, navigate() {}, async refresh() { return undefined; },
+      returnUrl: 'https://gateway.test/', canWrite: true, signal: new AbortController().signal, pollIntervalMs: 0 });
+    try { expect(root.querySelector('#telegram-setup')?.getAttribute('aria-hidden')).toBe('false'); }
+    finally { controller.dispose(); root.remove(); }
+  });
   test('Dropbox permissions recovery opens the walkthrough at its permissions step', () => {
     happyWindow.location.hash = '#olympus-open=dropbox.permissions';
     const root = document.createElement('div');
@@ -1064,6 +1074,32 @@ describe('local messaging pairing', () => {
     expect(observed).toBe('12345');
     expect(controlCalls).toBe(0);
     controller.dispose();
+  });
+
+  test('a login code submitted during a status poll is sent once the poll finishes', async () => {
+    const root = messagingRoot();
+    let releaseStatus: () => void = () => {};
+    const operations: string[] = [];
+    let observed = '';
+    const controller = mountDashboardController({ root, canWrite: true, signal: new AbortController().signal, navigate() {}, refresh: async () => undefined, returnUrl: 'http://localhost/dashboard?keys', transport: {
+      control: async () => ({ status: 200, body: {} }),
+      messaging: async (operation, params) => {
+        operations.push(operation);
+        if (operation === 'status') { await new Promise<void>(resolve => { releaseStatus = resolve; }); return { status: 200, body: { state: 'idle' } }; }
+        observed = params.value!;
+        return { status: 200, body: { ok: true, state: 'paired' } };
+      },
+    } });
+    try {
+      await new Promise(resolve => setTimeout(resolve, 0));
+      expect(operations).toEqual(['status']);
+      root.querySelector('form')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+      expect(root.querySelector<HTMLInputElement>('input')!.value).toBe('');
+      releaseStatus();
+      await new Promise(resolve => setTimeout(resolve, 0));
+      expect(operations).toEqual(['status', 'respond']);
+      expect(observed).toBe('12345');
+    } finally { controller.dispose(); }
   });
 
   test('a native transport without the local pairing method receives no secret', async () => {

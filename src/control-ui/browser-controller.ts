@@ -1051,6 +1051,7 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
   }, { once: true });
   const messagingTimers = new Map<HTMLElement, ReturnType<typeof setTimeout>>();
   const messagingBusy = new WeakSet<HTMLElement>();
+  const messagingQueued = new Map<HTMLElement, () => void>();
   const messagingSeen = new Set<string>();
 
   function resumeMessaging(): void {
@@ -1059,7 +1060,12 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
   }
 
   async function messagingRequest(card: HTMLElement, operation: 'start' | 'status' | 'respond' | 'cancel' | 'scope' | 'chats', extra: { field?: string; value?: string; wholeAccount?: boolean; chatScopes?: string[] } = {}): Promise<void> {
-    if (!canWrite || disposed || !options.transport.messaging || messagingBusy.has(card)) return;
+    if (!canWrite || disposed || !options.transport.messaging) return;
+    if (messagingBusy.has(card)) {
+      // A status poll is in flight: run the user's action right after it instead of dropping it.
+      if (operation !== 'status') messagingQueued.set(card, () => { void messagingRequest(card, operation, extra); });
+      return;
+    }
     const source = card.dataset.messagingSource;
     if (source !== 'telegram' && source !== 'whatsapp') return;
     const timer = messagingTimers.get(card);
@@ -1166,7 +1172,12 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
       }
     } catch {
       if (status) status.textContent = 'Could not reach pairing on this computer. Try again.';
-    } finally { messagingBusy.delete(card); }
+    } finally {
+      messagingBusy.delete(card);
+      const queued = messagingQueued.get(card);
+      messagingQueued.delete(card);
+      if (queued && !disposed) queued();
+    }
   }
 
   function submitMessaging(form: HTMLFormElement): void {

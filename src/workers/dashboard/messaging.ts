@@ -20,8 +20,9 @@ function telegramSetupSheet(): string {
 /** Local controls only: the QR and credentials never enter the remote panel. */
 export function renderMessagingCard(source: 'telegram' | 'whatsapp', localSession: boolean): string {
   const label = source === 'telegram' ? 'Telegram' : 'WhatsApp';
+  const sourceId = source === 'telegram' ? 'telegram.messages' : 'whatsapp.personal.messages';
   const form = (kind: string, text: string) => `<form method="dialog" data-messaging-kind="${kind}"><button class="btn${kind === 'start' ? ' primary' : ''}" type="submit">${text}</button></form>`;
-  return `<section id="agent-${source}-personal" class="messaging-card" aria-hidden="false" data-source="${source === 'telegram' ? 'telegram.messages' : 'whatsapp.personal.messages'}" data-messaging-source="${source}"><h3>${escapeHtml(label)}</h3>`
+  return `<section id="agent-${source}-personal" class="messaging-card" aria-hidden="false" data-source="${sourceId}" data-source-id="${sourceId}" data-messaging-source="${source}"><h3>${escapeHtml(label)}</h3>`
     + (source === 'whatsapp' ? '<p>The chat list includes saved contacts and groups and may omit unsaved chats. Choose all chats to include those.</p>' : '')
     + '<p>Pairing alone does not start capture. After pairing, choose which chats Olympus reads. Each message is classified on its own; choosing a chat does not set its privacy tier.</p>'
     + (!localSession ? '<p>Open dashboard controls on this computer to pair and choose chats.</p><form method="dialog" data-messaging-open-controls><button class="btn" type="submit">Open controls on this computer</button><span data-action-message role="status"></span></form></section>'
