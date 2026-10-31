@@ -1,3 +1,4 @@
+import { createPendingPrivacyPolicy } from '../src/core/first-run-privacy.ts';
 import { ModelSetupService } from '../src/core/model-setup.ts';
 import { loadSovereigntyPreset } from '../src/core/sovereignty.ts';
 // Local design-iteration harness for the dashboard (unified dashboard phase
@@ -15,6 +16,8 @@ import { loadSovereigntyPreset } from '../src/core/sovereignty.ts';
 //   /dashboard?state=<name>  that preview state, in one load
 //   /dashboard?keys | ?agents | ?private-answers | ?connector
 //                the computer's own pages, as the worker renders them.
+//   &sheet=first-run|first-run-local|first-run-no-sensitive&step=1..3 with state=first-run
+//   &sheet=dropbox|venice&step=1..5 opens a setup fixture without starting OAuth.
 //   &waiting=0..9  how many private inbox questions appear (default 3; remembered):
 //                the Private answers list and the panel's Needs you line.
 //   &agents=off|not-connected|relay-unavailable|awaiting-terms|worker-env
@@ -264,7 +267,7 @@ const engine = createSovereigntyEngine(buildEnvBridgeSovereigntyConfig({
  */
 function connectPreview(
   provider: 'google' | 'dropbox' | 'x',
-  options: { refused?: boolean; loopback?: boolean; publisher?: boolean } = {},
+  options: { refused?: boolean; connecting?: boolean; loopback?: boolean; publisher?: boolean } = {},
 ) {
   const source = provider === 'google' ? 'gmail' : provider;
   return buildSourceDashboardViewModel({
@@ -288,13 +291,13 @@ function connectPreview(
     // publisher's Dropbox app key (and later Google web client id) ship.
     ...(options.publisher ? { publisherOAuthSources: ['gmail', 'google-drive', 'dropbox'] as const } : {}),
     oauthRedirectBaseUrl: options.loopback ? 'http://127.0.0.1:8010' : PREVIEW_REDIRECT_BASE_URL,
-    ...(options.refused
+    ...(options.refused || options.connecting
       ? {
         pendingConnects: [{
           source: source as 'gmail' | 'dropbox' | 'x',
           started_at: at(300),
           expires_at: new Date(NOW.getTime() + 5 * 60_000).toISOString(),
-          error: { code: 'redirect_uri_mismatch', at: at(280) },
+          ...(options.refused ? { error: { code: 'redirect_uri_mismatch', at: at(280) } } : {}),
         }],
       }
       : {}),
@@ -374,6 +377,11 @@ export function buildDashboardPreviewOptions(state: string): Pick<ChatGptDashboa
 }
 
 export function buildDashboardPreviewView(state: string): SourceDashboardViewModel {
+  if (state === 'first-run') {
+    const view = buildDashboardPreviewView('fresh');
+    view.model_setup = new ModelSetupService({ config: createPendingPrivacyPolicy(), credentialState: () => 'missing', autoCheck: false }).getStatus();
+    return view;
+  }
   if (state === 'privacy-edit' || state === 'privacy-conflict') return buildDashboardPreviewView('full');
   if (state === 'review' || state === 'review-unconfigured' || state === 'review-indexing') return reviewPreview(state);
   if (state === 'models') {
@@ -506,6 +514,8 @@ export function buildDashboardPreviewView(state: string): SourceDashboardViewMod
   if (state === 'dropbox-update') return dropboxPreview('update');
   if (state === 'connect-google') return connectPreview('google');
   if (state === 'connect-google-loopback') return connectPreview('google', { loopback: true });
+  if (state === 'connect-venice') return buildDashboardPreviewView('models');
+  if (state === 'connect-dropbox-connecting') return connectPreview('dropbox', { connecting: true });
   if (state === 'connect-dropbox') return connectPreview('dropbox');
   if (state === 'connect-x') return connectPreview('x');
   if (state === 'connect-dropbox-refused') return connectPreview('dropbox', { refused: true });
@@ -1679,9 +1689,9 @@ export function previewAgentsView(mode: string | null): DashboardAgentsView {
 
 export const DASHBOARD_PREVIEW_STATES = [
   'review', 'review-unconfigured', 'review-indexing', 'privacy-edit', 'privacy-conflict',
-  'models', 'models-applying', 'first-install', 'gmail-scope-pending', 'tier-migration', 'partial', 'fresh', 'full', 'dropbox-initial', 'dropbox-update',
+  'first-run', 'models', 'models-applying', 'first-install', 'gmail-scope-pending', 'tier-migration', 'partial', 'fresh', 'full', 'dropbox-initial', 'dropbox-update',
   'connect-google', 'connect-google-loopback', 'connect-dropbox', 'connect-x',
-  'connect-dropbox-refused', 'connect-dropbox-publisher', 'connect-google-publisher',
+  'connect-venice', 'connect-dropbox-connecting', 'connect-dropbox-refused', 'connect-dropbox-publisher', 'connect-google-publisher',
   'local-files-off', 'local-files-connected', 'local-files-indexing', 'local-files-reading', 'local-files-needs-permission',
   'local-files-finding', 'local-files-finding-page', 'local-files-sync-checking', 'local-files-sync-checked',
   'local-files-picker', 'local-files-picker-waiting', 'local-files-picker-denied', 'local-files-picker-helper',
@@ -1810,6 +1820,18 @@ function pickerAutoScript(spec: string): string {
 }
 
 /** The dashboard tool's result for a preview state, with the computer's Index faster state (and waiting questions, unlocked). */
+export function setupPreviewScript(name: string | null, step: string | null): string {
+  if (name === 'first-run' || name === 'first-run-local' || name === 'first-run-no-sensitive') {
+    const choice = name === 'first-run-local' ? 'local-only' : name === 'first-run-no-sensitive' ? 'no-sensitive' : 'local-first';
+    const index = Math.max(1, Math.min(3, Number(step) || 1));
+    return `<script>window.addEventListener('DOMContentLoaded',async function(){var sheet=document.querySelector('[data-first-run-sheet]');if(!sheet)return;if(${index}>1){sheet.querySelector('input[value="${choice}"]').checked=true;sheet.querySelector('[data-setup-submit]').click();for(var i=0;i<100&& !sheet.querySelector('[data-setup-panel]').hidden;i++)await new Promise(r=>setTimeout(r,20));if(${index}>2&&${JSON.stringify(choice)}!=='no-sensitive')sheet.querySelector('[data-setup-next]').click();}sheet.scrollIntoView({block:'start'});});</script>`;
+  }
+  if (name !== 'dropbox'  && name !== 'venice') return '';
+  const index = Math.max(0, Math.min(name === 'dropbox' ? 4 : 2, Number(step ?? 1) - 1 || 0));
+  const selector = name === 'dropbox' ? '#connect-dropbox-files' : '[data-setup-steps]:has([name="source"][value="venice"])';
+  return `<script>window.addEventListener('DOMContentLoaded',function(){var sheet=document.querySelector(${JSON.stringify(selector)});if(!sheet)return;sheet.classList.add('on');sheet.setAttribute('aria-hidden','false');var steps=sheet.matches('[data-setup-steps]')?sheet:sheet.querySelector('[data-setup-steps]');if(steps){var details=steps.closest('details');if(details)details.open=true;for(var i=0;i<${index};i++){steps.querySelector('[data-setup-next]').click();}}sheet.scrollIntoView({block:'center'});});</script>`;
+}
+
 export function previewDashboardToolResult(state: string, indexFasterOn: boolean, waitingPrivateQuestions = 0) {
   if (state === 'delete-data' && previewDataDeleted) state = 'delete-data-done';
   const result = dashboardToolResult(buildChatGptDashboardViewModel(view(state), { now: NOW, ...buildDashboardPreviewOptions(state) }));
@@ -2000,6 +2022,11 @@ if (import.meta.main) {
     if (request.method === 'POST' && url.pathname === '/dashboard/agents/revoke') {
       return Response.json({ ok: true, status_message: 'Preview only: nothing was revoked.' });
     }
+    // First-run controls are synthetic preview state, never persisted to a policy.
+    if (state === 'first-run' && request.method === 'POST' && ['/dashboard/models/first-run-privacy', '/dashboard/models/check'].includes(url.pathname)) {
+      if (!previewUnlocked) return Response.json({ ok: false }, { status: 403 });
+      return Response.json({ ok: true }, { headers: { 'set-cookie': 'olympus_preview_first_run=saved; Path=/; SameSite=Strict' } });
+    }
     // Every other control POST needs a worker. Say so in the words the page
     // prints, instead of a bare "Request failed.".
     if (request.method === 'POST' && url.pathname.startsWith('/dashboard/')) {
@@ -2039,9 +2066,14 @@ if (import.meta.main) {
           ...(unlocked ? { csrfToken: 'preview-csrf-token' } : {}),
         }), COMPUTER_HOST_PAGE_CSP), cookies);
       }
+      const pageView = view(pageState);
+      if (pageState === 'first-run' && request.headers.get('sec-fetch-dest') !== 'document' && /olympus_preview_first_run=saved/.test(request.headers.get('cookie') ?? '')) {
+        pageView.model_setup = { ready: true, checked_at: '', cards: [] };
+      }
+      if (pageState === 'first-run' && request.headers.get('sec-fetch-dest') === 'document') cookies.push('olympus_preview_first_run=; Path=/; Max-Age=0');
       return withCookies(html(renderDashboardLocalPage(page, {
         url,
-        view: view(pageState),
+        view: pageView,
         options: {
           now: NOW,
           ...(unlocked ? { controlSessionCsrfToken: 'preview-csrf-token' } : {}),
@@ -2051,7 +2083,7 @@ if (import.meta.main) {
           outsideHelp: previewOutsideHelp(url.searchParams.get('anonymous') === 'on'),
           privateAnswers: { available: true, destinations: { computer: 'ready', venice: url.searchParams.get('venice') === 'ready' ? 'ready' : url.searchParams.get('venice') === 'unset' ? 'not_set_up' : 'not_allowed' }, ...(unlocked ? { waiting: previewWaitingQuestions(waitingCount) } : {}) },
         },
-      }), undefined, url.searchParams.get('theme')), cookies);
+      }) + setupPreviewScript(url.searchParams.get('sheet'), url.searchParams.get('step')), undefined, url.searchParams.get('theme')), cookies);
     }
     const named = url.pathname.replace(/^\//, '');
     if ((DASHBOARD_PREVIEW_STATES as readonly string[]).includes(named)) {

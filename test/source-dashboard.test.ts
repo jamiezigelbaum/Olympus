@@ -2235,6 +2235,9 @@ describe('multi-source source dashboard', () => {
     let tokenExchangeBody = '';
     const syncRequests: unknown[] = [];
     const oauthFetch: OAuthFetch = async (url, init) => {
+      if (String(url).endsWith('/2/files/list_folder')) {
+        return Response.json({ entries: [], has_more: false, cursor: 'fixture' });
+      }
       // Connect also asks Dropbox which account the grant belongs to.
       if (String(url).endsWith('/2/users/get_current_account')) {
         return new Response(JSON.stringify({ account_id: 'dbid:dashboard-fixture' }), { status: 200 });
@@ -2386,6 +2389,54 @@ describe('multi-source source dashboard', () => {
     expect(text).not.toContain('dropbox-token-shaped-value-1234567890');
     expect(text).not.toContain('"error"');
   });
+
+  test('Dropbox own-app invalid scope links directly to permissions without storing a grant', async () => {
+    const registryPath = join(mkdtempSync(join(tmpdir(), 'olympus-dropbox-scope-')), 'handles.json');
+    const secretStore = memorySecretStore({});
+    const worker = createEmailSourceWorker({ sourceDashboard: { sovereigntyEngine: fixtureSovereigntyEngine(), registryPath, secretStore } });
+    const fetch = withWorkerBearerAuth(worker.fetch, { authToken: 'dashboard-secret' });
+    const start = await fetch(new Request('http://worker.test/dashboard/connect/oauth/start', {
+      method: 'POST', headers: { Authorization: 'Bearer dashboard-secret', 'Content-Type': 'application/json' },
+      body: JSON.stringify({ source: 'dropbox', client_id: 'own-app-fixture' }),
+    }));
+    const payload = await start.json();
+    const state = new URL(payload.authorization_url).searchParams.get('state');
+    const callback = await fetch(new Request(`http://worker.test/oauth/callback/dropbox?error=invalid_scope&state=${state}`));
+    expect(callback.status).toBe(400);
+    expect(await callback.text()).toContain('href="/dashboard#olympus-open=dropbox.permissions"');
+    expect(await secretStore.get('dropbox.personal.oauth.refresh_token')).toBeUndefined();
+  });
+
+  for (const own of [true, false]) {
+    test(`Dropbox ${own ? 'own' : 'publisher'} app missing scope ${own ? 'offers' : 'does not offer'} permissions repair`, async () => {
+      const registryPath = join(mkdtempSync(join(tmpdir(), 'olympus-dropbox-scope-')), 'handles.json');
+      const secretStore = memorySecretStore({});
+      const oauthFetch: OAuthFetch = async (url) => String(url).endsWith('/2/files/list_folder')
+        ? Response.json({ error: { '.tag': 'missing_scope' } }, { status: 401 })
+        : Response.json({ access_token: 'access-fixture', refresh_token: 'refresh-fixture', expires_in: 3600 });
+      const worker = createEmailSourceWorker({ sourceDashboard: { sovereigntyEngine: fixtureSovereigntyEngine(), registryPath, secretStore, oauthFetch } });
+      const fetch = withWorkerBearerAuth(worker.fetch, { authToken: 'dashboard-secret' });
+      const start = await fetch(new Request('http://worker.test/dashboard/connect/oauth/start', {
+        method: 'POST', headers: { Authorization: 'Bearer dashboard-secret', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ source: 'dropbox', ...(own ? { client_id: 'own-app-fixture' } : {}) }),
+      }));
+      expect(start.status).toBe(200);
+      const payload = await start.json();
+      const state = new URL(payload.authorization_url).searchParams.get('state');
+      const callback = await fetch(new Request(`http://worker.test/oauth/callback/dropbox?code=fixture&state=${state}`));
+      const text = await callback.text();
+      expect(callback.status).toBe(400);
+      expect(text.includes('href="/dashboard#olympus-open=dropbox.permissions"')).toBe(own);
+      expect(await secretStore.get('dropbox.personal.oauth.refresh_token')).toBeUndefined();
+      const retry = await fetch(new Request('http://worker.test/dashboard/connect/oauth/start', {
+        method: 'POST', headers: { Authorization: 'Bearer dashboard-secret', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ source: 'dropbox', ...(own ? { client_id: 'own-app-fixture' } : {}) }),
+      }));
+      const retryState = new URL((await retry.json()).authorization_url).searchParams.get('state');
+      const refused = await fetch(new Request(`http://worker.test/oauth/callback/dropbox?error=invalid_scope&state=${retryState}`));
+      expect((await refused.text()).includes('href="/dashboard#olympus-open=dropbox.permissions"')).toBe(own);
+    });
+  }
 
   // The live 2026-08-19 incident: behind `tailscale serve` the TLS terminates
   // at the proxy, the worker sees plain HTTP, and the callback came out as
