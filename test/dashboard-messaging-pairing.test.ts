@@ -65,3 +65,19 @@ test('cancellation after registration begins waits for the grant to publish', as
   expect(saved).toBe(true);
   expect(manager.status('telegram').state).toBe('paired');
 }, 30_000);
+
+test('cancelling the post-pair choice releases the waiting task without publishing', async () => {
+  let published = false;
+  const manager = createDashboardMessagingPairing({
+    pair: async (_source, hooks) => { await hooks.choose([{ chatScope: 'telegram.personal:chat:1', title: 'One', kind: 'dm' }]); return { chats: [] }; },
+    publish: async () => { published = true; },
+  });
+  manager.start('telegram');
+  await Promise.resolve();
+  expect(manager.status('telegram').state).toBe('scope_selection_required');
+  await manager.cancelAndWait('telegram');
+  expect(manager.status('telegram').state).toBe('cancelled');
+  expect(manager.busy('telegram')).toBe(false);
+  expect(published).toBe(false);
+  expect(() => manager.select('telegram', { wholeAccount: true, chatScopes: [] })).toThrow();
+});

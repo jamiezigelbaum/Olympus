@@ -10,6 +10,7 @@ test('pairing runner sends replies only on the private input pipe', async () => 
     prompt: (field, reply) => { expect(field).toBe('code'); reply('temporary-code'); },
     qr: () => {},
     commit: () => {},
+    choose: async () => { throw new Error('Runner does not choose scope'); },
   });
   expect(result.exitCode).toBe(0);
   expect(events).toEqual(['{"event": "ready"}']);

@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { Window } from 'happy-dom';
 import type { OlympusDashboardControlResult } from '../src/control-ui-contract.ts';
 import { DASHBOARD_REDRAW_EVENT, mountDashboardController, type OlympusDashboardPageRead } from '../src/control-ui/browser-controller.ts';
+import { renderMessagingCard } from '../src/workers/dashboard/messaging.ts';
 import { connectSetupSheet } from '../src/workers/dashboard/components.ts';
 
 const GLOBALS = [
@@ -949,12 +950,14 @@ describe('local messaging pairing', () => {
     const controller = mountDashboardController({ root, canWrite: true, signal: new AbortController().signal, navigate() {}, refresh: async () => undefined, returnUrl: 'http://localhost/dashboard?keys', transport: {
       control: async () => { controlCalls++; return { status: 200, body: {} }; },
       messaging: async (operation, params) => {
+        if (operation === 'status') return { status: 200, body: { state: 'idle' } };
         expect(operation).toBe('respond');
         expect(root.querySelector<HTMLInputElement>('input')!.value).toBe('');
         observed = params.value!;
         return { status: 200, body: { ok: true, state: 'paired' } };
       },
     } });
+    await new Promise(resolve => setTimeout(resolve, 0));
     root.querySelector('form')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
     await new Promise(resolve => setTimeout(resolve, 0));
     expect(observed).toBe('12345');
@@ -966,6 +969,7 @@ describe('local messaging pairing', () => {
     const root = messagingRoot();
     let controlCalls = 0;
     const controller = mountDashboardController({ root, canWrite: true, signal: new AbortController().signal, navigate() {}, refresh: async () => undefined, returnUrl: 'http://localhost/dashboard?keys', transport: { control: async () => { controlCalls++; return { status: 200, body: {} }; } } });
+    await new Promise(resolve => setTimeout(resolve, 0));
     root.querySelector('form')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
     await new Promise(resolve => setTimeout(resolve, 0));
     expect(controlCalls).toBe(0);
@@ -986,6 +990,7 @@ describe('local messaging pairing', () => {
       control: async () => { controlCalls++; return { status: 200, body: {} }; },
       openLocalControls: async () => { opened++; return true; },
     } });
+    await new Promise(resolve => setTimeout(resolve, 0));
     form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
     await new Promise(resolve => setTimeout(resolve, 0));
     expect(opened).toBe(1);
@@ -1003,6 +1008,7 @@ describe('local messaging pairing', () => {
       control: noControl,
       messaging: async () => ({ status: 200, body: { ok: true, state: 'paired', chats: [{ chatScope: 'telegram.personal:chat:1', title: 'Preview' }] } }),
     } });
+    await new Promise(resolve => setTimeout(resolve, 0));
     form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
     await new Promise(resolve => setTimeout(resolve, 0));
     expect(root.querySelector('[data-messaging-chats]')!.textContent).toBe('saved selection');
@@ -1017,8 +1023,9 @@ describe('local messaging pairing', () => {
     let selection: unknown;
     const controller = mountDashboardController({ root, canWrite: true, signal: new AbortController().signal, navigate() {}, refresh: async () => undefined, returnUrl: 'http://localhost/dashboard?keys', transport: {
       control: noControl,
-      messaging: async (operation, params) => { expect(operation).toBe('scope'); selection = structuredClone(params); return { status: 200, body: { ok: true } }; },
+      messaging: async (operation, params) => { if (operation === 'status') return { status: 200, body: { state: 'idle' } }; expect(operation).toBe('scope'); selection = structuredClone(params); return { status: 200, body: { ok: true } }; },
     } });
+    await new Promise(resolve => setTimeout(resolve, 0));
     form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
     await new Promise(resolve => setTimeout(resolve, 0));
     expect(selection).toEqual({ source: 'telegram', wholeAccount: true, chatScopes: [] });
@@ -1034,12 +1041,69 @@ describe('local messaging pairing', () => {
       control: noControl,
       messaging: async () => { calls++; return { status: 200, body: { ok: true, state: 'pairing', qr: 'data:image/png;base64,YQ==' } }; },
     } });
+    await new Promise(resolve => setTimeout(resolve, 0));
     form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
     await new Promise(resolve => setTimeout(resolve, 0));
     expect(root.querySelector('img')!.hasAttribute('src')).toBe(true);
     controller.dispose();
     expect(root.querySelector('img')!.hasAttribute('src')).toBe(false);
     await new Promise(resolve => setTimeout(resolve, 1250));
-    expect(calls).toBe(1);
+    expect(calls).toBe(2);
   });
+});
+
+test('messaging cards remain visible when another source sheet opens', () => {
+  const root = document.createElement('div');
+  root.innerHTML = renderMessagingCard('telegram', true) + renderMessagingCard('whatsapp', true) + '<button data-sheet-toggle="#other">Connect</button><section id="other" class="sheet"></section>';
+  document.body.append(root);
+  const controller = mountDashboardController({ root, canWrite: true, signal: new AbortController().signal, transport: { control: noControl }, navigate() {}, refresh: async () => undefined, returnUrl: 'http://localhost/dashboard?keys' });
+  root.querySelector<HTMLButtonElement>('[data-sheet-toggle]')!.click();
+  for (const card of root.querySelectorAll('[data-messaging-source]')) {
+    expect(card.getAttribute('aria-hidden')).not.toBe('true');
+    expect(card.classList.contains('sheet')).toBe(false);
+  }
+  controller.dispose();
+});
+
+test.each(['telegram', 'whatsapp'])('mount restores %s pairing and continues polling without restarting it', async source => {
+  const root = document.createElement('div'); root.innerHTML = renderMessagingCard(source as 'telegram' | 'whatsapp', true); document.body.append(root);
+  const operations: string[] = [];
+  const controller = mountDashboardController({ root, canWrite: true, signal: new AbortController().signal, transport: { control: noControl,
+    messaging: async operation => { operations.push(operation); return { status: 200, body: source === 'telegram' ? { state: 'waiting', field: 'code' } : { state: 'waiting', qr: 'data:image/png;base64,YQ==' } }; },
+  }, navigate() {}, refresh: async () => undefined, returnUrl: 'http://localhost/dashboard?keys' });
+  try {
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(operations).toEqual(['status']);
+    if (source === 'telegram') expect(root.querySelector('[data-messaging-input] input')).not.toBeNull();
+    else expect(root.querySelector('img')!.getAttribute('src')).toBe('data:image/png;base64,YQ==');
+    await new Promise(resolve => setTimeout(resolve, 1250));
+    expect(operations).toEqual(['status', 'status']);
+  } finally { controller.dispose(); }
+});
+
+test.each([false, true])('post-pair choice sends only explicit consent (wholeAccount=%s)', async wholeAccount => {
+  const root = document.createElement('div'); root.innerHTML = renderMessagingCard('telegram', true); document.body.append(root);
+  const choices: unknown[] = [];
+  const controller = mountDashboardController({ root, canWrite: true, signal: new AbortController().signal, transport: { control: noControl,
+    messaging: async (operation, params) => {
+      if (operation === 'scope') { choices.push(structuredClone(params)); return { status: 200, body: { state: 'paired' } }; }
+      return { status: 200, body: { state: 'scope_selection_required', chats: [{ chatScope: 'telegram.personal:chat:101', title: 'One', kind: 'dm' }], wholeAccount: false, chatScopes: [] } };
+    },
+  }, navigate() {}, refresh: async () => undefined, returnUrl: 'http://localhost/dashboard?keys' });
+  try {
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(choices).toEqual([]);
+    expect(root.textContent).toContain('Nothing is being captured');
+    expect(root.textContent).toContain('Pick chats (recommended)');
+    expect(root.textContent).toContain('Everything in this account');
+    const slot = root.querySelector('[data-messaging-chats]')!;
+    const check = slot.querySelector<HTMLInputElement>('[name="chatScope"]')!;
+    expect(check.checked).toBe(false);
+    check.checked = true;
+    const form = wholeAccount ? slot.querySelector<HTMLInputElement>('[name="wholeAccount"]')!.closest('form')! : check.closest('form')!;
+    form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(choices).toEqual([{ source: 'telegram', wholeAccount, chatScopes: wholeAccount ? [] : ['telegram.personal:chat:101'] }]);
+    expect(slot.textContent).toBe('');
+  } finally { controller.dispose(); }
 });

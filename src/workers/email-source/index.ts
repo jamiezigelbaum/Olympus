@@ -484,6 +484,8 @@ export interface EmailSourceWorkerOptions {
    * `fileExtractionAliasFor`.
    */
   fileExtraction?: FileExtractionRunner;
+  /** Apply current lane policy before any extraction route reads jobs or items. */
+  authorizeFileExtractionLane?: (lane: ExtractionLaneKey) => void;
   /** The file lanes whose PDFs `/source/index/files/extract-pdfs` drains, resolved per call. */
   pdfExtractionLanes?: () => readonly ExtractionLaneKey[];
   /** False for a drain lane whose file source has no current scope approval. */
@@ -493,6 +495,8 @@ export interface EmailSourceWorkerOptions {
   sourceIndexEmbeddingProvider?: SourceEmbeddingProvider;
   dropboxIngestionPolicy?: SourceIngestionPolicy;
   connectorStores?: LocalConnectorStore[];
+  /** Discover stores that ingestion created after boot; never creates an absent store. */
+  refreshConnectorStores?: () => void;
   /**
    * Per-tier stores (P1b): the sibling corpora of a corpus in a tiered store
    * set. `source_index_search` searches every tier of the named source unless
@@ -878,7 +882,10 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
   // Looked up live: a tiered store set opens its Public store on first need,
   // after this worker was created, and the runtime appends it to this list.
   const connectorStoresByCorpusId = {
-    get: (corpusId: string): LocalConnectorStore | undefined => connectorStores.find((store) => store.corpusId === corpusId),
+    get: (corpusId: string): LocalConnectorStore | undefined => {
+      options.refreshConnectorStores?.();
+      return connectorStores.find((store) => store.corpusId === corpusId);
+    },
   };
   const connectorStoreEmbeddingProviders = options.connectorStoreEmbeddingProviders ?? new Map();
   const connectorStoreAccountScopes = options.connectorStoreAccountScopes ?? new Map();
@@ -1199,6 +1206,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
               'Private source worker does not support source-index status.',
             );
           }
+          options.refreshConnectorStores?.();
           const statusRequest = await parseSourceIndexStatusRequest(request, connectorStores);
           const result = withCredentialDegradations(
             await sourceIndexStatus.status(statusRequest),
@@ -3199,6 +3207,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           const runner = requireFileExtractionRunner(fileExtraction);
           const record = await parseObjectBody(request);
           const lane = parseFileExtractionLaneRecord(record, filesAliasLane, runner);
+          options.authorizeFileExtractionLane?.(lane);
           const result = await runner.run({
             ...lane,
             ...optionalNumberField(record.limit, 'limit', 'limit'),
@@ -3219,6 +3228,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           const runner = requireFileExtractionRunner(fileExtraction);
           const record = await parseObjectBody(request);
           const lane = parseFileExtractionLaneRecord(record, filesAliasLane, runner);
+          options.authorizeFileExtractionLane?.(lane);
           const result = await runner.plan({
             ...lane,
             limit: asOptionalNumber(record.limit, 'limit') ?? DEFAULT_FILE_EXTRACTION_PLAN_LIMIT,
@@ -3246,6 +3256,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           const runner = requireFileExtractionRunner(fileExtraction);
           const record = await parseObjectBody(request);
           const lane = parseFileExtractionLaneRecord(record, filesAliasLane, runner);
+          options.authorizeFileExtractionLane?.(lane);
           const result = await runner.plan({
             ...lane,
             limit: asOptionalNumber(record.limit, 'limit') ?? DEFAULT_FILE_EXTRACTION_PLAN_LIMIT,
@@ -3262,6 +3273,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           const runner = requireFileExtractionRunner(fileExtraction);
           const record = await parseObjectBody(request);
           const lane = parseFileExtractionLaneRecord(record, filesAliasLane, runner);
+          options.authorizeFileExtractionLane?.(lane);
           const extractorKindPrefix = asOptionalString(record.extractor_kind_prefix);
           if (!extractorKindPrefix) {
             throw new EmailSourceWorkerError(
@@ -3297,6 +3309,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           const runner = requireFileExtractionRunner(fileExtraction);
           const record = await parseObjectBody(request);
           const lane = parseFileExtractionLaneRecord(record, filesAliasLane, runner);
+          options.authorizeFileExtractionLane?.(lane);
           const mode = asOptionalString(record.mode) ?? 'terminal_reclassification';
           if (mode === 'terminal_reclassification' && record.last_error_kind === undefined) {
             const result = runner.reclassifyTerminal({
@@ -3396,6 +3409,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           const runner = requireFileExtractionRunner(fileExtraction);
           const record = await parseObjectBody(request);
           const lane = parseFileExtractionLaneRecord(record, filesAliasLane, runner);
+          options.authorizeFileExtractionLane?.(lane);
           const counts = runner.counts(lane);
           const body = {
             kind: 'file_extraction_status',

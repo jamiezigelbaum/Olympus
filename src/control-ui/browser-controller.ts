@@ -775,6 +775,7 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
     pollIntervalMs = result.poll_interval_ms;
     deferredSince = 0;
     applyWriteCapability();
+    resumeMessaging();
   }
 
   async function refreshNow(force: boolean, requested = false): Promise<void> {
@@ -839,6 +840,11 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
   const messagingTimers = new Map<HTMLElement, ReturnType<typeof setTimeout>>();
   const messagingBusy = new WeakSet<HTMLElement>();
 
+  function resumeMessaging(): void {
+    messagingTimers.forEach((timer, card) => { if (!card.isConnected) { clearTimeout(timer); messagingTimers.delete(card); } });
+    queryAll<HTMLElement>('[data-messaging-source]').forEach(card => { void messagingRequest(card, 'status'); });
+  }
+
   async function messagingRequest(card: HTMLElement, operation: 'start' | 'status' | 'respond' | 'cancel' | 'scope' | 'chats', extra: { field?: string; value?: string; wholeAccount?: boolean; chatScopes?: string[] } = {}): Promise<void> {
     if (!canWrite || disposed || !options.transport.messaging || messagingBusy.has(card)) return;
     const source = card.dataset.messagingSource;
@@ -868,7 +874,7 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
       const field = typeof body.field === 'string' ? body.field : '';
       const labels: Record<string, string> = { api_id: 'Telegram API ID', api_hash: 'Telegram API hash', phone: 'Phone number (with country code)', code: 'Telegram login code', password: 'Telegram two-step verification password' };
       const label = labels[field];
-      if (status) status.textContent = label ? `Enter ${label.toLowerCase()} to continue.` : state === 'failed' ? (body.registrationMayBeSaved === true ? 'Pairing could not finish. The connection may already be saved; check connection and capture status before retrying.' : 'Pairing failed. Start pairing again to retry.') : state === 'committing' ? 'Saving the connection and chat permission…' : state === 'paired' || state === 'complete' || state === 'completed' ? 'Paired. Capture is starting. Choose chats below; watch sync progress on the main dashboard.' : state === 'cancelled' ? 'Pairing cancelled.' : operation === 'scope' ? 'Chat choices saved. Capture will use this selection.' : operation === 'chats' ? 'Choose the chats Olympus may read.' : source === 'whatsapp' ? 'Open WhatsApp → Settings → Linked devices and scan the QR code.' : 'Pairing is running on this computer…';
+      if (status) status.textContent = label ? `Enter ${label.toLowerCase()} to continue.` : state === 'failed' ? (body.registrationMayBeSaved === true ? 'Pairing could not finish. The connection may already be saved; check connection and capture status before retrying.' : 'Pairing failed. Start pairing again to retry.') : state === 'idle' ? 'Pair this account to choose the chats Olympus may read.' : state === 'scope_selection_required' ? 'Paired. Nothing is being captured. Choose what Olympus may read.' : state === 'committing' ? 'Saving the connection and chat permission…' : state === 'paired' || state === 'complete' || state === 'completed' ? 'Paired. Capture is starting. Choose chats below; watch sync progress on the main dashboard.' : state === 'cancelled' ? 'Pairing cancelled.' : operation === 'scope' ? 'Chat choices saved. Capture will use this selection.' : operation === 'chats' ? 'Choose the chats Olympus may read.' : source === 'whatsapp' ? 'Open WhatsApp → Settings → Linked devices and scan the QR code.' : 'Pairing is running on this computer…';
       if (qr) {
         const value = typeof body.qr === 'string' ? body.qr : '';
         // Only the local helper's raster QR image is displayed; no external requests or SVG markup.
@@ -886,12 +892,18 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
           const button = document.createElement('button'); button.type = 'submit'; button.textContent = 'Continue'; button.className = 'btn'; form.append(button); inputSlot.append(form); input.focus();
         }
       }
+      const choosingScope = state === 'scope_selection_required';
+      const chatSlot = card.querySelector<HTMLElement>('[data-messaging-chats]');
+      if (!choosingScope && chatSlot?.dataset.pendingChoice === 'true') chatSlot.replaceChildren();
+      if (chatSlot) chatSlot.dataset.pendingChoice = String(choosingScope);
       if (Array.isArray(body.chats) && typeof body.wholeAccount === 'boolean' && Array.isArray(body.chatScopes)) {
         const slot = card.querySelector<HTMLElement>('[data-messaging-chats]');
         if (slot) {
           slot.replaceChildren();
           const form = document.createElement('form'); form.method = 'dialog'; form.dataset.messagingKind = 'scope';
-          const allLabel = document.createElement('label'); const all = document.createElement('input'); all.type = 'checkbox'; all.name = 'wholeAccount'; all.checked = body.wholeAccount === true; allLabel.append(all, ' Read all chats, including new chats'); form.append(allLabel);
+          if (!choosingScope) {
+            const allLabel = document.createElement('label'); const all = document.createElement('input'); all.type = 'checkbox'; all.name = 'wholeAccount'; all.checked = body.wholeAccount === true; allLabel.append(all, ' Read all chats, including new chats'); form.append(allLabel);
+          }
           const selected = Array.isArray(body.chatScopes) ? body.chatScopes : [];
           for (const entry of body.chats) {
             if (!entry || typeof entry !== 'object') continue;
@@ -899,10 +911,20 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
             if (typeof chat.chatScope !== 'string' || typeof chat.title !== 'string') continue;
             const line = document.createElement('label'); line.style.display = 'block'; const check = document.createElement('input'); check.type = 'checkbox'; check.name = 'chatScope'; check.value = chat.chatScope; check.checked = selected.includes(chat.chatScope); line.append(check, ' ' + chat.title); form.append(line);
           }
-          const button = document.createElement('button'); button.type = 'submit'; button.className = 'btn'; button.textContent = 'Save chat choices'; form.append(button); slot.append(form);
+          const button = document.createElement('button'); button.type = 'submit'; button.className = 'btn'; button.textContent = choosingScope ? 'Read selected chats' : 'Save chat choices'; form.append(button);
+          if (choosingScope) {
+            const pick = document.createElement('details');
+            const summary = document.createElement('summary'); summary.textContent = 'Pick chats (recommended)'; pick.append(summary, form); slot.append(pick);
+            if (!body.chats.length) { const empty = document.createElement('p'); empty.textContent = 'No chats are available to select yet. You can cancel and try pairing again later.'; form.prepend(empty); button.disabled = true; }
+            const allForm = document.createElement('form'); allForm.method = 'dialog'; allForm.dataset.messagingKind = 'scope';
+            const all = document.createElement('input'); all.type = 'checkbox'; all.name = 'wholeAccount'; all.checked = true; all.hidden = true;
+            const allButton = document.createElement('button'); allButton.type = 'submit'; allButton.className = 'btn'; allButton.textContent = 'Everything in this account';
+            const explanation = document.createElement('p'); explanation.textContent = 'Allow Olympus to read every chat, including new chats.';
+            allForm.append(all, allButton, explanation); slot.append(allForm);
+          } else slot.append(form);
         }
       }
-      if (operation !== 'chats' && operation !== 'scope' && (operation !== 'cancel' || state === 'committing') && !['paired', 'complete', 'completed', 'failed', 'cancelled', 'idle'].includes(state)) {
+      if (operation !== 'chats' && (operation !== 'cancel' || state === 'committing') && !['paired', 'complete', 'completed', 'failed', 'cancelled', 'idle', 'scope_selection_required'].includes(state)) {
         messagingTimers.set(card, setTimeout(() => { messagingTimers.delete(card); void messagingRequest(card, 'status'); }, 1200));
       }
     } catch {
@@ -1173,6 +1195,7 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
   applyWriteCapability();
   applyOpenTarget();
   restartPoll();
+  resumeMessaging();
 
   const dispose = (): void => {
     if (disposed) return;

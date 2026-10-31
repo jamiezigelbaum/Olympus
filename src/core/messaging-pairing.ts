@@ -115,6 +115,7 @@ export interface PairMessagingSourceOptions extends TelegramPythonSeams {
   requestCaptureScope?: (input: {
     source: MessagingPairingSource;
     accountProof: string;
+    sessionPath: string;
     chats: readonly MessagingChatMetadata[];
   }) => Promise<MessagingCaptureScopeApproval | undefined>;
   onWhatsAppQr?: (pngPath: string) => void | Promise<void>;
@@ -278,6 +279,7 @@ export async function pairMessagingSource(options: PairMessagingSourceOptions): 
     const approval = options.captureScopeApproval ?? await options.requestCaptureScope?.({
       source: options.source,
       accountProof,
+      sessionPath,
       chats,
     });
     if (!approval) {

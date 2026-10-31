@@ -11328,7 +11328,15 @@ export class LocalConnectorStore {
       selected = rows.filter((row) => {
         if (enough(row)) return true;
         if (!weights) return false;
-        const matched = (matchedGroupIndexes.get(row.item_pk) ?? []).reduce((sum, index) => sum + weights.of[index]!, 0);
+        const indexes = matchedGroupIndexes.get(row.item_pk) ?? [];
+        // Two rare topic concepts can identify an item even when the question
+        // adds words it never used. Rarity is evidence in every source family.
+        // Keep the strict floor for common words, small corpora, and a lone
+        // rare word. This uses the same scoped FTS candidates and tier filter.
+        if (groups.length >= 3 && weights.population >= 10
+          && indexes.length >= 2 && indexes.length * 2 >= groups.length
+          && indexes.filter((index) => weights.counts[index]! <= Math.floor(weights.population / 10)).length >= 2) return true;
+        const matched = indexes.reduce((sum, index) => sum + weights.of[index]!, 0);
         return weights.total > 0 && matched / weights.total >= RARE_CONCEPT_WEIGHT_SHARE;
       });
     }
@@ -11408,15 +11416,16 @@ export class LocalConnectorStore {
    * weighs the most, so the question's missing words still count against a
    * partial match.
    */
-  private conceptWeights(groups: ReadonlyArray<readonly string[]>, exact: ReadonlyMap<string, unknown>): { of: number[]; total: number } {
+  private conceptWeights(groups: ReadonlyArray<readonly string[]>, exact: ReadonlyMap<string, unknown>): { of: number[]; total: number; counts: number[]; population: number } {
     const items = (this.db.query('SELECT COUNT(*) AS count FROM items WHERE tombstoned = 0').get() as { count: number }).count;
-    const of = groups.map((group) => {
+    const counts = groups.map((group) => {
       const { count } = this.db.query(
         'SELECT COUNT(DISTINCT item_pk) AS count FROM connector_store_fts WHERE connector_store_fts MATCH ?',
       ).get(sourceIndexFtsGroupQuery(group, exact)) as { count: number };
-      return Math.max(0, Math.log((items + 1) / (count + 0.5)));
+      return count;
     });
-    return { of, total: of.reduce((sum, weight) => sum + weight, 0) };
+    const of = counts.map((count) => Math.max(0, Math.log((items + 1) / (count + 0.5))));
+    return { of, total: of.reduce((sum, weight) => sum + weight, 0), counts, population: items };
   }
 
   /**

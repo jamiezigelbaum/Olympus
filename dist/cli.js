@@ -37722,7 +37722,10 @@ var init_local_index = __esm(() => {
             return true;
           if (!weights)
             return false;
-          const matched = (matchedGroupIndexes.get(row.item_pk) ?? []).reduce((sum, index) => sum + weights.of[index], 0);
+          const indexes = matchedGroupIndexes.get(row.item_pk) ?? [];
+          if (groups.length >= 3 && weights.population >= 10 && indexes.length >= 2 && indexes.length * 2 >= groups.length && indexes.filter((index) => weights.counts[index] <= Math.floor(weights.population / 10)).length >= 2)
+            return true;
+          const matched = indexes.reduce((sum, index) => sum + weights.of[index], 0);
           return weights.total > 0 && matched / weights.total >= RARE_CONCEPT_WEIGHT_SHARE;
         });
       }
@@ -37776,11 +37779,12 @@ var init_local_index = __esm(() => {
     }
     conceptWeights(groups, exact) {
       const items = this.db.query("SELECT COUNT(*) AS count FROM items WHERE tombstoned = 0").get().count;
-      const of = groups.map((group) => {
+      const counts = groups.map((group) => {
         const { count } = this.db.query("SELECT COUNT(DISTINCT item_pk) AS count FROM connector_store_fts WHERE connector_store_fts MATCH ?").get(sourceIndexFtsGroupQuery(group, exact));
-        return Math.max(0, Math.log((items + 1) / (count + 0.5)));
+        return count;
       });
-      return { of, total: of.reduce((sum, weight) => sum + weight, 0) };
+      const of = counts.map((count) => Math.max(0, Math.log((items + 1) / (count + 0.5))));
+      return { of, total: of.reduce((sum, weight) => sum + weight, 0), counts, population: items };
     }
     chunkMatchForChunkPk(chunkPk, lane, queryTerms) {
       const row = this.db.query("SELECT item_pk, chunk_index, content_hash, bounded_text FROM chunks WHERE chunk_pk = ?").get(chunkPk);
@@ -39129,6 +39133,7 @@ async function pairMessagingSource(options) {
     const approval = options.captureScopeApproval ?? await options.requestCaptureScope?.({
       source: options.source,
       accountProof,
+      sessionPath,
       chats
     });
     if (!approval) {
@@ -52991,7 +52996,7 @@ var init_vocabulary = __esm(() => {
     pasteToken: "Paste the worker bearer token.",
     readToken: "That is the read-only view token; use the worker bearer token from setup.",
     refused: "That token was not accepted.",
-    openBlocked: "Your browser did not open the page.",
+    openBlocked: "If the page didn't open,",
     openBlockedLink: "Open it"
   };
   ARCHIVE_PICK_INTRO = archivePickIntro();
@@ -77237,7 +77242,7 @@ function telegramProviderAccountId(userId) {
   return `telegram:${createHash55("sha256").update(userId).digest("hex").slice(0, 16)}`;
 }
 function telegramArchiveTarget(options) {
-  const connector = withInputs(options.connector, options.builder);
+  let connector;
   return {
     sourceId: TELEGRAM_SOURCE_ID,
     label: "Telegram",
@@ -77258,7 +77263,12 @@ function telegramArchiveTarget(options) {
       } catch {}
       return telegramExportInput(archive, { account: options.account, ...ownUserId ? { ownUserId } : {} });
     },
-    lane: () => ({ set: options.set, sync: options.sync, connector }),
+    lane: () => {
+      if ("lane" in options)
+        return options.lane();
+      connector ??= withInputs(options.connector, options.builder);
+      return { set: options.set, sync: options.sync, connector };
+    },
     ...options.liveSince ? { liveSince: () => options.liveSince() } : {}
   };
 }
@@ -90540,12 +90550,57 @@ var init_tiered_extraction = __esm(() => {
 
 // src/workers/email-source/file-extraction-runtime.ts
 import { existsSync as existsSync57 } from "node:fs";
+function createRefreshableFileExtractionRuntime(options) {
+  const first = options.build();
+  if (!first)
+    return;
+  const runtimes = [first];
+  let closed = false;
+  let generation = options.generation();
+  const current2 = () => {
+    if (closed)
+      return;
+    options.beforeCurrent?.();
+    const nextGeneration = options.generation();
+    if (generation !== nextGeneration) {
+      const next = options.build();
+      if (next)
+        runtimes.push(next);
+      generation = nextGeneration;
+    }
+    return runtimes.at(-1);
+  };
+  return {
+    ...first,
+    get corpusIds() {
+      return current2()?.corpusIds ?? [];
+    },
+    runner: new Proxy(first.runner, {
+      get(_target, key2) {
+        const runtime = current2();
+        if (!runtime)
+          throw new Error("File extraction runtime is closed.");
+        const runner = runtime.runner;
+        const value = Reflect.get(runner, key2);
+        return typeof value === "function" ? value.bind(runner) : value;
+      }
+    }),
+    locateItem: (ref) => current2()?.locateItem(ref),
+    close() {
+      if (closed)
+        return;
+      closed = true;
+      for (const runtime of runtimes)
+        runtime.close();
+    }
+  };
+}
 function createFileExtractionRuntime(options) {
   const env = options.env ?? process.env;
   if (options.enabled !== true && (env[FILE_EXTRACTION_ENABLED_ENV] ?? "").trim().toLowerCase() !== "true")
     return;
   const roster = options.corpora ?? parseFileExtractionCorporaEnv(env[FILE_EXTRACTION_CORPORA_ENV]);
-  if (roster.length === 0)
+  if (roster.length === 0 && options.allowEmpty !== true)
     return;
   const warn = options.warn ?? ((message2) => console.warn(message2));
   const storesByCorpusId = new Map(options.connectorStores.map((store) => [store.corpusId, store]));
@@ -90687,7 +90742,7 @@ function createFileExtractionRuntime(options) {
       ...guardsRefs ? { authorization: { assertCurrent: assertRefCurrent } } : {}
     });
   }
-  if (corpora.length === 0) {
+  if (corpora.length === 0 && options.allowEmpty !== true) {
     jobs.close();
     return;
   }
@@ -141351,6 +141406,7 @@ function createDashboardMessagingPairing(options) {
       ...item.field ? { field: item.field } : {},
       ...item.qr ? { qr: item.qr } : {},
       ...item.chats ? { chats: item.chats } : {},
+      ...item.state === "scope_selection_required" ? { wholeAccount: false, chatScopes: [] } : {},
       ...item.registrationMayBeSaved ? { registrationMayBeSaved: true } : {}
     } : { ok: true, state: "idle" };
   };
@@ -141381,6 +141437,28 @@ function createDashboardMessagingPairing(options) {
                 item.qr = value2;
                 item.state = "waiting";
               }
+            },
+            choose(chats) {
+              if (item.controller.signal.aborted)
+                return Promise.reject(new Error("Pairing was cancelled."));
+              delete item.reply;
+              delete item.field;
+              delete item.qr;
+              item.chats = chats;
+              item.state = "scope_selection_required";
+              return new Promise((resolve24, reject) => {
+                const abort = () => {
+                  delete item.selection;
+                  reject(new Error("Pairing was cancelled."));
+                };
+                item.controller.signal.addEventListener("abort", abort, { once: true });
+                item.selection = (selection) => {
+                  item.controller.signal.removeEventListener("abort", abort);
+                  delete item.selection;
+                  item.state = "starting";
+                  resolve24(selection);
+                };
+              });
             },
             commit() {
               if (item.controller.signal.aborted)
@@ -141414,6 +141492,17 @@ function createDashboardMessagingPairing(options) {
       });
       return status(source);
     },
+    select(source, selection) {
+      const item = states.get(source);
+      if (!item || item.state !== "scope_selection_required" || !item.selection)
+        throw new Error("No pending chat choice.");
+      if (selection.wholeAccount ? selection.chatScopes.length > 0 : selection.chatScopes.length === 0)
+        throw new Error("Choose all chats or at least one chat.");
+      if (selection.chatScopes.some((scope) => !item.chats?.some((chat) => chat.chatScope === scope)))
+        throw new Error("Chat list changed.");
+      item.selection(selection);
+      return status(source);
+    },
     respond(source, field, value2) {
       const item = states.get(source);
       if (!item || item.state !== "waiting" || item.field !== field || !item.reply || !value2 || value2.length > 4096 || /[\r\n\0]/.test(value2)) {
@@ -141428,7 +141517,7 @@ function createDashboardMessagingPairing(options) {
     },
     cancel(source) {
       const item = states.get(source);
-      if (item && (item.state === "starting" || item.state === "waiting")) {
+      if (item && (item.state === "starting" || item.state === "waiting" || item.state === "scope_selection_required")) {
         item.controller.abort();
         delete item.reply;
         delete item.field;
@@ -141557,6 +141646,21 @@ function sourceOf(value2) {
 function validScope(source, scope) {
   return source === "telegram" ? /^telegram\.personal:chat:[A-Za-z0-9_-]+$/.test(scope) : /^whatsapp\.personal:chat:[A-Za-z0-9._:-]{1,192}@[A-Za-z0-9.-]{1,63}$/.test(scope);
 }
+function parseChats(source, listing) {
+  if (!listing || typeof listing !== "object" || !Array.isArray(listing.dialogs))
+    throw new Error("Invalid chat listing.");
+  const chats = [];
+  for (const raw of listing.dialogs) {
+    if (!raw || typeof raw !== "object")
+      continue;
+    const row = raw;
+    if (typeof row.chat_scope !== "string" || typeof row.title !== "string" || typeof row.kind !== "string")
+      continue;
+    if (validScope(source, row.chat_scope))
+      chats.push({ chatScope: row.chat_scope, title: row.title, kind: row.kind });
+  }
+  return chats;
+}
 function retainApprovedCaptureScope(source, env) {
   const key2 = source === "telegram" ? "OLYMPUS_TELEGRAM_ALLOWED_CHAT_SCOPES" : "OLYMPUS_WHATSAPP_ALLOWED_CHAT_JIDS";
   const alternate = source === "telegram" ? env.OLYMPUS_SOURCE_INDEX_TELEGRAM_APPROVED_CHAT_SCOPES : undefined;
@@ -141649,7 +141753,30 @@ function createDashboardMessagingService(options) {
         signal: hooks.signal,
         onCommitStart: hooks.commit,
         whatsappQrMode: "artifact",
-        captureScopeApproval: { source, explicitApproval: true, wholeAccount: true },
+        requestCaptureScope: async ({ chats, sessionPath }) => {
+          const prior = readCaptureGrantFile(defaultMessagingCaptureGrantPath(source, options.registryPath));
+          if (grantSnapshot(source) !== initialGrants.get(source))
+            throw new Error("Capture grant changed during pairing.");
+          let selection;
+          if (prior.kind === "valid") {
+            const env = retainApprovedCaptureScope(source, prior.grant.producer.env);
+            const raw = env[source === "telegram" ? "OLYMPUS_TELEGRAM_ALLOWED_CHAT_SCOPES" : "OLYMPUS_WHATSAPP_ALLOWED_CHAT_JIDS"];
+            selection = { wholeAccount: raw === "*", chatScopes: raw === "*" ? [] : raw.split(",").map((value2) => source === "whatsapp" ? `whatsapp.personal:chat:${value2}` : value2) };
+          } else {
+            let choices = chats;
+            if (source === "whatsapp") {
+              const listing = await (options.listCommand ?? listHelper)(whatsappBridgePathForPackage(packageRoot, { env: process.env }), ["--list-chats"], {
+                ...process.env,
+                OLYMPUS_WHATSAPP_STATE_DIR: sessionPath
+              });
+              choices = parseChats(source, listing);
+            }
+            selection = await hooks.choose(choices);
+          }
+          if (grantSnapshot(source) !== initialGrants.get(source))
+            throw new Error("Capture grant changed during pairing.");
+          return source === "telegram" ? { source, explicitApproval: true, wholeAccount: selection.wholeAccount, chatScopes: selection.chatScopes } : { source, explicitApproval: true, wholeAccount: selection.wholeAccount, chatJids: selection.chatScopes.map((scope) => scope.slice("whatsapp.personal:chat:".length)) };
+        },
         runCommand: (request) => runDashboardPairingCommand(request, hooks),
         onWhatsAppQr: (path) => hooks.qr(readQr(path))
       });
@@ -141695,18 +141822,7 @@ function createDashboardMessagingService(options) {
         OLYMPUS_WHATSAPP_STATE_DIR: current2.grant.sessionPath ?? whatsappStateDir({ env: process.env })
       });
     });
-    if (!listing || typeof listing !== "object" || !Array.isArray(listing.dialogs))
-      throw new Error("Invalid chat listing.");
-    const chats = [];
-    for (const raw of listing.dialogs) {
-      if (!raw || typeof raw !== "object")
-        continue;
-      const row = raw;
-      if (typeof row.chat_scope !== "string" || typeof row.title !== "string" || typeof row.kind !== "string")
-        continue;
-      if (validScope(source, row.chat_scope))
-        chats.push({ chatScope: row.chat_scope, title: row.title, kind: row.kind });
-    }
+    const chats = parseChats(source, listing);
     const key2 = source === "telegram" ? "OLYMPUS_TELEGRAM_ALLOWED_CHAT_SCOPES" : "OLYMPUS_WHATSAPP_ALLOWED_CHAT_JIDS";
     const rawScope = current2.grant.producer.env[key2] ?? "";
     const selected = rawScope === "*" ? [] : rawScope.split(",").filter(Boolean).map((v) => source === "whatsapp" ? `whatsapp.personal:chat:${v}` : v);
@@ -141741,6 +141857,11 @@ function createDashboardMessagingService(options) {
         const value2 = record5.value;
         delete record5.value;
         return manager.respond(source, record5.field, value2);
+      }
+      if (operation === "scope" && manager.status(source).state === "scope_selection_required") {
+        if (typeof record5.wholeAccount !== "boolean" || !Array.isArray(record5.chatScopes) || !record5.chatScopes.every((value2) => typeof value2 === "string"))
+          throw new Error("Invalid scope.");
+        return manager.select(source, { wholeAccount: record5.wholeAccount, chatScopes: [...new Set(record5.chatScopes)] });
       }
       if (manager.busy(source))
         throw new Error("Finish or cancel pairing first.");
@@ -144234,6 +144355,7 @@ function mountDashboardController(options) {
     pollIntervalMs = result.poll_interval_ms;
     deferredSince = 0;
     applyWriteCapability();
+    resumeMessaging();
   }
   async function refreshNow(force, requested = false) {
     if (disposed || inFlight || pendingFormCount > 0 || options.signal.aborted)
@@ -144301,6 +144423,17 @@ function mountDashboardController(options) {
   }, { once: true });
   const messagingTimers = new Map;
   const messagingBusy = new WeakSet;
+  function resumeMessaging() {
+    messagingTimers.forEach((timer, card) => {
+      if (!card.isConnected) {
+        clearTimeout(timer);
+        messagingTimers.delete(card);
+      }
+    });
+    queryAll("[data-messaging-source]").forEach((card) => {
+      messagingRequest(card, "status");
+    });
+  }
   async function messagingRequest(card, operation, extra = {}) {
     if (!canWrite || disposed || !options.transport.messaging || messagingBusy.has(card))
       return;
@@ -144345,7 +144478,7 @@ function mountDashboardController(options) {
       const labels = { api_id: "Telegram API ID", api_hash: "Telegram API hash", phone: "Phone number (with country code)", code: "Telegram login code", password: "Telegram two-step verification password" };
       const label = labels[field];
       if (status)
-        status.textContent = label ? `Enter ${label.toLowerCase()} to continue.` : state === "failed" ? body.registrationMayBeSaved === true ? "Pairing could not finish. The connection may already be saved; check connection and capture status before retrying." : "Pairing failed. Start pairing again to retry." : state === "committing" ? "Saving the connection and chat permission…" : state === "paired" || state === "complete" || state === "completed" ? "Paired. Capture is starting. Choose chats below; watch sync progress on the main dashboard." : state === "cancelled" ? "Pairing cancelled." : operation === "scope" ? "Chat choices saved. Capture will use this selection." : operation === "chats" ? "Choose the chats Olympus may read." : source === "whatsapp" ? "Open WhatsApp → Settings → Linked devices and scan the QR code." : "Pairing is running on this computer…";
+        status.textContent = label ? `Enter ${label.toLowerCase()} to continue.` : state === "failed" ? body.registrationMayBeSaved === true ? "Pairing could not finish. The connection may already be saved; check connection and capture status before retrying." : "Pairing failed. Start pairing again to retry." : state === "idle" ? "Pair this account to choose the chats Olympus may read." : state === "scope_selection_required" ? "Paired. Nothing is being captured. Choose what Olympus may read." : state === "committing" ? "Saving the connection and chat permission…" : state === "paired" || state === "complete" || state === "completed" ? "Paired. Capture is starting. Choose chats below; watch sync progress on the main dashboard." : state === "cancelled" ? "Pairing cancelled." : operation === "scope" ? "Chat choices saved. Capture will use this selection." : operation === "chats" ? "Choose the chats Olympus may read." : source === "whatsapp" ? "Open WhatsApp → Settings → Linked devices and scan the QR code." : "Pairing is running on this computer…";
       if (qr) {
         const value2 = typeof body.qr === "string" ? body.qr : "";
         if (/^data:image\/(?:png|jpeg|webp);base64,[A-Za-z0-9+/=]+$/.test(value2)) {
@@ -144384,6 +144517,12 @@ function mountDashboardController(options) {
           input.focus();
         }
       }
+      const choosingScope = state === "scope_selection_required";
+      const chatSlot = card.querySelector("[data-messaging-chats]");
+      if (!choosingScope && chatSlot?.dataset.pendingChoice === "true")
+        chatSlot.replaceChildren();
+      if (chatSlot)
+        chatSlot.dataset.pendingChoice = String(choosingScope);
       if (Array.isArray(body.chats) && typeof body.wholeAccount === "boolean" && Array.isArray(body.chatScopes)) {
         const slot = card.querySelector("[data-messaging-chats]");
         if (slot) {
@@ -144391,13 +144530,15 @@ function mountDashboardController(options) {
           const form = document.createElement("form");
           form.method = "dialog";
           form.dataset.messagingKind = "scope";
-          const allLabel = document.createElement("label");
-          const all = document.createElement("input");
-          all.type = "checkbox";
-          all.name = "wholeAccount";
-          all.checked = body.wholeAccount === true;
-          allLabel.append(all, " Read all chats, including new chats");
-          form.append(allLabel);
+          if (!choosingScope) {
+            const allLabel = document.createElement("label");
+            const all = document.createElement("input");
+            all.type = "checkbox";
+            all.name = "wholeAccount";
+            all.checked = body.wholeAccount === true;
+            allLabel.append(all, " Read all chats, including new chats");
+            form.append(allLabel);
+          }
           const selected = Array.isArray(body.chatScopes) ? body.chatScopes : [];
           for (const entry of body.chats) {
             if (!entry || typeof entry !== "object")
@@ -144418,12 +144559,41 @@ function mountDashboardController(options) {
           const button = document.createElement("button");
           button.type = "submit";
           button.className = "btn";
-          button.textContent = "Save chat choices";
+          button.textContent = choosingScope ? "Read selected chats" : "Save chat choices";
           form.append(button);
-          slot.append(form);
+          if (choosingScope) {
+            const pick2 = document.createElement("details");
+            const summary = document.createElement("summary");
+            summary.textContent = "Pick chats (recommended)";
+            pick2.append(summary, form);
+            slot.append(pick2);
+            if (!body.chats.length) {
+              const empty = document.createElement("p");
+              empty.textContent = "No chats are available to select yet. You can cancel and try pairing again later.";
+              form.prepend(empty);
+              button.disabled = true;
+            }
+            const allForm = document.createElement("form");
+            allForm.method = "dialog";
+            allForm.dataset.messagingKind = "scope";
+            const all = document.createElement("input");
+            all.type = "checkbox";
+            all.name = "wholeAccount";
+            all.checked = true;
+            all.hidden = true;
+            const allButton = document.createElement("button");
+            allButton.type = "submit";
+            allButton.className = "btn";
+            allButton.textContent = "Everything in this account";
+            const explanation = document.createElement("p");
+            explanation.textContent = "Allow Olympus to read every chat, including new chats.";
+            allForm.append(all, allButton, explanation);
+            slot.append(allForm);
+          } else
+            slot.append(form);
         }
       }
-      if (operation !== "chats" && operation !== "scope" && (operation !== "cancel" || state === "committing") && !["paired", "complete", "completed", "failed", "cancelled", "idle"].includes(state)) {
+      if (operation !== "chats" && (operation !== "cancel" || state === "committing") && !["paired", "complete", "completed", "failed", "cancelled", "idle", "scope_selection_required"].includes(state)) {
         messagingTimers.set(card, setTimeout(() => {
           messagingTimers.delete(card);
           messagingRequest(card, "status");
@@ -144694,6 +144864,7 @@ function mountDashboardController(options) {
   applyWriteCapability();
   applyOpenTarget();
   restartPoll();
+  resumeMessaging();
   const dispose = () => {
     if (disposed)
       return;
@@ -145057,6 +145228,9 @@ td { padding: 7px 10px 7px 0; border-bottom: 1px solid var(--line2); color: var(
    it, never further down the page. */
 .sheet { display: none; background: var(--panel2); border: 1px solid var(--line); border-radius: 10px; padding: 16px 18px; margin: -4px 0 12px; }
 .sheet.on { display: block; }
+.messaging-card { background: var(--panel2); border: 1px solid var(--line); border-radius: 10px; padding: 16px 18px; margin: 0 0 12px; }
+.messaging-card p { color: var(--t2); font-size: var(--fs-body); max-width: 72ch; }
+.messaging-card form, .messaging-card details { margin: 10px 0; }
 /* Where an open link landed (#olympus-open=…): an accent outline that fades. */
 .landed { outline: 3px solid var(--link); outline-offset: 4px; border-radius: 10px; animation: landed-fade 2.5s ease-out 1.5s forwards; }
 @keyframes landed-fade { to { outline-color: transparent; } }
@@ -152627,22 +152801,16 @@ function hostProgram(input, bridge) {
         window.location.assign(parsed.pathname + parsed.search + parsed.hash);
         return;
       }
-      let tab = null;
       try {
-        tab = window.open(url2, "_blank");
-      } catch {
-        tab = null;
-      }
-      if (tab) {
-        tab.opener = null;
-        return;
-      }
+        window.open(url2, "_blank", "noopener,noreferrer");
+      } catch {}
       const offer = document.querySelector("[data-open-offer]");
       const link = document.querySelector("[data-open-offer-link]");
       if (!offer || !link)
         return;
       link.href = url2;
       offer.hidden = false;
+      link.focus();
     }
   });
   const offerLink = document.querySelector("[data-open-offer-link]");
@@ -152884,7 +153052,7 @@ input{font:inherit;font-size:0.875rem;min-height:2.25rem;padding:0.375rem 0.75re
 function renderMessagingCard(source, localSession) {
   const label = source === "telegram" ? "Telegram" : "WhatsApp";
   const form = (kind, text4) => `<form method="dialog" data-messaging-kind="${kind}"><button class="btn" type="submit">${text4}</button></form>`;
-  return `<section id="agent-${source}-personal" class="sheet on" aria-hidden="false" data-source="${source === "telegram" ? "telegram.messages" : "whatsapp.personal.messages"}" data-messaging-source="${source}"><h3>${escapeHtml2(label)}</h3>` + (source === "whatsapp" ? "<p>The chat list includes saved contacts and groups and may omit unsaved chats. Choose all chats to include those.</p>" : "") + "<p>Choose which chats Olympus reads. Each message is classified on its own; choosing a chat does not set its privacy tier.</p>" + (!localSession ? '<p>Open dashboard controls on this computer to pair and choose chats.</p><form method="dialog" data-messaging-open-controls><button class="btn" type="submit">Open controls on this computer</button><span data-action-message role="status"></span></form></section>' : `${form("start", `Pair ${label}`)}${form("chats", "Choose chats")}<div data-messaging-view><p data-messaging-status role="status" aria-live="polite"></p><img data-messaging-qr hidden alt="Scan this QR code in WhatsApp to link Olympus" width="256" height="256"><div data-messaging-input></div><div data-messaging-chats></div></div>${form("cancel", "Cancel pairing")}</section>`);
+  return `<section id="agent-${source}-personal" class="messaging-card" aria-hidden="false" data-source="${source === "telegram" ? "telegram.messages" : "whatsapp.personal.messages"}" data-messaging-source="${source}"><h3>${escapeHtml2(label)}</h3>` + (source === "whatsapp" ? "<p>The chat list includes saved contacts and groups and may omit unsaved chats. Choose all chats to include those.</p>" : "") + "<p>Pairing alone does not start capture. After pairing, choose which chats Olympus reads. Each message is classified on its own; choosing a chat does not set its privacy tier.</p>" + (!localSession ? '<p>Open dashboard controls on this computer to pair and choose chats.</p><form method="dialog" data-messaging-open-controls><button class="btn" type="submit">Open controls on this computer</button><span data-action-message role="status"></span></form></section>' : `${form("start", `Pair ${label}`)}${form("chats", "Choose chats")}<div data-messaging-view><p data-messaging-status role="status" aria-live="polite"></p><img data-messaging-qr hidden alt="Scan this QR code in WhatsApp to link Olympus" width="256" height="256"><div data-messaging-input></div><div data-messaging-chats></div></div>${form("cancel", "Cancel pairing")}</section>`);
 }
 var init_messaging = __esm(() => {
   init_components();
@@ -160115,7 +160283,10 @@ function createEmailSourceWorker(options = {}) {
   const sourceIndexEmbeddingProvider = options.sourceIndexEmbeddingProvider;
   const connectorStores = options.connectorStores ?? [];
   const connectorStoresByCorpusId = {
-    get: (corpusId) => connectorStores.find((store) => store.corpusId === corpusId)
+    get: (corpusId) => {
+      options.refreshConnectorStores?.();
+      return connectorStores.find((store) => store.corpusId === corpusId);
+    }
   };
   const connectorStoreEmbeddingProviders = options.connectorStoreEmbeddingProviders ?? new Map;
   const connectorStoreAccountScopes = options.connectorStoreAccountScopes ?? new Map;
@@ -160344,6 +160515,7 @@ function createEmailSourceWorker(options = {}) {
           if (!sourceIndexStatus) {
             throw new EmailSourceWorkerError(501, "source_index_status_not_supported", "Private source worker does not support source-index status.");
           }
+          options.refreshConnectorStores?.();
           const statusRequest = await parseSourceIndexStatusRequest(request, connectorStores);
           const result = withCredentialDegradations(await sourceIndexStatus.status(statusRequest), credentialDegradations?.() ?? []);
           const resultWithLatencyHealth = sourceAnswerLatencyLog?.health ? {
@@ -161682,6 +161854,7 @@ function createEmailSourceWorker(options = {}) {
           const runner = requireFileExtractionRunner(fileExtraction);
           const record7 = await parseObjectBody(request);
           const lane = parseFileExtractionLaneRecord(record7, filesAliasLane, runner);
+          options.authorizeFileExtractionLane?.(lane);
           const result = await runner.run({
             ...lane,
             ...optionalNumberField(record7.limit, "limit", "limit"),
@@ -161699,6 +161872,7 @@ function createEmailSourceWorker(options = {}) {
           const runner = requireFileExtractionRunner(fileExtraction);
           const record7 = await parseObjectBody(request);
           const lane = parseFileExtractionLaneRecord(record7, filesAliasLane, runner);
+          options.authorizeFileExtractionLane?.(lane);
           const result = await runner.plan({
             ...lane,
             limit: asOptionalNumber(record7.limit, "limit") ?? DEFAULT_FILE_EXTRACTION_PLAN_LIMIT,
@@ -161718,6 +161892,7 @@ function createEmailSourceWorker(options = {}) {
           const runner = requireFileExtractionRunner(fileExtraction);
           const record7 = await parseObjectBody(request);
           const lane = parseFileExtractionLaneRecord(record7, filesAliasLane, runner);
+          options.authorizeFileExtractionLane?.(lane);
           const result = await runner.plan({
             ...lane,
             limit: asOptionalNumber(record7.limit, "limit") ?? DEFAULT_FILE_EXTRACTION_PLAN_LIMIT,
@@ -161733,6 +161908,7 @@ function createEmailSourceWorker(options = {}) {
           const runner = requireFileExtractionRunner(fileExtraction);
           const record7 = await parseObjectBody(request);
           const lane = parseFileExtractionLaneRecord(record7, filesAliasLane, runner);
+          options.authorizeFileExtractionLane?.(lane);
           const extractorKindPrefix = asOptionalString(record7.extractor_kind_prefix);
           if (!extractorKindPrefix) {
             throw new EmailSourceWorkerError(400, "invalid_request", "extractor_kind_prefix is required for a lease recycle.");
@@ -161759,6 +161935,7 @@ function createEmailSourceWorker(options = {}) {
           const runner = requireFileExtractionRunner(fileExtraction);
           const record7 = await parseObjectBody(request);
           const lane = parseFileExtractionLaneRecord(record7, filesAliasLane, runner);
+          options.authorizeFileExtractionLane?.(lane);
           const mode = asOptionalString(record7.mode) ?? "terminal_reclassification";
           if (mode === "terminal_reclassification" && record7.last_error_kind === undefined) {
             const result2 = runner.reclassifyTerminal({
@@ -161845,6 +162022,7 @@ function createEmailSourceWorker(options = {}) {
           const runner = requireFileExtractionRunner(fileExtraction);
           const record7 = await parseObjectBody(request);
           const lane = parseFileExtractionLaneRecord(record7, filesAliasLane, runner);
+          options.authorizeFileExtractionLane?.(lane);
           const counts = runner.counts(lane);
           const body = {
             kind: "file_extraction_status",
@@ -165938,6 +166116,30 @@ function createLocalFilesOwnRootsCleanup(options) {
   let running;
   let removedNow = 0;
   let toldWaiting = false;
+  let toldRemovalFailure = false;
+  const resetWalk = (walk) => {
+    walk.done = false;
+    delete walk.after;
+    delete walk.page;
+    delete walk.failed;
+  };
+  const resetWalks = () => {
+    for (const walk of walks)
+      resetWalk(walk);
+  };
+  const reportRemovalFailure = (message2) => {
+    if (!toldRemovalFailure)
+      options.log?.(message2);
+    toldRemovalFailure = true;
+  };
+  const waitForIndex = () => {
+    if (!toldWaiting)
+      options.log?.("The index of stored paths is still being prepared; what is inside Olympus's own folders is removed at the next run.");
+    toldWaiting = true;
+    resetWalks();
+    return { removed: removedNow, complete: false };
+  };
+  const lookupsReady = () => view3.lookupsReady?.() ?? true;
   const inside = (locatorUri) => {
     try {
       return isInsideOwnRoot(locatorUri, context2);
@@ -165966,54 +166168,67 @@ function createLocalFilesOwnRootsCleanup(options) {
     await tierSet.sync(connector, sync, { commitCursor: false, settle: false });
   };
   const once = async () => {
-    if (view3.lookupsReady && !view3.lookupsReady()) {
-      if (!toldWaiting)
-        options.log?.("The index of stored paths is still being prepared; what is inside Olympus's own folders is removed at the next run.");
-      toldWaiting = true;
-      return { removed: 0, complete: false };
-    }
+    removedNow = 0;
+    if (!lookupsReady())
+      return waitForIndex();
     const started = Date.now();
     const timeUp = () => Date.now() - started >= maxMs;
-    removedNow = 0;
     let scanned = 0;
-    let kept = 0;
+    let attempted = 0;
     for (const walk of walks) {
       while (!walk.done) {
-        if (timeUp() || removedNow >= maxItems || scanned >= maxScanned)
+        if (timeUp() || attempted >= maxItems || scanned >= maxScanned)
           return { removed: removedNow, complete: false };
-        const page2 = walk.store.pageActiveItemsUnderLocatorIfIndexed({
-          provider: LOCAL_FILES_PROVIDER,
-          accountScope: LOCAL_FILES_ACCOUNT_SCOPE,
-          locatorUri: walk.root,
-          limit: pageSize,
-          ...walk.after !== undefined ? { after: walk.after } : {}
-        });
-        scanned += page2.items.length;
-        const hits = page2.items.filter((item) => inside(item.locatorUri));
-        for (let index = 0;index < hits.length; ) {
-          if (timeUp() || removedNow >= maxItems)
+        if (!lookupsReady())
+          return waitForIndex();
+        if (!walk.page) {
+          const page3 = walk.store.pageActiveItemsUnderLocatorIfIndexed({
+            provider: LOCAL_FILES_PROVIDER,
+            accountScope: LOCAL_FILES_ACCOUNT_SCOPE,
+            locatorUri: walk.root,
+            limit: pageSize,
+            ...walk.after !== undefined ? { after: walk.after } : {}
+          });
+          if (!lookupsReady())
+            return waitForIndex();
+          scanned += page3.items.length;
+          walk.page = { hits: page3.items.filter((item) => inside(item.locatorUri)), next: page3.next, index: 0 };
+        }
+        const page2 = walk.page;
+        while (page2.index < page2.hits.length) {
+          if (timeUp() || attempted >= maxItems)
             return { removed: removedNow, complete: false };
-          const batch = hits.slice(index, index + Math.min(batchSize, maxItems - removedNow));
-          await remove(batch);
-          removedNow += batch.length;
-          index += batch.length;
-          kept += batch.filter((item) => walk.store.itemPresence(item.identity).active).length;
+          const batch = page2.hits.slice(page2.index, page2.index + Math.min(batchSize, maxItems - attempted));
+          attempted += batch.length;
+          try {
+            await remove(batch);
+          } catch (error2) {
+            reportRemovalFailure(`Items inside Olympus's own folders could not be removed this run (${error2 instanceof Error ? error2.name : "error"}); they are tried again at the next.`);
+          }
+          const kept = batch.filter((item) => walk.store.itemPresence(item.identity).active).length;
+          removedNow += batch.length - kept;
+          page2.index += batch.length;
+          if (kept > 0) {
+            reportRemovalFailure("The store did not remove some items inside Olympus's own folders; they are tried again at the next run.");
+            walk.failed = true;
+          }
         }
         if (page2.next === undefined)
           walk.done = true;
         else
           walk.after = page2.next;
+        delete walk.page;
         await new Promise((resolve27) => {
           setImmediate(resolve27);
         });
       }
     }
-    if (kept > 0) {
-      options.log?.("The store did not remove some items inside Olympus's own folders; they are tried again at the next run.");
-      for (const walk of walks) {
-        walk.done = false;
-        delete walk.after;
-      }
+    if (!lookupsReady())
+      return waitForIndex();
+    if (walks.some((walk) => walk.failed)) {
+      for (const walk of walks)
+        if (walk.failed)
+          resetWalk(walk);
       return { removed: removedNow, complete: false };
     }
     finished = true;
@@ -166024,8 +166239,9 @@ function createLocalFilesOwnRootsCleanup(options) {
       if (finished)
         return Promise.resolve({ removed: 0, complete: true });
       running ??= once().catch((error2) => {
-        options.log?.(`Items inside Olympus's own folders could not be removed this run (${error2 instanceof Error ? error2.name : "error"}); they are tried again at the next.`);
-        return { removed: 0, complete: false };
+        resetWalks();
+        reportRemovalFailure(`Items inside Olympus's own folders could not be removed this run (${error2 instanceof Error ? error2.name : "error"}); they are tried again at the next.`);
+        return { removed: removedNow, complete: false };
       }).finally(() => {
         running = undefined;
       });
@@ -166043,6 +166259,84 @@ function createLocalFilesOwnRootsCleanup(options) {
     async idle() {
       while (running)
         await running;
+    }
+  };
+}
+function createLocalFilesOwnRootsRecovery(options) {
+  let closed = false;
+  let complete = false;
+  let timer;
+  const setTimer = options.setTimeoutImpl ?? setTimeout;
+  const clearTimer = options.clearTimeoutImpl ?? clearTimeout;
+  const retryMs = Math.max(1, options.retryMs ?? 25);
+  const maxRetryMs = Math.max(retryMs, options.maxRetryMs ?? 1000);
+  let delay2 = retryMs;
+  let toldWaiting = false;
+  const schedule = (progress) => {
+    if (closed || complete || timer)
+      return;
+    if (!toldWaiting) {
+      toldWaiting = true;
+      options.log?.("Local-file reads wait until cleanup of Olympus-owned folders completes; recovery continues in the background.");
+    }
+    if (progress)
+      delay2 = retryMs;
+    timer = setTimer(() => {
+      timer = undefined;
+      recover();
+    }, delay2);
+    timer.unref();
+    delay2 = Math.min(maxRetryMs, delay2 * 2);
+  };
+  const observe = (result) => {
+    if (closed)
+      return;
+    if (result.complete)
+      complete = true;
+    else
+      schedule(result.removed > 0);
+  };
+  const recover = async () => {
+    let progress = false;
+    try {
+      await options.cleanup.idle();
+      if (closed)
+        return;
+      for (const store of options.stores()) {
+        if (closed)
+          return;
+        if (!store.locatorIdentityIndexReady()) {
+          const backfill = await store.ensureLocatorIdentityIndexReady({ maxItems: 1000, maxWindows: 1 });
+          if (closed)
+            return;
+          progress ||= backfill.scannedItems > 0;
+          if (backfill.state !== "ready") {
+            schedule(progress);
+            return;
+          }
+        }
+      }
+      observe(await options.cleanup.run());
+    } catch {
+      schedule(progress);
+    }
+  };
+  const initial = (async () => {
+    try {
+      observe(await options.cleanup.run());
+    } catch {
+      schedule(false);
+    }
+  })();
+  return {
+    initial,
+    ready: () => !closed && complete,
+    close() {
+      closed = true;
+      complete = false;
+      if (timer)
+        clearTimer(timer);
+      timer = undefined;
     }
   };
 }
@@ -204868,6 +205162,7 @@ __export(exports_server2, {
   createReadwiseConnectorStoreRuntime: () => createReadwiseConnectorStoreRuntime,
   createFileExtractionLocalVlmClientFromEnv: () => createFileExtractionLocalVlmClientFromEnv,
   createEmailSourceConnectorFromEnv: () => createEmailSourceConnectorFromEnv,
+  createConnectorStoreMountDiscovery: () => createConnectorStoreMountDiscovery,
   createCloudSourceIndexEmbeddingProviderFromEnv: () => createCloudSourceIndexEmbeddingProviderFromEnv,
   createAnalystForSovereigntyProfile: () => createAnalystForSovereigntyProfile,
   connectorStoreLaneHandle: () => connectorStoreLaneHandle,
@@ -206237,6 +206532,18 @@ async function main() {
     } : {}
   }) : undefined;
   const fileExtractionLocalVlmClient = createFileExtractionLocalVlmClientFromEnv(process.env);
+  let sourceRuntimeClosed = false;
+  let sourceLaneGeneration = 0;
+  let mountConfiguredSourceStores = () => {};
+  const earlySourceStores = [];
+  let sourceLaneMounted = (stores) => {
+    sourceLaneGeneration += 1;
+    earlySourceStores.push(stores);
+  };
+  const sourceHasStores = (sourceId) => ["internal", "secure_local", "public_safe"].some((domain) => {
+    const path = resolvedStorePath(sourceId, domain, process.env);
+    return existsSync98(path) || existsSync98(tieredStoreSetLedgerPath(path)) || existsSync98(secretLocationsPathForStore(path));
+  });
   const tierLanes = [];
   const tierLegsOpenedEarly = [];
   let registerTierLegStore = (...registration) => {
@@ -206337,82 +206644,113 @@ async function main() {
     });
     return lane.set;
   };
-  const refreshableReadwiseRuntime = createRefreshableReadwiseConnectorStoreRuntime({
-    enabled: readwiseConnectorStoreLane.enabled,
-    ...readwiseEmbeddingProvider ? { embeddingProvider: readwiseEmbeddingProvider } : {},
-    ...sourceIndexAccount ? { account: sourceIndexAccount } : {},
-    env: process.env,
-    tierSetFor: (store) => {
-      const secrets = openTierSecretLocations({ sourceId: READWISE_SOURCE_ID }, resolvedStorePath(READWISE_SOURCE_ID, "secure_local", process.env), READWISE_SECURE_LIBRARY_CORPUS_ID);
-      return existingStoreTierSet(createReadwiseTierLane({
-        store,
-        env: process.env,
-        ...readwiseEmbeddingProvider ? { embeddingProvider: readwiseEmbeddingProvider } : {},
-        ...tierSecureEmbeddingProvider ? { secureEmbeddingProvider: tierSecureEmbeddingProvider } : {},
-        ...secrets ? { secretLocations: secrets } : {},
-        onStoreOpened: (opened) => registerTierLegStore(opened, store.corpusId, tierSecureEmbeddingProvider ?? null)
-      }), { store, ...secrets ? { secrets } : {} });
-    }
-  });
-  const readwiseConnectorStore = refreshableReadwiseRuntime?.store;
+  let refreshableReadwiseRuntime;
+  let readwiseConnectorStore;
+  const mountReadwise = () => {
+    if (sourceRuntimeClosed)
+      throw new Error("Source runtime is closed.");
+    if (refreshableReadwiseRuntime)
+      return;
+    refreshableReadwiseRuntime = createRefreshableReadwiseConnectorStoreRuntime({
+      enabled: readwiseConnectorStoreLane.enabled,
+      ...readwiseEmbeddingProvider ? { embeddingProvider: readwiseEmbeddingProvider } : {},
+      ...sourceIndexAccount ? { account: sourceIndexAccount } : {},
+      env: process.env,
+      tierSetFor: (store) => {
+        const secrets = openTierSecretLocations({ sourceId: READWISE_SOURCE_ID }, resolvedStorePath(READWISE_SOURCE_ID, "secure_local", process.env), READWISE_SECURE_LIBRARY_CORPUS_ID);
+        return existingStoreTierSet(createReadwiseTierLane({
+          store,
+          env: process.env,
+          ...readwiseEmbeddingProvider ? { embeddingProvider: readwiseEmbeddingProvider } : {},
+          ...tierSecureEmbeddingProvider ? { secureEmbeddingProvider: tierSecureEmbeddingProvider } : {},
+          ...secrets ? { secretLocations: secrets } : {},
+          onStoreOpened: (opened) => registerTierLegStore(opened, store.corpusId, tierSecureEmbeddingProvider ?? null)
+        }), { store, ...secrets ? { secrets } : {} });
+      }
+    });
+    readwiseConnectorStore = refreshableReadwiseRuntime?.store;
+    if (readwiseConnectorStore)
+      sourceLaneMounted([readwiseConnectorStore]);
+  };
   const xBookmarksConnectorStoreLane = sourceIndexLaneAccountDecision(sourceIndexLaneStorageDecision(process.env, "OLYMPUS_SOURCE_INDEX_X_BOOKMARKS_CONNECTOR_STORE_ENABLED", sourceIndexReadEnabled), { sourceId: X_BOOKMARKS_SOURCE_ID });
   let xBookmarksTierStores = [];
-  const refreshableXBookmarksRuntime = createRefreshableXBookmarksConnectorStoreRuntime({
-    enabled: xBookmarksConnectorStoreLane.enabled,
-    ...xBookmarksEmbeddingProvider ? { embeddingProvider: xBookmarksEmbeddingProvider } : {},
-    ...sourceIndexAccount ? { account: sourceIndexAccount } : {},
-    env: process.env,
-    tierSetFor: (store) => {
-      const secrets = openTierSecretLocations({ sourceId: X_BOOKMARKS_SOURCE_ID }, resolvedStorePath(X_BOOKMARKS_SOURCE_ID, "secure_local", process.env), X_BOOKMARKS_SECURE_CORPUS_ID);
-      const lane = createXBookmarksTierLane({
-        store,
-        env: process.env,
-        ...xBookmarksEmbeddingProvider ? { embeddingProvider: xBookmarksEmbeddingProvider } : {},
-        ...tierSecureEmbeddingProvider ? { secureEmbeddingProvider: tierSecureEmbeddingProvider } : {},
-        ...secrets ? { secretLocations: secrets } : {},
-        onStoreOpened: (opened) => registerTierLegStore(opened, store.corpusId, tierSecureEmbeddingProvider ?? null)
-      });
-      xBookmarksTierStores = Object.values(lane.newStores).filter((leg) => leg !== undefined);
-      return existingStoreTierSet(lane, { store, ...secrets ? { secrets } : {} });
-    }
-  });
-  const xBookmarksConnectorStore = refreshableXBookmarksRuntime?.store;
+  let refreshableXBookmarksRuntime;
+  let xBookmarksConnectorStore;
+  const mountXBookmarks = () => {
+    if (sourceRuntimeClosed)
+      throw new Error("Source runtime is closed.");
+    if (refreshableXBookmarksRuntime)
+      return;
+    refreshableXBookmarksRuntime = createRefreshableXBookmarksConnectorStoreRuntime({
+      enabled: xBookmarksConnectorStoreLane.enabled,
+      ...xBookmarksEmbeddingProvider ? { embeddingProvider: xBookmarksEmbeddingProvider } : {},
+      ...sourceIndexAccount ? { account: sourceIndexAccount } : {},
+      env: process.env,
+      tierSetFor: (store) => {
+        const secrets = openTierSecretLocations({ sourceId: X_BOOKMARKS_SOURCE_ID }, resolvedStorePath(X_BOOKMARKS_SOURCE_ID, "secure_local", process.env), X_BOOKMARKS_SECURE_CORPUS_ID);
+        const lane = createXBookmarksTierLane({
+          store,
+          env: process.env,
+          ...xBookmarksEmbeddingProvider ? { embeddingProvider: xBookmarksEmbeddingProvider } : {},
+          ...tierSecureEmbeddingProvider ? { secureEmbeddingProvider: tierSecureEmbeddingProvider } : {},
+          ...secrets ? { secretLocations: secrets } : {},
+          onStoreOpened: (opened) => registerTierLegStore(opened, store.corpusId, tierSecureEmbeddingProvider ?? null)
+        });
+        xBookmarksTierStores = Object.values(lane.newStores).filter((leg) => leg !== undefined);
+        return existingStoreTierSet(lane, { store, ...secrets ? { secrets } : {} });
+      }
+    });
+    xBookmarksConnectorStore = refreshableXBookmarksRuntime?.store;
+    if (xBookmarksConnectorStore)
+      sourceLaneMounted([xBookmarksConnectorStore]);
+  };
   const gmailConnectorStoreLane = sourceIndexLaneAccountDecision(sourceIndexLaneStorageDecision(process.env, "OLYMPUS_SOURCE_INDEX_GMAIL_CONNECTOR_STORE_ENABLED", sourceIndexReadEnabled), { sourceId: GMAIL_SOURCE_ID });
   const googleDriveConnectorStoreLane = sourceIndexLaneAccountDecision(sourceIndexLaneStorageDecision(process.env, "OLYMPUS_SOURCE_INDEX_GOOGLE_DRIVE_CONNECTOR_STORE_ENABLED", sourceIndexReadEnabled), { sourceId: GOOGLE_DRIVE_SOURCE_ID });
   const gmailRequestBudget = gmailConnectorStoreLane.enabled ? createGmailDailyRequestBudget({ env: process.env }) : undefined;
-  const gmailInternalConnectorStore = gmailConnectorStoreLane.enabled ? openConnectorStore({ sourceId: GMAIL_SOURCE_ID }, {
-    dbPath: resolvedStorePath(GMAIL_SOURCE_ID, "internal", process.env),
-    corpusId: GMAIL_INTERNAL_CONNECTOR_CORPUS_ID,
-    family: "email",
-    trustDomain: "internal"
-  }) : undefined;
-  const gmailSecureConnectorStore = gmailInternalConnectorStore ? openConnectorStore({ sourceId: GMAIL_SOURCE_ID }, {
-    dbPath: resolvedStorePath(GMAIL_SOURCE_ID, "secure_local", process.env),
-    corpusId: GMAIL_SECURE_CONNECTOR_CORPUS_ID,
-    family: "email",
-    trustDomain: "secure_local"
-  }) : undefined;
-  const gmailTierLane = gmailInternalConnectorStore && gmailSecureConnectorStore ? tierLane({
-    account: { sourceId: GMAIL_SOURCE_ID },
-    internal: gmailInternalConnectorStore,
-    secure: gmailSecureConnectorStore,
-    publicStore: onDemandTierStore({
-      corpusId: GMAIL_PUBLIC_CONNECTOR_CORPUS_ID,
-      dbPath: resolvedStorePath(GMAIL_SOURCE_ID, "public_safe", process.env),
-      create: () => openConnectorStore({ sourceId: GMAIL_SOURCE_ID }, {
-        dbPath: resolvedStorePath(GMAIL_SOURCE_ID, "public_safe", process.env),
+  let gmailInternalConnectorStore;
+  let gmailSecureConnectorStore;
+  let gmailTierLane;
+  const mountGmail = () => {
+    if (sourceRuntimeClosed)
+      throw new Error("Source runtime is closed.");
+    if (gmailInternalConnectorStore)
+      return;
+    gmailInternalConnectorStore = gmailConnectorStoreLane.enabled ? openConnectorStore({ sourceId: GMAIL_SOURCE_ID }, {
+      dbPath: resolvedStorePath(GMAIL_SOURCE_ID, "internal", process.env),
+      corpusId: GMAIL_INTERNAL_CONNECTOR_CORPUS_ID,
+      family: "email",
+      trustDomain: "internal"
+    }) : undefined;
+    gmailSecureConnectorStore = gmailInternalConnectorStore ? openConnectorStore({ sourceId: GMAIL_SOURCE_ID }, {
+      dbPath: resolvedStorePath(GMAIL_SOURCE_ID, "secure_local", process.env),
+      corpusId: GMAIL_SECURE_CONNECTOR_CORPUS_ID,
+      family: "email",
+      trustDomain: "secure_local"
+    }) : undefined;
+    gmailTierLane = gmailInternalConnectorStore && gmailSecureConnectorStore ? tierLane({
+      account: { sourceId: GMAIL_SOURCE_ID },
+      internal: gmailInternalConnectorStore,
+      secure: gmailSecureConnectorStore,
+      publicStore: onDemandTierStore({
         corpusId: GMAIL_PUBLIC_CONNECTOR_CORPUS_ID,
-        family: "email",
-        trustDomain: "public_safe"
-      }),
-      onOpened: (store) => registerTierLegStore(store, GMAIL_INTERNAL_CONNECTOR_CORPUS_ID)
-    })
-  }) : undefined;
+        dbPath: resolvedStorePath(GMAIL_SOURCE_ID, "public_safe", process.env),
+        create: () => openConnectorStore({ sourceId: GMAIL_SOURCE_ID }, {
+          dbPath: resolvedStorePath(GMAIL_SOURCE_ID, "public_safe", process.env),
+          corpusId: GMAIL_PUBLIC_CONNECTOR_CORPUS_ID,
+          family: "email",
+          trustDomain: "public_safe"
+        }),
+        onOpened: (store) => registerTierLegStore(store, GMAIL_INTERNAL_CONNECTOR_CORPUS_ID)
+      })
+    }) : undefined;
+    if (gmailInternalConnectorStore && gmailSecureConnectorStore)
+      sourceLaneMounted([gmailInternalConnectorStore, gmailSecureConnectorStore]);
+  };
   const gmailItemScopeFor = (handle) => {
     const role = handle?.accountRole?.trim() || accountFromGoogleHandle(handle?.handle);
     return gmailInternalConnectorStore && gmailSecureConnectorStore ? gmailItemAccountScope([gmailInternalConnectorStore, gmailSecureConnectorStore], role) : role;
   };
-  if (gmailInternalConnectorStore && gmailSecureConnectorStore) {
+  if (gmailConnectorStoreLane.enabled) {
     let gmailArchiveSet;
     const gmailImportGate = gmailImportAllowance({ usage: () => gmailRequestBudget?.status() });
     let gmailLabelCache;
@@ -206420,6 +206758,9 @@ async function main() {
       concurrencyKey: GMAIL_INTERNAL_CONNECTOR_CORPUS_ID,
       exclusive: (task) => connectedHandleRegistryPath ? runExclusiveForSource(connectedHandleRegistryPath, GMAIL_SOURCE_ID, task) : task(),
       lane: () => {
+        mountGmail();
+        if (!gmailInternalConnectorStore || !gmailSecureConnectorStore)
+          throw new Error("Gmail stores are unavailable.");
         const handle = selectedSourceCredentialHandle({
           env: process.env,
           pinEnvName: "OLYMPUS_SOURCE_INDEX_GMAIL_CREDENTIAL_HANDLE",
@@ -206518,103 +206859,141 @@ ${key2}`;
   }
   const googleDriveRequestBudget = googleDriveConnectorStoreLane.enabled ? createGoogleDriveDailyRequestBudget({ env: process.env }) : undefined;
   const googleDriveExclusions = googleDriveConnectorStoreLane.enabled ? googleDriveIngestionExclusionMatcher(process.env) : undefined;
-  const googleDriveInternalConnectorStore = googleDriveConnectorStoreLane.enabled ? openConnectorStore({ sourceId: GOOGLE_DRIVE_SOURCE_ID }, {
-    dbPath: resolvedStorePath(GOOGLE_DRIVE_SOURCE_ID, "internal", process.env),
-    corpusId: GOOGLE_DRIVE_INTERNAL_CONNECTOR_CORPUS_ID,
-    family: "file",
-    trustDomain: "internal",
-    ...googleDriveExclusions ? { exclusions: googleDriveExclusions } : {}
-  }) : undefined;
-  const googleDriveSecureConnectorStore = googleDriveInternalConnectorStore ? openConnectorStore({ sourceId: GOOGLE_DRIVE_SOURCE_ID }, {
-    dbPath: resolvedStorePath(GOOGLE_DRIVE_SOURCE_ID, "secure_local", process.env),
-    corpusId: GOOGLE_DRIVE_SECURE_CONNECTOR_CORPUS_ID,
-    family: "file",
-    trustDomain: "secure_local",
-    ...googleDriveExclusions ? { exclusions: googleDriveExclusions } : {}
-  }) : undefined;
-  const googleDriveTierLane = googleDriveInternalConnectorStore && googleDriveSecureConnectorStore ? tierLane({
-    account: { sourceId: GOOGLE_DRIVE_SOURCE_ID },
-    internal: googleDriveInternalConnectorStore,
-    secure: googleDriveSecureConnectorStore,
-    publicStore: onDemandTierStore({
-      corpusId: GOOGLE_DRIVE_PUBLIC_CONNECTOR_CORPUS_ID,
-      dbPath: resolvedStorePath(GOOGLE_DRIVE_SOURCE_ID, "public_safe", process.env),
-      create: () => openConnectorStore({ sourceId: GOOGLE_DRIVE_SOURCE_ID }, {
-        dbPath: resolvedStorePath(GOOGLE_DRIVE_SOURCE_ID, "public_safe", process.env),
+  let googleDriveInternalConnectorStore;
+  let googleDriveSecureConnectorStore;
+  let googleDriveTierLane;
+  const mountGoogleDrive = () => {
+    if (sourceRuntimeClosed)
+      throw new Error("Source runtime is closed.");
+    if (googleDriveInternalConnectorStore)
+      return;
+    googleDriveInternalConnectorStore = googleDriveConnectorStoreLane.enabled ? openConnectorStore({ sourceId: GOOGLE_DRIVE_SOURCE_ID }, {
+      dbPath: resolvedStorePath(GOOGLE_DRIVE_SOURCE_ID, "internal", process.env),
+      corpusId: GOOGLE_DRIVE_INTERNAL_CONNECTOR_CORPUS_ID,
+      family: "file",
+      trustDomain: "internal",
+      ...googleDriveExclusions ? { exclusions: googleDriveExclusions } : {}
+    }) : undefined;
+    googleDriveSecureConnectorStore = googleDriveInternalConnectorStore ? openConnectorStore({ sourceId: GOOGLE_DRIVE_SOURCE_ID }, {
+      dbPath: resolvedStorePath(GOOGLE_DRIVE_SOURCE_ID, "secure_local", process.env),
+      corpusId: GOOGLE_DRIVE_SECURE_CONNECTOR_CORPUS_ID,
+      family: "file",
+      trustDomain: "secure_local",
+      ...googleDriveExclusions ? { exclusions: googleDriveExclusions } : {}
+    }) : undefined;
+    googleDriveTierLane = googleDriveInternalConnectorStore && googleDriveSecureConnectorStore ? tierLane({
+      account: { sourceId: GOOGLE_DRIVE_SOURCE_ID },
+      internal: googleDriveInternalConnectorStore,
+      secure: googleDriveSecureConnectorStore,
+      publicStore: onDemandTierStore({
         corpusId: GOOGLE_DRIVE_PUBLIC_CONNECTOR_CORPUS_ID,
-        family: "file",
-        trustDomain: "public_safe",
-        ...googleDriveExclusions ? { exclusions: googleDriveExclusions } : {}
-      }),
-      onOpened: (store) => registerTierLegStore(store, GOOGLE_DRIVE_INTERNAL_CONNECTOR_CORPUS_ID)
-    })
-  }) : undefined;
+        dbPath: resolvedStorePath(GOOGLE_DRIVE_SOURCE_ID, "public_safe", process.env),
+        create: () => openConnectorStore({ sourceId: GOOGLE_DRIVE_SOURCE_ID }, {
+          dbPath: resolvedStorePath(GOOGLE_DRIVE_SOURCE_ID, "public_safe", process.env),
+          corpusId: GOOGLE_DRIVE_PUBLIC_CONNECTOR_CORPUS_ID,
+          family: "file",
+          trustDomain: "public_safe",
+          ...googleDriveExclusions ? { exclusions: googleDriveExclusions } : {}
+        }),
+        onOpened: (store) => registerTierLegStore(store, GOOGLE_DRIVE_INTERNAL_CONNECTOR_CORPUS_ID)
+      })
+    }) : undefined;
+    if (googleDriveInternalConnectorStore && googleDriveSecureConnectorStore)
+      sourceLaneMounted([googleDriveInternalConnectorStore, googleDriveSecureConnectorStore]);
+  };
   const dropboxConnectorStoreLane = sourceIndexLaneAccountDecision(sourceIndexLaneStorageDecision(process.env, "OLYMPUS_SOURCE_INDEX_DROPBOX_CONNECTOR_STORE_ENABLED", sourceIndexReadEnabled), { sourceId: DROPBOX_FILES_SOURCE_ID });
-  const dropboxConnectorStore = dropboxConnectorStoreLane.enabled ? createDropboxConnectorStore(process.env, { policy: dropboxIngestionPolicy }) : undefined;
   const dropboxProviderAccount = dropboxHandle?.accountRole?.trim() || dropboxFilesAccount || "personal";
-  const dropboxSecretLocations = dropboxConnectorStore ? openTierSecretLocations({ sourceId: DROPBOX_FILES_SOURCE_ID }, dropboxConnectorStore.dbPath, DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID) : undefined;
-  const dropboxTierLane = dropboxConnectorStore ? createDropboxTierLane({
-    secureStore: dropboxConnectorStore,
-    env: process.env,
-    policy: dropboxIngestionPolicy,
-    ...dropboxSecretLocations ? { secretLocations: dropboxSecretLocations } : {},
-    onStoreOpened: (store) => registerTierLegStore(store, DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID, sourceIndexEmbeddingProvider ?? null)
-  }) : undefined;
-  if (dropboxTierLane && dropboxFilesEmbeddingProvider && isApprovedSecureSourceEmbeddingProvider(dropboxFilesEmbeddingProvider)) {
-    dropboxTierLane.set.declarePrivateEmbedder(dropboxFilesEmbeddingProvider, {
-      embedWith: () => dropboxScopeRef && fileSourceScopeAuthority ? scopeBoundEmbeddingProvider(dropboxFilesEmbeddingProvider, fileSourceScopeAuthority, dropboxScopeRef) : undefined
-    });
-  }
-  if (dropboxTierLane && dropboxConnectorStore) {
-    adoptTierLane({
-      ledger: dropboxTierLane.ledger,
-      secureCorpusId: dropboxConnectorStore.corpusId,
-      corpusIds: [dropboxConnectorStore.corpusId, dropboxTierLane.internal.corpusId, dropboxTierLane.public.corpusId],
-      onDemand: [dropboxTierLane.internal, dropboxTierLane.public],
-      ...dropboxSecretLocations ? { secrets: dropboxSecretLocations } : {}
-    });
-  }
-  const dropboxExtractionView = dropboxTierLane ? tieredExtractionView(dropboxTierLane.set) : undefined;
+  let dropboxConnectorStore;
+  let dropboxSecretLocations;
+  let dropboxTierLane;
+  let dropboxExtractionView;
+  const mountDropbox = () => {
+    if (sourceRuntimeClosed)
+      throw new Error("Source runtime is closed.");
+    if (dropboxConnectorStore)
+      return;
+    dropboxConnectorStore = dropboxConnectorStoreLane.enabled ? createDropboxConnectorStore(process.env, { policy: dropboxIngestionPolicy }) : undefined;
+    dropboxSecretLocations = dropboxConnectorStore ? openTierSecretLocations({ sourceId: DROPBOX_FILES_SOURCE_ID }, dropboxConnectorStore.dbPath, DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID) : undefined;
+    dropboxTierLane = dropboxConnectorStore ? createDropboxTierLane({
+      secureStore: dropboxConnectorStore,
+      env: process.env,
+      policy: dropboxIngestionPolicy,
+      ...dropboxSecretLocations ? { secretLocations: dropboxSecretLocations } : {},
+      onStoreOpened: (store) => registerTierLegStore(store, DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID, sourceIndexEmbeddingProvider ?? null)
+    }) : undefined;
+    if (dropboxTierLane && dropboxFilesEmbeddingProvider && isApprovedSecureSourceEmbeddingProvider(dropboxFilesEmbeddingProvider)) {
+      dropboxTierLane.set.declarePrivateEmbedder(dropboxFilesEmbeddingProvider, {
+        embedWith: () => {
+          const ref = fileSourceScopeAuthority?.policyRef("dropbox.files");
+          return ref && fileSourceScopeAuthority ? scopeBoundEmbeddingProvider(dropboxFilesEmbeddingProvider, fileSourceScopeAuthority, ref) : undefined;
+        }
+      });
+    }
+    if (dropboxTierLane && dropboxConnectorStore) {
+      adoptTierLane({
+        ledger: dropboxTierLane.ledger,
+        secureCorpusId: dropboxConnectorStore.corpusId,
+        corpusIds: [dropboxConnectorStore.corpusId, dropboxTierLane.internal.corpusId, dropboxTierLane.public.corpusId],
+        onDemand: [dropboxTierLane.internal, dropboxTierLane.public],
+        ...dropboxSecretLocations ? { secrets: dropboxSecretLocations } : {}
+      });
+    }
+    dropboxExtractionView = dropboxTierLane ? tieredExtractionView(dropboxTierLane.set) : undefined;
+    if (dropboxConnectorStore)
+      sourceLaneMounted([dropboxConnectorStore]);
+  };
   const isDropboxTierStore = (store) => store === dropboxConnectorStore || dropboxTierLane !== undefined && (store === dropboxTierLane.internal.current() || store === dropboxTierLane.public.current());
-  const dropboxScopeRef = dropboxHandle && fileSourceScopeAuthority ? fileSourceScopeAuthority.policyRef("dropbox.files") : undefined;
-  const dropboxProviderStoreSync = dropboxConnectorStore && dropboxTierLane && dropboxHandle && dropboxScopeRef && fileSourceScopeAuthority ? createDropboxProviderStoreSyncHandler({
-    tierSet: dropboxTierLane.set,
-    store: dropboxConnectorStore,
-    account: dropboxProviderAccount,
-    credentialHandle: dropboxHandle.handle,
-    scope: createScopeBoundDropboxContentScope({ authority: fileSourceScopeAuthority, ref: dropboxScopeRef }),
-    ...dropboxFilesEmbeddingProvider && isApprovedSecureSourceEmbeddingProvider(dropboxFilesEmbeddingProvider) ? { embeddingProvider: scopeBoundEmbeddingProvider(dropboxFilesEmbeddingProvider, fileSourceScopeAuthority, dropboxScopeRef) } : {}
-  }) : undefined;
   const localFilesConnectorStoreLane = sourceIndexLaneAccountDecision(sourceIndexLaneStorageDecision(process.env, "OLYMPUS_SOURCE_INDEX_LOCAL_FILES_CONNECTOR_STORE_ENABLED", sourceIndexReadEnabled), { sourceId: LOCAL_FILES_SOURCE_ID });
   const localFilesIngestionPolicy = defaultLocalFilesIngestionPolicy();
-  const localFilesConnectorStore = localFilesConnectorStoreLane.enabled ? createLocalFilesConnectorStore(process.env, { policy: localFilesIngestionPolicy }) : undefined;
-  const localFilesSecretLocations = localFilesConnectorStore ? openTierSecretLocations({ sourceId: LOCAL_FILES_SOURCE_ID }, localFilesConnectorStore.dbPath, LOCAL_FILES_CORPUS_ID) : undefined;
-  const localFilesTierLane = localFilesConnectorStore ? createLocalFilesTierLane({
-    secureStore: localFilesConnectorStore,
-    env: process.env,
-    policy: localFilesIngestionPolicy,
-    ...localFilesSecretLocations ? { secretLocations: localFilesSecretLocations } : {},
-    onStoreOpened: (store) => registerTierLegStore(store, LOCAL_FILES_CORPUS_ID, sourceIndexEmbeddingProvider ?? null)
-  }) : undefined;
   const localFilesScopeRef = fileSourceScopeAuthority ? fileSourceScopeAuthority.policyRef(LOCAL_FILES_SOURCE_ID) : undefined;
-  if (localFilesTierLane && localFilesConnectorStore && localFilesEmbeddingProvider && isApprovedSecureSourceEmbeddingProvider(localFilesEmbeddingProvider)) {
-    localFilesTierLane.set.declarePrivateEmbedder(localFilesEmbeddingProvider, {
-      embedWith: () => {
-        const ref = fileSourceScopeAuthority?.policyRef(LOCAL_FILES_SOURCE_ID);
-        return ref && fileSourceScopeAuthority ? scopeBoundEmbeddingProvider(localFilesEmbeddingProvider, fileSourceScopeAuthority, ref) : undefined;
-      }
-    });
-  }
-  if (localFilesTierLane && localFilesConnectorStore) {
-    adoptTierLane({
-      ledger: localFilesTierLane.ledger,
-      secureCorpusId: localFilesConnectorStore.corpusId,
-      corpusIds: [localFilesConnectorStore.corpusId, localFilesTierLane.internal.corpusId, localFilesTierLane.public.corpusId],
-      onDemand: [localFilesTierLane.internal, localFilesTierLane.public],
-      ...localFilesSecretLocations ? { secrets: localFilesSecretLocations } : {}
-    });
-  }
-  const localFilesExtractionView = localFilesTierLane ? tieredExtractionView(localFilesTierLane.set) : undefined;
+  let localFilesOwnRootsCleanup;
+  let localFilesInitialCleanup;
+  let localFilesCleanupRecovery;
+  let localFilesConnectorStore;
+  let localFilesSecretLocations;
+  let localFilesTierLane;
+  let localFilesExtractionView;
+  const mountLocalFiles = () => {
+    if (sourceRuntimeClosed)
+      throw new Error("Source runtime is closed.");
+    if (localFilesConnectorStore)
+      return;
+    localFilesConnectorStore = localFilesConnectorStoreLane.enabled ? createLocalFilesConnectorStore(process.env, { policy: localFilesIngestionPolicy }) : undefined;
+    localFilesSecretLocations = localFilesConnectorStore ? openTierSecretLocations({ sourceId: LOCAL_FILES_SOURCE_ID }, localFilesConnectorStore.dbPath, LOCAL_FILES_CORPUS_ID) : undefined;
+    localFilesTierLane = localFilesConnectorStore ? createLocalFilesTierLane({
+      secureStore: localFilesConnectorStore,
+      env: process.env,
+      policy: localFilesIngestionPolicy,
+      ...localFilesSecretLocations ? { secretLocations: localFilesSecretLocations } : {},
+      onStoreOpened: (store) => registerTierLegStore(store, LOCAL_FILES_CORPUS_ID, sourceIndexEmbeddingProvider ?? null)
+    }) : undefined;
+    if (localFilesTierLane && localFilesConnectorStore && localFilesEmbeddingProvider && isApprovedSecureSourceEmbeddingProvider(localFilesEmbeddingProvider)) {
+      localFilesTierLane.set.declarePrivateEmbedder(localFilesEmbeddingProvider, {
+        embedWith: () => {
+          const ref = fileSourceScopeAuthority?.policyRef(LOCAL_FILES_SOURCE_ID);
+          return ref && fileSourceScopeAuthority ? scopeBoundEmbeddingProvider(localFilesEmbeddingProvider, fileSourceScopeAuthority, ref) : undefined;
+        }
+      });
+    }
+    if (localFilesTierLane && localFilesConnectorStore) {
+      adoptTierLane({
+        ledger: localFilesTierLane.ledger,
+        secureCorpusId: localFilesConnectorStore.corpusId,
+        corpusIds: [localFilesConnectorStore.corpusId, localFilesTierLane.internal.corpusId, localFilesTierLane.public.corpusId],
+        onDemand: [localFilesTierLane.internal, localFilesTierLane.public],
+        ...localFilesSecretLocations ? { secrets: localFilesSecretLocations } : {}
+      });
+    }
+    localFilesExtractionView = localFilesTierLane ? tieredExtractionView(localFilesTierLane.set) : undefined;
+    if (localFilesTierLane) {
+      localFilesOwnRootsCleanup = createLocalFilesOwnRootsCleanup({ tierSet: localFilesTierLane.set, context: localFilesExclusionContext, log: (message2) => console.warn(`[local-files] ${message2}`) });
+      const lane = localFilesTierLane;
+      localFilesCleanupRecovery = createLocalFilesOwnRootsRecovery({ cleanup: localFilesOwnRootsCleanup, stores: () => lane.set.openStores(), log: (message2) => console.warn(`[local-files] ${message2}`) });
+      localFilesInitialCleanup = localFilesCleanupRecovery.initial;
+    }
+    if (localFilesConnectorStore)
+      sourceLaneMounted([localFilesConnectorStore]);
+  };
   const isLocalFilesTierStore = (store) => store === localFilesConnectorStore || localFilesTierLane !== undefined && (store === localFilesTierLane.internal.current() || store === localFilesTierLane.public.current());
   const localFilesWatchHub = new WatchHub;
   const localFilesVolumes = new VolumeResolver;
@@ -206623,14 +207002,12 @@ ${key2}`;
     volumeIgnoresCase: (volumeId, path) => localFilesVolumes.ignoresCase(volumeId, path)
   };
   const localFilesWatchIgnore = watchIgnoreGlobs(localFilesExclusionContext);
-  const localFilesOwnRootsCleanup = localFilesConnectorStore && localFilesTierLane ? createLocalFilesOwnRootsCleanup({
-    tierSet: localFilesTierLane.set,
-    context: localFilesExclusionContext,
-    log: (message2) => console.warn(`[local-files] ${message2}`)
-  }) : undefined;
   let localFilesSyncCache;
   const localFilesSyncFor = (ref) => {
     if (!localFilesConnectorStore || !localFilesTierLane || !fileSourceScopeAuthority)
+      return;
+    const ownRootsCleanup = localFilesOwnRootsCleanup;
+    if (!ownRootsCleanup)
       return;
     const key2 = `${ref.accountGeneration}:${ref.revision}`;
     if (localFilesSyncCache?.key === key2)
@@ -206644,10 +207021,10 @@ ${key2}`;
       hub: localFilesWatchHub,
       snapshotDir: localFilesWatchDir(process.env),
       ignore: localFilesWatchIgnore,
-      ...localFilesOwnRootsCleanup ? { beforePull: async () => {
-        await localFilesOwnRootsCleanup.run();
-        await localFilesOwnRootsCleanup.idle();
-      } } : {},
+      beforePull: async () => {
+        await ownRootsCleanup.run();
+        await ownRootsCleanup.idle();
+      },
       ...localFilesEmbeddingProvider && isApprovedSecureSourceEmbeddingProvider(localFilesEmbeddingProvider) ? { embeddingProvider: scopeBoundEmbeddingProvider(localFilesEmbeddingProvider, fileSourceScopeAuthority, ref) } : {}
     });
     localFilesSyncCache = { key: key2, handler };
@@ -206679,23 +207056,34 @@ ${key2}`;
     });
   };
   const whatsappConnectorStoreLane = sourceIndexLaneAccountDecision(sourceIndexLaneStorageDecision(process.env, "OLYMPUS_SOURCE_INDEX_WHATSAPP_CONNECTOR_STORE_ENABLED", sourceIndexReadEnabled), { sourceId: WHATSAPP_PERSONAL_SOURCE_ID });
-  const whatsappConnectorStore = whatsappConnectorStoreLane.enabled ? createWhatsAppConnectorStore(process.env) : undefined;
-  const whatsappSecretLocations = whatsappConnectorStore ? openTierSecretLocations({ sourceId: WHATSAPP_PERSONAL_SOURCE_ID }, whatsappConnectorStore.dbPath, WHATSAPP_LIVE_CORPUS_ID) : undefined;
-  const whatsappTierSet = whatsappConnectorStore ? existingStoreTierSet(createWhatsAppTierLane({
-    store: whatsappConnectorStore,
-    env: process.env,
-    ...sourceIndexEmbeddingProvider ? { internalEmbeddingProvider: sourceIndexEmbeddingProvider } : {},
-    ...whatsappSecretLocations ? { secretLocations: whatsappSecretLocations } : {},
-    onStoreOpened: (opened) => registerTierLegStore(opened, WHATSAPP_LIVE_CORPUS_ID, sourceIndexEmbeddingProvider ?? null)
-  }), {
-    store: whatsappConnectorStore,
-    ...whatsappSecretLocations ? { secrets: whatsappSecretLocations } : {}
-  }) : undefined;
-  if (whatsappTierSet && tierSecureEmbeddingProvider)
-    whatsappTierSet.declarePrivateEmbedder(tierSecureEmbeddingProvider);
-  if (whatsappTierSet && whatsappConnectorStore) {
-    reportRehomedChatOverrides("whatsapp", rehomeChatLaneOverrides(whatsappTierSet.ledger, "whatsapp", [whatsappConnectorStore]));
-  }
+  let whatsappConnectorStore;
+  let whatsappSecretLocations;
+  let whatsappTierSet;
+  const mountWhatsApp = () => {
+    if (sourceRuntimeClosed)
+      throw new Error("Source runtime is closed.");
+    if (whatsappConnectorStore)
+      return;
+    whatsappConnectorStore = whatsappConnectorStoreLane.enabled ? createWhatsAppConnectorStore(process.env) : undefined;
+    whatsappSecretLocations = whatsappConnectorStore ? openTierSecretLocations({ sourceId: WHATSAPP_PERSONAL_SOURCE_ID }, whatsappConnectorStore.dbPath, WHATSAPP_LIVE_CORPUS_ID) : undefined;
+    whatsappTierSet = whatsappConnectorStore ? existingStoreTierSet(createWhatsAppTierLane({
+      store: whatsappConnectorStore,
+      env: process.env,
+      ...sourceIndexEmbeddingProvider ? { internalEmbeddingProvider: sourceIndexEmbeddingProvider } : {},
+      ...whatsappSecretLocations ? { secretLocations: whatsappSecretLocations } : {},
+      onStoreOpened: (opened) => registerTierLegStore(opened, WHATSAPP_LIVE_CORPUS_ID, sourceIndexEmbeddingProvider ?? null)
+    }), {
+      store: whatsappConnectorStore,
+      ...whatsappSecretLocations ? { secrets: whatsappSecretLocations } : {}
+    }) : undefined;
+    if (whatsappTierSet && tierSecureEmbeddingProvider)
+      whatsappTierSet.declarePrivateEmbedder(tierSecureEmbeddingProvider);
+    if (whatsappTierSet && whatsappConnectorStore) {
+      reportRehomedChatOverrides("whatsapp", rehomeChatLaneOverrides(whatsappTierSet.ledger, "whatsapp", [whatsappConnectorStore]));
+    }
+    if (whatsappConnectorStore)
+      sourceLaneMounted([whatsappConnectorStore]);
+  };
   let whatsappImportTierSet = whatsappTierSet;
   const whatsappArchiveMedia = () => ({ state: archiveImports.state, bindings: archiveImports.media });
   const whatsappReadChild = whatsAppChildReader(process.env, whatsappArchiveMedia);
@@ -206703,6 +207091,8 @@ ${key2}`;
   archiveSourceTargets.register(createWhatsAppArchiveTarget({
     env: process.env,
     set: () => {
+      mountWhatsApp();
+      whatsappImportTierSet ??= whatsappTierSet;
       if (whatsappImportTierSet)
         return whatsappImportTierSet;
       const store = createWhatsAppConnectorStore(process.env);
@@ -206721,7 +207111,7 @@ ${key2}`;
     },
     readChild: whatsappReadChild
   }));
-  const whatsappConnectorStoreSync = whatsappConnectorStore && whatsappTierSet ? createWhatsAppConnectorStoreSyncHandler({
+  let whatsappConnectorStoreSync = whatsappConnectorStore && whatsappTierSet ? createWhatsAppConnectorStoreSyncHandler({
     tierSet: whatsappTierSet,
     store: whatsappConnectorStore,
     account: WHATSAPP_PERSONAL_ACCOUNT_SCOPE,
@@ -206730,26 +207120,69 @@ ${key2}`;
   }) : undefined;
   const whatsappLiveMaxItems = parseOptionalPositiveInteger(process.env.OLYMPUS_WHATSAPP_LIVE_DRAIN_MAX_ITEMS, "OLYMPUS_WHATSAPP_LIVE_DRAIN_MAX_ITEMS");
   const telegramConnectorStoreLane = sourceIndexLaneAccountDecision(sourceIndexLaneStorageDecision(process.env, "OLYMPUS_SOURCE_INDEX_TELEGRAM_CONNECTOR_STORES_ENABLED", sourceIndexReadEnabled), { sourceId: TELEGRAM_MESSAGES_SOURCE_ID });
-  const telegramConnectorStores = telegramConnectorStoreLane.enabled ? createTelegramConnectorStores(process.env) : undefined;
-  const telegramTierLane = telegramConnectorStores ? tierLane({
-    account: { sourceId: TELEGRAM_MESSAGES_SOURCE_ID },
-    internal: telegramConnectorStores.internal,
-    secure: telegramConnectorStores.secureLocal
-  }) : undefined;
-  if (telegramTierLane && telegramConnectorStores) {
-    reportRehomedChatOverrides("telegram", rehomeChatLaneOverrides(telegramTierLane.ledger, "telegram", [telegramConnectorStores.internal, telegramConnectorStores.secureLocal]));
-  }
-  const telegramConnectorStoreSync = telegramConnectorStores ? createTelegramConnectorStoreSyncHandler({
-    stores: telegramConnectorStores,
-    env: process.env,
-    ...telegramTierLane?.secrets ? { secretLocations: telegramTierLane.secrets } : {},
-    ...tierSecureEmbeddingProvider ? { privateEmbedder: tierSecureEmbeddingProvider } : {}
-  }) : undefined;
-  if (telegramConnectorStoreSync)
-    archiveSourceTargets.register(telegramConnectorStoreSync.archiveTarget());
+  let telegramConnectorStores;
+  let telegramTierLane;
+  let telegramConnectorStoreSync;
+  const mountTelegram = () => {
+    if (sourceRuntimeClosed)
+      throw new Error("Source runtime is closed.");
+    if (telegramConnectorStores)
+      return;
+    telegramConnectorStores = telegramConnectorStoreLane.enabled ? createTelegramConnectorStores(process.env) : undefined;
+    telegramTierLane = telegramConnectorStores ? tierLane({
+      account: { sourceId: TELEGRAM_MESSAGES_SOURCE_ID },
+      internal: telegramConnectorStores.internal,
+      secure: telegramConnectorStores.secureLocal
+    }) : undefined;
+    if (telegramTierLane && telegramConnectorStores) {
+      reportRehomedChatOverrides("telegram", rehomeChatLaneOverrides(telegramTierLane.ledger, "telegram", [telegramConnectorStores.internal, telegramConnectorStores.secureLocal]));
+    }
+    telegramConnectorStoreSync = telegramConnectorStores ? createTelegramConnectorStoreSyncHandler({
+      stores: telegramConnectorStores,
+      env: process.env,
+      ...telegramTierLane?.secrets ? { secretLocations: telegramTierLane.secrets } : {},
+      ...tierSecureEmbeddingProvider ? { privateEmbedder: tierSecureEmbeddingProvider } : {}
+    }) : undefined;
+    if (telegramConnectorStores)
+      sourceLaneMounted([telegramConnectorStores.internal, telegramConnectorStores.secureLocal]);
+  };
+  if (telegramConnectorStoreLane.enabled)
+    archiveSourceTargets.register(telegramArchiveTarget({
+      account: TELEGRAM_PERSONAL_ACCOUNT_SCOPE,
+      lane: () => {
+        mountTelegram();
+        if (!telegramConnectorStoreSync)
+          throw new Error("Telegram stores are unavailable.");
+        return telegramConnectorStoreSync.archiveTarget().lane({ sourceId: TELEGRAM_MESSAGES_SOURCE_ID, slot: "1" }, process.env);
+      },
+      liveSince: () => telegramConnectorStoreSync?.archiveTarget().liveSince?.({ sourceId: TELEGRAM_MESSAGES_SOURCE_ID, slot: "1" }, process.env)
+    }));
   const telegramSpoolChanges = createSpoolChangeSubscription(defaultTelegramCaptureSpoolDir(process.env));
   const whatsappSpoolChanges = createSpoolChangeSubscription(defaultWhatsAppSpoolDir(process.env));
   const telegramCaptureMaxItems = parseOptionalPositiveInteger(process.env.OLYMPUS_TELEGRAM_SPOOL_DRAIN_MAX_ITEMS, "OLYMPUS_TELEGRAM_SPOOL_DRAIN_MAX_ITEMS");
+  const mountSourceLanes = (handles) => {
+    if (sourceRuntimeClosed)
+      return;
+    const connected2 = (provider, capability) => activeCredentialHandle(handles, { provider, capability }) !== undefined;
+    if (!gmailInternalConnectorStore && gmailConnectorStoreLane.enabled && (sourceHasStores(GMAIL_SOURCE_ID) || connected2("gmail", "gmail.email.sync")))
+      mountGmail();
+    if (!googleDriveInternalConnectorStore && googleDriveConnectorStoreLane.enabled && (sourceHasStores(GOOGLE_DRIVE_SOURCE_ID) || connected2("google_drive", "google_drive.docs.sync")))
+      mountGoogleDrive();
+    if (!dropboxConnectorStore && dropboxConnectorStoreLane.enabled && (sourceHasStores(DROPBOX_FILES_SOURCE_ID) || connected2("dropbox", "dropbox.files.sync")))
+      mountDropbox();
+    if (!localFilesConnectorStore && localFilesConnectorStoreLane.enabled && (sourceHasStores(LOCAL_FILES_SOURCE_ID) || fileSourceScopeAuthority?.policyRef(LOCAL_FILES_SOURCE_ID)))
+      mountLocalFiles();
+    if (!whatsappConnectorStore && whatsappConnectorStoreLane.enabled && (sourceHasStores(WHATSAPP_PERSONAL_SOURCE_ID) || connected2("whatsapp_personal", "whatsapp.personal.messages.sync")))
+      mountWhatsApp();
+    if (!telegramConnectorStores && telegramConnectorStoreLane.enabled && (sourceHasStores(TELEGRAM_MESSAGES_SOURCE_ID) || connected2("telegram", "telegram.messages.sync")))
+      mountTelegram();
+    if (!readwiseConnectorStore && readwiseConnectorStoreLane.enabled && (sourceHasStores(READWISE_SOURCE_ID) || connected2("readwise", "readwise.sync")))
+      mountReadwise();
+    if (!xBookmarksConnectorStore && xBookmarksConnectorStoreLane.enabled && (sourceHasStores(X_BOOKMARKS_SOURCE_ID) || connected2("x", "x.bookmarks.sync")))
+      mountXBookmarks();
+    mountConfiguredSourceStores();
+  };
+  mountSourceLanes(connectedHandles);
   const laneConnectorStores = [
     ...dropboxConnectorStore ? [dropboxConnectorStore] : [],
     ...localFilesConnectorStore ? [localFilesConnectorStore] : [],
@@ -206762,16 +207195,19 @@ ${key2}`;
     ...telegramConnectorStores ? [telegramConnectorStores.internal, telegramConnectorStores.secureLocal] : [],
     ...whatsappConnectorStore ? [whatsappConnectorStore] : []
   ];
-  const configuredConnectorStoreMounts = parseConnectorStoreMountsFromEnv(process.env.OLYMPUS_SOURCE_INDEX_CONNECTOR_STORES_JSON, {
-    collidingStores: laneConnectorStores,
-    registeredCorpora: sourceCorpusRegistry2.list(),
-    storeOwner: lifecycleStoreFileOwner(process.env)
+  let configuredMountStores = laneConnectorStores;
+  const discoverConfiguredStores = createConnectorStoreMountDiscovery(process.env.OLYMPUS_SOURCE_INDEX_CONNECTOR_STORES_JSON, {
+    stores: () => configuredMountStores,
+    registeredCorpora: () => sourceCorpusRegistry2.list(),
+    storeOwner: () => lifecycleStoreFileOwner(process.env)
   });
+  const configuredConnectorStoreMounts = discoverConfiguredStores();
   const configuredConnectorStores = configuredConnectorStoreMounts.map((mount) => mount.store);
   const connectorStores = mergeConnectorStores([
     ...configuredConnectorStores,
     ...laneConnectorStores
   ]);
+  configuredMountStores = connectorStores;
   const readConnectorStores = connectorStores;
   const configuredFileExtractionCorpora = parseFileExtractionCorporaEnv(process.env.OLYMPUS_FILE_EXTRACTION_CORPORA_JSON);
   const dropboxExtractionScopes = dropboxPolicyFullExtractionScopeKeys(dropboxIngestionPolicy);
@@ -206782,7 +207218,7 @@ ${key2}`;
     capability: "google_drive.docs.sync",
     handles: readActiveConnectedHandles(process.env)
   });
-  const fileExtractionCorpora = fileExtractionCorporaRoster({
+  const fileExtractionCorpora = () => fileExtractionCorporaRoster({
     configured: configuredFileExtractionCorpora,
     ...dropboxConnectorStore ? {
       dropbox: {
@@ -206851,6 +207287,9 @@ ${key2}`;
     console.log("[file-extraction] Dropbox extraction waits for Dropbox to be connected.");
   }
   const assertFileSourceScopeCurrent = (provider) => {
+    if (provider === LOCAL_FILES_PROVIDER && !localFilesCleanupRecovery?.ready()) {
+      throw new OperationError("source_index_policy_violation", "Local-file cleanup is still in progress.");
+    }
     const sourceId = fileSourceScopeIdForProvider(provider);
     if (!sourceId)
       return;
@@ -206860,7 +207299,8 @@ ${key2}`;
     }
     fileSourceScopeAuthority.assertCurrent(ref);
   };
-  const googleDriveExtractionTierSet = googleDriveInternalConnectorStore && googleDriveSecureConnectorStore ? createGoogleDriveLaneTierSet({
+  let googleDriveExtractionTierSet;
+  const driveExtractionSet = () => googleDriveExtractionTierSet ??= googleDriveInternalConnectorStore && googleDriveSecureConnectorStore ? createGoogleDriveLaneTierSet({
     setId: "google_drive.extraction",
     internalStore: googleDriveInternalConnectorStore,
     secureStore: googleDriveSecureConnectorStore,
@@ -206874,15 +207314,18 @@ ${key2}`;
     ...googleDriveTierLane?.secrets ? { secretLocations: googleDriveTierLane.secrets } : {},
     registerWithLedger: false
   }) : undefined;
-  const fileExtractionTierSets = new Map([
-    ...dropboxTierLane ? [[DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID, dropboxTierLane.set]] : [],
-    ...localFilesTierLane ? [[LOCAL_FILES_CORPUS_ID, localFilesTierLane.set]] : [],
-    ...whatsappTierSet ? [[WHATSAPP_LIVE_CORPUS_ID, whatsappTierSet]] : [],
-    ...googleDriveExtractionTierSet && googleDriveInternalConnectorStore && googleDriveSecureConnectorStore ? [
-      [googleDriveInternalConnectorStore.corpusId, googleDriveExtractionTierSet],
-      [googleDriveSecureConnectorStore.corpusId, googleDriveExtractionTierSet]
-    ] : []
-  ]);
+  const fileExtractionTierSets = () => {
+    const googleDriveExtractionTierSet2 = driveExtractionSet();
+    return new Map([
+      ...dropboxTierLane ? [[DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID, dropboxTierLane.set]] : [],
+      ...localFilesTierLane ? [[LOCAL_FILES_CORPUS_ID, localFilesTierLane.set]] : [],
+      ...whatsappTierSet ? [[WHATSAPP_LIVE_CORPUS_ID, whatsappTierSet]] : [],
+      ...googleDriveExtractionTierSet2 && googleDriveInternalConnectorStore && googleDriveSecureConnectorStore ? [
+        [googleDriveInternalConnectorStore.corpusId, googleDriveExtractionTierSet2],
+        [googleDriveSecureConnectorStore.corpusId, googleDriveExtractionTierSet2]
+      ] : []
+    ]);
+  };
   const fileExtractionExtractors = {
     ...process.env.OLYMPUS_TRANSCRIBE_COMMAND?.trim() ? { transcription: { command: process.env.OLYMPUS_TRANSCRIBE_COMMAND.trim() } } : sharedBuiltInTranscriber(process.env) ? { transcription: { builtIn: sharedBuiltInTranscriber(process.env) } } : {},
     ...fileExtractionPdfTextCommand !== undefined || fileExtractionPdfTextTimeoutMs !== undefined || fileExtractionMaxBoundedTextChars !== undefined ? {
@@ -206922,11 +207365,12 @@ ${key2}`;
       }
     } : {}
   };
-  const fileExtractionRuntime = createFileExtractionRuntime({
+  const buildFileExtractionRuntime = () => createFileExtractionRuntime({
     env: process.env,
-    enabled: fileExtractionCorpora.length > 0,
+    enabled: fileExtractionCorpora().length > 0 || dropboxConnectorStoreLane.enabled || localFilesConnectorStoreLane.enabled || whatsappConnectorStoreLane.enabled || googleDriveConnectorStoreLane.enabled,
+    allowEmpty: true,
     connectorStores,
-    corpora: fileExtractionCorpora,
+    corpora: fileExtractionCorpora(),
     extraSourceFactories: new Map([
       [LOCAL_FILES_PROVIDER, ({ config: config2, store, view: view3 }) => {
         const ref = fileSourceScopeAuthority?.policyRef(LOCAL_FILES_SOURCE_ID);
@@ -206954,7 +207398,7 @@ ${key2}`;
       }],
       ["whatsapp", ({ config: config2, store, view: view3 }) => whatsappExtraction({ config: config2, store, ...view3 ? { view: view3 } : {} })]
     ]),
-    ...fileExtractionTierSets.size > 0 ? { tierSets: fileExtractionTierSets } : {},
+    tierSets: fileExtractionTierSets(),
     scopeGuard: {
       assertAuthorized({ config: config2 }) {
         assertFileSourceScopeCurrent(config2.provider);
@@ -206971,6 +207415,11 @@ ${key2}`;
       }
     },
     extractors: fileExtractionExtractors
+  });
+  const fileExtractionRuntime = createRefreshableFileExtractionRuntime({
+    build: buildFileExtractionRuntime,
+    generation: () => sourceLaneGeneration,
+    beforeCurrent: () => mountSourceLanes(readActiveConnectedHandles(process.env))
   });
   const connectorStoreEmbeddingProviders = new Map;
   const connectorStoreAccountScopes = new Map;
@@ -207002,18 +207451,20 @@ ${key2}`;
       connectorStorePrincipals.set(corpusId, canonicalConnectorStoreChatPrincipal("telegram", telegramConnectorAccountScope));
     }
   }
-  for (const mount of configuredConnectorStoreMounts) {
+  const adoptConfiguredPrincipal = (mount) => {
     if (mount.principal && !connectorStorePrincipals.has(mount.store.corpusId)) {
       connectorStorePrincipals.set(mount.store.corpusId, mount.principal);
     }
-    if (mount.store.family !== "chat" || !mount.chatPrincipal)
-      continue;
-    if (!connectorStoreAccountScopes.has(mount.store.corpusId)) {
+    if (mount.store.family === "chat" && mount.chatPrincipal && !connectorStoreAccountScopes.has(mount.store.corpusId)) {
       connectorStoreAccountScopes.set(mount.store.corpusId, mount.chatPrincipal.accountScope);
     }
-  }
+  };
+  for (const mount of configuredConnectorStoreMounts)
+    adoptConfiguredPrincipal(mount);
   const connectorStoreReadScope = (store) => {
     const sourceId = isDropboxTierStore(store) ? "dropbox.files" : isLocalFilesTierStore(store) ? LOCAL_FILES_SOURCE_ID : store === googleDriveInternalConnectorStore || store === googleDriveSecureConnectorStore || store.corpusId === GOOGLE_DRIVE_PUBLIC_CONNECTOR_CORPUS_ID && store === googleDriveTierLane?.publicStore?.current() ? "google_drive.docs" : Object.values(EVERNOTE_TIER_CORPUS_IDS).includes(store.corpusId) ? EVERNOTE_SOURCE_ID : undefined;
+    if (sourceId === LOCAL_FILES_SOURCE_ID && !localFilesCleanupRecovery?.ready())
+      return { allowed: false };
     if (!sourceId)
       return { allowed: true, contentAllowed: true };
     const approval = fileSourceScopeAuthority?.snapshot(sourceId);
@@ -207096,6 +207547,17 @@ ${key2}`;
   registerTierLegStore = (store, siblingCorpusId, embeddingProvider) => {
     if (!connectorStores.includes(store))
       connectorStores.push(store);
+    if (!fullyDefinedCorpusIds.has(store.corpusId)) {
+      const definition = registeredCorpusDefinitions.get(store.corpusId);
+      fullCorpusDefinitions.push(defineConnectorCorpus({
+        corpusId: store.corpusId,
+        family: store.family,
+        trustDomain: store.trustDomain,
+        ...definition ? { activationMode: definition.activationMode } : {},
+        ...secureEmbeddingCloudApproved && store.trustDomain === "secure_local" ? { embeddingPolicy: "cloud_allowed_by_policy" } : {}
+      }));
+      fullyDefinedCorpusIds.add(store.corpusId);
+    }
     const accountScope = connectorStoreAccountScopes.get(siblingCorpusId);
     if (accountScope)
       connectorStoreAccountScopes.set(store.corpusId, accountScope);
@@ -207110,6 +207572,38 @@ ${key2}`;
         providers: connectorStoreEmbeddingProviders,
         retrievalAvailability
       });
+    }
+  };
+  sourceLaneMounted = (stores) => {
+    if (stores.some((store) => !connectorStores.includes(store)))
+      sourceLaneGeneration += 1;
+    for (const store of stores) {
+      const provider = store === readwiseConnectorStore ? readwiseEmbeddingProvider : store === xBookmarksConnectorStore ? xBookmarksEmbeddingProvider : store.trustDomain === "secure_local" ? tierSecureEmbeddingProvider : sourceIndexEmbeddingProvider;
+      registerTierLegStore(store, store.corpusId, provider ?? null);
+      if (store === dropboxConnectorStore) {
+        connectorStoreAccountScopes.set(store.corpusId, dropboxProviderAccount);
+        connectorStorePrincipals.set(store.corpusId, { provider: "dropbox", accountScope: dropboxProviderAccount });
+      } else if (store === localFilesConnectorStore) {
+        connectorStoreAccountScopes.set(store.corpusId, LOCAL_FILES_ACCOUNT_SCOPE);
+        connectorStorePrincipals.set(store.corpusId, { provider: LOCAL_FILES_PROVIDER, accountScope: LOCAL_FILES_ACCOUNT_SCOPE });
+      } else if (store === whatsappConnectorStore || store === telegramConnectorStores?.internal || store === telegramConnectorStores?.secureLocal) {
+        const telegram = store !== whatsappConnectorStore;
+        const accountScope = telegram ? telegramConnectorAccountScope : WHATSAPP_PERSONAL_ACCOUNT_SCOPE;
+        connectorStoreAccountScopes.set(store.corpusId, accountScope);
+        connectorStorePrincipals.set(store.corpusId, canonicalConnectorStoreChatPrincipal(telegram ? "telegram" : "whatsapp", accountScope));
+      }
+    }
+  };
+  for (const stores of earlySourceStores.splice(0))
+    sourceLaneMounted(stores);
+  mountConfiguredSourceStores = () => {
+    if (sourceRuntimeClosed)
+      return;
+    const mounts = discoverConfiguredStores();
+    for (const mount of mounts) {
+      if (!connectorStores.includes(mount.store))
+        sourceLaneMounted([mount.store]);
+      adoptConfiguredPrincipal(mount);
     }
   };
   for (const registration of tierLegsOpenedEarly.splice(0))
@@ -207294,7 +207788,8 @@ ${key2}`;
   const createGmailConnectorStoreSyncForHandle = (handle) => {
     const scopeRef = handle && fileSourceScopeAuthority ? fileSourceScopeAuthority.mailPolicyRef() : undefined;
     const approval = scopeRef && fileSourceScopeAuthority ? fileSourceScopeAuthority.assertCurrentMail(scopeRef) : undefined;
-    const privateDefinition = gmailSecureConnectorStore && sourceCorpusRegistry2.definitions().find((entry) => entry.corpusId === gmailSecureConnectorStore.corpusId);
+    const privateCorpusId = gmailSecureConnectorStore?.corpusId;
+    const privateDefinition = privateCorpusId && sourceCorpusRegistry2.definitions().find((entry) => entry.corpusId === privateCorpusId);
     return handle && scopeRef && approval && fileSourceScopeAuthority && gmailInternalConnectorStore && gmailSecureConnectorStore && gmailRequestBudget ? createGmailConnectorStoreSyncHandler({
       internalStore: gmailInternalConnectorStore,
       secureStore: gmailSecureConnectorStore,
@@ -207428,7 +207923,10 @@ ${key2}`;
       secureAnalystPoolState,
       ...secureDerivativeDefault !== undefined ? { secureDerivativeDefault } : {},
       lanes: sourceAnswerLanes = createSourceAnswerLanes({
-        stores: () => readConnectorStores,
+        stores: () => {
+          mountConfiguredSourceStores();
+          return readConnectorStores;
+        },
         registry: () => buildSourceIndexCorpusRegistry(sourceCorpusRegistry2.definitions("answer", fullCorpusDefinitions).filter((definition) => !onDemandCorpusAbsent(definition.corpusId))),
         embeddingProvider: (store) => connectorStoreEmbeddingProviders.get(store.corpusId) ?? sourceIndexEmbeddingProvider,
         localEmbedding: loadedBuiltInEmbedding,
@@ -207548,7 +208046,10 @@ ${key2}`;
     } : {}
   });
   const sourceIndexStatus = sourceIndexReadEnabled ? createSourceIndexStatusHandler({
-    corpusDefinitions: () => sourceCorpusRegistry2.definitions("status", fullCorpusDefinitions).filter((definition) => !onDemandCorpusAbsent(definition.corpusId)),
+    corpusDefinitions: () => {
+      mountConfiguredSourceStores();
+      return sourceCorpusRegistry2.definitions("status", fullCorpusDefinitions).filter((definition) => !onDemandCorpusAbsent(definition.corpusId));
+    },
     connectorStores,
     connectorStoreStatusScope,
     ...unreadableFiles ? { unreadableCount: (corpusId) => unreadableFiles.recheck(corpusId).unreadable } : {},
@@ -207578,6 +208079,8 @@ ${key2}`;
       capability: "x.bookmarks.sync",
       handles: readActiveConnectedHandles(process.env)
     });
+    if (handle)
+      mountXBookmarks();
     const runtime = refreshableXBookmarksRuntime?.runtimeForHandle(handle);
     if (!runtime)
       return;
@@ -207586,6 +208089,8 @@ ${key2}`;
     return guard ? accountCheckedXBookmarksRuntime(runtime, guard) : runtime;
   };
   const readwiseSyncForHandle = (handle) => {
+    if (handle)
+      mountReadwise();
     const sync = refreshableReadwiseRuntime?.syncForHandle(handle);
     if (sync && readwiseConnectorStore) {
       connectorStoreAccountScopes.set(readwiseConnectorStore.corpusId, sourceIndexAccount?.trim() || handle?.accountRole?.trim() || "personal");
@@ -207651,6 +208156,9 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     readsAs: { accountId: readsAs }
   });
   const schedulerSourcesForHandles = (handles) => {
+    mountSourceLanes(handles);
+    if (whatsappConnectorStore && whatsappTierSet)
+      whatsappConnectorStoreSync ??= createWhatsAppConnectorStoreSyncHandler({ tierSet: whatsappTierSet, store: whatsappConnectorStore, account: WHATSAPP_PERSONAL_ACCOUNT_SCOPE, env: process.env, readChild: whatsappReadChild });
     const decisions = [];
     laneGuards.clear();
     const recordLane = (expectedSourceId, skipReason, build) => {
@@ -207723,7 +208231,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     const currentGoogleDriveScopeRef = currentGoogleDriveHandle && fileSourceScopeAuthority ? fileSourceScopeAuthority.policyRef("google_drive.docs") : undefined;
     const currentGoogleDriveConnectorStoreSync = createGoogleDriveConnectorStoreSyncForHandle(currentGoogleDriveHandle);
     const currentDropboxScopeRef = currentDropboxHandle && fileSourceScopeAuthority ? fileSourceScopeAuthority.policyRef("dropbox.files") : undefined;
-    const currentDropboxProviderStoreSync = currentDropboxHandle && currentDropboxScopeRef && fileSourceScopeAuthority && dropboxConnectorStore && dropboxTierLane ? currentDropboxHandle.handle === dropboxHandle?.handle && currentDropboxScopeRef.sourceId === dropboxScopeRef?.sourceId && currentDropboxScopeRef.accountGeneration === dropboxScopeRef?.accountGeneration && currentDropboxScopeRef.revision === dropboxScopeRef?.revision && dropboxProviderStoreSync ? dropboxProviderStoreSync : createDropboxProviderStoreSyncHandler({
+    const currentDropboxProviderStoreSync = currentDropboxHandle && currentDropboxScopeRef && fileSourceScopeAuthority && dropboxConnectorStore && dropboxTierLane ? createDropboxProviderStoreSyncHandler({
       tierSet: dropboxTierLane.set,
       store: dropboxConnectorStore,
       account: currentDropboxHandle.accountRole?.trim() || dropboxFilesAccount || "personal",
@@ -208298,8 +208806,13 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     dropboxIngestionPolicy,
     ...sourceIndexEmbeddingProvider ? { sourceIndexEmbeddingProvider } : {},
     ...fileExtractionRuntime ? { fileExtraction: fileExtractionRuntime.runner } : {},
+    authorizeFileExtractionLane: (lane) => {
+      if (lane.provider === LOCAL_FILES_PROVIDER && !localFilesCleanupRecovery?.ready()) {
+        throw new OperationError("source_index_policy_violation", "Local-file cleanup is still in progress.");
+      }
+    },
     ...fileExtractionRuntime ? {
-      pdfExtractionLanes: () => pdfExtractionLanes(fileExtractionCorpora, fileExtractionRuntime.corpusIds),
+      pdfExtractionLanes: () => pdfExtractionLanes(fileExtractionCorpora(), fileExtractionRuntime.corpusIds),
       pdfExtractionLaneScopeApproved: (lane) => {
         try {
           assertFileSourceScopeCurrent(lane.provider);
@@ -208311,17 +208824,16 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
         }
       }
     } : {},
-    ...connectorStores.length > 0 ? { connectorStores } : {},
-    ...tierLanes.length > 0 ? {
-      connectorStoreTierSiblings: (corpusId) => [
-        ...tierLanes.find((lane) => lane.corpusIds.has(corpusId))?.corpusIds ?? []
-      ].filter((sibling) => sibling !== corpusId),
-      sourceIndexVisibilityGate: tierVisibilityGate,
-      secretLocationSearch: tierSecretLocations
-    } : {},
-    ...connectorStoreEmbeddingProviders.size > 0 ? { connectorStoreEmbeddingProviders } : {},
-    ...connectorStoreAccountScopes.size > 0 ? { connectorStoreAccountScopes } : {},
-    ...connectorStorePrincipals.size > 0 ? { connectorStorePrincipals } : {},
+    connectorStores,
+    refreshConnectorStores: () => mountConfiguredSourceStores(),
+    connectorStoreTierSiblings: (corpusId) => [
+      ...tierLanes.find((lane) => lane.corpusIds.has(corpusId))?.corpusIds ?? []
+    ].filter((sibling) => sibling !== corpusId),
+    sourceIndexVisibilityGate: tierVisibilityGate,
+    secretLocationSearch: tierSecretLocations,
+    connectorStoreEmbeddingProviders,
+    connectorStoreAccountScopes,
+    connectorStorePrincipals,
     connectorStoreReadScope,
     ...sourceScheduler ? { sourceScheduler } : {},
     ...sourceWatchPass ? {
@@ -209054,7 +209566,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
       }
     })), withWorkerBearerAuth(withEngineBriefRoute2(worker.fetch, { view: (signal) => engineBriefView(chatgptSurface, signal) }), { authToken, requireOwnerSocket: !!socketPath, sessionSecret: dashboardSessionSecret.secret }))))))), !!socketPath)
   };
-  await localFilesOwnRootsCleanup?.run();
+  await localFilesInitialCleanup;
   const startServer = () => socketPath ? Bun.serve({ unix: socketPath, fetch(request, server2) {
     server2.timeout(request, 0);
     if (new URL(request.url).pathname === DESKTOP_OWNER_OPEN_PATH) {
@@ -209207,6 +209719,10 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     if (shuttingDown)
       return;
     shuttingDown = true;
+    sourceRuntimeClosed = true;
+    localFilesCleanupRecovery?.close();
+    sourceScheduler?.stop();
+    worker.close();
     updateChecker.stop();
     capturesClosed = true;
     desktopPollingClosed = true;
@@ -209228,8 +209744,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     waitingStoreClosed = true;
     waitingStore?.close();
     waitingStore = undefined;
-    worker.close();
-    sourceScheduler?.stop();
+    fileExtractionRuntime?.close();
     server.stop();
   };
   shutdownSignals.setShutdown(shutdown);
@@ -209646,6 +210161,52 @@ function commaSeparatedEnv(value2) {
   return (value2 ?? "").split(/,|\|\|/).map((item) => item.trim()).filter(Boolean);
 }
 function parseConnectorStoreMountsFromEnv(raw, options = {}) {
+  return mountConnectorStoreDeclarations(compileConnectorStoreMountDeclarations(raw, options), options);
+}
+function createConnectorStoreMountDiscovery(raw, options) {
+  const reported = new Set;
+  const reportFailure = (message2) => {
+    const label = message2.split(" skipped:")[0];
+    if (reported.has(label))
+      return;
+    reported.add(label);
+    (options.reportFailure ?? console.error)(message2);
+  };
+  const declarations = compileConnectorStoreMountDeclarations(raw, { reportFailure });
+  const registeredCorpora = options.registeredCorpora();
+  let previousStores;
+  let pending = declarations;
+  return () => {
+    const stores = options.stores();
+    if (!previousStores || previousStores.length !== stores.length || stores.some((store, i2) => store !== previousStores[i2])) {
+      pending = declarations;
+      previousStores = [...stores];
+    }
+    if (!pending.length)
+      return [];
+    const byCorpus = new Map(stores.map((store) => [store.corpusId, store]));
+    const ready = [];
+    const absent = [];
+    for (const declaration of pending) {
+      const placed = hasFolderLayout(storageAccountForCorpus(declaration, registeredCorpora).sourceId);
+      if (byCorpus.has(declaration.corpusId) || !placed && (!declaration.dbPath || existsSync98(declaration.dbPath)))
+        ready.push(declaration);
+      else
+        absent.push(declaration);
+    }
+    pending = absent;
+    if (!ready.length)
+      return [];
+    return mountConnectorStoreDeclarations(ready, {
+      existingOnly: true,
+      collidingStores: stores,
+      registeredCorpora: options.registeredCorpora(),
+      storeOwner: options.storeOwner(),
+      reportFailure
+    });
+  };
+}
+function compileConnectorStoreMountDeclarations(raw, options) {
   const value2 = raw?.trim();
   if (!value2)
     return [];
@@ -209659,8 +210220,6 @@ function parseConnectorStoreMountsFromEnv(raw, options = {}) {
     throw new Error("OLYMPUS_SOURCE_INDEX_CONNECTOR_STORES_JSON must be a JSON array.");
   }
   const reportFailure = options.reportFailure ?? ((message2) => console.error(message2));
-  const collidingStoresByCorpusId = new Map((options.collidingStores ?? []).map((store) => [store.corpusId, store]));
-  const ownerCorpusIdByDbPath = new Map((options.collidingStores ?? []).map((store) => [store.dbPath, store.corpusId]));
   const declarations = [];
   for (const [index, entry] of parsed.entries()) {
     const declaredCorpusIdValue = entry && typeof entry === "object" ? entry.corpusId : undefined;
@@ -209673,12 +210232,20 @@ function parseConnectorStoreMountsFromEnv(raw, options = {}) {
       reportFailure(`Connector-store mount ${label} skipped: ${detail}`);
     }
   }
+  return declarations;
+}
+function mountConnectorStoreDeclarations(declarations, options) {
+  const reportFailure = options.reportFailure ?? ((message2) => console.error(message2));
+  const collidingStoresByCorpusId = new Map((options.collidingStores ?? []).map((store) => [store.corpusId, store]));
+  const ownerCorpusIdByDbPath = new Map((options.collidingStores ?? []).map((store) => [store.dbPath, store.corpusId]));
   const mounts = [];
   for (const declaration of declarations) {
     try {
       const collidingStore = collidingStoresByCorpusId.get(declaration.corpusId);
       if (hasFolderLayout(storageAccountForCorpus(declaration, options.registeredCorpora).sourceId)) {
         if (!collidingStore) {
+          if (options.existingOnly)
+            continue;
           throw new Error("its source keeps its stores where Olympus places them; a declaration can only add a principal to the store its lane opened, and that lane is not open.");
         }
         const { dbPath: _ignored, ...placed } = declaration;
@@ -209694,6 +210261,8 @@ function parseConnectorStoreMountsFromEnv(raw, options = {}) {
         throw new Error("Connector store entries require dbPath, corpusId, family, trustDomain.");
       if (collidingStore)
         assertConnectorStoreMountIdentity(declaration, collidingStore);
+      if (options.existingOnly && !collidingStore && !existsSync98(declaration.dbPath))
+        continue;
       const pathOwnerCorpusId = ownerCorpusIdByDbPath.get(declaration.dbPath);
       if (pathOwnerCorpusId !== undefined && pathOwnerCorpusId !== declaration.corpusId) {
         throw new Error(`dbPath ${JSON.stringify(declaration.dbPath)} is already mounted as corpus ${JSON.stringify(pathOwnerCorpusId)}.`);
@@ -209890,6 +210459,7 @@ var init_server5 = __esm(async () => {
   init_source_answer_lanes();
   init_gmail_status_scope();
   init_tiered_store_set();
+  init_archive_target();
   init_connector5();
   init_live_sync3();
   init_runtime3();

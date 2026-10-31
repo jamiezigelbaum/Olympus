@@ -31,8 +31,14 @@ import {
   sharedDataPath,
   type AccountRawName,
 } from '../src/core/olympus-layout.ts';
+import { localFilesItemId } from '../src/workers/local-files/connector.ts';
+import type { SourceConnector } from '../src/core/contracts.ts';
 import { resolvedStorePath } from '../src/core/source-placement.ts';
 import { readSourceRegistry } from '../src/core/source-registry.ts';
+import { TierLedger } from '../src/workers/classification/tier-ledger.ts';
+import { FileSourceScopeAuthority } from '../src/workers/source-scope-runtime.ts';
+import { connectThisComputerSource } from '../src/core/this-computer.ts';
+import { upsertConnectedHandle } from '../src/workers/credential-broker/connected-handles.ts';
 import { createWorkerFetch } from '../src/core/worker-transport.ts';
 import { deleteOlympusData } from '../src/data-lifecycle.ts';
 import { archiveConnectorStoreDbPath } from '../src/workers/archive-import/store.ts';
@@ -85,10 +91,10 @@ async function freePort(): Promise<number> {
 }
 
 /** The real worker on `env`, up once it listens (or once it says why it will not). */
-async function boot(env: Env): Promise<Booted> {
+async function boot(env: Env, preload?: string): Promise<Booted> {
   for (const name of readdirSync(env.XDG_RUNTIME_DIR!)) rmSync(join(env.XDG_RUNTIME_DIR!, name), { recursive: true, force: true });
   const port = await freePort();
-  const child = Bun.spawn([process.execPath, SERVER], {
+  const child = Bun.spawn([process.execPath, ...(preload ? ['--preload', preload] : []), SERVER], {
     env: { PATH: process.env.PATH ?? '', ...env, OLYMPUS_EMAIL_SOURCE_PORT: String(port), OLYMPUS_WORKER_AUTH_TOKEN: TOKEN },
     cwd: REPO,
     stdout: 'pipe',
@@ -169,7 +175,7 @@ const SPECS: FixtureSpec[] = [
 ];
 
 /** A store with content, as the connector wrote it, at `path`. */
-async function writeStore(path: string, corpusId: string, family: 'file' | 'email' | 'readwise' | 'x', trustDomain: 'internal' | 'secure_local'): Promise<void> {
+async function writeStore(path: string, corpusId: string, family: 'file' | 'email' | 'readwise' | 'x' | 'note', trustDomain: 'internal' | 'secure_local'): Promise<void> {
   mkdirSync(dirname(path), { recursive: true });
   const store = new LocalConnectorStore({ dbPath: path, corpusId, family, trustDomain });
   try {
@@ -246,7 +252,505 @@ async function seedPreFolderInstall(env: Env): Promise<Record<string, string>> {
   return stores;
 }
 
+async function seedOldLocalOwnItem(env: Env, observation?: { accountGeneration: string; scopeRevision: string }, ownCount = 1): Promise<{ dbPath: string; ownPath: string }> {
+  const dbPath = resolvedStorePath('local.files', 'secure_local', env);
+  const ownPath = join(env.XDG_CONFIG_HOME!, 'olympus', 'old-own-data.txt');
+  const store = new LocalConnectorStore({ dbPath, corpusId: 'secure_local.local.files', family: 'file', trustDomain: 'secure_local' });
+  const items = [...Array.from({ length: ownCount }, (_, i) => [i === 0 ? ownPath : join(dirname(ownPath), `old-own-data-${i}.txt`), 'zzownhistory synthetic old index item']), [join(env.HOME!, 'Documents', 'kept.txt'), 'zzuserhistory synthetic user item']].map(([path, text]) => {
+    const id = localFilesItemId(path!);
+    return {
+      identity: { family: 'file' as const, provider: 'local_files', accountScope: 'this_computer', providerItemId: id, providerFileId: id, localItemId: `this_computer:${id}`, sourceVersion: 'v1' },
+      mimeType: 'text/plain', content: { kind: 'text' as const, text: text! },
+      metadata: { entryKind: 'file', deleted: false, name: path!.split('/').at(-1)!, locatorUri: path!, pathDisplay: path! }, fetchedAt: '2026-10-24T10:00:00.000Z',
+    };
+  });
+  const connector: SourceConnector = { id: 'local.files.old-index', family: 'file', async authenticate() {}, async *listItems() { yield { items, done: true }; }, async fetchItem(id) { return items.find(item => item.identity.localItemId === id)!; }, classificationSignals() { return {}; } };
+  try { await store.syncFromConnector(connector, { fetchContent: true, ...(observation ? { sourceScopeObservation: () => observation } : {}) }); } finally { store.close(); }
+  return { dbPath, ownPath };
+}
+function ownItemStillActive(dbPath: string, ownPath: string): boolean {
+  const db = new Database(dbPath, { readonly: true });
+  try { return (db.query('SELECT COUNT(*) AS n FROM items WHERE tombstoned = 0 AND locator_uri LIKE ?').get(`${dirname(ownPath)}/old-own-data%`) as { n: number }).n > 0; } finally { db.close(); }
+}
+
 describe('source storage, end to end on this host', () => {
+  for (const read of ['status', 'search'] as const) {
+    test(`a declared store ingested after boot is discovered by ${read} with the scheduler off`, async () => {
+      const env: Env = { ...freshHome(), OLYMPUS_WORKER_SCHEDULER_ENABLED: 'false' };
+      const path = join(env.HOME!, 'late-reflect.sqlite');
+      env.OLYMPUS_SOURCE_INDEX_CONNECTOR_STORES_JSON = JSON.stringify([{ dbPath: path, corpusId: 'secure_local.reflect.notes', family: 'note', trustDomain: 'secure_local' }]);
+      const worker = await boot(env);
+      try {
+        expect(worker.output(), listening(worker)).toContain('worker listening');
+        expect((await ask(env, worker, '/v1/source/index/status', {})).status).toBe(200);
+        expect(existsSync(path)).toBe(false);
+        await writeStore(path, 'secure_local.reflect.notes', 'note', 'secure_local');
+        if (read === 'status') expect((await ask(env, worker, '/v1/source/index/status', {})).status).toBe(200);
+        const search = await ask(env, worker, '/v1/source/index/search', { query: 'orchard', corpus_id: 'secure_local.reflect.notes' });
+        expect(search.status, JSON.stringify(search.json)).toBe(200);
+        expect(search.json.hits).toEqual(expect.arrayContaining([expect.objectContaining({ selected_item: expect.objectContaining({ title: 'orchard-lab.txt' }) })]));
+      } finally { await worker.stop(); }
+    }, 180_000);
+  }
+
+  test('startup cleans existing local-file own-root history even without an approved scope', async () => {
+    const env: Env = { ...freshHome(), OLYMPUS_WORKER_SCHEDULER_ENABLED: 'false' };
+    const { dbPath, ownPath } = await seedOldLocalOwnItem(env);
+    expect(ownItemStillActive(dbPath, ownPath)).toBe(true);
+    const worker = await boot(env);
+    try {
+      expect(worker.output(), listening(worker)).toContain('worker listening');
+      expect(ownItemStillActive(dbPath, ownPath)).toBe(false);
+    } finally { await worker.stop(); }
+  }, 180_000);
+
+  test('late local-file mount cleans old own-root history before allowing reads', async () => {
+    const env: Env = { ...freshHome(), OLYMPUS_WORKER_SCHEDULER_ENABLED: 'false' };
+    const registryPath = join(env.HOME!, '.config', 'olympus', 'handles.json');
+    env.OLYMPUS_CREDENTIAL_HANDLE_REGISTRY_PATH = registryPath;
+    const preload = join(env.HOME!, 'slow-own-cleanup.ts');
+    writeFileSync(preload, `
+      import { LocalConnectorStore } from ${JSON.stringify(join(REPO, 'src/workers/connector-store/index.ts'))};
+      const sync = LocalConnectorStore.prototype.syncFromConnector;
+      LocalConnectorStore.prototype.syncFromConnector = async function(connector, ...args) {
+        if (connector.id.includes('local.files.own-roots-cleanup')) await Bun.sleep(1500);
+        return sync.call(this, connector, ...args);
+      };
+    `);
+    const worker = await boot(env, preload);
+    try {
+      expect(worker.output(), listening(worker)).toContain('worker listening');
+      expect(existsSync(resolvedStorePath('local.files', 'secure_local', env))).toBe(false);
+      connectThisComputerSource(registryPath, 'local.files');
+      const authority = new FileSourceScopeAuthority({ registryPath });
+      const pending = authority.snapshot('local.files');
+      authority.approve({ sourceId: 'local.files', accountGeneration: pending.accountGeneration!, expectedRevision: pending.revision, selections: [{ key: env.HOME!, state: 'ingest' }], wholeAccount: false, explicitWholeAccountConfirmation: false });
+      const approved = authority.snapshot('local.files');
+      const { dbPath, ownPath } = await seedOldLocalOwnItem(env, { accountGeneration: approved.accountGeneration!, scopeRevision: approved.revision });
+      const lane = { corpus_id: 'secure_local.local.files', provider: 'local_files', account_scope: 'this_computer', approved_scope_key: `local_files.this_computer:${env.HOME!}` };
+      expect((await ask(env, worker, '/v1/source/index/files/plan', lane)).status).toBe(403);
+      expect(ownItemStillActive(dbPath, ownPath)).toBe(true); // Deliberately slow deletion is still running.
+      const during = await ask(env, worker, '/v1/source/index/search', { corpus_id: lane.corpus_id, approved_scope_key: lane.approved_scope_key, query: 'zzownhistory' });
+      expect(during.json.hits ?? []).toEqual([]);
+      const deadline = Date.now() + 10_000;
+      while (ownItemStillActive(dbPath, ownPath) && Date.now() < deadline) await Bun.sleep(100);
+      expect(ownItemStillActive(dbPath, ownPath), worker.errors()).toBe(false);
+      expect((await ask(env, worker, '/v1/source/index/search', { corpus_id: lane.corpus_id, approved_scope_key: lane.approved_scope_key, query: 'zzownhistory' })).json.hits).toEqual([]);
+      expect((await ask(env, worker, '/v1/source/index/search', { corpus_id: lane.corpus_id, approved_scope_key: lane.approved_scope_key, query: 'zzuserhistory' })).json.hits).toHaveLength(1);
+    } finally { await worker.stop(); }
+  }, 180_000);
+
+  for (const mode of ['unindexed', 'count', 'time', 'transient'] as const) test(`incomplete own-root cleanup stays private and recovers with scheduler off: ${mode}`, async () => {
+    const env: Env = { ...freshHome(), OLYMPUS_WORKER_SCHEDULER_ENABLED: 'false' };
+    const registryPath = join(env.HOME!, '.config', 'olympus', 'handles.json');
+    env.OLYMPUS_CREDENTIAL_HANDLE_REGISTRY_PATH = registryPath;
+    connectThisComputerSource(registryPath, 'local.files');
+    const authority = new FileSourceScopeAuthority({ registryPath });
+    const pending = authority.snapshot('local.files');
+    authority.approve({ sourceId: 'local.files', accountGeneration: pending.accountGeneration!, expectedRevision: pending.revision, selections: [{ key: env.HOME!, state: 'ingest' }], wholeAccount: false, explicitWholeAccountConfirmation: false });
+    const approved = authority.snapshot('local.files');
+    const { dbPath, ownPath } = await seedOldLocalOwnItem(env, { accountGeneration: approved.accountGeneration!, scopeRevision: approved.revision }, 2);
+    if (mode === 'unindexed') {
+      const db = new Database(dbPath);
+      db.exec('DELETE FROM item_locator_identities; UPDATE locator_identity_index_state SET completed = 0, cursor_item_pk = 0');
+      db.close();
+    }
+    const preload = join(env.HOME!, 'incomplete-cleanup.ts');
+    writeFileSync(preload, `
+      import { mock } from 'bun:test';
+      import * as actual from ${JSON.stringify(join(REPO, 'src/workers/local-files/own-roots-cleanup.ts'))};
+      import { LocalConnectorStore } from ${JSON.stringify(join(REPO, 'src/workers/connector-store/index.ts'))};
+      const realCreate = actual.createLocalFilesOwnRootsCleanup;
+      mock.module(${JSON.stringify(join(REPO, 'src/workers/local-files/own-roots-cleanup.ts'))}, () => ({ ...actual,
+        createLocalFilesOwnRootsCleanup: options => {
+          const cleanup = realCreate({ ...options, ...${JSON.stringify(mode === 'count' ? { maxItems: 1, batchSize: 1 } : mode === 'time' ? { maxMs: 20, batchSize: 1 } : {})} });
+          let attempts = 0;
+          return { ...cleanup, run: async () => {
+            if (${mode === 'transient'} && ++attempts <= 2) { await Bun.sleep(1000); return { removed: 0, complete: false }; }
+            return cleanup.run();
+          }};
+        }
+      }));
+      const sync = LocalConnectorStore.prototype.syncFromConnector;
+      LocalConnectorStore.prototype.syncFromConnector = async function(connector, ...args) {
+        if (${mode === 'time' || mode === 'count'} && connector.id.includes('local.files.own-roots-cleanup')) await Bun.sleep(1500);
+        return sync.call(this, connector, ...args);
+      };
+      const backfill = LocalConnectorStore.prototype.ensureLocatorIdentityIndexReady;
+      LocalConnectorStore.prototype.ensureLocatorIdentityIndexReady = async function(...args) {
+        if (${mode === 'unindexed'}) await Bun.sleep(1500);
+        return backfill.apply(this, args);
+      };
+    `);
+    const worker = await boot(env, preload);
+    try {
+      expect(worker.output(), listening(worker)).toContain('worker listening');
+      expect(ownItemStillActive(dbPath, ownPath)).toBe(true);
+      const search = (query: string) => ask(env, worker, '/v1/source/index/search', { corpus_id: 'secure_local.local.files', query });
+      expect((await search('zzownhistory')).json.hits ?? []).toEqual([]);
+      const status = await ask(env, worker, '/v1/source/index/status', { corpus_ids: ['secure_local.local.files'], include_items: true });
+      expect(JSON.stringify(status.json)).not.toContain('old-own-data');
+      for (const route of ['plan', 'extract']) {
+        const extraction = await ask(env, worker, `/v1/source/index/files/${route}`, { corpus_id: 'secure_local.local.files', provider: 'local_files', account_scope: 'this_computer', approved_scope_key: `local_files.this_computer:${env.HOME!}`, limit: 1 });
+        expect(extraction.status, JSON.stringify(extraction.json)).toBe(403);
+        expect(extraction.json).toMatchObject({ error: { code: 'source_index_policy_violation' } });
+      }
+      const deadline = Date.now() + 20_000;
+      let user: Awaited<ReturnType<typeof search>> | undefined;
+      while (Date.now() < deadline) {
+        const own = await search('zzownhistory');
+        expect(own.json.hits ?? []).toEqual([]);
+        user = await search('zzuserhistory');
+        if (Array.isArray(user.json.hits) && user.json.hits.length === 1) break;
+        await Bun.sleep(100);
+      }
+      expect(user?.json.hits, `${worker.errors()}\n${JSON.stringify(user?.json)}`).toHaveLength(1);
+      expect(ownItemStillActive(dbPath, ownPath)).toBe(false);
+    } finally { await worker.stop(); }
+  }, 180_000);
+
+  test('malformed mount declarations are reported once across repeated read refreshes', async () => {
+    const env: Env = { ...freshHome(), OLYMPUS_WORKER_SCHEDULER_ENABLED: 'false', OLYMPUS_SOURCE_INDEX_CONNECTOR_STORES_JSON: JSON.stringify([{ corpusId: 'secure_local.reflect.notes', family: 'typo', trustDomain: 'secure_local' }]) };
+    const worker = await boot(env);
+    try {
+      expect(worker.output(), listening(worker)).toContain('worker listening');
+      for (let i = 0; i < 10; i++) expect((await ask(env, worker, '/v1/source/index/status', {})).status).toBe(200);
+      expect(worker.errors().match(/Connector-store mount secure_local\.reflect\.notes skipped:/g) ?? []).toHaveLength(1);
+    } finally { await worker.stop(); }
+  }, 180_000);
+
+  test('an explicitly disabled Telegram lane leaves an export under Archives without source stores', async () => {
+    const env: Env = { ...freshHome(), OLYMPUS_SOURCE_INDEX_TELEGRAM_CONNECTOR_STORES_ENABLED: 'false', OLYMPUS_WORKER_SCHEDULER_ENABLED: 'false' };
+    const resultPath = join(env.HOME!, 'disabled-target.json');
+    const preload = join(env.HOME!, 'disabled-target.ts');
+    writeFileSync(preload, `
+      import { archiveSourceTargets } from ${JSON.stringify(join(REPO, 'src/workers/archive-import/source-targets.ts'))};
+      import { Database } from 'bun:sqlite';
+      import { createArchiveImportRuntime } from ${JSON.stringify(join(REPO, 'src/workers/archive-import/runtime.ts'))};
+      import { pullArchiveImport } from ${JSON.stringify(join(REPO, 'src/workers/archive-import/sync.ts'))};
+      import { telegramChat, telegramJson, telegramSingleChatExport, telegramText, writeTelegramExport } from ${JSON.stringify(join(REPO, 'test/support/archive-fixtures-telegram.ts'))};
+      import { writeFileSync } from 'node:fs';
+      setTimeout(async () => {
+        const registered = !!archiveSourceTargets.forSource('telegram.messages');
+        if (registered) { writeFileSync(${JSON.stringify(resultPath)}, JSON.stringify({ registered })); return; }
+        const dir = ${JSON.stringify(join(env.HOME!, 'fixture-export'))};
+        writeTelegramExport(dir, telegramJson(telegramSingleChatExport(telegramChat({ name: 'Synthetic', type: 'personal_chat', id: 42, messages: [telegramText(1, 'Synthetic archive item')] }))));
+        const runtime = createArchiveImportRuntime({ env: process.env });
+        const started = runtime.start(dir);
+        if (started.kind !== 'started') throw new Error(started.kind);
+        for (let i = 0; i < 20; i++) {
+          const result = await pullArchiveImport({ state: runtime.state, lane: runtime.lane('chat'), archiveId: started.archive.archive_id, targets: runtime.targets });
+          if (!result.continueSoon) break;
+        }
+        writeFileSync(${JSON.stringify(resultPath)}, JSON.stringify({ registered, target: started.archive.target ?? null, archived: runtime.existingLanes().some(lane => lane.set.openStores().some(store => { const db = new Database(store.dbPath, { readonly: true }); try { return db.query('SELECT COUNT(*) AS n FROM items').get().n > 0; } finally { db.close(); } })) }));
+      }, 2000);
+    `);
+    const worker = await boot(env, preload);
+    try {
+      expect(worker.output(), listening(worker)).toContain('worker listening');
+      const deadline = Date.now() + 10_000;
+      while (!existsSync(resultPath) && Date.now() < deadline) await Bun.sleep(100);
+      expect(existsSync(resultPath), worker.errors()).toBe(true);
+      expect(JSON.parse(readFileSync(resultPath, 'utf8'))).toEqual({ registered: false, target: null, archived: true });
+      expect(existsSync(resolvedStorePath('telegram.messages', 'internal', env))).toBe(false);
+      expect(existsSync(resolvedStorePath('telegram.messages', 'secure_local', env))).toBe(false);
+    } finally { await worker.stop(); }
+  }, 180_000);
+
+  for (const sourceId of ['telegram.messages', 'gmail.email', 'whatsapp.personal.messages']) test(`a retained lazy ${sourceId} archive target cannot open stores after shutdown`, async () => {
+    const env: Env = { ...freshHome(), OLYMPUS_WORKER_SCHEDULER_ENABLED: 'false' };
+    const resultPath = join(env.HOME!, 'closed-target.json');
+    const preload = join(env.HOME!, 'closed-target.ts');
+    writeFileSync(preload, `
+      import { archiveSourceTargets } from ${JSON.stringify(join(REPO, 'src/workers/archive-import/source-targets.ts'))};
+      import { writeFileSync } from 'node:fs';
+      process.on('SIGTERM', () => queueMicrotask(() => {
+        try {
+          const target = archiveSourceTargets.forSource(${JSON.stringify(sourceId)});
+          if (!target) throw new Error('target missing');
+          target.lane({ sourceId: ${JSON.stringify(sourceId)}, slot: '1' }, process.env);
+          writeFileSync(${JSON.stringify(resultPath)}, JSON.stringify({ opened: true }));
+        } catch (error) { writeFileSync(${JSON.stringify(resultPath)}, JSON.stringify({ error: String(error) })); }
+      }));
+    `);
+    const worker = await boot(env, preload);
+    expect(worker.output(), listening(worker)).toContain('worker listening');
+    await worker.stop();
+    expect(JSON.parse(readFileSync(resultPath, 'utf8'))).toMatchObject({ error: expect.stringMatching(/closed/i) });
+    expect(existsSync(resolvedStorePath(sourceId, 'internal', env))).toBe(false);
+  }, 180_000);
+
+  test('Telegram registers its archive target before pairing and opens its source lane only on import', async () => {
+    const env = freshHome();
+    const resultPath = join(env.HOME!, 'telegram-target.json');
+    const preload = join(env.HOME!, 'check-telegram-target.ts');
+    writeFileSync(preload, `
+      import { archiveSourceTargets } from ${JSON.stringify(join(REPO, 'src/workers/archive-import/source-targets.ts'))};
+      import { resolvedStorePath } from ${JSON.stringify(join(REPO, 'src/core/source-placement.ts'))};
+      import { existsSync, writeFileSync } from 'node:fs';
+      const deadline = Date.now() + 10000;
+      const tick = setInterval(() => {
+        const target = archiveSourceTargets.forSource('telegram.messages');
+        if (!target && Date.now() < deadline) return;
+        clearInterval(tick);
+        if (!target) { writeFileSync(${JSON.stringify(resultPath)}, JSON.stringify({ registered: false })); return; }
+        const path = resolvedStorePath('telegram.messages', 'internal', process.env);
+        const existed = existsSync(path);
+        const lane = target.lane({ sourceId: 'telegram.messages', slot: '1' }, process.env);
+        writeFileSync(${JSON.stringify(resultPath)}, JSON.stringify({ registered: true, existed, opened: existsSync(path), setId: lane.set.setId, formats: target.formats }));
+      }, 50);
+    `);
+    const worker = await boot(env, preload);
+    try {
+      expect(worker.output(), listening(worker)).toContain('worker listening');
+      const deadline = Date.now() + 12_000;
+      while (!existsSync(resultPath) && Date.now() < deadline) await Bun.sleep(100);
+      expect(JSON.parse(readFileSync(resultPath, 'utf8'))).toMatchObject({ registered: true, existed: false, opened: true, formats: ['telegram_json'] });
+    } finally { await worker.stop(); }
+  }, 180_000);
+
+  test('an enabled file lane mounts for extraction after boot with global reads and scheduler off', async () => {
+    const env: Env = {
+      ...freshHome(), OLYMPUS_SOURCE_INDEX_ENABLED: 'false', OLYMPUS_SOURCE_INDEX_ANSWER_ENABLED: 'false',
+      OLYMPUS_SOURCE_INDEX_LOCAL_FILES_CONNECTOR_STORE_ENABLED: 'true', OLYMPUS_WORKER_SCHEDULER_ENABLED: 'false',
+    };
+    const registryPath = join(env.HOME!, '.config', 'olympus', 'handles.json');
+    env.OLYMPUS_CREDENTIAL_HANDLE_REGISTRY_PATH = registryPath;
+    const worker = await boot(env);
+    try {
+      expect(worker.output(), listening(worker)).toContain('worker listening');
+      const path = resolvedStorePath('local.files', 'secure_local', env);
+      expect(existsSync(path)).toBe(false);
+      connectThisComputerSource(registryPath, 'local.files');
+      const folder = join(env.HOME!, 'selected-notes');
+      mkdirSync(folder);
+      const authority = new FileSourceScopeAuthority({ registryPath });
+      const pending = authority.snapshot('local.files');
+      authority.approve({ sourceId: 'local.files', accountGeneration: pending.accountGeneration!, expectedRevision: pending.revision, selections: [{ key: folder, state: 'ingest' }], wholeAccount: false, explicitWholeAccountConfirmation: false });
+      let plan: Awaited<ReturnType<typeof ask>>;
+      const cleanupDeadline = Date.now() + 10_000;
+      do {
+        plan = await ask(env, worker, '/v1/source/index/files/plan', {
+          corpus_id: 'secure_local.local.files', provider: 'local_files', account_scope: 'this_computer',
+          approved_scope_key: `local_files.this_computer:${folder}`,
+        });
+        if (plan.status === 200) break;
+        expect(plan.status, JSON.stringify(plan.json)).toBe(403);
+        await Bun.sleep(50);
+      } while (Date.now() < cleanupDeadline);
+      expect(plan.status, JSON.stringify(plan.json)).toBe(200);
+      expect(plan.json).toMatchObject({ kind: 'file_extraction_plan', corpus_id: 'secure_local.local.files', candidates: 0 });
+      expect(existsSync(path)).toBe(true);
+    } finally { await worker.stop(); }
+  }, 180_000);
+
+  test('an explicitly enabled file lane extracts with global source reads off', async () => {
+    const env: Env = {
+      ...freshHome(), OLYMPUS_SOURCE_INDEX_ENABLED: 'false', OLYMPUS_SOURCE_INDEX_ANSWER_ENABLED: 'false',
+      OLYMPUS_SOURCE_INDEX_LOCAL_FILES_CONNECTOR_STORE_ENABLED: 'true', OLYMPUS_WORKER_SCHEDULER_ENABLED: 'true',
+      OLYMPUS_WORKER_SCHEDULER_TICK_SECONDS: '1', OLYMPUS_WORKER_SCHEDULER_SYNC_INTERVAL_SECONDS: '1',
+    };
+    const registryPath = join(env.HOME!, '.config', 'olympus', 'handles.json');
+    env.OLYMPUS_CREDENTIAL_HANDLE_REGISTRY_PATH = registryPath;
+    connectThisComputerSource(registryPath, 'local.files');
+    const folder = join(env.HOME!, 'selected-notes');
+    mkdirSync(folder);
+    writeFileSync(join(folder, 'explicit.txt'), 'The explicitlane reference should be read despite global search being disabled.');
+    const authority = new FileSourceScopeAuthority({ registryPath });
+    const pending = authority.snapshot('local.files');
+    authority.approve({ sourceId: 'local.files', accountGeneration: pending.accountGeneration!, expectedRevision: pending.revision, selections: [{ key: folder, state: 'ingest' }], wholeAccount: false, explicitWholeAccountConfirmation: false });
+    const worker = await boot(env);
+    try {
+      expect(worker.output(), listening(worker)).toContain('worker listening');
+      const paths = ['internal', 'secure_local'].map((domain) => resolvedStorePath('local.files', domain, env));
+      let text = '';
+      const deadline = Date.now() + 20_000;
+      while (Date.now() < deadline) {
+        text = paths.filter(existsSync).map((path) => JSON.stringify(snapshotStore(path).chunks)).join('\n');
+        if (text.includes('explicitlane')) break;
+        await Bun.sleep(100);
+      }
+      expect(text, `${worker.errors()}\n${worker.output()}`).toContain('explicitlane');
+    } finally { await worker.stop(); }
+  }, 180_000);
+
+  test('Dropbox connected after boot lists and extracts through the real worker with a fixture provider', async () => {
+    const env: Env = {
+      ...freshHome(),
+      OLYMPUS_WORKER_SCHEDULER_ENABLED: 'true',
+      OLYMPUS_WORKER_SCHEDULER_TICK_SECONDS: '1',
+      OLYMPUS_WORKER_SCHEDULER_SYNC_INTERVAL_SECONDS: '1',
+      OLYMPUS_SOURCE_INDEX_DROPBOX_TOKEN: 'fixture-dropbox-token',
+    };
+    const registryPath = join(env.HOME!, '.config', 'olympus', 'handles.json');
+    env.OLYMPUS_CREDENTIAL_HANDLE_REGISTRY_PATH = registryPath;
+    const preload = join(env.HOME!, 'fixture-dropbox.ts');
+    writeFileSync(preload, `
+      const originalFetch = globalThis.fetch.bind(globalThis);
+      const file = { '.tag': 'file', id: 'id:harbour', name: 'harbour.txt', path_lower: '/selected/harbour.txt', path_display: '/Selected/harbour.txt', rev: 'a1', size: 59, client_modified: '2026-01-01T00:00:00Z', server_modified: '2026-01-01T00:00:00Z' };
+      const folder = { '.tag': 'folder', id: 'id:selected', name: 'Selected', path_lower: '/selected', path_display: '/Selected' };
+      globalThis.fetch = async (input, init) => {
+        const url = new URL(input instanceof Request ? input.url : String(input));
+        if (!['api.dropboxapi.com', 'content.dropboxapi.com'].includes(url.hostname)) return originalFetch(input, init);
+        if (url.pathname.endsWith('/users/get_current_account')) return Response.json({ account_id: 'dbid:fixture' });
+        if (url.pathname.endsWith('/files/get_metadata')) return Response.json(folder);
+        if (url.pathname.endsWith('/files/list_folder/continue')) return Response.json({ entries: [], cursor: 'fixture-cursor', has_more: false });
+        if (url.pathname.endsWith('/files/list_folder')) {
+          const body = JSON.parse(String(init?.body ?? '{}'));
+          return Response.json({ entries: body.path === '' ? [folder] : [file], cursor: 'fixture-cursor', has_more: false });
+        }
+        if (url.pathname.endsWith('/files/download')) return new Response('A reference manual records the zephyrdropbox observation.', { headers: { 'content-type': 'text/plain' } });
+        throw new Error('Unexpected fixture Dropbox request: ' + url.pathname);
+      };
+    `);
+    const securePath = resolvedStorePath('dropbox.files', 'secure_local', env);
+    const internalPath = resolvedStorePath('dropbox.files', 'internal', env);
+    const worker = await boot(env, preload);
+    try {
+      expect(worker.output(), listening(worker)).toContain('worker listening');
+      expect(existsSync(securePath)).toBe(false);
+      // Native OAuth completion records this same connected handle; the provider here is entirely a fixture.
+      upsertConnectedHandle({
+        handle: 'dropbox.personal', provider: 'dropbox', accountRole: 'personal', trustDomain: 'secure_local',
+        allowedCapabilities: ['dropbox.files.sync'], scopes: ['files.metadata.read', 'files.content.read', 'sharing.read', 'account_info.read'],
+        connectedAt: new Date().toISOString(),
+      }, registryPath);
+      const authority = new FileSourceScopeAuthority({ registryPath });
+      const pending = authority.snapshot('dropbox.files');
+      authority.approve({
+        sourceId: 'dropbox.files', accountGeneration: pending.accountGeneration!, expectedRevision: pending.revision,
+        selections: [{ key: '/selected', state: 'ingest' }], wholeAccount: false, explicitWholeAccountConfirmation: false,
+      });
+      const sync = await ask(env, worker, '/dashboard/sync-now', { source: 'dropbox' });
+      expect(sync.status, JSON.stringify(sync.json)).toBe(200);
+      let text = '';
+      const deadline = Date.now() + 30_000;
+      while (Date.now() < deadline) {
+        text = [securePath, internalPath].filter(existsSync).map((path) => JSON.stringify(snapshotStore(path).chunks)).join('\n');
+        if (text.includes('zephyrdropbox')) break;
+        await Bun.sleep(100);
+      }
+      expect(text, `${worker.errors()}\n${worker.output()}`).toContain('zephyrdropbox');
+      const search = await ask(env, worker, '/v1/source/index/search', { query: 'zephyrdropbox', corpus_id: 'secure_local.dropbox.files' });
+      expect(search.status, JSON.stringify(search.json)).toBe(200);
+      expect(search.json.hits).toEqual(expect.arrayContaining([expect.objectContaining({ selected_item: expect.objectContaining({ title: 'harbour.txt' }) })]));
+      expect(TierLedger.readLedgerId(tierLedgerPathForStore(securePath))).toBeDefined();
+    } finally {
+      await worker.stop();
+    }
+  }, 180_000);
+
+  test('connect after boot ingests and extracts across the shared tiers, and connected reboot preserves that history', async () => {
+    const env: Env = {
+      ...freshHome(),
+      OLYMPUS_WORKER_SCHEDULER_ENABLED: 'true',
+      OLYMPUS_WORKER_SCHEDULER_TICK_SECONDS: '1',
+      OLYMPUS_WORKER_SCHEDULER_SYNC_INTERVAL_SECONDS: '1',
+      OLYMPUS_CREDENTIAL_HANDLE_REGISTRY_PATH: '',
+      OLYMPUS_SOURCE_INDEX_CONNECTOR_STORES_JSON: JSON.stringify([{ corpusId: 'secure_local.local.files', family: 'file', trustDomain: 'secure_local', principalProvider: 'telegram', principalAccountScope: 'impostor' }]),
+    };
+    env.OLYMPUS_CREDENTIAL_HANDLE_REGISTRY_PATH = join(env.HOME!, '.config', 'olympus', 'handles.json');
+    const folder = join(env.HOME!, 'selected-notes');
+    mkdirSync(folder, { recursive: true });
+    writeFileSync(join(folder, 'harbour.txt'), 'The harbourmaster records the zephyrtide observation in this reference manual.');
+    const sourceId = 'local.files';
+    const securePath = resolvedStorePath(sourceId, 'secure_local', env);
+    const internalPath = resolvedStorePath(sourceId, 'internal', env);
+    const ledgerPath = tierLedgerPathForStore(securePath);
+    const authority = new FileSourceScopeAuthority({ registryPath: env.OLYMPUS_CREDENTIAL_HANDLE_REGISTRY_PATH });
+    const worker = await boot(env);
+    try {
+      expect(worker.output(), listening(worker)).toContain('worker listening');
+      expect(existsSync(securePath)).toBe(false);
+      const connect = await ask(env, worker, '/dashboard/connect/this-computer', { source: sourceId });
+      expect(connect.status, JSON.stringify(connect.json)).toBe(200);
+      const pending = authority.snapshot(sourceId);
+      expect(pending.accountGeneration).toBeDefined();
+      authority.approve({
+        sourceId,
+        accountGeneration: pending.accountGeneration!,
+        expectedRevision: pending.revision,
+        selections: [{ key: folder, state: 'ingest' }],
+        wholeAccount: false,
+        explicitWholeAccountConfirmation: false,
+      });
+      // The real connect route refreshes the live scheduler, as it does for a saved folder choice.
+      expect((await ask(env, worker, '/dashboard/connect/this-computer', { source: sourceId })).status).toBe(200);
+      const deadline = Date.now() + 30_000;
+      let text = '';
+      while (Date.now() < deadline) {
+        text = [securePath, internalPath].filter(existsSync).map((path) => JSON.stringify(snapshotStore(path).chunks)).join('\n');
+        if (text.includes('zephyrtide')) break;
+        await Bun.sleep(100);
+      }
+      expect(text, `${worker.errors()}\n${worker.output()}`).toContain('zephyrtide');
+      expect(existsSync(internalPath)).toBe(true);
+      const secure = new LocalConnectorStore({ dbPath: securePath, corpusId: 'secure_local.local.files', family: 'file', trustDomain: 'secure_local', readOnly: true });
+      const internal = new LocalConnectorStore({ dbPath: internalPath, corpusId: 'internal.local.files', family: 'file', trustDomain: 'internal', readOnly: true });
+      try {
+        const ledgerId = TierLedger.readLedgerId(ledgerPath);
+        expect(ledgerId).toBeDefined();
+        // The empty legacy Private leg owns the ledger; the routed Personal copy is bound to it.
+        expect(secure.tierLedgerPathInUse()).toBe(ledgerPath);
+        expect(internal.tierSetBinding()).toEqual({ ledgerId: ledgerId!, ledgerPath });
+      } finally {
+        secure.close();
+        internal.close();
+      }
+      const status = await ask(env, worker, '/v1/source/index/status', {});
+      expect(status.status).toBe(200);
+      const search = await ask(env, worker, '/v1/source/index/search', { query: 'zephyrtide', corpus_id: 'secure_local.local.files', approved_scope_key: `local_files.this_computer:${folder}` });
+      expect(search.status, JSON.stringify(search.json)).toBe(200);
+      expect(search.json.hits).toEqual(expect.arrayContaining([expect.objectContaining({ selected_item: expect.objectContaining({ title: 'harbour.txt', corpus_id: 'internal.local.files' }) })]));
+    } finally {
+      await worker.stop();
+    }
+    const before = { secure: snapshotStore(securePath), internal: snapshotStore(internalPath), ledgerId: TierLedger.readLedgerId(ledgerPath) };
+    // Isolate boot from the normal names-only sync which may update item metadata while retaining its chunks.
+    const rebooted = await boot({ ...env, OLYMPUS_WORKER_SCHEDULER_ENABLED: 'false' });
+    try {
+      expect(rebooted.output(), listening(rebooted)).toContain('worker listening');
+      expect(snapshotStore(securePath)).toEqual(before.secure);
+      expect(snapshotStore(internalPath)).toEqual(before.internal);
+      expect(TierLedger.readLedgerId(ledgerPath)).toBe(before.ledgerId);
+      expect((await ask(env, rebooted, '/v1/source/index/status', {})).status).toBe(200);
+    } finally {
+      await rebooted.stop();
+    }
+  }, 180_000);
+
+  test('deleted disconnected sources stay absent through reboot, status and search', async () => {
+    const env = freshHome();
+    await seedPreFolderInstall(env);
+    await writeStore(resolvedStorePath('evernote.notes', 'secure_local', env), 'secure_local.evernote.notes', 'note', 'secure_local');
+    const first = await boot(env);
+    try {
+      expect(first.output(), listening(first)).toContain('worker listening');
+    } finally {
+      await first.stop();
+    }
+    for (const sourceId of FOLDER_LAYOUT_SOURCES) {
+      expect(filesUnder(accountFolder({ source_id: sourceId, slot: '1' }, env)).length, sourceId).toBeGreaterThan(0);
+      deleteOlympusData({ sourceId, homeDir: env.HOME!, env });
+      expect(filesUnder(accountFolder({ source_id: sourceId, slot: '1' }, env)), sourceId).toEqual([]);
+    }
+    const worker = await boot(env);
+    try {
+      expect(worker.output(), listening(worker)).toContain('worker listening');
+      const status = await ask(env, worker, '/v1/source/index/status', {});
+      expect(status.status, JSON.stringify(status.json).slice(0, 500)).toBe(200);
+      const search = await ask(env, worker, '/v1/source/index/search', { query: 'orchard pruning plan', corpus_id: 'internal.email' });
+      expect(search.status, JSON.stringify(search.json).slice(0, 500)).toBe(501);
+      expect(search.json.error).toMatchObject({ code: 'source_index_search_not_supported' });
+      for (const sourceId of FOLDER_LAYOUT_SOURCES) {
+        expect(filesUnder(accountFolder({ source_id: sourceId, slot: '1' }, env)), sourceId).toEqual([]);
+        expect(legacyLeft(sourceId, env), sourceId).toEqual([]);
+      }
+    } finally {
+      await worker.stop();
+    }
+  }, 180_000);
+
   test('a fresh install: every source lands in its folder and nothing is made at a legacy place', async () => {
     const env = freshHome();
     const worker = await boot(env);
@@ -344,7 +848,6 @@ describe('source storage, end to end on this host', () => {
     const before = Object.fromEntries(MOVED_SOURCES.map((sourceId) => [sourceId, filesUnder(accountFolder({ source_id: sourceId, slot: '1' }, env))]));
     const mineFolder = accountFolder({ source_id: MINE.source_id, slot: '1' }, env);
     const mineStore = resolvedStorePath(MINE.source_id, 'secure_local', env);
-    const mineInode = lstatSync(mineStore).ino;
     deleteOlympusData({ sourceId: MINE.source_id, homeDir: env.HOME!, env });
     // With no worker running, the delete takes the folder at once.
     expect(existsSync(mineFolder)).toBe(false);
@@ -354,11 +857,9 @@ describe('source storage, end to end on this host', () => {
     } finally {
       await second.stop();
     }
-    // The next worker may mount the source's lane again: that is a new, empty account, never the deleted files.
-    if (existsSync(mineStore)) {
-      expect(lstatSync(mineStore).ino).not.toBe(mineInode);
-      expect(snapshotStore(mineStore).items.length).toBe(0);
-    }
+    // A disconnected source stays deleted across reboot, including its stores and tier sidecars.
+    expect(existsSync(mineFolder)).toBe(false);
+    expect(existsSync(mineStore)).toBe(false);
     for (const sourceId of MOVED_SOURCES.filter((id) => id !== MINE.source_id)) {
       expect(filesUnder(accountFolder({ source_id: sourceId, slot: '1' }, env)), sourceId).toEqual(expect.arrayContaining(before[sourceId]!));
     }

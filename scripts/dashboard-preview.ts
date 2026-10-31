@@ -1678,8 +1678,8 @@ export function previewAgentsView(mode: string | null): DashboardAgentsView {
 }
 
 export const DASHBOARD_PREVIEW_STATES = [
-  'telegram-pair-phone', 'telegram-pair-code', 'telegram-pair-2fa', 'telegram-pair-error', 'telegram-chats', 'telegram-capturing',
-  'whatsapp-qr', 'whatsapp-chats', 'whatsapp-capturing',
+  'telegram-pair-phone', 'telegram-pair-code', 'telegram-pair-2fa', 'telegram-pair-error', 'telegram-post-pair', 'telegram-chats', 'telegram-capturing',
+  'whatsapp-qr', 'whatsapp-post-pair', 'whatsapp-chats', 'whatsapp-capturing',
   'review', 'review-unconfigured', 'review-indexing', 'privacy-edit', 'privacy-conflict',
   'models', 'models-applying', 'first-install', 'gmail-scope-pending', 'tier-migration', 'partial', 'fresh', 'full', 'dropbox-initial', 'dropbox-update',
   'connect-google', 'connect-google-loopback', 'connect-dropbox', 'connect-x',
@@ -1700,12 +1700,13 @@ export function previewMessagingFixture(state: string): Record<string, unknown> 
   if (state === 'telegram-pair-error') return { ok: true, state: 'failed' };
   if (state === 'whatsapp-qr') return { ok: true, state: 'waiting', qr: PREVIEW_QR };
   if (state === 'telegram-capturing' || state === 'whatsapp-capturing') return { ok: true, state: 'paired' };
-  if (state === 'telegram-chats' || state === 'whatsapp-chats') return {
+  if (['telegram-chats', 'whatsapp-chats', 'telegram-post-pair', 'whatsapp-post-pair'].includes(state)) return {
     ok: true, chats: [
       { chatScope: 'preview:1', title: 'Alex Example', kind: 'person' },
       { chatScope: 'preview:2', title: 'Weekend plans', kind: 'group' },
       { chatScope: 'preview:3', title: 'Book club', kind: 'group' },
-    ], wholeAccount: false, chatScopes: ['preview:1'],
+    ], wholeAccount: false, chatScopes: state.endsWith('-post-pair') ? [] : ['preview:1'],
+    ...(state.endsWith('-post-pair') ? { state: 'scope_selection_required' } : {}),
   };
   return undefined;
 }
@@ -1715,14 +1716,12 @@ const PREVIEW_QR = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAALkAAAC5CAIAAA
 
 export function renderMessagingPreviewPage(state: string): string {
   const source = state.startsWith('telegram-') ? 'telegram' : 'whatsapp';
-  const operation = state.endsWith('-chats') ? 'chats' : 'start';
   const page = renderDashboardLocalPage('keys', {
     url: new URL('http://127.0.0.1:8930/dashboard?controls&keys'),
     view: view(state),
     options: { now: NOW, controlSessionCsrfToken: 'preview-csrf-token', messagingLocalSession: true },
   });
-  const script = `<script data-preview-messaging>window.addEventListener('load', function () { var form = document.querySelector('[data-messaging-source="${source}"] [data-messaging-kind="${operation}"]'); if (form) form.requestSubmit(); });</script>`;
-  return page.replace('</body>', script + '</body>');
+  return page.replace('</body>', '<script data-preview-messaging>/* Initial status read supplies this fixture. */</script></body>');
 }
 
 /** Invented settings only; the conflict simulates another editor changing them. */
@@ -2036,7 +2035,8 @@ if (import.meta.main) {
     }
     if (request.method === 'POST' && url.pathname.startsWith('/dashboard/messaging/')) {
       const fixture = previewMessagingFixture(state);
-      if (fixture && previewUnlocked) return Response.json(fixture);
+      const input = await request.json() as { source?: unknown };
+      if (fixture && previewUnlocked) return Response.json(state.startsWith(`${input.source}-`) ? fixture : { ok: true, state: 'idle' });
     }
     // Every other control POST needs a worker. Say so in the words the page
     // prints, instead of a bare "Request failed.".

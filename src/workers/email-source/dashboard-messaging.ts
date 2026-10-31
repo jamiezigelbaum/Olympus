@@ -2,21 +2,24 @@
 export type MessagingSource = 'telegram' | 'whatsapp';
 export type PairingField = 'api_id' | 'api_hash' | 'phone' | 'code' | 'password';
 export interface PairingChat { chatScope: string; title: string; kind: string }
+type ChatSelection = { wholeAccount: boolean; chatScopes: string[] };
 export interface PairingHooks {
   signal: AbortSignal;
   prompt(field: PairingField, reply: (value: string) => void): void;
   qr(value: string): void;
   commit(): void;
+  choose(chats: readonly PairingChat[]): Promise<ChatSelection>;
 }
 type PairResult = { chats: readonly PairingChat[] };
 type PairState = {
-  state: 'starting' | 'waiting' | 'committing' | 'paired' | 'failed' | 'cancelled';
+  state: 'starting' | 'waiting' | 'committing' | 'scope_selection_required' | 'paired' | 'failed' | 'cancelled';
   controller: AbortController;
   field?: PairingField;
   reply?: (value: string) => void;
   qr?: string;
   chats?: readonly PairingChat[];
   registrationMayBeSaved?: boolean;
+  selection?: (selection: ChatSelection) => void;
   task?: Promise<void>;
 };
 
@@ -32,6 +35,7 @@ export function createDashboardMessagingPairing<T extends PairResult>(options: {
       ...(item.field ? { field: item.field } : {}),
       ...(item.qr ? { qr: item.qr } : {}),
       ...(item.chats ? { chats: item.chats } : {}),
+      ...(item.state === 'scope_selection_required' ? { wholeAccount: false, chatScopes: [] } : {}),
       ...(item.registrationMayBeSaved ? { registrationMayBeSaved: true } : {}),
     } : { ok: true as const, state: 'idle' as const };
   };
@@ -54,6 +58,22 @@ export function createDashboardMessagingPairing<T extends PairResult>(options: {
               item.state = 'waiting';
             },
             qr(value) { if (!item.controller.signal.aborted) { item.qr = value; item.state = 'waiting'; } },
+            choose(chats) {
+              if (item.controller.signal.aborted) return Promise.reject(new Error('Pairing was cancelled.'));
+              delete item.reply; delete item.field; delete item.qr;
+              item.chats = chats;
+              item.state = 'scope_selection_required';
+              return new Promise<ChatSelection>((resolve, reject) => {
+                const abort = () => { delete item.selection; reject(new Error('Pairing was cancelled.')); };
+                item.controller.signal.addEventListener('abort', abort, { once: true });
+                item.selection = selection => {
+                  item.controller.signal.removeEventListener('abort', abort);
+                  delete item.selection;
+                  item.state = 'starting';
+                  resolve(selection);
+                };
+              });
+            },
             commit() {
               if (item.controller.signal.aborted) throw new Error('Pairing was cancelled.');
               delete item.reply; delete item.field; delete item.qr;
@@ -80,6 +100,14 @@ export function createDashboardMessagingPairing<T extends PairResult>(options: {
       });
       return status(source);
     },
+    select(source: MessagingSource, selection: ChatSelection) {
+      const item = states.get(source);
+      if (!item || item.state !== 'scope_selection_required' || !item.selection) throw new Error('No pending chat choice.');
+      if (selection.wholeAccount ? selection.chatScopes.length > 0 : selection.chatScopes.length === 0) throw new Error('Choose all chats or at least one chat.');
+      if (selection.chatScopes.some(scope => !item.chats?.some(chat => chat.chatScope === scope))) throw new Error('Chat list changed.');
+      item.selection(selection);
+      return status(source);
+    },
     respond(source: MessagingSource, field: string, value: string) {
       const item = states.get(source);
       if (!item || item.state !== 'waiting' || item.field !== field || !item.reply || !value || value.length > 4096 || /[\r\n\0]/.test(value)) {
@@ -94,7 +122,7 @@ export function createDashboardMessagingPairing<T extends PairResult>(options: {
     },
     cancel(source: MessagingSource) {
       const item = states.get(source);
-      if (item && (item.state === 'starting' || item.state === 'waiting')) {
+      if (item && (item.state === 'starting' || item.state === 'waiting' || item.state === 'scope_selection_required')) {
         item.controller.abort();
         delete item.reply;
         delete item.field;

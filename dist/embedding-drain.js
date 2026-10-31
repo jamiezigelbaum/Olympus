@@ -29236,7 +29236,10 @@ var init_local_index = __esm(() => {
             return true;
           if (!weights)
             return false;
-          const matched = (matchedGroupIndexes.get(row.item_pk) ?? []).reduce((sum, index) => sum + weights.of[index], 0);
+          const indexes = matchedGroupIndexes.get(row.item_pk) ?? [];
+          if (groups.length >= 3 && weights.population >= 10 && indexes.length >= 2 && indexes.length * 2 >= groups.length && indexes.filter((index) => weights.counts[index] <= Math.floor(weights.population / 10)).length >= 2)
+            return true;
+          const matched = indexes.reduce((sum, index) => sum + weights.of[index], 0);
           return weights.total > 0 && matched / weights.total >= RARE_CONCEPT_WEIGHT_SHARE;
         });
       }
@@ -29290,11 +29293,12 @@ var init_local_index = __esm(() => {
     }
     conceptWeights(groups, exact) {
       const items = this.db.query("SELECT COUNT(*) AS count FROM items WHERE tombstoned = 0").get().count;
-      const of = groups.map((group) => {
+      const counts = groups.map((group) => {
         const { count } = this.db.query("SELECT COUNT(DISTINCT item_pk) AS count FROM connector_store_fts WHERE connector_store_fts MATCH ?").get(sourceIndexFtsGroupQuery(group, exact));
-        return Math.max(0, Math.log((items + 1) / (count + 0.5)));
+        return count;
       });
-      return { of, total: of.reduce((sum, weight) => sum + weight, 0) };
+      const of = counts.map((count) => Math.max(0, Math.log((items + 1) / (count + 0.5))));
+      return { of, total: of.reduce((sum, weight) => sum + weight, 0), counts, population: items };
     }
     chunkMatchForChunkPk(chunkPk, lane, queryTerms) {
       const row = this.db.query("SELECT item_pk, chunk_index, content_hash, bounded_text FROM chunks WHERE chunk_pk = ?").get(chunkPk);
@@ -64824,6 +64828,9 @@ td { padding: 7px 10px 7px 0; border-bottom: 1px solid var(--line2); color: var(
    it, never further down the page. */
 .sheet { display: none; background: var(--panel2); border: 1px solid var(--line); border-radius: 10px; padding: 16px 18px; margin: -4px 0 12px; }
 .sheet.on { display: block; }
+.messaging-card { background: var(--panel2); border: 1px solid var(--line); border-radius: 10px; padding: 16px 18px; margin: 0 0 12px; }
+.messaging-card p { color: var(--t2); font-size: var(--fs-body); max-width: 72ch; }
+.messaging-card form, .messaging-card details { margin: 10px 0; }
 /* Where an open link landed (#olympus-open=…): an accent outline that fades. */
 .landed { outline: 3px solid var(--link); outline-offset: 4px; border-radius: 10px; animation: landed-fade 2.5s ease-out 1.5s forwards; }
 @keyframes landed-fade { to { outline-color: transparent; } }
@@ -68570,6 +68577,7 @@ var GMAIL_IMPORTED_FILTERS = Object.freeze({ provider: GMAIL_PROVIDER_ID, observ
 
 // src/workers/email-source/server.ts
 init_tiered_store_set();
+init_archive_target();
 init_connector5();
 init_live_sync3();
 

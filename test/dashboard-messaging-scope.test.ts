@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from 'bun:test';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createDashboardMessagingService, retainApprovedCaptureScope } from '../src/workers/email-source/dashboard-messaging-service.ts';
@@ -85,3 +85,41 @@ test('re-pair never widens a grant removed during pairing', async () => {
   expect(() => readFileSync(grantPath)).toThrow();
   service.close();
 });
+
+for (const source of ['telegram', 'whatsapp'] as const) {
+  for (const wholeAccount of [false, true]) test(`${source}: pairing waits for explicit ${wholeAccount ? 'account' : 'chat'} consent before registration and publication`, async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'messaging-consent-')); dirs.push(dir);
+    const chatScope = source === 'telegram' ? 'telegram.personal:chat:101' : 'whatsapp.personal:chat:123@s.whatsapp.net';
+    const grantPath = join(dir, `messaging-capture.${source}.json`);
+    let registered = false;
+    const service = createDashboardMessagingService({ registryPath: join(dir, 'handles.json'),
+      secretStore: { label: 'memory', get: async () => undefined, getSync: () => undefined, set: async () => {}, delete: async () => {}, list: async () => [] },
+      withMessagingCapturePaused: async (_source, operation) => operation(), withGrantMutation: async operation => operation(),
+      listCommand: async () => ({ dialogs: [{ chat_scope: chatScope, title: 'One', kind: 'dm' }] }),
+      pairSource: async options => {
+        const approval = options.captureScopeApproval ?? await options.requestCaptureScope?.({ source, accountProof: 'account', sessionPath: dir, chats: [{ chatScope, title: 'One', kind: 'dm' }] });
+        if (!approval) throw new Error('Consent missing');
+        options.onCommitStart?.();
+        registered = true;
+        const selected = approval.source === 'telegram' ? approval.chatScopes?.join(',') : approval.chatJids?.join(',');
+        const value = approval.wholeAccount ? '*' : selected!;
+        const env = source === 'telegram' ? { OLYMPUS_TELEGRAM_ALLOWED_CHAT_SCOPES: value, OLYMPUS_SOURCE_INDEX_TELEGRAM_APPROVED_CHAT_SCOPES: value } : { OLYMPUS_WHATSAPP_ALLOWED_CHAT_JIDS: value };
+        return { ok: true, source, status: 'connected', registered: true, captureStarted: false, sessionPath: dir, accountProof: 'account', chats: [], handles: [`${source}.personal`], secretRefs: [], producer: { source, executable: 'fixture', args: [], env, secretEnvironment: [], captureStarted: false } };
+      },
+    });
+    try {
+      await service.handle('start', { source });
+      for (let i = 0; i < 30 && !['scope_selection_required', 'paired'].includes((await service.handle('status', { source })).state); i++) await new Promise(resolve => setTimeout(resolve, 0));
+      expect(registered).toBe(false);
+      expect(existsSync(grantPath)).toBe(false);
+      expect(await service.handle('status', { source })).toMatchObject({ state: 'scope_selection_required', wholeAccount: false, chatScopes: [] });
+      await expect(service.handle('scope', { source, wholeAccount: false, chatScopes: ['unknown'] })).rejects.toThrow();
+      expect(registered).toBe(false);
+      await service.handle('scope', { source, wholeAccount, chatScopes: wholeAccount ? [] : [chatScope] });
+      for (let i = 0; i < 30 && (await service.handle('status', { source })).state !== 'paired'; i++) await new Promise(resolve => setTimeout(resolve, 0));
+      expect(registered).toBe(true);
+      const env = JSON.parse(readFileSync(grantPath, 'utf8')).producer.env;
+      expect(env[source === 'telegram' ? 'OLYMPUS_TELEGRAM_ALLOWED_CHAT_SCOPES' : 'OLYMPUS_WHATSAPP_ALLOWED_CHAT_JIDS']).toBe(wholeAccount ? '*' : source === 'telegram' ? chatScope : '123@s.whatsapp.net');
+    } finally { await service.cancelAndWait(source); service.close(); }
+  });
+}
