@@ -40,7 +40,7 @@ import {
   type NativeProcessServiceDefinition,
 } from './native-process-service.ts';
 import { createNativeRelayService } from './native-relay-service.ts';
-import { createNativeWorkerService, WORKER_DATA_OWNER_CONFLICT_MESSAGE, WORKER_ENDPOINT_CONFLICT_MESSAGE } from './native-worker-service.ts';
+import { createNativeWorkerService, WORKER_DATA_OWNER_CONFLICT_MESSAGE, WORKER_ENDPOINT_CONFLICT_MESSAGE, WORKER_SOCKET_RETAINED_MESSAGE } from './native-worker-service.ts';
 import { resolveRemoteAccessMode } from './remote-access.ts';
 import { createWorkerFetch, prepareWorkerSocket, removeReleasedWorkerSocket, validateWorkerSocketDirectory } from './worker-transport.ts';
 
@@ -288,7 +288,8 @@ export async function startEngineHost(options: EngineHostOptions): Promise<Engin
       },
       workerOwned: () => status.services['olympus-worker']?.state === 'ok',
       workerConflict: () => status.services['olympus-worker']?.message === WORKER_DATA_OWNER_CONFLICT_MESSAGE ? 'data'
-        : status.services['olympus-worker']?.message === WORKER_ENDPOINT_CONFLICT_MESSAGE ? 'endpoint' : undefined,
+        : status.services['olympus-worker']?.message === WORKER_ENDPOINT_CONFLICT_MESSAGE ? 'endpoint'
+        : status.services['olympus-worker']?.message === WORKER_SOCKET_RETAINED_MESSAGE ? 'retained_socket' : undefined,
       workerReady: async () => {
         if (status.services['olympus-worker']?.state !== 'ok') return false;
         const response = await fetchSocket(base + '/v1/health', { headers: { Authorization: `Bearer ${authToken() ?? ''}` }, signal: AbortSignal.timeout(1_000) });
@@ -296,13 +297,20 @@ export async function startEngineHost(options: EngineHostOptions): Promise<Engin
       },
       fetchSocket: request => fetchSocket(request, { redirect: 'manual' }),
       establishDashboard: async () => {
+        if (status.services['olympus-worker']?.state !== 'ok') throw new Error('Worker ownership changed.');
         const response = await fetchSocket(base + '/dashboard/control/session', { method: 'POST', headers: { Authorization: `Bearer ${authToken() ?? ''}`, Origin: base }, signal: AbortSignal.timeout(5_000) });
+        if (status.services['olympus-worker']?.state !== 'ok') {
+          await response.body?.cancel().catch(() => {});
+          throw new Error('Worker ownership changed.');
+        }
         if (!response.ok) {
           await response.body?.cancel().catch(() => {});
           if (response.status === 503) throw new Error('Owner dashboard session is restarting.');
           return null;
         }
-        await response.body?.cancel(); return response.headers.getSetCookie();
+        await response.body?.cancel();
+        if (status.services['olympus-worker']?.state !== 'ok') throw new Error('Worker ownership changed.');
+        return response.headers.getSetCookie();
       },
     });
   }

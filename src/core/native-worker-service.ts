@@ -1,6 +1,6 @@
 import { WORKER_DATA_OWNER_BUSY_EXIT_CODE } from './data-owner-lock.ts';
 import { OWNER_BRIDGE_HOST_ENV } from './linux-owner-bridge-host.ts';
-import { removeReleasedWorkerSocket, workerFetch } from './worker-transport.ts';
+import { removeReleasedWorkerSocket, validateWorkerSocket, workerSocketListenerStopped, workerFetch } from './worker-transport.ts';
 import type { ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { statSync } from 'node:fs';
@@ -23,6 +23,8 @@ import { applyWorkerSetupEnv, workerAuthTokenFromConfig } from './worker-auth.ts
 export const WORKER_DATA_OWNER_CONFLICT_MESSAGE = 'Olympus worker cannot start because another process owns its data. Run olympus worker uninstall to remove an older worker service; otherwise stop the competing Olympus process. Retrying automatically.';
 
 export const WORKER_ENDPOINT_CONFLICT_MESSAGE = 'Olympus worker cannot start because another process owns its endpoint. Run olympus worker uninstall to remove an older worker service; otherwise stop the competing process. Retrying automatically.';
+
+export const WORKER_SOCKET_RETAINED_MESSAGE = 'Olympus worker cannot start because a stopped worker left its socket behind. Run olympus worker uninstall, then olympus engine restart to safely clear the retained socket. The socket is kept until process and listener custody are verified.';
 
 const SERVICE_ID = 'olympus-worker';
 const SERVICE_LABEL = 'worker';
@@ -183,6 +185,14 @@ async function prepareWorkerStart(
   if (endpointOccupied) throw new NativeProcessRetryableStartError(WORKER_ENDPOINT_CONFLICT_MESSAGE);
   if(process.platform==='linux'&&worker.fetchWorker===workerFetch&&!endpointOccupied&&input.previousChildReleased){
     removeReleasedWorkerSocket({platform:'linux',env:settings.env},{previousWorkerReleased:true});
+  }
+  if (process.platform === 'linux' && worker.fetchWorker === workerFetch) {
+    let socket: string | undefined;
+    try { socket = validateWorkerSocket({platform: 'linux', env: settings.env}); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+    if (socket && workerSocketListenerStopped(socket) === true) {
+      throw new NativeProcessRetryableStartError(WORKER_SOCKET_RETAINED_MESSAGE);
+    }
   }
   return {
     ...settings,

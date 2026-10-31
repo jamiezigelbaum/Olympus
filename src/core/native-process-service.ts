@@ -368,7 +368,7 @@ export function createNativeProcessService<TSettings extends NativeProcessStartS
   };
 
   const reportStartFailure = (lifetime: ServiceLifetime<TSettings>, error: unknown): string => {
-    if (error instanceof NativeProcessRetryableStartError) lifetime.startupFailure = error.message;
+    lifetime.startupFailure = error instanceof NativeProcessRetryableStartError ? error.message : undefined;
     const message = error instanceof NativeProcessConfigurationError ? error.message
       : lifetime.startupFailure ?? `Olympus ${options.label} failed to become ready.`;
     reportFailure(lifetime, message);

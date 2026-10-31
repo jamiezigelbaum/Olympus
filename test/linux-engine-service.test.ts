@@ -1,3 +1,4 @@
+import { bindWorkerSocket, prepareWorkerSocket, workerSocketListenerStopped } from '../src/core/worker-transport.ts';
 import { withFileLeaseSync } from '../src/core/file-lease.ts';
 import { createHash } from 'node:crypto';
 import { afterEach, expect, test } from 'bun:test';
@@ -429,3 +430,18 @@ for(const live of [false,true])test(`language-pack manifest PID temporary ${live
  if(live){expect(run).toThrow('language-pack installer is still running');expect(calls.some(args=>args.includes('stop')||args.includes('disable'))).toBe(false);expect(existsSync(join(dir,name))).toBe(true);}
  else{expect(run).not.toThrow();expect(readFileSync(join(l.configDir,'consult/vocabulary/manifest.json'),'utf8')).toBe('{"schema":1,"packs":{}}');expect(existsSync(join(dir,name))).toBe(false);expect(existsSync(join(l.configDir,'consult/vocabulary',name))).toBe(false);}
 },15_000);
+
+
+for (const stale of [true, false]) test.skipIf(process.platform !== 'linux')(`engine restart ${stale ? 'clears a legacy retained socket without an engine child receipt' : 'preserves a live legacy listener'}`, async () => {
+ const {l,options}=installed();
+ const env=linuxEngineEnvironment(l), path=prepareWorkerSocket({platform:'linux',env})!;
+ let listener: ReturnType<typeof Bun.serve> | undefined;
+ if(stale){const made=spawnSync('python3',['-c','import socket,sys,os;s=socket.socket(socket.AF_UNIX);s.bind(sys.argv[1]);os.chmod(sys.argv[1],0o600);s.close()',path]);expect(made.status).toBe(0);}
+ else listener=bindWorkerSocket(path,()=>Bun.serve({unix:path,fetch:()=>new Response('legacy')}));
+ const inode=lstatSync(path).ino;
+ try{
+  const actual={...options,workerStopped:workerSocketListenerStopped};
+  if(stale){expect(restartEngine(actual)).toMatchObject({ok:true});expect(lstatSync(path,{throwIfNoEntry:false})).toBeUndefined();}
+  else{expect(()=>restartEngine(actual)).toThrow('still listening');expect(lstatSync(path).ino).toBe(inode);}
+ }finally{await listener?.stop(true);}
+},10000);

@@ -1,4 +1,4 @@
-import { WORKER_DATA_OWNER_CONFLICT_MESSAGE, WORKER_ENDPOINT_CONFLICT_MESSAGE } from './native-worker-service.ts';
+import { WORKER_DATA_OWNER_CONFLICT_MESSAGE, WORKER_ENDPOINT_CONFLICT_MESSAGE, WORKER_SOCKET_RETAINED_MESSAGE } from './native-worker-service.ts';
 import { defaultTelegramPython } from './messaging-runtime.ts';
 import { readEngineLinger, linuxInstalledBuild } from './linux-engine-service.ts';
 import { engineServicePaths, readEngineWorkerProblem, waitForEngineHealthy } from './engine-service.ts';
@@ -536,7 +536,9 @@ async function ocrReadingCheck(deps: DoctorDeps): Promise<DoctorCheck> {
 async function hostCheck(deps: DoctorDeps): Promise<DoctorCheck> {
   const facts = await deps.hostProbe!();
   if (facts.engine.workerProblem) return { name: 'host', ok: false, detail: facts.engine.workerProblem,
-    hint: [WORKER_DATA_OWNER_CONFLICT_MESSAGE, WORKER_ENDPOINT_CONFLICT_MESSAGE].includes(facts.engine.workerProblem)
+    hint: facts.engine.workerProblem === WORKER_SOCKET_RETAINED_MESSAGE
+      ? 'Run olympus worker uninstall, then olympus engine restart to safely clear the retained socket.'
+      : [WORKER_DATA_OWNER_CONFLICT_MESSAGE, WORKER_ENDPOINT_CONFLICT_MESSAGE].includes(facts.engine.workerProblem)
       ? 'Run olympus worker uninstall to remove an older worker service; otherwise stop the competing Olympus process. The engine retries automatically.'
       : 'Run olympus engine status and olympus engine logs to diagnose the worker startup failure.' };
   // Checked first: a competing worker unit is a common reason the engine's own worker is not ready.

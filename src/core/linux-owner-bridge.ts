@@ -61,12 +61,14 @@ function page(body: string, status = 200): Response {
 }
 /** Constant response: no bootstrap, cookie, ticket or origin-storage proof. */
 const WORKER_CONFLICT_HEADER = 'X-Olympus-Worker-Conflict';
-const restartWords = (conflict?: string | null): string => conflict === 'data' || conflict === 'endpoint'
+const restartWords = (conflict?: string | null): string => conflict === 'retained_socket'
+  ? 'A stopped Olympus worker left its socket behind. Run olympus worker uninstall, then olympus engine restart to safely clear the retained socket.'
+  : conflict === 'data' || conflict === 'endpoint'
   ? `Olympus cannot start because another process owns its ${conflict}. Run olympus worker uninstall to remove an older worker service; otherwise stop the competing process. Retrying automatically.`
   : 'Olympus is restarting…';
 /** A closed status code, never arbitrary response copy, crosses into the waiting scripts. */
 const restartWordsScript = (response: string): string => `(${restartWords.toString()})(${response}.headers.get(${JSON.stringify(WORKER_CONFLICT_HEADER)}))`;
-function restarting(conflict?: 'data' | 'endpoint'): Response {
+function restarting(conflict?: 'data' | 'endpoint' | 'retained_socket'): Response {
   const response = page(`${openingView().replace('Opening your dashboard…', restartWords(conflict))}<script>setTimeout(()=>location.reload(),1000)</script>`, 503);
   response.headers.set('Retry-After', '1');
   if (conflict) response.headers.set(WORKER_CONFLICT_HEADER, conflict);
@@ -262,7 +264,7 @@ export interface LinuxOwnerBridgeOptions {
   /** Host keeps the listener and epoch while its worker is unavailable. */
   workerReady?: () => boolean;
   /** Set by the engine host only, from its own supervised worker diagnosis. */
-  workerConflict?: () => 'data' | 'endpoint' | undefined;
+  workerConflict?: () => 'data' | 'endpoint' | 'retained_socket' | undefined;
   fetchSocket: (request: Request) => Promise<Response>;
   openFile?: (path: string) => Promise<void>;
   /** Called under an exclusive private-ticket claim. Null is a final refusal;
@@ -428,7 +430,9 @@ export class LinuxOwnerBridge {
       const current = () => [...this.tickets.values()].includes(ticket) && ticket.expires > this.now();
       let dashboardCookies: readonly string[];
       try {
+        if (this.options.workerReady?.() === false) throw new Error('Worker ownership changed.');
         const result = this.options.establishDashboard ? await this.options.establishDashboard() : [];
+        if (this.options.workerReady?.() === false) throw new Error('Worker ownership changed.');
         if (result === null) { this.clearTicket(ticket); return refusal(); }
         dashboardCookies = result;
       }
@@ -461,7 +465,9 @@ export class LinuxOwnerBridge {
       const current = () => this.claim?.record === claim && claim.expires > this.now();
       let dashboardCookies: readonly string[];
       try {
+        if (this.options.workerReady?.() === false) throw new Error('Worker ownership changed.');
         const result = this.options.establishDashboard ? await this.options.establishDashboard() : [];
+        if (this.options.workerReady?.() === false) throw new Error('Worker ownership changed.');
         if (result === null) { if (current()) this.claim = undefined; return refusal(); }
         dashboardCookies = result;
       } catch {

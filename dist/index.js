@@ -18241,13 +18241,15 @@ var init_embedding_identity = __esm(() => {
 });
 
 // src/workers/source-index/embeddings.ts
-var SUPPORTED_IMAGE_MIME_TYPES, TRANSIENT_EMBEDDING_STATUSES;
+import { AsyncLocalStorage as AsyncLocalStorage4 } from "node:async_hooks";
+var priorityQueryEmbedding, SUPPORTED_IMAGE_MIME_TYPES, TRANSIENT_EMBEDDING_STATUSES;
 var init_embeddings = __esm(() => {
   init_operation_error();
   init_local_model_policy();
   init_model_transport();
   init_zkapi_consult_settings();
   init_embedding_identity();
+  priorityQueryEmbedding = new AsyncLocalStorage4;
   SUPPORTED_IMAGE_MIME_TYPES = new Set(["image/jpeg", "image/png"]);
   TRANSIENT_EMBEDDING_STATUSES = new Set([429, 500, 502, 503, 504]);
 });
@@ -19049,7 +19051,7 @@ var init_evidence_versions = __esm(() => {
 });
 
 // src/core/analyst.ts
-import { AsyncLocalStorage as AsyncLocalStorage4 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage5 } from "node:async_hooks";
 var analystAbortSignalStorage, CONFLICT_RULE = "- If items give different values for the same thing, give each value with its item's name and date; never pick one silently.", ANALYST_SYSTEM, ANALYST_COMPACT_SYSTEM, ANALYST_AUDIT_SYSTEM, DEFAULT_ANALYST_MAX_OUTPUT_CHARS = 1600, AUDIT_OUTPUT_HEADROOM_CHARS = 800, DEFAULT_AUDIT_MAX_OUTPUT_CHARS, promptEncoder, STOP_WORDS2, MEANING_BEARING_MODIFIERS, TOKEN_EDGE_PUNCTUATION;
 var init_analyst = __esm(() => {
   init_opsec();
@@ -19058,7 +19060,7 @@ var init_analyst = __esm(() => {
   init_types();
   init_operation_error();
   init_evidence_versions();
-  analystAbortSignalStorage = new AsyncLocalStorage4;
+  analystAbortSignalStorage = new AsyncLocalStorage5;
   ANALYST_SYSTEM = [
     "You are an evidence analyst. Answer the question USING ONLY the numbered evidence provided.",
     "Rules:",
@@ -24894,8 +24896,7 @@ function createNativeProcessService(options) {
     lifetime.restartTimer.unref?.();
   };
   const reportStartFailure = (lifetime, error) => {
-    if (error instanceof NativeProcessRetryableStartError)
-      lifetime.startupFailure = error.message;
+    lifetime.startupFailure = error instanceof NativeProcessRetryableStartError ? error.message : undefined;
     const message = error instanceof NativeProcessConfigurationError ? error.message : lifetime.startupFailure ?? `Olympus ${options.label} failed to become ready.`;
     reportFailure(lifetime, message);
     return message;
@@ -27478,7 +27479,7 @@ function page(body, status = 200) {
   } });
 }
 var WORKER_CONFLICT_HEADER = "X-Olympus-Worker-Conflict";
-var restartWords = (conflict) => conflict === "data" || conflict === "endpoint" ? `Olympus cannot start because another process owns its ${conflict}. Run olympus worker uninstall to remove an older worker service; otherwise stop the competing process. Retrying automatically.` : "Olympus is restarting…";
+var restartWords = (conflict) => conflict === "retained_socket" ? "A stopped Olympus worker left its socket behind. Run olympus worker uninstall, then olympus engine restart to safely clear the retained socket." : conflict === "data" || conflict === "endpoint" ? `Olympus cannot start because another process owns its ${conflict}. Run olympus worker uninstall to remove an older worker service; otherwise stop the competing process. Retrying automatically.` : "Olympus is restarting…";
 var restartWordsScript = (response) => `(${restartWords.toString()})(${response}.headers.get(${JSON.stringify(WORKER_CONFLICT_HEADER)}))`;
 function restarting(conflict) {
   const response = page(`${openingView().replace("Opening your dashboard…", restartWords(conflict))}<script>setTimeout(()=>location.reload(),1000)</script>`, 503);
@@ -27850,7 +27851,11 @@ class LinuxOwnerBridge {
       const current2 = () => [...this.tickets.values()].includes(ticket) && ticket.expires > this.now();
       let dashboardCookies;
       try {
+        if (this.options.workerReady?.() === false)
+          throw new Error("Worker ownership changed.");
         const result = this.options.establishDashboard ? await this.options.establishDashboard() : [];
+        if (this.options.workerReady?.() === false)
+          throw new Error("Worker ownership changed.");
         if (result === null) {
           this.clearTicket(ticket);
           return refusal();
@@ -27899,7 +27904,11 @@ class LinuxOwnerBridge {
       const current2 = () => this.claim?.record === claim && claim.expires > this.now();
       let dashboardCookies;
       try {
+        if (this.options.workerReady?.() === false)
+          throw new Error("Worker ownership changed.");
         const result = this.options.establishDashboard ? await this.options.establishDashboard() : [];
+        if (this.options.workerReady?.() === false)
+          throw new Error("Worker ownership changed.");
         if (result === null) {
           if (current2())
             this.claim = undefined;
@@ -28061,6 +28070,7 @@ init_olympus_layout();
 init_worker_auth();
 var WORKER_DATA_OWNER_CONFLICT_MESSAGE = "Olympus worker cannot start because another process owns its data. Run olympus worker uninstall to remove an older worker service; otherwise stop the competing Olympus process. Retrying automatically.";
 var WORKER_ENDPOINT_CONFLICT_MESSAGE = "Olympus worker cannot start because another process owns its endpoint. Run olympus worker uninstall to remove an older worker service; otherwise stop the competing process. Retrying automatically.";
+var WORKER_SOCKET_RETAINED_MESSAGE = "Olympus worker cannot start because a stopped worker left its socket behind. Run olympus worker uninstall, then olympus engine restart to safely clear the retained socket. The socket is kept until process and listener custody are verified.";
 var SERVICE_ID3 = "olympus-worker";
 var SERVICE_LABEL = "worker";
 var READINESS_PROBE_TIMEOUT_MS = 1000;
@@ -28162,6 +28172,18 @@ async function prepareWorkerStart(input, worker) {
     throw new NativeProcessRetryableStartError(WORKER_ENDPOINT_CONFLICT_MESSAGE);
   if (process.platform === "linux" && worker.fetchWorker === workerFetch && !endpointOccupied && input.previousChildReleased) {
     removeReleasedWorkerSocket({ platform: "linux", env: settings.env }, { previousWorkerReleased: true });
+  }
+  if (process.platform === "linux" && worker.fetchWorker === workerFetch) {
+    let socket;
+    try {
+      socket = validateWorkerSocket({ platform: "linux", env: settings.env });
+    } catch (error) {
+      if (error.code !== "ENOENT")
+        throw error;
+    }
+    if (socket && workerSocketListenerStopped(socket) === true) {
+      throw new NativeProcessRetryableStartError(WORKER_SOCKET_RETAINED_MESSAGE);
+    }
   }
   return {
     ...settings,
@@ -32156,7 +32178,7 @@ async function hostCheck(deps) {
       name: "host",
       ok: false,
       detail: facts.engine.workerProblem,
-      hint: [WORKER_DATA_OWNER_CONFLICT_MESSAGE, WORKER_ENDPOINT_CONFLICT_MESSAGE].includes(facts.engine.workerProblem) ? "Run olympus worker uninstall to remove an older worker service; otherwise stop the competing Olympus process. The engine retries automatically." : "Run olympus engine status and olympus engine logs to diagnose the worker startup failure."
+      hint: facts.engine.workerProblem === WORKER_SOCKET_RETAINED_MESSAGE ? "Run olympus worker uninstall, then olympus engine restart to safely clear the retained socket." : [WORKER_DATA_OWNER_CONFLICT_MESSAGE, WORKER_ENDPOINT_CONFLICT_MESSAGE].includes(facts.engine.workerProblem) ? "Run olympus worker uninstall to remove an older worker service; otherwise stop the competing Olympus process. The engine retries automatically." : "Run olympus engine status and olympus engine logs to diagnose the worker startup failure."
     };
   if (facts.engine.installed && facts.legacyWorkerUnit)
     return { name: "host", ok: false, detail: "A worker service from olympus worker install is installed beside the engine and competes with it for the same data and port.", hint: "Run olympus worker uninstall. The engine keeps running and owns the worker." };

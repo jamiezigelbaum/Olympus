@@ -767,3 +767,59 @@ test('an owner open right after another opens a window, and the newer ticket rep
   const ticket = readFileSync(second, 'utf8').match(/owner-proof#([A-Za-z0-9_-]{43})/)![1]!;
   expect((await f.bridge.handle(f.post('/owner-proof', { ticket }))).status).toBe(200);
 });
+
+
+for (const phase of ['body', 'session']) test(`owner proof mints no cookies after worker ownership is lost during ${phase}`, async () => {
+  const f = fixture(); let owned = true, calls = 0, release!: () => void;
+  const pending = new Promise<void>(resolve => { release = resolve; });
+  const bridge = new LinuxOwnerBridge({ ...f.options, workerReady: () => owned,
+    establishDashboard: async () => { calls++; await pending; return ['olympus_dashboard_control=FOREIGN; Path=/']; } });
+  cleanup.push(() => bridge.close());
+  await bridge.openTicket('/dashboard');
+  const ticket = readFileSync(f.opened(), 'utf8').match(/owner-proof#([A-Za-z0-9_-]{43})/)![1]!;
+  let response: Promise<Response>;
+  if (phase === 'body') {
+    const body = new ReadableStream<Uint8Array>({ async start(controller) { await pending; controller.enqueue(new TextEncoder().encode(JSON.stringify({ticket}))); controller.close(); } });
+    response = bridge.handle(new Request(bridge.origin + '/owner-proof', { method: 'POST', headers: {Host: new URL(bridge.origin).host, Origin: bridge.origin, 'Content-Type': 'application/json'}, body, duplex: 'half' } as RequestInit));
+    await Bun.sleep(1); owned = false; release();
+  } else {
+    response = bridge.handle(new Request(bridge.origin + '/owner-proof', {method: 'POST', headers: {Host: new URL(bridge.origin).host, Origin: bridge.origin, 'Content-Type': 'application/json'}, body: JSON.stringify({ticket})}));
+    await Bun.sleep(1); expect(calls).toBe(1); owned = false; release();
+  }
+  const refused = await response;
+  expect(refused.status).toBe(503);
+  expect(refused.headers.has('Set-Cookie')).toBe(false);
+  if (phase === 'body') expect(calls).toBe(0);
+});
+
+
+for (const phase of ['body', 'session']) test(`approved owner claim mints no cookies after worker ownership is lost during ${phase}`, async () => {
+  const f = fixture(); let owned = true, armed = false, calls = 0, release!: () => void;
+  const pending = new Promise<void>(resolve => { release = resolve; });
+  const bridge = new LinuxOwnerBridge({ ...f.options, workerReady: () => owned,
+    establishDashboard: async () => { if (!armed) return []; calls++; await pending; return ['olympus_dashboard_control=FOREIGN; Path=/']; } });
+  cleanup.push(() => bridge.close());
+  const request = (path: string, init: RequestInit = {}) => new Request(bridge.origin + path, {...init, headers: {Host: new URL(bridge.origin).host, ...Object.fromEntries(new Headers(init.headers))}});
+  const post = (path: string, body: object) => request(path, {method: 'POST', headers: {Origin: bridge.origin, 'Content-Type': 'application/json'}, body: JSON.stringify(body)});
+  const custom = {...f, bridge, request, post};
+  const owner = await prove(custom);
+  const opened = await bridge.handle(custom.post('/owner-open', {}));
+  const claim = opened.headers.get('X-Olympus-Owner-Claim')!, id = opened.headers.get('X-Olympus-Owner-Approval')!;
+  const ticket = readFileSync(f.opened(), 'utf8').match(/owner-proof#([A-Za-z0-9_-]{43})/)![1]!;
+  expect((await bridge.handle(custom.post('/owner-proof', {ticket}))).status).toBe(200);
+  expect((await bridge.handle(custom.request('/owner-approve', {method: 'POST', headers: {Origin: bridge.origin, 'Content-Type': 'application/json', Cookie: owner.cookie, 'X-Olympus-Owner-Proof': owner.proof}, body: JSON.stringify({id, approve: true})}))).status).toBe(204);
+  armed = true;
+  let response: Promise<Response>;
+  if (phase === 'body') {
+    const body = new ReadableStream<Uint8Array>({ async start(controller) { await pending; controller.enqueue(new TextEncoder().encode(JSON.stringify({claim}))); controller.close(); } });
+    response = bridge.handle(new Request(bridge.origin + '/owner-claim', {method: 'POST', headers: {Host: new URL(bridge.origin).host, Origin: bridge.origin, 'Content-Type': 'application/json'}, body, duplex: 'half'} as RequestInit));
+    await Bun.sleep(1); owned = false; release();
+  } else {
+    response = bridge.handle(custom.post('/owner-claim', {claim}));
+    await Bun.sleep(1); expect(calls).toBe(1); owned = false; release();
+  }
+  const refused = await response;
+  expect(refused.status).toBe(503);
+  expect(refused.headers.has('Set-Cookie')).toBe(false);
+  if (phase === 'body') expect(calls).toBe(0);
+});
