@@ -2790,7 +2790,7 @@ export const DASHBOARD_PRIVACY_QUESTIONS_COPY = {
 export const DASHBOARD_CHATGPT_PRIVACY_COPY = {
   addRule: 'Add a rule',
   details: 'Details',
-  summaryEmpty: 'No personal topics chosen yet. Add your description in Details.',
+  judgingDetails: 'Olympus reads your own words when judging each item. Your answers to the follow-up questions become sentences in that description. Always-private rules can only add protection; secrets always stay on your computer.',
   kindPrompt: 'What would you like to keep private?',
   step: 'Step {step} of 3',
   stepPick: 'Step 2 of 3',

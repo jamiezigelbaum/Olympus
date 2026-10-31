@@ -1678,7 +1678,7 @@ export function previewAgentsView(mode: string | null): DashboardAgentsView {
 }
 
 export const DASHBOARD_PREVIEW_STATES = [
-  'review', 'review-unconfigured', 'review-indexing', 'privacy-edit', 'privacy-conflict',
+  'review', 'review-unconfigured', 'review-indexing', 'privacy-edit', 'privacy-empty', 'privacy-description-editing', 'privacy-questions', 'privacy-conflict',
   'privacy-add-kind', 'privacy-add-pick', 'privacy-add-confirm', 'privacy-details', 'privacy-add-folder', 'privacy-add-label',
   'models', 'models-applying', 'first-install', 'gmail-scope-pending', 'tier-migration', 'partial', 'fresh', 'full', 'dropbox-initial', 'dropbox-update',
   'connect-google', 'connect-google-loopback', 'connect-dropbox', 'connect-x',
@@ -1696,7 +1696,8 @@ export const DASHBOARD_PREVIEW_STATES = [
 export function previewPrivacySteps(state: string): string | undefined {
   if (!state.startsWith('privacy-')) return undefined;
   const start = 'key:privacy:edit';
-  if (state === 'privacy-edit') return start;
+  if (['privacy-edit', 'privacy-empty', 'privacy-questions'].includes(state)) return start;
+  if (state === 'privacy-description-editing') return start + ',key:privacy:description:edit';
   if (state === 'privacy-details') return start + ',key:privacy:details';
   const kind = start + ',key:privacy:add';
   if (state === 'privacy-add-kind') return kind;
@@ -1726,8 +1727,8 @@ export function previewPrivacyToolResult(state: string, action: 'get' | 'set', i
   const conflict = state === 'privacy-conflict' && action === 'set' && !previewPrivacyConflicted;
   const initial: PrivacySettings = {
     configured: true,
-    description: 'Health and family matters are private.',
-    rules: [
+    description: state === 'privacy-empty' ? '' : state === 'privacy-questions' ? 'Health and family matters are private.' : 'My diary, legal correspondence and therapy notes are private. Keep the details of personal disputes on this computer. Everyday travel plans and restaurant recommendations are fine to share.',
+    rules: state === 'privacy-empty' ? [] : [
       { kind: 'folder', source_id: 'dropbox.files', key: '/Health', display: 'Health' },
       { kind: 'label', source_id: 'gmail.email', key: 'Label_preview', value: 'Family' },
       { kind: 'sender', source_id: 'gmail.email', value: 'doctor@example.com' },

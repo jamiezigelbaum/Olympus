@@ -4,10 +4,12 @@ import { PRIVACY_META_KEY } from '../src/workers/chatgpt/dashboard-contract.ts';
 
 describe('privacy preview fixtures', () => {
   test('deep links reach every sheet step, Details and conflict; picker fixtures have no names in structuredContent', () => {
-    for (const state of ['privacy-edit', 'privacy-add-kind', 'privacy-add-pick', 'privacy-add-confirm', 'privacy-details', 'privacy-conflict', 'privacy-add-folder', 'privacy-add-label'] as const) {
+    for (const state of ['privacy-edit', 'privacy-empty', 'privacy-description-editing', 'privacy-questions', 'privacy-add-kind', 'privacy-add-pick', 'privacy-add-confirm', 'privacy-details', 'privacy-conflict', 'privacy-add-folder', 'privacy-add-label'] as const) {
       expect(DASHBOARD_PREVIEW_STATES).toContain(state);
       expect(previewPrivacySteps(state)).toStartWith('key:privacy:edit');
     }
+    expect(previewPrivacyToolResult('privacy-empty', 'get')._meta[PRIVACY_META_KEY]!.description).toBe('');
+    expect(previewPrivacySteps('privacy-description-editing')).toEndWith('key:privacy:description:edit');
     expect(previewPrivacySteps('privacy-add-confirm')).toEndWith('key:privacy:sender:add');
     expect(previewPrivacySteps('privacy-conflict')).toEndWith('key:privacy:sheet:confirm');
     expect(previewPrivacySteps('privacy-details')).toEndWith('key:privacy:details');

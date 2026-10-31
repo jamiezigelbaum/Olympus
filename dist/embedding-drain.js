@@ -37846,7 +37846,7 @@ var init_vocabulary = __esm(() => {
   DASHBOARD_CHATGPT_PRIVACY_COPY = {
     addRule: "Add a rule",
     details: "Details",
-    summaryEmpty: "No personal topics chosen yet. Add your description in Details.",
+    judgingDetails: "Olympus reads your own words when judging each item. Your answers to the follow-up questions become sentences in that description. Always-private rules can only add protection; secrets always stay on your computer.",
     kindPrompt: "What would you like to keep private?",
     step: "Step {step} of 3",
     stepPick: "Step 2 of 3",
@@ -45022,6 +45022,7 @@ function chatgptPrivacyProgram(kit, makeLogic) {
       labelsError: "",
       sender: "",
       senderError: "",
+      editingDescription: false,
       questionsError: "",
       detailsOpen: false,
       conflictDetailsOpen: false,
@@ -45470,7 +45471,7 @@ function chatgptPrivacyProgram(kit, makeLogic) {
     const asked = L.questions(s.description);
     if (!asked.length)
       return null;
-    const section = add(el("section", "fsection questions"), el("h2", "", Q.title), el("p", "reason", Q.intro));
+    const section = add(el("section", "fsection questions"), el("h2", "", Q.title));
     for (const topic of asked) {
       const heading = el("h3", "qtitle", topic.question);
       heading.id = "privacy-q-" + topic.id;
@@ -45518,7 +45519,7 @@ function chatgptPrivacyProgram(kit, makeLogic) {
     return section;
   }
   function mainView(page2) {
-    add(page2, el("h1", "", W.title));
+    add(page2, el("h1", "", W.title), el("p", "muted intro", W.intro));
     if (s.server)
       add(page2, conflictBox());
     if (s.error) {
@@ -45535,41 +45536,47 @@ function chatgptPrivacyProgram(kit, makeLogic) {
       }
       return;
     }
-    const summary = el("p", "privacy-summary", L.summary(s.description) || W.summaryEmpty);
+    const description = add(el("section", "fsection privacy-description"), el("h2", "", W.descriptionLabel));
+    const summary = el("p", "privacy-summary", s.description || W.descriptionPlaceholder);
     summary.setAttribute("data-key", "privacy:summary");
-    add(page2, summary);
-    const details = disclosure();
-    add(details, el("p", "muted intro", W.intro));
-    const field = el("label", "field");
-    add(field, el("span", "field-label", W.descriptionLabel));
-    const area = el("textarea", "text");
-    area.rows = 4;
-    area.placeholder = W.descriptionPlaceholder;
-    area.value = s.description;
-    area.disabled = s.saving;
-    area.setAttribute("data-key", "privacy:description");
-    area.setAttribute("aria-describedby", "privacy-description-shared");
-    const asked = L.questionsKey(s.description);
-    area.addEventListener("input", () => {
-      const hadDescriptionEdits = s.description !== s.savedDescription;
-      s.description = area.value;
-      summary.textContent = L.summary(s.description) || W.summaryEmpty;
-      const open3 = s.confirmStep;
-      const could = canSave();
-      changed();
-      const noted = !!s.questionsError;
-      s.questionsError = "";
-      if (hadDescriptionEdits !== (s.description !== s.savedDescription) || open3 || noted || could !== canSave() || L.questionsKey(s.description) !== asked)
+    if (!s.editingDescription) {
+      add(description, summary, kit.button(W.edit, "privacy:description:edit", s.saving ? null : () => {
+        s.editingDescription = true;
         kit.render("privacy:description");
-    });
-    add(details, add(field, area));
+      }, "plain"));
+    } else {
+      const field = el("label", "field");
+      const area = el("textarea", "text");
+      area.rows = 4;
+      area.placeholder = W.descriptionPlaceholder;
+      area.value = s.description;
+      area.disabled = s.saving;
+      area.setAttribute("aria-label", W.descriptionLabel);
+      area.setAttribute("data-key", "privacy:description");
+      area.setAttribute("aria-describedby", "privacy-description-shared");
+      const asked = L.questionsKey(s.description);
+      area.addEventListener("input", () => {
+        s.description = area.value;
+        const open3 = s.confirmStep;
+        const could = canSave();
+        changed();
+        s.edited = s.intents.length > 0 || s.description !== s.savedDescription;
+        const noted = !!s.questionsError;
+        s.questionsError = "";
+        if (open3 || noted || could !== canSave() || L.questionsKey(s.description) !== asked)
+          kit.render("privacy:description");
+      });
+      add(description, add(field, area));
+    }
     const shared = el("p", "reason field-note", W.descriptionShared);
     shared.id = "privacy-description-shared";
-    add(details, shared);
+    add(description, shared);
+    add(page2, description);
     const questions = questionsSection();
     if (questions)
-      add(details, questions);
-    add(details, el("p", "reason", W.namesShared));
+      add(page2, questions);
+    const details = disclosure();
+    add(details, el("p", "reason", W.judgingDetails), el("p", "reason", W.questions.intro));
     const rules = add(el("section", "fsection"), el("h2", "", W.rulesTitle));
     if (s.rules.length) {
       const listNode = el("ul", "rule-chips");
@@ -45587,10 +45594,16 @@ function chatgptPrivacyProgram(kit, makeLogic) {
     } : null, "plain"));
     if (s.server)
       add(rules, el("p", "reason", W.conflictAddBlocked));
+    add(rules, el("p", "reason", W.namesShared));
+    if (!folderSources().length || !kit.picker)
+      add(rules, el("p", "reason", W.needFolderSource));
+    if (!gmailConnected())
+      add(rules, el("p", "reason", W.needGmail));
     add(page2, rules, details);
     const footer = el("section", "picker-footer");
+    const saveHost = s.editingDescription || s.description !== s.savedDescription ? description : page2;
     if (s.confirmStep && !s.saving && lowers()) {
-      add(page2, add(footer, confirmBox()));
+      add(saveHost, add(footer, confirmBox()));
       return;
     }
     const pendingDescription = s.description !== s.savedDescription;
@@ -45599,8 +45612,16 @@ function chatgptPrivacyProgram(kit, makeLogic) {
       const busy = kit.button(W.saving, "privacy:save", null, "main");
       busy.setAttribute("aria-busy", "true");
       add(wrap, busy);
-    } else if (!s.server && pendingDescription) {
-      add(wrap, add(el("div", "actions"), kit.button(W.save, "privacy:save", canSave() ? save : null, "main"), kit.button(W.cancel, "privacy:cancel", backOut, "plain")));
+    } else if (!s.server && (s.editingDescription || pendingDescription)) {
+      add(wrap, add(el("div", "actions"), kit.button(W.save, "privacy:save", canSave() ? save : null, "main"), kit.button(W.cancel, "privacy:cancel", () => {
+        s.description = s.savedDescription;
+        s.editingDescription = false;
+        s.questionsError = "";
+        s.confirmStep = false;
+        s.saveError = "";
+        s.edited = s.intents.length > 0;
+        kit.render("privacy:description:edit");
+      }, "plain")));
     } else if (!s.server && s.intents.length) {
       add(wrap, kit.button(W.applyAgain, "privacy:save", save, "main"));
     }
@@ -45610,7 +45631,7 @@ function chatgptPrivacyProgram(kit, makeLogic) {
       add(wrap, error);
     }
     if (wrap.childNodes.length)
-      add(page2, add(footer, wrap));
+      add(saveHost, add(footer, wrap));
   }
   function sourcesView(page2) {
     add(page2, el("h1", "", W.folderSourceTitle));
@@ -46267,7 +46288,7 @@ textarea.text{resize:vertical;min-height:4.5rem}
 .qchoice input{flex:none;width:1.125rem;height:1.125rem;margin:0;accent-color:var(--accent)}
 .fsection>.reason{margin-top:0.375rem}
 .privacy>.intro{margin-bottom:0.5rem}
-.privacy-summary{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;line-height:1.5;margin-top:0.75rem}
+.privacy-summary{white-space:pre-wrap;overflow-wrap:anywhere;line-height:1.5;margin:0.75rem 0} .privacy-description .actions{flex-direction:row;align-items:center}
 .rule-chips{list-style:none;padding:0;display:flex;flex-wrap:wrap;gap:0.5rem;margin:0.75rem 0}
 .rule-chip{display:flex;align-items:center;gap:0.5rem;border:1px solid var(--line);border-radius:1rem;padding:0.25rem 0.5rem 0.25rem 0.75rem;max-width:100%;overflow-wrap:anywhere}
 .rule-chip .fname{width:auto;min-width:0;padding:0;text-align:left}

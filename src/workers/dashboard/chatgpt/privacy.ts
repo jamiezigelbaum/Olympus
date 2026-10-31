@@ -125,7 +125,7 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
       edited: false, saving: false, saveError: '', discarding: false, picking: false,
       labels: [], labelsLoading: false, labelsError: '',
       sender: '', senderError: '',
-      questionsError: '', detailsOpen: false, conflictDetailsOpen: false, candidate: null, ruleKind: '',
+      editingDescription: false, questionsError: '', detailsOpen: false, conflictDetailsOpen: false, candidate: null, ruleKind: '',
     };
     load();
   }
@@ -621,7 +621,7 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
     const Q = W.questions;
     const asked = L.questions(s.description);
     if (!asked.length) return null;
-    const section = add(el('section', 'fsection questions'), el('h2', '', Q.title), el('p', 'reason', Q.intro));
+    const section = add(el('section', 'fsection questions'), el('h2', '', Q.title));
     for (const topic of asked) {
       const heading = el('h3', 'qtitle', topic.question);
       heading.id = 'privacy-q-' + topic.id;
@@ -670,7 +670,7 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
   }
 
   function mainView(page: HTMLElement): void {
-    add(page, el('h1', '', W.title));
+    add(page, el('h1', '', W.title), el('p', 'muted intro', W.intro));
 
     if (s.server) add(page, conflictBox());
     if (s.error) {
@@ -688,41 +688,46 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
       }
       return;
     }
-    const summary = el('p', 'privacy-summary', L.summary(s.description) || W.summaryEmpty);
+    const description = add(el('section', 'fsection privacy-description'), el('h2', '', W.descriptionLabel));
+    const summary = el('p', 'privacy-summary', s.description || W.descriptionPlaceholder);
     summary.setAttribute('data-key', 'privacy:summary');
-    add(page, summary);
-    const details = disclosure();
-    add(details, el('p', 'muted intro', W.intro));
-    const field = el('label', 'field');
-    add(field, el('span', 'field-label', W.descriptionLabel));
-    const area = el('textarea', 'text') as HTMLTextAreaElement;
-    area.rows = 4;
-    area.placeholder = W.descriptionPlaceholder;
-    area.value = s.description;
-    area.disabled = s.saving;
-    area.setAttribute('data-key', 'privacy:description');
-    area.setAttribute('aria-describedby', 'privacy-description-shared');
-    const asked = L.questionsKey(s.description);
-    area.addEventListener('input', () => {
-      const hadDescriptionEdits = s.description !== s.savedDescription;
-      s.description = area.value;
-      summary.textContent = L.summary(s.description) || W.summaryEmpty;
-      const open = s.confirmStep;
-      const could = canSave();
-      changed();
-      // Redrawn (caret kept) when the step closes, a too-long note clears, or
-      // what the questions show changes (an area, or an answer edited by hand).
-      const noted = !!s.questionsError;
-      s.questionsError = '';
-      if (hadDescriptionEdits !== (s.description !== s.savedDescription) || open || noted || could !== canSave() || L.questionsKey(s.description) !== asked) kit.render('privacy:description');
-    });
-    add(details, add(field, area));
+    if (!s.editingDescription) {
+      add(description, summary, kit.button(W.edit, 'privacy:description:edit', s.saving ? null : () => {
+        s.editingDescription = true;
+        kit.render('privacy:description');
+      }, 'plain'));
+    } else {
+      const field = el('label', 'field');
+      const area = el('textarea', 'text') as HTMLTextAreaElement;
+      area.rows = 4;
+      area.placeholder = W.descriptionPlaceholder;
+      area.value = s.description;
+      area.disabled = s.saving;
+      area.setAttribute('aria-label', W.descriptionLabel);
+      area.setAttribute('data-key', 'privacy:description');
+      area.setAttribute('aria-describedby', 'privacy-description-shared');
+      const asked = L.questionsKey(s.description);
+      area.addEventListener('input', () => {
+        s.description = area.value;
+        const open = s.confirmStep;
+        const could = canSave();
+        changed();
+        s.edited = s.intents.length > 0 || s.description !== s.savedDescription;
+        // Preserve the caret unless questions, confirmation or save availability change.
+        const noted = !!s.questionsError;
+        s.questionsError = '';
+        if (open || noted || could !== canSave() || L.questionsKey(s.description) !== asked) kit.render('privacy:description');
+      });
+      add(description, add(field, area));
+    }
     const shared = el('p', 'reason field-note', W.descriptionShared);
     shared.id = 'privacy-description-shared';
-    add(details, shared);
+    add(description, shared);
+    add(page, description);
     const questions = questionsSection();
-    if (questions) add(details, questions);
-    add(details, el('p', 'reason', W.namesShared));
+    if (questions) add(page, questions);
+    const details = disclosure();
+    add(details, el('p', 'reason', W.judgingDetails), el('p', 'reason', W.questions.intro));
 
     const rules = add(el('section', 'fsection'), el('h2', '', W.rulesTitle));
     if (s.rules.length) {
@@ -735,12 +740,16 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
       kit.render('privacy:add:folder');
     } : null, 'plain'));
     if (s.server) add(rules, el('p', 'reason', W.conflictAddBlocked));
+    add(rules, el('p', 'reason', W.namesShared));
+    if (!folderSources().length || !kit.picker) add(rules, el('p', 'reason', W.needFolderSource));
+    if (!gmailConnected()) add(rules, el('p', 'reason', W.needGmail));
     add(page, rules, details);
 
     const footer = el('section', 'picker-footer');
+    const saveHost = s.editingDescription || s.description !== s.savedDescription ? description : page;
     // The confirmation step stands in for Save while it is open (and while the change still lowers protection).
     if (s.confirmStep && !s.saving && lowers()) {
-      add(page, add(footer, confirmBox()));
+      add(saveHost, add(footer, confirmBox()));
       return;
     }
     // Rule writes apply immediately. Only description/question edits get a save bar.
@@ -750,10 +759,18 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
       const busy = kit.button(W.saving, 'privacy:save', null, 'main');
       busy.setAttribute('aria-busy', 'true');
       add(wrap, busy);
-    } else if (!s.server && pendingDescription) {
+    } else if (!s.server && (s.editingDescription || pendingDescription)) {
       add(wrap, add(el('div', 'actions'),
         kit.button(W.save, 'privacy:save', canSave() ? save : null, 'main'),
-        kit.button(W.cancel, 'privacy:cancel', backOut, 'plain')));
+        kit.button(W.cancel, 'privacy:cancel', () => {
+          s.description = s.savedDescription;
+          s.editingDescription = false;
+          s.questionsError = '';
+          s.confirmStep = false;
+          s.saveError = '';
+          s.edited = s.intents.length > 0;
+          kit.render('privacy:description:edit');
+        }, 'plain')));
     } else if (!s.server && s.intents.length) {
       // A failed addition or cancelled removal still needs its existing retry path.
       add(wrap, kit.button(W.applyAgain, 'privacy:save', save, 'main'));
@@ -763,7 +780,7 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
       error.setAttribute('role', 'alert');
       add(wrap, error);
     }
-    if (wrap.childNodes.length) add(page, add(footer, wrap));
+    if (wrap.childNodes.length) add(saveHost, add(footer, wrap));
   }
 
   function sourcesView(page: HTMLElement): void {
