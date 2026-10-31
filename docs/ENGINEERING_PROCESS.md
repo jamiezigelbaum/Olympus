@@ -126,6 +126,16 @@ This keeps incidents from turning into permanent latency by default.
 
 Current blocking gates recorded here:
 
+- **Connector-store source neutrality** (2026-10-31). The architecture guard
+  rejects new literal family/source-name comparisons and switches in the
+  shared connector store, preventing source-specific retrieval rules such as
+  the PR #676 finding. Owner: the session changing connector-store retrieval.
+  Expected runtime: under one second for this focused check. False-positive
+  budget: zero; dynamic identity/scope comparisons are permitted. Six existing
+  lines are pinned individually with retirement notes in the guard; deleting
+  a line must delete its allowance. Retire the scan only when an equivalent
+  structural check enforces the same source-neutrality contract.
+
 - **ChatGPT directory reviewer path** (2026-10-12). Prevents a relay release
   from changing what OpenAI's directory reviewers and directory users see on
   `/openai/mcp`, or from breaking the frozen reviewer demo engine; and an
