@@ -242,6 +242,9 @@ export interface DashboardCallbackRegistration {
 export interface DashboardSetupStep {
   text: string;
   title?: string;
+  /** Numbered clicks; **words** are emphasized by the shared renderer. */
+  instructions?: string[];
+  return_note?: string;
   redirect_uri?: boolean;
   button_label?: string;
   links?: Array<{ label: string; url: string }>;
@@ -4349,7 +4352,7 @@ function oauthSetupInstructions(
   };
   if (isGoogleOAuthSource(source)) {
     return {
-      plain_intro: 'Three stops in Google Cloud. Each button opens the exact page.',
+      plain_intro: 'About ten minutes, free. You make the app once; it works for Gmail and Google Drive.',
       setup_provider: 'Google Cloud',
       setup_heading: 'Connect Gmail with your own Google app',
       credential_file: 'google_desktop',
@@ -4357,12 +4360,12 @@ function oauthSetupInstructions(
       provider_console_url: 'https://console.cloud.google.com/auth/clients',
       diy_summary: 'Use my own Google app',
       diy_steps: [
-        { title: 'Make the project and turn on Gmail and Drive', text: 'Create a project, select it, then enable both APIs using the links below.', button_label: 'Open Google Cloud', link: { label: 'Google Cloud', url: 'https://console.cloud.google.com/projectcreate' }, links: [
-          { label: 'Enable Gmail API', url: 'https://console.cloud.google.com/apis/library/gmail.googleapis.com' },
-          { label: 'Enable Google Drive API', url: 'https://console.cloud.google.com/apis/library/drive.googleapis.com' },
-        ] },
-        { title: 'Set up the sign-in screen and publish it', text: 'External, your own email, then Publish app.', button_label: 'Open the sign-in screen', link: { label: 'Sign-in screen', url: 'https://console.cloud.google.com/auth/overview' }, links: [{ label: 'Publish app in Audience', url: 'https://console.cloud.google.com/auth/audience' }] },
-        { title: 'Make a Desktop app key and download it', text: 'Choose Download JSON when Google shows the key.', button_label: 'Open Clients', link: { label: 'Clients', url: 'https://console.cloud.google.com/auth/clients' } },
+        { title: 'Create the project', text: '', instructions: ['Name the project **Olympus**.', 'Choose **Create**, then select the new project.'], link: { label: 'Google Cloud', url: 'https://console.cloud.google.com/projectcreate' }, return_note: "Google opens in your browser. Come back here when you've created and selected your Olympus project." },
+        { title: 'Turn on Gmail and Drive', text: '', instructions: ['Check **Olympus** is selected at the top.', 'Search for **Gmail API**, open it and choose **Enable**.', 'Return to **Library**, search for **Google Drive API** and choose **Enable**.'], link: { label: 'Google Cloud', url: 'https://console.cloud.google.com/apis/library' }, return_note: "Google opens the API Library. Come back here when both Gmail and Google Drive are enabled in the same project." },
+        { title: 'Set up the sign-in screen', text: '', instructions: ['Choose **Get started**.', 'Name the app **Olympus** and give your own email for support.', 'For Audience choose **External**, then add your email as contact.', 'Choose **Create**.'], link: { label: 'Google Cloud', url: 'https://console.cloud.google.com/auth/overview' }, return_note: "Google opens in your browser on the right project. Come back here when you've pressed Create." },
+        { title: 'Publish', text: '', instructions: ['In **Audience**, choose **Publish app**.', 'Confirm to move the app to **In production**.'], link: { label: 'Google Cloud', url: 'https://console.cloud.google.com/auth/audience' }, return_note: 'Testing ends the connection every 7 days. Come back here when the publishing status is In production.' },
+        { title: 'Make the key', text: '', instructions: ['In **Clients**, choose **Create client**.', 'Choose **Desktop app**, name it **Olympus** and choose **Create**.', 'Choose **Download JSON** and save the file in **Downloads**.'], link: { label: 'Google Cloud', url: 'https://console.cloud.google.com/auth/clients' }, return_note: "Google makes the key for your app. Come back here when you've downloaded the JSON file." },
+        { title: 'Paste it here', text: '' },
       ],
       secret_shown_once: false,
       fields: [clientIdField, clientSecretField],

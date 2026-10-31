@@ -110,6 +110,16 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
   function setSheetOpen(sheet: HTMLElement, open: boolean): void {
     sheet.classList.toggle('on', open);
     sheet.setAttribute('aria-hidden', open ? 'false' : 'true');
+    if (!open) {
+      const choice = sheet.querySelector<HTMLElement>('[data-setup-choice], [data-setup-lead]');
+      const walkthrough = sheet.querySelector<HTMLElement>('[data-setup-walkthrough]');
+      if (choice && walkthrough) {
+        choice.hidden = false;
+        walkthrough.hidden = true;
+        const note = choice.querySelector<HTMLElement>('[data-shared-app-note]');
+        if (note) note.hidden = false;
+      }
+    }
     if (!sheet.id) return;
     queryAll<HTMLElement>('[data-sheet-toggle]').forEach((toggle) => {
       if (toggle.dataset.sheetToggle === `#${sheet.id}`) toggle.setAttribute('aria-expanded', open ? 'true' : 'false');
@@ -1031,6 +1041,18 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
   function showSetupFailure(form: HTMLFormElement, message: string): void {
       const setup = form.closest<HTMLElement>('[data-setup-steps]');
       const step = message.includes('Redo the Set up your account step') ? 0 : message.includes('Redo the Create an API key step') ? 1 : -1;
+      if (setup && form.querySelector('[data-client-file-drop]')) {
+        const panels = Array.from(setup.querySelectorAll<HTMLElement>('[data-setup-panel]'));
+        showSetupStep(setup, panels.length - 1);
+        const error = document.createElement('div'); error.dataset.setupError = '';
+        const banner = document.createElement('p'); banner.className = 'why'; banner.setAttribute('role', 'alert'); banner.textContent = message;
+        const details = document.createElement('details'); details.className = 'howto';
+        const summary = document.createElement('summary'); summary.textContent = 'How to fix';
+        const hint = document.createElement('p'); hint.textContent = 'Check the app settings in Google Cloud, then choose the Desktop app file again or paste the ID and secret.';
+        details.append(summary, hint); error.append(banner, details);
+        form.querySelector('[data-client-file-drop]')!.after(error);
+        return;
+      }
       if (setup) {
         const panels = Array.from(setup.querySelectorAll<HTMLElement>('[data-setup-panel]'));
         const current = panels.findIndex(panel => !panel.hidden);
@@ -1056,7 +1078,9 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
     const panels = Array.from(sheet.querySelectorAll<HTMLElement>('[data-setup-panel]'));
     panels.forEach((panel, index) => { panel.hidden = index !== step; });
     const counter = sheet.querySelector<HTMLElement>('[data-setup-counter]');
-    if (counter) counter.textContent = `Step ${step + 1} of ${panels.length}`;
+    if (counter) counter.textContent = sheet.hasAttribute('data-setup-guided') ? `STEP ${step + 1} OF ${panels.length}` : `Step ${step + 1} of ${panels.length}`;
+    sheet.querySelectorAll<HTMLElement>('[data-setup-segment]').forEach((segment, index) => segment.classList.toggle('filled', index <= step));
+    sheet.querySelector('[role="progressbar"]')?.setAttribute('aria-valuenow', String(step + 1));
     const progress = sheet.querySelector<HTMLProgressElement>('[data-setup-progress]');
     if (progress) progress.value = step + 1;
     const back = sheet.querySelector<HTMLButtonElement>('[data-setup-back]');
@@ -1071,7 +1095,7 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
       sheet.querySelectorAll<HTMLFormElement>('form').forEach(form => say(form, ''));
       sheet.querySelector('[data-setup-error]')?.remove();
     }
-    const heading = panels[step]?.querySelector<HTMLElement>('h4');
+    const heading = panels[step]?.querySelector<HTMLElement>('h2, h4');
     if (heading) { heading.tabIndex = -1; heading.focus(); }
   }
 
@@ -1098,6 +1122,15 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
     if (picker) picker.value = '';
   }
 
+  function onClientFileKeydown(event: Event): void {
+    const target = event.target instanceof HTMLElement ? event.target : null;
+    const key = (event as KeyboardEvent).key;
+    if (target?.matches('[data-client-file-drop]') && (key === 'Enter' || key === ' ')) {
+      event.preventDefault();
+      target.querySelector<HTMLInputElement>('[data-client-file]')?.click();
+    }
+  }
+
   function onClientFileChange(event: Event): void {
     const input = event.target instanceof HTMLInputElement ? event.target : null;
     if (input?.matches('[data-client-file]') && input.form) void readClientFile(input.form, input.files?.[0]);
@@ -1113,6 +1146,11 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
   function onClick(event: Event): void {
     const target = event.target instanceof Element ? event.target : null;
     if (!target || !root.contains(target)) return;
+    const fileZone = target.closest('[data-client-file-drop]');
+    if (fileZone && !target.matches('[data-client-file]')) {
+      fileZone.querySelector<HTMLInputElement>('[data-client-file]')?.click();
+      return;
+    }
     const messagingRetry = target.closest('[data-messaging-retry]');
     if (messagingRetry) {
       const sheet = messagingRetry.closest('[data-messaging-setup]');
@@ -1136,9 +1174,11 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
       const walkthrough = sheet?.querySelector<HTMLElement>('[data-setup-walkthrough]');
       if (walkthrough) {
         walkthrough.hidden = false;
-        const heading = walkthrough.querySelector<HTMLElement>('h4');
+        const heading = walkthrough.querySelector<HTMLElement>('h2, h4');
         if (heading) { heading.tabIndex = -1; heading.focus(); }
       }
+      const choice = sheet?.querySelector<HTMLElement>('[data-setup-choice]');
+      if (choice) choice.hidden = true;
       const sharedNote = sheet?.querySelector<HTMLElement>('[data-shared-app-note]');
       if (sharedNote) sharedNote.hidden = true;
       const lead = sheet?.querySelector<HTMLElement>('[data-setup-lead]');
@@ -1365,6 +1405,7 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
   root.addEventListener('submit', onSubmit);
   root.addEventListener('click', onClick);
   root.addEventListener('change', onClientFileChange);
+  root.addEventListener('keydown', onClientFileKeydown);
   root.addEventListener('dragover', onClientFileDrop);
   root.addEventListener('drop', onClientFileDrop);
   // Coming back from the approval browser or tab is the moment the exchange
@@ -1402,6 +1443,7 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
     root.removeEventListener('submit', onSubmit);
     root.removeEventListener('click', onClick);
     root.removeEventListener('change', onClientFileChange);
+    root.removeEventListener('keydown', onClientFileKeydown);
     root.removeEventListener('dragover', onClientFileDrop);
     root.removeEventListener('drop', onClientFileDrop);
     root.removeEventListener(redrawEvent, onRedrawRequest);

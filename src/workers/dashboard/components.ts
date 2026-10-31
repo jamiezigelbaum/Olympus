@@ -575,19 +575,27 @@ export interface DashboardConnectSheetInput {
 }
 
 /** A provider-neutral walkthrough. The last step contains the existing connect form. */
-export function setupStepsSheet(input: { id: string; provider: string; steps: readonly DashboardSetupStep[]; finalForm: (formId: string) => string; submitLabel?: string; redirect?: string }): string {
+export function setupStepsSheet(input: { id: string; provider: string; steps: readonly DashboardSetupStep[]; finalForm: (formId: string) => string; submitLabel?: string; redirect?: string; guided?: boolean; footer?: string; initialStep?: number }): string {
   const id = safeId(input.id);
   const count = input.steps.length;
+  const current = input.initialStep ?? 0;
   const formId = `${id}-form`;
   const panels = input.steps.map((step, index) => {
     const url = step.link && safeExternalHref(step.link.url);
-    const link = url ? `<button type="button" class="btn primary" data-setup-open="${escapeHtml(url)}">${escapeHtml(step.button_label ?? `Open this page in ${input.provider}`)}</button>` : '';
+    const link = url ? `<button type="button" class="btn primary" data-setup-open="${escapeHtml(url)}">${escapeHtml(step.button_label ?? `Open this page in ${input.provider}${input.guided ? ' ↗' : ''}`)}</button>` : '';
     const extraLinks = (step.links ?? []).map(link => { const href = safeExternalHref(link.url); return href ? `<p><a class="ext" href="${escapeHtml(href)}" target="_blank" rel="noopener noreferrer">${escapeHtml(link.label)} ↗</a></p>` : ''; }).join('');
     const redirect = step.redirect_uri && input.redirect
       ? `<div class="promptbox" id="${id}-redirect">${escapeHtml(input.redirect)}</div><button class="btn" type="button" data-copy-target="#${id}-redirect">Copy redirect URI</button><span data-copy-status aria-live="polite"></span>` : '';
-    return `<div data-setup-panel${index ? ' hidden' : ''}><h4>${escapeHtml(step.title ?? `Step ${index + 1}`)}</h4><p>${escapeHtml(step.text)}</p>${link}${extraLinks}${redirect}${index === count - 1 ? input.finalForm(formId) : ''}</div>`;
+    const instructions = step.instructions
+      ? `<ol class="steps">${step.instructions.map(click => `<li>${escapeHtml(click).replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')}</li>`).join('')}</ol>`
+      : step.text ? `<p>${escapeHtml(step.text)}</p>` : '';
+    const heading = input.guided ? 'h2' : 'h4';
+    return `<div data-setup-panel${index !== current ? ' hidden' : ''}><${heading}>${escapeHtml(step.title ?? `Step ${index + 1}`)}</${heading}>${instructions}${link}${extraLinks}${redirect}${step.return_note ? `<p class="setupnote">${escapeHtml(step.return_note)}</p>` : ''}${index === count - 1 ? input.finalForm(formId) : ''}</div>`;
   }).join('');
-  return `<div data-setup-steps><p data-setup-counter>Step 1 of ${count}</p><progress data-setup-progress max="${count}" value="1"></progress>${panels}<div class="setupactions" data-setup-actions><button class="btn" type="button" data-setup-back disabled>Back</button><button class="btn primary" type="button" data-setup-next${count === 1 ? ' hidden' : ''}>I've done this, next</button><button class="btn primary" type="submit" form="${formId}" data-setup-submit${count === 1 ? '' : ' hidden'}>${escapeHtml(input.submitLabel ?? 'Connect')}</button></div></div>`;
+  const progress = input.guided
+    ? `<div class="setupsegments" role="progressbar" aria-label="Setup progress" aria-valuemin="1" aria-valuemax="${count}" aria-valuenow="${current + 1}">${input.steps.map((_, i) => `<span data-setup-segment${i <= current ? ' class="filled"' : ''}></span>`).join('')}</div>`
+    : `<progress data-setup-progress max="${count}" value="${current + 1}"></progress>`;
+  return `<div data-setup-steps${input.guided ? ' data-setup-guided' : ''}>${progress}<p data-setup-counter>${input.guided ? `STEP ${current + 1} OF ${count}` : `Step ${current + 1} of ${count}`}</p>${panels}<div class="setupactions actionrow" data-setup-actions><button class="btn" type="button" data-setup-back${current === 0 ? ' disabled' : ''}>Back</button><button class="btn primary" type="button" data-setup-next${current === count - 1 ? ' hidden' : ''}>I've done this, next</button><button class="btn primary" type="submit" form="${formId}" data-setup-submit${current === count - 1 ? '' : ' hidden'}>${escapeHtml(input.submitLabel ?? 'Connect')}</button></div>${input.footer ? `<p class="setupfooter">${escapeHtml(input.footer)}</p>` : ''}</div>`;
 }
 
 /**
@@ -649,16 +657,18 @@ export function connectSetupSheet(input: DashboardConnectSheetInput): string {
   const sourceField = `<input type="hidden" name="source" value="${escapeHtml(input.source)}">`;
   const byoForm = (formId?: string) => `<form${formId ? ` id="${formId}" class="setupfields"` : ' class="rowform"'} data-connect-kind="oauth" style="margin-top:12px">`
     + sourceField
-    + (input.credentialFile ? `<input type="hidden" name="google_desktop" value="true"><input type="hidden" name="client_file_revision" value="0"><div data-client-file-drop tabindex="0" role="group" aria-label="Drop the downloaded file here"><p>Drop the downloaded file here</p><p class="hint">client_secret_….json, or choose it from Downloads</p><input type="file" accept=".json,application/json" data-client-file aria-label="Choose the downloaded file"><p data-client-file-status role="status"></p></div><p class="hint">The file stays on this computer. Olympus reads the key from it, checks your app is ready, and opens Google's sign-in. Drive uses the same app.</p><p class="hint">The key check runs before sign-in. Google confirms consent and API access after you sign in.</p><details data-client-paste><summary>Paste the ID and secret instead</summary>${inputs.replace(/<input /g, '<input disabled ')}</details>` : inputs)
+    + (input.credentialFile ? `<input type="hidden" name="google_desktop" value="true"><input type="hidden" name="client_file_revision" value="0"><div data-client-file-drop tabindex="0" role="button" aria-label="Drop the downloaded file here"><p>Drop the downloaded file here</p><p class="hint">client_secret_….json, or choose it from Downloads</p><input type="file" accept=".json,application/json" data-client-file hidden aria-label="Choose the downloaded file"><p data-client-file-status role="status"></p></div>${hasError ? `<div data-setup-error><p class="why" role="alert">${escapeHtml(input.notice!)}</p>${detailsDisclosure('How to fix', input.noticeDetail ? `<p class="hint">${escapeHtml(input.noticeDetail)}</p>` : '')}</div>` : ''}<p class="hint">The file stays on this computer. Olympus reads the key from it, checks your app is ready, and opens Google's sign-in. Drive uses the same app.</p><p class="hint">The key check runs before sign-in. Google confirms consent and API access after you sign in.</p><details data-client-paste><summary>Paste the ID and secret instead</summary>${inputs.replace(/<input /g, '<input disabled ')}</details>` : inputs)
     + (formId ? '' : `<button class="btn primary" type="submit">${submitLabel}</button>`)
     + `<span class="actmsg" data-action-message role="status"></span>`
     // Where the authorization link lands when the browser blocks the new tab.
     + `<span class="authfallback" data-authorization-fallback></span>`
     + `</form>`;
   const walkthroughBody = input.steps?.length && input.provider
-    ? setupStepsSheet({ id, provider: input.provider, steps: input.steps, finalForm: byoForm, submitLabel: input.submitLabel ?? 'Connect', ...(input.redirectUri ? { redirect: input.redirectUri.uri } : {}) })
+    ? setupStepsSheet({ id, provider: input.provider, steps: input.steps, finalForm: byoForm, submitLabel: input.submitLabel ?? 'Connect', ...(input.credentialFile ? { guided: true, initialStep: hasError ? input.steps!.length - 1 : 0, footer: 'Steps: project · turn on Gmail and Drive · sign-in screen · publish · make the key · paste it here' } : {}), ...(input.redirectUri ? { redirect: input.redirectUri.uri } : {}) })
     : `${registration}${redirect}${byoForm()}`;
-  const walkthrough = `${input.setupHeading ? `<h4>${escapeHtml(input.setupHeading)}</h4>` : ''}${walkthroughBody}`;
+  const walkthrough = input.credentialFile
+    ? `<div class="setupheader"><h2>${escapeHtml(input.setupHeading ?? input.heading)}</h2><button class="btn setupclose" type="button" data-sheet-toggle="#${id}" aria-label="Close setup">×</button></div><p class="setupintro">${escapeHtml(input.intro)}</p>${walkthroughBody}`
+    : `${input.setupHeading ? `<h4>${escapeHtml(input.setupHeading)}</h4>` : ''}${walkthroughBody}`;
   const lead = input.lead ? `<div data-setup-lead><h4>${escapeHtml(input.lead.title)}</h4><p>${escapeHtml(input.lead.body)}</p><button type="button" class="btn primary" data-setup-begin>${escapeHtml(input.lead.button)}</button>${input.lead.notes.map(note => `<p class="hint">${escapeHtml(note)}</p>`).join('')}</div>` : '';
   if (input.publisher) {
     // The whole point of publisher mode is that there is nothing to do first.
@@ -671,18 +681,18 @@ export function connectSetupSheet(input: DashboardConnectSheetInput): string {
       + `<span class="actmsg" data-action-message role="status"></span>`
       + `<span class="authfallback" data-authorization-fallback></span>`
       + `</form>`;
+    if (input.credentialFile) return `<div class="sheet" id="${id}" aria-hidden="true"><div data-connect-content><div data-setup-choice${hasError ? ' hidden' : ''}><h4>${escapeHtml(input.heading)}</h4>${providerNote}<p>${escapeHtml(input.publisher.intro)}</p><div class="actionrow">${publisherForm}<button type="button" class="btn" data-setup-begin>${escapeHtml(input.publisher.byoSummary)}</button></div>${cancel}</div><div data-setup-walkthrough${hasError ? '' : ' hidden'}>${walkthrough}</div></div></div>`;
     return `<div class="sheet" id="${id}" aria-hidden="true">`
       + `<h4>${escapeHtml(input.heading)}</h4>`
       + `${notice}<div data-connect-content${hasError ? ' hidden' : ''}>${providerNote}`
       + `<p>${escapeHtml(input.publisher.intro)}</p>`
       + `${publisherForm}`
       + `${cancel}`
-      + (input.credentialFile
-        ? `<button type="button" class="btn" data-setup-begin>${escapeHtml(input.publisher.byoSummary)}</button><div data-setup-walkthrough hidden><p>${escapeHtml(input.intro)}</p>${walkthrough}${prompt}</div>`
-        : `<details class="agentprompt"><summary>${escapeHtml(input.publisher.byoSummary)}</summary><p>${escapeHtml(input.intro)}</p>${walkthrough}${prompt}</details>`)
+      + `<details class="agentprompt"><summary>${escapeHtml(input.publisher.byoSummary)}</summary><p>${escapeHtml(input.intro)}</p>${walkthrough}${prompt}</details>`
       + `</div>`
       + `</div>`;
   }
+  if (input.credentialFile) return `<div class="sheet" id="${id}" aria-hidden="true"><div data-connect-content>${lead}<div data-setup-walkthrough${input.lead && !hasError ? ' hidden' : ''}>${walkthrough}</div>${cancel}</div></div>`;
   return `<div class="sheet" id="${id}" aria-hidden="true">`
     + `<h4>${escapeHtml(input.heading)}</h4>`
     + `${notice}<div data-connect-content${hasError ? ' hidden' : ''}>${providerNote}`

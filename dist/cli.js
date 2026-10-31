@@ -95543,7 +95543,7 @@ function oauthSetupInstructions(source, googleCloudProjectId, redirectBaseUrl) {
   };
   if (isGoogleOAuthSource2(source)) {
     return {
-      plain_intro: "Three stops in Google Cloud. Each button opens the exact page.",
+      plain_intro: "About ten minutes, free. You make the app once; it works for Gmail and Google Drive.",
       setup_provider: "Google Cloud",
       setup_heading: "Connect Gmail with your own Google app",
       credential_file: "google_desktop",
@@ -95551,12 +95551,12 @@ function oauthSetupInstructions(source, googleCloudProjectId, redirectBaseUrl) {
       provider_console_url: "https://console.cloud.google.com/auth/clients",
       diy_summary: "Use my own Google app",
       diy_steps: [
-        { title: "Make the project and turn on Gmail and Drive", text: "Create a project, select it, then enable both APIs using the links below.", button_label: "Open Google Cloud", link: { label: "Google Cloud", url: "https://console.cloud.google.com/projectcreate" }, links: [
-          { label: "Enable Gmail API", url: "https://console.cloud.google.com/apis/library/gmail.googleapis.com" },
-          { label: "Enable Google Drive API", url: "https://console.cloud.google.com/apis/library/drive.googleapis.com" }
-        ] },
-        { title: "Set up the sign-in screen and publish it", text: "External, your own email, then Publish app.", button_label: "Open the sign-in screen", link: { label: "Sign-in screen", url: "https://console.cloud.google.com/auth/overview" }, links: [{ label: "Publish app in Audience", url: "https://console.cloud.google.com/auth/audience" }] },
-        { title: "Make a Desktop app key and download it", text: "Choose Download JSON when Google shows the key.", button_label: "Open Clients", link: { label: "Clients", url: "https://console.cloud.google.com/auth/clients" } }
+        { title: "Create the project", text: "", instructions: ["Name the project **Olympus**.", "Choose **Create**, then select the new project."], link: { label: "Google Cloud", url: "https://console.cloud.google.com/projectcreate" }, return_note: "Google opens in your browser. Come back here when you've created and selected your Olympus project." },
+        { title: "Turn on Gmail and Drive", text: "", instructions: ["Check **Olympus** is selected at the top.", "Search for **Gmail API**, open it and choose **Enable**.", "Return to **Library**, search for **Google Drive API** and choose **Enable**."], link: { label: "Google Cloud", url: "https://console.cloud.google.com/apis/library" }, return_note: "Google opens the API Library. Come back here when both Gmail and Google Drive are enabled in the same project." },
+        { title: "Set up the sign-in screen", text: "", instructions: ["Choose **Get started**.", "Name the app **Olympus** and give your own email for support.", "For Audience choose **External**, then add your email as contact.", "Choose **Create**."], link: { label: "Google Cloud", url: "https://console.cloud.google.com/auth/overview" }, return_note: "Google opens in your browser on the right project. Come back here when you've pressed Create." },
+        { title: "Publish", text: "", instructions: ["In **Audience**, choose **Publish app**.", "Confirm to move the app to **In production**."], link: { label: "Google Cloud", url: "https://console.cloud.google.com/auth/audience" }, return_note: "Testing ends the connection every 7 days. Come back here when the publishing status is In production." },
+        { title: "Make the key", text: "", instructions: ["In **Clients**, choose **Create client**.", "Choose **Desktop app**, name it **Olympus** and choose **Create**.", "Choose **Download JSON** and save the file in **Downloads**."], link: { label: "Google Cloud", url: "https://console.cloud.google.com/auth/clients" }, return_note: "Google makes the key for your app. Come back here when you've downloaded the JSON file." },
+        { title: "Paste it here", text: "" }
       ],
       secret_shown_once: false,
       fields: [clientIdField, clientSecretField]
@@ -143950,6 +143950,17 @@ function mountDashboardController(options) {
   function setSheetOpen(sheet, open7) {
     sheet.classList.toggle("on", open7);
     sheet.setAttribute("aria-hidden", open7 ? "false" : "true");
+    if (!open7) {
+      const choice = sheet.querySelector("[data-setup-choice], [data-setup-lead]");
+      const walkthrough = sheet.querySelector("[data-setup-walkthrough]");
+      if (choice && walkthrough) {
+        choice.hidden = false;
+        walkthrough.hidden = true;
+        const note = choice.querySelector("[data-shared-app-note]");
+        if (note)
+          note.hidden = false;
+      }
+    }
     if (!sheet.id)
       return;
     queryAll("[data-sheet-toggle]").forEach((toggle) => {
@@ -144919,6 +144930,26 @@ function mountDashboardController(options) {
   function showSetupFailure(form, message2) {
     const setup = form.closest("[data-setup-steps]");
     const step = message2.includes("Redo the Set up your account step") ? 0 : message2.includes("Redo the Create an API key step") ? 1 : -1;
+    if (setup && form.querySelector("[data-client-file-drop]")) {
+      const panels = Array.from(setup.querySelectorAll("[data-setup-panel]"));
+      showSetupStep(setup, panels.length - 1);
+      const error2 = document.createElement("div");
+      error2.dataset.setupError = "";
+      const banner = document.createElement("p");
+      banner.className = "why";
+      banner.setAttribute("role", "alert");
+      banner.textContent = message2;
+      const details = document.createElement("details");
+      details.className = "howto";
+      const summary = document.createElement("summary");
+      summary.textContent = "How to fix";
+      const hint = document.createElement("p");
+      hint.textContent = "Check the app settings in Google Cloud, then choose the Desktop app file again or paste the ID and secret.";
+      details.append(summary, hint);
+      error2.append(banner, details);
+      form.querySelector("[data-client-file-drop]").after(error2);
+      return;
+    }
     if (setup) {
       const panels = Array.from(setup.querySelectorAll("[data-setup-panel]"));
       const current2 = panels.findIndex((panel) => !panel.hidden);
@@ -144959,7 +144990,9 @@ function mountDashboardController(options) {
     });
     const counter = sheet.querySelector("[data-setup-counter]");
     if (counter)
-      counter.textContent = `Step ${step + 1} of ${panels.length}`;
+      counter.textContent = sheet.hasAttribute("data-setup-guided") ? `STEP ${step + 1} OF ${panels.length}` : `Step ${step + 1} of ${panels.length}`;
+    sheet.querySelectorAll("[data-setup-segment]").forEach((segment, index) => segment.classList.toggle("filled", index <= step));
+    sheet.querySelector('[role="progressbar"]')?.setAttribute("aria-valuenow", String(step + 1));
     const progress = sheet.querySelector("[data-setup-progress]");
     if (progress)
       progress.value = step + 1;
@@ -144979,7 +145012,7 @@ function mountDashboardController(options) {
       sheet.querySelectorAll("form").forEach((form) => say(form, ""));
       sheet.querySelector("[data-setup-error]")?.remove();
     }
-    const heading = panels[step]?.querySelector("h4");
+    const heading = panels[step]?.querySelector("h2, h4");
     if (heading) {
       heading.tabIndex = -1;
       heading.focus();
@@ -145018,6 +145051,14 @@ function mountDashboardController(options) {
     if (picker)
       picker.value = "";
   }
+  function onClientFileKeydown(event) {
+    const target = event.target instanceof HTMLElement ? event.target : null;
+    const key2 = event.key;
+    if (target?.matches("[data-client-file-drop]") && (key2 === "Enter" || key2 === " ")) {
+      event.preventDefault();
+      target.querySelector("[data-client-file]")?.click();
+    }
+  }
   function onClientFileChange(event) {
     const input = event.target instanceof HTMLInputElement ? event.target : null;
     if (input?.matches("[data-client-file]") && input.form)
@@ -145036,6 +145077,11 @@ function mountDashboardController(options) {
     const target = event.target instanceof Element ? event.target : null;
     if (!target || !root.contains(target))
       return;
+    const fileZone = target.closest("[data-client-file-drop]");
+    if (fileZone && !target.matches("[data-client-file]")) {
+      fileZone.querySelector("[data-client-file]")?.click();
+      return;
+    }
     const messagingRetry = target.closest("[data-messaging-retry]");
     if (messagingRetry) {
       const sheet = messagingRetry.closest("[data-messaging-setup]");
@@ -145066,12 +145112,15 @@ function mountDashboardController(options) {
       const walkthrough = sheet?.querySelector("[data-setup-walkthrough]");
       if (walkthrough) {
         walkthrough.hidden = false;
-        const heading = walkthrough.querySelector("h4");
+        const heading = walkthrough.querySelector("h2, h4");
         if (heading) {
           heading.tabIndex = -1;
           heading.focus();
         }
       }
+      const choice = sheet?.querySelector("[data-setup-choice]");
+      if (choice)
+        choice.hidden = true;
       const sharedNote = sheet?.querySelector("[data-shared-app-note]");
       if (sharedNote)
         sharedNote.hidden = true;
@@ -145292,6 +145341,7 @@ function mountDashboardController(options) {
   root.addEventListener("submit", onSubmit);
   root.addEventListener("click", onClick);
   root.addEventListener("change", onClientFileChange);
+  root.addEventListener("keydown", onClientFileKeydown);
   root.addEventListener("dragover", onClientFileDrop);
   root.addEventListener("drop", onClientFileDrop);
   const refreshOnReturn = () => {
@@ -145334,6 +145384,7 @@ function mountDashboardController(options) {
     root.removeEventListener("submit", onSubmit);
     root.removeEventListener("click", onClick);
     root.removeEventListener("change", onClientFileChange);
+    root.removeEventListener("keydown", onClientFileKeydown);
     root.removeEventListener("dragover", onClientFileDrop);
     root.removeEventListener("drop", onClientFileDrop);
     root.removeEventListener(redrawEvent, onRedrawRequest);
@@ -145669,15 +145720,37 @@ td { padding: 7px 10px 7px 0; border-bottom: 1px solid var(--line2); color: var(
 .setrow .blurb { color: var(--t2); font-size: var(--fs-body); }
 .setrow .blurb .caveat { color: var(--warn); font-weight: 600; }
 .setrow .blurb details.howto { color: var(--t3); font-size: var(--fs-caption); }
-.rowform { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.rowform { display: flex; gap: 12px; align-items: center; flex-wrap: nowrap; }
 .keyfield { background: var(--bg); border: 1px solid var(--field); border-radius: 7px; color: var(--t1); font: inherit; font-size: var(--fs-body); padding: 5px 10px; width: 190px; }
 .setupfields { display: grid; gap: 8px; width: 100%; }
-[data-client-file-drop] { border: 1px dashed var(--line); border-radius: 8px; padding: 20px; text-align: center; }
+[data-client-file-drop] { border: 2px dashed var(--field); border-radius: 10px; padding: 24px; min-height: 180px; box-sizing: border-box; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; cursor: pointer; }
+[data-client-file-drop]:focus-visible { outline: 2px solid var(--link); outline-offset: 3px; }
 [data-client-file-drop] input { max-width: 100%; }
 .setupfields .keyfield { width: 100%; box-sizing: border-box; }
-.setupactions { display: flex; align-items: center; gap: 12px; margin-top: 16px; }
-.setupactions > .primary { margin-left: auto; }
-[data-setup-steps] [hidden], [data-connect-content][hidden], [data-connect-error][hidden] { display: none !important; }
+.actionrow, .setupactions { display: flex; flex-direction: row; align-items: center; justify-content: flex-start; gap: 12px; }
+.actionrow > form { margin: 0 !important; }
+.setupactions { margin-top: 24px; }
+[data-setup-guided] .setupactions > .primary { margin-left: auto; }
+.setupheader { display: flex; align-items: flex-start; justify-content: space-between; gap: 24px; margin-bottom: 12px; }
+.sheet .setupheader h2 { font-size: 22px; line-height: 1.3; margin: 0; }
+.setupclose { border: 0; color: var(--t3); font-size: 24px; padding: 0 4px; }
+.sheet .setupintro { color: var(--t3); margin-bottom: 24px; }
+.setupsegments { display: flex; gap: 6px; margin-bottom: 20px; }
+[data-setup-segment] { flex: 1; height: 6px; border-radius: 3px; background: var(--line); }
+[data-setup-segment].filled { background: var(--accent-fill); }
+.sheet [data-setup-guided] [data-setup-counter] { color: var(--t3); font-size: 11px; letter-spacing: 0.1em; margin-bottom: 8px; }
+[data-setup-guided] h2 { font-size: 22px; margin: 0 0 20px; }
+[data-setup-guided] [data-setup-open] { width: 100%; padding: 12px 18px; margin: 8px 0 16px; }
+[data-setup-guided] .primary { background: var(--t1); border-color: var(--t1); color: var(--bg); }
+.sheet .setupnote { background: light-dark(#efebfa, #302b43); color: var(--t2); padding: 16px; border-radius: 8px; max-width: none; }
+.sheet .setupfooter { color: var(--t3); font-size: 11px; margin: 16px 0 0; max-width: none; }
+[data-client-paste] summary { color: var(--link); cursor: pointer; font-size: var(--fs-body); margin-bottom: 12px; }
+[data-client-paste] .keyfield + .keyfield { margin-top: 8px; }
+@media (max-width: 480px) {
+  .actionrow, .setupactions, .rowform { flex-direction: column; align-items: stretch; }
+  [data-setup-guided] .setupactions > .primary { margin-left: 0; }
+}
+[data-setup-steps] [hidden], [data-setup-choice][hidden], [data-setup-walkthrough][hidden], [data-setup-lead][hidden], [data-connect-content][hidden], [data-connect-error][hidden] { display: none !important; }
 .keyfield::placeholder { color: var(--t4); }
 .keyfield:focus-visible { outline: 2px solid var(--link); outline-offset: 1px; }
 .actmsg { color: var(--t3); font-size: var(--fs-caption); }
@@ -145929,18 +146002,22 @@ function connectorSheet(input) {
 function setupStepsSheet(input) {
   const id = safeId2(input.id);
   const count = input.steps.length;
+  const current2 = input.initialStep ?? 0;
   const formId = `${id}-form`;
   const panels = input.steps.map((step, index) => {
     const url2 = step.link && safeExternalHref(step.link.url);
-    const link = url2 ? `<button type="button" class="btn primary" data-setup-open="${escapeHtml2(url2)}">${escapeHtml2(step.button_label ?? `Open this page in ${input.provider}`)}</button>` : "";
+    const link = url2 ? `<button type="button" class="btn primary" data-setup-open="${escapeHtml2(url2)}">${escapeHtml2(step.button_label ?? `Open this page in ${input.provider}${input.guided ? " ↗" : ""}`)}</button>` : "";
     const extraLinks = (step.links ?? []).map((link2) => {
       const href = safeExternalHref(link2.url);
       return href ? `<p><a class="ext" href="${escapeHtml2(href)}" target="_blank" rel="noopener noreferrer">${escapeHtml2(link2.label)} ↗</a></p>` : "";
     }).join("");
     const redirect = step.redirect_uri && input.redirect ? `<div class="promptbox" id="${id}-redirect">${escapeHtml2(input.redirect)}</div><button class="btn" type="button" data-copy-target="#${id}-redirect">Copy redirect URI</button><span data-copy-status aria-live="polite"></span>` : "";
-    return `<div data-setup-panel${index ? " hidden" : ""}><h4>${escapeHtml2(step.title ?? `Step ${index + 1}`)}</h4><p>${escapeHtml2(step.text)}</p>${link}${extraLinks}${redirect}${index === count - 1 ? input.finalForm(formId) : ""}</div>`;
+    const instructions = step.instructions ? `<ol class="steps">${step.instructions.map((click) => `<li>${escapeHtml2(click).replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")}</li>`).join("")}</ol>` : step.text ? `<p>${escapeHtml2(step.text)}</p>` : "";
+    const heading = input.guided ? "h2" : "h4";
+    return `<div data-setup-panel${index !== current2 ? " hidden" : ""}><${heading}>${escapeHtml2(step.title ?? `Step ${index + 1}`)}</${heading}>${instructions}${link}${extraLinks}${redirect}${step.return_note ? `<p class="setupnote">${escapeHtml2(step.return_note)}</p>` : ""}${index === count - 1 ? input.finalForm(formId) : ""}</div>`;
   }).join("");
-  return `<div data-setup-steps><p data-setup-counter>Step 1 of ${count}</p><progress data-setup-progress max="${count}" value="1"></progress>${panels}<div class="setupactions" data-setup-actions><button class="btn" type="button" data-setup-back disabled>Back</button><button class="btn primary" type="button" data-setup-next${count === 1 ? " hidden" : ""}>I've done this, next</button><button class="btn primary" type="submit" form="${formId}" data-setup-submit${count === 1 ? "" : " hidden"}>${escapeHtml2(input.submitLabel ?? "Connect")}</button></div></div>`;
+  const progress = input.guided ? `<div class="setupsegments" role="progressbar" aria-label="Setup progress" aria-valuemin="1" aria-valuemax="${count}" aria-valuenow="${current2 + 1}">${input.steps.map((_, i2) => `<span data-setup-segment${i2 <= current2 ? ' class="filled"' : ""}></span>`).join("")}</div>` : `<progress data-setup-progress max="${count}" value="${current2 + 1}"></progress>`;
+  return `<div data-setup-steps${input.guided ? " data-setup-guided" : ""}>${progress}<p data-setup-counter>${input.guided ? `STEP ${current2 + 1} OF ${count}` : `Step ${current2 + 1} of ${count}`}</p>${panels}<div class="setupactions actionrow" data-setup-actions><button class="btn" type="button" data-setup-back${current2 === 0 ? " disabled" : ""}>Back</button><button class="btn primary" type="button" data-setup-next${current2 === count - 1 ? " hidden" : ""}>I've done this, next</button><button class="btn primary" type="submit" form="${formId}" data-setup-submit${current2 === count - 1 ? "" : " hidden"}>${escapeHtml2(input.submitLabel ?? "Connect")}</button></div>${input.footer ? `<p class="setupfooter">${escapeHtml2(input.footer)}</p>` : ""}</div>`;
 }
 function connectSetupSheet(input) {
   const id = safeId2(input.id);
@@ -145959,14 +146036,18 @@ function connectSetupSheet(input) {
   const prompt = `<details class="agentprompt">` + `<summary>Ask your agent to walk you through it</summary>` + `<div class="promptbox" id="${promptId}">${escapeHtml2(input.promptText)}</div>` + `<button class="btn" type="button" data-copy-target="#${promptId}">Copy prompt</button>` + `<span class="copystatus" data-copy-status aria-live="polite"></span>` + `</details>`;
   const submitLabel = escapeHtml2(input.submitLabel ?? "Connect");
   const sourceField = `<input type="hidden" name="source" value="${escapeHtml2(input.source)}">`;
-  const byoForm = (formId) => `<form${formId ? ` id="${formId}" class="setupfields"` : ' class="rowform"'} data-connect-kind="oauth" style="margin-top:12px">` + sourceField + (input.credentialFile ? `<input type="hidden" name="google_desktop" value="true"><input type="hidden" name="client_file_revision" value="0"><div data-client-file-drop tabindex="0" role="group" aria-label="Drop the downloaded file here"><p>Drop the downloaded file here</p><p class="hint">client_secret_….json, or choose it from Downloads</p><input type="file" accept=".json,application/json" data-client-file aria-label="Choose the downloaded file"><p data-client-file-status role="status"></p></div><p class="hint">The file stays on this computer. Olympus reads the key from it, checks your app is ready, and opens Google's sign-in. Drive uses the same app.</p><p class="hint">The key check runs before sign-in. Google confirms consent and API access after you sign in.</p><details data-client-paste><summary>Paste the ID and secret instead</summary>${inputs.replace(/<input /g, "<input disabled ")}</details>` : inputs) + (formId ? "" : `<button class="btn primary" type="submit">${submitLabel}</button>`) + `<span class="actmsg" data-action-message role="status"></span>` + `<span class="authfallback" data-authorization-fallback></span>` + `</form>`;
-  const walkthroughBody = input.steps?.length && input.provider ? setupStepsSheet({ id, provider: input.provider, steps: input.steps, finalForm: byoForm, submitLabel: input.submitLabel ?? "Connect", ...input.redirectUri ? { redirect: input.redirectUri.uri } : {} }) : `${registration}${redirect}${byoForm()}`;
-  const walkthrough = `${input.setupHeading ? `<h4>${escapeHtml2(input.setupHeading)}</h4>` : ""}${walkthroughBody}`;
+  const byoForm = (formId) => `<form${formId ? ` id="${formId}" class="setupfields"` : ' class="rowform"'} data-connect-kind="oauth" style="margin-top:12px">` + sourceField + (input.credentialFile ? `<input type="hidden" name="google_desktop" value="true"><input type="hidden" name="client_file_revision" value="0"><div data-client-file-drop tabindex="0" role="button" aria-label="Drop the downloaded file here"><p>Drop the downloaded file here</p><p class="hint">client_secret_….json, or choose it from Downloads</p><input type="file" accept=".json,application/json" data-client-file hidden aria-label="Choose the downloaded file"><p data-client-file-status role="status"></p></div>${hasError ? `<div data-setup-error><p class="why" role="alert">${escapeHtml2(input.notice)}</p>${detailsDisclosure("How to fix", input.noticeDetail ? `<p class="hint">${escapeHtml2(input.noticeDetail)}</p>` : "")}</div>` : ""}<p class="hint">The file stays on this computer. Olympus reads the key from it, checks your app is ready, and opens Google's sign-in. Drive uses the same app.</p><p class="hint">The key check runs before sign-in. Google confirms consent and API access after you sign in.</p><details data-client-paste><summary>Paste the ID and secret instead</summary>${inputs.replace(/<input /g, "<input disabled ")}</details>` : inputs) + (formId ? "" : `<button class="btn primary" type="submit">${submitLabel}</button>`) + `<span class="actmsg" data-action-message role="status"></span>` + `<span class="authfallback" data-authorization-fallback></span>` + `</form>`;
+  const walkthroughBody = input.steps?.length && input.provider ? setupStepsSheet({ id, provider: input.provider, steps: input.steps, finalForm: byoForm, submitLabel: input.submitLabel ?? "Connect", ...input.credentialFile ? { guided: true, initialStep: hasError ? input.steps.length - 1 : 0, footer: "Steps: project · turn on Gmail and Drive · sign-in screen · publish · make the key · paste it here" } : {}, ...input.redirectUri ? { redirect: input.redirectUri.uri } : {} }) : `${registration}${redirect}${byoForm()}`;
+  const walkthrough = input.credentialFile ? `<div class="setupheader"><h2>${escapeHtml2(input.setupHeading ?? input.heading)}</h2><button class="btn setupclose" type="button" data-sheet-toggle="#${id}" aria-label="Close setup">×</button></div><p class="setupintro">${escapeHtml2(input.intro)}</p>${walkthroughBody}` : `${input.setupHeading ? `<h4>${escapeHtml2(input.setupHeading)}</h4>` : ""}${walkthroughBody}`;
   const lead = input.lead ? `<div data-setup-lead><h4>${escapeHtml2(input.lead.title)}</h4><p>${escapeHtml2(input.lead.body)}</p><button type="button" class="btn primary" data-setup-begin>${escapeHtml2(input.lead.button)}</button>${input.lead.notes.map((note) => `<p class="hint">${escapeHtml2(note)}</p>`).join("")}</div>` : "";
   if (input.publisher) {
     const publisherForm = `<form class="rowform" data-connect-kind="oauth"${input.cancellable ? "" : " data-oauth-autostart"} style="margin-top:12px">` + sourceField + `<button class="btn primary" type="submit">${submitLabel}</button>` + `<span class="actmsg" data-action-message role="status"></span>` + `<span class="authfallback" data-authorization-fallback></span>` + `</form>`;
-    return `<div class="sheet" id="${id}" aria-hidden="true">` + `<h4>${escapeHtml2(input.heading)}</h4>` + `${notice}<div data-connect-content${hasError ? " hidden" : ""}>${providerNote}` + `<p>${escapeHtml2(input.publisher.intro)}</p>` + `${publisherForm}` + `${cancel}` + (input.credentialFile ? `<button type="button" class="btn" data-setup-begin>${escapeHtml2(input.publisher.byoSummary)}</button><div data-setup-walkthrough hidden><p>${escapeHtml2(input.intro)}</p>${walkthrough}${prompt}</div>` : `<details class="agentprompt"><summary>${escapeHtml2(input.publisher.byoSummary)}</summary><p>${escapeHtml2(input.intro)}</p>${walkthrough}${prompt}</details>`) + `</div>` + `</div>`;
+    if (input.credentialFile)
+      return `<div class="sheet" id="${id}" aria-hidden="true"><div data-connect-content><div data-setup-choice${hasError ? " hidden" : ""}><h4>${escapeHtml2(input.heading)}</h4>${providerNote}<p>${escapeHtml2(input.publisher.intro)}</p><div class="actionrow">${publisherForm}<button type="button" class="btn" data-setup-begin>${escapeHtml2(input.publisher.byoSummary)}</button></div>${cancel}</div><div data-setup-walkthrough${hasError ? "" : " hidden"}>${walkthrough}</div></div></div>`;
+    return `<div class="sheet" id="${id}" aria-hidden="true">` + `<h4>${escapeHtml2(input.heading)}</h4>` + `${notice}<div data-connect-content${hasError ? " hidden" : ""}>${providerNote}` + `<p>${escapeHtml2(input.publisher.intro)}</p>` + `${publisherForm}` + `${cancel}` + `<details class="agentprompt"><summary>${escapeHtml2(input.publisher.byoSummary)}</summary><p>${escapeHtml2(input.intro)}</p>${walkthrough}${prompt}</details>` + `</div>` + `</div>`;
   }
+  if (input.credentialFile)
+    return `<div class="sheet" id="${id}" aria-hidden="true"><div data-connect-content>${lead}<div data-setup-walkthrough${input.lead && !hasError ? " hidden" : ""}>${walkthrough}</div>${cancel}</div></div>`;
   return `<div class="sheet" id="${id}" aria-hidden="true">` + `<h4>${escapeHtml2(input.heading)}</h4>` + `${notice}<div data-connect-content${hasError ? " hidden" : ""}>${providerNote}` + `${lead}<div data-setup-walkthrough${input.lead ? " hidden" : ""}><p>${escapeHtml2(input.intro)}</p>${walkthrough}${prompt}</div>` + `${cancel}</div>` + `</div>`;
 }
 function callbackRegistrationSteps(id, registration) {
@@ -152722,14 +152803,15 @@ h3{font-size:0.875rem;font-weight:600;color:var(--muted);margin:0.75rem 0 0.25re
 .source-name{font-weight:600}
 .source-head .source-for{flex:1 1 0;min-width:0;font-weight:400}
 .status{color:var(--muted);font-size:0.875rem}
-.source-actions{display:flex;flex-wrap:wrap;align-items:flex-start;gap:0.5rem;justify-content:flex-end}
+.source-actions{display:flex;flex-wrap:nowrap;align-items:center;gap:12px;justify-content:flex-start}
 .dot{flex:none;width:0.625rem;height:0.625rem;border-radius:50%;display:inline-block;background:var(--off)}
 .tone-good{background:var(--good)}.tone-run{background:var(--run)}.tone-warn{background:var(--warn)}
 .tone-bad{background:var(--bad)}.tone-off{background:var(--off)}.tone-line{background:transparent;border:2px solid var(--idle)}
 .fix{display:inline-flex;flex-wrap:wrap;align-items:center;gap:0.5rem}
 .reason{color:var(--muted);font-size:0.875rem}
 .reason.strong{color:var(--text);font-weight:600}
-.actions{display:flex;flex-wrap:wrap;gap:0.5rem;align-items:center}
+.actions{display:flex;flex-direction:row;flex-wrap:nowrap;gap:12px;align-items:center;justify-content:flex-start}
+@media(max-width:480px){.actions,.source-actions{flex-direction:column;align-items:stretch}}
 .tag{font-size:0.75rem;font-weight:400;padding:0 0.4rem;border:1px solid var(--line);border-radius:999px;color:var(--muted);margin-left:0.25rem}
 .index-faster{margin-top:0.5rem}
 .btn{font:inherit;font-size:0.875rem;font-weight:500;min-height:2.25rem;padding:0.375rem 0.875rem;border-radius:999px;border:1px solid var(--line);background:var(--bg);color:var(--text);cursor:pointer}
@@ -154137,7 +154219,7 @@ var LOCAL_PAGE_CSS = `
 .remoteterms { border: 1px solid var(--line); border-radius: 8px; background: var(--panel); padding: 12px 14px; margin: 6px 0 10px; font-size: var(--fs-body); color: var(--t2); }
 .remoteterms[hidden] { display: none; }
 .remoteterms p { margin: 0 0 8px; max-width: 72ch; }
-.remoteterms .rowform { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 4px; }
+.remoteterms .rowform { margin-top: 4px; }
 .promptbox.prose { word-break: normal; overflow-wrap: anywhere; }`, MODEL_SETUP_CSS = `
 .modelcards{display:grid;gap:12px;margin:16px 0 20px}.modelcard{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:16px 18px;min-width:0}
 .modelcard header{display:flex;align-items:baseline;flex-wrap:wrap;gap:2px 10px;margin:0}.modelcard header [role=status]{color:var(--t3);font-size:var(--fs-caption)}
@@ -154169,7 +154251,8 @@ var LOCAL_PAGE_CSS = `
 .outside .ohfix li > span { flex: 1 1 200px; min-width: 0; }
 .outside .ohfix li::before { content: '!'; flex: 0 0 20px; height: 20px; border-radius: 50%; background: var(--warn-fill); color: var(--bg); font-weight: 800; font-size: var(--fs-caption); line-height: 20px; text-align: center; }
 .outside .ohfix .ohform { margin: 0; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.outside .ohfix .ohactions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.outside .ohfix .ohactions { display: flex; align-items: center; gap: 12px; }
+@media (max-width: 480px) { .outside .ohfix .ohactions { flex-direction: column; align-items: stretch; } }
 .outside .ohfix .actmsg:empty, .outside .ohpanel .actmsg:empty { display: none; }
 /* The statements, in full only until accepted. */
 .outside .ohaccept { margin: 0 0 12px; padding: 14px 18px; border: 1px solid var(--warn-line); border-radius: 10px; }

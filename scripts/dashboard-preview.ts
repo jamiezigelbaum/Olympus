@@ -1855,14 +1855,14 @@ export function setupPreviewScript(name: string | null, step: string | null): st
   const sheets: Record<string, { selector: string; count: number }> = {
     dropbox: { selector: '#connect-dropbox-files', count: 5 },
     venice: { selector: '[data-setup-steps]:has([name="source"][value="venice"])', count: 3 },
-    google: { selector: '#connect-gmail-email', count: 3 },
+    google: { selector: '#connect-gmail-email', count: 6 },
     x: { selector: '#connect-x-bookmarks', count: 5 },
     telegram: { selector: '#telegram-setup', count: 3 },
   };
   const selected = name ? sheets[name] : undefined;
   if (!selected) return '';
   const index = Math.max(0, Math.min(selected.count - 1, Number(step ?? 1) - 1 || 0));
-  return `<script>window.addEventListener('DOMContentLoaded',function(){var sheet=document.querySelector(${JSON.stringify(selected.selector)});if(!sheet)return;sheet.classList.add('on');sheet.setAttribute('aria-hidden','false');var steps=sheet.matches('[data-setup-steps]')?sheet:sheet.querySelector('[data-setup-steps]');if(steps){var details=steps.closest('details');if(details)details.open=true;var walk=steps.closest('[data-setup-walkthrough]');if(walk&&!sheet.querySelector('[data-setup-lead]')&&${JSON.stringify(step)}!=='choice'){var begin=sheet.querySelector('[data-setup-begin]');if(begin)begin.click();else walk.hidden=false;}for(var i=0;i<${index};i++){steps.querySelector('[data-setup-next]').click();}}sheet.scrollIntoView({block:'center'});});</script>`;
+  return `<script>window.addEventListener('DOMContentLoaded',function(){var sheet=document.querySelector(${JSON.stringify(selected.selector)});if(!sheet)return;sheet.classList.add('on');sheet.setAttribute('aria-hidden','false');var steps=sheet.matches('[data-setup-steps]')?sheet:sheet.querySelector('[data-setup-steps]');if(steps){var details=steps.closest('details');if(details)details.open=true;var walk=steps.closest('[data-setup-walkthrough]');if(walk&&${JSON.stringify(step)}!=='choice'){var begin=sheet.querySelector('[data-setup-begin]');if(begin)begin.click();else walk.hidden=false;}for(var i=0;i<${index}&&!steps.querySelector('[data-setup-error]');i++){steps.querySelector('[data-setup-next]').click();}}sheet.scrollIntoView({block:'center'});});</script>`;
 }
 
 export function previewDashboardToolResult(state: string, indexFasterOn: boolean, waitingPrivateQuestions = 0) {

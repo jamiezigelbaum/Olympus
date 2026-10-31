@@ -66,9 +66,9 @@ test('Google and X use the same single-footer walkthrough with the approved step
   const google = preview('connect-google-loopback');
   const sheet = google.querySelector('#connect-gmail-email')!;
   expect(sheet.querySelector('[data-setup-steps]')).not.toBeNull();
-  expect(sheet.textContent).toContain('Make the project and turn on Gmail and Drive');
-  expect(sheet.textContent).toContain('Set up the sign-in screen and publish it');
-  expect(sheet.textContent).toContain('Make a Desktop app key and download it');
+  expect(sheet.textContent).toContain('Create the project');
+  expect(sheet.textContent).toContain('Set up the sign-in screen');
+  expect(sheet.textContent).toContain('Make the key');
   expect(sheet.textContent).toContain('Drop the downloaded file here');
   expect(sheet.querySelector('[type="file"]')).not.toBeNull();
   expect(sheet.querySelectorAll('[data-setup-actions]').length).toBe(1);
@@ -92,14 +92,32 @@ test('Google full signal uses owner copy; otherwise shared Connect stays first',
   expect(ordinary.querySelector('[data-setup-walkthrough]')!.hasAttribute('hidden')).toBe(true);
 });
 
-test('Google own-app has exactly three stops with the file drop in the Desktop key step', () => {
+test('Google own-app has six guided steps and a clickable file drop with no shared warning', () => {
   for (const state of ['connect-google-loopback', 'connect-google-full', 'connect-google-error']) {
     const sheet = preview(state).querySelector('#connect-gmail-email')!;
-    const panels = sheet.querySelectorAll('[data-setup-panel]');
-    expect(panels.length).toBe(3);
-    expect(sheet.querySelector('[data-setup-counter]')!.textContent).toBe('Step 1 of 3');
-    expect(panels[2]!.querySelector('[data-client-file-drop]')).not.toBeNull();
-    expect(sheet.querySelector('.providernote')).toBeNull();
+    const walk = sheet.querySelector('[data-setup-walkthrough]')!;
+    const panels = walk.querySelectorAll('[data-setup-panel]');
+    expect(panels.length).toBe(6);
+    expect(walk.querySelectorAll('[data-setup-segment]').length).toBe(6);
+    expect(walk.querySelector('[data-setup-counter]')!.textContent).toBe(state === 'connect-google-error' ? 'STEP 6 OF 6' : 'STEP 1 OF 6');
+    expect([...panels].map(p => p.querySelector('h2')?.textContent)).toEqual(['Create the project', 'Turn on Gmail and Drive', 'Set up the sign-in screen', 'Publish', 'Make the key', 'Paste it here']);
+    for (const panel of [...panels].slice(0, 5)) {
+      expect(panel.querySelectorAll('[data-setup-open]').length).toBe(1);
+      expect(panel.querySelector('[data-setup-open]')!.textContent).toBe('Open this page in Google Cloud ↗');
+      expect(panel.querySelectorAll('a').length).toBe(0);
+      expect(panel.querySelectorAll('ol li').length).toBeGreaterThan(1);
+      expect(panel.querySelector('.setupnote')).not.toBeNull();
+    }
+    expect([...panels[2]!.querySelectorAll('li')].map(li => li.textContent)).toEqual(['Choose Get started.', 'Name the app Olympus and give your own email for support.', 'For Audience choose External, then add your email as contact.', 'Choose Create.']);
+    expect(panels[5]!.querySelector('[data-client-file-drop]')!.getAttribute('role')).toBe('button');
+    expect(panels[5]!.querySelector('[type="file"]')!.hasAttribute('hidden')).toBe(true);
+    expect(walk.textContent).toContain("About ten minutes, free. You make the app once; it works for Gmail and Google Drive.");
+    expect(walk.textContent).toContain("The file stays on this computer. Olympus reads the key from it, checks your app is ready, and opens Google's sign-in. Drive uses the same app.");
+    expect(walk.textContent).toContain('Steps: project · turn on Gmail and Drive · sign-in screen · publish · make the key · paste it here');
+    expect(walk.textContent).not.toContain('unverified');
+    expect(walk.querySelector('[data-sheet-toggle="#connect-gmail-email"]')).not.toBeNull();
   }
-  expect(preview('connect-google-publisher').querySelector('#connect-gmail-email .providernote')).not.toBeNull();
+  const choice = preview('connect-google-publisher').querySelector('#connect-gmail-email [data-setup-choice]')!;
+  const actions = choice.querySelector('.actionrow')!;
+  expect([...actions.querySelectorAll('button')].map(b => b.textContent)).toEqual(['Connect', 'Use my own Google app']);
 });

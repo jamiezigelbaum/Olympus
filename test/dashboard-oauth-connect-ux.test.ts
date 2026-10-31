@@ -106,9 +106,11 @@ describe('the guided Google setup uses a Desktop client on every dashboard origi
       expect(action.instructions.agent_prompt).toContain('Desktop app client');
       expect(action.instructions.agent_prompt).toContain('download its JSON');
       expect(action.instructions.agent_prompt).toContain('Never ask for the client secret in chat');
-      expect(action.instructions.diy_steps.slice(0, 3).map(step => step.link?.url)).toEqual([
+      expect(action.instructions.diy_steps.slice(0, 5).map(step => step.link?.url)).toEqual([
         'https://console.cloud.google.com/projectcreate',
+        'https://console.cloud.google.com/apis/library',
         'https://console.cloud.google.com/auth/overview',
+        'https://console.cloud.google.com/auth/audience',
         'https://console.cloud.google.com/auth/clients',
       ]);
       expect(action.instructions.fields.map(field => field.name)).toEqual(['client_id', 'client_secret']);
@@ -196,12 +198,13 @@ describe('the card walks the owner through registering the callback itself', () 
     test(`Google uses the shared Desktop walkthrough on ${origin}`, () => {
       const sheet = setupSheet('gmail.email', {}, origin);
       expect(sheet).toContain('https://console.cloud.google.com/projectcreate');
-      expect(sheet).toContain('https://console.cloud.google.com/apis/library/gmail.googleapis.com');
-      expect(sheet).toContain('https://console.cloud.google.com/apis/library/drive.googleapis.com');
+      expect(sheet).toContain('https://console.cloud.google.com/apis/library');
+      expect(sheet).toContain('Gmail API');
+      expect(sheet).toContain('Google Drive API');
       expect(sheet).toContain('https://console.cloud.google.com/auth/overview');
       expect(sheet).toContain('https://console.cloud.google.com/auth/audience');
       expect(sheet).toContain('https://console.cloud.google.com/auth/clients');
-      expect(sheet).toContain('Make a Desktop app key and download it');
+      expect(sheet).toContain('Make the key');
       expect(sheet).toContain('data-client-file-drop');
       expect(sheet).toContain('name="google_desktop" value="true"');
       expect(sheet).not.toContain('name="google_client_json"'); // Uploaded secrets live in memory, never an HTML field.

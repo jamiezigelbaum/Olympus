@@ -39,6 +39,9 @@ In scope:
   this signal is not a live measurement of Google's 100-user cap. Shared
   Connect otherwise stays first. One Desktop app serves Gmail and Drive;
   the app key is checked before consent and API access after consent.
+  The owner's 2026-10-31 revised wizard has six stops: project, enable both
+  APIs, sign-in screen, publish, Desktop key, then file drop or paste.
+  Step 6 uses Connect; action rows stay horizontal above 480px.
 - Telegram and X guided setup (#656, #655) reuse the shared step sheet.
   Telegram continues into dashboard pairing and explicit Pick chats / Everything;
   X checks a bookmarks read before saving its grant. X's 2026-10-31 pricing

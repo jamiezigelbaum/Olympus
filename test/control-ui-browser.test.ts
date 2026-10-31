@@ -1273,7 +1273,7 @@ test('Google JSON stays out of visible text and is checked before any provider U
     expect(submitted?.google_client_json).toContain('fixture-upload-secret');
     expect(sheet.querySelector('[data-setup-error]')!.textContent).toContain('Google did not accept');
     expect(sheet.querySelector('[data-setup-error] details')!.hasAttribute('open')).toBe(false);
-    expect([...sheet.querySelectorAll<HTMLElement>('[data-setup-panel]')].every(panel => panel.hidden)).toBe(true);
+    expect(sheet.querySelector<HTMLElement>('[data-client-file-drop]')!.closest<HTMLElement>('[data-setup-panel]')!.hidden).toBe(false);
     expect(sheet.outerHTML).not.toContain('fixture-upload-secret');
   } finally { controller.dispose(); }
 });
@@ -1319,7 +1319,7 @@ test('Google paste inputs remain editable after refusal and clear after success'
     id.form!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
     await happyWindow.happyDOM.waitUntilComplete();
     expect(key.disabled).toBe(false);
-    sheet.querySelector<HTMLButtonElement>('[data-setup-retry]')!.click();
+    expect(sheet.querySelector<HTMLElement>('[data-client-file-drop]')!.closest<HTMLElement>('[data-setup-panel]')!.hidden).toBe(false);
     success = true;
     id.form!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
     await happyWindow.happyDOM.waitUntilComplete();
@@ -1372,21 +1372,35 @@ test('Telegram preserves an open sheet and a deliberate close across dashboard r
   } finally { controller.dispose(); }
 });
 
-test('Google own-app hides the shared warning and reaches Step 3 of 3 with the file input', () => {
+test('Google own-app hides the shared warning and reaches STEP 6 OF 6 with the file input', () => {
   const root = document.createElement('div');
   root.innerHTML = renderDashboardLocalPage('keys', { url: new URL('http://localhost/dashboard?keys'), view: buildDashboardPreviewView('connect-google-publisher'), options: { controlSessionCsrfToken: 'fixture' } });
   document.body.append(root);
   const controller = mountDashboardController({ root, transport: { control: async () => { throw new Error('No consent should start'); } }, navigate() {}, async refresh() { return undefined; }, returnUrl: 'https://gateway.test/', canWrite: true, signal: new AbortController().signal, pollIntervalMs: 0 });
   try {
     const sheet = root.querySelector('#connect-gmail-email')!;
+    sheet.classList.add('on');
     const note = sheet.querySelector<HTMLElement>('.providernote')!;
     expect(note.hidden).toBe(false);
     sheet.querySelector<HTMLButtonElement>('[data-setup-begin]')!.click();
     expect(note.hidden).toBe(true);
+    expect(sheet.querySelector<HTMLElement>('[data-setup-choice]')!.hidden).toBe(true);
     const next = sheet.querySelector<HTMLButtonElement>('[data-setup-next]')!;
-    next.click(); next.click();
-    expect(sheet.querySelector('[data-setup-counter]')!.textContent).toBe('Step 3 of 3');
+    for (let i = 0; i < 5; i++) next.click();
+    expect(sheet.querySelector('[data-setup-counter]')!.textContent).toBe('STEP 6 OF 6');
     expect(sheet.querySelector<HTMLElement>('[data-client-file-drop]')!.closest<HTMLElement>('[data-setup-panel]')!.hidden).toBe(false);
     expect(sheet.querySelector<HTMLButtonElement>('[data-setup-submit]')!.hidden).toBe(false);
+    expect(sheet.querySelectorAll('[data-setup-segment].filled').length).toBe(6);
+    const zone = sheet.querySelector<HTMLElement>('[data-client-file-drop]')!;
+    let picked = 0;
+    sheet.querySelector('[data-client-file]')!.addEventListener('click', () => { picked++; });
+    zone.click();
+    zone.dispatchEvent(new happyWindow.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }) as unknown as Event);
+    zone.dispatchEvent(new happyWindow.KeyboardEvent('keydown', { key: ' ', bubbles: true }) as unknown as Event);
+    expect(picked).toBe(3);
+    sheet.querySelector<HTMLButtonElement>('[aria-label="Close setup"]')!.click();
+    expect(sheet.classList.contains('on')).toBe(false);
+    expect(sheet.querySelector<HTMLElement>('[data-setup-choice]')!.hidden).toBe(false);
+    expect(sheet.querySelector<HTMLElement>('[data-setup-walkthrough]')!.hidden).toBe(true);
   } finally { controller.dispose(); }
 });
