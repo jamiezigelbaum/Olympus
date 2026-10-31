@@ -492,6 +492,8 @@ export interface EmailSourceWorkerOptions {
   sourceIndexEmbeddingProvider?: SourceEmbeddingProvider;
   dropboxIngestionPolicy?: SourceIngestionPolicy;
   connectorStores?: LocalConnectorStore[];
+  /** Discover stores that ingestion created after boot; never creates an absent store. */
+  refreshConnectorStores?: () => void;
   /**
    * Per-tier stores (P1b): the sibling corpora of a corpus in a tiered store
    * set. `source_index_search` searches every tier of the named source unless
@@ -875,7 +877,10 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
   // Looked up live: a tiered store set opens its Public store on first need,
   // after this worker was created, and the runtime appends it to this list.
   const connectorStoresByCorpusId = {
-    get: (corpusId: string): LocalConnectorStore | undefined => connectorStores.find((store) => store.corpusId === corpusId),
+    get: (corpusId: string): LocalConnectorStore | undefined => {
+      options.refreshConnectorStores?.();
+      return connectorStores.find((store) => store.corpusId === corpusId);
+    },
   };
   const connectorStoreEmbeddingProviders = options.connectorStoreEmbeddingProviders ?? new Map();
   const connectorStoreAccountScopes = options.connectorStoreAccountScopes ?? new Map();
@@ -1189,6 +1194,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
               'Private source worker does not support source-index status.',
             );
           }
+          options.refreshConnectorStores?.();
           const statusRequest = await parseSourceIndexStatusRequest(request, connectorStores);
           const result = withCredentialDegradations(
             await sourceIndexStatus.status(statusRequest),

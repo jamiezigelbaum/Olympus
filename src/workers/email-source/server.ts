@@ -38,6 +38,7 @@ import { existsSync } from 'node:fs';
 import { dirname, isAbsolute, join } from 'node:path';
 import {
   createFileExtractionRuntime,
+  createRefreshableFileExtractionRuntime,
   pdfExtractionLanes,
   fileExtractionCorporaRoster,
   connectorStoreExtractionCandidateReader,
@@ -297,6 +298,7 @@ import {
   type OnDemandTierStore,
   type TieredStoreSet,
 } from '../connector-store/tiered-store-set.ts';
+import { telegramArchiveTarget } from '../telegram-messages/archive-target.ts';
 import { EVERNOTE_SOURCE_ID } from '../evernote/connector.ts';
 import { EVERNOTE_SYNC_CAPABILITY, EVERNOTE_TIER_CORPUS_IDS } from '../evernote/live-sync.ts';
 import { createEvernoteRuntime } from '../evernote/runtime.ts';
@@ -2659,6 +2661,7 @@ export async function main(): Promise<void> {
   // visibility authority for its stores, bound to every leg at boot so no
   // reader ever consults a different ledger; its secret-locations index sits
   // beside the same store.
+  let sourceRuntimeClosed = false;
   let sourceLaneGeneration = 0;
   let mountConfiguredSourceStores = (): void => {};
   const earlySourceStores: LocalConnectorStore[][] = [];
@@ -3187,9 +3190,10 @@ export async function main(): Promise<void> {
     if (dropboxTierLane && dropboxFilesEmbeddingProvider && isApprovedSecureSourceEmbeddingProvider(dropboxFilesEmbeddingProvider)) {
       dropboxTierLane.set.declarePrivateEmbedder(dropboxFilesEmbeddingProvider, {
         // Rows moved into the Private store embed under the current scope binding, as the lane's own pass does.
-        embedWith: () => (dropboxScopeRef && fileSourceScopeAuthority
-          ? scopeBoundEmbeddingProvider(dropboxFilesEmbeddingProvider, fileSourceScopeAuthority, dropboxScopeRef)
-          : undefined),
+        embedWith: () => {
+          const ref = fileSourceScopeAuthority?.policyRef('dropbox.files');
+          return ref && fileSourceScopeAuthority ? scopeBoundEmbeddingProvider(dropboxFilesEmbeddingProvider, fileSourceScopeAuthority, ref) : undefined;
+        },
       });
     }
     if (dropboxTierLane && dropboxConnectorStore) {
@@ -3208,21 +3212,6 @@ export async function main(): Promise<void> {
   const isDropboxTierStore = (store: LocalConnectorStore): boolean => store === dropboxConnectorStore
     || (dropboxTierLane !== undefined
       && (store === dropboxTierLane.internal.current() || store === dropboxTierLane.public.current()));
-  const dropboxScopeRef = dropboxHandle && fileSourceScopeAuthority
-    ? fileSourceScopeAuthority.policyRef('dropbox.files')
-    : undefined;
-  const dropboxProviderStoreSync = dropboxConnectorStore && dropboxTierLane && dropboxHandle && dropboxScopeRef && fileSourceScopeAuthority
-    ? createDropboxProviderStoreSyncHandler({
-        tierSet: dropboxTierLane.set,
-        store: dropboxConnectorStore,
-        account: dropboxProviderAccount,
-        credentialHandle: dropboxHandle.handle,
-        scope: createScopeBoundDropboxContentScope({ authority: fileSourceScopeAuthority, ref: dropboxScopeRef }),
-        ...(dropboxFilesEmbeddingProvider && isApprovedSecureSourceEmbeddingProvider(dropboxFilesEmbeddingProvider)
-          ? { embeddingProvider: scopeBoundEmbeddingProvider(dropboxFilesEmbeddingProvider, fileSourceScopeAuthority, dropboxScopeRef) }
-          : {}),
-      })
-    : undefined;
   // Local files: the folders the owner chose on this computer. No credential;
   // the lane exists once the owner connects it and approves folders. Same three
   // per-tier stores, exclusion gate and tier set as Dropbox.
@@ -3459,9 +3448,9 @@ export async function main(): Promise<void> {
   let telegramConnectorStores: ReturnType<typeof createTelegramConnectorStores> | undefined;
   let telegramTierLane: ReturnType<typeof tierLane> | undefined;
   let telegramConnectorStoreSync: TelegramConnectorStoreSyncHandler | undefined;
-  const mountTelegram = (): void => {
+  const mountTelegram = (forImport = false): void => {
     if (telegramConnectorStores) return;
-    telegramConnectorStores = telegramConnectorStoreLane.enabled
+    telegramConnectorStores = telegramConnectorStoreLane.enabled || forImport
       ? createTelegramConnectorStores(process.env)
       : undefined;
     telegramTierLane = telegramConnectorStores
@@ -3486,17 +3475,25 @@ export async function main(): Promise<void> {
           ...(tierSecureEmbeddingProvider ? { privateEmbedder: tierSecureEmbeddingProvider } : {}),
         })
       : undefined;
-    // A Telegram Desktop export of this account is one more input of the Telegram connector, read into
-    // these stores beside live capture (docs/design/archive-live-one-dataset.md). Without the live lane
-    // an export stays under Archives, as before.
-    if (telegramConnectorStoreSync) archiveSourceTargets.register(telegramConnectorStoreSync.archiveTarget());
     if (telegramConnectorStores) sourceLaneMounted([telegramConnectorStores.internal, telegramConnectorStores.secureLocal]);
   };
+  // Register source knowledge before pairing or mounting: preview and saved-import resumption
+  // can find the target without creating stores. An approved import opens the same canonical lane.
+  archiveSourceTargets.register(telegramArchiveTarget({
+    account: TELEGRAM_PERSONAL_ACCOUNT_SCOPE,
+    lane: () => {
+      mountTelegram(true);
+      if (!telegramConnectorStoreSync) throw new Error('Telegram stores are unavailable.');
+      return telegramConnectorStoreSync.archiveTarget().lane({ sourceId: TELEGRAM_MESSAGES_SOURCE_ID, slot: '1' }, process.env);
+    },
+    liveSince: () => telegramConnectorStoreSync?.archiveTarget().liveSince?.({ sourceId: TELEGRAM_MESSAGES_SOURCE_ID, slot: '1' }, process.env),
+  }));
   const telegramCaptureMaxItems = parseOptionalPositiveInteger(
     process.env.OLYMPUS_TELEGRAM_SPOOL_DRAIN_MAX_ITEMS,
     'OLYMPUS_TELEGRAM_SPOOL_DRAIN_MAX_ITEMS',
   );
   const mountSourceLanes = (handles: readonly ConnectedCredentialHandle[]): void => {
+    if (sourceRuntimeClosed) return;
     const connected = (provider: ConnectedCredentialHandle['provider'], capability: string): boolean =>
       activeCredentialHandle(handles, { provider, capability }) !== undefined;
     if (gmailConnectorStoreLane.enabled && (sourceHasStores(GMAIL_SOURCE_ID) || connected('gmail', 'gmail.email.sync'))) mountGmail();
@@ -3796,7 +3793,8 @@ export async function main(): Promise<void> {
   };
   const buildFileExtractionRuntime = () => createFileExtractionRuntime({
     env: process.env,
-    enabled: sourceIndexReadEnabled || configuredFileExtractionCorpora.length > 0,
+    enabled: fileExtractionCorpora().length > 0 || dropboxConnectorStoreLane.enabled || localFilesConnectorStoreLane.enabled
+      || whatsappConnectorStoreLane.enabled || googleDriveConnectorStoreLane.enabled,
     allowEmpty: true,
     connectorStores,
     corpora: fileExtractionCorpora(),
@@ -3845,33 +3843,11 @@ export async function main(): Promise<void> {
     },
     extractors: fileExtractionExtractors,
   });
-  // The shared jobs/readiness handle lives for this worker. A newly connected
-  // lane gets a fresh runner over the same durable queue. Keep earlier runners
-  // alive until shutdown so a connection never closes an in-flight read's queue.
-  const firstFileExtractionRuntime = buildFileExtractionRuntime();
-  const fileExtractionRuntimes = firstFileExtractionRuntime ? [firstFileExtractionRuntime] : [];
-  let extractionGeneration = sourceLaneGeneration;
-  const currentFileExtractionRuntime = () => {
-    if (extractionGeneration !== sourceLaneGeneration) {
-      const next = buildFileExtractionRuntime();
-      if (next) fileExtractionRuntimes.push(next);
-      extractionGeneration = sourceLaneGeneration;
-    }
-    return fileExtractionRuntimes.at(-1) ?? firstFileExtractionRuntime;
-  };
-  const fileExtractionRuntime = firstFileExtractionRuntime ? {
-    ...firstFileExtractionRuntime,
-    get corpusIds() { return currentFileExtractionRuntime()?.corpusIds ?? []; },
-    runner: new Proxy(firstFileExtractionRuntime.runner, {
-      get(_target, key) {
-        const runner = currentFileExtractionRuntime()!.runner;
-        const value = Reflect.get(runner, key);
-        return typeof value === 'function' ? value.bind(runner) : value;
-      },
-    }),
-    locateItem: (ref: Parameters<typeof firstFileExtractionRuntime.locateItem>[0]) => currentFileExtractionRuntime()?.locateItem(ref),
-    close() { for (const runtime of fileExtractionRuntimes) runtime.close(); },
-  } : undefined;
+  const fileExtractionRuntime = createRefreshableFileExtractionRuntime({
+    build: buildFileExtractionRuntime,
+    generation: () => sourceLaneGeneration,
+    beforeCurrent: () => mountSourceLanes(readActiveConnectedHandles(process.env)),
+  });
   const connectorStoreEmbeddingProviders = new Map<string, SourceEmbeddingProvider>();
   const connectorStoreAccountScopes = new Map<string, string>();
   const connectorStorePrincipals = new Map<string, ConnectorStoreDeclaredPrincipal>();
@@ -3911,15 +3887,15 @@ export async function main(): Promise<void> {
       );
     }
   }
-  for (const mount of configuredConnectorStoreMounts) {
+  const adoptConfiguredPrincipal = (mount: ConnectorStoreMount): void => {
     if (mount.principal && !connectorStorePrincipals.has(mount.store.corpusId)) {
       connectorStorePrincipals.set(mount.store.corpusId, mount.principal);
     }
-    if (mount.store.family !== 'chat' || !mount.chatPrincipal) continue;
-    if (!connectorStoreAccountScopes.has(mount.store.corpusId)) {
+    if (mount.store.family === 'chat' && mount.chatPrincipal && !connectorStoreAccountScopes.has(mount.store.corpusId)) {
       connectorStoreAccountScopes.set(mount.store.corpusId, mount.chatPrincipal.accountScope);
     }
-  }
+  };
+  for (const mount of configuredConnectorStoreMounts) adoptConfiguredPrincipal(mount);
   const connectorStoreReadScope = (store: LocalConnectorStore):
     { allowed: false } | {
       allowed: true;
@@ -4077,14 +4053,14 @@ export async function main(): Promise<void> {
   };
   for (const stores of earlySourceStores.splice(0)) sourceLaneMounted(stores);
   mountConfiguredSourceStores = (): void => {
+    if (sourceRuntimeClosed) return;
     const mounts = parseConnectorStoreMountsFromEnv(process.env.OLYMPUS_SOURCE_INDEX_CONNECTOR_STORES_JSON, {
       existingOnly: true, collidingStores: connectorStores, registeredCorpora: sourceCorpusRegistry.list(),
       storeOwner: lifecycleStoreFileOwner(process.env),
     });
     for (const mount of mounts) {
       if (!connectorStores.includes(mount.store)) sourceLaneMounted([mount.store]);
-      if (mount.principal) connectorStorePrincipals.set(mount.store.corpusId, mount.principal);
-      if (mount.chatPrincipal) connectorStoreAccountScopes.set(mount.store.corpusId, mount.chatPrincipal.accountScope);
+      adoptConfiguredPrincipal(mount);
     }
   };
   for (const registration of tierLegsOpenedEarly.splice(0)) registerTierLegStore(...registration);
@@ -4593,7 +4569,7 @@ export async function main(): Promise<void> {
         // is audited as skipped/no_adapter instead of silently disappearing
         // from unified fan-out.
         lanes: sourceAnswerLanes = createSourceAnswerLanes({
-          stores: () => readConnectorStores,
+          stores: () => { mountConfiguredSourceStores(); return readConnectorStores; },
           registry: () => buildSourceIndexCorpusRegistry(
             sourceCorpusRegistry.definitions('answer', fullCorpusDefinitions)
               .filter((definition) => !onDemandCorpusAbsent(definition.corpusId)),
@@ -4755,8 +4731,11 @@ export async function main(): Promise<void> {
     ? createSourceIndexStatusHandler({
       // Read per request: a per-tier store its tier set creates while the
       // runtime is up is reported from that moment, with no restart.
-      corpusDefinitions: () => sourceCorpusRegistry.definitions('status', fullCorpusDefinitions)
-        .filter((definition) => !onDemandCorpusAbsent(definition.corpusId)),
+      corpusDefinitions: () => {
+        mountConfiguredSourceStores();
+        return sourceCorpusRegistry.definitions('status', fullCorpusDefinitions)
+          .filter((definition) => !onDemandCorpusAbsent(definition.corpusId));
+      },
       connectorStores,
       connectorStoreStatusScope,
       ...(unreadableFiles ? { unreadableCount: (corpusId: string) => unreadableFiles.recheck(corpusId).unreadable } : {}),
@@ -5026,13 +5005,7 @@ export async function main(): Promise<void> {
       : undefined;
     const currentDropboxProviderStoreSync = currentDropboxHandle && currentDropboxScopeRef
       && fileSourceScopeAuthority && dropboxConnectorStore && dropboxTierLane
-      ? currentDropboxHandle.handle === dropboxHandle?.handle
-        && currentDropboxScopeRef.sourceId === dropboxScopeRef?.sourceId
-        && currentDropboxScopeRef.accountGeneration === dropboxScopeRef?.accountGeneration
-        && currentDropboxScopeRef.revision === dropboxScopeRef?.revision
-        && dropboxProviderStoreSync
-        ? dropboxProviderStoreSync
-        : createDropboxProviderStoreSyncHandler({
+      ? createDropboxProviderStoreSyncHandler({
             tierSet: dropboxTierLane.set,
             store: dropboxConnectorStore,
             account: currentDropboxHandle.accountRole?.trim() || dropboxFilesAccount || 'personal',
@@ -5823,6 +5796,7 @@ export async function main(): Promise<void> {
         }
       : {}),
     connectorStores,
+    refreshConnectorStores: () => mountConfiguredSourceStores(),
     connectorStoreTierSiblings: (corpusId: string) => [
       ...(tierLanes.find((lane) => lane.corpusIds.has(corpusId))?.corpusIds ?? []),
     ].filter((sibling) => sibling !== corpusId),
@@ -6949,6 +6923,9 @@ export async function main(): Promise<void> {
     closeDesktopBridge();
     if (shuttingDown) return;
     shuttingDown = true;
+    sourceRuntimeClosed = true;
+    sourceScheduler?.stop();
+    worker.close();
     updateChecker.stop();
     capturesClosed = true;
     desktopPollingClosed = true;
@@ -6970,8 +6947,6 @@ export async function main(): Promise<void> {
     waitingStore?.close();
     waitingStore = undefined;
     fileExtractionRuntime?.close();
-    worker.close();
-    sourceScheduler?.stop();
     void server.stop();
     // The data owner lock stays held: the teardown above is still running, and
     // the kernel releases the lock when this process exits.

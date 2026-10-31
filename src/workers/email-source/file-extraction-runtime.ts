@@ -228,6 +228,50 @@ export interface FileExtractionRuntime {
   close(): void;
 }
 
+/** A stable queue/readiness handle whose runner follows newly mounted source lanes. */
+export function createRefreshableFileExtractionRuntime(options: {
+  build(): FileExtractionRuntime | undefined;
+  generation(): number;
+  beforeCurrent?(): void;
+}): FileExtractionRuntime | undefined {
+  const first = options.build();
+  if (!first) return undefined;
+  const runtimes = [first];
+  let closed = false;
+  let generation = options.generation();
+  const current = (): FileExtractionRuntime | undefined => {
+    if (closed) return undefined;
+    options.beforeCurrent?.();
+    const nextGeneration = options.generation();
+    if (generation !== nextGeneration) {
+      const next = options.build();
+      if (next) runtimes.push(next);
+      generation = nextGeneration;
+    }
+    return runtimes.at(-1)!;
+  };
+  return {
+    ...first,
+    get corpusIds() { return current()?.corpusIds ?? []; },
+    runner: new Proxy(first.runner, {
+      get(_target, key) {
+        const runtime = current();
+        if (!runtime) throw new Error('File extraction runtime is closed.');
+        const runner = runtime.runner;
+        const value = Reflect.get(runner, key);
+        return typeof value === 'function' ? value.bind(runner) : value;
+      },
+    }),
+    locateItem: (ref) => current()?.locateItem(ref),
+    // Earlier runners stay alive for reads already in flight on their shared durable queue.
+    close() {
+      if (closed) return;
+      closed = true;
+      for (const runtime of runtimes) runtime.close();
+    },
+  };
+}
+
 export interface ExtractionItemLocation {
   locatorUri?: string;
   providerConversationId?: string;

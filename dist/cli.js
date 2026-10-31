@@ -77177,7 +77177,7 @@ function telegramProviderAccountId(userId) {
   return `telegram:${createHash55("sha256").update(userId).digest("hex").slice(0, 16)}`;
 }
 function telegramArchiveTarget(options) {
-  const connector = withInputs(options.connector, options.builder);
+  let connector;
   return {
     sourceId: TELEGRAM_SOURCE_ID,
     label: "Telegram",
@@ -77198,7 +77198,12 @@ function telegramArchiveTarget(options) {
       } catch {}
       return telegramExportInput(archive, { account: options.account, ...ownUserId ? { ownUserId } : {} });
     },
-    lane: () => ({ set: options.set, sync: options.sync, connector }),
+    lane: () => {
+      if ("lane" in options)
+        return options.lane();
+      connector ??= withInputs(options.connector, options.builder);
+      return { set: options.set, sync: options.sync, connector };
+    },
     ...options.liveSince ? { liveSince: () => options.liveSince() } : {}
   };
 }
@@ -90480,6 +90485,51 @@ var init_tiered_extraction = __esm(() => {
 
 // src/workers/email-source/file-extraction-runtime.ts
 import { existsSync as existsSync57 } from "node:fs";
+function createRefreshableFileExtractionRuntime(options) {
+  const first = options.build();
+  if (!first)
+    return;
+  const runtimes = [first];
+  let closed = false;
+  let generation = options.generation();
+  const current2 = () => {
+    if (closed)
+      return;
+    options.beforeCurrent?.();
+    const nextGeneration = options.generation();
+    if (generation !== nextGeneration) {
+      const next = options.build();
+      if (next)
+        runtimes.push(next);
+      generation = nextGeneration;
+    }
+    return runtimes.at(-1);
+  };
+  return {
+    ...first,
+    get corpusIds() {
+      return current2()?.corpusIds ?? [];
+    },
+    runner: new Proxy(first.runner, {
+      get(_target, key2) {
+        const runtime = current2();
+        if (!runtime)
+          throw new Error("File extraction runtime is closed.");
+        const runner = runtime.runner;
+        const value = Reflect.get(runner, key2);
+        return typeof value === "function" ? value.bind(runner) : value;
+      }
+    }),
+    locateItem: (ref) => current2()?.locateItem(ref),
+    close() {
+      if (closed)
+        return;
+      closed = true;
+      for (const runtime of runtimes)
+        runtime.close();
+    }
+  };
+}
 function createFileExtractionRuntime(options) {
   const env = options.env ?? process.env;
   if (options.enabled !== true && (env[FILE_EXTRACTION_ENABLED_ENV] ?? "").trim().toLowerCase() !== "true")
@@ -159194,7 +159244,10 @@ function createEmailSourceWorker(options = {}) {
   const sourceIndexEmbeddingProvider = options.sourceIndexEmbeddingProvider;
   const connectorStores = options.connectorStores ?? [];
   const connectorStoresByCorpusId = {
-    get: (corpusId) => connectorStores.find((store) => store.corpusId === corpusId)
+    get: (corpusId) => {
+      options.refreshConnectorStores?.();
+      return connectorStores.find((store) => store.corpusId === corpusId);
+    }
   };
   const connectorStoreEmbeddingProviders = options.connectorStoreEmbeddingProviders ?? new Map;
   const connectorStoreAccountScopes = options.connectorStoreAccountScopes ?? new Map;
@@ -159416,6 +159469,7 @@ function createEmailSourceWorker(options = {}) {
           if (!sourceIndexStatus) {
             throw new EmailSourceWorkerError(501, "source_index_status_not_supported", "Private source worker does not support source-index status.");
           }
+          options.refreshConnectorStores?.();
           const statusRequest = await parseSourceIndexStatusRequest(request, connectorStores);
           const result = withCredentialDegradations(await sourceIndexStatus.status(statusRequest), credentialDegradations?.() ?? []);
           const resultWithLatencyHealth = sourceAnswerLatencyLog?.health ? {
@@ -205168,6 +205222,7 @@ async function main() {
     } : {}
   }) : undefined;
   const fileExtractionLocalVlmClient = createFileExtractionLocalVlmClientFromEnv(process.env);
+  let sourceRuntimeClosed = false;
   let sourceLaneGeneration = 0;
   let mountConfiguredSourceStores = () => {};
   const earlySourceStores = [];
@@ -205548,7 +205603,10 @@ ${key2}`;
     }) : undefined;
     if (dropboxTierLane && dropboxFilesEmbeddingProvider && isApprovedSecureSourceEmbeddingProvider(dropboxFilesEmbeddingProvider)) {
       dropboxTierLane.set.declarePrivateEmbedder(dropboxFilesEmbeddingProvider, {
-        embedWith: () => dropboxScopeRef && fileSourceScopeAuthority ? scopeBoundEmbeddingProvider(dropboxFilesEmbeddingProvider, fileSourceScopeAuthority, dropboxScopeRef) : undefined
+        embedWith: () => {
+          const ref = fileSourceScopeAuthority?.policyRef("dropbox.files");
+          return ref && fileSourceScopeAuthority ? scopeBoundEmbeddingProvider(dropboxFilesEmbeddingProvider, fileSourceScopeAuthority, ref) : undefined;
+        }
       });
     }
     if (dropboxTierLane && dropboxConnectorStore) {
@@ -205565,15 +205623,6 @@ ${key2}`;
       sourceLaneMounted([dropboxConnectorStore]);
   };
   const isDropboxTierStore = (store) => store === dropboxConnectorStore || dropboxTierLane !== undefined && (store === dropboxTierLane.internal.current() || store === dropboxTierLane.public.current());
-  const dropboxScopeRef = dropboxHandle && fileSourceScopeAuthority ? fileSourceScopeAuthority.policyRef("dropbox.files") : undefined;
-  const dropboxProviderStoreSync = dropboxConnectorStore && dropboxTierLane && dropboxHandle && dropboxScopeRef && fileSourceScopeAuthority ? createDropboxProviderStoreSyncHandler({
-    tierSet: dropboxTierLane.set,
-    store: dropboxConnectorStore,
-    account: dropboxProviderAccount,
-    credentialHandle: dropboxHandle.handle,
-    scope: createScopeBoundDropboxContentScope({ authority: fileSourceScopeAuthority, ref: dropboxScopeRef }),
-    ...dropboxFilesEmbeddingProvider && isApprovedSecureSourceEmbeddingProvider(dropboxFilesEmbeddingProvider) ? { embeddingProvider: scopeBoundEmbeddingProvider(dropboxFilesEmbeddingProvider, fileSourceScopeAuthority, dropboxScopeRef) } : {}
-  }) : undefined;
   const localFilesConnectorStoreLane = sourceIndexLaneAccountDecision(sourceIndexLaneStorageDecision(process.env, "OLYMPUS_SOURCE_INDEX_LOCAL_FILES_CONNECTOR_STORE_ENABLED", sourceIndexReadEnabled), { sourceId: LOCAL_FILES_SOURCE_ID });
   const localFilesIngestionPolicy = defaultLocalFilesIngestionPolicy();
   const localFilesScopeRef = fileSourceScopeAuthority ? fileSourceScopeAuthority.policyRef(LOCAL_FILES_SOURCE_ID) : undefined;
@@ -205745,10 +205794,10 @@ ${key2}`;
   let telegramConnectorStores;
   let telegramTierLane;
   let telegramConnectorStoreSync;
-  const mountTelegram = () => {
+  const mountTelegram = (forImport = false) => {
     if (telegramConnectorStores)
       return;
-    telegramConnectorStores = telegramConnectorStoreLane.enabled ? createTelegramConnectorStores(process.env) : undefined;
+    telegramConnectorStores = telegramConnectorStoreLane.enabled || forImport ? createTelegramConnectorStores(process.env) : undefined;
     telegramTierLane = telegramConnectorStores ? tierLane({
       account: { sourceId: TELEGRAM_MESSAGES_SOURCE_ID },
       internal: telegramConnectorStores.internal,
@@ -205763,13 +205812,23 @@ ${key2}`;
       ...telegramTierLane?.secrets ? { secretLocations: telegramTierLane.secrets } : {},
       ...tierSecureEmbeddingProvider ? { privateEmbedder: tierSecureEmbeddingProvider } : {}
     }) : undefined;
-    if (telegramConnectorStoreSync)
-      archiveSourceTargets.register(telegramConnectorStoreSync.archiveTarget());
     if (telegramConnectorStores)
       sourceLaneMounted([telegramConnectorStores.internal, telegramConnectorStores.secureLocal]);
   };
+  archiveSourceTargets.register(telegramArchiveTarget({
+    account: TELEGRAM_PERSONAL_ACCOUNT_SCOPE,
+    lane: () => {
+      mountTelegram(true);
+      if (!telegramConnectorStoreSync)
+        throw new Error("Telegram stores are unavailable.");
+      return telegramConnectorStoreSync.archiveTarget().lane({ sourceId: TELEGRAM_MESSAGES_SOURCE_ID, slot: "1" }, process.env);
+    },
+    liveSince: () => telegramConnectorStoreSync?.archiveTarget().liveSince?.({ sourceId: TELEGRAM_MESSAGES_SOURCE_ID, slot: "1" }, process.env)
+  }));
   const telegramCaptureMaxItems = parseOptionalPositiveInteger(process.env.OLYMPUS_TELEGRAM_SPOOL_DRAIN_MAX_ITEMS, "OLYMPUS_TELEGRAM_SPOOL_DRAIN_MAX_ITEMS");
   const mountSourceLanes = (handles) => {
+    if (sourceRuntimeClosed)
+      return;
     const connected2 = (provider, capability) => activeCredentialHandle(handles, { provider, capability }) !== undefined;
     if (gmailConnectorStoreLane.enabled && (sourceHasStores(GMAIL_SOURCE_ID) || connected2("gmail", "gmail.email.sync")))
       mountGmail();
@@ -205969,7 +206028,7 @@ ${key2}`;
   };
   const buildFileExtractionRuntime = () => createFileExtractionRuntime({
     env: process.env,
-    enabled: sourceIndexReadEnabled || configuredFileExtractionCorpora.length > 0,
+    enabled: fileExtractionCorpora().length > 0 || dropboxConnectorStoreLane.enabled || localFilesConnectorStoreLane.enabled || whatsappConnectorStoreLane.enabled || googleDriveConnectorStoreLane.enabled,
     allowEmpty: true,
     connectorStores,
     corpora: fileExtractionCorpora(),
@@ -206018,36 +206077,11 @@ ${key2}`;
     },
     extractors: fileExtractionExtractors
   });
-  const firstFileExtractionRuntime = buildFileExtractionRuntime();
-  const fileExtractionRuntimes = firstFileExtractionRuntime ? [firstFileExtractionRuntime] : [];
-  let extractionGeneration = sourceLaneGeneration;
-  const currentFileExtractionRuntime = () => {
-    if (extractionGeneration !== sourceLaneGeneration) {
-      const next = buildFileExtractionRuntime();
-      if (next)
-        fileExtractionRuntimes.push(next);
-      extractionGeneration = sourceLaneGeneration;
-    }
-    return fileExtractionRuntimes.at(-1) ?? firstFileExtractionRuntime;
-  };
-  const fileExtractionRuntime = firstFileExtractionRuntime ? {
-    ...firstFileExtractionRuntime,
-    get corpusIds() {
-      return currentFileExtractionRuntime()?.corpusIds ?? [];
-    },
-    runner: new Proxy(firstFileExtractionRuntime.runner, {
-      get(_target, key2) {
-        const runner = currentFileExtractionRuntime().runner;
-        const value2 = Reflect.get(runner, key2);
-        return typeof value2 === "function" ? value2.bind(runner) : value2;
-      }
-    }),
-    locateItem: (ref) => currentFileExtractionRuntime()?.locateItem(ref),
-    close() {
-      for (const runtime of fileExtractionRuntimes)
-        runtime.close();
-    }
-  } : undefined;
+  const fileExtractionRuntime = createRefreshableFileExtractionRuntime({
+    build: buildFileExtractionRuntime,
+    generation: () => sourceLaneGeneration,
+    beforeCurrent: () => mountSourceLanes(readActiveConnectedHandles(process.env))
+  });
   const connectorStoreEmbeddingProviders = new Map;
   const connectorStoreAccountScopes = new Map;
   const connectorStorePrincipals = new Map;
@@ -206078,16 +206112,16 @@ ${key2}`;
       connectorStorePrincipals.set(corpusId, canonicalConnectorStoreChatPrincipal("telegram", telegramConnectorAccountScope));
     }
   }
-  for (const mount of configuredConnectorStoreMounts) {
+  const adoptConfiguredPrincipal = (mount) => {
     if (mount.principal && !connectorStorePrincipals.has(mount.store.corpusId)) {
       connectorStorePrincipals.set(mount.store.corpusId, mount.principal);
     }
-    if (mount.store.family !== "chat" || !mount.chatPrincipal)
-      continue;
-    if (!connectorStoreAccountScopes.has(mount.store.corpusId)) {
+    if (mount.store.family === "chat" && mount.chatPrincipal && !connectorStoreAccountScopes.has(mount.store.corpusId)) {
       connectorStoreAccountScopes.set(mount.store.corpusId, mount.chatPrincipal.accountScope);
     }
-  }
+  };
+  for (const mount of configuredConnectorStoreMounts)
+    adoptConfiguredPrincipal(mount);
   const connectorStoreReadScope = (store) => {
     const sourceId = isDropboxTierStore(store) ? "dropbox.files" : isLocalFilesTierStore(store) ? LOCAL_FILES_SOURCE_ID : store === googleDriveInternalConnectorStore || store === googleDriveSecureConnectorStore || store.corpusId === GOOGLE_DRIVE_PUBLIC_CONNECTOR_CORPUS_ID && store === googleDriveTierLane?.publicStore?.current() ? "google_drive.docs" : Object.values(EVERNOTE_TIER_CORPUS_IDS).includes(store.corpusId) ? EVERNOTE_SOURCE_ID : undefined;
     if (!sourceId)
@@ -206222,6 +206256,8 @@ ${key2}`;
   for (const stores of earlySourceStores.splice(0))
     sourceLaneMounted(stores);
   mountConfiguredSourceStores = () => {
+    if (sourceRuntimeClosed)
+      return;
     const mounts = parseConnectorStoreMountsFromEnv(process.env.OLYMPUS_SOURCE_INDEX_CONNECTOR_STORES_JSON, {
       existingOnly: true,
       collidingStores: connectorStores,
@@ -206231,10 +206267,7 @@ ${key2}`;
     for (const mount of mounts) {
       if (!connectorStores.includes(mount.store))
         sourceLaneMounted([mount.store]);
-      if (mount.principal)
-        connectorStorePrincipals.set(mount.store.corpusId, mount.principal);
-      if (mount.chatPrincipal)
-        connectorStoreAccountScopes.set(mount.store.corpusId, mount.chatPrincipal.accountScope);
+      adoptConfiguredPrincipal(mount);
     }
   };
   for (const registration of tierLegsOpenedEarly.splice(0))
@@ -206554,7 +206587,10 @@ ${key2}`;
       secureAnalystPoolState,
       ...secureDerivativeDefault !== undefined ? { secureDerivativeDefault } : {},
       lanes: sourceAnswerLanes = createSourceAnswerLanes({
-        stores: () => readConnectorStores,
+        stores: () => {
+          mountConfiguredSourceStores();
+          return readConnectorStores;
+        },
         registry: () => buildSourceIndexCorpusRegistry(sourceCorpusRegistry2.definitions("answer", fullCorpusDefinitions).filter((definition) => !onDemandCorpusAbsent(definition.corpusId))),
         embeddingProvider: (store) => connectorStoreEmbeddingProviders.get(store.corpusId) ?? sourceIndexEmbeddingProvider,
         localEmbedding: loadedBuiltInEmbedding,
@@ -206674,7 +206710,10 @@ ${key2}`;
     } : {}
   });
   const sourceIndexStatus = sourceIndexReadEnabled ? createSourceIndexStatusHandler({
-    corpusDefinitions: () => sourceCorpusRegistry2.definitions("status", fullCorpusDefinitions).filter((definition) => !onDemandCorpusAbsent(definition.corpusId)),
+    corpusDefinitions: () => {
+      mountConfiguredSourceStores();
+      return sourceCorpusRegistry2.definitions("status", fullCorpusDefinitions).filter((definition) => !onDemandCorpusAbsent(definition.corpusId));
+    },
     connectorStores,
     connectorStoreStatusScope,
     ...unreadableFiles ? { unreadableCount: (corpusId) => unreadableFiles.recheck(corpusId).unreadable } : {},
@@ -206856,7 +206895,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     const currentGoogleDriveScopeRef = currentGoogleDriveHandle && fileSourceScopeAuthority ? fileSourceScopeAuthority.policyRef("google_drive.docs") : undefined;
     const currentGoogleDriveConnectorStoreSync = createGoogleDriveConnectorStoreSyncForHandle(currentGoogleDriveHandle);
     const currentDropboxScopeRef = currentDropboxHandle && fileSourceScopeAuthority ? fileSourceScopeAuthority.policyRef("dropbox.files") : undefined;
-    const currentDropboxProviderStoreSync = currentDropboxHandle && currentDropboxScopeRef && fileSourceScopeAuthority && dropboxConnectorStore && dropboxTierLane ? currentDropboxHandle.handle === dropboxHandle?.handle && currentDropboxScopeRef.sourceId === dropboxScopeRef?.sourceId && currentDropboxScopeRef.accountGeneration === dropboxScopeRef?.accountGeneration && currentDropboxScopeRef.revision === dropboxScopeRef?.revision && dropboxProviderStoreSync ? dropboxProviderStoreSync : createDropboxProviderStoreSyncHandler({
+    const currentDropboxProviderStoreSync = currentDropboxHandle && currentDropboxScopeRef && fileSourceScopeAuthority && dropboxConnectorStore && dropboxTierLane ? createDropboxProviderStoreSyncHandler({
       tierSet: dropboxTierLane.set,
       store: dropboxConnectorStore,
       account: currentDropboxHandle.accountRole?.trim() || dropboxFilesAccount || "personal",
@@ -207443,6 +207482,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
       }
     } : {},
     connectorStores,
+    refreshConnectorStores: () => mountConfiguredSourceStores(),
     connectorStoreTierSiblings: (corpusId) => [
       ...tierLanes.find((lane) => lane.corpusIds.has(corpusId))?.corpusIds ?? []
     ].filter((sibling) => sibling !== corpusId),
@@ -208331,6 +208371,9 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     if (shuttingDown)
       return;
     shuttingDown = true;
+    sourceRuntimeClosed = true;
+    sourceScheduler?.stop();
+    worker.close();
     updateChecker.stop();
     capturesClosed = true;
     desktopPollingClosed = true;
@@ -208353,8 +208396,6 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     waitingStore?.close();
     waitingStore = undefined;
     fileExtractionRuntime?.close();
-    worker.close();
-    sourceScheduler?.stop();
     server.stop();
   };
   shutdownSignals.setShutdown(shutdown);
@@ -209018,6 +209059,7 @@ var init_server5 = __esm(async () => {
   init_source_answer_lanes();
   init_gmail_status_scope();
   init_tiered_store_set();
+  init_archive_target();
   init_connector5();
   init_live_sync3();
   init_runtime3();

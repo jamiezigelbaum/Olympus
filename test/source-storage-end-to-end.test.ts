@@ -35,6 +35,7 @@ import { resolvedStorePath } from '../src/core/source-placement.ts';
 import { readSourceRegistry } from '../src/core/source-registry.ts';
 import { TierLedger } from '../src/workers/classification/tier-ledger.ts';
 import { FileSourceScopeAuthority } from '../src/workers/source-scope-runtime.ts';
+import { connectThisComputerSource } from '../src/core/this-computer.ts';
 import { upsertConnectedHandle } from '../src/workers/credential-broker/connected-handles.ts';
 import { createWorkerFetch } from '../src/core/worker-transport.ts';
 import { deleteOlympusData } from '../src/data-lifecycle.ts';
@@ -250,6 +251,112 @@ async function seedPreFolderInstall(env: Env): Promise<Record<string, string>> {
 }
 
 describe('source storage, end to end on this host', () => {
+  for (const read of ['status', 'search'] as const) {
+    test(`a declared store ingested after boot is discovered by ${read} with the scheduler off`, async () => {
+      const env: Env = { ...freshHome(), OLYMPUS_WORKER_SCHEDULER_ENABLED: 'false' };
+      const path = join(env.HOME!, 'late-reflect.sqlite');
+      env.OLYMPUS_SOURCE_INDEX_CONNECTOR_STORES_JSON = JSON.stringify([{ dbPath: path, corpusId: 'secure_local.reflect.notes', family: 'note', trustDomain: 'secure_local' }]);
+      const worker = await boot(env);
+      try {
+        expect(worker.output(), listening(worker)).toContain('worker listening');
+        expect((await ask(env, worker, '/v1/source/index/status', {})).status).toBe(200);
+        expect(existsSync(path)).toBe(false);
+        await writeStore(path, 'secure_local.reflect.notes', 'note', 'secure_local');
+        if (read === 'status') expect((await ask(env, worker, '/v1/source/index/status', {})).status).toBe(200);
+        const search = await ask(env, worker, '/v1/source/index/search', { query: 'orchard', corpus_id: 'secure_local.reflect.notes' });
+        expect(search.status, JSON.stringify(search.json)).toBe(200);
+        expect(search.json.hits).toEqual(expect.arrayContaining([expect.objectContaining({ selected_item: expect.objectContaining({ title: 'orchard-lab.txt' }) })]));
+      } finally { await worker.stop(); }
+    }, 180_000);
+  }
+
+  test('Telegram registers its archive target before pairing and opens its source lane only on import', async () => {
+    const env = freshHome();
+    const resultPath = join(env.HOME!, 'telegram-target.json');
+    const preload = join(env.HOME!, 'check-telegram-target.ts');
+    writeFileSync(preload, `
+      import { archiveSourceTargets } from ${JSON.stringify(join(REPO, 'src/workers/archive-import/source-targets.ts'))};
+      import { resolvedStorePath } from ${JSON.stringify(join(REPO, 'src/core/source-placement.ts'))};
+      import { existsSync, writeFileSync } from 'node:fs';
+      const deadline = Date.now() + 10000;
+      const tick = setInterval(() => {
+        const target = archiveSourceTargets.forSource('telegram.messages');
+        if (!target && Date.now() < deadline) return;
+        clearInterval(tick);
+        if (!target) { writeFileSync(${JSON.stringify(resultPath)}, JSON.stringify({ registered: false })); return; }
+        const path = resolvedStorePath('telegram.messages', 'internal', process.env);
+        const existed = existsSync(path);
+        const lane = target.lane({ sourceId: 'telegram.messages', slot: '1' }, process.env);
+        writeFileSync(${JSON.stringify(resultPath)}, JSON.stringify({ registered: true, existed, opened: existsSync(path), setId: lane.set.setId, formats: target.formats }));
+      }, 50);
+    `);
+    const worker = await boot(env, preload);
+    try {
+      expect(worker.output(), listening(worker)).toContain('worker listening');
+      const deadline = Date.now() + 12_000;
+      while (!existsSync(resultPath) && Date.now() < deadline) await Bun.sleep(100);
+      expect(JSON.parse(readFileSync(resultPath, 'utf8'))).toMatchObject({ registered: true, existed: false, opened: true, formats: ['telegram_json'] });
+    } finally { await worker.stop(); }
+  }, 180_000);
+
+  test('an enabled file lane mounts for extraction after boot with global reads and scheduler off', async () => {
+    const env: Env = {
+      ...freshHome(), OLYMPUS_SOURCE_INDEX_ENABLED: 'false', OLYMPUS_SOURCE_INDEX_ANSWER_ENABLED: 'false',
+      OLYMPUS_SOURCE_INDEX_LOCAL_FILES_CONNECTOR_STORE_ENABLED: 'true', OLYMPUS_WORKER_SCHEDULER_ENABLED: 'false',
+    };
+    const registryPath = join(env.HOME!, '.config', 'olympus', 'handles.json');
+    env.OLYMPUS_CREDENTIAL_HANDLE_REGISTRY_PATH = registryPath;
+    const worker = await boot(env);
+    try {
+      expect(worker.output(), listening(worker)).toContain('worker listening');
+      const path = resolvedStorePath('local.files', 'secure_local', env);
+      expect(existsSync(path)).toBe(false);
+      connectThisComputerSource(registryPath, 'local.files');
+      const folder = join(env.HOME!, 'selected-notes');
+      mkdirSync(folder);
+      const authority = new FileSourceScopeAuthority({ registryPath });
+      const pending = authority.snapshot('local.files');
+      authority.approve({ sourceId: 'local.files', accountGeneration: pending.accountGeneration!, expectedRevision: pending.revision, selections: [{ key: folder, state: 'ingest' }], wholeAccount: false, explicitWholeAccountConfirmation: false });
+      const plan = await ask(env, worker, '/v1/source/index/files/plan', {
+        corpus_id: 'secure_local.local.files', provider: 'local_files', account_scope: 'this_computer',
+        approved_scope_key: `local_files.this_computer:${folder}`,
+      });
+      expect(plan.status, JSON.stringify(plan.json)).toBe(200);
+      expect(plan.json).toMatchObject({ kind: 'file_extraction_plan', corpus_id: 'secure_local.local.files', candidates: 0 });
+      expect(existsSync(path)).toBe(true);
+    } finally { await worker.stop(); }
+  }, 180_000);
+
+  test('an explicitly enabled file lane extracts with global source reads off', async () => {
+    const env: Env = {
+      ...freshHome(), OLYMPUS_SOURCE_INDEX_ENABLED: 'false', OLYMPUS_SOURCE_INDEX_ANSWER_ENABLED: 'false',
+      OLYMPUS_SOURCE_INDEX_LOCAL_FILES_CONNECTOR_STORE_ENABLED: 'true', OLYMPUS_WORKER_SCHEDULER_ENABLED: 'true',
+      OLYMPUS_WORKER_SCHEDULER_TICK_SECONDS: '1', OLYMPUS_WORKER_SCHEDULER_SYNC_INTERVAL_SECONDS: '1',
+    };
+    const registryPath = join(env.HOME!, '.config', 'olympus', 'handles.json');
+    env.OLYMPUS_CREDENTIAL_HANDLE_REGISTRY_PATH = registryPath;
+    connectThisComputerSource(registryPath, 'local.files');
+    const folder = join(env.HOME!, 'selected-notes');
+    mkdirSync(folder);
+    writeFileSync(join(folder, 'explicit.txt'), 'The explicitlane reference should be read despite global search being disabled.');
+    const authority = new FileSourceScopeAuthority({ registryPath });
+    const pending = authority.snapshot('local.files');
+    authority.approve({ sourceId: 'local.files', accountGeneration: pending.accountGeneration!, expectedRevision: pending.revision, selections: [{ key: folder, state: 'ingest' }], wholeAccount: false, explicitWholeAccountConfirmation: false });
+    const worker = await boot(env);
+    try {
+      expect(worker.output(), listening(worker)).toContain('worker listening');
+      const paths = ['internal', 'secure_local'].map((domain) => resolvedStorePath('local.files', domain, env));
+      let text = '';
+      const deadline = Date.now() + 20_000;
+      while (Date.now() < deadline) {
+        text = paths.filter(existsSync).map((path) => JSON.stringify(snapshotStore(path).chunks)).join('\n');
+        if (text.includes('explicitlane')) break;
+        await Bun.sleep(100);
+      }
+      expect(text, `${worker.errors()}\n${worker.output()}`).toContain('explicitlane');
+    } finally { await worker.stop(); }
+  }, 180_000);
+
   test('Dropbox connected after boot lists and extracts through the real worker with a fixture provider', async () => {
     const env: Env = {
       ...freshHome(),
@@ -323,6 +430,7 @@ describe('source storage, end to end on this host', () => {
       OLYMPUS_WORKER_SCHEDULER_TICK_SECONDS: '1',
       OLYMPUS_WORKER_SCHEDULER_SYNC_INTERVAL_SECONDS: '1',
       OLYMPUS_CREDENTIAL_HANDLE_REGISTRY_PATH: '',
+      OLYMPUS_SOURCE_INDEX_CONNECTOR_STORES_JSON: JSON.stringify([{ corpusId: 'secure_local.local.files', family: 'file', trustDomain: 'secure_local', principalProvider: 'telegram', principalAccountScope: 'impostor' }]),
     };
     env.OLYMPUS_CREDENTIAL_HANDLE_REGISTRY_PATH = join(env.HOME!, '.config', 'olympus', 'handles.json');
     const folder = join(env.HOME!, 'selected-notes');
@@ -374,7 +482,7 @@ describe('source storage, end to end on this host', () => {
       }
       const status = await ask(env, worker, '/v1/source/index/status', {});
       expect(status.status).toBe(200);
-      const search = await ask(env, worker, '/v1/source/index/search', { query: 'zephyrtide', corpus_id: 'secure_local.local.files' });
+      const search = await ask(env, worker, '/v1/source/index/search', { query: 'zephyrtide', corpus_id: 'secure_local.local.files', approved_scope_key: `local_files.this_computer:${folder}` });
       expect(search.status, JSON.stringify(search.json)).toBe(200);
       expect(search.json.hits).toEqual(expect.arrayContaining([expect.objectContaining({ selected_item: expect.objectContaining({ title: 'harbour.txt', corpus_id: 'internal.local.files' }) })]));
     } finally {

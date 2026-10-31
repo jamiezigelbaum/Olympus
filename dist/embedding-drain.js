@@ -68439,6 +68439,7 @@ var GMAIL_IMPORTED_FILTERS = Object.freeze({ provider: GMAIL_PROVIDER_ID, observ
 
 // src/workers/email-source/server.ts
 init_tiered_store_set();
+init_archive_target();
 init_connector5();
 init_live_sync3();
 
