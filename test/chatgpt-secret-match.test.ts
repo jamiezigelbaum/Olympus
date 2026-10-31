@@ -132,3 +132,45 @@ for (const seenOnDelivery of [false, true]) test(`Secret pointer claim and ackno
     expect(opened.answer).not.toContain('SENTINEL');
   } finally { store.close(); rmSync(dir, { recursive: true, force: true }); }
 });
+
+test('claim refresh discovering a Secret preserves Inbox through mixed Private answer acknowledgment', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'secret-refresh-waiting-'));
+  const store = openWaitingPrivateQuestionStore(join(dir, 'waiting.sqlite'));
+  let releaseModel: (() => void) | undefined;
+  const heldModel = new Promise<void>((resolve) => { releaseModel = resolve; });
+  let modelStarted = false;
+  try {
+    const ref = store.record(store.ticket('a'.repeat(18)), { question: 'mixed vault', surface: 'chatgpt', state: 'waiting' })!;
+    const evidence = [{ trustDomain: 'secure_local', title: 'Ordinary Private item' }];
+    const jobs = new PrivateAnswerJobs({ installId: () => 'a'.repeat(32), claimHoldMs: 0, precompute: false,
+      eligible: async (items) => items.map(() => true), acknowledge: (waiting) => store.acknowledge(waiting),
+      model: () => ({ status: () => ({ state: 'ready' }), answerPrivately: async () => {
+        modelStarted = true;
+        await heldModel;
+        return { answer: 'The Private answer.', citations: [], unanswered: [] };
+      } }),
+    });
+    const match = jobs.begin({ question: 'mixed vault', count: 1, evidence, waiting: ref,
+      refresh: async () => Object.assign([...evidence], { secretMatch: true as const }),
+    });
+    const panel = await generatePanelKeyPair();
+    let result = await jobs.claim(match.jobId!, panel.publicKey);
+    for (let i = 0; i < 20 && !modelStarted; i++) await Bun.sleep(10);
+    expect(modelStarted).toBe(true);
+    expect(jobs.hasClaimedWaiting(ref)).toBe(false);
+    releaseModel!();
+    for (let i = 0; i < 20 && result.status === 202; i++) { await Bun.sleep(10); result = await jobs.claim(match.jobId!, panel.publicKey); }
+    expect(result.status).toBe(200);
+    const opened = JSON.parse(await openPrivateAnswer(match.jobId!, panel.privateKey, sealedBody(result.body)));
+    expect(opened.answer).toContain('The Private answer.');
+    expect(opened.answer).toContain(POINTER);
+    expect(opened.citations).toEqual([]);
+    expect((await jobs.acknowledge(match.jobId!, panel.publicKey, opened.ack)).body).toEqual({ status: 'acknowledged' });
+    expect(jobs.hasClaimedWaiting(ref)).toBe(false);
+    expect(store.list().questions.map((question) => question.id)).toContain(ref.id);
+    const answer = secretLocationAnswer([{ where: 'SENTINEL refreshed local vault' }]);
+    expect(store.saveAnswer(ref, { status: 'answered', answer, citations: [], unanswered: [], leftOut: [], read: [] })).toBe(true);
+    expect(store.get(ref.id)?.result?.answer).toBe(answer);
+    expect(opened.answer).not.toContain('SENTINEL');
+  } finally { releaseModel?.(); store.close(); rmSync(dir, { recursive: true, force: true }); }
+});

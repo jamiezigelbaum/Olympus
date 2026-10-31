@@ -1145,7 +1145,11 @@ export class PrivateAnswerJobs {
       job.refresh = undefined;
       const refreshStarted = this.now();
       // No search to judge the items by now: nothing is read (fail closed).
-      const found = refresh ? await refresh(abort.signal) : [];
+      const found: Awaited<ReturnType<PrivateEvidenceRefresh>> = refresh ? await refresh(abort.signal) : [];
+      // A newly discovered Secret still needs its local location answer.
+      // Preserve the Inbox as soon as the refresh knows, including mixed
+      // results whose Private evidence can still answer in the panel.
+      if (found.secretMatch === true) job.preserveWaiting = true;
       if (refresh) timing.refreshMs = this.now() - refreshStarted;
       // A refresh that finished after the deadline (or after the job was
       // dropped) must not start inference.
@@ -1185,6 +1189,8 @@ export class PrivateAnswerJobs {
           // A fresh acknowledgment capability for this job's sealed answer only.
           const ack = randomBytes(32).toString('base64url');
           const plaintext = { ...this.withOpenTokens(job, result.plaintext, result.localPaths), ack };
+          // The pointer leads so payload fitting cannot truncate it away.
+          if (job.preserveWaiting) plaintext.answer = `${REMOTE_SECRET_NOTE}\n\n${plaintext.answer}`;
           // The payload contract is enforced here, before first delivery, on
           // every job: the limits and byte budgets in private-answer-payload.ts.
           const sealed = await sealPrivateAnswer(job.id, panelKey, padPrivateAnswerPlaintext(serializePrivateAnswerPlaintext(plaintext)));

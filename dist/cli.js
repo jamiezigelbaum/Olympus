@@ -48718,7 +48718,7 @@ function openWaitingPrivateQuestionStore(dbPath, options = {}) {
           const generation = existing.generation + 1;
           db.query(`
             UPDATE waiting_questions
-            SET question = ?, detail = ?, state = ?, seen = 0, generation = ?, asked_at = ?, result = NULL, answered_at = NULL, attempts = 0, next_attempt_at = 0, retry_reasons = '[]'
+            SET question = ?, detail = ?, state = ?, seen = 0, generation = ?, asked_at = ?, result = NULL, answered_at = NULL, attempts = 0, next_attempt_at = 0, retry_reasons = '[]', failed = 0
             WHERE id = ?
           `).run(question, existing.detail === "full" || detail === "full" ? "full" : "summary", existing.state === "waiting" || input.state === "waiting" ? "waiting" : "unchecked", generation, at, existing.id);
           ref = { id: existing.id, generation, connectionId: ticket.connectionId };
@@ -48739,7 +48739,7 @@ function openWaitingPrivateQuestionStore(dbPath, options = {}) {
       const at = now();
       if (db.query("SELECT 1 FROM waiting_questions WHERE answered_at IS NULL AND asked_at <= ? LIMIT 1").get(at - WAITING_QUESTION_LIMITS.ttlMs))
         expire(at);
-      const columns = options2?.includeResults === false ? "id, connection_id, surface, answer_path, destination, question, detail, selectors, state, seen, generation, asked_at, answered_at, attempts, next_attempt_at, retry_reasons, NULL AS result, result IS NOT NULL AS has_result, json_extract(result, '$.status') = 'failed' AS failed" : "*";
+      const columns = options2?.includeResults === false ? "id, connection_id, surface, answer_path, destination, question, detail, selectors, state, seen, generation, asked_at, answered_at, attempts, next_attempt_at, retry_reasons, NULL AS result, result IS NOT NULL AS has_result, failed" : "*";
       const rows = db.query(`SELECT ${columns} FROM waiting_questions WHERE answered_at IS NOT NULL OR asked_at > ? ORDER BY asked_at DESC, rowid DESC`).all(now() - WAITING_QUESTION_LIMITS.ttlMs);
       const marker = db.query("SELECT value FROM waiting_meta WHERE key = ?").get(OLDER_REMOVED_KEY);
       return { questions: rows.map(toQuestion), olderRemoved: marker !== null };
@@ -48817,7 +48817,7 @@ function openWaitingPrivateQuestionStore(dbPath, options = {}) {
         }
       }
       return db.transaction(() => {
-        const changed = db.query("UPDATE waiting_questions SET result = ?, answered_at = ?, question = COALESCE(?, question), seen = 0, attempts = 0, next_attempt_at = 0 WHERE id = ? AND generation = ? AND connection_id = ?").run(serialized, now(), sent ?? null, ref.id, ref.generation, ref.connectionId).changes > 0;
+        const changed = db.query("UPDATE waiting_questions SET result = ?, answered_at = ?, question = COALESCE(?, question), failed = ?, seen = 0, attempts = 0, next_attempt_at = 0 WHERE id = ? AND generation = ? AND connection_id = ?").run(serialized, now(), sent ?? null, result.status === "failed" ? 1 : 0, ref.id, ref.generation, ref.connectionId).changes > 0;
         return changed;
       }).immediate();
     },
@@ -48832,7 +48832,7 @@ function openWaitingPrivateQuestionStore(dbPath, options = {}) {
         const exhausted = attempts >= WAITING_QUESTION_RETRY_LIMIT;
         const result = exhausted ? { status: "failed", citations: [], unanswered: [], leftOut: [], read: [] } : null;
         const delay = Math.min(30 * 60000, 5000 * 2 ** Math.min(row.attempts, 9));
-        return db.query("UPDATE waiting_questions SET attempts = ?, retry_reasons = ?, next_attempt_at = ?, result = ?, answered_at = ?, seen = 0 WHERE id = ? AND generation = ? AND connection_id = ? AND result IS NULL").run(attempts, JSON.stringify(reasons), exhausted ? 0 : now() + delay, result ? JSON.stringify(result) : null, exhausted ? now() : null, ref.id, ref.generation, ref.connectionId).changes > 0;
+        return db.query("UPDATE waiting_questions SET attempts = ?, retry_reasons = ?, next_attempt_at = ?, result = ?, answered_at = ?, failed = ?, seen = 0 WHERE id = ? AND generation = ? AND connection_id = ? AND result IS NULL").run(attempts, JSON.stringify(reasons), exhausted ? 0 : now() + delay, result ? JSON.stringify(result) : null, exhausted ? now() : null, exhausted ? 1 : 0, ref.id, ref.generation, ref.connectionId).changes > 0;
       }).immediate();
     },
     invalidate(ref) {
@@ -48840,7 +48840,7 @@ function openWaitingPrivateQuestionStore(dbPath, options = {}) {
         const row = db.query("SELECT destination, result FROM waiting_questions WHERE id = ? AND generation = ? AND connection_id = ?").get(ref.id, ref.generation, ref.connectionId);
         const old = row?.result ? JSON.parse(row.result) : undefined;
         const disclosure = row?.destination === "venice" && old?.sentItems ? JSON.stringify({ status: "withdrawn", reason: "Sent to Venice, but the sources changed. The answer was withdrawn.", sentItems: old.sentItems, citations: [], read: [], unanswered: [], leftOut: [] }) : null;
-        return db.query("UPDATE waiting_questions SET result = ?, seen = 0, generation = generation + 1, attempts = 0, next_attempt_at = 0, retry_reasons = '[]' WHERE id = ? AND generation = ? AND connection_id = ?").run(disclosure, ref.id, ref.generation, ref.connectionId).changes > 0;
+        return db.query("UPDATE waiting_questions SET result = ?, seen = 0, generation = generation + 1, attempts = 0, next_attempt_at = 0, retry_reasons = '[]', failed = 0 WHERE id = ? AND generation = ? AND connection_id = ?").run(disclosure, ref.id, ref.generation, ref.connectionId).changes > 0;
       }).immediate();
     },
     deleteForCorpora(corpusIds, knownCorpusIds, options2 = {}) {
@@ -49016,6 +49016,14 @@ function migrations2() {
     up(db) {
       db.exec("ALTER TABLE waiting_questions ADD COLUMN retry_reasons TEXT NOT NULL DEFAULT '[]'");
     }
+  }, {
+    version: 7,
+    name: "failure_listing_metadata",
+    up(db) {
+      db.exec(`ALTER TABLE waiting_questions ADD COLUMN failed INTEGER NOT NULL DEFAULT 0;
+        UPDATE waiting_questions SET failed = CASE WHEN json_valid(result)
+          THEN COALESCE(json_extract(result, '$.status') = 'failed', 0) ELSE 0 END;`);
+    }
   }];
 }
 function hardenPrivatePath(dbPath) {
@@ -49038,7 +49046,7 @@ function hardenPrivatePath(dbPath) {
     }
   }
 }
-var WAITING_PRIVATE_QUESTIONS_STORE_ID = "waiting-private-questions", WAITING_PRIVATE_QUESTIONS_SCHEMA_VERSION = 6, WAITING_QUESTION_LIMITS, STORE_BUSY_TIMEOUT_MS = 5000, REVOKE_BUSY_TIMEOUT_MS = 1000, OLDER_REMOVED_KEY = "older_removed_at", SELECTOR_TEXT_FIELDS, SELECTED_ITEM_FIELDS, WAITING_QUESTION_RETRY_LIMIT = 8, WAITING_QUESTION_RETRY_REASONS, CHATGPT_INBOX_GRACE_MS = 30000;
+var WAITING_PRIVATE_QUESTIONS_STORE_ID = "waiting-private-questions", WAITING_PRIVATE_QUESTIONS_SCHEMA_VERSION = 7, WAITING_QUESTION_LIMITS, STORE_BUSY_TIMEOUT_MS = 5000, REVOKE_BUSY_TIMEOUT_MS = 1000, OLDER_REMOVED_KEY = "older_removed_at", SELECTOR_TEXT_FIELDS, SELECTED_ITEM_FIELDS, WAITING_QUESTION_RETRY_LIMIT = 8, WAITING_QUESTION_RETRY_REASONS, CHATGPT_INBOX_GRACE_MS = 30000;
 var init_waiting_private_questions = __esm(() => {
   init_sqlite_migrations();
   init_olympus_layout();
@@ -201034,6 +201042,8 @@ class PrivateAnswerJobs {
       job.refresh = undefined;
       const refreshStarted = this.now();
       const found = refresh ? await refresh(abort.signal) : [];
+      if (found.secretMatch === true)
+        job.preserveWaiting = true;
       if (refresh)
         timing.refreshMs = this.now() - refreshStarted;
       if (settled || abort.signal.aborted)
@@ -201067,6 +201077,10 @@ class PrivateAnswerJobs {
             return;
           const ack = randomBytes31(32).toString("base64url");
           const plaintext = { ...this.withOpenTokens(job, result.plaintext, result.localPaths), ack };
+          if (job.preserveWaiting)
+            plaintext.answer = `${REMOTE_SECRET_NOTE}
+
+${plaintext.answer}`;
           const sealed = await sealPrivateAnswer(job.id, panelKey, padPrivateAnswerPlaintext(serializePrivateAnswerPlaintext(plaintext)));
           const outcome = { kind: "sealed", sealed };
           if (settled)

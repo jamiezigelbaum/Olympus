@@ -31,7 +31,7 @@ import { closeSqliteStore } from './sqlite-store.ts';
 import { SHARED_DATA_FILES } from './olympus-layout.ts';
 
 export const WAITING_PRIVATE_QUESTIONS_STORE_ID = 'waiting-private-questions';
-export const WAITING_PRIVATE_QUESTIONS_SCHEMA_VERSION = 6;
+export const WAITING_PRIVATE_QUESTIONS_SCHEMA_VERSION = 7;
 
 export const WAITING_QUESTION_LIMITS = Object.freeze({
   /** UTF-8 bytes of the question. */
@@ -427,7 +427,7 @@ export function openWaitingPrivateQuestionStore(
           const generation = existing.generation + 1;
           db.query(`
             UPDATE waiting_questions
-            SET question = ?, detail = ?, state = ?, seen = 0, generation = ?, asked_at = ?, result = NULL, answered_at = NULL, attempts = 0, next_attempt_at = 0, retry_reasons = '[]'
+            SET question = ?, detail = ?, state = ?, seen = 0, generation = ?, asked_at = ?, result = NULL, answered_at = NULL, attempts = 0, next_attempt_at = 0, retry_reasons = '[]', failed = 0
             WHERE id = ?
           `).run(
             question,
@@ -459,7 +459,7 @@ export function openWaitingPrivateQuestionStore(
       if (db.query('SELECT 1 FROM waiting_questions WHERE answered_at IS NULL AND asked_at <= ? LIMIT 1')
         .get(at - WAITING_QUESTION_LIMITS.ttlMs)) expire(at);
       const columns = options?.includeResults === false
-        ? "id, connection_id, surface, answer_path, destination, question, detail, selectors, state, seen, generation, asked_at, answered_at, attempts, next_attempt_at, retry_reasons, NULL AS result, result IS NOT NULL AS has_result, json_extract(result, '$.status') = 'failed' AS failed"
+        ? "id, connection_id, surface, answer_path, destination, question, detail, selectors, state, seen, generation, asked_at, answered_at, attempts, next_attempt_at, retry_reasons, NULL AS result, result IS NOT NULL AS has_result, failed"
         : '*';
       const rows = db.query(`SELECT ${columns} FROM waiting_questions WHERE answered_at IS NOT NULL OR asked_at > ? ORDER BY asked_at DESC, rowid DESC`)
         .all(now() - WAITING_QUESTION_LIMITS.ttlMs) as QuestionRow[];
@@ -546,8 +546,8 @@ export function openWaitingPrivateQuestionStore(
         try { if (!options.isActive(ref.connectionId)) return false; } catch { return false; }
       }
       return db.transaction(() => {
-        const changed = db.query('UPDATE waiting_questions SET result = ?, answered_at = ?, question = COALESCE(?, question), seen = 0, attempts = 0, next_attempt_at = 0 WHERE id = ? AND generation = ? AND connection_id = ?')
-          .run(serialized, now(), sent ?? null, ref.id, ref.generation, ref.connectionId).changes > 0;
+        const changed = db.query('UPDATE waiting_questions SET result = ?, answered_at = ?, question = COALESCE(?, question), failed = ?, seen = 0, attempts = 0, next_attempt_at = 0 WHERE id = ? AND generation = ? AND connection_id = ?')
+          .run(serialized, now(), sent ?? null, result.status === 'failed' ? 1 : 0, ref.id, ref.generation, ref.connectionId).changes > 0;
         return changed;
       }).immediate();
     },
@@ -565,8 +565,8 @@ export function openWaitingPrivateQuestionStore(
         const result: StoredPrivateAnswer | null = exhausted
           ? { status: 'failed', citations: [], unanswered: [], leftOut: [], read: [] } : null;
         const delay = Math.min(30 * 60_000, 5_000 * 2 ** Math.min(row.attempts, 9));
-        return db.query('UPDATE waiting_questions SET attempts = ?, retry_reasons = ?, next_attempt_at = ?, result = ?, answered_at = ?, seen = 0 WHERE id = ? AND generation = ? AND connection_id = ? AND result IS NULL')
-          .run(attempts, JSON.stringify(reasons), exhausted ? 0 : now() + delay, result ? JSON.stringify(result) : null, exhausted ? now() : null, ref.id, ref.generation, ref.connectionId).changes > 0;
+        return db.query('UPDATE waiting_questions SET attempts = ?, retry_reasons = ?, next_attempt_at = ?, result = ?, answered_at = ?, failed = ?, seen = 0 WHERE id = ? AND generation = ? AND connection_id = ? AND result IS NULL')
+          .run(attempts, JSON.stringify(reasons), exhausted ? 0 : now() + delay, result ? JSON.stringify(result) : null, exhausted ? now() : null, exhausted ? 1 : 0, ref.id, ref.generation, ref.connectionId).changes > 0;
       }).immediate();
     },
 
@@ -577,7 +577,7 @@ export function openWaitingPrivateQuestionStore(
         const old = row?.result ? JSON.parse(row.result) as StoredPrivateAnswer : undefined;
         const disclosure = row?.destination === 'venice' && old?.sentItems
           ? JSON.stringify({ status: 'withdrawn', reason: 'Sent to Venice, but the sources changed. The answer was withdrawn.', sentItems: old.sentItems, citations: [], read: [], unanswered: [], leftOut: [] }) : null;
-        return db.query("UPDATE waiting_questions SET result = ?, seen = 0, generation = generation + 1, attempts = 0, next_attempt_at = 0, retry_reasons = '[]' WHERE id = ? AND generation = ? AND connection_id = ?")
+        return db.query("UPDATE waiting_questions SET result = ?, seen = 0, generation = generation + 1, attempts = 0, next_attempt_at = 0, retry_reasons = '[]', failed = 0 WHERE id = ? AND generation = ? AND connection_id = ?")
           .run(disclosure, ref.id, ref.generation, ref.connectionId).changes > 0;
       }).immediate();
     },
@@ -789,6 +789,16 @@ function migrations(): SqliteMigration[] {
     version: 6,
     name: 'bounded_retry_reasons',
     up(db) { db.exec("ALTER TABLE waiting_questions ADD COLUMN retry_reasons TEXT NOT NULL DEFAULT '[]'"); },
+  }, {
+    version: 7,
+    name: 'failure_listing_metadata',
+    up(db) {
+      // Backfill once on upgrade, tolerating malformed old bodies. Polling
+      // thereafter reads this bit without reading or parsing answer JSON.
+      db.exec(`ALTER TABLE waiting_questions ADD COLUMN failed INTEGER NOT NULL DEFAULT 0;
+        UPDATE waiting_questions SET failed = CASE WHEN json_valid(result)
+          THEN COALESCE(json_extract(result, '$.status') = 'failed', 0) ELSE 0 END;`);
+    },
   }];
 }
 
