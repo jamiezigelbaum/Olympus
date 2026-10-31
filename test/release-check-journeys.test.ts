@@ -237,64 +237,69 @@ describe('journey runner', () => {
 });
 
 /** What the fake privacy settings get wrong, one fault at a time. */
-interface PrivacyFaults { leavesWithoutAsking?: boolean; discardKeeps?: boolean; acceptsAnySender?: boolean }
+interface PrivacyFaults { leavesWithoutAsking?: boolean; discardKeeps?: boolean; acceptsAnySender?: boolean; cancelKeeps?: boolean; reviewBackSaves?: boolean }
 
 /**
- * The panel's privacy settings as a person meets them: Edit opens them, Cancel or Back asks before dropping unsaved changes,
- * Discard changes drops them, and Add a sender takes only an address. Each fault breaks one of those.
+ * The panel's privacy settings as 1.3 ships them: Edit opens them; Back with an unsaved description asks first, and Discard
+ * changes drops it; Cancel puts the saved description back; a rule is added on a three-step sheet (Add a rule, Add a sender,
+ * the address, then Make private, which saves it at once), and Back on the sheet keeps nothing. Each fault breaks one of those.
  */
 function privacyPanel(driver: DomDriver, faults: PrivacyFaults = {}): void {
   const doc = driver.window.document;
-  let saved = { description: '', senders: [] as string[] };
-  let draft = { description: '', senders: [] as string[] };
+  const saved = { description: '', senders: [] as string[] };
+  let description = '';
+  let sender = '';
   let senderError = '';
+  let screen: 'dashboard' | 'main' | 'kinds' | 'sender' | 'review' = 'dashboard';
+  let editing = false;
   const textarea = () => doc.querySelector('textarea') as unknown as { value: string } | null;
   const input = () => doc.querySelector('input') as unknown as { value: string } | null;
-  const keep = () => { const area = textarea(); if (area) draft.description = area.value; };
-  const dashboard = () => { onDashboard = true; editing = false; doc.body.innerHTML = `<main><h2>${PANEL.sources}</h2><button>${PRIVACY.edit}</button></main>`; };
-  // As shipped (#684): the description shows as text with Edit, or as "Describe what's private"; the box opens from either.
-  let editing = false;
-  let onDashboard = true;
+  const keep = () => { const area = textarea(); if (area) description = area.value; const field = input(); if (field) sender = field.value; };
+  const dashboard = () => { screen = 'dashboard'; editing = false; doc.body.innerHTML = `<main><h2>${PANEL.sources}</h2><button>${PRIVACY.edit}</button></main>`; };
   const main = (asking = false) => {
-    onDashboard = false;
-    const description = editing
-      ? `<label><span>${PRIVACY.descriptionLabel}</span><textarea></textarea></label>`
-      : draft.description
-        ? `<p>${draft.description}</p><button data-key="privacy:description:edit">${PRIVACY.edit}</button>`
+    screen = 'main';
+    const box = editing
+      ? `<label><span>${PRIVACY.descriptionLabel}</span><textarea></textarea></label><button>${PRIVACY.save}</button><button>${PRIVACY.cancel}</button>`
+      : saved.description
+        ? `<p>${saved.description}</p><button data-key="privacy:description:edit">${PRIVACY.edit}</button>`
         : `<button data-key="privacy:description:edit">${PRIVACY.descriptionStart}</button>`;
     doc.body.innerHTML = `<main><button>${PRIVACY.back}</button>${asking ? `<div role="alert"><p>${PRIVACY.discardPrompt}</p><button>${PRIVACY.discard}</button><button>${PRIVACY.keep}</button></div>` : ''}
-      <h1>${PRIVACY.title}</h1><section><h2>${PRIVACY.descriptionLabel}</h2>${description}</section>
-      <ul>${draft.senders.map((sender) => `<li>${sender}</li>`).join('')}</ul><button>${PRIVACY.addSender}</button>
-      <button>${PRIVACY.save}</button><button>${PRIVACY.cancel}</button></main>`;
-    if (editing) textarea()!.value = draft.description;
+      <h1>${PRIVACY.title}</h1><section><h2>${PRIVACY.descriptionLabel}</h2>${box}</section>
+      <ul>${saved.senders.map((item) => `<li>${item}</li>`).join('')}</ul><button>${PRIVACY.addRule}</button></main>`;
+    if (editing) textarea()!.value = description;
   };
-  const sender = (value: string) => {
-    doc.body.innerHTML = `<main><button>${PRIVACY.backToPrivacy}</button><h1>${PRIVACY.senderTitle}</h1><p>${PRIVACY.senderIntro}</p>
-      <label><span>${PRIVACY.senderLabel}</span><input type="text">${senderError ? `<p role="alert">${senderError}</p>` : ''}</label><button>${PRIVACY.senderAdd}</button></main>`;
-    input()!.value = value;
+  const sheet = (body: string, primary: string) => { doc.body.innerHTML = `<main>${body}<div><button>${PRIVACY.sheetBack}</button><button>${primary}</button></div></main>`; };
+  const kinds = () => { screen = 'kinds'; sheet(`<h1>${PRIVACY.addRule}</h1><p>${PRIVACY.kindPrompt}</p><button>${PRIVACY.addSender}</button>`, PRIVACY.next); };
+  const senderSheet = () => {
+    screen = 'sender';
+    sheet(`<h1>${PRIVACY.senderTitle}</h1><p>${PRIVACY.senderIntro}</p><label><span>${PRIVACY.senderLabel}</span><input type="text">${senderError ? `<p role="alert">${senderError}</p>` : ''}</label>`, PRIVACY.next);
+    input()!.value = sender;
   };
-  const edited = () => draft.description !== saved.description || draft.senders.join() !== saved.senders.join();
-  const leave = () => { keep(); if (edited() && !faults.leavesWithoutAsking) main(true); else dashboard(); };
+  const review = () => { screen = 'review'; sheet(`<h1>${PRIVACY.confirmRule}</h1><p>${sender}</p>`, PRIVACY.makePrivate); };
+  const unsaved = () => editing && description !== saved.description;
   driver.pagesByPath['/dashboard'] = `<main><h2>${PANEL.sources}</h2><button>${PRIVACY.edit}</button></main>`;
-  const openBox = () => { keep(); editing = true; main(); };
-  driver.onPress.set(PRIVACY.edit, () => {
-    if (!onDashboard) { openBox(); return; }
-    draft = { description: saved.description, senders: [...saved.senders] };
-    main();
-  });
+  const openBox = () => { editing = true; description = saved.description; main(); };
+  driver.onPress.set(PRIVACY.edit, () => { if (screen === 'dashboard') { editing = false; main(); } else openBox(); });
   driver.onPress.set(PRIVACY.descriptionStart, openBox);
-  driver.onPress.set(PRIVACY.cancel, leave);
-  driver.onPress.set(PRIVACY.back, leave);
+  driver.onPress.set(PRIVACY.cancel, () => { keep(); if (faults.cancelKeeps) saved.description = description; else description = saved.description; editing = false; main(); });
+  driver.onPress.set(PRIVACY.back, () => { keep(); if (unsaved() && !faults.leavesWithoutAsking) main(true); else dashboard(); });
   driver.onPress.set(PRIVACY.keep, () => { keep(); main(); });
-  driver.onPress.set(PRIVACY.discard, () => { if (faults.discardKeeps) saved = { description: draft.description, senders: [...draft.senders] }; dashboard(); });
-  driver.onPress.set(PRIVACY.addSender, () => { keep(); senderError = ''; sender(''); });
-  driver.onPress.set(PRIVACY.backToPrivacy, () => { editing = false; main(); });
-  driver.onPress.set(PRIVACY.senderAdd, () => {
-    const value = input()!.value.trim();
-    if (!faults.acceptsAnySender && !/^([^@\s]+@|@)[^@\s]+\.[^@\s]+$/.test(value)) { senderError = PRIVACY.senderInvalid; sender(value); return; }
-    draft.senders.push(value);
-    main();
+  driver.onPress.set(PRIVACY.discard, () => { if (faults.discardKeeps) saved.description = description; dashboard(); });
+  driver.onPress.set(PRIVACY.addRule, () => { sender = ''; senderError = ''; kinds(); });
+  driver.onPress.set(PRIVACY.addSender, kinds);
+  driver.onPress.set(PRIVACY.next, () => {
+    if (screen === 'kinds') { senderError = ''; senderSheet(); return; }
+    keep();
+    if (!faults.acceptsAnySender && !/^([^@\s]+@|@)[^@\s]+\.[^@\s]+$/.test(sender.trim())) { senderError = PRIVACY.senderInvalid; senderSheet(); return; }
+    review();
   });
+  driver.onPress.set(PRIVACY.sheetBack, () => {
+    keep();
+    if (screen === 'review') { if (faults.reviewBackSaves) saved.senders.push(sender); senderSheet(); }
+    else if (screen === 'sender') kinds();
+    else main();
+  });
+  driver.onPress.set(PRIVACY.makePrivate, () => { saved.senders.push(sender); main(); });
 }
 
 /** The dashboard with its Models line, which opens to the lines inside it; `empty` opens to nothing. */
@@ -335,14 +340,14 @@ describe('the shipped journeys, on a DOM', () => {
     expect(bad.steps.find((step) => !step.ok)!.name).toContain('agents');
   });
 
-  test('privacy-cancel-asks passes when leaving asks first and Discard changes keeps nothing, and FAILS when either is wrong', async () => {
+  test('privacy-cancel-asks passes when leaving asks first, Discard changes keeps nothing and Cancel puts it back, and FAILS when any is wrong', async () => {
     const run = async (faults?: PrivacyFaults) => { const driver = new DomDriver({}); privacyPanel(driver, faults); return await runJourney(driver, find('privacy-cancel-asks'), options()); };
     const good = await run();
     expect(good.steps.filter((step) => !step.ok).map((step) => `${step.name}: ${step.actual}`)).toEqual([]);
     expect(good.ok).toBe(true);
     const leaves = await run({ leavesWithoutAsking: true });
     expect(leaves.ok).toBe(false);
-    expect(leaves.steps.find((step) => !step.ok)!.name).toBe('Press Cancel');
+    expect(leaves.steps.find((step) => !step.ok)!.name).toBe('Press Back with the description unsaved');
     const keeps = await run({ discardKeeps: true });
     expect(keeps.ok).toBe(false);
     const failed = keeps.steps.find((step) => !step.ok)!;
@@ -350,20 +355,22 @@ describe('the shipped journeys, on a DOM', () => {
     // The discarded note is shown as the saved description.
     expect(failed.expected).toContain('does not say "release check: this note is never saved"');
     expect(failed.actual).toEndWith('it does');
+    const cancelKeeps = await run({ cancelKeeps: true });
+    expect(cancelKeeps.ok).toBe(false);
+    expect(cancelKeeps.steps.find((step) => !step.ok)!.name).toBe('Press Cancel');
   });
 
-  test('privacy-add-sender passes when only an address is taken and Discard changes drops it, and FAILS when it is not', async () => {
+  test('privacy-add-sender passes when only an address is taken and backing out of the review keeps nothing, and FAILS when it is not', async () => {
     const run = async (faults?: PrivacyFaults) => { const driver = new DomDriver({}); privacyPanel(driver, faults); return await runJourney(driver, find('privacy-add-sender'), options()); };
     const good = await run();
     expect(good.steps.filter((step) => !step.ok).map((step) => `${step.name}: ${step.actual}`)).toEqual([]);
+    expect(good.ok).toBe(true);
     const anything = await run({ acceptsAnySender: true });
     expect(anything.ok).toBe(false);
-    expect(anything.steps.find((step) => !step.ok)!.name).toBe('Press Add');
-    const keeps = await run({ discardKeeps: true });
-    expect(keeps.ok).toBe(false);
-    expect(keeps.steps.find((step) => !step.ok)!.name).toBe('Open the privacy settings again');
-    const leaves = await run({ leavesWithoutAsking: true });
-    expect(leaves.steps.find((step) => !step.ok)!.name).toBe('Press Back with the sender unsaved');
+    expect(anything.steps.find((step) => !step.ok)!.name).toBe('Press Next with it');
+    const saves = await run({ reviewBackSaves: true });
+    expect(saves.ok).toBe(false);
+    expect(saves.steps.find((step) => !step.ok)!.name).toBe('Press Back to privacy again');
   });
 
   test('models-section-opens passes when the Models line opens to its lines and closes again, and FAILS when it opens to nothing', async () => {
