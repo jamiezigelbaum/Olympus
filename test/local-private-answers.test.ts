@@ -25,7 +25,13 @@ import tls from 'node:tls';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { answerPrivately, type BuiltInAnalystModel } from '../src/core/analyst-built-in.ts';
+import { answerPrivately, createBuiltInAnalystModel, type BuiltInAnalystModel } from '../src/core/analyst-built-in.ts';
+import { seedEngineSovereignty } from '../src/core/engine-service.ts';
+import { saveFirstRunPrivacyChoice } from '../src/core/first-run-privacy.ts';
+import { ModelSetupService } from '../src/core/model-setup.ts';
+import { loadConfig } from '../src/core/config.ts';
+import { builtInBacksPrivateAnalyst, createAnalystForSovereigntyProfile, loadSourceWorkerSovereignty } from '../src/workers/email-source/server.ts';
+import { WorkerBootSecretResolver } from '../src/workers/credential-degradation.ts';
 import type { AnalystModelRequest } from '../src/core/analyst.ts';
 import { createRemotePrivateParts } from '../src/core/remote-private-part.ts';
 import { recordRequestPeer } from '../src/core/request-peer.ts';
@@ -92,8 +98,9 @@ afterEach(async () => {
 // ---- network denial ----------------------------------------------------------
 
 /** Every outbound path a request could take from this process, refused and recorded. */
-function denyNetwork() {
+function denyNetwork(loopback?: (url: URL, init?: RequestInit) => Promise<Response>) {
   const attempts: string[] = [];
+  const loopbackRequests: string[] = [];
   const restores: Array<() => void> = [];
   const deny = (target: Record<string, unknown>, key: string, label: string) => {
     const original = target[key];
@@ -106,18 +113,30 @@ function denyNetwork() {
     });
   };
   deny(globalThis as unknown as Record<string, unknown>, 'fetch', 'fetch');
+  if (loopback) {
+    const blocked = globalThis.fetch;
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(input instanceof Request ? input.url : input.toString());
+      if (url.protocol === 'http:' && url.hostname === '127.0.0.1') {
+        loopbackRequests.push(url.href);
+        return loopback(url, init);
+      }
+      return blocked(input, init);
+    }) as typeof fetch;
+  }
   deny(http as unknown as Record<string, unknown>, 'request', 'http.request');
   deny(http as unknown as Record<string, unknown>, 'get', 'http.get');
   deny(https as unknown as Record<string, unknown>, 'request', 'https.request');
   deny(https as unknown as Record<string, unknown>, 'get', 'https.get');
   deny(net as unknown as Record<string, unknown>, 'connect', 'net.connect');
   deny(net as unknown as Record<string, unknown>, 'createConnection', 'net.createConnection');
+  deny(net.Socket.prototype as unknown as Record<string, unknown>, 'connect', 'Socket.connect');
   deny(tls as unknown as Record<string, unknown>, 'connect', 'tls.connect');
   const restore = () => {
     for (const undo of restores.splice(0).reverse()) undo();
   };
   cleanups.push(restore);
-  return { attempts, restore };
+  return { attempts, loopbackRequests, restore };
 }
 
 // ---- the built-in models' stand-ins -------------------------------------------
@@ -281,6 +300,7 @@ function datedConnector(specs: readonly FixtureSpec[], dates: Readonly<Record<st
  * answer must never call.
  */
 async function localFixture(options: {
+  model?: BuiltInAnalystModel;
   embedding?: BuiltInEmbeddingState;
   specs?: readonly FixtureSpec[];
   privateIds?: readonly string[];
@@ -331,7 +351,7 @@ async function localFixture(options: {
   const path = createLocalAnswerPath({
     releaseCheck: createReleaseTierCheck(() => [{ ledger: fixture.ledger, corpusIds: new Set(fixture.set.openStores().map(store => store.corpusId)) }], () => 'approval'),
     lanes,
-    model: stub.model,
+    model: options.model ?? stub.model,
     available: () => true,
     relevanceEmbedding: () => builtInEmbeddingOnly(builtIn.provider, loadedBuiltInEmbedding),
     sourceName: (corpusId) => SOURCE_NAMES[corpusId],
@@ -1267,7 +1287,7 @@ describe('the waiting count reaches only the computer\'s control session', () =>
 // ---- the page's own script ----------------------------------------------------------
 
 describe('the Private answers page', () => {
-  function renderAndRun(answer: (body: Record<string, unknown>) => { status: number; body: unknown }, url = 'http://127.0.0.1:8010/dashboard?private-answers', markdown = true) {
+  function renderAndRun(answer: (body: Record<string, unknown>) => { status: number; body: unknown } | Promise<{ status: number; body: unknown }>, url = 'http://127.0.0.1:8010/dashboard?private-answers', markdown = true) {
     const html = renderDashboardPrivateAnswersPage({
       now: DASHBOARD_PREVIEW_NOW,
       controlSessionCsrfToken: 'csrf-token',
@@ -1291,7 +1311,7 @@ describe('the Private answers page', () => {
     const fetchStub = async (target: string, init: { headers: Record<string, string>; body: string }) => {
       const parsed = JSON.parse(init.body) as Record<string, unknown>;
       posts.push({ url: target, headers: init.headers, body: parsed });
-      const reply = answer(parsed);
+      const reply = await answer(parsed);
       return { ok: reply.status >= 200 && reply.status < 300, status: reply.status, json: async () => reply.body };
     };
     const timers: Array<() => Promise<void>> = [];
@@ -1301,6 +1321,87 @@ describe('the Private answers page', () => {
     if (!markdown) (pageWindow as { olympusMarkdown?: unknown }).olympusMarkdown = undefined;
     return { html, document, posts, confirmations: () => confirmations, poll: async () => { await timers.shift()?.(); }, settle: () => new Promise((resolve) => setTimeout(resolve, 20)) };
   }
+
+  test.each(['local-first', 'local-only'] as const)('%s standalone without a Venice key unlocks sources and shows a cited built-in answer without outbound requests (#591)', async choice => {
+    const { dir, cleanup } = tempDir('olympus-standalone-answer-');
+    cleanups.push(cleanup);
+    const policyPath = join(dir, 'sovereignty.json');
+    const env = {
+      HOME: dir, OLYMPUS_ENGINE_HOST: '1', OLYMPUS_SOVEREIGNTY_CONFIG: policyPath,
+      OLYMPUS_BUILT_IN_REASONING_DIR: join(dir, 'reasoning'),
+    };
+    const completions: string[] = [];
+    // No socket is opened. The two loopback endpoints model an absent user
+    // server and the installed built-in runtime; every other transport is denied.
+    const network = denyNetwork(async (url, init) => {
+      if (url.port === '28090' && url.pathname.endsWith('/models')) {
+        throw new Error('ECONNREFUSED: no user model server on this standalone install');
+      }
+      expect(url.href).toBe('http://127.0.0.1:40123/v1/chat/completions');
+      expect(init?.method).toBe('POST');
+      completions.push(String(init?.body));
+      return Response.json({ choices: [{ message: { content: ANSWER_JSON } }] });
+    });
+    expect(seedEngineSovereignty(policyPath)).toBe('pending');
+    expect(saveFirstRunPrivacyChoice(policyPath, choice)).toMatchObject({ ok: true, changed: true });
+    const engine = loadSourceWorkerSovereignty({}, env);
+    const members = engine.resolveAnalystPool({ trustDomain: 'secure_local' }).members;
+    const secretReads: string[] = [];
+    const resolver = new WorkerBootSecretResolver({ resolveSecretRefValueSync: ref => { secretReads.push(ref); return undefined; } });
+    for (const { id, profile } of members.filter(member => member.profile.provider === 'venice')) {
+      expect(createAnalystForSovereigntyProfile({ profileId: id, profile, env, olympusConfig: loadConfig({}),
+        bootSecretResolver: resolver, veniceAnalystTimeoutMs: undefined, veniceReasoningHeadroomTokens: undefined,
+      })).toBeUndefined();
+    }
+    if (choice === 'local-first') expect(secretReads.length).toBeGreaterThan(0);
+    const model = createBuiltInAnalystModel({ env, model: QWEN35_4B,
+      install: async () => ({ modelPath: join(dir, 'model.gguf'), serverPath: join(dir, 'llama-server'), gpu: false }),
+      createServer: () => ({ pid: 1, ensureRunning: async () => ({ baseUrl: 'http://127.0.0.1:40123', token: 'synthetic-runtime-token' }), touch() {}, async stop() {} }),
+    });
+    await model.prepare();
+    const setup = new ModelSetupService({ config: engine.config, autoCheck: false,
+      credentialState: (_id, profile) => profile.secretRef ? 'missing' : 'ready',
+      builtInAnswers: id => builtInBacksPrivateAnalyst(id, model.status().state, members),
+    });
+    const ready = await setup.checkLocalModels();
+    expect(ready.ready).toBe(true); // The same gate the source Connect controls use.
+    expect(ready.privacy_choice_pending).toBeUndefined();
+    expect(network.loopbackRequests).toContain('http://127.0.0.1:28090/v1/models');
+    if (choice === 'local-first') expect(ready.cards.find(card => card.id === 'venice')).toMatchObject({ required: false, state: 'not_configured' });
+
+    const local = await localFixture({ model, specs: [SPECS[0]!], privateIds: ['lease'] });
+    const store = waitingStore();
+    const controller = createLocalPrivateAnswers({ answer: local.answer, eligible: local.eligible, store: () => store });
+    cleanups.push(() => controller.close());
+    const replies: Array<Record<string, unknown>> = [];
+    const page = renderAndRun(async body => {
+      const result = await controller.handle(body, 'standalone-owner');
+      replies.push(result.body);
+      return result;
+    });
+    const question = 'When does the orchard flat lease end?';
+    (page.document.querySelector('textarea') as unknown as { value: string }).value = question;
+    page.document.querySelector('form[data-pa-ask]')!.dispatchEvent(new page.document.defaultView!.Event('submit', { cancelable: true }));
+    for (let turn = 0; turn < 100 && !page.document.querySelector('.paanswer'); turn++) await page.settle();
+    expect(replies[0]).toMatchObject({ ok: true, status: 'answered', answer: 'The orchard flat lease ends on 31 May 2027.' });
+    expect(replies[0]!.citations).toMatchObject([{ title: 'orchard-lease.txt' }]);
+    expect(page.document.querySelector('.paanswer')?.textContent).toBe('The orchard flat lease ends on 31 May 2027.');
+    expect(page.document.querySelector('.pameta')?.textContent).toContain('orchard-lease.txt');
+    expect(page.document.querySelector('[data-state="error"]')).toBeNull();
+    expect(completions.length).toBeGreaterThan(0);
+    expect(completions.join('\n')).toContain(LEASE_TEXT);
+    expect(local.builtIn.embedded.some(text => text.includes(question))).toBe(true);
+    expect(model.status().state).toBe('ready');
+
+    // The remote question's automatic local answer survives the inbox read path.
+    const waiting = store.record(store.ticket('chatgpt'), { question, surface: 'remote', state: 'waiting' })!;
+    await controller.tick();
+    const read = await controller.handle({ action: 'read', id: waiting.id }, 'standalone-owner');
+    expect(read.body).toMatchObject({ status: 'answered', answer: 'The orchard flat lease ends on 31 May 2027.', citations: [{ title: 'orchard-lease.txt' }] });
+    await model.stop();
+    await backgroundSettled();
+    expect(network.attempts).toEqual([]);
+  });
 
   test('an expired Secret handle points back to Inbox without claiming deletion', async () => {
     const page = renderAndRun(() => ({ status: 410, body: { ok: false } }), 'http://127.0.0.1:8010/dashboard?private-answers#' + 'S'.repeat(22));
