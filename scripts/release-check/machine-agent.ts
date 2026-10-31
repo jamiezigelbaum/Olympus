@@ -19,7 +19,10 @@
  */
 import { olympusDataRoot } from '../../src/core/olympus-layout.ts';
 import { resolvedStorePath } from '../../src/core/source-placement.ts';
-import { isPendingPrivacyPolicy, saveFirstRunPrivacyChoice } from '../../src/core/first-run-privacy.ts';
+import { isPendingPrivacyPolicy } from '../../src/core/first-run-privacy.ts';
+import { updateSovereigntyConfigFile, validateSovereigntyConfig, type SovereigntyConfig } from '../../src/core/sovereignty.ts';
+// Embedded: the bundled agent runs outside the product tree, so the preset file is not on disk beside it.
+import noSensitivePreset from '../../config/sovereignty/presets/no-sensitive.json' with { type: 'json' };
 import { spawn, spawnSync } from 'node:child_process';
 import { Database } from 'bun:sqlite';
 import { createHash } from 'node:crypto';
@@ -309,7 +312,8 @@ async function prepareSource(): Promise<never> {
       emit({ ok: false, step: 'privacy-choice', detail: `a fresh install did not ask for the privacy choice with local-first recommended: ${asked.stdout.slice(0, 200) || asked.stderr.slice(0, 200)}` });
     }
     say('fresh install asks for the privacy choice, local-first recommended');
-    const saved = saveFirstRunPrivacyChoice(p.sovereigntyPath, 'no-sensitive');
+    // The same compare-and-save as saveFirstRunPrivacyChoice, with the preset embedded.
+    const saved = updateSovereigntyConfigFile({ path: p.sovereigntyPath, patch: current => isPendingPrivacyPolicy(current) ? validateSovereigntyConfig(structuredClone(noSensitivePreset) as unknown as SovereigntyConfig) : current });
     if (!saved.ok || !saved.changed) emit({ ok: false, step: 'privacy-choice', detail: 'the first-run privacy choice could not be saved' });
     say('first-run privacy choice saved: no-sensitive');
   }
