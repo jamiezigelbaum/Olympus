@@ -19,6 +19,10 @@
  */
 import { olympusDataRoot } from '../../src/core/olympus-layout.ts';
 import { resolvedStorePath } from '../../src/core/source-placement.ts';
+import { isPendingPrivacyPolicy } from '../../src/core/first-run-privacy.ts';
+import { updateSovereigntyConfigFile, validateSovereigntyConfig, type SovereigntyConfig } from '../../src/core/sovereignty.ts';
+// Embedded: the bundled agent runs outside the product tree, so the preset file is not on disk beside it.
+import noSensitivePreset from '../../config/sovereignty/presets/no-sensitive.json' with { type: 'json' };
 import { spawn, spawnSync } from 'node:child_process';
 import { Database } from 'bun:sqlite';
 import { createHash } from 'node:crypto';
@@ -293,6 +297,26 @@ async function restartEngine(timeoutMs: number): Promise<{ ok: boolean; ms: numb
 async function prepareSource(): Promise<never> {
   const config = readConfig();
   const p = platform();
+  // A fresh install (1.3.0 on) asks the owner how Private items are answered
+  // and refuses source access until then. Answer it through the dashboard's
+  // own save path, with the earlier fresh-install default the legs were
+  // qualified on; the restart below applies it. Upgrades already have a choice.
+  const before = readPolicy();
+  if (before && isPendingPrivacyPolicy(before.json as Parameters<typeof isPendingPrivacyPolicy>[0])) {
+    // First, the agent-led path must still ask, with local-first recommended.
+    const asked = olympus(['setup', '--privacy-options']);
+    let offer: { state?: string; options?: Array<{ id?: string; recommended?: boolean }> } = {};
+    try { offer = JSON.parse(asked.stdout); } catch { /* reported below */ }
+    const recommended = offer.options?.filter((option) => option.recommended).map((option) => option.id) ?? [];
+    if (asked.code !== 0 || offer.state !== 'pending' || recommended.join() !== 'local-first') {
+      emit({ ok: false, step: 'privacy-choice', detail: `a fresh install did not ask for the privacy choice with local-first recommended: ${asked.stdout.slice(0, 200) || asked.stderr.slice(0, 200)}` });
+    }
+    say('fresh install asks for the privacy choice, local-first recommended');
+    // The same compare-and-save as saveFirstRunPrivacyChoice, with the preset embedded.
+    const saved = updateSovereigntyConfigFile({ path: p.sovereigntyPath, patch: current => isPendingPrivacyPolicy(current) ? validateSovereigntyConfig(structuredClone(noSensitivePreset) as unknown as SovereigntyConfig) : current });
+    if (!saved.ok || !saved.changed) emit({ ok: false, step: 'privacy-choice', detail: 'the first-run privacy choice could not be saved' });
+    say('first-run privacy choice saved: no-sensitive');
+  }
   await startFakeDetached(config);
   say('stand-in running');
   upsertEnv(p.workerEnvPath, {
