@@ -157,7 +157,7 @@ describe('the card walks the owner through registering the callback itself', () 
   test('Dropbox names its console, its permissions, its setting, and what to bring back', () => {
     const sheet = connectSheet('dropbox.files', { dropbox: 'dropbox-app-key' });
 
-    expect(sheet).toContain('href="https://www.dropbox.com/developers/apps"');
+    expect(sheet).toContain('data-setup-open="https://www.dropbox.com/developers/apps"');
     expect(sheet).toContain('Open this page in Dropbox');
     expect(sheet).toContain('Choose Scoped access');
     expect(sheet).toContain('files.metadata.read, files.content.read, sharing.read, and account_info.read');
@@ -178,7 +178,7 @@ describe('the card walks the owner through registering the callback itself', () 
   test('X names its portal, its scopes, its paid-access requirement, and its setting', () => {
     const sheet = setupSheet('x.bookmarks');
 
-    expect(sheet).toContain('href="https://console.x.com/"');
+    expect(sheet).toContain('data-setup-open="https://console.x.com/"');
     // Scopes are requested by Olympus at authorization time, not configured in
     // the console, so the card names the console's own controls instead.
     expect(sheet).toContain('with Read permissions');
