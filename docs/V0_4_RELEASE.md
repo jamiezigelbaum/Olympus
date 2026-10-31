@@ -13,6 +13,8 @@ starts; patch releases only for security, data loss or a privacy leak, a
 broken install or upgrade, or a directory-reviewer blocker. One full release
 check on the final candidate. Listing updates ride only on a tested minor
 release; the demo box is updated right after the tag, before any upload.
+Before the tag, run `bun run eval:real` on the owner's install with the
+private held-out set to verify chat search (#619).
 
 Centerpiece: the signed, notarized Mac helper under OCU (olympus-ops #64), so
 Files on this computer reads Desktop, Documents, Downloads and iCloud Drive.
