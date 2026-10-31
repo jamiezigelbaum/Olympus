@@ -14,6 +14,7 @@ import {
   engineDataCustody,
   enginePaths,
   engineServicePaths,
+  resolveInstallationPrivacyState,
   engineSovereigntySeedBlocker,
   inspectEngine,
   installEngine,
@@ -39,6 +40,8 @@ import {
 import { dataDeleteCustody, deleteOlympusDataWithCustody } from '../src/data-lifecycle.ts';
 import { runDoctor, type DoctorDeps, type DoctorHostFacts } from '../src/core/doctor.ts';
 import { emptyRemoteAccessStatus, remoteAccessDir, writeRemoteAccessStatus } from '../src/core/remote-access.ts';
+import { workerServicePaths } from '../src/core/worker-service.ts';
+import { createPendingPrivacyPolicy } from '../src/core/first-run-privacy.ts';
 import { defaultConfig } from '../src/core/config.ts';
 import { createOpenClawInferAnalystModel } from '../src/core/analyst-openclaw-infer.ts';
 import { buildEnvBridgeSovereigntyConfig, loadSovereigntyPreset, type SovereigntyConfig } from '../src/core/sovereignty.ts';
@@ -1315,3 +1318,26 @@ describe('engine install preflight, policy seeding, and what uninstall keeps', (
     expect(kept[paths.previousAppDir]).toBeUndefined();
   });
 });
+
+for (const platform of ['linux', 'darwin'] as const) {
+  for (const policyKind of ['inline', 'custom-path', 'pending'] as const) {
+    test(`installed ${platform} worker resolves its ${policyKind} policy without engine.json`, () => {
+      const { home } = fixture();
+      const env = { HOME: home, XDG_CONFIG_HOME: join(home, 'custom-config') };
+      const paths = engineServicePaths({ platform, env });
+      const unit = workerServicePaths(platform, home, env).unitPath;
+      mkdirSync(dirname(unit), { recursive: true });
+      writeFileSync(unit, platform === 'linux' ? '[Service]\nExecStart=/synthetic/olympus worker run\n' : '<plist/>');
+      mkdirSync(join(home, '.olympus'), { recursive: true });
+      const policy = policyKind === 'pending' ? createPendingPrivacyPolicy() : loadSovereigntyPreset('local-only');
+      const configPath = join(home, 'custom-policy.json');
+      writeFileSync(configPath, JSON.stringify(policy));
+      writeFileSync(join(home, '.olympus', 'config.json'), JSON.stringify({ sovereignty:
+        policyKind === 'custom-path' ? { configPath } : { policy } }));
+      expect(existsSync(paths.configPath)).toBe(false);
+      expect(existsSync(paths.sovereigntyPath)).toBe(false);
+      expect(resolveInstallationPrivacyState({ homeDir: home, paths, env }).state)
+        .toBe(policyKind === 'pending' ? 'pending' : 'configured');
+    });
+  }
+}
