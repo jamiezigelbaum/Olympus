@@ -609,7 +609,7 @@ describe('ready page', () => {
     expect(narrow).not.toContain('.row.source.has-actions{');
     expect(narrow).toContain('.row.source.has-actions.has-menu>.source-actions{grid-column:1/-1;grid-row:2}');
     expect(narrow).not.toContain('justify-content:flex-start}.row');
-    expect(CHATGPT_DASHBOARD_CSS).toContain('.source-actions{display:flex;flex-wrap:wrap;align-items:flex-start;gap:0.5rem;justify-content:flex-end}');
+    expect(CHATGPT_DASHBOARD_CSS).toContain('.source-actions{display:flex;flex-wrap:nowrap;align-items:center;gap:12px;justify-content:flex-start}');
     expect(narrow.slice(0, narrow.indexOf('}}'))).not.toContain('width:100%');
   });
 
