@@ -165127,11 +165127,15 @@ function createLocalFilesOwnRootsCleanup(options) {
   let removedNow = 0;
   let toldWaiting = false;
   let toldRemovalFailure = false;
+  const resetWalk = (walk) => {
+    walk.done = false;
+    delete walk.after;
+    delete walk.page;
+    delete walk.failed;
+  };
   const resetWalks = () => {
-    for (const walk of walks) {
-      walk.done = false;
-      delete walk.after;
-    }
+    for (const walk of walks)
+      resetWalk(walk);
   };
   const reportRemovalFailure = (message2) => {
     if (!toldRemovalFailure)
@@ -165187,36 +165191,43 @@ function createLocalFilesOwnRootsCleanup(options) {
           return { removed: removedNow, complete: false };
         if (!lookupsReady())
           return waitForIndex();
-        const page2 = walk.store.pageActiveItemsUnderLocatorIfIndexed({
-          provider: LOCAL_FILES_PROVIDER,
-          accountScope: LOCAL_FILES_ACCOUNT_SCOPE,
-          locatorUri: walk.root,
-          limit: pageSize,
-          ...walk.after !== undefined ? { after: walk.after } : {}
-        });
-        if (!lookupsReady())
-          return waitForIndex();
-        scanned += page2.items.length;
-        const hits = page2.items.filter((item) => inside(item.locatorUri));
-        for (let index = 0;index < hits.length; ) {
+        if (!walk.page) {
+          const page3 = walk.store.pageActiveItemsUnderLocatorIfIndexed({
+            provider: LOCAL_FILES_PROVIDER,
+            accountScope: LOCAL_FILES_ACCOUNT_SCOPE,
+            locatorUri: walk.root,
+            limit: pageSize,
+            ...walk.after !== undefined ? { after: walk.after } : {}
+          });
+          if (!lookupsReady())
+            return waitForIndex();
+          scanned += page3.items.length;
+          walk.page = { hits: page3.items.filter((item) => inside(item.locatorUri)), next: page3.next, index: 0 };
+        }
+        const page2 = walk.page;
+        while (page2.index < page2.hits.length) {
           if (timeUp() || attempted >= maxItems)
             return { removed: removedNow, complete: false };
-          const batch = hits.slice(index, index + Math.min(batchSize, maxItems - attempted));
-          await remove(batch);
+          const batch = page2.hits.slice(page2.index, page2.index + Math.min(batchSize, maxItems - attempted));
           attempted += batch.length;
+          try {
+            await remove(batch);
+          } catch (error2) {
+            reportRemovalFailure(`Items inside Olympus's own folders could not be removed this run (${error2 instanceof Error ? error2.name : "error"}); they are tried again at the next.`);
+          }
           const kept = batch.filter((item) => walk.store.itemPresence(item.identity).active).length;
           removedNow += batch.length - kept;
-          index += batch.length;
+          page2.index += batch.length;
           if (kept > 0) {
             reportRemovalFailure("The store did not remove some items inside Olympus's own folders; they are tried again at the next run.");
-            resetWalks();
-            return { removed: removedNow, complete: false };
+            walk.failed = true;
           }
         }
         if (page2.next === undefined)
           walk.done = true;
         else
           walk.after = page2.next;
+        delete walk.page;
         await new Promise((resolve27) => {
           setImmediate(resolve27);
         });
@@ -165224,6 +165235,12 @@ function createLocalFilesOwnRootsCleanup(options) {
     }
     if (!lookupsReady())
       return waitForIndex();
+    if (walks.some((walk) => walk.failed)) {
+      for (const walk of walks)
+        if (walk.failed)
+          resetWalk(walk);
+      return { removed: removedNow, complete: false };
+    }
     finished = true;
     return { removed: removedNow, complete: true };
   };

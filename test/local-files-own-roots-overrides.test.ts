@@ -17,7 +17,7 @@ import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { configuredCaptureLocations } from '../src/core/config.ts';
-import type { SourceConnector } from '../src/core/contracts.ts';
+import type { SourceConnector, SourceConnectorListPage } from '../src/core/contracts.ts';
 import { isDedicatedOlympusFolder, olympusOwnLocations, olympusOwnRoots } from '../src/core/olympus-layout.ts';
 import { SOURCE_INGESTION_EXCLUSIONS_PATH_ENV } from '../src/core/source-ingestion-exclusions.ts';
 import { defaultLocalFilesIngestionPolicy } from '../src/core/source-ingestion-policy.ts';
@@ -646,6 +646,56 @@ describe('5. what an earlier version indexed inside an own folder', () => {
     return { secure, lane };
   }
   const sleep = (ms: number) => new Promise<void>((resolve) => { setTimeout(resolve, ms); });
+
+  test.each(['kept', 'throws'] as const)('a failed early row does not starve later pages, folders or tiers (%s)', async (failure) => {
+    const failed = `${home}/.config/olympus/a-failed.txt`;
+    const laterPage = `${home}/.config/olympus/z-later.txt`;
+    const laterFolder = `${home}/capture/later.txt`;
+    const laterTier = `${home}/.config/olympus/tier-later.txt`;
+    const sibling = `${home}/Capture/sibling.txt`;
+    const { secure, lane } = await tierLaneHolding([[laterTier, 'zzlatertier'], [budget, 'zzbudgetbody']]);
+    // Personal-tier rows must be routed through the shared ledger; only the
+    // secure store is a legacy leg that accepts unregistered old rows.
+    const items = [[failed, 'zzfailed'], [laterPage, 'zzlaterpage'], [laterFolder, 'zzlaterfolder'], [sibling, 'zzsibling']].map(([path, text]) => rawFile(path!, text!));
+    await lane.set.sync({
+      id: 'local.files.earlier-routed', family: 'file', async authenticate() {},
+      async *listItems() { yield { items, done: true }; },
+      async fetchItem(id) { return items.find(item => item.identity.localItemId === id)!; },
+      classificationSignals() { return {}; },
+    }, { fetchContent: true, placement: { trustTier: 'S4', trustDomain: 'secure_local' } });
+    const internal = lane.internal.open();
+    expect([failed, laterPage, laterFolder, sibling].every(path => present(internal, path))).toBe(true);
+    const sync = lane.set.sync.bind(lane.set);
+    lane.set.sync = async (connector, options, run) => {
+      const pages: SourceConnectorListPage[] = [];
+      for await (const page of connector.listItems()) pages.push(page);
+      if (failure === 'throws' && pages.some(page => page.items.some(item => item.identity.providerItemId === localFilesItemId(failed)))) throw new Error('synthetic row deletion failure');
+      return sync({ ...connector, async *listItems() {
+        for (const page of pages) yield { ...page, items: page.items.filter(item => item.identity.providerItemId !== localFilesItemId(failed)) };
+      } }, options, run);
+    };
+    const messages: string[] = [];
+    const cleanup = createLocalFilesOwnRootsCleanup({
+      tierSet: lane.set, context: { ...ownContext(), ownRoots: [`${home}/.config/olympus`, `${home}/capture`], volumeIgnoresCase: () => false },
+      pageSize: 1, batchSize: 1, maxItems: 1, log: message => messages.push(message),
+    });
+    const results = [];
+    for (let pass = 0; pass < 20; pass++) results.push(await cleanup.run());
+    expect([present(internal, laterPage), present(internal, laterFolder), present(secure, laterTier)]).toEqual([false, false, false]);
+    expect(results.reduce((sum, result) => sum + result.removed, 0)).toBe(3);
+    expect(results.every(result => !result.complete)).toBe(true);
+    expect(present(internal, failed)).toBe(true);
+    expect(present(internal, sibling)).toBe(true);
+    expect(present(secure, budget)).toBe(true);
+    expect(messages).toHaveLength(1);
+    lane.set.sync = sync;
+    let final = await cleanup.run();
+    for (let pass = 0; !final.complete && pass < 20; pass++) final = await cleanup.run();
+    expect(final.complete).toBe(true);
+    expect(present(internal, failed)).toBe(false);
+    expect(present(internal, sibling)).toBe(true);
+    expect(present(secure, budget)).toBe(true);
+  });
 
   test.each([1, 50])('failed deletions report no removal progress and repeated failure only once (limit %s)', async (maxItems) => {
     const { secure, lane } = await tierLaneHolding([[secret, 'zzsecretbody'], [budget, 'zzbudgetbody']]);

@@ -94,14 +94,28 @@ export function createLocalFilesOwnRootsCleanup(options: LocalFilesOwnRootsClean
   // Every store the items may sit in, each walked under every own folder.
   const stores: LocalConnectorStore[] = TIER_DOMAIN_ORDER
     .flatMap((domain) => { const leg = tierSet.store(domain); return leg ? [leg] : []; });
-  interface Walk { store: LocalConnectorStore; root: string; after?: string; done: boolean }
+  interface Walk {
+    store: LocalConnectorStore;
+    root: string;
+    after?: string;
+    done: boolean;
+    failed?: boolean;
+    // At most one bounded page is retained when a count/time limit interrupts it.
+    page?: { hits: ReturnType<LocalConnectorStore['pageActiveItemsUnderLocatorIfIndexed']>['items']; next: string | undefined; index: number };
+  }
   const walks: Walk[] = stores.flatMap((leg) => (context.ownRoots ?? []).map((root): Walk => ({ store: leg, root, done: false })));
   let finished = walks.length === 0;
   let running: Promise<LocalFilesOwnRootsCleanupResult> | undefined;
   let removedNow = 0;
   let toldWaiting = false;
   let toldRemovalFailure = false;
-  const resetWalks = (): void => { for (const walk of walks) { walk.done = false; delete walk.after; } };
+  const resetWalk = (walk: Walk): void => {
+    walk.done = false;
+    delete walk.after;
+    delete walk.page;
+    delete walk.failed;
+  };
+  const resetWalks = (): void => { for (const walk of walks) resetWalk(walk); };
   const reportRemovalFailure = (message: string): void => {
     if (!toldRemovalFailure) options.log?.(message);
     toldRemovalFailure = true;
@@ -146,35 +160,41 @@ export function createLocalFilesOwnRootsCleanup(options: LocalFilesOwnRootsClean
       while (!walk.done) {
         if (timeUp() || attempted >= maxItems || scanned >= maxScanned) return { removed: removedNow, complete: false };
         if (!lookupsReady()) return waitForIndex();
-        const page = walk.store.pageActiveItemsUnderLocatorIfIndexed({
-          provider: LOCAL_FILES_PROVIDER,
-          accountScope: LOCAL_FILES_ACCOUNT_SCOPE,
-          locatorUri: walk.root,
-          limit: pageSize,
-          ...(walk.after !== undefined ? { after: walk.after } : {}),
-        });
-        if (!lookupsReady()) return waitForIndex();
-        scanned += page.items.length;
-        const hits = page.items.filter((item) => inside(item.locatorUri));
-        for (let index = 0; index < hits.length;) {
-          // A page cut short here is read again from its start: what was removed is no longer listed.
+        if (!walk.page) {
+          const page = walk.store.pageActiveItemsUnderLocatorIfIndexed({
+            provider: LOCAL_FILES_PROVIDER,
+            accountScope: LOCAL_FILES_ACCOUNT_SCOPE,
+            locatorUri: walk.root,
+            limit: pageSize,
+            ...(walk.after !== undefined ? { after: walk.after } : {}),
+          });
+          if (!lookupsReady()) return waitForIndex();
+          scanned += page.items.length;
+          walk.page = { hits: page.items.filter((item) => inside(item.locatorUri)), next: page.next, index: 0 };
+        }
+        const page = walk.page;
+        while (page.index < page.hits.length) {
           if (timeUp() || attempted >= maxItems) return { removed: removedNow, complete: false };
-          const batch = hits.slice(index, index + Math.min(batchSize, maxItems - attempted));
-          await remove(batch);
+          const batch = page.hits.slice(page.index, page.index + Math.min(batchSize, maxItems - attempted));
           attempted += batch.length;
+          try {
+            await remove(batch);
+          } catch (error) {
+            reportRemovalFailure(`Items inside Olympus's own folders could not be removed this run (${error instanceof Error ? error.name : 'error'}); they are tried again at the next.`);
+          }
           const kept = batch.filter((item) => walk.store.itemPresence(item.identity).active).length;
           removedNow += batch.length - kept;
-          index += batch.length;
-          // No progress is claimed for attempted deletions. Keep failed rows in the
-          // next walk even if this run's count/time bound was reached by the batch.
+          page.index += batch.length;
+          // Finish every page/folder/tier before retrying failed rows. Page position
+          // and failure debt survive bounded returns, so an early failure cannot starve later items.
           if (kept > 0) {
             reportRemovalFailure('The store did not remove some items inside Olympus\'s own folders; they are tried again at the next run.');
-            resetWalks();
-            return { removed: removedNow, complete: false };
+            walk.failed = true;
           }
         }
         if (page.next === undefined) walk.done = true;
         else walk.after = page.next;
+        delete walk.page;
         // The worker stays responsive between pages.
         await new Promise<void>((resolve) => { setImmediate(resolve); });
       }
@@ -182,6 +202,10 @@ export function createLocalFilesOwnRootsCleanup(options: LocalFilesOwnRootsClean
     // An empty projection from a concurrently invalidated index is not proof
     // that the own folders are empty. Start the walk again after backfill.
     if (!lookupsReady()) return waitForIndex();
+    if (walks.some(walk => walk.failed)) {
+      for (const walk of walks) if (walk.failed) resetWalk(walk);
+      return { removed: removedNow, complete: false };
+    }
     finished = true;
     return { removed: removedNow, complete: true };
   };

@@ -392,7 +392,9 @@ that opens files inside an account folder:
   scheduler off. Search, status and extraction stay closed until cleanup reports
   complete; persistent failures keep the local-files lane unavailable while
   retries continue. Only confirmed deletions count as recovery progress; failed
-  deletions back off and report once. Locator readiness is checked through the
+  deletions back off and report once. A failed row does not stop later pages,
+  folders or tiers: bounded passes retain page position and retry failed walks
+  only after the whole walk cycle finishes. Locator readiness is checked through the
   walk and before completion. Every pull still waits for the cleanup run and idle
   barrier.
   Shutdown stops scheduler/adoption work before closing extraction queues, and a
