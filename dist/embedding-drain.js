@@ -63992,6 +63992,7 @@ if (false)
   ;
 
 // src/core/messaging-pairing.ts
+init_messaging_capture_grant_file();
 init_provider_account_history();
 
 // src/core/native-worker-service.ts

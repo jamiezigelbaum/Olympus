@@ -39162,7 +39162,12 @@ async function pairMessagingSource(options) {
         throw telegramHistoryAccountError("different");
       }
     }
-    const producer = producerLaunch(options.source, approval, helper, packageRoot, sessionPath, chats, layout);
+    const prior = options.source === "telegram" ? readCaptureGrantFile(options.registryPath ? captureGrantPathBeside("telegram", options.registryPath) : captureGrantPathFromEnv("telegram", registryEnv)) : undefined;
+    const priorEnv = prior?.kind === "valid" && prior.grant.source === "telegram" && (prior.grant.sessionPath === sessionPath || layout === "folder" && prior.grant.sessionPath === undefined) ? prior.grant.producer.env : undefined;
+    const priorRaw = priorEnv?.OLYMPUS_TELEGRAM_ALLOWED_CHAT_SCOPES;
+    const priorScopes = typeof priorRaw === "string" ? priorRaw.split(",") : [];
+    const retained = priorRaw === priorEnv?.OLYMPUS_SOURCE_INDEX_TELEGRAM_APPROVED_CHAT_SCOPES && priorScopes.every((scope) => /^telegram\.personal:chat:[A-Za-z0-9_-]+$/.test(scope)) ? priorScopes : [];
+    const producer = producerLaunch(options.source, approval, helper, packageRoot, sessionPath, chats, layout, retained);
     const rollbackCredentials = options.source === "telegram" ? await persistTelegramCredentials(secretStore, result.privatePayload) : async () => {};
     const register = options.registerSession ?? connectGuidedSession;
     let connected;
@@ -39363,7 +39368,7 @@ async function observeBunExit(exited, timeoutMs) {
     clearTimeout(timeout);
   return observed;
 }
-function producerLaunch(source, approval, helperExecutable, packageRoot, sessionPath, chats, layout) {
+function producerLaunch(source, approval, helperExecutable, packageRoot, sessionPath, chats, layout, retainedChatScopes) {
   if (approval.source !== source || approval.explicitApproval !== true) {
     throw new Error("Capture scope approval must name the paired source and be explicit.");
   }
@@ -39374,7 +39379,7 @@ function producerLaunch(source, approval, helperExecutable, packageRoot, session
       throw new Error("Approve either the whole Telegram account or at least one exact chat, but not both.");
     if (scopes.some((scope) => scope.includes("*")))
       throw new Error("Telegram capture approval requires exact chat identifiers.");
-    const listed = new Set(chats.map((chat) => chat.chatScope));
+    const listed = new Set([...chats.map((chat) => chat.chatScope), ...retainedChatScopes]);
     if (scopes.some((scope) => !listed.has(scope))) {
       throw new Error("Telegram capture approval contains a chat that was not in the verified account listing.");
     }
@@ -39725,6 +39730,7 @@ var init_messaging_pairing = __esm(() => {
   init_pairing_session_paths();
   init_pairing_placement();
   init_whatsapp_bridge_name();
+  init_messaging_capture_grant_file();
   init_provider_account_history();
 });
 
@@ -144478,7 +144484,7 @@ function mountDashboardController(options) {
       const labels = { api_id: "Telegram API ID", api_hash: "Telegram API hash", phone: "Phone number (with country code)", code: "Telegram login code", password: "Telegram two-step verification password" };
       const label = labels[field];
       if (status)
-        status.textContent = label ? `Enter ${label.toLowerCase()} to continue.` : state === "failed" ? body.registrationMayBeSaved === true ? "Pairing could not finish. The connection may already be saved; check connection and capture status before retrying." : "Pairing failed. Start pairing again to retry." : state === "idle" ? "Pair this account to choose the chats Olympus may read." : state === "scope_selection_required" ? "Paired. Nothing is being captured. Choose what Olympus may read." : state === "committing" ? "Saving the connection and chat permission…" : state === "paired" || state === "complete" || state === "completed" ? "Paired. Capture is starting. Choose chats below; watch sync progress on the main dashboard." : state === "cancelled" ? "Pairing cancelled." : operation === "scope" ? "Chat choices saved. Capture will use this selection." : operation === "chats" ? "Choose the chats Olympus may read." : source === "whatsapp" ? "Open WhatsApp → Settings → Linked devices and scan the QR code." : "Pairing is running on this computer…";
+        status.textContent = label ? `Enter ${label.toLowerCase()} to continue.` : state === "failed" ? body.registrationMayBeSaved === true ? "Pairing could not finish. The connection may already be saved; check connection and capture status before retrying." : "Pairing failed. Start pairing again to retry." : state === "idle" ? "Pair this account to choose the chats Olympus may read." : state === "scope_selection_required" ? "Paired. Nothing is being captured. Choose what Olympus may read." : state === "committing" ? "Saving the connection and chat permission…" : state === "paired" || state === "complete" || state === "completed" ? "Pairing completed. Manage chat choices below; check current connection and sync status on the main dashboard." : state === "cancelled" ? `Setup cancelled. Capture permission was not changed. If you linked a new device, remove Olympus in ${source === "telegram" ? "Telegram active sessions" : "WhatsApp linked devices"} to unlink it.` : operation === "scope" ? "Chat choices saved. Capture will use this selection." : operation === "chats" ? "Choose the chats Olympus may read." : source === "whatsapp" ? "Open WhatsApp → Settings → Linked devices and scan the QR code." : "Pairing is running on this computer…";
       if (qr) {
         const value2 = typeof body.qr === "string" ? body.qr : "";
         if (/^data:image\/(?:png|jpeg|webp);base64,[A-Za-z0-9+/=]+$/.test(value2)) {

@@ -17,6 +17,7 @@ import { tryHoldFileFlock, type HeldFileFlock } from './data-owner-lock.ts';
 import { pairingLayoutEnv, telegramSessionBasePath, telegramStagedLogins, telegramStagedSessionBase, whatsappStateDir } from './pairing-session-paths.ts';
 import { recordPairingAccount, settlePairingPlacement } from './pairing-placement.ts';
 import { whatsappBridgeFileName } from './whatsapp-bridge-name.ts';
+import { captureGrantPathBeside, captureGrantPathFromEnv, readCaptureGrantFile } from './messaging-capture-grant-file.ts';
 import { assertTelegramHistoryAccount, telegramHistoryAccount, telegramHistoryAccountError } from './provider-account-history.ts';
 
 export type MessagingPairingSource = 'telegram' | 'whatsapp';
@@ -311,7 +312,19 @@ export async function pairMessagingSource(options: PairMessagingSourceOptions): 
         throw telegramHistoryAccountError('different');
       }
     }
-    const producer = producerLaunch(options.source, approval, helper, packageRoot, sessionPath, chats, layout);
+    // Renewing credentials preserves exact consent even if an old chat is no longer listed.
+    // Only a trusted grant for this session can supply those additional scopes.
+    const prior = options.source === 'telegram' ? readCaptureGrantFile(options.registryPath
+      ? captureGrantPathBeside('telegram', options.registryPath)
+      : captureGrantPathFromEnv('telegram', registryEnv)) : undefined;
+    const priorEnv = prior?.kind === 'valid' && prior.grant.source === 'telegram'
+      && (prior.grant.sessionPath === sessionPath || (layout === 'folder' && prior.grant.sessionPath === undefined))
+      ? prior.grant.producer.env : undefined;
+    const priorRaw = priorEnv?.OLYMPUS_TELEGRAM_ALLOWED_CHAT_SCOPES;
+    const priorScopes = typeof priorRaw === 'string' ? priorRaw.split(',') : [];
+    const retained = priorRaw === priorEnv?.OLYMPUS_SOURCE_INDEX_TELEGRAM_APPROVED_CHAT_SCOPES
+      && priorScopes.every(scope => /^telegram\.personal:chat:[A-Za-z0-9_-]+$/.test(scope)) ? priorScopes : [];
+    const producer = producerLaunch(options.source, approval, helper, packageRoot, sessionPath, chats, layout, retained);
     const rollbackCredentials = options.source === 'telegram'
       ? await persistTelegramCredentials(secretStore, result.privatePayload)
       : async () => {};
@@ -545,6 +558,7 @@ function producerLaunch(
   sessionPath: string,
   chats: readonly MessagingChatMetadata[],
   layout: LayoutAccountLayout,
+  retainedChatScopes: readonly string[],
 ): MessagingProducerLaunch {
   if (approval.source !== source || approval.explicitApproval !== true) {
     throw new Error('Capture scope approval must name the paired source and be explicit.');
@@ -554,7 +568,7 @@ function producerLaunch(
     const wholeAccount = approval.source === 'telegram' && approval.wholeAccount === true;
     if (wholeAccount === (scopes.length > 0)) throw new Error('Approve either the whole Telegram account or at least one exact chat, but not both.');
     if (scopes.some((scope) => scope.includes('*'))) throw new Error('Telegram capture approval requires exact chat identifiers.');
-    const listed = new Set(chats.map((chat) => chat.chatScope));
+    const listed = new Set([...chats.map((chat) => chat.chatScope), ...retainedChatScopes]);
     if (scopes.some((scope) => !listed.has(scope))) {
       throw new Error('Telegram capture approval contains a chat that was not in the verified account listing.');
     }

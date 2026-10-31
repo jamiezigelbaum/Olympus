@@ -791,3 +791,27 @@ describe('a Telegram history keeps its account (storage step 4e)', () => {
     expect(hashOf(root)).toBe(PROVED);
   });
 });
+
+
+for (const approved of [true, false]) test(`Telegram re-pair permits only previously approved missing chats (approved=${approved})`, async () => {
+  const root = packageFixture();
+  const registryPath = join(root, 'handles.json');
+  writeFileSync(join(root, 'messaging-capture.telegram.json'), JSON.stringify({ version: 1, source: 'telegram', handle: 'telegram.personal', grantedAt: '2026-01-01', producer: { source: 'telegram', secretEnvironment: [], env: { OLYMPUS_TELEGRAM_ALLOWED_CHAT_SCOPES: 'telegram.personal:chat:999', OLYMPUS_SOURCE_INDEX_TELEGRAM_APPROVED_CHAT_SCOPES: 'telegram.personal:chat:999' } } }), { mode: 0o600 });
+  let registered = false;
+  const pairing = pairMessagingSource({
+    source: 'telegram', packageRoot: root, homeDir: join(root, 'home'), env: {}, registryPath,
+    pythonExecutable: '/usr/bin/python3', secretStore: memorySecretStore(),
+    captureScopeApproval: { source: 'telegram', explicitApproval: true, chatScopes: [approved ? 'telegram.personal:chat:999' : 'telegram.personal:chat:888'] },
+    runCommand: async request => telegramReady(request.env.OLYMPUS_TELEGRAM_SESSION_PATH),
+    registerSession: async () => { registered = true; return { ok: true, source: 'telegram', handles: ['telegram.personal'], secretRefs: [] }; },
+  });
+  if (!approved) {
+    await expect(pairing).rejects.toThrow('not in the verified account listing');
+    expect(registered).toBe(false);
+  } else {
+    const result = await pairing;
+    expect(result.registered).toBe(true);
+    if (!result.registered) throw new Error('Expected re-pair');
+    expect(result.producer.env.OLYMPUS_TELEGRAM_ALLOWED_CHAT_SCOPES).toBe('telegram.personal:chat:999');
+  }
+});
