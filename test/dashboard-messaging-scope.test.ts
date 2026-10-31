@@ -194,3 +194,9 @@ for (const source of ['telegram', 'whatsapp'] as const) {
     } finally { await service.cancelAndWait(source); service.close(); }
   });
 }
+
+test('Choose chats before pairing is an answer (not_paired), not a failed request', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'messaging-unpaired-')); dirs.push(dir);
+  const service = createDashboardMessagingService({ registryPath: join(dir, 'handles.json'), secretStore: memorySecrets, withMessagingCapturePaused: (_s, op) => op(), withGrantMutation: op => op() });
+  for (const source of ['telegram', 'whatsapp'] as const) expect(await service.handle('chats', { source })).toEqual({ ok: true, state: 'not_paired' });
+});

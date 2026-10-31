@@ -31,6 +31,9 @@ const DASHBOARD_PAGES = ['/dashboard', '/dashboard?keys', '/dashboard?agents', '
 /** The privacy settings open from the setup prompt on a fresh install, or from Edit once they are saved. */
 const OPEN_PRIVACY: Target = { role: 'button', name: new RegExp(`^(${PRIVACY_SETUP.label}|${PRIVACY.edit}|${PRIVACY.editLabel})$`) };
 const DESCRIPTION: Target = { role: 'textbox', name: PRIVACY.descriptionLabel };
+/** The description shows as text with Edit, or (none yet) as "Describe what's private"; either opens the box (1.3.0, #684). */
+const DESCRIPTION_EDIT: Target = { css: 'button[data-key="privacy:description:edit"]' };
+const OPEN_DESCRIPTION = { name: 'Open the description box', do: { click: DESCRIPTION_EDIT, frame: 'panel' as const }, expect: [{ present: DESCRIPTION, frame: 'panel' as const }] };
 // The sender field's label also holds its error once one shows.
 const SENDER: Target = { role: 'textbox', name: PRIVACY.senderLabel, contains: true };
 const MODELS_LINE: Target = { role: 'button', name: new RegExp(`^${PANEL.models}\\s+—`) };
@@ -45,13 +48,6 @@ const onlyDeletedGone = (expected: string) => async ({ count, vars }: StepContex
 };
 const DISCARDED_NOTE = 'release check: this note is never saved';
 const DISCARDED_SENDER = 'release-check@example.com';
-
-/** The description box does not hold `text` (what a discarded edit typed there). */
-const descriptionLacks = (text: string) => async ({ driver }: StepContext) => {
-  const held = await driver.probe('panel', `__rc.value(${JSON.stringify(wireTarget(DESCRIPTION))})`) as string | null;
-  const ok = typeof held === 'string' && !held.includes(text);
-  return { ok, expected: `the description does not hold "${text}"`, actual: typeof held !== 'string' ? 'the description box is not on the page' : ok ? 'it does not' : 'it does: the discarded edit was kept' };
-};
 
 export const JOURNEYS: readonly Journey[] = [
   {
@@ -337,7 +333,8 @@ export const JOURNEYS: readonly Journey[] = [
     source: 'owner test plan: what is private; the release check had never pressed Cancel there',
     steps: [
       { name: 'Open the dashboard', do: { open: 'dashboard' }, expect: [{ text: PANEL.sources, frame: 'panel' }] },
-      { name: 'Open the privacy settings', do: { click: OPEN_PRIVACY, frame: 'panel' }, expect: [{ text: PRIVACY.title, frame: 'panel' }, { present: DESCRIPTION, frame: 'panel' }] },
+      { name: 'Open the privacy settings', do: { click: OPEN_PRIVACY, frame: 'panel' }, expect: [{ text: PRIVACY.title, frame: 'panel' }, { present: DESCRIPTION_EDIT, frame: 'panel' }] },
+      OPEN_DESCRIPTION,
       {
         name: 'Type a description',
         do: { type: { into: DESCRIPTION, text: DISCARDED_NOTE }, frame: 'panel' },
@@ -366,7 +363,7 @@ export const JOURNEYS: readonly Journey[] = [
       {
         name: 'Open the privacy settings again',
         do: { click: OPEN_PRIVACY, frame: 'panel' },
-        expect: [{ text: PRIVACY.title, frame: 'panel' }, { custom: descriptionLacks(DISCARDED_NOTE) }],
+        expect: [{ text: PRIVACY.title, frame: 'panel' }, { present: DESCRIPTION_EDIT, frame: 'panel' }, { noText: DISCARDED_NOTE, frame: 'panel' }],
       },
       {
         name: 'Press Back with nothing changed',
@@ -383,7 +380,7 @@ export const JOURNEYS: readonly Journey[] = [
     steps: [
       { name: 'Open the dashboard', do: { open: 'dashboard' }, expect: [{ text: PANEL.sources, frame: 'panel' }] },
       // The title shows while the settings still load; the description box only once they have.
-      { name: 'Open the privacy settings', do: { click: OPEN_PRIVACY, frame: 'panel' }, expect: [{ text: PRIVACY.title, frame: 'panel' }, { present: DESCRIPTION, frame: 'panel' }] },
+      { name: 'Open the privacy settings', do: { click: OPEN_PRIVACY, frame: 'panel' }, expect: [{ text: PRIVACY.title, frame: 'panel' }, { present: DESCRIPTION_EDIT, frame: 'panel' }] },
       {
         name: 'Press Add a sender',
         do: { click: { role: 'button', name: PRIVACY.addSender }, frame: 'panel' },
@@ -398,7 +395,7 @@ export const JOURNEYS: readonly Journey[] = [
       {
         name: 'Press Back to privacy',
         do: { click: { role: 'button', name: PRIVACY.backToPrivacy }, frame: 'panel' },
-        expect: [{ present: DESCRIPTION, frame: 'panel' }, { absent: SENDER, frame: 'panel' }, { noText: 'not an address', frame: 'panel' }],
+        expect: [{ present: DESCRIPTION_EDIT, frame: 'panel' }, { absent: SENDER, frame: 'panel' }, { noText: 'not an address', frame: 'panel' }],
       },
       {
         name: 'Press Add a sender again',
@@ -426,7 +423,7 @@ export const JOURNEYS: readonly Journey[] = [
         name: 'Open the privacy settings again',
         do: { click: OPEN_PRIVACY, frame: 'panel' },
         // Loaded first, so the saved senders are on the page when their absence is read.
-        expect: [{ text: PRIVACY.title, frame: 'panel' }, { present: DESCRIPTION, frame: 'panel' }, { noText: DISCARDED_SENDER, frame: 'panel' }],
+        expect: [{ text: PRIVACY.title, frame: 'panel' }, { present: DESCRIPTION_EDIT, frame: 'panel' }, { noText: DISCARDED_SENDER, frame: 'panel' }],
       },
       { name: 'Leave the privacy settings', do: { click: { role: 'button', name: PRIVACY.back }, frame: 'panel' }, expect: [{ text: PANEL.sources, frame: 'panel' }] },
     ],
@@ -441,8 +438,9 @@ export const JOURNEYS: readonly Journey[] = [
       {
         name: 'Open the privacy settings',
         do: { click: { role: 'button', name: new RegExp(`^(${PRIVACY_SETUP.label}|${PRIVACY.edit}|${PRIVACY.editLabel})$`) }, frame: 'panel' },
-        expect: [{ text: PRIVACY.title, frame: 'panel' }, { present: { role: 'textbox', name: PRIVACY.descriptionLabel }, frame: 'panel' }],
+        expect: [{ text: PRIVACY.title, frame: 'panel' }, { present: DESCRIPTION_EDIT, frame: 'panel' }],
       },
+      OPEN_DESCRIPTION,
       {
         name: 'Type a description of what is private',
         do: { type: { into: { role: 'textbox', name: PRIVACY.descriptionLabel }, text: 'my medical records and my tax papers' }, frame: 'panel' },
@@ -464,8 +462,14 @@ export const JOURNEYS: readonly Journey[] = [
       {
         name: 'Open the privacy settings again',
         do: { click: { role: 'button', name: new RegExp(`^(${PRIVACY.edit}|${PRIVACY.editLabel})$`) }, frame: 'panel' },
+        // The saved description shows as text, with Edit (the approved #684 design), before any box opens.
+        expect: [{ text: 'my medical records and my tax papers', frame: 'panel' }, { present: { css: 'button[data-key="privacy:description:edit"]', text: PRIVACY.edit }, frame: 'panel' }, { absent: DESCRIPTION, frame: 'panel' }],
+      },
+      {
+        name: 'Press Edit on the description',
+        do: { click: DESCRIPTION_EDIT, frame: 'panel' },
         // The saved description keeps what was typed and gains the answers to the quick questions after it (found on the second Linux run).
-        expect: [{ value: { role: 'textbox', name: PRIVACY.descriptionLabel }, equals: /^my medical records and my tax papers/, frame: 'panel' }],
+        expect: [{ value: DESCRIPTION, equals: /^my medical records and my tax papers/, frame: 'panel' }],
       },
     ],
   },

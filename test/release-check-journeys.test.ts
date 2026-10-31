@@ -223,13 +223,22 @@ function privacyPanel(driver: DomDriver, faults: PrivacyFaults = {}): void {
   const textarea = () => doc.querySelector('textarea') as unknown as { value: string } | null;
   const input = () => doc.querySelector('input') as unknown as { value: string } | null;
   const keep = () => { const area = textarea(); if (area) draft.description = area.value; };
-  const dashboard = () => { doc.body.innerHTML = `<main><h2>${PANEL.sources}</h2><button>${PRIVACY.edit}</button></main>`; };
+  const dashboard = () => { onDashboard = true; editing = false; doc.body.innerHTML = `<main><h2>${PANEL.sources}</h2><button>${PRIVACY.edit}</button></main>`; };
+  // As shipped (#684): the description shows as text with Edit, or as "Describe what's private"; the box opens from either.
+  let editing = false;
+  let onDashboard = true;
   const main = (asking = false) => {
+    onDashboard = false;
+    const description = editing
+      ? `<label><span>${PRIVACY.descriptionLabel}</span><textarea></textarea></label>`
+      : draft.description
+        ? `<p>${draft.description}</p><button data-key="privacy:description:edit">${PRIVACY.edit}</button>`
+        : `<button data-key="privacy:description:edit">${PRIVACY.descriptionStart}</button>`;
     doc.body.innerHTML = `<main><button>${PRIVACY.back}</button>${asking ? `<div role="alert"><p>${PRIVACY.discardPrompt}</p><button>${PRIVACY.discard}</button><button>${PRIVACY.keep}</button></div>` : ''}
-      <h1>${PRIVACY.title}</h1><label><span>${PRIVACY.descriptionLabel}</span><textarea></textarea></label>
+      <h1>${PRIVACY.title}</h1><section><h2>${PRIVACY.descriptionLabel}</h2>${description}</section>
       <ul>${draft.senders.map((sender) => `<li>${sender}</li>`).join('')}</ul><button>${PRIVACY.addSender}</button>
       <button>${PRIVACY.save}</button><button>${PRIVACY.cancel}</button></main>`;
-    textarea()!.value = draft.description;
+    if (editing) textarea()!.value = draft.description;
   };
   const sender = (value: string) => {
     doc.body.innerHTML = `<main><button>${PRIVACY.backToPrivacy}</button><h1>${PRIVACY.senderTitle}</h1><p>${PRIVACY.senderIntro}</p>
@@ -239,13 +248,19 @@ function privacyPanel(driver: DomDriver, faults: PrivacyFaults = {}): void {
   const edited = () => draft.description !== saved.description || draft.senders.join() !== saved.senders.join();
   const leave = () => { keep(); if (edited() && !faults.leavesWithoutAsking) main(true); else dashboard(); };
   driver.pagesByPath['/dashboard'] = `<main><h2>${PANEL.sources}</h2><button>${PRIVACY.edit}</button></main>`;
-  driver.onPress.set(PRIVACY.edit, () => { draft = { description: saved.description, senders: [...saved.senders] }; main(); });
+  const openBox = () => { keep(); editing = true; main(); };
+  driver.onPress.set(PRIVACY.edit, () => {
+    if (!onDashboard) { openBox(); return; }
+    draft = { description: saved.description, senders: [...saved.senders] };
+    main();
+  });
+  driver.onPress.set(PRIVACY.descriptionStart, openBox);
   driver.onPress.set(PRIVACY.cancel, leave);
   driver.onPress.set(PRIVACY.back, leave);
   driver.onPress.set(PRIVACY.keep, () => { keep(); main(); });
   driver.onPress.set(PRIVACY.discard, () => { if (faults.discardKeeps) saved = { description: draft.description, senders: [...draft.senders] }; dashboard(); });
   driver.onPress.set(PRIVACY.addSender, () => { keep(); senderError = ''; sender(''); });
-  driver.onPress.set(PRIVACY.backToPrivacy, () => main());
+  driver.onPress.set(PRIVACY.backToPrivacy, () => { editing = false; main(); });
   driver.onPress.set(PRIVACY.senderAdd, () => {
     const value = input()!.value.trim();
     if (!faults.acceptsAnySender && !/^([^@\s]+@|@)[^@\s]+\.[^@\s]+$/.test(value)) { senderError = PRIVACY.senderInvalid; sender(value); return; }
@@ -304,7 +319,9 @@ describe('the shipped journeys, on a DOM', () => {
     expect(keeps.ok).toBe(false);
     const failed = keeps.steps.find((step) => !step.ok)!;
     expect(failed.name).toBe('Open the privacy settings again');
-    expect(failed.actual).toContain('the discarded edit was kept');
+    // The discarded note is shown as the saved description.
+    expect(failed.expected).toContain('does not say "release check: this note is never saved"');
+    expect(failed.actual).toEndWith('it does');
   });
 
   test('privacy-add-sender passes when only an address is taken and Discard changes drops it, and FAILS when it is not', async () => {

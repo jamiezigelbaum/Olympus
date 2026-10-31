@@ -21,7 +21,7 @@ function telegramSetupSheet(): string {
 export function renderMessagingCard(source: 'telegram' | 'whatsapp', localSession: boolean): string {
   const label = source === 'telegram' ? 'Telegram' : 'WhatsApp';
   const sourceId = source === 'telegram' ? 'telegram.messages' : 'whatsapp.personal.messages';
-  const form = (kind: string, text: string) => `<form method="dialog" data-messaging-kind="${kind}"><button class="btn${kind === 'start' ? ' primary' : ''}" type="submit">${text}</button></form>`;
+  const form = (kind: string, text: string) => `<form method="dialog" data-messaging-kind="${kind}"${kind === 'cancel' ? ' hidden' : ''}><button class="btn${kind === 'start' ? ' primary' : ''}" type="submit">${text}</button></form>`;
   return `<section id="agent-${source}-personal" class="messaging-card" aria-hidden="false" data-source="${sourceId}" data-source-id="${sourceId}" data-messaging-source="${source}"><h3>${escapeHtml(label)}</h3>`
     + (source === 'whatsapp' ? '<p>The chat list includes saved contacts and groups and may omit unsaved chats. Choose all chats to include those.</p>' : '')
     + '<p>Pairing alone does not start capture. After pairing, choose which chats Olympus reads. Each message is classified on its own; choosing a chat does not set its privacy tier.</p>'
