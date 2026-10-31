@@ -105,3 +105,21 @@ test('the pending chooser returns no existing source rules or backlog', async ()
   expect(meta(result).privateAnswerChoice.pending).toBe(true);
   expect(JSON.stringify(result)).not.toContain('SENTINEL');
 });
+
+
+test('pending chooser refuses profile edits without overwriting hidden owner rules', async () => {
+  const { backend, dir } = setup();
+  const env = { HOME: dir, OLYMPUS_PRIVACY_PROFILE_PATH: join(dir, 'privacy.json'), OLYMPUS_TIER_RULES_PATH: join(dir, 'rules.json') };
+  writePrivacyProfile({ description: 'SENTINEL_KEEP_DESCRIPTION', rules: [{ kind: 'sender', source_id: 'gmail.email', value: 'keep@example.test' }] }, { env });
+  const before = readFileSync(env.OLYMPUS_PRIVACY_PROFILE_PATH, 'utf8');
+  const beforeRules = readFileSync(env.OLYMPUS_TIER_RULES_PATH, 'utf8');
+  const opened = await callSetupTool('olympus_privacy_get', {}, backend);
+  await expect(callSetupTool('olympus_privacy_set', { revision: meta(opened).revision,
+    rules: [{ kind: 'sender', source_id: 'gmail.email', value: 'new@example.test' }] }, backend)).rejects.toMatchObject({ code: 'privacy_choice_required' });
+  expect(readFileSync(env.OLYMPUS_PRIVACY_PROFILE_PATH, 'utf8')).toBe(before);
+  expect(readFileSync(env.OLYMPUS_TIER_RULES_PATH, 'utf8')).toBe(beforeRules);
+  expect(meta(opened).privateAnswerChoice.pending).toBe(true);
+  await callSetupTool('olympus_privacy_set', { revision: meta(opened).revision, confirmation: meta(opened).confirmation, private_answer_mode: 'local-only' }, backend);
+  expect(readFileSync(env.OLYMPUS_PRIVACY_PROFILE_PATH, 'utf8')).toBe(before);
+  expect(readFileSync(env.OLYMPUS_TIER_RULES_PATH, 'utf8')).toBe(beforeRules);
+});

@@ -1,9 +1,9 @@
 import { expect, test } from 'bun:test';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { createPendingPrivacyPolicy, isPendingPrivacyPolicy, saveFirstRunPrivacyChoice } from '../src/core/first-run-privacy.ts';
-import { seedEngineSovereignty } from '../src/core/engine-service.ts';
+import { engineServicePaths, seedEngineSovereignty } from '../src/core/engine-service.ts';
 import { ModelSetupService } from '../src/core/model-setup.ts';
 import { loadSovereigntyPreset, validateSovereigntyConfig, writeSovereigntyConfigFile } from '../src/core/sovereignty.ts';
 
@@ -53,13 +53,19 @@ test.each(['env', 'inline', 'custom-path'] as const)('agent setup preserves an e
     mkdirSync(join(home, '.olympus'));
     const env = { ...process.env, HOME: home, OLYMPUS_CONFIG: join(home, '.olympus', 'config.json'),
       OLYMPUS_SOVEREIGNTY_CONFIG: '', OLYMPUS_SOVEREIGNTY_CONFIG_PATH: '' };
+    const paths = engineServicePaths({ env });
+    mkdirSync(dirname(paths.configPath), { recursive: true });
+    writeFileSync(paths.configPath, JSON.stringify({})); // an installed host, not just this shell
     const policy = loadSovereigntyPreset('local-only');
-    if (mode === 'env') Object.assign(env, { OLYMPUS_ARGUS_BASE_URL: 'http://127.0.0.1:11434/v1' });
-    if (mode === 'inline') writeFileSync(env.OLYMPUS_CONFIG, JSON.stringify({ sovereignty: { policy } }));
+    if (mode === 'env') {
+      mkdirSync(dirname(paths.workerEnvPath), { recursive: true });
+      writeFileSync(paths.workerEnvPath, 'OLYMPUS_ARGUS_BASE_URL=http://127.0.0.1:11434/v1\n');
+    }
+    if (mode === 'inline') writeFileSync(paths.configPath, JSON.stringify({ sovereignty: { policy } }));
     if (mode === 'custom-path') {
       const path = join(home, 'custom-policy.json');
       writeFileSync(path, JSON.stringify(policy));
-      writeFileSync(env.OLYMPUS_CONFIG, JSON.stringify({ sovereignty: { configPath: path } }));
+      writeFileSync(paths.configPath, JSON.stringify({ sovereignty: { configPath: path } }));
     }
     const result = Bun.spawnSync([process.execPath, 'src/cli.ts', 'setup', '--privacy-options'], { env });
     expect(result.exitCode).toBe(0);

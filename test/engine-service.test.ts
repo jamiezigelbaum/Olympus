@@ -1181,20 +1181,42 @@ describe('engine install preflight, policy seeding, and what uninstall keeps', (
     expect(existsSync(enginePaths(home).sovereigntyPath)).toBe(true);
   });
 
+  for (const mode of ['ambient-key', 'leftover-inline', 'leftover-path', 'malformed-leftover'] as const) {
+    test(`fresh install still asks when the shell has ${mode}`, () => {
+      const { home, checkout, bun } = fixture();
+      const env: Record<string, string> = mode === 'ambient-key' ? { GEMINI_API_KEY: 'synthetic-unrelated-key' } : {};
+      if (mode !== 'ambient-key') {
+        mkdirSync(join(home, '.olympus'), { recursive: true });
+        const configPath = join(home, 'leftover-policy.json');
+        writeFileSync(configPath, JSON.stringify(loadSovereigntyPreset('local-only')));
+        writeFileSync(join(home, '.olympus', 'config.json'), mode === 'malformed-leftover' ? '{' : JSON.stringify({ sovereignty:
+          mode === 'leftover-inline' ? { policy: loadSovereigntyPreset('local-only') } : { configPath } }));
+      }
+      const result = installEngine({ platform: 'darwin', homeDir: home, exec: fakeLaunchctl().exec, fromCheckout: checkout, bunBin: bun, env });
+      expect(result.sovereignty).toMatchObject({ action: 'seeded', preset: 'pending' });
+      expect(JSON.parse(readFileSync(enginePaths(home).sovereigntyPath, 'utf8')).privacyChoicePending).toBe(true);
+    });
+  }
+
   const blockers: Array<[string, (home: string, root: string) => Record<string, string>, string]> = [
-    ['an environment-backed policy', () => ({ OLYMPUS_ARGUS_BASE_URL: 'http://127.0.0.1:11434/v1' }), 'already sets OLYMPUS_ARGUS_BASE_URL'],
+    ['an environment-backed policy', (home) => {
+      const path = enginePaths(home).workerEnvPath;
+      mkdirSync(dirname(path), { recursive: true });
+      writeFileSync(path, 'OLYMPUS_ARGUS_BASE_URL=http://127.0.0.1:11434/v1\n');
+      return {};
+    }, 'already sets OLYMPUS_ARGUS_BASE_URL'],
     ['an inline policy', (home) => {
       mkdirSync(join(home, '.olympus'), { recursive: true });
-      writeFileSync(join(home, '.olympus', 'config.json'), JSON.stringify({ sovereignty: { policy: loadSovereigntyPreset('local-only') } }));
+      writeFileSync(enginePaths(home).configPath, JSON.stringify({ ...defaultEngineConfig(), sovereignty: { policy: loadSovereigntyPreset('local-only') } }));
       return {};
-    }, 'existing effective privacy policy'],
+    }, 'existing engine installation'],
     ['a custom-path policy', (home) => {
       mkdirSync(join(home, '.olympus'), { recursive: true });
       const configPath = join(home, 'custom-policy.json');
       writeFileSync(configPath, JSON.stringify(loadSovereigntyPreset('local-only')));
-      writeFileSync(join(home, '.olympus', 'config.json'), JSON.stringify({ sovereignty: { configPath } }));
+      writeFileSync(enginePaths(home).configPath, JSON.stringify({ ...defaultEngineConfig(), sovereignty: { configPath } }));
       return {};
-    }, 'existing effective privacy policy'],
+    }, 'existing engine installation'],
     ['an OpenClaw config with an Olympus entry', (home) => {
       mkdirSync(join(home, '.openclaw'), { recursive: true });
       writeFileSync(join(home, '.openclaw', 'openclaw.json'), JSON.stringify({ plugins: { entries: { olympus: { config: {} } }, installs: { olympus: { source: 'npm' } } } }));

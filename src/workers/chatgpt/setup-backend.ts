@@ -323,6 +323,7 @@ export function createChatGptSetupBackend(options: ChatGptSetupBackendOptions): 
     },
 
     savePrivacy(update) {
+      if (privacySettings().privateAnswerChoice?.pending) throw new SetupBackendError('privacy_choice_required');
       writePrivacyProfile({
         ...(update.description !== undefined ? { description: update.description } : {}),
         ...(update.rules ? { rules: update.rules as PrivacyRule[] } : {}),

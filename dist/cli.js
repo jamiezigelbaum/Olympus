@@ -107047,38 +107047,21 @@ function seedEngineSovereignty(path) {
 function resolveInstallationPrivacyState(input = {}) {
   const env = { ...input.env ?? process.env, HOME: input.homeDir ?? input.env?.HOME ?? homedir30() };
   const paths = input.paths ?? engineServicePaths({ env });
-  const inspectionEnv = { ...env };
-  for (const key2 of ["OLYMPUS_SOVEREIGNTY_CONFIG", "OLYMPUS_SOVEREIGNTY_CONFIG_PATH"]) {
-    if (inspectionEnv[key2] && resolvePath2(inspectionEnv[key2]) === resolvePath2(paths.sovereigntyPath) && !existsSync67(paths.sovereigntyPath))
-      delete inspectionEnv[key2];
+  if (existsSync67(paths.sovereigntyPath)) {
+    const policy = validateSovereigntyConfig(JSON.parse(readFileSync55(paths.sovereigntyPath, "utf8")));
+    return { state: isPendingPrivacyPolicy(policy) ? "pending" : "configured" };
   }
-  const config = loadConfig(inspectionEnv);
-  const explicitPolicy = config.sovereignty?.policy !== undefined || !!config.sovereignty?.configPath;
-  if (explicitPolicy || existsSync67(paths.sovereigntyPath)) {
-    const policy = loadSovereigntyEngine({
-      env,
-      inlineConfig: config.sovereignty?.policy,
-      configPath: config.sovereignty?.configPath ?? paths.sovereigntyPath
-    });
-    return {
-      state: isPendingPrivacyPolicy(policy.config) ? "pending" : "configured",
-      reason: "An existing effective privacy policy is preserved."
-    };
-  }
-  const blocker = engineSovereigntySeedBlocker({ homeDir: env.HOME, workerEnvPath: paths.workerEnvPath, env: inspectionEnv });
-  if (blocker)
-    return { state: "configured", reason: blocker };
   if (existsSync67(paths.configPath) || existsSync67(paths.plistPath))
     return {
       state: "configured",
       reason: "An existing engine installation has no policy file; its current policy is preserved."
     };
+  const blocker = engineSovereigntySeedBlocker({ homeDir: env.HOME, workerEnvPath: paths.workerEnvPath, env });
+  if (blocker)
+    return { state: "configured", reason: blocker };
   return { state: "not_installed" };
 }
 function engineSovereigntySeedBlocker(input) {
-  const envKey = Object.entries(input.env ?? process.env).find(([key2, value]) => value?.trim() && ENV_POLICY_KEY.test(`${key2}=`))?.[0];
-  if (envKey)
-    return `The environment already sets ${envKey}, which chooses this worker's models and privacy routes.`;
   try {
     if (existsSync67(input.workerEnvPath)) {
       const key2 = ENV_POLICY_KEY.exec(readFileSync55(input.workerEnvPath, "utf8"))?.[1];
@@ -108767,7 +108750,7 @@ function installLinuxEngine(options) {
     assertKnown(before);
     const privacyState = resolveInstallationPrivacyState({ homeDir: l.home, paths, env: options.env ?? process.env });
     if (options.dryRun)
-      return { ...base, wrote_plist: false, wrote_config: false, wrote_worker_env: false, sovereignty: { action: existsSync68(l.sovereigntyPath) ? "present" : "would_seed", path: l.sovereigntyPath }, action: "dry_run" };
+      return { ...base, wrote_plist: false, wrote_config: false, wrote_worker_env: false, sovereignty: { action: existsSync68(l.sovereigntyPath) ? "present" : privacyState.state === "not_installed" ? "would_seed" : "skipped", path: l.sovereigntyPath, ...privacyState.reason ? { reason: privacyState.reason } : {} }, action: "dry_run" };
     requireLinuxApprovalTransport(source);
     const existingReceipt = readLinuxEngineReceipt(l.receiptPath);
     const observedLinger = readEngineLinger(exec, options.uid);
@@ -151370,7 +151353,7 @@ function chatgptPrivacyProgram(kit, makeLogic) {
       }
       take(data2);
       s.loaded = true;
-      if (data2.configured && s.answerChoice)
+      if (s.answerChoice)
         s.screen = "answers";
       kit.render(s.screen === "answers" ? "privacy:answer:local-first" : "privacy:description");
     }, () => {
@@ -191187,6 +191170,7 @@ var init_response_builder = __esm(() => {
     picker_unavailable: "Olympus could not list this source right now. Try again shortly.",
     folder_needs_helper: "Olympus cannot open Desktop, Documents, Downloads, iCloud Drive or other disks on this Mac yet, or a folder that holds them. Your choices are still here. Choose folders outside them, or drag files onto the dashboard.",
     confirm_whole_account: "Choosing the whole account needs the owner's confirmation in the Olympus panel.",
+    privacy_choice_required: "Choose how Olympus may answer with Private items before editing privacy rules.",
     privacy_owner_only: "Only the owner can remove a privacy rule or change what they said is private, in the Olympus panel.",
     embedding_change_needs_approval: "Changing the search model re-indexes every source and needs the owner's approval on the computer.",
     model_not_configured: "That model is not set up on the computer. Set it up in Olympus on the computer first.",
@@ -191406,6 +191390,8 @@ async function callSetupTool(name, args, backend) {
           spendPrivacyConfirmation(backend, confirmation2);
           return privacyToolResult(visiblePrivacy(saved2, secretLocations(backend)), "saved");
         }
+        if (backend.privacySettings().privateAnswerChoice?.pending)
+          throw new ChatGptSurfaceError("privacy_choice_required");
         let update;
         try {
           update = parsePrivacyProfileInput(fields);
@@ -191965,6 +191951,7 @@ var init_setup_tools = __esm(() => {
     folder_needs_helper: "folder_needs_helper",
     source_dashboard_not_supported: "unavailable",
     source_not_connected: "source_not_connected",
+    privacy_choice_required: "privacy_choice_required",
     disconnect_source_busy: "source_busy",
     disconnect_credential_delete_failed: "disconnect_incomplete",
     capture_stop_unconfirmed: "disconnect_incomplete",
@@ -203907,6 +203894,8 @@ function createChatGptSetupBackend(options) {
       return privacySettings();
     },
     savePrivacy(update) {
+      if (privacySettings().privateAnswerChoice?.pending)
+        throw new SetupBackendError("privacy_choice_required");
       writePrivacyProfile({
         ...update.description !== undefined ? { description: update.description } : {},
         ...update.rules ? { rules: update.rules } : {}
