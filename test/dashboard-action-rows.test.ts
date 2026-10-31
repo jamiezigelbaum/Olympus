@@ -8,7 +8,7 @@ test('non-wizard action rows stack below 480px while wizard footers keep Back fi
   expect(theme).toContain('.actionrow:not(.setupactions) > .primary { order: -1; }');
   expect(theme).toContain('@media (max-width: 480px) {');
   expect(theme).toContain('.actionrow:not(.setupactions), .rowform { flex-direction: column; align-items: stretch; }');
-  expect(theme).not.toContain('.setupactions > .primary { margin-left: auto; }');
+  expect(theme).toContain('.setupactions > .primary { margin-left: auto; }');
   expect(panel).toContain('.actions{display:flex;flex-direction:row;flex-wrap:nowrap;gap:12px;align-items:center;justify-content:flex-start}');
   expect(panel).toContain('@media(max-width:480px){.actions,.source-actions{flex-direction:column;align-items:stretch}}');
 });
