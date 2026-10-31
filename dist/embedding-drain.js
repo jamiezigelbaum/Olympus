@@ -64870,6 +64870,11 @@ var CODEX_SNIPPET = [
 
 // src/workers/dashboard/pages/local.ts
 init_vocabulary();
+
+// src/workers/dashboard/model-setup.ts
+init_source_dashboard();
+
+// src/workers/dashboard/pages/local.ts
 init_vocabulary();
 var CONNECTOR_SHEET_INTRO = "Copy this prompt, replace the source name, and paste it into your coding " + "agent. The connector playbook it names lives in an Olympus source checkout, not in the installed " + "package — CONTRIBUTING.md says how to get one. A finished connector appears in Olympus like any " + "built-in.";
 var CONNECTOR_PROMPT = [

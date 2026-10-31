@@ -444,7 +444,17 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
     const authorizationUrl = result.body.authorization_url;
     if (result.status < 200 || result.status >= 300 || result.body.ok !== true) {
       closeAuthorizationTab(authorizationTab);
-      say(form, errorMessage(result));
+      const message = errorMessage(result);
+      say(form, message);
+      const setup = form.closest<HTMLElement>('[data-setup-steps]');
+      const step = message.includes('Redo the Set up your account step') ? 0 : message.includes('Redo the Create an API key step') ? 1 : -1;
+      form.querySelector('[data-setup-retry]')?.remove();
+      if (setup && step >= 0) {
+        const retry = document.createElement('button');
+        retry.type = 'button'; retry.className = 'btn'; retry.dataset.setupRetry = String(step);
+        retry.textContent = step === 0 ? 'Go to account and credit' : 'Go to API key';
+        form.append(retry);
+      }
       return;
     }
     if (typeof authorizationUrl === 'string' && authorizationUrl.startsWith('https://')) {
@@ -855,6 +865,28 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
   function onClick(event: Event): void {
     const target = event.target instanceof Element ? event.target : null;
     if (!target || !root.contains(target)) return;
+    const setupOpen = target.closest<HTMLElement>('[data-setup-open]');
+    if (setupOpen) {
+      const url = setupOpen.dataset.setupOpen;
+      if (url && !openAuthorizationExternally(url)) window.open(url, '_blank', 'noopener,noreferrer');
+      return;
+    }
+    const setupControl = target.closest<HTMLElement>('[data-setup-next], [data-setup-back], [data-setup-retry]');
+    if (setupControl) {
+      const sheet = setupControl.closest<HTMLElement>('[data-setup-steps]');
+      if (!sheet) return;
+      const panels = Array.from(sheet.querySelectorAll<HTMLElement>('[data-setup-panel]'));
+      const current = panels.findIndex(panel => !panel.hidden);
+      const next = Math.max(0, Math.min(panels.length - 1, setupControl.hasAttribute('data-setup-retry') ? Number(setupControl.dataset.setupRetry) : current + (setupControl.hasAttribute('data-setup-next') ? 1 : -1)));
+      panels.forEach((panel, index) => { panel.hidden = index !== next; });
+      const counter = sheet.querySelector<HTMLElement>('[data-setup-counter]');
+      if (counter) counter.textContent = `Step ${next + 1} of ${panels.length}`;
+      const progress = sheet.querySelector<HTMLProgressElement>('[data-setup-progress]');
+      if (progress) progress.value = next + 1;
+      const forward = sheet.querySelector<HTMLElement>('[data-setup-next]');
+      if (forward) forward.hidden = next === panels.length - 1;
+      return;
+    }
     // A row's ⋯ menu closes when anything else is clicked, and after one of
     // its own items is chosen.
     const menu = target.closest('details.rowmenu');

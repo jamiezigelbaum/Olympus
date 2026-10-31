@@ -241,6 +241,8 @@ export interface DashboardCallbackRegistration {
 
 export interface DashboardSetupStep {
   text: string;
+  title?: string;
+  redirect_uri?: boolean;
   link?: {
     label: string;
     url: string;
@@ -4385,15 +4387,15 @@ function oauthSetupInstructions(
   if (source === 'dropbox') {
     return {
       plain_intro: 'To read your Dropbox files, Olympus needs your Dropbox App key (Dropbox\'s name for the OAuth client id), shown on the app\'s Settings tab in your Dropbox developer account. Dropbox uses PKCE here, so there is no app secret to paste.',
-      agent_prompt: 'Help me connect Dropbox to Olympus. Walk me through creating a Dropbox app at https://www.dropbox.com/developers/apps (Scoped access, the folder access I want, named Olympus) or reusing my existing Olympus app, enabling the files.metadata.read and files.content.read permissions, and adding the redirect URI shown on the Olympus dashboard\'s Dropbox card under the app\'s OAuth 2 redirect URIs. Then give me the App key so I can paste it into the Client ID field on that card and press Connect. Dropbox uses PKCE, so no app secret is needed. Do not ask me to edit files, configuration, or code.',
+      agent_prompt: 'Help me connect Dropbox to Olympus. Walk me through creating a Dropbox app at https://www.dropbox.com/developers/apps (Scoped access, the folder access I want, named Olympus) or reusing my existing Olympus app, enabling the files.metadata.read, files.content.read, sharing.read and account_info.read permissions, and adding the redirect URI shown on the Olympus dashboard\'s Dropbox card under the app\'s OAuth 2 redirect URIs. Then give me the App key so I can paste it into the Client ID field on that card and press Connect. Dropbox uses PKCE, so no app secret is needed. Do not ask me to edit files, configuration, or code.',
       provider_console_url: 'https://www.dropbox.com/developers/apps',
       diy_summary: 'Or set it up yourself (about 5 minutes)',
       diy_steps: [
-        { text: 'Sign in to Dropbox Developers.', link: { label: 'Open Dropbox apps', url: 'https://www.dropbox.com/developers/apps' } },
-        { text: 'Create an app named Olympus, or choose the existing Olympus app.' },
-        { text: 'Choose the access level you want Olympus to read.' },
-        { text: 'Register the exact redirect URI shown on this card.' },
-        { text: 'Copy the app key into the Client ID field. Dropbox uses PKCE here, so there is no client secret to paste.' },
+        { title: 'Create your app', text: 'Choose Scoped access and name the app Olympus.', link: { label: 'Dropbox', url: 'https://www.dropbox.com/developers/apps/create' } },
+        { title: 'Choose access', text: 'Choose App folder to read only that folder, or Full Dropbox to choose from your whole Dropbox.', link: { label: 'Dropbox', url: 'https://www.dropbox.com/developers/apps' } },
+        { title: 'Enable permissions', text: 'On the Permissions tab enable files.metadata.read, files.content.read, sharing.read, and account_info.read, then save.', link: { label: 'Dropbox', url: 'https://www.dropbox.com/developers/apps' } },
+        { title: 'Register the redirect URI', text: 'On Settings, add this exact URI under OAuth 2 redirect URIs.', redirect_uri: true, link: { label: 'Dropbox', url: 'https://www.dropbox.com/developers/apps' } },
+        { title: 'Add your app key', text: 'Copy the App key from Settings and paste it here. No app secret is needed.' },
       ],
       secret_shown_once: false,
       // Dropbox calls the client id the "App key"; the field says so, because a
@@ -4422,6 +4424,12 @@ function oauthSetupInstructions(
   };
 }
 
+export const VENICE_SETUP_STEPS: DashboardSetupStep[] = [
+  { title: 'Set up your account', text: 'Create or sign in to your Venice account and add credit.', link: { label: 'Venice', url: 'https://venice.ai/settings/api' } },
+  { title: 'Create an API key', text: 'Create an API key and copy it.', link: { label: 'Venice', url: 'https://venice.ai/settings/api' } },
+  { title: 'Add your API key', text: 'Paste your API key here. It stays on this computer.' },
+];
+
 function apiKeySetupInstructions(source: DashboardApiKeySource): DashboardSetupInstructions {
   const tokenField: DashboardConnectField = {
     name: 'api_key',
@@ -4449,11 +4457,7 @@ function apiKeySetupInstructions(source: DashboardApiKeySource): DashboardSetupI
     agent_prompt: 'Set up Venice for Olympus and walk me through it step by step.',
     provider_console_url: 'https://venice.ai',
     diy_summary: 'Or get the API key yourself (about 2 minutes)',
-    diy_steps: [
-      { text: 'Sign in to Venice.', link: { label: 'Open Venice', url: 'https://venice.ai' } },
-      { text: 'Open your API key or developer settings.' },
-      { text: 'Create or copy an API key, then paste it into the dashboard field below and click Connect.' },
-    ],
+    diy_steps: VENICE_SETUP_STEPS,
     secret_shown_once: false,
     fields: [tokenField],
   };
