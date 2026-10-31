@@ -7,8 +7,8 @@ test('local-model sheet offers explicit discovery and synthetic checks while pre
   expect(html).toContain('Detect local models');
   expect(html).toContain('name="base_url"');
   expect(html).toContain('name="answer_model"');
-  expect(html).toContain('name="embedding_model"');
-  expect(html).toContain('Test selected models');
+  expect(html).not.toContain('name="embedding_model"');
+  expect(html).toContain('Test answer model');
   expect(html).toContain('Testing does not change your configured models');
   expect(html).toContain(LOCAL_MODELS_SETUP_PROMPT);
 });

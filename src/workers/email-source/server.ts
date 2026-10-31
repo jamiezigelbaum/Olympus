@@ -1438,11 +1438,9 @@ async function createSovereigntyAnalystMap(input: {
 }
 
 /**
- * The built-in private model backs the Private lane when no other private
- * analyst is configured: with no constructible Venice member in the secure
- * pool, each local secure-pool member falls back to the built-in model when
- * its own model service is not running. A configured, running local service
- * is always used first, and a configured Venice member leaves the pool as is.
+ * Each local Private-pool member falls back to the built-in model when its
+ * configured service is not running, including when Venice is available.
+ * A configured, running local service is used first.
  * Returns whether the built-in model was wired in.
  */
 export function applyBuiltInPrivateAnalyst(
@@ -1455,7 +1453,6 @@ export function applyBuiltInPrivateAnalyst(
     const entry = map.get(id);
     return entry ? [[id, entry] as const] : [];
   });
-  if (members.some(([, entry]) => entry.backend === 'venice')) return false;
   let wired = false;
   for (const [id, entry] of members) {
     if (entry.backend !== 'local') continue;
@@ -1468,7 +1465,7 @@ export function applyBuiltInPrivateAnalyst(
 /**
  * Whether the built-in model answers for this Private-pool analyst when its
  * server is down, as applyBuiltInPrivateAnalyst wires it: a local member of a
- * pool without Venice. Judged by install state, not by "prepared in this
+ * pool. Judged by install state, not by "prepared in this
  * process": boot re-verifies the model while the first readiness check runs,
  * and that check locked every source (#591).
  */
@@ -1476,10 +1473,10 @@ export function builtInBacksPrivateAnalyst(
   id: string,
   state: ReturnType<BuiltInAnalystModel['status']>['state'] | undefined,
   members: readonly { id: string; profile: SovereigntyModelProfile }[],
-  availableIds?: ReadonlySet<string>,
+  _availableIds?: ReadonlySet<string>,
 ): boolean {
   if (!state || state === 'failed') return false;
-  return members.some((member) => member.id === id) && !members.some((member) => member.profile.provider === 'venice' && (!availableIds || availableIds.has(member.id)));
+  return members.some((member) => member.id === id && member.profile.provider === 'local-openai-compatible');
 }
 
 /** Whether this computer's configured local answer model answers /models within a few seconds. */

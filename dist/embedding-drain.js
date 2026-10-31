@@ -64980,6 +64980,7 @@ init_vocabulary();
 
 // src/workers/dashboard/model-setup.ts
 init_privacy_language();
+init_source_dashboard();
 
 // src/workers/dashboard/pages/local.ts
 init_vocabulary();

@@ -614,6 +614,20 @@ function prepareOAuthSourceConnection(
   };
 }
 
+export async function checkDropboxConnection(accessToken: string, fetchImpl: OAuthFetch, timeoutMs: number): Promise<void> {
+  let response: Response;
+  try {
+    response = await fetchWithTimeout(fetchImpl, 'https://api.dropboxapi.com/2/files/list_folder', {
+      method: 'POST', headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path: '', limit: 1 }), redirect: 'error',
+    }, timeoutMs);
+  } catch {
+    throw new Error('Dropbox could not be reached for the final check. No credentials were stored; try again.');
+  }
+  if (response.status === 403) throw new Error('Dropbox refused the list check. Redo the Enable permissions step and sign in again. No credentials were stored.');
+  if (!response.ok) throw new Error('Dropbox could not complete the list check. No credentials were stored; try again.');
+}
+
 async function completeOAuthSourceConnection(
   prepared: PreparedOAuthSourceConnection,
   code: string,
@@ -652,6 +666,9 @@ async function completeOAuthSourceConnection(
   });
   if (!token.refreshToken) throw new Error('OAuth provider did not return a refresh token. Re-run connect and request offline access.');
   const refreshToken = token.refreshToken;
+  if (prepared.options.source === 'dropbox') {
+    await checkDropboxConnection(token.accessToken, prepared.options.fetch ?? fetch, prepared.tokenExchangeTimeoutMs);
+  }
 
   let xUserId: string | undefined;
   if (prepared.options.source === 'x') {
@@ -1284,28 +1301,32 @@ async function validatePublicApiKeySource(options: {
     return;
   }
 
-  const url = options.veniceModelsUrl
-    ?? process.env.OLYMPUS_CONNECT_VENICE_MODELS_URL
-    ?? 'https://api.venice.ai/api/v1/models';
+  await validateVeniceKey(options);
+
+}
+
+async function validateVeniceKey(options: { apiKey: string; fetchImpl: OAuthFetch; veniceModelsUrl?: string; timeoutMs: number }): Promise<void> {
+  const url = options.veniceModelsUrl ?? process.env.OLYMPUS_CONNECT_VENICE_MODELS_URL ?? 'https://api.venice.ai/api/v1/api_keys/rate_limits';
   let response: Response;
   try {
     response = await fetchWithTimeout(modelEndpointFetch(options.fetchImpl), url, {
-      method: 'GET',
-      headers: { Authorization: `Bearer ${options.apiKey}`, Accept: 'application/json' },
-      // The key rides this request: a redirect is refused, never followed.
-      redirect: 'error',
+      method: 'GET', headers: { Authorization: `Bearer ${options.apiKey}`, Accept: 'application/json' }, redirect: 'error',
     }, options.timeoutMs);
   } catch (error) {
-    // A zkAPI-daemon refusal is a configuration problem, not an outage.
     if (isZkapiDaemonEndpointRefusal(error)) throw error;
-    if (isAbortError(error)) {
-      throw new Error('Venice API key validation timed out. No credentials were stored; try again when Venice is reachable.');
-    }
-    throw new Error('Could not validate the Venice API key. No credentials were stored; try again when Venice is reachable.');
+    throw new Error('Venice could not be reached to check your key. No credentials were stored; try again.');
   }
-  if (!response.ok) {
-    throw new Error('Venice rejected the API key. Paste a current Venice API key and try again.');
-  }
+  if (response.status === 401 || response.status === 403) throw new Error('Venice could not accept this key. Redo the Create an API key step and check its restrictions. No credentials were stored.');
+  if (!response.ok) throw new Error('Venice could not check the key now. No credentials were stored; try again.');
+  let data: any;
+  try { data = (await response.json() as { data?: unknown }).data; } catch { throw new Error('Venice returned an unreadable check. No credentials were stored; try again.'); }
+  if (!data || typeof data !== 'object' || typeof data.accessPermitted !== 'boolean') throw new Error('Venice returned an incomplete check. No credentials were stored; try again.');
+  if (!data.accessPermitted) throw new Error('Venice does not permit this key. Redo the Create an API key step and check its restrictions. No credentials were stored.');
+  const balances = data.balances;
+  if (!balances || typeof balances !== 'object') throw new Error('Venice did not report a balance. No credentials were stored; try again.');
+  const amounts = ['USD', 'DIEM', 'BUNDLED_CREDITS'].map(key => balances[key]);
+  if (!amounts.every(value => typeof value === 'number' && Number.isFinite(value))) throw new Error('Venice returned an incomplete balance. No credentials were stored; try again.');
+  if (!amounts.some(value => value > 0)) throw new Error('Venice reports no credit. Redo the Set up your account step and add credit. No credentials were stored.');
 }
 
 // OLYMPUS_PUBLIC_RUNTIME_EXCLUDE_START
@@ -1468,31 +1489,8 @@ async function validateApiKeySource(options: {
     return;
   }
 
-  const url = options.veniceModelsUrl
-    ?? process.env.OLYMPUS_CONNECT_VENICE_MODELS_URL
-    ?? 'https://api.venice.ai/api/v1/models';
-  let response: Response;
-  try {
-    response = await fetchWithTimeout(modelEndpointFetch(options.fetchImpl), url, {
-      method: 'GET',
-      headers: {
-        Authorization: `Bearer ${options.apiKey}`,
-        Accept: 'application/json',
-      },
-      // The key rides this request: a redirect is refused, never followed.
-      redirect: 'error',
-    }, options.timeoutMs);
-  } catch (error) {
-    // A zkAPI-daemon refusal is a configuration problem, not an outage.
-    if (isZkapiDaemonEndpointRefusal(error)) throw error;
-    if (isAbortError(error)) {
-      throw new Error('Venice API key validation timed out. No credentials were stored; try again when Venice is reachable.');
-    }
-    throw new Error('Could not validate the Venice API key. No credentials were stored; try again when Venice is reachable.');
-  }
-  if (!response.ok) {
-    throw new Error('Venice rejected the API key. Paste a current Venice API key and try again.');
-  }
+  await validateVeniceKey(options);
+
 }
 
 function normalizeNotionBaseUrl(baseUrl: string): string {

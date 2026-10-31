@@ -8,3 +8,9 @@ test('new install presents the Private-answer choices with local-first recommend
   expect(html).toContain('Recommended');
   for (const choice of ['local-first', 'local-only', 'private-cloud-only', 'no-sensitive']) expect(html).toContain(`value="${choice}"`);
 });
+
+
+test('local model setup never offers an embedding model', () => {
+  const html = renderModelSetup({ ready: true, checked_at: '', cards: [] });
+  expect(html).not.toContain('name="embedding_model"');
+});

@@ -327,7 +327,7 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
     if (form.hasAttribute('data-model-check')) return { action: 'check_model_setup' };
     const body = formRecord(form);
     if (form.hasAttribute('data-local-models-discover')) return { action: 'discover_local_models', base_url: body.base_url ?? '' };
-    if (form.hasAttribute('data-local-models-test')) return { action: 'test_local_models', base_url: body.base_url ?? '', answer_model: body.answer_model ?? '', embedding_model: body.embedding_model ?? '' };
+    if (form.hasAttribute('data-local-models-test')) return { action: 'test_local_models', base_url: body.base_url ?? '', answer_model: body.answer_model ?? '' };
     if (form.hasAttribute('data-first-run-privacy')) return { action: 'save_first_run_privacy', choice: body.choice ?? '' };
     const connect = form.dataset.connectKind;
     if (connect === 'oauth') {
@@ -447,7 +447,17 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
     const authorizationUrl = result.body.authorization_url;
     if (result.status < 200 || result.status >= 300 || result.body.ok !== true) {
       closeAuthorizationTab(authorizationTab);
-      say(form, errorMessage(result));
+      const message = errorMessage(result);
+      say(form, message);
+      const setup = form.closest<HTMLElement>('[data-setup-steps]');
+      const step = message.includes('Redo the Set up your account step') ? 0 : message.includes('Redo the Create an API key step') ? 1 : -1;
+      form.querySelector('[data-setup-retry]')?.remove();
+      if (setup && step >= 0) {
+        const retry = document.createElement('button');
+        retry.type = 'button'; retry.className = 'btn'; retry.dataset.setupRetry = String(step);
+        retry.textContent = step === 0 ? 'Go to account and credit' : 'Go to API key';
+        form.append(retry);
+      }
       return;
     }
     if (params.action === 'discover_local_models') {
@@ -545,7 +555,7 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
             });
           });
           testForm.hidden = false;
-          say(testForm, `Using ${item.baseUrl}. Choose both models, then test.`);
+          say(testForm, `Using ${item.baseUrl}. Choose an answer model, then test.`);
         };
         const button = document.createElement('button');
         button.type = 'button';
@@ -557,7 +567,7 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
       }
       output.append(row);
     });
-    say(form, selected ? 'Server detected. Select models below.' : 'No usable local models found. Olympus does not download models.');
+    say(form, selected ? 'Server detected. Select an answer model below.' : 'No usable local models found. Olympus does not download models.');
   }
 
   /**
@@ -924,6 +934,28 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
   function onClick(event: Event): void {
     const target = event.target instanceof Element ? event.target : null;
     if (!target || !root.contains(target)) return;
+    const setupOpen = target.closest<HTMLElement>('[data-setup-open]');
+    if (setupOpen) {
+      const url = setupOpen.dataset.setupOpen;
+      if (url && !openAuthorizationExternally(url)) window.open(url, '_blank', 'noopener,noreferrer');
+      return;
+    }
+    const setupControl = target.closest<HTMLElement>('[data-setup-next], [data-setup-back], [data-setup-retry]');
+    if (setupControl) {
+      const sheet = setupControl.closest<HTMLElement>('[data-setup-steps]');
+      if (!sheet) return;
+      const panels = Array.from(sheet.querySelectorAll<HTMLElement>('[data-setup-panel]'));
+      const current = panels.findIndex(panel => !panel.hidden);
+      const next = Math.max(0, Math.min(panels.length - 1, setupControl.hasAttribute('data-setup-retry') ? Number(setupControl.dataset.setupRetry) : current + (setupControl.hasAttribute('data-setup-next') ? 1 : -1)));
+      panels.forEach((panel, index) => { panel.hidden = index !== next; });
+      const counter = sheet.querySelector<HTMLElement>('[data-setup-counter]');
+      if (counter) counter.textContent = `Step ${next + 1} of ${panels.length}`;
+      const progress = sheet.querySelector<HTMLProgressElement>('[data-setup-progress]');
+      if (progress) progress.value = next + 1;
+      const forward = sheet.querySelector<HTMLElement>('[data-setup-next]');
+      if (forward) forward.hidden = next === panels.length - 1;
+      return;
+    }
     // A row's ⋯ menu closes when anything else is clicked, and after one of
     // its own items is chosen.
     const menu = target.closest('details.rowmenu');

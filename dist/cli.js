@@ -16345,6 +16345,23 @@ function prepareOAuthSourceConnection(options, redirectUri, pkce = createOAuthPk
     startedAt: now()
   };
 }
+async function checkDropboxConnection(accessToken, fetchImpl, timeoutMs) {
+  let response;
+  try {
+    response = await fetchWithTimeout(fetchImpl, "https://api.dropboxapi.com/2/files/list_folder", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ path: "", limit: 1 }),
+      redirect: "error"
+    }, timeoutMs);
+  } catch {
+    throw new Error("Dropbox could not be reached for the final check. No credentials were stored; try again.");
+  }
+  if (response.status === 403)
+    throw new Error("Dropbox refused the list check. Redo the Enable permissions step and sign in again. No credentials were stored.");
+  if (!response.ok)
+    throw new Error("Dropbox could not complete the list check. No credentials were stored; try again.");
+}
 async function completeOAuthSourceConnection(prepared, code) {
   const usesGooglePublisherExchange = isGooglePublisherExchangeClient(prepared.options.source, prepared.clientId);
   const shippedDesktopSecret = isGoogleOAuthSource(prepared.options.source) ? googleDesktopClientSecret(prepared.clientId) : undefined;
@@ -16364,6 +16381,9 @@ async function completeOAuthSourceConnection(prepared, code) {
   if (!token.refreshToken)
     throw new Error("OAuth provider did not return a refresh token. Re-run connect and request offline access.");
   const refreshToken = token.refreshToken;
+  if (prepared.options.source === "dropbox") {
+    await checkDropboxConnection(token.accessToken, prepared.options.fetch ?? fetch, prepared.tokenExchangeTimeoutMs);
+  }
   let xUserId;
   if (prepared.options.source === "x") {
     xUserId = await fetchXUserId({
@@ -16771,10 +16791,10 @@ async function validateGeminiApiKey(options) {
 }
 async function validatePublicApiKeySource(options) {
   if (options.source === "readwise") {
-    const url2 = options.readwiseAuthUrl ?? process.env.OLYMPUS_CONNECT_READWISE_AUTH_URL ?? "https://readwise.io/api/v2/auth/";
-    let response2;
+    const url = options.readwiseAuthUrl ?? process.env.OLYMPUS_CONNECT_READWISE_AUTH_URL ?? "https://readwise.io/api/v2/auth/";
+    let response;
     try {
-      response2 = await fetchWithTimeout(modelEndpointFetch(options.fetchImpl), url2, {
+      response = await fetchWithTimeout(modelEndpointFetch(options.fetchImpl), url, {
         method: "GET",
         headers: { Authorization: `Token ${options.apiKey}`, Accept: "application/json" }
       }, options.timeoutMs);
@@ -16786,12 +16806,15 @@ async function validatePublicApiKeySource(options) {
       }
       throw new Error("Could not validate the Readwise token. No credentials were stored; try again when Readwise is reachable.");
     }
-    if (response2.status !== 204) {
+    if (response.status !== 204) {
       throw new Error("Readwise rejected the API token. Paste a current Readwise access token and try again.");
     }
     return;
   }
-  const url = options.veniceModelsUrl ?? process.env.OLYMPUS_CONNECT_VENICE_MODELS_URL ?? "https://api.venice.ai/api/v1/models";
+  await validateVeniceKey(options);
+}
+async function validateVeniceKey(options) {
+  const url = options.veniceModelsUrl ?? process.env.OLYMPUS_CONNECT_VENICE_MODELS_URL ?? "https://api.venice.ai/api/v1/api_keys/rate_limits";
   let response;
   try {
     response = await fetchWithTimeout(modelEndpointFetch(options.fetchImpl), url, {
@@ -16802,14 +16825,30 @@ async function validatePublicApiKeySource(options) {
   } catch (error) {
     if (isZkapiDaemonEndpointRefusal(error))
       throw error;
-    if (isAbortError(error)) {
-      throw new Error("Venice API key validation timed out. No credentials were stored; try again when Venice is reachable.");
-    }
-    throw new Error("Could not validate the Venice API key. No credentials were stored; try again when Venice is reachable.");
+    throw new Error("Venice could not be reached to check your key. No credentials were stored; try again.");
   }
-  if (!response.ok) {
-    throw new Error("Venice rejected the API key. Paste a current Venice API key and try again.");
+  if (response.status === 401 || response.status === 403)
+    throw new Error("Venice could not accept this key. Redo the Create an API key step and check its restrictions. No credentials were stored.");
+  if (!response.ok)
+    throw new Error("Venice could not check the key now. No credentials were stored; try again.");
+  let data;
+  try {
+    data = (await response.json()).data;
+  } catch {
+    throw new Error("Venice returned an unreadable check. No credentials were stored; try again.");
   }
+  if (!data || typeof data !== "object" || typeof data.accessPermitted !== "boolean")
+    throw new Error("Venice returned an incomplete check. No credentials were stored; try again.");
+  if (!data.accessPermitted)
+    throw new Error("Venice does not permit this key. Redo the Create an API key step and check its restrictions. No credentials were stored.");
+  const balances = data.balances;
+  if (!balances || typeof balances !== "object")
+    throw new Error("Venice did not report a balance. No credentials were stored; try again.");
+  const amounts = ["USD", "DIEM", "BUNDLED_CREDITS"].map((key) => balances[key]);
+  if (!amounts.every((value) => typeof value === "number" && Number.isFinite(value)))
+    throw new Error("Venice returned an incomplete balance. No credentials were stored; try again.");
+  if (!amounts.some((value) => value > 0))
+    throw new Error("Venice reports no credit. Redo the Set up your account step and add credit. No credentials were stored.");
 }
 async function fetchXUserId(options) {
   const userUrl = new URL("/2/users/me", options.tokenUrl).toString();
@@ -93876,6 +93915,7 @@ __export(exports_source_dashboard, {
   dashboardGuidedSessionAgentPrompt: () => dashboardGuidedSessionAgentPrompt,
   dashboardArchivesImportedLabel: () => dashboardArchivesImportedLabel,
   buildSourceDashboardViewModel: () => buildSourceDashboardViewModel,
+  VENICE_SETUP_STEPS: () => VENICE_SETUP_STEPS,
   SqliteSourceDashboardHistory: () => SqliteSourceDashboardHistory,
   PUBLISHER_ADVANCED_BYO_SUMMARY: () => PUBLISHER_ADVANCED_BYO_SUMMARY,
   DASHBOARD_UNSETTLED_CUSTODY_LABELS: () => DASHBOARD_UNSETTLED_CUSTODY_LABELS,
@@ -95296,15 +95336,15 @@ function oauthSetupInstructions(source, googleCloudProjectId, redirectBaseUrl) {
   if (source === "dropbox") {
     return {
       plain_intro: "To read your Dropbox files, Olympus needs your Dropbox App key (Dropbox's name for the OAuth client id), shown on the app's Settings tab in your Dropbox developer account. Dropbox uses PKCE here, so there is no app secret to paste.",
-      agent_prompt: "Help me connect Dropbox to Olympus. Walk me through creating a Dropbox app at https://www.dropbox.com/developers/apps (Scoped access, the folder access I want, named Olympus) or reusing my existing Olympus app, enabling the files.metadata.read and files.content.read permissions, and adding the redirect URI shown on the Olympus dashboard's Dropbox card under the app's OAuth 2 redirect URIs. Then give me the App key so I can paste it into the Client ID field on that card and press Connect. Dropbox uses PKCE, so no app secret is needed. Do not ask me to edit files, configuration, or code.",
+      agent_prompt: "Help me connect Dropbox to Olympus. Walk me through creating a Dropbox app at https://www.dropbox.com/developers/apps (Scoped access, the folder access I want, named Olympus) or reusing my existing Olympus app, enabling the files.metadata.read, files.content.read, sharing.read and account_info.read permissions, and adding the redirect URI shown on the Olympus dashboard's Dropbox card under the app's OAuth 2 redirect URIs. Then give me the App key so I can paste it into the Client ID field on that card and press Connect. Dropbox uses PKCE, so no app secret is needed. Do not ask me to edit files, configuration, or code.",
       provider_console_url: "https://www.dropbox.com/developers/apps",
       diy_summary: "Or set it up yourself (about 5 minutes)",
       diy_steps: [
-        { text: "Sign in to Dropbox Developers.", link: { label: "Open Dropbox apps", url: "https://www.dropbox.com/developers/apps" } },
-        { text: "Create an app named Olympus, or choose the existing Olympus app." },
-        { text: "Choose the access level you want Olympus to read." },
-        { text: "Register the exact redirect URI shown on this card." },
-        { text: "Copy the app key into the Client ID field. Dropbox uses PKCE here, so there is no client secret to paste." }
+        { title: "Create your app", text: "Choose Scoped access and name the app Olympus.", link: { label: "Dropbox", url: "https://www.dropbox.com/developers/apps/create" } },
+        { title: "Choose access", text: "Choose App folder to read only that folder, or Full Dropbox to choose from your whole Dropbox.", link: { label: "Dropbox", url: "https://www.dropbox.com/developers/apps" } },
+        { title: "Enable permissions", text: "On the Permissions tab enable files.metadata.read, files.content.read, sharing.read, and account_info.read, then save.", link: { label: "Dropbox", url: "https://www.dropbox.com/developers/apps" } },
+        { title: "Register the redirect URI", text: "On Settings, add this exact URI under OAuth 2 redirect URIs.", redirect_uri: true, link: { label: "Dropbox", url: "https://www.dropbox.com/developers/apps" } },
+        { title: "Add your app key", text: "Copy the App key from Settings and paste it here. No app secret is needed." }
       ],
       secret_shown_once: false,
       fields: [{ ...clientIdField, label: "App key (Client ID)" }]
@@ -95353,11 +95393,7 @@ function apiKeySetupInstructions(source) {
     agent_prompt: "Set up Venice for Olympus and walk me through it step by step.",
     provider_console_url: "https://venice.ai",
     diy_summary: "Or get the API key yourself (about 2 minutes)",
-    diy_steps: [
-      { text: "Sign in to Venice.", link: { label: "Open Venice", url: "https://venice.ai" } },
-      { text: "Open your API key or developer settings." },
-      { text: "Create or copy an API key, then paste it into the dashboard field below and click Connect." }
-    ],
+    diy_steps: VENICE_SETUP_STEPS,
     secret_shown_once: false,
     fields: [tokenField]
   };
@@ -96137,7 +96173,7 @@ function titleCase(value) {
 function round12(value) {
   return Math.round(value * 10) / 10;
 }
-var DASHBOARD_CONNECTION_REGISTRY_UNREADABLE_LABEL = "connection state unreadable", DASHBOARD_UNPAIRED_LABEL = "unpaired", DASHBOARD_UNPAIR_STATE_UNREADABLE_LABEL = "unpair state unreadable", DASHBOARD_UNPAIR_INCOMPLETE_LABEL = "Unpair incomplete — manual cleanup required", DASHBOARD_UNSETTLED_CUSTODY_LABELS, DASHBOARD_FIRST_SYNC_FRESHNESS_LABEL = "Waiting for the first sync", DASHBOARD_PERSISTENT_FAILURE_RUNS = 3, DASHBOARD_CREDENTIAL_CONTENTION_KINDS, DASHBOARD_SAVED_SECRET_FIELD_VALUE = "olympus-saved-secret-unchanged", DASHBOARD_MANUAL_SYNC_SHOWN_MS, DASHBOARD_MANUAL_SYNC_MIN_INTERVAL_MS = 60000, CAPTURE_MEDIA_WAITING_FOR_DISK_COUNT = "capture_media_waiting_for_disk", DASHBOARD_SQLITE_STORE_ID = "source-dashboard", MIN_PROGRESS_WINDOW_MS, SAMPLE_RETENTION_MS2, MAX_SAMPLES_PER_CORPUS2 = 720, DASHBOARD_NEEDS_REVIEW_REASONS, DASHBOARD_SENSITIVITY_TIERS, ARCHIVE_IMPORTS_CARD_ID = "archive.imports", LIVE_ARCHIVE_CARD_IDS, DASHBOARD_SUPPORTED_SOURCES, VENICE_ANSWER_LANE, CARD_UNREADABLE_NAMES = 5, TIER_MIGRATION_STATE_LABELS, DASHBOARD_NO_ARCHIVES_LABEL = "no archives imported yet", DASHBOARD_ARCHIVES_IMPORTING_LABEL = "importing", DASHBOARD_ARCHIVES_NOT_RUNNING_LABEL = "imports can't run", DASHBOARD_ARCHIVES_UNREADABLE_LABEL = "can't read the list of imported archives", PUBLISHER_ADVANCED_BYO_SUMMARY = "Use my own app instead", CAPTURE_STATE_RANK, OPERATOR_PARK_EXPLAINS_STALENESS_HOURS = 24, DASHBOARD_UNREADABLE_ALARM_SHARE = 0.05, DASHBOARD_TRUST_DOMAINS;
+var DASHBOARD_CONNECTION_REGISTRY_UNREADABLE_LABEL = "connection state unreadable", DASHBOARD_UNPAIRED_LABEL = "unpaired", DASHBOARD_UNPAIR_STATE_UNREADABLE_LABEL = "unpair state unreadable", DASHBOARD_UNPAIR_INCOMPLETE_LABEL = "Unpair incomplete — manual cleanup required", DASHBOARD_UNSETTLED_CUSTODY_LABELS, DASHBOARD_FIRST_SYNC_FRESHNESS_LABEL = "Waiting for the first sync", DASHBOARD_PERSISTENT_FAILURE_RUNS = 3, DASHBOARD_CREDENTIAL_CONTENTION_KINDS, DASHBOARD_SAVED_SECRET_FIELD_VALUE = "olympus-saved-secret-unchanged", DASHBOARD_MANUAL_SYNC_SHOWN_MS, DASHBOARD_MANUAL_SYNC_MIN_INTERVAL_MS = 60000, CAPTURE_MEDIA_WAITING_FOR_DISK_COUNT = "capture_media_waiting_for_disk", DASHBOARD_SQLITE_STORE_ID = "source-dashboard", MIN_PROGRESS_WINDOW_MS, SAMPLE_RETENTION_MS2, MAX_SAMPLES_PER_CORPUS2 = 720, DASHBOARD_NEEDS_REVIEW_REASONS, DASHBOARD_SENSITIVITY_TIERS, ARCHIVE_IMPORTS_CARD_ID = "archive.imports", LIVE_ARCHIVE_CARD_IDS, DASHBOARD_SUPPORTED_SOURCES, VENICE_ANSWER_LANE, CARD_UNREADABLE_NAMES = 5, TIER_MIGRATION_STATE_LABELS, DASHBOARD_NO_ARCHIVES_LABEL = "no archives imported yet", DASHBOARD_ARCHIVES_IMPORTING_LABEL = "importing", DASHBOARD_ARCHIVES_NOT_RUNNING_LABEL = "imports can't run", DASHBOARD_ARCHIVES_UNREADABLE_LABEL = "can't read the list of imported archives", PUBLISHER_ADVANCED_BYO_SUMMARY = "Use my own app instead", VENICE_SETUP_STEPS, CAPTURE_STATE_RANK, OPERATOR_PARK_EXPLAINS_STALENESS_HOURS = 24, DASHBOARD_UNREADABLE_ALARM_SHARE = 0.05, DASHBOARD_TRUST_DOMAINS;
 var init_source_dashboard = __esm(() => {
   init_olympus_layout();
   init_google_handle_compatibility();
@@ -96460,6 +96496,11 @@ var init_source_dashboard = __esm(() => {
     stopped: "Tier migration paused — run it again to resume",
     done: "Tier migration done — previous copies kept, hidden, until you purge them"
   };
+  VENICE_SETUP_STEPS = [
+    { title: "Set up your account", text: "Create or sign in to your Venice account and add credit.", link: { label: "Venice", url: "https://venice.ai/settings/api" } },
+    { title: "Create an API key", text: "Create an API key and copy it.", link: { label: "Venice", url: "https://venice.ai/settings/api" } },
+    { title: "Add your API key", text: "Paste your API key here. It stays on this computer." }
+  ];
   CAPTURE_STATE_RANK = {
     fresh: 0,
     awaiting: 1,
@@ -137476,7 +137517,7 @@ class LocalModelDiscovery {
       try {
         const ids = await this.models(normalized);
         const models = ids.map((id) => ({ id, allowed: !isCloudForwardingModelId(id), ...isCloudForwardingModelId(id) ? { reason: "This cloud model can forward text off this computer and cannot be used as a local model." } : {} }));
-        return { provider, baseUrl: normalized.href.replace(/\/$/, ""), models, working: true, step: "models", detail: models.length ? "Choose an answer model and an embedding model." : "The server returned no installed models. Olympus does not download models." };
+        return { provider, baseUrl: normalized.href.replace(/\/$/, ""), models, working: true, step: "models", detail: models.length ? "Choose an answer model." : "The server returned no installed models. Olympus does not download models." };
       } catch (error2) {
         return { provider, baseUrl: normalized.href.replace(/\/$/, ""), models: [], working: false, step: "models", detail: failureDetail(error2) };
       }
@@ -137489,17 +137530,11 @@ class LocalModelDiscovery {
       step = "answer";
       const answer = modelId(selection.answerModel);
       assertLocalModelIdNotCloudForwarding("Answer model", answer);
-      step = "embedding";
-      const embedding = modelId(selection.embeddingModel);
-      assertLocalModelIdNotCloudForwarding("Embedding model", embedding);
       step = "models";
       const listed = await this.models(base);
       step = "answer";
       if (!listed.includes(answer))
         throw new CheckError("The selected answer model is not listed by this server. Refresh the models and choose an installed model.");
-      step = "embedding";
-      if (!listed.includes(embedding))
-        throw new CheckError("The selected embedding model is not listed by this server. Refresh the models and choose an installed model.");
       step = "answer";
       const completion = await this.request(base, "chat/completions", {
         model: answer,
@@ -137511,13 +137546,7 @@ class LocalModelDiscovery {
       if (!record4(message2) || typeof message2.content !== "string" || !message2.content.trim()) {
         throw new CheckError("The answer model did not return text. Choose a model that supports chat completions.");
       }
-      step = "embedding";
-      const result = await this.request(base, "embeddings", { model: embedding, input: "Olympus synthetic local model check." });
-      const vector = record4(result) && Array.isArray(result.data) && record4(result.data[0]) ? result.data[0].embedding : undefined;
-      if (!Array.isArray(vector) || !vector.length || !vector.every((value2) => typeof value2 === "number" && Number.isFinite(value2))) {
-        throw new CheckError("The embedding model did not return a valid vector. Choose a model that supports embeddings.");
-      }
-      return { working: true, step: "complete", detail: "Working", embeddingDimension: vector.length };
+      return { working: true, step: "complete", detail: "Working" };
     } catch (error2) {
       return { working: false, step, detail: failureDetail(error2) };
     }
@@ -143414,7 +143443,7 @@ function mountDashboardController(options) {
     if (form.hasAttribute("data-local-models-discover"))
       return { action: "discover_local_models", base_url: body.base_url ?? "" };
     if (form.hasAttribute("data-local-models-test"))
-      return { action: "test_local_models", base_url: body.base_url ?? "", answer_model: body.answer_model ?? "", embedding_model: body.embedding_model ?? "" };
+      return { action: "test_local_models", base_url: body.base_url ?? "", answer_model: body.answer_model ?? "" };
     if (form.hasAttribute("data-first-run-privacy"))
       return { action: "save_first_run_privacy", choice: body.choice ?? "" };
     const connect = form.dataset.connectKind;
@@ -143527,7 +143556,19 @@ function mountDashboardController(options) {
     const authorizationUrl = result.body.authorization_url;
     if (result.status < 200 || result.status >= 300 || result.body.ok !== true) {
       closeAuthorizationTab(authorizationTab);
-      say(form, errorMessage3(result));
+      const message2 = errorMessage3(result);
+      say(form, message2);
+      const setup = form.closest("[data-setup-steps]");
+      const step = message2.includes("Redo the Set up your account step") ? 0 : message2.includes("Redo the Create an API key step") ? 1 : -1;
+      form.querySelector("[data-setup-retry]")?.remove();
+      if (setup && step >= 0) {
+        const retry = document.createElement("button");
+        retry.type = "button";
+        retry.className = "btn";
+        retry.dataset.setupRetry = String(step);
+        retry.textContent = step === 0 ? "Go to account and credit" : "Go to API key";
+        form.append(retry);
+      }
       return;
     }
     if (params.action === "discover_local_models") {
@@ -143622,7 +143663,7 @@ function mountDashboardController(options) {
             });
           });
           testForm.hidden = false;
-          say(testForm, `Using ${item.baseUrl}. Choose both models, then test.`);
+          say(testForm, `Using ${item.baseUrl}. Choose an answer model, then test.`);
         };
         const button = document.createElement("button");
         button.type = "button";
@@ -143637,7 +143678,7 @@ function mountDashboardController(options) {
       }
       output.append(row);
     });
-    say(form, selected ? "Server detected. Select models below." : "No usable local models found. Olympus does not download models.");
+    say(form, selected ? "Server detected. Select an answer model below." : "No usable local models found. Olympus does not download models.");
   }
   function agentParams(form) {
     const kind = form.dataset.agentKind;
@@ -143980,6 +144021,35 @@ function mountDashboardController(options) {
     const target = event.target instanceof Element ? event.target : null;
     if (!target || !root.contains(target))
       return;
+    const setupOpen = target.closest("[data-setup-open]");
+    if (setupOpen) {
+      const url2 = setupOpen.dataset.setupOpen;
+      if (url2 && !openAuthorizationExternally(url2))
+        window.open(url2, "_blank", "noopener,noreferrer");
+      return;
+    }
+    const setupControl = target.closest("[data-setup-next], [data-setup-back], [data-setup-retry]");
+    if (setupControl) {
+      const sheet = setupControl.closest("[data-setup-steps]");
+      if (!sheet)
+        return;
+      const panels = Array.from(sheet.querySelectorAll("[data-setup-panel]"));
+      const current2 = panels.findIndex((panel) => !panel.hidden);
+      const next = Math.max(0, Math.min(panels.length - 1, setupControl.hasAttribute("data-setup-retry") ? Number(setupControl.dataset.setupRetry) : current2 + (setupControl.hasAttribute("data-setup-next") ? 1 : -1)));
+      panels.forEach((panel, index) => {
+        panel.hidden = index !== next;
+      });
+      const counter = sheet.querySelector("[data-setup-counter]");
+      if (counter)
+        counter.textContent = `Step ${next + 1} of ${panels.length}`;
+      const progress = sheet.querySelector("[data-setup-progress]");
+      if (progress)
+        progress.value = next + 1;
+      const forward = sheet.querySelector("[data-setup-next]");
+      if (forward)
+        forward.hidden = next === panels.length - 1;
+      return;
+    }
     const menu = target.closest("details.rowmenu");
     queryAll("details.rowmenu[open]").forEach((open7) => {
       if (open7 !== menu || target.closest("[data-sheet-toggle],a[href]"))
@@ -144751,6 +144821,17 @@ function connectorSheet(input) {
   const promptId = `${id}-prompt`;
   return `<div class="sheet" id="${id}" aria-hidden="true">` + `<h4>${escapeHtml2(input.heading)}</h4>` + `<p>${escapeHtml2(input.intro)}</p>` + `<div class="promptbox" id="${promptId}">${escapeHtml2(input.promptText)}</div>` + `<button class="btn" type="button" data-copy-target="#${promptId}">${escapeHtml2(input.copyButtonLabel)}</button>` + `<span class="copystatus" data-copy-status aria-live="polite"></span>` + `</div>`;
 }
+function setupStepsSheet(input) {
+  const id = safeId2(input.id);
+  const count = input.steps.length;
+  const panels = input.steps.map((step, index) => {
+    const url2 = step.link && safeExternalHref(step.link.url);
+    const link = url2 ? `<button type="button" class="btn primary" data-setup-open="${escapeHtml2(url2)}">Open this page in ${escapeHtml2(input.provider)}</button>` + `<p><a class="ext" href="${escapeHtml2(url2)}" target="_blank" rel="noopener noreferrer">Open the page in ${escapeHtml2(input.provider)} ↗</a></p>` : "";
+    const redirect = step.redirect_uri && input.redirect ? `<div class="promptbox" id="${id}-redirect">${escapeHtml2(input.redirect)}</div><button class="btn" type="button" data-copy-target="#${id}-redirect">Copy redirect URI</button><span data-copy-status aria-live="polite"></span>` : "";
+    return `<div data-setup-panel${index ? " hidden" : ""}><h4>${escapeHtml2(step.title ?? `Step ${index + 1}`)}</h4><p>${escapeHtml2(step.text)}</p>${link}${redirect}${index === count - 1 ? input.finalForm : ""}</div>`;
+  }).join("");
+  return `<div data-setup-steps><p data-setup-counter>Step 1 of ${count}</p><progress data-setup-progress max="${count}" value="1"></progress>${panels}<div class="rowform"><button class="btn" type="button" data-setup-back>Back</button><button class="btn primary" type="button" data-setup-next>I've done this, next</button></div></div>`;
+}
 function connectSetupSheet(input) {
   const id = safeId2(input.id);
   const promptId = `${id}-prompt`;
@@ -144767,11 +144848,12 @@ function connectSetupSheet(input) {
   const submitLabel = escapeHtml2(input.submitLabel ?? "Connect");
   const sourceField = `<input type="hidden" name="source" value="${escapeHtml2(input.source)}">`;
   const byoForm = `<form class="rowform" data-connect-kind="oauth" style="margin-top:12px">` + sourceField + `${inputs}` + `<button class="btn primary" type="submit">${submitLabel}</button>` + `<span class="actmsg" data-action-message role="status"></span>` + `<span class="authfallback" data-authorization-fallback></span>` + `</form>`;
+  const walkthrough = input.steps && input.provider ? setupStepsSheet({ id, provider: input.provider, steps: input.steps, finalForm: byoForm, ...input.redirectUri ? { redirect: input.redirectUri.uri } : {} }) : `${registration}${redirect}${byoForm}`;
   if (input.publisher) {
-    const publisherForm = `<form class="rowform" data-connect-kind="oauth"${input.cancellable ? "" : " data-oauth-autostart"} style="margin-top:12px">` + sourceField + `<button class="btn primary" type="submit">${submitLabel}</button>` + `<span class="actmsg" data-action-message role="status"></span>` + `<span class="authfallback" data-authorization-fallback></span>` + `</form>`;
-    return `<div class="sheet" id="${id}" aria-hidden="true">` + `<h4>${escapeHtml2(input.heading)}</h4>` + `${notice}` + `<p>${escapeHtml2(input.publisher.intro)}</p>` + `${publisherForm}` + `${cancel}` + `<details class="agentprompt">` + `<summary>${escapeHtml2(input.publisher.byoSummary)}</summary>` + `<p>${escapeHtml2(input.intro)}</p>` + `${registration}` + `${redirect}` + `${byoForm}` + `${prompt}` + `</details>` + `</div>`;
+    const publisherForm = `<form class="rowform" data-connect-kind="oauth"${input.cancellable || input.steps ? "" : " data-oauth-autostart"} style="margin-top:12px">` + sourceField + `<button class="btn primary" type="submit">${submitLabel}</button>` + `<span class="actmsg" data-action-message role="status"></span>` + `<span class="authfallback" data-authorization-fallback></span>` + `</form>`;
+    return `<div class="sheet" id="${id}" aria-hidden="true">` + `<h4>${escapeHtml2(input.heading)}</h4>` + `${notice}` + `<p>${escapeHtml2(input.publisher.intro)}</p>` + `${publisherForm}` + `${cancel}` + `<details class="agentprompt">` + `<summary>${escapeHtml2(input.publisher.byoSummary)}</summary>` + `<p>${escapeHtml2(input.intro)}</p>` + `${walkthrough}` + `${prompt}` + `</details>` + `</div>`;
   }
-  return `<div class="sheet" id="${id}" aria-hidden="true">` + `<h4>${escapeHtml2(input.heading)}</h4>` + `${notice}` + `<p>${escapeHtml2(input.intro)}</p>` + `${registration}` + `${redirect}` + `${byoForm}` + `${cancel}` + `${prompt}` + `</div>`;
+  return `<div class="sheet" id="${id}" aria-hidden="true">` + `<h4>${escapeHtml2(input.heading)}</h4>` + `${notice}` + `<p>${escapeHtml2(input.intro)}</p>` + `${walkthrough}` + `${cancel}` + `${prompt}` + `</div>`;
 }
 function callbackRegistrationSteps(id, registration) {
   if (registration === undefined)
@@ -144793,6 +144875,7 @@ function dashboardNeedsSetupSheet(source, action, options = {}) {
     promptText: action.instructions.agent_prompt,
     source: action.source,
     fields: action.instructions.fields,
+    ...action.source === "dropbox" ? { steps: action.instructions.diy_steps, provider: "Dropbox" } : {},
     ...options.providerNote === undefined ? {} : { providerNote: options.providerNote },
     ...redirectUriInput(action)
   });
@@ -144816,6 +144899,7 @@ function dashboardOAuthConnectSheet(source, action, options = {}) {
     promptText: byo.agent_prompt,
     source: action.source,
     fields,
+    ...action.source === "dropbox" ? { steps: byo.diy_steps, provider: "Dropbox" } : {},
     submitLabel: dashboardActionLabel(action.label),
     ...action.publisher_client ? {
       publisher: {
@@ -153035,7 +153119,7 @@ function renderFirstRunPrivacyChoice() {
   return `<section aria-label="Private answers"><h2>How should Olympus answer with Private items?</h2><p>Choose how Private answers may be made. You can change this later.</p><form data-first-run-privacy>${choices}<button class="btn primary" type="submit">Continue</button><span data-action-message role="status"></span></form></section>`;
 }
 function localModelsSheet() {
-  const controls = '<form data-local-models-discover><label>OpenAI-compatible URL (optional)<input class="keyfield" name="base_url" type="url" placeholder="http://127.0.0.1:1234/v1"></label><p>Leave blank to detect Ollama and LM Studio on this computer. Only loopback URLs are accepted.</p><button class="btn primary" type="submit">Detect local models</button><span data-action-message role="status"></span></form>' + '<div data-local-models-results></div><form data-local-models-test hidden><input type="hidden" name="base_url"><label>Answer model<select name="answer_model" required></select></label><label>Embedding model<select name="embedding_model" required></select></label><p>Testing does not change your configured models or replace existing search vectors. Use the agent prompt below to apply a verified configuration.</p><button class="btn primary" type="submit">Test selected models</button><span data-action-message role="status"></span></form>';
+  const controls = '<form data-local-models-discover><label>OpenAI-compatible URL (optional)<input class="keyfield" name="base_url" type="url" placeholder="http://127.0.0.1:1234/v1"></label><p>Leave blank to detect Ollama and LM Studio on this computer. Only loopback URLs are accepted.</p><button class="btn primary" type="submit">Detect local models</button><span data-action-message role="status"></span></form>' + '<div data-local-models-results></div><form data-local-models-test hidden><input type="hidden" name="base_url"><label>Answer model<select name="answer_model" required></select></label><p>Testing does not change your configured models or replace existing search vectors. Use the agent prompt below to apply a verified configuration.</p><button class="btn primary" type="submit">Test answer model</button><span data-action-message role="status"></span></form>';
   return connectorSheet({ id: "local-model-setup-sheet", heading: "Connect existing local models", intro: "Detect models you already run and test them with synthetic text. Olympus does not install, download, or maintain them. Local means the machine hosting Olympus.", promptText: LOCAL_MODELS_SETUP_PROMPT, copyButtonLabel: "Copy prompt" }).replace('<div class="promptbox"', controls + '<div class="promptbox"');
 }
 function blockingCard(view3) {
@@ -153094,7 +153178,7 @@ function renderModelSetupBlocker(view3) {
     return blockerBanner({ sentence: card.detail });
   return blockerBanner({
     sentence: `Add your ${card.label} API key to start connecting sources.`,
-    controlHtml: `<button type="button" class="btn primary" data-focus-target="#${modelKeyFieldId(card)}">Add ${escapeHtml2(card.label)} key</button>`
+    controlHtml: `<button type="button" class="btn primary" data-focus-target="#${card.id === "venice" ? "model-venice-start" : modelKeyFieldId(card)}">Add ${escapeHtml2(card.label)} key</button>`
   });
 }
 function modelKeyFieldId(card) {
@@ -153104,12 +153188,16 @@ function modelKeyForm(card) {
   return `<form method="post" action="/dashboard/connect/api-key" data-connect-kind="api_key" data-model-provider="${card.id}">` + `<input type="hidden" name="source" value="${card.id}">` + `<input class="keyfield"${card.state === "ready" ? "" : ` id="${modelKeyFieldId(card)}"`} type="password" name="api_key" required autocomplete="new-password" placeholder="${card.label} API key" aria-label="${card.label} API key">` + '<button class="btn primary" type="submit">Connect</button><span data-action-message role="status"></span></form>';
 }
 function modelKeyAction(card, lead) {
+  if (card.id === "venice" && lead.includes("<form")) {
+    return `<span id="model-venice-start" tabindex="-1"></span>` + setupStepsSheet({ id: `model-venice-${card.state}`, provider: "Venice", steps: VENICE_SETUP_STEPS, finalForm: lead });
+  }
   const href = card.id === "gemini" ? "https://aistudio.google.com/apikey" : "https://venice.ai";
   return `<div class="modelaction">${lead}<a href="${href}" target="_blank" rel="noopener noreferrer">Get a ${card.label} API key</a></div>`;
 }
-var LOCAL_MODELS_SETUP_PROMPT = "Connect my existing local models to Olympus. Read the installed docs/SOVEREIGNTY_CONFIG.md, inspect the current Olympus policy, and help identify the running answer and embedding endpoints and their exact model IDs on the machine hosting Olympus. Do not install or maintain model software, download models, change network access, or replace existing vectors. Explain any needed configuration changes before applying them. After an approved policy change, use olympus worker restart to apply it. Use synthetic text to verify the configured models and embedding dimensions, run olympus doctor, then send me back to the Keys page of the Olympus dashboard and its Check readiness button. If the server is on another machine or needs unsupported settings, explain that specific limit rather than inventing a working configuration.", LOCAL_MODELS_TOGGLE = 'data-sheet-toggle="#local-model-setup-sheet" aria-expanded="false">Connect existing local models</button>', CHECK_FORM_OPEN = '<form method="post" action="/dashboard/models/check" data-model-check>', CHECK_FORM_TAIL = '<span data-action-message role="status"></span></form>';
+var LOCAL_MODELS_SETUP_PROMPT = "Connect my existing local models to Olympus. Read the installed docs/SOVEREIGNTY_CONFIG.md, inspect the current Olympus policy, and help identify the running answer endpoint and its exact model ID on the machine hosting Olympus. Do not install or maintain model software, download models, change network access, or replace existing vectors. Explain any needed configuration changes before applying them. After an approved policy change, use olympus worker restart to apply it. Use synthetic text to verify the configured answer model, run olympus doctor, then send me back to the Keys page of the Olympus dashboard and its Check readiness button. If the server is on another machine or needs unsupported settings, explain that specific limit rather than inventing a working configuration.", LOCAL_MODELS_TOGGLE = 'data-sheet-toggle="#local-model-setup-sheet" aria-expanded="false">Connect existing local models</button>', CHECK_FORM_OPEN = '<form method="post" action="/dashboard/models/check" data-model-check>', CHECK_FORM_TAIL = '<span data-action-message role="status"></span></form>';
 var init_model_setup2 = __esm(() => {
   init_privacy_language();
+  init_source_dashboard();
   init_components();
 });
 
@@ -153244,6 +153332,12 @@ ${sheet}`;
       return `${row}
 ${connect.sheet}`;
     }
+  }
+  if (action.kind === "api_key" && action.source === "venice") {
+    const sheetId = "setup-venice-api";
+    const form = `<form class="rowform" data-connect-kind="api_key"><input type="hidden" name="source" value="venice"><input class="keyfield" type="password" name="api_key" required autocomplete="new-password" placeholder="API key" aria-label="API key"><button class="btn primary" type="submit">Connect</button><span class="actmsg" data-action-message role="status"></span></form>`;
+    const sheet = `<div class="sheet" id="${sheetId}" aria-hidden="true"><h4>Set up Venice</h4>${setupStepsSheet({ id: sheetId, provider: "Venice", steps: action.instructions.diy_steps, finalForm: form })}</div>`;
+    return setupRow({ ...id, label: source.label, blurb: action.instructions.plain_intro, action: { label: action.label, kind: "none", sheet: sheetId, ...gate } }) + sheet;
   }
   const link = action.kind === "api_key" ? keyLocationLink(action.instructions) : undefined;
   return setupRow({
@@ -160385,9 +160479,9 @@ function createEmailSourceWorker(options = {}) {
           }
           if (!sourceDashboard?.testLocalModels)
             throw new EmailSourceWorkerError(501, "model_setup_not_supported", "Local model testing is unavailable.");
-          if (typeof input.base_url !== "string" || typeof input.answer_model !== "string" || typeof input.embedding_model !== "string")
-            throw new EmailSourceWorkerError(400, "invalid_request", "Choose a server, answer model and embedding model.");
-          const result = await sourceDashboard.testLocalModels({ baseUrl: input.base_url, answerModel: input.answer_model, embeddingModel: input.embedding_model });
+          if (typeof input.base_url !== "string" || typeof input.answer_model !== "string")
+            throw new EmailSourceWorkerError(400, "invalid_request", "Choose a server and answer model.");
+          const result = await sourceDashboard.testLocalModels({ baseUrl: input.base_url, answerModel: input.answer_model });
           return json({ ok: true, result });
         }
         if (request.method === "POST" && url2.pathname === "/dashboard/models/check") {
@@ -160454,8 +160548,8 @@ function createEmailSourceWorker(options = {}) {
               }
               try {
                 await sourceDashboard.connectModelKey(source, apiKey);
-              } catch {
-                throw new EmailSourceWorkerError(400, "model_key_setup_failed", "The model key could not be validated or applied. Check the Models card and retry.");
+              } catch (error2) {
+                throw new EmailSourceWorkerError(400, "model_key_setup_failed", source === "venice" ? safeVeniceCheckFailure(error2) : "The model key could not be validated or applied. Check the Models card and retry.");
               }
               const modelSetup = sourceDashboard.modelSetup?.();
               return json({ ok: true, source, status_message: modelSetup?.ready ? "Model connection ready." : "Key saved. Finish the remaining model requirements; Olympus applies the keys automatically." });
@@ -160476,7 +160570,7 @@ function createEmailSourceWorker(options = {}) {
               if (error2 instanceof ConnectedHandleAccountCardinalityError) {
                 throw new EmailSourceWorkerError(409, "dashboard_account_cardinality_violation", "Olympus v0.4 supports one connected account per source. Disconnect the existing account before connecting another.");
               }
-              throw new EmailSourceWorkerError(400, "api_key_validation_failed", `Validating the ${source} API key failed. Paste a current key and try again, or retry when the provider is reachable.`);
+              throw new EmailSourceWorkerError(400, "api_key_validation_failed", source === "venice" ? safeVeniceCheckFailure(error2) : `Validating the ${source} API key failed. Paste a current key and try again, or retry when the provider is reachable.`);
             }
             markDashboardSourceConnected(source, dashboardDisconnectedSources);
             await triggerDashboardPostConnectSync({
@@ -163604,8 +163698,25 @@ async function dashboardApiKeyAvailability(secretStore) {
     readwise: Boolean(readwiseToken)
   };
 }
+function safeVeniceCheckFailure(error2) {
+  const message2 = error2 instanceof Error ? error2.message : "";
+  const allowed = new Set([
+    "Venice could not be reached to check your key. No credentials were stored; try again.",
+    "Venice could not accept this key. Redo the Create an API key step and check its restrictions. No credentials were stored.",
+    "Venice could not check the key now. No credentials were stored; try again.",
+    "Venice returned an unreadable check. No credentials were stored; try again.",
+    "Venice returned an incomplete check. No credentials were stored; try again.",
+    "Venice does not permit this key. Redo the Create an API key step and check its restrictions. No credentials were stored.",
+    "Venice did not report a balance. No credentials were stored; try again.",
+    "Venice returned an incomplete balance. No credentials were stored; try again.",
+    "Venice reports no credit. Redo the Set up your account step and add credit. No credentials were stored."
+  ]);
+  return allowed.has(message2) ? message2 : "The Venice key could not be validated or applied. Try again.";
+}
 function dashboardCallbackFailureReason(error2, source) {
   const message2 = error2 instanceof Error ? error2.message : "";
+  if (source === "dropbox" && message2 === "Dropbox refused the list check. Redo the Enable permissions step and sign in again. No credentials were stored.")
+    return message2;
   const match = /^OAuth token exchange failed with status (\d{3})(?: \(([a-z_]+)\))?\.$/.exec(message2);
   if (match && (match[2] === undefined || safeOAuthErrorCode(match[2]) !== undefined))
     return message2;
@@ -204860,8 +204971,6 @@ function applyBuiltInPrivateAnalyst(map2, securePoolMemberIds, builtInAnalyst) {
     const entry = map2.get(id);
     return entry ? [[id, entry]] : [];
   });
-  if (members.some(([, entry]) => entry.backend === "venice"))
-    return false;
   let wired = false;
   for (const [id, entry] of members) {
     if (entry.backend !== "local")
@@ -204871,10 +204980,10 @@ function applyBuiltInPrivateAnalyst(map2, securePoolMemberIds, builtInAnalyst) {
   }
   return wired;
 }
-function builtInBacksPrivateAnalyst(id, state, members, availableIds) {
+function builtInBacksPrivateAnalyst(id, state, members, _availableIds) {
   if (!state || state === "failed")
     return false;
-  return members.some((member) => member.id === id) && !members.some((member) => member.profile.provider === "venice" && (!availableIds || availableIds.has(member.id)));
+  return members.some((member) => member.id === id && member.profile.provider === "local-openai-compatible");
 }
 async function probeLocalAnalystService(olympusConfig) {
   try {

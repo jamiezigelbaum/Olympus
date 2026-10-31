@@ -37,37 +37,37 @@ describe('local model discovery', () => {
     expect(results[0]?.models.map(item => item.id)).toEqual(['a', 'b']);
   });
 
-  test('checks selected models with synthetic answer and embedding text only', async () => {
+  test('checks the answer model without requesting embeddings', async () => {
     const bodies: unknown[] = [];
     const discovery = service((url, init) => {
       if (url.endsWith('/models')) return response({ data: [{ id: 'answer' }, { id: 'embed' }] });
       bodies.push(JSON.parse(String(init.body)));
       return url.endsWith('/embeddings') ? response({ data: [{ embedding: [0.1, 0.2] }] }) : response({ choices: [{ message: { content: 'ready' } }] });
     });
-    expect(await discovery.test({ baseUrl: 'http://localhost:1234', answerModel: 'answer', embeddingModel: 'embed' })).toEqual({ working: true, step: 'complete', detail: 'Working', embeddingDimension: 2 });
+    expect(await discovery.test({ baseUrl: 'http://localhost:1234', answerModel: 'answer' })).toEqual({ working: true, step: 'complete', detail: 'Working' });
     expect(bodies).toEqual([
       { model: 'answer', messages: [{ role: 'user', content: 'Reply with one word: ready.' }], temperature: 0, max_tokens: 8 },
-      { model: 'embed', input: 'Olympus synthetic local model check.' },
     ]);
   });
 
   test('refuses cloud models before making any request', async () => {
     let calls = 0;
     const discovery = service(() => { calls++; return response({}); });
-    const result = await discovery.test({ baseUrl: 'http://localhost:11434/v1', answerModel: 'gpt-oss:120b-cloud', embeddingModel: 'embed' });
+    const result = await discovery.test({ baseUrl: 'http://localhost:11434/v1', answerModel: 'gpt-oss:120b-cloud' });
     expect(result.working).toBe(false);
     expect(result.step).toBe('answer');
     expect(result.detail).toContain('cloud');
     expect(calls).toBe(0);
   });
 
-  test.each(['answer', 'embedding'] as const)('maps %s HTTP failure to its step without reflecting response bodies', async (failure) => {
+  test('maps answer HTTP failure without reflecting response bodies', async () => {
+    const failure = 'answer';
     const discovery = service(url => {
       if (url.endsWith('/models')) return response({ data: [{ id: 'answer' }, { id: 'embed' }] });
       if (url.endsWith(failure === 'answer' ? '/chat/completions' : '/embeddings')) return response({ error: 'private server detail' }, 503);
       return response({ choices: [{ message: { content: 'ready' } }] });
     });
-    const result = await discovery.test({ baseUrl: 'http://localhost:1234/v1', answerModel: 'answer', embeddingModel: 'embed' });
+    const result = await discovery.test({ baseUrl: 'http://localhost:1234/v1', answerModel: 'answer' });
     expect(result.working).toBe(false);
     expect(result.step).toBe(failure);
     expect(result.detail).toContain('503');
@@ -76,35 +76,13 @@ describe('local model discovery', () => {
 
   test('refuses redirects and reports missing selected models without inference', async () => {
     let calls = 0;
-    const missing = await service(() => { calls++; return response({ data: [{ id: 'other' }] }); }).test({ baseUrl: 'http://127.0.0.1:1234/v1', answerModel: 'answer', embeddingModel: 'embed' });
+    const missing = await service(() => { calls++; return response({ data: [{ id: 'other' }] }); }).test({ baseUrl: 'http://127.0.0.1:1234/v1', answerModel: 'answer' });
     expect(missing.step).toBe('answer');
     expect(calls).toBe(1);
     const redirected = await service(() => new Response(null, { status: 302, headers: { Location: 'https://example.com' } })).discover('http://localhost:1234/v1');
     expect(redirected[0]?.working).toBe(false);
     expect(redirected[0]?.detail).toContain('redirect');
   });
-  test('refuses a cloud embedding before making any request', async () => {
-    let calls = 0;
-    const result = await service(() => { calls++; return response({}); }).test({ baseUrl: 'http://localhost:11434', answerModel: 'answer', embeddingModel: 'embed:cloud' });
-    expect(result.step).toBe('embedding');
-    expect(result.working).toBe(false);
-    expect(calls).toBe(0);
-  });
-
-  test('rewrites localhost to literal loopback and rejects a malformed embedding vector', async () => {
-    const requests: string[] = [];
-    const result = await service(url => {
-      requests.push(url);
-      if (url.endsWith('/models')) return response({ data: [{ id: 'answer' }, { id: 'embed' }] });
-      if (url.endsWith('/embeddings')) return response({ data: [{ embedding: [0, 'bad'] }] });
-      return response({ choices: [{ message: { content: 'ready' } }] });
-    }).test({ baseUrl: 'http://localhost:1234', answerModel: 'answer', embeddingModel: 'embed' });
-    expect(requests.every(url => url.startsWith('http://127.0.0.1:1234/'))).toBe(true);
-    expect(result.working).toBe(false);
-    expect(result.step).toBe('embedding');
-    expect(result.detail).toContain('valid vector');
-  });
-
   test('maps a stalled model list to a bounded timeout error', async () => {
     const result = await service(() => new Promise<Response>(() => {})).discover('http://127.0.0.1:1234');
     expect(result[0]?.working).toBe(false);

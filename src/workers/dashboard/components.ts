@@ -14,6 +14,7 @@ import type {
   DashboardCallbackRegistration,
   DashboardConnectField,
   DashboardConnectFieldName,
+  DashboardSetupStep,
   DashboardSourceAction,
   DashboardSourceCard,
   SourceDashboardViewModel,
@@ -514,6 +515,8 @@ export interface DashboardConnectSheetInput {
   source: string;
   /** The instructions' declared fields; the route reads them by name. */
   fields: readonly DashboardConnectField[];
+  steps?: readonly DashboardSetupStep[];
+  provider?: string;
   /**
    * The exact callback URI the provider must accept, plus the one line saying
    * where it goes in that provider's console. Rendered ABOVE the Client ID
@@ -566,6 +569,21 @@ export interface DashboardConnectSheetInput {
     /** The disclosure's summary, e.g. "Use my own app instead". */
     byoSummary: string;
   };
+}
+
+/** A provider-neutral walkthrough. The last step contains the existing connect form. */
+export function setupStepsSheet(input: { id: string; provider: string; steps: readonly DashboardSetupStep[]; finalForm: string; redirect?: string }): string {
+  const id = safeId(input.id);
+  const count = input.steps.length;
+  const panels = input.steps.map((step, index) => {
+    const url = step.link && safeExternalHref(step.link.url);
+    const link = url ? `<button type="button" class="btn primary" data-setup-open="${escapeHtml(url)}">Open this page in ${escapeHtml(input.provider)}</button>`
+      + `<p><a class="ext" href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer">Open the page in ${escapeHtml(input.provider)} ↗</a></p>` : '';
+    const redirect = step.redirect_uri && input.redirect
+      ? `<div class="promptbox" id="${id}-redirect">${escapeHtml(input.redirect)}</div><button class="btn" type="button" data-copy-target="#${id}-redirect">Copy redirect URI</button><span data-copy-status aria-live="polite"></span>` : '';
+    return `<div data-setup-panel${index ? ' hidden' : ''}><h4>${escapeHtml(step.title ?? `Step ${index + 1}`)}</h4><p>${escapeHtml(step.text)}</p>${link}${redirect}${index === count - 1 ? input.finalForm : ''}</div>`;
+  }).join('');
+  return `<div data-setup-steps><p data-setup-counter>Step 1 of ${count}</p><progress data-setup-progress max="${count}" value="1"></progress>${panels}<div class="rowform"><button class="btn" type="button" data-setup-back>Back</button><button class="btn primary" type="button" data-setup-next>I've done this, next</button></div></div>`;
 }
 
 /**
@@ -633,12 +651,15 @@ export function connectSetupSheet(input: DashboardConnectSheetInput): string {
     // Where the authorization link lands when the browser blocks the new tab.
     + `<span class="authfallback" data-authorization-fallback></span>`
     + `</form>`;
+  const walkthrough = input.steps && input.provider
+    ? setupStepsSheet({ id, provider: input.provider, steps: input.steps, finalForm: byoForm, ...(input.redirectUri ? { redirect: input.redirectUri.uri } : {}) })
+    : `${registration}${redirect}${byoForm}`;
   if (input.publisher) {
     // The whole point of publisher mode is that there is nothing to do first.
     // The one-click form carries the source and NOTHING else: no client id
     // field to fill, no redirect URI to register, no console to visit. The
     // start route reads the absence of a client id as "use the publisher app".
-    const publisherForm = `<form class="rowform" data-connect-kind="oauth"${input.cancellable ? '' : ' data-oauth-autostart'} style="margin-top:12px">`
+    const publisherForm = `<form class="rowform" data-connect-kind="oauth"${input.cancellable || input.steps ? '' : ' data-oauth-autostart'} style="margin-top:12px">`
       + sourceField
       + `<button class="btn primary" type="submit">${submitLabel}</button>`
       + `<span class="actmsg" data-action-message role="status"></span>`
@@ -653,9 +674,7 @@ export function connectSetupSheet(input: DashboardConnectSheetInput): string {
       + `<details class="agentprompt">`
       + `<summary>${escapeHtml(input.publisher.byoSummary)}</summary>`
       + `<p>${escapeHtml(input.intro)}</p>`
-      + `${registration}`
-      + `${redirect}`
-      + `${byoForm}`
+      + `${walkthrough}`
       + `${prompt}`
       + `</details>`
       + `</div>`;
@@ -664,9 +683,7 @@ export function connectSetupSheet(input: DashboardConnectSheetInput): string {
     + `<h4>${escapeHtml(input.heading)}</h4>`
     + `${notice}`
     + `<p>${escapeHtml(input.intro)}</p>`
-    + `${registration}`
-    + `${redirect}`
-    + `${byoForm}`
+    + `${walkthrough}`
     + `${cancel}`
     + `${prompt}`
     + `</div>`;
@@ -724,6 +741,7 @@ export function dashboardNeedsSetupSheet(
     promptText: action.instructions.agent_prompt,
     source: action.source,
     fields: action.instructions.fields,
+    ...(action.source === 'dropbox' ? { steps: action.instructions.diy_steps, provider: 'Dropbox' } : {}),
     ...(options.providerNote === undefined ? {} : { providerNote: options.providerNote }),
     ...redirectUriInput(action),
   });
@@ -780,6 +798,7 @@ export function dashboardOAuthConnectSheet(
     promptText: byo.agent_prompt,
     source: action.source,
     fields,
+    ...(action.source === 'dropbox' ? { steps: byo.diy_steps, provider: 'Dropbox' } : {}),
     submitLabel: dashboardActionLabel(action.label),
     // Publisher mode: Olympus's own registered app does the asking, so the
     // sheet leads with the button and keeps the bring-your-own walkthrough

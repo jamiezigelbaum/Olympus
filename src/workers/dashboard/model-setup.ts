@@ -1,8 +1,9 @@
 import { PRIVATE_ANSWER_OPTIONS } from '../../core/privacy-language.ts';
+import { VENICE_SETUP_STEPS } from '../source-dashboard.ts';
 import type { ModelSetupCard, ModelSetupView } from '../../core/model-setup.ts';
-import { blockerBanner, connectorSheet, escapeHtml, rowMenu } from './components.ts';
+import { blockerBanner, connectorSheet, escapeHtml, rowMenu, setupStepsSheet } from './components.ts';
 
-export const LOCAL_MODELS_SETUP_PROMPT = 'Connect my existing local models to Olympus. Read the installed docs/SOVEREIGNTY_CONFIG.md, inspect the current Olympus policy, and help identify the running answer and embedding endpoints and their exact model IDs on the machine hosting Olympus. Do not install or maintain model software, download models, change network access, or replace existing vectors. Explain any needed configuration changes before applying them. After an approved policy change, use olympus worker restart to apply it. Use synthetic text to verify the configured models and embedding dimensions, run olympus doctor, then send me back to the Keys page of the Olympus dashboard and its Check readiness button. If the server is on another machine or needs unsupported settings, explain that specific limit rather than inventing a working configuration.';
+export const LOCAL_MODELS_SETUP_PROMPT = 'Connect my existing local models to Olympus. Read the installed docs/SOVEREIGNTY_CONFIG.md, inspect the current Olympus policy, and help identify the running answer endpoint and its exact model ID on the machine hosting Olympus. Do not install or maintain model software, download models, change network access, or replace existing vectors. Explain any needed configuration changes before applying them. After an approved policy change, use olympus worker restart to apply it. Use synthetic text to verify the configured answer model, run olympus doctor, then send me back to the Keys page of the Olympus dashboard and its Check readiness button. If the server is on another machine or needs unsupported settings, explain that specific limit rather than inventing a working configuration.';
 
 const LOCAL_MODELS_TOGGLE = 'data-sheet-toggle="#local-model-setup-sheet" aria-expanded="false">Connect existing local models</button>';
 const CHECK_FORM_OPEN = '<form method="post" action="/dashboard/models/check" data-model-check>';
@@ -70,7 +71,7 @@ function renderFirstRunPrivacyChoice(): string {
 
 function localModelsSheet(): string {
   const controls = '<form data-local-models-discover><label>OpenAI-compatible URL (optional)<input class="keyfield" name="base_url" type="url" placeholder="http://127.0.0.1:1234/v1"></label><p>Leave blank to detect Ollama and LM Studio on this computer. Only loopback URLs are accepted.</p><button class="btn primary" type="submit">Detect local models</button><span data-action-message role="status"></span></form>'
-    + '<div data-local-models-results></div><form data-local-models-test hidden><input type="hidden" name="base_url"><label>Answer model<select name="answer_model" required></select></label><label>Embedding model<select name="embedding_model" required></select></label><p>Testing does not change your configured models or replace existing search vectors. Use the agent prompt below to apply a verified configuration.</p><button class="btn primary" type="submit">Test selected models</button><span data-action-message role="status"></span></form>';
+    + '<div data-local-models-results></div><form data-local-models-test hidden><input type="hidden" name="base_url"><label>Answer model<select name="answer_model" required></select></label><p>Testing does not change your configured models or replace existing search vectors. Use the agent prompt below to apply a verified configuration.</p><button class="btn primary" type="submit">Test answer model</button><span data-action-message role="status"></span></form>';
   return connectorSheet({ id: 'local-model-setup-sheet', heading: 'Connect existing local models', intro: 'Detect models you already run and test them with synthetic text. Olympus does not install, download, or maintain them. Local means the machine hosting Olympus.', promptText: LOCAL_MODELS_SETUP_PROMPT, copyButtonLabel: 'Copy prompt' }).replace('<div class="promptbox"', controls + '<div class="promptbox"');
 }
 
@@ -145,7 +146,7 @@ export function renderModelSetupBlocker(view: ModelSetupView | undefined): strin
   if (card.state === 'needs_attention') return blockerBanner({ sentence: card.detail });
   return blockerBanner({
     sentence: `Add your ${card.label} API key to start connecting sources.`,
-    controlHtml: `<button type="button" class="btn primary" data-focus-target="#${modelKeyFieldId(card)}">Add ${escapeHtml(card.label)} key</button>`,
+    controlHtml: `<button type="button" class="btn primary" data-focus-target="#${card.id === 'venice' ? 'model-venice-start' : modelKeyFieldId(card)}">Add ${escapeHtml(card.label)} key</button>`,
   });
 }
 
@@ -162,6 +163,9 @@ function modelKeyForm(card: ModelSetupCard): string {
 
 /** One wrapping row: the key form (or the saved-key note) and the "Get a key" link beside it. */
 function modelKeyAction(card: ModelSetupCard, lead: string): string {
+  if (card.id === 'venice' && lead.includes('<form')) {
+    return `<span id="model-venice-start" tabindex="-1"></span>` + setupStepsSheet({ id: `model-venice-${card.state}`, provider: 'Venice', steps: VENICE_SETUP_STEPS, finalForm: lead });
+  }
   const href = card.id === 'gemini' ? 'https://aistudio.google.com/apikey' : 'https://venice.ai';
   return `<div class="modelaction">${lead}<a href="${href}" target="_blank" rel="noopener noreferrer">Get a ${card.label} API key</a></div>`;
 }

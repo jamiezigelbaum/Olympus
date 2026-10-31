@@ -2093,8 +2093,8 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
             return json({ ok: true, results });
           }
           if (!sourceDashboard?.testLocalModels) throw new EmailSourceWorkerError(501, 'model_setup_not_supported', 'Local model testing is unavailable.');
-          if (typeof input.base_url !== 'string' || typeof input.answer_model !== 'string' || typeof input.embedding_model !== 'string') throw new EmailSourceWorkerError(400, 'invalid_request', 'Choose a server, answer model and embedding model.');
-          const result = await sourceDashboard.testLocalModels({ baseUrl: input.base_url, answerModel: input.answer_model, embeddingModel: input.embedding_model });
+          if (typeof input.base_url !== 'string' || typeof input.answer_model !== 'string') throw new EmailSourceWorkerError(400, 'invalid_request', 'Choose a server and answer model.');
+          const result = await sourceDashboard.testLocalModels({ baseUrl: input.base_url, answerModel: input.answer_model });
           return json({ ok: true, result });
         }
 
@@ -2189,7 +2189,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
               throw new EmailSourceWorkerError(501, 'model_setup_not_supported', 'Upgrade the worker to connect model keys here.');
             }
             try { await sourceDashboard.connectModelKey(source, apiKey); }
-            catch { throw new EmailSourceWorkerError(400, 'model_key_setup_failed', 'The model key could not be validated or applied. Check the Models card and retry.'); }
+            catch (error) { throw new EmailSourceWorkerError(400, 'model_key_setup_failed', source === 'venice' ? safeVeniceCheckFailure(error) : 'The model key could not be validated or applied. Check the Models card and retry.'); }
             const modelSetup = sourceDashboard.modelSetup?.();
             return json({ ok: true, source, status_message: modelSetup?.ready
               ? 'Model connection ready.'
@@ -2221,7 +2221,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
             throw new EmailSourceWorkerError(
               400,
               'api_key_validation_failed',
-              `Validating the ${source} API key failed. Paste a current key and try again, or retry when the provider is reachable.`,
+              source === 'venice' ? safeVeniceCheckFailure(error) : `Validating the ${source} API key failed. Paste a current key and try again, or retry when the provider is reachable.`,
             );
           }
           markDashboardSourceConnected(source, dashboardDisconnectedSources);
@@ -7310,8 +7310,25 @@ async function dashboardApiKeyAvailability(secretStore: SecretStore): Promise<Pa
  * value-based redaction layer is deleted with its last caller: a page that
  * only ever speaks bounded text has nothing to redact.
  */
+function safeVeniceCheckFailure(error: unknown): string {
+  const message = error instanceof Error ? error.message : '';
+  const allowed = new Set([
+    'Venice could not be reached to check your key. No credentials were stored; try again.',
+    'Venice could not accept this key. Redo the Create an API key step and check its restrictions. No credentials were stored.',
+    'Venice could not check the key now. No credentials were stored; try again.',
+    'Venice returned an unreadable check. No credentials were stored; try again.',
+    'Venice returned an incomplete check. No credentials were stored; try again.',
+    'Venice does not permit this key. Redo the Create an API key step and check its restrictions. No credentials were stored.',
+    'Venice did not report a balance. No credentials were stored; try again.',
+    'Venice returned an incomplete balance. No credentials were stored; try again.',
+    'Venice reports no credit. Redo the Set up your account step and add credit. No credentials were stored.',
+  ]);
+  return allowed.has(message) ? message : 'The Venice key could not be validated or applied. Try again.';
+}
+
 function dashboardCallbackFailureReason(error: unknown, source: DashboardOAuthSource): string {
   const message = error instanceof Error ? error.message : '';
+  if (source === 'dropbox' && message === 'Dropbox refused the list check. Redo the Enable permissions step and sign in again. No credentials were stored.') return message;
   const match = /^OAuth token exchange failed with status (\d{3})(?: \(([a-z_]+)\))?\.$/.exec(message);
   // The code inside the shape is re-checked against the allowlist: the shape
   // alone would admit arbitrary lowercase content from a crafted message.

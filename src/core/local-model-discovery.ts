@@ -18,7 +18,7 @@ export interface LocalModelTestResult {
   detail: string;
   embeddingDimension?: number;
 }
-export interface LocalModelSelection { baseUrl: string; answerModel: string; embeddingModel: string }
+export interface LocalModelSelection { baseUrl: string; answerModel: string }
 
 /** Read-only discovery and synthetic checks. Never installs or downloads models. */
 export class LocalModelDiscovery {
@@ -43,7 +43,7 @@ export class LocalModelDiscovery {
       try {
         const ids = await this.models(normalized);
         const models = ids.map(id => ({ id, allowed: !isCloudForwardingModelId(id), ...(isCloudForwardingModelId(id) ? { reason: 'This cloud model can forward text off this computer and cannot be used as a local model.' } : {}) }));
-        return { provider, baseUrl: normalized.href.replace(/\/$/, ''), models, working: true, step: 'models' as const, detail: models.length ? 'Choose an answer model and an embedding model.' : 'The server returned no installed models. Olympus does not download models.' };
+        return { provider, baseUrl: normalized.href.replace(/\/$/, ''), models, working: true, step: 'models' as const, detail: models.length ? 'Choose an answer model.' : 'The server returned no installed models. Olympus does not download models.' };
       } catch (error) {
         return { provider, baseUrl: normalized.href.replace(/\/$/, ''), models: [], working: false, step: 'models' as const, detail: failureDetail(error) };
       }
@@ -58,15 +58,10 @@ export class LocalModelDiscovery {
       step = 'answer';
       const answer = modelId(selection.answerModel);
       assertLocalModelIdNotCloudForwarding('Answer model', answer);
-      step = 'embedding';
-      const embedding = modelId(selection.embeddingModel);
-      assertLocalModelIdNotCloudForwarding('Embedding model', embedding);
       step = 'models';
       const listed = await this.models(base);
       step = 'answer';
       if (!listed.includes(answer)) throw new CheckError('The selected answer model is not listed by this server. Refresh the models and choose an installed model.');
-      step = 'embedding';
-      if (!listed.includes(embedding)) throw new CheckError('The selected embedding model is not listed by this server. Refresh the models and choose an installed model.');
       step = 'answer';
       const completion = await this.request(base, 'chat/completions', {
         model: answer,
@@ -78,13 +73,7 @@ export class LocalModelDiscovery {
       if (!record(message) || typeof message.content !== 'string' || !message.content.trim()) {
         throw new CheckError('The answer model did not return text. Choose a model that supports chat completions.');
       }
-      step = 'embedding';
-      const result = await this.request(base, 'embeddings', { model: embedding, input: 'Olympus synthetic local model check.' });
-      const vector = record(result) && Array.isArray(result.data) && record(result.data[0]) ? result.data[0].embedding : undefined;
-      if (!Array.isArray(vector) || !vector.length || !vector.every(value => typeof value === 'number' && Number.isFinite(value))) {
-        throw new CheckError('The embedding model did not return a valid vector. Choose a model that supports embeddings.');
-      }
-      return { working: true, step: 'complete', detail: 'Working', embeddingDimension: vector.length };
+      return { working: true, step: 'complete', detail: 'Working' };
     } catch (error) {
       return { working: false, step, detail: failureDetail(error) };
     }

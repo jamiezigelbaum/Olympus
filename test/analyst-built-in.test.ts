@@ -450,7 +450,7 @@ describe('Private lane fallback', () => {
     await expect(withBuiltInFallback(failing(refused), fixed('built-in')).analyze(pack, { localOnly: true })).rejects.toBe(refused);
   });
 
-  test('wired into local secure-pool members only when no Venice member is configured', async () => {
+  test('wired into local secure-pool members before Venice', async () => {
     const down = failing(new OperationError('argus_unreachable', 'Argus lane is unreachable at http://127.0.0.1:28090.'));
     const entry = (id: string, backend: 'local' | 'venice' | 'cloud', analyst: Analyst) => [id, {
       profile: { id, profile: { provider: 'local-openai-compatible' as const, trust: 'local' as const, model: 'm', baseUrl: 'http://127.0.0.1:1/v1' } },
@@ -464,8 +464,8 @@ describe('Private lane fallback', () => {
     expect((await localOnly.get('cloud')!.analyst.analyze(pack, { localOnly: false })).answer).toBe('cloud');
 
     const withVenice = new Map([entry('local-source-answer', 'local', down), entry('venice-private', 'venice', fixed('venice'))]);
-    expect(applyBuiltInPrivateAnalyst(withVenice, new Set(['local-source-answer', 'venice-private']), fixed('built-in'))).toBe(false);
-    await expect(withVenice.get('local-source-answer')!.analyst.analyze(pack, { localOnly: true })).rejects.toThrow('unreachable');
+    expect(applyBuiltInPrivateAnalyst(withVenice, new Set(['local-source-answer', 'venice-private']), fixed('built-in'))).toBe(true);
+    expect((await withVenice.get('local-source-answer')!.analyst.analyze(pack, { localOnly: true })).answer).toBe('built-in');
 
     expect(applyBuiltInPrivateAnalyst(localOnly, new Set(['local-source-answer']), undefined)).toBe(false);
   });
@@ -478,7 +478,7 @@ describe('Private lane fallback', () => {
     }
     expect(builtInBacksPrivateAnalyst(local.id, 'failed', [local])).toBe(false);
     expect(builtInBacksPrivateAnalyst(local.id, undefined, [local])).toBe(false);
-    expect(builtInBacksPrivateAnalyst(local.id, 'ready', [local, venice])).toBe(false);
+    expect(builtInBacksPrivateAnalyst(local.id, 'ready', [local, venice])).toBe(true);
     expect(builtInBacksPrivateAnalyst(local.id, 'ready', [local, venice], new Set([local.id]))).toBe(true);
     expect(builtInBacksPrivateAnalyst('other', 'ready', [local])).toBe(false);
   });
