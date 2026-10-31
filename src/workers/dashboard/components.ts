@@ -572,18 +572,19 @@ export interface DashboardConnectSheetInput {
 }
 
 /** A provider-neutral walkthrough. The last step contains the existing connect form. */
-export function setupStepsSheet(input: { id: string; provider: string; steps: readonly DashboardSetupStep[]; finalForm: string; redirect?: string }): string {
+export function setupStepsSheet(input: { id: string; provider: string; steps: readonly DashboardSetupStep[]; finalForm: (formId: string) => string; submitLabel?: string; redirect?: string }): string {
   const id = safeId(input.id);
   const count = input.steps.length;
+  const formId = `${id}-form`;
   const panels = input.steps.map((step, index) => {
     const url = step.link && safeExternalHref(step.link.url);
     const link = url ? `<button type="button" class="btn primary" data-setup-open="${escapeHtml(url)}">Open this page in ${escapeHtml(input.provider)}</button>`
       + `<p><a class="ext" href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer">Open the page in ${escapeHtml(input.provider)} ↗</a></p>` : '';
     const redirect = step.redirect_uri && input.redirect
       ? `<div class="promptbox" id="${id}-redirect">${escapeHtml(input.redirect)}</div><button class="btn" type="button" data-copy-target="#${id}-redirect">Copy redirect URI</button><span data-copy-status aria-live="polite"></span>` : '';
-    return `<div data-setup-panel${index ? ' hidden' : ''}><h4>${escapeHtml(step.title ?? `Step ${index + 1}`)}</h4><p>${escapeHtml(step.text)}</p>${link}${redirect}${index === count - 1 ? input.finalForm : ''}</div>`;
+    return `<div data-setup-panel${index ? ' hidden' : ''}><h4>${escapeHtml(step.title ?? `Step ${index + 1}`)}</h4><p>${escapeHtml(step.text)}</p>${link}${redirect}${index === count - 1 ? input.finalForm(formId) : ''}</div>`;
   }).join('');
-  return `<div data-setup-steps><p data-setup-counter>Step 1 of ${count}</p><progress data-setup-progress max="${count}" value="1"></progress>${panels}<div class="rowform"><button class="btn" type="button" data-setup-back>Back</button><button class="btn primary" type="button" data-setup-next>I've done this, next</button></div></div>`;
+  return `<div data-setup-steps><p data-setup-counter>Step 1 of ${count}</p><progress data-setup-progress max="${count}" value="1"></progress>${panels}<div class="setupactions" data-setup-actions><button class="btn" type="button" data-setup-back disabled>Back</button><button class="btn primary" type="button" data-setup-next${count === 1 ? ' hidden' : ''}>I've done this, next</button><button class="btn primary" type="submit" form="${formId}" data-setup-submit${count === 1 ? '' : ' hidden'}>${escapeHtml(input.submitLabel ?? 'Connect')}</button></div></div>`;
 }
 
 /**
@@ -607,13 +608,13 @@ export function connectSetupSheet(input: DashboardConnectSheetInput): string {
       + `${value === undefined ? '' : ` value="${escapeHtml(value)}"`}`
       + ` placeholder="${escapeHtml(placeholder)}" aria-label="${escapeHtml(field.label)}">`;
   }).join('');
-  const notice = (input.notice === undefined || input.notice.trim() === ''
-    ? ''
-    : `<p class="why">${escapeHtml(input.notice)}</p>`
-      + detailsDisclosure('How to fix', input.noticeDetail === undefined ? '' : `<p class="hint">${escapeHtml(input.noticeDetail)}</p>`))
-    + (input.providerNote === undefined || input.providerNote.trim() === ''
-      ? ''
-      : `<p class="providernote">${escapeHtml(input.providerNote)}</p>`);
+  const hasError = Boolean(input.notice?.trim());
+  const notice = hasError
+    ? `<div data-connect-error><p class="why" role="alert">${escapeHtml(input.notice!)}</p>`
+      + detailsDisclosure('How to fix', input.noticeDetail ? `<p class="hint">${escapeHtml(input.noticeDetail)}</p>` : '')
+      + `<button class="btn" type="button" data-connect-retry>Back to setup</button></div>`
+    : '';
+  const providerNote = input.providerNote?.trim() ? `<p class="providernote">${escapeHtml(input.providerNote)}</p>` : '';
   const registration = callbackRegistrationSteps(id, input.registration);
   // The redirect URI sits above the key fields and is selectable text with its
   // own copy button (.promptbox is already `user-select: all`), because every
@@ -643,17 +644,17 @@ export function connectSetupSheet(input: DashboardConnectSheetInput): string {
     + `</details>`;
   const submitLabel = escapeHtml(input.submitLabel ?? 'Connect');
   const sourceField = `<input type="hidden" name="source" value="${escapeHtml(input.source)}">`;
-  const byoForm = `<form class="rowform" data-connect-kind="oauth" style="margin-top:12px">`
+  const byoForm = (formId?: string) => `<form${formId ? ` id="${formId}" class="setupfields"` : ' class="rowform"'} data-connect-kind="oauth" style="margin-top:12px">`
     + sourceField
     + `${inputs}`
-    + `<button class="btn primary" type="submit">${submitLabel}</button>`
+    + (formId ? '' : `<button class="btn primary" type="submit">${submitLabel}</button>`)
     + `<span class="actmsg" data-action-message role="status"></span>`
     // Where the authorization link lands when the browser blocks the new tab.
     + `<span class="authfallback" data-authorization-fallback></span>`
     + `</form>`;
   const walkthrough = input.steps?.length && input.provider
-    ? setupStepsSheet({ id, provider: input.provider, steps: input.steps, finalForm: byoForm, ...(input.redirectUri ? { redirect: input.redirectUri.uri } : {}) })
-    : `${registration}${redirect}${byoForm}`;
+    ? setupStepsSheet({ id, provider: input.provider, steps: input.steps, finalForm: byoForm, submitLabel: input.submitLabel ?? 'Connect', ...(input.redirectUri ? { redirect: input.redirectUri.uri } : {}) })
+    : `${registration}${redirect}${byoForm()}`;
   if (input.publisher) {
     // The whole point of publisher mode is that there is nothing to do first.
     // The one-click form carries the source and NOTHING else: no client id
@@ -667,7 +668,7 @@ export function connectSetupSheet(input: DashboardConnectSheetInput): string {
       + `</form>`;
     return `<div class="sheet" id="${id}" aria-hidden="true">`
       + `<h4>${escapeHtml(input.heading)}</h4>`
-      + `${notice}`
+      + `${notice}<div data-connect-content${hasError ? ' hidden' : ''}>${providerNote}`
       + `<p>${escapeHtml(input.publisher.intro)}</p>`
       + `${publisherForm}`
       + `${cancel}`
@@ -676,16 +677,16 @@ export function connectSetupSheet(input: DashboardConnectSheetInput): string {
       + `<p>${escapeHtml(input.intro)}</p>`
       + `${walkthrough}`
       + `${prompt}`
-      + `</details>`
+      + `</details></div>`
       + `</div>`;
   }
   return `<div class="sheet" id="${id}" aria-hidden="true">`
     + `<h4>${escapeHtml(input.heading)}</h4>`
-    + `${notice}`
+    + `${notice}<div data-connect-content${hasError ? ' hidden' : ''}>${providerNote}`
     + `<p>${escapeHtml(input.intro)}</p>`
     + `${walkthrough}`
     + `${cancel}`
-    + `${prompt}`
+    + `${prompt}</div>`
     + `</div>`;
 }
 
@@ -783,14 +784,7 @@ export function dashboardOAuthConnectSheet(
     field.name === 'client_id' || !secretOnFile ? field : { ...field, required: false }
   ));
   const savedSecrets = secretOnFile ? byo.fields.filter((field) => field.secret).map((field) => field.name) : [];
-  // A provider that does not know this callback URI answers with its own
-  // generic error page and never calls back, so the attempt just sits pending.
-  // Say so while it does: the owner otherwise retries the identical request.
-  const pendingNote = action.pending_attempt && action.redirect_uri_to_register
-    ? `If ${source.label}'s page shows an error instead of asking you to approve, the callback URL below is not`
-      + ` registered exactly on your app. Add it, press Cancel connection attempt, then Connect again.`
-    : undefined;
-  const notice = options.notice ?? pendingNote;
+  const notice = options.notice;
   const sheet = connectSetupSheet({
     id: sheetId,
     heading: `${dashboardActionLabel(action.label)} ${source.label}`,

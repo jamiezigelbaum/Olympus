@@ -277,7 +277,7 @@ function renderSetupRow(source: DashboardSourceCard, view: SourceDashboardViewMo
   }
   if (action.kind === 'api_key' && action.source === 'venice') {
     const sheetId = 'setup-venice-api';
-    const form = `<form class="rowform" data-connect-kind="api_key"><input type="hidden" name="source" value="venice"><input class="keyfield" type="password" name="api_key" required autocomplete="new-password" placeholder="API key" aria-label="API key"><button class="btn primary" type="submit">Connect</button><span class="actmsg" data-action-message role="status"></span></form>`;
+    const form = (formId: string) => `<form id="${formId}" class="setupfields" data-connect-kind="api_key"><input type="hidden" name="source" value="venice"><input class="keyfield" type="password" name="api_key" required autocomplete="new-password" placeholder="API key" aria-label="API key"><span class="actmsg" data-action-message role="status"></span></form>`;
     const sheet = `<div class="sheet" id="${sheetId}" aria-hidden="true"><h4>Set up Venice</h4>${setupStepsSheet({ id: sheetId, provider: 'Venice', steps: action.instructions.diy_steps, finalForm: form })}</div>`;
     return setupRow({ ...id, label: source.label, blurb: action.instructions.plain_intro, action: { label: action.label, kind: 'none', sheet: sheetId, ...gate } }) + sheet;
   }

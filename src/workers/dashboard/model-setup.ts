@@ -145,17 +145,17 @@ function modelKeyFieldId(card: ModelSetupCard): string {
   return `model-key-field-${card.id.replace(/[^A-Za-z0-9_-]+/g, '-')}`;
 }
 
-function modelKeyForm(card: ModelSetupCard): string {
-  return `<form method="post" action="/dashboard/connect/api-key" data-connect-kind="api_key" data-model-provider="${card.id}">`
+function modelKeyForm(card: ModelSetupCard, formId?: string): string {
+  return `<form${formId ? ` id="${formId}" class="setupfields"` : ''} method="post" action="/dashboard/connect/api-key" data-connect-kind="api_key" data-model-provider="${card.id}">`
     + `<input type="hidden" name="source" value="${card.id}">`
     + `<input class="keyfield"${card.state === 'ready' ? '' : ` id="${modelKeyFieldId(card)}"`} type="password" name="api_key" required autocomplete="new-password" placeholder="${card.label} API key" aria-label="${card.label} API key">`
-    + '<button class="btn primary" type="submit">Connect</button><span data-action-message role="status"></span></form>';
+    + (formId ? '' : '<button class="btn primary" type="submit">Connect</button>') + '<span data-action-message role="status"></span></form>';
 }
 
 /** One wrapping row: the key form (or the saved-key note) and the "Get a key" link beside it. */
 function modelKeyAction(card: ModelSetupCard, lead: string): string {
   if (card.id === 'venice' && lead.includes('<form')) {
-    return `<span id="model-venice-start" tabindex="-1"></span>` + setupStepsSheet({ id: `model-venice-${card.state}`, provider: 'Venice', steps: VENICE_SETUP_STEPS, finalForm: lead });
+    return `<span id="model-venice-start" tabindex="-1"></span>` + setupStepsSheet({ id: `model-venice-${card.state}`, provider: 'Venice', steps: VENICE_SETUP_STEPS, finalForm: (formId) => modelKeyForm(card, formId) });
   }
   const href = card.id === 'gemini' ? 'https://aistudio.google.com/apikey' : 'https://venice.ai';
   return `<div class="modelaction">${lead}<a href="${href}" target="_blank" rel="noopener noreferrer">Get a ${card.label} API key</a></div>`;

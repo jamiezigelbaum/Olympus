@@ -95175,7 +95175,7 @@ function sourceAction(definition, connected, reauthRequired, providerRefusing, o
   if (definition.connect_action.kind === "oauth" && definition.connect_action.source === "evernote") {
     if (connected && !reauthRequired && !providerRefusing)
       return { kind: "none" };
-    return { kind: "oauth", source: "evernote", label, publisher_client: true, ...pending ? { pending_attempt: true } : {} };
+    return { kind: "oauth", source: "evernote", label, publisher_client: true, ...pending && !pending.error ? { pending_attempt: true } : {} };
   }
   if (definition.connect_action.kind === "oauth") {
     if (connected && !reauthRequired && !providerRefusing)
@@ -95202,7 +95202,7 @@ function sourceAction(definition, connected, reauthRequired, providerRefusing, o
         ...knownClientId && clientSecretOnFile ? { client_secret_on_file: true } : {},
         ...redirectFields,
         instructions: publisherOAuthSetupInstructions(definition.label, label, oauthSetupInstructions(definition.connect_action.source, googleCloudProjectId, oauthRedirectBaseUrl)),
-        ...pending ? { pending_attempt: true } : {}
+        ...pending && !pending.error ? { pending_attempt: true } : {}
       };
     }
     if (!knownClientId || !hasClientSecret) {
@@ -95223,7 +95223,7 @@ function sourceAction(definition, connected, reauthRequired, providerRefusing, o
       ...clientSecretOnFile ? { client_secret_on_file: true } : {},
       ...redirectFields,
       instructions: oauthSetupInstructions(definition.connect_action.source, googleCloudProjectId, oauthRedirectBaseUrl),
-      ...pending ? { pending_attempt: true } : {}
+      ...pending && !pending.error ? { pending_attempt: true } : {}
     };
   }
   if (definition.connect_action.kind === "this_computer") {
@@ -143110,7 +143110,7 @@ function mountDashboardController(options) {
   function applyWriteCapability() {
     root.querySelectorAll("form[data-connect-kind],form[data-model-check],form[data-agent-kind]").forEach((form) => {
       const pending = pendingForms.has(form) || form.dataset.keyAccepted === "true";
-      form.querySelectorAll('button,input:not([type="hidden"])').forEach((control) => {
+      Array.from(form.elements).filter((control) => control instanceof HTMLButtonElement || control instanceof HTMLInputElement && control.type !== "hidden").forEach((control) => {
         if (control.dataset.olympusOriginallyDisabled === undefined) {
           control.dataset.olympusOriginallyDisabled = control.disabled ? "true" : "false";
         }
@@ -143390,14 +143390,30 @@ function mountDashboardController(options) {
       say(form, message2);
       const setup = form.closest("[data-setup-steps]");
       const step = message2.includes("Redo the Set up your account step") ? 0 : message2.includes("Redo the Create an API key step") ? 1 : -1;
-      form.querySelector("[data-setup-retry]")?.remove();
-      if (setup && step >= 0) {
+      if (setup) {
+        const panels = Array.from(setup.querySelectorAll("[data-setup-panel]"));
+        const current2 = panels.findIndex((panel) => !panel.hidden);
+        panels.forEach((panel) => {
+          panel.hidden = true;
+        });
+        const actions = setup.querySelector("[data-setup-actions]");
+        if (actions)
+          actions.hidden = true;
+        setup.querySelector("[data-setup-error]")?.remove();
+        const error2 = document.createElement("div");
+        error2.dataset.setupError = "";
+        const banner = document.createElement("p");
+        banner.className = "why";
+        banner.setAttribute("role", "alert");
+        banner.textContent = message2;
         const retry = document.createElement("button");
         retry.type = "button";
         retry.className = "btn";
-        retry.dataset.setupRetry = String(step);
-        retry.textContent = step === 0 ? "Go to account and credit" : "Go to API key";
-        form.append(retry);
+        retry.dataset.setupRetry = String(step >= 0 ? step : Math.max(0, current2));
+        retry.textContent = step === 0 ? "Go to account and credit" : step === 1 ? "Go to API key" : "Try again";
+        error2.append(banner, retry);
+        setup.append(error2);
+        retry.focus();
       }
       return;
     }
@@ -143428,7 +143444,7 @@ function mountDashboardController(options) {
         input.value = "";
         input.hidden = true;
       });
-      form.querySelectorAll('button[type="submit"],button:not([type])').forEach((button) => {
+      Array.from(form.elements).filter((control) => control instanceof HTMLButtonElement && isSubmitControl(control)).forEach((button) => {
         button.textContent = params.source === "readwise" ? "Connected" : "Key saved";
       });
       applyWriteCapability();
@@ -143773,10 +143789,57 @@ function mountDashboardController(options) {
     const tab = form.dataset.connectKind === "oauth" ? openAuthorizationTab() : null;
     submitControl(form, tab, submittedValues);
   }
+  function showSetupStep(sheet, step) {
+    const panels = Array.from(sheet.querySelectorAll("[data-setup-panel]"));
+    panels.forEach((panel, index) => {
+      panel.hidden = index !== step;
+    });
+    const counter = sheet.querySelector("[data-setup-counter]");
+    if (counter)
+      counter.textContent = `Step ${step + 1} of ${panels.length}`;
+    const progress = sheet.querySelector("[data-setup-progress]");
+    if (progress)
+      progress.value = step + 1;
+    const back = sheet.querySelector("[data-setup-back]");
+    if (back)
+      back.disabled = step === 0;
+    const next = sheet.querySelector("[data-setup-next]");
+    if (next)
+      next.hidden = step === panels.length - 1;
+    const submit = sheet.querySelector("[data-setup-submit]");
+    if (submit)
+      submit.hidden = step !== panels.length - 1;
+    const actions = sheet.querySelector("[data-setup-actions]");
+    if (actions)
+      actions.hidden = false;
+    if (sheet.querySelector("[data-setup-error]")) {
+      sheet.querySelectorAll("form").forEach((form) => say(form, ""));
+      sheet.querySelector("[data-setup-error]")?.remove();
+    }
+    const heading = panels[step]?.querySelector("h4");
+    if (heading) {
+      heading.tabIndex = -1;
+      heading.focus();
+    }
+  }
   function onClick(event) {
     const target = event.target instanceof Element ? event.target : null;
     if (!target || !root.contains(target))
       return;
+    if (target.closest("[data-connect-retry]")) {
+      const sheet = target.closest(".sheet");
+      const error2 = sheet?.querySelector("[data-connect-error]");
+      const content = sheet?.querySelector("[data-connect-content]");
+      if (error2)
+        error2.hidden = true;
+      if (content) {
+        content.hidden = false;
+        const steps = content.querySelector("[data-setup-steps]");
+        if (steps)
+          showSetupStep(steps, 0);
+      }
+      return;
+    }
     const setupOpen = target.closest("[data-setup-open]");
     if (setupOpen) {
       const url2 = setupOpen.dataset.setupOpen;
@@ -143792,18 +143855,7 @@ function mountDashboardController(options) {
       const panels = Array.from(sheet.querySelectorAll("[data-setup-panel]"));
       const current2 = panels.findIndex((panel) => !panel.hidden);
       const next = Math.max(0, Math.min(panels.length - 1, setupControl.hasAttribute("data-setup-retry") ? Number(setupControl.dataset.setupRetry) : current2 + (setupControl.hasAttribute("data-setup-next") ? 1 : -1)));
-      panels.forEach((panel, index) => {
-        panel.hidden = index !== next;
-      });
-      const counter = sheet.querySelector("[data-setup-counter]");
-      if (counter)
-        counter.textContent = `Step ${next + 1} of ${panels.length}`;
-      const progress = sheet.querySelector("[data-setup-progress]");
-      if (progress)
-        progress.value = next + 1;
-      const forward = sheet.querySelector("[data-setup-next]");
-      if (forward)
-        forward.hidden = next === panels.length - 1;
+      showSetupStep(sheet, next);
       return;
     }
     const menu = target.closest("details.rowmenu");
@@ -143832,7 +143884,7 @@ function mountDashboardController(options) {
         sheet.focus();
       }
       const form = sheet.querySelector('form[data-connect-kind="oauth"][data-oauth-autostart]');
-      if (open7 && form && (canWrite || csrfToken) && !startedFromSheet.has(form) && !form.hasAttribute("data-native-oauth-unavailable")) {
+      if (open7 && form && !form.closest("[hidden]") && (canWrite || csrfToken) && !startedFromSheet.has(form) && !form.hasAttribute("data-native-oauth-unavailable")) {
         startedFromSheet.add(form);
         form.requestSubmit();
       }
@@ -143947,15 +143999,13 @@ function mountDashboardController(options) {
             const walkthrough = sheet.querySelector("[data-setup-steps]");
             const panels = walkthrough ? Array.from(walkthrough.querySelectorAll("[data-setup-panel]")) : [];
             if (walkthrough && panels.length > 2) {
-              panels.forEach((panel, index) => {
-                panel.hidden = index !== 2;
-              });
-              const counter = walkthrough.querySelector("[data-setup-counter]");
-              if (counter)
-                counter.textContent = `Step 3 of ${panels.length}`;
-              const progress = walkthrough.querySelector("[data-setup-progress]");
-              if (progress)
-                progress.value = 3;
+              const error2 = sheet.querySelector("[data-connect-error]");
+              const content = sheet.querySelector("[data-connect-content]");
+              if (error2)
+                error2.hidden = true;
+              if (content)
+                content.hidden = false;
+              showSetupStep(walkthrough, 2);
               const disclosure = walkthrough.closest("details");
               if (disclosure)
                 disclosure.open = true;
@@ -144351,6 +144401,11 @@ td { padding: 7px 10px 7px 0; border-bottom: 1px solid var(--line2); color: var(
 .setrow .blurb details.howto { color: var(--t3); font-size: var(--fs-caption); }
 .rowform { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .keyfield { background: var(--bg); border: 1px solid var(--field); border-radius: 7px; color: var(--t1); font: inherit; font-size: var(--fs-body); padding: 5px 10px; width: 190px; }
+.setupfields { display: grid; gap: 8px; width: 100%; }
+.setupfields .keyfield { width: 100%; box-sizing: border-box; }
+.setupactions { display: flex; align-items: center; gap: 12px; margin-top: 16px; }
+.setupactions > .primary { margin-left: auto; }
+[data-setup-steps] [hidden], [data-connect-content][hidden], [data-connect-error][hidden] { display: none !important; }
 .keyfield::placeholder { color: var(--t4); }
 .keyfield:focus-visible { outline: 2px solid var(--link); outline-offset: 1px; }
 .actmsg { color: var(--t3); font-size: var(--fs-caption); }
@@ -144599,13 +144654,14 @@ function connectorSheet(input) {
 function setupStepsSheet(input) {
   const id = safeId2(input.id);
   const count = input.steps.length;
+  const formId = `${id}-form`;
   const panels = input.steps.map((step, index) => {
     const url2 = step.link && safeExternalHref(step.link.url);
     const link = url2 ? `<button type="button" class="btn primary" data-setup-open="${escapeHtml2(url2)}">Open this page in ${escapeHtml2(input.provider)}</button>` + `<p><a class="ext" href="${escapeHtml2(url2)}" target="_blank" rel="noopener noreferrer">Open the page in ${escapeHtml2(input.provider)} ↗</a></p>` : "";
     const redirect = step.redirect_uri && input.redirect ? `<div class="promptbox" id="${id}-redirect">${escapeHtml2(input.redirect)}</div><button class="btn" type="button" data-copy-target="#${id}-redirect">Copy redirect URI</button><span data-copy-status aria-live="polite"></span>` : "";
-    return `<div data-setup-panel${index ? " hidden" : ""}><h4>${escapeHtml2(step.title ?? `Step ${index + 1}`)}</h4><p>${escapeHtml2(step.text)}</p>${link}${redirect}${index === count - 1 ? input.finalForm : ""}</div>`;
+    return `<div data-setup-panel${index ? " hidden" : ""}><h4>${escapeHtml2(step.title ?? `Step ${index + 1}`)}</h4><p>${escapeHtml2(step.text)}</p>${link}${redirect}${index === count - 1 ? input.finalForm(formId) : ""}</div>`;
   }).join("");
-  return `<div data-setup-steps><p data-setup-counter>Step 1 of ${count}</p><progress data-setup-progress max="${count}" value="1"></progress>${panels}<div class="rowform"><button class="btn" type="button" data-setup-back>Back</button><button class="btn primary" type="button" data-setup-next>I've done this, next</button></div></div>`;
+  return `<div data-setup-steps><p data-setup-counter>Step 1 of ${count}</p><progress data-setup-progress max="${count}" value="1"></progress>${panels}<div class="setupactions" data-setup-actions><button class="btn" type="button" data-setup-back disabled>Back</button><button class="btn primary" type="button" data-setup-next${count === 1 ? " hidden" : ""}>I've done this, next</button><button class="btn primary" type="submit" form="${formId}" data-setup-submit${count === 1 ? "" : " hidden"}>${escapeHtml2(input.submitLabel ?? "Connect")}</button></div></div>`;
 }
 function connectSetupSheet(input) {
   const id = safeId2(input.id);
@@ -144615,20 +144671,22 @@ function connectSetupSheet(input) {
     const placeholder = input.placeholders?.[field.name] ?? field.label;
     return `<input class="keyfield" type="${field.secret ? "password" : "text"}" name="${escapeHtml2(field.name)}"` + `${field.required ? " required" : ""}` + `${value2 === undefined ? "" : ` value="${escapeHtml2(value2)}"`}` + ` placeholder="${escapeHtml2(placeholder)}" aria-label="${escapeHtml2(field.label)}">`;
   }).join("");
-  const notice = (input.notice === undefined || input.notice.trim() === "" ? "" : `<p class="why">${escapeHtml2(input.notice)}</p>` + detailsDisclosure("How to fix", input.noticeDetail === undefined ? "" : `<p class="hint">${escapeHtml2(input.noticeDetail)}</p>`)) + (input.providerNote === undefined || input.providerNote.trim() === "" ? "" : `<p class="providernote">${escapeHtml2(input.providerNote)}</p>`);
+  const hasError = Boolean(input.notice?.trim());
+  const notice = hasError ? `<div data-connect-error><p class="why" role="alert">${escapeHtml2(input.notice)}</p>` + detailsDisclosure("How to fix", input.noticeDetail ? `<p class="hint">${escapeHtml2(input.noticeDetail)}</p>` : "") + `<button class="btn" type="button" data-connect-retry>Back to setup</button></div>` : "";
+  const providerNote = input.providerNote?.trim() ? `<p class="providernote">${escapeHtml2(input.providerNote)}</p>` : "";
   const registration = callbackRegistrationSteps(id, input.registration);
   const redirect = input.registration !== undefined || input.redirectUri === undefined ? "" : `<p class="hint">Redirect URI</p>` + `<div class="promptbox" id="${id}-redirect">${escapeHtml2(input.redirectUri.uri)}</div>` + `<button class="btn" type="button" data-copy-target="#${id}-redirect">Copy redirect URI</button>` + `<span class="copystatus" data-copy-status aria-live="polite"></span>` + `${input.redirectUri.guidance === undefined ? "" : `<p class="hint">${escapeHtml2(input.redirectUri.guidance)}</p>`}`;
   const cancel = input.cancellable !== true ? "" : `<form class="rowform" data-connect-kind="oauth_cancel" style="margin-top:8px">` + `<input type="hidden" name="source" value="${escapeHtml2(input.source)}">` + `<button class="btn" type="submit">Cancel connection attempt</button>` + `<span class="actmsg" data-action-message role="status"></span>` + `</form>`;
   const prompt = `<details class="agentprompt">` + `<summary>Ask your agent to walk you through it</summary>` + `<div class="promptbox" id="${promptId}">${escapeHtml2(input.promptText)}</div>` + `<button class="btn" type="button" data-copy-target="#${promptId}">Copy prompt</button>` + `<span class="copystatus" data-copy-status aria-live="polite"></span>` + `</details>`;
   const submitLabel = escapeHtml2(input.submitLabel ?? "Connect");
   const sourceField = `<input type="hidden" name="source" value="${escapeHtml2(input.source)}">`;
-  const byoForm = `<form class="rowform" data-connect-kind="oauth" style="margin-top:12px">` + sourceField + `${inputs}` + `<button class="btn primary" type="submit">${submitLabel}</button>` + `<span class="actmsg" data-action-message role="status"></span>` + `<span class="authfallback" data-authorization-fallback></span>` + `</form>`;
-  const walkthrough = input.steps?.length && input.provider ? setupStepsSheet({ id, provider: input.provider, steps: input.steps, finalForm: byoForm, ...input.redirectUri ? { redirect: input.redirectUri.uri } : {} }) : `${registration}${redirect}${byoForm}`;
+  const byoForm = (formId) => `<form${formId ? ` id="${formId}" class="setupfields"` : ' class="rowform"'} data-connect-kind="oauth" style="margin-top:12px">` + sourceField + `${inputs}` + (formId ? "" : `<button class="btn primary" type="submit">${submitLabel}</button>`) + `<span class="actmsg" data-action-message role="status"></span>` + `<span class="authfallback" data-authorization-fallback></span>` + `</form>`;
+  const walkthrough = input.steps?.length && input.provider ? setupStepsSheet({ id, provider: input.provider, steps: input.steps, finalForm: byoForm, submitLabel: input.submitLabel ?? "Connect", ...input.redirectUri ? { redirect: input.redirectUri.uri } : {} }) : `${registration}${redirect}${byoForm()}`;
   if (input.publisher) {
     const publisherForm = `<form class="rowform" data-connect-kind="oauth"${input.cancellable ? "" : " data-oauth-autostart"} style="margin-top:12px">` + sourceField + `<button class="btn primary" type="submit">${submitLabel}</button>` + `<span class="actmsg" data-action-message role="status"></span>` + `<span class="authfallback" data-authorization-fallback></span>` + `</form>`;
-    return `<div class="sheet" id="${id}" aria-hidden="true">` + `<h4>${escapeHtml2(input.heading)}</h4>` + `${notice}` + `<p>${escapeHtml2(input.publisher.intro)}</p>` + `${publisherForm}` + `${cancel}` + `<details class="agentprompt">` + `<summary>${escapeHtml2(input.publisher.byoSummary)}</summary>` + `<p>${escapeHtml2(input.intro)}</p>` + `${walkthrough}` + `${prompt}` + `</details>` + `</div>`;
+    return `<div class="sheet" id="${id}" aria-hidden="true">` + `<h4>${escapeHtml2(input.heading)}</h4>` + `${notice}<div data-connect-content${hasError ? " hidden" : ""}>${providerNote}` + `<p>${escapeHtml2(input.publisher.intro)}</p>` + `${publisherForm}` + `${cancel}` + `<details class="agentprompt">` + `<summary>${escapeHtml2(input.publisher.byoSummary)}</summary>` + `<p>${escapeHtml2(input.intro)}</p>` + `${walkthrough}` + `${prompt}` + `</details></div>` + `</div>`;
   }
-  return `<div class="sheet" id="${id}" aria-hidden="true">` + `<h4>${escapeHtml2(input.heading)}</h4>` + `${notice}` + `<p>${escapeHtml2(input.intro)}</p>` + `${walkthrough}` + `${cancel}` + `${prompt}` + `</div>`;
+  return `<div class="sheet" id="${id}" aria-hidden="true">` + `<h4>${escapeHtml2(input.heading)}</h4>` + `${notice}<div data-connect-content${hasError ? " hidden" : ""}>${providerNote}` + `<p>${escapeHtml2(input.intro)}</p>` + `${walkthrough}` + `${cancel}` + `${prompt}</div>` + `</div>`;
 }
 function callbackRegistrationSteps(id, registration) {
   if (registration === undefined)
@@ -144665,8 +144723,7 @@ function dashboardOAuthConnectSheet(source, action, options = {}) {
   const secretOnFile = action.client_secret_on_file === true;
   const fields = byo.fields.map((field) => field.name === "client_id" || !secretOnFile ? field : { ...field, required: false });
   const savedSecrets = secretOnFile ? byo.fields.filter((field) => field.secret).map((field) => field.name) : [];
-  const pendingNote = action.pending_attempt && action.redirect_uri_to_register ? `If ${source.label}'s page shows an error instead of asking you to approve, the callback URL below is not` + ` registered exactly on your app. Add it, press Cancel connection attempt, then Connect again.` : undefined;
-  const notice = options.notice ?? pendingNote;
+  const notice = options.notice;
   const sheet = connectSetupSheet({
     id: sheetId,
     heading: `${dashboardActionLabel(action.label)} ${source.label}`,
@@ -152867,12 +152924,12 @@ function renderModelSetupBlocker(view3) {
 function modelKeyFieldId(card) {
   return `model-key-field-${card.id.replace(/[^A-Za-z0-9_-]+/g, "-")}`;
 }
-function modelKeyForm(card) {
-  return `<form method="post" action="/dashboard/connect/api-key" data-connect-kind="api_key" data-model-provider="${card.id}">` + `<input type="hidden" name="source" value="${card.id}">` + `<input class="keyfield"${card.state === "ready" ? "" : ` id="${modelKeyFieldId(card)}"`} type="password" name="api_key" required autocomplete="new-password" placeholder="${card.label} API key" aria-label="${card.label} API key">` + '<button class="btn primary" type="submit">Connect</button><span data-action-message role="status"></span></form>';
+function modelKeyForm(card, formId) {
+  return `<form${formId ? ` id="${formId}" class="setupfields"` : ""} method="post" action="/dashboard/connect/api-key" data-connect-kind="api_key" data-model-provider="${card.id}">` + `<input type="hidden" name="source" value="${card.id}">` + `<input class="keyfield"${card.state === "ready" ? "" : ` id="${modelKeyFieldId(card)}"`} type="password" name="api_key" required autocomplete="new-password" placeholder="${card.label} API key" aria-label="${card.label} API key">` + (formId ? "" : '<button class="btn primary" type="submit">Connect</button>') + '<span data-action-message role="status"></span></form>';
 }
 function modelKeyAction(card, lead) {
   if (card.id === "venice" && lead.includes("<form")) {
-    return `<span id="model-venice-start" tabindex="-1"></span>` + setupStepsSheet({ id: `model-venice-${card.state}`, provider: "Venice", steps: VENICE_SETUP_STEPS, finalForm: lead });
+    return `<span id="model-venice-start" tabindex="-1"></span>` + setupStepsSheet({ id: `model-venice-${card.state}`, provider: "Venice", steps: VENICE_SETUP_STEPS, finalForm: (formId) => modelKeyForm(card, formId) });
   }
   const href = card.id === "gemini" ? "https://aistudio.google.com/apikey" : "https://venice.ai";
   return `<div class="modelaction">${lead}<a href="${href}" target="_blank" rel="noopener noreferrer">Get a ${card.label} API key</a></div>`;
@@ -153017,7 +153074,7 @@ ${connect.sheet}`;
   }
   if (action.kind === "api_key" && action.source === "venice") {
     const sheetId = "setup-venice-api";
-    const form = `<form class="rowform" data-connect-kind="api_key"><input type="hidden" name="source" value="venice"><input class="keyfield" type="password" name="api_key" required autocomplete="new-password" placeholder="API key" aria-label="API key"><button class="btn primary" type="submit">Connect</button><span class="actmsg" data-action-message role="status"></span></form>`;
+    const form = (formId) => `<form id="${formId}" class="setupfields" data-connect-kind="api_key"><input type="hidden" name="source" value="venice"><input class="keyfield" type="password" name="api_key" required autocomplete="new-password" placeholder="API key" aria-label="API key"><span class="actmsg" data-action-message role="status"></span></form>`;
     const sheet = `<div class="sheet" id="${sheetId}" aria-hidden="true"><h4>Set up Venice</h4>${setupStepsSheet({ id: sheetId, provider: "Venice", steps: action.instructions.diy_steps, finalForm: form })}</div>`;
     return setupRow({ ...id, label: source.label, blurb: action.instructions.plain_intro, action: { label: action.label, kind: "none", sheet: sheetId, ...gate } }) + sheet;
   }

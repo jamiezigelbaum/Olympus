@@ -3,6 +3,8 @@ import { Window } from 'happy-dom';
 import type { OlympusDashboardControlResult } from '../src/control-ui-contract.ts';
 import { DASHBOARD_REDRAW_EVENT, mountDashboardController, type OlympusDashboardPageRead } from '../src/control-ui/browser-controller.ts';
 import { connectSetupSheet, setupStepsSheet } from '../src/workers/dashboard/components.ts';
+import { buildDashboardPreviewView, setupPreviewScript } from '../scripts/dashboard-preview.ts';
+import { dashboardHtmlRoutePage, renderDashboardLocalPage } from '../src/workers/dashboard/index.ts';
 
 const GLOBALS = [
   'window', 'document', 'navigator', 'Element', 'HTMLElement', 'HTMLFormElement', 'HTMLInputElement',
@@ -94,7 +96,7 @@ describe('OAuth browser handoff', () => {
   });
   test('setup opens the provider synchronously and keeps a safe fallback link', () => {
     const root = document.createElement('div');
-    root.innerHTML = setupStepsSheet({ id: 'venice', provider: 'Venice', finalForm: '', steps: [
+    root.innerHTML = setupStepsSheet({ id: 'venice', provider: 'Venice', finalForm: () => '', steps: [
       { text: 'Account', link: { label: 'Venice', url: 'https://venice.ai/settings/api' } },
     ] });
     document.body.append(root);
@@ -117,7 +119,7 @@ describe('OAuth browser handoff', () => {
     test(`Venice failure returns to step ${index + 1}`, async () => {
       const root = document.createElement('div');
       root.innerHTML = setupStepsSheet({ id: 'venice', provider: 'Venice', steps: [{ text: 'Account' }, { text: 'Key' }, { text: 'Paste' }],
-        finalForm: '<form data-connect-kind="api_key"><input name="source" value="venice"><input name="api_key" value="fixture"><button type="submit">Connect</button><span data-action-message></span></form>' });
+        finalForm: (id) => `<form id="${id}" data-connect-kind="api_key"><input name="source" value="venice"><input name="api_key" value="fixture"><span data-action-message></span></form>` });
       document.body.append(root);
       const controller = mountDashboardController({ root, transport: { control: async () => ({ status: 400, body: { ok: false, error: { message } } }) },
         navigate() {}, async refresh() { return undefined; }, returnUrl: 'https://gateway.test/', canWrite: true,
@@ -126,9 +128,13 @@ describe('OAuth browser handoff', () => {
       next.click(); next.click();
       root.querySelector<HTMLFormElement>('form')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
       await happyWindow.happyDOM.waitUntilComplete();
-      expect(root.querySelector('[data-action-message]')?.textContent).toBe(message);
+      expect(root.querySelector('[data-setup-error]')?.textContent).toContain(message);
+      expect(Array.from(root.querySelectorAll<HTMLElement>('[data-setup-panel]')).every(panel => panel.hidden)).toBe(true);
+      expect(root.querySelector<HTMLElement>('[data-setup-actions]')!.hidden).toBe(true);
       root.querySelector<HTMLButtonElement>('[data-setup-retry]')!.click();
       expect(Array.from(root.querySelectorAll<HTMLElement>('[data-setup-panel]')).findIndex(p => !p.hidden)).toBe(index);
+      expect(root.querySelector('[data-setup-error]')).toBeNull();
+      expect(root.querySelector('[data-action-message]')?.textContent).toBe('');
       controller.dispose();
     });
   }
@@ -136,7 +142,7 @@ describe('OAuth browser handoff', () => {
     happyWindow.location.hash = '#olympus-open=dropbox.permissions';
     const root = document.createElement('div');
     root.innerHTML = '<div data-source-id="dropbox.files"><button data-sheet-toggle="#dropbox-sheet">Connect</button>'
-      + '<div class="sheet" id="dropbox-sheet"><details>' + setupStepsSheet({ id: 'd', provider: 'Dropbox', finalForm: '<form></form>',
+      + '<div class="sheet" id="dropbox-sheet"><details>' + setupStepsSheet({ id: 'd', provider: 'Dropbox', finalForm: (id) => `<form id="${id}"></form>`,
         steps: [{ text: 'Create' }, { text: 'Access' }, { text: 'Permissions' }, { text: 'Redirect' }, { text: 'Key' }] }) + '</details></div></div>';
     document.body.append(root);
     const controller = mountDashboardController({ root, transport: { control: noControl }, navigate() {}, async refresh() { return undefined; },
@@ -1002,4 +1008,71 @@ test('a redraw asked for while a Connect is pending runs once that Connect has a
 
 test('the serialized controller listens for the exported redraw event name', () => {
   expect(mountDashboardController.toString()).toMatch(new RegExp(`['"]${DASHBOARD_REDRAW_EVENT}['"]`));
+});
+
+
+for (const [state, provider, step] of [
+  ['connect-dropbox', 'dropbox', '1'], ['connect-dropbox', 'dropbox', '5'],
+  ['connect-dropbox-refused', 'dropbox', '1'], ['connect-venice', 'venice', '3'],
+] as const) {
+  test(`preview deep link reaches ${state} step ${step} without starting a connection`, () => {
+    const root = document.createElement('div');
+    const url = new URL(`http://localhost/dashboard?keys&controls&state=${state}&sheet=${provider}&step=${step}`);
+    expect(dashboardHtmlRoutePage(url)).toBe('keys');
+    root.innerHTML = renderDashboardLocalPage('keys', {
+      url, view: buildDashboardPreviewView(state),
+      options: { controlSessionCsrfToken: 'fixture' },
+    });
+    document.body.append(root);
+    let calls = 0;
+    const controller = mountDashboardController({ root, transport: { control: async () => { calls++; return { status: 200, body: { ok: true } }; } },
+      navigate() {}, async refresh() { return undefined; }, returnUrl: 'https://gateway.test/', canWrite: true,
+      signal: new AbortController().signal, pollIntervalMs: 0 });
+    const script = setupPreviewScript(provider, step).replace(/^<script>|<\/script>$/g, '');
+    new Function(script)();
+    happyWindow.dispatchEvent(new happyWindow.Event('DOMContentLoaded'));
+    const sheet = provider === 'dropbox' ? root.querySelector<HTMLElement>('#connect-dropbox-files')!
+      : root.querySelector<HTMLElement>('[data-model-card="venice"]')!;
+    if (state.endsWith('refused')) {
+      expect(sheet.querySelector<HTMLElement>('[data-connect-content]')!.hidden).toBe(true);
+      expect(sheet.querySelector<HTMLElement>('[data-connect-error]')!.hidden).toBe(false);
+      sheet.querySelector<HTMLButtonElement>('[data-connect-retry]')!.click();
+      expect(sheet.querySelector<HTMLElement>('[data-connect-content]')!.hidden).toBe(false);
+      expect(sheet.querySelector<HTMLElement>('[data-connect-error]')!.hidden).toBe(true);
+    }
+    expect(sheet.querySelector('[data-setup-counter]')!.textContent).toContain(`Step ${step} of`);
+    const back = sheet.querySelector<HTMLButtonElement>('[data-setup-back]')!;
+    const submit = sheet.querySelector<HTMLButtonElement>('[data-setup-submit]')!;
+    expect(back.disabled).toBe(step === '1');
+    expect(submit.hidden).toBe(step === '1');
+    expect(back.parentElement).toBe(submit.parentElement);
+    expect(calls).toBe(0);
+    controller.dispose();
+  });
+}
+
+test('shared footer submit respects write access, pending state and accepted keys', async () => {
+  const root = document.createElement('div');
+  root.innerHTML = setupStepsSheet({ id: 'key', provider: 'Venice', steps: [{ text: 'Paste key' }],
+    finalForm: id => `<form id="${id}" data-connect-kind="api_key"><input type="hidden" name="source" value="venice"><input name="api_key" value="fixture"><span data-action-message></span></form>` });
+  document.body.append(root);
+  let complete!: (result: OlympusDashboardControlResult) => void;
+  let calls = 0;
+  const controller = mountDashboardController({ root, transport: { control: () => { calls++; return new Promise(resolve => { complete = resolve; }); } },
+    navigate() {}, async refresh() { return undefined; }, returnUrl: 'https://gateway.test/', canWrite: false,
+    signal: new AbortController().signal, pollIntervalMs: 0 });
+  const submit = root.querySelector<HTMLButtonElement>('[data-setup-submit]')!;
+  expect(submit.disabled).toBe(true);
+  controller.update({ canWrite: true });
+  expect(submit.disabled).toBe(false);
+  submit.click();
+  expect(calls).toBe(1);
+  expect(submit.disabled).toBe(true);
+  submit.click();
+  expect(calls).toBe(1);
+  complete({ status: 200, body: { ok: true } });
+  await happyWindow.happyDOM.waitUntilComplete();
+  expect(submit.disabled).toBe(true);
+  expect(submit.textContent).toBe('Key saved');
+  controller.dispose();
 });

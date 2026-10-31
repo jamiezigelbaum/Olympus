@@ -380,6 +380,11 @@ td { padding: 7px 10px 7px 0; border-bottom: 1px solid var(--line2); color: var(
 .setrow .blurb details.howto { color: var(--t3); font-size: var(--fs-caption); }
 .rowform { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .keyfield { background: var(--bg); border: 1px solid var(--field); border-radius: 7px; color: var(--t1); font: inherit; font-size: var(--fs-body); padding: 5px 10px; width: 190px; }
+.setupfields { display: grid; gap: 8px; width: 100%; }
+.setupfields .keyfield { width: 100%; box-sizing: border-box; }
+.setupactions { display: flex; align-items: center; gap: 12px; margin-top: 16px; }
+.setupactions > .primary { margin-left: auto; }
+[data-setup-steps] [hidden], [data-connect-content][hidden], [data-connect-error][hidden] { display: none !important; }
 .keyfield::placeholder { color: var(--t4); }
 .keyfield:focus-visible { outline: 2px solid var(--link); outline-offset: 1px; }
 .actmsg { color: var(--t3); font-size: var(--fs-caption); }

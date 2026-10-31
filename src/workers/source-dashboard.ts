@@ -4165,7 +4165,7 @@ function sourceAction(
     // The MCP server registers its own client at sign-in (core/mcp-source/oauth.ts):
     // no app key to set up, one Connect button.
     if (connected && !reauthRequired && !providerRefusing) return { kind: 'none' };
-    return { kind: 'oauth', source: 'evernote', label, publisher_client: true as const, ...(pending ? { pending_attempt: true as const } : {}) };
+    return { kind: 'oauth', source: 'evernote', label, publisher_client: true as const, ...(pending && !pending.error ? { pending_attempt: true as const } : {}) };
   }
   if (definition.connect_action.kind === 'oauth') {
     if (connected && !reauthRequired && !providerRefusing) return { kind: 'none' };
@@ -4214,7 +4214,7 @@ function sourceAction(
           label,
           oauthSetupInstructions(definition.connect_action.source, googleCloudProjectId, oauthRedirectBaseUrl),
         ),
-        ...(pending ? { pending_attempt: true as const } : {}),
+        ...(pending && !pending.error ? { pending_attempt: true as const } : {}),
       };
     }
     if (!knownClientId || !hasClientSecret) {
@@ -4243,7 +4243,7 @@ function sourceAction(
       ...(clientSecretOnFile ? { client_secret_on_file: true as const } : {}),
       ...redirectFields,
       instructions: oauthSetupInstructions(definition.connect_action.source, googleCloudProjectId, oauthRedirectBaseUrl),
-      ...(pending ? { pending_attempt: true as const } : {}),
+      ...(pending && !pending.error ? { pending_attempt: true as const } : {}),
     };
   }
   if (definition.connect_action.kind === 'this_computer') {
