@@ -3,10 +3,10 @@ import { Window } from 'happy-dom';
 import { DASHBOARD_THEME_CSS } from '../src/workers/dashboard/theme.ts';
 import type { OlympusDashboardControlResult } from '../src/control-ui-contract.ts';
 import { DASHBOARD_REDRAW_EVENT, mountDashboardController, type OlympusDashboardPageRead } from '../src/control-ui/browser-controller.ts';
-import { renderMessagingCard } from '../src/workers/dashboard/messaging.ts';
 import { connectSetupSheet, setupStepsSheet } from '../src/workers/dashboard/components.ts';
 import { buildDashboardPreviewView, setupPreviewScript } from '../scripts/dashboard-preview.ts';
 import { dashboardHtmlRoutePage, renderDashboardLocalPage } from '../src/workers/dashboard/index.ts';
+import { renderMessagingCard } from '../src/workers/dashboard/messaging.ts';
 
 const GLOBALS = [
   'window', 'document', 'navigator', 'Element', 'HTMLElement', 'HTMLFormElement', 'HTMLInputElement',
@@ -96,7 +96,7 @@ describe('OAuth browser handoff', () => {
     expect(calls[0]).toMatchObject({ action: 'start_oauth', source: 'dropbox' });
     controller.dispose();
   });
-  test('setup opens the provider synchronously and keeps a safe fallback link', () => {
+  test('setup opens the provider synchronously without a duplicate link', () => {
     const root = document.createElement('div');
     root.innerHTML = setupStepsSheet({ id: 'venice', provider: 'Venice', finalForm: () => '', steps: [
       { text: 'Account', link: { label: 'Venice', url: 'https://venice.ai/settings/api' } },
@@ -108,10 +108,7 @@ describe('OAuth browser handoff', () => {
       returnUrl: 'https://gateway.test/', canWrite: true, signal: new AbortController().signal, pollIntervalMs: 0 });
     root.querySelector<HTMLButtonElement>('[data-setup-open]')!.click();
     expect(calls).toEqual([['https://venice.ai/settings/api', '_blank', 'noopener,noreferrer']]);
-    const fallback = root.querySelector<HTMLAnchorElement>('a.ext')!;
-    expect(fallback.href).toBe('https://venice.ai/settings/api');
-    expect(fallback.target).toBe('_blank');
-    expect(fallback.rel).toContain('noopener');
+    expect(root.querySelector('a.ext')).toBeNull();
     controller.dispose();
   });
   for (const [message, index] of [
@@ -140,6 +137,16 @@ describe('OAuth browser handoff', () => {
       controller.dispose();
     });
   }
+  test('a Telegram deep link opens the pairing sheet on the messaging card', () => {
+    happyWindow.location.hash = '#olympus-open=connect.telegram';
+    const root = document.createElement('div');
+    root.innerHTML = renderMessagingCard('telegram', true);
+    document.body.append(root);
+    const controller = mountDashboardController({ root, transport: { control: noControl }, navigate() {}, async refresh() { return undefined; },
+      returnUrl: 'https://gateway.test/', canWrite: true, signal: new AbortController().signal, pollIntervalMs: 0 });
+    try { expect(root.querySelector('#telegram-setup')?.getAttribute('aria-hidden')).toBe('false'); }
+    finally { controller.dispose(); root.remove(); }
+  });
   test('Dropbox permissions recovery opens the walkthrough at its permissions step', () => {
     happyWindow.location.hash = '#olympus-open=dropbox.permissions';
     const root = document.createElement('div');
@@ -1069,6 +1076,32 @@ describe('local messaging pairing', () => {
     controller.dispose();
   });
 
+  test('a login code submitted during a status poll is sent once the poll finishes', async () => {
+    const root = messagingRoot();
+    let releaseStatus: () => void = () => {};
+    const operations: string[] = [];
+    let observed = '';
+    const controller = mountDashboardController({ root, canWrite: true, signal: new AbortController().signal, navigate() {}, refresh: async () => undefined, returnUrl: 'http://localhost/dashboard?keys', transport: {
+      control: async () => ({ status: 200, body: {} }),
+      messaging: async (operation, params) => {
+        operations.push(operation);
+        if (operation === 'status') { await new Promise<void>(resolve => { releaseStatus = resolve; }); return { status: 200, body: { state: 'idle' } }; }
+        observed = params.value!;
+        return { status: 200, body: { ok: true, state: 'paired' } };
+      },
+    } });
+    try {
+      await new Promise(resolve => setTimeout(resolve, 0));
+      expect(operations).toEqual(['status']);
+      root.querySelector('form')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+      expect(root.querySelector<HTMLInputElement>('input')!.value).toBe('');
+      releaseStatus();
+      await new Promise(resolve => setTimeout(resolve, 0));
+      expect(operations).toEqual(['status', 'respond']);
+      expect(observed).toBe('12345');
+    } finally { controller.dispose(); }
+  });
+
   test('a native transport without the local pairing method receives no secret', async () => {
     const root = messagingRoot();
     let controlCalls = 0;
@@ -1290,4 +1323,161 @@ test('shared footer submit respects write access, pending state and accepted key
   expect(submit.disabled).toBe(true);
   expect(submit.textContent).toBe('Key saved');
   controller.dispose();
+});
+
+test('Google JSON stays out of visible text and is checked before any provider URL opens', async () => {
+  const root = document.createElement('div');
+  root.innerHTML = renderDashboardLocalPage('keys', { url: new URL('http://localhost/dashboard?keys'), view: buildDashboardPreviewView('connect-google-loopback'), options: { controlSessionCsrfToken: 'fixture' } });
+  document.body.append(root);
+  let submitted: Record<string, unknown> | undefined;
+  const controller = mountDashboardController({ root, canWrite: true, signal: new AbortController().signal, navigate() {}, refresh: async () => undefined, returnUrl: 'http://localhost/dashboard?keys', pollIntervalMs: 0,
+    transport: { control: async params => { submitted = params; return { status: 400, body: { ok: false, error: { message: 'Google did not accept this app key.' } } }; } },
+  });
+  try {
+    const sheet = root.querySelector<HTMLElement>('#connect-gmail-email')!;
+    const picker = sheet.querySelector<HTMLInputElement>('[data-client-file]')!;
+    const file = new happyWindow.File([JSON.stringify({ installed: { client_id: '123-example.apps.googleusercontent.com', client_secret: 'fixture-upload-secret' } })], 'client_secret_fixture.json');
+    const transfer = new happyWindow.DataTransfer(); transfer.items.add(file);
+    picker.files = transfer.files as unknown as FileList;
+    picker.dispatchEvent(new Event('change', { bubbles: true }));
+    await happyWindow.happyDOM.waitUntilComplete();
+    expect(sheet.querySelector('[data-client-file-status]')!.textContent).toContain('Desktop app file ready');
+    expect(sheet.outerHTML).not.toContain('fixture-upload-secret');
+    const form = picker.form!;
+    form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    await happyWindow.happyDOM.waitUntilComplete();
+    expect(submitted?.google_desktop).toBe(true);
+    expect(submitted?.google_client_json).toContain('fixture-upload-secret');
+    expect(sheet.querySelector('[data-setup-error]')!.textContent).toContain('Google did not accept');
+    expect(sheet.querySelector('[data-setup-error] details')!.hasAttribute('open')).toBe(false);
+    expect(sheet.querySelector<HTMLElement>('[data-client-file-drop]')!.closest<HTMLElement>('[data-setup-panel]')!.hidden).toBe(false);
+    expect(sheet.outerHTML).not.toContain('fixture-upload-secret');
+  } finally { controller.dispose(); }
+});
+
+test('Telegram setup hands over to private prompts, shows Cancel only during pairing, and offers error recovery', async () => {
+  const root = document.createElement('div'); root.innerHTML = renderMessagingCard('telegram', true); document.body.append(root);
+  let state: Record<string, unknown> = { state: 'idle' };
+  const controller = mountDashboardController({ root, canWrite: true, signal: new AbortController().signal, navigate() {}, refresh: async () => undefined, returnUrl: 'http://localhost/dashboard?keys', pollIntervalMs: 0,
+    transport: { control: async () => ({ status: 200, body: {} }), messaging: async op => { if (op === 'start') state = { state: 'waiting', field: 'api_id' }; if (op === 'respond') state = { state: 'failed' }; return { status: 200, body: { ok: true, ...state } }; } },
+  });
+  try {
+    await happyWindow.happyDOM.waitUntilComplete();
+    const cancel = root.querySelector<HTMLElement>('[data-messaging-kind="cancel"]')!;
+    expect(cancel.hidden).toBe(true);
+    root.querySelector('[data-messaging-kind="start"]')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    // Don't drain timers while pairing polls; wait only for the transport microtask.
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(root.querySelector<HTMLElement>('[data-messaging-setup-intro]')!.hidden).toBe(true);
+    expect(cancel.hidden).toBe(false);
+    const input = root.querySelector<HTMLInputElement>('[data-messaging-input] input')!; input.value = '12345';
+    input.form!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(cancel.hidden).toBe(true);
+    expect(root.querySelector('[data-pairing-error] details')!.hasAttribute('open')).toBe(false);
+    root.querySelector<HTMLButtonElement>('[data-messaging-retry]')!.click();
+    expect(root.querySelector<HTMLElement>('[data-messaging-setup-intro]')!.hidden).toBe(false);
+  } finally { controller.dispose(); }
+});
+
+
+test('Google paste inputs remain editable after refusal and clear after success', async () => {
+  const root = document.createElement('div');
+  root.innerHTML = renderDashboardLocalPage('keys', { url: new URL('http://localhost/dashboard?keys'), view: buildDashboardPreviewView('connect-google-loopback'), options: { controlSessionCsrfToken: 'fixture' } }); document.body.append(root);
+  let success = false;
+  const controller = mountDashboardController({ root, canWrite: true, signal: new AbortController().signal, navigate() {}, refresh: async () => undefined, returnUrl: 'http://localhost/dashboard?keys', pollIntervalMs: 0,
+    transport: { control: async () => success ? { status: 200, body: { ok: true, authorization_url: 'https://accounts.google.com/o/oauth2/v2/auth' } } : { status: 400, body: { ok: false, error: { message: 'Check the app key.' } } } },
+  });
+  try {
+    const sheet = root.querySelector<HTMLElement>('#connect-gmail-email')!;
+    sheet.querySelector<HTMLElement>('[data-client-paste] summary')!.click();
+    const id = sheet.querySelector<HTMLInputElement>('[name="client_id"]')!; id.value = 'fixture.apps.googleusercontent.com';
+    const key = sheet.querySelector<HTMLInputElement>('[name="client_secret"]')!; key.value = 'fixture-manual-secret';
+    id.form!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    await happyWindow.happyDOM.waitUntilComplete();
+    expect(key.disabled).toBe(false);
+    expect(sheet.querySelector<HTMLElement>('[data-client-file-drop]')!.closest<HTMLElement>('[data-setup-panel]')!.hidden).toBe(false);
+    success = true;
+    id.form!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    await happyWindow.happyDOM.waitUntilComplete();
+    expect(key.value).not.toBe('fixture-manual-secret');
+    expect(sheet.outerHTML).not.toContain('fixture-manual-secret');
+  } finally { controller.dispose(); }
+});
+
+test('completed Telegram pairing still offers setup to pair again', async () => {
+  const root = document.createElement('div'); root.innerHTML = renderMessagingCard('telegram', true); document.body.append(root);
+  const controller = mountDashboardController({ root, canWrite: true, signal: new AbortController().signal, navigate() {}, refresh: async () => undefined, returnUrl: 'http://localhost/dashboard?keys', pollIntervalMs: 0,
+    transport: { control: async () => ({ status: 200, body: {} }), messaging: async () => ({ status: 200, body: { ok: true, state: 'paired' } }) },
+  });
+  try { await happyWindow.happyDOM.waitUntilComplete(); expect(root.querySelector<HTMLElement>('[data-messaging-setup-intro]')!.hidden).toBe(false); }
+  finally { controller.dispose(); }
+});
+
+test('Telegram restores an active prompt once without reopening on each poll', async () => {
+  const root = document.createElement('div'); root.innerHTML = renderMessagingCard('telegram', true); document.body.append(root);
+  const controller = mountDashboardController({ root, canWrite: true, signal: new AbortController().signal, navigate() {}, refresh: async () => undefined, returnUrl: 'http://localhost/dashboard?keys', pollIntervalMs: 0,
+    transport: { control: async () => ({ status: 200, body: {} }), messaging: async () => ({ status: 200, body: { ok: true, state: 'waiting', field: 'code' } }) },
+  });
+  try {
+    await new Promise(resolve => setTimeout(resolve, 0));
+    const sheet = root.querySelector<HTMLElement>('#telegram-setup')!;
+    expect(sheet.getAttribute('aria-hidden')).toBe('false');
+    root.querySelector<HTMLButtonElement>('[data-sheet-toggle="#telegram-setup"]')!.click();
+    expect(sheet.getAttribute('aria-hidden')).toBe('true');
+    await new Promise(resolve => setTimeout(resolve, 1300));
+    expect(sheet.getAttribute('aria-hidden')).toBe('true');
+  } finally { controller.dispose(); }
+});
+
+
+test('Telegram preserves an open sheet and a deliberate close across dashboard redraws', async () => {
+  const root = document.createElement('div'); root.innerHTML = renderMessagingCard('telegram', true); document.body.append(root);
+  let reads = 0;
+  const controller = mountDashboardController({ root, canWrite: true, signal: new AbortController().signal, navigate() {}, refresh: async () => result(renderMessagingCard('telegram', true), `read-${++reads}`), returnUrl: 'http://localhost/dashboard?keys', pollIntervalMs: 0,
+    transport: { control: async () => ({ status: 200, body: {} }), messaging: async () => ({ status: 200, body: { ok: true, state: 'failed' } }) },
+  });
+  try {
+    await happyWindow.happyDOM.waitUntilComplete();
+    expect(root.querySelector('#telegram-setup')!.getAttribute('aria-hidden')).toBe('false');
+    await controller.refresh(); await happyWindow.happyDOM.waitUntilComplete();
+    expect(root.querySelector('#telegram-setup')!.getAttribute('aria-hidden')).toBe('false');
+    root.querySelector<HTMLButtonElement>('[data-sheet-toggle="#telegram-setup"]')!.click();
+    await controller.refresh(); await happyWindow.happyDOM.waitUntilComplete();
+    expect(reads).toBe(2);
+    expect(root.querySelector('#telegram-setup')!.getAttribute('aria-hidden')).toBe('true');
+  } finally { controller.dispose(); }
+});
+
+test('Google own-app hides the shared warning and reaches STEP 6 OF 6 with the file input', () => {
+  const root = document.createElement('div');
+  root.innerHTML = renderDashboardLocalPage('keys', { url: new URL('http://localhost/dashboard?keys'), view: buildDashboardPreviewView('connect-google-publisher'), options: { controlSessionCsrfToken: 'fixture' } });
+  document.body.append(root);
+  const controller = mountDashboardController({ root, transport: { control: async () => { throw new Error('No consent should start'); } }, navigate() {}, async refresh() { return undefined; }, returnUrl: 'https://gateway.test/', canWrite: true, signal: new AbortController().signal, pollIntervalMs: 0 });
+  try {
+    const sheet = root.querySelector('#connect-gmail-email')!;
+    sheet.classList.add('on');
+    const note = sheet.querySelector<HTMLElement>('.providernote')!;
+    expect(note.hidden).toBe(false);
+    sheet.querySelector<HTMLButtonElement>('[data-setup-begin]')!.click();
+    expect(note.hidden).toBe(true);
+    expect(sheet.querySelector<HTMLElement>('[data-setup-choice]')!.hidden).toBe(true);
+    const next = sheet.querySelector<HTMLButtonElement>('[data-setup-next]')!;
+    for (let i = 0; i < 5; i++) next.click();
+    expect(sheet.querySelector('[data-setup-counter]')!.textContent).toBe('STEP 6 OF 6');
+    expect(sheet.querySelector<HTMLElement>('[data-client-file-drop]')!.closest<HTMLElement>('[data-setup-panel]')!.hidden).toBe(false);
+    expect(sheet.querySelector<HTMLButtonElement>('[data-setup-submit]')!.hidden).toBe(false);
+    expect(sheet.querySelectorAll('[data-setup-segment].filled').length).toBe(6);
+    const zone = sheet.querySelector<HTMLElement>('[data-client-file-drop]')!;
+    let picked = 0;
+    sheet.querySelector('[data-client-file]')!.addEventListener('click', () => { picked++; });
+    zone.click();
+    zone.dispatchEvent(new happyWindow.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }) as unknown as Event);
+    zone.dispatchEvent(new happyWindow.KeyboardEvent('keydown', { key: ' ', bubbles: true }) as unknown as Event);
+    expect(picked).toBe(3);
+    sheet.querySelector<HTMLButtonElement>('[aria-label="Close setup"]')!.click();
+    expect(sheet.classList.contains('on')).toBe(false);
+    expect(sheet.querySelector<HTMLElement>('[data-setup-choice]')!.hidden).toBe(false);
+    expect(sheet.querySelector<HTMLElement>('[data-setup-walkthrough]')!.hidden).toBe(true);
+  } finally { controller.dispose(); }
 });

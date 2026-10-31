@@ -39,6 +39,10 @@ export interface MessagingCaptureGrant {
   sessionPath?: string;
   producer: Pick<MessagingProducerLaunch, 'source' | 'env' | 'secretEnvironment'>;
   grantedAt: string;
+  /** Verified Telegram account reference; absent on older grants and WhatsApp. */
+  accountProof?: string;
+  /** Pairing may have changed the session. Only publication of renewed consent clears this. */
+  pairingPending?: true;
 }
 
 export class NativeMessagingCaptureOwnerError extends Error {
@@ -74,6 +78,8 @@ export function saveMessagingCaptureGrant(input: {
     version: 1,
     source: input.pairing.source as MessagingPairingSource,
     handle,
+    ...(input.pairing.source === 'telegram' && /^telegram:[a-f0-9]{16}$/.test(input.pairing.accountProof)
+      ? { accountProof: input.pairing.accountProof } : {}),
     ...(input.pairing.sessionLayout === 'folder' ? {} : { sessionPath: input.pairing.sessionPath }),
     producer: {
       source: input.pairing.producer.source,
@@ -120,7 +126,7 @@ export function readMessagingCaptureGrantFacts(
 ): MessagingCaptureGrantFacts {
   try {
     const read = readGrant(grantPath);
-    if (read.kind !== 'valid' || read.grant.source !== source) return {};
+    if (read.kind !== 'valid' || read.grant.source !== source || read.grant.pairingPending) return {};
     const facts: MessagingCaptureGrantFacts = {};
     const grantedAt = typeof read.grant.grantedAt === 'string' ? Date.parse(read.grant.grantedAt) : Number.NaN;
     if (Number.isFinite(grantedAt)) facts.pairedAt = new Date(grantedAt).toISOString();
@@ -287,6 +293,10 @@ export class MessagingCaptureSupervisor {
     if (grant.source !== this.options.source) {
       await this.stop();
       return { state: 'blocked', reason: 'grant_invalid' };
+    }
+    if (grant.pairingPending) {
+      await this.stop();
+      return { source: grant.source, state: 'stopped', reason: 'grant_missing' };
     }
     // The durable Unpair latch is authoritative even if a crash left the
     // grant, session and registry handle intact. Unreadable latches fail closed.

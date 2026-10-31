@@ -1,3 +1,4 @@
+import { checkGoogleOwnAppAccess } from './google-own-app.ts';
 import { linuxOwnerConfigPath } from './owner-config-read.ts';
 import { readLinuxEngineReceipt, resolveLinuxEngineLayout, isLegacyLinuxSetting } from './linux-engine-layout.ts';
 import { isRetiredGoogleHandle } from './google-handle-compatibility.ts';
@@ -120,6 +121,8 @@ export interface ConnectOAuthOptions {
    * CLI connect path, which has no publisher concept and writes nothing new.
    */
   clientIdSource?: 'publisher' | 'byo';
+  /** Guided Desktop setup proves API access before publishing the grant. */
+  googleOwnApp?: boolean;
   /**
    * The data folder whose registry names each source's history account
    * (followProviderAccountRename); the process's own by default.
@@ -633,6 +636,43 @@ export async function checkDropboxConnection(accessToken: string, fetchImpl: OAu
   if (!response.ok) throw new Error('Dropbox could not complete the list check. No credentials were stored; try again.');
 }
 
+/** Verify bookmark access before any part of the new grant is persisted. */
+async function checkXBookmarksConnection(options: { tokenUrl: string; userId: string; accessToken: string; fetchImpl: OAuthFetch; timeoutMs: number }): Promise<void> {
+  const url = new URL(`/2/users/${encodeURIComponent(options.userId)}/bookmarks`, options.tokenUrl);
+  // The documented minimum is one bookmark; do not fetch a whole page to prove access.
+  url.searchParams.set('max_results', '1');
+  let response: Response;
+  let text: string;
+  try {
+    ({ response, text } = await fetchBoundedText(options.fetchImpl, url.toString(), {
+      method: 'GET', headers: { Authorization: `Bearer ${options.accessToken}`, Accept: 'application/json' }, redirect: 'error',
+    }, { timeoutMs: options.timeoutMs, limitBytes: 64 * 1024 }));
+  } catch {
+    throw new Error('X could not complete the bookmarks read check. No credentials were stored; try connecting again when X is reachable.');
+  }
+  if (response.status === 401) throw new Error('X did not authorize the bookmarks read. Redo Enable OAuth 2.0 with bookmark.read and sign in again. No credentials were stored.');
+  if (response.status === 402 || response.status === 403) throw new Error('X refused the bookmarks read. Redo Check the cost to confirm paid API access and available credits, then Enable OAuth 2.0 with Read permissions and sign in again. No credentials were stored.');
+  if (!response.ok) throw new Error('X could not complete the bookmarks read check. No credentials were stored; try connecting again later.');
+  // A 200 error object or malformed body is not proof that bookmarks are readable.
+  let valid = false;
+  try {
+    const payload = JSON.parse(text);
+    if (payload && typeof payload === 'object' && !Array.isArray(payload)) {
+      const count = payload.meta?.result_count;
+      const data = payload.data;
+      const errors = payload.errors;
+      // X may return readable bookmarks alongside errors for other resources.
+      // An empty result with errors alone does not prove bookmark access.
+      valid = (errors === undefined || Array.isArray(errors)) && (count === 0
+        ? (errors === undefined || errors.length === 0) && (data === undefined || (Array.isArray(data) && data.length === 0))
+        : count === 1 && Array.isArray(data) && data.length === 1
+          && typeof data[0]?.id === 'string' && /^\d+$/.test(data[0].id)
+          && typeof data[0]?.text === 'string');
+    }
+  } catch { /* Never echo a provider response, which may contain credentials. */ }
+  if (!valid) throw new Error('X returned an invalid bookmarks read result. No credentials were stored; try connecting again later.');
+}
+
 async function completeOAuthSourceConnection(
   prepared: PreparedOAuthSourceConnection,
   code: string,
@@ -671,6 +711,9 @@ async function completeOAuthSourceConnection(
   });
   if (!token.refreshToken) throw new Error('OAuth provider did not return a refresh token. Re-run connect and request offline access.');
   const refreshToken = token.refreshToken;
+  if (prepared.options.googleOwnApp && isGoogleOAuthSource(prepared.options.source)) {
+    await checkGoogleOwnAppAccess(prepared.options.source as 'gmail' | 'google-drive' | 'google', token.accessToken, prepared.options.fetch ?? fetch);
+  }
   if (prepared.options.source === 'dropbox') {
     await checkDropboxConnection(token.accessToken, prepared.options.fetch ?? fetch, prepared.tokenExchangeTimeoutMs, prepared.options.tokenUrl ?? prepared.definition.tokenUrl);
   }
@@ -681,6 +724,13 @@ async function completeOAuthSourceConnection(
     // latency must never make a live local mutation lease look abandoned.
     xUserId = await fetchXUserId({
       tokenUrl: prepared.options.tokenUrl ?? prepared.definition.tokenUrl,
+      accessToken: token.accessToken,
+      fetchImpl: prepared.options.fetch ?? fetch,
+      timeoutMs: prepared.tokenExchangeTimeoutMs,
+    });
+    await checkXBookmarksConnection({
+      tokenUrl: prepared.options.tokenUrl ?? prepared.definition.tokenUrl,
+      userId: xUserId,
       accessToken: token.accessToken,
       fetchImpl: prepared.options.fetch ?? fetch,
       timeoutMs: prepared.tokenExchangeTimeoutMs,
@@ -980,7 +1030,7 @@ async function completeOAuthSourceConnection(
             ...(providerAccountId ? { providerAccountId } : {}),
           });
         }
-        // The refresh token goes last, so the new grant can mint only once
+        // The refresh token is the last grant credential, so it can mint only once
         // everything it needs is in place.
         tokenWritesAttempted += 1;
         await prepared.secretStore.set(refreshKey, refreshToken);
@@ -1031,6 +1081,14 @@ async function completeOAuthSourceConnection(
       const retired = readConnectedHandleRegistry(prepared.registryPath).handles
         .filter((handle) => replacedProviders.has(handle.provider) && isRetiredGoogleHandle(handle));
       if (retired.length > 0) removeConnectedHandles(retired.map((handle) => handle.handle), prepared.registryPath);
+
+      // This optional reuse preference must never undo or misreport a live
+      // grant. If saving it fails, the next source asks for the same file again.
+      if (prepared.options.googleOwnApp && clientSecret && isGoogleOAuthSource(prepared.options.source)) {
+        try {
+          await prepared.secretStore.set('google.own_app.registration', JSON.stringify({ clientId: prepared.clientId, clientSecret }));
+        } catch { /* Grant, cache invalidation and account checks already succeeded. */ }
+      }
 
       return {
         ok: true,

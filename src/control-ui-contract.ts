@@ -129,6 +129,8 @@ export type OlympusDashboardControlParams =
       source: OlympusDashboardOAuthSource;
       client_id?: string;
       client_secret?: string;
+      google_desktop?: boolean;
+      google_client_json?: string;
     }
   | {
       action: 'connect_api_key';

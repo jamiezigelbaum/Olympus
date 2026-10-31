@@ -782,6 +782,7 @@ const REDIRECT_REFUSAL_CODES: ReadonlySet<string> = new Set([
 export function dashboardProviderRefusalLine(source: DashboardSourceCard, options?: DashboardVocabularyOptions): string {
   const code = source.connection.provider_refusal?.code ?? '';
   if (options?.surface === 'chatgpt') return DASHBOARD_CHATGPT_REFUSAL_COPY.line[chatgptRefusalKind(code)];
+  if (code === 'connection_check_failed') return `${source.label} could not complete its access check. How to fix has the details.`;
   if (REDIRECT_REFUSAL_CODES.has(code)) {
     return `rejected the sign-in address — fix it in your ${source.label} app settings`;
   }

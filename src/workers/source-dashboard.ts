@@ -242,7 +242,12 @@ export interface DashboardCallbackRegistration {
 export interface DashboardSetupStep {
   text: string;
   title?: string;
+  /** Numbered clicks; **words** are emphasized by the shared renderer. */
+  instructions?: string[];
+  return_note?: string;
   redirect_uri?: boolean;
+  button_label?: string;
+  links?: Array<{ label: string; url: string }>;
   link?: {
     label: string;
     url: string;
@@ -251,6 +256,9 @@ export interface DashboardSetupStep {
 
 export interface DashboardSetupInstructions {
   plain_intro: string;
+  setup_provider?: string;
+  setup_heading?: string;
+  credential_file?: 'google_desktop';
   agent_prompt: string;
   provider_console_url: string;
   google_cloud_project_id?: string;
@@ -278,6 +286,9 @@ export interface DashboardSetupInstructions {
 /** The BYO half of a publisher-mode action: exactly the pre-publisher shape. */
 export interface DashboardAdvancedByoInstructions {
   plain_intro: string;
+  setup_provider?: string;
+  setup_heading?: string;
+  credential_file?: 'google_desktop';
   agent_prompt: string;
   provider_console_url: string;
   google_cloud_project_id?: string;
@@ -4178,9 +4189,7 @@ function sourceAction(
     // A Google Web application client (the https-origin bring-your-own path)
     // is confidential too: its sheet asks for the secret, and one already
     // stored makes that field optional on a reauthorization.
-    const googleWebClient = isGoogleOAuthSource(definition.connect_action.source)
-      && googleOAuthClientType(oauthRedirectBaseUrl) === 'web';
-    const clientSecretOnFile = (clientSecretRequired || googleWebClient)
+    const clientSecretOnFile = (clientSecretRequired || isGoogleOAuthSource(definition.connect_action.source))
       && oauthClientSecretAvailableForSource(definition.connect_action.source, oauthClientSecretAvailability);
     const hasClientSecret = !clientSecretRequired || clientSecretOnFile;
     const redirectUriToRegister = oauthRedirectUriToRegister(definition.connect_action.source, oauthRedirectBaseUrl);
@@ -4307,7 +4316,7 @@ function publisherOAuthSetupInstructions(
       + 'Do not ask me to edit files, configuration, or code.',
     provider_console_url: byo.provider_console_url,
     ...(byo.google_cloud_project_id ? { google_cloud_project_id: byo.google_cloud_project_id } : {}),
-    diy_summary: PUBLISHER_ADVANCED_BYO_SUMMARY,
+    diy_summary: byo.credential_file ? 'Use my own Google app' : PUBLISHER_ADVANCED_BYO_SUMMARY,
     diy_steps: [],
     secret_shown_once: false,
     fields: [],
@@ -4342,50 +4351,29 @@ function oauthSetupInstructions(
     secret: true,
   };
   if (isGoogleOAuthSource(source)) {
-    const sourceLabel = source === 'google-drive' ? 'Google Drive' : source === 'google' ? 'Google' : 'Gmail';
-    const sourceObject = source === 'google-drive' ? 'your Google Drive' : source === 'google' ? 'your Google data' : 'your Gmail';
-    // Which client type the owner must create is decided by the origin this
-    // dashboard is served on, not by an assumption. A Desktop app client can
-    // only ever call back to loopback; the moment the page is reached over
-    // https — behind `tailscale serve`, say — the same instructions send the
-    // owner to build a client Google will refuse (live, 2026-09-03).
-    const web = googleOAuthClientType(redirectBaseUrl) === 'web';
-    const clientTypeName = web ? 'Web application' : 'Desktop app';
-    const redirectClause = web
-      ? `adding the redirect URI shown on the Olympus dashboard's ${sourceLabel} card to that client's Authorized redirect URIs`
-      : 'confirming that Google accepts the loopback callback this dashboard uses without registering a redirect URI';
     return {
-      // Factual only. "You stay in control" was reassurance and is gone; the
-      // Google sentence stays because it states a checkable fact about the
-      // consent screen. Owner ruling, 2026-08-18.
-      plain_intro: web
-        ? `To read ${sourceObject} with the advanced BYO path, Olympus needs a Google Web application Client ID and Client secret you create in your own Google account. Register the redirect URI shown on this card on that client, then copy the Client ID and the Client secret into the fields on this card. Google Web clients need the secret to finish sign-in. Google shows you exactly what Olympus can see.`
-        : `To read ${sourceObject} with the advanced BYO path, Olympus needs a Google Desktop app Client ID you create in your own Google account. PKCE protects the exchange, so there is no client secret to paste. Google shows you exactly what Olympus can see.`,
-      agent_prompt: web
-        ? `Help me connect ${sourceLabel} to Olympus with my own Google client. Walk me through creating an OAuth client of type ${clientTypeName} in my Google Cloud project (console.cloud.google.com, APIs & Services, Credentials), enabling the ${sourceLabel} API, and ${redirectClause}. Then tell me where to find the Client ID and the Client secret so I can paste each into its own field on that card and press Connect. Google Web clients need the secret to finish sign-in; do not ask me to type it into this chat, only into the Client secret field on the card. Do not ask me to edit files, configuration, or code.`
-        : `Help me connect ${sourceLabel} to Olympus with my own Google client. Walk me through creating an OAuth client of type ${clientTypeName} in my Google Cloud project (console.cloud.google.com, APIs & Services, Credentials), enabling the ${sourceLabel} API, and ${redirectClause}. Then give me the Client ID so I can paste it into the Client ID field on that card and press Connect. PKCE protects the exchange, so no client secret is needed. Do not ask me to edit files, configuration, or code.`,
-      provider_console_url: googleConsoleUrl('https://console.cloud.google.com/auth/clients', googleCloudProjectId),
-      ...(googleCloudProjectId ? { google_cloud_project_id: googleCloudProjectId } : {}),
-      diy_summary: 'Or set it up yourself (about 5 minutes)',
+      plain_intro: 'About ten minutes, free. You make the app once; it works for Gmail and Google Drive.',
+      setup_provider: 'Google Cloud',
+      setup_heading: 'Connect Gmail with your own Google app',
+      credential_file: 'google_desktop',
+      agent_prompt: 'Help me connect Gmail and Drive with my own Google app using the dashboard walkthrough. Create a project, enable Gmail and Drive APIs, publish the External sign-in screen, then create a Desktop app client and download its JSON. Add that file only in the Olympus dashboard. Never ask for the client secret in chat.',
+      provider_console_url: 'https://console.cloud.google.com/auth/clients',
+      diy_summary: 'Use my own Google app',
       diy_steps: [
-        { text: 'Sign in to Google Cloud.', link: { label: 'Open Google OAuth clients', url: googleConsoleUrl('https://console.cloud.google.com/auth/clients', googleCloudProjectId) } },
-        { text: 'Create or choose a project named Olympus.' },
-        { text: 'Set the consent screen to External, then publish it to production. Testing mode stops working after 7 days.' },
-        web
-          ? { text: 'Create an OAuth client ID, choose Web application, and add the redirect URI shown on this card to its Authorized redirect URIs. A Desktop app client cannot register an https redirect URI.' }
-          : { text: 'Create an OAuth client ID and choose Desktop app. Google accepts this dashboard\'s loopback callback with nothing to register.' },
-        { text: 'Enable the Gmail API for this project. Sync returns 403 errors until the Gmail and Drive APIs are enabled.', link: { label: 'Open Gmail API', url: googleConsoleUrl('https://console.cloud.google.com/apis/library/gmail.googleapis.com', googleCloudProjectId) } },
-        { text: 'Enable the Google Drive API for the same project.', link: { label: 'Open Google Drive API', url: googleConsoleUrl('https://console.cloud.google.com/apis/library/drive.googleapis.com', googleCloudProjectId) } },
-        web
-          ? { text: 'Copy the Client ID and the Client secret shown in the popup into the fields below. A Google Web application client needs its secret to finish sign-in. Paste the secret only into the Client secret field on this card; Olympus keeps it on this computer.' }
-          : { text: 'Copy the Client ID shown in the popup. Olympus uses PKCE and does not need the client secret.' },
+        { title: 'Create the project', text: '', instructions: ['Name the project **Olympus**.', 'Choose **Create**, then select the new project.'], link: { label: 'Google Cloud', url: 'https://console.cloud.google.com/projectcreate' }, return_note: "Google opens in your browser. Come back here when you've created and selected your Olympus project." },
+        { title: 'Turn on Gmail and Drive', text: '', instructions: ['Check **Olympus** is selected at the top.', 'Search for **Gmail API**, open it and choose **Enable**.', 'Return to **Library**, search for **Google Drive API** and choose **Enable**.'], link: { label: 'Google Cloud', url: 'https://console.cloud.google.com/apis/library' }, return_note: "Google opens the API Library. Come back here when both Gmail and Google Drive are enabled in the same project." },
+        { title: 'Set up the sign-in screen', text: '', instructions: ['Choose **Get started**.', 'Name the app **Olympus** and give your own email for support.', 'For Audience choose **External**, then add your email as contact.', 'Choose **Create**.'], link: { label: 'Google Cloud', url: 'https://console.cloud.google.com/auth/overview' }, return_note: "Google opens in your browser on the right project. Come back here when you've pressed Create." },
+        { title: 'Publish', text: '', instructions: ['In **Audience**, choose **Publish app**.', 'Confirm to move the app to **In production**.'], link: { label: 'Google Cloud', url: 'https://console.cloud.google.com/auth/audience' }, return_note: 'Testing ends the connection every 7 days. Come back here when the publishing status is In production.' },
+        { title: 'Make the key', text: '', instructions: ['In **Clients**, choose **Create client**.', 'Choose **Desktop app**, name it **Olympus** and choose **Create**.', 'Choose **Download JSON** and save the file in **Downloads**.'], link: { label: 'Google Cloud', url: 'https://console.cloud.google.com/auth/clients' }, return_note: "Google makes the key for your app. Come back here when you've downloaded the JSON file." },
+        { title: 'Paste it here', text: '' },
       ],
       secret_shown_once: false,
-      fields: web ? [clientIdField, clientSecretField] : [clientIdField],
+      fields: [clientIdField, clientSecretField],
     };
   }
   if (source === 'dropbox') {
     return {
+      setup_provider: 'Dropbox',
       plain_intro: 'To read your Dropbox files, Olympus needs your Dropbox App key (Dropbox\'s name for the OAuth client id), shown on the app\'s Settings tab in your Dropbox developer account. Dropbox uses PKCE here, so there is no app secret to paste.',
       agent_prompt: 'Help me connect Dropbox to Olympus. Walk me through creating a Dropbox app at https://www.dropbox.com/developers/apps (Scoped access, the folder access I want, named Olympus) or reusing my existing Olympus app, enabling the files.metadata.read, files.content.read, sharing.read and account_info.read permissions, and adding the redirect URI shown on the Olympus dashboard\'s Dropbox card under the app\'s OAuth 2 redirect URIs. Then give me the App key so I can paste it into the Client ID field on that card and press Connect. Dropbox uses PKCE, so no app secret is needed. Do not ask me to edit files, configuration, or code.',
       provider_console_url: 'https://www.dropbox.com/developers/apps',
@@ -4409,15 +4397,13 @@ function oauthSetupInstructions(
     agent_prompt: 'Help me connect X bookmarks to Olympus. Walk me through creating an app at https://console.x.com, opening the app\'s Settings (Authentication settings: App permissions Read, Type of App Web App, Automated App or Bot), adding the redirect URI shown on the Olympus dashboard\'s X bookmarks card under Callback URI / Redirect URL, saving, and finding the OAuth 2.0 Client ID and Client secret under Keys & Tokens so I can paste them into that card and press Connect. Remind me that reading bookmarks needs paid X API access before I start. Do not ask me to edit files, configuration, or code.',
     provider_console_url: 'https://console.x.com',
     diy_summary: 'Or set it up yourself (about 5 minutes)',
+    setup_provider: 'X',
     diy_steps: [
-      { text: 'Sign in to the X Developer Portal.', link: { label: 'Open X developer console', url: 'https://console.x.com' } },
-      { text: 'Create or choose a project and app named Olympus.' },
-      // The old step here said to use a public PKCE client with no secret.
-      // The live app is a confidential client, and X's token endpoint demands
-      // HTTP Basic from one — a secretless flow dies at the exchange with 401.
-      { text: 'Open the app\'s Settings. Under Type of App choose Web App, Automated App or Bot (a Confidential client); under App permissions, Read is enough.' },
-      { text: 'Under Callback URI / Redirect URL press Add another, paste the exact redirect URI shown on this card, and press Save Changes.' },
-      { text: 'Back on Keys & Tokens, copy the OAuth 2.0 Client ID and Client secret into the fields below. X shows the secret once; Regenerate it if you no longer have it.' },
+      { title: 'Check the cost', text: 'Reading bookmarks needs paid X API access. X currently charges by usage with credits. Review the costs before connecting.', button_label: 'Open X pricing', link: { label: 'X pricing', url: 'https://docs.x.com/x-api/getting-started/pricing' } },
+      { title: 'Create your app', text: 'Sign in to the X developer console and create or choose your app.', link: { label: 'X developer console', url: 'https://console.x.com' } },
+      { title: 'Enable OAuth 2.0', text: 'Open the app Settings. Choose Web App, Automated App or Bot (Confidential client), with Read permissions. Olympus requests tweet.read, users.read, bookmark.read and offline.access.', link: { label: 'X developer console', url: 'https://console.x.com' } },
+      { title: 'Register the callback', text: 'Under Callback URI / Redirect URL, add this exact URI and save.', redirect_uri: true, link: { label: 'X developer console', url: 'https://console.x.com' } },
+      { title: 'Add your app key', text: 'Under Keys & Tokens, copy the OAuth 2.0 Client ID and Client secret. X shows the secret once. After sign-in Olympus checks it can read bookmarks before saving the connection.' },
     ],
     secret_shown_once: true,
     fields: [clientIdField, clientSecretField],
@@ -4654,6 +4640,7 @@ function providerRefusalReason(
   redirectUri: string | undefined,
   settingLabel: string | undefined,
 ): string {
+  if (error.code === 'connection_check_failed') return 'Check the app key, enabled APIs, permissions and provider access. The sign-in tab explains which check failed. Then connect again.';
   // The refusal names the same setting the walkthrough on the card names, so
   // the sentence and the steps under it cannot send the owner to two places.
   if (redirectUri && settingLabel) {

@@ -88,6 +88,7 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
   /** That start's wait line and the sheet it shows in: a redraw replaces the form, so it is said again until the owner comes back. */
   let authorizationWait: { sheetId: string; message: string } | undefined;
   const root = options.root;
+  const uploadedClientFiles = new WeakMap<HTMLFormElement, string>();
   const submittedFormValues = new WeakMap<HTMLFormElement, Record<string, string>>();
   const startedFromSheet = new WeakSet<HTMLFormElement>();
   const pendingForms = new WeakSet<HTMLFormElement>();
@@ -109,7 +110,9 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
     const count = noConnection ? 2 : panels.length;
     const position = noConnection && next === 2 ? 2 : next + 1;
     const counter = sheet.querySelector<HTMLElement>('[data-setup-counter]');
-    if (counter) counter.textContent = `Step ${position} of ${count}`;
+    if (counter) counter.textContent = sheet.hasAttribute('data-setup-guided') ? `STEP ${position} OF ${count}` : `Step ${position} of ${count}`;
+    sheet.querySelectorAll<HTMLElement>('[data-setup-segment]').forEach((segment, index) => segment.classList.toggle('filled', index <= next));
+    sheet.querySelector('[role="progressbar"]')?.setAttribute('aria-valuenow', String(position));
     const progress = sheet.querySelector<HTMLProgressElement>('[data-setup-progress]');
     if (progress) { progress.max = count; progress.value = position; }
     const forward = sheet.querySelector<HTMLElement>('[data-setup-next]');
@@ -133,7 +136,7 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
       sheet.querySelectorAll<HTMLFormElement>('form').forEach(form => say(form, ''));
       sheet.querySelector('[data-setup-error]')?.remove();
     }
-    const heading = panels[next]?.querySelector<HTMLElement>('h4');
+    const heading = panels[next]?.querySelector<HTMLElement>('h2, h4');
     if (heading) { heading.tabIndex = -1; heading.focus(); }
   }
 
@@ -192,6 +195,16 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
   function setSheetOpen(sheet: HTMLElement, open: boolean): void {
     sheet.classList.toggle('on', open);
     sheet.setAttribute('aria-hidden', open ? 'false' : 'true');
+    if (!open) {
+      const choice = sheet.querySelector<HTMLElement>('[data-setup-choice], [data-setup-lead]');
+      const walkthrough = sheet.querySelector<HTMLElement>('[data-setup-walkthrough]');
+      if (choice && walkthrough) {
+        choice.hidden = false;
+        walkthrough.hidden = true;
+        const note = choice.querySelector<HTMLElement>('[data-shared-app-note]');
+        if (note) note.hidden = false;
+      }
+    }
     if (!sheet.id) return;
     queryAll<HTMLElement>('[data-sheet-toggle]').forEach((toggle) => {
       if (toggle.dataset.sheetToggle === `#${sheet.id}`) toggle.setAttribute('aria-expanded', open ? 'true' : 'false');
@@ -423,6 +436,8 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
         source: body.source as Extract<OlympusDashboardControlParams, { action: 'start_oauth' }>['source'],
         ...(body.client_id ? { client_id: body.client_id } : {}),
         ...(body.client_secret ? { client_secret: body.client_secret } : {}),
+        ...(body.google_desktop === 'true' ? { google_desktop: true } : {}),
+        ...(uploadedClientFiles.has(form) ? { google_client_json: uploadedClientFiles.get(form)! } : {}),
       };
     }
     if (connect === 'this_computer') {
@@ -502,7 +517,10 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
       closeAuthorizationTab(authorizationTab);
       return;
     }
-    if (params.action === 'start_oauth') clearAuthorizationFallback(form);
+    if (params.action === 'start_oauth') {
+      clearAuthorizationFallback(form);
+      uploadedClientFiles.delete(form);
+    }
     if (firstRunChoice && ['check_model_setup', 'save_local_answer_model', 'connect_api_key'].includes(params.action)) {
       firstRunCheckRequested = false;
       firstRunResult('Check readiness after Olympus applies your changes.');
@@ -540,24 +558,7 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
       closeAuthorizationTab(authorizationTab);
       const message = errorMessage(result);
       say(form, message);
-      const setup = form.closest<HTMLElement>('[data-setup-steps]');
-      const step = message.includes('Redo the Set up your account step') ? 0 : message.includes('Redo the Create an API key step') ? 1 : -1;
-      if (setup) {
-        const panels = Array.from(setup.querySelectorAll<HTMLElement>('[data-setup-panel]'));
-        const current = panels.findIndex(panel => !panel.hidden);
-        panels.forEach(panel => { panel.hidden = true; });
-        const actions = setup.querySelector<HTMLElement>('[data-setup-actions]');
-        if (actions) actions.hidden = true;
-        setup.querySelector('[data-setup-error]')?.remove();
-        const error = document.createElement('div');
-        error.dataset.setupError = '';
-        const banner = document.createElement('p');
-        banner.className = 'why'; banner.setAttribute('role', 'alert'); banner.textContent = message;
-        const retry = document.createElement('button');
-        retry.type = 'button'; retry.className = 'btn'; retry.dataset.setupRetry = String(step >= 0 ? step : Math.max(0, current));
-        retry.textContent = step === 0 ? 'Go to account and credit' : step === 1 ? 'Go to API key' : 'Try again';
-        error.append(banner, retry); setup.append(error); retry.focus();
-      }
+      showSetupFailure(form, message);
       return;
     }
     if (params.action === 'discover_local_models') {
@@ -957,7 +958,7 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
     });
     for (const id of openSheets) {
       const sheet = queryAll<HTMLElement>('.sheet').find((candidate) => candidate.id === id);
-      sheet?.classList.add('on');
+      if (sheet) setSheetOpen(sheet, true);
       queryAll<HTMLElement>('[data-sheet-toggle]').filter((toggle) => toggle.dataset.sheetToggle === `#${id}`).forEach((toggle) => toggle.setAttribute('aria-expanded', 'true'));
     }
     const wait = authorizationWait;
@@ -1050,6 +1051,8 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
   }, { once: true });
   const messagingTimers = new Map<HTMLElement, ReturnType<typeof setTimeout>>();
   const messagingBusy = new WeakSet<HTMLElement>();
+  const messagingQueued = new Map<HTMLElement, () => void>();
+  const messagingSeen = new Set<string>();
 
   function resumeMessaging(): void {
     messagingTimers.forEach((timer, card) => { if (!card.isConnected) { clearTimeout(timer); messagingTimers.delete(card); } });
@@ -1057,7 +1060,12 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
   }
 
   async function messagingRequest(card: HTMLElement, operation: 'start' | 'status' | 'respond' | 'cancel' | 'scope' | 'chats', extra: { field?: string; value?: string; wholeAccount?: boolean; chatScopes?: string[] } = {}): Promise<void> {
-    if (!canWrite || disposed || !options.transport.messaging || messagingBusy.has(card)) return;
+    if (!canWrite || disposed || !options.transport.messaging) return;
+    if (messagingBusy.has(card)) {
+      // A status poll is in flight: run the user's action right after it instead of dropping it.
+      if (operation !== 'status') messagingQueued.set(card, () => { void messagingRequest(card, operation, extra); });
+      return;
+    }
     const source = card.dataset.messagingSource;
     if (source !== 'telegram' && source !== 'whatsapp') return;
     const timer = messagingTimers.get(card);
@@ -1085,6 +1093,30 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
       const field = typeof body.field === 'string' ? body.field : '';
       const labels: Record<string, string> = { api_id: 'Telegram API ID', api_hash: 'Telegram API hash', phone: 'Phone number (with country code)', code: 'Telegram login code', password: 'Telegram two-step verification password' };
       const label = labels[field];
+      const restoring = operation === 'status' && !messagingSeen.has(source);
+      messagingSeen.add(source);
+      const setupSheet = card.querySelector<HTMLElement>('[data-messaging-setup]');
+      if (setupSheet) {
+        const intro = setupSheet.querySelector<HTMLElement>('[data-messaging-setup-intro]');
+        const active = !['idle', 'failed', 'cancelled', 'completed', 'complete', 'paired'].includes(state);
+        if (intro) intro.hidden = active || state === 'failed';
+        const cancel = setupSheet.querySelector<HTMLElement>('[data-messaging-kind="cancel"]');
+        if (cancel) cancel.hidden = !active;
+        if (operation !== 'status' || (restoring && (active || state === 'failed'))) {
+          queryAll<HTMLElement>('.sheet.on').forEach(other => { if (other !== setupSheet) setSheetOpen(other, false); });
+          setSheetOpen(setupSheet, true);
+        }
+        setupSheet.querySelector('[data-pairing-error]')?.remove();
+        if (state === 'failed') {
+          const error = document.createElement('div'); error.dataset.pairingError = '';
+          const details = document.createElement('details'); details.className = 'howto';
+          const summary = document.createElement('summary'); summary.textContent = 'How to fix';
+          const hint = document.createElement('p'); hint.textContent = 'Check api_id and api_hash at my.telegram.org/apps. Enter the latest code from Telegram and your two-step verification password if asked. Then try pairing again.';
+          details.append(summary, hint);
+          const retry = document.createElement('button'); retry.type = 'button'; retry.className = 'btn'; retry.dataset.messagingRetry = ''; retry.textContent = 'Back to setup';
+          error.append(details, retry); setupSheet.append(error);
+        }
+      }
       if (status) status.textContent = label ? `Enter ${label.toLowerCase()} to continue.` : state === 'failed' ? (body.registrationMayBeSaved === true ? 'Pairing could not finish. The connection may already be saved; check connection and capture status before retrying.' : 'Pairing failed. Start pairing again to retry.') : state === 'idle' ? 'Pair this account to choose the chats Olympus may read.' : state === 'scope_selection_required' ? 'Paired. Nothing is being captured. Choose what Olympus may read.' : state === 'committing' ? 'Saving the connection and chat permission…' : state === 'paired' || state === 'complete' || state === 'completed' ? 'Pairing completed. Manage chat choices below; check current connection and sync status on the main dashboard.' : state === 'cancelled' ? `Setup cancelled. Capture permission was not changed. If you linked a new device, remove Olympus in ${source === 'telegram' ? 'Telegram active sessions' : 'WhatsApp linked devices'} to unlink it.` : operation === 'scope' ? 'Chat choices saved. Capture will use this selection.' : operation === 'chats' ? 'Choose the chats Olympus may read.' : source === 'whatsapp' ? 'Open WhatsApp → Settings → Linked devices and scan the QR code.' : 'Pairing is running on this computer…';
       if (qr) {
         const value = typeof body.qr === 'string' ? body.qr : '';
@@ -1140,7 +1172,12 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
       }
     } catch {
       if (status) status.textContent = 'Could not reach pairing on this computer. Try again.';
-    } finally { messagingBusy.delete(card); }
+    } finally {
+      messagingBusy.delete(card);
+      const queued = messagingQueued.get(card);
+      messagingQueued.delete(card);
+      if (queued && !disposed) queued();
+    }
   }
 
   function submitMessaging(form: HTMLFormElement): void {
@@ -1206,9 +1243,128 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
     void submitControl(form, tab, submittedValues);
   }
 
+  function showSetupFailure(form: HTMLFormElement, message: string): void {
+      const setup = form.closest<HTMLElement>('[data-setup-steps]');
+      const step = message.includes('Redo the Set up your account step') ? 0 : message.includes('Redo the Create an API key step') ? 1 : -1;
+      if (setup && form.querySelector('[data-client-file-drop]')) {
+        const panels = Array.from(setup.querySelectorAll<HTMLElement>('[data-setup-panel]'));
+        showSetupStep(setup, panels.length - 1);
+        const error = document.createElement('div'); error.dataset.setupError = '';
+        const banner = document.createElement('p'); banner.className = 'why'; banner.setAttribute('role', 'alert'); banner.textContent = message;
+        const details = document.createElement('details'); details.className = 'howto';
+        const summary = document.createElement('summary'); summary.textContent = 'How to fix';
+        const hint = document.createElement('p'); hint.textContent = 'Check the app settings in Google Cloud, then choose the Desktop app file again or paste the ID and secret.';
+        details.append(summary, hint); error.append(banner, details);
+        form.querySelector('[data-client-file-drop]')!.after(error);
+        return;
+      }
+      if (setup) {
+        const panels = Array.from(setup.querySelectorAll<HTMLElement>('[data-setup-panel]'));
+        const current = panels.findIndex(panel => !panel.hidden);
+        panels.forEach(panel => { panel.hidden = true; });
+        const actions = setup.querySelector<HTMLElement>('[data-setup-actions]');
+        if (actions) actions.hidden = true;
+        setup.querySelector('[data-setup-error]')?.remove();
+        const error = document.createElement('div');
+        error.dataset.setupError = '';
+        const banner = document.createElement('p');
+        banner.className = 'why'; banner.setAttribute('role', 'alert'); banner.textContent = message;
+        const retry = document.createElement('button');
+        retry.type = 'button'; retry.className = 'btn'; retry.dataset.setupRetry = String(step >= 0 ? step : Math.max(0, current));
+        retry.textContent = step === 0 ? 'Go to account and credit' : step === 1 ? 'Go to API key' : 'Try again';
+        const details = document.createElement('details'); details.className = 'howto';
+        const summary = document.createElement('summary'); summary.textContent = 'How to fix';
+        const hint = document.createElement('p'); hint.textContent = 'Return to setup, check the app settings and add the key again. Your login code and password are never shown here.';
+        details.append(summary, hint); error.append(banner, details, retry); setup.append(error); retry.focus();
+      }
+  }
+
+  async function readClientFile(form: HTMLFormElement, file: File | undefined): Promise<void> {
+    const revision = form.querySelector<HTMLInputElement>('[name="client_file_revision"]');
+    const status = form.querySelector<HTMLElement>('[data-client-file-status]');
+    if (!revision || !status || !file) return;
+    uploadedClientFiles.delete(form);
+    try {
+      if (file.size > 64 * 1024) throw new Error();
+      const text = await file.text();
+      const app = JSON.parse(text)?.installed;
+      if (!app || typeof app.client_id !== 'string' || typeof app.client_secret !== 'string' || !app.client_id.endsWith('.apps.googleusercontent.com') || !app.client_secret.trim()) throw new Error();
+      uploadedClientFiles.set(form, text);
+      revision.value = String(Number(revision.value) + 1);
+      for (const field of Array.from(form.querySelectorAll<HTMLInputElement>('[name="client_id"], [name="client_secret"]'))) { field.value = ''; field.disabled = true; field.dataset.olympusOriginallyDisabled = 'true'; }
+      status.textContent = 'Desktop app file ready. Connect to check the key with Google.';
+    } catch {
+      status.textContent = '';
+      showSetupFailure(form, 'Choose the JSON downloaded for a Desktop app in Google Cloud Clients. Web app keys cannot use this flow.');
+      for (const field of Array.from(form.querySelectorAll<HTMLInputElement>('[name="client_id"], [name="client_secret"]'))) { field.disabled = false; field.dataset.olympusOriginallyDisabled = 'false'; }
+    }
+    const picker = form.querySelector<HTMLInputElement>('[data-client-file]');
+    if (picker) picker.value = '';
+  }
+
+  function onClientFileKeydown(event: Event): void {
+    const target = event.target instanceof HTMLElement ? event.target : null;
+    const key = (event as KeyboardEvent).key;
+    if (target?.matches('[data-client-file-drop]') && (key === 'Enter' || key === ' ')) {
+      event.preventDefault();
+      target.querySelector<HTMLInputElement>('[data-client-file]')?.click();
+    }
+  }
+
+  function onClientFileChange(event: Event): void {
+    const input = event.target instanceof HTMLInputElement ? event.target : null;
+    if (input?.matches('[data-client-file]') && input.form) void readClientFile(input.form, input.files?.[0]);
+  }
+  function onClientFileDrop(event: Event): void {
+    const zone = event.target instanceof Element ? event.target.closest('[data-client-file-drop]') : null;
+    if (!zone) return;
+    event.preventDefault();
+    const form = zone.closest('form');
+    if (form && event.type === 'drop') void readClientFile(form, (event as DragEvent).dataTransfer?.files[0]);
+  }
+
   function onClick(event: Event): void {
     const target = event.target instanceof Element ? event.target : null;
     if (!target || !root.contains(target)) return;
+    const fileZone = target.closest('[data-client-file-drop]');
+    if (fileZone && !target.matches('[data-client-file]')) {
+      fileZone.querySelector<HTMLInputElement>('[data-client-file]')?.click();
+      return;
+    }
+    const messagingRetry = target.closest('[data-messaging-retry]');
+    if (messagingRetry) {
+      const sheet = messagingRetry.closest('[data-messaging-setup]');
+      const intro = sheet?.querySelector<HTMLElement>('[data-messaging-setup-intro]');
+      if (intro) intro.hidden = false;
+      sheet?.querySelector('[data-pairing-error]')?.remove();
+      const status = sheet?.querySelector<HTMLElement>('[data-messaging-status]');
+      if (status) status.textContent = '';
+      return;
+    }
+    if (target.closest('[data-client-paste] summary')) {
+      const form = target.closest('form');
+      if (form) uploadedClientFiles.delete(form);
+      const fileStatus = form?.querySelector<HTMLElement>('[data-client-file-status]');
+      if (fileStatus) fileStatus.textContent = '';
+      form?.querySelectorAll<HTMLInputElement>('[name="client_id"], [name="client_secret"]').forEach(field => { field.disabled = false; field.dataset.olympusOriginallyDisabled = 'false'; });
+    }
+    const begin = target.closest('[data-setup-begin]');
+    if (begin) {
+      const sheet = begin.closest('.sheet');
+      const walkthrough = sheet?.querySelector<HTMLElement>('[data-setup-walkthrough]');
+      if (walkthrough) {
+        walkthrough.hidden = false;
+        const heading = walkthrough.querySelector<HTMLElement>('h2, h4');
+        if (heading) { heading.tabIndex = -1; heading.focus(); }
+      }
+      const choice = sheet?.querySelector<HTMLElement>('[data-setup-choice]');
+      if (choice) choice.hidden = true;
+      const sharedNote = sheet?.querySelector<HTMLElement>('[data-shared-app-note]');
+      if (sharedNote) sharedNote.hidden = true;
+      const lead = sheet?.querySelector<HTMLElement>('[data-setup-lead]');
+      if (lead) lead.hidden = true;
+      return;
+    }
     if (target.closest('[data-first-run-done],[data-first-run-keys]')) {
       firstRunChoice = undefined;
       query('[data-first-run-sheet]')?.remove();
@@ -1439,6 +1595,10 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
 
   root.addEventListener('submit', onSubmit);
   root.addEventListener('click', onClick);
+  root.addEventListener('change', onClientFileChange);
+  root.addEventListener('keydown', onClientFileKeydown);
+  root.addEventListener('dragover', onClientFileDrop);
+  root.addEventListener('drop', onClientFileDrop);
   // Coming back from the approval browser or tab is the moment the exchange
   // may have just landed: one authoritative read, and only while this
   // controller still owes the owner an answer about a start it performed.
@@ -1473,6 +1633,10 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
     root.ownerDocument.removeEventListener('visibilitychange', onVisibilityReturn);
     root.removeEventListener('submit', onSubmit);
     root.removeEventListener('click', onClick);
+    root.removeEventListener('change', onClientFileChange);
+    root.removeEventListener('keydown', onClientFileKeydown);
+    root.removeEventListener('dragover', onClientFileDrop);
+    root.removeEventListener('drop', onClientFileDrop);
     root.removeEventListener(redrawEvent, onRedrawRequest);
   };
   options.signal.addEventListener('abort', dispose, { once: true });

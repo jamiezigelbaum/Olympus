@@ -2397,6 +2397,10 @@ function readCaptureGrantFile(path) {
     const value = JSON.parse(readFileSync5(descriptor, "utf8"));
     if (value.version !== 1 || !["telegram", "whatsapp"].includes(value.source) || !value.handle)
       return { kind: "invalid" };
+    if (value.accountProof !== undefined && typeof value.accountProof !== "string")
+      return { kind: "invalid" };
+    if (value.pairingPending !== undefined && value.pairingPending !== true)
+      return { kind: "invalid" };
     if (value.sessionPath !== undefined && (typeof value.sessionPath !== "string" || value.sessionPath === ""))
       return { kind: "invalid" };
     if (!value.producer || value.producer.source !== value.source || !Array.isArray(value.producer.secretEnvironment))
@@ -6592,6 +6596,392 @@ var init_secret_store = __esm(() => {
   };
 });
 
+// src/core/provider-account-identity.ts
+import { createHash as createHash3 } from "node:crypto";
+function isAccountBoundProvider(provider) {
+  return ACCOUNT_BOUND_PROVIDERS.includes(provider);
+}
+function dropboxAccountIdFromTokenPayload(payload) {
+  const value = typeof payload.account_id === "string" ? payload.account_id.trim() : "";
+  return DROPBOX_ACCOUNT_ID.test(value) ? value : undefined;
+}
+function googleAccountIdFromAddress(address) {
+  return `google:${createHash3("sha256").update(address.trim().toLowerCase()).digest("hex").slice(0, 40)}`;
+}
+function googleSubjectLabel(subject) {
+  return `google-sub:${createHash3("sha256").update(`sub
+${subject.trim()}`).digest("hex").slice(0, 32)}`;
+}
+function googlePermissionLabel(permissionId) {
+  return `google-perm:${createHash3("sha256").update(`perm
+${permissionId.trim()}`).digest("hex").slice(0, 32)}`;
+}
+function composeProviderAccountId(labels) {
+  const byKind = new Map;
+  for (const label of labels) {
+    const kind = LABEL.exec(label)?.[1];
+    if (kind && !byKind.has(kind))
+      byKind.set(kind, label);
+  }
+  const ordered = [
+    ...IMMUTABLE_LABEL_KINDS.map((kind) => byKind.get(kind)),
+    byKind.get("google")
+  ].filter((label) => Boolean(label));
+  return ordered.length > 0 ? ordered.join(".") : undefined;
+}
+function parseProviderAccountId(id) {
+  const labels = new Map;
+  for (const label of id.trim().split(".")) {
+    const kind = LABEL.exec(label)?.[1];
+    if (!kind || kind !== "google" && !IMMUTABLE_LABEL_KINDS.includes(kind))
+      return;
+    if (labels.has(kind))
+      return;
+    labels.set(kind, label);
+  }
+  return labels.size > 0 ? labels : undefined;
+}
+function compareProviderAccounts(recorded, observed) {
+  const a = parseProviderAccountId(recorded);
+  const b = parseProviderAccountId(observed);
+  if (!a || !b)
+    return recorded.trim() === observed.trim() ? "same" : "different";
+  let shared = false;
+  for (const kind of IMMUTABLE_LABEL_KINDS) {
+    const left = a.get(kind);
+    const right = b.get(kind);
+    if (left === undefined || right === undefined)
+      continue;
+    if (left !== right)
+      return "different";
+    shared = true;
+  }
+  if (shared)
+    return "same";
+  if (hasImmutableAccountLabel(recorded))
+    return "unproven";
+  const address = a.get("google");
+  return address !== undefined && address === b.get("google") ? "same" : "different";
+}
+function sameProviderAccount(recorded, observed) {
+  return compareProviderAccounts(recorded, observed) === "same";
+}
+function namesAccountByAddressOnly(id) {
+  const labels = parseProviderAccountId(id);
+  return labels !== undefined && labels.has("google") && !hasImmutableAccountLabel(id);
+}
+function compareAddressToRecord(recorded, address) {
+  const mine = parseProviderAccountId(address)?.get("google");
+  const theirs = parseProviderAccountId(recorded)?.get("google");
+  if (mine === undefined || theirs === undefined)
+    return "unproven";
+  return mine === theirs ? "same" : "different";
+}
+function hasImmutableAccountLabel(id) {
+  const labels = parseProviderAccountId(id);
+  return labels !== undefined && IMMUTABLE_LABEL_KINDS.some((kind) => labels.has(kind));
+}
+function mergeProviderAccountIds(recorded, observed) {
+  const a = parseProviderAccountId(recorded);
+  const b = parseProviderAccountId(observed);
+  if (!a || !b)
+    return observed.trim();
+  const labels = IMMUTABLE_LABEL_KINDS.map((kind) => b.get(kind) ?? a.get(kind)).concat(b.get("google") ?? a.get("google")).filter((label) => Boolean(label));
+  return composeProviderAccountId(labels);
+}
+async function fetchProviderAccountId(options) {
+  const endpoint = options.endpoints?.[options.provider] ?? DEFAULT_PROVIDER_IDENTITY_ENDPOINTS[options.provider];
+  const init = options.provider === "dropbox" ? {
+    method: "POST",
+    headers: { Authorization: `Bearer ${options.accessToken}`, "Content-Type": "application/json" },
+    body: "null"
+  } : { method: "GET", headers: { Authorization: `Bearer ${options.accessToken}`, Accept: "application/json" } };
+  let response;
+  let text;
+  try {
+    ({ response, text } = await fetchBoundedText(options.fetchImpl ?? ((url, requestInit) => fetch(url, requestInit)), endpoint, init, { timeoutMs: options.timeoutMs ?? 15000, limitBytes: IDENTITY_RESPONSE_LIMIT_BYTES }));
+  } catch {
+    throw new ProviderAccountIdentityError(`${providerLabel(options.provider)} did not answer the account lookup.`);
+  }
+  if (!response.ok) {
+    throw new ProviderAccountIdentityError(`${providerLabel(options.provider)} refused the account lookup with status ${response.status}.`);
+  }
+  let payload;
+  try {
+    const parsed = JSON.parse(text);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
+      throw new Error("not an object");
+    payload = parsed;
+  } catch {
+    throw new ProviderAccountIdentityError(`${providerLabel(options.provider)} returned an unreadable account lookup.`);
+  }
+  if (options.provider === "x") {
+    const id = xUserIdFromPayload(payload);
+    if (!id)
+      throw new ProviderAccountIdentityError("X did not name the connected account.");
+    return id;
+  }
+  const labels = labelsFromIdentityPayload(options.provider, payload);
+  if (!labels) {
+    throw new ProviderAccountIdentityError(`${providerLabel(options.provider)} did not name the connected account.`);
+  }
+  if (options.provider === "gmail" || options.provider === "google_drive") {
+    const subject = await fetchGoogleSubject({
+      accessToken: options.accessToken,
+      endpoint: options.endpoints?.google_tokeninfo ?? DEFAULT_PROVIDER_IDENTITY_ENDPOINTS.google_tokeninfo,
+      fetchImpl: options.fetchImpl,
+      timeoutMs: options.timeoutMs
+    });
+    if (subject)
+      labels.push(googleSubjectLabel(subject));
+  }
+  return composeProviderAccountId(labels);
+}
+async function fetchGoogleSubject(options) {
+  let response;
+  let text;
+  try {
+    ({ response, text } = await fetchBoundedText(options.fetchImpl ?? ((url, requestInit) => fetch(url, requestInit)), options.endpoint, { method: "POST", headers: { Authorization: `Bearer ${options.accessToken}`, Accept: "application/json" } }, { timeoutMs: options.timeoutMs ?? 15000, limitBytes: IDENTITY_RESPONSE_LIMIT_BYTES }));
+  } catch {
+    throw new ProviderAccountIdentityError("Google did not answer the token lookup.");
+  }
+  if (!response.ok)
+    throw new ProviderAccountIdentityError(`Google refused the token lookup with status ${response.status}.`);
+  let payload;
+  try {
+    const parsed = JSON.parse(text);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
+      throw new Error("not an object");
+    payload = parsed;
+  } catch {
+    throw new ProviderAccountIdentityError("Google returned an unreadable token lookup.");
+  }
+  const subject = typeof payload.sub === "string" ? payload.sub.trim() : "";
+  if (/^[A-Za-z0-9_-]{1,255}$/.test(subject))
+    return subject;
+  const scopes = typeof payload.scope === "string" ? payload.scope.split(/\s+/) : [];
+  if (subject || scopes.includes("openid")) {
+    throw new ProviderAccountIdentityError("Google did not name the subject of an openid token.");
+  }
+  return;
+}
+function xUserIdFromPayload(payload) {
+  const data = payload.data;
+  const id = data && typeof data === "object" && !Array.isArray(data) ? data.id : undefined;
+  return typeof id === "string" && X_USER_ID.test(id.trim()) ? id.trim() : undefined;
+}
+function labelsFromIdentityPayload(provider, payload) {
+  if (provider === "dropbox") {
+    const id = dropboxAccountIdFromTokenPayload(payload);
+    return id ? [id] : undefined;
+  }
+  const user = payload.user && typeof payload.user === "object" && !Array.isArray(payload.user) ? payload.user : undefined;
+  const address = provider === "gmail" ? payload.emailAddress : user?.emailAddress;
+  if (typeof address !== "string" || !address.includes("@"))
+    return;
+  const labels = [googleAccountIdFromAddress(address)];
+  const permissionId = typeof user?.permissionId === "string" ? user.permissionId.trim() : "";
+  if (provider === "google_drive" && /^[A-Za-z0-9_-]{1,255}$/.test(permissionId)) {
+    labels.push(googlePermissionLabel(permissionId));
+  }
+  return labels;
+}
+function providerLabel(provider) {
+  return provider === "dropbox" ? "Dropbox" : provider === "gmail" ? "Gmail" : provider === "x" ? "X" : "Google Drive";
+}
+async function dropboxOwnsOneOfFolders(options) {
+  const endpoint = options.endpoint ?? "https://api.dropboxapi.com/2/files/get_metadata";
+  let unknown = false;
+  for (const id of options.folderIds) {
+    if (!/^id:[A-Za-z0-9_-]{1,200}$/.test(id)) {
+      unknown = true;
+      continue;
+    }
+    let response;
+    let text;
+    try {
+      ({ response, text } = await fetchBoundedText(options.fetchImpl ?? ((url, requestInit) => fetch(url, requestInit)), endpoint, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${options.accessToken}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ path: id })
+      }, { timeoutMs: options.timeoutMs ?? 15000, limitBytes: IDENTITY_RESPONSE_LIMIT_BYTES }));
+    } catch {
+      unknown = true;
+      continue;
+    }
+    if (response.ok) {
+      let entry;
+      try {
+        entry = JSON.parse(text);
+      } catch {
+        entry = undefined;
+      }
+      if (!entry || typeof entry !== "object") {
+        unknown = true;
+        continue;
+      }
+      if (entry[".tag"] === "folder" && entry.id === id && entry.sharing_info === undefined)
+        return true;
+      continue;
+    }
+    if (response.status === 409 && /"not_found"/.test(text))
+      continue;
+    unknown = true;
+  }
+  return unknown ? undefined : false;
+}
+async function dropboxOwnRootFolderIds(options) {
+  const limit = options.limit ?? 5;
+  const listUrl = options.endpoint ?? "https://api.dropboxapi.com/2/files/list_folder";
+  const found = [];
+  let cursor;
+  for (let page2 = 0;page2 < 20; page2 += 1) {
+    let response;
+    let text;
+    try {
+      ({ response, text } = await fetchBoundedText(options.fetchImpl ?? ((url, requestInit) => fetch(url, requestInit)), cursor === undefined ? listUrl : `${listUrl}/continue`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${options.accessToken}`, "Content-Type": "application/json" },
+        body: JSON.stringify(cursor === undefined ? { path: "", recursive: false, limit: 200 } : { cursor })
+      }, { timeoutMs: options.timeoutMs ?? 15000, limitBytes: 1024 * 1024 }));
+    } catch {
+      return;
+    }
+    if (!response.ok)
+      return;
+    let parsed;
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      return;
+    }
+    if (!Array.isArray(parsed.entries))
+      return;
+    for (const raw of parsed.entries) {
+      const entry = raw;
+      if (entry && typeof entry === "object" && entry[".tag"] === "folder" && typeof entry.id === "string" && /^id:[A-Za-z0-9_-]{1,200}$/.test(entry.id) && entry.sharing_info === undefined) {
+        found.push(entry.id);
+        if (found.length >= limit)
+          return found;
+      }
+    }
+    if (parsed.has_more !== true)
+      return found;
+    if (typeof parsed.cursor !== "string" || !parsed.cursor)
+      return;
+    cursor = parsed.cursor;
+  }
+  return found.length > 0 ? found : undefined;
+}
+var ACCOUNT_BOUND_PROVIDERS, DEFAULT_PROVIDER_IDENTITY_ENDPOINTS, IDENTITY_RESPONSE_LIMIT_BYTES, DROPBOX_ACCOUNT_ID, X_USER_ID, ProviderAccountIdentityError, IMMUTABLE_LABEL_KINDS, LABEL;
+var init_provider_account_identity = __esm(() => {
+  init_http_timeout();
+  ACCOUNT_BOUND_PROVIDERS = ["dropbox", "gmail", "google_drive", "x"];
+  DEFAULT_PROVIDER_IDENTITY_ENDPOINTS = {
+    dropbox: "https://api.dropboxapi.com/2/users/get_current_account",
+    gmail: new URL("users/me/profile", "https://gmail.googleapis.com/gmail/v1/").toString(),
+    google_drive: "https://www.googleapis.com/drive/v3/about?fields=user(emailAddress,permissionId)",
+    x: "https://api.x.com/2/users/me",
+    google_tokeninfo: "https://oauth2.googleapis.com/tokeninfo"
+  };
+  IDENTITY_RESPONSE_LIMIT_BYTES = 64 * 1024;
+  DROPBOX_ACCOUNT_ID = /^dbid:[A-Za-z0-9_-]{1,150}$/;
+  X_USER_ID = /^\d{1,32}$/;
+  ProviderAccountIdentityError = class ProviderAccountIdentityError extends Error {
+    constructor(message) {
+      super(message);
+      this.name = "ProviderAccountIdentityError";
+    }
+  };
+  IMMUTABLE_LABEL_KINDS = ["dbid", "google-sub", "google-perm"];
+  LABEL = /^([a-z-]+):[A-Za-z0-9_-]{1,150}$/;
+});
+
+// src/core/google-own-app.ts
+function parseGoogleDesktopClient(text) {
+  try {
+    if (text.length > 64 * 1024)
+      throw new Error;
+    const value = JSON.parse(text)?.installed;
+    if (!value || typeof value.client_id !== "string" || typeof value.client_secret !== "string")
+      throw new Error;
+    const client = { clientId: value.client_id.trim(), clientSecret: value.client_secret.trim() };
+    validateClient(client);
+    return client;
+  } catch {
+    throw new Error(FILE_ERROR);
+  }
+}
+function validateClient(client) {
+  if (typeof client?.clientId !== "string" || typeof client?.clientSecret !== "string" || !/^[A-Za-z0-9._-]{1,240}\.apps\.googleusercontent\.com$/.test(client.clientId) || !client.clientSecret || client.clientSecret.length > 1024 || /\s/.test(client.clientSecret)) {
+    throw new Error("Copy the Client ID and secret from the same Desktop app in Google Cloud Clients.");
+  }
+}
+async function checkGoogleOwnApp(client, fetchImpl = fetch) {
+  validateClient(client);
+  let response;
+  let text;
+  try {
+    ({ response, text } = await fetchBoundedText(fetchImpl, "https://oauth2.googleapis.com/token", {
+      method: "POST",
+      redirect: "error",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ client_id: client.clientId, client_secret: client.clientSecret, grant_type: "refresh_token", refresh_token: "olympus-app-check-not-a-user-token" }).toString()
+    }, { timeoutMs: 1e4, limitBytes: 16 * 1024 }));
+  } catch {
+    throw new Error("Google could not be reached to check your app key. Try again.");
+  }
+  let code;
+  try {
+    code = JSON.parse(text)?.error;
+  } catch {}
+  if (response.status === 400 && code === "invalid_grant")
+    return;
+  if (code === "invalid_client" || code === "unauthorized_client")
+    throw new Error("Google did not accept this app key. Redo Make a Desktop app key and download it, then add the new file.");
+  throw new Error("Google could not confirm this app key. Check the Desktop client in Google Cloud Clients, then try again.");
+}
+async function checkGoogleOwnAppAccess(source, accessToken, fetchImpl = fetch) {
+  const checks = source === "google" ? ["gmail", "google-drive"] : [source];
+  for (const check of checks) {
+    const url = check === "gmail" ? DEFAULT_PROVIDER_IDENTITY_ENDPOINTS.gmail : "https://www.googleapis.com/drive/v3/about?fields=user(permissionId)";
+    let response;
+    let text;
+    try {
+      ({ response, text } = await fetchBoundedText(fetchImpl, url, { headers: { Authorization: `Bearer ${accessToken}` }, redirect: "error" }, { timeoutMs: 1e4, limitBytes: 64 * 1024 }));
+    } catch {
+      throw new Error("Google could not be reached for the API check. Try signing in again.");
+    }
+    if (response.status === 403)
+      throw new Error("Google did not allow this API read. Redo Make the project and turn on Gmail and Drive, then sign in and allow read access.");
+    if (response.status === 401)
+      throw new Error("Google did not accept the sign-in. Sign in again and allow read access.");
+    let value = {};
+    try {
+      value = JSON.parse(text) ?? {};
+    } catch {}
+    if (!response.ok || (check === "gmail" ? typeof value.emailAddress !== "string" : typeof value.user?.permissionId !== "string"))
+      throw new Error("Google could not confirm API access. Check your app settings and sign in again.");
+  }
+}
+async function readGoogleOwnAppRegistration(store) {
+  const raw = await store.get("google.own_app.registration");
+  if (!raw)
+    return;
+  try {
+    const client = JSON.parse(raw);
+    validateClient(client);
+    return client;
+  } catch {
+    return;
+  }
+}
+var FILE_ERROR = "Choose the JSON downloaded for a Desktop app in Google Cloud Clients. Web app keys cannot use this flow.";
+var init_google_own_app = __esm(() => {
+  init_provider_account_identity();
+  init_http_timeout();
+});
+
 // src/core/owner-config-read.ts
 import { readFileSync as readFileSync11, statSync as statSync3, lstatSync as lstatSync10 } from "node:fs";
 import { homedir as homedir8 } from "node:os";
@@ -8354,7 +8744,7 @@ var GOOGLE_OAUTH_TOKEN_URL = "https://oauth2.googleapis.com/token", GOOGLE_JWT_B
 var init_google_service_account = () => {};
 
 // src/workers/credential-broker/index.ts
-import { createHash as createHash3 } from "node:crypto";
+import { createHash as createHash4 } from "node:crypto";
 import { mkdir as mkdir2, readFile } from "node:fs/promises";
 import { dirname as dirname15 } from "node:path";
 function isCredentialProvider(value) {
@@ -8402,7 +8792,7 @@ class JsonCredentialOAuth2StateStore {
     return store.handles[handle];
   }
   leaseTargetPath(handle) {
-    const digest2 = createHash3("sha256").update(handle).digest("hex");
+    const digest2 = createHash4("sha256").update(handle).digest("hex");
     return `${this.path}.refresh-${digest2}`;
   }
   async save(handle, state) {
@@ -9101,7 +9491,7 @@ function bearerSessionFromMintedToken(options) {
 }
 function mintedSessionCacheKey(namespace, definition, capability, env) {
   const envRefreshToken = firstNonEmptyEnv(env, definition.oauth2Refresh?.refreshTokenEnvNames ?? []);
-  const envGrant = envRefreshToken ? createHash3("sha256").update(envRefreshToken).digest("hex").slice(0, 32) : "";
+  const envGrant = envRefreshToken ? createHash4("sha256").update(envRefreshToken).digest("hex").slice(0, 32) : "";
   return `${mintedSessionCachePrefix(namespace, definition.handle, capability)}${definition.grantGeneration ?? ""}
 ${envGrant}`;
 }
@@ -10434,15 +10824,15 @@ function normalizeConnectedHandle(value) {
     return { ok: false, reason: "entry_not_object" };
   const record = value;
   const handle = optionalSafeLabel(record.handle);
-  const providerLabel = optionalSafeLabel(record.provider);
+  const providerLabel2 = optionalSafeLabel(record.provider);
   const connectedAt = typeof record.connectedAt === "string" ? record.connectedAt : undefined;
   if (!handle)
     return { ok: false, reason: "invalid_handle" };
-  if (!providerLabel)
+  if (!providerLabel2)
     return { ok: false, reason: "invalid_provider" };
-  if (!isCredentialProvider(providerLabel))
+  if (!isCredentialProvider(providerLabel2))
     return { ok: false, reason: "unknown_provider" };
-  const provider = providerLabel;
+  const provider = providerLabel2;
   if (!connectedAt)
     return { ok: false, reason: "invalid_connected_at" };
   const allowedCapabilities = stringArray(record.allowedCapabilities);
@@ -10827,307 +11217,6 @@ var init_unpaired_sources = __esm(() => {
     "telegram.messages": "telegram",
     "whatsapp.personal.messages": "whatsapp_personal"
   };
-});
-
-// src/core/provider-account-identity.ts
-import { createHash as createHash4 } from "node:crypto";
-function isAccountBoundProvider(provider) {
-  return ACCOUNT_BOUND_PROVIDERS.includes(provider);
-}
-function dropboxAccountIdFromTokenPayload(payload) {
-  const value = typeof payload.account_id === "string" ? payload.account_id.trim() : "";
-  return DROPBOX_ACCOUNT_ID.test(value) ? value : undefined;
-}
-function googleAccountIdFromAddress(address) {
-  return `google:${createHash4("sha256").update(address.trim().toLowerCase()).digest("hex").slice(0, 40)}`;
-}
-function googleSubjectLabel(subject) {
-  return `google-sub:${createHash4("sha256").update(`sub
-${subject.trim()}`).digest("hex").slice(0, 32)}`;
-}
-function googlePermissionLabel(permissionId) {
-  return `google-perm:${createHash4("sha256").update(`perm
-${permissionId.trim()}`).digest("hex").slice(0, 32)}`;
-}
-function composeProviderAccountId(labels) {
-  const byKind = new Map;
-  for (const label of labels) {
-    const kind = LABEL.exec(label)?.[1];
-    if (kind && !byKind.has(kind))
-      byKind.set(kind, label);
-  }
-  const ordered = [
-    ...IMMUTABLE_LABEL_KINDS.map((kind) => byKind.get(kind)),
-    byKind.get("google")
-  ].filter((label) => Boolean(label));
-  return ordered.length > 0 ? ordered.join(".") : undefined;
-}
-function parseProviderAccountId(id) {
-  const labels = new Map;
-  for (const label of id.trim().split(".")) {
-    const kind = LABEL.exec(label)?.[1];
-    if (!kind || kind !== "google" && !IMMUTABLE_LABEL_KINDS.includes(kind))
-      return;
-    if (labels.has(kind))
-      return;
-    labels.set(kind, label);
-  }
-  return labels.size > 0 ? labels : undefined;
-}
-function compareProviderAccounts(recorded, observed) {
-  const a = parseProviderAccountId(recorded);
-  const b = parseProviderAccountId(observed);
-  if (!a || !b)
-    return recorded.trim() === observed.trim() ? "same" : "different";
-  let shared = false;
-  for (const kind of IMMUTABLE_LABEL_KINDS) {
-    const left = a.get(kind);
-    const right = b.get(kind);
-    if (left === undefined || right === undefined)
-      continue;
-    if (left !== right)
-      return "different";
-    shared = true;
-  }
-  if (shared)
-    return "same";
-  if (hasImmutableAccountLabel(recorded))
-    return "unproven";
-  const address = a.get("google");
-  return address !== undefined && address === b.get("google") ? "same" : "different";
-}
-function sameProviderAccount(recorded, observed) {
-  return compareProviderAccounts(recorded, observed) === "same";
-}
-function namesAccountByAddressOnly(id) {
-  const labels = parseProviderAccountId(id);
-  return labels !== undefined && labels.has("google") && !hasImmutableAccountLabel(id);
-}
-function compareAddressToRecord(recorded, address) {
-  const mine = parseProviderAccountId(address)?.get("google");
-  const theirs = parseProviderAccountId(recorded)?.get("google");
-  if (mine === undefined || theirs === undefined)
-    return "unproven";
-  return mine === theirs ? "same" : "different";
-}
-function hasImmutableAccountLabel(id) {
-  const labels = parseProviderAccountId(id);
-  return labels !== undefined && IMMUTABLE_LABEL_KINDS.some((kind) => labels.has(kind));
-}
-function mergeProviderAccountIds(recorded, observed) {
-  const a = parseProviderAccountId(recorded);
-  const b = parseProviderAccountId(observed);
-  if (!a || !b)
-    return observed.trim();
-  const labels = IMMUTABLE_LABEL_KINDS.map((kind) => b.get(kind) ?? a.get(kind)).concat(b.get("google") ?? a.get("google")).filter((label) => Boolean(label));
-  return composeProviderAccountId(labels);
-}
-async function fetchProviderAccountId(options) {
-  const endpoint = options.endpoints?.[options.provider] ?? DEFAULT_PROVIDER_IDENTITY_ENDPOINTS[options.provider];
-  const init = options.provider === "dropbox" ? {
-    method: "POST",
-    headers: { Authorization: `Bearer ${options.accessToken}`, "Content-Type": "application/json" },
-    body: "null"
-  } : { method: "GET", headers: { Authorization: `Bearer ${options.accessToken}`, Accept: "application/json" } };
-  let response;
-  let text;
-  try {
-    ({ response, text } = await fetchBoundedText(options.fetchImpl ?? ((url, requestInit) => fetch(url, requestInit)), endpoint, init, { timeoutMs: options.timeoutMs ?? 15000, limitBytes: IDENTITY_RESPONSE_LIMIT_BYTES }));
-  } catch {
-    throw new ProviderAccountIdentityError(`${providerLabel(options.provider)} did not answer the account lookup.`);
-  }
-  if (!response.ok) {
-    throw new ProviderAccountIdentityError(`${providerLabel(options.provider)} refused the account lookup with status ${response.status}.`);
-  }
-  let payload;
-  try {
-    const parsed = JSON.parse(text);
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
-      throw new Error("not an object");
-    payload = parsed;
-  } catch {
-    throw new ProviderAccountIdentityError(`${providerLabel(options.provider)} returned an unreadable account lookup.`);
-  }
-  if (options.provider === "x") {
-    const id = xUserIdFromPayload(payload);
-    if (!id)
-      throw new ProviderAccountIdentityError("X did not name the connected account.");
-    return id;
-  }
-  const labels = labelsFromIdentityPayload(options.provider, payload);
-  if (!labels) {
-    throw new ProviderAccountIdentityError(`${providerLabel(options.provider)} did not name the connected account.`);
-  }
-  if (options.provider === "gmail" || options.provider === "google_drive") {
-    const subject = await fetchGoogleSubject({
-      accessToken: options.accessToken,
-      endpoint: options.endpoints?.google_tokeninfo ?? DEFAULT_PROVIDER_IDENTITY_ENDPOINTS.google_tokeninfo,
-      fetchImpl: options.fetchImpl,
-      timeoutMs: options.timeoutMs
-    });
-    if (subject)
-      labels.push(googleSubjectLabel(subject));
-  }
-  return composeProviderAccountId(labels);
-}
-async function fetchGoogleSubject(options) {
-  let response;
-  let text;
-  try {
-    ({ response, text } = await fetchBoundedText(options.fetchImpl ?? ((url, requestInit) => fetch(url, requestInit)), options.endpoint, { method: "POST", headers: { Authorization: `Bearer ${options.accessToken}`, Accept: "application/json" } }, { timeoutMs: options.timeoutMs ?? 15000, limitBytes: IDENTITY_RESPONSE_LIMIT_BYTES }));
-  } catch {
-    throw new ProviderAccountIdentityError("Google did not answer the token lookup.");
-  }
-  if (!response.ok)
-    throw new ProviderAccountIdentityError(`Google refused the token lookup with status ${response.status}.`);
-  let payload;
-  try {
-    const parsed = JSON.parse(text);
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
-      throw new Error("not an object");
-    payload = parsed;
-  } catch {
-    throw new ProviderAccountIdentityError("Google returned an unreadable token lookup.");
-  }
-  const subject = typeof payload.sub === "string" ? payload.sub.trim() : "";
-  if (/^[A-Za-z0-9_-]{1,255}$/.test(subject))
-    return subject;
-  const scopes = typeof payload.scope === "string" ? payload.scope.split(/\s+/) : [];
-  if (subject || scopes.includes("openid")) {
-    throw new ProviderAccountIdentityError("Google did not name the subject of an openid token.");
-  }
-  return;
-}
-function xUserIdFromPayload(payload) {
-  const data = payload.data;
-  const id = data && typeof data === "object" && !Array.isArray(data) ? data.id : undefined;
-  return typeof id === "string" && X_USER_ID.test(id.trim()) ? id.trim() : undefined;
-}
-function labelsFromIdentityPayload(provider, payload) {
-  if (provider === "dropbox") {
-    const id = dropboxAccountIdFromTokenPayload(payload);
-    return id ? [id] : undefined;
-  }
-  const user = payload.user && typeof payload.user === "object" && !Array.isArray(payload.user) ? payload.user : undefined;
-  const address = provider === "gmail" ? payload.emailAddress : user?.emailAddress;
-  if (typeof address !== "string" || !address.includes("@"))
-    return;
-  const labels = [googleAccountIdFromAddress(address)];
-  const permissionId = typeof user?.permissionId === "string" ? user.permissionId.trim() : "";
-  if (provider === "google_drive" && /^[A-Za-z0-9_-]{1,255}$/.test(permissionId)) {
-    labels.push(googlePermissionLabel(permissionId));
-  }
-  return labels;
-}
-function providerLabel(provider) {
-  return provider === "dropbox" ? "Dropbox" : provider === "gmail" ? "Gmail" : provider === "x" ? "X" : "Google Drive";
-}
-async function dropboxOwnsOneOfFolders(options) {
-  const endpoint = options.endpoint ?? "https://api.dropboxapi.com/2/files/get_metadata";
-  let unknown = false;
-  for (const id of options.folderIds) {
-    if (!/^id:[A-Za-z0-9_-]{1,200}$/.test(id)) {
-      unknown = true;
-      continue;
-    }
-    let response;
-    let text;
-    try {
-      ({ response, text } = await fetchBoundedText(options.fetchImpl ?? ((url, requestInit) => fetch(url, requestInit)), endpoint, {
-        method: "POST",
-        headers: { Authorization: `Bearer ${options.accessToken}`, "Content-Type": "application/json" },
-        body: JSON.stringify({ path: id })
-      }, { timeoutMs: options.timeoutMs ?? 15000, limitBytes: IDENTITY_RESPONSE_LIMIT_BYTES }));
-    } catch {
-      unknown = true;
-      continue;
-    }
-    if (response.ok) {
-      let entry;
-      try {
-        entry = JSON.parse(text);
-      } catch {
-        entry = undefined;
-      }
-      if (!entry || typeof entry !== "object") {
-        unknown = true;
-        continue;
-      }
-      if (entry[".tag"] === "folder" && entry.id === id && entry.sharing_info === undefined)
-        return true;
-      continue;
-    }
-    if (response.status === 409 && /"not_found"/.test(text))
-      continue;
-    unknown = true;
-  }
-  return unknown ? undefined : false;
-}
-async function dropboxOwnRootFolderIds(options) {
-  const limit = options.limit ?? 5;
-  const listUrl = options.endpoint ?? "https://api.dropboxapi.com/2/files/list_folder";
-  const found = [];
-  let cursor;
-  for (let page2 = 0;page2 < 20; page2 += 1) {
-    let response;
-    let text;
-    try {
-      ({ response, text } = await fetchBoundedText(options.fetchImpl ?? ((url, requestInit) => fetch(url, requestInit)), cursor === undefined ? listUrl : `${listUrl}/continue`, {
-        method: "POST",
-        headers: { Authorization: `Bearer ${options.accessToken}`, "Content-Type": "application/json" },
-        body: JSON.stringify(cursor === undefined ? { path: "", recursive: false, limit: 200 } : { cursor })
-      }, { timeoutMs: options.timeoutMs ?? 15000, limitBytes: 1024 * 1024 }));
-    } catch {
-      return;
-    }
-    if (!response.ok)
-      return;
-    let parsed;
-    try {
-      parsed = JSON.parse(text);
-    } catch {
-      return;
-    }
-    if (!Array.isArray(parsed.entries))
-      return;
-    for (const raw of parsed.entries) {
-      const entry = raw;
-      if (entry && typeof entry === "object" && entry[".tag"] === "folder" && typeof entry.id === "string" && /^id:[A-Za-z0-9_-]{1,200}$/.test(entry.id) && entry.sharing_info === undefined) {
-        found.push(entry.id);
-        if (found.length >= limit)
-          return found;
-      }
-    }
-    if (parsed.has_more !== true)
-      return found;
-    if (typeof parsed.cursor !== "string" || !parsed.cursor)
-      return;
-    cursor = parsed.cursor;
-  }
-  return found.length > 0 ? found : undefined;
-}
-var ACCOUNT_BOUND_PROVIDERS, DEFAULT_PROVIDER_IDENTITY_ENDPOINTS, IDENTITY_RESPONSE_LIMIT_BYTES, DROPBOX_ACCOUNT_ID, X_USER_ID, ProviderAccountIdentityError, IMMUTABLE_LABEL_KINDS, LABEL;
-var init_provider_account_identity = __esm(() => {
-  init_http_timeout();
-  ACCOUNT_BOUND_PROVIDERS = ["dropbox", "gmail", "google_drive", "x"];
-  DEFAULT_PROVIDER_IDENTITY_ENDPOINTS = {
-    dropbox: "https://api.dropboxapi.com/2/users/get_current_account",
-    gmail: new URL("users/me/profile", "https://gmail.googleapis.com/gmail/v1/").toString(),
-    google_drive: "https://www.googleapis.com/drive/v3/about?fields=user(emailAddress,permissionId)",
-    x: "https://api.x.com/2/users/me",
-    google_tokeninfo: "https://oauth2.googleapis.com/tokeninfo"
-  };
-  IDENTITY_RESPONSE_LIMIT_BYTES = 64 * 1024;
-  DROPBOX_ACCOUNT_ID = /^dbid:[A-Za-z0-9_-]{1,150}$/;
-  X_USER_ID = /^\d{1,32}$/;
-  ProviderAccountIdentityError = class ProviderAccountIdentityError extends Error {
-    constructor(message) {
-      super(message);
-      this.name = "ProviderAccountIdentityError";
-    }
-  };
-  IMMUTABLE_LABEL_KINDS = ["dbid", "google-sub", "google-perm"];
-  LABEL = /^([a-z-]+):[A-Za-z0-9_-]{1,150}$/;
 });
 
 // src/core/source-account-binding.ts
@@ -11714,6 +11803,39 @@ async function checkDropboxConnection(accessToken, fetchImpl, timeoutMs, tokenUr
   if (!response.ok)
     throw new Error("Dropbox could not complete the list check. No credentials were stored; try again.");
 }
+async function checkXBookmarksConnection(options) {
+  const url = new URL(`/2/users/${encodeURIComponent(options.userId)}/bookmarks`, options.tokenUrl);
+  url.searchParams.set("max_results", "1");
+  let response;
+  let text;
+  try {
+    ({ response, text } = await fetchBoundedText(options.fetchImpl, url.toString(), {
+      method: "GET",
+      headers: { Authorization: `Bearer ${options.accessToken}`, Accept: "application/json" },
+      redirect: "error"
+    }, { timeoutMs: options.timeoutMs, limitBytes: 64 * 1024 }));
+  } catch {
+    throw new Error("X could not complete the bookmarks read check. No credentials were stored; try connecting again when X is reachable.");
+  }
+  if (response.status === 401)
+    throw new Error("X did not authorize the bookmarks read. Redo Enable OAuth 2.0 with bookmark.read and sign in again. No credentials were stored.");
+  if (response.status === 402 || response.status === 403)
+    throw new Error("X refused the bookmarks read. Redo Check the cost to confirm paid API access and available credits, then Enable OAuth 2.0 with Read permissions and sign in again. No credentials were stored.");
+  if (!response.ok)
+    throw new Error("X could not complete the bookmarks read check. No credentials were stored; try connecting again later.");
+  let valid = false;
+  try {
+    const payload = JSON.parse(text);
+    if (payload && typeof payload === "object" && !Array.isArray(payload)) {
+      const count = payload.meta?.result_count;
+      const data = payload.data;
+      const errors = payload.errors;
+      valid = (errors === undefined || Array.isArray(errors)) && (count === 0 ? (errors === undefined || errors.length === 0) && (data === undefined || Array.isArray(data) && data.length === 0) : count === 1 && Array.isArray(data) && data.length === 1 && typeof data[0]?.id === "string" && /^\d+$/.test(data[0].id) && typeof data[0]?.text === "string");
+    }
+  } catch {}
+  if (!valid)
+    throw new Error("X returned an invalid bookmarks read result. No credentials were stored; try connecting again later.");
+}
 async function completeOAuthSourceConnection(prepared, code) {
   const usesGooglePublisherExchange = isGooglePublisherExchangeClient(prepared.options.source, prepared.clientId);
   const shippedDesktopSecret = isGoogleOAuthSource(prepared.options.source) ? googleDesktopClientSecret(prepared.clientId) : undefined;
@@ -11733,6 +11855,9 @@ async function completeOAuthSourceConnection(prepared, code) {
   if (!token.refreshToken)
     throw new Error("OAuth provider did not return a refresh token. Re-run connect and request offline access.");
   const refreshToken = token.refreshToken;
+  if (prepared.options.googleOwnApp && isGoogleOAuthSource(prepared.options.source)) {
+    await checkGoogleOwnAppAccess(prepared.options.source, token.accessToken, prepared.options.fetch ?? fetch);
+  }
   if (prepared.options.source === "dropbox") {
     await checkDropboxConnection(token.accessToken, prepared.options.fetch ?? fetch, prepared.tokenExchangeTimeoutMs, prepared.options.tokenUrl ?? prepared.definition.tokenUrl);
   }
@@ -11740,6 +11865,13 @@ async function completeOAuthSourceConnection(prepared, code) {
   if (prepared.options.source === "x") {
     xUserId = await fetchXUserId({
       tokenUrl: prepared.options.tokenUrl ?? prepared.definition.tokenUrl,
+      accessToken: token.accessToken,
+      fetchImpl: prepared.options.fetch ?? fetch,
+      timeoutMs: prepared.tokenExchangeTimeoutMs
+    });
+    await checkXBookmarksConnection({
+      tokenUrl: prepared.options.tokenUrl ?? prepared.definition.tokenUrl,
+      userId: xUserId,
       accessToken: token.accessToken,
       fetchImpl: prepared.options.fetch ?? fetch,
       timeoutMs: prepared.tokenExchangeTimeoutMs
@@ -11979,6 +12111,11 @@ async function completeOAuthSourceConnection(prepared, code) {
     const retired = readConnectedHandleRegistry(prepared.registryPath).handles.filter((handle) => replacedProviders.has(handle.provider) && isRetiredGoogleHandle(handle));
     if (retired.length > 0)
       removeConnectedHandles(retired.map((handle) => handle.handle), prepared.registryPath);
+    if (prepared.options.googleOwnApp && clientSecret && isGoogleOAuthSource(prepared.options.source)) {
+      try {
+        await prepared.secretStore.set("google.own_app.registration", JSON.stringify({ clientId: prepared.clientId, clientSecret }));
+      } catch {}
+    }
     return {
       ok: true,
       source: prepared.options.source,
@@ -12885,6 +13022,7 @@ function retryableErrorDisposition(error, now) {
 }
 var DEFAULT_OAUTH_AUTHORIZATION_TIMEOUT_MS, DEFAULT_OAUTH_TOKEN_EXCHANGE_TIMEOUT_MS, DETACHED_PARENT_WAIT_MS = 5000, DROPBOX_OAUTH_SCOPES, OAUTH_TOKEN_RESPONSE_LIMIT_BYTES, KNOWN_OAUTH_ERROR_CODES;
 var init_connect = __esm(() => {
+  init_google_own_app();
   init_owner_config_read();
   init_linux_engine_layout();
   init_google_handle_compatibility();
@@ -39272,11 +39410,15 @@ async function pairMessagingSource(options) {
     if (options.signal?.aborted)
       throw new Error("Pairing was cancelled.");
     options.onCommitStart?.();
-    const prior = options.source === "telegram" && historyAccount === accountProof ? readCaptureGrantFile(options.registryPath ? captureGrantPathBeside("telegram", options.registryPath) : captureGrantPathFromEnv("telegram", registryEnv)) : undefined;
-    const priorEnv = prior?.kind === "valid" && prior.grant.source === "telegram" && (prior.grant.sessionPath === sessionPath || layout === "folder" && prior.grant.sessionPath === undefined) ? prior.grant.producer.env : undefined;
+    const prior = options.source === "telegram" ? readCaptureGrantFile(options.registryPath ? captureGrantPathBeside("telegram", options.registryPath) : captureGrantPathFromEnv("telegram", registryEnv)) : undefined;
+    const priorGrant = prior?.kind === "valid" && prior.grant.source === "telegram" ? prior.grant : undefined;
+    const sameAccount = /^telegram:[a-f0-9]{16}$/.test(accountProof) && priorGrant?.accountProof === accountProof;
+    const legacySameSession = priorGrant?.accountProof === undefined && historyAccount === accountProof && (priorGrant?.sessionPath === sessionPath || layout === "folder" && priorGrant?.sessionPath === undefined);
+    const priorEnv = sameAccount || legacySameSession ? priorGrant?.producer.env : undefined;
     const priorRaw = priorEnv?.OLYMPUS_TELEGRAM_ALLOWED_CHAT_SCOPES;
     const priorScopes = typeof priorRaw === "string" ? priorRaw.split(",") : [];
-    const retained = priorRaw === priorEnv?.OLYMPUS_SOURCE_INDEX_TELEGRAM_APPROVED_CHAT_SCOPES && priorScopes.every((scope) => /^telegram\.personal:chat:[A-Za-z0-9_-]+$/.test(scope)) ? priorScopes : [];
+    const alternate = priorEnv?.OLYMPUS_SOURCE_INDEX_TELEGRAM_APPROVED_CHAT_SCOPES;
+    const retained = (priorRaw === alternate || sameAccount && alternate === undefined) && priorScopes.every((scope) => /^telegram\.personal:chat:[A-Za-z0-9_-]+$/.test(scope)) ? priorScopes : [];
     const producer = producerLaunch(options.source, approval, helper, packageRoot, sessionPath, chats, layout, retained);
     if (options.source === "telegram") {
       const recorded = historyAccount === accountProof ? "same" : await recordPairingAccount(account, accountProof, registryEnv, workerTransport).catch(() => {
@@ -39873,6 +40015,7 @@ function saveMessagingCaptureGrant(input) {
     version: 1,
     source: input.pairing.source,
     handle,
+    ...input.pairing.source === "telegram" && /^telegram:[a-f0-9]{16}$/.test(input.pairing.accountProof) ? { accountProof: input.pairing.accountProof } : {},
     ...input.pairing.sessionLayout === "folder" ? {} : { sessionPath: input.pairing.sessionPath },
     producer: {
       source: input.pairing.producer.source,
@@ -39894,7 +40037,7 @@ function isPlainRecord(value) {
 function readMessagingCaptureGrantFacts(source, grantPath = defaultMessagingCaptureGrantPath(source)) {
   try {
     const read = readGrant(grantPath);
-    if (read.kind !== "valid" || read.grant.source !== source)
+    if (read.kind !== "valid" || read.grant.source !== source || read.grant.pairingPending)
       return {};
     const facts = {};
     const grantedAt = typeof read.grant.grantedAt === "string" ? Date.parse(read.grant.grantedAt) : Number.NaN;
@@ -39974,6 +40117,10 @@ class MessagingCaptureSupervisor {
     if (grant.source !== this.options.source) {
       await this.stop();
       return { state: "blocked", reason: "grant_invalid" };
+    }
+    if (grant.pairingPending) {
+      await this.stop();
+      return { source: grant.source, state: "stopped", reason: "grant_missing" };
     }
     const handle = withoutUnpairedLaneHandles(readConnectedHandleRegistry(registryPath).handles, registryPath).find((candidate) => candidate.handle === grant.handle);
     if (!handleAllowsCapture(handle, grant.source)) {
@@ -52368,6 +52515,8 @@ function dashboardProviderRefusalLine(source, options) {
   const code = source.connection.provider_refusal?.code ?? "";
   if (options?.surface === "chatgpt")
     return DASHBOARD_CHATGPT_REFUSAL_COPY.line[chatgptRefusalKind(code)];
+  if (code === "connection_check_failed")
+    return `${source.label} could not complete its access check. How to fix has the details.`;
   if (REDIRECT_REFUSAL_CODES.has(code)) {
     return `rejected the sign-in address — fix it in your ${source.label} app settings`;
   }
@@ -95438,8 +95587,7 @@ function sourceAction(definition, connected, reauthRequired, providerRefusing, o
       return { kind: "none" };
     const knownClientId = oauthClientIdForSource(definition.connect_action.source, oauthClientIds);
     const clientSecretRequired = definition.connect_action.source === "x";
-    const googleWebClient = isGoogleOAuthSource2(definition.connect_action.source) && googleOAuthClientType(oauthRedirectBaseUrl) === "web";
-    const clientSecretOnFile = (clientSecretRequired || googleWebClient) && oauthClientSecretAvailableForSource(definition.connect_action.source, oauthClientSecretAvailability);
+    const clientSecretOnFile = (clientSecretRequired || isGoogleOAuthSource2(definition.connect_action.source)) && oauthClientSecretAvailableForSource(definition.connect_action.source, oauthClientSecretAvailability);
     const hasClientSecret = !clientSecretRequired || clientSecretOnFile;
     const redirectUriToRegister = oauthRedirectUriToRegister(definition.connect_action.source, oauthRedirectBaseUrl);
     const redirectUriGuidance = oauthRedirectUriGuidance(definition.connect_action.source, oauthRedirectBaseUrl);
@@ -95518,7 +95666,7 @@ function publisherOAuthSetupInstructions(sourceLabel2, actionLabel, byo) {
     agent_prompt: `Connect ${sourceLabel2} to Olympus from the Olympus dashboard: press ${actionLabel} on the ` + `${sourceLabel2} card, approve the access in the provider tab that opens, and come back to the dashboard. ` + "Olympus uses its own registered app, so there is nothing for me to create, register, or paste. " + "Do not ask me to edit files, configuration, or code.",
     provider_console_url: byo.provider_console_url,
     ...byo.google_cloud_project_id ? { google_cloud_project_id: byo.google_cloud_project_id } : {},
-    diy_summary: PUBLISHER_ADVANCED_BYO_SUMMARY,
+    diy_summary: byo.credential_file ? "Use my own Google app" : PUBLISHER_ADVANCED_BYO_SUMMARY,
     diy_steps: [],
     secret_shown_once: false,
     fields: [],
@@ -95542,32 +95690,29 @@ function oauthSetupInstructions(source, googleCloudProjectId, redirectBaseUrl) {
     secret: true
   };
   if (isGoogleOAuthSource2(source)) {
-    const sourceLabel2 = source === "google-drive" ? "Google Drive" : source === "google" ? "Google" : "Gmail";
-    const sourceObject = source === "google-drive" ? "your Google Drive" : source === "google" ? "your Google data" : "your Gmail";
-    const web = googleOAuthClientType(redirectBaseUrl) === "web";
-    const clientTypeName = web ? "Web application" : "Desktop app";
-    const redirectClause = web ? `adding the redirect URI shown on the Olympus dashboard's ${sourceLabel2} card to that client's Authorized redirect URIs` : "confirming that Google accepts the loopback callback this dashboard uses without registering a redirect URI";
     return {
-      plain_intro: web ? `To read ${sourceObject} with the advanced BYO path, Olympus needs a Google Web application Client ID and Client secret you create in your own Google account. Register the redirect URI shown on this card on that client, then copy the Client ID and the Client secret into the fields on this card. Google Web clients need the secret to finish sign-in. Google shows you exactly what Olympus can see.` : `To read ${sourceObject} with the advanced BYO path, Olympus needs a Google Desktop app Client ID you create in your own Google account. PKCE protects the exchange, so there is no client secret to paste. Google shows you exactly what Olympus can see.`,
-      agent_prompt: web ? `Help me connect ${sourceLabel2} to Olympus with my own Google client. Walk me through creating an OAuth client of type ${clientTypeName} in my Google Cloud project (console.cloud.google.com, APIs & Services, Credentials), enabling the ${sourceLabel2} API, and ${redirectClause}. Then tell me where to find the Client ID and the Client secret so I can paste each into its own field on that card and press Connect. Google Web clients need the secret to finish sign-in; do not ask me to type it into this chat, only into the Client secret field on the card. Do not ask me to edit files, configuration, or code.` : `Help me connect ${sourceLabel2} to Olympus with my own Google client. Walk me through creating an OAuth client of type ${clientTypeName} in my Google Cloud project (console.cloud.google.com, APIs & Services, Credentials), enabling the ${sourceLabel2} API, and ${redirectClause}. Then give me the Client ID so I can paste it into the Client ID field on that card and press Connect. PKCE protects the exchange, so no client secret is needed. Do not ask me to edit files, configuration, or code.`,
-      provider_console_url: googleConsoleUrl("https://console.cloud.google.com/auth/clients", googleCloudProjectId),
-      ...googleCloudProjectId ? { google_cloud_project_id: googleCloudProjectId } : {},
-      diy_summary: "Or set it up yourself (about 5 minutes)",
+      plain_intro: "About ten minutes, free. You make the app once; it works for Gmail and Google Drive.",
+      setup_provider: "Google Cloud",
+      setup_heading: "Connect Gmail with your own Google app",
+      credential_file: "google_desktop",
+      agent_prompt: "Help me connect Gmail and Drive with my own Google app using the dashboard walkthrough. Create a project, enable Gmail and Drive APIs, publish the External sign-in screen, then create a Desktop app client and download its JSON. Add that file only in the Olympus dashboard. Never ask for the client secret in chat.",
+      provider_console_url: "https://console.cloud.google.com/auth/clients",
+      diy_summary: "Use my own Google app",
       diy_steps: [
-        { text: "Sign in to Google Cloud.", link: { label: "Open Google OAuth clients", url: googleConsoleUrl("https://console.cloud.google.com/auth/clients", googleCloudProjectId) } },
-        { text: "Create or choose a project named Olympus." },
-        { text: "Set the consent screen to External, then publish it to production. Testing mode stops working after 7 days." },
-        web ? { text: "Create an OAuth client ID, choose Web application, and add the redirect URI shown on this card to its Authorized redirect URIs. A Desktop app client cannot register an https redirect URI." } : { text: "Create an OAuth client ID and choose Desktop app. Google accepts this dashboard's loopback callback with nothing to register." },
-        { text: "Enable the Gmail API for this project. Sync returns 403 errors until the Gmail and Drive APIs are enabled.", link: { label: "Open Gmail API", url: googleConsoleUrl("https://console.cloud.google.com/apis/library/gmail.googleapis.com", googleCloudProjectId) } },
-        { text: "Enable the Google Drive API for the same project.", link: { label: "Open Google Drive API", url: googleConsoleUrl("https://console.cloud.google.com/apis/library/drive.googleapis.com", googleCloudProjectId) } },
-        web ? { text: "Copy the Client ID and the Client secret shown in the popup into the fields below. A Google Web application client needs its secret to finish sign-in. Paste the secret only into the Client secret field on this card; Olympus keeps it on this computer." } : { text: "Copy the Client ID shown in the popup. Olympus uses PKCE and does not need the client secret." }
+        { title: "Create the project", text: "", instructions: ["Name the project **Olympus**.", "Choose **Create**, then select the new project."], link: { label: "Google Cloud", url: "https://console.cloud.google.com/projectcreate" }, return_note: "Google opens in your browser. Come back here when you've created and selected your Olympus project." },
+        { title: "Turn on Gmail and Drive", text: "", instructions: ["Check **Olympus** is selected at the top.", "Search for **Gmail API**, open it and choose **Enable**.", "Return to **Library**, search for **Google Drive API** and choose **Enable**."], link: { label: "Google Cloud", url: "https://console.cloud.google.com/apis/library" }, return_note: "Google opens the API Library. Come back here when both Gmail and Google Drive are enabled in the same project." },
+        { title: "Set up the sign-in screen", text: "", instructions: ["Choose **Get started**.", "Name the app **Olympus** and give your own email for support.", "For Audience choose **External**, then add your email as contact.", "Choose **Create**."], link: { label: "Google Cloud", url: "https://console.cloud.google.com/auth/overview" }, return_note: "Google opens in your browser on the right project. Come back here when you've pressed Create." },
+        { title: "Publish", text: "", instructions: ["In **Audience**, choose **Publish app**.", "Confirm to move the app to **In production**."], link: { label: "Google Cloud", url: "https://console.cloud.google.com/auth/audience" }, return_note: "Testing ends the connection every 7 days. Come back here when the publishing status is In production." },
+        { title: "Make the key", text: "", instructions: ["In **Clients**, choose **Create client**.", "Choose **Desktop app**, name it **Olympus** and choose **Create**.", "Choose **Download JSON** and save the file in **Downloads**."], link: { label: "Google Cloud", url: "https://console.cloud.google.com/auth/clients" }, return_note: "Google makes the key for your app. Come back here when you've downloaded the JSON file." },
+        { title: "Paste it here", text: "" }
       ],
       secret_shown_once: false,
-      fields: web ? [clientIdField, clientSecretField] : [clientIdField]
+      fields: [clientIdField, clientSecretField]
     };
   }
   if (source === "dropbox") {
     return {
+      setup_provider: "Dropbox",
       plain_intro: "To read your Dropbox files, Olympus needs your Dropbox App key (Dropbox's name for the OAuth client id), shown on the app's Settings tab in your Dropbox developer account. Dropbox uses PKCE here, so there is no app secret to paste.",
       agent_prompt: "Help me connect Dropbox to Olympus. Walk me through creating a Dropbox app at https://www.dropbox.com/developers/apps (Scoped access, the folder access I want, named Olympus) or reusing my existing Olympus app, enabling the files.metadata.read, files.content.read, sharing.read and account_info.read permissions, and adding the redirect URI shown on the Olympus dashboard's Dropbox card under the app's OAuth 2 redirect URIs. Then give me the App key so I can paste it into the Client ID field on that card and press Connect. Dropbox uses PKCE, so no app secret is needed. Do not ask me to edit files, configuration, or code.",
       provider_console_url: "https://www.dropbox.com/developers/apps",
@@ -95588,12 +95733,13 @@ function oauthSetupInstructions(source, googleCloudProjectId, redirectBaseUrl) {
     agent_prompt: "Help me connect X bookmarks to Olympus. Walk me through creating an app at https://console.x.com, opening the app's Settings (Authentication settings: App permissions Read, Type of App Web App, Automated App or Bot), adding the redirect URI shown on the Olympus dashboard's X bookmarks card under Callback URI / Redirect URL, saving, and finding the OAuth 2.0 Client ID and Client secret under Keys & Tokens so I can paste them into that card and press Connect. Remind me that reading bookmarks needs paid X API access before I start. Do not ask me to edit files, configuration, or code.",
     provider_console_url: "https://console.x.com",
     diy_summary: "Or set it up yourself (about 5 minutes)",
+    setup_provider: "X",
     diy_steps: [
-      { text: "Sign in to the X Developer Portal.", link: { label: "Open X developer console", url: "https://console.x.com" } },
-      { text: "Create or choose a project and app named Olympus." },
-      { text: "Open the app's Settings. Under Type of App choose Web App, Automated App or Bot (a Confidential client); under App permissions, Read is enough." },
-      { text: "Under Callback URI / Redirect URL press Add another, paste the exact redirect URI shown on this card, and press Save Changes." },
-      { text: "Back on Keys & Tokens, copy the OAuth 2.0 Client ID and Client secret into the fields below. X shows the secret once; Regenerate it if you no longer have it." }
+      { title: "Check the cost", text: "Reading bookmarks needs paid X API access. X currently charges by usage with credits. Review the costs before connecting.", button_label: "Open X pricing", link: { label: "X pricing", url: "https://docs.x.com/x-api/getting-started/pricing" } },
+      { title: "Create your app", text: "Sign in to the X developer console and create or choose your app.", link: { label: "X developer console", url: "https://console.x.com" } },
+      { title: "Enable OAuth 2.0", text: "Open the app Settings. Choose Web App, Automated App or Bot (Confidential client), with Read permissions. Olympus requests tweet.read, users.read, bookmark.read and offline.access.", link: { label: "X developer console", url: "https://console.x.com" } },
+      { title: "Register the callback", text: "Under Callback URI / Redirect URL, add this exact URI and save.", redirect_uri: true, link: { label: "X developer console", url: "https://console.x.com" } },
+      { title: "Add your app key", text: "Under Keys & Tokens, copy the OAuth 2.0 Client ID and Client secret. X shows the secret once. After sign-in Olympus checks it can read bookmarks before saving the connection." }
     ],
     secret_shown_once: true,
     fields: [clientIdField, clientSecretField]
@@ -95725,6 +95871,8 @@ function oauthCallbackRegistration(source, baseUrl, googleCloudProjectId, google
   };
 }
 function providerRefusalReason(error, redirectUri, settingLabel) {
+  if (error.code === "connection_check_failed")
+    return "Check the app key, enabled APIs, permissions and provider access. The sign-in tab explains which check failed. Then connect again.";
   if (redirectUri && settingLabel) {
     return `Provider refused the callback (${error.code}): register ${redirectUri} at ${settingLabel}, then Connect again`;
   }
@@ -142402,7 +142550,7 @@ function createDashboardMessagingService(options) {
   const grantFor = (source) => {
     const path = defaultMessagingCaptureGrantPath(source, options.registryPath);
     const read = readCaptureGrantFile(path);
-    if (read.kind !== "valid" || read.grant.source !== source)
+    if (read.kind !== "valid" || read.grant.source !== source || read.grant.pairingPending)
       throw new Error("No valid capture grant.");
     return { path, grant: read.grant, fingerprint: JSON.stringify(read.grant) };
   };
@@ -142416,15 +142564,15 @@ function createDashboardMessagingService(options) {
         signal: hooks.signal,
         onCommitStart: hooks.commit,
         whatsappQrMode: "artifact",
-        requestCaptureScope: async ({ chats, sessionPath }) => {
+        requestCaptureScope: async ({ chats, sessionPath, accountProof }) => {
           const prior = readCaptureGrantFile(defaultMessagingCaptureGrantPath(source, options.registryPath));
           if (grantSnapshot(source) !== initialGrants.get(source))
             throw new Error("Capture grant changed during pairing.");
           let selection;
-          if (prior.kind === "valid") {
+          if (source === "telegram" && /^telegram:[a-f0-9]{16}$/.test(accountProof) && prior.kind === "valid" && prior.grant.accountProof === accountProof) {
             const env = retainApprovedCaptureScope(source, prior.grant.producer.env);
-            const raw = env[source === "telegram" ? "OLYMPUS_TELEGRAM_ALLOWED_CHAT_SCOPES" : "OLYMPUS_WHATSAPP_ALLOWED_CHAT_JIDS"];
-            selection = { wholeAccount: raw === "*", chatScopes: raw === "*" ? [] : raw.split(",").map((value2) => source === "whatsapp" ? `whatsapp.personal:chat:${value2}` : value2) };
+            const raw = env.OLYMPUS_TELEGRAM_ALLOWED_CHAT_SCOPES;
+            selection = { wholeAccount: raw === "*", chatScopes: raw === "*" ? [] : raw.split(",") };
           } else {
             let choices = chats;
             if (source === "whatsapp") {
@@ -142456,10 +142604,9 @@ function createDashboardMessagingService(options) {
         throw new Error("Capture grant changed during pairing.");
       if (prior.kind === "invalid" || prior.kind === "valid" && prior.grant.source !== source)
         throw new Error("Invalid capture grant.");
-      const retained = prior.kind === "valid" ? retainApprovedCaptureScope(source, prior.grant.producer.env) : {};
       if (signal.aborted)
         return;
-      saveMessagingCaptureGrant({ path, pairing: { ...result, producer: { ...result.producer, env: { ...result.producer.env, ...retained } } } });
+      saveMessagingCaptureGrant({ path, pairing: result });
       available.delete(source);
     })
   });
@@ -142506,6 +142653,13 @@ function createDashboardMessagingService(options) {
         return options.withGrantMutation(async () => {
           if (manager.busy(source))
             throw new Error("Pairing is already running.");
+          grantSnapshot(source);
+          const path = defaultMessagingCaptureGrantPath(source, options.registryPath);
+          const prior = readCaptureGrantFile(path);
+          if (prior.kind === "valid") {
+            writePrivateFileAtomicSync(path, `${JSON.stringify({ ...prior.grant, pairingPending: true }, null, 2)}
+`);
+          }
           initialGrants.set(source, grantSnapshot(source));
           return manager.start(source);
         });
@@ -144407,6 +144561,7 @@ function mountDashboardController(options) {
   let awaitingAuthorizationReturn = false;
   let authorizationWait;
   const root = options.root;
+  const uploadedClientFiles = new WeakMap;
   const submittedFormValues = new WeakMap;
   const startedFromSheet = new WeakSet;
   const pendingForms = new WeakSet;
@@ -144426,7 +144581,9 @@ function mountDashboardController(options) {
     const position = noConnection && next === 2 ? 2 : next + 1;
     const counter = sheet.querySelector("[data-setup-counter]");
     if (counter)
-      counter.textContent = `Step ${position} of ${count}`;
+      counter.textContent = sheet.hasAttribute("data-setup-guided") ? `STEP ${position} OF ${count}` : `Step ${position} of ${count}`;
+    sheet.querySelectorAll("[data-setup-segment]").forEach((segment, index) => segment.classList.toggle("filled", index <= next));
+    sheet.querySelector('[role="progressbar"]')?.setAttribute("aria-valuenow", String(position));
     const progress = sheet.querySelector("[data-setup-progress]");
     if (progress) {
       progress.max = count;
@@ -144457,7 +144614,7 @@ function mountDashboardController(options) {
       sheet.querySelectorAll("form").forEach((form) => say(form, ""));
       sheet.querySelector("[data-setup-error]")?.remove();
     }
-    const heading = panels[next]?.querySelector("h4");
+    const heading = panels[next]?.querySelector("h2, h4");
     if (heading) {
       heading.tabIndex = -1;
       heading.focus();
@@ -144523,6 +144680,17 @@ function mountDashboardController(options) {
   function setSheetOpen(sheet, open7) {
     sheet.classList.toggle("on", open7);
     sheet.setAttribute("aria-hidden", open7 ? "false" : "true");
+    if (!open7) {
+      const choice = sheet.querySelector("[data-setup-choice], [data-setup-lead]");
+      const walkthrough = sheet.querySelector("[data-setup-walkthrough]");
+      if (choice && walkthrough) {
+        choice.hidden = false;
+        walkthrough.hidden = true;
+        const note = choice.querySelector("[data-shared-app-note]");
+        if (note)
+          note.hidden = false;
+      }
+    }
     if (!sheet.id)
       return;
     queryAll("[data-sheet-toggle]").forEach((toggle) => {
@@ -144725,7 +144893,9 @@ function mountDashboardController(options) {
         action: "start_oauth",
         source: body.source,
         ...body.client_id ? { client_id: body.client_id } : {},
-        ...body.client_secret ? { client_secret: body.client_secret } : {}
+        ...body.client_secret ? { client_secret: body.client_secret } : {},
+        ...body.google_desktop === "true" ? { google_desktop: true } : {},
+        ...uploadedClientFiles.has(form) ? { google_client_json: uploadedClientFiles.get(form) } : {}
       };
     }
     if (connect === "this_computer") {
@@ -144799,8 +144969,10 @@ function mountDashboardController(options) {
       closeAuthorizationTab(authorizationTab);
       return;
     }
-    if (params.action === "start_oauth")
+    if (params.action === "start_oauth") {
       clearAuthorizationFallback(form);
+      uploadedClientFiles.delete(form);
+    }
     if (firstRunChoice && ["check_model_setup", "save_local_answer_model", "connect_api_key"].includes(params.action)) {
       firstRunCheckRequested = false;
       firstRunResult("Check readiness after Olympus applies your changes.");
@@ -144835,33 +145007,7 @@ function mountDashboardController(options) {
       closeAuthorizationTab(authorizationTab);
       const message2 = errorMessage3(result);
       say(form, message2);
-      const setup = form.closest("[data-setup-steps]");
-      const step = message2.includes("Redo the Set up your account step") ? 0 : message2.includes("Redo the Create an API key step") ? 1 : -1;
-      if (setup) {
-        const panels = Array.from(setup.querySelectorAll("[data-setup-panel]"));
-        const current2 = panels.findIndex((panel) => !panel.hidden);
-        panels.forEach((panel) => {
-          panel.hidden = true;
-        });
-        const actions = setup.querySelector("[data-setup-actions]");
-        if (actions)
-          actions.hidden = true;
-        setup.querySelector("[data-setup-error]")?.remove();
-        const error2 = document.createElement("div");
-        error2.dataset.setupError = "";
-        const banner = document.createElement("p");
-        banner.className = "why";
-        banner.setAttribute("role", "alert");
-        banner.textContent = message2;
-        const retry = document.createElement("button");
-        retry.type = "button";
-        retry.className = "btn";
-        retry.dataset.setupRetry = String(step >= 0 ? step : Math.max(0, current2));
-        retry.textContent = step === 0 ? "Go to account and credit" : step === 1 ? "Go to API key" : "Try again";
-        error2.append(banner, retry);
-        setup.append(error2);
-        retry.focus();
-      }
+      showSetupFailure(form, message2);
       return;
     }
     if (params.action === "discover_local_models") {
@@ -145243,7 +145389,8 @@ function mountDashboardController(options) {
     });
     for (const id of openSheets) {
       const sheet = queryAll(".sheet").find((candidate) => candidate.id === id);
-      sheet?.classList.add("on");
+      if (sheet)
+        setSheetOpen(sheet, true);
       queryAll("[data-sheet-toggle]").filter((toggle) => toggle.dataset.sheetToggle === `#${id}`).forEach((toggle) => toggle.setAttribute("aria-expanded", "true"));
     }
     const wait = authorizationWait;
@@ -145341,6 +145488,8 @@ function mountDashboardController(options) {
   }, { once: true });
   const messagingTimers = new Map;
   const messagingBusy = new WeakSet;
+  const messagingQueued = new Map;
+  const messagingSeen = new Set;
   function resumeMessaging() {
     messagingTimers.forEach((timer, card) => {
       if (!card.isConnected) {
@@ -145353,8 +145502,15 @@ function mountDashboardController(options) {
     });
   }
   async function messagingRequest(card, operation, extra = {}) {
-    if (!canWrite || disposed || !options.transport.messaging || messagingBusy.has(card))
+    if (!canWrite || disposed || !options.transport.messaging)
       return;
+    if (messagingBusy.has(card)) {
+      if (operation !== "status")
+        messagingQueued.set(card, () => {
+          messagingRequest(card, operation, extra);
+        });
+      return;
+    }
     const source = card.dataset.messagingSource;
     if (source !== "telegram" && source !== "whatsapp")
       return;
@@ -145395,6 +145551,44 @@ function mountDashboardController(options) {
       const field = typeof body.field === "string" ? body.field : "";
       const labels = { api_id: "Telegram API ID", api_hash: "Telegram API hash", phone: "Phone number (with country code)", code: "Telegram login code", password: "Telegram two-step verification password" };
       const label = labels[field];
+      const restoring = operation === "status" && !messagingSeen.has(source);
+      messagingSeen.add(source);
+      const setupSheet = card.querySelector("[data-messaging-setup]");
+      if (setupSheet) {
+        const intro = setupSheet.querySelector("[data-messaging-setup-intro]");
+        const active = !["idle", "failed", "cancelled", "completed", "complete", "paired"].includes(state);
+        if (intro)
+          intro.hidden = active || state === "failed";
+        const cancel = setupSheet.querySelector('[data-messaging-kind="cancel"]');
+        if (cancel)
+          cancel.hidden = !active;
+        if (operation !== "status" || restoring && (active || state === "failed")) {
+          queryAll(".sheet.on").forEach((other) => {
+            if (other !== setupSheet)
+              setSheetOpen(other, false);
+          });
+          setSheetOpen(setupSheet, true);
+        }
+        setupSheet.querySelector("[data-pairing-error]")?.remove();
+        if (state === "failed") {
+          const error2 = document.createElement("div");
+          error2.dataset.pairingError = "";
+          const details = document.createElement("details");
+          details.className = "howto";
+          const summary = document.createElement("summary");
+          summary.textContent = "How to fix";
+          const hint = document.createElement("p");
+          hint.textContent = "Check api_id and api_hash at my.telegram.org/apps. Enter the latest code from Telegram and your two-step verification password if asked. Then try pairing again.";
+          details.append(summary, hint);
+          const retry = document.createElement("button");
+          retry.type = "button";
+          retry.className = "btn";
+          retry.dataset.messagingRetry = "";
+          retry.textContent = "Back to setup";
+          error2.append(details, retry);
+          setupSheet.append(error2);
+        }
+      }
       if (status)
         status.textContent = label ? `Enter ${label.toLowerCase()} to continue.` : state === "failed" ? body.registrationMayBeSaved === true ? "Pairing could not finish. The connection may already be saved; check connection and capture status before retrying." : "Pairing failed. Start pairing again to retry." : state === "idle" ? "Pair this account to choose the chats Olympus may read." : state === "scope_selection_required" ? "Paired. Nothing is being captured. Choose what Olympus may read." : state === "committing" ? "Saving the connection and chat permission…" : state === "paired" || state === "complete" || state === "completed" ? "Pairing completed. Manage chat choices below; check current connection and sync status on the main dashboard." : state === "cancelled" ? `Setup cancelled. Capture permission was not changed. If you linked a new device, remove Olympus in ${source === "telegram" ? "Telegram active sessions" : "WhatsApp linked devices"} to unlink it.` : operation === "scope" ? "Chat choices saved. Capture will use this selection." : operation === "chats" ? "Choose the chats Olympus may read." : source === "whatsapp" ? "Open WhatsApp → Settings → Linked devices and scan the QR code." : "Pairing is running on this computer…";
       if (qr) {
@@ -145526,6 +145720,10 @@ function mountDashboardController(options) {
         status.textContent = "Could not reach pairing on this computer. Try again.";
     } finally {
       messagingBusy.delete(card);
+      const queued = messagingQueued.get(card);
+      messagingQueued.delete(card);
+      if (queued && !disposed)
+        queued();
     }
   }
   function submitMessaging(form) {
@@ -145601,10 +145799,173 @@ function mountDashboardController(options) {
     const tab = form.dataset.connectKind === "oauth" ? openAuthorizationTab() : null;
     submitControl(form, tab, submittedValues);
   }
+  function showSetupFailure(form, message2) {
+    const setup = form.closest("[data-setup-steps]");
+    const step = message2.includes("Redo the Set up your account step") ? 0 : message2.includes("Redo the Create an API key step") ? 1 : -1;
+    if (setup && form.querySelector("[data-client-file-drop]")) {
+      const panels = Array.from(setup.querySelectorAll("[data-setup-panel]"));
+      showSetupStep(setup, panels.length - 1);
+      const error2 = document.createElement("div");
+      error2.dataset.setupError = "";
+      const banner = document.createElement("p");
+      banner.className = "why";
+      banner.setAttribute("role", "alert");
+      banner.textContent = message2;
+      const details = document.createElement("details");
+      details.className = "howto";
+      const summary = document.createElement("summary");
+      summary.textContent = "How to fix";
+      const hint = document.createElement("p");
+      hint.textContent = "Check the app settings in Google Cloud, then choose the Desktop app file again or paste the ID and secret.";
+      details.append(summary, hint);
+      error2.append(banner, details);
+      form.querySelector("[data-client-file-drop]").after(error2);
+      return;
+    }
+    if (setup) {
+      const panels = Array.from(setup.querySelectorAll("[data-setup-panel]"));
+      const current2 = panels.findIndex((panel) => !panel.hidden);
+      panels.forEach((panel) => {
+        panel.hidden = true;
+      });
+      const actions = setup.querySelector("[data-setup-actions]");
+      if (actions)
+        actions.hidden = true;
+      setup.querySelector("[data-setup-error]")?.remove();
+      const error2 = document.createElement("div");
+      error2.dataset.setupError = "";
+      const banner = document.createElement("p");
+      banner.className = "why";
+      banner.setAttribute("role", "alert");
+      banner.textContent = message2;
+      const retry = document.createElement("button");
+      retry.type = "button";
+      retry.className = "btn";
+      retry.dataset.setupRetry = String(step >= 0 ? step : Math.max(0, current2));
+      retry.textContent = step === 0 ? "Go to account and credit" : step === 1 ? "Go to API key" : "Try again";
+      const details = document.createElement("details");
+      details.className = "howto";
+      const summary = document.createElement("summary");
+      summary.textContent = "How to fix";
+      const hint = document.createElement("p");
+      hint.textContent = "Return to setup, check the app settings and add the key again. Your login code and password are never shown here.";
+      details.append(summary, hint);
+      error2.append(banner, details, retry);
+      setup.append(error2);
+      retry.focus();
+    }
+  }
+  async function readClientFile(form, file) {
+    const revision = form.querySelector('[name="client_file_revision"]');
+    const status = form.querySelector("[data-client-file-status]");
+    if (!revision || !status || !file)
+      return;
+    uploadedClientFiles.delete(form);
+    try {
+      if (file.size > 64 * 1024)
+        throw new Error;
+      const text3 = await file.text();
+      const app = JSON.parse(text3)?.installed;
+      if (!app || typeof app.client_id !== "string" || typeof app.client_secret !== "string" || !app.client_id.endsWith(".apps.googleusercontent.com") || !app.client_secret.trim())
+        throw new Error;
+      uploadedClientFiles.set(form, text3);
+      revision.value = String(Number(revision.value) + 1);
+      for (const field of Array.from(form.querySelectorAll('[name="client_id"], [name="client_secret"]'))) {
+        field.value = "";
+        field.disabled = true;
+        field.dataset.olympusOriginallyDisabled = "true";
+      }
+      status.textContent = "Desktop app file ready. Connect to check the key with Google.";
+    } catch {
+      status.textContent = "";
+      showSetupFailure(form, "Choose the JSON downloaded for a Desktop app in Google Cloud Clients. Web app keys cannot use this flow.");
+      for (const field of Array.from(form.querySelectorAll('[name="client_id"], [name="client_secret"]'))) {
+        field.disabled = false;
+        field.dataset.olympusOriginallyDisabled = "false";
+      }
+    }
+    const picker = form.querySelector("[data-client-file]");
+    if (picker)
+      picker.value = "";
+  }
+  function onClientFileKeydown(event) {
+    const target = event.target instanceof HTMLElement ? event.target : null;
+    const key2 = event.key;
+    if (target?.matches("[data-client-file-drop]") && (key2 === "Enter" || key2 === " ")) {
+      event.preventDefault();
+      target.querySelector("[data-client-file]")?.click();
+    }
+  }
+  function onClientFileChange(event) {
+    const input = event.target instanceof HTMLInputElement ? event.target : null;
+    if (input?.matches("[data-client-file]") && input.form)
+      readClientFile(input.form, input.files?.[0]);
+  }
+  function onClientFileDrop(event) {
+    const zone = event.target instanceof Element ? event.target.closest("[data-client-file-drop]") : null;
+    if (!zone)
+      return;
+    event.preventDefault();
+    const form = zone.closest("form");
+    if (form && event.type === "drop")
+      readClientFile(form, event.dataTransfer?.files[0]);
+  }
   function onClick(event) {
     const target = event.target instanceof Element ? event.target : null;
     if (!target || !root.contains(target))
       return;
+    const fileZone = target.closest("[data-client-file-drop]");
+    if (fileZone && !target.matches("[data-client-file]")) {
+      fileZone.querySelector("[data-client-file]")?.click();
+      return;
+    }
+    const messagingRetry = target.closest("[data-messaging-retry]");
+    if (messagingRetry) {
+      const sheet = messagingRetry.closest("[data-messaging-setup]");
+      const intro = sheet?.querySelector("[data-messaging-setup-intro]");
+      if (intro)
+        intro.hidden = false;
+      sheet?.querySelector("[data-pairing-error]")?.remove();
+      const status = sheet?.querySelector("[data-messaging-status]");
+      if (status)
+        status.textContent = "";
+      return;
+    }
+    if (target.closest("[data-client-paste] summary")) {
+      const form = target.closest("form");
+      if (form)
+        uploadedClientFiles.delete(form);
+      const fileStatus = form?.querySelector("[data-client-file-status]");
+      if (fileStatus)
+        fileStatus.textContent = "";
+      form?.querySelectorAll('[name="client_id"], [name="client_secret"]').forEach((field) => {
+        field.disabled = false;
+        field.dataset.olympusOriginallyDisabled = "false";
+      });
+    }
+    const begin = target.closest("[data-setup-begin]");
+    if (begin) {
+      const sheet = begin.closest(".sheet");
+      const walkthrough = sheet?.querySelector("[data-setup-walkthrough]");
+      if (walkthrough) {
+        walkthrough.hidden = false;
+        const heading = walkthrough.querySelector("h2, h4");
+        if (heading) {
+          heading.tabIndex = -1;
+          heading.focus();
+        }
+      }
+      const choice = sheet?.querySelector("[data-setup-choice]");
+      if (choice)
+        choice.hidden = true;
+      const sharedNote = sheet?.querySelector("[data-shared-app-note]");
+      if (sharedNote)
+        sharedNote.hidden = true;
+      const lead = sheet?.querySelector("[data-setup-lead]");
+      if (lead)
+        lead.hidden = true;
+      return;
+    }
     if (target.closest("[data-first-run-done],[data-first-run-keys]")) {
       firstRunChoice = undefined;
       query("[data-first-run-sheet]")?.remove();
@@ -145828,6 +146189,10 @@ function mountDashboardController(options) {
   }
   root.addEventListener("submit", onSubmit);
   root.addEventListener("click", onClick);
+  root.addEventListener("change", onClientFileChange);
+  root.addEventListener("keydown", onClientFileKeydown);
+  root.addEventListener("dragover", onClientFileDrop);
+  root.addEventListener("drop", onClientFileDrop);
   const refreshOnReturn = () => {
     if (disposed || options.signal.aborted || !awaitingAuthorizationReturn)
       return;
@@ -145867,6 +146232,10 @@ function mountDashboardController(options) {
     root.ownerDocument.removeEventListener("visibilitychange", onVisibilityReturn);
     root.removeEventListener("submit", onSubmit);
     root.removeEventListener("click", onClick);
+    root.removeEventListener("change", onClientFileChange);
+    root.removeEventListener("keydown", onClientFileKeydown);
+    root.removeEventListener("dragover", onClientFileDrop);
+    root.removeEventListener("drop", onClientFileDrop);
     root.removeEventListener(redrawEvent, onRedrawRequest);
   };
   options.signal.addEventListener("abort", dispose, { once: true });
@@ -146203,6 +146572,9 @@ td { padding: 7px 10px 7px 0; border-bottom: 1px solid var(--line2); color: var(
 .rowform { display: flex; gap: 12px; align-items: center; flex-wrap: nowrap; }
 .keyfield { background: var(--bg); border: 1px solid var(--field); border-radius: 7px; color: var(--t1); font: inherit; font-size: var(--fs-body); padding: 5px 10px; width: 190px; }
 .setupfields { display: grid; gap: 8px; width: 100%; }
+[data-client-file-drop] { border: 2px dashed var(--field); border-radius: 10px; padding: 24px; min-height: 180px; box-sizing: border-box; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; cursor: pointer; }
+[data-client-file-drop]:focus-visible { outline: 2px solid var(--link); outline-offset: 3px; }
+[data-client-file-drop] input { max-width: 100%; }
 .setupfields .keyfield { width: 100%; box-sizing: border-box; }
 [data-setup-steps] [hidden], [data-connect-content][hidden], [data-connect-error][hidden] { display: none !important; }
 .actionrow, .setupactions { display: flex; flex-direction: row; align-items: center; justify-content: flex-start; gap: 12px; }
@@ -146219,9 +146591,25 @@ td { padding: 7px 10px 7px 0; border-bottom: 1px solid var(--line2); color: var(
 .actionrow:not(.setupactions) > .primary { order: -1; }
 .setupactions { margin-top: 24px; }
 .setupactions > .primary { margin-left: auto; }
+.setupheader { display: flex; align-items: flex-start; justify-content: space-between; gap: 24px; margin-bottom: 12px; }
+.sheet .setupheader h2 { font-size: var(--fs-title); line-height: 1.3; margin: 0; }
+.setupclose { border: 0; color: var(--t3); font-size: var(--fs-title); padding: 0 4px; }
+.sheet .setupintro { color: var(--t3); margin-bottom: 24px; }
+.setupsegments { display: flex; gap: 6px; margin-bottom: 20px; }
+[data-setup-segment] { flex: 1; height: 6px; border-radius: 3px; background: var(--line); }
+[data-setup-segment].filled { background: var(--accent-fill); }
+.sheet [data-setup-guided] [data-setup-counter] { color: var(--t3); font-size: var(--fs-caption); letter-spacing: 0.1em; margin-bottom: 8px; }
+[data-setup-guided] h2 { font-size: var(--fs-title); margin: 0 0 20px; }
+[data-setup-guided] [data-setup-open] { width: 100%; padding: 12px 18px; margin: 8px 0 16px; }
+[data-setup-guided] .setupactions > .primary { background: var(--t1); border-color: var(--t1); color: var(--bg); }
+.sheet .setupnote { background: light-dark(#efebfa, #302b43); color: var(--t2); padding: 16px; border-radius: 8px; max-width: none; }
+.sheet .setupfooter { color: var(--t3); font-size: var(--fs-caption); margin: 16px 0 0; max-width: none; }
+[data-client-paste] summary { color: var(--link); cursor: pointer; font-size: var(--fs-body); margin-bottom: 12px; }
+[data-client-paste] .keyfield + .keyfield { margin-top: 8px; }
 @media (max-width: 480px) {
   .actionrow:not(.setupactions), .rowform { flex-direction: column; align-items: stretch; }
 }
+[data-setup-steps] [hidden], [data-setup-choice][hidden], [data-setup-walkthrough][hidden], [data-setup-lead][hidden], [data-connect-content][hidden], [data-connect-error][hidden] { display: none !important; }
 .keyfield::placeholder { color: var(--t4); }
 .keyfield:focus-visible { outline: 2px solid var(--link); outline-offset: 1px; }
 .actmsg { color: var(--t3); font-size: var(--fs-caption); }
@@ -146473,16 +146861,24 @@ function connectorSheet(input) {
 function setupStepsSheet(input) {
   const id = safeId2(input.id);
   const count = input.steps.length;
+  const current2 = input.initialStep ?? 0;
   const formId = `${id}-form`;
   const initialAction = input.stepActions?.[0];
   const panels = input.steps.map((step, index) => {
     const url2 = step.link && safeExternalHref(step.link.url);
-    const link = url2 ? `<button type="button" class="btn primary" data-setup-open="${escapeHtml2(url2)}">Open this page in ${escapeHtml2(input.provider)}</button>` + `<p><a class="ext" href="${escapeHtml2(url2)}" target="_blank" rel="noopener noreferrer">Open the page in ${escapeHtml2(input.provider)} ↗</a></p>` : "";
+    const link = url2 ? `<button type="button" class="btn primary" data-setup-open="${escapeHtml2(url2)}">${escapeHtml2(step.button_label ?? `Open this page in ${input.provider}${input.guided ? " ↗" : ""}`)}</button>` : "";
+    const extraLinks = (step.links ?? []).map((link2) => {
+      const href = safeExternalHref(link2.url);
+      return href ? `<p><a class="ext" href="${escapeHtml2(href)}" target="_blank" rel="noopener noreferrer">${escapeHtml2(link2.label)} ↗</a></p>` : "";
+    }).join("");
     const redirect = step.redirect_uri && input.redirect ? `<div class="promptbox" id="${id}-redirect">${escapeHtml2(input.redirect)}</div><button class="btn" type="button" data-copy-target="#${id}-redirect">Copy redirect URI</button><span data-copy-status aria-live="polite"></span>` : "";
     const action = input.stepActions?.[index];
-    return `<div data-setup-panel${action ? ` data-setup-form="${escapeHtml2(action.formId)}" data-setup-label="${escapeHtml2(action.label)}"` : ""}${index ? " hidden" : ""}><h4>${escapeHtml2(step.title ?? `Step ${index + 1}`)}</h4><p>${escapeHtml2(step.text)}</p>${link}${redirect}${input.stepContent?.[index] ?? ""}${index === count - 1 ? input.finalForm(formId) : ""}</div>`;
+    const instructions = step.instructions ? `<ol class="steps">${step.instructions.map((click) => `<li>${escapeHtml2(click).replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")}</li>`).join("")}</ol>` : step.text ? `<p>${escapeHtml2(step.text)}</p>` : "";
+    const heading = input.guided ? "h2" : "h4";
+    return `<div data-setup-panel${action ? ` data-setup-form="${escapeHtml2(action.formId)}" data-setup-label="${escapeHtml2(action.label)}"` : ""}${index !== current2 ? " hidden" : ""}><${heading}>${escapeHtml2(step.title ?? `Step ${index + 1}`)}</${heading}>${instructions}${link}${extraLinks}${redirect}${step.return_note ? `<p class="setupnote">${escapeHtml2(step.return_note)}</p>` : ""}${input.stepContent?.[index] ?? ""}${index === count - 1 ? input.finalForm(formId) : ""}</div>`;
   }).join("");
-  return `<div data-setup-steps><p data-setup-counter>Step 1 of ${count}</p><progress data-setup-progress max="${count}" value="1"></progress>${panels}<div class="setupactions actionrow" data-setup-actions><button class="btn" type="button" data-setup-back disabled>Back</button><button class="btn primary" type="button" data-setup-next${count === 1 || initialAction ? " hidden" : ""}>I've done this, next</button><button class="btn primary" type="submit" form="${escapeHtml2(initialAction?.formId ?? formId)}" data-setup-submit${count === 1 || initialAction ? "" : " hidden"}>${escapeHtml2(initialAction?.label ?? input.submitLabel ?? "Connect")}</button>${input.footerContent ?? ""}</div></div>`;
+  const progress = input.guided ? `<div class="setupsegments" role="progressbar" aria-label="Setup progress" aria-valuemin="1" aria-valuemax="${count}" aria-valuenow="${current2 + 1}">${input.steps.map((_, i2) => `<span data-setup-segment${i2 <= current2 ? ' class="filled"' : ""}></span>`).join("")}</div>` : `<progress data-setup-progress max="${count}" value="${current2 + 1}"></progress>`;
+  return `<div data-setup-steps${input.guided ? " data-setup-guided" : ""}>${progress}<p data-setup-counter>${input.guided ? `STEP ${current2 + 1} OF ${count}` : `Step ${current2 + 1} of ${count}`}</p>${panels}<div class="setupactions actionrow" data-setup-actions><button class="btn" type="button" data-setup-back${current2 === 0 ? " disabled" : ""}>Back</button><button class="btn primary" type="button" data-setup-next${current2 === count - 1 || initialAction ? " hidden" : ""}>I've done this, next</button><button class="btn primary" type="submit" form="${escapeHtml2(initialAction?.formId ?? formId)}" data-setup-submit${current2 === count - 1 || initialAction ? "" : " hidden"}>${escapeHtml2(initialAction?.label ?? input.submitLabel ?? "Connect")}</button>${input.footerContent ?? ""}</div>${input.footer ? `<p class="setupfooter">${escapeHtml2(input.footer)}</p>` : ""}</div>`;
 }
 function connectSetupSheet(input) {
   const id = safeId2(input.id);
@@ -146490,24 +146886,30 @@ function connectSetupSheet(input) {
   const inputs = input.fields.map((field) => {
     const value2 = field.secret && input.savedSecrets?.includes(field.name) ? DASHBOARD_SAVED_SECRET_FIELD_VALUE : input.values?.[field.name];
     const placeholder = input.placeholders?.[field.name] ?? field.label;
-    return `<input class="keyfield" type="${field.secret ? "password" : "text"}" name="${escapeHtml2(field.name)}"` + `${field.required ? " required" : ""}` + `${value2 === undefined ? "" : ` value="${escapeHtml2(value2)}"`}` + ` placeholder="${escapeHtml2(placeholder)}" aria-label="${escapeHtml2(field.label)}">`;
+    return `<input class="keyfield" type="${field.secret ? "password" : "text"}" name="${escapeHtml2(field.name)}"` + `${field.required ? " required" : ""} autocomplete="off"` + `${value2 === undefined ? "" : ` value="${escapeHtml2(value2)}"`}` + ` placeholder="${escapeHtml2(placeholder)}" aria-label="${escapeHtml2(field.label)}">`;
   }).join("");
   const hasError = Boolean(input.notice?.trim());
   const notice = hasError ? `<div data-connect-error><p class="why" role="alert">${escapeHtml2(input.notice)}</p>` + detailsDisclosure("How to fix", input.noticeDetail ? `<p class="hint">${escapeHtml2(input.noticeDetail)}</p>` : "") + `<button class="btn" type="button" data-connect-retry>Back to setup</button></div>` : "";
-  const providerNote = input.providerNote?.trim() ? `<p class="providernote">${escapeHtml2(input.providerNote)}</p>` : "";
+  const providerNote = input.providerNote?.trim() && (!input.credentialFile || input.publisher) ? `<p class="providernote"${input.credentialFile ? " data-shared-app-note" : ""}>${escapeHtml2(input.providerNote)}</p>` : "";
   const registration = callbackRegistrationSteps(id, input.registration);
   const redirect = input.registration !== undefined || input.redirectUri === undefined ? "" : `<p class="hint">Redirect URI</p>` + `<div class="promptbox" id="${id}-redirect">${escapeHtml2(input.redirectUri.uri)}</div>` + `<button class="btn" type="button" data-copy-target="#${id}-redirect">Copy redirect URI</button>` + `<span class="copystatus" data-copy-status aria-live="polite"></span>` + `${input.redirectUri.guidance === undefined ? "" : `<p class="hint">${escapeHtml2(input.redirectUri.guidance)}</p>`}`;
   const cancel = input.cancellable !== true ? "" : `<form class="rowform" data-connect-kind="oauth_cancel" style="margin-top:8px">` + `<input type="hidden" name="source" value="${escapeHtml2(input.source)}">` + `<button class="btn" type="submit">Cancel connection attempt</button>` + `<span class="actmsg" data-action-message role="status"></span>` + `</form>`;
   const prompt = `<details class="agentprompt">` + `<summary>Ask your agent to walk you through it</summary>` + `<div class="promptbox" id="${promptId}">${escapeHtml2(input.promptText)}</div>` + `<button class="btn" type="button" data-copy-target="#${promptId}">Copy prompt</button>` + `<span class="copystatus" data-copy-status aria-live="polite"></span>` + `</details>`;
   const submitLabel = escapeHtml2(input.submitLabel ?? "Connect");
   const sourceField = `<input type="hidden" name="source" value="${escapeHtml2(input.source)}">`;
-  const byoForm = (formId) => `<form${formId ? ` id="${formId}" class="setupfields"` : ' class="rowform"'} data-connect-kind="oauth" style="margin-top:12px">` + sourceField + `${inputs}` + (formId ? "" : `<button class="btn primary" type="submit">${submitLabel}</button>`) + `<span class="actmsg" data-action-message role="status"></span>` + `<span class="authfallback" data-authorization-fallback></span>` + `</form>`;
-  const walkthrough = input.steps?.length && input.provider ? setupStepsSheet({ id, provider: input.provider, steps: input.steps, finalForm: byoForm, submitLabel: input.submitLabel ?? "Connect", ...input.redirectUri ? { redirect: input.redirectUri.uri } : {} }) : `${registration}${redirect}${byoForm()}`;
+  const byoForm = (formId) => `<form${formId ? ` id="${formId}" class="setupfields"` : ' class="rowform"'} data-connect-kind="oauth" style="margin-top:12px">` + sourceField + (input.credentialFile ? `<input type="hidden" name="google_desktop" value="true"><input type="hidden" name="client_file_revision" value="0"><div data-client-file-drop tabindex="0" role="button" aria-label="Drop the downloaded file here"><p>Drop the downloaded file here</p><p class="hint">client_secret_….json, or choose it from Downloads</p><input type="file" accept=".json,application/json" data-client-file hidden aria-label="Choose the downloaded file"><p data-client-file-status role="status"></p></div>${hasError ? `<div data-setup-error><p class="why" role="alert">${escapeHtml2(input.notice)}</p>${detailsDisclosure("How to fix", input.noticeDetail ? `<p class="hint">${escapeHtml2(input.noticeDetail)}</p>` : "")}</div>` : ""}<p class="hint">The file stays on this computer. Olympus reads the key from it, checks your app is ready, and opens Google's sign-in. Drive uses the same app.</p><details data-client-paste><summary>Paste the ID and secret instead</summary>${inputs.replace(/<input /g, "<input disabled ")}</details>` : inputs) + (formId ? "" : `<button class="btn primary" type="submit">${submitLabel}</button>`) + `<span class="actmsg" data-action-message role="status"></span>` + `<span class="authfallback" data-authorization-fallback></span>` + `</form>`;
+  const walkthroughBody = input.steps?.length && input.provider ? setupStepsSheet({ id, provider: input.provider, steps: input.steps, finalForm: byoForm, submitLabel: input.submitLabel ?? "Connect", ...input.credentialFile ? { guided: true, initialStep: hasError ? input.steps.length - 1 : 0, footer: "Steps: project · turn on Gmail and Drive · sign-in screen · publish · make the key · paste it here" } : {}, ...input.redirectUri ? { redirect: input.redirectUri.uri } : {} }) : `${registration}${redirect}${byoForm()}`;
+  const walkthrough = input.credentialFile ? `<div class="setupheader"><h2>${escapeHtml2(input.setupHeading ?? input.heading)}</h2><button class="btn setupclose" type="button" data-sheet-toggle="#${id}" aria-label="Close setup">×</button></div><p class="setupintro">${escapeHtml2(input.intro)}</p>${walkthroughBody}` : `${input.setupHeading ? `<h4>${escapeHtml2(input.setupHeading)}</h4>` : ""}${walkthroughBody}`;
+  const lead = input.lead ? `<div data-setup-lead><h4>${escapeHtml2(input.lead.title)}</h4><p>${escapeHtml2(input.lead.body)}</p><button type="button" class="btn primary" data-setup-begin>${escapeHtml2(input.lead.button)}</button>${input.lead.notes.map((note) => `<p class="hint">${escapeHtml2(note)}</p>`).join("")}</div>` : "";
   if (input.publisher) {
     const publisherForm = `<form class="rowform" data-connect-kind="oauth"${input.cancellable ? "" : " data-oauth-autostart"} style="margin-top:12px">` + sourceField + `<button class="btn primary" type="submit">${submitLabel}</button>` + `<span class="actmsg" data-action-message role="status"></span>` + `<span class="authfallback" data-authorization-fallback></span>` + `</form>`;
-    return `<div class="sheet" id="${id}" aria-hidden="true">` + `<h4>${escapeHtml2(input.heading)}</h4>` + `${notice}<div data-connect-content${hasError ? " hidden" : ""}>${providerNote}` + `<p>${escapeHtml2(input.publisher.intro)}</p>` + `${publisherForm}` + `${cancel}` + `<details class="agentprompt">` + `<summary>${escapeHtml2(input.publisher.byoSummary)}</summary>` + `<p>${escapeHtml2(input.intro)}</p>` + `${walkthrough}` + `${prompt}` + `</details></div>` + `</div>`;
+    if (input.credentialFile)
+      return `<div class="sheet" id="${id}" aria-hidden="true"><div data-connect-content><div data-setup-choice${hasError ? " hidden" : ""}><h4>${escapeHtml2(input.heading)}</h4>${providerNote}<p>${escapeHtml2(input.publisher.intro)}</p><div class="actionrow">${publisherForm}<button type="button" class="btn" data-setup-begin>${escapeHtml2(input.publisher.byoSummary)}</button></div>${cancel}</div><div data-setup-walkthrough${hasError ? "" : " hidden"}>${walkthrough}</div></div></div>`;
+    return `<div class="sheet" id="${id}" aria-hidden="true">` + `<h4>${escapeHtml2(input.heading)}</h4>` + `${notice}<div data-connect-content${hasError ? " hidden" : ""}>${providerNote}` + `<p>${escapeHtml2(input.publisher.intro)}</p>` + `${publisherForm}` + `${cancel}` + `<details class="agentprompt"><summary>${escapeHtml2(input.publisher.byoSummary)}</summary><p>${escapeHtml2(input.intro)}</p>${walkthrough}${prompt}</details>` + `</div>` + `</div>`;
   }
-  return `<div class="sheet" id="${id}" aria-hidden="true">` + `<h4>${escapeHtml2(input.heading)}</h4>` + `${notice}<div data-connect-content${hasError ? " hidden" : ""}>${providerNote}` + `<p>${escapeHtml2(input.intro)}</p>` + `${walkthrough}` + `${cancel}` + `${prompt}</div>` + `</div>`;
+  if (input.credentialFile)
+    return `<div class="sheet" id="${id}" aria-hidden="true"><div data-connect-content>${lead}<div data-setup-walkthrough${input.lead && !hasError ? " hidden" : ""}>${walkthrough}</div>${cancel}</div></div>`;
+  return `<div class="sheet" id="${id}" aria-hidden="true">` + `<h4>${escapeHtml2(input.heading)}</h4>` + `${notice}<div data-connect-content${hasError ? " hidden" : ""}>${providerNote}` + `${lead}<div data-setup-walkthrough${input.lead ? " hidden" : ""}><p>${escapeHtml2(input.intro)}</p>${walkthrough}${prompt}</div>` + `${cancel}</div>` + `</div>`;
 }
 function callbackRegistrationSteps(id, registration) {
   if (registration === undefined)
@@ -146529,7 +146931,8 @@ function dashboardNeedsSetupSheet(source, action, options = {}) {
     promptText: action.instructions.agent_prompt,
     source: action.source,
     fields: action.instructions.fields,
-    ...action.source === "dropbox" ? { steps: action.instructions.diy_steps, provider: "Dropbox" } : {},
+    ...action.instructions.setup_provider ? { steps: action.instructions.diy_steps, provider: action.instructions.setup_provider, setupHeading: action.instructions.setup_heading, credentialFile: action.instructions.credential_file } : {},
+    ...options.lead ? { lead: options.lead } : {},
     ...options.providerNote === undefined ? {} : { providerNote: options.providerNote },
     ...redirectUriInput(action)
   });
@@ -146552,9 +146955,10 @@ function dashboardOAuthConnectSheet(source, action, options = {}) {
     promptText: byo.agent_prompt,
     source: action.source,
     fields,
-    ...action.source === "dropbox" ? { steps: byo.diy_steps, provider: "Dropbox" } : {},
+    ...byo.setup_provider ? { steps: byo.diy_steps, provider: byo.setup_provider, setupHeading: byo.setup_heading, credentialFile: byo.credential_file } : {},
+    ...options.lead ? { lead: options.lead } : {},
     submitLabel: dashboardActionLabel(action.label),
-    ...action.publisher_client ? {
+    ...action.publisher_client && !options.lead ? {
       publisher: {
         intro: instructions.plain_intro,
         byoSummary: instructions.diy_summary
@@ -154338,10 +154742,25 @@ input{font:inherit;font-size:0.875rem;min-height:2.25rem;padding:0.375rem 0.75re
 });
 
 // src/workers/dashboard/messaging.ts
+function telegramSetupSheet() {
+  const walkthrough = setupStepsSheet({
+    id: "telegram-setup",
+    provider: "Telegram",
+    submitLabel: "Check keys and continue",
+    steps: [
+      { title: "Sign in to Telegram", text: "Sign in at my.telegram.org with your Telegram phone number. Telegram sends the login code to your Telegram app.", link: { label: "Sign in to Telegram", url: "https://my.telegram.org/auth" } },
+      { title: "Open API development tools", text: "Choose API development tools. If you have not created an app, enter an app title and short name and create it. Keep the app page open.", link: { label: "API development tools", url: "https://my.telegram.org/apps" } },
+      { title: "Enter your Telegram app credentials", text: "Find api_id and api_hash on the app page. Check keys and continue starts pairing on this computer: enter the API ID and API hash when prompted, then your phone number, Telegram login code and two-step verification password if requested." }
+    ],
+    finalForm: (formId) => `<form id="${formId}" method="dialog" data-messaging-kind="start"></form>`
+  });
+  return '<div class="sheet" id="telegram-setup" aria-hidden="true" data-messaging-setup><h4>Connect Telegram</h4><p data-messaging-status role="status" aria-live="polite"></p>' + `<div data-messaging-setup-intro>${walkthrough}</div>` + "<div data-messaging-view><div data-messaging-input></div><div data-messaging-chats></div></div>" + '<form method="dialog" data-messaging-kind="cancel" hidden><button class="btn" type="submit">Cancel pairing</button></form></div>';
+}
 function renderMessagingCard(source, localSession) {
   const label = source === "telegram" ? "Telegram" : "WhatsApp";
+  const sourceId = source === "telegram" ? "telegram.messages" : "whatsapp.personal.messages";
   const form = (kind, text4) => `<form method="dialog" data-messaging-kind="${kind}"><button class="btn${kind === "start" ? " primary" : ""}" type="submit">${text4}</button></form>`;
-  return `<section id="agent-${source}-personal" class="messaging-card" aria-hidden="false" data-source="${source === "telegram" ? "telegram.messages" : "whatsapp.personal.messages"}" data-messaging-source="${source}"><h3>${escapeHtml2(label)}</h3>` + (source === "whatsapp" ? "<p>The chat list includes saved contacts and groups and may omit unsaved chats. Choose all chats to include those.</p>" : "") + "<p>Pairing alone does not start capture. After pairing, choose which chats Olympus reads. Each message is classified on its own; choosing a chat does not set its privacy tier.</p>" + (!localSession ? '<p>Open dashboard controls on this computer to pair and choose chats.</p><form method="dialog" data-messaging-open-controls><button class="btn" type="submit">Open controls on this computer</button><span data-action-message role="status"></span></form></section>' : `<div class="actionrow">${form("start", `Pair ${label}`)}${form("chats", "Choose chats")}${form("cancel", "Cancel pairing")}</div><div data-messaging-view><p data-messaging-status role="status" aria-live="polite"></p><img data-messaging-qr hidden alt="Scan this QR code in WhatsApp to link Olympus" width="256" height="256"><div data-messaging-input></div><div data-messaging-chats></div></div></section>`);
+  return `<section id="agent-${source}-personal" class="messaging-card" aria-hidden="false" data-source="${sourceId}" data-source-id="${sourceId}" data-messaging-source="${source}"><h3>${escapeHtml2(label)}</h3>` + (source === "whatsapp" ? "<p>The chat list includes saved contacts and groups and may omit unsaved chats. Choose all chats to include those.</p>" : "") + "<p>Pairing alone does not start capture. After pairing, choose which chats Olympus reads. Each message is classified on its own; choosing a chat does not set its privacy tier.</p>" + (!localSession ? '<p>Open dashboard controls on this computer to pair and choose chats.</p><form method="dialog" data-messaging-open-controls><button class="btn" type="submit">Open controls on this computer</button><span data-action-message role="status"></span></form></section>' : source === "telegram" ? `<div class="actionrow"><button class="btn primary" type="button" data-sheet-toggle="#telegram-setup" aria-controls="telegram-setup" aria-expanded="false">Pair Telegram</button>${form("chats", "Choose chats")}</div>${telegramSetupSheet()}</section>` : `<div class="actionrow">${form("start", `Pair ${label}`)}${form("chats", "Choose chats")}${form("cancel", "Cancel pairing")}</div><div data-messaging-view><p data-messaging-status role="status" aria-live="polite"></p><img data-messaging-qr hidden alt="Scan this QR code in WhatsApp to link Olympus" width="256" height="256"><div data-messaging-input></div><div data-messaging-chats></div></div></section>`);
 }
 var init_messaging = __esm(() => {
   init_components();
@@ -154929,7 +155348,7 @@ var LOCAL_PAGE_CSS = `
 .remoteterms { border: 1px solid var(--line); border-radius: 8px; background: var(--panel); padding: 12px 14px; margin: 6px 0 10px; font-size: var(--fs-body); color: var(--t2); }
 .remoteterms[hidden] { display: none; }
 .remoteterms p { margin: 0 0 8px; max-width: 72ch; }
-.remoteterms .rowform { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 4px; }
+.remoteterms .rowform { margin-top: 4px; }
 .promptbox.prose { word-break: normal; overflow-wrap: anywhere; }`, MODEL_SETUP_CSS = `
 [data-first-run-privacy]{display:grid;gap:12px;margin:16px 0}[data-first-run-privacy] .modelcard{display:block;cursor:pointer}
 [data-first-run-sheet] [hidden]{display:none!important}
@@ -154963,7 +155382,8 @@ var LOCAL_PAGE_CSS = `
 .outside .ohfix li > span { flex: 1 1 200px; min-width: 0; }
 .outside .ohfix li::before { content: '!'; flex: 0 0 20px; height: 20px; border-radius: 50%; background: var(--warn-fill); color: var(--bg); font-weight: 800; font-size: var(--fs-caption); line-height: 20px; text-align: center; }
 .outside .ohfix .ohform { margin: 0; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.outside .ohfix .ohactions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.outside .ohfix .ohactions { display: flex; align-items: center; gap: 12px; }
+@media (max-width: 480px) { .outside .ohfix .ohactions { flex-direction: column; align-items: stretch; } }
 .outside .ohfix .actmsg:empty, .outside .ohpanel .actmsg:empty { display: none; }
 /* The statements, in full only until accepted. */
 .outside .ohaccept { margin: 0 0 12px; padding: 14px 18px; border: 1px solid var(--warn-line); border-radius: 10px; }
@@ -155258,7 +155678,7 @@ ${sheet}`;
       label: source.label,
       blurb: action.instructions.plain_intro,
       ...dashboardSetupLead(source.source_id, action.instructions.plain_intro),
-      action: { label: action.label, kind: "none", sheet: sheetId, ...gate },
+      action: { label: providerNote(view3, action).lead?.button ?? action.label, kind: "none", sheet: sheetId, ...gate },
       ...link2 === undefined ? {} : { blurbLink: link2 }
     });
     return `${row}
@@ -155270,8 +155690,8 @@ ${sheet}`;
       const row = setupRow({
         ...id,
         label: source.label,
-        blurb: setupBlurb(source),
-        action: { label: action.label, kind: "none", sheet: connect.sheetId, ...gate }
+        blurb: providerNote(view3, action).lead?.title ?? setupBlurb(source),
+        action: { label: providerNote(view3, action).lead?.button ?? action.label, kind: "none", sheet: connect.sheetId, ...gate }
       });
       return `${row}
 ${connect.sheet}`;
@@ -155294,6 +155714,13 @@ ${connect.sheet}`;
   });
 }
 function providerNote(view3, action) {
+  if ((action.source === "gmail" || action.source === "google-drive") && view3.google_pilot?.mode === "advanced_byo_required")
+    return { lead: {
+      title: "Olympus's Google sign-in is full",
+      body: "Until Google reviews Olympus, it lets 100 people use Olympus's Google app. You can still connect Gmail and Drive with a free app of your own. It takes about ten minutes.",
+      button: "Set up my own Google app",
+      notes: ["What changes: Google shows your own name on its warning, not Olympus's.", "What stays the same: Olympus reads your mail on this computer, and judges each message Personal, Private or Secret as before."]
+    } };
   const note = dashboardGoogleProviderNote(view3, action);
   return note === undefined ? {} : { providerNote: note };
 }
@@ -162258,7 +162685,10 @@ function createEmailSourceWorker(options = {}) {
               }
             });
           } catch (error2) {
-            clearDashboardOAuthAttempt(dashboardOAuthAttempts, source, attempt);
+            if (dashboardOAuthAttempts.get(source) === attempt) {
+              attempt.consumed = true;
+              attempt.error = { code: "connection_check_failed", at: new Date().toISOString() };
+            }
             return dashboardOAuthFailureHtml({
               source,
               reason: dashboardCallbackFailureReason(error2, source, attempt.clientIdSource),
@@ -162291,7 +162721,16 @@ function createEmailSourceWorker(options = {}) {
             const registry2 = readDashboardRegistry(sourceDashboard.registryPath);
             assertDashboardAccountCardinality(registry2, source);
             const clientIdSets = await dashboardOAuthClientIdSets(registry2, secretStore);
-            const submittedClientId = asOptionalString(record8.client_id);
+            let uploadedClient;
+            const ownDesktop = dashboardGoogleOAuthSource(source) && record8.google_desktop === true;
+            if (ownDesktop && typeof record8.google_client_json === "string") {
+              try {
+                uploadedClient = parseGoogleDesktopClient(record8.google_client_json);
+              } catch (error2) {
+                throw new EmailSourceWorkerError(400, "google_app_file_invalid", error2.message);
+              }
+            }
+            const submittedClientId = uploadedClient?.clientId ?? asOptionalString(record8.client_id);
             const handback = record8.handback === "relay" ? sourceDashboard.oauthHandback?.() : undefined;
             const computerHandback = record8.handback === "computer";
             if (record8.handback !== undefined && !handback && !computerHandback) {
@@ -162324,31 +162763,39 @@ function createEmailSourceWorker(options = {}) {
                 policy: { raw_runtime_secrets_exposed: false, client_secret_returned: false }
               });
             }
-            const publisher = submittedClientId ? undefined : dashboardPublisherOAuthFlow(source, dashboardOAuthClientIdForSource(source, clientIdSets.own));
+            const publisher = submittedClientId || ownDesktop ? undefined : dashboardPublisherOAuthFlow(source, dashboardOAuthClientIdForSource(source, clientIdSets.own));
             if (handback && (submittedClientId || publisher?.relay !== true)) {
               throw new EmailSourceWorkerError(409, "oauth_handback_unavailable", "This source uses your own app registration; connect it in Olympus on your Mac.");
             }
             if (computerHandback && (submittedClientId || publisher?.loopback !== true)) {
               throw new EmailSourceWorkerError(409, "oauth_handback_unavailable", "This source does not sign in on this computer; connect it in the Olympus dashboard.");
             }
-            const clientId = submittedClientId ?? publisher?.clientId ?? dashboardOAuthClientIdForSource(source, clientIdSets.all);
+            const savedDesktop = ownDesktop ? await readGoogleOwnAppRegistration(secretStore) : undefined;
+            const clientId = submittedClientId ?? (ownDesktop ? savedDesktop?.clientId : publisher?.clientId ?? dashboardOAuthClientIdForSource(source, clientIdSets.all));
             if (!clientId) {
-              throw new EmailSourceWorkerError(409, "oauth_client_id_missing", `Missing OAuth client id: ${dashboardOAuthClientIdConfigKey(source)}.`);
+              throw new EmailSourceWorkerError(409, "oauth_client_id_missing", ownDesktop ? "Choose the downloaded Desktop app file, or paste the Client ID and secret." : `Missing OAuth client id: ${dashboardOAuthClientIdConfigKey(source)}.`);
             }
-            const rawClientSecret = asOptionalString(record8.client_secret);
+            const rawClientSecret = uploadedClient?.clientSecret ?? asOptionalString(record8.client_secret);
             const submittedClientSecret = rawClientSecret === DASHBOARD_SAVED_SECRET_FIELD_VALUE ? undefined : rawClientSecret;
             const clientSecret = publisher && dashboardGoogleOAuthSource(source) ? undefined : await dashboardOAuthClientSecret(source, secretStore, submittedClientSecret, clientId);
             if (dashboardOAuthClientSecretRequired(source) && !clientSecret) {
               throw new EmailSourceWorkerError(409, "oauth_client_secret_missing", `Missing OAuth client secret: ${dashboardOAuthClientSecretConfigKey(source)}.`);
             }
-            if (submittedClientId) {
+            if (ownDesktop) {
+              try {
+                await checkGoogleOwnApp({ clientId, clientSecret: clientSecret ?? "" }, sourceDashboard.oauthFetch);
+              } catch (error2) {
+                throw new EmailSourceWorkerError(400, "google_app_check_failed", error2.message);
+              }
+            }
+            if (submittedClientId && !ownDesktop) {
               await secretStore.set(dashboardOAuthClientIdConfigKey(source), submittedClientId);
               await secretStore.set(dashboardOAuthClientIdSourceKey(source), "byo");
             }
             if (submittedClientSecret && dashboardOAuthClientSecretRequired(source)) {
               await secretStore.set(dashboardOAuthClientSecretConfigKey(source), submittedClientSecret);
             }
-            const redirectUri = publisher?.loopback ? `${dashboardGoogleLoopbackOrigin(dashboardOrigin, sourceDashboard.loopbackPort)}/oauth/callback/${encodeURIComponent(source)}` : publisher?.redirectUri ?? `${dashboardOrigin}/oauth/callback/${encodeURIComponent(source)}`;
+            const redirectUri = publisher?.loopback || ownDesktop ? `${dashboardGoogleLoopbackOrigin(dashboardOrigin, sourceDashboard.loopbackPort)}/oauth/callback/${encodeURIComponent(source)}` : publisher?.redirectUri ?? `${dashboardOrigin}/oauth/callback/${encodeURIComponent(source)}`;
             const relayNonce = publisher?.relay === true ? handback ? `${handback.installId}_${createOAuthRelayNonce()}` : createOAuthRelayNonce() : undefined;
             const relayState = relayNonce === undefined ? undefined : signOAuthRelayState({
               origin: dashboardOrigin,
@@ -162367,7 +162814,8 @@ function createEmailSourceWorker(options = {}) {
               ...relayState ? { state: relayState } : {},
               openBrowser: false,
               ...sourceDashboard.oauthFetch ? { fetch: sourceDashboard.oauthFetch } : {},
-              clientIdSource: publisher ? "publisher" : "byo"
+              clientIdSource: publisher ? "publisher" : "byo",
+              ...ownDesktop ? { googleOwnApp: true } : {}
             });
             const expectedOrigin = oauthAuthorizeOrigin(source);
             let authorizationUrl;
@@ -165576,6 +166024,9 @@ async function dashboardOAuthClientIdSets(registry2, secretStore) {
   return { own: own3, all };
 }
 async function readConfiguredDashboardOAuthClientIds(output, secretStore) {
+  const sharedOwnAppId = (await readGoogleOwnAppRegistration(secretStore))?.clientId;
+  if (sharedOwnAppId)
+    output.google = sharedOwnAppId;
   const sources = ["google", "gmail", "google-drive", "dropbox", "x"];
   for (const source of sources) {
     const clientId = await secretStore.get(dashboardOAuthClientIdConfigKey(source));
@@ -165583,7 +166034,8 @@ async function readConfiguredDashboardOAuthClientIds(output, secretStore) {
       continue;
     if (await dashboardStoredClientIdIsPublisherOwned(source, clientId, dashboardOAuthClientIdConfigKey(source), secretStore))
       continue;
-    output[source] = clientId;
+    if (source !== "google" || !sharedOwnAppId)
+      output[source] = clientId;
   }
 }
 async function dashboardStoredClientIdIsPublisherOwned(source, clientId, clientIdKey, secretStore) {
@@ -165646,6 +166098,9 @@ async function dashboardOAuthClientSecret(source, secretStore, fallback, clientI
 async function dashboardGoogleOAuthClientSecret(source, secretStore, fallback, clientId) {
   if (fallback)
     return fallback;
+  const ownApp = await readGoogleOwnAppRegistration(secretStore);
+  if (ownApp?.clientId === clientId)
+    return ownApp.clientSecret;
   if (clientId === dashboardGooglePilotClientId()) {
     return process.env.OLYMPUS_GOOGLE_PILOT_CLIENT_SECRET?.trim();
   }
@@ -165771,9 +166226,26 @@ function dashboardCallbackFailureReason(error2, source, clientIdSource) {
   const message2 = error2 instanceof Error ? error2.message : "";
   if (source === "dropbox" && clientIdSource === "byo" && message2 === "Dropbox needs more permissions. Redo the Enable permissions step and sign in again. No credentials were stored.")
     return message2;
-  const match = /^OAuth token exchange failed with status (\d{3})(?: \(([a-z_]+)\))?\.$/.exec(message2);
-  if (match && (match[2] === undefined || safeOAuthErrorCode(match[2]) !== undefined))
+  const setupMessages = source === "x" ? [
+    "X could not complete the bookmarks read check. No credentials were stored; try connecting again when X is reachable.",
+    "X did not authorize the bookmarks read. Redo Enable OAuth 2.0 with bookmark.read and sign in again. No credentials were stored.",
+    "X refused the bookmarks read. Redo Check the cost to confirm paid API access and available credits, then Enable OAuth 2.0 with Read permissions and sign in again. No credentials were stored.",
+    "X could not complete the bookmarks read check. No credentials were stored; try connecting again later.",
+    "X returned an invalid bookmarks read result. No credentials were stored; try connecting again later."
+  ] : dashboardGoogleOAuthSource(source) ? [
+    "Google could not be reached for the API check. Try signing in again.",
+    "Google did not allow this API read. Redo Make the project and turn on Gmail and Drive, then sign in and allow read access.",
+    "Google did not accept the sign-in. Sign in again and allow read access.",
+    "Google could not confirm API access. Check your app settings and sign in again."
+  ] : [];
+  if (setupMessages.includes(message2))
     return message2;
+  const match = /^OAuth token exchange failed with status (\d{3})(?: \(([a-z_]+)\))?\.$/.exec(message2);
+  if (match && (match[2] === undefined || safeOAuthErrorCode(match[2]) !== undefined)) {
+    if (source === "x" && ["401", "403"].includes(match[1]))
+      return "X did not accept the app key. Redo Enable OAuth 2.0, copy the Client ID and secret from the same app, and check the callback URI.";
+    return message2;
+  }
   return `Connecting ${dashboardOAuthSourceLabel(source)} failed partway through. Start connect again from the dashboard.`;
 }
 function dashboardOAuthSourceLabel(source) {
@@ -166085,6 +166557,7 @@ function mostPrivateTrustDomain(domains) {
 }
 var CONNECTOR_STORE_FILTER_CAPABILITIES, EMAIL_CONNECTOR_NOT_CONNECTED_DETAIL = "No email account is connected yet. Connect Gmail from the Olympus dashboard to enable email answers.", EmailSourceWorkerError, DEFAULT_SQLITE_BUSY_RETRY_DELAYS_MS, SOURCE_DISPOSITION_STATES, DEFAULT_FILE_EXTRACTION_PLAN_LIMIT = 100, DROPBOX_FILE_EXTRACTION_PROVIDER = "dropbox", FILE_EXTRACTION_ROUTE_ALIASES, DASHBOARD_OAUTH_RELAY_STATE_KEY = "dashboard.oauth.relay_state_key", DASHBOARD_OAUTH_CALLBACK_RATE_LIMIT_WINDOW_MS = 60000, DASHBOARD_OAUTH_CALLBACK_RATE_LIMIT_MAX_PER_WINDOW = 30, DASHBOARD_UNPAIR_SOURCE_IDS, DASHBOARD_EVERNOTE_SIGN_IN_TTL_MS = 600000, CHATGPT_RETURN_TO = "https://chatgpt.com/", DASHBOARD_EXCLUSION_DEBT_MAX_AGE_MS = 120000, DASHBOARD_DEFAULT_ENGINE_PORT = 8010;
 var init_email_source = __esm(() => {
+  init_google_own_app();
   init_sovereignty();
   init_dashboard_messaging_service();
   init_source_scope_approval();
