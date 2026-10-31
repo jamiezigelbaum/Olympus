@@ -572,19 +572,21 @@ export interface DashboardConnectSheetInput {
 }
 
 /** A provider-neutral walkthrough. The last step contains the existing connect form. */
-export function setupStepsSheet(input: { id: string; provider: string; steps: readonly DashboardSetupStep[]; finalForm: (formId: string) => string; submitLabel?: string; redirect?: string }): string {
+export function setupStepsSheet(input: { id: string; provider: string; steps: readonly DashboardSetupStep[]; finalForm: (formId: string) => string; submitLabel?: string; redirect?: string; stepContent?: readonly string[]; stepActions?: readonly ({ formId: string; label: string } | undefined)[]; footerContent?: string }): string {
   const id = safeId(input.id);
   const count = input.steps.length;
   const formId = `${id}-form`;
+  const initialAction = input.stepActions?.[0];
   const panels = input.steps.map((step, index) => {
     const url = step.link && safeExternalHref(step.link.url);
     const link = url ? `<button type="button" class="btn primary" data-setup-open="${escapeHtml(url)}">Open this page in ${escapeHtml(input.provider)}</button>`
       + `<p><a class="ext" href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer">Open the page in ${escapeHtml(input.provider)} ↗</a></p>` : '';
     const redirect = step.redirect_uri && input.redirect
       ? `<div class="promptbox" id="${id}-redirect">${escapeHtml(input.redirect)}</div><button class="btn" type="button" data-copy-target="#${id}-redirect">Copy redirect URI</button><span data-copy-status aria-live="polite"></span>` : '';
-    return `<div data-setup-panel${index ? ' hidden' : ''}><h4>${escapeHtml(step.title ?? `Step ${index + 1}`)}</h4><p>${escapeHtml(step.text)}</p>${link}${redirect}${index === count - 1 ? input.finalForm(formId) : ''}</div>`;
+    const action = input.stepActions?.[index];
+    return `<div data-setup-panel${action ? ` data-setup-form="${escapeHtml(action.formId)}" data-setup-label="${escapeHtml(action.label)}"` : ''}${index ? ' hidden' : ''}><h4>${escapeHtml(step.title ?? `Step ${index + 1}`)}</h4><p>${escapeHtml(step.text)}</p>${link}${redirect}${input.stepContent?.[index] ?? ''}${index === count - 1 ? input.finalForm(formId) : ''}</div>`;
   }).join('');
-  return `<div data-setup-steps><p data-setup-counter>Step 1 of ${count}</p><progress data-setup-progress max="${count}" value="1"></progress>${panels}<div class="setupactions actionrow" data-setup-actions><button class="btn" type="button" data-setup-back disabled>Back</button><button class="btn primary" type="button" data-setup-next${count === 1 ? ' hidden' : ''}>I've done this, next</button><button class="btn primary" type="submit" form="${formId}" data-setup-submit${count === 1 ? '' : ' hidden'}>${escapeHtml(input.submitLabel ?? 'Connect')}</button></div></div>`;
+  return `<div data-setup-steps><p data-setup-counter>Step 1 of ${count}</p><progress data-setup-progress max="${count}" value="1"></progress>${panels}<div class="setupactions actionrow" data-setup-actions><button class="btn" type="button" data-setup-back disabled>Back</button><button class="btn primary" type="button" data-setup-next${count === 1 || initialAction ? ' hidden' : ''}>I've done this, next</button><button class="btn primary" type="submit" form="${escapeHtml(initialAction?.formId ?? formId)}" data-setup-submit${count === 1 || initialAction ? '' : ' hidden'}>${escapeHtml(initialAction?.label ?? input.submitLabel ?? 'Connect')}</button>${input.footerContent ?? ''}</div></div>`;
 }
 
 /**
