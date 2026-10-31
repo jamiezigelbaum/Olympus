@@ -590,6 +590,72 @@ test('uninstaller help is available without an install or live session', () => {
   expect(r.stdout).toContain('--purge --yes');
 }, 30_000);
 
+test('receipt-less uninstall reports retained machinery instead of succeeding', () => {
+  const h = fixture();
+  const installed = h.receipt();
+  rmSync(installed.path);
+  const before = treeSha(h.home);
+  const result = h.uninstall();
+  expect(result.status).toBe(1);
+  expect(result.stderr).toContain('No install receipt exists');
+  expect(result.stderr).toContain(installed.unitPath);
+  expect(result.stderr).toContain(installed.launcherPath);
+  expect(result.stderr).toContain('nothing was removed');
+  expect(treeSha(h.home)).toBe(before);
+}, 30_000);
+
+test('receipt-less uninstall checks custom XDG locations without following links', () => {
+  const h = fixture();
+  const configHome = join(h.home, 'config');
+  const dataHome = join(h.home, 'data');
+  const unit = join(configHome, 'systemd/user/olympus-engine.service');
+  const desktop = join(dataHome, 'applications/ai.olympusplugin.Olympus.desktop');
+  for (const path of [unit, desktop]) {
+    mkdirSync(dirname(path), { recursive: true });
+    symlinkSync(join(h.home, 'missing-target'), path);
+  }
+  const result = h.uninstall({ XDG_CONFIG_HOME: configHome, XDG_DATA_HOME: dataHome });
+  expect(result.status).toBe(1);
+  expect(result.stderr).toContain(unit);
+  expect(result.stderr).toContain(desktop);
+  expect(lstatSync(unit).isSymbolicLink()).toBe(true);
+  expect(lstatSync(desktop).isSymbolicLink()).toBe(true);
+}, 30_000);
+
+test('receipt-less uninstall refuses unknown service custody even without files', () => {
+  const h = fixture();
+  const result = h.uninstall({ FAKE_BUS_FAIL: '1' });
+  expect(result.status).toBe(1);
+  expect(result.stderr).toContain('systemd');
+  expect(result.stderr).toContain('nothing was removed');
+}, 30_000);
+
+test('receipt-less uninstall reports a loaded service whose files are gone', () => {
+  const h = fixture();
+  const result = h.uninstall();
+  expect(result.status).toBe(1);
+  expect(result.stderr).toContain('olympus-engine.service');
+  expect(result.stderr).toContain('nothing was removed');
+}, 30_000);
+
+test('receipt-less uninstall with no known machinery is repeatable and retains data', () => {
+  const h = fixture();
+  executable(join(h.bin, 'systemctl'), '#!/bin/sh\nprintf "LoadState=not-found\\nActiveState=inactive\\nMainPID=0\\n"\n');
+  const data = join(h.home, '.local/share/openclaw/olympus/personal');
+  mkdirSync(dirname(data), { recursive: true });
+  writeFileSync(data, 'keep');
+  const before = treeSha(h.home);
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const result = h.uninstall();
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain('No known Olympus machinery was found');
+    expect(treeSha(h.home)).toBe(before);
+  }
+  expect(h.uninstall({}, ['--purge', '--yes']).status).toBe(1);
+  expect(h.uninstall({}, ['--restore-linger']).status).toBe(1);
+  expect(treeSha(h.home)).toBe(before);
+}, 30_000);
+
 test('keep-data removal is repeatable and retained receipt authorizes later purge', () => {
   const h = fixture();
   const receipt = h.receipt();
