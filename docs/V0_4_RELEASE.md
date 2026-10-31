@@ -73,6 +73,17 @@ Not in 1.3: frontier consult C5 (owner, 2026-10-31: skip for 1.3; C1–C4b
 stay inert on main), Evernote live sync unless it lands before the freeze
 (#568, #559, #554), #599, #570, #626 (research runs alongside), #138.
 
+Moved to 1.4 at the freeze (2026-10-31; each issue carries the reason):
+#631, #603, #620, #636, #638, olympus-ops #67, and #581's "lead with your
+own app near the 100-user cap" (the guided own-app path itself ships). #628
+and the listing update stay held: this release does not resubmit the
+listing. To verify on the 1.3.0 candidate's test-Mac and canary runs before
+closing: #588, #609, #621, #633, #654.
+
+eval:real for #619 runs on the test-corpus install (the synthetic "Olympus
+Eval Corpus" Dropbox folder on test-omarchy), not the owner's own data, with
+the owner's approval (2026-10-31). A rerun on the owner's install is #707.
+
 ## 1.1.0 Private answers inbox (owner decision 2026-10-14)
 
 Commit-only implementation in `claude/private-answers-inbox`; do not land

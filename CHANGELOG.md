@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.3.0 - 2026-10-31
+
+- **Files on this computer reads Desktop, Documents, Downloads and iCloud Drive on a Mac.** The installer brings a signed, notarized Olympus Engine helper, so macOS asks you once to allow each folder (#654).
+- **A new install asks how to answer with Private items.** Local first (recommended) or local only. Until you choose, nothing leaves your computer and no source is read remotely. Without a Venice key, the built-in model answers on your computer (#591).
+- **Guided setup on the dashboard.** Dropbox, Venice, Google (with your own Google app, step by step), Telegram and X each open a short step sheet with Back and Next, and check what you paste before saving.
+- **Pair Telegram and WhatsApp from the dashboard, and choose which chats Olympus reads.** Pairing alone reads nothing. Choosing chats never decides what is private: each message is still judged on its own. Pairing again with a different WhatsApp account asks for its chats again.
+- **Privacy in your own words, on the main page.** What you write is shown in full with Edit, follow-up questions sit beside it, and always-private rules apply as soon as you add them (#618).
+- **Secrets are named.** When only a Secret matches, ChatGPT and other apps say to look on your computer, and the Inbox shows the matching Secret's location (#611, #612, #622).
+- Answers in ChatGPT and other apps name their sources instead of showing bare [E1] (#590).
+- Chat search ranks the message that answers the question ahead of the newest ones (#619).
+- The "Private check still running" notice stays when an answer takes longer (#623). Waiting Private questions record why they retry and stop after a limit (#594).
+- On a Mac, `olympus doctor` checks the runtimes Olympus actually uses (#578, #624).
+- The dashboard sign-in link stays available in Safari (#579).
+- The dashboard shows when another worker owns your data, with a fix (#630). A deliberate engine restart no longer counts as a crash.
+- Anonymous answers are not offered to remote apps while they are off (#617).
+- Disconnected sources' data can still be opened and deleted (#615).
+- Connecting Evernote says to leave only View ticked on Evernote's consent screen (#616).
+
 ## 1.2.2 - 2026-10-30
 
 - Olympus supports Ubuntu 24.04 LTS on x86_64. On Ubuntu, restarting or stopping Olympus could be refused because it checked too early that the previous engine had stopped. It now waits for systemd to finish (#642).
