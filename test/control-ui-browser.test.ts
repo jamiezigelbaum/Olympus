@@ -1339,3 +1339,19 @@ test('completed Telegram pairing still offers setup to pair again', async () => 
   try { await happyWindow.happyDOM.waitUntilComplete(); expect(root.querySelector<HTMLElement>('[data-messaging-setup-intro]')!.hidden).toBe(false); }
   finally { controller.dispose(); }
 });
+
+test('Telegram restores an active prompt once without reopening on each poll', async () => {
+  const root = document.createElement('div'); root.innerHTML = renderMessagingCard('telegram', true); document.body.append(root);
+  const controller = mountDashboardController({ root, canWrite: true, signal: new AbortController().signal, navigate() {}, refresh: async () => undefined, returnUrl: 'http://localhost/dashboard?keys', pollIntervalMs: 0,
+    transport: { control: async () => ({ status: 200, body: {} }), messaging: async () => ({ status: 200, body: { ok: true, state: 'waiting', field: 'code' } }) },
+  });
+  try {
+    await new Promise(resolve => setTimeout(resolve, 0));
+    const sheet = root.querySelector<HTMLElement>('#telegram-setup')!;
+    expect(sheet.getAttribute('aria-hidden')).toBe('false');
+    root.querySelector<HTMLButtonElement>('[data-sheet-toggle="#telegram-setup"]')!.click();
+    expect(sheet.getAttribute('aria-hidden')).toBe('true');
+    await new Promise(resolve => setTimeout(resolve, 1300));
+    expect(sheet.getAttribute('aria-hidden')).toBe('true');
+  } finally { controller.dispose(); }
+});

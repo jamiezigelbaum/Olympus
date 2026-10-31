@@ -11931,9 +11931,6 @@ async function completeOAuthSourceConnection(prepared, code) {
     const clientIdKey = `${prepared.options.source}.${prepared.accountRole}.oauth.client_id`;
     const refreshKey = `${prepared.options.source}.${prepared.accountRole}.oauth.refresh_token`;
     secretWrites.push([clientIdKey, prepared.clientId]);
-    if (prepared.options.googleOwnApp && clientSecret && isGoogleOAuthSource(prepared.options.source)) {
-      secretWrites.push(["google.own_app.registration", JSON.stringify({ clientId: prepared.clientId, clientSecret })]);
-    }
     secretRefs.push(`store:${clientIdKey}`, `store:${refreshKey}`);
     if (prepared.options.clientIdSource !== undefined) {
       const clientIdSourceKey = `${prepared.options.source}.${prepared.accountRole}.oauth.client_id_source`;
@@ -12033,6 +12030,9 @@ async function completeOAuthSourceConnection(prepared, code) {
       }
       tokenWritesAttempted += 1;
       await prepared.secretStore.set(refreshKey, refreshToken);
+      if (prepared.options.googleOwnApp && clientSecret && isGoogleOAuthSource(prepared.options.source)) {
+        await prepared.secretStore.set("google.own_app.registration", JSON.stringify({ clientId: prepared.clientId, clientSecret }));
+      }
     } catch (error) {
       if (registryBefore && await oldGrantStillMints()) {
         try {
@@ -144619,6 +144619,7 @@ function mountDashboardController(options) {
   }, { once: true });
   const messagingTimers = new Map;
   const messagingBusy = new WeakSet;
+  const messagingSeen = new WeakSet;
   function resumeMessaging() {
     messagingTimers.forEach((timer, card) => {
       if (!card.isConnected) {
@@ -144673,6 +144674,8 @@ function mountDashboardController(options) {
       const field = typeof body.field === "string" ? body.field : "";
       const labels = { api_id: "Telegram API ID", api_hash: "Telegram API hash", phone: "Phone number (with country code)", code: "Telegram login code", password: "Telegram two-step verification password" };
       const label = labels[field];
+      const restoring = operation === "status" && !messagingSeen.has(card);
+      messagingSeen.add(card);
       const setupSheet = card.querySelector("[data-messaging-setup]");
       if (setupSheet) {
         const intro = setupSheet.querySelector("[data-messaging-setup-intro]");
@@ -144682,8 +144685,13 @@ function mountDashboardController(options) {
         const cancel = setupSheet.querySelector('[data-messaging-kind="cancel"]');
         if (cancel)
           cancel.hidden = !active;
-        if (operation !== "status")
+        if (operation !== "status" || restoring && (active || state === "failed")) {
+          queryAll(".sheet.on").forEach((other) => {
+            if (other !== setupSheet)
+              setSheetOpen(other, false);
+          });
           setSheetOpen(setupSheet, true);
+        }
         setupSheet.querySelector("[data-pairing-error]")?.remove();
         if (state === "failed") {
           const error2 = document.createElement("div");

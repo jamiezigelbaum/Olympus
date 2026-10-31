@@ -847,6 +847,7 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
   }, { once: true });
   const messagingTimers = new Map<HTMLElement, ReturnType<typeof setTimeout>>();
   const messagingBusy = new WeakSet<HTMLElement>();
+  const messagingSeen = new WeakSet<HTMLElement>();
 
   function resumeMessaging(): void {
     messagingTimers.forEach((timer, card) => { if (!card.isConnected) { clearTimeout(timer); messagingTimers.delete(card); } });
@@ -882,6 +883,8 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
       const field = typeof body.field === 'string' ? body.field : '';
       const labels: Record<string, string> = { api_id: 'Telegram API ID', api_hash: 'Telegram API hash', phone: 'Phone number (with country code)', code: 'Telegram login code', password: 'Telegram two-step verification password' };
       const label = labels[field];
+      const restoring = operation === 'status' && !messagingSeen.has(card);
+      messagingSeen.add(card);
       const setupSheet = card.querySelector<HTMLElement>('[data-messaging-setup]');
       if (setupSheet) {
         const intro = setupSheet.querySelector<HTMLElement>('[data-messaging-setup-intro]');
@@ -889,7 +892,10 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
         if (intro) intro.hidden = active || state === 'failed';
         const cancel = setupSheet.querySelector<HTMLElement>('[data-messaging-kind="cancel"]');
         if (cancel) cancel.hidden = !active;
-        if (operation !== 'status') setSheetOpen(setupSheet, true);
+        if (operation !== 'status' || (restoring && (active || state === 'failed'))) {
+          queryAll<HTMLElement>('.sheet.on').forEach(other => { if (other !== setupSheet) setSheetOpen(other, false); });
+          setSheetOpen(setupSheet, true);
+        }
         setupSheet.querySelector('[data-pairing-error]')?.remove();
         if (state === 'failed') {
           const error = document.createElement('div'); error.dataset.pairingError = '';

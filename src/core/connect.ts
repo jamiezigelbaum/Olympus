@@ -883,11 +883,6 @@ async function completeOAuthSourceConnection(
       const clientIdKey = `${prepared.options.source}.${prepared.accountRole}.oauth.client_id`;
       const refreshKey = `${prepared.options.source}.${prepared.accountRole}.oauth.refresh_token`;
       secretWrites.push([clientIdKey, prepared.clientId]);
-      // Only a completed, API-checked Desktop grant changes the reusable app.
-      // Abandoned or refused setup must leave shared Connect available.
-      if (prepared.options.googleOwnApp && clientSecret && isGoogleOAuthSource(prepared.options.source)) {
-        secretWrites.push(['google.own_app.registration', JSON.stringify({ clientId: prepared.clientId, clientSecret })]);
-      }
       secretRefs.push(`store:${clientIdKey}`, `store:${refreshKey}`);
       // Written only when the caller states it, which today means only the
       // dashboard's publisher-relay start route: the plain CLI connect path has
@@ -1035,10 +1030,15 @@ async function completeOAuthSourceConnection(
             ...(providerAccountId ? { providerAccountId } : {}),
           });
         }
-        // The refresh token goes last, so the new grant can mint only once
+        // The refresh token is the last grant credential, so it can mint only once
         // everything it needs is in place.
         tokenWritesAttempted += 1;
         await prepared.secretStore.set(refreshKey, refreshToken);
+        // The reusable app is a preference, not a grant credential. Publish it
+        // only after every grant write succeeds, including the refresh token.
+        if (prepared.options.googleOwnApp && clientSecret && isGoogleOAuthSource(prepared.options.source)) {
+          await prepared.secretStore.set('google.own_app.registration', JSON.stringify({ clientId: prepared.clientId, clientSecret }));
+        }
       } catch (error) {
         if (registryBefore && await oldGrantStillMints()) {
           try {
