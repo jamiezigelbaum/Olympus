@@ -133,7 +133,7 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
       // disabled, so a second click cannot issue a second transport call,
       // without taking the caret out of the fields the owner is still typing.
       const pending = pendingForms.has(form) || form.dataset.keyAccepted === 'true';
-      Array.from(form.elements).filter((control): control is HTMLButtonElement | HTMLInputElement => control instanceof HTMLButtonElement || (control instanceof HTMLInputElement && control.type !== 'hidden'))
+      Array.from(form.elements).filter((control): control is HTMLButtonElement | HTMLInputElement => control.matches('button,input:not([type="hidden"])'))
         .forEach((control) => {
           if (control.dataset.olympusOriginallyDisabled === undefined) {
             control.dataset.olympusOriginallyDisabled = control.disabled ? 'true' : 'false';
@@ -494,7 +494,7 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
     if (released && params.action === 'connect_api_key') {
       form.dataset.keyAccepted = 'true';
       form.querySelectorAll<HTMLInputElement>('input[name="api_key"]').forEach((input) => { input.value = ''; input.hidden = true; });
-      Array.from(form.elements).filter((control): control is HTMLButtonElement => control instanceof HTMLButtonElement && isSubmitControl(control)).forEach((button) => {
+      Array.from(form.elements).filter((control): control is HTMLButtonElement => control.matches('button[type="submit"],button:not([type])')).forEach((button) => {
         button.textContent = params.source === 'readwise' ? 'Connected' : 'Key saved';
       });
       applyWriteCapability();

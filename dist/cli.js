@@ -143241,7 +143241,7 @@ function mountDashboardController(options) {
   function applyWriteCapability() {
     root.querySelectorAll("form[data-connect-kind],form[data-model-check],form[data-agent-kind]").forEach((form) => {
       const pending = pendingForms.has(form) || form.dataset.keyAccepted === "true";
-      Array.from(form.elements).filter((control) => control instanceof HTMLButtonElement || control instanceof HTMLInputElement && control.type !== "hidden").forEach((control) => {
+      Array.from(form.elements).filter((control) => control.matches('button,input:not([type="hidden"])')).forEach((control) => {
         if (control.dataset.olympusOriginallyDisabled === undefined) {
           control.dataset.olympusOriginallyDisabled = control.disabled ? "true" : "false";
         }
@@ -143575,7 +143575,7 @@ function mountDashboardController(options) {
         input.value = "";
         input.hidden = true;
       });
-      Array.from(form.elements).filter((control) => control instanceof HTMLButtonElement && isSubmitControl(control)).forEach((button) => {
+      Array.from(form.elements).filter((control) => control.matches('button[type="submit"],button:not([type])')).forEach((button) => {
         button.textContent = params.source === "readwise" ? "Connected" : "Key saved";
       });
       applyWriteCapability();
