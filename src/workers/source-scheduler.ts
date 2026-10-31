@@ -1740,6 +1740,7 @@ export function createWhatsAppSchedulerSource(input: {
   maxItems?: number;
   extractionPlanLimit?: number;
   extractionBatchSize?: number;
+  subscribeChanges?: SourceSchedulerSource['subscribeChanges'];
 }): SourceSchedulerSource | undefined {
   if (!input.sync) return undefined;
   const tasks: SourceSchedulerTask[] = [{
@@ -1808,6 +1809,7 @@ export function createWhatsAppSchedulerSource(input: {
   }
   return {
     sourceId: SCHEDULER_SOURCE_IDS.whatsapp,
+    ...(input.subscribeChanges ? { subscribeChanges: input.subscribeChanges } : {}),
     corpusId: WHATSAPP_LIVE_CORPUS_ID,
     cadence: 'continuous',
     intervalMs: input.config.worker.scheduler.syncIntervalSeconds * 1_000,
@@ -1821,10 +1823,12 @@ export function createTelegramSchedulerSource(input: {
   config: OlympusConfig;
   sync?: TelegramConnectorStoreSyncHandler;
   maxItems?: number;
+  subscribeChanges?: SourceSchedulerSource['subscribeChanges'];
 }): SourceSchedulerSource | undefined {
   if (!input.sync) return undefined;
   return {
     sourceId: SCHEDULER_SOURCE_IDS.telegram,
+    ...(input.subscribeChanges ? { subscribeChanges: input.subscribeChanges } : {}),
     corpusId: INTERNAL_TELEGRAM_MESSAGES_CORPUS_ID,
     cadence: 'continuous',
     intervalMs: input.config.worker.scheduler.syncIntervalSeconds * 1_000,

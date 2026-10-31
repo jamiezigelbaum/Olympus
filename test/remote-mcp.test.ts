@@ -169,12 +169,24 @@ describe('remote operation surface', () => {
 });
 
 describe('remote MCP over loopback with a connection token', () => {
+  test('anonymous answers off are not advertised while result collection remains available', async () => {
+    const { token } = store.create('Claude');
+    const client = await connectClient(token);
+    try {
+      const names = (await client.listTools()).tools.map((tool) => tool.name);
+      expect(names).not.toContain('ask_anonymously');
+      expect(names).toContain('source_answer');
+      expect(names).toContain('source_answer_result');
+    } finally {
+      await client.close();
+    }
+  });
   test('an MCP SDK client lists exactly the remote tools, reads status, and answers attributed to the connection', async () => {
     const { connection, token } = store.create('Muse');
     const client = await connectClient(token);
     try {
       const tools = await client.listTools();
-      expect(tools.tools.map((tool) => tool.name).sort()).toEqual(['ask_anonymously', 'source_answer', 'source_answer_result', 'source_index_status']);
+      expect(tools.tools.map((tool) => tool.name).sort()).toEqual(['source_answer', 'source_answer_result', 'source_index_status']);
 
       const status = await client.callTool({ name: 'source_index_status', arguments: {} });
       const statusText = (status.content as Array<{ type: string; text: string }>)[0]!.text;
@@ -591,12 +603,14 @@ describe('remote evidence search', () => {
   let searchBase: string;
   let searches: Array<{ question: string; limit?: number }>;
   let answerModel: boolean;
+  let anonymousEnabled: boolean;
   let pauseSearch: Promise<void> | undefined;
   let searchStarted: (() => void) | undefined;
 
   beforeEach(() => {
     searches = [];
     answerModel = false;
+    anonymousEnabled = true;
     pauseSearch = undefined;
     searchStarted = undefined;
     const worker = createEmailSourceWorker({
@@ -606,6 +620,7 @@ describe('remote evidence search', () => {
     const fetch = withRemoteMcpRoute(
       createRemoteMcpHandler({
         connections: () => store,
+        anonymousAnswersEnabled: () => anonymousEnabled,
         makeOperationContext: (caller, signal) => createInProcessOperationContext({
           config: defaultConfig(),
           sourceIndexReadEnabled: true,
@@ -662,6 +677,20 @@ describe('remote evidence search', () => {
       const refused = await client.callTool({ name: 'source_answer', arguments: { question: 'when does the lease renew?' } });
       expect(refused.isError).toBe(true);
       expect(answered).toBe(0);
+    } finally {
+      await client.close();
+    }
+  });
+
+  test('listing follows anonymous settings without losing the async collector', async () => {
+    const { token } = store.create('Claude');
+    const client = await searchClient(token);
+    try {
+      expect((await client.listTools()).tools.map((tool) => tool.name)).toContain('ask_anonymously');
+      anonymousEnabled = false;
+      const names = (await client.listTools()).tools.map((tool) => tool.name);
+      expect(names).not.toContain('ask_anonymously');
+      expect(names).toContain('source_answer_result');
     } finally {
       await client.close();
     }
