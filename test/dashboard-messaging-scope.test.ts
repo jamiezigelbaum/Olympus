@@ -30,7 +30,7 @@ test('dashboard re-pair publishes the previous narrow grant instead of widening 
   expect((await service.handle('status', { source: 'whatsapp' })).state).toBe('paired');
   expect(JSON.parse(readFileSync(grantPath, 'utf8')).producer.env.OLYMPUS_WHATSAPP_ALLOWED_CHAT_JIDS).toBe('123@s.whatsapp.net');
   service.close();
-}, 30_000);
+});
 
 test('chat selection writes the pairing grant, stops capture during the change, and refuses stale lists', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'messaging-scope-')); dirs.push(dir);
