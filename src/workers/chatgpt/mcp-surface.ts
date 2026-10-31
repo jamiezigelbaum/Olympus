@@ -129,6 +129,7 @@ export interface ChatGptSurfaceOptions {
 }
 
 export interface PrivateMatchProbeResult {
+  secretMatch?: true;
   count: number;
   evidence: readonly PrivateEvidenceItem[];
 }
@@ -603,7 +604,7 @@ function normalizeProbe(value: boolean | number | PrivateMatchProbeResult): Priv
   if (value === true) return { count: 1, evidence: [] };
   if (typeof value === 'number') return { count: Number.isFinite(value) ? Math.max(0, Math.floor(value)) : 0, evidence: [] };
   if (value && typeof value === 'object' && Number.isFinite(value.count)) {
-    return { count: Math.max(0, Math.floor(value.count)), evidence: Array.isArray(value.evidence) ? value.evidence : [] };
+    return { count: Math.max(0, Math.floor(value.count)), evidence: Array.isArray(value.evidence) ? value.evidence : [], ...(value.secretMatch === true ? { secretMatch: true } : {}) };
   }
   return { count: 0, evidence: [] };
 }
@@ -722,7 +723,10 @@ function privateRefresh(
   context: () => OperationContext,
   options: Pick<ChatGptSurfaceOptions, 'privateMatchProbeTimeoutMs' | 'privateMatchProbeLog'>,
 ): PrivateEvidenceRefresh {
-  return async () => normalizeProbe(await probeWithinDeadline(probe, question, context(), options, 'refresh')).evidence;
+  return async () => {
+    const current = normalizeProbe(await probeWithinDeadline(probe, question, context(), options, 'refresh'));
+    return Object.assign([...current.evidence], current.secretMatch ? { secretMatch: true as const } : {});
+  };
 }
 
 /**
@@ -731,20 +735,26 @@ function privateRefresh(
  */
 function beginPrivateAnswer(pending: PendingPrivateMatch, options: ChatGptSurfaceOptions): PrivateMatchSummary & { jobId?: string } {
   const { question, match, refresh, caller, detail, waiting } = pending;
-  if (!options.privateAnswers) return { count: match.count, panelState: 'no_model' };
+  if (!options.privateAnswers) return { count: match.count, panelState: 'no_model', ...(match.secretMatch ? { secretMatch: true as const } : {}) };
   try {
-    return options.privateAnswers.begin({
+    const summary = options.privateAnswers.begin({
       question,
       count: match.count,
       evidence: match.evidence,
+      preserveWaiting: match.secretMatch === true,
       refresh,
+      ...(match.secretMatch && match.evidence.length === 0 ? { secretMatch: async () => {
+        const current = await refresh(new AbortController().signal);
+        return current.secretMatch === true;
+      } } : {}),
       detail,
       ...(caller ? { caller } : {}),
       ...(waiting ? { waiting } : {}),
       ...(options.privateAnswerSeenOnDelivery ? { seenOnDelivery: true } : {}),
     });
+    return { ...summary, ...(match.secretMatch ? { secretMatch: true as const, hasPrivateEvidence: match.evidence.length > 0 } : {}) };
   } catch {
-    return { count: match.count, panelState: 'no_model' };
+    return { count: match.count, panelState: 'no_model', ...(match.secretMatch ? { secretMatch: true as const } : {}) };
   }
 }
 

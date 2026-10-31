@@ -157,6 +157,16 @@ Olympus reads. Olympus judges each item's names (Personal unless raised) and
 its content (raised to Private or Secrets on evidence); your always-Private
 rules raise matching items, and nothing you write can lower content.
 
+In Privacy, **In your own words** shows your full description. **Edit** opens
+it inline; Save and Cancel sit together. The note underneath explains that
+ChatGPT sees these words, so describe topics rather than private details.
+Follow-up questions stay next to your description and add their answers to
+it. **Always private (optional)** shows your rules and an **Add a rule** sheet;
+the note beside the rules explains that their names are shown to ChatGPT.
+**Details** holds the longer explanations. Changes to the description or
+removal of a rule still ask for confirmation; conflicts keep your changes
+until you choose Apply or Discard.
+
 The legacy sensitivity map (`~/.olympus/sensitivity-map.json` and
 `olympus sensitivity validate`) was retired on 2026-10-03. If an older
 install has that file, Olympus no longer reads it: re-add its rules in the
@@ -542,6 +552,18 @@ chosen lane becomes ready when its credential or paired session, scope, and
 source-specific prerequisites are satisfied; no legacy read-authority flag or
 migration utility is needed. Omit `--session-ready` for Telegram or WhatsApp
 until its local pairing helper is ready; otherwise it records `reauth_required`.
+
+On this computer's Keys page, pair Telegram or WhatsApp on its card. After a
+first pairing, choose **Pick chats (recommended)** and confirm the selected
+chats, or **Everything in this account** (including new chats). Pairing alone
+does not register a capture grant or start capture. Returning to Keys resumes
+the waiting login prompt, QR or chat choice. Cancelling the first chat choice
+leaves capture off but keeps the provider login: remove Olympus in Telegram
+active sessions or WhatsApp linked devices to unlink it.
+Re-pairing an already approved account retains its existing capture scope.
+The WhatsApp picker lists saved contacts and joined groups and may omit unsaved
+chats. Each message is still classified individually; chat selection does not
+set its privacy tier.
 
 <details>
 <summary>CLI fallback reference for a chosen source</summary>

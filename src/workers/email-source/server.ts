@@ -36,7 +36,7 @@ import { ModelSetupService, requiredModelProfiles, type ModelCredentialState } f
 import { workerRestartsItself, type ModelKeyReloadRequest, type WorkerLaunch } from '../../core/model-key-reload.ts';
 import { connectGeminiApiKey, connectPublicApiKeySource } from '../../core/connect.ts';
 import { environmentWithWorkerSetupEnv, readWorkerSetupEnv } from '../../core/worker-auth.ts';
-import { resolveServerMode, resolveAgentApprovalHost } from '../../core/remote-open.ts';
+import { remoteOpenInstructions, resolveServerMode, resolveAgentApprovalHost } from '../../core/remote-open.ts';
 import { loadOrCreateDashboardSessionSecret } from '../../core/dashboard-session-secret.ts';
 import { execFile } from 'node:child_process';
 import { existsSync } from 'node:fs';
@@ -543,10 +543,13 @@ export function createWorkerMessagingCaptureOwnership(options: {
   packageRoot: string;
   createSupervisor?: (source: MessagingCaptureSource) => WorkerMessagingCaptureSupervisor;
   revokeGrant?: (path: string) => void;
+  shouldResumeCapture?: () => boolean;
+  onResumeFailure?: (source: MessagingCaptureSource) => void;
 }): {
   captures: Partial<Record<MessagingCaptureSource, WorkerMessagingCaptureSupervisor>>;
   nativeOwners: Record<MessagingCaptureSource, boolean>;
   stopForUnpair(source: MessagingCaptureSource): Promise<void>;
+  withMessagingCapturePaused<T>(source: MessagingCaptureSource, operation: () => Promise<T>): Promise<T>;
 } {
   const env = options.env ?? process.env;
   const nativeOwners = {
@@ -570,21 +573,61 @@ export function createWorkerMessagingCaptureOwnership(options: {
         })
   ));
   const captures: Partial<Record<MessagingCaptureSource, WorkerMessagingCaptureSupervisor>> = {};
+  const rawCaptures: Partial<Record<MessagingCaptureSource, WorkerMessagingCaptureSupervisor>> = {};
+  const paused = { telegram: 0, whatsapp: 0 };
+  const queues: Record<MessagingCaptureSource, Promise<unknown>> = { telegram: Promise.resolve(), whatsapp: Promise.resolve() };
+  const serialized = <T>(source: MessagingCaptureSource, operation: () => Promise<T>): Promise<T> => {
+    const result = queues[source].then(operation);
+    queues[source] = result.catch(() => undefined);
+    return result;
+  };
   for (const source of ['telegram', 'whatsapp'] as const) {
-    if (!nativeOwners[source]) captures[source] = createSupervisor(source);
+    if (nativeOwners[source]) continue;
+    const capture = createSupervisor(source);
+    rawCaptures[source] = capture;
+    captures[source] = {
+      reconcile: async () => {
+        const stopped = (): MessagingCaptureStatus => ({ source, state: 'stopped' });
+        if (paused[source]) return stopped();
+        return serialized(source, async () => paused[source] ? stopped() : capture.reconcile());
+      },
+      stop: () => serialized(source, () => capture.stop()),
+      ...(capture.liveness ? { liveness: () => capture.liveness!() } : {}),
+    };
   }
   const revokeGrant = options.revokeGrant ?? revokeMessagingCaptureGrant;
   return {
     captures,
     nativeOwners,
     async stopForUnpair(source) {
-      if (nativeOwners[source]) {
-        throw new NativeMessagingCaptureOwnerError(source);
-      }
-      const capture = captures[source];
+      if (nativeOwners[source]) throw new NativeMessagingCaptureOwnerError(source);
+      const capture = rawCaptures[source];
       if (!capture) throw new Error(`Worker ${source} capture ownership is unavailable.`);
-      await capture.stop();
-      revokeGrant(defaultMessagingCaptureGrantPath(source, options.registryPath));
+      await serialized(source, async () => {
+        await capture.stop();
+        revokeGrant(defaultMessagingCaptureGrantPath(source, options.registryPath));
+      });
+    },
+    async withMessagingCapturePaused<T>(source: MessagingCaptureSource, operation: () => Promise<T>): Promise<T> {
+      if (nativeOwners[source]) throw new NativeMessagingCaptureOwnerError(source);
+      const capture = rawCaptures[source];
+      if (!capture) throw new Error(`Worker ${source} capture ownership is unavailable.`);
+      // Mark before waiting for the queue, so a timer cannot enqueue another restart.
+      paused[source] += 1;
+      return serialized(source, async () => {
+        let stopped = false;
+        try {
+          await capture.stop();
+          stopped = true;
+          return await operation();
+        } finally {
+          paused[source] -= 1;
+          if (stopped && !paused[source] && (options.shouldResumeCapture?.() ?? true)) {
+            try { await capture.reconcile(); }
+            catch { options.onResumeFailure?.(source); }
+          }
+        }
+      });
     },
   };
 }
@@ -2410,18 +2453,20 @@ export async function main(): Promise<void> {
   const connectedHandles = readActiveConnectedHandles(process.env);
   const connectedHandleRegistryPath = handleRegistryPathFromEnv(process.env, true);
   const packageRoot = olympusPackageRoot();
+  let capturesClosed = false;
+  const captureFailures: Partial<Record<'telegram' | 'whatsapp', true>> = {};
   const captureOwnership = createWorkerMessagingCaptureOwnership({
+    shouldResumeCapture: () => !capturesClosed,
+    onResumeFailure: (source) => { captureFailures[source] = true; },
     registryPath: connectedHandleRegistryPath!,
     packageRoot,
   });
   const captures = captureOwnership.captures;
   let captureReconcileRunning = false;
-  let capturesClosed = false;
   // What each supervisor last reported, for the dashboard. Absent for a source
   // whose capture the native service owns: this worker runs nothing there.
   const captureStatuses: Partial<Record<'telegram' | 'whatsapp', MessagingCaptureStatus>> = {};
   // Sources whose last reconcile threw: their old status is no fact about the helper.
-  const captureFailures: Partial<Record<'telegram' | 'whatsapp', true>> = {};
   const captureEntries = () => Object.entries(captures) as Array<['telegram' | 'whatsapp', WorkerMessagingCaptureSupervisor]>;
   const reconcileCaptures = async () => {
     if (capturesClosed || captureReconcileRunning) return;
@@ -2784,6 +2829,21 @@ export async function main(): Promise<void> {
       return [];
     }
   });
+  const checkTierSecretLocations = (
+    locations: readonly import('../../core/evidence-pack.ts').SavedSecretLocation[],
+    searched: ReadonlyArray<{ corpusId: string; accountScope?: string; filters?: ConnectorStoreSearchFilters }>,
+  ): boolean => locations.every((location) => tierLanes.some((lane) => {
+    const scope = searched.find((entry) => entry.corpusId === lane.secureCorpusId);
+    if (!scope || !lane.secrets) return false;
+    try {
+      return lane.secrets.recheck(location, scope, {
+        hide: (identities) => hiddenProbesByParentIdentity({
+          ledger: () => lane.ledger,
+          stores: () => connectorStores.filter((store) => lane.corpusIds.has(store.corpusId)),
+        }, identities),
+      });
+    } catch { return false; }
+  }));
   // Each lane's ledger, its corpora and its stores that exist now: the stores
   // let a child item be judged by its parent where the gate and the release
   // check read (tier-visibility.ts).
@@ -4607,6 +4667,7 @@ export async function main(): Promise<void> {
           // A child item's citation names its parent when the parent's names may go where the child goes.
           parentLabels: parentLabelResolver,
           secretLocations: tierSecretLocations,
+          checkSecretLocations: checkTierSecretLocations,
           heldItems: (corpusId) => tierLanes.find((candidate) => candidate.corpusIds.has(corpusId))?.ledger.corpusCopyCounts(corpusId).held ?? 0,
         }),
       });
@@ -5901,6 +5962,7 @@ export async function main(): Promise<void> {
               saveStandard: (update) => dashboardConsult.saveStandard(update),
             },
             stopMessagingCapture,
+            withMessagingCapturePaused: captureOwnership.withMessagingCapturePaused,
             captureRuntime: dashboardCaptureRuntime,
             // Delete indexed data: the same supervised restart a model-key
             // change uses. `canRestart` has no side effect, so the route can
@@ -6183,6 +6245,11 @@ export async function main(): Promise<void> {
   // The last time the ChatGPT model was missing from the live zkAPI listing (for the card); cleared by a reply.
   let chatgptModelProblem: { at: string; message: string } | undefined;
   const privateAnswers = new PrivateAnswerJobs({
+    inboxRemote: () => {
+      const mode = resolveServerMode({ env: process.env, fileEnv: readWorkerSetupEnv(), desktopReady: () => agentApprovalHost().headless === false });
+      return mode.remote ? remoteOpenInstructions({ port, ...(mode.sshTarget ? { sshTarget: mode.sshTarget } : {}),
+        ...(process.platform === 'linux' ? { socketPath: workerSocketPath()! } : {}), target: { kind: 'private_answers' } }) : undefined;
+    },
     model: () => privateAnswerModel,
     eligible: privateEvidenceEligible,
     installId: () => remotePublicUrls()?.installId,
@@ -6274,6 +6341,11 @@ export async function main(): Promise<void> {
       store: waitingQuestionStore,
       connectionName: (connectionId) => localInboxLabel(connectionId) ?? remoteConnections()?.list().find((connection) => connection.id === connectionId)?.displayName,
       eligible: local.eligible,
+      eligibleSecrets: local.eligibleSecrets,
+      resolveSecretInbox: handle => privateAnswers.resolveSecretInbox(handle),
+      panelSecretNotice: ref => privateAnswers.hasSecretInbox(ref),
+      panelSecretOnlyNotice: ref => privateAnswers.hasSecretInbox(ref, true),
+      secretSources: local.secretSources,
       ...(openCitedFile ? { openFile: openCitedFile } : {}),
       ...(process.platform === 'darwin' ? {
         openUrl: async (url: string, eligible: () => Promise<boolean>) => {
@@ -6449,7 +6521,7 @@ export async function main(): Promise<void> {
   const { createRemotePrivateParts } = await import('../../core/remote-private-part.ts');
   const remotePrivateParts = createRemotePrivateParts({
     probe: (request, timeoutMs) => (sourceAnswerLanes
-      ? probePrivateMatch({ lanes: sourceAnswerLanes, request: request as unknown as SourceIndexAnswerRequest, timeoutMs })
+      ? probePrivateMatch({ lanes: sourceAnswerLanes, request: request as unknown as SourceIndexAnswerRequest, timeoutMs, distinguishSecret: true })
       : Promise.resolve('unknown' as const)),
     store: waitingQuestionStore,
     isActive: connectionActive,
@@ -6651,7 +6723,7 @@ export async function main(): Promise<void> {
   const chatgptPrivateMatchProbe = sourceAnswerLanes
     ? async (question: string) => {
         const result = await searchPrivateEvidence({ lanes: sourceAnswerLanes!, question });
-        return { count: result.matched, evidence: result.candidates as unknown as readonly Record<string, unknown>[] };
+        return { count: result.matched, evidence: result.candidates as unknown as readonly Record<string, unknown>[], ...(result.secretMatch ? { secretMatch: true as const } : {}) };
       }
     : undefined;
   // The dashboard's install progress follows the built-in model's download.
