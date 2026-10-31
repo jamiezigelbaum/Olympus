@@ -114,7 +114,7 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
     if (kit.compact()) kit.fullscreen();
     s = {
       screen: 'main', returnKey, loaded: false, loading: true, error: '',
-      description: '', rules: [], pendingCount: 0,
+      description: '', rules: [], intents: [], savedRules: [], pendingCount: 0,
       // The saved settings this view started from: the compare-and-swap revision,
       // the saved description, and the owner's confirmation for a save that lowers protection.
       revision: '', savedDescription: '', confirmation: '', confirmedAt: 0, confirmStep: false,
@@ -174,6 +174,8 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
     s.confirmStep = false;
     // `saved`: removing it lowers protection, so the save needs the owner's confirmation.
     s.rules = data.rules.filter(validRule).map(viewRule);
+    s.savedRules = s.rules.map(ruleOut);
+    s.intents = [];
     s.hidden = data.rules.filter((rule: Any) => !validRule(rule));
     s.server = null;
     s.pendingCount = typeof data.pendingCount === 'number' && isFinite(data.pendingCount) ? Math.max(0, data.pendingCount) : 0;
@@ -242,10 +244,13 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
     if (s.saving || s.server) return;
     // Save only the addition against the saved revision. Other draft edits may
     // lower protection and must retain their separate confirmation.
-    const draft = { rules: s.rules, description: s.description, savedDescription: s.savedDescription };
-    const wasEdited = s.edited;
-    const baseline = s.rules.filter((item: Any) => item.saved).map(ruleOut).concat(s.hidden);
-    if (!s.rules.some((item: Any) => item.saved && identity(item) === identity(rule))) baseline.push(ruleOut(rule));
+    const baseline = s.savedRules.slice().concat(s.hidden);
+    if (!s.savedRules.some((item: Any) => identity(item) === identity(rule))) baseline.push(ruleOut(rule));
+    // Record the choice before sending: failures and conflicts do not erase it.
+    L.addTo(s.rules, rule);
+    L.setIntent(s.intents, rule, true);
+    changed();
+    const draft = { intents: s.intents, description: s.description, savedDescription: s.savedDescription };
     const args: Any = { description: s.savedDescription, rules: baseline };
     if (s.revision) args.revision = s.revision;
     s.saving = true;
@@ -256,26 +261,21 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
       s.saving = false;
       const data = settings(result);
       const content = result && result.structuredContent;
-      if (data && content && content.status === 'conflict') {
-        L.addTo(s.rules, rule);
-        // Restoring a previously saved rule is also an explicit addition:
-        // another editor may have removed it in the conflicting revision.
-        for (const item of s.rules) if (identity(item) === identity(rule)) item.readded = true;
-        changed();
-        return conflict(data);
-      }
-      if (!data || result.isError) {
+      if (data && content && content.status === 'conflict') return conflict(data);
+      if (!data || !content || content.status !== 'saved') {
         s.saveError = W.addRuleFailed;
         kit.render('privacy:save');
         return;
       }
-      // Adding an already-saved rule cancels a pending removal of that rule.
-      for (const item of draft.rules) if (identity(item) === identity(rule)) item.removed = false;
+      // This immediate save covers only this addition, never other pending edits.
+      if (!L.satisfies([{ rule, present: true }], data.rules)) return conflict(data);
+      draft.intents = draft.intents.filter((intent: Any) => identity(intent.rule) !== identity(rule));
       take(data);
+      s.intents = draft.intents;
       const replayed = L.replay(draft, s.rules);
       s.rules = replayed.rules;
       if (replayed.description !== null) s.description = replayed.description;
-      s.edited = wasEdited;
+      s.edited = s.intents.length > 0 || s.description !== s.savedDescription;
       kit.remember(data.rules.filter(validRule).length);
       kit.render('privacy:add:folder');
     }, () => {
@@ -342,12 +342,13 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
       }
       const data = settings(result);
       if (data && content && content.status === 'conflict') return conflict(data);
-      if (!data || result.isError) {
+      if (!data || !content || content.status !== 'saved') {
         s.saveError = W.saveFailed;
         kit.render('privacy:save');
         return;
       }
       if (confirmed) s.confirmation = '';
+      if (!L.satisfies(s.intents, data.rules) || data.description !== args.description) return conflict(data);
       kit.remember(data.rules.filter(validRule).length);
       leave(W.saved, true);
     }, () => {
@@ -374,8 +375,9 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
   function applyAgain(): void {
     const server = s.server;
     if (!server) return;
-    const draft = { rules: s.rules, description: s.description, savedDescription: s.savedDescription };
+    const draft = { intents: s.intents, description: s.description, savedDescription: s.savedDescription };
     take(server);
+    s.intents = draft.intents;
     const replayed = L.replay(draft, s.rules);
     s.rules = replayed.rules;
     s.confirmStep = false;
@@ -584,6 +586,7 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
       add(li, el('p', 'fname leaf muted', fill(W.removed, { name: rule.display })));
       const undo = kit.button(W.undo, 'privacy:rule:' + index, s.saving ? null : () => {
         rule.removed = false;
+        L.setIntent(s.intents, rule, true);
         changed();
         kit.render('privacy:rule:' + index);
       }, 'plain');
@@ -593,6 +596,7 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
     add(li, add(el('p', 'fname leaf two-line'), el('span', 'two-top', rule.display), el('span', 'two-bottom', kindText(rule))));
     const remove = kit.button(W.remove, 'privacy:rule:' + index, s.saving ? null : () => {
       rule.removed = true;
+      L.setIntent(s.intents, rule, false);
       changed();
       s.saveError = '';
       kit.render('privacy:rule:' + index);

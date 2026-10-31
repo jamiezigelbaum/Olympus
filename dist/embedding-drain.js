@@ -42047,19 +42047,31 @@ function privacyLogic(config) {
     const change = lowering(rules, description, savedDescription);
     return change.removed.length > 0 || change.described;
   }
+  function setIntent(intents, rule, present) {
+    const id = identity(rule);
+    const next = { rule: { ...rule }, present };
+    const index = intents.findIndex((intent) => identity(intent.rule) === id);
+    if (index < 0)
+      intents.push(next);
+    else
+      intents[index] = next;
+  }
+  function satisfies(intents, rules) {
+    const ids = new Set(rules.filter(validRule).map(identity));
+    return intents.every((intent) => ids.has(identity(intent.rule)) === intent.present);
+  }
   function replay(draft, fresh) {
-    const removed = {};
-    for (const rule of draft.rules)
-      if (rule.saved && rule.removed)
-        removed[identity(rule)] = true;
-    const additions = draft.rules.filter((rule) => (!rule.saved || rule.readded) && !rule.removed);
+    const rules = fresh.map((rule) => ({ ...rule }));
+    for (const intent of draft.intents) {
+      let rule = rules.find((item) => identity(item) === identity(intent.rule));
+      if (!rule) {
+        rule = { ...intent.rule, saved: false };
+        rules.push(rule);
+      }
+      rule.removed = !intent.present;
+    }
     const described = draft.description.trim() !== draft.savedDescription ? draft.description : null;
-    for (const rule of fresh)
-      if (removed[identity(rule)])
-        rule.removed = true;
-    for (const rule of additions)
-      addTo(fresh, rule);
-    return { rules: fresh, description: described };
+    return { rules, description: described };
   }
   function senderValue(input) {
     const value = String(input || "").trim().toLowerCase();
@@ -42295,6 +42307,8 @@ function privacyLogic(config) {
     return JSON.stringify(questions(description));
   }
   return {
+    setIntent,
+    satisfies,
     validRule,
     displayOf,
     viewRule,
@@ -44256,6 +44270,8 @@ function chatgptPrivacyProgram(kit, makeLogic) {
       error: "",
       description: "",
       rules: [],
+      intents: [],
+      savedRules: [],
       pendingCount: 0,
       revision: "",
       savedDescription: "",
@@ -44308,6 +44324,8 @@ function chatgptPrivacyProgram(kit, makeLogic) {
     s.edited = false;
     s.confirmStep = false;
     s.rules = data2.rules.filter(validRule).map(viewRule);
+    s.savedRules = s.rules.map(ruleOut);
+    s.intents = [];
     s.hidden = data2.rules.filter((rule) => !validRule(rule));
     s.server = null;
     s.pendingCount = typeof data2.pendingCount === "number" && isFinite(data2.pendingCount) ? Math.max(0, data2.pendingCount) : 0;
@@ -44364,11 +44382,13 @@ function chatgptPrivacyProgram(kit, makeLogic) {
   function addRule(rule) {
     if (s.saving || s.server)
       return;
-    const draft = { rules: s.rules, description: s.description, savedDescription: s.savedDescription };
-    const wasEdited = s.edited;
-    const baseline = s.rules.filter((item) => item.saved).map(ruleOut).concat(s.hidden);
-    if (!s.rules.some((item) => item.saved && identity(item) === identity(rule)))
+    const baseline = s.savedRules.slice().concat(s.hidden);
+    if (!s.savedRules.some((item) => identity(item) === identity(rule)))
       baseline.push(ruleOut(rule));
+    L.addTo(s.rules, rule);
+    L.setIntent(s.intents, rule, true);
+    changed();
+    const draft = { intents: s.intents, description: s.description, savedDescription: s.savedDescription };
     const args = { description: s.savedDescription, rules: baseline };
     if (s.revision)
       args.revision = s.revision;
@@ -44381,28 +44401,23 @@ function chatgptPrivacyProgram(kit, makeLogic) {
       s.saving = false;
       const data2 = settings(result);
       const content = result && result.structuredContent;
-      if (data2 && content && content.status === "conflict") {
-        L.addTo(s.rules, rule);
-        for (const item of s.rules)
-          if (identity(item) === identity(rule))
-            item.readded = true;
-        changed();
+      if (data2 && content && content.status === "conflict")
         return conflict(data2);
-      }
-      if (!data2 || result.isError) {
+      if (!data2 || !content || content.status !== "saved") {
         s.saveError = W.addRuleFailed;
         kit.render("privacy:save");
         return;
       }
-      for (const item of draft.rules)
-        if (identity(item) === identity(rule))
-          item.removed = false;
+      if (!L.satisfies([{ rule, present: true }], data2.rules))
+        return conflict(data2);
+      draft.intents = draft.intents.filter((intent) => identity(intent.rule) !== identity(rule));
       take(data2);
+      s.intents = draft.intents;
       const replayed = L.replay(draft, s.rules);
       s.rules = replayed.rules;
       if (replayed.description !== null)
         s.description = replayed.description;
-      s.edited = wasEdited;
+      s.edited = s.intents.length > 0 || s.description !== s.savedDescription;
       kit.remember(data2.rules.filter(validRule).length);
       kit.render("privacy:add:folder");
     }, () => {
@@ -44464,13 +44479,15 @@ function chatgptPrivacyProgram(kit, makeLogic) {
       const data2 = settings(result);
       if (data2 && content && content.status === "conflict")
         return conflict(data2);
-      if (!data2 || result.isError) {
+      if (!data2 || !content || content.status !== "saved") {
         s.saveError = W.saveFailed;
         kit.render("privacy:save");
         return;
       }
       if (confirmed)
         s.confirmation = "";
+      if (!L.satisfies(s.intents, data2.rules) || data2.description !== args.description)
+        return conflict(data2);
       kit.remember(data2.rules.filter(validRule).length);
       leave(W.saved, true);
     }, () => {
@@ -44491,8 +44508,9 @@ function chatgptPrivacyProgram(kit, makeLogic) {
     const server = s.server;
     if (!server)
       return;
-    const draft = { rules: s.rules, description: s.description, savedDescription: s.savedDescription };
+    const draft = { intents: s.intents, description: s.description, savedDescription: s.savedDescription };
     take(server);
+    s.intents = draft.intents;
     const replayed = L.replay(draft, s.rules);
     s.rules = replayed.rules;
     s.confirmStep = false;
@@ -44687,6 +44705,7 @@ function chatgptPrivacyProgram(kit, makeLogic) {
       add(li, el("p", "fname leaf muted", fill2(W.removed, { name: rule.display })));
       const undo = kit.button(W.undo, "privacy:rule:" + index, s.saving ? null : () => {
         rule.removed = false;
+        L.setIntent(s.intents, rule, true);
         changed();
         kit.render("privacy:rule:" + index);
       }, "plain");
@@ -44696,6 +44715,7 @@ function chatgptPrivacyProgram(kit, makeLogic) {
     add(li, add(el("p", "fname leaf two-line"), el("span", "two-top", rule.display), el("span", "two-bottom", kindText(rule))));
     const remove = kit.button(W.remove, "privacy:rule:" + index, s.saving ? null : () => {
       rule.removed = true;
+      L.setIntent(s.intents, rule, false);
       changed();
       s.saveError = "";
       kit.render("privacy:rule:" + index);
