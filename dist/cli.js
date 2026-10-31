@@ -144712,6 +144712,45 @@ function mountDashboardController(options) {
     if (slot)
       slot.textContent = message2;
   }
+  function errorCode2(result) {
+    const error2 = result.body.error;
+    if (!error2 || typeof error2 !== "object" || Array.isArray(error2))
+      return;
+    const code = error2.code;
+    return typeof code === "string" ? code : undefined;
+  }
+  function askLocalUnlock(form) {
+    say(form, "Unlock on this computer to save this.");
+    if (!options.transport.openLocalControls)
+      return;
+    const slot = form.querySelector("[data-action-message]");
+    if (!slot || slot.parentElement?.querySelector("[data-unlock-here]"))
+      return;
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "btn";
+    button.setAttribute("data-unlock-here", "");
+    button.textContent = "Unlock on this computer";
+    button.addEventListener("click", () => {
+      button.disabled = true;
+      (async () => {
+        let opened = false;
+        try {
+          opened = await options.transport.openLocalControls();
+        } catch {
+          opened = false;
+        }
+        if (!opened) {
+          button.disabled = false;
+          say(form, "Could not unlock. Open this dashboard in a browser on this computer and try again.");
+          return;
+        }
+        button.remove();
+        form.requestSubmit();
+      })();
+    });
+    slot.after(button);
+  }
   function errorMessage3(result) {
     const error2 = result.body.error;
     if (error2 && typeof error2 === "object" && !Array.isArray(error2)) {
@@ -145001,6 +145040,10 @@ function mountDashboardController(options) {
     }
     if (result.status === 401 || result.status === 403) {
       closeAuthorizationTab(authorizationTab);
+      if (result.status === 403 && errorCode2(result) === "mac_dashboard_only") {
+        askLocalUnlock(form);
+        return;
+      }
       if (options.authority === "worker-session") {
         csrfToken = "";
         say(form, "The control session expired — open dashboard controls again, then try again.");
