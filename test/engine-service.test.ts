@@ -512,6 +512,31 @@ if (env.LAUNCH === '0') {
     await expect(model.complete({ system: 's', prompt: 'p' } as never)).rejects.toThrow('OpenClaw CLI not found');
   });
 
+  test('engine status rejects a reachable competing worker until its own worker proves readiness', async () => {
+    const { home, checkout, bun } = fixture();
+    const launchctl = fakeLaunchctl();
+    installEngine({ platform: 'darwin', homeDir: home, exec: launchctl.exec, fromCheckout: checkout, bunBin: bun });
+    writeRemoteAccessStatus(remoteAccessDir({ HOME: home }), { ...emptyRemoteAccessStatus('relay'), pid: process.pid,
+      relay: { state: 'online', reason: null, retry_in_ms: null } });
+    const path = engineStatusPath({ HOME: home });
+    mkdirSync(join(path, '..'), { recursive: true });
+    const report = () => engineStatusReport({ homeDir: home, platform: 'darwin', env: { HOME: home }, exec: launchctl.exec,
+      openclawPath: () => undefined, fetchImpl: (async () => Response.json({ ok: true })) as unknown as typeof fetch });
+    expect((await report()).ok).toBe(false);
+    const health = (state: string, message: string | null) => writeFileSync(path, JSON.stringify({ schema: 'olympus.engine.status.v1', pid: process.pid, state: 'running', services: {
+      'olympus-worker': { state, message },
+    } }));
+    health('failing', 'Olympus worker cannot start because another process owns its data. Run olympus worker uninstall. Retrying automatically.');
+    const blocked = await report();
+    expect(blocked.ok).toBe(false);
+    expect(JSON.stringify(blocked.missing)).toContain('another process owns its data');
+    expect(JSON.stringify(blocked.missing)).toContain('olympus worker uninstall');
+    health('starting', 'Olympus worker is starting.');
+    expect((await report()).ok).toBe(false);
+    health('ok', null);
+    expect((await report()).ok).toBe(true);
+  });
+
   test('engine status says plainly that OpenClaw is not needed and what is missing', async () => {
     const { home } = fixture();
     const report = await engineStatusReport({
@@ -531,6 +556,11 @@ if (env.LAUNCH === '0') {
     const { home, checkout, bun } = fixture();
     const launchctl = fakeLaunchctl();
     installEngine({ platform: 'darwin', homeDir: home, exec: launchctl.exec, fromCheckout: checkout, bunBin: bun });
+    const statusPath = engineStatusPath({ HOME: home });
+    mkdirSync(join(statusPath, '..'), { recursive: true });
+    writeFileSync(statusPath, JSON.stringify({ schema: 'olympus.engine.status.v1', pid: process.pid, state: 'running', services: {
+      'olympus-worker': { state: 'ok', message: null },
+    } }));
     const report = () => engineStatusReport({
       homeDir: home,
       platform: 'darwin',

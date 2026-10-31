@@ -108,6 +108,8 @@ export interface NativeProcessStartSettings {
   endpointOccupied: boolean;
   /** Per-child readiness probe. `true` means this exact instance is serving. */
   readinessProbe(child: ChildProcess): Promise<boolean>;
+  /** Safe, categorical startup diagnosis from a child exit (never stderr). */
+  startupFailure?(child: ChildProcess): NativeProcessRetryableStartError | undefined;
 }
 
 export interface NativeProcessStartInput<TSettings extends NativeProcessStartSettings> {
@@ -196,6 +198,7 @@ interface ServiceLifetime<TSettings extends NativeProcessStartSettings> {
   context: NativeProcessServiceContext;
   child: ChildProcess | undefined;
   childReady: boolean;
+  startupFailure: string | undefined;
   stopping: boolean;
   restartAttempt: number;
   /** Deliberate self-restarts that skipped the backoff since the last stable uptime. */
@@ -223,6 +226,9 @@ export class NativeProcessServiceStoppedError extends Error {}
  * verbatim, unlike raw spawn/HTTP failures.
  */
 export class NativeProcessConfigurationError extends Error {}
+
+/** A positively identified temporary failure safe to keep visible while retrying. */
+export class NativeProcessRetryableStartError extends Error {}
 
 /** The child accepted the forced kill but has not exited; custody is kept. */
 class NativeProcessChildAliveError extends Error {
@@ -354,11 +360,19 @@ export function createNativeProcessService<TSettings extends NativeProcessStartS
         // Never spawn over a failed start's child that is still alive: wait
         // until its exit is confirmed, however long the cleanup takes.
         if (!await stopFailedStart(lifetime)) return;
-        reportFailure(lifetime, `Olympus ${options.label} failed to become ready.`);
-        scheduleRestart(lifetime);
+        reportStartFailure(lifetime, error);
+        if (!(error instanceof NativeProcessConfigurationError)) scheduleRestart(lifetime);
       });
     }, delay);
     lifetime.restartTimer.unref?.();
+  };
+
+  const reportStartFailure = (lifetime: ServiceLifetime<TSettings>, error: unknown): string => {
+    if (error instanceof NativeProcessRetryableStartError) lifetime.startupFailure = error.message;
+    const message = error instanceof NativeProcessConfigurationError ? error.message
+      : lifetime.startupFailure ?? `Olympus ${options.label} failed to become ready.`;
+    reportFailure(lifetime, message);
+    return message;
   };
 
   /**
@@ -443,7 +457,7 @@ export function createNativeProcessService<TSettings extends NativeProcessStartS
     if (settings.endpointOccupied) {
       throw new Error(`Olympus ${options.label} endpoint is already occupied.`);
     }
-    reportFailure(lifetime, `Olympus ${options.label} is starting.`);
+    if (!lifetime.startupFailure) reportFailure(lifetime, `Olympus ${options.label} is starting.`);
     if (!isCurrent(lifetime)) throw new NativeProcessServiceStoppedError();
     const child = spawnChild(settings.command, [...settings.args], {
       env: settings.env,
@@ -503,16 +517,21 @@ export function createNativeProcessService<TSettings extends NativeProcessStartS
       // platform errors can include command arguments and environment detail.
     });
 
-    const outcome = await waitForChildReadiness({
-      lifetime,
-      child,
-      settings,
-      isCurrent,
-      startupTimeoutMs: options.startupTimeoutMs ?? settings.startupTimeoutMs,
-      readinessPollMs,
-      restartOnCleanExit,
-      spawnFailed: () => spawnFailed,
-    });
+    let outcome: 'ready' | 'cleanCompletion';
+    try {
+      outcome = await waitForChildReadiness({
+        lifetime,
+        child,
+        settings,
+        isCurrent,
+        startupTimeoutMs: options.startupTimeoutMs ?? settings.startupTimeoutMs,
+        readinessPollMs,
+        restartOnCleanExit,
+        spawnFailed: () => spawnFailed,
+      });
+    } catch (error) {
+      throw settings.startupFailure?.(child) ?? error;
+    }
     if (!isCurrent(lifetime) || lifetime.child !== child) throw new NativeProcessServiceStoppedError();
     if (outcome === 'cleanCompletion' || (!restartOnCleanExit && !spawnFailed && isCleanExit(child))) {
       await completeCleanExit(lifetime, child);
@@ -531,6 +550,7 @@ export function createNativeProcessService<TSettings extends NativeProcessStartS
       lifetime.restartAttempt = 0;
       lifetime.fastRestarts = 0;
     }
+    lifetime.startupFailure = undefined;
     clearFailure(lifetime);
     lifetime.context.logger?.info?.(`Olympus ${options.label} is ready.`);
   };
@@ -548,6 +568,7 @@ export function createNativeProcessService<TSettings extends NativeProcessStartS
         context,
         child: undefined,
         childReady: false,
+        startupFailure: undefined,
         stopping: false,
         restartAttempt: 0,
         fastRestarts: 0,
@@ -561,12 +582,13 @@ export function createNativeProcessService<TSettings extends NativeProcessStartS
         await launch(lifetime);
       } catch (error) {
         if (error instanceof NativeProcessServiceStoppedError) return;
-        await stopChild(lifetime);
-        const message = error instanceof NativeProcessConfigurationError
-          ? error.message
-          : `Olympus ${options.label} failed to become ready.`;
-        reportFailure(lifetime, message);
-        if (current === lifetime) current = undefined;
+        // Keep the lifetime after an initial failure, just as after a failed
+        // restart. Cleanup retains custody until the direct child is gone.
+        if (!await stopFailedStart(lifetime)) return;
+        const message = reportStartFailure(lifetime, error);
+        if (error instanceof NativeProcessConfigurationError) {
+          if (current === lifetime) current = undefined;
+        } else scheduleRestart(lifetime);
         throw new NativeProcessReportedStartError(message);
       }
     },

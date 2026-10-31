@@ -1,3 +1,4 @@
+import { WORKER_DATA_OWNER_BUSY_EXIT_CODE } from './data-owner-lock.ts';
 import { OWNER_BRIDGE_HOST_ENV } from './linux-owner-bridge-host.ts';
 import { removeReleasedWorkerSocket, workerFetch } from './worker-transport.ts';
 import type { ChildProcess } from 'node:child_process';
@@ -9,6 +10,7 @@ import { configFromPluginConfig, NATIVE_REMOTE_CONFIG_ENV, type OlympusConfig } 
 import {
   createNativeProcessService,
   NativeProcessConfigurationError,
+  NativeProcessRetryableStartError,
   type NativeProcessServiceContext,
   type NativeProcessServiceDefinition,
   type NativeProcessServiceHealth,
@@ -17,6 +19,10 @@ import {
 } from './native-process-service.ts';
 import { NATIVE_CAPTURE_OWNER_ENV_NAMES } from './olympus-layout.ts';
 import { applyWorkerSetupEnv, workerAuthTokenFromConfig } from './worker-auth.ts';
+
+export const WORKER_DATA_OWNER_CONFLICT_MESSAGE = 'Olympus worker cannot start because another process owns its data. Run olympus worker uninstall to remove an older worker service; otherwise stop the competing Olympus process. Retrying automatically.';
+
+export const WORKER_ENDPOINT_CONFLICT_MESSAGE = 'Olympus worker cannot start because another process owns its endpoint. Run olympus worker uninstall to remove an older worker service; otherwise stop the competing process. Retrying automatically.';
 
 const SERVICE_ID = 'olympus-worker';
 const SERVICE_LABEL = 'worker';
@@ -174,6 +180,7 @@ async function prepareWorkerStart(
   // when bounding the individual readiness probe against the start deadline.
   const effectiveStartupTimeoutMs = worker.startupTimeoutMs ?? startupTimeoutMs;
   const endpointOccupied=await workerEndpointIsOccupied(worker.fetchWorker,settings.readinessUrl);
+  if (endpointOccupied) throw new NativeProcessRetryableStartError(WORKER_ENDPOINT_CONFLICT_MESSAGE);
   if(process.platform==='linux'&&worker.fetchWorker===workerFetch&&!endpointOccupied&&input.previousChildReleased){
     removeReleasedWorkerSocket({platform:'linux',env:settings.env},{previousWorkerReleased:true});
   }
@@ -183,6 +190,8 @@ async function prepareWorkerStart(
     command: settings.runtimePath,
     args: ['--no-env-file', settings.executablePath, '__worker-service-run', settings.instanceId],
     endpointOccupied,
+    startupFailure: child => child.exitCode === WORKER_DATA_OWNER_BUSY_EXIT_CODE
+      ? new NativeProcessRetryableStartError(WORKER_DATA_OWNER_CONFLICT_MESSAGE) : undefined,
     readinessProbe: () => authenticatedReadinessProbe(
       worker.fetchWorker,
       settings.readinessUrl,

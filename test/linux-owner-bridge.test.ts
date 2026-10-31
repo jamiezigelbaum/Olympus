@@ -2,6 +2,7 @@ import { afterEach, expect, spyOn, test } from 'bun:test';
 import { mkdtempSync, readFileSync, rmSync, statSync, existsSync, chmodSync, writeFileSync, symlinkSync } from 'node:fs';
 import * as fs from 'node:fs';
 import { tmpdir } from 'node:os';
+import { runInNewContext } from 'node:vm';
 import { join } from 'node:path';
 import { LinuxOwnerBridge, manageLinuxOwnerBridge, randomOwnerHostname } from '../src/core/linux-owner-bridge.ts';
 import { prepareWorkerSocket, bindWorkerSocket } from '../src/core/worker-transport.ts';
@@ -370,6 +371,39 @@ test('Linux dashboard cookie and CSRF survive worker auth-wrapper reload behind 
   expect((await next.handle(request('/dashboard/control/session/lock', { method: 'POST', headers: { ...headers, Origin: next.origin, 'X-Olympus-CSRF': csrf } }))).status).toBe(200);
 });
 
+test('engine-hosted dashboard waiting page reports a data-owner conflict and clears after readiness', async () => {
+  const f = fixture(); let ready = false;
+  const bridge = new LinuxOwnerBridge({ ...f.options, workerReady: () => ready, workerConflict: () => ready ? undefined : 'data' });
+  cleanup.push(() => bridge.close());
+  await bridge.openTicket('/dashboard');
+  const response = await bridge.handle(new Request(bridge.origin + '/dashboard', { headers: { Host: new URL(bridge.origin).host } }));
+  expect(response.status).toBe(503);
+  expect(response.headers.get('X-Olympus-Worker-Conflict')).toBe('data');
+  expect(await response.text()).toContain('olympus worker uninstall');
+  // The private ticket waits for the challenge before navigation; it must
+  // show the conflict there too, rather than loop forever on 'restarting'.
+  expect(readFileSync(f.opened(), 'utf8')).toContain('X-Olympus-Worker-Conflict');
+  const proof = await bridge.handle(new Request(bridge.origin + '/owner-proof', { headers: { Host: new URL(bridge.origin).host } }));
+  const proofHtml = await proof.text();
+  expect(proofHtml).toContain('X-Olympus-Worker-Conflict');
+  for (const html of [readFileSync(f.opened(), 'utf8'), proofHtml]) {
+    const message = { textContent: '' };
+    const script = html.match(/<script>([\s\S]*?)<\/script>/)![1]!;
+    // Exercise the emitted waiting script with the real 503 headers. Keep its
+    // retry timer pending so it cannot navigate or spend a ticket in this test.
+    runInNewContext(script, { document: { getElementById: () => message },
+      location: { hash: '#fixture', pathname: '/owner-proof' }, history: { replaceState() {} },
+      fetch: async () => new Response(null, { status: 503, headers: { 'Retry-After': '1', 'X-Olympus-Worker-Conflict': 'data' } }),
+      setTimeout() {} });
+    await Bun.sleep(0);
+    expect(message.textContent).toContain('another process owns its data');
+    expect(message.textContent).toContain('olympus worker uninstall');
+  }
+  ready = true;
+  const after = await bridge.handle(new Request(bridge.origin + '/dashboard', { headers: { Host: new URL(bridge.origin).host } }));
+  expect(await after.text()).not.toContain('olympus worker uninstall');
+});
+
 test('listener challenge authenticates only the live ticket, including restart retries', async () => {
   const f = fixture(); let workerReady = false;
   const bridge = new LinuxOwnerBridge({ ...f.options, workerReady: () => workerReady });
@@ -382,12 +416,12 @@ test('listener challenge authenticates only the live ticket, including restart r
   const retry = await get('/owner-proof?challenge=' + challenge);
   expect(retry.status).toBe(503);
   expect(retry.headers.get('Access-Control-Allow-Origin')).toBe('*');
-  expect(retry.headers.get('Access-Control-Expose-Headers')).toBe('Retry-After');
+  expect(retry.headers.get('Access-Control-Expose-Headers')).toBe('Retry-After, X-Olympus-Worker-Conflict');
   expect(await retry.text()).not.toContain(ticket);
   // Navigation must load the ticket redemption logic even during a restart.
   const navigation = await get('/owner-proof');
   expect(navigation.status).toBe(200);
-  expect(await navigation.text()).toContain('Olympus is restarting…');
+  expect(await navigation.text()).toContain('Olympus is restarting');
   workerReady = true;
   const { createHmac } = await import('node:crypto');
   const answer = createHmac('sha256', ticket).update(challenge).digest('base64url');

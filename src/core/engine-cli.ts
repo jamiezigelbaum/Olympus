@@ -15,6 +15,7 @@ import { engineBriefReport } from './engine-brief.ts';
 import { engineStatusPath, type EngineStatusFile } from './engine-host.ts';
 import {
   engineConflictWarnings,
+  readEngineWorkerHealth,
   enginePaths,
   engineServicePaths,
   waitForEngineHealthy,
@@ -250,7 +251,11 @@ export async function engineStatusReport(deps: EngineCliDeps = {}): Promise<Reco
   const openclaw = (deps.openclawPath ?? (() => resolveOpenClawExecutable({ env, homeDir })))();
   const worker = await probeWorker(deps.fetchImpl ?? workerFetch, baseUrl, paths.linux?.workerSocketPath);
   const linuxHealth = paths.linux ? await waitForEngineHealthy({ paths, expectedBuild: linuxInstalledBuild({ ...deps, homeDir }) }, { ...deps.health, timeoutMs: 0, fetchImpl: deps.fetchImpl, exec: deps.exec }) : undefined;
+  const engineWorker = readEngineWorkerHealth(env);
+  const workerProblem = agent.state === 'running' && engineWorker?.state !== 'ok'
+    ? engineWorker?.message ?? 'The engine worker is not ready yet: see olympus engine logs.' : undefined;
   const missing: string[] = [];
+  if (workerProblem) missing.push(workerProblem);
   if (linuxHealth && !linuxHealth.ok) missing.push(linuxHealth.reason ?? 'Linux engine health is unknown.');
   if (!agent.installed) missing.push('The engine agent is not installed: run olympus engine install.');
   else if (agent.state === 'not_loaded') missing.push('The engine agent is installed but not loaded: run olympus engine install.');
@@ -273,7 +278,7 @@ export async function engineStatusReport(deps: EngineCliDeps = {}): Promise<Reco
     missing.push('Remote access is on but the relay process is not running: see olympus engine logs, or run olympus engine restart.');
   }
   return {
-    ok: (!linuxHealth || linuxHealth.ok) && agent.state === 'running' && worker.reachable && !configError && !helperUnused && !helperGone && (remoteMode.mode !== 'relay' || relayRunning),
+    ok: !workerProblem && (!linuxHealth || linuxHealth.ok) && agent.state === 'running' && worker.reachable && !configError && !helperUnused && !helperGone && (remoteMode.mode !== 'relay' || relayRunning),
     host: openclaw
       ? { mode: 'standalone', openclaw: 'installed (optional; not used by the engine)', openclaw_path: openclaw }
       : { mode: 'standalone', openclaw: 'not installed (not needed)' },
