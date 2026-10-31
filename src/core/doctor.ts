@@ -166,6 +166,7 @@ export async function defaultDoctorHostProbe(
   options: { insideOpenClaw?: boolean } = {},
 ): Promise<DoctorHostFacts> {
   const home = env.HOME?.trim() || homedir();
+  const paths = engineServicePaths({ homeDir: home, env });
   const openclawPath = resolveOpenClawExecutable({ env, homeDir: home });
   const engine = (process.platform === 'darwin' || process.platform === 'linux')
     ? inspectEngine({ homeDir: home, env })
@@ -173,10 +174,10 @@ export async function defaultDoctorHostProbe(
   const legacyWorkerUnit = process.platform === 'darwin' || process.platform === 'linux'
     ? existsSync(workerServicePaths(process.platform, home).unitPath)
     : false;
-  const health = process.platform === 'linux' && engine.installed ? await waitForEngineHealthy({ paths: engineServicePaths({ homeDir: home, env }), expectedBuild: linuxInstalledBuild({ homeDir: home, env }) }, { timeoutMs: 0 }) : undefined;
+  const health = process.platform === 'linux' && engine.installed ? await waitForEngineHealthy({ paths, expectedBuild: linuxInstalledBuild({ homeDir: home, env }) }, { timeoutMs: 0 }) : undefined;
   return {
     ...(openclawPath ? { openclawPath } : {}),
-    engine: { installed: engine.installed, state: engine.state, ...(engine.state === 'running' ? { workerProblem: readEngineWorkerProblem({ ...env, HOME: home }) } : {}), ...(process.platform === 'linux' ? { healthy: (health?.ok ?? false) && readEngineLinger() === true, detail: health?.reason ?? ('detail' in engine ? engine.detail : ''), linger: readEngineLinger() } : {}) },
+    engine: { installed: engine.installed, state: engine.state, ...(engine.state === 'running' ? { workerProblem: readEngineWorkerProblem(paths.statusPath) } : {}), ...(process.platform === 'linux' ? { healthy: (health?.ok ?? false) && readEngineLinger() === true, detail: health?.reason ?? ('detail' in engine ? engine.detail : ''), linger: readEngineLinger() } : {}) },
     legacyWorkerUnit,
     ...(options.insideOpenClaw ? { insideOpenClaw: true } : {}),
   };

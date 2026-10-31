@@ -23,6 +23,7 @@ import {
   parseLaunchctlPrint,
   preflightEnginePaths,
   readEngineLogs,
+  readEngineWorkerProblem,
   reconcileEngineConfig,
   renderEnginePlist,
   restartEngine,
@@ -582,6 +583,8 @@ if (env.LAUNCH === '0') {
       const blocked = await report();
       expect(blocked.ok).toBe(false);
       expect(blocked.missing).toContain('Actual worker data conflict');
+      // Doctor's problem reader must use the same resolved service path.
+      expect(readEngineWorkerProblem(statusPath)).toBe('Actual worker data conflict');
     });
   }
 

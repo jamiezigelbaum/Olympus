@@ -162,8 +162,8 @@ export function readEngineWorkerHealth(statusPath: string): { state: string; mes
   } catch { return undefined; }
 }
 
-export function readEngineWorkerProblem(env: Record<string, string | undefined> = process.env): string | undefined {
-  const worker = readEngineWorkerHealth(engineStatusPath(env));
+export function readEngineWorkerProblem(statusPath: string): string | undefined {
+  const worker = readEngineWorkerHealth(statusPath);
   return worker?.state === 'failing' ? worker.message ?? 'The engine worker failed to become ready.' : undefined;
 }
 

@@ -29431,8 +29431,8 @@ function readEngineWorkerHealth(statusPath) {
     return;
   }
 }
-function readEngineWorkerProblem(env = process.env) {
-  const worker = readEngineWorkerHealth(engineStatusPath(env));
+function readEngineWorkerProblem(statusPath) {
+  const worker = readEngineWorkerHealth(statusPath);
   return worker?.state === "failing" ? worker.message ?? "The engine worker failed to become ready." : undefined;
 }
 function readEngineConfig(path) {
@@ -31949,13 +31949,14 @@ function errorCode(error) {
 // src/core/doctor.ts
 async function defaultDoctorHostProbe(env = process.env, options = {}) {
   const home = env.HOME?.trim() || homedir17();
+  const paths = engineServicePaths({ homeDir: home, env });
   const openclawPath = resolveOpenClawExecutable({ env, homeDir: home });
   const engine = process.platform === "darwin" || process.platform === "linux" ? inspectEngine({ homeDir: home, env }) : { installed: false, state: "not_loaded" };
   const legacyWorkerUnit = process.platform === "darwin" || process.platform === "linux" ? existsSync21(workerServicePaths(process.platform, home).unitPath) : false;
-  const health = process.platform === "linux" && engine.installed ? await waitForEngineHealthy({ paths: engineServicePaths({ homeDir: home, env }), expectedBuild: linuxInstalledBuild({ homeDir: home, env }) }, { timeoutMs: 0 }) : undefined;
+  const health = process.platform === "linux" && engine.installed ? await waitForEngineHealthy({ paths, expectedBuild: linuxInstalledBuild({ homeDir: home, env }) }, { timeoutMs: 0 }) : undefined;
   return {
     ...openclawPath ? { openclawPath } : {},
-    engine: { installed: engine.installed, state: engine.state, ...engine.state === "running" ? { workerProblem: readEngineWorkerProblem({ ...env, HOME: home }) } : {}, ...process.platform === "linux" ? { healthy: (health?.ok ?? false) && readEngineLinger() === true, detail: health?.reason ?? ("detail" in engine ? engine.detail : ""), linger: readEngineLinger() } : {} },
+    engine: { installed: engine.installed, state: engine.state, ...engine.state === "running" ? { workerProblem: readEngineWorkerProblem(paths.statusPath) } : {}, ...process.platform === "linux" ? { healthy: (health?.ok ?? false) && readEngineLinger() === true, detail: health?.reason ?? ("detail" in engine ? engine.detail : ""), linger: readEngineLinger() } : {} },
     legacyWorkerUnit,
     ...options.insideOpenClaw ? { insideOpenClaw: true } : {}
   };
