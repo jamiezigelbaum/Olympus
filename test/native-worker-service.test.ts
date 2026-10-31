@@ -2,6 +2,8 @@ import { afterEach, describe, expect, setDefaultTimeout, test } from 'bun:test';
 import { appendFileSync, chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { holdDataOwnerLock } from '../src/core/data-owner-lock.ts';
 import {
   createNativeWorkerService as createWorkerService,
   type NativeWorkerServiceDefinition,
@@ -25,6 +27,30 @@ afterEach(async () => {
 });
 
 describe('native Olympus worker service', () => {
+  test('keeps retrying a data-owner conflict, reports it until its own worker is ready, and cancels on stop', async () => {
+    const fixture = fakeWorkerFixture({ dataLock: true });
+    const lock = holdDataOwnerLock({ HOME: fixture.root });
+    const events: string[] = [];
+    const service = track(createNativeWorkerService({
+      initialPluginConfig: fixture.pluginConfig(true), moduleUrl: import.meta.url,
+      startupTimeoutMs: 2_000, readinessPollMs: 10, stopGraceMs: 20,
+      restartDelaysMs: [20], workerEnvPath: fixture.envFilePath, engineHosted: true,
+    }));
+    try {
+      await expect(service.start({ serviceHealth: healthRecorder(events) })).rejects.toThrow('another process owns its data');
+      await waitUntil(() => events.filter(event => event.includes('another process owns its data')).length >= 2);
+      expect(service.isReady()).toBe(false);
+      expect(events).not.toContain('clear');
+      lock.release();
+      await waitUntil(() => service.isReady());
+      expect(events.at(-1)).toBe('clear');
+      await service.stop();
+      const count = readCount(fixture.countPath);
+      await Bun.sleep(100);
+      expect(readCount(fixture.countPath)).toBe(count);
+    } finally { lock.release(); }
+  });
+
   test('disabled service does not launch a child', async () => {
     const fixture = fakeWorkerFixture();
     const service = track(createNativeWorkerService({
@@ -409,15 +435,54 @@ describe('native Olympus worker service', () => {
     }));
     try {
       await expect(service.start({ serviceHealth: healthRecorder(events) }))
-        .rejects.toThrow('Olympus worker failed to become ready.');
-      expect(events).toEqual(['failure:Olympus worker failed to become ready.']);
+        .rejects.toThrow('another process owns its endpoint');
+      expect(events[0]).toContain('another process owns its endpoint');
       expect(readCount(fixture.countPath)).toBe(0);
     } finally {
       existing.stop(true);
     }
   });
 
-  test('fails startup when the spawned child exits before readiness', async () => {
+  test('keeps a healthy competing worker untouched, retries its occupied endpoint, and recovers when it leaves', async () => {
+    const fixture = fakeWorkerFixture();
+    const existing = Bun.serve({ hostname: '127.0.0.1', port: fixture.port,
+      fetch: () => Response.json({ ok: true, instance_id: 'legacy-worker' }) });
+    const events: string[] = [];
+    const service = track(createNativeWorkerService({ initialPluginConfig: fixture.pluginConfig(true),
+      moduleUrl: import.meta.url, startupTimeoutMs: 2_000, readinessPollMs: 10, stopGraceMs: 20,
+      restartDelaysMs: [20], workerEnvPath: fixture.envFilePath, engineHosted: true }));
+    try {
+      await expect(service.start({ serviceHealth: healthRecorder(events) })).rejects.toThrow('another process owns its endpoint');
+      await waitUntil(() => events.filter(event => event.includes('owns its endpoint')).length >= 2);
+      expect(service.isReady()).toBe(false);
+      expect(readCount(fixture.countPath)).toBe(0);
+      expect(events).not.toContain('clear');
+      expect((await fetch(`http://127.0.0.1:${fixture.port}/v1/health`)).ok).toBe(true);
+      existing.stop(true);
+      await waitUntil(() => service.isReady());
+      expect(events.at(-1)).toBe('clear');
+    } finally { existing.stop(true); }
+  });
+
+  test('stop cancels a pending startup retry', async () => {
+    const fixture = fakeWorkerFixture();
+    const existing = Bun.serve({ hostname: '127.0.0.1', port: fixture.port, fetch: () => new Response('occupied') });
+    let probes = 0;
+    const service = track(createNativeWorkerService({ initialPluginConfig: fixture.pluginConfig(true),
+      moduleUrl: import.meta.url, restartDelaysMs: [20], workerEnvPath: fixture.envFilePath,
+      fetch: (async (...args: Parameters<typeof fetch>) => { probes++; return fetch(...args); }) as typeof fetch }));
+    try {
+      await expect(service.start({})).rejects.toThrow('owns its endpoint');
+      await service.stop();
+      const stoppedProbes = probes;
+      existing.stop(true);
+      await Bun.sleep(100);
+      expect(probes).toBe(stoppedProbes);
+      expect(readCount(fixture.countPath)).toBe(0);
+    } finally { existing.stop(true); }
+  });
+
+  test('retries startup when the spawned child exits before readiness', async () => {
     const fixture = fakeWorkerFixture({ exitBeforeServe: true });
     const events: string[] = [];
     const service = track(createNativeWorkerService({
@@ -434,8 +499,9 @@ describe('native Olympus worker service', () => {
       .rejects.toThrow('Olympus worker failed to become ready.');
     await Bun.sleep(80);
 
-    expect(readCount(fixture.countPath)).toBe(1);
-    expect(events).toEqual(['failure:Olympus worker is starting.', 'failure:Olympus worker failed to become ready.']);
+    expect(readCount(fixture.countPath)).toBeGreaterThan(1);
+    expect(events).toContain('failure:Olympus worker failed to become ready.');
+    expect(events).not.toContain('clear');
   });
 
   test('reconstructs child resources across repeated start and stop calls', async () => {
@@ -461,7 +527,7 @@ describe('native Olympus worker service', () => {
   });
 });
 
-function fakeWorkerFixture(options: { spawnDescendant?: boolean; exitBeforeServe?: boolean } = {}): {
+function fakeWorkerFixture(options: { spawnDescendant?: boolean; exitBeforeServe?: boolean; dataLock?: boolean } = {}): {
   root: string;
   port: number;
   token: string;
@@ -484,7 +550,11 @@ function fakeWorkerFixture(options: { spawnDescendant?: boolean; exitBeforeServe
   const configEnvPath = join(root, 'config-env.json');
   const port = reservePort();
   const token = 'native-worker-test-token';
-  writeFileSync(scriptPath, fakeWorkerSource(), { mode: 0o700 });
+  writeFileSync(scriptPath, (options.dataLock
+    ? `import { takeWorkerDataOwnerLock } from ${JSON.stringify(fileURLToPath(new URL('../src/core/data-owner-lock.ts', import.meta.url)))};
+const ownerLock = takeWorkerDataOwnerLock({ HOME: ${JSON.stringify(root)} }, { waitMs: 20 });
+`
+    : '') + fakeWorkerSource(), { mode: 0o700 });
   writeFileSync(envFilePath, [
     `OLYMPUS_EMAIL_SOURCE_PORT=${port}`,
     `OLYMPUS_WORKER_AUTH_TOKEN=${token}`,

@@ -44,7 +44,10 @@ describe('first-run docs', () => {
 
     const normalizedInstall = install.replace(/>\s*/g, '').replace(/\s+/g, ' ');
     expect(normalizedInstall).toContain('So tell me about your data: what do you want your assistant to know about, and what are you protective of?');
-    expect(install.indexOf('Only after the operator confirms, ask the posture question.')).toBeLessThan(install.indexOf('How do you want to handle your Private data?'));
+    const confirmed = install.indexOf('Only after the operator confirms, run `olympus setup --privacy-options`.');
+    const choice = install.indexOf('operator which option they want.');
+    expect(confirmed).toBeGreaterThan(0);
+    expect(choice).toBeGreaterThan(confirmed);
     expect(install).not.toContain('\nolympus sensitivity validate');
     expect(install).toContain('Gmail already lives on Google\'s servers');
     expect(normalizedInstall).toContain('Default categories to **Private** unless the operator explicitly says **Secrets**');
@@ -94,7 +97,9 @@ describe('first-run docs', () => {
     expect(install).toContain('Required user-facing tier explanation');
     expect(install).toContain('before asking any privacy or posture question');
     expect(install.indexOf(scripts[0]![0]!)).toBeLessThan(install.indexOf(scripts[1]![0]!));
-    expect(install.indexOf(scripts[1]![0]!)).toBeLessThan(install.indexOf('> Do you run local AI models'));
+    const sharedOptions = install.indexOf('Only after the operator confirms, run `olympus setup --privacy-options`.');
+    expect(sharedOptions).toBeGreaterThan(0);
+    expect(install.indexOf(scripts[1]![0]!)).toBeLessThan(sharedOptions);
   });
 
   test('base activation precedes optional source choice and source answer proof', () => {
@@ -133,15 +138,22 @@ describe('first-run docs', () => {
     }
   });
 
-  test('Venice option distinguishes Private search from Public and Personal embeddings', () => {
-    const install = readFileSync(join(ROOT, 'INSTALL_FOR_AGENTS.md'), 'utf8');
-    const posture = install.slice(install.indexOf('> 3. **Venice**'), install.indexOf("> 4. **Private meaning search on this computer**"))
-      .replace(/>\s*/g, '').replace(/\s+/g, ' ');
-    expect(posture).toContain('Private content goes only to Venice');
-    expect(posture).toContain('Search indexing for every tier uses the model built into Olympus');
-    expect(posture).toContain('separately approved Venice Private embedding model stays an opt-in');
-    expect(posture).toContain('Private content never goes to Gemini');
-    expect(posture).not.toContain('Private cloud only');
+  test('installer uses the shared first-run options and keeps the documented embedding boundary', () => {
+    const install = readFileSync(join(ROOT, 'INSTALL_FOR_AGENTS.md'), 'utf8').replace(/\s+/g, ' ');
+    expect(install).toContain('If it says `configured`, their policy is already chosen');
+    expect(install).toContain('do not ask this first-run question again');
+    expect(install).toContain("present every option's label and description exactly as the command returns them");
+    expect(install).toContain('`local-first` marked Recommended');
+    expect(install).toContain('Never infer consent from the recommendation');
+    expect(install).toContain('The option text comes from the same source as both setup panels');
+    // The shared option text replaced the duplicated numbered walkthrough.
+    // Its detailed search/answer distinction remains in the product guide.
+    const guide = readFileSync(join(ROOT, 'README.md'), 'utf8').replace(/\s+/g, ' ');
+    expect(guide).toContain('Venice answers Private questions');
+    expect(guide).toContain('Search indexing for every tier uses EmbeddingGemma 2');
+    expect(guide).toContain('built into Olympus');
+    expect(guide).toContain('Venice Private embeddings stay an opt-in choice');
+    expect(guide).toContain('Private content never goes to Gemini');
   });
 
   test('native dashboard guidance checks artifact support and preserves standalone authentication', () => {

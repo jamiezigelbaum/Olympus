@@ -369,6 +369,37 @@ that opens files inside an account folder:
   connection, inside `local-index.ts`, of a store the service opened.
 - Search keeps reading disconnected accounts' stores ("Disconnected ·
   indexed data kept"), because they stay `active` until deleted.
+- Absent lanes are opened on demand (2026-10-31, #615). Boot opens existing
+  stores and tier sidecars, including disconnected history, and mounts a
+  connected source when it needs its lane. A disconnected source with no
+  remaining data creates no store or tier sidecar at boot, on status, or on
+  search. Connecting or importing later mounts the real lane, registers its
+  shared ledger and readers, and makes its extraction runner available in the
+  same worker. Store declarations used by readers wait for an existing store. A
+  deleted, disconnected source therefore stays absent across restart.
+  Status, search and answers discover newly ingested declared stores even
+  without the scheduler; declarations only fill missing principals and account
+  scopes, never replace the source lane's authority. Declarations are validated
+  once, failures report once per declaration, and reads probe only pending files;
+  ownership scans run when a file appears or the mounted roster changes. Enabled
+  archive targets register before pairing and resolve their source lane only
+  when an import uses it; disabling Telegram keeps its exports under Archives.
+  An individually enabled file lane retains extraction when search is disabled.
+  Local-files own-root cleanup starts with its lane, including without an approved
+  scope. Startup waits for one bounded run, but a run's time/count limit or an
+  unfinished locator index never opens reads. A cancellable background recovery
+  backfills locator indexes in bounded windows and resumes cleanup, even with the
+  scheduler off. Search, status and extraction stay closed until cleanup reports
+  complete; persistent failures keep the local-files lane unavailable while
+  retries continue. Only confirmed deletions count as recovery progress; failed
+  deletions back off and report once. A failed row does not stop later pages,
+  folders or tiers: bounded passes retain page position and retry failed walks
+  only after the whole walk cycle finishes. Locator readiness is checked through the
+  walk and before completion. Every pull still waits for the cleanup run and idle
+  barrier.
+  Shutdown stops scheduler/adoption work before closing extraction queues, and a
+  closed extraction runtime cannot create a runner for a later source. Retained
+  archive targets cannot open a source lane after shutdown begins.
 
 **Owner lock.** The worker takes an exclusive kernel lock (`flock(2)` on
 `<data>/data-owner.lock`, released by the kernel on death;

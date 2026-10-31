@@ -40,9 +40,9 @@ import {
   type NativeProcessServiceDefinition,
 } from './native-process-service.ts';
 import { createNativeRelayService } from './native-relay-service.ts';
-import { createNativeWorkerService } from './native-worker-service.ts';
+import { createNativeWorkerService, WORKER_DATA_OWNER_CONFLICT_MESSAGE, WORKER_ENDPOINT_CONFLICT_MESSAGE, WORKER_SOCKET_RETAINED_MESSAGE } from './native-worker-service.ts';
 import { resolveRemoteAccessMode } from './remote-access.ts';
-import { createWorkerFetch, prepareWorkerSocket, removeReleasedWorkerSocket } from './worker-transport.ts';
+import { createWorkerFetch, prepareWorkerSocket, removeReleasedWorkerSocket, validateWorkerSocketDirectory } from './worker-transport.ts';
 
 export const ENGINE_STATUS_SCHEMA = 'olympus.engine.status.v1';
 /** EX_CONFIG: launchd's throttle keeps a misconfigured engine from spinning. */
@@ -155,7 +155,10 @@ export async function startEngineHost(options: EngineHostOptions): Promise<Engin
     const workerGroups=recordedBeforeReap?.children.filter(child=>child.service==='olympus-worker')??[];
     const workerReleased=workerGroups.length>0&&workerGroups.every(child=>reaped.stopped.some(entry=>entry.pgid===child.pgid)
       ||reaped.skipped.some(entry=>entry.pgid===child.pgid&&['gone','not_ours'].includes(entry.reason)));
-    try { removeReleasedWorkerSocket({platform:'linux',env:dataEnv},{previousWorkerReleased:workerReleased}); }
+    // Only unlink a socket belonging to a released child of this engine. A
+    // legacy service's socket stays untouched while supervision reports and
+    // retries the conflict; it is never adopted or treated as our readiness.
+    try { if (workerReleased) removeReleasedWorkerSocket({platform:'linux',env:dataEnv},{previousWorkerReleased:true}); }
     catch(error){log(`engine: retained worker socket because prior process custody is not released: ${error instanceof Error?error.message:'unknown error'}`);exit(EXIT_CONFIG);return undefined;}
   }
   const allRecordedReleased=(recordedBeforeReap?.children??[]).every(child=>reaped.stopped.some(entry=>entry.pgid===child.pgid)
@@ -261,7 +264,15 @@ export async function startEngineHost(options: EngineHostOptions): Promise<Engin
   // touches the worker socket.
   if (paths.linux && !stopping && pluginConfig && enabled['olympus-worker'] !== false) {
     const transport = { platform: 'linux', env: dataEnv };
-    const socketPath = prepareWorkerSocket(transport)!;
+    // The bridge binds its own control socket, never the worker socket. An
+    // existing validated directory is enough even while a legacy listener is
+    // present; prepare creates that directory only on a fresh install.
+    let socketPath: string;
+    try { socketPath = validateWorkerSocketDirectory(transport)!; }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      socketPath = prepareWorkerSocket(transport)!;
+    }
     const config = configFromPluginConfig(pluginConfig, { requireResolvedWorkerSecrets: false });
     const port = Number(new URL(config.email.baseUrl).port || 80);
     // The bridge forwards every browser request as this origin
@@ -275,19 +286,31 @@ export async function startEngineHost(options: EngineHostOptions): Promise<Engin
         const desktop = options.desktop?.ready ? { ready: await options.desktop.ready() } : await linuxGraphicalSessionReadinessAsync();
         return desktop.ready && !resolveServerMode({ platform: options.platform ?? process.platform, env: dataEnv, fileEnv: readWorkerSetupEnv({ env: dataEnv, workerEnvPath: paths.workerEnvPath }), desktopReady: () => desktop.ready }).remote;
       },
+      workerOwned: () => status.services['olympus-worker']?.state === 'ok',
+      workerConflict: () => status.services['olympus-worker']?.message === WORKER_DATA_OWNER_CONFLICT_MESSAGE ? 'data'
+        : status.services['olympus-worker']?.message === WORKER_ENDPOINT_CONFLICT_MESSAGE ? 'endpoint'
+        : status.services['olympus-worker']?.message === WORKER_SOCKET_RETAINED_MESSAGE ? 'retained_socket' : undefined,
       workerReady: async () => {
+        if (status.services['olympus-worker']?.state !== 'ok') return false;
         const response = await fetchSocket(base + '/v1/health', { headers: { Authorization: `Bearer ${authToken() ?? ''}` }, signal: AbortSignal.timeout(1_000) });
         await response.body?.cancel(); return response.ok;
       },
       fetchSocket: request => fetchSocket(request, { redirect: 'manual' }),
       establishDashboard: async () => {
+        if (status.services['olympus-worker']?.state !== 'ok') throw new Error('Worker ownership changed.');
         const response = await fetchSocket(base + '/dashboard/control/session', { method: 'POST', headers: { Authorization: `Bearer ${authToken() ?? ''}`, Origin: base }, signal: AbortSignal.timeout(5_000) });
+        if (status.services['olympus-worker']?.state !== 'ok') {
+          await response.body?.cancel().catch(() => {});
+          throw new Error('Worker ownership changed.');
+        }
         if (!response.ok) {
           await response.body?.cancel().catch(() => {});
           if (response.status === 503) throw new Error('Owner dashboard session is restarting.');
           return null;
         }
-        await response.body?.cancel(); return response.headers.getSetCookie();
+        await response.body?.cancel();
+        if (status.services['olympus-worker']?.state !== 'ok') throw new Error('Worker ownership changed.');
+        return response.headers.getSetCookie();
       },
     });
   }
