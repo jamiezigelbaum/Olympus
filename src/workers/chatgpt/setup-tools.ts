@@ -529,6 +529,7 @@ export async function callSetupTool(
           spendPrivacyConfirmation(backend, confirmation);
           return privacyToolResult(visiblePrivacy(saved, secretLocations(backend)), 'saved');
         }
+        if (backend.privacySettings().privateAnswerChoice?.pending) throw new ChatGptSurfaceError('privacy_choice_required');
         let update: ReturnType<typeof parsePrivacyProfileInput>;
         try {
           update = parsePrivacyProfileInput(fields);
@@ -915,6 +916,7 @@ const BACKEND_CODES: Record<string, ChatGptErrorCode> = {
   folder_needs_helper: 'folder_needs_helper',
   source_dashboard_not_supported: 'unavailable',
   source_not_connected: 'source_not_connected',
+  privacy_choice_required: 'privacy_choice_required',
   disconnect_source_busy: 'source_busy',
   disconnect_credential_delete_failed: 'disconnect_incomplete',
   capture_stop_unconfirmed: 'disconnect_incomplete',
