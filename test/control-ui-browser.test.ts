@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { Window } from 'happy-dom';
+import { DASHBOARD_THEME_CSS } from '../src/workers/dashboard/theme.ts';
 import type { OlympusDashboardControlResult } from '../src/control-ui-contract.ts';
 import { DASHBOARD_REDRAW_EVENT, mountDashboardController, type OlympusDashboardPageRead } from '../src/control-ui/browser-controller.ts';
 import { renderMessagingCard } from '../src/workers/dashboard/messaging.ts';
@@ -1081,8 +1082,8 @@ test.each(['telegram', 'whatsapp'])('mount restores %s pairing and continues pol
   } finally { controller.dispose(); }
 });
 
-test.each([false, true])('post-pair choice sends only explicit consent (wholeAccount=%s)', async wholeAccount => {
-  const root = document.createElement('div'); root.innerHTML = renderMessagingCard('telegram', true); document.body.append(root);
+test.each([{ source: 'telegram', wholeAccount: false }, { source: 'telegram', wholeAccount: true }, { source: 'whatsapp', wholeAccount: false }, { source: 'whatsapp', wholeAccount: true }] as const)('post-pair choice layout and explicit consent: %j', async ({ source, wholeAccount }) => {
+  const root = document.createElement('div'); root.innerHTML = renderMessagingCard(source, true); document.body.append(root);
   const choices: unknown[] = [];
   const controller = mountDashboardController({ root, canWrite: true, signal: new AbortController().signal, transport: { control: noControl,
     messaging: async (operation, params) => {
@@ -1097,13 +1098,26 @@ test.each([false, true])('post-pair choice sends only explicit consent (wholeAcc
     expect(root.textContent).toContain('Pick chats (recommended)');
     expect(root.textContent).toContain('Everything in this account');
     const slot = root.querySelector('[data-messaging-chats]')!;
+    expect(slot.classList.contains('messagingchoices')).toBe(true);
+    expect(slot.classList.contains('actionrow')).toBe(false);
+    const explanation = slot.querySelector(':scope > p.hint');
+    expect(explanation?.textContent).toBe('Allow Olympus to read every chat, including new chats.');
+    expect(slot.querySelector('details > summary + form')).not.toBeNull();
+    expect(slot.querySelector(':scope > form > p')).toBeNull();
     const check = slot.querySelector<HTMLInputElement>('[name="chatScope"]')!;
     expect(check.checked).toBe(false);
     check.checked = true;
     const form = wholeAccount ? slot.querySelector<HTMLInputElement>('[name="wholeAccount"]')!.closest('form')! : check.closest('form')!;
     form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
     await new Promise(resolve => setTimeout(resolve, 0));
-    expect(choices).toEqual([{ source: 'telegram', wholeAccount, chatScopes: wholeAccount ? [] : ['telegram.personal:chat:101'] }]);
+    expect(choices).toEqual([{ source, wholeAccount, chatScopes: wholeAccount ? [] : ['telegram.personal:chat:101'] }]);
     expect(slot.textContent).toBe('');
   } finally { controller.dispose(); }
+});
+
+ test('chat disclosure list spans the row below its grey caption', () => {
+  expect(DASHBOARD_THEME_CSS).toContain('.messagingchoices { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: start;');
+  expect(DASHBOARD_THEME_CSS).toContain('.messagingchoices > details > form { grid-column: 1 / -1; grid-row: 3;');
+  expect(DASHBOARD_THEME_CSS).toContain('.messagingchoices > .hint { grid-column: 1 / -1; grid-row: 2; color: var(--t3);');
+  expect(DASHBOARD_THEME_CSS).toContain('.messagingchoices > details:not([open]) > form { display: none; }');
 });

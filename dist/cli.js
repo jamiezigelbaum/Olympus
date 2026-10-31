@@ -144636,7 +144636,7 @@ function mountDashboardController(options) {
         chatSlot.replaceChildren();
       if (chatSlot) {
         chatSlot.dataset.pendingChoice = String(choosingScope);
-        chatSlot.classList.toggle("actionrow", choosingScope);
+        chatSlot.classList.toggle("messagingchoices", choosingScope);
       }
       if (Array.isArray(body.chats) && typeof body.wholeAccount === "boolean" && Array.isArray(body.chatScopes)) {
         const slot = card.querySelector("[data-messaging-chats]");
@@ -144702,9 +144702,10 @@ function mountDashboardController(options) {
             allButton.className = "btn";
             allButton.textContent = "Everything in this account";
             const explanation = document.createElement("p");
+            explanation.className = "hint";
             explanation.textContent = "Allow Olympus to read every chat, including new chats.";
-            allForm.append(all, allButton, explanation);
-            slot.append(allForm);
+            allForm.append(all, allButton);
+            slot.append(allForm, explanation);
           } else
             slot.append(form);
         }
@@ -145337,6 +145338,16 @@ td { padding: 7px 10px 7px 0; border-bottom: 1px solid var(--line2); color: var(
 .keyfield { background: var(--bg); border: 1px solid var(--field); border-radius: 7px; color: var(--t1); font: inherit; font-size: var(--fs-body); padding: 5px 10px; width: 190px; }
 .actionrow, .setupactions { display: flex; flex-direction: row; align-items: center; justify-content: flex-start; gap: 12px; }
 .actionrow > form { margin: 0 !important; }
+/* The native disclosure shares the choice row; its list spans both columns. */
+.messagingchoices { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: start; gap: 12px; }
+.messagingchoices > details, .messagingchoices > details::details-content { display: contents; }
+.messagingchoices > details > summary { grid-column: 1; grid-row: 1; margin: 0; box-sizing: border-box; }
+.messagingchoices > form { grid-column: 2; grid-row: 1; margin: 0 !important; }
+.messagingchoices > form > .btn { margin: 0; }
+.messagingchoices > .hint { grid-column: 1 / -1; grid-row: 2; color: var(--t3); margin: 0; }
+.messagingchoices > details > form { grid-column: 1 / -1; grid-row: 3; margin: 0; }
+.messagingchoices > details:not([open]) > form { display: none; }
+
 .actionrow > .primary, .setupactions > .primary { order: -1; }
 .setupactions { margin-top: 24px; }
 @media (max-width: 480px) {
