@@ -1116,7 +1116,7 @@ test.each([{ source: 'telegram', wholeAccount: false }, { source: 'telegram', wh
 });
 
  test('chat disclosure list spans the row below its grey caption', () => {
-  expect(DASHBOARD_THEME_CSS).toContain('.messagingchoices { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: start;');
+  expect(DASHBOARD_THEME_CSS).toContain('.messagingchoices { display: grid; grid-template-columns: max-content max-content minmax(0, 1fr); align-items: start;');
   expect(DASHBOARD_THEME_CSS).toContain('.messagingchoices > details > form { grid-column: 1 / -1; grid-row: 3;');
   expect(DASHBOARD_THEME_CSS).toContain('.messagingchoices > .hint { grid-column: 1 / -1; grid-row: 2; color: var(--t3);');
   expect(DASHBOARD_THEME_CSS).toContain('.messagingchoices > details:not([open]) > form { display: none; }');

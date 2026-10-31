@@ -145339,7 +145339,7 @@ td { padding: 7px 10px 7px 0; border-bottom: 1px solid var(--line2); color: var(
 .actionrow, .setupactions { display: flex; flex-direction: row; align-items: center; justify-content: flex-start; gap: 12px; }
 .actionrow > form { margin: 0 !important; }
 /* The native disclosure shares the choice row; its list spans both columns. */
-.messagingchoices { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: start; gap: 12px; }
+.messagingchoices { display: grid; grid-template-columns: max-content max-content minmax(0, 1fr); align-items: start; gap: 12px; }
 .messagingchoices > details, .messagingchoices > details::details-content { display: contents; }
 .messagingchoices > details > summary { grid-column: 1; grid-row: 1; margin: 0; box-sizing: border-box; }
 .messagingchoices > form { grid-column: 2; grid-row: 1; margin: 0 !important; }
