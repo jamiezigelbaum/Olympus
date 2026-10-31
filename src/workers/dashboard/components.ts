@@ -584,7 +584,7 @@ export function setupStepsSheet(input: { id: string; provider: string; steps: re
       ? `<div class="promptbox" id="${id}-redirect">${escapeHtml(input.redirect)}</div><button class="btn" type="button" data-copy-target="#${id}-redirect">Copy redirect URI</button><span data-copy-status aria-live="polite"></span>` : '';
     return `<div data-setup-panel${index ? ' hidden' : ''}><h4>${escapeHtml(step.title ?? `Step ${index + 1}`)}</h4><p>${escapeHtml(step.text)}</p>${link}${redirect}${index === count - 1 ? input.finalForm(formId) : ''}</div>`;
   }).join('');
-  return `<div data-setup-steps><p data-setup-counter>Step 1 of ${count}</p><progress data-setup-progress max="${count}" value="1"></progress>${panels}<div class="setupactions" data-setup-actions><button class="btn" type="button" data-setup-back disabled>Back</button><button class="btn primary" type="button" data-setup-next${count === 1 ? ' hidden' : ''}>I've done this, next</button><button class="btn primary" type="submit" form="${formId}" data-setup-submit${count === 1 ? '' : ' hidden'}>${escapeHtml(input.submitLabel ?? 'Connect')}</button></div></div>`;
+  return `<div data-setup-steps><p data-setup-counter>Step 1 of ${count}</p><progress data-setup-progress max="${count}" value="1"></progress>${panels}<div class="setupactions actionrow" data-setup-actions><button class="btn" type="button" data-setup-back disabled>Back</button><button class="btn primary" type="button" data-setup-next${count === 1 ? ' hidden' : ''}>I've done this, next</button><button class="btn primary" type="submit" form="${formId}" data-setup-submit${count === 1 ? '' : ' hidden'}>${escapeHtml(input.submitLabel ?? 'Connect')}</button></div></div>`;
 }
 
 /**
