@@ -137,7 +137,7 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
       // disabled, so a second click cannot issue a second transport call,
       // without taking the caret out of the fields the owner is still typing.
       const pending = pendingForms.has(form) || form.dataset.keyAccepted === 'true';
-      form.querySelectorAll<HTMLButtonElement | HTMLInputElement>('button,input:not([type="hidden"])')
+      Array.from(form.elements).filter((control): control is HTMLButtonElement | HTMLInputElement => control.matches('button,input:not([type="hidden"])'))
         .forEach((control) => {
           if (control.dataset.olympusOriginallyDisabled === undefined) {
             control.dataset.olympusOriginallyDisabled = control.disabled ? 'true' : 'false';
@@ -448,7 +448,26 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
     const authorizationUrl = result.body.authorization_url;
     if (result.status < 200 || result.status >= 300 || result.body.ok !== true) {
       closeAuthorizationTab(authorizationTab);
-      say(form, errorMessage(result));
+      const message = errorMessage(result);
+      say(form, message);
+      const setup = form.closest<HTMLElement>('[data-setup-steps]');
+      const step = message.includes('Redo the Set up your account step') ? 0 : message.includes('Redo the Create an API key step') ? 1 : -1;
+      if (setup) {
+        const panels = Array.from(setup.querySelectorAll<HTMLElement>('[data-setup-panel]'));
+        const current = panels.findIndex(panel => !panel.hidden);
+        panels.forEach(panel => { panel.hidden = true; });
+        const actions = setup.querySelector<HTMLElement>('[data-setup-actions]');
+        if (actions) actions.hidden = true;
+        setup.querySelector('[data-setup-error]')?.remove();
+        const error = document.createElement('div');
+        error.dataset.setupError = '';
+        const banner = document.createElement('p');
+        banner.className = 'why'; banner.setAttribute('role', 'alert'); banner.textContent = message;
+        const retry = document.createElement('button');
+        retry.type = 'button'; retry.className = 'btn'; retry.dataset.setupRetry = String(step >= 0 ? step : Math.max(0, current));
+        retry.textContent = step === 0 ? 'Go to account and credit' : step === 1 ? 'Go to API key' : 'Try again';
+        error.append(banner, retry); setup.append(error); retry.focus();
+      }
       return;
     }
     if (typeof authorizationUrl === 'string' && authorizationUrl.startsWith('https://')) {
@@ -479,7 +498,7 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
     if (released && params.action === 'connect_api_key') {
       form.dataset.keyAccepted = 'true';
       form.querySelectorAll<HTMLInputElement>('input[name="api_key"]').forEach((input) => { input.value = ''; input.hidden = true; });
-      form.querySelectorAll<HTMLButtonElement>('button[type="submit"],button:not([type])').forEach((button) => {
+      Array.from(form.elements).filter((control): control is HTMLButtonElement => control.matches('button[type="submit"],button:not([type])')).forEach((button) => {
         button.textContent = params.source === 'readwise' ? 'Connected' : 'Key saved';
       });
       applyWriteCapability();
@@ -995,9 +1014,60 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
     void submitControl(form, tab, submittedValues);
   }
 
+  function showSetupStep(sheet: HTMLElement, step: number): void {
+    const panels = Array.from(sheet.querySelectorAll<HTMLElement>('[data-setup-panel]'));
+    panels.forEach((panel, index) => { panel.hidden = index !== step; });
+    const counter = sheet.querySelector<HTMLElement>('[data-setup-counter]');
+    if (counter) counter.textContent = `Step ${step + 1} of ${panels.length}`;
+    const progress = sheet.querySelector<HTMLProgressElement>('[data-setup-progress]');
+    if (progress) progress.value = step + 1;
+    const back = sheet.querySelector<HTMLButtonElement>('[data-setup-back]');
+    if (back) back.disabled = step === 0;
+    const next = sheet.querySelector<HTMLElement>('[data-setup-next]');
+    if (next) next.hidden = step === panels.length - 1;
+    const submit = sheet.querySelector<HTMLElement>('[data-setup-submit]');
+    if (submit) submit.hidden = step !== panels.length - 1;
+    const actions = sheet.querySelector<HTMLElement>('[data-setup-actions]');
+    if (actions) actions.hidden = false;
+    if (sheet.querySelector('[data-setup-error]')) {
+      sheet.querySelectorAll<HTMLFormElement>('form').forEach(form => say(form, ''));
+      sheet.querySelector('[data-setup-error]')?.remove();
+    }
+    const heading = panels[step]?.querySelector<HTMLElement>('h4');
+    if (heading) { heading.tabIndex = -1; heading.focus(); }
+  }
+
   function onClick(event: Event): void {
     const target = event.target instanceof Element ? event.target : null;
     if (!target || !root.contains(target)) return;
+    if (target.closest('[data-connect-retry]')) {
+      const sheet = target.closest('.sheet');
+      const error = sheet?.querySelector<HTMLElement>('[data-connect-error]');
+      const content = sheet?.querySelector<HTMLElement>('[data-connect-content]');
+      if (error) error.hidden = true;
+      if (content) {
+        content.hidden = false;
+        const steps = content.querySelector<HTMLElement>('[data-setup-steps]');
+        if (steps) showSetupStep(steps, 0);
+      }
+      return;
+    }
+    const setupOpen = target.closest<HTMLElement>('[data-setup-open]');
+    if (setupOpen) {
+      const url = setupOpen.dataset.setupOpen;
+      if (url && !openAuthorizationExternally(url)) window.open(url, '_blank', 'noopener,noreferrer');
+      return;
+    }
+    const setupControl = target.closest<HTMLElement>('[data-setup-next], [data-setup-back], [data-setup-retry]');
+    if (setupControl) {
+      const sheet = setupControl.closest<HTMLElement>('[data-setup-steps]');
+      if (!sheet) return;
+      const panels = Array.from(sheet.querySelectorAll<HTMLElement>('[data-setup-panel]'));
+      const current = panels.findIndex(panel => !panel.hidden);
+      const next = Math.max(0, Math.min(panels.length - 1, setupControl.hasAttribute('data-setup-retry') ? Number(setupControl.dataset.setupRetry) : current + (setupControl.hasAttribute('data-setup-next') ? 1 : -1)));
+      showSetupStep(sheet, next);
+      return;
+    }
     // A row's ⋯ menu closes when anything else is clicked, and after one of
     // its own items is chosen.
     const menu = target.closest('details.rowmenu');
@@ -1030,7 +1100,7 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
       // Keep BYO forms and pending attempts for explicit input/review, and do
       // not create another attempt when this same panel is reopened.
       const form = sheet.querySelector<HTMLFormElement>('form[data-connect-kind="oauth"][data-oauth-autostart]');
-      if (open && form && (canWrite || csrfToken) && !startedFromSheet.has(form)
+      if (open && form && !form.closest('[hidden]') && (canWrite || csrfToken) && !startedFromSheet.has(form)
         && !form.hasAttribute('data-native-oauth-unavailable')) {
         startedFromSheet.add(form);
         form.requestSubmit();
@@ -1137,6 +1207,7 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
       'connect.telegram': 'telegram.messages',
       'connect.whatsapp': 'whatsapp.personal.messages',
       'connect.evernote': 'evernote.notes',
+      'dropbox.permissions': 'dropbox.files',
     };
     let focus: HTMLElement | null = null;
     const sourceId = Object.prototype.hasOwnProperty.call(sources, wanted) ? sources[wanted] : undefined;
@@ -1149,6 +1220,19 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
         if (sheet) {
           queryAll<HTMLElement>('.sheet.on').forEach((other) => { if (other !== sheet) setSheetOpen(other, false); });
           setSheetOpen(sheet, true);
+          if (wanted === 'dropbox.permissions') {
+            const walkthrough = sheet.querySelector<HTMLElement>('[data-setup-steps]');
+            const panels = walkthrough ? Array.from(walkthrough.querySelectorAll<HTMLElement>('[data-setup-panel]')) : [];
+            if (walkthrough && panels.length > 2) {
+              const error = sheet.querySelector<HTMLElement>('[data-connect-error]');
+              const content = sheet.querySelector<HTMLElement>('[data-connect-content]');
+              if (error) error.hidden = true;
+              if (content) content.hidden = false;
+              showSetupStep(walkthrough, 2);
+              const disclosure = walkthrough.closest('details');
+              if (disclosure) disclosure.open = true;
+            }
+          }
           if (!sheet.hasAttribute('tabindex')) sheet.setAttribute('tabindex', '-1');
           focus = sheet;
         } else {

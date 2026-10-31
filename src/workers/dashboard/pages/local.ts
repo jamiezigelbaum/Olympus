@@ -41,6 +41,7 @@ import {
   pageShell,
   safeExternalHref,
   setupRow,
+  setupStepsSheet,
   type DashboardActionInput,
 } from '../components.ts';
 import { DASHBOARD_PRIVATE_ANSWERS_COPY } from '../vocabulary.ts';
@@ -94,9 +95,10 @@ export interface DashboardWaitingQuestion {
   from: string;
   askedAt: string;
   unchecked: boolean;
-  state?: 'answering' | 'retrying' | 'answered' | 'unchecked' | 'queued' | 'changed';
+  state?: 'answering' | 'retrying' | 'answered' | 'unchecked' | 'queued' | 'changed' | 'failed';
   unread?: boolean;
   answeredAt?: string;
+  failureReason?: string;
 }
 
 const CONNECTOR_SHEET_ID = 'connector-sheet';
@@ -282,6 +284,12 @@ function renderSetupRow(source: DashboardSourceCard, view: SourceDashboardViewMo
       });
       return `${row}\n${connect.sheet}`;
     }
+  }
+  if (action.kind === 'api_key' && action.source === 'venice') {
+    const sheetId = 'setup-venice-api';
+    const form = (formId: string) => `<form id="${formId}" class="setupfields" data-connect-kind="api_key"><input type="hidden" name="source" value="venice"><input class="keyfield" type="password" name="api_key" required autocomplete="new-password" placeholder="API key" aria-label="API key"><span class="actmsg" data-action-message role="status"></span></form>`;
+    const sheet = `<div class="sheet" id="${sheetId}" aria-hidden="true"><h4>Set up Venice</h4>${setupStepsSheet({ id: sheetId, provider: 'Venice', steps: action.instructions.diy_steps, finalForm: form })}</div>`;
+    return setupRow({ ...id, label: source.label, blurb: action.instructions.plain_intro, action: { label: action.label, kind: 'none', sheet: sheetId, ...gate } }) + sheet;
   }
   // An api_key row asks for a secret the reader has to go and fetch, so its
   // blurb is the instructions' own plain intro plus the page that issues the

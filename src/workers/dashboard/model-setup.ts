@@ -1,5 +1,6 @@
+import { VENICE_SETUP_STEPS } from '../source-dashboard.ts';
 import type { ModelSetupCard, ModelSetupView } from '../../core/model-setup.ts';
-import { blockerBanner, connectorSheet, escapeHtml, rowMenu } from './components.ts';
+import { blockerBanner, connectorSheet, escapeHtml, rowMenu, setupStepsSheet } from './components.ts';
 
 export const LOCAL_MODELS_SETUP_PROMPT = 'Connect my existing local models to Olympus. Read the installed docs/SOVEREIGNTY_CONFIG.md, inspect the current Olympus policy, and help identify the running answer and embedding endpoints and their exact model IDs on the machine hosting Olympus. Do not install or maintain model software, download models, change network access, or replace existing vectors. Explain any needed configuration changes before applying them. After an approved policy change, use olympus worker restart to apply it. Use synthetic text to verify the configured models and embedding dimensions, run olympus doctor, then send me back to the Keys page of the Olympus dashboard and its Check readiness button. If the server is on another machine or needs unsupported settings, explain that specific limit rather than inventing a working configuration.';
 
@@ -136,7 +137,7 @@ export function renderModelSetupBlocker(view: ModelSetupView | undefined): strin
   if (card.state === 'needs_attention') return blockerBanner({ sentence: card.detail });
   return blockerBanner({
     sentence: `Add your ${card.label} API key to start connecting sources.`,
-    controlHtml: `<button type="button" class="btn primary" data-focus-target="#${modelKeyFieldId(card)}">Add ${escapeHtml(card.label)} key</button>`,
+    controlHtml: `<button type="button" class="btn primary" data-focus-target="#${card.id === 'venice' ? 'model-venice-start' : modelKeyFieldId(card)}">Add ${escapeHtml(card.label)} key</button>`,
   });
 }
 
@@ -144,15 +145,18 @@ function modelKeyFieldId(card: ModelSetupCard): string {
   return `model-key-field-${card.id.replace(/[^A-Za-z0-9_-]+/g, '-')}`;
 }
 
-function modelKeyForm(card: ModelSetupCard): string {
-  return `<form method="post" action="/dashboard/connect/api-key" data-connect-kind="api_key" data-model-provider="${card.id}">`
+function modelKeyForm(card: ModelSetupCard, formId?: string): string {
+  return `<form${formId ? ` id="${formId}" class="setupfields"` : ''} method="post" action="/dashboard/connect/api-key" data-connect-kind="api_key" data-model-provider="${card.id}">`
     + `<input type="hidden" name="source" value="${card.id}">`
     + `<input class="keyfield"${card.state === 'ready' ? '' : ` id="${modelKeyFieldId(card)}"`} type="password" name="api_key" required autocomplete="new-password" placeholder="${card.label} API key" aria-label="${card.label} API key">`
-    + '<button class="btn primary" type="submit">Connect</button><span data-action-message role="status"></span></form>';
+    + (formId ? '' : '<button class="btn primary" type="submit">Connect</button>') + '<span data-action-message role="status"></span></form>';
 }
 
 /** One wrapping row: the key form (or the saved-key note) and the "Get a key" link beside it. */
 function modelKeyAction(card: ModelSetupCard, lead: string): string {
+  if (card.id === 'venice' && lead.includes('<form')) {
+    return `<span id="model-venice-start" tabindex="-1"></span>` + setupStepsSheet({ id: `model-venice-${card.state}`, provider: 'Venice', steps: VENICE_SETUP_STEPS, finalForm: (formId) => modelKeyForm(card, formId) });
+  }
   const href = card.id === 'gemini' ? 'https://aistudio.google.com/apikey' : 'https://venice.ai';
   return `<div class="modelaction">${lead}<a href="${href}" target="_blank" rel="noopener noreferrer">Get a ${card.label} API key</a></div>`;
 }

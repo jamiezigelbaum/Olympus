@@ -1783,7 +1783,9 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
             attempt.consumed = true;
             return dashboardOAuthFailureHtml({
               source,
-              reason: `OAuth provider returned ${errorCode ?? 'an unrecognized error'}.`,
+              reason: source === 'dropbox' && errorCode === 'invalid_scope' && attempt.clientIdSource === 'byo'
+                ? 'Dropbox needs more permissions. Redo the Enable permissions step and sign in again. No credentials were stored.'
+                : `OAuth provider returned ${errorCode ?? 'an unrecognized error'}.`,
               returnTo: attempt.returnTo,
               status: 400,
             });
@@ -1822,7 +1824,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
             clearDashboardOAuthAttempt(dashboardOAuthAttempts, source, attempt);
             return dashboardOAuthFailureHtml({
               source,
-              reason: dashboardCallbackFailureReason(error, source),
+              reason: dashboardCallbackFailureReason(error, source, attempt.clientIdSource),
               returnTo: attempt.returnTo,
               status: 400,
             });
@@ -2035,6 +2037,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           dashboardOAuthAttempts.set(source, {
             source,
             pending,
+            clientIdSource: publisher ? 'publisher' : 'byo',
             returnTo: handback || computerHandback ? CHATGPT_RETURN_TO : dashboardReturnTo(),
             startedAt: startedAtDate.toISOString(),
             expiresAt,
@@ -2187,7 +2190,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
               throw new EmailSourceWorkerError(501, 'model_setup_not_supported', 'Upgrade the worker to connect model keys here.');
             }
             try { await sourceDashboard.connectModelKey(source, apiKey); }
-            catch { throw new EmailSourceWorkerError(400, 'model_key_setup_failed', 'The model key could not be validated or applied. Check the Models card and retry.'); }
+            catch (error) { throw new EmailSourceWorkerError(400, 'model_key_setup_failed', source === 'venice' ? safeVeniceCheckFailure(error) : 'The model key could not be validated or applied. Check the Models card and retry.'); }
             const modelSetup = sourceDashboard.modelSetup?.();
             return json({ ok: true, source, status_message: modelSetup?.ready
               ? 'Model connection ready.'
@@ -2219,7 +2222,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
             throw new EmailSourceWorkerError(
               400,
               'api_key_validation_failed',
-              `Validating the ${source} API key failed. Paste a current key and try again, or retry when the provider is reachable.`,
+              source === 'venice' ? safeVeniceCheckFailure(error) : `Validating the ${source} API key failed. Paste a current key and try again, or retry when the provider is reachable.`,
             );
           }
           markDashboardSourceConnected(source, dashboardDisconnectedSources);
@@ -6573,6 +6576,7 @@ const DASHBOARD_EVERNOTE_SIGN_IN_TTL_MS = 10 * 60_000;
 interface DashboardOAuthAttempt {
   source: DashboardOAuthSource;
   pending: DashboardPendingOAuth;
+  clientIdSource?: 'publisher' | 'byo';
   returnTo: string;
   startedAt: string;
   expiresAt: string;
@@ -7355,8 +7359,25 @@ async function dashboardApiKeyAvailability(secretStore: SecretStore): Promise<Pa
  * value-based redaction layer is deleted with its last caller: a page that
  * only ever speaks bounded text has nothing to redact.
  */
-function dashboardCallbackFailureReason(error: unknown, source: DashboardOAuthSource): string {
+function safeVeniceCheckFailure(error: unknown): string {
   const message = error instanceof Error ? error.message : '';
+  const allowed = new Set([
+    'Venice could not be reached to check your key. No credentials were stored; try again.',
+    'Venice could not accept this key. Redo the Create an API key step and check its restrictions. No credentials were stored.',
+    'Venice could not check the key now. No credentials were stored; try again.',
+    'Venice returned an unreadable check. No credentials were stored; try again.',
+    'Venice returned an incomplete check. No credentials were stored; try again.',
+    'Venice does not permit this key. Redo the Create an API key step and check its restrictions. No credentials were stored.',
+    'Venice did not report a balance. No credentials were stored; try again.',
+    'Venice returned an incomplete balance. No credentials were stored; try again.',
+    'Venice reports no credit. Redo the Set up your account step and add credit. No credentials were stored.',
+  ]);
+  return allowed.has(message) ? message : 'The Venice key could not be validated or applied. Try again.';
+}
+
+function dashboardCallbackFailureReason(error: unknown, source: DashboardOAuthSource, clientIdSource?: 'publisher' | 'byo'): string {
+  const message = error instanceof Error ? error.message : '';
+  if (source === 'dropbox' && clientIdSource === 'byo' && message === 'Dropbox needs more permissions. Redo the Enable permissions step and sign in again. No credentials were stored.') return message;
   const match = /^OAuth token exchange failed with status (\d{3})(?: \(([a-z_]+)\))?\.$/.exec(message);
   // The code inside the shape is re-checked against the allowlist: the shape
   // alone would admit arbitrary lowercase content from a crafted message.
@@ -7398,6 +7419,8 @@ function dashboardOAuthFailureHtml(options: {
 }): Response {
   const label = dashboardOAuthSourceLabel(options.source);
   const chatgpt = options.returnTo === CHATGPT_RETURN_TO;
+  const permissions = !chatgpt && options.source === 'dropbox'
+    && options.reason === 'Dropbox needs more permissions. Redo the Enable permissions step and sign in again. No credentials were stored.';
   return dashboardOAuthLandingHtml({
     title: 'Olympus connect failed',
     heading: `Could not connect ${label}`,
@@ -7407,8 +7430,8 @@ function dashboardOAuthFailureHtml(options: {
         ? 'Go back to ChatGPT and try again from your Olympus dashboard.'
         : 'You can close this tab and go back to the Olympus dashboard tab you started from.',
     ],
-    returnTo: options.returnTo,
-    returnLabel: chatgpt ? 'Back to ChatGPT' : 'Back to the dashboard tab',
+    returnTo: permissions ? '/dashboard#olympus-open=dropbox.permissions' : options.returnTo,
+    returnLabel: permissions ? 'Go to Dropbox permissions' : chatgpt ? 'Back to ChatGPT' : 'Back to the dashboard tab',
     status: options.status,
   });
 }
