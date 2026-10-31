@@ -19,6 +19,7 @@
  */
 import { olympusDataRoot } from '../../src/core/olympus-layout.ts';
 import { resolvedStorePath } from '../../src/core/source-placement.ts';
+import { isPendingPrivacyPolicy, saveFirstRunPrivacyChoice } from '../../src/core/first-run-privacy.ts';
 import { spawn, spawnSync } from 'node:child_process';
 import { Database } from 'bun:sqlite';
 import { createHash } from 'node:crypto';
@@ -293,6 +294,16 @@ async function restartEngine(timeoutMs: number): Promise<{ ok: boolean; ms: numb
 async function prepareSource(): Promise<never> {
   const config = readConfig();
   const p = platform();
+  // A fresh install (1.3.0 on) asks the owner how Private items are answered
+  // and refuses source access until then. Answer it through the dashboard's
+  // own save path, with the earlier fresh-install default the legs were
+  // qualified on; the restart below applies it. Upgrades already have a choice.
+  const before = readPolicy();
+  if (before && isPendingPrivacyPolicy(before.json as Parameters<typeof isPendingPrivacyPolicy>[0])) {
+    const saved = saveFirstRunPrivacyChoice(p.sovereigntyPath, 'no-sensitive');
+    if (!saved.ok || !saved.changed) emit({ ok: false, step: 'privacy-choice', detail: 'the first-run privacy choice could not be saved' });
+    say('first-run privacy choice saved: no-sensitive');
+  }
   await startFakeDetached(config);
   say('stand-in running');
   upsertEnv(p.workerEnvPath, {
