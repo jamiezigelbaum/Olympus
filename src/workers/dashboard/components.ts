@@ -651,7 +651,7 @@ export function connectSetupSheet(input: DashboardConnectSheetInput): string {
     // Where the authorization link lands when the browser blocks the new tab.
     + `<span class="authfallback" data-authorization-fallback></span>`
     + `</form>`;
-  const walkthrough = input.steps && input.provider
+  const walkthrough = input.steps?.length && input.provider
     ? setupStepsSheet({ id, provider: input.provider, steps: input.steps, finalForm: byoForm, ...(input.redirectUri ? { redirect: input.redirectUri.uri } : {}) })
     : `${registration}${redirect}${byoForm}`;
   if (input.publisher) {
