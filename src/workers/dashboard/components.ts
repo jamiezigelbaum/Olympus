@@ -944,6 +944,9 @@ export function standaloneDashboardControllerScript(
             var response = await fetch('/dashboard/control/session/local', {
               method: 'POST', credentials: 'same-origin', cache: 'no-store',
             });
+            // The local session is a new one: later requests carry its CSRF token, not the launch session's.
+            var body = await json(response);
+            if (response.ok && typeof body.csrf_token === 'string') csrfToken = body.csrf_token;
             return response.ok;
           },
           async messaging(operation, params) {
