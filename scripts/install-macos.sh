@@ -497,8 +497,8 @@ main() {
   HELPER_CHANGED=0
   if [ "$MACOS_HELPER_NAME" != none ]; then
     if [ "$HELPER_READY" = 1 ] && [ ! -L "$SUPPORT/Olympus Engine.app" ] && [ -d "$SUPPORT/Olympus Engine.app" ] && [ -x "$SUPPORT/Olympus Engine.app/Contents/MacOS/OlympusEngineHost" ] && diff -rq "$WORK/helper/Olympus Engine.app" "$SUPPORT/Olympus Engine.app" >/dev/null 2>&1 \
-      && "$BUN" "$RELEASE/dist/cli.js" engine status --brief > "$WORK/helper-status" 2>> "$LOG" </dev/null 8>&- \
-      && grep -Fq '"helper":{"installed":true,"in_use":true' "$WORK/helper-status"; then
+      && "$BUN" "$RELEASE/dist/cli.js" engine status > "$WORK/helper-status" 2>> "$LOG" </dev/null 8>&- \
+      && tr -d '[:space:]' < "$WORK/helper-status" | grep -Fq '"helper":{"installed":true,"in_use":true'; then
       : # The verified bundle is installed and the engine agent uses it.
     elif [ "$HELPER_READY" = 1 ] && OLYMPUS_MACOS_HELPER_TEAM_ID="$MACOS_HELPER_TEAM_ID" cli "$RELEASE" engine install-helper --from "$WORK/helper/Olympus Engine.app"; then
       HELPER_CHANGED=1

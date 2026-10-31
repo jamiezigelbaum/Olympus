@@ -236,7 +236,8 @@ exec /bin/mv "$@"
       // FAKE_BLOCK_VERSION: that version's install waits (after saying so in <root>/blocked) until <root>/release exists.
       `if [ "$2" = install ] && [ "$FAKE_BLOCK_VERSION" = "${version}" ]; then : > "${root}/blocked"; while [ ! -e "${root}/release" ]; do sleep 0.1; done; fi`,
       'if [ "$2" = install-helper ]; then [ -z "$FAKE_HELPER_FAIL" ] || exit 1; rm -rf "$HOME/Library/Application Support/Olympus/Olympus Engine.app"; cp -R "$4" "$HOME/Library/Application Support/Olympus/Olympus Engine.app"; exit 0; fi',
-      'if [ "$2" = status ]; then if [ -f "$HOME/Library/LaunchAgents/ai.olympusplugin.engine.plist" ] && ! grep -q OlympusEngineHost "$HOME/Library/LaunchAgents/ai.olympusplugin.engine.plist"; then echo \'{"helper":{"installed":true,"in_use":false}}\'; else echo \'{"helper":{"installed":true,"in_use":true}}\'; fi; exit 0; fi',
+      'if [ "$2" = status ] && [ "$3" = --brief ]; then echo \'{"schema":"olympus.engine.brief.v1","state":"running","progress":null,"blocker":null,"needsYou":null}\'; exit 0; fi',
+      'if [ "$2" = status ]; then if [ -f "$HOME/Library/LaunchAgents/ai.olympusplugin.engine.plist" ] && ! grep -q OlympusEngineHost "$HOME/Library/LaunchAgents/ai.olympusplugin.engine.plist"; then printf \'{\\n  "helper": {\\n    "installed": true,\\n    "in_use": false\\n  }\\n}\\n\'; else printf \'{\\n  "helper": {\\n    "installed": true,\\n    "in_use": true\\n  }\\n}\\n\'; fi; exit 0; fi',
       'if [ "$2" = verify ]; then [ -z "$FAKE_UNHEALTHY" ] || exit 1; exit 0; fi',
       `if [ "$2" = install ] && { [ "$FAKE_FAIL_VERSION" = "${version}" ] || [ -n "$FAKE_FAIL_RESTORE" ]; }; then exit 1; fi`,
       // FAKE_TERM_VERSION: that version's install stops the installer (Ctrl-C, a closed Terminal).
@@ -1222,6 +1223,7 @@ describe('macOS helper installer', () => {
     expect(commands.indexOf('engine install-helper')).toBeLessThan(commands.indexOf('engine install --'));
     expectSucceeded(h.run('1.0.0', {}, { helper: {} }));
     expect(h.logLines().filter((line) => line.includes('engine install-helper'))).toHaveLength(1);
+    expect(h.logLines().filter((line) => line.includes('engine install --'))).toHaveLength(1);
     expectSucceeded(h.uninstall());
     expect(existsSync(join(h.support, 'Olympus Engine.app'))).toBe(false);
   }, 30_000);
