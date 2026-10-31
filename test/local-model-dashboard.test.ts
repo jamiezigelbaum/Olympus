@@ -9,6 +9,6 @@ test('local-model sheet offers explicit discovery and synthetic checks while pre
   expect(html).toContain('name="answer_model"');
   expect(html).not.toContain('name="embedding_model"');
   expect(html).toContain('Connect answer model');
-  expect(html).toContain('Search embeddings and existing vectors stay unchanged');
+  expect(html).toContain('Your existing search index stays unchanged');
   expect(html).toContain(LOCAL_MODELS_SETUP_PROMPT);
 });
