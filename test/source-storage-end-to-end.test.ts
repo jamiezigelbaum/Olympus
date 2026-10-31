@@ -313,8 +313,12 @@ describe('source storage, end to end on this host', () => {
       import { LocalConnectorStore } from ${JSON.stringify(join(REPO, 'src/workers/connector-store/index.ts'))};
       const sync = LocalConnectorStore.prototype.syncFromConnector;
       LocalConnectorStore.prototype.syncFromConnector = async function(connector, ...args) {
-        if (connector.id.includes('local.files.own-roots-cleanup')) await Bun.sleep(1500);
-        return sync.call(this, connector, ...args);
+        const cleanup = connector.id.includes('local.files.own-roots-cleanup');
+        if (cleanup) await Bun.sleep(1500);
+        const result = await sync.call(this, connector, ...args);
+        // Deletion is visible before the cleanup walk and its read gate finish.
+        if (cleanup) await Bun.sleep(500);
+        return result;
       };
     `);
     const worker = await boot(env, preload);
@@ -335,7 +339,16 @@ describe('source storage, end to end on this host', () => {
       const deadline = Date.now() + 10_000;
       while (ownItemStillActive(dbPath, ownPath) && Date.now() < deadline) await Bun.sleep(100);
       expect(ownItemStillActive(dbPath, ownPath), worker.errors()).toBe(false);
-      expect((await ask(env, worker, '/v1/source/index/search', { corpus_id: lane.corpus_id, approved_scope_key: lane.approved_scope_key, query: 'zzownhistory' })).json.hits).toEqual([]);
+      // A tombstone is committed before the cleanup walk finishes every tier.
+      // Wait for the public read boundary, checking that no own data escapes meanwhile.
+      let after = await ask(env, worker, '/v1/source/index/search', { corpus_id: lane.corpus_id, approved_scope_key: lane.approved_scope_key, query: 'zzownhistory' });
+      while (after.status !== 200 && Date.now() < deadline) {
+        expect(after.json.hits ?? []).toEqual([]);
+        await Bun.sleep(100);
+        after = await ask(env, worker, '/v1/source/index/search', { corpus_id: lane.corpus_id, approved_scope_key: lane.approved_scope_key, query: 'zzownhistory' });
+      }
+      expect(after.status, JSON.stringify(after.json)).toBe(200);
+      expect(after.json.hits).toEqual([]);
       expect((await ask(env, worker, '/v1/source/index/search', { corpus_id: lane.corpus_id, approved_scope_key: lane.approved_scope_key, query: 'zzuserhistory' })).json.hits).toHaveLength(1);
     } finally { await worker.stop(); }
   }, 180_000);
