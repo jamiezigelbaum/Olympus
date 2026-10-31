@@ -16345,20 +16345,27 @@ function prepareOAuthSourceConnection(options, redirectUri, pkce = createOAuthPk
     startedAt: now()
   };
 }
-async function checkDropboxConnection(accessToken, fetchImpl, timeoutMs) {
+async function checkDropboxConnection(accessToken, fetchImpl, timeoutMs, tokenUrl = "https://api.dropboxapi.com/oauth2/token") {
   let response;
+  let text2;
   try {
-    response = await fetchWithTimeout(fetchImpl, "https://api.dropboxapi.com/2/files/list_folder", {
+    ({ response, text: text2 } = await fetchBoundedText(fetchImpl, new URL("/2/files/list_folder", tokenUrl).toString(), {
       method: "POST",
       headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" },
       body: JSON.stringify({ path: "", limit: 1 }),
       redirect: "error"
-    }, timeoutMs);
+    }, { timeoutMs, limitBytes: 64 * 1024 }));
   } catch {
     throw new Error("Dropbox could not be reached for the final check. No credentials were stored; try again.");
   }
-  if (response.status === 403)
-    throw new Error("Dropbox refused the list check. Redo the Enable permissions step and sign in again. No credentials were stored.");
+  let missingScope = false;
+  if (response.status === 401) {
+    try {
+      missingScope = JSON.parse(text2)?.error?.[".tag"] === "missing_scope";
+    } catch {}
+  }
+  if (missingScope)
+    throw new Error("Dropbox needs more permissions. Redo the Enable permissions step and sign in again. No credentials were stored.");
   if (!response.ok)
     throw new Error("Dropbox could not complete the list check. No credentials were stored; try again.");
 }
@@ -16382,7 +16389,7 @@ async function completeOAuthSourceConnection(prepared, code) {
     throw new Error("OAuth provider did not return a refresh token. Re-run connect and request offline access.");
   const refreshToken = token.refreshToken;
   if (prepared.options.source === "dropbox") {
-    await checkDropboxConnection(token.accessToken, prepared.options.fetch ?? fetch, prepared.tokenExchangeTimeoutMs);
+    await checkDropboxConnection(token.accessToken, prepared.options.fetch ?? fetch, prepared.tokenExchangeTimeoutMs, prepared.options.tokenUrl ?? prepared.definition.tokenUrl);
   }
   let xUserId;
   if (prepared.options.source === "x") {
@@ -16816,12 +16823,13 @@ async function validatePublicApiKeySource(options) {
 async function validateVeniceKey(options) {
   const url = options.veniceModelsUrl ?? process.env.OLYMPUS_CONNECT_VENICE_MODELS_URL ?? "https://api.venice.ai/api/v1/api_keys/rate_limits";
   let response;
+  let text2;
   try {
-    response = await fetchWithTimeout(modelEndpointFetch(options.fetchImpl), url, {
+    ({ response, text: text2 } = await fetchBoundedText(modelEndpointFetch(options.fetchImpl), url, {
       method: "GET",
       headers: { Authorization: `Bearer ${options.apiKey}`, Accept: "application/json" },
       redirect: "error"
-    }, options.timeoutMs);
+    }, { timeoutMs: options.timeoutMs, limitBytes: 64 * 1024 }));
   } catch (error) {
     if (isZkapiDaemonEndpointRefusal(error))
       throw error;
@@ -16833,7 +16841,7 @@ async function validateVeniceKey(options) {
     throw new Error("Venice could not check the key now. No credentials were stored; try again.");
   let data;
   try {
-    data = (await response.json()).data;
+    data = JSON.parse(text2).data;
   } catch {
     throw new Error("Venice returned an unreadable check. No credentials were stored; try again.");
   }
@@ -16844,8 +16852,8 @@ async function validateVeniceKey(options) {
   const balances = data.balances;
   if (!balances || typeof balances !== "object")
     throw new Error("Venice did not report a balance. No credentials were stored; try again.");
-  const amounts = ["USD", "DIEM", "BUNDLED_CREDITS"].map((key) => balances[key]);
-  if (!amounts.every((value) => typeof value === "number" && Number.isFinite(value)))
+  const amounts = ["USD", "DIEM", "BUNDLED_CREDITS"].map((key) => balances[key]).filter((value) => value !== undefined && value !== null);
+  if (!amounts.length || !amounts.every((value) => typeof value === "number" && Number.isFinite(value)))
     throw new Error("Venice returned an incomplete balance. No credentials were stored; try again.");
   if (!amounts.some((value) => value > 0))
     throw new Error("Venice reports no credit. Redo the Set up your account step and add credit. No credentials were stored.");
@@ -95243,7 +95251,7 @@ function sourceAction(definition, connected, reauthRequired, providerRefusing, o
   if (definition.connect_action.kind === "oauth" && definition.connect_action.source === "evernote") {
     if (connected && !reauthRequired && !providerRefusing)
       return { kind: "none" };
-    return { kind: "oauth", source: "evernote", label, publisher_client: true, ...pending ? { pending_attempt: true } : {} };
+    return { kind: "oauth", source: "evernote", label, publisher_client: true, ...pending && !pending.error ? { pending_attempt: true } : {} };
   }
   if (definition.connect_action.kind === "oauth") {
     if (connected && !reauthRequired && !providerRefusing)
@@ -95270,7 +95278,7 @@ function sourceAction(definition, connected, reauthRequired, providerRefusing, o
         ...knownClientId && clientSecretOnFile ? { client_secret_on_file: true } : {},
         ...redirectFields,
         instructions: publisherOAuthSetupInstructions(definition.label, label, oauthSetupInstructions(definition.connect_action.source, googleCloudProjectId, oauthRedirectBaseUrl)),
-        ...pending ? { pending_attempt: true } : {}
+        ...pending && !pending.error ? { pending_attempt: true } : {}
       };
     }
     if (!knownClientId || !hasClientSecret) {
@@ -95291,7 +95299,7 @@ function sourceAction(definition, connected, reauthRequired, providerRefusing, o
       ...clientSecretOnFile ? { client_secret_on_file: true } : {},
       ...redirectFields,
       instructions: oauthSetupInstructions(definition.connect_action.source, googleCloudProjectId, oauthRedirectBaseUrl),
-      ...pending ? { pending_attempt: true } : {}
+      ...pending && !pending.error ? { pending_attempt: true } : {}
     };
   }
   if (definition.connect_action.kind === "this_computer") {
@@ -143412,7 +143420,23 @@ function mountDashboardController(options) {
       forward.hidden = next === panels.length - 1 || Boolean(firstRun && next === 0);
     const back = sheet.querySelector("[data-setup-back]");
     if (back)
-      back.hidden = Boolean(firstRun && (next < 2 || noConnection));
+      back.disabled = next === 0 || Boolean(firstRun && (next < 2 || noConnection));
+    const submit = sheet.querySelector("[data-setup-submit]");
+    const actionForm = panels[next]?.dataset.setupForm;
+    if (submit) {
+      submit.hidden = !actionForm && next !== panels.length - 1;
+      if (actionForm) {
+        submit.setAttribute("form", actionForm);
+        submit.textContent = panels[next].dataset.setupLabel ?? "Continue";
+      }
+    }
+    const actions = sheet.querySelector("[data-setup-actions]");
+    if (actions)
+      actions.hidden = false;
+    if (sheet.querySelector("[data-setup-error]")) {
+      sheet.querySelectorAll("form").forEach((form) => say(form, ""));
+      sheet.querySelector("[data-setup-error]")?.remove();
+    }
     const heading = panels[next]?.querySelector("h4");
     if (heading) {
       heading.tabIndex = -1;
@@ -143426,6 +143450,9 @@ function mountDashboardController(options) {
     const done = query("[data-first-run-done]");
     if (done)
       done.hidden = !working;
+    const primary = query("[data-first-run-sheet] [data-setup-submit]");
+    if (primary)
+      primary.hidden = working;
     const retry = query("[data-first-run-redo]");
     if (retry) {
       retry.hidden = !redo;
@@ -143499,7 +143526,7 @@ function mountDashboardController(options) {
   function applyWriteCapability() {
     root.querySelectorAll("form[data-connect-kind],form[data-model-check],form[data-first-run-privacy],form[data-local-models-discover],form[data-local-models-test],form[data-agent-kind]").forEach((form) => {
       const pending = pendingForms.has(form) || form.dataset.keyAccepted === "true";
-      form.querySelectorAll('button,input:not([type="hidden"])').forEach((control) => {
+      Array.from(form.elements).filter((control) => control.matches('button,input:not([type="hidden"])')).forEach((control) => {
         if (control.dataset.olympusOriginallyDisabled === undefined) {
           control.dataset.olympusOriginallyDisabled = control.disabled ? "true" : "false";
         }
@@ -143789,14 +143816,30 @@ function mountDashboardController(options) {
       say(form, message2);
       const setup = form.closest("[data-setup-steps]");
       const step = message2.includes("Redo the Set up your account step") ? 0 : message2.includes("Redo the Create an API key step") ? 1 : -1;
-      form.querySelector("[data-setup-retry]")?.remove();
-      if (setup && step >= 0) {
+      if (setup) {
+        const panels = Array.from(setup.querySelectorAll("[data-setup-panel]"));
+        const current2 = panels.findIndex((panel) => !panel.hidden);
+        panels.forEach((panel) => {
+          panel.hidden = true;
+        });
+        const actions = setup.querySelector("[data-setup-actions]");
+        if (actions)
+          actions.hidden = true;
+        setup.querySelector("[data-setup-error]")?.remove();
+        const error2 = document.createElement("div");
+        error2.dataset.setupError = "";
+        const banner = document.createElement("p");
+        banner.className = "why";
+        banner.setAttribute("role", "alert");
+        banner.textContent = message2;
         const retry = document.createElement("button");
         retry.type = "button";
         retry.className = "btn";
-        retry.dataset.setupRetry = String(step);
-        retry.textContent = step === 0 ? "Go to account and credit" : "Go to API key";
-        form.append(retry);
+        retry.dataset.setupRetry = String(step >= 0 ? step : Math.max(0, current2));
+        retry.textContent = step === 0 ? "Go to account and credit" : step === 1 ? "Go to API key" : "Try again";
+        error2.append(banner, retry);
+        setup.append(error2);
+        retry.focus();
       }
       return;
     }
@@ -143871,7 +143914,7 @@ function mountDashboardController(options) {
         input.value = "";
         input.hidden = true;
       });
-      form.querySelectorAll('button[type="submit"],button:not([type])').forEach((button) => {
+      Array.from(form.elements).filter((control) => control.matches('button[type="submit"],button:not([type])')).forEach((button) => {
         button.textContent = params.source === "readwise" ? "Connected" : "Key saved";
       });
       applyWriteCapability();
@@ -144304,6 +144347,20 @@ function mountDashboardController(options) {
         showSetupStep(steps, 1);
       return;
     }
+    if (target.closest("[data-connect-retry]")) {
+      const sheet = target.closest(".sheet");
+      const error2 = sheet?.querySelector("[data-connect-error]");
+      const content = sheet?.querySelector("[data-connect-content]");
+      if (error2)
+        error2.hidden = true;
+      if (content) {
+        content.hidden = false;
+        const steps = content.querySelector("[data-setup-steps]");
+        if (steps)
+          showSetupStep(steps, 0);
+      }
+      return;
+    }
     const setupOpen = target.closest("[data-setup-open]");
     if (setupOpen) {
       const url2 = setupOpen.dataset.setupOpen;
@@ -144348,7 +144405,7 @@ function mountDashboardController(options) {
         sheet.focus();
       }
       const form = sheet.querySelector('form[data-connect-kind="oauth"][data-oauth-autostart]');
-      if (open7 && form && (canWrite || csrfToken) && !startedFromSheet.has(form) && !form.hasAttribute("data-native-oauth-unavailable")) {
+      if (open7 && form && !form.closest("[hidden]") && (canWrite || csrfToken) && !startedFromSheet.has(form) && !form.hasAttribute("data-native-oauth-unavailable")) {
         startedFromSheet.add(form);
         form.requestSubmit();
       }
@@ -144442,7 +144499,8 @@ function mountDashboardController(options) {
       "connect.readwise": "readwise.library",
       "connect.telegram": "telegram.messages",
       "connect.whatsapp": "whatsapp.personal.messages",
-      "connect.evernote": "evernote.notes"
+      "connect.evernote": "evernote.notes",
+      "dropbox.permissions": "dropbox.files"
     };
     let focus = null;
     const sourceId = Object.prototype.hasOwnProperty.call(sources, wanted) ? sources[wanted] : undefined;
@@ -144458,6 +144516,22 @@ function mountDashboardController(options) {
               setSheetOpen(other, false);
           });
           setSheetOpen(sheet, true);
+          if (wanted === "dropbox.permissions") {
+            const walkthrough = sheet.querySelector("[data-setup-steps]");
+            const panels = walkthrough ? Array.from(walkthrough.querySelectorAll("[data-setup-panel]")) : [];
+            if (walkthrough && panels.length > 2) {
+              const error2 = sheet.querySelector("[data-connect-error]");
+              const content = sheet.querySelector("[data-connect-content]");
+              if (error2)
+                error2.hidden = true;
+              if (content)
+                content.hidden = false;
+              showSetupStep(walkthrough, 2);
+              const disclosure = walkthrough.closest("details");
+              if (disclosure)
+                disclosure.open = true;
+            }
+          }
           if (!sheet.hasAttribute("tabindex"))
             sheet.setAttribute("tabindex", "-1");
           focus = sheet;
@@ -144848,6 +144922,11 @@ td { padding: 7px 10px 7px 0; border-bottom: 1px solid var(--line2); color: var(
 .setrow .blurb details.howto { color: var(--t3); font-size: var(--fs-caption); }
 .rowform { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .keyfield { background: var(--bg); border: 1px solid var(--field); border-radius: 7px; color: var(--t1); font: inherit; font-size: var(--fs-body); padding: 5px 10px; width: 190px; }
+.setupfields { display: grid; gap: 8px; width: 100%; }
+.setupfields .keyfield { width: 100%; box-sizing: border-box; }
+.setupactions { display: flex; align-items: center; gap: 12px; margin-top: 16px; }
+.setupactions > .primary { margin-left: auto; }
+[data-setup-steps] [hidden], [data-connect-content][hidden], [data-connect-error][hidden] { display: none !important; }
 .keyfield::placeholder { color: var(--t4); }
 .keyfield:focus-visible { outline: 2px solid var(--link); outline-offset: 1px; }
 .actmsg { color: var(--t3); font-size: var(--fs-caption); }
@@ -145096,13 +145175,16 @@ function connectorSheet(input) {
 function setupStepsSheet(input) {
   const id = safeId2(input.id);
   const count = input.steps.length;
+  const formId = `${id}-form`;
+  const initialAction = input.stepActions?.[0];
   const panels = input.steps.map((step, index) => {
     const url2 = step.link && safeExternalHref(step.link.url);
     const link = url2 ? `<button type="button" class="btn primary" data-setup-open="${escapeHtml2(url2)}">Open this page in ${escapeHtml2(input.provider)}</button>` + `<p><a class="ext" href="${escapeHtml2(url2)}" target="_blank" rel="noopener noreferrer">Open the page in ${escapeHtml2(input.provider)} ↗</a></p>` : "";
     const redirect = step.redirect_uri && input.redirect ? `<div class="promptbox" id="${id}-redirect">${escapeHtml2(input.redirect)}</div><button class="btn" type="button" data-copy-target="#${id}-redirect">Copy redirect URI</button><span data-copy-status aria-live="polite"></span>` : "";
-    return `<div data-setup-panel${index ? " hidden" : ""}><h4>${escapeHtml2(step.title ?? `Step ${index + 1}`)}</h4><p>${escapeHtml2(step.text)}</p>${link}${redirect}${input.stepContent?.[index] ?? ""}${index === count - 1 ? input.finalForm : ""}</div>`;
+    const action = input.stepActions?.[index];
+    return `<div data-setup-panel${action ? ` data-setup-form="${escapeHtml2(action.formId)}" data-setup-label="${escapeHtml2(action.label)}"` : ""}${index ? " hidden" : ""}><h4>${escapeHtml2(step.title ?? `Step ${index + 1}`)}</h4><p>${escapeHtml2(step.text)}</p>${link}${redirect}${input.stepContent?.[index] ?? ""}${index === count - 1 ? input.finalForm(formId) : ""}</div>`;
   }).join("");
-  return `<div data-setup-steps><p data-setup-counter>Step 1 of ${count}</p><progress data-setup-progress max="${count}" value="1"></progress>${panels}<div class="rowform"><button class="btn" type="button" data-setup-back>Back</button><button class="btn primary" type="button" data-setup-next>I've done this, next</button></div></div>`;
+  return `<div data-setup-steps><p data-setup-counter>Step 1 of ${count}</p><progress data-setup-progress max="${count}" value="1"></progress>${panels}<div class="setupactions" data-setup-actions><button class="btn" type="button" data-setup-back disabled>Back</button><button class="btn primary" type="button" data-setup-next${count === 1 || initialAction ? " hidden" : ""}>I've done this, next</button><button class="btn primary" type="submit" form="${escapeHtml2(initialAction?.formId ?? formId)}" data-setup-submit${count === 1 || initialAction ? "" : " hidden"}>${escapeHtml2(initialAction?.label ?? input.submitLabel ?? "Connect")}</button>${input.footerContent ?? ""}</div></div>`;
 }
 function connectSetupSheet(input) {
   const id = safeId2(input.id);
@@ -145112,20 +145194,22 @@ function connectSetupSheet(input) {
     const placeholder = input.placeholders?.[field.name] ?? field.label;
     return `<input class="keyfield" type="${field.secret ? "password" : "text"}" name="${escapeHtml2(field.name)}"` + `${field.required ? " required" : ""}` + `${value2 === undefined ? "" : ` value="${escapeHtml2(value2)}"`}` + ` placeholder="${escapeHtml2(placeholder)}" aria-label="${escapeHtml2(field.label)}">`;
   }).join("");
-  const notice = (input.notice === undefined || input.notice.trim() === "" ? "" : `<p class="why">${escapeHtml2(input.notice)}</p>` + detailsDisclosure("How to fix", input.noticeDetail === undefined ? "" : `<p class="hint">${escapeHtml2(input.noticeDetail)}</p>`)) + (input.providerNote === undefined || input.providerNote.trim() === "" ? "" : `<p class="providernote">${escapeHtml2(input.providerNote)}</p>`);
+  const hasError = Boolean(input.notice?.trim());
+  const notice = hasError ? `<div data-connect-error><p class="why" role="alert">${escapeHtml2(input.notice)}</p>` + detailsDisclosure("How to fix", input.noticeDetail ? `<p class="hint">${escapeHtml2(input.noticeDetail)}</p>` : "") + `<button class="btn" type="button" data-connect-retry>Back to setup</button></div>` : "";
+  const providerNote = input.providerNote?.trim() ? `<p class="providernote">${escapeHtml2(input.providerNote)}</p>` : "";
   const registration = callbackRegistrationSteps(id, input.registration);
   const redirect = input.registration !== undefined || input.redirectUri === undefined ? "" : `<p class="hint">Redirect URI</p>` + `<div class="promptbox" id="${id}-redirect">${escapeHtml2(input.redirectUri.uri)}</div>` + `<button class="btn" type="button" data-copy-target="#${id}-redirect">Copy redirect URI</button>` + `<span class="copystatus" data-copy-status aria-live="polite"></span>` + `${input.redirectUri.guidance === undefined ? "" : `<p class="hint">${escapeHtml2(input.redirectUri.guidance)}</p>`}`;
   const cancel = input.cancellable !== true ? "" : `<form class="rowform" data-connect-kind="oauth_cancel" style="margin-top:8px">` + `<input type="hidden" name="source" value="${escapeHtml2(input.source)}">` + `<button class="btn" type="submit">Cancel connection attempt</button>` + `<span class="actmsg" data-action-message role="status"></span>` + `</form>`;
   const prompt = `<details class="agentprompt">` + `<summary>Ask your agent to walk you through it</summary>` + `<div class="promptbox" id="${promptId}">${escapeHtml2(input.promptText)}</div>` + `<button class="btn" type="button" data-copy-target="#${promptId}">Copy prompt</button>` + `<span class="copystatus" data-copy-status aria-live="polite"></span>` + `</details>`;
   const submitLabel = escapeHtml2(input.submitLabel ?? "Connect");
   const sourceField = `<input type="hidden" name="source" value="${escapeHtml2(input.source)}">`;
-  const byoForm = `<form class="rowform" data-connect-kind="oauth" style="margin-top:12px">` + sourceField + `${inputs}` + `<button class="btn primary" type="submit">${submitLabel}</button>` + `<span class="actmsg" data-action-message role="status"></span>` + `<span class="authfallback" data-authorization-fallback></span>` + `</form>`;
-  const walkthrough = input.steps && input.provider ? setupStepsSheet({ id, provider: input.provider, steps: input.steps, finalForm: byoForm, ...input.redirectUri ? { redirect: input.redirectUri.uri } : {} }) : `${registration}${redirect}${byoForm}`;
+  const byoForm = (formId) => `<form${formId ? ` id="${formId}" class="setupfields"` : ' class="rowform"'} data-connect-kind="oauth" style="margin-top:12px">` + sourceField + `${inputs}` + (formId ? "" : `<button class="btn primary" type="submit">${submitLabel}</button>`) + `<span class="actmsg" data-action-message role="status"></span>` + `<span class="authfallback" data-authorization-fallback></span>` + `</form>`;
+  const walkthrough = input.steps?.length && input.provider ? setupStepsSheet({ id, provider: input.provider, steps: input.steps, finalForm: byoForm, submitLabel: input.submitLabel ?? "Connect", ...input.redirectUri ? { redirect: input.redirectUri.uri } : {} }) : `${registration}${redirect}${byoForm()}`;
   if (input.publisher) {
-    const publisherForm = `<form class="rowform" data-connect-kind="oauth"${input.cancellable || input.steps ? "" : " data-oauth-autostart"} style="margin-top:12px">` + sourceField + `<button class="btn primary" type="submit">${submitLabel}</button>` + `<span class="actmsg" data-action-message role="status"></span>` + `<span class="authfallback" data-authorization-fallback></span>` + `</form>`;
-    return `<div class="sheet" id="${id}" aria-hidden="true">` + `<h4>${escapeHtml2(input.heading)}</h4>` + `${notice}` + `<p>${escapeHtml2(input.publisher.intro)}</p>` + `${publisherForm}` + `${cancel}` + `<details class="agentprompt">` + `<summary>${escapeHtml2(input.publisher.byoSummary)}</summary>` + `<p>${escapeHtml2(input.intro)}</p>` + `${walkthrough}` + `${prompt}` + `</details>` + `</div>`;
+    const publisherForm = `<form class="rowform" data-connect-kind="oauth"${input.cancellable ? "" : " data-oauth-autostart"} style="margin-top:12px">` + sourceField + `<button class="btn primary" type="submit">${submitLabel}</button>` + `<span class="actmsg" data-action-message role="status"></span>` + `<span class="authfallback" data-authorization-fallback></span>` + `</form>`;
+    return `<div class="sheet" id="${id}" aria-hidden="true">` + `<h4>${escapeHtml2(input.heading)}</h4>` + `${notice}<div data-connect-content${hasError ? " hidden" : ""}>${providerNote}` + `<p>${escapeHtml2(input.publisher.intro)}</p>` + `${publisherForm}` + `${cancel}` + `<details class="agentprompt">` + `<summary>${escapeHtml2(input.publisher.byoSummary)}</summary>` + `<p>${escapeHtml2(input.intro)}</p>` + `${walkthrough}` + `${prompt}` + `</details></div>` + `</div>`;
   }
-  return `<div class="sheet" id="${id}" aria-hidden="true">` + `<h4>${escapeHtml2(input.heading)}</h4>` + `${notice}` + `<p>${escapeHtml2(input.intro)}</p>` + `${walkthrough}` + `${cancel}` + `${prompt}` + `</div>`;
+  return `<div class="sheet" id="${id}" aria-hidden="true">` + `<h4>${escapeHtml2(input.heading)}</h4>` + `${notice}<div data-connect-content${hasError ? " hidden" : ""}>${providerNote}` + `<p>${escapeHtml2(input.intro)}</p>` + `${walkthrough}` + `${cancel}` + `${prompt}</div>` + `</div>`;
 }
 function callbackRegistrationSteps(id, registration) {
   if (registration === undefined)
@@ -145162,8 +145246,7 @@ function dashboardOAuthConnectSheet(source, action, options = {}) {
   const secretOnFile = action.client_secret_on_file === true;
   const fields = byo.fields.map((field) => field.name === "client_id" || !secretOnFile ? field : { ...field, required: false });
   const savedSecrets = secretOnFile ? byo.fields.filter((field) => field.secret).map((field) => field.name) : [];
-  const pendingNote = action.pending_attempt && action.redirect_uri_to_register ? `If ${source.label}'s page shows an error instead of asking you to approve, the callback URL below is not` + ` registered exactly on your app. Add it, press Cancel connection attempt, then Connect again.` : undefined;
-  const notice = options.notice ?? pendingNote;
+  const notice = options.notice;
   const sheet = connectSetupSheet({
     id: sheetId,
     heading: `${dashboardActionLabel(action.label)} ${source.label}`,
@@ -153453,9 +153536,9 @@ function renderModelSetup(view3, options = {}) {
 }
 function renderFirstRunPrivacyChoice() {
   const choices = PRIVATE_ANSWER_OPTIONS.map((option) => `<label class="modelcard"><input type="radio" name="choice" value="${escapeHtml2(option.id)}"${option.recommended ? " checked" : ""}> <b>${escapeHtml2(option.label)}${option.recommended ? " — Recommended" : ""}</b><p>${escapeHtml2(option.description)}</p></label>`).join("");
-  const choice = `<form data-first-run-privacy>${choices}<button class="btn primary" type="submit">Continue</button><span data-action-message role="status"></span></form>`;
+  const choice = `<form id="first-run-privacy-choice" data-first-run-privacy>${choices}<span data-action-message role="status"></span></form>`;
   const connect = '<div data-first-run-venice hidden><h4>Add a Venice key</h4><p data-first-run-venice-help></p><button class="btn" type="button" data-focus-target="#venice-setup input[name=api_key]">Go to the Venice key field</button></div>' + `<div data-first-run-local hidden><h4>Connect my local models</h4><p>The built-in model is already included. Connect a model you run, or continue with the built-in model.</p><button type="button" class="btn" ${LOCAL_MODELS_TOGGLE}${localModelsSheet()}</div>`;
-  const verify2 = `${CHECK_FORM_OPEN}<button class="btn primary" type="submit">Check readiness</button>${CHECK_FORM_TAIL}` + '<p data-first-run-result role="status">Run the readiness check to verify your setup.</p><button class="btn" type="button" data-first-run-redo hidden></button><button class="btn" type="button" data-first-run-keys hidden>Continue setup in Keys</button><button class="btn primary" type="button" data-first-run-done hidden>Done</button>';
+  const verify2 = `<form id="first-run-privacy-form" method="post" action="/dashboard/models/check" data-model-check>${CHECK_FORM_TAIL}` + '<p data-first-run-result role="status">Run the readiness check to verify your setup.</p><button class="btn" type="button" data-first-run-redo hidden></button><button class="btn" type="button" data-first-run-keys hidden>Continue setup in Keys</button>';
   return '<section aria-label="Private answers" data-first-run-sheet>' + setupStepsSheet({
     id: "first-run-privacy",
     provider: "Olympus",
@@ -153465,8 +153548,10 @@ function renderFirstRunPrivacyChoice() {
       { title: "Verify it works", text: "Check that Olympus is ready with your saved choice." }
     ],
     stepContent: [choice, connect],
-    finalForm: verify2
-  }).replace("data-setup-back>", "data-setup-back hidden>").replace("data-setup-next>", "data-setup-next hidden>") + "</section>";
+    finalForm: () => verify2,
+    stepActions: [{ formId: "first-run-privacy-choice", label: "Continue" }, undefined, { formId: "first-run-privacy-form", label: "Check readiness" }],
+    footerContent: '<button class="btn primary" type="button" data-first-run-done hidden>Done</button>'
+  }) + "</section>";
 }
 function localModelsSheet() {
   const controls = '<form data-local-models-discover><label>OpenAI-compatible URL (optional)<input class="keyfield" name="base_url" type="url" placeholder="http://127.0.0.1:1234/v1"></label><p>Leave blank to detect Ollama and LM Studio on this computer. Only loopback URLs are accepted.</p><button class="btn primary" type="submit">Detect local models</button><span data-action-message role="status"></span></form>' + '<div data-local-models-results></div><form data-local-models-test hidden><input type="hidden" name="base_url"><label>Answer model<select name="answer_model" required></select></label><p>Olympus tests the answer model before saving it. Search embeddings and existing vectors stay unchanged.</p><button class="btn primary" type="submit">Connect answer model</button><span data-action-message role="status"></span></form>';
@@ -153534,12 +153619,12 @@ function renderModelSetupBlocker(view3) {
 function modelKeyFieldId(card) {
   return `model-key-field-${card.id.replace(/[^A-Za-z0-9_-]+/g, "-")}`;
 }
-function modelKeyForm(card) {
-  return `<form method="post" action="/dashboard/connect/api-key" data-connect-kind="api_key" data-model-provider="${card.id}">` + `<input type="hidden" name="source" value="${card.id}">` + `<input class="keyfield"${card.state === "ready" ? "" : ` id="${modelKeyFieldId(card)}"`} type="password" name="api_key" required autocomplete="new-password" placeholder="${card.label} API key" aria-label="${card.label} API key">` + '<button class="btn primary" type="submit">Connect</button><span data-action-message role="status"></span></form>';
+function modelKeyForm(card, formId) {
+  return `<form${formId ? ` id="${formId}" class="setupfields"` : ""} method="post" action="/dashboard/connect/api-key" data-connect-kind="api_key" data-model-provider="${card.id}">` + `<input type="hidden" name="source" value="${card.id}">` + `<input class="keyfield"${card.state === "ready" ? "" : ` id="${modelKeyFieldId(card)}"`} type="password" name="api_key" required autocomplete="new-password" placeholder="${card.label} API key" aria-label="${card.label} API key">` + (formId ? "" : '<button class="btn primary" type="submit">Connect</button>') + '<span data-action-message role="status"></span></form>';
 }
 function modelKeyAction(card, lead) {
   if (card.id === "venice" && lead.includes("<form")) {
-    return `<span id="model-venice-start" tabindex="-1"></span>` + setupStepsSheet({ id: `model-venice-${card.state}`, provider: "Venice", steps: VENICE_SETUP_STEPS, finalForm: lead });
+    return `<span id="model-venice-start" tabindex="-1"></span>` + setupStepsSheet({ id: `model-venice-${card.state}`, provider: "Venice", steps: VENICE_SETUP_STEPS, finalForm: (formId) => modelKeyForm(card, formId) });
   }
   const href = card.id === "gemini" ? "https://aistudio.google.com/apikey" : "https://venice.ai";
   return `<div class="modelaction">${lead}<a href="${href}" target="_blank" rel="noopener noreferrer">Get a ${card.label} API key</a></div>`;
@@ -153685,7 +153770,7 @@ ${connect.sheet}`;
   }
   if (action.kind === "api_key" && action.source === "venice") {
     const sheetId = "setup-venice-api";
-    const form = `<form class="rowform" data-connect-kind="api_key"><input type="hidden" name="source" value="venice"><input class="keyfield" type="password" name="api_key" required autocomplete="new-password" placeholder="API key" aria-label="API key"><button class="btn primary" type="submit">Connect</button><span class="actmsg" data-action-message role="status"></span></form>`;
+    const form = (formId) => `<form id="${formId}" class="setupfields" data-connect-kind="api_key"><input type="hidden" name="source" value="venice"><input class="keyfield" type="password" name="api_key" required autocomplete="new-password" placeholder="API key" aria-label="API key"><span class="actmsg" data-action-message role="status"></span></form>`;
     const sheet = `<div class="sheet" id="${sheetId}" aria-hidden="true"><h4>Set up Venice</h4>${setupStepsSheet({ id: sheetId, provider: "Venice", steps: action.instructions.diy_steps, finalForm: form })}</div>`;
     return setupRow({ ...id, label: source.label, blurb: action.instructions.plain_intro, action: { label: action.label, kind: "none", sheet: sheetId, ...gate } }) + sheet;
   }
@@ -160614,7 +160699,7 @@ function createEmailSourceWorker(options = {}) {
             attempt.consumed = true;
             return dashboardOAuthFailureHtml({
               source,
-              reason: `OAuth provider returned ${errorCode2 ?? "an unrecognized error"}.`,
+              reason: source === "dropbox" && errorCode2 === "invalid_scope" && attempt.clientIdSource === "byo" ? "Dropbox needs more permissions. Redo the Enable permissions step and sign in again. No credentials were stored." : `OAuth provider returned ${errorCode2 ?? "an unrecognized error"}.`,
               returnTo: attempt.returnTo,
               status: 400
             });
@@ -160646,7 +160731,7 @@ function createEmailSourceWorker(options = {}) {
             clearDashboardOAuthAttempt(dashboardOAuthAttempts, source, attempt);
             return dashboardOAuthFailureHtml({
               source,
-              reason: dashboardCallbackFailureReason(error2, source),
+              reason: dashboardCallbackFailureReason(error2, source, attempt.clientIdSource),
               returnTo: attempt.returnTo,
               status: 400
             });
@@ -160769,6 +160854,7 @@ function createEmailSourceWorker(options = {}) {
             dashboardOAuthAttempts.set(source, {
               source,
               pending,
+              clientIdSource: publisher ? "publisher" : "byo",
               returnTo: handback || computerHandback ? CHATGPT_RETURN_TO : dashboardReturnTo(),
               startedAt: startedAtDate.toISOString(),
               expiresAt,
@@ -164070,9 +164156,9 @@ function safeVeniceCheckFailure(error2) {
   ]);
   return allowed.has(message2) ? message2 : "The Venice key could not be validated or applied. Try again.";
 }
-function dashboardCallbackFailureReason(error2, source) {
+function dashboardCallbackFailureReason(error2, source, clientIdSource) {
   const message2 = error2 instanceof Error ? error2.message : "";
-  if (source === "dropbox" && message2 === "Dropbox refused the list check. Redo the Enable permissions step and sign in again. No credentials were stored.")
+  if (source === "dropbox" && clientIdSource === "byo" && message2 === "Dropbox needs more permissions. Redo the Enable permissions step and sign in again. No credentials were stored.")
     return message2;
   const match = /^OAuth token exchange failed with status (\d{3})(?: \(([a-z_]+)\))?\.$/.exec(message2);
   if (match && (match[2] === undefined || safeOAuthErrorCode(match[2]) !== undefined))
@@ -164100,6 +164186,7 @@ function dashboardBoundedExpiry(claimed, now) {
 function dashboardOAuthFailureHtml(options) {
   const label = dashboardOAuthSourceLabel(options.source);
   const chatgpt = options.returnTo === CHATGPT_RETURN_TO;
+  const permissions = !chatgpt && options.source === "dropbox" && options.reason === "Dropbox needs more permissions. Redo the Enable permissions step and sign in again. No credentials were stored.";
   return dashboardOAuthLandingHtml({
     title: "Olympus connect failed",
     heading: `Could not connect ${label}`,
@@ -164107,8 +164194,8 @@ function dashboardOAuthFailureHtml(options) {
       `Could not connect ${label}: ${options.reason}`,
       chatgpt ? "Go back to ChatGPT and try again from your Olympus dashboard." : "You can close this tab and go back to the Olympus dashboard tab you started from."
     ],
-    returnTo: options.returnTo,
-    returnLabel: chatgpt ? "Back to ChatGPT" : "Back to the dashboard tab",
+    returnTo: permissions ? "/dashboard#olympus-open=dropbox.permissions" : options.returnTo,
+    returnLabel: permissions ? "Go to Dropbox permissions" : chatgpt ? "Back to ChatGPT" : "Back to the dashboard tab",
     status: options.status
   });
 }

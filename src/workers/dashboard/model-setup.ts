@@ -69,18 +69,20 @@ export function renderModelSetup(view: ModelSetupView | undefined, options: { he
 
 function renderFirstRunPrivacyChoice(): string {
   const choices = PRIVATE_ANSWER_OPTIONS.map(option => `<label class="modelcard"><input type="radio" name="choice" value="${escapeHtml(option.id)}"${option.recommended ? ' checked' : ''}> <b>${escapeHtml(option.label)}${option.recommended ? ' — Recommended' : ''}</b><p>${escapeHtml(option.description)}</p></label>`).join('');
-  const choice = `<form data-first-run-privacy>${choices}<button class="btn primary" type="submit">Continue</button><span data-action-message role="status"></span></form>`;
+  const choice = `<form id="first-run-privacy-choice" data-first-run-privacy>${choices}<span data-action-message role="status"></span></form>`;
   const connect = '<div data-first-run-venice hidden><h4>Add a Venice key</h4><p data-first-run-venice-help></p><button class="btn" type="button" data-focus-target="#venice-setup input[name=api_key]">Go to the Venice key field</button></div>'
     + `<div data-first-run-local hidden><h4>Connect my local models</h4><p>The built-in model is already included. Connect a model you run, or continue with the built-in model.</p><button type="button" class="btn" ${LOCAL_MODELS_TOGGLE}${localModelsSheet()}</div>`;
-  const verify = `${CHECK_FORM_OPEN}<button class="btn primary" type="submit">Check readiness</button>${CHECK_FORM_TAIL}`
-    + '<p data-first-run-result role="status">Run the readiness check to verify your setup.</p><button class="btn" type="button" data-first-run-redo hidden></button><button class="btn" type="button" data-first-run-keys hidden>Continue setup in Keys</button><button class="btn primary" type="button" data-first-run-done hidden>Done</button>';
+  const verify = `<form id="first-run-privacy-form" method="post" action="/dashboard/models/check" data-model-check>${CHECK_FORM_TAIL}`
+    + '<p data-first-run-result role="status">Run the readiness check to verify your setup.</p><button class="btn" type="button" data-first-run-redo hidden></button><button class="btn" type="button" data-first-run-keys hidden>Continue setup in Keys</button>';
   return '<section aria-label="Private answers" data-first-run-sheet>' + setupStepsSheet({
     id: 'first-run-privacy', provider: 'Olympus', steps: [
       { title: 'How should Olympus answer with Private items?', text: 'Choose how Private answers may be made. You can change this later in Privacy settings.' },
       { title: 'Connect your choice', text: 'Your privacy choice is saved.' },
       { title: 'Verify it works', text: 'Check that Olympus is ready with your saved choice.' },
-    ], stepContent: [choice, connect], finalForm: verify,
-  }).replace('data-setup-back>', 'data-setup-back hidden>').replace('data-setup-next>', 'data-setup-next hidden>') + '</section>';
+    ], stepContent: [choice, connect], finalForm: () => verify,
+    stepActions: [{ formId: 'first-run-privacy-choice', label: 'Continue' }, undefined, { formId: 'first-run-privacy-form', label: 'Check readiness' }],
+    footerContent: '<button class="btn primary" type="button" data-first-run-done hidden>Done</button>',
+  }) + '</section>';
 }
 
 function localModelsSheet(): string {
@@ -168,17 +170,17 @@ function modelKeyFieldId(card: ModelSetupCard): string {
   return `model-key-field-${card.id.replace(/[^A-Za-z0-9_-]+/g, '-')}`;
 }
 
-function modelKeyForm(card: ModelSetupCard): string {
-  return `<form method="post" action="/dashboard/connect/api-key" data-connect-kind="api_key" data-model-provider="${card.id}">`
+function modelKeyForm(card: ModelSetupCard, formId?: string): string {
+  return `<form${formId ? ` id="${formId}" class="setupfields"` : ''} method="post" action="/dashboard/connect/api-key" data-connect-kind="api_key" data-model-provider="${card.id}">`
     + `<input type="hidden" name="source" value="${card.id}">`
     + `<input class="keyfield"${card.state === 'ready' ? '' : ` id="${modelKeyFieldId(card)}"`} type="password" name="api_key" required autocomplete="new-password" placeholder="${card.label} API key" aria-label="${card.label} API key">`
-    + '<button class="btn primary" type="submit">Connect</button><span data-action-message role="status"></span></form>';
+    + (formId ? '' : '<button class="btn primary" type="submit">Connect</button>') + '<span data-action-message role="status"></span></form>';
 }
 
 /** One wrapping row: the key form (or the saved-key note) and the "Get a key" link beside it. */
 function modelKeyAction(card: ModelSetupCard, lead: string): string {
   if (card.id === 'venice' && lead.includes('<form')) {
-    return `<span id="model-venice-start" tabindex="-1"></span>` + setupStepsSheet({ id: `model-venice-${card.state}`, provider: 'Venice', steps: VENICE_SETUP_STEPS, finalForm: lead });
+    return `<span id="model-venice-start" tabindex="-1"></span>` + setupStepsSheet({ id: `model-venice-${card.state}`, provider: 'Venice', steps: VENICE_SETUP_STEPS, finalForm: (formId) => modelKeyForm(card, formId) });
   }
   const href = card.id === 'gemini' ? 'https://aistudio.google.com/apikey' : 'https://venice.ai';
   return `<div class="modelaction">${lead}<a href="${href}" target="_blank" rel="noopener noreferrer">Get a ${card.label} API key</a></div>`;
