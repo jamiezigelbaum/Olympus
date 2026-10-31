@@ -896,6 +896,9 @@ export function dashboardConnectedSummary(connected: number, ready: number): str
   return `${dashboardCount(connected)} ${plural(connected, 'source')} connected, ${dashboardCount(ready)} ready to answer`;
 }
 
+/** View-only sync verified in #616; OAuth metadata omitted scopes_supported on 2026-10-31. */
+export const DASHBOARD_EVERNOTE_CONSENT_HELP = 'On Evernote’s consent screen, leave only View ticked; untick Create, Edit and Delete.';
+
 /** Why a connect control is greyed out while models are not ready. */
 export const DASHBOARD_MODELS_BLOCKED_REASON = 'Locked until models are ready';
 

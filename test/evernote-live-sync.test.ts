@@ -447,6 +447,8 @@ describe('the dashboard', () => {
     const keys = renderDashboardKeysPage(view, {});
     const at = keys.indexOf('data-source-id="evernote.notes"');
     expect(at).toBeGreaterThan(0);
+    const evernoteRow = keys.slice(at, keys.indexOf('</div>', at));
+    expect(evernoteRow).toContain('On Evernote’s consent screen, leave only View ticked; untick Create, Edit and Delete.');
     // The row's Connect posts { source: 'evernote' } to /dashboard/connect/oauth/start (start_oauth).
     expect(keys.slice(at, keys.indexOf('</div>', at))).toContain('data-connect-kind="oauth"><input type="hidden" name="source" value="evernote">');
   });
