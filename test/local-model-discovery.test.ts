@@ -91,3 +91,27 @@ describe('local model discovery', () => {
   });
 
 });
+
+test('saving a verified answer model preserves the rest of the policy and rejects stale policy', async () => {
+  const { mkdtempSync, writeFileSync, readFileSync, rmSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const { loadSovereigntyPreset } = await import('../src/core/sovereignty.ts');
+  const { saveLocalAnswerModel } = await import('../src/core/local-model-discovery.ts');
+  const dir = mkdtempSync(join(tmpdir(), 'local-answer-save-'));
+  try {
+    const path = join(dir, 'policy.json');
+    const original = loadSovereigntyPreset('local-only');
+    writeFileSync(path, JSON.stringify(original));
+    const discovery = service(url => url.endsWith('/models') ? response({ data: [{ id: 'answer' }] }) : response({ choices: [{ message: { content: 'ready' } }] }));
+    const saved = await saveLocalAnswerModel({ path, expected: original, selection: { baseUrl: 'http://localhost:1234', answerModel: 'answer' }, discovery });
+    expect(saved.ok).toBe(true);
+    const current = JSON.parse(readFileSync(path, 'utf8'));
+    expect(current.modelProfiles['local-source-answer']).toMatchObject({ baseUrl: 'http://127.0.0.1:1234/v1', model: 'answer' });
+    expect(current.modelProfiles['built-in-embedding']).toEqual(original.modelProfiles['built-in-embedding']);
+    expect(current.routes).toEqual(original.routes);
+    expect(current.retrieval).toEqual(original.retrieval);
+    const stale = await saveLocalAnswerModel({ path, expected: original, selection: { baseUrl: 'http://localhost:1234', answerModel: 'answer' }, discovery });
+    expect(stale.ok).toBe(false);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});

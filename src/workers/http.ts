@@ -615,7 +615,8 @@ function isDashboardArchiveImportLocalRoute(request: Request): boolean {
 
 /** Routes only a local-grade control session reaches: Outside help, Private answers, and archive approvals. */
 function isDashboardLocalGradeRoute(request: Request): boolean {
-  return isDashboardConsultControlRoute(request) || isDashboardPrivateAnswersRoute(request) || isDashboardArchiveImportLocalRoute(request);
+  return isDashboardConsultControlRoute(request) || isDashboardPrivateAnswersRoute(request) || isDashboardArchiveImportLocalRoute(request)
+    || (request.method === 'POST' && ['/dashboard/models/first-run-privacy', '/dashboard/models/local/discover', '/dashboard/models/local/test', '/dashboard/models/local/save'].includes(new URL(request.url).pathname));
 }
 
 function dashboardLocalGradeRefusal(request: Request): Response {
@@ -664,6 +665,7 @@ function isDashboardControlRoute(request: Request): boolean {
     '/dashboard/models/first-run-privacy',
     '/dashboard/models/local/discover',
     '/dashboard/models/local/test',
+    '/dashboard/models/local/save',
     '/dashboard/sync-now',
     '/dashboard/embedding-priority',
     '/dashboard/disconnect',

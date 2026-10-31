@@ -1,6 +1,7 @@
 import { fetchBoundedText, isAbortError } from './http-timeout.ts';
 import { assertLocalModelIdNotCloudForwarding, isCloudForwardingModelId } from './local-model-policy.ts';
 import { isModelEndpointRedirectError, modelEndpointFetch, type ModelTransportFetch } from './model-transport.ts';
+import { updateSovereigntyConfigFile, type SovereigntyConfig } from './sovereignty.ts';
 
 export type LocalModelStep = 'endpoint' | 'models' | 'answer' | 'embedding' | 'complete';
 export interface DiscoveredLocalModel { id: string; allowed: boolean; reason?: string }
@@ -19,6 +20,20 @@ export interface LocalModelTestResult {
   embeddingDimension?: number;
 }
 export interface LocalModelSelection { baseUrl: string; answerModel: string }
+
+/** Test synthetic input before committing only the existing local answer profile. */
+export async function saveLocalAnswerModel(input: { path: string; expected: SovereigntyConfig; selection: LocalModelSelection; discovery: LocalModelDiscovery }) {
+  const check = await input.discovery.test(input.selection);
+  if (!check.working) return { ok: false as const, detail: check.detail };
+  const baseUrl = localBaseUrl(input.selection.baseUrl).href.replace(/\/$/, '');
+  const model = modelId(input.selection.answerModel);
+  const result = updateSovereigntyConfigFile({ path: input.path, expect: input.expected, patch: current => {
+    const profile = current.modelProfiles['local-source-answer'];
+    if (!profile || profile.provider !== 'local-openai-compatible' || profile.trust !== 'local' || profile.purpose !== 'analyst') return current;
+    return { ...current, modelProfiles: { ...current.modelProfiles, 'local-source-answer': { ...profile, baseUrl, model } } };
+  } });
+  return result.ok && result.changed ? { ok: true as const } : { ok: false as const, detail: 'The policy changed or has no editable local answer profile. Refresh and try again.' };
+}
 
 /** Read-only discovery and synthetic checks. Never installs or downloads models. */
 export class LocalModelDiscovery {

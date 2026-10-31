@@ -137497,6 +137497,21 @@ var init_remote_relay_runtime = __esm(() => {
 });
 
 // src/core/local-model-discovery.ts
+async function saveLocalAnswerModel(input) {
+  const check = await input.discovery.test(input.selection);
+  if (!check.working)
+    return { ok: false, detail: check.detail };
+  const baseUrl = localBaseUrl(input.selection.baseUrl).href.replace(/\/$/, "");
+  const model = modelId(input.selection.answerModel);
+  const result = updateSovereigntyConfigFile({ path: input.path, expect: input.expected, patch: (current2) => {
+    const profile = current2.modelProfiles["local-source-answer"];
+    if (!profile || profile.provider !== "local-openai-compatible" || profile.trust !== "local" || profile.purpose !== "analyst")
+      return current2;
+    return { ...current2, modelProfiles: { ...current2.modelProfiles, "local-source-answer": { ...profile, baseUrl, model } } };
+  } });
+  return result.ok && result.changed ? { ok: true } : { ok: false, detail: "The policy changed or has no editable local answer profile. Refresh and try again." };
+}
+
 class LocalModelDiscovery {
   fetchImpl;
   timeoutMs;
@@ -137622,6 +137637,7 @@ var init_local_model_discovery = __esm(() => {
   init_http_timeout();
   init_local_model_policy();
   init_model_transport();
+  init_sovereignty();
   CheckError = class CheckError extends Error {
   };
 });
@@ -143443,7 +143459,7 @@ function mountDashboardController(options) {
     if (form.hasAttribute("data-local-models-discover"))
       return { action: "discover_local_models", base_url: body.base_url ?? "" };
     if (form.hasAttribute("data-local-models-test"))
-      return { action: "test_local_models", base_url: body.base_url ?? "", answer_model: body.answer_model ?? "" };
+      return { action: "save_local_answer_model", base_url: body.base_url ?? "", answer_model: body.answer_model ?? "" };
     if (form.hasAttribute("data-first-run-privacy"))
       return { action: "save_first_run_privacy", choice: body.choice ?? "" };
     const connect = form.dataset.connectKind;
@@ -144966,6 +144982,7 @@ function standaloneDashboardControllerScript(input) {
         if (action === 'start_oauth') return ['/dashboard/connect/oauth/start', withoutAction(params)];
         if (action === 'discover_local_models') return ['/dashboard/models/local/discover', withoutAction(params)];
         if (action === 'test_local_models') return ['/dashboard/models/local/test', withoutAction(params)];
+        if (action === 'save_local_answer_model') return ['/dashboard/models/local/save', withoutAction(params)];
         if (action === 'check_model_setup') return ['/dashboard/models/check', {}];
         if (action === 'save_first_run_privacy') return ['/dashboard/models/first-run-privacy', withoutAction(params)];
         if (action === 'connect_api_key') return ['/dashboard/connect/api-key', withoutAction(params)];
@@ -153119,7 +153136,7 @@ function renderFirstRunPrivacyChoice() {
   return `<section aria-label="Private answers"><h2>How should Olympus answer with Private items?</h2><p>Choose how Private answers may be made. You can change this later.</p><form data-first-run-privacy>${choices}<button class="btn primary" type="submit">Continue</button><span data-action-message role="status"></span></form></section>`;
 }
 function localModelsSheet() {
-  const controls = '<form data-local-models-discover><label>OpenAI-compatible URL (optional)<input class="keyfield" name="base_url" type="url" placeholder="http://127.0.0.1:1234/v1"></label><p>Leave blank to detect Ollama and LM Studio on this computer. Only loopback URLs are accepted.</p><button class="btn primary" type="submit">Detect local models</button><span data-action-message role="status"></span></form>' + '<div data-local-models-results></div><form data-local-models-test hidden><input type="hidden" name="base_url"><label>Answer model<select name="answer_model" required></select></label><p>Testing does not change your configured models or replace existing search vectors. Use the agent prompt below to apply a verified configuration.</p><button class="btn primary" type="submit">Test answer model</button><span data-action-message role="status"></span></form>';
+  const controls = '<form data-local-models-discover><label>OpenAI-compatible URL (optional)<input class="keyfield" name="base_url" type="url" placeholder="http://127.0.0.1:1234/v1"></label><p>Leave blank to detect Ollama and LM Studio on this computer. Only loopback URLs are accepted.</p><button class="btn primary" type="submit">Detect local models</button><span data-action-message role="status"></span></form>' + '<div data-local-models-results></div><form data-local-models-test hidden><input type="hidden" name="base_url"><label>Answer model<select name="answer_model" required></select></label><p>Olympus tests the answer model before saving it. Search embeddings and existing vectors stay unchanged.</p><button class="btn primary" type="submit">Connect answer model</button><span data-action-message role="status"></span></form>';
   return connectorSheet({ id: "local-model-setup-sheet", heading: "Connect existing local models", intro: "Detect models you already run and test them with synthetic text. Olympus does not install, download, or maintain them. Local means the machine hosting Olympus.", promptText: LOCAL_MODELS_SETUP_PROMPT, copyButtonLabel: "Copy prompt" }).replace('<div class="promptbox"', controls + '<div class="promptbox"');
 }
 function blockingCard(view3) {
@@ -154703,7 +154720,7 @@ function isDashboardArchiveImportLocalRoute(request) {
   return request.method === "POST" && DASHBOARD_ARCHIVE_IMPORT_LOCAL_PATHS.includes(new URL(request.url).pathname);
 }
 function isDashboardLocalGradeRoute(request) {
-  return isDashboardConsultControlRoute(request) || isDashboardPrivateAnswersRoute(request) || isDashboardArchiveImportLocalRoute(request);
+  return isDashboardConsultControlRoute(request) || isDashboardPrivateAnswersRoute(request) || isDashboardArchiveImportLocalRoute(request) || request.method === "POST" && ["/dashboard/models/first-run-privacy", "/dashboard/models/local/discover", "/dashboard/models/local/test", "/dashboard/models/local/save"].includes(new URL(request.url).pathname);
 }
 function dashboardLocalGradeRefusal(request) {
   if (!isDashboardPrivateAnswersRoute(request) && !isDashboardArchiveImportLocalRoute(request))
@@ -154749,6 +154766,7 @@ function isDashboardControlRoute(request) {
     "/dashboard/models/first-run-privacy",
     "/dashboard/models/local/discover",
     "/dashboard/models/local/test",
+    "/dashboard/models/local/save",
     "/dashboard/sync-now",
     "/dashboard/embedding-priority",
     "/dashboard/disconnect",
@@ -160464,7 +160482,7 @@ function createEmailSourceWorker(options = {}) {
           }
           return json({ ok: true, status_message: "Choice saved. Olympus is applying it." });
         }
-        if (request.method === "POST" && ["/dashboard/models/local/discover", "/dashboard/models/local/test"].includes(url2.pathname)) {
+        if (request.method === "POST" && ["/dashboard/models/local/discover", "/dashboard/models/local/test", "/dashboard/models/local/save"].includes(url2.pathname)) {
           if (!request.headers.has(DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER) || request.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER) !== "local") {
             return json({ ok: false, error: { code: "mac_dashboard_only", message: "Check local models in an unlocked dashboard on this computer." } }, 403);
           }
@@ -160477,10 +160495,16 @@ function createEmailSourceWorker(options = {}) {
             const results = await sourceDashboard.discoverLocalModels(typeof input.base_url === "string" && input.base_url.trim() ? input.base_url.trim() : undefined);
             return json({ ok: true, results });
           }
-          if (!sourceDashboard?.testLocalModels)
-            throw new EmailSourceWorkerError(501, "model_setup_not_supported", "Local model testing is unavailable.");
           if (typeof input.base_url !== "string" || typeof input.answer_model !== "string")
             throw new EmailSourceWorkerError(400, "invalid_request", "Choose a server and answer model.");
+          if (url2.pathname.endsWith("/save")) {
+            if (!sourceDashboard?.saveLocalAnswerModel)
+              throw new EmailSourceWorkerError(501, "model_setup_not_supported", "Local model saving is unavailable.");
+            const result2 = await sourceDashboard.saveLocalAnswerModel({ baseUrl: input.base_url, answerModel: input.answer_model });
+            return json(result2.ok ? { ok: true, status_message: "Model saved. Olympus is applying it; check readiness after restart." } : { ok: false, error: { code: "model_save_failed", message: result2.detail } }, result2.ok ? 200 : 409);
+          }
+          if (!sourceDashboard?.testLocalModels)
+            throw new EmailSourceWorkerError(501, "model_setup_not_supported", "Local model testing is unavailable.");
           const result = await sourceDashboard.testLocalModels({ baseUrl: input.base_url, answerModel: input.answer_model });
           return json({ ok: true, result });
         }
@@ -207810,6 +207834,16 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
         checkModelSetup: () => modelSetup.checkLocalModels(),
         discoverLocalModels: (baseUrl) => localModelDiscovery.discover(baseUrl),
         testLocalModels: (selection) => localModelDiscovery.test(selection),
+        saveLocalAnswerModel: async (selection) => {
+          if (sovereigntyEngine.source !== "file" || !sovereigntyEngine.path || !modelReloadInstalled || !workerRestartsItself(workerLaunch, process.env))
+            return { ok: false, detail: "Olympus cannot apply this change automatically. Restart support and a writable policy are required." };
+          const result = await saveLocalAnswerModel({ path: sovereigntyEngine.path, expected: sovereigntyEngine.config, selection, discovery: localModelDiscovery });
+          if (!result.ok)
+            return result;
+          if (!requestModelReload())
+            return { ok: false, detail: "The model was saved but could not be applied. Restart Olympus and check readiness." };
+          return result;
+        },
         saveFirstRunPrivacyChoice: (choice) => {
           if (sovereigntyEngine.source !== "file" || !sovereigntyEngine.path)
             return false;

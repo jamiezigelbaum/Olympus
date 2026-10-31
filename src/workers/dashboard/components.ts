@@ -909,6 +909,7 @@ export function standaloneDashboardControllerScript(
         if (action === 'start_oauth') return ['/dashboard/connect/oauth/start', withoutAction(params)];
         if (action === 'discover_local_models') return ['/dashboard/models/local/discover', withoutAction(params)];
         if (action === 'test_local_models') return ['/dashboard/models/local/test', withoutAction(params)];
+        if (action === 'save_local_answer_model') return ['/dashboard/models/local/save', withoutAction(params)];
         if (action === 'check_model_setup') return ['/dashboard/models/check', {}];
         if (action === 'save_first_run_privacy') return ['/dashboard/models/first-run-privacy', withoutAction(params)];
         if (action === 'connect_api_key') return ['/dashboard/connect/api-key', withoutAction(params)];

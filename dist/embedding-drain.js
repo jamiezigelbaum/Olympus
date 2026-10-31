@@ -63059,6 +63059,7 @@ import { dirname as dirname34, isAbsolute as isAbsolute14 } from "node:path";
 init_http_timeout();
 init_local_model_policy();
 init_model_transport();
+init_sovereignty();
 
 // src/workers/email-source/server.ts
 init_first_run_privacy();

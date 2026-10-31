@@ -327,7 +327,7 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
     if (form.hasAttribute('data-model-check')) return { action: 'check_model_setup' };
     const body = formRecord(form);
     if (form.hasAttribute('data-local-models-discover')) return { action: 'discover_local_models', base_url: body.base_url ?? '' };
-    if (form.hasAttribute('data-local-models-test')) return { action: 'test_local_models', base_url: body.base_url ?? '', answer_model: body.answer_model ?? '' };
+    if (form.hasAttribute('data-local-models-test')) return { action: 'save_local_answer_model', base_url: body.base_url ?? '', answer_model: body.answer_model ?? '' };
     if (form.hasAttribute('data-first-run-privacy')) return { action: 'save_first_run_privacy', choice: body.choice ?? '' };
     const connect = form.dataset.connectKind;
     if (connect === 'oauth') {

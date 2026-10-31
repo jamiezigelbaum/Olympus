@@ -944,7 +944,7 @@ test('local discovery lists models safely and synthetic errors stay beside the s
       calls.push(params);
       return params.action === 'discover_local_models'
         ? { status: 200, body: { ok: true, results: [{ working: true, provider: 'ollama', baseUrl: 'http://127.0.0.1:11434/v1', detail: 'Choose models', models: [{ id: '<img src=x>', allowed: true }, { id: 'embed', allowed: true }, { id: 'x:cloud', allowed: false, reason: 'Cloud models refused' }] }] } }
-        : { status: 200, body: { ok: true, result: { working: false, step: 'answer', detail: 'Model lacks chat.' } } };
+        : { status: 409, body: { ok: false, error: { message: 'Model lacks chat.' } } };
     } },
     navigate() {}, async refresh() { return undefined; }, returnUrl: 'https://gateway.test/', canWrite: true,
     signal: new AbortController().signal, pollIntervalMs: 0,
@@ -957,7 +957,7 @@ test('local discovery lists models safely and synthetic errors stay beside the s
   expect(root.querySelectorAll('option')).toHaveLength(2);
   form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
   await new Promise(resolve => setTimeout(resolve, 0));
-  expect(calls[1]).toEqual({ action: 'test_local_models', base_url: 'http://127.0.0.1:11434/v1', answer_model: '<img src=x>' });
-  expect(form.textContent).toContain('answer: Model lacks chat.');
+  expect(calls[1]).toEqual({ action: 'save_local_answer_model', base_url: 'http://127.0.0.1:11434/v1', answer_model: '<img src=x>' });
+  expect(form.textContent).toContain('Model lacks chat.');
   controller.dispose();
 });

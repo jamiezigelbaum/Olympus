@@ -1,4 +1,4 @@
-import { LocalModelDiscovery } from '../../core/local-model-discovery.ts';
+import { LocalModelDiscovery, saveLocalAnswerModel } from '../../core/local-model-discovery.ts';
 import { saveFirstRunPrivacyChoice } from '../../core/first-run-privacy.ts';
 import { hasFolderLayout, resolvedRawPath, resolvedStorePath, retiredPathSettings } from '../../core/source-placement.ts';
 import { DASHBOARD_PRIVATE_ANSWERS_COPY as PRIVATE_ANSWERS_COPY } from '../dashboard/vocabulary.ts';
@@ -5686,6 +5686,13 @@ export async function main(): Promise<void> {
             checkModelSetup: () => modelSetup.checkLocalModels(),
             discoverLocalModels: (baseUrl) => localModelDiscovery.discover(baseUrl),
             testLocalModels: (selection) => localModelDiscovery.test(selection),
+            saveLocalAnswerModel: async (selection) => {
+              if (sovereigntyEngine.source !== 'file' || !sovereigntyEngine.path || !modelReloadInstalled || !workerRestartsItself(workerLaunch, process.env)) return { ok: false, detail: 'Olympus cannot apply this change automatically. Restart support and a writable policy are required.' };
+              const result = await saveLocalAnswerModel({ path: sovereigntyEngine.path, expected: sovereigntyEngine.config, selection, discovery: localModelDiscovery });
+              if (!result.ok) return result;
+              if (!requestModelReload()) return { ok: false, detail: 'The model was saved but could not be applied. Restart Olympus and check readiness.' };
+              return result;
+            },
             saveFirstRunPrivacyChoice: (choice) => {
               if (sovereigntyEngine.source !== 'file' || !sovereigntyEngine.path) return false;
               const result = saveFirstRunPrivacyChoice(sovereigntyEngine.path, choice);

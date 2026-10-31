@@ -122,6 +122,7 @@ export type OlympusDashboardControlParams =
   | { action: 'check_model_setup' }
   | { action: 'discover_local_models'; base_url: string }
   | { action: 'test_local_models'; base_url: string; answer_model: string }
+  | { action: 'save_local_answer_model'; base_url: string; answer_model: string }
   | { action: 'save_first_run_privacy'; choice: string }
   | {
       action: 'start_oauth';

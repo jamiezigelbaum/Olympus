@@ -559,6 +559,7 @@ export interface EmailSourceWorkerOptions {
     checkModelSetup?: () => Promise<ModelSetupView>;
     discoverLocalModels?: (baseUrl?: string) => Promise<LocalModelDiscoveryResult[]>;
     testLocalModels?: (selection: LocalModelSelection) => Promise<LocalModelTestResult>;
+    saveLocalAnswerModel?: (selection: LocalModelSelection) => Promise<{ ok: boolean; detail?: string }>;
     saveFirstRunPrivacyChoice?: (choice: SovereigntyPresetName) => boolean;
     connectModelKey?: (source: 'gemini' | 'venice', apiKey: string) => Promise<void>;
     /**
@@ -2081,7 +2082,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           return json({ ok: true, status_message: 'Choice saved. Olympus is applying it.' });
         }
 
-        if (request.method === 'POST' && ['/dashboard/models/local/discover', '/dashboard/models/local/test'].includes(url.pathname)) {
+        if (request.method === 'POST' && ['/dashboard/models/local/discover', '/dashboard/models/local/test', '/dashboard/models/local/save'].includes(url.pathname)) {
           if (!request.headers.has(DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER) || request.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER) !== 'local') {
             return json({ ok: false, error: { code: 'mac_dashboard_only', message: 'Check local models in an unlocked dashboard on this computer.' } }, 403);
           }
@@ -2092,8 +2093,13 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
             const results = await sourceDashboard.discoverLocalModels(typeof input.base_url === 'string' && input.base_url.trim() ? input.base_url.trim() : undefined);
             return json({ ok: true, results });
           }
-          if (!sourceDashboard?.testLocalModels) throw new EmailSourceWorkerError(501, 'model_setup_not_supported', 'Local model testing is unavailable.');
           if (typeof input.base_url !== 'string' || typeof input.answer_model !== 'string') throw new EmailSourceWorkerError(400, 'invalid_request', 'Choose a server and answer model.');
+          if (url.pathname.endsWith('/save')) {
+            if (!sourceDashboard?.saveLocalAnswerModel) throw new EmailSourceWorkerError(501, 'model_setup_not_supported', 'Local model saving is unavailable.');
+            const result = await sourceDashboard.saveLocalAnswerModel({ baseUrl: input.base_url, answerModel: input.answer_model });
+            return json(result.ok ? { ok: true, status_message: 'Model saved. Olympus is applying it; check readiness after restart.' } : { ok: false, error: { code: 'model_save_failed', message: result.detail } }, result.ok ? 200 : 409);
+          }
+          if (!sourceDashboard?.testLocalModels) throw new EmailSourceWorkerError(501, 'model_setup_not_supported', 'Local model testing is unavailable.');
           const result = await sourceDashboard.testLocalModels({ baseUrl: input.base_url, answerModel: input.answer_model });
           return json({ ok: true, result });
         }
