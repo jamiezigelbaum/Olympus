@@ -932,7 +932,8 @@ export function installLinuxEngine(options: EngineInstallOptions): EngineInstall
    for(const path of [paths.logPath,paths.errorLogPath]) { assertLinuxManagedPath(path); if(!existsSync(path)) writePrivateFileAtomicSync(path,''); }
    const oldUnit=optionalText(l.unitPath),oldProgram=currentProgram(l);
    if(oldUnit && oldProgram && oldProgram.build!==program.build) writePrivateFileAtomicSync(join(l.stateDir,'service-previous.json'),JSON.stringify({program:oldProgram,unit:oldUnit,config:readFileSync(l.configPath,'utf8')}));
-   const config=reconcileEngineConfig(l.configPath), seeded=seedEngineSovereignty(l.sovereigntyPath);
+   const existingWithoutPolicy = !existsSync(l.sovereigntyPath) && (existingReceipt?.installationState === 'installed' || existsSync(l.configPath) || existsSync(l.unitPath));
+   const config=reconcileEngineConfig(l.configPath), seeded=existingWithoutPolicy ? undefined : seedEngineSovereignty(l.sovereigntyPath);
    let wroteEnv=false;
    if(!existsSync(l.workerEnvPath)) { writePrivateFileAtomicSync(l.workerEnvPath,`OLYMPUS_WORKER_AUTH_TOKEN='${randomBytes(32).toString('base64url')}'\nOLYMPUS_SOURCE_INDEX_ANSWER_ENABLED=true\n`); wroteEnv=true; }
    lifecycleCheckpoint(options,'config_published');
@@ -957,7 +958,7 @@ export function installLinuxEngine(options: EngineInstallOptions): EngineInstall
    refreshMachineArtifacts(l);
    const warnings=[...base.warnings];
    warnings.push(`Installed in your user directories. Address this layout with ${Object.entries(linuxEngineEnvironment(l)).filter(([k])=>k.startsWith('XDG_')).map(([k,v])=>`${k}='${v.replace(/'/g,`'\\''`)}'`).join(' ')}.`);
-   return {...base,program,plist:unit,warnings,wrote_plist:changed,wrote_config:config.wrote,wrote_worker_env:wroteEnv,sovereignty:{action:seeded?'seeded' as const:'present' as const,path:l.sovereigntyPath,...(seeded?{preset:seeded}:{})},action:before.active?'restarted' as const:'bootstrapped' as const};
+   return {...base,program,plist:unit,warnings,wrote_plist:changed,wrote_config:config.wrote,wrote_worker_env:wroteEnv,sovereignty:{action:existingWithoutPolicy?'skipped' as const:seeded?'seeded' as const:'present' as const,path:l.sovereigntyPath,...(existingWithoutPolicy?{reason:'An existing engine installation has no policy file; its current policy is preserved.'}:{}),...(seeded?{preset:seeded}:{})},action:before.active?'restarted' as const:'bootstrapped' as const};
   } catch(error) {
    try { restoreInstallTransaction(l,exec,options); }
    catch(recoveryError) { throw new Error(`Linux install failed (${String(error)}), and recovery failed (${String(recoveryError)}). The durable journal was retained.`); }

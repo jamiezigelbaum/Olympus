@@ -1,3 +1,4 @@
+import { PRIVATE_ANSWER_OPTIONS } from '../../core/privacy-language.ts';
 import type { ModelSetupCard, ModelSetupView } from '../../core/model-setup.ts';
 import { blockerBanner, connectorSheet, escapeHtml, rowMenu } from './components.ts';
 
@@ -9,6 +10,7 @@ const CHECK_FORM_TAIL = '<span data-action-message role="status"></span></form>'
 
 export function renderModelSetup(view: ModelSetupView | undefined, options: { heading?: boolean } = {}): string {
   if (!view) return '';
+  if (view.privacy_choice_pending) return renderFirstRunPrivacyChoice();
   // The local-models sheet opens in place: directly under whichever control
   // opens it, and only where one does.
   const bannerOwnsToggle = blockerOwnsLocalToggle(view);
@@ -61,13 +63,20 @@ export function renderModelSetup(view: ModelSetupView | undefined, options: { he
     + '</section>';
 }
 
+function renderFirstRunPrivacyChoice(): string {
+  const choices = PRIVATE_ANSWER_OPTIONS.map(option => `<label class="modelcard"><input type="radio" name="choice" value="${escapeHtml(option.id)}"${option.recommended ? ' checked' : ''}> <b>${escapeHtml(option.label)}${option.recommended ? ' — Recommended' : ''}</b><p>${escapeHtml(option.description)}</p></label>`).join('');
+  return `<section aria-label="Private answers"><h2>How should Olympus answer with Private items?</h2><p>Choose how Private answers may be made. You can change this later.</p><form data-first-run-privacy>${choices}<button class="btn primary" type="submit">Continue</button><span data-action-message role="status"></span></form></section>`;
+}
+
 function localModelsSheet(): string {
-  return connectorSheet({ id: 'local-model-setup-sheet', heading: 'Connect existing local models', intro: 'Your agent can help connect models you already run. Olympus does not install, download, or maintain them. Local means the machine hosting Olympus.', promptText: LOCAL_MODELS_SETUP_PROMPT, copyButtonLabel: 'Copy prompt' });
+  const controls = '<form data-local-models-discover><label>OpenAI-compatible URL (optional)<input class="keyfield" name="base_url" type="url" placeholder="http://127.0.0.1:1234/v1"></label><p>Leave blank to detect Ollama and LM Studio on this computer. Only loopback URLs are accepted.</p><button class="btn primary" type="submit">Detect local models</button><span data-action-message role="status"></span></form>'
+    + '<div data-local-models-results></div><form data-local-models-test hidden><input type="hidden" name="base_url"><label>Answer model<select name="answer_model" required></select></label><label>Embedding model<select name="embedding_model" required></select></label><p>Testing does not change your configured models or replace existing search vectors. Use the agent prompt below to apply a verified configuration.</p><button class="btn primary" type="submit">Test selected models</button><span data-action-message role="status"></span></form>';
+  return connectorSheet({ id: 'local-model-setup-sheet', heading: 'Connect existing local models', intro: 'Detect models you already run and test them with synthetic text. Olympus does not install, download, or maintain them. Local means the machine hosting Olympus.', promptText: LOCAL_MODELS_SETUP_PROMPT, copyButtonLabel: 'Copy prompt' }).replace('<div class="promptbox"', controls + '<div class="promptbox"');
 }
 
 /** The first model in the way, which the blocker banner names. */
 function blockingCard(view: ModelSetupView): ModelSetupCard | undefined {
-  return view.ready ? undefined : view.cards.find((entry) => entry.state !== 'ready');
+  return view.ready ? undefined : view.cards.find((entry) => entry.required && entry.state !== 'ready');
 }
 
 /** True when the blocker banner itself carries "Connect existing local models". */
@@ -110,7 +119,7 @@ function modelStateWord(card: ModelSetupCard): string {
  * nothing blocks.
  */
 export function renderModelSetupBlocker(view: ModelSetupView | undefined): string {
-  if (!view || view.ready) return '';
+  if (!view || view.ready || view.privacy_choice_pending) return '';
   const card = blockingCard(view);
   if (!card) {
     return blockerBanner({ sentence: view.attention ?? 'Model setup is not finished, so sources stay locked.' });

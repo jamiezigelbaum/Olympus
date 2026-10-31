@@ -1,3 +1,5 @@
+import { LocalModelDiscovery } from '../../core/local-model-discovery.ts';
+import { saveFirstRunPrivacyChoice } from '../../core/first-run-privacy.ts';
 import { hasFolderLayout, resolvedRawPath, resolvedStorePath, retiredPathSettings } from '../../core/source-placement.ts';
 import { DASHBOARD_PRIVATE_ANSWERS_COPY as PRIVATE_ANSWERS_COPY } from '../dashboard/vocabulary.ts';
 import { anonymousInboxConnectionId, localInboxLabel, askWithAnonymousInbox } from './local-private-answers.ts';
@@ -1474,9 +1476,10 @@ export function builtInBacksPrivateAnalyst(
   id: string,
   state: ReturnType<BuiltInAnalystModel['status']>['state'] | undefined,
   members: readonly { id: string; profile: SovereigntyModelProfile }[],
+  availableIds?: ReadonlySet<string>,
 ): boolean {
   if (!state || state === 'failed') return false;
-  return members.some((member) => member.id === id) && !members.some((member) => member.profile.provider === 'venice');
+  return members.some((member) => member.id === id) && !members.some((member) => member.profile.provider === 'venice' && (!availableIds || availableIds.has(member.id)));
 }
 
 /** Whether this computer's configured local answer model answers /models within a few seconds. */
@@ -2565,12 +2568,15 @@ export async function main(): Promise<void> {
     },
     builtInAnswers: (id) => {
       try {
-        return builtInBacksPrivateAnalyst(id, workerBuiltInModel?.model.status().state, sovereigntyEngine.resolveAnalystPool({ trustDomain: 'secure_local' }).members);
+        const members = sovereigntyEngine.resolveAnalystPool({ trustDomain: 'secure_local' }).members;
+        const available = new Set(members.filter(member => member.profile.provider !== 'venice' || bootModelCredentials.get(member.id)).map(member => member.id));
+        return builtInBacksPrivateAnalyst(id, workerBuiltInModel?.model.status().state, members, available);
       } catch {
         return false;
       }
     },
   });
+  const localModelDiscovery = new LocalModelDiscovery();
   const getModelSetup = () => {
     const view = modelSetup.getStatus();
     if (!modelReloadUnavailable) return view;
@@ -5681,6 +5687,15 @@ export async function main(): Promise<void> {
             sovereigntyEngine,
             modelSetup: getModelSetup,
             checkModelSetup: () => modelSetup.checkLocalModels(),
+            discoverLocalModels: (baseUrl) => localModelDiscovery.discover(baseUrl),
+            testLocalModels: (selection) => localModelDiscovery.test(selection),
+            saveFirstRunPrivacyChoice: (choice) => {
+              if (sovereigntyEngine.source !== 'file' || !sovereigntyEngine.path) return false;
+              const result = saveFirstRunPrivacyChoice(sovereigntyEngine.path, choice);
+              if (!result.ok || !result.changed) return false;
+              requestModelReload();
+              return true;
+            },
             connectModelKey,
             // The panel's tools on the computer; bound late (set up further
             // down; called only per request).

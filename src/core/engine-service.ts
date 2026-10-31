@@ -41,7 +41,8 @@ import { OperationError } from './operation-error.ts';
 import { openClawConfigPath } from './config.ts';
 import { olympusPackageRoot } from './package-root.ts';
 import { olympusDataDir, remoteAccessDir } from './remote-access.ts';
-import { loadSovereigntyPreset, writeSovereigntyConfigFile, type SovereigntyPresetName } from './sovereignty.ts';
+import { writeSovereigntyConfigFile, type SovereigntyPresetName } from './sovereignty.ts';
+import { createPendingPrivacyPolicy } from './first-run-privacy.ts';
 import { workerAuthTokenFromSetupEnv } from './worker-auth.ts';
 import { ensureManagedWorkerEnvironment, workerServicePaths } from './worker-service.ts';
 import { defaultZkapiStatePath, zkapiConsultInFlightOnDisk } from './consult-transport-zkapi.ts';
@@ -454,7 +455,7 @@ export interface EngineSovereigntyPlan {
   /** `seeded`: the preset was written. `present`: a policy file exists. `skipped`: another host's policy is in place. */
   action: 'seeded' | 'present' | 'skipped' | 'would_seed';
   path: string;
-  preset?: SovereigntyPresetName;
+  preset?: SovereigntyPresetName | 'pending';
   reason?: string;
 }
 
@@ -471,7 +472,7 @@ export interface EngineInstallResult {
   wrote_config: boolean;
   wrote_worker_env: boolean;
   /** The preset seeded into a missing sovereignty.json; absent when one existed or seeding was skipped. */
-  seeded_sovereignty?: SovereigntyPresetName;
+  seeded_sovereignty?: SovereigntyPresetName | 'pending';
   sovereignty: EngineSovereigntyPlan;
   /**
    * `bootstrapped` (was not loaded), `reloaded` (plist changed), `restarted`
@@ -499,7 +500,9 @@ function installEngineUnderFence(options: EngineInstallOptions = {}): EngineInst
   const warnings = engineConflictWarnings(homeDir, 'darwin');
   const sovereigntyBlocker = existsSync(paths.sovereigntyPath)
     ? undefined
-    : engineSovereigntySeedBlocker({ homeDir, workerEnvPath: paths.workerEnvPath, env: options.env ?? process.env });
+    : existsSync(paths.configPath) || existsSync(paths.plistPath)
+      ? 'An existing engine installation has no policy file; its current policy is preserved.'
+      : engineSovereigntySeedBlocker({ homeDir, workerEnvPath: paths.workerEnvPath, env: options.env ?? process.env });
   const base = {
     ok: true as const,
     label: paths.label,
@@ -539,7 +542,7 @@ function installEngineUnderFence(options: EngineInstallOptions = {}): EngineInst
   let sovereignty: EngineSovereigntyPlan;
   if (sovereigntyBlocker) {
     sovereignty = { action: 'skipped', path: paths.sovereigntyPath, reason: sovereigntyBlocker };
-    warnings.push(`${paths.sovereigntyPath} was not created: ${sovereigntyBlocker} The engine's worker uses that policy too; run olympus sovereignty init --preset ${STANDALONE_SOVEREIGNTY_PRESET} to choose this install's policy explicitly.`);
+    warnings.push(`${paths.sovereigntyPath} was not created: ${sovereigntyBlocker} The engine's worker uses that policy too; choose this install's policy explicitly using olympus setup.`);
   } else {
     const seeded = seedEngineSovereignty(paths.sovereigntyPath);
     sovereignty = seeded
@@ -935,19 +938,12 @@ function runningBuildDiffers(statusPath: string, build: string | undefined): boo
   }
 }
 
-/**
- * The policy a new standalone install starts with: the shipped preset that
- * needs nothing from the owner. Every tier embeds with the built-in model
- * (downloaded on first use, no key), including Private meaning search on this
- * computer. The Private agent answer route stays disabled; the built-in model
- * serves Ask privately and the sealed panel separately. Seeding preserves an
- * existing file; engine startup migrates only the unmodified 1.0.0 default.
- */
-export const STANDALONE_SOVEREIGNTY_PRESET: SovereigntyPresetName = 'no-sensitive';
+/** New standalone installs wait for an explicit privacy choice. Existing files are preserved. */
+export const STANDALONE_SOVEREIGNTY_PRESET = 'pending' as const;
 
-export function seedEngineSovereignty(path: string): SovereigntyPresetName | undefined {
+export function seedEngineSovereignty(path: string): 'pending' | undefined {
   if (existsSync(path)) return undefined;
-  writeSovereigntyConfigFile({ config: loadSovereigntyPreset(STANDALONE_SOVEREIGNTY_PRESET), path });
+  writeSovereigntyConfigFile({ config: createPendingPrivacyPolicy(), path });
   return STANDALONE_SOVEREIGNTY_PRESET;
 }
 

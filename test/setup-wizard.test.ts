@@ -1,3 +1,4 @@
+import { seedEngineSovereignty } from '../src/core/engine-service.ts';
 import { createHash } from 'node:crypto';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -20,6 +21,17 @@ import {
 } from '../src/core/worker-service.ts';
 
 describe('olympus setup wizard', () => {
+  test('agent setup commits an outstanding first-run choice through the shared policy save', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'olympus-first-setup-'));
+    try {
+      const sovereigntyPath = join(dir, 'sovereignty.json');
+      seedEngineSovereignty(sovereigntyPath);
+      const result = await runIsolatedSetupWizard({ preset: 'local-only', yes: true, sovereigntyPath, platform: 'linux', homeDir: dir, workingDirectory: dir, dependencyCheck: healthyDependencyCheck });
+      expect(result.sovereignty.wrote).toBe(true);
+      expect(JSON.parse(readFileSync(sovereigntyPath, 'utf8'))).toEqual(loadSovereigntyPreset('local-only'));
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
   test('runs non-interactive end-to-end against temp files and records secure-off as a user choice', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'olympus-setup-test-'));
     const sovereigntyPath = join(dir, 'sovereignty.json');

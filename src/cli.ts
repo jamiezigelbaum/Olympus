@@ -1,3 +1,5 @@
+import { PRIVATE_ANSWER_OPTIONS } from './core/privacy-language.ts';
+import { isPendingPrivacyPolicy } from './core/first-run-privacy.ts';
 import { resolvedRawPath } from './core/source-placement.ts';
 import { DESKTOP_OWNER_OPEN_PATH } from './core/linux-owner-bridge.ts';
 import { workerFetch, validateWorkerSocket, workerSocketPath } from './core/worker-transport.ts';
@@ -282,6 +284,12 @@ async function main(): Promise<void> {
   }
 
   if (args[0] === 'setup') {
+    if (args.length === 2 && args[1] === '--privacy-options') {
+      const path = defaultSovereigntyConfigPath();
+      const state = !existsSync(path) ? 'not_installed' : isPendingPrivacyPolicy(JSON.parse(readFileSync(path, 'utf8'))) ? 'pending' : 'configured';
+      console.log(JSON.stringify({ state, options: PRIVATE_ANSWER_OPTIONS }, null, 2));
+      return;
+    }
     try {
       const result = await runSetupWizard(parseSetupArgs(args.slice(1)));
       console.log(JSON.stringify(result, null, 2));

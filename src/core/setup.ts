@@ -1,3 +1,5 @@
+import { existsSync, readFileSync } from 'node:fs';
+import { isPendingPrivacyPolicy, saveFirstRunPrivacyChoice } from './first-run-privacy.ts';
 import { PRIVACY_PRESET_LABELS } from './privacy-language.ts';
 import { randomBytes } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
@@ -249,11 +251,22 @@ export async function runSetupWizard(options: SetupWizardOptions): Promise<Setup
   if (options.dryRun) {
     managedWorker = installManagedWorkerFiles(workerOptions(options, workerToken));
   } else {
-    writeSovereigntyConfigFile({
-      config: presetConfig,
-      path: sovereigntyPath,
-      ...(options.force !== undefined ? { force: options.force } : {}),
-    });
+    let pending = false;
+    if (existsSync(sovereigntyPath)) {
+      try { pending = isPendingPrivacyPolicy(JSON.parse(readFileSync(sovereigntyPath, 'utf8')) as SovereigntyConfig); }
+      catch { /* Existing unreadable policies remain the normal writer's refusal. */ }
+    }
+    if (pending) {
+      if (cloudLane !== 'subscription') throw new OperationError('invalid_params', 'Choose the Private-answer mode before changing the Personal cloud lane.');
+      const saved = saveFirstRunPrivacyChoice(sovereigntyPath, options.preset);
+      if (!saved.ok || !saved.changed) throw new OperationError('invalid_params', 'The privacy choice changed elsewhere. Review the current policy before continuing.');
+    } else {
+      writeSovereigntyConfigFile({
+        config: presetConfig,
+        path: sovereigntyPath,
+        ...(options.force !== undefined ? { force: options.force } : {}),
+      });
+    }
     wroteSovereignty = true;
     // Writing the unit and walking away left the operator with an inactive
     // worker and a guide whose next step was to verify it was running

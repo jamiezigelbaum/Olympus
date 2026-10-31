@@ -19,7 +19,6 @@ import { join } from 'node:path';
 import type { AnalystModel, AnalystModelRequest } from '../src/core/analyst.ts';
 import { buildSourceIndexCorpusRegistry } from '../src/core/source-index/corpus.ts';
 import { isPublicTierRetired, loadSovereigntyPreset, SOVEREIGNTY_PRESETS, type SovereigntyConfig } from '../src/core/sovereignty.ts';
-import { STANDALONE_SOVEREIGNTY_PRESET } from '../src/core/engine-service.ts';
 import { searchToolResult } from '../src/workers/chatgpt/response-builder.ts';
 import {
   appendClassificationLedgerEntry,
@@ -98,7 +97,7 @@ afterEach(() => {
 
 /** A fresh install with Dropbox connected: the seeded policy, the lane, one sync, and the text extracted. */
 async function freshInstall(options: { lane?: typeof BUILT_IN_SNIFFER_LANE; ownerWords?: string; gardenOwnRecord?: boolean; bankStructuredName?: boolean } = {}) {
-  const policy = loadSovereigntyPreset(STANDALONE_SOVEREIGNTY_PRESET);
+  const policy = loadSovereigntyPreset('no-sensitive');
   const installed = configureInstalledTierClassification({
     env,
     ...(options.lane ? { lane: { kind: options.lane.kind, modelId: options.lane.modelId } } : {}),
@@ -222,7 +221,7 @@ describe('fresh install: Personal by default, flagged items wait, Secrets never 
     const builtIn: BuiltInPrivateModel = { model, available: () => ready };
     // The seeded policy has no private lane, so the built-in model is the sniffer.
     const runtime = resolveTierSnifferRuntime({
-      engine: loadSovereigntyEngine({ inlineConfig: loadSovereigntyPreset(STANDALONE_SOVEREIGNTY_PRESET) }),
+      engine: loadSovereigntyEngine({ inlineConfig: loadSovereigntyPreset('no-sensitive') }),
       builtIn,
     });
     expect(runtime.source).toBe('built_in');
@@ -283,7 +282,7 @@ describe('fresh install: Personal by default, flagged items wait, Secrets never 
     const builtIn: BuiltInPrivateModel = { model: { complete: async () => ({ text: '', modelId: 'built_in' }) }, available: () => true };
     const localFirst = loadSovereigntyEngine({ inlineConfig: loadSovereigntyPreset('local-first') });
     expect(resolveTierSnifferRuntime({ engine: localFirst, builtIn }).source).toBe('configured');
-    const noSensitive = loadSovereigntyEngine({ inlineConfig: loadSovereigntyPreset(STANDALONE_SOVEREIGNTY_PRESET) });
+    const noSensitive = loadSovereigntyEngine({ inlineConfig: loadSovereigntyPreset('no-sensitive') });
     expect(resolveTierSnifferRuntime({ engine: noSensitive })).toEqual({ source: 'off', reason: 'no_private_lane' });
   });
 
@@ -379,7 +378,7 @@ describe('owner defaults (2026-10-01): the registered built-in model is approved
     });
     const builtIn = registeredBuiltInPrivateModel()!;
     const runtime = resolveTierSnifferRuntime({
-      engine: loadSovereigntyEngine({ inlineConfig: loadSovereigntyPreset(STANDALONE_SOVEREIGNTY_PRESET) }),
+      engine: loadSovereigntyEngine({ inlineConfig: loadSovereigntyPreset('no-sensitive') }),
       builtIn,
     });
     expect(runtime.source).toBe('built_in');

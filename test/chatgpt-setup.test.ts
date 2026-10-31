@@ -20,7 +20,7 @@ import { join } from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { configFromPluginConfig, defaultConfig, loadConfig } from '../src/core/config.ts';
-import { seedEngineSovereignty, STANDALONE_SOVEREIGNTY_PRESET } from '../src/core/engine-service.ts';
+import { seedEngineSovereignty } from '../src/core/engine-service.ts';
 import { openRemoteConnectionStore, type RemoteConnectionStore } from '../src/core/remote-connections.ts';
 import { isPublicTierRetired, loadSovereigntyPreset, type SovereigntyConfig } from '../src/core/sovereignty.ts';
 import type { OlympusFolderScopeBrowseResult, OlympusMailScopeDraft } from '../src/control-ui-contract.ts';
@@ -83,7 +83,7 @@ describe('one-time sign-in links', () => {
 /* ------------------------------------------------------------------ */
 
 describe('model choice', () => {
-  const seed = (): SovereigntyConfig => loadSovereigntyPreset(STANDALONE_SOVEREIGNTY_PRESET);
+  const seed = (): SovereigntyConfig => loadSovereigntyPreset('no-sensitive');
 
   test('the standalone seed embeds every tier with the built-in model', () => {
     expect(embeddingIsBuiltIn(seed())).toBe(true);
@@ -119,16 +119,17 @@ describe('standalone engine config', () => {
   beforeEach(() => { home = mkdtempSync(join(tmpdir(), 'olympus-chatgpt-engine-')); });
   afterEach(() => { rmSync(home, { recursive: true, force: true }); });
 
-  test('engine install seeds the keyless built-in preset only when sovereignty.json is absent', () => {
+  test('engine install seeds a pending local-only policy only when sovereignty.json is absent', () => {
     const path = join(home, '.olympus', 'sovereignty.json');
-    expect(seedEngineSovereignty(path)).toBe('no-sensitive');
+    expect(seedEngineSovereignty(path)).toBe('pending');
     const written = JSON.parse(readFileSync(path, 'utf8')) as SovereigntyConfig;
     expect(embeddingIsBuiltIn(written)).toBe(true);
     // Personal, Private and Secret only: a fresh install has no Public tier.
     expect(isPublicTierRetired(written)).toBe(true);
     expect(written.routes.public_safe).toBeUndefined();
     expect(written.retrieval.trustDomains.public_safe).toBeUndefined();
-    expect(written.retrieval.trustDomains.internal?.allowCloudQuery).toBe(true);
+    expect(written.retrieval.trustDomains.internal?.allowCloudQuery).toBe(false);
+    expect(written.routes.internal?.mode).toBe('disabled');
     writeFileSync(path, '{"owner":"kept"}');
     expect(seedEngineSovereignty(path)).toBeUndefined();
     expect(readFileSync(path, 'utf8')).toBe('{"owner":"kept"}');
@@ -498,7 +499,7 @@ describe('olympus_model_set through the real setup backend', () => {
     const home = join(dir, 'home');
     mkdirSync(home, { recursive: true });
     const policyPath = join(home, 'sovereignty.json');
-    const policy = loadSovereigntyPreset(STANDALONE_SOVEREIGNTY_PRESET);
+    const policy = loadSovereigntyPreset('no-sensitive');
     policy.modelProfiles[ANSWER_PROFILE_IDS.local] = { ...answerProfile('local'), model: 'gpt-oss:120b-cloud' };
     const onDisk = JSON.stringify(policy);
     writeFileSync(policyPath, onDisk);

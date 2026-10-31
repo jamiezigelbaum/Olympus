@@ -479,6 +479,7 @@ describe('Private lane fallback', () => {
     expect(builtInBacksPrivateAnalyst(local.id, 'failed', [local])).toBe(false);
     expect(builtInBacksPrivateAnalyst(local.id, undefined, [local])).toBe(false);
     expect(builtInBacksPrivateAnalyst(local.id, 'ready', [local, venice])).toBe(false);
+    expect(builtInBacksPrivateAnalyst(local.id, 'ready', [local, venice], new Set([local.id]))).toBe(true);
     expect(builtInBacksPrivateAnalyst('other', 'ready', [local])).toBe(false);
   });
 });

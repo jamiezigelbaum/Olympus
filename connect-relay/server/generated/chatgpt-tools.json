@@ -25,9 +25,9 @@
       ],
       "_meta": {
         "ui": {
-          "resourceUri": "ui://olympus/dashboard?v=774d3a9f5fab"
+          "resourceUri": "ui://olympus/dashboard?v=fccb712b1084"
         },
-        "openai/outputTemplate": "ui://olympus/dashboard?v=774d3a9f5fab",
+        "openai/outputTemplate": "ui://olympus/dashboard?v=fccb712b1084",
         "openai/ui": {
           "entrypoints": [
             {
@@ -818,6 +818,16 @@
       "inputSchema": {
         "type": "object",
         "properties": {
+          "private_answer_mode": {
+            "type": "string",
+            "enum": [
+              "local-first",
+              "local-only",
+              "private-cloud-only",
+              "no-sensitive"
+            ],
+            "description": "First-run Private-answer mode chosen by the owner in the panel."
+          },
           "description": {
             "type": "string",
             "maxLength": 2000,
@@ -953,7 +963,7 @@
   ],
   "resources": [
     {
-      "uri": "ui://olympus/dashboard?v=774d3a9f5fab",
+      "uri": "ui://olympus/dashboard?v=fccb712b1084",
       "name": "Olympus dashboard",
       "mimeType": "text/html;profile=mcp-app"
     },

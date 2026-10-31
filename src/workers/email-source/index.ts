@@ -1,3 +1,5 @@
+import type { LocalModelDiscoveryResult, LocalModelSelection, LocalModelTestResult } from '../../core/local-model-discovery.ts';
+import { SOVEREIGNTY_PRESETS, type SovereigntyPresetName } from '../../core/sovereignty.ts';
 import { isFileSourceScopeId } from '../../core/source-scope-approval.ts';
 import { createReleaseManifestSink, runWithReleaseManifestSink, recordReleaseManifest, answerReleaseWithheldReason, type ReleaseCheck, type ReleaseManifest } from '../../core/release-manifest.ts';
 import type { UpdateAvailable } from '../../core/update-check.ts';
@@ -555,6 +557,9 @@ export interface EmailSourceWorkerOptions {
     connectApiKey?: typeof connectPublicApiKeySource;
     modelSetup?: () => ModelSetupView;
     checkModelSetup?: () => Promise<ModelSetupView>;
+    discoverLocalModels?: (baseUrl?: string) => Promise<LocalModelDiscoveryResult[]>;
+    testLocalModels?: (selection: LocalModelSelection) => Promise<LocalModelTestResult>;
+    saveFirstRunPrivacyChoice?: (choice: SovereigntyPresetName) => boolean;
     connectModelKey?: (source: 'gemini' | 'venice', apiKey: string) => Promise<void>;
     /**
      * Outside help (consults): the Mac dashboard card's backend
@@ -2060,6 +2065,37 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
                 : 'No connection attempt was pending.',
             });
           });
+        }
+
+        if (request.method === 'POST' && url.pathname === '/dashboard/models/first-run-privacy') {
+          if (!request.headers.has(DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER) || request.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER) !== 'local') {
+            return json({ ok: false, error: { code: 'mac_dashboard_only', message: 'Choose this on the computer in an unlocked dashboard.' } }, 403);
+          }
+          const input = await parseObjectBody(request);
+          if (typeof input.choice !== 'string' || !SOVEREIGNTY_PRESETS.includes(input.choice as SovereigntyPresetName)) {
+            throw new EmailSourceWorkerError(400, 'invalid_request', 'Choose a Private-answer mode.');
+          }
+          if (!sourceDashboard?.saveFirstRunPrivacyChoice?.(input.choice as SovereigntyPresetName)) {
+            return json({ ok: false, error: { code: 'privacy_choice_changed', message: 'This choice was already made or the policy changed. Refresh to see the current setting.' } }, 409);
+          }
+          return json({ ok: true, status_message: 'Choice saved. Olympus is applying it.' });
+        }
+
+        if (request.method === 'POST' && ['/dashboard/models/local/discover', '/dashboard/models/local/test'].includes(url.pathname)) {
+          if (!request.headers.has(DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER) || request.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER) !== 'local') {
+            return json({ ok: false, error: { code: 'mac_dashboard_only', message: 'Check local models in an unlocked dashboard on this computer.' } }, 403);
+          }
+          const input = await parseObjectBody(request);
+          if (url.pathname.endsWith('/discover')) {
+            if (!sourceDashboard?.discoverLocalModels) throw new EmailSourceWorkerError(501, 'model_setup_not_supported', 'Local model discovery is unavailable.');
+            if (input.base_url !== undefined && typeof input.base_url !== 'string') throw new EmailSourceWorkerError(400, 'invalid_request', 'Enter a loopback URL.');
+            const results = await sourceDashboard.discoverLocalModels(typeof input.base_url === 'string' && input.base_url.trim() ? input.base_url.trim() : undefined);
+            return json({ ok: true, results });
+          }
+          if (!sourceDashboard?.testLocalModels) throw new EmailSourceWorkerError(501, 'model_setup_not_supported', 'Local model testing is unavailable.');
+          if (typeof input.base_url !== 'string' || typeof input.answer_model !== 'string' || typeof input.embedding_model !== 'string') throw new EmailSourceWorkerError(400, 'invalid_request', 'Choose a server, answer model and embedding model.');
+          const result = await sourceDashboard.testLocalModels({ baseUrl: input.base_url, answerModel: input.answer_model, embeddingModel: input.embedding_model });
+          return json({ ok: true, result });
         }
 
         if (request.method === 'POST' && url.pathname === '/dashboard/models/check') {

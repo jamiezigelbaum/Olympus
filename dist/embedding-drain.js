@@ -6868,166 +6868,6 @@ var init_worker_transport = __esm(() => {
   init_atomic_file();
 });
 
-// src/core/build-flavor.ts
-var PUBLIC_RUNTIME_BUILD = false;
-
-// src/core/google-handle-compatibility.ts
-var init_google_handle_compatibility = () => {};
-
-// src/core/publisher-oauth-client.ts
-function isGooglePublisherWebClientId(clientId, env = process.env) {
-  const candidate = clientId?.trim();
-  if (!candidate)
-    return false;
-  const override = env.OLYMPUS_GOOGLE_PUBLISHER_WEB_CLIENT_ID?.trim();
-  if (override && candidate === override)
-    return true;
-  return GOOGLE_PUBLISHER_WEB_CLIENT_IDS.some((known) => known.trim() !== "" && known.trim() === candidate);
-}
-function googleDesktopClientSecret(clientId, env = process.env) {
-  const candidate = clientId?.trim();
-  if (!candidate)
-    return;
-  const overrideId = env.OLYMPUS_GOOGLE_DESKTOP_CLIENT_ID?.trim();
-  if (overrideId && candidate === overrideId) {
-    const overrideSecret = env.OLYMPUS_GOOGLE_DESKTOP_CLIENT_SECRET?.trim();
-    if (overrideSecret)
-      return overrideSecret;
-  }
-  const known = GOOGLE_DESKTOP_CLIENTS.find((client) => client.id.trim() !== "" && client.id.trim() === candidate);
-  return known?.secret.trim() || undefined;
-}
-var DEFAULT_GOOGLE_PUBLISHER_WEB_CLIENT_ID = "1027907846009-a9cbup55bplsuu2ibk4rasfl6auerdh4.apps.googleusercontent.com", GOOGLE_PUBLISHER_WEB_CLIENT_IDS, DEFAULT_GOOGLE_DESKTOP_CLIENT_ID = "1027907846009-bsl76vuivvlt8hk4d073emj825tei5kd.apps.googleusercontent.com", DEFAULT_GOOGLE_DESKTOP_CLIENT_SECRET = "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", GOOGLE_DESKTOP_CLIENTS;
-var init_publisher_oauth_client = __esm(() => {
-  GOOGLE_PUBLISHER_WEB_CLIENT_IDS = [
-    DEFAULT_GOOGLE_PUBLISHER_WEB_CLIENT_ID
-  ];
-  GOOGLE_DESKTOP_CLIENTS = [
-    { id: DEFAULT_GOOGLE_DESKTOP_CLIENT_ID, secret: DEFAULT_GOOGLE_DESKTOP_CLIENT_SECRET }
-  ];
-});
-
-// src/core/privacy-language.ts
-var SENSITIVITY_TIER_LABELS;
-var init_privacy_language = __esm(() => {
-  SENSITIVITY_TIER_LABELS = {
-    public: "Public",
-    private: "Personal",
-    secure: "Private",
-    secrets: "Secrets"
-  };
-});
-
-// src/core/sqlite-migrations.ts
-function currentStoreMigrations() {
-  return [
-    {
-      version: CURRENT_OLYMPUS_SQLITE_SCHEMA_VERSION,
-      name: "record_existing_v1_schema",
-      up() {}
-    }
-  ];
-}
-function assertSqliteSchemaCanOpen(db, storeId, knownVersion = CURRENT_OLYMPUS_SQLITE_SCHEMA_VERSION) {
-  const currentVersion = readSqliteSchemaVersion(db, storeId);
-  if (currentVersion > knownVersion) {
-    throw new OperationError("config_error", `SQLite store "${storeId}" is at schema_version ${currentVersion}, but this Olympus build only knows schema_version ${knownVersion}.`, "Upgrade Olympus before opening this store. Refusing to open it prevents an older build from corrupting newer data.");
-  }
-}
-function runSqliteMigrations(db, storeId, migrations = currentStoreMigrations(), options = {}) {
-  const ordered = validateMigrations(migrations);
-  const targetVersion = options.knownVersion ?? ordered.at(-1)?.version ?? CURRENT_OLYMPUS_SQLITE_SCHEMA_VERSION;
-  const currentVersion = readSqliteSchemaVersion(db, storeId);
-  if (currentVersion > targetVersion) {
-    throw new OperationError("config_error", `SQLite store "${storeId}" is at schema_version ${currentVersion}, but this Olympus build only knows schema_version ${targetVersion}.`, "Upgrade Olympus before opening this store. Refusing to open it prevents an older build from corrupting newer data.");
-  }
-  const pending = ordered.filter((migration) => migration.version > currentVersion).map(({ version, name }) => ({ version, name }));
-  if (options.dryRun === true) {
-    return {
-      storeId,
-      currentVersion,
-      targetVersion,
-      dryRun: true,
-      applied: [],
-      pending
-    };
-  }
-  ensureSchemaVersionTable(db);
-  const applied = [];
-  if (pending.length > 0) {
-    db.transaction(() => {
-      const lockedVersion = readSqliteSchemaVersion(db, storeId);
-      if (lockedVersion > targetVersion) {
-        throw new OperationError("config_error", `SQLite store "${storeId}" is at schema_version ${lockedVersion}, but this Olympus build only knows schema_version ${targetVersion}.`, "Upgrade Olympus before opening this store. Refusing to open it prevents an older build from corrupting newer data.");
-      }
-      for (const migration of ordered.filter((entry) => entry.version > lockedVersion)) {
-        migration.up(db);
-        writeSqliteSchemaVersion(db, storeId, migration.version);
-        applied.push({ version: migration.version, name: migration.name });
-      }
-    }).immediate();
-  }
-  return {
-    storeId,
-    currentVersion,
-    targetVersion,
-    dryRun: false,
-    applied,
-    pending: applied
-  };
-}
-function readSqliteSchemaVersion(db, storeId) {
-  if (!schemaVersionTableExists(db))
-    return 0;
-  const row = db.query(`SELECT version FROM ${SQLITE_SCHEMA_VERSION_TABLE} WHERE store_id = ?`).get(storeId);
-  return typeof row?.version === "number" && Number.isInteger(row.version) ? row.version : 0;
-}
-function ensureSchemaVersionTable(db) {
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS ${SQLITE_SCHEMA_VERSION_TABLE} (
-      store_id TEXT PRIMARY KEY,
-      version INTEGER NOT NULL,
-      applied_at TEXT NOT NULL
-    );
-  `);
-}
-function writeSqliteSchemaVersion(db, storeId, version) {
-  db.query(`
-    INSERT INTO ${SQLITE_SCHEMA_VERSION_TABLE} (store_id, version, applied_at)
-    VALUES (?, ?, ?)
-    ON CONFLICT(store_id) DO UPDATE SET
-      version = excluded.version,
-      applied_at = excluded.applied_at
-  `).run(storeId, version, new Date().toISOString());
-}
-function schemaVersionTableExists(db) {
-  const row = db.query("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?").get(SQLITE_SCHEMA_VERSION_TABLE);
-  return row?.name === SQLITE_SCHEMA_VERSION_TABLE;
-}
-function validateMigrations(migrations) {
-  const ordered = [...migrations].sort((left, right) => left.version - right.version);
-  let previous = 0;
-  for (const migration of ordered) {
-    if (!Number.isInteger(migration.version) || migration.version <= 0) {
-      throw new OperationError("config_error", `SQLite migration "${migration.name}" must use a positive integer version.`);
-    }
-    if (migration.version === previous) {
-      throw new OperationError("config_error", `Duplicate SQLite migration version ${migration.version}.`);
-    }
-    previous = migration.version;
-  }
-  return ordered;
-}
-var SQLITE_SCHEMA_VERSION_TABLE = "schema_version", CURRENT_OLYMPUS_SQLITE_SCHEMA_VERSION = 1;
-var init_sqlite_migrations = __esm(() => {
-  init_operation_error();
-});
-
-// src/core/ingestion-throughput.ts
-var init_ingestion_throughput = __esm(() => {
-  init_operation_error();
-});
-
 // src/core/local-model-policy.ts
 function isCloudForwardingModelId(modelId) {
   const trimmed = modelId.trim().toLowerCase();
@@ -7045,129 +6885,6 @@ function assertLocalModelIdNotCloudForwarding(label, modelId) {
 }
 var init_local_model_policy = __esm(() => {
   init_operation_error();
-});
-
-// src/core/source-model-policy.ts
-var init_source_model_policy = __esm(() => {
-  init_operation_error();
-});
-
-// src/core/venice-models.ts
-function normalizeVeniceAnalystModelId(value) {
-  const trimmed = value.trim();
-  if (!trimmed)
-    return trimmed;
-  const key = trimmed.toLowerCase().replace(/\bvenice\b/g, " ").replace(/\bgl m\b/g, "glm").replace(/\bqwen\s*3\.6\b/g, "qwen-3-6").replace(/\bqwen\s*3\s*vl\b/g, "qwen3-vl").replace(/\bgrok\s*4\.3\b/g, "grok-4-3").replace(/\bgrok\s*4\.5\b/g, "grok-4-5").replace(/\bglm\s*5\.2\b/g, "glm-5-2").replace(/\bglm\s*5\.1\b/g, "glm-5-1").replace(/\be2e\b/g, "e2ee").replace(/\bee2e\b/g, "e2ee").replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
-  return VENICE_MODEL_ALIASES[key] ?? trimmed.toLowerCase();
-}
-function venicePrivacyCategoryForModel(value) {
-  return VENICE_MODEL_PRIVACY_CATEGORIES[normalizeVeniceAnalystModelId(value)];
-}
-async function assertVeniceEmbeddingModelAllowed(modelId, resolveCategory, signal) {
-  const resolvedModelId = modelId.trim();
-  if (/e2e{2}|ee2e/i.test(resolvedModelId)) {
-    throw new OperationError("source_index_policy_violation", `Venice embedding model "${resolvedModelId}" uses a gated E2EE class.`, "Use the approved Venice Private or TEE embedding model; E2EE embedding remains unavailable until local key handling exists.");
-  }
-  const category = await resolveCategory(resolvedModelId, signal);
-  if (category !== "private" && category !== "tee") {
-    throw new OperationError("source_index_policy_violation", `Venice embedding model "${resolvedModelId}" has privacy category ${category ?? "unknown"}; source embeddings require Venice Private or TEE.`, "Choose a Venice embedding model published with Private or TEE privacy metadata.");
-  }
-}
-var VENICE_MODEL_ALIASES, VENICE_MODEL_PRIVACY_CATEGORIES;
-var init_venice_models = __esm(() => {
-  init_operation_error();
-  VENICE_MODEL_ALIASES = Object.freeze({
-    default: "kimi-k3",
-    strong: "kimi-k3",
-    "strong-reasoning": "kimi-k3",
-    reasoning: "kimi-k3",
-    "secure-reasoning": "kimi-k3",
-    kimi: "kimi-k3",
-    "kimi-3": "kimi-k3",
-    "kimi-k-3": "kimi-k3",
-    "kimi-k3": "kimi-k3",
-    normal: "inkling",
-    "normal-reasoning": "inkling",
-    inkling: "inkling",
-    "most-secure": "e2ee-glm-5-2-p",
-    "slower-most-secure": "e2ee-glm-5-2-p",
-    "slow-most-secure": "e2ee-glm-5-2-p",
-    "glm-5-2-e2ee": "e2ee-glm-5-2-p",
-    "glm-5-2-ee2e": "e2ee-glm-5-2-p",
-    "glm-5-2-private": "zai-org-glm-5-2",
-    "glm-5-2-p": "e2ee-glm-5-2-p",
-    "e2ee-glm-5-2": "e2ee-glm-5-2-p",
-    "ee2e-glm-5-2": "e2ee-glm-5-2-p",
-    "venice-glm-5-2-e2ee": "e2ee-glm-5-2-p",
-    "venice-glm-5-2-ee2e": "e2ee-glm-5-2-p",
-    "venice-glm-5-2-private": "zai-org-glm-5-2",
-    "glm-5-2": "zai-org-glm-5-2",
-    "fast-reasoning": "inkling",
-    "faster-reasoning": "inkling",
-    "acceptable-reasoning": "inkling",
-    "glm-5-2-fast": "zai-org-glm-5-2",
-    "glm-5-2-acceptable": "zai-org-glm-5-2",
-    "glm-5-1-e2ee": "e2ee-glm-5-1",
-    "glm-5-1-ee2e": "e2ee-glm-5-1",
-    "e2ee-glm-5-1": "e2ee-glm-5-1",
-    "ee2e-glm-5-1": "e2ee-glm-5-1",
-    "venice-glm-5-1-e2ee": "e2ee-glm-5-1",
-    "venice-glm-5-1-ee2e": "e2ee-glm-5-1",
-    "glm-5-1": "zai-org-glm-5-1",
-    "qwen-3-6-35b-e2ee": "e2ee-qwen3-6-35b-a3b",
-    "qwen-3-6-35b-ee2e": "e2ee-qwen3-6-35b-a3b",
-    "qwen3-6-35b-e2ee": "e2ee-qwen3-6-35b-a3b",
-    "qwen3-6-35b-ee2e": "e2ee-qwen3-6-35b-a3b",
-    "qwen-3-6-35b-a3b-e2ee": "e2ee-qwen3-6-35b-a3b",
-    "qwen-3-6-35b-a3b-ee2e": "e2ee-qwen3-6-35b-a3b",
-    "qwen3-6-35b-a3b-e2ee": "e2ee-qwen3-6-35b-a3b",
-    "qwen3-6-35b-a3b-ee2e": "e2ee-qwen3-6-35b-a3b",
-    vision: "kimi-k3",
-    "secure-vision": "kimi-k3",
-    "most-secure-vision": "kimi-k3",
-    "qwen-vision": "qwen3-vl-235b-a22b",
-    "qwen3-vl-vision": "qwen3-vl-235b-a22b",
-    "qwen-3-vl-vision": "qwen3-vl-235b-a22b",
-    "qwen3-vl-235b": "qwen3-vl-235b-a22b",
-    "qwen3-vl-235b-a22b": "qwen3-vl-235b-a22b",
-    "qwen-3-vl-235b": "qwen3-vl-235b-a22b",
-    "qwen-3-vl-235b-a22b": "qwen3-vl-235b-a22b",
-    "qwen3-vl-30b-e2ee": "e2ee-qwen3-vl-30b-a3b-p",
-    "qwen3-vl-30b-ee2e": "e2ee-qwen3-vl-30b-a3b-p",
-    "qwen3-vl-30b-a3b-e2ee": "e2ee-qwen3-vl-30b-a3b-p",
-    "qwen3-vl-30b-a3b-ee2e": "e2ee-qwen3-vl-30b-a3b-p",
-    "qwen-3-vl-30b-e2ee": "e2ee-qwen3-vl-30b-a3b-p",
-    "qwen-3-vl-30b-ee2e": "e2ee-qwen3-vl-30b-a3b-p",
-    "vision-escalation": "kimi-k3",
-    "private-grok-4-3": "grok-4-3",
-    "grok-4-3-private": "grok-4-3",
-    "grok-4-3-vision": "grok-4-3",
-    multimodal: "kimi-k3",
-    "fast-multimodal": "kimi-k3",
-    "faster-multimodal": "kimi-k3",
-    "acceptable-multimodal": "kimi-k3",
-    "grok-4-3": "grok-4-3",
-    "grok-4-3-multimodal": "grok-4-3",
-    "grok-4-5": "grok-4-5",
-    "grok-4-5-vision": "grok-4-5",
-    "private-grok-4-5": "grok-4-5"
-  });
-  VENICE_MODEL_PRIVACY_CATEGORIES = Object.freeze({
-    "kimi-k3": "private",
-    inkling: "private",
-    "e2ee-glm-5-2-p": "e2ee",
-    "zai-org-glm-5-2": "private",
-    "e2ee-glm-5-1": "e2ee",
-    "zai-org-glm-5-1": "private",
-    "e2ee-qwen3-6-35b-a3b": "e2ee",
-    "grok-4-5": "private",
-    "qwen3-vl-235b-a22b": "private",
-    "e2ee-qwen3-vl-30b-a3b-p": "e2ee",
-    "grok-4-3": "private",
-    "claude-opus-4-7-fast": "anonymized",
-    "qwen3-6-27b": "private",
-    "tee-qwen3-5-122b-a10b": "tee"
-  });
 });
 
 // src/core/zkapi-consult-settings.ts
@@ -7414,6 +7131,187 @@ var init_zkapi_consult_settings = __esm(() => {
   };
 });
 
+// src/core/model-transport.ts
+function isModelEndpointRedirectError(error) {
+  return error instanceof ModelEndpointRedirectError;
+}
+async function fetchModelEndpoint(fetchImpl, url, init) {
+  await assertNotZkapiDaemonEndpointResolved(url, "Model endpoint");
+  let response;
+  try {
+    response = await fetchImpl(url, { ...init, redirect: "error" });
+  } catch (error) {
+    if (isFetchRedirectRefusal(error))
+      throw new ModelEndpointRedirectError;
+    throw error;
+  }
+  if (isRedirectResponse(response)) {
+    discardBody(response);
+    throw new ModelEndpointRedirectError(response.status >= 300 && response.status <= 399 ? response.status : undefined);
+  }
+  return response;
+}
+function isRedirectResponse(response) {
+  return response.type === "opaqueredirect" || response.redirected === true || response.status >= 300 && response.status <= 399;
+}
+function discardBody(response) {
+  try {
+    const cancelled = response.body?.cancel();
+    if (cancelled && typeof cancelled.catch === "function") {
+      cancelled.catch(() => {
+        return;
+      });
+    }
+  } catch {}
+}
+function isFetchRedirectRefusal(error) {
+  if (error instanceof ModelEndpointRedirectError)
+    return true;
+  if (!(error instanceof Error))
+    return false;
+  if (error.code === "UnexpectedRedirect")
+    return true;
+  const cause = error.cause;
+  const causeMessage = cause instanceof Error ? cause.message : typeof cause === "string" ? cause : "";
+  return /unexpected redirect/i.test(causeMessage) || /unexpected ?redirect/i.test(error.message);
+}
+var MODEL_ENDPOINT_REDIRECT_MESSAGE = "The model endpoint answered with a redirect. Olympus refuses redirects on model transports and did not use the answer.", ModelEndpointRedirectError;
+var init_model_transport = __esm(() => {
+  init_zkapi_consult_settings();
+  ModelEndpointRedirectError = class ModelEndpointRedirectError extends Error {
+    code = "model_endpoint_redirect";
+    status;
+    constructor(status) {
+      super(MODEL_ENDPOINT_REDIRECT_MESSAGE);
+      this.name = "ModelEndpointRedirectError";
+      this.status = status;
+    }
+  };
+});
+
+// src/core/source-model-policy.ts
+var init_source_model_policy = __esm(() => {
+  init_operation_error();
+});
+
+// src/core/venice-models.ts
+function normalizeVeniceAnalystModelId(value) {
+  const trimmed = value.trim();
+  if (!trimmed)
+    return trimmed;
+  const key = trimmed.toLowerCase().replace(/\bvenice\b/g, " ").replace(/\bgl m\b/g, "glm").replace(/\bqwen\s*3\.6\b/g, "qwen-3-6").replace(/\bqwen\s*3\s*vl\b/g, "qwen3-vl").replace(/\bgrok\s*4\.3\b/g, "grok-4-3").replace(/\bgrok\s*4\.5\b/g, "grok-4-5").replace(/\bglm\s*5\.2\b/g, "glm-5-2").replace(/\bglm\s*5\.1\b/g, "glm-5-1").replace(/\be2e\b/g, "e2ee").replace(/\bee2e\b/g, "e2ee").replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+  return VENICE_MODEL_ALIASES[key] ?? trimmed.toLowerCase();
+}
+function venicePrivacyCategoryForModel(value) {
+  return VENICE_MODEL_PRIVACY_CATEGORIES[normalizeVeniceAnalystModelId(value)];
+}
+async function assertVeniceEmbeddingModelAllowed(modelId, resolveCategory, signal) {
+  const resolvedModelId = modelId.trim();
+  if (/e2e{2}|ee2e/i.test(resolvedModelId)) {
+    throw new OperationError("source_index_policy_violation", `Venice embedding model "${resolvedModelId}" uses a gated E2EE class.`, "Use the approved Venice Private or TEE embedding model; E2EE embedding remains unavailable until local key handling exists.");
+  }
+  const category = await resolveCategory(resolvedModelId, signal);
+  if (category !== "private" && category !== "tee") {
+    throw new OperationError("source_index_policy_violation", `Venice embedding model "${resolvedModelId}" has privacy category ${category ?? "unknown"}; source embeddings require Venice Private or TEE.`, "Choose a Venice embedding model published with Private or TEE privacy metadata.");
+  }
+}
+var VENICE_MODEL_ALIASES, VENICE_MODEL_PRIVACY_CATEGORIES;
+var init_venice_models = __esm(() => {
+  init_operation_error();
+  VENICE_MODEL_ALIASES = Object.freeze({
+    default: "kimi-k3",
+    strong: "kimi-k3",
+    "strong-reasoning": "kimi-k3",
+    reasoning: "kimi-k3",
+    "secure-reasoning": "kimi-k3",
+    kimi: "kimi-k3",
+    "kimi-3": "kimi-k3",
+    "kimi-k-3": "kimi-k3",
+    "kimi-k3": "kimi-k3",
+    normal: "inkling",
+    "normal-reasoning": "inkling",
+    inkling: "inkling",
+    "most-secure": "e2ee-glm-5-2-p",
+    "slower-most-secure": "e2ee-glm-5-2-p",
+    "slow-most-secure": "e2ee-glm-5-2-p",
+    "glm-5-2-e2ee": "e2ee-glm-5-2-p",
+    "glm-5-2-ee2e": "e2ee-glm-5-2-p",
+    "glm-5-2-private": "zai-org-glm-5-2",
+    "glm-5-2-p": "e2ee-glm-5-2-p",
+    "e2ee-glm-5-2": "e2ee-glm-5-2-p",
+    "ee2e-glm-5-2": "e2ee-glm-5-2-p",
+    "venice-glm-5-2-e2ee": "e2ee-glm-5-2-p",
+    "venice-glm-5-2-ee2e": "e2ee-glm-5-2-p",
+    "venice-glm-5-2-private": "zai-org-glm-5-2",
+    "glm-5-2": "zai-org-glm-5-2",
+    "fast-reasoning": "inkling",
+    "faster-reasoning": "inkling",
+    "acceptable-reasoning": "inkling",
+    "glm-5-2-fast": "zai-org-glm-5-2",
+    "glm-5-2-acceptable": "zai-org-glm-5-2",
+    "glm-5-1-e2ee": "e2ee-glm-5-1",
+    "glm-5-1-ee2e": "e2ee-glm-5-1",
+    "e2ee-glm-5-1": "e2ee-glm-5-1",
+    "ee2e-glm-5-1": "e2ee-glm-5-1",
+    "venice-glm-5-1-e2ee": "e2ee-glm-5-1",
+    "venice-glm-5-1-ee2e": "e2ee-glm-5-1",
+    "glm-5-1": "zai-org-glm-5-1",
+    "qwen-3-6-35b-e2ee": "e2ee-qwen3-6-35b-a3b",
+    "qwen-3-6-35b-ee2e": "e2ee-qwen3-6-35b-a3b",
+    "qwen3-6-35b-e2ee": "e2ee-qwen3-6-35b-a3b",
+    "qwen3-6-35b-ee2e": "e2ee-qwen3-6-35b-a3b",
+    "qwen-3-6-35b-a3b-e2ee": "e2ee-qwen3-6-35b-a3b",
+    "qwen-3-6-35b-a3b-ee2e": "e2ee-qwen3-6-35b-a3b",
+    "qwen3-6-35b-a3b-e2ee": "e2ee-qwen3-6-35b-a3b",
+    "qwen3-6-35b-a3b-ee2e": "e2ee-qwen3-6-35b-a3b",
+    vision: "kimi-k3",
+    "secure-vision": "kimi-k3",
+    "most-secure-vision": "kimi-k3",
+    "qwen-vision": "qwen3-vl-235b-a22b",
+    "qwen3-vl-vision": "qwen3-vl-235b-a22b",
+    "qwen-3-vl-vision": "qwen3-vl-235b-a22b",
+    "qwen3-vl-235b": "qwen3-vl-235b-a22b",
+    "qwen3-vl-235b-a22b": "qwen3-vl-235b-a22b",
+    "qwen-3-vl-235b": "qwen3-vl-235b-a22b",
+    "qwen-3-vl-235b-a22b": "qwen3-vl-235b-a22b",
+    "qwen3-vl-30b-e2ee": "e2ee-qwen3-vl-30b-a3b-p",
+    "qwen3-vl-30b-ee2e": "e2ee-qwen3-vl-30b-a3b-p",
+    "qwen3-vl-30b-a3b-e2ee": "e2ee-qwen3-vl-30b-a3b-p",
+    "qwen3-vl-30b-a3b-ee2e": "e2ee-qwen3-vl-30b-a3b-p",
+    "qwen-3-vl-30b-e2ee": "e2ee-qwen3-vl-30b-a3b-p",
+    "qwen-3-vl-30b-ee2e": "e2ee-qwen3-vl-30b-a3b-p",
+    "vision-escalation": "kimi-k3",
+    "private-grok-4-3": "grok-4-3",
+    "grok-4-3-private": "grok-4-3",
+    "grok-4-3-vision": "grok-4-3",
+    multimodal: "kimi-k3",
+    "fast-multimodal": "kimi-k3",
+    "faster-multimodal": "kimi-k3",
+    "acceptable-multimodal": "kimi-k3",
+    "grok-4-3": "grok-4-3",
+    "grok-4-3-multimodal": "grok-4-3",
+    "grok-4-5": "grok-4-5",
+    "grok-4-5-vision": "grok-4-5",
+    "private-grok-4-5": "grok-4-5"
+  });
+  VENICE_MODEL_PRIVACY_CATEGORIES = Object.freeze({
+    "kimi-k3": "private",
+    inkling: "private",
+    "e2ee-glm-5-2-p": "e2ee",
+    "zai-org-glm-5-2": "private",
+    "e2ee-glm-5-1": "e2ee",
+    "zai-org-glm-5-1": "private",
+    "e2ee-qwen3-6-35b-a3b": "e2ee",
+    "grok-4-5": "private",
+    "qwen3-vl-235b-a22b": "private",
+    "e2ee-qwen3-vl-30b-a3b-p": "e2ee",
+    "grok-4-3": "private",
+    "claude-opus-4-7-fast": "anonymized",
+    "qwen3-6-27b": "private",
+    "tee-qwen3-5-122b-a10b": "tee"
+  });
+});
+
 // src/core/sovereignty.ts
 function assertSecureAnalystPoolModelIdAllowed(profileId, rawModelId) {
   const modelId = normalizeVeniceAnalystModelId(rawModelId);
@@ -7447,6 +7345,183 @@ var init_sovereignty = __esm(() => {
       this.modelId = modelId;
     }
   };
+});
+
+// src/core/first-run-privacy.ts
+var init_first_run_privacy = __esm(() => {
+  init_sovereignty();
+});
+
+// src/core/build-flavor.ts
+var PUBLIC_RUNTIME_BUILD = false;
+
+// src/core/google-handle-compatibility.ts
+var init_google_handle_compatibility = () => {};
+
+// src/core/publisher-oauth-client.ts
+function isGooglePublisherWebClientId(clientId, env = process.env) {
+  const candidate = clientId?.trim();
+  if (!candidate)
+    return false;
+  const override = env.OLYMPUS_GOOGLE_PUBLISHER_WEB_CLIENT_ID?.trim();
+  if (override && candidate === override)
+    return true;
+  return GOOGLE_PUBLISHER_WEB_CLIENT_IDS.some((known) => known.trim() !== "" && known.trim() === candidate);
+}
+function googleDesktopClientSecret(clientId, env = process.env) {
+  const candidate = clientId?.trim();
+  if (!candidate)
+    return;
+  const overrideId = env.OLYMPUS_GOOGLE_DESKTOP_CLIENT_ID?.trim();
+  if (overrideId && candidate === overrideId) {
+    const overrideSecret = env.OLYMPUS_GOOGLE_DESKTOP_CLIENT_SECRET?.trim();
+    if (overrideSecret)
+      return overrideSecret;
+  }
+  const known = GOOGLE_DESKTOP_CLIENTS.find((client) => client.id.trim() !== "" && client.id.trim() === candidate);
+  return known?.secret.trim() || undefined;
+}
+var DEFAULT_GOOGLE_PUBLISHER_WEB_CLIENT_ID = "1027907846009-a9cbup55bplsuu2ibk4rasfl6auerdh4.apps.googleusercontent.com", GOOGLE_PUBLISHER_WEB_CLIENT_IDS, DEFAULT_GOOGLE_DESKTOP_CLIENT_ID = "1027907846009-bsl76vuivvlt8hk4d073emj825tei5kd.apps.googleusercontent.com", DEFAULT_GOOGLE_DESKTOP_CLIENT_SECRET = "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", GOOGLE_DESKTOP_CLIENTS;
+var init_publisher_oauth_client = __esm(() => {
+  GOOGLE_PUBLISHER_WEB_CLIENT_IDS = [
+    DEFAULT_GOOGLE_PUBLISHER_WEB_CLIENT_ID
+  ];
+  GOOGLE_DESKTOP_CLIENTS = [
+    { id: DEFAULT_GOOGLE_DESKTOP_CLIENT_ID, secret: DEFAULT_GOOGLE_DESKTOP_CLIENT_SECRET }
+  ];
+});
+
+// src/core/privacy-language.ts
+var SENSITIVITY_TIER_LABELS, PRIVACY_PRESET_LABELS, PRIVATE_ANSWER_OPTIONS;
+var init_privacy_language = __esm(() => {
+  SENSITIVITY_TIER_LABELS = {
+    public: "Public",
+    private: "Personal",
+    secure: "Private",
+    secrets: "Secrets"
+  };
+  PRIVACY_PRESET_LABELS = {
+    "local-first": "Local models with Venice fallback",
+    "local-only": "Local models",
+    "private-cloud-only": "Venice",
+    "no-sensitive": "Private meaning search on this computer"
+  };
+  PRIVATE_ANSWER_OPTIONS = [
+    { id: "local-first", label: PRIVACY_PRESET_LABELS["local-first"], description: "The built-in model answers on this computer. Venice can help only after you add a Venice key. Venice is a privacy-focused cloud provider whose policy says it does not retain conversations or train on them; it can read the content.", recommended: true },
+    { id: "local-only", label: PRIVACY_PRESET_LABELS["local-only"], description: "The built-in model answers on this computer. You can connect your own local models; Private items stay on this computer.", recommended: false },
+    { id: "private-cloud-only", label: PRIVACY_PRESET_LABELS["private-cloud-only"], description: "Use Venice for Private answers after you add its key. Venice is a privacy-focused cloud provider whose policy says it does not retain conversations or train on them; it can read the content.", recommended: false },
+    { id: "no-sensitive", label: PRIVACY_PRESET_LABELS["no-sensitive"], description: "Find Private items by meaning on this computer and use Ask privately in the sealed panel. No Private agent answer lane is enabled.", recommended: false }
+  ];
+});
+
+// src/core/sqlite-migrations.ts
+function currentStoreMigrations() {
+  return [
+    {
+      version: CURRENT_OLYMPUS_SQLITE_SCHEMA_VERSION,
+      name: "record_existing_v1_schema",
+      up() {}
+    }
+  ];
+}
+function assertSqliteSchemaCanOpen(db, storeId, knownVersion = CURRENT_OLYMPUS_SQLITE_SCHEMA_VERSION) {
+  const currentVersion = readSqliteSchemaVersion(db, storeId);
+  if (currentVersion > knownVersion) {
+    throw new OperationError("config_error", `SQLite store "${storeId}" is at schema_version ${currentVersion}, but this Olympus build only knows schema_version ${knownVersion}.`, "Upgrade Olympus before opening this store. Refusing to open it prevents an older build from corrupting newer data.");
+  }
+}
+function runSqliteMigrations(db, storeId, migrations = currentStoreMigrations(), options = {}) {
+  const ordered = validateMigrations(migrations);
+  const targetVersion = options.knownVersion ?? ordered.at(-1)?.version ?? CURRENT_OLYMPUS_SQLITE_SCHEMA_VERSION;
+  const currentVersion = readSqliteSchemaVersion(db, storeId);
+  if (currentVersion > targetVersion) {
+    throw new OperationError("config_error", `SQLite store "${storeId}" is at schema_version ${currentVersion}, but this Olympus build only knows schema_version ${targetVersion}.`, "Upgrade Olympus before opening this store. Refusing to open it prevents an older build from corrupting newer data.");
+  }
+  const pending = ordered.filter((migration) => migration.version > currentVersion).map(({ version, name }) => ({ version, name }));
+  if (options.dryRun === true) {
+    return {
+      storeId,
+      currentVersion,
+      targetVersion,
+      dryRun: true,
+      applied: [],
+      pending
+    };
+  }
+  ensureSchemaVersionTable(db);
+  const applied = [];
+  if (pending.length > 0) {
+    db.transaction(() => {
+      const lockedVersion = readSqliteSchemaVersion(db, storeId);
+      if (lockedVersion > targetVersion) {
+        throw new OperationError("config_error", `SQLite store "${storeId}" is at schema_version ${lockedVersion}, but this Olympus build only knows schema_version ${targetVersion}.`, "Upgrade Olympus before opening this store. Refusing to open it prevents an older build from corrupting newer data.");
+      }
+      for (const migration of ordered.filter((entry) => entry.version > lockedVersion)) {
+        migration.up(db);
+        writeSqliteSchemaVersion(db, storeId, migration.version);
+        applied.push({ version: migration.version, name: migration.name });
+      }
+    }).immediate();
+  }
+  return {
+    storeId,
+    currentVersion,
+    targetVersion,
+    dryRun: false,
+    applied,
+    pending: applied
+  };
+}
+function readSqliteSchemaVersion(db, storeId) {
+  if (!schemaVersionTableExists(db))
+    return 0;
+  const row = db.query(`SELECT version FROM ${SQLITE_SCHEMA_VERSION_TABLE} WHERE store_id = ?`).get(storeId);
+  return typeof row?.version === "number" && Number.isInteger(row.version) ? row.version : 0;
+}
+function ensureSchemaVersionTable(db) {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS ${SQLITE_SCHEMA_VERSION_TABLE} (
+      store_id TEXT PRIMARY KEY,
+      version INTEGER NOT NULL,
+      applied_at TEXT NOT NULL
+    );
+  `);
+}
+function writeSqliteSchemaVersion(db, storeId, version) {
+  db.query(`
+    INSERT INTO ${SQLITE_SCHEMA_VERSION_TABLE} (store_id, version, applied_at)
+    VALUES (?, ?, ?)
+    ON CONFLICT(store_id) DO UPDATE SET
+      version = excluded.version,
+      applied_at = excluded.applied_at
+  `).run(storeId, version, new Date().toISOString());
+}
+function schemaVersionTableExists(db) {
+  const row = db.query("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?").get(SQLITE_SCHEMA_VERSION_TABLE);
+  return row?.name === SQLITE_SCHEMA_VERSION_TABLE;
+}
+function validateMigrations(migrations) {
+  const ordered = [...migrations].sort((left, right) => left.version - right.version);
+  let previous = 0;
+  for (const migration of ordered) {
+    if (!Number.isInteger(migration.version) || migration.version <= 0) {
+      throw new OperationError("config_error", `SQLite migration "${migration.name}" must use a positive integer version.`);
+    }
+    if (migration.version === previous) {
+      throw new OperationError("config_error", `Duplicate SQLite migration version ${migration.version}.`);
+    }
+    previous = migration.version;
+  }
+  return ordered;
+}
+var SQLITE_SCHEMA_VERSION_TABLE = "schema_version", CURRENT_OLYMPUS_SQLITE_SCHEMA_VERSION = 1;
+var init_sqlite_migrations = __esm(() => {
+  init_operation_error();
+});
+
+// src/core/ingestion-throughput.ts
+var init_ingestion_throughput = __esm(() => {
+  init_operation_error();
 });
 
 // src/core/whatsapp-notice.ts
@@ -20510,64 +20585,6 @@ var init_reactions = __esm(() => {
       super(message2);
       this.name = "SourceReactionValidationError";
       this.refusal = refusal;
-    }
-  };
-});
-
-// src/core/model-transport.ts
-function isModelEndpointRedirectError(error) {
-  return error instanceof ModelEndpointRedirectError;
-}
-async function fetchModelEndpoint(fetchImpl, url, init) {
-  await assertNotZkapiDaemonEndpointResolved(url, "Model endpoint");
-  let response;
-  try {
-    response = await fetchImpl(url, { ...init, redirect: "error" });
-  } catch (error) {
-    if (isFetchRedirectRefusal(error))
-      throw new ModelEndpointRedirectError;
-    throw error;
-  }
-  if (isRedirectResponse(response)) {
-    discardBody(response);
-    throw new ModelEndpointRedirectError(response.status >= 300 && response.status <= 399 ? response.status : undefined);
-  }
-  return response;
-}
-function isRedirectResponse(response) {
-  return response.type === "opaqueredirect" || response.redirected === true || response.status >= 300 && response.status <= 399;
-}
-function discardBody(response) {
-  try {
-    const cancelled = response.body?.cancel();
-    if (cancelled && typeof cancelled.catch === "function") {
-      cancelled.catch(() => {
-        return;
-      });
-    }
-  } catch {}
-}
-function isFetchRedirectRefusal(error) {
-  if (error instanceof ModelEndpointRedirectError)
-    return true;
-  if (!(error instanceof Error))
-    return false;
-  if (error.code === "UnexpectedRedirect")
-    return true;
-  const cause = error.cause;
-  const causeMessage = cause instanceof Error ? cause.message : typeof cause === "string" ? cause : "";
-  return /unexpected redirect/i.test(causeMessage) || /unexpected ?redirect/i.test(error.message);
-}
-var MODEL_ENDPOINT_REDIRECT_MESSAGE = "The model endpoint answered with a redirect. Olympus refuses redirects on model transports and did not use the answer.", ModelEndpointRedirectError;
-var init_model_transport = __esm(() => {
-  init_zkapi_consult_settings();
-  ModelEndpointRedirectError = class ModelEndpointRedirectError extends Error {
-    code = "model_endpoint_redirect";
-    status;
-    constructor(status) {
-      super(MODEL_ENDPOINT_REDIRECT_MESSAGE);
-      this.name = "ModelEndpointRedirectError";
-      this.status = status;
     }
   };
 });
@@ -44259,6 +44276,8 @@ function chatgptPrivacyProgram(kit, makeLogic) {
       description: "",
       rules: [],
       pendingCount: 0,
+      answerChoice: null,
+      answerMode: "local-first",
       revision: "",
       savedDescription: "",
       confirmation: "",
@@ -44307,6 +44326,7 @@ function chatgptPrivacyProgram(kit, makeLogic) {
     s.description = typeof data2.description === "string" ? data2.description : "";
     s.savedDescription = s.description;
     s.revision = typeof data2.revision === "string" ? data2.revision : "";
+    s.answerChoice = data2.privateAnswerChoice && data2.privateAnswerChoice.pending === true && Array.isArray(data2.privateAnswerChoice.options) ? data2.privateAnswerChoice : null;
     s.edited = false;
     s.confirmStep = false;
     s.rules = data2.rules.filter(validRule).map(viewRule);
@@ -44335,7 +44355,9 @@ function chatgptPrivacyProgram(kit, makeLogic) {
       }
       take(data2);
       s.loaded = true;
-      kit.render("privacy:description");
+      if (data2.configured && s.answerChoice)
+        s.screen = "answers";
+      kit.render(s.screen === "answers" ? "privacy:answer:local-first" : "privacy:description");
     }, () => {
       if (mine !== session || !s)
         return;
@@ -44427,6 +44449,12 @@ function chatgptPrivacyProgram(kit, makeLogic) {
       if (confirmed)
         s.confirmation = "";
       kit.remember(data2.rules.filter(validRule).length);
+      take(data2);
+      if (s.answerChoice) {
+        s.screen = "answers";
+        kit.render("privacy:answer:local-first");
+        return;
+      }
       leave(W.saved, true);
     }, () => {
       if (mine !== session || !s)
@@ -44893,6 +44921,75 @@ function chatgptPrivacyProgram(kit, makeLogic) {
     add(page2, field);
     add(page2, add(el("div", "actions"), kit.button(W.senderAdd, "privacy:sender:add", submitSender, "main")));
   }
+  function saveAnswerMode() {
+    if (!s || s.saving || !s.answerChoice)
+      return;
+    if (!s.confirmation || Date.now() - s.confirmedAt > CONFIRMATION_FRESH_MS) {
+      renewConfirmation(saveAnswerMode);
+      return;
+    }
+    s.saving = true;
+    s.saveError = "";
+    kit.render("privacy:answer:save");
+    const mine = session;
+    kit.call(T.set, { private_answer_mode: s.answerMode, revision: s.revision, confirmation: s.confirmation }).then((result) => {
+      if (mine !== session || !s)
+        return;
+      s.saving = false;
+      const data2 = settings(result);
+      if (!data2 || result.isError) {
+        s.saveError = W.saveFailed;
+        kit.render("privacy:answer:save");
+        return;
+      }
+      take(data2);
+      if (!s.answerChoice)
+        return leave(W.saved, true);
+      s.saveError = W.saveFailed;
+      kit.render("privacy:answer:save");
+    }, () => {
+      if (mine !== session || !s)
+        return;
+      s.saving = false;
+      s.saveError = W.saveFailed;
+      kit.render("privacy:answer:save");
+    });
+  }
+  function answersView(page2) {
+    add(page2, el("h1", "", "How should Olympus answer with Private items?"));
+    add(page2, el("p", "muted intro", "Until you save a choice, nothing leaves this computer."));
+    if (!s.answerChoice)
+      return;
+    const choices = el("fieldset", "field");
+    add(choices, el("legend", "field-label", "Private-answer mode"));
+    s.answerChoice.options.forEach((option) => {
+      if (!option || typeof option.id !== "string" || typeof option.label !== "string" || typeof option.description !== "string")
+        return;
+      const label = el("label", "field");
+      const input = el("input");
+      input.type = "radio";
+      input.name = "private-answer-mode";
+      input.value = option.id;
+      input.checked = s.answerMode === option.id;
+      input.disabled = s.saving;
+      input.setAttribute("data-key", "privacy:answer:" + option.id);
+      input.addEventListener("change", () => {
+        if (input.checked)
+          s.answerMode = option.id;
+      });
+      add(label, input, el("span", "strong", option.label + (option.recommended ? " — Recommended" : "")), el("span", "muted", option.description));
+      add(choices, label);
+    });
+    add(page2, choices);
+    if (s.saveError) {
+      const error = el("p", "banner", s.saveError);
+      error.setAttribute("role", "alert");
+      add(page2, error);
+    }
+    const save2 = kit.button(s.saving ? "Saving…" : "Save Private-answer mode", "privacy:answer:save", saveAnswerMode, "main");
+    save2.disabled = s.saving;
+    add(page2, save2);
+  }
   function view() {
     const page2 = el("main", "page picker privacy");
     if (!s)
@@ -44910,7 +45007,9 @@ function chatgptPrivacyProgram(kit, makeLogic) {
       }, "plain")));
       add(page2, confirm);
     }
-    if (s.screen === "sources")
+    if (s.screen === "answers")
+      answersView(page2);
+    else if (s.screen === "sources")
       sourcesView(page2);
     else if (s.screen === "labels")
       labelsView(page2);
@@ -62956,7 +63055,13 @@ import { createHash as createHash26 } from "node:crypto";
 import { existsSync as existsSync28, lstatSync as lstatSync14, mkdirSync as mkdirSync18, writeFileSync as writeFileSync7 } from "node:fs";
 import { dirname as dirname34, isAbsolute as isAbsolute14 } from "node:path";
 
+// src/core/local-model-discovery.ts
+init_http_timeout();
+init_local_model_policy();
+init_model_transport();
+
 // src/workers/email-source/server.ts
+init_first_run_privacy();
 init_source_placement();
 init_vocabulary();
 init_local_private_answers();
@@ -63876,6 +63981,7 @@ init_olympus_layout();
 init_worker_auth();
 
 // src/core/model-setup.ts
+init_first_run_privacy();
 init_model_transport();
 init_http_timeout();
 init_embedding_identity();
@@ -64240,6 +64346,7 @@ init_vlm();
 init_apple_vision_ocr();
 
 // src/workers/email-source/index.ts
+init_sovereignty();
 init_source_scope_approval();
 init_release_manifest();
 init_google_handle_compatibility();
@@ -64870,6 +64977,11 @@ var CODEX_SNIPPET = [
 
 // src/workers/dashboard/pages/local.ts
 init_vocabulary();
+
+// src/workers/dashboard/model-setup.ts
+init_privacy_language();
+
+// src/workers/dashboard/pages/local.ts
 init_vocabulary();
 var CONNECTOR_SHEET_INTRO = "Copy this prompt, replace the source name, and paste it into your coding " + "agent. The connector playbook it names lives in an Olympus source checkout, not in the installed " + "package — CONTRIBUTING.md says how to get one. A finished connector appears in Olympus like any " + "built-in.";
 var CONNECTOR_PROMPT = [

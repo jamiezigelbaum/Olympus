@@ -114,7 +114,7 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
     if (kit.compact()) kit.fullscreen();
     s = {
       screen: 'main', returnKey, loaded: false, loading: true, error: '',
-      description: '', rules: [], pendingCount: 0,
+      description: '', rules: [], pendingCount: 0, answerChoice: null, answerMode: 'local-first',
       // The saved settings this view started from: the compare-and-swap revision,
       // the saved description, and the owner's confirmation for a save that lowers protection.
       revision: '', savedDescription: '', confirmation: '', confirmedAt: 0, confirmStep: false,
@@ -170,6 +170,7 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
     s.description = typeof data.description === 'string' ? data.description : '';
     s.savedDescription = s.description;
     s.revision = typeof data.revision === 'string' ? data.revision : '';
+    s.answerChoice = data.privateAnswerChoice && data.privateAnswerChoice.pending === true && Array.isArray(data.privateAnswerChoice.options) ? data.privateAnswerChoice : null;
     s.edited = false;
     s.confirmStep = false;
     // `saved`: removing it lowers protection, so the save needs the owner's confirmation.
@@ -199,7 +200,8 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
       }
       take(data);
       s.loaded = true;
-      kit.render('privacy:description');
+      if (data.configured && s.answerChoice) s.screen = 'answers';
+      kit.render(s.screen === 'answers' ? 'privacy:answer:local-first' : 'privacy:description');
     }, () => {
       if (mine !== session || !s) return;
       s.loading = false;
@@ -307,6 +309,12 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
       }
       if (confirmed) s.confirmation = '';
       kit.remember(data.rules.filter(validRule).length);
+      take(data);
+      if (s.answerChoice) {
+        s.screen = 'answers';
+        kit.render('privacy:answer:local-first');
+        return;
+      }
       leave(W.saved, true);
     }, () => {
       if (mine !== session || !s) return;
@@ -807,6 +815,68 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
     add(page, add(el('div', 'actions'), kit.button(W.senderAdd, 'privacy:sender:add', submitSender, 'main')));
   }
 
+  function saveAnswerMode(): void {
+    if (!s || s.saving || !s.answerChoice) return;
+    if (!s.confirmation || Date.now() - s.confirmedAt > CONFIRMATION_FRESH_MS) {
+      renewConfirmation(saveAnswerMode);
+      return;
+    }
+    s.saving = true;
+    s.saveError = '';
+    kit.render('privacy:answer:save');
+    const mine = session;
+    kit.call(T.set, { private_answer_mode: s.answerMode, revision: s.revision, confirmation: s.confirmation }).then(result => {
+      if (mine !== session || !s) return;
+      s.saving = false;
+      const data = settings(result);
+      if (!data || result.isError) {
+        s.saveError = W.saveFailed;
+        kit.render('privacy:answer:save');
+        return;
+      }
+      take(data);
+      if (!s.answerChoice) return leave(W.saved, true);
+      s.saveError = W.saveFailed;
+      kit.render('privacy:answer:save');
+    }, () => {
+      if (mine !== session || !s) return;
+      s.saving = false;
+      s.saveError = W.saveFailed;
+      kit.render('privacy:answer:save');
+    });
+  }
+
+  function answersView(page: HTMLElement): void {
+    add(page, el('h1', '', 'How should Olympus answer with Private items?'));
+    add(page, el('p', 'muted intro', 'Until you save a choice, nothing leaves this computer.'));
+    if (!s.answerChoice) return;
+    const choices = el('fieldset', 'field');
+    add(choices, el('legend', 'field-label', 'Private-answer mode'));
+    s.answerChoice.options.forEach((option: Any) => {
+      if (!option || typeof option.id !== 'string' || typeof option.label !== 'string' || typeof option.description !== 'string') return;
+      const label = el('label', 'field');
+      const input = el('input') as HTMLInputElement;
+      input.type = 'radio';
+      input.name = 'private-answer-mode';
+      input.value = option.id;
+      input.checked = s.answerMode === option.id;
+      input.disabled = s.saving;
+      input.setAttribute('data-key', 'privacy:answer:' + option.id);
+      input.addEventListener('change', () => { if (input.checked) s.answerMode = option.id; });
+      add(label, input, el('span', 'strong', option.label + (option.recommended ? ' — Recommended' : '')), el('span', 'muted', option.description));
+      add(choices, label);
+    });
+    add(page, choices);
+    if (s.saveError) {
+      const error = el('p', 'banner', s.saveError);
+      error.setAttribute('role', 'alert');
+      add(page, error);
+    }
+    const save = kit.button(s.saving ? 'Saving…' : 'Save Private-answer mode', 'privacy:answer:save', saveAnswerMode, 'main');
+    save.disabled = s.saving;
+    add(page, save);
+  }
+
   function view(): HTMLElement {
     const page = el('main', 'page picker privacy');
     if (!s) return page;
@@ -825,7 +895,8 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
         }, 'plain')));
       add(page, confirm);
     }
-    if (s.screen === 'sources') sourcesView(page);
+    if (s.screen === 'answers') answersView(page);
+    else if (s.screen === 'sources') sourcesView(page);
     else if (s.screen === 'labels') labelsView(page);
     else if (s.screen === 'sender') senderView(page);
     else mainView(page);

@@ -1,3 +1,6 @@
+import { readFileSync } from 'node:fs';
+import { isPendingPrivacyPolicy, saveFirstRunPrivacyChoice } from '../../core/first-run-privacy.ts';
+import { PRIVATE_ANSWER_OPTIONS } from '../../core/privacy-language.ts';
 /**
  * The engine side of setup from ChatGPT (setup-tools.ts): each call goes to
  * the worker's own dashboard route in process, so the ChatGPT panel and the
@@ -11,6 +14,7 @@ import { mailScopeDraftView } from '../../core/mail-source-scope.ts';
 import type { RemotePublicUrls } from '../../core/remote-public-url.ts';
 import {
   updateSovereigntyConfigFile,
+  validateSovereigntyConfig,
   type SovereigntyConfig,
   type SovereigntyModelProfile,
 } from '../../core/sovereignty.ts';
@@ -114,6 +118,16 @@ export function privacyRevision(profile: { description: string; rules: readonly 
 
 export function createChatGptSetupBackend(options: ChatGptSetupBackendOptions): ChatGptSetupBackend {
   let policy = options.sovereignty.config;
+  const privacySettings = (): PrivacySettings => {
+    const settings = readChatGptPrivacySettings(options.env ?? process.env, safeCount(options.pendingClassificationCount));
+    if (options.sovereignty.source === 'file' && options.sovereignty.path) {
+      // A separate setup path may already have answered since this worker booted.
+      const current = validateSovereigntyConfig(JSON.parse(readFileSync(options.sovereignty.path, 'utf8')));
+      if (isPendingPrivacyPolicy(current)) settings.privateAnswerChoice = { pending: true, options: PRIVATE_ANSWER_OPTIONS };
+    }
+    return settings;
+  };
+
 
   const post = async (path: string, body: Record<string, unknown>): Promise<Record<string, unknown>> => {
     const response = await options.workerFetch(new Request(`${WORKER_ORIGIN}${path}`, {
@@ -294,7 +308,16 @@ export function createChatGptSetupBackend(options: ChatGptSetupBackendOptions): 
     },
 
     privacySettings() {
-      return readChatGptPrivacySettings(options.env ?? process.env, safeCount(options.pendingClassificationCount));
+      return privacySettings();
+    },
+
+    choosePrivateAnswers(choice) {
+      if (options.sovereignty.source !== 'file' || !options.sovereignty.path) throw new SetupBackendError('invalid_request');
+      const result = saveFirstRunPrivacyChoice(options.sovereignty.path, choice);
+      if (!result.ok) throw new SetupBackendError('invalid_request');
+      policy = result.config;
+      if (result.changed) options.requestReload();
+      return privacySettings();
     },
 
     savePrivacy(update) {
@@ -302,7 +325,7 @@ export function createChatGptSetupBackend(options: ChatGptSetupBackendOptions): 
         ...(update.description !== undefined ? { description: update.description } : {}),
         ...(update.rules ? { rules: update.rules as PrivacyRule[] } : {}),
       }, { env: options.env ?? process.env });
-      return readChatGptPrivacySettings(options.env ?? process.env, safeCount(options.pendingClassificationCount));
+      return privacySettings();
     },
   };
 }

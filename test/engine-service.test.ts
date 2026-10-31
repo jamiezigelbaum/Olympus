@@ -2,7 +2,7 @@ import { afterAll, afterEach, describe, expect, test } from 'bun:test';
 import { spawn as spawnChild, spawnSync, type ChildProcess } from 'node:child_process';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { engineStatusReport, parseInstallArgs, parseLogsArgs, parseVerifyArgs } from '../src/core/engine-cli.ts';
 import { engineHostServices, engineStatusPath, startEngineHost } from '../src/core/engine-host.ts';
 import {
@@ -1082,11 +1082,21 @@ describe('engine install preflight, policy seeding, and what uninstall keeps', (
     expect(existsSync(paths.configPath)).toBe(false);
   });
 
+  test('an existing engine without a policy file is not treated as a fresh install', () => {
+    const { home, checkout, bun } = fixture();
+    const paths = enginePaths(home);
+    mkdirSync(dirname(paths.configPath), { recursive: true });
+    writeFileSync(paths.configPath, JSON.stringify(defaultEngineConfig()));
+    const result = installEngine({ platform: 'darwin', homeDir: home, exec: fakeLaunchctl().exec, fromCheckout: checkout, bunBin: bun, env: {} });
+    expect(result.sovereignty.action).toBe('skipped');
+    expect(existsSync(paths.sovereigntyPath)).toBe(false);
+  });
+
   test('a fresh Mac gets the keyless policy seeded', () => {
     const { home, checkout, bun } = fixture();
     const result = installEngine({ platform: 'darwin', homeDir: home, exec: fakeLaunchctl().exec, fromCheckout: checkout, bunBin: bun, env: {} });
-    expect(result.sovereignty).toMatchObject({ action: 'seeded', preset: 'no-sensitive' });
-    expect(result.seeded_sovereignty).toBe('no-sensitive');
+    expect(result.sovereignty).toMatchObject({ action: 'seeded', preset: 'pending' });
+    expect(result.seeded_sovereignty).toBe('pending');
     expect(existsSync(enginePaths(home).sovereigntyPath)).toBe(true);
   });
 

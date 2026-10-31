@@ -933,3 +933,32 @@ test('a redraw asked for while a Connect is pending runs once that Connect has a
 test('the serialized controller listens for the exported redraw event name', () => {
   expect(mountDashboardController.toString()).toMatch(new RegExp(`['"]${DASHBOARD_REDRAW_EVENT}['"]`));
 });
+
+test('local discovery lists models safely and synthetic errors stay beside the selected models', async () => {
+  const root = document.createElement('div');
+  root.innerHTML = '<div class="sheet on"><form data-local-models-discover><input name="base_url"><button type="submit">Detect</button><span data-action-message></span></form><div data-local-models-results></div><form data-local-models-test hidden><input type="hidden" name="base_url"><select name="answer_model"></select><select name="embedding_model"></select><button type="submit">Test</button><span data-action-message></span></form></div>';
+  document.body.append(root);
+  const calls: unknown[] = [];
+  const controller = mountDashboardController({
+    root, transport: { control: async params => {
+      calls.push(params);
+      return params.action === 'discover_local_models'
+        ? { status: 200, body: { ok: true, results: [{ working: true, provider: 'ollama', baseUrl: 'http://127.0.0.1:11434/v1', detail: 'Choose models', models: [{ id: '<img src=x>', allowed: true }, { id: 'embed', allowed: true }, { id: 'x:cloud', allowed: false, reason: 'Cloud models refused' }] }] } }
+        : { status: 200, body: { ok: true, result: { working: false, step: 'embedding', detail: 'Model lacks embeddings.' } } };
+    } },
+    navigate() {}, async refresh() { return undefined; }, returnUrl: 'https://gateway.test/', canWrite: true,
+    signal: new AbortController().signal, pollIntervalMs: 0,
+  });
+  root.querySelector<HTMLFormElement>('[data-local-models-discover]')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+  await new Promise(resolve => setTimeout(resolve, 0));
+  const form = root.querySelector<HTMLFormElement>('[data-local-models-test]')!;
+  expect(form.hidden).toBe(false);
+  expect(root.querySelector('img')).toBeNull();
+  expect(root.querySelectorAll('option')).toHaveLength(4);
+  root.querySelector<HTMLSelectElement>('[name="embedding_model"]')!.value = 'embed';
+  form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+  await new Promise(resolve => setTimeout(resolve, 0));
+  expect(calls[1]).toEqual({ action: 'test_local_models', base_url: 'http://127.0.0.1:11434/v1', answer_model: '<img src=x>', embedding_model: 'embed' });
+  expect(form.textContent).toContain('embedding: Model lacks embeddings.');
+  controller.dispose();
+});

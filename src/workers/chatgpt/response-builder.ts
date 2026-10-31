@@ -1,3 +1,4 @@
+import { PRIVATE_ANSWER_OPTIONS } from '../../core/privacy-language.ts';
 /**
  * The allowlisted response builder: the ONLY way a ChatGPT-bound response
  * leaves the engine. Every tool result (text content, structuredContent,
@@ -1161,6 +1162,7 @@ function copyPrivacySettings(settings: PrivacySettings): PrivacySettings {
       const display = text(rule.display);
       return [{ kind: 'folder', source_id: sourceId, key: opaque(rule.key), ...(display ? { display } : {}) }];
     }),
+    ...(settings.privateAnswerChoice?.pending === true ? { privateAnswerChoice: { pending: true as const, options: PRIVATE_ANSWER_OPTIONS } } : {}),
     pendingCount: whole(settings.pendingCount),
     ...(typeof settings.revision === 'string' && settings.revision ? { revision: opaque(settings.revision).slice(0, 64) } : {}),
   };
