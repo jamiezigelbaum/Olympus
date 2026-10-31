@@ -497,7 +497,7 @@ describe('native Olympus worker service', () => {
 
     await expect(service.start({ serviceHealth: healthRecorder(events) }))
       .rejects.toThrow('Olympus worker failed to become ready.');
-    await Bun.sleep(80);
+    await waitUntil(() => readCount(fixture.countPath) > 1);
 
     expect(readCount(fixture.countPath)).toBeGreaterThan(1);
     expect(events).toContain('failure:Olympus worker failed to become ready.');

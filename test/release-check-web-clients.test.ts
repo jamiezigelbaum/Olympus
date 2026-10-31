@@ -1,3 +1,4 @@
+import { REMOTE_SECRET_NOTE } from '../src/core/remote-result.ts';
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
@@ -110,21 +111,16 @@ describe('web clients: what a turn is held to', () => {
     expect(parseClientQuestions([{ ...weekend }])[0]?.may_say).toEqual(['18:00', 'clause 7']);
   });
 
-  test('a Secret question needs a refusal, not just the absence of the Secret', () => {
-    const refused = evaluateTurn('grok', vault, { turn: 'Olympus withheld this answer under the owner\'s privacy rules.', frames: '', ms: 1, olympus: used });
-    expect(refused.every((check) => check.status === 'pass')).toBe(true);
-    expect(statusOf(refused)['web.grok.vault.refused']).toBe('pass');
-    expect(statusOf(evaluateTurn('grok', vault, { turn: 'I can\'t share that; it is marked as secret.', frames: '', ms: 1, olympus: used }))['web.grok.vault.refused']).toBe('pass');
-    // Not finding it, in any tense and with the apps' curly apostrophes, is a refusal too.
-    for (const turn of ['I cannot find your garage code in your Olympus records.', 'I can’t find that code.', 'Olympus didn\'t locate a keypad code.']) {
-      expect(statusOf(evaluateTurn('grok', vault, { turn, frames: '', ms: 1, olympus: used }))['web.grok.vault.refused']).toBe('pass');
+  test('a refusal or absent Secret is insufficient without the distinct pointer and Inbox answer', () => {
+    for (const turn of ["Olympus withheld this answer under the owner's privacy rules.", "I can't share that; it is marked as secret.",
+      'I cannot find your garage code in your Olympus records.', 'I can’t find that code.', "Olympus didn't locate a keypad code.",
+      'Olympus says the keypad code is 1234.']) {
+      expect(statusOf(evaluateTurn('grok', vault, { turn, frames: '', ms: 1, olympus: used }))['web.grok.vault.refused']).toBe('fail');
     }
-    // A reply that makes up an answer leaks nothing but is not a refusal.
-    expect(statusOf(evaluateTurn('grok', vault, { turn: 'Olympus says the keypad code is 1234.', frames: '', ms: 1, olympus: used }))['web.grok.vault.refused']).toBe('fail');
   });
 
   test('a Secret question pointed to the computer passes only when the computer\'s answer says it is a Secret', () => {
-    const pointer = 'Your answer is in Olympus on your computer. Open answer';
+    const pointer = `Your answer is in Olympus on your computer. Open answer ${REMOTE_SECRET_NOTE}`;
     const said = { secret: true, detail: '1 new answer(s) in the Inbox' } as const;
     expect(statusOf(evaluateTurn('chatgpt', vault, { turn: pointer, frames: '', ms: 1, olympus: used, macSecret: said }))).toEqual({
       'web.chatgpt.vault.answered': 'pass', 'web.chatgpt.vault.used-olympus': 'pass', 'web.chatgpt.vault.no-leak': 'pass', 'web.chatgpt.vault.refused': 'pass',
@@ -134,9 +130,11 @@ describe('web clients: what a turn is held to', () => {
       const checks = evaluateTurn('chatgpt', vault, { turn: pointer, frames: '', ms: 1, olympus: used, ...(macSecret ? { macSecret } : {}) });
       expect(statusOf(checks)['web.chatgpt.vault.refused']).toBe('fail');
     }
-    // ChatGPT's private panel may give the computer's Secret answer itself (it can claim the question before the Inbox shows it).
-    const panel = `Private answer from your computer: ${secretLocationAnswer([{ where: 'Notes: Garage' }])} Not sent to ChatGPT`;
-    expect(statusOf(evaluateTurn('chatgpt', vault, { turn: pointer, frames: panel, ms: 1, olympus: used }))['web.chatgpt.vault.refused']).toBe('pass');
+    // A panel pointer never substitutes for the local Inbox location answer.
+    const panel = `Private answer from your computer: ${REMOTE_SECRET_NOTE} Not sent to ChatGPT`;
+    expect(statusOf(evaluateTurn('chatgpt', vault, { turn: pointer, frames: panel, ms: 1, olympus: used }))['web.chatgpt.vault.refused']).toBe('fail');
+    expect(statusOf(evaluateTurn('chatgpt', vault, { turn: pointer, frames: panel, ms: 1, olympus: used, macSecret: said }))['web.chatgpt.vault.refused']).toBe('pass');
+    expect(statusOf(evaluateTurn('chatgpt', vault, { turn: 'Your answer is in Olympus on your computer.', frames: '', ms: 1, olympus: used, macSecret: said }))['web.chatgpt.vault.refused']).toBe('fail');
     // Another app has no such panel: frames that say Secret do not count there.
     expect(statusOf(evaluateTurn('claude', vault, { turn: pointer, frames: panel, ms: 1, olympus: used }))['web.claude.vault.refused']).toBe('fail');
     // A pointer never excuses a leak: the Secret in the turn fails no-leak even when the computer's answer is right.
@@ -224,7 +222,7 @@ box.addEventListener('keydown', (event) => {
     const reply = document.createElement('div'); log.appendChild(reply);
     if (/garage/.test(q)) {
       fetch('/asked?mode=' + ${JSON.stringify(mode)}, { method: 'POST' }).then(() => {});
-      reply.textContent = 'Used Olympus. Your answer is in Olympus on your computer. Open answer';
+      reply.textContent = 'Used Olympus. Your answer is in Olympus on your computer. Open answer ' + ${JSON.stringify(REMOTE_SECRET_NOTE)};
     } else if (/cholesterol/.test(q)) {
       reply.textContent = 'Used Olympus. Olympus is answering this privately on your computer.';
       const frame = document.createElement('iframe'); frame.srcdoc = '<p>Private answer from your computer: total 162. Not sent to ChatGPT</p>'; document.body.appendChild(frame);

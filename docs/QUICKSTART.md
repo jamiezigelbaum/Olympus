@@ -157,6 +157,16 @@ Olympus reads. Olympus judges each item's names (Personal unless raised) and
 its content (raised to Private or Secrets on evidence); your always-Private
 rules raise matching items, and nothing you write can lower content.
 
+In Privacy, **In your own words** shows your full description. **Edit** opens
+it inline; Save and Cancel sit together. The note underneath explains that
+ChatGPT sees these words, so describe topics rather than private details.
+Follow-up questions stay next to your description and add their answers to
+it. **Always private (optional)** shows your rules and an **Add a rule** sheet;
+the note beside the rules explains that their names are shown to ChatGPT.
+**Details** holds the longer explanations. Changes to the description or
+removal of a rule still ask for confirmation; conflicts keep your changes
+until you choose Apply or Discard.
+
 The legacy sensitivity map (`~/.olympus/sensitivity-map.json` and
 `olympus sensitivity validate`) was retired on 2026-10-03. If an older
 install has that file, Olympus no longer reads it: re-add its rules in the
