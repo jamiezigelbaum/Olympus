@@ -53,8 +53,19 @@ In scope:
 - Remote answers and notices: #590, #611, #622, #623, #603, #612, #620, #594.
 - Engine: #630, #604; PR #481.
 - Own Google app made smooth on the dashboard (#581): a guided path that
-  replaces the help-page steps, led with once the shared app nears Google's
-  100-user cap. Design probes go to the owner before build.
+  replaces the help-page steps. The owner-approved 2026-10-31 copy leads
+  with the own-app path only on the existing `advanced_byo_required` signal;
+  this signal is not a live measurement of Google's 100-user cap. Shared
+  Connect otherwise stays first. One Desktop app serves Gmail and Drive;
+  the app key is checked before consent and API access after consent.
+  The owner's 2026-10-31 revised wizard has six stops: project, enable both
+  APIs, sign-in screen, publish, Desktop key, then file drop or paste.
+  Step 6 uses Connect; action rows stay horizontal above 480px.
+- Telegram and X guided setup (#656, #655) reuse the shared step sheet.
+  Telegram continues into dashboard pairing and explicit Pick chats / Everything;
+  X checks a bookmarks read before saving its grant. X's 2026-10-31 pricing
+  describes paid usage credits, not a required monthly subscription. No prices
+  are pinned in the sheet.
 - ChatGPT listing update from the tested build: #628 tagline, crowned-mountain
   icon, Secrets wording (a new OpenAI review).
 

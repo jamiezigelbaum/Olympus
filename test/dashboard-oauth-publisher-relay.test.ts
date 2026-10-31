@@ -1641,11 +1641,9 @@ function googleIdentityResponse(): Response {
   });
 }
 
-// Bring-your-own Google when the dashboard is served over https: Google accepts
-// only a Web application client there, and that client type requires its
-// client_secret at the token exchange and at every refresh. Served on this
-// computer (loopback) the Desktop app client needs none. The secret is entered
-// only in the dashboard's Client secret field.
+// Guided Google setup uses a Desktop client JSON on every origin. Raw API
+// callers can still use legacy Web clients, whose exchange and refresh must
+// retain the supplied secret without ever exposing it in dashboard responses.
 describe('Google bring-your-own client secret on an https dashboard', () => {
   const OWN_WEB_CLIENT_ID = 'owner-web-app.apps.googleusercontent.com';
   const OWN_WEB_CLIENT_SECRET = 'GOCSPX-owner-web-secret-fixture';
@@ -1673,18 +1671,21 @@ describe('Google bring-your-own client secret on an https dashboard', () => {
       expect(walkthrough).not.toContain('no client secret to paste');
       expect(walkthrough).not.toContain('does not need the client secret');
       // The assistant is told to keep the secret out of chat.
-      expect(byo.agent_prompt).toContain('only into the Client secret field');
+      expect(byo.agent_prompt).toContain('Add that file only in the Olympus dashboard');
+      expect(byo.agent_prompt).toContain('Never ask for the client secret in chat');
     });
   });
 
-  test('the loopback (Desktop app) walkthrough is unchanged: a Client ID field and no secret', async () => {
+  test('the loopback Desktop walkthrough accepts JSON or a masked ID and secret fallback', async () => {
     await withoutPilotClient(async () => {
       const action = gmailCardAction(await dashboardJson(fixture(), LOOPBACK_ORIGIN));
       expect(action.kind).toBe('oauth');
       const byo = action.instructions.advanced_byo;
-      expect(byo.fields.map((field: { name: string }) => field.name)).toEqual(['client_id']);
-      expect(byo.plain_intro).toContain('Desktop app Client ID');
-      expect(action.callback_registration.finish).toContain('no client secret to paste');
+      expect(byo.credential_file).toBe('google_desktop');
+      expect(byo.fields.map((field: { name: string }) => field.name)).toEqual(['client_id', 'client_secret']);
+      expect(byo.fields.find((field: { name: string }) => field.name === 'client_secret')).toMatchObject({ secret: true, required: true });
+      expect(byo.agent_prompt).toContain('Desktop app client');
+      expect(byo.agent_prompt).toContain('Never ask for the client secret in chat');
     });
   });
 

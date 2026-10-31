@@ -105,6 +105,10 @@ describe('olympus connect OAuth authorization-code flow', () => {
           }));
           return;
         }
+        if (url.pathname === '/2/users/1234567890/bookmarks') {
+          response.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({ meta: { result_count: 0 } }));
+          return;
+        }
         if (url.pathname === '/api/v2/auth/') {
           response.writeHead(204).end();
           return;
@@ -380,6 +384,10 @@ describe('olympus connect OAuth authorization-code flow', () => {
           response.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({
             data: { id: '9876543210', username: 'fixture' },
           }));
+          return;
+        }
+        if (url.pathname === '/2/users/9876543210/bookmarks') {
+          response.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({ meta: { result_count: 0 } }));
           return;
         }
         response.writeHead(404).end();
@@ -1293,6 +1301,10 @@ async function oauthServer(options: { tokenStatus: number; tokenBody: Record<str
       response.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({
         data: { id: '2468135790', username: 'fixture' },
       }));
+      return;
+    }
+    if (url.pathname === '/2/users/2468135790/bookmarks') {
+      response.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({ meta: { result_count: 0 } }));
       return;
     }
     response.writeHead(404).end();

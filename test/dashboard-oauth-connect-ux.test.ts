@@ -97,31 +97,25 @@ describe('the redirect URI the provider has to accept is a fact the page states'
   });
 });
 
-describe('the Google client type follows the origin this dashboard is served on', () => {
-  test('an https dashboard needs a Web application client, and says so everywhere', () => {
-    const view = buildView({ oauthRedirectBaseUrl: TAILNET });
-    const action = actionOf(view, 'gmail.email') as Extract<DashboardSourceAction, { kind: 'needs_setup' }>;
-
-    expect(action.redirect_uri_guidance).toContain('Web application client');
-    expect(action.redirect_uri_guidance).toContain('A Desktop app client cannot register an https redirect URI');
-    expect(action.instructions.plain_intro).toContain('Google Web application Client ID');
-    expect(action.instructions.agent_prompt).toContain('OAuth client of type Web application');
-    expect(action.instructions.agent_prompt).toContain("Authorized redirect URIs");
-    expect(action.instructions.diy_steps.some((step) => step.text.includes('choose Web application'))).toBe(true);
-    expect(action.instructions.plain_intro).not.toContain('Desktop app Client ID');
-  });
-
-  test('a loopback dashboard keeps the Desktop app client, with nothing to register', () => {
-    const view = buildView({ oauthRedirectBaseUrl: 'http://127.0.0.1:8010' });
-    const action = actionOf(view, 'gmail.email') as Extract<DashboardSourceAction, { kind: 'needs_setup' }>;
-
-    expect(action.redirect_uri_to_register).toBe('http://127.0.0.1:8010/oauth/callback/gmail');
-    expect(action.redirect_uri_guidance).toContain('Desktop app client');
-    expect(action.redirect_uri_guidance).toContain('no redirect URI to register');
-    expect(action.instructions.plain_intro).toContain('Google Desktop app Client ID');
-    expect(action.instructions.agent_prompt).toContain('OAuth client of type Desktop app');
-    expect(action.instructions.diy_steps.some((step) => step.text.includes('choose Desktop app'))).toBe(true);
-  });
+describe('the guided Google setup uses a Desktop client on every dashboard origin', () => {
+  for (const origin of [TAILNET, 'http://127.0.0.1:8010']) {
+    test(`Desktop JSON setup is offered on ${origin}`, () => {
+      const view = buildView({ oauthRedirectBaseUrl: origin });
+      const action = actionOf(view, 'gmail.email') as Extract<DashboardSourceAction, { kind: 'needs_setup' }>;
+      expect(action.instructions.credential_file).toBe('google_desktop');
+      expect(action.instructions.agent_prompt).toContain('Desktop app client');
+      expect(action.instructions.agent_prompt).toContain('download its JSON');
+      expect(action.instructions.agent_prompt).toContain('Never ask for the client secret in chat');
+      expect(action.instructions.diy_steps.slice(0, 5).map(step => step.link?.url)).toEqual([
+        'https://console.cloud.google.com/projectcreate',
+        'https://console.cloud.google.com/apis/library',
+        'https://console.cloud.google.com/auth/overview',
+        'https://console.cloud.google.com/auth/audience',
+        'https://console.cloud.google.com/auth/clients',
+      ]);
+      expect(action.instructions.fields.map(field => field.name)).toEqual(['client_id', 'client_secret']);
+    });
+  }
 });
 
 describe('a provider refusal is a state the owner can act on, not a stuck handshake', () => {
@@ -165,7 +159,7 @@ describe('the card walks the owner through registering the callback itself', () 
   test('Dropbox names its console, its permissions, its setting, and what to bring back', () => {
     const sheet = connectSheet('dropbox.files', { dropbox: 'dropbox-app-key' });
 
-    expect(sheet).toContain('href="https://www.dropbox.com/developers/apps"');
+    expect(sheet).toContain('data-setup-open="https://www.dropbox.com/developers/apps"');
     expect(sheet).toContain('Open this page in Dropbox');
     expect(sheet).toContain('Choose Scoped access');
     expect(sheet).toContain('files.metadata.read, files.content.read, sharing.read, and account_info.read');
@@ -186,50 +180,40 @@ describe('the card walks the owner through registering the callback itself', () 
   test('X names its portal, its scopes, its paid-access requirement, and its setting', () => {
     const sheet = setupSheet('x.bookmarks');
 
-    expect(sheet).toContain('href="https://console.x.com/"');
+    expect(sheet).toContain('data-setup-open="https://console.x.com/"');
     // Scopes are requested by Olympus at authorization time, not configured in
     // the console, so the card names the console's own controls instead.
-    expect(sheet).toContain('Under App permissions choose Read');
+    expect(sheet).toContain('with Read permissions');
+    expect(sheet).toContain('Olympus requests tweet.read, users.read, bookmark.read and offline.access');
     expect(sheet).toContain('OAuth 2.0 Client ID and Client secret');
     expect(sheet).toContain('paid X API access');
-    expect(sheet).toContain('<b>Callback URI / Redirect URL</b>');
-    // The 2026 X console has no "User authentication settings" page: the
-    // callback list lives under the app's Settings button (owner, 2026-09-04).
-    expect(sheet).toContain('press Settings on the app&#39;s page');
+    expect(sheet).toContain('https://docs.x.com/x-api/getting-started/pricing');
+    expect(sheet).toContain('Under Callback URI / Redirect URL, add this exact URI and save');
+    expect(sheet).toContain('data-copy-target="#setup-x-bookmarks-redirect"');
     expect(sheet).toContain('Web App, Automated App or Bot');
     expect(sheet).toContain(`${TAILNET}/oauth/callback/x`);
   });
 
-  test('Google over https names the credentials console, the client type, and the API to enable', () => {
-    const sheet = setupSheet('gmail.email');
-
-    expect(sheet).toContain('href="https://console.cloud.google.com/apis/credentials"');
-    expect(sheet).toContain('Application type to Web application');
-    // The owner's existing Desktop client showed no redirect-URI section at
-    // all (2026-09-04): the steps must say why a Desktop client cannot be reused.
-    expect(sheet).toContain('a Desktop app client cannot register an https redirect URI and shows no redirect URI section');
-    expect(sheet).toContain('enable the Gmail API');
-    expect(sheet).toContain('<b>Authorized redirect URIs</b>');
-    expect(sheet).toContain('Add it with + Add URI');
-    // A Web application client cannot sign in without its secret: the steps
-    // say to copy it, and the form carries a masked field for it.
-    expect(sheet).toContain('copy the Client ID and the Client secret from the confirmation dialog');
-    expect(sheet).toContain('name="client_secret"');
-    expect(sheet).toContain(`${TAILNET}/oauth/callback/gmail`);
-    expect(setupSheet('google_drive.docs')).toContain('enable the Google Drive API');
-  });
-
-  test('a loopback Google install is told there is nothing to register, and gets no steps', () => {
-    const sheet = setupSheet('gmail.email', {}, 'http://127.0.0.1:8010');
-
-    expect(sheet).toContain('No registration needed on this machine');
-    expect(sheet).not.toContain('<ol class="steps">');
-    // The Desktop app client uses PKCE alone: no secret field.
-    expect(sheet).not.toContain('name="client_secret"');
-    // The URI is still shown; it is what a reader debugging a failed callback
-    // needs, and it costs them no step.
-    expect(sheet).toContain('http://127.0.0.1:8010/oauth/callback/gmail');
-  });
+  for (const origin of [TAILNET, 'http://127.0.0.1:8010']) {
+    test(`Google uses the shared Desktop walkthrough on ${origin}`, () => {
+      const sheet = setupSheet('gmail.email', {}, origin);
+      expect(sheet).toContain('https://console.cloud.google.com/projectcreate');
+      expect(sheet).toContain('https://console.cloud.google.com/apis/library');
+      expect(sheet).toContain('Gmail API');
+      expect(sheet).toContain('Google Drive API');
+      expect(sheet).toContain('https://console.cloud.google.com/auth/overview');
+      expect(sheet).toContain('https://console.cloud.google.com/auth/audience');
+      expect(sheet).toContain('https://console.cloud.google.com/auth/clients');
+      expect(sheet).toContain('Make the key');
+      expect(sheet).toContain('data-client-file-drop');
+      expect(sheet).toContain('name="google_desktop" value="true"');
+      expect(sheet).not.toContain('name="google_client_json"'); // Uploaded secrets live in memory, never an HTML field.
+      expect(sheet).toContain('Paste the ID and secret instead');
+      expect(sheet).toMatch(/type="password" name="client_secret"/);
+      expect(sheet).not.toContain('Authorized redirect URIs');
+      expect(sheet).not.toContain(`${origin}/oauth/callback/gmail`);
+    });
+  }
 
   test('the agent prompt is demoted to a disclosure under the form, not the walkthrough', () => {
     const sheet = connectSheet('dropbox.files', { dropbox: 'dropbox-app-key' });

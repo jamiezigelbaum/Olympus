@@ -61,6 +61,8 @@ export function readCaptureGrantFile(path: string): CaptureGrantFileRead {
     }
     const value = JSON.parse(readFileSync(descriptor, 'utf8')) as MessagingCaptureGrant;
     if (value.version !== 1 || !['telegram', 'whatsapp'].includes(value.source) || !value.handle) return { kind: 'invalid' };
+    if (value.accountProof !== undefined && typeof value.accountProof !== 'string') return { kind: 'invalid' };
+    if (value.pairingPending !== undefined && value.pairingPending !== true) return { kind: 'invalid' };
     if (value.sessionPath !== undefined && (typeof value.sessionPath !== 'string' || value.sessionPath === '')) return { kind: 'invalid' };
     if (!value.producer || value.producer.source !== value.source || !Array.isArray(value.producer.secretEnvironment)) return { kind: 'invalid' };
     return { kind: 'valid', grant: value };
