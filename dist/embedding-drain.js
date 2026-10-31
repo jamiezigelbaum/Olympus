@@ -63992,6 +63992,7 @@ if (false)
   ;
 
 // src/core/messaging-pairing.ts
+init_messaging_capture_grant_file();
 init_provider_account_history();
 
 // src/core/native-worker-service.ts
@@ -64363,6 +64364,17 @@ init_vlm();
 
 // src/workers/email-source/server.ts
 init_apple_vision_ocr();
+
+// src/workers/email-source/dashboard-messaging-service.ts
+init_atomic_file();
+init_file_lease();
+init_messaging_capture_grant_file();
+init_messaging_runtime();
+init_package_root();
+init_pairing_session_paths();
+
+// src/workers/email-source/dashboard-messaging-runner.ts
+var FIELDS = new Set(["api_id", "api_hash", "phone", "code", "password"]);
 
 // src/workers/email-source/index.ts
 init_source_scope_approval();
@@ -64822,6 +64834,9 @@ td { padding: 7px 10px 7px 0; border-bottom: 1px solid var(--line2); color: var(
    it, never further down the page. */
 .sheet { display: none; background: var(--panel2); border: 1px solid var(--line); border-radius: 10px; padding: 16px 18px; margin: -4px 0 12px; }
 .sheet.on { display: block; }
+.messaging-card { background: var(--panel2); border: 1px solid var(--line); border-radius: 10px; padding: 16px 18px; margin: 0 0 12px; }
+.messaging-card p { color: var(--t2); font-size: var(--fs-body); max-width: 72ch; }
+.messaging-card form, .messaging-card details { margin: 10px 0; }
 /* Where an open link landed (#olympus-open=…): an accent outline that fades. */
 .landed { outline: 3px solid var(--link); outline-offset: 4px; border-radius: 10px; animation: landed-fade 2.5s ease-out 1.5s forwards; }
 @keyframes landed-fade { to { outline-color: transparent; } }

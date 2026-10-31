@@ -261,6 +261,12 @@ export const V0_4_PUBLIC_DASHBOARD_ROUTES: readonly PublicDashboardRoute[] = [
   { method: 'POST', path: '/dashboard/disconnect' },
   { method: 'POST', path: '/dashboard/delete-source-data' },
   { method: 'POST', path: '/dashboard/unpair' },
+  { method: 'POST', path: '/dashboard/messaging/start' },
+  { method: 'POST', path: '/dashboard/messaging/status' },
+  { method: 'POST', path: '/dashboard/messaging/respond' },
+  { method: 'POST', path: '/dashboard/messaging/cancel' },
+  { method: 'POST', path: '/dashboard/messaging/chats' },
+  { method: 'POST', path: '/dashboard/messaging/scope' },
   // Importing an archive: the upload of a dropped file or folder (start, one
   // request per file, status, cancel), approval, Decline, Remove and Stop
   // (archive-import/dashboard.ts). Control session only.
@@ -360,12 +366,15 @@ export const V0_4_PUBLIC_PACKAGE_FILES = [
   'scripts/macos-vision-ocr.js',
   'config/systemd/user/olympus-whisper-transcribe.sh',
   'tools/whatsapp-bridge/main.go',
+  'tools/whatsapp-bridge/chat_list.go',
   'tools/whatsapp-bridge/capture_status.go',
   'tools/whatsapp-bridge/media_files.go',
   'tools/whatsapp-bridge/media_serve.go',
   'tools/whatsapp-bridge/media_waiting.go',
   'tools/whatsapp-bridge/disk_unix.go',
   'tools/whatsapp-bridge/disk_other.go',
+  'tools/whatsapp-bridge/session_lock_unix.go',
+  'tools/whatsapp-bridge/session_lock_other.go',
   'tools/whatsapp-bridge/boot_darwin.go',
   'tools/whatsapp-bridge/boot_linux.go',
   'tools/whatsapp-bridge/boot_other.go',

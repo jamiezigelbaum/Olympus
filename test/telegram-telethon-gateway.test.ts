@@ -14,6 +14,39 @@ const PYTHON = Bun.which('python3');
 const pythonTest = test.skipIf(!PYTHON);
 
 describe('long-lived read-only Telethon capture gateway', () => {
+  pythonTest('whole-account capture discovers dialogs each sweep and accepts new-chat events and backfill', async () => {
+    const fixture = gatewayFixture();
+    try {
+      writeFileSync(fixture.backfillPath, `${JSON.stringify({ request_id: 'whole-backfill', chat_scope: 'telegram.personal:chat:303', provider_cursor: 'offset_id:50' })}\n`);
+      const first = await runGateway(fixture, {
+        OLYMPUS_TELEGRAM_ALLOWED_CHAT_SCOPES: '*',
+        FAKE_TELETHON_DIALOG_IDS: '[101,303]',
+        FAKE_TELETHON_EVENTS_JSON: '[{"chat_id":404,"message_id":404}]',
+        FAKE_TELETHON_REACTION_UPDATES_JSON: '[{"chat_id":606,"msg_id":10,"reactions":[{"emoticon":"👍","count":1}]}]',
+      });
+      expect(first.code).toBe(0);
+      let records = readJsonLines(join(fixture.spoolDir, '2026-07-22.jsonl'));
+      expect(new Set(records.map((record) => record.chat_scope))).toEqual(new Set(['telegram.personal:chat:101', 'telegram.personal:chat:303', 'telegram.personal:chat:404', 'telegram.personal:chat:606']));
+      expect(records.some((record) => record.sync_direction === 'backfill')).toBe(true);
+      const second = await runGateway(fixture, { OLYMPUS_TELEGRAM_ALLOWED_CHAT_SCOPES: '*', FAKE_TELETHON_DIALOG_IDS: '[101,303,505]' });
+      expect(second.code).toBe(0);
+      records = readJsonLines(join(fixture.spoolDir, '2026-07-22.jsonl'));
+      expect(records.some((record) => record.chat_scope === 'telegram.personal:chat:505')).toBe(true);
+      expect(records.every((record) => !('tier' in record) && record.trust_domain === 'internal')).toBe(true);
+    } finally { rmSync(fixture.root, { recursive: true, force: true }); }
+  }, 30_000);
+
+  pythonTest('mixed wildcard grants fail closed before provider contact', async () => {
+    const fixture = gatewayFixture();
+    try {
+      for (const scope of ['*,telegram.personal:chat:101', 'telegram.personal:chat:*']) {
+        const result = await runGateway(fixture, { OLYMPUS_TELEGRAM_ALLOWED_CHAT_SCOPES: scope });
+        expect(result.code).toBe(2);
+        expect(readJsonLines(fixture.callLog)).toEqual([]);
+      }
+    } finally { rmSync(fixture.root, { recursive: true, force: true }); }
+  }, 30_000);
+
   pythonTest('publishes authenticated native startup identity before history capture', async () => {
     const fixture = gatewayFixture();
     const instance = '019f6ff4-2fb0-70a3-91dd-3ef3ada9354f';
@@ -610,6 +643,7 @@ function fakeTelethonModule(): string {
   return `
 import datetime as dt
 import asyncio
+from types import SimpleNamespace
 import json
 import os
 
@@ -705,6 +739,9 @@ class TelegramClient:
         if self._event_tasks:
             await asyncio.gather(*self._event_tasks)
         return False
+    async def iter_dialogs(self, limit=None):
+        for chat_id in json.loads(os.environ.get("FAKE_TELETHON_DIALOG_IDS", "[101,202]")):
+            yield SimpleNamespace(id=chat_id)
     async def get_entity(self, chat_id):
         log({"event":"entity","chat_id":str(chat_id)})
         return Entity(999 if chat_id == "me" else int(chat_id))

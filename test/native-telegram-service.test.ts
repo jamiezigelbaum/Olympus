@@ -88,6 +88,27 @@ describe('native Telegram capture service', () => {
     }, { requireResolvedWorkerSecrets: false }).worker.telegramCapture.credentials).toEqual({});
   });
 
+  test('accepts whole-account scope and rejects mixed wildcard scopes before spawning', async () => {
+    for (const scope of ['*', '*,telegram.personal:chat:42', 'telegram.personal:chat:*']) {
+      const fixture = telegramFixture();
+      writeFileSync(fixture.workerEnvPath, readFileSync(fixture.workerEnvPath, 'utf8').replace(
+        'APPROVED_CHAT_SCOPES=telegram.personal:chat:42', `APPROVED_CHAT_SCOPES=${scope}`,
+      ));
+      const service = track(createNativeTelegramService({
+        workerIsReady: () => true, initialPluginConfig: fixture.pluginConfig,
+        moduleUrl: new URL('../src/native-plugin.ts', import.meta.url).href,
+        workerEnvPath: fixture.workerEnvPath, startupTimeoutMs: 2_000, readinessPollMs: 10, stopGraceMs: 100,
+      }));
+      if (scope === '*') {
+        await service.start({});
+        expect(readStarts(fixture.startsPath)).toHaveLength(1);
+      } else {
+        await expect(service.start({})).rejects.toThrow('requires exact chat scopes or a whole-account grant');
+        expect(existsSync(fixture.startsPath)).toBe(false);
+      }
+    }
+  });
+
   test('matches Python readiness for duplicate and whitespace-padded approved scopes', async () => {
     const fixture = telegramFixture();
     writeFileSync(fixture.workerEnvPath, readFileSync(fixture.workerEnvPath, 'utf8').replace(

@@ -2853,6 +2853,12 @@ var init_public_surface = __esm(() => {
     { method: "POST", path: "/dashboard/disconnect" },
     { method: "POST", path: "/dashboard/delete-source-data" },
     { method: "POST", path: "/dashboard/unpair" },
+    { method: "POST", path: "/dashboard/messaging/start" },
+    { method: "POST", path: "/dashboard/messaging/status" },
+    { method: "POST", path: "/dashboard/messaging/respond" },
+    { method: "POST", path: "/dashboard/messaging/cancel" },
+    { method: "POST", path: "/dashboard/messaging/chats" },
+    { method: "POST", path: "/dashboard/messaging/scope" },
     { method: "POST", path: "/dashboard/archive-import/upload-start" },
     { method: "POST", path: "/dashboard/archive-import/upload-file" },
     { method: "POST", path: "/dashboard/archive-import/upload-status" },
@@ -39174,6 +39180,7 @@ async function pairMessagingSource(options) {
     const approval = options.captureScopeApproval ?? await options.requestCaptureScope?.({
       source: options.source,
       accountProof,
+      sessionPath,
       chats
     });
     if (!approval) {
@@ -39189,6 +39196,15 @@ async function pairMessagingSource(options) {
         registered: false
       };
     }
+    if (options.signal?.aborted)
+      throw new Error("Pairing was cancelled.");
+    options.onCommitStart?.();
+    const prior = options.source === "telegram" && historyAccount === accountProof ? readCaptureGrantFile(options.registryPath ? captureGrantPathBeside("telegram", options.registryPath) : captureGrantPathFromEnv("telegram", registryEnv)) : undefined;
+    const priorEnv = prior?.kind === "valid" && prior.grant.source === "telegram" && (prior.grant.sessionPath === sessionPath || layout === "folder" && prior.grant.sessionPath === undefined) ? prior.grant.producer.env : undefined;
+    const priorRaw = priorEnv?.OLYMPUS_TELEGRAM_ALLOWED_CHAT_SCOPES;
+    const priorScopes = typeof priorRaw === "string" ? priorRaw.split(",") : [];
+    const retained = priorRaw === priorEnv?.OLYMPUS_SOURCE_INDEX_TELEGRAM_APPROVED_CHAT_SCOPES && priorScopes.every((scope) => /^telegram\.personal:chat:[A-Za-z0-9_-]+$/.test(scope)) ? priorScopes : [];
+    const producer = producerLaunch(options.source, approval, helper, packageRoot, sessionPath, chats, layout, retained);
     if (options.source === "telegram") {
       const recorded = historyAccount === accountProof ? "same" : await recordPairingAccount(account, accountProof, registryEnv, workerTransport).catch(() => {
         return;
@@ -39199,7 +39215,6 @@ async function pairMessagingSource(options) {
         throw telegramHistoryAccountError("different");
       }
     }
-    const producer = producerLaunch(options.source, approval, helper, packageRoot, sessionPath, chats, layout);
     const rollbackCredentials = options.source === "telegram" ? await persistTelegramCredentials(secretStore, result.privatePayload) : async () => {};
     const register = options.registerSession ?? connectGuidedSession;
     let connected;
@@ -39400,15 +39415,18 @@ async function observeBunExit(exited, timeoutMs) {
     clearTimeout(timeout);
   return observed;
 }
-function producerLaunch(source, approval, helperExecutable, packageRoot, sessionPath, chats, layout) {
+function producerLaunch(source, approval, helperExecutable, packageRoot, sessionPath, chats, layout, retainedChatScopes) {
   if (approval.source !== source || approval.explicitApproval !== true) {
     throw new Error("Capture scope approval must name the paired source and be explicit.");
   }
   if (source === "telegram") {
-    const scopes = uniqueNonEmpty(approval.source === "telegram" ? approval.chatScopes : []);
-    if (scopes.length === 0)
-      throw new Error("Choose at least one Telegram chat before capture can start.");
-    const listed = new Set(chats.map((chat) => chat.chatScope));
+    const scopes = uniqueNonEmpty(approval.source === "telegram" ? approval.chatScopes ?? [] : []);
+    const wholeAccount2 = approval.source === "telegram" && approval.wholeAccount === true;
+    if (wholeAccount2 === scopes.length > 0)
+      throw new Error("Approve either the whole Telegram account or at least one exact chat, but not both.");
+    if (scopes.some((scope) => scope.includes("*")))
+      throw new Error("Telegram capture approval requires exact chat identifiers.");
+    const listed = new Set([...chats.map((chat) => chat.chatScope), ...retainedChatScopes]);
     if (scopes.some((scope) => !listed.has(scope))) {
       throw new Error("Telegram capture approval contains a chat that was not in the verified account listing.");
     }
@@ -39419,8 +39437,8 @@ function producerLaunch(source, approval, helperExecutable, packageRoot, session
       env: {
         ...layout === "folder" ? {} : { OLYMPUS_TELEGRAM_SESSION_PATH: sessionPath },
         OLYMPUS_SOURCE_INDEX_TELEGRAM_ACCOUNT: "telegram.personal",
-        OLYMPUS_SOURCE_INDEX_TELEGRAM_APPROVED_CHAT_SCOPES: scopes.join(","),
-        OLYMPUS_TELEGRAM_ALLOWED_CHAT_SCOPES: scopes.join(",")
+        OLYMPUS_SOURCE_INDEX_TELEGRAM_APPROVED_CHAT_SCOPES: wholeAccount2 ? "*" : scopes.join(","),
+        OLYMPUS_TELEGRAM_ALLOWED_CHAT_SCOPES: wholeAccount2 ? "*" : scopes.join(",")
       },
       secretEnvironment: [
         { env: "OLYMPUS_TELEGRAM_API_ID", secretKey: TELEGRAM_API_ID_SECRET_KEY },
@@ -39759,6 +39777,7 @@ var init_messaging_pairing = __esm(() => {
   init_pairing_session_paths();
   init_pairing_placement();
   init_whatsapp_bridge_name();
+  init_messaging_capture_grant_file();
   init_provider_account_history();
 });
 
@@ -39813,7 +39832,10 @@ function readMessagingCaptureGrantFacts(source, grantPath = defaultMessagingCapt
     if (typeof raw === "string") {
       const scopes = raw.split(",").map((item) => item.trim()).filter(Boolean);
       if (scopes.length > 0) {
-        facts.scope = scopes.includes("*") ? { kind: "whole_account" } : { kind: "chats", count: new Set(scopes).size };
+        if (scopes.length === 1 && scopes[0] === "*")
+          facts.scope = { kind: "whole_account" };
+        else if (scopes.every((scope) => !scope.includes("*")))
+          facts.scope = { kind: "chats", count: new Set(scopes).size };
       }
     }
     return facts;
@@ -141428,6 +141450,527 @@ var init_openai_compatible_client = __esm(() => {
   init_vlm();
 });
 
+// src/workers/email-source/dashboard-messaging.ts
+function createDashboardMessagingPairing(options) {
+  const states = new Map;
+  const status = (source) => {
+    const item = states.get(source);
+    return item ? {
+      ok: true,
+      state: item.state,
+      ...item.field ? { field: item.field } : {},
+      ...item.qr ? { qr: item.qr } : {},
+      ...item.chats ? { chats: item.chats } : {},
+      ...item.state === "scope_selection_required" ? { wholeAccount: false, chatScopes: [] } : {},
+      ...item.registrationMayBeSaved ? { registrationMayBeSaved: true } : {}
+    } : { ok: true, state: "idle" };
+  };
+  return {
+    status,
+    busy(source) {
+      return states.get(source)?.task !== undefined;
+    },
+    start(source) {
+      const prior = states.get(source);
+      if (prior?.task)
+        throw new Error("Pairing is already running.");
+      const item = { state: "starting", controller: new AbortController };
+      states.set(source, item);
+      item.task = Promise.resolve().then(async () => {
+        try {
+          const result = await options.pair(source, {
+            signal: item.controller.signal,
+            prompt(field, reply) {
+              if (item.controller.signal.aborted || item.reply)
+                throw new Error("Pairing prompt is unavailable.");
+              item.field = field;
+              item.reply = reply;
+              item.state = "waiting";
+            },
+            qr(value2) {
+              if (!item.controller.signal.aborted) {
+                item.qr = value2;
+                item.state = "waiting";
+              }
+            },
+            choose(chats) {
+              if (item.controller.signal.aborted)
+                return Promise.reject(new Error("Pairing was cancelled."));
+              delete item.reply;
+              delete item.field;
+              delete item.qr;
+              item.chats = chats;
+              item.state = "scope_selection_required";
+              return new Promise((resolve24, reject) => {
+                const abort = () => {
+                  delete item.selection;
+                  reject(new Error("Pairing was cancelled."));
+                };
+                item.controller.signal.addEventListener("abort", abort, { once: true });
+                item.selection = (selection) => {
+                  item.controller.signal.removeEventListener("abort", abort);
+                  delete item.selection;
+                  item.state = "starting";
+                  resolve24(selection);
+                };
+              });
+            },
+            commit() {
+              if (item.controller.signal.aborted)
+                throw new Error("Pairing was cancelled.");
+              delete item.reply;
+              delete item.field;
+              delete item.qr;
+              item.state = "committing";
+            }
+          });
+          if (item.controller.signal.aborted)
+            return;
+          item.state = "committing";
+          await options.publish(source, result, item.controller.signal);
+          if (item.controller.signal.aborted)
+            return;
+          item.chats = result.chats;
+          item.state = "paired";
+        } catch {
+          if (!item.controller.signal.aborted) {
+            if (item.state === "committing")
+              item.registrationMayBeSaved = true;
+            item.state = "failed";
+          }
+        } finally {
+          delete item.reply;
+          delete item.field;
+          delete item.qr;
+          delete item.task;
+        }
+      });
+      return status(source);
+    },
+    select(source, selection) {
+      const item = states.get(source);
+      if (!item || item.state !== "scope_selection_required" || !item.selection)
+        throw new Error("No pending chat choice.");
+      if (selection.wholeAccount ? selection.chatScopes.length > 0 : selection.chatScopes.length === 0)
+        throw new Error("Choose all chats or at least one chat.");
+      if (selection.chatScopes.some((scope) => !item.chats?.some((chat) => chat.chatScope === scope)))
+        throw new Error("Chat list changed.");
+      item.selection(selection);
+      return status(source);
+    },
+    respond(source, field, value2) {
+      const item = states.get(source);
+      if (!item || item.state !== "waiting" || item.field !== field || !item.reply || !value2 || value2.length > 4096 || /[\r\n\0]/.test(value2)) {
+        throw new Error("No matching pairing prompt.");
+      }
+      const reply = item.reply;
+      delete item.reply;
+      delete item.field;
+      item.state = "starting";
+      reply(value2);
+      return status(source);
+    },
+    cancel(source) {
+      const item = states.get(source);
+      if (item && (item.state === "starting" || item.state === "waiting" || item.state === "scope_selection_required")) {
+        item.controller.abort();
+        delete item.reply;
+        delete item.field;
+        delete item.qr;
+        item.state = "cancelled";
+      }
+      return status(source);
+    },
+    async cancelAndWait(source) {
+      this.cancel(source);
+      await states.get(source)?.task;
+    },
+    close() {
+      for (const source of states.keys())
+        this.cancel(source);
+    }
+  };
+}
+
+// src/workers/email-source/dashboard-messaging-runner.ts
+import { spawn as spawn9 } from "node:child_process";
+async function runDashboardPairingCommand(request, hooks) {
+  const child2 = spawn9(request.executable, request.args, {
+    env: { ...request.env, OLYMPUS_TELEGRAM_LIST_CHATS: "", OLYMPUS_TELEGRAM_DASHBOARD_PROMPTS: "1" },
+    stdio: ["pipe", "pipe", "pipe", "pipe", ...request.inheritFds ?? []]
+  });
+  const stdin = child2.stdin;
+  const stdout = child2.stdout;
+  const stderr = child2.stderr;
+  if (!stdin || !stdout || !stderr || !child2.stdio[3])
+    throw new Error("Pairing pipes unavailable.");
+  let escalation;
+  const cancel = () => {
+    child2.kill("SIGTERM");
+    escalation ??= setTimeout(() => child2.kill("SIGKILL"), 5000);
+  };
+  const timer = setTimeout(cancel, 10 * 60000);
+  if (hooks.signal.aborted)
+    cancel();
+  else
+    hooks.signal.addEventListener("abort", cancel, { once: true });
+  const lines = [];
+  stdin.on("error", () => {});
+  const exit = new Promise((resolve24, reject) => {
+    child2.once("error", reject);
+    child2.once("close", (code) => resolve24(code ?? 1));
+  });
+  const readLines = async () => {
+    let buffer = "";
+    for await (const chunk of stdout) {
+      buffer += Buffer.from(chunk).toString("utf8");
+      if (buffer.length > 4 * 1024 * 1024)
+        throw new Error("Pairing output exceeded its bound.");
+      let newline;
+      while ((newline = buffer.indexOf(`
+`)) >= 0) {
+        const line2 = buffer.slice(0, newline).trim();
+        buffer = buffer.slice(newline + 1);
+        let event = {};
+        try {
+          event = JSON.parse(line2);
+        } catch {}
+        if (event.event === "prompt") {
+          if (typeof event.field !== "string" || !FIELDS.has(event.field))
+            throw new Error("Invalid pairing prompt.");
+          const field = event.field;
+          hooks.prompt(field, (value2) => {
+            stdin.write(`${JSON.stringify({ field, value: value2 })}
+`);
+          });
+        } else {
+          lines.push(line2);
+          await request.onStdoutLine?.(line2);
+        }
+      }
+    }
+    if (buffer.trim())
+      throw new Error("Incomplete pairing output.");
+  };
+  const readBounded3 = async (stream, limit) => {
+    const chunks2 = [];
+    let size = 0;
+    for await (const chunk of stream) {
+      const bytes = Buffer.from(chunk);
+      size += bytes.length;
+      if (size > limit)
+        throw new Error("Pairing output exceeded its bound.");
+      chunks2.push(bytes);
+    }
+    return Buffer.concat(chunks2).toString("utf8").trim();
+  };
+  try {
+    const [exitCode, stderrText, privatePayload] = await Promise.all([
+      exit,
+      readBounded3(stderr, 16 * 1024),
+      readBounded3(child2.stdio[3], 4096),
+      readLines()
+    ]);
+    return { exitCode, stdoutLines: lines, stderr: stderrText, ...privatePayload ? { privatePayload } : {} };
+  } catch (error2) {
+    cancel();
+    await exit.catch(() => 1);
+    throw error2;
+  } finally {
+    clearTimeout(timer);
+    if (escalation)
+      clearTimeout(escalation);
+    hooks.signal.removeEventListener("abort", cancel);
+    stdin.destroy();
+  }
+}
+var FIELDS;
+var init_dashboard_messaging_runner = __esm(() => {
+  FIELDS = new Set(["api_id", "api_hash", "phone", "code", "password"]);
+});
+
+// src/workers/email-source/dashboard-messaging-service.ts
+import { spawn as spawn10 } from "node:child_process";
+import { closeSync as closeSync30, constants as constants16, fstatSync as fstatSync7, openSync as openSync29, readFileSync as readFileSync73 } from "node:fs";
+import { basename as basename19, join as join117 } from "node:path";
+function sourceOf(value2) {
+  if (value2 !== "telegram" && value2 !== "whatsapp")
+    throw new Error("Invalid messaging source.");
+  return value2;
+}
+function validScope(source, scope) {
+  return source === "telegram" ? /^telegram\.personal:chat:[A-Za-z0-9_-]+$/.test(scope) : /^whatsapp\.personal:chat:[A-Za-z0-9._:-]{1,192}@[A-Za-z0-9.-]{1,63}$/.test(scope);
+}
+function parseChats(source, listing) {
+  if (!listing || typeof listing !== "object" || !Array.isArray(listing.dialogs))
+    throw new Error("Invalid chat listing.");
+  const chats = [];
+  for (const raw of listing.dialogs) {
+    if (!raw || typeof raw !== "object")
+      continue;
+    const row = raw;
+    if (typeof row.chat_scope !== "string" || typeof row.title !== "string" || typeof row.kind !== "string")
+      continue;
+    if (validScope(source, row.chat_scope))
+      chats.push({ chatScope: row.chat_scope, title: row.title, kind: row.kind });
+  }
+  return chats;
+}
+function retainApprovedCaptureScope(source, env) {
+  const key2 = source === "telegram" ? "OLYMPUS_TELEGRAM_ALLOWED_CHAT_SCOPES" : "OLYMPUS_WHATSAPP_ALLOWED_CHAT_JIDS";
+  const alternate = source === "telegram" ? env.OLYMPUS_SOURCE_INDEX_TELEGRAM_APPROVED_CHAT_SCOPES : undefined;
+  const raw = env[key2]?.trim() || alternate?.trim();
+  if (!raw || alternate && alternate.trim() !== raw)
+    throw new Error("Invalid capture grant scope.");
+  if (raw !== "*") {
+    const values = raw.split(",").map((value2) => value2.trim());
+    if (!values.length || values.some((value2) => !validScope(source, source === "whatsapp" ? `whatsapp.personal:chat:${value2}` : value2)))
+      throw new Error("Invalid capture grant scope.");
+  }
+  return source === "telegram" ? { OLYMPUS_TELEGRAM_ALLOWED_CHAT_SCOPES: raw, OLYMPUS_SOURCE_INDEX_TELEGRAM_APPROVED_CHAT_SCOPES: raw } : { OLYMPUS_WHATSAPP_ALLOWED_CHAT_JIDS: raw };
+}
+function readQr(path) {
+  if (basename19(path) !== "qr.png")
+    throw new Error("Invalid QR artifact.");
+  const fd2 = openSync29(path, constants16.O_RDONLY | (constants16.O_NOFOLLOW ?? 0));
+  try {
+    const stat5 = fstatSync7(fd2);
+    if (!stat5.isFile() || stat5.size > 1024 * 1024 || (stat5.mode & 63) !== 0 || typeof process.getuid === "function" && stat5.uid !== process.getuid())
+      throw new Error("Invalid QR artifact.");
+    const bytes = readFileSync73(fd2);
+    if (!bytes.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10])))
+      throw new Error("Invalid QR artifact.");
+    return `data:image/png;base64,${bytes.toString("base64")}`;
+  } finally {
+    closeSync30(fd2);
+  }
+}
+async function listHelper(command, args, env, input) {
+  const child2 = spawn10(command, args, { env, stdio: ["pipe", "pipe", "ignore"] });
+  const stdin = child2.stdin;
+  const stdout = child2.stdout;
+  if (!stdin || !stdout)
+    throw new Error("Chat listing pipes unavailable.");
+  stdin.on("error", () => {});
+  const timeout = setTimeout(() => child2.kill("SIGKILL"), 60000);
+  const exit = new Promise((resolve24, reject) => {
+    child2.once("error", reject);
+    child2.once("close", (code) => resolve24(code ?? 1));
+  });
+  try {
+    stdin.end(input);
+    input = undefined;
+    let output = "";
+    for await (const chunk of stdout) {
+      output += Buffer.from(chunk).toString("utf8");
+      if (output.length > 16 * 1024 * 1024)
+        throw new Error("Chat listing is too large.");
+    }
+    if (await exit !== 0)
+      throw new Error("Chat listing failed.");
+    return JSON.parse(output);
+  } catch (error2) {
+    child2.kill("SIGKILL");
+    await exit.catch(() => 1);
+    throw error2;
+  } finally {
+    clearTimeout(timeout);
+    stdin.destroy();
+  }
+}
+function createDashboardMessagingService(options) {
+  const packageRoot = olympusPackageRoot();
+  const available = new Map;
+  const selecting = new Set;
+  const initialGrants = new Map;
+  const grantSnapshot = (source) => {
+    const read = readCaptureGrantFile(defaultMessagingCaptureGrantPath(source, options.registryPath));
+    if (read.kind === "invalid" || read.kind === "valid" && read.grant.source !== source)
+      throw new Error("Invalid capture grant.");
+    if (read.kind === "valid")
+      retainApprovedCaptureScope(source, read.grant.producer.env);
+    return JSON.stringify(read.kind === "valid" ? read.grant : null);
+  };
+  const grantFor = (source) => {
+    const path = defaultMessagingCaptureGrantPath(source, options.registryPath);
+    const read = readCaptureGrantFile(path);
+    if (read.kind !== "valid" || read.grant.source !== source)
+      throw new Error("No valid capture grant.");
+    return { path, grant: read.grant, fingerprint: JSON.stringify(read.grant) };
+  };
+  const manager = createDashboardMessagingPairing({
+    pair: (source, hooks) => options.withMessagingCapturePaused(source, async () => {
+      const result = await (options.pairSource ?? pairMessagingSource)({
+        source,
+        packageRoot,
+        secretStore: options.secretStore,
+        ...options.registryPath ? { registryPath: options.registryPath } : {},
+        signal: hooks.signal,
+        onCommitStart: hooks.commit,
+        whatsappQrMode: "artifact",
+        requestCaptureScope: async ({ chats, sessionPath }) => {
+          const prior = readCaptureGrantFile(defaultMessagingCaptureGrantPath(source, options.registryPath));
+          if (grantSnapshot(source) !== initialGrants.get(source))
+            throw new Error("Capture grant changed during pairing.");
+          let selection;
+          if (prior.kind === "valid") {
+            const env = retainApprovedCaptureScope(source, prior.grant.producer.env);
+            const raw = env[source === "telegram" ? "OLYMPUS_TELEGRAM_ALLOWED_CHAT_SCOPES" : "OLYMPUS_WHATSAPP_ALLOWED_CHAT_JIDS"];
+            selection = { wholeAccount: raw === "*", chatScopes: raw === "*" ? [] : raw.split(",").map((value2) => source === "whatsapp" ? `whatsapp.personal:chat:${value2}` : value2) };
+          } else {
+            let choices = chats;
+            if (source === "whatsapp") {
+              const listing = await (options.listCommand ?? listHelper)(whatsappBridgePathForPackage(packageRoot, { env: process.env }), ["--list-chats"], {
+                ...process.env,
+                OLYMPUS_WHATSAPP_STATE_DIR: sessionPath
+              });
+              choices = parseChats(source, listing);
+            }
+            selection = await hooks.choose(choices);
+          }
+          if (grantSnapshot(source) !== initialGrants.get(source))
+            throw new Error("Capture grant changed during pairing.");
+          return source === "telegram" ? { source, explicitApproval: true, wholeAccount: selection.wholeAccount, chatScopes: selection.chatScopes } : { source, explicitApproval: true, wholeAccount: selection.wholeAccount, chatJids: selection.chatScopes.map((scope) => scope.slice("whatsapp.personal:chat:".length)) };
+        },
+        runCommand: (request) => runDashboardPairingCommand(request, hooks),
+        onWhatsAppQr: (path) => hooks.qr(readQr(path))
+      });
+      if (!result.registered)
+        throw new Error("Pairing did not finish.");
+      return result;
+    }),
+    publish: (source, result, signal) => options.withGrantMutation(async () => {
+      if (signal.aborted)
+        return;
+      const path = defaultMessagingCaptureGrantPath(source, options.registryPath);
+      const prior = readCaptureGrantFile(path);
+      if (grantSnapshot(source) !== initialGrants.get(source))
+        throw new Error("Capture grant changed during pairing.");
+      if (prior.kind === "invalid" || prior.kind === "valid" && prior.grant.source !== source)
+        throw new Error("Invalid capture grant.");
+      const retained = prior.kind === "valid" ? retainApprovedCaptureScope(source, prior.grant.producer.env) : {};
+      if (signal.aborted)
+        return;
+      saveMessagingCaptureGrant({ path, pairing: { ...result, producer: { ...result.producer, env: { ...result.producer.env, ...retained } } } });
+      available.delete(source);
+    })
+  });
+  const list = async (source) => {
+    const current2 = grantFor(source);
+    const listing = await options.withMessagingCapturePaused(source, async () => {
+      if (source === "telegram") {
+        const apiId = await options.secretStore.get(TELEGRAM_API_ID_SECRET_KEY);
+        const apiHash = await options.secretStore.get(TELEGRAM_API_HASH_SECRET_KEY);
+        const python = telegramPythonExecutable();
+        if (!python || !apiId || !apiHash || !/^\d+$/.test(apiId))
+          throw new Error("Telegram credentials unavailable.");
+        const session = current2.grant.sessionPath ?? telegramSessionBasePath({ env: process.env });
+        return withFileLease(`${session}.pairing`, () => (options.listCommand ?? listHelper)(python, [join117(packageRoot, "scripts", "telegram-pair.py")], {
+          ...process.env,
+          OLYMPUS_TELEGRAM_LIST_CHATS: "1",
+          OLYMPUS_TELEGRAM_SESSION_PATH: session
+        }, `${JSON.stringify({ api_id: Number(apiId), api_hash: apiHash })}
+`), { acquireTimeoutMs: 1 });
+      }
+      return (options.listCommand ?? listHelper)(whatsappBridgePathForPackage(packageRoot, { env: process.env }), ["--list-chats"], {
+        ...process.env,
+        OLYMPUS_WHATSAPP_STATE_DIR: current2.grant.sessionPath ?? whatsappStateDir({ env: process.env })
+      });
+    });
+    const chats = parseChats(source, listing);
+    const key2 = source === "telegram" ? "OLYMPUS_TELEGRAM_ALLOWED_CHAT_SCOPES" : "OLYMPUS_WHATSAPP_ALLOWED_CHAT_JIDS";
+    const rawScope = current2.grant.producer.env[key2] ?? "";
+    const selected = rawScope === "*" ? [] : rawScope.split(",").filter(Boolean).map((v) => source === "whatsapp" ? `whatsapp.personal:chat:${v}` : v);
+    if (!rawScope || selected.some((scope) => !validScope(source, scope)))
+      throw new Error("Invalid capture grant scope.");
+    for (const scope of selected)
+      if (!chats.some((chat) => chat.chatScope === scope))
+        chats.push({ chatScope: scope, title: scope, kind: "chat" });
+    available.set(source, { fingerprint: current2.fingerprint, chats });
+    return { ok: true, state: "paired", chats, wholeAccount: rawScope === "*", chatScopes: selected, ...source === "whatsapp" ? { coverage: "contacts_and_joined_groups" } : {} };
+  };
+  return {
+    async handle(operation, record5) {
+      const source = sourceOf(record5.source);
+      if (operation === "start") {
+        if (selecting.has(source))
+          throw new Error("Finish choosing chats first.");
+        return options.withGrantMutation(async () => {
+          if (manager.busy(source))
+            throw new Error("Pairing is already running.");
+          initialGrants.set(source, grantSnapshot(source));
+          return manager.start(source);
+        });
+      }
+      if (operation === "status")
+        return manager.status(source);
+      if (operation === "cancel")
+        return manager.cancel(source);
+      if (operation === "respond") {
+        if (typeof record5.field !== "string" || typeof record5.value !== "string")
+          throw new Error("Invalid response.");
+        const value2 = record5.value;
+        delete record5.value;
+        return manager.respond(source, record5.field, value2);
+      }
+      if (operation === "scope" && manager.status(source).state === "scope_selection_required") {
+        if (typeof record5.wholeAccount !== "boolean" || !Array.isArray(record5.chatScopes) || !record5.chatScopes.every((value2) => typeof value2 === "string"))
+          throw new Error("Invalid scope.");
+        return manager.select(source, { wholeAccount: record5.wholeAccount, chatScopes: [...new Set(record5.chatScopes)] });
+      }
+      if (manager.busy(source))
+        throw new Error("Finish or cancel pairing first.");
+      if (operation !== "chats" && operation !== "scope")
+        throw new Error("Unknown operation.");
+      if (selecting.has(source))
+        throw new Error("Chat selection is already running.");
+      selecting.add(source);
+      try {
+        if (operation === "chats")
+          return await list(source);
+        const whole = record5.wholeAccount === true;
+        if (!Array.isArray(record5.chatScopes) || !record5.chatScopes.every((value2) => typeof value2 === "string"))
+          throw new Error("Invalid scope.");
+        const selected = [...new Set(record5.chatScopes)];
+        if (whole ? selected.length > 0 : selected.length === 0)
+          throw new Error("Choose all chats or at least one chat.");
+        return await options.withGrantMutation(() => options.withMessagingCapturePaused(source, async () => {
+          const current2 = grantFor(source);
+          const snapshot = available.get(source);
+          if (!snapshot || snapshot.fingerprint !== current2.fingerprint || selected.some((scope) => !snapshot.chats.some((chat) => chat.chatScope === scope)))
+            throw new Error("Chat list changed.");
+          const value2 = whole ? "*" : selected.map((scope) => source === "whatsapp" ? scope.slice("whatsapp.personal:chat:".length) : scope).join(",");
+          const env = { ...current2.grant.producer.env };
+          if (source === "telegram") {
+            env.OLYMPUS_TELEGRAM_ALLOWED_CHAT_SCOPES = value2;
+            env.OLYMPUS_SOURCE_INDEX_TELEGRAM_APPROVED_CHAT_SCOPES = value2;
+          } else
+            env.OLYMPUS_WHATSAPP_ALLOWED_CHAT_JIDS = value2;
+          writePrivateFileAtomicSync(current2.path, `${JSON.stringify({ ...current2.grant, producer: { ...current2.grant.producer, env } }, null, 2)}
+`);
+          available.delete(source);
+          return { ok: true, state: "paired" };
+        }));
+      } finally {
+        selecting.delete(source);
+      }
+    },
+    cancelAndWait: (source) => manager.cancelAndWait(source),
+    close: () => manager.close()
+  };
+}
+var init_dashboard_messaging_service = __esm(() => {
+  init_atomic_file();
+  init_file_lease();
+  init_messaging_capture();
+  init_messaging_capture_grant_file();
+  init_messaging_pairing();
+  init_messaging_runtime();
+  init_package_root();
+  init_pairing_session_paths();
+  init_dashboard_messaging_runner();
+});
+
 // src/workers/remote-oauth/consent-page.ts
 import { randomBytes as randomBytes26 } from "node:crypto";
 function hostnameOf(host) {
@@ -141680,7 +142223,7 @@ var DEFAULT_GOOGLE_PILOT_CLIENT_ID = "604346037984-oukrdn4ouh8n2fctggracadt0fdd2
 import { randomBytes as randomBytes27 } from "node:crypto";
 import { existsSync as existsSync85, mkdirSync as mkdirSync56, readdirSync as readdirSync25, realpathSync as realpathSync20, rmSync as rmSync35, statSync as statSync38, statfsSync as statfsSync4, utimesSync } from "node:fs";
 import { open as open5 } from "node:fs/promises";
-import { sep as sep18, join as join117, resolve as resolve24 } from "node:path";
+import { sep as sep18, join as join118, resolve as resolve24 } from "node:path";
 function sanitizeUploadPath(raw) {
   const bad = () => {
     throw new ArchiveUploadError("bad_path", ARCHIVE_UPLOAD_COPY.bad_path);
@@ -141806,7 +142349,7 @@ function createArchiveUploads(options) {
     };
     found.abort.add(stop);
     try {
-      const parent = join117(found.files, ...segments.slice(0, -1));
+      const parent = join118(found.files, ...segments.slice(0, -1));
       try {
         mkdirSync56(parent, { recursive: true, mode: 448 });
         if (!contained(realpathSync20.native(found.files), realpathSync20.native(parent)))
@@ -141816,7 +142359,7 @@ function createArchiveUploads(options) {
           throw error2;
         throw new ArchiveUploadError("bad_path", ARCHIVE_UPLOAD_COPY.bad_path, 409);
       }
-      target = join117(parent, segments[segments.length - 1]);
+      target = join118(parent, segments[segments.length - 1]);
       if (!contained(found.files, resolve24(target)))
         throw new ArchiveUploadError("bad_path", ARCHIVE_UPLOAD_COPY.bad_path);
       if (!await roomFor(found, declared !== undefined && Number.isFinite(declared) && declared > 0 ? declared : 0, receiveOptions.signal)) {
@@ -141909,12 +142452,12 @@ function createArchiveUploads(options) {
         throw new ArchiveUploadError("cancelled", ARCHIVE_UPLOAD_COPY.cancelled, 409);
       const root = stagingRoot();
       const uploadId = randomBytes27(16).toString("hex");
-      const dir = join117(root, uploadId);
-      mkdirSync56(join117(dir, "files"), { recursive: true, mode: 448 });
+      const dir = join118(root, uploadId);
+      mkdirSync56(join118(dir, "files"), { recursive: true, mode: 448 });
       sessions.set(uploadId, {
         id: uploadId,
         dir,
-        files: join117(dir, "files"),
+        files: join118(dir, "files"),
         fileCount: 0,
         bytes: 0,
         active: 0,
@@ -141940,7 +142483,7 @@ function createArchiveUploads(options) {
       if (typeof uploadId !== "string" || !ID2.test(uploadId))
         return false;
       const found = sessions.get(uploadId);
-      const dir = found?.dir ?? (existsSync85(options.root) ? join117(stagingRoot(), uploadId) : undefined);
+      const dir = found?.dir ?? (existsSync85(options.root) ? join118(stagingRoot(), uploadId) : undefined);
       if (!dir)
         return false;
       if (keep?.(dir)) {
@@ -141968,7 +142511,7 @@ function createArchiveUploads(options) {
       if (found.active > 0 || found.partials.size > 0)
         throw new ArchiveUploadError("upload_closed", "Files are still arriving. Wait until the upload has finished.", 409);
       const entries = readdirSync25(found.files);
-      const top = entries.length === 1 ? join117(found.files, entries[0]) : found.files;
+      const top = entries.length === 1 ? join118(found.files, entries[0]) : found.files;
       const canonical2 = realpathSync20.native(top);
       if (!contained(realpathSync20.native(found.dir), canonical2))
         throw new ArchiveUploadError("bad_path", ARCHIVE_UPLOAD_COPY.bad_path);
@@ -141987,7 +142530,7 @@ function createArchiveUploads(options) {
       if (typeof uploadId !== "string" || !ID2.test(uploadId))
         return;
       const found = sessions.get(uploadId);
-      const dir = found?.dir ?? (existsSync85(options.root) ? join117(stagingRoot(), uploadId) : undefined);
+      const dir = found?.dir ?? (existsSync85(options.root) ? join118(stagingRoot(), uploadId) : undefined);
       if (!dir || keep?.(dir))
         return;
       sessions.delete(uploadId);
@@ -142011,7 +142554,7 @@ function createArchiveUploads(options) {
       for (const name of names) {
         if (!ID2.test(name))
           continue;
-        const dir = join117(root, name);
+        const dir = join118(root, name);
         const found = sessions.get(name);
         if (found && (found.active > 0 || now() - found.lastTouch < ARCHIVE_UPLOAD_IDLE_MS))
           continue;
@@ -142073,9 +142616,9 @@ var init_staging = __esm(() => {
 });
 
 // src/core/messaging-account-move.ts
-import { readFileSync as readFileSync73 } from "node:fs";
+import { readFileSync as readFileSync74 } from "node:fs";
 import { homedir as homedir40 } from "node:os";
-import { join as join118, resolve as resolve25 } from "node:path";
+import { join as join119, resolve as resolve25 } from "node:path";
 function namesDefaultLegacySession(source, value2, env) {
   const trimmed2 = value2.trim();
   if (trimmed2 === "")
@@ -142101,7 +142644,7 @@ function folderSessionValue(source, env) {
   return source === "telegram" ? accountSessionPath(account, env) : accountRawPath(account, "whatsapp", env);
 }
 function handleRegistryPath(env) {
-  return env.OLYMPUS_CREDENTIAL_HANDLE_REGISTRY_PATH?.trim() || join118(env.HOME?.trim() || homedir40(), ".config", "olympus", "handles.json");
+  return env.OLYMPUS_CREDENTIAL_HANDLE_REGISTRY_PATH?.trim() || join119(env.HOME?.trim() || homedir40(), ".config", "olympus", "handles.json");
 }
 async function sessionPathKeys(source, secretStore) {
   const keys = new Set([source === "telegram" ? "telegram.personal.session_path" : "whatsapp.personal_local.session_path"]);
@@ -142192,7 +142735,7 @@ function repointGrant(env, source, sessionEnv) {
   const path = captureGrantPathFromEnv(source, env);
   let before;
   try {
-    before = readFileSync73(path, "utf8");
+    before = readFileSync74(path, "utf8");
   } catch {
     return false;
   }
@@ -142206,7 +142749,7 @@ function repointGrant(env, source, sessionEnv) {
   const producerEnv = { ...read.grant.producer.env ?? {} };
   delete producerEnv[sessionEnv];
   const grant = { ...rest, producer: { ...read.grant.producer, env: producerEnv } };
-  if (readFileSync73(path, "utf8") !== before)
+  if (readFileSync74(path, "utf8") !== before)
     return false;
   writePrivateFileAtomicSync(path, `${JSON.stringify(grant, null, 2)}
 `);
@@ -142554,7 +143097,7 @@ var init_locator_result_projector2 = __esm(() => {
 
 // src/workers/source-watch-runtime.ts
 import { createHash as createHash82 } from "node:crypto";
-import { readFileSync as readFileSync74 } from "node:fs";
+import { readFileSync as readFileSync75 } from "node:fs";
 import { request as httpsRequest2 } from "node:https";
 import { homedir as homedir41 } from "node:os";
 import { resolve as resolvePath3 } from "node:path";
@@ -142721,7 +143264,7 @@ class OpenClawSourceWatchDeliveryTransport {
         throw new TypeError("Source watch HTTPS gateway requires gateway.tls.certPath.");
       }
       try {
-        this.caPem = readFileSync74(trustPath, "utf8");
+        this.caPem = readFileSync75(trustPath, "utf8");
       } catch {
         throw new TypeError("Source watch HTTPS gateway public certificate could not be read.");
       }
@@ -142824,7 +143367,7 @@ async function postOpenClawGatewayPluginRoute(input) {
   const url2 = `${connection.baseUrl}${input.path}`;
   const timeoutMs = input.timeoutMs ?? 30000;
   if (connection.certificatePath) {
-    return requestVerifiedHttps(url2, init, timeoutMs, readFileSync74(connection.certificatePath, "utf8"));
+    return requestVerifiedHttps(url2, init, timeoutMs, readFileSync75(connection.certificatePath, "utf8"));
   }
   return fetchWithTimeout(input.fetchImpl ?? fetch, url2, init, timeoutMs);
 }
@@ -143895,6 +144438,7 @@ function mountDashboardController(options) {
     pollIntervalMs = result.poll_interval_ms;
     deferredSince = 0;
     applyWriteCapability();
+    resumeMessaging();
   }
   async function refreshNow(force, requested = false) {
     if (disposed || inFlight || pendingFormCount > 0 || options.signal.aborted)
@@ -143908,7 +144452,7 @@ function mountDashboardController(options) {
     const ownerDocument = root.ownerDocument;
     if (!force && !requested && ownerDocument.visibilityState === "hidden")
       return;
-    if (!force && query('.sheet.on input:not([type="hidden"]),.sheet.on textarea,.sheet.on select'))
+    if (!force && (query("[data-messaging-input] input,[data-messaging-chats] input") || messagingTimers.size > 0 || query('.sheet.on input:not([type="hidden"]),.sheet.on textarea,.sheet.on select')))
       return;
     if (!force && query("[data-remote-terms]:not([hidden])"))
       return;
@@ -143949,10 +144493,254 @@ function mountDashboardController(options) {
       refreshNow(false);
     }, pollIntervalMs) : undefined;
   }
+  options.signal.addEventListener("abort", () => {
+    messagingTimers.forEach((timer) => clearTimeout(timer));
+    messagingTimers.clear();
+    queryAll("[data-messaging-input] input").forEach((input) => {
+      input.value = "";
+    });
+    queryAll("[data-messaging-qr]").forEach((qr) => {
+      qr.removeAttribute("src");
+      qr.hidden = true;
+    });
+  }, { once: true });
+  const messagingTimers = new Map;
+  const messagingBusy = new WeakSet;
+  function resumeMessaging() {
+    messagingTimers.forEach((timer, card) => {
+      if (!card.isConnected) {
+        clearTimeout(timer);
+        messagingTimers.delete(card);
+      }
+    });
+    queryAll("[data-messaging-source]").forEach((card) => {
+      messagingRequest(card, "status");
+    });
+  }
+  async function messagingRequest(card, operation, extra = {}) {
+    if (!canWrite || disposed || !options.transport.messaging || messagingBusy.has(card))
+      return;
+    const source = card.dataset.messagingSource;
+    if (source !== "telegram" && source !== "whatsapp")
+      return;
+    const timer = messagingTimers.get(card);
+    if (timer)
+      clearTimeout(timer);
+    messagingTimers.delete(card);
+    messagingBusy.add(card);
+    const status = card.querySelector("[data-messaging-status]");
+    if (status && operation !== "status")
+      status.textContent = "Working…";
+    try {
+      const params = { source, ...extra };
+      let result;
+      try {
+        result = await options.transport.messaging(operation, params);
+      } finally {
+        delete params.value;
+        delete extra.value;
+      }
+      if (disposed || !card.isConnected)
+        return;
+      const body = result.body;
+      const inputSlot = card.querySelector("[data-messaging-input]");
+      const qr = card.querySelector("[data-messaging-qr]");
+      if (result.status < 200 || result.status >= 300 || body.ok === false) {
+        if (status)
+          status.textContent = "Could not complete this step. Try again from this computer.";
+        if (qr) {
+          qr.hidden = true;
+          qr.removeAttribute("src");
+        }
+        if (inputSlot)
+          inputSlot.replaceChildren();
+        return;
+      }
+      const state = typeof body.state === "string" ? body.state : "";
+      const field = typeof body.field === "string" ? body.field : "";
+      const labels = { api_id: "Telegram API ID", api_hash: "Telegram API hash", phone: "Phone number (with country code)", code: "Telegram login code", password: "Telegram two-step verification password" };
+      const label = labels[field];
+      if (status)
+        status.textContent = label ? `Enter ${label.toLowerCase()} to continue.` : state === "failed" ? body.registrationMayBeSaved === true ? "Pairing could not finish. The connection may already be saved; check connection and capture status before retrying." : "Pairing failed. Start pairing again to retry." : state === "idle" ? "Pair this account to choose the chats Olympus may read." : state === "scope_selection_required" ? "Paired. Nothing is being captured. Choose what Olympus may read." : state === "committing" ? "Saving the connection and chat permission…" : state === "paired" || state === "complete" || state === "completed" ? "Pairing completed. Manage chat choices below; check current connection and sync status on the main dashboard." : state === "cancelled" ? `Setup cancelled. Capture permission was not changed. If you linked a new device, remove Olympus in ${source === "telegram" ? "Telegram active sessions" : "WhatsApp linked devices"} to unlink it.` : operation === "scope" ? "Chat choices saved. Capture will use this selection." : operation === "chats" ? "Choose the chats Olympus may read." : source === "whatsapp" ? "Open WhatsApp → Settings → Linked devices and scan the QR code." : "Pairing is running on this computer…";
+      if (qr) {
+        const value2 = typeof body.qr === "string" ? body.qr : "";
+        if (/^data:image\/(?:png|jpeg|webp);base64,[A-Za-z0-9+/=]+$/.test(value2)) {
+          qr.src = value2;
+          qr.hidden = false;
+        } else {
+          qr.hidden = true;
+          qr.removeAttribute("src");
+        }
+      }
+      if (inputSlot && inputSlot.dataset.field !== field) {
+        inputSlot.replaceChildren();
+        inputSlot.dataset.field = field;
+        if (label) {
+          const form = document.createElement("form");
+          form.method = "dialog";
+          form.dataset.messagingKind = "respond";
+          form.dataset.field = field;
+          const wrapper = document.createElement("label");
+          wrapper.textContent = label + " ";
+          const input = document.createElement("input");
+          input.name = "value";
+          input.required = true;
+          input.type = field === "phone" || field === "api_id" ? "text" : "password";
+          input.autocomplete = "off";
+          input.setAttribute("autocapitalize", "off");
+          input.spellcheck = false;
+          wrapper.append(input);
+          form.append(wrapper);
+          const button = document.createElement("button");
+          button.type = "submit";
+          button.textContent = "Continue";
+          button.className = "btn";
+          form.append(button);
+          inputSlot.append(form);
+          input.focus();
+        }
+      }
+      const choosingScope = state === "scope_selection_required";
+      const chatSlot = card.querySelector("[data-messaging-chats]");
+      if (!choosingScope && chatSlot?.dataset.pendingChoice === "true")
+        chatSlot.replaceChildren();
+      if (chatSlot)
+        chatSlot.dataset.pendingChoice = String(choosingScope);
+      if (Array.isArray(body.chats) && typeof body.wholeAccount === "boolean" && Array.isArray(body.chatScopes)) {
+        const slot = card.querySelector("[data-messaging-chats]");
+        if (slot) {
+          slot.replaceChildren();
+          const form = document.createElement("form");
+          form.method = "dialog";
+          form.dataset.messagingKind = "scope";
+          if (!choosingScope) {
+            const allLabel = document.createElement("label");
+            const all = document.createElement("input");
+            all.type = "checkbox";
+            all.name = "wholeAccount";
+            all.checked = body.wholeAccount === true;
+            allLabel.append(all, " Read all chats, including new chats");
+            form.append(allLabel);
+          }
+          const selected = Array.isArray(body.chatScopes) ? body.chatScopes : [];
+          for (const entry of body.chats) {
+            if (!entry || typeof entry !== "object")
+              continue;
+            const chat = entry;
+            if (typeof chat.chatScope !== "string" || typeof chat.title !== "string")
+              continue;
+            const line2 = document.createElement("label");
+            line2.style.display = "block";
+            const check = document.createElement("input");
+            check.type = "checkbox";
+            check.name = "chatScope";
+            check.value = chat.chatScope;
+            check.checked = selected.includes(chat.chatScope);
+            line2.append(check, " " + chat.title);
+            form.append(line2);
+          }
+          const button = document.createElement("button");
+          button.type = "submit";
+          button.className = "btn";
+          button.textContent = choosingScope ? "Read selected chats" : "Save chat choices";
+          form.append(button);
+          if (choosingScope) {
+            const pick2 = document.createElement("details");
+            const summary = document.createElement("summary");
+            summary.textContent = "Pick chats (recommended)";
+            pick2.append(summary, form);
+            slot.append(pick2);
+            if (!body.chats.length) {
+              const empty = document.createElement("p");
+              empty.textContent = "No chats are available to select yet. You can cancel and try pairing again later.";
+              form.prepend(empty);
+              button.disabled = true;
+            }
+            const allForm = document.createElement("form");
+            allForm.method = "dialog";
+            allForm.dataset.messagingKind = "scope";
+            const all = document.createElement("input");
+            all.type = "checkbox";
+            all.name = "wholeAccount";
+            all.checked = true;
+            all.hidden = true;
+            const allButton = document.createElement("button");
+            allButton.type = "submit";
+            allButton.className = "btn";
+            allButton.textContent = "Everything in this account";
+            const explanation = document.createElement("p");
+            explanation.textContent = "Allow Olympus to read every chat, including new chats.";
+            allForm.append(all, allButton, explanation);
+            slot.append(allForm);
+          } else
+            slot.append(form);
+        }
+      }
+      if (operation !== "chats" && (operation !== "cancel" || state === "committing") && !["paired", "complete", "completed", "failed", "cancelled", "idle", "scope_selection_required"].includes(state)) {
+        messagingTimers.set(card, setTimeout(() => {
+          messagingTimers.delete(card);
+          messagingRequest(card, "status");
+        }, 1200));
+      }
+    } catch {
+      if (status)
+        status.textContent = "Could not reach pairing on this computer. Try again.";
+    } finally {
+      messagingBusy.delete(card);
+    }
+  }
+  function submitMessaging(form) {
+    const card = form.closest("[data-messaging-source]");
+    const kind = form.dataset.messagingKind;
+    if (!card)
+      return;
+    if (kind === "respond") {
+      const input = form.querySelector('input[name="value"]');
+      if (!input)
+        return;
+      const value2 = input.value;
+      input.value = "";
+      messagingRequest(card, "respond", { ...form.dataset.field ? { field: form.dataset.field } : {}, value: value2 });
+    } else if (kind === "scope") {
+      const wholeAccount = form.querySelector('[name="wholeAccount"]')?.checked === true;
+      messagingRequest(card, "scope", { wholeAccount, chatScopes: wholeAccount ? [] : Array.from(form.querySelectorAll('[name="chatScope"]:checked')).map((input) => input.value) });
+    } else if (kind === "start" || kind === "chats" || kind === "cancel")
+      messagingRequest(card, kind);
+  }
+  async function openMessagingControls(form) {
+    if (pendingForms.has(form))
+      return;
+    if (!options.transport.openLocalControls) {
+      say(form, "Open this dashboard in a browser on this computer.");
+      return;
+    }
+    pendingForms.add(form);
+    say(form, "Opening controls…");
+    try {
+      if (await options.transport.openLocalControls())
+        options.navigate(options.returnUrl);
+      else
+        say(form, "Could not open controls. Open this dashboard in a browser on this computer and try again.");
+    } catch {
+      say(form, "Could not open controls. Open this dashboard in a browser on this computer and try again.");
+    } finally {
+      pendingForms.delete(form);
+    }
+  }
   function onSubmit(event) {
     const form = event.target instanceof HTMLFormElement ? event.target : null;
     if (!form || !root.contains(form))
       return;
+    if (form.hasAttribute("data-messaging-open-controls")) {
+      event.preventDefault();
+      openMessagingControls(form);
+      return;
+    }
+    if (form.hasAttribute("data-messaging-kind")) {
+      event.preventDefault();
+      submitMessaging(form);
+      return;
+    }
     if (form.hasAttribute("data-control-session-kind")) {
       event.preventDefault();
       if (form.dataset.controlSessionKind === "lock")
@@ -144241,10 +145029,20 @@ function mountDashboardController(options) {
   applyWriteCapability();
   applyOpenTarget();
   restartPoll();
+  resumeMessaging();
   const dispose = () => {
     if (disposed)
       return;
     disposed = true;
+    messagingTimers.forEach((timer) => clearTimeout(timer));
+    messagingTimers.clear();
+    queryAll("[data-messaging-input] input").forEach((input) => {
+      input.value = "";
+    });
+    queryAll("[data-messaging-qr]").forEach((qr) => {
+      qr.removeAttribute("src");
+      qr.hidden = true;
+    });
     if (interval)
       clearInterval(interval);
     view3.removeEventListener("focus", refreshOnReturn);
@@ -144600,6 +145398,9 @@ td { padding: 7px 10px 7px 0; border-bottom: 1px solid var(--line2); color: var(
    it, never further down the page. */
 .sheet { display: none; background: var(--panel2); border: 1px solid var(--line); border-radius: 10px; padding: 16px 18px; margin: -4px 0 12px; }
 .sheet.on { display: block; }
+.messaging-card { background: var(--panel2); border: 1px solid var(--line); border-radius: 10px; padding: 16px 18px; margin: 0 0 12px; }
+.messaging-card p { color: var(--t2); font-size: var(--fs-body); max-width: 72ch; }
+.messaging-card form, .messaging-card details { margin: 10px 0; }
 /* Where an open link landed (#olympus-open=…): an accent outline that fades. */
 .landed { outline: 3px solid var(--link); outline-offset: 4px; border-radius: 10px; animation: landed-fade 2.5s ease-out 1.5s forwards; }
 @keyframes landed-fade { to { outline-color: transparent; } }
@@ -145001,6 +145802,20 @@ function standaloneDashboardControllerScript(input) {
       var controller = mount({
         root: root,
         transport: {
+          async openLocalControls() {
+            var response = await fetch('/dashboard/control/session/local', {
+              method: 'POST', credentials: 'same-origin', cache: 'no-store',
+            });
+            return response.ok;
+          },
+          async messaging(operation, params) {
+            var response = await fetch('/dashboard/messaging/' + operation, {
+              method: 'POST', credentials: 'same-origin', cache: 'no-store',
+              headers: { 'X-Olympus-CSRF': csrfToken, 'Content-Type': 'application/json' },
+              body: JSON.stringify(params),
+            });
+            return { status: response.status, body: await json(response) };
+          },
           async control(params) {
             var target = route(params);
             if (!target) return { status: 400, body: { error: { message: 'Unsupported dashboard action.' } } };
@@ -152419,6 +153234,16 @@ input{font:inherit;font-size:0.875rem;min-height:2.25rem;padding:0.375rem 0.75re
   ].join("; ");
 });
 
+// src/workers/dashboard/messaging.ts
+function renderMessagingCard(source, localSession) {
+  const label = source === "telegram" ? "Telegram" : "WhatsApp";
+  const form = (kind, text4) => `<form method="dialog" data-messaging-kind="${kind}"><button class="btn" type="submit">${text4}</button></form>`;
+  return `<section id="agent-${source}-personal" class="messaging-card" aria-hidden="false" data-source="${source === "telegram" ? "telegram.messages" : "whatsapp.personal.messages"}" data-messaging-source="${source}"><h3>${escapeHtml2(label)}</h3>` + (source === "whatsapp" ? "<p>The chat list includes saved contacts and groups and may omit unsaved chats. Choose all chats to include those.</p>" : "") + "<p>Pairing alone does not start capture. After pairing, choose which chats Olympus reads. Each message is classified on its own; choosing a chat does not set its privacy tier.</p>" + (!localSession ? '<p>Open dashboard controls on this computer to pair and choose chats.</p><form method="dialog" data-messaging-open-controls><button class="btn" type="submit">Open controls on this computer</button><span data-action-message role="status"></span></form></section>' : `${form("start", `Pair ${label}`)}${form("chats", "Choose chats")}<div data-messaging-view><p data-messaging-status role="status" aria-live="polite"></p><img data-messaging-qr hidden alt="Scan this QR code in WhatsApp to link Olympus" width="256" height="256"><div data-messaging-input></div><div data-messaging-chats></div></div>${form("cancel", "Cancel pairing")}</section>`);
+}
+var init_messaging = __esm(() => {
+  init_components();
+});
+
 // src/workers/agent-connections.ts
 function remoteAccessFromStatus(input) {
   const status = input.status;
@@ -153208,7 +154033,7 @@ function localShell(input) {
 }
 function renderDashboardKeysPage(view3, options) {
   const blocked = view3.model_setup !== undefined && !view3.model_setup.ready;
-  const sources = view3.sources.filter((source) => source.connection.action.kind !== "none");
+  const sources = view3.sources.filter((source) => source.connection.action.kind !== "none" || source.source_id === "telegram.messages" || source.source_id === "whatsapp.personal.messages");
   const body = [
     dashboardControlGate({ connected: unlocked(options) }),
     renderModelSetupBlocker(view3.model_setup),
@@ -153217,7 +154042,7 @@ function renderDashboardKeysPage(view3, options) {
     `<section id="private-routing"><h3 class="sect">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.privacySetting)}</h3><p class="pnote">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.privacySettingHelp)}</p></section>`,
     `<section id="anonymous"><h3 class="sect">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.anonymousTitle)}</h3>${options?.outsideHelp ? renderOutsideHelpCard(options.outsideHelp, { ...options.controlSessionCsrfToken !== undefined ? { csrfToken: options.controlSessionCsrfToken } : {}, localSession: options.outsideHelpLocalSession === true, untitled: true }) : `<p data-outside-unavailable>${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.anonymousNotSetUp)}</p>`}</section>`,
     sources.length === 0 ? "" : '<div class="sect" id="sources">Sources</div>',
-    sources.length === 0 ? "" : `<div class="srows">${sources.map((source) => renderSetupRow(source, view3, blocked, options?.basePath ?? "/dashboard")).join(`
+    sources.length === 0 ? "" : `<div class="srows">${sources.map((source) => renderSetupRow(source, view3, blocked, options?.basePath ?? "/dashboard", options?.messagingLocalSession === true)).join(`
 `)}</div>`
   ].filter((block) => block !== "").join(`
 `);
@@ -153261,8 +154086,11 @@ function refusalNotice(source) {
     ...detail === undefined ? {} : { noticeDetail: detail }
   };
 }
-function renderSetupRow(source, view3, blocked, basePath) {
+function renderSetupRow(source, view3, blocked, basePath, messagingLocalSession = false) {
   const action = source.connection.action;
+  if (source.source_id === "telegram.messages" || source.source_id === "whatsapp.personal.messages") {
+    return renderMessagingCard(source.source_id === "telegram.messages" ? "telegram" : "whatsapp", messagingLocalSession);
+  }
   const gate = blocked ? { blockedReason: DASHBOARD_MODELS_BLOCKED_REASON } : {};
   const id = { sourceId: source.source_id };
   if (action.kind === "archive_import") {
@@ -153272,6 +154100,9 @@ function renderSetupRow(source, view3, blocked, basePath) {
       blurb: setupBlurb(source),
       action: { label: action.label, kind: "link", href: `${basePath}#${DASHBOARD_OPEN_FRAGMENT_KEY}=${dashboardImportLandingToken(source.source_id)}` }
     });
+  }
+  if (action.kind === "guided_session" && (action.source === "telegram" || action.source === "whatsapp")) {
+    return renderMessagingCard(action.source, messagingLocalSession);
   }
   if (action.kind === "guided_session") {
     const sheetId = `agent-${source.source_id.replace(/[^A-Za-z0-9_-]+/g, "-")}`;
@@ -153377,6 +154208,7 @@ function connectAction(source) {
 var CONNECTOR_SHEET_ID = "connector-sheet", CONNECTOR_SHEET_HEADING = "Build a connector with your agent", CONNECTOR_SHEET_INTRO, CONNECTOR_PROMPT, W;
 var init_local = __esm(() => {
   init_source_dashboard();
+  init_messaging();
   init_open_targets();
   init_agents();
   init_components();
@@ -154380,6 +155212,12 @@ function withWorkerBearerAuth(fetchHandler, options) {
     if (!authToken) {
       return workerAuthRequiredResponse();
     }
+    if (isDashboardMessagingRoute(request)) {
+      const origin = sameRequestOrigin(request);
+      if (!origin || !isLoopbackOrigin(origin) || !requestFromOwnerSocket(request) && (options.requireOwnerSocket || !isLoopbackAddress(requestPeerAddress(request))) || request.headers.has("X-Forwarded-Proto") || request.headers.has("X-Forwarded-For") || request.headers.has("X-Forwarded-Host")) {
+        return dashboardControlForbiddenResponse("origin_mismatch");
+      }
+    }
     if (isDashboardLaunchMintRequest(request)) {
       if (!hasValidWorkerBearerToken(presentedAuthorization, authToken))
         return unauthorizedWorkerResponse();
@@ -154684,11 +155522,14 @@ function isDashboardConsultControlRoute(request) {
 function isDashboardPrivateAnswersRoute(request) {
   return request.method === "POST" && new URL(request.url).pathname === DASHBOARD_PRIVATE_ANSWERS_PATH;
 }
+function isDashboardMessagingRoute(request) {
+  return request.method === "POST" && DASHBOARD_MESSAGING_PATHS.includes(new URL(request.url).pathname);
+}
 function isDashboardArchiveImportLocalRoute(request) {
   return request.method === "POST" && DASHBOARD_ARCHIVE_IMPORT_LOCAL_PATHS.includes(new URL(request.url).pathname);
 }
 function isDashboardLocalGradeRoute(request) {
-  return isDashboardConsultControlRoute(request) || isDashboardPrivateAnswersRoute(request) || isDashboardArchiveImportLocalRoute(request);
+  return isDashboardConsultControlRoute(request) || isDashboardPrivateAnswersRoute(request) || isDashboardArchiveImportLocalRoute(request) || isDashboardMessagingRoute(request);
 }
 function dashboardLocalGradeRefusal(request) {
   if (!isDashboardPrivateAnswersRoute(request) && !isDashboardArchiveImportLocalRoute(request))
@@ -155088,7 +155929,7 @@ function optionalEnv(value2) {
   const trimmed2 = value2?.trim();
   return trimmed2 ? trimmed2 : undefined;
 }
-var DEFAULT_WORKER_BIND_HOST = "127.0.0.1", DASHBOARD_CONTROL_SESSION_TTL_SECONDS, DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER = "X-Olympus-Control-Session-CSRF", DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER = "X-Olympus-Control-Session-Grade", DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER = "X-Olympus-Gateway-Public-Origin", DASHBOARD_GATEWAY_CALLBACK_PEER_HEADER = "X-Olympus-Gateway-Callback-Peer", DASHBOARD_GATEWAY_CALLBACK_PEER_CONTEXT = "olympus-dashboard-callback-peer-v1", DASHBOARD_CONTROL_COOKIE = "olympus_dashboard_control", DASHBOARD_CONTROL_SIGNATURE_CONTEXT = "olympus-dashboard-control-session-v3", DASHBOARD_CONTROL_CSRF_CONTEXT = "olympus-dashboard-control-csrf-v2", DASHBOARD_CONTROL_ORIGIN_CONTEXT = "olympus-dashboard-control-origin-v2", DASHBOARD_LOCAL_CONTROL_SESSION_PATH = "/dashboard/control/session/local", AGENT_MINT_PATHS, AGENT_MINT_LIMIT = 10, AGENT_MINT_WINDOW_MS, AGENT_MINT_MAX_KEYS = 256, REMOTE_ACCESS_TOGGLE_PATH = "/dashboard/agents/remote-access", REMOTE_ACCESS_TOGGLE_LIMIT = 6, REMOTE_ACCESS_TOGGLE_WINDOW_MS, DASHBOARD_CONSULT_CONTROL_PATHS, DASHBOARD_PRIVATE_ANSWERS_PATH = "/dashboard/private-answers", DASHBOARD_ARCHIVE_IMPORT_LOCAL_PATHS, GRADE_CODES;
+var DEFAULT_WORKER_BIND_HOST = "127.0.0.1", DASHBOARD_CONTROL_SESSION_TTL_SECONDS, DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER = "X-Olympus-Control-Session-CSRF", DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER = "X-Olympus-Control-Session-Grade", DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER = "X-Olympus-Gateway-Public-Origin", DASHBOARD_GATEWAY_CALLBACK_PEER_HEADER = "X-Olympus-Gateway-Callback-Peer", DASHBOARD_GATEWAY_CALLBACK_PEER_CONTEXT = "olympus-dashboard-callback-peer-v1", DASHBOARD_CONTROL_COOKIE = "olympus_dashboard_control", DASHBOARD_CONTROL_SIGNATURE_CONTEXT = "olympus-dashboard-control-session-v3", DASHBOARD_CONTROL_CSRF_CONTEXT = "olympus-dashboard-control-csrf-v2", DASHBOARD_CONTROL_ORIGIN_CONTEXT = "olympus-dashboard-control-origin-v2", DASHBOARD_LOCAL_CONTROL_SESSION_PATH = "/dashboard/control/session/local", AGENT_MINT_PATHS, AGENT_MINT_LIMIT = 10, AGENT_MINT_WINDOW_MS, AGENT_MINT_MAX_KEYS = 256, REMOTE_ACCESS_TOGGLE_PATH = "/dashboard/agents/remote-access", REMOTE_ACCESS_TOGGLE_LIMIT = 6, REMOTE_ACCESS_TOGGLE_WINDOW_MS, DASHBOARD_CONSULT_CONTROL_PATHS, DASHBOARD_PRIVATE_ANSWERS_PATH = "/dashboard/private-answers", DASHBOARD_ARCHIVE_IMPORT_LOCAL_PATHS, DASHBOARD_MESSAGING_PATHS, GRADE_CODES;
 var init_http = __esm(() => {
   init_request_peer();
   init_worker_auth();
@@ -155117,6 +155958,14 @@ var init_http = __esm(() => {
     "/dashboard/archive-import/decline",
     "/dashboard/archive-import/remove",
     "/dashboard/archive-import/stop"
+  ];
+  DASHBOARD_MESSAGING_PATHS = [
+    "/dashboard/messaging/start",
+    "/dashboard/messaging/status",
+    "/dashboard/messaging/respond",
+    "/dashboard/messaging/cancel",
+    "/dashboard/messaging/chats",
+    "/dashboard/messaging/scope"
   ];
   GRADE_CODES = { bearer: "b", local: "l" };
 });
@@ -155378,7 +156227,7 @@ var init_source_disposition_tree = __esm(() => {
 });
 
 // src/workers/source-dispositions.ts
-import { chmodSync as chmodSync33, copyFileSync as copyFileSync2, existsSync as existsSync86, lstatSync as lstatSync44, mkdirSync as mkdirSync57, readFileSync as readFileSync75 } from "node:fs";
+import { chmodSync as chmodSync33, copyFileSync as copyFileSync2, existsSync as existsSync86, lstatSync as lstatSync44, mkdirSync as mkdirSync57, readFileSync as readFileSync76 } from "node:fs";
 import { dirname as dirname88 } from "node:path";
 function resolveSourceIngestionExclusionsPath(env = process.env, explicitPath) {
   return explicitPath?.trim() || env[SOURCE_INGESTION_EXCLUSIONS_PATH_ENV]?.trim() || defaultSourceIngestionExclusionsPath(env);
@@ -155392,7 +156241,7 @@ function readSourceIngestionExclusionsFile(path) {
       rawRulesById: new Map
     };
   }
-  const text4 = readFileSync75(path, "utf8");
+  const text4 = readFileSync76(path, "utf8");
   const raw = JSON.parse(text4);
   const document2 = parseSourceIngestionExclusions(raw, path);
   const rawRulesById = new Map;
@@ -159265,7 +160114,7 @@ __export(exports_live_sync, {
   EVERNOTE_HANDLE: () => EVERNOTE_HANDLE,
   EVERNOTE_ACCOUNT_ROLE: () => EVERNOTE_ACCOUNT_ROLE
 });
-import { existsSync as existsSync87, mkdirSync as mkdirSync58, readFileSync as readFileSync76 } from "node:fs";
+import { existsSync as existsSync87, mkdirSync as mkdirSync58, readFileSync as readFileSync77 } from "node:fs";
 import { dirname as dirname89 } from "node:path";
 function evernoteExclusionMatcher(env = process.env) {
   return createSourceExclusionMatcher(loadSourceIngestionExclusions({ env }), EVERNOTE_SOURCE_ID, {
@@ -159321,7 +160170,7 @@ function readPassFile(path) {
   if (!existsSync87(path))
     return { version: 1, status: {} };
   try {
-    const parsed = JSON.parse(readFileSync76(path, "utf8"));
+    const parsed = JSON.parse(readFileSync77(path, "utf8"));
     if (parsed.version !== 1 || typeof parsed.status !== "object" || parsed.status === null)
       return { version: 1, status: {} };
     const record7 = parsed.record?.version === 1 && parsed.record.notes && typeof parsed.record.notes === "object" ? parsed.record : undefined;
@@ -159574,9 +160423,9 @@ var init_live_sync3 = __esm(() => {
 
 // src/workers/email-source/index.ts
 import { createHash as createHash88, randomBytes as randomBytes29, timingSafeEqual as timingSafeEqual8 } from "node:crypto";
-import { readFileSync as readFileSync77, statSync as statSync39 } from "node:fs";
+import { readFileSync as readFileSync78, statSync as statSync39 } from "node:fs";
 import { homedir as homedir42 } from "node:os";
-import { join as join120, resolve as resolve26 } from "node:path";
+import { join as join121, resolve as resolve26 } from "node:path";
 
 class GogcliEmailConnectorStub {
   name = "gogcli";
@@ -159683,10 +160532,17 @@ function createEmailSourceWorker(options = {}) {
   }
   let dashboardGrantMutationTail = Promise.resolve();
   const dashboardExclusionDebt = new Map;
+  const dashboardMessaging = sourceDashboard?.withMessagingCapturePaused ? createDashboardMessagingService({
+    ...sourceDashboard.registryPath ? { registryPath: sourceDashboard.registryPath } : {},
+    secretStore: dashboardSecretStore(sourceDashboard),
+    withMessagingCapturePaused: sourceDashboard.withMessagingCapturePaused,
+    withGrantMutation: withDashboardGrantMutation
+  }) : undefined;
   const basePath = normalizeBasePath2(options.basePath ?? "/v1");
   return {
     close() {
       dashboardWorkerClosed = true;
+      dashboardMessaging?.close();
       if (dashboardSchedulerAdoptionTick === undefined)
         return;
       clearInterval(dashboardSchedulerAdoptionTick);
@@ -160162,6 +161018,7 @@ function createEmailSourceWorker(options = {}) {
               options: {
                 ...controlSessionCsrfToken ? { controlSessionCsrfToken } : {},
                 outsideHelpLocalSession: request.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER) === "local",
+                messagingLocalSession: Boolean(controlSessionCsrfToken) && request.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER) === "local",
                 ...controlSessionCsrfToken && sourceDashboard.consult ? { outsideHelp: await sourceDashboard.consult.status().catch(() => {
                   return;
                 }) } : {}
@@ -160447,6 +161304,22 @@ function createEmailSourceWorker(options = {}) {
           });
           return json({ ok: true, status_message: "Readiness check requested. See the Models cards above for the result." });
         }
+        if (request.method === "POST" && url2.pathname.startsWith("/dashboard/messaging/")) {
+          if (!request.headers.get(DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER) || request.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER) !== "local") {
+            return json({ ok: false, error: { code: "mac_dashboard_only", message: "Pairing opens only in dashboard controls on this computer." } }, 403);
+          }
+          const operation = url2.pathname.slice("/dashboard/messaging/".length);
+          if (operation !== "start" && operation !== "status" && operation !== "respond" && operation !== "cancel" && operation !== "chats" && operation !== "scope")
+            return json({ ok: false }, 404);
+          if (!dashboardMessaging)
+            return json({ ok: false, error: { code: "messaging_unavailable", message: "Pairing is unavailable on this computer." } }, 501);
+          try {
+            const record7 = await parseDashboardMessagingBody(request);
+            return new Response(JSON.stringify(await dashboardMessaging.handle(operation, record7)), { headers: { "Content-Type": "application/json", "Cache-Control": "no-store" } });
+          } catch {
+            return new Response(JSON.stringify({ ok: false, error: { code: "messaging_request_failed", message: "Could not complete this pairing step. Try again from this computer." } }), { status: 400, headers: { "Content-Type": "application/json", "Cache-Control": "no-store" } });
+          }
+        }
         if (request.method === "POST" && url2.pathname === DASHBOARD_PRIVATE_ANSWERS_PATH) {
           const csrf = request.headers.get(DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER);
           if (!csrf || request.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER) !== "local") {
@@ -160628,11 +161501,18 @@ function createEmailSourceWorker(options = {}) {
           });
         }
         if (request.method === "POST" && url2.pathname === "/dashboard/disconnect") {
+          const disconnectRecord = await parseObjectBody(request);
+          if (disconnectRecord.acknowledge === true) {
+            if (disconnectRecord.source_id === "telegram.messages")
+              await dashboardMessaging?.cancelAndWait("telegram");
+            if (disconnectRecord.source_id === "whatsapp.personal.messages")
+              await dashboardMessaging?.cancelAndWait("whatsapp");
+          }
           return await withDashboardGrantMutation(async () => {
             if (!sourceDashboard) {
               throw new EmailSourceWorkerError(501, "source_dashboard_not_supported", "Private source worker does not have the source dashboard configured.");
             }
-            const record7 = await parseObjectBody(request);
+            const record7 = disconnectRecord;
             if (record7.source_id === "local.files") {
               if (record7.acknowledge !== true) {
                 throw new EmailSourceWorkerError(400, "disconnect_confirmation_required", "Confirm that Disconnect keeps the files already indexed and only stops Olympus reading this computer.");
@@ -160753,11 +161633,18 @@ function createEmailSourceWorker(options = {}) {
           });
         }
         if (request.method === "POST" && url2.pathname === "/dashboard/delete-source-data") {
+          const mutationRecord = await parseObjectBody(request);
+          if (mutationRecord.acknowledge === true) {
+            if (mutationRecord.source_id === "telegram.messages")
+              await dashboardMessaging?.cancelAndWait("telegram");
+            if (mutationRecord.source_id === "whatsapp.personal.messages")
+              await dashboardMessaging?.cancelAndWait("whatsapp");
+          }
           return await withDashboardGrantMutation(async () => {
             if (!sourceDashboard) {
               throw new EmailSourceWorkerError(501, "source_dashboard_not_supported", "Private source worker does not have the source dashboard configured.");
             }
-            const record7 = await parseObjectBody(request);
+            const record7 = mutationRecord;
             const sourceId = record7.source_id === "local.files" ? "local.files" : parseDashboardDisconnectSource(record7.source_id);
             if (record7.acknowledge !== true) {
               throw new EmailSourceWorkerError(400, "delete_confirmation_required", "Confirm that deleting indexed data cannot be undone and leaves the source's files and accounts untouched.");
@@ -160781,11 +161668,18 @@ function createEmailSourceWorker(options = {}) {
           });
         }
         if (request.method === "POST" && url2.pathname === "/dashboard/unpair") {
+          const mutationRecord = await parseObjectBody(request);
+          if (mutationRecord.acknowledge === true) {
+            if (mutationRecord.source_id === "telegram.messages")
+              await dashboardMessaging?.cancelAndWait("telegram");
+            if (mutationRecord.source_id === "whatsapp.personal.messages")
+              await dashboardMessaging?.cancelAndWait("whatsapp");
+          }
           return await withDashboardGrantMutation(async () => {
             if (!sourceDashboard) {
               throw new EmailSourceWorkerError(501, "source_dashboard_not_supported", "Private source worker does not have the source dashboard configured.");
             }
-            const record7 = await parseObjectBody(request);
+            const record7 = mutationRecord;
             const sourceId = parseDashboardUnpairSource(record7.source_id);
             if (record7.acknowledge !== true) {
               throw new EmailSourceWorkerError(400, "unpair_confirmation_required", "Confirm that Unpair removes only this computer's pairing session, retains indexed and captured data, and does not remove the linked device at the provider.");
@@ -162613,6 +163507,44 @@ function parseSourceDispositionsSave(body, sources) {
     ...body.document !== undefined ? { document: body.document } : {}
   };
 }
+async function parseDashboardMessagingBody(request) {
+  if (!request.body)
+    throw new Error("invalid_request");
+  const reader = request.body.getReader();
+  const chunks2 = [];
+  let size = 0;
+  try {
+    for (;; ) {
+      const part = await reader.read();
+      if (part.done)
+        break;
+      size += part.value.byteLength;
+      if (size > 32768) {
+        await reader.cancel();
+        throw new Error("invalid_request");
+      }
+      chunks2.push(part.value);
+    }
+    const data2 = new Uint8Array(size);
+    let offset = 0;
+    for (const chunk of chunks2) {
+      data2.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
+    try {
+      const parsed = JSON.parse(new TextDecoder().decode(data2));
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
+        throw new Error("invalid_request");
+      return parsed;
+    } finally {
+      data2.fill(0);
+    }
+  } finally {
+    for (const chunk of chunks2)
+      chunk.fill(0);
+    reader.releaseLock();
+  }
+}
 async function parseObjectBody(request) {
   let body;
   try {
@@ -163437,7 +164369,7 @@ function dashboardStorageNotices() {
 }
 function dashboardGoogleCloudProjectId() {
   try {
-    const raw = readFileSync77(join120(homedir42(), ".olympus", "google-bootstrap.json"), "utf8");
+    const raw = readFileSync78(join121(homedir42(), ".olympus", "google-bootstrap.json"), "utf8");
     const parsed = JSON.parse(raw);
     if (typeof parsed.projectId !== "string")
       return;
@@ -163991,6 +164923,7 @@ function mostPrivateTrustDomain(domains) {
 }
 var CONNECTOR_STORE_FILTER_CAPABILITIES, EMAIL_CONNECTOR_NOT_CONNECTED_DETAIL = "No email account is connected yet. Connect Gmail from the Olympus dashboard to enable email answers.", EmailSourceWorkerError, DEFAULT_SQLITE_BUSY_RETRY_DELAYS_MS, SOURCE_DISPOSITION_STATES, DEFAULT_FILE_EXTRACTION_PLAN_LIMIT = 100, DROPBOX_FILE_EXTRACTION_PROVIDER = "dropbox", FILE_EXTRACTION_ROUTE_ALIASES, DASHBOARD_OAUTH_RELAY_STATE_KEY = "dashboard.oauth.relay_state_key", DASHBOARD_OAUTH_CALLBACK_RATE_LIMIT_WINDOW_MS = 60000, DASHBOARD_OAUTH_CALLBACK_RATE_LIMIT_MAX_PER_WINDOW = 30, DASHBOARD_UNPAIR_SOURCE_IDS, DASHBOARD_EVERNOTE_SIGN_IN_TTL_MS = 600000, CHATGPT_RETURN_TO = "https://chatgpt.com/", DASHBOARD_EXCLUSION_DEBT_MAX_AGE_MS = 120000, DASHBOARD_DEFAULT_ENGINE_PORT = 8010;
 var init_email_source = __esm(() => {
+  init_dashboard_messaging_service();
   init_source_scope_approval();
   init_release_manifest();
   init_google_handle_compatibility();
@@ -164333,8 +165266,8 @@ var init_locations = __esm(() => {
 
 // src/workers/local-files/watch-hub.ts
 import { createRequire as createRequire7 } from "node:module";
-import { existsSync as existsSync88, readFileSync as readFileSync78 } from "node:fs";
-import { dirname as dirname90, join as join121 } from "node:path";
+import { existsSync as existsSync88, readFileSync as readFileSync79 } from "node:fs";
+import { dirname as dirname90, join as join122 } from "node:path";
 function watchIgnoreGlobs(context2, extra = []) {
   const home2 = context2.home;
   const globs = IGNORE_SEGMENTS.map((segment) => `**/${segment}`);
@@ -164533,7 +165466,7 @@ class WatchHub {
 }
 function readInotifyLimit() {
   try {
-    const value2 = Number.parseInt(readFileSync78("/proc/sys/fs/inotify/max_user_watches", "utf8").trim(), 10);
+    const value2 = Number.parseInt(readFileSync79("/proc/sys/fs/inotify/max_user_watches", "utf8").trim(), 10);
     return Number.isFinite(value2) && value2 > 0 ? value2 : undefined;
   } catch {
     return;
@@ -164549,11 +165482,11 @@ async function loadParcelWatcher(extraDirs = []) {
   }
   const dirs = [...extraDirs, ...process.env.OLYMPUS_NATIVE_MODULES_DIR ? [process.env.OLYMPUS_NATIVE_MODULES_DIR] : []];
   for (const dir of dirs) {
-    const candidate = join121(dir, "node_modules");
-    if (!existsSync88(join121(candidate, "@parcel", "watcher")))
+    const candidate = join122(dir, "node_modules");
+    if (!existsSync88(join122(candidate, "@parcel", "watcher")))
       continue;
     try {
-      const requireFrom = createRequire7(join121(dirname90(candidate), "package.json"));
+      const requireFrom = createRequire7(join122(dirname90(candidate), "package.json"));
       return unwrap(requireFrom(specifier));
     } catch (error2) {
       failures.push(error2 instanceof Error ? error2.message : String(error2));
@@ -164594,7 +165527,7 @@ var init_watch_hub = __esm(() => {
 // src/workers/local-files/connector.ts
 import { createHash as createHash89, randomUUID as randomUUID29 } from "node:crypto";
 import { realpathSync as realpathSync21, rmSync as rmSync36, readdirSync as readdirSync26 } from "node:fs";
-import { join as join122, posix as posix3 } from "node:path";
+import { join as join123, posix as posix3 } from "node:path";
 function nameAsOnDisk(scopeRoot, rel) {
   let dir = "";
   for (const part of rel.split("/")) {
@@ -164885,7 +165818,7 @@ function createLocalFilesSourceConnector(options) {
       }
     }
   }
-  const snapshotFile = (gen) => join122(options.watch.snapshotDir, `${options.connectorId}.${gen}.snap`);
+  const snapshotFile = (gen) => join123(options.watch.snapshotDir, `${options.connectorId}.${gen}.snap`);
   const pruneSnapshots = (keep) => {
     if (!options.watch)
       return;
@@ -164893,7 +165826,7 @@ function createLocalFilesSourceConnector(options) {
     try {
       for (const name of readdirSync26(options.watch.snapshotDir)) {
         if (name.startsWith(`${options.connectorId}.`) && name.endsWith(".snap") && !keepNames.has(name)) {
-          rmSync36(join122(options.watch.snapshotDir, name), { force: true });
+          rmSync36(join123(options.watch.snapshotDir, name), { force: true });
         }
       }
     } catch {}
@@ -167468,9 +168401,9 @@ var init_source_scheduler = __esm(() => {
 });
 
 // src/workers/local-files/mac-permissions.ts
-import { existsSync as existsSync89, mkdirSync as mkdirSync59, opendirSync, readFileSync as readFileSync79 } from "node:fs";
+import { existsSync as existsSync89, mkdirSync as mkdirSync59, opendirSync, readFileSync as readFileSync80 } from "node:fs";
 import { opendir } from "node:fs/promises";
-import { dirname as dirname91, join as join123 } from "node:path";
+import { dirname as dirname91, join as join124 } from "node:path";
 function permissionHostKind(env) {
   if (env[ENGINE_HELPER_ENV])
     return "engine_helper";
@@ -167553,10 +168486,10 @@ class MacPermissions {
     if (!this.active)
       return;
     const tops = [
-      ["desktop", join123(this.home, "Desktop")],
-      ["documents", join123(this.home, "Documents")],
-      ["downloads", join123(this.home, "Downloads")],
-      ["icloud", join123(this.home, "Library", "Mobile Documents")]
+      ["desktop", join124(this.home, "Desktop")],
+      ["documents", join124(this.home, "Documents")],
+      ["downloads", join124(this.home, "Downloads")],
+      ["icloud", join124(this.home, "Library", "Mobile Documents")]
     ];
     for (const [kind, root] of tops) {
       if (isWithinScopePath(realPath, root))
@@ -167574,7 +168507,7 @@ class MacPermissions {
       return true;
     if (realPath === "/" || realPath === "/Volumes")
       return true;
-    return [join123(this.home, "Desktop"), join123(this.home, "Documents"), join123(this.home, "Downloads"), join123(this.home, "Library", "Mobile Documents")].some((top) => isWithinScopePath(top, realPath));
+    return [join124(this.home, "Desktop"), join124(this.home, "Documents"), join124(this.home, "Downloads"), join124(this.home, "Library", "Mobile Documents")].some((top) => isWithinScopePath(top, realPath));
   }
   nodeAccess(guard) {
     if (this.recall(guard) === "granted")
@@ -167609,7 +168542,7 @@ class MacPermissions {
     return { state: "needs_full_disk_access", message: MAC_ACCESS_COPY.fullDiskAccess(this.appName()), settings_url: FULL_DISK_ACCESS_URL };
   }
   hasFullDiskAccess() {
-    for (const path of [join123(this.home, "Library", "Safari"), join123(this.home, "Library", "Application Support", "com.apple.TCC")]) {
+    for (const path of [join124(this.home, "Library", "Safari"), join124(this.home, "Library", "Application Support", "com.apple.TCC")]) {
       try {
         this.listProtected(path);
         return true;
@@ -167674,7 +168607,7 @@ class MacPermissions {
     let loaded = {};
     if (this.memoryPath && existsSync89(this.memoryPath)) {
       try {
-        const parsed = JSON.parse(readFileSync79(this.memoryPath, "utf8"));
+        const parsed = JSON.parse(readFileSync80(this.memoryPath, "utf8"));
         if (parsed && typeof parsed === "object")
           loaded = parsed;
       } catch {
@@ -179340,7 +180273,7 @@ var init_open_target2 = __esm(() => {
 // src/workers/local-files/volume-identity.ts
 import { createHash as createHash96 } from "node:crypto";
 import { execFileSync as execFileSync5 } from "node:child_process";
-import { existsSync as existsSync92, lstatSync as lstatSync46, readFileSync as readFileSync80, readdirSync as readdirSync27, realpathSync as realpathSync26 } from "node:fs";
+import { existsSync as existsSync92, lstatSync as lstatSync46, readFileSync as readFileSync81, readdirSync as readdirSync27, realpathSync as realpathSync26 } from "node:fs";
 import { homedir as homedir45 } from "node:os";
 
 class VolumeResolver {
@@ -179510,7 +180443,7 @@ function normalizeNetworkSource(source) {
 function defaultReadMounts(platform2) {
   if (platform2 === "darwin")
     return execFileSync5("/sbin/mount", [], { encoding: "utf8", timeout: 5000 });
-  return readFileSync80("/proc/self/mountinfo", "utf8");
+  return readFileSync81("/proc/self/mountinfo", "utf8");
 }
 function defaultDiskutilPlist(mountPoint) {
   try {
@@ -179892,16 +180825,16 @@ var init_source_scope_browser = __esm(() => {
 });
 
 // src/workers/local-files/mac-settings.ts
-import { spawn as spawn9 } from "node:child_process";
+import { spawn as spawn11 } from "node:child_process";
 import { existsSync as existsSync93 } from "node:fs";
 import { homedir as homedir46 } from "node:os";
-import { join as join124 } from "node:path";
+import { join as join125 } from "node:path";
 function helperAppPathForHome(home2 = homedir46()) {
-  return join124(home2, "Library", "Application Support", "Olympus", ENGINE_HELPER_APP_NAME);
+  return join125(home2, "Library", "Application Support", "Olympus", ENGINE_HELPER_APP_NAME);
 }
 function revealHelperAndOpenFullDiskAccess(deps = {}) {
   const run2 = deps.run ?? ((command, args) => {
-    spawn9(command, args, { stdio: "ignore", detached: true }).unref();
+    spawn11(command, args, { stdio: "ignore", detached: true }).unref();
   });
   const helper = deps.helperApp ?? helperAppPathForHome();
   if ((deps.exists ?? existsSync93)(helper))
@@ -179915,7 +180848,7 @@ var init_mac_settings = __esm(() => {
 // src/workers/local-files/scope-browser.ts
 import { lstatSync as lstatSync47, readdirSync as readdirSync28, realpathSync as realpathSync27 } from "node:fs";
 import { homedir as homedir47 } from "node:os";
-import { join as join125 } from "node:path";
+import { join as join126 } from "node:path";
 function safeRealpath(path) {
   try {
     return realpathSync27.native(path);
@@ -179945,7 +180878,7 @@ function localFilesListing(options) {
   const readDirectory = options.readDirectory ?? ((realPath) => readdirSync28(realPath, { withFileTypes: true }));
   const permissions = options.permissions ?? new MacPermissions({
     home: home2,
-    memoryPath: join125(olympusDataDir(), "local-files", "folder-access.json")
+    memoryPath: join126(olympusDataDir(), "local-files", "folder-access.json")
   });
   const node = (scopePath, name, parentKey2, access) => {
     const own3 = isInsideOwnRoot(scopePath, context2);
@@ -179982,7 +180915,7 @@ function localFilesListing(options) {
     }
     const offered = (entry) => !entry.isSymbolicLink() && entry.isDirectory();
     return entries.filter(offered).map((entry) => {
-      const childReal = join125(realPath, entry.name);
+      const childReal = join126(realPath, entry.name);
       const guard = permissions.guardOf(childReal, volumes.volumeOf(childReal));
       const access = guard && guard.root === childReal ? permissions.nodeAccess(guard) : undefined;
       return node(scopePathOfRealPath(volumes, childReal), entry.name, parentKey2, access);
@@ -181507,7 +182440,7 @@ var init_tier_visibility = __esm(() => {
 
 // src/core/source-account-migration.ts
 import { linkSync as linkSync4, lstatSync as lstatSync48, mkdirSync as mkdirSync60, readdirSync as readdirSync29, realpathSync as realpathSync28, renameSync as renameSync21, rmdirSync as rmdirSync8, statSync as statSync41, unlinkSync as unlinkSync4 } from "node:fs";
-import { basename as basename19, dirname as dirname92, isAbsolute as isAbsolute36, join as join126, relative as relative16, resolve as resolve27, sep as sep19 } from "node:path";
+import { basename as basename20, dirname as dirname92, isAbsolute as isAbsolute36, join as join127, relative as relative16, resolve as resolve27, sep as sep19 } from "node:path";
 function accountFolderMigrationEnabled(env = process.env) {
   const value2 = env[MIGRATE_ACCOUNT_FOLDERS_ENV]?.trim().toLowerCase() ?? "";
   return value2 === "" || MIGRATION_ON.includes(value2);
@@ -181536,7 +182469,7 @@ function candidates(sourceId, slot, env) {
   if (sourceId === TELEGRAM_SOURCE_ID) {
     const legacyDir = dirname92(legacyTelegramSessionBase(env));
     const folderDir = dirname92(accountSessionPath(account, env));
-    const own3 = basename19(legacyTelegramSessionBase(env));
+    const own3 = basename20(legacyTelegramSessionBase(env));
     const staged = new Set;
     for (const name of listNames2(legacyDir))
       if (folderNameOfStagedTelegramLogin(name, env))
@@ -181547,7 +182480,7 @@ function candidates(sourceId, slot, env) {
         staged.add(legacyName);
     }
     for (const name of [...staged].sort()) {
-      found.push({ role: "raw", from: join126(legacyDir, name), to: join126(folderDir, folderNameOfStagedTelegramLogin(name, env)), kind: "file", db: false });
+      found.push({ role: "raw", from: join127(legacyDir, name), to: join127(folderDir, folderNameOfStagedTelegramLogin(name, env)), kind: "file", db: false });
     }
   }
   return found;
@@ -181595,13 +182528,13 @@ function relPath(ctx, path) {
 }
 function absPath(ctx, rel) {
   if (!rel.startsWith("@"))
-    return join126(ctx.root, ...rel.split("/"));
+    return join127(ctx.root, ...rel.split("/"));
   const slash = rel.indexOf("/");
   const tag = rel.slice(1, slash < 0 ? undefined : slash);
   const root = ctx.roots.find((candidate) => candidate.tag === tag && tag !== "")?.root;
   if (root === undefined || slash < 0)
     throw new TypeError(`A migration path names a folder this build does not know (${JSON.stringify(tag)}).`);
-  return join126(root, ...rel.slice(slash + 1).split("/"));
+  return join127(root, ...rel.slice(slash + 1).split("/"));
 }
 function moveWithoutReplacing(from, to, kind) {
   if (kind === "dir") {
@@ -181650,13 +182583,13 @@ function nearRealPath(path) {
   const rest = [];
   let near = resolve27(path);
   for (;; ) {
-    rest.unshift(basename19(near));
+    rest.unshift(basename20(near));
     const up = dirname92(near);
     if (up === near)
       return resolve27(path);
     near = up;
     try {
-      return join126(realpathSync28(near), ...rest);
+      return join127(realpathSync28(near), ...rest);
     } catch {}
   }
 }
@@ -181665,7 +182598,7 @@ function destinationIsOurs(ctx, destination) {
   const at = rootOf(ctx, parent);
   if (!at)
     return false;
-  return nearRealPath(parent) === join126(nearRealPath(at.root), at.below);
+  return nearRealPath(parent) === join127(nearRealPath(at.root), at.below);
 }
 function nearestExisting(path) {
   let near = resolve27(path);
@@ -181718,7 +182651,7 @@ function inspect(ctx, sourceId, slot, entry) {
     const found = look(candidate.from);
     if (found.kind === "absent")
       continue;
-    const name = basename19(candidate.from);
+    const name = basename20(candidate.from);
     if (found.kind === "unreadable")
       return skip("unreadable", `${name} cannot be looked at.`);
     if (found.kind === "link" || found.kind === "other" || found.kind !== candidate.kind) {
@@ -181736,7 +182669,7 @@ function inspect(ctx, sourceId, slot, entry) {
     return skip("unreadable", "The account folder cannot be looked at.");
   }
   for (const { candidate, found } of present) {
-    const name = basename19(candidate.from);
+    const name = basename20(candidate.from);
     if (!destinationIsOurs(ctx, candidate.to))
       return skip("unexpected_file", `A folder on the way to ${name}'s place in the account folder is a link.`);
     const destination = look(candidate.to);
@@ -181785,7 +182718,7 @@ function checkDatabases(ctx, moves) {
     const path = absPath(ctx, move.from);
     const reads = storeFileReads(path, waitMs(ctx));
     if (reads === "busy")
-      return { busy: `${basename19(move.from)} is in use by another program, so the account stays where it is for now.` };
+      return { busy: `${basename20(move.from)} is in use by another program, so the account stays where it is for now.` };
     if (reads === "damaged") {
       checked.push({ file: move.to, result: "damaged" });
       continue;
@@ -181801,7 +182734,7 @@ function checkDatabases(ctx, moves) {
     ctx.quickCheckSpentMs += ctx.now() - started;
     ctx.quickCheckBytes += bytes;
     if (result === "busy")
-      return { busy: `${basename19(move.from)} is in use by another program, so the account stays where it is for now.` };
+      return { busy: `${basename20(move.from)} is in use by another program, so the account stays where it is for now.` };
     checked.push({ file: move.to, result });
   }
   return { checked };
@@ -181834,7 +182767,7 @@ function syncFolderChains(ctx, folders) {
     let current2 = realpathSync28(at.root);
     chain.add(current2);
     for (const part of at.below.split(sep19).filter(Boolean)) {
-      current2 = join126(current2, part);
+      current2 = join127(current2, part);
       chain.add(current2);
     }
   }
@@ -181854,7 +182787,7 @@ function makeFolders(ctx, moves) {
       destinations.add(destination);
       let current2 = real;
       for (const part of relative16(ctx.root, destination).split(sep19).filter(Boolean)) {
-        current2 = join126(current2, part);
+        current2 = join127(current2, part);
         const found = lookAt(current2);
         if (found.kind === "dir")
           continue;
@@ -181905,7 +182838,7 @@ function moveOne(ctx, move, direction) {
   const [from, to] = direction === "forward" ? [absPath(ctx, move.from), absPath(ctx, move.to)] : [absPath(ctx, move.to), absPath(ctx, move.from)];
   const source = look(from);
   const target = look(to);
-  const name = basename19(move.from);
+  const name = basename20(move.from);
   if (source.kind === "absent") {
     if (target.kind !== "absent")
       return "there";
@@ -181954,13 +182887,13 @@ function verifyIdentity(ctx, moves) {
     if (found.kind === "absent" && isDisposable(move))
       continue;
     if (found.kind !== "file" && found.kind !== "dir" || found.kind !== move.kind) {
-      throw new MoveFault("failed", "verify_failed", `${basename19(move.from)} is not there after the move.`);
+      throw new MoveFault("failed", "verify_failed", `${basename20(move.from)} is not there after the move.`);
     }
     if (String(found.dev) !== move.dev || String(found.ino) !== move.ino) {
-      throw new MoveFault("failed", "verify_failed", `${basename19(move.from)} is not the same file after the move.`);
+      throw new MoveFault("failed", "verify_failed", `${basename20(move.from)} is not the same file after the move.`);
     }
     if (move.kind === "file" && !move.from.endsWith("-shm") && Number(found.size) !== move.size) {
-      throw new MoveFault("failed", "verify_failed", `${basename19(move.from)} changed size in the move (${move.size} bytes, now ${Number(found.size)}).`);
+      throw new MoveFault("failed", "verify_failed", `${basename20(move.from)} changed size in the move (${move.size} bytes, now ${Number(found.size)}).`);
     }
   }
 }
@@ -181968,12 +182901,12 @@ function verifyRestored(ctx, moves) {
   for (const move of moves) {
     const back = look(absPath(ctx, move.from));
     if (isPlanned(look(absPath(ctx, move.to)), move)) {
-      throw new MoveFault("failed", "move_failed", `${basename19(move.from)} is still in the account folder.`);
+      throw new MoveFault("failed", "move_failed", `${basename20(move.from)} is still in the account folder.`);
     }
     if (back.kind === "absent" && isDisposable(move))
       continue;
     if (back.kind !== "file" && back.kind !== "dir" || back.kind !== move.kind) {
-      throw new MoveFault("failed", "move_failed", `${basename19(move.from)} is not back at its old place.`);
+      throw new MoveFault("failed", "move_failed", `${basename20(move.from)} is not back at its old place.`);
     }
   }
 }
@@ -181985,7 +182918,7 @@ function forward(ctx, sourceId, slot, migration) {
   makeFolders(ctx, moves);
   moves.forEach((move, index) => {
     if (moveOne(ctx, move, "forward") === "lost") {
-      throw new MoveFault("failed", "move_failed", `${basename19(move.from)} is in neither place.`);
+      throw new MoveFault("failed", "move_failed", `${basename20(move.from)} is in neither place.`);
     }
     checkpoint(`rename:${index}`);
   });
@@ -181996,9 +182929,9 @@ function forward(ctx, sourceId, slot, migration) {
       continue;
     const reads = storeFileReads(absPath(ctx, move.to), waitMs(ctx));
     if (reads === "busy")
-      throw new MoveFault("skipped", "busy", `${basename19(move.from)} is in use by another program, so the account stays where it is for now.`);
+      throw new MoveFault("skipped", "busy", `${basename20(move.from)} is in use by another program, so the account stays where it is for now.`);
     if (reads !== "reads") {
-      throw new MoveFault("failed", "verify_failed", `${basename19(move.from)} does not open after the move.`);
+      throw new MoveFault("failed", "verify_failed", `${basename20(move.from)} does not open after the move.`);
     }
   }
   checkpoint("verified");
@@ -182036,7 +182969,7 @@ function revert(ctx, sourceId, slot, migration, fault) {
   const lost = [];
   back.forEach((move, index) => {
     if (moveOne(ctx, move, "back") === "lost")
-      lost.push(basename19(move.from));
+      lost.push(basename20(move.from));
     checkpoint(`unrename:${index}`);
   });
   for (const move of moves) {
@@ -182139,12 +183072,12 @@ function foldLogs(ctx, moves) {
       const logs = moves.filter((other) => other.from === `${move.from}-wal` || other.from === `${move.from}-journal`);
       if (logs.every((log) => log.size === 0))
         continue;
-      return notFolded(`${basename19(move.from)} is not a database, and it has a log that would be lost, so the account stays where it is.`);
+      return notFolded(`${basename20(move.from)} is not a database, and it has a log that would be lost, so the account stays where it is.`);
     }
     if (result === "busy") {
-      return { kind: "skip", reason: "busy", detail: `${basename19(move.from)} is in use by another program, so its write-ahead log could not be folded into it; the account stays where it is for now.` };
+      return { kind: "skip", reason: "busy", detail: `${basename20(move.from)} is in use by another program, so its write-ahead log could not be folded into it; the account stays where it is for now.` };
     }
-    return notFolded(`${basename19(move.from)}'s write-ahead log could not be folded into it, so the account stays where it is.`);
+    return notFolded(`${basename20(move.from)}'s write-ahead log could not be folded into it, so the account stays where it is.`);
   }
   return;
 }
@@ -182167,7 +183100,7 @@ function holdCaptureLocks(ctx, sourceId, slot) {
       continue;
     let lock;
     try {
-      lock = (__accountMigrationTestHooks.captureLock ?? tryHoldFileFlock)(join126(dir, name));
+      lock = (__accountMigrationTestHooks.captureLock ?? tryHoldFileFlock)(join127(dir, name));
     } catch {
       return giveBack(skip("unreadable", `Its capture lock (${name}) cannot be taken.`));
     }
@@ -183335,12 +184268,12 @@ var init_source_scope_runtime = __esm(() => {
 });
 
 // src/workers/google-connectors/gmail-scope-browser.ts
-import { dirname as dirname93, join as join127 } from "node:path";
+import { dirname as dirname93, join as join128 } from "node:path";
 function createGmailPickerRequestBudget(options) {
   return new GoogleDailyRequestBudget({
     provider: "Gmail mail picker",
     dailyRequestBudget: GMAIL_PICKER_DAILY_REQUEST_BUDGET,
-    statePath: join127(dirname93(options.laneStatePath), "gmail-picker-daily-request-budget.json"),
+    statePath: join128(dirname93(options.laneStatePath), "gmail-picker-daily-request-budget.json"),
     ...options.now ? { now: options.now } : {}
   });
 }
@@ -184093,7 +185026,7 @@ var init_installed_tier_classification = __esm(() => {
 });
 
 // src/workers/classification/sniffer-resolver.ts
-import { mkdirSync as mkdirSync61, readFileSync as readFileSync81 } from "node:fs";
+import { mkdirSync as mkdirSync61, readFileSync as readFileSync82 } from "node:fs";
 import { dirname as dirname94 } from "node:path";
 
 class SnifferCallBudget {
@@ -184108,7 +185041,7 @@ class SnifferCallBudget {
     this.statePath = options.statePath;
     if (this.statePath) {
       try {
-        const saved = JSON.parse(readFileSync81(this.statePath, "utf8"));
+        const saved = JSON.parse(readFileSync82(this.statePath, "utf8"));
         if (typeof saved.day === "string" && typeof saved.used === "number" && Number.isFinite(saved.used)) {
           this.day = saved.day;
           this.used = Math.max(0, Math.floor(saved.used));
@@ -204459,7 +205392,7 @@ __export(exports_server2, {
 });
 import { execFile as execFile4 } from "node:child_process";
 import { existsSync as existsSync98 } from "node:fs";
-import { dirname as dirname97, isAbsolute as isAbsolute38, join as join128 } from "node:path";
+import { dirname as dirname97, isAbsolute as isAbsolute38, join as join129 } from "node:path";
 function createWorkerMessagingCaptureOwnership(options) {
   const env = options.env ?? process.env;
   const nativeOwners = {
@@ -204473,23 +205406,71 @@ function createWorkerMessagingCaptureOwnership(options) {
     whatsappBridgePath: whatsappBridgePathForPackage(options.packageRoot, { env })
   }));
   const captures = {};
+  const rawCaptures = {};
+  const paused = { telegram: 0, whatsapp: 0 };
+  const queues = { telegram: Promise.resolve(), whatsapp: Promise.resolve() };
+  const serialized = (source, operation) => {
+    const result = queues[source].then(operation);
+    queues[source] = result.catch(() => {
+      return;
+    });
+    return result;
+  };
   for (const source of ["telegram", "whatsapp"]) {
-    if (!nativeOwners[source])
-      captures[source] = createSupervisor(source);
+    if (nativeOwners[source])
+      continue;
+    const capture = createSupervisor(source);
+    rawCaptures[source] = capture;
+    captures[source] = {
+      reconcile: async () => {
+        const stopped = () => ({ source, state: "stopped" });
+        if (paused[source])
+          return stopped();
+        return serialized(source, async () => paused[source] ? stopped() : capture.reconcile());
+      },
+      stop: () => serialized(source, () => capture.stop()),
+      ...capture.liveness ? { liveness: () => capture.liveness() } : {}
+    };
   }
   const revokeGrant = options.revokeGrant ?? revokeMessagingCaptureGrant;
   return {
     captures,
     nativeOwners,
     async stopForUnpair(source) {
-      if (nativeOwners[source]) {
+      if (nativeOwners[source])
         throw new NativeMessagingCaptureOwnerError(source);
-      }
-      const capture = captures[source];
+      const capture = rawCaptures[source];
       if (!capture)
         throw new Error(`Worker ${source} capture ownership is unavailable.`);
-      await capture.stop();
-      revokeGrant(defaultMessagingCaptureGrantPath(source, options.registryPath));
+      await serialized(source, async () => {
+        await capture.stop();
+        revokeGrant(defaultMessagingCaptureGrantPath(source, options.registryPath));
+      });
+    },
+    async withMessagingCapturePaused(source, operation) {
+      if (nativeOwners[source])
+        throw new NativeMessagingCaptureOwnerError(source);
+      const capture = rawCaptures[source];
+      if (!capture)
+        throw new Error(`Worker ${source} capture ownership is unavailable.`);
+      paused[source] += 1;
+      return serialized(source, async () => {
+        let stopped = false;
+        try {
+          await capture.stop();
+          stopped = true;
+          return await operation();
+        } finally {
+          paused[source] -= 1;
+          if (stopped && !paused[source] && (options.shouldResumeCapture?.() ?? true)) {
+            try {
+              await capture.reconcile();
+            } catch {
+              options.onResumeFailure?.(source);
+            }
+          }
+        }
+      });
     }
   };
 }
@@ -205602,15 +206583,19 @@ async function main() {
   const connectedHandles = readActiveConnectedHandles(process.env);
   const connectedHandleRegistryPath = handleRegistryPathFromEnv(process.env, true);
   const packageRoot = olympusPackageRoot();
+  let capturesClosed = false;
+  const captureFailures = {};
   const captureOwnership = createWorkerMessagingCaptureOwnership({
+    shouldResumeCapture: () => !capturesClosed,
+    onResumeFailure: (source) => {
+      captureFailures[source] = true;
+    },
     registryPath: connectedHandleRegistryPath,
     packageRoot
   });
   const captures = captureOwnership.captures;
   let captureReconcileRunning = false;
-  let capturesClosed = false;
   const captureStatuses = {};
-  const captureFailures = {};
   const captureEntries = () => Object.entries(captures);
   const reconcileCaptures = async () => {
     if (capturesClosed || captureReconcileRunning)
@@ -208106,6 +209091,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
           saveStandard: (update) => dashboardConsult.saveStandard(update)
         },
         stopMessagingCapture,
+        withMessagingCapturePaused: captureOwnership.withMessagingCapturePaused,
         captureRuntime: dashboardCaptureRuntime,
         workerRestart: {
           canRestart: () => modelReloadInstalled && workerRestartsItself(workerLaunch, process.env),
@@ -208917,7 +209903,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     } : {},
     ...fileExtractionRuntime ? { extractionState: (identity2) => fileExtractionRuntime.jobs.itemExtractionState(identity2) } : {},
     ownerContext: privacyOwnerWords,
-    budgetStatePath: join128(dirname97(resolveClassificationLedgerPath(process.env)), "tier-sniffer-budget.json"),
+    budgetStatePath: join129(dirname97(resolveClassificationLedgerPath(process.env)), "tier-sniffer-budget.json"),
     intervalMs: snifferEnv.intervalMs,
     ...snifferEnv.maxCallsPerPass !== undefined ? { maxCallsPerPass: snifferEnv.maxCallsPerPass } : {},
     maxCallsPerDay: snifferEnv.maxCallsPerDay,
@@ -210227,7 +211213,7 @@ init_config();
 init_dashboard_opening();
 init_open_targets();
 import { randomBytes as randomBytes33 } from "node:crypto";
-import { existsSync as existsSync99, readFileSync as readFileSync82, openSync as openSync29, closeSync as closeSync30, writeSync as writeSync9 } from "node:fs";
+import { existsSync as existsSync99, readFileSync as readFileSync83, openSync as openSync30, closeSync as closeSync31, writeSync as writeSync9 } from "node:fs";
 import { createInterface as createInterface3 } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
 import { resolve as resolve28 } from "node:path";
@@ -212872,8 +213858,10 @@ Run: ${ocr.repairHint}`);
   }
   if (args[0] === "connect") {
     try {
-      const result = await runConnect(args.slice(1));
-      console.log(JSON.stringify(result, null, 2));
+      const pairing = (args[1] === "telegram" || args[1] === "whatsapp") && args.includes("--pair");
+      const json2 = pairing && args.includes("--json");
+      const result = await runConnect(json2 ? args.slice(1).filter((arg) => arg !== "--json") : args.slice(1));
+      console.log(pairing && !json2 ? formatMessagingPairingResult(args[1], result) : JSON.stringify(result, null, 2));
     } catch (error2) {
       if (error2 instanceof OperationError) {
         console.error(`Error [${error2.code}]: ${error2.message}`);
@@ -213251,7 +214239,7 @@ function parseArgs(operation, args) {
     }
   }
   if (operation.cliHints.stdin && params[operation.cliHints.stdin] === undefined && !process.stdin.isTTY) {
-    params[operation.cliHints.stdin] = readFileSync82("/dev/stdin", "utf8");
+    params[operation.cliHints.stdin] = readFileSync83("/dev/stdin", "utf8");
   }
   return params;
 }
@@ -213606,7 +214594,7 @@ function parseOwnerTierOverrideArgs(args) {
     throw new OperationError("invalid_params", "Owner tier override requires --reason <string>.");
   let raw;
   try {
-    raw = readFileSync82(resolve28(input2), "utf8");
+    raw = readFileSync83(resolve28(input2), "utf8");
   } catch (error2) {
     throw new OperationError("invalid_params", `Owner tier override --input file could not be read: ${error2.message}`);
   }
@@ -214662,10 +215650,30 @@ async function runConnect(args) {
   }
   throw new OperationError("invalid_params", `Unsupported connect source: ${source}`);
 }
+function terminalMessagingCaptureApproval(source, tell) {
+  if (source === "telegram") {
+    tell(`Olympus reads every Telegram chat on this account, including chats started after pairing. Each message is still judged Personal, Private or Secret by what it says.
+`);
+    return { source: "telegram", explicitApproval: true, wholeAccount: true };
+  }
+  tell(`Olympus reads every WhatsApp chat on this account, from new messages delivered while its bridge runs; this does not import the full historical archive. Each message is still judged Personal, Private or Secret by what it says.
+`);
+  return { source: "whatsapp", explicitApproval: true, wholeAccount: true };
+}
+function formatMessagingPairingResult(source, result) {
+  const label = source === "telegram" ? "Telegram" : "WhatsApp";
+  if (!result || typeof result !== "object" || result.status !== "connected") {
+    return `${label} was not connected. No capture started.`;
+  }
+  if (result.captureActivation !== "requested") {
+    return `${label} is connected, but starting capture needs attention. Open the dashboard for next steps.`;
+  }
+  return `${label} is connected. Olympus is starting capture; open the dashboard to watch messages arrive.`;
+}
 async function runMessagingPairing(source, secretStore, registryPath) {
   let terminal;
   try {
-    terminal = openSync29("/dev/tty", "r+");
+    terminal = openSync30("/dev/tty", "r+");
   } catch {
     throw new OperationError("invalid_params", "Run this pairing command in your own terminal on the Olympus host. Login codes and passwords must never be entered in chat.");
   }
@@ -214682,21 +215690,7 @@ async function runMessagingPairing(source, secretStore, registryPath) {
       ...secretStore ? { secretStore } : {},
       ...registryPath ? { registryPath } : {},
       whatsappQrMode: "terminal",
-      requestCaptureScope: async ({ chats }) => {
-        if (source === "telegram") {
-          if (chats.length === 0) {
-            tell(`No chats were available to read. Nothing will be captured.
-`);
-            return;
-          }
-          tell(`Olympus reads all ${chats.length} of your most recent Telegram chats. Each message is still judged Personal, Private or Secret by what it says. A chat you start after pairing is read once you pair again.
-`);
-          return { source: "telegram", explicitApproval: true, chatScopes: [...new Set(chats.map((chat) => chat.chatScope))] };
-        }
-        tell(`Olympus reads every WhatsApp chat on this account, from new messages delivered while its bridge runs; this does not import the full historical archive. Each message is still judged Personal, Private or Secret by what it says.
-`);
-        return { source: "whatsapp", explicitApproval: true, wholeAccount: true };
-      }
+      requestCaptureScope: async () => terminalMessagingCaptureApproval(source, tell)
     });
     if (!paired.registered)
       return paired;
@@ -214706,7 +215700,7 @@ async function runMessagingPairing(source, secretStore, registryPath) {
     const activation = restartCaptureWorker();
     return { ...paired, captureStarted: false, captureActivation: activation.ok ? "requested" : "needs_attention", next: activation.ok ? "Open this source in the Olympus dashboard to monitor capture and initial indexing." : `Pairing is saved. Capture starts once the worker restarts: ${activation.next}` };
   } finally {
-    closeSync30(terminal);
+    closeSync31(terminal);
   }
 }
 function parseConnectOptions(args) {
@@ -215312,6 +216306,7 @@ async function runExtractPdfsCommand(args) {
 }
 export {
   v04PublicCliCommandName,
+  terminalMessagingCaptureApproval,
   runXReconcileRecovery,
   runWorkerForeground,
   runSourceSchedulerUnparkCancel,
@@ -215338,6 +216333,7 @@ export {
   olympusCommandHint2 as olympusCommandHint,
   lifecycleRecoverySignalsFromWorkerHttpState,
   isV04PublicCliInvocation,
+  formatMessagingPairingResult,
   formatCliFatalError,
   doctorFailureSummary,
   dashboardTargetArg

@@ -543,6 +543,18 @@ source-specific prerequisites are satisfied; no legacy read-authority flag or
 migration utility is needed. Omit `--session-ready` for Telegram or WhatsApp
 until its local pairing helper is ready; otherwise it records `reauth_required`.
 
+On this computer's Keys page, pair Telegram or WhatsApp on its card. After a
+first pairing, choose **Pick chats (recommended)** and confirm the selected
+chats, or **Everything in this account** (including new chats). Pairing alone
+does not register a capture grant or start capture. Returning to Keys resumes
+the waiting login prompt, QR or chat choice. Cancelling the first chat choice
+leaves capture off but keeps the provider login: remove Olympus in Telegram
+active sessions or WhatsApp linked devices to unlink it.
+Re-pairing an already approved account retains its existing capture scope.
+The WhatsApp picker lists saved contacts and joined groups and may omit unsaved
+chats. Each message is still classified individually; chat selection does not
+set its privacy tier.
+
 <details>
 <summary>CLI fallback reference for a chosen source</summary>
 
