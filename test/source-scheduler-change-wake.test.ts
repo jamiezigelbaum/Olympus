@@ -5,6 +5,8 @@
 import { describe, expect, test } from 'bun:test';
 import {
   SourceScheduler,
+  createTelegramSchedulerSource,
+  createWhatsAppSchedulerSource,
   type SourceSchedulerSource,
   type SourceSchedulerTaskRunResult,
 } from '../src/workers/source-scheduler.ts';
@@ -100,6 +102,33 @@ function watchedSource(options: {
     unsubscribed: () => unsubscribed,
   };
 }
+
+describe('messaging scheduler wake wiring', () => {
+  test('a capture signal wakes both source pulls and WhatsApp extraction', async () => {
+    const config = { worker: { scheduler: { syncIntervalSeconds: 1800, freshnessThresholdHours: 26 } } } as any;
+    let telegramRuns = 0, whatsappRuns = 0, extractRuns = 0;
+    let telegramWake = () => {}, whatsappWake = () => {};
+    const telegram = createTelegramSchedulerSource({ config,
+      sync: { pull: async () => { telegramRuns++; return { status: 'idle', counts: {} }; }, lastStoreRunCompletedAt: () => undefined } as any,
+      subscribeChanges: wake => { telegramWake = wake; return () => {}; },
+    })!;
+    const whatsapp = createWhatsAppSchedulerSource({ config,
+      sync: { pull: async () => { whatsappRuns++; return { status: 'idle', counts: {} }; }, lastStoreRunCompletedAt: () => undefined } as any,
+      fileExtraction: { plan: async () => ({ jobsQueued: 0, candidates: 0, jobsExisting: 0, jobsUnroutable: 0, jobsRefused: 0, done: true }),
+        run: async () => { extractRuns++; return { processedJobs: 0, counts: {} }; } } as any,
+      subscribeChanges: wake => { whatsappWake = wake; return () => {}; },
+    })!;
+    const h = harness([telegram, whatsapp]);
+    h.scheduler.start();
+    await settle();
+    const before = [telegramRuns, whatsappRuns, extractRuns];
+    telegramWake(); whatsappWake(); whatsappWake();
+    expect(h.pendingDebounce()).toBe(2);
+    await h.fireDebounce();
+    expect([telegramRuns, whatsappRuns, extractRuns]).toEqual(before.map(n => n + 1));
+    h.scheduler.stop();
+  });
+});
 
 describe('scheduler push wake', () => {
   test('subscribes on start, never before, and unsubscribes on stop', () => {

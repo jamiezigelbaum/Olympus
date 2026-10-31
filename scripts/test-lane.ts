@@ -6,7 +6,7 @@
  *   bun scripts/test-lane.ts go
  *
  * Lane membership is derived from each file's source on every run (see
- * test/helpers/test-lanes.ts), so there is no list to maintain. Deploy files
+ * test/helpers/test-lanes.ts), so there is no list to maintain. Sharded files
  * are assigned with deterministic longest-processing-time placement using a
  * hash-keyed timing map from a trusted GitHub run. Unknown files receive a
  * conservative p95. Timeout budgets are never treated as runtime weights.
@@ -129,8 +129,11 @@ export async function runTestLane(args: string[]): Promise<number> {
   if (options.shard) {
     const timing = JSON.parse(
       readFileSync(join(ROOT, 'config/test-timings.json'), 'utf8'),
-    ) as TestTimingConfig;
-    const plan = planWeightedShards(selected, options.shard.total, timing);
+    ) as TestTimingConfig & { fastMs: Record<string, number>; fastUnknownP95Ms: number };
+    const weights = options.lane === 'fast'
+      ? { ...timing, deployMs: timing.fastMs, unknownP95Ms: timing.fastUnknownP95Ms }
+      : timing;
+    const plan = planWeightedShards(selected, options.shard.total, weights);
     selected = plan.shards[options.shard.index - 1]!;
     placement = `, predicted ${plan.weightsMs[options.shard.index - 1]}ms, ${plan.unknownFiles.length} unknown overall`;
   }

@@ -405,7 +405,7 @@ export function configuredCaptureLocations(env: Record<string, string | undefine
  * OpenClaw plugin config; core/engine-service.ts) when the engine host is
  * installed here: its LaunchAgent exists, or this process runs under it.
  */
-function installedEngineConfig(env: Record<string, string | undefined>): Record<string, unknown> | undefined {
+export function installedEngineConfig(env: Record<string, string | undefined>): Record<string, unknown> | undefined {
   const home = env.HOME?.trim() || homedir();
   const layout = process.platform === 'linux' ? resolveLinuxEngineLayout(env) : undefined;
   const receipt = layout ? readLinuxEngineReceipt(layout.receiptPath) : undefined;
