@@ -118070,12 +118070,16 @@ function createNativeProcessService(options) {
       lifetime.context.serviceHealth?.clearFailure();
     } catch {}
   };
-  const scheduleRestart = (lifetime) => {
+  const scheduleRestart = (lifetime, deliberate = false) => {
     if (!isCurrent(lifetime) || lifetime.restartTimer)
       return;
-    const index = Math.min(lifetime.restartAttempt, Math.max(restartDelaysMs.length - 1, 0));
+    const fast = deliberate && lifetime.fastRestarts < FAST_SELF_RESTARTS;
+    if (fast)
+      lifetime.fastRestarts += 1;
+    const index = fast ? 0 : Math.min(lifetime.restartAttempt, Math.max(restartDelaysMs.length - 1, 0));
     const delay = restartDelaysMs[index] ?? 30000;
-    lifetime.restartAttempt += 1;
+    if (!fast)
+      lifetime.restartAttempt += 1;
     lifetime.restartTimer = setTimeout(() => {
       lifetime.restartTimer = undefined;
       if (!isCurrent(lifetime))
@@ -118188,7 +118192,7 @@ function createNativeProcessService(options) {
       }, () => {
         reportStuckDescendants(lifetime, `Olympus ${options.label} descendants could not be stopped after an unexpected exit; restarting it anyway.`);
       }).then(() => {
-        scheduleRestart(lifetime);
+        scheduleRestart(lifetime, code === SELF_RESTART_EXIT_CODE && signal === null);
       });
     });
     child2.once("error", () => {
@@ -118218,12 +118222,15 @@ function createNativeProcessService(options) {
         clearTimeout(lifetime.stableTimer);
       lifetime.stableTimer = setTimeout(() => {
         lifetime.stableTimer = undefined;
-        if (isCurrent(lifetime) && lifetime.child === child2 && lifetime.childReady)
+        if (isCurrent(lifetime) && lifetime.child === child2 && lifetime.childReady) {
           lifetime.restartAttempt = 0;
+          lifetime.fastRestarts = 0;
+        }
       }, stableUptimeMs);
       lifetime.stableTimer.unref?.();
     } else {
       lifetime.restartAttempt = 0;
+      lifetime.fastRestarts = 0;
     }
     clearFailure(lifetime);
     lifetime.context.logger?.info?.(`Olympus ${options.label} is ready.`);
@@ -118244,6 +118251,7 @@ function createNativeProcessService(options) {
         childReady: false,
         stopping: false,
         restartAttempt: 0,
+        fastRestarts: 0,
         restartTimer: undefined,
         stableTimer: undefined,
         cleanupPromise: undefined,
@@ -118435,7 +118443,7 @@ function delay(ms) {
     timeout.unref?.();
   });
 }
-var DEFAULT_READINESS_POLL_MS = 100, DEFAULT_STOP_GRACE_MS2 = 2000, DEFAULT_RESTART_DELAYS_MS, DEFAULT_DESCENDANT_SETTLE_MS = 2000, DESCENDANT_SETTLE_POLL_MS = 50, childStdio = "ignore", childObserver, NativeProcessServiceStoppedError, NativeProcessConfigurationError, NativeProcessChildAliveError, NativeProcessReportedStartError;
+var DEFAULT_READINESS_POLL_MS = 100, DEFAULT_STOP_GRACE_MS2 = 2000, DEFAULT_RESTART_DELAYS_MS, SELF_RESTART_EXIT_CODE = 75, FAST_SELF_RESTARTS = 3, DEFAULT_DESCENDANT_SETTLE_MS = 2000, DESCENDANT_SETTLE_POLL_MS = 50, childStdio = "ignore", childObserver, NativeProcessServiceStoppedError, NativeProcessConfigurationError, NativeProcessChildAliveError, NativeProcessReportedStartError;
 var init_native_process_service = __esm(() => {
   DEFAULT_RESTART_DELAYS_MS = [250, 1000, 5000, 15000, 30000];
   NativeProcessServiceStoppedError = class NativeProcessServiceStoppedError extends Error {
