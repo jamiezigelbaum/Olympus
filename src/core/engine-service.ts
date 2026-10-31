@@ -38,11 +38,11 @@ import {
 import { engineChildrenPath, reapRecordedEngineChildren, type EngineChildReapDeps, type EngineChildReapResult } from './engine-children.ts';
 import { redactLogLine } from './log-redaction.ts';
 import { OperationError } from './operation-error.ts';
-import { openClawConfigPath } from './config.ts';
+import { loadConfig, openClawConfigPath } from './config.ts';
 import { olympusPackageRoot } from './package-root.ts';
 import { olympusDataDir, remoteAccessDir } from './remote-access.ts';
-import { writeSovereigntyConfigFile, type SovereigntyPresetName } from './sovereignty.ts';
-import { createPendingPrivacyPolicy } from './first-run-privacy.ts';
+import { loadSovereigntyEngine, writeSovereigntyConfigFile, type SovereigntyPresetName } from './sovereignty.ts';
+import { createPendingPrivacyPolicy, isPendingPrivacyPolicy } from './first-run-privacy.ts';
 import { workerAuthTokenFromSetupEnv } from './worker-auth.ts';
 import { ensureManagedWorkerEnvironment, workerServicePaths } from './worker-service.ts';
 import { defaultZkapiStatePath, zkapiConsultInFlightOnDisk } from './consult-transport-zkapi.ts';
@@ -518,11 +518,9 @@ function installEngineUnderFence(options: EngineInstallOptions = {}): EngineInst
   const program: EngineProgram = helperPath ? { ...baseProgram, helperPath } : baseProgram;
   const plist = renderEnginePlist({ paths, program, homeDir });
   const warnings = engineConflictWarnings(homeDir, 'darwin');
-  const sovereigntyBlocker = existsSync(paths.sovereigntyPath)
-    ? undefined
-    : existsSync(paths.configPath) || existsSync(paths.plistPath)
-      ? 'An existing engine installation has no policy file; its current policy is preserved.'
-      : engineSovereigntySeedBlocker({ homeDir, workerEnvPath: paths.workerEnvPath, env: options.env ?? process.env });
+  const privacyState = resolveInstallationPrivacyState({ homeDir, paths, env: options.env ?? process.env });
+  const sovereigntyBlocker = existsSync(paths.sovereigntyPath) || privacyState.state === 'not_installed'
+    ? undefined : privacyState.reason ?? 'An existing privacy policy is preserved.';
   const base = {
     ok: true as const,
     label: paths.label,
@@ -967,6 +965,37 @@ export function seedEngineSovereignty(path: string): 'pending' | undefined {
   return STANDALONE_SOVEREIGNTY_PRESET;
 }
 
+/** Shared by engine installation and agent setup: missing default file is not a first run. */
+export function resolveInstallationPrivacyState(input: {
+  homeDir?: string;
+  paths?: EnginePaths;
+  env?: Record<string, string | undefined>;
+} = {}): { state: 'not_installed' | 'pending' | 'configured'; reason?: string } {
+  const env = { ...(input.env ?? process.env), HOME: input.homeDir ?? input.env?.HOME ?? homedir() };
+  const paths = input.paths ?? engineServicePaths({ env });
+  // Linux pins its default path even before first installation. That pin is
+  // not evidence of an existing policy; a genuinely custom path still is.
+  const inspectionEnv: Record<string, string | undefined> = { ...env };
+  for (const key of ['OLYMPUS_SOVEREIGNTY_CONFIG', 'OLYMPUS_SOVEREIGNTY_CONFIG_PATH']) {
+    if (inspectionEnv[key] && resolvePath(inspectionEnv[key]!) === resolvePath(paths.sovereigntyPath)
+      && !existsSync(paths.sovereigntyPath)) delete inspectionEnv[key];
+  }
+  const config = loadConfig(inspectionEnv);
+  const explicitPolicy = config.sovereignty?.policy !== undefined || !!config.sovereignty?.configPath;
+  if (explicitPolicy || existsSync(paths.sovereigntyPath)) {
+    const policy = loadSovereigntyEngine({ env, inlineConfig: config.sovereignty?.policy,
+      configPath: config.sovereignty?.configPath ?? paths.sovereigntyPath });
+    return { state: isPendingPrivacyPolicy(policy.config) ? 'pending' : 'configured',
+      reason: 'An existing effective privacy policy is preserved.' };
+  }
+  const blocker = engineSovereigntySeedBlocker({ homeDir: env.HOME, workerEnvPath: paths.workerEnvPath, env: inspectionEnv });
+  if (blocker) return { state: 'configured', reason: blocker };
+  if (existsSync(paths.configPath) || existsSync(paths.plistPath)) return {
+    state: 'configured', reason: 'An existing engine installation has no policy file; its current policy is preserved.',
+  };
+  return { state: 'not_installed' };
+}
+
 /**
  * Environment names the env-bridge policy (sovereignty.ts
  * buildEnvBridgeSovereigntyConfig) or an explicit policy path reads. A worker
@@ -987,6 +1016,8 @@ export function engineSovereigntySeedBlocker(input: {
   workerEnvPath: string;
   env?: Record<string, string | undefined>;
 }): string | undefined {
+  const envKey = Object.entries(input.env ?? process.env).find(([key, value]) => value?.trim() && ENV_POLICY_KEY.test(`${key}=`))?.[0];
+  if (envKey) return `The environment already sets ${envKey}, which chooses this worker's models and privacy routes.`;
   try {
     if (existsSync(input.workerEnvPath)) {
       const key = ENV_POLICY_KEY.exec(readFileSync(input.workerEnvPath, 'utf8'))?.[1];

@@ -1,5 +1,4 @@
 import { PRIVATE_ANSWER_OPTIONS } from './core/privacy-language.ts';
-import { isPendingPrivacyPolicy } from './core/first-run-privacy.ts';
 import { resolvedRawPath } from './core/source-placement.ts';
 import { DESKTOP_OWNER_OPEN_PATH } from './core/linux-owner-bridge.ts';
 import { workerFetch, validateWorkerSocket, workerSocketPath } from './core/worker-transport.ts';
@@ -145,7 +144,7 @@ import {
 import { REMOTE_PUBLIC_BASE_URL_ENV } from './core/remote-public-url.ts';
 import { readThisComputerHandles } from './core/this-computer.ts';
 import { ENGINE_CLI_USAGE, runEngineCommand } from './core/engine-cli.ts';
-import { engineDataCustody, engineServicePaths, inspectEngine, restartEngine } from './core/engine-service.ts';
+import { resolveInstallationPrivacyState, engineDataCustody, engineServicePaths, inspectEngine, restartEngine } from './core/engine-service.ts';
 import {
   reachableLoopbackWorkerOrigin,
   readRemoteAccessStatus,
@@ -285,8 +284,7 @@ async function main(): Promise<void> {
 
   if (args[0] === 'setup') {
     if (args.length === 2 && args[1] === '--privacy-options') {
-      const path = defaultSovereigntyConfigPath();
-      const state = !existsSync(path) ? 'not_installed' : isPendingPrivacyPolicy(JSON.parse(readFileSync(path, 'utf8'))) ? 'pending' : 'configured';
+      const { state } = resolveInstallationPrivacyState();
       console.log(JSON.stringify({ state, options: PRIVATE_ANSWER_OPTIONS }, null, 2));
       return;
     }

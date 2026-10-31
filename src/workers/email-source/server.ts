@@ -1,3 +1,5 @@
+import { withFirstRunPrivacyGate } from '../first-run-privacy-gate.ts';
+import { privacyChoicePending } from '../../core/first-run-privacy.ts';
 import { LocalModelDiscovery, saveLocalAnswerModel } from '../../core/local-model-discovery.ts';
 import { saveFirstRunPrivacyChoice } from '../../core/first-run-privacy.ts';
 import { createSpoolChangeSubscription } from '../messaging-spool-wake.ts';
@@ -6769,7 +6771,7 @@ export async function main(): Promise<void> {
     // (relay-mode OAuth approval: core/request-peer.ts).
     // The relay child reads the offline tool-list mapping it keeps the relay
     // in step with (workers/relay-surfaces.ts), by its per-boot secret.
-    fetch: withRequestPeer(withRelaySurfacesRoute(createRelaySurfacesHandler({
+    fetch: withRequestPeer(withFirstRunPrivacyGate(withRelaySurfacesRoute(createRelaySurfacesHandler({
       connections: () => remoteConnections(),
       publicUrls: remotePublicUrls,
       isRelayed: isRelayedRequest,
@@ -6820,7 +6822,7 @@ export async function main(): Promise<void> {
         // The brief route must pass both bearer and owner-socket authorization.
         withWorkerBearerAuth(withEngineBriefRoute(worker.fetch, { view: (signal) => engineBriefView(chatgptSurface, signal) }), { authToken, requireOwnerSocket: !!socketPath, sessionSecret: dashboardSessionSecret.secret }),
       )),
-    )))), !!socketPath),
+    )))), { pending: () => privacyChoicePending(sovereigntyEngine), isRelayed: carriesRelayMarker }), !!socketPath),
   };
   // Nothing is answered from the local files index before what an earlier version
   // indexed inside Olympus's own folders is gone (own-roots-cleanup.ts).
