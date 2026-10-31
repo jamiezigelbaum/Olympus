@@ -1524,6 +1524,11 @@ describe('messaging card in a session that is not local-grade, and its idle cont
     root.querySelector<HTMLFormElement>('[data-messaging-kind="start"]')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
     await new Promise(resolve => setTimeout(resolve, 20));
     expect(cancel.hidden).toBe(false);
+    // Still running while it waits for the chat choice, so the owner can abandon it there (Codex on #716).
+    state = 'scope_selection_required';
+    root.querySelector<HTMLFormElement>('[data-messaging-kind="start"]')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    await new Promise(resolve => setTimeout(resolve, 20));
+    expect(cancel.hidden).toBe(false);
     state = 'cancelled';
     cancel.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
     await new Promise(resolve => setTimeout(resolve, 20));
