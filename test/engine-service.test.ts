@@ -13,6 +13,7 @@ import {
   engineBuildIdentity,
   engineDataCustody,
   enginePaths,
+  engineServicePaths,
   engineSovereigntySeedBlocker,
   inspectEngine,
   installEngine,
@@ -537,6 +538,52 @@ if (env.LAUNCH === '0') {
     health('ok', null);
     expect((await report()).ok).toBe(true);
   });
+
+  for (const platform of ['darwin', 'linux']) {
+    test(`${platform} engine status reads worker health from the service path with custom XDG data`, async () => {
+      const { home } = fixture();
+      const env = { HOME: home, XDG_DATA_HOME: join(home, 'custom-data'), XDG_RUNTIME_DIR: join(home, 'run') };
+      const paths = engineServicePaths({ homeDir: home, platform, env });
+      const statusPath = platform === 'darwin'
+        ? join(home, '.local/share/openclaw/olympus/engine/status.json')
+        : join(env.XDG_DATA_HOME, 'olympus/engine/status.json');
+      expect(paths.statusPath).toBe(statusPath);
+      mkdirSync(join(paths.configPath, '..'), { recursive: true });
+      writeFileSync(paths.configPath, JSON.stringify({ remote: { mode: 'off' } }));
+      mkdirSync(join(paths.plistPath, '..'), { recursive: true });
+      writeFileSync(paths.plistPath, '');
+      const health = (path: string, state: string, message: string | null) => {
+        mkdirSync(join(path, '..'), { recursive: true });
+        writeFileSync(path, JSON.stringify({ schema: 'olympus.engine.status.v1', pid: process.pid, state: 'running',
+          services: { 'olympus-worker': { state, message } } }));
+      };
+      const otherPath = platform === 'darwin'
+        ? join(env.XDG_DATA_HOME, 'openclaw/olympus/engine/status.json')
+        : join(home, '.local/share/openclaw/olympus/engine/status.json');
+      health(statusPath, 'ok', null);
+      // An existing Linux dataset keeps the service on its XDG data root even
+      // when an older, populated legacy directory is also present.
+      if (paths.linux) writeFileSync(join(paths.linux.dataDir, 'dataset.sqlite'), 'fixture');
+      health(otherPath, 'failing', 'Wrong data directory');
+      const report = () => engineStatusReport({ homeDir: home, platform, env,
+        exec: () => ({ status: 0, stderr: '', stdout: platform === 'darwin'
+          ? `state = running\npid = ${process.pid}\n`
+          : `LoadState=loaded\nActiveState=active\nSubState=running\nMainPID=${process.pid}\nUnitFileState=enabled\nFragmentPath=${paths.plistPath}\n` }),
+        openclawPath: () => undefined, fetchImpl: (async () => Response.json({ ok: true })) as unknown as typeof fetch });
+      const ready = await report();
+      expect(ready.agent).toMatchObject({ state: 'running' });
+      expect(ready.engine).toMatchObject({ services: { 'olympus-worker': { state: 'ok' } } });
+      expect(JSON.stringify(ready.missing)).not.toContain('The engine worker is not ready yet');
+      expect(JSON.stringify(ready.missing)).not.toContain('Wrong data directory');
+      if (platform === 'darwin') expect(ready.ok).toBe(true);
+      // A healthy file in the other directory must not hide the host's real failure.
+      health(otherPath, 'ok', null);
+      health(statusPath, 'failing', 'Actual worker data conflict');
+      const blocked = await report();
+      expect(blocked.ok).toBe(false);
+      expect(blocked.missing).toContain('Actual worker data conflict');
+    });
+  }
 
   test('engine status says plainly that OpenClaw is not needed and what is missing', async () => {
     const { home } = fixture();

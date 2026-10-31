@@ -12,7 +12,7 @@ import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { configFromPluginConfig } from './config.ts';
 import { engineBriefReport } from './engine-brief.ts';
-import { engineStatusPath, type EngineStatusFile } from './engine-host.ts';
+import type { EngineStatusFile } from './engine-host.ts';
 import {
   engineConflictWarnings,
   readEngineWorkerHealth,
@@ -244,14 +244,14 @@ export async function engineStatusReport(deps: EngineCliDeps = {}): Promise<Reco
   const parsed = pluginConfig ? configFromPluginConfig(pluginConfig, { requireResolvedWorkerSecrets: false }) : undefined;
   const remoteMode = parsed ? resolveRemoteAccessMode(parsed.remote) : { mode: 'off' as const };
   const baseUrl = parsed?.email.baseUrl ?? 'http://127.0.0.1:8010/v1';
-  const host = readEngineStatusFile(env);
+  const host = readEngineStatusFile(paths.statusPath);
   const relayDir = remoteAccessDirForCli(env);
   const relayStatus = readRemoteAccessStatus(relayDir);
   const relayRunning = relayProcessRunning(relayDir);
   const openclaw = (deps.openclawPath ?? (() => resolveOpenClawExecutable({ env, homeDir })))();
   const worker = await probeWorker(deps.fetchImpl ?? workerFetch, baseUrl, paths.linux?.workerSocketPath);
   const linuxHealth = paths.linux ? await waitForEngineHealthy({ paths, expectedBuild: linuxInstalledBuild({ ...deps, homeDir }) }, { ...deps.health, timeoutMs: 0, fetchImpl: deps.fetchImpl, exec: deps.exec }) : undefined;
-  const engineWorker = readEngineWorkerHealth(env);
+  const engineWorker = readEngineWorkerHealth(paths.statusPath);
   const workerProblem = agent.state === 'running' && engineWorker?.state !== 'ok'
     ? engineWorker?.message ?? 'The engine worker is not ready yet: see olympus engine logs.' : undefined;
   const missing: string[] = [];
@@ -306,9 +306,9 @@ export async function engineStatusReport(deps: EngineCliDeps = {}): Promise<Reco
   };
 }
 
-function readEngineStatusFile(env: Record<string, string | undefined>): EngineStatusFile | undefined {
+function readEngineStatusFile(statusPath: string): EngineStatusFile | undefined {
   try {
-    const parsed = JSON.parse(readFileSync(engineStatusPath(env), 'utf8')) as EngineStatusFile;
+    const parsed = JSON.parse(readFileSync(statusPath, 'utf8')) as EngineStatusFile;
     return parsed?.schema === 'olympus.engine.status.v1' ? parsed : undefined;
   } catch {
     return undefined;

@@ -106378,9 +106378,9 @@ function engineServicePaths(options = {}) {
 function engineStatusPath(env = process.env) {
   return join97(olympusDataDir(env), "engine", "status.json");
 }
-function readEngineWorkerHealth(env = process.env) {
+function readEngineWorkerHealth(statusPath) {
   try {
-    const status = JSON.parse(readFileSync54(engineStatusPath(env), "utf8"));
+    const status = JSON.parse(readFileSync54(statusPath, "utf8"));
     if (status?.schema !== "olympus.engine.status.v1" || status.state !== "running" || !Number.isSafeInteger(status.pid) || status.pid <= 0)
       return;
     process.kill(status.pid, 0);
@@ -106393,7 +106393,7 @@ function readEngineWorkerHealth(env = process.env) {
   }
 }
 function readEngineWorkerProblem(env = process.env) {
-  const worker = readEngineWorkerHealth(env);
+  const worker = readEngineWorkerHealth(engineStatusPath(env));
   return worker?.state === "failing" ? worker.message ?? "The engine worker failed to become ready." : undefined;
 }
 function engineBuildIdentity(packageRoot) {
@@ -119571,955 +119571,6 @@ var init_engine_brief = __esm(() => {
   };
 });
 
-// src/workers/dashboard/embedding-runtime.ts
-import { mkdirSync as mkdirSync50, readFileSync as readFileSync65, rmSync as rmSync32, writeFileSync as writeFileSync20 } from "node:fs";
-import { dirname as dirname80, join as join108 } from "node:path";
-import { homedir as homedir36 } from "node:os";
-function guardStateDir(env) {
-  const configured = env[GUARD_STATE_DIR_ENV]?.trim();
-  if (configured)
-    return configured;
-  return join108(env.HOME?.trim() || homedir36(), ...GUARD_STATE_DIR_SEGMENTS);
-}
-function resolveEmbeddingOverridePath(env = process.env) {
-  const explicit = env[GUARD_OVERRIDE_PATH_ENV]?.trim();
-  if (explicit)
-    return explicit;
-  return join108(guardStateDir(env), "operator-override");
-}
-function resolveGuardReportPath(env = process.env) {
-  return join108(guardStateDir(env), "latest.json");
-}
-function resolveEmbeddingDrainReportPath(env = process.env) {
-  const explicit = env[EMBEDDING_DRAIN_REPORT_PATH_ENV]?.trim();
-  if (explicit)
-    return explicit;
-  const dir = env[EMBEDDING_DRAIN_REPORT_DIR_ENV]?.trim() || EMBEDDING_DRAIN_REPORT_DIR_DEFAULT;
-  return join108(dir, "source-embedding-drain-current.json");
-}
-function readEmbeddingOperatorOverride(path) {
-  let raw;
-  try {
-    raw = readFileSync65(path, "utf8");
-  } catch (error) {
-    if (error?.code === "ENOENT")
-      return "none";
-    return "unreadable";
-  }
-  const token = raw.replace(/[\r\n]/g, "");
-  if (token === "")
-    return "none";
-  if (token === EMBEDDING_PRIORITY_TOKEN)
-    return "embedding_priority";
-  if (token === GUARD_PAUSED_TOKEN)
-    return "guard_paused";
-  return "unknown_token";
-}
-function writeEmbeddingOperatorOverride(path, on) {
-  if (!on) {
-    rmSync32(path, { force: true });
-    return;
-  }
-  mkdirSync50(dirname80(path), { recursive: true, mode: 448 });
-  writeFileSync20(path, `${EMBEDDING_PRIORITY_TOKEN}
-`, "utf8");
-}
-function asRecord15(value2) {
-  return typeof value2 === "object" && value2 !== null && !Array.isArray(value2) ? value2 : undefined;
-}
-function asStamp(value2) {
-  if (typeof value2 !== "string")
-    return;
-  const at = Date.parse(value2);
-  return Number.isFinite(at) ? new Date(at) : undefined;
-}
-function fresh(at, now, maxAgeMs) {
-  const age = now.getTime() - at.getTime();
-  return age <= maxAgeMs && age >= -REPORT_MAX_FUTURE_SKEW_MS;
-}
-function readJsonFile(path) {
-  try {
-    return asRecord15(JSON.parse(readFileSync65(path, "utf8")));
-  } catch {
-    return;
-  }
-}
-function readGuardReport(path, now) {
-  const record2 = readJsonFile(path);
-  if (record2 === undefined)
-    return;
-  const generatedAt = asStamp(record2.finished_at) ?? asStamp(record2.started_at);
-  if (generatedAt === undefined || !fresh(generatedAt, now, GUARD_REPORT_MAX_AGE_MS))
-    return;
-  const actions = Array.isArray(record2.actions) ? record2.actions.filter((line2) => typeof line2 === "string") : [];
-  return {
-    generatedAt,
-    ...typeof record2.metadata_window_active === "boolean" ? { metadataWindowActive: record2.metadata_window_active } : {},
-    ...typeof record2.metadata_window_reason === "string" ? { metadataWindowReason: record2.metadata_window_reason } : {},
-    ...typeof record2.writer_drains_parked_without_window === "boolean" ? { writerDrainsParked: record2.writer_drains_parked_without_window } : {},
-    actions
-  };
-}
-function readEmbeddingDrainReport(path, now) {
-  const record2 = readJsonFile(path);
-  if (record2 === undefined)
-    return;
-  const updatedAt = asStamp(record2.updated_at) ?? asStamp(record2.generated_at);
-  if (updatedAt === undefined || !fresh(updatedAt, now, DRAIN_REPORT_MAX_AGE_MS))
-    return;
-  return {
-    updatedAt,
-    ...typeof record2.run_state === "string" ? { runState: record2.run_state } : {},
-    ...typeof record2.active_phase === "string" ? { activePhase: record2.active_phase } : {},
-    ...typeof record2.chunks_embedded === "number" && Number.isFinite(record2.chunks_embedded) ? { chunksEmbedded: record2.chunks_embedded } : {}
-  };
-}
-function drainReportIsLive(report) {
-  if (report === undefined)
-    return false;
-  if (report.runState !== "running")
-    return false;
-  return report.activePhase !== undefined && LIVE_DRAIN_PHASES.includes(report.activePhase);
-}
-function deriveEmbeddingRunState(input) {
-  const live = drainReportIsLive(input.drain);
-  if (input.override === "embedding_priority") {
-    return {
-      state: "operator_priority",
-      stateLine: live ? "Embeddings: running now (operator priority)" : "Embeddings: operator priority is on — the guard keeps this lane running"
-    };
-  }
-  if (input.override === "guard_paused") {
-    return {
-      state: "guard_paused",
-      stateLine: live ? "Embeddings: running now, but the guard is paused — nothing will park or restart this lane" : "Embeddings: off (guard paused) — nothing will start this lane until the pause is lifted"
-    };
-  }
-  if (input.override === "unreadable") {
-    return {
-      state: "unknown",
-      stateLine: "Embeddings: state unknown — the operator override file could not be read"
-    };
-  }
-  if (live) {
-    const phase = input.drain?.activePhase;
-    const phaseText = phase === "embedding" ? "metadata caught up" : phase === "sleeping" || phase === "backoff" ? "between passes" : phase === "starting" ? "starting up" : phase ?? "up";
-    return {
-      state: "running",
-      stateLine: `Embeddings: running now (${phaseText})`
-    };
-  }
-  const guard = input.guard;
-  if (guard === undefined) {
-    return {
-      state: "unknown",
-      stateLine: "Embeddings: state unknown — neither the guard nor the drain has reported recently"
-    };
-  }
-  if (guard.metadataWindowActive === true) {
-    const reason = guard.metadataWindowReason;
-    return {
-      state: "parked",
-      stateLine: reason ? `Embeddings: parked — Dropbox metadata sync has priority (${reason})` : "Embeddings: parked — Dropbox metadata sync has priority"
-    };
-  }
-  const parkAction = guard.actions.find((line2) => line2.includes("olympus-source-embedding-drain") && line2.startsWith("paused"));
-  if (parkAction !== undefined) {
-    const reason = parkAction.split(":").slice(1).join(":").trim();
-    return {
-      state: "parked",
-      stateLine: reason ? `Embeddings: parked by the guard — ${reason}` : "Embeddings: parked by the guard"
-    };
-  }
-  if (guard.writerDrainsParked === true) {
-    return {
-      state: "parked",
-      stateLine: "Embeddings: parked — the source-processing supervisors own the machine right now"
-    };
-  }
-  return {
-    state: "unknown",
-    stateLine: "Embeddings: state unknown — the guard has not parked this lane, but the drain is not reporting"
-  };
-}
-async function readEmbeddingModelLine(options = {}) {
-  const env = options.env ?? process.env;
-  const configured = env.OLYMPUS_SOURCE_INDEX_EMBEDDING_MODEL?.trim();
-  const baseUrl = env.OLYMPUS_SOURCE_INDEX_EMBEDDING_BASE_URL?.trim();
-  if (!configured)
-    return;
-  const local = env.OLYMPUS_SOURCE_INDEX_EMBEDDING_PROVIDER?.trim() === "local-openai-compatible";
-  const fallback = {
-    name: configured,
-    live: false,
-    local,
-    text: `${configured} · ${where(local)} (configured)`
-  };
-  if (!baseUrl)
-    return fallback;
-  const backendModel = await fetchBackendModel({
-    baseUrl,
-    model: configured,
-    fetchImpl: options.fetchImpl ?? globalThis.fetch,
-    timeoutMs: options.routerTimeoutMs ?? 1500
-  });
-  if (backendModel === undefined)
-    return fallback;
-  return {
-    name: configured,
-    live: true,
-    local,
-    ...backendModel === "" ? {} : { backendModel },
-    text: backendModel === "" || backendModel === configured ? `${configured} · ${where(local)}` : `${configured} · ${where(local)} · backed by ${backendModel}`
-  };
-}
-function where(local) {
-  return local ? "local (Delphi router)" : "remote provider";
-}
-async function fetchBackendModel(input) {
-  const url = `${input.baseUrl.replace(/\/+$/, "")}/models`;
-  try {
-    const response = await fetchModelEndpoint(input.fetchImpl, url, {
-      method: "GET",
-      signal: AbortSignal.timeout(input.timeoutMs)
-    });
-    if (!response.ok)
-      return;
-    const body = asRecord15(await response.json());
-    const data2 = body?.data;
-    if (!Array.isArray(data2))
-      return;
-    const entry = data2.map((item) => asRecord15(item)).find((item) => item !== undefined && item.id === input.model);
-    if (entry === undefined)
-      return;
-    const backendModel = asRecord15(entry.metadata)?.backendModel;
-    return typeof backendModel === "string" && backendModel.trim() !== "" ? backendModel.trim() : "";
-  } catch {
-    return;
-  }
-}
-async function readEmbeddingRuntime(options = {}) {
-  const env = options.env ?? process.env;
-  const now = options.now ?? new Date;
-  const overridePath = resolveEmbeddingOverridePath(env);
-  const override = readEmbeddingOperatorOverride(overridePath);
-  const guard = readGuardReport(resolveGuardReportPath(env), now);
-  const drain = readEmbeddingDrainReport(resolveEmbeddingDrainReportPath(env), now);
-  const { state, stateLine } = deriveEmbeddingRunState({ override, guard, drain });
-  const model = await readEmbeddingModelLine(options);
-  return {
-    state,
-    stateLine,
-    scheduleLine: SCHEDULE_LINE,
-    ...model ? { model } : {},
-    overrideOn: override === "embedding_priority",
-    override,
-    overridePath
-  };
-}
-var EMBEDDING_PRIORITY_TOKEN = "embedding-priority", GUARD_PAUSED_TOKEN = "paused", GUARD_STATE_DIR_ENV = "OLYMPUS_OVERNIGHT_SOURCE_DRAIN_GUARD_STATE_DIR", GUARD_OVERRIDE_PATH_ENV = "OLYMPUS_OVERNIGHT_SOURCE_DRAIN_GUARD_OPERATOR_OVERRIDE_PATH", EMBEDDING_DRAIN_REPORT_PATH_ENV = "OLYMPUS_SOURCE_EMBEDDING_DRAIN_REPORT_PATH", EMBEDDING_DRAIN_REPORT_DIR_ENV = "OLYMPUS_SOURCE_EMBEDDING_DRAIN_REPORT_DIR", GUARD_STATE_DIR_SEGMENTS, EMBEDDING_DRAIN_REPORT_DIR_DEFAULT = "/tmp/olympus-source-processing-supervisor", GUARD_REPORT_MAX_AGE_MS, DRAIN_REPORT_MAX_AGE_MS, REPORT_MAX_FUTURE_SKEW_MS, LIVE_DRAIN_PHASES, SCHEDULE_LINE = "No fixed hours: the guard re-decides every minute. Embedding runs once Dropbox metadata sync is caught up, and is parked while metadata has priority.";
-var init_embedding_runtime = __esm(() => {
-  init_model_transport();
-  GUARD_STATE_DIR_SEGMENTS = [".local", "state", "olympus", "overnight-source-drain-guard"];
-  GUARD_REPORT_MAX_AGE_MS = 5 * 60 * 1000;
-  DRAIN_REPORT_MAX_AGE_MS = 300 * 1000;
-  REPORT_MAX_FUTURE_SKEW_MS = 60 * 1000;
-  LIVE_DRAIN_PHASES = ["starting", "embedding", "sleeping", "backoff"];
-});
-
-// src/core/native-embedding-drain-service.ts
-import { randomUUID as randomUUID27 } from "node:crypto";
-import { readFileSync as readFileSync66, statSync as statSync37 } from "node:fs";
-import { delimiter as delimiter8, dirname as dirname81, isAbsolute as isAbsolute33, join as join109 } from "node:path";
-import { fileURLToPath as fileURLToPath10 } from "node:url";
-function createNativeEmbeddingDrainService(options) {
-  return createNativeProcessService({
-    id: SERVICE_ID2,
-    label: SERVICE_LABEL2,
-    restartOnCleanExit: false,
-    reload: { configPrefixes: ["plugins.entries.olympus.config.worker.embeddingDrain"] },
-    initialConfig: options.initialPluginConfig,
-    defaultStartupTimeoutMs: DEFAULT_STARTUP_TIMEOUT_MS3,
-    ...options.startupTimeoutMs !== undefined ? { startupTimeoutMs: options.startupTimeoutMs } : {},
-    ...options.readinessPollMs !== undefined ? { readinessPollMs: options.readinessPollMs } : {},
-    ...options.stopGraceMs !== undefined ? { stopGraceMs: options.stopGraceMs } : {},
-    ...options.restartDelaysMs ? { restartDelaysMs: options.restartDelaysMs } : {},
-    ...options.workingDirectory ? { workingDirectory: options.workingDirectory } : {},
-    prepareStart: (input) => prepareEmbeddingDrainStart(input, options)
-  });
-}
-async function prepareEmbeddingDrainStart(input, options) {
-  let config;
-  try {
-    config = configFromPluginConfig(freshPluginConfig(input.context.config, input.initialConfig));
-  } catch {
-    throw new NativeProcessConfigurationError("Olympus source embedding drain configuration is invalid or contains unresolved credentials.");
-  }
-  const drain = config.worker.embeddingDrain;
-  if (!drain.enabled)
-    return;
-  const loadedEnv = baseEnvironment();
-  const workerEnvPath = drain.environmentPath ?? options.workerEnvPath;
-  applyWorkerSetupEnv({
-    env: loadedEnv,
-    ...workerEnvPath ? { workerEnvPath } : {}
-  });
-  const env = selectedEmbeddingEnvironment(loadedEnv);
-  for (const name of EMBEDDING_CREDENTIAL_NAMES) {
-    const value2 = drain.credentials[name]?.trim();
-    if (value2)
-      env[name] = value2;
-  }
-  env.GEMINI_API_KEY ??= env.OLYMPUS_SOURCE_INDEX_GEMINI_API_KEY;
-  env.OLYMPUS_SOURCE_INDEX_GEMINI_API_KEY ??= env.GEMINI_API_KEY;
-  const runtimePath = resolveBunRuntimePath2(drain.runtimePath, env);
-  const executablePath = assertUsableFile(fileURLToPath10(new URL("./embedding-drain.js", options.moduleUrl)), "packaged embedding drain");
-  const reportPath = drain.reportPath ?? resolveEmbeddingDrainReportPath(env);
-  if (!isAbsolute33(reportPath)) {
-    throw new NativeProcessConfigurationError("Olympus source embedding drain report path must be absolute.");
-  }
-  const readinessPath = join109(dirname81(reportPath), READINESS_FILE);
-  const instanceId = randomUUID27();
-  env.OLYMPUS_SOURCE_EMBEDDING_DRAIN_INSTANCE_ID = instanceId;
-  env.OLYMPUS_SOURCE_EMBEDDING_DRAIN_READINESS_PATH = readinessPath;
-  return {
-    command: runtimePath,
-    args: ["--no-env-file", executablePath, "--report", reportPath],
-    env,
-    startupTimeoutMs: options.startupTimeoutMs ?? DEFAULT_STARTUP_TIMEOUT_MS3,
-    endpointOccupied: false,
-    readinessPath,
-    instanceId,
-    readinessProbe: (child2) => embeddingDrainReadinessProbe(readinessPath, instanceId, child2)
-  };
-}
-function freshPluginConfig(contextConfig, initialPluginConfig) {
-  const root = asRecord16(contextConfig);
-  const entries = asRecord16(asRecord16(root?.plugins)?.entries);
-  const olympus = asRecord16(entries?.olympus);
-  if (entries) {
-    return olympus && Object.prototype.hasOwnProperty.call(olympus, "config") ? olympus.config : undefined;
-  }
-  if (root && ["worker", "email", "sourceIndex", "argus", "identity", "sovereignty"].some((key2) => Object.prototype.hasOwnProperty.call(root, key2))) {
-    return root;
-  }
-  return initialPluginConfig;
-}
-function baseEnvironment() {
-  return Object.fromEntries(SYSTEM_ENV_NAMES.map((name) => [name, process.env[name]]).filter((entry) => typeof entry[1] === "string" && entry[1].length > 0));
-}
-function selectedEmbeddingEnvironment(loadedEnv) {
-  const env = baseEnvironment();
-  for (const [name, value2] of Object.entries(loadedEnv)) {
-    if (!value2 || !EMBEDDING_SETTING_ENV_NAMES.has(name))
-      continue;
-    env[name] = value2;
-  }
-  return env;
-}
-function resolveBunRuntimePath2(configured, env) {
-  if (configured)
-    return assertUsableFile(configured, "Bun runtime");
-  const candidates = [
-    process.execPath,
-    ...(env.PATH ?? "").split(delimiter8).filter(Boolean).map((dir) => join109(dir, process.platform === "win32" ? "bun.exe" : "bun"))
-  ];
-  for (const candidate of candidates) {
-    if (!candidate || !isAbsolute33(candidate))
-      continue;
-    if (!["bun", "bun.exe"].includes(candidate.split(/[\\/]/).at(-1)?.toLowerCase() ?? ""))
-      continue;
-    try {
-      if (statSync37(candidate).isFile())
-        return candidate;
-    } catch {}
-  }
-  throw new NativeProcessConfigurationError("Olympus source embedding drain could not resolve an absolute Bun runtime path.");
-}
-function assertUsableFile(path, label) {
-  if (!isAbsolute33(path)) {
-    throw new NativeProcessConfigurationError(`Olympus source embedding drain ${label} path must be absolute.`);
-  }
-  try {
-    if (statSync37(path).isFile())
-      return path;
-  } catch {}
-  throw new NativeProcessConfigurationError(`Olympus source embedding drain ${label} file is missing.`);
-}
-async function embeddingDrainReadinessProbe(readinessPath, instanceId, child2) {
-  try {
-    const stat5 = statSync37(readinessPath);
-    if (!stat5.isFile() || stat5.size > 16 * 1024)
-      return false;
-    const receipt = JSON.parse(readFileSync66(readinessPath, "utf8"));
-    return receipt.kind === "source_embedding_drain_service_readiness" && receipt.schema_version === 1 && receipt.instance_id === instanceId && receipt.pid === child2.pid && receipt.options_validated === true && receipt.content_free === true;
-  } catch {
-    return false;
-  }
-}
-function asRecord16(value2) {
-  return value2 && typeof value2 === "object" && !Array.isArray(value2) ? value2 : undefined;
-}
-var SERVICE_ID2 = "olympus-source-embedding-drain", SERVICE_LABEL2 = "source embedding drain", DEFAULT_STARTUP_TIMEOUT_MS3 = 30000, READINESS_FILE = "source-embedding-drain-native-readiness.json", EMBEDDING_CREDENTIAL_NAMES, SYSTEM_ENV_NAMES, EMBEDDING_SETTING_ENV_NAMES, EMBEDDING_LANE_NAMES;
-var init_native_embedding_drain_service = __esm(() => {
-  init_config();
-  init_native_process_service();
-  init_worker_auth();
-  init_embedding_runtime();
-  EMBEDDING_CREDENTIAL_NAMES = [
-    "GEMINI_API_KEY",
-    "OLYMPUS_SOURCE_INDEX_GEMINI_API_KEY"
-  ];
-  SYSTEM_ENV_NAMES = ["HOME", "PATH", "TMPDIR", "LANG", "XDG_DATA_HOME", ...process.platform === "linux" ? ["XDG_CONFIG_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME", "XDG_RUNTIME_DIR", "OLYMPUS_SOVEREIGNTY_CONFIG"] : []];
-  EMBEDDING_SETTING_ENV_NAMES = new Set([
-    "OLYMPUS_BUILT_IN_EMBEDDING_DIR",
-    "OLYMPUS_BUILT_IN_EMBEDDING_THREADS",
-    "OLYMPUS_CONFIG",
-    "OLYMPUS_EMAIL_BASE_URL",
-    "OLYMPUS_SOURCE_INDEX_CONNECTOR_STORES_JSON",
-    "OLYMPUS_SOVEREIGNTY_CONFIG",
-    "OLYMPUS_SOVEREIGNTY_CONFIG_PATH",
-    "OLYMPUS_SOURCE_EMBEDDING_DRAIN_BASE_URL",
-    "OLYMPUS_SOURCE_EMBEDDING_DRAIN_DRIVE_INTERNAL_ENABLED",
-    "OLYMPUS_SOURCE_EMBEDDING_DRAIN_DROPBOX_STORE_ENABLED",
-    "OLYMPUS_SOURCE_EMBEDDING_DRAIN_EMAIL_ENABLED",
-    "OLYMPUS_SOURCE_EMBEDDING_DRAIN_ENABLED",
-    "OLYMPUS_SOURCE_EMBEDDING_DRAIN_ERROR_BACKOFF_SECONDS",
-    "OLYMPUS_SOURCE_EMBEDDING_DRAIN_EXIT_ON_ATTENTION",
-    "OLYMPUS_SOURCE_EMBEDDING_DRAIN_FORCE",
-    "OLYMPUS_SOURCE_EMBEDDING_DRAIN_IDLE_SLEEP_SECONDS",
-    "OLYMPUS_SOURCE_EMBEDDING_DRAIN_INTERNAL_TELEGRAM_ENABLED",
-    "OLYMPUS_SOURCE_EMBEDDING_DRAIN_MAX_CONSECUTIVE_FAILURES",
-    "OLYMPUS_SOURCE_EMBEDDING_DRAIN_MAX_PENDING_CHUNKS",
-    "OLYMPUS_SOURCE_EMBEDDING_DRAIN_MAX_RUNS",
-    "OLYMPUS_SOURCE_EMBEDDING_DRAIN_MAX_RUNTIME_SECONDS",
-    "OLYMPUS_SOURCE_EMBEDDING_DRAIN_MODE",
-    "OLYMPUS_SOURCE_EMBEDDING_DRAIN_PROGRESS_HEARTBEAT_SECONDS",
-    "OLYMPUS_SOURCE_EMBEDDING_DRAIN_PROTECTED_TELEGRAM_ENABLED",
-    "OLYMPUS_SOURCE_EMBEDDING_DRAIN_READWISE_ENABLED",
-    "OLYMPUS_SOURCE_EMBEDDING_DRAIN_REPORT_DIR",
-    "OLYMPUS_SOURCE_EMBEDDING_DRAIN_REPORT_PATH",
-    "OLYMPUS_SOURCE_EMBEDDING_DRAIN_REQUEST_TIMEOUT_SECONDS",
-    "OLYMPUS_SOURCE_EMBEDDING_DRAIN_STOP_WHEN_IDLE",
-    "OLYMPUS_SOURCE_EMBEDDING_DRAIN_WHATSAPP_ENABLED",
-    "OLYMPUS_SOURCE_EMBEDDING_DRAIN_WORKER_ID",
-    "OLYMPUS_SOURCE_EMBEDDING_DRAIN_X_BOOKMARKS_ENABLED",
-    "OLYMPUS_SOURCE_INDEX_CLOUD_EMBEDDING_EPOCH",
-    "OLYMPUS_SOURCE_INDEX_CLOUD_EMBEDDING_OUTPUT_DIMENSIONALITY",
-    "OLYMPUS_SOURCE_INDEX_EMBEDDING_BASE_URL",
-    "OLYMPUS_SOURCE_INDEX_EMBEDDING_EPOCH",
-    "OLYMPUS_SOURCE_INDEX_EMBEDDING_MEDIA_TIMEOUT_SECONDS",
-    "OLYMPUS_SOURCE_INDEX_EMBEDDING_MODEL",
-    "OLYMPUS_SOURCE_INDEX_EMBEDDING_OUTPUT_DIMENSIONALITY",
-    "OLYMPUS_SOURCE_INDEX_EMBEDDING_PROVIDER",
-    "OLYMPUS_SOURCE_INDEX_EMBEDDING_TIMEOUT_SECONDS",
-    "OLYMPUS_WHATSAPP_STATE_DIR"
-  ]);
-  EMBEDDING_LANE_NAMES = [
-    "DROPBOX",
-    "EMAIL",
-    "WHATSAPP",
-    "INTERNAL_TELEGRAM",
-    "PROTECTED_TELEGRAM",
-    "READWISE",
-    "X_BOOKMARKS",
-    "DRIVE_INTERNAL"
-  ];
-  for (const lane of EMBEDDING_LANE_NAMES) {
-    EMBEDDING_SETTING_ENV_NAMES.add(`OLYMPUS_SOURCE_EMBEDDING_DRAIN_${lane}_ENABLED`);
-    EMBEDDING_SETTING_ENV_NAMES.add(`OLYMPUS_SOURCE_EMBEDDING_DRAIN_${lane}_CADENCE_PASSES`);
-    EMBEDDING_SETTING_ENV_NAMES.add(`OLYMPUS_SOURCE_EMBEDDING_DRAIN_${lane}_MAX_PENDING_CHUNKS`);
-  }
-});
-
-// src/core/native-relay-service.ts
-import { randomUUID as relayRandomUUID } from "node:crypto";
-import { statSync as relayStatSync } from "node:fs";
-import { isAbsolute as relayIsAbsolute } from "node:path";
-import { fileURLToPath as relayFileURLToPath } from "node:url";
-function createNativeRelayService(options) {
-  let lastStatusDir;
-  let lastInstanceId;
-  const service = createNativeProcessService({
-    id: SERVICE_ID3,
-    label: SERVICE_LABEL3,
-    reload: {
-      configPrefixes: [
-        "plugins.entries.olympus.config.remote",
-        "plugins.entries.olympus.config.email.baseUrl",
-        "plugins.entries.olympus.config.worker.service"
-      ]
-    },
-    initialConfig: options.initialPluginConfig,
-    ...options.startupTimeoutMs !== undefined ? { startupTimeoutMs: options.startupTimeoutMs } : {},
-    ...options.readinessPollMs !== undefined ? { readinessPollMs: options.readinessPollMs } : {},
-    ...options.stopGraceMs !== undefined ? { stopGraceMs: options.stopGraceMs } : {},
-    ...options.restartDelaysMs ? { restartDelaysMs: options.restartDelaysMs } : {},
-    defaultStartupTimeoutMs: DEFAULT_STARTUP_TIMEOUT_MS4,
-    stableUptimeMs: options.stableUptimeMs ?? DEFAULT_STABLE_UPTIME_MS,
-    prepareStart: async (input) => {
-      const settings = prepareRelayStart(relayFreshConfig(input.context.config, input.initialConfig), options);
-      lastStatusDir = settings.statusDir;
-      lastInstanceId = settings.launch?.instanceId;
-      return settings.launch;
-    }
-  });
-  return {
-    ...service,
-    async stop() {
-      await service.stop();
-      clearStalePublicUrl(lastStatusDir, lastInstanceId);
-    }
-  };
-}
-function prepareRelayStart(config, options) {
-  const env = { ...process.env };
-  applyWorkerSetupEnv({ env, ...options.workerEnvPath ? { workerEnvPath: options.workerEnvPath } : {} });
-  const statusDir = remoteAccessDir(env);
-  const mode = resolveRemoteAccessMode(config.remote);
-  const localUrl = workerOrigin(config, env);
-  const status = (next) => ({
-    ...emptyRemoteAccessStatus(next.mode),
-    local_url: localUrl ?? null,
-    ...next
-  });
-  const reportsOff = (next) => {
-    if (relayProcessRunning(statusDir))
-      return;
-    writeRemoteAccessStatus(statusDir, next);
-  };
-  const fail = (error, statusMode2) => {
-    const next = status({ mode: statusMode2, error });
-    if (statusMode2 === "off")
-      reportsOff(next);
-    else
-      writeRemoteAccessStatus(statusDir, next);
-    throw new NativeProcessConfigurationError(`Olympus remote access is off: ${error}`);
-  };
-  if (mode.mode === "off") {
-    if (readRemoteAccessStatus(statusDir))
-      reportsOff(status({ mode: "off" }));
-    return { statusDir, launch: undefined };
-  }
-  if (mode.mode === "error")
-    return fail(mode.error, "off");
-  const statusMode = mode.mode;
-  if (env[REMOTE_PUBLIC_BASE_URL_ENV]?.trim()) {
-    return fail(`${REMOTE_PUBLIC_BASE_URL_ENV} in worker.env already sets the public address, which conflicts with plugin config remote.*. Remove it from worker.env, or turn remote.enabled off.`, statusMode);
-  }
-  if (mode.mode === "manual") {
-    writeRemoteAccessStatus(statusDir, status({ mode: "manual", public_base_url: mode.publicBaseUrl }));
-    return { statusDir, launch: undefined };
-  }
-  if (!localUrl) {
-    return fail("the relay forwards only to a loopback http worker; email.baseUrl is not one.", "relay");
-  }
-  const instanceId = relayRandomUUID();
-  const childEnv = {};
-  for (const name of CHILD_ENV_PASSTHROUGH)
-    if (env[name])
-      childEnv[name] = env[name];
-  Object.assign(childEnv, options.childEnv ?? {}, {
-    OLYMPUS_RELAY_HOST: mode.relayHost,
-    OLYMPUS_RELAY_TARGET: localUrl,
-    OLYMPUS_NATIVE_SERVICE_INSTANCE_ID: instanceId
-  });
-  let command;
-  let executablePath;
-  try {
-    command = resolveBunRuntimePath(config.worker.service.runtimePath, env);
-    executablePath = resolveExecutablePath(options.executablePath ?? relayFileURLToPath(new URL("./cli.js", options.moduleUrl)));
-  } catch {
-    return fail("the Bun runtime or the packaged Olympus CLI could not be found.", "relay");
-  }
-  writeRemoteAccessStatus(statusDir, status({
-    mode: "relay",
-    relay_host: mode.relayHost,
-    instance_id: instanceId,
-    relay: { state: "starting", reason: null, retry_in_ms: null }
-  }));
-  return {
-    statusDir,
-    launch: {
-      command,
-      args: ["--no-env-file", executablePath, "__relay-service-run", instanceId],
-      env: childEnv,
-      startupTimeoutMs: DEFAULT_STARTUP_TIMEOUT_MS4,
-      endpointOccupied: false,
-      statusDir,
-      instanceId,
-      readinessProbe: async (child2) => {
-        watchExit(child2, statusDir, instanceId);
-        const reported = readRemoteAccessStatus(statusDir);
-        return reported?.instance_id === instanceId && reported.pid === child2.pid;
-      }
-    }
-  };
-}
-function workerOrigin(config, env) {
-  if (!config.worker.service.enabled) {
-    const port = env.OLYMPUS_EMAIL_SOURCE_PORT?.trim();
-    if (port && /^\d{1,5}$/.test(port)) {
-      const host = env.OLYMPUS_WORKER_BIND_HOST?.trim() || env.OLYMPUS_EMAIL_SOURCE_HOST?.trim() || "127.0.0.1";
-      return loopbackWorkerOrigin(`http://${host === "::1" ? "[::1]" : host}:${port}`);
-    }
-  }
-  return loopbackWorkerOrigin(config.email.baseUrl);
-}
-function watchExit(child2, statusDir, instanceId) {
-  if (watchedChildren.has(child2))
-    return;
-  watchedChildren.add(child2);
-  child2.once("exit", () => {
-    try {
-      const status = readRemoteAccessStatus(statusDir);
-      if (!status || status.instance_id !== instanceId || status.relay?.state === "stopped")
-        return;
-      writeRemoteAccessStatus(statusDir, {
-        ...status,
-        updated_at: new Date().toISOString(),
-        public_base_url: null,
-        relay: { state: "offline", reason: "the relay process exited; Olympus restarts it", retry_in_ms: null }
-      });
-    } catch {}
-  });
-}
-function clearStalePublicUrl(statusDir, instanceId) {
-  if (!statusDir || !instanceId)
-    return;
-  try {
-    const status = readRemoteAccessStatus(statusDir);
-    if (!status || status.instance_id !== instanceId)
-      return;
-    if (status.public_base_url === null && status.relay?.state === "stopped")
-      return;
-    writeRemoteAccessStatus(statusDir, {
-      ...status,
-      updated_at: new Date().toISOString(),
-      public_base_url: null,
-      relay: { state: "stopped", reason: null, retry_in_ms: null }
-    });
-  } catch {}
-}
-function resolveExecutablePath(path) {
-  if (!relayIsAbsolute(path) || !relayStatSync(path).isFile())
-    throw new Error("Olympus CLI is unavailable.");
-  return path;
-}
-function relayFreshConfig(contextConfig, initialPluginConfig) {
-  const root = relayConfigRecord(contextConfig);
-  const entries = relayConfigRecord(relayConfigRecord(root?.plugins)?.entries);
-  const olympus = relayConfigRecord(entries?.olympus);
-  let pluginConfig;
-  if (entries) {
-    pluginConfig = olympus && Object.prototype.hasOwnProperty.call(olympus, "config") ? olympus.config : undefined;
-  } else if (root && ["remote", "worker", "email", "sourceIndex", "argus", "identity", "sovereignty"].some((key2) => Object.prototype.hasOwnProperty.call(root, key2))) {
-    pluginConfig = root;
-  } else {
-    pluginConfig = initialPluginConfig;
-  }
-  try {
-    return configFromPluginConfig(pluginConfig, { requireResolvedWorkerSecrets: false });
-  } catch {
-    throw new NativeProcessConfigurationError("Olympus remote access could not read the plugin configuration.");
-  }
-}
-function relayConfigRecord(value2) {
-  return value2 && typeof value2 === "object" && !Array.isArray(value2) ? value2 : undefined;
-}
-var SERVICE_ID3 = "olympus-remote-relay", SERVICE_LABEL3 = "remote relay", DEFAULT_STARTUP_TIMEOUT_MS4 = 15000, DEFAULT_STABLE_UPTIME_MS = 60000, CHILD_ENV_PASSTHROUGH, watchedChildren;
-var init_native_relay_service = __esm(() => {
-  init_config();
-  init_native_process_service();
-  init_native_worker_service();
-  init_remote_access();
-  init_remote_public_url();
-  init_worker_auth();
-  CHILD_ENV_PASSTHROUGH = ["HOME", "XDG_DATA_HOME", "PATH", "TMPDIR", "LANG", "SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS", ...process.platform === "linux" ? ["XDG_CONFIG_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME", "XDG_RUNTIME_DIR"] : []];
-  watchedChildren = new WeakSet;
-});
-
-// src/core/engine-host.ts
-var exports_engine_host = {};
-__export(exports_engine_host, {
-  startEngineHost: () => startEngineHost,
-  runEngineHostProcess: () => runEngineHostProcess,
-  engineStatusPath: () => engineStatusPath,
-  engineHostServices: () => engineHostServices,
-  ENGINE_STATUS_SCHEMA: () => ENGINE_STATUS_SCHEMA
-});
-import { mkdirSync as mkdirSync51 } from "node:fs";
-import { join as join110 } from "node:path";
-function engineHostServices(pluginConfig, moduleUrl, paths, ownerBridgeHostSocket) {
-  const managed = paths?.linux ? { workerEnvPath: paths.workerEnvPath } : {};
-  const { isReady: _workerIsReady, ...worker } = createNativeWorkerService({ initialPluginConfig: pluginConfig, moduleUrl, engineHosted: true, ...managed, ...ownerBridgeHostSocket ? { ownerBridgeHostSocket } : {} });
-  return [
-    backgroundNativeProcessService(worker),
-    backgroundNativeProcessService(createNativeRelayService({ initialPluginConfig: pluginConfig, moduleUrl, ...managed })),
-    backgroundNativeProcessService(createNativeEmbeddingDrainService({ initialPluginConfig: pluginConfig, moduleUrl, ...managed }))
-  ];
-}
-async function startEngineHost(options) {
-  const env = options.env ?? process.env;
-  const log = options.log ?? ((line2) => console.log(`${new Date().toISOString()} ${line2}`));
-  const exit = options.exit ?? ((code) => process.exit(code));
-  const homeDir = options.homeDir ?? env.HOME ?? "";
-  const paths = engineServicePaths({ homeDir, env, platform: options.platform ?? process.platform });
-  let pluginConfig;
-  let remoteMode = "off";
-  let enabled = {};
-  try {
-    pluginConfig = readEngineConfig(paths.configPath);
-    if (pluginConfig) {
-      const parsed = configFromPluginConfig(pluginConfig, { requireResolvedWorkerSecrets: false });
-      remoteMode = resolveRemoteAccessMode(parsed.remote).mode;
-      enabled = {
-        "olympus-worker": parsed.worker.service.enabled,
-        "olympus-remote-relay": remoteMode !== "off",
-        "olympus-source-embedding-drain": parsed.worker.embeddingDrain.enabled
-      };
-    }
-  } catch (error) {
-    log(`engine: ${paths.configPath} could not be read: ${error instanceof Error ? error.message : "unknown error"}`);
-    exit(EXIT_CONFIG);
-    return;
-  }
-  if (!pluginConfig) {
-    log(`engine: no ${paths.configPath}; run olympus engine install.`);
-    exit(EXIT_CONFIG);
-    return;
-  }
-  setNativeProcessChildStdio("inherit");
-  const dataEnv = { ...env, HOME: homeDir };
-  const childrenPath = engineChildrenPath(dataEnv);
-  const recordedBeforeReap = readEngineChildren(childrenPath);
-  const reaped = reapRecordedEngineChildren(childrenPath, { ...options.reap ?? {}, retainSettledRecord: true });
-  if (reaped.stopped.length > 0) {
-    log(`engine: stopped ${reaped.stopped.length} process group(s) a previous engine left running (${reaped.stopped.map((child2) => child2.service).join(", ")}).`);
-  }
-  if (paths.linux) {
-    const workerGroups = recordedBeforeReap?.children.filter((child2) => child2.service === "olympus-worker") ?? [];
-    const workerReleased = workerGroups.length > 0 && workerGroups.every((child2) => reaped.stopped.some((entry) => entry.pgid === child2.pgid) || reaped.skipped.some((entry) => entry.pgid === child2.pgid && ["gone", "not_ours"].includes(entry.reason)));
-    try {
-      if (workerReleased)
-        removeReleasedWorkerSocket({ platform: "linux", env: dataEnv }, { previousWorkerReleased: true });
-    } catch (error) {
-      log(`engine: retained worker socket because prior process custody is not released: ${error instanceof Error ? error.message : "unknown error"}`);
-      exit(EXIT_CONFIG);
-      return;
-    }
-  }
-  const allRecordedReleased = (recordedBeforeReap?.children ?? []).every((child2) => reaped.stopped.some((entry) => entry.pgid === child2.pgid) || reaped.skipped.some((entry) => entry.pgid === child2.pgid && ["gone", "not_ours"].includes(entry.reason)));
-  if (allRecordedReleased)
-    removeFileDurablySync(childrenPath);
-  setNativeProcessChildObserver(engineChildrenRecorder({ path: childrenPath }));
-  const now = () => new Date().toISOString();
-  const status = {
-    schema: ENGINE_STATUS_SCHEMA,
-    ...paths.linux ? { process_identity: processInstanceIdentity(process.pid) } : {},
-    pid: process.pid,
-    started_at: now(),
-    updated_at: now(),
-    state: "running",
-    build: env[ENGINE_BUILD_ENV]?.trim() || null,
-    remote_mode: remoteMode,
-    services: {}
-  };
-  let desktopBridge;
-  const statusPath = engineStatusPath(dataEnv);
-  let lastStatus;
-  const writeStatus = () => {
-    if (desktopBridge)
-      status.desktop_bridge = desktopBridge.status();
-    const content = JSON.stringify({ ...status, updated_at: undefined });
-    if (content === lastStatus)
-      return;
-    status.updated_at = now();
-    try {
-      mkdirSync51(join110(statusPath, ".."), { recursive: true, mode: 448 });
-      writePrivateFileAtomicSync(statusPath, `${JSON.stringify(status, null, 2)}
-`);
-      lastStatus = content;
-    } catch {}
-  };
-  const makeServices = options.services ?? ((config) => engineHostServices(config, options.moduleUrl, paths, desktopBridge?.controlPath));
-  let services = [];
-  const contextFor = (id) => ({
-    config: { plugins: { entries: { olympus: { config: pluginConfig } } } },
-    logger: {
-      info: (message2) => log(`${id}: ${message2}`),
-      warn: (message2) => log(`${id}: ${message2}`)
-    },
-    serviceHealth: {
-      reportFailure(error) {
-        const message2 = error.message;
-        const state = /is starting\.$/.test(message2) ? "starting" : "failing";
-        if (status.services[id]?.state === state && status.services[id]?.message === message2) {
-          writeStatus();
-          return;
-        }
-        status.services[id] = {
-          state,
-          message: message2,
-          updated_at: now()
-        };
-        log(`${id}: ${message2}`);
-        writeStatus();
-      },
-      clearFailure() {
-        if (status.services[id]?.state === "ok" && status.services[id]?.message === null) {
-          writeStatus();
-          return;
-        }
-        status.services[id] = { state: "ok", message: null, updated_at: now() };
-        writeStatus();
-      }
-    }
-  });
-  const rotation = paths.linux ? setInterval(() => {
-    try {
-      rotateEngineLog(paths.logPath);
-      rotateEngineLog(paths.errorLogPath);
-    } catch {
-      log("engine: private log rotation failed; check engine log permissions.");
-    }
-  }, 30000) : undefined;
-  rotation?.unref();
-  let stopping;
-  const stop = () => {
-    stopping ??= (async () => {
-      if (rotation)
-        clearInterval(rotation);
-      desktopBridge?.close();
-      status.state = "stopping";
-      writeStatus();
-      log("engine: stopping.");
-      const deadline = new Promise((resolve22) => setTimeout(resolve22, STOP_DEADLINE_MS).unref?.());
-      await Promise.race([
-        Promise.allSettled([...services].reverse().map((service) => service.stop())),
-        deadline
-      ]);
-      for (const [id, health] of Object.entries(status.services)) {
-        if (health.state !== "off")
-          status.services[id] = { state: "stopped", message: null, updated_at: now() };
-      }
-      status.state = "stopped";
-      writeStatus();
-      setNativeProcessChildObserver(undefined);
-      log("engine: stopped.");
-    })();
-    return stopping;
-  };
-  if (options.installSignalHandlers !== false) {
-    const onSignal = () => {
-      stop().then(() => exit(0));
-    };
-    process.once("SIGTERM", onSignal);
-    process.once("SIGINT", onSignal);
-  }
-  if (paths.linux && !stopping && pluginConfig && enabled["olympus-worker"] !== false) {
-    const transport = { platform: "linux", env: dataEnv };
-    let socketPath;
-    try {
-      socketPath = validateWorkerSocketDirectory(transport);
-    } catch (error) {
-      if (error.code !== "ENOENT")
-        throw error;
-      socketPath = prepareWorkerSocket(transport);
-    }
-    const config = configFromPluginConfig(pluginConfig, { requireResolvedWorkerSecrets: false });
-    const port = Number(new URL(config.email.baseUrl).port || 80);
-    const base = `http://127.0.0.1:${port}`;
-    const fetchSocket = createWorkerFetch(transport);
-    const authToken = () => workerAuthTokenFromConfig(configFromPluginConfig(readEngineConfig(paths.configPath), { requireResolvedWorkerSecrets: false }), { env: dataEnv, workerEnvPath: paths.workerEnvPath });
-    desktopBridge = startLinuxOwnerBridgeHost({
-      port,
-      socketPath,
-      transport,
-      ...options.desktop?.openFile ? { openFile: options.desktop.openFile } : {},
-      onChange: writeStatus,
-      desktopReady: async () => {
-        const desktop = options.desktop?.ready ? { ready: await options.desktop.ready() } : await linuxGraphicalSessionReadinessAsync();
-        return desktop.ready && !resolveServerMode({ platform: options.platform ?? process.platform, env: dataEnv, fileEnv: readWorkerSetupEnv({ env: dataEnv, workerEnvPath: paths.workerEnvPath }), desktopReady: () => desktop.ready }).remote;
-      },
-      workerOwned: () => status.services["olympus-worker"]?.state === "ok",
-      workerConflict: () => status.services["olympus-worker"]?.message === WORKER_DATA_OWNER_CONFLICT_MESSAGE ? "data" : status.services["olympus-worker"]?.message === WORKER_ENDPOINT_CONFLICT_MESSAGE ? "endpoint" : status.services["olympus-worker"]?.message === WORKER_SOCKET_RETAINED_MESSAGE ? "retained_socket" : undefined,
-      workerReady: async () => {
-        if (status.services["olympus-worker"]?.state !== "ok")
-          return false;
-        const response = await fetchSocket(base + "/v1/health", { headers: { Authorization: `Bearer ${authToken() ?? ""}` }, signal: AbortSignal.timeout(1000) });
-        await response.body?.cancel();
-        return response.ok;
-      },
-      fetchSocket: (request) => fetchSocket(request, { redirect: "manual" }),
-      establishDashboard: async () => {
-        if (status.services["olympus-worker"]?.state !== "ok")
-          throw new Error("Worker ownership changed.");
-        const response = await fetchSocket(base + "/dashboard/control/session", { method: "POST", headers: { Authorization: `Bearer ${authToken() ?? ""}`, Origin: base }, signal: AbortSignal.timeout(5000) });
-        if (status.services["olympus-worker"]?.state !== "ok") {
-          await response.body?.cancel().catch(() => {});
-          throw new Error("Worker ownership changed.");
-        }
-        if (!response.ok) {
-          await response.body?.cancel().catch(() => {});
-          if (response.status === 503)
-            throw new Error("Owner dashboard session is restarting.");
-          return null;
-        }
-        await response.body?.cancel();
-        if (status.services["olympus-worker"]?.state !== "ok")
-          throw new Error("Worker ownership changed.");
-        return response.headers.getSetCookie();
-      }
-    });
-  }
-  services = makeServices(pluginConfig);
-  log(`engine: starting (pid ${process.pid}, remote access ${remoteMode}).`);
-  writeStatus();
-  for (const service of services) {
-    status.services[service.id] = { state: enabled[service.id] === false ? "off" : "starting", message: null, updated_at: now() };
-    if (stopping)
-      break;
-    await service.start(contextFor(service.id));
-  }
-  writeStatus();
-  return { stop, status: () => {
-    writeStatus();
-    return structuredClone(status);
-  } };
-}
-async function runEngineHostProcess(moduleUrl) {
-  const handle = await startEngineHost({ moduleUrl });
-  if (!handle)
-    return;
-  setInterval(() => {
-    return;
-  }, 60000);
-  await new Promise(() => {
-    return;
-  });
-}
-var ENGINE_STATUS_SCHEMA = "olympus.engine.status.v1", EXIT_CONFIG = 78, STOP_DEADLINE_MS = 15000;
-var init_engine_host = __esm(() => {
-  init_linux_owner_bridge_host();
-  init_linux_desktop_opener();
-  init_worker_auth();
-  init_remote_open();
-  init_file_lease();
-  init_linux_engine_service();
-  init_atomic_file();
-  init_config();
-  init_engine_children();
-  init_engine_service();
-  init_native_embedding_drain_service();
-  init_native_process_service();
-  init_native_relay_service();
-  init_native_worker_service();
-  init_remote_access();
-  init_worker_transport();
-  init_engine_service();
-});
-
 // src/core/consult-writer.ts
 var exports_consult_writer = {};
 __export(exports_consult_writer, {
@@ -120544,7 +119595,7 @@ __export(exports_consult_writer, {
   CONSULT_STANDARD_REPLY_FORMAT: () => CONSULT_STANDARD_REPLY_FORMAT
 });
 import { execFileSync as execFileSync4 } from "node:child_process";
-import { readFileSync as readFileSync68 } from "node:fs";
+import { readFileSync as readFileSync66 } from "node:fs";
 import { freemem, platform as osPlatform5, totalmem as totalmem3 } from "node:os";
 function consultWriterSystem(level, options = {}) {
   if (level === "unnamed")
@@ -120714,7 +119765,7 @@ function meminfoBytes(meminfo, field) {
 }
 function defaultConsultMemoryProbe(deps = {}) {
   const exec = deps.exec ?? ((file, args) => execFileSync4(file, [...args], { encoding: "utf8", timeout: 5000, stdio: ["ignore", "pipe", "ignore"] }));
-  const readFile12 = deps.readFile ?? ((path) => readFileSync68(path, "utf8"));
+  const readFile12 = deps.readFile ?? ((path) => readFileSync66(path, "utf8"));
   const platform2 = deps.platform ?? osPlatform5();
   const readOptional = (path) => {
     try {
@@ -135836,7 +134887,7 @@ function remoteToolSchema(operation, schema) {
   const withheld = withheldParams(operation);
   if (withheld.length === 0)
     return schema;
-  const properties = asRecord17(schema.properties) ?? {};
+  const properties = asRecord15(schema.properties) ?? {};
   const required4 = Array.isArray(schema.required) ? schema.required : [];
   return {
     ...schema,
@@ -135864,11 +134915,11 @@ function remoteOperationOutput(operation, raw, options = {}) {
   }
 }
 function isAnonymousAnswerResult(raw) {
-  const record4 = asRecord17(raw);
+  const record4 = asRecord15(raw);
   return record4 !== undefined && typeof record4.ok === "boolean" && typeof record4.answer !== "string";
 }
 function pendingOutput(raw) {
-  const record4 = asRecord17(raw);
+  const record4 = asRecord15(raw);
   if (record4?.status !== "working")
     return;
   if (typeof record4.job_id !== "string" || !JOB_ID.test(record4.job_id) || isSecretLike(record4.job_id)) {
@@ -135883,11 +134934,11 @@ function pendingOutput(raw) {
   };
 }
 function sourceAnswerOutput(raw, options) {
-  const record4 = asRecord17(raw);
+  const record4 = asRecord15(raw);
   if (!record4 || typeof record4.answer !== "string" || !Array.isArray(record4.evidence)) {
     throw new OperationError("source_index_error", "unexpected answer shape");
   }
-  const evidence = record4.evidence.map(asRecord17).filter((entry) => entry !== undefined);
+  const evidence = record4.evidence.map(asRecord15).filter((entry) => entry !== undefined);
   let dropped = new Set;
   if (options.releaseCheck) {
     const recheck = recheckRelease(evidence, options.releaseManifests ?? [], options.releaseCheck);
@@ -135979,7 +135030,7 @@ function citationOutput(entry) {
   };
 }
 function anonymousAnswerOutput(raw) {
-  const record4 = asRecord17(raw);
+  const record4 = asRecord15(raw);
   if (!record4 || typeof record4.ok !== "boolean") {
     throw new OperationError("email_error", "unexpected anonymous answer shape");
   }
@@ -136009,7 +135060,7 @@ function anonymousAnswerOutput(raw) {
     };
   }
   if (record4.code === "needs_choice") {
-    const options = asRecord17(record4.options);
+    const options = asRecord15(record4.options);
     return {
       kind: "anonymous_answer",
       status: "needs_choice",
@@ -136035,7 +135086,7 @@ function anonymousAnswerOutput(raw) {
   };
 }
 function sourceIndexStatusOutput(raw) {
-  const record4 = asRecord17(raw);
+  const record4 = asRecord15(raw);
   if (!record4 || record4.kind !== "source_index_status" || !Array.isArray(record4.corpora)) {
     throw new OperationError("source_index_error", "unexpected status shape");
   }
@@ -136044,16 +135095,16 @@ function sourceIndexStatusOutput(raw) {
   for (const value2 of record4.corpora) {
     if (corpora.length >= MAX_CORPORA)
       break;
-    const corpus = asRecord17(value2);
+    const corpus = asRecord15(value2);
     if (!corpus || typeof corpus.corpus_id !== "string" || corpus.corpus_id.length > 128 || !CORPUS_ID.test(corpus.corpus_id) || isSecretLike(corpus.corpus_id))
       continue;
-    const retrieval = asRecord17(corpus.retrieval);
+    const retrieval = asRecord15(corpus.retrieval);
     const mode = oneOf(retrieval?.servable_mode, RETRIEVAL_MODES);
     const state = oneOf(retrieval?.state, RETRIEVAL_STATES);
-    const refresh = asRecord17(corpus.last_refresh);
+    const refresh = asRecord15(corpus.last_refresh);
     const refreshStatus = oneOf(refresh?.status, REFRESH_STATUSES);
     const completedAt = iso(refresh?.completed_at);
-    const counts = asRecord17(corpus.counts);
+    const counts = asRecord15(corpus.counts);
     const trustDomain = oneOf(corpus.trust_domain, TRUST_DOMAINS);
     corpora.push({
       corpus_id: corpus.corpus_id,
@@ -136168,7 +135219,7 @@ function iso(value2) {
 function dateOnly(value2) {
   return iso(value2)?.slice(0, 10);
 }
-function asRecord17(value2) {
+function asRecord15(value2) {
   return typeof value2 === "object" && value2 !== null && !Array.isArray(value2) ? value2 : undefined;
 }
 var MAX_ANSWER, MAX_SENT, MAX_TITLE = 400, MAX_ROUTE = 300, MAX_MESSAGE = 2000, MAX_CITATIONS = 50, MAX_CORPORA = 200, JOB_ID, PARAM_NAME, CORPUS_ID, MODEL_ID, UNSAFE_CHARS, REMOTE_PENDING_MESSAGE, REMOTE_ANSWER_CHANGED = "Olympus withheld this answer because an item it drew on has changed privacy level since the answer was written. Ask the question again.", REMOTE_ANSWER_UNVERIFIED = "Olympus withheld this answer because it could not confirm the items it drew on may still be shared. Ask the question again.", REMOTE_PRIVATE_NOTE = "Your answer is in Olympus on your computer.", REMOTE_PRIVATE_NOTE_PATTERN = "^Your answer is in Olympus on your computer\\.(?: \\[Open answer\\]\\(olympus://open/private/[A-Za-z0-9_-]{22}\\))?$", PRIVATE_ANSWER_ID, REMOTE_ANSWER_WITHHELD = "Olympus withheld this answer under the owner's privacy rules.", REMOTE_REPLY_WITHHELD = "Olympus withheld the reply because it looked like it contained a password, key or token.", REMOTE_REFUSAL_FALLBACK = "Olympus could not ask anonymously.", REMOTE_PROVIDER_UNKNOWN_NOTE = "Olympus does not know which company runs this agent, so it could not make sure the answer came from another company's model.", REMOTE_NEEDS_CHOICE_MESSAGE = "Nothing was sent. Ask the user once: Strict (their model rewrites it into general questions first) or Standard (their words, prepared as they choose: as written, light cleanup, or their own instruction). Then call again with level, and remember=true to keep it.", PROVIDER_LABELS, FAMILY_LABELS, OTHER_SOURCE_LABEL = "Other source", REMOTE_SOURCE_LABELS, REMOTE_REFUSAL_CODES, REMOTE_DAEMON_CODES, REFRESH_STATUSES, TRUST_DOMAINS, RETRIEVAL_MODES, RETRIEVAL_STATES, NETWORK_IDENTITIES, CLEANUPS, OUTCOMES, REMOTE_WITHHELD_PARAMS, REMOTE_DESCRIPTIONS, REMOTE_ERROR_TEXT, SOURCE_ANSWER_BUSY_RETRY_AFTER_SECONDS = 30, RETRY_AFTER_SECONDS, REMOTE_ERROR_CODES, REFERENCED_ERROR_CODES, PENDING_SCHEMA, CITATION_SCHEMA, SOURCE_ANSWER_SCHEMA, ANONYMOUS_ANSWERED_SCHEMA, ANONYMOUS_NEEDS_CHOICE_SCHEMA, ANONYMOUS_REFUSED_SCHEMA, SOURCE_INDEX_STATUS_SCHEMA, REMOTE_ERROR_SCHEMA, REMOTE_OUTPUT_SCHEMAS;
@@ -137337,6 +136388,955 @@ var init_server4 = __esm(() => {
     [-32603]: "Internal error.",
     [-32001]: "Session not found."
   };
+});
+
+// src/workers/dashboard/embedding-runtime.ts
+import { mkdirSync as mkdirSync51, readFileSync as readFileSync67, rmSync as rmSync33, writeFileSync as writeFileSync20 } from "node:fs";
+import { dirname as dirname82, join as join110 } from "node:path";
+import { homedir as homedir38 } from "node:os";
+function guardStateDir(env) {
+  const configured = env[GUARD_STATE_DIR_ENV]?.trim();
+  if (configured)
+    return configured;
+  return join110(env.HOME?.trim() || homedir38(), ...GUARD_STATE_DIR_SEGMENTS);
+}
+function resolveEmbeddingOverridePath(env = process.env) {
+  const explicit = env[GUARD_OVERRIDE_PATH_ENV]?.trim();
+  if (explicit)
+    return explicit;
+  return join110(guardStateDir(env), "operator-override");
+}
+function resolveGuardReportPath(env = process.env) {
+  return join110(guardStateDir(env), "latest.json");
+}
+function resolveEmbeddingDrainReportPath(env = process.env) {
+  const explicit = env[EMBEDDING_DRAIN_REPORT_PATH_ENV]?.trim();
+  if (explicit)
+    return explicit;
+  const dir = env[EMBEDDING_DRAIN_REPORT_DIR_ENV]?.trim() || EMBEDDING_DRAIN_REPORT_DIR_DEFAULT;
+  return join110(dir, "source-embedding-drain-current.json");
+}
+function readEmbeddingOperatorOverride(path) {
+  let raw;
+  try {
+    raw = readFileSync67(path, "utf8");
+  } catch (error2) {
+    if (error2?.code === "ENOENT")
+      return "none";
+    return "unreadable";
+  }
+  const token = raw.replace(/[\r\n]/g, "");
+  if (token === "")
+    return "none";
+  if (token === EMBEDDING_PRIORITY_TOKEN)
+    return "embedding_priority";
+  if (token === GUARD_PAUSED_TOKEN)
+    return "guard_paused";
+  return "unknown_token";
+}
+function writeEmbeddingOperatorOverride(path, on) {
+  if (!on) {
+    rmSync33(path, { force: true });
+    return;
+  }
+  mkdirSync51(dirname82(path), { recursive: true, mode: 448 });
+  writeFileSync20(path, `${EMBEDDING_PRIORITY_TOKEN}
+`, "utf8");
+}
+function asRecord16(value2) {
+  return typeof value2 === "object" && value2 !== null && !Array.isArray(value2) ? value2 : undefined;
+}
+function asStamp(value2) {
+  if (typeof value2 !== "string")
+    return;
+  const at = Date.parse(value2);
+  return Number.isFinite(at) ? new Date(at) : undefined;
+}
+function fresh(at, now, maxAgeMs) {
+  const age = now.getTime() - at.getTime();
+  return age <= maxAgeMs && age >= -REPORT_MAX_FUTURE_SKEW_MS;
+}
+function readJsonFile(path) {
+  try {
+    return asRecord16(JSON.parse(readFileSync67(path, "utf8")));
+  } catch {
+    return;
+  }
+}
+function readGuardReport(path, now) {
+  const record4 = readJsonFile(path);
+  if (record4 === undefined)
+    return;
+  const generatedAt = asStamp(record4.finished_at) ?? asStamp(record4.started_at);
+  if (generatedAt === undefined || !fresh(generatedAt, now, GUARD_REPORT_MAX_AGE_MS))
+    return;
+  const actions = Array.isArray(record4.actions) ? record4.actions.filter((line2) => typeof line2 === "string") : [];
+  return {
+    generatedAt,
+    ...typeof record4.metadata_window_active === "boolean" ? { metadataWindowActive: record4.metadata_window_active } : {},
+    ...typeof record4.metadata_window_reason === "string" ? { metadataWindowReason: record4.metadata_window_reason } : {},
+    ...typeof record4.writer_drains_parked_without_window === "boolean" ? { writerDrainsParked: record4.writer_drains_parked_without_window } : {},
+    actions
+  };
+}
+function readEmbeddingDrainReport(path, now) {
+  const record4 = readJsonFile(path);
+  if (record4 === undefined)
+    return;
+  const updatedAt = asStamp(record4.updated_at) ?? asStamp(record4.generated_at);
+  if (updatedAt === undefined || !fresh(updatedAt, now, DRAIN_REPORT_MAX_AGE_MS))
+    return;
+  return {
+    updatedAt,
+    ...typeof record4.run_state === "string" ? { runState: record4.run_state } : {},
+    ...typeof record4.active_phase === "string" ? { activePhase: record4.active_phase } : {},
+    ...typeof record4.chunks_embedded === "number" && Number.isFinite(record4.chunks_embedded) ? { chunksEmbedded: record4.chunks_embedded } : {}
+  };
+}
+function drainReportIsLive(report) {
+  if (report === undefined)
+    return false;
+  if (report.runState !== "running")
+    return false;
+  return report.activePhase !== undefined && LIVE_DRAIN_PHASES.includes(report.activePhase);
+}
+function deriveEmbeddingRunState(input) {
+  const live = drainReportIsLive(input.drain);
+  if (input.override === "embedding_priority") {
+    return {
+      state: "operator_priority",
+      stateLine: live ? "Embeddings: running now (operator priority)" : "Embeddings: operator priority is on — the guard keeps this lane running"
+    };
+  }
+  if (input.override === "guard_paused") {
+    return {
+      state: "guard_paused",
+      stateLine: live ? "Embeddings: running now, but the guard is paused — nothing will park or restart this lane" : "Embeddings: off (guard paused) — nothing will start this lane until the pause is lifted"
+    };
+  }
+  if (input.override === "unreadable") {
+    return {
+      state: "unknown",
+      stateLine: "Embeddings: state unknown — the operator override file could not be read"
+    };
+  }
+  if (live) {
+    const phase = input.drain?.activePhase;
+    const phaseText = phase === "embedding" ? "metadata caught up" : phase === "sleeping" || phase === "backoff" ? "between passes" : phase === "starting" ? "starting up" : phase ?? "up";
+    return {
+      state: "running",
+      stateLine: `Embeddings: running now (${phaseText})`
+    };
+  }
+  const guard = input.guard;
+  if (guard === undefined) {
+    return {
+      state: "unknown",
+      stateLine: "Embeddings: state unknown — neither the guard nor the drain has reported recently"
+    };
+  }
+  if (guard.metadataWindowActive === true) {
+    const reason = guard.metadataWindowReason;
+    return {
+      state: "parked",
+      stateLine: reason ? `Embeddings: parked — Dropbox metadata sync has priority (${reason})` : "Embeddings: parked — Dropbox metadata sync has priority"
+    };
+  }
+  const parkAction = guard.actions.find((line2) => line2.includes("olympus-source-embedding-drain") && line2.startsWith("paused"));
+  if (parkAction !== undefined) {
+    const reason = parkAction.split(":").slice(1).join(":").trim();
+    return {
+      state: "parked",
+      stateLine: reason ? `Embeddings: parked by the guard — ${reason}` : "Embeddings: parked by the guard"
+    };
+  }
+  if (guard.writerDrainsParked === true) {
+    return {
+      state: "parked",
+      stateLine: "Embeddings: parked — the source-processing supervisors own the machine right now"
+    };
+  }
+  return {
+    state: "unknown",
+    stateLine: "Embeddings: state unknown — the guard has not parked this lane, but the drain is not reporting"
+  };
+}
+async function readEmbeddingModelLine(options = {}) {
+  const env = options.env ?? process.env;
+  const configured = env.OLYMPUS_SOURCE_INDEX_EMBEDDING_MODEL?.trim();
+  const baseUrl = env.OLYMPUS_SOURCE_INDEX_EMBEDDING_BASE_URL?.trim();
+  if (!configured)
+    return;
+  const local = env.OLYMPUS_SOURCE_INDEX_EMBEDDING_PROVIDER?.trim() === "local-openai-compatible";
+  const fallback = {
+    name: configured,
+    live: false,
+    local,
+    text: `${configured} · ${where(local)} (configured)`
+  };
+  if (!baseUrl)
+    return fallback;
+  const backendModel = await fetchBackendModel({
+    baseUrl,
+    model: configured,
+    fetchImpl: options.fetchImpl ?? globalThis.fetch,
+    timeoutMs: options.routerTimeoutMs ?? 1500
+  });
+  if (backendModel === undefined)
+    return fallback;
+  return {
+    name: configured,
+    live: true,
+    local,
+    ...backendModel === "" ? {} : { backendModel },
+    text: backendModel === "" || backendModel === configured ? `${configured} · ${where(local)}` : `${configured} · ${where(local)} · backed by ${backendModel}`
+  };
+}
+function where(local) {
+  return local ? "local (Delphi router)" : "remote provider";
+}
+async function fetchBackendModel(input) {
+  const url2 = `${input.baseUrl.replace(/\/+$/, "")}/models`;
+  try {
+    const response = await fetchModelEndpoint(input.fetchImpl, url2, {
+      method: "GET",
+      signal: AbortSignal.timeout(input.timeoutMs)
+    });
+    if (!response.ok)
+      return;
+    const body = asRecord16(await response.json());
+    const data2 = body?.data;
+    if (!Array.isArray(data2))
+      return;
+    const entry = data2.map((item) => asRecord16(item)).find((item) => item !== undefined && item.id === input.model);
+    if (entry === undefined)
+      return;
+    const backendModel = asRecord16(entry.metadata)?.backendModel;
+    return typeof backendModel === "string" && backendModel.trim() !== "" ? backendModel.trim() : "";
+  } catch {
+    return;
+  }
+}
+async function readEmbeddingRuntime(options = {}) {
+  const env = options.env ?? process.env;
+  const now = options.now ?? new Date;
+  const overridePath = resolveEmbeddingOverridePath(env);
+  const override = readEmbeddingOperatorOverride(overridePath);
+  const guard = readGuardReport(resolveGuardReportPath(env), now);
+  const drain = readEmbeddingDrainReport(resolveEmbeddingDrainReportPath(env), now);
+  const { state, stateLine } = deriveEmbeddingRunState({ override, guard, drain });
+  const model = await readEmbeddingModelLine(options);
+  return {
+    state,
+    stateLine,
+    scheduleLine: SCHEDULE_LINE,
+    ...model ? { model } : {},
+    overrideOn: override === "embedding_priority",
+    override,
+    overridePath
+  };
+}
+var EMBEDDING_PRIORITY_TOKEN = "embedding-priority", GUARD_PAUSED_TOKEN = "paused", GUARD_STATE_DIR_ENV = "OLYMPUS_OVERNIGHT_SOURCE_DRAIN_GUARD_STATE_DIR", GUARD_OVERRIDE_PATH_ENV = "OLYMPUS_OVERNIGHT_SOURCE_DRAIN_GUARD_OPERATOR_OVERRIDE_PATH", EMBEDDING_DRAIN_REPORT_PATH_ENV = "OLYMPUS_SOURCE_EMBEDDING_DRAIN_REPORT_PATH", EMBEDDING_DRAIN_REPORT_DIR_ENV = "OLYMPUS_SOURCE_EMBEDDING_DRAIN_REPORT_DIR", GUARD_STATE_DIR_SEGMENTS, EMBEDDING_DRAIN_REPORT_DIR_DEFAULT = "/tmp/olympus-source-processing-supervisor", GUARD_REPORT_MAX_AGE_MS, DRAIN_REPORT_MAX_AGE_MS, REPORT_MAX_FUTURE_SKEW_MS, LIVE_DRAIN_PHASES, SCHEDULE_LINE = "No fixed hours: the guard re-decides every minute. Embedding runs once Dropbox metadata sync is caught up, and is parked while metadata has priority.";
+var init_embedding_runtime = __esm(() => {
+  init_model_transport();
+  GUARD_STATE_DIR_SEGMENTS = [".local", "state", "olympus", "overnight-source-drain-guard"];
+  GUARD_REPORT_MAX_AGE_MS = 5 * 60 * 1000;
+  DRAIN_REPORT_MAX_AGE_MS = 300 * 1000;
+  REPORT_MAX_FUTURE_SKEW_MS = 60 * 1000;
+  LIVE_DRAIN_PHASES = ["starting", "embedding", "sleeping", "backoff"];
+});
+
+// src/core/native-embedding-drain-service.ts
+import { randomUUID as randomUUID27 } from "node:crypto";
+import { readFileSync as readFileSync68, statSync as statSync37 } from "node:fs";
+import { delimiter as delimiter8, dirname as dirname83, isAbsolute as isAbsolute33, join as join111 } from "node:path";
+import { fileURLToPath as fileURLToPath10 } from "node:url";
+function createNativeEmbeddingDrainService(options) {
+  return createNativeProcessService({
+    id: SERVICE_ID2,
+    label: SERVICE_LABEL2,
+    restartOnCleanExit: false,
+    reload: { configPrefixes: ["plugins.entries.olympus.config.worker.embeddingDrain"] },
+    initialConfig: options.initialPluginConfig,
+    defaultStartupTimeoutMs: DEFAULT_STARTUP_TIMEOUT_MS3,
+    ...options.startupTimeoutMs !== undefined ? { startupTimeoutMs: options.startupTimeoutMs } : {},
+    ...options.readinessPollMs !== undefined ? { readinessPollMs: options.readinessPollMs } : {},
+    ...options.stopGraceMs !== undefined ? { stopGraceMs: options.stopGraceMs } : {},
+    ...options.restartDelaysMs ? { restartDelaysMs: options.restartDelaysMs } : {},
+    ...options.workingDirectory ? { workingDirectory: options.workingDirectory } : {},
+    prepareStart: (input) => prepareEmbeddingDrainStart(input, options)
+  });
+}
+async function prepareEmbeddingDrainStart(input, options) {
+  let config2;
+  try {
+    config2 = configFromPluginConfig(freshPluginConfig(input.context.config, input.initialConfig));
+  } catch {
+    throw new NativeProcessConfigurationError("Olympus source embedding drain configuration is invalid or contains unresolved credentials.");
+  }
+  const drain = config2.worker.embeddingDrain;
+  if (!drain.enabled)
+    return;
+  const loadedEnv = baseEnvironment();
+  const workerEnvPath = drain.environmentPath ?? options.workerEnvPath;
+  applyWorkerSetupEnv({
+    env: loadedEnv,
+    ...workerEnvPath ? { workerEnvPath } : {}
+  });
+  const env = selectedEmbeddingEnvironment(loadedEnv);
+  for (const name of EMBEDDING_CREDENTIAL_NAMES) {
+    const value2 = drain.credentials[name]?.trim();
+    if (value2)
+      env[name] = value2;
+  }
+  env.GEMINI_API_KEY ??= env.OLYMPUS_SOURCE_INDEX_GEMINI_API_KEY;
+  env.OLYMPUS_SOURCE_INDEX_GEMINI_API_KEY ??= env.GEMINI_API_KEY;
+  const runtimePath = resolveBunRuntimePath2(drain.runtimePath, env);
+  const executablePath = assertUsableFile(fileURLToPath10(new URL("./embedding-drain.js", options.moduleUrl)), "packaged embedding drain");
+  const reportPath = drain.reportPath ?? resolveEmbeddingDrainReportPath(env);
+  if (!isAbsolute33(reportPath)) {
+    throw new NativeProcessConfigurationError("Olympus source embedding drain report path must be absolute.");
+  }
+  const readinessPath = join111(dirname83(reportPath), READINESS_FILE);
+  const instanceId = randomUUID27();
+  env.OLYMPUS_SOURCE_EMBEDDING_DRAIN_INSTANCE_ID = instanceId;
+  env.OLYMPUS_SOURCE_EMBEDDING_DRAIN_READINESS_PATH = readinessPath;
+  return {
+    command: runtimePath,
+    args: ["--no-env-file", executablePath, "--report", reportPath],
+    env,
+    startupTimeoutMs: options.startupTimeoutMs ?? DEFAULT_STARTUP_TIMEOUT_MS3,
+    endpointOccupied: false,
+    readinessPath,
+    instanceId,
+    readinessProbe: (child2) => embeddingDrainReadinessProbe(readinessPath, instanceId, child2)
+  };
+}
+function freshPluginConfig(contextConfig, initialPluginConfig) {
+  const root = asRecord17(contextConfig);
+  const entries = asRecord17(asRecord17(root?.plugins)?.entries);
+  const olympus = asRecord17(entries?.olympus);
+  if (entries) {
+    return olympus && Object.prototype.hasOwnProperty.call(olympus, "config") ? olympus.config : undefined;
+  }
+  if (root && ["worker", "email", "sourceIndex", "argus", "identity", "sovereignty"].some((key2) => Object.prototype.hasOwnProperty.call(root, key2))) {
+    return root;
+  }
+  return initialPluginConfig;
+}
+function baseEnvironment() {
+  return Object.fromEntries(SYSTEM_ENV_NAMES.map((name) => [name, process.env[name]]).filter((entry) => typeof entry[1] === "string" && entry[1].length > 0));
+}
+function selectedEmbeddingEnvironment(loadedEnv) {
+  const env = baseEnvironment();
+  for (const [name, value2] of Object.entries(loadedEnv)) {
+    if (!value2 || !EMBEDDING_SETTING_ENV_NAMES.has(name))
+      continue;
+    env[name] = value2;
+  }
+  return env;
+}
+function resolveBunRuntimePath2(configured, env) {
+  if (configured)
+    return assertUsableFile(configured, "Bun runtime");
+  const candidates = [
+    process.execPath,
+    ...(env.PATH ?? "").split(delimiter8).filter(Boolean).map((dir) => join111(dir, process.platform === "win32" ? "bun.exe" : "bun"))
+  ];
+  for (const candidate of candidates) {
+    if (!candidate || !isAbsolute33(candidate))
+      continue;
+    if (!["bun", "bun.exe"].includes(candidate.split(/[\\/]/).at(-1)?.toLowerCase() ?? ""))
+      continue;
+    try {
+      if (statSync37(candidate).isFile())
+        return candidate;
+    } catch {}
+  }
+  throw new NativeProcessConfigurationError("Olympus source embedding drain could not resolve an absolute Bun runtime path.");
+}
+function assertUsableFile(path, label) {
+  if (!isAbsolute33(path)) {
+    throw new NativeProcessConfigurationError(`Olympus source embedding drain ${label} path must be absolute.`);
+  }
+  try {
+    if (statSync37(path).isFile())
+      return path;
+  } catch {}
+  throw new NativeProcessConfigurationError(`Olympus source embedding drain ${label} file is missing.`);
+}
+async function embeddingDrainReadinessProbe(readinessPath, instanceId, child2) {
+  try {
+    const stat5 = statSync37(readinessPath);
+    if (!stat5.isFile() || stat5.size > 16 * 1024)
+      return false;
+    const receipt = JSON.parse(readFileSync68(readinessPath, "utf8"));
+    return receipt.kind === "source_embedding_drain_service_readiness" && receipt.schema_version === 1 && receipt.instance_id === instanceId && receipt.pid === child2.pid && receipt.options_validated === true && receipt.content_free === true;
+  } catch {
+    return false;
+  }
+}
+function asRecord17(value2) {
+  return value2 && typeof value2 === "object" && !Array.isArray(value2) ? value2 : undefined;
+}
+var SERVICE_ID2 = "olympus-source-embedding-drain", SERVICE_LABEL2 = "source embedding drain", DEFAULT_STARTUP_TIMEOUT_MS3 = 30000, READINESS_FILE = "source-embedding-drain-native-readiness.json", EMBEDDING_CREDENTIAL_NAMES, SYSTEM_ENV_NAMES, EMBEDDING_SETTING_ENV_NAMES, EMBEDDING_LANE_NAMES;
+var init_native_embedding_drain_service = __esm(() => {
+  init_config();
+  init_native_process_service();
+  init_worker_auth();
+  init_embedding_runtime();
+  EMBEDDING_CREDENTIAL_NAMES = [
+    "GEMINI_API_KEY",
+    "OLYMPUS_SOURCE_INDEX_GEMINI_API_KEY"
+  ];
+  SYSTEM_ENV_NAMES = ["HOME", "PATH", "TMPDIR", "LANG", "XDG_DATA_HOME", ...process.platform === "linux" ? ["XDG_CONFIG_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME", "XDG_RUNTIME_DIR", "OLYMPUS_SOVEREIGNTY_CONFIG"] : []];
+  EMBEDDING_SETTING_ENV_NAMES = new Set([
+    "OLYMPUS_BUILT_IN_EMBEDDING_DIR",
+    "OLYMPUS_BUILT_IN_EMBEDDING_THREADS",
+    "OLYMPUS_CONFIG",
+    "OLYMPUS_EMAIL_BASE_URL",
+    "OLYMPUS_SOURCE_INDEX_CONNECTOR_STORES_JSON",
+    "OLYMPUS_SOVEREIGNTY_CONFIG",
+    "OLYMPUS_SOVEREIGNTY_CONFIG_PATH",
+    "OLYMPUS_SOURCE_EMBEDDING_DRAIN_BASE_URL",
+    "OLYMPUS_SOURCE_EMBEDDING_DRAIN_DRIVE_INTERNAL_ENABLED",
+    "OLYMPUS_SOURCE_EMBEDDING_DRAIN_DROPBOX_STORE_ENABLED",
+    "OLYMPUS_SOURCE_EMBEDDING_DRAIN_EMAIL_ENABLED",
+    "OLYMPUS_SOURCE_EMBEDDING_DRAIN_ENABLED",
+    "OLYMPUS_SOURCE_EMBEDDING_DRAIN_ERROR_BACKOFF_SECONDS",
+    "OLYMPUS_SOURCE_EMBEDDING_DRAIN_EXIT_ON_ATTENTION",
+    "OLYMPUS_SOURCE_EMBEDDING_DRAIN_FORCE",
+    "OLYMPUS_SOURCE_EMBEDDING_DRAIN_IDLE_SLEEP_SECONDS",
+    "OLYMPUS_SOURCE_EMBEDDING_DRAIN_INTERNAL_TELEGRAM_ENABLED",
+    "OLYMPUS_SOURCE_EMBEDDING_DRAIN_MAX_CONSECUTIVE_FAILURES",
+    "OLYMPUS_SOURCE_EMBEDDING_DRAIN_MAX_PENDING_CHUNKS",
+    "OLYMPUS_SOURCE_EMBEDDING_DRAIN_MAX_RUNS",
+    "OLYMPUS_SOURCE_EMBEDDING_DRAIN_MAX_RUNTIME_SECONDS",
+    "OLYMPUS_SOURCE_EMBEDDING_DRAIN_MODE",
+    "OLYMPUS_SOURCE_EMBEDDING_DRAIN_PROGRESS_HEARTBEAT_SECONDS",
+    "OLYMPUS_SOURCE_EMBEDDING_DRAIN_PROTECTED_TELEGRAM_ENABLED",
+    "OLYMPUS_SOURCE_EMBEDDING_DRAIN_READWISE_ENABLED",
+    "OLYMPUS_SOURCE_EMBEDDING_DRAIN_REPORT_DIR",
+    "OLYMPUS_SOURCE_EMBEDDING_DRAIN_REPORT_PATH",
+    "OLYMPUS_SOURCE_EMBEDDING_DRAIN_REQUEST_TIMEOUT_SECONDS",
+    "OLYMPUS_SOURCE_EMBEDDING_DRAIN_STOP_WHEN_IDLE",
+    "OLYMPUS_SOURCE_EMBEDDING_DRAIN_WHATSAPP_ENABLED",
+    "OLYMPUS_SOURCE_EMBEDDING_DRAIN_WORKER_ID",
+    "OLYMPUS_SOURCE_EMBEDDING_DRAIN_X_BOOKMARKS_ENABLED",
+    "OLYMPUS_SOURCE_INDEX_CLOUD_EMBEDDING_EPOCH",
+    "OLYMPUS_SOURCE_INDEX_CLOUD_EMBEDDING_OUTPUT_DIMENSIONALITY",
+    "OLYMPUS_SOURCE_INDEX_EMBEDDING_BASE_URL",
+    "OLYMPUS_SOURCE_INDEX_EMBEDDING_EPOCH",
+    "OLYMPUS_SOURCE_INDEX_EMBEDDING_MEDIA_TIMEOUT_SECONDS",
+    "OLYMPUS_SOURCE_INDEX_EMBEDDING_MODEL",
+    "OLYMPUS_SOURCE_INDEX_EMBEDDING_OUTPUT_DIMENSIONALITY",
+    "OLYMPUS_SOURCE_INDEX_EMBEDDING_PROVIDER",
+    "OLYMPUS_SOURCE_INDEX_EMBEDDING_TIMEOUT_SECONDS",
+    "OLYMPUS_WHATSAPP_STATE_DIR"
+  ]);
+  EMBEDDING_LANE_NAMES = [
+    "DROPBOX",
+    "EMAIL",
+    "WHATSAPP",
+    "INTERNAL_TELEGRAM",
+    "PROTECTED_TELEGRAM",
+    "READWISE",
+    "X_BOOKMARKS",
+    "DRIVE_INTERNAL"
+  ];
+  for (const lane of EMBEDDING_LANE_NAMES) {
+    EMBEDDING_SETTING_ENV_NAMES.add(`OLYMPUS_SOURCE_EMBEDDING_DRAIN_${lane}_ENABLED`);
+    EMBEDDING_SETTING_ENV_NAMES.add(`OLYMPUS_SOURCE_EMBEDDING_DRAIN_${lane}_CADENCE_PASSES`);
+    EMBEDDING_SETTING_ENV_NAMES.add(`OLYMPUS_SOURCE_EMBEDDING_DRAIN_${lane}_MAX_PENDING_CHUNKS`);
+  }
+});
+
+// src/core/native-relay-service.ts
+import { randomUUID as relayRandomUUID } from "node:crypto";
+import { statSync as relayStatSync } from "node:fs";
+import { isAbsolute as relayIsAbsolute } from "node:path";
+import { fileURLToPath as relayFileURLToPath } from "node:url";
+function createNativeRelayService(options) {
+  let lastStatusDir;
+  let lastInstanceId;
+  const service = createNativeProcessService({
+    id: SERVICE_ID3,
+    label: SERVICE_LABEL3,
+    reload: {
+      configPrefixes: [
+        "plugins.entries.olympus.config.remote",
+        "plugins.entries.olympus.config.email.baseUrl",
+        "plugins.entries.olympus.config.worker.service"
+      ]
+    },
+    initialConfig: options.initialPluginConfig,
+    ...options.startupTimeoutMs !== undefined ? { startupTimeoutMs: options.startupTimeoutMs } : {},
+    ...options.readinessPollMs !== undefined ? { readinessPollMs: options.readinessPollMs } : {},
+    ...options.stopGraceMs !== undefined ? { stopGraceMs: options.stopGraceMs } : {},
+    ...options.restartDelaysMs ? { restartDelaysMs: options.restartDelaysMs } : {},
+    defaultStartupTimeoutMs: DEFAULT_STARTUP_TIMEOUT_MS4,
+    stableUptimeMs: options.stableUptimeMs ?? DEFAULT_STABLE_UPTIME_MS,
+    prepareStart: async (input) => {
+      const settings = prepareRelayStart(relayFreshConfig(input.context.config, input.initialConfig), options);
+      lastStatusDir = settings.statusDir;
+      lastInstanceId = settings.launch?.instanceId;
+      return settings.launch;
+    }
+  });
+  return {
+    ...service,
+    async stop() {
+      await service.stop();
+      clearStalePublicUrl(lastStatusDir, lastInstanceId);
+    }
+  };
+}
+function prepareRelayStart(config2, options) {
+  const env = { ...process.env };
+  applyWorkerSetupEnv({ env, ...options.workerEnvPath ? { workerEnvPath: options.workerEnvPath } : {} });
+  const statusDir = remoteAccessDir(env);
+  const mode = resolveRemoteAccessMode(config2.remote);
+  const localUrl = workerOrigin(config2, env);
+  const status = (next) => ({
+    ...emptyRemoteAccessStatus(next.mode),
+    local_url: localUrl ?? null,
+    ...next
+  });
+  const reportsOff = (next) => {
+    if (relayProcessRunning(statusDir))
+      return;
+    writeRemoteAccessStatus(statusDir, next);
+  };
+  const fail = (error2, statusMode2) => {
+    const next = status({ mode: statusMode2, error: error2 });
+    if (statusMode2 === "off")
+      reportsOff(next);
+    else
+      writeRemoteAccessStatus(statusDir, next);
+    throw new NativeProcessConfigurationError(`Olympus remote access is off: ${error2}`);
+  };
+  if (mode.mode === "off") {
+    if (readRemoteAccessStatus(statusDir))
+      reportsOff(status({ mode: "off" }));
+    return { statusDir, launch: undefined };
+  }
+  if (mode.mode === "error")
+    return fail(mode.error, "off");
+  const statusMode = mode.mode;
+  if (env[REMOTE_PUBLIC_BASE_URL_ENV]?.trim()) {
+    return fail(`${REMOTE_PUBLIC_BASE_URL_ENV} in worker.env already sets the public address, which conflicts with plugin config remote.*. Remove it from worker.env, or turn remote.enabled off.`, statusMode);
+  }
+  if (mode.mode === "manual") {
+    writeRemoteAccessStatus(statusDir, status({ mode: "manual", public_base_url: mode.publicBaseUrl }));
+    return { statusDir, launch: undefined };
+  }
+  if (!localUrl) {
+    return fail("the relay forwards only to a loopback http worker; email.baseUrl is not one.", "relay");
+  }
+  const instanceId = relayRandomUUID();
+  const childEnv = {};
+  for (const name of CHILD_ENV_PASSTHROUGH)
+    if (env[name])
+      childEnv[name] = env[name];
+  Object.assign(childEnv, options.childEnv ?? {}, {
+    OLYMPUS_RELAY_HOST: mode.relayHost,
+    OLYMPUS_RELAY_TARGET: localUrl,
+    OLYMPUS_NATIVE_SERVICE_INSTANCE_ID: instanceId
+  });
+  let command;
+  let executablePath;
+  try {
+    command = resolveBunRuntimePath(config2.worker.service.runtimePath, env);
+    executablePath = resolveExecutablePath(options.executablePath ?? relayFileURLToPath(new URL("./cli.js", options.moduleUrl)));
+  } catch {
+    return fail("the Bun runtime or the packaged Olympus CLI could not be found.", "relay");
+  }
+  writeRemoteAccessStatus(statusDir, status({
+    mode: "relay",
+    relay_host: mode.relayHost,
+    instance_id: instanceId,
+    relay: { state: "starting", reason: null, retry_in_ms: null }
+  }));
+  return {
+    statusDir,
+    launch: {
+      command,
+      args: ["--no-env-file", executablePath, "__relay-service-run", instanceId],
+      env: childEnv,
+      startupTimeoutMs: DEFAULT_STARTUP_TIMEOUT_MS4,
+      endpointOccupied: false,
+      statusDir,
+      instanceId,
+      readinessProbe: async (child2) => {
+        watchExit(child2, statusDir, instanceId);
+        const reported = readRemoteAccessStatus(statusDir);
+        return reported?.instance_id === instanceId && reported.pid === child2.pid;
+      }
+    }
+  };
+}
+function workerOrigin(config2, env) {
+  if (!config2.worker.service.enabled) {
+    const port = env.OLYMPUS_EMAIL_SOURCE_PORT?.trim();
+    if (port && /^\d{1,5}$/.test(port)) {
+      const host = env.OLYMPUS_WORKER_BIND_HOST?.trim() || env.OLYMPUS_EMAIL_SOURCE_HOST?.trim() || "127.0.0.1";
+      return loopbackWorkerOrigin(`http://${host === "::1" ? "[::1]" : host}:${port}`);
+    }
+  }
+  return loopbackWorkerOrigin(config2.email.baseUrl);
+}
+function watchExit(child2, statusDir, instanceId) {
+  if (watchedChildren.has(child2))
+    return;
+  watchedChildren.add(child2);
+  child2.once("exit", () => {
+    try {
+      const status = readRemoteAccessStatus(statusDir);
+      if (!status || status.instance_id !== instanceId || status.relay?.state === "stopped")
+        return;
+      writeRemoteAccessStatus(statusDir, {
+        ...status,
+        updated_at: new Date().toISOString(),
+        public_base_url: null,
+        relay: { state: "offline", reason: "the relay process exited; Olympus restarts it", retry_in_ms: null }
+      });
+    } catch {}
+  });
+}
+function clearStalePublicUrl(statusDir, instanceId) {
+  if (!statusDir || !instanceId)
+    return;
+  try {
+    const status = readRemoteAccessStatus(statusDir);
+    if (!status || status.instance_id !== instanceId)
+      return;
+    if (status.public_base_url === null && status.relay?.state === "stopped")
+      return;
+    writeRemoteAccessStatus(statusDir, {
+      ...status,
+      updated_at: new Date().toISOString(),
+      public_base_url: null,
+      relay: { state: "stopped", reason: null, retry_in_ms: null }
+    });
+  } catch {}
+}
+function resolveExecutablePath(path) {
+  if (!relayIsAbsolute(path) || !relayStatSync(path).isFile())
+    throw new Error("Olympus CLI is unavailable.");
+  return path;
+}
+function relayFreshConfig(contextConfig, initialPluginConfig) {
+  const root = relayConfigRecord(contextConfig);
+  const entries = relayConfigRecord(relayConfigRecord(root?.plugins)?.entries);
+  const olympus = relayConfigRecord(entries?.olympus);
+  let pluginConfig;
+  if (entries) {
+    pluginConfig = olympus && Object.prototype.hasOwnProperty.call(olympus, "config") ? olympus.config : undefined;
+  } else if (root && ["remote", "worker", "email", "sourceIndex", "argus", "identity", "sovereignty"].some((key2) => Object.prototype.hasOwnProperty.call(root, key2))) {
+    pluginConfig = root;
+  } else {
+    pluginConfig = initialPluginConfig;
+  }
+  try {
+    return configFromPluginConfig(pluginConfig, { requireResolvedWorkerSecrets: false });
+  } catch {
+    throw new NativeProcessConfigurationError("Olympus remote access could not read the plugin configuration.");
+  }
+}
+function relayConfigRecord(value2) {
+  return value2 && typeof value2 === "object" && !Array.isArray(value2) ? value2 : undefined;
+}
+var SERVICE_ID3 = "olympus-remote-relay", SERVICE_LABEL3 = "remote relay", DEFAULT_STARTUP_TIMEOUT_MS4 = 15000, DEFAULT_STABLE_UPTIME_MS = 60000, CHILD_ENV_PASSTHROUGH, watchedChildren;
+var init_native_relay_service = __esm(() => {
+  init_config();
+  init_native_process_service();
+  init_native_worker_service();
+  init_remote_access();
+  init_remote_public_url();
+  init_worker_auth();
+  CHILD_ENV_PASSTHROUGH = ["HOME", "XDG_DATA_HOME", "PATH", "TMPDIR", "LANG", "SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS", ...process.platform === "linux" ? ["XDG_CONFIG_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME", "XDG_RUNTIME_DIR"] : []];
+  watchedChildren = new WeakSet;
+});
+
+// src/core/engine-host.ts
+var exports_engine_host = {};
+__export(exports_engine_host, {
+  startEngineHost: () => startEngineHost,
+  runEngineHostProcess: () => runEngineHostProcess,
+  engineStatusPath: () => engineStatusPath,
+  engineHostServices: () => engineHostServices,
+  ENGINE_STATUS_SCHEMA: () => ENGINE_STATUS_SCHEMA
+});
+import { mkdirSync as mkdirSync52 } from "node:fs";
+import { join as join112 } from "node:path";
+function engineHostServices(pluginConfig, moduleUrl, paths, ownerBridgeHostSocket) {
+  const managed = paths?.linux ? { workerEnvPath: paths.workerEnvPath } : {};
+  const { isReady: _workerIsReady, ...worker } = createNativeWorkerService({ initialPluginConfig: pluginConfig, moduleUrl, engineHosted: true, ...managed, ...ownerBridgeHostSocket ? { ownerBridgeHostSocket } : {} });
+  return [
+    backgroundNativeProcessService(worker),
+    backgroundNativeProcessService(createNativeRelayService({ initialPluginConfig: pluginConfig, moduleUrl, ...managed })),
+    backgroundNativeProcessService(createNativeEmbeddingDrainService({ initialPluginConfig: pluginConfig, moduleUrl, ...managed }))
+  ];
+}
+async function startEngineHost(options) {
+  const env = options.env ?? process.env;
+  const log = options.log ?? ((line2) => console.log(`${new Date().toISOString()} ${line2}`));
+  const exit = options.exit ?? ((code) => process.exit(code));
+  const homeDir = options.homeDir ?? env.HOME ?? "";
+  const paths = engineServicePaths({ homeDir, env, platform: options.platform ?? process.platform });
+  let pluginConfig;
+  let remoteMode = "off";
+  let enabled = {};
+  try {
+    pluginConfig = readEngineConfig(paths.configPath);
+    if (pluginConfig) {
+      const parsed = configFromPluginConfig(pluginConfig, { requireResolvedWorkerSecrets: false });
+      remoteMode = resolveRemoteAccessMode(parsed.remote).mode;
+      enabled = {
+        "olympus-worker": parsed.worker.service.enabled,
+        "olympus-remote-relay": remoteMode !== "off",
+        "olympus-source-embedding-drain": parsed.worker.embeddingDrain.enabled
+      };
+    }
+  } catch (error2) {
+    log(`engine: ${paths.configPath} could not be read: ${error2 instanceof Error ? error2.message : "unknown error"}`);
+    exit(EXIT_CONFIG);
+    return;
+  }
+  if (!pluginConfig) {
+    log(`engine: no ${paths.configPath}; run olympus engine install.`);
+    exit(EXIT_CONFIG);
+    return;
+  }
+  setNativeProcessChildStdio("inherit");
+  const dataEnv = { ...env, HOME: homeDir };
+  const childrenPath = engineChildrenPath(dataEnv);
+  const recordedBeforeReap = readEngineChildren(childrenPath);
+  const reaped = reapRecordedEngineChildren(childrenPath, { ...options.reap ?? {}, retainSettledRecord: true });
+  if (reaped.stopped.length > 0) {
+    log(`engine: stopped ${reaped.stopped.length} process group(s) a previous engine left running (${reaped.stopped.map((child2) => child2.service).join(", ")}).`);
+  }
+  if (paths.linux) {
+    const workerGroups = recordedBeforeReap?.children.filter((child2) => child2.service === "olympus-worker") ?? [];
+    const workerReleased = workerGroups.length > 0 && workerGroups.every((child2) => reaped.stopped.some((entry) => entry.pgid === child2.pgid) || reaped.skipped.some((entry) => entry.pgid === child2.pgid && ["gone", "not_ours"].includes(entry.reason)));
+    try {
+      if (workerReleased)
+        removeReleasedWorkerSocket({ platform: "linux", env: dataEnv }, { previousWorkerReleased: true });
+    } catch (error2) {
+      log(`engine: retained worker socket because prior process custody is not released: ${error2 instanceof Error ? error2.message : "unknown error"}`);
+      exit(EXIT_CONFIG);
+      return;
+    }
+  }
+  const allRecordedReleased = (recordedBeforeReap?.children ?? []).every((child2) => reaped.stopped.some((entry) => entry.pgid === child2.pgid) || reaped.skipped.some((entry) => entry.pgid === child2.pgid && ["gone", "not_ours"].includes(entry.reason)));
+  if (allRecordedReleased)
+    removeFileDurablySync(childrenPath);
+  setNativeProcessChildObserver(engineChildrenRecorder({ path: childrenPath }));
+  const now = () => new Date().toISOString();
+  const status = {
+    schema: ENGINE_STATUS_SCHEMA,
+    ...paths.linux ? { process_identity: processInstanceIdentity(process.pid) } : {},
+    pid: process.pid,
+    started_at: now(),
+    updated_at: now(),
+    state: "running",
+    build: env[ENGINE_BUILD_ENV]?.trim() || null,
+    remote_mode: remoteMode,
+    services: {}
+  };
+  let desktopBridge;
+  const statusPath = engineStatusPath(dataEnv);
+  let lastStatus;
+  const writeStatus = () => {
+    if (desktopBridge)
+      status.desktop_bridge = desktopBridge.status();
+    const content = JSON.stringify({ ...status, updated_at: undefined });
+    if (content === lastStatus)
+      return;
+    status.updated_at = now();
+    try {
+      mkdirSync52(join112(statusPath, ".."), { recursive: true, mode: 448 });
+      writePrivateFileAtomicSync(statusPath, `${JSON.stringify(status, null, 2)}
+`);
+      lastStatus = content;
+    } catch {}
+  };
+  const makeServices = options.services ?? ((config2) => engineHostServices(config2, options.moduleUrl, paths, desktopBridge?.controlPath));
+  let services = [];
+  const contextFor = (id) => ({
+    config: { plugins: { entries: { olympus: { config: pluginConfig } } } },
+    logger: {
+      info: (message2) => log(`${id}: ${message2}`),
+      warn: (message2) => log(`${id}: ${message2}`)
+    },
+    serviceHealth: {
+      reportFailure(error2) {
+        const message2 = error2.message;
+        const state = /is starting\.$/.test(message2) ? "starting" : "failing";
+        if (status.services[id]?.state === state && status.services[id]?.message === message2) {
+          writeStatus();
+          return;
+        }
+        status.services[id] = {
+          state,
+          message: message2,
+          updated_at: now()
+        };
+        log(`${id}: ${message2}`);
+        writeStatus();
+      },
+      clearFailure() {
+        if (status.services[id]?.state === "ok" && status.services[id]?.message === null) {
+          writeStatus();
+          return;
+        }
+        status.services[id] = { state: "ok", message: null, updated_at: now() };
+        writeStatus();
+      }
+    }
+  });
+  const rotation = paths.linux ? setInterval(() => {
+    try {
+      rotateEngineLog(paths.logPath);
+      rotateEngineLog(paths.errorLogPath);
+    } catch {
+      log("engine: private log rotation failed; check engine log permissions.");
+    }
+  }, 30000) : undefined;
+  rotation?.unref();
+  let stopping;
+  const stop = () => {
+    stopping ??= (async () => {
+      if (rotation)
+        clearInterval(rotation);
+      desktopBridge?.close();
+      status.state = "stopping";
+      writeStatus();
+      log("engine: stopping.");
+      const deadline = new Promise((resolve23) => setTimeout(resolve23, STOP_DEADLINE_MS).unref?.());
+      await Promise.race([
+        Promise.allSettled([...services].reverse().map((service) => service.stop())),
+        deadline
+      ]);
+      for (const [id, health] of Object.entries(status.services)) {
+        if (health.state !== "off")
+          status.services[id] = { state: "stopped", message: null, updated_at: now() };
+      }
+      status.state = "stopped";
+      writeStatus();
+      setNativeProcessChildObserver(undefined);
+      log("engine: stopped.");
+    })();
+    return stopping;
+  };
+  if (options.installSignalHandlers !== false) {
+    const onSignal = () => {
+      stop().then(() => exit(0));
+    };
+    process.once("SIGTERM", onSignal);
+    process.once("SIGINT", onSignal);
+  }
+  if (paths.linux && !stopping && pluginConfig && enabled["olympus-worker"] !== false) {
+    const transport = { platform: "linux", env: dataEnv };
+    let socketPath;
+    try {
+      socketPath = validateWorkerSocketDirectory(transport);
+    } catch (error2) {
+      if (error2.code !== "ENOENT")
+        throw error2;
+      socketPath = prepareWorkerSocket(transport);
+    }
+    const config2 = configFromPluginConfig(pluginConfig, { requireResolvedWorkerSecrets: false });
+    const port = Number(new URL(config2.email.baseUrl).port || 80);
+    const base = `http://127.0.0.1:${port}`;
+    const fetchSocket = createWorkerFetch(transport);
+    const authToken = () => workerAuthTokenFromConfig(configFromPluginConfig(readEngineConfig(paths.configPath), { requireResolvedWorkerSecrets: false }), { env: dataEnv, workerEnvPath: paths.workerEnvPath });
+    desktopBridge = startLinuxOwnerBridgeHost({
+      port,
+      socketPath,
+      transport,
+      ...options.desktop?.openFile ? { openFile: options.desktop.openFile } : {},
+      onChange: writeStatus,
+      desktopReady: async () => {
+        const desktop = options.desktop?.ready ? { ready: await options.desktop.ready() } : await linuxGraphicalSessionReadinessAsync();
+        return desktop.ready && !resolveServerMode({ platform: options.platform ?? process.platform, env: dataEnv, fileEnv: readWorkerSetupEnv({ env: dataEnv, workerEnvPath: paths.workerEnvPath }), desktopReady: () => desktop.ready }).remote;
+      },
+      workerOwned: () => status.services["olympus-worker"]?.state === "ok",
+      workerConflict: () => status.services["olympus-worker"]?.message === WORKER_DATA_OWNER_CONFLICT_MESSAGE ? "data" : status.services["olympus-worker"]?.message === WORKER_ENDPOINT_CONFLICT_MESSAGE ? "endpoint" : status.services["olympus-worker"]?.message === WORKER_SOCKET_RETAINED_MESSAGE ? "retained_socket" : undefined,
+      workerReady: async () => {
+        if (status.services["olympus-worker"]?.state !== "ok")
+          return false;
+        const response = await fetchSocket(base + "/v1/health", { headers: { Authorization: `Bearer ${authToken() ?? ""}` }, signal: AbortSignal.timeout(1000) });
+        await response.body?.cancel();
+        return response.ok;
+      },
+      fetchSocket: (request) => fetchSocket(request, { redirect: "manual" }),
+      establishDashboard: async () => {
+        if (status.services["olympus-worker"]?.state !== "ok")
+          throw new Error("Worker ownership changed.");
+        const response = await fetchSocket(base + "/dashboard/control/session", { method: "POST", headers: { Authorization: `Bearer ${authToken() ?? ""}`, Origin: base }, signal: AbortSignal.timeout(5000) });
+        if (status.services["olympus-worker"]?.state !== "ok") {
+          await response.body?.cancel().catch(() => {});
+          throw new Error("Worker ownership changed.");
+        }
+        if (!response.ok) {
+          await response.body?.cancel().catch(() => {});
+          if (response.status === 503)
+            throw new Error("Owner dashboard session is restarting.");
+          return null;
+        }
+        await response.body?.cancel();
+        if (status.services["olympus-worker"]?.state !== "ok")
+          throw new Error("Worker ownership changed.");
+        return response.headers.getSetCookie();
+      }
+    });
+  }
+  services = makeServices(pluginConfig);
+  log(`engine: starting (pid ${process.pid}, remote access ${remoteMode}).`);
+  writeStatus();
+  for (const service of services) {
+    status.services[service.id] = { state: enabled[service.id] === false ? "off" : "starting", message: null, updated_at: now() };
+    if (stopping)
+      break;
+    await service.start(contextFor(service.id));
+  }
+  writeStatus();
+  return { stop, status: () => {
+    writeStatus();
+    return structuredClone(status);
+  } };
+}
+async function runEngineHostProcess(moduleUrl) {
+  const handle = await startEngineHost({ moduleUrl });
+  if (!handle)
+    return;
+  setInterval(() => {
+    return;
+  }, 60000);
+  await new Promise(() => {
+    return;
+  });
+}
+var ENGINE_STATUS_SCHEMA = "olympus.engine.status.v1", EXIT_CONFIG = 78, STOP_DEADLINE_MS = 15000;
+var init_engine_host = __esm(() => {
+  init_linux_owner_bridge_host();
+  init_linux_desktop_opener();
+  init_worker_auth();
+  init_remote_open();
+  init_file_lease();
+  init_linux_engine_service();
+  init_atomic_file();
+  init_config();
+  init_engine_children();
+  init_engine_service();
+  init_native_embedding_drain_service();
+  init_native_process_service();
+  init_native_relay_service();
+  init_native_worker_service();
+  init_remote_access();
+  init_worker_transport();
+  init_engine_service();
 });
 
 // connect-relay/shared/protocol.ts
@@ -212016,22 +212016,21 @@ init_linux_engine_service();
 init_worker_transport();
 init_config();
 init_engine_brief();
-init_engine_host();
 init_engine_service();
 import { spawn as spawn7 } from "node:child_process";
 import { createInterface as createInterface2 } from "node:readline";
-import { existsSync as existsSync81, readFileSync as readFileSync67 } from "node:fs";
-import { homedir as homedir38 } from "node:os";
-import { dirname as dirname83, join as join112 } from "node:path";
+import { existsSync as existsSync81, readFileSync as readFileSync65 } from "node:fs";
+import { homedir as homedir37 } from "node:os";
+import { dirname as dirname81, join as join109 } from "node:path";
 
 // src/core/engine-helper.ts
 init_engine_service();
 init_operation_error();
 init_package_root();
 import { spawnSync as spawnSync19 } from "node:child_process";
-import { existsSync as existsSync80, lstatSync as lstatSync40, mkdirSync as mkdirSync52, mkdtempSync as mkdtempSync5, renameSync as renameSync18, rmSync as rmSync33 } from "node:fs";
-import { homedir as homedir37 } from "node:os";
-import { join as join111, resolve as resolve22 } from "node:path";
+import { existsSync as existsSync80, lstatSync as lstatSync40, mkdirSync as mkdirSync50, mkdtempSync as mkdtempSync5, renameSync as renameSync18, rmSync as rmSync32 } from "node:fs";
+import { homedir as homedir36 } from "node:os";
+import { join as join108, resolve as resolve22 } from "node:path";
 var MACOS_SIGNING_IDENTITY_ENV = "OLYMPUS_MACOS_SIGNING_IDENTITY";
 var MACOS_HELPER_TEAM_ENV = "OLYMPUS_MACOS_HELPER_TEAM_ID";
 function run(exec, command, args, env) {
@@ -212056,17 +212055,17 @@ function installEngineHelper(options = {}) {
     throw new OperationError("invalid_params", "The Olympus helper app is for macOS. Linux does not need one.");
   }
   const env = options.env ?? process.env;
-  const homeDir = resolve22(options.homeDir ?? homedir37());
+  const homeDir = resolve22(options.homeDir ?? homedir36());
   const paths = enginePaths(homeDir);
   const target = paths.helperAppPath;
-  mkdirSync52(paths.appSupportDir, { recursive: true, mode: 448 });
-  const staging = mkdtempSync5(join111(paths.appSupportDir, ".helper-"));
+  mkdirSync50(paths.appSupportDir, { recursive: true, mode: 448 });
+  const staging = mkdtempSync5(join108(paths.appSupportDir, ".helper-"));
   try {
     let built = false;
     let candidate;
     if (options.from !== undefined) {
       candidate = resolve22(options.from);
-      if (!existsSync80(join111(candidate, "Contents", "Info.plist"))) {
+      if (!existsSync80(join108(candidate, "Contents", "Info.plist"))) {
         throw new OperationError("invalid_params", `${candidate} is not an app bundle.`);
       }
     } else {
@@ -212075,8 +212074,8 @@ function installEngineHelper(options = {}) {
         throw new OperationError("config_error", "Building the Olympus helper app needs a Developer ID signing identity.", `Set ${MACOS_SIGNING_IDENTITY_ENV}, pass --identity, or pass --from <signed app> to install one that is already built.`);
       }
       const root = options.packageRoot ?? olympusPackageRoot();
-      const script2 = join111(root, "scripts", "build-macos-helper.sh");
-      if (!existsSync80(script2) || !existsSync80(join111(root, "native", "macos-engine-host", "main.c"))) {
+      const script2 = join108(root, "scripts", "build-macos-helper.sh");
+      if (!existsSync80(script2) || !existsSync80(join108(root, "native", "macos-engine-host", "main.c"))) {
         throw new OperationError("config_error", "This install does not include the helper app source.", "Pass --from <signed app>, or build from an Olympus source checkout.");
       }
       const result = run(options.exec, script2, ["--out", staging], { ...process.env, ...env, [MACOS_SIGNING_IDENTITY_ENV]: identity2 });
@@ -212084,7 +212083,7 @@ function installEngineHelper(options = {}) {
         throw new OperationError("config_error", `Building the Olympus helper app failed: ${(result.stderr || result.stdout).trim().split(`
 `).slice(-3).join(" ")}`);
       }
-      candidate = join111(staging, ENGINE_HELPER_APP_NAME);
+      candidate = join108(staging, ENGINE_HELPER_APP_NAME);
       built = true;
     }
     const verify = run(options.exec, "/usr/bin/codesign", ["--verify", "--strict", "--deep", candidate]);
@@ -212106,7 +212105,7 @@ function installEngineHelper(options = {}) {
     if (expectedTeam && details.teamId !== expectedTeam) {
       throw new OperationError("config_error", `The helper app is signed by team ${details.teamId ?? "none"}, not the expected team.`);
     }
-    const executable = join111(candidate, "Contents", "MacOS", ENGINE_HELPER_EXECUTABLE);
+    const executable = join108(candidate, "Contents", "MacOS", ENGINE_HELPER_EXECUTABLE);
     if (!existsSync80(executable)) {
       throw new OperationError("config_error", `The helper app has no ${ENGINE_HELPER_EXECUTABLE} program.`);
     }
@@ -212114,7 +212113,7 @@ function installEngineHelper(options = {}) {
     if (replaced && lstatSync40(target).isSymbolicLink()) {
       throw new OperationError("config_error", `${target} is a link; remove it and run this again.`);
     }
-    const copy = join111(staging, "copy.app");
+    const copy = join108(staging, "copy.app");
     const ditto = run(options.exec, "/usr/bin/ditto", [candidate, copy]);
     if (ditto.status !== 0)
       throw new OperationError("config_error", `Could not copy the helper app: ${ditto.stderr.trim()}`);
@@ -212124,7 +212123,7 @@ function installEngineHelper(options = {}) {
 `)[0] ?? ""}`);
     }
     const rename2 = options.rename ?? renameSync18;
-    const aside = join111(staging, "previous.app");
+    const aside = join108(staging, "previous.app");
     if (replaced)
       rename2(target, aside);
     try {
@@ -212145,7 +212144,7 @@ function installEngineHelper(options = {}) {
       replaced
     };
   } finally {
-    rmSync33(staging, { recursive: true, force: true });
+    rmSync32(staging, { recursive: true, force: true });
   }
 }
 
@@ -212221,14 +212220,14 @@ async function runEngineCommand(args, deps = {}) {
       ...deps.exec ? { exec: deps.exec } : {},
       ...options
     });
-    const paths = engineServicePaths({ ...service, homeDir: deps.homeDir ?? homedir38() });
+    const paths = engineServicePaths({ ...service, homeDir: deps.homeDir ?? homedir37() });
     if (!existsSync81(paths.plistPath)) {
       return { ...helper, engine: "not_installed", next: "Run olympus engine install; the engine will start through the Olympus helper app." };
     }
     const current2 = installedProgram(paths.plistPath);
     const engine = await installEngineVerified({
       ...service,
-      ...current2 ? { fromCheckout: dirname83(dirname83(current2.entryPath)), bunBin: current2.runtimePath } : {},
+      ...current2 ? { fromCheckout: dirname81(dirname81(current2.entryPath)), bunBin: current2.runtimePath } : {},
       ...deps.health ? { health: deps.health } : {}
     });
     if (engine.action === "unchanged")
@@ -212275,7 +212274,7 @@ async function runEngineCommand(args, deps = {}) {
     const handlerApi = openHandlerFor(deps);
     if (handlerApi)
       beginLinuxOpenHandlerMutation(service);
-    let handler = handlerApi?.install({ ...openHandlerOptions(deps, service), program: { runtimePath: join112(dirname83(result.app_dir), "runtime/bun"), entryPath: join112(result.app_dir, "dist/cli.js"), workingDirectory: result.app_dir } });
+    let handler = handlerApi?.install({ ...openHandlerOptions(deps, service), program: { runtimePath: join109(dirname81(result.app_dir), "runtime/bun"), entryPath: join109(result.app_dir, "dist/cli.js"), workingDirectory: result.app_dir } });
     if (handler?.action === "installed") {
       try {
         syncLinuxOpenHandlerReceipt(service, true);
@@ -212317,7 +212316,7 @@ function openHandlerOptions(deps, service) {
   };
 }
 async function engineStatusReport(deps = {}) {
-  const homeDir = deps.homeDir ?? homedir38();
+  const homeDir = deps.homeDir ?? homedir37();
   const env = { ...deps.env ?? process.env, HOME: homeDir };
   const paths = engineServicePaths({ ...deps, homeDir });
   const agent = inspectEngine({
@@ -212337,14 +212336,14 @@ async function engineStatusReport(deps = {}) {
   const parsed = pluginConfig ? configFromPluginConfig(pluginConfig, { requireResolvedWorkerSecrets: false }) : undefined;
   const remoteMode = parsed ? resolveRemoteAccessMode(parsed.remote) : { mode: "off" };
   const baseUrl = parsed?.email.baseUrl ?? "http://127.0.0.1:8010/v1";
-  const host = readEngineStatusFile(env);
+  const host = readEngineStatusFile(paths.statusPath);
   const relayDir = remoteAccessDirForCli(env);
   const relayStatus = readRemoteAccessStatus(relayDir);
   const relayRunning = relayProcessRunning(relayDir);
   const openclaw = (deps.openclawPath ?? (() => resolveOpenClawExecutable({ env, homeDir })))();
   const worker = await probeWorker(deps.fetchImpl ?? workerFetch, baseUrl, paths.linux?.workerSocketPath);
   const linuxHealth = paths.linux ? await waitForEngineHealthy({ paths, expectedBuild: linuxInstalledBuild({ ...deps, homeDir }) }, { ...deps.health, timeoutMs: 0, fetchImpl: deps.fetchImpl, exec: deps.exec }) : undefined;
-  const engineWorker = readEngineWorkerHealth(env);
+  const engineWorker = readEngineWorkerHealth(paths.statusPath);
   const workerProblem = agent.state === "running" && engineWorker?.state !== "ok" ? engineWorker?.message ?? "The engine worker is not ready yet: see olympus engine logs." : undefined;
   const missing = [];
   if (workerProblem)
@@ -212397,9 +212396,9 @@ async function engineStatusReport(deps = {}) {
     missing
   };
 }
-function readEngineStatusFile(env) {
+function readEngineStatusFile(statusPath) {
   try {
-    const parsed = JSON.parse(readFileSync67(engineStatusPath(env), "utf8"));
+    const parsed = JSON.parse(readFileSync65(statusPath, "utf8"));
     return parsed?.schema === "olympus.engine.status.v1" ? parsed : undefined;
   } catch {
     return;

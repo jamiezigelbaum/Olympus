@@ -150,9 +150,9 @@ export function engineStatusPath(env: Record<string, string | undefined> = proce
 }
 
 /** The live host's own worker health; a competing endpoint cannot clear it. */
-export function readEngineWorkerHealth(env: Record<string, string | undefined> = process.env): { state: string; message: string | null } | undefined {
+export function readEngineWorkerHealth(statusPath: string): { state: string; message: string | null } | undefined {
   try {
-    const status = JSON.parse(readFileSync(engineStatusPath(env), 'utf8'));
+    const status = JSON.parse(readFileSync(statusPath, 'utf8'));
     if (status?.schema !== 'olympus.engine.status.v1' || status.state !== 'running'
       || !Number.isSafeInteger(status.pid) || status.pid <= 0) return undefined;
     process.kill(status.pid, 0);
@@ -163,7 +163,7 @@ export function readEngineWorkerHealth(env: Record<string, string | undefined> =
 }
 
 export function readEngineWorkerProblem(env: Record<string, string | undefined> = process.env): string | undefined {
-  const worker = readEngineWorkerHealth(env);
+  const worker = readEngineWorkerHealth(engineStatusPath(env));
   return worker?.state === 'failing' ? worker.message ?? 'The engine worker failed to become ready.' : undefined;
 }
 

@@ -29417,9 +29417,9 @@ function engineServicePaths(options = {}) {
 function engineStatusPath(env = process.env) {
   return join32(olympusDataDir(env), "engine", "status.json");
 }
-function readEngineWorkerHealth(env = process.env) {
+function readEngineWorkerHealth(statusPath) {
   try {
-    const status = JSON.parse(readFileSync25(engineStatusPath(env), "utf8"));
+    const status = JSON.parse(readFileSync25(statusPath, "utf8"));
     if (status?.schema !== "olympus.engine.status.v1" || status.state !== "running" || !Number.isSafeInteger(status.pid) || status.pid <= 0)
       return;
     process.kill(status.pid, 0);
@@ -29432,7 +29432,7 @@ function readEngineWorkerHealth(env = process.env) {
   }
 }
 function readEngineWorkerProblem(env = process.env) {
-  const worker = readEngineWorkerHealth(env);
+  const worker = readEngineWorkerHealth(engineStatusPath(env));
   return worker?.state === "failing" ? worker.message ?? "The engine worker failed to become ready." : undefined;
 }
 function readEngineConfig(path) {
