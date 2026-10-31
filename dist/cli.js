@@ -198817,8 +198817,7 @@ function anonymousListing(enabled, inner) {
   return {
     tools: (listed) => {
       const tools = inner ? inner.tools(listed) : listed;
-      const read = enabled ? undefined : readConsultSettings();
-      const on = enabled ? enabled() : read?.state === "valid" && read.settings.enabled;
+      const on = enabled?.() === true;
       return on ? tools : tools.filter((tool) => tool.name !== "ask_anonymously");
     },
     call: async (request, next, signal) => inner ? await inner.call(request, next, signal) : await next()
@@ -199000,7 +198999,6 @@ function jsonResponse(status, body, headers = {}) {
 }
 var REMOTE_MCP_PATH = "/mcp", REMOTE_DIRECTORY_MCP_PATH, IN_PROCESS_WORKER_BASE_URL = "http://olympus-worker.internal/v1";
 var init_remote_mcp = __esm(() => {
-  init_consult_settings();
   init_webStandardStreamableHttp();
   init_delphi();
   init_email();
@@ -207980,6 +207978,10 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
       connections: () => remoteConnections({ create: true })
     }), withRemoteOpenApiRoutes2(withRemoteFailureBoundary2(remoteOpenApi), withRemoteMcpRoute2(withRemoteFailureBoundary2(createRemoteMcpHandler2({
       ...remoteAgentOptions,
+      anonymousAnswersEnabled: () => {
+        const read = readConsultSettings2();
+        return read.state === "valid" && read.settings.enabled;
+      },
       ...remoteEvidenceSearch ? { search: { evidenceSearch: remoteEvidenceSearch, answerModelAvailable: chatgptAnswerModelAvailable } } : {},
       chatgpt: {
         servesRequest: (request, connection) => isRelayedRequest2(request) && isChatGptGrant2(connection),

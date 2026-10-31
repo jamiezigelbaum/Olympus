@@ -34,7 +34,6 @@
  * from the client, and lands on the answer's audit ledger entry.
  */
 import { existsSync } from 'node:fs';
-import { readConsultSettings } from '../core/consult-settings.ts';
 import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js';
 import type { OlympusConfig } from '../core/config.ts';
 import { createDelphiTransport, DelphiClient } from '../core/delphi.ts';
@@ -227,8 +226,7 @@ function anonymousListing(enabled: (() => boolean) | undefined, inner: McpServer
   return {
     tools: (listed) => {
       const tools = inner ? inner.tools(listed) : listed;
-      const read = enabled ? undefined : readConsultSettings();
-      const on = enabled ? enabled() : read?.state === 'valid' && read.settings.enabled;
+      const on = enabled?.() === true;
       return on ? tools : tools.filter((tool) => tool.name !== 'ask_anonymously');
     },
     call: async (request, next, signal) => inner ? await inner.call(request, next, signal) : await next(),

@@ -6614,6 +6614,10 @@ export async function main(): Promise<void> {
       withRemoteOpenApiRoutes(withRemoteFailureBoundary(remoteOpenApi), withRemoteMcpRoute(
         withRemoteFailureBoundary(createRemoteMcpHandler({
           ...remoteAgentOptions,
+          anonymousAnswersEnabled: () => {
+            const read = readConsultSettings();
+            return read.state === 'valid' && read.settings.enabled;
+          },
           // Relayed requests get the ChatGPT surface (docs/design/chatgpt-plugin.md):
           // the hosted relay is the ChatGPT path, and the relay marker must
           // carry the relay child's per-boot secret (isRelayedRequest), from
