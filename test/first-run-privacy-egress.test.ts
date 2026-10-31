@@ -185,8 +185,8 @@ for (const choice of ['pending', 'local-first', 'local-only'] as const) {
     if (choice !== 'pending') expect(saveFirstRunPrivacyChoice(i.path, choice)).toMatchObject({ ok: true, changed: true });
     const p = await sourcePaths(i);
     if (choice === 'pending') {
-      expect(() => p.engine.resolveAnalystPool({ trustDomain: 'internal' })).toThrow('disabled');
-      expect(() => p.engine.resolveAnalystPool({ trustDomain: 'secure_local' })).toThrow('disabled');
+      expect(() => p.engine.resolveAnalystPool({ trustDomain: 'internal' })).toThrow('Choose the first-run privacy policy');
+      expect(() => p.engine.resolveAnalystPool({ trustDomain: 'secure_local' })).toThrow('Choose the first-run privacy policy');
     }
     expect(p.embeddingCalls.join('\n')).toContain(PRIVATE_TEXT);
     expect(p.embeddingCalls.join('\n')).toContain(PERSONAL_TEXT);
