@@ -51,6 +51,7 @@ import { renderOutsideHelpCard, type DashboardOutsideHelpStatus } from '../outsi
 import { AGENT_CONNECT_CSS, LOCAL_PAGE_CSS, MODEL_SETUP_CSS } from '../static-styles.ts';
 import {
   DASHBOARD_COMPUTER_PANEL_COPY,
+  DASHBOARD_EVERNOTE_CONSENT_HELP,
   DASHBOARD_MODELS_BLOCKED_REASON,
   dashboardCheckedLabel,
   dashboardProviderRefusalDetail,
@@ -340,6 +341,7 @@ function actionStateLabel(source: DashboardSourceCard): string {
 
 function setupBlurb(source: DashboardSourceCard): string {
   const action = source.connection.action;
+  if (action.kind === 'oauth' && action.source === 'evernote') return DASHBOARD_EVERNOTE_CONSENT_HELP;
   if (action.kind === 'guided_session') return action.instructions[0] ?? source.connection.label;
   if (action.kind === 'api_key') return action.instructions.plain_intro;
   if (action.kind === 'this_computer') return 'Choose the folders on this computer Olympus may read. Nothing is read until you choose.';
