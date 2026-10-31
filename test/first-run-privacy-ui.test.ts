@@ -85,6 +85,19 @@ test('new-install fixture renders the shared sheet and upgrade fixture never ask
   expect(fixture(true).root.querySelector('[data-first-run-sheet]')).toBeNull();
 });
 
+test('Keys shows one privacy explanation and describes the fourth option without routing jargon', () => {
+  const page = document.createElement('div');
+  page.innerHTML = renderDashboardKeysPage(buildDashboardPreviewView('first-run'));
+  expect(page.textContent).not.toContain('Privacy settings for Private answers');
+  expect(page.textContent).not.toContain('The default keeps them on this computer');
+  const option = page.querySelector('input[value="no-sensitive"]')!.closest('label')!;
+  expect(option.textContent).toContain('Private answers only in Olympus');
+  expect(option.textContent).toContain('Connected agents cannot use Private items to answer.');
+  expect(option.textContent).not.toContain('agent answer lane');
+  // Existing links from Private answers still land on the model setup area.
+  expect(page.querySelector('#private-routing [data-first-run-sheet]')).not.toBeNull();
+});
+
 test('the full Keys page supplies the existing Venice key target and the local-model connector', () => {
   const view = buildDashboardPreviewView('new');
   view.model_setup = new ModelSetupService({ config: createPendingPrivacyPolicy(), credentialState: () => 'missing', autoCheck: false }).getStatus();

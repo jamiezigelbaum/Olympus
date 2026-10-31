@@ -46,15 +46,15 @@ the scoped work in any harness. An issue is an inbox item, not authorization.
    User-installed hooks remain user-owned and must not be rewritten by repo
    automation.
 5. **Let CI decide merge readiness.** GitHub requires every substantive lane
-   directly: `static checks`, `fast tests`, `exchange tests`, all four
+   directly: `static checks`, all three `fast tests` shards, `exchange tests`, all four
    `deploy tests` shards, and `Go bridge tests`. A local result is useful
-   evidence, never a substitute for those exact-head checks. The protected `fast tests`
-   context aggregates three fast shards until the ruleset requires those shards
-   directly; its runner only checks the matrix result. On 2026-10-31 the
+   evidence, never a substitute for those exact-head checks. Branch protection
+   requires `fast tests 1/3`, `2/3` and `3/3` directly (owner-approved
+   2026-10-31; #688 briefly kept an aggregate `fast tests` context). On 2026-10-31 the
    unsharded main test work took 433 seconds in run 41191132361, before relay
    tests and setup. Shards use those per-file timings and a conservative p95
    for unknown files. The first sharded PR run (41191925041) finished the
-   three jobs in 3m23s, 2m52s and 2m04s; the aggregate took 2 seconds.
+   three jobs in 3m23s, 2m52s and 2m04s.
    The `exchange tests` lane runs `test:exchange` for the publisher Google
    exchange service; `typecheck` checks both the plugin and the exchange service's
    separate WebWorker configuration. The `exchange/` subtree is critical,
@@ -125,6 +125,16 @@ recurring or expensive, and cheap to detect. Each blocking gate records:
 This keeps incidents from turning into permanent latency by default.
 
 Current blocking gates recorded here:
+
+- **Connector-store source neutrality** (2026-10-31). The architecture guard
+  rejects new literal family/source-name comparisons and switches in the
+  shared connector store, preventing source-specific retrieval rules such as
+  the PR #676 finding. Owner: the session changing connector-store retrieval.
+  Expected runtime: under one second for this focused check. False-positive
+  budget: zero; dynamic identity/scope comparisons are permitted. Six existing
+  lines are pinned individually with retirement notes in the guard; deleting
+  a line must delete its allowance. Retire the scan only when an equivalent
+  structural check enforces the same source-neutrality contract.
 
 - **ChatGPT directory reviewer path** (2026-10-12). Prevents a relay release
   from changing what OpenAI's directory reviewers and directory users see on
@@ -228,9 +238,19 @@ A release is two pull requests, a tag and a site publish:
    bytes differ from the tagged release's. So:
    `gh release download vX.Y.Z -p olympus-X.Y.Z.tgz -D <dir>`, then
    `bun scripts/publish-release-to-site.ts --artifact <dir>/olympus-X.Y.Z.tgz`,
-   then `site/deploy/deploy.sh --dry-run` and `site/deploy/deploy.sh`
+   with `--whatsapp-bridge <bridge>` (or `--no-whatsapp-bridge`) and
+   `--macos-helper <zip>` for a helper release (or `--no-macos-helper`), then
+   `site/deploy/deploy.sh --dry-run` and `site/deploy/deploy.sh`
    ([`chatgpt-plugin/SUBMISSION.md`](../chatgpt-plugin/SUBMISSION.md) has the
    checks).
+
+Build the Mac helper on Xanthos with the OCU Developer ID identity in the login
+keychain, `OLYMPUS_MACOS_NOTARY_PROFILE=olympus-notary` and
+`OLYMPUS_MACOS_HELPER_TEAM_ID` set to the expected team. Run
+`scripts/release-macos-helper.sh <output-directory>` with
+`OLYMPUS_MACOS_SIGNING_IDENTITY` set; it signs, notarizes, staples and checks
+the result and writes a receipt beside the zip; publish the receipt with the zip for off-Mac publishing. Reuse the verified zip until its source fingerprint changes. The site publisher pins the required team, checksum and size; if the team
+variable is set, it must match that team.
 
 The ChatGPT directory listing has its own version. It changes only with a new
 listing upload, which restarts OpenAI's review, so an engine release never

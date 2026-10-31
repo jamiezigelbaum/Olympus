@@ -12,10 +12,12 @@ export const OWNER_BRIDGE_HOST_ENV = 'OLYMPUS_OWNER_BRIDGE_HOST_SOCKET';
 export function startLinuxOwnerBridgeHost(options: Omit<LinuxOwnerBridgeOptions, 'ready' | 'workerReady'> & {
   desktopReady?: () => Promise<boolean>;
   workerReady: () => Promise<boolean>;
+  /** Synchronous supervisor proof; loss must bypass the debounced endpoint probe. */
+  workerOwned?: () => boolean;
   onChange?: () => void;
 }) {
   let closed = false, probing = false, workerProbing = false, ready = false, workerReady = false;
-  const manager = manageLinuxOwnerBridge({ ...options, platform: 'linux', listenerOwner: 'engine-host', ready: () => !closed && ready, workerReady: () => workerReady });
+  const manager = manageLinuxOwnerBridge({ ...options, platform: 'linux', listenerOwner: 'engine-host', ready: () => !closed && ready, workerReady: () => workerReady && options.workerOwned?.() !== false });
   let workerFailures = 0;
   // Worker availability never delays or coalesces a desktop-presence probe.
   const probeWorker = async () => {
