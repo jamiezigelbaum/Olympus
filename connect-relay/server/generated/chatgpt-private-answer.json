@@ -15,6 +15,15 @@
           "domain": "https://mcp.olympusplugin.ai",
           "prefersBorder": false
         },
+        "openai/widgetCSP": {
+          "connect_domains": [
+            "https://mcp.olympusplugin.ai"
+          ],
+          "resource_domains": [],
+          "redirect_domains": [
+            "https://olympusplugin.ai"
+          ]
+        },
         "openai/widgetDescription": "Shows how many private items match and, when the user asks, a private answer that ChatGPT never receives."
       }
     }

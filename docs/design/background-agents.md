@@ -145,7 +145,7 @@ keeps the capability unspent: no successful acknowledgment, or pinned sealed
 hand-out, until deletion commits (or that generation is already absent). No claim within 30 seconds schedules a local inbox answer;
 a claimed job that expires without acknowledgment also falls back. Restart
 forgets in-memory panel claims and resumes persisted questions after their
-grace window. An acknowledged answer never appears in the inbox.
+grace window. An acknowledged answer without a Secret notice never appears in the inbox.
 
 **Secret notice navigation (2026-10-31).** On `/mcp`, the sealed answer panel
 can open its question's local Inbox answer through a random 128-bit handle.

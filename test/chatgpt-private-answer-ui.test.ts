@@ -1186,3 +1186,9 @@ test('Secret notice without a reachable Inbox uses plain fallback guidance', asy
   host.push(ready()); await host.until(() => host.text().includes('Open Olympus on your computer, then Inbox'), 'fallback guidance');
   expect(host.buttons().some(button => button.textContent === 'Open it in Olympus on your computer')).toBe(false);
 });
+
+test('Secret Inbox landing domain is allowed by the ChatGPT resource CSP', () => {
+  expect(privateAnswerResourceMeta()).toMatchObject({
+    'openai/widgetCSP': { connect_domains: [RELAY], resource_domains: [], redirect_domains: ['https://olympusplugin.ai'] },
+  });
+});
