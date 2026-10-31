@@ -369,6 +369,14 @@ that opens files inside an account folder:
   connection, inside `local-index.ts`, of a store the service opened.
 - Search keeps reading disconnected accounts' stores ("Disconnected ·
   indexed data kept"), because they stay `active` until deleted.
+- Absent lanes are opened on demand (2026-10-31, #615). Boot opens existing
+  stores and tier sidecars, including disconnected history, and mounts a
+  connected source when it needs its lane. A disconnected source with no
+  remaining data creates no store or tier sidecar at boot, on status, or on
+  search. Connecting or importing later mounts the real lane, registers its
+  shared ledger and readers, and makes its extraction runner available in the
+  same worker. Store declarations used by readers wait for an existing store. A
+  deleted, disconnected source therefore stays absent across restart.
 
 **Owner lock.** The worker takes an exclusive kernel lock (`flock(2)` on
 `<data>/data-owner.lock`, released by the kernel on death;

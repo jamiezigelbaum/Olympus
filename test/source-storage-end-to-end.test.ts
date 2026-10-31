@@ -33,6 +33,9 @@ import {
 } from '../src/core/olympus-layout.ts';
 import { resolvedStorePath } from '../src/core/source-placement.ts';
 import { readSourceRegistry } from '../src/core/source-registry.ts';
+import { TierLedger } from '../src/workers/classification/tier-ledger.ts';
+import { FileSourceScopeAuthority } from '../src/workers/source-scope-runtime.ts';
+import { upsertConnectedHandle } from '../src/workers/credential-broker/connected-handles.ts';
 import { createWorkerFetch } from '../src/core/worker-transport.ts';
 import { deleteOlympusData } from '../src/data-lifecycle.ts';
 import { archiveConnectorStoreDbPath } from '../src/workers/archive-import/store.ts';
@@ -85,10 +88,10 @@ async function freePort(): Promise<number> {
 }
 
 /** The real worker on `env`, up once it listens (or once it says why it will not). */
-async function boot(env: Env): Promise<Booted> {
+async function boot(env: Env, preload?: string): Promise<Booted> {
   for (const name of readdirSync(env.XDG_RUNTIME_DIR!)) rmSync(join(env.XDG_RUNTIME_DIR!, name), { recursive: true, force: true });
   const port = await freePort();
-  const child = Bun.spawn([process.execPath, SERVER], {
+  const child = Bun.spawn([process.execPath, ...(preload ? ['--preload', preload] : []), SERVER], {
     env: { PATH: process.env.PATH ?? '', ...env, OLYMPUS_EMAIL_SOURCE_PORT: String(port), OLYMPUS_WORKER_AUTH_TOKEN: TOKEN },
     cwd: REPO,
     stdout: 'pipe',
@@ -169,7 +172,7 @@ const SPECS: FixtureSpec[] = [
 ];
 
 /** A store with content, as the connector wrote it, at `path`. */
-async function writeStore(path: string, corpusId: string, family: 'file' | 'email' | 'readwise' | 'x', trustDomain: 'internal' | 'secure_local'): Promise<void> {
+async function writeStore(path: string, corpusId: string, family: 'file' | 'email' | 'readwise' | 'x' | 'note', trustDomain: 'internal' | 'secure_local'): Promise<void> {
   mkdirSync(dirname(path), { recursive: true });
   const store = new LocalConnectorStore({ dbPath: path, corpusId, family, trustDomain });
   try {
@@ -247,6 +250,182 @@ async function seedPreFolderInstall(env: Env): Promise<Record<string, string>> {
 }
 
 describe('source storage, end to end on this host', () => {
+  test('Dropbox connected after boot lists and extracts through the real worker with a fixture provider', async () => {
+    const env: Env = {
+      ...freshHome(),
+      OLYMPUS_WORKER_SCHEDULER_ENABLED: 'true',
+      OLYMPUS_WORKER_SCHEDULER_TICK_SECONDS: '1',
+      OLYMPUS_WORKER_SCHEDULER_SYNC_INTERVAL_SECONDS: '1',
+      OLYMPUS_SOURCE_INDEX_DROPBOX_TOKEN: 'fixture-dropbox-token',
+    };
+    const registryPath = join(env.HOME!, '.config', 'olympus', 'handles.json');
+    env.OLYMPUS_CREDENTIAL_HANDLE_REGISTRY_PATH = registryPath;
+    const preload = join(env.HOME!, 'fixture-dropbox.ts');
+    writeFileSync(preload, `
+      const originalFetch = globalThis.fetch.bind(globalThis);
+      const file = { '.tag': 'file', id: 'id:harbour', name: 'harbour.txt', path_lower: '/selected/harbour.txt', path_display: '/Selected/harbour.txt', rev: 'a1', size: 59, client_modified: '2026-01-01T00:00:00Z', server_modified: '2026-01-01T00:00:00Z' };
+      const folder = { '.tag': 'folder', id: 'id:selected', name: 'Selected', path_lower: '/selected', path_display: '/Selected' };
+      globalThis.fetch = async (input, init) => {
+        const url = new URL(input instanceof Request ? input.url : String(input));
+        if (!['api.dropboxapi.com', 'content.dropboxapi.com'].includes(url.hostname)) return originalFetch(input, init);
+        if (url.pathname.endsWith('/users/get_current_account')) return Response.json({ account_id: 'dbid:fixture' });
+        if (url.pathname.endsWith('/files/get_metadata')) return Response.json(folder);
+        if (url.pathname.endsWith('/files/list_folder/continue')) return Response.json({ entries: [], cursor: 'fixture-cursor', has_more: false });
+        if (url.pathname.endsWith('/files/list_folder')) {
+          const body = JSON.parse(String(init?.body ?? '{}'));
+          return Response.json({ entries: body.path === '' ? [folder] : [file], cursor: 'fixture-cursor', has_more: false });
+        }
+        if (url.pathname.endsWith('/files/download')) return new Response('A reference manual records the zephyrdropbox observation.', { headers: { 'content-type': 'text/plain' } });
+        throw new Error('Unexpected fixture Dropbox request: ' + url.pathname);
+      };
+    `);
+    const securePath = resolvedStorePath('dropbox.files', 'secure_local', env);
+    const internalPath = resolvedStorePath('dropbox.files', 'internal', env);
+    const worker = await boot(env, preload);
+    try {
+      expect(worker.output(), listening(worker)).toContain('worker listening');
+      expect(existsSync(securePath)).toBe(false);
+      // Native OAuth completion records this same connected handle; the provider here is entirely a fixture.
+      upsertConnectedHandle({
+        handle: 'dropbox.personal', provider: 'dropbox', accountRole: 'personal', trustDomain: 'secure_local',
+        allowedCapabilities: ['dropbox.files.sync'], scopes: ['files.metadata.read', 'files.content.read', 'sharing.read', 'account_info.read'],
+        connectedAt: new Date().toISOString(),
+      }, registryPath);
+      const authority = new FileSourceScopeAuthority({ registryPath });
+      const pending = authority.snapshot('dropbox.files');
+      authority.approve({
+        sourceId: 'dropbox.files', accountGeneration: pending.accountGeneration!, expectedRevision: pending.revision,
+        selections: [{ key: '/selected', state: 'ingest' }], wholeAccount: false, explicitWholeAccountConfirmation: false,
+      });
+      const sync = await ask(env, worker, '/dashboard/sync-now', { source: 'dropbox' });
+      expect(sync.status, JSON.stringify(sync.json)).toBe(200);
+      let text = '';
+      const deadline = Date.now() + 30_000;
+      while (Date.now() < deadline) {
+        text = [securePath, internalPath].filter(existsSync).map((path) => JSON.stringify(snapshotStore(path).chunks)).join('\n');
+        if (text.includes('zephyrdropbox')) break;
+        await Bun.sleep(100);
+      }
+      expect(text, `${worker.errors()}\n${worker.output()}`).toContain('zephyrdropbox');
+      const search = await ask(env, worker, '/v1/source/index/search', { query: 'zephyrdropbox', corpus_id: 'secure_local.dropbox.files' });
+      expect(search.status, JSON.stringify(search.json)).toBe(200);
+      expect(search.json.hits).toEqual(expect.arrayContaining([expect.objectContaining({ selected_item: expect.objectContaining({ title: 'harbour.txt' }) })]));
+      expect(TierLedger.readLedgerId(tierLedgerPathForStore(securePath))).toBeDefined();
+    } finally {
+      await worker.stop();
+    }
+  }, 180_000);
+
+  test('connect after boot ingests and extracts across the shared tiers, and connected reboot preserves that history', async () => {
+    const env: Env = {
+      ...freshHome(),
+      OLYMPUS_WORKER_SCHEDULER_ENABLED: 'true',
+      OLYMPUS_WORKER_SCHEDULER_TICK_SECONDS: '1',
+      OLYMPUS_WORKER_SCHEDULER_SYNC_INTERVAL_SECONDS: '1',
+      OLYMPUS_CREDENTIAL_HANDLE_REGISTRY_PATH: '',
+    };
+    env.OLYMPUS_CREDENTIAL_HANDLE_REGISTRY_PATH = join(env.HOME!, '.config', 'olympus', 'handles.json');
+    const folder = join(env.HOME!, 'selected-notes');
+    mkdirSync(folder, { recursive: true });
+    writeFileSync(join(folder, 'harbour.txt'), 'The harbourmaster records the zephyrtide observation in this reference manual.');
+    const sourceId = 'local.files';
+    const securePath = resolvedStorePath(sourceId, 'secure_local', env);
+    const internalPath = resolvedStorePath(sourceId, 'internal', env);
+    const ledgerPath = tierLedgerPathForStore(securePath);
+    const authority = new FileSourceScopeAuthority({ registryPath: env.OLYMPUS_CREDENTIAL_HANDLE_REGISTRY_PATH });
+    const worker = await boot(env);
+    try {
+      expect(worker.output(), listening(worker)).toContain('worker listening');
+      expect(existsSync(securePath)).toBe(false);
+      const connect = await ask(env, worker, '/dashboard/connect/this-computer', { source: sourceId });
+      expect(connect.status, JSON.stringify(connect.json)).toBe(200);
+      const pending = authority.snapshot(sourceId);
+      expect(pending.accountGeneration).toBeDefined();
+      authority.approve({
+        sourceId,
+        accountGeneration: pending.accountGeneration!,
+        expectedRevision: pending.revision,
+        selections: [{ key: folder, state: 'ingest' }],
+        wholeAccount: false,
+        explicitWholeAccountConfirmation: false,
+      });
+      // The real connect route refreshes the live scheduler, as it does for a saved folder choice.
+      expect((await ask(env, worker, '/dashboard/connect/this-computer', { source: sourceId })).status).toBe(200);
+      const deadline = Date.now() + 30_000;
+      let text = '';
+      while (Date.now() < deadline) {
+        text = [securePath, internalPath].filter(existsSync).map((path) => JSON.stringify(snapshotStore(path).chunks)).join('\n');
+        if (text.includes('zephyrtide')) break;
+        await Bun.sleep(100);
+      }
+      expect(text, `${worker.errors()}\n${worker.output()}`).toContain('zephyrtide');
+      expect(existsSync(internalPath)).toBe(true);
+      const secure = new LocalConnectorStore({ dbPath: securePath, corpusId: 'secure_local.local.files', family: 'file', trustDomain: 'secure_local', readOnly: true });
+      const internal = new LocalConnectorStore({ dbPath: internalPath, corpusId: 'internal.local.files', family: 'file', trustDomain: 'internal', readOnly: true });
+      try {
+        const ledgerId = TierLedger.readLedgerId(ledgerPath);
+        expect(ledgerId).toBeDefined();
+        // The empty legacy Private leg owns the ledger; the routed Personal copy is bound to it.
+        expect(secure.tierLedgerPathInUse()).toBe(ledgerPath);
+        expect(internal.tierSetBinding()).toEqual({ ledgerId: ledgerId!, ledgerPath });
+      } finally {
+        secure.close();
+        internal.close();
+      }
+      const status = await ask(env, worker, '/v1/source/index/status', {});
+      expect(status.status).toBe(200);
+      const search = await ask(env, worker, '/v1/source/index/search', { query: 'zephyrtide', corpus_id: 'secure_local.local.files' });
+      expect(search.status, JSON.stringify(search.json)).toBe(200);
+      expect(search.json.hits).toEqual(expect.arrayContaining([expect.objectContaining({ selected_item: expect.objectContaining({ title: 'harbour.txt', corpus_id: 'internal.local.files' }) })]));
+    } finally {
+      await worker.stop();
+    }
+    const before = { secure: snapshotStore(securePath), internal: snapshotStore(internalPath), ledgerId: TierLedger.readLedgerId(ledgerPath) };
+    // Isolate boot from the normal names-only sync which may update item metadata while retaining its chunks.
+    const rebooted = await boot({ ...env, OLYMPUS_WORKER_SCHEDULER_ENABLED: 'false' });
+    try {
+      expect(rebooted.output(), listening(rebooted)).toContain('worker listening');
+      expect(snapshotStore(securePath)).toEqual(before.secure);
+      expect(snapshotStore(internalPath)).toEqual(before.internal);
+      expect(TierLedger.readLedgerId(ledgerPath)).toBe(before.ledgerId);
+      expect((await ask(env, rebooted, '/v1/source/index/status', {})).status).toBe(200);
+    } finally {
+      await rebooted.stop();
+    }
+  }, 180_000);
+
+  test('deleted disconnected sources stay absent through reboot, status and search', async () => {
+    const env = freshHome();
+    await seedPreFolderInstall(env);
+    await writeStore(resolvedStorePath('evernote.notes', 'secure_local', env), 'secure_local.evernote.notes', 'note', 'secure_local');
+    const first = await boot(env);
+    try {
+      expect(first.output(), listening(first)).toContain('worker listening');
+    } finally {
+      await first.stop();
+    }
+    for (const sourceId of FOLDER_LAYOUT_SOURCES) {
+      expect(filesUnder(accountFolder({ source_id: sourceId, slot: '1' }, env)).length, sourceId).toBeGreaterThan(0);
+      deleteOlympusData({ sourceId, homeDir: env.HOME!, env });
+      expect(filesUnder(accountFolder({ source_id: sourceId, slot: '1' }, env)), sourceId).toEqual([]);
+    }
+    const worker = await boot(env);
+    try {
+      expect(worker.output(), listening(worker)).toContain('worker listening');
+      const status = await ask(env, worker, '/v1/source/index/status', {});
+      expect(status.status, JSON.stringify(status.json).slice(0, 500)).toBe(200);
+      const search = await ask(env, worker, '/v1/source/index/search', { query: 'orchard pruning plan', corpus_id: 'internal.email' });
+      expect(search.status, JSON.stringify(search.json).slice(0, 500)).toBe(501);
+      expect(search.json.error).toMatchObject({ code: 'source_index_search_not_supported' });
+      for (const sourceId of FOLDER_LAYOUT_SOURCES) {
+        expect(filesUnder(accountFolder({ source_id: sourceId, slot: '1' }, env)), sourceId).toEqual([]);
+        expect(legacyLeft(sourceId, env), sourceId).toEqual([]);
+      }
+    } finally {
+      await worker.stop();
+    }
+  }, 180_000);
+
   test('a fresh install: every source lands in its folder and nothing is made at a legacy place', async () => {
     const env = freshHome();
     const worker = await boot(env);
@@ -344,7 +523,6 @@ describe('source storage, end to end on this host', () => {
     const before = Object.fromEntries(MOVED_SOURCES.map((sourceId) => [sourceId, filesUnder(accountFolder({ source_id: sourceId, slot: '1' }, env))]));
     const mineFolder = accountFolder({ source_id: MINE.source_id, slot: '1' }, env);
     const mineStore = resolvedStorePath(MINE.source_id, 'secure_local', env);
-    const mineInode = lstatSync(mineStore).ino;
     deleteOlympusData({ sourceId: MINE.source_id, homeDir: env.HOME!, env });
     // With no worker running, the delete takes the folder at once.
     expect(existsSync(mineFolder)).toBe(false);
@@ -354,11 +532,9 @@ describe('source storage, end to end on this host', () => {
     } finally {
       await second.stop();
     }
-    // The next worker may mount the source's lane again: that is a new, empty account, never the deleted files.
-    if (existsSync(mineStore)) {
-      expect(lstatSync(mineStore).ino).not.toBe(mineInode);
-      expect(snapshotStore(mineStore).items.length).toBe(0);
-    }
+    // A disconnected source stays deleted across reboot, including its stores and tier sidecars.
+    expect(existsSync(mineFolder)).toBe(false);
+    expect(existsSync(mineStore)).toBe(false);
     for (const sourceId of MOVED_SOURCES.filter((id) => id !== MINE.source_id)) {
       expect(filesUnder(accountFolder({ source_id: sourceId, slot: '1' }, env)), sourceId).toEqual(expect.arrayContaining(before[sourceId]!));
     }

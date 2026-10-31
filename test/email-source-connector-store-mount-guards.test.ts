@@ -9,6 +9,25 @@ import {
 } from '../src/workers/dropbox-files/connector-store.ts';
 
 describe('connector-store mount declaration guards', () => {
+  test('runtime declarations leave an absent store absent, then adopt the real store after ingestion', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'olympus-mount-deferred-'));
+    const dbPath = join(dir, 'reflect.sqlite');
+    const declaration = JSON.stringify([{ dbPath, corpusId: 'secure_local.reflect.notes', family: 'note', trustDomain: 'secure_local' }]);
+    let made: ReturnType<typeof parseConnectorStoreMountsFromEnv> = [];
+    let mounted: ReturnType<typeof parseConnectorStoreMountsFromEnv> = [];
+    try {
+      expect(parseConnectorStoreMountsFromEnv(declaration, { existingOnly: true })).toEqual([]);
+      expect(existsSync(dbPath)).toBe(false);
+      made = parseConnectorStoreMountsFromEnv(declaration);
+      expect(made).toHaveLength(1);
+      mounted = parseConnectorStoreMountsFromEnv(declaration, { existingOnly: true, collidingStores: made.map((mount) => mount.store) });
+      expect(mounted[0]?.store).toBe(made[0]?.store);
+    } finally {
+      for (const mount of made) mount.store.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   // Every secure gate in the worker is exact equality against 'secure_local',
   // so a typo'd trust domain does not degrade the mount — it leaves the secure
   // band entirely and the store is handed the internal-band embedding provider.

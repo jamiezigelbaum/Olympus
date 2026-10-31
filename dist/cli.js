@@ -90485,7 +90485,7 @@ function createFileExtractionRuntime(options) {
   if (options.enabled !== true && (env[FILE_EXTRACTION_ENABLED_ENV] ?? "").trim().toLowerCase() !== "true")
     return;
   const roster = options.corpora ?? parseFileExtractionCorporaEnv(env[FILE_EXTRACTION_CORPORA_ENV]);
-  if (roster.length === 0)
+  if (roster.length === 0 && options.allowEmpty !== true)
     return;
   const warn = options.warn ?? ((message2) => console.warn(message2));
   const storesByCorpusId = new Map(options.connectorStores.map((store) => [store.corpusId, store]));
@@ -90627,7 +90627,7 @@ function createFileExtractionRuntime(options) {
       ...guardsRefs ? { authorization: { assertCurrent: assertRefCurrent } } : {}
     });
   }
-  if (corpora.length === 0) {
+  if (corpora.length === 0 && options.allowEmpty !== true) {
     jobs.close();
     return;
   }
@@ -205168,6 +205168,17 @@ async function main() {
     } : {}
   }) : undefined;
   const fileExtractionLocalVlmClient = createFileExtractionLocalVlmClientFromEnv(process.env);
+  let sourceLaneGeneration = 0;
+  let mountConfiguredSourceStores = () => {};
+  const earlySourceStores = [];
+  let sourceLaneMounted = (stores) => {
+    sourceLaneGeneration += 1;
+    earlySourceStores.push(stores);
+  };
+  const sourceHasStores = (sourceId) => ["internal", "secure_local", "public_safe"].some((domain) => {
+    const path = resolvedStorePath(sourceId, domain, process.env);
+    return existsSync97(path) || existsSync97(tieredStoreSetLedgerPath(path)) || existsSync97(secretLocationsPathForStore(path));
+  });
   const tierLanes = [];
   const tierLegsOpenedEarly = [];
   let registerTierLegStore = (...registration) => {
@@ -205268,82 +205279,107 @@ async function main() {
     });
     return lane.set;
   };
-  const refreshableReadwiseRuntime = createRefreshableReadwiseConnectorStoreRuntime({
-    enabled: readwiseConnectorStoreLane.enabled,
-    ...readwiseEmbeddingProvider ? { embeddingProvider: readwiseEmbeddingProvider } : {},
-    ...sourceIndexAccount ? { account: sourceIndexAccount } : {},
-    env: process.env,
-    tierSetFor: (store) => {
-      const secrets = openTierSecretLocations({ sourceId: READWISE_SOURCE_ID }, resolvedStorePath(READWISE_SOURCE_ID, "secure_local", process.env), READWISE_SECURE_LIBRARY_CORPUS_ID);
-      return existingStoreTierSet(createReadwiseTierLane({
-        store,
-        env: process.env,
-        ...readwiseEmbeddingProvider ? { embeddingProvider: readwiseEmbeddingProvider } : {},
-        ...tierSecureEmbeddingProvider ? { secureEmbeddingProvider: tierSecureEmbeddingProvider } : {},
-        ...secrets ? { secretLocations: secrets } : {},
-        onStoreOpened: (opened) => registerTierLegStore(opened, store.corpusId, tierSecureEmbeddingProvider ?? null)
-      }), { store, ...secrets ? { secrets } : {} });
-    }
-  });
-  const readwiseConnectorStore = refreshableReadwiseRuntime?.store;
+  let refreshableReadwiseRuntime;
+  let readwiseConnectorStore;
+  const mountReadwise = () => {
+    if (refreshableReadwiseRuntime)
+      return;
+    refreshableReadwiseRuntime = createRefreshableReadwiseConnectorStoreRuntime({
+      enabled: readwiseConnectorStoreLane.enabled,
+      ...readwiseEmbeddingProvider ? { embeddingProvider: readwiseEmbeddingProvider } : {},
+      ...sourceIndexAccount ? { account: sourceIndexAccount } : {},
+      env: process.env,
+      tierSetFor: (store) => {
+        const secrets = openTierSecretLocations({ sourceId: READWISE_SOURCE_ID }, resolvedStorePath(READWISE_SOURCE_ID, "secure_local", process.env), READWISE_SECURE_LIBRARY_CORPUS_ID);
+        return existingStoreTierSet(createReadwiseTierLane({
+          store,
+          env: process.env,
+          ...readwiseEmbeddingProvider ? { embeddingProvider: readwiseEmbeddingProvider } : {},
+          ...tierSecureEmbeddingProvider ? { secureEmbeddingProvider: tierSecureEmbeddingProvider } : {},
+          ...secrets ? { secretLocations: secrets } : {},
+          onStoreOpened: (opened) => registerTierLegStore(opened, store.corpusId, tierSecureEmbeddingProvider ?? null)
+        }), { store, ...secrets ? { secrets } : {} });
+      }
+    });
+    readwiseConnectorStore = refreshableReadwiseRuntime?.store;
+    if (readwiseConnectorStore)
+      sourceLaneMounted([readwiseConnectorStore]);
+  };
   const xBookmarksConnectorStoreLane = sourceIndexLaneAccountDecision(sourceIndexLaneStorageDecision(process.env, "OLYMPUS_SOURCE_INDEX_X_BOOKMARKS_CONNECTOR_STORE_ENABLED", sourceIndexReadEnabled), { sourceId: X_BOOKMARKS_SOURCE_ID });
   let xBookmarksTierStores = [];
-  const refreshableXBookmarksRuntime = createRefreshableXBookmarksConnectorStoreRuntime({
-    enabled: xBookmarksConnectorStoreLane.enabled,
-    ...xBookmarksEmbeddingProvider ? { embeddingProvider: xBookmarksEmbeddingProvider } : {},
-    ...sourceIndexAccount ? { account: sourceIndexAccount } : {},
-    env: process.env,
-    tierSetFor: (store) => {
-      const secrets = openTierSecretLocations({ sourceId: X_BOOKMARKS_SOURCE_ID }, resolvedStorePath(X_BOOKMARKS_SOURCE_ID, "secure_local", process.env), X_BOOKMARKS_SECURE_CORPUS_ID);
-      const lane = createXBookmarksTierLane({
-        store,
-        env: process.env,
-        ...xBookmarksEmbeddingProvider ? { embeddingProvider: xBookmarksEmbeddingProvider } : {},
-        ...tierSecureEmbeddingProvider ? { secureEmbeddingProvider: tierSecureEmbeddingProvider } : {},
-        ...secrets ? { secretLocations: secrets } : {},
-        onStoreOpened: (opened) => registerTierLegStore(opened, store.corpusId, tierSecureEmbeddingProvider ?? null)
-      });
-      xBookmarksTierStores = Object.values(lane.newStores).filter((leg) => leg !== undefined);
-      return existingStoreTierSet(lane, { store, ...secrets ? { secrets } : {} });
-    }
-  });
-  const xBookmarksConnectorStore = refreshableXBookmarksRuntime?.store;
+  let refreshableXBookmarksRuntime;
+  let xBookmarksConnectorStore;
+  const mountXBookmarks = () => {
+    if (refreshableXBookmarksRuntime)
+      return;
+    refreshableXBookmarksRuntime = createRefreshableXBookmarksConnectorStoreRuntime({
+      enabled: xBookmarksConnectorStoreLane.enabled,
+      ...xBookmarksEmbeddingProvider ? { embeddingProvider: xBookmarksEmbeddingProvider } : {},
+      ...sourceIndexAccount ? { account: sourceIndexAccount } : {},
+      env: process.env,
+      tierSetFor: (store) => {
+        const secrets = openTierSecretLocations({ sourceId: X_BOOKMARKS_SOURCE_ID }, resolvedStorePath(X_BOOKMARKS_SOURCE_ID, "secure_local", process.env), X_BOOKMARKS_SECURE_CORPUS_ID);
+        const lane = createXBookmarksTierLane({
+          store,
+          env: process.env,
+          ...xBookmarksEmbeddingProvider ? { embeddingProvider: xBookmarksEmbeddingProvider } : {},
+          ...tierSecureEmbeddingProvider ? { secureEmbeddingProvider: tierSecureEmbeddingProvider } : {},
+          ...secrets ? { secretLocations: secrets } : {},
+          onStoreOpened: (opened) => registerTierLegStore(opened, store.corpusId, tierSecureEmbeddingProvider ?? null)
+        });
+        xBookmarksTierStores = Object.values(lane.newStores).filter((leg) => leg !== undefined);
+        return existingStoreTierSet(lane, { store, ...secrets ? { secrets } : {} });
+      }
+    });
+    xBookmarksConnectorStore = refreshableXBookmarksRuntime?.store;
+    if (xBookmarksConnectorStore)
+      sourceLaneMounted([xBookmarksConnectorStore]);
+  };
   const gmailConnectorStoreLane = sourceIndexLaneAccountDecision(sourceIndexLaneStorageDecision(process.env, "OLYMPUS_SOURCE_INDEX_GMAIL_CONNECTOR_STORE_ENABLED", sourceIndexReadEnabled), { sourceId: GMAIL_SOURCE_ID });
   const googleDriveConnectorStoreLane = sourceIndexLaneAccountDecision(sourceIndexLaneStorageDecision(process.env, "OLYMPUS_SOURCE_INDEX_GOOGLE_DRIVE_CONNECTOR_STORE_ENABLED", sourceIndexReadEnabled), { sourceId: GOOGLE_DRIVE_SOURCE_ID });
   const gmailRequestBudget = gmailConnectorStoreLane.enabled ? createGmailDailyRequestBudget({ env: process.env }) : undefined;
-  const gmailInternalConnectorStore = gmailConnectorStoreLane.enabled ? openConnectorStore({ sourceId: GMAIL_SOURCE_ID }, {
-    dbPath: resolvedStorePath(GMAIL_SOURCE_ID, "internal", process.env),
-    corpusId: GMAIL_INTERNAL_CONNECTOR_CORPUS_ID,
-    family: "email",
-    trustDomain: "internal"
-  }) : undefined;
-  const gmailSecureConnectorStore = gmailInternalConnectorStore ? openConnectorStore({ sourceId: GMAIL_SOURCE_ID }, {
-    dbPath: resolvedStorePath(GMAIL_SOURCE_ID, "secure_local", process.env),
-    corpusId: GMAIL_SECURE_CONNECTOR_CORPUS_ID,
-    family: "email",
-    trustDomain: "secure_local"
-  }) : undefined;
-  const gmailTierLane = gmailInternalConnectorStore && gmailSecureConnectorStore ? tierLane({
-    account: { sourceId: GMAIL_SOURCE_ID },
-    internal: gmailInternalConnectorStore,
-    secure: gmailSecureConnectorStore,
-    publicStore: onDemandTierStore({
-      corpusId: GMAIL_PUBLIC_CONNECTOR_CORPUS_ID,
-      dbPath: resolvedStorePath(GMAIL_SOURCE_ID, "public_safe", process.env),
-      create: () => openConnectorStore({ sourceId: GMAIL_SOURCE_ID }, {
-        dbPath: resolvedStorePath(GMAIL_SOURCE_ID, "public_safe", process.env),
+  let gmailInternalConnectorStore;
+  let gmailSecureConnectorStore;
+  let gmailTierLane;
+  const mountGmail = () => {
+    if (gmailInternalConnectorStore)
+      return;
+    gmailInternalConnectorStore = gmailConnectorStoreLane.enabled ? openConnectorStore({ sourceId: GMAIL_SOURCE_ID }, {
+      dbPath: resolvedStorePath(GMAIL_SOURCE_ID, "internal", process.env),
+      corpusId: GMAIL_INTERNAL_CONNECTOR_CORPUS_ID,
+      family: "email",
+      trustDomain: "internal"
+    }) : undefined;
+    gmailSecureConnectorStore = gmailInternalConnectorStore ? openConnectorStore({ sourceId: GMAIL_SOURCE_ID }, {
+      dbPath: resolvedStorePath(GMAIL_SOURCE_ID, "secure_local", process.env),
+      corpusId: GMAIL_SECURE_CONNECTOR_CORPUS_ID,
+      family: "email",
+      trustDomain: "secure_local"
+    }) : undefined;
+    gmailTierLane = gmailInternalConnectorStore && gmailSecureConnectorStore ? tierLane({
+      account: { sourceId: GMAIL_SOURCE_ID },
+      internal: gmailInternalConnectorStore,
+      secure: gmailSecureConnectorStore,
+      publicStore: onDemandTierStore({
         corpusId: GMAIL_PUBLIC_CONNECTOR_CORPUS_ID,
-        family: "email",
-        trustDomain: "public_safe"
-      }),
-      onOpened: (store) => registerTierLegStore(store, GMAIL_INTERNAL_CONNECTOR_CORPUS_ID)
-    })
-  }) : undefined;
+        dbPath: resolvedStorePath(GMAIL_SOURCE_ID, "public_safe", process.env),
+        create: () => openConnectorStore({ sourceId: GMAIL_SOURCE_ID }, {
+          dbPath: resolvedStorePath(GMAIL_SOURCE_ID, "public_safe", process.env),
+          corpusId: GMAIL_PUBLIC_CONNECTOR_CORPUS_ID,
+          family: "email",
+          trustDomain: "public_safe"
+        }),
+        onOpened: (store) => registerTierLegStore(store, GMAIL_INTERNAL_CONNECTOR_CORPUS_ID)
+      })
+    }) : undefined;
+    if (gmailInternalConnectorStore && gmailSecureConnectorStore)
+      sourceLaneMounted([gmailInternalConnectorStore, gmailSecureConnectorStore]);
+  };
   const gmailItemScopeFor = (handle) => {
     const role = handle?.accountRole?.trim() || accountFromGoogleHandle(handle?.handle);
     return gmailInternalConnectorStore && gmailSecureConnectorStore ? gmailItemAccountScope([gmailInternalConnectorStore, gmailSecureConnectorStore], role) : role;
   };
-  if (gmailInternalConnectorStore && gmailSecureConnectorStore) {
+  if (gmailConnectorStoreLane.enabled) {
     let gmailArchiveSet;
     const gmailImportGate = gmailImportAllowance({ usage: () => gmailRequestBudget?.status() });
     let gmailLabelCache;
@@ -205351,6 +205387,9 @@ async function main() {
       concurrencyKey: GMAIL_INTERNAL_CONNECTOR_CORPUS_ID,
       exclusive: (task) => connectedHandleRegistryPath ? runExclusiveForSource(connectedHandleRegistryPath, GMAIL_SOURCE_ID, task) : task(),
       lane: () => {
+        mountGmail();
+        if (!gmailInternalConnectorStore || !gmailSecureConnectorStore)
+          throw new Error("Gmail stores are unavailable.");
         const handle = selectedSourceCredentialHandle({
           env: process.env,
           pinEnvName: "OLYMPUS_SOURCE_INDEX_GMAIL_CREDENTIAL_HANDLE",
@@ -205449,63 +205488,82 @@ ${key2}`;
   }
   const googleDriveRequestBudget = googleDriveConnectorStoreLane.enabled ? createGoogleDriveDailyRequestBudget({ env: process.env }) : undefined;
   const googleDriveExclusions = googleDriveConnectorStoreLane.enabled ? googleDriveIngestionExclusionMatcher(process.env) : undefined;
-  const googleDriveInternalConnectorStore = googleDriveConnectorStoreLane.enabled ? openConnectorStore({ sourceId: GOOGLE_DRIVE_SOURCE_ID }, {
-    dbPath: resolvedStorePath(GOOGLE_DRIVE_SOURCE_ID, "internal", process.env),
-    corpusId: GOOGLE_DRIVE_INTERNAL_CONNECTOR_CORPUS_ID,
-    family: "file",
-    trustDomain: "internal",
-    ...googleDriveExclusions ? { exclusions: googleDriveExclusions } : {}
-  }) : undefined;
-  const googleDriveSecureConnectorStore = googleDriveInternalConnectorStore ? openConnectorStore({ sourceId: GOOGLE_DRIVE_SOURCE_ID }, {
-    dbPath: resolvedStorePath(GOOGLE_DRIVE_SOURCE_ID, "secure_local", process.env),
-    corpusId: GOOGLE_DRIVE_SECURE_CONNECTOR_CORPUS_ID,
-    family: "file",
-    trustDomain: "secure_local",
-    ...googleDriveExclusions ? { exclusions: googleDriveExclusions } : {}
-  }) : undefined;
-  const googleDriveTierLane = googleDriveInternalConnectorStore && googleDriveSecureConnectorStore ? tierLane({
-    account: { sourceId: GOOGLE_DRIVE_SOURCE_ID },
-    internal: googleDriveInternalConnectorStore,
-    secure: googleDriveSecureConnectorStore,
-    publicStore: onDemandTierStore({
-      corpusId: GOOGLE_DRIVE_PUBLIC_CONNECTOR_CORPUS_ID,
-      dbPath: resolvedStorePath(GOOGLE_DRIVE_SOURCE_ID, "public_safe", process.env),
-      create: () => openConnectorStore({ sourceId: GOOGLE_DRIVE_SOURCE_ID }, {
-        dbPath: resolvedStorePath(GOOGLE_DRIVE_SOURCE_ID, "public_safe", process.env),
+  let googleDriveInternalConnectorStore;
+  let googleDriveSecureConnectorStore;
+  let googleDriveTierLane;
+  const mountGoogleDrive = () => {
+    if (googleDriveInternalConnectorStore)
+      return;
+    googleDriveInternalConnectorStore = googleDriveConnectorStoreLane.enabled ? openConnectorStore({ sourceId: GOOGLE_DRIVE_SOURCE_ID }, {
+      dbPath: resolvedStorePath(GOOGLE_DRIVE_SOURCE_ID, "internal", process.env),
+      corpusId: GOOGLE_DRIVE_INTERNAL_CONNECTOR_CORPUS_ID,
+      family: "file",
+      trustDomain: "internal",
+      ...googleDriveExclusions ? { exclusions: googleDriveExclusions } : {}
+    }) : undefined;
+    googleDriveSecureConnectorStore = googleDriveInternalConnectorStore ? openConnectorStore({ sourceId: GOOGLE_DRIVE_SOURCE_ID }, {
+      dbPath: resolvedStorePath(GOOGLE_DRIVE_SOURCE_ID, "secure_local", process.env),
+      corpusId: GOOGLE_DRIVE_SECURE_CONNECTOR_CORPUS_ID,
+      family: "file",
+      trustDomain: "secure_local",
+      ...googleDriveExclusions ? { exclusions: googleDriveExclusions } : {}
+    }) : undefined;
+    googleDriveTierLane = googleDriveInternalConnectorStore && googleDriveSecureConnectorStore ? tierLane({
+      account: { sourceId: GOOGLE_DRIVE_SOURCE_ID },
+      internal: googleDriveInternalConnectorStore,
+      secure: googleDriveSecureConnectorStore,
+      publicStore: onDemandTierStore({
         corpusId: GOOGLE_DRIVE_PUBLIC_CONNECTOR_CORPUS_ID,
-        family: "file",
-        trustDomain: "public_safe",
-        ...googleDriveExclusions ? { exclusions: googleDriveExclusions } : {}
-      }),
-      onOpened: (store) => registerTierLegStore(store, GOOGLE_DRIVE_INTERNAL_CONNECTOR_CORPUS_ID)
-    })
-  }) : undefined;
+        dbPath: resolvedStorePath(GOOGLE_DRIVE_SOURCE_ID, "public_safe", process.env),
+        create: () => openConnectorStore({ sourceId: GOOGLE_DRIVE_SOURCE_ID }, {
+          dbPath: resolvedStorePath(GOOGLE_DRIVE_SOURCE_ID, "public_safe", process.env),
+          corpusId: GOOGLE_DRIVE_PUBLIC_CONNECTOR_CORPUS_ID,
+          family: "file",
+          trustDomain: "public_safe",
+          ...googleDriveExclusions ? { exclusions: googleDriveExclusions } : {}
+        }),
+        onOpened: (store) => registerTierLegStore(store, GOOGLE_DRIVE_INTERNAL_CONNECTOR_CORPUS_ID)
+      })
+    }) : undefined;
+    if (googleDriveInternalConnectorStore && googleDriveSecureConnectorStore)
+      sourceLaneMounted([googleDriveInternalConnectorStore, googleDriveSecureConnectorStore]);
+  };
   const dropboxConnectorStoreLane = sourceIndexLaneAccountDecision(sourceIndexLaneStorageDecision(process.env, "OLYMPUS_SOURCE_INDEX_DROPBOX_CONNECTOR_STORE_ENABLED", sourceIndexReadEnabled), { sourceId: DROPBOX_FILES_SOURCE_ID });
-  const dropboxConnectorStore = dropboxConnectorStoreLane.enabled ? createDropboxConnectorStore(process.env, { policy: dropboxIngestionPolicy }) : undefined;
   const dropboxProviderAccount = dropboxHandle?.accountRole?.trim() || dropboxFilesAccount || "personal";
-  const dropboxSecretLocations = dropboxConnectorStore ? openTierSecretLocations({ sourceId: DROPBOX_FILES_SOURCE_ID }, dropboxConnectorStore.dbPath, DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID) : undefined;
-  const dropboxTierLane = dropboxConnectorStore ? createDropboxTierLane({
-    secureStore: dropboxConnectorStore,
-    env: process.env,
-    policy: dropboxIngestionPolicy,
-    ...dropboxSecretLocations ? { secretLocations: dropboxSecretLocations } : {},
-    onStoreOpened: (store) => registerTierLegStore(store, DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID, sourceIndexEmbeddingProvider ?? null)
-  }) : undefined;
-  if (dropboxTierLane && dropboxFilesEmbeddingProvider && isApprovedSecureSourceEmbeddingProvider(dropboxFilesEmbeddingProvider)) {
-    dropboxTierLane.set.declarePrivateEmbedder(dropboxFilesEmbeddingProvider, {
-      embedWith: () => dropboxScopeRef && fileSourceScopeAuthority ? scopeBoundEmbeddingProvider(dropboxFilesEmbeddingProvider, fileSourceScopeAuthority, dropboxScopeRef) : undefined
-    });
-  }
-  if (dropboxTierLane && dropboxConnectorStore) {
-    adoptTierLane({
-      ledger: dropboxTierLane.ledger,
-      secureCorpusId: dropboxConnectorStore.corpusId,
-      corpusIds: [dropboxConnectorStore.corpusId, dropboxTierLane.internal.corpusId, dropboxTierLane.public.corpusId],
-      onDemand: [dropboxTierLane.internal, dropboxTierLane.public],
-      ...dropboxSecretLocations ? { secrets: dropboxSecretLocations } : {}
-    });
-  }
-  const dropboxExtractionView = dropboxTierLane ? tieredExtractionView(dropboxTierLane.set) : undefined;
+  let dropboxConnectorStore;
+  let dropboxSecretLocations;
+  let dropboxTierLane;
+  let dropboxExtractionView;
+  const mountDropbox = () => {
+    if (dropboxConnectorStore)
+      return;
+    dropboxConnectorStore = dropboxConnectorStoreLane.enabled ? createDropboxConnectorStore(process.env, { policy: dropboxIngestionPolicy }) : undefined;
+    dropboxSecretLocations = dropboxConnectorStore ? openTierSecretLocations({ sourceId: DROPBOX_FILES_SOURCE_ID }, dropboxConnectorStore.dbPath, DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID) : undefined;
+    dropboxTierLane = dropboxConnectorStore ? createDropboxTierLane({
+      secureStore: dropboxConnectorStore,
+      env: process.env,
+      policy: dropboxIngestionPolicy,
+      ...dropboxSecretLocations ? { secretLocations: dropboxSecretLocations } : {},
+      onStoreOpened: (store) => registerTierLegStore(store, DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID, sourceIndexEmbeddingProvider ?? null)
+    }) : undefined;
+    if (dropboxTierLane && dropboxFilesEmbeddingProvider && isApprovedSecureSourceEmbeddingProvider(dropboxFilesEmbeddingProvider)) {
+      dropboxTierLane.set.declarePrivateEmbedder(dropboxFilesEmbeddingProvider, {
+        embedWith: () => dropboxScopeRef && fileSourceScopeAuthority ? scopeBoundEmbeddingProvider(dropboxFilesEmbeddingProvider, fileSourceScopeAuthority, dropboxScopeRef) : undefined
+      });
+    }
+    if (dropboxTierLane && dropboxConnectorStore) {
+      adoptTierLane({
+        ledger: dropboxTierLane.ledger,
+        secureCorpusId: dropboxConnectorStore.corpusId,
+        corpusIds: [dropboxConnectorStore.corpusId, dropboxTierLane.internal.corpusId, dropboxTierLane.public.corpusId],
+        onDemand: [dropboxTierLane.internal, dropboxTierLane.public],
+        ...dropboxSecretLocations ? { secrets: dropboxSecretLocations } : {}
+      });
+    }
+    dropboxExtractionView = dropboxTierLane ? tieredExtractionView(dropboxTierLane.set) : undefined;
+    if (dropboxConnectorStore)
+      sourceLaneMounted([dropboxConnectorStore]);
+  };
   const isDropboxTierStore = (store) => store === dropboxConnectorStore || dropboxTierLane !== undefined && (store === dropboxTierLane.internal.current() || store === dropboxTierLane.public.current());
   const dropboxScopeRef = dropboxHandle && fileSourceScopeAuthority ? fileSourceScopeAuthority.policyRef("dropbox.files") : undefined;
   const dropboxProviderStoreSync = dropboxConnectorStore && dropboxTierLane && dropboxHandle && dropboxScopeRef && fileSourceScopeAuthority ? createDropboxProviderStoreSyncHandler({
@@ -205518,34 +205576,44 @@ ${key2}`;
   }) : undefined;
   const localFilesConnectorStoreLane = sourceIndexLaneAccountDecision(sourceIndexLaneStorageDecision(process.env, "OLYMPUS_SOURCE_INDEX_LOCAL_FILES_CONNECTOR_STORE_ENABLED", sourceIndexReadEnabled), { sourceId: LOCAL_FILES_SOURCE_ID });
   const localFilesIngestionPolicy = defaultLocalFilesIngestionPolicy();
-  const localFilesConnectorStore = localFilesConnectorStoreLane.enabled ? createLocalFilesConnectorStore(process.env, { policy: localFilesIngestionPolicy }) : undefined;
-  const localFilesSecretLocations = localFilesConnectorStore ? openTierSecretLocations({ sourceId: LOCAL_FILES_SOURCE_ID }, localFilesConnectorStore.dbPath, LOCAL_FILES_CORPUS_ID) : undefined;
-  const localFilesTierLane = localFilesConnectorStore ? createLocalFilesTierLane({
-    secureStore: localFilesConnectorStore,
-    env: process.env,
-    policy: localFilesIngestionPolicy,
-    ...localFilesSecretLocations ? { secretLocations: localFilesSecretLocations } : {},
-    onStoreOpened: (store) => registerTierLegStore(store, LOCAL_FILES_CORPUS_ID, sourceIndexEmbeddingProvider ?? null)
-  }) : undefined;
   const localFilesScopeRef = fileSourceScopeAuthority ? fileSourceScopeAuthority.policyRef(LOCAL_FILES_SOURCE_ID) : undefined;
-  if (localFilesTierLane && localFilesConnectorStore && localFilesEmbeddingProvider && isApprovedSecureSourceEmbeddingProvider(localFilesEmbeddingProvider)) {
-    localFilesTierLane.set.declarePrivateEmbedder(localFilesEmbeddingProvider, {
-      embedWith: () => {
-        const ref = fileSourceScopeAuthority?.policyRef(LOCAL_FILES_SOURCE_ID);
-        return ref && fileSourceScopeAuthority ? scopeBoundEmbeddingProvider(localFilesEmbeddingProvider, fileSourceScopeAuthority, ref) : undefined;
-      }
-    });
-  }
-  if (localFilesTierLane && localFilesConnectorStore) {
-    adoptTierLane({
-      ledger: localFilesTierLane.ledger,
-      secureCorpusId: localFilesConnectorStore.corpusId,
-      corpusIds: [localFilesConnectorStore.corpusId, localFilesTierLane.internal.corpusId, localFilesTierLane.public.corpusId],
-      onDemand: [localFilesTierLane.internal, localFilesTierLane.public],
-      ...localFilesSecretLocations ? { secrets: localFilesSecretLocations } : {}
-    });
-  }
-  const localFilesExtractionView = localFilesTierLane ? tieredExtractionView(localFilesTierLane.set) : undefined;
+  let localFilesConnectorStore;
+  let localFilesSecretLocations;
+  let localFilesTierLane;
+  let localFilesExtractionView;
+  const mountLocalFiles = () => {
+    if (localFilesConnectorStore)
+      return;
+    localFilesConnectorStore = localFilesConnectorStoreLane.enabled ? createLocalFilesConnectorStore(process.env, { policy: localFilesIngestionPolicy }) : undefined;
+    localFilesSecretLocations = localFilesConnectorStore ? openTierSecretLocations({ sourceId: LOCAL_FILES_SOURCE_ID }, localFilesConnectorStore.dbPath, LOCAL_FILES_CORPUS_ID) : undefined;
+    localFilesTierLane = localFilesConnectorStore ? createLocalFilesTierLane({
+      secureStore: localFilesConnectorStore,
+      env: process.env,
+      policy: localFilesIngestionPolicy,
+      ...localFilesSecretLocations ? { secretLocations: localFilesSecretLocations } : {},
+      onStoreOpened: (store) => registerTierLegStore(store, LOCAL_FILES_CORPUS_ID, sourceIndexEmbeddingProvider ?? null)
+    }) : undefined;
+    if (localFilesTierLane && localFilesConnectorStore && localFilesEmbeddingProvider && isApprovedSecureSourceEmbeddingProvider(localFilesEmbeddingProvider)) {
+      localFilesTierLane.set.declarePrivateEmbedder(localFilesEmbeddingProvider, {
+        embedWith: () => {
+          const ref = fileSourceScopeAuthority?.policyRef(LOCAL_FILES_SOURCE_ID);
+          return ref && fileSourceScopeAuthority ? scopeBoundEmbeddingProvider(localFilesEmbeddingProvider, fileSourceScopeAuthority, ref) : undefined;
+        }
+      });
+    }
+    if (localFilesTierLane && localFilesConnectorStore) {
+      adoptTierLane({
+        ledger: localFilesTierLane.ledger,
+        secureCorpusId: localFilesConnectorStore.corpusId,
+        corpusIds: [localFilesConnectorStore.corpusId, localFilesTierLane.internal.corpusId, localFilesTierLane.public.corpusId],
+        onDemand: [localFilesTierLane.internal, localFilesTierLane.public],
+        ...localFilesSecretLocations ? { secrets: localFilesSecretLocations } : {}
+      });
+    }
+    localFilesExtractionView = localFilesTierLane ? tieredExtractionView(localFilesTierLane.set) : undefined;
+    if (localFilesConnectorStore)
+      sourceLaneMounted([localFilesConnectorStore]);
+  };
   const isLocalFilesTierStore = (store) => store === localFilesConnectorStore || localFilesTierLane !== undefined && (store === localFilesTierLane.internal.current() || store === localFilesTierLane.public.current());
   const localFilesWatchHub = new WatchHub;
   const localFilesVolumes = new VolumeResolver;
@@ -205554,7 +205622,7 @@ ${key2}`;
     volumeIgnoresCase: (volumeId, path) => localFilesVolumes.ignoresCase(volumeId, path)
   };
   const localFilesWatchIgnore = watchIgnoreGlobs(localFilesExclusionContext);
-  const localFilesOwnRootsCleanup = localFilesConnectorStore && localFilesTierLane ? createLocalFilesOwnRootsCleanup({
+  let localFilesOwnRootsCleanup = localFilesConnectorStore && localFilesTierLane ? createLocalFilesOwnRootsCleanup({
     tierSet: localFilesTierLane.set,
     context: localFilesExclusionContext,
     log: (message2) => console.warn(`[local-files] ${message2}`)
@@ -205563,6 +205631,8 @@ ${key2}`;
   const localFilesSyncFor = (ref) => {
     if (!localFilesConnectorStore || !localFilesTierLane || !fileSourceScopeAuthority)
       return;
+    localFilesOwnRootsCleanup ??= createLocalFilesOwnRootsCleanup({ tierSet: localFilesTierLane.set, context: localFilesExclusionContext, log: (message2) => console.warn(`[local-files] ${message2}`) });
+    const ownRootsCleanup = localFilesOwnRootsCleanup;
     const key2 = `${ref.accountGeneration}:${ref.revision}`;
     if (localFilesSyncCache?.key === key2)
       return localFilesSyncCache.handler;
@@ -205575,9 +205645,9 @@ ${key2}`;
       hub: localFilesWatchHub,
       snapshotDir: localFilesWatchDir(process.env),
       ignore: localFilesWatchIgnore,
-      ...localFilesOwnRootsCleanup ? { beforePull: async () => {
-        await localFilesOwnRootsCleanup.run();
-        await localFilesOwnRootsCleanup.idle();
+      ...ownRootsCleanup ? { beforePull: async () => {
+        await ownRootsCleanup.run();
+        await ownRootsCleanup.idle();
       } } : {},
       ...localFilesEmbeddingProvider && isApprovedSecureSourceEmbeddingProvider(localFilesEmbeddingProvider) ? { embeddingProvider: scopeBoundEmbeddingProvider(localFilesEmbeddingProvider, fileSourceScopeAuthority, ref) } : {}
     });
@@ -205610,23 +205680,32 @@ ${key2}`;
     });
   };
   const whatsappConnectorStoreLane = sourceIndexLaneAccountDecision(sourceIndexLaneStorageDecision(process.env, "OLYMPUS_SOURCE_INDEX_WHATSAPP_CONNECTOR_STORE_ENABLED", sourceIndexReadEnabled), { sourceId: WHATSAPP_PERSONAL_SOURCE_ID });
-  const whatsappConnectorStore = whatsappConnectorStoreLane.enabled ? createWhatsAppConnectorStore(process.env) : undefined;
-  const whatsappSecretLocations = whatsappConnectorStore ? openTierSecretLocations({ sourceId: WHATSAPP_PERSONAL_SOURCE_ID }, whatsappConnectorStore.dbPath, WHATSAPP_LIVE_CORPUS_ID) : undefined;
-  const whatsappTierSet = whatsappConnectorStore ? existingStoreTierSet(createWhatsAppTierLane({
-    store: whatsappConnectorStore,
-    env: process.env,
-    ...sourceIndexEmbeddingProvider ? { internalEmbeddingProvider: sourceIndexEmbeddingProvider } : {},
-    ...whatsappSecretLocations ? { secretLocations: whatsappSecretLocations } : {},
-    onStoreOpened: (opened) => registerTierLegStore(opened, WHATSAPP_LIVE_CORPUS_ID, sourceIndexEmbeddingProvider ?? null)
-  }), {
-    store: whatsappConnectorStore,
-    ...whatsappSecretLocations ? { secrets: whatsappSecretLocations } : {}
-  }) : undefined;
-  if (whatsappTierSet && tierSecureEmbeddingProvider)
-    whatsappTierSet.declarePrivateEmbedder(tierSecureEmbeddingProvider);
-  if (whatsappTierSet && whatsappConnectorStore) {
-    reportRehomedChatOverrides("whatsapp", rehomeChatLaneOverrides(whatsappTierSet.ledger, "whatsapp", [whatsappConnectorStore]));
-  }
+  let whatsappConnectorStore;
+  let whatsappSecretLocations;
+  let whatsappTierSet;
+  const mountWhatsApp = () => {
+    if (whatsappConnectorStore)
+      return;
+    whatsappConnectorStore = whatsappConnectorStoreLane.enabled ? createWhatsAppConnectorStore(process.env) : undefined;
+    whatsappSecretLocations = whatsappConnectorStore ? openTierSecretLocations({ sourceId: WHATSAPP_PERSONAL_SOURCE_ID }, whatsappConnectorStore.dbPath, WHATSAPP_LIVE_CORPUS_ID) : undefined;
+    whatsappTierSet = whatsappConnectorStore ? existingStoreTierSet(createWhatsAppTierLane({
+      store: whatsappConnectorStore,
+      env: process.env,
+      ...sourceIndexEmbeddingProvider ? { internalEmbeddingProvider: sourceIndexEmbeddingProvider } : {},
+      ...whatsappSecretLocations ? { secretLocations: whatsappSecretLocations } : {},
+      onStoreOpened: (opened) => registerTierLegStore(opened, WHATSAPP_LIVE_CORPUS_ID, sourceIndexEmbeddingProvider ?? null)
+    }), {
+      store: whatsappConnectorStore,
+      ...whatsappSecretLocations ? { secrets: whatsappSecretLocations } : {}
+    }) : undefined;
+    if (whatsappTierSet && tierSecureEmbeddingProvider)
+      whatsappTierSet.declarePrivateEmbedder(tierSecureEmbeddingProvider);
+    if (whatsappTierSet && whatsappConnectorStore) {
+      reportRehomedChatOverrides("whatsapp", rehomeChatLaneOverrides(whatsappTierSet.ledger, "whatsapp", [whatsappConnectorStore]));
+    }
+    if (whatsappConnectorStore)
+      sourceLaneMounted([whatsappConnectorStore]);
+  };
   let whatsappImportTierSet = whatsappTierSet;
   const whatsappArchiveMedia = () => ({ state: archiveImports.state, bindings: archiveImports.media });
   const whatsappReadChild = whatsAppChildReader(process.env, whatsappArchiveMedia);
@@ -205634,6 +205713,8 @@ ${key2}`;
   archiveSourceTargets.register(createWhatsAppArchiveTarget({
     env: process.env,
     set: () => {
+      mountWhatsApp();
+      whatsappImportTierSet ??= whatsappTierSet;
       if (whatsappImportTierSet)
         return whatsappImportTierSet;
       const store = createWhatsAppConnectorStore(process.env);
@@ -205652,7 +205733,7 @@ ${key2}`;
     },
     readChild: whatsappReadChild
   }));
-  const whatsappConnectorStoreSync = whatsappConnectorStore && whatsappTierSet ? createWhatsAppConnectorStoreSyncHandler({
+  let whatsappConnectorStoreSync = whatsappConnectorStore && whatsappTierSet ? createWhatsAppConnectorStoreSyncHandler({
     tierSet: whatsappTierSet,
     store: whatsappConnectorStore,
     account: WHATSAPP_PERSONAL_ACCOUNT_SCOPE,
@@ -205661,24 +205742,54 @@ ${key2}`;
   }) : undefined;
   const whatsappLiveMaxItems = parseOptionalPositiveInteger(process.env.OLYMPUS_WHATSAPP_LIVE_DRAIN_MAX_ITEMS, "OLYMPUS_WHATSAPP_LIVE_DRAIN_MAX_ITEMS");
   const telegramConnectorStoreLane = sourceIndexLaneAccountDecision(sourceIndexLaneStorageDecision(process.env, "OLYMPUS_SOURCE_INDEX_TELEGRAM_CONNECTOR_STORES_ENABLED", sourceIndexReadEnabled), { sourceId: TELEGRAM_MESSAGES_SOURCE_ID });
-  const telegramConnectorStores = telegramConnectorStoreLane.enabled ? createTelegramConnectorStores(process.env) : undefined;
-  const telegramTierLane = telegramConnectorStores ? tierLane({
-    account: { sourceId: TELEGRAM_MESSAGES_SOURCE_ID },
-    internal: telegramConnectorStores.internal,
-    secure: telegramConnectorStores.secureLocal
-  }) : undefined;
-  if (telegramTierLane && telegramConnectorStores) {
-    reportRehomedChatOverrides("telegram", rehomeChatLaneOverrides(telegramTierLane.ledger, "telegram", [telegramConnectorStores.internal, telegramConnectorStores.secureLocal]));
-  }
-  const telegramConnectorStoreSync = telegramConnectorStores ? createTelegramConnectorStoreSyncHandler({
-    stores: telegramConnectorStores,
-    env: process.env,
-    ...telegramTierLane?.secrets ? { secretLocations: telegramTierLane.secrets } : {},
-    ...tierSecureEmbeddingProvider ? { privateEmbedder: tierSecureEmbeddingProvider } : {}
-  }) : undefined;
-  if (telegramConnectorStoreSync)
-    archiveSourceTargets.register(telegramConnectorStoreSync.archiveTarget());
+  let telegramConnectorStores;
+  let telegramTierLane;
+  let telegramConnectorStoreSync;
+  const mountTelegram = () => {
+    if (telegramConnectorStores)
+      return;
+    telegramConnectorStores = telegramConnectorStoreLane.enabled ? createTelegramConnectorStores(process.env) : undefined;
+    telegramTierLane = telegramConnectorStores ? tierLane({
+      account: { sourceId: TELEGRAM_MESSAGES_SOURCE_ID },
+      internal: telegramConnectorStores.internal,
+      secure: telegramConnectorStores.secureLocal
+    }) : undefined;
+    if (telegramTierLane && telegramConnectorStores) {
+      reportRehomedChatOverrides("telegram", rehomeChatLaneOverrides(telegramTierLane.ledger, "telegram", [telegramConnectorStores.internal, telegramConnectorStores.secureLocal]));
+    }
+    telegramConnectorStoreSync = telegramConnectorStores ? createTelegramConnectorStoreSyncHandler({
+      stores: telegramConnectorStores,
+      env: process.env,
+      ...telegramTierLane?.secrets ? { secretLocations: telegramTierLane.secrets } : {},
+      ...tierSecureEmbeddingProvider ? { privateEmbedder: tierSecureEmbeddingProvider } : {}
+    }) : undefined;
+    if (telegramConnectorStoreSync)
+      archiveSourceTargets.register(telegramConnectorStoreSync.archiveTarget());
+    if (telegramConnectorStores)
+      sourceLaneMounted([telegramConnectorStores.internal, telegramConnectorStores.secureLocal]);
+  };
   const telegramCaptureMaxItems = parseOptionalPositiveInteger(process.env.OLYMPUS_TELEGRAM_SPOOL_DRAIN_MAX_ITEMS, "OLYMPUS_TELEGRAM_SPOOL_DRAIN_MAX_ITEMS");
+  const mountSourceLanes = (handles) => {
+    const connected2 = (provider, capability) => activeCredentialHandle(handles, { provider, capability }) !== undefined;
+    if (gmailConnectorStoreLane.enabled && (sourceHasStores(GMAIL_SOURCE_ID) || connected2("gmail", "gmail.email.sync")))
+      mountGmail();
+    if (googleDriveConnectorStoreLane.enabled && (sourceHasStores(GOOGLE_DRIVE_SOURCE_ID) || connected2("google_drive", "google_drive.docs.sync")))
+      mountGoogleDrive();
+    if (dropboxConnectorStoreLane.enabled && (sourceHasStores(DROPBOX_FILES_SOURCE_ID) || connected2("dropbox", "dropbox.files.sync")))
+      mountDropbox();
+    if (localFilesConnectorStoreLane.enabled && (sourceHasStores(LOCAL_FILES_SOURCE_ID) || fileSourceScopeAuthority?.policyRef(LOCAL_FILES_SOURCE_ID)))
+      mountLocalFiles();
+    if (whatsappConnectorStoreLane.enabled && (sourceHasStores(WHATSAPP_PERSONAL_SOURCE_ID) || connected2("whatsapp_personal", "whatsapp.personal.messages.sync")))
+      mountWhatsApp();
+    if (telegramConnectorStoreLane.enabled && (sourceHasStores(TELEGRAM_MESSAGES_SOURCE_ID) || connected2("telegram", "telegram.messages.sync")))
+      mountTelegram();
+    if (readwiseConnectorStoreLane.enabled && (sourceHasStores(READWISE_SOURCE_ID) || connected2("readwise", "readwise.sync")))
+      mountReadwise();
+    if (xBookmarksConnectorStoreLane.enabled && (sourceHasStores(X_BOOKMARKS_SOURCE_ID) || connected2("x", "x.bookmarks.sync")))
+      mountXBookmarks();
+    mountConfiguredSourceStores();
+  };
+  mountSourceLanes(connectedHandles);
   const laneConnectorStores = [
     ...dropboxConnectorStore ? [dropboxConnectorStore] : [],
     ...localFilesConnectorStore ? [localFilesConnectorStore] : [],
@@ -205692,6 +205803,7 @@ ${key2}`;
     ...whatsappConnectorStore ? [whatsappConnectorStore] : []
   ];
   const configuredConnectorStoreMounts = parseConnectorStoreMountsFromEnv(process.env.OLYMPUS_SOURCE_INDEX_CONNECTOR_STORES_JSON, {
+    existingOnly: true,
     collidingStores: laneConnectorStores,
     registeredCorpora: sourceCorpusRegistry2.list(),
     storeOwner: lifecycleStoreFileOwner(process.env)
@@ -205711,7 +205823,7 @@ ${key2}`;
     capability: "google_drive.docs.sync",
     handles: readActiveConnectedHandles(process.env)
   });
-  const fileExtractionCorpora = fileExtractionCorporaRoster({
+  const fileExtractionCorpora = () => fileExtractionCorporaRoster({
     configured: configuredFileExtractionCorpora,
     ...dropboxConnectorStore ? {
       dropbox: {
@@ -205789,7 +205901,8 @@ ${key2}`;
     }
     fileSourceScopeAuthority.assertCurrent(ref);
   };
-  const googleDriveExtractionTierSet = googleDriveInternalConnectorStore && googleDriveSecureConnectorStore ? createGoogleDriveLaneTierSet({
+  let googleDriveExtractionTierSet;
+  const driveExtractionSet = () => googleDriveExtractionTierSet ??= googleDriveInternalConnectorStore && googleDriveSecureConnectorStore ? createGoogleDriveLaneTierSet({
     setId: "google_drive.extraction",
     internalStore: googleDriveInternalConnectorStore,
     secureStore: googleDriveSecureConnectorStore,
@@ -205803,15 +205916,18 @@ ${key2}`;
     ...googleDriveTierLane?.secrets ? { secretLocations: googleDriveTierLane.secrets } : {},
     registerWithLedger: false
   }) : undefined;
-  const fileExtractionTierSets = new Map([
-    ...dropboxTierLane ? [[DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID, dropboxTierLane.set]] : [],
-    ...localFilesTierLane ? [[LOCAL_FILES_CORPUS_ID, localFilesTierLane.set]] : [],
-    ...whatsappTierSet ? [[WHATSAPP_LIVE_CORPUS_ID, whatsappTierSet]] : [],
-    ...googleDriveExtractionTierSet && googleDriveInternalConnectorStore && googleDriveSecureConnectorStore ? [
-      [googleDriveInternalConnectorStore.corpusId, googleDriveExtractionTierSet],
-      [googleDriveSecureConnectorStore.corpusId, googleDriveExtractionTierSet]
-    ] : []
-  ]);
+  const fileExtractionTierSets = () => {
+    const googleDriveExtractionTierSet2 = driveExtractionSet();
+    return new Map([
+      ...dropboxTierLane ? [[DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID, dropboxTierLane.set]] : [],
+      ...localFilesTierLane ? [[LOCAL_FILES_CORPUS_ID, localFilesTierLane.set]] : [],
+      ...whatsappTierSet ? [[WHATSAPP_LIVE_CORPUS_ID, whatsappTierSet]] : [],
+      ...googleDriveExtractionTierSet2 && googleDriveInternalConnectorStore && googleDriveSecureConnectorStore ? [
+        [googleDriveInternalConnectorStore.corpusId, googleDriveExtractionTierSet2],
+        [googleDriveSecureConnectorStore.corpusId, googleDriveExtractionTierSet2]
+      ] : []
+    ]);
+  };
   const fileExtractionExtractors = {
     ...process.env.OLYMPUS_TRANSCRIBE_COMMAND?.trim() ? { transcription: { command: process.env.OLYMPUS_TRANSCRIBE_COMMAND.trim() } } : sharedBuiltInTranscriber(process.env) ? { transcription: { builtIn: sharedBuiltInTranscriber(process.env) } } : {},
     ...fileExtractionPdfTextCommand !== undefined || fileExtractionPdfTextTimeoutMs !== undefined || fileExtractionMaxBoundedTextChars !== undefined ? {
@@ -205851,11 +205967,12 @@ ${key2}`;
       }
     } : {}
   };
-  const fileExtractionRuntime = createFileExtractionRuntime({
+  const buildFileExtractionRuntime = () => createFileExtractionRuntime({
     env: process.env,
-    enabled: fileExtractionCorpora.length > 0,
+    enabled: sourceIndexReadEnabled || configuredFileExtractionCorpora.length > 0,
+    allowEmpty: true,
     connectorStores,
-    corpora: fileExtractionCorpora,
+    corpora: fileExtractionCorpora(),
     extraSourceFactories: new Map([
       [LOCAL_FILES_PROVIDER, ({ config: config2, store, view: view3 }) => {
         const ref = fileSourceScopeAuthority?.policyRef(LOCAL_FILES_SOURCE_ID);
@@ -205883,7 +206000,7 @@ ${key2}`;
       }],
       ["whatsapp", ({ config: config2, store, view: view3 }) => whatsappExtraction({ config: config2, store, ...view3 ? { view: view3 } : {} })]
     ]),
-    ...fileExtractionTierSets.size > 0 ? { tierSets: fileExtractionTierSets } : {},
+    tierSets: fileExtractionTierSets(),
     scopeGuard: {
       assertAuthorized({ config: config2 }) {
         assertFileSourceScopeCurrent(config2.provider);
@@ -205901,6 +206018,36 @@ ${key2}`;
     },
     extractors: fileExtractionExtractors
   });
+  const firstFileExtractionRuntime = buildFileExtractionRuntime();
+  const fileExtractionRuntimes = firstFileExtractionRuntime ? [firstFileExtractionRuntime] : [];
+  let extractionGeneration = sourceLaneGeneration;
+  const currentFileExtractionRuntime = () => {
+    if (extractionGeneration !== sourceLaneGeneration) {
+      const next = buildFileExtractionRuntime();
+      if (next)
+        fileExtractionRuntimes.push(next);
+      extractionGeneration = sourceLaneGeneration;
+    }
+    return fileExtractionRuntimes.at(-1) ?? firstFileExtractionRuntime;
+  };
+  const fileExtractionRuntime = firstFileExtractionRuntime ? {
+    ...firstFileExtractionRuntime,
+    get corpusIds() {
+      return currentFileExtractionRuntime()?.corpusIds ?? [];
+    },
+    runner: new Proxy(firstFileExtractionRuntime.runner, {
+      get(_target, key2) {
+        const runner = currentFileExtractionRuntime().runner;
+        const value2 = Reflect.get(runner, key2);
+        return typeof value2 === "function" ? value2.bind(runner) : value2;
+      }
+    }),
+    locateItem: (ref) => currentFileExtractionRuntime()?.locateItem(ref),
+    close() {
+      for (const runtime of fileExtractionRuntimes)
+        runtime.close();
+    }
+  } : undefined;
   const connectorStoreEmbeddingProviders = new Map;
   const connectorStoreAccountScopes = new Map;
   const connectorStorePrincipals = new Map;
@@ -206025,6 +206172,17 @@ ${key2}`;
   registerTierLegStore = (store, siblingCorpusId, embeddingProvider) => {
     if (!connectorStores.includes(store))
       connectorStores.push(store);
+    if (!fullyDefinedCorpusIds.has(store.corpusId)) {
+      const definition = registeredCorpusDefinitions.get(store.corpusId);
+      fullCorpusDefinitions.push(defineConnectorCorpus({
+        corpusId: store.corpusId,
+        family: store.family,
+        trustDomain: store.trustDomain,
+        ...definition ? { activationMode: definition.activationMode } : {},
+        ...secureEmbeddingCloudApproved && store.trustDomain === "secure_local" ? { embeddingPolicy: "cloud_allowed_by_policy" } : {}
+      }));
+      fullyDefinedCorpusIds.add(store.corpusId);
+    }
     const accountScope = connectorStoreAccountScopes.get(siblingCorpusId);
     if (accountScope)
       connectorStoreAccountScopes.set(store.corpusId, accountScope);
@@ -206039,6 +206197,44 @@ ${key2}`;
         providers: connectorStoreEmbeddingProviders,
         retrievalAvailability
       });
+    }
+  };
+  sourceLaneMounted = (stores) => {
+    if (stores.some((store) => !connectorStores.includes(store)))
+      sourceLaneGeneration += 1;
+    for (const store of stores) {
+      const provider = store === readwiseConnectorStore ? readwiseEmbeddingProvider : store === xBookmarksConnectorStore ? xBookmarksEmbeddingProvider : store.trustDomain === "secure_local" ? tierSecureEmbeddingProvider : sourceIndexEmbeddingProvider;
+      registerTierLegStore(store, store.corpusId, provider ?? null);
+      if (store === dropboxConnectorStore) {
+        connectorStoreAccountScopes.set(store.corpusId, dropboxProviderAccount);
+        connectorStorePrincipals.set(store.corpusId, { provider: "dropbox", accountScope: dropboxProviderAccount });
+      } else if (store === localFilesConnectorStore) {
+        connectorStoreAccountScopes.set(store.corpusId, LOCAL_FILES_ACCOUNT_SCOPE);
+        connectorStorePrincipals.set(store.corpusId, { provider: LOCAL_FILES_PROVIDER, accountScope: LOCAL_FILES_ACCOUNT_SCOPE });
+      } else if (store === whatsappConnectorStore || store === telegramConnectorStores?.internal || store === telegramConnectorStores?.secureLocal) {
+        const telegram = store !== whatsappConnectorStore;
+        const accountScope = telegram ? telegramConnectorAccountScope : WHATSAPP_PERSONAL_ACCOUNT_SCOPE;
+        connectorStoreAccountScopes.set(store.corpusId, accountScope);
+        connectorStorePrincipals.set(store.corpusId, canonicalConnectorStoreChatPrincipal(telegram ? "telegram" : "whatsapp", accountScope));
+      }
+    }
+  };
+  for (const stores of earlySourceStores.splice(0))
+    sourceLaneMounted(stores);
+  mountConfiguredSourceStores = () => {
+    const mounts = parseConnectorStoreMountsFromEnv(process.env.OLYMPUS_SOURCE_INDEX_CONNECTOR_STORES_JSON, {
+      existingOnly: true,
+      collidingStores: connectorStores,
+      registeredCorpora: sourceCorpusRegistry2.list(),
+      storeOwner: lifecycleStoreFileOwner(process.env)
+    });
+    for (const mount of mounts) {
+      if (!connectorStores.includes(mount.store))
+        sourceLaneMounted([mount.store]);
+      if (mount.principal)
+        connectorStorePrincipals.set(mount.store.corpusId, mount.principal);
+      if (mount.chatPrincipal)
+        connectorStoreAccountScopes.set(mount.store.corpusId, mount.chatPrincipal.accountScope);
     }
   };
   for (const registration of tierLegsOpenedEarly.splice(0))
@@ -206223,7 +206419,8 @@ ${key2}`;
   const createGmailConnectorStoreSyncForHandle = (handle) => {
     const scopeRef = handle && fileSourceScopeAuthority ? fileSourceScopeAuthority.mailPolicyRef() : undefined;
     const approval = scopeRef && fileSourceScopeAuthority ? fileSourceScopeAuthority.assertCurrentMail(scopeRef) : undefined;
-    const privateDefinition = gmailSecureConnectorStore && sourceCorpusRegistry2.definitions().find((entry) => entry.corpusId === gmailSecureConnectorStore.corpusId);
+    const privateCorpusId = gmailSecureConnectorStore?.corpusId;
+    const privateDefinition = privateCorpusId && sourceCorpusRegistry2.definitions().find((entry) => entry.corpusId === privateCorpusId);
     return handle && scopeRef && approval && fileSourceScopeAuthority && gmailInternalConnectorStore && gmailSecureConnectorStore && gmailRequestBudget ? createGmailConnectorStoreSyncHandler({
       internalStore: gmailInternalConnectorStore,
       secureStore: gmailSecureConnectorStore,
@@ -206507,6 +206704,8 @@ ${key2}`;
       capability: "x.bookmarks.sync",
       handles: readActiveConnectedHandles(process.env)
     });
+    if (handle)
+      mountXBookmarks();
     const runtime = refreshableXBookmarksRuntime?.runtimeForHandle(handle);
     if (!runtime)
       return;
@@ -206515,6 +206714,8 @@ ${key2}`;
     return guard ? accountCheckedXBookmarksRuntime(runtime, guard) : runtime;
   };
   const readwiseSyncForHandle = (handle) => {
+    if (handle)
+      mountReadwise();
     const sync = refreshableReadwiseRuntime?.syncForHandle(handle);
     if (sync && readwiseConnectorStore) {
       connectorStoreAccountScopes.set(readwiseConnectorStore.corpusId, sourceIndexAccount?.trim() || handle?.accountRole?.trim() || "personal");
@@ -206580,6 +206781,9 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     readsAs: { accountId: readsAs }
   });
   const schedulerSourcesForHandles = (handles) => {
+    mountSourceLanes(handles);
+    if (whatsappConnectorStore && whatsappTierSet)
+      whatsappConnectorStoreSync ??= createWhatsAppConnectorStoreSyncHandler({ tierSet: whatsappTierSet, store: whatsappConnectorStore, account: WHATSAPP_PERSONAL_ACCOUNT_SCOPE, env: process.env, readChild: whatsappReadChild });
     const decisions = [];
     laneGuards.clear();
     const recordLane = (expectedSourceId, skipReason, build) => {
@@ -207226,7 +207430,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     ...sourceIndexEmbeddingProvider ? { sourceIndexEmbeddingProvider } : {},
     ...fileExtractionRuntime ? { fileExtraction: fileExtractionRuntime.runner } : {},
     ...fileExtractionRuntime ? {
-      pdfExtractionLanes: () => pdfExtractionLanes(fileExtractionCorpora, fileExtractionRuntime.corpusIds),
+      pdfExtractionLanes: () => pdfExtractionLanes(fileExtractionCorpora(), fileExtractionRuntime.corpusIds),
       pdfExtractionLaneScopeApproved: (lane) => {
         try {
           assertFileSourceScopeCurrent(lane.provider);
@@ -207238,17 +207442,15 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
         }
       }
     } : {},
-    ...connectorStores.length > 0 ? { connectorStores } : {},
-    ...tierLanes.length > 0 ? {
-      connectorStoreTierSiblings: (corpusId) => [
-        ...tierLanes.find((lane) => lane.corpusIds.has(corpusId))?.corpusIds ?? []
-      ].filter((sibling) => sibling !== corpusId),
-      sourceIndexVisibilityGate: tierVisibilityGate,
-      secretLocationSearch: tierSecretLocations
-    } : {},
-    ...connectorStoreEmbeddingProviders.size > 0 ? { connectorStoreEmbeddingProviders } : {},
-    ...connectorStoreAccountScopes.size > 0 ? { connectorStoreAccountScopes } : {},
-    ...connectorStorePrincipals.size > 0 ? { connectorStorePrincipals } : {},
+    connectorStores,
+    connectorStoreTierSiblings: (corpusId) => [
+      ...tierLanes.find((lane) => lane.corpusIds.has(corpusId))?.corpusIds ?? []
+    ].filter((sibling) => sibling !== corpusId),
+    sourceIndexVisibilityGate: tierVisibilityGate,
+    secretLocationSearch: tierSecretLocations,
+    connectorStoreEmbeddingProviders,
+    connectorStoreAccountScopes,
+    connectorStorePrincipals,
     connectorStoreReadScope,
     ...sourceScheduler ? { sourceScheduler } : {},
     ...sourceWatchPass ? {
@@ -208150,6 +208352,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     waitingStoreClosed = true;
     waitingStore?.close();
     waitingStore = undefined;
+    fileExtractionRuntime?.close();
     worker.close();
     sourceScheduler?.stop();
     server.stop();
@@ -208601,6 +208804,8 @@ function parseConnectorStoreMountsFromEnv(raw, options = {}) {
       const collidingStore = collidingStoresByCorpusId.get(declaration.corpusId);
       if (hasFolderLayout(storageAccountForCorpus(declaration, options.registeredCorpora).sourceId)) {
         if (!collidingStore) {
+          if (options.existingOnly)
+            continue;
           throw new Error("its source keeps its stores where Olympus places them; a declaration can only add a principal to the store its lane opened, and that lane is not open.");
         }
         const { dbPath: _ignored, ...placed } = declaration;
@@ -208616,6 +208821,8 @@ function parseConnectorStoreMountsFromEnv(raw, options = {}) {
         throw new Error("Connector store entries require dbPath, corpusId, family, trustDomain.");
       if (collidingStore)
         assertConnectorStoreMountIdentity(declaration, collidingStore);
+      if (options.existingOnly && !collidingStore && !existsSync97(declaration.dbPath))
+        continue;
       const pathOwnerCorpusId = ownerCorpusIdByDbPath.get(declaration.dbPath);
       if (pathOwnerCorpusId !== undefined && pathOwnerCorpusId !== declaration.corpusId) {
         throw new Error(`dbPath ${JSON.stringify(declaration.dbPath)} is already mounted as corpus ${JSON.stringify(pathOwnerCorpusId)}.`);

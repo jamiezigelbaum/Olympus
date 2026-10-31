@@ -153,6 +153,8 @@ export interface FileExtractionRuntimeOptions {
   env?: Record<string, string | undefined>;
   /** Product wiring may enable the shared factory without an operator env gate. */
   enabled?: boolean;
+  /** Keep the shared queue ready while source lanes wait for their first connect. */
+  allowEmpty?: boolean;
   connectorStores: readonly LocalConnectorStore[];
   extractors?: ExtractorRegistryConfig;
   /**
@@ -254,7 +256,7 @@ export function createFileExtractionRuntime(
   ) return undefined;
 
   const roster = options.corpora ?? parseFileExtractionCorporaEnv(env[FILE_EXTRACTION_CORPORA_ENV]);
-  if (roster.length === 0) return undefined;
+  if (roster.length === 0 && options.allowEmpty !== true) return undefined;
 
   const warn = options.warn ?? ((message: string) => console.warn(message));
   const storesByCorpusId = new Map(options.connectorStores.map((store) => [store.corpusId, store]));
@@ -441,7 +443,7 @@ export function createFileExtractionRuntime(
       ...(guardsRefs ? { authorization: { assertCurrent: assertRefCurrent } } : {}),
     });
   }
-  if (corpora.length === 0) {
+  if (corpora.length === 0 && options.allowEmpty !== true) {
     jobs.close();
     return undefined;
   }
