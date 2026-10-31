@@ -14,6 +14,7 @@ import { isMediaCachePath } from '../../../core/media-cache.ts';
 import {
   SourceEmbeddingInputsFailedError,
   TransientSourceEmbeddingError,
+  priorityQueryEmbeddingRequested,
   type SourceEmbeddingImageInput,
   type SourceEmbeddingInput,
   type SourceEmbeddingProvider,
@@ -140,8 +141,12 @@ export class BuiltInSourceEmbeddingProvider implements SourceEmbeddingProvider {
   private now: () => number;
   private loading: Promise<LoadedModel> | undefined;
   private loaded: LoadedModel | undefined;
+  /** Text-only runtime reserved for deadline-bound probes, loaded with the ordinary runtime. */
+  private priorityLoaded: LoadedModel | undefined;
+  private prioritySlotBusy = false;
+  private readonly priorityWaiting: Array<() => void> = [];
   private lastFailure: { atMs: number; error: Error } | undefined;
-  /** One forward pass runs at a time; these wait for the slot, queries first. */
+  /** One ordinary forward pass runs at a time; queries precede waiting documents. */
   private slotBusy = false;
   private imageSupportWarned = false;
   /** Known-good-picture failures in a row, and until when pictures are held after too many. */
@@ -330,7 +335,7 @@ export class BuiltInSourceEmbeddingProvider implements SourceEmbeddingProvider {
       let model: LoadedModel;
       if (this.spec.runtime === 'litert') {
         if (!installed.libraryPath) throw new Error('the LiteRT-LM runtime is not installed.');
-        const embedder = await this.liteRtFactory({
+        const settings: LiteRtEmbedderOptions = {
           library: installed.libraryPath,
           model: installed.modelPath,
           // LiteRT keeps compiled GPU programs here, so later starts take seconds.
@@ -339,8 +344,19 @@ export class BuiltInSourceEmbeddingProvider implements SourceEmbeddingProvider {
           device: this.device,
           maxInputTokens: this.spec.maxTokens,
           ...(this.spec.vision ? { visionTokensPerImage: this.spec.vision.tokensPerImage } : {}),
-        });
+        };
+        const embedder = await this.liteRtFactory(settings);
         model = { kind: 'litert', embedder };
+        try {
+          // A long answer-relevance batch can hold the ordinary helper beyond
+          // the probe's deadline. Its reserved helper reads only query text,
+          // so it needs no image encoder. The pinned assets/vectors are identical.
+          const { visionTokensPerImage: _vision, ...querySettings } = settings;
+          this.priorityLoaded = { kind: 'litert', embedder: await this.liteRtFactory(querySettings) };
+        } catch (error) {
+          await embedder.release().catch(() => undefined);
+          throw error;
+        }
         // The image encoder starting is what makes photos searchable by
         // content; say whether it did where every process can read it (the
         // ingestion policy admits photos only while it is not known to have
@@ -351,6 +367,13 @@ export class BuiltInSourceEmbeddingProvider implements SourceEmbeddingProvider {
         const tokenizer = loadTokenizer(installed.vocabularyPath);
         const session = await this.runtimeFactory(installed).createSession(installed.modelPath, { threads: this.threads });
         model = { kind: 'onnx', session, tokenizer };
+        try {
+          const querySession = await this.runtimeFactory(installed).createSession(installed.modelPath, { threads: this.threads });
+          this.priorityLoaded = { kind: 'onnx', session: querySession, tokenizer };
+        } catch (error) {
+          await session.release?.().catch(() => undefined);
+          throw error;
+        }
       }
       reportBuiltInEmbeddingState(reporterOptions, 'ready');
       return model;
@@ -365,13 +388,25 @@ export class BuiltInSourceEmbeddingProvider implements SourceEmbeddingProvider {
   }
 
   /**
-   * One forward pass at a time per process, so the thread cap is the CPU cap.
+   * One forward pass at a time per runtime. Probes have a reserved text-only
+   * runtime, so an active answer/index pass cannot hold their query in a queue.
    * A question's pass goes before every waiting document pass: a search never
    * waits behind a whole indexing batch (32 documents of several windows
    * each), only behind the one pass already running. Indexing right after a
    * start once held a ChatGPT question's Private search past its deadline.
    */
   private async withSlot<T>(taskType: SourceEmbeddingTaskType, run: () => Promise<T>): Promise<T> {
+    if (taskType === 'RETRIEVAL_QUERY' && priorityQueryEmbeddingRequested()) {
+      if (this.prioritySlotBusy) await new Promise<void>((resolve) => this.priorityWaiting.push(resolve));
+      else this.prioritySlotBusy = true;
+      try {
+        return await run();
+      } finally {
+        const next = this.priorityWaiting.shift();
+        if (next) next();
+        else this.prioritySlotBusy = false;
+      }
+    }
     if (this.slotBusy) {
       await new Promise<void>((resolve) => this.waiting[taskType === 'RETRIEVAL_QUERY' ? 'query' : 'document'].push(resolve));
     } else {
@@ -392,6 +427,10 @@ export class BuiltInSourceEmbeddingProvider implements SourceEmbeddingProvider {
     inputs: SourceEmbeddingInput[],
     taskType: SourceEmbeddingTaskType,
   ): Promise<number[][]> {
+    if (taskType === 'RETRIEVAL_QUERY' && priorityQueryEmbeddingRequested()) {
+      if (!this.priorityLoaded) throw new BuiltInEmbeddingNotReadyError(this.status());
+      model = this.priorityLoaded;
+    }
     if (model.kind === 'litert') return this.embedLiteRt(model.embedder, inputs, taskType);
     const windowTokens = this.spec.maxTokens - 2;
     const windows: Window[] = [];

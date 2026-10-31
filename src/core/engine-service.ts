@@ -270,6 +270,7 @@ export function renderEnginePlist(input: { paths: EnginePaths; program: EnginePr
 /** Defaults for a new standalone install: worker on, relay mode to the one public host. */
 export function defaultEngineConfig(): Record<string, unknown> {
   return {
+    olympusStandalone: true,
     worker: {
       service: { enabled: true },
       scheduler: { enabled: true },
@@ -305,6 +306,7 @@ export function reconcileEngineConfig(path: string): { wrote: boolean; config: R
     return { wrote: true, config: defaults };
   }
   const next = structuredClone(current);
+  next.olympusStandalone = true;
   const worker = objectAt(next, 'worker');
   const service = objectAt(worker, 'service');
   if (service.enabled === undefined) service.enabled = true;
