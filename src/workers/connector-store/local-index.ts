@@ -11329,11 +11329,11 @@ export class LocalConnectorStore {
         if (enough(row)) return true;
         if (!weights) return false;
         const indexes = matchedGroupIndexes.get(row.item_pk) ?? [];
-        // Chat messages are short: two independently rare topic concepts can
-        // identify a message even when the question adds words it never used.
+        // Two rare topic concepts can identify an item even when the question
+        // adds words it never used. Rarity is evidence in every source family.
         // Keep the strict floor for common words, small corpora, and a lone
         // rare word. This uses the same scoped FTS candidates and tier filter.
-        if (this.family === 'chat' && groups.length >= 3 && weights.population >= 10
+        if (groups.length >= 3 && weights.population >= 10
           && indexes.length >= 2 && indexes.length * 2 >= groups.length
           && indexes.filter((index) => weights.counts[index]! <= Math.floor(weights.population / 10)).length >= 2) return true;
         const matched = indexes.reduce((sum, index) => sum + weights.of[index]!, 0);

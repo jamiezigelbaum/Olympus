@@ -29237,7 +29237,7 @@ var init_local_index = __esm(() => {
           if (!weights)
             return false;
           const indexes = matchedGroupIndexes.get(row.item_pk) ?? [];
-          if (this.family === "chat" && groups.length >= 3 && weights.population >= 10 && indexes.length >= 2 && indexes.length * 2 >= groups.length && indexes.filter((index) => weights.counts[index] <= Math.floor(weights.population / 10)).length >= 2)
+          if (groups.length >= 3 && weights.population >= 10 && indexes.length >= 2 && indexes.length * 2 >= groups.length && indexes.filter((index) => weights.counts[index] <= Math.floor(weights.population / 10)).length >= 2)
             return true;
           const matched = indexes.reduce((sum, index) => sum + weights.of[index], 0);
           return weights.total > 0 && matched / weights.total >= RARE_CONCEPT_WEIGHT_SHARE;

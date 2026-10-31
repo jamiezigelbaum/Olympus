@@ -26,6 +26,7 @@ import {
 } from '../src/core/source-index/router.ts';
 import {
   buildSourceSensitivity,
+  SOURCE_FAMILIES,
   type SourceFamily,
   type SourceTrustDomain,
   type SourceTrustTier,
@@ -2510,23 +2511,23 @@ describe('createConnectorStoreCorpusAdapter', () => {
     store.close();
   });
 
-  test('strict remote chat search finds two distinctive terms despite unmatched words', async () => {
-    const store = new LocalConnectorStore({ dbPath: ':memory:', corpusId: 'internal.fakechat.messages', family: 'chat', trustDomain: 'internal' });
+  test.each([...SOURCE_FAMILIES])('strict remote %s search finds two distinctive terms despite unmatched words', async (family) => {
+    const store = new LocalConnectorStore({ dbPath: ':memory:', corpusId: `internal.fake.${family}`, family, trustDomain: 'internal' });
     const items: RawItem[] = Array.from({ length: 13 }, (_, index) => ({
-      identity: { family: 'chat', provider: 'fakechat', accountScope: ACCOUNT, providerItemId: String(index), localItemId: `${ACCOUNT}:${index}`, sourceVersion: 'v1' },
+      identity: { family, provider: 'fakechat', accountScope: ACCOUNT, providerItemId: String(index), localItemId: `${ACCOUNT}:${index}`, sourceVersion: 'v1' },
       mimeType: 'text/plain', content: { kind: 'text', text: index === 0 ? 'Tiago drinks after at Duque table for 6 at 9' : `unrelated message ${index}` },
       metadata: Object.freeze({ sentAt: `2026-07-01T10:${String(index).padStart(2, '0')}:00.000Z` }), fetchedAt: '2026-07-01T10:00:00.000Z',
     }));
-    const connector: SourceConnector = { id: 'fakechat', family: 'chat', async authenticate() {}, async *listItems() { yield { items, done: true }; }, async fetchItem(id) { return items.find((item) => item.identity.localItemId === id)!; }, classificationSignals() { return {}; } };
+    const connector: SourceConnector = { id: 'fakechat', family, async authenticate() {}, async *listItems() { yield { items, done: true }; }, async fetchItem(id) { return items.find((item) => item.identity.localItemId === id)!; }, classificationSignals() { return {}; } };
     await store.syncFromConnector(connector, { fetchContent: true });
     const adapter = createConnectorStoreCorpusAdapter({ store });
-    const corpus = defineConnectorCorpus({ corpusId: store.corpusId, family: 'chat', trustDomain: 'internal' });
+    const corpus = defineConnectorCorpus({ corpusId: store.corpusId, family, trustDomain: 'internal' });
     for (const query of ['Tiago drinks work', 'Use Olympus to find what Tiago said about drinks after work']) {
       const response = await adapter({ query, maxResults: 1, corpus, context: { allowedTrustDomains: ['internal'] } });
       expect(response.hits[0]?.sourceItem.providerItemId).toBe('0');
       expect(response.matchCount?.matchedItems).toBe(1);
     }
-    // Two common concepts do not clear the strict floor, even for chat.
+    // Two common concepts do not clear the strict floor in any family.
     const noise = await adapter({ query: 'unrelated message missing absent', maxResults: 1, corpus, context: { allowedTrustDomains: ['internal'] } });
     expect(noise.matchCount?.matchedItems).toBe(0);
     items[1] = { ...items[1]!, identity: { ...items[1]!.identity, sourceVersion: 'v2' }, content: { kind: 'text', text: 'Tiago drinks Duque party' } };
