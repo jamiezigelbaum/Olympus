@@ -37820,14 +37820,11 @@ var init_vocabulary = __esm(() => {
     needFolderSource: "Connect Dropbox or Google Drive to add a folder.",
     needGmail: "Connect Gmail to add a label.",
     nothingToSave: "Nothing to save yet. Change a rule or the description first.",
-    pending: {
-      one: "{n} item is waiting to be checked on your computer.",
-      many: "{n} items are waiting to be checked on your computer."
-    },
     save: "Save",
     saving: "Saving…",
     cancel: "Cancel",
     saveFailed: "Olympus could not save. Your changes are still here. Try again.",
+    addRuleFailed: "Olympus could not make this private. Try again.",
     saved: "Privacy saved.",
     confirmRemove: "This removes protection from {list}.",
     confirmDescription: "This changes your description, which decides what Olympus keeps private.",
@@ -44364,9 +44361,53 @@ function chatgptPrivacyProgram(kit, makeLogic) {
     return !s.server && (s.edited || L.withShownAnswers(s.description) !== s.description);
   }
   function addRule(rule) {
-    L.addTo(s.rules, rule);
-    changed();
+    if (s.saving || s.server)
+      return;
+    const draft = { rules: s.rules, description: s.description, savedDescription: s.savedDescription };
+    const wasEdited = s.edited;
+    const baseline = s.rules.filter((item) => item.saved).map(ruleOut).concat(s.hidden);
+    if (!s.rules.some((item) => item.saved && identity(item) === identity(rule)))
+      baseline.push(ruleOut(rule));
+    const args = { description: s.savedDescription, rules: baseline };
+    if (s.revision)
+      args.revision = s.revision;
+    s.saving = true;
     s.saveError = "";
+    const mine = session;
+    kit.call(T.set, args).then((result) => {
+      if (mine !== session || !s)
+        return;
+      s.saving = false;
+      const data2 = settings(result);
+      const content = result && result.structuredContent;
+      if (data2 && content && content.status === "conflict") {
+        L.addTo(s.rules, rule);
+        changed();
+        return conflict(data2);
+      }
+      if (!data2 || result.isError) {
+        s.saveError = W.addRuleFailed;
+        kit.render("privacy:save");
+        return;
+      }
+      for (const item of draft.rules)
+        if (identity(item) === identity(rule))
+          item.removed = false;
+      take(data2);
+      const replayed = L.replay(draft, s.rules);
+      s.rules = replayed.rules;
+      if (replayed.description !== null)
+        s.description = replayed.description;
+      s.edited = wasEdited;
+      kit.remember(data2.rules.filter(validRule).length);
+      kit.render("privacy:add:folder");
+    }, () => {
+      if (mine !== session || !s)
+        return;
+      s.saving = false;
+      s.saveError = W.addRuleFailed;
+      kit.render("privacy:save");
+    });
   }
   function lowering() {
     return L.lowering(s.rules, s.description, s.savedDescription);
@@ -44773,9 +44814,6 @@ function chatgptPrivacyProgram(kit, makeLogic) {
     add(rules, el("p", "reason", W.namesShared));
     add(page2, rules);
     const footer = el("section", "picker-footer");
-    if (s.pendingCount > 0) {
-      add(footer, el("p", "", fill2(s.pendingCount === 1 ? W.pending.one : W.pending.many, { n: kit.count(s.pendingCount) })));
-    }
     if (s.confirmStep && !s.saving && lowers()) {
       add(page2, add(footer, confirmBox()));
       return;
@@ -44921,7 +44959,7 @@ function chatgptPrivacyProgram(kit, makeLogic) {
     return page2;
   }
   function backOut() {
-    if (!s)
+    if (!s || s.saving)
       return;
     if (s.edited && !s.saving) {
       s.discarding = true;

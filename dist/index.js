@@ -15152,14 +15152,11 @@ var init_vocabulary = __esm(() => {
     needFolderSource: "Connect Dropbox or Google Drive to add a folder.",
     needGmail: "Connect Gmail to add a label.",
     nothingToSave: "Nothing to save yet. Change a rule or the description first.",
-    pending: {
-      one: "{n} item is waiting to be checked on your computer.",
-      many: "{n} items are waiting to be checked on your computer."
-    },
     save: "Save",
     saving: "Saving…",
     cancel: "Cancel",
     saveFailed: "Olympus could not save. Your changes are still here. Try again.",
+    addRuleFailed: "Olympus could not make this private. Try again.",
     saved: "Privacy saved.",
     confirmRemove: "This removes protection from {list}.",
     confirmDescription: "This changes your description, which decides what Olympus keeps private.",

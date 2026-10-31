@@ -239,9 +239,48 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
   }
 
   function addRule(rule: Any): void {
-    L.addTo(s.rules, rule);
-    changed();
+    if (s.saving || s.server) return;
+    // Save only the addition against the saved revision. Other draft edits may
+    // lower protection and must retain their separate confirmation.
+    const draft = { rules: s.rules, description: s.description, savedDescription: s.savedDescription };
+    const wasEdited = s.edited;
+    const baseline = s.rules.filter((item: Any) => item.saved).map(ruleOut).concat(s.hidden);
+    if (!s.rules.some((item: Any) => item.saved && identity(item) === identity(rule))) baseline.push(ruleOut(rule));
+    const args: Any = { description: s.savedDescription, rules: baseline };
+    if (s.revision) args.revision = s.revision;
+    s.saving = true;
     s.saveError = '';
+    const mine = session;
+    kit.call(T.set, args).then((result) => {
+      if (mine !== session || !s) return;
+      s.saving = false;
+      const data = settings(result);
+      const content = result && result.structuredContent;
+      if (data && content && content.status === 'conflict') {
+        L.addTo(s.rules, rule);
+        changed();
+        return conflict(data);
+      }
+      if (!data || result.isError) {
+        s.saveError = W.addRuleFailed;
+        kit.render('privacy:save');
+        return;
+      }
+      // Adding an already-saved rule cancels a pending removal of that rule.
+      for (const item of draft.rules) if (identity(item) === identity(rule)) item.removed = false;
+      take(data);
+      const replayed = L.replay(draft, s.rules);
+      s.rules = replayed.rules;
+      if (replayed.description !== null) s.description = replayed.description;
+      s.edited = wasEdited;
+      kit.remember(data.rules.filter(validRule).length);
+      kit.render('privacy:add:folder');
+    }, () => {
+      if (mine !== session || !s) return;
+      s.saving = false;
+      s.saveError = W.addRuleFailed;
+      kit.render('privacy:save');
+    });
   }
 
   /** Saved rules this save would drop, and whether it changes the saved description: both lower protection. */
@@ -683,9 +722,6 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
     add(page, rules);
 
     const footer = el('section', 'picker-footer');
-    if (s.pendingCount > 0) {
-      add(footer, el('p', '', fill(s.pendingCount === 1 ? W.pending.one : W.pending.many, { n: kit.count(s.pendingCount) })));
-    }
     // The confirmation step stands in for Save while it is open (and while the change still lowers protection).
     if (s.confirmStep && !s.saving && lowers()) {
       add(page, add(footer, confirmBox()));
@@ -833,7 +869,7 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
   }
 
   function backOut(): void {
-    if (!s) return;
+    if (!s || s.saving) return;
     if (s.edited && !s.saving) {
       s.discarding = true;
       kit.render('privacy:discard:no');

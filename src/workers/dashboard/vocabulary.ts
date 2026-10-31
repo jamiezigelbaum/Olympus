@@ -2818,14 +2818,11 @@ export const DASHBOARD_CHATGPT_PRIVACY_COPY = {
   needFolderSource: 'Connect Dropbox or Google Drive to add a folder.',
   needGmail: 'Connect Gmail to add a label.',
   nothingToSave: 'Nothing to save yet. Change a rule or the description first.',
-  pending: {
-    one: '{n} item is waiting to be checked on your computer.',
-    many: '{n} items are waiting to be checked on your computer.',
-  },
   save: 'Save',
   saving: 'Saving…',
   cancel: 'Cancel',
   saveFailed: 'Olympus could not save. Your changes are still here. Try again.',
+  addRuleFailed: 'Olympus could not make this private. Try again.',
   saved: 'Privacy saved.',
   /** The inline step before a save that lowers protection; {list} names the removed rules. */
   confirmRemove: 'This removes protection from {list}.',

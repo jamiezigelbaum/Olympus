@@ -227,7 +227,7 @@ describe('the Privacy screen', () => {
     expect(text).toContain(W.rulesTitle);
     expect(ruleRows(host)).toEqual(['Medical RecordsFolder in Dropbox', 'Lawyer LettersGmail label', 'doctor@clinic.exampleSender']);
     for (const label of [W.addFolder, W.addLabel, W.addSender]) expect(host.button(label).disabled).toBe(false);
-    expect(text).toContain('12 items are waiting to be checked on your computer.');
+    expect(text).not.toContain('waiting to be checked');
     // Nothing to save yet: Save is inactive. A change makes it the one accent; Cancel is quiet.
     expect(host.button(W.save).disabled).toBe(true);
     // ...and says why beside it (release check: a disabled Save that said nothing).
@@ -263,7 +263,7 @@ describe('the Privacy screen', () => {
     expect(none.host.text()).not.toContain('waiting to be checked');
     expect(none.host.text()).toContain(W.rulesEmpty);
     const one = await openPrivacy({ pending: 1 });
-    expect(one.host.text()).toContain('1 item is waiting to be checked on your computer.');
+    expect(one.host.text()).not.toContain('waiting to be checked');
   });
 
   test('a load failure says so inline and Try again loads again', async () => {
@@ -284,7 +284,8 @@ describe('the Privacy screen', () => {
 
 describe('adding rules', () => {
   test('Add a folder browses one level per screen and Make private adds the folder and returns', async () => {
-    const { host } = await openPrivacy({ rules: [SAVED_RULES[0]] });
+    const { host, saves } = await openPrivacy({ rules: [SAVED_RULES[0]], pending: 12 });
+    expect(host.text()).not.toContain('12 items are waiting to be checked');
     host.button(W.addFolder).click();
     await host.settle();
     expect(host.toolCalls(S.scopeList)).toEqual([{ source_id: 'dropbox.files' }]);
@@ -304,6 +305,8 @@ describe('adding rules', () => {
     await host.settle();
     expect(host.text()).toContain(W.title);
     expect(ruleRows(host)).toEqual(['Medical RecordsFolder in Dropbox', 'Therapy NotesFolder in Dropbox']);
+    expect(saves).toHaveLength(1);
+    expect(saves[0].rules).toContainEqual({ kind: 'folder', source_id: 'dropbox.files', key: 'k-a1', display: 'Therapy Notes' });
     expect(host.doc.activeElement!.getAttribute('data-key')).toBe('privacy:add:folder');
     expectNamesOnlyInPrivacy(host);
   });
@@ -336,6 +339,7 @@ describe('adding rules', () => {
     expect(rowButton(host, 'Lawyer Letters').textContent).toBe(W.alreadyPrivate);
     expect(rowButton(host, 'Lawyer Letters').disabled).toBe(true);
     host.button('Make Kids School private').click();
+    await host.settle();
     expect(ruleRows(host)).toEqual(['Lawyer LettersGmail label', 'Kids SchoolGmail label']);
     expectNamesOnlyInPrivacy(host);
   });
@@ -359,6 +363,7 @@ describe('adding rules', () => {
     input().value = '@Example.com';
     input().dispatchEvent(new host.win.Event('input') as unknown as Event);
     host.button(W.senderAdd).click();
+    await host.settle();
     expect(host.text()).toContain(W.title);
     expect(ruleRows(host)).toEqual(['doctor@clinic.exampleSender', '@example.comSender']);
   });
@@ -386,16 +391,21 @@ describe('saving', () => {
     input.value = '@example.com';
     input.dispatchEvent(new host.win.Event('input') as unknown as Event);
     host.button(W.senderAdd).click();
+    await host.settle();
     host.button(W.save).click();
     // Removing a rule and new words lower protection: an inline step names what goes, before anything is sent.
     const box = host.doc.querySelector('.confirm-box')!;
     expect(box.getAttribute('role')).toBe('alert');
     expect(box.textContent).toContain('This removes protection from Lawyer Letters.');
     expect(box.textContent).toContain(W.confirmDescription);
-    expect(host.toolCalls(P.set)).toEqual([]);
+    expect(host.toolCalls(P.set)).toHaveLength(1);
     host.button(W.confirm).click();
     await host.settle();
-    expect(saves).toEqual([{
+    expect(saves).toHaveLength(2);
+    expect(saves[0].description).toBe('old words');
+    expect(saves[0].rules).toContainEqual(SAVED_RULES[1]);
+    expect(saves[0].confirmation).toBeUndefined();
+    expect(saves[1]).toEqual({
       description: DESCRIPTION,
       // Loaded rules go back exactly as the engine sent them.
       rules: [
@@ -405,7 +415,7 @@ describe('saving', () => {
       ],
       revision: 'rev1',
       confirmation: 'conf1',
-    }]);
+    });
     expect(host.text()).toContain(W.saved);
     expect(host.text()).not.toContain(W.title);
     expect(host.toolCalls('olympus_dashboard').length).toBe(1);
@@ -431,13 +441,12 @@ describe('saving', () => {
     input.value = '@example.com';
     input.dispatchEvent(new host.win.Event('input') as unknown as Event);
     host.button(W.senderAdd).click();
-    host.button(W.save).click();
-    expect(host.doc.querySelector('.confirm-box')).toBeNull();
     await host.settle();
     expect(saves).toHaveLength(1);
     expect(saves[0].revision).toBe('rev1');
     expect(saves[0].confirmation).toBeUndefined();
-    expect(host.text()).toContain(W.saved);
+    expect(host.text()).toContain('@example.com');
+    expect(host.button(W.save).disabled).toBe(true);
   });
 
   test('Cancel in the confirmation step sends nothing and keeps the changes', async () => {
@@ -472,7 +481,6 @@ describe('saving', () => {
     input.value = '@example.com';
     input.dispatchEvent(new host.win.Event('input') as unknown as Event);
     host.button(W.senderAdd).click();
-    host.button(W.save).click();
     await host.settle();
     // Nothing saved, and it says so plainly; the draft is still here, the saved settings beside it.
     const box = host.doc.querySelector('.confirm-box')!;
@@ -562,6 +570,7 @@ describe('saving', () => {
     input.value = 'Doctor@Clinic.example';
     input.dispatchEvent(new host.win.Event('input') as unknown as Event);
     host.button(W.senderAdd).click();
+    await host.settle();
     expect(host.text()).toContain(W.senderDuplicate);
   });
 
@@ -613,6 +622,7 @@ describe('saving', () => {
     input.value = '@example.com';
     input.dispatchEvent(new host.win.Event('input') as unknown as Event);
     host.button(W.senderAdd).click();
+    await host.settle();
     const area = () => host.doc.querySelector('textarea') as unknown as HTMLTextAreaElement;
     area().value = 'new words';
     area().dispatchEvent(new host.win.Event('input') as unknown as Event);
@@ -624,9 +634,9 @@ describe('saving', () => {
     expect(host.doc.querySelector('.confirm-box')).toBeNull();
     host.button(W.save).click();
     await host.settle();
-    expect(saves).toHaveLength(1);
-    expect(saves[0].confirmation).toBeUndefined();
-    expect(saves[0].description).toBe('old words');
+    expect(saves).toHaveLength(2);
+    expect(saves[1].confirmation).toBeUndefined();
+    expect(saves[1].description).toBe('old words');
   });
 
   test('a confirmation the engine no longer accepts is fetched fresh once, then the save goes through', async () => {
