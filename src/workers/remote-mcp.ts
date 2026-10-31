@@ -34,6 +34,7 @@
  * from the client, and lands on the answer's audit ledger entry.
  */
 import { existsSync } from 'node:fs';
+import { readConsultSettings } from '../core/consult-settings.ts';
 import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js';
 import type { OlympusConfig } from '../core/config.ts';
 import { createDelphiTransport, DelphiClient } from '../core/delphi.ts';
@@ -100,6 +101,8 @@ export interface RemoteMcpHandlerOptions {
    * (workers/remote-search.ts). Absent: the operation list alone.
    */
   search?: RemoteSearchOptions;
+  /** Read on each listing; absent or invalid settings leave anonymous answers off. */
+  anonymousAnswersEnabled?: () => boolean;
   /**
    * Whether a connection is a demo sign-in grant (remote-oauth/demo-consent.ts
    * isDemoGrant). One not served the ChatGPT surface gets only
@@ -196,7 +199,7 @@ export function createRemoteMcpHandler(options: RemoteMcpHandlerOptions): (reque
       ? surface === 'directory'
         ? (options.directoryServer ?? createChatGptDirectoryMcpServer)(() => ctx, chatgpt, detached)
         : createChatGptMcpServer(() => ctx, chatgpt, detached)
-      : createOlympusMcpServer('remote', () => ctx, demoGrantLimit(demo, options.search
+      : createOlympusMcpServer('remote', () => ctx, anonymousListing(options.anonymousAnswersEnabled, demoGrantLimit(demo, options.search
         ? remoteSearchExtension(options.search, () => stillAuthorized(request, verification.connection, options, surface), {
           // A demo sign-in grant is a shared password: its searches never write to the owner's Inbox.
           ...(!demo && ctx.remotePrivatePart ? { privatePart: ctx.remotePrivatePart } : {}),
@@ -204,7 +207,7 @@ export function createRemoteMcpHandler(options: RemoteMcpHandlerOptions): (reque
           // The agent hanging up cancels its search, Private part included.
           signal: request.signal,
         })
-        : undefined));
+        : undefined)));
     // No sessionIdGenerator: stateless mode.
     const transport = new WebStandardStreamableHTTPServerTransport({ enableJsonResponse: true });
     try {
@@ -218,6 +221,18 @@ export function createRemoteMcpHandler(options: RemoteMcpHandlerOptions): (reque
       await server.close().catch(() => undefined);
     }
   }
+}
+
+function anonymousListing(enabled: (() => boolean) | undefined, inner: McpServerExtension | undefined): McpServerExtension {
+  return {
+    tools: (listed) => {
+      const tools = inner ? inner.tools(listed) : listed;
+      const read = enabled ? undefined : readConsultSettings();
+      const on = enabled ? enabled() : read?.state === 'valid' && read.settings.enabled;
+      return on ? tools : tools.filter((tool) => tool.name !== 'ask_anonymously');
+    },
+    call: async (request, next, signal) => inner ? await inner.call(request, next, signal) : await next(),
+  };
 }
 
 /**

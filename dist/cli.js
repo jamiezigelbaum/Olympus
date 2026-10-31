@@ -198793,11 +198793,11 @@ function createRemoteMcpHandler(options) {
       return jsonResponse(404, remoteSurfaceErrorOutput("not_found"));
     const detached = () => options.makeOperationContext(caller, new AbortController().signal);
     const demo = options.demoGrant?.(verification.connection) === true;
-    const server = chatgpt ? surface === "directory" ? (options.directoryServer ?? createChatGptDirectoryMcpServer)(() => ctx, chatgpt, detached) : createChatGptMcpServer(() => ctx, chatgpt, detached) : createOlympusMcpServer("remote", () => ctx, demoGrantLimit(demo, options.search ? remoteSearchExtension(options.search, () => stillAuthorized(request, verification.connection, options, surface), {
+    const server = chatgpt ? surface === "directory" ? (options.directoryServer ?? createChatGptDirectoryMcpServer)(() => ctx, chatgpt, detached) : createChatGptMcpServer(() => ctx, chatgpt, detached) : createOlympusMcpServer("remote", () => ctx, anonymousListing(options.anonymousAnswersEnabled, demoGrantLimit(demo, options.search ? remoteSearchExtension(options.search, () => stillAuthorized(request, verification.connection, options, surface), {
       ...!demo && ctx.remotePrivatePart ? { privatePart: ctx.remotePrivatePart } : {},
       ...ctx.releaseCheck ? { releaseCheck: ctx.releaseCheck } : {},
       signal: request.signal
-    }) : undefined));
+    }) : undefined)));
     const transport = new WebStandardStreamableHTTPServerTransport({ enableJsonResponse: true });
     try {
       await server.connect(transport);
@@ -198812,6 +198812,17 @@ function createRemoteMcpHandler(options) {
       });
     }
   }
+}
+function anonymousListing(enabled, inner) {
+  return {
+    tools: (listed) => {
+      const tools = inner ? inner.tools(listed) : listed;
+      const read = enabled ? undefined : readConsultSettings();
+      const on = enabled ? enabled() : read?.state === "valid" && read.settings.enabled;
+      return on ? tools : tools.filter((tool) => tool.name !== "ask_anonymously");
+    },
+    call: async (request, next, signal) => inner ? await inner.call(request, next, signal) : await next()
+  };
 }
 function demoGrantLimit(demo, inner) {
   if (!demo)
@@ -198989,6 +199000,7 @@ function jsonResponse(status, body, headers = {}) {
 }
 var REMOTE_MCP_PATH = "/mcp", REMOTE_DIRECTORY_MCP_PATH, IN_PROCESS_WORKER_BASE_URL = "http://olympus-worker.internal/v1";
 var init_remote_mcp = __esm(() => {
+  init_consult_settings();
   init_webStandardStreamableHttp();
   init_delphi();
   init_email();
