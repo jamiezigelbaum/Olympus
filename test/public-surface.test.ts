@@ -186,6 +186,17 @@ describe('v0.4 positive public surface', () => {
     expect(isV04PublicDashboardRoute('POST', '/oauth/callback/gmail')).toBe(false);
   });
 
+  test('every dashboard control the HTTP host accepts is on the public route list', () => {
+    // 1.3 shipped the first-run choice and local model routes in the host but not here, so the engine answered them 404.
+    const host = readFileSync(join(import.meta.dir, '../src/workers/http.ts'), 'utf8');
+    const start = host.indexOf('function isDashboardControlRoute');
+    const body = host.slice(start, host.indexOf('\n}\n', start));
+    const local = host.slice(host.indexOf('function isDashboardLocalGradeRoute'), start);
+    const paths = [...`${local}${body}`.matchAll(/'(\/dashboard\/[^']+)'/g)].map(match => match[1]!);
+    expect(paths).toContain('/dashboard/models/local/discover');
+    expect(paths.filter(path => !isV04PublicDashboardRoute('POST', path))).toEqual([]);
+  });
+
   test('one complete connector-owned catalog feeds dashboard, doctor, and docs', () => {
     expect(V0_4_PUBLIC_SOURCE_CAPABILITIES.map((source) => source.source_id))
       .toEqual([...V0_4_PUBLIC_SOURCE_IDS]);
