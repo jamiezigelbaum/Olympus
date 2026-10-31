@@ -137425,11 +137425,30 @@ var init_remote_relay_runtime = __esm(() => {
 // src/workers/messaging-spool-wake.ts
 import { existsSync as existsSync83, watch } from "node:fs";
 import { dirname as dirname84, resolve as resolve23 } from "node:path";
-function createSpoolChangeSubscription(spoolDir) {
+function createSpoolChangeSubscription(spoolDir, options = {}) {
   const target = resolve23(spoolDir);
   return (wake) => {
     let closed = false;
     let watchers = [];
+    let timer;
+    let delay2 = options.retryInitialMs ?? 1000;
+    const maxDelay = options.retryMaxMs ?? 60000;
+    const watchDir = options.watch ?? watch;
+    const retry = () => {
+      if (closed || timer)
+        return;
+      recovering = true;
+      for (const watcher of watchers)
+        watcher.close();
+      watchers = [];
+      timer = setTimeout(() => {
+        timer = undefined;
+        arm();
+      }, delay2);
+      timer.unref();
+      delay2 = Math.min(delay2 * 2, maxDelay);
+    };
+    let recovering = false;
     const arm = () => {
       if (closed)
         return;
@@ -137441,27 +137460,36 @@ function createSpoolChangeSubscription(spoolDir) {
         parent = dirname84(parent);
       const next = target.slice(parent.length + (parent === "/" ? 0 : 1)).split("/")[0];
       try {
-        const watcher = watch(parent, { persistent: false }, (_event, name) => {
+        const watcher = watchDir(parent, { persistent: false }, (_event, name) => {
           if (name === null || (name.toString() === next || name.toString().startsWith(`${next}/`))) {
             arm();
             wake();
           }
         });
-        watcher.on("error", () => watcher.close());
+        watcher.on("error", retry);
         watchers.push(watcher);
         if (existsSync83(target)) {
-          const spool = watch(target, { persistent: false }, (_event, name) => {
+          const spool = watchDir(target, { persistent: false }, (_event, name) => {
             if (name === null || name.toString().endsWith(".jsonl"))
               wake();
           });
-          spool.on("error", () => spool.close());
+          spool.on("error", retry);
           watchers.push(spool);
         }
-      } catch {}
+        delay2 = options.retryInitialMs ?? 1000;
+        if (recovering)
+          wake();
+        recovering = false;
+      } catch {
+        recovering = true;
+        retry();
+      }
     };
     arm();
     return () => {
       closed = true;
+      if (timer)
+        clearTimeout(timer);
       for (const watcher of watchers)
         watcher.close();
       watchers = [];
