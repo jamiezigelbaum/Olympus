@@ -31,7 +31,7 @@ import { closeSqliteStore } from './sqlite-store.ts';
 import { SHARED_DATA_FILES } from './olympus-layout.ts';
 
 export const WAITING_PRIVATE_QUESTIONS_STORE_ID = 'waiting-private-questions';
-export const WAITING_PRIVATE_QUESTIONS_SCHEMA_VERSION = 5;
+export const WAITING_PRIVATE_QUESTIONS_SCHEMA_VERSION = 7;
 
 export const WAITING_QUESTION_LIMITS = Object.freeze({
   /** UTF-8 bytes of the question. */
@@ -96,7 +96,7 @@ const SELECTED_ITEM_FIELDS = [
 
 /** Answer text and citation locators only; evidence identities contain no source text. */
 export interface StoredPrivateAnswer {
-  status: 'answered' | 'not_found' | 'withdrawn';
+  status: 'answered' | 'not_found' | 'withdrawn' | 'failed';
   reason?: string;
   answer?: string;
   citations: Array<{ title?: string; source?: string; date?: string; url?: string; localPath?: string }>;
@@ -104,7 +104,17 @@ export interface StoredPrivateAnswer {
   unanswered: string[];
   leftOut: string[];
   read: readonly Readonly<Record<string, unknown>>[];
+  /** Screened Secret-location handles, only for an answer made on this computer. */
+  secretLocations?: readonly import('./evidence-pack.ts').SavedSecretLocation[];
 }
+
+/** Attempts per question generation; a new ask starts a fresh generation. */
+export const WAITING_QUESTION_RETRY_LIMIT = 8;
+export const WAITING_QUESTION_RETRY_REASONS = [
+  'answer_failed', 'no_model', 'model_downloading', 'evidence_changed',
+  'eligibility_unavailable', 'save_refused',
+] as const;
+export type WaitingQuestionRetryReason = typeof WAITING_QUESTION_RETRY_REASONS[number];
 
 export const CHATGPT_INBOX_GRACE_MS = 30_000;
 
@@ -124,6 +134,9 @@ export interface WaitingQuestion {
   result?: StoredPrivateAnswer;
   /** Metadata listings omit bodies but retain their presence. */
   hasResult?: boolean;
+  /** Metadata-only listings can show a terminal failure without loading answer bodies. */
+  failed?: boolean;
+  retryReasons?: WaitingQuestionRetryReason[];
   answeredAt?: string;
   attempts: number;
   nextAttemptAt: number;
@@ -185,7 +198,7 @@ export interface WaitingQuestionStore {
   subscribe(listener: () => void): () => void;
   markRead(ref: WaitingQuestionRef): boolean;
   saveAnswer(ref: WaitingQuestionRef, result: StoredPrivateAnswer, sent?: string): boolean;
-  retry(ref: WaitingQuestionRef): boolean;
+  retry(ref: WaitingQuestionRef, reason?: WaitingQuestionRetryReason): boolean;
   invalidate(ref: WaitingQuestionRef): boolean;
   /**
    * Source deletion also clears pending questions, whose dependencies are not
@@ -224,6 +237,8 @@ interface QuestionRow {
   answered_at: number | null;
   attempts: number;
   next_attempt_at: number;
+  retry_reasons: string;
+  failed?: number;
 }
 
 /** Where the store lives: beside the remote-connections database, in its private directory. */
@@ -412,7 +427,7 @@ export function openWaitingPrivateQuestionStore(
           const generation = existing.generation + 1;
           db.query(`
             UPDATE waiting_questions
-            SET question = ?, detail = ?, state = ?, seen = 0, generation = ?, asked_at = ?, result = NULL, answered_at = NULL, attempts = 0, next_attempt_at = 0
+            SET question = ?, detail = ?, state = ?, seen = 0, generation = ?, asked_at = ?, result = NULL, answered_at = NULL, attempts = 0, next_attempt_at = 0, retry_reasons = '[]', failed = 0
             WHERE id = ?
           `).run(
             question,
@@ -444,7 +459,7 @@ export function openWaitingPrivateQuestionStore(
       if (db.query('SELECT 1 FROM waiting_questions WHERE answered_at IS NULL AND asked_at <= ? LIMIT 1')
         .get(at - WAITING_QUESTION_LIMITS.ttlMs)) expire(at);
       const columns = options?.includeResults === false
-        ? 'id, connection_id, surface, answer_path, destination, question, detail, selectors, state, seen, generation, asked_at, answered_at, attempts, next_attempt_at, NULL AS result, result IS NOT NULL AS has_result'
+        ? "id, connection_id, surface, answer_path, destination, question, detail, selectors, state, seen, generation, asked_at, answered_at, attempts, next_attempt_at, retry_reasons, NULL AS result, result IS NOT NULL AS has_result, failed"
         : '*';
       const rows = db.query(`SELECT ${columns} FROM waiting_questions WHERE answered_at IS NOT NULL OR asked_at > ? ORDER BY asked_at DESC, rowid DESC`)
         .all(now() - WAITING_QUESTION_LIMITS.ttlMs) as QuestionRow[];
@@ -531,18 +546,28 @@ export function openWaitingPrivateQuestionStore(
         try { if (!options.isActive(ref.connectionId)) return false; } catch { return false; }
       }
       return db.transaction(() => {
-        const changed = db.query('UPDATE waiting_questions SET result = ?, answered_at = ?, question = COALESCE(?, question), seen = 0, attempts = 0, next_attempt_at = 0 WHERE id = ? AND generation = ? AND connection_id = ?')
-          .run(serialized, now(), sent ?? null, ref.id, ref.generation, ref.connectionId).changes > 0;
+        const changed = db.query('UPDATE waiting_questions SET result = ?, answered_at = ?, question = COALESCE(?, question), failed = ?, seen = 0, attempts = 0, next_attempt_at = 0 WHERE id = ? AND generation = ? AND connection_id = ?')
+          .run(serialized, now(), sent ?? null, result.status === 'failed' ? 1 : 0, ref.id, ref.generation, ref.connectionId).changes > 0;
         return changed;
       }).immediate();
     },
 
-    retry(ref) {
-      const row = db.query('SELECT attempts FROM waiting_questions WHERE id = ? AND generation = ? AND connection_id = ? AND result IS NULL').get(ref.id, ref.generation, ref.connectionId) as { attempts: number } | null;
-      if (!row) return false;
-      const delay = Math.min(30 * 60_000, 5_000 * 2 ** Math.min(row.attempts, 9));
-      return db.query('UPDATE waiting_questions SET attempts = attempts + 1, next_attempt_at = ? WHERE id = ? AND generation = ? AND connection_id = ? AND result IS NULL')
-        .run(now() + delay, ref.id, ref.generation, ref.connectionId).changes > 0;
+    retry(ref, reason = 'answer_failed') {
+      // Validate even internal callers: exception messages and source identifiers
+      // can never be smuggled into this content-free diagnostic history.
+      const safeReason = WAITING_QUESTION_RETRY_REASONS.includes(reason) ? reason : 'answer_failed';
+      return db.transaction(() => {
+        const row = db.query('SELECT attempts, retry_reasons FROM waiting_questions WHERE id = ? AND generation = ? AND connection_id = ? AND result IS NULL').get(ref.id, ref.generation, ref.connectionId) as { attempts: number; retry_reasons: string } | null;
+        if (!row) return false;
+        const attempts = row.attempts + 1;
+        const reasons = [...JSON.parse(row.retry_reasons) as WaitingQuestionRetryReason[], safeReason].slice(-WAITING_QUESTION_RETRY_LIMIT);
+        const exhausted = attempts >= WAITING_QUESTION_RETRY_LIMIT;
+        const result: StoredPrivateAnswer | null = exhausted
+          ? { status: 'failed', citations: [], unanswered: [], leftOut: [], read: [] } : null;
+        const delay = Math.min(30 * 60_000, 5_000 * 2 ** Math.min(row.attempts, 9));
+        return db.query('UPDATE waiting_questions SET attempts = ?, retry_reasons = ?, next_attempt_at = ?, result = ?, answered_at = ?, failed = ?, seen = 0 WHERE id = ? AND generation = ? AND connection_id = ? AND result IS NULL')
+          .run(attempts, JSON.stringify(reasons), exhausted ? 0 : now() + delay, result ? JSON.stringify(result) : null, exhausted ? now() : null, exhausted ? 1 : 0, ref.id, ref.generation, ref.connectionId).changes > 0;
+      }).immediate();
     },
 
     invalidate(ref) {
@@ -552,7 +577,7 @@ export function openWaitingPrivateQuestionStore(
         const old = row?.result ? JSON.parse(row.result) as StoredPrivateAnswer : undefined;
         const disclosure = row?.destination === 'venice' && old?.sentItems
           ? JSON.stringify({ status: 'withdrawn', reason: 'Sent to Venice, but the sources changed. The answer was withdrawn.', sentItems: old.sentItems, citations: [], read: [], unanswered: [], leftOut: [] }) : null;
-        return db.query('UPDATE waiting_questions SET result = ?, seen = 0, generation = generation + 1, attempts = 0, next_attempt_at = 0 WHERE id = ? AND generation = ? AND connection_id = ?')
+        return db.query("UPDATE waiting_questions SET result = ?, seen = 0, generation = generation + 1, attempts = 0, next_attempt_at = 0, retry_reasons = '[]', failed = 0 WHERE id = ? AND generation = ? AND connection_id = ?")
           .run(disclosure, ref.id, ref.generation, ref.connectionId).changes > 0;
       }).immediate();
     },
@@ -700,6 +725,8 @@ function toQuestion(row: QuestionRow): WaitingQuestion {
     ...(row.has_result !== undefined ? { hasResult: row.has_result === 1 } : {}),
     ...(row.result ? { result: JSON.parse(row.result) as StoredPrivateAnswer } : {}),
     ...(row.answered_at !== null ? { answeredAt: new Date(row.answered_at).toISOString() } : {}),
+    ...(row.failed === 1 ? { failed: true } : {}),
+    ...(row.retry_reasons && row.retry_reasons !== '[]' ? { retryReasons: JSON.parse(row.retry_reasons) as WaitingQuestionRetryReason[] } : {}),
     attempts: row.attempts,
     nextAttemptAt: row.next_attempt_at,
   };
@@ -758,6 +785,20 @@ function migrations(): SqliteMigration[] {
     version: 5,
     name: 'ask_destination',
     up(db) { db.exec("ALTER TABLE waiting_questions ADD COLUMN destination TEXT CHECK(destination IS NULL OR destination = 'venice')"); },
+  }, {
+    version: 6,
+    name: 'bounded_retry_reasons',
+    up(db) { db.exec("ALTER TABLE waiting_questions ADD COLUMN retry_reasons TEXT NOT NULL DEFAULT '[]'"); },
+  }, {
+    version: 7,
+    name: 'failure_listing_metadata',
+    up(db) {
+      // Backfill once on upgrade, tolerating malformed old bodies. Polling
+      // thereafter reads this bit without reading or parsing answer JSON.
+      db.exec(`ALTER TABLE waiting_questions ADD COLUMN failed INTEGER NOT NULL DEFAULT 0;
+        UPDATE waiting_questions SET failed = CASE WHEN json_valid(result)
+          THEN COALESCE(json_extract(result, '$.status') = 'failed', 0) ELSE 0 END;`);
+    },
   }];
 }
 

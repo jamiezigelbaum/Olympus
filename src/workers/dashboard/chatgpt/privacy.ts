@@ -125,7 +125,7 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
       edited: false, saving: false, saveError: '', discarding: false, picking: false,
       labels: [], labelsLoading: false, labelsError: '',
       sender: '', senderError: '',
-      questionsError: '',
+      editingDescription: false, questionsError: '', detailsOpen: false, conflictDetailsOpen: false, candidate: null, ruleKind: '',
     };
     load();
   }
@@ -203,7 +203,7 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
       take(data);
       s.loaded = true;
       if (s.answerChoice) s.screen = 'answers';
-      kit.render(s.screen === 'answers' ? 'privacy:answer:local-first' : 'privacy:description');
+      kit.render(s.screen === 'answers' ? 'privacy:answer:local-first' : 'privacy:title');
     }, () => {
       if (mine !== session || !s) return;
       s.loading = false;
@@ -279,7 +279,7 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
       if (replayed.description !== null) s.description = replayed.description;
       s.edited = s.intents.length > 0 || s.description !== s.savedDescription;
       kit.remember(data.rules.filter(validRule).length);
-      kit.render('privacy:add:folder');
+      kit.render('privacy:add');
     }, () => {
       if (mine !== session || !s) return;
       s.saving = false;
@@ -298,7 +298,12 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
 
   /** Save: a save that lowers protection first asks inline, then carries the owner's confirmation. */
   function save(): void {
-    if (!s || !s.loaded || s.saving || !canSave()) return;
+    if (!s || !s.loaded || s.saving) return;
+    if (s.server) {
+      kit.render('privacy:conflict:apply');
+      return;
+    }
+    if (!canSave()) return;
     // The questions' choices as shown, defaults included, become their sentences before anything is decided.
     const shown = L.withShownAnswers(s.description);
     if (shown !== s.description) {
@@ -400,7 +405,7 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
     const server = s.server;
     if (!server) return;
     take(server);
-    kit.render('privacy:description');
+    kit.render('privacy:add');
   }
 
   /** The conflict box: what happened, what is saved now, and the two ways on. */
@@ -414,7 +419,9 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
     const rules = s.server.rules.filter(validRule);
     if (!rules.length) add(list, el('li', '', W.rulesEmpty));
     for (const rule of rules) add(list, el('li', '', displayOf(rule) + ' · ' + kindText(rule)));
-    add(box, list, add(el('div', 'actions'),
+    const detail = disclosure(true);
+    add(detail, list);
+    add(box, detail, add(el('div', 'actions'),
       kit.button(W.applyAgain, 'privacy:conflict:apply', applyAgain, 'main'),
       kit.button(W.discardMine, 'privacy:conflict:discard', discardMine, 'plain')));
     return box;
@@ -512,15 +519,16 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
       back: W.backToPrivacy,
       title: W.folderTitle,
       intro: W.folderIntro,
-      makePrivate: W.makePrivate,
-      makePrivateFor: W.makePrivateFor,
+      makePrivate: W.select,
+      makePrivateFor: W.selectFor,
+      stepSheet: { step: W.stepPick, next: W.next, back: W.sheetBack },
       alreadyPrivate: W.alreadyPrivate,
     }, taken, (folder) => {
       if (mine !== session || !s) return;
       s.picking = false;
-      s.screen = 'main';
-      if (folder) addRule({ kind: 'folder', source_id: id, key: folder.key, display: folder.name, removed: false });
-      kit.render('privacy:add:folder');
+      s.screen = 'kinds';
+      if (folder) reviewRule({ kind: 'folder', source_id: id, key: folder.key, display: folder.name, removed: false });
+      kit.render(folder ? 'privacy:sheet:confirm' : 'privacy:add:folder');
     });
   }
 
@@ -559,7 +567,6 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
   // ---- add a sender ------------------------------------------------------
   function addSender(): void {
     s.screen = 'sender';
-    s.sender = '';
     s.senderError = '';
     kit.render('privacy:sender');
   }
@@ -577,9 +584,7 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
       kit.render('privacy:sender');
       return;
     }
-    addRule(rule);
-    s.screen = 'main';
-    kit.render('privacy:add:sender');
+    reviewRule(rule);
   }
 
   // ---- views -------------------------------------------------------------
@@ -589,7 +594,7 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
   }
 
   function ruleRow(rule: Any, index: number): HTMLElement {
-    const li = el('li', 'frow pick rule');
+    const li = el('li', 'rule rule-chip');
     if (rule.removed) {
       add(li, el('p', 'fname leaf muted', fill(W.removed, { name: rule.display })));
       const undo = kit.button(W.undo, 'privacy:rule:' + index, s.saving ? null : () => {
@@ -602,12 +607,12 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
       return add(li, undo);
     }
     add(li, add(el('p', 'fname leaf two-line'), el('span', 'two-top', rule.display), el('span', 'two-bottom', kindText(rule))));
-    const remove = kit.button(W.remove, 'privacy:rule:' + index, s.saving ? null : () => {
+    const remove = kit.button('×', 'privacy:rule:' + index, s.saving ? null : () => {
       rule.removed = true;
       L.setIntent(s.intents, rule, false);
       changed();
       s.saveError = '';
-      kit.render('privacy:rule:' + index);
+      save();
     }, 'plain');
     remove.setAttribute('aria-label', fill(W.removeFor, { name: rule.display }));
     return add(li, remove);
@@ -673,8 +678,11 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
   }
 
   function mainView(page: HTMLElement): void {
-    add(page, el('h1', '', W.title));
-    add(page, el('p', 'muted intro', W.intro));
+    const title = el('h1', '', W.title);
+    title.setAttribute('tabindex', '-1');
+    title.setAttribute('data-key', 'privacy:title');
+    add(page, title, el('p', 'muted intro', W.intro));
+
     if (s.server) add(page, conflictBox());
     if (s.error) {
       const error = el('div', 'banner');
@@ -691,75 +699,103 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
       }
       return;
     }
-    const field = el('label', 'field');
-    add(field, el('span', 'field-label', W.descriptionLabel));
-    const area = el('textarea', 'text') as HTMLTextAreaElement;
-    area.rows = 4;
-    area.placeholder = W.descriptionPlaceholder;
-    area.value = s.description;
-    area.disabled = s.saving;
-    area.setAttribute('data-key', 'privacy:description');
-    area.setAttribute('aria-describedby', 'privacy-description-shared');
-    const asked = L.questionsKey(s.description);
-    area.addEventListener('input', () => {
-      s.description = area.value;
-      const open = s.confirmStep;
-      const could = canSave();
-      changed();
-      // Redrawn (caret kept) when the step closes, a too-long note clears, or
-      // what the questions show changes (an area, or an answer edited by hand).
-      const noted = !!s.questionsError;
-      s.questionsError = '';
-      if (open || noted || could !== canSave() || L.questionsKey(s.description) !== asked) kit.render('privacy:description');
-    });
-    add(page, add(field, area));
+    const description = add(el('section', 'fsection privacy-description'), el('h2', '', W.descriptionLabel));
+    const summary = el('p', 'privacy-summary', s.description);
+    summary.setAttribute('data-key', 'privacy:summary');
+    const openEditor = s.saving ? null : () => {
+      s.editingDescription = true;
+      kit.render('privacy:description');
+    };
+    if (!s.editingDescription && s.description) {
+      add(description, summary, kit.button(W.edit, 'privacy:description:edit', openEditor, 'plain'));
+    } else if (!s.editingDescription) {
+      // Nothing written yet: say so, and show the example greyed so it never reads as saved text.
+      summary.textContent = W.descriptionEmpty;
+      add(description, summary, el('p', 'muted privacy-example', W.descriptionPlaceholder),
+        kit.button(W.descriptionStart, 'privacy:description:edit', openEditor, 'main'));
+    } else {
+      const field = el('label', 'field');
+      const area = el('textarea', 'text') as HTMLTextAreaElement;
+      area.rows = 4;
+      area.placeholder = W.descriptionPlaceholder;
+      area.value = s.description;
+      area.disabled = s.saving;
+      area.setAttribute('aria-label', W.descriptionLabel);
+      area.setAttribute('data-key', 'privacy:description');
+      area.setAttribute('aria-describedby', 'privacy-description-shared');
+      const asked = L.questionsKey(s.description);
+      area.addEventListener('input', () => {
+        s.description = area.value;
+        const open = s.confirmStep;
+        const could = canSave();
+        changed();
+        s.edited = s.intents.length > 0 || s.description !== s.savedDescription;
+        // Preserve the caret unless questions, confirmation or save availability change.
+        const noted = !!s.questionsError;
+        s.questionsError = '';
+        if (open || noted || could !== canSave() || L.questionsKey(s.description) !== asked) kit.render('privacy:description');
+      });
+      add(description, add(field, area));
+    }
     const shared = el('p', 'reason field-note', W.descriptionShared);
     shared.id = 'privacy-description-shared';
-    add(page, shared);
+    add(description, shared);
+    add(page, description);
     const questions = questionsSection();
     if (questions) add(page, questions);
+    const details = disclosure();
+    add(details, el('p', 'reason', W.judgingDetails));
 
     const rules = add(el('section', 'fsection'), el('h2', '', W.rulesTitle));
     if (s.rules.length) {
-      const listNode = el('ul', 'flist');
+      const listNode = el('ul', 'rule-chips');
       s.rules.forEach((rule: Any, index: number) => add(listNode, ruleRow(rule, index)));
       add(rules, listNode);
     } else add(rules, el('p', 'muted fempty', W.rulesEmpty));
-    const folders = folderSources().length > 0 && !!kit.picker;
-    const gmail = gmailConnected();
-    const canAdd = !s.saving && !s.server;
-    add(rules, add(el('div', 'actions add-rules'),
-      kit.button(W.addFolder, 'privacy:add:folder', folders && canAdd ? addFolder : null, 'plain'),
-      kit.button(W.addLabel, 'privacy:add:label', gmail && canAdd ? addLabel : null, 'plain'),
-      kit.button(W.addSender, 'privacy:add:sender', canAdd ? addSender : null, 'plain')));
+    add(rules, kit.button(W.addRule, 'privacy:add', !s.saving && !s.server ? () => {
+      s.screen = 'kinds'; s.ruleKind = ''; s.candidate = null; s.sender = ''; s.senderError = '';
+      kit.render('privacy:add:folder');
+    } : null, 'plain'));
     if (s.server) add(rules, el('p', 'reason', W.conflictAddBlocked));
-    if (!folders) add(rules, el('p', 'reason', W.needFolderSource));
-    if (!gmail) add(rules, el('p', 'reason', W.needGmail));
     add(rules, el('p', 'reason', W.namesShared));
-    add(page, rules);
+    if (!folderSources().length || !kit.picker) add(rules, el('p', 'reason', W.needFolderSource));
+    if (!gmailConnected()) add(rules, el('p', 'reason', W.needGmail));
+    add(page, rules, details);
 
     const footer = el('section', 'picker-footer');
+    const saveHost = s.editingDescription || s.description !== s.savedDescription ? description : page;
     // The confirmation step stands in for Save while it is open (and while the change still lowers protection).
     if (s.confirmStep && !s.saving && lowers()) {
-      add(page, add(footer, confirmBox()));
+      add(saveHost, add(footer, confirmBox()));
       return;
     }
-    const row = el('div', 'actions');
+    // Rule writes apply immediately. Only description/question edits get a save bar.
+    const pendingDescription = s.description !== s.savedDescription;
+    const wrap = el('div', 'save');
     if (s.saving) {
       const busy = kit.button(W.saving, 'privacy:save', null, 'main');
       busy.setAttribute('aria-busy', 'true');
-      add(row, busy);
-    } else {
-      const button = kit.button(W.save, 'privacy:save', canSave() ? save : null, 'main');
-      // A Save with nothing to do says why it is off, as the folder picker's does.
-      if (!canSave()) button.setAttribute('aria-describedby', 'privacy-save-reason');
-      add(row, button);
+      add(wrap, busy);
+    } else if (!s.server && (s.editingDescription || pendingDescription)) {
+      add(wrap, add(el('div', 'actions'),
+        kit.button(W.save, 'privacy:save', canSave() ? save : null, 'main'),
+        kit.button(W.cancel, 'privacy:cancel', () => {
+          s.description = s.savedDescription;
+          s.editingDescription = false;
+          s.questionsError = '';
+          s.confirmStep = false;
+          s.saveError = '';
+          s.edited = s.intents.length > 0;
+          kit.render('privacy:description:edit');
+        }, 'plain')));
+    } else if (!s.server && s.intents.length) {
+      // A failed addition or cancelled removal still needs its existing retry path.
+      add(wrap, kit.button(W.applyAgain, 'privacy:save', save, 'main'));
     }
-    add(row, kit.button(W.cancel, 'privacy:cancel', s.saving ? null : backOut, 'plain'));
-    const wrap = add(el('div', 'save'), row);
-    if (!s.saving && !canSave()) {
+    if (s.editingDescription && !s.saving && !s.server && !canSave()) {
       const reason = el('p', 'reason', W.nothingToSave);
       reason.id = 'privacy-save-reason';
+      wrap.querySelector('[data-key="privacy:save"]')?.setAttribute('aria-describedby', reason.id);
       add(wrap, reason);
     }
     if (s.saveError) {
@@ -767,7 +803,7 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
       error.setAttribute('role', 'alert');
       add(wrap, error);
     }
-    add(page, add(footer, wrap));
+    if (wrap.childNodes.length) add(saveHost, add(footer, wrap));
   }
 
   function sourcesView(page: HTMLElement): void {
@@ -813,12 +849,11 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
       if (kept().some((other: Any) => other.kind === 'label' && other.source_id === mail && other.key === label.id)) {
         add(li, kit.button(W.alreadyPrivate, 'privacy:label:' + index, null, 'plain'));
       } else {
-        const control = kit.button(W.makePrivate, 'privacy:label:' + index, () => {
-          addRule(rule);
-          s.screen = 'main';
-          kit.render('privacy:add:label');
+        const control = kit.button(s.candidate && identity(s.candidate) === identity(rule) ? W.selected : W.select, 'privacy:label:' + index, () => {
+          s.candidate = rule;
+          kit.render('privacy:sheet:next');
         }, 'plain');
-        control.setAttribute('aria-label', fill(W.makePrivateFor, { name }));
+        control.setAttribute('aria-label', fill(W.selectFor, { name }));
         add(li, control);
       }
       add(listNode, li);
@@ -857,7 +892,83 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
       add(field, error);
     }
     add(page, field);
-    add(page, add(el('div', 'actions'), kit.button(W.senderAdd, 'privacy:sender:add', submitSender, 'main')));
+
+  }
+
+  function disclosure(conflict = false): HTMLElement {
+    const details = el('details', 'privacy-details') as HTMLDetailsElement;
+    const key = conflict ? 'conflictDetailsOpen' : 'detailsOpen';
+    details.open = s[key];
+    const summary = el('summary', '', W.details);
+    summary.setAttribute('data-key', conflict ? 'privacy:conflict:details' : 'privacy:details');
+    add(details, summary);
+    details.addEventListener('toggle', () => { if (s) s[key] = details.open; });
+    return details;
+  }
+
+  function reviewRule(rule: Any): void {
+    s.candidate = rule;
+    s.screen = 'review';
+    kit.render('privacy:sheet:confirm');
+  }
+
+  function kindsView(page: HTMLElement): void {
+    add(page, el('h1', '', W.addRule), el('p', 'muted intro', W.kindPrompt));
+    const folders = folderSources().length > 0 && !!kit.picker;
+    const choices = el('div', 'privacy-kinds');
+    choices.setAttribute('role', 'group');
+    choices.setAttribute('aria-label', W.kindPrompt);
+    for (const [kind, label, enabled] of [
+      ['folder', W.addFolder, folders], ['label', W.addLabel, gmailConnected()], ['sender', W.addSender, true],
+    ] as const) {
+      const button = kit.button(label, 'privacy:add:' + kind, enabled ? () => {
+        s.candidate = null; s.ruleKind = kind; kit.render('privacy:add:' + kind);
+      } : null, 'plain');
+      button.setAttribute('aria-pressed', String(s.ruleKind === kind));
+      add(choices, button);
+    }
+    add(page, choices);
+    if (!folders) add(page, el('p', 'reason', W.needFolderSource));
+    if (!gmailConnected()) add(page, el('p', 'reason', W.needGmail));
+  }
+
+  function sheetBack(): void {
+    if (!s || s.saving) return;
+    if (s.screen === 'review') {
+      if (s.ruleKind === 'sender') s.screen = 'sender';
+      else if (s.ruleKind === 'label') s.screen = 'labels';
+      else { addFolder(); return; }
+    } else s.screen = s.screen === 'kinds' ? 'main' : 'kinds';
+    kit.render(s.screen === 'main' ? 'privacy:add' : 'privacy:sheet:back');
+  }
+
+  function sheetView(page: HTMLElement): void {
+    const step = s.screen === 'kinds' ? 1 : s.screen === 'review' ? 3 : 2;
+    add(page, el('p', 'muted', fill(W.step, { step })));
+    const progress = el('progress') as HTMLProgressElement;
+    progress.max = 3; progress.value = step;
+    progress.setAttribute('aria-label', fill(W.step, { step }));
+    add(page, progress);
+    if (s.screen === 'kinds') kindsView(page);
+    else if (s.screen === 'sources') sourcesView(page);
+    else if (s.screen === 'labels') labelsView(page);
+    else if (s.screen === 'sender') senderView(page);
+    else {
+      add(page, el('h1', '', W.confirmRule), el('p', '', s.candidate.display), el('p', 'reason', kindText(s.candidate)), el('p', 'reason', W.namesShared));
+    }
+    const row = add(el('div', 'actions privacy-sheet-actions'), kit.button(W.sheetBack, 'privacy:sheet:back', sheetBack, 'plain'));
+    if (s.screen === 'kinds') add(row, kit.button(W.next, 'privacy:sheet:next', s.ruleKind ? () => {
+      if (s.ruleKind === 'folder') addFolder();
+      else if (s.ruleKind === 'label') addLabel();
+      else addSender();
+    } : null, 'main'));
+    if (s.screen === 'sender') add(row, kit.button(W.next, 'privacy:sender:add', submitSender, 'main'));
+    if (s.screen === 'labels') add(row, kit.button(W.next, 'privacy:sheet:next', s.candidate ? () => reviewRule(s.candidate) : null, 'main'));
+    if (s.screen === 'review') add(row, kit.button(W.makePrivate, 'privacy:sheet:confirm', () => {
+      if (!s || s.screen !== 'review' || s.saving || s.server) return;
+      const rule = s.candidate; s.screen = 'main'; addRule(rule); kit.render('privacy:add');
+    }, 'main'));
+    add(page, row);
   }
 
   function saveAnswerMode(): void {
@@ -928,7 +1039,7 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
     const top = el('div', 'picker-top');
     const backButton = kit.button(s.screen === 'main' ? W.back : W.backToPrivacy, 'privacy:back', escape, 'plain');
     backButton.className = 'btn back';
-    add(page, add(top, backButton));
+    if (s.screen === 'main') add(page, add(top, backButton));
     if (s.discarding) {
       const confirm = el('div', 'confirm-box');
       confirm.setAttribute('role', 'alert');
@@ -941,9 +1052,7 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
       add(page, confirm);
     }
     if (s.screen === 'answers') answersView(page);
-    else if (s.screen === 'sources') sourcesView(page);
-    else if (s.screen === 'labels') labelsView(page);
-    else if (s.screen === 'sender') senderView(page);
+    else if (s.screen !== 'main') sheetView(page);
     else mainView(page);
     return page;
   }
@@ -960,14 +1069,12 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
 
   /** Back and Escape: the discard prompt, then a sub-screen, then leave. */
   function escape(): void {
-    if (!s || s.picking) return;
+    if (!s || s.picking || s.saving) return;
     if (s.discarding) {
       s.discarding = false;
       kit.render('privacy:back');
-    } else if (s.screen !== 'main') {
-      const from = s.screen;
-      s.screen = 'main';
-      kit.render(from === 'sources' ? 'privacy:add:folder' : from === 'labels' ? 'privacy:add:label' : 'privacy:add:sender');
+    } else if (s.screen !== 'main' && s.screen !== 'answers') {
+      sheetBack();
     } else backOut();
   }
 

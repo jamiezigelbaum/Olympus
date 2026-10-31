@@ -210,7 +210,68 @@ function rowButton(host: Host, name: string): HTMLButtonElement {
 }
 
 function ruleRows(host: Host): string[] {
-  return Array.from(host.doc.querySelectorAll('.rule')).map((row) => (row.textContent ?? '').replace(/Remove|Undo/g, '').trim());
+  return Array.from(host.doc.querySelectorAll('.rule')).map((row) => (row.textContent ?? '').replace(/Remove|Undo|×/g, '').trim());
+}
+
+/** Removal already opens the same confirmation that Save opens for other edits. */
+function saveDraft(host: Host): void {
+  if (host.hasButton(W.confirm)) {
+    expect(host.doc.querySelector('[data-key="privacy:confirm:yes"]')).not.toBeNull();
+    return;
+  }
+  if (host.hasButton(W.save)) host.button(W.save).click();
+  else host.button(W.applyAgain).click();
+}
+
+describe('privacy main-view essentials', () => {
+  test('full words, intro, questions and disclosure notes stay outside Details in order', async () => {
+    const description = 'My family is private. ' + 'Personal diary entries stay private. '.repeat(12).trim();
+    const { host } = await openPrivacy({ description, rules: SAVED_RULES });
+    const summary = host.doc.querySelector('[data-key="privacy:summary"]')!;
+    expect(summary.textContent).toBe(description);
+    expect(host.doc.activeElement?.getAttribute('data-key')).toBe('privacy:title');
+    expect(summary.closest('details')).toBeNull();
+    expect(host.doc.querySelector('textarea')).toBeNull();
+    expect(host.button('Edit')).toBeDefined();
+    const details = host.doc.querySelector('details')!;
+    expect(details.open).toBe(false);
+    for (const text of [W.intro, W.descriptionShared, W.namesShared]) {
+      expect(host.text()).toContain(text);
+      expect(details.textContent).not.toContain(text);
+    }
+    const questions = host.doc.querySelector('.questions')!;
+    expect(questions.closest('details')).toBeNull();
+    expect(host.text().indexOf(W.descriptionLabel)).toBeLessThan(host.text().indexOf(W.questions.title));
+    expect(host.text().indexOf(W.questions.title)).toBeLessThan(host.text().indexOf(W.rulesTitle));
+    expect(host.doc.querySelector('.rule-chips')!.parentElement!.textContent).toContain(W.namesShared);
+    expect(details.querySelector('textarea, input, button')).toBeNull();
+  });
+  test('empty state opens the same inline editor; Cancel restores words without saving', async () => {
+    const { host, saves } = await openPrivacy();
+    // Empty reads as empty: a plain line, the example greyed, and one main button; never the example as saved text.
+    expect(host.doc.querySelector('[data-key="privacy:summary"]')!.textContent).toBe(W.descriptionEmpty);
+    expect(host.doc.querySelector('.privacy-example.muted')!.textContent).toBe(W.descriptionPlaceholder);
+    expect(host.doc.querySelector('button[data-key="privacy:description:edit"]')!.textContent).toBe(W.descriptionStart);
+    host.button(W.descriptionStart).click();
+    const area = host.doc.querySelector('textarea')!;
+    expect(area.closest('details')).toBeNull();
+    expect(area.placeholder).toBe(W.descriptionPlaceholder);
+    const save = host.button(W.save);
+    expect(save.parentElement).toBe(host.button(W.cancel).parentElement);
+    expect(save.parentElement!.firstElementChild).toBe(save);
+    area.value = 'my diary';
+    area.dispatchEvent(new host.win.Event('input') as unknown as Event);
+    host.button(W.cancel).click();
+    expect(host.doc.querySelector('textarea')).toBeNull();
+    expect(host.text()).toContain(W.descriptionEmpty);
+    expect(host.text()).toContain(W.title);
+    expect(saves).toHaveLength(0);
+  });
+});
+
+function editDescription(host: Host): HTMLTextAreaElement {
+  if (!host.doc.querySelector('textarea')) (host.doc.querySelector('button[data-key="privacy:description:edit"]') as unknown as HTMLButtonElement).click();
+  return host.doc.querySelector('textarea') as HTMLTextAreaElement;
 }
 
 describe('the Privacy screen', () => {
@@ -221,20 +282,17 @@ describe('the Privacy screen', () => {
     expect(text).toContain(W.title);
     expect(text).toContain(W.intro);
     expect(text).toContain(W.back);
-    const area = host.doc.querySelector('textarea') as unknown as HTMLTextAreaElement;
+    const area = editDescription(host) as unknown as HTMLTextAreaElement;
     expect(area.value).toBe(DESCRIPTION);
     expect(area.placeholder).toBe(W.descriptionPlaceholder);
-    expect(area.closest('label')!.textContent).toContain(W.descriptionLabel);
+    expect(area.getAttribute('aria-label')).toBe(W.descriptionLabel);
     expect(text).toContain(W.rulesTitle);
     expect(ruleRows(host)).toEqual(['Medical RecordsFolder in Dropbox', 'Lawyer LettersGmail label', 'doctor@clinic.exampleSender']);
-    for (const label of [W.addFolder, W.addLabel, W.addSender]) expect(host.button(label).disabled).toBe(false);
+    expect(host.button(W.addRule).disabled).toBe(false);
     expect(text).not.toContain('waiting to be checked');
-    // Nothing to save yet: Save is inactive. A change makes it the one accent; Cancel is quiet.
     expect(host.button(W.save).disabled).toBe(true);
-    // ...and says why beside it (release check: a disabled Save that said nothing).
-    expect(host.doc.getElementById('privacy-save-reason')?.textContent).toBe(W.nothingToSave);
-    expect(host.button(W.save).getAttribute('aria-describedby')).toBe('privacy-save-reason');
-    expect(host.doc.querySelectorAll('.btn.primary')).toHaveLength(0);
+    expect(host.hasButton(W.cancel)).toBe(true);
+    expect(host.doc.querySelector('.privacy-description .picker-footer')).not.toBeNull();
     area.value = `${DESCRIPTION} and more`;
     area.dispatchEvent(new host.win.Event('input') as unknown as Event);
     expect(host.button(W.save).disabled).toBe(false);
@@ -250,12 +308,12 @@ describe('the Privacy screen', () => {
   test('says plainly what ChatGPT sees: under the description box, and under the always-private rules', async () => {
     const { host } = await openPrivacy({ description: DESCRIPTION, rules: SAVED_RULES });
     expect(W.descriptionShared).toBe('ChatGPT sees what you type here so it can save it; keep it to topics, like "my health", not details.');
+    editDescription(host);
     const field = host.doc.querySelector('label.field')!;
     const note = field.nextElementSibling!;
     expect(note.textContent).toBe(W.descriptionShared);
-    expect(host.doc.querySelector('textarea')!.getAttribute('aria-describedby')).toBe(note.id);
-    const rules = Array.from(host.doc.querySelectorAll('section.fsection')).find((node) => node.querySelector('h2')?.textContent === W.rulesTitle)!;
-    expect(rules.lastElementChild!.textContent).toBe(W.namesShared);
+    expect(editDescription(host)!.getAttribute('aria-describedby')).toBe(note.id);
+    expect(host.doc.querySelector('.rule-chips')!.parentElement!.textContent).toContain(W.namesShared);
     expect(W.namesShared).toContain('shown to ChatGPT');
   });
 
@@ -279,7 +337,7 @@ describe('the Privacy screen', () => {
     fail = false;
     host.button(W.tryAgain).click();
     await host.settle();
-    expect((host.doc.querySelector('textarea') as unknown as HTMLTextAreaElement).value).toBe(DESCRIPTION);
+    expect((editDescription(host) as unknown as HTMLTextAreaElement).value).toBe(DESCRIPTION);
   });
 });
 
@@ -287,14 +345,16 @@ describe('adding rules', () => {
   test('Add a folder browses one level per screen and Make private adds the folder and returns', async () => {
     const { host, saves } = await openPrivacy({ rules: [SAVED_RULES[0]], pending: 12 });
     expect(host.text()).not.toContain('12 items are waiting to be checked');
+    host.button(W.addRule).click();
     host.button(W.addFolder).click();
+    host.button(W.next).click();
     await host.settle();
     expect(host.toolCalls(S.scopeList)).toEqual([{ source_id: 'dropbox.files' }]);
     expect(host.text()).toContain(W.folderTitle);
-    expect(host.text()).toContain(W.backToPrivacy);
+    expect(host.text()).toContain(W.sheetBack);
     // No choices sheet, no Save in pick mode; an already-private folder says so.
     expect(host.doc.querySelector('.fstatus')).toBeNull();
-    expect(host.doc.querySelector('.picker-footer')).toBeNull();
+    expect(host.doc.querySelector('.privacy-sheet-actions')).not.toBeNull();
     expect(rowButton(host, 'Medical Records').textContent).toBe(W.alreadyPrivate);
     expect(rowButton(host, 'Medical Records').disabled).toBe(true);
     // Tapping a name drills in.
@@ -302,44 +362,54 @@ describe('adding rules', () => {
     await host.settle();
     expect(host.toolCalls(S.scopeList).at(-1)).toEqual({ source_id: 'dropbox.files', parent_key: 'k-a' });
     expect(host.text()).toContain('Therapy Notes');
-    host.button('Make Therapy Notes private').click();
+    host.button('Choose Therapy Notes').click();
+    host.button(W.next).click();
+    host.button(W.makePrivate).click();
     await host.settle();
     expect(host.text()).toContain(W.title);
     expect(ruleRows(host)).toEqual(['Medical RecordsFolder in Dropbox', 'Therapy NotesFolder in Dropbox']);
     expect(saves).toHaveLength(1);
     expect(saves[0].rules).toContainEqual({ kind: 'folder', source_id: 'dropbox.files', key: 'k-a1', display: 'Therapy Notes' });
-    expect(host.doc.activeElement!.getAttribute('data-key')).toBe('privacy:add:folder');
+    expect(host.doc.activeElement!.getAttribute('data-key')).toBe('privacy:add');
     expectNamesOnlyInPrivacy(host);
   });
 
   test('with two folder sources the account comes first; Back from the picker returns without a rule', async () => {
     const { host } = await openPrivacy({ sources: [DROPBOX, DRIVE, GMAIL] });
+    host.button(W.addRule).click();
     host.button(W.addFolder).click();
+    host.button(W.next).click();
     expect(host.text()).toContain(W.folderSourceIntro);
     host.button('Google Drive›').click();
     await host.settle();
     expect(host.toolCalls(S.scopeList)).toEqual([{ source_id: 'google_drive.docs' }]);
-    host.button(W.backToPrivacy).click();
+    host.button(W.sheetBack).click();
+    host.button(W.sheetBack).click();
     expect(host.text()).toContain(W.title);
     expect(ruleRows(host)).toEqual([]);
   });
 
   test('Add a folder is unavailable, with a reason, when no folder source is connected', async () => {
     const { host } = await openPrivacy({ sources: [GMAIL, { ...DROPBOX, status: 'Off' }] });
+    host.button(W.addRule).click();
     expect(host.button(W.addFolder).disabled).toBe(true);
     expect(host.text()).toContain(W.needFolderSource);
   });
 
   test('Add a Gmail label lists the labels with Make private on each', async () => {
     const { host } = await openPrivacy({ rules: [SAVED_RULES[1]] });
+    host.button(W.addRule).click();
     host.button(W.addLabel).click();
+    host.button(W.next).click();
     await host.settle();
     expect(host.toolCalls(S.scopeList)).toEqual([{ source_id: 'gmail.email' }]);
     expect(host.text()).toContain(W.labelTitle);
     expect(host.text()).toContain('Sent');
     expect(rowButton(host, 'Lawyer Letters').textContent).toBe(W.alreadyPrivate);
     expect(rowButton(host, 'Lawyer Letters').disabled).toBe(true);
-    host.button('Make Kids School private').click();
+    host.button('Choose Kids School').click();
+    host.button(W.next).click();
+    host.button(W.makePrivate).click();
     await host.settle();
     expect(ruleRows(host)).toEqual(['Lawyer LettersGmail label', 'Kids SchoolGmail label']);
     expectNamesOnlyInPrivacy(host);
@@ -347,33 +417,38 @@ describe('adding rules', () => {
 
   test('Add a sender checks for an address or @domain inline', async () => {
     const { host } = await openPrivacy({ rules: [SAVED_RULES[2]] });
+    host.button(W.addRule).click();
     host.button(W.addSender).click();
+    host.button(W.next).click();
     const input = () => host.doc.querySelector('input[data-key="privacy:sender"]') as unknown as HTMLInputElement;
     expect(input().closest('label')!.textContent).toContain(W.senderLabel);
     for (const bad of ['', 'clinic', 'name@', '@', '@nodot', 'two words@x.com']) {
       input().value = bad;
       input().dispatchEvent(new host.win.Event('input') as unknown as Event);
-      host.button(W.senderAdd).click();
+      host.button(W.next).click();
+      if (host.hasButton(W.makePrivate)) host.button(W.makePrivate).click();
       expect(host.text()).toContain(W.senderInvalid);
       expect(input().getAttribute('aria-invalid')).toBe('true');
     }
     input().value = 'Doctor@Clinic.example';
     input().dispatchEvent(new host.win.Event('input') as unknown as Event);
-    host.button(W.senderAdd).click();
+    host.button(W.next).click();
+    if (host.hasButton(W.makePrivate)) host.button(W.makePrivate).click();
     expect(host.text()).toContain(W.senderDuplicate);
     input().value = '@Example.com';
     input().dispatchEvent(new host.win.Event('input') as unknown as Event);
-    host.button(W.senderAdd).click();
+    host.button(W.next).click();
+    if (host.hasButton(W.makePrivate)) host.button(W.makePrivate).click();
     await host.settle();
     expect(host.text()).toContain(W.title);
     expect(ruleRows(host)).toEqual(['doctor@clinic.exampleSender', '@example.comSender']);
   });
 
-  test('Remove offers an inline Undo, no dialog', async () => {
+  test('Remove offers immediate confirmation and an inline Undo', async () => {
     const { host } = await openPrivacy({ rules: SAVED_RULES });
     host.button('Remove Medical Records').click();
     expect(host.text()).toContain('Removed: Medical Records');
-    expect(host.doc.activeElement!.getAttribute('data-key')).toBe('privacy:rule:0');
+    expect(host.doc.activeElement!.getAttribute('data-key')).toBe('privacy:confirm:yes');
     host.button('Undo removing Medical Records').click();
     expect(host.text()).not.toContain('Removed:');
     expect(ruleRows(host)[0]).toBe('Medical RecordsFolder in Dropbox');
@@ -383,17 +458,20 @@ describe('adding rules', () => {
 describe('saving', () => {
   test('Save sends exactly the description and the kept rules, then returns to the dashboard', async () => {
     const { host, saves } = await openPrivacy({ description: 'old words', rules: SAVED_RULES });
-    const area = host.doc.querySelector('textarea') as unknown as HTMLTextAreaElement;
+    const area = editDescription(host) as unknown as HTMLTextAreaElement;
     area.value = `  ${DESCRIPTION}\n`;
     area.dispatchEvent(new host.win.Event('input') as unknown as Event);
     host.button('Remove Lawyer Letters').click();
+    host.button(W.addRule).click();
     host.button(W.addSender).click();
+    host.button(W.next).click();
     const input = host.doc.querySelector('input[data-key="privacy:sender"]') as unknown as HTMLInputElement;
     input.value = '@example.com';
     input.dispatchEvent(new host.win.Event('input') as unknown as Event);
-    host.button(W.senderAdd).click();
+    host.button(W.next).click();
+    if (host.hasButton(W.makePrivate)) host.button(W.makePrivate).click();
     await host.settle();
-    host.button(W.save).click();
+    saveDraft(host);
     // Removing a rule and new words lower protection: an inline step names what goes, before anything is sent.
     const box = host.doc.querySelector('.confirm-box')!;
     expect(box.getAttribute('role')).toBe('alert');
@@ -425,35 +503,38 @@ describe('saving', () => {
 
   test('a failed save keeps the changes and says so inline', async () => {
     const { host } = await openPrivacy({ setResult: () => ({ isError: true, structuredContent: {} }) });
-    const area = host.doc.querySelector('textarea') as unknown as HTMLTextAreaElement;
+    const area = editDescription(host) as unknown as HTMLTextAreaElement;
     area.value = DESCRIPTION;
     area.dispatchEvent(new host.win.Event('input') as unknown as Event);
-    host.button(W.save).click();
+    saveDraft(host);
     host.button(W.confirm).click();
     await host.settle();
     expect(host.text()).toContain(W.saveFailed);
-    expect((host.doc.querySelector('textarea') as unknown as HTMLTextAreaElement).value).toBe(DESCRIPTION);
+    expect((editDescription(host) as unknown as HTMLTextAreaElement).value).toBe(DESCRIPTION);
   });
 
   test('adding protection saves at once, with the revision and no confirmation', async () => {
     const { host, saves } = await openPrivacy({ description: 'old words', rules: SAVED_RULES });
+    host.button(W.addRule).click();
     host.button(W.addSender).click();
+    host.button(W.next).click();
     const input = host.doc.querySelector('input[data-key="privacy:sender"]') as unknown as HTMLInputElement;
     input.value = '@example.com';
     input.dispatchEvent(new host.win.Event('input') as unknown as Event);
-    host.button(W.senderAdd).click();
+    host.button(W.next).click();
+    if (host.hasButton(W.makePrivate)) host.button(W.makePrivate).click();
     await host.settle();
     expect(saves).toHaveLength(1);
     expect(saves[0].revision).toBe('rev1');
     expect(saves[0].confirmation).toBeUndefined();
     expect(host.text()).toContain('@example.com');
-    expect(host.button(W.save).disabled).toBe(true);
+    expect(host.hasButton(W.save)).toBe(false);
   });
 
   test('Cancel in the confirmation step sends nothing and keeps the changes', async () => {
     const { host } = await openPrivacy({ rules: SAVED_RULES });
     host.button('Remove Medical Records').click();
-    host.button(W.save).click();
+    saveDraft(host);
     expect(host.text()).toContain('This removes protection from Medical Records.');
     host.button(W.cancel).click();
     expect(host.doc.querySelector('.confirm-box')).toBeNull();
@@ -461,7 +542,7 @@ describe('saving', () => {
     expect(host.toolCalls(P.set)).toEqual([]);
     // Undoing the removal leaves nothing to confirm.
     host.button('Undo removing Medical Records').click();
-    host.button(W.save).click();
+    expect(host.hasButton(W.save)).toBe(false);
     expect(host.doc.querySelector('.confirm-box')).toBeNull();
   });
 
@@ -477,21 +558,24 @@ describe('saving', () => {
         return privacyResult(args.description ?? '', args.rules ?? [], 0, { revision: 'rev3', status: 'saved' });
       },
     });
+    host.button(W.addRule).click();
     host.button(W.addSender).click();
+    host.button(W.next).click();
     const input = host.doc.querySelector('input[data-key="privacy:sender"]') as unknown as HTMLInputElement;
     input.value = '@example.com';
     input.dispatchEvent(new host.win.Event('input') as unknown as Event);
-    host.button(W.senderAdd).click();
+    host.button(W.next).click();
+    if (host.hasButton(W.makePrivate)) host.button(W.makePrivate).click();
     await host.settle();
     // Nothing saved, and it says so plainly; the draft is still here, the saved settings beside it.
     const box = host.doc.querySelector('.confirm-box')!;
     expect(box.textContent).toContain("Your changes weren't saved because the privacy settings changed elsewhere.");
     expect(box.textContent).toContain('Your description: their words');
     expect(box.textContent).toContain('lawyer@firm.example');
-    expect((host.doc.querySelector('textarea') as unknown as HTMLTextAreaElement).value).toBe('old words');
+    expect((editDescription(host) as unknown as HTMLTextAreaElement).value).toBe('old words');
     expect(ruleRows(host)).toContain('@example.comSender');
-    expect(host.button(W.save).disabled).toBe(true);
-    for (const label of [W.addFolder, W.addLabel, W.addSender]) expect(host.button(label).disabled).toBe(true);
+    expect(host.hasButton(W.save)).toBe(false);
+    expect(host.button(W.addRule).disabled).toBe(true);
     expect(host.text()).toContain('Resolve the conflict before adding another rule.');
     // Apply again: the addition lands on their settings, their words and rules kept, against their revision.
     host.button(W.applyAgain).click();
@@ -529,18 +613,25 @@ describe('saving', () => {
           const name = kind === 'folder' ? 'Medical Records' : kind === 'label' ? 'Lawyer Letters' : 'doctor@clinic.example';
           if (edit !== 'add') host.button(`Remove ${name}`).click();
           if (edit === 'remove') {
-            host.button(W.save).click();
+            saveDraft(host);
             host.button(W.confirm).click();
           } else if (kind === 'sender') {
+            host.button(W.addRule).click();
             host.button(W.addSender).click();
+            host.button(W.next).click();
             const input = host.doc.querySelector('input[data-key="privacy:sender"]') as unknown as HTMLInputElement;
             input.value = name;
             input.dispatchEvent(new host.win.Event('input') as unknown as Event);
-            host.button(W.senderAdd).click();
+            host.button(W.next).click();
+            if (host.hasButton(W.makePrivate)) host.button(W.makePrivate).click();
           } else {
+            host.button(W.addRule).click();
             host.button(kind === 'folder' ? W.addFolder : W.addLabel).click();
+            host.button(W.next).click();
             await host.settle();
-            host.button(`Make ${name} private`).click();
+            host.button(`Choose ${name}`).click();
+            host.button(W.next).click();
+            host.button(W.makePrivate).click();
           }
           await host.settle();
           for (let i = 0; i < conflicts; i++) {
@@ -570,7 +661,7 @@ describe('saving', () => {
       });
       host.button('Remove doctor@clinic.example').click();
       if (edit === 'add') host.button('Undo removing doctor@clinic.example').click();
-      host.button(W.save).click();
+      saveDraft(host);
       if (host.hasButton(W.confirm)) host.button(W.confirm).click();
       await host.settle();
       expect(host.text()).not.toContain(W.saved);
@@ -601,15 +692,18 @@ describe('saving', () => {
       },
     });
     host.button('Remove Lawyer Letters').click();
+    host.button(W.addRule).click();
     host.button(W.addSender).click();
+    host.button(W.next).click();
     const input = host.doc.querySelector('input[data-key="privacy:sender"]') as unknown as HTMLInputElement;
     input.value = sender.value!;
     input.dispatchEvent(new host.win.Event('input') as unknown as Event);
-    host.button(W.senderAdd).click();
+    host.button(W.next).click();
+    if (host.hasButton(W.makePrivate)) host.button(W.makePrivate).click();
     await host.settle();
     expect(host.toolCalls(P.set)[0].rules).toEqual([...base, sender]);
     expect(host.text()).toContain('Removed: Lawyer Letters');
-    host.button(W.save).click();
+    saveDraft(host);
     host.button(W.confirm).click();
     await host.settle();
     for (let i = 0; i < 2; i++) {
@@ -631,14 +725,17 @@ describe('saving', () => {
           return privacyResult(args.description, args.rules, 0, { status: 'saved' });
         },
       });
+      host.button(W.addRule).click();
       host.button(W.addSender).click();
+      host.button(W.next).click();
       const input = host.doc.querySelector('input[data-key="privacy:sender"]') as unknown as HTMLInputElement;
       input.value = 'doctor@clinic.example';
       input.dispatchEvent(new host.win.Event('input') as unknown as Event);
-      host.button(W.senderAdd).click();
+      host.button(W.next).click();
+      if (host.hasButton(W.makePrivate)) host.button(W.makePrivate).click();
       await host.settle();
       expect(host.text()).not.toContain(W.saved);
-      host.button(failure === 'contradictory' ? W.applyAgain : W.save).click();
+      host.button(W.applyAgain).click();
       await host.settle();
       expect(host.toolCalls(P.set).at(-1).rules).toEqual([SAVED_RULES[2]]);
       expect(host.text()).toContain(W.saved);
@@ -660,7 +757,7 @@ describe('saving', () => {
       },
     });
     host.button('Remove Medical Records').click();
-    host.button(W.save).click();
+    saveDraft(host);
     host.button(W.confirm).click();
     await host.settle();
     expect(host.text()).toContain(W.conflict);
@@ -668,13 +765,52 @@ describe('saving', () => {
     expect(host.doc.querySelector('.confirm-box')!.textContent).toContain('This removes protection from Medical Records.');
     host.button(W.cancel).click();
     expect(host.text()).toContain('Removed: Medical Records');
-    host.button(W.save).click();
+    saveDraft(host);
     host.button(W.confirm).click();
     await host.settle();
     expect(sent.at(-1).revision).toBe('rev2');
     expect(sent.at(-1).description).toBe('their words');
     expect(sent.at(-1).rules).toEqual(SAVED_RULES.slice(1));
     expect(typeof sent.at(-1).confirmation).toBe('string');
+    expect(host.text()).toContain(W.saved);
+  });
+
+  test('Remove and Undo stay visible during an unresolved conflict and Apply sends only visible changes', async () => {
+    const sent: any[] = [];
+    const { host } = await openPrivacy({
+      rules: SAVED_RULES,
+      setResult: (args) => {
+        sent.push(args);
+        if (sent.length === 1) return privacyResult('their words', SAVED_RULES, 0, { revision: 'rev2', status: 'conflict' });
+        return privacyResult(args.description, args.rules, 0, { status: 'saved' });
+      },
+    });
+    host.button('Remove Medical Records').click();
+    host.button(W.confirm).click();
+    await host.settle();
+    expect(host.text()).toContain(W.conflict);
+
+    host.button('Remove Lawyer Letters').click();
+    expect(host.text()).toContain('Removed: Lawyer Letters');
+    host.button('Undo removing Lawyer Letters').click();
+    expect(host.text()).not.toContain('Removed: Lawyer Letters');
+    expect(host.button('Remove Lawyer Letters').disabled).toBe(false);
+    host.button('Remove doctor@clinic.example').click();
+    expect(host.text()).toContain('Removed: doctor@clinic.example');
+    expect(host.button('Undo removing doctor@clinic.example').disabled).toBe(false);
+    expect(host.text()).toContain('Removed: Medical Records');
+    expect(host.text()).toContain(W.conflict);
+    expect(sent).toHaveLength(1);
+
+    host.button(W.applyAgain).click();
+    expect(sent).toHaveLength(1);
+    host.button(W.confirm).click();
+    await host.settle();
+    expect(sent).toHaveLength(2);
+    expect(sent[1].revision).toBe('rev2');
+    expect(sent[1].description).toBe('their words');
+    expect(sent[1].rules).toEqual([SAVED_RULES[1]]);
+    expect(typeof sent[1].confirmation).toBe('string');
     expect(host.text()).toContain(W.saved);
   });
 
@@ -694,7 +830,7 @@ describe('saving', () => {
       },
     });
     host.button('Remove Old name').click();
-    host.button(W.save).click();
+    saveDraft(host);
     host.button(W.confirm).click();
     await host.settle();
     host.button(W.applyAgain).click();
@@ -709,11 +845,14 @@ describe('saving', () => {
 
   test('a sender already private in another case is not added twice', async () => {
     const { host } = await openPrivacy({ rules: [{ kind: 'sender', source_id: 'gmail.email', value: 'doctor@clinic.example' }] });
+    host.button(W.addRule).click();
     host.button(W.addSender).click();
+    host.button(W.next).click();
     const input = host.doc.querySelector('input[data-key="privacy:sender"]') as unknown as HTMLInputElement;
     input.value = 'Doctor@Clinic.example';
     input.dispatchEvent(new host.win.Event('input') as unknown as Event);
-    host.button(W.senderAdd).click();
+    host.button(W.next).click();
+    if (host.hasButton(W.makePrivate)) host.button(W.makePrivate).click();
     await host.settle();
     expect(host.text()).toContain(W.senderDuplicate);
   });
@@ -725,15 +864,15 @@ describe('saving', () => {
       setResult: () => privacyResult('their words', [], 0, { revision: 'rev2', status: 'conflict' }),
     });
     host.button('Remove Medical Records').click();
-    host.button(W.save).click();
+    saveDraft(host);
     host.button(W.confirm).click();
     await host.settle();
     host.button(W.discardMine).click();
     expect(host.doc.querySelector('.confirm-box')).toBeNull();
-    for (const label of [W.addFolder, W.addLabel, W.addSender]) expect(host.button(label).disabled).toBe(false);
-    expect((host.doc.querySelector('textarea') as unknown as HTMLTextAreaElement).value).toBe('their words');
+    expect(host.button(W.addRule).disabled).toBe(false);
+    expect((editDescription(host) as unknown as HTMLTextAreaElement).value).toBe('their words');
     expect(ruleRows(host)).toEqual([]);
-    // What is shown is what is saved: nothing to save until something changes.
+    // Opening Edit retains a disabled Save until something changes.
     expect(host.button(W.save).disabled).toBe(true);
   });
 
@@ -747,10 +886,10 @@ describe('saving', () => {
     expect(serialized.some((rule: any) => 'display' in rule)).toBe(false);
     const { host, saves } = await openPrivacy({ description: 'old words', rules: real });
     expect(ruleRows(host)).toEqual(['A folder in Google DriveFolder in Google Drive', 'MedicalGmail label', '@clinic.exampleSender']);
-    const area = host.doc.querySelector('textarea') as unknown as HTMLTextAreaElement;
+    const area = editDescription(host) as unknown as HTMLTextAreaElement;
     area.value = 'new words';
     area.dispatchEvent(new host.win.Event('input') as unknown as Event);
-    host.button(W.save).click();
+    saveDraft(host);
     // Asked only because the description changed: nothing is named as losing protection.
     const box = host.doc.querySelector('.confirm-box')!;
     expect(box.textContent).toContain(W.confirmDescription);
@@ -760,28 +899,31 @@ describe('saving', () => {
     expect(saves).toEqual([{ description: 'new words', rules: serialized, revision: 'rev1', confirmation: 'conf1' }]);
   });
 
-  test('an additive save never carries the confirmation: add a sender, change the words, Save, change them back', async () => {
+  test('reverting description edits after an immediate addition closes confirmation without another save', async () => {
     const { host, saves } = await openPrivacy({ description: 'old words', rules: SAVED_RULES });
+    host.button(W.addRule).click();
     host.button(W.addSender).click();
+    host.button(W.next).click();
     const input = host.doc.querySelector('input[data-key="privacy:sender"]') as unknown as HTMLInputElement;
     input.value = '@example.com';
     input.dispatchEvent(new host.win.Event('input') as unknown as Event);
-    host.button(W.senderAdd).click();
+    host.button(W.next).click();
+    if (host.hasButton(W.makePrivate)) host.button(W.makePrivate).click();
     await host.settle();
-    const area = () => host.doc.querySelector('textarea') as unknown as HTMLTextAreaElement;
+    const area = () => editDescription(host) as unknown as HTMLTextAreaElement;
     area().value = 'new words';
     area().dispatchEvent(new host.win.Event('input') as unknown as Event);
-    host.button(W.save).click();
+    saveDraft(host);
     expect(host.doc.querySelector('.confirm-box')).not.toBeNull();
     area().value = 'old words';
     area().dispatchEvent(new host.win.Event('input') as unknown as Event);
     // The change closed the step; what it named is no longer true.
     expect(host.doc.querySelector('.confirm-box')).toBeNull();
-    host.button(W.save).click();
+    expect(host.button(W.save).disabled).toBe(true);
     await host.settle();
-    expect(saves).toHaveLength(2);
-    expect(saves[1].confirmation).toBeUndefined();
-    expect(saves[1].description).toBe('old words');
+    expect(saves).toHaveLength(1);
+    expect(saves[0].confirmation).toBeUndefined();
+    expect(saves[0].description).toBe('old words');
   });
 
   test('a confirmation the engine no longer accepts is fetched fresh once, then the save goes through', async () => {
@@ -795,7 +937,7 @@ describe('saving', () => {
       },
     });
     host.button('Remove Medical Records').click();
-    host.button(W.save).click();
+    saveDraft(host);
     host.button(W.confirm).click();
     await host.settle();
     expect(host.toolCalls(P.get)).toHaveLength(2);
@@ -805,16 +947,16 @@ describe('saving', () => {
 
   test('Cancel with changes asks inline first; without changes it just goes back', async () => {
     const { host } = await openPrivacy({ rules: SAVED_RULES });
-    host.button(W.cancel).click();
+    host.button(W.back).click();
     expect(host.text()).not.toContain(W.title);
     host.button('Set up').click();
     await host.settle();
     host.button('Remove Medical Records').click();
-    host.button(W.cancel).click();
+    host.button(W.back).click();
     expect(host.text()).toContain(W.discardPrompt);
     host.button(W.keep).click();
     expect(host.text()).toContain('Removed: Medical Records');
-    host.button(W.cancel).click();
+    host.button(W.back).click();
     host.button(W.discard).click();
     expect(host.text()).not.toContain(W.title);
     expect(host.toolCalls(P.set)).toEqual([]);
@@ -830,7 +972,9 @@ describe('follow-up questions', () => {
     const { host } = await openPrivacy({ description: OWNER });
     const section = host.doc.querySelector('section.questions')!;
     expect(section.querySelector('h2')!.textContent).toBe(Q.title);
+    // The explanation sits with the questions on the main view, as on main, not in Details.
     expect(section.textContent).toContain(Q.intro);
+    expect(host.doc.querySelector('details')!.textContent).not.toContain(Q.intro);
     expect(section.querySelector('h3')!.textContent).toBe(Q.topics.family.question);
     const rows = Array.from(section.querySelectorAll('[role="radiogroup"]'));
     // Each pair is named by its question and its choice.
@@ -849,7 +993,7 @@ describe('follow-up questions', () => {
   test('no broad word, no questions; typing one asks them, keeping the caret in the box', async () => {
     const { host } = await openPrivacy({ description: 'my divorce' });
     expect(host.doc.querySelector('section.questions')).toBeNull();
-    const area = host.doc.querySelector('textarea') as unknown as HTMLTextAreaElement;
+    const area = editDescription(host) as unknown as HTMLTextAreaElement;
     area.focus();
     area.value = 'my divorce and my finances';
     area.dispatchEvent(new host.win.Event('input') as unknown as Event);
@@ -859,10 +1003,11 @@ describe('follow-up questions', () => {
 
   test('a choice writes its sentence into the description, and Save (after the usual confirmation) sends it', async () => {
     const { host, saves } = await openPrivacy({ description: OWNER });
+    editDescription(host);
     const share = radio(host, 'family:medical:share');
     share.checked = true;
     share.dispatchEvent(new host.win.Event('change') as unknown as Event);
-    const area = host.doc.querySelector('textarea') as unknown as HTMLTextAreaElement;
+    const area = editDescription(host) as unknown as HTMLTextAreaElement;
     const lines = area.value.split('\n');
     expect(lines[0]).toBe(OWNER);
     expect(lines[1]).toStartWith('About family: private — Family legal and money papers');
@@ -873,10 +1018,10 @@ describe('follow-up questions', () => {
     const back = radio(host, 'family:medical:private');
     back.checked = true;
     back.dispatchEvent(new host.win.Event('change') as unknown as Event);
-    const refined = (host.doc.querySelector('textarea') as unknown as HTMLTextAreaElement).value;
+    const refined = (editDescription(host) as unknown as HTMLTextAreaElement).value;
     expect(refined.split('About family:')).toHaveLength(2);
     // A changed description lowers protection: the owner confirms, as when typing.
-    host.button(W.save).click();
+    saveDraft(host);
     expect(host.doc.querySelector('.confirm-box')!.textContent).toContain(W.confirmDescription);
     expect(host.toolCalls(P.set)).toEqual([]);
     host.button(W.confirm).click();
@@ -887,11 +1032,15 @@ describe('follow-up questions', () => {
     expectNamesOnlyInPrivacy(host);
   });
 
-  test('Save without touching a choice still writes the defaults shown, after the usual confirmation', async () => {
+  test('description edits save the defaults shown, after the usual confirmation', async () => {
     const { host, saves } = await openPrivacy({ description: OWNER });
-    host.button(W.save).click();
-    const area = host.doc.querySelector('textarea') as unknown as HTMLTextAreaElement;
-    expect(area.value.split('\n')[0]).toBe(OWNER);
+    expect(host.hasButton(W.save)).toBe(false);
+    const edited = editDescription(host)!;
+    edited.value += ' ';
+    edited.dispatchEvent(new host.win.Event('input') as unknown as Event);
+    saveDraft(host);
+    const area = editDescription(host) as unknown as HTMLTextAreaElement;
+    expect(area.value.split('\n')[0]!.trim()).toBe(OWNER);
     expect(area.value.split('\n')[1]).toStartWith('About family: private — ');
     expect(host.doc.querySelector('.confirm-box')!.textContent).toContain(W.confirmDescription);
     host.button(W.confirm).click();
@@ -912,16 +1061,17 @@ describe('follow-up questions', () => {
   test('a choice too long to add changes nothing, keeps the radio, and says why until the words change', async () => {
     const long = `my family ${'x'.repeat(1_900)}`;
     const { host } = await openPrivacy({ description: long });
+    editDescription(host);
     const share = radio(host, 'family:medical:share');
     share.checked = true;
     share.dispatchEvent(new host.win.Event('change') as unknown as Event);
-    expect((host.doc.querySelector('textarea') as unknown as HTMLTextAreaElement).value).toBe(long);
+    expect((editDescription(host) as unknown as HTMLTextAreaElement).value).toBe(long);
     expect(radio(host, 'family:medical:private').checked).toBe(true);
     expect(radio(host, 'family:medical:share').checked).toBe(false);
     const note = host.doc.querySelector('section.questions [role="alert"]')!;
     expect(note.textContent).toBe(Q.tooLong);
     // Nothing changed, so leaving needs no discard prompt.
-    host.button(W.cancel).click();
+    host.button(W.back).click();
     expect(host.text()).not.toContain(W.discardPrompt);
   });
 
@@ -931,7 +1081,7 @@ describe('follow-up questions', () => {
     const pick = radio(host, 'family:contacts:private');
     pick.checked = true;
     pick.dispatchEvent(new host.win.Event('change') as unknown as Event);
-    const area = () => host.doc.querySelector('textarea') as unknown as HTMLTextAreaElement;
+    const area = () => editDescription(host) as unknown as HTMLTextAreaElement;
     expect(area().value.split('\n').slice(0, 2)).toEqual(owner.split('\n'));
     expect(area().value.split('\n')[2]).toStartWith('About family: private — ');
     const field = area();
@@ -940,12 +1090,12 @@ describe('follow-up questions', () => {
     expect(radio(host, 'family:contacts:share').checked).toBe(true);
   });
 
-  test('a choice marks the draft changed: Cancel asks before discarding it', async () => {
+  test('a choice marks the draft changed: leaving asks before discarding it', async () => {
     const { host } = await openPrivacy({ description: OWNER });
     const share = radio(host, 'family:conversations:share');
     share.checked = true;
     share.dispatchEvent(new host.win.Event('change') as unknown as Event);
-    host.button(W.cancel).click();
+    host.button(W.back).click();
     expect(host.text()).toContain(W.discardPrompt);
   });
 });
@@ -1009,10 +1159,10 @@ describe('the dashboard Privacy row', () => {
     expect(host.text()).not.toContain('waiting to be checked');
     host.button(W.editLabel).click();
     await host.settle();
-    const area = host.doc.querySelector('textarea') as unknown as HTMLTextAreaElement;
+    const area = editDescription(host) as unknown as HTMLTextAreaElement;
     area.value = `${DESCRIPTION} and more`;
     area.dispatchEvent(new host.win.Event('input') as unknown as Event);
-    host.button(W.save).click();
+    saveDraft(host);
     expect(host.doc.querySelector('.confirm-box')).not.toBeNull();
     host.button(W.confirm).click();
     await host.settle();
@@ -1038,12 +1188,31 @@ describe('words', () => {
     expect(JSON.stringify(W)).not.toMatch(/public/i);
     const { host } = await openPrivacy({ description: DESCRIPTION, rules: SAVED_RULES, pending: 2 });
     expect(host.text()).not.toMatch(/public/i);
+    host.button(W.addRule).click();
     host.button(W.addFolder).click();
+    host.button(W.next).click();
     await host.settle();
     expect(host.text()).not.toMatch(/public/i);
   });
 });
 
+
+test('Escape leaves the pending first-run chooser without opening a profile sheet', async () => {
+  const pending = { pending: true as const, options: PRIVATE_ANSWER_OPTIONS };
+  const { host, saves } = await openPrivacy({
+    getResult: () => privacyToolResult({ configured: false, description: '', rules: [], pendingCount: 0, revision: 'rev1', privateAnswerChoice: pending }, 'current', 'owner-token'),
+  });
+  expect(host.text()).toContain('How should Olympus answer with Private items?');
+  host.doc.dispatchEvent(new host.win.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }) as unknown as Event);
+  await host.settle();
+  expect(host.doc.querySelectorAll('.privacy')).toHaveLength(0);
+  expect(host.doc.querySelectorAll('.privacy-sheet')).toHaveLength(0);
+  expect(host.doc.querySelector('textarea')).toBeNull();
+  expect(saves).toHaveLength(0);
+  host.button('Set up').click();
+  await host.settle();
+  expect(host.text()).toContain('How should Olympus answer with Private items?');
+});
 
 test('pending first-run opens the shared mode choice before any profile edit', async () => {
   const saves: any[] = [];
@@ -1065,4 +1234,157 @@ test('pending first-run opens the shared mode choice before any profile edit', a
   await host.settle();
   expect(saves[0]).toEqual({ private_answer_mode: 'local-first', revision: 'rev1', confirmation: 'owner-token' });
   expect(host.text()).not.toContain('How should Olympus answer with Private items?');
+});
+
+describe('privacy step sheet', () => {
+  test('starts with full description, compact removable chips and collapsed Details', async () => {
+    const { host } = await openPrivacy({ description: DESCRIPTION, rules: SAVED_RULES });
+    expect(host.doc.querySelector('[data-key="privacy:summary"]')?.textContent).toContain(DESCRIPTION);
+    const details = host.doc.querySelector('details')!;
+    expect(details).not.toBeNull();
+    expect(details.hasAttribute('open')).toBe(false);
+    expect(details.textContent).toContain(W.judgingDetails);
+    expect(host.doc.querySelectorAll('.rule-chip')).toHaveLength(3);
+    expect(host.button('Remove Medical Records').textContent).toBe('×');
+    expect(host.button('Add a rule')).toBeDefined();
+  });
+  test('sender has three steps, Back retains input, and double confirm saves once', async () => {
+    const { host, saves } = await openPrivacy();
+    host.button('Add a rule').click();
+    expect(host.text()).toContain('Step 1 of 3');
+    host.button(W.addSender).click();
+    host.button(W.next).click();
+    expect(host.text()).toContain('Step 2 of 3');
+    const input = host.doc.querySelector('input[data-key="privacy:sender"]') as HTMLInputElement;
+    input.value = 'person@example.com';
+    input.dispatchEvent(new host.win.Event('input') as unknown as Event);
+    host.button('Next').click();
+    expect(host.text()).toContain('Step 3 of 3');
+    expect(saves).toHaveLength(0);
+    host.button('Back').click();
+    expect((host.doc.querySelector('input[data-key="privacy:sender"]') as HTMLInputElement).value).toBe('person@example.com');
+    host.button('Next').click();
+    const confirm = host.button('Make private');
+    confirm.click(); confirm.click();
+    await host.settle();
+    expect(saves).toHaveLength(1);
+    expect(saves[0].rules).toEqual([{ kind: 'sender', source_id: 'gmail.email', value: 'person@example.com' }]);
+    expect(host.text()).toContain(W.title);
+    expectNamesOnlyInPrivacy(host);
+  });
+});
+
+describe('privacy sheet persistence boundaries', () => {
+  for (const kind of ['folder', 'label'] as const) {
+    test(`${kind} selection waits for review, Back keeps the choice, confirm saves once`, async () => {
+      const { host, saves } = await openPrivacy();
+      host.button(W.addRule).click();
+      expect(host.button(W.next).disabled).toBe(true);
+      host.button(kind === 'folder' ? W.addFolder : W.addLabel).click();
+      host.button(W.next).click();
+      await host.settle();
+      expect(host.text()).toContain('Step 2 of 3');
+      expect(host.doc.querySelectorAll('.privacy-sheet-actions')).toHaveLength(1);
+      const name = kind === 'folder' ? 'Medical Records' : 'Lawyer Letters';
+      host.button(`Choose ${name}`).click();
+      expect(saves).toHaveLength(0);
+      host.button(W.next).click();
+      expect(host.text()).toContain('Step 3 of 3');
+      expect(saves).toHaveLength(0);
+      host.button(W.sheetBack).click();
+      await host.settle();
+      expect(host.text()).toContain('Step 2 of 3');
+      // The folder browser starts afresh; labels retain the in-session selection.
+      if (kind === 'folder') host.button(`Choose ${name}`).click();
+      host.button(W.next).click();
+      const confirm = host.button(W.makePrivate);
+      confirm.click(); confirm.click();
+      await host.settle();
+      expect(saves).toHaveLength(1);
+      expect(saves[0].rules).toEqual([SAVED_RULES[kind === 'folder' ? 0 : 1]]);
+      expectNamesOnlyInPrivacy(host);
+    });
+  }
+
+  test('changing kind clears the prior candidate and cannot save it as a different kind', async () => {
+    const { host, saves } = await openPrivacy();
+    host.button(W.addRule).click(); host.button(W.addSender).click(); host.button(W.next).click();
+    const input = host.doc.querySelector('input[data-key="privacy:sender"]') as HTMLInputElement;
+    input.value = 'person@example.com'; input.dispatchEvent(new host.win.Event('input') as unknown as Event);
+    host.button(W.next).click(); host.button(W.sheetBack).click(); host.button(W.sheetBack).click();
+    host.button(W.addLabel).click(); host.button(W.next).click();
+    await host.settle();
+    expect(host.button(W.next).disabled).toBe(true);
+    expect(saves).toHaveLength(0);
+  });
+
+  test('removing a chip confirms and applies without a separate Save click', async () => {
+    const { host, saves } = await openPrivacy({ rules: SAVED_RULES });
+    host.button('Remove Medical Records').click();
+    expect(saves).toHaveLength(0);
+    expect(host.text()).toContain('This removes protection from Medical Records.');
+    host.button(W.confirm).click();
+    await host.settle();
+    expect(saves).toHaveLength(1);
+    expect(saves[0].rules).toEqual(SAVED_RULES.slice(1));
+    expect(saves[0].confirmation).toBe('conf1');
+  });
+
+  test('Details stays open during editing; all quick questions remain outside it without a cap', async () => {
+    const { host } = await openPrivacy({ description: 'family health money work relationships home' });
+    let details = host.doc.querySelector('details') as HTMLDetailsElement;
+    expect(details.open).toBe(false);
+    details.open = true;
+    details.dispatchEvent(new host.win.Event('toggle') as unknown as Event);
+    expect(details.querySelectorAll('.qtopic')).toHaveLength(0);
+    expect(host.doc.querySelectorAll('.qtopic')).toHaveLength(6);
+    const area = editDescription(host);
+    area.value += ' and other topics';
+    area.dispatchEvent(new host.win.Event('input') as unknown as Event);
+    details = host.doc.querySelector('details') as HTMLDetailsElement;
+    expect(details.open).toBe(true);
+    expect(details.textContent).not.toContain(W.descriptionShared);
+    expect(details.textContent).not.toContain(W.namesShared);
+  });
+});
+
+test('inline editor retains every keystroke and caret when topics and save availability stay the same', async () => {
+  const { host, saves } = await openPrivacy({ description: 'my diary' });
+  const details = () => host.doc.querySelector('details') as HTMLDetailsElement;
+  details().open = true;
+  details().dispatchEvent(new host.win.Event('toggle') as unknown as Event);
+  const type = (value: string) => {
+    const area = editDescription(host)!;
+    area.value = value;
+    area.dispatchEvent(new host.win.Event('input') as unknown as Event);
+  };
+  type('my diary and a');
+  const area = editDescription(host)!;
+  type('my diary and letters');
+  // This edit must retain the textarea and its current value without redrawing it.
+  expect(editDescription(host)).toBe(area);
+  expect(editDescription(host).value).toBe('my diary and letters');
+  details().open = false;
+  details().dispatchEvent(new host.win.Event('toggle') as unknown as Event);
+  expect(editDescription(host).value).toBe('my diary and letters');
+  saveDraft(host);
+  host.button(W.confirm).click();
+  await host.settle();
+  expect(saves).toHaveLength(1);
+  expect(saves[0].description).toBe('my diary and letters');
+});
+
+test('the save bar follows pending covered edits, including reverting to the saved description', async () => {
+  const { host } = await openPrivacy({ description: 'my family' });
+  expect(host.doc.querySelector('.picker-footer')).toBeNull();
+  for (const value of ['my family and diary', 'my family']) {
+    const area = editDescription(host)!;
+    area.value = value;
+    area.dispatchEvent(new host.win.Event('input') as unknown as Event);
+    expect(host.hasButton(W.save)).toBe(true);
+  }
+  const choice = host.doc.querySelector('input[data-key="privacy:q:family:medical:share"]') as HTMLInputElement;
+  choice.checked = true;
+  choice.dispatchEvent(new host.win.Event('change') as unknown as Event);
+  expect(host.button(W.save).textContent).toBe('Save description and answers');
 });

@@ -2788,6 +2788,18 @@ export const DASHBOARD_PRIVACY_QUESTIONS_COPY = {
  * sender names and the person's own description are never part of this copy.
  */
 export const DASHBOARD_CHATGPT_PRIVACY_COPY = {
+  addRule: 'Add a rule',
+  details: 'Details',
+  judgingDetails: 'Olympus reads your own words when judging each item. Your answers to the follow-up questions become sentences in that description. Always-private rules can only add protection; secrets always stay on your computer.',
+  kindPrompt: 'What would you like to keep private?',
+  step: 'Step {step} of 3',
+  stepPick: 'Step 2 of 3',
+  sheetBack: 'Back',
+  next: 'Next',
+  select: 'Choose',
+  selected: 'Selected',
+  selectFor: 'Choose {name}',
+  confirmRule: 'Keep this private?',
   back: 'Back to Olympus',
   title: 'What\'s private for you?',
   intro: 'Olympus shares your items with ChatGPT unless you say they\'re private. Private items are answered on your computer and never sent to ChatGPT. Passwords and other secrets are always kept on your computer.',
@@ -2818,7 +2830,7 @@ export const DASHBOARD_CHATGPT_PRIVACY_COPY = {
   needFolderSource: 'Connect Dropbox or Google Drive to add a folder.',
   needGmail: 'Connect Gmail to add a label.',
   nothingToSave: 'Nothing to save yet. Change a rule or the description first.',
-  save: 'Save',
+  save: 'Save description and answers',
   saving: 'Saving…',
   cancel: 'Cancel',
   saveFailed: 'Olympus could not save. Your changes are still here. Try again.',
@@ -2869,6 +2881,9 @@ export const DASHBOARD_CHATGPT_PRIVACY_COPY = {
   },
   rowNoCount: 'Uses your description and always-private rules.',
   edit: 'Edit',
+  /** The description while nothing is written yet, with its button. */
+  descriptionEmpty: 'You haven\'t said what\'s private yet.',
+  descriptionStart: 'Describe what\'s private',
   editLabel: 'Edit what\'s private',
   dashboardPending: {
     one: '{n} item waiting to be checked',
@@ -2893,6 +2908,9 @@ export const DASHBOARD_CHATGPT_PRIVACY_CLASSIFIER_APPROVAL_COPY = {
  * `{list}` are filled in by the panel. Nothing here names a source item.
  */
 export const DASHBOARD_CHATGPT_PRIVATE_ANSWER_COPY = {
+  secretOpen: 'Open it in Olympus on your computer',
+  secretFallback: 'Open Olympus on your computer, then Inbox',
+
   pageTitle: 'Olympus private answer',
   title: 'Private answer from your computer',
   /** The muted line under the title once the answer is shown. */
@@ -3225,6 +3243,7 @@ export const DASHBOARD_PRIVATE_ANSWERS_COPY = {
   deleteAll: 'Delete all',
   deleteAllConfirm: 'Delete every question and answer in your private inbox?',
   deleted: 'That answer was deleted',
+  secretLinkUnavailable: 'This link has expired or is unavailable. Choose your question in Inbox.',
   // A delete that removed nothing says so; the page keeps what it shows (owner rule: nothing looks deleted when it isn't).
   deleteNotFound: 'Olympus could not find this answer, so nothing was deleted. Reload to see your inbox as it is now.',
   deleteUnavailable: 'Private answers cannot be changed right now, so nothing was deleted. Try again in a moment.',
@@ -3544,4 +3563,20 @@ export const DASHBOARD_OUTSIDE_HELP_COPY = {
 export function archiveFindingList(kind: string): 'not_imported' | 'how_read' {
   const lists: Readonly<Record<string, 'not_imported' | 'how_read'>> = DASHBOARD_ARCHIVE_COPY.listOf;
   return Object.prototype.hasOwnProperty.call(lists, kind) ? lists[kind]! : 'not_imported';
+}
+
+/** Fixed, content-free Inbox failure copy. Broad codes must not invent a key or provider failure. */
+export const PRIVATE_ANSWER_FAILURES = {
+  answer_failed: { message: 'The model could not finish the answer.', href: '/dashboard?keys', action: 'Check models' },
+  no_model: { message: 'Your local model is not available.', href: '/dashboard?keys', action: 'Set up local models' },
+  model_downloading: { message: 'Your local model is still downloading.', href: '/dashboard?keys', action: 'Check models' },
+  evidence_changed: { message: 'Items changed before Olympus could finish the answer.', href: '/dashboard?keys', action: 'Check setup' },
+  eligibility_unavailable: { message: 'Olympus could not check whether the items are still available.', href: '/dashboard?keys', action: 'Check setup' },
+  save_refused: { message: 'Olympus could not save the answer.', href: '/dashboard?keys', action: 'Check setup' },
+} as const satisfies Record<import('../../core/waiting-private-questions.ts').WaitingQuestionRetryReason, { message: string; href: string; action: string }>;
+
+/** Also embedded in the browser controller so initial, polled and opened rows use the same mapping. */
+export function privateAnswerFailure(reason: unknown, mapping = PRIVATE_ANSWER_FAILURES): { message: string; action: string; href?: string } {
+  return typeof reason === 'string' && Object.prototype.hasOwnProperty.call(mapping, reason)
+    ? mapping[reason as keyof typeof mapping] : { message: 'Olympus could not answer this.', action: 'Try again.' };
 }

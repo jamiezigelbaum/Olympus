@@ -144,6 +144,14 @@ export function withWorkerBearerAuth(
     if (!authToken) {
       return workerAuthRequiredResponse();
     }
+    if (isDashboardMessagingRoute(request)) {
+      const origin = sameRequestOrigin(request);
+      if (!origin || !isLoopbackOrigin(origin)
+        || (!requestFromOwnerSocket(request) && (options.requireOwnerSocket || !isLoopbackAddress(requestPeerAddress(request))))
+        || request.headers.has('X-Forwarded-Proto') || request.headers.has('X-Forwarded-For') || request.headers.has('X-Forwarded-Host')) {
+        return dashboardControlForbiddenResponse('origin_mismatch');
+      }
+    }
     if (isDashboardLaunchMintRequest(request)) {
       // Bearer only, and only the bearer: never the derived dash_ view token,
       // never a live control cookie. The origin check is the same one every
@@ -609,13 +617,22 @@ export const DASHBOARD_ARCHIVE_IMPORT_LOCAL_PATHS: readonly string[] = [
   '/dashboard/archive-import/stop',
 ];
 
+export const DASHBOARD_MESSAGING_PATHS: readonly string[] = [
+  '/dashboard/messaging/start', '/dashboard/messaging/status', '/dashboard/messaging/respond',
+  '/dashboard/messaging/cancel', '/dashboard/messaging/chats', '/dashboard/messaging/scope',
+];
+
+function isDashboardMessagingRoute(request: Request): boolean {
+  return request.method === 'POST' && DASHBOARD_MESSAGING_PATHS.includes(new URL(request.url).pathname);
+}
+
 function isDashboardArchiveImportLocalRoute(request: Request): boolean {
   return request.method === 'POST' && DASHBOARD_ARCHIVE_IMPORT_LOCAL_PATHS.includes(new URL(request.url).pathname);
 }
 
 /** Routes only a local-grade control session reaches: Outside help, Private answers, and archive approvals. */
 function isDashboardLocalGradeRoute(request: Request): boolean {
-  return isDashboardConsultControlRoute(request) || isDashboardPrivateAnswersRoute(request) || isDashboardArchiveImportLocalRoute(request)
+  return isDashboardConsultControlRoute(request) || isDashboardPrivateAnswersRoute(request) || isDashboardArchiveImportLocalRoute(request) || isDashboardMessagingRoute(request)
     || (request.method === 'POST' && ['/dashboard/models/first-run-privacy', '/dashboard/models/local/discover', '/dashboard/models/local/test', '/dashboard/models/local/save'].includes(new URL(request.url).pathname));
 }
 
