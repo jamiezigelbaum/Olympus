@@ -614,109 +614,14 @@ there is no "always Secret" setting. Keep a short note of the confirmed
 answer for Step 6: the description in the operator's words, and any folders,
 labels or senders they named as always Private.
 
-Only after the operator confirms, ask the posture question. **Do not lead
-with a recommendation.** A recommendation must come from the operator's
-own answer, so first ask:
-
-> Do you run local AI models on this machine — or want to set that up?
-
-This moment — not earlier — is when local models enter the conversation.
-Do not mention machine checks, detected runtimes, or postures during the
-tier explainer or the privacy conversation; an unprompted "I checked
-this machine for Ollama" lands as a non sequitur.
-
-If you detected a local runtime, it is a conversational observation to
-verify aloud HERE — "I noticed this machine is already serving a local
-model; do you actually use it?" — never a silent basis for recommending a
-posture. But be strict about what counts as detection. **An installed
-plugin is not a runtime.** OpenClaw ships a built-in `llama-cpp` provider
-plugin, so "there is a llama.cpp plugin" is true on a machine that has
-never run a local model, and treating it as a cue recommends
-`local-first` to someone with nothing to serve it. The only thing worth
-reporting is a running OpenAI-compatible HTTP server actually answering on
-the ports Olympus's local lanes are configured to use — the answer
-endpoint and the embedding endpoint (both shipped `local-first`/`local-only`
-profiles use `http://127.0.0.1:28090/v1`, with distinct model IDs). Read the
-effective policy and probe its endpoints and models,
-and if nothing answers, you detected nothing: ask the question above with
-no preamble. Use their answer to mark which option below is recommended
-for them, then present all four.
-
-The operator has likely never heard of Venice, so introduce it once,
-before the options name it:
-
-Use these display labels in conversation and setup summaries. Preset IDs in
-parentheses are command values; keep those IDs in commands and configuration.
-The setup result also supplies `presetLabel` for its human-facing name.
-
-> Two of these options use Venice (venice.ai) — a privacy-focused AI
-> cloud. What it offers is a provider that does not train on your
-> conversations or retain them the way an ordinary cloud model does.
-> Being straight with you about the limit, because it matters for the
-> tier we just discussed: this is Venice's privacy policy and
-> infrastructure, not encryption that would make it impossible for them
-> to read a question. Olympus does not provide or qualify
-> end-to-end-encrypted inference in this version.
->
-> How do you want to handle your Private data?
->
-> 1. **Local models with Venice fallback** (`local-first`) — recommended if
->    you run local models. Private questions are answered on your own
->    machine first; Venice is the approved second step when the local lane
->    cannot answer. Requires: a local runtime with lots of fast memory —
->    MLX, llama.cpp, Ollama, LM Studio and similar expose the local endpoint
->    Olympus uses — plus a Venice API key (pay-as-you-go). Search indexing
->    uses the model built into Olympus: no key, nothing leaves the machine.
->    Trade-off: strongest owner-controlled first step, with private-cloud escalation available;
->    speed and first-pass quality depend on your machine.
->
-> 2. **Local models** (`local-only`) — Private questions are answered
->    only on your own machine. Venice is not used. Requires: the same local
->    runtime with lots of fast memory. Search indexing uses the model built
->    into Olympus. Trade-off: no
->    Private-tier cloud escalation; if the local lane cannot answer, Olympus reports the gap.
->
-> 3. **Venice** (`private-cloud-only`) — recommended if you do
->    not run local models. Private content goes only to Venice, on its
->    Private model path — `kimi-k3` for answers. Search indexing for every
->    tier uses the model built into Olympus, on this machine. Requires: a
->    Venice API key (pay-as-you-go). Private content never goes to Gemini;
->    a separately approved Venice Private embedding model stays an opt-in.
->    Trade-off: no local-model requirement
->    or local fallback; you are choosing a privacy-focused cloud provider
->    for Private answers and embeddings, on that provider's word rather than on
->    encryption.
->
-> 4. **Private meaning search on this computer** (`no-sensitive`) — Olympus
->    stores Private items and finds them by meaning on this computer using
->    the built-in embedding model, and keeps their search vectors here.
->    Ask privately and the sealed ChatGPT panel can use them; no Private
->    agent answer lane is set up. When a question touches health,
->    finances, or legal matters, the answer says Private sources were not
->    searched instead of answering from them. Requires:
->    nothing; Personal and Private content is indexed by the model built
->    into Olympus. Standalone default-path policies with the shipped 1.0.0 Private retrieval
->    block and built-in local embedding profile switch at engine start with a
->    dated backup; other settings are preserved. Gateway-pinned policies are never rewritten.
->    To stay keyword-only, set `retrieval.trustDomains.secure_local.activationMode: lexical_only`; this is never re-migrated.
->    Trade-off: Private sources need the local panel until you add an agent answer lane.
->
-> You can change this later — it's a config file, not a commitment
-> (`olympus sovereignty init --preset <name>`).
-
-**Lead with the recommendation (adaptive ordering).** The numbered order
-above is the neutral default. The moment the operator has told you
-something that makes one posture the clear fit — "I can't run local
-models" makes it `private-cloud-only`; "nothing sensitive ever leaves this
-machine" makes it `local-only` — put THAT option first, opening with why
-it is recommended for them, in one sentence, in their own terms. Then
-present the remaining options beneath it, framed as alternatives: "here
-are the others, in case one fits better or you change your mind later."
-Never leave the recommended option buried mid-list with only a
-"recommended" tag — the shape of the list is part of the guidance.
-
-Ask which posture fits how they feel about their most private data, answer
-their questions, and record the choice.
+Only after the operator confirms, run `olympus setup --privacy-options`.
+If it says `configured`, their policy is already chosen: show its current
+setting and do not ask this first-run question again. If it says `pending` or
+`not_installed`, present every option's label and description exactly as the
+command returns them, with `local-first` marked Recommended. Explain Venice's
+provider policy and its limits in plain words; answer every question. Ask the
+operator which option they want. Never infer consent from the recommendation.
+The option text comes from the same source as both setup panels.
 
 **Now clear the second gate, before you run setup.** `olympus setup` does
 not only write config: it registers the background worker service

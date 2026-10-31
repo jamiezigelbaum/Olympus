@@ -1,3 +1,7 @@
+import { withFirstRunPrivacyGate } from '../first-run-privacy-gate.ts';
+import { privacyChoicePending } from '../../core/first-run-privacy.ts';
+import { LocalModelDiscovery, saveLocalAnswerModel } from '../../core/local-model-discovery.ts';
+import { saveFirstRunPrivacyChoice } from '../../core/first-run-privacy.ts';
 import { createSpoolChangeSubscription } from '../messaging-spool-wake.ts';
 import { hasFolderLayout, resolvedRawPath, resolvedStorePath, retiredPathSettings } from '../../core/source-placement.ts';
 import { DASHBOARD_PRIVATE_ANSWERS_COPY as PRIVATE_ANSWERS_COPY } from '../dashboard/vocabulary.ts';
@@ -1485,11 +1489,9 @@ async function createSovereigntyAnalystMap(input: {
 }
 
 /**
- * The built-in private model backs the Private lane when no other private
- * analyst is configured: with no constructible Venice member in the secure
- * pool, each local secure-pool member falls back to the built-in model when
- * its own model service is not running. A configured, running local service
- * is always used first, and a configured Venice member leaves the pool as is.
+ * Each local Private-pool member falls back to the built-in model when its
+ * configured service is not running, including when Venice is available.
+ * A configured, running local service is used first.
  * Returns whether the built-in model was wired in.
  */
 export function applyBuiltInPrivateAnalyst(
@@ -1502,7 +1504,6 @@ export function applyBuiltInPrivateAnalyst(
     const entry = map.get(id);
     return entry ? [[id, entry] as const] : [];
   });
-  if (members.some(([, entry]) => entry.backend === 'venice')) return false;
   let wired = false;
   for (const [id, entry] of members) {
     if (entry.backend !== 'local') continue;
@@ -1515,7 +1516,7 @@ export function applyBuiltInPrivateAnalyst(
 /**
  * Whether the built-in model answers for this Private-pool analyst when its
  * server is down, as applyBuiltInPrivateAnalyst wires it: a local member of a
- * pool without Venice. Judged by install state, not by "prepared in this
+ * pool. Judged by install state, not by "prepared in this
  * process": boot re-verifies the model while the first readiness check runs,
  * and that check locked every source (#591).
  */
@@ -1523,9 +1524,10 @@ export function builtInBacksPrivateAnalyst(
   id: string,
   state: ReturnType<BuiltInAnalystModel['status']>['state'] | undefined,
   members: readonly { id: string; profile: SovereigntyModelProfile }[],
+  _availableIds?: ReadonlySet<string>,
 ): boolean {
   if (!state || state === 'failed') return false;
-  return members.some((member) => member.id === id) && !members.some((member) => member.profile.provider === 'venice');
+  return members.some((member) => member.id === id && member.profile.provider === 'local-openai-compatible');
 }
 
 /** Whether this computer's configured local answer model answers /models within a few seconds. */
@@ -2616,12 +2618,15 @@ export async function main(): Promise<void> {
     },
     builtInAnswers: (id) => {
       try {
-        return builtInBacksPrivateAnalyst(id, workerBuiltInModel?.model.status().state, sovereigntyEngine.resolveAnalystPool({ trustDomain: 'secure_local' }).members);
+        const members = sovereigntyEngine.resolveAnalystPool({ trustDomain: 'secure_local' }).members;
+        const available = new Set(members.filter(member => member.profile.provider !== 'venice' || bootModelCredentials.get(member.id)).map(member => member.id));
+        return builtInBacksPrivateAnalyst(id, workerBuiltInModel?.model.status().state, members, available);
       } catch {
         return false;
       }
     },
   });
+  const localModelDiscovery = new LocalModelDiscovery();
   const getModelSetup = () => {
     const view = modelSetup.getStatus();
     if (!modelReloadUnavailable) return view;
@@ -5903,6 +5908,22 @@ export async function main(): Promise<void> {
             sovereigntyEngine,
             modelSetup: getModelSetup,
             checkModelSetup: () => modelSetup.checkLocalModels(),
+            discoverLocalModels: (baseUrl) => localModelDiscovery.discover(baseUrl),
+            testLocalModels: (selection) => localModelDiscovery.test(selection),
+            saveLocalAnswerModel: async (selection) => {
+              if (sovereigntyEngine.source !== 'file' || !sovereigntyEngine.path || !modelReloadInstalled || !workerRestartsItself(workerLaunch, process.env)) return { ok: false, detail: 'Olympus cannot apply this change automatically. Restart support and a writable policy are required.' };
+              const result = await saveLocalAnswerModel({ path: sovereigntyEngine.path, expected: sovereigntyEngine.config, selection, discovery: localModelDiscovery });
+              if (!result.ok) return result;
+              if (!requestModelReload()) return { ok: false, detail: 'The model was saved but could not be applied. Restart Olympus and check readiness.' };
+              return result;
+            },
+            saveFirstRunPrivacyChoice: (choice) => {
+              if (sovereigntyEngine.source !== 'file' || !sovereigntyEngine.path) return false;
+              const result = saveFirstRunPrivacyChoice(sovereigntyEngine.path, choice);
+              if (!result.ok || !result.changed) return false;
+              requestModelReload();
+              return true;
+            },
             connectModelKey,
             // The panel's tools on the computer; bound late (set up further
             // down; called only per request).
@@ -6822,7 +6843,7 @@ export async function main(): Promise<void> {
     // (relay-mode OAuth approval: core/request-peer.ts).
     // The relay child reads the offline tool-list mapping it keeps the relay
     // in step with (workers/relay-surfaces.ts), by its per-boot secret.
-    fetch: withRequestPeer(withRelaySurfacesRoute(createRelaySurfacesHandler({
+    fetch: withRequestPeer(withFirstRunPrivacyGate(withRelaySurfacesRoute(createRelaySurfacesHandler({
       connections: () => remoteConnections(),
       publicUrls: remotePublicUrls,
       isRelayed: isRelayedRequest,
@@ -6873,7 +6894,7 @@ export async function main(): Promise<void> {
         // The brief route must pass both bearer and owner-socket authorization.
         withWorkerBearerAuth(withEngineBriefRoute(worker.fetch, { view: (signal) => engineBriefView(chatgptSurface, signal) }), { authToken, requireOwnerSocket: !!socketPath, sessionSecret: dashboardSessionSecret.secret }),
       )),
-    )))), !!socketPath),
+    )))), { pending: () => privacyChoicePending(sovereigntyEngine), isRelayed: carriesRelayMarker }), !!socketPath),
   };
   // Nothing is answered from the local files index before what an earlier version
   // indexed inside Olympus's own folders is gone (own-roots-cleanup.ts).

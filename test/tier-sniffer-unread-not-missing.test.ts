@@ -14,7 +14,6 @@ import { join } from 'node:path';
 import type { AnalystModel, AnalystModelRequest } from '../src/core/analyst.ts';
 import { defaultDropboxIngestionPolicy } from '../src/core/source-ingestion-policy.ts';
 import { loadSovereigntyPreset, isPublicTierRetired } from '../src/core/sovereignty.ts';
-import { STANDALONE_SOVEREIGNTY_PRESET } from '../src/core/engine-service.ts';
 import { appendClassificationLedgerEntry, CLASSIFICATION_LEDGER_OWNER_APPROVAL } from '../src/workers/classification-ledger.ts';
 import { BUILT_IN_SNIFFER_LANE } from '../src/workers/classification/built-in-sniffer.ts';
 import {
@@ -60,7 +59,7 @@ afterEach(() => {
 
 /** Dropbox connected, names listed, nothing extracted yet. */
 async function connected() {
-  const policy = loadSovereigntyPreset(STANDALONE_SOVEREIGNTY_PRESET);
+  const policy = loadSovereigntyPreset('no-sensitive');
   const installed = configureInstalledTierClassification({
     env,
     lane: { kind: BUILT_IN_SNIFFER_LANE.kind, modelId: BUILT_IN_SNIFFER_LANE.modelId },

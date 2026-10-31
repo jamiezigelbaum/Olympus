@@ -1,3 +1,5 @@
+import { PRIVATE_ANSWER_OPTIONS } from '../../core/privacy-language.ts';
+import type { SovereigntyPresetName } from '../../core/sovereignty.ts';
 /**
  * Setup from ChatGPT: the tools the Olympus panel calls to connect sources,
  * choose folders and mail, disconnect, and choose models, so a ChatGPT user
@@ -146,6 +148,7 @@ export interface ChatGptSetupBackend {
   /** The saved privacy settings and the privacy-check backlog; throws when the profile cannot be read. */
   privacySettings(): PrivacySettings;
   /** Saves a validated update (each field given replaces the saved one); returns the settings now. */
+  choosePrivateAnswers?(choice: SovereigntyPresetName): PrivacySettings;
   savePrivacy(update: { description?: string; rules?: PrivacyRuleView[] }): PrivacySettings;
   /**
    * Whose privacy confirmations these are. A host that wraps the backend per
@@ -394,6 +397,7 @@ export const PRIVACY_SET_TOOL: ToolDefinition = {
   inputSchema: {
     type: 'object',
     properties: {
+      private_answer_mode: { type: 'string', enum: PRIVATE_ANSWER_OPTIONS.map(option => option.id), description: 'First-run Private-answer mode chosen by the owner in the panel.' },
       description: { type: 'string', maxLength: 2000, description: 'The user\'s own words about what is private for them.' },
       rules: { type: 'array', items: PRIVACY_RULE_SCHEMA, maxItems: 100 },
       confirmation: { type: 'string', maxLength: 128, description: 'The panel\'s confirmation from olympus_privacy_get.' },
@@ -508,13 +512,24 @@ export async function callSetupTool(
         return privacyToolResult(visible, 'current', issuePrivacyConfirmation(backend));
       }
       case PRIVACY_SET_TOOL_NAME: {
-        const { confirmation, revision, ...fields } = args;
+        const { confirmation, revision, private_answer_mode, ...fields } = args;
         if (confirmation !== undefined && typeof confirmation !== 'string') throw new ChatGptSurfaceError('invalid_params');
         // Every save is a compare-and-swap: a caller that omits the revision
         // could overwrite settings it never saw (review, 2026-10-03).
         if (typeof revision !== 'string' || !revision || revision.length > 64) {
           throw new ChatGptSurfaceError('invalid_params');
         }
+        if (private_answer_mode !== undefined) {
+          if (!PRIVATE_ANSWER_OPTIONS.some(option => option.id === private_answer_mode) || Object.keys(fields).length) throw new ChatGptSurfaceError('invalid_params');
+          if (typeof confirmation !== 'string' || !privacyConfirmationValid(backend, confirmation)) throw new ChatGptSurfaceError('privacy_owner_only');
+          if (!backend.choosePrivateAnswers) throw new ChatGptSurfaceError('unavailable');
+          const current = backend.privacySettings();
+          if (current.revision !== revision) return privacyToolResult(visiblePrivacy(current, secretLocations(backend)), 'conflict');
+          const saved = backend.choosePrivateAnswers(private_answer_mode as SovereigntyPresetName);
+          spendPrivacyConfirmation(backend, confirmation);
+          return privacyToolResult(visiblePrivacy(saved, secretLocations(backend)), 'saved');
+        }
+        if (backend.privacySettings().privateAnswerChoice?.pending) throw new ChatGptSurfaceError('privacy_choice_required');
         let update: ReturnType<typeof parsePrivacyProfileInput>;
         try {
           update = parsePrivacyProfileInput(fields);
@@ -542,7 +557,7 @@ export async function callSetupTool(
           ...(rules ? { rules: rules as PrivacyRuleView[] } : {}),
         });
         if (confirmed) spendPrivacyConfirmation(backend, confirmation);
-        return privacyToolResult(visiblePrivacy(saved, secrets), 'saved');
+        return privacyToolResult(visiblePrivacy(saved, secrets), 'saved', saved.privateAnswerChoice ? issuePrivacyConfirmation(backend) : undefined);
       }
       default:
         throw new ChatGptSurfaceError('unknown_tool');
@@ -901,6 +916,7 @@ const BACKEND_CODES: Record<string, ChatGptErrorCode> = {
   folder_needs_helper: 'folder_needs_helper',
   source_dashboard_not_supported: 'unavailable',
   source_not_connected: 'source_not_connected',
+  privacy_choice_required: 'privacy_choice_required',
   disconnect_source_busy: 'source_busy',
   disconnect_credential_delete_failed: 'disconnect_incomplete',
   capture_stop_unconfirmed: 'disconnect_incomplete',

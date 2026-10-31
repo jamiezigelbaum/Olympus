@@ -65,6 +65,18 @@ describe('requiredModelProfiles', () => {
 });
 
 describe('ModelSetupService status', () => {
+  test('local-first remains usable without the optional Venice key', async () => {
+    const service = new ModelSetupService({
+      config: loadSovereigntyPreset('local-first'),
+      credentialState: (id) => id === 'venice-private' ? 'missing' : 'ready',
+      builtInAnswers: () => true,
+      fetch: asFetch(async () => { throw new Error('local server unreachable'); }),
+      autoCheck: false,
+    });
+    const result = await service.checkLocalModels();
+    expect(result.ready).toBe(true);
+    expect(result.cards.find(card => card.id === 'venice')).toMatchObject({ required: false, state: 'not_configured' });
+  });
   test('gates readiness on required cards and does no inference during status reads', () => {
     let requests = 0;
     const states: Record<string, ModelCredentialState> = {
