@@ -28360,10 +28360,14 @@ var init_embedding_identity = __esm(() => {
 
 // src/workers/source-index/embeddings.ts
 import { Buffer as Buffer3 } from "node:buffer";
+import { AsyncLocalStorage as AsyncLocalStorage2 } from "node:async_hooks";
 import { createHash as createHash14 } from "node:crypto";
 import { lookup as lookup2 } from "node:dns/promises";
 import { request as httpsRequest } from "node:https";
 import { isIP as isIP2 } from "node:net";
+function priorityQueryEmbeddingRequested() {
+  return priorityQueryEmbedding.getStore() === true;
+}
 function isApprovedSecureSourceEmbeddingProvider(provider) {
   return provider.backend === "local" || provider.backend === "cloud" && provider.provider === "venice";
 }
@@ -29164,13 +29168,14 @@ function mediaJudgeMethods(provider) {
     ...provider.embedPromptTexts ? { embedPromptTexts: (texts) => provider.embedPromptTexts(texts) } : {}
   };
 }
-var SourceEmbeddingInputsFailedError, DEFAULT_GEMINI_EMBEDDING_MODEL = "gemini-embedding-2", DEFAULT_GEMINI_API_BASE_URL = "https://generativelanguage.googleapis.com/v1beta", DEFAULT_VENICE_SOURCE_EMBEDDING_MODEL = "text-embedding-qwen3-8b", DEFAULT_VENICE_SOURCE_EMBEDDING_BASE_URL = "https://api.venice.ai/api/v1", DEFAULT_VENICE_SOURCE_EMBEDDING_DIMENSION = 4096, VENICE_SOURCE_EMBEDDING_QUERY_INSTRUCTION = "Instruct: Given a web search query, retrieve relevant passages that answer the query", DEFAULT_MAX_MEDIA_PER_INPUT = 0, MAX_MEDIA_PER_INPUT_LIMIT = 6, DEFAULT_MAX_MEDIA_REDIRECTS = 3, DEFAULT_MAX_MEDIA_BYTES = 5000000, DEFAULT_MEDIA_FETCH_TIMEOUT_MS = 5000, SUPPORTED_IMAGE_MIME_TYPES, MEDIA_FETCH_HEADERS, TRANSIENT_EMBEDDING_STATUSES, TRANSIENT_EMBEDDING_RETRY_DELAYS_MS, TransientSourceEmbeddingError;
+var priorityQueryEmbedding, SourceEmbeddingInputsFailedError, DEFAULT_GEMINI_EMBEDDING_MODEL = "gemini-embedding-2", DEFAULT_GEMINI_API_BASE_URL = "https://generativelanguage.googleapis.com/v1beta", DEFAULT_VENICE_SOURCE_EMBEDDING_MODEL = "text-embedding-qwen3-8b", DEFAULT_VENICE_SOURCE_EMBEDDING_BASE_URL = "https://api.venice.ai/api/v1", DEFAULT_VENICE_SOURCE_EMBEDDING_DIMENSION = 4096, VENICE_SOURCE_EMBEDDING_QUERY_INSTRUCTION = "Instruct: Given a web search query, retrieve relevant passages that answer the query", DEFAULT_MAX_MEDIA_PER_INPUT = 0, MAX_MEDIA_PER_INPUT_LIMIT = 6, DEFAULT_MAX_MEDIA_REDIRECTS = 3, DEFAULT_MAX_MEDIA_BYTES = 5000000, DEFAULT_MEDIA_FETCH_TIMEOUT_MS = 5000, SUPPORTED_IMAGE_MIME_TYPES, MEDIA_FETCH_HEADERS, TRANSIENT_EMBEDDING_STATUSES, TRANSIENT_EMBEDDING_RETRY_DELAYS_MS, TransientSourceEmbeddingError;
 var init_embeddings = __esm(() => {
   init_operation_error();
   init_local_model_policy();
   init_model_transport();
   init_zkapi_consult_settings();
   init_embedding_identity();
+  priorityQueryEmbedding = new AsyncLocalStorage2;
   SourceEmbeddingInputsFailedError = class SourceEmbeddingInputsFailedError extends Error {
     failedIndexes;
     reason;
@@ -59356,6 +59361,9 @@ class BuiltInSourceEmbeddingProvider {
   now;
   loading;
   loaded;
+  priorityLoaded;
+  prioritySlotBusy = false;
+  priorityWaiting = [];
   lastFailure;
   slotBusy = false;
   imageSupportWarned = false;
@@ -59506,7 +59514,7 @@ class BuiltInSourceEmbeddingProvider {
       if (this.spec.runtime === "litert") {
         if (!installed.libraryPath)
           throw new Error("the LiteRT-LM runtime is not installed.");
-        const embedder = await this.liteRtFactory({
+        const settings = {
           library: installed.libraryPath,
           model: installed.modelPath,
           cacheDir: join54(dirname49(installed.modelPath), "cache"),
@@ -59514,8 +59522,18 @@ class BuiltInSourceEmbeddingProvider {
           device: this.device,
           maxInputTokens: this.spec.maxTokens,
           ...this.spec.vision ? { visionTokensPerImage: this.spec.vision.tokensPerImage } : {}
-        });
+        };
+        const embedder = await this.liteRtFactory(settings);
         model = { kind: "litert", embedder };
+        try {
+          const { visionTokensPerImage: _vision, ...querySettings } = settings;
+          this.priorityLoaded = { kind: "litert", embedder: await this.liteRtFactory(querySettings) };
+        } catch (error) {
+          await embedder.release().catch(() => {
+            return;
+          });
+          throw error;
+        }
         if (this.spec.vision)
           reportBuiltInEmbeddingVision(embedder.vision, { env: this.env, model: this.spec });
       } else {
@@ -59524,6 +59542,15 @@ class BuiltInSourceEmbeddingProvider {
         const tokenizer = loadTokenizer(installed.vocabularyPath);
         const session = await this.runtimeFactory(installed).createSession(installed.modelPath, { threads: this.threads });
         model = { kind: "onnx", session, tokenizer };
+        try {
+          const querySession = await this.runtimeFactory(installed).createSession(installed.modelPath, { threads: this.threads });
+          this.priorityLoaded = { kind: "onnx", session: querySession, tokenizer };
+        } catch (error) {
+          await session.release?.().catch(() => {
+            return;
+          });
+          throw error;
+        }
       }
       reportBuiltInEmbeddingState(reporterOptions, "ready");
       return model;
@@ -59534,6 +59561,21 @@ class BuiltInSourceEmbeddingProvider {
     }
   }
   async withSlot(taskType, run) {
+    if (taskType === "RETRIEVAL_QUERY" && priorityQueryEmbeddingRequested()) {
+      if (this.prioritySlotBusy)
+        await new Promise((resolve14) => this.priorityWaiting.push(resolve14));
+      else
+        this.prioritySlotBusy = true;
+      try {
+        return await run();
+      } finally {
+        const next = this.priorityWaiting.shift();
+        if (next)
+          next();
+        else
+          this.prioritySlotBusy = false;
+      }
+    }
     if (this.slotBusy) {
       await new Promise((resolve14) => this.waiting[taskType === "RETRIEVAL_QUERY" ? "query" : "document"].push(resolve14));
     } else {
@@ -59550,6 +59592,11 @@ class BuiltInSourceEmbeddingProvider {
     }
   }
   async embedLoaded(model, inputs, taskType) {
+    if (taskType === "RETRIEVAL_QUERY" && priorityQueryEmbeddingRequested()) {
+      if (!this.priorityLoaded)
+        throw new BuiltInEmbeddingNotReadyError(this.status());
+      model = this.priorityLoaded;
+    }
     if (model.kind === "litert")
       return this.embedLiteRt(model.embedder, inputs, taskType);
     const windowTokens = this.spec.maxTokens - 2;
@@ -62830,17 +62877,17 @@ function namesOnlyCoverageNote(count) {
 }
 
 // src/workers/answer-activity.ts
-import { AsyncLocalStorage as AsyncLocalStorage2 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage3 } from "node:async_hooks";
 function runWithLocalInferenceGuard(guard, work) {
-  localInferenceGuards ??= new AsyncLocalStorage2;
+  localInferenceGuards ??= new AsyncLocalStorage3;
   return localInferenceGuards.run([...localInferenceGuards?.getStore() ?? [], guard], work);
 }
 function runBackgroundInference(work) {
-  localInferencePriority ??= new AsyncLocalStorage2;
+  localInferencePriority ??= new AsyncLocalStorage3;
   return localInferencePriority.run("background", work);
 }
 function runClassificationInference(work) {
-  localInferencePriority ??= new AsyncLocalStorage2;
+  localInferencePriority ??= new AsyncLocalStorage3;
   return localInferencePriority.run("maintenance", work);
 }
 function createAnswerActivity(onBusy, options = {}) {
@@ -63285,7 +63332,7 @@ var init_evidence_versions = __esm(() => {
 });
 
 // src/core/analyst.ts
-import { AsyncLocalStorage as AsyncLocalStorage3 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage4 } from "node:async_hooks";
 function refuseLocalOnlyOnOrdinaryCloud(request, providerLabel3) {
   if (!request.localOnly)
     return;
@@ -64040,7 +64087,7 @@ var init_analyst = __esm(() => {
   init_types();
   init_operation_error();
   init_evidence_versions();
-  analystAbortSignalStorage = new AsyncLocalStorage3;
+  analystAbortSignalStorage = new AsyncLocalStorage4;
   ANALYST_SYSTEM = [
     "You are an evidence analyst. Answer the question USING ONLY the numbered evidence provided.",
     "Rules:",
@@ -64671,7 +64718,7 @@ var init_parent_label = __esm(() => {
 });
 
 // src/workers/source-index/answer-latency-trace.ts
-import { AsyncLocalStorage as AsyncLocalStorage4 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage5 } from "node:async_hooks";
 import { randomUUID as randomUUID14 } from "node:crypto";
 function createSourceAnswerTrace(now = () => new Date) {
   const received = now();
@@ -64932,7 +64979,7 @@ function nonNegativeMs(value) {
 }
 var storage, CONTENT_FREE_ERROR_CLASSES;
 var init_answer_latency_trace = __esm(() => {
-  storage = new AsyncLocalStorage4;
+  storage = new AsyncLocalStorage5;
   CONTENT_FREE_ERROR_CLASSES = new Set([
     "AbortError",
     "AnalystUnavailable",
@@ -65836,7 +65883,7 @@ var init_evidence_pack = __esm(() => {
 });
 
 // src/core/release-manifest.ts
-import { AsyncLocalStorage as AsyncLocalStorage5 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage6 } from "node:async_hooks";
 function createReleaseManifestSink() {
   return { manifests: [] };
 }
@@ -65899,7 +65946,7 @@ function withheldSourceAnswer(reason) {
 }
 var storage2, ANSWER_BECAME_PRIVATE = "Olympus withheld this answer because an item became Private.", ANSWER_RELEASE_UNVERIFIED = "Olympus withheld this answer because its current privacy classification could not be verified.", withheldAnswers;
 var init_release_manifest = __esm(() => {
-  storage2 = new AsyncLocalStorage5;
+  storage2 = new AsyncLocalStorage6;
   withheldAnswers = new WeakSet;
 });
 
@@ -105409,6 +105456,7 @@ function renderEnginePlist(input) {
 }
 function defaultEngineConfig() {
   return {
+    olympusStandalone: true,
     worker: {
       service: { enabled: true },
       scheduler: { enabled: true }
@@ -105440,6 +105488,7 @@ function reconcileEngineConfig(path) {
     return { wrote: true, config: defaults };
   }
   const next = structuredClone(current2);
+  next.olympusStandalone = true;
   const worker = objectAt(next, "worker");
   const service = objectAt(worker, "service");
   if (service.enabled === undefined)
@@ -115055,6 +115104,627 @@ var init_privacy_profile = __esm(() => {
   };
 });
 
+// src/core/analyst-built-in.ts
+import { totalmem as totalmem2 } from "node:os";
+function builtInAnalystEnabled(env = process.env, platform2 = `${process.platform}-${process.arch}`) {
+  const raw = env[BUILT_IN_ANALYST_ENV]?.trim().toLowerCase();
+  if (raw === "off" || raw === "false" || raw === "0" || raw === "no")
+    return false;
+  if (!runtimeArchiveFor(platform2))
+    return false;
+  return true;
+}
+function resolveBuiltInReasoningModel(env = process.env, totalMemoryBytes = totalmem2()) {
+  return pickBuiltInReasoningModel(totalMemoryBytes, env[BUILT_IN_ANALYST_MODEL_ENV]?.trim() || "auto");
+}
+function builtInPrivateModelStatus(env = process.env, totalMemoryBytes = totalmem2()) {
+  const spec = resolveBuiltInReasoningModel(env, totalMemoryBytes);
+  const enabled = builtInAnalystEnabled(env) && spec !== undefined;
+  if (!spec) {
+    return {
+      enabled: false,
+      state: "not_started",
+      modelId: "",
+      percent: 0,
+      label: "This computer does not have enough memory for the built-in private model",
+      bytesDone: 0,
+      bytesTotal: 0,
+      updatedAt: new Date(0).toISOString()
+    };
+  }
+  return {
+    ...readBuiltInReasoningStatus(spec, env),
+    enabled,
+    displayName: spec.displayName,
+    downloadBytes: spec.file.bytes
+  };
+}
+function createBuiltInAnalystModel(options = {}) {
+  const env = options.env ?? process.env;
+  const totalMemoryBytes = options.totalMemoryBytes ?? totalmem2();
+  const spec = options.model ?? resolveBuiltInReasoningModel(env, totalMemoryBytes);
+  if (!spec) {
+    throw new OperationError("config_error", "This computer does not have enough memory for the built-in private model.", "Use a local model service or Venice Private for Private answers.");
+  }
+  const install = options.install ?? installBuiltInReasoning;
+  const fetchImpl = options.fetchImpl ?? fetch;
+  const requestTimeoutMs = options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
+  const installerOptions = {
+    model: spec,
+    env,
+    ...options.platform ? { platform: options.platform } : {},
+    ...options.fetchImpl ? { fetchImpl: options.fetchImpl } : {}
+  };
+  let installed;
+  let installing2;
+  let server;
+  const ensureInstalled = () => {
+    if (installed)
+      return Promise.resolve(installed);
+    installing2 ??= install(installerOptions).then((result) => {
+      installed = result;
+      return result;
+    }).finally(() => {
+      installing2 = undefined;
+    });
+    return installing2;
+  };
+  const ensureServer = (paths) => {
+    server ??= (options.createServer ?? createLlamaServerHandle)({
+      serverPath: paths.serverPath,
+      modelPath: paths.modelPath,
+      contextTokens: spec.contextTokens,
+      gpu: paths.gpu,
+      threads: builtInReasoningThreads(),
+      idleShutdownSeconds: options.idleShutdownSeconds ?? DEFAULT_IDLE_SHUTDOWN_SECONDS2,
+      startupTimeoutMs: DEFAULT_STARTUP_TIMEOUT_MS2
+    });
+    return server;
+  };
+  const model = {
+    name: BUILT_IN_ANALYST_NAME,
+    spec,
+    async prepare() {
+      try {
+        const cached2 = installed !== undefined;
+        await ensureInstalled();
+        const status = readBuiltInReasoningStatus(spec, env);
+        if (cached2 && status.state === "failed" && status.failure?.reason === "runtime_load_failed") {
+          reportBuiltInReasoningState({ model: spec, env }, "ready");
+        }
+      } catch {}
+    },
+    status() {
+      return readBuiltInReasoningStatus(spec, env);
+    },
+    async stop() {
+      await server?.stop();
+    },
+    installedRuntime() {
+      return installed;
+    },
+    async complete(request) {
+      let paths = installed;
+      if (!paths) {
+        const pending = ensureInstalled();
+        if (options.waitForInstall) {
+          paths = await pending.catch((error) => {
+            throw unavailable(error);
+          });
+        } else {
+          pending.catch(() => {
+            return;
+          });
+          const status = readBuiltInReasoningStatus(spec, env);
+          throw new OperationError("argus_unreachable", status.state === "failed" ? `The built-in private model could not be installed: ${status.failure?.message ?? "unknown error"}` : `The built-in private model is still downloading (${status.percent}%).`, "Private answers use the built-in model once its download finishes; nothing needs to be done.");
+        }
+      }
+      const handle = ensureServer(paths);
+      let endpoint;
+      try {
+        if (!handle.pid)
+          reportBuiltInReasoningState({ model: spec, env }, "loading");
+        endpoint = await handle.ensureRunning(request.signal);
+        reportBuiltInReasoningState({ model: spec, env }, "ready");
+      } catch (error) {
+        if (request.signal?.aborted)
+          throw error;
+        if (error instanceof LlamaServerStillExitingError) {
+          reportBuiltInReasoningState({ model: spec, env }, "ready");
+          throw unavailable(error);
+        }
+        reportBuiltInReasoningState({ model: spec, env }, "failed", {
+          reason: "runtime_load_failed",
+          message: error instanceof Error ? error.message : String(error)
+        });
+        throw unavailable(error);
+      }
+      try {
+        return await chatCompletion(fetchImpl, endpoint, spec, request, requestTimeoutMs);
+      } finally {
+        handle.touch();
+      }
+    }
+  };
+  return model;
+}
+function unavailable(error) {
+  if (error instanceof OperationError)
+    return error;
+  const message2 = error instanceof Error ? error.message : String(error);
+  return new OperationError("argus_unreachable", error instanceof BuiltInReasoningInstallError ? `The built-in private model could not be installed: ${message2}` : `The built-in private model is not available: ${message2}`, "Check the dashboard for the built-in model status.");
+}
+async function chatCompletion(fetchImpl, endpoint, spec, request, timeoutMs) {
+  const timeout = AbortSignal.timeout(timeoutMs);
+  const signal = request.signal ? AbortSignal.any([timeout, request.signal]) : timeout;
+  let response;
+  try {
+    response = await fetchModelEndpoint(fetchImpl, `${endpoint.baseUrl}/v1/chat/completions`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${endpoint.token}`,
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({
+        messages: [
+          { role: "system", content: request.system },
+          { role: "user", content: request.prompt }
+        ],
+        temperature: 0,
+        max_tokens: maxTokensForChars(request.maxOutputChars),
+        response_format: request.responseSchema ? { type: "json_schema", json_schema: { name: "reply", schema: request.responseSchema } } : { type: "json_object" }
+      }),
+      signal
+    });
+  } catch (error) {
+    if (request.signal?.aborted)
+      throw error;
+    if (isZkapiDaemonEndpointRefusal(error))
+      throw error;
+    if (isModelEndpointRedirectError(error)) {
+      throw new OperationError("argus_unreachable", "The built-in private model answered with a redirect, which is refused.", error.message);
+    }
+    throw new OperationError("argus_unreachable", `The built-in private model did not answer${error instanceof Error && error.name === "TimeoutError" ? ` within ${Math.round(timeoutMs / 1000)}s` : ""}.`, "It runs on this computer; a busy machine answers slowly.");
+  }
+  if (!response.ok) {
+    const body = await response.text().catch(() => "");
+    throw new OperationError("argus_error", `The built-in private model returned HTTP ${response.status}.`, body.slice(0, 300) || undefined);
+  }
+  const payload2 = await response.json();
+  const content = payload2.choices?.[0]?.message?.content;
+  if (typeof content !== "string") {
+    throw new OperationError("argus_error", "The built-in private model returned no text.");
+  }
+  const usage = llamaUsage(payload2.timings);
+  return { text: content, modelId: `${BUILT_IN_ANALYST_NAME}/${spec.modelId}`, ...usage ? { usage } : {} };
+}
+function llamaUsage(timings) {
+  if (!timings)
+    return;
+  const count = (value2) => typeof value2 === "number" && Number.isFinite(value2) && value2 >= 0 ? Math.round(value2) : undefined;
+  const usage = {};
+  const promptTokens = count(timings.prompt_n);
+  const promptMs = count(timings.prompt_ms);
+  const outputTokens = count(timings.predicted_n);
+  const outputMs = count(timings.predicted_ms);
+  if (promptTokens !== undefined)
+    usage.promptTokens = promptTokens;
+  if (promptMs !== undefined)
+    usage.promptMs = promptMs;
+  if (outputTokens !== undefined)
+    usage.outputTokens = outputTokens;
+  if (outputMs !== undefined)
+    usage.outputMs = outputMs;
+  return Object.keys(usage).length > 0 ? usage : undefined;
+}
+function maxTokensForChars(chars) {
+  if (chars === undefined)
+    return 1024;
+  return Math.max(512, Math.ceil(chars / 2));
+}
+function withBuiltInFallback(primary, builtIn) {
+  return {
+    async analyze(pack, options) {
+      try {
+        return await primary.analyze(pack, options);
+      } catch (error) {
+        if (!isLocalServiceDown(error))
+          throw error;
+        return builtIn.analyze(pack, options);
+      }
+    }
+  };
+}
+function isLocalServiceDown(error) {
+  return error instanceof OperationError && error.code === "argus_unreachable" && !/timed out/i.test(error.message);
+}
+async function answerPrivately(question, evidence, options = {}) {
+  const model = options.model ?? (sharedPanelModel ??= createBuiltInAnalystModel({ waitForInstall: true }));
+  const pack = fitPrivatePack(privateEvidencePack(question, evidence), options.maxPromptBytes ?? DEFAULT_PRIVATE_ANSWER_PROMPT_BYTES, options.evidenceFormat ?? "full", options.maxAnswerChars ?? DEFAULT_ANALYST_MAX_OUTPUT_CHARS);
+  const verdict = { sufficient: undefined };
+  const analyst = createAnalyst(withVerdict(options.onModelCall ? timedModel(model, options.onModelCall) : model, verdict), {
+    auditSuspiciousDrafts: options.audit ?? true,
+    boundedResponseSchema: true,
+    ...options.evidenceFormat ? { evidenceFormat: options.evidenceFormat } : {}
+  });
+  const run = () => analyst.analyze(pack, {
+    localOnly: true,
+    ...options.maxAnswerChars !== undefined ? { maxAnswerChars: options.maxAnswerChars } : {}
+  });
+  const result = options.signal ? await runWithAnalystAbortSignal(options.signal, run) : await run();
+  const byId = new Map(evidence.map((item) => [item.id, item]));
+  const modelId = `${BUILT_IN_ANALYST_NAME}/${model.spec.modelId}`;
+  const unanswered = result.unanswered.filter((line2) => !echoesEvidenceScaffolding(line2));
+  const gapChars = analystSchemaGapChars(options.maxAnswerChars ?? DEFAULT_PRIVATE_ANSWER_CHARS);
+  if (result.escalation || echoesEvidenceScaffolding(result.answer)) {
+    return {
+      answer: PRIVATE_ANSWER_NOT_FOUND,
+      citations: [],
+      unanswered: cleanUnanswered(unanswered, "", { maxChars: gapChars, complete: false }),
+      modelId
+    };
+  }
+  return {
+    answer: result.answer,
+    unanswered: cleanUnanswered(unanswered, result.answer, { maxChars: gapChars, complete: verdict.sufficient === true }),
+    citations: result.citations.map((citation) => {
+      const id = citation.provenance.sourceItem.providerItemId;
+      const item = byId.get(id);
+      return {
+        id,
+        ...item?.title ? { title: item.title } : {},
+        ...item?.locator ? { locator: item.locator } : {},
+        claim: citation.claim
+      };
+    }),
+    modelId
+  };
+}
+function withVerdict(model, verdict) {
+  return {
+    async complete(request) {
+      const completion = await model.complete(request);
+      verdict.sufficient = replySufficient(completion.text);
+      return completion;
+    }
+  };
+}
+function replySufficient(text3) {
+  const start = text3.indexOf("{");
+  const end = text3.lastIndexOf("}");
+  if (start === -1 || end <= start)
+    return;
+  try {
+    const parsed = JSON.parse(text3.slice(start, end + 1));
+    if (typeof parsed !== "object" || parsed === null)
+      return;
+    const sufficient = parsed.sufficient;
+    return typeof sufficient === "boolean" ? sufficient : undefined;
+  } catch {
+    return;
+  }
+}
+function cleanUnanswered(gaps, answer, options) {
+  if (options.complete)
+    return [];
+  const answered = new Set(specificTerms(answer).map(termStem));
+  const answerText = answer.toLowerCase();
+  const out = [];
+  const seen = new Set;
+  for (const raw of gaps) {
+    const gap = raw.trim();
+    if (!gap || gap.length >= options.maxChars - 1)
+      continue;
+    const terms = specificTerms(gap);
+    if (terms.length === 0)
+      continue;
+    if (terms.every((term) => answered.has(termStem(term)) || answerText.includes(term)))
+      continue;
+    const key2 = gap.toLowerCase();
+    if (seen.has(key2))
+      continue;
+    seen.add(key2);
+    out.push(gap);
+  }
+  return out;
+}
+function specificTerms(text3) {
+  return (text3.toLowerCase().match(/[\p{L}\p{N}][\p{L}\p{N}.,/-]*[\p{L}\p{N}]|[\p{L}\p{N}]/gu) ?? []).filter((word) => /\p{N}/u.test(word) || word.length >= 3 && !GAP_GENERIC_WORDS.has(word));
+}
+function termStem(word) {
+  return word.length > 4 && word.endsWith("es") ? word.slice(0, -2) : word.length > 3 && word.endsWith("s") ? word.slice(0, -1) : word;
+}
+function timedModel(model, report) {
+  let calls = 0;
+  return {
+    async complete(request) {
+      const stage = calls === 0 ? "main" : "audit";
+      calls += 1;
+      const started = performance.now();
+      const promptBytes = utf82.encode(request.system).length + utf82.encode(request.prompt).length;
+      const done = (ok, usage) => {
+        try {
+          report({ stage, ms: Math.round(performance.now() - started), promptBytes, ok, ...usage ?? {} });
+        } catch {}
+      };
+      try {
+        const completion = await model.complete(request);
+        done(true, completion.usage);
+        return completion;
+      } catch (error) {
+        done(false);
+        throw error;
+      }
+    }
+  };
+}
+function echoesEvidenceScaffolding(text3) {
+  const normalized = text3.toLowerCase().split(/\s+/).join(" ").split(" /").join("/").split("/ ").join("/").split(" :").join(":");
+  return ANALYST_EVIDENCE_SCAFFOLDING_LABELS.some((label) => normalized.includes(label));
+}
+function fitPrivatePack(pack, maxPromptBytes, format, outputChars) {
+  const options = { localOnly: true };
+  const promptBytes = (candidatePack) => analystPromptBytes(candidatePack, options, format, outputChars);
+  if (promptBytes(pack) <= maxPromptBytes)
+    return pack;
+  for (let keep = pack.candidates.length;keep >= 1; keep -= 1) {
+    const base = pack.candidates.slice(0, keep);
+    const overhead = promptBytes({ ...pack, candidates: base.map((candidate) => ({ ...candidate, chunks: [] })) });
+    if (overhead >= maxPromptBytes)
+      continue;
+    let share = Math.floor((maxPromptBytes - overhead) / keep);
+    for (let attempt = 0;attempt < 6; attempt += 1) {
+      if (share < MIN_PRIVATE_PASSAGE_BYTES && keep > 1)
+        break;
+      const fitted = { ...pack, candidates: base.map((candidate) => ({ ...candidate, chunks: clipUtf8(candidate.chunks, share) })) };
+      const bytes = promptBytes(fitted);
+      if (bytes <= maxPromptBytes)
+        return fitted;
+      share = Math.floor(share * (maxPromptBytes - overhead) / Math.max(1, bytes - overhead)) - 1;
+    }
+  }
+  return { ...pack, candidates: pack.candidates.slice(0, 1).map((candidate) => ({ ...candidate, chunks: clipUtf8(candidate.chunks, MIN_PRIVATE_PASSAGE_BYTES) })) };
+}
+function clipUtf8(chunks, maxBytes) {
+  const kept = [];
+  let remaining = Math.max(0, Math.floor(maxBytes));
+  for (const chunk of chunks) {
+    if (remaining <= 0)
+      break;
+    const bytes = utf82.encode(chunk).length;
+    if (bytes <= remaining) {
+      kept.push(chunk);
+      remaining -= bytes;
+      continue;
+    }
+    let cut = "";
+    for (const codePoint of chunk) {
+      const size = utf82.encode(codePoint).length;
+      if (size > remaining)
+        break;
+      cut += codePoint;
+      remaining -= size;
+    }
+    if (cut)
+      kept.push(cut);
+    break;
+  }
+  return kept;
+}
+function privateEvidencePack(question, evidence) {
+  const candidates = evidence.map((item) => ({
+    provenance: {
+      sourceItem: {
+        family: item.family ?? "file",
+        provider: "private-answer",
+        accountScope: "local",
+        providerItemId: item.id,
+        localItemId: item.id
+      },
+      citation: {
+        ...item.title ? { title: item.title } : {},
+        ...item.source ? { sourceLabel: item.source } : {},
+        ...item.locator ? { uri: item.locator } : {},
+        ...item.date ? { authoredAt: item.date } : {}
+      }
+    },
+    trustTier: "S4",
+    trustDomain: "secure_local",
+    chunks: [item.text]
+  }));
+  return {
+    question,
+    candidates,
+    coverage: { searchedCorpora: ["private-answer"], skippedCorpora: [], extractionGaps: [] },
+    builtAt: new Date().toISOString()
+  };
+}
+var BUILT_IN_ANALYST_NAME = "built_in", BUILT_IN_ANALYST_ENV = "OLYMPUS_BUILT_IN_ANALYST", BUILT_IN_ANALYST_MODEL_ENV = "OLYMPUS_BUILT_IN_ANALYST_MODEL", DEFAULT_REQUEST_TIMEOUT_MS = 300000, DEFAULT_IDLE_SHUTDOWN_SECONDS2 = 600, DEFAULT_STARTUP_TIMEOUT_MS2 = 120000, DEFAULT_PRIVATE_ANSWER_PROMPT_BYTES = 28000, MIN_PRIVATE_PASSAGE_BYTES = 600, PRIVATE_ANSWER_NOT_FOUND = "These private items do not answer this question.", sharedPanelModel, DEFAULT_PRIVATE_ANSWER_CHARS = 1600, GAP_GENERIC_WORDS, utf82;
+var init_analyst_built_in = __esm(() => {
+  init_analyst();
+  init_operation_error();
+  init_model_transport();
+  init_zkapi_consult_settings();
+  init_install();
+  init_manifest2();
+  init_server();
+  GAP_GENERIC_WORDS = new Set([
+    "the",
+    "and",
+    "for",
+    "are",
+    "was",
+    "were",
+    "with",
+    "from",
+    "that",
+    "this",
+    "these",
+    "those",
+    "not",
+    "any",
+    "all",
+    "its",
+    "their",
+    "there",
+    "which",
+    "what",
+    "when",
+    "where",
+    "who",
+    "whom",
+    "how",
+    "why",
+    "does",
+    "did",
+    "has",
+    "have",
+    "had",
+    "been",
+    "being",
+    "into",
+    "about",
+    "than",
+    "then",
+    "also",
+    "such",
+    "other",
+    "only",
+    "more",
+    "most",
+    "some",
+    "can",
+    "could",
+    "would",
+    "should",
+    "may",
+    "might",
+    "will",
+    "shall",
+    "but",
+    "nor",
+    "yet",
+    "per",
+    "via",
+    "each",
+    "your",
+    "you",
+    "user",
+    "his",
+    "her",
+    "our",
+    "they",
+    "them",
+    "one",
+    "out",
+    "over",
+    "under",
+    "between",
+    "within",
+    "specific",
+    "exact",
+    "precise",
+    "actual",
+    "value",
+    "values",
+    "level",
+    "levels",
+    "number",
+    "numbers",
+    "amount",
+    "detail",
+    "details",
+    "detailed",
+    "information",
+    "info",
+    "result",
+    "results",
+    "data",
+    "figure",
+    "figures",
+    "provided",
+    "provide",
+    "evidence",
+    "found",
+    "find",
+    "missing",
+    "available",
+    "unavailable",
+    "mentioned",
+    "mention",
+    "listed",
+    "list",
+    "given",
+    "give",
+    "stated",
+    "state",
+    "states",
+    "shown",
+    "show",
+    "shows",
+    "included",
+    "include",
+    "includes",
+    "contain",
+    "contains",
+    "contained",
+    "reported",
+    "report",
+    "reports",
+    "document",
+    "documents",
+    "item",
+    "items",
+    "text",
+    "source",
+    "sources",
+    "record",
+    "records",
+    "file",
+    "files",
+    "full",
+    "complete",
+    "entire",
+    "whole",
+    "unknown",
+    "unclear",
+    "unspecified",
+    "specified",
+    "answer",
+    "question",
+    "none",
+    "no",
+    "citations",
+    "citation",
+    "unanswered",
+    "sufficient",
+    "insufficient",
+    "claim",
+    "claims"
+  ]);
+  utf82 = new TextEncoder;
+});
+
+// src/workers/classification/installed-sniffer-runtime.ts
+function installedSnifferRuntime(env) {
+  const workerEnv = environmentWithWorkerSetupEnv({ env });
+  const standalone = isStandaloneEngineProcess(env) || !env.OLYMPUS_CONFIG && installedEngineConfig(env)?.olympusStandalone === true;
+  const spec = !standalone || workerEnv.NODE_ENV === "test" || !builtInAnalystEnabled(workerEnv) ? undefined : resolveBuiltInReasoningModel(workerEnv);
+  const model = spec ? createBuiltInAnalystModel({ env: workerEnv, model: spec }) : undefined;
+  return resolveTierSnifferRuntime({
+    engine: loadSovereigntyEngine({ env: workerEnv }),
+    standaloneEngine: standalone,
+    ...model ? { builtIn: { model, available: () => false, cacheModelId: `${model.spec.modelId}:${model.spec.revision}:${model.spec.file.sha256}` } } : {}
+  });
+}
+var init_installed_sniffer_runtime = __esm(() => {
+  init_analyst_built_in();
+  init_config();
+  init_sovereignty();
+  init_worker_auth();
+  init_built_in_sniffer();
+});
+
 // src/workers/classification/tier-migration.ts
 import { createHash as createHash77 } from "node:crypto";
 import { chmodSync as chmodSync30, existsSync as existsSync76, mkdirSync as mkdirSync49, readFileSync as readFileSync63, renameSync as renameSync17, writeFileSync as writeFileSync19 } from "node:fs";
@@ -117041,15 +117711,11 @@ async function installedInputs(env, options) {
   };
   if (!options.withSniffer)
     return base;
-  let lane;
-  try {
-    lane = resolveSnifferLane(loadSovereigntyEngine({ env }));
-  } catch (error) {
-    if (error instanceof SnifferLaneRefusedError) {
-      throw new OperationError("invalid_request", `No privacy-safe sniffer lane is available (${error.reason}); --with-sniffer cannot run.`);
-    }
-    throw error;
+  const runtime = installedSnifferRuntime(env);
+  if (runtime.source === "off") {
+    throw new OperationError("invalid_request", `No privacy-safe sniffer lane is available (${runtime.reason}); --with-sniffer cannot run.`);
   }
+  const lane = runtime.lane;
   const ledger = await readClassificationLedger(resolveClassificationLedgerPath(env));
   const approved = isClassifierApproved(ledger.entries, {
     lane: lane.kind,
@@ -117174,11 +117840,11 @@ var init_tier_migration_cli = __esm(() => {
   init_operation_error();
   init_classification_ledger();
   init_sniffer();
-  init_sniffer_lane();
+  init_installed_sniffer_runtime();
   init_sniffer_store();
   init_tier_rules();
-  init_tier_classifier();
   init_sovereignty();
+  init_tier_classifier();
   init_embedding_ledger();
   init_embedding_identity();
   init_tier_migration();
@@ -117553,15 +118219,8 @@ async function runTierClassifier(args, context2 = {}) {
   const env = context2.env ?? process.env;
   const [command, ...rest] = args;
   const ledgerPath = resolveClassificationLedgerPath(env);
-  const lane = (() => {
-    try {
-      return resolveSnifferLane(loadSovereigntyEngine({ env }));
-    } catch (error) {
-      if (error instanceof SnifferLaneRefusedError)
-        return { refused: error.reason };
-      throw error;
-    }
-  })();
+  const runtime = installedSnifferRuntime(env);
+  const lane = runtime.source === "off" ? { refused: runtime.reason } : runtime.lane;
   const promptVersion = snifferPromptVersions(privacyOwnerContext({ env: context2.env ?? process.env })).approval;
   const laneSummary = "refused" in lane ? { lane: null, refused: lane.refused } : { lane: lane.kind, profile: lane.profileId, modelId: lane.modelId };
   if (command === "status") {
@@ -117660,11 +118319,10 @@ var init_tier_cli = __esm(() => {
   init_mail_source_scope();
   init_connected_handles();
   init_operation_error();
-  init_sovereignty();
   init_classification_ledger();
   init_sniffer();
   init_privacy_profile();
-  init_sniffer_lane();
+  init_installed_sniffer_runtime();
   init_sniffer_store();
   init_tier_classifier();
   init_tier_ledger();
@@ -118740,7 +119398,7 @@ function createNativeEmbeddingDrainService(options) {
     restartOnCleanExit: false,
     reload: { configPrefixes: ["plugins.entries.olympus.config.worker.embeddingDrain"] },
     initialConfig: options.initialPluginConfig,
-    defaultStartupTimeoutMs: DEFAULT_STARTUP_TIMEOUT_MS2,
+    defaultStartupTimeoutMs: DEFAULT_STARTUP_TIMEOUT_MS3,
     ...options.startupTimeoutMs !== undefined ? { startupTimeoutMs: options.startupTimeoutMs } : {},
     ...options.readinessPollMs !== undefined ? { readinessPollMs: options.readinessPollMs } : {},
     ...options.stopGraceMs !== undefined ? { stopGraceMs: options.stopGraceMs } : {},
@@ -118787,7 +119445,7 @@ async function prepareEmbeddingDrainStart(input, options) {
     command: runtimePath,
     args: ["--no-env-file", executablePath, "--report", reportPath],
     env,
-    startupTimeoutMs: options.startupTimeoutMs ?? DEFAULT_STARTUP_TIMEOUT_MS2,
+    startupTimeoutMs: options.startupTimeoutMs ?? DEFAULT_STARTUP_TIMEOUT_MS3,
     endpointOccupied: false,
     readinessPath,
     instanceId,
@@ -118861,7 +119519,7 @@ async function embeddingDrainReadinessProbe(readinessPath, instanceId, child2) {
 function asRecord15(value2) {
   return value2 && typeof value2 === "object" && !Array.isArray(value2) ? value2 : undefined;
 }
-var SERVICE_ID = "olympus-source-embedding-drain", SERVICE_LABEL = "source embedding drain", DEFAULT_STARTUP_TIMEOUT_MS2 = 30000, READINESS_FILE = "source-embedding-drain-native-readiness.json", EMBEDDING_CREDENTIAL_NAMES, SYSTEM_ENV_NAMES, EMBEDDING_SETTING_ENV_NAMES, EMBEDDING_LANE_NAMES;
+var SERVICE_ID = "olympus-source-embedding-drain", SERVICE_LABEL = "source embedding drain", DEFAULT_STARTUP_TIMEOUT_MS3 = 30000, READINESS_FILE = "source-embedding-drain-native-readiness.json", EMBEDDING_CREDENTIAL_NAMES, SYSTEM_ENV_NAMES, EMBEDDING_SETTING_ENV_NAMES, EMBEDDING_LANE_NAMES;
 var init_native_embedding_drain_service = __esm(() => {
   init_config();
   init_native_process_service();
@@ -119259,7 +119917,7 @@ function createNativeRelayService(options) {
     ...options.readinessPollMs !== undefined ? { readinessPollMs: options.readinessPollMs } : {},
     ...options.stopGraceMs !== undefined ? { stopGraceMs: options.stopGraceMs } : {},
     ...options.restartDelaysMs ? { restartDelaysMs: options.restartDelaysMs } : {},
-    defaultStartupTimeoutMs: DEFAULT_STARTUP_TIMEOUT_MS3,
+    defaultStartupTimeoutMs: DEFAULT_STARTUP_TIMEOUT_MS4,
     stableUptimeMs: options.stableUptimeMs ?? DEFAULT_STABLE_UPTIME_MS,
     prepareStart: async (input) => {
       const settings = prepareRelayStart(relayFreshConfig(input.context.config, input.initialConfig), options);
@@ -119348,7 +120006,7 @@ function prepareRelayStart(config, options) {
       command,
       args: ["--no-env-file", executablePath, "__relay-service-run", instanceId],
       env: childEnv,
-      startupTimeoutMs: DEFAULT_STARTUP_TIMEOUT_MS3,
+      startupTimeoutMs: DEFAULT_STARTUP_TIMEOUT_MS4,
       endpointOccupied: false,
       statusDir,
       instanceId,
@@ -119431,7 +120089,7 @@ function relayFreshConfig(contextConfig, initialPluginConfig) {
 function relayConfigRecord(value2) {
   return value2 && typeof value2 === "object" && !Array.isArray(value2) ? value2 : undefined;
 }
-var SERVICE_ID3 = "olympus-remote-relay", SERVICE_LABEL3 = "remote relay", DEFAULT_STARTUP_TIMEOUT_MS3 = 15000, DEFAULT_STABLE_UPTIME_MS = 60000, CHILD_ENV_PASSTHROUGH, watchedChildren;
+var SERVICE_ID3 = "olympus-remote-relay", SERVICE_LABEL3 = "remote relay", DEFAULT_STARTUP_TIMEOUT_MS4 = 15000, DEFAULT_STABLE_UPTIME_MS = 60000, CHILD_ENV_PASSTHROUGH, watchedChildren;
 var init_native_relay_service = __esm(() => {
   init_config();
   init_native_process_service();
@@ -119729,7 +120387,7 @@ __export(exports_consult_writer, {
 });
 import { execFileSync as execFileSync4 } from "node:child_process";
 import { readFileSync as readFileSync68 } from "node:fs";
-import { freemem, platform as osPlatform5, totalmem as totalmem2 } from "node:os";
+import { freemem, platform as osPlatform5, totalmem as totalmem3 } from "node:os";
 function consultWriterSystem(level, options = {}) {
   if (level === "unnamed")
     return CONSULT_WRITER_SYSTEM_UNNAMED;
@@ -119914,13 +120572,13 @@ function defaultConsultMemoryProbe(deps = {}) {
         const psi = readOptional("/proc/pressure/memory");
         if (meminfo === undefined && psi === undefined)
           return;
-        const totalBytes2 = (meminfo === undefined ? undefined : meminfoBytes(meminfo, "MemTotal")) ?? totalmem2();
+        const totalBytes2 = (meminfo === undefined ? undefined : meminfoBytes(meminfo, "MemTotal")) ?? totalmem3();
         const availableBytes = meminfo === undefined ? undefined : meminfoBytes(meminfo, "MemAvailable");
         const freePercent = availableBytes === undefined ? Number.NaN : availableBytes / totalBytes2 * 100;
         const pressure2 = psi === undefined ? "warn" : linuxMemoryPressureFromPsi(psi);
         return { totalBytes: totalBytes2, freePercent, pressure: pressure2 };
       }
-      const totalBytes = totalmem2();
+      const totalBytes = totalmem3();
       if (platform2 !== "darwin") {
         return { totalBytes, freePercent: freemem() / totalBytes * 100, pressure: "unknown" };
       }
@@ -137497,607 +138155,6 @@ function createSpoolChangeSubscription(spoolDir, options = {}) {
   };
 }
 var init_messaging_spool_wake = () => {};
-
-// src/core/analyst-built-in.ts
-import { totalmem as totalmem3 } from "node:os";
-function builtInAnalystEnabled(env = process.env, platform2 = `${process.platform}-${process.arch}`) {
-  const raw = env[BUILT_IN_ANALYST_ENV]?.trim().toLowerCase();
-  if (raw === "off" || raw === "false" || raw === "0" || raw === "no")
-    return false;
-  if (!runtimeArchiveFor(platform2))
-    return false;
-  return true;
-}
-function resolveBuiltInReasoningModel(env = process.env, totalMemoryBytes = totalmem3()) {
-  return pickBuiltInReasoningModel(totalMemoryBytes, env[BUILT_IN_ANALYST_MODEL_ENV]?.trim() || "auto");
-}
-function builtInPrivateModelStatus(env = process.env, totalMemoryBytes = totalmem3()) {
-  const spec = resolveBuiltInReasoningModel(env, totalMemoryBytes);
-  const enabled = builtInAnalystEnabled(env) && spec !== undefined;
-  if (!spec) {
-    return {
-      enabled: false,
-      state: "not_started",
-      modelId: "",
-      percent: 0,
-      label: "This computer does not have enough memory for the built-in private model",
-      bytesDone: 0,
-      bytesTotal: 0,
-      updatedAt: new Date(0).toISOString()
-    };
-  }
-  return {
-    ...readBuiltInReasoningStatus(spec, env),
-    enabled,
-    displayName: spec.displayName,
-    downloadBytes: spec.file.bytes
-  };
-}
-function createBuiltInAnalystModel(options = {}) {
-  const env = options.env ?? process.env;
-  const totalMemoryBytes = options.totalMemoryBytes ?? totalmem3();
-  const spec = options.model ?? resolveBuiltInReasoningModel(env, totalMemoryBytes);
-  if (!spec) {
-    throw new OperationError("config_error", "This computer does not have enough memory for the built-in private model.", "Use a local model service or Venice Private for Private answers.");
-  }
-  const install = options.install ?? installBuiltInReasoning;
-  const fetchImpl = options.fetchImpl ?? fetch;
-  const requestTimeoutMs = options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
-  const installerOptions = {
-    model: spec,
-    env,
-    ...options.platform ? { platform: options.platform } : {},
-    ...options.fetchImpl ? { fetchImpl: options.fetchImpl } : {}
-  };
-  let installed;
-  let installing2;
-  let server;
-  const ensureInstalled = () => {
-    if (installed)
-      return Promise.resolve(installed);
-    installing2 ??= install(installerOptions).then((result) => {
-      installed = result;
-      return result;
-    }).finally(() => {
-      installing2 = undefined;
-    });
-    return installing2;
-  };
-  const ensureServer = (paths) => {
-    server ??= (options.createServer ?? createLlamaServerHandle)({
-      serverPath: paths.serverPath,
-      modelPath: paths.modelPath,
-      contextTokens: spec.contextTokens,
-      gpu: paths.gpu,
-      threads: builtInReasoningThreads(),
-      idleShutdownSeconds: options.idleShutdownSeconds ?? DEFAULT_IDLE_SHUTDOWN_SECONDS2,
-      startupTimeoutMs: DEFAULT_STARTUP_TIMEOUT_MS4
-    });
-    return server;
-  };
-  const model = {
-    name: BUILT_IN_ANALYST_NAME,
-    spec,
-    async prepare() {
-      try {
-        const cached3 = installed !== undefined;
-        await ensureInstalled();
-        const status = readBuiltInReasoningStatus(spec, env);
-        if (cached3 && status.state === "failed" && status.failure?.reason === "runtime_load_failed") {
-          reportBuiltInReasoningState({ model: spec, env }, "ready");
-        }
-      } catch {}
-    },
-    status() {
-      return readBuiltInReasoningStatus(spec, env);
-    },
-    async stop() {
-      await server?.stop();
-    },
-    installedRuntime() {
-      return installed;
-    },
-    async complete(request) {
-      let paths = installed;
-      if (!paths) {
-        const pending = ensureInstalled();
-        if (options.waitForInstall) {
-          paths = await pending.catch((error2) => {
-            throw unavailable(error2);
-          });
-        } else {
-          pending.catch(() => {
-            return;
-          });
-          const status = readBuiltInReasoningStatus(spec, env);
-          throw new OperationError("argus_unreachable", status.state === "failed" ? `The built-in private model could not be installed: ${status.failure?.message ?? "unknown error"}` : `The built-in private model is still downloading (${status.percent}%).`, "Private answers use the built-in model once its download finishes; nothing needs to be done.");
-        }
-      }
-      const handle = ensureServer(paths);
-      let endpoint;
-      try {
-        if (!handle.pid)
-          reportBuiltInReasoningState({ model: spec, env }, "loading");
-        endpoint = await handle.ensureRunning(request.signal);
-        reportBuiltInReasoningState({ model: spec, env }, "ready");
-      } catch (error2) {
-        if (request.signal?.aborted)
-          throw error2;
-        if (error2 instanceof LlamaServerStillExitingError) {
-          reportBuiltInReasoningState({ model: spec, env }, "ready");
-          throw unavailable(error2);
-        }
-        reportBuiltInReasoningState({ model: spec, env }, "failed", {
-          reason: "runtime_load_failed",
-          message: error2 instanceof Error ? error2.message : String(error2)
-        });
-        throw unavailable(error2);
-      }
-      try {
-        return await chatCompletion(fetchImpl, endpoint, spec, request, requestTimeoutMs);
-      } finally {
-        handle.touch();
-      }
-    }
-  };
-  return model;
-}
-function unavailable(error2) {
-  if (error2 instanceof OperationError)
-    return error2;
-  const message2 = error2 instanceof Error ? error2.message : String(error2);
-  return new OperationError("argus_unreachable", error2 instanceof BuiltInReasoningInstallError ? `The built-in private model could not be installed: ${message2}` : `The built-in private model is not available: ${message2}`, "Check the dashboard for the built-in model status.");
-}
-async function chatCompletion(fetchImpl, endpoint, spec, request, timeoutMs) {
-  const timeout = AbortSignal.timeout(timeoutMs);
-  const signal = request.signal ? AbortSignal.any([timeout, request.signal]) : timeout;
-  let response;
-  try {
-    response = await fetchModelEndpoint(fetchImpl, `${endpoint.baseUrl}/v1/chat/completions`, {
-      method: "POST",
-      headers: {
-        authorization: `Bearer ${endpoint.token}`,
-        "content-type": "application/json"
-      },
-      body: JSON.stringify({
-        messages: [
-          { role: "system", content: request.system },
-          { role: "user", content: request.prompt }
-        ],
-        temperature: 0,
-        max_tokens: maxTokensForChars(request.maxOutputChars),
-        response_format: request.responseSchema ? { type: "json_schema", json_schema: { name: "reply", schema: request.responseSchema } } : { type: "json_object" }
-      }),
-      signal
-    });
-  } catch (error2) {
-    if (request.signal?.aborted)
-      throw error2;
-    if (isZkapiDaemonEndpointRefusal(error2))
-      throw error2;
-    if (isModelEndpointRedirectError(error2)) {
-      throw new OperationError("argus_unreachable", "The built-in private model answered with a redirect, which is refused.", error2.message);
-    }
-    throw new OperationError("argus_unreachable", `The built-in private model did not answer${error2 instanceof Error && error2.name === "TimeoutError" ? ` within ${Math.round(timeoutMs / 1000)}s` : ""}.`, "It runs on this computer; a busy machine answers slowly.");
-  }
-  if (!response.ok) {
-    const body = await response.text().catch(() => "");
-    throw new OperationError("argus_error", `The built-in private model returned HTTP ${response.status}.`, body.slice(0, 300) || undefined);
-  }
-  const payload2 = await response.json();
-  const content = payload2.choices?.[0]?.message?.content;
-  if (typeof content !== "string") {
-    throw new OperationError("argus_error", "The built-in private model returned no text.");
-  }
-  const usage = llamaUsage(payload2.timings);
-  return { text: content, modelId: `${BUILT_IN_ANALYST_NAME}/${spec.modelId}`, ...usage ? { usage } : {} };
-}
-function llamaUsage(timings) {
-  if (!timings)
-    return;
-  const count = (value2) => typeof value2 === "number" && Number.isFinite(value2) && value2 >= 0 ? Math.round(value2) : undefined;
-  const usage = {};
-  const promptTokens = count(timings.prompt_n);
-  const promptMs = count(timings.prompt_ms);
-  const outputTokens = count(timings.predicted_n);
-  const outputMs = count(timings.predicted_ms);
-  if (promptTokens !== undefined)
-    usage.promptTokens = promptTokens;
-  if (promptMs !== undefined)
-    usage.promptMs = promptMs;
-  if (outputTokens !== undefined)
-    usage.outputTokens = outputTokens;
-  if (outputMs !== undefined)
-    usage.outputMs = outputMs;
-  return Object.keys(usage).length > 0 ? usage : undefined;
-}
-function maxTokensForChars(chars) {
-  if (chars === undefined)
-    return 1024;
-  return Math.max(512, Math.ceil(chars / 2));
-}
-function withBuiltInFallback(primary, builtIn) {
-  return {
-    async analyze(pack, options) {
-      try {
-        return await primary.analyze(pack, options);
-      } catch (error2) {
-        if (!isLocalServiceDown(error2))
-          throw error2;
-        return builtIn.analyze(pack, options);
-      }
-    }
-  };
-}
-function isLocalServiceDown(error2) {
-  return error2 instanceof OperationError && error2.code === "argus_unreachable" && !/timed out/i.test(error2.message);
-}
-async function answerPrivately(question, evidence, options = {}) {
-  const model = options.model ?? (sharedPanelModel ??= createBuiltInAnalystModel({ waitForInstall: true }));
-  const pack = fitPrivatePack(privateEvidencePack(question, evidence), options.maxPromptBytes ?? DEFAULT_PRIVATE_ANSWER_PROMPT_BYTES, options.evidenceFormat ?? "full", options.maxAnswerChars ?? DEFAULT_ANALYST_MAX_OUTPUT_CHARS);
-  const verdict = { sufficient: undefined };
-  const analyst = createAnalyst(withVerdict(options.onModelCall ? timedModel(model, options.onModelCall) : model, verdict), {
-    auditSuspiciousDrafts: options.audit ?? true,
-    boundedResponseSchema: true,
-    ...options.evidenceFormat ? { evidenceFormat: options.evidenceFormat } : {}
-  });
-  const run2 = () => analyst.analyze(pack, {
-    localOnly: true,
-    ...options.maxAnswerChars !== undefined ? { maxAnswerChars: options.maxAnswerChars } : {}
-  });
-  const result = options.signal ? await runWithAnalystAbortSignal(options.signal, run2) : await run2();
-  const byId = new Map(evidence.map((item) => [item.id, item]));
-  const modelId = `${BUILT_IN_ANALYST_NAME}/${model.spec.modelId}`;
-  const unanswered = result.unanswered.filter((line2) => !echoesEvidenceScaffolding(line2));
-  const gapChars = analystSchemaGapChars(options.maxAnswerChars ?? DEFAULT_PRIVATE_ANSWER_CHARS);
-  if (result.escalation || echoesEvidenceScaffolding(result.answer)) {
-    return {
-      answer: PRIVATE_ANSWER_NOT_FOUND,
-      citations: [],
-      unanswered: cleanUnanswered(unanswered, "", { maxChars: gapChars, complete: false }),
-      modelId
-    };
-  }
-  return {
-    answer: result.answer,
-    unanswered: cleanUnanswered(unanswered, result.answer, { maxChars: gapChars, complete: verdict.sufficient === true }),
-    citations: result.citations.map((citation) => {
-      const id = citation.provenance.sourceItem.providerItemId;
-      const item = byId.get(id);
-      return {
-        id,
-        ...item?.title ? { title: item.title } : {},
-        ...item?.locator ? { locator: item.locator } : {},
-        claim: citation.claim
-      };
-    }),
-    modelId
-  };
-}
-function withVerdict(model, verdict) {
-  return {
-    async complete(request) {
-      const completion = await model.complete(request);
-      verdict.sufficient = replySufficient(completion.text);
-      return completion;
-    }
-  };
-}
-function replySufficient(text3) {
-  const start = text3.indexOf("{");
-  const end = text3.lastIndexOf("}");
-  if (start === -1 || end <= start)
-    return;
-  try {
-    const parsed = JSON.parse(text3.slice(start, end + 1));
-    if (typeof parsed !== "object" || parsed === null)
-      return;
-    const sufficient = parsed.sufficient;
-    return typeof sufficient === "boolean" ? sufficient : undefined;
-  } catch {
-    return;
-  }
-}
-function cleanUnanswered(gaps, answer, options) {
-  if (options.complete)
-    return [];
-  const answered = new Set(specificTerms(answer).map(termStem));
-  const answerText = answer.toLowerCase();
-  const out = [];
-  const seen = new Set;
-  for (const raw of gaps) {
-    const gap = raw.trim();
-    if (!gap || gap.length >= options.maxChars - 1)
-      continue;
-    const terms = specificTerms(gap);
-    if (terms.length === 0)
-      continue;
-    if (terms.every((term) => answered.has(termStem(term)) || answerText.includes(term)))
-      continue;
-    const key2 = gap.toLowerCase();
-    if (seen.has(key2))
-      continue;
-    seen.add(key2);
-    out.push(gap);
-  }
-  return out;
-}
-function specificTerms(text3) {
-  return (text3.toLowerCase().match(/[\p{L}\p{N}][\p{L}\p{N}.,/-]*[\p{L}\p{N}]|[\p{L}\p{N}]/gu) ?? []).filter((word) => /\p{N}/u.test(word) || word.length >= 3 && !GAP_GENERIC_WORDS.has(word));
-}
-function termStem(word) {
-  return word.length > 4 && word.endsWith("es") ? word.slice(0, -2) : word.length > 3 && word.endsWith("s") ? word.slice(0, -1) : word;
-}
-function timedModel(model, report) {
-  let calls = 0;
-  return {
-    async complete(request) {
-      const stage = calls === 0 ? "main" : "audit";
-      calls += 1;
-      const started = performance.now();
-      const promptBytes = utf82.encode(request.system).length + utf82.encode(request.prompt).length;
-      const done = (ok, usage) => {
-        try {
-          report({ stage, ms: Math.round(performance.now() - started), promptBytes, ok, ...usage ?? {} });
-        } catch {}
-      };
-      try {
-        const completion = await model.complete(request);
-        done(true, completion.usage);
-        return completion;
-      } catch (error2) {
-        done(false);
-        throw error2;
-      }
-    }
-  };
-}
-function echoesEvidenceScaffolding(text3) {
-  const normalized = text3.toLowerCase().split(/\s+/).join(" ").split(" /").join("/").split("/ ").join("/").split(" :").join(":");
-  return ANALYST_EVIDENCE_SCAFFOLDING_LABELS.some((label) => normalized.includes(label));
-}
-function fitPrivatePack(pack, maxPromptBytes, format, outputChars) {
-  const options = { localOnly: true };
-  const promptBytes = (candidatePack) => analystPromptBytes(candidatePack, options, format, outputChars);
-  if (promptBytes(pack) <= maxPromptBytes)
-    return pack;
-  for (let keep = pack.candidates.length;keep >= 1; keep -= 1) {
-    const base = pack.candidates.slice(0, keep);
-    const overhead = promptBytes({ ...pack, candidates: base.map((candidate) => ({ ...candidate, chunks: [] })) });
-    if (overhead >= maxPromptBytes)
-      continue;
-    let share = Math.floor((maxPromptBytes - overhead) / keep);
-    for (let attempt = 0;attempt < 6; attempt += 1) {
-      if (share < MIN_PRIVATE_PASSAGE_BYTES && keep > 1)
-        break;
-      const fitted = { ...pack, candidates: base.map((candidate) => ({ ...candidate, chunks: clipUtf8(candidate.chunks, share) })) };
-      const bytes = promptBytes(fitted);
-      if (bytes <= maxPromptBytes)
-        return fitted;
-      share = Math.floor(share * (maxPromptBytes - overhead) / Math.max(1, bytes - overhead)) - 1;
-    }
-  }
-  return { ...pack, candidates: pack.candidates.slice(0, 1).map((candidate) => ({ ...candidate, chunks: clipUtf8(candidate.chunks, MIN_PRIVATE_PASSAGE_BYTES) })) };
-}
-function clipUtf8(chunks2, maxBytes) {
-  const kept = [];
-  let remaining = Math.max(0, Math.floor(maxBytes));
-  for (const chunk of chunks2) {
-    if (remaining <= 0)
-      break;
-    const bytes = utf82.encode(chunk).length;
-    if (bytes <= remaining) {
-      kept.push(chunk);
-      remaining -= bytes;
-      continue;
-    }
-    let cut = "";
-    for (const codePoint of chunk) {
-      const size = utf82.encode(codePoint).length;
-      if (size > remaining)
-        break;
-      cut += codePoint;
-      remaining -= size;
-    }
-    if (cut)
-      kept.push(cut);
-    break;
-  }
-  return kept;
-}
-function privateEvidencePack(question, evidence) {
-  const candidates = evidence.map((item) => ({
-    provenance: {
-      sourceItem: {
-        family: item.family ?? "file",
-        provider: "private-answer",
-        accountScope: "local",
-        providerItemId: item.id,
-        localItemId: item.id
-      },
-      citation: {
-        ...item.title ? { title: item.title } : {},
-        ...item.source ? { sourceLabel: item.source } : {},
-        ...item.locator ? { uri: item.locator } : {},
-        ...item.date ? { authoredAt: item.date } : {}
-      }
-    },
-    trustTier: "S4",
-    trustDomain: "secure_local",
-    chunks: [item.text]
-  }));
-  return {
-    question,
-    candidates,
-    coverage: { searchedCorpora: ["private-answer"], skippedCorpora: [], extractionGaps: [] },
-    builtAt: new Date().toISOString()
-  };
-}
-var BUILT_IN_ANALYST_NAME = "built_in", BUILT_IN_ANALYST_ENV = "OLYMPUS_BUILT_IN_ANALYST", BUILT_IN_ANALYST_MODEL_ENV = "OLYMPUS_BUILT_IN_ANALYST_MODEL", DEFAULT_REQUEST_TIMEOUT_MS = 300000, DEFAULT_IDLE_SHUTDOWN_SECONDS2 = 600, DEFAULT_STARTUP_TIMEOUT_MS4 = 120000, DEFAULT_PRIVATE_ANSWER_PROMPT_BYTES = 28000, MIN_PRIVATE_PASSAGE_BYTES = 600, PRIVATE_ANSWER_NOT_FOUND = "These private items do not answer this question.", sharedPanelModel, DEFAULT_PRIVATE_ANSWER_CHARS = 1600, GAP_GENERIC_WORDS, utf82;
-var init_analyst_built_in = __esm(() => {
-  init_analyst();
-  init_operation_error();
-  init_model_transport();
-  init_zkapi_consult_settings();
-  init_install();
-  init_manifest2();
-  init_server();
-  GAP_GENERIC_WORDS = new Set([
-    "the",
-    "and",
-    "for",
-    "are",
-    "was",
-    "were",
-    "with",
-    "from",
-    "that",
-    "this",
-    "these",
-    "those",
-    "not",
-    "any",
-    "all",
-    "its",
-    "their",
-    "there",
-    "which",
-    "what",
-    "when",
-    "where",
-    "who",
-    "whom",
-    "how",
-    "why",
-    "does",
-    "did",
-    "has",
-    "have",
-    "had",
-    "been",
-    "being",
-    "into",
-    "about",
-    "than",
-    "then",
-    "also",
-    "such",
-    "other",
-    "only",
-    "more",
-    "most",
-    "some",
-    "can",
-    "could",
-    "would",
-    "should",
-    "may",
-    "might",
-    "will",
-    "shall",
-    "but",
-    "nor",
-    "yet",
-    "per",
-    "via",
-    "each",
-    "your",
-    "you",
-    "user",
-    "his",
-    "her",
-    "our",
-    "they",
-    "them",
-    "one",
-    "out",
-    "over",
-    "under",
-    "between",
-    "within",
-    "specific",
-    "exact",
-    "precise",
-    "actual",
-    "value",
-    "values",
-    "level",
-    "levels",
-    "number",
-    "numbers",
-    "amount",
-    "detail",
-    "details",
-    "detailed",
-    "information",
-    "info",
-    "result",
-    "results",
-    "data",
-    "figure",
-    "figures",
-    "provided",
-    "provide",
-    "evidence",
-    "found",
-    "find",
-    "missing",
-    "available",
-    "unavailable",
-    "mentioned",
-    "mention",
-    "listed",
-    "list",
-    "given",
-    "give",
-    "stated",
-    "state",
-    "states",
-    "shown",
-    "show",
-    "shows",
-    "included",
-    "include",
-    "includes",
-    "contain",
-    "contains",
-    "contained",
-    "reported",
-    "report",
-    "reports",
-    "document",
-    "documents",
-    "item",
-    "items",
-    "text",
-    "source",
-    "sources",
-    "record",
-    "records",
-    "file",
-    "files",
-    "full",
-    "complete",
-    "entire",
-    "whole",
-    "unknown",
-    "unclear",
-    "unspecified",
-    "specified",
-    "answer",
-    "question",
-    "none",
-    "no",
-    "citations",
-    "citation",
-    "unanswered",
-    "sufficient",
-    "insufficient",
-    "claim",
-    "claims"
-  ]);
-  utf82 = new TextEncoder;
-});
 
 // src/workers/chatgpt/private-answer-contract.ts
 async function checkPrivateEvidence(guard, items) {
@@ -190825,7 +190882,7 @@ async function runChatGptTool(name, args, ctx, options, signal, detachedContext)
         const pending = match.count > 0 ? { question, match, refresh: privateRefresh(question, probe, later, options), caller: privateCaller(ctx), detail, waiting } : undefined;
         const jobId = pendingJobId(raw);
         if (jobId) {
-          rememberPrivateMatch(privateCaller(ctx), jobId, pending);
+          rememberPrivateMatch(privateCaller(ctx), jobId, pending, late.timedOut === true);
           return answerToolResult(raw);
         }
         const privateMatch = pending ? beginPrivateAnswer(pending, options) : undefined;
@@ -190842,8 +190899,8 @@ async function runChatGptTool(name, args, ctx, options, signal, detachedContext)
           return askAnonymouslyToolResult(raw);
         const done = pendingJobId(raw) === undefined;
         const pending = privateMatchForJob(privateCaller(ctx), jobId, done);
-        const privateMatch = done && isAnswered(raw) && pending ? beginPrivateAnswer(pending, options) : undefined;
-        return answerToolResult(raw, privateMatch ? { privateMatch } : {});
+        const privateMatch = done && isAnswered(raw) && pending?.match ? beginPrivateAnswer(pending.match, options) : undefined;
+        return answerToolResult(raw, privateMatch ? { privateMatch } : done && pending?.timedOut ? { privateCheckPending: true } : {});
       }
       case ASK_ANONYMOUSLY_TOOL.name: {
         if (!askToolListed(ctx))
@@ -191007,7 +191064,7 @@ function isAnswered(raw) {
 function privateMatchKey(caller, jobId) {
   return `${caller ?? ""}\x00${jobId}`;
 }
-function rememberPrivateMatch(caller, jobId, match) {
+function rememberPrivateMatch(caller, jobId, match, timedOut) {
   const now = Date.now();
   for (const [id, entry] of privateMatchByJob)
     if (entry.expiresAt <= now)
@@ -191018,14 +191075,14 @@ function rememberPrivateMatch(caller, jobId, match) {
       break;
     privateMatchByJob.delete(oldest);
   }
-  privateMatchByJob.set(privateMatchKey(caller, jobId), { match, expiresAt: now + PRIVATE_MATCH_TTL_MS });
+  privateMatchByJob.set(privateMatchKey(caller, jobId), { match, timedOut, expiresAt: now + PRIVATE_MATCH_TTL_MS });
 }
 function privateMatchForJob(caller, jobId, done) {
   const key2 = privateMatchKey(caller, jobId);
   const entry = privateMatchByJob.get(key2);
   if (done)
     privateMatchByJob.delete(key2);
-  return entry !== undefined && entry.expiresAt > Date.now() ? entry.match : undefined;
+  return entry !== undefined && entry.expiresAt > Date.now() ? entry : undefined;
 }
 async function runOperation(name, ctx, params) {
   const operation = findOperationByName(name);
