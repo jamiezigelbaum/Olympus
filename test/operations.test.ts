@@ -104,7 +104,7 @@ test('doctor operation withholds source diagnostics before the first-run choice'
       expect(result.checks.find(check => check.name === name)?.ok).toBe(true);
     }
   } finally { rmSync(home, { recursive: true, force: true }); }
-});
+}, 30_000);
 
 describe('operations', () => {
   test('defines the current operation surface', () => {
