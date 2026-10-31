@@ -143433,6 +143433,9 @@ function mountDashboardController(options) {
     const actions = sheet.querySelector("[data-setup-actions]");
     if (actions)
       actions.hidden = false;
+    const done = sheet.querySelector("[data-first-run-done]");
+    if (done)
+      done.hidden = true;
     if (sheet.querySelector("[data-setup-error]")) {
       sheet.querySelectorAll("form").forEach((form) => say(form, ""));
       sheet.querySelector("[data-setup-error]")?.remove();
@@ -143448,10 +143451,11 @@ function mountDashboardController(options) {
     if (slot)
       slot.textContent = message2;
     const done = query("[data-first-run-done]");
+    const verifying = query("[data-first-run-sheet] [data-model-check]")?.closest("[data-setup-panel]")?.hidden === false;
     if (done)
-      done.hidden = !working;
+      done.hidden = !working || !verifying;
     const primary = query("[data-first-run-sheet] [data-setup-submit]");
-    if (primary)
+    if (primary && verifying)
       primary.hidden = working;
     const retry = query("[data-first-run-redo]");
     if (retry) {

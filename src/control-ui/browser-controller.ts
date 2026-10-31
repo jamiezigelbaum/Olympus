@@ -123,6 +123,8 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
     }
     const actions = sheet.querySelector<HTMLElement>('[data-setup-actions]');
     if (actions) actions.hidden = false;
+    const done = sheet.querySelector<HTMLElement>('[data-first-run-done]');
+    if (done) done.hidden = true;
     if (sheet.querySelector('[data-setup-error]')) {
       sheet.querySelectorAll<HTMLFormElement>('form').forEach(form => say(form, ''));
       sheet.querySelector('[data-setup-error]')?.remove();
@@ -135,9 +137,10 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
     const slot = query<HTMLElement>('[data-first-run-result]');
     if (slot) slot.textContent = message;
     const done = query<HTMLElement>('[data-first-run-done]');
-    if (done) done.hidden = !working;
+    const verifying = query<HTMLElement>('[data-first-run-sheet] [data-model-check]')?.closest<HTMLElement>('[data-setup-panel]')?.hidden === false;
+    if (done) done.hidden = !working || !verifying;
     const primary = query<HTMLElement>('[data-first-run-sheet] [data-setup-submit]');
-    if (primary) primary.hidden = working;
+    if (primary && verifying) primary.hidden = working;
     const retry = query<HTMLElement>('[data-first-run-redo]');
     if (retry) { retry.hidden = !redo; retry.textContent = redo ?? ''; }
     const keys = query<HTMLElement>('[data-first-run-keys]');
