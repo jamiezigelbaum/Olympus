@@ -1,3 +1,4 @@
+import { isPendingPrivacyPolicy } from './first-run-privacy.ts';
 import { WORKER_DATA_OWNER_CONFLICT_MESSAGE, WORKER_ENDPOINT_CONFLICT_MESSAGE, WORKER_SOCKET_RETAINED_MESSAGE } from './native-worker-service.ts';
 import { defaultTelegramPython } from './messaging-runtime.ts';
 import { readEngineLinger, linuxInstalledBuild } from './linux-engine-service.ts';
@@ -223,28 +224,46 @@ export async function runDoctor(input: DoctorDeps): Promise<DoctorResult> {
   const deps: DoctorDeps = inputEnv === undefined
     ? input
     : doctorDepsWithLayeredEnvironment(input, inputEnv);
+  // This shared operation runs in CLI, native and stdio MCP too: HTTP's
+  // response gate cannot protect diagnostics read directly from local state.
+  // Skip the probes themselves so identifiers cannot escape in errors either.
+  let sourceDiagnostics: 'allowed' | 'pending' | 'unavailable';
+  try {
+    const policy = doctorSovereigntyEngine(deps)?.config;
+    sourceDiagnostics = policy && isPendingPrivacyPolicy(policy) ? 'pending' : 'allowed';
+  } catch {
+    sourceDiagnostics = 'unavailable';
+  }
+  const sourceCheck = (name: string, run: () => Promise<DoctorCheck>): Promise<DoctorCheck> =>
+    sourceDiagnostics === 'allowed' ? safeCheck(name, run) : Promise.resolve({
+      name,
+      ok: sourceDiagnostics === 'pending',
+      detail: sourceDiagnostics === 'pending'
+        ? 'Skipped: source diagnostics await the first-run privacy choice.'
+        : 'Skipped: source diagnostics are unavailable until the privacy policy can be read.',
+    });
   const checks = [
     ...(deps.hostProbe ? [await safeCheck('host', () => hostCheck(deps))] : []),
     await safeCheck('dependencies', () => dependencyCheck(deps)),
     ...(deps.ocrProbe ? [await safeCheck('ocr_reading', () => ocrReadingCheck(deps))] : []),
-    await safeCheck('source_capability_catalog', () => sourceCapabilityCatalogCheck(deps)),
+    await sourceCheck('source_capability_catalog', () => sourceCapabilityCatalogCheck(deps)),
     await safeCheck('sovereignty_prerequisites', () => sovereigntyPrerequisiteCheck(deps)),
-    await safeCheck('credential_handles', () => credentialHandleCheck(deps)),
-    await safeCheck('detached_oauth_connections', () => detachedOAuthConnectionCheck(deps)),
-    await safeCheck('google_oauth_refresh_lifetime', () => googleOAuthRefreshLifetimeCheck(deps)),
-    await safeCheck('credential_reauthorization_backlog', () => credentialReauthorizationBacklogCheck(deps)),
+    await sourceCheck('credential_handles', () => credentialHandleCheck(deps)),
+    await sourceCheck('detached_oauth_connections', () => detachedOAuthConnectionCheck(deps)),
+    await sourceCheck('google_oauth_refresh_lifetime', () => googleOAuthRefreshLifetimeCheck(deps)),
+    await sourceCheck('credential_reauthorization_backlog', () => credentialReauthorizationBacklogCheck(deps)),
     await safeCheck('argus_model_pool', () => argusProfileCheck(deps, deps.config.argus.defaultProfile)),
     await safeCheck('sovereignty_model_lanes', () => sovereigntyModelLaneCheck(deps)),
     await safeCheck('zkapi_consult_transport', () => zkapiConsultTransportCheck(deps)),
     await safeCheck('consult_settings', () => consultSettingsCheck(deps)),
     await safeCheck('consult_vocabulary', () => consultVocabularyCheck(deps)),
-    await safeCheck('email_worker', () => emailWorkerCheck(deps)),
-    await safeCheck('worker_credential_lanes', () => workerCredentialLanesCheck(deps)),
-    await safeCheck('dropbox_content_extraction_throughput', () => dropboxContentExtractionThroughputCheck(deps)),
+    await sourceCheck('email_worker', () => emailWorkerCheck(deps)),
+    await sourceCheck('worker_credential_lanes', () => workerCredentialLanesCheck(deps)),
+    await sourceCheck('dropbox_content_extraction_throughput', () => dropboxContentExtractionThroughputCheck(deps)),
     await safeCheck('photo_search', () => photoSearchCheck(deps)),
-    await safeCheck('source_index_status', () => sourceIndexStatusCheck(deps)),
-    await safeCheck('source_scheduler_status', () => sourceSchedulerStatusCheck(deps)),
-    await safeCheck('source_ingestion_health', () => sourceIngestionHealthCheck(deps)),
+    await sourceCheck('source_index_status', () => sourceIndexStatusCheck(deps)),
+    await sourceCheck('source_scheduler_status', () => sourceSchedulerStatusCheck(deps)),
+    await sourceCheck('source_ingestion_health', () => sourceIngestionHealthCheck(deps)),
   ];
   return {
     ok: checks.every((check) => check.ok),
