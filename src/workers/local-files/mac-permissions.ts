@@ -20,12 +20,17 @@ import { existsSync, mkdirSync, opendirSync, readFileSync } from 'node:fs';
 import { opendir } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { writePrivateFileAtomicSync } from '../../core/atomic-file.ts';
+import { olympusDataDir } from '../../core/remote-access.ts';
 import type { OlympusFolderAccess } from '../../control-ui-contract.ts';
 import { isWithinScopePath } from './paths.ts';
 import type { MountedVolume } from './volume-identity.ts';
 
 /** The helper sets this in the engine's environment (native/macos-engine-host/main.c). */
 export const ENGINE_HELPER_ENV = 'OLYMPUS_ENGINE_HELPER';
+/** Where the Mac's remembered answers live: one file for the folder picker and the scheduler's reads. */
+export function folderAccessMemoryPath(): string {
+  return join(olympusDataDir(), 'local-files', 'folder-access.json');
+}
 export const FULL_DISK_ACCESS_URL = 'x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles';
 export const FILES_AND_FOLDERS_URL = 'x-apple.systempreferences:com.apple.preference.security?Privacy_FilesAndFolders';
 
@@ -277,6 +282,11 @@ export class MacPermissions {
     return { state: 'denied', message: MAC_ACCESS_COPY.denied(guard.kind, this.appName()), settings_url: FILES_AND_FOLDERS_URL };
   }
 
+  /** A guarded folder that was just read: the Mac allowed it, so its row stops saying "Needs permission". */
+  noteGranted(guard: GuardedFolder): void {
+    this.remember(guard, 'granted');
+  }
+
   /** What an unreadable folder, found while reading, means: a denial, or a plain failure. */
   noteDenied(guard: GuardedFolder): OlympusFolderAccess {
     this.remember(guard, 'denied');
@@ -354,7 +364,8 @@ export class MacPermissions {
   }
 
   private load(): Record<string, { answer: 'granted' | 'denied'; at: string }> {
-    if (this.memory) return this.memory;
+    // The file is shared with the scheduler's reads, so it is read again rather than held.
+    if (this.memory && !this.memoryPath) return this.memory;
     let loaded: Record<string, { answer: 'granted' | 'denied'; at: string }> = {};
     if (this.memoryPath && existsSync(this.memoryPath)) {
       try {
