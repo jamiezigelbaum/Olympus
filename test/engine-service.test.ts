@@ -256,6 +256,7 @@ describe('olympus engine install/uninstall', () => {
     const result = reconcileEngineConfig(path);
     expect(result.wrote).toBe(true);
     expect(result.config).toEqual({
+      olympusStandalone: true,
       remote: { enabled: false },
       email: { baseUrl: 'http://127.0.0.1:9010/v1' },
       worker: { service: { enabled: true }, scheduler: { enabled: true } },
