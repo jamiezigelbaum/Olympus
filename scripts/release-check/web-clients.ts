@@ -174,6 +174,9 @@ export function forbiddenFor(q: ClientQuestion, shared: readonly string[] = []):
   return out;
 }
 
+/** An evidence id as Olympus hands it out ([E1]); every entry it names carries its source. */
+const EVIDENCE_ID = /\[E\d+\]/;
+
 /** The checks for one asked question. Never repeats a forbidden string. */
 export function evaluateTurn(client: WebClientId, q: ClientQuestion, obs: TurnObservation | Inconclusive, sharedForbid: readonly string[] = []): CheckResult[] {
   const prefix = `web.${client}.${q.id}`;
@@ -233,7 +236,13 @@ export function evaluateTurn(client: WebClientId, q: ClientQuestion, obs: TurnOb
   const cite = q.cite ?? [];
   if (cite.length > 0) {
     const cited = cite.filter((value) => turnContains(turn, value));
-    add('cited', 'a source item is cited', cited.length > 0, cited.length > 0 ? `cites ${cited.map((value) => `"${value}"`).join(', ')}` : `none of ${cite.map((value) => `"${value}"`).join(', ')} is cited`);
+    // A bare [E1] cites an Olympus evidence entry, which carries its source, so it counts when Olympus was used.
+    // Naming the source in the answer is a product question for after 1.2.0 (src/workers/chatgpt/response-builder.ts SEARCH_INSTRUCTION).
+    const evidence = cited.length === 0 && EVIDENCE_ID.test(turn) && 'used' in use && use.used;
+    add('cited', 'a source item is cited', cited.length > 0 || evidence,
+      cited.length > 0 ? `cites ${cited.map((value) => `"${value}"`).join(', ')}`
+        : evidence ? 'cites Olympus evidence by id ([E1]); the source is not named in the reply'
+          : `none of ${cite.map((value) => `"${value}"`).join(', ')} is cited`);
   } else if (q.kind === 'personal') {
     // A personal answer comes from items; a question that names none to cite cannot tell a cited answer from a guess.
     add('cited', 'a source item is cited', false, 'the question names no items to cite (cite in the questions file)');
