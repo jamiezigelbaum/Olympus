@@ -392,7 +392,12 @@ function verifyHelperArchive(path: string): void {
   }
   const dir = mkdtempSync(join(tmpdir(), 'olympus-helper-verify-'));
   try {
-    const extracted = spawnSync('unzip', ['-q', path, '-d', dir], { encoding: 'utf8' });
+    // On a Mac, unpack as the installer does (ditto): the helper zip carries
+    // AppleDouble entries that plain unzip writes out as ._ files, which breaks
+    // the signature seal the installed copy never sees.
+    const extracted = process.platform === 'darwin'
+      ? spawnSync('/usr/bin/ditto', ['-x', '-k', path, dir], { encoding: 'utf8' })
+      : spawnSync('unzip', ['-q', path, '-d', dir], { encoding: 'utf8' });
     if (extracted.status !== 0) throw new Error('Could not unzip macOS helper.');
     const app = join(dir, 'Olympus Engine.app');
     const plist = join(app, 'Contents', 'Info.plist');
