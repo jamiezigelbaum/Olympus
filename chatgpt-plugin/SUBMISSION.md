@@ -2,7 +2,7 @@
 
 Status: 1.0.0-rc.3 approved and published 2026-10-27. Listing update for
 1.3.0 prepared 2026-11-01: crowned-mountain icon and clay brand colours, the
-tagline "Ask your mail, files and chats" (#628), the softer Secrets wording,
+tagline "A private second brain" (#628, from the site and README), the softer Secrets wording,
 Evernote and Mac files in the long description, and new release notes. The
 tool surface on `/openai/mcp` stays pinned to the approved listing
 (`connect-relay/server/directory/approved.ts`): engines through 1.3.0 serve
@@ -27,7 +27,7 @@ out of the uploaded ZIP (see the checklist).
 | Field | Value | Limit |
 |---|---|---|
 | Name (`displayName`) | Olympus | ≤30 |
-| Short description | Ask your mail, files and chats | ≤30 (30) |
+| Short description | A private second brain | ≤30 (22) |
 | Developer name | OCU Inc. (`author.name`: OCU Inc. (Open Coordination Unlimited, Inc.)) | ≤80 |
 | Category | Productivity | fixed list |
 | Website | https://olympusplugin.ai | HTTPS |
