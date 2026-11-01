@@ -235,6 +235,19 @@ Reviewer demo
   changed until OpenAI's review ends. No engine or plugin updates, config or
   data edits, reinstalls or restarts, and releases skip it. Ask the owner
   before touching it; update it only after the review result.
+- 2026-11-01: OpenAI's review was over, so with the owner's go the demo
+  engine moved from 1.0.0-rc.3 to the 1.3.0 release (OpenClaw 2026.9.5
+  unchanged). The upgrade needed three fixes on the host, kept as they are
+  now (#734): `OLYMPUS_ENGINE_HOST=1` deleted from worker.env,
+  `sovereignty.json` moved unchanged from `~/.olympus/` to
+  `~/.config/olympus/`, and the secret store's `secret-backend.json` written
+  as `file`. Before-upgrade backups: `~/releases/backup-20261101-pre-1.3.0`
+  on the host. Live check through the relay as ChatGPT's client: sign-in,
+  token, the pinned tools, the lease question and the Private and Secret
+  refusals all passed. The policy files are unchanged and nothing is waiting
+  for the privacy choice. 1.3's tier re-check moved `docs/garden-bylaws.md`
+  to Private as a precaution (5 Private, was 4); it stays there until the
+  owner decides.
 - The relay keeps shipping while the demo engine is frozen. The directory
   endpoint serves the submitted listing, not the current engine's
   (`connect-relay/server/directory/approved.ts`); CI holds the relay's
