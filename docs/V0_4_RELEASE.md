@@ -80,9 +80,29 @@ and the listing update stay held: this release does not resubmit the
 listing. To verify on the 1.3.0 candidate's test-Mac and canary runs before
 closing: #588, #609, #621, #633, #654.
 
-eval:real for #619 runs on the test-corpus install (the synthetic "Olympus
-Eval Corpus" Dropbox folder on test-omarchy), not the owner's own data, with
-the owner's approval (2026-10-31). A rerun on the owner's install is #707.
+eval:real for #619 did not run for 1.3.0 (2026-10-31): no reachable install
+had the synthetic "Olympus Eval Corpus" indexed (test-omarchy holds a different
+demo set; the other test installs hold none), and the owner's own install
+is not set up. A substitute chat-search check on test-omarchy found 4 of 7
+queries at rank 1; the recall gap is #710 (1.4). The real eval run is #707.
+
+Release verification for 1.3.0 (2026-10-31), final candidate 5450c2cc,
+tagged v1.3.0: mac and linux-ubuntu release-check legs pass 227 checks with 0
+failures (warnings are the approved Keys design change and coverage notes);
+canary-test-mac and canary-test-omarchy pass 7/7 and report olympus 1.3.0.
+Fixes found on the way and landed before the tag: the privacy journeys (#721),
+the Keys model routes the dashboard worker refused (#722), Mac folder access
+remembered after a pull (#726, fixes #724), and the first save on a new install
+offering Unlock on this computer (#727). A live first-run check saved the
+choice and Keys then showed models ready. Verified and closed: #654, #591,
+#588 (with follow-up #711). #621's Telegram picker passes (polish #712); #633
+moved to 1.4; #609 is left for an owner hand check. Filed for 1.3.1: #723,
+#728.
+
+1.3.0 shipped 2026-11-01: GitHub release v1.3.0 (latest) and the site publish
+with the signed Mac helper and both WhatsApp bridges; every served file matches
+its release hash, and the post-publish canary-test-mac and canary-test-omarchy
+runs install olympus 1.3.0 from the site and pass 7/7.
 
 ## 1.1.0 Private answers inbox (owner decision 2026-10-14)
 
