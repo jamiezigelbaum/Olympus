@@ -36,6 +36,8 @@ import {
   PANEL_TOOL_NAMES,
   PRIVACY_GET_TOOL_NAME,
   PRIVACY_SET_TOOL_NAME,
+  PRIVACY_QUESTIONS_TOOL_NAME,
+  PRIVACY_CHECK_TOOL_NAME,
   type DashboardViewModelV1,
 } from '../src/workers/chatgpt/dashboard-contract.ts';
 import { chatgptDashboardPageHtml } from '../src/workers/dashboard/chatgpt/page.ts';
@@ -66,6 +68,8 @@ describe('the panel\'s tool lists', () => {
   test('the privacy names written out in the list are the privacy tools\' own names', () => {
     expect(PANEL_TOOL_NAMES).toContain(PRIVACY_GET_TOOL_NAME);
     expect(PANEL_TOOL_NAMES).toContain(PRIVACY_SET_TOOL_NAME);
+    expect(PANEL_TOOL_NAMES).toContain(PRIVACY_QUESTIONS_TOOL_NAME);
+    expect(PANEL_TOOL_NAMES).toContain(PRIVACY_CHECK_TOOL_NAME);
   });
 
   test('the computer adds exactly Index faster, Unpair, opening and paging unreadable files, and importing archives; ChatGPT\'s conversation tools are on neither list', () => {
@@ -887,6 +891,8 @@ describe('Privacy saves through the panel tools', () => {
     const setup = {
       secretLocations: () => ({ folderKeys: new Set<string>(), pathPrefixes: [], labelIds: new Set<string>(), senders: [] }),
       privacySettings: settings,
+      privacyQuestions: async () => ({ fallback: true, questions: [] }),
+      privacyCheck: async () => null,
       savePrivacy: (update: { description?: string }) => {
         saved = { description: update.description ?? '', rules: [] };
         return settings();
@@ -901,6 +907,23 @@ describe('Privacy saves through the panel tools', () => {
     });
     return { panelTools, saved: () => saved };
   }
+
+  test('draft inference reaches the same computer panel backend with a stable owner confirmation', async () => {
+    const { panelTools, saved } = tools();
+    const got = await panelTools.call(PRIVACY_GET_TOOL_NAME, {}, { origin: ORIGIN });
+    const confirmation = (got._meta as Record<string, any>)['olympus/privacy'].confirmation;
+    for (const name of [PRIVACY_QUESTIONS_TOOL_NAME, PRIVACY_CHECK_TOOL_NAME]) {
+      expect(panelTools.allows(name)).toBe(true);
+      const refused = await panelTools.call(name, { description: 'Draft' }, { origin: ORIGIN });
+      expect(refused.structuredContent).toEqual({ error: 'privacy_owner_only' });
+      const result = await panelTools.call(name, { description: 'Draft', confirmation }, { origin: ORIGIN });
+      expect(result.isError).toBeUndefined();
+      expect(result.content).toEqual([]);
+      expect(result.structuredContent).toBeUndefined();
+      expect(result._meta).toHaveProperty('olympus/privacy');
+    }
+    expect(saved()).toBeUndefined();
+  });
 
   test('the confirmation one call issues is spent by the save that follows it (a fresh wrapper per call)', async () => {
     const { panelTools, saved } = tools();

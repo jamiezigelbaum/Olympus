@@ -194,3 +194,21 @@ describe('one implementation in both pages', () => {
     expect(chatgptDashboardPageHtml()).toContain(source);
   });
 });
+
+
+describe('draft question sentences on every dashboard host', () => {
+  test('serialized logic keeps owner text byte for byte and replaces only its own answer lines', () => {
+    const serialized = new Function('return (' + privacyLogic.toString() + ')')()({ mailSourceId: '', folderSources: {} }) as typeof L;
+    const own = '  My client invoices and poems.  \n';
+    const first = serialized.answerLines(own, [], ['client invoices', 'medical records'], []);
+    expect(first).toEqual({ description: own + '\nPrivate: client invoices; medical records.', lines: ['Private: client invoices; medical records.'], fits: true });
+    const second = serialized.answerLines(first.description, first.lines, ['medical records'], ['client invoices']);
+    expect(second.description).toBe(own + '\nPrivate: medical records.\nFine to share: client invoices.');
+    // An owner line that happens to match is kept: only this session's exact lines are replaced.
+    expect(serialized.answerLines('Private: poems.', [], ['x'], []).description).toBe('Private: poems.\nPrivate: x.');
+    expect(serialized.answerLines('x'.repeat(2000), [], ['y'], [])).toEqual({ description: 'x'.repeat(2000), lines: [], fits: false });
+    // Rewritten answers stay where they were, so a later correction line keeps its place.
+    expect(serialized.answerLines(first.description + '\nFine to share: a sample', first.lines, ['medical records'], []).description)
+      .toBe(own + '\nPrivate: medical records.\nFine to share: a sample');
+  });
+});

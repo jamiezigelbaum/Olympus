@@ -1,3 +1,4 @@
+import { createPrivacyQuestionEngine, type PrivacyQuestionEngine } from '../classification/privacy-questions.ts';
 import { readFileSync } from 'node:fs';
 import { isPendingPrivacyPolicy, saveFirstRunPrivacyChoice } from '../../core/first-run-privacy.ts';
 import { PRIVATE_ANSWER_OPTIONS } from '../../core/privacy-language.ts';
@@ -75,6 +76,7 @@ export interface ChatGptSetupBackendOptions {
   requestReload: () => boolean;
   /** Items held for the privacy check across every tier ledger (counts only). */
   pendingClassificationCount?: () => number;
+  privacyQuestionEngine?: PrivacyQuestionEngine;
   /** Starts a built-in model's install again; false when that model is not built in here. */
   retryModel?: (model: 'embedding' | 'answers' | 'transcription') => boolean;
   env?: Record<string, string | undefined>;
@@ -308,6 +310,9 @@ export function createChatGptSetupBackend(options: ChatGptSetupBackendOptions): 
     secretLocations() {
       return loadSecretLocations(options.env ?? process.env);
     },
+
+    privacyQuestions: (description) => (options.privacyQuestionEngine ?? createPrivacyQuestionEngine({ runtime: async () => undefined })).questions(description),
+    privacyCheck: (description, sample) => (options.privacyQuestionEngine ?? createPrivacyQuestionEngine({ runtime: async () => undefined })).check(description, sample),
 
     privacySettings() {
       return privacySettings();

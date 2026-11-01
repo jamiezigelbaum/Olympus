@@ -1,3 +1,5 @@
+import { createPrivacyQuestionEngine } from '../classification/privacy-questions.ts';
+import { snifferPromptVersions } from '../classification/sniffer.ts';
 import { withFirstRunPrivacyGate } from '../first-run-privacy-gate.ts';
 import { privacyChoicePending } from '../../core/first-run-privacy.ts';
 import { LocalModelDiscovery, saveLocalAnswerModel } from '../../core/local-model-discovery.ts';
@@ -521,7 +523,7 @@ import { registerBuiltInPrivateModel, registeredBuiltInPrivateModel, resolveTier
 import { createAnswerActivity, createLocalModelActivity, runBackgroundInference, runClassificationInference, localModelResourceKey, type LocalModelActivity } from '../answer-activity.ts';
 import { privacyOwnerContext } from '../classification/privacy-profile.ts';
 import { TierSnifferService, tierSnifferServiceEnv } from '../classification/sniffer-service.ts';
-import { resolveClassificationLedgerPath } from '../classification-ledger.ts';
+import { resolveClassificationLedgerPath, readClassificationLedger, isClassifierApproved } from '../classification-ledger.ts';
 import type { AnalystModel } from '../../core/analyst.ts';
 import { resolveTierMigrationPaths, tierMigrationStatusSummary } from '../classification/tier-migration.ts';
 import { resolveEmbeddingLedgerPath } from '../embedding-ledger.ts';
@@ -6586,6 +6588,19 @@ export async function main(): Promise<void> {
     return total;
   };
   const chatgptSetup = createChatGptSetupBackend({
+    privacyQuestionEngine: createPrivacyQuestionEngine({ runtime: async () => {
+      if (!snifferModel || !snifferLane || !snifferEnv.enabled || snifferRuntime.source === 'off') return undefined;
+      if (snifferRuntime.source === 'built_in' && !snifferRuntime.builtIn.available()) return undefined;
+      const ledger = await readClassificationLedger(resolveClassificationLedgerPath(process.env));
+      const approved = isClassifierApproved(ledger.entries, {
+        lane: snifferLane.kind, profileId: snifferLane.profileId, modelId: snifferLane.modelId,
+        promptVersion: snifferPromptVersions(privacyOwnerWords()).approval,
+      }, { builtInDefault: snifferRuntime.source === 'built_in' });
+      return { lane: snifferLane, approved, model: {
+        complete: request => runClassificationInference(() => (snifferResource
+          ? localModelActivity.track(snifferResource, snifferModel) : snifferModel).complete(request)),
+      } };
+    } }),
     pendingClassificationCount,
     workerFetch: worker.fetch,
     handoffs: chatgptHandoffs,

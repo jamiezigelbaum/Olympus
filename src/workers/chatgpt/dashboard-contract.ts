@@ -830,6 +830,8 @@ export const PANEL_TOOL_NAMES = [
   MODEL_RETRY_TOOL_NAME,
   'olympus_privacy_get',
   'olympus_privacy_set',
+  'olympus_privacy_questions',
+  'olympus_privacy_check',
   SYNC_SOURCE_TOOL_NAME,
 ] as const;
 
@@ -1103,6 +1105,8 @@ export interface ModelRetryResult {
 
 export const PRIVACY_GET_TOOL_NAME = 'olympus_privacy_get';
 export const PRIVACY_SET_TOOL_NAME = 'olympus_privacy_set';
+export const PRIVACY_QUESTIONS_TOOL_NAME = 'olympus_privacy_questions';
+export const PRIVACY_CHECK_TOOL_NAME = 'olympus_privacy_check';
 /** The `_meta` key carrying the privacy rules to the widget only. */
 export const PRIVACY_META_KEY = 'olympus/privacy';
 

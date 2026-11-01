@@ -10,16 +10,10 @@
  * beside its programs; the standalone dashboard beside its controller), so it
  * must stay self-contained: it references nothing outside its own body.
  *
- * Follow-up questions (owner request, 2026-10-05): a description that names a
- * broad area ("my family, health and financial stuff") makes the privacy
- * model keep too much private. The editors ask a few short questions per
- * broad area it names, and each answered area becomes one visible sentence
- * after the owner's own words ("About family: private — …; fine to share —
- * …."), which the owner can still edit. The catalog's structure (which areas,
- * how they are spotted, each choice's default) lives here; its words (names,
- * questions, choices, the sentence) are vocabulary.ts
- * DASHBOARD_PRIVACY_QUESTIONS_COPY, handed in as `topicWords`. Deterministic:
- * no model call.
+ * Follow-up fallback questions retain the original broad-area catalog.
+ * New choices are unanswered. Only explicit choices are written while editing;
+ * skipped choices become Private on save. Model questions live in the engine.
+
  */
 
 /** Folder sources a private folder can come from, by name. */
@@ -66,7 +60,7 @@ export interface PrivacyTopicQuestion {
   question: string;
   /** True when the description already carries this area's sentence. */
   answered: boolean;
-  options: Array<{ id: string; label: string; side: PrivacyTopicSide }>;
+  options: Array<{ id: string; label: string; side: PrivacyTopicSide | undefined }>;
 }
 
 /** What the logic needs to know about the editor it serves. */
@@ -241,32 +235,31 @@ export function privacyLogic(config: PrivacyLogicConfig) {
   const DESCRIPTION_MAX = 2000;
   /**
    * The broad areas, in the order they are asked: the words that name one
-   * (whole words, any case, with plurals and common variants), and each
-   * choice's default side.
+   * (whole words, any case, with plurals and common variants). No default answers.
    */
-  const TOPICS: Array<{ id: string; words: string[]; options: Array<[string, PrivacyTopicSide]> }> = [
+  const TOPICS: Array<{ id: string; words: string[]; options: string[] }> = [
     { id: 'family', words: ['family', 'families', 'familial', 'kid', 'kids', 'child', 'children', 'son', 'sons', 'daughter', 'daughters', 'parent', 'parents', 'mother', 'father', 'mom', 'dad', 'spouse', 'wife', 'husband', 'sibling', 'siblings'], options: [
-      ['medical', 'private'], ['legal_money', 'private'], ['conversations', 'private'],
-      ['logistics', 'share'], ['contacts', 'share'], ['history', 'share']] },
+      'medical', 'legal_money', 'conversations',
+      'logistics', 'contacts', 'history'] },
     { id: 'health', words: ['health', 'healthcare', 'health care', 'medical'], options: [
-      ['results', 'private'], ['prescriptions', 'private'], ['therapy', 'private'], ['exports', 'private'],
-      ['wellness', 'share'], ['guides', 'share'], ['product_tests', 'share']] },
+      'results', 'prescriptions', 'therapy', 'exports',
+      'wellness', 'guides', 'product_tests'] },
     { id: 'money', words: ['financial', 'financials', 'finance', 'finances', 'money', 'bank', 'banks', 'banking'], options: [
-      ['statements', 'private'], ['tax', 'private'], ['bills', 'private'], ['loans', 'private'],
-      ['articles', 'share'], ['projects', 'share'], ['prices', 'share']] },
+      'statements', 'tax', 'bills', 'loans',
+      'articles', 'projects', 'prices'] },
     { id: 'work', words: ['work', 'job', 'jobs', 'career', 'employment'], options: [
-      ['contracts', 'private'], ['hr', 'private'],
-      ['projects', 'share'], ['meetings', 'share'], ['wikis', 'share']] },
+      'contracts', 'hr',
+      'projects', 'meetings', 'wikis'] },
     { id: 'relationships', words: ['relationship', 'relationships', 'love', 'love life', 'partner', 'partners', 'intimate', 'intimacy', 'dating'], options: [
-      ['journals', 'private'], ['conversations', 'private'],
-      ['teachings', 'share'], ['groups', 'share']] },
+      'journals', 'conversations',
+      'teachings', 'groups'] },
     { id: 'home', words: ['home', 'homes', 'house', 'houses', 'property', 'properties'], options: [
-      ['deeds', 'private'],
-      ['info', 'share'], ['plans', 'share']] },
+      'deeds',
+      'info', 'plans'] },
   ];
   const words = config.topicWords;
 
-  function topicById(id: string): { id: string; words: string[]; options: Array<[string, PrivacyTopicSide]> } | undefined {
+  function topicById(id: string): { id: string; words: string[]; options: string[] } | undefined {
     return TOPICS.filter((entry) => entry.id === id)[0];
   }
 
@@ -341,30 +334,30 @@ export function privacyLogic(config: PrivacyLogicConfig) {
       const privatePart = p < 0 ? '' : body.slice(p + privatePrefix.length, q > p ? q : body.length);
       const sharePart = q < 0 ? '' : body.slice(q + sharePrefix.length, p > q ? p : body.length);
       const answer: Record<string, PrivacyTopicSide> = {};
-      for (const [option, side] of topic.options) {
+      for (const option of topic.options) {
         const label = words.topics[id]!.options[option] || '';
-        answer[option] = label && holds(' ' + privatePart, label) ? 'private'
-          : label && holds(' ' + sharePart, label) ? 'share' : side;
+        if (label && holds(' ' + privatePart, label)) answer[option] = 'private';
+        else if (label && holds(' ' + sharePart, label)) answer[option] = 'share';
       }
       out[id] = answer;
     }
     return out;
   }
 
-  /** An area's sentence for an answer (a choice it does not name keeps its default). */
+  /** Only explicit answers become visible sentences while editing. */
   function sentence(id: string, answer: Record<string, PrivacyTopicSide>): string {
     const topic = topicById(id);
     if (!words || !topic || !words.topics[id]) return '';
     const kept: string[] = [];
     const shared: string[] = [];
-    for (const [option, side] of topic.options) {
+    for (const option of topic.options) {
       const label = words.topics[id]!.options[option] || '';
-      if (label) ((answer[option] || side) === 'private' ? kept : shared).push(label);
+      if (label && answer[option]) (answer[option] === 'private' ? kept : shared).push(label);
     }
     const parts: string[] = [];
     if (kept.length) parts.push(words.privateList.split('{list}').join(kept.join(', ')));
     if (shared.length) parts.push(words.shareList.split('{list}').join(shared.join(', ')));
-    return leadOf(id) + ' ' + parts.join('; ') + '.';
+    return parts.length ? leadOf(id) + ' ' + parts.join('; ') + '.' : '';
   }
 
   /**
@@ -375,7 +368,7 @@ export function privacyLogic(config: PrivacyLogicConfig) {
    * description comes back unchanged (`fitsAnswers` tells the editor why).
    */
   function refineDescription(description: string, answers: PrivacyTopicAnswers): string {
-    const text = String(description || '').replace(/\r\n/g, '\n');
+    const text = String(description || '');
     const refined = refineUnbounded(text, answers);
     return refined.length > DESCRIPTION_MAX ? text : refined;
   }
@@ -395,14 +388,13 @@ export function privacyLogic(config: PrivacyLogicConfig) {
       const at = lines.map(lineTopic).indexOf(topic.id);
       if (at >= 0) lines[at] = line;
       else {
-        while (lines.length && lines[lines.length - 1]!.trim() === '') lines.pop();
         lines.push(line);
       }
     }
     return lines.join('\n');
   }
 
-  /** The questions for a description: each area it names, each choice at its saved side or its default. */
+  /** The questions for a description: each area it names, each choice answered only if the saved words say so. */
   function questions(description: string): PrivacyTopicQuestion[] {
     if (!words) return [];
     const saved = topicAnswers(description);
@@ -417,10 +409,10 @@ export function privacyLogic(config: PrivacyLogicConfig) {
         name: said.name,
         question: said.question,
         answered: !!answer,
-        options: topic.options.map(([option, side]) => ({
+        options: topic.options.map((option) => ({
           id: option,
           label: said.options[option] || option,
-          side: answer && answer[option] ? answer[option]! : side,
+          side: answer?.[option],
         })),
       });
     }
@@ -432,7 +424,10 @@ export function privacyLogic(config: PrivacyLogicConfig) {
     const question = questions(description).filter((entry) => entry.id === topicId)[0];
     if (!question || (side !== 'private' && side !== 'share')) return null;
     const answer: Record<string, PrivacyTopicSide> = {};
-    for (const option of question.options) answer[option.id] = option.id === optionId ? side : option.side;
+    for (const option of question.options) {
+      if (option.id === optionId) answer[option.id] = side;
+      else if (option.side) answer[option.id] = option.side;
+    }
     const answers: PrivacyTopicAnswers = {};
     answers[topicId] = answer;
     return answers;
@@ -453,18 +448,56 @@ export function privacyLogic(config: PrivacyLogicConfig) {
 
   /**
    * The description with every asked area's sentence written as its choices
-   * stand, defaults included: Save calls this so what the questions show is
-   * what is saved, even when the owner accepts every default. Unchanged when
+   * stand, unanswered choices kept Private. Save calls this only after checking the
+   * complete description fits; nothing grants sharing without an answer. Unchanged when
    * nothing is asked or the sentences would pass the description limit.
    */
   function withShownAnswers(description: string): string {
     const answers: PrivacyTopicAnswers = {};
     for (const question of questions(description)) {
       const answer: Record<string, PrivacyTopicSide> = {};
-      for (const option of question.options) answer[option.id] = option.side;
+      for (const option of question.options) answer[option.id] = option.side || 'private';
       answers[question.id] = answer;
     }
     return refineDescription(description, answers);
+  }
+
+  /**
+   * The owner's answers as at most two compact lines ("Private: a; b." and
+   * "Fine to share: c."), replacing only the lines this session wrote before
+   * (`previous`, matched exactly); the owner's own text stays byte for byte.
+   */
+  function answerLines(description: string, previous: readonly string[], privateTopics: readonly string[], shareTopics: readonly string[]): { description: string; lines: string[]; fits: boolean } {
+    const lines = description.split('\n');
+    // The new lines go where the first earlier answer line was, or at the end.
+    let place = -1;
+    for (const old of previous) {
+      const at = lines.indexOf(old);
+      if (at < 0) continue;
+      lines.splice(at, 1);
+      place = place < 0 || at < place ? at : place;
+    }
+    const added: string[] = [];
+    if (privateTopics.length) added.push('Private: ' + privateTopics.join('; ') + '.');
+    if (shareTopics.length) added.push('Fine to share: ' + shareTopics.join('; ') + '.');
+    let next: string;
+    if (place >= 0) {
+      lines.splice(place, 0, ...added);
+      next = lines.join('\n');
+    } else {
+      const kept = lines.join('\n');
+      next = added.length ? kept + (kept ? '\n' : '') + added.join('\n') : kept;
+    }
+    return next.length <= DESCRIPTION_MAX
+      ? { description: next, lines: added, fits: true }
+      : { description, lines: [...previous], fits: false };
+  }
+  function draftLine(description: string, line: string, previous = ''): { description: string; fits: boolean } {
+    const lines = description.split('\n');
+    const at = previous ? lines.indexOf(previous) : -1;
+    const next = at >= 0 ? lines.map((old, i) => i === at ? line : old).join('\n')
+      : description + (description ? '\n' : '') + line;
+    return { description: next.length <= DESCRIPTION_MAX ? next : description, fits: next.length <= DESCRIPTION_MAX };
   }
 
   /** What the questions show for a description, as one comparable string: redraw when it changes. */
@@ -478,7 +511,7 @@ export function privacyLogic(config: PrivacyLogicConfig) {
   }
 
   return {
-    summary, setIntent, satisfies, validRule, displayOf, viewRule, identity, ruleOut, addTo, lowering, lowers, replay, senderValue,
+    answerLines, draftLine, summary, setIntent, satisfies, validRule, displayOf, viewRule, identity, ruleOut, addTo, lowering, lowers, replay, senderValue,
     detectTopics, topicAnswers, refineDescription, fitsAnswers, questions, questionsKey, answerTopic, withShownAnswers,
   };
 }

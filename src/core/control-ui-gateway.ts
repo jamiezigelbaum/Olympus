@@ -30,6 +30,8 @@ export const OLYMPUS_TAB_TOOL_NAMES = [
   'olympus_model_retry',
   'olympus_privacy_get',
   'olympus_privacy_set',
+  'olympus_privacy_questions',
+  'olympus_privacy_check',
   'olympus_sync_source',
 ] as const;
 

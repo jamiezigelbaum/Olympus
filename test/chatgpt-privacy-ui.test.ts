@@ -40,6 +40,7 @@ afterEach(async () => {
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 function mount(serve: Record<string, Serve>, openai: Record<string, any> = { displayMode: 'fullscreen' }): Host {
+  serve[P.questions] ??= () => ({ _meta: { [CHATGPT_PRIVACY_META_KEY]: { fallback: true, questions: [] } } });
   const html = chatgptDashboardPageHtml({ resultTimeoutMs: 5_000 });
   const start = html.indexOf('<script>') + '<script>'.length;
   const script = html.slice(start, html.indexOf('</script>', start));
@@ -175,6 +176,7 @@ async function openPrivacy(options: { description?: string; rules?: unknown[]; p
   });
   host.push({ structuredContent: dashboard });
   host.button(dashboard.needsYou.length ? 'Set up' : W.edit).click();
+  await sleep(475);
   await host.settle();
   return { host, saves };
 }
@@ -187,7 +189,7 @@ function expectNoJargon(host: Host) {
 
 /** Names leave the page only in the privacy tools' and the scope list's arguments. */
 function expectNamesOnlyInPrivacy(host: Host) {
-  const allowed = [P.get, P.set, S.scopeList];
+  const allowed = [P.get, P.set, P.questions, P.check, S.scopeList];
   for (const message of host.sent) {
     if (message.method === 'tools/call' && allowed.includes(message.params.name)) continue;
     const raw = JSON.stringify(message);
@@ -214,7 +216,9 @@ function ruleRows(host: Host): string[] {
 }
 
 /** Removal already opens the same confirmation that Save opens for other edits. */
-function saveDraft(host: Host): void {
+async function saveDraft(host: Host): Promise<void> {
+  await sleep(475);
+  await host.settle();
   if (host.hasButton(W.confirm)) {
     expect(host.doc.querySelector('[data-key="privacy:confirm:yes"]')).not.toBeNull();
     return;
@@ -295,6 +299,8 @@ describe('the Privacy screen', () => {
     expect(host.doc.querySelector('.privacy-description .picker-footer')).not.toBeNull();
     area.value = `${DESCRIPTION} and more`;
     area.dispatchEvent(new host.win.Event('input') as unknown as Event);
+    expect(host.button(W.save).disabled).toBe(true);
+    await sleep(475); await host.settle();
     expect(host.button(W.save).disabled).toBe(false);
     expect(host.doc.getElementById('privacy-save-reason')).toBeNull();
     expect(host.button(W.save).hasAttribute('aria-describedby')).toBe(false);
@@ -471,7 +477,7 @@ describe('saving', () => {
     host.button(W.next).click();
     if (host.hasButton(W.makePrivate)) host.button(W.makePrivate).click();
     await host.settle();
-    saveDraft(host);
+    await saveDraft(host);
     // Removing a rule and new words lower protection: an inline step names what goes, before anything is sent.
     const box = host.doc.querySelector('.confirm-box')!;
     expect(box.getAttribute('role')).toBe('alert');
@@ -506,7 +512,7 @@ describe('saving', () => {
     const area = editDescription(host) as unknown as HTMLTextAreaElement;
     area.value = DESCRIPTION;
     area.dispatchEvent(new host.win.Event('input') as unknown as Event);
-    saveDraft(host);
+    await saveDraft(host);
     host.button(W.confirm).click();
     await host.settle();
     expect(host.text()).toContain(W.saveFailed);
@@ -534,7 +540,7 @@ describe('saving', () => {
   test('Cancel in the confirmation step sends nothing and keeps the changes', async () => {
     const { host } = await openPrivacy({ rules: SAVED_RULES });
     host.button('Remove Medical Records').click();
-    saveDraft(host);
+    await saveDraft(host);
     expect(host.text()).toContain('This removes protection from Medical Records.');
     host.button(W.cancel).click();
     expect(host.doc.querySelector('.confirm-box')).toBeNull();
@@ -613,7 +619,7 @@ describe('saving', () => {
           const name = kind === 'folder' ? 'Medical Records' : kind === 'label' ? 'Lawyer Letters' : 'doctor@clinic.example';
           if (edit !== 'add') host.button(`Remove ${name}`).click();
           if (edit === 'remove') {
-            saveDraft(host);
+            await saveDraft(host);
             host.button(W.confirm).click();
           } else if (kind === 'sender') {
             host.button(W.addRule).click();
@@ -661,7 +667,7 @@ describe('saving', () => {
       });
       host.button('Remove doctor@clinic.example').click();
       if (edit === 'add') host.button('Undo removing doctor@clinic.example').click();
-      saveDraft(host);
+      await saveDraft(host);
       if (host.hasButton(W.confirm)) host.button(W.confirm).click();
       await host.settle();
       expect(host.text()).not.toContain(W.saved);
@@ -703,7 +709,7 @@ describe('saving', () => {
     await host.settle();
     expect(host.toolCalls(P.set)[0].rules).toEqual([...base, sender]);
     expect(host.text()).toContain('Removed: Lawyer Letters');
-    saveDraft(host);
+    await saveDraft(host);
     host.button(W.confirm).click();
     await host.settle();
     for (let i = 0; i < 2; i++) {
@@ -757,7 +763,7 @@ describe('saving', () => {
       },
     });
     host.button('Remove Medical Records').click();
-    saveDraft(host);
+    await saveDraft(host);
     host.button(W.confirm).click();
     await host.settle();
     expect(host.text()).toContain(W.conflict);
@@ -765,7 +771,7 @@ describe('saving', () => {
     expect(host.doc.querySelector('.confirm-box')!.textContent).toContain('This removes protection from Medical Records.');
     host.button(W.cancel).click();
     expect(host.text()).toContain('Removed: Medical Records');
-    saveDraft(host);
+    await saveDraft(host);
     host.button(W.confirm).click();
     await host.settle();
     expect(sent.at(-1).revision).toBe('rev2');
@@ -830,7 +836,7 @@ describe('saving', () => {
       },
     });
     host.button('Remove Old name').click();
-    saveDraft(host);
+    await saveDraft(host);
     host.button(W.confirm).click();
     await host.settle();
     host.button(W.applyAgain).click();
@@ -864,7 +870,7 @@ describe('saving', () => {
       setResult: () => privacyResult('their words', [], 0, { revision: 'rev2', status: 'conflict' }),
     });
     host.button('Remove Medical Records').click();
-    saveDraft(host);
+    await saveDraft(host);
     host.button(W.confirm).click();
     await host.settle();
     host.button(W.discardMine).click();
@@ -889,7 +895,7 @@ describe('saving', () => {
     const area = editDescription(host) as unknown as HTMLTextAreaElement;
     area.value = 'new words';
     area.dispatchEvent(new host.win.Event('input') as unknown as Event);
-    saveDraft(host);
+    await saveDraft(host);
     // Asked only because the description changed: nothing is named as losing protection.
     const box = host.doc.querySelector('.confirm-box')!;
     expect(box.textContent).toContain(W.confirmDescription);
@@ -913,7 +919,7 @@ describe('saving', () => {
     const area = () => editDescription(host) as unknown as HTMLTextAreaElement;
     area().value = 'new words';
     area().dispatchEvent(new host.win.Event('input') as unknown as Event);
-    saveDraft(host);
+    await saveDraft(host);
     expect(host.doc.querySelector('.confirm-box')).not.toBeNull();
     area().value = 'old words';
     area().dispatchEvent(new host.win.Event('input') as unknown as Event);
@@ -937,7 +943,7 @@ describe('saving', () => {
       },
     });
     host.button('Remove Medical Records').click();
-    saveDraft(host);
+    await saveDraft(host);
     host.button(W.confirm).click();
     await host.settle();
     expect(host.toolCalls(P.get)).toHaveLength(2);
@@ -966,137 +972,105 @@ describe('saving', () => {
 describe('follow-up questions', () => {
   const Q = W.questions;
   const OWNER = 'I want my family stuff to stay private';
-  const radio = (host: Host, key: string) => host.doc.querySelector(`input[data-key="privacy:q:${key}"]`) as unknown as HTMLInputElement;
+  const choice = (host: Host, id: string, side: string) => host.doc.querySelector(`[data-key="privacy:q:${id}:${side}"]`) as HTMLButtonElement;
 
-  test('a broad word asks short questions, each choice a labelled Private / Fine to share pair at its default', async () => {
+  test('fallback pairs start unanswered, stay side by side and disclose the general questions', async () => {
     const { host } = await openPrivacy({ description: OWNER });
-    const section = host.doc.querySelector('section.questions')!;
-    expect(section.querySelector('h2')!.textContent).toBe(Q.title);
-    // The explanation sits with the questions on the main view, as on main, not in Details.
-    expect(section.textContent).toContain(Q.intro);
-    expect(host.doc.querySelector('details')!.textContent).not.toContain(Q.intro);
-    expect(section.querySelector('h3')!.textContent).toBe(Q.topics.family.question);
-    const rows = Array.from(section.querySelectorAll('[role="radiogroup"]'));
-    // Each pair is named by its question and its choice.
-    expect(rows.map((row) => row.getAttribute('aria-labelledby')!.split(' ').map((id) => host.doc.getElementById(id)!.textContent).join(' / ')))
-      .toEqual(Object.values(Q.topics.family.options).map((label) => `${Q.topics.family.question} / ${label}`));
-    // Real labels around real radio buttons: keyboard operable as a group.
-    const logistics = rows[3]!;
-    const inputs = Array.from(logistics.querySelectorAll('input')) as unknown as HTMLInputElement[];
-    expect(inputs.map((input) => [input.type, input.closest('label')!.textContent, input.checked])).toEqual([
-      ['radio', Q.private, false], ['radio', Q.share, true]]);
-    expect(radio(host, 'family:medical:private').checked).toBe(true);
+    expect(host.text()).toContain(Q.fallback);
+    const pairs = host.doc.querySelectorAll('.qchoices');
+    expect(pairs).toHaveLength(6);
+    for (const pair of pairs) {
+      expect(Array.from(pair.querySelectorAll('button')).map(button => button.getAttribute('aria-pressed'))).toEqual(['false', 'false']);
+    }
+    expect(host.doc.querySelector('style')!.textContent).toContain('.qchoices{display:flex;flex-wrap:nowrap;');
+    expect(host.text()).not.toContain(Q.checkTitle);
     expectNoJargon(host);
+  });
+
+  test('only explicit sharing is allowed; skipped questions save Private after confirmation', async () => {
+    const { host, saves } = await openPrivacy({ description: OWNER });
+    editDescription(host);
+    choice(host, 'family:medical', 'share').click();
+    const draft = (editDescription(host) as HTMLTextAreaElement).value;
+    expect(draft.split('\n')[0]).toBe(OWNER);
+    expect(draft.split('\n')[1]).toBe('Fine to share: ' + Q.topics.family.options.medical + '.');
+    expect(choice(host, 'family:history', 'share').getAttribute('aria-pressed')).toBe('false');
+    choice(host, 'family:medical', 'private').click();
+    const answered = (editDescription(host) as HTMLTextAreaElement).value;
+    expect(answered).toBe(OWNER + '\nPrivate: ' + Q.topics.family.options.medical + '.');
+    await saveDraft(host);
+    expect(host.doc.querySelector('.confirm-box')).not.toBeNull();
+    expect(saves).toHaveLength(0);
+    const complete = (editDescription(host) as HTMLTextAreaElement).value;
+    // Every skipped choice joins the one Private line; nothing is fine to share.
+    expect(complete.split('\n')).toHaveLength(2);
+    expect(complete.split('\n')[1]!.startsWith('Private: ')).toBe(true);
+    expect(complete).not.toContain('Fine to share');
+    host.button(W.confirm).click(); await host.settle();
+    expect(saves[0].description).toBe(complete);
     expectNamesOnlyInPrivacy(host);
   });
 
-  test('no broad word, no questions; typing one asks them, keeping the caret in the box', async () => {
-    const { host } = await openPrivacy({ description: 'my divorce' });
-    expect(host.doc.querySelector('section.questions')).toBeNull();
-    const area = editDescription(host) as unknown as HTMLTextAreaElement;
-    area.focus();
-    area.value = 'my divorce and my finances';
+  test('a failed refresh cannot restore a sharing answer deleted from the description', async () => {
+    const { host, saves } = await openPrivacy({ description: OWNER });
+    editDescription(host);
+    choice(host, 'family:medical', 'share').click();
+    host.serve[P.questions] = () => 'fail';
+    const area = editDescription(host) as HTMLTextAreaElement;
+    area.value = OWNER + ' and my diary';
     area.dispatchEvent(new host.win.Event('input') as unknown as Event);
-    expect(host.doc.querySelector('section.questions h3')!.textContent).toBe(Q.topics.money.question);
-    expect(host.doc.activeElement!.getAttribute('data-key')).toBe('privacy:description');
+    await sleep(475); await host.settle();
+    expect(choice(host, 'family:medical', 'share').getAttribute('aria-pressed')).toBe('false');
+    await saveDraft(host);
+    host.button(W.confirm).click(); await host.settle();
+    expect(saves[0].description).not.toContain('Fine to share');
   });
 
-  test('a choice writes its sentence into the description, and Save (after the usual confirmation) sends it', async () => {
-    const { host, saves } = await openPrivacy({ description: OWNER });
+  test('a choice over the limit is refused without selecting either side', async () => {
+    const own = 'my family ' + 'x'.repeat(1980);
+    const { host, saves } = await openPrivacy({ description: own });
     editDescription(host);
-    const share = radio(host, 'family:medical:share');
-    share.checked = true;
-    share.dispatchEvent(new host.win.Event('change') as unknown as Event);
-    const area = editDescription(host) as unknown as HTMLTextAreaElement;
-    const lines = area.value.split('\n');
-    expect(lines[0]).toBe(OWNER);
-    expect(lines[1]).toStartWith('About family: private — Family legal and money papers');
-    expect(lines[1]).toContain('fine to share — Family members\' medical records, School plans and family logistics');
-    expect(radio(host, 'family:medical:share').checked).toBe(true);
-    expect(host.doc.activeElement!.getAttribute('data-key')).toBe('privacy:q:family:medical:share');
-    // Changing it back replaces the sentence instead of adding one.
-    const back = radio(host, 'family:medical:private');
-    back.checked = true;
-    back.dispatchEvent(new host.win.Event('change') as unknown as Event);
-    const refined = (editDescription(host) as unknown as HTMLTextAreaElement).value;
-    expect(refined.split('About family:')).toHaveLength(2);
-    // A changed description lowers protection: the owner confirms, as when typing.
-    saveDraft(host);
-    expect(host.doc.querySelector('.confirm-box')!.textContent).toContain(W.confirmDescription);
-    expect(host.toolCalls(P.set)).toEqual([]);
-    host.button(W.confirm).click();
-    await host.settle();
+    choice(host, 'family:medical', 'share').click();
+    expect((editDescription(host) as HTMLTextAreaElement).value).toBe(own);
+    expect(choice(host, 'family:medical', 'share').getAttribute('aria-pressed')).toBe('false');
+    expect(host.text()).toContain(Q.tooLong);
+    await saveDraft(host);
+    expect(saves).toHaveLength(0);
+    expect(host.doc.querySelector('.confirm-box')).toBeNull();
+  });
+
+  test('debounces edits, reads back before Save, corrects the same sample, and never persists samples to widget state', async () => {
+    const { host, saves } = await openPrivacy({ description: 'My client invoices and poems' });
+    host.serve[P.questions] = () => ({ _meta: { [CHATGPT_PRIVACY_META_KEY]: { fallback: false,
+      questions: [{ id: 'invoices', question: 'Should client invoices stay Private?', topic: 'client invoices', quote: 'client invoices' }] } } });
+    host.serve[P.check] = args => ({ _meta: { [CHATGPT_PRIVACY_META_KEY]: {
+      private: ['Client invoices'], share: ['Poems'], samples: [{ name: 'Synthetic client invoice', side: args.sample ? 'share' : 'private' }],
+    } } });
+    const area = editDescription(host) as HTMLTextAreaElement;
+    for (const value of ['My client invoices and poems.', 'My client invoices and poems. More words.']) {
+      area.value = value; area.dispatchEvent(new host.win.Event('input') as unknown as Event);
+    }
+    const previous = host.toolCalls(P.questions).length;
+    expect(host.text()).toContain(Q.loading);
+    expect(host.toolCalls(P.questions)).toHaveLength(previous);
+    await sleep(475); await host.settle();
+    expect(host.toolCalls(P.questions)).toHaveLength(previous + 1);
+    expect(host.text()).toContain('Should client invoices stay Private?');
+    await saveDraft(host); await host.settle();
+    expect(saves).toHaveLength(0);
+    expect(host.text()).toContain(Q.checkTitle);
+    expect(host.text()).toContain('Synthetic client invoice');
+    expect(host.toolCalls(P.check)[0].description).toContain('Private: client invoices.');
+    host.button(Q.wrong).click(); await host.settle();
+    expect(host.toolCalls(P.check).at(-1).sample).toBe('Synthetic client invoice');
+    expect(host.toolCalls(P.check).at(-1).description).toContain('Fine to share: Synthetic client invoice');
+    expect(saves).toHaveLength(0);
+    await saveDraft(host);
+    host.button(W.confirm).click(); await host.settle();
     expect(saves).toHaveLength(1);
-    expect(saves[0].description).toBe(refined);
-    expect(saves[0].confirmation).toBe('conf1');
-    expectNamesOnlyInPrivacy(host);
-  });
-
-  test('description edits save the defaults shown, after the usual confirmation', async () => {
-    const { host, saves } = await openPrivacy({ description: OWNER });
-    expect(host.hasButton(W.save)).toBe(false);
-    const edited = editDescription(host)!;
-    edited.value += ' ';
-    edited.dispatchEvent(new host.win.Event('input') as unknown as Event);
-    saveDraft(host);
-    const area = editDescription(host) as unknown as HTMLTextAreaElement;
-    expect(area.value.split('\n')[0]!.trim()).toBe(OWNER);
-    expect(area.value.split('\n')[1]).toStartWith('About family: private — ');
-    expect(host.doc.querySelector('.confirm-box')!.textContent).toContain(W.confirmDescription);
-    host.button(W.confirm).click();
-    await host.settle();
-    expect(saves).toHaveLength(1);
-    expect(saves[0].description).toBe(area.value.trim());
-  });
-
-  test('a saved description pre-fills the choices it already answers', async () => {
-    const saved = `${OWNER}\nAbout family: private — Alumni, contact and address lists; fine to share — Family members' medical records.`;
-    const { host } = await openPrivacy({ description: saved });
-    expect(radio(host, 'family:contacts:private').checked).toBe(true);
-    expect(radio(host, 'family:medical:share').checked).toBe(true);
-    // Not named in the sentence: its default.
-    expect(radio(host, 'family:history:share').checked).toBe(true);
-  });
-
-  test('a choice too long to add changes nothing, keeps the radio, and says why until the words change', async () => {
-    const long = `my family ${'x'.repeat(1_900)}`;
-    const { host } = await openPrivacy({ description: long });
-    editDescription(host);
-    const share = radio(host, 'family:medical:share');
-    share.checked = true;
-    share.dispatchEvent(new host.win.Event('change') as unknown as Event);
-    expect((editDescription(host) as unknown as HTMLTextAreaElement).value).toBe(long);
-    expect(radio(host, 'family:medical:private').checked).toBe(true);
-    expect(radio(host, 'family:medical:share').checked).toBe(false);
-    const note = host.doc.querySelector('section.questions [role="alert"]')!;
-    expect(note.textContent).toBe(Q.tooLong);
-    // Nothing changed, so leaving needs no discard prompt.
-    host.button(W.back).click();
-    expect(host.text()).not.toContain(W.discardPrompt);
-  });
-
-  test('a sentence edited by hand redraws the radios; an owner line that looks like one is left alone', async () => {
-    const owner = 'About family: never share anything about my kids.\nmy family stuff';
-    const { host } = await openPrivacy({ description: owner });
-    const pick = radio(host, 'family:contacts:private');
-    pick.checked = true;
-    pick.dispatchEvent(new host.win.Event('change') as unknown as Event);
-    const area = () => editDescription(host) as unknown as HTMLTextAreaElement;
-    expect(area().value.split('\n').slice(0, 2)).toEqual(owner.split('\n'));
-    expect(area().value.split('\n')[2]).toStartWith('About family: private — ');
-    const field = area();
-    field.value = field.value.replace(', Alumni, contact and address lists;', ';').replace('fine to share — ', 'fine to share — Alumni, contact and address lists, ');
-    field.dispatchEvent(new host.win.Event('input') as unknown as Event);
-    expect(radio(host, 'family:contacts:share').checked).toBe(true);
-  });
-
-  test('a choice marks the draft changed: leaving asks before discarding it', async () => {
-    const { host } = await openPrivacy({ description: OWNER });
-    const share = radio(host, 'family:conversations:share');
-    share.checked = true;
-    share.dispatchEvent(new host.win.Event('change') as unknown as Event);
-    host.button(W.back).click();
-    expect(host.text()).toContain(W.discardPrompt);
+    expect(saves[0].description).toContain('Fine to share: Synthetic client invoice');
+    expect(host.calls.some(([name]) => name === 'setWidgetState')).toBe(false);
+    expect(host.sent.some(message => String(message.method).includes('update-model-context'))).toBe(false);
   });
 });
 
@@ -1162,7 +1136,7 @@ describe('the dashboard Privacy row', () => {
     const area = editDescription(host) as unknown as HTMLTextAreaElement;
     area.value = `${DESCRIPTION} and more`;
     area.dispatchEvent(new host.win.Event('input') as unknown as Event);
-    saveDraft(host);
+    await saveDraft(host);
     expect(host.doc.querySelector('.confirm-box')).not.toBeNull();
     host.button(W.confirm).click();
     await host.settle();
@@ -1337,7 +1311,7 @@ describe('privacy sheet persistence boundaries', () => {
     details.open = true;
     details.dispatchEvent(new host.win.Event('toggle') as unknown as Event);
     expect(details.querySelectorAll('.qtopic')).toHaveLength(0);
-    expect(host.doc.querySelectorAll('.qtopic')).toHaveLength(6);
+    expect(host.doc.querySelectorAll('.qchoices')).toHaveLength(32);
     const area = editDescription(host);
     area.value += ' and other topics';
     area.dispatchEvent(new host.win.Event('input') as unknown as Event);
@@ -1367,7 +1341,7 @@ test('inline editor retains every keystroke and caret when topics and save avail
   details().open = false;
   details().dispatchEvent(new host.win.Event('toggle') as unknown as Event);
   expect(editDescription(host).value).toBe('my diary and letters');
-  saveDraft(host);
+  await saveDraft(host);
   host.button(W.confirm).click();
   await host.settle();
   expect(saves).toHaveLength(1);
@@ -1383,8 +1357,8 @@ test('the save bar follows pending covered edits, including reverting to the sav
     area.dispatchEvent(new host.win.Event('input') as unknown as Event);
     expect(host.hasButton(W.save)).toBe(true);
   }
-  const choice = host.doc.querySelector('input[data-key="privacy:q:family:medical:share"]') as HTMLInputElement;
-  choice.checked = true;
-  choice.dispatchEvent(new host.win.Event('change') as unknown as Event);
+  await sleep(475); await host.settle();
+  const choice = host.doc.querySelector('[data-key="privacy:q:family:medical:share"]') as HTMLButtonElement;
+  choice.click();
   expect(host.button(W.save).textContent).toBe('Save description and answers');
 });

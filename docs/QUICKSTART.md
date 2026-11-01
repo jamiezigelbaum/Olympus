@@ -160,8 +160,13 @@ rules raise matching items, and nothing you write can lower content.
 In Privacy, **In your own words** shows your full description. **Edit** opens
 it inline; Save and Cancel sit together. The note underneath explains that
 ChatGPT sees these words, so describe topics rather than private details.
-Follow-up questions stay next to your description and add their answers to
-it. **Always private (optional)** shows your rules and an **Add a rule** sheet;
+Olympus’s private classifier reads your draft and asks follow-up questions in your
+own context, then adds any uncovered common privacy checks. Every answer starts
+blank; skipped questions save as Private. Answers stay editable after your own
+words. **Check what Olympus understood** summarizes both sides and tries synthetic
+item names with the real classifier. **This is wrong** adds a correction to your
+draft and checks that sample again. Nothing is saved until Save. When the private
+model is unavailable, general questions appear and the read-back check is hidden. **Always private (optional)** shows your rules and an **Add a rule** sheet;
 the note beside the rules explains that their names are shown to ChatGPT.
 **Details** holds the longer explanations. Changes to the description or
 removal of a rule still ask for confirmation; conflicts keep your changes

@@ -2704,7 +2704,31 @@ export const DASHBOARD_CHATGPT_PICKER_COPY = {
  */
 export const DASHBOARD_PRIVACY_QUESTIONS_COPY = {
   title: 'A few quick questions',
-  intro: 'Your words name some broad areas. Pick what\'s private in each, so Olympus keeps only those things private. Your answers are added to your description, where you can still edit them.',
+  intro: 'Choose Private or Fine to share. Skipped questions stay Private when you save. Your answers become editable sentences after your own words.',
+  loading: 'Reading your words…',
+  fallback: 'Olympus’s private model isn’t on yet, so these are general questions.',
+  checkTitle: 'Check what Olympus understood',
+  check: 'Check my description',
+  checking: 'Checking your description…',
+  wrong: 'This is wrong',
+  checkFailed: 'Olympus could not check this description yet. You can still save.',
+  privateExamples: 'Olympus would keep these Private',
+  shareExamples: 'Olympus would treat these as fine to share',
+  baseline: {
+    medical: 'Should medical records and results stay Private?',
+    financial: 'Should bank, card and tax papers stay Private?',
+    intimate: 'Should intimate or romantic messages stay Private?',
+    legal: 'Should legal matters (custody, disputes, lawsuits) stay Private?',
+    identity: 'Should ID documents (passport, licence) stay Private?',
+  },
+  /** What an answer to each baseline check writes into the description. */
+  baselineTopics: {
+    medical: 'medical records and results',
+    financial: 'bank, card and tax papers',
+    intimate: 'intimate or romantic messages',
+    legal: 'legal matters (custody, disputes, lawsuits)',
+    identity: 'ID documents (passport, licence)',
+  },
   private: 'Private',
   share: 'Fine to share',
   /** A choice whose sentence would not fit in the description: nothing changes. */

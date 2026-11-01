@@ -343,7 +343,7 @@ textarea.text{resize:vertical;min-height:4.5rem}
 .qtitle{font-size:0.9375rem;font-weight:600;margin:0 0 0.25rem}
 .qopt{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:0.25rem 0.75rem;padding:0.25rem 0;border-bottom:1px solid var(--line)}
 .qlabel{flex:1 1 12rem;min-width:0}
-.qchoices{display:flex;flex-wrap:wrap;gap:0.25rem 1rem}
+.qchoices{display:flex;flex-wrap:nowrap;gap:0.25rem 1rem}
 .qchoice{display:inline-flex;align-items:center;gap:0.375rem;min-height:2.5rem;cursor:pointer}
 .qchoice input{flex:none;width:1.125rem;height:1.125rem;margin:0;accent-color:var(--accent)}
 .fsection>.reason{margin-top:0.375rem}
