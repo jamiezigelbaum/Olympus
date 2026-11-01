@@ -126,7 +126,7 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
       edited: false, saving: false, saveError: '', discarding: false, picking: false,
       labels: [], labelsLoading: false, labelsError: '',
       sender: '', senderError: '',
-      questionKey: null, questionVersion: 0, questionLoading: false, generated: null, questionAnswers: {}, answerLines: [],
+      questionKey: null, questionVersion: 0, questionLoading: false, generated: null, questionAnswers: {},
       checkKey: null, checking: false, checkResult: null, checkError: '',
       editingDescription: false, questionsError: '', detailsOpen: false, conflictDetailsOpen: false, candidate: null, ruleKind: '',
     };
@@ -172,7 +172,7 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
   function take(data: Any): void {
     clearTimeout(questionTimer);
     s.questionVersion++;
-    s.questionKey = null; s.generated = null; s.questionAnswers = {}; s.answerLines = [];
+    s.questionKey = null; s.generated = null; s.questionAnswers = {};
     s.checkKey = null; s.checkResult = null; s.checkError = ''; s.checking = false;
     s.description = typeof data.description === 'string' ? data.description : '';
     s.savedDescription = s.description;
@@ -641,12 +641,12 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
         const data = result && !result.isError && result._meta && result._meta[kit.config.metaKey];
         s.generated = data && !data.fallback && Array.isArray(data.questions) ? data : fallbackQuestions(description);
         s.questionLoading = false;
-        s.questionAnswers = {}; s.answerLines = [];
+        s.questionAnswers = {};
         kit.render();
       }, () => {
         if (!s || mine !== session || version !== s.questionVersion) return;
         s.generated = fallbackQuestions(description); s.questionLoading = false;
-        s.questionAnswers = {}; s.answerLines = [];
+        s.questionAnswers = {};
         kit.render();
       });
     }, 450);
@@ -662,15 +662,25 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
     return s.generated ? s.generated.questions : [];
   }
 
-  /** Rewrite this session's answer lines; skipped questions count as Private only when `skippedPrivate`. */
-  function writeAnswers(answers: Any, skippedPrivate: boolean): { description: string; lines: string[]; fits: boolean } {
-    const kept: string[] = [];
-    const shared: string[] = [];
+  /** The topic an answer writes for a question. */
+  function topicOf(question: Any): string {
+    return L.cleanTopic(String(question.topic || question.question));
+  }
+
+  /** The side a question shows: this session's answer, else what the description's answer lines already say. */
+  function shownSide(question: Any): string {
+    return s.questionAnswers[question.id] || L.savedAnswers(s.description)[topicOf(question)] || '';
+  }
+
+  /** Rewrite the answer lines; at Save, questions still unanswered anywhere count as Private. */
+  function writeAnswers(answers: Any, skippedPrivate: boolean): { description: string; fits: boolean } {
+    const byTopic: Record<string, 'private' | 'share'> = {};
+    const unanswered: Record<string, 'private' | 'share'> = {};
     for (const question of askedQuestions()) {
-      const side = answers[question.id] || question.side || (skippedPrivate ? 'private' : '');
-      if (side) (side === 'private' ? kept : shared).push(question.topic || question.question);
+      if (answers[question.id]) byTopic[topicOf(question)] = answers[question.id];
+      else if (skippedPrivate) unanswered[topicOf(question)] = 'private';
     }
-    return L.answerLines(s.description, s.answerLines, kept, shared);
+    return L.answerLines(s.description, byTopic, unanswered);
   }
 
   function chooseQuestion(question: Any, side: 'private' | 'share'): void {
@@ -679,7 +689,7 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
     s.questionsError = next.fits ? '' : W.questions.tooLong;
     if (next.fits) {
       s.description = next.description; s.questionKey = s.description;
-      s.questionAnswers = answers; s.answerLines = next.lines;
+      s.questionAnswers = answers;
       s.checkKey = null; s.checkResult = null; s.checkError = '';
       changed();
     }
@@ -694,7 +704,6 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
       changed();
     }
     s.questionKey = s.description;
-    s.answerLines = next.lines;
     return true;
   }
 
@@ -741,11 +750,11 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
       s.checkResult.samples.filter((sample: Any) => sample.side === side).forEach((sample: Any, index: number) => {
         const row = add(el('div', 'qopt'), el('span', 'qlabel', sample.name));
         add(row, kit.button(Q.wrong, 'privacy:wrong:' + side + ':' + index, s.checking || s.saving ? null : () => {
-          const line = (side === 'private' ? 'Fine to share: ' : 'Private: ') + sample.name;
-          const next = L.draftLine(s.description, line, sample.correction || '');
+          // The correction joins the answer lines, on the other side from Olympus's judgment.
+          const next = L.answerLines(s.description, { [sample.name]: side === 'private' ? 'share' : 'private' });
           s.questionsError = next.fits ? '' : Q.tooLong;
           if (next.fits) {
-            s.description = next.description; s.questionKey = s.description; sample.correction = line;
+            s.description = next.description; s.questionKey = s.description;
             changed(); runCheck(sample.name);
           } else kit.render();
         }, 'plain'));
@@ -770,7 +779,7 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
       const pair = el('span', 'qchoices');
       pair.setAttribute('role', 'group'); pair.setAttribute('aria-label', question.question);
       for (const side of ['private', 'share'] as const) {
-        const selected = (s.questionAnswers[question.id] || question.side) === side;
+        const selected = shownSide(question) === side;
         const control = kit.button(side === 'private' ? Q.private : Q.share, 'privacy:q:' + question.id + ':' + side,
           s.saving || s.checking ? null : () => chooseQuestion(question, side), selected ? 'main' : 'plain');
         control.setAttribute('aria-pressed', String(selected));
@@ -890,7 +899,7 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
         kit.button(W.save, 'privacy:save', canSave() ? save : null, 'main'),
         kit.button(W.cancel, 'privacy:cancel', () => {
           clearTimeout(questionTimer); s.questionVersion++;
-          s.questionKey = null; s.generated = null; s.questionAnswers = {}; s.answerLines = [];
+          s.questionKey = null; s.generated = null; s.questionAnswers = {};
           s.description = s.savedDescription;
           s.editingDescription = false;
           s.questionsError = '';

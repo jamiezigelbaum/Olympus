@@ -462,42 +462,71 @@ export function privacyLogic(config: PrivacyLogicConfig) {
     return refineDescription(description, answers);
   }
 
-  /**
-   * The owner's answers as at most two compact lines ("Private: a; b." and
-   * "Fine to share: c."), replacing only the lines this session wrote before
-   * (`previous`, matched exactly); the owner's own text stays byte for byte.
-   */
-  function answerLines(description: string, previous: readonly string[], privateTopics: readonly string[], shareTopics: readonly string[]): { description: string; lines: string[]; fits: boolean } {
-    const lines = description.split('\n');
-    // The new lines go where the first earlier answer line was, or at the end.
-    let place = -1;
-    for (const old of previous) {
-      const at = lines.indexOf(old);
-      if (at < 0) continue;
-      lines.splice(at, 1);
-      place = place < 0 || at < place ? at : place;
+  /** The two answer-line leads; a line in either shape is an answer, whoever wrote it. */
+  const ANSWER_LEADS: Array<[PrivacyTopicSide, string]> = [['private', 'Private: '], ['share', 'Fine to share: ']];
+  function answerLineSide(line: string): PrivacyTopicSide | '' {
+    for (const [side, lead] of ANSWER_LEADS) if (line.indexOf(lead) === 0 && line.charAt(line.length - 1) === '.') return side;
+    return '';
+  }
+
+  /** A topic is one phrase on one line: no list separator, line break or closing full stop of its own. */
+  function cleanTopic(raw: string): string {
+    return String(raw || '').replace(/\s+/g, ' ').split('; ').join(', ').replace(/[.\s]+$/, '').trim();
+  }
+
+  /** The topics a description's answer lines already place on each side (later lines win). */
+  function savedAnswers(description: string): Record<string, PrivacyTopicSide> {
+    const out: Record<string, PrivacyTopicSide> = {};
+    for (const line of String(description || '').split('\n')) {
+      const side = answerLineSide(line);
+      if (!side) continue;
+      const lead = side === 'private' ? 'Private: ' : 'Fine to share: ';
+      for (const topic of line.slice(lead.length, -1).split('; ')) if (topic.trim()) out[topic.trim()] = side;
     }
+    return out;
+  }
+
+  /**
+   * The answers as at most two compact lines ("Private: a; b." and "Fine to
+   * share: c."). Every earlier answer line is folded in, so a changed answer
+   * replaces its old side instead of contradicting it; `whenUnanswered` topics
+   * are added only if no line answers them yet. The new lines take the place
+   * of the first earlier one, or go at the end; every other line stays byte
+   * for byte.
+   */
+  function answerLines(description: string, answers: Record<string, PrivacyTopicSide>, whenUnanswered?: Record<string, PrivacyTopicSide>): { description: string; fits: boolean } {
+    const merged = savedAnswers(description);
+    if (whenUnanswered) for (const raw of Object.keys(whenUnanswered)) {
+      const topic = cleanTopic(raw);
+      if (topic && !merged[topic]) merged[topic] = whenUnanswered[raw]!;
+    }
+    for (const raw of Object.keys(answers)) {
+      const topic = cleanTopic(raw);
+      if (!topic) continue;
+      delete merged[topic];
+      merged[topic] = answers[raw]!;
+    }
+    const lines = String(description || '').split('\n');
+    let place = -1;
+    const kept: string[] = [];
+    for (const line of lines) {
+      if (answerLineSide(line)) { if (place < 0) place = kept.length; }
+      else kept.push(line);
+    }
+    const keep = Object.keys(merged).filter((topic) => merged[topic] === 'private');
+    const share = Object.keys(merged).filter((topic) => merged[topic] === 'share');
     const added: string[] = [];
-    if (privateTopics.length) added.push('Private: ' + privateTopics.join('; ') + '.');
-    if (shareTopics.length) added.push('Fine to share: ' + shareTopics.join('; ') + '.');
+    if (keep.length) added.push('Private: ' + keep.join('; ') + '.');
+    if (share.length) added.push('Fine to share: ' + share.join('; ') + '.');
     let next: string;
     if (place >= 0) {
-      lines.splice(place, 0, ...added);
-      next = lines.join('\n');
+      kept.splice(place, 0, ...added);
+      next = kept.join('\n');
     } else {
-      const kept = lines.join('\n');
-      next = added.length ? kept + (kept ? '\n' : '') + added.join('\n') : kept;
+      const own = kept.join('\n');
+      next = added.length ? own + (own ? '\n' : '') + added.join('\n') : own;
     }
-    return next.length <= DESCRIPTION_MAX
-      ? { description: next, lines: added, fits: true }
-      : { description, lines: [...previous], fits: false };
-  }
-  function draftLine(description: string, line: string, previous = ''): { description: string; fits: boolean } {
-    const lines = description.split('\n');
-    const at = previous ? lines.indexOf(previous) : -1;
-    const next = at >= 0 ? lines.map((old, i) => i === at ? line : old).join('\n')
-      : description + (description ? '\n' : '') + line;
-    return { description: next.length <= DESCRIPTION_MAX ? next : description, fits: next.length <= DESCRIPTION_MAX };
+    return next.length <= DESCRIPTION_MAX ? { description: next, fits: true } : { description, fits: false };
   }
 
   /** What the questions show for a description, as one comparable string: redraw when it changes. */
@@ -511,7 +540,7 @@ export function privacyLogic(config: PrivacyLogicConfig) {
   }
 
   return {
-    answerLines, draftLine, summary, setIntent, satisfies, validRule, displayOf, viewRule, identity, ruleOut, addTo, lowering, lowers, replay, senderValue,
+    answerLines, savedAnswers, cleanTopic, summary, setIntent, satisfies, validRule, displayOf, viewRule, identity, ruleOut, addTo, lowering, lowers, replay, senderValue,
     detectTopics, topicAnswers, refineDescription, fitsAnswers, questions, questionsKey, answerTopic, withShownAnswers,
   };
 }

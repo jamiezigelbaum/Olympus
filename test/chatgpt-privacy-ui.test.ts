@@ -1011,6 +1011,20 @@ describe('follow-up questions', () => {
     expectNamesOnlyInPrivacy(host);
   });
 
+  test('a saved answer shows as chosen when reopened, and flipping it replaces it instead of contradicting it', async () => {
+    const photos = Q.topics.family.options.history;
+    const { host, saves } = await openPrivacy({ description: OWNER + '\nFine to share: ' + photos + '.' });
+    editDescription(host);
+    expect(choice(host, 'family:history', 'share').getAttribute('aria-pressed')).toBe('true');
+    choice(host, 'family:history', 'private').click();
+    const flipped = (editDescription(host) as HTMLTextAreaElement).value;
+    expect(flipped).toBe(OWNER + '\nPrivate: ' + photos + '.');
+    await saveDraft(host);
+    host.button(W.confirm).click(); await host.settle();
+    expect(saves[0].description).not.toContain('Fine to share');
+    expect(saves[0].description.split(photos)).toHaveLength(2);
+  });
+
   test('a failed refresh cannot restore a sharing answer deleted from the description', async () => {
     const { host, saves } = await openPrivacy({ description: OWNER });
     editDescription(host);

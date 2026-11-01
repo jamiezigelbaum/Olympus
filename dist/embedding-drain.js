@@ -43286,44 +43286,76 @@ function privacyLogic(config) {
     }
     return refineDescription(description, answers);
   }
-  function answerLines(description, previous, privateTopics, shareTopics) {
-    const lines = description.split(`
+  const ANSWER_LEADS = [["private", "Private: "], ["share", "Fine to share: "]];
+  function answerLineSide(line) {
+    for (const [side, lead] of ANSWER_LEADS)
+      if (line.indexOf(lead) === 0 && line.charAt(line.length - 1) === ".")
+        return side;
+    return "";
+  }
+  function cleanTopic(raw) {
+    return String(raw || "").replace(/\s+/g, " ").split("; ").join(", ").replace(/[.\s]+$/, "").trim();
+  }
+  function savedAnswers(description) {
+    const out = {};
+    for (const line of String(description || "").split(`
+`)) {
+      const side = answerLineSide(line);
+      if (!side)
+        continue;
+      const lead = side === "private" ? "Private: " : "Fine to share: ";
+      for (const topic of line.slice(lead.length, -1).split("; "))
+        if (topic.trim())
+          out[topic.trim()] = side;
+    }
+    return out;
+  }
+  function answerLines(description, answers, whenUnanswered) {
+    const merged = savedAnswers(description);
+    if (whenUnanswered)
+      for (const raw of Object.keys(whenUnanswered)) {
+        const topic = cleanTopic(raw);
+        if (topic && !merged[topic])
+          merged[topic] = whenUnanswered[raw];
+      }
+    for (const raw of Object.keys(answers)) {
+      const topic = cleanTopic(raw);
+      if (!topic)
+        continue;
+      delete merged[topic];
+      merged[topic] = answers[raw];
+    }
+    const lines = String(description || "").split(`
 `);
     let place = -1;
-    for (const old of previous) {
-      const at = lines.indexOf(old);
-      if (at < 0)
-        continue;
-      lines.splice(at, 1);
-      place = place < 0 || at < place ? at : place;
+    const kept = [];
+    for (const line of lines) {
+      if (answerLineSide(line)) {
+        if (place < 0)
+          place = kept.length;
+      } else
+        kept.push(line);
     }
+    const keep = Object.keys(merged).filter((topic) => merged[topic] === "private");
+    const share = Object.keys(merged).filter((topic) => merged[topic] === "share");
     const added = [];
-    if (privateTopics.length)
-      added.push("Private: " + privateTopics.join("; ") + ".");
-    if (shareTopics.length)
-      added.push("Fine to share: " + shareTopics.join("; ") + ".");
+    if (keep.length)
+      added.push("Private: " + keep.join("; ") + ".");
+    if (share.length)
+      added.push("Fine to share: " + share.join("; ") + ".");
     let next;
     if (place >= 0) {
-      lines.splice(place, 0, ...added);
-      next = lines.join(`
+      kept.splice(place, 0, ...added);
+      next = kept.join(`
 `);
     } else {
-      const kept = lines.join(`
+      const own3 = kept.join(`
 `);
-      next = added.length ? kept + (kept ? `
+      next = added.length ? own3 + (own3 ? `
 ` : "") + added.join(`
-`) : kept;
+`) : own3;
     }
-    return next.length <= DESCRIPTION_MAX ? { description: next, lines: added, fits: true } : { description, lines: [...previous], fits: false };
-  }
-  function draftLine(description, line, previous = "") {
-    const lines = description.split(`
-`);
-    const at = previous ? lines.indexOf(previous) : -1;
-    const next = at >= 0 ? lines.map((old, i2) => i2 === at ? line : old).join(`
-`) : description + (description ? `
-` : "") + line;
-    return { description: next.length <= DESCRIPTION_MAX ? next : description, fits: next.length <= DESCRIPTION_MAX };
+    return next.length <= DESCRIPTION_MAX ? { description: next, fits: true } : { description, fits: false };
   }
   function questionsKey(description) {
     return JSON.stringify(questions(description));
@@ -43333,7 +43365,8 @@ function privacyLogic(config) {
   }
   return {
     answerLines,
-    draftLine,
+    savedAnswers,
+    cleanTopic,
     summary,
     setIntent,
     satisfies,
@@ -45347,7 +45380,6 @@ function chatgptPrivacyProgram(kit, makeLogic) {
       questionLoading: false,
       generated: null,
       questionAnswers: {},
-      answerLines: [],
       checkKey: null,
       checking: false,
       checkResult: null,
@@ -45390,7 +45422,6 @@ function chatgptPrivacyProgram(kit, makeLogic) {
     s.questionKey = null;
     s.generated = null;
     s.questionAnswers = {};
-    s.answerLines = [];
     s.checkKey = null;
     s.checkResult = null;
     s.checkError = "";
@@ -45838,7 +45869,6 @@ function chatgptPrivacyProgram(kit, makeLogic) {
         s.generated = data2 && !data2.fallback && Array.isArray(data2.questions) ? data2 : fallbackQuestions(description);
         s.questionLoading = false;
         s.questionAnswers = {};
-        s.answerLines = [];
         kit.render();
       }, () => {
         if (!s || mine !== session || version !== s.questionVersion)
@@ -45846,7 +45876,6 @@ function chatgptPrivacyProgram(kit, makeLogic) {
         s.generated = fallbackQuestions(description);
         s.questionLoading = false;
         s.questionAnswers = {};
-        s.answerLines = [];
         kit.render();
       });
     }, 450);
@@ -45862,15 +45891,22 @@ function chatgptPrivacyProgram(kit, makeLogic) {
   function askedQuestions() {
     return s.generated ? s.generated.questions : [];
   }
+  function topicOf(question) {
+    return L.cleanTopic(String(question.topic || question.question));
+  }
+  function shownSide(question) {
+    return s.questionAnswers[question.id] || L.savedAnswers(s.description)[topicOf(question)] || "";
+  }
   function writeAnswers(answers, skippedPrivate) {
-    const kept2 = [];
-    const shared = [];
+    const byTopic = {};
+    const unanswered = {};
     for (const question of askedQuestions()) {
-      const side = answers[question.id] || question.side || (skippedPrivate ? "private" : "");
-      if (side)
-        (side === "private" ? kept2 : shared).push(question.topic || question.question);
+      if (answers[question.id])
+        byTopic[topicOf(question)] = answers[question.id];
+      else if (skippedPrivate)
+        unanswered[topicOf(question)] = "private";
     }
-    return L.answerLines(s.description, s.answerLines, kept2, shared);
+    return L.answerLines(s.description, byTopic, unanswered);
   }
   function chooseQuestion(question, side) {
     const answers = { ...s.questionAnswers, [question.id]: side };
@@ -45880,7 +45916,6 @@ function chatgptPrivacyProgram(kit, makeLogic) {
       s.description = next.description;
       s.questionKey = s.description;
       s.questionAnswers = answers;
-      s.answerLines = next.lines;
       s.checkKey = null;
       s.checkResult = null;
       s.checkError = "";
@@ -45900,7 +45935,6 @@ function chatgptPrivacyProgram(kit, makeLogic) {
       changed();
     }
     s.questionKey = s.description;
-    s.answerLines = next.lines;
     return true;
   }
   function runCheck(sample) {
@@ -45964,13 +45998,11 @@ function chatgptPrivacyProgram(kit, makeLogic) {
         s.checkResult.samples.filter((sample) => sample.side === side).forEach((sample, index) => {
           const row = add(el("div", "qopt"), el("span", "qlabel", sample.name));
           add(row, kit.button(Q.wrong, "privacy:wrong:" + side + ":" + index, s.checking || s.saving ? null : () => {
-            const line = (side === "private" ? "Fine to share: " : "Private: ") + sample.name;
-            const next = L.draftLine(s.description, line, sample.correction || "");
+            const next = L.answerLines(s.description, { [sample.name]: side === "private" ? "share" : "private" });
             s.questionsError = next.fits ? "" : Q.tooLong;
             if (next.fits) {
               s.description = next.description;
               s.questionKey = s.description;
-              sample.correction = line;
               changed();
               runCheck(sample.name);
             } else
@@ -46000,7 +46032,7 @@ function chatgptPrivacyProgram(kit, makeLogic) {
       pair.setAttribute("role", "group");
       pair.setAttribute("aria-label", question.question);
       for (const side of ["private", "share"]) {
-        const selected = (s.questionAnswers[question.id] || question.side) === side;
+        const selected = shownSide(question) === side;
         const control = kit.button(side === "private" ? Q.private : Q.share, "privacy:q:" + question.id + ":" + side, s.saving || s.checking ? null : () => chooseQuestion(question, side), selected ? "main" : "plain");
         control.setAttribute("aria-pressed", String(selected));
         add(pair, control);
@@ -46127,7 +46159,6 @@ function chatgptPrivacyProgram(kit, makeLogic) {
         s.questionKey = null;
         s.generated = null;
         s.questionAnswers = {};
-        s.answerLines = [];
         s.description = s.savedDescription;
         s.editingDescription = false;
         s.questionsError = "";
