@@ -263,8 +263,8 @@ Reviewer demo
   `olympus zkapi install-tools` (the wallet in `~/.config/zkapi-clientd` is
   unchanged). The owner installed the root-owned helper
   `/usr/local/libexec/olympus/zkapi-confine` and the AppArmor profile
-  `/etc/apparmor.d/olympus-zkapi-confine` (undo command:
-  `olympus zkapi check-confinement`), and recorded the six statements at
+  `/etc/apparmor.d/olympus-zkapi-confine` (undo as root:
+  `apparmor_parser -R` on the profile, then delete both files), and recorded the six statements at
   version 8 in `sovereignty.json` (previous copy: `sovereignty.json.pre-ack-v8`).
   OpenClaw Labs "Custom plugin UI" is on, but the dashboard still can't
   reach the worker on this host (#735). `olympus doctor` reports the zkAPI
