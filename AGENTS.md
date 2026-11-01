@@ -197,3 +197,8 @@ remain outside the repo's ownership.
   there; a branch switch or sweeping `git add` in the main checkout captures
   another session's uncommitted edits (2026-07-08 incident).
 - Deliver implementation through a short-lived topic branch and squash PR.
+- Commits are authored by people only (owner rule, standing). Commit as
+  Jamie (or the human contributor); never as Claude or Codex and never with an
+  AI `Co-authored-by` trailer, whatever a harness's attribution guidance says.
+  The static checks job rejects a PR whose commits break this, because
+  GitHub's squash merge would credit the AI as a co-author on `main`.

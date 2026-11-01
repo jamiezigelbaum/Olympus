@@ -33,6 +33,23 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: bun scripts/credential-pattern-check.ts --base "$BASE_SHA" --head "$HEAD_SHA"
+      - name: Keep AI tools out of commit authorship
+        # Jamie's rule: commits are his (and named human contributors'), never
+        # Claude's or Codex's. GitHub's squash merge turns any AI-authored commit
+        # on the branch into a Co-authored-by trailer on main, so check the PR.
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          bad=$(git log --format='%h %an <%ae> %cn <%ce>%x09%(trailers:key=Co-authored-by,valueonly,separator=%x2C)' "$BASE_SHA..$HEAD_SHA" \
+            | grep -iE '@(anthropic|openai)\.com|claude|codex' || true)
+          if [ -n "$bad" ]; then
+            echo "These commits name an AI tool as author, committer or co-author:"
+            echo "$bad"
+            echo "Re-author them as the person (git commit --amend --reset-author, or rebase with --exec), drop AI Co-authored-by lines, and push the branch again."
+            exit 1
+          fi
       - run: bun run contracts:check
       - run: bun run typecheck
       - run: bun run dist:check
