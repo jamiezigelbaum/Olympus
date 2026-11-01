@@ -87,7 +87,9 @@ is not set up. A substitute chat-search check on test-omarchy found 4 of 7
 queries at rank 1; the recall gap is #710 (1.4). The real eval run is #707.
 
 Release verification for 1.3.0 (2026-10-31), final candidate 5450c2cc,
-tagged v1.3.0: mac and linux-ubuntu release-check legs pass 227 checks with 0
+tagged v1.3.0 (on 2026-11-01 main was rewritten to drop two Claude co-author
+trailers; v1.3.0 now points at the same-tree twin 3181eb39, and the release
+assets are unchanged): mac and linux-ubuntu release-check legs pass 227 checks with 0
 failures (warnings are the approved Keys design change and coverage notes);
 canary-test-mac and canary-test-omarchy pass 7/7 and report olympus 1.3.0.
 Fixes found on the way and landed before the tag: the privacy journeys (#721),
