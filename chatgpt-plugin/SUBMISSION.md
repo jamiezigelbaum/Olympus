@@ -1,6 +1,14 @@
 # Olympus: ChatGPT directory submission kit
 
-Status: package complete 2026-10-10 (directory endpoint `/openai/mcp`, review
+Status: 1.0.0-rc.3 approved and published 2026-10-27. Listing update for
+1.3.0 prepared 2026-11-01: crowned-mountain icon and clay brand colours, the
+tagline "Ask your mail, files and chats" (#628), the softer Secrets wording,
+Evernote and Mac files in the long description, and new release notes. The
+tool surface on `/openai/mcp` stays pinned to the approved listing
+(`connect-relay/server/directory/approved.ts`): engines through 1.3.0 serve
+that pinned copy themselves, so re-pinning needs an engine release first.
+
+Earlier: package complete 2026-10-10 (directory endpoint `/openai/mcp`, review
 cases and release notes in `plugin.json`, own logo, final privacy policy and
 terms); earlier: draft 2026-10-01; tools, tiers and the private answer panel updated
 2026-10-02; installer, sources and sensitive-data items updated after the
@@ -19,7 +27,7 @@ out of the uploaded ZIP (see the checklist).
 | Field | Value | Limit |
 |---|---|---|
 | Name (`displayName`) | Olympus | ≤30 |
-| Short description | Ask your own mail and files | ≤30 (27) |
+| Short description | Ask your mail, files and chats | ≤30 (30) |
 | Developer name | OCU Inc. (`author.name`: OCU Inc. (Open Coordination Unlimited, Inc.)) | ≤80 |
 | Category | Productivity | fixed list |
 | Website | https://olympusplugin.ai | HTTPS |
@@ -115,8 +123,9 @@ or credentials). Credentials live in 1Password, never in this repository.
 > Personal, Private or Secret on the Mac. Only Personal items can reach
 > ChatGPT's model. Private items are answered on the Mac and shown only in
 > an encrypted Olympus panel that ChatGPT's model does not receive, and
-> Secret items (passwords, recovery codes, keys) are never given to any
-> model. The plugin does not ask users for sensitive data, OCU keeps no
+> Olympus never sends what it recognizes as a Secret (passwords, recovery
+> codes, keys) to any model or answers from it. Labels are automatic and can
+> be wrong. The plugin does not ask users for sensitive data, OCU keeps no
 > hosted copy of anyone's content, and the privacy policy asks users not to
 > submit such data through the plugin. Owner decision 2026-10-10: submit with
 > this explanation rather than narrow the build.
@@ -177,9 +186,10 @@ Package
 - [ ] ZIP contains only `plugin.json`, `mcp.json`, `skills/`, `assets/`. Not
       `SUBMISSION.md`, not `demo-data/`, no `.app.json`, no hooks.
 - [x] Icons: square, ≥48 px, PNG/JPEG/WebP/SVG, ≤5 MiB (test enforced).
-      `assets/icon.png` is the site's mountain mark (2026-10-10), replacing
-      the emoji-style placeholder; `brandColor` #2f5d50, `brandColorDark`
-      #7fbfa9.
+      `assets/icon.png` is the crowned mountain (`assets/app-icon.png`,
+      512 px), replacing the green mountain mark for the 1.3.0 listing
+      update (2026-11-01); `brandColor` #8f5a43, `brandColorDark` #b27e65
+      (the site's clay).
 - [ ] Skills pass the automated scan. The scan flagged the setup skill's
       `curl | sh` line (2026-10-11: "may download or execute code outside
       the reviewed package"), so the skill now sends the user to

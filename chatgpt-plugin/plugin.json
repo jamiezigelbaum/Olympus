@@ -23,8 +23,8 @@
     "com.openai": {
       "interface": {
         "displayName": "Olympus",
-        "shortDescription": "Ask your own mail and files",
-        "longDescription": "Olympus is a private knowledge engine that runs on your Mac. It indexes the sources you choose, such as your files in Dropbox and Google Drive and your Gmail, connected with accounts you already have, and sources such as X bookmarks, Readwise, Telegram and WhatsApp, set up on your Mac. It answers your questions in ChatGPT with citations to your own items.\n\nYour index stays on your Mac. Olympus sorts every item, one by one, into Personal, Private or Secret, and you can tell it in your own words what is private for you. ChatGPT receives excerpts only from Personal items. Questions that match Private items are answered on your Mac and shown to you in a private Olympus panel; ChatGPT's model does not receive that answer. Olympus never sends what it recognizes as a Secret, such as a private key or a saved password, to ChatGPT, and never answers from it. Labels are automatic and can be wrong.\n\nChatGPT reaches your Mac through one secure connection that you approve with a click on the Mac itself: no Olympus account, no password and no API keys. The Olympus dashboard in the ChatGPT sidebar shows what is connected, how far indexing has got and anything that needs you.\n\nOptionally, with your own zkAPI account set up in Olympus on your Mac, you can ask a frontier AI model a question anonymously. Type it in a private Olympus panel, encrypted between the panel and your Mac, and the answer appears there.\n\nOlympus never sends mail, edits files or changes anything in your accounts. Requires a Mac that is awake and online when you ask.",
+        "shortDescription": "Ask your mail, files and chats",
+        "longDescription": "Olympus is a private knowledge engine that runs on your Mac. It indexes the sources you choose, such as your files in Dropbox and Google Drive and your Gmail, connected with accounts you already have, and sources such as the files on your Mac, Evernote, X bookmarks, Readwise, Telegram and WhatsApp, set up on your Mac. It answers your questions in ChatGPT with citations to your own items.\n\nYour index stays on your Mac. Olympus sorts every item, one by one, into Personal, Private or Secret, and you can tell it in your own words what is private for you. ChatGPT receives excerpts only from Personal items. Questions that match Private items are answered on your Mac and shown to you in a private Olympus panel; ChatGPT's model does not receive that answer. Olympus never sends what it recognizes as a Secret, such as a private key or a saved password, to ChatGPT, and never answers from it. Labels are automatic and can be wrong.\n\nChatGPT reaches your Mac through one secure connection that you approve with a click on the Mac itself: no Olympus account, no password and no API keys. The Olympus dashboard in the ChatGPT sidebar shows what is connected, how far indexing has got and anything that needs you.\n\nOptionally, with your own zkAPI account set up in Olympus on your Mac, you can ask a frontier AI model a question anonymously. Type it in a private Olympus panel, encrypted between the panel and your Mac, and the answer appears there.\n\nOlympus never sends mail, edits files or changes anything in your accounts. Requires a Mac that is awake and online when you ask.",
         "developerName": "OCU Inc.",
         "category": "Productivity",
         "capabilities": [
@@ -42,8 +42,8 @@
           "Use Olympus to find what Sam sent me about the lease.",
           "Show my Olympus dashboard."
         ],
-        "brandColor": "#2f5d50",
-        "brandColorDark": "#7fbfa9",
+        "brandColor": "#8f5a43",
+        "brandColorDark": "#b27e65",
         "composerIcon": "./assets/icon.png",
         "logo": "./assets/icon.png"
       },
@@ -101,7 +101,7 @@
         "commerce_description": "Nothing is sold, bought or paid in ChatGPT. The optional anonymous questions use the user's own zkAPI account, set up outside ChatGPT in Olympus on their Mac; each question uses a little of that account's balance. The plugin never offers, links to or starts a purchase or payment."
       },
       "publication": {
-        "release_notes": "First release. Ask ChatGPT about your own mail, files and notes, with citations; answers from Private items appear only in a private Olympus panel; the Olympus dashboard shows your sources and indexing; and, with your own zkAPI account, ask a frontier model a question anonymously in a panel ChatGPT never sees."
+        "release_notes": "New icon and a clearer description. Olympus on your Mac can now read the files in your Desktop, Documents, Downloads and iCloud Drive folders, guides you step by step through connecting sources, and asks on first run how you want Private questions answered. Asking ChatGPT about your own mail, files, notes and messages, the private answer panel, the dashboard and anonymous questions work as before."
       }
     }
   }
