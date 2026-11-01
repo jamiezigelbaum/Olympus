@@ -1025,6 +1025,40 @@ describe('follow-up questions', () => {
     expect(saves[0].description.split(photos)).toHaveLength(2);
   });
 
+  test('answers saved by the earlier editor are kept, shown, and replaced rather than contradicted', async () => {
+    const photos = Q.topics.family.options.history;
+    const medical = Q.topics.family.options.medical;
+    const legacy = OWNER + '\nAbout family: private — ' + medical + '; fine to share — ' + photos + '.';
+    const { host, saves } = await openPrivacy({ description: legacy });
+    editDescription(host);
+    expect(choice(host, 'family:history', 'share').getAttribute('aria-pressed')).toBe('true');
+    expect(choice(host, 'family:medical', 'private').getAttribute('aria-pressed')).toBe('true');
+    choice(host, 'family:history', 'private').click();
+    const migrated = (editDescription(host) as HTMLTextAreaElement).value;
+    expect(migrated).not.toContain('About family');
+    expect(migrated).not.toContain('Fine to share');
+    expect(migrated.split(photos)).toHaveLength(2);
+    expect(migrated.split(medical)).toHaveLength(2);
+    await saveDraft(host);
+    host.button(W.confirm).click(); await host.settle();
+    expect(saves[0].description).not.toContain('Fine to share');
+    expect(saves[0].description.split(photos)).toHaveLength(2);
+  });
+
+  test('saving an earlier editor\'s answers untouched keeps their sharing choice', async () => {
+    const photos = Q.topics.family.options.history;
+    const legacy = OWNER + '\nAbout family: fine to share — ' + photos + '.';
+    const { host, saves } = await openPrivacy({ description: legacy });
+    const area = editDescription(host) as HTMLTextAreaElement;
+    area.value = legacy + ' '; area.dispatchEvent(new host.win.Event('input') as unknown as Event);
+    await sleep(475); await host.settle();
+    await saveDraft(host);
+    if (host.doc.querySelector('.confirm-box')) { host.button(W.confirm).click(); }
+    await host.settle();
+    expect(saves[0].description).toContain('Fine to share: ' + photos + '.');
+    expect(saves[0].description.split(photos)).toHaveLength(2);
+  });
+
   test('a failed refresh cannot restore a sharing answer deleted from the description', async () => {
     const { host, saves } = await openPrivacy({ description: OWNER });
     editDescription(host);

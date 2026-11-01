@@ -477,6 +477,14 @@ export function privacyLogic(config: PrivacyLogicConfig) {
   /** The topics a description's answer lines already place on each side (later lines win). */
   function savedAnswers(description: string): Record<string, PrivacyTopicSide> {
     const out: Record<string, PrivacyTopicSide> = {};
+    // The earlier editor's "About family: private — …; fine to share — …" sentences carry answers too.
+    const legacy = topicAnswers(description);
+    for (const id of Object.keys(legacy)) {
+      for (const option of Object.keys(legacy[id]!)) {
+        const label = words && words.topics[id] ? words.topics[id]!.options[option] || '' : '';
+        if (label) out[cleanTopic(label)] = legacy[id]![option]!;
+      }
+    }
     for (const line of String(description || '').split('\n')) {
       const side = answerLineSide(line);
       if (!side) continue;
@@ -488,7 +496,8 @@ export function privacyLogic(config: PrivacyLogicConfig) {
 
   /**
    * The answers as at most two compact lines ("Private: a; b." and "Fine to
-   * share: c."). Every earlier answer line is folded in, so a changed answer
+   * share: c."). Every earlier answer line, including the earlier editor's
+   * "About <area>:" sentences, is folded in, so a changed answer
    * replaces its old side instead of contradicting it; `whenUnanswered` topics
    * are added only if no line answers them yet. The new lines take the place
    * of the first earlier one, or go at the end; every other line stays byte
@@ -510,7 +519,8 @@ export function privacyLogic(config: PrivacyLogicConfig) {
     let place = -1;
     const kept: string[] = [];
     for (const line of lines) {
-      if (answerLineSide(line)) { if (place < 0) place = kept.length; }
+      // Earlier answer lines, compact or the earlier editor's sentences, are folded into the new two.
+      if (answerLineSide(line) || lineTopic(line)) { if (place < 0) place = kept.length; }
       else kept.push(line);
     }
     const keep = Object.keys(merged).filter((topic) => merged[topic] === 'private');

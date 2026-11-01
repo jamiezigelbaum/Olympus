@@ -43298,6 +43298,14 @@ function privacyLogic(config) {
   }
   function savedAnswers(description) {
     const out = {};
+    const legacy = topicAnswers(description);
+    for (const id of Object.keys(legacy)) {
+      for (const option of Object.keys(legacy[id])) {
+        const label = words2 && words2.topics[id] ? words2.topics[id].options[option] || "" : "";
+        if (label)
+          out[cleanTopic(label)] = legacy[id][option];
+      }
+    }
     for (const line of String(description || "").split(`
 `)) {
       const side = answerLineSide(line);
@@ -43330,7 +43338,7 @@ function privacyLogic(config) {
     let place = -1;
     const kept = [];
     for (const line of lines) {
-      if (answerLineSide(line)) {
+      if (answerLineSide(line) || lineTopic(line)) {
         if (place < 0)
           place = kept.length;
       } else
