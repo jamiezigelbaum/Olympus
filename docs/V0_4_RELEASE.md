@@ -82,7 +82,7 @@ closing: #588, #609, #621, #633, #654.
 
 eval:real for #619 did not run for 1.3.0 (2026-10-31): no reachable install
 had the synthetic "Olympus Eval Corpus" indexed (test-omarchy holds a different
-demo set; Sparta, Delphi and test-mac hold none), and the owner's own install
+demo set; the other test installs hold none), and the owner's own install
 is not set up. A substitute chat-search check on test-omarchy found 4 of 7
 queries at rank 1; the recall gap is #710 (1.4). The real eval run is #707.
 
@@ -98,6 +98,11 @@ choice and Keys then showed models ready. Verified and closed: #654, #591,
 #588 (with follow-up #711). #621's Telegram picker passes (polish #712); #633
 moved to 1.4; #609 is left for an owner hand check. Filed for 1.3.1: #723,
 #728.
+
+1.3.0 shipped 2026-11-01: GitHub release v1.3.0 (latest) and the site publish
+with the signed Mac helper and both WhatsApp bridges; every served file matches
+its release hash, and the post-publish canary-test-mac and canary-test-omarchy
+runs install olympus 1.3.0 from the site and pass 7/7.
 
 ## 1.1.0 Private answers inbox (owner decision 2026-10-14)
 
