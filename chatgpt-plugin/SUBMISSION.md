@@ -256,8 +256,22 @@ Reviewer demo
   token, the pinned tools, the lease question and the Private and Secret
   refusals all passed. The policy files are unchanged and nothing is waiting
   for the privacy choice. 1.3's tier re-check moved `docs/garden-bylaws.md`
-  to Private as a precaution (5 Private, was 4); it stays there until the
-  owner decides.
+  to Private as a precaution (5 Private, was 4); the owner set it back to
+  Personal the same day (4 Private, as before).
+- 2026-11-01, anonymous answers on the demo after 1.3.0 (#734): the
+  zkapi-clientd went from 0.1.6-olympus2 to 0.1.6-olympus4 through
+  `olympus zkapi install-tools` (the wallet in `~/.config/zkapi-clientd` is
+  unchanged). The owner installed the root-owned helper
+  `/usr/local/libexec/olympus/zkapi-confine` and the AppArmor profile
+  `/etc/apparmor.d/olympus-zkapi-confine` (undo command:
+  `olympus zkapi check-confinement`), and recorded the six statements at
+  version 8 in `sovereignty.json` (previous copy: `sovereignty.json.pre-ack-v8`).
+  OpenClaw Labs "Custom plugin UI" is on, but the dashboard still can't
+  reach the worker on this host (#735). `olympus doctor` reports the zkAPI
+  route ready; no paid question has been run. The zkAPI note was funded on
+  2026-10-11 and expires about 2026-11-10; renewing it means withdrawing and
+  making a new deposit, after which the `fundingDate` in `sovereignty.json`
+  needs the new date.
 - The relay keeps shipping while the demo engine is frozen. The directory
   endpoint serves the submitted listing, not the current engine's
   (`connect-relay/server/directory/approved.ts`); CI holds the relay's
