@@ -1,3 +1,5 @@
+import type { PrivacyQuestionEngine } from '../classification/privacy-questions.ts';
+import { PRIVACY_DESCRIPTION_MAX_CHARS } from '../classification/privacy-profile.ts';
 import { PRIVATE_ANSWER_OPTIONS } from '../../core/privacy-language.ts';
 import type { SovereigntyPresetName } from '../../core/sovereignty.ts';
 /**
@@ -40,6 +42,9 @@ import {
   MODEL_SET_TOOL_NAME,
   PRIVACY_GET_TOOL_NAME,
   PRIVACY_SET_TOOL_NAME,
+  PRIVACY_QUESTIONS_TOOL_NAME,
+  PRIVACY_CHECK_TOOL_NAME,
+  PRIVACY_META_KEY,
   SCOPE_LIST_TOOL_NAME,
   SCOPE_SET_TOOL_NAME,
   SYNC_SOURCE_TOOL_NAME,
@@ -147,6 +152,8 @@ export interface ChatGptSetupBackend {
   secretLocations(): SecretLocations;
   /** The saved privacy settings and the privacy-check backlog; throws when the profile cannot be read. */
   privacySettings(): PrivacySettings;
+  privacyQuestions?: PrivacyQuestionEngine['questions'];
+  privacyCheck?: PrivacyQuestionEngine['check'];
   /** Saves a validated update (each field given replaces the saved one); returns the settings now. */
   choosePrivateAnswers?(choice: SovereigntyPresetName): PrivacySettings;
   savePrivacy(update: { description?: string; rules?: PrivacyRuleView[] }): PrivacySettings;
@@ -414,6 +421,21 @@ export const PRIVACY_SET_TOOL: ToolDefinition = {
   _meta: WIDGET_ONLY,
 };
 
+/** Draft-only inference: owner confirmation stays in widget metadata. */
+export const PRIVACY_DRAFT_TOOLS: readonly ToolDefinition[] = [PRIVACY_QUESTIONS_TOOL_NAME, PRIVACY_CHECK_TOOL_NAME].map(name => ({
+  name, title: name === PRIVACY_QUESTIONS_TOOL_NAME ? 'Privacy follow-up questions' : 'Check privacy understanding',
+  description: 'For the owner in the Olympus panel: privately check an unsaved privacy description. Saves nothing.',
+  inputSchema: { type: 'object', additionalProperties: false,
+    properties: { description: { type: 'string', maxLength: PRIVACY_DESCRIPTION_MAX_CHARS },
+      confirmation: { type: 'string', maxLength: 128 },
+      ...(name === PRIVACY_CHECK_TOOL_NAME ? { sample: { type: 'string', minLength: 1, maxLength: 120 } } : {}) },
+    required: ['description', 'confirmation'] },
+  // Saves nothing, but each call runs the private model on the owner's draft: kept off the read-only (demo)
+  // grant, like every owner-only privacy action.
+  annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
+  securitySchemes: OAUTH2_REQUIRED, _meta: WIDGET_ONLY,
+}));
+
 export const SETUP_TOOLS: readonly ToolDefinition[] = [
   CONNECT_SOURCE_TOOL,
   SCOPE_LIST_TOOL,
@@ -424,6 +446,7 @@ export const SETUP_TOOLS: readonly ToolDefinition[] = [
   MODEL_RETRY_TOOL,
   PRIVACY_GET_TOOL,
   PRIVACY_SET_TOOL,
+  ...PRIVACY_DRAFT_TOOLS,
   SYNC_SOURCE_TOOL,
 ];
 
@@ -510,6 +533,18 @@ export async function callSetupTool(
         const visible = visiblePrivacy(backend.privacySettings(), secretLocations(backend));
         // The confirmation rides `_meta`, which reaches the widget only, never the model.
         return privacyToolResult(visible, 'current', issuePrivacyConfirmation(backend));
+      }
+      case PRIVACY_QUESTIONS_TOOL_NAME:
+      case PRIVACY_CHECK_TOOL_NAME: {
+        if (typeof args.description !== 'string' || args.description.length > PRIVACY_DESCRIPTION_MAX_CHARS
+          || (args.sample !== undefined && (typeof args.sample !== 'string' || !args.sample.trim() || args.sample.length > 120))) {
+          throw new ChatGptSurfaceError('invalid_params');
+        }
+        if (typeof args.confirmation !== 'string' || !privacyConfirmationValid(backend, args.confirmation)) throw new ChatGptSurfaceError('privacy_owner_only');
+        const data = name === PRIVACY_QUESTIONS_TOOL_NAME
+          ? await backend.privacyQuestions?.(args.description) ?? { fallback: true, questions: [] }
+          : await backend.privacyCheck?.(args.description, args.sample as string | undefined) ?? null;
+        return { content: [], _meta: { [PRIVACY_META_KEY]: data } };
       }
       case PRIVACY_SET_TOOL_NAME: {
         const { confirmation, revision, private_answer_mode, ...fields } = args;

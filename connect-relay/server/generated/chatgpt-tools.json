@@ -25,9 +25,9 @@
       ],
       "_meta": {
         "ui": {
-          "resourceUri": "ui://olympus/dashboard?v=e7ca04ad7aed"
+          "resourceUri": "ui://olympus/dashboard?v=29d4d05aa514"
         },
-        "openai/outputTemplate": "ui://olympus/dashboard?v=e7ca04ad7aed",
+        "openai/outputTemplate": "ui://olympus/dashboard?v=29d4d05aa514",
         "openai/ui": {
           "entrypoints": [
             {
@@ -915,6 +915,97 @@
       }
     },
     {
+      "name": "olympus_privacy_questions",
+      "title": "Privacy follow-up questions",
+      "description": "For the owner in the Olympus panel: privately check an unsaved privacy description. Saves nothing.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "description": {
+            "type": "string",
+            "maxLength": 2000
+          },
+          "confirmation": {
+            "type": "string",
+            "maxLength": 128
+          }
+        },
+        "required": [
+          "description",
+          "confirmation"
+        ]
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "openWorldHint": false
+      },
+      "securitySchemes": [
+        {
+          "type": "oauth2",
+          "scopes": []
+        }
+      ],
+      "_meta": {
+        "ui": {
+          "visibility": [
+            "app"
+          ]
+        },
+        "openai/widgetAccessible": true,
+        "openai/visibility": "private"
+      }
+    },
+    {
+      "name": "olympus_privacy_check",
+      "title": "Check privacy understanding",
+      "description": "For the owner in the Olympus panel: privately check an unsaved privacy description. Saves nothing.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "description": {
+            "type": "string",
+            "maxLength": 2000
+          },
+          "confirmation": {
+            "type": "string",
+            "maxLength": 128
+          },
+          "sample": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 120
+          }
+        },
+        "required": [
+          "description",
+          "confirmation"
+        ]
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "openWorldHint": false
+      },
+      "securitySchemes": [
+        {
+          "type": "oauth2",
+          "scopes": []
+        }
+      ],
+      "_meta": {
+        "ui": {
+          "visibility": [
+            "app"
+          ]
+        },
+        "openai/widgetAccessible": true,
+        "openai/visibility": "private"
+      }
+    },
+    {
       "name": "olympus_sync_source",
       "title": "Sync a source now",
       "description": "For the Olympus panel: check a connected source for anything new now. Answers at once; the panel shows what the check found.",
@@ -963,7 +1054,7 @@
   ],
   "resources": [
     {
-      "uri": "ui://olympus/dashboard?v=e7ca04ad7aed",
+      "uri": "ui://olympus/dashboard?v=29d4d05aa514",
       "name": "Olympus dashboard",
       "mimeType": "text/html;profile=mcp-app"
     },

@@ -194,3 +194,27 @@ describe('one implementation in both pages', () => {
     expect(chatgptDashboardPageHtml()).toContain(source);
   });
 });
+
+
+describe('draft question sentences on every dashboard host', () => {
+  test('serialized logic folds every answer line into one Private and one Fine to share line, owner text byte for byte', () => {
+    const serialized = new Function('return (' + privacyLogic.toString() + ')')()({ mailSourceId: '', folderSources: {} }) as typeof L;
+    const own = '  My client invoices and poems.  \n';
+    const first = serialized.answerLines(own, { 'client invoices': 'private', 'medical records': 'private' });
+    expect(first).toEqual({ description: own + '\nPrivate: client invoices; medical records.', fits: true });
+    // A changed answer moves its topic; nothing is left on the old side.
+    const second = serialized.answerLines(first.description, { 'client invoices': 'share' });
+    expect(second.description).toBe(own + '\nPrivate: medical records.\nFine to share: client invoices.');
+    expect(serialized.savedAnswers(second.description)).toEqual({ 'medical records': 'private', 'client invoices': 'share' });
+    // Reopened later, the saved lines are the starting point: a flip replaces, never contradicts.
+    const reopened = serialized.answerLines(second.description + '\nMore of my own words.', { 'client invoices': 'private' });
+    expect(reopened.description).toBe(own + '\nPrivate: medical records; client invoices.\nMore of my own words.');
+    // Skipped questions become Private only where no line answers them yet.
+    expect(serialized.answerLines(second.description, {}, { 'client invoices': 'private', diary: 'private' }).description)
+      .toBe(own + '\nPrivate: medical records; diary.\nFine to share: client invoices.');
+    // A topic cannot break the line format.
+    expect(serialized.answerLines('', { 'a; b.\nc': 'private' }).description).toBe('Private: a, b. c.');
+    expect(serialized.answerLines('x'.repeat(2000), { y: 'private' })).toEqual({ description: 'x'.repeat(2000), fits: false });
+  });
+
+});

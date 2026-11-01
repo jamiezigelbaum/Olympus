@@ -19,11 +19,11 @@
  */
 import type { DASHBOARD_CHATGPT_PRIVACY_COPY } from '../vocabulary.ts';
 import type { ChatGptPicker } from './picker.ts';
-import { PRIVACY_GET_TOOL_NAME, PRIVACY_META_KEY, PRIVACY_SET_TOOL_NAME } from '../../chatgpt/dashboard-contract.ts';
+import { PRIVACY_GET_TOOL_NAME, PRIVACY_META_KEY, PRIVACY_SET_TOOL_NAME, PRIVACY_QUESTIONS_TOOL_NAME, PRIVACY_CHECK_TOOL_NAME } from '../../chatgpt/dashboard-contract.ts';
 import type { privacyLogic } from '../shared-privacy-logic.ts';
 
 /** The privacy tools: get {} and set {description?, rules?}; both answer with the settings in `_meta`. */
-export const CHATGPT_PRIVACY_TOOLS = { get: PRIVACY_GET_TOOL_NAME, set: PRIVACY_SET_TOOL_NAME } as const;
+export const CHATGPT_PRIVACY_TOOLS = { get: PRIVACY_GET_TOOL_NAME, set: PRIVACY_SET_TOOL_NAME, questions: PRIVACY_QUESTIONS_TOOL_NAME, check: PRIVACY_CHECK_TOOL_NAME } as const;
 
 /** The result `_meta` key that carries the description and rule names to the widget only. */
 export const CHATGPT_PRIVACY_META_KEY = PRIVACY_META_KEY;
@@ -104,6 +104,7 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
 
   let s: Any = null;
   let session = 0;
+  let questionTimer: ReturnType<typeof setTimeout> | undefined;
 
   function handles(fix: Any): boolean {
     return !!fix && fix.tool === T.get;
@@ -125,6 +126,8 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
       edited: false, saving: false, saveError: '', discarding: false, picking: false,
       labels: [], labelsLoading: false, labelsError: '',
       sender: '', senderError: '',
+      questionKey: null, questionVersion: 0, questionLoading: false, generated: null, questionAnswers: {},
+      checkKey: null, checking: false, checkResult: null, checkError: '',
       editingDescription: false, questionsError: '', detailsOpen: false, conflictDetailsOpen: false, candidate: null, ruleKind: '',
     };
     load();
@@ -167,6 +170,10 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
    * spent only by the save that uses it.
    */
   function take(data: Any): void {
+    clearTimeout(questionTimer);
+    s.questionVersion++;
+    s.questionKey = null; s.generated = null; s.questionAnswers = {};
+    s.checkKey = null; s.checkResult = null; s.checkError = ''; s.checking = false;
     s.description = typeof data.description === 'string' ? data.description : '';
     s.savedDescription = s.description;
     s.revision = typeof data.revision === 'string' ? data.revision : '';
@@ -239,7 +246,7 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
 
   /** Whether Save has anything to do: a change, or questions whose shown choices are not yet in the description. */
   function canSave(): boolean {
-    return !s.server && (s.edited || L.withShownAnswers(s.description) !== s.description);
+    return !s.server && !s.questionLoading && !s.checking && (s.edited || (s.editingDescription && askedQuestions().length > 0));
   }
 
   function addRule(rule: Any): void {
@@ -304,11 +311,10 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
       return;
     }
     if (!canSave()) return;
-    // The questions' choices as shown, defaults included, become their sentences before anything is decided.
-    const shown = L.withShownAnswers(s.description);
-    if (shown !== s.description) {
-      s.description = shown;
-      changed();
+    if (!settleQuestions()) return;
+    if (s.generated && !s.generated.fallback && s.checkKey !== s.description) {
+      runCheck();
+      return;
     }
     if (lowers()) {
       s.confirmStep = true;
@@ -618,62 +624,170 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
     return add(li, remove);
   }
 
-  /**
-   * The follow-up questions for the broad areas the description names: each
-   * choice is a pair of radio buttons, Private or Fine to share, at its
-   * default or the answer the description already carries. A change rewrites
-   * that area's sentence in the description, so what is saved is visible text
-   * (shared-privacy-logic.ts answerTopic), and marks the draft changed.
-   */
-  function questionsSection(): HTMLElement | null {
+  /** All draft inference stays in this session. Debounce and discard stale replies. */
+  function requestQuestions(): void {
+    if (!s || !s.loaded || s.questionKey === s.description) return;
+    clearTimeout(questionTimer);
+    s.questionKey = s.description;
+    const description = s.description;
+    const version = ++s.questionVersion;
+    const mine = session;
+    s.questionLoading = true;
+    s.checkKey = null; s.checkResult = null; s.checkError = '';
+    questionTimer = setTimeout(() => {
+      if (!s || mine !== session || version !== s.questionVersion) return;
+      kit.call(T.questions, { description, confirmation: s.confirmation }).then(result => {
+        if (!s || mine !== session || version !== s.questionVersion) return;
+        const data = result && !result.isError && result._meta && result._meta[kit.config.metaKey];
+        s.generated = data && !data.fallback && Array.isArray(data.questions) ? data : fallbackQuestions(description);
+        s.questionLoading = false;
+        s.questionAnswers = {};
+        kit.render();
+      }, () => {
+        if (!s || mine !== session || version !== s.questionVersion) return;
+        s.generated = fallbackQuestions(description); s.questionLoading = false;
+        s.questionAnswers = {};
+        kit.render();
+      });
+    }, 450);
+  }
+
+  function fallbackQuestions(description: string): Any {
+    return { fallback: true, questions: L.questions(description).flatMap(topic => topic.options.map(option => ({
+      id: topic.id + ':' + option.id, question: option.label, topic: option.label, side: option.side,
+    }))) };
+  }
+
+  function askedQuestions(): Any[] {
+    return s.generated ? s.generated.questions : [];
+  }
+
+  /** The topic an answer writes for a question. */
+  function topicOf(question: Any): string {
+    return L.cleanTopic(String(question.topic || question.question));
+  }
+
+  /** The side a question shows: this session's answer, else what the description's answer lines already say. */
+  function shownSide(question: Any): string {
+    return s.questionAnswers[question.id] || L.savedAnswers(s.description)[topicOf(question)] || '';
+  }
+
+  /** Rewrite the answer lines; at Save, questions still unanswered anywhere count as Private. */
+  function writeAnswers(answers: Any, skippedPrivate: boolean): { description: string; fits: boolean } {
+    const byTopic: Record<string, 'private' | 'share'> = {};
+    const unanswered: Record<string, 'private' | 'share'> = {};
+    for (const question of askedQuestions()) {
+      if (answers[question.id]) byTopic[topicOf(question)] = answers[question.id];
+      else if (skippedPrivate) unanswered[topicOf(question)] = 'private';
+    }
+    return L.answerLines(s.description, byTopic, unanswered);
+  }
+
+  function chooseQuestion(question: Any, side: 'private' | 'share'): void {
+    const answers = { ...s.questionAnswers, [question.id]: side };
+    const next = writeAnswers(answers, false);
+    s.questionsError = next.fits ? '' : W.questions.tooLong;
+    if (next.fits) {
+      s.description = next.description; s.questionKey = s.description;
+      s.questionAnswers = answers;
+      s.checkKey = null; s.checkResult = null; s.checkError = '';
+      changed();
+    }
+    kit.render('privacy:q:' + question.id + ':' + side);
+  }
+
+  function settleQuestions(): boolean {
+    const next = writeAnswers(s.questionAnswers, true);
+    if (!next.fits) { s.questionsError = W.questions.tooLong; kit.render(); return false; }
+    if (next.description !== s.description) {
+      s.description = next.description;
+      changed();
+    }
+    s.questionKey = s.description;
+    return true;
+  }
+
+  function runCheck(sample?: string): void {
+    if (!s || s.checking || s.questionLoading || (!sample && !settleQuestions())) return;
+    const description = s.description;
+    const mine = session;
+    s.checking = true; s.checkError = '';
+    kit.render('privacy:check:title');
+    kit.call(T.check, { description, confirmation: s.confirmation, ...(sample ? { sample } : {}) }).then(result => {
+      if (!s || mine !== session) return;
+      s.checking = false;
+      if (s.description !== description) { kit.render(); return; }
+      const data = result && !result.isError && result._meta && result._meta[kit.config.metaKey];
+      s.checkKey = description;
+      if (data && Array.isArray(data.samples)) {
+        if (sample && s.checkResult) {
+          s.checkResult.private = data.private; s.checkResult.share = data.share;
+          s.checkResult.samples = s.checkResult.samples.map((old: Any) => old.name === sample ? { ...data.samples[0], correction: old.correction } : old);
+        } else s.checkResult = data;
+      } else { s.checkResult = null; s.checkError = W.questions.checkFailed; }
+      kit.render();
+    }, () => {
+      if (!s || mine !== session) return;
+      s.checking = false; s.checkKey = description; s.checkResult = null; s.checkError = W.questions.checkFailed;
+      kit.render();
+    });
+  }
+
+  function checkSection(): HTMLElement | null {
+    if (!s.generated || s.generated.fallback) return null;
     const Q = W.questions;
-    const asked = L.questions(s.description);
-    if (!asked.length) return null;
+    const title = el('h2', '', Q.checkTitle);
+    title.setAttribute('tabindex', '-1'); title.setAttribute('data-key', 'privacy:check:title');
+    const section = add(el('section', 'fsection'), title);
+    add(section, kit.button(s.checking ? Q.checking : Q.check, 'privacy:check',
+      s.checking || s.questionLoading || s.saving ? null : () => runCheck(), 'plain'));
+    if (s.checkError) add(section, el('p', 'reason', s.checkError));
+    if (s.checkResult) for (const side of ['private', 'share'] as const) {
+      add(section, el('h3', '', side === 'private' ? Q.private : Q.share));
+      const list = el('ul');
+      for (const text of s.checkResult[side]) add(list, el('li', '', text));
+      add(section, list, el('p', 'strong', side === 'private' ? Q.privateExamples : Q.shareExamples));
+      s.checkResult.samples.filter((sample: Any) => sample.side === side).forEach((sample: Any, index: number) => {
+        const row = add(el('div', 'qopt'), el('span', 'qlabel', sample.name));
+        add(row, kit.button(Q.wrong, 'privacy:wrong:' + side + ':' + index, s.checking || s.saving ? null : () => {
+          // The correction joins the answer lines, on the other side from Olympus's judgment.
+          const next = L.answerLines(s.description, { [sample.name]: side === 'private' ? 'share' : 'private' });
+          s.questionsError = next.fits ? '' : Q.tooLong;
+          if (next.fits) {
+            s.description = next.description; s.questionKey = s.description;
+            changed(); runCheck(sample.name);
+          } else kit.render();
+        }, 'plain'));
+        add(section, row);
+      });
+    }
+    return section;
+  }
+
+  function questionsSection(): HTMLElement | null {
+    requestQuestions();
+    const Q = W.questions;
     const section = add(el('section', 'fsection questions'), el('h2', '', Q.title), el('p', 'reason', Q.intro));
-    for (const topic of asked) {
-      const heading = el('h3', 'qtitle', topic.question);
-      heading.id = 'privacy-q-' + topic.id;
-      const group = add(el('div', 'qtopic'), heading);
-      for (const option of topic.options) {
-        const id = 'privacy-q-' + topic.id + '-' + option.id;
-        const row = el('div', 'qopt');
-        row.setAttribute('role', 'radiogroup');
-        row.setAttribute('aria-labelledby', heading.id + ' ' + id);
-        const name = el('span', 'qlabel', option.label);
-        name.id = id;
-        const choices = el('span', 'qchoices');
-        for (const side of ['private', 'share'] as const) {
-          const choice = el('label', 'qchoice');
-          const input = el('input') as HTMLInputElement;
-          input.type = 'radio';
-          input.name = id;
-          input.value = side;
-          input.checked = option.side === side;
-          input.disabled = s.saving;
-          input.setAttribute('data-key', 'privacy:q:' + topic.id + ':' + option.id + ':' + side);
-          input.addEventListener('change', () => {
-            if (!input.checked || !s) return;
-            const next = L.answerTopic(s.description, topic.id, option.id, side);
-            // Too long to add: nothing changes, the radio redraws as it was, and the owner is told why.
-            s.questionsError = next.fits ? '' : Q.tooLong;
-            if (next.fits) {
-              s.description = next.description;
-              changed();
-              s.saveError = '';
-            }
-            kit.render('privacy:q:' + topic.id + ':' + option.id + ':' + side);
-          });
-          add(choices, add(choice, input, el('span', '', side === 'private' ? Q.private : Q.share)));
-        }
-        add(group, add(row, name, choices));
+    if (s.questionLoading) {
+      const loading = el('p', 'reason', Q.loading); loading.setAttribute('role', 'status');
+      return add(section, loading);
+    }
+    if (s.generated?.fallback) add(section, el('p', 'reason', Q.fallback));
+    for (const question of askedQuestions()) {
+      const row = add(el('div', 'qopt'), el('span', 'qlabel', question.question));
+      if (question.quote) add(row, el('q', 'reason', question.quote));
+      const pair = el('span', 'qchoices');
+      pair.setAttribute('role', 'group'); pair.setAttribute('aria-label', question.question);
+      for (const side of ['private', 'share'] as const) {
+        const selected = shownSide(question) === side;
+        const control = kit.button(side === 'private' ? Q.private : Q.share, 'privacy:q:' + question.id + ':' + side,
+          s.saving || s.checking ? null : () => chooseQuestion(question, side), selected ? 'main' : 'plain');
+        control.setAttribute('aria-pressed', String(selected));
+        add(pair, control);
       }
-      add(section, group);
+      add(section, add(row, pair));
     }
-    if (s.questionsError) {
-      const message = el('p', 'reason error', s.questionsError);
-      message.setAttribute('role', 'alert');
-      add(section, message);
-    }
+    if (s.questionsError) { const error = el('p', 'error', s.questionsError); error.setAttribute('role', 'alert'); add(section, error); }
     return section;
   }
 
@@ -726,6 +840,8 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
       const asked = L.questionsKey(s.description);
       area.addEventListener('input', () => {
         s.description = area.value;
+        const wasLoading = s.questionLoading;
+        requestQuestions();
         const open = s.confirmStep;
         const could = canSave();
         changed();
@@ -733,7 +849,7 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
         // Preserve the caret unless questions, confirmation or save availability change.
         const noted = !!s.questionsError;
         s.questionsError = '';
-        if (open || noted || could !== canSave() || L.questionsKey(s.description) !== asked) kit.render('privacy:description');
+        if (!wasLoading || open || noted || could !== canSave() || L.questionsKey(s.description) !== asked) kit.render('privacy:description');
       });
       add(description, add(field, area));
     }
@@ -743,6 +859,8 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
     add(page, description);
     const questions = questionsSection();
     if (questions) add(page, questions);
+    const readback = checkSection();
+    if (readback) add(page, readback);
     const details = disclosure();
     add(details, el('p', 'reason', W.judgingDetails));
 
@@ -780,6 +898,8 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
       add(wrap, add(el('div', 'actions'),
         kit.button(W.save, 'privacy:save', canSave() ? save : null, 'main'),
         kit.button(W.cancel, 'privacy:cancel', () => {
+          clearTimeout(questionTimer); s.questionVersion++;
+          s.questionKey = null; s.generated = null; s.questionAnswers = {};
           s.description = s.savedDescription;
           s.editingDescription = false;
           s.questionsError = '';

@@ -542,7 +542,9 @@ export function chatgptDashboardClient(
 
   /** A tools/call whose result the caller handles (the picker's own tools). */
   function callRaw(name: string, args: Any): Promise<Any> {
-    return request('tools/call', { name, arguments: args || {} }, config.resultTimeoutMs);
+    // Draft privacy checks run several one-item classifier calls before replying.
+    const privacyInference = name === config.privacy.tools.questions || name === config.privacy.tools.check;
+    return request('tools/call', { name, arguments: args || {} }, privacyInference ? Math.max(config.resultTimeoutMs, 150_000) : config.resultTimeoutMs);
   }
 
   function openLink(href: string): void {

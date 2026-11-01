@@ -74,6 +74,7 @@ stay inert on main), Evernote live sync unless it lands before the freeze
 (#568, #559, #554), #599, #570, #626 (research runs alongside), #138.
 
 Moved to 1.4 at the freeze (2026-10-31; each issue carries the reason):
+#741 (privacy questions from the owner’s words, unanswered choices and private-model read-back),
 #631, #603, #620, #636, #638, olympus-ops #67, and #581's "lead with your
 own app near the 100-user cap" (the guided own-app path itself ships). #628
 and the listing update stay held: this release does not resubmit the
