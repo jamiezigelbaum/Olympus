@@ -42,7 +42,7 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
-          bad=$(git log --format='%h %ae %ce%x09%(trailers:key=Co-authored-by,valueonly,separator=%x2C)' "$BASE_SHA..$HEAD_SHA" \
+          bad=$(git log --format='%h %an <%ae> %cn <%ce>%x09%(trailers:key=Co-authored-by,valueonly,separator=%x2C)' "$BASE_SHA..$HEAD_SHA" \
             | grep -iE '@(anthropic|openai)\.com|claude|codex' || true)
           if [ -n "$bad" ]; then
             echo "These commits name an AI tool as author, committer or co-author:"
