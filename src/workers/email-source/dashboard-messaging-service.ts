@@ -10,7 +10,7 @@ import { telegramPythonExecutable } from '../../core/messaging-runtime.ts';
 import { olympusPackageRoot } from '../../core/package-root.ts';
 import { telegramSessionBasePath, whatsappStateDir } from '../../core/pairing-session-paths.ts';
 import type { SecretStore } from '../../core/secret-store.ts';
-import { createDashboardMessagingPairing, type MessagingSource, type PairingChat } from './dashboard-messaging.ts';
+import { codedError, createDashboardMessagingPairing, type MessagingSource, type PairingChat } from './dashboard-messaging.ts';
 import { runDashboardPairingCommand } from './dashboard-messaging-runner.ts';
 
 type Operation = 'start' | 'status' | 'respond' | 'cancel' | 'chats' | 'scope';
@@ -27,7 +27,7 @@ function validScope(source: MessagingSource, scope: string): boolean {
 }
 
 function parseChats(source: MessagingSource, listing: unknown): PairingChat[] {
-  if (!listing || typeof listing !== 'object' || !Array.isArray((listing as { dialogs?: unknown }).dialogs)) throw new Error('Invalid chat listing.');
+  if (!listing || typeof listing !== 'object' || !Array.isArray((listing as { dialogs?: unknown }).dialogs)) throw codedError('Invalid chat listing.', 'chat_list_unreadable');
   const chats: PairingChat[] = [];
   for (const raw of (listing as { dialogs: unknown[] }).dialogs) {
     if (!raw || typeof raw !== 'object') continue;
@@ -65,13 +65,27 @@ function readQr(path: string): string {
   } finally { closeSync(fd); }
 }
 
-async function listHelper(command: string, args: string[], env: Record<string, string | undefined>, input?: string): Promise<unknown> {
-  const child = spawn(command, args, { env, stdio: ['pipe', 'pipe', 'ignore'] });
+/** The bridge's last fixed error code on stderr. */
+function listingErrorCode(stderr: string): string | undefined {
+  for (const line of stderr.split(/\r?\n/).reverse()) {
+    const match = /olympus-whatsapp-bridge:\s*([a-z0-9_]{1,48})\s*$/.exec(line.trim());
+    if (match) return match[1];
+  }
+  return undefined;
+}
+
+export async function listHelper(command: string, args: string[], env: Record<string, string | undefined>, input?: string): Promise<unknown> {
+  const child = spawn(command, args, { env, stdio: ['pipe', 'pipe', 'pipe'] });
   const stdin = child.stdin;
   const stdout = child.stdout;
-  if (!stdin || !stdout) throw new Error('Chat listing pipes unavailable.');
+  const stderr = child.stderr;
+  if (!stdin || !stdout || !stderr) throw new Error('Chat listing pipes unavailable.');
   stdin.on('error', () => {});
-  const timeout = setTimeout(() => child.kill('SIGKILL'), 60_000);
+  // Only the bridge's last fixed code is kept (`olympus-whatsapp-bridge: connect_failed`), never other text.
+  let errorTail = '';
+  stderr.on('data', (chunk) => { errorTail = (errorTail + Buffer.from(chunk).toString('utf8')).slice(-4096); });
+  let timedOut = false;
+  const timeout = setTimeout(() => { timedOut = true; child.kill('SIGKILL'); }, 60_000);
   const exit = new Promise<number>((resolve, reject) => {
     child.once('error', reject);
     child.once('close', (code) => resolve(code ?? 1));
@@ -84,8 +98,12 @@ async function listHelper(command: string, args: string[], env: Record<string, s
       output += Buffer.from(chunk).toString('utf8');
       if (output.length > 16 * 1024 * 1024) throw new Error('Chat listing is too large.');
     }
-    if (await exit !== 0) throw new Error('Chat listing failed.');
-    return JSON.parse(output);
+    if (await exit !== 0) throw codedError('Chat listing failed.', timedOut ? 'chat_list_timeout' : `chat_list_${listingErrorCode(errorTail) ?? 'failed'}`);
+    try {
+      return JSON.parse(output);
+    } catch {
+      throw codedError('Chat listing was unreadable.', 'chat_list_unreadable');
+    }
   } catch (error) {
     child.kill('SIGKILL');
     await exit.catch(() => 1);
@@ -152,6 +170,7 @@ export function createDashboardMessagingService(options: {
         },
         runCommand: (request) => runDashboardPairingCommand(request, hooks),
         onWhatsAppQr: (path) => hooks.qr(readQr(path)),
+        onWhatsAppLinked: () => hooks.linked(),
       });
       if (!result.registered) throw new Error('Pairing did not finish.');
       return result;

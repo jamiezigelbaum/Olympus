@@ -9,6 +9,7 @@ test('pairing runner sends replies only on the private input pipe', async () => 
     signal: controller.signal,
     prompt: (field, reply) => { expect(field).toBe('code'); reply('temporary-code'); },
     qr: () => {},
+    linked: () => {},
     commit: () => {},
     choose: async () => { throw new Error('Runner does not choose scope'); },
   });
