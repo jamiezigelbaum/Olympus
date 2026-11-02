@@ -7,6 +7,8 @@ export interface PairingHooks {
   signal: AbortSignal;
   prompt(field: PairingField, reply: (value: string) => void): void;
   qr(value: string): void;
+  /** The phone accepted the link: the QR is spent, and Olympus is reading the chat list. */
+  linked(): void;
   commit(): void;
   choose(chats: readonly PairingChat[]): Promise<ChatSelection>;
 }
@@ -17,6 +19,9 @@ type PairState = {
   field?: PairingField;
   reply?: (value: string) => void;
   qr?: string;
+  linked?: boolean;
+  /** Why the last pairing failed: a fixed code, never a provider message, path or account detail. */
+  reason?: string;
   chats?: readonly PairingChat[];
   registrationMayBeSaved?: boolean;
   selection?: (selection: ChatSelection) => void;
@@ -34,6 +39,8 @@ export function createDashboardMessagingPairing<T extends PairResult>(options: {
       ok: true as const, state: item.state,
       ...(item.field ? { field: item.field } : {}),
       ...(item.qr ? { qr: item.qr } : {}),
+      ...(item.linked && item.state !== 'failed' && item.state !== 'cancelled' ? { linked: true } : {}),
+      ...(item.state === 'failed' && item.reason ? { reason: item.reason } : {}),
       ...(item.chats ? { chats: item.chats } : {}),
       ...(item.state === 'scope_selection_required' ? { wholeAccount: false, chatScopes: [] } : {}),
       ...(item.registrationMayBeSaved ? { registrationMayBeSaved: true } : {}),
@@ -58,6 +65,7 @@ export function createDashboardMessagingPairing<T extends PairResult>(options: {
               item.state = 'waiting';
             },
             qr(value) { if (!item.controller.signal.aborted) { item.qr = value; item.state = 'waiting'; } },
+            linked() { if (!item.controller.signal.aborted) { delete item.qr; item.linked = true; item.state = 'starting'; } },
             choose(chats) {
               if (item.controller.signal.aborted) return Promise.reject(new Error('Pairing was cancelled.'));
               delete item.reply; delete item.field; delete item.qr;
@@ -86,10 +94,13 @@ export function createDashboardMessagingPairing<T extends PairResult>(options: {
           if (item.controller.signal.aborted) return;
           item.chats = result.chats;
           item.state = 'paired';
-        } catch {
+        } catch (error) {
           if (!item.controller.signal.aborted) {
             if (item.state === 'committing') item.registrationMayBeSaved = true;
+            item.reason = pairingFailureReason(error);
             item.state = 'failed';
+            // The code only: a helper's message can carry a path or an account detail.
+            console.warn(`[messaging] ${source} pairing failed: ${item.reason}`);
           }
         } finally {
           delete item.reply;
@@ -137,4 +148,17 @@ export function createDashboardMessagingPairing<T extends PairResult>(options: {
     },
     close() { for (const source of states.keys()) this.cancel(source); },
   };
+}
+
+/** A failure's fixed code (`Error.code`, set by the pairing and listing helpers), or `unexpected`. */
+export function pairingFailureReason(error: unknown): string {
+  const code = error && typeof error === 'object' ? (error as { code?: unknown }).code : undefined;
+  return typeof code === 'string' && /^[a-z0-9_]{1,64}$/.test(code) ? code : 'unexpected';
+}
+
+/** An Error carrying a fixed failure code the dashboard may show and log. */
+export function codedError(message: string, code: string | undefined): Error {
+  const error = new Error(message) as Error & { code?: string };
+  if (code && /^[a-z0-9_]{1,64}$/.test(code)) error.code = code;
+  return error;
 }

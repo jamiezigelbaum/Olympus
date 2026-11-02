@@ -120,6 +120,8 @@ export interface PairMessagingSourceOptions extends TelegramPythonSeams {
     chats: readonly MessagingChatMetadata[];
   }) => Promise<MessagingCaptureScopeApproval | undefined>;
   onWhatsAppQr?: (pngPath: string) => void | Promise<void>;
+  /** The bridge proved the linked device (its `ready` event), before Olympus lists chats. */
+  onWhatsAppLinked?: () => void | Promise<void>;
   whatsappQrMode?: 'terminal' | 'artifact';
   signal?: AbortSignal;
   onCommitStart?: () => void;
@@ -231,6 +233,7 @@ export async function pairMessagingSource(options: PairMessagingSourceOptions): 
           qrPngPath = event.qr_png_path;
           await options.onWhatsAppQr?.(qrPngPath);
         }
+        if (options.source === 'whatsapp' && event.event === 'ready') await options.onWhatsAppLinked?.();
       },
     });
     // Injected runners may return completed output without invoking the streaming
@@ -795,6 +798,12 @@ function removeTelegramLogin(base: string): void {
 }
 
 function pairingFailure(source: MessagingPairingSource, code: string | undefined): Error {
+  const error = pairingFailureMessage(source, code) as Error & { code?: string };
+  error.code = code ?? 'helper_failed';
+  return error;
+}
+
+function pairingFailureMessage(source: MessagingPairingSource, code: string | undefined): Error {
   if (source === 'whatsapp' && code?.startsWith('unsupported_')) {
     return new Error(`WhatsApp requested a linking step this bridge does not support (${code}). No account was connected or capture started. Ask your agent to check compatibility before another scan.`);
   }

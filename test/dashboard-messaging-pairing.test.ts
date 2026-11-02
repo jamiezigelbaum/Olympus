@@ -1,5 +1,9 @@
+import { mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, test } from 'bun:test';
-import { createDashboardMessagingPairing } from '../src/workers/email-source/dashboard-messaging.ts';
+import { listHelper } from '../src/workers/email-source/dashboard-messaging-service.ts';
+import { codedError, createDashboardMessagingPairing } from '../src/workers/email-source/dashboard-messaging.ts';
 
 describe('dashboard messaging pairing', () => {
   test('keeps prompt values out of status and prevents duplicate or stale replies', async () => {
@@ -80,4 +84,80 @@ test('cancelling the post-pair choice releases the waiting task without publishi
   expect(manager.busy('telegram')).toBe(false);
   expect(published).toBe(false);
   expect(() => manager.select('telegram', { wholeAccount: true, chatScopes: [] })).toThrow();
+});
+
+describe('what a WhatsApp pairing shows after the scan', () => {
+  test('a linked phone clears the spent QR and says Olympus is reading the chat list', async () => {
+    let linked!: () => void;
+    const listing = new Promise<void>((resolve) => { linked = resolve; });
+    const manager = createDashboardMessagingPairing({
+      pair: async (_source, hooks) => {
+        hooks.qr('data:image/png;base64,AAAA');
+        await listing;
+        hooks.linked();
+        return await new Promise<never>(() => {});
+      },
+      publish: async () => {},
+    });
+    manager.start('whatsapp');
+    await Promise.resolve();
+    expect(manager.status('whatsapp')).toMatchObject({ state: 'waiting', qr: 'data:image/png;base64,AAAA' });
+    linked();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const status = manager.status('whatsapp');
+    expect(status).toMatchObject({ state: 'starting', linked: true });
+    expect(status).not.toHaveProperty('qr');
+    manager.cancel('whatsapp');
+  });
+
+  test('a failure keeps its fixed code, shows it and logs only it', async () => {
+    const warned: string[] = [];
+    const warn = console.warn;
+    console.warn = (line: string) => { warned.push(line); };
+    try {
+      const manager = createDashboardMessagingPairing({
+        pair: async () => { throw codedError('Chat listing failed at /Users/mark/secret path', 'chat_list_connect_failed'); },
+        publish: async () => {},
+      });
+      manager.start('whatsapp');
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(manager.status('whatsapp')).toMatchObject({ state: 'failed', reason: 'chat_list_connect_failed' });
+      expect(warned).toEqual(['[messaging] whatsapp pairing failed: chat_list_connect_failed']);
+      // A failure with no code says only that it was unexpected; its message never reaches the status.
+      const other = createDashboardMessagingPairing({ pair: async () => { throw new Error('/Users/mark/x'); }, publish: async () => {} });
+      other.start('whatsapp');
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(other.status('whatsapp')).toMatchObject({ state: 'failed', reason: 'unexpected' });
+      expect(JSON.stringify(other.status('whatsapp'))).not.toContain('mark');
+    } finally {
+      console.warn = warn;
+    }
+  });
+});
+
+describe('the WhatsApp chat listing', () => {
+  const script = (body: string) => {
+    const dir = mkdtempSync(join(tmpdir(), 'wa-list-'));
+    const path = join(dir, 'bridge');
+    writeFileSync(path, `#!/bin/sh\n${body}\n`, { mode: 0o700 });
+    return path;
+  };
+  const code = (error: unknown) => (error as { code?: string }).code;
+
+  test('a failed listing carries the bridge\'s fixed code, never its other text', async () => {
+    const bridge = script("echo 'Database WARN /Users/mark/x' >&2; echo 'olympus-whatsapp-bridge: connect_failed' >&2; exit 1");
+    const failure = await listHelper(bridge, [], {}).catch((error) => error);
+    expect(code(failure)).toBe('chat_list_connect_failed');
+    expect(String((failure as Error).message)).not.toContain('mark');
+  });
+
+  test('output that is not the listing says so', async () => {
+    const bridge = script("echo 'Database WARN something'; echo '{\"dialogs\":[]}'");
+    expect(code(await listHelper(bridge, [], {}).catch((error) => error))).toBe('chat_list_unreadable');
+  });
+
+  test('a listing that succeeds is returned', async () => {
+    const bridge = script("echo '{\"event\":\"dialogs\",\"dialogs\":[]}'");
+    expect(await listHelper(bridge, [], {})).toEqual({ event: 'dialogs', dialogs: [] });
+  });
 });
