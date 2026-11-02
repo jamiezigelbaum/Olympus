@@ -40928,7 +40928,9 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
   }
   function callRaw(name, args) {
     const privacyInference = name === config.privacy.tools.questions || name === config.privacy.tools.check;
-    return request("tools/call", { name, arguments: args || {} }, privacyInference ? Math.max(config.resultTimeoutMs, 150000) : config.resultTimeoutMs);
+    const providerListing = name === config.picker.tools.scopeList || name === config.picker.tools.scopeSet;
+    const timeoutMs = privacyInference ? Math.max(config.resultTimeoutMs, 150000) : providerListing ? Math.max(config.resultTimeoutMs, 120000) : config.resultTimeoutMs;
+    return request("tools/call", { name, arguments: args || {} }, timeoutMs);
   }
   function openLink(href) {
     if (typeof href !== "string")
@@ -64134,7 +64136,7 @@ var init_session = __esm(() => {
 });
 
 // src/workers/evernote/live-sync.ts
-var EVERNOTE_SECURE_CORPUS_ID = "secure_local.evernote.notes", EVERNOTE_INTERNAL_CORPUS_ID = "internal.evernote.notes", EVERNOTE_TIER_CORPUS_IDS, EVERNOTE_STORE_PLACEMENT, AUTH_KINDS;
+var EVERNOTE_SECURE_CORPUS_ID = "secure_local.evernote.notes", EVERNOTE_INTERNAL_CORPUS_ID = "internal.evernote.notes", EVERNOTE_TIER_CORPUS_IDS, EVERNOTE_NOTEBOOK_LIST_TTL_MS, EVERNOTE_STORE_PLACEMENT, AUTH_KINDS;
 var init_live_sync3 = __esm(() => {
   init_atomic_file();
   init_errors();
@@ -64151,6 +64153,7 @@ var init_live_sync3 = __esm(() => {
     secure_local: EVERNOTE_SECURE_CORPUS_ID,
     internal: EVERNOTE_INTERNAL_CORPUS_ID
   });
+  EVERNOTE_NOTEBOOK_LIST_TTL_MS = 10 * 60000;
   EVERNOTE_STORE_PLACEMENT = Object.freeze({
     trustTier: "S4",
     trustDomain: "secure_local",

@@ -6,7 +6,7 @@
 import { mkdtempSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, test } from 'bun:test';
+import { afterEach, describe, expect, setSystemTime, test } from 'bun:test';
 import { McpSourceError } from '../src/core/mcp-source/errors.ts';
 import { McpCallPacer } from '../src/core/mcp-source/pacer.ts';
 import type { SecretStore } from '../src/core/secret-store.ts';
@@ -477,5 +477,50 @@ describe('the dashboard', () => {
       .toContain('1,204 notes in 12 notebooks · 3 shared with you, not imported');
     // A pass that ran out of its budget resumes on its own: nothing to say.
     expect(evernoteDashboardPass({ last_completed_at: '2026-10-28T11:00:00.000Z', last_error: { kind: 'budget_exhausted', state: 'paused', at: '2026-10-28T11:00:00.000Z' } })?.error).toBeUndefined();
+  });
+});
+
+describe('the notebook picker list', () => {
+  test('the picker\'s open, Try again and save share one listing, and a finished list answers again without asking Evernote', async () => {
+    fake = new FakeEvernoteServer({ auth: true }).start();
+    fake.addNotebook('Field work');
+    fake.addNotebook('Recipes');
+    const { sync } = await connected(fake);
+    // Two at once (a timed-out open and its Try again): one listing.
+    const [first, second] = await Promise.all([sync.notebooks(), sync.notebooks()]);
+    expect(first.map((book) => book.label).sort()).toEqual(['Field work', 'Recipes']);
+    expect(second).toBe(first);
+    const listed = fake.calls.search_notebooks;
+    expect(listed).toBe(1);
+    // The save's check, moments later: the finished list.
+    expect(await sync.notebooks()).toBe(first);
+    expect(fake.calls.search_notebooks).toBe(listed);
+  });
+
+  test('a failed listing is not kept: the next try lists again', async () => {
+    fake = new FakeEvernoteServer({ auth: true }).start();
+    fake.addNotebook('Field work');
+    const { sync } = await connected(fake);
+    fake.failTool = 'search_notebooks';
+    await expect(sync.notebooks()).rejects.toThrow();
+    fake.failTool = undefined;
+    expect((await sync.notebooks()).map((book) => book.label)).toEqual(['Field work']);
+  });
+
+  test('the list is read again once it is older than ten minutes', async () => {
+    fake = new FakeEvernoteServer({ auth: true }).start();
+    fake.addNotebook('Field work');
+    const { sync } = await connected(fake);
+    const start = Date.now();
+    try {
+      await sync.notebooks();
+      fake.addNotebook('Recipes');
+      setSystemTime(new Date(start + 9 * 60_000));
+      expect((await sync.notebooks()).length).toBe(1);
+      setSystemTime(new Date(start + 11 * 60_000));
+      expect((await sync.notebooks()).length).toBe(2);
+    } finally {
+      setSystemTime();
+    }
   });
 });

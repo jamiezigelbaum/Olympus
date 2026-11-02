@@ -148621,7 +148621,9 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
   }
   function callRaw(name, args) {
     const privacyInference = name === config2.privacy.tools.questions || name === config2.privacy.tools.check;
-    return request("tools/call", { name, arguments: args || {} }, privacyInference ? Math.max(config2.resultTimeoutMs, 150000) : config2.resultTimeoutMs);
+    const providerListing = name === config2.picker.tools.scopeList || name === config2.picker.tools.scopeSet;
+    const timeoutMs = privacyInference ? Math.max(config2.resultTimeoutMs, 150000) : providerListing ? Math.max(config2.resultTimeoutMs, 120000) : config2.resultTimeoutMs;
+    return request("tools/call", { name, arguments: args || {} }, timeoutMs);
   }
   function openLink(href) {
     if (typeof href !== "string")
@@ -162176,6 +162178,7 @@ __export(exports_live_sync, {
   EVERNOTE_STORE_PLACEMENT: () => EVERNOTE_STORE_PLACEMENT,
   EVERNOTE_SECURE_CORPUS_ID: () => EVERNOTE_SECURE_CORPUS_ID,
   EVERNOTE_PASS_RECEIPT_KIND: () => EVERNOTE_PASS_RECEIPT_KIND,
+  EVERNOTE_NOTEBOOK_LIST_TTL_MS: () => EVERNOTE_NOTEBOOK_LIST_TTL_MS,
   EVERNOTE_INTERNAL_CORPUS_ID: () => EVERNOTE_INTERNAL_CORPUS_ID,
   EVERNOTE_HANDLE: () => EVERNOTE_HANDLE,
   EVERNOTE_ACCOUNT_ROLE: () => EVERNOTE_ACCOUNT_ROLE
@@ -162351,6 +162354,8 @@ function createEvernoteLiveSync(options) {
   });
   let lastCompletedAt = readPassFile(passPath).status.last_completed_at;
   let running;
+  let notebookList;
+  let notebookListing;
   const failed = (file, error2) => {
     const name = error2?.name;
     const kind = isMcpSourceError(error2) ? error2.kind : name === "EvernoteListingIncomplete" ? "listing_incomplete" : name === "EvernoteAccountChanged" ? "account_changed" : "pass_failed";
@@ -162443,14 +162448,23 @@ function createEvernoteLiveSync(options) {
       })();
       return running;
     },
-    async notebooks() {
-      const listing = session("notebooks");
-      await listing.open();
-      try {
-        return await listNotebooks(listing);
-      } finally {
-        await listing.close();
-      }
+    notebooks() {
+      if (notebookList && now().getTime() - notebookList.at < EVERNOTE_NOTEBOOK_LIST_TTL_MS)
+        return Promise.resolve(notebookList.books);
+      notebookListing ??= (async () => {
+        const listing = session("notebooks");
+        await listing.open();
+        try {
+          const books = await listNotebooks(listing);
+          notebookList = { at: now().getTime(), books };
+          return books;
+        } finally {
+          await listing.close();
+        }
+      })().finally(() => {
+        notebookListing = undefined;
+      });
+      return notebookListing;
     },
     attachmentConnector: () => attachments,
     bindNotebookChoice: (choice) => {
@@ -162460,7 +162474,7 @@ function createEvernoteLiveSync(options) {
     lastStoreRunCompletedAt: () => lastCompletedAt
   };
 }
-var EVERNOTE_SECURE_CORPUS_ID = "secure_local.evernote.notes", EVERNOTE_INTERNAL_CORPUS_ID = "internal.evernote.notes", EVERNOTE_TIER_CORPUS_IDS, EVERNOTE_HANDLE = "evernote.personal", EVERNOTE_ACCOUNT_ROLE = "personal", EVERNOTE_SYNC_CAPABILITY = "evernote.notes.sync", EVERNOTE_PASS_RECEIPT_KIND = "evernote_connector_store_pass_receipt", evernoteCredentialKey = (accountRole = EVERNOTE_ACCOUNT_ROLE) => `evernote.${accountRole}.mcp_credential`, ATTACHMENT_CALL_BUDGET = 4, NOTEBOOKS_CALL_BUDGET = 400, EVERNOTE_ENFORCEABLE_EXCLUSION_CRITERIA, DISPOSITION_RANK, EVERNOTE_STORE_PLACEMENT, AUTH_KINDS;
+var EVERNOTE_SECURE_CORPUS_ID = "secure_local.evernote.notes", EVERNOTE_INTERNAL_CORPUS_ID = "internal.evernote.notes", EVERNOTE_TIER_CORPUS_IDS, EVERNOTE_HANDLE = "evernote.personal", EVERNOTE_ACCOUNT_ROLE = "personal", EVERNOTE_SYNC_CAPABILITY = "evernote.notes.sync", EVERNOTE_PASS_RECEIPT_KIND = "evernote_connector_store_pass_receipt", evernoteCredentialKey = (accountRole = EVERNOTE_ACCOUNT_ROLE) => `evernote.${accountRole}.mcp_credential`, ATTACHMENT_CALL_BUDGET = 4, NOTEBOOKS_CALL_BUDGET = 400, EVERNOTE_NOTEBOOK_LIST_TTL_MS, EVERNOTE_ENFORCEABLE_EXCLUSION_CRITERIA, DISPOSITION_RANK, EVERNOTE_STORE_PLACEMENT, AUTH_KINDS;
 var init_live_sync3 = __esm(() => {
   init_atomic_file();
   init_errors3();
@@ -162477,6 +162491,7 @@ var init_live_sync3 = __esm(() => {
     secure_local: EVERNOTE_SECURE_CORPUS_ID,
     internal: EVERNOTE_INTERNAL_CORPUS_ID
   });
+  EVERNOTE_NOTEBOOK_LIST_TTL_MS = 10 * 60000;
   EVERNOTE_ENFORCEABLE_EXCLUSION_CRITERIA = ["path_prefix", "folder_id"];
   DISPOSITION_RANK = { ingest: 0, metadata_only: 1, exclude: 2 };
   EVERNOTE_STORE_PLACEMENT = Object.freeze({
