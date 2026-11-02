@@ -544,7 +544,13 @@ export function chatgptDashboardClient(
   function callRaw(name: string, args: Any): Promise<Any> {
     // Draft privacy checks run several one-item classifier calls before replying.
     const privacyInference = name === config.privacy.tools.questions || name === config.privacy.tools.check;
-    return request('tools/call', { name, arguments: args || {} }, privacyInference ? Math.max(config.resultTimeoutMs, 150_000) : config.resultTimeoutMs);
+    // A folder list can take a provider a minute or more (Evernote over 100 notebooks: one paced search per name
+    // fragment). A literal: this function is serialized into the page and sees nothing outside it.
+    const providerListing = name === config.picker.tools.scopeList || name === config.picker.tools.scopeSet;
+    const timeoutMs = privacyInference ? Math.max(config.resultTimeoutMs, 150_000)
+      : providerListing ? Math.max(config.resultTimeoutMs, 120_000)
+      : config.resultTimeoutMs;
+    return request('tools/call', { name, arguments: args || {} }, timeoutMs);
   }
 
   function openLink(href: string): void {
