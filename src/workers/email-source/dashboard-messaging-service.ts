@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process';
 import { closeSync, constants, fstatSync, openSync, readFileSync } from 'node:fs';
+import { arch, platform, release } from 'node:os';
 import { basename, join } from 'node:path';
 import { writePrivateFileAtomicSync } from '../../core/atomic-file.ts';
 import { withFileLease } from '../../core/file-lease.ts';
@@ -9,6 +10,7 @@ import { pairMessagingSource, TELEGRAM_API_HASH_SECRET_KEY, TELEGRAM_API_ID_SECR
 import { telegramPythonExecutable } from '../../core/messaging-runtime.ts';
 import { olympusPackageRoot } from '../../core/package-root.ts';
 import { telegramSessionBasePath, whatsappStateDir } from '../../core/pairing-session-paths.ts';
+import { runningOlympusVersion } from '../../core/update-check.ts';
 import type { SecretStore } from '../../core/secret-store.ts';
 import { codedError, createDashboardMessagingPairing, type MessagingSource, type PairingChat } from './dashboard-messaging.ts';
 import { runDashboardPairingCommand } from './dashboard-messaging-runner.ts';
@@ -157,6 +159,7 @@ export function createDashboardMessagingService(options: {
     return { path, grant: read.grant, fingerprint: JSON.stringify(read.grant) };
   };
   const manager = createDashboardMessagingPairing({
+    identity: { version: runningOlympusVersion(), os: `${platform() === 'darwin' ? 'macOS' : platform()} (kernel ${release()}, ${arch()})` },
     pair: (source, hooks) => options.withMessagingCapturePaused(source, async () => {
       // A device this pairing linked, until the connection is being saved: a failure or a cancel before then unlinks it,
       // so the phone never keeps an Olympus entry nothing uses.

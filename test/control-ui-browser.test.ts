@@ -1361,7 +1361,7 @@ test('Telegram setup hands over to private prompts, shows Cancel only during pai
   const root = document.createElement('div'); root.innerHTML = renderMessagingCard('telegram', true); document.body.append(root);
   let state: Record<string, unknown> = { state: 'idle' };
   const controller = mountDashboardController({ root, canWrite: true, signal: new AbortController().signal, navigate() {}, refresh: async () => undefined, returnUrl: 'http://localhost/dashboard?keys', pollIntervalMs: 0,
-    transport: { control: async () => ({ status: 200, body: {} }), messaging: async op => { if (op === 'start') state = { state: 'waiting', field: 'api_id' }; if (op === 'respond') state = { state: 'failed' }; return { status: 200, body: { ok: true, ...state } }; } },
+    transport: { control: async () => ({ status: 200, body: {} }), messaging: async op => { if (op === 'start') state = { state: 'waiting', field: 'api_id' }; if (op === 'respond') state = { state: 'failed', reason: 'unexpected', details: 'Olympus 1.3.1\nSource: telegram\nFailure: unexpected' }; return { status: 200, body: { ok: true, ...state } }; } },
   });
   try {
     await happyWindow.happyDOM.waitUntilComplete();
@@ -1377,6 +1377,10 @@ test('Telegram setup hands over to private prompts, shows Cancel only during pai
     await new Promise(resolve => setTimeout(resolve, 0));
     expect(cancel.hidden).toBe(true);
     expect(root.querySelector('[data-pairing-error] details')!.hasAttribute('open')).toBe(false);
+    // Support gets a copyable, content-free block instead of a Terminal command.
+    const copy = root.querySelector<HTMLButtonElement>('[data-pairing-error] [data-copy-target]')!;
+    expect(copy.textContent).toBe('Copy details');
+    expect(root.querySelector(copy.dataset.copyTarget!)!.textContent).toBe('Olympus 1.3.1\nSource: telegram\nFailure: unexpected');
     root.querySelector<HTMLButtonElement>('[data-messaging-retry]')!.click();
     expect(root.querySelector<HTMLElement>('[data-messaging-setup-intro]')!.hidden).toBe(false);
   } finally { controller.dispose(); }

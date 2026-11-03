@@ -1160,13 +1160,23 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
           const details = document.createElement('details'); details.className = 'howto';
           const summary = document.createElement('summary'); summary.textContent = 'How to fix';
           const hint = document.createElement('p'); hint.textContent = source === 'whatsapp'
-            ? (body.unlinked === 'removed' ? 'Olympus removed itself from your phone\'s linked devices, so there is nothing to clean up. Pair again; if it fails again, send the code shown above to support. It names the step that failed and nothing about your account.'
-              : body.unlinked === 'offline' || body.unlinked === 'failed' ? 'Olympus could not remove itself from your phone. Remove the Olympus entry in WhatsApp → Settings → Linked devices, then pair again. If it fails again, send the code shown above to support.'
-                : 'Pair again. If it fails again, send the code shown above to support; it names the step that failed and nothing about your account.')
+            ? (body.unlinked === 'removed' ? 'Olympus removed itself from your phone\'s linked devices, so there is nothing to clean up. Pair again; if it fails again, press Copy details and send what it copies to support.'
+              : body.unlinked === 'offline' || body.unlinked === 'failed' ? 'Olympus could not remove itself from your phone. Remove the Olympus entry in WhatsApp → Settings → Linked devices, then pair again. If it fails again, press Copy details and send what it copies to support.'
+                : 'Pair again. If it fails again, press Copy details and send what it copies to support.')
             : 'Check api_id and api_hash at my.telegram.org/apps. Enter the latest code from Telegram and your two-step verification password if asked. Then try pairing again.';
           details.append(summary, hint);
           const retry = document.createElement('button'); retry.type = 'button'; retry.className = 'btn'; retry.dataset.messagingRetry = ''; retry.textContent = 'Back to setup';
-          error.append(details, retry); setupSheet.append(error);
+          error.append(details, retry);
+          // What support needs instead of a Terminal command: fixed codes, version and OS only (built by the engine).
+          if (typeof body.details === 'string' && body.details) {
+            const report = document.createElement('div'); report.className = 'promptbox'; report.id = `pairing-details-${source}`; report.textContent = body.details;
+            const copy = document.createElement('button'); copy.type = 'button'; copy.className = 'btn'; copy.dataset.copyTarget = `#${report.id}`; copy.textContent = 'Copy details';
+            const said = document.createElement('span'); said.dataset.copyStatus = ''; said.setAttribute('aria-live', 'polite');
+            const note = document.createElement('p'); note.textContent = 'Nothing from your account: no names, numbers or chats.';
+            const row = document.createElement('div'); row.append(copy, said);
+            error.append(report, note, row);
+          }
+          setupSheet.append(error);
         }
       }
       // Cancel pairing is offered only while a pairing is running, including while it waits for the chat choice; at any other time it would do nothing.
@@ -1226,7 +1236,7 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
           } else slot.append(form);
         }
       }
-      if (operation !== 'chats' && (operation !== 'cancel' || state === 'committing') && !['paired', 'complete', 'completed', 'failed', 'cancelled', 'idle', 'not_paired', 'scope_selection_required'].includes(state)) {
+      if ((state === 'cancelled' && body.cleaning === true) || (operation !== 'chats' && (operation !== 'cancel' || state === 'committing') && !['paired', 'complete', 'completed', 'failed', 'cancelled', 'idle', 'not_paired', 'scope_selection_required'].includes(state))) {
         messagingTimers.set(card, setTimeout(() => { messagingTimers.delete(card); void messagingRequest(card, 'status'); }, 1200));
       }
     } catch {

@@ -71,7 +71,10 @@ test('Telegram startup failure reports failure without returning helper errors o
   });
   manager.start('telegram');
   await new Promise(resolve => setTimeout(resolve, 0));
-  expect(manager.status('telegram')).toEqual({ ok: true, state: 'failed', reason: 'unexpected' });
+  const status = manager.status('telegram') as { details?: string };
+  expect(status).toMatchObject({ ok: true, state: 'failed', reason: 'unexpected' });
+  expect(status.details).toContain('Failure: unexpected');
+  expect(JSON.stringify(status)).not.toContain('fixture-api-hash');
 });
 
 test('cancelling Telegram credential entry clears prompts without publishing a connection', async () => {
