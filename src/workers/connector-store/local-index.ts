@@ -11820,9 +11820,14 @@ export class LocalConnectorStore {
     const identities = ledger.corpusCopyIdentities(this.corpusId, 'metadata_layer_settled_unreadable');
     const filters = connectorStoreFilterSql(scope?.contentFilters ?? scope?.itemFilters);
     const account = normalizeOptionalAccountScope(scope?.accountScope);
+    // normalized_conversation, not COALESCE(provider_conversation_id, ''):
+    // only the stored column is in the identity index. The expression left
+    // SQLite scanning the account's every item per identity, which held
+    // Sparta's worker 35-130 s on each status publish with a 28k-item
+    // Dropbox store (2026-11-03).
     const lookup = this.db.query(`SELECT i.local_item_id, i.title, i.source_version FROM items i
       WHERE i.tombstoned = 0 AND i.provider = ? AND i.account_scope = ? AND i.provider_item_id = ?
-        AND COALESCE(i.provider_conversation_id, '') = ?
+        AND i.normalized_conversation = ?
         ${account ? 'AND i.account_scope = ?' : ''} ${filters.sql}`);
     const out: ExtractionUnreadableItem[] = [];
     for (const identity of identities) {
