@@ -1060,6 +1060,9 @@ export class SourceScheduler {
       }
       state.nextRunAt = nextRunAt;
       if (continuing || wokenWhileRunning) this.scheduleContinueWake(nextRunAt);
+      // A retry due before the next regular tick gets its own wake, or the tick
+      // would round it up (an embedding backlog asking for 5 s waited 60 s).
+      else if (retryAt && nextRunAt - Date.parse(completedAt) < this.tickMs) this.scheduleContinueWake(nextRunAt);
       if (result.status === 'progress' && !retryAt) this.wakeDownstream(state, continueAt);
     } catch (error) {
       delete state.wakeAfterRun;

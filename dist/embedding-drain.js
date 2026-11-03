@@ -67542,6 +67542,8 @@ class SourceScheduler {
       state.nextRunAt = nextRunAt;
       if (continuing || wokenWhileRunning)
         this.scheduleContinueWake(nextRunAt);
+      else if (retryAt && nextRunAt - Date.parse(completedAt) < this.tickMs)
+        this.scheduleContinueWake(nextRunAt);
       if (result.status === "progress" && !retryAt)
         this.wakeDownstream(state, continueAt);
     } catch (error) {
