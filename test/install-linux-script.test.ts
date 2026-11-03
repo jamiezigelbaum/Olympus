@@ -316,7 +316,7 @@ test('Bun-free uninstaller tree digest matches lifecycle recursive ordering', ()
 // Re-pinned for #751: server mode (LaunchDaemon) install and uninstall changes.
 test('Mac installer and uninstaller stay byte-for-byte unchanged', () => {
   expect(sha(readFileSync(join(REPO, 'scripts/install-macos.sh')))).toBe('0d1c96e322d8a3cb995a15082996183dff589ff1250032b05046a2be44709477');
-  expect(sha(readFileSync(join(REPO, 'site/uninstall.sh')))).toBe('437305eb6c3b91e456ad713239a4b0341564980abfe2620e04bdb8dc7de509b5');
+  expect(sha(readFileSync(join(REPO, 'site/uninstall.sh')))).toBe('588474f6551ef9a5242bf7c880958b6c8335936b7cf177d761366dc4fa3b832f');
 });
 
 for (const [env, message] of [

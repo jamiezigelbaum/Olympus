@@ -127,6 +127,11 @@ stop_agent() {
 # No installed Olympus executable is needed, and cancelling precedes all deletion.
 stop_daemon() {
   if [ ! -e /Library/LaunchDaemons/ai.olympusplugin.engine.plist ] && [ ! -L /Library/LaunchDaemons/ai.olympusplugin.engine.plist ]; then return 0; fi
+  # Another account's server mode is not ours to remove: leave it untouched.
+  if [ -f /Library/LaunchDaemons/ai.olympusplugin.engine.plist ] && [ ! -L /Library/LaunchDaemons/ai.olympusplugin.engine.plist ] \
+    && [ "$(/usr/bin/plutil -extract UserName raw -o - /Library/LaunchDaemons/ai.olympusplugin.engine.plist 2>/dev/null || true)" != "$(id -un)" ]; then
+    return 0
+  fi
   say "Your Mac will ask for an administrator's password to remove Olympus server mode. Cancelling keeps Olympus installed."
   if ! osascript -e 'on run argv
   do shell script ("/bin/sh -c '\''set -eu
