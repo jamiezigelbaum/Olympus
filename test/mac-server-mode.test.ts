@@ -210,7 +210,7 @@ test('status reports the daemon manager and system service state', async () => {
 test('the server switch appears only when the standalone Mac supplies server-mode facts', () => {
   const view = { ready: true, checked_at: '2026-11-03T00:00:00.000Z', cards: [] };
   expect(renderModelSetup(view)).not.toContain('role="switch"');
-  const html = renderModelSetup({ ...view, engine_server_mode: { enabled: true, pending: false, message: 'Saved.' } });
+  const html = renderModelSetup({ ...view, engine_server_mode: { enabled: true, pending: false, notice: 'Saved.' } });
   expect(html).toContain('role="switch"'); expect(html).toContain('checked'); expect(html).toContain('Saved.');
   expect(html).toContain('once the disk is unlocked');
 });
@@ -379,4 +379,22 @@ test('retrying an interrupted handoff retires the leftover agent without another
   expect(existsSync(f.paths.plistPath)).toBe(false);
   expect(calls).toContainEqual(['launchctl', 'bootout', `gui/501/${ENGINE_LABEL}`]);
   expect(calls.some(call => call[0] === 'osascript')).toBe(false);
+});
+
+test('the dashboard can start the server-mode helper: the CLI accepts it as a package-internal command', async () => {
+  const { V0_4_PACKAGE_INTERNAL_CLI_HELPERS } = await import('../src/core/public-surface.ts');
+  expect(V0_4_PACKAGE_INTERNAL_CLI_HELPERS as readonly string[]).toContain('__engine-server-mode');
+});
+
+test('the admin step names the real account when Bun reports "unknown" without USER', async () => {
+  const { currentMacUserName } = await import('../src/core/mac-engine-daemon.ts');
+  expect(currentMacUserName(501, 'unknown', uid => (uid === 501 ? 'mark' : 'wrong'))).toBe('mark');
+  expect(currentMacUserName(501, 'mark', () => { throw new Error('must not look up'); })).toBe('mark');
+});
+
+test('a server-mode notice passes the dashboard view policy', async () => {
+  const { assertNoRawEmailFields } = await import('../src/core/email-policy.ts');
+  const view = { model_setup: { engine_server_mode: { enabled: false, pending: true, notice: 'Your Mac will ask for an administrator’s password.' } } };
+  expect(() => assertNoRawEmailFields(view)).not.toThrow();
+  expect(() => assertNoRawEmailFields({ model_setup: { engine_server_mode: { enabled: false, pending: true, message: 'x' } } })).toThrow();
 });

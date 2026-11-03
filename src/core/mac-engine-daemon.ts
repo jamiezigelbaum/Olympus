@@ -1,5 +1,6 @@
 /** The small, fixed privilege boundary for the standalone Mac engine. No user-supplied paths or plist cross it. */
 import { lstatSync, readFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { userInfo } from 'node:os';
 import { OperationError } from './operation-error.ts';
 import type { EngineExec, EngineServiceOptions } from './engine-service.ts';
@@ -121,9 +122,22 @@ fi
 }
 
 const quoteShell = (text: string) => "'" + text.replaceAll("'", "'\\''") + "'";
+/**
+ * The account this process runs as. Bun reports "unknown" when USER is unset,
+ * as it is for the detached dashboard helper, so fall back to the uid's name.
+ */
+export function currentMacUserName(
+  uid: number,
+  reported: string = userInfo().username,
+  lookup: (uid: number) => string = uid => execFileSync('/usr/bin/id', ['-un', String(uid)], { encoding: 'utf8', timeout: 5_000 }).trim(),
+): string {
+  if (reported && reported !== 'unknown') return reported;
+  try { return lookup(uid); } catch { return reported; }
+}
+
 export function authorizeMacServerMode(enable: boolean, options: EngineServiceOptions, exec: EngineExec): void {
-  const userName = options.userName ?? userInfo().username;
   const uid = options.uid ?? process.getuid?.() ?? -1;
+  const userName = options.userName ?? currentMacUserName(uid);
   validateMacEngineOwner(userName, uid);
   const command = `/bin/sh -c ${quoteShell(macServerModeScript(enable))} olympus ${quoteShell(userName)} ${quoteShell(String(uid))}`;
   // No path, environment value, log text, or caller-provided plist enters this program.

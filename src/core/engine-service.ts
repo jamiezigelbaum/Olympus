@@ -1,4 +1,4 @@
-import { MAC_ENGINE_DAEMON_PLIST, macEngineManager, authorizeMacServerMode } from './mac-engine-daemon.ts';
+import { MAC_ENGINE_DAEMON_PLIST, macEngineManager, authorizeMacServerMode, currentMacUserName } from './mac-engine-daemon.ts';
 export { macEngineManager, macServerModeScript, validateMacEngineOwner } from './mac-engine-daemon.ts';
 import { ENGINE_HELPER_APP_NAME, ENGINE_HELPER_BUNDLE_ID, ENGINE_HELPER_EXECUTABLE } from './engine-helper-names.ts';
 export { ENGINE_HELPER_APP_NAME, ENGINE_HELPER_BUNDLE_ID, ENGINE_HELPER_EXECUTABLE };
@@ -1846,7 +1846,8 @@ export async function waitForMacAgentHandoff(options: { exec?: EngineExec; uid?:
 export interface MacServerModeView {
   enabled: boolean;
   pending: boolean;
-  message?: string;
+  /** Not `message`: the dashboard view refuses any field with that name. */
+  notice?: string;
 }
 function serverModeResultPath(paths: EnginePaths): string { return join(dirname(paths.configPath), 'server-mode-result.json'); }
 export function macServerModeView(options: EngineServiceOptions = {}): MacServerModeView {
@@ -1856,8 +1857,14 @@ export function macServerModeView(options: EngineServiceOptions = {}): MacServer
     const result = JSON.parse(readFileSync(serverModeResultPath(paths), 'utf8'));
     // Pending work from a process that died must not disable the switch forever.
     const pending = result.pending === true && Number.isSafeInteger(result.pid) && defaultPidAlive(result.pid);
-    return { enabled, pending, ...(typeof result.message === 'string' ? { message: result.message } : {}) };
+    return { enabled, pending, ...(typeof result.message === 'string' ? { notice: result.message } : {}) };
   } catch { return { enabled, pending: false }; }
+}
+
+/** USER and LOGNAME for the helper, so it never names the owner "unknown". */
+function macOwnerEnv(): Record<string, string> {
+  const name = currentMacUserName(process.getuid?.() ?? -1);
+  return name && name !== 'unknown' ? { USER: name, LOGNAME: name } : {};
 }
 
 /** Spawn outside the worker's process group so unloading the engine cannot strand the handoff. */
@@ -1868,7 +1875,7 @@ export function requestMacServerMode(enable: boolean): { ok: true; status_messag
   const program = installedProgram(paths.plistPath);
   if (!program) throw new OperationError('config_error', 'Update Olympus from its download page before changing this setting.');
   const child = spawn(program.runtimePath, ['--no-env-file', program.entryPath, '__engine-server-mode', enable ? 'on' : 'off'], {
-    detached: true, stdio: 'ignore', env: { HOME: homedir(), PATH: '/usr/bin:/bin:/usr/sbin:/sbin' },
+    detached: true, stdio: 'ignore', env: { HOME: homedir(), PATH: '/usr/bin:/bin:/usr/sbin:/sbin', ...macOwnerEnv() },
   });
   child.on('error', () => { writePrivateFileAtomicSync(serverModeResultPath(paths), JSON.stringify({ pending: false, message: 'Olympus could not open the administrator request. Update Olympus, then try again.' })); });
   child.unref();
