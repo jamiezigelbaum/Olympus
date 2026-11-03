@@ -106,6 +106,17 @@ with the signed Mac helper and both WhatsApp bridges; every served file matches
 its release hash, and the post-publish canary-test-mac and canary-test-omarchy
 runs install olympus 1.3.0 from the site and pass 7/7.
 
+1.3.1 shipped 2026-11-03: GitHub release v1.3.1 (latest) at 16a91267, with the
+WhatsApp fixes (#744 via #757, #745, #746, #747, and the WhatsApp Web version
+update #759), the Evernote picker fix (#743) and #742. The owner chose a
+minimal test for this patch instead of the full release check: exact-head CI
+green, in-place upgrades on test-mac and test-omarchy (test-omarchy's existing
+WhatsApp link kept capturing across the session-store upgrade), and one real
+WhatsApp pairing on test-mac that reached the chat list and saved one chat.
+The site serves 1.3.1 with the new bridges (1255fe5f591d6e51) and the
+unchanged signed Mac helper. Follow-ups: #760 (keep the WhatsApp version
+current), #761, #762.
+
 ## 1.1.0 Private answers inbox (owner decision 2026-10-14)
 
 Commit-only implementation in `claude/private-answers-inbox`; do not land
