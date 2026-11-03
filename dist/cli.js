@@ -188954,7 +188954,7 @@ async function runSnifferPass(options) {
   let dispatches = options.targets.reduce((total, target) => total + target.sniffer.dispatchCount(), 0);
   while (pending.length > 0) {
     const aged = pending.filter((item) => dispatches % 5 === 4 && item.target.sniffer.clockMs() - Date.parse(item.question.queuedAt) >= 5 * 60000).sort((a, b) => a.question.queuedAt.localeCompare(b.question.queuedAt) || a.question.sequence - b.question.sequence);
-    let next = aged[0] ?? pending[0];
+    let next = aged[0] ?? nextInTurn(pending, options.targets, dispatches);
     if (next.question.pass === "content")
       next = pending.find((item) => item.question.pass === "metadata" && item.target === next.target && tierLedgerIdentityKey(item.question) === tierLedgerIdentityKey(next.question)) ?? next;
     pending.splice(pending.indexOf(next), 1);
@@ -189055,6 +189055,11 @@ async function runSnifferPass(options) {
   }
   return finish(report);
 }
+function nextInTurn(pending, targets, dispatches) {
+  const waiting = targets.filter((target2) => pending.some((item) => item.target === target2));
+  const target = waiting[dispatches % Math.max(1, waiting.length)];
+  return pending.find((item) => item.target === target) ?? pending[0];
+}
 function compareRecent(a, b) {
   return b.question.priority - a.question.priority || b.question.queuedAt.localeCompare(a.question.queuedAt) || b.question.sequence - a.question.sequence;
 }
@@ -189082,7 +189087,7 @@ function finish(report) {
   report.estimatedOutputTokens = Math.ceil(report.responseChars / 4);
   return report;
 }
-var DEFAULT_SNIFFER_MAX_CALLS_PER_DAY = 20000, DEFAULT_SNIFFER_PASS_TIME_MS = 5000, MAX_CONSECUTIVE_TRANSPORT_FAILURES = 2, OUTPUT_CHARS_PER_ITEM = 110, SECRET_SCREEN_CACHE_LIMIT = 20000, secretScreenCache;
+var DEFAULT_SNIFFER_MAX_CALLS_PER_DAY = 20000, DEFAULT_SNIFFER_PASS_TIME_MS = 30000, MAX_CONSECUTIVE_TRANSPORT_FAILURES = 2, OUTPUT_CHARS_PER_ITEM = 110, SECRET_SCREEN_CACHE_LIMIT = 20000, secretScreenCache;
 var init_sniffer_resolver = __esm(() => {
   init_atomic_file();
   init_sniffer();
