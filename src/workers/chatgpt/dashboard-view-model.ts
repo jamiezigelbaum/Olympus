@@ -543,7 +543,7 @@ function sourceEntry(
   }
   return {
     id: definition.source_id,
-    supportDetails: sourceSupportDetails({ sourceId: definition.source_id, state: status, failure: sourceFailureKind(card.schedule?.last_error_kind, card.schedule?.degraded_reason), ref: card.schedule?.last_error_hash }),
+    supportDetails: sourceSupportDetails({ sourceId: definition.source_id, state: status, failure: card.schedule?.last_error_kind || card.schedule?.degraded_reason ? sourceFailureKind(card.schedule?.last_error_kind, card.schedule?.degraded_reason) : undefined, ref: card.schedule?.last_error_hash }),
     label: definition.label,
     ...(definition.sync_name ? { syncNoun: definition.sync_name.mid } : {}),
     group: sourceGroup(definition),
