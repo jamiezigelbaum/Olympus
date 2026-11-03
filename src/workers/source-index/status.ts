@@ -40,6 +40,7 @@ import type { WorkerCredentialDegradation } from '../credential-degradation.ts';
 import type { ContentExtractionThroughputSignal } from '../../core/ingestion-throughput.ts';
 import { OperationError } from '../../core/operation-error.ts';
 import { existsSync } from 'node:fs';
+import { ingestionTurn } from '../control-path-headroom.ts';
 import { SecretLocationsIndex, secretLocationsPathForStore } from '../classification/secret-locations.ts';
 
 /**
@@ -341,7 +342,7 @@ export function createSourceIndexStatusHandler(
       const corpora = currentRegistry()
         .list()
         .filter((corpus) => requestedCorpusId === undefined || corpus.corpusId === requestedCorpusId);
-      const statuses = corpora.map((declaredCorpus) => {
+      const statusFor = (declaredCorpus: (typeof corpora)[number]): SourceIndexStatusCorpus => {
         const policy = options.retrievalPolicy?.(declaredCorpus.trustDomain);
         const embeddingDisabled = policy !== undefined
           && (!policy.embeddingProfile || policy.activationMode === 'metadata_only' || policy.activationMode === 'lexical_only');
@@ -408,7 +409,16 @@ export function createSourceIndexStatusHandler(
           : withBacklog;
         if (maxAgeMs > 0) cache.set(cacheKey, { recordedAtMs: nowMs(), status: resolved });
         return resolved;
-      });
+      };
+      // Each corpus's counts are synchronous SQLite reads over its whole store;
+      // read in one go they held the worker's thread for seconds on a large
+      // library (Sparta, 2026-11-03: 5–10 s freezes, about half the thread's
+      // time). A turn between corpora lets requests answer in between.
+      const statuses: SourceIndexStatusCorpus[] = [];
+      for (const declaredCorpus of corpora) {
+        await ingestionTurn();
+        statuses.push(statusFor(declaredCorpus));
+      }
       const tierClassification = options.tierClassification?.();
       let tierMigration: SourceIndexTierMigrationStatus | undefined;
       try {

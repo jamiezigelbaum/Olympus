@@ -94275,7 +94275,7 @@ function createSourceIndexStatusHandler(options = {}) {
       const requestedCorpusId = request.corpus_id ? canonicalSourceCorpusId(request.corpus_id) : undefined;
       const storesByCorpusId = new Map((options.connectorStores ?? []).map((store) => [store.corpusId, store]));
       const corpora = currentRegistry().list().filter((corpus) => requestedCorpusId === undefined || corpus.corpusId === requestedCorpusId);
-      const statuses = corpora.map((declaredCorpus) => {
+      const statusFor = (declaredCorpus) => {
         const policy = options.retrievalPolicy?.(declaredCorpus.trustDomain);
         const embeddingDisabled = policy !== undefined && (!policy.embeddingProfile || policy.activationMode === "metadata_only" || policy.activationMode === "lexical_only");
         const corpus = embeddingDisabled ? { ...declaredCorpus, embeddingPolicy: "disabled", activationMode: policy?.activationMode === "metadata_only" ? "metadata_only" : "lexical_only" } : declaredCorpus;
@@ -94312,7 +94312,12 @@ function createSourceIndexStatusHandler(options = {}) {
         if (maxAgeMs > 0)
           cache.set(cacheKey, { recordedAtMs: nowMs(), status: resolved });
         return resolved;
-      });
+      };
+      const statuses = [];
+      for (const declaredCorpus of corpora) {
+        await ingestionTurn();
+        statuses.push(statusFor(declaredCorpus));
+      }
       const tierClassification = options.tierClassification?.();
       let tierMigration;
       try {
@@ -94619,6 +94624,7 @@ var init_status = __esm(() => {
   init_store2();
   init_telegram_messages();
   init_operation_error();
+  init_control_path_headroom();
   init_secret_locations();
 });
 
