@@ -158,20 +158,27 @@ export const CPU_SAMPLE_LOG_ENV = 'OLYMPUS_CPU_SAMPLE_LOG';
 const CPU_SAMPLE_FLUSH_MS = 30_000;
 const CPU_SAMPLE_TOP = 30;
 
-interface SampledFrame { name?: string; sourceURL?: string; line?: number; category?: string }
+interface SampledFrame { name?: string; sourceID?: number; sourceURL?: string; line?: number; category?: string }
 
 /**
  * Summarizes JSC sampling-profiler traces: the functions on top of the stack
  * (where the thread spends its own time) and every function on the stack
  * (what that time is spent under). Names and code positions only, never data.
  */
-export function summarizeCpuSamples(traces: readonly { frames?: readonly SampledFrame[] }[], top = CPU_SAMPLE_TOP): {
+export function summarizeCpuSamples(
+  traces: readonly { frames?: readonly SampledFrame[] }[],
+  top = CPU_SAMPLE_TOP,
+  sources: readonly { sourceID?: number; url?: string }[] = [],
+): {
   samples: number; self: [string, number][]; total: [string, number][];
 } {
   const self = new Map<string, number>();
   const total = new Map<string, number>();
+  // A frame may carry only its sourceID; the profiler's sources table maps it to a URL.
+  const urls = new Map(sources.flatMap((source) => source.sourceID !== undefined && source.url ? [[source.sourceID, source.url] as const] : []));
   const key = (frame: SampledFrame) => {
-    const file = frame.sourceURL ? frame.sourceURL.split('/').slice(-2).join('/') : '';
+    const url = frame.sourceURL ?? (frame.sourceID !== undefined ? urls.get(frame.sourceID) : undefined);
+    const file = url ? url.split('/').slice(-2).join('/') : '';
     const line = frame.line !== undefined && frame.line < 0xffff_ffff ? `:${frame.line}` : '';
     return `${frame.name || '(anonymous)'}${file ? ` ${file}${line}` : ''}`;
   };
@@ -198,7 +205,7 @@ export async function startCpuSampleLog(env: Record<string, string | undefined> 
   if (!path) return undefined;
   const jsc = await import('bun:jsc') as unknown as {
     startSamplingProfiler?: () => void;
-    samplingProfilerStackTraces?: () => { traces?: { frames?: SampledFrame[] }[] };
+    samplingProfilerStackTraces?: () => { traces?: { frames?: SampledFrame[] }[]; sources?: { sourceID?: number; url?: string }[] };
   };
   if (!jsc.startSamplingProfiler || !jsc.samplingProfilerStackTraces) return undefined;
   const { appendFileSync } = await import('node:fs');
@@ -207,7 +214,8 @@ export async function startCpuSampleLog(env: Record<string, string | undefined> 
   const flush = () => {
     const now = Date.now();
     try {
-      const summary = summarizeCpuSamples(jsc.samplingProfilerStackTraces!().traces ?? []);
+      const sampled = jsc.samplingProfilerStackTraces!();
+      const summary = summarizeCpuSamples(sampled.traces ?? [], CPU_SAMPLE_TOP, sampled.sources ?? []);
       appendFileSync(path, `${JSON.stringify({ at: new Date(now).toISOString(), windowMs: now - last, headroom: controlPathHeadroom.snapshot(), ...summary })}\n`, { mode: 0o600 });
     } catch (error) {
       console.error(`[olympus:control-path] cpu sample log failed: ${error instanceof Error ? error.name : 'error'}`);

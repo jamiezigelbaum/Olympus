@@ -26036,11 +26036,13 @@ class ControlPathHeadroom {
 function ingestionTurn() {
   return controlPathHeadroom.ingestionTurn();
 }
-function summarizeCpuSamples(traces, top = CPU_SAMPLE_TOP) {
+function summarizeCpuSamples(traces, top = CPU_SAMPLE_TOP, sources = []) {
   const self = new Map;
   const total = new Map;
+  const urls = new Map(sources.flatMap((source) => source.sourceID !== undefined && source.url ? [[source.sourceID, source.url]] : []));
   const key2 = (frame) => {
-    const file = frame.sourceURL ? frame.sourceURL.split("/").slice(-2).join("/") : "";
+    const url = frame.sourceURL ?? (frame.sourceID !== undefined ? urls.get(frame.sourceID) : undefined);
+    const file = url ? url.split("/").slice(-2).join("/") : "";
     const line = frame.line !== undefined && frame.line < 4294967295 ? `:${frame.line}` : "";
     return `${frame.name || "(anonymous)"}${file ? ` ${file}${line}` : ""}`;
   };
@@ -26069,7 +26071,8 @@ async function startCpuSampleLog(env = process.env) {
   const flush = () => {
     const now = Date.now();
     try {
-      const summary = summarizeCpuSamples(jsc.samplingProfilerStackTraces().traces ?? []);
+      const sampled = jsc.samplingProfilerStackTraces();
+      const summary = summarizeCpuSamples(sampled.traces ?? [], CPU_SAMPLE_TOP, sampled.sources ?? []);
       appendFileSync(path, `${JSON.stringify({ at: new Date(now).toISOString(), windowMs: now - last, headroom: controlPathHeadroom.snapshot(), ...summary })}
 `, { mode: 384 });
     } catch (error) {

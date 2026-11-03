@@ -80,3 +80,18 @@ describe('cpu sample summary', () => {
     expect(summary.total[0]).toEqual(['sync dist/cli.js:5', 3]);
   });
 });
+
+describe('cpu sample summary from the profiler', () => {
+  test('frames with only a sourceID take their file from the sources table', async () => {
+    const jsc = await import('bun:jsc') as unknown as { startSamplingProfiler: () => void; samplingProfilerStackTraces: () => { traces: { frames: { sourceID?: number; name?: string; line?: number }[] }[]; sources: { sourceID?: number; url?: string }[] } };
+    jsc.startSamplingProfiler();
+    const end = performance.now() + 50;
+    let spin = 0;
+    while (performance.now() < end) spin += Math.sqrt(spin + 1);
+    const raw = jsc.samplingProfilerStackTraces();
+    const stripped = raw.traces.map((trace) => ({ frames: trace.frames.map(({ sourceID, name, line }) => ({ ...(sourceID !== undefined ? { sourceID } : {}), ...(name !== undefined ? { name } : {}), ...(line !== undefined ? { line } : {}) })) }));
+    const summary = summarizeCpuSamples(stripped, 30, raw.sources);
+    expect(summary.samples).toBeGreaterThan(0);
+    expect(summary.total.some(([key]) => key.includes('control-path-headroom.test.ts'))).toBe(true);
+  });
+});
