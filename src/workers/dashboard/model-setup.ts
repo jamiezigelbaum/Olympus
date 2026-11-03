@@ -200,7 +200,7 @@ function renderComputerUseChoice(view: ModelSetupView): string {
     + '<label class="modelcard"><input type="radio" name="choice" value="server"> Always on, as a server</label>'
     + '<p>' + escapeHtml(SERVER_MODE_HELP) + '</p>' + SERVER_CHECKLIST
     + '<button type="submit" class="btn primary">Continue</button></fieldset><span data-action-message role="status">'
-    + escapeHtml(view.engine_server_mode?.message ?? '') + '</span></form></section>';
+    + escapeHtml(view.engine_server_mode?.notice ?? '') + '</span></form></section>';
 }
 function renderEngineServerMode(view: ModelSetupView): string {
   const mode = view.engine_server_mode;
@@ -211,7 +211,7 @@ function renderEngineServerMode(view: ModelSetupView): string {
     + '<p role="status">' + (mode.enabled ? 'On — starts once the disk is unlocked.' : 'Off — runs when this account is signed in.') + '</p>'
     + (mode.enabled ? SERVER_CHECKLIST : '')
     + '<button type="submit" class="btn"' + (mode.pending ? ' disabled' : '') + '>Save</button><span data-action-message role="status">'
-    + escapeHtml(mode.message ?? '') + '</span></form></section>';
+    + escapeHtml(mode.notice ?? '') + '</span></form></section>';
 }
 
 function privateModelWords(view: ModelSetupView | undefined): string {

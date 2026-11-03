@@ -228,6 +228,7 @@ export const V0_4_PACKAGE_INTERNAL_CLI_HELPERS = [
   '__worker-service-run',
   '__relay-service-run',
   '__engine-run',
+  '__engine-server-mode',
 ] as const;
 
 export interface PublicDashboardRoute {
