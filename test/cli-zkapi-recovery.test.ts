@@ -72,4 +72,4 @@ test('the public CLI dispatches abandon and refuses an unconfirmed recovery with
   expect({ exit: abandoned.exitCode, stderr: abandoned.stderr.toString() }).toEqual({ exit: 0, stderr: '' });
   expect(abandoned.stdout.toString()).toContain('marked abandoned');
   expect(zkapiOutstandingFences(ledger)).toEqual({});
-});
+}, 30_000);

@@ -106456,23 +106456,30 @@ async function runSession(recovery, options, statePath, bridge, sent, clock2, st
       if (completion.ok)
         timings = withTiming(timings, "replyHandedOverAtMs", durationMs(startedAt, lastSampleAt));
       bridge.state = "replied";
-      const handOverReply = () => bridge.reply.resolve(completion.ok ? {
-        kind: "reply",
-        text: completion.text,
-        routeLabel: zkapiRouteLabel(pendingSnapshot3()),
-        networkIdentity: identity2(),
-        receipt: pendingSnapshot3(),
-        ...completion.providerVerification ? { providerVerification: completion.providerVerification } : {},
-        elapsedMs: completion.elapsedMs
-      } : {
-        kind: "failed",
-        error: failure(completion.error.code, completion.error.outcome, identity2(), {
-          ...completion.error.daemonCode ? { daemonCode: completion.error.daemonCode } : {},
-          ...completion.error.httpStatus ? { httpStatus: completion.error.httpStatus } : {},
-          receipt: pendingSnapshot3()
-        }).error
-      });
-      if (completion.ok)
+      const mayBePreLease = !completion.ok && !recovery && (completion.error.httpStatus === 400 && (completion.error.daemonCode === "invalid_model" || completion.error.daemonCode === "model_budget_unavailable") || completion.error.httpStatus === 502 && completion.error.daemonCode === "model_policy_unavailable");
+      let handedOver = false;
+      const handOverReply = (failureReceipt = pendingSnapshot3) => {
+        if (handedOver)
+          return;
+        handedOver = true;
+        bridge.reply.resolve(completion.ok ? {
+          kind: "reply",
+          text: completion.text,
+          routeLabel: zkapiRouteLabel(pendingSnapshot3()),
+          networkIdentity: identity2(),
+          receipt: pendingSnapshot3(),
+          ...completion.providerVerification ? { providerVerification: completion.providerVerification } : {},
+          elapsedMs: completion.elapsedMs
+        } : {
+          kind: "failed",
+          error: failure(completion.error.code, completion.error.outcome, identity2(), {
+            ...completion.error.daemonCode ? { daemonCode: completion.error.daemonCode } : {},
+            ...completion.error.httpStatus ? { httpStatus: completion.error.httpStatus } : {},
+            receipt: failureReceipt()
+          }).error
+        });
+      };
+      if (!mayBePreLease)
         handOverReply();
       stage("correlationWaitMs");
       const correlated = await waitFor(() => {
@@ -106486,11 +106493,13 @@ async function runSession(recovery, options, statePath, bridge, sent, clock2, st
       const keyRef = request?.keys.length === 1 ? request.keys[0].keyRef : undefined;
       let fenceClears = false;
       if (keyRef !== undefined) {
+        if (!completion.ok)
+          handOverReply();
         stage("settlementWaitMs");
         receipt.settlement = await waitFor(() => facts.settled.get(keyRef) === true, settings.settleTimeoutMs, { giveUp: unexpectedExit }) ? "confirmed" : "not_confirmed";
         fenceClears = receipt.settlement === "confirmed" && request.keys[0].source === "fresh";
       } else {
-        const preLease = !recovery && request !== undefined && request.keys.length === 0 && !completion.ok && request.finished?.status === completion.error.httpStatus && (request.finished?.status === 400 && (completion.error.daemonCode === "invalid_model" || completion.error.daemonCode === "model_budget_unavailable") || request.finished?.status === 502 && completion.error.daemonCode === "model_policy_unavailable");
+        const preLease = mayBePreLease && !completion.ok && request !== undefined && request.keys.length === 0 && request.finished?.status === completion.error.httpStatus;
         receipt.settlement = preLease ? "no_lease" : "not_confirmed";
         fenceClears = preLease;
         if (preLease)
@@ -106507,8 +106516,7 @@ async function runSession(recovery, options, statePath, bridge, sent, clock2, st
           receipt.fence = "clear";
         } catch {}
       }
-      if (!completion.ok)
-        handOverReply();
+      handOverReply(snapshot);
       if (perConsultTor && !unexpectedExit()) {
         tor.deliberate = true;
         stage("torStopMs");

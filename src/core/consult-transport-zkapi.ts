@@ -2858,7 +2858,17 @@ async function runSession(
     // --- Replied: hand the completion over before settlement.
     if (completion.ok) timings = withTiming(timings, 'replyHandedOverAtMs', durationMs(startedAt, lastSampleAt));
     bridge.state = 'replied';
-    const handOverReply = () => bridge.reply.resolve(completion.ok
+    // A failure is handed over with the receipt as it stands at that moment.
+    // Only a refusal that may have come before any lease waits for the log
+    // lines that prove it; every other reply is handed over now.
+    const mayBePreLease = !completion.ok && !recovery
+      && ((completion.error.httpStatus === 400 && (completion.error.daemonCode === 'invalid_model' || completion.error.daemonCode === 'model_budget_unavailable'))
+        || (completion.error.httpStatus === 502 && completion.error.daemonCode === 'model_policy_unavailable'));
+    let handedOver = false;
+    const handOverReply = (failureReceipt: () => ZkapiSessionReceipt = pendingSnapshot) => {
+      if (handedOver) return;
+      handedOver = true;
+      bridge.reply.resolve(completion.ok
       ? {
         kind: 'reply',
         text: completion.text,
@@ -2873,10 +2883,11 @@ async function runSession(
         error: failure(completion.error.code, completion.error.outcome, identity(), {
           ...(completion.error.daemonCode ? { daemonCode: completion.error.daemonCode } : {}),
           ...(completion.error.httpStatus ? { httpStatus: completion.error.httpStatus } : {}),
-          receipt: pendingSnapshot(),
+          receipt: failureReceipt(),
         }).error,
       });
-    if (completion.ok) handOverReply();
+    };
+    if (!mayBePreLease) handOverReply();
 
     // Correlate this request's own log lines, then wait for its key to settle.
     // Runs to completion whatever the caller did; stops if a process died.
@@ -2891,6 +2902,8 @@ async function runSession(
     const keyRef = request?.keys.length === 1 ? request.keys[0]!.keyRef : undefined;
     let fenceClears = false;
     if (keyRef !== undefined) {
+      // A lease was issued: the caller is not kept waiting for its settlement.
+      if (!completion.ok) handOverReply();
       stage('settlementWaitMs');
       receipt.settlement = await waitFor(
         () => facts.settled.get(keyRef) === true,
@@ -2904,10 +2917,8 @@ async function runSession(
       // in an ordinary session. A recovery session exists to settle an earlier
       // lease, which the daemon attempts only after that same model check, so
       // a refusal there proves nothing about the earlier lease.
-      const preLease = !recovery && request !== undefined && request.keys.length === 0 && !completion.ok
-        && request.finished?.status === completion.error.httpStatus
-        && ((request.finished?.status === 400 && (completion.error.daemonCode === 'invalid_model' || completion.error.daemonCode === 'model_budget_unavailable'))
-          || (request.finished?.status === 502 && completion.error.daemonCode === 'model_policy_unavailable'));
+      const preLease = mayBePreLease && !completion.ok && request !== undefined && request.keys.length === 0
+        && request.finished?.status === completion.error.httpStatus;
       receipt.settlement = preLease ? 'no_lease' : 'not_confirmed';
       fenceClears = preLease;
       if (preLease) completion.error.outcome = 'not_sent';
@@ -2925,7 +2936,9 @@ async function runSession(
         // stays held
       }
     }
-    if (!completion.ok) handOverReply();
+    // With no lease, the failure waited only for its own log lines, so the
+    // caller sees whether it was sent and the fence as it now stands.
+    handOverReply(snapshot);
 
     if (perConsultTor && !unexpectedExit()) {
       tor!.deliberate = true;
