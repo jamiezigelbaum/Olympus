@@ -133,6 +133,9 @@ stop_daemon() {
     return 0
   fi
   say "Your Mac will ask for an administrator's password to remove Olympus server mode. Cancelling keeps Olympus installed."
+  # The quoted AppleScript carries the fixed removal script verbatim; its quotes and
+  # dollar signs are meant for the root shell it runs in, not for this one.
+  # shellcheck disable=SC1003,SC2016
   if ! osascript -e 'on run argv
   do shell script ("/bin/sh -c '\''set -eu
 [ \"$#\" = 2 ] || exit 64
