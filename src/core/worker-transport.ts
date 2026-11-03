@@ -2,6 +2,8 @@
  * cookies/CSRF; they are not listening TCP endpoints on the engine host. */
 import { lstatSync, mkdirSync, realpathSync, chmodSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
+import { request as httpRequest } from 'node:http';
+import { Readable } from 'node:stream';
 import { dirname, isAbsolute, join, normalize, parse } from 'node:path';
 import { resolveLinuxEngineLayout } from './linux-engine-layout.ts';
 import { removeFileDurablySync } from './atomic-file.ts';
@@ -119,11 +121,46 @@ export function createWorkerFetch(options: WorkerTransportOptions = {}, fetchImp
       throw new Error('Linux worker requests require a loopback HTTP origin over the owner socket.');
     }
     const unix = validateWorkerSocket(options)!;
-    // Bun's native Unix transport is also used by the standalone CLI and relay.
-    // A non-Bun host must refuse, never silently fall back to loopback TCP.
-    if (typeof Bun === 'undefined') throw new Error('Linux worker socket requests require the Bun runtime.');
+    if (typeof Bun === 'undefined') return nodeWorkerFetch(unix, input, init, options);
     return fetchImpl(input, { ...init, unix, redirect: init?.redirect === 'manual' ? 'manual' : 'error' } as RequestInit);
   }) as typeof fetch;
+}
+
+/** The Gateway loads plugins under Node. Keep its HTTP origin, body and abort
+ * semantics while connecting exclusively to the same validated owner socket. */
+async function nodeWorkerFetch(unix: string, input: RequestInfo | URL, init: RequestInit | undefined, options: WorkerTransportOptions): Promise<Response> {
+  const request = new Request(input, init);
+  const body = request.body ? Buffer.from(await request.arrayBuffer()) : undefined;
+  const url = new URL(request.url);
+  // Recheck after an asynchronous body read, immediately before dispatch.
+  validateWorkerSocket(options);
+  return new Promise((resolve, reject) => {
+    const outgoing = httpRequest(url, {
+      socketPath: unix,
+      method: request.method,
+      headers: Object.fromEntries(request.headers),
+      signal: request.signal,
+      agent: false,
+    }, incoming => {
+      const status = incoming.statusCode ?? 500;
+      if (status >= 300 && status < 400 && init?.redirect !== 'manual') {
+        incoming.destroy();
+        reject(new TypeError('Worker request redirect refused.'));
+        return;
+      }
+      const headers = new Headers();
+      for (let i = 0; i < incoming.rawHeaders.length; i += 2) headers.append(incoming.rawHeaders[i]!, incoming.rawHeaders[i + 1]!);
+      const noBody = request.method === 'HEAD' || [204, 205, 304].includes(status);
+      const response = new Response(noBody ? null : Readable.toWeb(incoming) as unknown as ReadableStream<Uint8Array>, {
+        status, statusText: incoming.statusMessage ?? '', headers,
+      });
+      if (noBody) incoming.resume();
+      Object.defineProperty(response, 'url', { value: request.url });
+      resolve(response);
+    });
+    outgoing.on('error', reject);
+    outgoing.end(body);
+  });
 }
 
 export const workerFetch: typeof fetch = ((input: RequestInfo | URL, init?: RequestInit) =>

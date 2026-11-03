@@ -208,6 +208,8 @@ export const V0_4_PUBLIC_CLI_COMMANDS = [
   'zkapi install-tools',
   'zkapi check-confinement',
   'zkapi test-writer',
+  'zkapi recover',
+  'zkapi abandon',
   'serve',
 ] as const;
 

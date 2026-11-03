@@ -485,17 +485,17 @@ describe('zkAPI consult transport: one-shot session', () => {
     }
   }, 90_000);
 
-  test('a completion failure is handed over before settlement too, and finished carries the settled receipt', async () => {
+  test('a refusal before any lease is handed over as not sent, with the fence it cleared', async () => {
     writePlan({ completion: 'error' });
     const session = await openReady();
     const reply = await session.send(QUESTION);
     expect(reply).toMatchObject({
       kind: 'failed',
-      error: { code: 'daemon_error', daemonCode: 'model_budget_unavailable', httpStatus: 400, outcome: 'sent_failed', receipt: { settlement: 'pending', fence: 'held' } },
+      error: { code: 'daemon_error', daemonCode: 'model_budget_unavailable', httpStatus: 400, outcome: 'not_sent', receipt: { settlement: 'no_lease', fence: 'clear' } },
     });
     expect(await session.finished).toMatchObject({
       ok: false,
-      error: { code: 'daemon_error', daemonCode: 'model_budget_unavailable', outcome: 'sent_failed', receipt: { settlement: 'no_lease', fence: 'clear' } },
+      error: { code: 'daemon_error', daemonCode: 'model_budget_unavailable', outcome: 'not_sent', receipt: { settlement: 'no_lease', fence: 'clear' } },
     });
     expect(JSON.stringify(reply)).not.toContain('notice period');
   }, SLOW);
@@ -525,7 +525,7 @@ describe('zkAPI consult transport: one-shot session', () => {
     expect(ledger().lastSession.stageMs).toMatchObject({ warmTotalMs: expect.any(Number), replyHandedOverAtMs: expect.any(Number), totalMs: expect.any(Number) });
     writePlan({ completion: 'error' });
     const failed = await sendZkapiConsult(QUESTION, transport());
-    expect(failed).toMatchObject({ ok: false, error: { code: 'daemon_error', outcome: 'sent_failed', receipt: { settlement: 'no_lease', fence: 'clear' } } });
+    expect(failed).toMatchObject({ ok: false, error: { code: 'daemon_error', outcome: 'not_sent', receipt: { settlement: 'no_lease', fence: 'clear' } } });
     expect(strip(failed)).toEqual(strip(await viaSession()));
     // Every path records the warm total; only a reply records when it was handed over.
     const last = ledger().lastSession;

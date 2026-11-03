@@ -52,6 +52,7 @@ export interface WorkerServiceInstallResult {
   error_log_path: string;
   wrote_unit: boolean;
   wrote_env: boolean;
+  notices: string[];
   unit: string;
   commands: {
     install: string[];
@@ -84,6 +85,7 @@ export function installWorkerService(options: WorkerServiceInstallOptions = {}):
     : renderSystemdWorkerUnit({ ...options, envPath, paths });
   let wroteUnit = false;
   let wroteEnv = false;
+  const notices: string[] = [];
   if (!options.dryRun) {
     ensurePrivateRootDirectorySync(homeDir);
     assertManagedParentSafety(homeDir, paths.unitPath, 'worker unit');
@@ -94,7 +96,7 @@ export function installWorkerService(options: WorkerServiceInstallOptions = {}):
     if (pathIsWithin(homeDir, envPath)) ensurePrivateDirectoryTreeSync(homeDir, dirname(envPath));
     else mkdirSync(dirname(envPath), { recursive: true });
     wroteUnit = writeManagedFileAtomicIfChanged(paths.unitPath, unit, 'worker unit');
-    wroteEnv = reconcileWorkerEnv(envPath, options);
+    wroteEnv = reconcileWorkerEnv(envPath, options, notices);
   }
   return {
     ok: true,
@@ -105,6 +107,7 @@ export function installWorkerService(options: WorkerServiceInstallOptions = {}):
     error_log_path: paths.errorLogPath,
     wrote_unit: wroteUnit,
     wrote_env: wroteEnv,
+    notices,
     unit,
     commands: {
       install: workerServiceCommand(platform, 'install', paths.unitPath),
@@ -687,10 +690,10 @@ export function ensureManagedWorkerEnvironment(
     assertManagedParentSafety(homeDir, envPath, 'worker environment');
     ensurePrivateDirectoryTreeSync(homeDir, dirname(envPath));
   }
-  return { path: envPath, wrote: reconcileWorkerEnv(envPath, { ...options, homeDir }) };
+  return { path: envPath, wrote: reconcileWorkerEnv(envPath, { ...options, homeDir }, undefined, true) };
 }
 
-function reconcileWorkerEnv(envPath: string, options: WorkerServiceInstallOptions): boolean {
+function reconcileWorkerEnv(envPath: string, options: WorkerServiceInstallOptions, notices?: string[], engineHosted = false): boolean {
   mkdirSync(dirname(envPath), { recursive: true, mode: 0o700 });
   if (!existsSync(envPath)) {
     writePrivateFileAtomicSync(envPath, defaultWorkerEnv(options));
@@ -699,6 +702,10 @@ function reconcileWorkerEnv(envPath: string, options: WorkerServiceInstallOption
   assertManagedRegularFile(envPath, 'worker environment');
   const current = readFileSync(envPath, 'utf8');
   let next = nextWorkerEnvAuthToken(current, options.authToken);
+  if (!engineHosted && /^[ \t]*(?:export[ \t]+)?OLYMPUS_ENGINE_HOST[ \t]*=/m.test(next)) {
+    next = next.replace(/^[ \t]*(?:export[ \t]+)?OLYMPUS_ENGINE_HOST[ \t]*=.*(?:\n|$)/gm, '');
+    notices?.push('Removed an old standalone setting. This worker now uses your existing OpenClaw data.');
+  }
   next = nextWorkerEnvPath(next, options);
   if (!/^OLYMPUS_SOURCE_INDEX_ANSWER_ENABLED=/m.test(next)) {
     next = `${next.replace(/\n?$/, '\n')}OLYMPUS_SOURCE_INDEX_ANSWER_ENABLED=true\n`;

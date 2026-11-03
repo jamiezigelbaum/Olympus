@@ -686,7 +686,7 @@ describe('zkAPI consult transport: responses', () => {
     const rejected = await sendZkapiConsult(QUESTION, transport());
     expect(rejected).toMatchObject({
       ok: false,
-      error: { code: 'daemon_error', daemonCode: 'model_budget_unavailable', httpStatus: 400, outcome: 'sent_failed' },
+      error: { code: 'daemon_error', daemonCode: 'model_budget_unavailable', httpStatus: 400, outcome: 'not_sent' },
     });
     writePlan({ completion: 'garbage' });
     const unknown = await sendZkapiConsult(QUESTION, transport());
@@ -1035,6 +1035,16 @@ describe('sovereignty: zkapi provider', () => {
 });
 
 describe('doctor: zkapi_consult_transport', () => {
+  test('an upgrade names the tool update and renewed money statements', async () => {
+    writePlan({ version: '0.1.4' });
+    const check = await zkapiCheck(doctorDeps({ zkapi: { acknowledgements: { version: 7, accepted: ZKAPI_RISK_ACKNOWLEDGEMENTS.map(x => x.id) } } }));
+    expect(check.ok).toBe(false);
+    expect(check.hint).toContain('olympus zkapi install-tools');
+    expect(check.hint).toContain('Install tools');
+    expect(check.hint).toContain('statements have changed');
+    expect(check.hint).toContain('Anonymous answers');
+  }, SLOW);
+
   test('not configured', async () => {
     const check = await zkapiCheck({ ...doctorDeps(), sovereigntyEngine: createSovereigntyEngine(baseConfig() as SovereigntyConfig) });
     expect(check).toEqual({

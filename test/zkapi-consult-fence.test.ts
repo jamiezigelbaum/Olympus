@@ -38,6 +38,34 @@ import {
 useZkapiHarness();
 
 describe('zkAPI consult transport: fence and recovery', () => {
+  test('issuer model-policy failure before a lease is not sent and leaves the next question usable', async () => {
+    writePlan({ completion: 'policy-error' });
+    expect(await sendZkapiConsult(QUESTION, transport())).toMatchObject({
+      ok: false, error: { daemonCode: 'model_policy_unavailable', outcome: 'not_sent', receipt: { settlement: 'no_lease', fence: 'clear' } },
+    });
+    expect(zkapiUnresolvedSession(statePath)).toBe(false);
+    writePlan({ completion: 'normal' });
+    expect(await sendZkapiConsult(QUESTION, transport())).toMatchObject({ ok: true });
+  }, SLOW);
+
+  test('a policy error with a correlated key cannot clear an unsettled lease', async () => {
+    writePlan({ completion: 'policy-error-after-key', noSettlement: true });
+    expect(await sendZkapiConsult(QUESTION, transport())).toMatchObject({
+      ok: false, error: { outcome: 'sent_failed', receipt: { settlement: 'not_confirmed', fence: 'held' } },
+    });
+    expect(zkapiUnresolvedSession(statePath)).toBe(true);
+  }, SLOW);
+
+  test('model-policy refusal during recovery preserves the earlier held payment', async () => {
+    writePlan({ noSettlement: true });
+    await sendZkapiConsult(QUESTION, transport());
+    writePlan({ completion: 'policy-error' });
+    expect(await recoverZkapiSession(transport())).toMatchObject({
+      ok: false, error: { receipt: { settlement: 'not_confirmed', fence: 'held' } },
+    });
+    expect(zkapiUnresolvedSession(statePath)).toBe(true);
+  }, SLOW);
+
   test('an unconfirmed settlement holds the fence and blocks the next consult until recovery', async () => {
     writePlan({ noSettlement: true });
     expect(await sendZkapiConsult(QUESTION, transport())).toMatchObject({
