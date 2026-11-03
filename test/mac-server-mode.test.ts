@@ -1,9 +1,9 @@
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { afterEach, expect, test } from 'bun:test';
 import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { ENGINE_BUILD_ENV, ENGINE_LABEL, enginePaths, engineServicePaths, inspectEngine, renderEnginePlist, restartEngine, setMacEngineServerMode, runMacServerModeChange, installEngine, engineBuildIdentity, installedEngineBuild, uninstallEngine, waitForMacAgentHandoff, macServerModeScript, validateMacEngineOwner, type EngineExec } from '../src/core/engine-service.ts';
+import { ENGINE_BUILD_ENV, ENGINE_LABEL, enginePaths, engineServicePaths, inspectEngine, renderEnginePlist, restartEngine, setMacEngineServerMode, requestMacServerMode, macServerModeView, runMacServerModeChange, installEngine, engineBuildIdentity, installedEngineBuild, uninstallEngine, waitForMacAgentHandoff, macServerModeScript, validateMacEngineOwner, type EngineExec } from '../src/core/engine-service.ts';
 import { createSovereigntyEngine, loadSovereigntyPreset } from '../src/core/sovereignty.ts';
 import { startEngineHost } from '../src/core/engine-host.ts';
 import { engineStatusReport } from '../src/core/engine-cli.ts';
@@ -398,3 +398,115 @@ test('a server-mode notice passes the dashboard view policy', async () => {
   expect(() => assertNoRawEmailFields(view)).not.toThrow();
   expect(() => assertNoRawEmailFields({ model_setup: { engine_server_mode: { enabled: false, pending: true, message: 'x' } } })).toThrow();
 });
+
+const signInMessage = "Sign in to this Mac's desktop to turn this off. Olympus keeps running.";
+
+test('a daemon off request bootstraps a private one-shot agent with only the fixed installed command', () => {
+  const f = fixture(); f.put(f.daemonPlistPath, f.daemon);
+  const calls: string[][] = [];
+  const agentPath = join(dirname(f.paths.configPath), 'server-mode-off.plist');
+  const options = { platform: 'darwin', homeDir: f.home, daemonPlistPath: f.daemonPlistPath, uid: 501, userName: 'mark',
+    spawn: (() => { throw new Error('must use launchd, never detach in the daemon session'); }) as typeof spawn,
+    exec: ((cmd, args) => {
+      calls.push([cmd, ...args]);
+      if (args[0] === 'bootstrap') {
+        expect(macServerModeView(options)).toMatchObject({ enabled: true, pending: true });
+        const plist = readFileSync(agentPath, 'utf8');
+        const argv = [...(/<key>ProgramArguments<\/key><array>(.*?)<\/array>/.exec(plist)?.[1] ?? '').matchAll(/<string>(.*?)<\/string>/g)].map(match => match[1]);
+        expect(argv).toEqual([f.program.runtimePath, '--no-env-file', f.program.entryPath, '__engine-server-mode', 'off']);
+        expect(plist).toContain('<key>RunAtLoad</key><true/>');
+        expect(plist).toContain('<key>LaunchOnlyOnce</key><true/>');
+        expect(plist).toContain('<key>LimitLoadToSessionType</key><string>Aqua</string>');
+        expect(plist).toContain(`<key>HOME</key><string>${f.home}</string>`);
+        expect(plist).toContain('<key>USER</key><string>mark</string>');
+        expect(plist).not.toContain('KeepAlive');
+        expect(plist).not.toContain('/bin/sh');
+        expect(statSync(agentPath).mode & 0o777).toBe(0o600);
+        expect(statSync(dirname(agentPath)).mode & 0o777).toBe(0o700);
+      }
+      return { status: 0, stdout: '', stderr: '' };
+    }) as EngineExec,
+  };
+  expect(requestMacServerMode(false, options).ok).toBe(true);
+  expect(calls).toEqual([['launchctl', 'print', 'gui/501'], ['launchctl', 'bootstrap', 'gui/501', agentPath]]);
+  expect(readFileSync(f.daemonPlistPath, 'utf8')).toBe(f.daemon);
+  expect(() => requestMacServerMode(false, options)).toThrow('already changing');
+  expect(calls).toHaveLength(2);
+}, 5_000);
+
+test('a missing desktop domain refuses immediately and publishes the sign-in notice without stopping Olympus', () => {
+  const f = fixture(); f.put(f.daemonPlistPath, f.daemon); f.put(f.paths.configPath, '{}');
+  const calls: string[][] = [];
+  const options = { platform: 'darwin', homeDir: f.home, daemonPlistPath: f.daemonPlistPath, uid: 501,
+    exec: ((cmd, args) => { calls.push([cmd, ...args]); return { status: 125, stdout: '', stderr: 'Could not find domain for user gui: 501' }; }) as EngineExec,
+  };
+  expect(() => requestMacServerMode(false, options)).toThrow(signInMessage);
+  expect(calls).toEqual([['launchctl', 'print', 'gui/501']]);
+  expect(macServerModeView(options)).toEqual({ enabled: true, pending: false, notice: signInMessage });
+  expect(readFileSync(f.daemonPlistPath, 'utf8')).toBe(f.daemon);
+  expect(existsSync(join(dirname(f.paths.configPath), 'server-mode-off.plist'))).toBe(false);
+}, 5_000);
+
+test('logout between domain check and bootstrap clears pending and removes the temporary plist', () => {
+  const f = fixture(); f.put(f.daemonPlistPath, f.daemon);
+  const options = { platform: 'darwin', homeDir: f.home, daemonPlistPath: f.daemonPlistPath, uid: 501, userName: 'mark',
+    exec: ((_cmd, args) => ({ status: args[0] === 'bootstrap' ? 125 : 0, stdout: '', stderr: args[0] === 'bootstrap' ? 'Could not find domain' : '' })) as EngineExec,
+  };
+  expect(() => requestMacServerMode(false, options)).toThrow(signInMessage);
+  expect(macServerModeView(options)).toEqual({ enabled: true, pending: false, notice: signInMessage });
+  expect(existsSync(join(dirname(f.paths.configPath), 'server-mode-off.plist'))).toBe(false);
+  expect(readFileSync(f.daemonPlistPath, 'utf8')).toBe(f.daemon);
+}, 5_000);
+
+for (const outcome of ['success', 'cancel', 'no-desktop'] as const) {
+  test(`desktop helper records ${outcome} before removing its plist and unloading itself`, async () => {
+    const f = fixture(); f.put(f.daemonPlistPath, f.daemon); seedComputerUseState(f.paths.sovereigntyPath);
+    const agentPath = join(dirname(f.paths.configPath), 'server-mode-off.plist');
+    const calls: string[][] = [];
+    const options = { platform: 'darwin', homeDir: f.home, daemonPlistPath: f.daemonPlistPath, uid: 501, userName: 'mark', now: true,
+      exec: ((cmd, args) => {
+        calls.push([cmd, ...args]);
+        if (cmd === 'osascript') {
+          expect(JSON.parse(readFileSync(join(dirname(f.paths.configPath), 'server-mode-result.json'), 'utf8'))).toMatchObject({ pending: true, pid: process.pid });
+          if (outcome !== 'success') return { status: 1, stdout: '', stderr: outcome === 'cancel' ? 'User canceled. (-128)' : 'execution error: An error of type -60007 has occurred. (-60007)' };
+          rmSync(f.daemonPlistPath);
+        }
+        if (args[0] === 'bootstrap' && args[2] === f.paths.plistPath) {
+          f.put(f.paths.statusPath, JSON.stringify({ schema: 'olympus.engine.status.v1', state: 'running', build: engineBuildIdentity(f.paths.appDir), pid: process.pid,
+            started_at: new Date().toISOString(), services: { 'olympus-worker': { state: 'off' } } }));
+        }
+        if (args[0] === 'bootout') {
+          expect(existsSync(agentPath)).toBe(false);
+          expect(macServerModeView(options).pending).toBe(false);
+        }
+        return { status: 0, stdout: '', stderr: '' };
+      }) as EngineExec,
+      health: { timeoutMs: 0, pidAlive: () => true },
+    };
+    requestMacServerMode(false, options);
+    await runMacServerModeChange(false, options);
+    expect(calls.at(-1)).toEqual(['launchctl', 'bootout', 'gui/501/ai.olympusplugin.engine-server-mode-off']);
+    expect(existsSync(agentPath)).toBe(false);
+    expect(macServerModeView(options)).toEqual({ enabled: outcome !== 'success', pending: false,
+      notice: outcome === 'success' ? 'Olympus will run while this account is signed in.' : outcome === 'cancel' ? 'The administrator request was cancelled. Nothing was changed.' : signInMessage });
+    expect(readComputerUseState(f.paths.sovereigntyPath)?.choice).toBe(outcome === 'success' ? 'everyday' : null);
+  }, 5_000);
+}
+
+test('agent-manager dashboard requests retain the detached helper command and pending result', () => {
+  const f = fixture(); f.put(f.paths.plistPath, f.agent); f.put(f.paths.configPath, '{}');
+  const calls: unknown[][] = [];
+  let unrefs = 0;
+  const child = { pid: process.pid, on: () => child, unref: () => { unrefs++; } };
+  const options = { platform: 'darwin', homeDir: f.home, daemonPlistPath: f.daemonPlistPath, uid: 501, userName: 'mark',
+    exec: (() => { throw new Error('agent requests must not use launchctl'); }) as EngineExec,
+    spawn: ((...args: unknown[]) => { calls.push(args); return child; }) as unknown as typeof spawn,
+  };
+  const result = requestMacServerMode(true, options);
+  expect(calls).toEqual([[f.program.runtimePath, ['--no-env-file', f.program.entryPath, '__engine-server-mode', 'on'], {
+    detached: true, stdio: 'ignore', env: { HOME: f.home, PATH: '/usr/bin:/bin:/usr/sbin:/sbin', USER: 'mark', LOGNAME: 'mark' },
+  }]]);
+  expect(unrefs).toBe(1);
+  expect(macServerModeView(options)).toEqual({ enabled: false, pending: true, notice: result.status_message });
+  expect(existsSync(join(dirname(f.paths.configPath), 'server-mode-off.plist'))).toBe(false);
+}, 5_000);
