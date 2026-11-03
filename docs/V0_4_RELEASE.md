@@ -5,6 +5,46 @@ Status: active
 Owner: Olympus product owner
 Planning authority: this document defines release scope, sequence, and completion: Olympus 1.0 first, then the 0.4 record. It supersedes dated CTO planning handoffs and migration plans. [`CONTRACTS.md`](CONTRACTS.md) remains the architecture authority.
 
+## 1.3.2 Servers and second accounts (owner decision 2026-11-03)
+
+Why: Mark Alexander's 1.3.0 install on a headless Mac Studio took about 7
+hours over 3 days. About 2.5 hours were Olympus bugs and missing controls
+(fixed or planned below). The rest was macOS server setup that a guide
+would have saved. Olympus had been designed only for a laptop with its
+owner logged in.
+
+Supported setups after 1.3.2: an everyday Mac; an always-on Mac with no
+one logged in; headless Linux (standalone already persists via linger);
+and Olympus in its own account with agents in another account or on the
+owner's tailnet. Not supported: Olympus inside an agent's own account when
+the agent must not read Private data, and one install shared by several
+people.
+
+Scope (frozen at build start, 2026-11-03):
+- Mac server mode (#751): a LaunchDaemon that runs as the Olympus account,
+  admin password once through the macOS dialog, switch on the dashboard and
+  a first-run question ("everyday computer or always on, as a server").
+  FileVault still needs a disk unlock after a restart; server mode removes
+  the login step only.
+- Agent address and key for another account on this computer or the
+  tailnet only, never the open LAN or internet (#764; tailnet included by
+  owner, 2026-11-03).
+- No Terminal after install: remote-access switch on standalone installs
+  (#748), Copy details on every failed source and a Copy system report
+  (#747), model download progress (#752), the Private-answer mode shown
+  (#750), installer closing text for any assistant (#749), Pair button
+  after pairing (#762). The dashboard header names the computer and account.
+- OpenClaw-hosted Linux: upgrade in place from 1.0 (#734), Gateway and
+  dashboard reach the worker under Node (#735), stuck anonymous-question
+  lock (#740).
+- Mac server guide on olympusplugin.ai (#753).
+
+The installer still asks nothing. Out of scope: reaching the owner
+dashboard from another device. Testing: CI on the release commit; test-mac
+as a server (second account, agent on a third, restart, unlock, no login);
+an upgrade rehearsal from a 1.0 OpenClaw-hosted Linux layout; one fresh
+laptop-style install.
+
 ## 1.3.0 The Mac release (owner decision 2026-10-31)
 
 Releases are now themed and bundled (owner, 2026-10-31): a minor release
