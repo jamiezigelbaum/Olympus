@@ -2857,7 +2857,8 @@ var init_public_surface = __esm(() => {
     "__oauth-detached-child",
     "__worker-service-run",
     "__relay-service-run",
-    "__engine-run"
+    "__engine-run",
+    "__engine-server-mode"
   ];
   V0_4_PUBLIC_DASHBOARD_ROUTES = [
     { method: "GET", path: "/dashboard" },
@@ -40828,6 +40829,7 @@ var init_dashboard_opening = __esm(() => {
 
 // src/core/mac-engine-daemon.ts
 import { lstatSync as lstatSync19, readFileSync as readFileSync30 } from "node:fs";
+import { execFileSync as execFileSync2 } from "node:child_process";
 import { userInfo } from "node:os";
 function validateMacEngineOwner(userName, uid) {
   if (!/^[a-z_][a-z0-9._-]{0,31}$/i.test(userName) || userName === "root" || !Number.isSafeInteger(uid) || uid <= 0 || uid > 2147483647) {
@@ -40935,9 +40937,18 @@ if ! /bin/launchctl bootstrap system "$daemon"; then
 fi
 `;
 }
+function currentMacUserName(uid, reported = userInfo().username, lookup3 = (uid2) => execFileSync2("/usr/bin/id", ["-un", String(uid2)], { encoding: "utf8", timeout: 5000 }).trim()) {
+  if (reported && reported !== "unknown")
+    return reported;
+  try {
+    return lookup3(uid);
+  } catch {
+    return reported;
+  }
+}
 function authorizeMacServerMode(enable, options, exec) {
-  const userName = options.userName ?? userInfo().username;
   const uid = options.uid ?? process.getuid?.() ?? -1;
+  const userName = options.userName ?? currentMacUserName(uid);
   validateMacEngineOwner(userName, uid);
   const command = `/bin/sh -c ${quoteShell(macServerModeScript(enable))} olympus ${quoteShell(userName)} ${quoteShell(String(uid))}`;
   const script2 = `do shell script "${command.replaceAll("\\", "\\\\").replaceAll('"', "\\\"")}" with administrator privileges`;
@@ -80299,7 +80310,7 @@ var init_spool_reader = __esm(() => {
 });
 
 // src/workers/whatsapp/live-connector.ts
-import { execFileSync as execFileSync2 } from "node:child_process";
+import { execFileSync as execFileSync3 } from "node:child_process";
 import { createHash as createHash58 } from "node:crypto";
 import { closeSync as closeSync22, existsSync as existsSync53, fsyncSync as fsyncSync4, lstatSync as lstatSync29, openSync as openSync22, readFileSync as readFileSync43, readdirSync as readdirSync11, realpathSync as realpathSync14, rmSync as rmSync21, statSync as statSync26 } from "node:fs";
 import { basename as basename12, dirname as dirname56, isAbsolute as isAbsolute23, join as join69, relative as relative12 } from "node:path";
@@ -81195,7 +81206,7 @@ function whatsAppBootNonce() {
     if (process.platform === "linux")
       id = readFileSync43("/proc/sys/kernel/random/boot_id", "utf8").trim();
     else if (process.platform === "darwin")
-      id = execFileSync2("/usr/sbin/sysctl", ["-n", "kern.bootsessionuuid"], { encoding: "utf8" }).trim();
+      id = execFileSync3("/usr/sbin/sysctl", ["-n", "kern.bootsessionuuid"], { encoding: "utf8" }).trim();
   } catch {
     id = "";
   }
@@ -104893,7 +104904,7 @@ __export(exports_consult_transport_zkapi, {
   WATCHDOG_SCRIPT: () => WATCHDOG_SCRIPT,
   DEFAULT_EXECUTABLE_TRUST: () => DEFAULT_EXECUTABLE_TRUST
 });
-import { spawn as spawn6, execFileSync as execFileSync3 } from "node:child_process";
+import { spawn as spawn6, execFileSync as execFileSync4 } from "node:child_process";
 import { createHash as createHash69, randomUUID as randomUUID24 } from "node:crypto";
 import { accessSync as accessSync10, chmodSync as chmodSync27, closeSync as closeSync26, constants as constants13, existsSync as existsSync67, mkdirSync as mkdirSync44, mkdtempSync as mkdtempSync3, readdirSync as readdirSync21, readFileSync as readFileSync55, readlinkSync as readlinkSync3, realpathSync as realpathSync18, rmSync as rmSync29, statSync as statSync32, writeFileSync as writeFileSync16 } from "node:fs";
 import { createConnection as createConnection4, createServer as createServer4 } from "node:net";
@@ -105004,7 +105015,7 @@ function versionSupported(version, platform2 = process.platform) {
 }
 function supportsManagedConfinement(executable, env) {
   try {
-    const help = execFileSync3(executable, ["serve", "--help"], {
+    const help = execFileSync4(executable, ["serve", "--help"], {
       encoding: "utf8",
       timeout: 5000,
       maxBuffer: 64 * 1024,
@@ -105058,7 +105069,7 @@ function darwinSandboxProfile(policy, ports) {
 }
 function runSelfTestProbe(argv, env) {
   try {
-    return JSON.parse(execFileSync3(argv[0], argv.slice(1), {
+    return JSON.parse(execFileSync4(argv[0], argv.slice(1), {
       encoding: "utf8",
       timeout: 25000,
       env,
@@ -105566,7 +105577,7 @@ function processGroupOf(pid) {
       const pgrp = Number(fields[2]);
       return Number.isInteger(pgrp) ? pgrp : undefined;
     }
-    const out = execFileSync3("/bin/ps", ["-o", "pgid=", "-p", String(pid)], {
+    const out = execFileSync4("/bin/ps", ["-o", "pgid=", "-p", String(pid)], {
       encoding: "utf8",
       timeout: 5000,
       stdio: ["ignore", "pipe", "ignore"]
@@ -105773,7 +105784,7 @@ function inspectLoopbackListener(port) {
   let pids;
   if (process.platform === "darwin") {
     try {
-      const out = execFileSync3("/usr/sbin/lsof", ["-nP", "-a", `-iTCP:${port}`, "-sTCP:LISTEN", "-Fp"], {
+      const out = execFileSync4("/usr/sbin/lsof", ["-nP", "-a", `-iTCP:${port}`, "-sTCP:LISTEN", "-Fp"], {
         encoding: "utf8",
         timeout: 5000,
         stdio: ["ignore", "pipe", "ignore"]
@@ -105876,7 +105887,7 @@ async function zkapiConsultReadiness(options) {
     blockers.push("daemon_not_found");
   } else {
     try {
-      const out = execFileSync3(daemonExecutable, ["--version"], {
+      const out = execFileSync4(daemonExecutable, ["--version"], {
         encoding: "utf8",
         timeout: 5000,
         env: childEnvironment(env),
@@ -108531,10 +108542,14 @@ function macServerModeView(options = {}) {
   try {
     const result = JSON.parse(readFileSync56(serverModeResultPath(paths), "utf8"));
     const pending = result.pending === true && Number.isSafeInteger(result.pid) && defaultPidAlive(result.pid);
-    return { enabled, pending, ...typeof result.message === "string" ? { message: result.message } : {} };
+    return { enabled, pending, ...typeof result.message === "string" ? { notice: result.message } : {} };
   } catch {
     return { enabled, pending: false };
   }
+}
+function macOwnerEnv() {
+  const name = currentMacUserName(process.getuid?.() ?? -1);
+  return name && name !== "unknown" ? { USER: name, LOGNAME: name } : {};
 }
 function requestMacServerMode(enable) {
   assertDarwin(undefined);
@@ -108547,7 +108562,7 @@ function requestMacServerMode(enable) {
   const child2 = spawn7(program.runtimePath, ["--no-env-file", program.entryPath, "__engine-server-mode", enable ? "on" : "off"], {
     detached: true,
     stdio: "ignore",
-    env: { HOME: homedir30(), PATH: "/usr/bin:/bin:/usr/sbin:/sbin" }
+    env: { HOME: homedir30(), PATH: "/usr/bin:/bin:/usr/sbin:/sbin", ...macOwnerEnv() }
   });
   child2.on("error", () => {
     writePrivateFileAtomicSync(serverModeResultPath(paths), JSON.stringify({ pending: false, message: "Olympus could not open the administrator request. Update Olympus, then try again." }));
@@ -120795,7 +120810,7 @@ __export(exports_consult_writer, {
   CONSULT_STANDARD_RESPONSE_SCHEMA: () => CONSULT_STANDARD_RESPONSE_SCHEMA,
   CONSULT_STANDARD_REPLY_FORMAT: () => CONSULT_STANDARD_REPLY_FORMAT
 });
-import { execFileSync as execFileSync4 } from "node:child_process";
+import { execFileSync as execFileSync5 } from "node:child_process";
 import { readFileSync as readFileSync69 } from "node:fs";
 import { freemem, platform as osPlatform5, totalmem as totalmem3 } from "node:os";
 function consultWriterSystem(level, options = {}) {
@@ -120965,7 +120980,7 @@ function meminfoBytes(meminfo, field) {
   return raw === undefined ? undefined : Number(raw) * 1024;
 }
 function defaultConsultMemoryProbe(deps = {}) {
-  const exec = deps.exec ?? ((file, args) => execFileSync4(file, [...args], { encoding: "utf8", timeout: 5000, stdio: ["ignore", "pipe", "ignore"] }));
+  const exec = deps.exec ?? ((file, args) => execFileSync5(file, [...args], { encoding: "utf8", timeout: 5000, stdio: ["ignore", "pipe", "ignore"] }));
   const readFile12 = deps.readFile ?? ((path) => readFileSync69(path, "utf8"));
   const platform2 = deps.platform ?? osPlatform5();
   const readOptional = (path) => {
@@ -157152,13 +157167,13 @@ function modelKeyAction(card, lead) {
 }
 function renderComputerUseChoice(view3) {
   const pending = view3.engine_server_mode?.pending === true;
-  return '<section aria-label="Computer setup" data-first-run-computer><h3>How will this computer run?</h3>' + "<form data-computer-use><fieldset" + (pending ? " disabled" : "") + "><legend>Choose how you use this Mac</legend>" + '<label class="modelcard"><input type="radio" name="choice" value="everyday" checked> My everyday computer <span>Recommended</span></label>' + '<label class="modelcard"><input type="radio" name="choice" value="server"> Always on, as a server</label>' + "<p>" + escapeHtml2(SERVER_MODE_HELP) + "</p>" + SERVER_CHECKLIST + '<button type="submit" class="btn primary">Continue</button></fieldset><span data-action-message role="status">' + escapeHtml2(view3.engine_server_mode?.message ?? "") + "</span></form></section>";
+  return '<section aria-label="Computer setup" data-first-run-computer><h3>How will this computer run?</h3>' + "<form data-computer-use><fieldset" + (pending ? " disabled" : "") + "><legend>Choose how you use this Mac</legend>" + '<label class="modelcard"><input type="radio" name="choice" value="everyday" checked> My everyday computer <span>Recommended</span></label>' + '<label class="modelcard"><input type="radio" name="choice" value="server"> Always on, as a server</label>' + "<p>" + escapeHtml2(SERVER_MODE_HELP) + "</p>" + SERVER_CHECKLIST + '<button type="submit" class="btn primary">Continue</button></fieldset><span data-action-message role="status">' + escapeHtml2(view3.engine_server_mode?.notice ?? "") + "</span></form></section>";
 }
 function renderEngineServerMode(view3) {
   const mode = view3.engine_server_mode;
   if (!mode)
     return "";
-  return '<section aria-label="Engine" id="engine-settings"><h3 class="sect">Engine</h3><form data-computer-use data-server-mode>' + '<label><input type="checkbox" role="switch" name="server"' + (mode.enabled ? " checked" : "") + (mode.pending ? " disabled" : "") + "> Keep Olympus running when no one is logged in</label><p>" + escapeHtml2(SERVER_MODE_HELP) + "</p>" + '<p role="status">' + (mode.enabled ? "On — starts once the disk is unlocked." : "Off — runs when this account is signed in.") + "</p>" + (mode.enabled ? SERVER_CHECKLIST : "") + '<button type="submit" class="btn"' + (mode.pending ? " disabled" : "") + '>Save</button><span data-action-message role="status">' + escapeHtml2(mode.message ?? "") + "</span></form></section>";
+  return '<section aria-label="Engine" id="engine-settings"><h3 class="sect">Engine</h3><form data-computer-use data-server-mode>' + '<label><input type="checkbox" role="switch" name="server"' + (mode.enabled ? " checked" : "") + (mode.pending ? " disabled" : "") + "> Keep Olympus running when no one is logged in</label><p>" + escapeHtml2(SERVER_MODE_HELP) + "</p>" + '<p role="status">' + (mode.enabled ? "On — starts once the disk is unlocked." : "Off — runs when this account is signed in.") + "</p>" + (mode.enabled ? SERVER_CHECKLIST : "") + '<button type="submit" class="btn"' + (mode.pending ? " disabled" : "") + '>Save</button><span data-action-message role="status">' + escapeHtml2(mode.notice ?? "") + "</span></form></section>";
 }
 function privateModelWords(view3) {
   const model = view3?.private_model;
@@ -183655,7 +183670,7 @@ var init_open_target2 = __esm(() => {
 
 // src/workers/local-files/volume-identity.ts
 import { createHash as createHash96 } from "node:crypto";
-import { execFileSync as execFileSync5 } from "node:child_process";
+import { execFileSync as execFileSync6 } from "node:child_process";
 import { existsSync as existsSync94, lstatSync as lstatSync47, readFileSync as readFileSync84, readdirSync as readdirSync27, realpathSync as realpathSync26 } from "node:fs";
 import { homedir as homedir45 } from "node:os";
 
@@ -183825,12 +183840,12 @@ function normalizeNetworkSource(source) {
 }
 function defaultReadMounts(platform3) {
   if (platform3 === "darwin")
-    return execFileSync5("/sbin/mount", [], { encoding: "utf8", timeout: 5000 });
+    return execFileSync6("/sbin/mount", [], { encoding: "utf8", timeout: 5000 });
   return readFileSync84("/proc/self/mountinfo", "utf8");
 }
 function defaultDiskutilPlist(mountPoint) {
   try {
-    return execFileSync5("/usr/sbin/diskutil", ["info", "-plist", mountPoint], {
+    return execFileSync6("/usr/sbin/diskutil", ["info", "-plist", mountPoint], {
       encoding: "utf8",
       timeout: 8000,
       stdio: ["ignore", "pipe", "ignore"]
