@@ -1632,6 +1632,12 @@ function isNotLoaded(result: EngineExecResult): boolean {
     || /could not find service/i.test(`${result.stderr}${result.stdout}`);
 }
 
+/** launchctl exits 125 when the gui/<uid> domain does not exist because the user has not signed in. */
+function isAbsentLoginDomain(result: EngineExecResult): boolean {
+  return result.status === 125
+    || /could not find domain|domain does not support specified action/i.test(`${result.stderr}${result.stdout}`);
+}
+
 function mustSucceed(result: EngineExecResult, what: string): void {
   if (result.status === 0) return;
   throw new OperationError('config_error', `launchctl could not ${what}: ${boundedDetail(result)}`, 'Run olympus engine logs, then olympus engine install again.');
@@ -1820,7 +1826,9 @@ export async function waitForMacAgentHandoff(options: { exec?: EngineExec; uid?:
   const sleep = options.sleep ?? (ms => new Promise(resolve => setTimeout(resolve, ms)));
   for (let i = 0; i < (options.attempts ?? 120); i++) {
     const result = exec('launchctl', ['print', serviceTarget(options.uid)]);
-    if (isNotLoaded(result)) return true;
+    // After a reboot with nobody signed in, the login domain itself does not exist yet
+    // (launchctl exits 125), so no login engine can be running.
+    if (isNotLoaded(result) || isAbsentLoginDomain(result)) return true;
     if (result.status !== 0) return false;
     await sleep(250);
   }

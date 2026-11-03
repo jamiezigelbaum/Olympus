@@ -140,6 +140,10 @@ test('a daemon cannot enter the data plane before the login agent unloads, and u
   expect(await waitForMacAgentHandoff({ exec: () => ({ status: 1, stdout: '', stderr: 'permission denied' }) })).toBe(false);
 });
 
+test('a daemon starts after a reboot when nobody has signed in and the login domain does not exist', async () => {
+  expect(await waitForMacAgentHandoff({ uid: 501, sleep: async () => { throw new Error('no wait expected'); }, exec: () => ({ status: 125, stdout: '', stderr: 'Bad request.\nCould not find domain for user gui: 501' }) })).toBe(true);
+});
+
 test('daemon upgrades retain the exact plist and signal restart, with no administrator request', () => {
   const f = fixture(); f.put(f.daemonPlistPath, f.daemon);
   f.put(join(f.paths.appDir, 'package.json'), JSON.stringify({ name: 'olympus', version: '1.3.2' }));

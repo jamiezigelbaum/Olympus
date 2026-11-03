@@ -108075,6 +108075,9 @@ function launchctlLoaded(exec, target) {
 function isNotLoaded(result) {
   return result.status === 113 || result.status === 3 || /could not find service/i.test(`${result.stderr}${result.stdout}`);
 }
+function isAbsentLoginDomain(result) {
+  return result.status === 125 || /could not find domain|domain does not support specified action/i.test(`${result.stderr}${result.stdout}`);
+}
 function mustSucceed(result, what) {
   if (result.status === 0)
     return;
@@ -108239,7 +108242,7 @@ async function waitForMacAgentHandoff(options = {}) {
   const sleep3 = options.sleep ?? ((ms) => new Promise((resolve21) => setTimeout(resolve21, ms)));
   for (let i2 = 0;i2 < (options.attempts ?? 120); i2++) {
     const result = exec("launchctl", ["print", serviceTarget(options.uid)]);
-    if (isNotLoaded(result))
+    if (isNotLoaded(result) || isAbsentLoginDomain(result))
       return true;
     if (result.status !== 0)
       return false;
