@@ -4,6 +4,7 @@ import { CHILD_ITEM_ID_SEPARATOR } from '../../core/child-item-id.ts';
 import { keywordAlternatives, withKeywordAlternatives, keywordExpansionDisabled, withKeywordExpansionDisabled } from '../../core/source-index/keyword-context.ts';
 import { storeKeywordLanguages } from '../../core/source-index/keyword-languages.ts';
 import { expandSourceIndexKeywords, withExpandedSourceIndexKeywords } from '../../core/source-index/keyword-expansion.ts';
+import { ingestionTurn } from '../control-path-headroom.ts';
 // The shared connector ingest spine: ONE generic local store that turns any
 // Contract 1 SourceConnector into a searchable, analyst-served corpus with
 // zero new storage code.
@@ -303,7 +304,6 @@ const MEDIA_JUDGE_RETRY_BASE_MS = CHUNK_MEDIA_RETRY_BASE_MS;
 /** ... and left unjudged (Private) after this many tries by one judge. */
 const MEDIA_JUDGE_MAX_ATTEMPTS = 3;
 const MAX_CONSECUTIVE_CONTENT_FETCH_FAILURES = 3;
-const CONNECTOR_SYNC_COOPERATIVE_YIELD_ITEMS = 32;
 
 export function connectorStoreMigrations() {
   return [
@@ -8075,17 +8075,13 @@ export class LocalConnectorStore {
             break;
           }
           itemsSeen += 1;
-          // SQLite's item work is synchronous. Yield between bounded groups so
-          // a large metadata page cannot starve the Bun HTTP server that owns
-          // this same event loop. Put the yield before item handling so every
-          // disposition — excluded, deleted, rejected, or indexed — shares the
-          // same fairness bound.
-          if (
-            itemsSeen > 1
-            && (itemsSeen - 1) % CONNECTOR_SYNC_COOPERATIVE_YIELD_ITEMS === 0
-          ) {
-            await yieldConnectorSyncTurn();
-          }
+          // SQLite's item work is synchronous. Return to the event loop once
+          // the thread has run a time slice, so a large page cannot starve the
+          // Bun HTTP server that owns this same loop (control-path-headroom.ts;
+          // a count of items bounded nothing when each item was slow). Put the
+          // turn before item handling so every disposition — excluded,
+          // deleted, rejected, or indexed — shares the same fairness bound.
+          await ingestionTurn();
 
           // FIRST, before content is fetched, before classification, before
           // any scope or allowlist is consulted. Enforcing here is what makes

@@ -42,6 +42,7 @@
  * no regular expressions in this module.
  */
 
+import { ingestionTurn } from '../control-path-headroom.ts';
 import { createHash } from 'node:crypto';
 import { dirname } from 'node:path';
 import { boundedLogErrorMessage } from '../../core/log-redaction.ts';
@@ -696,6 +697,7 @@ export function createFileExtractionRunner(
         refused.set(reason, (refused.get(reason) ?? 0) + count);
       };
       for (const ref of page.candidates) {
+        await ingestionTurn();
         if (isImageMediaType(ref.mimeType) && refusesImageContent(corpus, ref)) {
           jobsSkippedImageNotPrivate += 1;
           continue;
@@ -762,6 +764,7 @@ export function createFileExtractionRunner(
           let refusedRefs = 0;
           let firstRefusal: unknown;
           for (const ref of refs) {
+            await ingestionTurn();
             try {
               results.push(enqueue([ref]));
             } catch (refError) {
@@ -874,6 +877,7 @@ export function createFileExtractionRunner(
 
       for (const job of lease.leasedJobs) {
         if (paused) break;
+        await ingestionTurn();
         processedJobs += 1;
         const extractor = registry.get(job.extractorKind);
         // Read off the extractor's declared egress rather than off what the
