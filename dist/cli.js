@@ -26027,7 +26027,7 @@ class ControlPathHeadroom {
       if (this.lastLagMs >= this.freezeLogMs) {
         this.freezes += 1;
         const running = [...this.active.keys()].sort().join(",") || "none";
-        this.log(`[olympus:control-path] the worker could not answer requests for ${Math.round(this.lastLagMs)} ms; background work running: ${running}`);
+        this.log(`${new Date().toISOString()} [olympus:control-path] the worker could not answer requests for ${Math.round(this.lastLagMs)} ms; background work running: ${running}`);
       }
     }, HEARTBEAT_MS);
     this.heartbeat.unref?.();
@@ -26036,7 +26036,53 @@ class ControlPathHeadroom {
 function ingestionTurn() {
   return controlPathHeadroom.ingestionTurn();
 }
-var CONTROL_PATH_SLICE_MS = 20, CONTROL_PATH_LAG_REST_THRESHOLD_MS = 200, CONTROL_PATH_REST_MS = 25, HEARTBEAT_MS = 50, CONTROL_PATH_FREEZE_LOG_MS = 2000, controlPathHeadroom;
+function summarizeCpuSamples(traces, top = CPU_SAMPLE_TOP) {
+  const self = new Map;
+  const total = new Map;
+  const key2 = (frame) => {
+    const file = frame.sourceURL ? frame.sourceURL.split("/").slice(-2).join("/") : "";
+    const line = frame.line !== undefined && frame.line < 4294967295 ? `:${frame.line}` : "";
+    return `${frame.name || "(anonymous)"}${file ? ` ${file}${line}` : ""}`;
+  };
+  for (const trace of traces) {
+    const frames = trace.frames ?? [];
+    if (frames.length === 0)
+      continue;
+    const leaf = key2(frames[0]);
+    self.set(leaf, (self.get(leaf) ?? 0) + 1);
+    for (const name of new Set(frames.map(key2)))
+      total.set(name, (total.get(name) ?? 0) + 1);
+  }
+  const rank = (map) => [...map.entries()].sort((a, b) => b[1] - a[1]).slice(0, top);
+  return { samples: traces.length, self: rank(self), total: rank(total) };
+}
+async function startCpuSampleLog(env = process.env) {
+  const path = env[CPU_SAMPLE_LOG_ENV]?.trim();
+  if (!path)
+    return;
+  const jsc = await import("bun:jsc");
+  if (!jsc.startSamplingProfiler || !jsc.samplingProfilerStackTraces)
+    return;
+  const { appendFileSync } = await import("node:fs");
+  jsc.startSamplingProfiler();
+  let last = Date.now();
+  const flush = () => {
+    const now = Date.now();
+    try {
+      const summary = summarizeCpuSamples(jsc.samplingProfilerStackTraces().traces ?? []);
+      appendFileSync(path, `${JSON.stringify({ at: new Date(now).toISOString(), windowMs: now - last, headroom: controlPathHeadroom.snapshot(), ...summary })}
+`, { mode: 384 });
+    } catch (error) {
+      console.error(`[olympus:control-path] cpu sample log failed: ${error instanceof Error ? error.name : "error"}`);
+    }
+    last = now;
+  };
+  const timer = setInterval(flush, CPU_SAMPLE_FLUSH_MS);
+  timer.unref?.();
+  console.error(`[olympus:control-path] sampling CPU to ${CPU_SAMPLE_LOG_ENV}`);
+  return () => clearInterval(timer);
+}
+var CONTROL_PATH_SLICE_MS = 20, CONTROL_PATH_LAG_REST_THRESHOLD_MS = 200, CONTROL_PATH_REST_MS = 25, HEARTBEAT_MS = 50, CONTROL_PATH_FREEZE_LOG_MS = 2000, controlPathHeadroom, CPU_SAMPLE_LOG_ENV = "OLYMPUS_CPU_SAMPLE_LOG", CPU_SAMPLE_FLUSH_MS = 30000, CPU_SAMPLE_TOP = 30;
 var init_control_path_headroom = __esm(() => {
   controlPathHeadroom = new ControlPathHeadroom;
 });
@@ -141493,11 +141539,11 @@ function installWorkerShutdownSignals(options) {
     const code = signal === "SIGINT" ? 130 : 143;
     if (!shutdown)
       return options.exit(code);
+    if (exitAfterDeadline) {
+      deadline ??= setTimeout(() => options.exit(code), options.deadlineMs ?? WORKER_SHUTDOWN_DEADLINE_MS);
+      deadline.unref?.();
+    }
     shutdown(signal);
-    if (!exitAfterDeadline)
-      return;
-    deadline ??= setTimeout(() => options.exit(code), options.deadlineMs ?? WORKER_SHUTDOWN_DEADLINE_MS);
-    deadline.unref?.();
   };
   const onInt = () => stop("SIGINT");
   const onTerm = () => stop("SIGTERM");
@@ -214017,6 +214063,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
   tierSnifferBacklog = tierSniffer ? () => tierSniffer.backlog() : undefined;
   archivePrivateModelState = () => archivePrivateModelFromSniffer(tierSniffer);
   tierSniffer?.start();
+  const stopCpuSampleLog = await startCpuSampleLog(process.env);
   let shuttingDown = false;
   const shutdown = (signal) => {
     closeDesktopBridge();
@@ -214034,6 +214081,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     if (desktopPoll)
       clearInterval(desktopPoll);
     clearInterval(captureTick);
+    stopCpuSampleLog?.();
     tierSniffer?.stop();
     archiveImportDashboard.close();
     installedTierClassification.close();
@@ -214837,6 +214885,7 @@ var init_server5 = __esm(async () => {
   init_classification_ledger();
   init_tier_migration();
   init_embedding_ledger();
+  init_control_path_headroom();
   init_agent_connections();
   init_remote_access_control();
   GMAIL_ATTACHMENT_READER_REUSE_MS = 5 * 60000;

@@ -530,6 +530,7 @@ import { resolveClassificationLedgerPath, readClassificationLedger, isClassifier
 import type { AnalystModel } from '../../core/analyst.ts';
 import { resolveTierMigrationPaths, tierMigrationStatusSummary } from '../classification/tier-migration.ts';
 import { resolveEmbeddingLedgerPath } from '../embedding-ledger.ts';
+import { startCpuSampleLog } from '../control-path-headroom.ts';
 import { remoteAccessFromStatus, type DashboardAgentConnectionsBackend } from '../agent-connections.ts';
 import { createDashboardRemoteAccessControl, createGatewayRemoteAccessConfigWriter, createStandaloneRemoteAccessConfigWriter, createDashboardEngineRestart } from '../remote-access-control.ts';
 
@@ -7082,6 +7083,7 @@ export async function main(): Promise<void> {
   tierSnifferBacklog = tierSniffer ? () => tierSniffer.backlog() : undefined;
   archivePrivateModelState = () => archivePrivateModelFromSniffer(tierSniffer);
   tierSniffer?.start();
+  const stopCpuSampleLog = await startCpuSampleLog(process.env);
 
   // The worker owns a background tick that outlives any request, so the process
   // needs a way to put it down. Without this the only shutdown was the process
@@ -7102,6 +7104,7 @@ export async function main(): Promise<void> {
     desktopPollingClosed = true;
     if (desktopPoll) clearInterval(desktopPoll);
     clearInterval(captureTick);
+    stopCpuSampleLog?.();
     tierSniffer?.stop();
     archiveImportDashboard.close();
     installedTierClassification.close();

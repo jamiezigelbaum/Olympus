@@ -16,16 +16,19 @@ export function installWorkerShutdownSignals(options: {
     options.closeOwnerBridge();
     const code = signal === 'SIGINT' ? 130 : 143;
     if (!shutdown) return options.exit(code);
+    if (exitAfterDeadline) {
+      // Armed before the handler runs, so a handler that throws or blocks still
+      // has a deadline behind it.
+      deadline ??= setTimeout(() => options.exit(code), options.deadlineMs ?? WORKER_SHUTDOWN_DEADLINE_MS);
+      deadline.unref?.();
+    }
     shutdown(signal);
-    if (!exitAfterDeadline) return;
     // The handler closes the listener (which removes the socket) and stops
     // new work, but a pass already running (a first import's page) keeps the
     // process up until it ends. Past the deadline the worker exits rather than
     // waiting for the service manager's kill, which left the socket behind and
     // the next start refusing it (Sparta, 2026-11-03). SQLite stores are safe
     // to leave mid-write; the pass resumes from its checkpoint.
-    deadline ??= setTimeout(() => options.exit(code), options.deadlineMs ?? WORKER_SHUTDOWN_DEADLINE_MS);
-    deadline.unref?.();
   };
   const onInt = () => stop('SIGINT');
   const onTerm = () => stop('SIGTERM');
