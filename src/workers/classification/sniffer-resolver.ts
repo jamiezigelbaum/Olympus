@@ -544,10 +544,18 @@ export async function runSnifferPass(options: SnifferPassOptions): Promise<Sniff
   return finish(report);
 }
 
+/** The store turn a dispatch takes: ordinary slots only, so turns never line up with the aged slot. */
+export function snifferStoreTurn(dispatches: number): number {
+  return dispatches - Math.floor((dispatches + 1) / 5);
+}
+
 /** The newest item of the store whose turn it is, among stores with work. */
 function nextInTurn(pending: readonly WorkItem[], targets: readonly SnifferTarget[], dispatches: number): WorkItem {
   const waiting = targets.filter((target) => pending.some((item) => item.target === target));
-  const target = waiting[dispatches % Math.max(1, waiting.length)];
+  // Count only the ordinary slots: every fifth dispatch is reserved for an
+  // aged question, and counting it would line one store's turn up with that
+  // slot for good (with five stores, the fifth would never get a turn).
+  const target = waiting[snifferStoreTurn(dispatches) % Math.max(1, waiting.length)];
   return pending.find((item) => item.target === target) ?? pending[0]!;
 }
 

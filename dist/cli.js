@@ -189061,9 +189061,12 @@ async function runSnifferPass(options) {
   }
   return finish(report);
 }
+function snifferStoreTurn(dispatches) {
+  return dispatches - Math.floor((dispatches + 1) / 5);
+}
 function nextInTurn(pending, targets, dispatches) {
   const waiting = targets.filter((target2) => pending.some((item) => item.target === target2));
-  const target = waiting[dispatches % Math.max(1, waiting.length)];
+  const target = waiting[snifferStoreTurn(dispatches) % Math.max(1, waiting.length)];
   return pending.find((item) => item.target === target) ?? pending[0];
 }
 function compareRecent(a, b) {

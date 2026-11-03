@@ -40,6 +40,7 @@ import {
   snifferMaterialLooksLikeInjection,
 } from '../src/workers/classification/sniffer.ts';
 import { sharingInfoFromDropboxJson } from '../src/workers/dropbox-files/provider-client.ts';
+import { snifferStoreTurn } from '../src/workers/classification/sniffer-resolver.ts';
 import { resolveSnifferLane, SnifferLaneRefusedError, type SnifferLane } from '../src/workers/classification/sniffer-lane.ts';
 import {
   DEFAULT_SNIFFER_MAX_CALLS_PER_DAY,
@@ -266,6 +267,19 @@ describe('2. an answer preempts the sniffer', () => {
     });
     expect(model.requests).toHaveLength(2);
     expect(model.requests.filter((request) => request.prompt.includes('quiet'))).toHaveLength(1);
+  });
+
+  test('store turns never line up with the slot kept for aged questions', () => {
+    // Five stores: each must get ordinary turns, not just the one whose index
+    // falls on every fifth dispatch (which an aged question takes first).
+    for (const stores of [2, 3, 4, 5, 6]) {
+      const served = new Set<number>();
+      for (let dispatch = 0; dispatch < 40; dispatch += 1) {
+        if (dispatch % 5 === 4) continue;
+        served.add(snifferStoreTurn(dispatch) % stores);
+      }
+      expect(served.size).toBe(stores);
+    }
   });
 });
 
