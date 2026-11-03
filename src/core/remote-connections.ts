@@ -371,6 +371,11 @@ function remoteConnectionMigrations(): SqliteMigration[] {
     up(db) {
       // Older binaries refuse schema 4. Do not downgrade this database: an
       // older verifier would accept a local key on the public route.
+      // Idempotent, like v3: a second process that opened the file first, or a
+      // re-upgrade after a manual version rollback, finds the column and keeps
+      // every recorded route.
+      const columns = db.query('PRAGMA table_info(remote_connections)').all() as Array<{ name: string }>;
+      if (columns.some((column) => column.name === 'route')) return;
       db.exec("ALTER TABLE remote_connections ADD COLUMN route TEXT NOT NULL DEFAULT 'remote' CHECK(route IN ('remote', 'loopback', 'tailnet'));");
     },
   }];

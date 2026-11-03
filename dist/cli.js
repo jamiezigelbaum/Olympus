@@ -49710,6 +49710,9 @@ function remoteConnectionMigrations() {
     version: 4,
     name: "bind_connection_route",
     up(db) {
+      const columns = db.query("PRAGMA table_info(remote_connections)").all();
+      if (columns.some((column) => column.name === "route"))
+        return;
       db.exec("ALTER TABLE remote_connections ADD COLUMN route TEXT NOT NULL DEFAULT 'remote' CHECK(route IN ('remote', 'loopback', 'tailnet'));");
     }
   }];
