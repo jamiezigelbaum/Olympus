@@ -2,7 +2,7 @@
 
 ## 1.3.1 - 2026-11-03
 
-- **WhatsApp pairing works again.** After the scan, Olympus could not read the chat list when someone was in two of your groups, so pairing failed although your phone showed Olympus as linked (#744).
+- **WhatsApp pairing works again.** After the scan, Olympus could not read the chat list when someone was in two of your groups, so pairing failed although your phone showed Olympus as linked (#744). Olympus also now reports WhatsApp's current version, which WhatsApp requires to link a device; with the old one, the phone said "Couldn't link device" (#759).
 - If a WhatsApp pairing fails or you cancel it after scanning, Olympus removes itself from your phone's linked devices and says whether it could (#746).
 - A failed pairing says which step failed and has Copy details, a short report with no names, numbers or chats, to send to support (#745, #747).
 - Evernote's Choose folders loads for accounts with more than 100 notebooks (#743).
