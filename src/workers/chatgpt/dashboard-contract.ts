@@ -140,6 +140,8 @@ export interface SourceProgress {
 }
 
 export interface DashboardSource {
+  /** Code-only details for support, rebuilt at the release boundary. */
+  supportDetails?: string;
   id: string;
   label: string;
   /** How a sentence names this source ("your files"); absent: the label. */
@@ -469,7 +471,7 @@ export interface OlympusHostContext {
   /** The local dashboard controls are locked: every control is disabled with the locked reason. */
   readOnly?: boolean;
   /** Computer only: the local pages the "On this computer" section opens. */
-  links?: Partial<Record<'keys' | 'agents' | 'privateAnswers' | 'connector', string>>;
+  links?: Partial<Record<'keys' | 'agents' | 'privateAnswers' | 'connector' | 'help', string>>;
   /**
    * Computer only, in the first `ui/initialize` answer only: the source an
    * open link asked to land on (core/open-targets.ts `unreadable/<source>`).
@@ -1148,6 +1150,8 @@ export type PrivacyRuleView = PrivacyFolderRule | PrivacyLabelRule | PrivacySend
 export interface PrivacySettings {
   /** First-run only; never returned after either setup path chooses a policy. */
   privateAnswerChoice?: { pending: true; options: typeof PRIVATE_ANSWER_OPTIONS };
+  /** Current Private-answer mode and the same choices first run offers. */
+  privateAnswerMode?: { id: typeof PRIVATE_ANSWER_OPTIONS[number]['id'] | 'custom'; label: string; options: typeof PRIVATE_ANSWER_OPTIONS };
   /** False until the owner has saved privacy settings once. */
   configured: boolean;
   /** The owner's own words; empty until set. At most 2000 characters. */

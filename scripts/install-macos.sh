@@ -593,7 +593,6 @@ main() {
 install_command() {
   BIN_DIR="$HOME/.local/bin"
   LAUNCHER="$BIN_DIR/olympus"
-  COMMAND_READY=0
   if [ -L "$LAUNCHER" ] || { [ -e "$LAUNCHER" ] && ! grep -qF "$LAUNCHER_MARK" "$LAUNCHER" 2>/dev/null; }; then
     step "Left $LAUNCHER alone: this installer did not write it."
     return 0
@@ -609,13 +608,12 @@ exec "$HOME/Library/Application Support/Olympus/runtime/bun" "$HOME/Library/Appl
 LAUNCHER
   chmod 755 "$LAUNCHER.next"
   mv "$LAUNCHER.next" "$LAUNCHER"
-  COMMAND_READY=1
   case ":${PATH:-}:" in *":$BIN_DIR:"*) return 0 ;; esac
-  if [ "${OLYMPUS_NO_MODIFY_PATH:-}" = 1 ]; then COMMAND_READY=0; return 0; fi
+  if [ "${OLYMPUS_NO_MODIFY_PATH:-}" = 1 ]; then return 0; fi
   case "${SHELL:-/bin/zsh}" in
     */zsh) PROFILE="$HOME/.zprofile" ;;
     */bash) PROFILE="$HOME/.bash_profile" ;;
-    *) COMMAND_READY=0; return 0 ;;
+    *) return 0 ;;
   esac
   if ! grep -qF "$PATH_MARK" "$PROFILE" 2>/dev/null; then
     # shellcheck disable=SC2016 # $HOME and $PATH expand when the profile runs.
@@ -629,17 +627,15 @@ finish() {
   say ""
   say "Olympus is installed and running in the background on this Mac."
   say ""
-  say "Next, in ChatGPT:"
-  say "  In ChatGPT desktop, add the Olympus plugin and ask: Connect Olympus"
-  say "  A page opens in your browser on this Mac asking to connect ChatGPT. Click Connect."
+  say "Open Olympus from Applications to see your dashboard."
+  say "The dashboard opens in the browser on this computer."
   say ""
-  say "Olympus now downloads its built-in models in the background (about"
+  say "To connect ChatGPT, Claude or other agents, open the dashboard's Agents page."
+  say "It guides you through connecting the assistant you choose."
+  say ""
+  say "Olympus downloads its built-in models in the background (about"
   say "225 MB, then 1.3 to 2.7 GB for its private answer model)."
-  if [ "$COMMAND_READY" = 1 ]; then
-    say "To check on it later, open a new Terminal window and run: olympus engine status"
-  else
-    say "To check on it later, run: \"$BUN\" \"$APP/dist/cli.js\" engine status"
-  fi
+  say "You can see progress and check that Olympus is ready in the dashboard."
   say "To uninstall: $UNINSTALL_COMMAND"
 }
 

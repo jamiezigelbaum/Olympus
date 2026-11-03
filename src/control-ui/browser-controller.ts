@@ -161,9 +161,17 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
       if (!page || page.status !== 200) throw new Error('unavailable');
       canWrite = page.can_write;
       applyWriteCapability();
-      if (!firstRunCheckRequested) return;
       const template = document.createElement('template');
       template.innerHTML = page.body;
+      // The walkthrough keeps its inputs. Only the independent download line
+      // is replaced from this read, even before the readiness check is pressed.
+      const previousProgress = query<HTMLElement>('[data-private-model-progress]');
+      const nextProgress = template.content.querySelector<HTMLElement>('[data-private-model-progress]');
+      if (previousProgress) {
+        if (nextProgress) previousProgress.replaceWith(document.importNode(nextProgress, true));
+        else previousProgress.remove();
+      } else if (nextProgress) query('[data-first-run-sheet]')?.before(document.importNode(nextProgress, true));
+      if (!firstRunCheckRequested) return;
       const encoded = template.content.querySelector<HTMLElement>('[data-model-setup-status]')?.dataset.modelSetupStatus;
       if (!encoded) throw new Error('missing readiness');
       const status = JSON.parse(encoded);
@@ -1134,7 +1142,15 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
     try {
       const params = { source: source as 'telegram' | 'whatsapp', ...extra };
       let result: OlympusDashboardControlResult;
-      try { result = await options.transport.messaging(operation, params); }
+      try {
+        result = await options.transport.messaging(operation, params);
+        // Authentication rejects the request before the pairing handler runs.
+        // Renew only for a gesture, once, so the first press after an idle tab works.
+        if (operation !== 'status' && (result.status === 401 || result.status === 403)
+          && options.transport.openLocalControls && await options.transport.openLocalControls()) {
+          result = await options.transport.messaging(operation, params);
+        }
+      }
       finally { delete params.value; delete extra.value; }
       if (disposed || !card.isConnected) return;
       const body = result.body;
@@ -1147,6 +1163,18 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
         return;
       }
       const state = typeof body.state === 'string' ? body.state : '';
+      if (['paired', 'complete', 'completed'].includes(state)) {
+        const row = card.querySelector('.actionrow');
+        const start = row?.querySelector<HTMLFormElement>('form[data-messaging-kind="start"]');
+        if (start) { start.dataset.messagingKind = 'status'; const button = start.querySelector('button'); if (button) { button.textContent = 'Check connection'; button.classList.remove('primary'); } }
+        const toggle = row?.querySelector<HTMLButtonElement>('[data-sheet-toggle="#telegram-setup"]');
+        if (toggle) { const form = document.createElement('form'); form.method = 'dialog'; form.dataset.messagingKind = 'status'; toggle.removeAttribute('data-sheet-toggle'); toggle.textContent = 'Check connection'; toggle.type = 'submit'; toggle.classList.remove('primary'); toggle.replaceWith(form); form.append(toggle); }
+        row?.querySelector('[data-messaging-kind="chats"] button')?.classList.add('primary');
+        const chats = row?.querySelector('[data-messaging-kind="chats"]');
+        if (chats) row?.prepend(chats);
+        if (!card.querySelector('[data-messaging-account]')) { const account = document.createElement('p'); account.dataset.messagingAccount = ''; account.textContent = source === 'whatsapp' ? 'Your linked WhatsApp account' : 'Your linked Telegram account'; row?.before(account); }
+      }
+
       const field = typeof body.field === 'string' ? body.field : '';
       const labels: Record<string, string> = { api_id: 'Telegram API ID', api_hash: 'Telegram API hash', phone: 'Phone number (with country code)', code: 'Telegram login code', password: 'Telegram two-step verification password' };
       const label = labels[field];
@@ -1270,7 +1298,7 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
     } else if (kind === 'scope') {
       const wholeAccount = form.querySelector<HTMLInputElement>('[name="wholeAccount"]')?.checked === true;
       void messagingRequest(card, 'scope', { wholeAccount, chatScopes: wholeAccount ? [] : Array.from(form.querySelectorAll<HTMLInputElement>('[name="chatScope"]:checked')).map(input => input.value) });
-    } else if (kind === 'start' || kind === 'chats' || kind === 'cancel') void messagingRequest(card, kind);
+    } else if (kind === 'start' || kind === 'chats' || kind === 'cancel' || kind === 'status') void messagingRequest(card, kind);
   }
 
   async function openMessagingControls(form: HTMLFormElement): Promise<void> {

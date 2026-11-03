@@ -276,7 +276,13 @@ export function createDashboardMessagingService(options: {
           return manager.start(source);
         });
       }
-      if (operation === 'status') return manager.status(source);
+      if (operation === 'status') {
+        const status = manager.status(source);
+        if (status.state !== 'idle') return status;
+        const read = readCaptureGrantFile(defaultMessagingCaptureGrantPath(source, options.registryPath));
+        return read.kind === 'valid' && read.grant.source === source && !read.grant.pairingPending
+          ? { ok: true, state: 'paired' } : status;
+      }
       if (operation === 'cancel') return manager.cancel(source);
       if (operation === 'respond') {
         if (typeof record.field !== 'string' || typeof record.value !== 'string') throw new Error('Invalid response.');

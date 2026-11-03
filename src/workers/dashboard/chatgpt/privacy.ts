@@ -177,7 +177,9 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
     s.description = typeof data.description === 'string' ? data.description : '';
     s.savedDescription = s.description;
     s.revision = typeof data.revision === 'string' ? data.revision : '';
-    s.answerChoice = data.privateAnswerChoice && data.privateAnswerChoice.pending === true && Array.isArray(data.privateAnswerChoice.options) ? data.privateAnswerChoice : null;
+    s.answerChoice = data.privateAnswerChoice && data.privateAnswerChoice.pending === true && Array.isArray(data.privateAnswerChoice.options) ? data.privateAnswerChoice
+      : data.privateAnswerMode && Array.isArray(data.privateAnswerMode.options) ? data.privateAnswerMode : null;
+    if (s.answerChoice && typeof s.answerChoice.id === 'string') s.answerMode = s.answerChoice.id;
     s.edited = false;
     s.confirmStep = false;
     // `saved`: removing it lowers protection, so the save needs the owner's confirmation.
@@ -209,7 +211,7 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
       }
       take(data);
       s.loaded = true;
-      if (s.answerChoice) s.screen = 'answers';
+      if (s.answerChoice?.pending) s.screen = 'answers';
       kit.render(s.screen === 'answers' ? 'privacy:answer:local-first' : 'privacy:title');
     }, () => {
       if (mine !== session || !s) return;
@@ -364,7 +366,7 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
       if (!L.satisfies(s.intents, data.rules) || data.description !== args.description) return conflict(data);
       kit.remember(data.rules.filter(validRule).length);
       take(data);
-      if (s.answerChoice) {
+      if (s.answerChoice?.pending) {
         s.screen = 'answers';
         kit.render('privacy:answer:local-first');
         return;
@@ -813,6 +815,9 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
       }
       return;
     }
+    if (s.answerChoice && !s.answerChoice.pending) {
+      add(page, add(el('section', 'fsection'), el('h2', '', 'Private-answer mode'), el('p', '', s.answerChoice.label || 'Custom Private-answer mode'), kit.button('Change', 'privacy:answer:change', () => { s.screen = 'answers'; kit.render('privacy:answer:' + s.answerMode); }, 'plain')));
+    }
     const description = add(el('section', 'fsection privacy-description'), el('h2', '', W.descriptionLabel));
     const summary = el('p', 'privacy-summary', s.description);
     summary.setAttribute('data-key', 'privacy:summary');
@@ -1105,13 +1110,24 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
       if (mine !== session || !s) return;
       s.saving = false;
       const data = settings(result);
-      if (!data || result.isError) {
+      const content = result && result.structuredContent;
+      if (data && content && content.status === 'conflict') {
+        // Nothing was applied. Show what is saved now, keep the requested
+        // mode selected, and let the person save it again on purpose.
+        const wanted = s.answerMode;
+        take(data);
+        s.answerMode = wanted;
+        s.saveError = W.conflict;
+        kit.render('privacy:answer:save');
+        return;
+      }
+      if (!data || result.isError || !content || content.status !== 'saved') {
         s.saveError = W.saveFailed;
         kit.render('privacy:answer:save');
         return;
       }
       take(data);
-      if (!s.answerChoice) return leave(W.saved, true);
+      if (!s.answerChoice?.pending) return leave(W.saved, true);
       s.saveError = W.saveFailed;
       kit.render('privacy:answer:save');
     }, () => {
@@ -1124,7 +1140,7 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
 
   function answersView(page: HTMLElement): void {
     add(page, el('h1', '', 'How should Olympus answer with Private items?'));
-    add(page, el('p', 'muted intro', 'Until you save a choice, nothing leaves this computer.'));
+    add(page, el('p', 'muted intro', s.answerChoice?.pending ? 'Until you save a choice, nothing leaves this computer.' : 'Choose how Private answers may be made. Your current mode stays in use until you save.'));
     if (!s.answerChoice) return;
     const choices = el('fieldset', 'field');
     add(choices, el('legend', 'field-label', 'Private-answer mode'));
@@ -1159,7 +1175,7 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
     const top = el('div', 'picker-top');
     const backButton = kit.button(s.screen === 'main' ? W.back : W.backToPrivacy, 'privacy:back', escape, 'plain');
     backButton.className = 'btn back';
-    if (s.screen === 'main') add(page, add(top, backButton));
+    if (s.screen === 'main' || (s.screen === 'answers' && !s.answerChoice?.pending)) add(page, add(top, backButton));
     if (s.discarding) {
       const confirm = el('div', 'confirm-box');
       confirm.setAttribute('role', 'alert');
@@ -1193,6 +1209,8 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
     if (s.discarding) {
       s.discarding = false;
       kit.render('privacy:back');
+    } else if (s.screen === 'answers' && !s.answerChoice?.pending) {
+      s.screen = 'main'; kit.render('privacy:title');
     } else if (s.screen !== 'main' && s.screen !== 'answers') {
       sheetBack();
     } else backOut();

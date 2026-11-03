@@ -329,6 +329,14 @@ export function readEngineConfig(path: string): Record<string, unknown> | undefi
   return parsed as Record<string, unknown>;
 }
 
+/** Dashboard remote-access writes use the same private atomic writer as install. */
+export function setEngineRemoteAccessEnabled(path: string, enabled: boolean): void {
+  const config = readEngineConfig(path);
+  if (!config) throw new OperationError('config_error', 'Olympus settings could not be read.');
+  objectAt(config, 'remote').enabled = enabled;
+  writePrivateFileAtomicSync(path, `${JSON.stringify(config, null, 2)}\n`);
+}
+
 /**
  * Write the defaults where nothing is set; never overwrite a value the owner
  * set. A `remote` block the owner wrote (even `enabled: false`) is kept whole.

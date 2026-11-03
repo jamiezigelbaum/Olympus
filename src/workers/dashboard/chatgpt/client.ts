@@ -299,7 +299,7 @@ export function chatgptDashboardClient(
     state.hostReadOnly = value.readOnly === true;
     const links: Record<string, string> = {};
     const given = value.links && typeof value.links === 'object' ? value.links : {};
-    for (const key of ['keys', 'agents', 'privateAnswers', 'connector']) {
+    for (const key of ['keys', 'agents', 'privateAnswers', 'connector', 'help']) {
       const href = given[key];
       if (typeof href === 'string' && /^https?:\/\//.test(href)) links[key] = href;
     }
@@ -1163,6 +1163,13 @@ export function chatgptDashboardClient(
     const why = seeWhy(source, id, !!progress && !!progress.stalled && !checking && !manual)
       || (archives ? archiveUnreadable(archives, id) || archiveNotRunning(archives, id) : null)
       || (joined ? archiveNotRunning(joined, id) : null);
+    if (source.supportDetails && (progress?.stalled || status === 'Failing' || status === 'Needs you' || source.lastManualSync?.outcome === 'failed')) {
+      const report = el('pre', 'help', source.supportDetails);
+      const copy = copyControl(report, 'support:' + id);
+      copy.textContent = 'Copy details';
+      const details = add(el('details', 'disclosure'), el('summary', '', 'Details for support'), report, copy, el('p', 'muted', 'No names, numbers, emails, chats or folder titles.'));
+      add(main, details);
+    }
     if (why) add(main, why);
     // Landed on a source with nothing to see why about now: the row itself is
     // outlined, or on the Archives row each archive and request that needs the person.
@@ -2606,7 +2613,7 @@ export function chatgptDashboardClient(
   function computerSection(): HTMLElement | null {
     if (!onComputer()) return null;
     const W = H.copy;
-    const keys = ['keys', 'agents', 'privateAnswers', 'connector'].filter((key) => !!state.hostLinks[key]);
+    const keys = ['keys', 'agents', 'privateAnswers', 'connector', 'help'].filter((key) => !!state.hostLinks[key]);
     if (!keys.length) return null;
     const heading = add(el('h2'), doc.createTextNode(W.section + ' '), el('span', 'tag', W.onlyHere));
     const section = add(el('section', 'section on-computer'), heading);

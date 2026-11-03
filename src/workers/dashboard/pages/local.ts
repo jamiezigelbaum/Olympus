@@ -1,3 +1,4 @@
+import { sourceFailureKind, sourceSupportDetails } from '../source-failure.ts';
 /**
  * The computer's own pages (unified dashboard phase 4, 2026-10-09): what
  * cannot work through ChatGPT, each opened from the panel's "On this
@@ -46,13 +47,12 @@ import {
 } from '../components.ts';
 import { DASHBOARD_PRIVATE_ANSWERS_COPY } from '../vocabulary.ts';
 import { DASHBOARD_OUTSIDE_HELP_CSS } from '../static-styles.ts';
-import { renderModelSetup, renderModelSetupBlocker } from '../model-setup.ts';
+import { renderModelSetup, renderModelSetupBlocker, dashboardModelsBlockedReason } from '../model-setup.ts';
 import { renderOutsideHelpCard, type DashboardOutsideHelpStatus } from '../outside-help.ts';
 import { AGENT_CONNECT_CSS, LOCAL_PAGE_CSS, MODEL_SETUP_CSS } from '../static-styles.ts';
 import {
   DASHBOARD_COMPUTER_PANEL_COPY,
   DASHBOARD_EVERNOTE_CONSENT_HELP,
-  DASHBOARD_MODELS_BLOCKED_REASON,
   dashboardCheckedLabel,
   dashboardProviderRefusalDetail,
   dashboardProviderRefusalSentence,
@@ -70,6 +70,7 @@ export interface DashboardPageOptions {
   controlSessionCsrfToken?: string;
   /** Remote agent connections and remote access, for Agents. */
   agents?: DashboardAgentsView;
+  systemReport?: string;
   /** OPENER supplies the current desktop/headless approval handoff. */
   agentConnectHost?: AgentConnectHost;
   /** The Outside help card's facts, for that page only, with the control session. */
@@ -167,7 +168,7 @@ export function renderDashboardKeysPage(view: SourceDashboardViewModel, options?
     sources.length === 0 ? '' : '<div class="sect" id="sources">Sources</div>',
     sources.length === 0
       ? ''
-      : `<div class="srows">${sources.map((source) => renderSetupRow(source, view, blocked, options?.basePath ?? '/dashboard', options?.messagingLocalSession === true)).join('\n')}</div>`,
+      : `<div class="srows">${sources.map((source) => renderSetupRow(source, view, blocked, options?.basePath ?? '/dashboard', options?.messagingLocalSession === true) + sourceSupportBlock(source)).join('\n')}</div>`,
   ].filter((block) => block !== '').join('\n');
   return localShell({
     crumb: W.keys.title,
@@ -221,9 +222,9 @@ function refusalNotice(source: DashboardSourceCard): { notice?: string; noticeDe
 function renderSetupRow(source: DashboardSourceCard, view: SourceDashboardViewModel, blocked: boolean, basePath: string, messagingLocalSession = false): string {
   const action = source.connection.action;
   if (source.source_id === 'telegram.messages' || source.source_id === 'whatsapp.personal.messages') {
-    return renderMessagingCard(source.source_id === 'telegram.messages' ? 'telegram' : 'whatsapp', messagingLocalSession);
+    return renderMessagingCard(source.source_id === 'telegram.messages' ? 'telegram' : 'whatsapp', messagingLocalSession, { paired: ['connected', 'syncing', 'synced', 'waiting_for_first_sync'].includes(source.connection.state) });
   }
-  const gate = blocked ? { blockedReason: DASHBOARD_MODELS_BLOCKED_REASON } : {};
+  const gate = blocked ? { blockedReason: dashboardModelsBlockedReason(view.model_setup) } : {};
   const id = { sourceId: source.source_id };
   // Imports happen on the main page, from the source's card: the button goes there and opens its Import an archive.
   if (action.kind === 'archive_import') {
@@ -362,4 +363,22 @@ function connectAction(source: DashboardSourceCard): DashboardActionInput | unde
   if (action.kind === 'api_key') return { label: action.label, kind: 'api_key', source: action.source, primary: false };
   if (action.kind === 'this_computer') return { label: action.label, kind: 'this_computer', source: action.source, primary: false };
   return undefined;
+}
+
+/** A local, content-free report using the same copy control as pairing errors. */
+export function renderDashboardHelpPage(options?: DashboardPageOptions): string {
+  const report = options?.systemReport;
+  return localShell({ crumb: 'Help', meta: '', options, styles: [], body:
+    dashboardControlGate({ connected: unlocked(options) })
+    + '<h3>Help with Olympus</h3><p>If something is not working, copy the system report and send it to support.</p>'
+    + (report ? `<pre id="system-report" class="promptbox">${escapeHtml(report)}</pre><p>Only system states and error codes: no names, numbers, emails, chats, notebook or folder titles, or home folder paths.</p><button type="button" class="btn" data-copy-target="#system-report">Copy system report</button><span data-copy-status aria-live="polite"></span>` : unlocked(options) ? '<p>Olympus could not read the system report. Try again, or contact support.</p>' : '<p>Open dashboard controls on this computer to copy a system report.</p>')
+    + '<p><a href="https://olympusplugin.ai/support" target="_blank" rel="noopener noreferrer">Contact support</a></p>',
+  });
+}
+
+function sourceSupportBlock(source: DashboardSourceCard): string {
+  if (!(source.schedule?.consecutive_failures || source.connection.state === 'reauth_required' || source.answer_readiness?.state === 'needs_attention')) return '';
+  const id = `source-support-${source.source_id.replace(/[^a-z0-9-]/gi, '-')}`;
+  const report = sourceSupportDetails({ sourceId: source.source_id, state: source.connection.state, failure: sourceFailureKind(source.schedule?.last_error_kind, source.schedule?.degraded_reason), ref: source.schedule?.last_error_hash });
+  return `<details><summary>Details for support</summary><pre class="promptbox" id="${id}">${escapeHtml(report)}</pre><button type="button" class="btn" data-copy-target="#${id}">Copy details</button><span data-copy-status aria-live="polite"></span><p>No names, numbers, emails, chats or folder titles.</p></details>`;
 }

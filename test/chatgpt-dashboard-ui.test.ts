@@ -1466,3 +1466,16 @@ describe('Sync now keeps the page reading while it checks', () => {
     }
   });
 });
+
+test('failed and stalled source rows offer code-only Copy details', () => {
+  const host = mount({});
+  host.push({ structuredContent: copyDashboardViewModel(model({ sources: [{
+    id: 'dropbox.files', label: 'Dropbox', group: 'cloud', status: 'Failing',
+    supportDetails: 'Mark +15551234567 mark@example.test /Users/mark/Notebook',
+    progress: { stage: 'reading', unit: 'files', total: 1, stalled: true, stall: { cause: 'failing', failure: 'timeout' } },
+  }] })) });
+  const report = host.win.document.querySelector('.row.source pre')!;
+  expect(report.textContent).toContain('Failure: timeout');
+  expect(report.textContent).not.toContain('Mark');
+  expect(host.button('Copy details')).toBeDefined();
+});

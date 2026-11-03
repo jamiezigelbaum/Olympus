@@ -123,3 +123,42 @@ test('pending chooser refuses profile edits without overwriting hidden owner rul
   expect(readFileSync(env.OLYMPUS_PRIVACY_PROFILE_PATH, 'utf8')).toBe(before);
   expect(readFileSync(env.OLYMPUS_TIER_RULES_PATH, 'utf8')).toBe(beforeRules);
 });
+
+test.each(['local-first', 'local-only', 'private-cloud-only', 'no-sensitive'] as const)('the saved mode can change to %s without replacing search models', async choice => {
+  const { backend, path } = setup();
+  saveFirstRunPrivacyChoice(path, 'local-only');
+  const original = JSON.parse(readFileSync(path, 'utf8'));
+  original.modelProfiles['local-source-answer'].model = 'my-local-model';
+  writeFileSync(path, JSON.stringify(original));
+  const opened = await callSetupTool('olympus_privacy_get', {}, backend);
+  expect(meta(opened).privateAnswerMode).toMatchObject({ id: 'local-only', label: 'Local models' });
+  const saved = await callSetupTool('olympus_privacy_set', { revision: meta(opened).revision, confirmation: meta(opened).confirmation, private_answer_mode: choice }, backend);
+  expect(meta(saved).privateAnswerMode.id).toBe(choice);
+  const config = JSON.parse(readFileSync(path, 'utf8'));
+  expect(config.modelProfiles['local-source-answer'].model).toBe('my-local-model');
+  expect(config.retrieval.trustDomains.internal).toEqual(original.retrieval.trustDomains.internal);
+  expect(config.retrieval.trustDomains.secure_local.embeddingProfile).toBe(original.retrieval.trustDomains.secure_local.embeddingProfile);
+});
+
+test('a stale mode change cannot overwrite a policy saved by another tab', async () => {
+  const { backend, path } = setup();
+  saveFirstRunPrivacyChoice(path, 'local-only');
+  const opened = await callSetupTool('olympus_privacy_get', {}, backend);
+  const current = JSON.parse(readFileSync(path, 'utf8'));
+  current.modelProfiles['local-source-answer'].model = 'changed-elsewhere';
+  writeFileSync(path, JSON.stringify(current));
+  const saved = await callSetupTool('olympus_privacy_set', { revision: meta(opened).revision, confirmation: meta(opened).confirmation, private_answer_mode: 'private-cloud-only' }, backend);
+  expect((saved as any).structuredContent.status).toBe('conflict');
+  expect(JSON.parse(readFileSync(path, 'utf8'))).toEqual(current);
+});
+
+test('choosing Local models cannot silently keep sending Private search text to a cloud model', async () => {
+  const { path } = setup();
+  const config = loadSovereigntyPreset('private-cloud-only');
+  config.modelProfiles['private-search'] = { provider: 'venice', trust: 'encrypted_cloud', purpose: 'embedding', model: 'text-embedding-bge-m3', baseUrl: 'https://api.venice.ai/api/v1', secretRef: 'store:venice.api_key' };
+  config.retrieval.trustDomains.secure_local!.embeddingProfile = 'private-search';
+  writeFileSync(path, JSON.stringify(config));
+  const { savePrivateAnswerMode } = await import('../src/core/first-run-privacy.ts');
+  expect(() => savePrivateAnswerMode(path, 'local-only', config)).toThrow();
+  expect(JSON.parse(readFileSync(path, 'utf8'))).toEqual(config);
+});

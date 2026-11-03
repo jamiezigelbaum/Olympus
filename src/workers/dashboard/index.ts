@@ -29,6 +29,7 @@ import {
   renderDashboardAgentsPage,
   renderDashboardConnectorPage,
   renderDashboardKeysPage,
+  renderDashboardHelpPage,
   type DashboardPageOptions,
 } from './pages/local.ts';
 import { DASHBOARD_PRIVATE_ANSWERS_ANONYMOUS_FRAGMENT, renderDashboardPrivateAnswersPage } from './pages/private-answers.ts';
@@ -41,7 +42,7 @@ export { DASHBOARD_HTML_PATH };
  */
 export const DASHBOARD_LEGACY_QUERY_PARAMS = ['source', 'background', 'sensitivity', 'setup', 'privacy', 'embedding-ledger'] as const;
 
-export type DashboardHtmlRoutePage = 'host' | 'panel_read' | 'keys' | 'agents' | 'private_answers' | 'outside_help_moved' | 'connector' | 'legacy';
+export type DashboardHtmlRoutePage = 'host' | 'panel_read' | 'keys' | 'agents' | 'private_answers' | 'outside_help_moved' | 'connector' | 'help' | 'legacy';
 
 export function isDashboardHtmlRoute(url: URL): boolean {
   return url.pathname === DASHBOARD_HTML_PATH;
@@ -52,6 +53,7 @@ export function dashboardHtmlRoutePage(url: URL): DashboardHtmlRoutePage {
   const params = url.searchParams;
   if (DASHBOARD_LEGACY_QUERY_PARAMS.some((param) => params.has(param))) return 'legacy';
   if (params.has(DASHBOARD_PANEL_READ_QUERY_PARAM)) return 'panel_read';
+  if (params.has(DASHBOARD_LOCAL_PAGES.help)) return 'help';
   if (params.has(DASHBOARD_LOCAL_PAGES.keys)) return 'keys';
   if (params.has(DASHBOARD_LOCAL_PAGES.agents)) return 'agents';
   if (params.has(DASHBOARD_LOCAL_PAGES.privateAnswers)) return 'private_answers';
@@ -81,11 +83,13 @@ export function dashboardOutsideHelpRedirect(url: URL): string {
 
 /** The computer's local pages. `view` is needed by Keys only. */
 export function renderDashboardLocalPage(
-  page: 'keys' | 'agents' | 'private_answers' | 'connector',
+  page: 'keys' | 'agents' | 'private_answers' | 'connector' | 'help',
   input: { url: URL; view?: SourceDashboardViewModel; options?: DashboardPageOptions },
 ): string {
   const options: DashboardPageOptions = { ...input.options, basePath: dashboardHomeHref(dashboardReadToken(input.url)) };
   switch (page) {
+    case 'help':
+      return renderDashboardHelpPage(options);
     case 'keys':
       if (!input.view) throw new Error('Keys needs the dashboard view.');
       return renderDashboardKeysPage(input.view, options);

@@ -1,7 +1,7 @@
 import { createPrivacyQuestionEngine, type PrivacyQuestionEngine } from '../classification/privacy-questions.ts';
 import { readFileSync } from 'node:fs';
-import { isPendingPrivacyPolicy, saveFirstRunPrivacyChoice } from '../../core/first-run-privacy.ts';
-import { PRIVATE_ANSWER_OPTIONS } from '../../core/privacy-language.ts';
+import { isPendingPrivacyPolicy, savePrivateAnswerMode, privateAnswerMode } from '../../core/first-run-privacy.ts';
+import { PRIVATE_ANSWER_OPTIONS, PRIVACY_PRESET_LABELS } from '../../core/privacy-language.ts';
 /**
  * The engine side of setup from ChatGPT (setup-tools.ts): each call goes to
  * the worker's own dashboard route in process, so the ChatGPT panel and the
@@ -124,12 +124,16 @@ export function createChatGptSetupBackend(options: ChatGptSetupBackendOptions): 
     // A separate setup path may already have answered since this worker booted.
     const current = options.sovereignty.source === 'file' && options.sovereignty.path
       ? validateSovereigntyConfig(JSON.parse(readFileSync(options.sovereignty.path, 'utf8'))) : policy;
+    policy = current;
+    const policyRevision = createHash('sha256').update(JSON.stringify(current)).digest('hex').slice(0, 16);
     if (isPendingPrivacyPolicy(current)) return {
       configured: false, description: '', rules: [], pendingCount: 0,
-      revision: privacyRevision(undefined),
+      revision: privacyRevision(undefined) + '.' + policyRevision,
       privateAnswerChoice: { pending: true, options: PRIVATE_ANSWER_OPTIONS },
     };
-    return readChatGptPrivacySettings(options.env ?? process.env, safeCount(options.pendingClassificationCount));
+    const settings = readChatGptPrivacySettings(options.env ?? process.env, safeCount(options.pendingClassificationCount));
+    const id = privateAnswerMode(current);
+    return { ...settings, revision: settings.revision + '.' + policyRevision, privateAnswerMode: { id, label: id === 'custom' ? 'Custom Private-answer mode' : PRIVACY_PRESET_LABELS[id], options: PRIVATE_ANSWER_OPTIONS } };
   };
 
 
@@ -320,7 +324,7 @@ export function createChatGptSetupBackend(options: ChatGptSetupBackendOptions): 
 
     choosePrivateAnswers(choice) {
       if (options.sovereignty.source !== 'file' || !options.sovereignty.path) throw new SetupBackendError('invalid_request');
-      const result = saveFirstRunPrivacyChoice(options.sovereignty.path, choice);
+      const result = savePrivateAnswerMode(options.sovereignty.path, choice, policy);
       if (!result.ok) throw new SetupBackendError('invalid_request');
       policy = result.config;
       if (result.changed) options.requestReload();

@@ -57,3 +57,52 @@ export function saveComputerUseChoice(policyPath: string, choice: 'everyday' | '
   if (!current || current.choice !== null) return;
   writePrivateFileAtomicSync(computerUseStatePath(policyPath), JSON.stringify({ ...current, choice }) + '\n');
 }
+
+/** Infer the saved mode from the active Private route, including older installs. */
+export function privateAnswerMode(config: SovereigntyConfig): SovereigntyPresetName | 'custom' {
+  // Older or partial policies may lack routes or profiles: they read as custom.
+  const route = config.routes?.secure_local;
+  if (route?.mode === 'disabled') return 'no-sensitive';
+  const members = route?.pool?.order ?? route?.pool?.members ?? route?.analyst ?? [];
+  const providers = members.map(id => config.modelProfiles?.[id]?.provider);
+  if (providers.length === 1 && providers[0] === 'venice') return 'private-cloud-only';
+  if (providers.length === 1 && providers[0] === 'local-openai-compatible') return 'local-only';
+  if (route?.pool?.order && providers.length === 2 && providers[0] === 'local-openai-compatible' && providers[1] === 'venice') return 'local-first';
+  return 'custom';
+}
+
+/** Change the Private lane and its permissions; keep search model identity and local endpoints. */
+export function savePrivateAnswerMode(path: string, choice: SovereigntyPresetName, expect: SovereigntyConfig) {
+  if (isPendingPrivacyPolicy(expect)) return saveFirstRunPrivacyChoice(path, choice);
+  return updateSovereigntyConfigFile({ path, expect, patch: current => {
+    const next = structuredClone(current);
+    const preset = loadSovereigntyPreset(choice);
+    const route = structuredClone(preset.routes.secure_local!);
+    const oldMembers = current.routes.secure_local?.pool?.members ?? current.routes.secure_local?.analyst ?? [];
+    const mapped = new Map<string, string>();
+    for (const id of route.pool?.members ?? route.analyst ?? []) {
+      const profile = preset.modelProfiles[id]!;
+      const existing = oldMembers.find(member => current.modelProfiles[member]?.provider === profile.provider);
+      if (existing) { mapped.set(id, existing); continue; }
+      // Never overwrite an endpoint the owner already runs with a different provider.
+      if (next.modelProfiles[id] && next.modelProfiles[id]!.provider !== profile.provider) throw new Error('The selected mode conflicts with a custom model.');
+      next.modelProfiles[id] ??= profile;
+      mapped.set(id, id);
+    }
+    if (route.pool) {
+      route.pool.members = route.pool.members.map(id => mapped.get(id)!);
+      if (route.pool.order) route.pool.order = route.pool.order.map(id => mapped.get(id)!);
+    }
+    if (route.analyst) route.analyst = route.analyst.map(id => mapped.get(id)!);
+    next.routes.secure_local = route;
+    const retrieval = next.retrieval.trustDomains.secure_local;
+    const target = preset.retrieval.trustDomains.secure_local!;
+    if (!retrieval) throw new Error('Private search settings are unavailable.');
+    retrieval.minimumExecutionTrust = target.minimumExecutionTrust;
+    retrieval.allowedEmbeddingTrust = [...target.allowedEmbeddingTrust];
+    if (target.secureHandling) retrieval.secureHandling = target.secureHandling;
+    else delete retrieval.secureHandling;
+    retrieval.allowCloudQuery = false;
+    return next;
+  } });
+}

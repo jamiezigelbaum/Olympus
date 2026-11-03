@@ -1258,6 +1258,27 @@ test('pending first-run opens the shared mode choice before any profile edit', a
   expect(host.text()).not.toContain('How should Olympus answer with Private items?');
 });
 
+test('a mode save that lost a race says nothing was saved and keeps the chosen mode', async () => {
+  const saves: any[] = [];
+  const pending = { pending: true as const, options: PRIVATE_ANSWER_OPTIONS };
+  const { host } = await openPrivacy({
+    getResult: () => privacyToolResult({ configured: false, description: '', rules: [], pendingCount: 0, revision: 'rev1', privateAnswerChoice: pending }, 'current', 'owner-token'),
+    setResult: args => {
+      saves.push(args);
+      // Another tab saved first: the engine returns what is saved now, unchanged.
+      return privacyToolResult({ configured: false, description: '', rules: [], pendingCount: 0, revision: 'rev2', privateAnswerChoice: pending }, 'conflict', 'owner-token');
+    },
+  });
+  (host.doc.querySelector('input[value="local-only"]') as unknown as HTMLInputElement).click();
+  await host.settle();
+  host.button('Save Private-answer mode').click();
+  await host.settle();
+  expect(saves).toHaveLength(1);
+  expect(host.text()).toContain(W.conflict);
+  expect(host.text()).not.toContain(W.saved);
+  expect((host.doc.querySelector('input[value="local-only"]') as unknown as HTMLInputElement).checked).toBe(true);
+});
+
 describe('privacy step sheet', () => {
   test('starts with full description, compact removable chips and collapsed Details', async () => {
     const { host } = await openPrivacy({ description: DESCRIPTION, rules: SAVED_RULES });
@@ -1409,4 +1430,16 @@ test('the save bar follows pending covered edits, including reverting to the sav
   const choice = host.doc.querySelector('[data-key="privacy:q:family:medical:share"]') as HTMLButtonElement;
   choice.click();
   expect(host.button(W.save).textContent).toBe('Save description and answers');
+});
+
+test('Privacy shows the saved mode and Change opens the same four choices', async () => {
+  const host = mount({ [P.get]: () => privacyToolResult({ configured: true, description: '', rules: [], pendingCount: 0, revision: 'rev1', privateAnswerMode: { id: 'local-only', label: 'Local models', options: PRIVATE_ANSWER_OPTIONS } }, 'current', 'owner-token') });
+  host.push({ structuredContent: model({ configured: true, ruleCount: 0, pendingCount: 0 }) });
+  host.button('Edit').click();
+  await host.settle();
+  expect(host.text()).toContain('Private-answer mode');
+  expect(host.text()).toContain('Local models');
+  host.button('Change').click();
+  expect(host.doc.querySelectorAll('input[name="private-answer-mode"]')).toHaveLength(4);
+  expect((host.doc.querySelector('input[value="local-only"]') as HTMLInputElement).checked).toBe(true);
 });

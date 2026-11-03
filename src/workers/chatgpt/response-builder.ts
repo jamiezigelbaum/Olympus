@@ -1,4 +1,5 @@
-import { PRIVATE_ANSWER_OPTIONS } from '../../core/privacy-language.ts';
+import { sourceSupportDetails } from '../dashboard/source-failure.ts';
+import { PRIVATE_ANSWER_OPTIONS, PRIVACY_PRESET_LABELS } from '../../core/privacy-language.ts';
 import { REMOTE_SECRET_NOTE } from '../../core/remote-result.ts';
 /**
  * The allowlisted response builder: the ONLY way a ChatGPT-bound response
@@ -303,6 +304,7 @@ function copySource(source: DashboardSource): DashboardSource {
     group: source.group === 'local' ? 'local' : 'cloud',
     status: STATUSES.has(source.status) ? source.status : 'Waiting',
   };
+  out.supportDetails = sourceSupportDetails({ sourceId: source.id, state: out.status, failure: source.progress?.stall?.failure ?? source.lastManualSync?.failure, ref: source.progress?.stall?.ref ?? source.lastManualSync?.ref });
   if (source.detail) out.detail = text(source.detail);
   if (iso(source.lastSyncAt)) out.lastSyncAt = iso(source.lastSyncAt)!;
   if (source.primary) out.primary = copyFix(source.primary);
@@ -1170,6 +1172,9 @@ function copyPrivacySettings(settings: PrivacySettings): PrivacySettings {
       return [{ kind: 'folder', source_id: sourceId, key: opaque(rule.key), ...(display ? { display } : {}) }];
     }),
     ...(settings.privateAnswerChoice?.pending === true ? { privateAnswerChoice: { pending: true as const, options: PRIVATE_ANSWER_OPTIONS } } : {}),
+    ...(settings.privateAnswerMode && (settings.privateAnswerMode.id === 'custom' || PRIVATE_ANSWER_OPTIONS.some(option => option.id === settings.privateAnswerMode!.id)) ? {
+      privateAnswerMode: { id: settings.privateAnswerMode.id, label: settings.privateAnswerMode.id === 'custom' ? 'Custom Private-answer mode' : PRIVACY_PRESET_LABELS[settings.privateAnswerMode.id], options: PRIVATE_ANSWER_OPTIONS },
+    } : {}),
     pendingCount: whole(settings.pendingCount),
     ...(typeof settings.revision === 'string' && settings.revision ? { revision: opaque(settings.revision).slice(0, 64) } : {}),
   };

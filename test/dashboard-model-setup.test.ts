@@ -72,3 +72,46 @@ test('a worker restarts itself only after a validated native-service launch or u
   expect(workerRestartsItself({ nativeServiceSupervised: false }, { OLYMPUS_NATIVE_SERVICE_INSTANCE_ID: '0f8fad5b-d9cb-469f-a165-70867728950e' })).toBe(false);
   expect(workerRestartsItself({}, {})).toBe(false);
 });
+
+test('locked sources show private-model bytes and a failed download offers Try again', async () => {
+  const { renderModelSetupBlocker, dashboardModelsBlockedReason } = await import('../src/workers/dashboard/model-setup.ts');
+  const base = { ready: false, checked_at: new Date().toISOString(), cards: [] };
+  const downloading = { ...base, private_model: { state: 'downloading' as const, bytesDone: 1.4e9, bytesTotal: 2.7e9 } };
+  expect(dashboardModelsBlockedReason(downloading)).toContain('Downloading the private answer model: 1.4 of 2.7 GB');
+  expect(renderModelSetupBlocker(downloading)).toContain('1.4 of 2.7 GB');
+  const failed = renderModelSetupBlocker({ ...base, private_model: { state: 'failed', bytesDone: 0, bytesTotal: 2.7e9 } });
+  expect(failed).toContain('download failed');
+  expect(failed).toContain('Try again');
+  expect(failed).toContain('data-model-retry');
+});
+
+test('model bytes keep refreshing while the first-run choice sheet stays in place', async () => {
+  const { Window } = await import('happy-dom');
+  const { mountDashboardController } = await import('../src/control-ui/browser-controller.ts');
+  const { renderModelSetup, renderModelSetupBlocker } = await import('../src/workers/dashboard/model-setup.ts');
+  const happy = new Window({ url: 'http://127.0.0.1:8010/dashboard?keys' });
+  const names = ['window', 'document', 'navigator', 'Element', 'HTMLElement', 'HTMLFormElement', 'HTMLInputElement', 'HTMLTextAreaElement', 'HTMLSelectElement', 'HTMLButtonElement', 'HTMLAnchorElement', 'ShadowRoot', 'Event', 'MouseEvent', 'FormData', 'CSS'];
+  const old = new Map(names.map(name => [name, Object.getOwnPropertyDescriptor(globalThis, name)]));
+  const abort = new AbortController();
+  try {
+    for (const name of names) Object.defineProperty(globalThis, name, { configurable: true, value: name === 'window' ? happy : (happy as any)[name] });
+    const root = happy.document.createElement('div');
+    const initial: ModelSetupView = { ready: false, privacy_choice_pending: true, checked_at: new Date().toISOString(), cards: [], private_model: { state: 'downloading', bytesDone: 1.4e9, bytesTotal: 2.7e9 } };
+    root.innerHTML = renderModelSetup(initial);
+    happy.document.body.append(root);
+    const fresh = { ...initial, privacy_choice_pending: false, private_model: { ...initial.private_model!, bytesDone: 2e9 } };
+    const controller = mountDashboardController({ root: root as any, transport: { control: async () => ({ status: 200, body: { ok: true } }) }, navigate: () => {},
+      refresh: async () => ({ status: 200, title: 'Olympus', body: renderModelSetupBlocker(fresh) + renderModelSetup(fresh), controller: 'dashboard', can_write: true, signature: 'new', poll_interval_ms: 0 }),
+      returnUrl: happy.location.href, canWrite: true, signal: abort.signal, pollIntervalMs: 0,
+    });
+    const sheet = root.querySelector('[data-first-run-sheet]');
+    root.querySelector('form[data-first-run-privacy]')!.dispatchEvent(new happy.Event('submit', { bubbles: true, cancelable: true }));
+    for (let i = 0; i < 5; i++) await Bun.sleep(0);
+    await controller.refresh();
+    expect(root.querySelector('[data-first-run-sheet]')).toBe(sheet);
+    expect(root.textContent).toContain('2.0 of 2.7 GB');
+  } finally {
+    abort.abort(); happy.close();
+    for (const name of names) { const descriptor = old.get(name); if (descriptor) Object.defineProperty(globalThis, name, descriptor); else delete (globalThis as any)[name]; }
+  }
+});
