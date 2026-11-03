@@ -520,3 +520,30 @@ function connector(items: RawItem[]): SourceConnector {
     },
   };
 }
+
+describe('status build shares the worker thread', () => {
+  test('a timer due during a long status build runs between corpora, not after all of them', async () => {
+    const { defineLocalFilesCorpus } = await import('../src/workers/local-files/store.ts');
+    const definitions = [defineDropboxFilesCorpus(), defineLocalFilesCorpus()];
+    const stores = definitions.map((definition) => new LocalConnectorStore({
+      dbPath: ':memory:', corpusId: definition.corpusId, family: 'file', trustDomain: definition.trustDomain,
+    }));
+    const order: string[] = [];
+    for (const store of stores) {
+      const real = store.status.bind(store);
+      store.status = ((...args: Parameters<typeof store.status>) => {
+        order.push(`status:${store.corpusId}`);
+        const until = Date.now() + 40; // a store whose counts take a while
+        while (Date.now() < until) { /* busy */ }
+        return real(...args);
+      }) as typeof store.status;
+    }
+    try {
+      const handler = createSourceIndexStatusHandler({ corpusDefinitions: definitions, connectorStores: stores });
+      setTimeout(() => order.push('request'), 5);
+      const result = await handler.status({});
+      expect(result.corpora).toHaveLength(2);
+      expect(order).toEqual([`status:${definitions[0]!.corpusId}`, 'request', `status:${definitions[1]!.corpusId}`]);
+    } finally { for (const store of stores) store.close(); }
+  });
+});
