@@ -841,7 +841,8 @@ describe('install.sh template', () => {
       expect(`${path}\n${result.stdout}${result.stderr}`).toBe(`${path}\n`);
       expect(result.status).toBe(0);
     }
-  });
+  // shellcheck runs three times over long scripts; a busy CI runner can take more than 5s.
+  }, 30_000);
 });
 
 describe.each(SHELLS)('uninstall.sh under %s', (shell) => {
