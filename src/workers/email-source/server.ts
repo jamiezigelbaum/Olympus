@@ -531,6 +531,9 @@ import type { AnalystModel } from '../../core/analyst.ts';
 import { resolveTierMigrationPaths, tierMigrationStatusSummary } from '../classification/tier-migration.ts';
 import { resolveEmbeddingLedgerPath } from '../embedding-ledger.ts';
 import { startCpuSampleLog } from '../control-path-headroom.ts';
+
+/** The least time between two scheduler status snapshots for the ingestion ledger. */
+const SOURCE_STATUS_PUBLISH_MIN_INTERVAL_MS = 30_000;
 import { remoteAccessFromStatus, type DashboardAgentConnectionsBackend } from '../agent-connections.ts';
 import { createDashboardRemoteAccessControl, createGatewayRemoteAccessConfigWriter, createStandaloneRemoteAccessConfigWriter, createDashboardEngineRestart } from '../remote-access-control.ts';
 
@@ -5470,6 +5473,8 @@ export async function main(): Promise<void> {
       sources: schedulerSources,
       ...(sourceIndexStatus && sourceIngestionLedger
         ? {
+            // Each delivery reads every store's status; at most one every 30 s.
+            afterTickMinIntervalMs: SOURCE_STATUS_PUBLISH_MIN_INTERVAL_MS,
             afterTick: async (schedulerStatus) => {
               const status = await sourceIndexStatus.status({ include_items: false });
               sourceIngestionLedger.record(buildSourceIngestionLedgerSnapshot(status, {

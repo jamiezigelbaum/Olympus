@@ -382,6 +382,12 @@ export interface SourceSchedulerOptions {
   setIntervalImpl?: typeof setInterval;
   clearIntervalImpl?: typeof clearInterval;
   afterTick?: (status: SourceSchedulerStatus) => void | Promise<void>;
+  /**
+   * The least time between two afterTick deliveries; statuses in between
+   * coalesce to the latest, delivered when the interval has passed. 0 (the
+   * default) delivers after every tick.
+   */
+  afterTickMinIntervalMs?: number;
   stateStore?: SourceSchedulerStateStore;
   /** Consecutive zero-change runs before a lane is marked degraded. */
   zeroChangeDegradeRuns?: number;
@@ -528,6 +534,9 @@ export class SourceScheduler {
   private readonly busyConcurrencyKeys = new Set<string>();
   private pendingAfterTickStatus: SourceSchedulerStatus | undefined;
   private afterTickDrain: Promise<void> | undefined;
+  private readonly afterTickMinIntervalMs: number;
+  private lastAfterTickAt: number | undefined;
+  private afterTickTimer: ReturnType<typeof setTimeout> | undefined;
   private timer: ReturnType<typeof setInterval> | undefined;
   private readonly fastWakeTimers = new Map<number, ReturnType<typeof setInterval>>();
   private readonly continueAfterMs: number;
@@ -551,6 +560,7 @@ export class SourceScheduler {
     this.setIntervalImpl = options.setIntervalImpl ?? setInterval;
     this.clearIntervalImpl = options.clearIntervalImpl ?? clearInterval;
     this.afterTick = options.afterTick;
+    this.afterTickMinIntervalMs = Math.max(0, options.afterTickMinIntervalMs ?? 0);
     this.stateStore = options.stateStore;
     this.zeroChangeDegradeRuns = options.zeroChangeDegradeRuns ?? DEFAULT_ZERO_CHANGE_DEGRADE_RUNS;
     this.continueAfterMs = options.continueAfterMs ?? SOURCE_SCHEDULER_CONTINUE_AFTER_MS;
@@ -618,6 +628,10 @@ export class SourceScheduler {
     if (this.continueWake) {
       this.clearTimeoutImpl(this.continueWake.timer);
       this.continueWake = undefined;
+    }
+    if (this.afterTickTimer) {
+      this.clearTimeoutImpl(this.afterTickTimer);
+      this.afterTickTimer = undefined;
     }
   }
 
@@ -852,9 +866,36 @@ export class SourceScheduler {
   private publishAfterTick(status: SourceSchedulerStatus): Promise<void> {
     if (!this.afterTick) return Promise.resolve();
     this.pendingAfterTickStatus = status;
+    if (this.afterTickDrain) return this.afterTickDrain;
+    // A delivery builds every store's status. Continuation wakes tick every few
+    // seconds during an import, and a status per tick held Sparta's worker for
+    // most of its time (2026-11-03), so deliveries are spaced; the latest
+    // status waits for the next slot instead.
+    const waitMs = this.afterTickWaitMs();
+    if (waitMs > 0) {
+      if (!this.afterTickTimer) {
+        this.afterTickTimer = this.setTimeoutImpl(() => {
+          this.afterTickTimer = undefined;
+          void this.startAfterTickDrain();
+        }, waitMs);
+        (this.afterTickTimer as { unref?: () => void }).unref?.();
+      }
+      return Promise.resolve();
+    }
+    return this.startAfterTickDrain();
+  }
+
+  private afterTickWaitMs(): number {
+    if (this.afterTickMinIntervalMs <= 0 || this.lastAfterTickAt === undefined) return 0;
+    return Math.max(0, this.lastAfterTickAt + this.afterTickMinIntervalMs - Date.now());
+  }
+
+  private startAfterTickDrain(): Promise<void> {
     if (!this.afterTickDrain) {
       this.afterTickDrain = this.drainAfterTickStatuses().finally(() => {
         this.afterTickDrain = undefined;
+        // A status that arrived during the last delivery waits its slot.
+        if (this.pendingAfterTickStatus) void this.publishAfterTick(this.pendingAfterTickStatus);
       });
     }
     return this.afterTickDrain;
@@ -864,11 +905,13 @@ export class SourceScheduler {
     while (this.pendingAfterTickStatus) {
       const status = this.pendingAfterTickStatus;
       this.pendingAfterTickStatus = undefined;
+      this.lastAfterTickAt = Date.now();
       try {
         await this.afterTick!(status);
       } catch (error) {
         console.error(`[olympus:source-scheduler] after_tick_failed error_kind=${safeSchedulerErrorKind(error)}`);
       }
+      if (this.afterTickWaitMs() > 0) break;
     }
   }
 
@@ -1344,6 +1387,7 @@ export function createSourceSchedulerFromConfig(input: {
   config: OlympusConfig;
   sources: SourceSchedulerSource[];
   afterTick?: (status: SourceSchedulerStatus) => void | Promise<void>;
+  afterTickMinIntervalMs?: number;
   stateStore?: SourceSchedulerStateStore;
 }): SourceScheduler {
   return new SourceScheduler({
@@ -1363,6 +1407,7 @@ export function createSourceSchedulerFromConfig(input: {
       ? { allowedSourceIds: input.config.worker.scheduler.sourceIds }
       : {}),
     ...(input.afterTick ? { afterTick: input.afterTick } : {}),
+    ...(input.afterTickMinIntervalMs !== undefined ? { afterTickMinIntervalMs: input.afterTickMinIntervalMs } : {}),
     ...(input.config.worker.scheduler.enabled
       ? { stateStore: input.stateStore ?? new LocalSourceSchedulerStateStore() }
       : {}),

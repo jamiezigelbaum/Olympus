@@ -65091,7 +65091,7 @@ init_config();
 init_data_owner_lock();
 init_worker_auth();
 init_worker_transport();
-import { createHash as createHash26 } from "node:crypto";
+import { createHash as createHash27 } from "node:crypto";
 import { existsSync as existsSync28, lstatSync as lstatSync15, mkdirSync as mkdirSync18, writeFileSync as writeFileSync7 } from "node:fs";
 import { dirname as dirname35, isAbsolute as isAbsolute14 } from "node:path";
 
@@ -67109,6 +67109,9 @@ class SourceScheduler {
   busyConcurrencyKeys = new Set;
   pendingAfterTickStatus;
   afterTickDrain;
+  afterTickMinIntervalMs;
+  lastAfterTickAt;
+  afterTickTimer;
   timer;
   fastWakeTimers = new Map;
   continueAfterMs;
@@ -67129,6 +67132,7 @@ class SourceScheduler {
     this.setIntervalImpl = options.setIntervalImpl ?? setInterval;
     this.clearIntervalImpl = options.clearIntervalImpl ?? clearInterval;
     this.afterTick = options.afterTick;
+    this.afterTickMinIntervalMs = Math.max(0, options.afterTickMinIntervalMs ?? 0);
     this.stateStore = options.stateStore;
     this.zeroChangeDegradeRuns = options.zeroChangeDegradeRuns ?? DEFAULT_ZERO_CHANGE_DEGRADE_RUNS;
     this.continueAfterMs = options.continueAfterMs ?? SOURCE_SCHEDULER_CONTINUE_AFTER_MS;
@@ -67190,6 +67194,10 @@ class SourceScheduler {
     if (this.continueWake) {
       this.clearTimeoutImpl(this.continueWake.timer);
       this.continueWake = undefined;
+    }
+    if (this.afterTickTimer) {
+      this.clearTimeoutImpl(this.afterTickTimer);
+      this.afterTickTimer = undefined;
     }
   }
   syncChangeSubscriptions() {
@@ -67380,9 +67388,32 @@ class SourceScheduler {
     if (!this.afterTick)
       return Promise.resolve();
     this.pendingAfterTickStatus = status;
+    if (this.afterTickDrain)
+      return this.afterTickDrain;
+    const waitMs = this.afterTickWaitMs();
+    if (waitMs > 0) {
+      if (!this.afterTickTimer) {
+        this.afterTickTimer = this.setTimeoutImpl(() => {
+          this.afterTickTimer = undefined;
+          this.startAfterTickDrain();
+        }, waitMs);
+        this.afterTickTimer.unref?.();
+      }
+      return Promise.resolve();
+    }
+    return this.startAfterTickDrain();
+  }
+  afterTickWaitMs() {
+    if (this.afterTickMinIntervalMs <= 0 || this.lastAfterTickAt === undefined)
+      return 0;
+    return Math.max(0, this.lastAfterTickAt + this.afterTickMinIntervalMs - Date.now());
+  }
+  startAfterTickDrain() {
     if (!this.afterTickDrain) {
       this.afterTickDrain = this.drainAfterTickStatuses().finally(() => {
         this.afterTickDrain = undefined;
+        if (this.pendingAfterTickStatus)
+          this.publishAfterTick(this.pendingAfterTickStatus);
       });
     }
     return this.afterTickDrain;
@@ -67391,11 +67422,14 @@ class SourceScheduler {
     while (this.pendingAfterTickStatus) {
       const status = this.pendingAfterTickStatus;
       this.pendingAfterTickStatus = undefined;
+      this.lastAfterTickAt = Date.now();
       try {
         await this.afterTick(status);
       } catch (error) {
         console.error(`[olympus:source-scheduler] after_tick_failed error_kind=${safeSchedulerErrorKind(error)}`);
       }
+      if (this.afterTickWaitMs() > 0)
+        break;
     }
   }
   async runStates(states, dueAt, provenance) {
@@ -70320,6 +70354,7 @@ init_atomic_file();
 init_sniffer();
 init_sniffer_lane();
 init_tier_ledger();
+import { createHash as createHash26 } from "node:crypto";
 import { mkdirSync as mkdirSync17, readFileSync as readFileSync24 } from "node:fs";
 import { dirname as dirname34 } from "node:path";
 var DEFAULT_SNIFFER_MAX_CALLS_PER_DAY = 20000;
@@ -70375,6 +70410,20 @@ class SnifferCallBudget {
       this.used = 0;
     }
   }
+}
+var SECRET_SCREEN_CACHE_LIMIT = 20000;
+var secretScreenCache = new Map;
+function materialCarriesSecret(question) {
+  const own3 = snifferOwnMaterial(question.material);
+  const key2 = createHash26("sha256").update(own3).digest("base64");
+  const known = secretScreenCache.get(key2);
+  if (known !== undefined)
+    return known;
+  const carries = snifferMaterialCarriesSecret(own3);
+  if (secretScreenCache.size >= SECRET_SCREEN_CACHE_LIMIT)
+    secretScreenCache.delete(secretScreenCache.keys().next().value);
+  secretScreenCache.set(key2, carries);
+  return carries;
 }
 async function runSnifferPass(options) {
   const promptVersion = options.promptVersion ?? SNIFFER_PROMPT_VERSION;
@@ -70491,7 +70540,7 @@ async function runSnifferPass(options) {
     return open4;
   };
   const screenQuestion = (target, question) => {
-    const screen = snifferMaterialCarriesSecret(snifferOwnMaterial(question.material)) ? "secrets" : target.screenStoredQuestion?.(question) ?? "clean";
+    const screen = materialCarriesSecret(question) ? "secrets" : target.screenStoredQuestion?.(question) ?? "clean";
     if (screen === "unreadable") {
       report.awaitingPlacement += 1;
       return false;
@@ -71962,7 +72011,7 @@ async function runSourceEmbeddingDrain(options) {
         }
       }
       consecutiveFailures = Math.max(...laneConsecutiveFailures);
-      scopeReport.errors.push(createHash26("sha256").update(message2).digest("hex"));
+      scopeReport.errors.push(createHash27("sha256").update(message2).digest("hex"));
       consecutiveIdleScopeChecks = 0;
       emitProgress();
       if (!isolatedLanes[item.laneIndex] && errorBackoffMs > 0) {
@@ -72292,7 +72341,7 @@ function normalizeOptionalList(values) {
   return [...new Set((values ?? []).map((value) => value.trim()).filter(Boolean))];
 }
 function hashScope(scope) {
-  return createHash26("sha256").update(scope).digest("hex").slice(0, 16);
+  return createHash27("sha256").update(scope).digest("hex").slice(0, 16);
 }
 function sum(items, value) {
   return items.reduce((total, item) => total + value(item), 0);
