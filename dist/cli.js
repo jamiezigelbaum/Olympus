@@ -142415,6 +142415,7 @@ function createDashboardMessagingPairing(options) {
       ...item.linked && item.state !== "failed" && item.state !== "cancelled" ? { linked: true } : {},
       ...item.state === "failed" && item.reason ? { reason: item.reason } : {},
       ...(item.state === "failed" || item.state === "cancelled") && item.unlinked ? { unlinked: item.unlinked } : {},
+      ...item.state === "cancelled" && item.task ? { cleaning: true } : {},
       ...item.chats ? { chats: item.chats } : {},
       ...item.state === "scope_selection_required" ? { wholeAccount: false, chatScopes: [] } : {},
       ...item.registrationMayBeSaved ? { registrationMayBeSaved: true } : {},
@@ -146104,7 +146105,7 @@ function mountDashboardController(options) {
             slot.append(form);
         }
       }
-      if (operation !== "chats" && (operation !== "cancel" || state === "committing") && !["paired", "complete", "completed", "failed", "cancelled", "idle", "not_paired", "scope_selection_required"].includes(state)) {
+      if (state === "cancelled" && body.cleaning === true || operation !== "chats" && (operation !== "cancel" || state === "committing") && !["paired", "complete", "completed", "failed", "cancelled", "idle", "not_paired", "scope_selection_required"].includes(state)) {
         messagingTimers.set(card, setTimeout(() => {
           messagingTimers.delete(card);
           messagingRequest(card, "status");

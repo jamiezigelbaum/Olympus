@@ -57,6 +57,8 @@ export function createDashboardMessagingPairing<T extends PairResult>(options: {
       ...(item.linked && item.state !== 'failed' && item.state !== 'cancelled' ? { linked: true } : {}),
       ...(item.state === 'failed' && item.reason ? { reason: item.reason } : {}),
       ...((item.state === 'failed' || item.state === 'cancelled') && item.unlinked ? { unlinked: item.unlinked } : {}),
+      // A cancel returns at once; cleanup (such as unlinking the phone) may still be running, so the card keeps asking.
+      ...(item.state === 'cancelled' && item.task ? { cleaning: true } : {}),
       ...(item.chats ? { chats: item.chats } : {}),
       ...(item.state === 'scope_selection_required' ? { wholeAccount: false, chatScopes: [] } : {}),
       ...(item.registrationMayBeSaved ? { registrationMayBeSaved: true } : {}),

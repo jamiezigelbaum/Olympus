@@ -214,6 +214,27 @@ describe('Copy details on a failed pairing', () => {
   });
 });
 
+test('a cancel says cleanup is still running until the pairing task ends', async () => {
+  let finish!: () => void;
+  const cleanup = new Promise<void>((resolve) => { finish = resolve; });
+  // Unlinking happens inside pair's catch; model it as a task that ends later.
+  const slow = createDashboardMessagingPairing({
+    pair: async (_source, hooks) => {
+      try { return await new Promise<never>((_resolve, reject) => hooks.signal.addEventListener('abort', () => reject(new Error('cancelled')))); }
+      catch (error) { await cleanup; Object.assign(error as Error, { unlinked: 'offline' }); throw error; }
+    },
+    publish: async () => {},
+  });
+  slow.start('whatsapp');
+  await Promise.resolve();
+  expect(slow.cancel('whatsapp')).toMatchObject({ state: 'cancelled', cleaning: true });
+  finish();
+  await slow.cancelAndWait('whatsapp');
+  const done = slow.status('whatsapp');
+  expect(done).toMatchObject({ state: 'cancelled', unlinked: 'offline' });
+  expect(done).not.toHaveProperty('cleaning');
+});
+
 describe('the WhatsApp chat listing', () => {
   const script = (body: string) => {
     const dir = mkdtempSync(join(tmpdir(), 'wa-list-'));

@@ -1872,7 +1872,10 @@ func runUnlinkMode(ctx context.Context, container *sqlstore.Container) error {
 			return nil
 		}
 	}
-	if err := device.Delete(ctx); err != nil {
+	// A fresh deadline: a connect or logout that used up ctx must not also keep the local session.
+	cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	defer cancel()
+	if err := device.Delete(cleanup); err != nil {
 		return errors.New("session_store_failed")
 	}
 	return errors.New("unlink_offline")
