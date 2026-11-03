@@ -1258,6 +1258,27 @@ test('pending first-run opens the shared mode choice before any profile edit', a
   expect(host.text()).not.toContain('How should Olympus answer with Private items?');
 });
 
+test('a mode save that lost a race says nothing was saved and keeps the chosen mode', async () => {
+  const saves: any[] = [];
+  const pending = { pending: true as const, options: PRIVATE_ANSWER_OPTIONS };
+  const { host } = await openPrivacy({
+    getResult: () => privacyToolResult({ configured: false, description: '', rules: [], pendingCount: 0, revision: 'rev1', privateAnswerChoice: pending }, 'current', 'owner-token'),
+    setResult: args => {
+      saves.push(args);
+      // Another tab saved first: the engine returns what is saved now, unchanged.
+      return privacyToolResult({ configured: false, description: '', rules: [], pendingCount: 0, revision: 'rev2', privateAnswerChoice: pending }, 'conflict', 'owner-token');
+    },
+  });
+  (host.doc.querySelector('input[value="local-only"]') as unknown as HTMLInputElement).click();
+  await host.settle();
+  host.button('Save Private-answer mode').click();
+  await host.settle();
+  expect(saves).toHaveLength(1);
+  expect(host.text()).toContain(W.conflict);
+  expect(host.text()).not.toContain(W.saved);
+  expect((host.doc.querySelector('input[value="local-only"]') as unknown as HTMLInputElement).checked).toBe(true);
+});
+
 describe('privacy step sheet', () => {
   test('starts with full description, compact removable chips and collapsed Details', async () => {
     const { host } = await openPrivacy({ description: DESCRIPTION, rules: SAVED_RULES });

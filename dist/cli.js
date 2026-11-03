@@ -155111,7 +155111,16 @@ function chatgptPrivacyProgram(kit, makeLogic) {
         return;
       s.saving = false;
       const data2 = settings(result);
-      if (!data2 || result.isError) {
+      const content = result && result.structuredContent;
+      if (data2 && content && content.status === "conflict") {
+        const wanted = s.answerMode;
+        take(data2);
+        s.answerMode = wanted;
+        s.saveError = W.conflict;
+        kit.render("privacy:answer:save");
+        return;
+      }
+      if (!data2 || result.isError || !content || content.status !== "saved") {
         s.saveError = W.saveFailed;
         kit.render("privacy:answer:save");
         return;
@@ -156304,7 +156313,7 @@ function renderMessagingCard(source, localSession, connection = { paired: false 
   const label = source === "telegram" ? "Telegram" : "WhatsApp";
   const sourceId = source === "telegram" ? "telegram.messages" : "whatsapp.personal.messages";
   const form = (kind, text4) => `<form method="dialog" data-messaging-kind="${kind}"${kind === "cancel" ? " hidden" : ""}><button class="btn${(connection.paired ? kind === "chats" : kind === "start") ? " primary" : ""}" type="submit">${text4}</button></form>`;
-  return `<section id="agent-${source}-personal" class="messaging-card" aria-hidden="false" data-source="${sourceId}" data-source-id="${sourceId}" data-messaging-source="${source}"><h3>${escapeHtml2(label)}</h3>` + (connection.paired ? `<p data-messaging-account>${connection.account ? `Linked account: ${escapeHtml2(connection.account)}` : `Your linked ${label} account`}</p>` : "") + (source === "whatsapp" ? "<p>The chat list includes saved contacts and groups and may omit unsaved chats. Choose all chats to include those.</p>" : "") + "<p>Pairing alone does not start capture. After pairing, choose which chats Olympus reads. Each message is classified on its own; choosing a chat does not set its privacy tier.</p>" + (!localSession ? '<p>Open dashboard controls on this computer to pair and choose chats.</p><form method="dialog" data-messaging-open-controls><button class="btn" type="submit">Open controls on this computer</button><span data-action-message role="status"></span></form></section>' : source === "telegram" ? `<div class="actionrow">${connection.paired ? form("chats", "Choose chats") + form("status", "Check connection") : '<button class="btn primary" type="button" data-sheet-toggle="#telegram-setup" aria-controls="telegram-setup" aria-expanded="false">Pair Telegram</button>' + form("chats", "Choose chats")}</div>${telegramSetupSheet()}</section>` : `<div class="actionrow">${connection.paired ? form("chats", "Choose chats") + form("status", "Check connection") : form("start", `Pair ${label}`) + form("chats", "Choose chats")}${form("cancel", "Cancel pairing")}</div><div data-messaging-view><p data-messaging-status role="status" aria-live="polite"></p><img data-messaging-qr hidden alt="Scan this QR code in WhatsApp to link Olympus" width="256" height="256"><div data-messaging-input></div><div data-messaging-chats></div></div></section>`);
+  return `<section id="agent-${source}-personal" class="messaging-card" aria-hidden="false" data-source="${sourceId}" data-source-id="${sourceId}" data-messaging-source="${source}"><h3>${escapeHtml2(label)}</h3>` + (connection.paired ? `<p data-messaging-account>${connection.account ? `Linked account: ${escapeHtml2(connection.account)}` : `Your linked ${label} account`}</p>` : "") + (source === "whatsapp" ? "<p>The chat list includes saved contacts and groups and may omit unsaved chats. Choose all chats to include those.</p>" : "") + "<p>Pairing alone does not start capture. After pairing, choose which chats Olympus reads. Each message is classified on its own; choosing a chat does not set its privacy tier.</p>" + (!localSession ? '<p>Open dashboard controls on this computer to pair and choose chats.</p><form method="dialog" data-messaging-open-controls><button class="btn" type="submit">Open controls on this computer</button><span data-action-message role="status"></span></form></section>' : source === "telegram" ? `<div class="actionrow">${connection.paired ? form("chats", "Choose chats") + form("status", "Check connection") + '<button class="btn" type="button" data-sheet-toggle="#telegram-setup" aria-controls="telegram-setup" aria-expanded="false">Pair again</button>' : '<button class="btn primary" type="button" data-sheet-toggle="#telegram-setup" aria-controls="telegram-setup" aria-expanded="false">Pair Telegram</button>' + form("chats", "Choose chats")}</div>${telegramSetupSheet()}</section>` : `<div class="actionrow">${connection.paired ? form("chats", "Choose chats") + form("status", "Check connection") + form("start", "Pair again") : form("start", `Pair ${label}`) + form("chats", "Choose chats")}${form("cancel", "Cancel pairing")}</div><div data-messaging-view><p data-messaging-status role="status" aria-live="polite"></p><img data-messaging-qr hidden alt="Scan this QR code in WhatsApp to link Olympus" width="256" height="256"><div data-messaging-input></div><div data-messaging-chats></div></div></section>`);
 }
 var init_messaging = __esm(() => {
   init_components();

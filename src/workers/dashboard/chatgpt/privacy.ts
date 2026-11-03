@@ -1110,7 +1110,18 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
       if (mine !== session || !s) return;
       s.saving = false;
       const data = settings(result);
-      if (!data || result.isError) {
+      const content = result && result.structuredContent;
+      if (data && content && content.status === 'conflict') {
+        // Nothing was applied. Show what is saved now, keep the requested
+        // mode selected, and let the person save it again on purpose.
+        const wanted = s.answerMode;
+        take(data);
+        s.answerMode = wanted;
+        s.saveError = W.conflict;
+        kit.render('privacy:answer:save');
+        return;
+      }
+      if (!data || result.isError || !content || content.status !== 'saved') {
         s.saveError = W.saveFailed;
         kit.render('privacy:answer:save');
         return;

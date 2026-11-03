@@ -70,5 +70,9 @@ for (const source of ['whatsapp', 'telegram'] as const) {
     expect(card.querySelector('.actionrow .primary')!.textContent).toBe('Choose chats');
     expect(card.querySelector('.actionrow')!.textContent).toContain('Check connection');
     expect(card.querySelector('.actionrow')!.textContent).not.toContain(`Pair ${source === 'whatsapp' ? 'WhatsApp' : 'Telegram'}`);
+    // An expired session still needs a way to pair again; it is never the primary action.
+    const again = [...card.querySelectorAll('.actionrow button')].find(button => button.textContent === 'Pair again')!;
+    expect(again).toBeDefined();
+    expect(again.classList.contains('primary')).toBe(false);
   });
 }

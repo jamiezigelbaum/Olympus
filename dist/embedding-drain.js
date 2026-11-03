@@ -46959,7 +46959,16 @@ function chatgptPrivacyProgram(kit, makeLogic) {
         return;
       s.saving = false;
       const data2 = settings(result);
-      if (!data2 || result.isError) {
+      const content = result && result.structuredContent;
+      if (data2 && content && content.status === "conflict") {
+        const wanted = s.answerMode;
+        take(data2);
+        s.answerMode = wanted;
+        s.saveError = W.conflict;
+        kit.render("privacy:answer:save");
+        return;
+      }
+      if (!data2 || result.isError || !content || content.status !== "saved") {
         s.saveError = W.saveFailed;
         kit.render("privacy:answer:save");
         return;
