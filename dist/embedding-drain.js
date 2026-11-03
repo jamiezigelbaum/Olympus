@@ -17253,6 +17253,11 @@ class TierLedger {
   corpusHasCopies(corpusId) {
     return this.db.query("SELECT 1 FROM tier_copies WHERE corpus_id = ? LIMIT 1").get(corpusId) !== null;
   }
+  changeMarker() {
+    const row = this.db.query("SELECT total_changes() AS changes").get();
+    const version = this.db.query("PRAGMA data_version").get();
+    return `${version.data_version}:${row.changes}`;
+  }
   corpusCopyIdentities(corpusId, filter) {
     const where = filter === "held" ? `copy_state = 'current' AND embed_hold = 1` : filter === "metadata_layer" ? `copy_state = 'current' AND layers = 'metadata'` : filter === "metadata_layer_settled_unreadable" ? `copy_state = 'current' AND layers = 'metadata'
             AND EXISTS (SELECT 1 FROM tier_items t
@@ -24909,6 +24914,32 @@ var init_local_index = __esm(() => {
       return children.length === 0 ? base : { ...base, hidden: [...new Set([...base.hidden, ...children])] };
     }
     tierLedgerHiddenItemPks() {
+      const marker = this.tierLedgerHiddenMemoMarker();
+      if (marker !== undefined && this.tierLedgerHiddenMemo?.marker === marker)
+        return this.tierLedgerHiddenMemo.value;
+      const value = this.computeTierLedgerHiddenItemPks();
+      if (marker !== undefined) {
+        this.tierLedgerHiddenMemo = { marker, value };
+        queueMicrotask(() => {
+          this.tierLedgerHiddenMemo = undefined;
+        });
+      }
+      return value;
+    }
+    tierLedgerHiddenMemo;
+    tierLedgerHiddenMemoMarker() {
+      try {
+        const ledger = this.visibilityLedger();
+        if (!ledger)
+          return;
+        const own3 = this.db.query("SELECT total_changes() AS changes").get();
+        const version = this.db.query("PRAGMA data_version").get();
+        return `${version.data_version}:${own3.changes}:${ledger.changeMarker()}`;
+      } catch {
+        return;
+      }
+    }
+    computeTierLedgerHiddenItemPks() {
       const ledger = this.visibilityLedger();
       if (!ledger || !ledger.corpusHasCopies(this.corpusId)) {
         return { hidden: [], held: [], metadataLayer: [], metadataLayerContentUnread: [], moving: 0 };

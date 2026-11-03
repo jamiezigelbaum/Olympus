@@ -532,8 +532,14 @@ import { resolveTierMigrationPaths, tierMigrationStatusSummary } from '../classi
 import { resolveEmbeddingLedgerPath } from '../embedding-ledger.ts';
 import { startCpuSampleLog } from '../control-path-headroom.ts';
 
-/** The least time between two scheduler status snapshots for the ingestion ledger. */
-const SOURCE_STATUS_PUBLISH_MIN_INTERVAL_MS = 30_000;
+/**
+ * The least time between two scheduler status snapshots for the ingestion
+ * ledger. A snapshot reads every store's counts; on a large library that is
+ * seconds of the worker's thread, so at 30 s it was most of the thread's time
+ * during an import (Sparta, 2026-11-03). The ledger is a record for doctor and
+ * Castor, so two minutes stale is fine.
+ */
+const SOURCE_STATUS_PUBLISH_MIN_INTERVAL_MS = 120_000;
 import { remoteAccessFromStatus, type DashboardAgentConnectionsBackend } from '../agent-connections.ts';
 import { createDashboardRemoteAccessControl, createGatewayRemoteAccessConfigWriter, createStandaloneRemoteAccessConfigWriter, createDashboardEngineRestart } from '../remote-access-control.ts';
 
