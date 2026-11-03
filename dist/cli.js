@@ -38555,7 +38555,7 @@ var init_local_index = __esm(() => {
       const account = normalizeOptionalAccountScope(scope?.accountScope);
       const lookup3 = this.db.query(`SELECT i.local_item_id, i.title, i.source_version FROM items i
       WHERE i.tombstoned = 0 AND i.provider = ? AND i.account_scope = ? AND i.provider_item_id = ?
-        AND COALESCE(i.provider_conversation_id, '') = ?
+        AND i.normalized_conversation = ?
         ${account ? "AND i.account_scope = ?" : ""} ${filters.sql}`);
       const out = [];
       for (const identity2 of identities) {
