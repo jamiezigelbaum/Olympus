@@ -201,6 +201,30 @@ const PUBLIC_INSTALL_URLS = new Set([
 ]);
 
 /**
+ * README links and its banner image as absolute public-repository URLs. The
+ * README is also the plugin page in OpenClaw's Control UI and on ClawHub, where
+ * relative paths do not resolve. Exact entries only, and only in README.md.
+ */
+const PUBLIC_README_URLS = new Set([
+  'https://raw.githubusercontent.com/jamiezigelbaum/Olympus/main/assets/olympus-banner.png',
+  'https://github.com/jamiezigelbaum/Olympus/blob/main/CHANGELOG.md',
+  'https://github.com/jamiezigelbaum/Olympus/blob/main/CONTRIBUTING.md',
+  'https://github.com/jamiezigelbaum/Olympus/blob/main/LICENSE',
+  'https://github.com/jamiezigelbaum/Olympus/blob/main/docs/CONTRACTS.md',
+  'https://github.com/jamiezigelbaum/Olympus/blob/main/docs/ENGINEERING_PROCESS.md',
+  'https://github.com/jamiezigelbaum/Olympus/blob/main/docs/QUICKSTART.md',
+  'https://github.com/jamiezigelbaum/Olympus/blob/main/docs/QUICKSTART.md#5-open-your-dashboard-and-connect-sources',
+  'https://github.com/jamiezigelbaum/Olympus/blob/main/docs/SOVEREIGNTY_CONFIG.md',
+  'https://github.com/jamiezigelbaum/Olympus/blob/main/docs/SOVEREIGNTY_CONFIG.md#agent-led-model-setup-for-the-v04-beta',
+  'https://github.com/jamiezigelbaum/Olympus/blob/main/docs/TRUST_MODEL.md',
+  'https://github.com/jamiezigelbaum/Olympus/blob/main/docs/TRUST_MODEL.md#product-tier-names',
+  'https://github.com/jamiezigelbaum/Olympus/blob/main/docs/UNINSTALL.md',
+  'https://github.com/jamiezigelbaum/Olympus/blob/main/docs/design/chatgpt-plugin.md',
+  'https://github.com/jamiezigelbaum/Olympus/blob/main/docs/design/chatgpt-plugin.md#who-can-read-the-answer',
+  'https://github.com/jamiezigelbaum/Olympus/blob/main/integrations/agent-skills/ask-olympus/SKILL.md',
+]);
+
+/**
  * The pinned zkAPI download (src/core/managed-tools.ts): the Olympus fork's
  * public release, which the shipped installer must name. The four exact asset
  * URLs, each a quoted literal, in the managed-tools source and its two bundles.
@@ -226,7 +250,9 @@ export function scannableText(relativePath: string, text: string): string {
   }
   if (PUBLIC_INSTALL_URL_FILES.has(relativePath)) {
     return text.replace(/https:\/\/[^\s<>"'`()]+/g, (url) => (
-      PUBLIC_INSTALL_URLS.has(url) ? '<public-olympus-install-url>' : url
+      PUBLIC_INSTALL_URLS.has(url) || (relativePath === 'README.md' && PUBLIC_README_URLS.has(url))
+        ? '<public-olympus-install-url>'
+        : url
     ));
   }
   return relativePath === 'LICENSE'
