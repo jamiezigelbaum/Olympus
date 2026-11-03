@@ -170209,6 +170209,9 @@ class SourceScheduler {
   busyConcurrencyKeys = new Set;
   pendingAfterTickStatus;
   afterTickDrain;
+  afterTickMinIntervalMs;
+  lastAfterTickAt;
+  afterTickTimer;
   timer;
   fastWakeTimers = new Map;
   continueAfterMs;
@@ -170229,6 +170232,7 @@ class SourceScheduler {
     this.setIntervalImpl = options.setIntervalImpl ?? setInterval;
     this.clearIntervalImpl = options.clearIntervalImpl ?? clearInterval;
     this.afterTick = options.afterTick;
+    this.afterTickMinIntervalMs = Math.max(0, options.afterTickMinIntervalMs ?? 0);
     this.stateStore = options.stateStore;
     this.zeroChangeDegradeRuns = options.zeroChangeDegradeRuns ?? DEFAULT_ZERO_CHANGE_DEGRADE_RUNS;
     this.continueAfterMs = options.continueAfterMs ?? SOURCE_SCHEDULER_CONTINUE_AFTER_MS;
@@ -170290,6 +170294,10 @@ class SourceScheduler {
     if (this.continueWake) {
       this.clearTimeoutImpl(this.continueWake.timer);
       this.continueWake = undefined;
+    }
+    if (this.afterTickTimer) {
+      this.clearTimeoutImpl(this.afterTickTimer);
+      this.afterTickTimer = undefined;
     }
   }
   syncChangeSubscriptions() {
@@ -170480,9 +170488,32 @@ class SourceScheduler {
     if (!this.afterTick)
       return Promise.resolve();
     this.pendingAfterTickStatus = status;
+    if (this.afterTickDrain)
+      return this.afterTickDrain;
+    const waitMs = this.afterTickWaitMs();
+    if (waitMs > 0) {
+      if (!this.afterTickTimer) {
+        this.afterTickTimer = this.setTimeoutImpl(() => {
+          this.afterTickTimer = undefined;
+          this.startAfterTickDrain();
+        }, waitMs);
+        this.afterTickTimer.unref?.();
+      }
+      return Promise.resolve();
+    }
+    return this.startAfterTickDrain();
+  }
+  afterTickWaitMs() {
+    if (this.afterTickMinIntervalMs <= 0 || this.lastAfterTickAt === undefined)
+      return 0;
+    return Math.max(0, this.lastAfterTickAt + this.afterTickMinIntervalMs - Date.now());
+  }
+  startAfterTickDrain() {
     if (!this.afterTickDrain) {
       this.afterTickDrain = this.drainAfterTickStatuses().finally(() => {
         this.afterTickDrain = undefined;
+        if (this.pendingAfterTickStatus)
+          this.publishAfterTick(this.pendingAfterTickStatus);
       });
     }
     return this.afterTickDrain;
@@ -170491,11 +170522,14 @@ class SourceScheduler {
     while (this.pendingAfterTickStatus) {
       const status = this.pendingAfterTickStatus;
       this.pendingAfterTickStatus = undefined;
+      this.lastAfterTickAt = Date.now();
       try {
         await this.afterTick(status);
       } catch (error2) {
         console.error(`[olympus:source-scheduler] after_tick_failed error_kind=${safeSchedulerErrorKind(error2)}`);
       }
+      if (this.afterTickWaitMs() > 0)
+        break;
     }
   }
   async runStates(states, dueAt, provenance) {
@@ -170894,6 +170928,7 @@ function createSourceSchedulerFromConfig(input) {
     sources: input.sources,
     ...input.config.worker.scheduler.sourceIds.length > 0 ? { allowedSourceIds: input.config.worker.scheduler.sourceIds } : {},
     ...input.afterTick ? { afterTick: input.afterTick } : {},
+    ...input.afterTickMinIntervalMs !== undefined ? { afterTickMinIntervalMs: input.afterTickMinIntervalMs } : {},
     ...input.config.worker.scheduler.enabled ? { stateStore: input.stateStore ?? new LocalSourceSchedulerStateStore } : {}
   });
 }
@@ -188648,6 +188683,7 @@ var init_installed_tier_classification = __esm(() => {
 });
 
 // src/workers/classification/sniffer-resolver.ts
+import { createHash as createHash99 } from "node:crypto";
 import { mkdirSync as mkdirSync61, readFileSync as readFileSync85 } from "node:fs";
 import { dirname as dirname96 } from "node:path";
 
@@ -188699,6 +188735,18 @@ class SnifferCallBudget {
       this.used = 0;
     }
   }
+}
+function materialCarriesSecret(question) {
+  const own3 = snifferOwnMaterial(question.material);
+  const key2 = createHash99("sha256").update(own3).digest("base64");
+  const known = secretScreenCache.get(key2);
+  if (known !== undefined)
+    return known;
+  const carries = snifferMaterialCarriesSecret(own3);
+  if (secretScreenCache.size >= SECRET_SCREEN_CACHE_LIMIT)
+    secretScreenCache.delete(secretScreenCache.keys().next().value);
+  secretScreenCache.set(key2, carries);
+  return carries;
 }
 async function runSnifferPass(options) {
   const promptVersion = options.promptVersion ?? SNIFFER_PROMPT_VERSION;
@@ -188815,7 +188863,7 @@ async function runSnifferPass(options) {
     return open7;
   };
   const screenQuestion = (target, question) => {
-    const screen = snifferMaterialCarriesSecret(snifferOwnMaterial(question.material)) ? "secrets" : target.screenStoredQuestion?.(question) ?? "clean";
+    const screen = materialCarriesSecret(question) ? "secrets" : target.screenStoredQuestion?.(question) ?? "clean";
     if (screen === "unreadable") {
       report.awaitingPlacement += 1;
       return false;
@@ -189014,12 +189062,13 @@ function finish(report) {
   report.estimatedOutputTokens = Math.ceil(report.responseChars / 4);
   return report;
 }
-var DEFAULT_SNIFFER_MAX_CALLS_PER_DAY = 20000, DEFAULT_SNIFFER_PASS_TIME_MS = 5000, MAX_CONSECUTIVE_TRANSPORT_FAILURES = 2, OUTPUT_CHARS_PER_ITEM = 110;
+var DEFAULT_SNIFFER_MAX_CALLS_PER_DAY = 20000, DEFAULT_SNIFFER_PASS_TIME_MS = 5000, MAX_CONSECUTIVE_TRANSPORT_FAILURES = 2, OUTPUT_CHARS_PER_ITEM = 110, SECRET_SCREEN_CACHE_LIMIT = 20000, secretScreenCache;
 var init_sniffer_resolver = __esm(() => {
   init_atomic_file();
   init_sniffer();
   init_sniffer_lane();
   init_tier_ledger();
+  secretScreenCache = new Map;
 });
 
 // src/workers/classification/sniffer-service.ts
@@ -204485,7 +204534,7 @@ __export(exports_handler, {
   REMOTE_OAUTH_PATHS: () => REMOTE_OAUTH_PATHS,
   CONNECT_BODY_DEADLINE_MS: () => CONNECT_BODY_DEADLINE_MS
 });
-import { createHash as createHash99, randomBytes as randomBytes30, timingSafeEqual as timingSafeEqual10 } from "node:crypto";
+import { createHash as createHash100, randomBytes as randomBytes30, timingSafeEqual as timingSafeEqual10 } from "node:crypto";
 function isRemoteOAuthRequest(request) {
   return ROUTED_PATHS.has(new URL(request.url).pathname);
 }
@@ -204853,7 +204902,7 @@ function createRemoteOAuthHandler(options) {
         codes.delete(hash3);
         return oauthError(400, "invalid_grant", "The authorization code was issued to another client or redirect.");
       }
-      if (!constantTimeEqual(createHash99("sha256").update(verifier).digest("base64url"), issued.codeChallenge)) {
+      if (!constantTimeEqual(createHash100("sha256").update(verifier).digest("base64url"), issued.codeChallenge)) {
         codes.delete(hash3);
         return oauthError(400, "invalid_grant", "The code verifier does not match the challenge.");
       }
@@ -205120,7 +205169,7 @@ function constantTimeEqual(left, right) {
   return a.length === b.length && a.length > 0 && timingSafeEqual10(a, b);
 }
 function sha25613(value2) {
-  return createHash99("sha256").update(value2).digest("hex");
+  return createHash100("sha256").update(value2).digest("hex");
 }
 function redirectWithParams(redirectUri, params) {
   const target = new URL(redirectUri);
@@ -207313,7 +207362,7 @@ __export(exports_remote_openapi, {
   REMOTE_OPENAPI_MAX_BODY_BYTES: () => REMOTE_OPENAPI_MAX_BODY_BYTES,
   REMOTE_OPENAPI_API_VERSION: () => REMOTE_OPENAPI_API_VERSION
 });
-import { createHash as createHash100 } from "node:crypto";
+import { createHash as createHash101 } from "node:crypto";
 function isRemoteOpenApiRequest(request) {
   const { pathname } = new URL(request.url);
   return pathname === REMOTE_OPENAPI_SPEC_PATH || TOOL_PATH_PATTERN.test(pathname);
@@ -207330,7 +207379,7 @@ function createRemoteOpenApiHandler(options) {
     const serverUrl = typeof configured === "function" ? livePublicServerUrl(configured()) : publicServerUrl(configured);
     if (spec?.serverUrl !== serverUrl) {
       const text6 = JSON.stringify(buildRemoteOpenApiSpec({ serverUrl }));
-      spec = { serverUrl, text: text6, etag: `"${createHash100("sha256").update(text6).digest("base64url").slice(0, 27)}"` };
+      spec = { serverUrl, text: text6, etag: `"${createHash101("sha256").update(text6).digest("base64url").slice(0, 27)}"` };
     }
     return spec;
   };
@@ -207707,7 +207756,7 @@ __export(exports_setup_backend, {
   createChatGptSetupBackend: () => createChatGptSetupBackend
 });
 import { readFileSync as readFileSync86 } from "node:fs";
-import { createHash as createHash101 } from "node:crypto";
+import { createHash as createHash102 } from "node:crypto";
 function privacyRuleView(rule) {
   if (rule.kind === "sender" && rule.value)
     return [{ kind: "sender", source_id: "gmail.email", value: rule.value }];
@@ -207731,7 +207780,7 @@ function readChatGptPrivacySettings(env, pendingCount) {
 function privacyRevision(profile) {
   if (!profile)
     return "prv1.unset";
-  const digest5 = createHash101("sha256").update(JSON.stringify({ d: profile.description, r: profile.rules })).digest("hex");
+  const digest5 = createHash102("sha256").update(JSON.stringify({ d: profile.description, r: profile.rules })).digest("hex");
   return `prv1.${digest5.slice(0, 32)}`;
 }
 function createChatGptSetupBackend(options) {
@@ -207739,7 +207788,7 @@ function createChatGptSetupBackend(options) {
   const privacySettings = () => {
     const current2 = options.sovereignty.source === "file" && options.sovereignty.path ? validateSovereigntyConfig(JSON.parse(readFileSync86(options.sovereignty.path, "utf8"))) : policy;
     policy = current2;
-    const policyRevision = createHash101("sha256").update(JSON.stringify(current2)).digest("hex").slice(0, 16);
+    const policyRevision = createHash102("sha256").update(JSON.stringify(current2)).digest("hex").slice(0, 16);
     if (isPendingPrivacyPolicy(current2))
       return {
         configured: false,
@@ -212715,6 +212764,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     config: olympusConfig,
     sources: schedulerSources,
     ...sourceIndexStatus && sourceIngestionLedger ? {
+      afterTickMinIntervalMs: SOURCE_STATUS_PUBLISH_MIN_INTERVAL_MS,
       afterTick: async (schedulerStatus) => {
         const status = await sourceIndexStatus.status({ include_items: false });
         sourceIngestionLedger.record(buildSourceIngestionLedgerSnapshot(status, {
@@ -214724,7 +214774,7 @@ function googleFilePage(locator) {
     return false;
   }
 }
-var GMAIL_ATTACHMENT_READER_REUSE_MS, SCOPE_APPROVED_SOURCE_IDS, INGESTION_DISPOSITION_SOURCES, BUILT_IN_MODEL_RETRY_MS, CONNECTOR_STORE_ANSWER_FILTER_CAPABILITIES, workerLaunch, dataOwnerLock;
+var SOURCE_STATUS_PUBLISH_MIN_INTERVAL_MS = 30000, GMAIL_ATTACHMENT_READER_REUSE_MS, SCOPE_APPROVED_SOURCE_IDS, INGESTION_DISPOSITION_SOURCES, BUILT_IN_MODEL_RETRY_MS, CONNECTOR_STORE_ANSWER_FILTER_CAPABILITIES, workerLaunch, dataOwnerLock;
 var init_server5 = __esm(async () => {
   init_engine_service();
   init_privacy_questions();

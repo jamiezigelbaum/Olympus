@@ -1605,6 +1605,31 @@ describe('source worker scheduler', () => {
     expect(maxActive).toBe(1);
   });
 
+  test('spaces afterTick deliveries by the minimum interval, delivering the latest status when it passes', async () => {
+    let now = new Date('2026-07-18T12:00:00.000Z');
+    const delivered: string[] = [];
+    const scheduler = new SourceScheduler({
+      enabled: true,
+      tickMs: 1_000,
+      errorBackoffMs: 5_000,
+      maxTransientRetries: 1,
+      now: () => now,
+      sources: [],
+      afterTickMinIntervalMs: 150,
+      afterTick: (status) => { delivered.push(status.generated_at); },
+    });
+    await scheduler.runDueTasks(now);
+    for (const second of ['01', '02', '03']) {
+      now = new Date(`2026-07-18T12:00:${second}.000Z`);
+      await scheduler.runDueTasks(now);
+    }
+    // One delivery per interval: the ticks in between wait, coalesced.
+    expect(delivered).toEqual(['2026-07-18T12:00:00.000Z']);
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(delivered).toEqual(['2026-07-18T12:00:00.000Z', '2026-07-18T12:00:03.000Z']);
+    scheduler.stop();
+  });
+
   test('bounds provider retry clocks and effective cadence to the scheduler safety horizon', async () => {
     const now = new Date('2026-07-18T12:00:00.000Z');
     const scheduler = new SourceScheduler({

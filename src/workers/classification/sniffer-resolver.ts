@@ -22,6 +22,7 @@
 // - The pass only updates ledger decisions. It never moves, embeds or deletes
 //   stored content.
 
+import { createHash } from 'node:crypto';
 import { mkdirSync, readFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import type { AnalystModel } from '../../core/analyst.ts';
@@ -202,6 +203,27 @@ interface WorkItem {
   question: SnifferQuestion;
 }
 
+/**
+ * The secret screen of a question's own material, remembered by its hash
+ * (the screen reads nothing else, so the key is that text's hash). A pass re-screens every open question it
+ * lists, up to a page of 500, once a second; with thousands waiting on a slow
+ * model that re-ran the same regexes over the same text all day and held
+ * nearly half of Sparta's worker thread (2026-11-03).
+ */
+const SECRET_SCREEN_CACHE_LIMIT = 20_000;
+const secretScreenCache = new Map<string, boolean>();
+function materialCarriesSecret(question: SnifferQuestion): boolean {
+  const own = snifferOwnMaterial(question.material);
+  // Keyed by the text screened, so no two materials can share an answer.
+  const key = createHash('sha256').update(own).digest('base64');
+  const known = secretScreenCache.get(key);
+  if (known !== undefined) return known;
+  const carries = snifferMaterialCarriesSecret(own);
+  if (secretScreenCache.size >= SECRET_SCREEN_CACHE_LIMIT) secretScreenCache.delete(secretScreenCache.keys().next().value!);
+  secretScreenCache.set(key, carries);
+  return carries;
+}
+
 export async function runSnifferPass(options: SnifferPassOptions): Promise<SnifferPassReport> {
   const promptVersion = options.promptVersion ?? SNIFFER_PROMPT_VERSION;
   const id = snifferId(options.lane, promptVersion);
@@ -329,7 +351,7 @@ export async function runSnifferPass(options: SnifferPassOptions): Promise<Sniff
   const screenQuestion = (target: SnifferTarget, question: SnifferQuestion): boolean => {
     // Check inside listQuestions' eligibility callback so unreadable copies
     // remain queued while its durable bounded cursor advances past them.
-    const screen = snifferMaterialCarriesSecret(snifferOwnMaterial(question.material)) ? 'secrets'
+    const screen = materialCarriesSecret(question) ? 'secrets'
       : target.screenStoredQuestion?.(question) ?? 'clean';
     if (screen === 'unreadable') { report.awaitingPlacement += 1; return false; }
     if (screen === 'clean') return true;
