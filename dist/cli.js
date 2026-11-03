@@ -147092,6 +147092,8 @@ var DASHBOARD_REDRAW_EVENT = "olympus:redraw";
 import { spawnSync as spawnSync21 } from "node:child_process";
 import { hostname, userInfo as userInfo3 } from "node:os";
 function dashboardComputerIdentity() {
+  if (fixedIdentity !== undefined)
+    return fixedIdentity;
   let name = hostname();
   if (process.platform === "darwin") {
     const result = spawnSync21("/usr/sbin/scutil", ["--get", "ComputerName"], { encoding: "utf8", timeout: 1000 });
@@ -147104,6 +147106,7 @@ function dashboardComputerIdentity() {
   } catch {}
   return `${name} · ${account}`;
 }
+var fixedIdentity;
 var init_computer_identity = () => {};
 
 // src/workers/dashboard/theme.ts
