@@ -8,6 +8,8 @@
 - Paired WhatsApp and Telegram cards name the linked account and lead with Choose chats; Pair again stays as a secondary button (#762).
 - The dashboard header names this computer and the account Olympus runs as.
 - Linux upgrades from older installs keep working, and anonymous questions held by an interrupted payment are recovered (#734, #735, #740).
+- The dashboard keeps answering while a large source imports, instead of stalling until the import ends (#786).
+- A Mac in server mode can turn server mode off from the dashboard. If no one is signed in to the Mac's desktop, the dashboard says to sign in first, and Olympus keeps running (#788).
 
 ## 1.3.1 - 2026-11-03
 
