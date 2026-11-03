@@ -423,8 +423,29 @@ func runPairOnlyMode(stateDir string, container *sqlstore.Container) error {
 
 // openSessionContainer opens (and migrates) the upstream session store. It is
 // split out so startup routing can be exercised without a live provider.
+//
+// Its warnings go to stderr: stdout carries --list-chats' JSON and the pairing
+// events, and one store warning there (whatsmeow warns about duplicate group
+// members while listing joined groups) made the chat list unreadable.
 func openSessionContainer(dbPath string) (*sqlstore.Container, error) {
-	return sqlstore.New(context.Background(), "sqlite3", "file:"+dbPath+"?_foreign_keys=on", waLog.Stdout("Database", "WARN", true))
+	return sqlstore.New(context.Background(), "sqlite3", "file:"+dbPath+"?_foreign_keys=on", stderrWarnLogger{w: os.Stderr, module: "Database"})
+}
+
+// stderrWarnLogger writes warnings and errors to w and drops everything quieter.
+type stderrWarnLogger struct {
+	w      io.Writer
+	module string
+}
+
+func (l stderrWarnLogger) Errorf(msg string, args ...interface{}) { l.write("ERROR", msg, args) }
+func (l stderrWarnLogger) Warnf(msg string, args ...interface{})  { l.write("WARN", msg, args) }
+func (l stderrWarnLogger) Infof(string, ...interface{})           {}
+func (l stderrWarnLogger) Debugf(string, ...interface{})          {}
+func (l stderrWarnLogger) Sub(module string) waLog.Logger {
+	return stderrWarnLogger{w: l.w, module: l.module + "/" + module}
+}
+func (l stderrWarnLogger) write(level, msg string, args []interface{}) {
+	fmt.Fprintf(l.w, "[%s %s] %s\n", l.module, level, fmt.Sprintf(msg, args...))
 }
 
 // newWhatsmeowClient is the only place a capture client is constructed, so the
