@@ -41049,12 +41049,14 @@ function authorizeMacServerMode(enable, options, exec) {
   const script2 = `do shell script "${command.replaceAll("\\", "\\\\").replaceAll('"', "\\\"")}" with administrator privileges`;
   const result = exec("osascript", ["-e", script2]);
   if (result.status !== 0) {
+    if (/-60007\b/.test(result.stderr))
+      throw new OperationError("config_error", MAC_SERVER_MODE_SIGN_IN);
     if (/(-128|user cancel)/i.test(result.stderr))
       throw new OperationError("config_error", "The administrator request was cancelled. Nothing was changed.");
     throw new OperationError("config_error", "Your Mac could not change the Olympus server setting. Open System Settings and check that administrator approval is available, then try again.");
   }
 }
-var MAC_ENGINE_DAEMON_PLIST = "/Library/LaunchDaemons/ai.olympusplugin.engine.plist", quoteShell = (text2) => "'" + text2.replaceAll("'", "'\\''") + "'";
+var MAC_ENGINE_DAEMON_PLIST = "/Library/LaunchDaemons/ai.olympusplugin.engine.plist", MAC_SERVER_MODE_SIGN_IN = "Sign in to this Mac's desktop to turn this off. Olympus keeps running.", quoteShell = (text2) => "'" + text2.replaceAll("'", "'\\''") + "'";
 var init_mac_engine_daemon = __esm(() => {
   init_operation_error();
 });
@@ -107317,6 +107319,7 @@ __export(exports_engine_service, {
   defaultEngineConfig: () => defaultEngineConfig,
   STANDALONE_SOVEREIGNTY_PRESET: () => STANDALONE_SOVEREIGNTY_PRESET,
   STANDALONE_RELAY_HOST: () => STANDALONE_RELAY_HOST,
+  MAC_SERVER_MODE_HANDOFF_MS: () => MAC_SERVER_MODE_HANDOFF_MS,
   ENGINE_RUN_COMMAND: () => ENGINE_RUN_COMMAND,
   ENGINE_QUIET_WAIT_MS: () => ENGINE_QUIET_WAIT_MS,
   ENGINE_LABEL: () => ENGINE_LABEL,
@@ -108599,7 +108602,7 @@ function setMacEngineServerModeUnderFence(enable, options) {
   }
   preflightEnginePaths(homeDir, { ...agent, appDir: paths.appDir });
   if (!enable && exec("launchctl", ["print", guiDomain(options.uid)]).status !== 0) {
-    throw new OperationError("config_error", "Sign in to the Olympus account on this Mac, using Screen Sharing if needed, then turn server mode off. Nothing was changed.");
+    throw new OperationError("config_error", MAC_SERVER_MODE_SIGN_IN);
   }
   waitForQuietEngine(options);
   if (!enable || !daemonInstalled)
@@ -108635,47 +108638,90 @@ async function waitForMacAgentHandoff(options = {}) {
 function serverModeResultPath(paths) {
   return join98(dirname73(paths.configPath), "server-mode-result.json");
 }
+function serverModeAgentPath(paths) {
+  return join98(dirname73(paths.configPath), "server-mode-off.plist");
+}
 function macServerModeView(options = {}) {
   const paths = engineServicePaths(options);
   const enabled = paths.engineManager === "daemon";
   try {
     const result = JSON.parse(readFileSync56(serverModeResultPath(paths), "utf8"));
-    const pending = result.pending === true && Number.isSafeInteger(result.pid) && defaultPidAlive(result.pid);
+    const handoffExpired = typeof result.handoff_at === "number" && Date.now() - result.handoff_at > MAC_SERVER_MODE_HANDOFF_MS;
+    const pending = result.pending === true && !handoffExpired && Number.isSafeInteger(result.pid) && defaultPidAlive(result.pid);
     return { enabled, pending, ...typeof result.message === "string" ? { notice: result.message } : {} };
   } catch {
     return { enabled, pending: false };
   }
 }
-function macOwnerEnv() {
-  const name = currentMacUserName(process.getuid?.() ?? -1);
+function macOwnerEnv(options) {
+  const name = options.userName ?? currentMacUserName(options.uid ?? process.getuid?.() ?? -1);
   return name && name !== "unknown" ? { USER: name, LOGNAME: name } : {};
 }
-function requestMacServerMode(enable) {
-  assertDarwin(undefined);
-  const paths = engineServicePaths();
-  if (macServerModeView().pending)
+function requestMacServerMode(enable, options = {}) {
+  assertDarwin(options.platform);
+  const paths = engineServicePaths(options);
+  if (macServerModeView(options).pending)
     throw new OperationError("config_error", "Your Mac is already changing this setting. Wait for it to finish.");
   const program = installedProgram(paths.plistPath);
   if (!program)
     throw new OperationError("config_error", "Update Olympus from its download page before changing this setting.");
-  const child2 = spawn7(program.runtimePath, ["--no-env-file", program.entryPath, "__engine-server-mode", enable ? "on" : "off"], {
+  const message2 = "Your Mac will ask for an administrator’s password. Olympus will reconnect here when the change is finished.";
+  if (!enable && paths.engineManager === "daemon") {
+    const exec = options.exec ?? defaultExec2;
+    const domain = guiDomain(options.uid);
+    if (exec("launchctl", ["print", domain]).status !== 0) {
+      writePrivateFileAtomicSync(serverModeResultPath(paths), JSON.stringify({ pending: false, message: MAC_SERVER_MODE_SIGN_IN }));
+      throw new OperationError("config_error", MAC_SERVER_MODE_SIGN_IN);
+    }
+    if (program.runtimePath !== join98(paths.runtimeDir, "bun") || program.entryPath !== join98(paths.appDir, "dist/cli.js")) {
+      throw new OperationError("config_error", "Update Olympus from its download page before changing this setting.");
+    }
+    const homeDir = options.homeDir ?? homedir30();
+    ensurePrivateDirectoryTreeSync(homeDir, dirname73(paths.configPath));
+    const agentPath = serverModeAgentPath(paths);
+    const args = [join98(paths.runtimeDir, "bun"), "--no-env-file", join98(paths.appDir, "dist/cli.js"), "__engine-server-mode", "off"];
+    const env = { HOME: homeDir, PATH: "/usr/bin:/bin:/usr/sbin:/sbin", ...macOwnerEnv(options) };
+    writePrivateFileAtomicSync(agentPath, `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>Label</key><string>${MAC_SERVER_MODE_AGENT_LABEL}</string>
+<key>ProgramArguments</key><array>${args.map((arg) => `<string>${xml(arg)}</string>`).join("")}</array>
+<key>EnvironmentVariables</key><dict>${Object.entries(env).map(([key2, value]) => `<key>${key2}</key><string>${xml(value)}</string>`).join("")}</dict>
+<key>RunAtLoad</key><true/>
+<key>LaunchOnlyOnce</key><true/>
+<key>LimitLoadToSessionType</key><string>Aqua</string>
+</dict></plist>
+`);
+    writePrivateFileAtomicSync(serverModeResultPath(paths), JSON.stringify({ pending: true, pid: process.pid, handoff_at: Date.now(), message: message2 }));
+    const result = exec("launchctl", ["bootstrap", domain, agentPath]);
+    if (result.status !== 0) {
+      removeFileDurablySync(agentPath);
+      const failure2 = isAbsentLoginDomain(result) ? MAC_SERVER_MODE_SIGN_IN : "Olympus could not open the administrator request. Update Olympus, then try again.";
+      writePrivateFileAtomicSync(serverModeResultPath(paths), JSON.stringify({ pending: false, message: failure2 }));
+      throw new OperationError("config_error", failure2);
+    }
+    return { ok: true, status_message: message2 };
+  }
+  const child2 = (options.spawn ?? spawn7)(program.runtimePath, ["--no-env-file", program.entryPath, "__engine-server-mode", enable ? "on" : "off"], {
     detached: true,
     stdio: "ignore",
-    env: { HOME: homedir30(), PATH: "/usr/bin:/bin:/usr/sbin:/sbin", ...macOwnerEnv() }
+    env: { HOME: options.homeDir ?? homedir30(), PATH: "/usr/bin:/bin:/usr/sbin:/sbin", ...macOwnerEnv(options) }
   });
   child2.on("error", () => {
     writePrivateFileAtomicSync(serverModeResultPath(paths), JSON.stringify({ pending: false, message: "Olympus could not open the administrator request. Update Olympus, then try again." }));
   });
   child2.unref();
-  const message2 = "Your Mac will ask for an administrator’s password. Olympus will reconnect here when the change is finished.";
   writePrivateFileAtomicSync(serverModeResultPath(paths), JSON.stringify({ pending: true, pid: child2.pid, message: message2 }));
   return { ok: true, status_message: message2 };
 }
 async function runMacServerModeChange(enable, options = {}) {
   const paths = engineServicePaths(options);
+  const desktopAgent = !enable && existsSync68(serverModeAgentPath(paths));
   const since = (options.health?.now ?? Date.now)();
   const needsHandoff = paths.engineManager === "daemon" !== enable || enable && existsSync68(enginePaths(options.homeDir ?? homedir30()).plistPath);
   try {
+    if (desktopAgent)
+      writePrivateFileAtomicSync(serverModeResultPath(paths), JSON.stringify({ pending: true, pid: process.pid, message: "Your Mac will ask for an administrator’s password. Olympus will reconnect here when the change is finished." }));
     setMacEngineServerMode(enable, options);
     const health = await waitForEngineHealthy({ paths: engineServicePaths(options), expectedBuild: engineBuildIdentity(paths.appDir), ...needsHandoff ? { since } : {} }, options.health);
     if (!health.ok)
@@ -108685,6 +108731,11 @@ async function runMacServerModeChange(enable, options = {}) {
   } catch (error) {
     const message2 = error instanceof OperationError ? error.message : "Olympus could not finish changing this setting. Refresh Keys and try again.";
     writePrivateFileAtomicSync(serverModeResultPath(paths), JSON.stringify({ pending: false, message: message2 }));
+  } finally {
+    if (desktopAgent) {
+      removeFileDurablySync(serverModeAgentPath(paths));
+      (options.exec ?? defaultExec2)("launchctl", ["bootout", `${guiDomain(options.uid)}/${MAC_SERVER_MODE_AGENT_LABEL}`]);
+    }
   }
 }
 function macComputerSetupView() {
@@ -108706,7 +108757,7 @@ function saveMacComputerUseChoice(choice) {
   saveComputerUseChoice(engineServicePaths().sovereigntyPath, choice);
   return { ok: true, status_message: "Choice saved. Continue to Private answers." };
 }
-var ENGINE_LABEL = "ai.olympusplugin.engine", STANDALONE_RELAY_HOST = "mcp.olympusplugin.ai", ENGINE_RUN_COMMAND = "__engine-run", ENGINE_BUILD_ENV = "OLYMPUS_ENGINE_BUILD", BUILD_DIGEST_FILES, ENGINE_THROTTLE_SECONDS = 30, PACKAGE_NAMES, MAINTENANCE_FENCE, ENGINE_QUIET_WAIT_MS = 180000, ENGINE_QUIET_POLL_MS = 2000, ENGINE_HEALTH_TIMEOUT_MS = 60000, ENGINE_HEALTH_POLL_MS = 500, WORKER_SERVICE_ID = "olympus-worker", DEFAULT_WORKER_BASE_URL = "http://127.0.0.1:8010/v1", STANDALONE_SOVEREIGNTY_PRESET = "pending", ENV_POLICY_KEY, LOG_TAIL_BYTES;
+var ENGINE_LABEL = "ai.olympusplugin.engine", STANDALONE_RELAY_HOST = "mcp.olympusplugin.ai", ENGINE_RUN_COMMAND = "__engine-run", ENGINE_BUILD_ENV = "OLYMPUS_ENGINE_BUILD", BUILD_DIGEST_FILES, ENGINE_THROTTLE_SECONDS = 30, PACKAGE_NAMES, MAINTENANCE_FENCE, ENGINE_QUIET_WAIT_MS = 180000, ENGINE_QUIET_POLL_MS = 2000, ENGINE_HEALTH_TIMEOUT_MS = 60000, ENGINE_HEALTH_POLL_MS = 500, WORKER_SERVICE_ID = "olympus-worker", DEFAULT_WORKER_BASE_URL = "http://127.0.0.1:8010/v1", STANDALONE_SOVEREIGNTY_PRESET = "pending", ENV_POLICY_KEY, LOG_TAIL_BYTES, MAC_SERVER_MODE_AGENT_LABEL = "ai.olympusplugin.engine-server-mode-off", MAC_SERVER_MODE_HANDOFF_MS = 120000;
 var init_engine_service = __esm(() => {
   init_mac_engine_daemon();
   init_mac_engine_daemon();

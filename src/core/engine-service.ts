@@ -1,4 +1,4 @@
-import { MAC_ENGINE_DAEMON_PLIST, macEngineManager, authorizeMacServerMode, currentMacUserName } from './mac-engine-daemon.ts';
+import { MAC_ENGINE_DAEMON_PLIST, MAC_SERVER_MODE_SIGN_IN, macEngineManager, authorizeMacServerMode, currentMacUserName } from './mac-engine-daemon.ts';
 export { macEngineManager, macServerModeScript, validateMacEngineOwner } from './mac-engine-daemon.ts';
 import { ENGINE_HELPER_APP_NAME, ENGINE_HELPER_BUNDLE_ID, ENGINE_HELPER_EXECUTABLE } from './engine-helper-names.ts';
 export { ENGINE_HELPER_APP_NAME, ENGINE_HELPER_BUNDLE_ID, ENGINE_HELPER_EXECUTABLE };
@@ -1808,7 +1808,7 @@ function setMacEngineServerModeUnderFence(enable: boolean, options: EngineServic
   }
   preflightEnginePaths(homeDir, { ...agent, appDir: paths.appDir });
   if (!enable && exec('launchctl', ['print', guiDomain(options.uid)]).status !== 0) {
-    throw new OperationError('config_error', 'Sign in to the Olympus account on this Mac, using Screen Sharing if needed, then turn server mode off. Nothing was changed.');
+    throw new OperationError('config_error', MAC_SERVER_MODE_SIGN_IN);
   }
   waitForQuietEngine(options);
   // The administrator dialog precedes ALL local mutation, so cancelling preserves the agent.
@@ -1850,36 +1850,83 @@ export interface MacServerModeView {
   notice?: string;
 }
 function serverModeResultPath(paths: EnginePaths): string { return join(dirname(paths.configPath), 'server-mode-result.json'); }
+const MAC_SERVER_MODE_AGENT_LABEL = 'ai.olympusplugin.engine-server-mode-off';
+/** How long the desktop helper has to take over a pending off request before the switch frees up again. */
+export const MAC_SERVER_MODE_HANDOFF_MS = 120_000;
+function serverModeAgentPath(paths: EnginePaths): string { return join(dirname(paths.configPath), 'server-mode-off.plist'); }
 export function macServerModeView(options: EngineServiceOptions = {}): MacServerModeView {
   const paths = engineServicePaths(options);
   const enabled = paths.engineManager === 'daemon';
   try {
     const result = JSON.parse(readFileSync(serverModeResultPath(paths), 'utf8'));
     // Pending work from a process that died must not disable the switch forever.
-    const pending = result.pending === true && Number.isSafeInteger(result.pid) && defaultPidAlive(result.pid);
+    // A desktop helper that never started leaves the worker's own pid behind:
+    // stop counting it as pending once the helper has had time to take over.
+    const handoffExpired = typeof result.handoff_at === 'number' && Date.now() - result.handoff_at > MAC_SERVER_MODE_HANDOFF_MS;
+    const pending = result.pending === true && !handoffExpired && Number.isSafeInteger(result.pid) && defaultPidAlive(result.pid);
     return { enabled, pending, ...(typeof result.message === 'string' ? { notice: result.message } : {}) };
   } catch { return { enabled, pending: false }; }
 }
 
 /** USER and LOGNAME for the helper, so it never names the owner "unknown". */
-function macOwnerEnv(): Record<string, string> {
-  const name = currentMacUserName(process.getuid?.() ?? -1);
+function macOwnerEnv(options: EngineServiceOptions): Record<string, string> {
+  const name = options.userName ?? currentMacUserName(options.uid ?? process.getuid?.() ?? -1);
   return name && name !== 'unknown' ? { USER: name, LOGNAME: name } : {};
 }
 
 /** Spawn outside the worker's process group so unloading the engine cannot strand the handoff. */
-export function requestMacServerMode(enable: boolean): { ok: true; status_message: string } {
-  assertDarwin(undefined);
-  const paths = engineServicePaths();
-  if (macServerModeView().pending) throw new OperationError('config_error', 'Your Mac is already changing this setting. Wait for it to finish.');
+export function requestMacServerMode(enable: boolean, options: EngineServiceOptions & { spawn?: typeof spawn } = {}): { ok: true; status_message: string } {
+  assertDarwin(options.platform);
+  const paths = engineServicePaths(options);
+  if (macServerModeView(options).pending) throw new OperationError('config_error', 'Your Mac is already changing this setting. Wait for it to finish.');
   const program = installedProgram(paths.plistPath);
   if (!program) throw new OperationError('config_error', 'Update Olympus from its download page before changing this setting.');
-  const child = spawn(program.runtimePath, ['--no-env-file', program.entryPath, '__engine-server-mode', enable ? 'on' : 'off'], {
-    detached: true, stdio: 'ignore', env: { HOME: homedir(), PATH: '/usr/bin:/bin:/usr/sbin:/sbin', ...macOwnerEnv() },
+  const message = 'Your Mac will ask for an administrator’s password. Olympus will reconnect here when the change is finished.';
+  if (!enable && paths.engineManager === 'daemon') {
+    const exec = options.exec ?? defaultExec;
+    const domain = guiDomain(options.uid);
+    if (exec('launchctl', ['print', domain]).status !== 0) {
+      writePrivateFileAtomicSync(serverModeResultPath(paths), JSON.stringify({ pending: false, message: MAC_SERVER_MODE_SIGN_IN }));
+      throw new OperationError('config_error', MAC_SERVER_MODE_SIGN_IN);
+    }
+    // A daemon has no Aqua session. launchd starts this fixed, unprivileged
+    // helper in the owner's desktop; no shell or caller-supplied argv is used.
+    if (program.runtimePath !== join(paths.runtimeDir, 'bun') || program.entryPath !== join(paths.appDir, 'dist/cli.js')) {
+      throw new OperationError('config_error', 'Update Olympus from its download page before changing this setting.');
+    }
+    const homeDir = options.homeDir ?? homedir();
+    ensurePrivateDirectoryTreeSync(homeDir, dirname(paths.configPath));
+    const agentPath = serverModeAgentPath(paths);
+    const args = [join(paths.runtimeDir, 'bun'), '--no-env-file', join(paths.appDir, 'dist/cli.js'), '__engine-server-mode', 'off'];
+    const env = { HOME: homeDir, PATH: '/usr/bin:/bin:/usr/sbin:/sbin', ...macOwnerEnv(options) };
+    writePrivateFileAtomicSync(agentPath, `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>Label</key><string>${MAC_SERVER_MODE_AGENT_LABEL}</string>
+<key>ProgramArguments</key><array>${args.map(arg => `<string>${xml(arg)}</string>`).join('')}</array>
+<key>EnvironmentVariables</key><dict>${Object.entries(env).map(([key, value]) => `<key>${key}</key><string>${xml(value)}</string>`).join('')}</dict>
+<key>RunAtLoad</key><true/>
+<key>LaunchOnlyOnce</key><true/>
+<key>LimitLoadToSessionType</key><string>Aqua</string>
+</dict></plist>
+`);
+    // Publish before bootstrap: the helper replaces this pid with its own as
+    // soon as it starts, and its final result must never be overwritten here.
+    writePrivateFileAtomicSync(serverModeResultPath(paths), JSON.stringify({ pending: true, pid: process.pid, handoff_at: Date.now(), message }));
+    const result = exec('launchctl', ['bootstrap', domain, agentPath]);
+    if (result.status !== 0) {
+      removeFileDurablySync(agentPath);
+      const failure = isAbsentLoginDomain(result) ? MAC_SERVER_MODE_SIGN_IN : 'Olympus could not open the administrator request. Update Olympus, then try again.';
+      writePrivateFileAtomicSync(serverModeResultPath(paths), JSON.stringify({ pending: false, message: failure }));
+      throw new OperationError('config_error', failure);
+    }
+    return { ok: true, status_message: message };
+  }
+  const child = (options.spawn ?? spawn)(program.runtimePath, ['--no-env-file', program.entryPath, '__engine-server-mode', enable ? 'on' : 'off'], {
+    detached: true, stdio: 'ignore', env: { HOME: options.homeDir ?? homedir(), PATH: '/usr/bin:/bin:/usr/sbin:/sbin', ...macOwnerEnv(options) },
   });
   child.on('error', () => { writePrivateFileAtomicSync(serverModeResultPath(paths), JSON.stringify({ pending: false, message: 'Olympus could not open the administrator request. Update Olympus, then try again.' })); });
   child.unref();
-  const message = 'Your Mac will ask for an administrator’s password. Olympus will reconnect here when the change is finished.';
   writePrivateFileAtomicSync(serverModeResultPath(paths), JSON.stringify({ pending: true, pid: child.pid, message }));
   return { ok: true, status_message: message };
 }
@@ -1887,9 +1934,11 @@ export function requestMacServerMode(enable: boolean): { ok: true; status_messag
 /** Internal CLI target of the dashboard request. Never accepts an account, path, or plist. */
 export async function runMacServerModeChange(enable: boolean, options: EngineServiceOptions & { health?: EngineHealthDeps } = {}): Promise<void> {
   const paths = engineServicePaths(options);
+  const desktopAgent = !enable && existsSync(serverModeAgentPath(paths));
   const since = (options.health?.now ?? Date.now)();
   const needsHandoff = (paths.engineManager === 'daemon') !== enable || (enable && existsSync(enginePaths(options.homeDir ?? homedir()).plistPath));
   try {
+    if (desktopAgent) writePrivateFileAtomicSync(serverModeResultPath(paths), JSON.stringify({ pending: true, pid: process.pid, message: 'Your Mac will ask for an administrator’s password. Olympus will reconnect here when the change is finished.' }));
     setMacEngineServerMode(enable, options);
     const health = await waitForEngineHealthy({ paths: engineServicePaths(options), expectedBuild: engineBuildIdentity(paths.appDir), ...(needsHandoff ? { since } : {}) }, options.health);
     if (!health.ok) throw new OperationError('config_error', 'The setting changed, but Olympus has not reconnected yet. Refresh Keys in a moment. If it is still unavailable, sign in to this Mac and open Olympus.');
@@ -1898,6 +1947,13 @@ export async function runMacServerModeChange(enable: boolean, options: EngineSer
   } catch (error) {
     const message = error instanceof OperationError ? error.message : 'Olympus could not finish changing this setting. Refresh Keys and try again.';
     writePrivateFileAtomicSync(serverModeResultPath(paths), JSON.stringify({ pending: false, message }));
+  } finally {
+    if (desktopAgent) {
+      removeFileDurablySync(serverModeAgentPath(paths));
+      // Last action: bootout may terminate this helper. The result is already
+      // durable and the next dashboard request can reuse the one-shot label.
+      (options.exec ?? defaultExec)('launchctl', ['bootout', `${guiDomain(options.uid)}/${MAC_SERVER_MODE_AGENT_LABEL}`]);
+    }
   }
 }
 

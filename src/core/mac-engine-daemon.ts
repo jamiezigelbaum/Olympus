@@ -6,6 +6,7 @@ import { OperationError } from './operation-error.ts';
 import type { EngineExec, EngineServiceOptions } from './engine-service.ts';
 
 export const MAC_ENGINE_DAEMON_PLIST = '/Library/LaunchDaemons/ai.olympusplugin.engine.plist';
+export const MAC_SERVER_MODE_SIGN_IN = "Sign in to this Mac's desktop to turn this off. Olympus keeps running.";
 export type MacEngineManager = 'agent' | 'daemon';
 
 export function validateMacEngineOwner(userName: string, uid: number): void {
@@ -144,6 +145,7 @@ export function authorizeMacServerMode(enable: boolean, options: EngineServiceOp
   const script = `do shell script "${command.replaceAll('\\', '\\\\').replaceAll('"', '\\"')}" with administrator privileges`;
   const result = exec('osascript', ['-e', script]);
   if (result.status !== 0) {
+    if (/-60007\b/.test(result.stderr)) throw new OperationError('config_error', MAC_SERVER_MODE_SIGN_IN);
     if (/(-128|user cancel)/i.test(result.stderr)) throw new OperationError('config_error', 'The administrator request was cancelled. Nothing was changed.');
     throw new OperationError('config_error', 'Your Mac could not change the Olympus server setting. Open System Settings and check that administrator approval is available, then try again.');
   }
