@@ -49596,15 +49596,19 @@ function openRemoteConnectionStore(dbPath = defaultRemoteConnectionsDbPath(), op
       if (options2.provider !== undefined && !isRemoteConnectionProvider(options2.provider)) {
         throw new OperationError("invalid_params", "A connection's host must be openai, xai, meta, anthropic or other.");
       }
+      const route = options2.route ?? "remote";
+      if (!["remote", "loopback", "tailnet"].includes(route) || route !== "remote" && options2.installId) {
+        throw new OperationError("invalid_params", "Choose a supported connection route.");
+      }
       const provider = remoteConnectionProvider({ displayName: name, chosen: options2.provider ?? null });
       const id = randomBytes11(CONNECTION_ID_BYTES).toString("hex");
       const secret2 = randomBytes11(CONNECTION_SECRET_BYTES).toString("base64url");
       const token = options2.installId ? mintCredential("access", options2.installId) : `${REMOTE_CONNECTION_TOKEN_PREFIX}${id}_${secret2}`;
       const createdAt = now().toISOString();
       db.query(`
-        INSERT INTO remote_connections (id, display_name, kind, token_hash, created_at, provider)
-        VALUES (?, ?, 'bearer', ?, ?, ?)
-      `).run(id, name, hashRemoteConnectionToken(token), createdAt, provider);
+        INSERT INTO remote_connections (id, display_name, kind, token_hash, created_at, provider, route)
+        VALUES (?, ?, 'bearer', ?, ?, ?, ?)
+      `).run(id, name, hashRemoteConnectionToken(token), createdAt, provider, route);
       const row = readRow(id);
       if (!row)
         throw new Error("Remote connection could not be read after creation.");
@@ -49634,7 +49638,7 @@ function openRemoteConnectionStore(dbPath = defaultRemoteConnectionsDbPath(), op
       }
       return toRecord(row);
     },
-    verifyToken(token) {
+    verifyToken(token, route = "remote") {
       const match = typeof token === "string" ? TOKEN_PATTERN2.exec(token) : null;
       const routed = typeof token === "string" ? credentialInstallId("access", token) : undefined;
       if (!match && !routed)
@@ -49644,7 +49648,7 @@ function openRemoteConnectionStore(dbPath = defaultRemoteConnectionsDbPath(), op
       const bearer = row && row.kind === "bearer" && row.token_hash ? row : null;
       const stored = bearer ? Buffer.from(bearer.token_hash) : Buffer.alloc(presented.length);
       const equal2 = stored.length === presented.length && timingSafeEqual4(stored, presented);
-      if (!bearer || !equal2)
+      if (!bearer || !equal2 || bearer.route !== route)
         return { ok: false, reason: "unknown" };
       if (bearer.revoked_at !== null)
         return { ok: false, reason: "revoked" };
@@ -49667,6 +49671,7 @@ function toRecord(row) {
     displayName: row.display_name,
     kind: row.kind === "oauth" ? "oauth" : "bearer",
     clientId: row.client_id ?? null,
+    route: row.route,
     provider: remoteConnectionProvider({
       clientId: row.client_id,
       displayName: row.display_name,
@@ -49701,7 +49706,16 @@ function remoteConnectionMigrations() {
         );
       `);
     }
-  }, remoteOAuthSchemaMigration(2), connectionProviderMigration(3)];
+  }, remoteOAuthSchemaMigration(2), connectionProviderMigration(3), {
+    version: 4,
+    name: "bind_connection_route",
+    up(db) {
+      const columns = db.query("PRAGMA table_info(remote_connections)").all();
+      if (columns.some((column) => column.name === "route"))
+        return;
+      db.exec("ALTER TABLE remote_connections ADD COLUMN route TEXT NOT NULL DEFAULT 'remote' CHECK(route IN ('remote', 'loopback', 'tailnet'));");
+    }
+  }];
 }
 function connectionProviderMigration(version) {
   return {
@@ -49754,7 +49768,7 @@ function hardenPrivateDatabasePath(dbPath) {
     }
   }
 }
-var REMOTE_CONNECTIONS_STORE_ID = "remote-connections", REMOTE_CONNECTIONS_SCHEMA_VERSION = 3, REMOTE_CONNECTION_TOKEN_PREFIX = "olympus_conn_", REMOTE_CONNECTION_LAST_USED_RESOLUTION_MS = 60000, STORE_BUSY_TIMEOUT_MS2 = 1e4, LAST_USED_BUSY_TIMEOUT_MS = 50, CONNECTION_ID_BYTES = 9, CONNECTION_SECRET_BYTES = 32, CONNECTION_ID_PATTERN2, TOKEN_PATTERN2;
+var REMOTE_CONNECTIONS_STORE_ID = "remote-connections", REMOTE_CONNECTIONS_SCHEMA_VERSION = 4, REMOTE_CONNECTION_TOKEN_PREFIX = "olympus_conn_", REMOTE_CONNECTION_LAST_USED_RESOLUTION_MS = 60000, STORE_BUSY_TIMEOUT_MS2 = 1e4, LAST_USED_BUSY_TIMEOUT_MS = 50, CONNECTION_ID_BYTES = 9, CONNECTION_SECRET_BYTES = 32, CONNECTION_ID_PATTERN2, TOKEN_PATTERN2;
 var init_remote_connections = __esm(() => {
   init_operation_error();
   init_worker_auth();
@@ -145963,8 +145977,10 @@ function mountDashboardController(options) {
     if (kind === "pair")
       return { action: "mint_agent_pairing_code" };
     if (kind === "key") {
-      const agent = form.closest("[data-agent]")?.dataset.agent;
-      return { action: "create_agent_key", name: formRecord(form).name || "", ...agent ? { agent } : {} };
+      const route = form.dataset.privateRoute;
+      const privateRoute = route === "loopback" || route === "tailnet" ? route : undefined;
+      const agent = privateRoute ? "other" : form.closest("[data-agent]")?.dataset.agent;
+      return { action: "create_agent_key", name: formRecord(form).name || "", ...agent ? { agent } : {}, ...privateRoute ? { route: privateRoute } : {} };
     }
     if (kind === "revoke")
       return { action: "revoke_agent_connection", connection_id: formRecord(form).connection_id || "" };
@@ -146013,13 +146029,16 @@ function mountDashboardController(options) {
       say(accept, "");
     }
   }
-  function showAgentSecret(form, value2, note) {
+  function showAgentSecret(form, value2, note, mcpUrl) {
     const holder = form.closest("[data-agent-step]") || form.parentElement || form;
     const slot = holder.querySelector("[data-agent-secret-slot]");
     const field = slot?.querySelector("[data-agent-secret]");
     if (!slot || !field)
       return;
     field.value = value2;
+    slot.querySelectorAll("[data-agent-setup]").forEach((setup) => {
+      setup.value = mcpUrl ? `Connect Olympus to ${setup.dataset.agentSetup}. Add a remote MCP server named olympus with URL ${mcpUrl} and header Authorization: Bearer ${value2}. Keep this key private. Confirm that Olympus tools are available.` : "";
+    });
     const noteSlot = slot.querySelector("[data-agent-secret-note]");
     if (noteSlot)
       noteSlot.textContent = note;
@@ -146114,7 +146133,7 @@ function mountDashboardController(options) {
     }
     if (params.action === "create_agent_key" && typeof result.body.token === "string") {
       say(form, "");
-      showAgentSecret(form, result.body.token, "Copy it now. Olympus keeps only a fingerprint of this key and cannot show it again.");
+      showAgentSecret(form, result.body.token, "Copy it now. Olympus keeps only a fingerprint of this key and cannot show it again. Each setup line includes this key; keep it private.", typeof result.body.mcp_url === "string" ? result.body.mcp_url : undefined);
       await refreshAgentList();
       return;
     }
@@ -155945,21 +155964,24 @@ function relayNotConnected(status) {
 }
 function dashboardAgentsView(backend) {
   const remoteAccess = backend.remoteAccess();
+  const privateAccess = backend.privateListeners ? { privateAccess: backend.privateListeners.view() } : {};
   const control = backend.remoteAccessControl;
   const manual = control && "manual" in control ? { remoteAccessManual: control.manual(remoteAccess.state === "off") } : {};
   let records;
   try {
     records = backend.store()?.list() ?? [];
   } catch {
-    return { remoteAccess, connections: [], unavailable: true, ...manual };
+    return { remoteAccess, connections: [], unavailable: true, ...manual, ...privateAccess };
   }
   return {
     remoteAccess,
     ...manual,
+    ...privateAccess,
     connections: records.filter((record6) => record6.revokedAt === null).map((record6) => ({
       id: record6.id,
       name: record6.displayName,
       kind: record6.kind,
+      route: record6.route ?? "remote",
       createdAt: record6.createdAt,
       lastUsedAt: record6.lastUsedAt
     }))
@@ -155996,9 +156018,20 @@ async function handleDashboardAgentRequest(request, pathname, backend) {
     });
   }
   if (pathname === DASHBOARD_AGENT_KEYS_PATH) {
-    const unknown4 = Object.keys(body).filter((key2) => key2 !== "name" && key2 !== "agent");
+    const unknown4 = Object.keys(body).filter((key2) => key2 !== "name" && key2 !== "agent" && key2 !== "route");
     if (unknown4.length > 0)
-      return refusal3(400, "invalid_request", "A key takes only a name and the agent it is for.");
+      return refusal3(400, "invalid_request", "A key takes only a name, the agent it is for, and its connection route.");
+    const route = body.route ?? "remote";
+    if (route !== "remote" && route !== "loopback" && route !== "tailnet")
+      return refusal3(400, "invalid_request", "Choose a connection from this page.");
+    const listeners = backend.privateListeners;
+    if (route !== "remote") {
+      if (!listeners)
+        return refusal3(501, "private_connections_unsupported", "This Olympus cannot connect agents this way. Choose another connection on this page.");
+      const access = listeners.view()[route];
+      if (access.state !== "available")
+        return refusal3(409, "private_connection_unavailable", access.message ?? "This connection is not ready. Try again.");
+    }
     const name = sanitizeCallerDisplayName(body.name);
     if (!name)
       return refusal3(400, "invalid_request", "Give the connection a name, for example Grok API.");
@@ -156011,14 +156044,25 @@ async function handleDashboardAgentRequest(request, pathname, backend) {
     const store2 = openStore(backend);
     if (!store2)
       return storeUnavailable();
-    const installId = backend.relayInstallId?.();
-    const created = store2.create(name, { ...provider ? { provider } : {}, ...installId ? { installId } : {} });
+    const installId = route === "remote" ? backend.relayInstallId?.() : undefined;
+    const created = store2.create(name, { route, ...provider ? { provider } : {}, ...installId ? { installId } : {} });
+    let privateUrl;
+    if (route !== "remote" && listeners) {
+      listeners.refresh();
+      const access = listeners.view()[route];
+      privateUrl = access.urls[0];
+      if (access.state !== "available" || !access.listening || !privateUrl) {
+        store2.revoke(created.connection.id);
+        listeners.refresh();
+        return refusal3(503, "private_connection_unavailable", access.message ?? "Olympus could not open this connection. Try again.");
+      }
+    }
     const remoteAccess = backend.remoteAccess();
     return secretResponse({
       ok: true,
       token: created.token,
       connection: connectionView(created.connection),
-      ...remoteAccess.state === "on" ? { mcp_url: remoteAccess.mcpUrl, openapi_url: remoteAccess.openapiUrl } : {}
+      ...privateUrl ? { mcp_url: privateUrl } : remoteAccess.state === "on" ? { mcp_url: remoteAccess.mcpUrl, openapi_url: remoteAccess.openapiUrl } : {}
     });
   }
   const unknown3 = Object.keys(body).filter((key2) => key2 !== "connection_id");
@@ -156032,6 +156076,7 @@ async function handleDashboardAgentRequest(request, pathname, backend) {
   if (!store || !existing)
     return refusal3(404, "connection_not_found", "No connection has that id.");
   const revoked = store.revoke(id);
+  backend.privateListeners?.refresh();
   return secretResponse({
     ok: true,
     connection: connectionView(revoked),
@@ -156110,6 +156155,7 @@ function connectionView(record6) {
     id: record6.id,
     name: record6.displayName,
     kind: record6.kind,
+    route: record6.route ?? "remote",
     provider: record6.provider,
     created_at: record6.createdAt,
     last_used_at: record6.lastUsedAt,
@@ -156197,13 +156243,13 @@ function renderDashboardAgentsSection(input) {
       blurb: platform3 === "linux" ? "Let ChatGPT, Claude, Grok or a coding agent ask Olympus, under the same privacy rules on this computer." : "Let ChatGPT, Claude, Grok or a coding agent ask Olympus, under the same privacy rules as your OpenClaw agent.",
       action: { label: "Connect an agent", kind: "none", sheet: AGENT_CONNECT_SHEET_ID, primary: true }
     }),
-    connectSheet(view3.remoteAccess, host),
+    connectSheet(view3.remoteAccess, host, view3.privateAccess),
     `<div data-agent-connections-list>${connectionList(view3, input.now)}</div>`
   ].join(`
 `);
 }
 function remoteAccessRow(access, manual) {
-  const why = access.state === "on" ? `On. Agents in the cloud reach Olympus at ${hostOf(access.mcpUrl)}.` : access.state === "off" ? "Off. Only agents on this computer can ask Olympus." : access.state === "not_connected" ? "On, but not connected. Agents in the cloud cannot reach Olympus until it is." : `Not set up correctly. ${access.detail}`;
+  const why = access.state === "on" ? `On. Agents in the cloud reach Olympus at ${hostOf(access.mcpUrl)}.` : access.state === "off" ? "Off. Agents in the cloud cannot ask Olympus. Connections on this computer and your tailnet work separately." : access.state === "not_connected" ? "On, but not connected. Agents in the cloud cannot reach Olympus until it is." : `Not set up correctly. ${access.detail}`;
   const next = access.state === "not_connected" && access.detail ? `<span class="hint" data-remote-next-step> ${escapeHtml2(access.detail)}</span>` : access.state === "on" && access.setBy === "worker_env" ? `<span class="hint" data-remote-set-by="worker_env"> ${escapeHtml2(WORKER_ENV_ADDRESS_MESSAGE)}</span>` : "";
   const workerEnv = access.state === "on" && access.setBy === "worker_env";
   const how = manual !== undefined && !workerEnv ? `<span class="hint" data-remote-manual> ${escapeHtml2(manual)}</span>` : "";
@@ -156223,7 +156269,7 @@ function remoteAccessControls(access) {
 function termsPanel() {
   return `<div class="remoteterms" data-remote-terms hidden>` + `<p><b>Before remote access turns on</b></p>` + `<p>So that agents in the cloud reach this computer over an encrypted connection only this computer can open, Olympus gets a free certificate from Let's Encrypt. Getting one means agreeing to Let's Encrypt's Subscriber Agreement.</p>` + `<p>In short: the certificate is only for this Olympus's own address; its private key never leaves this computer and must be kept secret; Let's Encrypt may revoke the certificate if the key is exposed or the certificate is misused; and the service comes without warranties. You don't sign up for anything or share an email address. This is a summary, not the agreement: read the agreement itself before you accept.</p>` + `<p><a data-remote-terms-link href="${LETS_ENCRYPT_REPOSITORY_URL}" target="_blank" rel="noopener noreferrer">Read the Let's Encrypt Subscriber Agreement</a></p>` + `<form class="rowform" data-agent-kind="remote-accept">` + `<button class="btn primary" type="submit">I accept, turn on remote access</button>` + `<button class="btn" type="button" data-remote-terms-cancel>Not now</button>` + `<span class="actmsg" data-action-message role="status"></span>` + `</form>` + `</div>`;
 }
-function connectSheet(access, host) {
+function connectSheet(access, host, privateAccess) {
   const agents = host.platform === "linux" ? [...AGENTS.map((agent) => agent.id === "grok-api" ? { ...agent, viaRelay: true } : agent), ...["grok-bot", "cursor"].map((id) => ({
     id,
     label: id === "grok-bot" ? "Grok Bot" : "Cursor",
@@ -156234,13 +156280,23 @@ function connectSheet(access, host) {
     approveViaRelay: "An Olympus page opens in this computer's browser asking to connect Grok Bot or Cursor to Olympus: choose Connect. Olympus names this connection Grok Bot or Cursor because the apps share a sign-in.",
     instructionsWhere: "Paste this into the agent's instructions."
   }))] : AGENTS;
-  const choices = agents.map((agent) => agentChoice(agent, access, host)).join("");
-  return `<div class="sheet" id="${AGENT_CONNECT_SHEET_ID}" aria-hidden="true">` + `<h4>Connect an agent</h4>` + `<p>Pick the agent you use. It never sees Private source text or Secrets. For Private items it receives only answers that Venice or a local model reasoned out, with each item's title, path, source and author.</p>` + `<div class="agentpick">${choices}</div>` + `</div>`;
+  const choices = agents.map((agent) => agentChoice(agent, access, host, privateAccess !== undefined)).join("");
+  return `<div class="sheet" id="${AGENT_CONNECT_SHEET_ID}" aria-hidden="true">` + `<h4>Connect an agent</h4>` + `<p>Pick the agent you use. It never sees Private source text or Secrets. For Private items it receives only answers that Venice or a local model reasoned out, with each item's title, path, source and author.</p>` + `<div class="agentpick">${choices}${privateChoices(privateAccess)}</div>` + `</div>`;
 }
-function agentChoice(agent, access, host) {
+function privateChoices(access) {
+  if (!access)
+    return "";
+  return ["loopback", "tailnet"].map((route) => {
+    const status = access[route];
+    const label = route === "loopback" ? "Agent on another account of this computer" : "Agent on my tailnet";
+    const body = status.state !== "available" ? `<p>${escapeHtml2(status.message ?? "This connection is not ready. Try again.")}</p>` : `<p>${route === "loopback" ? "For an agent using another account on this computer. It does not need access to your Olympus files." : "For an agent on your Tailscale network. Keep Tailscale running on both computers. This address follows this computer’s Tailscale connection."}</p>` + status.urls.map((url2, i2) => copyBox(`agent-private-${route}-url-${i2}`, url2, "Copy address")).join("") + "<p>Name the agent, then choose Create key. Creating the key approves this connection. Copy the setup line into your agent; no separate sign-in is needed. Revoke the key below to stop its access.</p>" + `<div data-agent-step><form class="rowform" data-agent-kind="key" data-private-route="${route}">` + `<input class="keyfield" name="name" value="My agent" required maxlength="64" aria-label="Connection name" autocomplete="off">` + `<button class="btn primary" type="submit">Create key</button><span class="actmsg" data-action-message role="status"></span></form>` + secretSlot(`agent-private-${route}-key`, "Key", true) + "</div>" + instructionsStep({ id: `private-${route}`, label, method: "key", instructionsWhere: "Paste this wherever the agent keeps its instructions." }, false);
+    return `<details class="agentchoice" data-poll-key="agent-private-${route}" data-agent="private-${route}">` + `<summary><span class="name">${label}</span></summary><div class="agentbody">${body}</div></details>`;
+  }).join("");
+}
+function agentChoice(agent, access, host, privateAvailable) {
   const hints2 = [agent.detail, needsOwnTunnel(agent, access) ? "needs your own tunnel" : undefined].filter(Boolean).join(" · ");
   const detail = hints2 ? ` <span class="hint">${escapeHtml2(hints2)}</span>` : "";
-  return `<details class="agentchoice" data-poll-key="agent-${agent.id}" data-agent="${agent.id}">` + `<summary><span class="name">${escapeHtml2(agent.label)}</span>${detail}</summary>` + `<div class="agentbody">${agentBody(agent, access, host)}</div>` + `</details>`;
+  return `<details class="agentchoice" data-poll-key="agent-${agent.id}" data-agent="${agent.id}">` + `<summary><span class="name">${escapeHtml2(agent.label)}</span>${detail}</summary>` + `<div class="agentbody">${agentBody(agent, access, host, privateAvailable)}</div>` + `</details>`;
 }
 function ownTunnel(access) {
   return access.state === "on" && (access.ownTunnel === true || access.setBy === "worker_env");
@@ -156248,13 +156304,13 @@ function ownTunnel(access) {
 function needsOwnTunnel(agent, access) {
   return agent.method !== "local" && !agent.viaRelay && !ownTunnel(access);
 }
-function agentBody(agent, access, host) {
+function agentBody(agent, access, host, privateAvailable) {
   if (agent.method === "local")
     return localBody(agent, host);
   if (needsOwnTunnel(agent, access))
-    return tunnelNeeded(host) + instructionsStep(agent, false);
+    return tunnelNeeded(host, privateAvailable) + instructionsStep(agent, false);
   if (access.state !== "on")
-    return remoteUnavailable(access) + instructionsStep(agent, false);
+    return remoteUnavailable(access, privateAvailable) + instructionsStep(agent, false);
   if (agent.method === "oauth" && !ownTunnel(access) && agent.approveViaRelay) {
     return `<ol class="steps">` + `<li>${escapeHtml2(agent.add ?? "")}${copyBox(`agent-${agent.id}-url`, access.mcpUrl, "Copy address")}</li>` + `<li>${approvalStep(agent, host)}</li>` + `<li>${instructionsStep(agent, true)}</li>` + `</ol>`;
   }
@@ -156280,15 +156336,15 @@ function approvalStep(agent, host, pairing = false) {
 function localBody(agent, host) {
   const linux = host.platform === "linux";
   const prompt = linux ? LOCAL_AGENT_PROMPT.replace("Mac installer", "Linux installer") : LOCAL_AGENT_PROMPT;
-  return `<p>These run on this computer, so they work without remote access. Paste this into Claude Code or Codex and it adds Olympus for you:</p>` + copyBox("agent-local-prompt", prompt, "Copy prompt", true) + `<details class="agentprompt" data-poll-key="agent-local-manual"><summary>Add it yourself instead</summary>` + `<p>The olympus path is the full path of the olympus command. On ${linux ? "Linux set up with the Olympus Linux installer" : "a Mac set up with the Olympus installer"} it is <b>~/.local/bin/olympus</b>, written out from your home folder. With OpenClaw it is <b>bin/olympus</b> inside the <b>rootDir</b> that <b>openclaw plugins inspect olympus --json</b> prints. For Claude Code, run:</p>` + copyBox("agent-local-claude", CLAUDE_CODE_SNIPPET, "Copy command") + `<p>For Codex, add this to ~/.codex/config.toml:</p>` + copyBox("agent-local-codex", CODEX_SNIPPET, "Copy snippet") + `</details>` + instructionsStep(agent, false);
+  return `<p>These run under your account on this computer, so they work without remote access. Paste this into Claude Code or Codex and it adds Olympus for you:</p>` + copyBox("agent-local-prompt", prompt, "Copy prompt", true) + `<details class="agentprompt" data-poll-key="agent-local-manual"><summary>Add it yourself instead</summary>` + `<p>The olympus path is the full path of the olympus command. On ${linux ? "Linux set up with the Olympus Linux installer" : "a Mac set up with the Olympus installer"} it is <b>~/.local/bin/olympus</b>, written out from your home folder. With OpenClaw it is <b>bin/olympus</b> inside the <b>rootDir</b> that <b>openclaw plugins inspect olympus --json</b> prints. For Claude Code, run:</p>` + copyBox("agent-local-claude", CLAUDE_CODE_SNIPPET, "Copy command") + `<p>For Codex, add this to ~/.codex/config.toml:</p>` + copyBox("agent-local-codex", CODEX_SNIPPET, "Copy snippet") + `</details>` + instructionsStep(agent, false);
 }
-function tunnelNeeded(host) {
-  const text4 = (host.platform === "linux" ? "Olympus's relay connects ChatGPT, Claude, Grok, Grok Bot and Cursor, so this agent needs a tunnel you run yourself. " : "Olympus's relay connects only ChatGPT, Claude and Grok, so this agent needs a tunnel you run yourself. ") + "Advanced: set remote.publicBaseUrl in Olympus's settings to your tunnel's https address and turn on remote access; this agent's steps then appear here. " + "Claude Code and Codex on this computer need no tunnel.";
+function tunnelNeeded(host, privateAvailable) {
+  const text4 = (host.platform === "linux" ? "Olympus's relay connects ChatGPT, Claude, Grok, Grok Bot and Cursor. " : "Olympus's relay connects only ChatGPT, Claude and Grok. ") + (privateAvailable ? "For OpenClaw, Hermes or another agent on this computer, choose Agent on another account of this computer. " + "For an agent on your Tailscale network, choose Agent on my tailnet. " : "") + "Other agents in the cloud need a tunnel you run yourself; ask the person who manages that agent to connect it. " + "Claude Code and Codex on this computer need no tunnel.";
   return `<p class="why" data-agent-needs-tunnel>${escapeHtml2(text4)}</p>`;
 }
-function remoteUnavailable(access) {
+function remoteUnavailable(access, privateAvailable) {
   const text4 = access.state === "not_connected" ? "Remote access is on but not connected, so this agent cannot reach Olympus right now. The Remote access line above says why." : access.state === "invalid" ? `Remote access is not set up correctly, so this agent cannot reach Olympus yet. ${access.detail}` : "This agent runs in the cloud, and remote access is off, so it cannot reach Olympus on this computer yet. Turn on remote access above first. Claude Code and Codex on this computer work now.";
-  return `<p class="why" data-remote-unavailable>${escapeHtml2(text4)}</p>`;
+  return `<p class="why" data-remote-unavailable>${escapeHtml2(text4)}${privateAvailable ? " For an agent on another account or your Tailscale network, use the choices below." : ""}</p>`;
 }
 function instructionsStep(agent, inStep) {
   const lead = inStep ? `Tell it when to ask Olympus. ${agent.instructionsWhere}` : `To have it ask Olympus on its own, ${agent.instructionsWhere.charAt(0).toLowerCase()}${agent.instructionsWhere.slice(1)}`;
@@ -156306,8 +156362,8 @@ function pairForm(agentId) {
 function keyForm(agentId, name) {
   return `<form class="rowform" data-agent-kind="key">` + `<input class="keyfield" type="text" name="name" value="${escapeHtml2(name)}" required maxlength="64" aria-label="Connection name" autocomplete="off">` + `<button class="btn primary" type="submit">Create key</button>` + `<span class="actmsg" data-action-message role="status"></span>` + `</form>` + secretSlot(`agent-${agentId}-key`, "Key");
 }
-function secretSlot(id, label) {
-  return `<div class="agentsecret" data-agent-secret-slot hidden>` + `<input class="keyfield" id="${id}" data-agent-secret type="text" readonly autocomplete="off" spellcheck="false" aria-label="${escapeHtml2(label)}">` + `<button class="btn primary" type="button" data-copy-target="#${id}">Copy</button>` + `<button class="btn" type="button" data-agent-secret-done>Done</button>` + `<span class="copystatus" data-copy-status aria-live="polite"></span>` + `<span class="hint" data-agent-secret-note></span>` + `</div>`;
+function secretSlot(id, label, setup = false) {
+  return `<div class="agentsecret" data-agent-secret-slot hidden>` + `<input class="keyfield" id="${id}" data-agent-secret type="text" readonly autocomplete="off" spellcheck="false" aria-label="${escapeHtml2(label)}">` + `<button class="btn primary" type="button" data-copy-target="#${id}">Copy</button>` + `<button class="btn" type="button" data-agent-secret-done>Done</button>` + `<span class="copystatus" data-copy-status aria-live="polite"></span>` + (setup ? ["OpenClaw", "Hermes", "Other MCP client"].map((client, i2) => `<label>${client}<input class="keyfield" id="${id}-setup-${i2}" data-agent-setup="${client}" data-agent-secret type="text" readonly autocomplete="off" spellcheck="false" aria-label="${client} setup line"></label>` + `<button class="btn" type="button" data-copy-target="#${id}-setup-${i2}">Copy setup line</button>`).join("") : "") + `<span class="hint" data-agent-secret-note></span>` + `</div>`;
 }
 function connectionList(view3, now) {
   if (view3.unavailable) {
@@ -156323,7 +156379,8 @@ ${rows}`;
 }
 function connectionRow(connection, now) {
   const used = connection.lastUsedAt ? `last used ${relativeDay(connection.lastUsedAt, now)}` : "not used yet";
-  const why = `added ${calendarDate(connection.createdAt)} · ${used}`;
+  const route = connection.route === "loopback" ? "another account of this computer" : connection.route === "tailnet" ? "my tailnet" : "relay or own tunnel";
+  const why = `${route} · added ${calendarDate(connection.createdAt)} · ${used}`;
   const confirmation2 = `Revoke ${connection.name}? It will no longer be able to ask Olympus. You can connect it again later.`;
   return `<div class="attncard plain" data-agent-connection="${escapeHtml2(connection.id)}">` + `<div class="grow"><span class="name">${escapeHtml2(connection.name)}</span><span class="why"> — ${escapeHtml2(why)}</span></div>` + `<form class="rowform" data-agent-kind="revoke" data-confirmation="${escapeHtml2(confirmation2)}">` + `<input type="hidden" name="connection_id" value="${escapeHtml2(connection.id)}">` + `<button class="btn" type="submit">Revoke</button>` + `<span class="actmsg" data-action-message role="status"></span>` + `</form>` + `</div>`;
 }
@@ -203344,7 +203401,7 @@ function authenticateRemoteRequest(request, options, surface = "default") {
   const token = bearerToken(request.headers.get("Authorization"));
   if (token === undefined)
     return refuse3();
-  const oauthToken = urls !== undefined && isWellFormedOAuthAccessToken(token);
+  const oauthToken = !options.connectionRoute && urls !== undefined && isWellFormedOAuthAccessToken(token);
   if (!oauthToken && (surface === "directory" || !isWellFormedRemoteConnectionToken(token)))
     return refuse3("invalid_token");
   let store;
@@ -203357,9 +203414,9 @@ function authenticateRemoteRequest(request, options, surface = "default") {
     return refuse3("invalid_token");
   let verification;
   try {
-    verification = oauthToken ? store.oauth.verifyAccessToken(token, endpoint2.resource) : store.verifyToken(token);
+    verification = oauthToken ? store.oauth.verifyAccessToken(token, endpoint2.resource) : store.verifyToken(token, options.connectionRoute);
     if (oauthToken && !verification.ok && verification.reason === "unknown" && surface === "default" && urls?.installId && credentialInstallId("access", token) === urls.installId) {
-      verification = store.verifyToken(token);
+      verification = store.verifyToken(token, options.connectionRoute);
     }
   } catch {
     return connectionsUnavailable();
@@ -208399,6 +208456,157 @@ var init_dashboard_panel_tools = __esm(() => {
   UNPAIR_SOURCE_IDS = new Set(["telegram.messages", "whatsapp.personal.messages"]);
 });
 
+// src/workers/private-agent-listeners.ts
+var exports_private_agent_listeners = {};
+__export(exports_private_agent_listeners, {
+  isTailscaleInterfaceName: () => isTailscaleInterfaceName,
+  isPrivateAgentBindAddress: () => isPrivateAgentBindAddress,
+  createPrivateAgentListeners: () => createPrivateAgentListeners,
+  PRIVATE_AGENT_PORT: () => PRIVATE_AGENT_PORT
+});
+import { isIP as isIP3 } from "node:net";
+import { networkInterfaces as networkInterfaces3 } from "node:os";
+function isPrivateAgentBindAddress(route, address) {
+  if (route === "loopback")
+    return address === "127.0.0.1";
+  if (isIP3(address) === 4) {
+    const octets = address.split(".").map(Number);
+    return octets[0] === 100 && octets[1] >= 64 && octets[1] <= 127;
+  }
+  return isIP3(address) === 6 && /^fd7a:115c:a1e0:/i.test(address) && !address.includes("%");
+}
+function isTailscaleInterfaceName(name, platform3 = process.platform) {
+  return platform3 === "darwin" ? /^utun\d+$/.test(name) : /^tailscale\d+$/.test(name);
+}
+function interfaceAddresses() {
+  return Object.entries(networkInterfaces3()).filter(([name]) => isTailscaleInterfaceName(name)).flatMap(([, items]) => (items ?? []).filter((item) => !item.internal).map((item) => item.address));
+}
+function createPrivateAgentListeners(options) {
+  const port = options.port ?? PRIVATE_AGENT_PORT;
+  const active = new Map;
+  let closed = false;
+  let views;
+  const listen2 = options.listen ?? ((hostname2, fetch2) => {
+    const server = Bun.serve({ hostname: hostname2, port, idleTimeout: 0, fetch: fetch2 });
+    return { port: server.port, stop: () => server.stop(true) };
+  });
+  const handlers = Object.fromEntries(["loopback", "tailnet"].map((route) => {
+    const mcp = withFirstRunPrivacyGate(createRemoteMcpHandler({
+      makeOperationContext: options.mcp.makeOperationContext,
+      ...options.mcp.search ? { search: options.mcp.search } : {},
+      ...options.mcp.anonymousAnswersEnabled ? { anonymousAnswersEnabled: options.mcp.anonymousAnswersEnabled } : {},
+      connections: options.connections,
+      connectionRoute: route,
+      isRelayed: () => false
+    }), { pending: options.privacyPending });
+    return [route, mcp];
+  }));
+  function stop(address) {
+    const entry = active.get(address);
+    active.delete(address);
+    if (entry)
+      entry.server.stop();
+  }
+  function refresh() {
+    if (closed)
+      return;
+    let addresses = [];
+    let records = [];
+    let storeFailed = false;
+    let interfacesFailed = false;
+    try {
+      addresses = [...new Set((options.addresses ?? interfaceAddresses)())].filter((a) => isPrivateAgentBindAddress("tailnet", a));
+    } catch {
+      interfacesFailed = true;
+    }
+    try {
+      records = options.connections()?.list() ?? [];
+    } catch {
+      storeFailed = true;
+    }
+    const desired = new Map;
+    if (!storeFailed) {
+      for (const route of ["loopback", "tailnet"]) {
+        if (records.some((r) => r.kind === "bearer" && r.route === route && r.revokedAt === null)) {
+          for (const address of route === "loopback" ? ["127.0.0.1"] : addresses)
+            desired.set(address, route);
+        }
+      }
+    }
+    for (const address of active.keys())
+      if (!desired.has(address))
+        stop(address);
+    const failed = new Set;
+    for (const [address, route] of desired) {
+      if (active.has(address))
+        continue;
+      try {
+        if (!isPrivateAgentBindAddress(route, address))
+          throw new Error("Unsafe bind refused");
+        const server = listen2(address, async (request) => {
+          refresh();
+          if (!active.has(address))
+            return Response.json({ error: "connection_unavailable" }, { status: 503 });
+          if (new URL(request.url).pathname !== "/mcp")
+            return new Response(null, { status: 404 });
+          const auth2 = authenticateRemoteRequest(request, { connections: options.connections, connectionRoute: route });
+          if (!auth2.ok)
+            return auth2.response;
+          return handlers[route](request);
+        });
+        active.set(address, { route, server });
+      } catch {
+        failed.add(route);
+      }
+    }
+    const view3 = (route) => {
+      const candidates2 = route === "loopback" ? ["127.0.0.1"] : addresses;
+      const servers = [...active.values()].filter((a) => a.route === route);
+      if (storeFailed || failed.has(route) || route === "tailnet" && interfacesFailed)
+        return {
+          state: "unavailable",
+          listening: servers.length > 0,
+          urls: [],
+          message: "Olympus could not open this connection. Check that Olympus is running, then try again."
+        };
+      if (route === "tailnet" && candidates2.length === 0)
+        return {
+          state: "absent",
+          listening: false,
+          urls: [],
+          message: "Tailscale isn't running on this computer"
+        };
+      return {
+        state: "available",
+        listening: servers.length > 0,
+        urls: candidates2.map((a) => mcpUrl(a, active.get(a)?.server.port ?? port))
+      };
+    };
+    views = { loopback: view3("loopback"), tailnet: view3("tailnet") };
+  }
+  refresh();
+  const timer = setInterval(refresh, 2000);
+  timer.unref();
+  return {
+    refresh,
+    view() {
+      refresh();
+      return views;
+    },
+    close() {
+      closed = true;
+      clearInterval(timer);
+      for (const address of active.keys())
+        stop(address);
+    }
+  };
+}
+var PRIVATE_AGENT_PORT = 17841, mcpUrl = (address, port) => `http://${isIP3(address) === 6 ? `[${address}]` : address}:${port}/mcp`;
+var init_private_agent_listeners = __esm(() => {
+  init_remote_mcp();
+  init_first_run_privacy_gate();
+});
+
 // src/workers/email-source/server.ts
 var exports_server2 = {};
 __export(exports_server2, {
@@ -212059,6 +212267,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
       };
     }
   } : undefined;
+  let privateAgentListeners;
   let dashboardAgentStore;
   let dashboardRemoteAccess = () => ({ state: "off" });
   let dashboardRemoteAccessControl;
@@ -212068,7 +212277,10 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
   let dashboardPanelTools;
   let localPrivateAnswers;
   let desktopBridge;
-  closeDesktopBridge = () => desktopBridge?.close();
+  closeDesktopBridge = () => {
+    desktopBridge?.close();
+    privateAgentListeners?.close();
+  };
   let desktopPoll;
   let desktopPollingClosed = false;
   const agentApprovalHost = () => resolveAgentApprovalHost({ env: process.env, fileEnv: readWorkerSetupEnv(), port, desktopBridgeReady: () => desktopBridge?.status().state === "listening" });
@@ -212084,6 +212296,9 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     agentConnectHost: agentApprovalHost,
     agentConnections: {
       store: (options) => dashboardAgentStore?.(options),
+      get privateListeners() {
+        return privateAgentListeners;
+      },
       ...process.platform === "linux" ? { relayInstallId: () => remotePublicUrls()?.installId } : {},
       remoteAccess: () => dashboardRemoteAccess(),
       get remoteAccessControl() {
@@ -212893,6 +213108,14 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     archiveSources: () => archiveImportDashboard.archiveSources(),
     archiveCards: () => archiveImportDashboard.cardViews()
   });
+  const sharedRemoteMcpOptions = {
+    ...remoteAgentOptions,
+    anonymousAnswersEnabled: () => {
+      const read = readConsultSettings2();
+      return read.state === "valid" && read.settings.enabled;
+    },
+    ...remoteEvidenceSearch ? { search: { evidenceSearch: remoteEvidenceSearch, answerModelAvailable: chatgptAnswerModelAvailable } } : {}
+  };
   const socketPath = prepareWorkerSocket();
   const serverOptions = {
     fetch: withRequestPeer2(withFirstRunPrivacyGate(withRelaySurfacesRoute2(createRelaySurfacesHandler2({
@@ -212911,12 +213134,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
       demoConsent: () => resolveDemoConsent2(olympusConfig.remote, () => demoInstallMarked2(remoteAccessDir2(process.env))),
       connections: () => remoteConnections({ create: true })
     }), withRemoteOpenApiRoutes2(withRemoteFailureBoundary2(remoteOpenApi), withRemoteMcpRoute2(withRemoteFailureBoundary2(createRemoteMcpHandler2({
-      ...remoteAgentOptions,
-      anonymousAnswersEnabled: () => {
-        const read = readConsultSettings2();
-        return read.state === "valid" && read.settings.enabled;
-      },
-      ...remoteEvidenceSearch ? { search: { evidenceSearch: remoteEvidenceSearch, answerModelAvailable: chatgptAnswerModelAvailable } } : {},
+      ...sharedRemoteMcpOptions,
       chatgpt: {
         servesRequest: (request, connection) => isRelayedRequest2(request) && isChatGptGrant2(connection),
         readOnlyFor: isDemoGrant2,
@@ -212963,6 +213181,12 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     return response;
   } }) : Bun.serve({ hostname: hostname2, port, idleTimeout: 0, ...serverOptions });
   const server = socketPath ? bindWorkerSocket(socketPath, startServer) : startServer();
+  const { createPrivateAgentListeners: createPrivateAgentListeners2 } = await Promise.resolve().then(() => (init_private_agent_listeners(), exports_private_agent_listeners));
+  privateAgentListeners = createPrivateAgentListeners2({
+    connections: remoteConnections,
+    mcp: sharedRemoteMcpOptions,
+    privacyPending: () => privacyChoicePending(sovereigntyEngine)
+  });
   updateChecker.start();
   if (socketPath && process.env[OWNER_BRIDGE_HOST_ENV]) {
     const client = connectLinuxOwnerBridgeHost(process.env[OWNER_BRIDGE_HOST_ENV]);
@@ -213077,6 +213301,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     if (shuttingDown)
       return;
     shuttingDown = true;
+    privateAgentListeners?.close();
     sourceRuntimeClosed = true;
     localFilesCleanupRecovery?.close();
     sourceScheduler?.stop();

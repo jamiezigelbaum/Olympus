@@ -151,6 +151,7 @@ export type OlympusDashboardControlParams =
       /** A bearer connection for the Grok API or another agent. Its token is shown once. */
       action: 'create_agent_key';
       name: string;
+      route?: 'loopback' | 'tailnet';
       /** The Connect an agent choice it is for (its `data-agent` id), which sets who hosts it. */
       agent?: string;
     }

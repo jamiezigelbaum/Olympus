@@ -26,7 +26,8 @@
  * Remote-access status comes from the relay's status through one thin
  * adapter, `remoteAccessFromStatus`.
  */
-import type { RemoteConnectionRecord, RemoteConnectionStore } from '../core/remote-connections.ts';
+import type { PrivateAgentListeners, PrivateAgentListenersView } from './private-agent-listeners.ts';
+import type { RemoteConnectionRecord, RemoteConnectionRoute, RemoteConnectionStore } from '../core/remote-connections.ts';
 import type { RemoteConnectionProvider } from '../core/remote-oauth-store.ts';
 import type { RemotePublicUrls } from '../core/remote-public-url.ts';
 import type { RemoteAccessStatusView } from '../core/remote-access.ts';
@@ -107,6 +108,7 @@ export interface DashboardAgentConnection {
   id: string;
   name: string;
   kind: 'bearer' | 'oauth';
+  route?: RemoteConnectionRoute;
   createdAt: string;
   lastUsedAt: string | null;
 }
@@ -115,6 +117,7 @@ export interface DashboardAgentConnection {
 export interface DashboardAgentsView {
   remoteAccess: DashboardRemoteAccess;
   connections: DashboardAgentConnection[];
+  privateAccess?: PrivateAgentListenersView;
   /** The connection database could not be opened; the list is unknown, not empty. */
   unavailable?: boolean;
   /** This host cannot switch remote access from the dashboard: how the owner does it instead. */
@@ -122,6 +125,8 @@ export interface DashboardAgentsView {
 }
 
 export interface DashboardAgentConnectionsBackend {
+  /** Only workers that own the private listeners advertise these routes. */
+  privateListeners?: Pick<PrivateAgentListeners, 'view' | 'refresh'> | undefined;
   /** Linux relay keys bind to the engine's current outbound registration. */
   relayInstallId?: () => string | undefined;
   /** The worker's connection store. `create` opens (and creates) the database. */
@@ -201,6 +206,7 @@ function relayNotConnected(
 
 export function dashboardAgentsView(backend: DashboardAgentConnectionsBackend): DashboardAgentsView {
   const remoteAccess = backend.remoteAccess();
+  const privateAccess = backend.privateListeners ? { privateAccess: backend.privateListeners.view() } : {};
   const control = backend.remoteAccessControl;
   // The switch the row would offer: on when off, off otherwise.
   const manual = control && 'manual' in control ? { remoteAccessManual: control.manual(remoteAccess.state === 'off') } : {};
@@ -208,17 +214,19 @@ export function dashboardAgentsView(backend: DashboardAgentConnectionsBackend): 
   try {
     records = backend.store()?.list() ?? [];
   } catch {
-    return { remoteAccess, connections: [], unavailable: true, ...manual };
+    return { remoteAccess, connections: [], unavailable: true, ...manual, ...privateAccess };
   }
   return {
     remoteAccess,
     ...manual,
+    ...privateAccess,
     connections: records
       .filter((record) => record.revokedAt === null)
       .map((record) => ({
         id: record.id,
         name: record.displayName,
         kind: record.kind,
+        route: record.route ?? 'remote',
         createdAt: record.createdAt,
         lastUsedAt: record.lastUsedAt,
       })),
@@ -265,8 +273,16 @@ export async function handleDashboardAgentRequest(
   }
 
   if (pathname === DASHBOARD_AGENT_KEYS_PATH) {
-    const unknown = Object.keys(body).filter((key) => key !== 'name' && key !== 'agent');
-    if (unknown.length > 0) return refusal(400, 'invalid_request', 'A key takes only a name and the agent it is for.');
+    const unknown = Object.keys(body).filter((key) => key !== 'name' && key !== 'agent' && key !== 'route');
+    if (unknown.length > 0) return refusal(400, 'invalid_request', 'A key takes only a name, the agent it is for, and its connection route.');
+    const route = body.route ?? 'remote';
+    if (route !== 'remote' && route !== 'loopback' && route !== 'tailnet') return refusal(400, 'invalid_request', 'Choose a connection from this page.');
+    const listeners = backend.privateListeners;
+    if (route !== 'remote') {
+      if (!listeners) return refusal(501, 'private_connections_unsupported', 'This Olympus cannot connect agents this way. Choose another connection on this page.');
+      const access = listeners.view()[route];
+      if (access.state !== 'available') return refusal(409, 'private_connection_unavailable', access.message ?? 'This connection is not ready. Try again.');
+    }
     const name = sanitizeCallerDisplayName(body.name);
     if (!name) return refusal(400, 'invalid_request', 'Give the connection a name, for example Grok API.');
     // A page from before the agent was sent leaves it out: the name decides.
@@ -277,14 +293,25 @@ export async function handleDashboardAgentRequest(
     }
     const store = openStore(backend);
     if (!store) return storeUnavailable();
-    const installId = backend.relayInstallId?.();
-    const created = store.create(name, { ...(provider ? { provider } : {}), ...(installId ? { installId } : {}) });
+    const installId = route === 'remote' ? backend.relayInstallId?.() : undefined;
+    const created = store.create(name, { route, ...(provider ? { provider } : {}), ...(installId ? { installId } : {}) });
+    let privateUrl: string | undefined;
+    if (route !== 'remote' && listeners) {
+      listeners.refresh();
+      const access = listeners.view()[route];
+      privateUrl = access.urls[0];
+      if (access.state !== 'available' || !access.listening || !privateUrl) {
+        store.revoke(created.connection.id);
+        listeners.refresh();
+        return refusal(503, 'private_connection_unavailable', access.message ?? 'Olympus could not open this connection. Try again.');
+      }
+    }
     const remoteAccess = backend.remoteAccess();
     return secretResponse({
       ok: true,
       token: created.token,
       connection: connectionView(created.connection),
-      ...(remoteAccess.state === 'on' ? { mcp_url: remoteAccess.mcpUrl, openapi_url: remoteAccess.openapiUrl } : {}),
+      ...(privateUrl ? { mcp_url: privateUrl } : remoteAccess.state === 'on' ? { mcp_url: remoteAccess.mcpUrl, openapi_url: remoteAccess.openapiUrl } : {}),
     });
   }
 
@@ -296,6 +323,7 @@ export async function handleDashboardAgentRequest(
   const existing = store?.list().find((record) => record.id === id);
   if (!store || !existing) return refusal(404, 'connection_not_found', 'No connection has that id.');
   const revoked = store.revoke(id);
+  backend.privateListeners?.refresh();
   return secretResponse({
     ok: true,
     connection: connectionView(revoked),
@@ -403,6 +431,7 @@ function connectionView(record: RemoteConnectionRecord): Record<string, unknown>
     id: record.id,
     name: record.displayName,
     kind: record.kind,
+    route: record.route ?? 'remote',
     provider: record.provider,
     created_at: record.createdAt,
     last_used_at: record.lastUsedAt,

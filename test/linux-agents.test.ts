@@ -58,7 +58,7 @@ afterEach(() => { for (const fn of cleanup.splice(0).reverse()) fn(); });
 const render = (host: Record<string, unknown>, remoteAccess = access) => renderDashboardAgentsSection({view:{remoteAccess, connections:[]}, now, ...host});
 const section = (html: string, id: string) => html.split(`data-agent="${id}"`)[1]?.split('</details>')[0] ?? '';
 
-test('Mac connect output stays byte-for-byte equal to pre-change fixtures in every remote state', () => {
+test('Mac connect output matches reviewed guidance fixtures in every remote state', () => {
   for (let i = 0; i < mac.accesses.length; i++) expect(render({platform:'darwin'}, mac.accesses[i])).toBe(mac.agents[i]);
   const page = renderLoopbackConsentPage({platform:'darwin',requestId:'fixture-request',csrf:'fixture-csrf',clientName:'ChatGPT',verifiedHost:'chatgpt.com',redirectHost:'chatgpt.com',redirectOrigin:'https://chatgpt.com'});
   page.body = page.body.replace(/nonce="[^"]+"/g,'nonce="NONCE"');

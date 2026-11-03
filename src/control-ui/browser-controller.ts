@@ -756,8 +756,10 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
     if (kind === 'pair') return { action: 'mint_agent_pairing_code' };
     if (kind === 'key') {
       // The agent chosen on Connect an agent sets who hosts the connection.
-      const agent = form.closest<HTMLElement>('[data-agent]')?.dataset.agent;
-      return { action: 'create_agent_key', name: formRecord(form).name || '', ...(agent ? { agent } : {}) };
+      const route = form.dataset.privateRoute;
+      const privateRoute = route === 'loopback' || route === 'tailnet' ? route : undefined;
+      const agent = privateRoute ? 'other' : form.closest<HTMLElement>('[data-agent]')?.dataset.agent;
+      return { action: 'create_agent_key', name: formRecord(form).name || '', ...(agent ? { agent } : {}), ...(privateRoute ? { route: privateRoute } : {}) };
     }
     if (kind === 'revoke') return { action: 'revoke_agent_connection', connection_id: formRecord(form).connection_id || '' };
     if (kind === 'remote-on') return { action: 'set_remote_access', enabled: true };
@@ -811,12 +813,17 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
     }
   }
 
-  function showAgentSecret(form: HTMLFormElement, value: string, note: string): void {
+  function showAgentSecret(form: HTMLFormElement, value: string, note: string, mcpUrl?: string): void {
     const holder = form.closest('[data-agent-step]') || form.parentElement || form;
     const slot = holder.querySelector<HTMLElement>('[data-agent-secret-slot]');
     const field = slot?.querySelector<HTMLInputElement>('[data-agent-secret]');
     if (!slot || !field) return;
     field.value = value;
+    slot.querySelectorAll<HTMLInputElement>('[data-agent-setup]').forEach(setup => {
+      setup.value = mcpUrl
+        ? `Connect Olympus to ${setup.dataset.agentSetup}. Add a remote MCP server named olympus with URL ${mcpUrl} and header Authorization: Bearer ${value}. Keep this key private. Confirm that Olympus tools are available.`
+        : '';
+    });
     const noteSlot = slot.querySelector('[data-agent-secret-note]');
     if (noteSlot) noteSlot.textContent = note;
     slot.hidden = false;
@@ -919,7 +926,8 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
     }
     if (params.action === 'create_agent_key' && typeof result.body.token === 'string') {
       say(form, '');
-      showAgentSecret(form, result.body.token, 'Copy it now. Olympus keeps only a fingerprint of this key and cannot show it again.');
+      showAgentSecret(form, result.body.token, 'Copy it now. Olympus keeps only a fingerprint of this key and cannot show it again. Each setup line includes this key; keep it private.',
+        typeof result.body.mcp_url === 'string' ? result.body.mcp_url : undefined);
       await refreshAgentList();
       return;
     }
