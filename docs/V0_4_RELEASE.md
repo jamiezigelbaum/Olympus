@@ -146,6 +146,16 @@ with the signed Mac helper and both WhatsApp bridges; every served file matches
 its release hash, and the post-publish canary-test-mac and canary-test-omarchy
 runs install olympus 1.3.0 from the site and pass 7/7.
 
+1.3.2 shipped 2026-11-03: GitHub release v1.3.2 at 72521dd, "Servers and
+second accounts" (Mac server mode #751, agents on another account or the
+tailnet #764, setup without Terminal, the always-on Mac guide #753, Linux
+upgrade fixes). Tested with the release check (Linux and Mac upgrades from
+1.3.1, test-mac canaries) plus hands-on server-mode checks on test-mac.
+1.3.3 shipped the same day at 533980b with #786 (the dashboard keeps answering
+while sources import) and #788 (server mode off, #785), which merged just after
+the 1.3.2 commit; tested by diff against 1.3.2 (exact-head CI and a test-mac
+canary). Follow-ups: #784 (speech-model start-up freeze), #787, #790, #791.
+
 1.3.1 shipped 2026-11-03: GitHub release v1.3.1 (latest) at 16a91267, with the
 WhatsApp fixes (#744 via #757, #745, #746, #747, and the WhatsApp Web version
 update #759), the Evernote picker fix (#743) and #742. The owner chose a
