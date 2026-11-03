@@ -96696,6 +96696,7 @@ __export(exports_source_dashboard, {
   dashboardArchivesImportedLabel: () => dashboardArchivesImportedLabel,
   buildSourceDashboardViewModel: () => buildSourceDashboardViewModel,
   VENICE_SETUP_STEPS: () => VENICE_SETUP_STEPS,
+  VENICE_SETUP_SHORTCUT: () => VENICE_SETUP_SHORTCUT,
   SqliteSourceDashboardHistory: () => SqliteSourceDashboardHistory,
   PUBLISHER_ADVANCED_BYO_SUMMARY: () => PUBLISHER_ADVANCED_BYO_SUMMARY,
   DASHBOARD_UNSETTLED_CUSTODY_LABELS: () => DASHBOARD_UNSETTLED_CUSTODY_LABELS,
@@ -98096,6 +98097,7 @@ function oauthSetupInstructions(source, googleCloudProjectId, redirectBaseUrl) {
       agent_prompt: "Help me connect Gmail and Drive with my own Google app using the dashboard walkthrough. Create a project, enable Gmail and Drive APIs, publish the External sign-in screen, then create a Desktop app client and download its JSON. Add that file only in the Olympus dashboard. Never ask for the client secret in chat.",
       provider_console_url: "https://console.cloud.google.com/auth/clients",
       diy_summary: "Use my own Google app",
+      setup_shortcut: "I already have the downloaded file",
       diy_steps: [
         { title: "Create the project", text: "", instructions: ["Name the project **Olympus**.", "Choose **Create**, then select the new project."], link: { label: "Google Cloud", url: "https://console.cloud.google.com/projectcreate" }, return_note: "Google opens in your browser. Come back here when you've created and selected your Olympus project." },
         { title: "Turn on Gmail and Drive", text: "", instructions: ["Check **Olympus** is selected at the top.", "Search for **Gmail API**, open it and choose **Enable**.", "Return to **Library**, search for **Google Drive API** and choose **Enable**."], link: { label: "Google Cloud", url: "https://console.cloud.google.com/apis/library" }, return_note: "Google opens the API Library. Come back here when both Gmail and Google Drive are enabled in the same project." },
@@ -98115,12 +98117,12 @@ function oauthSetupInstructions(source, googleCloudProjectId, redirectBaseUrl) {
       agent_prompt: "Help me connect Dropbox to Olympus. Walk me through creating a Dropbox app at https://www.dropbox.com/developers/apps (Scoped access, the folder access I want, named Olympus) or reusing my existing Olympus app, enabling the files.metadata.read, files.content.read, sharing.read and account_info.read permissions, and adding the redirect URI shown on the Olympus dashboard's Dropbox card under the app's OAuth 2 redirect URIs. Then give me the App key so I can paste it into the Client ID field on that card and press Connect. Dropbox uses PKCE, so no app secret is needed. Do not ask me to edit files, configuration, or code.",
       provider_console_url: "https://www.dropbox.com/developers/apps",
       diy_summary: "Or set it up yourself (about 5 minutes)",
+      setup_shortcut: "I already have a Dropbox app",
       diy_steps: [
-        { title: "Create your app", text: "Choose Scoped access and name the app Olympus.", link: { label: "Dropbox", url: "https://www.dropbox.com/developers/apps/create" } },
-        { title: "Choose access", text: "Choose App folder to read only that folder, or Full Dropbox to choose from your whole Dropbox.", link: { label: "Dropbox", url: "https://www.dropbox.com/developers/apps" } },
-        { title: "Enable permissions", text: "On the Permissions tab enable files.metadata.read, files.content.read, sharing.read, and account_info.read, then save.", link: { label: "Dropbox", url: "https://www.dropbox.com/developers/apps" } },
-        { title: "Register the redirect URI", text: "On Settings, add this exact URI under OAuth 2 redirect URIs.", redirect_uri: true, link: { label: "Dropbox", url: "https://www.dropbox.com/developers/apps" } },
-        { title: "Add your app key", text: "Copy the App key from Settings and paste it here. No app secret is needed." }
+        { title: "Create your app", text: "", instructions: ["Choose **Scoped access**.", "Choose **App folder** to let Olympus read only that folder, or **Full Dropbox** to choose from all of it.", "Name the app **Olympus** and choose **Create app**."], button_label: "Create the app in Dropbox", link: { label: "Dropbox", url: "https://www.dropbox.com/developers/apps/create" }, return_note: "Dropbox opens your new app. Keep that tab open and come back here." },
+        { title: "Enable permissions", text: "", instructions: ["In your app, open the **Permissions** tab.", "Tick **files.metadata.read**, **files.content.read**, **sharing.read** and **account_info.read**.", "Choose **Submit** at the bottom of the page."], button_label: "Open your Dropbox apps", link: { label: "Dropbox", url: "https://www.dropbox.com/developers/apps" }, return_note: "In the list of your apps, choose Olympus first." },
+        { title: "Register the redirect URI", text: "", instructions: ["Open the **Settings** tab.", "Under **OAuth 2**, find **Redirect URIs**.", "Paste the address below and choose **Add**."], redirect_uri: true, button_label: "Open your Dropbox apps", link: { label: "Dropbox", url: "https://www.dropbox.com/developers/apps" } },
+        { title: "Add your app key", text: "On the Settings tab, copy the App key and paste it here. No app secret is needed." }
       ],
       secret_shown_once: false,
       fields: [{ ...clientIdField, label: "App key (Client ID)" }]
@@ -98132,12 +98134,13 @@ function oauthSetupInstructions(source, googleCloudProjectId, redirectBaseUrl) {
     provider_console_url: "https://console.x.com",
     diy_summary: "Or set it up yourself (about 5 minutes)",
     setup_provider: "X",
+    setup_shortcut: "I already have an X app",
     diy_steps: [
       { title: "Check the cost", text: "Reading bookmarks needs paid X API access. X currently charges by usage with credits. Review the costs before connecting.", button_label: "Open X pricing", link: { label: "X pricing", url: "https://docs.x.com/x-api/getting-started/pricing" } },
-      { title: "Create your app", text: "Sign in to the X developer console and create or choose your app.", link: { label: "X developer console", url: "https://console.x.com" } },
-      { title: "Enable OAuth 2.0", text: "Open the app Settings. Choose Web App, Automated App or Bot (Confidential client), with Read permissions. Olympus requests tweet.read, users.read, bookmark.read and offline.access.", link: { label: "X developer console", url: "https://console.x.com" } },
-      { title: "Register the callback", text: "Under Callback URI / Redirect URL, add this exact URI and save.", redirect_uri: true, link: { label: "X developer console", url: "https://console.x.com" } },
-      { title: "Add your app key", text: "Under Keys & Tokens, copy the OAuth 2.0 Client ID and Client secret. X shows the secret once. After sign-in Olympus checks it can read bookmarks before saving the connection." }
+      { title: "Create your app", text: "", instructions: ["Sign in to the X developer console.", "In the left menu choose **Apps**.", "Open the app you want to use, or create one named **Olympus**."], button_label: "Open the X developer console", link: { label: "X developer console", url: "https://console.x.com" }, return_note: "Come back here when your app is open." },
+      { title: "Enable OAuth 2.0", text: "", instructions: ["On your app's page, open its **user authentication settings** and choose **Set up** (or **Edit**).", "Choose **Read** for app permissions.", "Choose **Web App, Automated App or Bot** for the type of app."], button_label: "Open the X developer console", link: { label: "X developer console", url: "https://console.x.com" }, return_note: "Olympus requests tweet.read, users.read, bookmark.read and offline.access when you sign in. Stay on this form for the next step." },
+      { title: "Register the callback", text: "", instructions: ["On the same form, find **Callback URI / Redirect URL**.", "Paste the address below, exactly as shown.", "Choose **Save**."], redirect_uri: true, button_label: "Open the X developer console", link: { label: "X developer console", url: "https://console.x.com" } },
+      { title: "Add your app key", text: "On your app's page, find the OAuth 2.0 keys and copy the Client ID and Client secret. X shows the secret only once, so paste it here straight away. After sign-in Olympus checks it can read bookmarks before saving the connection." }
     ],
     secret_shown_once: true,
     fields: [clientIdField, clientSecretField]
@@ -98171,6 +98174,7 @@ function apiKeySetupInstructions(source) {
     provider_console_url: "https://venice.ai",
     diy_summary: "Or get the API key yourself (about 2 minutes)",
     diy_steps: VENICE_SETUP_STEPS,
+    setup_shortcut: VENICE_SETUP_SHORTCUT,
     secret_shown_once: false,
     fields: [tokenField]
   };
@@ -98947,7 +98951,7 @@ function titleCase(value) {
 function round12(value) {
   return Math.round(value * 10) / 10;
 }
-var DASHBOARD_CONNECTION_REGISTRY_UNREADABLE_LABEL = "connection state unreadable", DASHBOARD_UNPAIRED_LABEL = "unpaired", DASHBOARD_UNPAIR_STATE_UNREADABLE_LABEL = "unpair state unreadable", DASHBOARD_UNPAIR_INCOMPLETE_LABEL = "Unpair incomplete — manual cleanup required", DASHBOARD_UNSETTLED_CUSTODY_LABELS, DASHBOARD_FIRST_SYNC_FRESHNESS_LABEL = "Waiting for the first sync", DASHBOARD_PERSISTENT_FAILURE_RUNS = 3, DASHBOARD_CREDENTIAL_CONTENTION_KINDS, DASHBOARD_SAVED_SECRET_FIELD_VALUE = "olympus-saved-secret-unchanged", DASHBOARD_MANUAL_SYNC_SHOWN_MS, DASHBOARD_MANUAL_SYNC_MIN_INTERVAL_MS = 60000, CAPTURE_MEDIA_WAITING_FOR_DISK_COUNT = "capture_media_waiting_for_disk", DASHBOARD_SQLITE_STORE_ID = "source-dashboard", MIN_PROGRESS_WINDOW_MS, SAMPLE_RETENTION_MS2, MAX_SAMPLES_PER_CORPUS2 = 720, DASHBOARD_NEEDS_REVIEW_REASONS, DASHBOARD_SENSITIVITY_TIERS, ARCHIVE_IMPORTS_CARD_ID = "archive.imports", LIVE_ARCHIVE_CARD_IDS, DASHBOARD_SUPPORTED_SOURCES, VENICE_ANSWER_LANE, CARD_UNREADABLE_NAMES = 5, TIER_MIGRATION_STATE_LABELS, DASHBOARD_NO_ARCHIVES_LABEL = "no archives imported yet", DASHBOARD_ARCHIVES_IMPORTING_LABEL = "importing", DASHBOARD_ARCHIVES_NOT_RUNNING_LABEL = "imports can't run", DASHBOARD_ARCHIVES_UNREADABLE_LABEL = "can't read the list of imported archives", PUBLISHER_ADVANCED_BYO_SUMMARY = "Use my own app instead", VENICE_SETUP_STEPS, CAPTURE_STATE_RANK, OPERATOR_PARK_EXPLAINS_STALENESS_HOURS = 24, DASHBOARD_UNREADABLE_ALARM_SHARE = 0.05, DASHBOARD_TRUST_DOMAINS;
+var DASHBOARD_CONNECTION_REGISTRY_UNREADABLE_LABEL = "connection state unreadable", DASHBOARD_UNPAIRED_LABEL = "unpaired", DASHBOARD_UNPAIR_STATE_UNREADABLE_LABEL = "unpair state unreadable", DASHBOARD_UNPAIR_INCOMPLETE_LABEL = "Unpair incomplete — manual cleanup required", DASHBOARD_UNSETTLED_CUSTODY_LABELS, DASHBOARD_FIRST_SYNC_FRESHNESS_LABEL = "Waiting for the first sync", DASHBOARD_PERSISTENT_FAILURE_RUNS = 3, DASHBOARD_CREDENTIAL_CONTENTION_KINDS, DASHBOARD_SAVED_SECRET_FIELD_VALUE = "olympus-saved-secret-unchanged", DASHBOARD_MANUAL_SYNC_SHOWN_MS, DASHBOARD_MANUAL_SYNC_MIN_INTERVAL_MS = 60000, CAPTURE_MEDIA_WAITING_FOR_DISK_COUNT = "capture_media_waiting_for_disk", DASHBOARD_SQLITE_STORE_ID = "source-dashboard", MIN_PROGRESS_WINDOW_MS, SAMPLE_RETENTION_MS2, MAX_SAMPLES_PER_CORPUS2 = 720, DASHBOARD_NEEDS_REVIEW_REASONS, DASHBOARD_SENSITIVITY_TIERS, ARCHIVE_IMPORTS_CARD_ID = "archive.imports", LIVE_ARCHIVE_CARD_IDS, DASHBOARD_SUPPORTED_SOURCES, VENICE_ANSWER_LANE, CARD_UNREADABLE_NAMES = 5, TIER_MIGRATION_STATE_LABELS, DASHBOARD_NO_ARCHIVES_LABEL = "no archives imported yet", DASHBOARD_ARCHIVES_IMPORTING_LABEL = "importing", DASHBOARD_ARCHIVES_NOT_RUNNING_LABEL = "imports can't run", DASHBOARD_ARCHIVES_UNREADABLE_LABEL = "can't read the list of imported archives", PUBLISHER_ADVANCED_BYO_SUMMARY = "Use my own app instead", VENICE_SETUP_SHORTCUT = "I already have a Venice API key", VENICE_SETUP_STEPS, CAPTURE_STATE_RANK, OPERATOR_PARK_EXPLAINS_STALENESS_HOURS = 24, DASHBOARD_UNREADABLE_ALARM_SHARE = 0.05, DASHBOARD_TRUST_DOMAINS;
 var init_source_dashboard = __esm(() => {
   init_olympus_layout();
   init_google_handle_compatibility();
@@ -149630,6 +149634,14 @@ function mountDashboardController(options) {
           input.spellcheck = false;
           wrapper.append(input);
           form.append(wrapper);
+          const hints2 = { code: "Telegram has just sent you a message in the Telegram app, from the account called Telegram. The login code is in that message.", password: "The password you set under Two-Step Verification in Telegram’s Privacy and Security settings." };
+          if (hints2[field]) {
+            const hint = document.createElement("p");
+            hint.className = "setupnote";
+            hint.dataset.messagingFieldHint = field;
+            hint.textContent = hints2[field];
+            form.append(hint);
+          }
           const button = document.createElement("button");
           button.type = "submit";
           button.textContent = "Continue";
@@ -150012,14 +150024,14 @@ function mountDashboardController(options) {
         window.open(url2, "_blank", "noopener,noreferrer");
       return;
     }
-    const setupControl = target.closest("[data-setup-next], [data-setup-back], [data-setup-retry]");
+    const setupControl = target.closest("[data-setup-next], [data-setup-back], [data-setup-retry], [data-setup-jump]");
     if (setupControl) {
       const sheet = setupControl.closest("[data-setup-steps]");
       if (!sheet)
         return;
       const panels = Array.from(sheet.querySelectorAll(":scope > [data-setup-panel]"));
       const current2 = panels.findIndex((panel) => !panel.hidden);
-      const next = Math.max(0, Math.min(panels.length - 1, setupControl.hasAttribute("data-setup-retry") ? Number(setupControl.dataset.setupRetry) : current2 + (setupControl.hasAttribute("data-setup-next") ? 1 : -1)));
+      const next = Math.max(0, Math.min(panels.length - 1, setupControl.hasAttribute("data-setup-retry") ? Number(setupControl.dataset.setupRetry) : setupControl.hasAttribute("data-setup-jump") ? Number(setupControl.dataset.setupJump) : current2 + (setupControl.hasAttribute("data-setup-next") ? 1 : -1)));
       showSetupStep(sheet, next);
       return;
     }
@@ -150897,6 +150909,9 @@ function setupStepsSheet(input) {
   const id = safeId2(input.id);
   const count = input.steps.length;
   const current2 = input.initialStep ?? 0;
+  const redirectStep = input.steps.findIndex((step) => step.redirect_uri && input.redirect);
+  const shortcutTarget = redirectStep >= 0 ? redirectStep : count - 1;
+  const shortcut = input.shortcut && shortcutTarget > 0 ? `<p class="setupshortcut"><button class="btn" type="button" data-setup-jump="${shortcutTarget}">${escapeHtml2(input.shortcut)}</button></p>` : "";
   const formId = `${id}-form`;
   const initialAction = input.stepActions?.[0];
   const panels = input.steps.map((step, index) => {
@@ -150910,7 +150925,7 @@ function setupStepsSheet(input) {
     const action = input.stepActions?.[index];
     const instructions = step.instructions ? `<ol class="steps">${step.instructions.map((click) => `<li>${escapeHtml2(click).replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")}</li>`).join("")}</ol>` : step.text ? `<p>${escapeHtml2(step.text)}</p>` : "";
     const heading = input.guided ? "h2" : "h4";
-    return `<div data-setup-panel${action ? ` data-setup-form="${escapeHtml2(action.formId)}" data-setup-label="${escapeHtml2(action.label)}"` : ""}${index !== current2 ? " hidden" : ""}><${heading}>${escapeHtml2(step.title ?? `Step ${index + 1}`)}</${heading}>${instructions}${link}${extraLinks}${redirect}${step.return_note ? `<p class="setupnote">${escapeHtml2(step.return_note)}</p>` : ""}${input.stepContent?.[index] ?? ""}${index === count - 1 ? input.finalForm(formId) : ""}</div>`;
+    return `<div data-setup-panel${action ? ` data-setup-form="${escapeHtml2(action.formId)}" data-setup-label="${escapeHtml2(action.label)}"` : ""}${index !== current2 ? " hidden" : ""}><${heading}>${escapeHtml2(step.title ?? `Step ${index + 1}`)}</${heading}>${instructions}${link}${extraLinks}${redirect}${step.return_note ? `<p class="setupnote">${escapeHtml2(step.return_note)}</p>` : ""}${index === 0 ? shortcut : ""}${input.stepContent?.[index] ?? ""}${index === count - 1 ? input.finalForm(formId) : ""}</div>`;
   }).join("");
   const progress = input.guided ? `<div class="setupsegments" role="progressbar" aria-label="Setup progress" aria-valuemin="1" aria-valuemax="${count}" aria-valuenow="${current2 + 1}">${input.steps.map((_, i2) => `<span data-setup-segment${i2 <= current2 ? ' class="filled"' : ""}></span>`).join("")}</div>` : `<progress data-setup-progress max="${count}" value="${current2 + 1}"></progress>`;
   return `<div data-setup-steps${input.guided ? " data-setup-guided" : ""}>${progress}<p data-setup-counter>${input.guided ? `STEP ${current2 + 1} OF ${count}` : `Step ${current2 + 1} of ${count}`}</p>${panels}<div class="setupactions actionrow" data-setup-actions><button class="btn" type="button" data-setup-back${current2 === 0 ? " disabled" : ""}>Back</button><button class="btn primary" type="button" data-setup-next${current2 === count - 1 || initialAction ? " hidden" : ""}>I've done this, next</button><button class="btn primary" type="submit" form="${escapeHtml2(initialAction?.formId ?? formId)}" data-setup-submit${current2 === count - 1 || initialAction ? "" : " hidden"}>${escapeHtml2(initialAction?.label ?? input.submitLabel ?? "Connect")}</button>${input.footerContent ?? ""}</div>${input.footer ? `<p class="setupfooter">${escapeHtml2(input.footer)}</p>` : ""}</div>`;
@@ -150933,7 +150948,7 @@ function connectSetupSheet(input) {
   const submitLabel = escapeHtml2(input.submitLabel ?? "Connect");
   const sourceField = `<input type="hidden" name="source" value="${escapeHtml2(input.source)}">`;
   const byoForm = (formId) => `<form${formId ? ` id="${formId}" class="setupfields"` : ' class="rowform"'} data-connect-kind="oauth" style="margin-top:12px">` + sourceField + (input.credentialFile ? `<input type="hidden" name="google_desktop" value="true"><input type="hidden" name="client_file_revision" value="0"><div data-client-file-drop tabindex="0" role="button" aria-label="Drop the downloaded file here"><p>Drop the downloaded file here</p><p class="hint">client_secret_….json, or choose it from Downloads</p><input type="file" accept=".json,application/json" data-client-file hidden aria-label="Choose the downloaded file"><p data-client-file-status role="status"></p></div>${hasError ? `<div data-setup-error><p class="why" role="alert">${escapeHtml2(input.notice)}</p>${detailsDisclosure("How to fix", input.noticeDetail ? `<p class="hint">${escapeHtml2(input.noticeDetail)}</p>` : "")}</div>` : ""}<p class="hint">The file stays on this computer. Olympus reads the key from it, checks your app is ready, and opens Google's sign-in. Drive uses the same app.</p><details data-client-paste><summary>Paste the ID and secret instead</summary>${inputs.replace(/<input /g, "<input disabled ")}</details>` : inputs) + (formId ? "" : `<button class="btn primary" type="submit">${submitLabel}</button>`) + `<span class="actmsg" data-action-message role="status"></span>` + `<span class="authfallback" data-authorization-fallback></span>` + `</form>`;
-  const walkthroughBody = input.steps?.length && input.provider ? setupStepsSheet({ id, provider: input.provider, steps: input.steps, finalForm: byoForm, submitLabel: input.submitLabel ?? "Connect", ...input.credentialFile ? { guided: true, initialStep: hasError ? input.steps.length - 1 : 0, footer: "Steps: project · turn on Gmail and Drive · sign-in screen · publish · make the key · paste it here" } : {}, ...input.redirectUri ? { redirect: input.redirectUri.uri } : {} }) : `${registration}${redirect}${byoForm()}`;
+  const walkthroughBody = input.steps?.length && input.provider ? setupStepsSheet({ id, provider: input.provider, steps: input.steps, finalForm: byoForm, submitLabel: input.submitLabel ?? "Connect", ...input.credentialFile ? { guided: true, initialStep: hasError ? input.steps.length - 1 : 0, footer: "Steps: project · turn on Gmail and Drive · sign-in screen · publish · make the key · paste it here" } : {}, ...input.redirectUri ? { redirect: input.redirectUri.uri } : {}, ...input.shortcut ? { shortcut: input.shortcut } : {} }) : `${registration}${redirect}${byoForm()}`;
   const walkthrough = input.credentialFile ? `<div class="setupheader"><h2>${escapeHtml2(input.setupHeading ?? input.heading)}</h2><button class="btn setupclose" type="button" data-sheet-toggle="#${id}" aria-label="Close setup">×</button></div><p class="setupintro">${escapeHtml2(input.intro)}</p>${walkthroughBody}` : `${input.setupHeading ? `<h4>${escapeHtml2(input.setupHeading)}</h4>` : ""}${walkthroughBody}`;
   const lead = input.lead ? `<div data-setup-lead><h4>${escapeHtml2(input.lead.title)}</h4><p>${escapeHtml2(input.lead.body)}</p><button type="button" class="btn primary" data-setup-begin>${escapeHtml2(input.lead.button)}</button>${input.lead.notes.map((note) => `<p class="hint">${escapeHtml2(note)}</p>`).join("")}</div>` : "";
   if (input.publisher) {
@@ -150967,6 +150982,7 @@ function dashboardNeedsSetupSheet(source, action, options = {}) {
     source: action.source,
     fields: action.instructions.fields,
     ...action.instructions.setup_provider ? { steps: action.instructions.diy_steps, provider: action.instructions.setup_provider, setupHeading: action.instructions.setup_heading, credentialFile: action.instructions.credential_file } : {},
+    ...action.instructions.setup_shortcut ? { shortcut: action.instructions.setup_shortcut } : {},
     ...options.lead ? { lead: options.lead } : {},
     ...options.providerNote === undefined ? {} : { providerNote: options.providerNote },
     ...redirectUriInput(action)
@@ -150991,6 +151007,7 @@ function dashboardOAuthConnectSheet(source, action, options = {}) {
     source: action.source,
     fields,
     ...byo.setup_provider ? { steps: byo.diy_steps, provider: byo.setup_provider, setupHeading: byo.setup_heading, credentialFile: byo.credential_file } : {},
+    ...byo.setup_shortcut ? { shortcut: byo.setup_shortcut } : {},
     ...options.lead ? { lead: options.lead } : {},
     submitLabel: dashboardActionLabel(action.label),
     ...action.publisher_client && !options.lead ? {
@@ -158700,10 +158717,11 @@ function telegramSetupSheet() {
     id: "telegram-setup",
     provider: "Telegram",
     submitLabel: "Check keys and continue",
+    shortcut: "I already have my API ID and hash",
     steps: [
       { title: "Sign in to Telegram", text: "Sign in at my.telegram.org with your Telegram phone number. Telegram sends the login code to your Telegram app.", link: { label: "Sign in to Telegram", url: "https://my.telegram.org/auth" } },
       { title: "Open API development tools", text: "Choose API development tools. If you have not created an app, enter an app title and short name and create it. Keep the app page open.", link: { label: "API development tools", url: "https://my.telegram.org/apps" } },
-      { title: "Enter your Telegram app credentials", text: "Find api_id and api_hash on the app page. Check keys and continue starts pairing on this computer: enter the API ID and API hash when prompted, then your phone number, Telegram login code and two-step verification password if requested." }
+      { title: "Enter your Telegram app credentials", text: "Find api_id and api_hash on the app page. Check keys and continue starts pairing on this computer: enter the API ID and API hash when prompted, then your phone number. Telegram then sends a login code as a message in your Telegram app; enter it here, and your two-step verification password if asked." }
     ],
     finalForm: (formId) => `<form id="${formId}" method="dialog" data-messaging-kind="start"></form>`
   });
@@ -160124,7 +160142,7 @@ function modelKeyForm(card, formId) {
 }
 function modelKeyAction(card, lead) {
   if (card.id === "venice" && lead.includes("<form")) {
-    return `<span id="model-venice-start" tabindex="-1"></span>` + setupStepsSheet({ id: `model-venice-${card.state}`, provider: "Venice", steps: VENICE_SETUP_STEPS, finalForm: (formId) => modelKeyForm(card, formId) });
+    return `<span id="model-venice-start" tabindex="-1"></span>` + setupStepsSheet({ id: `model-venice-${card.state}`, provider: "Venice", steps: VENICE_SETUP_STEPS, shortcut: VENICE_SETUP_SHORTCUT, finalForm: (formId) => modelKeyForm(card, formId) });
   }
   if (card.id === "gemini")
     return `<div class="modelaction">${lead}<span class="modelnote">Existing Gemini installations only. New embedding setup uses built-in local EmbeddingGemma or Venice. See the embedding migration guide above.</span></div>`;
@@ -160316,7 +160334,7 @@ ${connect.sheet}`;
   if (action.kind === "api_key" && action.source === "venice") {
     const sheetId = "setup-venice-api";
     const form = (formId) => `<form id="${formId}" class="setupfields" data-connect-kind="api_key"><input type="hidden" name="source" value="venice"><input class="keyfield" type="password" name="api_key" required autocomplete="new-password" placeholder="API key" aria-label="API key"><span class="actmsg" data-action-message role="status"></span></form>`;
-    const sheet = `<div class="sheet" id="${sheetId}" aria-hidden="true"><h4>Set up Venice</h4>${setupStepsSheet({ id: sheetId, provider: "Venice", steps: action.instructions.diy_steps, finalForm: form })}</div>`;
+    const sheet = `<div class="sheet" id="${sheetId}" aria-hidden="true"><h4>Set up Venice</h4>${setupStepsSheet({ id: sheetId, provider: "Venice", steps: action.instructions.diy_steps, ...action.instructions.setup_shortcut ? { shortcut: action.instructions.setup_shortcut } : {}, finalForm: form })}</div>`;
     return setupRow({ ...id, label: source.label, blurb: action.instructions.plain_intro, action: { label: action.label, kind: "none", sheet: sheetId, ...gate } }) + sheet;
   }
   const link = action.kind === "api_key" ? keyLocationLink(action.instructions) : undefined;

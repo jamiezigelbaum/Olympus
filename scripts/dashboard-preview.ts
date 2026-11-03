@@ -22,7 +22,7 @@ import { loadSovereigntyPreset } from '../src/core/sovereignty.ts';
 //   /dashboard?keys | ?agents | ?private-answers | ?connector
 //                the computer's own pages, as the worker renders them.
 //   &sheet=first-run|first-run-local|first-run-no-sensitive&step=1..3 with state=first-run
-//   &sheet=dropbox|venice&step=1..5 opens a setup fixture without starting OAuth.
+//   &sheet=dropbox|venice&step=1..4 opens a setup fixture without starting OAuth.
 //   &waiting=0..9  how many private inbox questions appear (default 3; remembered):
 //                the Private answers list and the panel's Needs you line.
 //   &agents=off|not-connected|relay-unavailable|awaiting-terms|worker-env

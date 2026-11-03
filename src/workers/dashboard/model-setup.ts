@@ -1,6 +1,6 @@
 import { DASHBOARD_MODELS_BLOCKED_REASON } from './vocabulary.ts';
 import { PRIVATE_ANSWER_OPTIONS } from '../../core/privacy-language.ts';
-import { VENICE_SETUP_STEPS } from '../source-dashboard.ts';
+import { VENICE_SETUP_SHORTCUT, VENICE_SETUP_STEPS } from '../source-dashboard.ts';
 import type { ModelSetupCard, ModelSetupView } from '../../core/model-setup.ts';
 import { blockerBanner, connectorSheet, escapeHtml, rowMenu, setupStepsSheet } from './components.ts';
 
@@ -185,7 +185,7 @@ function modelKeyForm(card: ModelSetupCard, formId?: string): string {
 /** One wrapping row: the key form (or the saved-key note) and the "Get a key" link beside it. */
 function modelKeyAction(card: ModelSetupCard, lead: string): string {
   if (card.id === 'venice' && lead.includes('<form')) {
-    return `<span id="model-venice-start" tabindex="-1"></span>` + setupStepsSheet({ id: `model-venice-${card.state}`, provider: 'Venice', steps: VENICE_SETUP_STEPS, finalForm: (formId) => modelKeyForm(card, formId) });
+    return `<span id="model-venice-start" tabindex="-1"></span>` + setupStepsSheet({ id: `model-venice-${card.state}`, provider: 'Venice', steps: VENICE_SETUP_STEPS, shortcut: VENICE_SETUP_SHORTCUT, finalForm: (formId) => modelKeyForm(card, formId) });
   }
   if (card.id === 'gemini') return `<div class="modelaction">${lead}<span class="modelnote">Existing Gemini installations only. New embedding setup uses built-in local EmbeddingGemma or Venice. See the embedding migration guide above.</span></div>`;
   const href = 'https://venice.ai';

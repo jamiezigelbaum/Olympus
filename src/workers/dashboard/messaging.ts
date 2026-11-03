@@ -3,11 +3,11 @@ import { escapeHtml, setupStepsSheet } from './components.ts';
 /** Guide app registration, then use the existing local, in-memory prompt flow. */
 function telegramSetupSheet(): string {
   const walkthrough = setupStepsSheet({
-    id: 'telegram-setup', provider: 'Telegram', submitLabel: 'Check keys and continue',
+    id: 'telegram-setup', provider: 'Telegram', submitLabel: 'Check keys and continue', shortcut: 'I already have my API ID and hash',
     steps: [
       { title: 'Sign in to Telegram', text: 'Sign in at my.telegram.org with your Telegram phone number. Telegram sends the login code to your Telegram app.', link: { label: 'Sign in to Telegram', url: 'https://my.telegram.org/auth' } },
       { title: 'Open API development tools', text: 'Choose API development tools. If you have not created an app, enter an app title and short name and create it. Keep the app page open.', link: { label: 'API development tools', url: 'https://my.telegram.org/apps' } },
-      { title: 'Enter your Telegram app credentials', text: 'Find api_id and api_hash on the app page. Check keys and continue starts pairing on this computer: enter the API ID and API hash when prompted, then your phone number, Telegram login code and two-step verification password if requested.' },
+      { title: 'Enter your Telegram app credentials', text: 'Find api_id and api_hash on the app page. Check keys and continue starts pairing on this computer: enter the API ID and API hash when prompted, then your phone number. Telegram then sends a login code as a message in your Telegram app; enter it here, and your two-step verification password if asked.' },
     ],
     finalForm: formId => `<form id="${formId}" method="dialog" data-messaging-kind="start"></form>`,
   });

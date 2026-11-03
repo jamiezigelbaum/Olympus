@@ -159,22 +159,25 @@ describe('the card walks the owner through registering the callback itself', () 
   test('Dropbox names its console, its permissions, its setting, and what to bring back', () => {
     const sheet = connectSheet('dropbox.files', { dropbox: 'dropbox-app-key' });
 
+    // Every step names the exact clicks in Dropbox's console (#781).
+    expect(sheet).toContain('data-setup-open="https://www.dropbox.com/developers/apps/create"');
     expect(sheet).toContain('data-setup-open="https://www.dropbox.com/developers/apps"');
-    expect(sheet).toContain('Open this page in Dropbox');
-    expect(sheet).toContain('Choose Scoped access');
-    expect(sheet).toContain('files.metadata.read, files.content.read, sharing.read, and account_info.read');
-    expect(sheet).toContain('On Settings, add this exact URI under OAuth 2 redirect URIs.');
+    expect(sheet).toContain('Open your Dropbox apps');
+    expect(sheet).toContain('Choose <strong>Scoped access</strong>');
+    expect(sheet).toContain('<strong>files.metadata.read</strong>, <strong>files.content.read</strong>, <strong>sharing.read</strong> and <strong>account_info.read</strong>');
+    expect(sheet).toContain('Open the <strong>Settings</strong> tab.');
+    expect(sheet).toContain('Under <strong>OAuth 2</strong>, find <strong>Redirect URIs</strong>.');
     expect(sheet).toContain(`<div class="promptbox" id="connect-dropbox-files-redirect">${TAILNET}/oauth/callback/dropbox</div>`);
     expect(sheet).toContain('data-copy-target="#connect-dropbox-files-redirect"');
-    expect(sheet).toContain('Copy the App key from Settings and paste it here.');
-    // Five guided steps replace the old four-item list; the key is last.
+    expect(sheet).toContain('On the Settings tab, copy the App key and paste it here.');
+    // Four guided steps; the key is last.
     const panels = sheet.split('<div data-setup-panel');
-    expect(panels).toHaveLength(6);
-    for (const [index, title] of ['Create your app', 'Choose access', 'Enable permissions', 'Register the redirect URI', 'Add your app key'].entries()) {
+    expect(panels).toHaveLength(5);
+    for (const [index, title] of ['Create your app', 'Enable permissions', 'Register the redirect URI', 'Add your app key'].entries()) {
       expect(panels[index + 1]).toContain(`<h4>${title}</h4>`);
-      if (index < 4) expect(panels[index + 1]).not.toContain('name="client_id"');
+      if (index < 3) expect(panels[index + 1]).not.toContain('name="client_id"');
     }
-    expect(panels[5]).toContain('name="client_id"');
+    expect(panels[4]).toContain('name="client_id"');
   });
 
   test('X names its portal, its scopes, its paid-access requirement, and its setting', () => {
@@ -183,12 +186,16 @@ describe('the card walks the owner through registering the callback itself', () 
     expect(sheet).toContain('data-setup-open="https://console.x.com/"');
     // Scopes are requested by Olympus at authorization time, not configured in
     // the console, so the card names the console's own controls instead.
-    expect(sheet).toContain('with Read permissions');
+    expect(sheet).toContain('Choose <strong>Read</strong> for app permissions.');
+    // The console has no stable per-app address, so the button promises the console, and the step names the clicks (#781).
+    expect(sheet).toContain('Open the X developer console');
+    expect(sheet).not.toContain('Open this page in X');
+    expect(sheet).toContain('In the left menu choose <strong>Apps</strong>.');
     expect(sheet).toContain('Olympus requests tweet.read, users.read, bookmark.read and offline.access');
-    expect(sheet).toContain('OAuth 2.0 Client ID and Client secret');
+    expect(sheet).toContain('copy the Client ID and Client secret');
     expect(sheet).toContain('paid X API access');
     expect(sheet).toContain('https://docs.x.com/x-api/getting-started/pricing');
-    expect(sheet).toContain('Under Callback URI / Redirect URL, add this exact URI and save');
+    expect(sheet).toContain('On the same form, find <strong>Callback URI / Redirect URL</strong>.');
     expect(sheet).toContain('data-copy-target="#setup-x-bookmarks-redirect"');
     expect(sheet).toContain('Web App, Automated App or Bot');
     expect(sheet).toContain(`${TAILNET}/oauth/callback/x`);
