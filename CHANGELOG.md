@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.3.3 - 2026-11-03
+
+- **The dashboard keeps answering while sources import.** A first import of several large sources could hold the engine at full load, so the dashboard said Olympus could not reach your computer until the imports ended (#786).
+- A Mac in server mode can turn server mode off from the dashboard. If no one is signed in to the Mac's desktop, the dashboard says to sign in first, and Olympus keeps running (#785, #788).
+
 ## 1.3.2 - 2026-11-03
 
 - **Run Olympus on an always-on Mac.** Choose "Always on, as a server" on the dashboard, or turn on Keep Olympus running when no one is logged in. Your Mac asks for an administrator password once; after that Olympus starts after a restart without anyone logging in (#751). A new help page covers accounts, FileVault, the network and agents for this setup (#753).
