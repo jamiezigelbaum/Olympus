@@ -209,6 +209,7 @@ const PUBLIC_DOWNLOAD_URL_FILES = new Set([
   'src/core/managed-tools.ts',
   'dist/cli.js',
   'dist/index.js',
+  'dist/embedding-drain.js',
 ]);
 const PUBLIC_DOWNLOAD_URLS = new Set([
   'https://github.com/jamiezigelbaum/zkapi/releases/download/clientd-v0.1.6-olympus4/zkapi-clientd_0.1.6-olympus4_darwin_arm64.tar.gz',

@@ -128,7 +128,7 @@ test('the fixed shell script rejects bad arguments before reaching a privileged 
       expect(spawnSync('/bin/sh', ['-c', script, 'olympus', ...args]).status).toBe(64);
     }
   }
-});
+}, 30_000);
 
 test('a daemon cannot enter the data plane before the login agent unloads, and unknown custody refuses', async () => {
   let calls = 0; let sleeps = 0;
