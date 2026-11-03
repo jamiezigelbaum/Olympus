@@ -5809,6 +5809,7 @@ export async function main(): Promise<void> {
   } : undefined;
   // Assigned once the remote agent routes are built below, so the Setup
   // page's agent panel reads the very store handle `/mcp` and OAuth use.
+  let privateAgentListeners: import('../private-agent-listeners.ts').PrivateAgentListeners | undefined;
   let dashboardAgentStore: DashboardAgentConnectionsBackend['store'] | undefined;
   let dashboardRemoteAccess: DashboardAgentConnectionsBackend['remoteAccess'] = () => ({ state: 'off' });
   let dashboardRemoteAccessControl: DashboardAgentConnectionsBackend['remoteAccessControl'];
@@ -5822,7 +5823,7 @@ export async function main(): Promise<void> {
   // beside the waiting-question store and the built-in model.
   let localPrivateAnswers: import('./local-private-answers.ts').LocalPrivateAnswers | undefined;
   let desktopBridge: ReturnType<typeof manageLinuxOwnerBridge> | ReturnType<typeof connectLinuxOwnerBridgeHost> | undefined;
-  closeDesktopBridge = () => desktopBridge?.close();
+  closeDesktopBridge = () => { desktopBridge?.close(); privateAgentListeners?.close(); };
   let desktopPoll: ReturnType<typeof setInterval> | undefined;
   let desktopPollingClosed = false;
   const agentApprovalHost = () => resolveAgentApprovalHost({ env: process.env, fileEnv: readWorkerSetupEnv(), port, desktopBridgeReady: () => desktopBridge?.status().state === 'listening' });
@@ -5836,6 +5837,7 @@ export async function main(): Promise<void> {
     agentConnectHost: agentApprovalHost,
     agentConnections: {
       store: (options) => dashboardAgentStore?.(options),
+      get privateListeners() { return privateAgentListeners; },
       ...(process.platform === 'linux' ? { relayInstallId: () => remotePublicUrls()?.installId } : {}),
       remoteAccess: () => dashboardRemoteAccess(),
       get remoteAccessControl() { return dashboardRemoteAccessControl; },
@@ -6847,6 +6849,16 @@ export async function main(): Promise<void> {
     archiveCards: () => archiveImportDashboard.cardViews(),
   });
 
+  const sharedRemoteMcpOptions = {
+    ...remoteAgentOptions,
+    anonymousAnswersEnabled: () => {
+      const read = readConsultSettings();
+      return read.state === 'valid' && read.settings.enabled;
+    },
+    ...(remoteEvidenceSearch
+      ? { search: { evidenceSearch: remoteEvidenceSearch, answerModelAvailable: chatgptAnswerModelAvailable } }
+      : {}),
+  };
   const socketPath = prepareWorkerSocket();
   const serverOptions = {
     // Remote agent routes authenticate connection credentials only (bearer
@@ -6885,24 +6897,8 @@ export async function main(): Promise<void> {
       // the worker-bearer routes keep their own handling.
       withRemoteOpenApiRoutes(withRemoteFailureBoundary(remoteOpenApi), withRemoteMcpRoute(
         withRemoteFailureBoundary(createRemoteMcpHandler({
-          ...remoteAgentOptions,
-          anonymousAnswersEnabled: () => {
-            const read = readConsultSettings();
-            return read.state === 'valid' && read.settings.enabled;
-          },
-          // Relayed requests get the ChatGPT surface (docs/design/chatgpt-plugin.md):
-          // the hosted relay is the ChatGPT path, and the relay marker must
-          // carry the relay child's per-boot secret (isRelayedRequest), from
-          // an OAuth grant to a pinned ChatGPT client. Direct, bearer and
-          // self-registered connections keep the remote operation surface; a
-          // demo sign-in grant gets the read-only tools. The dashboard tool
-          // reads the view `/dashboard.json` serves, in-process.
-          // Every other caller (Claude, Grok, Grok Bot or Cursor, keys)
-          // gets the same evidence search, so it can answer on an install
-          // with no answer model (workers/remote-search.ts).
-          ...(remoteEvidenceSearch
-            ? { search: { evidenceSearch: remoteEvidenceSearch, answerModelAvailable: chatgptAnswerModelAvailable } }
-            : {}),
+          ...sharedRemoteMcpOptions,
+          // Only the public relay route can select the pinned ChatGPT surface.
           chatgpt: {
             servesRequest: (request: Request, connection: { clientId?: string | null }) => isRelayedRequest(request) && isChatGptGrant(connection),
             readOnlyFor: isDemoGrant,
@@ -6948,6 +6944,15 @@ export async function main(): Promise<void> {
       } })
     : Bun.serve({ hostname, port, idleTimeout: 0, ...serverOptions });
   const server = socketPath ? bindWorkerSocket(socketPath, startServer) : startServer();
+  // This Bun worker owns listener lifecycle on standalone Mac/Linux and
+  // OpenClaw-hosted installs alike. Dashboard-only backends without this
+  // capability omit privateListeners and hide the choices.
+  const { createPrivateAgentListeners } = await import('../private-agent-listeners.ts');
+  privateAgentListeners = createPrivateAgentListeners({
+    connections: remoteConnections,
+    mcp: sharedRemoteMcpOptions,
+    privacyPending: () => privacyChoicePending(sovereigntyEngine),
+  });
   updateChecker.start();
   if (socketPath && process.env[OWNER_BRIDGE_HOST_ENV]) {
     const client = connectLinuxOwnerBridgeHost(process.env[OWNER_BRIDGE_HOST_ENV]!);
@@ -7060,6 +7065,7 @@ export async function main(): Promise<void> {
     closeDesktopBridge();
     if (shuttingDown) return;
     shuttingDown = true;
+    privateAgentListeners?.close();
     sourceRuntimeClosed = true;
     localFilesCleanupRecovery?.close();
     sourceScheduler?.stop();

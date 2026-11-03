@@ -73,6 +73,8 @@ export interface RemoteMcpHandlerOptions {
    * must not create one.
    */
   connections: () => RemoteConnectionStore | undefined;
+  /** Private listeners accept only bearer keys minted for this route. */
+  connectionRoute?: 'loopback' | 'tailnet';
   /** The configured public URLs (or a live source); undefined when OAuth is off (bearer connections only). */
   publicUrls?: RemotePublicUrlsSource;
   /** `signal` is the remote client's request signal; see createInProcessOperationContext. */
@@ -306,7 +308,7 @@ function markAuthenticated(response: Response, surface: 'chatgpt' | 'remote'): R
  */
 export function authenticateRemoteRequest(
   request: Request,
-  options: Pick<RemoteMcpHandlerOptions, 'connections' | 'publicUrls'>,
+  options: Pick<RemoteMcpHandlerOptions, 'connections' | 'publicUrls' | 'connectionRoute'>,
   surface: McpSurface = 'default',
 ): { ok: true; connection: RemoteMcpConnection } | { ok: false; response: Response } {
   const urls = currentRemotePublicUrls(options.publicUrls);
@@ -314,7 +316,7 @@ export function authenticateRemoteRequest(
   const refuse = (error?: 'invalid_token') => ({ ok: false as const, response: unauthorized(error, urls, endpoint?.protectedResourceMetadataUrl) });
   const token = bearerToken(request.headers.get('Authorization'));
   if (token === undefined) return refuse();
-  const oauthToken = urls !== undefined && isWellFormedOAuthAccessToken(token);
+  const oauthToken = !options.connectionRoute && urls !== undefined && isWellFormedOAuthAccessToken(token);
   if (!oauthToken && (surface === 'directory' || !isWellFormedRemoteConnectionToken(token))) return refuse('invalid_token');
   let store: RemoteConnectionStore | undefined;
   try {
@@ -326,14 +328,14 @@ export function authenticateRemoteRequest(
   let verification: ReturnType<RemoteConnectionStore['verifyToken']> | ReturnType<RemoteConnectionStore['oauth']['verifyAccessToken']>;
   try {
     // Audience binding: only an OAuth token issued for this resource opens it.
-    verification = oauthToken ? store.oauth.verifyAccessToken(token, endpoint!.resource) : store.verifyToken(token);
+    verification = oauthToken ? store.oauth.verifyAccessToken(token, endpoint!.resource) : store.verifyToken(token, options.connectionRoute);
     // A Linux owner-created API key uses the relay access-token envelope but
     // remains a revocable bearer connection. It never opens the directory
     // resource or bypasses an expired/revoked/wrong-audience OAuth grant.
     if (oauthToken && !verification.ok && verification.reason === 'unknown'
       && surface === 'default' && urls?.installId
       && credentialInstallId('access', token) === urls.installId) {
-      verification = store.verifyToken(token);
+      verification = store.verifyToken(token, options.connectionRoute);
     }
   } catch {
     // A store that cannot be read (closed, locked, corrupt) refuses with a
@@ -350,7 +352,7 @@ export function authenticateRemoteRequest(
 function stillAuthorized(
   request: Request,
   connection: RemoteMcpConnection,
-  options: Pick<RemoteMcpHandlerOptions, 'connections' | 'publicUrls'>,
+  options: Pick<RemoteMcpHandlerOptions, 'connections' | 'publicUrls' | 'connectionRoute'>,
   surface: McpSurface,
 ): 'active' | 'revoked' | 'unavailable' {
   const again = authenticateRemoteRequest(request, options, surface);

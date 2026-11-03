@@ -466,7 +466,7 @@ describe('the panel', () => {
       expect(html).not.toContain('data-agent-kind="key"');
       expect(html).toContain('&lt;olympus path&gt; serve');
     }
-    expect(render({ state: 'off' })).toContain('Off. Only agents on this computer can ask Olympus.');
+    expect(render({ state: 'off' })).toContain('Off. Agents in the cloud cannot ask Olympus. Connections on this computer and your tailnet work separately.');
   });
 
   test('lists active connections with dates and a Revoke control', () => {
@@ -543,9 +543,9 @@ describe('the controller shows a secret once', () => {
     happy.close();
   });
 
-  function mount(control: (params: OlympusDashboardControlParams) => Promise<OlympusDashboardControlResult>) {
+  function mount(control: (params: OlympusDashboardControlParams) => Promise<OlympusDashboardControlResult>, privateAccess?: import('../src/workers/agent-connections.ts').DashboardAgentsView['privateAccess']) {
     const root = document.createElement('div');
-    root.innerHTML = renderDashboardAgentsSection({ platform: 'darwin', view: { remoteAccess: REMOTE_TUNNEL, connections: [] }, now: NOW });
+    root.innerHTML = renderDashboardAgentsSection({ platform: 'darwin', view: { remoteAccess: REMOTE_TUNNEL, connections: [], ...(privateAccess ? { privateAccess } : {}) }, now: NOW });
     document.body.append(root);
     const abort = new AbortController();
     let refreshes = 0;
@@ -609,6 +609,34 @@ describe('the controller shows a secret once', () => {
     await Bun.sleep(0);
     expect(claude.querySelector('[data-action-message]')!.textContent).toBe('Remote access is off.');
     expect(claude.querySelector<HTMLElement>('[data-agent-secret-slot]')!.hidden).toBe(true);
+  });
+
+  test('private setup lines carry the chosen route, address and key once; Done clears every copy', async () => {
+    const calls: OlympusDashboardControlParams[] = [];
+    const { root } = mount(async params => {
+      calls.push(params);
+      return { status: 200, body: { ok: true, token: 'olympus_conn_private_secret', mcp_url: 'http://100.64.0.9:17841/mcp' } };
+    }, {
+      loopback: { state: 'available', listening: false, urls: ['http://127.0.0.1:17841/mcp'] },
+      tailnet: { state: 'available', listening: false, urls: ['http://100.64.0.9:17841/mcp'] },
+    });
+    const choice = root.querySelector<HTMLElement>('[data-agent="private-tailnet"]')!;
+    const form = choice.querySelector<HTMLFormElement>('form[data-agent-kind="key"]')!;
+    form.querySelector<HTMLInputElement>('[name="name"]')!.value = 'Hermes on server';
+    form.requestSubmit(); await Bun.sleep(0); await Bun.sleep(0);
+    expect(calls[0]).toEqual({ action: 'create_agent_key', name: 'Hermes on server', agent: 'other', route: 'tailnet' });
+    const setups = choice.querySelectorAll<HTMLInputElement>('[data-agent-setup]');
+    expect(setups.length).toBe(3);
+    for (const setup of setups) {
+      expect(setup.value).toContain(setup.dataset.agentSetup!);
+      expect(setup.value).toContain('http://100.64.0.9:17841/mcp');
+      expect(setup.value).toContain('Authorization: Bearer olympus_conn_private_secret');
+      expect(setup.readOnly).toBe(true);
+    }
+    expect(root.innerHTML).not.toContain('olympus_conn_private_secret');
+    choice.querySelector<HTMLElement>('[data-agent-secret-done]')!.click();
+    for (const field of choice.querySelectorAll<HTMLInputElement>('[data-agent-secret]')) expect(field.value).toBe('');
+    expect(choice.querySelector<HTMLElement>('[data-agent-secret-slot]')!.hidden).toBe(true);
   });
 
   test('Create key or Get pairing code that comes back without a key or code says so, never "Revoked."', async () => {

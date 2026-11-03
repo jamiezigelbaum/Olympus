@@ -623,8 +623,22 @@ snippet has a copy button.
   the page that opens in this computer's browser.
 - **Grok Bot**: nothing to add. Once Olympus is connected on grok.com,
   Grok Bot uses that connection, with the same xAI account.
+- **Agent on another account of this computer**: for OpenClaw, Hermes or an
+  MCP client running under another account. Name the agent and choose
+  **Create key**, then copy its setup line into the agent. It connects to
+  this computer only, without reading your Olympus files or signing in.
+- **Agent on my tailnet**: for an agent on your Tailscale network. Keep
+  Tailscale running on both computers, then create a key and copy the setup
+  line. If Tailscale is not running here, the page says so.
 - The **Grok API** and other agents in the cloud need a tunnel you run
-  yourself (below); the panel says so until remote access runs through one.
+  yourself (below), unless the agent can use one of the private choices above.
+
+The private choices use a different key for each named agent. Each address
+starts listening only while it has an active key; revoking its last key stops
+it. The connection list shows which route each key uses. Keys and setup lines
+are shown once, so copy them before choosing **Done**. These connections use
+the same remote tools and privacy rules as the relay, with no question limits.
+They work independently of the remote access switch.
 
 Agents in the cloud reach Olympus only when remote access is on; the Agents
 page says whether it is. To turn it on, press **Turn on remote access**

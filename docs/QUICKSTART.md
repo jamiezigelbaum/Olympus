@@ -661,6 +661,14 @@ Olympus plugin: see the README's
 API and other cloud agents need a tunnel of your own in
 `remote.publicBaseUrl`, approved with a pairing code or a key.)
 
+For OpenClaw, Hermes or another MCP client under another account, choose
+**Agent on another account of this computer**. For an agent on your Tailscale
+network, choose **Agent on my tailnet**; the page says if Tailscale is not
+running. Name the agent, choose **Create key**, and copy the setup line into
+it. No separate sign-in or remote access switch is needed. Copy before
+**Done**: the key and setup lines are shown once. **Revoke** stops that agent;
+revoking a route's last key stops its listener.
+
 ## Anytime
 
 ```bash
