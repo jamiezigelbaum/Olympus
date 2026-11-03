@@ -65,6 +65,26 @@ function readQr(path: string): string {
   } finally { closeSync(fd); }
 }
 
+/**
+ * Logs a linked device this pairing created out of WhatsApp (`--unlink`), which removes it from the phone's linked
+ * devices: `removed`, `offline` when WhatsApp could not be reached (the device is forgotten here, the phone keeps its
+ * entry), or `failed`.
+ */
+export async function unlinkHelper(command: string, env: Record<string, string | undefined>): Promise<'removed' | 'offline' | 'failed'> {
+  const child = spawn(command, ['--unlink'], { env, stdio: ['ignore', 'ignore', 'pipe'] });
+  let errorTail = '';
+  child.stderr?.on('data', (chunk) => { errorTail = (errorTail + Buffer.from(chunk).toString('utf8')).slice(-4096); });
+  const timeout = setTimeout(() => child.kill('SIGKILL'), 60_000);
+  try {
+    const code = await new Promise<number>((resolve, reject) => {
+      child.once('error', reject);
+      child.once('close', (exit) => resolve(exit ?? 1));
+    });
+    if (code === 0) return 'removed';
+    return listingErrorCode(errorTail) === 'unlink_offline' ? 'offline' : 'failed';
+  } finally { clearTimeout(timeout); }
+}
+
 /** The bridge's last fixed error code on stderr. */
 function listingErrorCode(stderr: string): string | undefined {
   for (const line of stderr.split(/\r?\n/).reverse()) {
@@ -117,6 +137,7 @@ export function createDashboardMessagingService(options: {
   withMessagingCapturePaused<T>(source: MessagingSource, operation: () => Promise<T>): Promise<T>;
   withGrantMutation<T>(operation: () => Promise<T>): Promise<T>;
   listCommand?: typeof listHelper;
+  unlinkCommand?: typeof unlinkHelper;
   pairSource?: typeof pairMessagingSource;
 }) {
   const packageRoot = olympusPackageRoot();
@@ -137,43 +158,64 @@ export function createDashboardMessagingService(options: {
   };
   const manager = createDashboardMessagingPairing({
     pair: (source, hooks) => options.withMessagingCapturePaused(source, async () => {
-      const result = await (options.pairSource ?? pairMessagingSource)({
-        source, packageRoot, secretStore: options.secretStore,
-        ...(options.registryPath ? { registryPath: options.registryPath } : {}),
-        signal: hooks.signal, onCommitStart: hooks.commit, whatsappQrMode: 'artifact',
-        requestCaptureScope: async ({ chats, sessionPath, accountProof }) => {
-          // Only the authenticated Telegram account reference establishes continuity.
-          // WhatsApp proves a linked device, not which account it belongs to.
-          const prior = readCaptureGrantFile(defaultMessagingCaptureGrantPath(source, options.registryPath));
-          if (grantSnapshot(source) !== initialGrants.get(source)) throw new Error('Capture grant changed during pairing.');
-          let selection: { wholeAccount: boolean; chatScopes: readonly string[] };
-          if (source === 'telegram' && /^telegram:[a-f0-9]{16}$/.test(accountProof)
-            && prior.kind === 'valid' && prior.grant.accountProof === accountProof) {
-            const env = retainApprovedCaptureScope(source, prior.grant.producer.env);
-            const raw = env.OLYMPUS_TELEGRAM_ALLOWED_CHAT_SCOPES!;
-            selection = { wholeAccount: raw === '*', chatScopes: raw === '*' ? [] : raw.split(',') };
-          } else {
-            let choices: readonly PairingChat[] = chats;
-            if (source === 'whatsapp') {
-              const listing = await (options.listCommand ?? listHelper)(whatsappBridgePathForPackage(packageRoot, { env: process.env }), ['--list-chats'], {
-                ...process.env, OLYMPUS_WHATSAPP_STATE_DIR: sessionPath,
-              });
-              choices = parseChats(source, listing);
+      // A device this pairing linked, until the connection is being saved: a failure or a cancel before then unlinks it,
+      // so the phone never keeps an Olympus entry nothing uses.
+      let created: string | undefined;
+      try {
+        const result = await (options.pairSource ?? pairMessagingSource)({
+          source, packageRoot, secretStore: options.secretStore,
+          ...(options.registryPath ? { registryPath: options.registryPath } : {}),
+          signal: hooks.signal,
+          onCommitStart: () => { created = undefined; hooks.commit(); },
+          whatsappQrMode: 'artifact',
+          requestCaptureScope: async ({ chats, sessionPath, accountProof }) => {
+            // Only the authenticated Telegram account reference establishes continuity.
+            // WhatsApp proves a linked device, not which account it belongs to.
+            const prior = readCaptureGrantFile(defaultMessagingCaptureGrantPath(source, options.registryPath));
+            if (grantSnapshot(source) !== initialGrants.get(source)) throw new Error('Capture grant changed during pairing.');
+            let selection: { wholeAccount: boolean; chatScopes: readonly string[] };
+            if (source === 'telegram' && /^telegram:[a-f0-9]{16}$/.test(accountProof)
+              && prior.kind === 'valid' && prior.grant.accountProof === accountProof) {
+              const env = retainApprovedCaptureScope(source, prior.grant.producer.env);
+              const raw = env.OLYMPUS_TELEGRAM_ALLOWED_CHAT_SCOPES!;
+              selection = { wholeAccount: raw === '*', chatScopes: raw === '*' ? [] : raw.split(',') };
+            } else {
+              let choices: readonly PairingChat[] = chats;
+              if (source === 'whatsapp') {
+                const listing = await (options.listCommand ?? listHelper)(whatsappBridgePathForPackage(packageRoot, { env: process.env }), ['--list-chats'], {
+                  ...process.env, OLYMPUS_WHATSAPP_STATE_DIR: sessionPath,
+                });
+                choices = parseChats(source, listing);
+              }
+              selection = await hooks.choose(choices);
             }
-            selection = await hooks.choose(choices);
-          }
-          // Consent waits outside the grant lock; reject a disconnect or other grant writer.
-          if (grantSnapshot(source) !== initialGrants.get(source)) throw new Error('Capture grant changed during pairing.');
-          return source === 'telegram'
-            ? { source, explicitApproval: true, wholeAccount: selection.wholeAccount, chatScopes: selection.chatScopes }
-            : { source, explicitApproval: true, wholeAccount: selection.wholeAccount, chatJids: selection.chatScopes.map(scope => scope.slice('whatsapp.personal:chat:'.length)) };
-        },
-        runCommand: (request) => runDashboardPairingCommand(request, hooks),
-        onWhatsAppQr: (path) => hooks.qr(readQr(path)),
-        onWhatsAppLinked: () => hooks.linked(),
-      });
-      if (!result.registered) throw new Error('Pairing did not finish.');
-      return result;
+            // Consent waits outside the grant lock; reject a disconnect or other grant writer.
+            if (grantSnapshot(source) !== initialGrants.get(source)) throw new Error('Capture grant changed during pairing.');
+            return source === 'telegram'
+              ? { source, explicitApproval: true, wholeAccount: selection.wholeAccount, chatScopes: selection.chatScopes }
+              : { source, explicitApproval: true, wholeAccount: selection.wholeAccount, chatJids: selection.chatScopes.map(scope => scope.slice('whatsapp.personal:chat:'.length)) };
+          },
+          runCommand: (request) => runDashboardPairingCommand(request, hooks),
+          onWhatsAppQr: (path) => hooks.qr(readQr(path)),
+          onWhatsAppLinked: (link) => {
+            if (link.created) created = link.sessionPath;
+            hooks.linked();
+          },
+        });
+        if (!result.registered) throw new Error('Pairing did not finish.');
+        return result;
+      } catch (error) {
+        if (source === 'whatsapp' && created !== undefined) {
+          const unlinked = await (options.unlinkCommand ?? unlinkHelper)(whatsappBridgePathForPackage(packageRoot, { env: process.env }), {
+            ...process.env, OLYMPUS_WHATSAPP_STATE_DIR: created,
+          }).catch(() => 'failed' as const);
+          console.warn(`[messaging] whatsapp unlink after a failed pairing: ${unlinked}`);
+          const coded = (error && typeof error === 'object' ? error : codedError('Pairing failed.', undefined)) as { unlinked?: string };
+          coded.unlinked = unlinked;
+          throw coded;
+        }
+        throw error;
+      }
     }),
     publish: (source, result, signal) => options.withGrantMutation(async () => {
       if (signal.aborted) return;

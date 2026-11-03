@@ -39351,8 +39351,9 @@ async function pairMessagingSource(options) {
             qrPngPath = event.qr_png_path;
             await options.onWhatsAppQr?.(qrPngPath);
           }
-          if (options.source === "whatsapp" && event.event === "ready")
-            await options.onWhatsAppLinked?.();
+          if (options.source === "whatsapp" && (event.event === "linked" || event.event === "ready")) {
+            await options.onWhatsAppLinked?.({ created: event.event === "linked", sessionPath });
+          }
         }
       });
       for (const line of result.stdoutLines) {
@@ -142407,6 +142408,7 @@ function createDashboardMessagingPairing(options) {
       ...item.qr ? { qr: item.qr } : {},
       ...item.linked && item.state !== "failed" && item.state !== "cancelled" ? { linked: true } : {},
       ...item.state === "failed" && item.reason ? { reason: item.reason } : {},
+      ...(item.state === "failed" || item.state === "cancelled") && item.unlinked ? { unlinked: item.unlinked } : {},
       ...item.chats ? { chats: item.chats } : {},
       ...item.state === "scope_selection_required" ? { wholeAccount: false, chatScopes: [] } : {},
       ...item.registrationMayBeSaved ? { registrationMayBeSaved: true } : {}
@@ -142487,6 +142489,9 @@ function createDashboardMessagingPairing(options) {
           item.chats = result.chats;
           item.state = "paired";
         } catch (error2) {
+          const unlinked = error2 && typeof error2 === "object" ? error2.unlinked : undefined;
+          if (unlinked === "removed" || unlinked === "offline" || unlinked === "failed")
+            item.unlinked = unlinked;
           if (!item.controller.signal.aborted) {
             if (item.state === "committing")
               item.registrationMayBeSaved = true;
@@ -142711,6 +142716,25 @@ function readQr(path) {
     closeSync30(fd2);
   }
 }
+async function unlinkHelper(command, env) {
+  const child2 = spawn10(command, ["--unlink"], { env, stdio: ["ignore", "ignore", "pipe"] });
+  let errorTail = "";
+  child2.stderr?.on("data", (chunk) => {
+    errorTail = (errorTail + Buffer.from(chunk).toString("utf8")).slice(-4096);
+  });
+  const timeout = setTimeout(() => child2.kill("SIGKILL"), 60000);
+  try {
+    const code = await new Promise((resolve24, reject) => {
+      child2.once("error", reject);
+      child2.once("close", (exit) => resolve24(exit ?? 1));
+    });
+    if (code === 0)
+      return "removed";
+    return listingErrorCode(errorTail) === "unlink_offline" ? "offline" : "failed";
+  } finally {
+    clearTimeout(timeout);
+  }
+}
 function listingErrorCode(stderr) {
   for (const line2 of stderr.split(/\r?\n/).reverse()) {
     const match = /olympus-whatsapp-bridge:\s*([a-z0-9_]{1,48})\s*$/.exec(line2.trim());
@@ -142787,45 +142811,67 @@ function createDashboardMessagingService(options) {
   };
   const manager = createDashboardMessagingPairing({
     pair: (source, hooks) => options.withMessagingCapturePaused(source, async () => {
-      const result = await (options.pairSource ?? pairMessagingSource)({
-        source,
-        packageRoot,
-        secretStore: options.secretStore,
-        ...options.registryPath ? { registryPath: options.registryPath } : {},
-        signal: hooks.signal,
-        onCommitStart: hooks.commit,
-        whatsappQrMode: "artifact",
-        requestCaptureScope: async ({ chats, sessionPath, accountProof }) => {
-          const prior = readCaptureGrantFile(defaultMessagingCaptureGrantPath(source, options.registryPath));
-          if (grantSnapshot(source) !== initialGrants.get(source))
-            throw new Error("Capture grant changed during pairing.");
-          let selection;
-          if (source === "telegram" && /^telegram:[a-f0-9]{16}$/.test(accountProof) && prior.kind === "valid" && prior.grant.accountProof === accountProof) {
-            const env = retainApprovedCaptureScope(source, prior.grant.producer.env);
-            const raw = env.OLYMPUS_TELEGRAM_ALLOWED_CHAT_SCOPES;
-            selection = { wholeAccount: raw === "*", chatScopes: raw === "*" ? [] : raw.split(",") };
-          } else {
-            let choices = chats;
-            if (source === "whatsapp") {
-              const listing = await (options.listCommand ?? listHelper)(whatsappBridgePathForPackage(packageRoot, { env: process.env }), ["--list-chats"], {
-                ...process.env,
-                OLYMPUS_WHATSAPP_STATE_DIR: sessionPath
-              });
-              choices = parseChats(source, listing);
+      let created;
+      try {
+        const result = await (options.pairSource ?? pairMessagingSource)({
+          source,
+          packageRoot,
+          secretStore: options.secretStore,
+          ...options.registryPath ? { registryPath: options.registryPath } : {},
+          signal: hooks.signal,
+          onCommitStart: () => {
+            created = undefined;
+            hooks.commit();
+          },
+          whatsappQrMode: "artifact",
+          requestCaptureScope: async ({ chats, sessionPath, accountProof }) => {
+            const prior = readCaptureGrantFile(defaultMessagingCaptureGrantPath(source, options.registryPath));
+            if (grantSnapshot(source) !== initialGrants.get(source))
+              throw new Error("Capture grant changed during pairing.");
+            let selection;
+            if (source === "telegram" && /^telegram:[a-f0-9]{16}$/.test(accountProof) && prior.kind === "valid" && prior.grant.accountProof === accountProof) {
+              const env = retainApprovedCaptureScope(source, prior.grant.producer.env);
+              const raw = env.OLYMPUS_TELEGRAM_ALLOWED_CHAT_SCOPES;
+              selection = { wholeAccount: raw === "*", chatScopes: raw === "*" ? [] : raw.split(",") };
+            } else {
+              let choices = chats;
+              if (source === "whatsapp") {
+                const listing = await (options.listCommand ?? listHelper)(whatsappBridgePathForPackage(packageRoot, { env: process.env }), ["--list-chats"], {
+                  ...process.env,
+                  OLYMPUS_WHATSAPP_STATE_DIR: sessionPath
+                });
+                choices = parseChats(source, listing);
+              }
+              selection = await hooks.choose(choices);
             }
-            selection = await hooks.choose(choices);
+            if (grantSnapshot(source) !== initialGrants.get(source))
+              throw new Error("Capture grant changed during pairing.");
+            return source === "telegram" ? { source, explicitApproval: true, wholeAccount: selection.wholeAccount, chatScopes: selection.chatScopes } : { source, explicitApproval: true, wholeAccount: selection.wholeAccount, chatJids: selection.chatScopes.map((scope) => scope.slice("whatsapp.personal:chat:".length)) };
+          },
+          runCommand: (request) => runDashboardPairingCommand(request, hooks),
+          onWhatsAppQr: (path) => hooks.qr(readQr(path)),
+          onWhatsAppLinked: (link) => {
+            if (link.created)
+              created = link.sessionPath;
+            hooks.linked();
           }
-          if (grantSnapshot(source) !== initialGrants.get(source))
-            throw new Error("Capture grant changed during pairing.");
-          return source === "telegram" ? { source, explicitApproval: true, wholeAccount: selection.wholeAccount, chatScopes: selection.chatScopes } : { source, explicitApproval: true, wholeAccount: selection.wholeAccount, chatJids: selection.chatScopes.map((scope) => scope.slice("whatsapp.personal:chat:".length)) };
-        },
-        runCommand: (request) => runDashboardPairingCommand(request, hooks),
-        onWhatsAppQr: (path) => hooks.qr(readQr(path)),
-        onWhatsAppLinked: () => hooks.linked()
-      });
-      if (!result.registered)
-        throw new Error("Pairing did not finish.");
-      return result;
+        });
+        if (!result.registered)
+          throw new Error("Pairing did not finish.");
+        return result;
+      } catch (error2) {
+        if (source === "whatsapp" && created !== undefined) {
+          const unlinked = await (options.unlinkCommand ?? unlinkHelper)(whatsappBridgePathForPackage(packageRoot, { env: process.env }), {
+            ...process.env,
+            OLYMPUS_WHATSAPP_STATE_DIR: created
+          }).catch(() => "failed");
+          console.warn(`[messaging] whatsapp unlink after a failed pairing: ${unlinked}`);
+          const coded = error2 && typeof error2 === "object" ? error2 : codedError("Pairing failed.", undefined);
+          coded.unlinked = unlinked;
+          throw coded;
+        }
+        throw error2;
+      }
     }),
     publish: (source, result, signal) => options.withGrantMutation(async () => {
       if (signal.aborted)
@@ -145864,7 +145910,7 @@ function mountDashboardController(options) {
           const summary = document.createElement("summary");
           summary.textContent = "How to fix";
           const hint = document.createElement("p");
-          hint.textContent = source === "whatsapp" ? "Remove the new Olympus entry in WhatsApp → Settings → Linked devices, then pair again. If it fails again, send the code shown above to support; it names the step that failed and nothing about your account." : "Check api_id and api_hash at my.telegram.org/apps. Enter the latest code from Telegram and your two-step verification password if asked. Then try pairing again.";
+          hint.textContent = source === "whatsapp" ? body.unlinked === "removed" ? "Olympus removed itself from your phone's linked devices, so there is nothing to clean up. Pair again; if it fails again, send the code shown above to support. It names the step that failed and nothing about your account." : body.unlinked === "offline" || body.unlinked === "failed" ? "Olympus could not remove itself from your phone. Remove the Olympus entry in WhatsApp → Settings → Linked devices, then pair again. If it fails again, send the code shown above to support." : "Pair again. If it fails again, send the code shown above to support; it names the step that failed and nothing about your account." : "Check api_id and api_hash at my.telegram.org/apps. Enter the latest code from Telegram and your two-step verification password if asked. Then try pairing again.";
           details.append(summary, hint);
           const retry = document.createElement("button");
           retry.type = "button";
@@ -145879,7 +145925,7 @@ function mountDashboardController(options) {
       if (cardCancel)
         cardCancel.hidden = ["idle", "failed", "cancelled", "completed", "complete", "paired", "not_paired"].includes(state);
       if (status)
-        status.textContent = label ? `Enter ${label.toLowerCase()} to continue.` : state === "failed" ? (body.registrationMayBeSaved === true ? "Pairing could not finish. The connection may already be saved; check connection and capture status before retrying." : "Pairing failed. Start pairing again to retry.") + (typeof body.reason === "string" && /^[a-z0-9_]{1,64}$/.test(body.reason) ? ` (${body.reason})` : "") : state === "not_paired" ? "Not paired yet. Pair this account first, then choose the chats Olympus may read." : state === "idle" ? "Pair this account to choose the chats Olympus may read." : state === "scope_selection_required" ? "Paired. Nothing is being captured. Choose what Olympus may read." : state === "committing" ? "Saving the connection and chat permission…" : state === "paired" || state === "complete" || state === "completed" ? "Pairing completed. Manage chat choices below; check current connection and sync status on the main dashboard." : state === "cancelled" ? `Setup cancelled. Capture permission was not changed. If you linked a new device, remove Olympus in ${source === "telegram" ? "Telegram active sessions" : "WhatsApp linked devices"} to unlink it.` : operation === "scope" ? "Chat choices saved. Capture will use this selection." : operation === "chats" ? "Choose the chats Olympus may read." : source === "whatsapp" ? body.linked === true ? "Linked. Reading your chat list from WhatsApp; this can take a minute…" : "Open WhatsApp → Settings → Linked devices and scan the QR code." : "Pairing is running on this computer…";
+        status.textContent = label ? `Enter ${label.toLowerCase()} to continue.` : state === "failed" ? (body.registrationMayBeSaved === true ? "Pairing could not finish. The connection may already be saved; check connection and capture status before retrying." : "Pairing failed. Start pairing again to retry.") + (typeof body.reason === "string" && /^[a-z0-9_]{1,64}$/.test(body.reason) ? ` (${body.reason})` : "") : state === "not_paired" ? "Not paired yet. Pair this account first, then choose the chats Olympus may read." : state === "idle" ? "Pair this account to choose the chats Olympus may read." : state === "scope_selection_required" ? "Paired. Nothing is being captured. Choose what Olympus may read." : state === "committing" ? "Saving the connection and chat permission…" : state === "paired" || state === "complete" || state === "completed" ? "Pairing completed. Manage chat choices below; check current connection and sync status on the main dashboard." : state === "cancelled" ? source === "whatsapp" ? body.unlinked === "removed" ? "Setup cancelled. Capture permission was not changed, and Olympus removed itself from your phone's linked devices." : body.unlinked === "offline" || body.unlinked === "failed" ? "Setup cancelled. Capture permission was not changed. Olympus could not remove itself from your phone: remove Olympus in WhatsApp linked devices." : "Setup cancelled. Capture permission was not changed. If your phone linked Olympus, Olympus removes it from WhatsApp linked devices." : "Setup cancelled. Capture permission was not changed. If you linked a new device, remove Olympus in Telegram active sessions to unlink it." : operation === "scope" ? "Chat choices saved. Capture will use this selection." : operation === "chats" ? "Choose the chats Olympus may read." : source === "whatsapp" ? body.linked === true ? "Linked. Reading your chat list from WhatsApp; this can take a minute…" : "Open WhatsApp → Settings → Linked devices and scan the QR code." : "Pairing is running on this computer…";
       if (qr) {
         const value2 = typeof body.qr === "string" ? body.qr : "";
         if (/^data:image\/(?:png|jpeg|webp);base64,[A-Za-z0-9+/=]+$/.test(value2)) {

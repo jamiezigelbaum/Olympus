@@ -1,8 +1,8 @@
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, test } from 'bun:test';
-import { listHelper } from '../src/workers/email-source/dashboard-messaging-service.ts';
+import { listHelper, unlinkHelper } from '../src/workers/email-source/dashboard-messaging-service.ts';
 import { codedError, createDashboardMessagingPairing } from '../src/workers/email-source/dashboard-messaging.ts';
 
 describe('dashboard messaging pairing', () => {
@@ -161,3 +161,27 @@ describe('the WhatsApp chat listing', () => {
     expect(await listHelper(bridge, [], {})).toEqual({ event: 'dialogs', dialogs: [] });
   });
 });
+
+describe('unlinking a device a failed pairing linked', () => {
+  test('a clean exit is removed; unlink_offline is offline; anything else failed', async () => {
+    const run = (body: string) => listHelperScript(body);
+    expect(await unlinkHelper(run('exit 0'), {})).toBe('removed');
+    expect(await unlinkHelper(run("echo 'olympus-whatsapp-bridge: unlink_offline' >&2; exit 1"), {})).toBe('offline');
+    expect(await unlinkHelper(run("echo 'olympus-whatsapp-bridge: session_busy' >&2; exit 1"), {})).toBe('failed');
+  });
+
+  test('the bridge is asked to unlink, against the state folder it is given', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'wa-unlink-'));
+    const seen = join(dir, 'seen');
+    const bridge = listHelperScript(`printf '%s %s' "$1" "$OLYMPUS_WHATSAPP_STATE_DIR" > '${seen}'`);
+    expect(await unlinkHelper(bridge, { OLYMPUS_WHATSAPP_STATE_DIR: '/state/here' })).toBe('removed');
+    expect(readFileSync(seen, 'utf8')).toBe('--unlink /state/here');
+  });
+});
+
+function listHelperScript(body: string): string {
+  const dir = mkdtempSync(join(tmpdir(), 'wa-bridge-'));
+  const path = join(dir, 'bridge');
+  writeFileSync(path, `#!/bin/sh\n${body}\n`, { mode: 0o700 });
+  return path;
+}

@@ -121,7 +121,11 @@ export interface PairMessagingSourceOptions extends TelegramPythonSeams {
   }) => Promise<MessagingCaptureScopeApproval | undefined>;
   onWhatsAppQr?: (pngPath: string) => void | Promise<void>;
   /** The bridge proved the linked device (its `ready` event), before Olympus lists chats. */
-  onWhatsAppLinked?: () => void | Promise<void>;
+  /**
+   * The phone accepted the link (`linked`: this run created the device, so a later failure should unlink it), or the bridge
+   * proved an existing device (`ready` on a re-pair: never unlinked). The state folder is the one an unlink runs against.
+   */
+  onWhatsAppLinked?: (link: { created: boolean; sessionPath: string }) => void | Promise<void>;
   whatsappQrMode?: 'terminal' | 'artifact';
   signal?: AbortSignal;
   onCommitStart?: () => void;
@@ -233,7 +237,9 @@ export async function pairMessagingSource(options: PairMessagingSourceOptions): 
           qrPngPath = event.qr_png_path;
           await options.onWhatsAppQr?.(qrPngPath);
         }
-        if (options.source === 'whatsapp' && event.event === 'ready') await options.onWhatsAppLinked?.();
+        if (options.source === 'whatsapp' && (event.event === 'linked' || event.event === 'ready')) {
+          await options.onWhatsAppLinked?.({ created: event.event === 'linked', sessionPath });
+        }
       },
     });
     // Injected runners may return completed output without invoking the streaming

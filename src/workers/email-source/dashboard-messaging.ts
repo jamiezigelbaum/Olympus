@@ -22,6 +22,8 @@ type PairState = {
   linked?: boolean;
   /** Why the last pairing failed: a fixed code, never a provider message, path or account detail. */
   reason?: string;
+  /** After a failed or cancelled pairing that linked a new device: whether Olympus removed it from the phone. */
+  unlinked?: 'removed' | 'offline' | 'failed';
   chats?: readonly PairingChat[];
   registrationMayBeSaved?: boolean;
   selection?: (selection: ChatSelection) => void;
@@ -41,6 +43,7 @@ export function createDashboardMessagingPairing<T extends PairResult>(options: {
       ...(item.qr ? { qr: item.qr } : {}),
       ...(item.linked && item.state !== 'failed' && item.state !== 'cancelled' ? { linked: true } : {}),
       ...(item.state === 'failed' && item.reason ? { reason: item.reason } : {}),
+      ...((item.state === 'failed' || item.state === 'cancelled') && item.unlinked ? { unlinked: item.unlinked } : {}),
       ...(item.chats ? { chats: item.chats } : {}),
       ...(item.state === 'scope_selection_required' ? { wholeAccount: false, chatScopes: [] } : {}),
       ...(item.registrationMayBeSaved ? { registrationMayBeSaved: true } : {}),
@@ -95,6 +98,8 @@ export function createDashboardMessagingPairing<T extends PairResult>(options: {
           item.chats = result.chats;
           item.state = 'paired';
         } catch (error) {
+          const unlinked = error && typeof error === 'object' ? (error as { unlinked?: unknown }).unlinked : undefined;
+          if (unlinked === 'removed' || unlinked === 'offline' || unlinked === 'failed') item.unlinked = unlinked;
           if (!item.controller.signal.aborted) {
             if (item.state === 'committing') item.registrationMayBeSaved = true;
             item.reason = pairingFailureReason(error);
