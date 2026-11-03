@@ -38789,6 +38789,13 @@ var init_remote_request_body = __esm(() => {
   REMOTE_REQUEST_MAX_BODY_BYTES = 256 * 1024;
 });
 
+// src/workers/first-run-privacy-gate.ts
+var init_first_run_privacy_gate = __esm(() => {
+  init_remote_access();
+  init_request_peer();
+  init_remote_request_body();
+});
+
 // src/core/remote-result.ts
 var MAX_ANSWER, MAX_SENT, MAX_TITLE = 400, MAX_ROUTE = 300, MAX_MESSAGE = 2000, MAX_CORPORA = 200, JOB_ID, PARAM_NAME, CORPUS_ID, MODEL_ID, REMOTE_PENDING_MESSAGE, REMOTE_PROVIDER_UNKNOWN_NOTE = "Olympus does not know which company runs this agent, so it could not make sure the answer came from another company's model.", PROVIDER_LABELS, FAMILY_LABELS, OTHER_SOURCE_LABEL = "Other source", REMOTE_SOURCE_LABELS, REMOTE_REFUSAL_CODES, REMOTE_DAEMON_CODES, REFRESH_STATUSES, TRUST_DOMAINS, RETRIEVAL_MODES, RETRIEVAL_STATES, NETWORK_IDENTITIES, CLEANUPS, OUTCOMES, REMOTE_DESCRIPTIONS, REMOTE_ERROR_TEXT, REMOTE_ERROR_CODES, REFERENCED_ERROR_CODES, PENDING_SCHEMA, CITATION_SCHEMA, ANONYMOUS_ANSWERED_SCHEMA, ANONYMOUS_NEEDS_CHOICE_SCHEMA, ANONYMOUS_REFUSED_SCHEMA, SOURCE_INDEX_STATUS_SCHEMA, REMOTE_ERROR_SCHEMA;
 var init_remote_result = __esm(() => {
@@ -64860,13 +64867,7 @@ import { dirname as dirname34, isAbsolute as isAbsolute14 } from "node:path";
 init_engine_service();
 init_privacy_questions();
 init_sniffer();
-
-// src/workers/first-run-privacy-gate.ts
-init_remote_access();
-init_request_peer();
-init_remote_request_body();
-
-// src/workers/email-source/server.ts
+init_first_run_privacy_gate();
 init_first_run_privacy();
 
 // src/core/local-model-discovery.ts
