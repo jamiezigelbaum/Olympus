@@ -200,3 +200,48 @@ test('Choose chats before pairing is an answer (not_paired), not a failed reques
   const service = createDashboardMessagingService({ registryPath: join(dir, 'handles.json'), secretStore: memorySecrets, withMessagingCapturePaused: (_s, op) => op(), withGrantMutation: op => op() });
   for (const source of ['telegram', 'whatsapp'] as const) expect(await service.handle('chats', { source })).toEqual({ ok: true, state: 'not_paired' });
 });
+
+// #746: a device this pairing linked is logged out again when the pairing fails or is cancelled before it is saved,
+// so the phone never keeps an Olympus entry nothing uses. A re-pair of an existing device is never logged out.
+for (const ending of ['listing-fails', 'cancelled', 'existing-device-fails', 'fails-after-commit'] as const) {
+  test(`whatsapp: ${ending}`, async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'messaging-unlink-')); dirs.push(dir);
+    const unlinks: Array<string | undefined> = [];
+    let cancelled!: () => void;
+    const waitForCancel = new Promise<void>((resolve) => { cancelled = resolve; });
+    const service = createDashboardMessagingService({ registryPath: join(dir, 'handles.json'),
+      secretStore: memorySecrets,
+      withMessagingCapturePaused: async (_source, operation) => operation(), withGrantMutation: async operation => operation(),
+      unlinkCommand: async (_command, env) => { unlinks.push(env.OLYMPUS_WHATSAPP_STATE_DIR); return 'removed'; },
+      pairSource: async options => {
+        await options.onWhatsAppLinked?.({ created: ending !== 'existing-device-fails', sessionPath: join(dir, 'state') });
+        if (ending === 'cancelled') {
+          options.signal?.addEventListener('abort', () => cancelled(), { once: true });
+          await waitForCancel;
+          throw new Error('Pairing was cancelled.');
+        }
+        if (ending === 'fails-after-commit') options.onCommitStart?.();
+        throw Object.assign(new Error('Chat listing failed.'), { code: 'chat_list_connect_failed' });
+      },
+    });
+    await service.handle('start', { source: 'whatsapp' });
+    if (ending === 'cancelled') {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      await service.handle('cancel', { source: 'whatsapp' });
+      for (let i = 0; i < 30 && unlinks.length === 0; i++) await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(unlinks).toEqual([join(dir, 'state')]);
+      expect(await service.handle('status', { source: 'whatsapp' })).toMatchObject({ state: 'cancelled', unlinked: 'removed' });
+    } else {
+      const status = await waitFor(service, 'whatsapp', ['failed']);
+      expect(status).toMatchObject({ state: 'failed', reason: 'chat_list_connect_failed' });
+      if (ending === 'listing-fails') {
+        expect(unlinks).toEqual([join(dir, 'state')]);
+        expect(status).toMatchObject({ unlinked: 'removed' });
+      } else {
+        expect(unlinks).toEqual([]);
+        expect(status).not.toHaveProperty('unlinked');
+      }
+    }
+    service.close();
+  });
+}

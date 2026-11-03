@@ -264,6 +264,7 @@ describe('packaged messaging pairing', () => {
     const stateDir = join(root, 'home', '.local/share/openclaw/olympus/sources/whatsapp.personal.messages/1/raw/whatsapp');
     const qrPath = join(stateDir, 'qr.png');
     const seenQr: string[] = [];
+    const links: Array<{ created: boolean; sessionPath: string }> = [];
     let command: PairingCommandRequest | undefined;
     const result = await pairMessagingSource({
       source: 'whatsapp',
@@ -278,8 +279,11 @@ describe('packaged messaging pairing', () => {
         chatJids: ['chat-1@s.whatsapp.net'],
       },
       onWhatsAppQr: async (path) => { seenQr.push(path); },
+      onWhatsAppLinked: async (link) => { links.push(link); },
       runCommand: async (request) => {
         command = request;
+        // The phone accepted the scan: this run created the device.
+        await request.onStdoutLine?.(JSON.stringify({ event: 'linked' }));
         for (const line of whatsappReady(qrPath).stdoutLines) await request.onStdoutLine?.(line);
         return whatsappReady(qrPath);
       },
@@ -294,6 +298,8 @@ describe('packaged messaging pairing', () => {
     expect(command?.env.OLYMPUS_WHATSAPP_QR_STDOUT).toBe('false');
     expect(command?.env.OLYMPUS_WHATSAPP_PAIR_TTY_QR).toBe('false');
     expect(seenQr).toEqual([qrPath]);
+    // `linked` says this run created the device; `ready` (also sent on a re-pair) never does.
+    expect(links).toEqual([{ created: true, sessionPath: stateDir }, { created: false, sessionPath: stateDir }]);
     expect(result.status).toBe('connected');
     if (result.status !== 'connected') throw new Error('expected connected result');
     expect(result.qrPngPath).toBe(qrPath);

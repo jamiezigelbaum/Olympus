@@ -235,6 +235,7 @@ func main() {
 // connection.
 type bridgeDeps struct {
 	listChats func(stateDir string, container *sqlstore.Container) error
+	unlink    func(stateDir string, container *sqlstore.Container) error
 	pairOnly  func(stateDir string, container *sqlstore.Container) error
 	native    func(stateDir, spoolDir string, native nativeCaptureConfig, allowed map[string]struct{}, container *sqlstore.Container) (*whatsmeow.Client, *spoolWriter, chan string, error)
 	manual    func(stateDir, spoolDir string, allowed map[string]struct{}, container *sqlstore.Container) (*whatsmeow.Client, *spoolWriter, chan string)
@@ -244,6 +245,11 @@ type bridgeDeps struct {
 func defaultBridgeDeps() bridgeDeps {
 	return bridgeDeps{
 		pairOnly: runPairOnlyMode,
+		unlink: func(_ string, container *sqlstore.Container) error {
+			ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+			defer cancel()
+			return runUnlinkMode(ctx, container)
+		},
 		listChats: func(_ string, container *sqlstore.Container) error {
 			ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 			defer cancel()
@@ -260,6 +266,7 @@ func defaultBridgeDeps() bridgeDeps {
 // run parses the command line and starts exactly one mode:
 //
 //	--pair-only         pair or verify the linked device, then exit; never captures
+//	--unlink            log the linked device out of WhatsApp and forget it; never captures
 //	--capture-approved  capture, but only for the chats named in the approved scope
 //	(no flags)          historic manual/native capture of every chat
 //
@@ -270,10 +277,11 @@ func run(args []string, deps bridgeDeps) error {
 	listChats := flags.Bool("list-chats", false, "list contact and joined-group metadata from an already linked account; never captures messages")
 	pairOnly := flags.Bool("pair-only", false, "pair or verify the linked device, then exit without capturing messages")
 	captureApproved := flags.Bool("capture-approved", false, "require and enforce an explicitly approved chat scope")
+	unlink := flags.Bool("unlink", false, "log the linked device out of WhatsApp, removing it from the phone's linked devices, and forget it here")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
-	if (*pairOnly && *captureApproved) || (*listChats && (*pairOnly || *captureApproved)) {
+	if (*pairOnly && *captureApproved) || (*listChats && (*pairOnly || *captureApproved)) || (*unlink && (*pairOnly || *captureApproved || *listChats)) {
 		return errors.New("incompatible_modes")
 	}
 	var allowed map[string]struct{}
@@ -314,6 +322,29 @@ func run(args []string, deps bridgeDeps) error {
 		}
 		defer container.Close()
 		return deps.listChats(stateDir, container)
+	}
+
+	if *unlink {
+		stateDir, err := resolveStateDir()
+		if err != nil {
+			return errors.New("state_dir_unavailable")
+		}
+		dbPath := filepath.Join(stateDir, sessionDBName)
+		if info, err := os.Stat(dbPath); err != nil || !info.Mode().IsRegular() {
+			// Nothing was ever linked from here.
+			return nil
+		}
+		release, err := holdBridgeSessionLock(stateDir)
+		if err != nil {
+			return err
+		}
+		defer release()
+		container, err := openSessionContainer(dbPath)
+		if err != nil {
+			return errors.New("session_store_failed")
+		}
+		defer container.Close()
+		return deps.unlink(stateDir, container)
 	}
 
 	if *pairOnly {
@@ -577,6 +608,9 @@ func runPairOnly(ctx context.Context, client *whatsmeow.Client, container *sqlst
 					}
 				case *events.PairSuccess:
 					paired = true
+					// The phone now lists this device. Said at once, so Olympus can take the spent QR away and,
+					// if a later step fails, unlink the device this run created (--unlink).
+					emitPairingEvent(map[string]any{"event": "linked"})
 				default:
 					if code := pairingEventError(raw); code != "" {
 						return errors.New(code)
@@ -1816,4 +1850,30 @@ func removeQRFile(stateDir string) {
 	if err := os.Remove(filepath.Join(stateDir, qrFileName)); err != nil && !os.IsNotExist(err) {
 		log.Printf("olympus-whatsapp-bridge: could not remove qr.txt: %v", err)
 	}
+}
+
+// runUnlinkMode is the --unlink entry point: it logs the linked device out of
+// WhatsApp, which removes it from the phone's linked devices and clears the
+// session store. When WhatsApp cannot be reached it still forgets the device
+// here and says unlink_offline, so the owner knows the phone entry remains.
+func runUnlinkMode(ctx context.Context, container *sqlstore.Container) error {
+	device, err := container.GetFirstDevice(ctx)
+	if err != nil {
+		return errors.New("session_store_failed")
+	}
+	if device == nil || device.ID == nil {
+		return nil
+	}
+	client := newWhatsmeowClient(device, waLog.Noop)
+	defer client.Disconnect()
+	if err := client.ConnectContext(ctx); err == nil &&
+		waitForPairingAuthentication(ctx, func() bool { return client.IsConnected() && client.IsLoggedIn() }, 20*time.Second) {
+		if err := client.Logout(ctx); err == nil {
+			return nil
+		}
+	}
+	if err := device.Delete(ctx); err != nil {
+		return errors.New("session_store_failed")
+	}
+	return errors.New("unlink_offline")
 }

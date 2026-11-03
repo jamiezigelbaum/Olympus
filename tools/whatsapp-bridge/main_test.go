@@ -1084,12 +1084,17 @@ type dispatchRecorder struct {
 	calls         []string
 	pairStateDir  string
 	pairErr       error
+	unlinkErr     error
 	nativeAllowed map[string]struct{}
 	manualAllowed map[string]struct{}
 }
 
 func (r *dispatchRecorder) deps() bridgeDeps {
 	return bridgeDeps{
+		unlink: func(_ string, _ *sqlstore.Container) error {
+			r.calls = append(r.calls, "unlink")
+			return r.unlinkErr
+		},
 		pairOnly: func(stateDir string, _ *sqlstore.Container) error {
 			r.calls = append(r.calls, "pair-only")
 			r.pairStateDir = stateDir
@@ -1461,5 +1466,71 @@ func TestCaptureScopeWholeAccountAndUnscopedSpoolEverything(t *testing.T) {
 				t.Fatalf("spool = %#v, want both chats", records)
 			}
 		})
+	}
+}
+
+func TestRunUnlinkWithNoSessionDoesNothing(t *testing.T) {
+	stateDir := dispatchState(t)
+	recorder := &dispatchRecorder{}
+	if err := run([]string{"--unlink"}, recorder.deps()); err != nil {
+		t.Fatal(err)
+	}
+	if len(recorder.calls) != 0 {
+		t.Fatalf("calls = %v, want none", recorder.calls)
+	}
+	if _, err := os.Stat(filepath.Join(stateDir, sessionDBName)); !os.IsNotExist(err) {
+		t.Fatalf("unlink created a session store: %v", err)
+	}
+}
+
+func TestRunUnlinkHoldsTheSessionLockAndReturnsItsCode(t *testing.T) {
+	stateDir := dispatchState(t)
+	if err := os.MkdirAll(stateDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	container, err := openSessionContainer(filepath.Join(stateDir, sessionDBName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	container.Close()
+	recorder := &dispatchRecorder{unlinkErr: errors.New("unlink_offline")}
+	if err := run([]string{"--unlink"}, recorder.deps()); err == nil || err.Error() != "unlink_offline" {
+		t.Fatalf("err = %v, want unlink_offline", err)
+	}
+	if strings.Join(recorder.calls, ",") != "unlink" {
+		t.Fatalf("calls = %v, want only unlink", recorder.calls)
+	}
+	release, err := holdBridgeSessionLock(stateDir)
+	if err != nil {
+		t.Fatalf("unlink left the session lock held: %v", err)
+	}
+	release()
+	held, err := holdBridgeSessionLock(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer held()
+	if err := run([]string{"--unlink"}, recorder.deps()); err == nil || err.Error() != "session_busy" {
+		t.Fatalf("err = %v, want session_busy while a bridge runs", err)
+	}
+}
+
+func TestRunUnlinkIsItsOwnMode(t *testing.T) {
+	dispatchState(t)
+	for _, args := range [][]string{{"--unlink", "--pair-only"}, {"--unlink", "--list-chats"}, {"--unlink", "--capture-approved"}} {
+		if err := run(args, (&dispatchRecorder{}).deps()); err == nil || err.Error() != "incompatible_modes" {
+			t.Fatalf("%v: err = %v, want incompatible_modes", args, err)
+		}
+	}
+}
+
+func TestUnlinkModeWithAnUnpairedStoreDoesNothing(t *testing.T) {
+	container, err := openSessionContainer(filepath.Join(t.TempDir(), sessionDBName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer container.Close()
+	if err := runUnlinkMode(context.Background(), container); err != nil {
+		t.Fatal(err)
 	}
 }
