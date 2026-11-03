@@ -1,4 +1,5 @@
 import { resumeVerifiedTierMove, flushTierMoveNotes } from '../connector-store/tier-move.ts';
+import { controlPathHeadroom, ingestionTurn } from '../control-path-headroom.ts';
 // The worker's background tick for the privacy-safe sniffer: a bounded
 // `runSnifferPass` over every connector store, continuously while work remains.
 // It yields only to actual inference using the same local model
@@ -441,11 +442,14 @@ export class TierSnifferService {
     const abort = new AbortController();
     this.abort = abort;
     let tick: TierSnifferTick;
+    const leave = controlPathHeadroom.enter('tier-sniffer');
     try {
       tick = await this.tick(abort.signal);
     } catch (error) {
       // Content-free: the class of failure only. Items stay pending.
       tick = { state: 'failed', error: error instanceof Error ? error.name : 'unknown' };
+    } finally {
+      leave();
     }
     // An abandoned pass that ends late changes nothing: a newer pass owns the state.
     if (generation !== this.passGeneration) {
@@ -630,8 +634,8 @@ export class TierSnifferService {
     const { lane } = this.options;
     // Owner rules that raise, and names-only folders, apply to stored items
     // whatever the model's state: no model is asked.
-    this.settleStoredItems();
-    this.recoverMissingQuestions();
+    await this.settleStoredItems();
+    await this.recoverMissingQuestions();
     if (this.options.modelAvailable && !this.options.modelAvailable()) {
       // Nothing is asked and nothing is counted: flagged items wait, pending
       // and held Private, until the model is there. A model whose download
@@ -690,8 +694,8 @@ export class TierSnifferService {
     // Items decided under an older classifier or sniffer prompt are judged
     // again first (tier-rejudge.ts), a bounded page per set per tick: their
     // questions join the queue this pass answers.
-    this.recoverMissingQuestions(true);
-    const rejudged = this.rejudge();
+    await this.recoverMissingQuestions(true);
+    const rejudged = await this.rejudge();
     const targets: SnifferTarget[] = [];
     for (const ledgerPath of this.ledgerPaths()) {
       let ledger: TierLedger;
@@ -827,7 +831,7 @@ export class TierSnifferService {
    * an unread item with no possible excerpt, or an orphaned ledger row.
    * Reconcile a bounded, durable page before model availability/approval.
    */
-  private recoverMissingQuestions(allowReask = false): void {
+  private async recoverMissingQuestions(allowReask = false): Promise<void> {
     // Separate cursors keep model-independent recovery and approved re-asking
     // from skipping alternating pages of a large ledger.
     const cursorKey = allowReask ? 'sniffer_missing_question_reask_cursor_v1' : 'sniffer_missing_question_cursor_v1';
@@ -848,6 +852,8 @@ export class TierSnifferService {
         let settled = 0;
         let retired = 0;
         for (const row of rows) {
+          // Each row can re-judge a stored body: let requests in between.
+          await ingestionTurn();
           const identity = recordIdentity(row);
           const missingMetadata = row.metadataPending && !queue.questionFor(identity, 'metadata');
           const missingContent = (row.contentPending || !row.metadataPending) && !queue.questionFor(identity, 'content');
@@ -962,9 +968,10 @@ export class TierSnifferService {
    * items a names-only folder covers stop waiting for text
    * (tier-names-only-settle.ts). Never throws.
    */
-  private settleStoredItems(): void {
+  private async settleStoredItems(): Promise<void> {
     this.applyOwnerOverrides();
     for (const ledgerPath of this.ledgerPaths()) {
+      await ingestionTurn();
       const set = tierSetForLedger(ledgerPath);
       if (!set) continue;
       void set.repairLowerContent({ ...(this.options.autoMoves ? {
@@ -1052,12 +1059,13 @@ export class TierSnifferService {
   }
 
   /** Re-judges a page of each set's routed items decided under older inputs; never throws. */
-  private rejudge(): TierRejudgeReport {
+  private async rejudge(): Promise<TierRejudgeReport> {
     const total = emptyTierRejudgeReport();
     const perPass = this.options.rejudgePerPass ?? DEFAULT_TIER_REJUDGE_PER_PASS;
     if (perPass <= 0) return total;
     const maxOpen = Math.max(0, this.options.rejudgeMaxOpenQuestions ?? 2 * perPass);
     for (const ledgerPath of this.ledgerPaths()) {
+      await ingestionTurn();
       const set = tierSetForLedger(ledgerPath);
       if (!set) continue;
       try {

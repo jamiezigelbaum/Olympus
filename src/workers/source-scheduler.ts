@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { parseSchedulerSourceIds, type OlympusConfig } from '../core/config.ts';
 import { boundedLogErrorMessage } from '../core/log-redaction.ts';
+import { controlPathHeadroom } from './control-path-headroom.ts';
 import { OperationError } from '../core/operation-error.ts';
 import type { SourceIngestionPolicy } from '../core/source-ingestion-policy.ts';
 import {
@@ -893,7 +894,7 @@ export class SourceScheduler {
           state.running = true;
           this.executingStates.add(state);
           try {
-            await this.runTask(state, dueAt, provenance);
+            await this.runTaskSharingThread(state, dueAt, provenance);
           } finally {
             state.running = false;
             this.executingStates.delete(state);
@@ -916,7 +917,7 @@ export class SourceScheduler {
             state.running = true;
             this.executingStates.add(state);
             try {
-              await this.runTask(state, state.nextRunAt, provenance);
+              await this.runTaskSharingThread(state, state.nextRunAt, provenance);
             } finally {
               state.running = false;
               this.executingStates.delete(state);
@@ -927,6 +928,24 @@ export class SourceScheduler {
         this.busyConcurrencyKeys.delete(concurrencyKey);
       }
     }));
+  }
+
+  /**
+   * Every task is named while it runs, so a freeze of the worker's requests is
+   * logged with the tasks that were running (control-path-headroom.ts). The
+   * tasks' own work loops take the turns that keep requests answering.
+   */
+  private async runTaskSharingThread(
+    state: SchedulerTaskState,
+    dueAt: number,
+    provenance: SourceSchedulerRunProvenance,
+  ): Promise<void> {
+    const leave = controlPathHeadroom.enter(`${state.source.sourceId}/${state.task.kind}`);
+    try {
+      await this.runTask(state, dueAt, provenance);
+    } finally {
+      leave();
+    }
   }
 
   private async runTask(
