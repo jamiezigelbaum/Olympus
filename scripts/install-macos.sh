@@ -593,7 +593,6 @@ main() {
 install_command() {
   BIN_DIR="$HOME/.local/bin"
   LAUNCHER="$BIN_DIR/olympus"
-  COMMAND_READY=0
   if [ -L "$LAUNCHER" ] || { [ -e "$LAUNCHER" ] && ! grep -qF "$LAUNCHER_MARK" "$LAUNCHER" 2>/dev/null; }; then
     step "Left $LAUNCHER alone: this installer did not write it."
     return 0
@@ -609,13 +608,12 @@ exec "$HOME/Library/Application Support/Olympus/runtime/bun" "$HOME/Library/Appl
 LAUNCHER
   chmod 755 "$LAUNCHER.next"
   mv "$LAUNCHER.next" "$LAUNCHER"
-  COMMAND_READY=1
   case ":${PATH:-}:" in *":$BIN_DIR:"*) return 0 ;; esac
-  if [ "${OLYMPUS_NO_MODIFY_PATH:-}" = 1 ]; then COMMAND_READY=0; return 0; fi
+  if [ "${OLYMPUS_NO_MODIFY_PATH:-}" = 1 ]; then return 0; fi
   case "${SHELL:-/bin/zsh}" in
     */zsh) PROFILE="$HOME/.zprofile" ;;
     */bash) PROFILE="$HOME/.bash_profile" ;;
-    *) COMMAND_READY=0; return 0 ;;
+    *) return 0 ;;
   esac
   if ! grep -qF "$PATH_MARK" "$PROFILE" 2>/dev/null; then
     # shellcheck disable=SC2016 # $HOME and $PATH expand when the profile runs.

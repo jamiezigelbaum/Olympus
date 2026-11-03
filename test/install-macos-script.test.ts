@@ -381,7 +381,7 @@ describe.each(SHELLS)('install.sh under %s', (shell) => {
     expect(result.stdout).toContain('ChatGPT, Claude or other agents');
     expect(result.stdout).toContain('Agents page');
     expect(result.stdout).not.toContain('open a new Terminal');
-    expect(result.stdout).toContain('olympus engine status');
+    expect(result.stdout).not.toContain('engine status');
     expect(result.stdout).toContain('curl -fsSL https://olympusplugin.ai/uninstall.sh | sh');
     expect(result.stdout).toContain('By installing Olympus you agree to its Terms (https://olympusplugin.ai/terms/)');
     expect(result.stdout.indexOf('By installing Olympus you agree')).toBeLessThan(result.stdout.indexOf('Olympus is installed and running'));
@@ -787,7 +787,7 @@ describe.each(SHELLS)('install.sh under %s', (shell) => {
     expectSucceeded(result);
     expect(readFileSync(join(h.home, '.local', 'bin', 'olympus'), 'utf8')).toBe('#!/bin/sh\necho mine\n');
     expect(result.stdout).toContain('this installer did not write it');
-    expect(result.stdout).toContain(`"${h.runtimeBun}" "${h.app}/dist/cli.js" engine status`);
+    expect(result.stdout).not.toContain('engine status');
     expect(existsSync(join(h.home, '.zprofile'))).toBe(false);
 
     const linked = harness(shell);
@@ -808,7 +808,7 @@ describe.each(SHELLS)('install.sh under %s', (shell) => {
     const result = onPath.run(V1, { PATH: `${join(onPath.root, 'bin')}:${join(onPath.home, '.local', 'bin')}:/usr/bin:/bin:/usr/sbin:/sbin` });
     expectSucceeded(result);
     expect(existsSync(join(onPath.home, '.zprofile'))).toBe(false);
-    expect(result.stdout).toContain('run: olympus engine status');
+    expect(result.stdout).not.toContain('engine status');
   });
 });
 

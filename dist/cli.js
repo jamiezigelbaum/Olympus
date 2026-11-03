@@ -100907,11 +100907,11 @@ function saveComputerUseChoice(policyPath, choice) {
 `);
 }
 function privateAnswerMode(config) {
-  const route = config.routes.secure_local;
+  const route = config.routes?.secure_local;
   if (route?.mode === "disabled")
     return "no-sensitive";
   const members = route?.pool?.order ?? route?.pool?.members ?? route?.analyst ?? [];
-  const providers = members.map((id) => config.modelProfiles[id]?.provider);
+  const providers = members.map((id) => config.modelProfiles?.[id]?.provider);
   if (providers.length === 1 && providers[0] === "venice")
     return "private-cloud-only";
   if (providers.length === 1 && providers[0] === "local-openai-compatible")

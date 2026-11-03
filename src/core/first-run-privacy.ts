@@ -60,10 +60,11 @@ export function saveComputerUseChoice(policyPath: string, choice: 'everyday' | '
 
 /** Infer the saved mode from the active Private route, including older installs. */
 export function privateAnswerMode(config: SovereigntyConfig): SovereigntyPresetName | 'custom' {
-  const route = config.routes.secure_local;
+  // Older or partial policies may lack routes or profiles: they read as custom.
+  const route = config.routes?.secure_local;
   if (route?.mode === 'disabled') return 'no-sensitive';
   const members = route?.pool?.order ?? route?.pool?.members ?? route?.analyst ?? [];
-  const providers = members.map(id => config.modelProfiles[id]?.provider);
+  const providers = members.map(id => config.modelProfiles?.[id]?.provider);
   if (providers.length === 1 && providers[0] === 'venice') return 'private-cloud-only';
   if (providers.length === 1 && providers[0] === 'local-openai-compatible') return 'local-only';
   if (route?.pool?.order && providers.length === 2 && providers[0] === 'local-openai-compatible' && providers[1] === 'venice') return 'local-first';
