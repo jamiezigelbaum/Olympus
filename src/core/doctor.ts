@@ -82,6 +82,7 @@ import {
   consultVocabularyFileStatus,
   type ConsultVocabularyFileStatus,
 } from './consult-gate.ts';
+import { ZKAPI_RISK_ACKNOWLEDGEMENTS_VERSION } from './zkapi-consult-settings.ts';
 import { photoSearchStatus } from './photo-search-status.ts';
 import { stillImageReadiness, type StillImageReadiness } from './still-image-readiness.ts';
 import {
@@ -720,6 +721,14 @@ async function zkapiConsultTransportCheck(deps: DoctorDeps): Promise<DoctorCheck
       ? {}
       : {
         hint: [
+          lines.some((line) => line.includes('daemon_version_unsupported'))
+            ? 'The zkAPI client needs an update. Open Anonymous answers in the dashboard and choose Install tools. For an agent managing this computer, the repair is olympus zkapi install-tools.'
+            : undefined,
+          lines.some((line) => line.includes('acknowledgements_incomplete'))
+            ? profiles.some(([, profile]) => profile.zkapi!.acknowledgements.version > 0 && profile.zkapi!.acknowledgements.version !== ZKAPI_RISK_ACKNOWLEDGEMENTS_VERSION)
+              ? 'The cost and risk statements have changed since you accepted them. Open Anonymous answers in the dashboard, read the current statements, and accept them again before asking another question.'
+              : 'Open Anonymous answers in the dashboard, read the cost and risk statements, and accept them before asking a question.'
+            : undefined,
           lines.some((line) => line.includes('confinement_unavailable'))
             ? 'Anonymous answers are not available on this computer: they need network confinement, which this version of Olympus does not have here. Nothing is ever sent without it.'
             : undefined,

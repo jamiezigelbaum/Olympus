@@ -130,3 +130,55 @@ test('headless handoff targets the socket with fail-fast forwarding; no TCP dest
   expect(commands.linux.tunnel).toContain(':8010:/run/user/1000/olympus/worker.sock');
   expect(() => remoteOpenInstructions({ port: 8010, socketPath: '/bad:22/olympus/worker.sock' })).toThrow();
 });
+
+test('Node Gateway client uses the private socket for requests, redirects, aborts and custody checks', async () => {
+  const { dir, options } = fixture(); const path = prepareWorkerSocket(options)!;
+  const server = bindWorkerSocket(path, () => Bun.serve({ unix: path, async fetch(request) {
+    const route = new URL(request.url).pathname;
+    if (route === '/dashboard/panel') return new Response('<!doctype html><html><body>fixture panel</body></html>', { headers: { 'content-type': 'text/html' } });
+    if (route === '/dashboard/tools/call') return Response.json({ content: [{ type: 'text', text: 'gateway fixture' }] });
+    if (route === '/redirect') return Response.redirect('http://127.0.0.1:1/stolen');
+    if (route === '/slow') { await Bun.sleep(1000); return new Response('late'); }
+    if (request.method === 'HEAD') return new Response(null, { status: 204 });
+    return Response.json({ method: request.method, body: await request.text(), bearer: request.headers.get('authorization'), url: request.url });
+  } })); servers.push(server);
+  const bundle = join(dir, 'transport.mjs');
+  const entry = join(dir, 'entry.ts');
+  writeFileSync(entry, `export * from ${JSON.stringify(join(import.meta.dir, '../src/core/worker-transport.ts'))}; export * from ${JSON.stringify(join(import.meta.dir, '../src/core/control-ui-gateway.ts'))};`);
+  const built = await Bun.build({ entrypoints: [entry], target: 'node', format: 'esm' });
+  expect(built.success).toBe(true); writeFileSync(bundle, await built.outputs[0]!.text());
+  const script = `
+    import assert from 'node:assert/strict';
+    import { chmodSync } from 'node:fs';
+    import { createWorkerFetch, requestDashboardTool, registerOlympusDashboardGateway } from ${JSON.stringify(bundle)};
+    assert.equal(typeof Bun, 'undefined');
+    const client = createWorkerFetch(${JSON.stringify(options)});
+    const origin = 'http://127.0.0.1:8010';
+    const response = await client(new Request(origin + '/tool?x=1', { method: 'POST', headers: { authorization: 'Bearer fixture' }, body: 'question' }));
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), { method: 'POST', body: 'question', bearer: 'Bearer fixture', url: origin + '/tool?x=1' });
+    assert.equal((await client(origin, { method: 'HEAD' })).status, 204);
+    const config = { worker: { authToken: 'fixture' }, email: { baseUrl: origin + '/v1', requestTimeoutSeconds: 1 } };
+    assert.deepEqual(await requestDashboardTool({ call: { name: 'olympus_dashboard', arguments: {} }, config }), { content: [{ type: 'text', text: 'gateway fixture' }] });
+    const routes = new Map();
+    registerOlympusDashboardGateway({ registerGatewayMethod() {}, registerHttpRoute(route) { routes.set(route.path, route.handler); } }, config);
+    const panelResponse = { statusCode: 0, setHeader() {}, end(body) { this.body = body; } };
+    await routes.get('/olympus/dashboard/panel')({ method: 'GET', url: '/olympus/dashboard/panel', headers: {} }, panelResponse);
+    assert.equal(panelResponse.statusCode, 200);
+    assert.match(panelResponse.body, /fixture panel/);
+    await assert.rejects(() => client(origin + '/redirect'));
+    assert.equal((await client(origin + '/redirect', { redirect: 'manual' })).status, 302);
+    await assert.rejects(() => client(origin + '/slow', { signal: AbortSignal.timeout(30) }));
+    assert.throws(() => client('https://example.invalid/'), /loopback/);
+    chmodSync(${JSON.stringify(path)}, 0o666);
+    assert.throws(() => client(origin), /0600/);
+    chmodSync(${JSON.stringify(path)}, 0o600);
+    chmodSync(${JSON.stringify(dirname(path))}, 0o755);
+    assert.throws(() => client(origin), /0700/);
+    console.log('node socket checks passed');
+  `;
+  const child = Bun.spawn(['node', '--input-type=module', '-e', script], { env: { ...process.env, ...options.env }, stdout: 'pipe', stderr: 'pipe' });
+  const [exit, stdout, stderr] = await Promise.all([child.exited, new Response(child.stdout).text(), new Response(child.stderr).text()]);
+  expect({ exit, stderr }).toEqual({ exit: 0, stderr: '' });
+  expect(stdout).toContain('node socket checks passed');
+}, 15_000);

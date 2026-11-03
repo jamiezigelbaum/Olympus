@@ -108,7 +108,7 @@ for (const hosted of [false, true]) test(`unreceipted Linux ${hosted ? 'OpenClaw
   expect(result.guard).toBe(layout.sovereigntyPath);
 }, 15_000);
 
-for (const owned of [false, true]) test(`sovereignty readers and writers refuse unmigrated settings (receipt: ${owned})`, () => {
+for (const owned of [false, true]) test(`sovereignty readers and writers resolve legacy settings safely (receipt: ${owned})`, () => {
   const { home, env, layout } = fixture(); if (!owned) rmSync(layout.receiptPath);
   mkdirSync(join(home, '.olympus'), { mode: 0o700 });
   const legacy = join(home, '.olympus/sovereignty.json'); writeFileSync(legacy, '{}', { mode: 0o600 });
@@ -118,6 +118,6 @@ for (const owned of [false, true]) test(`sovereignty readers and writers refuse 
     const { sovereigntyPolicyPath } = await import('./src/core/zkapi-consult-settings.ts');
     console.log(JSON.stringify([() => defaultSovereigntyConfigPath(), () => loadSovereigntyEngine(), () => writeSovereigntyConfigFile({config: loadSovereigntyPreset('local-first')}), () => sovereigntyPolicyPath()].map(run => {try {run(); return false;} catch (error) {return error.message.includes('migration');}})));
   `);
-  expect(result).toEqual([true, true, true, true]);
-  expect(readFileSync(legacy, 'utf8')).toBe('{}'); expect(existsSync(layout.sovereigntyPath)).toBe(false);
+  expect(result).toEqual([owned, owned, owned, owned]);
+  expect(readFileSync(owned ? legacy : layout.sovereigntyPath, 'utf8')).toBe('{}'); expect(existsSync(legacy)).toBe(owned); expect(existsSync(layout.sovereigntyPath)).toBe(!owned);
 }, 15_000);

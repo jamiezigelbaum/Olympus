@@ -90,7 +90,7 @@ test('unpublished temporary selection is ignored and durable file is chosen', ()
 
 test('legacy ciphertext without selection is refused without modifying it', () => {
   const f = fixture();
-  try { writeFileSync(f.paths.encryptedFilePath, 'old-store', { mode: 0o600 }); expect(f.make).toThrow('no migration'); expect(readFileSync(f.paths.encryptedFilePath, 'utf8')).toBe('old-store'); expect(existsSync(f.paths.backendFilePath)).toBe(false); }
+  try { writeFileSync(f.paths.encryptedFilePath, 'old-store', { mode: 0o600 }); expect(f.make).toThrow('missing one of its two files'); expect(readFileSync(f.paths.encryptedFilePath, 'utf8')).toBe('old-store'); expect(existsSync(f.paths.backendFilePath)).toBe(false); }
   finally { f.clean(); }
 });
 

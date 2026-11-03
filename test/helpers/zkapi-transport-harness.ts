@@ -138,6 +138,7 @@ let request = 0;
       const state = plan.statePath && fs.existsSync(plan.statePath) ? JSON.parse(fs.readFileSync(plan.statePath, 'utf8')) : {};
       event('completion ' + JSON.stringify({ body, auth: httpRequest.headers.get('authorization'), origin: httpRequest.headers.get('origin'), countAtArrival: state.count ?? 0, fenceAtArrival: Object.keys(state.fences ?? {}).length > 0 }));
       const completion = (content) => json(200, { object: 'chat.completion', choices: [{ index: 0, message: { role: 'assistant', content } }] }, { 'X-OA-Verification-Status': 'verified' });
+      if (plan.completion === 'policy-error') return finish(err(502, 'model_policy_unavailable', 'issuer policy timed out'));
       if (plan.completion === 'error') return finish(err(400, 'model_budget_unavailable', 'echo: ' + body + ' ?secret=1'));
       key += 1;
       const ref = key;
@@ -148,6 +149,7 @@ let request = 0;
         if (plan.crashAfterSettlement) process.exit(1);
       }, plan.settleDelayMs ?? 30);
       switch (plan.completion) {
+        case 'policy-error-after-key': return finish(err(502, 'model_policy_unavailable', 'issuer policy timed out'));
         case 'redirect': return finish(new Response(null, { status: 307, headers: { Location: '/v1/elsewhere' } }));
         case 'oversize': return finish(completion('x'.repeat(200000)));
         case 'garbage': return finish(new Response('<html>' + body + '</html>', { status: 502 }));

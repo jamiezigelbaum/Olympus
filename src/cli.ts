@@ -24,6 +24,62 @@ export async function printConfinementStatus(confinement: Pick<import('./core/co
   return result.ok;
 }
 
+export async function runZkapiRecoveryCommand(args: string[], deps: {
+  env?: Record<string, string | undefined>;
+  statePath?: string;
+  sovereignty?: { config: import('./core/sovereignty.ts').SovereigntyConfig };
+  recoverSession?: Parameters<typeof import('./core/zkapi-recovery.ts').recoverHeldZkapiRequest>[0]['recoverSession'];
+  confirm?: (message: string) => Promise<boolean>;
+  print?: (message: string) => void;
+} = {}): Promise<number> {
+  const [verb, ...rest] = args;
+  const values = rest.filter(arg => arg !== '--yes');
+  if ((verb !== 'recover' && verb !== 'abandon') || rest.filter(arg => arg === '--yes').length > 1
+    || (verb === 'recover' ? values.length !== 0 : values.length !== 1 || !/^[0-9a-f]{32}$/.test(values[0]!))) {
+    throw new OperationError('invalid_params', 'Choose recover, or abandon followed by the held request identifier. Only --yes is accepted as an option.');
+  }
+  const { abandonHeldZkapiRequest, recoverHeldZkapiRequest, ZKAPI_ABANDON_CONFIRM, ZKAPI_RECOVER_CONFIRM } = await import('./core/zkapi-recovery.ts');
+  const print = deps.print ?? console.log;
+  const confirm = deps.confirm ?? (async (message: string) => {
+    if (!input.isTTY) {
+      print(message);
+      print('This action needs your confirmation. Open Anonymous answers in the dashboard and choose Recover or Abandon.');
+      return false;
+    }
+    const rl = createInterface({ input, output });
+    try { return (await rl.question(`${message} Type yes to continue: `)).trim().toLowerCase() === 'yes'; }
+    finally { rl.close(); }
+  });
+  if (!rest.includes('--yes') && !await confirm(verb === 'recover' ? ZKAPI_RECOVER_CONFIRM : ZKAPI_ABANDON_CONFIRM)) {
+    print('Cancelled. The held request was kept.');
+    return 2;
+  }
+  const { environmentWithWorkerSetupEnv } = await import('./core/worker-auth.ts');
+  const env = environmentWithWorkerSetupEnv({ env: deps.env ?? process.env });
+  const { defaultZkapiStatePath, recoverZkapiSession, resolveZkapiConsultTransport } = await import('./core/consult-transport-zkapi.ts');
+  const statePath = deps.statePath ?? defaultZkapiStatePath(env.HOME?.trim() || undefined);
+  let result: import('./core/zkapi-recovery.ts').ZkapiRecoveryOutcome;
+  if (verb === 'abandon') {
+    result = abandonHeldZkapiRequest({ confirm: true, statePath, scope: values[0], now: new Date() });
+  } else {
+    const { loadSovereigntyEngine } = await import('./core/sovereignty.ts');
+    const { resolveSecretRefValue } = await import('./core/secret-store.ts');
+    const engine = deps.sovereignty ?? loadSovereigntyEngine({ env });
+    const profiles = Object.values(engine.config.modelProfiles).filter(profile => profile.provider === 'zkapi');
+    result = await recoverHeldZkapiRequest({
+      confirm: true, statePath, env,
+      route: resolveZkapiConsultTransport(engine.config.modelProfiles, () => undefined, { env, statePath }),
+      secretRef: profiles.length === 1 ? profiles[0]!.secretRef : undefined,
+      recoverSession: deps.recoverSession ?? (async (route, secretRef) => {
+        const apiKey = await resolveSecretRefValue(secretRef, { env });
+        return recoverZkapiSession({ ...route, ...(apiKey ? { apiKey } : {}) });
+      }),
+    });
+  }
+  print(result.ok ? result.status_message : result.message);
+  return result.ok ? 0 : 1;
+}
+
 /** How the CLI names itself in hints: plain `olympus` on PATH, else this install's own bin/olympus. */
 export function olympusCommandHint(input: { env?: Record<string, string | undefined>; pluginBin?: string } = {}): string {
   return olympusCommandHintFor({ ...input, pluginBin: input.pluginBin ?? resolve(olympusPackageRoot(), 'bin', 'olympus') });
@@ -349,6 +405,11 @@ async function main(): Promise<void> {
 
   if (args[0] === 'zkapi' && args[1] === 'test-writer') {
     await runZkapiTestWriter(args.slice(2));
+    return;
+  }
+
+  if (args[0] === 'zkapi' && (args[1] === 'recover' || args[1] === 'abandon')) {
+    process.exitCode = await runZkapiRecoveryCommand(args.slice(1));
     return;
   }
 
@@ -1385,6 +1446,8 @@ function printHelp(): void {
   for (const usage of Object.values(TIER_CLI_USAGE)) console.log(`  ${usage}`);
   console.log('  olympus zkapi install-tools');
   console.log('  olympus zkapi check-confinement');
+  console.log('  olympus zkapi recover [--yes]');
+  console.log('  olympus zkapi abandon <scope> [--yes]');
   console.log(`  ${ZKAPI_TEST_WRITER_USAGE}`);
   console.log('  olympus serve');
   console.log('  olympus --tools-json');
@@ -1436,6 +1499,8 @@ const PUBLIC_LEAF_USAGE: Readonly<Record<string, string>> = {
   'zkapi install-tools': 'olympus zkapi install-tools',
   'zkapi check-confinement': 'olympus zkapi check-confinement',
   'zkapi test-writer': ZKAPI_TEST_WRITER_USAGE,
+  'zkapi recover': 'olympus zkapi recover [--yes]',
+  'zkapi abandon': 'olympus zkapi abandon <scope> [--yes]',
   serve: 'olympus serve',
 };
 
@@ -1535,6 +1600,8 @@ const COMMAND_GROUP_HELP: Record<string, string[]> = {
     '  olympus zkapi check-confinement   Check anonymous-answer network confinement',
     '  olympus zkapi install-tools   Install the pinned, verified Tor and zkapi-clientd builds for anonymous answers',
     '  olympus zkapi test-writer     Test your own local model as the anonymous-answer writer on invented cases (sends nothing to zkAPI)',
+    '  olympus zkapi recover         Finish paying for a held anonymous question (asks for confirmation)',
+    '  olympus zkapi abandon <scope> Stop a held question from blocking new ones (asks for confirmation)',
   ],
   'server-mode': [
     'Usage: olympus server-mode <command>',

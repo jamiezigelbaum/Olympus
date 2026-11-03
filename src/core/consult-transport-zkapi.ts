@@ -2858,7 +2858,7 @@ async function runSession(
     // --- Replied: hand the completion over before settlement.
     if (completion.ok) timings = withTiming(timings, 'replyHandedOverAtMs', durationMs(startedAt, lastSampleAt));
     bridge.state = 'replied';
-    bridge.reply.resolve(completion.ok
+    const handOverReply = () => bridge.reply.resolve(completion.ok
       ? {
         kind: 'reply',
         text: completion.text,
@@ -2876,6 +2876,7 @@ async function runSession(
           receipt: pendingSnapshot(),
         }).error,
       });
+    if (completion.ok) handOverReply();
 
     // Correlate this request's own log lines, then wait for its key to settle.
     // Runs to completion whatever the caller did; stops if a process died.
@@ -2903,10 +2904,13 @@ async function runSession(
       // in an ordinary session. A recovery session exists to settle an earlier
       // lease, which the daemon attempts only after that same model check, so
       // a refusal there proves nothing about the earlier lease.
-      const preLease = !recovery && request !== undefined && request.keys.length === 0 && request.finished?.status === 400
-        && !completion.ok && (completion.error.daemonCode === 'invalid_model' || completion.error.daemonCode === 'model_budget_unavailable');
+      const preLease = !recovery && request !== undefined && request.keys.length === 0 && !completion.ok
+        && request.finished?.status === completion.error.httpStatus
+        && ((request.finished?.status === 400 && (completion.error.daemonCode === 'invalid_model' || completion.error.daemonCode === 'model_budget_unavailable'))
+          || (request.finished?.status === 502 && completion.error.daemonCode === 'model_policy_unavailable'));
       receipt.settlement = preLease ? 'no_lease' : 'not_confirmed';
       fenceClears = preLease;
+      if (preLease) completion.error.outcome = 'not_sent';
     }
     stage(undefined);
     if (fenceClears) {
@@ -2921,6 +2925,7 @@ async function runSession(
         // stays held
       }
     }
+    if (!completion.ok) handOverReply();
 
     if (perConsultTor && !unexpectedExit()) {
       tor!.deliberate = true;

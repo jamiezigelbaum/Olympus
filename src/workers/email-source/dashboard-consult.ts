@@ -50,6 +50,7 @@
  *     install's progress. It writes no setting and touches no wallet or key.
  */
 import { delimiter, dirname } from 'node:path';
+import { abandonHeldZkapiRequest, recoverHeldZkapiRequest } from '../../core/zkapi-recovery.ts';
 import { CONSULT_LANGUAGE_PACKS, consultVocabularyFileStatus, DEFAULT_CONSULT_DOMAIN_PACKS, type ConsultDomainPacks, type ConsultLanguage } from '../../core/consult-gate.ts';
 import {
   CONSULT_LEVEL_FOR_REPAIR,
@@ -72,7 +73,6 @@ import {
 import type { ConsultWriterCheckReport, ConsultWriterCheckResult } from '../../core/consult-writer-check.ts';
 import { writeConsultSettings, type ConsultSettingsWriteRefusal } from '../../core/consult-settings-writer.ts';
 import {
-  abandonZkapiFence,
   defaultZkapiConfinement,
   defaultZkapiStatePath,
   resolveExecutable,
@@ -226,18 +226,11 @@ const MESSAGES = {
   fundingDate: 'Enter the funding date as YYYY-MM-DD, the day the deposit was confirmed.',
   caps: 'A daily limit must be a whole number of requests, or a positive number of dollars.',
   confirm: 'This action needs your confirmation.',
-  noFence: 'There is no held request to recover.',
-  otherWallet: 'The held request belongs to another wallet folder. Recover it there, or abandon it.',
-  scope: 'Name which held request to abandon.',
   turnedOn: 'Anonymous answers are on. Ask your agent to use Olympus zkAPI to send a question anonymously.',
   turnedOff: 'Anonymous answers are off. No question is sent.',
   routeSavedRestart: 'Saved. Olympus is restarting its worker to apply the change; this page will refresh.',
   routeSavedNoRestart: 'Saved. Ask your agent to restart the managed Olympus worker to apply it; this worker cannot restart itself.',
   routeAdded: 'The zkAPI route is added. Finish the steps below.',
-  recovered: 'Recovered: the held request settled and consults can run again.',
-  recoveryIncomplete: 'The recovery session ran, but settlement was not confirmed. The request is still held; try again later.',
-  recoveryFailed: 'The recovery session did not complete. The request is still held.',
-  abandoned: 'The held request is marked abandoned. It no longer blocks consults and stays in the ledger as a record.',
   installStarted: 'Installing Tor and zkAPI. This takes a minute or two.',
   installRunning: 'An install is already running.',
   writerSaved: 'Saved. Your model writes the outside questions from now on.',
@@ -824,38 +817,14 @@ export function createDashboardConsultAdapter(options: DashboardConsultAdapterOp
     },
 
     async recover(update) {
-      if (update.confirm !== true) return invalid(MESSAGES.confirm, 'confirmation_required');
-      const transportOptions = transport();
-      if (!transportOptions) return { ok: false, httpStatus: 409, code: 'route_not_configured', message: MESSAGES.routeMissing };
-      let fences: Record<string, { at: string }>;
-      try {
-        fences = zkapiOutstandingFences(statePath);
-      } catch {
-        return { ok: false, httpStatus: 500, code: 'state_unavailable', message: 'The consult ledger on this computer could not be read.' };
-      }
-      const scopes = Object.keys(fences);
-      if (scopes.length === 0) return { ok: false, httpStatus: 409, code: 'no_unresolved_session', message: MESSAGES.noFence };
-      if (!scopes.includes(zkapiFenceScope({ env }))) return { ok: false, httpStatus: 409, code: 'unresolved_session_other_wallet', message: MESSAGES.otherWallet };
-      const result = await options.recoverSession(transportOptions, zkapiProfile()?.profile.secretRef);
-      const receipt = result.ok ? result.receipt : result.error.receipt;
-      if (!result.ok) return { ok: false, httpStatus: 502, code: result.error.code, message: MESSAGES.recoveryFailed };
-      if (receipt?.fence !== 'clear' || receipt.settlement !== 'confirmed') {
-        return { ok: false, httpStatus: 502, code: 'recovery_incomplete', message: MESSAGES.recoveryIncomplete };
-      }
-      return { ok: true, status_message: MESSAGES.recovered };
+      return recoverHeldZkapiRequest({
+        confirm: update.confirm === true, statePath, env, route: transport(),
+        secretRef: zkapiProfile()?.profile.secretRef, recoverSession: options.recoverSession,
+      });
     },
 
     async abandon(update) {
-      if (update.confirm !== true) return invalid(MESSAGES.confirm, 'confirmation_required');
-      if (typeof update.scope !== 'string' || !/^[0-9a-f]{32}$/.test(update.scope)) return invalid(MESSAGES.scope, 'scope_invalid');
-      let found: boolean;
-      try {
-        found = abandonZkapiFence(statePath, update.scope, now());
-      } catch {
-        return { ok: false, httpStatus: 500, code: 'state_unavailable', message: 'The consult ledger on this computer could not be written.' };
-      }
-      if (!found) return { ok: false, httpStatus: 409, code: 'no_unresolved_session', message: MESSAGES.noFence };
-      return { ok: true, status_message: MESSAGES.abandoned };
+      return abandonHeldZkapiRequest({ confirm: update.confirm === true, statePath, scope: update.scope, now: now() });
     },
   };
 }
