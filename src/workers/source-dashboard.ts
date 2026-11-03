@@ -264,6 +264,8 @@ export interface DashboardSetupInstructions {
   google_cloud_project_id?: string;
   diy_summary: string;
   diy_steps: DashboardSetupStep[];
+  /** The easy path's label: skip the walkthrough when the key or app already exists. */
+  setup_shortcut?: string;
   secret_shown_once: boolean;
   fields: DashboardConnectField[];
   /**
@@ -294,6 +296,8 @@ export interface DashboardAdvancedByoInstructions {
   google_cloud_project_id?: string;
   diy_summary: string;
   diy_steps: DashboardSetupStep[];
+  /** The easy path's label: skip the walkthrough when the key or app already exists. */
+  setup_shortcut?: string;
   secret_shown_once: boolean;
   fields: DashboardConnectField[];
 }
@@ -4359,6 +4363,7 @@ function oauthSetupInstructions(
       agent_prompt: 'Help me connect Gmail and Drive with my own Google app using the dashboard walkthrough. Create a project, enable Gmail and Drive APIs, publish the External sign-in screen, then create a Desktop app client and download its JSON. Add that file only in the Olympus dashboard. Never ask for the client secret in chat.',
       provider_console_url: 'https://console.cloud.google.com/auth/clients',
       diy_summary: 'Use my own Google app',
+      setup_shortcut: 'I already have the downloaded file',
       diy_steps: [
         { title: 'Create the project', text: '', instructions: ['Name the project **Olympus**.', 'Choose **Create**, then select the new project.'], link: { label: 'Google Cloud', url: 'https://console.cloud.google.com/projectcreate' }, return_note: "Google opens in your browser. Come back here when you've created and selected your Olympus project." },
         { title: 'Turn on Gmail and Drive', text: '', instructions: ['Check **Olympus** is selected at the top.', 'Search for **Gmail API**, open it and choose **Enable**.', 'Return to **Library**, search for **Google Drive API** and choose **Enable**.'], link: { label: 'Google Cloud', url: 'https://console.cloud.google.com/apis/library' }, return_note: "Google opens the API Library. Come back here when both Gmail and Google Drive are enabled in the same project." },
@@ -4378,6 +4383,7 @@ function oauthSetupInstructions(
       agent_prompt: 'Help me connect Dropbox to Olympus. Walk me through creating a Dropbox app at https://www.dropbox.com/developers/apps (Scoped access, the folder access I want, named Olympus) or reusing my existing Olympus app, enabling the files.metadata.read, files.content.read, sharing.read and account_info.read permissions, and adding the redirect URI shown on the Olympus dashboard\'s Dropbox card under the app\'s OAuth 2 redirect URIs. Then give me the App key so I can paste it into the Client ID field on that card and press Connect. Dropbox uses PKCE, so no app secret is needed. Do not ask me to edit files, configuration, or code.',
       provider_console_url: 'https://www.dropbox.com/developers/apps',
       diy_summary: 'Or set it up yourself (about 5 minutes)',
+      setup_shortcut: 'I already have a Dropbox app',
       diy_steps: [
         { title: 'Create your app', text: 'Choose Scoped access and name the app Olympus.', link: { label: 'Dropbox', url: 'https://www.dropbox.com/developers/apps/create' } },
         { title: 'Choose access', text: 'Choose App folder to read only that folder, or Full Dropbox to choose from your whole Dropbox.', link: { label: 'Dropbox', url: 'https://www.dropbox.com/developers/apps' } },
@@ -4398,6 +4404,7 @@ function oauthSetupInstructions(
     provider_console_url: 'https://console.x.com',
     diy_summary: 'Or set it up yourself (about 5 minutes)',
     setup_provider: 'X',
+    setup_shortcut: 'I already have an X app',
     diy_steps: [
       { title: 'Check the cost', text: 'Reading bookmarks needs paid X API access. X currently charges by usage with credits. Review the costs before connecting.', button_label: 'Open X pricing', link: { label: 'X pricing', url: 'https://docs.x.com/x-api/getting-started/pricing' } },
       { title: 'Create your app', text: 'Sign in to the X developer console and create or choose your app.', link: { label: 'X developer console', url: 'https://console.x.com' } },
@@ -4409,6 +4416,8 @@ function oauthSetupInstructions(
     fields: [clientIdField, clientSecretField],
   };
 }
+
+export const VENICE_SETUP_SHORTCUT = 'I already have a Venice API key';
 
 export const VENICE_SETUP_STEPS: DashboardSetupStep[] = [
   { title: 'Set up your account', text: 'Create or sign in to your Venice account and add credit.', link: { label: 'Venice', url: 'https://venice.ai/settings/api' } },
@@ -4444,6 +4453,7 @@ function apiKeySetupInstructions(source: DashboardApiKeySource): DashboardSetupI
     provider_console_url: 'https://venice.ai',
     diy_summary: 'Or get the API key yourself (about 2 minutes)',
     diy_steps: VENICE_SETUP_STEPS,
+    setup_shortcut: VENICE_SETUP_SHORTCUT,
     secret_shown_once: false,
     fields: [tokenField],
   };

@@ -1500,13 +1500,13 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
       if (url && !openAuthorizationExternally(url)) window.open(url, '_blank', 'noopener,noreferrer');
       return;
     }
-    const setupControl = target.closest<HTMLElement>('[data-setup-next], [data-setup-back], [data-setup-retry]');
+    const setupControl = target.closest<HTMLElement>('[data-setup-next], [data-setup-back], [data-setup-retry], [data-setup-jump]');
     if (setupControl) {
       const sheet = setupControl.closest<HTMLElement>('[data-setup-steps]');
       if (!sheet) return;
       const panels = Array.from(sheet.querySelectorAll<HTMLElement>(':scope > [data-setup-panel]'));
       const current = panels.findIndex(panel => !panel.hidden);
-      const next = Math.max(0, Math.min(panels.length - 1, setupControl.hasAttribute('data-setup-retry') ? Number(setupControl.dataset.setupRetry) : current + (setupControl.hasAttribute('data-setup-next') ? 1 : -1)));
+      const next = Math.max(0, Math.min(panels.length - 1, setupControl.hasAttribute('data-setup-retry') ? Number(setupControl.dataset.setupRetry) : setupControl.hasAttribute('data-setup-jump') ? Number(setupControl.dataset.setupJump) : current + (setupControl.hasAttribute('data-setup-next') ? 1 : -1)));
       showSetupStep(sheet, next);
       return;
     }
