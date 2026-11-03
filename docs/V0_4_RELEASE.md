@@ -1427,7 +1427,7 @@ exact-main verify run `35658364460`, GitHub tag `v0.4.0-beta.2`, asset
 968,934 bytes. Anonymous download and checksum/size verification passed. The exact
 archive passed isolated managed install/uninstall and live activation; its dated
 packaged plan is the pre-activation snapshot, while this register records closeout.
-ClawHub publication is on explicit owner hold (September 21); do not publish until the owner reopens it. GitHub is the available beta channel.
+ClawHub publication was on owner hold from September 21 until the owner reopened it on 2026-11-03. The Hermes skill is published there as `olympus-hermes`; the OpenClaw plugin (`clawhub:olympus`) waits on a ClawHub publish failure (out of memory on ClawHub's side), tracked in #794.
 The owner accepted the existing tester feedback instead of another broad source
 and platform qualification campaign. Unperformed qualification is not claimed.
 
@@ -1601,7 +1601,7 @@ measurement. Deferred mail should remain honestly represented in status.
 | 1. Complete shared spine | complete | All seven rows are repository-qualified on the shared spine; the messaging live exit is receipt-green; PR #71 CI `33171581700` and the exact-head 7/7 held-out receipt are recorded below. |
 | 2. Delete migration era | complete | The approved manifest accepts bounded Gmail metadata-only/clamped rows and eight damaged Dropbox entries as honest coverage debt. PR #80 removed the legacy supervisor; PR #87 removed all 154 reviewed migration-era paths; and PR #91 installed the 678 exact-compatible Dropbox vectors, proved none remained importable and the current set was complete, then deleted the embedding importer and import-only authority seam. Later corrective PRs completed managed-state cleanup and fail-closed refresh/resume recovery. Exact-head repository, CI, installed-artifact, and live-cutover receipts passed; deployment-specific receipt details remain in private operations records rather than the public package. |
 | 3. Standalone release candidate | complete | One exact commit/artifact passes 3A public-surface allowlists, 3B lifecycle, 3C dashboard/custody, 3D managed package and ClawHub path, 3E's 427-row private-ops disposition plus canonical-doc closure, and 3F release-harness readiness. `config/private-ops-disposition.json` mechanically binds the separately authorized private-topology rollback receipt before this row can merge. |
-| 4. Pilot and release | beta released | `v0.4.0-beta.2` is published with verified anonymous download, exact-main CI, and live public-package acceptance. The September 21 owner decision accepts the existing tester feedback for this beta; broader source/platform qualification remains future work, not a completed proof. ClawHub publication is on explicit owner hold until separately reopened. |
+| 4. Pilot and release | beta released | `v0.4.0-beta.2` is published with verified anonymous download, exact-main CI, and live public-package acceptance. The September 21 owner decision accepts the existing tester feedback for this beta; broader source/platform qualification remains future work, not a completed proof. ClawHub publication was reopened by the owner on 2026-11-03 (#794). |
 
 Slice 1 runtime-safety proof is merged in PR #48 (CI `33023155341`): product
 and migration capture identities are distinct, degraded retrieval is honest,
