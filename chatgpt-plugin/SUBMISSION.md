@@ -1,7 +1,8 @@
 # Olympus: ChatGPT directory submission kit
 
-Status: 1.0.0-rc.3 approved and published 2026-10-27. Listing update for
-1.3.0 prepared 2026-11-01: crowned-mountain icon and clay brand colours, the
+Status: 1.3.0 approved with no findings and published 2026-11-02, listed
+publicly by OCU Inc. (1.0.0-rc.3 was published 2026-10-27). The 1.3.0
+listing update was prepared 2026-11-01: crowned-mountain icon and clay brand colours, the
 tagline "A private second brain" (#628, from the site and README), the softer Secrets wording,
 Evernote and Mac files in the long description, and new release notes. The
 tool surface on `/openai/mcp` stays pinned to the approved listing
@@ -271,7 +272,14 @@ Reviewer demo
   route ready; no paid question has been run. The zkAPI note was funded on
   2026-10-11 and expires about 2026-11-10; renewing it means withdrawing and
   making a new deposit, after which the `fundingDate` in `sovereignty.json`
-  needs the new date.
+  needs the new date. Verified the same day: one paid question answered end
+  to end through the confined route (about 77 s, about 3,700 gwei). The first
+  attempt timed out loading the model policy and left a lock that only the
+  dashboard can clear (#740).
+- 2026-11-03: the demo gateway token was rotated after the review, because
+  the old one had been pasted in a chat. `openclaw config get` shows only a
+  redacted placeholder. The reviewer path, the demo sign-in and a Personal
+  question passed afterwards.
 - The relay keeps shipping while the demo engine is frozen. The directory
   endpoint serves the submitted listing, not the current engine's
   (`connect-relay/server/directory/approved.ts`); CI holds the relay's
