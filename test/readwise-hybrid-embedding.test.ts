@@ -764,9 +764,9 @@ describe('review round 2: scope binding, store-wide sweep, isolation, gate', () 
     await store.syncFromConnector(listConnector(items), { fetchContent: true });
     const provider = cloudProvider();
     const original = provider.embed.bind(provider);
-    provider.embed = async (inputs, options) => {
+    provider.embed = async (inputs) => {
       if (inputs.some((input) => input.text.includes('POISON'))) throw new Error('rejected');
-      return original(inputs, options);
+      return original(inputs);
     };
     const source: SourceSchedulerSource = {
       sourceId: 'readwise.library', corpusId: store.corpusId, cadence: 'continuous', intervalMs: 5 * 60_000, freshnessThresholdHours: 26, tasks: [],
