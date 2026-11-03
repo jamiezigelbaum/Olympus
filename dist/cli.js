@@ -107220,6 +107220,7 @@ __export(exports_engine_service, {
   defaultEngineConfig: () => defaultEngineConfig,
   STANDALONE_SOVEREIGNTY_PRESET: () => STANDALONE_SOVEREIGNTY_PRESET,
   STANDALONE_RELAY_HOST: () => STANDALONE_RELAY_HOST,
+  MAC_SERVER_MODE_HANDOFF_MS: () => MAC_SERVER_MODE_HANDOFF_MS,
   ENGINE_RUN_COMMAND: () => ENGINE_RUN_COMMAND,
   ENGINE_QUIET_WAIT_MS: () => ENGINE_QUIET_WAIT_MS,
   ENGINE_LABEL: () => ENGINE_LABEL,
@@ -108546,7 +108547,8 @@ function macServerModeView(options = {}) {
   const enabled = paths.engineManager === "daemon";
   try {
     const result = JSON.parse(readFileSync56(serverModeResultPath(paths), "utf8"));
-    const pending = result.pending === true && Number.isSafeInteger(result.pid) && defaultPidAlive(result.pid);
+    const handoffExpired = typeof result.handoff_at === "number" && Date.now() - result.handoff_at > MAC_SERVER_MODE_HANDOFF_MS;
+    const pending = result.pending === true && !handoffExpired && Number.isSafeInteger(result.pid) && defaultPidAlive(result.pid);
     return { enabled, pending, ...typeof result.message === "string" ? { notice: result.message } : {} };
   } catch {
     return { enabled, pending: false };
@@ -108591,7 +108593,7 @@ function requestMacServerMode(enable, options = {}) {
 <key>LimitLoadToSessionType</key><string>Aqua</string>
 </dict></plist>
 `);
-    writePrivateFileAtomicSync(serverModeResultPath(paths), JSON.stringify({ pending: true, pid: process.pid, message: message2 }));
+    writePrivateFileAtomicSync(serverModeResultPath(paths), JSON.stringify({ pending: true, pid: process.pid, handoff_at: Date.now(), message: message2 }));
     const result = exec("launchctl", ["bootstrap", domain, agentPath]);
     if (result.status !== 0) {
       removeFileDurablySync(agentPath);
@@ -108656,7 +108658,7 @@ function saveMacComputerUseChoice(choice) {
   saveComputerUseChoice(engineServicePaths().sovereigntyPath, choice);
   return { ok: true, status_message: "Choice saved. Continue to Private answers." };
 }
-var ENGINE_LABEL = "ai.olympusplugin.engine", STANDALONE_RELAY_HOST = "mcp.olympusplugin.ai", ENGINE_RUN_COMMAND = "__engine-run", ENGINE_BUILD_ENV = "OLYMPUS_ENGINE_BUILD", BUILD_DIGEST_FILES, ENGINE_THROTTLE_SECONDS = 30, PACKAGE_NAMES, MAINTENANCE_FENCE, ENGINE_QUIET_WAIT_MS = 180000, ENGINE_QUIET_POLL_MS = 2000, ENGINE_HEALTH_TIMEOUT_MS = 60000, ENGINE_HEALTH_POLL_MS = 500, WORKER_SERVICE_ID = "olympus-worker", DEFAULT_WORKER_BASE_URL = "http://127.0.0.1:8010/v1", STANDALONE_SOVEREIGNTY_PRESET = "pending", ENV_POLICY_KEY, LOG_TAIL_BYTES, MAC_SERVER_MODE_AGENT_LABEL = "ai.olympusplugin.engine-server-mode-off";
+var ENGINE_LABEL = "ai.olympusplugin.engine", STANDALONE_RELAY_HOST = "mcp.olympusplugin.ai", ENGINE_RUN_COMMAND = "__engine-run", ENGINE_BUILD_ENV = "OLYMPUS_ENGINE_BUILD", BUILD_DIGEST_FILES, ENGINE_THROTTLE_SECONDS = 30, PACKAGE_NAMES, MAINTENANCE_FENCE, ENGINE_QUIET_WAIT_MS = 180000, ENGINE_QUIET_POLL_MS = 2000, ENGINE_HEALTH_TIMEOUT_MS = 60000, ENGINE_HEALTH_POLL_MS = 500, WORKER_SERVICE_ID = "olympus-worker", DEFAULT_WORKER_BASE_URL = "http://127.0.0.1:8010/v1", STANDALONE_SOVEREIGNTY_PRESET = "pending", ENV_POLICY_KEY, LOG_TAIL_BYTES, MAC_SERVER_MODE_AGENT_LABEL = "ai.olympusplugin.engine-server-mode-off", MAC_SERVER_MODE_HANDOFF_MS = 120000;
 var init_engine_service = __esm(() => {
   init_mac_engine_daemon();
   init_mac_engine_daemon();

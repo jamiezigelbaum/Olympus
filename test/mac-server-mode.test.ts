@@ -510,3 +510,17 @@ test('agent-manager dashboard requests retain the detached helper command and pe
   expect(macServerModeView(options)).toEqual({ enabled: false, pending: true, notice: result.status_message });
   expect(existsSync(join(dirname(f.paths.configPath), 'server-mode-off.plist'))).toBe(false);
 }, 5_000);
+
+test('an off request whose desktop helper never took over frees the switch after the handoff window', () => {
+  const f = fixture(); f.put(f.daemonPlistPath, f.daemon);
+  const options = { platform: 'darwin', homeDir: f.home, daemonPlistPath: f.daemonPlistPath } as const;
+  const resultPath = join(dirname(f.paths.configPath), 'server-mode-result.json');
+  mkdirSync(dirname(resultPath), { recursive: true });
+  writeFileSync(resultPath, JSON.stringify({ pending: true, pid: process.pid, handoff_at: Date.now(), message: 'waiting' }));
+  expect(macServerModeView(options).pending).toBe(true);
+  writeFileSync(resultPath, JSON.stringify({ pending: true, pid: process.pid, handoff_at: Date.now() - 10 * 60_000, message: 'waiting' }));
+  expect(macServerModeView(options).pending).toBe(false);
+  // The helper's own record carries no handoff time and stays pending while it runs.
+  writeFileSync(resultPath, JSON.stringify({ pending: true, pid: process.pid, message: 'working' }));
+  expect(macServerModeView(options).pending).toBe(true);
+});

@@ -1851,6 +1851,8 @@ export interface MacServerModeView {
 }
 function serverModeResultPath(paths: EnginePaths): string { return join(dirname(paths.configPath), 'server-mode-result.json'); }
 const MAC_SERVER_MODE_AGENT_LABEL = 'ai.olympusplugin.engine-server-mode-off';
+/** How long the desktop helper has to take over a pending off request before the switch frees up again. */
+export const MAC_SERVER_MODE_HANDOFF_MS = 120_000;
 function serverModeAgentPath(paths: EnginePaths): string { return join(dirname(paths.configPath), 'server-mode-off.plist'); }
 export function macServerModeView(options: EngineServiceOptions = {}): MacServerModeView {
   const paths = engineServicePaths(options);
@@ -1858,7 +1860,10 @@ export function macServerModeView(options: EngineServiceOptions = {}): MacServer
   try {
     const result = JSON.parse(readFileSync(serverModeResultPath(paths), 'utf8'));
     // Pending work from a process that died must not disable the switch forever.
-    const pending = result.pending === true && Number.isSafeInteger(result.pid) && defaultPidAlive(result.pid);
+    // A desktop helper that never started leaves the worker's own pid behind:
+    // stop counting it as pending once the helper has had time to take over.
+    const handoffExpired = typeof result.handoff_at === 'number' && Date.now() - result.handoff_at > MAC_SERVER_MODE_HANDOFF_MS;
+    const pending = result.pending === true && !handoffExpired && Number.isSafeInteger(result.pid) && defaultPidAlive(result.pid);
     return { enabled, pending, ...(typeof result.message === 'string' ? { notice: result.message } : {}) };
   } catch { return { enabled, pending: false }; }
 }
@@ -1907,7 +1912,7 @@ export function requestMacServerMode(enable: boolean, options: EngineServiceOpti
 `);
     // Publish before bootstrap: the helper replaces this pid with its own as
     // soon as it starts, and its final result must never be overwritten here.
-    writePrivateFileAtomicSync(serverModeResultPath(paths), JSON.stringify({ pending: true, pid: process.pid, message }));
+    writePrivateFileAtomicSync(serverModeResultPath(paths), JSON.stringify({ pending: true, pid: process.pid, handoff_at: Date.now(), message }));
     const result = exec('launchctl', ['bootstrap', domain, agentPath]);
     if (result.status !== 0) {
       removeFileDurablySync(agentPath);
