@@ -1060,6 +1060,9 @@ export class SourceScheduler {
       }
       state.nextRunAt = nextRunAt;
       if (continuing || wokenWhileRunning) this.scheduleContinueWake(nextRunAt);
+      // A retry due before the next regular tick gets its own wake, or the tick
+      // would round it up (an embedding backlog asking for 5 s waited 60 s).
+      else if (retryAt && nextRunAt - Date.parse(completedAt) < this.tickMs) this.scheduleContinueWake(nextRunAt);
       if (result.status === 'progress' && !retryAt) this.wakeDownstream(state, continueAt);
     } catch (error) {
       delete state.wakeAfterRun;
@@ -1724,12 +1727,14 @@ function embeddingSweepTask(
         // A store that filled its bound has more owed: a backlog drains pass after pass, not one bound a minute.
         const more = runs.some((run) => run.busy !== true && run.chunksEmbedded > 0 && run.itemsAttempted >= EMBEDDING_SWEEP_MAX_ITEMS);
         if (counts.items_failed === 0) return { status, counts, ...(more ? { continueSoon: true } : {}) };
-        // Skipped items are surfaced, not retried: the sweep keeps its cadence.
+        // Skipped items are surfaced, not retried. A backlog still drains pass
+        // after pass: one failed item, ever, once held every later pass of the
+        // store to one bound a minute (Sparta, 2026-11-03: 21k Dropbox items).
         return {
           status,
           counts,
           retryAt: {
-            at: new Date(attemptedAt + EMBEDDING_SWEEP_INTERVAL_MS).toISOString(),
+            at: new Date(attemptedAt + (more ? SOURCE_SCHEDULER_CONTINUE_AFTER_MS : EMBEDDING_SWEEP_INTERVAL_MS)).toISOString(),
             degradedReason: EMBEDDING_ITEMS_FAILED_REASON,
           },
         };

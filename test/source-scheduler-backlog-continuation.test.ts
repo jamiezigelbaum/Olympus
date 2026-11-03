@@ -352,3 +352,34 @@ describe('a refused extraction candidate never fails the pass', () => {
     expect(line).not.toContain('error_message=');
   });
 });
+
+describe('a short retry', () => {
+  test('a retry due before the next tick gets its own wake, keeping its degraded reason', async () => {
+    const clock = { now: T0 };
+    const timeouts: number[] = [];
+    let runs = 0;
+    const sched = new SourceScheduler({
+      enabled: true,
+      tickMs: 60_000,
+      errorBackoffMs: 60_000,
+      maxTransientRetries: 1,
+      now: () => new Date(clock.now),
+      continueAfterMs: 5_000,
+      setIntervalImpl: (() => ({ unref() {} })) as unknown as typeof setInterval,
+      clearIntervalImpl: (() => undefined) as unknown as typeof clearInterval,
+      setTimeoutImpl: ((_: () => void, ms: number) => { timeouts.push(ms); return { unref() {} }; }) as unknown as typeof setTimeout,
+      clearTimeoutImpl: (() => undefined) as unknown as typeof clearTimeout,
+      sources: [source([task('embed', 'embed', async () => {
+        runs += 1;
+        return { status: 'progress', retryAt: { at: new Date(clock.now + 5_000).toISOString(), degradedReason: 'embedding_items_failed' } };
+      })])],
+    });
+    sched.start();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(runs).toBe(1);
+    expect(timeouts).toContain(5_000);
+    const status = sched.status(new Date(clock.now));
+    expect(status.sources[0]!.tasks[0]!.degraded_reason).toBe('embedding_items_failed');
+    sched.stop();
+  });
+});

@@ -19423,7 +19423,7 @@ class ControlPathHeadroom {
       if (this.lastLagMs >= this.freezeLogMs) {
         this.freezes += 1;
         const running = [...this.active.keys()].sort().join(",") || "none";
-        this.log(`[olympus:control-path] the worker could not answer requests for ${Math.round(this.lastLagMs)} ms; background work running: ${running}`);
+        this.log(`${new Date().toISOString()} [olympus:control-path] the worker could not answer requests for ${Math.round(this.lastLagMs)} ms; background work running: ${running}`);
       }
     }, HEARTBEAT_MS);
     this.heartbeat.unref?.();
@@ -67542,6 +67542,8 @@ class SourceScheduler {
       state.nextRunAt = nextRunAt;
       if (continuing || wokenWhileRunning)
         this.scheduleContinueWake(nextRunAt);
+      else if (retryAt && nextRunAt - Date.parse(completedAt) < this.tickMs)
+        this.scheduleContinueWake(nextRunAt);
       if (result.status === "progress" && !retryAt)
         this.wakeDownstream(state, continueAt);
     } catch (error) {
@@ -71570,6 +71572,7 @@ function setEmbedsWithBuiltInOnly(set2) {
 init_classification_ledger();
 init_tier_migration();
 init_embedding_ledger();
+init_control_path_headroom();
 
 // src/core/remote-access-config.ts
 init_http();

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from 'bun:test';
-import { ControlPathHeadroom } from '../src/workers/control-path-headroom.ts';
+import { ControlPathHeadroom, summarizeCpuSamples } from '../src/workers/control-path-headroom.ts';
 
 const busy = (ms: number) => {
   const end = performance.now() + ms;
@@ -61,7 +61,37 @@ describe('control path headroom', () => {
     await Bun.sleep(120);
     leave();
     expect(lines).toHaveLength(1);
-    expect(lines[0]).toMatch(/^\[olympus:control-path\] the worker could not answer requests for \d+ ms; background work running: dropbox\.files\/sync$/);
+    expect(lines[0]).toMatch(/^\d{4}-\d\d-\d\dT[\d:.]+Z \[olympus:control-path\] the worker could not answer requests for \d+ ms; background work running: dropbox\.files\/sync$/);
     expect(headroom.snapshot().freezes).toBe(1);
+  });
+});
+
+describe('cpu sample summary', () => {
+  test('ranks the functions on top of the stack and under it, by name and code position only', () => {
+    const frame = (name: string, line: number) => ({ name, sourceURL: '/opt/olympus/dist/cli.js', line });
+    const summary = summarizeCpuSamples([
+      { frames: [frame('scan', 10), frame('sync', 5)] },
+      { frames: [frame('scan', 10), frame('sync', 5)] },
+      { frames: [frame('write', 20), frame('sync', 5)] },
+      { frames: [] },
+    ]);
+    expect(summary.samples).toBe(4);
+    expect(summary.self[0]).toEqual(['scan dist/cli.js:10', 2]);
+    expect(summary.total[0]).toEqual(['sync dist/cli.js:5', 3]);
+  });
+});
+
+describe('cpu sample summary from the profiler', () => {
+  test('frames with only a sourceID take their file from the sources table', async () => {
+    const jsc = await import('bun:jsc') as unknown as { startSamplingProfiler: () => void; samplingProfilerStackTraces: () => { traces: { frames: { sourceID?: number; name?: string; line?: number }[] }[]; sources: { sourceID?: number; url?: string }[] } };
+    jsc.startSamplingProfiler();
+    const end = performance.now() + 50;
+    let spin = 0;
+    while (performance.now() < end) spin += Math.sqrt(spin + 1);
+    const raw = jsc.samplingProfilerStackTraces();
+    const stripped = raw.traces.map((trace) => ({ frames: trace.frames.map(({ sourceID, name, line }) => ({ ...(sourceID !== undefined ? { sourceID } : {}), ...(name !== undefined ? { name } : {}), ...(line !== undefined ? { line } : {}) })) }));
+    const summary = summarizeCpuSamples(stripped, 30, raw.sources);
+    expect(summary.samples).toBeGreaterThan(0);
+    expect(summary.total.some(([key]) => key.includes('control-path-headroom.test.ts'))).toBe(true);
   });
 });

@@ -18109,7 +18109,7 @@ class ControlPathHeadroom {
       if (this.lastLagMs >= this.freezeLogMs) {
         this.freezes += 1;
         const running = [...this.active.keys()].sort().join(",") || "none";
-        this.log(`[olympus:control-path] the worker could not answer requests for ${Math.round(this.lastLagMs)} ms; background work running: ${running}`);
+        this.log(`${new Date().toISOString()} [olympus:control-path] the worker could not answer requests for ${Math.round(this.lastLagMs)} ms; background work running: ${running}`);
       }
     }, HEARTBEAT_MS);
     this.heartbeat.unref?.();
