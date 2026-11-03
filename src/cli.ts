@@ -289,10 +289,17 @@ async function runZkapiTestWriter(rest: string[]): Promise<void> {
   if (report.canaryLeaks.length > 0) process.exitCode = 1;
 }
 
+/** Agents reach for a bare `olympus status`; name the commands that answer it. */
+function printStatusHint(args: readonly string[]): void {
+  if (args[0] !== 'status') return;
+  console.error('Did you mean olympus worker status (the worker service and its health) or olympus doctor (a full check)?');
+}
+
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
   if (!isV04PublicCliInvocation(args)) {
     console.error(`Unknown command: ${args.filter((arg) => !isHelpFlag(arg)).join(' ')}`);
+    printStatusHint(args);
     console.error('Run olympus --help for available commands.');
     process.exit(1);
   }
@@ -817,6 +824,7 @@ async function main(): Promise<void> {
       return;
     }
     console.error(`Unknown command: ${args.join(' ')}`);
+    printStatusHint(args);
     console.error('Run olympus --help for available commands.');
     process.exit(1);
   }
@@ -2035,7 +2043,7 @@ async function readWorkerHttpState(): Promise<Record<string, unknown>> {
   const baseUrl = `${workerRoot}/v1`;
   const authToken = workerAuthTokenFromConfig(config);
   try {
-    const health = await fetchJson(`${baseUrl}/health`, { method: 'GET' });
+    const health = await fetchJson(`${baseUrl}/health`, { method: 'GET', signal: AbortSignal.timeout(WORKER_STATUS_TIMEOUT_MS) });
     const output: Record<string, unknown> = {
       reachable: true,
       base_url: baseUrl,
@@ -2043,7 +2051,7 @@ async function readWorkerHttpState(): Promise<Record<string, unknown>> {
     };
     if (config.sourceIndex.enabled && authToken) {
       try {
-        output.source_index_status = await fetchJson(`${baseUrl}/source/index/status`, withWorkerAuthHeader({ method: 'GET' }, authToken));
+        output.source_index_status = await fetchJson(`${baseUrl}/source/index/status`, withWorkerAuthHeader({ method: 'GET', signal: AbortSignal.timeout(WORKER_STATUS_TIMEOUT_MS) }, authToken));
       } catch (error) {
         output.source_index_status = {
           reachable: false,
@@ -2059,7 +2067,7 @@ async function readWorkerHttpState(): Promise<Record<string, unknown>> {
         // not under the /v1 API base. Probing `${baseUrl}/dashboard.json`
         // asked for /v1/dashboard.json and reported the resulting 404 as a
         // broken dashboard on every healthy install.
-        output.source_dashboard = await fetchJson(`${workerRoot}/dashboard.json`, withWorkerAuthHeader({ method: 'GET' }, authToken));
+        output.source_dashboard = await fetchJson(`${workerRoot}/dashboard.json`, withWorkerAuthHeader({ method: 'GET', signal: AbortSignal.timeout(WORKER_STATUS_TIMEOUT_MS) }, authToken));
       } catch (error) {
         output.source_dashboard = { reachable: false, error: cliErrorDetail(error) };
       }
@@ -2073,9 +2081,23 @@ async function readWorkerHttpState(): Promise<Record<string, unknown>> {
     return {
       reachable: false,
       base_url: baseUrl,
-      error: cliErrorDetail(error),
+      ...(isTimeoutError(error) ? { busy: true } : {}),
+      error: isTimeoutError(error) ? WORKER_STATUS_BUSY_DETAIL : cliErrorDetail(error),
     };
   }
+}
+
+/**
+ * How long `olympus worker status` waits on each worker request. The service
+ * state comes from the service manager and is always reported; a worker too
+ * busy to answer is said to be so instead of holding the command (Sparta,
+ * 2026-11-03: an agent's status check timed out while the worker was frozen).
+ */
+const WORKER_STATUS_TIMEOUT_MS = 5_000;
+const WORKER_STATUS_BUSY_DETAIL = 'The worker is running but did not answer within 5 seconds. It may be busy with an import; try again shortly, or see olympus engine logs.';
+
+function isTimeoutError(error: unknown): boolean {
+  return error instanceof Error && (error.name === 'TimeoutError' || error.name === 'AbortError');
 }
 
 /** Translate the worker's public dashboard facts into exact no-restart recovery verbs. */
