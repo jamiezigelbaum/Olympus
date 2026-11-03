@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Run Olympus on an always-on Mac - Olympus help</title>
+  <meta name="description" content="How to set up a Mac that runs Olympus all the time, with no one logged in.">
+  <meta name="color-scheme" content="light">
+  <meta name="referrer" content="no-referrer">
+  <link rel="stylesheet" href="/assets/brand.css?v=1.0.0">
+  <link rel="stylesheet" href="/style.css?v=1.0.0">
+  <link rel="icon" href="/favicon-32.png" sizes="32x32" type="image/png">
+  <link rel="icon" href="/favicon-16.png" sizes="16x16" type="image/png">
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png">
+</head>
+<body>
+  <a class="skip" href="#main">Skip to content</a>
+  <header class="site-head">
+    <a class="wordmark" href="/" aria-label="Olympus home"><span class="wordmark__icon" aria-hidden="true"></span>Olympus</a>
+    <nav class="site-nav" aria-label="Main">
+      <a href="/#how">How it works</a>
+      <a href="/help/on-your-computer/">Help</a>
+      <a href="https://github.com/jamiezigelbaum/Olympus">GitHub</a>
+      <a class="btn" href="/install/">Add Olympus to your AI</a>
+    </nav>
+  </header>
+  <main id="main">
+    <div class="wrap">
+      <h1>Run Olympus on an always-on Mac</h1>
+      <p class="lede">Most people run Olympus on the Mac they use every day, and nothing here applies to them. This page is for a Mac that stays on as a small server, such as a Mac mini or Mac Studio in a cupboard, reached over Screen Sharing. Decide the points below before you install; changing them later takes longer.</p>
+
+      <h2>1. Choose the accounts</h2>
+      <ul>
+        <li><strong>An administrator account</strong> for you, used only to change settings.</li>
+        <li><strong>A standard account for Olympus.</strong> Olympus and all of its data live here.</li>
+        <li><strong>A separate account for any AI agent</strong> on the same Mac, such as OpenClaw or Hermes. The agent must not be able to read the Olympus account's home folder, so it only ever sees what Olympus chooses to answer. Never install Olympus inside the agent's own account.</li>
+      </ul>
+      <p>Create the accounts in System Settings, Users &amp; Groups. Accounts made there can unlock FileVault. Accounts made with command-line tools may not, and fixing that needs extra steps.</p>
+
+      <h2>2. Keep Olympus running when no one is logged in</h2>
+      <p>Install Olympus while logged in to the Olympus account. When the dashboard asks how this computer will run, choose <strong>Always on, as a server</strong>, or later turn on <strong>Keep Olympus running when no one is logged in</strong> in the dashboard. Your Mac asks for an administrator's name and password once. After that Olympus starts by itself after a restart, without anyone logging in.</p>
+
+      <h2>3. Decide about FileVault</h2>
+      <p>FileVault keeps your data encrypted if the Mac is stolen, and we recommend it. The trade-off: after every restart, the disk stays locked until someone unlocks it. Olympus starts as soon as it is unlocked.</p>
+      <ul>
+        <li>Unlock in person at the Mac, or remotely, which recent versions of macOS allow over SSH.</li>
+        <li>Remote unlock is much more reliable on a wired network than on Wi-Fi. Test a restart and a remote unlock before you rely on it.</li>
+        <li>Plan for power cuts: after one, the Mac waits at the unlock screen until someone unlocks it.</li>
+      </ul>
+
+      <h2>4. Set up the network</h2>
+      <ul>
+        <li>Use Ethernet if you can.</li>
+        <li>Give the Mac a fixed address on your network. Most routers call this a DHCP reservation.</li>
+        <li>If you use Tailscale, use the version that runs as a system service rather than the menu-bar app, which stops when you log out. Check that the Mac still shows as connected in Tailscale after a restart, before anyone logs in.</li>
+        <li>Turn on Screen Sharing in System Settings, General, Sharing. If it does not answer after turning it on, switch it off and on again there.</li>
+      </ul>
+
+      <h2>5. Connect agents</h2>
+      <p>On the dashboard's Agents page, choose <strong>Agent on another account of this computer</strong> for an agent on the same Mac, or <strong>Agent on my tailnet</strong> for one on another of your machines. Each agent gets its own key, which you can revoke there at any time. Neither choice opens Olympus to your local network or the internet.</p>
+
+      <h2>6. Know which Mac you are on</h2>
+      <p>The top of the Olympus dashboard shows the computer's name and the account Olympus runs as. When you or an assistant helping you switch between machines, check it before changing anything.</p>
+
+      <h2>If something goes wrong</h2>
+      <p>Open the dashboard and press <strong>Copy details</strong> on the card that failed, or <strong>Copy system report</strong> on the Help page, and send it to <a href="/support/">support</a>. The report contains no names, messages or file paths. You never need to run commands in Terminal for support. If an assistant is helping you, ask it not to send you long commands to paste.</p>
+    </div>
+  </main>
+  <footer class="site-foot">
+    <ul>
+      <li><a href="/install/">Install</a></li>
+      <li><a href="/help/on-your-computer/">Help</a></li>
+      <li><a href="/support/">Support</a></li>
+      <li><a href="/privacy/">Privacy</a></li>
+      <li><a href="/terms/">Terms</a></li>
+      <li><a href="https://github.com/jamiezigelbaum/Olympus">GitHub</a></li>
+    </ul>
+    <p>Olympus is open source under the MIT licence and published by Open Coordination Unlimited, Inc.</p>
+  </footer>
+</body>
+</html>
