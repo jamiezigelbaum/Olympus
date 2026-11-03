@@ -1,3 +1,4 @@
+import { sourceSupportDetails } from '../dashboard/source-failure.ts';
 /**
  * The engine's producer for the ChatGPT dashboard view-model (v1).
  *
@@ -542,6 +543,7 @@ function sourceEntry(
   }
   return {
     id: definition.source_id,
+    supportDetails: sourceSupportDetails({ sourceId: definition.source_id, state: status, failure: sourceFailureKind(card.schedule?.last_error_kind, card.schedule?.degraded_reason), ref: card.schedule?.last_error_hash }),
     label: definition.label,
     ...(definition.sync_name ? { syncNoun: definition.sync_name.mid } : {}),
     group: sourceGroup(definition),

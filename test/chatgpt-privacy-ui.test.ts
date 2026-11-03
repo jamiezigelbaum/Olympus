@@ -1410,3 +1410,15 @@ test('the save bar follows pending covered edits, including reverting to the sav
   choice.click();
   expect(host.button(W.save).textContent).toBe('Save description and answers');
 });
+
+test('Privacy shows the saved mode and Change opens the same four choices', async () => {
+  const host = mount({ [P.get]: () => privacyToolResult({ configured: true, description: '', rules: [], pendingCount: 0, revision: 'rev1', privateAnswerMode: { id: 'local-only', label: 'Local models', options: PRIVATE_ANSWER_OPTIONS } }, 'current', 'owner-token') });
+  host.push({ structuredContent: model({ configured: true, ruleCount: 0, pendingCount: 0 }) });
+  host.button('Edit').click();
+  await host.settle();
+  expect(host.text()).toContain('Private-answer mode');
+  expect(host.text()).toContain('Local models');
+  host.button('Change').click();
+  expect(host.doc.querySelectorAll('input[name="private-answer-mode"]')).toHaveLength(4);
+  expect((host.doc.querySelector('input[value="local-only"]') as HTMLInputElement).checked).toBe(true);
+});

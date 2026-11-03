@@ -22,6 +22,7 @@ export interface ModelSetupView {
   ready: boolean;
   checked_at: string;
   privacy_choice_pending?: boolean;
+  private_model?: { state: string; bytesDone?: number; bytesTotal?: number };
   cards: ModelSetupCard[];
   attention?: string;
 }

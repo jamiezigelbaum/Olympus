@@ -246,8 +246,13 @@ die() { printf '%s\n' "Olympus was not installed or upgraded: $*" >&2; exit 1; }
   say 'By installing Olympus you agree to its Terms (https://olympusplugin.ai/terms/)'
   say 'and acknowledge its Privacy Policy (https://olympusplugin.ai/privacy/).'
   say 'Olympus is provided as is, without warranty. Keep your own backups.'
-  say 'Installed for your user without an administrator password. Run ~/.local/bin/olympus engine status for later checks.'
-  say 'Model readiness is reported separately by the engine.'
+  say 'Installed for your user without an administrator password.'
+  say 'Open Olympus from your applications menu to see your dashboard.'
+  say 'The dashboard opens in the browser on this computer.'
+  say "To connect ChatGPT, Claude or other agents, open the dashboard's Agents page."
+  say 'It guides you through connecting the assistant you choose.'
+  say 'You can see model download progress and check that Olympus is ready in the dashboard.'
+  say 'To uninstall: curl -fsSL https://olympusplugin.ai/uninstall-linux.sh | sh'
 ACTIVATE
   # Ordinary cancellation cannot release the supervisor while its mutation
   # child is running, nor remove scratch beneath that child.

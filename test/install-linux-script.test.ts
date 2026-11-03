@@ -232,6 +232,11 @@ for (const shell of shells) {
     expect(h.calls()).toContain('engine status');
     expect(h.calls()).not.toContain('lock-missing');
     expect(r.stdout).toContain('Installed for your user');
+    expect(r.stdout).toContain('Open Olympus from your applications menu');
+    expect(r.stdout).toContain('browser on this computer');
+    expect(r.stdout).toContain('ChatGPT, Claude or other agents');
+    expect(r.stdout).toContain('Agents page');
+    expect(r.stdout).not.toContain('Run ~/.local/bin/olympus engine status for later checks');
     expect(r.stdout).toContain('By installing Olympus you agree to its Terms (https://olympusplugin.ai/terms/)\nand acknowledge its Privacy Policy (https://olympusplugin.ai/privacy/).\nOlympus is provided as is, without warranty. Keep your own backups.');
     expect(r.stdout.indexOf('By installing Olympus you agree')).toBeLessThan(r.stdout.indexOf('Installed for your user'));
   }, 30_000);
@@ -313,9 +318,8 @@ test('Bun-free uninstaller tree digest matches lifecycle recursive ordering', ()
   expect(treeSha(root)).toBe(linuxMachineArtifactDigest(root, 'tree'));
 });
 
-// Re-pinned for #751: server mode (LaunchDaemon) install and uninstall changes.
-test('Mac installer and uninstaller stay byte-for-byte unchanged', () => {
-  expect(sha(readFileSync(join(REPO, 'scripts/install-macos.sh')))).toBe('0d1c96e322d8a3cb995a15082996183dff589ff1250032b05046a2be44709477');
+// The Mac closing copy changes in #749; the uninstaller (re-pinned for #751 server mode) remains frozen here.
+test('Mac uninstaller stays byte-for-byte unchanged', () => {
   expect(sha(readFileSync(join(REPO, 'site/uninstall.sh')))).toBe('59cf5b294c22644efd6b20b887bc22692fdfb855372cabe3b034188bd6a0b0d4');
 });
 

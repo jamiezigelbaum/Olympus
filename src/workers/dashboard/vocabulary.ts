@@ -2531,6 +2531,7 @@ export const DASHBOARD_COMPUTER_PANEL_COPY = {
   onlyHere: 'only here',
   open: 'Open',
   rows: {
+    help: { title: 'Help', line: 'Copy a system report or contact support' },
     keys: { title: 'Keys', line: 'Venice, Readwise and X keys' },
     agents: { title: 'Agents', line: 'Remote access and connected agents' },
     privateAnswers: { title: 'Inbox', line: 'Answers from every model, kept on this computer.' },

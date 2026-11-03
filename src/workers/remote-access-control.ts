@@ -64,3 +64,39 @@ export function createDashboardRemoteAccessControl(options: {
 }): DashboardRemoteAccessControl {
   return { setEnabled: options.setEnabled };
 }
+
+/** Standalone hosts use their config writer and the full engine restart path. */
+export function createStandaloneRemoteAccessConfigWriter(options: {
+  write(enabled: boolean): void;
+  canRestart(): boolean;
+  unsupportedReason?: string;
+  requestRestart(): boolean;
+}): (enabled: boolean) => Promise<RemoteAccessConfigWrite> {
+  return async enabled => {
+    if (options.unsupportedReason) return { ok: false, status: 501, code: 'restart_unsupported', message: options.unsupportedReason };
+    if (!options.canRestart()) return { ok: false, status: 503, code: 'restart_unavailable', message: 'Olympus cannot apply this setting right now. Try again in a moment.' };
+    try { options.write(enabled); }
+    catch { return { ok: false, status: 500, code: 'config_write_failed', message: 'Olympus could not save the setting. Try again. If it keeps failing, copy the system report from Help and send it to support.' }; }
+    if (!options.requestRestart()) return { ok: false, status: 503, code: 'restart_unavailable', message: 'The setting was saved, but Olympus could not apply it yet. Try again in a moment.' };
+    return { ok: true };
+  };
+}
+
+/** Let the HTTP response finish before the host's full restart stops this worker. */
+export function createDashboardEngineRestart(options: {
+  restart(): void;
+  failed(): void;
+  schedule?: (run: () => void, delayMs: number) => unknown;
+}): () => boolean {
+  let pending = false;
+  return () => {
+    if (pending) return true;
+    pending = true;
+    (options.schedule ?? setTimeout)(() => {
+      try { options.restart(); }
+      catch { options.failed(); }
+      finally { pending = false; }
+    }, 750);
+    return true;
+  };
+}

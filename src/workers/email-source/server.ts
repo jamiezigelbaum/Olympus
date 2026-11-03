@@ -1,7 +1,9 @@
 import { macComputerSetupView, saveMacComputerUseChoice } from '../../core/engine-service.ts';
+import { release } from 'node:os';
 import { createPrivacyQuestionEngine } from '../classification/privacy-questions.ts';
 import { snifferPromptVersions } from '../classification/sniffer.ts';
 import { withFirstRunPrivacyGate } from '../first-run-privacy-gate.ts';
+import { engineServicePaths, setEngineRemoteAccessEnabled, readEngineLogs, restartEngine, inspectEngine, waitForQuietEngine } from '../../core/engine-service.ts';
 import { privacyChoicePending } from '../../core/first-run-privacy.ts';
 import { LocalModelDiscovery, saveLocalAnswerModel } from '../../core/local-model-discovery.ts';
 import { saveFirstRunPrivacyChoice } from '../../core/first-run-privacy.ts';
@@ -529,7 +531,7 @@ import type { AnalystModel } from '../../core/analyst.ts';
 import { resolveTierMigrationPaths, tierMigrationStatusSummary } from '../classification/tier-migration.ts';
 import { resolveEmbeddingLedgerPath } from '../embedding-ledger.ts';
 import { remoteAccessFromStatus, type DashboardAgentConnectionsBackend } from '../agent-connections.ts';
-import { createDashboardRemoteAccessControl, createGatewayRemoteAccessConfigWriter } from '../remote-access-control.ts';
+import { createDashboardRemoteAccessControl, createGatewayRemoteAccessConfigWriter, createStandaloneRemoteAccessConfigWriter, createDashboardEngineRestart } from '../remote-access-control.ts';
 
 const DROPBOX_SOURCE_ANSWER_SELF_HEAL_RETRY_AFTER_MS = 5_000;
 const DROPBOX_SOURCE_ANSWER_SELF_HEAL_PRIORITY = 1_000_000;
@@ -2631,7 +2633,8 @@ export async function main(): Promise<void> {
   });
   const localModelDiscovery = new LocalModelDiscovery();
   const getModelSetup = () => {
-    const view = { ...modelSetup.getStatus(), ...macComputerSetupView() };
+    const status = workerBuiltInModel ? builtInPrivateModelStatus(process.env) : undefined;
+    const view = { ...modelSetup.getStatus(), ...macComputerSetupView(), ...(status?.enabled ? { private_model: { state: status.state, bytesDone: status.bytesDone, bytesTotal: status.bytesTotal ?? status.downloadBytes } } : {}) };
     if (!modelReloadUnavailable) return view;
     return { ...view, ready: false, cards: view.cards.map((card) => card.state === 'applying'
       ? { ...card, state: 'needs_attention' as const, detail: 'Key saved. Ask your agent to restart the managed Olympus worker to apply it; this foreground worker cannot restart itself.' }
@@ -5911,10 +5914,21 @@ export async function main(): Promise<void> {
       ? {
           sourceDashboard: {
             sovereigntyEngine,
+            systemReport: () => ({
+              version: runningOlympusVersion(), os: process.platform, osVersion: release(),
+              host: process.env.OLYMPUS_ENGINE_HOST === '1' ? 'standalone' : 'openclaw', engine: 'running',
+              model: workerBuiltInModel ? builtInPrivateModelStatus(process.env).state : 'disabled',
+              downloads: { search: chatgptEmbeddingState()?.state ?? 'custom', transcription: dashboardTranscriptionState()?.state ?? 'disabled' },
+              remote: dashboardRemoteAccess?.().state ?? 'off',
+              logs: process.env.OLYMPUS_ENGINE_HOST === '1' ? (() => { const logs = readEngineLogs({ lines: 30 }); return [...logs.stdout, ...logs.stderr]; })() : [],
+            }),
             modelSetup: getModelSetup,
             computerSetup: macComputerSetupView,
             saveComputerUseChoice: saveMacComputerUseChoice,
-            checkModelSetup: () => modelSetup.checkLocalModels(),
+            checkModelSetup: () => {
+              if (workerBuiltInModel && builtInPrivateModelStatus(process.env).state === 'failed') void workerBuiltInModel.model.prepare();
+              return modelSetup.checkLocalModels();
+            },
             discoverLocalModels: (baseUrl) => localModelDiscovery.discover(baseUrl),
             testLocalModels: (selection) => localModelDiscovery.test(selection),
             saveLocalAnswerModel: async (selection) => {
@@ -6121,7 +6135,9 @@ export async function main(): Promise<void> {
   // LaunchAgent sets OLYMPUS_ENGINE_HOST=1 (engine-service.ts); otherwise the
   // OpenClaw Gateway runs this worker.
   const remoteAccessHostKind: 'openclaw' | 'standalone' = process.env.OLYMPUS_ENGINE_HOST === '1' ? 'standalone' : 'openclaw';
+  let remoteAccessRestartFailed = false;
   dashboardRemoteAccess = () => {
+    if (remoteAccessRestartFailed) return { state: 'invalid', detail: 'Olympus saved the setting but could not restart. Remote access may still be on. Try the switch again; if it keeps failing, copy the system report from Help and contact support.' };
     let status: ReturnType<typeof remoteAccessStatusView> | undefined;
     try {
       const dir = remoteAccessDir(process.env);
@@ -6139,12 +6155,23 @@ export async function main(): Promise<void> {
   // Turn on / Turn off remote access: the config change through the host's
   // own config write.
   if (authToken) {
-    // Under OpenClaw the Gateway writes. The standalone engine has no
-    // config writer yet: the panel says how to change engine.json instead of
-    // offering a button that could only be refused.
-    dashboardRemoteAccessControl = remoteAccessHostKind === 'standalone'
-      ? { manual: (enabled: boolean) => `To turn remote access ${enabled ? 'on' : 'off'}, set "remote": {"enabled": ${enabled}} in ~/.olympus/engine.json, then run: olympus engine restart` }
-      : createDashboardRemoteAccessControl({ setEnabled: createGatewayRemoteAccessConfigWriter({ authToken, env: process.env }) });
+    const requestEngineRestart = createDashboardEngineRestart({
+      restart: () => { restartEngine({ quietWaitMs: 0 }); },
+      failed: () => { remoteAccessRestartFailed = true; console.warn('[olympus] remote_access_restart_failed'); },
+    });
+    dashboardRemoteAccessControl = createDashboardRemoteAccessControl({
+      setEnabled: remoteAccessHostKind === 'standalone'
+        ? createStandaloneRemoteAccessConfigWriter({
+            write: enabled => setEngineRemoteAccessEnabled(engineServicePaths().configPath, enabled),
+            ...(process.platform !== 'darwin' ? { unsupportedReason: 'Changing remote access from this dashboard is not available on Linux yet. Copy the system report from Help and contact support.' } : {}),
+            canRestart: () => {
+              try { waitForQuietEngine({ quietWaitMs: 0 }); return inspectEngine().state === 'running'; }
+              catch { return false; }
+            },
+            requestRestart: () => { remoteAccessRestartFailed = false; return requestEngineRestart(); },
+          })
+        : createGatewayRemoteAccessConfigWriter({ authToken, env: process.env }),
+    });
   }
   // A background connection: a live remote agent that is not ChatGPT (the
   // owner's ChatGPT is the owner's own work). An unknown id is not one.

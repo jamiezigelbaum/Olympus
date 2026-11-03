@@ -1,3 +1,4 @@
+import { DASHBOARD_MODELS_BLOCKED_REASON } from './vocabulary.ts';
 import { PRIVATE_ANSWER_OPTIONS } from '../../core/privacy-language.ts';
 import { VENICE_SETUP_STEPS } from '../source-dashboard.ts';
 import type { ModelSetupCard, ModelSetupView } from '../../core/model-setup.ts';
@@ -16,7 +17,7 @@ export function renderModelSetup(view: ModelSetupView | undefined, options: { he
   const status = `<span hidden data-model-setup-status="${escapeHtml(JSON.stringify(view))}"></span>`;
   if (view.computer_use_pending) return status + renderComputerUseChoice(view);
   const engine = renderEngineServerMode(view);
-  if (view.privacy_choice_pending) return status + engine + renderFirstRunPrivacyChoice();
+  if (view.privacy_choice_pending) return status + engine + privateModelProgress(view) + renderFirstRunPrivacyChoice();
   // The local-models sheet opens in place: directly under whichever control
   // opens it, and only where one does.
   const bannerOwnsToggle = blockerOwnsLocalToggle(view);
@@ -59,7 +60,7 @@ export function renderModelSetup(view: ModelSetupView | undefined, options: { he
         + `<p>Optional: your agent can help connect models you already run and review the matching privacy choice.</p><button type="button" class="btn" ${LOCAL_MODELS_TOGGLE}`
         + `${CHECK_FORM_OPEN}<button class="btn" type="submit">Check readiness</button>${CHECK_FORM_TAIL}`
         + '</div>' + localModelsSheet();
-  return status + engine + `<section aria-label="Models">${options.heading === false ? '' : '<div class="sect">Models</div>'}`
+  return status + engine + (view.ready ? privateModelProgress(view) : '') + `<section aria-label="Models">${options.heading === false ? '' : '<div class="sect">Models</div>'}`
     + (view.ready
       ? `<p class="quiet" role="status">${options.heading === false ? 'Models are ready.' : 'Models are ready. You can connect sources below.'}</p>`
       : '<p class="modelintro">Add the keys required by your privacy choice. Olympus checks them and updates this page when they are ready. Saved keys are not displayed.</p>')
@@ -139,6 +140,7 @@ function modelStateWord(card: ModelSetupCard): string {
  */
 export function renderModelSetupBlocker(view: ModelSetupView | undefined): string {
   if (!view || view.ready || view.privacy_choice_pending) return '';
+  if (privateModelWords(view)) return `<div data-private-model-progress>${blockerBanner({ sentence: dashboardModelsBlockedReason(view), ...(view.private_model?.state === 'failed' ? { controlHtml: retryPrivateModel() } : {}) })}</div>`;
   const card = blockingCard(view);
   if (!card) {
     return blockerBanner({ sentence: view.attention ?? 'Model setup is not finished, so sources stay locked.' });
@@ -210,4 +212,29 @@ function renderEngineServerMode(view: ModelSetupView): string {
     + (mode.enabled ? SERVER_CHECKLIST : '')
     + '<button type="submit" class="btn"' + (mode.pending ? ' disabled' : '') + '>Save</button><span data-action-message role="status">'
     + escapeHtml(mode.message ?? '') + '</span></form></section>';
+}
+
+function privateModelWords(view: ModelSetupView | undefined): string {
+  const model = view?.private_model;
+  if (!model || model.state === 'ready' || model.state === 'not_started' || model.state === 'disabled') return '';
+  if (model.state === 'failed') return 'The private answer model download failed. Check your connection and available space, then try again.';
+  if (model.state !== 'downloading') return 'Getting the private answer model ready…';
+  const done = model.bytesDone; const total = model.bytesTotal;
+  if (typeof done !== 'number' || typeof total !== 'number' || !Number.isFinite(done) || !Number.isFinite(total) || total <= 0 || done < 0) return 'Downloading the private answer model…';
+  const scale = total >= 1e9 ? 1e9 : 1e6;
+  return `Downloading the private answer model: ${(Math.min(done, total) / scale).toFixed(1)} of ${(total / scale).toFixed(1)} ${scale === 1e9 ? 'GB' : 'MB'}`;
+}
+
+export function dashboardModelsBlockedReason(view: ModelSetupView | undefined): string {
+  const progress = privateModelWords(view);
+  return DASHBOARD_MODELS_BLOCKED_REASON + (progress ? `. ${progress}` : '');
+}
+
+function retryPrivateModel(): string {
+  return '<form method="post" action="/dashboard/models/check" data-model-check data-model-retry><button class="btn primary" type="submit">Try again</button><span data-action-message role="status"></span></form>';
+}
+
+function privateModelProgress(view: ModelSetupView): string {
+  const words = privateModelWords(view);
+  return words ? `<div data-private-model-progress role="status"><p>${escapeHtml(words)}</p>${view.private_model?.state === 'failed' ? retryPrivateModel() : ''}</div>` : '';
 }

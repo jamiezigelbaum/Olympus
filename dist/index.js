@@ -14452,7 +14452,7 @@ var init_scheduler_markers = __esm(() => {
 });
 
 // src/workers/dashboard/source-failure.ts
-var SOURCE_FAILURE_KINDS, KIND_SET;
+var SOURCE_FAILURE_KINDS, KIND_SET, SUPPORT_SOURCES, SUPPORT_STATES;
 var init_source_failure = __esm(() => {
   init_scheduler_markers();
   SOURCE_FAILURE_KINDS = [
@@ -14471,6 +14471,8 @@ var init_source_failure = __esm(() => {
     "unknown"
   ];
   KIND_SET = new Set(SOURCE_FAILURE_KINDS);
+  SUPPORT_SOURCES = new Set(["gmail.email", "google_drive.docs", "dropbox.files", "local.files", "readwise.library", "x.bookmarks", "evernote.notes", "telegram.messages", "whatsapp.personal.messages", "reflect.notes", "roam.notes", "archive.imports"]);
+  SUPPORT_STATES = new Set(["Off", "Waiting", "Working", "Fresh", "Needs you", "Failing", "not_connected", "needs_setup", "awaiting_consent", "reauth_required", "connected", "waiting_for_first_sync", "syncing", "synced"]);
 });
 
 // src/workers/dashboard/answer-ready-coverage.ts

@@ -8116,7 +8116,7 @@ var init_scheduler_markers = __esm(() => {
 });
 
 // src/workers/dashboard/source-failure.ts
-var SOURCE_FAILURE_KINDS, KIND_SET;
+var SOURCE_FAILURE_KINDS, KIND_SET, SUPPORT_SOURCES, SUPPORT_STATES;
 var init_source_failure = __esm(() => {
   init_scheduler_markers();
   SOURCE_FAILURE_KINDS = [
@@ -8135,6 +8135,8 @@ var init_source_failure = __esm(() => {
     "unknown"
   ];
   KIND_SET = new Set(SOURCE_FAILURE_KINDS);
+  SUPPORT_SOURCES = new Set(["gmail.email", "google_drive.docs", "dropbox.files", "local.files", "readwise.library", "x.bookmarks", "evernote.notes", "telegram.messages", "whatsapp.personal.messages", "reflect.notes", "roam.notes", "archive.imports"]);
+  SUPPORT_STATES = new Set(["Off", "Waiting", "Working", "Fresh", "Needs you", "Failing", "not_connected", "needs_setup", "awaiting_consent", "reauth_required", "connected", "waiting_for_first_sync", "syncing", "synced"]);
 });
 
 // src/workers/dashboard/answer-ready-coverage.ts
@@ -38238,6 +38240,7 @@ var init_vocabulary = __esm(() => {
     onlyHere: "only here",
     open: "Open",
     rows: {
+      help: { title: "Help", line: "Copy a system report or contact support" },
       keys: { title: "Keys", line: "Venice, Readwise and X keys" },
       agents: { title: "Agents", line: "Remote access and connected agents" },
       privateAnswers: { title: "Inbox", line: "Answers from every model, kept on this computer." },
@@ -41263,7 +41266,7 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     state.hostReadOnly = value.readOnly === true;
     const links = {};
     const given = value.links && typeof value.links === "object" ? value.links : {};
-    for (const key2 of ["keys", "agents", "privateAnswers", "connector"]) {
+    for (const key2 of ["keys", "agents", "privateAnswers", "connector", "help"]) {
       const href = given[key2];
       if (typeof href === "string" && /^https?:\/\//.test(href))
         links[key2] = href;
@@ -42018,6 +42021,13 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     }
     const joined = sourceImportsMeta(id);
     const why = seeWhy(source, id, !!progress && !!progress.stalled && !checking && !manual) || (archives ? archiveUnreadable(archives, id) || archiveNotRunning(archives, id) : null) || (joined ? archiveNotRunning(joined, id) : null);
+    if (source.supportDetails && (progress?.stalled || status === "Failing" || status === "Needs you" || source.lastManualSync?.outcome === "failed")) {
+      const report = el("pre", "help", source.supportDetails);
+      const copy = copyControl(report, "support:" + id);
+      copy.textContent = "Copy details";
+      const details2 = add(el("details", "disclosure"), el("summary", "", "Details for support"), report, copy, el("p", "muted", "No names, numbers, emails, chats or folder titles."));
+      add(main, details2);
+    }
     if (why)
       add(main, why);
     else if (state.landed && state.landed.id === id && !(archives && archiveNeeds(archives)) && !(joined && sourceImportsNeed(joined)))
@@ -43234,7 +43244,7 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     if (!onComputer())
       return null;
     const W = H.copy;
-    const keys = ["keys", "agents", "privateAnswers", "connector"].filter((key2) => !!state.hostLinks[key2]);
+    const keys = ["keys", "agents", "privateAnswers", "connector", "help"].filter((key2) => !!state.hostLinks[key2]);
     if (!keys.length)
       return null;
     const heading = add(el("h2"), doc.createTextNode(W.section + " "), el("span", "tag", W.onlyHere));
@@ -45981,7 +45991,9 @@ function chatgptPrivacyProgram(kit, makeLogic) {
     s.description = typeof data2.description === "string" ? data2.description : "";
     s.savedDescription = s.description;
     s.revision = typeof data2.revision === "string" ? data2.revision : "";
-    s.answerChoice = data2.privateAnswerChoice && data2.privateAnswerChoice.pending === true && Array.isArray(data2.privateAnswerChoice.options) ? data2.privateAnswerChoice : null;
+    s.answerChoice = data2.privateAnswerChoice && data2.privateAnswerChoice.pending === true && Array.isArray(data2.privateAnswerChoice.options) ? data2.privateAnswerChoice : data2.privateAnswerMode && Array.isArray(data2.privateAnswerMode.options) ? data2.privateAnswerMode : null;
+    if (s.answerChoice && typeof s.answerChoice.id === "string")
+      s.answerMode = s.answerChoice.id;
     s.edited = false;
     s.confirmStep = false;
     s.rules = data2.rules.filter(validRule).map(viewRule);
@@ -46012,7 +46024,7 @@ function chatgptPrivacyProgram(kit, makeLogic) {
       }
       take(data2);
       s.loaded = true;
-      if (s.answerChoice)
+      if (s.answerChoice?.pending)
         s.screen = "answers";
       kit.render(s.screen === "answers" ? "privacy:answer:local-first" : "privacy:title");
     }, () => {
@@ -46160,7 +46172,7 @@ function chatgptPrivacyProgram(kit, makeLogic) {
         return conflict(data2);
       kit.remember(data2.rules.filter(validRule).length);
       take(data2);
-      if (s.answerChoice) {
+      if (s.answerChoice?.pending) {
         s.screen = "answers";
         kit.render("privacy:answer:local-first");
         return;
@@ -46619,6 +46631,12 @@ function chatgptPrivacyProgram(kit, makeLogic) {
       }
       return;
     }
+    if (s.answerChoice && !s.answerChoice.pending) {
+      add(page2, add(el("section", "fsection"), el("h2", "", "Private-answer mode"), el("p", "", s.answerChoice.label || "Custom Private-answer mode"), kit.button("Change", "privacy:answer:change", () => {
+        s.screen = "answers";
+        kit.render("privacy:answer:" + s.answerMode);
+      }, "plain")));
+    }
     const description = add(el("section", "fsection privacy-description"), el("h2", "", W.descriptionLabel));
     const summary = el("p", "privacy-summary", s.description);
     summary.setAttribute("data-key", "privacy:summary");
@@ -46947,7 +46965,7 @@ function chatgptPrivacyProgram(kit, makeLogic) {
         return;
       }
       take(data2);
-      if (!s.answerChoice)
+      if (!s.answerChoice?.pending)
         return leave(W.saved, true);
       s.saveError = W.saveFailed;
       kit.render("privacy:answer:save");
@@ -46961,7 +46979,7 @@ function chatgptPrivacyProgram(kit, makeLogic) {
   }
   function answersView(page2) {
     add(page2, el("h1", "", "How should Olympus answer with Private items?"));
-    add(page2, el("p", "muted intro", "Until you save a choice, nothing leaves this computer."));
+    add(page2, el("p", "muted intro", s.answerChoice?.pending ? "Until you save a choice, nothing leaves this computer." : "Choose how Private answers may be made. Your current mode stays in use until you save."));
     if (!s.answerChoice)
       return;
     const choices = el("fieldset", "field");
@@ -47001,7 +47019,7 @@ function chatgptPrivacyProgram(kit, makeLogic) {
     const top = el("div", "picker-top");
     const backButton = kit.button(s.screen === "main" ? W.back : W.backToPrivacy, "privacy:back", escape2, "plain");
     backButton.className = "btn back";
-    if (s.screen === "main")
+    if (s.screen === "main" || s.screen === "answers" && !s.answerChoice?.pending)
       add(page2, add(top, backButton));
     if (s.discarding) {
       const confirm = el("div", "confirm-box");
@@ -47036,6 +47054,9 @@ function chatgptPrivacyProgram(kit, makeLogic) {
     if (s.discarding) {
       s.discarding = false;
       kit.render("privacy:back");
+    } else if (s.screen === "answers" && !s.answerChoice?.pending) {
+      s.screen = "main";
+      kit.render("privacy:title");
     } else if (s.screen !== "main" && s.screen !== "answers") {
       sheetBack();
     } else
@@ -64974,6 +64995,7 @@ init_engine_service();
 init_privacy_questions();
 init_sniffer();
 init_first_run_privacy_gate();
+init_engine_service();
 init_first_run_privacy();
 
 // src/core/local-model-discovery.ts
@@ -65642,6 +65664,7 @@ init_vlm();
 init_apple_vision_ocr();
 
 // src/workers/email-source/index.ts
+init_source_failure();
 init_google_own_app();
 init_sovereignty();
 
@@ -66276,6 +66299,7 @@ var COMPUTER_HOST_PAGE_CSP = [
 ].join("; ");
 
 // src/workers/dashboard/pages/local.ts
+init_source_failure();
 init_source_dashboard();
 init_open_targets();
 
@@ -66333,6 +66357,7 @@ var CODEX_SNIPPET = [
 init_vocabulary();
 
 // src/workers/dashboard/model-setup.ts
+init_vocabulary();
 init_privacy_language();
 init_source_dashboard();
 

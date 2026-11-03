@@ -65,6 +65,7 @@ export const DASHBOARD_LOCAL_PAGES = {
   agents: 'agents',
   privateAnswers: 'private-answers',
   connector: 'connector',
+  help: 'help',
 } as const;
 
 export type DashboardLocalPage = keyof typeof DASHBOARD_LOCAL_PAGES;

@@ -364,7 +364,7 @@ describe.each(SHELLS)('install.sh under %s', (shell) => {
     expect(appVersion(h.app)).toBe(V1);
    }, 60_000);
 
-  shellTest('installs Bun and Olympus, starts the engine, and tells the user the next step in ChatGPT', () => {
+  shellTest('installs Bun and Olympus, starts the engine, and leads with the dashboard and offers assistant connections', () => {
     const h = harness(shell);
     const result = h.run(V1);
     expectSucceeded(result);
@@ -376,7 +376,11 @@ describe.each(SHELLS)('install.sh under %s', (shell) => {
       `https://releases.test/${V1}/olympus-${V1}.tgz`,
     ]);
     expect(result.stdout).toContain('Olympus is installed and running in the background on this Mac.');
-    expect(result.stdout).toContain('In ChatGPT desktop, add the Olympus plugin and ask: Connect Olympus');
+    expect(result.stdout).toContain('Open Olympus from Applications');
+    expect(result.stdout).toContain('browser on this computer');
+    expect(result.stdout).toContain('ChatGPT, Claude or other agents');
+    expect(result.stdout).toContain('Agents page');
+    expect(result.stdout).not.toContain('open a new Terminal');
     expect(result.stdout).toContain('olympus engine status');
     expect(result.stdout).toContain('curl -fsSL https://olympusplugin.ai/uninstall.sh | sh');
     expect(result.stdout).toContain('By installing Olympus you agree to its Terms (https://olympusplugin.ai/terms/)');

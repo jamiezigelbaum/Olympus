@@ -1,3 +1,4 @@
+import { systemSupportReport, type SourceSupportState, type SystemSupportFacts } from '../dashboard/source-failure.ts';
 import { checkGoogleOwnApp, parseGoogleDesktopClient, readGoogleOwnAppRegistration } from '../../core/google-own-app.ts';
 import type { LocalModelDiscoveryResult, LocalModelSelection, LocalModelTestResult } from '../../core/local-model-discovery.ts';
 import { SOVEREIGNTY_PRESETS, type SovereigntyPresetName } from '../../core/sovereignty.ts';
@@ -563,6 +564,7 @@ export interface EmailSourceWorkerOptions {
     evernoteSignIn?: { serverUrl: string; authorizationHosts: readonly string[] };
     apiKeyFetch?: OAuthFetch;
     connectApiKey?: typeof connectPublicApiKeySource;
+    systemReport?: () => SystemSupportFacts;
     modelSetup?: () => ModelSetupView;
     checkModelSetup?: () => Promise<ModelSetupView>;
     discoverLocalModels?: (baseUrl?: string) => Promise<LocalModelDiscoveryResult[]>;
@@ -1489,7 +1491,8 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
               },
             }));
           }
-          if (page === 'json' || page === 'keys') {
+          if (page === 'help' && (!controlSessionCsrfToken || request.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER) !== 'local')) return renderHelp(request, url);
+          if (page === 'json' || page === 'keys' || page === 'help') {
             if (!sourceIndexStatus || !sourceDashboard) {
               throw new EmailSourceWorkerError(
                 501,
@@ -1608,6 +1611,10 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
             });
             assertNoRawEmailFields(view);
             if (page === 'json') return json(view);
+            if (page === 'help') return renderHelp(request, url, view.sources.map(source => ({
+              sourceId: source.source_id, state: source.connection.state,
+              failure: sourceFailureKind(source.schedule?.last_error_kind, source.schedule?.degraded_reason), ref: source.schedule?.last_error_hash,
+            })));
             return html(renderDashboardLocalPage('keys', {
               url,
               view,
@@ -3825,6 +3832,11 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           404,
         );
       } catch (error) {
+        const failedUrl = new URL(request.url);
+        if (request.method === 'GET' && failedUrl.pathname === '/dashboard' && dashboardHtmlRoutePage(failedUrl) === 'help') {
+          console.warn('[olympus] support_source_status_unavailable');
+          return renderHelp(request, failedUrl);
+        }
         if (error instanceof EmailSourceWorkerError) {
           return json(
             {
@@ -3898,6 +3910,18 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
       }
     },
   };
+
+  function renderHelp(request: Request, url: URL, sources: readonly SourceSupportState[] = []): Response {
+    const csrf = request.headers.get(DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER) ?? undefined;
+    let system: SystemSupportFacts | undefined;
+    if (csrf && request.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER) === 'local') {
+      try { system = sourceDashboard?.systemReport?.(); } catch { /* Help remains usable when system facts cannot be read. */ }
+    }
+    return html(renderDashboardLocalPage('help', { url, options: {
+      ...(csrf ? { controlSessionCsrfToken: csrf } : {}),
+      ...(system ? { systemReport: systemSupportReport({ ...system, sources }) } : {}),
+    } }));
+  }
 
   function assertDashboardModelsReady(): void {
     if (sourceDashboard?.modelSetup && !sourceDashboard.modelSetup().ready) {
