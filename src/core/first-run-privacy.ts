@@ -1,4 +1,6 @@
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { ensurePrivateRootDirectorySync, writePrivateFileAtomicSync } from './atomic-file.ts';
 /** The new standalone install's durable pending choice. */
 import { PENDING_PRIVACY_REASON, loadSovereigntyPreset, updateSovereigntyConfigFile, validateSovereigntyConfig, type SovereigntyConfig, type SovereigntyPresetName } from './sovereignty.ts';
 
@@ -30,4 +32,28 @@ export function privacyChoicePending(policy: { config: SovereigntyConfig; path?:
   if (!policy.path) return true;
   try { return isPendingPrivacyPolicy(validateSovereigntyConfig(JSON.parse(readFileSync(policy.path, 'utf8')))); }
   catch { return true; }
+}
+
+/** The installation question lives beside the initial privacy choice, and is seeded only on a fresh install. */
+export interface ComputerUseState {
+  schema: 'olympus.computer-use.v1';
+  choice: 'everyday' | 'server' | null;
+}
+export function computerUseStatePath(policyPath: string): string { return join(dirname(policyPath), 'computer-use.json'); }
+export function readComputerUseState(policyPath: string): ComputerUseState | undefined {
+  try {
+    const value = JSON.parse(readFileSync(computerUseStatePath(policyPath), 'utf8'));
+    if (value?.schema === 'olympus.computer-use.v1' && [null, 'everyday', 'server'].includes(value.choice)) return value;
+  } catch { /* Existing installs have no question to answer. */ }
+  return undefined;
+}
+export function seedComputerUseState(policyPath: string): void {
+  const path = computerUseStatePath(policyPath);
+  ensurePrivateRootDirectorySync(dirname(path));
+  if (!existsSync(path)) writePrivateFileAtomicSync(path, JSON.stringify({ schema: 'olympus.computer-use.v1', choice: null }) + '\n');
+}
+export function saveComputerUseChoice(policyPath: string, choice: 'everyday' | 'server'): void {
+  const current = readComputerUseState(policyPath);
+  if (!current || current.choice !== null) return;
+  writePrivateFileAtomicSync(computerUseStatePath(policyPath), JSON.stringify({ ...current, choice }) + '\n');
 }

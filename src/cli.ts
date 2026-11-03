@@ -381,6 +381,13 @@ async function main(): Promise<void> {
     return;
   }
 
+  if (args[0] === '__engine-server-mode') {
+    if (args.length !== 2 || !['on', 'off'].includes(args[1]!)) throw new OperationError('invalid_params', 'Choose whether Olympus should stay running.');
+    const { runMacServerModeChange } = await import('./core/engine-service.ts');
+    await runMacServerModeChange(args[1] === 'on');
+    return;
+  }
+
   if (args[0] === '__engine-run') {
     if (args.length !== 1) {
       throw new OperationError('invalid_params', 'Engine host invocation has unexpected arguments.');

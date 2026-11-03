@@ -1,3 +1,5 @@
+import { MAC_ENGINE_DAEMON_PLIST, macEngineManager, authorizeMacServerMode } from './mac-engine-daemon.ts';
+export { macEngineManager, macServerModeScript, validateMacEngineOwner } from './mac-engine-daemon.ts';
 import { ENGINE_HELPER_APP_NAME, ENGINE_HELPER_BUNDLE_ID, ENGINE_HELPER_EXECUTABLE } from './engine-helper-names.ts';
 export { ENGINE_HELPER_APP_NAME, ENGINE_HELPER_BUNDLE_ID, ENGINE_HELPER_EXECUTABLE };
 import { linuxDesktopEntryStatus } from './linux-desktop-entry.ts';
@@ -7,14 +9,17 @@ import { processInstanceIdentity } from './file-lease.ts';
 import { resolveLinuxEngineLayout, preflightLinuxEngineLayout, type LinuxEngineLayout } from './linux-engine-layout.ts';
 import { workerFetch } from './worker-transport.ts';
 /**
- * The standalone Olympus engine on macOS: one per-user LaunchAgent that runs
+ * The standalone Olympus engine on macOS: a LaunchAgent by default, or an
+ * optional LaunchDaemon running as the same account. Both run
  * the engine host (core/engine-host.ts), which supervises the worker, the
  * remote relay client and the embedding drain the way the OpenClaw Gateway
  * does. OpenClaw is an optional host; this is the one for an install that has
  * only Olympus (docs/design/chatgpt-plugin.md, "Standalone engine").
  *
- * Everything is per-user and needs no administrator password:
- *   ~/Library/LaunchAgents/ai.olympusplugin.engine.plist   the agent
+ * Only switching the system daemon on/off needs administrator approval.
+ * Upgrades and restarts use the account-owned app and need no password:
+ *   ~/Library/LaunchAgents/ai.olympusplugin.engine.plist   default agent
+ *   /Library/LaunchDaemons/ai.olympusplugin.engine.plist   optional server
  *   ~/Library/Logs/Olympus/engine.log|engine.err           host + child output
  *   ~/.olympus/engine.json                                 host config
  *   ~/.config/olympus/worker.env                           worker environment
@@ -23,7 +28,7 @@ import { workerFetch } from './worker-transport.ts';
  * engine.json has exactly the schema of `plugins.entries.olympus.config` in
  * openclaw.json, so the services read it with the same parser either way.
  */
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
 import { existsSync, lstatSync, readdirSync, readFileSync, renameSync, statSync } from 'node:fs';
 import { homedir, platform as osPlatform } from 'node:os';
@@ -42,7 +47,7 @@ import { loadConfig, openClawConfigPath } from './config.ts';
 import { olympusPackageRoot } from './package-root.ts';
 import { olympusDataDir, remoteAccessDir } from './remote-access.ts';
 import { loadSovereigntyEngine, validateSovereigntyConfig, writeSovereigntyConfigFile, type SovereigntyPresetName } from './sovereignty.ts';
-import { createPendingPrivacyPolicy, isPendingPrivacyPolicy } from './first-run-privacy.ts';
+import { createPendingPrivacyPolicy, isPendingPrivacyPolicy, seedComputerUseState, readComputerUseState, saveComputerUseChoice } from './first-run-privacy.ts';
 import { environmentWithWorkerSetupEnv, workerAuthTokenFromSetupEnv } from './worker-auth.ts';
 import { ensureManagedWorkerEnvironment, workerServicePaths } from './worker-service.ts';
 import { defaultZkapiStatePath, zkapiConsultInFlightOnDisk } from './consult-transport-zkapi.ts';
@@ -77,6 +82,9 @@ export type EngineExec = (command: string, args: string[]) => EngineExecResult;
 
 export interface EnginePaths {
   linux?: LinuxEngineLayout;
+  engineManager?: 'agent' | 'daemon';
+  /** Fixed system path; overridden only by isolated tests. */
+  daemonPlistPath?: string;
   label: string;
   plistPath: string;
   logDir: string;
@@ -134,9 +142,14 @@ export function enginePaths(homeDir: string): EnginePaths {
 }
 
 /** Platform-aware seam; the historical Mac path renderer remains byte-for-byte unchanged. */
-export function engineServicePaths(options: { homeDir?: string; platform?: string; env?: Record<string, string | undefined> } = {}): EnginePaths {
+export function engineServicePaths(options: { homeDir?: string; platform?: string; env?: Record<string, string | undefined>; daemonPlistPath?: string } = {}): EnginePaths {
   const env = { ...(options.env ?? process.env), HOME: options.homeDir ?? options.env?.HOME ?? homedir() };
-  if ((options.platform ?? process.platform) !== 'linux') return enginePaths(env.HOME);
+  if ((options.platform ?? process.platform) !== 'linux') {
+    const paths = enginePaths(env.HOME);
+    const daemonPlistPath = options.daemonPlistPath ?? MAC_ENGINE_DAEMON_PLIST;
+    const engineManager = macEngineManager(env.HOME, daemonPlistPath);
+    return { ...paths, engineManager, daemonPlistPath, ...(engineManager === 'daemon' ? { plistPath: daemonPlistPath } : {}) };
+  }
   const l = resolveLinuxEngineLayout(env);
   return { linux: l, label: 'olympus-engine.service', plistPath: l.unitPath, logDir: l.stateDir,
     logPath: join(l.stateDir, 'engine.log'), errorLogPath: join(l.stateDir, 'engine.err'), configPath: l.configPath,
@@ -228,7 +241,7 @@ export function resolveEngineProgram(options: {
   return { runtimePath, entryPath, workingDirectory: root, source: 'package', build: engineBuildIdentity(root) };
 }
 
-export function renderEnginePlist(input: { paths: EnginePaths; program: EngineProgram; homeDir: string }): string {
+export function renderEnginePlist(input: { paths: EnginePaths; program: EngineProgram; homeDir: string; owner?: { userName: string; groupName: string } }): string {
   const { paths, program } = input;
   const path = [dirname(program.runtimePath), '/usr/bin', '/bin', '/usr/sbin', '/sbin']
     .filter((entry, index, all) => all.indexOf(entry) === index)
@@ -236,7 +249,11 @@ export function renderEnginePlist(input: { paths: EnginePaths; program: EnginePr
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
-<dict>
+<dict>${input.owner ? `
+  <key>UserName</key>
+  <string>${xml(input.owner.userName)}</string>
+  <key>GroupName</key>
+  <string>${xml(input.owner.groupName)}</string>` : ''}
   <key>Label</key>
   <string>${xml(paths.label)}</string>
   <key>ProgramArguments</key>
@@ -260,7 +277,7 @@ export function renderEnginePlist(input: { paths: EnginePaths; program: EnginePr
     <key>PATH</key>
     <string>${xml(path)}</string>
     <key>OLYMPUS_ENGINE_HOST</key>
-    <string>1</string>${program.build ? `
+    <string>1</string>${program.build && !input.owner ? `
     <key>${ENGINE_BUILD_ENV}</key>
     <string>${xml(program.build)}</string>` : ''}
   </dict>
@@ -344,6 +361,8 @@ const MAINTENANCE_FENCE = Symbol('engine maintenance fence');
 export interface EngineServiceOptions {
   [MAINTENANCE_FENCE]?: EngineMaintenanceFence;
   homeDir?: string;
+  /** Test-only system path. Never populated from configuration or command arguments. */
+  daemonPlistPath?: string;
   env?: Record<string, string | undefined>;
   exec?: EngineExec | undefined;
   userName?: string;
@@ -508,7 +527,7 @@ function installEngineUnderFence(options: EngineInstallOptions = {}): EngineInst
   if (normalizedPlatform(options.platform) === 'linux') return installLinuxEngine(options);
   assertDarwin(options.platform);
   const homeDir = absolute(options.homeDir ?? homedir(), 'home directory');
-  const paths = enginePaths(homeDir);
+  const paths = engineServicePaths({ ...options, homeDir, platform: 'darwin' });
   const baseProgram = resolveEngineProgram({
     ...(options.fromCheckout !== undefined ? { fromCheckout: options.fromCheckout } : {}),
     ...(options.bunBin ? { bunBin: options.bunBin } : {}),
@@ -516,7 +535,9 @@ function installEngineUnderFence(options: EngineInstallOptions = {}): EngineInst
   });
   const helperPath = installedEngineHelper(paths);
   const program: EngineProgram = helperPath ? { ...baseProgram, helperPath } : baseProgram;
-  const plist = renderEnginePlist({ paths, program, homeDir });
+  // A daemon plist is immutable across builds, including its owner and group.
+  const plist = paths.engineManager === 'daemon' ? readFileSync(paths.plistPath, 'utf8') : renderEnginePlist({ paths, program, homeDir });
+  if (paths.engineManager === 'daemon') assertDaemonProgramUnchanged(paths, program);
   const warnings = engineConflictWarnings(homeDir, 'darwin');
   const privacyState = resolveInstallationPrivacyState({ homeDir, paths, env: options.env ?? process.env });
   const sovereigntyBlocker = existsSync(paths.sovereigntyPath) || privacyState.state === 'not_installed'
@@ -553,7 +574,7 @@ function installEngineUnderFence(options: EngineInstallOptions = {}): EngineInst
   // nothing half-written.
   preflightEnginePaths(homeDir, paths);
   ensurePrivateRootDirectorySync(homeDir);
-  ensurePrivateDirectoryTreeSync(homeDir, dirname(paths.plistPath));
+  if (paths.engineManager !== 'daemon') ensurePrivateDirectoryTreeSync(homeDir, dirname(paths.plistPath));
   ensurePrivateDirectoryTreeSync(homeDir, paths.logDir);
   ensurePrivateDirectoryTreeSync(homeDir, dirname(paths.configPath));
   const config = reconcileEngineConfig(paths.configPath);
@@ -563,6 +584,7 @@ function installEngineUnderFence(options: EngineInstallOptions = {}): EngineInst
     warnings.push(`${paths.sovereigntyPath} was not created: ${sovereigntyBlocker} The engine's worker uses that policy too; choose this install's policy explicitly using olympus setup.`);
   } else {
     const seeded = seedEngineSovereignty(paths.sovereigntyPath);
+    if (seeded && privacyState.state === 'not_installed') seedComputerUseState(paths.sovereigntyPath);
     sovereignty = seeded
       ? { action: 'seeded', path: paths.sovereigntyPath, preset: seeded }
       : { action: 'present', path: paths.sovereigntyPath };
@@ -574,10 +596,10 @@ function installEngineUnderFence(options: EngineInstallOptions = {}): EngineInst
     schedulerEnabled: true,
     authToken: workerAuthTokenFromSetupEnv({ homeDir }) ?? randomBytes(32).toString('base64url'),
   });
-  const wrotePlist = writeIfChanged(paths.plistPath, plist);
+  const wrotePlist = paths.engineManager === 'daemon' ? false : writeIfChanged(paths.plistPath, plist);
 
   const exec = options.exec ?? defaultExec;
-  const target = serviceTarget(options.uid);
+  const target = serviceTarget(options.uid, paths.engineManager);
   const loaded = launchctlLoaded(exec, target);
   let action: EngineInstallResult['action'] = 'unchanged';
   if (loaded && wrotePlist) {
@@ -590,8 +612,12 @@ function installEngineUnderFence(options: EngineInstallOptions = {}): EngineInst
     // Same plist, but the host launchd is running is another build (or the
     // caller just swapped the package): restart it in place.
     waitForQuietEngine(options);
-    mustSucceed(exec('launchctl', ['kickstart', '-k', target]), 'restart the engine agent');
+    if (paths.engineManager === 'daemon') requestDaemonRestart(exec, target);
+    else mustSucceed(exec('launchctl', ['kickstart', '-k', target]), 'restart the engine agent');
     action = 'restarted';
+  }
+  if (paths.engineManager === 'daemon' && action === 'bootstrapped') {
+    throw new OperationError('config_error', 'Olympus server mode is installed but is not running. Turn it off and on again in Keys to let your Mac repair it.');
   }
   if (action === 'bootstrapped' || action === 'reloaded') {
     // A label an owner once disabled refuses bootstrap; enabling is idempotent.
@@ -808,12 +834,17 @@ export async function installEngineVerified(options: EngineInstallOptions & { he
     : { ...result, ok: false, health, reason: `The engine did not prove build ${result.program.build ?? 'unknown'} healthy within ${Math.round(health.waited_ms / 1000)} s: ${health.reason}.` };
 }
 
-/** The build the installed agent's plist names (OLYMPUS_ENGINE_BUILD), or null. */
+/** The agent's build stamp, or the daemon's account-owned installed app on disk. */
 export function installedEngineBuild(plistPath: string): string | null {
   try {
     const text = readFileSync(plistPath, 'utf8');
     const match = new RegExp(`<key>${ENGINE_BUILD_ENV}</key>\\s*<string>([^<]*)</string>`).exec(text);
-    return match ? unxml(match[1]!) : null;
+    if (match) return unxml(match[1]!);
+    if (/<key>UserName<\/key>/.test(text)) {
+      const program = installedProgram(plistPath);
+      return program ? engineBuildIdentity(dirname(dirname(program.entryPath))) : null;
+    }
+    return null;
   } catch {
     return null;
   }
@@ -916,7 +947,7 @@ export function preflightEnginePaths(homeDir: string, paths: EnginePaths = engin
     }
   }
   const managed: Array<[string, string]> = [
-    [paths.plistPath, 'LaunchAgent'],
+    ...(paths.engineManager === 'daemon' ? [] : [[paths.plistPath, 'LaunchAgent']] as Array<[string, string]>),
     [paths.logPath, 'engine log'],
     [paths.configPath, 'engine config'],
     [paths.sovereigntyPath, 'privacy policy'],
@@ -1102,25 +1133,28 @@ function uninstallEngineUnderFence(options: EngineServiceOptions & { reap?: Engi
   if (normalizedPlatform(options.platform) === 'linux') return uninstallLinuxEngine(options);
   assertDarwin(options.platform);
   const homeDir = absolute(options.homeDir ?? homedir(), 'home directory');
-  const paths = enginePaths(homeDir);
+  const paths = engineServicePaths({ ...options, homeDir, platform: 'darwin' });
   const exec = options.exec ?? defaultExec;
-  const target = serviceTarget(options.uid);
+  const target = serviceTarget(options.uid, paths.engineManager);
   const loaded = launchctlLoaded(exec, target);
-  if (loaded) mustSucceed(exec('launchctl', ['bootout', target]), 'unload the engine agent');
+  if (paths.engineManager === 'daemon') authorizeMacServerMode(false, options, exec);
+  else if (loaded) mustSucceed(exec('launchctl', ['bootout', target]), 'unload the engine agent');
+  const agentPath = enginePaths(homeDir).plistPath;
+  if (paths.engineManager === 'daemon' && launchctlLoaded(exec, serviceTarget(options.uid))) mustSucceed(exec('launchctl', ['bootout', serviceTarget(options.uid)]), 'stop the login engine');
   let removed = false;
-  if (existsSync(paths.plistPath)) {
-    const stat = lstatSync(paths.plistPath);
+  if (existsSync(agentPath)) {
+    const stat = lstatSync(agentPath);
     if (!stat.isFile() || stat.isSymbolicLink()) {
       throw new OperationError('config_error', `${paths.plistPath} is not a regular file; remove it by hand.`);
     }
-    removed = removeFileDurablySync(paths.plistPath);
+    removed = removeFileDurablySync(agentPath);
   }
   const reaped = reapRecordedEngineChildren(paths.childrenPath, options.reap);
   return {
     ok: true,
     plist_path: paths.plistPath,
     unloaded: loaded,
-    removed_plist: removed,
+    removed_plist: removed || paths.engineManager === 'daemon',
     stopped_leftover_processes: reaped.stopped.length,
     kept: engineKeptItems(paths),
     next: 'To remove Olympus data too (indexes, models, relay keys), run olympus data delete --all. Remove the app and runtime folders by hand if you want them gone.',
@@ -1184,10 +1218,11 @@ function stopEngineUnderFence(options: EngineServiceOptions & { reap?: EngineChi
   if (normalizedPlatform(options.platform) === 'linux') return stopLinuxEngine(options);
   assertDarwin(options.platform);
   const homeDir = absolute(options.homeDir ?? homedir(), 'home directory');
-  const paths = enginePaths(homeDir);
+  const paths = engineServicePaths({ ...options, homeDir, platform: 'darwin' });
   const exec = options.exec ?? defaultExec;
-  const target = serviceTarget(options.uid);
+  const target = serviceTarget(options.uid, paths.engineManager);
   const loaded = launchctlLoaded(exec, target);
+  if (paths.engineManager === 'daemon') throw new OperationError('config_error', 'Olympus is set to stay running as a server. Turn off “Keep Olympus running when no one is logged in” in Keys before stopping it.');
   if (loaded) waitForQuietEngine(options);
   if (loaded) mustSucceed(exec('launchctl', ['bootout', target]), 'stop the engine agent');
   mustSucceed(exec('launchctl', ['disable', target]), 'keep the engine agent from starting at login');
@@ -1205,12 +1240,17 @@ export function startEngine(options: EngineServiceOptions = {}): { ok: true; act
   if (normalizedPlatform(options.platform) === 'linux') return startLinuxEngine(options);
   assertDarwin(options.platform);
   const homeDir = absolute(options.homeDir ?? homedir(), 'home directory');
-  const paths = enginePaths(homeDir);
+  const paths = engineServicePaths({ ...options, homeDir, platform: 'darwin' });
   if (!existsSync(paths.plistPath)) {
     throw new OperationError('config_error', 'The engine is not installed.', 'Run olympus engine install.');
   }
   const exec = options.exec ?? defaultExec;
-  const target = serviceTarget(options.uid);
+  const target = serviceTarget(options.uid, paths.engineManager);
+  if (paths.engineManager === 'daemon') {
+    const status = exec('launchctl', ['print', target]);
+    if (status.status === 0 && parseLaunchctlPrint(status.stdout).state === 'running') return { ok: true, action: 'already_running' };
+    throw new OperationError('config_error', 'Olympus server mode is not running. Turn it off and on again in Keys to let your Mac repair it.');
+  }
   mustSucceed(exec('launchctl', ['enable', target]), 'enable the engine agent');
   if (launchctlLoaded(exec, target)) return { ok: true, action: 'already_running' };
   bootstrapAgent(exec, target, guiDomain(options.uid), paths.plistPath, false);
@@ -1252,7 +1292,7 @@ async function rollbackEngineUnderFence(options: EngineServiceOptions & { bunBin
   if (normalizedPlatform(options.platform) === 'linux') return rollbackLinuxEngine(options);
   assertDarwin(options.platform);
   const homeDir = absolute(options.homeDir ?? homedir(), 'home directory');
-  const paths = enginePaths(homeDir);
+  const paths = engineServicePaths({ ...options, homeDir, platform: 'darwin' });
   const installed = installedProgram(paths.plistPath);
   const appEntry = join(paths.appDir, 'dist', 'cli.js');
   if (!installed) {
@@ -1273,6 +1313,7 @@ async function rollbackEngineUnderFence(options: EngineServiceOptions & { bunBin
   swapAppDirectories(paths);
   const reinstall = (): Promise<EngineVerifiedInstallResult> => installEngineVerified({
     ...(options[MAINTENANCE_FENCE] ? { [MAINTENANCE_FENCE]: options[MAINTENANCE_FENCE] } : {}),
+    ...(options.daemonPlistPath ? { daemonPlistPath: options.daemonPlistPath } : {}),
     ...(options.homeDir ? { homeDir: options.homeDir } : {}),
     ...(options.exec ? { exec: options.exec } : {}),
     ...(options.uid !== undefined ? { uid: options.uid } : {}),
@@ -1401,7 +1442,7 @@ export function installedProgram(plistPath: string): { runtimePath: string; entr
 export type EngineAgentState = 'running' | 'loaded' | 'not_loaded' | 'unknown';
 
 export interface EngineInspection {
-  manager?: 'systemd';
+  manager?: 'systemd' | 'agent' | 'daemon';
   custody?: 'loaded' | 'unknown' | 'none';
   enabled?: boolean | null;
   active?: boolean | null;
@@ -1425,6 +1466,7 @@ export function inspectEngine(options: EngineServiceOptions = {}): EngineInspect
   const paths = engineServicePaths(options);
   const installed = existsSync(paths.plistPath);
   const base = {
+    ...(paths.engineManager ? { manager: paths.engineManager } : {}),
     label: paths.label,
     installed,
     plist_path: paths.plistPath,
@@ -1440,7 +1482,7 @@ export function inspectEngine(options: EngineServiceOptions = {}): EngineInspect
   if (normalizedPlatform(options.platform) !== 'darwin') {
     return { ...base, state: 'unknown', pid: null, last_exit_code: null, detail: 'The standalone engine agent is macOS-only.' };
   }
-  const result = (options.exec ?? defaultExec)('launchctl', ['print', serviceTarget(options.uid)]);
+  const result = (options.exec ?? defaultExec)('launchctl', ['print', serviceTarget(options.uid, paths.engineManager)]);
   if (isNotLoaded(result)) {
     return {
       ...base,
@@ -1482,7 +1524,12 @@ function restartEngineUnderFence(options: EngineServiceOptions = {}): { ok: true
   if (normalizedPlatform(options.platform) === 'linux') return restartLinuxEngine(options);
   assertDarwin(options.platform);
   const exec = options.exec ?? defaultExec;
-  const target = serviceTarget(options.uid);
+  const paths = engineServicePaths(options);
+  const target = serviceTarget(options.uid, paths.engineManager);
+  if (paths.engineManager === 'daemon') {
+    waitForQuietEngine(options);
+    return { ok: true, command: requestDaemonRestart(exec, target) };
+  }
   if (!launchctlLoaded(exec, target)) {
     throw new OperationError('config_error', 'The engine agent is not loaded.', 'Run olympus engine install.');
   }
@@ -1546,8 +1593,8 @@ function guiDomain(uid: number | undefined): string {
   return `gui/${uid ?? process.getuid?.() ?? 501}`;
 }
 
-function serviceTarget(uid: number | undefined): string {
-  return `${guiDomain(uid)}/${ENGINE_LABEL}`;
+function serviceTarget(uid: number | undefined, manager?: 'agent' | 'daemon'): string {
+  return `${manager === 'daemon' ? 'system' : guiDomain(uid)}/${ENGINE_LABEL}`;
 }
 
 /**
@@ -1583,6 +1630,12 @@ function launchctlLoaded(exec: EngineExec, target: string): boolean {
 function isNotLoaded(result: EngineExecResult): boolean {
   return result.status === 113 || result.status === 3
     || /could not find service/i.test(`${result.stderr}${result.stdout}`);
+}
+
+/** launchctl exits 125 when the gui/<uid> domain does not exist because the user has not signed in. */
+function isAbsentLoginDomain(result: EngineExecResult): boolean {
+  return result.status === 125
+    || /could not find domain|domain does not support specified action/i.test(`${result.stderr}${result.stdout}`);
 }
 
 function mustSucceed(result: EngineExecResult, what: string): void {
@@ -1710,4 +1763,141 @@ function xml(value: string): string {
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&apos;');
+}
+
+/** SIGHUP is forwarded by the signed helper; the host drains children, exits 75, and KeepAlive restarts it. */
+function requestDaemonRestart(exec: EngineExec, target: string): string[] {
+  const result = exec('launchctl', ['print', target]);
+  const { pid, state } = parseLaunchctlPrint(result.stdout);
+  if (result.status !== 0 || state !== 'running' || !pid || pid <= 1) throw new OperationError('config_error', 'Olympus is not running yet. Wait a moment and try again in Keys.');
+  const command = ['/bin/kill', '-HUP', String(pid)];
+  if (exec(command[0]!, command.slice(1)).status !== 0) throw new OperationError('config_error', 'Olympus could not restart. Open Keys and try turning server mode off and on again.');
+  return command;
+}
+
+function assertDaemonProgramUnchanged(paths: EnginePaths, program: EngineProgram): void {
+  const current = installedProgram(paths.plistPath);
+  if (!current || current.runtimePath !== program.runtimePath || current.entryPath !== program.entryPath || current.helperPath !== program.helperPath) {
+    throw new OperationError('config_error', 'Olympus server mode uses the installed Olympus app. Turn server mode off in Keys before changing where Olympus runs.');
+  }
+}
+
+/** Called from an independent CLI process, never from the worker that is about to be stopped. */
+export function setMacEngineServerMode(enable: boolean, options: EngineServiceOptions = {}): { ok: true; manager: 'agent' | 'daemon' } {
+  return serviceMaintenance(options, fenced => setMacEngineServerModeUnderFence(enable, fenced));
+}
+function setMacEngineServerModeUnderFence(enable: boolean, options: EngineServiceOptions): { ok: true; manager: 'agent' | 'daemon' } {
+  assertDarwin(options.platform);
+  const homeDir = absolute(options.homeDir ?? homedir(), 'home directory');
+  const paths = engineServicePaths({ ...options, homeDir, platform: 'darwin' });
+  const exec = options.exec ?? defaultExec;
+  const daemonInstalled = paths.engineManager === 'daemon';
+  if (!enable && !daemonInstalled) return { ok: true, manager: 'agent' };
+  const agent = enginePaths(homeDir);
+  const current = installedProgram(paths.plistPath);
+  if (!current || current.entryPath !== join(paths.appDir, 'dist/cli.js') || current.runtimePath !== join(paths.runtimeDir, 'bun') || current.helperPath !== paths.helperExecutablePath) {
+    throw new OperationError('config_error', 'Server mode needs the installed Olympus Engine app. Update Olympus from its download page, then try again in Keys. Nothing was changed.');
+  }
+  preflightEnginePaths(homeDir, { ...agent, appDir: paths.appDir });
+  if (!enable && exec('launchctl', ['print', guiDomain(options.uid)]).status !== 0) {
+    throw new OperationError('config_error', 'Sign in to the Olympus account on this Mac, using Screen Sharing if needed, then turn server mode off. Nothing was changed.');
+  }
+  waitForQuietEngine(options);
+  // The administrator dialog precedes ALL local mutation, so cancelling preserves the agent.
+  if (!enable || !daemonInstalled) authorizeMacServerMode(enable, options, exec);
+  if (enable) {
+    const target = serviceTarget(options.uid);
+    if (launchctlLoaded(exec, target)) mustSucceed(exec('launchctl', ['bootout', target]), 'stop the login engine');
+    removeFileDurablySync(agent.plistPath);
+  } else {
+    const program: EngineProgram = { ...current, workingDirectory: paths.appDir, source: 'package', build: engineBuildIdentity(paths.appDir) };
+    ensurePrivateDirectoryTreeSync(homeDir, dirname(agent.plistPath));
+    writeIfChanged(agent.plistPath, renderEnginePlist({ paths: agent, program, homeDir }));
+    const target = serviceTarget(options.uid);
+    mustSucceed(exec('launchctl', ['enable', target]), 'enable the login engine');
+    bootstrapAgent(exec, target, guiDomain(options.uid), agent.plistPath, false);
+  }
+  return { ok: true, manager: enable ? 'daemon' : 'agent' };
+}
+
+/** The newly loaded daemon waits outside the data plane until the old agent is fully unloaded. */
+export async function waitForMacAgentHandoff(options: { exec?: EngineExec; uid?: number; sleep?: (ms: number) => Promise<void>; attempts?: number } = {}): Promise<boolean> {
+  const exec = options.exec ?? defaultExec;
+  const sleep = options.sleep ?? (ms => new Promise(resolve => setTimeout(resolve, ms)));
+  for (let i = 0; i < (options.attempts ?? 120); i++) {
+    const result = exec('launchctl', ['print', serviceTarget(options.uid)]);
+    // After a reboot with nobody signed in, the login domain itself does not exist yet
+    // (launchctl exits 125), so no login engine can be running.
+    if (isNotLoaded(result) || isAbsentLoginDomain(result)) return true;
+    if (result.status !== 0) return false;
+    await sleep(250);
+  }
+  return false;
+}
+
+export interface MacServerModeView {
+  enabled: boolean;
+  pending: boolean;
+  message?: string;
+}
+function serverModeResultPath(paths: EnginePaths): string { return join(dirname(paths.configPath), 'server-mode-result.json'); }
+export function macServerModeView(options: EngineServiceOptions = {}): MacServerModeView {
+  const paths = engineServicePaths(options);
+  const enabled = paths.engineManager === 'daemon';
+  try {
+    const result = JSON.parse(readFileSync(serverModeResultPath(paths), 'utf8'));
+    // Pending work from a process that died must not disable the switch forever.
+    const pending = result.pending === true && Number.isSafeInteger(result.pid) && defaultPidAlive(result.pid);
+    return { enabled, pending, ...(typeof result.message === 'string' ? { message: result.message } : {}) };
+  } catch { return { enabled, pending: false }; }
+}
+
+/** Spawn outside the worker's process group so unloading the engine cannot strand the handoff. */
+export function requestMacServerMode(enable: boolean): { ok: true; status_message: string } {
+  assertDarwin(undefined);
+  const paths = engineServicePaths();
+  if (macServerModeView().pending) throw new OperationError('config_error', 'Your Mac is already changing this setting. Wait for it to finish.');
+  const program = installedProgram(paths.plistPath);
+  if (!program) throw new OperationError('config_error', 'Update Olympus from its download page before changing this setting.');
+  const child = spawn(program.runtimePath, ['--no-env-file', program.entryPath, '__engine-server-mode', enable ? 'on' : 'off'], {
+    detached: true, stdio: 'ignore', env: { HOME: homedir(), PATH: '/usr/bin:/bin:/usr/sbin:/sbin' },
+  });
+  child.on('error', () => { writePrivateFileAtomicSync(serverModeResultPath(paths), JSON.stringify({ pending: false, message: 'Olympus could not open the administrator request. Update Olympus, then try again.' })); });
+  child.unref();
+  const message = 'Your Mac will ask for an administrator’s password. Olympus will reconnect here when the change is finished.';
+  writePrivateFileAtomicSync(serverModeResultPath(paths), JSON.stringify({ pending: true, pid: child.pid, message }));
+  return { ok: true, status_message: message };
+}
+
+/** Internal CLI target of the dashboard request. Never accepts an account, path, or plist. */
+export async function runMacServerModeChange(enable: boolean, options: EngineServiceOptions & { health?: EngineHealthDeps } = {}): Promise<void> {
+  const paths = engineServicePaths(options);
+  const since = (options.health?.now ?? Date.now)();
+  const needsHandoff = (paths.engineManager === 'daemon') !== enable || (enable && existsSync(enginePaths(options.homeDir ?? homedir()).plistPath));
+  try {
+    setMacEngineServerMode(enable, options);
+    const health = await waitForEngineHealthy({ paths: engineServicePaths(options), expectedBuild: engineBuildIdentity(paths.appDir), ...(needsHandoff ? { since } : {}) }, options.health);
+    if (!health.ok) throw new OperationError('config_error', 'The setting changed, but Olympus has not reconnected yet. Refresh Keys in a moment. If it is still unavailable, sign in to this Mac and open Olympus.');
+    saveComputerUseChoice(paths.sovereigntyPath, enable ? 'server' : 'everyday');
+    writePrivateFileAtomicSync(serverModeResultPath(paths), JSON.stringify({ pending: false, message: enable ? 'Olympus will start by itself once the disk is unlocked.' : 'Olympus will run while this account is signed in.' }));
+  } catch (error) {
+    const message = error instanceof OperationError ? error.message : 'Olympus could not finish changing this setting. Refresh Keys and try again.';
+    writePrivateFileAtomicSync(serverModeResultPath(paths), JSON.stringify({ pending: false, message }));
+  }
+}
+
+/** Available only to the installed standalone engine on a Mac, never to OpenClaw or Linux. */
+export function macComputerSetupView(): { engine_server_mode?: MacServerModeView; computer_use_pending?: boolean } {
+  if (process.platform !== 'darwin' || process.env.OLYMPUS_ENGINE_HOST !== '1') return {};
+  const paths = engineServicePaths();
+  if (!existsSync(paths.plistPath)) return {};
+  return { engine_server_mode: macServerModeView(), computer_use_pending: readComputerUseState(paths.sovereigntyPath)?.choice === null };
+}
+export function saveMacComputerUseChoice(choice: 'everyday' | 'server'): { ok: true; status_message: string } {
+  const view = macComputerSetupView();
+  if (!view.engine_server_mode) throw new OperationError('config_error', 'This setting is available in the standalone Olympus app on a Mac.');
+  if (choice === 'server') return requestMacServerMode(true);
+  if (view.engine_server_mode.enabled) return requestMacServerMode(false);
+  saveComputerUseChoice(engineServicePaths().sovereigntyPath, choice);
+  return { ok: true, status_message: 'Choice saved. Continue to Private answers.' };
 }

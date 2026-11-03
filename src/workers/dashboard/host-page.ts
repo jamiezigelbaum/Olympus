@@ -1,3 +1,4 @@
+import { dashboardComputerIdentity } from '../../core/computer-identity.ts';
 import { installerForPlatform, type UpdateAvailable } from '../../core/update-check.ts';
 /**
  * /dashboard on the computer (phase 4, owner decision 2026-10-09): a small
@@ -102,6 +103,7 @@ export function computerOpenTargets(origin: string, token?: string): Record<stri
 }
 
 export interface ComputerHostPageInput {
+  computerIdentity?: string;
   updateAvailable?: UpdateAvailable | undefined;
   /** The running worker platform; unsupported installers never render or poll. */
   platform?: string;
@@ -152,6 +154,7 @@ body{overflow-wrap:anywhere;margin:0;display:flex;flex-direction:column;backgrou
 .panel{flex:1 1 auto;width:100%;min-height:0;border:0;display:block;background:var(--bg)}
 main{flex:1 1 auto;min-height:0;display:flex;flex-direction:column}
 .sr-only{position:absolute;width:1px;height:1px;margin:-1px;padding:0;overflow:hidden;clip:rect(0 0 0 0);clip-path:inset(50%);white-space:nowrap;border:0}
+.computer-identity{flex:none;max-width:48rem;width:calc(100% - 2rem);margin:1rem auto 0;color:var(--muted);font-size:0.875rem}
 .gate[hidden]{display:none}
 .gate{flex:none;max-width:48rem;width:calc(100% - 2rem);margin:1rem auto 0;padding:0.75rem 1rem;background:var(--warn-bg);border-left:4px solid var(--warn);border-radius:8px}
 .gate p{margin:0}
@@ -578,6 +581,7 @@ export function renderComputerHostPage(input: ComputerHostPageInput): string {
     // The page's one landmark and level-one heading. The heading is visually hidden: the framed panel carries the visible title.
     '<main>',
     '<h1 class="sr-only">Olympus dashboard</h1>',
+    `<header class="computer-identity" data-computer-identity>${text(input.computerIdentity ?? dashboardComputerIdentity())}</header>`,
     ...(installer ? [
       `<section class="update" data-update-notice${update ? '' : ' hidden'}><p data-update-text>${update ? text(DASHBOARD_UPDATE_COPY.notice(update.version)) : ''}</p>`
       + `<p><code id="update-command">${text(installer.command)}</code> `

@@ -28,7 +28,8 @@
 #      ~/.zprofile (zsh) or ~/.bash_profile (bash). OLYMPUS_NO_MODIFY_PATH=1
 #      skips that.
 #   4. Runs `olympus engine install --restart`, which registers the per-user
-#      LaunchAgent (~/Library/LaunchAgents/ai.olympusplugin.engine.plist),
+#      LaunchAgent, or preserves an installed server LaunchDaemon without
+#      rewriting its system plist or asking for an administrator password,
 #      starts the engine on this build and waits (up to 60 s) for proof that
 #      the engine runs it and is healthy. It exits non-zero without that proof.
 #      Its output goes to ~/Library/Logs/Olympus/install.log.

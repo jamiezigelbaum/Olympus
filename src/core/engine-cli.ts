@@ -58,6 +58,8 @@ export interface EngineCliDeps {
   /** Internal reentrant marker: the public Linux lifecycle command already owns kernel custody. */
   lifecycleLocked?: boolean;
   homeDir?: string;
+  /** Test-only system path. */
+  daemonPlistPath?: string;
   exec?: EngineExec;
   uid?: number;
   platform?: string;
@@ -90,6 +92,7 @@ export async function runEngineCommand(args: string[], deps: EngineCliDeps = {})
     return withLinuxEngineLifecycleLockAsync(layout,()=>runEngineCommand(args,{...deps,lifecycleLocked:true}));
   }
   const service = {
+    ...(deps.daemonPlistPath ? { daemonPlistPath: deps.daemonPlistPath } : {}),
     ...(deps.env ? { env: deps.env } : {}),
     ...(deps.homeDir ? { homeDir: deps.homeDir } : {}),
     ...(deps.exec ? { exec: deps.exec } : {}),
@@ -237,6 +240,7 @@ export async function engineStatusReport(deps: EngineCliDeps = {}): Promise<Reco
   const paths = engineServicePaths({ ...deps, homeDir });
   const agent = inspectEngine({
     homeDir, env,
+    ...(deps.daemonPlistPath ? { daemonPlistPath: deps.daemonPlistPath } : {}),
     ...(deps.exec ? { exec: deps.exec } : {}),
     ...(deps.uid !== undefined ? { uid: deps.uid } : {}),
     ...(deps.platform ? { platform: deps.platform } : {}),

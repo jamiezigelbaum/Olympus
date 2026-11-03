@@ -1,3 +1,4 @@
+import { macComputerSetupView, saveMacComputerUseChoice } from '../../core/engine-service.ts';
 import { createPrivacyQuestionEngine } from '../classification/privacy-questions.ts';
 import { snifferPromptVersions } from '../classification/sniffer.ts';
 import { withFirstRunPrivacyGate } from '../first-run-privacy-gate.ts';
@@ -2630,7 +2631,7 @@ export async function main(): Promise<void> {
   });
   const localModelDiscovery = new LocalModelDiscovery();
   const getModelSetup = () => {
-    const view = modelSetup.getStatus();
+    const view = { ...modelSetup.getStatus(), ...macComputerSetupView() };
     if (!modelReloadUnavailable) return view;
     return { ...view, ready: false, cards: view.cards.map((card) => card.state === 'applying'
       ? { ...card, state: 'needs_attention' as const, detail: 'Key saved. Ask your agent to restart the managed Olympus worker to apply it; this foreground worker cannot restart itself.' }
@@ -5909,6 +5910,8 @@ export async function main(): Promise<void> {
           sourceDashboard: {
             sovereigntyEngine,
             modelSetup: getModelSetup,
+            computerSetup: macComputerSetupView,
+            saveComputerUseChoice: saveMacComputerUseChoice,
             checkModelSetup: () => modelSetup.checkLocalModels(),
             discoverLocalModels: (baseUrl) => localModelDiscovery.discover(baseUrl),
             testLocalModels: (selection) => localModelDiscovery.test(selection),

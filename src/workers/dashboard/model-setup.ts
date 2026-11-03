@@ -14,7 +14,9 @@ export function renderModelSetup(view: ModelSetupView | undefined, options: { he
   // The browser reads the same readiness facts as these cards, without
   // treating the asynchronous check request's acknowledgement as success.
   const status = `<span hidden data-model-setup-status="${escapeHtml(JSON.stringify(view))}"></span>`;
-  if (view.privacy_choice_pending) return status + renderFirstRunPrivacyChoice();
+  if (view.computer_use_pending) return status + renderComputerUseChoice(view);
+  const engine = renderEngineServerMode(view);
+  if (view.privacy_choice_pending) return status + engine + renderFirstRunPrivacyChoice();
   // The local-models sheet opens in place: directly under whichever control
   // opens it, and only where one does.
   const bannerOwnsToggle = blockerOwnsLocalToggle(view);
@@ -57,7 +59,7 @@ export function renderModelSetup(view: ModelSetupView | undefined, options: { he
         + `<p>Optional: your agent can help connect models you already run and review the matching privacy choice.</p><button type="button" class="btn" ${LOCAL_MODELS_TOGGLE}`
         + `${CHECK_FORM_OPEN}<button class="btn" type="submit">Check readiness</button>${CHECK_FORM_TAIL}`
         + '</div>' + localModelsSheet();
-  return status + `<section aria-label="Models">${options.heading === false ? '' : '<div class="sect">Models</div>'}`
+  return status + engine + `<section aria-label="Models">${options.heading === false ? '' : '<div class="sect">Models</div>'}`
     + (view.ready
       ? `<p class="quiet" role="status">${options.heading === false ? 'Models are ready.' : 'Models are ready. You can connect sources below.'}</p>`
       : '<p class="modelintro">Add the keys required by your privacy choice. Olympus checks them and updates this page when they are ready. Saved keys are not displayed.</p>')
@@ -184,4 +186,28 @@ function modelKeyAction(card: ModelSetupCard, lead: string): string {
   }
   const href = card.id === 'gemini' ? 'https://aistudio.google.com/apikey' : 'https://venice.ai';
   return `<div class="modelaction">${lead}<a href="${href}" target="_blank" rel="noopener noreferrer">Get a ${card.label} API key</a></div>`;
+}
+
+const SERVER_MODE_HELP = "Olympus starts by itself after a restart, once the disk is unlocked. Your Mac asks for an administrator's password once.";
+const SERVER_CHECKLIST = '<ul data-server-checklist><li>Use a wired network.</li><li>Give this Mac a fixed network address in System Settings.</li><li>After a restart, someone must unlock the disk in person, or use Screen Sharing or SSH unlock on a wired network. After that, Olympus starts by itself.</li></ul>';
+function renderComputerUseChoice(view: ModelSetupView): string {
+  const pending = view.engine_server_mode?.pending === true;
+  return '<section aria-label="Computer setup" data-first-run-computer><h3>How will this computer run?</h3>'
+    + '<form data-computer-use><fieldset' + (pending ? ' disabled' : '') + '><legend>Choose how you use this Mac</legend>'
+    + '<label class="modelcard"><input type="radio" name="choice" value="everyday" checked> My everyday computer <span>Recommended</span></label>'
+    + '<label class="modelcard"><input type="radio" name="choice" value="server"> Always on, as a server</label>'
+    + '<p>' + escapeHtml(SERVER_MODE_HELP) + '</p>' + SERVER_CHECKLIST
+    + '<button type="submit" class="btn primary">Continue</button></fieldset><span data-action-message role="status">'
+    + escapeHtml(view.engine_server_mode?.message ?? '') + '</span></form></section>';
+}
+function renderEngineServerMode(view: ModelSetupView): string {
+  const mode = view.engine_server_mode;
+  if (!mode) return '';
+  return '<section aria-label="Engine" id="engine-settings"><h3 class="sect">Engine</h3><form data-computer-use data-server-mode>'
+    + '<label><input type="checkbox" role="switch" name="server"' + (mode.enabled ? ' checked' : '') + (mode.pending ? ' disabled' : '')
+    + '> Keep Olympus running when no one is logged in</label><p>' + escapeHtml(SERVER_MODE_HELP) + '</p>'
+    + '<p role="status">' + (mode.enabled ? 'On — starts once the disk is unlocked.' : 'Off — runs when this account is signed in.') + '</p>'
+    + (mode.enabled ? SERVER_CHECKLIST : '')
+    + '<button type="submit" class="btn"' + (mode.pending ? ' disabled' : '') + '>Save</button><span data-action-message role="status">'
+    + escapeHtml(mode.message ?? '') + '</span></form></section>';
 }

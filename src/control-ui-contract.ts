@@ -124,6 +124,7 @@ export type OlympusDashboardControlParams =
   | { action: 'test_local_models'; base_url: string; answer_model: string }
   | { action: 'save_local_answer_model'; base_url: string; answer_model: string }
   | { action: 'save_first_run_privacy'; choice: string }
+  | { action: 'set_computer_use'; choice: 'everyday' | 'server' }
   | {
       action: 'start_oauth';
       source: OlympusDashboardOAuthSource;

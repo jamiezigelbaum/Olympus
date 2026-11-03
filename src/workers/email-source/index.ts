@@ -568,6 +568,8 @@ export interface EmailSourceWorkerOptions {
     discoverLocalModels?: (baseUrl?: string) => Promise<LocalModelDiscoveryResult[]>;
     testLocalModels?: (selection: LocalModelSelection) => Promise<LocalModelTestResult>;
     saveLocalAnswerModel?: (selection: LocalModelSelection) => Promise<{ ok: boolean; detail?: string }>;
+    computerSetup?: () => Pick<ModelSetupView, 'computer_use_pending' | 'engine_server_mode'>;
+    saveComputerUseChoice?: (choice: 'everyday' | 'server') => { ok: true; status_message: string };
     saveFirstRunPrivacyChoice?: (choice: SovereigntyPresetName) => boolean;
     connectModelKey?: (source: 'gemini' | 'venice', apiKey: string) => Promise<void>;
     /**
@@ -2107,10 +2109,24 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           });
         }
 
+        if (request.method === 'POST' && url.pathname === '/dashboard/engine/computer-use') {
+          if (!request.headers.has(DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER) || request.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER) !== 'local') {
+            return json({ ok: false, error: { code: 'mac_dashboard_only', message: 'Open dashboard controls on this Mac before changing how Olympus runs.' } }, 403);
+          }
+          const input = await parseObjectBody(request);
+          if (typeof input.choice !== 'string' || !['everyday', 'server'].includes(input.choice)) throw new EmailSourceWorkerError(400, 'invalid_request', 'Choose how this computer will run.');
+          if (!sourceDashboard?.saveComputerUseChoice || !sourceDashboard.computerSetup?.().engine_server_mode) {
+            return json({ ok: false, error: { code: 'not_available', message: 'This setting is available in the standalone Olympus app on a Mac.' } }, 409);
+          }
+          try { return json(sourceDashboard.saveComputerUseChoice(input.choice as 'everyday' | 'server')); }
+          catch (error) { return json({ ok: false, error: { code: 'server_mode_failed', message: error instanceof Error ? error.message : 'Olympus could not change this setting. Try again in Keys.' } }, 409); }
+        }
+
         if (request.method === 'POST' && url.pathname === '/dashboard/models/first-run-privacy') {
           if (!request.headers.has(DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER) || request.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER) !== 'local') {
             return json({ ok: false, error: { code: 'mac_dashboard_only', message: 'Choose this on the computer in an unlocked dashboard.' } }, 403);
           }
+          if (sourceDashboard?.computerSetup?.().computer_use_pending) return json({ ok: false, error: { code: 'computer_choice_pending', message: 'Choose how this computer will run first.' } }, 409);
           const input = await parseObjectBody(request);
           if (typeof input.choice !== 'string' || !SOVEREIGNTY_PRESETS.includes(input.choice as SovereigntyPresetName)) {
             throw new EmailSourceWorkerError(400, 'invalid_request', 'Choose a Private-answer mode.');

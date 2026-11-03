@@ -6,7 +6,7 @@ import { processInstanceIdentity } from './file-lease.ts';
 import { rotateEngineLog } from './linux-engine-service.ts';
 /**
  * The standalone engine host: what `olympus __engine-run` runs under the
- * per-user LaunchAgent (core/engine-service.ts).
+ * LaunchAgent or server LaunchDaemon running as the account (core/engine-service.ts).
  *
  * It stands in for the OpenClaw Gateway's service host and nothing more. The
  * same native service adapters the plugin registers (worker, remote relay,
@@ -30,7 +30,7 @@ import {
   reapRecordedEngineChildren,
   type EngineChildReapDeps,
 } from './engine-children.ts';
-import { ENGINE_BUILD_ENV, engineServicePaths, engineStatusPath, readEngineConfig } from './engine-service.ts';
+import { engineBuildIdentity, waitForMacAgentHandoff, ENGINE_BUILD_ENV, engineServicePaths, engineStatusPath, readEngineConfig } from './engine-service.ts';
 import { createNativeEmbeddingDrainService } from './native-embedding-drain-service.ts';
 import {
   backgroundNativeProcessService,
@@ -109,6 +109,12 @@ export async function startEngineHost(options: EngineHostOptions): Promise<Engin
   const homeDir = options.homeDir ?? env.HOME ?? '';
   const paths = engineServicePaths({ homeDir, env, platform: options.platform ?? process.platform });
 
+  // The daemon may be bootstrapped before the administrator dialog returns. It
+  // must not touch child records or data while the login engine still owns them.
+  if (paths.engineManager === 'daemon') {
+    const released = await waitForMacAgentHandoff();
+    if (!released) { log('engine: waiting for the login engine to stop.'); exit(75); return undefined; }
+  }
   let pluginConfig: Record<string, unknown> | undefined;
   let remoteMode = 'off';
   let enabled: Record<string, boolean> = {};
@@ -174,7 +180,7 @@ export async function startEngineHost(options: EngineHostOptions): Promise<Engin
     started_at: now(),
     updated_at: now(),
     state: 'running',
-    build: env[ENGINE_BUILD_ENV]?.trim() || null,
+    build: paths.engineManager === 'daemon' ? engineBuildIdentity(paths.appDir) : env[ENGINE_BUILD_ENV]?.trim() || null,
     remote_mode: remoteMode,
     services: {},
   };
@@ -231,9 +237,11 @@ export async function startEngineHost(options: EngineHostOptions): Promise<Engin
     catch { log('engine: private log rotation failed; check engine log permissions.'); }
   }, 30_000) : undefined;
   rotation?.unref();
+  let removeSignalHandlers = () => {};
   let stopping: Promise<void> | undefined;
   const stop = (): Promise<void> => {
     stopping ??= (async () => {
+      removeSignalHandlers();
       if (rotation) clearInterval(rotation);
       desktopBridge?.close();
       status.state = 'stopping';
@@ -259,6 +267,16 @@ export async function startEngineHost(options: EngineHostOptions): Promise<Engin
     const onSignal = () => { void stop().then(() => exit(0)); };
     process.once('SIGTERM', onSignal);
     process.once('SIGINT', onSignal);
+    // The signed helper already forwards HUP and propagates this exit code.
+    if (!paths.linux) {
+      const onRestart = () => { void stop().then(() => exit(75)); };
+      process.once('SIGHUP', onRestart);
+      removeSignalHandlers = () => {
+        process.removeListener('SIGHUP', onRestart);
+        process.removeListener('SIGTERM', onSignal);
+        process.removeListener('SIGINT', onSignal);
+      };
+    }
   }
   // No worker, no bridge: a worker-disabled engine reserves no port and never
   // touches the worker socket.
