@@ -170973,6 +170973,9 @@ function createCanonicalDropboxSchedulerSource(input) {
 }
 function fileExtractionSchedulerTask(input) {
   const maxPages = Math.max(1, input.maxPlanPages ?? FILE_EXTRACTION_MAX_PLAN_PAGES_PER_PASS);
+  const passBudgetMs = Math.max(0, input.passBudgetMs ?? FILE_EXTRACTION_PASS_BUDGET_MS);
+  const maxBatches = Math.max(1, input.maxBatchesPerPass ?? FILE_EXTRACTION_MAX_BATCHES_PER_PASS);
+  const now = input.now ?? Date.now;
   return {
     id: input.id,
     kind: "extract",
@@ -170981,6 +170984,7 @@ function fileExtractionSchedulerTask(input) {
       input.runner.prepareReadersWithWaitingWork?.([input.lane]);
     },
     run: async (context2) => {
+      const passStartedAt = now();
       let cursor = context2?.checkpoint ?? undefined;
       const startCursor = cursor;
       let done = false;
@@ -171016,24 +171020,40 @@ function fileExtractionSchedulerTask(input) {
         if (candidates >= input.planLimit)
           break;
       }
-      const run2 = await input.runner.run({
+      let run2 = await input.runner.run({
         ...input.lane,
         limit: input.batchSize,
         preflightExtractorKinds: [...extractorKinds]
       });
+      let processedJobs = run2.processedJobs;
+      const settled = { ...run2.counts };
+      for (let batch = 1;batch < maxBatches; batch += 1) {
+        if (run2.paused || run2.processedJobs < input.batchSize)
+          break;
+        if (now() - passStartedAt >= passBudgetMs)
+          break;
+        run2 = await input.runner.run({ ...input.lane, limit: input.batchSize });
+        processedJobs += run2.processedJobs;
+        settled.indexed += run2.counts.indexed;
+        settled.metadata_only += run2.counts.metadata_only;
+        settled.skipped_unsupported += run2.counts.skipped_unsupported;
+        settled.skipped_too_large += run2.counts.skipped_too_large;
+        settled.failed_retryable += run2.counts.failed_retryable;
+        settled.failed_terminal += run2.counts.failed_terminal;
+      }
       const counts = {
         candidates_seen: candidates,
         jobs_queued: jobsQueued,
         jobs_existing: jobsExisting,
         jobs_unroutable: jobsUnroutable,
         jobs_refused: jobsRefused,
-        jobs_processed: run2.processedJobs,
-        jobs_indexed: run2.counts.indexed,
-        jobs_metadata_only: run2.counts.metadata_only,
-        jobs_unsupported: run2.counts.skipped_unsupported,
-        jobs_too_large: run2.counts.skipped_too_large,
-        jobs_failed_retryable: run2.counts.failed_retryable,
-        jobs_failed_terminal: run2.counts.failed_terminal
+        jobs_processed: processedJobs,
+        jobs_indexed: settled.indexed,
+        jobs_metadata_only: settled.metadata_only,
+        jobs_unsupported: settled.skipped_unsupported,
+        jobs_too_large: settled.skipped_too_large,
+        jobs_failed_retryable: settled.failed_retryable,
+        jobs_failed_terminal: settled.failed_terminal
       };
       if (run2.paused) {
         throw new SourceSchedulerTaskFailure("File extraction paused at the extractor health gate.", {
@@ -171043,7 +171063,7 @@ function fileExtractionSchedulerTask(input) {
         });
       }
       return {
-        status: jobsQueued > 0 || run2.processedJobs > 0 ? "progress" : "idle",
+        status: jobsQueued > 0 || processedJobs > 0 ? "progress" : "idle",
         counts,
         ...extractionWarnings(jobsRefused, undefined),
         checkpoint: done ? null : cursor ?? null,
@@ -171892,7 +171912,7 @@ function accountFromApprovedScope(scope) {
   const match = /^dropbox\.([a-z0-9_-]+):/i.exec(scope ?? "");
   return match?.[1];
 }
-var SOURCE_SCHEDULER_MAX_FUTURE_DEFERRAL_MS, SOURCE_SCHEDULER_CONTINUE_AFTER_MS = 5000, SOURCE_SCHEDULER_SOURCE_IDS_ENV = "OLYMPUS_WORKER_SCHEDULER_SOURCE_IDS", GMAIL_REQUEST_BUDGET_CLOCK_REGRESSION = "gmail_request_budget_clock_regression", GOOGLE_DRIVE_REQUEST_BUDGET_CLOCK_REGRESSION = "google_drive_request_budget_clock_regression", GMAIL_REQUEST_BUDGET_LEDGER_BUSY = "gmail_request_budget_ledger_busy", GOOGLE_DRIVE_REQUEST_BUDGET_LEDGER_BUSY = "google_drive_request_budget_ledger_busy", SCHEDULER_SOURCE_IDS, SOURCE_SCHEDULER_CHANGE_DEBOUNCE_MS = 500, SourceSchedulerTaskFailure, FILE_EXTRACTION_MAX_PLAN_PAGES_PER_PASS = 40, EMBEDDING_SWEEP_INTERVAL_MS = 60000, EMBEDDING_SWEEP_MAX_BACKOFF_MS, EMBEDDING_SWEEP_MAX_ITEMS = 32, EMBEDDING_SWEEP_FRESHNESS_THRESHOLD_MS, DEFAULT_ZERO_CHANGE_DEGRADE_RUNS = 5, LANE_NOT_ADVANCING_DEGRADED_REASON = "traversal_not_advancing", HONEST_SCHEDULER_ERROR_KINDS, UTC_DAY_SCOPED_DEGRADED_REASONS, EXTRACTION_JOBS_REFUSED_WARNING = "extraction_jobs_refused", LOCAL_FILES_SCHEDULER_WARNINGS, VERBATIM_SCHEDULER_WARNINGS;
+var SOURCE_SCHEDULER_MAX_FUTURE_DEFERRAL_MS, SOURCE_SCHEDULER_CONTINUE_AFTER_MS = 5000, SOURCE_SCHEDULER_SOURCE_IDS_ENV = "OLYMPUS_WORKER_SCHEDULER_SOURCE_IDS", GMAIL_REQUEST_BUDGET_CLOCK_REGRESSION = "gmail_request_budget_clock_regression", GOOGLE_DRIVE_REQUEST_BUDGET_CLOCK_REGRESSION = "google_drive_request_budget_clock_regression", GMAIL_REQUEST_BUDGET_LEDGER_BUSY = "gmail_request_budget_ledger_busy", GOOGLE_DRIVE_REQUEST_BUDGET_LEDGER_BUSY = "google_drive_request_budget_ledger_busy", SCHEDULER_SOURCE_IDS, SOURCE_SCHEDULER_CHANGE_DEBOUNCE_MS = 500, SourceSchedulerTaskFailure, FILE_EXTRACTION_MAX_PLAN_PAGES_PER_PASS = 40, FILE_EXTRACTION_PASS_BUDGET_MS = 20000, FILE_EXTRACTION_MAX_BATCHES_PER_PASS = 25, EMBEDDING_SWEEP_INTERVAL_MS = 60000, EMBEDDING_SWEEP_MAX_BACKOFF_MS, EMBEDDING_SWEEP_MAX_ITEMS = 32, EMBEDDING_SWEEP_FRESHNESS_THRESHOLD_MS, DEFAULT_ZERO_CHANGE_DEGRADE_RUNS = 5, LANE_NOT_ADVANCING_DEGRADED_REASON = "traversal_not_advancing", HONEST_SCHEDULER_ERROR_KINDS, UTC_DAY_SCOPED_DEGRADED_REASONS, EXTRACTION_JOBS_REFUSED_WARNING = "extraction_jobs_refused", LOCAL_FILES_SCHEDULER_WARNINGS, VERBATIM_SCHEDULER_WARNINGS;
 var init_source_scheduler = __esm(() => {
   init_config();
   init_control_path_headroom();

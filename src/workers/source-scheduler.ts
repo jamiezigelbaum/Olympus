@@ -1475,6 +1475,16 @@ export function createCanonicalDropboxSchedulerSource(input: {
 export const FILE_EXTRACTION_MAX_PLAN_PAGES_PER_PASS = 40;
 
 /**
+ * How long one extraction pass keeps leasing further full batches after its
+ * first. Bounded so the lane's other tasks (and other lanes sharing its
+ * concurrency key) still get their turn between passes.
+ */
+export const FILE_EXTRACTION_PASS_BUDGET_MS = 20_000;
+
+/** Most batches one extraction pass extracts, whatever the budget. */
+export const FILE_EXTRACTION_MAX_BATCHES_PER_PASS = 25;
+
+/**
  * One scheduled extraction pass for a file lane: queue up to `planLimit`
  * candidates (reading as many candidate pages as that takes, within a bound),
  * then extract a small batch. Every extracted chunk feeds the lane's embedding
@@ -1490,8 +1500,16 @@ export function fileExtractionSchedulerTask(input: {
   batchSize: number;
   mimeTypes?: readonly string[];
   maxPlanPages?: number;
+  /** Time a pass may keep extracting full batches; see FILE_EXTRACTION_PASS_BUDGET_MS. */
+  passBudgetMs?: number;
+  /** Most batches one pass extracts; see FILE_EXTRACTION_MAX_BATCHES_PER_PASS. */
+  maxBatchesPerPass?: number;
+  now?: () => number;
 }): SourceSchedulerTask {
   const maxPages = Math.max(1, input.maxPlanPages ?? FILE_EXTRACTION_MAX_PLAN_PAGES_PER_PASS);
+  const passBudgetMs = Math.max(0, input.passBudgetMs ?? FILE_EXTRACTION_PASS_BUDGET_MS);
+  const maxBatches = Math.max(1, input.maxBatchesPerPass ?? FILE_EXTRACTION_MAX_BATCHES_PER_PASS);
+  const now = input.now ?? Date.now;
   return {
     id: input.id,
     kind: 'extract',
@@ -1501,6 +1519,7 @@ export function fileExtractionSchedulerTask(input: {
     // instead of at the lane's next pass.
     atStart: () => { input.runner.prepareReadersWithWaitingWork?.([input.lane]); },
     run: async (context?: SourceSchedulerTaskRunContext) => {
+      const passStartedAt = now();
       let cursor = context?.checkpoint ?? undefined;
       const startCursor = cursor;
       let done = false;
@@ -1535,24 +1554,42 @@ export function fileExtractionSchedulerTask(input: {
         cursor = plan.nextCursor;
         if (candidates >= input.planLimit) break;
       }
-      const run = await input.runner.run({
+      // Extract full batches until the pass budget is spent: one small batch
+      // per pass drained a large folder at a few files a minute (Sparta,
+      // 2026-11-03: ~900 queued Dropbox jobs, 2 per 15 s). Every job yields
+      // the thread (ingestionTurn), so a longer pass does not freeze requests.
+      let run = await input.runner.run({
         ...input.lane,
         limit: input.batchSize,
         preflightExtractorKinds: [...extractorKinds],
       });
+      let processedJobs = run.processedJobs;
+      const settled = { ...run.counts };
+      for (let batch = 1; batch < maxBatches; batch += 1) {
+        if (run.paused || run.processedJobs < input.batchSize) break;
+        if (now() - passStartedAt >= passBudgetMs) break;
+        run = await input.runner.run({ ...input.lane, limit: input.batchSize });
+        processedJobs += run.processedJobs;
+        settled.indexed += run.counts.indexed;
+        settled.metadata_only += run.counts.metadata_only;
+        settled.skipped_unsupported += run.counts.skipped_unsupported;
+        settled.skipped_too_large += run.counts.skipped_too_large;
+        settled.failed_retryable += run.counts.failed_retryable;
+        settled.failed_terminal += run.counts.failed_terminal;
+      }
       const counts = {
         candidates_seen: candidates,
         jobs_queued: jobsQueued,
         jobs_existing: jobsExisting,
         jobs_unroutable: jobsUnroutable,
         jobs_refused: jobsRefused,
-        jobs_processed: run.processedJobs,
-        jobs_indexed: run.counts.indexed,
-        jobs_metadata_only: run.counts.metadata_only,
-        jobs_unsupported: run.counts.skipped_unsupported,
-        jobs_too_large: run.counts.skipped_too_large,
-        jobs_failed_retryable: run.counts.failed_retryable,
-        jobs_failed_terminal: run.counts.failed_terminal,
+        jobs_processed: processedJobs,
+        jobs_indexed: settled.indexed,
+        jobs_metadata_only: settled.metadata_only,
+        jobs_unsupported: settled.skipped_unsupported,
+        jobs_too_large: settled.skipped_too_large,
+        jobs_failed_retryable: settled.failed_retryable,
+        jobs_failed_terminal: settled.failed_terminal,
       };
       if (run.paused) {
         throw new SourceSchedulerTaskFailure('File extraction paused at the extractor health gate.', {
@@ -1562,7 +1599,7 @@ export function fileExtractionSchedulerTask(input: {
         });
       }
       return {
-        status: jobsQueued > 0 || run.processedJobs > 0 ? 'progress' : 'idle',
+        status: jobsQueued > 0 || processedJobs > 0 ? 'progress' : 'idle',
         counts,
         // Refused candidates never fail the pass; they ride as a warning.
         ...extractionWarnings(jobsRefused, undefined),
