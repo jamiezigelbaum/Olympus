@@ -40,6 +40,7 @@ import {
   snifferMaterialLooksLikeInjection,
 } from '../src/workers/classification/sniffer.ts';
 import { sharingInfoFromDropboxJson } from '../src/workers/dropbox-files/provider-client.ts';
+import { snifferStoreTurn } from '../src/workers/classification/sniffer-resolver.ts';
 import { resolveSnifferLane, SnifferLaneRefusedError, type SnifferLane } from '../src/workers/classification/sniffer-lane.ts';
 import {
   DEFAULT_SNIFFER_MAX_CALLS_PER_DAY,
@@ -246,6 +247,39 @@ describe('2. an answer preempts the sniffer', () => {
     const model = answering(() => ({ tier: 'private', category: 'financial', confidence: 0.9 }));
     await runSnifferPass({ targets: [{ ledger, sniffer: store }], lane: LANE, model });
     expect(model.requests.map((request) => request.prompt.split('\n').filter((line) => line.startsWith('{')).length)).toEqual([1, 1, 1, 1, 1]);
+  });
+
+  test('stores take turns: a busy store\'s newer questions do not starve an older one', async () => {
+    const busyLedger = new TierLedger({ dbPath: ':memory:' });
+    const busyStore = new TierSnifferStore({ dbPath: ':memory:' });
+    const quietLedger = new TierLedger({ dbPath: ':memory:' });
+    const quietStore = new TierSnifferStore({ dbPath: ':memory:' });
+    cleanups.push(() => { busyStore.close(); busyLedger.close(); quietStore.close(); quietLedger.close(); });
+    // The quiet store's question is the oldest; the busy store keeps adding newer ones.
+    quietLedger.recordDecision(subject(50), classifyItemTiers({ signals: { title: 'tax file quiet', labels: [STRUCTURED_METADATA_LABEL] }, subject: subject(50) }, { sniffer: new CachedTierSniffer(quietStore, LANE) }));
+    for (let n = 0; n < 6; n += 1) {
+      busyLedger.recordDecision(subject(n), classifyItemTiers({ signals: { title: `tax file busy ${n}`, labels: [STRUCTURED_METADATA_LABEL] }, subject: subject(n) }, { sniffer: new CachedTierSniffer(busyStore, LANE) }));
+    }
+    const model = answering(() => ({ tier: 'private', category: 'financial', confidence: 0.9 }));
+    await runSnifferPass({
+      targets: [{ ledger: busyLedger, sniffer: busyStore }, { ledger: quietLedger, sniffer: quietStore }],
+      lane: LANE, model, maxCallsPerPass: 2,
+    });
+    expect(model.requests).toHaveLength(2);
+    expect(model.requests.filter((request) => request.prompt.includes('quiet'))).toHaveLength(1);
+  });
+
+  test('store turns never line up with the slot kept for aged questions', () => {
+    // Five stores: each must get ordinary turns, not just the one whose index
+    // falls on every fifth dispatch (which an aged question takes first).
+    for (const stores of [2, 3, 4, 5, 6]) {
+      const served = new Set<number>();
+      for (let dispatch = 0; dispatch < 40; dispatch += 1) {
+        if (dispatch % 5 === 4) continue;
+        served.add(snifferStoreTurn(dispatch) % stores);
+      }
+      expect(served.size).toBe(stores);
+    }
   });
 });
 
@@ -522,7 +556,7 @@ describe('6b. one item per call: no name can steer another item', () => {
 describe('pace, daily cap and the visible backlog', () => {
   test('defaults: 20,000 calls a day, prompt idle polling, optional legacy call cap', () => {
     expect(DEFAULT_SNIFFER_MAX_CALLS_PER_DAY).toBe(20_000);
-    expect(DEFAULT_SNIFFER_PASS_TIME_MS).toBe(5_000);
+    expect(DEFAULT_SNIFFER_PASS_TIME_MS).toBe(30_000);
     expect(tierSnifferServiceEnv({})).toEqual({ enabled: true, intervalMs: 1_000, maxCallsPerDay: 20_000 });
     expect(tierSnifferServiceEnv({ OLYMPUS_TIER_SNIFFER_MAX_CALLS_PER_PASS: '5' }).maxCallsPerPass).toBe(5);
   });

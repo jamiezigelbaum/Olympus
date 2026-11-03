@@ -70359,7 +70359,7 @@ import { createHash as createHash26 } from "node:crypto";
 import { mkdirSync as mkdirSync17, readFileSync as readFileSync24 } from "node:fs";
 import { dirname as dirname34 } from "node:path";
 var DEFAULT_SNIFFER_MAX_CALLS_PER_DAY = 20000;
-var DEFAULT_SNIFFER_PASS_TIME_MS = 5000;
+var DEFAULT_SNIFFER_PASS_TIME_MS = 30000;
 var MAX_CONSECUTIVE_TRANSPORT_FAILURES = 2;
 var OUTPUT_CHARS_PER_ITEM = 110;
 
@@ -70612,7 +70612,7 @@ async function runSnifferPass(options) {
   let dispatches = options.targets.reduce((total, target) => total + target.sniffer.dispatchCount(), 0);
   while (pending.length > 0) {
     const aged = pending.filter((item) => dispatches % 5 === 4 && item.target.sniffer.clockMs() - Date.parse(item.question.queuedAt) >= 5 * 60000).sort((a, b) => a.question.queuedAt.localeCompare(b.question.queuedAt) || a.question.sequence - b.question.sequence);
-    let next = aged[0] ?? pending[0];
+    let next = aged[0] ?? nextInTurn(pending, options.targets, dispatches);
     if (next.question.pass === "content")
       next = pending.find((item) => item.question.pass === "metadata" && item.target === next.target && tierLedgerIdentityKey(item.question) === tierLedgerIdentityKey(next.question)) ?? next;
     pending.splice(pending.indexOf(next), 1);
@@ -70712,6 +70712,14 @@ async function runSnifferPass(options) {
     }
   }
   return finish(report);
+}
+function snifferStoreTurn(dispatches) {
+  return dispatches - Math.floor((dispatches + 1) / 5);
+}
+function nextInTurn(pending, targets, dispatches) {
+  const waiting = targets.filter((target2) => pending.some((item) => item.target === target2));
+  const target = waiting[snifferStoreTurn(dispatches) % Math.max(1, waiting.length)];
+  return pending.find((item) => item.target === target) ?? pending[0];
 }
 function compareRecent(a, b) {
   return b.question.priority - a.question.priority || b.question.queuedAt.localeCompare(a.question.queuedAt) || b.question.sequence - a.question.sequence;

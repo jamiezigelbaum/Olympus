@@ -57,7 +57,13 @@ import { tierLedgerIdentityKey, type TierLedger, type TierLedgerRecord, type Tie
 
 /** The UTC daily cap survives restart. Time slices, not call counts, set the pace. */
 export const DEFAULT_SNIFFER_MAX_CALLS_PER_DAY = 20_000;
-export const DEFAULT_SNIFFER_PASS_TIME_MS = 5_000;
+/**
+ * How long one pass keeps asking. A local model answers in about 5 s, so a
+ * 5 s pass asked once and then paid the whole pass setup (listing, re-judge,
+ * moves) again for the next question (Sparta, 2026-11-03: 99 of 100 passes
+ * stopped after one call). Preemption still stops a pass at once.
+ */
+export const DEFAULT_SNIFFER_PASS_TIME_MS = 30_000;
 const MAX_CONSECUTIVE_TRANSPORT_FAILURES = 2;
 /** Output budget per item: one short JSON verdict. */
 const OUTPUT_CHARS_PER_ITEM = 110;
@@ -424,7 +430,11 @@ export async function runSnifferPass(options: SnifferPassOptions): Promise<Sniff
     const aged = pending.filter(item => dispatches % 5 === 4
       && item.target.sniffer.clockMs() - Date.parse(item.question.queuedAt) >= 5 * 60_000)
       .sort((a, b) => a.question.queuedAt.localeCompare(b.question.queuedAt) || a.question.sequence - b.question.sequence);
-    let next = aged[0] ?? pending[0]!;
+    // Otherwise take turns between stores (each target is one store's
+    // ledger, so one source's lane): newest first within a store, but a busy
+    // source's steady stream of new mail no longer keeps every other source
+    // waiting (Sparta, 2026-11-03: Dropbox questions never asked in 5 hours).
+    let next = aged[0] ?? nextInTurn(pending, options.targets, dispatches);
     // Within an item, names go first: a Private names verdict can settle both.
     if (next.question.pass === 'content') next = pending.find(item => item.question.pass === 'metadata'
       && item.target === next.target
@@ -532,6 +542,21 @@ export async function runSnifferPass(options: SnifferPassOptions): Promise<Sniff
     }
   }
   return finish(report);
+}
+
+/** The store turn a dispatch takes: ordinary slots only, so turns never line up with the aged slot. */
+export function snifferStoreTurn(dispatches: number): number {
+  return dispatches - Math.floor((dispatches + 1) / 5);
+}
+
+/** The newest item of the store whose turn it is, among stores with work. */
+function nextInTurn(pending: readonly WorkItem[], targets: readonly SnifferTarget[], dispatches: number): WorkItem {
+  const waiting = targets.filter((target) => pending.some((item) => item.target === target));
+  // Count only the ordinary slots: every fifth dispatch is reserved for an
+  // aged question, and counting it would line one store's turn up with that
+  // slot for good (with five stores, the fifth would never get a turn).
+  const target = waiting[snifferStoreTurn(dispatches) % Math.max(1, waiting.length)];
+  return pending.find((item) => item.target === target) ?? pending[0]!;
 }
 
 function compareRecent(a: WorkItem, b: WorkItem): number {
