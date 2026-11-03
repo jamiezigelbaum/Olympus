@@ -142399,6 +142399,12 @@ var init_openai_compatible_client = __esm(() => {
 // src/workers/email-source/dashboard-messaging.ts
 function createDashboardMessagingPairing(options) {
   const states = new Map;
+  const attempts = new Map;
+  const record6 = (source, outcome) => {
+    const list = attempts.get(source) ?? [];
+    list.push({ at: (options.now?.() ?? new Date).toISOString(), outcome });
+    attempts.set(source, list.slice(-ATTEMPTS_KEPT));
+  };
   const status = (source) => {
     const item = states.get(source);
     return item ? {
@@ -142411,7 +142417,17 @@ function createDashboardMessagingPairing(options) {
       ...(item.state === "failed" || item.state === "cancelled") && item.unlinked ? { unlinked: item.unlinked } : {},
       ...item.chats ? { chats: item.chats } : {},
       ...item.state === "scope_selection_required" ? { wholeAccount: false, chatScopes: [] } : {},
-      ...item.registrationMayBeSaved ? { registrationMayBeSaved: true } : {}
+      ...item.registrationMayBeSaved ? { registrationMayBeSaved: true } : {},
+      ...item.state === "failed" ? { details: pairingDetails({
+        source,
+        state: item.state,
+        reason: item.reason,
+        linked: item.linked === true,
+        unlinked: item.unlinked,
+        registrationMayBeSaved: item.registrationMayBeSaved === true,
+        attempts: attempts.get(source) ?? [],
+        identity: options.identity
+      }) } : {}
     } : { ok: true, state: "idle" };
   };
   return {
@@ -142500,6 +142516,10 @@ function createDashboardMessagingPairing(options) {
             console.warn(`[messaging] ${source} pairing failed: ${item.reason}`);
           }
         } finally {
+          if (item.state === "paired" || item.state === "cancelled")
+            record6(source, item.state);
+          else if (item.state === "failed")
+            record6(source, item.reason ?? "unexpected");
           delete item.reply;
           delete item.field;
           delete item.qr;
@@ -142552,6 +142572,23 @@ function createDashboardMessagingPairing(options) {
     }
   };
 }
+function pairingDetails(input) {
+  const code = (value2) => value2 && /^[a-z0-9_]{1,64}$/.test(value2) ? value2 : "unexpected";
+  const lines = [
+    `Olympus ${input.identity?.version ?? "unknown"}`,
+    `OS: ${input.identity?.os ?? "unknown"}`,
+    `Source: ${input.source}`,
+    `State: ${input.state}`,
+    `Failure: ${code(input.reason)}`,
+    ...input.source === "whatsapp" ? [`Phone accepted the QR: ${input.linked ? "yes" : "no"}`] : [],
+    ...input.unlinked ? [`Phone entry: ${input.unlinked}`] : [],
+    ...input.registrationMayBeSaved ? ["Connection may be saved: yes"] : [],
+    "Recent attempts:",
+    ...input.attempts.map((attempt) => `  ${attempt.at} ${code(attempt.outcome)}`)
+  ];
+  return lines.join(`
+`);
+}
 function pairingFailureReason(error2) {
   const code = error2 && typeof error2 === "object" ? error2.code : undefined;
   return typeof code === "string" && /^[a-z0-9_]{1,64}$/.test(code) ? code : "unexpected";
@@ -142562,6 +142599,7 @@ function codedError(message2, code) {
     error2.code = code;
   return error2;
 }
+var ATTEMPTS_KEPT = 5;
 
 // src/workers/email-source/dashboard-messaging-runner.ts
 import { spawn as spawn9 } from "node:child_process";
@@ -142663,6 +142701,7 @@ var init_dashboard_messaging_runner = __esm(() => {
 // src/workers/email-source/dashboard-messaging-service.ts
 import { spawn as spawn10 } from "node:child_process";
 import { closeSync as closeSync30, constants as constants16, fstatSync as fstatSync7, openSync as openSync29, readFileSync as readFileSync75 } from "node:fs";
+import { arch, platform as platform2, release } from "node:os";
 import { basename as basename19, join as join117 } from "node:path";
 function sourceOf(value2) {
   if (value2 !== "telegram" && value2 !== "whatsapp")
@@ -142810,6 +142849,7 @@ function createDashboardMessagingService(options) {
     return { path, grant: read.grant, fingerprint: JSON.stringify(read.grant) };
   };
   const manager = createDashboardMessagingPairing({
+    identity: { version: runningOlympusVersion(), os: `${platform2() === "darwin" ? "macOS" : platform2()} (kernel ${release()}, ${arch()})` },
     pair: (source, hooks) => options.withMessagingCapturePaused(source, async () => {
       let created;
       try {
@@ -143011,6 +143051,7 @@ var init_dashboard_messaging_service = __esm(() => {
   init_messaging_runtime();
   init_package_root();
   init_pairing_session_paths();
+  init_update_check();
   init_dashboard_messaging_runner();
 });
 
@@ -145910,7 +145951,7 @@ function mountDashboardController(options) {
           const summary = document.createElement("summary");
           summary.textContent = "How to fix";
           const hint = document.createElement("p");
-          hint.textContent = source === "whatsapp" ? body.unlinked === "removed" ? "Olympus removed itself from your phone's linked devices, so there is nothing to clean up. Pair again; if it fails again, send the code shown above to support. It names the step that failed and nothing about your account." : body.unlinked === "offline" || body.unlinked === "failed" ? "Olympus could not remove itself from your phone. Remove the Olympus entry in WhatsApp → Settings → Linked devices, then pair again. If it fails again, send the code shown above to support." : "Pair again. If it fails again, send the code shown above to support; it names the step that failed and nothing about your account." : "Check api_id and api_hash at my.telegram.org/apps. Enter the latest code from Telegram and your two-step verification password if asked. Then try pairing again.";
+          hint.textContent = source === "whatsapp" ? body.unlinked === "removed" ? "Olympus removed itself from your phone's linked devices, so there is nothing to clean up. Pair again; if it fails again, press Copy details and send what it copies to support." : body.unlinked === "offline" || body.unlinked === "failed" ? "Olympus could not remove itself from your phone. Remove the Olympus entry in WhatsApp → Settings → Linked devices, then pair again. If it fails again, press Copy details and send what it copies to support." : "Pair again. If it fails again, press Copy details and send what it copies to support." : "Check api_id and api_hash at my.telegram.org/apps. Enter the latest code from Telegram and your two-step verification password if asked. Then try pairing again.";
           details.append(summary, hint);
           const retry = document.createElement("button");
           retry.type = "button";
@@ -145918,6 +145959,25 @@ function mountDashboardController(options) {
           retry.dataset.messagingRetry = "";
           retry.textContent = "Back to setup";
           error2.append(details, retry);
+          if (typeof body.details === "string" && body.details) {
+            const report = document.createElement("div");
+            report.className = "promptbox";
+            report.id = `pairing-details-${source}`;
+            report.textContent = body.details;
+            const copy = document.createElement("button");
+            copy.type = "button";
+            copy.className = "btn";
+            copy.dataset.copyTarget = `#${report.id}`;
+            copy.textContent = "Copy details";
+            const said = document.createElement("span");
+            said.dataset.copyStatus = "";
+            said.setAttribute("aria-live", "polite");
+            const note = document.createElement("p");
+            note.textContent = "Nothing from your account: no names, numbers or chats.";
+            const row = document.createElement("div");
+            row.append(copy, said);
+            error2.append(report, note, row);
+          }
           setupSheet.append(error2);
         }
       }
@@ -155659,18 +155719,18 @@ var init_agent_instructions = __esm(() => {
 // src/workers/dashboard/agents.ts
 function renderDashboardAgentsSection(input) {
   const { view: view3 } = input;
-  const platform2 = input.platform ?? process.platform;
+  const platform3 = input.platform ?? process.platform;
   const host = {
     ...input,
-    platform: platform2,
-    headless: input.headless ?? resolveServerMode({ env: process.env, platform: platform2 }).remote
+    platform: platform3,
+    headless: input.headless ?? resolveServerMode({ env: process.env, platform: platform3 }).remote
   };
   return [
     '<div class="sect" id="agents">Agents</div>',
     remoteAccessRow(view3.remoteAccess, view3.remoteAccessManual),
     setupRow({
       label: "Connect an agent",
-      blurb: platform2 === "linux" ? "Let ChatGPT, Claude, Grok or a coding agent ask Olympus, under the same privacy rules on this computer." : "Let ChatGPT, Claude, Grok or a coding agent ask Olympus, under the same privacy rules as your OpenClaw agent.",
+      blurb: platform3 === "linux" ? "Let ChatGPT, Claude, Grok or a coding agent ask Olympus, under the same privacy rules on this computer." : "Let ChatGPT, Claude, Grok or a coding agent ask Olympus, under the same privacy rules as your OpenClaw agent.",
       action: { label: "Connect an agent", kind: "none", sheet: AGENT_CONNECT_SHEET_ID, primary: true }
     }),
     connectSheet(view3.remoteAccess, host),
@@ -164798,15 +164858,15 @@ function createEmailSourceWorker(options = {}) {
   }
   async function withDashboardGrantMutation(mutation) {
     const previous = dashboardGrantMutationTail;
-    let release;
+    let release2;
     dashboardGrantMutationTail = new Promise((resolve27) => {
-      release = resolve27;
+      release2 = resolve27;
     });
     await previous;
     try {
       return await mutation();
     } finally {
-      release();
+      release2();
     }
   }
   function assertFileSourceSyncApproved(sourceId) {
@@ -182716,8 +182776,8 @@ function shortHash(value2) {
 function normalizeNetworkSource(source) {
   return source.trim().toLowerCase().replace(/^\/\/[^@/]*@/, "//").replace(/\/+$/, "");
 }
-function defaultReadMounts(platform2) {
-  if (platform2 === "darwin")
+function defaultReadMounts(platform3) {
+  if (platform3 === "darwin")
     return execFileSync5("/sbin/mount", [], { encoding: "utf8", timeout: 5000 });
   return readFileSync83("/proc/self/mountinfo", "utf8");
 }
@@ -204898,9 +204958,9 @@ ${plaintext.answer}`;
     return detail === "full" ? Math.max(this.analysisTimeoutMs, this.fullAnalysisTimeoutMs) : this.analysisTimeoutMs;
   }
   beginActivity() {
-    let release;
+    let release2;
     try {
-      release = this.options.activity?.begin();
+      release2 = this.options.activity?.begin();
     } catch {
       return () => {
         return;
@@ -204912,8 +204972,8 @@ ${plaintext.answer}`;
         return;
       ended = true;
       try {
-        if (typeof release === "function")
-          release();
+        if (typeof release2 === "function")
+          release2();
         else
           this.options.activity?.end();
       } catch {}
@@ -206013,13 +206073,13 @@ async function callTool(request, name, options) {
   });
   try {
     const result = await runWithReleaseManifestSink(manifests, () => operation.handler(ctx, params.value));
-    const release = () => remoteOperationOutput(operation.name, result, {
+    const release2 = () => remoteOperationOutput(operation.name, result, {
       ...ctx.releaseCheck ? { releaseCheck: ctx.releaseCheck } : {},
       releaseManifests: manifests.manifests
     });
-    const approved = release();
+    const approved = release2();
     const privateMayAnswer = privatePart ? await privatePart.settle(result, approved) : false;
-    const output = privatePart ? release() : approved;
+    const output = privatePart ? release2() : approved;
     return jsonResponse(200, privateMayAnswer ? withRemotePrivateNote(output, privatePart?.answerId, privatePart?.secretMatch) : output);
   } catch (error2) {
     return operationErrorResponse(error2, declaredParams);
@@ -217719,11 +217779,11 @@ function refuseWorkerServiceBesideEngine(options) {
   throw new OperationError("config_error", "The Olympus engine already runs the worker on this computer; a separate worker service would compete with it for the same data and port. Use olympus engine status, olympus engine logs or olympus engine restart instead. To remove a worker service installed earlier, run olympus worker uninstall.");
 }
 function engineRunsWorkerHere(options) {
-  const platform2 = options.platform ?? process.platform;
-  if (platform2 !== "darwin" && platform2 !== "linux")
+  const platform3 = options.platform ?? process.platform;
+  if (platform3 !== "darwin" && platform3 !== "linux")
     return false;
   const env = options.homeDir ? { HOME: options.homeDir } : process.env;
-  return existsSync100(engineServicePaths({ env, platform: platform2 }).plistPath);
+  return existsSync100(engineServicePaths({ env, platform: platform3 }).plistPath);
 }
 function linuxDesktopOpenHandler(action, options) {
   if ((options.platform ?? process.platform) !== "linux")
@@ -217943,7 +218003,7 @@ function parseSetupArgs(args) {
   let sovereigntyPath;
   let force = false;
   let dryRun = false;
-  let platform2;
+  let platform3;
   let homeDir;
   let olympusBin;
   let workingDirectory;
@@ -217972,10 +218032,10 @@ function parseSetupArgs(args) {
     } else if (arg === "--dry-run") {
       dryRun = true;
     } else if (arg === "--platform") {
-      platform2 = parseWorkerPlatform(requireNext(args, index, "--platform"));
+      platform3 = parseWorkerPlatform(requireNext(args, index, "--platform"));
       index += 1;
     } else if (arg?.startsWith("--platform=")) {
-      platform2 = parseWorkerPlatform(arg.slice("--platform=".length));
+      platform3 = parseWorkerPlatform(arg.slice("--platform=".length));
     } else if (arg === "--home") {
       homeDir = requireNext(args, index, "--home");
       index += 1;
@@ -218013,7 +218073,7 @@ function parseSetupArgs(args) {
     ...sovereigntyPath ? { sovereigntyPath } : {},
     force,
     dryRun,
-    ...platform2 ? { platform: platform2 } : {},
+    ...platform3 ? { platform: platform3 } : {},
     ...homeDir ? { homeDir } : {},
     ...olympusBin ? { olympusBin } : {},
     ...workingDirectory ? { workingDirectory } : {},
@@ -218392,9 +218452,9 @@ function parseConnectOptions(args) {
   return options;
 }
 function restartCaptureWorker(deps = {}) {
-  const platform2 = deps.platform ?? process.platform;
+  const platform3 = deps.platform ?? process.platform;
   const engineLoaded = deps.engineLoaded ?? (() => engineDataCustody(inspectEngine()) === "loaded");
-  if ((platform2 === "darwin" || platform2 === "linux") && engineLoaded()) {
+  if ((platform3 === "darwin" || platform3 === "linux") && engineLoaded()) {
     try {
       (deps.restartEngine ?? restartEngine)();
       return { ok: true, next: "" };

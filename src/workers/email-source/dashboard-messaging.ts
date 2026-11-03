@@ -30,11 +30,24 @@ type PairState = {
   task?: Promise<void>;
 };
 
+/** One finished pairing attempt, for the Copy details block: a time and a fixed outcome code. */
+type PairAttempt = { at: string; outcome: string };
+const ATTEMPTS_KEPT = 5;
+
 export function createDashboardMessagingPairing<T extends PairResult>(options: {
   pair(source: MessagingSource, hooks: PairingHooks): Promise<T>;
   publish(source: MessagingSource, result: T, signal: AbortSignal): Promise<void>;
+  /** Olympus's version and the computer's OS, for the Copy details block. */
+  identity?: { version: string; os: string };
+  now?: () => Date;
 }) {
   const states = new Map<MessagingSource, PairState>();
+  const attempts = new Map<MessagingSource, PairAttempt[]>();
+  const record = (source: MessagingSource, outcome: string) => {
+    const list = attempts.get(source) ?? [];
+    list.push({ at: (options.now?.() ?? new Date()).toISOString(), outcome });
+    attempts.set(source, list.slice(-ATTEMPTS_KEPT));
+  };
   const status = (source: MessagingSource) => {
     const item = states.get(source);
     return item ? {
@@ -47,6 +60,10 @@ export function createDashboardMessagingPairing<T extends PairResult>(options: {
       ...(item.chats ? { chats: item.chats } : {}),
       ...(item.state === 'scope_selection_required' ? { wholeAccount: false, chatScopes: [] } : {}),
       ...(item.registrationMayBeSaved ? { registrationMayBeSaved: true } : {}),
+      ...(item.state === 'failed' ? { details: pairingDetails({
+        source, state: item.state, reason: item.reason, linked: item.linked === true, unlinked: item.unlinked,
+        registrationMayBeSaved: item.registrationMayBeSaved === true, attempts: attempts.get(source) ?? [], identity: options.identity,
+      }) } : {}),
     } : { ok: true as const, state: 'idle' as const };
   };
   return {
@@ -108,6 +125,8 @@ export function createDashboardMessagingPairing<T extends PairResult>(options: {
             console.warn(`[messaging] ${source} pairing failed: ${item.reason}`);
           }
         } finally {
+          if (item.state === 'paired' || item.state === 'cancelled') record(source, item.state);
+          else if (item.state === 'failed') record(source, item.reason ?? 'unexpected');
           delete item.reply;
           delete item.field;
           delete item.qr;
@@ -153,6 +172,37 @@ export function createDashboardMessagingPairing<T extends PairResult>(options: {
     },
     close() { for (const source of states.keys()) this.cancel(source); },
   };
+}
+
+/**
+ * The block a failed pairing card copies for support. Content-free by construction: every
+ * value is a fixed code, a boolean, a timestamp, or Olympus's version and OS; never a name, number,
+ * chat title, path or provider message.
+ */
+export function pairingDetails(input: {
+  source: MessagingSource;
+  state: 'failed';
+  reason?: string | undefined;
+  linked: boolean;
+  unlinked?: 'removed' | 'offline' | 'failed' | undefined;
+  registrationMayBeSaved: boolean;
+  attempts: readonly PairAttempt[];
+  identity?: { version: string; os: string } | undefined;
+}): string {
+  const code = (value: string | undefined) => value && /^[a-z0-9_]{1,64}$/.test(value) ? value : 'unexpected';
+  const lines = [
+    `Olympus ${input.identity?.version ?? 'unknown'}`,
+    `OS: ${input.identity?.os ?? 'unknown'}`,
+    `Source: ${input.source}`,
+    `State: ${input.state}`,
+    `Failure: ${code(input.reason)}`,
+    ...(input.source === 'whatsapp' ? [`Phone accepted the QR: ${input.linked ? 'yes' : 'no'}`] : []),
+    ...(input.unlinked ? [`Phone entry: ${input.unlinked}`] : []),
+    ...(input.registrationMayBeSaved ? ['Connection may be saved: yes'] : []),
+    'Recent attempts:',
+    ...input.attempts.map(attempt => `  ${attempt.at} ${code(attempt.outcome)}`),
+  ];
+  return lines.join('\n');
 }
 
 /** A failure's fixed code (`Error.code`, set by the pairing and listing helpers), or `unexpected`. */

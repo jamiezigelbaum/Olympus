@@ -135,6 +135,85 @@ describe('what a WhatsApp pairing shows after the scan', () => {
   });
 });
 
+describe('Copy details on a failed pairing', () => {
+  test('lists version, OS, the failure and recent attempts, and nothing from the account', async () => {
+    const warn = console.warn;
+    console.warn = () => {};
+    try {
+      let attempt = 0;
+      const manager = createDashboardMessagingPairing({
+        identity: { version: '1.3.1', os: 'macOS (kernel 25.1.0, arm64)' },
+        now: () => new Date(Date.UTC(2026, 10, 3, 9, attempt)),
+        pair: async (_source, hooks) => {
+          attempt += 1;
+          hooks.qr('data:image/png;base64,AAAA');
+          hooks.linked();
+          const error = codedError('Listing failed for Mark +351 912 at /Users/mark/.local/share', attempt === 1 ? 'chat_list_timeout' : 'chat_list_exit_3') as Error & { unlinked?: string };
+          error.unlinked = 'removed';
+          throw error;
+        },
+        publish: async () => {},
+      });
+      expect(manager.status('whatsapp')).not.toHaveProperty('details');
+      for (let i = 0; i < 2; i++) {
+        manager.start('whatsapp');
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      }
+      const status = manager.status('whatsapp') as { details?: string };
+      expect(status.details).toBe([
+        'Olympus 1.3.1',
+        'OS: macOS (kernel 25.1.0, arm64)',
+        'Source: whatsapp',
+        'State: failed',
+        'Failure: chat_list_exit_3',
+        'Phone accepted the QR: yes',
+        'Phone entry: removed',
+        'Recent attempts:',
+        '  2026-11-03T09:01:00.000Z chat_list_timeout',
+        '  2026-11-03T09:02:00.000Z chat_list_exit_3',
+      ].join('\n'));
+      expect(status.details).not.toMatch(/mark|351|Users/i);
+    } finally {
+      console.warn = warn;
+    }
+  });
+
+  test('keeps the last five attempts and shows details only after a failure', async () => {
+    let fail = true;
+    const manager = createDashboardMessagingPairing({
+      pair: async (_source, hooks) => {
+        if (fail) throw new Error('x');
+        return await new Promise<never>((_resolve, reject) => hooks.signal.addEventListener('abort', () => reject(new Error('cancelled'))));
+      },
+      publish: async () => {},
+    });
+    const warn = console.warn;
+    console.warn = () => {};
+    try {
+      for (let i = 0; i < 7; i++) {
+        manager.start('telegram');
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      }
+    } finally { console.warn = warn; }
+    const details = (manager.status('telegram') as { details: string }).details;
+    expect(details.split('\n').filter(line => line.startsWith('  ')).length).toBe(5);
+    expect(details).toContain('Olympus unknown');
+    expect(details).not.toContain('Phone accepted');
+    fail = false;
+    manager.start('telegram');
+    await Promise.resolve();
+    expect(manager.status('telegram')).not.toHaveProperty('details');
+    manager.cancel('telegram');
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(manager.status('telegram')).not.toHaveProperty('details');
+    // The cancelled attempt still counts in the next failure's history.
+    fail = true;
+    manager.start('telegram');
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect((manager.status('telegram') as { details: string }).details).toMatch(/ cancelled\n.* unexpected$/);
+  });
+});
+
 describe('the WhatsApp chat listing', () => {
   const script = (body: string) => {
     const dir = mkdtempSync(join(tmpdir(), 'wa-list-'));
