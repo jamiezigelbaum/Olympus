@@ -155,7 +155,7 @@ export interface DoctorHostFacts {
   /** Absolute `openclaw` executable, when one is installed. */
   openclawPath?: string;
   /** The standalone engine LaunchAgent (macOS). */
-  engine: { installed: boolean; state: string; workerProblem?: string | undefined; healthy?: boolean; detail?: string; linger?: boolean | undefined };
+  engine: { manager?: 'agent' | 'daemon' | 'systemd'; installed: boolean; state: string; workerProblem?: string | undefined; healthy?: boolean; detail?: string; linger?: boolean | undefined };
   /** The legacy worker unit from `olympus worker install`. */
   legacyWorkerUnit: boolean;
   /** Doctor is running inside the OpenClaw Gateway (the native tool surface). */
@@ -178,7 +178,7 @@ export async function defaultDoctorHostProbe(
   const health = process.platform === 'linux' && engine.installed ? await waitForEngineHealthy({ paths, expectedBuild: linuxInstalledBuild({ homeDir: home, env }) }, { timeoutMs: 0 }) : undefined;
   return {
     ...(openclawPath ? { openclawPath } : {}),
-    engine: { installed: engine.installed, state: engine.state, ...(engine.state === 'running' ? { workerProblem: readEngineWorkerProblem(paths.statusPath) } : {}), ...(process.platform === 'linux' ? { healthy: (health?.ok ?? false) && readEngineLinger() === true, detail: health?.reason ?? ('detail' in engine ? engine.detail : ''), linger: readEngineLinger() } : {}) },
+    engine: { ...('manager' in engine && engine.manager !== 'systemd' ? { manager: engine.manager } : {}), installed: engine.installed, state: engine.state, ...(engine.state === 'running' ? { workerProblem: readEngineWorkerProblem(paths.statusPath) } : {}), ...(process.platform === 'linux' ? { healthy: (health?.ok ?? false) && readEngineLinger() === true, detail: health?.reason ?? ('detail' in engine ? engine.detail : ''), linger: readEngineLinger() } : {}) },
     legacyWorkerUnit,
     ...(options.insideOpenClaw ? { insideOpenClaw: true } : {}),
   };
@@ -565,7 +565,7 @@ async function hostCheck(deps: DoctorDeps): Promise<DoctorCheck> {
   if (facts.engine.installed && facts.legacyWorkerUnit) return { name: 'host', ok: false, detail: 'A worker service from olympus worker install is installed beside the engine and competes with it for the same data and port.', hint: 'Run olympus worker uninstall. The engine keeps running and owns the worker.' };
   if (facts.engine.installed && (facts.engine.healthy === false || facts.engine.linger === false)) return { name: 'host', ok: false, detail: facts.engine.detail || 'The Linux engine has not proved healthy and persistent.', hint: 'Run olympus engine status and olympus engine logs. Repair configuration, then run systemctl --user reset-failed olympus-engine.service followed by olympus engine start.' };
   const hosts: string[] = [];
-  if (facts.engine.installed) hosts.push(`standalone engine (${facts.engine.state})`);
+  if (facts.engine.installed) hosts.push(`standalone engine (${facts.engine.manager === 'agent' || facts.engine.manager === 'daemon' ? facts.engine.manager + ', ' : ''}${facts.engine.state})`);
   if (facts.insideOpenClaw) hosts.push('OpenClaw (this Gateway)');
   else if (facts.openclawPath) hosts.push(`OpenClaw (${facts.openclawPath})`);
   if (facts.legacyWorkerUnit) hosts.push('worker unit from olympus worker install');

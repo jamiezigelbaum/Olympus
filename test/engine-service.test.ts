@@ -671,6 +671,12 @@ describe('doctor without OpenClaw', () => {
     expect(result.checks.find((check) => check.name === 'dependencies')).toMatchObject({ ok: true });
   });
 
+  test('doctor names the standalone daemon manager and state', async () => {
+    const result = await runDoctor(deps({ engine: { manager: 'daemon', installed: true, state: 'running' }, legacyWorkerUnit: false }));
+    expect(result.checks.find(check => check.name === 'host')).toMatchObject({ ok: true });
+    expect(result.checks.find(check => check.name === 'host')?.detail).toContain('daemon, running');
+  });
+
   test('says what is missing when nothing hosts the engine', async () => {
     const result = await runDoctor(deps({ engine: { installed: false, state: 'not_loaded' }, legacyWorkerUnit: false }));
     expect(result.checks.find((check) => check.name === 'host')).toMatchObject({

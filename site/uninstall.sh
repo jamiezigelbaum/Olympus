@@ -123,6 +123,50 @@ stop_agent() {
   die "Olympus could not be stopped, so nothing was removed." "launchctl still reports $target (status $printed). Restart the Mac, then run this again, or email support@olympusplugin.ai."
 }
 
+# The fixed removal script also checks that this daemon belongs to this account.
+# No installed Olympus executable is needed, and cancelling precedes all deletion.
+stop_daemon() {
+  if [ ! -e /Library/LaunchDaemons/ai.olympusplugin.engine.plist ] && [ ! -L /Library/LaunchDaemons/ai.olympusplugin.engine.plist ]; then return 0; fi
+  say "Your Mac will ask for an administrator's password to remove Olympus server mode. Cancelling keeps Olympus installed."
+  if ! osascript -e 'on run argv
+  do shell script ("/bin/sh -c '\''set -eu
+[ \"$#\" = 2 ] || exit 64
+owner=$1
+owner_uid=$2
+case \"$owner\" in '\''\\'\'''\'''\''\\'\'''\''|root|[!a-zA-Z_]*|*[!a-zA-Z0-9._-]*) exit 64 ;; esac
+[ \"${#owner}\" -le 32 ] || exit 64
+case \"$owner_uid\" in '\''\\'\'''\'''\''\\'\'''\''|*[!0-9]*) exit 64 ;; esac
+[ \"$owner_uid\" -gt 0 ] && [ \"$owner_uid\" -le 2147483647 ] || exit 64
+[ \"$(/usr/bin/id -u \"$owner\")\" = \"$owner_uid\" ] || exit 64
+[ \"$(/usr/bin/id -u)\" = 0 ] || exit 77
+daemon=/Library/LaunchDaemons/ai.olympusplugin.engine.plist
+target=system/ai.olympusplugin.engine
+if [ -e \"$daemon\" ] || [ -L \"$daemon\" ]; then
+  [ -f \"$daemon\" ] && [ ! -L \"$daemon\" ] || exit 65
+  [ \"$(/usr/bin/plutil -extract UserName raw -o - \"$daemon\")\" = \"$owner\" ] || exit 65
+fi
+printed=0
+/bin/launchctl print \"$target\" >/dev/null 2>&1 || printed=$?
+case \"$printed\" in
+  0) /bin/launchctl bootout \"$target\" ;;
+  113|3) ;;
+  *) exit 75 ;;
+esac
+n=0
+while :; do
+  printed=0
+  /bin/launchctl print \"$target\" >/dev/null 2>&1 || printed=$?
+  case \"$printed\" in 113|3) break ;; 0) ;; *) exit 75 ;; esac
+  n=$((n + 1)); [ \"$n\" -lt 120 ] || exit 75
+  /bin/sleep 0.25
+done
+/bin/rm -f \"$daemon\"
+'\'' olympus " & quoted form of (item 1 of argv) & " " & quoted form of (item 2 of argv)) with administrator privileges
+end run' "$(id -un)" "$(id -u)"; then
+    die "The administrator request did not finish. Olympus is still installed." "Open this Mac with Screen Sharing and try removing Olympus again."
+  fi
+}
+
 main() {
   [ "$(uname -s)" = "Darwin" ] || die "this uninstaller is for macOS."
   [ "$(id -u)" != "0" ] \
@@ -144,7 +188,9 @@ main() {
     die "$PLIST is not a file, so nothing was removed." "Move it aside, then run this again."
   fi
 
-  # 1. Stop it: always ask launchd, even with the app and plist gone.
+  # 1. Remove a server daemon first, before touching the login item or app.
+  stop_daemon
+  # Always ask launchd, even with the app and plist gone.
   stop_agent
   if [ -e "$PLIST" ] || [ -L "$PLIST" ]; then
     rm -f "$PLIST"

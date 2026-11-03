@@ -1,3 +1,4 @@
+import { dashboardComputerIdentity } from '../../core/computer-identity.ts';
 /**
  * The page's shared HTML pieces: status glyphs, cards, rows, the connector
  * sheet, and the standalone bootstrap for the shared browser controller.
@@ -194,7 +195,7 @@ export function pageShell(input: DashboardPageShellInput): string {
   const content = `<div class="frame">
       <div class="page">
       <div class="top">
-        <span class="brand">${brand}</span>${input.meta ? `
+        <span class="brand">${brand}</span><span class="meta" data-computer-identity>${escapeHtml(dashboardComputerIdentity())}</span>${input.meta ? `
         <span class="meta">${escapeHtml(input.meta)}</span>` : ''}
       </div>
       ${input.body}
@@ -920,6 +921,7 @@ export function standaloneDashboardControllerScript(
         if (action === 'test_local_models') return ['/dashboard/models/local/test', withoutAction(params)];
         if (action === 'save_local_answer_model') return ['/dashboard/models/local/save', withoutAction(params)];
         if (action === 'check_model_setup') return ['/dashboard/models/check', {}];
+        if (action === 'set_computer_use') return ['/dashboard/engine/computer-use', withoutAction(params)];
         if (action === 'save_first_run_privacy') return ['/dashboard/models/first-run-privacy', withoutAction(params)];
         if (action === 'connect_api_key') return ['/dashboard/connect/api-key', withoutAction(params)];
         if (action === 'connect_this_computer') return ['/dashboard/connect/this-computer', withoutAction(params)];

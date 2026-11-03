@@ -266,7 +266,7 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
 
   function applyWriteCapability(): void {
     root.querySelectorAll<HTMLFormElement>(
-      'form[data-connect-kind],form[data-model-check],form[data-first-run-privacy],form[data-local-models-discover],form[data-local-models-test],form[data-agent-kind]',
+      'form[data-connect-kind],form[data-model-check],form[data-first-run-privacy],form[data-computer-use],form[data-local-models-discover],form[data-local-models-test],form[data-agent-kind]',
     ).forEach((form) => {
       // A form whose request is still outstanding keeps its submit controls
       // disabled, so a second click cannot issue a second transport call,
@@ -467,6 +467,7 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
     const body = formRecord(form);
     if (form.hasAttribute('data-local-models-discover')) return { action: 'discover_local_models', base_url: body.base_url ?? '' };
     if (form.hasAttribute('data-local-models-test')) return { action: 'save_local_answer_model', base_url: body.base_url ?? '', answer_model: body.answer_model ?? '' };
+    if (form.hasAttribute('data-computer-use')) return { action: 'set_computer_use', choice: (form.hasAttribute('data-server-mode') ? body.server === 'on' : body.choice === 'server') ? 'server' : 'everyday' };
     if (form.hasAttribute('data-first-run-privacy')) return { action: 'save_first_run_privacy', choice: body.choice ?? '' };
     const connect = form.dataset.connectKind;
     if (connect === 'oauth') {
@@ -1301,7 +1302,7 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
       return;
     }
     if (!form.matches(
-      '[data-connect-kind],[data-model-check],[data-first-run-privacy],[data-local-models-discover],[data-local-models-test]',
+      '[data-connect-kind],[data-model-check],[data-first-run-privacy],[data-computer-use],[data-local-models-discover],[data-local-models-test]',
     )) return;
     event.preventDefault();
     // Every control form records what it submitted: the answer may only

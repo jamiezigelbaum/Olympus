@@ -17,6 +17,8 @@ export interface ModelSetupCard {
 }
 
 export interface ModelSetupView {
+  computer_use_pending?: boolean;
+  engine_server_mode?: import('./engine-service.ts').MacServerModeView;
   ready: boolean;
   checked_at: string;
   privacy_choice_pending?: boolean;

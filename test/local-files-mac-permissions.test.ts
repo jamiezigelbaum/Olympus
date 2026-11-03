@@ -460,3 +460,17 @@ test('missing helper copy uses the approved wording', () => {
   expect(MAC_ACCESS_COPY.needsHelper).toBe('Desktop, Documents, Downloads, iCloud Drive and other disks need the Olympus helper app. Update Olympus to add it, or choose a folder outside them.');
   expect(MAC_ACCESS_COPY.needsHelperWholeComputer).toBe('Reading the whole computer needs the Olympus helper app. Update Olympus to add it, or choose folders outside Desktop, Documents, Downloads, iCloud Drive and other disks.');
 });
+
+test('server mode names Full Disk Access and Screen Sharing without waiting for an impossible folder prompt', async () => {
+  let prompts = 0;
+  const permissions = new MacPermissions({ platform: 'darwin', home: '/Users/mark', helperPresent: () => true, serverMode: () => true,
+    list: async () => { prompts++; throw refusal('EPERM'); }, listProtected: () => { throw refusal('EPERM'); },
+  });
+  const guard = { kind: 'documents' as const, root: '/Users/mark/Documents' };
+  expect(permissions.nodeAccess(guard)?.message).toContain('Full Disk Access');
+  const denied = await permissions.open(guard);
+  expect(denied?.message).toContain('Screen Sharing');
+  expect(denied?.message).toContain('dashboard');
+  expect(denied?.settings_url).toBe(FULL_DISK_ACCESS_URL);
+  expect(prompts).toBe(0);
+});

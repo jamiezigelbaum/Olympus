@@ -1,3 +1,5 @@
+import { MAC_ENGINE_DAEMON_PLIST, authorizeMacServerMode, macEngineManager } from './core/mac-engine-daemon.ts';
+import { spawnSync } from 'node:child_process';
 import {
   SECRET_LOCATIONS_SQLITE_STORE_ID,
   TIER_LEDGER_SQLITE_STORE_ID,
@@ -601,15 +603,23 @@ function deleteAllOlympusData(options: { dryRun?: boolean } & LifecyclePathConte
   for (const target of targets) {
     if (existsSync(target.path)) assertDeleteTargetSafe(target);
   }
+  const removesDaemon = options.dryRun !== true && targets.some(target => target.path === MAC_ENGINE_DAEMON_PLIST);
+  if (removesDaemon) {
+    authorizeMacServerMode(false, {}, (command, args) => {
+      const result = spawnSync(command, args, { encoding: 'utf8' });
+      return { status: result.status, stdout: result.stdout ?? '', stderr: result.stderr ?? '' };
+    });
+  }
   const removed: string[] = [];
   const missing: string[] = [];
   for (const target of targets) {
     if (!existsSync(target.path)) {
+      if (removesDaemon && target.path === MAC_ENGINE_DAEMON_PLIST) { removed.push(target.path); continue; }
       missing.push(target.path);
       continue;
     }
     removed.push(target.path);
-    if (options.dryRun !== true) rmTargetKeepingOwnerLock(target, ownerLockPath);
+    if (options.dryRun !== true && target.path !== MAC_ENGINE_DAEMON_PLIST) rmTargetKeepingOwnerLock(target, ownerLockPath);
   }
   // A registry the targets did not reach (a data folder outside every known
   // root keeps it there) names no account's history any more.
@@ -1191,6 +1201,7 @@ function allDeleteTargets(context: LifecyclePathContext): DeleteTarget[] {
     ...accountTrashTargets(context),
     serviceUnitTarget(workerServicePaths('darwin', home).unitPath),
     serviceUnitTarget(workerServicePaths('linux', home).unitPath),
+    ...(process.platform === 'darwin' && macEngineManager(home) === 'daemon' ? [serviceUnitTarget(MAC_ENGINE_DAEMON_PLIST)] : []),
     ...globExisting(join(home, 'Library', 'LaunchAgents'), /^(?:(?:com|org)\.openclaw\.olympus.*|ai\.olympusplugin\.engine)\.plist$/)
       .map(serviceUnitTarget),
     ...globExisting(join(home, '.config', 'systemd', 'user'), /^olympus.*\.(service|timer)$/)
