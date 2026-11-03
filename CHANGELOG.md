@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.3.2 - 2026-11-03
+
+- **Run Olympus on an always-on Mac.** Choose "Always on, as a server" on the dashboard, or turn on Keep Olympus running when no one is logged in. Your Mac asks for an administrator password once; after that Olympus starts after a restart without anyone logging in (#751). A new help page covers accounts, FileVault, the network and agents for this setup (#753).
+- **Agents on another account or your tailnet.** On the Agents page, choose Agent on another account of this computer or Agent on my tailnet. Each agent gets its own address and key, which you can revoke. Neither opens Olympus to your local network or the internet (#764).
+- **No Terminal after install.** Remote access has a switch on the dashboard (#748). Every failed source card has Copy details, and the Help page has Copy system report, with no names, messages or file paths (#747). Built-in model downloads show their progress (#750), and the Private-answer mode you chose is shown and can be changed on screen (#749). The Mac installer's closing text no longer assumes ChatGPT (#752).
+- Paired WhatsApp and Telegram cards name the linked account and lead with Choose chats; Pair again stays as a secondary button (#762).
+- The dashboard header names this computer and the account Olympus runs as.
+- Linux upgrades from older installs keep working, and anonymous questions held by an interrupted payment are recovered (#734, #735, #740).
+
 ## 1.3.1 - 2026-11-03
 
 - **WhatsApp pairing works again.** After the scan, Olympus could not read the chat list when someone was in two of your groups, so pairing failed although your phone showed Olympus as linked (#744). Olympus also now reports WhatsApp's current version, which WhatsApp requires to link a device; with the old one, the phone said "Couldn't link device" (#759).
