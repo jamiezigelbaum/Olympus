@@ -37354,6 +37354,7 @@ var init_status = __esm(() => {
   init_store();
   init_telegram_messages();
   init_operation_error();
+  init_control_path_headroom();
   init_secret_locations();
 });
 
