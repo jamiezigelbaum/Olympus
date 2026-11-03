@@ -763,13 +763,14 @@ hard-coding them. A cited-answer round trip uses the discovered
 
 The optional packaged Hermes skill is
 [`integrations/hermes/ask-sources/SKILL.md`](integrations/hermes/ask-sources/SKILL.md).
-Copy its directory to `~/.hermes/skills/ask-sources/` or expose the parent with
+It is also published on ClawHub, which Hermes's skills hub searches, so
+`hermes skills install clawhub/olympus-hermes` installs it. Or copy its
+directory to `~/.hermes/skills/ask-sources/` or expose the parent with
 `skills.external_dirs`; it declares the same four tools and no fallback access.
 
 No `hermes://mcp/install` link is published: current Hermes upstream documents
 custom MCP installation through `hermes mcp add` but does not document that URI
-handler. No Nous catalog submission has been made; that remains a later,
-separately reviewed external action.
+handler.
 
 There are no operator agent tools. Index maintenance — sync, extraction,
 embedding, retries — is the worker's own scheduler, and what a person drives by
