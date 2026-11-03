@@ -1022,6 +1022,58 @@ describe('CLI tool surface', () => {
     }
   }, 30_000);
 
+  test('worker status says a worker too busy to answer is busy, within seconds', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'olympus-cli-worker-busy-test-'));
+    const binDir = join(dir, 'bin');
+    const home = join(dir, 'home');
+    // Accepts the connection and never answers, like a worker frozen in an import.
+    const server = createServer(() => undefined);
+    let serverOpen = false;
+    try {
+      mkdirSync(binDir, { recursive: true });
+      mkdirSync(home, { recursive: true });
+      writeFileSync(join(binDir, 'systemctl'), [
+        '#!/bin/sh',
+        'case "$*" in',
+        '  "--user status olympus-worker.service") printf "active\\n" ;;',
+        '  *) printf "unexpected systemctl call: %s\\n" "$*" >&2; exit 1 ;;',
+        'esac',
+        '',
+      ].join('\n'));
+      chmodSync(join(binDir, 'systemctl'), 0o755);
+      const linux = process.platform === 'linux';
+      const socket = join(dir, 'olympus', 'worker.sock');
+      if (linux) mkdirSync(join(dir, 'olympus'), { mode: 0o700 });
+      await new Promise<void>((resolve) => linux ? server.listen(socket, resolve) : server.listen(0, '127.0.0.1', resolve));
+      if (linux) chmodSync(socket, 0o600);
+      serverOpen = true;
+      const address = server.address();
+      const baseUrl = linux ? 'http://127.0.0.1:8010/v1' : `http://127.0.0.1:${(address as { port: number }).port}/v1`;
+      const started = Date.now();
+      const busy = await runSourceCli(['worker', 'status', '--platform', 'linux', '--home', home], {
+        XDG_RUNTIME_DIR: dir,
+        PATH: `${binDir}:${process.env.PATH ?? ''}`,
+        OLYMPUS_CONFIG: join(dir, 'missing-config.json'),
+        OLYMPUS_EMAIL_BASE_URL: baseUrl,
+        OLYMPUS_WORKER_AUTH_TOKEN: 'worker-busy-token',
+      });
+      expect(Date.now() - started).toBeLessThan(15_000);
+      const output = JSON.parse(busy.stdout);
+      expect(output.worker_http).toMatchObject({ reachable: false, busy: true });
+      expect(output.worker_http.error).toContain('did not answer within 5 seconds');
+    } finally {
+      server.closeAllConnections();
+      if (serverOpen) await new Promise<void>((resolve) => server.close(() => resolve()));
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  test('a bare olympus status names the commands that answer it', async () => {
+    const result = await runBinExit(['status']);
+    expect(result.code).toBe(1);
+    expect(result.stderr, result.stderr).toContain('Did you mean olympus worker status');
+  }, 30_000);
+
   test('the opening link is minted from the token the worker actually accepts', async () => {
     // `olympus dashboard token` deliberately prefers worker.env over a token
     // remembered in ~/.olympus/config.json, because the service loads its

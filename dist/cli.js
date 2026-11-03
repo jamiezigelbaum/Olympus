@@ -217932,10 +217932,16 @@ async function runZkapiTestWriter(rest) {
   if (report.canaryLeaks.length > 0)
     process.exitCode = 1;
 }
+function printStatusHint(args) {
+  if (args[0] !== "status")
+    return;
+  console.error("Did you mean olympus worker status (the worker service and its health) or olympus doctor (a full check)?");
+}
 async function main2() {
   const args = process.argv.slice(2);
   if (!isV04PublicCliInvocation(args)) {
     console.error(`Unknown command: ${args.filter((arg) => !isHelpFlag(arg)).join(" ")}`);
+    printStatusHint(args);
     console.error("Run olympus --help for available commands.");
     process.exit(1);
   }
@@ -218397,6 +218403,7 @@ Run: ${ocr.repairHint}`);
       return;
     }
     console.error(`Unknown command: ${args.join(" ")}`);
+    printStatusHint(args);
     console.error("Run olympus --help for available commands.");
     process.exit(1);
   }
@@ -219415,7 +219422,7 @@ async function readWorkerHttpState() {
   const baseUrl = `${workerRoot}/v1`;
   const authToken = workerAuthTokenFromConfig(config2);
   try {
-    const health = await fetchJson(`${baseUrl}/health`, { method: "GET" });
+    const health = await fetchJson(`${baseUrl}/health`, { method: "GET", signal: AbortSignal.timeout(WORKER_STATUS_TIMEOUT_MS) });
     const output2 = {
       reachable: true,
       base_url: baseUrl,
@@ -219423,7 +219430,7 @@ async function readWorkerHttpState() {
     };
     if (config2.sourceIndex.enabled && authToken) {
       try {
-        output2.source_index_status = await fetchJson(`${baseUrl}/source/index/status`, withWorkerAuthHeader({ method: "GET" }, authToken));
+        output2.source_index_status = await fetchJson(`${baseUrl}/source/index/status`, withWorkerAuthHeader({ method: "GET", signal: AbortSignal.timeout(WORKER_STATUS_TIMEOUT_MS) }, authToken));
       } catch (error2) {
         output2.source_index_status = {
           reachable: false,
@@ -219435,7 +219442,7 @@ async function readWorkerHttpState() {
     }
     if (authToken) {
       try {
-        output2.source_dashboard = await fetchJson(`${workerRoot}/dashboard.json`, withWorkerAuthHeader({ method: "GET" }, authToken));
+        output2.source_dashboard = await fetchJson(`${workerRoot}/dashboard.json`, withWorkerAuthHeader({ method: "GET", signal: AbortSignal.timeout(WORKER_STATUS_TIMEOUT_MS) }, authToken));
       } catch (error2) {
         output2.source_dashboard = { reachable: false, error: cliErrorDetail(error2) };
       }
@@ -219449,9 +219456,15 @@ async function readWorkerHttpState() {
     return {
       reachable: false,
       base_url: baseUrl,
-      error: cliErrorDetail(error2)
+      ...isTimeoutError(error2) ? { busy: true } : {},
+      error: isTimeoutError(error2) ? WORKER_STATUS_BUSY_DETAIL : cliErrorDetail(error2)
     };
   }
+}
+var WORKER_STATUS_TIMEOUT_MS = 5000;
+var WORKER_STATUS_BUSY_DETAIL = "The worker is running but did not answer within 5 seconds. It may be busy with an import; try again shortly, or see olympus engine logs.";
+function isTimeoutError(error2) {
+  return error2 instanceof Error && (error2.name === "TimeoutError" || error2.name === "AbortError");
 }
 function lifecycleRecoverySignalsFromWorkerHttpState(workerHttp) {
   const root = asRecord22(workerHttp);
