@@ -3184,8 +3184,11 @@ export class LocalConnectorStore {
   }
 
   private copyServable(identity: { provider: string; accountScope: string; providerItemId: string; providerConversationId?: string }): boolean {
-    return this.tierVisibleRows([identity], (entry) => entry, () => 'metadata').length > 0
-      || this.tierVisibleRows([identity], (entry) => entry, () => 'content').length > 0;
+    // Both layers in one pass: one ledger read and one parent check instead
+    // of two of each. An unreadable-files count asks this for every listed
+    // item (Sparta, 2026-11-04: most of a 14 s dashboard freeze).
+    const layers: TierSearchLayer[] = ['metadata', 'content'];
+    return this.tierVisibleRows(layers, () => identity, (layer) => layer).length > 0;
   }
 
   /**

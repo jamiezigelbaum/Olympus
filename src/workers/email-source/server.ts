@@ -4805,7 +4805,16 @@ export async function main(): Promise<void> {
         items: (corpusId) => {
           const items = [...(extractionReadinessLedger?.unreadableItems(corpusId) ?? []),
             ...connectorStores.filter(store => store.corpusId === corpusId)
-              .flatMap(store => store.settledUnreadableItems(connectorStoreStatusScope(store)))];
+              .flatMap(store => store.settledUnreadableItems(connectorStoreStatusScope(store))
+                // A file kept Private before its text was read is waiting to
+                // be read while extraction still owes it (queued, or in scope
+                // and not reached yet), not unreadable; once its extraction
+                // ends without text it counts. Sparta, 2026-11-04: 7,249
+                // Dropbox files waiting in the queue read as "could not be
+                // read", and checking each on every dashboard read froze the
+                // worker for 8-14 s.
+                .filter(item => store.family !== 'file' || !fileExtractionRuntime
+                  || fileExtractionRuntime.jobs.itemExtractionState(item.ref) === 'settled'))];
           return Array.from(new Map(items.map(item => [item.ref.localItemId, item])).values());
         },
         verdict: unreadableVerdict,
