@@ -23436,6 +23436,11 @@ function normalizeConnectorStoreSearchFilters(value) {
   };
   return Object.keys(normalized).length > 0 ? normalized : undefined;
 }
+function identityAmbiguous(identity, counts) {
+  if (counts.matching_provider_id_rows <= 1)
+    return false;
+  return normalizeConversationId(identity.providerConversationId) === "" || counts.exact_identity_rows !== 1;
+}
 function connectorStoreFilterSql(filters) {
   const normalized = normalizeConnectorStoreSearchFilters(filters);
   if (!normalized)
@@ -25434,7 +25439,7 @@ var init_local_index = __esm(() => {
           FROM items
           WHERE provider = ? AND account_scope = ? AND provider_item_id = ?
         `).get(normalizeConversationId(identity.providerConversationId), normalizeConversationId(identity.providerConversationId), normalizeConversationId(identity.providerConversationId), normalizeConversationId(identity.providerConversationId), identity.provider, identity.accountScope, identity.providerItemId);
-          if (existing.matching_provider_id_rows > 1)
+          if (identityAmbiguous(identity, existing))
             return "ambiguous";
           if (existing.exact_identity_rows !== 1 || existing.item_pk === null || existing.tombstoned === 1)
             return "missing";
@@ -27029,7 +27034,7 @@ var init_local_index = __esm(() => {
           FROM items
           WHERE provider = ? AND account_scope = ? AND provider_item_id = ?
         `).get(normalizeConversationId(item.identity.providerConversationId), normalizeConversationId(item.identity.providerConversationId), normalizeConversationId(item.identity.providerConversationId), item.identity.provider, item.identity.accountScope, item.identity.providerItemId);
-          if (existing.matching_provider_id_rows > 1) {
+          if (identityAmbiguous(item.identity, existing)) {
             throw new Error("Representation restore refused because a targeted identity matches multiple store rows.");
           }
           if (existing.exact_identity_rows !== 1 || existing.item_pk === null) {

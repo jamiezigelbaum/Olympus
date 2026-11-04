@@ -220,6 +220,33 @@ describe('extraction job store: enqueue', () => {
     expect(store.get(result.jobRefs[0]!.jobId)?.status).toBe('skipped_too_large');
   });
 
+  test('a job refused as an ambiguous identity is read once more at its next listing, then settles', () => {
+    const { store } = newStore();
+    const jobId = enqueueOne(store, 'item-a');
+    store.lease({ ...LANE, workerId: 'worker-1' });
+    store.record({ jobId, status: 'failed_terminal', errorKind: 'store_identity_ambiguous' });
+
+    const again = store.enqueue({ refs: [ref('item-a')], extractorKind: KIND, extractorVersion: VERSION, policyDecision: 'index_allowed' });
+    expect(again.jobsForced).toBe(1);
+    expect(store.get(jobId)!.status).toBe('queued');
+
+    store.lease({ ...LANE, workerId: 'worker-1' });
+    store.record({ jobId, status: 'failed_terminal', errorKind: 'store_identity_ambiguous' });
+    const third = store.enqueue({ refs: [ref('item-a')], extractorKind: KIND, extractorVersion: VERSION, policyDecision: 'index_allowed' });
+    expect(third.jobsForced).toBe(0);
+    expect(store.get(jobId)!.status).toBe('failed_terminal');
+  });
+
+  test('other terminal failures are not reopened by a listing', () => {
+    const { store } = newStore();
+    const jobId = enqueueOne(store, 'item-a');
+    store.lease({ ...LANE, workerId: 'worker-1' });
+    store.record({ jobId, status: 'failed_terminal', errorKind: 'extractor_crashed' });
+    const again = store.enqueue({ refs: [ref('item-a')], extractorKind: KIND, extractorVersion: VERSION, policyDecision: 'index_allowed' });
+    expect(again.jobsForced).toBe(0);
+    expect(store.get(jobId)!.status).toBe('failed_terminal');
+  });
+
   test('force resets a spent job back to queued and clears its error state', () => {
     const { store } = newStore();
     const jobId = enqueueOne(store, 'item-a');
