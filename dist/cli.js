@@ -190574,6 +190574,8 @@ class TierSnifferService {
           this.moveFailures.delete(failureKey);
         } catch (error2) {
           report.failed += 1;
+          const why = moveFailureName(error2);
+          report.failedBy = { ...report.failedBy, [why]: (report.failedBy?.[why] ?? 0) + 1 };
           if (error2 instanceof TierMoveContentChangedError) {
             const current2 = set2.ledger.getCurrent(identity2);
             if (current2 && current2.state !== "moving") {
@@ -190603,7 +190605,7 @@ class TierSnifferService {
       }
     }
     if (report.moved > 0 || report.failed > 0) {
-      this.options.log?.(`Olympus tier sniffer: ${report.moved} automatic tier move(s), ${report.failed} failed` + `${report.abandoned ? `, ${report.abandoned} stale move(s) given up (back where they were)` : ""}` + `${report.staleRaises ? `, ${report.staleRaises} stale raise(s) kept hidden and queued` : ""}.`);
+      this.options.log?.(`Olympus tier sniffer: ${report.moved} automatic tier move(s), ${report.failed} failed` + `${report.failedBy ? ` (${Object.entries(report.failedBy).map(([why, n]) => `${why} ×${n}`).join(", ")})` : ""}` + `${report.abandoned ? `, ${report.abandoned} stale move(s) given up (back where they were)` : ""}` + `${report.staleRaises ? `, ${report.staleRaises} stale raise(s) kept hidden and queued` : ""}.`);
     }
     return report;
   }
@@ -190674,6 +190676,13 @@ function positiveInteger7(value2, fallback, minimum) {
     return fallback;
   const parsed = Number(value2);
   return Number.isInteger(parsed) && parsed >= minimum ? parsed : fallback;
+}
+function moveFailureName(error2) {
+  if (!(error2 instanceof Error))
+    return "unknown";
+  if (error2.constructor !== Error)
+    return error2.name || error2.constructor.name || "Error";
+  return /^[a-z][a-z ]{0,39}$/.test(error2.message) ? error2.message : "Error";
 }
 var DEFAULT_TIER_SNIFFER_INTERVAL_MS = 1000, NOT_ANSWERING_FIRST_BACKOFF_MS = 30000, NOT_ANSWERING_MAX_BACKOFF_MS = 60000, DEFAULT_AUTO_MOVES_PER_PASS = 25, DEFAULT_TIER_SNIFFER_MAX_PASS_MS, EXTRACTION_ENQUEUE_GRACE_MS, DEFAULT_TIER_SNIFFER_ABANDON_MS, DEFAULT_STALE_MOVE_MS, BUILT_IN_CLASSIFIER_DEFAULT_APPROVAL_REASON = "built-in local model, nothing leaves the Mac (owner default 2026-10-01)", AUTO_MOVE_WHY = "Automatic tier move after the privacy check: every embedding involved is the built-in local model (owner approval 2026-10-01).";
 var init_sniffer_service = __esm(() => {
