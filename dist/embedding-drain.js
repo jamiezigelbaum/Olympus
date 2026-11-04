@@ -24981,15 +24981,33 @@ var init_local_index = __esm(() => {
       if (!ledger || !ledger.corpusHasCopies(this.corpusId)) {
         return { hidden: [], held: [], metadataLayer: [], metadataLayerContentUnread: [], moving: 0 };
       }
-      const pksFor = (identities) => this.itemRowsForIdentities(identities, (identity) => normalizeConversationId(identity.providerConversationId)).map((row) => row.item_pk);
+      const conversationOf = (identity) => normalizeConversationId(identity.providerConversationId);
+      const keyOf = (identity) => JSON.stringify([identity.provider, identity.accountScope, conversationOf(identity), identity.providerItemId]);
+      const pksFor = (identities) => this.itemRowsForIdentities(identities, conversationOf).map((row) => row.item_pk);
+      const metadataIdentities = ledger.corpusCopyIdentities(this.corpusId, "metadata_layer");
+      const metadataRows = this.itemRowsForIdentities(metadataIdentities, conversationOf);
+      const pksByKey = new Map;
+      for (const row of metadataRows) {
+        const key2 = keyOf(metadataIdentities[row.idx]);
+        const pks = pksByKey.get(key2);
+        if (pks)
+          pks.push(row.item_pk);
+        else
+          pksByKey.set(key2, [row.item_pk]);
+      }
+      const unreadIdentities = ledger.corpusCopyIdentities(this.corpusId, "metadata_layer_content_unread");
+      const unreadMissed = unreadIdentities.filter((identity) => !pksByKey.has(keyOf(identity)));
       return {
         hidden: pksFor([
           ...ledger.corpusCopyIdentities(this.corpusId, "superseded"),
           ...ledger.corpusCopyIdentities(this.corpusId, "staged")
         ]),
         held: pksFor(ledger.corpusCopyIdentities(this.corpusId, "held")),
-        metadataLayer: pksFor(ledger.corpusCopyIdentities(this.corpusId, "metadata_layer")),
-        metadataLayerContentUnread: pksFor(ledger.corpusCopyIdentities(this.corpusId, "metadata_layer_content_unread")),
+        metadataLayer: metadataRows.map((row) => row.item_pk),
+        metadataLayerContentUnread: [
+          ...unreadIdentities.flatMap((identity) => pksByKey.get(keyOf(identity)) ?? []),
+          ...pksFor(unreadMissed)
+        ],
         moving: ledger.corpusCopyCounts(this.corpusId).moving
       };
     }
@@ -30354,7 +30372,12 @@ var init_local_index = __esm(() => {
       const tier = this.tierHiddenItemPks({ countsMaxAgeMs: options.countsMaxAgeMs ?? 0 });
       const hiddenNotIn = tier.hidden.length > 0 ? "AND i.item_pk NOT IN (SELECT value FROM json_each(?))" : "";
       const heldNotIn = tier.held.length > 0 ? "AND i.item_pk NOT IN (SELECT value FROM json_each(?))" : "";
-      const namesOnlyNotIn = tier.metadataLayer.length > 0 ? "AND i.item_pk NOT IN (SELECT value FROM json_each(?))" : "";
+      const namesOnlyWithText = tier.metadataLayer.length > 0 ? this.db.query(`
+          SELECT j.value AS pk FROM json_each(?) j
+          WHERE EXISTS (SELECT 1 FROM chunks c WHERE c.item_pk = j.value)
+            OR EXISTS (SELECT 1 FROM chunk_embeddings emb WHERE emb.item_pk = j.value)
+        `).all(JSON.stringify(tier.metadataLayer)).map((row) => row.pk) : [];
+      const namesOnlyNotIn = namesOnlyWithText.length > 0 ? "AND i.item_pk NOT IN (SELECT value FROM json_each(?))" : "";
       const itemWhere = `${scope?.itemsAllowed === false ? "AND 0" : ""}
       ${accountScope ? "AND i.account_scope = ?" : ""}
       ${itemFilters.sql}
@@ -30380,7 +30403,7 @@ var init_local_index = __esm(() => {
         ...accountScope ? [accountScope] : [],
         ...contentFilters.params,
         ...jsonList(tier.hidden),
-        ...jsonList(tier.metadataLayer)
+        ...jsonList(namesOnlyWithText)
       ];
       const parityParams = [...contentParams, ...jsonList(tier.held)];
       const fileScopeParams = [
@@ -30497,7 +30520,7 @@ var init_local_index = __esm(() => {
                 SELECT COUNT(*) AS n FROM chunks WHERE item_pk IN (SELECT value FROM json_each(?))
               `).get(JSON.stringify(tier.hidden)).n : 0,
         tierMoveInProgress: tier.moving,
-        ...namesOnlyKept(this.db, tier.metadataLayer)
+        ...namesOnlyKept(this.db, namesOnlyWithText)
       } : undefined;
       const settledUnreadableItems = this.settledUnreadableCount(scope, options.countsMaxAgeMs ?? 0);
       const last = this.lastSyncRun();

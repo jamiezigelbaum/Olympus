@@ -455,3 +455,37 @@ describe('settled names copies', () => {
     expect(store.status().counts.contentElsewhereItems).toBe(1);
   });
 });
+
+describe('status with names-only copies that keep their text', () => {
+  test('kept chunks and vectors leave every text count and are reported as kept', async () => {
+    const dir = workspace();
+    await populateLegacy(dir);
+    const lane = openLane(dir);
+    cleanups.unshift(() => lane.close());
+    const store = lane.stores.secure_local!;
+    const before = store.status();
+    expect(before.counts.itemsWithText).toBe(LEGACY.length);
+    expect(before.counts.chunks).toBeGreaterThan(1);
+    const embeddedBefore = before.embeddingByModel.reduce((sum, row) => sum + row.embeddedChunks, 0);
+    expect(embeddedBefore).toBe(before.counts.chunks);
+
+    // One legacy item becomes names-only here while its text lives elsewhere:
+    // its chunks and vectors stay in this store but must not count.
+    const identity = identityOf(LEGACY[0]!.id);
+    const decision = { ...classifyItemTiers({ signals: { title: LEGACY[0]!.name }, text: LEGACY[0]!.body }), state: 'current' as const };
+    lane.ledger.recordRoutedPlacement(identity, decision, {
+      copies: [
+        { corpusId: CORPORA.secure_local!, trustDomain: 'secure_local', layers: 'metadata' },
+        { corpusId: CORPORA.internal!, trustDomain: 'internal', layers: 'content' },
+      ],
+      embedHold: false,
+    });
+    const after = store.status();
+    const kept = after.tier?.namesOnlyKeptChunks ?? 0;
+    expect(kept).toBeGreaterThan(0);
+    expect(after.counts.itemsWithText).toBe(LEGACY.length - 1);
+    expect(after.counts.chunks + kept).toBe(before.counts.chunks);
+    expect(after.counts.embeddedChunks + kept).toBe(before.counts.embeddedChunks);
+    expect(after.embeddingByModel.reduce((sum, row) => sum + row.embeddedChunks, 0)).toBe(after.counts.chunks);
+  });
+});
