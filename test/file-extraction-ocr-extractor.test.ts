@@ -18,6 +18,7 @@ import {
   classifyOcrDeterministicPdfRejection,
   createOcrExtractor,
   imageExtensionForMimeType,
+  pdfOcrTimeoutMs,
 } from '../src/workers/file-extraction/extractors/ocr.ts';
 import {
   extractorInput,
@@ -96,6 +97,20 @@ describe('ocr extractor: PDF lane', () => {
     expect(calls[0]?.command).toBe('ocrmypdf');
     expect(calls[0]?.args).toContain('--force-ocr');
     expect(calls[0]?.args).toContain('--deskew');
+  });
+
+  test('a large scan gets more time, in steps of its size, never past the job lease (Sparta, 2026-11-04)', async () => {
+    const MB = 1024 * 1024;
+    const timeouts: number[] = [];
+    for (const sizeBytes of [900, 5 * MB, 5 * MB + 1, 23 * MB, 900 * MB]) {
+      const { runner, calls } = sidecarWritingRunner('Scanned page');
+      await createOcrExtractor({ commandRunner: runner, engine: TESSERACT, ocrTimeoutMs: 120_000 })
+        .extract(extractorInput({ bytes: pdfImageOnly(), mimeType: PDF_MIME, sizeBytes }));
+      timeouts.push(calls[0]!.timeoutMs!);
+    }
+    expect(timeouts).toEqual([120_000, 120_000, 240_000, 600_000, 720_000]);
+    // A configured time longer than the cap is never cut.
+    expect(pdfOcrTimeoutMs(900_000, 1)).toBe(900_000);
   });
 
   test('an empty sidecar becomes a metadata-only media descriptor', async () => {
