@@ -21,6 +21,13 @@ const ROOT = join(import.meta.dir, '..');
 const CONFIG = 'config/dashboard-design-review.json';
 const TEST = 'test/dashboard-design-review.test.ts';
 
+// The panel embeds transpiled client code, so another Bun renders other bytes.
+const pinnedBun = readFileSync(join(ROOT, '.bun-version'), 'utf8').trim();
+if (Bun.version !== pinnedBun) {
+  console.error(`Run this under Bun ${pinnedBun} (the CI pin), not ${Bun.version}: the digests would not match CI.`);
+  process.exit(1);
+}
+
 const sha256 = (value: string | Buffer): string => createHash('sha256').update(value).digest('hex');
 
 function allFiles(path: string): string[] {
