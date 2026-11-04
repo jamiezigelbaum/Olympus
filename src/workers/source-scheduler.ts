@@ -1768,6 +1768,15 @@ export const EMBEDDING_SWEEP_INTERVAL_MS = 60_000;
 export const EMBEDDING_SWEEP_MAX_BACKOFF_MS = 30 * 60_000;
 /** Items per store per sweep pass. */
 export const EMBEDDING_SWEEP_MAX_ITEMS = 32;
+/**
+ * The longest one store's part of a sweep pass may take. A pass holds its
+ * source's exclusive turn (source-account-guard.ts), so one that never ended
+ * held every later sync and extraction of the source behind it (Sparta,
+ * 2026-11-04: Dropbox's store pulls and extraction stopped for hours). Past
+ * this the pass gives the turn back and the store reads as deferred; the
+ * store's own embedding lease keeps a second pass off the same chunks.
+ */
+export const EMBEDDING_SWEEP_STORE_DEADLINE_MS = 10 * 60_000;
 const EMBEDDING_SWEEP_FRESHNESS_THRESHOLD_MS = 26 * 60 * 60_000;
 
 /**
@@ -1803,13 +1812,14 @@ const EMBEDDING_SWEEP_FRESHNESS_THRESHOLD_MS = 26 * 60 * 60_000;
 export function withEmbeddingSweep(
   sources: readonly SourceSchedulerSource[],
   targetsFor: (source: SourceSchedulerSource) => (() => readonly ConnectorStoreEmbeddingTarget[]) | undefined,
+  options: { storeDeadlineMs?: number } = {},
 ): SourceSchedulerSource[] {
   return sources.map((source) => {
     const targets = targetsFor(source);
     if (!targets) return source;
     return {
       ...source,
-      tasks: [...source.tasks, embeddingSweepTask(source, targets)],
+      tasks: [...source.tasks, embeddingSweepTask(source, targets, options.storeDeadlineMs)],
       embeddingDeferredReason: () => targets().some((target) => target.store.embeddingDeferredReason() !== undefined)
         ? EMBEDDING_PROVIDER_UNAVAILABLE_REASON
         : undefined,
@@ -1824,6 +1834,7 @@ export function embeddingSweepConcurrencyKey(source: Pick<SourceSchedulerSource,
 function embeddingSweepTask(
   source: SourceSchedulerSource,
   targets: () => readonly ConnectorStoreEmbeddingTarget[],
+  deadlineMs = EMBEDDING_SWEEP_STORE_DEADLINE_MS,
 ): SourceSchedulerTask {
   return {
     id: `${source.sourceId}_embeddings`,
@@ -1839,7 +1850,22 @@ function embeddingSweepTask(
     freshnessThresholdMs: EMBEDDING_SWEEP_FRESHNESS_THRESHOLD_MS,
     run: async (context?: SourceSchedulerTaskRunContext) => {
       const passTargets = targets();
-      const runs = await embedPendingChunks(passTargets, { maxItems: EMBEDDING_SWEEP_MAX_ITEMS });
+      const runs: Awaited<ReturnType<typeof embedPendingChunks>> = [];
+      for (const target of passTargets) {
+        const overran = Symbol('overran');
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const result = await Promise.race([
+          embedPendingChunks([target], { maxItems: EMBEDDING_SWEEP_MAX_ITEMS }),
+          new Promise<typeof overran>((resolve) => { timer = setTimeout(() => resolve(overran), deadlineMs); }),
+        ]).finally(() => clearTimeout(timer));
+        if (result !== overran) {
+          runs.push(...result);
+          continue;
+        }
+        console.error(`[olympus:embedding-sweep] pass_overran source=${source.sourceId} corpus=${target.store.corpusId} after_ms=${deadlineMs}; the source's turn was given back`);
+        runs.push({ corpusId: target.store.corpusId, itemsAttempted: 0, chunksEmbedded: 0, itemsFailed: 0, itemsOutOfScope: 0,
+          deferredReason: EMBEDDING_PROVIDER_UNAVAILABLE_REASON });
+      }
       const deferred = runs.filter((run) => run.deferredReason !== undefined).length;
       const counts = {
         chunks_embedded: runs.reduce((sum, run) => sum + run.chunksEmbedded, 0),
