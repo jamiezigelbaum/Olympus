@@ -22246,25 +22246,12 @@ class TierLedger {
                 AND other.corpus_id <> tier_copies.corpus_id
                 AND other.copy_state = 'current' AND other.layers IN ('content', 'both')
             )` : `copy_state = '${filter === "superseded" ? "superseded" : "staged"}'`;
-    const page2 = this.db.query(`
+    const rows = this.db.query(`
       SELECT provider, account_scope, conversation_key, provider_item_id FROM tier_copies
       WHERE corpus_id = ? AND ${where}
-        AND (provider, account_scope, conversation_key, provider_item_id) > (?, ?, ?, ?)
       ORDER BY provider, account_scope, conversation_key, provider_item_id
-      LIMIT 5000
-    `);
-    const identities = [];
-    let after = ["", "", "", ""];
-    for (;; ) {
-      const rows = page2.all(corpusId, ...after);
-      for (const row of rows)
-        identities.push(identityFromRow(row));
-      if (rows.length < 5000)
-        break;
-      const last = rows[rows.length - 1];
-      after = [last.provider, last.account_scope, last.conversation_key, last.provider_item_id];
-    }
-    return identities;
+    `).all(corpusId);
+    return rows.map(identityFromRow);
   }
   corpusCopyCounts(corpusId) {
     const row = this.db.query(`
@@ -32843,7 +32830,7 @@ function fileIdentity(path) {
     return;
   }
 }
-var DEFAULT_MAX_CHUNK_CHARS = 4000, MAX_MAX_CHUNK_CHARS = 32000, MAX_SEARCH_RESULTS = 50, CONNECTOR_STORE_FTS_TITLE_WEIGHT = 1.5, EMBEDDING_BATCH_SIZE = 32, MAX_SELECTED_EMBED_ITEM_IDS = 25000, MAX_CONVERSATION_TITLE_LOOKUP_ROWS = 100, MIN_VECTOR_SCORE = 0.18, MAX_REQUIRED_CONCEPTS = 3, RARE_CONCEPT_WEIGHT_SHARE = 0.6, READ_RESULT_PROJECTION_LOCATOR_URI, DEFAULT_SEMANTIC_RELEVANCE_BAR = 0.62, CALIBRATED_CONTENT_PREFERENCE_BARS, CALIBRATED_SEMANTIC_RELEVANCE_BARS, CONTAINER_MIME_TYPES, CONTAINER_MIME_TYPES_SQL, VECTOR_BACKEND = "exact_scan", SQLITE_STORE_ID = "connector-store", CONNECTOR_STORE_SQLITE_SCHEMA_VERSION = 15, IMAGE_CONTENT_PRIVATE_ONLY_CONNECTOR_ID = "olympus_image_content_private_only", CHUNK_MEDIA_RETRY_BASE_MS, CHUNK_MEDIA_MAX_ATTEMPTS = 3, MEDIA_JUDGE_MAX_PER_PASS = 200, MEDIA_JUDGE_RETRY_BASE_MS, MEDIA_JUDGE_MAX_ATTEMPTS = 3, MAX_CONSECUTIVE_CONTENT_FETCH_FAILURES = 3, CONNECTOR_STORE_FTS_MIGRATION, ConnectorStoreExclusionViolationError, ConnectorStoreMetadataOnlyViolationError, ConnectorStoreTierWriteRefusedError, TierLedgerUnavailableError, TIER_SET_BINDING_RUN_ID = "tiered-store-set-binding", TIER_SET_BINDING_CONNECTOR_ID = "tiered_store_set_binding", TIER_MOVE_CONNECTOR_ID = "olympus_tier_move", NON_SYNC_RUN_CONNECTORS_SQL, ConnectorStoreLocatorIdentityIndexNotReadyError, EMBEDDING_PROVIDER_UNAVAILABLE_REASON = "embedding_provider_unavailable", EMBEDDING_ITEMS_FAILED_REASON = "embedding_items_failed", CONNECTOR_STORE_EMBEDDING_LEASE_SUFFIX = ".embedding", CONNECTOR_STORE_EMBEDDING_LEASE_WAIT_MS = 120000, CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE = 256, CONNECTOR_STORE_CURRENT_EMBEDDING_JOINS_AND_FILTER = `
+var DEFAULT_MAX_CHUNK_CHARS = 4000, MAX_MAX_CHUNK_CHARS = 32000, MAX_SEARCH_RESULTS = 50, CONNECTOR_STORE_FTS_TITLE_WEIGHT = 1.5, EMBEDDING_BATCH_SIZE = 32, MAX_SELECTED_EMBED_ITEM_IDS = 25000, MAX_CONVERSATION_TITLE_LOOKUP_ROWS = 100, MIN_VECTOR_SCORE = 0.18, MAX_REQUIRED_CONCEPTS = 3, RARE_CONCEPT_WEIGHT_SHARE = 0.6, READ_RESULT_PROJECTION_LOCATOR_URI, DEFAULT_SEMANTIC_RELEVANCE_BAR = 0.62, CALIBRATED_CONTENT_PREFERENCE_BARS, CALIBRATED_SEMANTIC_RELEVANCE_BARS, CONTAINER_MIME_TYPES, CONTAINER_MIME_TYPES_SQL, VECTOR_BACKEND = "exact_scan", SQLITE_STORE_ID = "connector-store", CONNECTOR_STORE_SQLITE_SCHEMA_VERSION = 15, IMAGE_CONTENT_PRIVATE_ONLY_CONNECTOR_ID = "olympus_image_content_private_only", CHUNK_MEDIA_RETRY_BASE_MS, CHUNK_MEDIA_MAX_ATTEMPTS = 3, MEDIA_JUDGE_MAX_PER_PASS = 200, MEDIA_JUDGE_RETRY_BASE_MS, MEDIA_JUDGE_MAX_ATTEMPTS = 3, MAX_CONSECUTIVE_CONTENT_FETCH_FAILURES = 3, CONNECTOR_STORE_FTS_MIGRATION, ConnectorStoreExclusionViolationError, ConnectorStoreMetadataOnlyViolationError, ConnectorStoreTierWriteRefusedError, STATUS_COUNTS_MAX_AGE_MS, TierLedgerUnavailableError, TIER_SET_BINDING_RUN_ID = "tiered-store-set-binding", TIER_SET_BINDING_CONNECTOR_ID = "tiered_store_set_binding", TIER_MOVE_CONNECTOR_ID = "olympus_tier_move", NON_SYNC_RUN_CONNECTORS_SQL, ConnectorStoreLocatorIdentityIndexNotReadyError, EMBEDDING_PROVIDER_UNAVAILABLE_REASON = "embedding_provider_unavailable", EMBEDDING_ITEMS_FAILED_REASON = "embedding_items_failed", CONNECTOR_STORE_EMBEDDING_LEASE_SUFFIX = ".embedding", CONNECTOR_STORE_EMBEDDING_LEASE_WAIT_MS = 120000, CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE = 256, CONNECTOR_STORE_CURRENT_EMBEDDING_JOINS_AND_FILTER = `
   FROM chunk_embeddings emb
   JOIN chunks c ON c.chunk_pk = emb.chunk_pk
   JOIN items i ON i.item_pk = emb.item_pk
@@ -32944,6 +32931,7 @@ var init_local_index = __esm(() => {
       super("The current tier ledger does not authorize this store write.");
     }
   };
+  STATUS_COUNTS_MAX_AGE_MS = 5 * 60000;
   TierLedgerUnavailableError = class TierLedgerUnavailableError extends Error {
     constructor(corpusId) {
       super(`The tier ledger governing ${corpusId} is missing or was replaced, so which copies are visible ` + "cannot be decided. Restore the set ledger (beside the source's secure_local store) before " + "syncing or reading this store.");
@@ -33235,11 +33223,18 @@ var init_local_index = __esm(() => {
       const hidden = hiddenChildKeys(this.childVisibilityLane(), rows.map(identityOf));
       return hidden.size === 0 ? rows : rows.filter((row) => !hidden.has(tierLedgerIdentityKey(identityOf(row))));
     }
-    tierHiddenItemPks() {
+    tierHiddenItemPks(options = {}) {
+      const maxAgeMs = options.countsMaxAgeMs ?? 0;
+      const counted = this.tierHiddenCountsMemo;
+      if (maxAgeMs > 0 && counted && Date.now() - counted.at < maxAgeMs)
+        return counted.value;
       const base = this.tierLedgerHiddenItemPks();
       const children = this.hiddenChildItemPks();
-      return children.length === 0 ? base : { ...base, hidden: [...new Set([...base.hidden, ...children])] };
+      const value = children.length === 0 ? base : { ...base, hidden: [...new Set([...base.hidden, ...children])] };
+      this.tierHiddenCountsMemo = { at: Date.now(), value };
+      return value;
     }
+    tierHiddenCountsMemo;
     tierLedgerHiddenItemPks() {
       const marker = this.tierLedgerHiddenMemoMarker();
       const memo = this.tierLedgerHiddenMemo;
@@ -38582,6 +38577,19 @@ var init_local_index = __esm(() => {
       const current2 = fileIdentity(this.dbPath);
       return !current2 || current2.dev !== this.openedFile.dev || current2.ino !== this.openedFile.ino;
     }
+    settledUnreadableCount(scope, maxAgeMs) {
+      const key2 = JSON.stringify(scope ?? null);
+      const memos = this.settledUnreadableCountMemo ??= new Map;
+      const memo = memos.get(key2);
+      if (maxAgeMs > 0 && memo && Date.now() - memo.at < maxAgeMs)
+        return memo.count;
+      const count = this.settledUnreadableItems(scope).length;
+      if (memos.size > 32)
+        memos.clear();
+      memos.set(key2, { at: Date.now(), count });
+      return count;
+    }
+    settledUnreadableCountMemo;
     settledUnreadableItems(scope) {
       if (scope?.itemsAllowed === false || scope?.contentAllowed === false)
         return [];
@@ -38620,11 +38628,11 @@ var init_local_index = __esm(() => {
       }
       return out;
     }
-    status(scope) {
+    status(scope, options = {}) {
       const accountScope = normalizeOptionalAccountScope(scope?.accountScope);
       const itemFilters = connectorStoreFilterSql(scope?.itemFilters);
       const contentFilters = connectorStoreFilterSql(scope?.contentFilters);
-      const tier = this.tierHiddenItemPks();
+      const tier = this.tierHiddenItemPks({ countsMaxAgeMs: options.countsMaxAgeMs ?? 0 });
       const hiddenNotIn = tier.hidden.length > 0 ? "AND i.item_pk NOT IN (SELECT value FROM json_each(?))" : "";
       const heldNotIn = tier.held.length > 0 ? "AND i.item_pk NOT IN (SELECT value FROM json_each(?))" : "";
       const namesOnlyNotIn = tier.metadataLayer.length > 0 ? "AND i.item_pk NOT IN (SELECT value FROM json_each(?))" : "";
@@ -38772,7 +38780,7 @@ var init_local_index = __esm(() => {
         tierMoveInProgress: tier.moving,
         ...namesOnlyKept(this.db, tier.metadataLayer)
       } : undefined;
-      const settledUnreadableItems = this.settledUnreadableItems(scope).length;
+      const settledUnreadableItems = this.settledUnreadableCount(scope, options.countsMaxAgeMs ?? 0);
       const last = this.db.query(`SELECT * FROM sync_runs
        WHERE connector_id NOT IN ${NON_SYNC_RUN_CONNECTORS_SQL}
        ORDER BY started_at DESC, rowid DESC LIMIT 1`).get();
@@ -94313,7 +94321,7 @@ function createSourceIndexStatusHandler(options = {}) {
   const cache = new Map;
   const nowMs = options.nowMs ?? Date.now;
   return {
-    async status(request = {}) {
+    async status(request = {}, snapshot = {}) {
       assertSupportedStatusRequest(request);
       const requestedCorpusId = request.corpus_id ? canonicalSourceCorpusId(request.corpus_id) : undefined;
       const storesByCorpusId = new Map((options.connectorStores ?? []).map((store) => [store.corpusId, store]));
@@ -94345,7 +94353,7 @@ function createSourceIndexStatusHandler(options = {}) {
         if (cached2 && nowMs() - cached2.recordedAtMs <= maxAgeMs)
           return cached2.status;
         const readiness = store && request.include_readiness_ledger === true ? options.readinessLedger?.snapshotForCorpus(corpus.corpusId) : undefined;
-        const status = store ? connectorStoreStatus(corpus, store.status(statusScope), readiness?.counts, readiness?.contentExtractionThroughput, availability?.modelId, secretLocationCount(store)) : configuredCorpusStatus(corpus);
+        const status = store ? connectorStoreStatus(corpus, store.status(statusScope, { countsMaxAgeMs: snapshot.countsMaxAgeMs ?? 0 }), readiness?.counts, readiness?.contentExtractionThroughput, availability?.modelId, secretLocationCount(store)) : configuredCorpusStatus(corpus);
         if (status.configured && request.include_readiness_ledger === true && options.unreadableCount) {
           status.counts[UNREADABLE_ITEMS_COUNT_KEY] = options.unreadableCount(corpus.corpusId);
         }
@@ -164451,7 +164459,7 @@ function createEmailSourceWorker(options = {}) {
               include_items: false,
               include_readiness_ledger: true,
               readiness_ledger_max_age_ms: DASHBOARD_READINESS_LEDGER_MAX_AGE_MS
-            }), credentialDegradations?.() ?? []);
+            }, { countsMaxAgeMs: STATUS_COUNTS_MAX_AGE_MS }), credentialDegradations?.() ?? []);
             const schedulerDashboardStatus = sourceScheduler?.status();
             const exclusionSources = await dashboardExclusionSources(sourceDashboard, dashboardExclusionDebt);
             const credentialHealth = readCredentialHealthReport(sourceDashboard.credentialHealthReportPath ?? process.env.OLYMPUS_CREDENTIAL_HEALTH_REPORT_PATH?.trim() ?? defaultCredentialHealthReportPath());
@@ -212843,7 +212851,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     ...sourceIndexStatus && sourceIngestionLedger ? {
       afterTickMinIntervalMs: SOURCE_STATUS_PUBLISH_MIN_INTERVAL_MS,
       afterTick: async (schedulerStatus) => {
-        const status = await sourceIndexStatus.status({ include_items: false });
+        const status = await sourceIndexStatus.status({ include_items: false }, { countsMaxAgeMs: STATUS_COUNTS_MAX_AGE_MS });
         sourceIngestionLedger.record(buildSourceIngestionLedgerSnapshot(status, {
           schedulerStatus,
           sourceCorpusRegistry: sourceCorpusRegistry2,

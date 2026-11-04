@@ -289,6 +289,7 @@ import {
   type TelegramConnectorStoreSyncHandler,
 } from '../telegram-messages/index.ts';
 import {
+  STATUS_COUNTS_MAX_AGE_MS,
   DEFAULT_SEMANTIC_RELEVANCE_BAR,
   type LocalConnectorStore,
   connectorStoreFilterCapabilityRegistry,
@@ -5482,7 +5483,7 @@ export async function main(): Promise<void> {
             // Each delivery reads every store's status; at most one every 30 s.
             afterTickMinIntervalMs: SOURCE_STATUS_PUBLISH_MIN_INTERVAL_MS,
             afterTick: async (schedulerStatus) => {
-              const status = await sourceIndexStatus.status({ include_items: false });
+              const status = await sourceIndexStatus.status({ include_items: false }, { countsMaxAgeMs: STATUS_COUNTS_MAX_AGE_MS });
               sourceIngestionLedger.record(buildSourceIngestionLedgerSnapshot(status, {
                 schedulerStatus,
                 sourceCorpusRegistry,
