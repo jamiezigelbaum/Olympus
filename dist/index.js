@@ -19233,6 +19233,7 @@ var init_tier_media_judgment_sweep = __esm(() => {
 // src/workers/connector-store/tiered-store-set.ts
 var LOWER_CONTENT_REPAIR_INTERVAL_MS;
 var init_tiered_store_set = __esm(() => {
+  init_control_path_headroom();
   init_types();
   init_engine();
   init_tier_classifier();
