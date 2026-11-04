@@ -22226,7 +22226,11 @@ class TierLedger {
     return `${version.data_version}:${row.changes}`;
   }
   corpusCopyIdentities(corpusId, filter) {
-    const where = filter === "held" ? `copy_state = 'current' AND embed_hold = 1` : filter === "metadata_layer" ? `copy_state = 'current' AND layers = 'metadata'` : filter === "metadata_layer_settled_unreadable" ? `copy_state = 'current' AND layers = 'metadata'
+    const where = filter === "held" ? `copy_state = 'current' AND embed_hold = 1` : filter === "metadata_layer" ? `copy_state = 'current' AND layers = 'metadata'` : filter === "metadata_layer_settled_unreadable" || filter === "metadata_layer_settled_unreadable_not_secret" ? `copy_state = 'current' AND layers = 'metadata'${filter === "metadata_layer_settled_unreadable_not_secret" ? `
+            AND NOT EXISTS (SELECT 1 FROM tier_overrides o
+              WHERE o.provider = tier_copies.provider AND o.account_scope = tier_copies.account_scope
+                AND o.conversation_key = tier_copies.conversation_key AND o.provider_item_id = tier_copies.provider_item_id
+                AND json_extract(o.override_json, '$.kind') = 'tier' AND json_extract(o.override_json, '$.tier') = 'secrets')` : ""}
             AND EXISTS (SELECT 1 FROM tier_items t
               WHERE t.provider = tier_copies.provider AND t.account_scope = tier_copies.account_scope
                 AND t.conversation_key = tier_copies.conversation_key AND t.provider_item_id = tier_copies.provider_item_id
@@ -33262,20 +33266,7 @@ var init_local_index = __esm(() => {
       if (!ledger || !ledger.corpusHasCopies(this.corpusId)) {
         return { hidden: [], held: [], metadataLayer: [], metadataLayerContentUnread: [], moving: 0 };
       }
-      const pksFor = (identities) => {
-        const lookup3 = this.db.query(`
-        SELECT item_pk FROM items
-        WHERE provider = ? AND account_scope = ? AND normalized_conversation = ? AND provider_item_id = ?
-          AND tombstoned = 0
-      `);
-        const pks = [];
-        for (const identity2 of identities) {
-          const row = lookup3.get(identity2.provider, identity2.accountScope, normalizeConversationId(identity2.providerConversationId), identity2.providerItemId);
-          if (row)
-            pks.push(row.item_pk);
-        }
-        return pks;
-      };
+      const pksFor = (identities) => this.itemRowsForIdentities(identities, (identity2) => normalizeConversationId(identity2.providerConversationId)).map((row) => row.item_pk);
       return {
         hidden: pksFor([
           ...ledger.corpusCopyIdentities(this.corpusId, "superseded"),
@@ -38583,34 +38574,54 @@ var init_local_index = __esm(() => {
       const memo = memos.get(key2);
       if (maxAgeMs > 0 && memo && Date.now() - memo.at < maxAgeMs)
         return memo.count;
-      const count = this.settledUnreadableItems(scope).length;
+      const count = this.settledUnreadableRows(scope, { withoutSecretsOverrides: true }).length;
       if (memos.size > 32)
         memos.clear();
       memos.set(key2, { at: Date.now(), count });
       return count;
     }
     settledUnreadableCountMemo;
+    settledUnreadableRows(scope, options = {}) {
+      if (scope?.itemsAllowed === false || scope?.contentAllowed === false)
+        return [];
+      const ledger = this.visibilityLedger();
+      if (!ledger)
+        return [];
+      const identities = ledger.corpusCopyIdentities(this.corpusId, options.withoutSecretsOverrides ? "metadata_layer_settled_unreadable_not_secret" : "metadata_layer_settled_unreadable");
+      const filters = connectorStoreFilterSql(scope?.contentFilters ?? scope?.itemFilters);
+      const account = normalizeOptionalAccountScope(scope?.accountScope);
+      return this.itemRowsForIdentities(identities, (identity2) => identity2.providerConversationId ?? "", {
+        sql: `${account ? "AND i.account_scope = ?" : ""} ${filters.sql}`,
+        params: [...account ? [account] : [], ...filters.params]
+      }).map((row) => ({ identity: identities[row.idx], row }));
+    }
+    itemRowsForIdentities(identities, conversationOf, extra = { sql: "", params: [] }) {
+      if (identities.length === 0)
+        return [];
+      const keys = JSON.stringify(identities.map((identity2) => [identity2.provider, identity2.accountScope, conversationOf(identity2), identity2.providerItemId]));
+      return this.db.query(`
+      SELECT CAST(j.key AS INTEGER) AS idx, i.item_pk, i.local_item_id, i.title, i.source_version
+      FROM json_each(?) j
+      JOIN items i ON i.provider = json_extract(j.value, '$[0]') AND i.account_scope = json_extract(j.value, '$[1]')
+        AND i.normalized_conversation = json_extract(j.value, '$[2]') AND i.provider_item_id = json_extract(j.value, '$[3]')
+      WHERE i.tombstoned = 0 ${extra.sql}
+      ORDER BY j.key
+    `).all(keys, ...extra.params);
+    }
     settledUnreadableItems(scope) {
       if (scope?.itemsAllowed === false || scope?.contentAllowed === false)
         return [];
       const ledger = this.visibilityLedger();
       if (!ledger)
         return [];
-      const identities = ledger.corpusCopyIdentities(this.corpusId, "metadata_layer_settled_unreadable");
-      const filters = connectorStoreFilterSql(scope?.contentFilters ?? scope?.itemFilters);
-      const account = normalizeOptionalAccountScope(scope?.accountScope);
-      const lookup3 = this.db.query(`SELECT i.local_item_id, i.title, i.source_version FROM items i
-      WHERE i.tombstoned = 0 AND i.provider = ? AND i.account_scope = ? AND i.provider_item_id = ?
-        AND i.normalized_conversation = ?
-        ${account ? "AND i.account_scope = ?" : ""} ${filters.sql}`);
+      const matched = this.settledUnreadableRows(scope);
       const out = [];
-      for (const identity2 of identities) {
+      for (const { identity: identity2, row } of matched) {
         const override = ledger.getOverride(identity2);
         if (override?.kind === "tier" && override.tier === "secrets")
           continue;
-        const row = lookup3.get(identity2.provider, identity2.accountScope, identity2.providerItemId, identity2.providerConversationId ?? "", ...account ? [account] : [], ...filters.params);
         const record = ledger.getCurrent(identity2);
-        if (!row || !record)
+        if (!record)
           continue;
         out.push({
           ref: {
