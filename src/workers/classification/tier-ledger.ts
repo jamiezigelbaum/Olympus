@@ -3224,9 +3224,9 @@ export class TierLedger {
   }
 
   /**
-   * Every item with a copy in this store in the given state. Paged by key
-   * internally, with no ceiling: a filter that silently stopped at N items
-   * would let the N+1st superseded copy be searched and counted.
+   * Every item with a copy in this store in the given state, with no ceiling:
+   * a filter that silently stopped at N items would let the N+1st superseded
+   * copy be searched and counted.
    */
   corpusCopyIdentities(
     corpusId: string,
@@ -3263,23 +3263,16 @@ export class TierLedger {
                 AND other.copy_state = 'current' AND other.layers IN ('content', 'both')
             )`
           : `copy_state = '${filter === 'superseded' ? 'superseded' : 'staged'}'`;
-    const page = this.db.query(`
+    // One read, in key order. It used to page by key 5,000 at a time, which
+    // gained nothing (every identity is returned in one array anyway) and,
+    // because the corpus index does not hold the key order, re-sorted the
+    // corpus's whole match set once per page.
+    const rows = this.db.query(`
       SELECT provider, account_scope, conversation_key, provider_item_id FROM tier_copies
       WHERE corpus_id = ? AND ${where}
-        AND (provider, account_scope, conversation_key, provider_item_id) > (?, ?, ?, ?)
       ORDER BY provider, account_scope, conversation_key, provider_item_id
-      LIMIT 5000
-    `);
-    const identities: TierLedgerIdentity[] = [];
-    let after: [string, string, string, string] = ['', '', '', ''];
-    for (;;) {
-      const rows = page.all(corpusId, ...after) as TierIdentityRow[];
-      for (const row of rows) identities.push(identityFromRow(row));
-      if (rows.length < 5000) break;
-      const last = rows[rows.length - 1]!;
-      after = [last.provider, last.account_scope, last.conversation_key, last.provider_item_id];
-    }
-    return identities;
+    `).all(corpusId) as TierIdentityRow[];
+    return rows.map(identityFromRow);
   }
 
   /** Content-free per-store counts for status surfaces. */

@@ -21,6 +21,7 @@ export {
   connectorStoreCurrentEmbeddingRowsIterator,
   connectorStoreQualificationFingerprint,
   DEFAULT_SEMANTIC_RELEVANCE_BAR,
+  STATUS_COUNTS_MAX_AGE_MS,
   normalizeConnectorStoreSearchFilters,
   repairConnectorStoreSendersFromConnector,
   syncAndEmbedFromConnector,

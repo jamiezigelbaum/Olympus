@@ -203,6 +203,39 @@ describe('the set ledger governs every handle, and its loss fails closed', () =>
     }
   });
 
+  test('a status snapshot may reuse the hidden copies for a while; other reads never do', async () => {
+    const dir = workspace();
+    const tiered = await raised(dir);
+    const store = tiered.stores.internal!;
+    const ledger = tiered.ledger;
+    const real = ledger.corpusCopyIdentities.bind(ledger);
+    let reads = 0;
+    ledger.corpusCopyIdentities = ((...args: Parameters<typeof real>) => { reads += 1; return real(...args); }) as typeof real;
+    try {
+      const readsFor = (options?: { countsMaxAgeMs: number }): number => {
+        const before = reads;
+        store.status(undefined, options);
+        return reads - before;
+      };
+      const fresh = readsFor({ countsMaxAgeMs: 60_000 });
+      expect(fresh).toBeGreaterThan(0);
+      // Writes on both sides, as an importing store has between snapshots.
+      ledger.recordDecision(identityOf('unrelated'), ledger.getCurrent(identityOf('garden'))! as unknown as Parameters<typeof ledger.recordDecision>[1]);
+      store.advanceItemVersion(identityOf('garden'));
+      // The snapshot reuses what it read; it still checks unreadable items
+      // through its own memo, so it reads no copy identities at all.
+      expect(readsFor({ countsMaxAgeMs: 60_000 })).toBe(0);
+      // A read that states no age sees the change at once.
+      expect(readsFor()).toBeGreaterThan(0);
+      // An age of zero is no allowance.
+      store.advanceItemVersion(identityOf('garden'));
+      expect(readsFor({ countsMaxAgeMs: 0 })).toBeGreaterThan(0);
+    } finally {
+      ledger.corpusCopyIdentities = real;
+      tiered.close();
+    }
+  });
+
   test('with the set ledger lost, a routed store refuses to sync and serves nothing', async () => {
     const dir = workspace();
     const first = await raised(dir);

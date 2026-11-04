@@ -272,6 +272,7 @@ import {
 } from '../credential-broker/index.ts';
 import {
   LocalConnectorStore,
+  STATUS_COUNTS_MAX_AGE_MS,
   connectorStoreFilterCapabilityRegistry,
   createConnectorStoreCorpusAdapter,
   defineConnectorCorpus,
@@ -1528,7 +1529,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
                 include_items: false,
                 include_readiness_ledger: true,
                 readiness_ledger_max_age_ms: DASHBOARD_READINESS_LEDGER_MAX_AGE_MS,
-              }),
+              }, { countsMaxAgeMs: STATUS_COUNTS_MAX_AGE_MS }),
               credentialDegradations?.() ?? [],
             );
             const schedulerDashboardStatus = sourceScheduler?.status();

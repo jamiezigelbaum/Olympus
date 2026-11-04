@@ -902,6 +902,14 @@ class ConnectorStoreTierWriteRefusedError extends Error {
  * set's ledger (missing, replaced, or unreadable). Visibility cannot be judged,
  * so the operation is refused rather than treating routed copies as legacy.
  */
+/**
+ * How old the hidden-copy set and the settled-unreadable count behind a
+ * status snapshot's counts may be. Snapshots are published every two
+ * minutes; at five, a busy store rebuilds them about every third snapshot
+ * instead of on every one. Only the snapshot passes it.
+ */
+export const STATUS_COUNTS_MAX_AGE_MS = 5 * 60_000;
+
 interface TierLedgerHiddenItemPks {
   hidden: number[];
   held: number[];
@@ -3044,19 +3052,25 @@ export class LocalConnectorStore {
    * (superseded and staged), and of copies held back from embedding (pending
    * classification). Empty for a store with no routed copies.
    */
-  private tierHiddenItemPks(): {
-    hidden: number[];
-    held: number[];
-    metadataLayer: number[];
-    /** The subset of `metadataLayer` whose text no current copy holds yet: still to be read. */
-    metadataLayerContentUnread: number[];
-    moving: number;
-  } {
+  private tierHiddenItemPks(options: { countsMaxAgeMs?: number } = {}): TierLedgerHiddenItemPks {
+    // Counts for a status snapshot may use a set up to `countsMaxAgeMs` old:
+    // an importing store writes between every two snapshots, so a set keyed
+    // on change markers alone was rebuilt on each one, and on Sparta
+    // (2026-11-04) that rebuild was most of every 8-16 s freeze. Searches,
+    // embedding and everything else that decides what is served pass no age
+    // and always see the current set.
+    const maxAgeMs = options.countsMaxAgeMs ?? 0;
+    const counted = this.tierHiddenCountsMemo;
+    if (maxAgeMs > 0 && counted && Date.now() - counted.at < maxAgeMs) return counted.value;
     const base = this.tierLedgerHiddenItemPks();
     // A child whose parent is not served is hidden with the copies the ledger hides.
     const children = this.hiddenChildItemPks();
-    return children.length === 0 ? base : { ...base, hidden: [...new Set([...base.hidden, ...children])] };
+    const value = children.length === 0 ? base : { ...base, hidden: [...new Set([...base.hidden, ...children])] };
+    this.tierHiddenCountsMemo = { at: Date.now(), value };
+    return value;
   }
+
+  private tierHiddenCountsMemo: { at: number; value: TierLedgerHiddenItemPks } | undefined;
 
   private tierLedgerHiddenItemPks(): TierLedgerHiddenItemPks {
     // One status build asks for these several times back to back (counts,
@@ -11846,6 +11860,22 @@ export class LocalConnectorStore {
     return !current || current.dev !== this.openedFile.dev || current.ino !== this.openedFile.ino;
   }
 
+  /** How many settled unreadable items the counts show, reused up to `maxAgeMs` per scope. */
+  private settledUnreadableCount(scope: ConnectorStoreStatusScope | undefined, maxAgeMs: number): number {
+    const key = JSON.stringify(scope ?? null);
+    const memos = this.settledUnreadableCountMemo ??= new Map();
+    const memo = memos.get(key);
+    if (maxAgeMs > 0 && memo && Date.now() - memo.at < maxAgeMs) return memo.count;
+    const count = this.settledUnreadableItems(scope).length;
+    if (memos.size > 32) memos.clear();
+    memos.set(key, { at: Date.now(), count });
+    return count;
+  }
+
+  // Made on first use: a class-field initializer is a load-time side effect
+  // that pulls this module into the plugin bundle (plugin-bundle-no-bun-sqlite).
+  private settledUnreadableCountMemo: Map<string, { at: number; count: number }> | undefined;
+
   /** Fail-safe decisions with no readable content: the count and the problem list share this query. */
   settledUnreadableItems(scope?: ConnectorStoreStatusScope): ExtractionUnreadableItem[] {
     if (scope?.itemsAllowed === false || scope?.contentAllowed === false) return [];
@@ -11881,7 +11911,12 @@ export class LocalConnectorStore {
     return out;
   }
 
-  status(scope?: ConnectorStoreStatusScope): ConnectorStoreStatus {
+  /**
+   * `countsMaxAgeMs`: for a status snapshot only, the hidden-copy set and the
+   * settled-unreadable count behind these counts may be reused up to this old
+   * (see STATUS_COUNTS_MAX_AGE_MS). Left out, every count is current.
+   */
+  status(scope?: ConnectorStoreStatusScope, options: { countsMaxAgeMs?: number } = {}): ConnectorStoreStatus {
     const accountScope = normalizeOptionalAccountScope(scope?.accountScope);
     const itemFilters = connectorStoreFilterSql(scope?.itemFilters);
     const contentFilters = connectorStoreFilterSql(scope?.contentFilters);
@@ -11889,7 +11924,7 @@ export class LocalConnectorStore {
     // never counted, and neither they nor items pending classification are in
     // the parity denominator. A store without routed copies gets exactly the
     // pre-P1b queries (the fragments below are empty).
-    const tier = this.tierHiddenItemPks();
+    const tier = this.tierHiddenItemPks({ countsMaxAgeMs: options.countsMaxAgeMs ?? 0 });
     // Each list is ONE JSON parameter, so no count of routed copies can hit
     // SQLite's bound-parameter ceiling.
     const hiddenNotIn = tier.hidden.length > 0
@@ -12102,7 +12137,7 @@ export class LocalConnectorStore {
           ...namesOnlyKept(this.db, tier.metadataLayer),
         }
       : undefined;
-    const settledUnreadableItems = this.settledUnreadableItems(scope).length;
+    const settledUnreadableItems = this.settledUnreadableCount(scope, options.countsMaxAgeMs ?? 0);
     // "Last" means most-recently-inserted. started_at has only millisecond
     // resolution, so two runs in the same tick tie on it; sync_run_id is a
     // random UUID, so tie-breaking on it picks a run at random (an

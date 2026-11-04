@@ -240,7 +240,12 @@ export interface SourceIndexLastRefresh {
 }
 
 export interface SourceIndexStatusHandler {
-  status(request?: SourceIndexStatusRequest): Promise<SourceIndexStatusResult>;
+  /**
+   * `snapshot.countsMaxAgeMs`: for a caller that shows or records a snapshot
+   * (the dashboard, the after-tick ingestion record), how old each store's
+   * hidden-copy set behind the counts may be. Left out, every count is current.
+   */
+  status(request?: SourceIndexStatusRequest, snapshot?: { countsMaxAgeMs?: number }): Promise<SourceIndexStatusResult>;
 }
 
 export interface SourceIndexStatusHandlerOptions {
@@ -333,7 +338,7 @@ export function createSourceIndexStatusHandler(
   const nowMs = options.nowMs ?? Date.now;
 
   return {
-    async status(request: SourceIndexStatusRequest = {}): Promise<SourceIndexStatusResult> {
+    async status(request: SourceIndexStatusRequest = {}, snapshot: { countsMaxAgeMs?: number } = {}): Promise<SourceIndexStatusResult> {
       assertSupportedStatusRequest(request);
       const requestedCorpusId = request.corpus_id
         ? canonicalSourceCorpusId(request.corpus_id)
@@ -388,7 +393,7 @@ export function createSourceIndexStatusHandler(
         const status = store
           ? connectorStoreStatus(
             corpus,
-            store.status(statusScope),
+            store.status(statusScope, { countsMaxAgeMs: snapshot.countsMaxAgeMs ?? 0 }),
             readiness?.counts,
             readiness?.contentExtractionThroughput,
             availability?.modelId,
