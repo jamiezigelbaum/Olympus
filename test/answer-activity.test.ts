@@ -101,3 +101,36 @@ test('configured analysts can complete concurrently without queue wait consuming
   release();
   await Promise.all([a, b]);
 });
+
+test('a caller with concurrency N runs up to N calls at once, and the owner still starts first', async () => {
+  const activity = createLocalModelActivity();
+  let inFlight = 0;
+  let peak = 0;
+  const started: string[] = [];
+  const release: Array<() => void> = [];
+  const model = { complete: async (request: { prompt: string }) => {
+    started.push(request.prompt);
+    inFlight += 1; peak = Math.max(peak, inFlight);
+    await new Promise<void>(resolve => release.push(resolve));
+    inFlight -= 1;
+    return { text: '', modelId: 'fixture' };
+  } };
+  const sorting = activity.track('local', model, { concurrency: 3 });
+  const owner = activity.track('local', model);
+  const request = (prompt: string) => ({ system: '', prompt, localOnly: true });
+  const calls = ['a', 'b', 'c', 'd', 'e'].map(name => runClassificationInference(() => sorting.complete(request(name))));
+  const tick = () => new Promise(resolve => setTimeout(resolve, 0));
+  await tick();
+  expect(started).toEqual(['a', 'b', 'c']);
+  // The owner arrives while three sorting calls run: it waits for them, then runs alone before d and e.
+  const ownerCall = owner.complete(request('owner'));
+  for (let i = 0; i < 3; i++) { release.shift()!(); await tick(); }
+  await tick();
+  expect(started.slice(3)).toEqual(['owner']);
+  expect(inFlight).toBe(1);
+  release.shift()!(); await tick();
+  expect(started.slice(4)).toEqual(['d', 'e']);
+  while (release.length > 0) { release.shift()!(); await tick(); }
+  await Promise.all([...calls, ownerCall]);
+  expect(peak).toBe(3);
+});

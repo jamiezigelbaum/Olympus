@@ -7061,7 +7061,7 @@ export async function main(): Promise<void> {
         lane: snifferLane,
         model: snifferResource ? {
           ...snifferModel,
-          complete: request => runClassificationInference(() => localModelActivity.track(snifferResource, snifferModel).complete(request)),
+          complete: request => runClassificationInference(() => localModelActivity.track(snifferResource, snifferModel, { concurrency: snifferEnv.concurrentCalls ?? 1 }).complete(request)),
         } : snifferModel,
         stores: () => connectorStores,
         classificationLedgerPath: resolveClassificationLedgerPath(process.env),
