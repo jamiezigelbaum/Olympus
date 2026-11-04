@@ -189345,6 +189345,8 @@ class TierSnifferService {
   moving;
   running = false;
   runningSinceMs = 0;
+  notAnsweringUntilMs = 0;
+  notAnsweringPasses = 0;
   overrunReported = false;
   overrunAbortedAtMs = 0;
   passGeneration = 0;
@@ -189371,7 +189373,7 @@ class TierSnifferService {
       return;
     this.timer = setInterval(() => {
       this.drainMoves();
-      this.runOnce();
+      this.scheduledRun();
     }, this.options.intervalMs ?? DEFAULT_TIER_SNIFFER_INTERVAL_MS);
     this.timer.unref?.();
     this.wake();
@@ -189381,9 +189383,14 @@ class TierSnifferService {
       return;
     this.continuation = setTimeout(() => {
       this.continuation = undefined;
-      this.runOnce();
+      this.scheduledRun();
     }, 0);
     this.continuation.unref?.();
+  }
+  async scheduledRun() {
+    if (this.notAnsweringUntilMs > this.clockMs())
+      return { state: "skipped_running" };
+    return this.runOnce();
   }
   stop() {
     this.stopped = true;
@@ -189521,6 +189528,13 @@ class TierSnifferService {
     this.abort = undefined;
     this.lastTick = tick;
     this.reportWaiting(tick, overran);
+    if (this.waitingReason === "model_not_answering") {
+      this.notAnsweringPasses += 1;
+      this.notAnsweringUntilMs = this.clockMs() + (this.notAnsweringPasses === 1 ? NOT_ANSWERING_FIRST_BACKOFF_MS : NOT_ANSWERING_MAX_BACKOFF_MS);
+    } else if (tick.state === "ran" && tick.report.calls > tick.report.failedCalls) {
+      this.notAnsweringPasses = 0;
+      this.notAnsweringUntilMs = 0;
+    }
     if (this.options.log && this.clockMs() - this.lastBacklogLogMs >= 60000) {
       this.lastBacklogLogMs = this.clockMs();
       const backlog = this.backlog();
@@ -190208,7 +190222,7 @@ function positiveInteger7(value2, fallback, minimum) {
   const parsed = Number(value2);
   return Number.isInteger(parsed) && parsed >= minimum ? parsed : fallback;
 }
-var DEFAULT_TIER_SNIFFER_INTERVAL_MS = 1000, DEFAULT_AUTO_MOVES_PER_PASS = 25, DEFAULT_TIER_SNIFFER_MAX_PASS_MS, EXTRACTION_ENQUEUE_GRACE_MS, DEFAULT_TIER_SNIFFER_ABANDON_MS, DEFAULT_STALE_MOVE_MS, BUILT_IN_CLASSIFIER_DEFAULT_APPROVAL_REASON = "built-in local model, nothing leaves the Mac (owner default 2026-10-01)", AUTO_MOVE_WHY = "Automatic tier move after the privacy check: every embedding involved is the built-in local model (owner approval 2026-10-01).";
+var DEFAULT_TIER_SNIFFER_INTERVAL_MS = 1000, NOT_ANSWERING_FIRST_BACKOFF_MS = 30000, NOT_ANSWERING_MAX_BACKOFF_MS = 60000, DEFAULT_AUTO_MOVES_PER_PASS = 25, DEFAULT_TIER_SNIFFER_MAX_PASS_MS, EXTRACTION_ENQUEUE_GRACE_MS, DEFAULT_TIER_SNIFFER_ABANDON_MS, DEFAULT_STALE_MOVE_MS, BUILT_IN_CLASSIFIER_DEFAULT_APPROVAL_REASON = "built-in local model, nothing leaves the Mac (owner default 2026-10-01)", AUTO_MOVE_WHY = "Automatic tier move after the privacy check: every embedding involved is the built-in local model (owner approval 2026-10-01).";
 var init_sniffer_service = __esm(() => {
   init_tier_move();
   init_control_path_headroom();

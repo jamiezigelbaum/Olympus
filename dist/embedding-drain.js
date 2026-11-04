@@ -70918,6 +70918,8 @@ init_tier_media_judgment_sweep();
 init_tier_ledger();
 import { existsSync as existsSync27 } from "node:fs";
 var DEFAULT_TIER_SNIFFER_INTERVAL_MS = 1000;
+var NOT_ANSWERING_FIRST_BACKOFF_MS = 30000;
+var NOT_ANSWERING_MAX_BACKOFF_MS = 60000;
 var DEFAULT_AUTO_MOVES_PER_PASS = 25;
 var DEFAULT_TIER_SNIFFER_MAX_PASS_MS = 15 * 60000;
 var EXTRACTION_ENQUEUE_GRACE_MS = 15 * 60000;
@@ -70934,6 +70936,8 @@ class TierSnifferService {
   moving;
   running = false;
   runningSinceMs = 0;
+  notAnsweringUntilMs = 0;
+  notAnsweringPasses = 0;
   overrunReported = false;
   overrunAbortedAtMs = 0;
   passGeneration = 0;
@@ -70960,7 +70964,7 @@ class TierSnifferService {
       return;
     this.timer = setInterval(() => {
       this.drainMoves();
-      this.runOnce();
+      this.scheduledRun();
     }, this.options.intervalMs ?? DEFAULT_TIER_SNIFFER_INTERVAL_MS);
     this.timer.unref?.();
     this.wake();
@@ -70970,9 +70974,14 @@ class TierSnifferService {
       return;
     this.continuation = setTimeout(() => {
       this.continuation = undefined;
-      this.runOnce();
+      this.scheduledRun();
     }, 0);
     this.continuation.unref?.();
+  }
+  async scheduledRun() {
+    if (this.notAnsweringUntilMs > this.clockMs())
+      return { state: "skipped_running" };
+    return this.runOnce();
   }
   stop() {
     this.stopped = true;
@@ -71110,6 +71119,13 @@ class TierSnifferService {
     this.abort = undefined;
     this.lastTick = tick;
     this.reportWaiting(tick, overran);
+    if (this.waitingReason === "model_not_answering") {
+      this.notAnsweringPasses += 1;
+      this.notAnsweringUntilMs = this.clockMs() + (this.notAnsweringPasses === 1 ? NOT_ANSWERING_FIRST_BACKOFF_MS : NOT_ANSWERING_MAX_BACKOFF_MS);
+    } else if (tick.state === "ran" && tick.report.calls > tick.report.failedCalls) {
+      this.notAnsweringPasses = 0;
+      this.notAnsweringUntilMs = 0;
+    }
     if (this.options.log && this.clockMs() - this.lastBacklogLogMs >= 60000) {
       this.lastBacklogLogMs = this.clockMs();
       const backlog = this.backlog();
