@@ -1496,4 +1496,17 @@ test('failed and stalled source rows offer code-only Copy details', () => {
   expect(report.textContent).toContain('Failure: timeout');
   expect(report.textContent).not.toContain('Mark');
   expect(host.button('Copy details')).toBeDefined();
+  // A keyed section: its summary is a control that opens it (the release check reaches Copy details through it),
+  // and a refresh keeps it open while the owner is reading.
+  const section = host.win.document.querySelector('details[data-open-key="support-details:dropbox.files"]') as unknown as { open: boolean; querySelector(selector: string): { textContent: string | null } | null; dispatchEvent(event: unknown): boolean };
+  const summary = section.querySelector('summary[data-key="summary:support-details:dropbox.files"]')!;
+  expect(summary.textContent).toBe('Details for support');
+  section.open = true;
+  section.dispatchEvent(new host.win.Event('toggle'));
+  host.push({ structuredContent: copyDashboardViewModel(model({ sources: [{
+    id: 'dropbox.files', label: 'Dropbox', group: 'cloud', status: 'Failing',
+    supportDetails: 'Failure: timeout again',
+    progress: { stage: 'reading', unit: 'files', total: 1, stalled: true, stall: { cause: 'failing', failure: 'timeout' } },
+  }] })) });
+  expect((host.win.document.querySelector('details[data-open-key="support-details:dropbox.files"]') as unknown as { open: boolean }).open).toBe(true);
 });

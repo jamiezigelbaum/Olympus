@@ -1237,8 +1237,9 @@ export function chatgptDashboardClient(
       const report = el('pre', 'help', source.supportDetails);
       const copy = copyControl(report, 'support:' + id);
       copy.textContent = 'Copy details';
-      const details = add(el('details', 'disclosure'), el('summary', '', 'Details for support'), report, copy, el('p', 'muted', 'No names, numbers, emails, chats or folder titles.'));
-      add(main, details);
+      // Keyed like the other sections: it stays open across a refresh, and its summary is a control that opens it.
+      const support = add(details('support-details:' + id, doc.createTextNode('Details for support'), 'disclosure'), report, copy, el('p', 'muted', 'No names, numbers, emails, chats or folder titles.'));
+      add(main, support);
     }
     if (why) add(main, why);
     // Landed on a source with nothing to see why about now: the row itself is
