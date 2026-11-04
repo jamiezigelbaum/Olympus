@@ -87707,7 +87707,7 @@ var init_remote_vlm = __esm(() => {
 });
 
 // src/workers/source-index/built-in-reasoning/install.ts
-import { spawnSync as spawnSync11 } from "node:child_process";
+import { spawn as spawn5 } from "node:child_process";
 import { createHash as createHash62, randomUUID as randomUUID20 } from "node:crypto";
 import {
   closeSync as closeSync24,
@@ -87979,7 +87979,7 @@ async function installRuntime2(fetchImpl, runtimeDir, archive, reporter, extract
     await downloadVerified2(fetchImpl, archive.url, archivePath, archive.bytes, archive.sha256, reporter, "Downloading the built-in model server", stallMs, space);
     reporter.set("verifying", "Unpacking the built-in model server");
     try {
-      extract(archivePath, staging);
+      await extract(archivePath, staging);
     } catch (error) {
       if (isNoSpaceError(error)) {
         throw spaceShortfallError(space, archive.bytes * RUNTIME_UNPACK_FACTOR + space.headroomBytes, space.freeBytes(dirname61(runtimeDir)) ?? 0, "the disk filled up while unpacking");
@@ -88002,15 +88002,29 @@ async function installRuntime2(fetchImpl, runtimeDir, archive, reporter, extract
   }
 }
 function extractWithTar(archivePath, targetDir) {
-  const result = spawnSync11("tar", ["-xzf", archivePath, "-C", targetDir], {
-    stdio: ["ignore", "ignore", "pipe"],
-    timeout: EXTRACT_TIMEOUT_MS
+  return new Promise((resolve20, reject) => {
+    const child2 = spawn5("tar", ["-xzf", archivePath, "-C", targetDir], { stdio: ["ignore", "ignore", "pipe"] });
+    let stderr = "";
+    child2.stderr?.on("data", (chunk) => {
+      if (stderr.length < 4000)
+        stderr += chunk.toString();
+    });
+    const timer = setTimeout(() => {
+      child2.kill("SIGKILL");
+      reject(new Error(`tar did not finish within ${Math.round(EXTRACT_TIMEOUT_MS / 60000)} min`));
+    }, EXTRACT_TIMEOUT_MS);
+    child2.on("error", (error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
+    child2.on("close", (status, signal) => {
+      clearTimeout(timer);
+      if (status === 0)
+        resolve20();
+      else
+        reject(new Error(stderr.trim() || `tar exited with ${status ?? signal}`));
+    });
   });
-  if (result.error)
-    throw result.error;
-  if (result.status !== 0) {
-    throw new Error(result.stderr?.toString().trim() || `tar exited with ${result.status ?? result.signal}`);
-  }
 }
 function locateFile(root, name, depth = 0, prefix = "") {
   let entries;
@@ -88268,7 +88282,7 @@ var init_install = __esm(() => {
 });
 
 // src/workers/source-index/built-in-reasoning/server.ts
-import { spawn as spawn5 } from "node:child_process";
+import { spawn as spawn6 } from "node:child_process";
 import { randomBytes as randomBytes13 } from "node:crypto";
 import { mkdtempSync as mkdtempSync2, rmSync as rmSync24, writeFileSync as writeFileSync13 } from "node:fs";
 import { createServer as createServer2 } from "node:net";
@@ -88326,7 +88340,7 @@ function llamaServerArguments(launch, port, tokenFile) {
   ];
 }
 function createLlamaServerHandle(launch, options = {}) {
-  const spawnImpl = options.spawnImpl ?? spawn5;
+  const spawnImpl = options.spawnImpl ?? spawn6;
   const fetchImpl = options.fetchImpl ?? fetch;
   const stopGraceMs = options.stopGraceMs ?? DEFAULT_STOP_GRACE_MS;
   const killWaitMs = options.killWaitMs ?? DEFAULT_KILL_WAIT_MS;
@@ -98760,7 +98774,7 @@ var init_source_forget_registry = __esm(() => {
 });
 
 // src/data-lifecycle.ts
-import { spawnSync as spawnSync12 } from "node:child_process";
+import { spawnSync as spawnSync11 } from "node:child_process";
 import { createHash as createHash67, randomUUID as randomUUID21 } from "node:crypto";
 import {
   closeSync as closeSync25,
@@ -99054,7 +99068,7 @@ function deleteAllOlympusData(options) {
   const removesDaemon = options.dryRun !== true && targets.some((target) => target.path === MAC_ENGINE_DAEMON_PLIST);
   if (removesDaemon) {
     authorizeMacServerMode(false, {}, (command, args) => {
-      const result = spawnSync12(command, args, { encoding: "utf8" });
+      const result = spawnSync11(command, args, { encoding: "utf8" });
       return { status: result.status, stdout: result.stdout ?? "", stderr: result.stderr ?? "" };
     });
   }
@@ -102634,7 +102648,7 @@ var init_engine_maintenance = __esm(() => {
 });
 
 // src/core/engine-children.ts
-import { spawnSync as spawnSync13 } from "node:child_process";
+import { spawnSync as spawnSync12 } from "node:child_process";
 import { existsSync as existsSync66, mkdirSync as mkdirSync42, readFileSync as readFileSync51 } from "node:fs";
 import { dirname as dirname69, join as join93 } from "node:path";
 function engineChildrenPath(env = process.env) {
@@ -102825,7 +102839,7 @@ function normalizeStart(value) {
   return value.trim().replace(/\s+/g, " ");
 }
 function listProcessTable() {
-  const result = spawnSync13("ps", ["-axww", "-o", "pid=,pgid=,lstart=,command="], {
+  const result = spawnSync12("ps", ["-axww", "-o", "pid=,pgid=,lstart=,command="], {
     encoding: "utf8",
     timeout: 1e4,
     maxBuffer: 32 * 1024 * 1024,
@@ -102838,7 +102852,7 @@ function listProcessTable() {
 function processStartTime(pid) {
   if (!Number.isSafeInteger(pid) || pid <= 1)
     return;
-  const result = spawnSync13("ps", ["-o", "lstart=", "-p", String(pid)], { encoding: "utf8", timeout: 5000, env: PS_ENV });
+  const result = spawnSync12("ps", ["-o", "lstart=", "-p", String(pid)], { encoding: "utf8", timeout: 5000, env: PS_ENV });
   if (result.status !== 0 || typeof result.stdout !== "string")
     return;
   const value = normalizeStart(result.stdout);
@@ -105526,7 +105540,7 @@ __export(exports_consult_transport_zkapi, {
   WATCHDOG_SCRIPT: () => WATCHDOG_SCRIPT,
   DEFAULT_EXECUTABLE_TRUST: () => DEFAULT_EXECUTABLE_TRUST
 });
-import { spawn as spawn6, execFileSync as execFileSync4 } from "node:child_process";
+import { spawn as spawn7, execFileSync as execFileSync4 } from "node:child_process";
 import { createHash as createHash70, randomUUID as randomUUID24 } from "node:crypto";
 import { accessSync as accessSync10, chmodSync as chmodSync27, closeSync as closeSync26, constants as constants13, existsSync as existsSync67, mkdirSync as mkdirSync44, mkdtempSync as mkdtempSync3, readdirSync as readdirSync21, readFileSync as readFileSync55, readlinkSync as readlinkSync3, realpathSync as realpathSync18, rmSync as rmSync29, statSync as statSync32, writeFileSync as writeFileSync16 } from "node:fs";
 import { createConnection as createConnection4, createServer as createServer4 } from "node:net";
@@ -105930,7 +105944,7 @@ function supervise(role, watchdog, argv, env, onLine, onExit, onStatus, onStatus
   const statusChannel = onStatus ? linuxBunStatusChannel() : undefined;
   let child2;
   try {
-    child2 = spawn6(process.execPath, [watchdog, String(process.pid), ...onStatus ? ["--private-status", String(inheritedFds.length)] : [], ...argv], { env, detached: true, stdio: onStatus ? ["pipe", "pipe", "pipe", statusChannel?.writer ?? "pipe", ...inheritedFds] : ["pipe", "pipe", "pipe"] });
+    child2 = spawn7(process.execPath, [watchdog, String(process.pid), ...onStatus ? ["--private-status", String(inheritedFds.length)] : [], ...argv], { env, detached: true, stdio: onStatus ? ["pipe", "pipe", "pipe", statusChannel?.writer ?? "pipe", ...inheritedFds] : ["pipe", "pipe", "pipe"] });
   } catch (error) {
     statusChannel?.reader.destroy();
     throw error;
@@ -107850,7 +107864,7 @@ __export(exports_engine_service, {
   ENGINE_HEALTH_TIMEOUT_MS: () => ENGINE_HEALTH_TIMEOUT_MS,
   ENGINE_BUILD_ENV: () => ENGINE_BUILD_ENV
 });
-import { spawn as spawn7, spawnSync as spawnSync14 } from "node:child_process";
+import { spawn as spawn8, spawnSync as spawnSync13 } from "node:child_process";
 import { createHash as createHash71, randomBytes as randomBytes17 } from "node:crypto";
 import { existsSync as existsSync68, lstatSync as lstatSync35, readdirSync as readdirSync22, readFileSync as readFileSync56, renameSync as renameSync14, statSync as statSync33 } from "node:fs";
 import { homedir as homedir30, platform as osPlatform3 } from "node:os";
@@ -108994,7 +109008,7 @@ function boundedDetail(result) {
   return (text3 || `exit ${result.status ?? "unknown"}`).slice(0, 300);
 }
 function defaultExec2(command, args) {
-  const result = spawnSync14(command, args, { encoding: "utf8" });
+  const result = spawnSync13(command, args, { encoding: "utf8" });
   return {
     status: result.status,
     stdout: result.stdout ?? "",
@@ -109223,7 +109237,7 @@ function requestMacServerMode(enable, options = {}) {
     }
     return { ok: true, status_message: message2 };
   }
-  const child2 = (options.spawn ?? spawn7)(program.runtimePath, ["--no-env-file", program.entryPath, "__engine-server-mode", enable ? "on" : "off"], {
+  const child2 = (options.spawn ?? spawn8)(program.runtimePath, ["--no-env-file", program.entryPath, "__engine-server-mode", enable ? "on" : "off"], {
     detached: true,
     stdio: "ignore",
     env: { HOME: options.homeDir ?? homedir30(), PATH: "/usr/bin:/bin:/usr/sbin:/sbin", ...macOwnerEnv(options) }
@@ -109307,14 +109321,14 @@ var init_engine_service = __esm(() => {
 });
 
 // src/core/linux-engine-service.ts
-import { spawnSync as spawnSync15 } from "node:child_process";
+import { spawnSync as spawnSync14 } from "node:child_process";
 import { chmodSync as chmodSync28, closeSync as closeSync27, constants as constants14, copyFileSync, existsSync as existsSync69, fstatSync as fstatSync5, fsyncSync as fsyncSync7, ftruncateSync, lstatSync as lstatSync36, linkSync as linkSync3, mkdirSync as mkdirSync45, openSync as openSync26, readFileSync as readFileSync57, readlinkSync as readlinkSync4, readdirSync as readdirSync23, realpathSync as realpathSync19, renameSync as renameSync15, rmSync as rmSync30, rmdirSync as rmdirSync7, statSync as statSync34, symlinkSync as symlinkSync2, writeFileSync as writeFileSync17 } from "node:fs";
 import { createRequire as createRequire7 } from "node:module";
 import { basename as basename16, dirname as dirname74, join as join99, relative as relative15, resolve as resolve21, sep as sep17 } from "node:path";
 import { userInfo as userInfo2 } from "node:os";
 import { randomBytes as randomBytes18, createHash as createHash72, randomUUID as randomUUID25 } from "node:crypto";
 function linuxEngineExec(command, args) {
-  const r = spawnSync15(command, args, { encoding: "utf8", timeout: 35000, env: { ...process.env, SYSTEMD_PAGER: "", SYSTEMD_COLORS: "0" } });
+  const r = spawnSync14(command, args, { encoding: "utf8", timeout: 35000, env: { ...process.env, SYSTEMD_PAGER: "", SYSTEMD_COLORS: "0" } });
   return { status: r.status, stdout: r.stdout ?? "", stderr: r.stderr ?? r.error?.message ?? "" };
 }
 function value(s, exec = false) {
@@ -114678,7 +114692,7 @@ var init_consult_settings = __esm(() => {
 });
 
 // src/core/doctor.ts
-import { spawnSync as spawnSync16 } from "node:child_process";
+import { spawnSync as spawnSync15 } from "node:child_process";
 import { existsSync as existsSync72, readFileSync as readFileSync59 } from "node:fs";
 import { join as join102 } from "node:path";
 import { homedir as homedir32 } from "node:os";
@@ -116071,7 +116085,7 @@ function defaultCommandExists(command) {
   return path.split(":").some((dir) => Boolean(dir) && existsSync72(join102(dir, command)));
 }
 function defaultPythonModuleExists(pythonCommand, moduleName) {
-  const proc = spawnSync16(pythonCommand, ["-c", `import ${moduleName}`], { stdio: "ignore" });
+  const proc = spawnSync15(pythonCommand, ["-c", `import ${moduleName}`], { stdio: "ignore" });
   return proc.status === 0;
 }
 function asRecord12(value2) {
@@ -144156,9 +144170,9 @@ function codedError(message2, code) {
 var ATTEMPTS_KEPT = 5;
 
 // src/workers/email-source/dashboard-messaging-runner.ts
-import { spawn as spawn10 } from "node:child_process";
+import { spawn as spawn11 } from "node:child_process";
 async function runDashboardPairingCommand(request, hooks) {
-  const child2 = spawn10(request.executable, request.args, {
+  const child2 = spawn11(request.executable, request.args, {
     env: { ...request.env, OLYMPUS_TELEGRAM_LIST_CHATS: "", OLYMPUS_TELEGRAM_DASHBOARD_PROMPTS: "1" },
     stdio: ["pipe", "pipe", "pipe", "pipe", ...request.inheritFds ?? []]
   });
@@ -144253,7 +144267,7 @@ var init_dashboard_messaging_runner = __esm(() => {
 });
 
 // src/workers/email-source/dashboard-messaging-service.ts
-import { spawn as spawn11 } from "node:child_process";
+import { spawn as spawn12 } from "node:child_process";
 import { closeSync as closeSync30, constants as constants16, fstatSync as fstatSync7, openSync as openSync29, readFileSync as readFileSync76 } from "node:fs";
 import { arch, platform as platform2, release } from "node:os";
 import { basename as basename19, join as join118 } from "node:path";
@@ -144310,7 +144324,7 @@ function readQr(path) {
   }
 }
 async function unlinkHelper(command, env) {
-  const child2 = spawn11(command, ["--unlink"], { env, stdio: ["ignore", "ignore", "pipe"] });
+  const child2 = spawn12(command, ["--unlink"], { env, stdio: ["ignore", "ignore", "pipe"] });
   let errorTail = "";
   child2.stderr?.on("data", (chunk) => {
     errorTail = (errorTail + Buffer.from(chunk).toString("utf8")).slice(-4096);
@@ -144337,7 +144351,7 @@ function listingErrorCode(stderr) {
   return;
 }
 async function listHelper(command, args, env, input) {
-  const child2 = spawn11(command, args, { env, stdio: ["pipe", "pipe", "pipe"] });
+  const child2 = spawn12(command, args, { env, stdio: ["pipe", "pipe", "pipe"] });
   const stdin = child2.stdin;
   const stdout = child2.stdout;
   const stderr = child2.stderr;
@@ -148266,14 +148280,14 @@ function mountDashboardController(options) {
 var DASHBOARD_REDRAW_EVENT = "olympus:redraw";
 
 // src/core/computer-identity.ts
-import { spawnSync as spawnSync21 } from "node:child_process";
+import { spawnSync as spawnSync20 } from "node:child_process";
 import { hostname, userInfo as userInfo3 } from "node:os";
 function dashboardComputerIdentity() {
   if (fixedIdentity !== undefined)
     return fixedIdentity;
   let name = hostname();
   if (process.platform === "darwin") {
-    const result = spawnSync21("/usr/sbin/scutil", ["--get", "ComputerName"], { encoding: "utf8", timeout: 1000 });
+    const result = spawnSync20("/usr/sbin/scutil", ["--get", "ComputerName"], { encoding: "utf8", timeout: 1000 });
     if (result.status === 0 && result.stdout.trim())
       name = result.stdout.trim();
   }
@@ -185165,7 +185179,7 @@ var init_source_scope_browser = __esm(() => {
 });
 
 // src/workers/local-files/mac-settings.ts
-import { spawn as spawn12 } from "node:child_process";
+import { spawn as spawn13 } from "node:child_process";
 import { existsSync as existsSync95 } from "node:fs";
 import { homedir as homedir46 } from "node:os";
 import { join as join126 } from "node:path";
@@ -185174,7 +185188,7 @@ function helperAppPathForHome(home2 = homedir46()) {
 }
 function revealHelperAndOpenFullDiskAccess(deps = {}) {
   const run2 = deps.run ?? ((command, args) => {
-    spawn12(command, args, { stdio: "ignore", detached: true }).unref();
+    spawn13(command, args, { stdio: "ignore", detached: true }).unref();
   });
   const helper = deps.helperApp ?? helperAppPathForHome();
   if ((deps.exists ?? existsSync95)(helper))
@@ -216547,7 +216561,7 @@ init_remote_open();
 init_worker_transport();
 init_atomic_file();
 import { createHash as createHash76 } from "node:crypto";
-import { spawnSync as spawnSync18 } from "node:child_process";
+import { spawnSync as spawnSync17 } from "node:child_process";
 import { existsSync as existsSync76, lstatSync as lstatSync39, mkdirSync as mkdirSync46, readFileSync as readFileSync64 } from "node:fs";
 import { homedir as homedir33, platform as osPlatform4 } from "node:os";
 import { dirname as dirname77, isAbsolute as isAbsolute32, join as join106 } from "node:path";
@@ -216556,7 +216570,7 @@ import { dirname as dirname77, isAbsolute as isAbsolute32, join as join106 } fro
 init_atomic_file();
 init_operation_error();
 import { createHash as createHash75, randomUUID as randomUUID26 } from "node:crypto";
-import { spawnSync as spawnSync17 } from "node:child_process";
+import { spawnSync as spawnSync16 } from "node:child_process";
 import {
   chmodSync as chmodSync29,
   closeSync as closeSync29,
@@ -216731,7 +216745,7 @@ function extractArchive(artifactPath, staging) {
   runTar(["-xzf", artifactPath, "-C", staging, "--strip-components=1"], "extract");
 }
 function runTar(args, action) {
-  const result = spawnSync17("tar", args, { encoding: "utf8", maxBuffer: 16 * 1024 * 1024 });
+  const result = spawnSync16("tar", args, { encoding: "utf8", maxBuffer: 16 * 1024 * 1024 });
   if (result.status !== 0) {
     throw new OperationError("invalid_params", `Could not ${action} the Olympus upgrade artifact.`, (result.stderr || result.stdout || "").trim().slice(0, 240) || undefined);
   }
@@ -216767,7 +216781,7 @@ function validateExtractedPackage(root, bunBin, executePreflight) {
     throw new OperationError("invalid_params", "Upgrade artifact package and plugin manifest versions do not match.");
   }
   if (executePreflight) {
-    const result = spawnSync17(bunBin, [cliPath, "--version"], { encoding: "utf8", timeout: 15000 });
+    const result = spawnSync16(bunBin, [cliPath, "--version"], { encoding: "utf8", timeout: 15000 });
     if (result.status !== 0 || result.stdout.trim() !== `olympus ${version}`) {
       throw new OperationError("invalid_params", "Upgrade artifact CLI preflight did not report its declared Olympus version.");
     }
@@ -217560,7 +217574,7 @@ function defaultWorkerReadinessProbe(url, bunBin) {
     "} catch { process.exit(1); }"
   ].join(`
 `);
-  const result = spawnSync18(executable, ["-e", script2, url], {
+  const result = spawnSync17(executable, ["-e", script2, url], {
     encoding: "utf8",
     stdio: ["ignore", "ignore", "ignore"],
     timeout: 5000
@@ -217819,7 +217833,7 @@ init_privacy_language();
 init_messaging_runtime();
 import { existsSync as existsSync80, readFileSync as readFileSync66 } from "node:fs";
 import { randomBytes as randomBytes19 } from "node:crypto";
-import { spawnSync as spawnSync19 } from "node:child_process";
+import { spawnSync as spawnSync18 } from "node:child_process";
 import { homedir as homedir34 } from "node:os";
 init_operation_error();
 init_sovereignty();
@@ -218062,17 +218076,17 @@ function normalizeSetupPlatform(platform2) {
   return "other";
 }
 function defaultCommandExists2(command) {
-  const result = spawnSync19("sh", ["-lc", `command -v ${shellQuote4(command)} >/dev/null 2>&1`], {
+  const result = spawnSync18("sh", ["-lc", `command -v ${shellQuote4(command)} >/dev/null 2>&1`], {
     stdio: "ignore"
   });
   return result.status === 0;
 }
 function defaultPythonModuleExists2(pythonCommand, moduleName) {
-  const result = spawnSync19(pythonCommand, ["-c", `import ${moduleName}`], { stdio: "ignore" });
+  const result = spawnSync18(pythonCommand, ["-c", `import ${moduleName}`], { stdio: "ignore" });
   return result.status === 0;
 }
 function defaultCommandVersion(command) {
-  const result = spawnSync19(command, ["--version"], {
+  const result = spawnSync18(command, ["--version"], {
     encoding: "utf8",
     stdio: ["ignore", "pipe", "ignore"]
   });
@@ -218126,7 +218140,7 @@ init_worker_transport();
 init_config();
 init_engine_brief();
 init_engine_service();
-import { spawn as spawn8 } from "node:child_process";
+import { spawn as spawn9 } from "node:child_process";
 import { createInterface as createInterface2 } from "node:readline";
 import { existsSync as existsSync83, readFileSync as readFileSync68 } from "node:fs";
 import { homedir as homedir37 } from "node:os";
@@ -218136,7 +218150,7 @@ import { dirname as dirname83, join as join110 } from "node:path";
 init_engine_service();
 init_operation_error();
 init_package_root();
-import { spawnSync as spawnSync20 } from "node:child_process";
+import { spawnSync as spawnSync19 } from "node:child_process";
 import { existsSync as existsSync82, lstatSync as lstatSync41, mkdirSync as mkdirSync50, mkdtempSync as mkdtempSync5, renameSync as renameSync18, rmSync as rmSync32 } from "node:fs";
 import { homedir as homedir36 } from "node:os";
 import { join as join109, resolve as resolve22 } from "node:path";
@@ -218145,7 +218159,7 @@ var MACOS_HELPER_TEAM_ENV = "OLYMPUS_MACOS_HELPER_TEAM_ID";
 function run(exec, command, args, env) {
   if (exec)
     return exec(command, args);
-  const result = spawnSync20(command, args, { encoding: "utf8", ...env ? { env } : {} });
+  const result = spawnSync19(command, args, { encoding: "utf8", ...env ? { env } : {} });
   return { status: result.status, stdout: result.stdout ?? "", stderr: result.stderr ?? "" };
 }
 function parseCodesignDetails(text3) {
@@ -218541,7 +218555,7 @@ async function probeWorker(fetchImpl, baseUrl, socket) {
 }
 async function followEngineLogs(deps, lines) {
   const paths = engineServicePaths(deps);
-  const child2 = spawn8("tail", ["-n", String(lines), "-F", paths.logPath, paths.errorLogPath], { stdio: ["ignore", "pipe", "ignore"] });
+  const child2 = spawn9("tail", ["-n", String(lines), "-F", paths.logPath, paths.errorLogPath], { stdio: ["ignore", "pipe", "ignore"] });
   const reader = createInterface2({ input: child2.stdout });
   reader.on("line", (line2) => console.log(redactLogLine(line2)));
   await new Promise((resolve23) => child2.once("exit", () => resolve23()));

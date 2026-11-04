@@ -557,6 +557,31 @@ describe('installer', () => {
     expect(requests).toHaveLength(2);
   });
 
+  test('unpacking the server waits on a child, so the worker keeps answering meanwhile (#784)', async () => {
+    const dir = tempDir();
+    const env = { OLYMPUS_BUILT_IN_REASONING_DIR: dir };
+    const { model, runtime } = specs();
+    const { fetchImpl } = server();
+    let ticks = 0;
+    let unpacking = false;
+    const tick = setInterval(() => { if (unpacking) ticks += 1; }, 1);
+    try {
+      const installed = await installFixture({
+        model, runtime, env, platform: 'darwin-arm64', fetchImpl,
+        extractArchive: async (archive: string, target: string) => {
+          unpacking = true;
+          await new Promise((resolve) => setTimeout(resolve, 30));
+          extractArchive(archive, target);
+          unpacking = false;
+        },
+      });
+      expect(installed.serverPath).toBe(join(dir, 'llama.cpp-b0-darwin-arm64', 'llama-b0', 'llama-server'));
+      expect(ticks).toBeGreaterThan(0);
+    } finally {
+      clearInterval(tick);
+    }
+  });
+
   test('a model that does not match its pinned digest is removed, never installed', async () => {
     const dir = tempDir();
     const env = { OLYMPUS_BUILT_IN_REASONING_DIR: dir };
