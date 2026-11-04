@@ -491,6 +491,11 @@ export interface ExtractionUnreadableItem {
    * When that job failed for good (its `updated_at`).
    */
   failedAt: string;
+  /**
+   * That job's bounded error kind (`last_error_kind`), for the reason the
+   * file's line gives (unreadable-files.ts `unreadableFileReason`).
+   */
+  errorKind?: string;
 }
 
 /**
@@ -541,7 +546,9 @@ function unreadableCandidate(itemRows: readonly ExtractionJobSqlRow[]): Extracti
     if (row.status !== 'failed_terminal') continue;
     if (!newest || row.updated_at > newest.updated_at) newest = row;
   }
-  return newest ? { ref: refFromRow(newest), failedAt: newest.updated_at } : undefined;
+  return newest
+    ? { ref: refFromRow(newest), failedAt: newest.updated_at, ...(newest.last_error_kind ? { errorKind: newest.last_error_kind } : {}) }
+    : undefined;
 }
 
 interface ExtractionJobSqlRow {
@@ -1763,7 +1770,7 @@ export class LocalFileExtractionJobStore {
     for (const row of failedRows) {
       if (seen.has(row.local_item_id)) continue;
       seen.add(row.local_item_id);
-      candidates.push({ ref: refFromRow(row), failedAt: row.updated_at });
+      candidates.push({ ref: refFromRow(row), failedAt: row.updated_at, ...(row.last_error_kind ? { errorKind: row.last_error_kind } : {}) });
     }
     const unreadable = settleUnreadable(candidates, options.classifyUnreadable);
     options.onUnreadable?.(unreadable.items);

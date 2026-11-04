@@ -170,7 +170,7 @@ export function chatgptDashboardClient(
     /** The computer-only facts from the last dashboard result (`_meta[computerMetaKey]`). */
     computerMeta: Any;
     /** Computer only: further pages of a source's unreadable files read since the last dashboard result. */
-    unreadablePages: Record<string, { files: Array<{ name: string; token?: string }>; more: number; after: string }>;
+    unreadablePages: Record<string, { files: Array<{ name: string; token?: string; reason?: string }>; more: number; after: string }>;
     /** Computer only: an agent's request whose export did not prove its account, by request id, until the person answers. */
     archiveConfirm: Record<string, { source: string; reconfirm?: boolean }>;
     /** Requests the person approved here, until a read stops listing them as pending (or the hold runs out). */
@@ -1963,6 +1963,9 @@ export function chatgptDashboardClient(
           }
           add(item, control);
         } else add(item, document.createTextNode(file.name));
+        // Exactly why, after the name (owner rule, 2026-11-04).
+        const why = file.reason ? (P.unreadableFileReasons as Any)[file.reason] : '';
+        if (typeof why === 'string' && why) add(item, el('span', 'muted file-why', ' · ' + why));
         add(list, item);
       });
       if (own.more > 0) {
@@ -1983,7 +1986,7 @@ export function chatgptDashboardClient(
   }
 
   /** Computer only: this source's unreadable files from the computer meta (names, open tokens), or null. */
-  function computerUnreadable(id: string): { files: Array<{ name: string; token?: string }>; more: number; after: string } | null {
+  function computerUnreadable(id: string): { files: Array<{ name: string; token?: string; reason?: string }>; more: number; after: string } | null {
     const meta = state.computerMeta;
     if (!onComputer() || !meta || !Array.isArray(meta.unreadable)) return null;
     const entry = meta.unreadable.filter((item: Any) => item && item.sourceId === id)[0];
@@ -2000,12 +2003,15 @@ export function chatgptDashboardClient(
     return typeof value === 'string' && value.length <= 64 && /^[0-9TZ:.+-]+~[A-Za-z0-9_-]+$/.test(value) ? value : '';
   }
 
-  function unreadableEntries(input: Any[]): Array<{ name: string; token?: string }> {
+  function unreadableEntries(input: Any[]): Array<{ name: string; token?: string; reason?: string }> {
     return input
       .filter((file: Any) => file && typeof file.name === 'string' && file.name)
-      .map((file: Any) => (typeof file.token === 'string' && /^[A-Za-z0-9_-]{16,128}$/.test(file.token)
-        ? { name: file.name, token: file.token }
-        : { name: file.name }));
+      .map((file: Any) => {
+        const reason = typeof file.reason === 'string' && /^[a-z_]{1,40}$/.test(file.reason) ? { reason: file.reason } : {};
+        return typeof file.token === 'string' && /^[A-Za-z0-9_-]{16,128}$/.test(file.token)
+          ? { name: file.name, token: file.token, ...reason }
+          : { name: file.name, ...reason };
+      });
   }
 
   function moreCount(value: Any): number {

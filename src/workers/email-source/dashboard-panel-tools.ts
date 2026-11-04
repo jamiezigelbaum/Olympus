@@ -495,6 +495,7 @@ function entriesOf(files: ReturnType<UnreadableFiles['computerList']>['files']):
     return name
       ? [{
           name,
+          reason: file.reason,
           ...(file.token ? { token: file.token } : {}),
           ...(file.parent ? { parent: { ...(label ? { label } : {}), route: file.parent.route } } : {}),
         }]

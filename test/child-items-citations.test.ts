@@ -256,14 +256,14 @@ describe('a file that could not be read names its parent', () => {
       corpusId: ref.corpusId,
       sourceItem: { provider: ref.provider, accountScope: ref.accountScope, providerItemId: ref.providerItemId },
     }));
-    expect(files).toEqual([{ name: 'lease.txt', parent: { label: LABEL, route: { kind: 'archive', archiveId } } }]);
+    expect(files).toEqual([{ name: 'lease.txt', reason: 'other', parent: { label: LABEL, route: { kind: 'archive', archiveId } } }]);
   });
 
   test('a file whose parent is a source, not an archive, routes to the source; a file with no parent has none', () => {
     const asSource = listFor('owner@example.com', 'child-1', () => ({ label: "'Flat'", provider: 'gmail', accountScope: 'owner@example.com' }));
-    expect(asSource).toEqual([{ name: 'lease.txt', parent: { label: "'Flat'", route: { kind: 'source' } } }]);
-    expect(listFor('owner@example.com', 'file-1', () => undefined)).toEqual([{ name: 'lease.txt' }]);
-    expect(listFor('owner@example.com', 'file-1', () => { throw new Error('ledger closed'); })).toEqual([{ name: 'lease.txt' }]);
+    expect(asSource).toEqual([{ name: 'lease.txt', reason: 'other', parent: { label: "'Flat'", route: { kind: 'source' } } }]);
+    expect(listFor('owner@example.com', 'file-1', () => undefined)).toEqual([{ name: 'lease.txt', reason: 'other' }]);
+    expect(listFor('owner@example.com', 'file-1', () => { throw new Error('ledger closed'); })).toEqual([{ name: 'lease.txt', reason: 'other' }]);
   });
 });
 
@@ -304,7 +304,7 @@ describe('a child that failed before its text landed is still listed', () => {
       openTarget: () => undefined,
       parentOf: locators.parentOf,
     }).computerList([home], 10, {}).files;
-    expect(files).toEqual([{ name: 'lease.txt', parent: { label: LABEL, route: { kind: 'archive', archiveId } } }]);
+    expect(files).toEqual([{ name: 'lease.txt', reason: 'other', parent: { label: LABEL, route: { kind: 'archive', archiveId } } }]);
 
     // An item no store of the lane holds is still left out.
     expect(verdict({ ...items[0]!, ref: { ...ref, localItemId: 'nowhere', providerItemId: 'nowhere' } })).toBe('hidden');

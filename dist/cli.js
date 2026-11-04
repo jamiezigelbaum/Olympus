@@ -38688,7 +38688,8 @@ var init_local_index = __esm(() => {
             ...row.title ? { name: row.title } : {},
             ...row.source_version ? { sourceVersion: row.source_version } : {}
           },
-          failedAt: record.decidedAt
+          failedAt: record.decidedAt,
+          errorKind: "privacy_check_missing"
         });
       }
       return out;
@@ -40987,7 +40988,8 @@ var init_dashboard_launch = __esm(() => {
         }
         var ticket = take();
         if (!ticket) {
-          status.textContent = 'This link is missing its opening ticket.';
+          // A reload of this page after its ticket was taken: the dashboard has the session, or the way back in.
+          window.location.replace('/dashboard');
           return;
         }
         fetch('/dashboard/control/launch/redeem', {
@@ -40996,7 +40998,10 @@ var init_dashboard_launch = __esm(() => {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ ticket: ticket })
         }).then(function (response) {
-          if (response.ok) {
+          // A link already used or expired (a reload, a second open) still
+          // lands on the dashboard: the session it opened is in its cookie,
+          // and without one the dashboard itself offers the way back in.
+          if (response.ok || response.status === 403) {
             // A Keys target (Connect, a model fix) lands on Keys, where the computer's setup
             // sheets and Models live; it only opens a panel there, never submits anything.
             // A panel target (See why on one source) lands on the dashboard there.
@@ -41008,9 +41013,7 @@ var init_dashboard_launch = __esm(() => {
               : PRIVATE.test(open) ? '/dashboard?private-answers' + (open.indexOf('page.private.') === 0 ? '#' + open.slice(13) : '') : '/dashboard');
             return;
           }
-          status.textContent = response.status === 403
-            ? 'This opening link is no longer valid.'
-            : 'Opening failed.';
+          status.textContent = 'Opening failed.';
         }).catch(function () {
           status.textContent = 'Opening failed.';
         });
@@ -52741,7 +52744,13 @@ function sourceFailureRef(value) {
 function sourceSupportDetails(input) {
   const source = typeof input.sourceId === "string" && SUPPORT_SOURCES.has(input.sourceId) ? input.sourceId : "unknown";
   const state = typeof input.state === "string" && SUPPORT_STATES.has(input.state) ? input.state : "unknown";
-  return [`Source: ${source}`, `State: ${state}`, `Failure: ${isSourceFailureKind(input.failure) ? input.failure : input.failure === undefined ? "none" : "unknown"}`, ...sourceFailureRef(input.ref) ? [`Reference: ${sourceFailureRef(input.ref)}`] : []].join(`
+  return [
+    `Source: ${source}`,
+    `State: ${state}`,
+    `Failure: ${isSourceFailureKind(input.failure) ? input.failure : input.failure === undefined ? "none" : "unknown"}`,
+    ...input.need === undefined ? [] : [`Needs: ${typeof input.need === "string" && SUPPORT_NEEDS.has(input.need) ? input.need : "unknown"}`],
+    ...sourceFailureRef(input.ref) ? [`Reference: ${sourceFailureRef(input.ref)}`] : []
+  ].join(`
 `);
 }
 function systemSupportReport(input) {
@@ -52770,7 +52779,7 @@ function systemSupportReport(input) {
   ].join(`
 `);
 }
-var SOURCE_FAILURE_KINDS, KIND_SET, EXACT, SUPPORT_SOURCES, SUPPORT_STATES;
+var SOURCE_FAILURE_KINDS, KIND_SET, EXACT, SUPPORT_SOURCES, SUPPORT_STATES, SUPPORT_NEEDS;
 var init_source_failure = __esm(() => {
   init_scheduler_markers();
   SOURCE_FAILURE_KINDS = [
@@ -52809,6 +52818,26 @@ var init_source_failure = __esm(() => {
   };
   SUPPORT_SOURCES = new Set(["gmail.email", "google_drive.docs", "dropbox.files", "local.files", "readwise.library", "x.bookmarks", "evernote.notes", "telegram.messages", "whatsapp.personal.messages", "archive.imports"]);
   SUPPORT_STATES = new Set(["Off", "Waiting", "Working", "Fresh", "Needs you", "Failing", "not_connected", "needs_setup", "awaiting_consent", "reauth_required", "connected", "waiting_for_first_sync", "syncing", "synced"]);
+  SUPPORT_NEEDS = new Set([
+    "finish_sign_in",
+    "sign_in",
+    "choose_folders",
+    "import_attention",
+    "waiting_for_credentials",
+    "scope_pending",
+    "scope_root_missing",
+    "scope_root_permission_needed",
+    "scope_root_helper_needed",
+    "scope_root_unreadable",
+    "provider_unavailable",
+    "model_downloading",
+    "storage_move",
+    "disk_full",
+    "live_feed",
+    "answer_readiness",
+    "queue",
+    "unknown"
+  ]);
 });
 
 // src/workers/dashboard/answer-ready-coverage.ts
@@ -53506,7 +53535,7 @@ function archiveFindingList(kind) {
 function privateAnswerFailure(reason, mapping = PRIVATE_ANSWER_FAILURES) {
   return typeof reason === "string" && Object.prototype.hasOwnProperty.call(mapping, reason) ? mapping[reason] : { message: "Olympus could not answer this.", action: "Try again." };
 }
-var DASHBOARD_UPDATE_COPY, DASHBOARD_MISSING_FOLDER = "A folder you chose is missing", DASHBOARD_FOLDER_NEEDS_PERMISSION = "Your Mac will not let Olympus open a folder you chose. In System Settings, choose Privacy & Security, then Files & Folders, and switch on Olympus Engine (or the app your Mac named when it asked).", DASHBOARD_FOLDER_NEEDS_HELPER = "Desktop, Documents, Downloads, iCloud Drive and other disks need the Olympus helper app. Update Olympus to add it, or choose a folder outside them.", DASHBOARD_FOLDER_UNREADABLE = "Your user account is not allowed to open a folder you chose. Change who may open that folder, or choose another one.", DASHBOARD_STATUS_PRESENTATION, DASHBOARD_CONNECTION_STATE_STATUS, DASHBOARD_ANSWER_READINESS_STATUS, DASHBOARD_QUEUE_HEALTH_STATUS, DASHBOARD_UNKNOWN_STATUS = "Waiting", DASHBOARD_UNCONNECTED_STATES, DASHBOARD_SIGNED_OUT = "signed out", DASHBOARD_DISCONNECTED_DATA_KEPT = "Disconnected · indexed data kept", DASHBOARD_RECONNECT_LABEL = "Reconnect", DASHBOARD_MANY_UNREADABLE_LABEL = "Many files cannot be read", DASHBOARD_STORAGE_NOTICE_COPY, DASHBOARD_MEDIA_STORAGE_COPY, READINESS_REASONS, GENERIC_READINESS_ATTENTION_LABEL = "Needs attention before answers", DASHBOARD_CAPTURE_STALE_LABEL = "Live capture is stale", DASHBOARD_CAPTURE_BLOCKED_LABEL = "Live capture cannot start", DASHBOARD_CAPTURE_COPY, CAPTURE_JUDGED_CONNECTION_STATES, CAPTURE_UNEXPECTED_STOP_REASONS, REDIRECT_REFUSAL_CODES, DASHBOARD_EVERNOTE_CONSENT_HELP = "On Evernote’s consent screen, leave only View ticked; untick Create, Edit and Delete.", DASHBOARD_MODELS_BLOCKED_REASON = "Locked until models are ready", SETUP_LEADS, DASHBOARD_INDEX_FASTER, DASHBOARD_NONE_READ_BY_POLICY = "none of these files are read by policy", DASHBOARD_NONE_READ_OLD_MAIL = "older mail is kept as names only", DASHBOARD_LIVE_PASS_ERROR_COPY, DASHBOARD_UNREADABLE_NOTE = "Olympus does not retry these, and nothing is waiting on you.", DASHBOARD_UNREADABLE_MORE = "and {count} more", DASHBOARD_UNREADABLE_NOTE_MANY, DASHBOARD_UNREADABLE_REASON_CODES, DASHBOARD_UNREADABLE_REASON_WORDS, DASHBOARD_SOURCE_FAILURE_WORDS, DASHBOARD_FAILURE_REF = "Olympus's log on the computer has the details under reference {ref}.", DASHBOARD_FAILURE_LOG = "Olympus's log on the computer has the details.", DASHBOARD_CHATGPT_VOCABULARY, DASHBOARD_CHATGPT_REFUSAL_COPY, DASHBOARD_CHATGPT_CONNECTION_COPY, DASHBOARD_CHATGPT_PAGE_COPY, DASHBOARD_WORKER_TOKEN_AGENT_PROMPT, DASHBOARD_HOST_GATE_COPY, ARCHIVE_PICK_INTRO, DASHBOARD_ARCHIVE_NOUNS, DASHBOARD_ARCHIVE_COPY, DASHBOARD_COMPUTER_PANEL_COPY, DASHBOARD_CHATGPT_SETUP_LABELS, DASHBOARD_CHATGPT_PICKER_COPY, DASHBOARD_PRIVACY_QUESTIONS_COPY, DASHBOARD_CHATGPT_PRIVACY_COPY, DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY, DASHBOARD_CHATGPT_PRIVACY_CLASSIFIER_APPROVAL_COPY, DASHBOARD_CHATGPT_PRIVATE_ANSWER_COPY, DASHBOARD_CHATGPT_PRIVATE_QUESTION_COPY, DASHBOARD_LOCAL_COPY, DASHBOARD_PRIVATE_ANSWERS_COPY, OUTSIDE_HELP_CONFINEMENT_UNAVAILABLE = "Anonymous answers aren't available on this computer because its network isolation check hasn't passed. Nothing is sent without it.", DASHBOARD_OUTSIDE_HELP_COPY, PRIVATE_ANSWER_FAILURES;
+var DASHBOARD_UPDATE_COPY, DASHBOARD_MISSING_FOLDER = "A folder you chose is missing", DASHBOARD_FOLDER_NEEDS_PERMISSION = "Your Mac will not let Olympus open a folder you chose. In System Settings, choose Privacy & Security, then Files & Folders, and switch on Olympus Engine (or the app your Mac named when it asked).", DASHBOARD_FOLDER_NEEDS_HELPER = "Desktop, Documents, Downloads, iCloud Drive and other disks need the Olympus helper app. Update Olympus to add it, or choose a folder outside them.", DASHBOARD_FOLDER_UNREADABLE = "Your user account is not allowed to open a folder you chose. Change who may open that folder, or choose another one.", DASHBOARD_STATUS_PRESENTATION, DASHBOARD_CONNECTION_STATE_STATUS, DASHBOARD_ANSWER_READINESS_STATUS, DASHBOARD_QUEUE_HEALTH_STATUS, DASHBOARD_UNKNOWN_STATUS = "Waiting", DASHBOARD_UNCONNECTED_STATES, DASHBOARD_SIGNED_OUT = "signed out", DASHBOARD_DISCONNECTED_DATA_KEPT = "Disconnected · indexed data kept", DASHBOARD_RECONNECT_LABEL = "Reconnect", DASHBOARD_MANY_UNREADABLE_LABEL = "Many files cannot be read", DASHBOARD_STORAGE_NOTICE_COPY, DASHBOARD_MEDIA_STORAGE_COPY, READINESS_REASONS, GENERIC_READINESS_ATTENTION_LABEL = "Needs attention before answers", DASHBOARD_CAPTURE_STALE_LABEL = "Live capture is stale", DASHBOARD_CAPTURE_BLOCKED_LABEL = "Live capture cannot start", DASHBOARD_CAPTURE_COPY, CAPTURE_JUDGED_CONNECTION_STATES, CAPTURE_UNEXPECTED_STOP_REASONS, REDIRECT_REFUSAL_CODES, DASHBOARD_EVERNOTE_CONSENT_HELP = "On Evernote’s consent screen, leave only View ticked; untick Create, Edit and Delete.", DASHBOARD_MODELS_BLOCKED_REASON = "Locked until models are ready", SETUP_LEADS, DASHBOARD_INDEX_FASTER, DASHBOARD_NONE_READ_BY_POLICY = "none of these files are read by policy", DASHBOARD_NONE_READ_OLD_MAIL = "older mail is kept as names only", DASHBOARD_LIVE_PASS_ERROR_COPY, DASHBOARD_UNREADABLE_FILE_REASON_WORDS, DASHBOARD_UNREADABLE_NOTE = "Olympus does not retry these, and nothing is waiting on you.", DASHBOARD_UNREADABLE_MORE = "and {count} more", DASHBOARD_UNREADABLE_NOTE_MANY, DASHBOARD_UNREADABLE_REASON_CODES, DASHBOARD_UNREADABLE_REASON_WORDS, DASHBOARD_SOURCE_FAILURE_WORDS, DASHBOARD_FAILURE_REF = "Olympus's log on the computer has the details under reference {ref}.", DASHBOARD_FAILURE_LOG = "Olympus's log on the computer has the details.", DASHBOARD_CHATGPT_VOCABULARY, DASHBOARD_CHATGPT_REFUSAL_COPY, DASHBOARD_CHATGPT_CONNECTION_COPY, DASHBOARD_CHATGPT_PAGE_COPY, DASHBOARD_WORKER_TOKEN_AGENT_PROMPT, DASHBOARD_HOST_GATE_COPY, ARCHIVE_PICK_INTRO, DASHBOARD_ARCHIVE_NOUNS, DASHBOARD_ARCHIVE_COPY, DASHBOARD_COMPUTER_PANEL_COPY, DASHBOARD_CHATGPT_SETUP_LABELS, DASHBOARD_CHATGPT_PICKER_COPY, DASHBOARD_PRIVACY_QUESTIONS_COPY, DASHBOARD_CHATGPT_PRIVACY_COPY, DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY, DASHBOARD_CHATGPT_PRIVACY_CLASSIFIER_APPROVAL_COPY, DASHBOARD_CHATGPT_PRIVATE_ANSWER_COPY, DASHBOARD_CHATGPT_PRIVATE_QUESTION_COPY, DASHBOARD_LOCAL_COPY, DASHBOARD_PRIVATE_ANSWERS_COPY, OUTSIDE_HELP_CONFINEMENT_UNAVAILABLE = "Anonymous answers aren't available on this computer because its network isolation check hasn't passed. Nothing is sent without it.", DASHBOARD_OUTSIDE_HELP_COPY, PRIVATE_ANSWER_FAILURES;
 var init_vocabulary = __esm(() => {
   init_source_dashboard();
   init_archive_formats();
@@ -53640,6 +53669,18 @@ var init_vocabulary = __esm(() => {
     account_changed: "the last check found a different Evernote account than the notes stored here, so nothing was changed: reconnect the earlier account, or delete this card's indexed data first",
     unavailable: "the last check could not reach the provider"
   });
+  DASHBOARD_UNREADABLE_FILE_REASON_WORDS = {
+    password: "locked with a password",
+    damaged: "the file is damaged",
+    too_large: "too large for Olympus to read",
+    no_text: "no text Olympus could find in it",
+    timed_out: "reading it took too long, even with extra time",
+    missing: "the file is no longer where it was",
+    no_access: "Olympus isn't allowed to open it",
+    unsupported: "a format Olympus can't read",
+    privacy_check_missing: "kept Private before it was read",
+    other: "Olympus couldn't read it"
+  };
   DASHBOARD_UNREADABLE_NOTE_MANY = "That is more than a healthy source has, so it may be a problem in Olympus rather than your files." + " The other files still answer questions.";
   DASHBOARD_UNREADABLE_REASON_CODES = ["damaged_or_unsupported", "privacy_check_missing"];
   DASHBOARD_UNREADABLE_REASON_WORDS = {
@@ -53648,8 +53689,8 @@ var init_vocabulary = __esm(() => {
       other: "{count} items were kept Private without being read because their privacy checks were missing. Open them below to check them, then use Sync now to try reading them again."
     },
     damaged_or_unsupported: {
-      one: "{count} file is damaged or in a format Olympus can't read",
-      other: "{count} files are damaged or in a format Olympus can't read"
+      one: "{count} file Olympus can't read at all",
+      other: "{count} files Olympus can't read at all"
     }
   };
   DASHBOARD_SOURCE_FAILURE_WORDS = {
@@ -53811,6 +53852,7 @@ var init_vocabulary = __esm(() => {
     },
     synced: "Synced {when}",
     updated: "Updated {when}",
+    busySlow: "Olympus is busy. Trying again…",
     checkAgain: "Check again",
     tryAgain: "Try again",
     openOlympus: "Open Olympus",
@@ -53897,6 +53939,7 @@ var init_vocabulary = __esm(() => {
     unreadableMore: DASHBOARD_UNREADABLE_MORE,
     unreadableOpen: "Open {name}",
     unreadableReasons: DASHBOARD_UNREADABLE_REASON_WORDS,
+    unreadableFileReasons: DASHBOARD_UNREADABLE_FILE_REASON_WORDS,
     unreadableNote: DASHBOARD_UNREADABLE_NOTE,
     unreadableNoteMany: DASHBOARD_UNREADABLE_NOTE_MANY
   };
@@ -54020,8 +54063,9 @@ var init_vocabulary = __esm(() => {
     },
     inSource: {
       listLabel: "Imported archives",
-      importingLine: "{percent}% read · {items} from this archive so far",
-      importingLineNone: "{percent}% read",
+      importingLine: "Reading your export: {percent}% · {items} so far",
+      importingNote: "The bar above counts these as they become searchable.",
+      importingLineNone: "Reading your export: {percent}%",
       importedLine: "{items} from this archive",
       importedWhen: " · imported {when}",
       alreadyThere: { one: ", of which 1 was already there", many: ", of which {n} were already there" },
@@ -54133,6 +54177,7 @@ var init_vocabulary = __esm(() => {
     remove: "Remove",
     removeConfirm: "Remove {name}? Everything Olympus made from it is deleted. The file itself stays where it is.",
     requestLine: "An agent asked to import {name} from {where}.",
+    startingLine: "Starting to import {name}…",
     fullPath: "Full path: {path}",
     removeRequestLine: "An agent asked to remove {name}, imported from {where}.",
     removeRequestLineNoWhere: "An agent asked to remove {name}.",
@@ -82830,7 +82875,7 @@ function unreadableCandidate(itemRows) {
     if (!newest || row.updated_at > newest.updated_at)
       newest = row;
   }
-  return newest ? { ref: refFromRow(newest), failedAt: newest.updated_at } : undefined;
+  return newest ? { ref: refFromRow(newest), failedAt: newest.updated_at, ...newest.last_error_kind ? { errorKind: newest.last_error_kind } : {} } : undefined;
 }
 
 class LocalFileExtractionJobStore {
@@ -83582,7 +83627,7 @@ class LocalFileExtractionJobStore {
       if (seen.has(row.local_item_id))
         continue;
       seen.add(row.local_item_id);
-      candidates.push({ ref: refFromRow(row), failedAt: row.updated_at });
+      candidates.push({ ref: refFromRow(row), failedAt: row.updated_at, ...row.last_error_kind ? { errorKind: row.last_error_kind } : {} });
     }
     const unreadable = settleUnreadable(candidates, options.classifyUnreadable);
     options.onUnreadable?.(unreadable.items);
@@ -96818,12 +96863,7 @@ function queueHealth(counts, scheduler) {
   const activeFromCounts = liveActive >= 0 ? liveActive : sumCounts(taskCounts, ["jobs_leased"]);
   const active = activeFromCounts + (scheduler?.tasks.filter((task) => task.running).length ?? 0);
   const retryingTasks = scheduler?.tasks.filter((task) => task.consecutive_failures > 0).length ?? 0;
-  const extractionFailures = firstCount(mergedCounts, [
-    "extraction_jobs_failed_actionable",
-    "extraction_jobs_failed"
-  ]);
-  const needsAttention = extractionFailures + sumCounts(mergedCounts, [
-    "metadata_sync_folders_retryable_failed",
+  const needsAttention = sumCounts(mergedCounts, [
     "metadata_sync_folders_exhausted_retry",
     "metadata_sync_folders_blocked",
     "metadata_sync_folders_failed",
@@ -142501,6 +142541,30 @@ function createUnreadableVerdict(input) {
     return located ? "unreadable" : "hidden";
   };
 }
+function unreadableFileReason(errorKind) {
+  const kind = (errorKind ?? "").toLowerCase();
+  if (!kind)
+    return "other";
+  if (kind === UNREAD_PRIVACY_CHECK_MISSING_KIND)
+    return "privacy_check_missing";
+  if (kind.includes("encrypted") || kind.includes("password"))
+    return "password";
+  if (kind.includes("too_large"))
+    return "too_large";
+  if (kind.includes("timeout"))
+    return "timed_out";
+  if (kind.includes("not_found") || kind.includes("content_unavailable") || kind.includes("missing_bytes"))
+    return "missing";
+  if (kind.includes("permission") || kind.includes("auth"))
+    return "no_access";
+  if (kind.includes("unsupported"))
+    return "unsupported";
+  if (kind.includes("empty"))
+    return "no_text";
+  if (kind.includes("invalid") || kind.includes("undecodable") || kind.includes("corrupt") || kind.includes("damaged"))
+    return "damaged";
+  return "other";
+}
 function isUnreadableOpenToken(value2) {
   return typeof value2 === "string" && value2.length === TOKEN_LENGTH && Array.from(value2).every((char) => TOKEN_ALPHABET.has(char));
 }
@@ -142694,7 +142758,8 @@ function createUnreadableFiles(options) {
       const files = shown.map((item) => {
         const name = displayName(item);
         const parent = parentOf3(item);
-        const base = opener && target(item) ? { name, token: mint(item, opener, at) } : { name };
+        const reason = unreadableFileReason(item.errorKind);
+        const base = opener && target(item) ? { name, reason, token: mint(item, opener, at) } : { name, reason };
         return parent ? { ...base, parent } : base;
       });
       const last = shown.at(-1);
@@ -142734,7 +142799,7 @@ function createUnreadableFiles(options) {
     }
   };
 }
-var TOKEN_LENGTH = 43, TOKEN_ALPHABET, DEFAULT_TOKEN_TTL_MS, MAX_TOKENS2 = 2000, OPEN_RATE, UNNAMED = "Unnamed file", CURSOR_TIME_ALPHABET;
+var UNREAD_PRIVACY_CHECK_MISSING_KIND = "privacy_check_missing", TOKEN_LENGTH = 43, TOKEN_ALPHABET, DEFAULT_TOKEN_TTL_MS, MAX_TOKENS2 = 2000, OPEN_RATE, UNNAMED = "Unnamed file", CURSOR_TIME_ALPHABET;
 var init_unreadable_files = __esm(() => {
   init_archive_formats();
   TOKEN_ALPHABET = new Set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_");
@@ -149718,9 +149783,12 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
   const P = config2.page;
   const C2 = config2.connection;
   const GLOBAL_STATES = ["not_connected", "installing", "mac_offline", "relay_unavailable"];
+  const BUSY_GRACE_MS = 120000;
   const state = {
     data: null,
     relayDown: false,
+    lastGoodAt: 0,
+    slow: false,
     deleting: {},
     busy: "",
     confirming: "",
@@ -149738,6 +149806,8 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     hostLinks: {},
     computerMeta: null,
     archiveConfirm: {},
+    archiveStarting: {},
+    archivePeak: {},
     unreadablePages: {},
     landing: "",
     landingImport: false,
@@ -149885,7 +149955,20 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
   }
   function relayFailed(failure2) {
     state.relayDown = true;
+    state.slow = false;
     state.lastFailure = { ...failure2, at: Date.now() };
+  }
+  function steadyPercent(archive) {
+    const raw = typeof archive.percent === "number" && isFinite(archive.percent) ? archive.percent : 0;
+    const id = typeof archive.id === "string" ? archive.id : "";
+    if (!id)
+      return raw;
+    const shown = Math.max(state.archivePeak[id] ?? 0, raw);
+    state.archivePeak[id] = shown;
+    return shown;
+  }
+  function busyNotGone(error2) {
+    return error2 instanceof Error && error2.message === "timeout" && !state.relayDown && state.lastGoodAt > 0 && Date.now() - state.lastGoodAt < BUSY_GRACE_MS;
   }
   function resultFailure(result) {
     if (!result || !result.isError)
@@ -149932,6 +150015,8 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
       state.computerMeta = meta2 && typeof meta2 === "object" ? meta2 : null;
       state.unreadablePages = {};
       state.relayDown = false;
+      state.lastGoodAt = Date.now();
+      state.slow = false;
       settleDeleting(content);
       if (!state.busy)
         state.syncPressed = {};
@@ -150309,7 +150394,8 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
       return wrap;
     const blocked = globalReason();
     if (blocked || fix.disabledReason) {
-      add(wrap, button(fix.label, key2, null, style), rowReason(blocked || String(fix.disabledReason)));
+      const saidAbove = !fix.disabledReason && (connectionState() === "relay_unavailable" || connectionState() === "mac_offline");
+      add(wrap, button(fix.label, key2, null, style), saidAbove ? null : rowReason(blocked || String(fix.disabledReason)));
       if (!blocked)
         add(wrap, howLink(fix, key2, source));
       return wrap;
@@ -150490,6 +150576,8 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     const data2 = state.data;
     if (!data2 || state.relayDown)
       return "";
+    if (state.slow)
+      return P.busySlow;
     const at = Date.parse(data2.generatedAt);
     if (!isFinite(at) || Date.now() - at < config2.staleAfterMs)
       return "";
@@ -150826,8 +150914,10 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
         if (content && content.status === "confirm_account") {
           const source = content.source && typeof content.source.label === "string" ? content.source.label : "";
           state.archiveConfirm[requestId] = { source, ...content.reconfirm === true ? { reconfirm: true } : {} };
-        } else
+        } else {
           delete state.archiveConfirm[requestId];
+          state.archiveStarting[requestId] = Date.now();
+        }
       }
     }
     return archiveOutcome(result && result.structuredContent);
@@ -150941,9 +151031,9 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
       const pct = typeof entry.percent === "number" && isFinite(entry.percent) ? entry.percent : 0;
       add(item, el("p", "muted", fill2(S.notRunningLine, { percent: percent(pct) })));
     } else if (entry.status === "importing") {
-      const pct = typeof entry.percent === "number" && isFinite(entry.percent) ? entry.percent : 0;
+      const pct = steadyPercent(entry);
       const line2 = read > 0 ? fill2(S.importingLine, { percent: percent(pct), items: itemCount(entry, read) }) + alreadyThereNote(entry) : fill2(S.importingLineNone, { percent: percent(pct) });
-      add(item, add(el("div", "archive-progress"), progressBar(pct, line2), el("p", "muted", line2)));
+      add(item, add(el("div", "archive-progress"), progressBar(pct, line2), el("p", "muted", line2), el("p", "muted", S.importingNote)));
     } else if (entry.status === "imported") {
       const when = typeof entry.importedAt === "string" ? ago(entry.importedAt) : "";
       if (read === 0) {
@@ -151018,6 +151108,14 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
       add(item, add(el("div", "archive-actions"), fixControl({ label: fill2(A.account.add, { source }), tool: H.archiveApproveTool, args: { request_id: request2.id, confirm_account: true } }, key2 + ":confirm", "plain", false), ...asked.reconfirm ? [] : [fixControl({ label: A.account.apart, tool: H.archiveApproveTool, args: { request_id: request2.id, keep_apart: true } }, key2 + ":apart", "plain", false)], fixControl({ label: A.decline, tool: H.archiveDeclineTool, args: { request_id: request2.id } }, key2 + ":decline", "plain", false)));
       return item;
     }
+    const startedAt = state.archiveStarting[request2.id];
+    if (request2.status !== "pending" || startedAt !== undefined && Date.now() - startedAt > 60000)
+      delete state.archiveStarting[request2.id];
+    else if (startedAt !== undefined) {
+      const line2 = el("p", "muted", fill2(A.startingLine, { name: request2.name }));
+      line2.setAttribute("role", "status");
+      return add(item, line2);
+    }
     if (request2.status === "pending") {
       add(item, isolatedLine("", A.requestLine, { name: request2.name, where: where2 }));
       add(item, archiveFullPath(request2));
@@ -151074,7 +151172,7 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     } else if (halted) {
       add(item, el("p", "muted", A.removingNotRunningLine));
     } else if (archive.status === "importing") {
-      const pct = typeof archive.percent === "number" && isFinite(archive.percent) ? archive.percent : 0;
+      const pct = steadyPercent(archive);
       const line2 = uncounted ? fill2(A.importingLineUncounted, { percent: percent(pct) }) : fill2(A.importingLine, { percent: percent(pct), items: itemCount(archive, items) });
       add(item, add(el("div", "archive-progress"), progressBar(pct, line2), el("p", "muted", line2)));
     } else if (archive.status === "imported") {
@@ -151206,6 +151304,9 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
           add(item, control);
         } else
           add(item, document.createTextNode(file.name));
+        const why = file.reason ? P.unreadableFileReasons[file.reason] : "";
+        if (typeof why === "string" && why)
+          add(item, el("span", "muted file-why", " · " + why));
         add(list, item);
       });
       if (own3.more > 0) {
@@ -151238,7 +151339,10 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     return typeof value2 === "string" && value2.length <= 64 && /^[0-9TZ:.+-]+~[A-Za-z0-9_-]+$/.test(value2) ? value2 : "";
   }
   function unreadableEntries(input) {
-    return input.filter((file) => file && typeof file.name === "string" && file.name).map((file) => typeof file.token === "string" && /^[A-Za-z0-9_-]{16,128}$/.test(file.token) ? { name: file.name, token: file.token } : { name: file.name });
+    return input.filter((file) => file && typeof file.name === "string" && file.name).map((file) => {
+      const reason = typeof file.reason === "string" && /^[a-z_]{1,40}$/.test(file.reason) ? { reason: file.reason } : {};
+      return typeof file.token === "string" && /^[A-Za-z0-9_-]{16,128}$/.test(file.token) ? { name: file.name, token: file.token, ...reason } : { name: file.name, ...reason };
+    });
   }
   function moreCount(value2) {
     return typeof value2 === "number" && isFinite(value2) && value2 > 0 ? Math.floor(value2) : 0;
@@ -152035,6 +152139,13 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
       refreshing = false;
       if (mine !== generation)
         return scheduleRefresh();
+      if (busyNotGone(error2)) {
+        state.slow = true;
+        redraw();
+        refreshTimer = setTimeout(backgroundRefresh, R.activeMs);
+        nextRefreshAt = Date.now() + R.activeMs;
+        return;
+      }
       refreshFailures++;
       relayFailed(rejectionFailure(error2));
       redraw();
@@ -191101,7 +191212,7 @@ function sourceEntry(definition, card, status, actionKind, degraded, connecting,
   }
   return {
     id: definition.source_id,
-    supportDetails: sourceSupportDetails({ sourceId: definition.source_id, state: status, failure: card.schedule?.last_error_kind || card.schedule?.degraded_reason ? sourceFailureKind(card.schedule?.last_error_kind, card.schedule?.degraded_reason) : undefined, ref: card.schedule?.last_error_hash }),
+    supportDetails: sourceSupportDetails({ sourceId: definition.source_id, state: status, failure: card.schedule?.last_error_kind || card.schedule?.degraded_reason ? sourceFailureKind(card.schedule?.last_error_kind, card.schedule?.degraded_reason) : undefined, ref: card.schedule?.last_error_hash, need: sourceNeed(card, status, degraded, connecting, progress) }),
     label: definition.label,
     ...definition.sync_name ? { syncNoun: definition.sync_name.mid } : {},
     group: sourceGroup(definition),
@@ -191406,6 +191517,31 @@ function connectFix(definition) {
   }
   const source = oauthSource(definition);
   return source ? { label: DASHBOARD_CHATGPT_SETUP_LABELS.connect, tool: CONNECT_SOURCE_TOOL_NAME, args: { source } } : helpLinkFix(DASHBOARD_CHATGPT_SETUP_LABELS.connect, openOnComputer(definition, "connect"));
+}
+function sourceNeed(card, status, degraded, connecting, progress) {
+  if (status !== "Needs you" && status !== "Failing")
+    return;
+  if (connecting)
+    return "finish_sign_in";
+  if (card.connection.imports_attention?.length)
+    return "import_attention";
+  if (dashboardCredentialProblem(card, degraded))
+    return "sign_in";
+  if (missingScope(card))
+    return "choose_folders";
+  if (card.storage_notice)
+    return "storage_move";
+  if (card.media_storage)
+    return "disk_full";
+  if (dashboardCaptureProblem(card) !== undefined)
+    return "live_feed";
+  if (progress?.stalled && progress.stalledReason)
+    return progress.stalledReason;
+  if (card.answer_readiness.state === "needs_attention")
+    return "answer_readiness";
+  if (card.queue_health.label === "Needs attention")
+    return "queue";
+  return "unknown";
 }
 function missingScope(card) {
   return card.schedule?.degraded_reason === "scope_root_missing" || (card.schedule?.missing_folders?.length ?? 0) > 0;
@@ -194433,6 +194569,10 @@ function copyDashboardViewModel(view3) {
 function copyItem(item) {
   return { id: identifier(item.id), sentence: text4(item.sentence), fix: copyFix(item.fix) };
 }
+function supportNeed(details) {
+  const match = typeof details === "string" ? /^Needs: ([a-z_]+)$/m.exec(details) : null;
+  return match ? match[1] : undefined;
+}
 function copySource(source) {
   const out = {
     id: identifier(source.id),
@@ -194441,7 +194581,7 @@ function copySource(source) {
     group: source.group === "local" ? "local" : "cloud",
     status: STATUSES2.has(source.status) ? source.status : "Waiting"
   };
-  out.supportDetails = sourceSupportDetails({ sourceId: source.id, state: out.status, failure: source.progress?.stall?.failure ?? source.lastManualSync?.failure, ref: source.progress?.stall?.ref ?? source.lastManualSync?.ref });
+  out.supportDetails = sourceSupportDetails({ sourceId: source.id, state: out.status, failure: source.progress?.stall?.failure ?? source.lastManualSync?.failure, ref: source.progress?.stall?.ref ?? source.lastManualSync?.ref, need: supportNeed(source.supportDetails) });
   if (source.detail)
     out.detail = text4(source.detail);
   if (iso3(source.lastSyncAt))
@@ -209410,6 +209550,7 @@ function entriesOf(files) {
     const [label] = unreadableNames([file.parent?.label]);
     return name ? [{
       name,
+      reason: file.reason,
       ...file.token ? { token: file.token } : {},
       ...file.parent ? { parent: { ...label ? { label } : {}, route: file.parent.route } } : {}
     }] : [];

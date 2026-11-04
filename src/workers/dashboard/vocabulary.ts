@@ -1359,6 +1359,24 @@ export function dashboardUnreadableSentence(source: DashboardSourceCard): string
     : `${lead} ${DASHBOARD_UNREADABLE_NOTE}`;
 }
 
+/**
+ * Why one file could not be read, after its name under See why (owner rule,
+ * 2026-11-04: exactly the reason, and a link to the file). Keys are
+ * file-extraction/unreadable-files.ts UNREADABLE_FILE_REASONS.
+ */
+export const DASHBOARD_UNREADABLE_FILE_REASON_WORDS: Readonly<Record<string, string>> = {
+  password: 'locked with a password',
+  damaged: 'the file is damaged',
+  too_large: 'too large for Olympus to read',
+  no_text: 'no text Olympus could find in it',
+  timed_out: 'reading it took too long, even with extra time',
+  missing: 'the file is no longer where it was',
+  no_access: 'Olympus isn\'t allowed to open it',
+  unsupported: 'a format Olympus can\'t read',
+  privacy_check_missing: 'kept Private before it was read',
+  other: 'Olympus couldn\'t read it',
+};
+
 /** The note under See why, and the detail page's tail: nothing to do, the rest answers. */
 export const DASHBOARD_UNREADABLE_NOTE = 'Olympus does not retry these, and nothing is waiting on you.';
 
@@ -1396,8 +1414,8 @@ export const DASHBOARD_UNREADABLE_REASON_WORDS: Readonly<
     other: "{count} items were kept Private without being read because their privacy checks were missing. Open them below to check them, then use Sync now to try reading them again.",
   },
   damaged_or_unsupported: {
-    one: "{count} file is damaged or in a format Olympus can't read",
-    other: "{count} files are damaged or in a format Olympus can't read",
+    one: "{count} file Olympus can't read at all",
+    other: "{count} files Olympus can't read at all",
   },
 };
 
@@ -2035,6 +2053,7 @@ export const DASHBOARD_CHATGPT_PAGE_COPY = {
   /** The accessible name of an unreadable file's open control: "Open report.pdf". */
   unreadableOpen: 'Open {name}',
   unreadableReasons: DASHBOARD_UNREADABLE_REASON_WORDS,
+  unreadableFileReasons: DASHBOARD_UNREADABLE_FILE_REASON_WORDS,
   unreadableNote: DASHBOARD_UNREADABLE_NOTE,
   unreadableNoteMany: DASHBOARD_UNREADABLE_NOTE_MANY,
 } as const;
