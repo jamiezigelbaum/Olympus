@@ -171433,10 +171433,12 @@ function embeddingSweepTask(source, targets, deadlineMs = EMBEDDING_SWEEP_STORE_
           })
         ]).finally(() => clearTimeout(timer));
         if (result !== overran) {
-          runs.push(...result);
+          const outage = target.store.embeddingDeferredReason();
+          runs.push(...result.map((run2) => run2.busy === true && run2.deferredReason === undefined && outage !== undefined ? { ...run2, deferredReason: outage } : run2));
           continue;
         }
         console.error(`[olympus:embedding-sweep] pass_overran source=${source.sourceId} corpus=${target.store.corpusId} after_ms=${deadlineMs}; the source's turn was given back`);
+        target.store.setEmbeddingDeferral(EMBEDDING_PROVIDER_UNAVAILABLE_REASON);
         runs.push({
           corpusId: target.store.corpusId,
           itemsAttempted: 0,
@@ -189571,12 +189573,12 @@ class TierSnifferService {
     this.abort = undefined;
     this.lastTick = tick;
     this.reportWaiting(tick, overran);
-    if (this.waitingReason === "model_not_answering") {
-      this.notAnsweringPasses += 1;
-      this.notAnsweringUntilMs = this.clockMs() + (this.notAnsweringPasses === 1 ? NOT_ANSWERING_FIRST_BACKOFF_MS : NOT_ANSWERING_MAX_BACKOFF_MS);
-    } else if (tick.state === "ran" && tick.report.calls > tick.report.failedCalls) {
+    if (tick.state === "ran" && tick.report.calls > tick.report.failedCalls) {
       this.notAnsweringPasses = 0;
       this.notAnsweringUntilMs = 0;
+    } else if (this.waitingReason === "model_not_answering") {
+      this.notAnsweringPasses += 1;
+      this.notAnsweringUntilMs = this.clockMs() + (this.notAnsweringPasses === 1 ? NOT_ANSWERING_FIRST_BACKOFF_MS : NOT_ANSWERING_MAX_BACKOFF_MS);
     }
     if (this.options.log && this.clockMs() - this.lastBacklogLogMs >= 60000) {
       this.lastBacklogLogMs = this.clockMs();

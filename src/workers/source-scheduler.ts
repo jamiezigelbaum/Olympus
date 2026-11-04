@@ -1859,10 +1859,16 @@ function embeddingSweepTask(
           new Promise<typeof overran>((resolve) => { timer = setTimeout(() => resolve(overran), deadlineMs); }),
         ]).finally(() => clearTimeout(timer));
         if (result !== overran) {
-          runs.push(...result);
+          // The abandoned call of an earlier overrun still holds the store's
+          // lease, so this pass answers busy: the store's outage stands until
+          // an embedding pass answers (embedPendingChunks clears it then).
+          const outage = target.store.embeddingDeferredReason();
+          runs.push(...result.map((run) => run.busy === true && run.deferredReason === undefined && outage !== undefined
+            ? { ...run, deferredReason: outage } : run));
           continue;
         }
         console.error(`[olympus:embedding-sweep] pass_overran source=${source.sourceId} corpus=${target.store.corpusId} after_ms=${deadlineMs}; the source's turn was given back`);
+        target.store.setEmbeddingDeferral(EMBEDDING_PROVIDER_UNAVAILABLE_REASON);
         runs.push({ corpusId: target.store.corpusId, itemsAttempted: 0, chunksEmbedded: 0, itemsFailed: 0, itemsOutOfScope: 0,
           deferredReason: EMBEDDING_PROVIDER_UNAVAILABLE_REASON });
       }
