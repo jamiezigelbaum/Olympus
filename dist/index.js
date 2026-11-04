@@ -23079,7 +23079,7 @@ var init_source_dashboard = __esm(() => {
         source: "telegram",
         instructions: [
           "Telegram pairs with a phone-number login on this computer.",
-          "Ask your agent to start Telegram pairing; this card updates once the login completes."
+          "Open Keys in the dashboard on this computer and press Pair Telegram; this card updates once the login completes."
         ]
       }
     },
@@ -23101,7 +23101,7 @@ var init_source_dashboard = __esm(() => {
         instructions: [
           "WhatsApp pairs by scanning a QR code from your phone (WhatsApp, then Linked devices).",
           WHATSAPP_UNOFFICIAL_CLIENT_NOTICE,
-          "Ask your agent to start WhatsApp pairing; this card updates once the scan completes."
+          "Open Keys in the dashboard on this computer and press Pair WhatsApp to show the QR code; this card updates once the scan completes."
         ]
       }
     },

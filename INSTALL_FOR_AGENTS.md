@@ -1785,10 +1785,10 @@ locally; never ask them to paste the raw token into chat. It starts syncing on
 the worker's next pass with no worker restart. Venice is not a source: its key
 belongs in the **Models** section.
 
-Telegram and WhatsApp use the packaged pairing commands below. The dashboard
-has **Ask your agent**, not a Connect/Pair button or a phone/code form. Never
-send the operator back to a nonexistent control or regenerate a dashboard link
-as a substitute for starting pairing.
+Telegram and WhatsApp pair on the dashboard's **Keys** page on the Olympus
+host: **Pair WhatsApp** shows the QR code on the page, and **Pair Telegram**
+walks through the app keys, phone number and login code. Send the operator there first. The packaged pairing
+commands below are the headless fallback, for a host with no browser.
 
 ```bash
 olympus connect telegram --pair
