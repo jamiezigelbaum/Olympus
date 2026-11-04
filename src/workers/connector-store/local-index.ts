@@ -3108,20 +3108,41 @@ export class LocalConnectorStore {
     if (!ledger || !ledger.corpusHasCopies(this.corpusId)) {
       return { hidden: [], held: [], metadataLayer: [], metadataLayerContentUnread: [], moving: 0 };
     }
-    const pksFor = (identities: ReadonlyArray<{ provider: string; accountScope: string; providerItemId: string; providerConversationId?: string }>): number[] =>
-      this.itemRowsForIdentities(identities, (identity) => normalizeConversationId(identity.providerConversationId))
-        .map((row) => row.item_pk);
+    type Identity = { provider: string; accountScope: string; providerItemId: string; providerConversationId?: string };
+    const conversationOf = (identity: Identity): string => normalizeConversationId(identity.providerConversationId);
+    const keyOf = (identity: Identity): string =>
+      JSON.stringify([identity.provider, identity.accountScope, conversationOf(identity), identity.providerItemId]);
+    const pksFor = (identities: ReadonlyArray<Identity>): number[] =>
+      this.itemRowsForIdentities(identities, conversationOf).map((row) => row.item_pk);
+    // A copy that serves only the names keeps any chunks it already had
+    // (e.g. kept vectors after a split move) but never serves, counts or
+    // embeds them.
+    const metadataIdentities = ledger.corpusCopyIdentities(this.corpusId, 'metadata_layer');
+    const metadataRows = this.itemRowsForIdentities(metadataIdentities, conversationOf);
+    // Unread names copies are a subset of the names copies (same corpus, same
+    // current names-only filter), so their rows are read off the lookup above
+    // instead of a second lookup of nearly the same set: on a names-only
+    // archive both sets are about 100k items (Sparta, 2026-11-04).
+    const pksByKey = new Map<string, number[]>();
+    for (const row of metadataRows) {
+      const key = keyOf(metadataIdentities[row.idx]!);
+      const pks = pksByKey.get(key);
+      if (pks) pks.push(row.item_pk); else pksByKey.set(key, [row.item_pk]);
+    }
+    const unreadIdentities = ledger.corpusCopyIdentities(this.corpusId, 'metadata_layer_content_unread');
+    const unreadMissed = unreadIdentities.filter((identity) => !pksByKey.has(keyOf(identity)));
     return {
       hidden: pksFor([
         ...ledger.corpusCopyIdentities(this.corpusId, 'superseded'),
         ...ledger.corpusCopyIdentities(this.corpusId, 'staged'),
       ]),
       held: pksFor(ledger.corpusCopyIdentities(this.corpusId, 'held')),
-      // A copy that serves only the names keeps any chunks it already had
-      // (e.g. kept vectors after a split move) but never serves, counts or
-      // embeds them.
-      metadataLayer: pksFor(ledger.corpusCopyIdentities(this.corpusId, 'metadata_layer')),
-      metadataLayerContentUnread: pksFor(ledger.corpusCopyIdentities(this.corpusId, 'metadata_layer_content_unread')),
+      metadataLayer: metadataRows.map((row) => row.item_pk),
+      metadataLayerContentUnread: [
+        ...unreadIdentities.flatMap((identity) => pksByKey.get(keyOf(identity)) ?? []),
+        // Only if the ledger changed between the two reads.
+        ...pksFor(unreadMissed),
+      ],
       moving: ledger.corpusCopyCounts(this.corpusId).moving,
     };
   }
@@ -11953,7 +11974,19 @@ export class LocalConnectorStore {
     const heldNotIn = tier.held.length > 0
       ? 'AND i.item_pk NOT IN (SELECT value FROM json_each(?))'
       : '';
-    const namesOnlyNotIn = tier.metadataLayer.length > 0
+    // Every query that excludes names-only copies counts chunks or vectors, so
+    // only names-only items that still hold a chunk or a vector can change its
+    // result. Narrowing the list once here keeps those queries from each
+    // building a lookup of every names-only item: on a names-only archive of
+    // about 100k items that was most of each status freeze (Sparta, 2026-11-04).
+    const namesOnlyWithText = tier.metadataLayer.length > 0
+      ? (this.db.query(`
+          SELECT j.value AS pk FROM json_each(?) j
+          WHERE EXISTS (SELECT 1 FROM chunks c WHERE c.item_pk = j.value)
+            OR EXISTS (SELECT 1 FROM chunk_embeddings emb WHERE emb.item_pk = j.value)
+        `).all(JSON.stringify(tier.metadataLayer)) as Array<{ pk: number }>).map((row) => row.pk)
+      : [];
+    const namesOnlyNotIn = namesOnlyWithText.length > 0
       ? 'AND i.item_pk NOT IN (SELECT value FROM json_each(?))'
       : '';
     const itemWhere = `${scope?.itemsAllowed === false ? 'AND 0' : ''}
@@ -11987,7 +12020,7 @@ export class LocalConnectorStore {
       ...(accountScope ? [accountScope] : []),
       ...contentFilters.params,
       ...jsonList(tier.hidden),
-      ...jsonList(tier.metadataLayer),
+      ...jsonList(namesOnlyWithText),
     ];
     const parityParams = [...contentParams, ...jsonList(tier.held)];
     const fileScopeParams = [
@@ -12154,7 +12187,7 @@ export class LocalConnectorStore {
               `).get(JSON.stringify(tier.hidden)) as { n: number }).n
             : 0,
           tierMoveInProgress: tier.moving,
-          ...namesOnlyKept(this.db, tier.metadataLayer),
+          ...namesOnlyKept(this.db, namesOnlyWithText),
         }
       : undefined;
     const settledUnreadableItems = this.settledUnreadableCount(scope, options.countsMaxAgeMs ?? 0);
