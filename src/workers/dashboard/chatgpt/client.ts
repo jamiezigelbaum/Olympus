@@ -50,6 +50,11 @@ export interface ChatGptDashboardClientConfig {
   statusTone: Record<DashboardStatus, DashboardStatusColorToken>;
   /** No tool result within this long means the relay cannot reach the Mac. */
   resultTimeoutMs: number;
+  /**
+   * On the computer itself, how long a read may take: there is no relay in
+   * between, so a slow answer is a busy Olympus, never an unreachable one.
+   */
+  computerResultTimeoutMs: number;
   staleAfterMs: number;
   /**
    * Re-reading the dashboard while the page is visible: every `activeMs`
@@ -138,6 +143,9 @@ export function chatgptDashboardClient(
   const GLOBAL_STATES = ['not_connected', 'installing', 'mac_offline', 'relay_unavailable'];
   // How long after its last answer a computer that does not answer in time is still called busy.
   const BUSY_GRACE_MS = 120_000;
+  // How long the first read waits before the loading line says it can take a minute.
+  const LOADING_SLOW_AFTER_MS = 8_000;
+  const startedAt = Date.now();
 
   const state: {
     data: Any;
@@ -331,6 +339,25 @@ export function chatgptDashboardClient(
     return state.hostKind === 'computer';
   }
 
+  /** How long a tool call may take here (Jamie, 2026-11-04: on the computer, a minute is fine). */
+  function callTimeoutMs(): number {
+    return onComputer() ? Math.max(config.resultTimeoutMs, config.computerResultTimeoutMs) : config.resultTimeoutMs;
+  }
+
+  /**
+   * A read that ran out of time on the computer itself: Olympus is up (it
+   * served this page) and busy, so the page keeps trying. Only a refused or
+   * failed call says it can't reach Olympus.
+   */
+  function timedOutOnComputer(error: Any): boolean {
+    return onComputer() && error instanceof Error && error.message === 'timeout';
+  }
+
+  /** The first read's line: calm, and honest that it can take a while. */
+  function loadingWords(): string {
+    return state.slow || Date.now() - startedAt >= LOADING_SLOW_AFTER_MS ? P.loadingSlow : P.loading;
+  }
+
   function readOpenAiGlobals(): void {
     const host = openai();
     if (!host) return;
@@ -352,7 +379,8 @@ export function chatgptDashboardClient(
     if (resultTimer) clearTimeout(resultTimer);
     resultTimer = setTimeout(() => {
       resultTimer = null;
-      if (!state.data) {
+      // On the computer the read in flight answers for itself, however long it takes.
+      if (!state.data && !onComputer()) {
         relayFailed({ kind: 'no_answer' });
         render();
       }
@@ -482,7 +510,7 @@ export function chatgptDashboardClient(
     state.notice = '';
     state.actionError = null;
     render();
-    request('tools/call', { name, arguments: args || {} }, config.resultTimeoutMs).then((result) => {
+    request('tools/call', { name, arguments: args || {} }, callTimeoutMs()).then((result) => {
       if (state.busy === key) state.busy = '';
       if (mine !== generation) {
         redraw();
@@ -564,7 +592,13 @@ export function chatgptDashboardClient(
     }, (error: Any) => {
       if (state.busy === key) state.busy = '';
       if (name === config.syncTool) state.syncPressed = {};
-      if (mine === generation) relayFailed(rejectionFailure(error));
+      if (mine === generation && name === config.toolName && timedOutOnComputer(error)) {
+        // Busy, not gone: say so calmly and read again soon by itself.
+        state.slow = true;
+        if (refreshTimer) clearTimeout(refreshTimer);
+        refreshTimer = setTimeout(backgroundRefresh, R.activeMs);
+        nextRefreshAt = Date.now() + R.activeMs;
+      } else if (mine === generation) relayFailed(rejectionFailure(error));
       redraw();
     });
   }
@@ -582,7 +616,7 @@ export function chatgptDashboardClient(
     const providerListing = name === config.picker.tools.scopeList || name === config.picker.tools.scopeSet;
     const timeoutMs = privacyInference ? Math.max(config.resultTimeoutMs, 150_000)
       : providerListing ? Math.max(config.resultTimeoutMs, 120_000)
-      : config.resultTimeoutMs;
+      : callTimeoutMs();
     return request('tools/call', { name, arguments: args || {} }, timeoutMs);
   }
 
@@ -2596,7 +2630,7 @@ export function chatgptDashboardClient(
       || (data && data.blocker ? itemBanner(data.blocker, 'blocker', false) : null)
       || (data && data.needsYou && data.needsYou[0] ? itemBanner(data.needsYou[0], 'need:' + String(data.needsYou[0].id || 0), false) : null);
     add(card, top);
-    if (!top && !data) add(card, el('p', 'muted', P.loading));
+    if (!top && !data) add(card, el('p', 'muted', loadingWords()));
     if (data && data.progress && !state.relayDown && !progressFinished(data.progress)) add(card, el('p', 'progress-line', progressText(data.progress)));
     else if (!top && data) add(card, el('p', '', P.upToDate));
     if (state.canFullscreen) {
@@ -2617,7 +2651,7 @@ export function chatgptDashboardClient(
       add(page, notice);
     }
     if (!data) {
-      if (!state.relayDown) add(page, el('p', 'muted', P.loading));
+      if (!state.relayDown) add(page, el('p', 'muted', loadingWords()));
       return page;
     }
     add(page, data.blocker ? itemBanner(data.blocker, 'blocker', true) : null);
@@ -2773,7 +2807,7 @@ export function chatgptDashboardClient(
       const mine = supersede();
       state.busy = 'refresh';
       render(focusKey);
-      request('tools/call', { name: config.toolName, arguments: {} }, config.resultTimeoutMs).then((result) => {
+      request('tools/call', { name: config.toolName, arguments: {} }, callTimeoutMs()).then((result) => {
         if (state.busy === 'refresh') state.busy = '';
         if (mine !== generation) return redraw();
         acceptResult(result, false);
@@ -2885,7 +2919,7 @@ export function chatgptDashboardClient(
     }
     refreshing = true;
     const mine = generation;
-    request('tools/call', { name: config.toolName, arguments: {} }, config.resultTimeoutMs).then((result) => {
+    request('tools/call', { name: config.toolName, arguments: {} }, callTimeoutMs()).then((result) => {
       refreshing = false;
       // Something newer happened while this was in flight: its answer is stale.
       if (mine !== generation) return scheduleRefresh();
@@ -2896,7 +2930,7 @@ export function chatgptDashboardClient(
     }, (error: Any) => {
       refreshing = false;
       if (mine !== generation) return scheduleRefresh();
-      if (busyNotGone(error)) {
+      if (busyNotGone(error) || timedOutOnComputer(error)) {
         // Olympus answered a moment ago and only this read ran out of time:
         // say it is busy and try again soon, with every control still usable.
         state.slow = true;
@@ -2949,4 +2983,8 @@ export function chatgptDashboardClient(
     if (state.hostKind && !state.data) refresh();
   }, () => undefined);
   if (!state.data) waitForResult();
+  // Still loading after a few seconds: the line says it can take a minute.
+  setTimeout(() => {
+    if (!state.data) redraw();
+  }, LOADING_SLOW_AFTER_MS);
 }

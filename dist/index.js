@@ -14690,6 +14690,7 @@ var init_vocabulary = __esm(() => {
   DASHBOARD_CHATGPT_PAGE_COPY = {
     title: "Olympus",
     loading: "Checking your computer…",
+    loadingSlow: "Loading. This can take a minute while Olympus is importing.",
     upToDate: "Olympus is up to date.",
     needsYou: "Needs you",
     sources: "Sources",
