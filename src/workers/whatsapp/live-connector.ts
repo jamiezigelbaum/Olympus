@@ -1403,7 +1403,7 @@ function spoolMessageText(message: SpoolMessage): string {
  * Reaction lines name another message and are left alone. Cursors are this
  * spool's `<file>:<lines>`.
  */
-export function redactWhatsAppLiveSpoolSecrets(options: {
+export async function redactWhatsAppLiveSpoolSecrets(options: {
   spoolDir: string;
   account?: string;
   from?: string;
@@ -1419,7 +1419,7 @@ export function redactWhatsAppLiveSpoolSecrets(options: {
    * (core/source-placement.ts, `whatsappMovedPathMapper`). The line keeps its path.
    */
   relocateMediaPath?: (path: string) => string;
-}): CaptureSpoolRedactionResult {
+}): Promise<CaptureSpoolRedactionResult> {
   const account = options.account === undefined ? DEFAULT_ACCOUNT : requireNonEmpty(options.account, 'WhatsApp account');
   const from = positionFromCursor(options.from);
   const through = positionFromCursor(options.through);

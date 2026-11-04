@@ -46,6 +46,7 @@ import { join } from 'node:path';
 import { detectSecretFindingKinds } from '../classification/engine.ts';
 import type { TierLedger, TierLedgerIdentity } from '../classification/tier-ledger.ts';
 import { secretsDisposition } from './secrets-disposition.ts';
+import { ingestionTurn } from '../control-path-headroom.ts';
 
 /**
  * How much of a record goes. `content`: the text (and anything that would
@@ -94,15 +95,17 @@ const SPOOL_MAX_LINE_BYTES = 32 * 1024 * 1024;
  * a line that changed on disk between the read and the write is left alone.
  * Each file is read in chunks from its start up to the window's end, holding
  * one line at a time, so a pass costs memory for one record whatever the
- * size of the spool.
+ * size of the spool. It lets requests in between lines (ingestionTurn): a
+ * whole-spool pass judges every record's text, and run in one piece it held
+ * the worker for seconds (Sparta, 2026-11-04: ~2 s freezes per Telegram pull).
  */
-export function redactCaptureSpoolLines(options: {
+export async function redactCaptureSpoolLines(options: {
   dir: string;
   files: readonly string[];
   from?: CaptureSpoolPosition;
   through?: CaptureSpoolPosition;
   redact: (line: string) => string | undefined;
-}): CaptureSpoolRedactionResult {
+}): Promise<CaptureSpoolRedactionResult> {
   const result: CaptureSpoolRedactionResult = { recordsRedacted: 0, recordsBlanked: 0 };
   for (const name of options.files) {
     if (options.from && name < options.from.file) continue;
@@ -174,6 +177,7 @@ export function redactCaptureSpoolLines(options: {
           finishLine(position + newline);
           if (lineIndex >= endLine) break scan;
           at = newline + 1;
+          await ingestionTurn();
         }
         position += read;
       }
@@ -220,13 +224,13 @@ export function createSpoolSecretJudge(options: {
  * `through` absent means the lane has read nothing yet, so nothing is judged.
  * `redact` is the lane's own rewrite over a window with the judge it is given.
  */
-export function clearCaptureSpoolSecrets(options: {
+export async function clearCaptureSpoolSecrets(options: {
   ledger: TierLedger;
   stateKey: string;
   from?: string;
   through: string | undefined;
-  redact: (window: { from?: string; through: string }, judge: SpoolSecretJudge) => CaptureSpoolRedactionResult;
-}): CaptureSpoolRedactionResult {
+  redact: (window: { from?: string; through: string }, judge: SpoolSecretJudge) => Promise<CaptureSpoolRedactionResult>;
+}): Promise<CaptureSpoolRedactionResult> {
   const through = options.through;
   if (!through) return addCaptureSpoolRedactions();
   const clearedKey = `${options.stateKey}:cleared_through`;
@@ -235,12 +239,12 @@ export function clearCaptureSpoolSecrets(options: {
   const from = options.from === undefined || cleared === undefined
     ? undefined
     : earlierSpoolCursor(cleared, options.from);
-  const window = options.redact(
+  const window = await options.redact(
     { ...(from === undefined ? {} : { from }), through },
     createSpoolSecretJudge({ ledger: options.ledger, floor: true }),
   );
   options.ledger.writeMeta(clearedKey, through);
-  const sweep = sweepCaptureSpoolWhenSecretsChange({
+  const sweep = await sweepCaptureSpoolWhenSecretsChange({
     ledger: options.ledger,
     stateKey: options.stateKey,
     sweep: (judge) => options.redact({ through }, judge),
@@ -292,17 +296,17 @@ interface SpoolSweepState {
  * after its record was read. `sweep` does the lane's own redaction with the
  * judge it is handed; the state is written only after it returns.
  */
-export function sweepCaptureSpoolWhenSecretsChange(options: {
+export async function sweepCaptureSpoolWhenSecretsChange(options: {
   ledger: TierLedger;
   stateKey: string;
-  sweep: (judge: SpoolSecretJudge) => CaptureSpoolRedactionResult;
-}): CaptureSpoolRedactionResult | undefined {
+  sweep: (judge: SpoolSecretJudge) => Promise<CaptureSpoolRedactionResult>;
+}): Promise<CaptureSpoolRedactionResult | undefined> {
   if (secretsDisposition() !== 'tombstone_now') return undefined;
   const digest = secretsDigest(options.ledger);
   const state = readSweepState(options.ledger, options.stateKey);
   const versionDue = state?.version !== CAPTURE_SPOOL_SWEEP_VERSION;
   if (!versionDue && state?.secrets === digest) return undefined;
-  const result = options.sweep(createSpoolSecretJudge({ ledger: options.ledger, floor: versionDue }));
+  const result = await options.sweep(createSpoolSecretJudge({ ledger: options.ledger, floor: versionDue }));
   const next: SpoolSweepState = { version: CAPTURE_SPOOL_SWEEP_VERSION, secrets: digest };
   options.ledger.writeMeta(options.stateKey, JSON.stringify(next));
   return result;

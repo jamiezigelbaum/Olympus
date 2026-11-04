@@ -396,7 +396,7 @@ export function createWhatsAppConnectorStoreSyncHandler(options: {
           const committed = sanitizeWhatsAppLiveCursor(
             tierSet.committedCursor(WHATSAPP_PRODUCT_CONNECTOR_ID)?.cursor ?? undefined,
           );
-          redacted = clearWhatsAppSpoolSecrets({
+          redacted = await clearWhatsAppSpoolSecrets({
             spoolDir,
             account,
             mediaDir,
@@ -478,7 +478,7 @@ export function createWhatsAppConnectorStoreSyncHandler(options: {
  * for a later judgment: those lines are cleared again as the cursor reaches
  * them.
  */
-export function clearWhatsAppSpoolSecrets(options: {
+export async function clearWhatsAppSpoolSecrets(options: {
   spoolDir: string;
   account: string;
   mediaDir?: string;
@@ -493,7 +493,7 @@ export function clearWhatsAppSpoolSecrets(options: {
   relocateMediaPath?: (path: string) => string;
   /** The bytes a pull may read clearing known Secrets ahead of the cursor (default 32 MiB; at least one whole file). */
   aheadBudgetBytes?: number;
-}): CaptureSpoolRedactionResult {
+}): Promise<CaptureSpoolRedactionResult> {
   const redact = (window: { from?: string; through: string }, judge: SpoolSecretJudge) => redactWhatsAppLiveSpoolSecrets({
     spoolDir: options.spoolDir,
     account: options.account,
@@ -539,7 +539,7 @@ export function clearWhatsAppSpoolSecrets(options: {
       : { lines: end, offset: options.throughOffset ?? offsetAfterLines(path, end) };
     if (scanned === undefined || scanned.offset === undefined) continue;
     try {
-      const cleared = redact({ from: `${file}:${start}`, through: `${file}:${scanned.lines}` }, judge);
+      const cleared = await redact({ from: `${file}:${start}`, through: `${file}:${scanned.lines}` }, judge);
       if (cleared.recordsRedacted + cleared.recordsBlanked > 0) rewritten.add(file);
       result = addCaptureSpoolRedactions(result, cleared);
     } catch (error) {
@@ -574,7 +574,7 @@ export function clearWhatsAppSpoolSecrets(options: {
       const scanned = terminatedLinesEnd(path);
       if (scanned === undefined) continue;
       try {
-        const cleared = redact({ from: `${file}:0`, through: `${file}:${scanned.lines}` }, judge);
+        const cleared = await redact({ from: `${file}:0`, through: `${file}:${scanned.lines}` }, judge);
         if (cleared.recordsRedacted + cleared.recordsBlanked > 0) rewritten.add(file);
         result = addCaptureSpoolRedactions(result, cleared);
       } catch (error) {
@@ -590,7 +590,7 @@ export function clearWhatsAppSpoolSecrets(options: {
   options.ledger.writeMeta(CLEARED_FILES_KEY, JSON.stringify(next));
   refreshIndex(options.spoolDir, rewritten);
   if (failure !== undefined) throw failure;
-  const sweep = sweepCaptureSpoolWhenSecretsChange({
+  const sweep = await sweepCaptureSpoolWhenSecretsChange({
     ledger: options.ledger,
     stateKey: WHATSAPP_SPOOL_REDACTION_STATE_KEY,
     sweep: (sweepJudge) => redact({ through: options.through! }, sweepJudge),
