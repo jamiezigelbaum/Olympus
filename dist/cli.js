@@ -75056,7 +75056,7 @@ var init_source_inputs = __esm(() => {
 import { createHash as createHash50 } from "node:crypto";
 import { closeSync as closeSync15, fsyncSync as fsyncSync3, lstatSync as lstatSync26, openSync as openSync15, readSync as readSync3, writeSync as writeSync4 } from "node:fs";
 import { join as join60 } from "node:path";
-function redactCaptureSpoolLines(options) {
+async function redactCaptureSpoolLines(options) {
   const result = { recordsRedacted: 0, recordsBlanked: 0 };
   for (const name of options.files) {
     if (options.from && name < options.from.file)
@@ -75135,6 +75135,7 @@ function redactCaptureSpoolLines(options) {
             if (lineIndex >= endLine)
               break scan;
             at = newline + 1;
+            await ingestionTurn();
           }
           position += read;
         }
@@ -75165,16 +75166,16 @@ function createSpoolSecretJudge(options) {
     return detectSecretFindingKinds(text2).length > 0 ? "content" : undefined;
   };
 }
-function clearCaptureSpoolSecrets(options) {
+async function clearCaptureSpoolSecrets(options) {
   const through = options.through;
   if (!through)
     return addCaptureSpoolRedactions();
   const clearedKey = `${options.stateKey}:cleared_through`;
   const cleared = options.ledger.readMeta(clearedKey);
   const from = options.from === undefined || cleared === undefined ? undefined : earlierSpoolCursor(cleared, options.from);
-  const window2 = options.redact({ ...from === undefined ? {} : { from }, through }, createSpoolSecretJudge({ ledger: options.ledger, floor: true }));
+  const window2 = await options.redact({ ...from === undefined ? {} : { from }, through }, createSpoolSecretJudge({ ledger: options.ledger, floor: true }));
   options.ledger.writeMeta(clearedKey, through);
-  const sweep = sweepCaptureSpoolWhenSecretsChange({
+  const sweep = await sweepCaptureSpoolWhenSecretsChange({
     ledger: options.ledger,
     stateKey: options.stateKey,
     sweep: (judge2) => options.redact({ through }, judge2)
@@ -75196,7 +75197,7 @@ function parseSpoolCursor(cursor) {
   const line = separator > 0 ? cursor.slice(separator + 1) : "";
   return file && /^\d+$/.test(line) ? { file, line: Number(line) } : undefined;
 }
-function sweepCaptureSpoolWhenSecretsChange(options) {
+async function sweepCaptureSpoolWhenSecretsChange(options) {
   if (secretsDisposition() !== "tombstone_now")
     return;
   const digest3 = secretsDigest(options.ledger);
@@ -75204,7 +75205,7 @@ function sweepCaptureSpoolWhenSecretsChange(options) {
   const versionDue = state?.version !== CAPTURE_SPOOL_SWEEP_VERSION;
   if (!versionDue && state?.secrets === digest3)
     return;
-  const result = options.sweep(createSpoolSecretJudge({ ledger: options.ledger, floor: versionDue }));
+  const result = await options.sweep(createSpoolSecretJudge({ ledger: options.ledger, floor: versionDue }));
   const next = { version: CAPTURE_SPOOL_SWEEP_VERSION, secrets: digest3 };
   options.ledger.writeMeta(options.stateKey, JSON.stringify(next));
   return result;
@@ -75244,6 +75245,7 @@ var SPOOL_SCAN_CHUNK_BYTES, SPOOL_MAX_LINE_BYTES, CAPTURE_SPOOL_SWEEP_VERSION = 
 var init_capture_spool_secrets = __esm(() => {
   init_engine();
   init_secrets_disposition();
+  init_control_path_headroom();
   SPOOL_SCAN_CHUNK_BYTES = 1 << 20;
   SPOOL_MAX_LINE_BYTES = 32 * 1024 * 1024;
 });
@@ -76435,7 +76437,7 @@ function spoolTailLines(path) {
     closeSync17(fd2);
   }
 }
-function redactTelegramCaptureSpoolSecrets(options) {
+async function redactTelegramCaptureSpoolSecrets(options) {
   assertTelegramCaptureSpoolDirectory(options.spoolDir);
   const from = parseTelegramCaptureSpoolCursor(options.from);
   const through = parseTelegramCaptureSpoolCursor(options.through);
@@ -81391,7 +81393,7 @@ function rawItemFromChild(message2, child2, account, fetchedAt) {
 function spoolMessageText(message2) {
   return enrichWithLinkPreview(resolveMentionText(message2.text, message2.mentions), message2);
 }
-function redactWhatsAppLiveSpoolSecrets(options) {
+async function redactWhatsAppLiveSpoolSecrets(options) {
   const account = options.account === undefined ? DEFAULT_ACCOUNT : requireNonEmpty7(options.account, "WhatsApp account");
   const from = positionFromCursor(options.from);
   const through = positionFromCursor(options.through);
@@ -82464,7 +82466,7 @@ function createWhatsAppConnectorStoreSyncHandler(options) {
         tiered = tieredLaneReceiptCounts({ routing: setRun.routing });
         try {
           const committed = sanitizeWhatsAppLiveCursor(tierSet.committedCursor(WHATSAPP_PRODUCT_CONNECTOR_ID)?.cursor ?? undefined);
-          redacted = clearWhatsAppSpoolSecrets({
+          redacted = await clearWhatsAppSpoolSecrets({
             spoolDir,
             account,
             mediaDir,
@@ -82506,7 +82508,7 @@ function createWhatsAppConnectorStoreSyncHandler(options) {
     }
   };
 }
-function clearWhatsAppSpoolSecrets(options) {
+async function clearWhatsAppSpoolSecrets(options) {
   const redact = (window2, judge4) => redactWhatsAppLiveSpoolSecrets({
     spoolDir: options.spoolDir,
     account: options.account,
@@ -82548,7 +82550,7 @@ function clearWhatsAppSpoolSecrets(options) {
     if (scanned === undefined || scanned.offset === undefined)
       continue;
     try {
-      const cleared = redact({ from: `${file}:${start}`, through: `${file}:${scanned.lines}` }, judge3);
+      const cleared = await redact({ from: `${file}:${start}`, through: `${file}:${scanned.lines}` }, judge3);
       if (cleared.recordsRedacted + cleared.recordsBlanked > 0)
         rewritten.add(file);
       result = addCaptureSpoolRedactions(result, cleared);
@@ -82585,7 +82587,7 @@ function clearWhatsAppSpoolSecrets(options) {
       if (scanned === undefined)
         continue;
       try {
-        const cleared = redact({ from: `${file}:0`, through: `${file}:${scanned.lines}` }, judge3);
+        const cleared = await redact({ from: `${file}:0`, through: `${file}:${scanned.lines}` }, judge3);
         if (cleared.recordsRedacted + cleared.recordsBlanked > 0)
           rewritten.add(file);
         result = addCaptureSpoolRedactions(result, cleared);
@@ -82605,7 +82607,7 @@ function clearWhatsAppSpoolSecrets(options) {
   refreshIndex(options.spoolDir, rewritten);
   if (failure !== undefined)
     throw failure;
-  const sweep = sweepCaptureSpoolWhenSecretsChange({
+  const sweep = await sweepCaptureSpoolWhenSecretsChange({
     ledger: options.ledger,
     stateKey: WHATSAPP_SPOOL_REDACTION_STATE_KEY,
     sweep: (sweepJudge) => redact({ through: options.through }, sweepJudge)
@@ -92407,7 +92409,7 @@ function createTelegramConnectorStoreSyncHandler(options) {
       let redacted;
       let redactionFailed = false;
       try {
-        redacted = clearTelegramSpoolSecrets({
+        redacted = await clearTelegramSpoolSecrets({
           spoolDir,
           ledger: tierSet.ledger,
           ...preflightCursor ? { from: preflightCursor } : {},
@@ -92474,7 +92476,7 @@ function telegramCaptureSince(spoolDir) {
     return;
   }
 }
-function clearTelegramSpoolSecrets(options) {
+async function clearTelegramSpoolSecrets(options) {
   return clearCaptureSpoolSecrets({
     ledger: options.ledger,
     stateKey: TELEGRAM_SPOOL_REDACTION_STATE_KEY,

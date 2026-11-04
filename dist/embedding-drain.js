@@ -35408,6 +35408,7 @@ var SPOOL_SCAN_CHUNK_BYTES, SPOOL_MAX_LINE_BYTES;
 var init_capture_spool_secrets = __esm(() => {
   init_engine();
   init_secrets_disposition();
+  init_control_path_headroom();
   SPOOL_SCAN_CHUNK_BYTES = 1 << 20;
   SPOOL_MAX_LINE_BYTES = 32 * 1024 * 1024;
 });
