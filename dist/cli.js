@@ -53949,6 +53949,7 @@ var init_vocabulary = __esm(() => {
   DASHBOARD_CHATGPT_PAGE_COPY = {
     title: "Olympus",
     loading: "Checking your computer…",
+    loadingSlow: "Loading. This can take a minute while Olympus is importing.",
     upToDate: "Olympus is up to date.",
     needsYou: "Needs you",
     sources: "Sources",
@@ -149963,6 +149964,8 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
   const C2 = config2.connection;
   const GLOBAL_STATES = ["not_connected", "installing", "mac_offline", "relay_unavailable"];
   const BUSY_GRACE_MS = 120000;
+  const LOADING_SLOW_AFTER_MS = 8000;
+  const startedAt = Date.now();
   const state = {
     data: null,
     relayDown: false,
@@ -150103,6 +150106,15 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
   function onComputer() {
     return state.hostKind === "computer";
   }
+  function callTimeoutMs() {
+    return onComputer() ? Math.max(config2.resultTimeoutMs, config2.computerResultTimeoutMs) : config2.resultTimeoutMs;
+  }
+  function timedOutOnComputer(error2) {
+    return onComputer() && error2 instanceof Error && error2.message === "timeout";
+  }
+  function loadingWords() {
+    return state.slow || Date.now() - startedAt >= LOADING_SLOW_AFTER_MS ? P.loadingSlow : P.loading;
+  }
   function readOpenAiGlobals() {
     const host = openai();
     if (!host)
@@ -150126,7 +150138,7 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
       clearTimeout(resultTimer);
     resultTimer = setTimeout(() => {
       resultTimer = null;
-      if (!state.data) {
+      if (!state.data && !onComputer()) {
         relayFailed({ kind: "no_answer" });
         render();
       }
@@ -150228,7 +150240,7 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     state.notice = "";
     state.actionError = null;
     render();
-    request("tools/call", { name, arguments: args || {} }, config2.resultTimeoutMs).then((result) => {
+    request("tools/call", { name, arguments: args || {} }, callTimeoutMs()).then((result) => {
       if (state.busy === key2)
         state.busy = "";
       if (mine !== generation) {
@@ -150300,7 +150312,13 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
         state.busy = "";
       if (name === config2.syncTool)
         state.syncPressed = {};
-      if (mine === generation)
+      if (mine === generation && name === config2.toolName && timedOutOnComputer(error2)) {
+        state.slow = true;
+        if (refreshTimer)
+          clearTimeout(refreshTimer);
+        refreshTimer = setTimeout(backgroundRefresh, R.activeMs);
+        nextRefreshAt = Date.now() + R.activeMs;
+      } else if (mine === generation)
         relayFailed(rejectionFailure(error2));
       redraw();
     });
@@ -150311,7 +150329,7 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
   function callRaw(name, args) {
     const privacyInference = name === config2.privacy.tools.questions || name === config2.privacy.tools.check;
     const providerListing = name === config2.picker.tools.scopeList || name === config2.picker.tools.scopeSet;
-    const timeoutMs = privacyInference ? Math.max(config2.resultTimeoutMs, 150000) : providerListing ? Math.max(config2.resultTimeoutMs, 120000) : config2.resultTimeoutMs;
+    const timeoutMs = privacyInference ? Math.max(config2.resultTimeoutMs, 150000) : providerListing ? Math.max(config2.resultTimeoutMs, 120000) : callTimeoutMs();
     return request("tools/call", { name, arguments: args || {} }, timeoutMs);
   }
   function openLink(href) {
@@ -151287,10 +151305,10 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
       add(item, add(el("div", "archive-actions"), fixControl({ label: fill2(A.account.add, { source }), tool: H.archiveApproveTool, args: { request_id: request2.id, confirm_account: true } }, key2 + ":confirm", "plain", false), ...asked.reconfirm ? [] : [fixControl({ label: A.account.apart, tool: H.archiveApproveTool, args: { request_id: request2.id, keep_apart: true } }, key2 + ":apart", "plain", false)], fixControl({ label: A.decline, tool: H.archiveDeclineTool, args: { request_id: request2.id } }, key2 + ":decline", "plain", false)));
       return item;
     }
-    const startedAt = state.archiveStarting[request2.id];
-    if (request2.status !== "pending" || startedAt !== undefined && Date.now() - startedAt > 60000)
+    const startedAt2 = state.archiveStarting[request2.id];
+    if (request2.status !== "pending" || startedAt2 !== undefined && Date.now() - startedAt2 > 60000)
       delete state.archiveStarting[request2.id];
-    else if (startedAt !== undefined) {
+    else if (startedAt2 !== undefined) {
       const line2 = el("p", "muted", fill2(A.startingLine, { name: request2.name }));
       line2.setAttribute("role", "status");
       return add(item, line2);
@@ -152038,7 +152056,7 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     const top = connectionBanner() || (data2 && data2.blocker ? itemBanner(data2.blocker, "blocker", false) : null) || (data2 && data2.needsYou && data2.needsYou[0] ? itemBanner(data2.needsYou[0], "need:" + String(data2.needsYou[0].id || 0), false) : null);
     add(card, top);
     if (!top && !data2)
-      add(card, el("p", "muted", P.loading));
+      add(card, el("p", "muted", loadingWords()));
     if (data2 && data2.progress && !state.relayDown && !progressFinished(data2.progress))
       add(card, el("p", "progress-line", progressText(data2.progress)));
     else if (!top && data2)
@@ -152062,7 +152080,7 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     }
     if (!data2) {
       if (!state.relayDown)
-        add(page2, el("p", "muted", P.loading));
+        add(page2, el("p", "muted", loadingWords()));
       return page2;
     }
     add(page2, data2.blocker ? itemBanner(data2.blocker, "blocker", true) : null);
@@ -152200,7 +152218,7 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
       const mine = supersede();
       state.busy = "refresh";
       render(focusKey);
-      request("tools/call", { name: config2.toolName, arguments: {} }, config2.resultTimeoutMs).then((result) => {
+      request("tools/call", { name: config2.toolName, arguments: {} }, callTimeoutMs()).then((result) => {
         if (state.busy === "refresh")
           state.busy = "";
         if (mine !== generation)
@@ -152305,7 +152323,7 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     }
     refreshing = true;
     const mine = generation;
-    request("tools/call", { name: config2.toolName, arguments: {} }, config2.resultTimeoutMs).then((result) => {
+    request("tools/call", { name: config2.toolName, arguments: {} }, callTimeoutMs()).then((result) => {
       refreshing = false;
       if (mine !== generation)
         return scheduleRefresh();
@@ -152318,7 +152336,7 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
       refreshing = false;
       if (mine !== generation)
         return scheduleRefresh();
-      if (busyNotGone(error2)) {
+      if (busyNotGone(error2) || timedOutOnComputer(error2)) {
         state.slow = true;
         redraw();
         refreshTimer = setTimeout(backgroundRefresh, R.activeMs);
@@ -152372,6 +152390,10 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
   });
   if (!state.data)
     waitForResult();
+  setTimeout(() => {
+    if (!state.data)
+      redraw();
+  }, LOADING_SLOW_AFTER_MS);
 }
 var RELAY_FAILURE_TEXT_MAX = 300;
 
@@ -155996,6 +156018,7 @@ function chatgptDashboardPageHtml(options = {}) {
     page: DASHBOARD_CHATGPT_PAGE_COPY,
     statusTone: STATUS_TONE,
     resultTimeoutMs: options.resultTimeoutMs ?? CHATGPT_DASHBOARD_RESULT_TIMEOUT_MS,
+    computerResultTimeoutMs: options.computerResultTimeoutMs ?? options.resultTimeoutMs ?? CHATGPT_DASHBOARD_COMPUTER_RESULT_TIMEOUT_MS,
     staleAfterMs: options.staleAfterMs ?? CHATGPT_DASHBOARD_STALE_AFTER_MS,
     refresh: { ...CHATGPT_DASHBOARD_REFRESH, ...options.refresh },
     picker: {
@@ -156057,7 +156080,7 @@ function privacyProgramSource() {
 function scriptJson(value2) {
   return JSON.stringify(value2).split("<").join("\\u003c").split("\u2028").join("\\u2028").split("\u2029").join("\\u2029");
 }
-var CHATGPT_DASHBOARD_RESULT_TIMEOUT_MS = 20000, CHATGPT_INLINE_ERROR_CODES, CHATGPT_DASHBOARD_STALE_AFTER_MS, CHATGPT_DASHBOARD_REFRESH, STATUS_TONE, CHATGPT_DASHBOARD_LIGHT, CHATGPT_DASHBOARD_DARK, CHATGPT_DASHBOARD_CSS, CHATGPT_ARCHIVES_SOURCE_ID = "archive.imports", CHATGPT_DASHBOARD_LANDED_MS = 4000;
+var CHATGPT_DASHBOARD_RESULT_TIMEOUT_MS = 20000, CHATGPT_DASHBOARD_COMPUTER_RESULT_TIMEOUT_MS = 120000, CHATGPT_INLINE_ERROR_CODES, CHATGPT_DASHBOARD_STALE_AFTER_MS, CHATGPT_DASHBOARD_REFRESH, STATUS_TONE, CHATGPT_DASHBOARD_LIGHT, CHATGPT_DASHBOARD_DARK, CHATGPT_DASHBOARD_CSS, CHATGPT_ARCHIVES_SOURCE_ID = "archive.imports", CHATGPT_DASHBOARD_LANDED_MS = 4000;
 var init_page = __esm(() => {
   init_vocabulary();
   init_dashboard_contract();
