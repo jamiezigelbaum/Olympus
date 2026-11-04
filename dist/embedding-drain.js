@@ -17328,18 +17328,20 @@ class TierLedger {
   }
   *corpusCopyIdentitiesSteps(corpusId, filter, pageSize = 5000) {
     const query = this.db.query(`
-      SELECT rowid AS row_id, provider, account_scope, conversation_key, provider_item_id FROM tier_copies
-      WHERE corpus_id = ? AND rowid > ? AND ${corpusCopyWhere(filter)}
-      ORDER BY rowid LIMIT ?
+      SELECT rowid AS row_id, embed_hold, provider, account_scope, conversation_key, provider_item_id FROM tier_copies
+      WHERE corpus_id = ? AND (embed_hold, rowid) > (?, ?) AND ${corpusCopyWhere(filter)}
+      ORDER BY embed_hold, rowid LIMIT ?
     `);
     const out = [];
-    for (let after = 0;; ) {
-      const rows = query.all(corpusId, after, pageSize);
+    for (let hold = -1, after = 0;; ) {
+      const rows = query.all(corpusId, hold, after, pageSize);
       for (const row of rows)
         out.push(identityFromRow(row));
       if (rows.length < pageSize)
         return out;
-      after = rows[rows.length - 1].row_id;
+      const last = rows[rows.length - 1];
+      hold = last.embed_hold;
+      after = last.row_id;
       yield;
     }
   }
