@@ -250,7 +250,8 @@ export interface SourceIndexStatusHandler {
 
 export interface SourceIndexStatusHandlerOptions {
   /** Live, deduplicated unreadable population when the problem list is wired. */
-  unreadableCount?: (corpusId: string) => number;
+  // Undefined: no recount yet, so the ledger's own count stands.
+  unreadableCount?: (corpusId: string) => number | undefined;
   /**
    * The corpora status reports. A function is read on every request, so a
    * per-tier store a tier set creates at runtime (design
@@ -304,7 +305,12 @@ export interface SourceIndexReadinessSnapshot {
 }
 
 export interface SourceIndexReadinessLedger {
-  snapshotForCorpus(corpusId: string): SourceIndexReadinessSnapshot | undefined;
+  /**
+   * `read.maxAgeMs`: the staleness this caller accepts. A ledger may answer
+   * its last snapshot within it (or older, while it takes a new one off the
+   * request path), and undefined before it has taken one.
+   */
+  snapshotForCorpus(corpusId: string, read?: { maxAgeMs?: number }): SourceIndexReadinessSnapshot | undefined;
 }
 
 export type SourceIndexStatusRetrievalAvailability =
@@ -388,7 +394,7 @@ export function createSourceIndexStatusHandler(
         // it off for cheap polling, while the dashboard — whose one headline
         // percentage is computed from exactly these counts — always asks.
         const readiness = store && request.include_readiness_ledger === true
-          ? options.readinessLedger?.snapshotForCorpus(corpus.corpusId)
+          ? options.readinessLedger?.snapshotForCorpus(corpus.corpusId, maxAgeMs > 0 ? { maxAgeMs } : {})
           : undefined;
         const status = store
           ? connectorStoreStatus(
@@ -401,7 +407,8 @@ export function createSourceIndexStatusHandler(
           )
           : configuredCorpusStatus(corpus);
         if (status.configured && request.include_readiness_ledger === true && options.unreadableCount) {
-          status.counts[UNREADABLE_ITEMS_COUNT_KEY] = options.unreadableCount(corpus.corpusId);
+          const unreadable = options.unreadableCount(corpus.corpusId);
+          if (unreadable !== undefined) status.counts[UNREADABLE_ITEMS_COUNT_KEY] = unreadable;
         }
         const enforced = withRetrievalEnforcementStatus(corpus, status, availability);
         const withBacklog = store && availability?.modelId

@@ -138,6 +138,17 @@ export interface UnreadableFilesOptions {
    * How long a token stays good from when it was issued (absolute: reading the list again never extends it).
    */
   tokenTtlMs?: number;
+  /**
+   * Off the request path: a recheck answers the counts last counted (no older
+   * than this, else still answered while a fresh count runs in the
+   * background, in turns). Left out, every recheck asks each verdict now.
+   * Counts only: names, the computer's list and opening still ask each file.
+   */
+  countsMaxAgeMs?: number;
+  /**
+   * Yields between slices of a background recount (ingestionTurn).
+   */
+  turn?: () => Promise<void> | undefined;
 }
 
 export type UnreadableOpenResult =
@@ -224,8 +235,9 @@ export interface UnreadableFiles {
   /**
    * The corpus's last counted list, each verdict asked again now: the count a
    * dashboard publishes beside the names, so neither lags a Secrets change.
+   * With countsMaxAgeMs, the last count (undefined until one has run).
    */
-  recheck(corpusId: string): UnreadableRecheck;
+  recheck(corpusId: string): UnreadableRecheck | undefined;
   /**
    * The newest unreadable files' names across these corpora, newest failure first (verdicts asked again now).
    */
@@ -464,8 +476,40 @@ export function createUnreadableFiles(options: UnreadableFilesOptions): Unreadab
     return true;
   }
 
+  const RECOUNT_SLICE = 100;
+  const counted = new Map<string, { at: number; value: UnreadableRecheck }>();
+  const recounting = new Set<string>();
+
+  async function recount(corpusId: string): Promise<void> {
+    const items = listed(corpusId);
+    let unreadable = 0;
+    let blocked = 0;
+    for (let index = 0; index < items.length; index += 1) {
+      if (index > 0 && index % RECOUNT_SLICE === 0) {
+        await (options.turn?.() ?? new Promise<void>((resolve) => setImmediate(resolve)));
+      }
+      const verdict = verdictOf(items[index]!);
+      if (verdict === 'unreadable') unreadable += 1;
+      else if (verdict === 'blocked_policy') blocked += 1;
+    }
+    counted.set(corpusId, { at: now(), value: { unreadable, blocked } });
+  }
+
+  function scheduleRecount(corpusId: string): void {
+    if (recounting.has(corpusId)) return;
+    recounting.add(corpusId);
+    setTimeout(() => {
+      void recount(corpusId).catch(() => undefined).finally(() => recounting.delete(corpusId));
+    }, 0);
+  }
+
   return {
     recheck(corpusId) {
+      if (options.countsMaxAgeMs !== undefined) {
+        const last = counted.get(corpusId);
+        if (!last || now() - last.at >= options.countsMaxAgeMs) scheduleRecount(corpusId);
+        return last?.value;
+      }
       let unreadable = 0;
       let blocked = 0;
       for (const item of listed(corpusId)) {

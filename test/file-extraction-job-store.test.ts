@@ -1150,6 +1150,62 @@ describe('extraction job store: corpus readiness', () => {
     expect(snapshot?.contentExtractionThroughput?.oldest_actionable_at).toBe(currentArrivedAt);
   });
 
+  test('asks one batched currency check for the whole queue when it has one', () => {
+    const { store } = newStore();
+    enqueueOne(store, 'current');
+    enqueueOne(store, 'stale');
+    const batches: number[] = [];
+    const snapshot = createExtractionReadinessLedger(store, {
+      lanesForCorpus: () => [LANE],
+      currentItem: () => { throw new Error('the per-item check is not asked'); },
+      currentItems: (refs) => {
+        batches.push(refs.length);
+        return refs.map((ref) => ref.providerItemId === 'current');
+      },
+    }).snapshotForCorpus(LANE.corpusId);
+
+    expect(batches).toEqual([2]);
+    expect(snapshot?.counts.extraction_jobs_queued).toBe(1);
+  });
+
+  test('answers a stale snapshot at once and takes a fresh one off the request path', async () => {
+    const { store } = newStore();
+    let at = 1_000;
+    let taken = 0;
+    const ledger = createExtractionReadinessLedger({
+      corpusReadiness: (...args) => {
+        taken += 1;
+        return store.corpusReadiness(...args);
+      },
+    }, { now: () => at });
+    const tick = () => new Promise((resolve) => setTimeout(resolve, 5));
+
+    // Nothing taken yet: absent counts now, one snapshot taken in the background.
+    expect(ledger.snapshotForCorpus(LANE.corpusId, { maxAgeMs: 60_000 })).toBeUndefined();
+    expect(ledger.snapshotForCorpus(LANE.corpusId, { maxAgeMs: 60_000 })).toBeUndefined();
+    expect(taken).toBe(0);
+    await tick();
+    expect(taken).toBe(1);
+    expect(ledger.snapshotForCorpus(LANE.corpusId, { maxAgeMs: 60_000 })?.counts.extraction_jobs_queued).toBe(0);
+
+    enqueueOne(store, 'later');
+    // Within the allowance: the last snapshot, and nothing taken.
+    at += 30_000;
+    expect(ledger.snapshotForCorpus(LANE.corpusId, { maxAgeMs: 60_000 })?.counts.extraction_jobs_queued).toBe(0);
+    await tick();
+    expect(taken).toBe(1);
+    // Past it: still the last snapshot now, the fresh one next.
+    at += 60_000;
+    expect(ledger.snapshotForCorpus(LANE.corpusId, { maxAgeMs: 60_000 })?.counts.extraction_jobs_queued).toBe(0);
+    expect(taken).toBe(1);
+    await tick();
+    expect(taken).toBe(2);
+    expect(ledger.snapshotForCorpus(LANE.corpusId, { maxAgeMs: 60_000 })?.counts.extraction_jobs_queued).toBe(1);
+    // A caller without an allowance still gets a snapshot taken now.
+    expect(ledger.snapshotForCorpus(LANE.corpusId)?.counts.extraction_jobs_queued).toBe(1);
+    expect(taken).toBe(3);
+  });
+
   test('keeps scoped failure actionability and per-item policy supersession semantics', () => {
     const { store } = newStore();
     settle(store, 'rescued', 'failed_terminal');

@@ -95,6 +95,7 @@ import type { EvidencePackBuildDetail } from '../../core/evidence-pack.ts';
 import type { SourceIndexAnswerRequest } from '../source-index/answer-types.ts';
 import {
   createSourceIndexStatusHandler,
+  DASHBOARD_READINESS_LEDGER_MAX_AGE_MS,
   resolveStatusRetrievalAvailability,
   type SourceIndexStatusRetrievalAvailability,
 } from '../source-index/status.ts';
@@ -531,7 +532,7 @@ import { resolveClassificationLedgerPath, readClassificationLedger, isClassifier
 import type { AnalystModel } from '../../core/analyst.ts';
 import { resolveTierMigrationPaths, tierMigrationStatusSummary } from '../classification/tier-migration.ts';
 import { resolveEmbeddingLedgerPath } from '../embedding-ledger.ts';
-import { startCpuSampleLog } from '../control-path-headroom.ts';
+import { ingestionTurn, startCpuSampleLog } from '../control-path-headroom.ts';
 
 /**
  * The least time between two scheduler status snapshots for the ingestion
@@ -4749,6 +4750,27 @@ export async function main(): Promise<void> {
     ? createExtractionReadinessLedger(fileExtractionRuntime.jobs, {
         terminalRetryPaths: fileExtractionRuntime.terminalRetryPaths,
         classifyUnreadable: unreadableVerdict,
+        currentItems(refs) {
+          // One batched check per store for the whole queue (the per-job
+          // check below held the worker for seconds on a large Dropbox queue).
+          const answers = refs.map(() => false);
+          const check = (
+            corpusId: string,
+            store: LocalConnectorStore | undefined,
+            view: { itemsMatchingExtractionRefs: LocalConnectorStore['itemsMatchingExtractionRefs'] } | undefined,
+          ): void => {
+            if (!store) return;
+            const indexes = refs.flatMap((ref, index) => (ref.corpusId === corpusId ? [index] : []));
+            if (indexes.length === 0) return;
+            const readScope = connectorStoreReadScope(store);
+            if (!readScope.allowed || !readScope.contentAllowed) return;
+            const matched = (view ?? store).itemsMatchingExtractionRefs(indexes.map((index) => refs[index]!), readScope.contentFilters);
+            indexes.forEach((index, position) => { answers[index] = matched[position] === true; });
+          };
+          check(LOCAL_FILES_CORPUS_ID, localFilesConnectorStore, localFilesExtractionView);
+          check(DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID, dropboxConnectorStore, dropboxExtractionView);
+          return answers;
+        },
         currentItem(ref) {
           if (ref.corpusId === LOCAL_FILES_CORPUS_ID && localFilesConnectorStore) {
             const readScope = connectorStoreReadScope(localFilesConnectorStore);
@@ -4820,6 +4842,11 @@ export async function main(): Promise<void> {
         verdict: unreadableVerdict,
         locate: locateUnreadableItem,
         parentOf: unreadableParentOfItem,
+        // Counts are recounted off the request path, in turns: asking every
+        // listed file's verdict on each poll froze the dashboard for 23 s on a
+        // large list (Sparta, 2026-11-04). Names and opening still ask each file.
+        countsMaxAgeMs: DASHBOARD_READINESS_LEDGER_MAX_AGE_MS,
+        turn: ingestionTurn,
         // The provider's own resolver, else a Drive file's own Google page.
         // Nothing else opens: a locator is provider data, not a link to trust.
         openTarget: (provider, locator) => (Object.hasOwn(unreadableOpenTargets, provider)
@@ -4845,7 +4872,7 @@ export async function main(): Promise<void> {
       },
       connectorStores,
       connectorStoreStatusScope,
-      ...(unreadableFiles ? { unreadableCount: (corpusId: string) => unreadableFiles.recheck(corpusId).unreadable } : {}),
+      ...(unreadableFiles ? { unreadableCount: (corpusId: string) => unreadableFiles.recheck(corpusId)?.unreadable } : {}),
       retrievalPolicy: (domain) => sovereigntyEngine.config.retrieval.trustDomains[domain as keyof typeof sovereigntyEngine.config.retrieval.trustDomains],
       retrievalAvailability,
       tierClassification: () => {
