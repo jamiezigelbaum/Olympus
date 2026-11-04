@@ -236,6 +236,35 @@ describe('the set ledger governs every handle, and its loss fails closed', () =>
     }
   });
 
+  test('an expired snapshot set is served at once and rebuilt in turns, never in the status call', async () => {
+    const dir = workspace();
+    const tiered = await raised(dir);
+    const store = tiered.stores.internal!;
+    const ledger = tiered.ledger;
+    const real = ledger.corpusCopyIdentities.bind(ledger);
+    let reads = 0;
+    ledger.corpusCopyIdentities = ((...args: Parameters<typeof real>) => { reads += 1; return real(...args); }) as typeof real;
+    try {
+      const readsFor = (): number => {
+        const before = reads;
+        store.status(undefined, { countsMaxAgeMs: 5 });
+        return reads - before;
+      };
+      expect(readsFor()).toBeGreaterThan(0);
+      ledger.recordDecision(identityOf('unrelated'), ledger.getCurrent(identityOf('garden'))! as unknown as Parameters<typeof ledger.recordDecision>[1]);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      // Expired: the call itself reads nothing and answers from the older set.
+      const before = reads;
+      expect(readsFor()).toBe(0);
+      // The rebuild runs in later turns.
+      for (let i = 0; i < 40 && reads === before; i += 1) await new Promise((resolve) => setTimeout(resolve, 5));
+      expect(reads).toBeGreaterThan(before);
+    } finally {
+      ledger.corpusCopyIdentities = real;
+      tiered.close();
+    }
+  });
+
   test('with the set ledger lost, a routed store refuses to sync and serves nothing', async () => {
     const dir = workspace();
     const first = await raised(dir);

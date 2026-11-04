@@ -22701,6 +22701,21 @@ function exclusionCounts(tally) {
     }))
   };
 }
+function runSteps(steps) {
+  let step = steps.next();
+  while (!step.done)
+    step = steps.next();
+  return step.value;
+}
+async function runStepsInTurns(steps) {
+  await ingestionTurn();
+  let step = steps.next();
+  while (!step.done) {
+    await ingestionTurn();
+    step = steps.next();
+  }
+  return step.value;
+}
 function connectorStoreCurrentEmbeddingRowsPage(db, options, afterChunkPk, limit = CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE) {
   const modelId = requireNonEmpty(options.modelId, "Connector store embedding model id");
   const accountScope = normalizeOptionalAccountScope(options.accountScope);
@@ -24556,7 +24571,7 @@ function fileIdentity(path) {
     return;
   }
 }
-var DEFAULT_MAX_CHUNK_CHARS = 4000, MAX_MAX_CHUNK_CHARS = 32000, MAX_SEARCH_RESULTS = 50, CONNECTOR_STORE_FTS_TITLE_WEIGHT = 1.5, EMBEDDING_BATCH_SIZE = 32, MAX_SELECTED_EMBED_ITEM_IDS = 25000, MAX_CONVERSATION_TITLE_LOOKUP_ROWS = 100, MIN_VECTOR_SCORE = 0.18, MAX_REQUIRED_CONCEPTS = 3, RARE_CONCEPT_WEIGHT_SHARE = 0.6, READ_RESULT_PROJECTION_LOCATOR_URI, DEFAULT_SEMANTIC_RELEVANCE_BAR = 0.62, CALIBRATED_CONTENT_PREFERENCE_BARS, CALIBRATED_SEMANTIC_RELEVANCE_BARS, CONTAINER_MIME_TYPES, CONTAINER_MIME_TYPES_SQL, SQLITE_STORE_ID = "connector-store", CONNECTOR_STORE_SQLITE_SCHEMA_VERSION = 15, IMAGE_CONTENT_PRIVATE_ONLY_CONNECTOR_ID = "olympus_image_content_private_only", CHUNK_MEDIA_RETRY_BASE_MS, CHUNK_MEDIA_MAX_ATTEMPTS = 3, MEDIA_JUDGE_MAX_PER_PASS = 200, MEDIA_JUDGE_RETRY_BASE_MS, MEDIA_JUDGE_MAX_ATTEMPTS = 3, MAX_CONSECUTIVE_CONTENT_FETCH_FAILURES = 3, CONNECTOR_STORE_FTS_MIGRATION, ConnectorStoreExclusionViolationError, ConnectorStoreMetadataOnlyViolationError, ConnectorStoreTierWriteRefusedError, STATUS_COUNTS_MAX_AGE_MS, TierLedgerUnavailableError, TIER_SET_BINDING_RUN_ID = "tiered-store-set-binding", TIER_SET_BINDING_CONNECTOR_ID = "tiered_store_set_binding", TIER_MOVE_CONNECTOR_ID = "olympus_tier_move", NON_SYNC_RUN_CONNECTORS_SQL, ConnectorStoreLocatorIdentityIndexNotReadyError, CONNECTOR_STORE_EMBEDDING_LEASE_SUFFIX = ".embedding", CONNECTOR_STORE_EMBEDDING_LEASE_WAIT_MS = 120000, CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE = 256, CONNECTOR_STORE_CURRENT_EMBEDDING_JOINS_AND_FILTER = `
+var DEFAULT_MAX_CHUNK_CHARS = 4000, MAX_MAX_CHUNK_CHARS = 32000, MAX_SEARCH_RESULTS = 50, CONNECTOR_STORE_FTS_TITLE_WEIGHT = 1.5, EMBEDDING_BATCH_SIZE = 32, MAX_SELECTED_EMBED_ITEM_IDS = 25000, MAX_CONVERSATION_TITLE_LOOKUP_ROWS = 100, MIN_VECTOR_SCORE = 0.18, MAX_REQUIRED_CONCEPTS = 3, RARE_CONCEPT_WEIGHT_SHARE = 0.6, READ_RESULT_PROJECTION_LOCATOR_URI, DEFAULT_SEMANTIC_RELEVANCE_BAR = 0.62, CALIBRATED_CONTENT_PREFERENCE_BARS, CALIBRATED_SEMANTIC_RELEVANCE_BARS, CONTAINER_MIME_TYPES, CONTAINER_MIME_TYPES_SQL, SQLITE_STORE_ID = "connector-store", CONNECTOR_STORE_SQLITE_SCHEMA_VERSION = 15, IMAGE_CONTENT_PRIVATE_ONLY_CONNECTOR_ID = "olympus_image_content_private_only", CHUNK_MEDIA_RETRY_BASE_MS, CHUNK_MEDIA_MAX_ATTEMPTS = 3, MEDIA_JUDGE_MAX_PER_PASS = 200, MEDIA_JUDGE_RETRY_BASE_MS, MEDIA_JUDGE_MAX_ATTEMPTS = 3, MAX_CONSECUTIVE_CONTENT_FETCH_FAILURES = 3, CONNECTOR_STORE_FTS_MIGRATION, ConnectorStoreExclusionViolationError, ConnectorStoreMetadataOnlyViolationError, ConnectorStoreTierWriteRefusedError, STATUS_COUNTS_MAX_AGE_MS, IDENTITY_LOOKUP_SLICE = 5000, TierLedgerUnavailableError, TIER_SET_BINDING_RUN_ID = "tiered-store-set-binding", TIER_SET_BINDING_CONNECTOR_ID = "tiered_store_set_binding", TIER_MOVE_CONNECTOR_ID = "olympus_tier_move", NON_SYNC_RUN_CONNECTORS_SQL, ConnectorStoreLocatorIdentityIndexNotReadyError, CONNECTOR_STORE_EMBEDDING_LEASE_SUFFIX = ".embedding", CONNECTOR_STORE_EMBEDDING_LEASE_WAIT_MS = 120000, CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE = 256, CONNECTOR_STORE_CURRENT_EMBEDDING_JOINS_AND_FILTER = `
   FROM chunk_embeddings emb
   JOIN chunks c ON c.chunk_pk = emb.chunk_pk
   JOIN items i ON i.item_pk = emb.item_pk
@@ -24952,15 +24967,33 @@ var init_local_index = __esm(() => {
     tierHiddenItemPks(options = {}) {
       const maxAgeMs = options.countsMaxAgeMs ?? 0;
       const counted = this.tierHiddenCountsMemo;
-      if (maxAgeMs > 0 && counted && Date.now() - counted.at < maxAgeMs)
+      if (maxAgeMs > 0 && counted) {
+        if (Date.now() - counted.at >= maxAgeMs)
+          this.refreshTierHiddenCountsInTurns();
         return counted.value;
-      const base = this.tierLedgerHiddenItemPks();
-      const children = this.hiddenChildItemPks();
-      const value = children.length === 0 ? base : { ...base, hidden: [...new Set([...base.hidden, ...children])] };
+      }
+      const value = this.withHiddenChildren(this.tierLedgerHiddenItemPks());
       this.tierHiddenCountsMemo = { at: Date.now(), value };
       return value;
     }
+    withHiddenChildren(base) {
+      const children = this.hiddenChildItemPks();
+      return children.length === 0 ? base : { ...base, hidden: [...new Set([...base.hidden, ...children])] };
+    }
     tierHiddenCountsMemo;
+    tierHiddenCountsRefresh;
+    refreshTierHiddenCountsInTurns() {
+      this.tierHiddenCountsRefresh ??= (async () => {
+        try {
+          const base = await runStepsInTurns(this.tierLedgerHiddenSteps());
+          await ingestionTurn();
+          this.tierHiddenCountsMemo = { at: Date.now(), value: this.withHiddenChildren(base) };
+        } catch {} finally {
+          this.tierHiddenCountsRefresh = undefined;
+        }
+      })();
+      return this.tierHiddenCountsRefresh;
+    }
     tierLedgerHiddenItemPks() {
       const marker = this.tierLedgerHiddenMemoMarker();
       const memo = this.tierLedgerHiddenMemo;
@@ -24984,15 +25017,21 @@ var init_local_index = __esm(() => {
       }
     }
     computeTierLedgerHiddenItemPks() {
+      return runSteps(this.tierLedgerHiddenSteps());
+    }
+    *tierLedgerHiddenSteps() {
       const ledger = this.visibilityLedger();
       if (!ledger || !ledger.corpusHasCopies(this.corpusId)) {
         return { hidden: [], held: [], metadataLayer: [], metadataLayerContentUnread: [], moving: 0 };
       }
       const conversationOf = (identity) => normalizeConversationId(identity.providerConversationId);
       const keyOf = (identity) => JSON.stringify([identity.provider, identity.accountScope, conversationOf(identity), identity.providerItemId]);
-      const pksFor = (identities) => this.itemRowsForIdentities(identities, conversationOf).map((row) => row.item_pk);
+      const rowsFor = (identities) => this.itemRowsForIdentitiesSteps(identities, conversationOf);
+      const pksFor = function* (identities) {
+        return (yield* rowsFor(identities)).map((row) => row.item_pk);
+      };
       const metadataIdentities = ledger.corpusCopyIdentities(this.corpusId, "metadata_layer");
-      const metadataRows = this.itemRowsForIdentities(metadataIdentities, conversationOf);
+      const metadataRows = yield* rowsFor(metadataIdentities);
       const pksByKey = new Map;
       for (const row of metadataRows) {
         const key2 = keyOf(metadataIdentities[row.idx]);
@@ -25004,16 +25043,19 @@ var init_local_index = __esm(() => {
       }
       const unreadIdentities = ledger.corpusCopyIdentities(this.corpusId, "metadata_layer_content_unread");
       const unreadMissed = unreadIdentities.filter((identity) => !pksByKey.has(keyOf(identity)));
+      const hidden = yield* pksFor([
+        ...ledger.corpusCopyIdentities(this.corpusId, "superseded"),
+        ...ledger.corpusCopyIdentities(this.corpusId, "staged")
+      ]);
+      const held = yield* pksFor(ledger.corpusCopyIdentities(this.corpusId, "held"));
+      const missed = yield* pksFor(unreadMissed);
       return {
-        hidden: pksFor([
-          ...ledger.corpusCopyIdentities(this.corpusId, "superseded"),
-          ...ledger.corpusCopyIdentities(this.corpusId, "staged")
-        ]),
-        held: pksFor(ledger.corpusCopyIdentities(this.corpusId, "held")),
+        hidden,
+        held,
         metadataLayer: metadataRows.map((row) => row.item_pk),
         metadataLayerContentUnread: [
           ...unreadIdentities.flatMap((identity) => pksByKey.get(keyOf(identity)) ?? []),
-          ...pksFor(unreadMissed)
+          ...missed
         ],
         moving: ledger.corpusCopyCounts(this.corpusId).moving
       };
@@ -30313,13 +30355,34 @@ var init_local_index = __esm(() => {
       const key2 = JSON.stringify(scope ?? null);
       const memos = this.settledUnreadableCountMemo ??= new Map;
       const memo = memos.get(key2);
-      if (maxAgeMs > 0 && memo && Date.now() - memo.at < maxAgeMs)
+      if (maxAgeMs > 0 && memo) {
+        if (Date.now() - memo.at >= maxAgeMs)
+          this.refreshSettledUnreadableCountInTurns(key2, scope);
         return memo.count;
-      const count = this.settledUnreadableRows(scope, { withoutSecretsOverrides: true }).length;
+      }
+      const count = runSteps(this.settledUnreadableRowsSteps(scope, { withoutSecretsOverrides: true })).length;
       if (memos.size > 32)
         memos.clear();
       memos.set(key2, { at: Date.now(), count });
       return count;
+    }
+    settledUnreadableCountRefresh;
+    refreshSettledUnreadableCountInTurns(key2, scope) {
+      const running = this.settledUnreadableCountRefresh ??= new Set;
+      if (running.has(key2))
+        return;
+      running.add(key2);
+      (async () => {
+        try {
+          const count = (await runStepsInTurns(this.settledUnreadableRowsSteps(scope, { withoutSecretsOverrides: true }))).length;
+          const memos = this.settledUnreadableCountMemo ??= new Map;
+          if (memos.size > 32)
+            memos.clear();
+          memos.set(key2, { at: Date.now(), count });
+        } catch {} finally {
+          running.delete(key2);
+        }
+      })();
     }
     settledUnreadableCountMemo;
     extractionEnded;
@@ -30328,6 +30391,9 @@ var init_local_index = __esm(() => {
       this.settledUnreadableCountMemo = undefined;
     }
     settledUnreadableRows(scope, options = {}) {
+      return runSteps(this.settledUnreadableRowsSteps(scope, options));
+    }
+    *settledUnreadableRowsSteps(scope, options = {}) {
       if (scope?.itemsAllowed === false || scope?.contentAllowed === false)
         return [];
       const ledger = this.visibilityLedger();
@@ -30337,10 +30403,23 @@ var init_local_index = __esm(() => {
       const filters = connectorStoreFilterSql(scope?.contentFilters ?? scope?.itemFilters);
       const account = normalizeOptionalAccountScope(scope?.accountScope);
       const ended = this.extractionEnded;
-      return this.itemRowsForIdentities(identities, (identity) => identity.providerConversationId ?? "", {
+      const rows = yield* this.itemRowsForIdentitiesSteps(identities, (identity) => identity.providerConversationId ?? "", {
         sql: `${account ? "AND i.account_scope = ?" : ""} ${filters.sql}`,
         params: [...account ? [account] : [], ...filters.params]
-      }).map((row) => ({ identity: identities[row.idx], row })).filter(({ identity }) => !ended || ended(identity));
+      });
+      return rows.map((row) => ({ identity: identities[row.idx], row })).filter(({ identity }) => !ended || ended(identity));
+    }
+    *itemRowsForIdentitiesSteps(identities, conversationOf, extra = { sql: "", params: [] }) {
+      const out = [];
+      for (let offset = 0;offset < identities.length; offset += IDENTITY_LOOKUP_SLICE) {
+        if (offset > 0)
+          yield;
+        for (const row of this.itemRowsForIdentities(identities.slice(offset, offset + IDENTITY_LOOKUP_SLICE), conversationOf, extra)) {
+          row.idx += offset;
+          out.push(row);
+        }
+      }
+      return out;
     }
     itemRowsForIdentities(identities, conversationOf, extra = { sql: "", params: [] }) {
       if (identities.length === 0)
