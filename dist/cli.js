@@ -22274,37 +22274,29 @@ class TierLedger {
     return `${version.data_version}:${row.changes}`;
   }
   corpusCopyIdentities(corpusId, filter) {
-    const where = filter === "held" ? `copy_state = 'current' AND embed_hold = 1` : filter === "metadata_layer" ? `copy_state = 'current' AND layers = 'metadata'` : filter === "metadata_layer_settled_unreadable" || filter === "metadata_layer_settled_unreadable_not_secret" ? `copy_state = 'current' AND layers = 'metadata'${filter === "metadata_layer_settled_unreadable_not_secret" ? `
-            AND NOT EXISTS (SELECT 1 FROM tier_overrides o
-              WHERE o.provider = tier_copies.provider AND o.account_scope = tier_copies.account_scope
-                AND o.conversation_key = tier_copies.conversation_key AND o.provider_item_id = tier_copies.provider_item_id
-                AND json_extract(o.override_json, '$.kind') = 'tier' AND json_extract(o.override_json, '$.tier') = 'secrets')` : ""}
-            AND EXISTS (SELECT 1 FROM tier_items t
-              WHERE t.provider = tier_copies.provider AND t.account_scope = tier_copies.account_scope
-                AND t.conversation_key = tier_copies.conversation_key AND t.provider_item_id = tier_copies.provider_item_id
-                AND t.state = 'current' AND t.content_read = 0
-                AND t.metadata_tier <> 'secrets' AND t.content_tier <> 'secrets'
-                AND EXISTS (SELECT 1 FROM json_each(t.reasons_json) r
-                  WHERE r.value GLOB 'content:sniffer:*:fail_safe:missing_question'
-                    OR r.value GLOB 'content:sniffer:*:fail_safe:unread'))
-            AND NOT EXISTS (SELECT 1 FROM tier_copies other
-              WHERE other.provider = tier_copies.provider AND other.account_scope = tier_copies.account_scope
-                AND other.conversation_key = tier_copies.conversation_key AND other.provider_item_id = tier_copies.provider_item_id
-                AND other.copy_state = 'current' AND other.layers IN ('content', 'both'))` : filter === "metadata_layer_content_unread" ? `copy_state = 'current' AND layers = 'metadata'
-            AND NOT EXISTS (
-              SELECT 1 FROM tier_copies other
-              WHERE other.provider = tier_copies.provider AND other.account_scope = tier_copies.account_scope
-                AND other.conversation_key = tier_copies.conversation_key
-                AND other.provider_item_id = tier_copies.provider_item_id
-                AND other.corpus_id <> tier_copies.corpus_id
-                AND other.copy_state = 'current' AND other.layers IN ('content', 'both')
-            )` : `copy_state = '${filter === "superseded" ? "superseded" : "staged"}'`;
     const rows = this.db.query(`
       SELECT provider, account_scope, conversation_key, provider_item_id FROM tier_copies
-      WHERE corpus_id = ? AND ${where}
+      WHERE corpus_id = ? AND ${corpusCopyWhere(filter)}
       ORDER BY provider, account_scope, conversation_key, provider_item_id
     `).all(corpusId);
     return rows.map(identityFromRow);
+  }
+  *corpusCopyIdentitiesSteps(corpusId, filter, pageSize = 5000) {
+    const query = this.db.query(`
+      SELECT rowid AS row_id, provider, account_scope, conversation_key, provider_item_id FROM tier_copies
+      WHERE corpus_id = ? AND rowid > ? AND ${corpusCopyWhere(filter)}
+      ORDER BY rowid LIMIT ?
+    `);
+    const out = [];
+    for (let after = 0;; ) {
+      const rows = query.all(corpusId, after, pageSize);
+      for (const row of rows)
+        out.push(identityFromRow(row));
+      if (rows.length < pageSize)
+        return out;
+      after = rows[rows.length - 1].row_id;
+      yield;
+    }
   }
   corpusCopyCounts(corpusId) {
     const row = this.db.query(`
@@ -22463,6 +22455,34 @@ function proposalFromRow(row) {
     outcome: row.outcome_json ? JSON.parse(row.outcome_json) : null,
     updatedAt: row.updated_at
   };
+}
+function corpusCopyWhere(filter) {
+  const where = filter === "held" ? `copy_state = 'current' AND embed_hold = 1` : filter === "metadata_layer" ? `copy_state = 'current' AND layers = 'metadata'` : filter === "metadata_layer_settled_unreadable" || filter === "metadata_layer_settled_unreadable_not_secret" ? `copy_state = 'current' AND layers = 'metadata'${filter === "metadata_layer_settled_unreadable_not_secret" ? `
+          AND NOT EXISTS (SELECT 1 FROM tier_overrides o
+            WHERE o.provider = tier_copies.provider AND o.account_scope = tier_copies.account_scope
+              AND o.conversation_key = tier_copies.conversation_key AND o.provider_item_id = tier_copies.provider_item_id
+              AND json_extract(o.override_json, '$.kind') = 'tier' AND json_extract(o.override_json, '$.tier') = 'secrets')` : ""}
+          AND EXISTS (SELECT 1 FROM tier_items t
+            WHERE t.provider = tier_copies.provider AND t.account_scope = tier_copies.account_scope
+              AND t.conversation_key = tier_copies.conversation_key AND t.provider_item_id = tier_copies.provider_item_id
+              AND t.state = 'current' AND t.content_read = 0
+              AND t.metadata_tier <> 'secrets' AND t.content_tier <> 'secrets'
+              AND EXISTS (SELECT 1 FROM json_each(t.reasons_json) r
+                WHERE r.value GLOB 'content:sniffer:*:fail_safe:missing_question'
+                  OR r.value GLOB 'content:sniffer:*:fail_safe:unread'))
+          AND NOT EXISTS (SELECT 1 FROM tier_copies other
+            WHERE other.provider = tier_copies.provider AND other.account_scope = tier_copies.account_scope
+              AND other.conversation_key = tier_copies.conversation_key AND other.provider_item_id = tier_copies.provider_item_id
+              AND other.copy_state = 'current' AND other.layers IN ('content', 'both'))` : filter === "metadata_layer_content_unread" ? `copy_state = 'current' AND layers = 'metadata'
+          AND NOT EXISTS (
+            SELECT 1 FROM tier_copies other
+            WHERE other.provider = tier_copies.provider AND other.account_scope = tier_copies.account_scope
+              AND other.conversation_key = tier_copies.conversation_key
+              AND other.provider_item_id = tier_copies.provider_item_id
+              AND other.corpus_id <> tier_copies.corpus_id
+              AND other.copy_state = 'current' AND other.layers IN ('content', 'both')
+          )` : `copy_state = '${filter === "superseded" ? "superseded" : "staged"}'`;
+  return where;
 }
 function identityFromRow(row) {
   return {
@@ -33386,10 +33406,13 @@ var init_local_index = __esm(() => {
       const pksFor = function* (identities) {
         return (yield* rowsFor(identities)).map((row) => row.item_pk);
       };
-      const metadataIdentities = ledger.corpusCopyIdentities(this.corpusId, "metadata_layer");
+      const metadataIdentities = yield* ledger.corpusCopyIdentitiesSteps(this.corpusId, "metadata_layer");
       const metadataRows = yield* rowsFor(metadataIdentities);
       const pksByKey = new Map;
-      for (const row of metadataRows) {
+      for (let index = 0;index < metadataRows.length; index += 1) {
+        if (index > 0 && index % IDENTITY_LOOKUP_SLICE === 0)
+          yield;
+        const row = metadataRows[index];
         const key2 = keyOf(metadataIdentities[row.idx]);
         const pks = pksByKey.get(key2);
         if (pks)
@@ -33397,22 +33420,29 @@ var init_local_index = __esm(() => {
         else
           pksByKey.set(key2, [row.item_pk]);
       }
-      const unreadIdentities = ledger.corpusCopyIdentities(this.corpusId, "metadata_layer_content_unread");
-      const unreadMissed = unreadIdentities.filter((identity2) => !pksByKey.has(keyOf(identity2)));
-      const hidden = yield* pksFor([
-        ...ledger.corpusCopyIdentities(this.corpusId, "superseded"),
-        ...ledger.corpusCopyIdentities(this.corpusId, "staged")
-      ]);
-      const held = yield* pksFor(ledger.corpusCopyIdentities(this.corpusId, "held"));
+      const unreadIdentities = yield* ledger.corpusCopyIdentitiesSteps(this.corpusId, "metadata_layer_content_unread");
+      const unreadMissed = [];
+      const unreadPks = [];
+      for (let index = 0;index < unreadIdentities.length; index += 1) {
+        if (index > 0 && index % IDENTITY_LOOKUP_SLICE === 0)
+          yield;
+        const identity2 = unreadIdentities[index];
+        const pks = pksByKey.get(keyOf(identity2));
+        if (pks)
+          unreadPks.push(...pks);
+        else
+          unreadMissed.push(identity2);
+      }
+      const superseded = yield* ledger.corpusCopyIdentitiesSteps(this.corpusId, "superseded");
+      const staged = yield* ledger.corpusCopyIdentitiesSteps(this.corpusId, "staged");
+      const hidden = yield* pksFor(superseded.concat(staged));
+      const held = yield* pksFor(yield* ledger.corpusCopyIdentitiesSteps(this.corpusId, "held"));
       const missed = yield* pksFor(unreadMissed);
       return {
         hidden,
         held,
         metadataLayer: metadataRows.map((row) => row.item_pk),
-        metadataLayerContentUnread: [
-          ...unreadIdentities.flatMap((identity2) => pksByKey.get(keyOf(identity2)) ?? []),
-          ...missed
-        ],
+        metadataLayerContentUnread: unreadPks.concat(missed),
         moving: ledger.corpusCopyCounts(this.corpusId).moving
       };
     }

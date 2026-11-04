@@ -3269,55 +3269,46 @@ export class TierLedger {
    */
   corpusCopyIdentities(
     corpusId: string,
-    filter: 'superseded' | 'staged' | 'held' | 'metadata_layer' | 'metadata_layer_content_unread' | 'metadata_layer_settled_unreadable'
-      | 'metadata_layer_settled_unreadable_not_secret',
+    filter: TierCorpusCopyFilter,
   ): TierLedgerIdentity[] {
-    // `metadata_layer_content_unread`: a names copy here whose text no current
-    // copy anywhere holds yet. That item is still waiting to be read (the
-    // extraction view's candidate rule), not kept as names only.
-    const where = filter === 'held'
-      ? `copy_state = 'current' AND embed_hold = 1`
-      : filter === 'metadata_layer'
-        ? `copy_state = 'current' AND layers = 'metadata'`
-        : filter === 'metadata_layer_settled_unreadable' || filter === 'metadata_layer_settled_unreadable_not_secret'
-          ? `copy_state = 'current' AND layers = 'metadata'${filter === 'metadata_layer_settled_unreadable_not_secret' ? `
-            AND NOT EXISTS (SELECT 1 FROM tier_overrides o
-              WHERE o.provider = tier_copies.provider AND o.account_scope = tier_copies.account_scope
-                AND o.conversation_key = tier_copies.conversation_key AND o.provider_item_id = tier_copies.provider_item_id
-                AND json_extract(o.override_json, '$.kind') = 'tier' AND json_extract(o.override_json, '$.tier') = 'secrets')` : ''}
-            AND EXISTS (SELECT 1 FROM tier_items t
-              WHERE t.provider = tier_copies.provider AND t.account_scope = tier_copies.account_scope
-                AND t.conversation_key = tier_copies.conversation_key AND t.provider_item_id = tier_copies.provider_item_id
-                AND t.state = 'current' AND t.content_read = 0
-                AND t.metadata_tier <> 'secrets' AND t.content_tier <> 'secrets'
-                AND EXISTS (SELECT 1 FROM json_each(t.reasons_json) r
-                  WHERE r.value GLOB 'content:sniffer:*:fail_safe:missing_question'
-                    OR r.value GLOB 'content:sniffer:*:fail_safe:unread'))
-            AND NOT EXISTS (SELECT 1 FROM tier_copies other
-              WHERE other.provider = tier_copies.provider AND other.account_scope = tier_copies.account_scope
-                AND other.conversation_key = tier_copies.conversation_key AND other.provider_item_id = tier_copies.provider_item_id
-                AND other.copy_state = 'current' AND other.layers IN ('content', 'both'))`
-        : filter === 'metadata_layer_content_unread'
-          ? `copy_state = 'current' AND layers = 'metadata'
-            AND NOT EXISTS (
-              SELECT 1 FROM tier_copies other
-              WHERE other.provider = tier_copies.provider AND other.account_scope = tier_copies.account_scope
-                AND other.conversation_key = tier_copies.conversation_key
-                AND other.provider_item_id = tier_copies.provider_item_id
-                AND other.corpus_id <> tier_copies.corpus_id
-                AND other.copy_state = 'current' AND other.layers IN ('content', 'both')
-            )`
-          : `copy_state = '${filter === 'superseded' ? 'superseded' : 'staged'}'`;
     // One read, in key order. It used to page by key 5,000 at a time, which
     // gained nothing (every identity is returned in one array anyway) and,
     // because the corpus index does not hold the key order, re-sorted the
     // corpus's whole match set once per page.
     const rows = this.db.query(`
       SELECT provider, account_scope, conversation_key, provider_item_id FROM tier_copies
-      WHERE corpus_id = ? AND ${where}
+      WHERE corpus_id = ? AND ${corpusCopyWhere(filter)}
       ORDER BY provider, account_scope, conversation_key, provider_item_id
     `).all(corpusId) as TierIdentityRow[];
     return rows.map(identityFromRow);
+  }
+
+  /**
+   * The same identities as corpusCopyIdentities, a page at a time in rowid
+   * order with a yield between pages, for a caller that gives the thread back
+   * between pages (#858: one read of a 645k staged backlog held the worker for
+   * seconds). Not in key order. A copy whose row changes during the walk may be
+   * seen as of before or after the change, as with a copy changed after a
+   * single read.
+   */
+  *corpusCopyIdentitiesSteps(
+    corpusId: string,
+    filter: TierCorpusCopyFilter,
+    pageSize = 5_000,
+  ): Generator<void, TierLedgerIdentity[]> {
+    const query = this.db.query(`
+      SELECT rowid AS row_id, provider, account_scope, conversation_key, provider_item_id FROM tier_copies
+      WHERE corpus_id = ? AND rowid > ? AND ${corpusCopyWhere(filter)}
+      ORDER BY rowid LIMIT ?
+    `);
+    const out: TierLedgerIdentity[] = [];
+    for (let after = 0; ;) {
+      const rows = query.all(corpusId, after, pageSize) as Array<TierIdentityRow & { row_id: number }>;
+      for (const row of rows) out.push(identityFromRow(row));
+      if (rows.length < pageSize) return out;
+      after = rows[rows.length - 1]!.row_id;
+      yield;
+    }
   }
 
   /** Content-free per-store counts for status surfaces. */
@@ -3680,6 +3671,50 @@ interface TierCopyRow {
   superseded_by_generation: number | null;
   previous_layers: TierCopyLayers | null;
   updated_at: string;
+}
+
+export type TierCorpusCopyFilter = 'superseded' | 'staged' | 'held' | 'metadata_layer' | 'metadata_layer_content_unread' | 'metadata_layer_settled_unreadable'
+  | 'metadata_layer_settled_unreadable_not_secret';
+
+/** The tier_copies condition for one corpus-copy filter (corpusCopyIdentities and its paged form). */
+function corpusCopyWhere(filter: TierCorpusCopyFilter): string {
+  // `metadata_layer_content_unread`: a names copy here whose text no current
+  // copy anywhere holds yet. That item is still waiting to be read (the
+  // extraction view's candidate rule), not kept as names only.
+  const where = filter === 'held'
+    ? `copy_state = 'current' AND embed_hold = 1`
+    : filter === 'metadata_layer'
+      ? `copy_state = 'current' AND layers = 'metadata'`
+      : filter === 'metadata_layer_settled_unreadable' || filter === 'metadata_layer_settled_unreadable_not_secret'
+        ? `copy_state = 'current' AND layers = 'metadata'${filter === 'metadata_layer_settled_unreadable_not_secret' ? `
+          AND NOT EXISTS (SELECT 1 FROM tier_overrides o
+            WHERE o.provider = tier_copies.provider AND o.account_scope = tier_copies.account_scope
+              AND o.conversation_key = tier_copies.conversation_key AND o.provider_item_id = tier_copies.provider_item_id
+              AND json_extract(o.override_json, '$.kind') = 'tier' AND json_extract(o.override_json, '$.tier') = 'secrets')` : ''}
+          AND EXISTS (SELECT 1 FROM tier_items t
+            WHERE t.provider = tier_copies.provider AND t.account_scope = tier_copies.account_scope
+              AND t.conversation_key = tier_copies.conversation_key AND t.provider_item_id = tier_copies.provider_item_id
+              AND t.state = 'current' AND t.content_read = 0
+              AND t.metadata_tier <> 'secrets' AND t.content_tier <> 'secrets'
+              AND EXISTS (SELECT 1 FROM json_each(t.reasons_json) r
+                WHERE r.value GLOB 'content:sniffer:*:fail_safe:missing_question'
+                  OR r.value GLOB 'content:sniffer:*:fail_safe:unread'))
+          AND NOT EXISTS (SELECT 1 FROM tier_copies other
+            WHERE other.provider = tier_copies.provider AND other.account_scope = tier_copies.account_scope
+              AND other.conversation_key = tier_copies.conversation_key AND other.provider_item_id = tier_copies.provider_item_id
+              AND other.copy_state = 'current' AND other.layers IN ('content', 'both'))`
+      : filter === 'metadata_layer_content_unread'
+        ? `copy_state = 'current' AND layers = 'metadata'
+          AND NOT EXISTS (
+            SELECT 1 FROM tier_copies other
+            WHERE other.provider = tier_copies.provider AND other.account_scope = tier_copies.account_scope
+              AND other.conversation_key = tier_copies.conversation_key
+              AND other.provider_item_id = tier_copies.provider_item_id
+              AND other.corpus_id <> tier_copies.corpus_id
+              AND other.copy_state = 'current' AND other.layers IN ('content', 'both')
+          )`
+        : `copy_state = '${filter === 'superseded' ? 'superseded' : 'staged'}'`;
+  return where;
 }
 
 interface TierIdentityRow {
