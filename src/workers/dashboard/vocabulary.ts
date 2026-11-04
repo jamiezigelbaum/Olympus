@@ -2265,7 +2265,9 @@ export const DASHBOARD_ARCHIVE_COPY = {
    */
   inSource: {
     listLabel: 'Imported archives',
-    importingLine: 'Reading your export: {percent}% · {items} so far. The bar above counts them as they become searchable.',
+    importingLine: 'Reading your export: {percent}% · {items} so far',
+    /** Under an import's own bar: the source's bar above is the same items, counted as they become searchable. */
+    importingNote: 'The bar above counts these as they become searchable.',
     importingLineNone: 'Reading your export: {percent}%',
     importedLine: '{items} from this archive',
     importedWhen: ' · imported {when}',

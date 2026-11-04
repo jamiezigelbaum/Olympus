@@ -1642,7 +1642,7 @@ export function chatgptDashboardClient(
       const line = read > 0
         ? fill(S.importingLine, { percent: percent(pct), items: itemCount(entry, read) }) + alreadyThereNote(entry)
         : fill(S.importingLineNone, { percent: percent(pct) });
-      add(item, add(el('div', 'archive-progress'), progressBar(pct, line), el('p', 'muted', line)));
+      add(item, add(el('div', 'archive-progress'), progressBar(pct, line), el('p', 'muted', line), el('p', 'muted', S.importingNote)));
     } else if (entry.status === 'imported') {
       const when = typeof entry.importedAt === 'string' ? ago(entry.importedAt) : '';
       if (read === 0) {
