@@ -455,6 +455,26 @@ describe('settled names copies', () => {
     expect(store.status().counts.contentElsewhereItems).toBe(1);
   });
 
+  test('a child whose source has no bytes for it is not listed as a file Olympus could not read', async () => {
+    const lane = openLane(workspace());
+    cleanups.unshift(() => lane.close());
+    await listAll(lane, [NEW[1]!]);
+    const identity = identityOf(NEW[1]!.id);
+    const decision = { ...classifyItemTiers({ signals: { title: NEW[1]!.name } }), state: 'current' as const,
+      decidedBy: 'sniffer' as const, snifferId: 'fixture',
+      contentTier: 'secure' as const, contentRead: false, contentPending: false, metadataPending: false,
+      reasons: ['content:sniffer:fixture:fail_safe:missing_question'] };
+    lane.ledger.recordRoutedPlacement(identity, decision, lane.set.placementFor(decision));
+    const store = lane.stores.internal!;
+    expect(store.settledUnreadableItems()).toHaveLength(1);
+    // The export left the media out: the source says there are no bytes.
+    const db = new Database(store.dbPath);
+    db.query("UPDATE items SET deferred_locator = '', bytes_available = 0").run();
+    db.close();
+    expect(store.status().counts.settledUnreadableItems ?? 0).toBe(0);
+    expect(store.settledUnreadableItems()).toEqual([]);
+  });
+
   test('a file still waiting for its extraction is not counted unreadable until the extraction ends (Sparta, 2026-11-04)', async () => {
     const lane = openLane(workspace());
     cleanups.unshift(() => lane.close());

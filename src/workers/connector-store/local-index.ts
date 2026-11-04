@@ -12016,7 +12016,12 @@ export class LocalConnectorStore {
     const account = normalizeOptionalAccountScope(scope?.accountScope);
     const ended = this.extractionEnded;
     const rows = yield* this.itemRowsForIdentitiesSteps(identities, (identity) => identity.providerConversationId ?? '', {
-      sql: `${account ? 'AND i.account_scope = ?' : ''} ${filters.sql}`,
+      // A child whose source said it has no bytes (media an export left out, a
+      // chat file the capture did not keep) was never a file Olympus failed to
+      // read: the archive's Not imported list says so, once, for all of them.
+      // Listing each as "can't be read" made thousands of rows of one fact
+      // (Sparta, 2026-11-04: 5,453 Telegram photos and videos).
+      sql: `AND COALESCE(i.bytes_available, 1) <> 0 ${account ? 'AND i.account_scope = ?' : ''} ${filters.sql}`,
       params: [...(account ? [account] : []), ...filters.params],
     });
     return rows.map((row) => ({ identity: identities[row.idx]!, row }))
