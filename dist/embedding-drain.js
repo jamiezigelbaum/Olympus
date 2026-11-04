@@ -29049,8 +29049,8 @@ var init_local_index = __esm(() => {
     `).all(modelId, JSON.stringify(localItemIds));
       return rows.map((row) => row.local_item_id);
     }
-    embeddingBacklogEstimate(modelId, embedder, scope) {
-      const tierExclusion = this.embeddingTierExclusionFilter();
+    embeddingBacklogEstimate(modelId, embedder, scope, options = {}) {
+      const tierExclusion = this.embeddingTierExclusionFilter(options.countsMaxAgeMs ?? 0);
       const privateTier = embedder ? this.privateTierEmbeddingFilter(embedder) : { filter: "", params: [] };
       const scoped = statusScopeContentFilter(scope);
       const filter = `${tierExclusion.filter} ${privateTier.filter} ${scoped.filter}`;
@@ -29084,8 +29084,8 @@ var init_local_index = __esm(() => {
         extractedChars: row.chars
       };
     }
-    embeddingTierExclusionFilter() {
-      const tierExcluded = this.tierHiddenItemPks();
+    embeddingTierExclusionFilter(countsMaxAgeMs = 0) {
+      const tierExcluded = this.tierHiddenItemPks({ countsMaxAgeMs });
       const excludedPks = [...tierExcluded.hidden, ...tierExcluded.held, ...tierExcluded.metadataLayer];
       return excludedPks.length > 0 ? { filter: "AND i.item_pk NOT IN (SELECT value FROM json_each(?))", params: [JSON.stringify(excludedPks)] } : { filter: "", params: [] };
     }
@@ -29116,12 +29116,12 @@ var init_local_index = __esm(() => {
       const tiers = connectorStoreEmbeddableRowTiers(this.trustDomain, embedder);
       return tiers === undefined ? { filter: "", params: [] } : { filter: "AND i.trust_tier IN (SELECT value FROM json_each(?))", params: [JSON.stringify(tiers)] };
     }
-    privateTierEmbeddingWithheld(embedder, scope) {
+    privateTierEmbeddingWithheld(embedder, scope, options = {}) {
       const reason = CONNECTOR_STORE_PRIVATE_TIER_EMBEDDING_WITHHELD_REASON;
       const tiers = connectorStoreEmbeddableRowTiers(this.trustDomain, embedder);
       if (tiers === undefined)
         return { items: 0, chunks: 0, reason };
-      const tierExclusion = this.embeddingTierExclusionFilter();
+      const tierExclusion = this.embeddingTierExclusionFilter(options.countsMaxAgeMs ?? 0);
       const scoped = statusScopeContentFilter(scope);
       const filter = `${tierExclusion.filter} ${scoped.filter}`;
       const params = [...tierExclusion.params, ...scoped.params];
@@ -30464,9 +30464,7 @@ var init_local_index = __esm(() => {
         ...namesOnlyKept(this.db, tier.metadataLayer)
       } : undefined;
       const settledUnreadableItems = this.settledUnreadableCount(scope, options.countsMaxAgeMs ?? 0);
-      const last = this.db.query(`SELECT * FROM sync_runs
-       WHERE connector_id NOT IN ${NON_SYNC_RUN_CONNECTORS_SQL}
-       ORDER BY started_at DESC, rowid DESC LIMIT 1`).get();
+      const last = this.lastSyncRun();
       return {
         corpusId: this.corpusId,
         family: this.family,
@@ -30498,8 +30496,14 @@ var init_local_index = __esm(() => {
           itemsEmbedded: row.items_embedded
         })),
         ...tierStatus ? { tier: tierStatus } : {},
-        ...last ? { lastSyncRun: syncRunFromRow(last) } : {}
+        ...last ? { lastSyncRun: last } : {}
       };
+    }
+    lastSyncRun() {
+      const last = this.db.query(`SELECT * FROM sync_runs
+       WHERE connector_id NOT IN ${NON_SYNC_RUN_CONNECTORS_SQL}
+       ORDER BY started_at DESC, rowid DESC LIMIT 1`).get();
+      return last ? syncRunFromRow(last) : undefined;
     }
     syncRun(syncRunId) {
       const row = this.db.query("SELECT * FROM sync_runs WHERE sync_run_id = ?").get(syncRunId);

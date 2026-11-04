@@ -2143,6 +2143,8 @@ describe('LocalConnectorStore sync', () => {
     insert.run('connector-sync-aaa-latest', CORPUS_ID, 'fake', startedAt);
     db.close();
     expect(store.status().lastSyncRun?.syncRunId).toBe('connector-sync-aaa-latest');
+    // The cheap accessor schedulers use answers exactly what status reports.
+    expect(store.lastSyncRun()).toEqual(store.status().lastSyncRun);
     store.close();
   });
 
@@ -2159,6 +2161,7 @@ describe('LocalConnectorStore sync', () => {
     insert.run('connector-sync-move', CORPUS_ID, TIER_MOVE_CONNECTOR_ID, 1, 1, '2026-10-29T10:45:33.000Z', '2026-10-29T10:45:33.000Z');
     db.close();
     expect(store.status().lastSyncRun).toMatchObject({ syncRunId: 'connector-sync-source', itemsSeen: 4 });
+    expect(store.lastSyncRun()).toEqual(store.status().lastSyncRun);
     expect(store.status().counts.syncRuns).toBe(1);
     store.close();
   });

@@ -622,8 +622,8 @@ export function createGmailConnectorStoreSyncHandler(
       },
     } : {}),
     lastStoreRunCompletedAt: () => latestCompletedAt([
-      options.internalStore.status().lastSyncRun?.completedAt,
-      options.secureStore.status().lastSyncRun?.completedAt,
+      options.internalStore.lastSyncRun()?.completedAt,
+      options.secureStore.lastSyncRun()?.completedAt,
     ]),
     requestBudgetStatus: () => options.requestBudget?.status(),
   };

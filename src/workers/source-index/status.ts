@@ -405,7 +405,7 @@ export function createSourceIndexStatusHandler(
         }
         const enforced = withRetrievalEnforcementStatus(corpus, status, availability);
         const withBacklog = store && availability?.modelId
-          ? withEmbeddingBacklogEstimate(enforced, store, availability.modelId, availability, statusScope)
+          ? withEmbeddingBacklogEstimate(enforced, store, availability.modelId, availability, statusScope, snapshot.countsMaxAgeMs ?? 0)
           : enforced;
         const resolved = store && corpus.family === 'file'
           ? withPdfExtractionBacklog(withBacklog, store, withBacklog.embedding_parity?.required === true
@@ -727,6 +727,7 @@ function withEmbeddingBacklogEstimate<T extends SourceIndexStatusCorpus>(
   modelId: string,
   availability: SourceIndexHybridAvailability,
   scope: ConnectorStoreStatusScope | undefined,
+  countsMaxAgeMs: number,
 ): T {
   const parity = status.embedding_parity;
   if (!parity?.required) return status;
@@ -736,8 +737,8 @@ function withEmbeddingBacklogEstimate<T extends SourceIndexStatusCorpus>(
     ? { modelId, provider: availability.provider, backend: availability.backend as SourceEmbeddingBackend }
     : undefined;
   // The same scoped population as the parity counts above (store.status(scope)).
-  const backlog = store.embeddingBacklogEstimate(modelId, embedder, scope);
-  const withheld = embedder ? store.privateTierEmbeddingWithheld(embedder, scope) : undefined;
+  const backlog = store.embeddingBacklogEstimate(modelId, embedder, scope, { countsMaxAgeMs });
+  const withheld = embedder ? store.privateTierEmbeddingWithheld(embedder, scope, { countsMaxAgeMs }) : undefined;
   const { source } = embeddingModelEstimate(modelId);
   return {
     ...status,

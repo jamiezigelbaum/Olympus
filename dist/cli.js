@@ -37366,8 +37366,8 @@ var init_local_index = __esm(() => {
     `).all(modelId, JSON.stringify(localItemIds));
       return rows.map((row) => row.local_item_id);
     }
-    embeddingBacklogEstimate(modelId, embedder, scope) {
-      const tierExclusion = this.embeddingTierExclusionFilter();
+    embeddingBacklogEstimate(modelId, embedder, scope, options = {}) {
+      const tierExclusion = this.embeddingTierExclusionFilter(options.countsMaxAgeMs ?? 0);
       const privateTier = embedder ? this.privateTierEmbeddingFilter(embedder) : { filter: "", params: [] };
       const scoped = statusScopeContentFilter(scope);
       const filter = `${tierExclusion.filter} ${privateTier.filter} ${scoped.filter}`;
@@ -37401,8 +37401,8 @@ var init_local_index = __esm(() => {
         extractedChars: row.chars
       };
     }
-    embeddingTierExclusionFilter() {
-      const tierExcluded = this.tierHiddenItemPks();
+    embeddingTierExclusionFilter(countsMaxAgeMs = 0) {
+      const tierExcluded = this.tierHiddenItemPks({ countsMaxAgeMs });
       const excludedPks = [...tierExcluded.hidden, ...tierExcluded.held, ...tierExcluded.metadataLayer];
       return excludedPks.length > 0 ? { filter: "AND i.item_pk NOT IN (SELECT value FROM json_each(?))", params: [JSON.stringify(excludedPks)] } : { filter: "", params: [] };
     }
@@ -37433,12 +37433,12 @@ var init_local_index = __esm(() => {
       const tiers = connectorStoreEmbeddableRowTiers(this.trustDomain, embedder);
       return tiers === undefined ? { filter: "", params: [] } : { filter: "AND i.trust_tier IN (SELECT value FROM json_each(?))", params: [JSON.stringify(tiers)] };
     }
-    privateTierEmbeddingWithheld(embedder, scope) {
+    privateTierEmbeddingWithheld(embedder, scope, options = {}) {
       const reason = CONNECTOR_STORE_PRIVATE_TIER_EMBEDDING_WITHHELD_REASON;
       const tiers = connectorStoreEmbeddableRowTiers(this.trustDomain, embedder);
       if (tiers === undefined)
         return { items: 0, chunks: 0, reason };
-      const tierExclusion = this.embeddingTierExclusionFilter();
+      const tierExclusion = this.embeddingTierExclusionFilter(options.countsMaxAgeMs ?? 0);
       const scoped = statusScopeContentFilter(scope);
       const filter = `${tierExclusion.filter} ${scoped.filter}`;
       const params = [...tierExclusion.params, ...scoped.params];
@@ -38781,9 +38781,7 @@ var init_local_index = __esm(() => {
         ...namesOnlyKept(this.db, tier.metadataLayer)
       } : undefined;
       const settledUnreadableItems = this.settledUnreadableCount(scope, options.countsMaxAgeMs ?? 0);
-      const last = this.db.query(`SELECT * FROM sync_runs
-       WHERE connector_id NOT IN ${NON_SYNC_RUN_CONNECTORS_SQL}
-       ORDER BY started_at DESC, rowid DESC LIMIT 1`).get();
+      const last = this.lastSyncRun();
       return {
         corpusId: this.corpusId,
         family: this.family,
@@ -38815,8 +38813,14 @@ var init_local_index = __esm(() => {
           itemsEmbedded: row.items_embedded
         })),
         ...tierStatus ? { tier: tierStatus } : {},
-        ...last ? { lastSyncRun: syncRunFromRow(last) } : {}
+        ...last ? { lastSyncRun: last } : {}
       };
+    }
+    lastSyncRun() {
+      const last = this.db.query(`SELECT * FROM sync_runs
+       WHERE connector_id NOT IN ${NON_SYNC_RUN_CONNECTORS_SQL}
+       ORDER BY started_at DESC, rowid DESC LIMIT 1`).get();
+      return last ? syncRunFromRow(last) : undefined;
     }
     syncRun(syncRunId) {
       const row = this.db.query("SELECT * FROM sync_runs WHERE sync_run_id = ?").get(syncRunId);
@@ -63560,7 +63564,7 @@ function createReadwiseConnectorStoreSyncHandler(options) {
         warnings: []
       });
     },
-    lastStoreRunCompletedAt: () => options.store.status().lastSyncRun?.completedAt,
+    lastStoreRunCompletedAt: () => options.store.lastSyncRun()?.completedAt,
     requestBudgetStatus: () => requestBudget.status()
   };
 }
@@ -73607,7 +73611,7 @@ function createDropboxProviderStoreSyncHandler(options) {
         checkpoint: dropboxScopedCheckpoint(sync.cursor, connectorId, options.scope !== undefined)
       };
     },
-    lastStoreRunCompletedAt: () => options.store.status().lastSyncRun?.completedAt
+    lastStoreRunCompletedAt: () => options.store.lastSyncRun()?.completedAt
   };
 }
 function dropboxConnectorIdForScope(account, approvedScopeKey, scope) {
@@ -92901,8 +92905,8 @@ function createGmailConnectorStoreSyncHandler(options) {
       }
     } : {},
     lastStoreRunCompletedAt: () => latestCompletedAt([
-      options.internalStore.status().lastSyncRun?.completedAt,
-      options.secureStore.status().lastSyncRun?.completedAt
+      options.internalStore.lastSyncRun()?.completedAt,
+      options.secureStore.lastSyncRun()?.completedAt
     ]),
     requestBudgetStatus: () => options.requestBudget?.status()
   };
@@ -93247,8 +93251,8 @@ function createGoogleDriveConnectorStoreSyncHandler(options) {
       });
     },
     lastStoreRunCompletedAt: () => latestCompletedAt2([
-      options.internalStore.status().lastSyncRun?.completedAt,
-      options.secureStore.status().lastSyncRun?.completedAt
+      options.internalStore.lastSyncRun()?.completedAt,
+      options.secureStore.lastSyncRun()?.completedAt
     ]),
     requestBudgetStatus: () => options.requestBudget?.status()
   };
@@ -94395,7 +94399,7 @@ function createSourceIndexStatusHandler(options = {}) {
           status.counts[UNREADABLE_ITEMS_COUNT_KEY] = options.unreadableCount(corpus.corpusId);
         }
         const enforced = withRetrievalEnforcementStatus(corpus, status, availability);
-        const withBacklog = store && availability?.modelId ? withEmbeddingBacklogEstimate(enforced, store, availability.modelId, availability, statusScope) : enforced;
+        const withBacklog = store && availability?.modelId ? withEmbeddingBacklogEstimate(enforced, store, availability.modelId, availability, statusScope, snapshot.countsMaxAgeMs ?? 0) : enforced;
         const resolved = store && corpus.family === "file" ? withPdfExtractionBacklog(withBacklog, store, withBacklog.embedding_parity?.required === true ? availability?.modelId : undefined) : withBacklog;
         if (maxAgeMs > 0)
           cache.set(cacheKey, { recordedAtMs: nowMs(), status: resolved });
@@ -94627,13 +94631,13 @@ function withRetrievalEnforcementStatus(corpus, status, hybridAvailability) {
     }
   };
 }
-function withEmbeddingBacklogEstimate(status, store, modelId, availability, scope) {
+function withEmbeddingBacklogEstimate(status, store, modelId, availability, scope, countsMaxAgeMs) {
   const parity = status.embedding_parity;
   if (!parity?.required)
     return status;
   const embedder = availability.backend !== undefined && availability.provider !== undefined ? { modelId, provider: availability.provider, backend: availability.backend } : undefined;
-  const backlog = store.embeddingBacklogEstimate(modelId, embedder, scope);
-  const withheld = embedder ? store.privateTierEmbeddingWithheld(embedder, scope) : undefined;
+  const backlog = store.embeddingBacklogEstimate(modelId, embedder, scope, { countsMaxAgeMs });
+  const withheld = embedder ? store.privateTierEmbeddingWithheld(embedder, scope, { countsMaxAgeMs }) : undefined;
   const { source } = embeddingModelEstimate(modelId);
   return {
     ...status,
@@ -169932,7 +169936,7 @@ function createLocalFilesProviderStoreSyncHandler(options) {
         checkpoint: scopedCheckpoint(sync.cursor, connectorId)
       };
     },
-    lastStoreRunCompletedAt: () => options.store.status().lastSyncRun?.completedAt
+    lastStoreRunCompletedAt: () => options.store.lastSyncRun()?.completedAt
   };
 }
 function scopedCheckpoint(cursor, connectorId) {
@@ -171506,8 +171510,8 @@ function createGmailConnectorStoreSchedulerSource(input) {
     return;
   const liveConfig = input.liveConfig ?? defaultGmailLiveSyncConfig();
   const lastCompletedAt = () => latestCompletedAt4([
-    input.internalStore?.status().lastSyncRun?.completedAt,
-    input.secureStore?.status().lastSyncRun?.completedAt
+    input.internalStore?.lastSyncRun()?.completedAt,
+    input.secureStore?.lastSyncRun()?.completedAt
   ]);
   return {
     sourceId: SCHEDULER_SOURCE_IDS.gmail,
@@ -171615,8 +171619,8 @@ function createGoogleDriveConnectorStoreSchedulerSource(input) {
     return;
   const liveConfig = input.liveConfig ?? defaultGoogleDriveLiveSyncConfig();
   const lastCompletedAt = () => latestCompletedAt4([
-    input.internalStore?.status().lastSyncRun?.completedAt,
-    input.secureStore?.status().lastSyncRun?.completedAt
+    input.internalStore?.lastSyncRun()?.completedAt,
+    input.secureStore?.lastSyncRun()?.completedAt
   ]);
   return {
     sourceId: SCHEDULER_SOURCE_IDS.googleDrive,

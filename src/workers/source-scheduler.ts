@@ -2072,8 +2072,8 @@ export function createGmailConnectorStoreSchedulerSource(input: {
   if (!input.sync) return undefined;
   const liveConfig = input.liveConfig ?? defaultGmailLiveSyncConfig();
   const lastCompletedAt = () => latestCompletedAt([
-    input.internalStore?.status().lastSyncRun?.completedAt,
-    input.secureStore?.status().lastSyncRun?.completedAt,
+    input.internalStore?.lastSyncRun()?.completedAt,
+    input.secureStore?.lastSyncRun()?.completedAt,
   ]);
   return {
     sourceId: SCHEDULER_SOURCE_IDS.gmail,
@@ -2202,8 +2202,8 @@ export function createGoogleDriveConnectorStoreSchedulerSource(input: {
   if (!input.liveSync) return undefined;
   const liveConfig = input.liveConfig ?? defaultGoogleDriveLiveSyncConfig();
   const lastCompletedAt = () => latestCompletedAt([
-    input.internalStore?.status().lastSyncRun?.completedAt,
-    input.secureStore?.status().lastSyncRun?.completedAt,
+    input.internalStore?.lastSyncRun()?.completedAt,
+    input.secureStore?.lastSyncRun()?.completedAt,
   ]);
   return {
     sourceId: SCHEDULER_SOURCE_IDS.googleDrive,
