@@ -17721,9 +17721,10 @@ var init_content_policy = __esm(() => {
 });
 
 // src/workers/classification/engine.ts
-var SECRET_FINDING_TYPES, CLEAN_GMAIL_CATEGORIES;
+var SECRET_SCAN_MEMO_MIN_CHARS, SECRET_FINDING_TYPES, CLEAN_GMAIL_CATEGORIES;
 var init_engine = __esm(() => {
   init_content_policy();
+  SECRET_SCAN_MEMO_MIN_CHARS = 256 * 1024;
   SECRET_FINDING_TYPES = new Set([
     "private_key_material",
     "aws_access_key_id",
