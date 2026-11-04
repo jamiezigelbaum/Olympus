@@ -21,7 +21,7 @@ import { mintDashboardOpeningUrl } from '../../core/dashboard-opening.ts';
 import { workerFetch } from '../../core/worker-transport.ts';
 import { linuxModelReadiness } from '../../core/linux-model-readiness.ts';
 import { withEngineWorkerAdmission, EngineMaintenanceInProgressError } from '../../core/engine-maintenance.ts';
-import { prepareWorkerSocket, bindWorkerSocket, workerSocketPath } from '../../core/worker-transport.ts';
+import { prepareWorkerSocket, bindWorkerSocket, releaseSystemdWorkerSocket, workerSocketPath } from '../../core/worker-transport.ts';
 import { modelInstallFailedReason, modelInstallSpaceToFree } from '../../core/model-install-failure.ts';
 import { accountFromGoogleHandle } from '../google-connectors/classification.ts';
 import { olympusPackageRoot } from '../../core/package-root.ts';
@@ -6908,6 +6908,9 @@ export async function main(): Promise<void> {
       ? { search: { evidenceSearch: remoteEvidenceSearch, answerModelAvailable: chatgptAnswerModelAvailable } }
       : {}),
   };
+  // A socket left by the unit's previous run, which systemd has already
+  // stopped (worker-transport.ts).
+  if (releaseSystemdWorkerSocket()) console.warn('[olympus:worker] removed the socket left by the previous worker run');
   const socketPath = prepareWorkerSocket();
   const serverOptions = {
     // Remote agent routes authenticate connection credentials only (bearer
