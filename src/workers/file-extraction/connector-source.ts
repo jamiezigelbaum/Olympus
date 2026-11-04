@@ -404,7 +404,54 @@ function typeFor(ref: ExtractionItemRef, mimeType: string | undefined): string |
 }
 
 function asSourceError(error: unknown): FileExtractionSourceError {
-  return isFileExtractionSourceError(error) ? error : new FileExtractionSourceError('source_unavailable');
+  if (isFileExtractionSourceError(error)) return error;
+  const cause = unavailableCause(error);
+  logUnavailableCause(cause);
+  return new FileExtractionSourceError('source_unavailable', { detailForHash: cause });
+}
+
+const UNAVAILABLE_CAUSE_LOG_INTERVAL_MS = 60_000;
+const unavailableCauseLoggedAt = new Map<string, number>();
+
+/**
+ * A content-free account of an error the source did not name: its class, and
+ * any short code or HTTP status it carries. Never its message, which can hold
+ * a file's name or path.
+ */
+export function unavailableCause(error: unknown): string {
+  const parts = [error instanceof Error ? error.name || 'Error' : typeof error];
+  const fields = typeof error === 'object' && error !== null ? error as Record<string, unknown> : {};
+  for (const key of ['code', 'status', 'statusCode']) {
+    const value = fields[key];
+    if (typeof value === 'number' && Number.isInteger(value)) parts.push(`${key}=${value}`);
+    else if (typeof value === 'string' && isShortToken(value)) parts.push(`${key}=${value}`);
+  }
+  return parts.join(' ').slice(0, 120);
+}
+
+// A short code such as ECONNRESET or ETIMEDOUT: letters, digits, underscore, dot and dash, at most 40 characters.
+function isShortToken(value: string): boolean {
+  if (value.length === 0 || value.length > 40) return false;
+  for (const char of value) {
+    const code = char.charCodeAt(0);
+    const alnum = (code >= 48 && code <= 57) || (code >= 65 && code <= 90) || (code >= 97 && code <= 122);
+    if (!alnum && char !== '_' && char !== '.' && char !== '-') return false;
+  }
+  return true;
+}
+
+/**
+ * A read that failed for a reason the source did not name is recorded as
+ * `source_unavailable`, which on its own says nothing about why (Sparta,
+ * 2026-11-04: 95 mail attachments failed that way with no cause anywhere).
+ * The content-free cause goes to the log, at most once a minute per cause.
+ */
+function logUnavailableCause(cause: string): void {
+  const at = Date.now();
+  const last = unavailableCauseLoggedAt.get(cause);
+  if (last !== undefined && at - last < UNAVAILABLE_CAUSE_LOG_INTERVAL_MS) return;
+  unavailableCauseLoggedAt.set(cause, at);
+  console.warn(`[olympus:file-extraction] source_unavailable cause=${JSON.stringify(cause)}`);
 }
 
 /**

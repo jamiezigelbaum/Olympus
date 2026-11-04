@@ -921,8 +921,21 @@ export class SourceScheduler {
     provenance: SourceSchedulerRunProvenance,
   ): Promise<void> {
     const groups = new Map<string, SchedulerTaskState[]>();
+    const keyOf = (state: SchedulerTaskState): string => {
+      const own = taskConcurrencyKey(state.source, state.task);
+      if (state.task.kind !== 'embed') return own;
+      // An embedding sweep due with its source's other work joins that turn
+      // and runs after it, so it embeds what the listing just wrote. Only
+      // while that turn is held by a run already under way does it take a
+      // turn of its own.
+      const sourceKey = state.source.corpusId;
+      const joins = !this.busyConcurrencyKeys.has(sourceKey)
+        && states.some((other) => other !== state && other.source === state.source
+          && taskConcurrencyKey(other.source, other.task) === sourceKey);
+      return joins ? sourceKey : own;
+    };
     for (const state of states) {
-      const concurrencyKey = taskConcurrencyKey(state.source, state.task);
+      const concurrencyKey = keyOf(state);
       const group = groups.get(concurrencyKey) ?? [];
       group.push(state);
       groups.set(concurrencyKey, group);
@@ -950,13 +963,23 @@ export class SourceScheduler {
         if (provenance === 'scheduled') {
           const ran = new Set(group);
           const now = this.now().getTime();
+          // A source's own embedding sweep keeps a turn of its own (it never
+          // waits out a listing), but when the listing ends it still follows
+          // at once, as it did when the two shared the key.
+          const sources = new Set(group.map((state) => state.source));
           const due = this.states.filter((state) => !ran.has(state)
             && !state.running
             && taskCadence(state.source, state.task) === 'continuous'
-            && taskConcurrencyKey(state.source, state.task) === concurrencyKey
+            && (taskConcurrencyKey(state.source, state.task) === concurrencyKey
+              || (sources.has(state.source) && state.task.kind === 'embed'))
             && state.nextRunAt <= now);
           for (const state of due) {
             if (state.running) continue;
+            const ownKey = taskConcurrencyKey(state.source, state.task);
+            if (ownKey !== concurrencyKey) {
+              if (this.busyConcurrencyKeys.has(ownKey)) continue;
+              this.busyConcurrencyKeys.add(ownKey);
+            }
             state.running = true;
             this.executingStates.add(state);
             try {
@@ -964,6 +987,7 @@ export class SourceScheduler {
             } finally {
               state.running = false;
               this.executingStates.delete(state);
+              if (ownKey !== concurrencyKey) this.busyConcurrencyKeys.delete(ownKey);
             }
           }
         }
@@ -1781,6 +1805,10 @@ export function withEmbeddingSweep(
   });
 }
 
+export function embeddingSweepConcurrencyKey(source: Pick<SourceSchedulerSource, 'corpusId'>): string {
+  return `${source.corpusId}.embeddings`;
+}
+
 function embeddingSweepTask(
   source: SourceSchedulerSource,
   targets: () => readonly ConnectorStoreEmbeddingTarget[],
@@ -1789,6 +1817,12 @@ function embeddingSweepTask(
     id: `${source.sourceId}_embeddings`,
     kind: 'embed',
     writer: true,
+    // Its own turn, not the source's: embedding reads only stores (a store
+    // another writer holds answers busy), never the provider, so nothing it
+    // touches needs the source's serialized access. Under the source's key it
+    // waited out every listing; on Sparta (2026-11-04) Gmail's half-hour
+    // reconcile left new mail unsearchable for as long.
+    concurrencyKey: embeddingSweepConcurrencyKey(source),
     intervalMs: EMBEDDING_SWEEP_INTERVAL_MS,
     freshnessThresholdMs: EMBEDDING_SWEEP_FRESHNESS_THRESHOLD_MS,
     run: async (context?: SourceSchedulerTaskRunContext) => {

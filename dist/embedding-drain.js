@@ -36818,9 +36818,11 @@ var init_drive_extraction_source = __esm(() => {
 });
 
 // src/workers/file-extraction/connector-source.ts
+var unavailableCauseLoggedAt;
 var init_connector_source = __esm(() => {
   init_spool();
   init_file_extraction_source();
+  unavailableCauseLoggedAt = new Map;
 });
 
 // src/workers/whatsapp/child-media.ts
@@ -67492,8 +67494,16 @@ class SourceScheduler {
   }
   async runStates(states, dueAt, provenance) {
     const groups = new Map;
+    const keyOf = (state) => {
+      const own3 = taskConcurrencyKey(state.source, state.task);
+      if (state.task.kind !== "embed")
+        return own3;
+      const sourceKey = state.source.corpusId;
+      const joins = !this.busyConcurrencyKeys.has(sourceKey) && states.some((other) => other !== state && other.source === state.source && taskConcurrencyKey(other.source, other.task) === sourceKey);
+      return joins ? sourceKey : own3;
+    };
     for (const state of states) {
-      const concurrencyKey = taskConcurrencyKey(state.source, state.task);
+      const concurrencyKey = keyOf(state);
       const group = groups.get(concurrencyKey) ?? [];
       group.push(state);
       groups.set(concurrencyKey, group);
@@ -67518,10 +67528,17 @@ class SourceScheduler {
         if (provenance === "scheduled") {
           const ran = new Set(group);
           const now = this.now().getTime();
-          const due = this.states.filter((state) => !ran.has(state) && !state.running && taskCadence(state.source, state.task) === "continuous" && taskConcurrencyKey(state.source, state.task) === concurrencyKey && state.nextRunAt <= now);
+          const sources = new Set(group.map((state) => state.source));
+          const due = this.states.filter((state) => !ran.has(state) && !state.running && taskCadence(state.source, state.task) === "continuous" && (taskConcurrencyKey(state.source, state.task) === concurrencyKey || sources.has(state.source) && state.task.kind === "embed") && state.nextRunAt <= now);
           for (const state of due) {
             if (state.running)
               continue;
+            const ownKey = taskConcurrencyKey(state.source, state.task);
+            if (ownKey !== concurrencyKey) {
+              if (this.busyConcurrencyKeys.has(ownKey))
+                continue;
+              this.busyConcurrencyKeys.add(ownKey);
+            }
             state.running = true;
             this.executingStates.add(state);
             try {
@@ -67529,6 +67546,8 @@ class SourceScheduler {
             } finally {
               state.running = false;
               this.executingStates.delete(state);
+              if (ownKey !== concurrencyKey)
+                this.busyConcurrencyKeys.delete(ownKey);
             }
           }
         }
