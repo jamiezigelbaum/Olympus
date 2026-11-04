@@ -31768,6 +31768,17 @@ function identityAmbiguous(identity2, counts) {
     return false;
   return normalizeConversationId(identity2.providerConversationId) === "" || counts.exact_identity_rows !== 1;
 }
+function identityRowsSql(extraSql) {
+  return `
+      SELECT CAST(j.key AS INTEGER) AS idx, i.item_pk, i.local_item_id, i.title, i.source_version
+      FROM json_each(?) j
+      CROSS JOIN items i
+      WHERE i.provider = json_extract(j.value, '$[0]') AND i.account_scope = json_extract(j.value, '$[1]')
+        AND i.normalized_conversation = json_extract(j.value, '$[2]') AND i.provider_item_id = json_extract(j.value, '$[3]')
+        AND i.tombstoned = 0 ${extraSql}
+      ORDER BY j.key
+    `;
+}
 function connectorStoreFilterSql(filters) {
   const normalized = normalizeConnectorStoreSearchFilters(filters);
   if (!normalized)
@@ -38617,14 +38628,7 @@ var init_local_index = __esm(() => {
       if (identities.length === 0)
         return [];
       const keys = JSON.stringify(identities.map((identity2) => [identity2.provider, identity2.accountScope, conversationOf(identity2), identity2.providerItemId]));
-      return this.db.query(`
-      SELECT CAST(j.key AS INTEGER) AS idx, i.item_pk, i.local_item_id, i.title, i.source_version
-      FROM json_each(?) j
-      JOIN items i ON i.provider = json_extract(j.value, '$[0]') AND i.account_scope = json_extract(j.value, '$[1]')
-        AND i.normalized_conversation = json_extract(j.value, '$[2]') AND i.provider_item_id = json_extract(j.value, '$[3]')
-      WHERE i.tombstoned = 0 ${extra.sql}
-      ORDER BY j.key
-    `).all(keys, ...extra.params);
+      return this.db.query(identityRowsSql(extra.sql)).all(keys, ...extra.params);
     }
     settledUnreadableItems(scope) {
       if (scope?.itemsAllowed === false || scope?.contentAllowed === false)
