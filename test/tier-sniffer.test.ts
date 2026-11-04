@@ -862,6 +862,50 @@ describe('bounds and the owner-approval gate', () => {
     }
   });
 
+  test('a pass that got an answer before its failures is not held back', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'olympus-tier-sniffer-partial-'));
+    const installed = new InstalledTierClassification({ env: {}, lane: LOCAL_LANE });
+    const ledger = new TierLedger({ dbPath: join(dir, 'store.tier-ledger.sqlite') });
+    try {
+      for (let n = 1; n <= 6; n += 1) recordFlagged(ledger, installed.snifferStoreForLedger(ledger.dbPath), n, `lab results ${n}`);
+      const ledgerPath = join(dir, 'classification-ledger.jsonl');
+      await appendClassificationLedgerEntry(ledgerPath, {
+        recorded_at: new Date().toISOString(), kind: 'classifier_model_decision', what: 'Owner approved the fixture sniffer.',
+        model_id: LOCAL_LANE.modelId, prompt_version: SNIFFER_PROMPT_VERSION, lane: LOCAL_LANE.kind, profile_id: LOCAL_LANE.profileId,
+        approved_by: 'owner', status: 'complete',
+      });
+      let calls = 0;
+      // First call of each pass answers; the rest fail, so every pass stops on transport failures.
+      let answeredThisPass = false;
+      const model = spyModel((_request, items) => {
+        calls += 1;
+        if (answeredThisPass) return new Error('connection refused');
+        answeredThisPass = true;
+        return verdictsFor(items, { tier: 'private', category: 'health', confidence: 0.9 });
+      });
+      const clock = Date.parse('2026-11-04T10:00:00Z');
+      const service = new TierSnifferService({
+        installed, lane: LOCAL_LANE, model,
+        stores: () => [{ dbPath: join(dir, 'store.sqlite') }],
+        classificationLedgerPath: ledgerPath, intervalMs: 10, now: () => new Date(clock),
+      });
+      const first = await service.runOnce();
+      expect(first).toMatchObject({ state: 'ran', report: { stoppedBy: 'transport_failures' } });
+      expect(first.state === 'ran' && first.report.calls > first.report.failedCalls).toBe(true);
+      const afterFirst = calls;
+      answeredThisPass = false;
+      service.start();
+      // The clock never moves: a held service would ask nothing more.
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      service.stop();
+      expect(calls).toBeGreaterThan(afterFirst);
+    } finally {
+      installed.close();
+      ledger.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   test('one question left and one failed call: the model reads as not answering, though the pass never reached its failure stop', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'olympus-tier-sniffer-one-failed-'));
     const installed = new InstalledTierClassification({ env: {}, lane: LOCAL_LANE });

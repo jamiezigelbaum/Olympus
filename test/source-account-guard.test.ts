@@ -25,6 +25,7 @@ import { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
 import type { SourceEmbeddingProvider } from '../src/workers/source-index/embeddings.ts';
 import { DropboxApiMetadataClient } from '../src/workers/dropbox-files/provider-client.ts';
 import { readFileSync } from 'node:fs';
+import { FileLeaseBusyError } from '../src/core/file-lease.ts';
 import {
   DEFAULT_PROVIDER_IDENTITY_ENDPOINTS,
   googleAccountIdFromAddress,
@@ -332,12 +333,14 @@ describe('the account guard', () => {
       async embed() { return new Promise<number[][]>(() => undefined); },
     };
     let deferred: string | undefined;
+    let embedChunks: () => Promise<unknown> = () => new Promise(() => undefined);
     const hanging = {
       corpusId: 'secure_local.dropbox.files',
       queuedEmbeddingGroups: () => [{ provider, localItemIds: ['stuck'] }],
       completeQueuedEmbedding() {},
       setEmbeddingDeferral(reason: string | undefined) { deferred = reason; },
-      embedChunks: () => new Promise(() => undefined),
+      embeddingDeferredReason: () => deferred,
+      embedChunks: () => embedChunks(),
       queuedEmbeddingItemIds: () => ['stuck'],
       embeddingFailedItemCount: () => 0,
     } as unknown as LocalConnectorStore;
@@ -349,6 +352,17 @@ describe('the account guard', () => {
     expect(pass.counts).toMatchObject({ stores_deferred: 1, chunks_embedded: 0 });
     // The source's next task gets its turn.
     expect(await guard.run!(async () => 'ran')).toBe('ran');
+    // The store itself records the outage, so sync status shows it too.
+    expect(deferred).toBe('embedding_provider_unavailable');
+    // The abandoned call still holds the lease: the next pass answers busy, and the outage stands.
+    embedChunks = async () => { throw new FileLeaseBusyError('/store'); };
+    const busy = await sweep.run();
+    expect(busy.retryAt?.degradedReason).toBe('embedding_provider_unavailable');
+    expect(deferred).toBe('embedding_provider_unavailable');
+    // A pass that answers clears it.
+    embedChunks = async () => ({ chunksEmbedded: 1 });
+    const answered = await sweep.run();
+    expect(answered.retryAt).toBeUndefined();
     expect(deferred).toBeUndefined();
   });
 

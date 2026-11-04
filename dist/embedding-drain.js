@@ -71133,12 +71133,12 @@ class TierSnifferService {
     this.abort = undefined;
     this.lastTick = tick;
     this.reportWaiting(tick, overran);
-    if (this.waitingReason === "model_not_answering") {
-      this.notAnsweringPasses += 1;
-      this.notAnsweringUntilMs = this.clockMs() + (this.notAnsweringPasses === 1 ? NOT_ANSWERING_FIRST_BACKOFF_MS : NOT_ANSWERING_MAX_BACKOFF_MS);
-    } else if (tick.state === "ran" && tick.report.calls > tick.report.failedCalls) {
+    if (tick.state === "ran" && tick.report.calls > tick.report.failedCalls) {
       this.notAnsweringPasses = 0;
       this.notAnsweringUntilMs = 0;
+    } else if (this.waitingReason === "model_not_answering") {
+      this.notAnsweringPasses += 1;
+      this.notAnsweringUntilMs = this.clockMs() + (this.notAnsweringPasses === 1 ? NOT_ANSWERING_FIRST_BACKOFF_MS : NOT_ANSWERING_MAX_BACKOFF_MS);
     }
     if (this.options.log && this.clockMs() - this.lastBacklogLogMs >= 60000) {
       this.lastBacklogLogMs = this.clockMs();
