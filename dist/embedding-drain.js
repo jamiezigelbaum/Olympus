@@ -25037,7 +25037,8 @@ var init_local_index = __esm(() => {
       }
     }
     copyServable(identity) {
-      return this.tierVisibleRows([identity], (entry) => entry, () => "metadata").length > 0 || this.tierVisibleRows([identity], (entry) => entry, () => "content").length > 0;
+      const layers = ["metadata", "content"];
+      return this.tierVisibleRows(layers, () => identity, (layer) => layer).length > 0;
     }
     activeLocalItemRow(localItemId) {
       const row = this.db.query(`

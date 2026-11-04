@@ -33351,7 +33351,8 @@ var init_local_index = __esm(() => {
       }
     }
     copyServable(identity2) {
-      return this.tierVisibleRows([identity2], (entry) => entry, () => "metadata").length > 0 || this.tierVisibleRows([identity2], (entry) => entry, () => "content").length > 0;
+      const layers = ["metadata", "content"];
+      return this.tierVisibleRows(layers, () => identity2, (layer) => layer).length > 0;
     }
     activeLocalItemRow(localItemId) {
       const row = this.db.query(`
@@ -142533,9 +142534,6 @@ function createUnreadableFiles(options) {
       return [];
     }
   }
-  function current2(corpusIds) {
-    return merged(corpusIds).filter((item) => verdictOf(item) === "unreadable");
-  }
   function merged(corpusIds) {
     const seen = new Set;
     const out = [];
@@ -142655,7 +142653,14 @@ function createUnreadableFiles(options) {
       return { unreadable, blocked };
     },
     names(corpusIds, limit) {
-      return current2(corpusIds).slice(0, Math.max(0, limit)).map(displayName);
+      const shown = [];
+      for (const item of merged(corpusIds)) {
+        if (shown.length >= Math.max(0, limit))
+          break;
+        if (verdictOf(item) === "unreadable")
+          shown.push(item);
+      }
+      return shown.map(displayName);
     },
     computerList(corpusIds, limit, list = {}) {
       const at = now();
@@ -142711,8 +142716,8 @@ function createUnreadableFiles(options) {
       }
       if (entry.expiresAt <= now() || verdictOf(entry.item) !== "unreadable")
         return { status: "gone" };
-      const current3 = target(entry.item);
-      return current3?.url ? { status: "open_link", url: current3.url } : { status: "gone" };
+      const current2 = target(entry.item);
+      return current2?.url ? { status: "open_link", url: current2.url } : { status: "gone" };
     }
   };
 }
@@ -212571,7 +212576,7 @@ ${key2}`;
     items: (corpusId) => {
       const items = [
         ...extractionReadinessLedger?.unreadableItems(corpusId) ?? [],
-        ...connectorStores.filter((store) => store.corpusId === corpusId).flatMap((store) => store.settledUnreadableItems(connectorStoreStatusScope(store)))
+        ...connectorStores.filter((store) => store.corpusId === corpusId).flatMap((store) => store.settledUnreadableItems(connectorStoreStatusScope(store)).filter((item) => store.family !== "file" || !fileExtractionRuntime || fileExtractionRuntime.jobs.itemExtractionState(item.ref) === "settled"))
       ];
       return Array.from(new Map(items.map((item) => [item.ref.localItemId, item])).values());
     },
