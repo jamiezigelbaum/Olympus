@@ -206,13 +206,13 @@ describe('live pictures and videos are children of their message', () => {
     expect(rows(target.root).map((row) => row.id)).toEqual(['A1']);
   });
 
-  test('clearing a Secret picture deletes the file the bridge saved in its picture folder', () => {
+  test('clearing a Secret picture deletes the file the bridge saved in its picture folder', async () => {
     const target = lane();
     const photo = join(target.images, 'S1.jpg');
     writeFileSync(photo, 'secret picture');
     const day = join(target.spoolDir, '2026-07-01.jsonl');
     writeFileSync(day, spoolLine({ id: 'S1', media_type: 'image', media_mime: 'image/jpeg', media_path: photo, download_status: 'ok', text: 'the door code' }));
-    redactWhatsAppLiveSpoolSecrets({
+    await redactWhatsAppLiveSpoolSecrets({
       spoolDir: target.spoolDir,
       account: 'personal',
       judge: () => 'content',
@@ -223,7 +223,7 @@ describe('live pictures and videos are children of their message', () => {
     expect(readFileSync(day, 'utf8')).not.toContain('S1.jpg');
   });
 
-  test('a Secret picture under an ordinary caption loses its file and download keys; the caption stays', () => {
+  test('a Secret picture under an ordinary caption loses its file and download keys; the caption stays', async () => {
     const target = lane();
     const photo = join(target.images, 'C1.jpg');
     writeFileSync(photo, 'secret picture');
@@ -232,7 +232,7 @@ describe('live pictures and videos are children of their message', () => {
       id: 'C1', media_type: 'image', media_mime: 'image/jpeg', media_path: photo, download_status: 'ok', text: 'lunch at the harbour',
       media_key: 'a2V5', media_direct_path: '/v/t62/fixture',
     }));
-    redactWhatsAppLiveSpoolSecrets({
+    await redactWhatsAppLiveSpoolSecrets({
       spoolDir: target.spoolDir,
       account: 'personal',
       judge: (identity) => (identity.providerItemId === 'C1#child:media' ? 'content' : undefined),
@@ -253,7 +253,7 @@ describe('live pictures and videos are children of their message', () => {
     writeFileSync(photo, 'an ordinary picture');
     const day = join(target.spoolDir, '2026-07-01.jsonl');
     writeFileSync(day, spoolLine({ id: 'C2', media_type: 'image', media_mime: 'image/jpeg', media_path: photo, download_status: 'ok', text: 'the door code is 4411' }));
-    redactWhatsAppLiveSpoolSecrets({
+    await redactWhatsAppLiveSpoolSecrets({
       spoolDir: target.spoolDir,
       account: 'personal',
       judge: (identity) => (identity.providerItemId === 'C2' ? 'content' : undefined),
@@ -268,7 +268,7 @@ describe('live pictures and videos are children of their message', () => {
     expect(rows(target.root).find((row) => row.id === 'C2#child:media')?.locator).toBe(`${WHATSAPP_MEDIA_FILE_LOCATOR_PREFIX}${photo}`);
   });
 
-  test('clearing a Secret picture removes every temp of it; temps a killed bridge left are swept, a stalled live download\'s kept', () => {
+  test('clearing a Secret picture removes every temp of it; temps a killed bridge left are swept, a stalled live download\'s kept', async () => {
     const target = lane();
     const photo = join(target.images, 'T1.jpg');
     writeFileSync(photo, 'secret picture');
@@ -286,7 +286,7 @@ describe('live pictures and videos are children of their message', () => {
     utimesSync(older, hoursAgo, hoursAgo);
     utimesSync(stalled, hoursAgo, hoursAgo);
     writeFileSync(join(target.spoolDir, '2026-07-01.jsonl'), spoolLine({ id: 'T1', media_type: 'image', media_mime: 'image/jpeg', media_path: photo, download_status: 'ok' }));
-    redactWhatsAppLiveSpoolSecrets({
+    await redactWhatsAppLiveSpoolSecrets({
       spoolDir: target.spoolDir,
       account: 'personal',
       judge: (identity) => (identity.providerItemId === 'T1#child:media' ? 'content' : undefined),
@@ -296,7 +296,7 @@ describe('live pictures and videos are children of their message', () => {
     expect(existsSync(stalled)).toBe(true);
   });
 
-  test('in a folder account the temps under the media folder\'s picture folder are found from its one root', () => {
+  test('in a folder account the temps under the media folder\'s picture folder are found from its one root', async () => {
     const target = lane();
     const mediaRoot = join(target.root, 'media');
     const photo = join(target.images, 'F1.jpg');
@@ -306,7 +306,7 @@ describe('live pictures and videos are children of their message', () => {
     for (const path of [own, dead]) writeFileSync(path, 'partial');
     writeFileSync(join(target.spoolDir, '2026-07-01.jsonl'), spoolLine({ id: 'F1', media_type: 'image', media_mime: 'image/jpeg', media_path: photo, download_status: 'ok' }));
     // The folder account's media roots are the media folder alone (defaultWhatsAppMediaRoots).
-    redactWhatsAppLiveSpoolSecrets({
+    await redactWhatsAppLiveSpoolSecrets({
       spoolDir: target.spoolDir,
       account: 'personal',
       judge: (identity) => (identity.providerItemId === 'F1#child:media' ? 'content' : undefined),
@@ -315,7 +315,7 @@ describe('live pictures and videos are children of their message', () => {
     for (const gone of [photo, own, dead]) expect(existsSync(gone)).toBe(false);
   });
 
-  test('a temp that cannot be removed fails the cleanup: the keys stay and the next pull tries again', () => {
+  test('a temp that cannot be removed fails the cleanup: the keys stay and the next pull tries again', async () => {
     const target = lane();
     const photo = join(target.images, 'E1.jpg');
     writeFileSync(photo, 'secret picture');
@@ -333,20 +333,20 @@ describe('live pictures and videos are children of their message', () => {
     });
     chmodSync(target.video, 0o500);
     try {
-      expect(clear).toThrow();
+      await expect(clear()).rejects.toThrow();
       // Not certified: the line keeps its path and keys.
       expect(readFileSync(day, 'utf8')).toBe(original);
     } finally {
       chmodSync(target.video, 0o700);
     }
     // Retried once removing works: cleared.
-    clear();
+    await clear();
     expect(existsSync(own)).toBe(false);
     expect(existsSync(photo)).toBe(false);
     expect(JSON.parse(readFileSync(day, 'utf8'))).not.toHaveProperty('media_key');
   });
 
-  test('a media folder that cannot be read fails a Secret picture\'s cleanup: never certified past it', () => {
+  test('a media folder that cannot be read fails a Secret picture\'s cleanup: never certified past it', async () => {
     const target = lane();
     const photo = join(target.images, 'U1.jpg');
     writeFileSync(photo, 'secret picture');
@@ -362,12 +362,12 @@ describe('live pictures and videos are children of their message', () => {
     // The video folder can be written and entered, never listed: a temp of U1 there could not be found.
     chmodSync(target.video, 0o300);
     try {
-      expect(clear).toThrow();
+      await expect(clear()).rejects.toThrow();
       expect(readFileSync(day, 'utf8')).toBe(original);
     } finally {
       chmodSync(target.video, 0o700);
     }
-    clear();
+    await clear();
     expect(JSON.parse(readFileSync(day, 'utf8'))).not.toHaveProperty('media_key');
   });
 
@@ -828,7 +828,7 @@ describe('review round 9 on #558: Olympus asks the bridge for the exact version,
     await pass(target);
     const path = fetchedPath(target, 'C1');
     expect(existsSync(path)).toBe(true);
-    redactWhatsAppLiveSpoolSecrets({
+    await redactWhatsAppLiveSpoolSecrets({
       spoolDir: target.spoolDir,
       account: 'personal',
       judge: (identity) => (identity.providerItemId === 'C1#child:media' ? 'content' : undefined),

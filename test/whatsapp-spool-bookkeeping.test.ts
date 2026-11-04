@@ -198,7 +198,7 @@ describe('review round 5', () => {
     const pad = Buffer.byteLength(original) - Buffer.byteLength(head) - Buffer.byteLength(secret) - Buffer.byteLength(line('p', { text: '' }));
     writeFileSync(file, head + line('p', { text: 'q'.repeat(pad) }) + secret);
     // The cursor has not moved (nothing told the listing): the cleanup's own boundary check must not trust its line count.
-    clearWhatsAppSpoolSecrets({ spoolDir: target.spoolDir, account: 'personal', ledger: target.ledger, through: '2026-10-25.jsonl:3' });
+    await clearWhatsAppSpoolSecrets({ spoolDir: target.spoolDir, account: 'personal', ledger: target.ledger, through: '2026-10-25.jsonl:3' });
     expect(readFileSync(file, 'utf8')).not.toContain(keyFor(55));
   });
 
@@ -285,12 +285,12 @@ describe('review round 6', () => {
       }
       return getCurrent(identity);
     }) as typeof target.ledger.getCurrent;
-    clearWhatsAppSpoolSecrets({ spoolDir: target.spoolDir, account: 'personal', ledger: target.ledger, through: '2026-10-25.jsonl:1' });
+    await clearWhatsAppSpoolSecrets({ spoolDir: target.spoolDir, account: 'personal', ledger: target.ledger, through: '2026-10-25.jsonl:1' });
     target.ledger.getCurrent = getCurrent;
     expect(appended).toBe(true);
     // Two later cleanups, the cursor past the appended line: it is cleared, not skipped as already certified.
-    clearWhatsAppSpoolSecrets({ spoolDir: target.spoolDir, account: 'personal', ledger: target.ledger, through: '2026-10-25.jsonl:2' });
-    clearWhatsAppSpoolSecrets({ spoolDir: target.spoolDir, account: 'personal', ledger: target.ledger, through: '2026-10-25.jsonl:2' });
+    await clearWhatsAppSpoolSecrets({ spoolDir: target.spoolDir, account: 'personal', ledger: target.ledger, through: '2026-10-25.jsonl:2' });
+    await clearWhatsAppSpoolSecrets({ spoolDir: target.spoolDir, account: 'personal', ledger: target.ledger, through: '2026-10-25.jsonl:2' });
     expect(readFileSync(day2, 'utf8')).not.toContain(keyFor(77));
   });
 
@@ -480,7 +480,7 @@ describe('review round 9', () => {
     }
   });
 
-  test('clearing ahead of the cursor is bounded by bytes, one whole file a pull at least, and reaches every file', () => {
+  test('clearing ahead of the cursor is bounded by bytes, one whole file a pull at least, and reaches every file', async () => {
     const target = lane();
     // Three files ahead of a cursor in the first, each holding a Secret the ledger already knows.
     writeFileSync(join(target.spoolDir, '2026-10-20.jsonl'), line('a'));
@@ -489,10 +489,10 @@ describe('review round 9', () => {
     for (const [n] of ahead.entries()) judgeSecret(target.ledger, `k${n}`);
     const left = () => ahead.filter((name) => readFileSync(join(target.spoolDir, name), 'utf8').includes('prod key'));
     // A budget of one byte: one file a pull, in order.
-    clearWhatsAppSpoolSecrets({ spoolDir: target.spoolDir, account: 'personal', ledger: target.ledger, through: '2026-10-20.jsonl:1', aheadBudgetBytes: 1 });
+    await clearWhatsAppSpoolSecrets({ spoolDir: target.spoolDir, account: 'personal', ledger: target.ledger, through: '2026-10-20.jsonl:1', aheadBudgetBytes: 1 });
     expect(left()).toEqual(ahead.slice(1));
-    clearWhatsAppSpoolSecrets({ spoolDir: target.spoolDir, account: 'personal', ledger: target.ledger, through: '2026-10-20.jsonl:1', aheadBudgetBytes: 1 });
-    clearWhatsAppSpoolSecrets({ spoolDir: target.spoolDir, account: 'personal', ledger: target.ledger, through: '2026-10-20.jsonl:1', aheadBudgetBytes: 1 });
+    await clearWhatsAppSpoolSecrets({ spoolDir: target.spoolDir, account: 'personal', ledger: target.ledger, through: '2026-10-20.jsonl:1', aheadBudgetBytes: 1 });
+    await clearWhatsAppSpoolSecrets({ spoolDir: target.spoolDir, account: 'personal', ledger: target.ledger, through: '2026-10-20.jsonl:1', aheadBudgetBytes: 1 });
     expect(left()).toEqual([]);
   });
 
@@ -534,13 +534,13 @@ describe('review round 9', () => {
     expect(readFileSync(day, 'utf8')).toContain('the door code');
     judgeSecret(target.ledger, 's');
     // The sweep is told the set of Secrets did not change, so only the per-file record decides.
-    sweepCaptureSpoolWhenSecretsChange({ ledger: target.ledger, stateKey: WHATSAPP_SPOOL_REDACTION_STATE_KEY, sweep: () => addCaptureSpoolRedactions() });
+    await sweepCaptureSpoolWhenSecretsChange({ ledger: target.ledger, stateKey: WHATSAPP_SPOOL_REDACTION_STATE_KEY, sweep: async () => addCaptureSpoolRedactions() });
     // The record as an older build wrote it: no certification.
     const key = `${WHATSAPP_SPOOL_REDACTION_STATE_KEY}:cleared_files`;
     const records = JSON.parse(target.ledger.readMeta(key)!) as Record<string, Record<string, unknown>>;
     for (const record of Object.values(records)) delete record.judgedLines;
     target.ledger.writeMeta(key, JSON.stringify(records));
-    clearWhatsAppSpoolSecrets({ spoolDir: target.spoolDir, account: 'personal', ledger: target.ledger, through: '2026-10-24.jsonl:2' });
+    await clearWhatsAppSpoolSecrets({ spoolDir: target.spoolDir, account: 'personal', ledger: target.ledger, through: '2026-10-24.jsonl:2' });
     expect(readFileSync(day, 'utf8')).not.toContain('the door code');
     // Once: the record it leaves certifies the file, so the next pull reads no spool file.
     const after = JSON.parse(target.ledger.readMeta(key)!) as Record<string, { judgedLines: number; lines: number }>;
