@@ -23511,9 +23511,9 @@ function connectorStoreFilterSql(filters) {
     const locatorPath = normalized.locatorPathScope;
     clauses.push("AND i.locator_uri IS NOT NULL");
     if (locatorPath === "/") {
-      clauses.push("AND LOWER(i.locator_uri) LIKE '/%' ESCAPE '\\'");
+      clauses.push("AND i.locator_uri LIKE '/%' ESCAPE '\\'");
     } else {
-      clauses.push("AND (LOWER(i.locator_uri) = LOWER(?) OR LOWER(i.locator_uri) LIKE LOWER(?) ESCAPE '\\')");
+      clauses.push("AND (i.locator_uri = ? COLLATE NOCASE OR i.locator_uri LIKE ? ESCAPE '\\')");
       params.push(locatorPath, `${escapeSqlLike(locatorPath)}/%`);
     }
   }
@@ -23522,9 +23522,9 @@ function connectorStoreFilterSql(filters) {
     clauses.push("AND i.locator_uri IS NOT NULL");
     for (const locatorPath of normalized.locatorPathScopes) {
       if (locatorPath === "/") {
-        alternatives.push("LOWER(i.locator_uri) LIKE '/%' ESCAPE '\\'");
+        alternatives.push("i.locator_uri LIKE '/%' ESCAPE '\\'");
       } else {
-        alternatives.push("(LOWER(i.locator_uri) = LOWER(?) OR LOWER(i.locator_uri) LIKE LOWER(?) ESCAPE '\\')");
+        alternatives.push("(i.locator_uri = ? COLLATE NOCASE OR i.locator_uri LIKE ? ESCAPE '\\')");
         params.push(locatorPath, `${escapeSqlLike(locatorPath)}/%`);
       }
     }
@@ -23533,9 +23533,9 @@ function connectorStoreFilterSql(filters) {
   if (normalized.locatorPathExcludedScopes?.length) {
     for (const locatorPath of normalized.locatorPathExcludedScopes) {
       if (locatorPath === "/") {
-        clauses.push("AND NOT (LOWER(i.locator_uri) LIKE '/%' ESCAPE '\\')");
+        clauses.push("AND NOT (i.locator_uri LIKE '/%' ESCAPE '\\')");
       } else {
-        clauses.push("AND NOT (LOWER(i.locator_uri) = LOWER(?) OR LOWER(i.locator_uri) LIKE LOWER(?) ESCAPE '\\')");
+        clauses.push("AND NOT (i.locator_uri = ? COLLATE NOCASE OR i.locator_uri LIKE ? ESCAPE '\\')");
         params.push(locatorPath, `${escapeSqlLike(locatorPath)}/%`);
       }
     }
@@ -23579,9 +23579,9 @@ function connectorStoreFtsScopeSql(filters) {
   const params = [];
   for (const locatorPath of normalized.metadataOnlyLocatorPathScopes ?? []) {
     if (locatorPath === "/") {
-      metadataOnly.push("LOWER(i.locator_uri) LIKE '/%' ESCAPE '\\'");
+      metadataOnly.push("i.locator_uri LIKE '/%' ESCAPE '\\'");
     } else {
-      metadataOnly.push("(LOWER(i.locator_uri) = LOWER(?) OR LOWER(i.locator_uri) LIKE LOWER(?) ESCAPE '\\')");
+      metadataOnly.push("(i.locator_uri = ? COLLATE NOCASE OR i.locator_uri LIKE ? ESCAPE '\\')");
       params.push(locatorPath, `${escapeSqlLike(locatorPath)}/%`);
     }
   }
@@ -30417,42 +30417,52 @@ var init_local_index = __esm(() => {
       const outsideWindowSql = Number.isFinite(contentNotBeforeMs) ? `(COALESCE(julianday(i.authored_at) < julianday(?), 0) = 1
           AND NOT EXISTS (SELECT 1 FROM chunks oc WHERE oc.item_pk = i.item_pk))` : undefined;
       const outsideWindowParams = outsideWindowSql ? [new Date(contentNotBeforeMs).toISOString()] : [];
-      const counts = this.db.query(`
+      const itemCounts = this.db.query(`
+      WITH flags AS MATERIALIZED (
+        SELECT
+          i.tombstoned AS t,
+          LOWER(i.mime_type) = 'inode/directory' AS dir,
+          (1 ${itemWhere}) AS in_items,
+          (1 ${hiddenNotIn}) AS stored,
+          i.item_pk IN (SELECT value FROM json_each(?)) AS elsewhere,
+          (1 ${fileScopeWhere}) AS in_file_scope
+        FROM items i
+      )
       SELECT
-        (SELECT COUNT(*) FROM items i WHERE i.tombstoned = 0 ${itemWhere}) AS items,
-        (SELECT COUNT(*) FROM items i WHERE i.tombstoned = 0 ${hiddenNotIn}) AS stored_items,
-        (SELECT COUNT(*) FROM items i WHERE i.tombstoned = 0 ${itemWhere}
-          AND i.item_pk IN (SELECT value FROM json_each(?))) AS content_elsewhere_items,
-        (SELECT COUNT(*) FROM items i WHERE i.tombstoned = 0
-          AND LOWER(i.mime_type) <> 'inode/directory' ${itemWhere}) AS files,
-        (SELECT COUNT(*) FROM items i WHERE i.tombstoned = 0
-          AND LOWER(i.mime_type) = 'inode/directory' ${itemWhere}) AS folders,
-        (SELECT COUNT(*) FROM items i WHERE i.tombstoned = 1 ${itemWhere}) AS tombstoned_items,
-        (SELECT COUNT(*) FROM chunks c JOIN items i ON i.item_pk = c.item_pk
+        COALESCE(SUM(t = 0 AND in_items), 0) AS items,
+        COALESCE(SUM(t = 0 AND stored), 0) AS stored_items,
+        COALESCE(SUM(t = 0 AND in_items AND elsewhere), 0) AS content_elsewhere_items,
+        COALESCE(SUM(t = 0 AND in_items AND NOT dir), 0) AS files,
+        COALESCE(SUM(t = 0 AND in_items AND dir), 0) AS folders,
+        COALESCE(SUM(t = 1 AND in_items), 0) AS tombstoned_items,
+        COALESCE(SUM(t = 0 AND NOT dir AND in_file_scope), 0) AS full_ingestion_files
+      FROM flags
+    `).get(...itemParams, ...jsonList(tier.hidden), JSON.stringify(keptNamesOnlyPks), ...fileScopeParams);
+      const textCounts = this.db.query(`
+      SELECT
+        -- CROSS JOIN keeps chunks and vectors as the outer loop: with items
+        -- outer, the scope tests ran on every item, chunk or not.
+        (SELECT COUNT(*) FROM chunks c CROSS JOIN items i ON i.item_pk = c.item_pk
           WHERE i.tombstoned = 0 ${parityWhere}) AS chunks,
         (SELECT COUNT(*)
           FROM chunk_embeddings emb
-          JOIN chunks c ON c.chunk_pk = emb.chunk_pk
-          JOIN items i ON i.item_pk = emb.item_pk
+          CROSS JOIN chunks c ON c.chunk_pk = emb.chunk_pk
+          CROSS JOIN items i ON i.item_pk = emb.item_pk
           WHERE i.tombstoned = 0 AND emb.content_hash = c.embedding_input_hash
             ${parityWhere}
         ) AS embedded_chunks,
         (SELECT COUNT(*) FROM sync_runs
           WHERE connector_id NOT IN ${NON_SYNC_RUN_CONNECTORS_SQL}
         ) AS sync_runs,
-        -- EXISTS rather than COUNT(DISTINCT ...) so the per-item probe stops at
-        -- the first chunk row instead of walking every chunk of every item.
-        (SELECT COUNT(*) FROM items i
+        -- Driven from the items that hold a chunk, so the scope tests run only
+        -- on those rows, not on every names-only item.
+        (SELECT COUNT(*) FROM (SELECT DISTINCT item_pk FROM chunks) ck
+          CROSS JOIN items i ON i.item_pk = ck.item_pk
           WHERE i.tombstoned = 0
-            AND EXISTS (SELECT 1 FROM chunks c WHERE c.item_pk = i.item_pk)
             ${contentWhere}
-        ) AS items_with_text,
-        (SELECT COUNT(*) FROM items i
-          WHERE i.tombstoned = 0
-            AND LOWER(i.mime_type) <> 'inode/directory'
-            ${fileScopeWhere}
-        ) AS full_ingestion_files
-    `).get(...itemParams, ...jsonList(tier.hidden), ...itemParams, JSON.stringify(keptNamesOnlyPks), ...itemParams, ...itemParams, ...itemParams, ...parityParams, ...parityParams, ...contentParams, ...fileScopeParams);
+        ) AS items_with_text
+    `).get(...parityParams, ...parityParams, ...contentParams);
+      const counts = { ...itemCounts, ...textCounts };
       const outsideContentWindowItems = outsideWindowSql ? this.db.query(`
           SELECT COUNT(*) AS n FROM items i
           WHERE i.tombstoned = 0
