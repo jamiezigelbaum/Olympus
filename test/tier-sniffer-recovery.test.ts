@@ -5,7 +5,7 @@ import { InstalledTierClassification } from '../src/workers/classification/insta
 import { BUILT_IN_SNIFFER_LANE } from '../src/workers/classification/built-in-sniffer.ts';
 import { TierSnifferService } from '../src/workers/classification/sniffer-service.ts';
 import { moveTieredItem } from '../src/workers/connector-store/tier-move.ts';
-import { classifyItemTiers } from '../src/workers/classification/tier-classifier.ts';
+import { classifyItemTiers, TIER_CLASSIFIER_VERSION } from '../src/workers/classification/tier-classifier.ts';
 import { FIXTURE_PLACEMENT, fixtureConnector, identityOf, openTierFixture, tempDir } from './helpers/tier-fixtures.ts';
 import { dashboardSourceProgress } from '../src/workers/dashboard/phases.ts';
 import type { DashboardSourceCard } from '../src/workers/source-dashboard.ts';
@@ -56,6 +56,17 @@ for (const contentRead of [true, false]) test(`an upgraded pending row with no q
   expect(f.ledger.getCurrent(f.identity)?.reasons).toContainEqual(expect.stringMatching(/^content:sniffer:.*:fail_safe:missing_question$/));
   await f.service.runOnce();
   expect(f.ledger.counts().byState.pending).toBe(0);
+});
+
+test('an item settled only because its question was missing is asked again by the re-judge pass (#606; Sparta, 2026-11-04)', async () => {
+  const f = await fixture(true);
+  await f.service.runOnce();
+  const reason = f.ledger.getCurrent(f.identity)!.reasons.find(r => r.endsWith(':fail_safe:missing_question'))!;
+  expect(reason).toBeDefined();
+  const snifferId = reason.split(':')[2]!;
+  // Under the very sniffer and classifier that settled it: nothing else would bring it back.
+  const page = f.ledger.rejudgeCandidatePage({ engineVersion: TIER_CLASSIFIER_VERSION, snifferId });
+  expect(page.records.map(row => row.providerItemId)).toContain(f.identity.providerItemId);
 });
 
 test('a vanished item retires its pending ledger row without deleting stored content', async () => {
