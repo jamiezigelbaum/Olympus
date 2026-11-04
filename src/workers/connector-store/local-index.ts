@@ -901,6 +901,14 @@ class ConnectorStoreTierWriteRefusedError extends Error {
  * set's ledger (missing, replaced, or unreadable). Visibility cannot be judged,
  * so the operation is refused rather than treating routed copies as legacy.
  */
+interface TierLedgerHiddenItemPks {
+  hidden: number[];
+  held: number[];
+  metadataLayer: number[];
+  metadataLayerContentUnread: number[];
+  moving: number;
+}
+
 export class TierLedgerUnavailableError extends Error {
   constructor(corpusId: string) {
     super(
@@ -3049,13 +3057,38 @@ export class LocalConnectorStore {
     return children.length === 0 ? base : { ...base, hidden: [...new Set([...base.hidden, ...children])] };
   }
 
-  private tierLedgerHiddenItemPks(): {
-    hidden: number[];
-    held: number[];
-    metadataLayer: number[];
-    metadataLayerContentUnread: number[];
-    moving: number;
-  } {
+  private tierLedgerHiddenItemPks(): TierLedgerHiddenItemPks {
+    // One status build asks for these several times back to back (counts,
+    // embedding backlog, unread files), and on a large tiered store each ask
+    // is tens of thousands of lookups (Sparta, 2026-11-03: most of a 5-15 s
+    // freeze). They depend only on this store's rows and the ledger, so they
+    // are reused within the same synchronous turn while neither has changed.
+    const marker = this.tierLedgerHiddenMemoMarker();
+    if (marker !== undefined && this.tierLedgerHiddenMemo?.marker === marker) return this.tierLedgerHiddenMemo.value;
+    const value = this.computeTierLedgerHiddenItemPks();
+    if (marker !== undefined) {
+      this.tierLedgerHiddenMemo = { marker, value };
+      queueMicrotask(() => { this.tierLedgerHiddenMemo = undefined; });
+    }
+    return value;
+  }
+
+  private tierLedgerHiddenMemo: { marker: string; value: TierLedgerHiddenItemPks } | undefined;
+
+  /** Changes whenever this store's database or its ledger's changes. */
+  private tierLedgerHiddenMemoMarker(): string | undefined {
+    try {
+      const ledger = this.visibilityLedger();
+      if (!ledger) return undefined;
+      const own = this.db.query('SELECT total_changes() AS changes').get() as { changes: number };
+      const version = this.db.query('PRAGMA data_version').get() as { data_version: number };
+      return `${version.data_version}:${own.changes}:${ledger.changeMarker()}`;
+    } catch {
+      return undefined;
+    }
+  }
+
+  private computeTierLedgerHiddenItemPks(): TierLedgerHiddenItemPks {
     const ledger = this.visibilityLedger();
     if (!ledger || !ledger.corpusHasCopies(this.corpusId)) {
       return { hidden: [], held: [], metadataLayer: [], metadataLayerContentUnread: [], moving: 0 };

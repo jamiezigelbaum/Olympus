@@ -3218,6 +3218,16 @@ export class TierLedger {
    * internally, with no ceiling: a filter that silently stopped at N items
    * would let the N+1st superseded copy be searched and counted.
    */
+  /**
+   * Changes whenever this ledger's database changes, from this connection or
+   * another: lets a reader reuse what it derived from the ledger until then.
+   */
+  changeMarker(): string {
+    const row = this.db.query('SELECT total_changes() AS changes').get() as { changes: number };
+    const version = this.db.query('PRAGMA data_version').get() as { data_version: number };
+    return `${version.data_version}:${row.changes}`;
+  }
+
   corpusCopyIdentities(
     corpusId: string,
     filter: 'superseded' | 'staged' | 'held' | 'metadata_layer' | 'metadata_layer_content_unread' | 'metadata_layer_settled_unreadable',

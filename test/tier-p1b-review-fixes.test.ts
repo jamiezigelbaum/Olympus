@@ -169,6 +169,37 @@ describe('the set ledger governs every handle, and its loss fails closed', () =>
     }
   });
 
+  test('one turn of status reads reuses the hidden copies until the store or ledger changes', async () => {
+    const dir = workspace();
+    const tiered = await raised(dir);
+    const store = tiered.stores.internal!;
+    const ledger = tiered.ledger;
+    const real = ledger.corpusCopyIdentities.bind(ledger);
+    let reads = 0;
+    ledger.corpusCopyIdentities = ((...args: Parameters<typeof real>) => { reads += 1; return real(...args); }) as typeof real;
+    try {
+      const statusReads = (): number => {
+        const before = reads;
+        expect(store.status().counts.chunks).toBe(0);
+        return reads - before;
+      };
+      const fresh = statusReads();
+      // Same turn, nothing changed: the hidden copies are not read again.
+      const reused = statusReads();
+      expect(reused).toBeLessThan(fresh);
+      expect(statusReads()).toBe(reused);
+      // A ledger write in the same turn is seen at once.
+      ledger.recordDecision(identityOf('unrelated'), ledger.getCurrent(identityOf('garden'))! as unknown as Parameters<typeof ledger.recordDecision>[1]);
+      expect(statusReads()).toBe(fresh);
+      // The next turn reads afresh.
+      await Promise.resolve();
+      expect(statusReads()).toBe(fresh);
+    } finally {
+      ledger.corpusCopyIdentities = real;
+      tiered.close();
+    }
+  });
+
   test('with the set ledger lost, a routed store refuses to sync and serves nothing', async () => {
     const dir = workspace();
     const first = await raised(dir);
