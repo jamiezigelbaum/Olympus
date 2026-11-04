@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 // Per-item tier classification engine (frontier-max doctrine).
 //
 // Corpus-level secure_local tiers are pre-classification DEFAULTS only. This
@@ -212,13 +213,34 @@ function buildHaystack(input: ClassifyItemTierInput): string {
 /** Secret finding kinds (S5) present in `text`. Empty when none. */
 export function detectSecretFindingKinds(text: string): string[] {
   if (!text.trim()) return [];
+  // One item's text is screened by several steps in a row (the tier
+  // classifier, placement, the store set, a tier move): up to four scans of
+  // the same text per item. On a large file each scan holds the thread for
+  // seconds (Sparta, 2026-11-04: 8 s per scan of 16-19 MB chat files), so a
+  // large text's result is reused, keyed by a digest of the whole text. Only
+  // kinds are kept, never the text.
+  const key = text.length >= SECRET_SCAN_MEMO_MIN_CHARS ? createHash('sha256').update(text).digest('hex') : undefined;
+  const memo = key ? secretScanMemo?.get(key) : undefined;
+  if (memo) return [...memo];
   const scan = scanDropboxContentPolicyText({ text });
-  return [...new Set(
+  const kinds = [...new Set(
     scan.findings
       .map((finding) => finding.finding_type)
       .filter((type) => SECRET_FINDING_TYPES.has(type)),
   )].sort();
+  if (key) {
+    secretScanMemo ??= new Map();
+    if (secretScanMemo.size >= SECRET_SCAN_MEMO_MAX_ENTRIES) secretScanMemo.delete(secretScanMemo.keys().next().value!);
+    secretScanMemo.set(key, kinds);
+  }
+  return [...kinds];
 }
+
+/** Texts at least this long have their secret scan reused (detectSecretFindingKinds). */
+const SECRET_SCAN_MEMO_MIN_CHARS = 256 * 1024;
+const SECRET_SCAN_MEMO_MAX_ENTRIES = 64;
+// Made on first use, so loading this module has no side effect.
+let secretScanMemo: Map<string, string[]> | undefined;
 
 export interface SensitiveContentDetection {
   /**
