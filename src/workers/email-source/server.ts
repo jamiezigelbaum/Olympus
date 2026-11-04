@@ -21,7 +21,7 @@ import { mintDashboardOpeningUrl } from '../../core/dashboard-opening.ts';
 import { workerFetch } from '../../core/worker-transport.ts';
 import { linuxModelReadiness } from '../../core/linux-model-readiness.ts';
 import { withEngineWorkerAdmission, EngineMaintenanceInProgressError } from '../../core/engine-maintenance.ts';
-import { prepareWorkerSocket, bindWorkerSocket, releaseSystemdWorkerSocket, workerSocketPath } from '../../core/worker-transport.ts';
+import { prepareWorkerSocket, bindWorkerSocket, releaseSystemdWorkerSocket, workerSocketPath, workerSocketServe } from '../../core/worker-transport.ts';
 import { modelInstallFailedReason, modelInstallSpaceToFree } from '../../core/model-install-failure.ts';
 import { accountFromGoogleHandle } from '../google-connectors/classification.ts';
 import { olympusPackageRoot } from '../../core/package-root.ts';
@@ -6993,7 +6993,7 @@ export async function main(): Promise<void> {
   // indexed inside Olympus's own folders is gone (own-roots-cleanup.ts).
   await localFilesInitialCleanup;
   const startServer = () => socketPath
-    ? Bun.serve({ unix: socketPath, fetch(request, server) {
+    ? Bun.serve(workerSocketServe({ unix: socketPath, fetch(request, server) {
         server.timeout(request, 0);
         if (new URL(request.url).pathname === DESKTOP_OWNER_OPEN_PATH) {
           if (request.method !== 'POST' || !authToken || request.headers.get('authorization') !== `Bearer ${authToken}`) return new Response(null, { status: 403 });
@@ -7020,7 +7020,7 @@ export async function main(): Promise<void> {
           return Response.json({ ...await value.json() as object, built_in_models: linuxModelReadiness(process.env), desktop_bridge: desktopBridge?.status() }, { status: value.status, headers: value.headers });
         });
         return response;
-      } })
+      } }))
     : Bun.serve({ hostname, port, idleTimeout: 0, ...serverOptions });
   const server = socketPath ? bindWorkerSocket(socketPath, startServer) : startServer();
   // This Bun worker owns listener lifecycle on standalone Mac/Linux and

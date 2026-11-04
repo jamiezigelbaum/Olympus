@@ -4028,6 +4028,9 @@ function releaseSystemdWorkerSocket(options = {}) {
     return false;
   }
 }
+function workerSocketServe(options) {
+  return Object.assign(options, WORKER_SOCKET_SERVE_OPTIONS);
+}
 function bindWorkerSocket(path, bind) {
   const previous = process.umask(127);
   try {
@@ -4089,10 +4092,11 @@ async function nodeWorkerFetch(unix, input, init, options) {
     outgoing.end(body);
   });
 }
-var workerFetch = (input, init) => createWorkerFetch()(input, init);
+var WORKER_SOCKET_SERVE_OPTIONS, workerFetch = (input, init) => createWorkerFetch()(input, init);
 var init_worker_transport = __esm(() => {
   init_linux_engine_layout();
   init_atomic_file();
+  WORKER_SOCKET_SERVE_OPTIONS = { idleTimeout: 0 };
 });
 
 // src/workers/dropbox-files/local-file-resolver.ts
@@ -101706,7 +101710,7 @@ function startLinuxOwnerBridgeHost(options) {
   if (validateWorkerSocketDirectory(options.transport) !== options.socketPath)
     throw new Error("Owner runtime changed.");
   const controlPath = join91(dirname68(options.socketPath), `owner-host-${process.pid}-${randomBytes14(6).toString("hex")}.sock`);
-  const control = bindWorkerSocket(controlPath, () => Bun.serve({ unix: controlPath, async fetch(request) {
+  const control = bindWorkerSocket(controlPath, () => Bun.serve(workerSocketServe({ unix: controlPath, async fetch(request) {
     if (closed)
       return new Response(null, { status: 503 });
     const url = new URL(request.url);
@@ -101719,7 +101723,7 @@ function startLinuxOwnerBridgeHost(options) {
     } catch {
       return new Response(null, { status: 503 });
     }
-  } }));
+  } })));
   const inode = lstatSync32(controlPath);
   const timer = setInterval(() => {
     probe();
@@ -214995,7 +214999,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     })), withWorkerBearerAuth(withEngineBriefRoute2(worker.fetch, { view: (signal) => engineBriefView(chatgptSurface, signal) }), { authToken, requireOwnerSocket: !!socketPath, sessionSecret: dashboardSessionSecret.secret }))))))), { pending: () => privacyChoicePending(sovereigntyEngine), isRelayed: carriesRelayMarker2 }), !!socketPath)
   };
   await localFilesInitialCleanup;
-  const startServer = () => socketPath ? Bun.serve({ unix: socketPath, fetch(request, server2) {
+  const startServer = () => socketPath ? Bun.serve(workerSocketServe({ unix: socketPath, fetch(request, server2) {
     server2.timeout(request, 0);
     if (new URL(request.url).pathname === DESKTOP_OWNER_OPEN_PATH) {
       if (request.method !== "POST" || !authToken || request.headers.get("authorization") !== `Bearer ${authToken}`)
@@ -215031,7 +215035,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
         return Response.json({ ...await value2.json(), built_in_models: linuxModelReadiness(process.env), desktop_bridge: desktopBridge?.status() }, { status: value2.status, headers: value2.headers });
       });
     return response;
-  } }) : Bun.serve({ hostname: hostname2, port, idleTimeout: 0, ...serverOptions });
+  } })) : Bun.serve({ hostname: hostname2, port, idleTimeout: 0, ...serverOptions });
   const server = socketPath ? bindWorkerSocket(socketPath, startServer) : startServer();
   const { createPrivateAgentListeners: createPrivateAgentListeners2 } = await Promise.resolve().then(() => (init_private_agent_listeners(), exports_private_agent_listeners));
   privateAgentListeners = createPrivateAgentListeners2({
