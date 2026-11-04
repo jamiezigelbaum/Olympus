@@ -67972,6 +67972,7 @@ ${request.taskId}`);
   }
 }
 var EMBEDDING_SWEEP_MAX_BACKOFF_MS = 30 * 60000;
+var EMBEDDING_SWEEP_STORE_DEADLINE_MS = 10 * 60000;
 var EMBEDDING_SWEEP_FRESHNESS_THRESHOLD_MS = 26 * 60 * 60000;
 function normalizeTaskResult(result) {
   return {
