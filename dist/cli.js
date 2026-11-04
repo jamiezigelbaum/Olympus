@@ -151087,8 +151087,8 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
       const report = el("pre", "help", source.supportDetails);
       const copy = copyControl(report, "support:" + id);
       copy.textContent = "Copy details";
-      const details2 = add(el("details", "disclosure"), el("summary", "", "Details for support"), report, copy, el("p", "muted", "No names, numbers, emails, chats or folder titles."));
-      add(main, details2);
+      const support = add(details("support-details:" + id, doc2.createTextNode("Details for support"), "disclosure"), report, copy, el("p", "muted", "No names, numbers, emails, chats or folder titles."));
+      add(main, support);
     }
     if (why)
       add(main, why);
