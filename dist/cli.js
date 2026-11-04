@@ -147566,7 +147566,8 @@ function mountDashboardController(options) {
         messagingActive.delete(card);
       if (["paired", "complete", "completed"].includes(state)) {
         const row = card.querySelector(".actionrow");
-        const start = row?.querySelector('form[data-messaging-kind="start"]');
+        const hasStatus = !!row?.querySelector('form[data-messaging-kind="status"]');
+        const start = hasStatus ? null : row?.querySelector('form[data-messaging-kind="start"]');
         if (start) {
           start.dataset.messagingKind = "status";
           const button = start.querySelector("button");
@@ -147575,7 +147576,7 @@ function mountDashboardController(options) {
             button.classList.remove("primary");
           }
         }
-        const toggle = row?.querySelector('[data-sheet-toggle="#telegram-setup"]');
+        const toggle = hasStatus ? null : row?.querySelector('[data-sheet-toggle="#telegram-setup"]');
         if (toggle) {
           const form = document.createElement("form");
           form.method = "dialog";
@@ -157011,10 +157012,11 @@ function hostProgram(input, bridge, mount) {
       shadow.innerHTML = "";
     };
     pairingDialog.showModal();
-    const start = () => {
+    const start = (paired) => {
       if (abort.signal.aborted)
         return;
-      shadow.innerHTML = "<style>" + input.pairing.css + '</style><div class="page">' + markup + "</div>";
+      const card = paired ? input.pairing.pairedCards[source] : markup;
+      shadow.innerHTML = "<style>" + input.pairing.css + '</style><div class="page">' + card + "</div>";
       controller = mount({
         root: shadow,
         canWrite: true,
@@ -157036,15 +157038,18 @@ function hostProgram(input, bridge, mount) {
       });
     };
     const begin = () => {
-      start();
       fetch(input.pairing.messagingPath + "status", {
         method: "POST",
         cache: "no-store",
         credentials: "same-origin",
         headers: { "X-Olympus-CSRF": csrfToken, "Content-Type": "application/json" },
         body: JSON.stringify({ source })
-      }).then((response) => response.ok ? response.json() : undefined).then((body) => {
-        if (abort.signal.aborted || !body || body.state !== "idle" && body.state !== "not_paired")
+      }).then((response) => response.ok ? response.json() : undefined, () => {
+        return;
+      }).then((body) => {
+        const state = body && typeof body.state === "string" ? body.state : "";
+        start(state === "paired" || state === "complete" || state === "completed");
+        if (abort.signal.aborted || state !== "idle" && state !== "not_paired")
           return;
         if (source === "telegram") {
           shadow.querySelector('[data-sheet-toggle="#telegram-setup"]')?.click();
@@ -157053,8 +157058,6 @@ function hostProgram(input, bridge, mount) {
         const form2 = shadow.querySelector('form[data-messaging-kind="start"]');
         if (form2)
           form2.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
-      }, () => {
-        return;
       });
     };
     if (localSession)
@@ -157203,15 +157206,17 @@ function hostProgram(input, bridge, mount) {
 function computerPairing(openTargets) {
   const urls = {};
   const cards = {};
+  const pairedCards = {};
   for (const source of ["whatsapp", "telegram"]) {
     const url2 = openTargets[openTargetPath({ kind: "connect", source })];
     if (url2)
       urls[url2] = source;
     cards[source] = renderMessagingCard(source, true);
+    pairedCards[source] = renderMessagingCard(source, true, { paired: true });
   }
   const css = DASHBOARD_THEME_CSS.replaceAll(":root", ":host").replace(/(^|\n)body\s*\{/g, "$1:host{display:block;").concat(`
 :host{padding:0 1rem 1rem}`);
-  return { urls, cards, css, messagingPath: "/dashboard/messaging/" };
+  return { urls, cards, pairedCards, css, messagingPath: "/dashboard/messaging/" };
 }
 function renderComputerHostPage(input) {
   const installer = installerForPlatform(input.platform ?? "darwin");

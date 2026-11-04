@@ -242,7 +242,7 @@ function hostProgram(input: {
    * controls over the dashboard instead of the Keys page. `urls` are the
    * connect links that mean it; `cards` each source's card markup.
    */
-  pairing: { urls: Record<string, 'telegram' | 'whatsapp'>; cards: Record<string, string>; css: string; messagingPath: string };
+  pairing: { urls: Record<string, 'telegram' | 'whatsapp'>; cards: Record<string, string>; pairedCards: Record<string, string>; css: string; messagingPath: string };
 }, bridge: typeof dashboardHostBridge, mount: typeof mountDashboardController): void {
   const frame = document.getElementById('olympus-panel') as HTMLIFrameElement | null;
   if (!frame) return;
@@ -448,9 +448,11 @@ function hostProgram(input: {
       shadow.innerHTML = '';
     };
     pairingDialog.showModal();
-    const start = () => {
+    const start = (paired: boolean) => {
       if (abort.signal.aborted) return;
-      shadow.innerHTML = '<style>' + input.pairing.css + '</style><div class="page">' + markup + '</div>';
+      // A paired account gets its own card (Pair again beside Check connection), as on Keys.
+      const card = paired ? input.pairing.pairedCards[source] : markup;
+      shadow.innerHTML = '<style>' + input.pairing.css + '</style><div class="page">' + card + '</div>';
       controller = mount({
         root: shadow,
         canWrite: true,
@@ -472,23 +474,24 @@ function hostProgram(input: {
       } as Parameters<typeof mount>[0]);
     };
     // Connect means pair: an account not paired yet goes straight to the QR
-    // (WhatsApp) or to the walkthrough (Telegram). A paired one stays as it
-    // is, with Pair again and Choose chats on the card.
+    // (WhatsApp) or to the walkthrough (Telegram). A paired one shows its
+    // card with Pair again and Choose chats, and nothing starts by itself.
     const begin = () => {
-      start();
       void fetch(input.pairing.messagingPath + 'status', {
         method: 'POST', cache: 'no-store', credentials: 'same-origin',
         headers: { 'X-Olympus-CSRF': csrfToken, 'Content-Type': 'application/json' },
         body: JSON.stringify({ source }),
-      }).then((response) => (response.ok ? response.json() : undefined)).then((body: { state?: unknown } | undefined) => {
-        if (abort.signal.aborted || !body || (body.state !== 'idle' && body.state !== 'not_paired')) return;
+      }).then((response) => (response.ok ? response.json() : undefined), () => undefined).then((body: { state?: unknown } | undefined) => {
+        const state = body && typeof body.state === 'string' ? body.state : '';
+        start(state === 'paired' || state === 'complete' || state === 'completed');
+        if (abort.signal.aborted || (state !== 'idle' && state !== 'not_paired')) return;
         if (source === 'telegram') {
           shadow.querySelector<HTMLButtonElement>('[data-sheet-toggle="#telegram-setup"]')?.click();
           return;
         }
         const form = shadow.querySelector<HTMLFormElement>('form[data-messaging-kind="start"]');
         if (form) form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
-      }, () => undefined);
+      });
     };
     // Pairing needs this computer's own session: open it first, as Keys does on a press.
     if (localSession) begin();
@@ -635,18 +638,20 @@ const DASHBOARD_PAIRING_DIALOG_LABEL = 'Pair a messaging account';
 
 /** What the host needs to pair WhatsApp and Telegram over the dashboard (hostProgram `pairing`). */
 function computerPairing(openTargets: Record<string, string>): {
-  urls: Record<string, 'telegram' | 'whatsapp'>; cards: Record<string, string>; css: string; messagingPath: string;
+  urls: Record<string, 'telegram' | 'whatsapp'>; cards: Record<string, string>; pairedCards: Record<string, string>; css: string; messagingPath: string;
 } {
   const urls: Record<string, 'telegram' | 'whatsapp'> = {};
   const cards: Record<string, string> = {};
+  const pairedCards: Record<string, string> = {};
   for (const source of ['whatsapp', 'telegram'] as const) {
     const url = openTargets[openTargetPath({ kind: 'connect', source })];
     if (url) urls[url] = source;
     cards[source] = renderMessagingCard(source, true);
+    pairedCards[source] = renderMessagingCard(source, true, { paired: true });
   }
   // The local pages' stylesheet, scoped to the shadow root it is placed in.
   const css = DASHBOARD_THEME_CSS.replaceAll(':root', ':host').replace(/(^|\n)body\s*\{/g, '$1:host{display:block;').concat('\n:host{padding:0 1rem 1rem}');
-  return { urls, cards, css, messagingPath: '/dashboard/messaging/' };
+  return { urls, cards, pairedCards, css, messagingPath: '/dashboard/messaging/' };
 }
 
 export function renderComputerHostPage(input: ComputerHostPageInput): string {

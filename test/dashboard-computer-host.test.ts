@@ -1017,6 +1017,10 @@ describe('Connect on a messaging card pairs in place', () => {
     await new Promise((resolve) => setTimeout(resolve, 20));
     expect(page.dialog.open).toBe(true);
     expect(page.requests.some((request) => request.url === '/dashboard/messaging/start')).toBe(false);
+    // Its card keeps Pair again beside Check connection, for a session that expired.
+    const labels = Array.from(page.shadow().querySelectorAll('.actionrow button')).map((button) => (button as HTMLElement).textContent);
+    expect(labels).toContain('Pair again');
+    expect(labels).toContain('Check connection');
   });
 
   test('Telegram opens its own walkthrough in place; other Connect links still go to Keys', async () => {
