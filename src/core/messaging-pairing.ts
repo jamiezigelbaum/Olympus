@@ -474,15 +474,22 @@ async function resolveHelper(options: PairMessagingSourceOptions, packageRoot: s
     return output;
   }
   const which = options.which ?? ((command: string) => Bun.which(command));
-  const go = which('go');
-  const compiler = which('cc') ?? which('clang') ?? which('gcc');
+  // A service's PATH is often narrower than the user's shell: look where Go
+  // is usually installed for one user too, not only on PATH (Sparta,
+  // 2026-11-04: Go in ~/.local/bin, invisible to the worker).
+  const home = options.homeDir ?? options.env?.HOME ?? homedir();
+  const userBins = [join(home, '.local', 'bin'), join(home, 'go', 'bin'), '/usr/local/go/bin', '/opt/homebrew/bin', '/usr/local/bin', '/usr/bin'];
+  const find = (command: string): string | undefined => which(command)
+    ?? (options.which ? undefined : userBins.map((dir) => join(dir, command)).find((path) => isExecutableFile(path)));
+  const go = find('go');
+  const compiler = find('cc') ?? find('clang') ?? find('gcc');
   if (!go || !compiler) {
-    throw new Error('WhatsApp pairing requires Go and a C compiler. Install Go plus cc/clang/gcc, then re-run olympus connect whatsapp --pair; Olympus will build the pinned bridge automatically.');
+    throw codedPairingError('WhatsApp pairing requires Go and a C compiler. Install Go plus cc/clang/gcc, then re-run olympus connect whatsapp --pair; Olympus will build the pinned bridge automatically.', 'bridge_build_tools_missing');
   }
   mkdirSync(join(output, '..'), { recursive: true, mode: 0o700 });
   const built = await (options.buildWhatsAppBridge ?? buildWhatsAppBridge)({ go, sourceDir, outputPath: output });
   if (!built || !existsSync(output)) {
-    throw new Error('The pinned WhatsApp bridge could not be built. Verify Go and the C compiler, then re-run olympus connect whatsapp --pair.');
+    throw codedPairingError('The pinned WhatsApp bridge could not be built. Verify Go and the C compiler, then re-run olympus connect whatsapp --pair.', 'bridge_build_failed');
   }
   chmodSync(output, 0o700);
   return output;
@@ -801,6 +808,21 @@ function processAlive(pid: number): boolean {
 
 function removeTelegramLogin(base: string): void {
   for (const suffix of ['.session', '.session-journal']) rmSync(`${base}${suffix}`, { force: true });
+}
+
+function codedPairingError(message: string, code: string): Error {
+  const error = new Error(message) as Error & { code?: string };
+  error.code = code;
+  return error;
+}
+
+function isExecutableFile(path: string): boolean {
+  try {
+    const stat = statSync(path);
+    return stat.isFile() && (stat.mode & 0o111) !== 0;
+  } catch {
+    return false;
+  }
 }
 
 function pairingFailure(source: MessagingPairingSource, code: string | undefined): Error {
