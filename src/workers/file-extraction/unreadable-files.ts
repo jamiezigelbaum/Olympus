@@ -311,13 +311,6 @@ export function createUnreadableFiles(options: UnreadableFilesOptions): Unreadab
     }
   }
 
-  /**
-   * The counted items across these corpora still unreadable now, newest failure first.
-   */
-  function current(corpusIds: readonly string[]): ExtractionUnreadableItem[] {
-    return merged(corpusIds).filter((item) => verdictOf(item) === 'unreadable');
-  }
-
   function merged(corpusIds: readonly string[]): ExtractionUnreadableItem[] {
     const seen = new Set<string>();
     const out: ExtractionUnreadableItem[] = [];
@@ -444,7 +437,15 @@ export function createUnreadableFiles(options: UnreadableFilesOptions): Unreadab
     },
 
     names(corpusIds, limit) {
-      return current(corpusIds).slice(0, Math.max(0, limit)).map(displayName);
+      // Verdicts only until the list is full: the names are the newest few,
+      // and asking every listed item first held the worker for seconds on a
+      // large list (Sparta, 2026-11-04).
+      const shown: ExtractionUnreadableItem[] = [];
+      for (const item of merged(corpusIds)) {
+        if (shown.length >= Math.max(0, limit)) break;
+        if (verdictOf(item) === 'unreadable') shown.push(item);
+      }
+      return shown.map(displayName);
     },
 
     computerList(corpusIds, limit, list = {}) {
