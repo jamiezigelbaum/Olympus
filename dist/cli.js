@@ -4018,6 +4018,16 @@ function removeReleasedWorkerSocket(options, custody) {
   removeFileDurablySync(path);
   return true;
 }
+function releaseSystemdWorkerSocket(options = {}) {
+  const env = options.env ?? process.env;
+  if ((options.platform ?? process.platform) !== "linux" || env.OLYMPUS_MANAGED_WORKER !== "1" || !env.INVOCATION_ID)
+    return false;
+  try {
+    return removeReleasedWorkerSocket(options, { previousWorkerReleased: true });
+  } catch {
+    return false;
+  }
+}
 function bindWorkerSocket(path, bind) {
   const previous = process.umask(127);
   try {
@@ -214573,6 +214583,8 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     },
     ...remoteEvidenceSearch ? { search: { evidenceSearch: remoteEvidenceSearch, answerModelAvailable: chatgptAnswerModelAvailable } } : {}
   };
+  if (releaseSystemdWorkerSocket())
+    console.warn("[olympus:worker] removed the socket left by the previous worker run");
   const socketPath = prepareWorkerSocket();
   const serverOptions = {
     fetch: withRequestPeer2(withFirstRunPrivacyGate(withRelaySurfacesRoute2(createRelaySurfacesHandler2({

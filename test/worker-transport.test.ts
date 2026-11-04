@@ -3,7 +3,7 @@ import { chmodSync, lstatSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writ
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
-import { bindWorkerSocket, createWorkerFetch, prepareWorkerSocket, removeReleasedWorkerSocket, validateWorkerSocket, workerSocketPath } from '../src/core/worker-transport.ts';
+import { bindWorkerSocket, createWorkerFetch, prepareWorkerSocket, releaseSystemdWorkerSocket, removeReleasedWorkerSocket, validateWorkerSocket, workerSocketPath } from '../src/core/worker-transport.ts';
 import { withRequestPeer, requestFromOwnerSocket } from '../src/core/request-peer.ts';
 import { createRemoteOAuthHandler } from '../src/workers/remote-oauth/handler.ts';
 import { openRemoteConnectionStore } from '../src/core/remote-connections.ts';
@@ -48,6 +48,24 @@ test('stale socket removal needs both supervisor process custody and listener re
  expect(removeReleasedWorkerSocket(options,{previousWorkerReleased:true})).toBe(true);expect(()=>lstatSync(path)).toThrow();
 }, 30_000);
 
+test('the worker under its systemd unit removes a socket its previous run left, and nothing else',()=>{
+ const {dir,options}=fixture();const path=workerSocketPath(options)!;mkdirSync(dirname(path),{mode:0o700});
+ const stale=()=>{const made=spawnSync('python3',['-c','import socket,sys\ns=socket.socket(socket.AF_UNIX);s.bind(sys.argv[1]);s.close()',path]);expect(made.status).toBe(0);chmodSync(path,0o600);};
+ const systemd={platform:'linux',env:{XDG_RUNTIME_DIR:dir,OLYMPUS_MANAGED_WORKER:'1',INVOCATION_ID:'0123456789abcdef'}};
+ stale();
+ // Not under systemd, or not the managed worker: the socket stays.
+ expect(releaseSystemdWorkerSocket(options)).toBe(false);
+ expect(releaseSystemdWorkerSocket({platform:'linux',env:{XDG_RUNTIME_DIR:dir,OLYMPUS_MANAGED_WORKER:'1'}})).toBe(false);
+ expect(releaseSystemdWorkerSocket({platform:'linux',env:{XDG_RUNTIME_DIR:dir,INVOCATION_ID:'0123456789abcdef'}})).toBe(false);
+ expect(lstatSync(path).isSocket()).toBe(true);
+ // A socket of the wrong mode stays, and prepare still reports it.
+ chmodSync(path,0o644);expect(releaseSystemdWorkerSocket(systemd)).toBe(false);expect(()=>prepareWorkerSocket(systemd)).toThrow('occupied');chmodSync(path,0o600);
+ expect(releaseSystemdWorkerSocket(systemd)).toBe(true);expect(()=>lstatSync(path)).toThrow();
+ expect(prepareWorkerSocket(systemd)).toBe(path);
+ // A live listener keeps its socket.
+ const server=Bun.listen({unix:path,socket:{data(){}}});servers.push(server);chmodSync(path,0o600);
+ expect(releaseSystemdWorkerSocket(systemd)).toBe(false);expect(lstatSync(path).isSocket()).toBe(true);
+}, 30_000);
 test('real Unix worker health and CLI/relay fetch retain origin and never follow redirects', async () => {
   const { options } = fixture(); const path = prepareWorkerSocket(options)!;
   const server = bindWorkerSocket(path, () => Bun.serve({ unix: path, fetch: withRequestPeer(request => {
