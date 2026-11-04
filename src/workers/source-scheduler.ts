@@ -15,6 +15,7 @@ import {
 import { DropboxPathNotFoundError } from './dropbox-files/provider-client.ts';
 import type { DropboxProviderStoreSyncHandler } from './dropbox-files/provider-store-sync.ts';
 import type { FileExtractionRunner } from './file-extraction/runner.ts';
+import { EXTRACTION_PAUSE_CONSECUTIVE_FAILURES } from './file-extraction/runner.ts';
 import { GOOGLE_DRIVE_EXTRACTION_SCOPE_KEY } from './google-connectors/drive-extraction-source.ts';
 import {
   EMBEDDING_ITEMS_FAILED_REASON,
@@ -1673,7 +1674,13 @@ export function fileExtractionSchedulerTask(input: {
         };
       }
       if (run.paused) {
-        throw new SourceSchedulerTaskFailure('File extraction paused at the extractor health gate.', {
+        // The message names the pause the runner reported: five retryable
+        // failures in a row used to be reported as a health-gate pause too,
+        // which sent a reader of the log looking at the wrong cause.
+        const message = run.pauseReason === EXTRACTION_PAUSE_CONSECUTIVE_FAILURES
+          ? 'File extraction paused after several files in a row failed to read; it tries again later.'
+          : 'File extraction paused at the extractor health gate.';
+        throw new SourceSchedulerTaskFailure(message, {
           errorKind: run.preflightErrorKind ?? run.pauseReason ?? 'extractor_health_probe_failed',
           ...extractionWarnings(jobsRefused, run.pauseReason),
           counts,

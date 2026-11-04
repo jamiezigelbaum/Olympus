@@ -171598,7 +171598,8 @@ function fileExtractionSchedulerTask(input) {
         };
       }
       if (run2.paused) {
-        throw new SourceSchedulerTaskFailure("File extraction paused at the extractor health gate.", {
+        const message2 = run2.pauseReason === EXTRACTION_PAUSE_CONSECUTIVE_FAILURES ? "File extraction paused after several files in a row failed to read; it tries again later." : "File extraction paused at the extractor health gate.";
+        throw new SourceSchedulerTaskFailure(message2, {
           errorKind: run2.preflightErrorKind ?? run2.pauseReason ?? "extractor_health_probe_failed",
           ...extractionWarnings(jobsRefused, run2.pauseReason),
           counts
@@ -172491,6 +172492,7 @@ var init_source_scheduler = __esm(() => {
   init_source_ingestion_policy();
   init_dropbox_files();
   init_provider_client();
+  init_runner();
   init_drive_extraction_source();
   init_connector_store();
   init_google_connectors();

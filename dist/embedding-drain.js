@@ -67421,6 +67421,7 @@ init_operation_error();
 init_source_ingestion_policy();
 init_dropbox_files();
 init_provider_client();
+init_runner();
 init_drive_extraction_source();
 init_connector_store();
 init_google_connectors();
