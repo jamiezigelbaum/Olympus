@@ -9750,8 +9750,9 @@ export class LocalConnectorStore {
     modelId: string,
     embedder?: Pick<SourceEmbeddingProvider, 'provider' | 'backend'>,
     scope?: ConnectorStoreStatusScope,
+    options: { countsMaxAgeMs?: number } = {},
   ): { missingChunks: number; estimatedTokens: number } {
-    const tierExclusion = this.embeddingTierExclusionFilter();
+    const tierExclusion = this.embeddingTierExclusionFilter(options.countsMaxAgeMs ?? 0);
     const privateTier = embedder ? this.privateTierEmbeddingFilter(embedder) : { filter: '', params: [] };
     const scoped = statusScopeContentFilter(scope);
     const filter = `${tierExclusion.filter} ${privateTier.filter} ${scoped.filter}`;
@@ -9792,8 +9793,9 @@ export class LocalConnectorStore {
     };
   }
 
-  private embeddingTierExclusionFilter(): { filter: string; params: string[] } {
-    const tierExcluded = this.tierHiddenItemPks();
+  /** `countsMaxAgeMs` only for counts a status snapshot shows (see STATUS_COUNTS_MAX_AGE_MS); never for what is embedded. */
+  private embeddingTierExclusionFilter(countsMaxAgeMs = 0): { filter: string; params: string[] } {
+    const tierExcluded = this.tierHiddenItemPks({ countsMaxAgeMs });
     const excludedPks = [...tierExcluded.hidden, ...tierExcluded.held, ...tierExcluded.metadataLayer];
     return excludedPks.length > 0
       ? { filter: 'AND i.item_pk NOT IN (SELECT value FROM json_each(?))', params: [JSON.stringify(excludedPks)] }
@@ -9858,6 +9860,7 @@ export class LocalConnectorStore {
   privateTierEmbeddingWithheld(
     embedder: Pick<SourceEmbeddingProvider, 'modelId' | 'provider' | 'backend'>,
     scope?: ConnectorStoreStatusScope,
+    options: { countsMaxAgeMs?: number } = {},
   ): {
     items: number;
     chunks: number;
@@ -9866,7 +9869,7 @@ export class LocalConnectorStore {
     const reason = CONNECTOR_STORE_PRIVATE_TIER_EMBEDDING_WITHHELD_REASON;
     const tiers = connectorStoreEmbeddableRowTiers(this.trustDomain, embedder);
     if (tiers === undefined) return { items: 0, chunks: 0, reason };
-    const tierExclusion = this.embeddingTierExclusionFilter();
+    const tierExclusion = this.embeddingTierExclusionFilter(options.countsMaxAgeMs ?? 0);
     const scoped = statusScopeContentFilter(scope);
     const filter = `${tierExclusion.filter} ${scoped.filter}`;
     const params = [...tierExclusion.params, ...scoped.params];
@@ -12138,16 +12141,7 @@ export class LocalConnectorStore {
         }
       : undefined;
     const settledUnreadableItems = this.settledUnreadableCount(scope, options.countsMaxAgeMs ?? 0);
-    // "Last" means most-recently-inserted. started_at has only millisecond
-    // resolution, so two runs in the same tick tie on it; sync_run_id is a
-    // random UUID, so tie-breaking on it picks a run at random (an
-    // order-dependent flake in status().lastSyncRun). rowid is monotonic with
-    // insertion, so it breaks the tie by true recency.
-    const last = this.db.query(
-      `SELECT * FROM sync_runs
-       WHERE connector_id NOT IN ${NON_SYNC_RUN_CONNECTORS_SQL}
-       ORDER BY started_at DESC, rowid DESC LIMIT 1`,
-    ).get() as SyncRunRow | null;
+    const last = this.lastSyncRun();
     return {
       corpusId: this.corpusId,
       family: this.family,
@@ -12184,8 +12178,27 @@ export class LocalConnectorStore {
         itemsEmbedded: row.items_embedded,
       })),
       ...(tierStatus ? { tier: tierStatus } : {}),
-      ...(last ? { lastSyncRun: syncRunFromRow(last) } : {}),
+      ...(last ? { lastSyncRun: last } : {}),
     };
+  }
+
+  /**
+   * The store's most recent run, as `status().lastSyncRun` reports it, without
+   * the rest of status: schedulers ask this on every status read, and a full
+   * status of a large tiered store is seconds of reads (Sparta, 2026-11-04).
+   */
+  lastSyncRun(): ConnectorStoreSyncRun | undefined {
+    // "Last" means most-recently-inserted. started_at has only millisecond
+    // resolution, so two runs in the same tick tie on it; sync_run_id is a
+    // random UUID, so tie-breaking on it picks a run at random (an
+    // order-dependent flake in status().lastSyncRun). rowid is monotonic with
+    // insertion, so it breaks the tie by true recency.
+    const last = this.db.query(
+      `SELECT * FROM sync_runs
+       WHERE connector_id NOT IN ${NON_SYNC_RUN_CONNECTORS_SQL}
+       ORDER BY started_at DESC, rowid DESC LIMIT 1`,
+    ).get() as SyncRunRow | null;
+    return last ? syncRunFromRow(last) : undefined;
   }
 
   syncRun(syncRunId: string): ConnectorStoreSyncRun | undefined {

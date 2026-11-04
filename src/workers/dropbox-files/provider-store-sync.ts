@@ -295,7 +295,7 @@ export function createDropboxProviderStoreSyncHandler(
       };
     },
 
-    lastStoreRunCompletedAt: () => options.store.status().lastSyncRun?.completedAt,
+    lastStoreRunCompletedAt: () => options.store.lastSyncRun()?.completedAt,
   };
 }
 
