@@ -38,6 +38,18 @@ afterEach(async () => {
   while (hosts.length) await hosts.pop()!.win.happyDOM.close();
 });
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+/**
+ * Past the 450 ms question debounce and until the questions it asked for are
+ * shown. A fixed wait raced the timer and the reply on a busy CI runner (#790).
+ */
+async function questionsShown(host: Host): Promise<void> {
+  await sleep(475);
+  await host.settle();
+  for (let waited = 0; waited < 3_000 && host.text().includes(W.questions.loading); waited += 10) {
+    await sleep(10);
+    await host.settle();
+  }
+}
 
 function mount(serve: Record<string, Serve>, openai: Record<string, any> = { displayMode: 'fullscreen' }): Host {
   serve[P.questions] ??= () => ({ _meta: { [CHATGPT_PRIVACY_META_KEY]: { fallback: true, questions: [] } } });
@@ -176,8 +188,7 @@ async function openPrivacy(options: { description?: string; rules?: unknown[]; p
   });
   host.push({ structuredContent: dashboard });
   host.button(dashboard.needsYou.length ? 'Set up' : W.edit).click();
-  await sleep(475);
-  await host.settle();
+  await questionsShown(host);
   return { host, saves };
 }
 
@@ -217,8 +228,7 @@ function ruleRows(host: Host): string[] {
 
 /** Removal already opens the same confirmation that Save opens for other edits. */
 async function saveDraft(host: Host): Promise<void> {
-  await sleep(475);
-  await host.settle();
+  await questionsShown(host);
   if (host.hasButton(W.confirm)) {
     expect(host.doc.querySelector('[data-key="privacy:confirm:yes"]')).not.toBeNull();
     return;
@@ -300,7 +310,7 @@ describe('the Privacy screen', () => {
     area.value = `${DESCRIPTION} and more`;
     area.dispatchEvent(new host.win.Event('input') as unknown as Event);
     expect(host.button(W.save).disabled).toBe(true);
-    await sleep(475); await host.settle();
+    await questionsShown(host);
     expect(host.button(W.save).disabled).toBe(false);
     expect(host.doc.getElementById('privacy-save-reason')).toBeNull();
     expect(host.button(W.save).hasAttribute('aria-describedby')).toBe(false);
@@ -1051,7 +1061,7 @@ describe('follow-up questions', () => {
     const { host, saves } = await openPrivacy({ description: legacy });
     const area = editDescription(host) as HTMLTextAreaElement;
     area.value = legacy + ' '; area.dispatchEvent(new host.win.Event('input') as unknown as Event);
-    await sleep(475); await host.settle();
+    await questionsShown(host);
     await saveDraft(host);
     if (host.doc.querySelector('.confirm-box')) { host.button(W.confirm).click(); }
     await host.settle();
@@ -1067,7 +1077,7 @@ describe('follow-up questions', () => {
     const area = editDescription(host) as HTMLTextAreaElement;
     area.value = OWNER + ' and my diary';
     area.dispatchEvent(new host.win.Event('input') as unknown as Event);
-    await sleep(475); await host.settle();
+    await questionsShown(host);
     expect(choice(host, 'family:medical', 'share').getAttribute('aria-pressed')).toBe('false');
     await saveDraft(host);
     host.button(W.confirm).click(); await host.settle();
@@ -1101,7 +1111,7 @@ describe('follow-up questions', () => {
     const previous = host.toolCalls(P.questions).length;
     expect(host.text()).toContain(Q.loading);
     expect(host.toolCalls(P.questions)).toHaveLength(previous);
-    await sleep(475); await host.settle();
+    await questionsShown(host);
     expect(host.toolCalls(P.questions)).toHaveLength(previous + 1);
     expect(host.text()).toContain('Should client invoices stay Private?');
     await saveDraft(host); await host.settle();
@@ -1426,7 +1436,7 @@ test('the save bar follows pending covered edits, including reverting to the sav
     area.dispatchEvent(new host.win.Event('input') as unknown as Event);
     expect(host.hasButton(W.save)).toBe(true);
   }
-  await sleep(475); await host.settle();
+  await questionsShown(host);
   const choice = host.doc.querySelector('[data-key="privacy:q:family:medical:share"]') as HTMLButtonElement;
   choice.click();
   expect(host.button(W.save).textContent).toBe('Save description and answers');

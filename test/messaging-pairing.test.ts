@@ -458,6 +458,17 @@ describe('packaged messaging pairing', () => {
     })).rejects.toThrow(/installed WhatsApp bridge is not a trusted/);
   });
 
+  test('no prebuilt bridge and no Go gives a fixed failure code the dashboard can explain', async () => {
+    const root = packageFixture();
+    const error: Error & { code?: string } = await pairMessagingSource({
+      source: 'whatsapp', packageRoot: root, homeDir: join(root, 'home'),
+      env: { XDG_CACHE_HOME: join(root, 'no-go-cache') }, which: () => null,
+      runCommand: async () => { throw new Error('must not run'); },
+    }).then(() => new Error('paired'), (caught: unknown) => caught as Error & { code?: string });
+    expect(error).toBeInstanceOf(Error);
+    expect(error.code).toBe('bridge_build_tools_missing');
+  });
+
   test('missing Telethon maps to a fixed command and does not echo helper stderr', async () => {
     const root = packageFixture();
     await expect(pairMessagingSource({

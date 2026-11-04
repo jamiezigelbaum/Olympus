@@ -56,6 +56,8 @@ import {
 export interface ChatGptDashboardPageOptions {
   /** How long to wait for a tool result before saying the Mac is unreachable. */
   resultTimeoutMs?: number;
+  /** On the computer's own dashboard, how long a tool call may take (defaults to resultTimeoutMs when that is given). */
+  computerResultTimeoutMs?: number;
   /** When `generatedAt` is older than this, the page offers Check again. */
   staleAfterMs?: number;
   /** How often the Connect flow checks whether sign-in finished. */
@@ -67,6 +69,8 @@ export interface ChatGptDashboardPageOptions {
 }
 
 export const CHATGPT_DASHBOARD_RESULT_TIMEOUT_MS = 20_000;
+/** The computer's own dashboard: no relay in between, so a slow read is a busy Olympus, and a minute is fine. */
+export const CHATGPT_DASHBOARD_COMPUTER_RESULT_TIMEOUT_MS = 120_000;
 
 /**
  * Setup tool errors whose fixed sentence (the result's text, from
@@ -394,6 +398,7 @@ export function chatgptDashboardPageHtml(options: ChatGptDashboardPageOptions = 
     page: DASHBOARD_CHATGPT_PAGE_COPY,
     statusTone: STATUS_TONE,
     resultTimeoutMs: options.resultTimeoutMs ?? CHATGPT_DASHBOARD_RESULT_TIMEOUT_MS,
+    computerResultTimeoutMs: options.computerResultTimeoutMs ?? options.resultTimeoutMs ?? CHATGPT_DASHBOARD_COMPUTER_RESULT_TIMEOUT_MS,
     staleAfterMs: options.staleAfterMs ?? CHATGPT_DASHBOARD_STALE_AFTER_MS,
     refresh: { ...CHATGPT_DASHBOARD_REFRESH, ...options.refresh },
     picker: {

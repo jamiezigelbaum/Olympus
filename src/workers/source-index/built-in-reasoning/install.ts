@@ -7,7 +7,7 @@ import { sharedDataPath } from '../../../core/olympus-layout.ts';
 // file (the same shape the built-in embedding lane writes) so the dashboard
 // engine can show "installing" with a percent and a label.
 
-import { spawnSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import {
   closeSync,
@@ -96,7 +96,7 @@ export interface PinnedInstallTuning {
   /** How long to wait for another process that holds the install lock. */
   lockWaitMs?: number;
   /** Unpacks a verified runtime archive into a directory (tests substitute it). */
-  extractArchive?: (archivePath: string, targetDir: string) => void;
+  extractArchive?: (archivePath: string, targetDir: string) => void | Promise<void>;
   /** Longest a download may go without receiving a byte before it is abandoned (resumable). */
   downloadStallMs?: number;
   /** Longest the checksum pass over the model file may take. */
@@ -554,7 +554,7 @@ async function installRuntime(
   runtimeDir: string,
   archive: PinnedRuntimeArchive,
   reporter: ProgressReporter,
-  extract: (archivePath: string, targetDir: string) => void,
+  extract: (archivePath: string, targetDir: string) => void | Promise<void>,
   stallMs: number,
   space: SpacePolicy,
 ): Promise<void> {
@@ -566,7 +566,7 @@ async function installRuntime(
       'Downloading the built-in model server', stallMs, space);
     reporter.set('verifying', 'Unpacking the built-in model server');
     try {
-      extract(archivePath, staging);
+      await extract(archivePath, staging);
     } catch (error) {
       if (isNoSpaceError(error)) {
         throw spaceShortfallError(space, archive.bytes * RUNTIME_UNPACK_FACTOR + space.headroomBytes,
@@ -595,16 +595,31 @@ async function installRuntime(
 /**
  * The archive is checksum-verified before this runs. The system `tar` keeps
  * the release's shared-library symlinks, which the server binary links against.
+ * Run as a child the worker waits on, never a synchronous spawn: unpacking
+ * held the worker's only thread, so the dashboard and /health went
+ * unanswered for the whole of a first install (#784).
  */
-function extractWithTar(archivePath: string, targetDir: string): void {
-  const result = spawnSync('tar', ['-xzf', archivePath, '-C', targetDir], {
-    stdio: ['ignore', 'ignore', 'pipe'],
-    timeout: EXTRACT_TIMEOUT_MS,
+function extractWithTar(archivePath: string, targetDir: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const child = spawn('tar', ['-xzf', archivePath, '-C', targetDir], { stdio: ['ignore', 'ignore', 'pipe'] });
+    let stderr = '';
+    child.stderr?.on('data', (chunk: Buffer) => {
+      if (stderr.length < 4_000) stderr += chunk.toString();
+    });
+    const timer = setTimeout(() => {
+      child.kill('SIGKILL');
+      reject(new Error(`tar did not finish within ${Math.round(EXTRACT_TIMEOUT_MS / 60_000)} min`));
+    }, EXTRACT_TIMEOUT_MS);
+    child.on('error', (error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
+    child.on('close', (status, signal) => {
+      clearTimeout(timer);
+      if (status === 0) resolve();
+      else reject(new Error(stderr.trim() || `tar exited with ${status ?? signal}`));
+    });
   });
-  if (result.error) throw result.error;
-  if (result.status !== 0) {
-    throw new Error(result.stderr?.toString().trim() || `tar exited with ${result.status ?? result.signal}`);
-  }
 }
 
 /** Relative path of the first regular file named `name`, at most two levels down. */
