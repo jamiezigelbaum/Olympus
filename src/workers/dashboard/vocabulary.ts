@@ -1889,6 +1889,8 @@ export const DASHBOARD_CHATGPT_PAGE_COPY = {
   },
   synced: 'Synced {when}',
   updated: 'Updated {when}',
+  /** A read ran out of time while the computer answered moments ago: busy, not gone; the page tries again by itself. */
+  busySlow: 'Olympus is busy. Trying again…',
   checkAgain: 'Check again',
   tryAgain: 'Try again',
   openOlympus: 'Open Olympus',
@@ -2263,8 +2265,8 @@ export const DASHBOARD_ARCHIVE_COPY = {
    */
   inSource: {
     listLabel: 'Imported archives',
-    importingLine: '{percent}% read · {items} from this archive so far',
-    importingLineNone: '{percent}% read',
+    importingLine: 'Reading your export: {percent}% · {items} so far. The bar above counts them as they become searchable.',
+    importingLineNone: 'Reading your export: {percent}%',
     importedLine: '{items} from this archive',
     importedWhen: ' · imported {when}',
     /** Appended to a count line when the source already had some of the archive's items. */
@@ -2414,6 +2416,8 @@ export const DASHBOARD_ARCHIVE_COPY = {
   removeConfirm: 'Remove {name}? Everything Olympus made from it is deleted. The file itself stays where it is.',
   /** An agent's request, waiting for the person. */
   requestLine: 'An agent asked to import {name} from {where}.',
+  /** Right after Import on an agent's request, until the import shows. */
+  startingLine: 'Starting to import {name}…',
   /** Under an agent's request: the whole path it acts on, with hidden characters written out. */
   fullPath: 'Full path: {path}',
   /** An agent's request to remove an archive; the archive's own name and folder. */

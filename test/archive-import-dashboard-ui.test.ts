@@ -1217,6 +1217,12 @@ describe('imports asked for', () => {
     await until(() => page.calls(ARCHIVE_APPROVE_TOOL_NAME).length > 0 && page.text().includes(fill(A.started, { name: REQUEST.name })));
     expect(page.calls(ARCHIVE_APPROVE_TOOL_NAME)).toEqual([{ name: ARCHIVE_APPROVE_TOOL_NAME, arguments: { request_id: REQUEST.id } }]);
     expect(page.text()).toContain(fill(A.started, { name: REQUEST.name }));
+    // The read after Import still lists the request as pending (the import
+    // has not shown yet): the row says it is starting, with nothing to press
+    // again (Sparta, 2026-11-04: it read as the same request for ~10 s).
+    await until(() => page.calls(DASHBOARD_TOOL_NAME).length > 1 && page.text().includes(fill(A.startingLine, { name: REQUEST.name })));
+    expect(page.text()).not.toContain(fill(A.requestLine, { name: REQUEST.name, where: REQUEST.where }));
+    expect(page.buttons().map((node) => node.textContent)).not.toContain(A.approve);
 
     answer = dashboard('archives-request', meta([], [{ ...REQUEST, origin: 'agent', status: 'pending' }]));
     const again = await mount({
