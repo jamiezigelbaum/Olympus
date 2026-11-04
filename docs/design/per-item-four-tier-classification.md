@@ -213,7 +213,7 @@ A classifier model change is an owner-approved, ledgered event.
 
 ### 2.5 Email scope picker (owner decision 2026-09-23)
 
-Email gets a connect-time scope picker, the equivalent of the Dropbox folder picker. Today a Gmail connect ingests the whole history with no picker. It pulls 200 messages per pass under a 5,000-request daily budget, and the only filter is a hidden `OLYMPUS_SOURCE_INDEX_GMAIL_QUERY` setting. The picker offers:
+Email gets a connect-time scope picker, the equivalent of the Dropbox folder picker. Today a Gmail connect ingests the whole history with no picker. It pulls 200 messages per pass under a 1,000,000-request daily budget (5,000 until 2026-11-04), and the only filter is a hidden `OLYMPUS_SOURCE_INDEX_GMAIL_QUERY` setting. The picker offers:
 
 - **Time window:** full content for the **last 2 years by default**. Older mail is indexed by metadata only, and can be upgraded later per label or sender.
 - **Gmail categories and labels:** include or skip each. Promotions and Social are skipped by default.
