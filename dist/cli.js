@@ -46,6 +46,18 @@ var __export = (target, all) => {
 var __esm = (fn, res) => () => (fn && (res = fn(fn = 0)), res);
 var __require = /* @__PURE__ */ createRequire(import.meta.url);
 
+// src/core/sqlite-statement-cache.ts
+import { createRequire as createRequire2 } from "node:module";
+var SQLITE_STATEMENT_CACHE_SIZE = 1000;
+var init_sqlite_statement_cache = __esm(() => {
+  if (typeof globalThis.Bun !== "undefined") {
+    const { Database } = createRequire2(import.meta.url)("bun:sqlite");
+    if ((Database.MAX_QUERY_CACHE_SIZE ?? 0) < SQLITE_STATEMENT_CACHE_SIZE) {
+      Database.MAX_QUERY_CACHE_SIZE = SQLITE_STATEMENT_CACHE_SIZE;
+    }
+  }
+});
+
 // src/core/privacy-language.ts
 var SENSITIVITY_TIER_LABELS, PRIVACY_PRESET_LABELS, PRIVATE_ANSWER_OPTIONS;
 var init_privacy_language = __esm(() => {
@@ -993,7 +1005,7 @@ var init_linux_desktop_entry = __esm(() => {
 import { execFileSync } from "node:child_process";
 import { closeSync as closeSync2, existsSync as existsSync3, mkdirSync as mkdirSync2, openSync as openSync2, readFileSync as readFileSync3 } from "node:fs";
 import { mkdir } from "node:fs/promises";
-import { createRequire as createRequire2 } from "node:module";
+import { createRequire as createRequire3 } from "node:module";
 import { dirname as dirname3 } from "node:path";
 async function withFileLease(targetPath, callback, options = {}) {
   const owner = await acquireFileLease(targetPath, normalizeOptions(options));
@@ -1384,7 +1396,7 @@ var init_file_lease = __esm(() => {
     acquireTimeoutMs: 1e4,
     pollIntervalMs: 25
   };
-  runtimeRequire = createRequire2(import.meta.url);
+  runtimeRequire = createRequire3(import.meta.url);
   FileLeaseBusyError = class FileLeaseBusyError extends Error {
     code = "file_lease_busy";
     targetPath;
@@ -13180,7 +13192,7 @@ function closeSqliteStore(db, options = {}) {
 
 // src/core/data-owner-lock.ts
 import { closeSync as closeSync8, constants as constants4, existsSync as existsSync11, mkdirSync as mkdirSync9, openSync as openSync8 } from "node:fs";
-import { createRequire as createRequire3 } from "node:module";
+import { createRequire as createRequire4 } from "node:module";
 import { constants as osConstants } from "node:os";
 import { dirname as dirname20 } from "node:path";
 function dataOwnerLockPath(env = process.env) {
@@ -13298,7 +13310,7 @@ function takeWorkerDataOwnerLock(env = process.env, options = {}) {
 var runtimeRequire2, LOCK_EX = 2, LOCK_NB = 4, LOCK_UN = 8, O_CLOEXEC, STOP_OLYMPUS_HINT = "olympus engine stop, or olympus worker stop if it runs as a worker service, or stop the OpenClaw Gateway that hosts it", WORKER_OWNER_LOCK_WAIT_MS = 1e4, WORKER_DATA_OWNER_BUSY_EXIT_CODE = 73, DataOwnerBusyError, library;
 var init_data_owner_lock = __esm(() => {
   init_olympus_layout();
-  runtimeRequire2 = createRequire3(import.meta.url);
+  runtimeRequire2 = createRequire4(import.meta.url);
   O_CLOEXEC = process.platform === "darwin" ? 16777216 : 524288;
   DataOwnerBusyError = class DataOwnerBusyError extends Error {
     code = "data_owner_busy";
@@ -23035,6 +23047,7 @@ function tierLedgerMigrations() {
 }
 var TIER_LEDGER_SCHEMA_VERSION = 10, DEFAULT_REJUDGE_SCAN_ROWS = 2000, TierLedgerGenerationConflictError, TierLedgerRaiseAbandonRefusedError, TierLedgerPurgedRollbackRefusedError, TierLedgerSecretsRollbackRefusedError, TIER_LEDGER_IDENTITY_FIELDS, TRUST_DOMAIN_RANK, STORED_NAMES_REASON = "metadata:names_from_store", STORED_NAMES_ASKED_REASON = "metadata:names_from_store:asked", TIER_CHECK = `IN ('public', 'private', 'secure', 'secrets')`;
 var init_tier_ledger = __esm(() => {
+  init_sqlite_statement_cache();
   init_sqlite_migrations();
   init_tier_classifier();
   TierLedgerGenerationConflictError = class TierLedgerGenerationConflictError extends Error {
@@ -32841,6 +32854,7 @@ var DEFAULT_MAX_CHUNK_CHARS = 4000, MAX_MAX_CHUNK_CHARS = 32000, MAX_SEARCH_RESU
     AND emb.content_hash = c.embedding_input_hash
 `, LocalConnectorStore, CHAT_RECENCY_LANE_LIMIT = 8, CHAT_RECENCY_WEIGHT = 0.25, CHAT_RECENCY_PIN_COUNT = 2, lexicalContentPreference, CONNECTOR_STORE_CONTENT_PRIVATE_GAP = "this item's contents are marked Private; only its name is in this tier.", CONNECTOR_STORE_NAMES_ONLY_SCOPE_GAP = "the owner set this item's folder to Names only; its name is searchable and its contents are not read.", CONNECTOR_STORE_COPY_ITEM_COLUMNS, CONNECTOR_STORE_CHILD_ITEM_COLUMNS, MAX_PASSAGES_PER_CANDIDATE = 3, PASSAGE_TIE_MARGIN = 0.03, CONNECTOR_STORE_PRIVATE_TIER_EMBEDDING_WITHHELD_REASON = "private_tier_requires_private_embedder", lastMediaCacheSweepMs = 0, reassertedMediaHolders, CONNECTOR_STORE_OWNED_SCHEMA_OBJECTS, CONNECTOR_STORE_V13_CHUNK_COLUMNS, CONNECTOR_STORE_REQUIRED_COLUMNS, CONNECTOR_STORE_EMBEDDING_MODEL_COLUMNS, CONNECTOR_STORE_V4_ITEM_COLUMNS, CONNECTOR_STORE_V5_ITEM_COLUMNS, CONNECTOR_STORE_V7_ITEM_COLUMNS, CONNECTOR_STORE_V9_ITEM_COLUMNS, CONNECTOR_STORE_V12_ITEM_COLUMNS, CONNECTOR_STORE_V15_ITEM_COLUMNS, CONNECTOR_STORE_ITEM_WRITE_CLAIM_COLUMNS, CONNECTOR_STORE_MEDIA_JUDGMENT_COLUMNS, LOCATOR_FOLD_SCAN_MAX_CANDIDATES = 50000, LOCAL_RELAXED_STOPWORDS, TRUST_RECONCILIATION_CURSOR_PATTERN;
 var init_local_index = __esm(() => {
+  init_sqlite_statement_cache();
   init_job_names();
   init_keyword_context();
   init_keyword_languages();
@@ -41462,7 +41476,7 @@ var init_store = __esm(() => {
 });
 
 // src/core/scope-safe-fs.ts
-import { createRequire as createRequire4 } from "node:module";
+import { createRequire as createRequire5 } from "node:module";
 import * as fs from "node:fs";
 import { posix } from "node:path";
 function sameScopeFileVersion(a, b) {
@@ -41984,7 +41998,7 @@ function joinRelative(dir, name) {
 }
 var runtimeRequire3, ScopeSafeError, SCOPE_FILE_MAX_RANGE_BYTES, ERRNO, SF_DATALESS = 1073741824, DT_DIR = 4, DT_REG = 8, DT_LNK = 10, RESOLVE_NO_XDEV = 1, RESOLVE_NO_SYMLINKS = 4, RESOLVE_BENEATH = 8, SYS_OPENAT2 = 437, O_CLOEXEC_LINUX = 524288, O_CLOEXEC_DARWIN = 16777216, cachedNative;
 var init_scope_safe_fs = __esm(() => {
-  runtimeRequire3 = createRequire4(import.meta.url);
+  runtimeRequire3 = createRequire5(import.meta.url);
   ScopeSafeError = class ScopeSafeError extends Error {
     code;
     errno;
@@ -60035,12 +60049,12 @@ var init_litert_runtime = __esm(() => {
 });
 
 // src/workers/source-index/built-in-embedding/runtime.ts
-import { createRequire as createRequire5 } from "node:module";
+import { createRequire as createRequire6 } from "node:module";
 import { join as join53 } from "node:path";
 function onnxRuntimeFromDirectory(runtimeDir) {
   return {
     async createSession(modelPath, options) {
-      const requireFromPack = createRequire5(join53(runtimeDir, "olympus-runtime.json"));
+      const requireFromPack = createRequire6(join53(runtimeDir, "olympus-runtime.json"));
       const ort = requireFromPack("onnxruntime-node");
       const session = await ort.InferenceSession.create(modelPath, {
         executionProviders: ["cpu"],
@@ -108875,7 +108889,7 @@ var init_engine_service = __esm(() => {
 // src/core/linux-engine-service.ts
 import { spawnSync as spawnSync15 } from "node:child_process";
 import { chmodSync as chmodSync28, closeSync as closeSync27, constants as constants14, copyFileSync, existsSync as existsSync69, fstatSync as fstatSync5, fsyncSync as fsyncSync7, ftruncateSync, lstatSync as lstatSync36, linkSync as linkSync3, mkdirSync as mkdirSync45, openSync as openSync26, readFileSync as readFileSync57, readlinkSync as readlinkSync4, readdirSync as readdirSync23, realpathSync as realpathSync19, renameSync as renameSync15, rmSync as rmSync30, rmdirSync as rmdirSync7, statSync as statSync34, symlinkSync as symlinkSync2, writeFileSync as writeFileSync17 } from "node:fs";
-import { createRequire as createRequire6 } from "node:module";
+import { createRequire as createRequire7 } from "node:module";
 import { basename as basename16, dirname as dirname74, join as join99, relative as relative15, resolve as resolve21, sep as sep17 } from "node:path";
 import { userInfo as userInfo2 } from "node:os";
 import { randomBytes as randomBytes18, createHash as createHash71, randomUUID as randomUUID25 } from "node:crypto";
@@ -110483,7 +110497,7 @@ var init_linux_engine_service = __esm(() => {
   init_engine_children();
   init_linux_secret_backend();
   init_worker_transport();
-  runtimeRequire4 = createRequire6(import.meta.url);
+  runtimeRequire4 = createRequire7(import.meta.url);
   heldLifecycleLocks = new Set;
   LEGACY_CONSULT_LEASE_FILES = ["consult.json.lock", "consult.json.lock.commit"];
 });
@@ -168874,7 +168888,7 @@ var init_locations = __esm(() => {
 });
 
 // src/workers/local-files/watch-hub.ts
-import { createRequire as createRequire7 } from "node:module";
+import { createRequire as createRequire8 } from "node:module";
 import { existsSync as existsSync90, readFileSync as readFileSync82 } from "node:fs";
 import { dirname as dirname92, join as join123 } from "node:path";
 function watchIgnoreGlobs(context2, extra = []) {
@@ -169095,7 +169109,7 @@ async function loadParcelWatcher(extraDirs = []) {
     if (!existsSync90(join123(candidate, "@parcel", "watcher")))
       continue;
     try {
-      const requireFrom = createRequire7(join123(dirname92(candidate), "package.json"));
+      const requireFrom = createRequire8(join123(dirname92(candidate), "package.json"));
       return unwrap(requireFrom(specifier));
     } catch (error2) {
       failures.push(error2 instanceof Error ? error2.message : String(error2));
@@ -215072,6 +215086,7 @@ var init_server5 = __esm(async () => {
 });
 
 // src/cli.ts
+init_sqlite_statement_cache();
 init_privacy_language();
 init_source_placement();
 init_linux_owner_bridge();

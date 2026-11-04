@@ -46,6 +46,18 @@ var __export = (target, all) => {
 var __esm = (fn, res) => () => (fn && (res = fn(fn = 0)), res);
 var __require = /* @__PURE__ */ createRequire(import.meta.url);
 
+// src/core/sqlite-statement-cache.ts
+import { createRequire as createRequire2 } from "node:module";
+var SQLITE_STATEMENT_CACHE_SIZE = 1000;
+var init_sqlite_statement_cache = __esm(() => {
+  if (typeof globalThis.Bun !== "undefined") {
+    const { Database } = createRequire2(import.meta.url)("bun:sqlite");
+    if ((Database.MAX_QUERY_CACHE_SIZE ?? 0) < SQLITE_STATEMENT_CACHE_SIZE) {
+      Database.MAX_QUERY_CACHE_SIZE = SQLITE_STATEMENT_CACHE_SIZE;
+    }
+  }
+});
+
 // src/workers/classification/tier-ledger-path.ts
 function tierLedgerPathForStore(storeDbPath) {
   if (storeDbPath === ":memory:")
@@ -699,7 +711,7 @@ var init_linux_desktop_entry = __esm(() => {
 import { execFileSync } from "node:child_process";
 import { closeSync as closeSync2, existsSync as existsSync2, mkdirSync as mkdirSync2, openSync as openSync2, readFileSync as readFileSync2 } from "node:fs";
 import { mkdir } from "node:fs/promises";
-import { createRequire as createRequire2 } from "node:module";
+import { createRequire as createRequire3 } from "node:module";
 import { dirname as dirname3 } from "node:path";
 async function withFileLease(targetPath, callback, options = {}) {
   const owner = await acquireFileLease(targetPath, normalizeOptions(options));
@@ -884,7 +896,7 @@ var init_file_lease = __esm(() => {
     acquireTimeoutMs: 1e4,
     pollIntervalMs: 25
   };
-  runtimeRequire = createRequire2(import.meta.url);
+  runtimeRequire = createRequire3(import.meta.url);
   FileLeaseBusyError = class FileLeaseBusyError extends Error {
     code = "file_lease_busy";
     targetPath;
@@ -6655,7 +6667,7 @@ var init_config = __esm(() => {
 
 // src/core/data-owner-lock.ts
 import { closeSync as closeSync6, constants as constants3, existsSync as existsSync8, mkdirSync as mkdirSync6, openSync as openSync6 } from "node:fs";
-import { createRequire as createRequire3 } from "node:module";
+import { createRequire as createRequire4 } from "node:module";
 import { constants as osConstants } from "node:os";
 import { dirname as dirname11 } from "node:path";
 function dataOwnerLockPath(env = process.env) {
@@ -6768,7 +6780,7 @@ function isPromiseLike(value) {
 var runtimeRequire2, LOCK_EX = 2, LOCK_NB = 4, LOCK_UN = 8, O_CLOEXEC, STOP_OLYMPUS_HINT = "olympus engine stop, or olympus worker stop if it runs as a worker service, or stop the OpenClaw Gateway that hosts it", DataOwnerBusyError, library;
 var init_data_owner_lock = __esm(() => {
   init_olympus_layout();
-  runtimeRequire2 = createRequire3(import.meta.url);
+  runtimeRequire2 = createRequire4(import.meta.url);
   O_CLOEXEC = process.platform === "darwin" ? 16777216 : 524288;
   DataOwnerBusyError = class DataOwnerBusyError extends Error {
     code = "data_owner_busy";
@@ -7080,7 +7092,7 @@ var init_engine_children = __esm(() => {
 });
 
 // src/core/linux-engine-service.ts
-import { createRequire as createRequire4 } from "node:module";
+import { createRequire as createRequire5 } from "node:module";
 var runtimeRequire3, heldLifecycleLocks;
 var init_linux_engine_service = __esm(() => {
   init_file_lease();
@@ -7093,7 +7105,7 @@ var init_linux_engine_service = __esm(() => {
   init_engine_children();
   init_linux_secret_backend();
   init_worker_transport();
-  runtimeRequire3 = createRequire4(import.meta.url);
+  runtimeRequire3 = createRequire5(import.meta.url);
   heldLifecycleLocks = new Set;
 });
 
@@ -18068,6 +18080,7 @@ function tierLedgerMigrations() {
 }
 var TIER_LEDGER_SCHEMA_VERSION = 10, DEFAULT_REJUDGE_SCAN_ROWS = 2000, TierLedgerGenerationConflictError, TierLedgerRaiseAbandonRefusedError, TierLedgerPurgedRollbackRefusedError, TierLedgerSecretsRollbackRefusedError, TIER_LEDGER_IDENTITY_FIELDS, TRUST_DOMAIN_RANK, STORED_NAMES_REASON = "metadata:names_from_store", STORED_NAMES_ASKED_REASON = "metadata:names_from_store:asked", TIER_CHECK = `IN ('public', 'private', 'secure', 'secrets')`;
 var init_tier_ledger = __esm(() => {
+  init_sqlite_statement_cache();
   init_sqlite_migrations();
   init_tier_classifier();
   TierLedgerGenerationConflictError = class TierLedgerGenerationConflictError extends Error {
@@ -24524,6 +24537,7 @@ var DEFAULT_MAX_CHUNK_CHARS = 4000, MAX_MAX_CHUNK_CHARS = 32000, MAX_SEARCH_RESU
     AND emb.content_hash = c.embedding_input_hash
 `, LocalConnectorStore, lexicalContentPreference, CONNECTOR_STORE_COPY_ITEM_COLUMNS, CONNECTOR_STORE_CHILD_ITEM_COLUMNS, MAX_PASSAGES_PER_CANDIDATE = 3, PASSAGE_TIE_MARGIN = 0.03, CONNECTOR_STORE_PRIVATE_TIER_EMBEDDING_WITHHELD_REASON = "private_tier_requires_private_embedder", lastMediaCacheSweepMs = 0, reassertedMediaHolders, CONNECTOR_STORE_OWNED_SCHEMA_OBJECTS, CONNECTOR_STORE_V13_CHUNK_COLUMNS, CONNECTOR_STORE_REQUIRED_COLUMNS, CONNECTOR_STORE_EMBEDDING_MODEL_COLUMNS, CONNECTOR_STORE_V4_ITEM_COLUMNS, CONNECTOR_STORE_V5_ITEM_COLUMNS, CONNECTOR_STORE_V7_ITEM_COLUMNS, CONNECTOR_STORE_V9_ITEM_COLUMNS, CONNECTOR_STORE_V12_ITEM_COLUMNS, CONNECTOR_STORE_V15_ITEM_COLUMNS, CONNECTOR_STORE_ITEM_WRITE_CLAIM_COLUMNS, CONNECTOR_STORE_MEDIA_JUDGMENT_COLUMNS, LOCATOR_FOLD_SCAN_MAX_CANDIDATES = 50000, LOCAL_RELAXED_STOPWORDS, TRUST_RECONCILIATION_CURSOR_PATTERN;
 var init_local_index = __esm(() => {
+  init_sqlite_statement_cache();
   init_job_names();
   init_keyword_context();
   init_keyword_languages();
@@ -32102,12 +32116,12 @@ var init_litert_runtime = __esm(() => {
 });
 
 // src/workers/source-index/built-in-embedding/runtime.ts
-import { createRequire as createRequire5 } from "node:module";
+import { createRequire as createRequire6 } from "node:module";
 import { join as join22 } from "node:path";
 function onnxRuntimeFromDirectory(runtimeDir) {
   return {
     async createSession(modelPath, options) {
-      const requireFromPack = createRequire5(join22(runtimeDir, "olympus-runtime.json"));
+      const requireFromPack = createRequire6(join22(runtimeDir, "olympus-runtime.json"));
       const ort = requireFromPack("onnxruntime-node");
       const session = await ort.InferenceSession.create(modelPath, {
         executionProviders: ["cpu"],
@@ -35611,10 +35625,10 @@ var init_tokenizer = __esm(() => {
 });
 
 // src/core/scope-safe-fs.ts
-import { createRequire as createRequire6 } from "node:module";
+import { createRequire as createRequire7 } from "node:module";
 var runtimeRequire4, SCOPE_FILE_MAX_RANGE_BYTES;
 var init_scope_safe_fs = __esm(() => {
-  runtimeRequire4 = createRequire6(import.meta.url);
+  runtimeRequire4 = createRequire7(import.meta.url);
   SCOPE_FILE_MAX_RANGE_BYTES = 64 * 1024 * 1024;
 });
 
@@ -65113,6 +65127,7 @@ var init_tier_migration = __esm(() => {
 });
 
 // scripts/source-embedding-drain.ts
+init_sqlite_statement_cache();
 init_source_placement();
 init_file_lease();
 init_atomic_file();
@@ -66829,7 +66844,7 @@ init_paths();
 init_scope();
 
 // src/workers/local-files/watch-hub.ts
-import { createRequire as createRequire7 } from "node:module";
+import { createRequire as createRequire8 } from "node:module";
 import { existsSync as existsSync23, readFileSync as readFileSync21 } from "node:fs";
 import { dirname as dirname32, join as join32 } from "node:path";
 
@@ -67023,7 +67038,7 @@ async function loadParcelWatcher(extraDirs = []) {
     if (!existsSync23(join32(candidate, "@parcel", "watcher")))
       continue;
     try {
-      const requireFrom = createRequire7(join32(dirname32(candidate), "package.json"));
+      const requireFrom = createRequire8(join32(dirname32(candidate), "package.json"));
       return unwrap(requireFrom(specifier));
     } catch (error) {
       failures.push(error instanceof Error ? error.message : String(error));

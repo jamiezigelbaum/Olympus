@@ -20,6 +20,7 @@
 // keys, content-free reason codes and version ids. Never a title, path,
 // sender, text or excerpt. The file is created owner-only (0600).
 
+import '../../core/sqlite-statement-cache.ts';
 import { Database } from 'bun:sqlite';
 import { chmodSync, closeSync, existsSync, mkdirSync, openSync, statSync } from 'node:fs';
 import { dirname } from 'node:path';
@@ -3214,11 +3215,6 @@ export class TierLedger {
   }
 
   /**
-   * Every item with a copy in this store in the given state. Paged by key
-   * internally, with no ceiling: a filter that silently stopped at N items
-   * would let the N+1st superseded copy be searched and counted.
-   */
-  /**
    * Changes whenever this ledger's database changes, from this connection or
    * another: lets a reader reuse what it derived from the ledger until then.
    */
@@ -3228,6 +3224,11 @@ export class TierLedger {
     return `${version.data_version}:${row.changes}`;
   }
 
+  /**
+   * Every item with a copy in this store in the given state. Paged by key
+   * internally, with no ceiling: a filter that silently stopped at N items
+   * would let the N+1st superseded copy be searched and counted.
+   */
   corpusCopyIdentities(
     corpusId: string,
     filter: 'superseded' | 'staged' | 'held' | 'metadata_layer' | 'metadata_layer_content_unread' | 'metadata_layer_settled_unreadable',
