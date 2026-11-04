@@ -911,6 +911,27 @@ class ConnectorStoreTierWriteRefusedError extends Error {
  */
 export const STATUS_COUNTS_MAX_AGE_MS = 5 * 60_000;
 
+// Identities looked up per step when the hidden-copy set is rebuilt in turns.
+const IDENTITY_LOOKUP_SLICE = 5_000;
+
+// A step generator run straight through, for a read that must be current.
+function runSteps<T>(steps: Generator<void, T>): T {
+  let step = steps.next();
+  while (!step.done) step = steps.next();
+  return step.value;
+}
+
+// The same steps with a turn before each one, so requests answer in between.
+async function runStepsInTurns<T>(steps: Generator<void, T>): Promise<T> {
+  await ingestionTurn();
+  let step = steps.next();
+  while (!step.done) {
+    await ingestionTurn();
+    step = steps.next();
+  }
+  return step.value;
+}
+
 interface TierLedgerHiddenItemPks {
   hidden: number[];
   held: number[];
@@ -3062,16 +3083,43 @@ export class LocalConnectorStore {
     // and always see the current set.
     const maxAgeMs = options.countsMaxAgeMs ?? 0;
     const counted = this.tierHiddenCountsMemo;
-    if (maxAgeMs > 0 && counted && Date.now() - counted.at < maxAgeMs) return counted.value;
-    const base = this.tierLedgerHiddenItemPks();
-    // A child whose parent is not served is hidden with the copies the ledger hides.
-    const children = this.hiddenChildItemPks();
-    const value = children.length === 0 ? base : { ...base, hidden: [...new Set([...base.hidden, ...children])] };
+    if (maxAgeMs > 0 && counted) {
+      // An older set is served while a new one is built in turns: a status
+      // caller never holds the worker's thread for the whole rebuild, which
+      // on a large tiered store took 10 s and more (Sparta, 2026-11-04: a
+      // status command froze the worker and the dashboard lost it).
+      if (Date.now() - counted.at >= maxAgeMs) this.refreshTierHiddenCountsInTurns();
+      return counted.value;
+    }
+    const value = this.withHiddenChildren(this.tierLedgerHiddenItemPks());
     this.tierHiddenCountsMemo = { at: Date.now(), value };
     return value;
   }
 
+  // A child whose parent is not served is hidden with the copies the ledger hides.
+  private withHiddenChildren(base: TierLedgerHiddenItemPks): TierLedgerHiddenItemPks {
+    const children = this.hiddenChildItemPks();
+    return children.length === 0 ? base : { ...base, hidden: [...new Set([...base.hidden, ...children])] };
+  }
+
   private tierHiddenCountsMemo: { at: number; value: TierLedgerHiddenItemPks } | undefined;
+  private tierHiddenCountsRefresh: Promise<void> | undefined;
+
+  /** Rebuilds the counts' hidden set with a turn between lookups; a failed rebuild keeps the older set. */
+  private refreshTierHiddenCountsInTurns(): Promise<void> {
+    this.tierHiddenCountsRefresh ??= (async () => {
+      try {
+        const base = await runStepsInTurns(this.tierLedgerHiddenSteps());
+        await ingestionTurn();
+        this.tierHiddenCountsMemo = { at: Date.now(), value: this.withHiddenChildren(base) };
+      } catch {
+        // A closed or busy store: the older set stands until the next ask.
+      } finally {
+        this.tierHiddenCountsRefresh = undefined;
+      }
+    })();
+    return this.tierHiddenCountsRefresh;
+  }
 
   private tierLedgerHiddenItemPks(): TierLedgerHiddenItemPks {
     // One status build asks for these several times back to back (counts,
@@ -3104,6 +3152,13 @@ export class LocalConnectorStore {
   }
 
   private computeTierLedgerHiddenItemPks(): TierLedgerHiddenItemPks {
+    return runSteps(this.tierLedgerHiddenSteps());
+  }
+
+  // The hidden-copy lookups, a slice of identities at a time: run straight
+  // through for a read that must be current, or a turn between slices for a
+  // status count (refreshTierHiddenCountsInTurns).
+  private *tierLedgerHiddenSteps(): Generator<void, TierLedgerHiddenItemPks> {
     const ledger = this.visibilityLedger();
     if (!ledger || !ledger.corpusHasCopies(this.corpusId)) {
       return { hidden: [], held: [], metadataLayer: [], metadataLayerContentUnread: [], moving: 0 };
@@ -3112,13 +3167,15 @@ export class LocalConnectorStore {
     const conversationOf = (identity: Identity): string => normalizeConversationId(identity.providerConversationId);
     const keyOf = (identity: Identity): string =>
       JSON.stringify([identity.provider, identity.accountScope, conversationOf(identity), identity.providerItemId]);
-    const pksFor = (identities: ReadonlyArray<Identity>): number[] =>
-      this.itemRowsForIdentities(identities, conversationOf).map((row) => row.item_pk);
+    const rowsFor = (identities: ReadonlyArray<Identity>) => this.itemRowsForIdentitiesSteps(identities, conversationOf);
+    const pksFor = function* (identities: ReadonlyArray<Identity>): Generator<void, number[]> {
+      return (yield* rowsFor(identities)).map((row) => row.item_pk);
+    };
     // A copy that serves only the names keeps any chunks it already had
     // (e.g. kept vectors after a split move) but never serves, counts or
     // embeds them.
     const metadataIdentities = ledger.corpusCopyIdentities(this.corpusId, 'metadata_layer');
-    const metadataRows = this.itemRowsForIdentities(metadataIdentities, conversationOf);
+    const metadataRows = yield* rowsFor(metadataIdentities);
     // Unread names copies are a subset of the names copies (same corpus, same
     // current names-only filter), so their rows are read off the lookup above
     // instead of a second lookup of nearly the same set: on a names-only
@@ -3131,17 +3188,20 @@ export class LocalConnectorStore {
     }
     const unreadIdentities = ledger.corpusCopyIdentities(this.corpusId, 'metadata_layer_content_unread');
     const unreadMissed = unreadIdentities.filter((identity) => !pksByKey.has(keyOf(identity)));
+    const hidden = yield* pksFor([
+      ...ledger.corpusCopyIdentities(this.corpusId, 'superseded'),
+      ...ledger.corpusCopyIdentities(this.corpusId, 'staged'),
+    ]);
+    const held = yield* pksFor(ledger.corpusCopyIdentities(this.corpusId, 'held'));
+    // Only if the ledger changed between the two reads.
+    const missed = yield* pksFor(unreadMissed);
     return {
-      hidden: pksFor([
-        ...ledger.corpusCopyIdentities(this.corpusId, 'superseded'),
-        ...ledger.corpusCopyIdentities(this.corpusId, 'staged'),
-      ]),
-      held: pksFor(ledger.corpusCopyIdentities(this.corpusId, 'held')),
+      hidden,
+      held,
       metadataLayer: metadataRows.map((row) => row.item_pk),
       metadataLayerContentUnread: [
         ...unreadIdentities.flatMap((identity) => pksByKey.get(keyOf(identity)) ?? []),
-        // Only if the ledger changed between the two reads.
-        ...pksFor(unreadMissed),
+        ...missed,
       ],
       moving: ledger.corpusCopyCounts(this.corpusId).moving,
     };
@@ -11878,11 +11938,36 @@ export class LocalConnectorStore {
     const key = JSON.stringify(scope ?? null);
     const memos = this.settledUnreadableCountMemo ??= new Map();
     const memo = memos.get(key);
-    if (maxAgeMs > 0 && memo && Date.now() - memo.at < maxAgeMs) return memo.count;
-    const count = this.settledUnreadableRows(scope, { withoutSecretsOverrides: true }).length;
+    if (maxAgeMs > 0 && memo) {
+      // As the hidden-copy set: an older count is served while a new one is
+      // counted in turns (refreshTierHiddenCountsInTurns).
+      if (Date.now() - memo.at >= maxAgeMs) this.refreshSettledUnreadableCountInTurns(key, scope);
+      return memo.count;
+    }
+    const count = runSteps(this.settledUnreadableRowsSteps(scope, { withoutSecretsOverrides: true })).length;
     if (memos.size > 32) memos.clear();
     memos.set(key, { at: Date.now(), count });
     return count;
+  }
+
+  private settledUnreadableCountRefresh: Set<string> | undefined;
+
+  private refreshSettledUnreadableCountInTurns(key: string, scope: ConnectorStoreStatusScope | undefined): void {
+    const running = this.settledUnreadableCountRefresh ??= new Set();
+    if (running.has(key)) return;
+    running.add(key);
+    void (async () => {
+      try {
+        const count = (await runStepsInTurns(this.settledUnreadableRowsSteps(scope, { withoutSecretsOverrides: true }))).length;
+        const memos = this.settledUnreadableCountMemo ??= new Map();
+        if (memos.size > 32) memos.clear();
+        memos.set(key, { at: Date.now(), count });
+      } catch {
+        // A closed or busy store: the older count stands until the next ask.
+      } finally {
+        running.delete(key);
+      }
+    })();
   }
 
   // Made on first use: a class-field initializer is a load-time side effect
@@ -11914,6 +11999,13 @@ export class LocalConnectorStore {
     scope: ConnectorStoreStatusScope | undefined,
     options: { withoutSecretsOverrides?: boolean } = {},
   ): Array<{ identity: TierLedgerIdentity; row: { local_item_id: string; title: string | null; source_version: string | null } }> {
+    return runSteps(this.settledUnreadableRowsSteps(scope, options));
+  }
+
+  private *settledUnreadableRowsSteps(
+    scope: ConnectorStoreStatusScope | undefined,
+    options: { withoutSecretsOverrides?: boolean } = {},
+  ): Generator<void, Array<{ identity: TierLedgerIdentity; row: { local_item_id: string; title: string | null; source_version: string | null } }>> {
     if (scope?.itemsAllowed === false || scope?.contentAllowed === false) return [];
     const ledger = this.visibilityLedger();
     if (!ledger) return [];
@@ -11923,10 +12015,11 @@ export class LocalConnectorStore {
     const filters = connectorStoreFilterSql(scope?.contentFilters ?? scope?.itemFilters);
     const account = normalizeOptionalAccountScope(scope?.accountScope);
     const ended = this.extractionEnded;
-    return this.itemRowsForIdentities(identities, (identity) => identity.providerConversationId ?? '', {
+    const rows = yield* this.itemRowsForIdentitiesSteps(identities, (identity) => identity.providerConversationId ?? '', {
       sql: `${account ? 'AND i.account_scope = ?' : ''} ${filters.sql}`,
       params: [...(account ? [account] : []), ...filters.params],
-    }).map((row) => ({ identity: identities[row.idx]!, row }))
+    });
+    return rows.map((row) => ({ identity: identities[row.idx]!, row }))
       .filter(({ identity }) => !ended || ended(identity));
   }
 
@@ -11940,6 +12033,24 @@ export class LocalConnectorStore {
    * expression there left SQLite scanning every item per identity
    * (2026-11-03). `idx` is the identity's position in the input.
    */
+  // The same rows as itemRowsForIdentities, looked up a slice at a time with a
+  // step between slices; `idx` still indexes the whole list.
+  private *itemRowsForIdentitiesSteps<T extends { provider: string; accountScope: string; providerItemId: string }>(
+    identities: readonly T[],
+    conversationOf: (identity: T) => string,
+    extra: { sql: string; params: readonly string[] } = { sql: '', params: [] },
+  ): Generator<void, Array<{ idx: number; item_pk: number; local_item_id: string; title: string | null; source_version: string | null }>> {
+    const out: Array<{ idx: number; item_pk: number; local_item_id: string; title: string | null; source_version: string | null }> = [];
+    for (let offset = 0; offset < identities.length; offset += IDENTITY_LOOKUP_SLICE) {
+      if (offset > 0) yield;
+      for (const row of this.itemRowsForIdentities(identities.slice(offset, offset + IDENTITY_LOOKUP_SLICE), conversationOf, extra)) {
+        row.idx += offset;
+        out.push(row);
+      }
+    }
+    return out;
+  }
+
   private itemRowsForIdentities<T extends { provider: string; accountScope: string; providerItemId: string }>(
     identities: readonly T[],
     conversationOf: (identity: T) => string,
