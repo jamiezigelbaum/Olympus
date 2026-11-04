@@ -236,13 +236,18 @@ describe('counts off the request path', () => {
       now: () => clock,
       turn: () => { turns += 1; return new Promise<void>((resolve) => setTimeout(resolve, 0)); },
     });
-    const settle = () => new Promise((resolve) => setTimeout(resolve, 20));
+    // The recount runs in timer turns; a loaded runner can take longer than any fixed wait (CI, 2026-11-04: 200 of 250 after 20 ms).
+    const settleUntil = async (done: () => boolean) => {
+      for (const deadline = Date.now() + 5_000; !done() && Date.now() < deadline;) await new Promise((resolve) => setTimeout(resolve, 5));
+      // The count is published right after the last verdict.
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    };
 
     // No count yet: nothing asked on the request, one recount scheduled.
     expect(files.recheck(LANE.corpusId)).toBeUndefined();
     expect(files.recheck(LANE.corpusId)).toBeUndefined();
     expect(asked).toBe(0);
-    await settle();
+    await settleUntil(() => asked >= 250);
     expect(asked).toBe(250);
     expect(turns).toBe(2);
     expect(files.recheck(LANE.corpusId)).toEqual({ unreadable: 250, blocked: 0 });
@@ -252,7 +257,7 @@ describe('counts off the request path', () => {
     clock += 60_000;
     expect(files.recheck(LANE.corpusId)).toEqual({ unreadable: 250, blocked: 0 });
     expect(asked).toBe(250);
-    await settle();
+    await settleUntil(() => asked >= 500);
     expect(files.recheck(LANE.corpusId)).toEqual({ unreadable: 0, blocked: 250 });
     // Names still ask each file now.
     expect(files.names([LANE.corpusId], 5)).toEqual([]);
