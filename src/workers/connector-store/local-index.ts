@@ -3062,27 +3062,26 @@ export class LocalConnectorStore {
     // embedding backlog, unread files), and on a large tiered store each ask
     // is tens of thousands of lookups (Sparta, 2026-11-03: most of a 5-15 s
     // freeze). They depend only on this store's rows and the ledger, so they
-    // are reused within the same synchronous turn while neither has changed.
+    // are reused until either changes (any write on this connection or a
+    // commit from another), or the store is bound to another ledger.
     const marker = this.tierLedgerHiddenMemoMarker();
-    if (marker !== undefined && this.tierLedgerHiddenMemo?.marker === marker) return this.tierLedgerHiddenMemo.value;
+    const memo = this.tierLedgerHiddenMemo;
+    if (marker && memo && memo.ledger === marker.ledger && memo.marker === marker.value) return memo.value;
     const value = this.computeTierLedgerHiddenItemPks();
-    if (marker !== undefined) {
-      this.tierLedgerHiddenMemo = { marker, value };
-      queueMicrotask(() => { this.tierLedgerHiddenMemo = undefined; });
-    }
+    this.tierLedgerHiddenMemo = marker ? { ledger: marker.ledger, marker: marker.value, value } : undefined;
     return value;
   }
 
-  private tierLedgerHiddenMemo: { marker: string; value: TierLedgerHiddenItemPks } | undefined;
+  private tierLedgerHiddenMemo: { ledger: TierLedger; marker: string; value: TierLedgerHiddenItemPks } | undefined;
 
   /** Changes whenever this store's database or its ledger's changes. */
-  private tierLedgerHiddenMemoMarker(): string | undefined {
+  private tierLedgerHiddenMemoMarker(): { ledger: TierLedger; value: string } | undefined {
     try {
       const ledger = this.visibilityLedger();
       if (!ledger) return undefined;
       const own = this.db.query('SELECT total_changes() AS changes').get() as { changes: number };
       const version = this.db.query('PRAGMA data_version').get() as { data_version: number };
-      return `${version.data_version}:${own.changes}:${ledger.changeMarker()}`;
+      return { ledger, value: `${version.data_version}:${own.changes}:${ledger.changeMarker()}` };
     } catch {
       return undefined;
     }

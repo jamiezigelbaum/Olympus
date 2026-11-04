@@ -33232,15 +33232,11 @@ var init_local_index = __esm(() => {
     }
     tierLedgerHiddenItemPks() {
       const marker = this.tierLedgerHiddenMemoMarker();
-      if (marker !== undefined && this.tierLedgerHiddenMemo?.marker === marker)
-        return this.tierLedgerHiddenMemo.value;
+      const memo = this.tierLedgerHiddenMemo;
+      if (marker && memo && memo.ledger === marker.ledger && memo.marker === marker.value)
+        return memo.value;
       const value = this.computeTierLedgerHiddenItemPks();
-      if (marker !== undefined) {
-        this.tierLedgerHiddenMemo = { marker, value };
-        queueMicrotask(() => {
-          this.tierLedgerHiddenMemo = undefined;
-        });
-      }
+      this.tierLedgerHiddenMemo = marker ? { ledger: marker.ledger, marker: marker.value, value } : undefined;
       return value;
     }
     tierLedgerHiddenMemo;
@@ -33251,7 +33247,7 @@ var init_local_index = __esm(() => {
           return;
         const own3 = this.db.query("SELECT total_changes() AS changes").get();
         const version = this.db.query("PRAGMA data_version").get();
-        return `${version.data_version}:${own3.changes}:${ledger.changeMarker()}`;
+        return { ledger, value: `${version.data_version}:${own3.changes}:${ledger.changeMarker()}` };
       } catch {
         return;
       }
@@ -62441,7 +62437,7 @@ class TieredStoreSet {
       const store = this.store(domain, { create: true });
       legRuns.push(await this.runLeg(domain, store, traversal, { ...sync, tierRouting: run }, embed));
     }
-    run.finalize();
+    await run.finalize();
     run.counts.itemsUnstored += this.unstoredAccepted(traversal.accepted(), (item) => run.plannedKind(item), (item) => run.alreadyOwed(item));
     const cursor = legRuns[0]?.sync.cursor;
     const unstored = run.counts.itemsUnstored > 0;
@@ -62468,7 +62464,7 @@ class TieredStoreSet {
         throw new Error(`No ${entry.trustDomain} leg in this tiered store set.`);
       run.legOptions.set(store.corpusId, entry.sync ?? {});
       legRuns.push(await this.runLeg(entry.trustDomain, store, entry.connector, { ...entry.sync, tierRouting: run }));
-      run.finalize();
+      await run.finalize();
     }
     return tieredRun(legRuns, run.counts, undefined);
   }
@@ -63011,17 +63007,21 @@ class TieredRoutingRun {
       connectorId
     }, run, settle);
   }
-  finalize() {
+  async finalize() {
     for (const { item, domains, text: text2 } of this.pendingWithdrawals.values()) {
+      await ingestionTurn();
       this.set.withdrawCopies(item, domains);
       for (const domain of text2)
         this.set.store(domain)?.stripCopyContent(item.identity);
     }
     this.pendingWithdrawals.clear();
-    for (const identity2 of this.copyRemovals.values())
+    for (const identity2 of this.copyRemovals.values()) {
+      await ingestionTurn();
       this.set.ledger.removeCopies(identity2);
+    }
     this.copyRemovals.clear();
     for (const [key2, identity2] of this.intents) {
+      await ingestionTurn();
       const intent = this.set.ledger.writeIntent(identity2);
       if (this.emptied.has(key2))
         for (const domain of TIER_DOMAIN_ORDER)
@@ -63394,6 +63394,7 @@ function handoffConnector(source, item) {
 }
 var LOWER_CONTENT_REPAIR_INTERVAL_MS, TIER_DOMAIN_ORDER, TIER_KEY_TRUST_DOMAIN, SECRET_LOCATION_DOMAIN = "secure_local", TIERED_STORE_SET_HANDOFF_CONNECTOR_ID = "tiered_store_set_handoff";
 var init_tiered_store_set = __esm(() => {
+  init_control_path_headroom();
   init_types();
   init_engine();
   init_tier_classifier();

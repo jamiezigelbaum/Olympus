@@ -169,7 +169,7 @@ describe('the set ledger governs every handle, and its loss fails closed', () =>
     }
   });
 
-  test('one turn of status reads reuses the hidden copies until the store or ledger changes', async () => {
+  test('status reads reuse the hidden copies until the store or ledger changes', async () => {
     const dir = workspace();
     const tiered = await raised(dir);
     const store = tiered.stores.internal!;
@@ -191,8 +191,11 @@ describe('the set ledger governs every handle, and its loss fails closed', () =>
       // A ledger write in the same turn is seen at once.
       ledger.recordDecision(identityOf('unrelated'), ledger.getCurrent(identityOf('garden'))! as unknown as Parameters<typeof ledger.recordDecision>[1]);
       expect(statusReads()).toBe(fresh);
-      // The next turn reads afresh.
-      await Promise.resolve();
+      // A later turn with nothing changed still reuses them.
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(statusReads()).toBe(reused);
+      // A write to the store itself is seen at once.
+      store.advanceItemVersion(identityOf('garden'));
       expect(statusReads()).toBe(fresh);
     } finally {
       ledger.corpusCopyIdentities = real;

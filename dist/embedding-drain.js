@@ -24915,15 +24915,11 @@ var init_local_index = __esm(() => {
     }
     tierLedgerHiddenItemPks() {
       const marker = this.tierLedgerHiddenMemoMarker();
-      if (marker !== undefined && this.tierLedgerHiddenMemo?.marker === marker)
-        return this.tierLedgerHiddenMemo.value;
+      const memo = this.tierLedgerHiddenMemo;
+      if (marker && memo && memo.ledger === marker.ledger && memo.marker === marker.value)
+        return memo.value;
       const value = this.computeTierLedgerHiddenItemPks();
-      if (marker !== undefined) {
-        this.tierLedgerHiddenMemo = { marker, value };
-        queueMicrotask(() => {
-          this.tierLedgerHiddenMemo = undefined;
-        });
-      }
+      this.tierLedgerHiddenMemo = marker ? { ledger: marker.ledger, marker: marker.value, value } : undefined;
       return value;
     }
     tierLedgerHiddenMemo;
@@ -24934,7 +24930,7 @@ var init_local_index = __esm(() => {
           return;
         const own3 = this.db.query("SELECT total_changes() AS changes").get();
         const version = this.db.query("PRAGMA data_version").get();
-        return `${version.data_version}:${own3.changes}:${ledger.changeMarker()}`;
+        return { ledger, value: `${version.data_version}:${own3.changes}:${ledger.changeMarker()}` };
       } catch {
         return;
       }
@@ -33640,6 +33636,7 @@ var init_tier_media_judgment_sweep = __esm(() => {
 // src/workers/connector-store/tiered-store-set.ts
 var LOWER_CONTENT_REPAIR_INTERVAL_MS;
 var init_tiered_store_set = __esm(() => {
+  init_control_path_headroom();
   init_types();
   init_engine();
   init_tier_classifier();
