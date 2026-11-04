@@ -12021,7 +12021,8 @@ export class LocalConnectorStore {
       // read: the archive's Not imported list says so, once, for all of them.
       // Listing each as "can't be read" made thousands of rows of one fact
       // (Sparta, 2026-11-04: 5,453 Telegram photos and videos).
-      sql: `AND COALESCE(i.bytes_available, 1) <> 0 ${account ? 'AND i.account_scope = ?' : ''} ${filters.sql}`,
+      // (A read-only store from before schema v15 has no such column, and no such children.)
+      sql: `${this.childItemColumnsPresent ? 'AND COALESCE(i.bytes_available, 1) <> 0' : ''} ${account ? 'AND i.account_scope = ?' : ''} ${filters.sql}`,
       params: [...(account ? [account] : []), ...filters.params],
     });
     return rows.map((row) => ({ identity: identities[row.idx]!, row }))

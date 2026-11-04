@@ -38718,7 +38718,7 @@ var init_local_index = __esm(() => {
       const account = normalizeOptionalAccountScope(scope?.accountScope);
       const ended = this.extractionEnded;
       const rows = yield* this.itemRowsForIdentitiesSteps(identities, (identity2) => identity2.providerConversationId ?? "", {
-        sql: `AND COALESCE(i.bytes_available, 1) <> 0 ${account ? "AND i.account_scope = ?" : ""} ${filters.sql}`,
+        sql: `${this.childItemColumnsPresent ? "AND COALESCE(i.bytes_available, 1) <> 0" : ""} ${account ? "AND i.account_scope = ?" : ""} ${filters.sql}`,
         params: [...account ? [account] : [], ...filters.params]
       });
       return rows.map((row) => ({ identity: identities[row.idx], row })).filter(({ identity: identity2 }) => !ended || ended(identity2));
