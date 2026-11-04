@@ -196,6 +196,7 @@ export function createLocalModelActivity() {
     // Gather simultaneous dispatches before choosing owner-first.
     queueMicrotask(pump);
   });
+  const taggedRunning = new Map<string, number>();
   const resources = new Map<string, ReturnType<typeof createAnswerActivity>>();
   const busyListeners = new Map<string, Set<() => void>>();
   const get = (key: string) => {
@@ -212,6 +213,8 @@ export function createLocalModelActivity() {
   };
   return {
     busy: (key: string) => get(key).busy,
+    // Busy with calls other than the ones tracked under `tag`.
+    busyExcept: (key: string, tag: string) => get(key).inFlight > (taggedRunning.get(`${key}\u0000${tag}`) ?? 0),
     run: <T>(key: string, work: () => Promise<T>) => get(key).run(work),
     onBusy(key: string, listener: () => void) {
       const listeners = busyListeners.get(key) ?? new Set<() => void>();
@@ -222,11 +225,23 @@ export function createLocalModelActivity() {
     onIdle: (key: string, listener: () => void) => get(key).onInteractiveIdle(listener),
     // `concurrency` lets this caller's calls share the resource with up to that
     // many in flight (default 1); owner work is still started first.
-    track<T extends import('../core/analyst.ts').AnalystModel>(key: string, model: T, options: { serialize?: boolean; concurrency?: number } = {}): T {
+    // `tag` names the caller's own calls, so `busyExcept` can tell whether
+    // anyone else holds the resource (a caller never yields to itself).
+    track<T extends import('../core/analyst.ts').AnalystModel>(key: string, model: T, options: { serialize?: boolean; concurrency?: number; tag?: string } = {}): T {
       return { ...model, complete: request => {
         const guards = localInferenceGuards?.getStore() ?? [];
         const run = options.serialize === false ? <R>(work: () => Promise<R>) => get(key).run(work) : <R>(work: () => Promise<R>) => dispatch(key, work, options.concurrency ?? 1);
-        return run(async () => {
+        const tagged = <R>(work: () => Promise<R>): (() => Promise<R>) => {
+          const tag = options.tag;
+          if (tag === undefined) return work;
+          const tagKey = `${key}\u0000${tag}`;
+          // Counted inside the lease, so the count never exceeds the leases held.
+          return async () => {
+            taggedRunning.set(tagKey, (taggedRunning.get(tagKey) ?? 0) + 1);
+            try { return await work(); } finally { taggedRunning.set(tagKey, (taggedRunning.get(tagKey) ?? 1) - 1); }
+          };
+        };
+        return run(tagged(async () => {
           request.signal?.throwIfAborted();
           for (const guard of guards) {
             try { await guard(); } catch (error) {
@@ -236,7 +251,7 @@ export function createLocalModelActivity() {
           }
           request.signal?.throwIfAborted();
           return model.complete(request);
-        });
+        }));
       } };
     },
   };

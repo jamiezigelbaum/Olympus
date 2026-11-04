@@ -134,3 +134,27 @@ test('a caller with concurrency N runs up to N calls at once, and the owner stil
   await Promise.all([...calls, ownerCall]);
   expect(peak).toBe(3);
 });
+
+test('busyExcept ignores the caller\'s own tagged calls and still sees anyone else\'s', async () => {
+  const activity = createLocalModelActivity();
+  const release: Array<() => void> = [];
+  const model = { complete: async (_request: { prompt: string }) => {
+    await new Promise<void>(resolve => release.push(resolve));
+    return { text: '', modelId: 'fixture' };
+  } };
+  const sorting = activity.track('local', model, { concurrency: 2, tag: 'sorter' });
+  const other = activity.track('local', model, { serialize: false });
+  const request = { system: '', prompt: 'x', localOnly: true };
+  const tick = () => new Promise(resolve => setTimeout(resolve, 0));
+  const a = runClassificationInference(() => sorting.complete(request));
+  const b = runClassificationInference(() => sorting.complete(request));
+  await tick();
+  expect(activity.busy('local')).toBe(true);
+  expect(activity.busyExcept('local', 'sorter')).toBe(false);
+  const c = other.complete(request);
+  await tick();
+  expect(activity.busyExcept('local', 'sorter')).toBe(true);
+  while (release.length > 0) { release.shift()!(); await tick(); }
+  await Promise.all([a, b, c]);
+  expect(activity.busyExcept('local', 'sorter')).toBe(false);
+});
