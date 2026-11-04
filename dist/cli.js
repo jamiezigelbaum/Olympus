@@ -189038,6 +189038,7 @@ async function runSnifferPass(options) {
   const promptVersion = options.promptVersion ?? SNIFFER_PROMPT_VERSION;
   const id = snifferId(options.lane, promptVersion);
   const maxCallsPerPass = Math.max(0, Math.floor(options.maxCallsPerPass ?? Number.MAX_SAFE_INTEGER));
+  const concurrency = Math.max(1, Math.min(SNIFFER_MAX_CONCURRENT_CALLS, Math.floor(options.concurrentCalls ?? 1)));
   const monotonicNow = options.monotonicNow ?? (() => performance.now());
   const deadline = monotonicNow() + (options.passTimeMs ?? DEFAULT_SNIFFER_PASS_TIME_MS);
   const report = {
@@ -189218,107 +189219,110 @@ async function runSnifferPass(options) {
   let consecutiveTransportFailures = 0;
   const pending = [...work.metadata, ...work.content].sort(compareRecent);
   let dispatches = options.targets.reduce((total, target) => total + target.sniffer.dispatchCount(), 0);
-  while (pending.length > 0) {
-    const aged = pending.filter((item) => dispatches % 5 === 4 && item.target.sniffer.clockMs() - Date.parse(item.question.queuedAt) >= 5 * 60000).sort((a, b) => a.question.queuedAt.localeCompare(b.question.queuedAt) || a.question.sequence - b.question.sequence);
-    let next = aged[0] ?? nextInTurn(pending, options.targets, dispatches);
-    if (next.question.pass === "content")
-      next = pending.find((item) => item.question.pass === "metadata" && item.target === next.target && tierLedgerIdentityKey(item.question) === tierLedgerIdentityKey(next.question)) ?? next;
-    pending.splice(pending.indexOf(next), 1);
-    const pass = next.question.pass;
-    if (!stillOpen(next.target, next.question)) {
-      if (!midMove(next.target, next.question)) {
-        next.target.sniffer.deleteQuestion(next.question, pass, next.question.materialHash);
-        report.staleDropped += 1;
+  const ask = async () => {
+    while (pending.length > 0 && report.stoppedBy === undefined) {
+      const aged = pending.filter((item) => dispatches % 5 === 4 && item.target.sniffer.clockMs() - Date.parse(item.question.queuedAt) >= 5 * 60000).sort((a, b) => a.question.queuedAt.localeCompare(b.question.queuedAt) || a.question.sequence - b.question.sequence);
+      let next = aged[0] ?? nextInTurn(pending, options.targets, dispatches);
+      if (next.question.pass === "content")
+        next = pending.find((item) => item.question.pass === "metadata" && item.target === next.target && tierLedgerIdentityKey(item.question) === tierLedgerIdentityKey(next.question)) ?? next;
+      pending.splice(pending.indexOf(next), 1);
+      const pass = next.question.pass;
+      if (!stillOpen(next.target, next.question)) {
+        if (!midMove(next.target, next.question)) {
+          next.target.sniffer.deleteQuestion(next.question, pass, next.question.materialHash);
+          report.staleDropped += 1;
+        }
+        continue;
       }
-      continue;
-    }
-    if (!screenQuestion(next.target, next.question))
-      continue;
-    const group = [next];
-    for (let i2 = pending.length - 1;i2 >= 0; i2--) {
-      const item = pending[i2];
-      if (item.question.pass === pass && item.question.materialHash === next.question.materialHash && item.question.mapRevision === next.question.mapRevision && stillOpen(item.target, item.question) && screenQuestion(item.target, item.question)) {
-        group.push(item);
-        pending.splice(i2, 1);
+      if (!screenQuestion(next.target, next.question))
+        continue;
+      const group = [next];
+      for (let i2 = pending.length - 1;i2 >= 0; i2--) {
+        const item = pending[i2];
+        if (item.question.pass === pass && item.question.materialHash === next.question.materialHash && item.question.mapRevision === next.question.mapRevision && stillOpen(item.target, item.question) && screenQuestion(item.target, item.question)) {
+          group.push(item);
+          pending.splice(i2, 1);
+        }
       }
-    }
-    const batch = [group];
-    const stop = stopReason(options, report, maxCallsPerPass, monotonicNow() >= deadline);
-    if (stop) {
-      report.stoppedBy = stop;
-      return finish(report);
-    }
-    assertSnifferProfileAllowed(options.lane.profileId, options.lane.profile);
-    const prompt = buildSnifferBatchPrompt(pass, batch.map((group2, index) => ({ i: index + 1, material: snifferMaterialForModel(group2[0].question.material) })), options.ownerContext);
-    next.target.sniffer.recordDispatch();
-    dispatches += 1;
-    for (const item of group)
-      report.maxQueueWaitMs = Math.max(report.maxQueueWaitMs, item.target.sniffer.clockMs() - Date.parse(item.question.queuedAt));
-    const callStarted = monotonicNow();
-    report.calls += 1;
-    report.itemsAsked += batch.length;
-    report.promptChars += SNIFFER_SYSTEM_PROMPT.length + prompt.length;
-    let text4;
-    try {
-      const completion = await options.model.complete({
-        system: SNIFFER_SYSTEM_PROMPT,
-        prompt,
-        localOnly: true,
-        responseSchema: SNIFFER_RESPONSE_SCHEMA,
-        maxOutputChars: batch.length * OUTPUT_CHARS_PER_ITEM + 200,
-        ...options.signal ? { signal: options.signal } : {}
-      });
-      text4 = completion.text;
-    } catch {
+      const batch = [group];
+      const stop = stopReason(options, report, maxCallsPerPass, monotonicNow() >= deadline);
+      if (stop) {
+        report.stoppedBy = stop;
+        return;
+      }
+      assertSnifferProfileAllowed(options.lane.profileId, options.lane.profile);
+      const prompt = buildSnifferBatchPrompt(pass, batch.map((group2, index) => ({ i: index + 1, material: snifferMaterialForModel(group2[0].question.material) })), options.ownerContext);
+      next.target.sniffer.recordDispatch();
+      dispatches += 1;
+      for (const item of group)
+        report.maxQueueWaitMs = Math.max(report.maxQueueWaitMs, item.target.sniffer.clockMs() - Date.parse(item.question.queuedAt));
+      const callStarted = monotonicNow();
+      report.calls += 1;
+      report.itemsAsked += batch.length;
+      report.promptChars += SNIFFER_SYSTEM_PROMPT.length + prompt.length;
+      let text4;
+      try {
+        const completion = await options.model.complete({
+          system: SNIFFER_SYSTEM_PROMPT,
+          prompt,
+          localOnly: true,
+          responseSchema: SNIFFER_RESPONSE_SCHEMA,
+          maxOutputChars: batch.length * OUTPUT_CHARS_PER_ITEM + 200,
+          ...options.signal ? { signal: options.signal } : {}
+        });
+        text4 = completion.text;
+      } catch {
+        if (options.signal?.aborted) {
+          report.stoppedBy = "preempted";
+          return;
+        }
+        report.failedCalls += 1;
+        consecutiveTransportFailures += 1;
+        if (consecutiveTransportFailures >= MAX_CONSECUTIVE_TRANSPORT_FAILURES) {
+          report.stoppedBy = "transport_failures";
+          return;
+        }
+        continue;
+      } finally {
+        report.callMs += Math.max(0, monotonicNow() - callStarted);
+      }
       if (options.signal?.aborted) {
         report.stoppedBy = "preempted";
-        return finish(report);
+        return;
       }
-      report.failedCalls += 1;
-      consecutiveTransportFailures += 1;
-      if (consecutiveTransportFailures >= MAX_CONSECUTIVE_TRANSPORT_FAILURES) {
-        report.stoppedBy = "transport_failures";
-        return finish(report);
-      }
-      continue;
-    } finally {
-      report.callMs += Math.max(0, monotonicNow() - callStarted);
-    }
-    if (options.signal?.aborted) {
-      report.stoppedBy = "preempted";
-      return finish(report);
-    }
-    consecutiveTransportFailures = 0;
-    report.responseChars += text4.length;
-    const verdicts = parseSnifferBatchResponse(text4, new Set(batch.map((_, index) => index + 1)));
-    for (const [index, group2] of batch.entries()) {
-      const verdict = verdicts.get(index + 1);
-      const key2 = keyOf2(group2[0].question);
-      if (verdict) {
-        const stored = { ...verdict, failSafe: false };
-        group2[0].target.sniffer.putVerdict(key2, stored);
-        for (const item of group2) {
-          if (item.target !== group2[0].target)
-            item.target.sniffer.putVerdict(key2, stored);
-          apply(item, stored);
+      consecutiveTransportFailures = 0;
+      report.responseChars += text4.length;
+      const verdicts = parseSnifferBatchResponse(text4, new Set(batch.map((_, index) => index + 1)));
+      for (const [index, group2] of batch.entries()) {
+        const verdict = verdicts.get(index + 1);
+        const key2 = keyOf2(group2[0].question);
+        if (verdict) {
+          const stored = { ...verdict, failSafe: false };
+          group2[0].target.sniffer.putVerdict(key2, stored);
+          for (const item of group2) {
+            if (item.target !== group2[0].target)
+              item.target.sniffer.putVerdict(key2, stored);
+            apply(item, stored);
+          }
+          continue;
         }
-        continue;
-      }
-      const currentGroup = group2.filter((item) => sameQuestion(item.target, item.question));
-      if (currentGroup.length === 0) {
-        report.staleDropped += group2.length;
-        continue;
-      }
-      const attempts = Math.max(...currentGroup.map((item) => item.target.sniffer.recordAttemptFailure(item.question, pass)));
-      if (attempts >= SNIFFER_MAX_ATTEMPTS) {
-        const failSafe = { tier: "private", category: "other", confidence: 0, failSafe: true };
-        for (const item of group2) {
-          item.target.sniffer.putVerdict(key2, failSafe);
-          apply(item, failSafe);
+        const currentGroup = group2.filter((item) => sameQuestion(item.target, item.question));
+        if (currentGroup.length === 0) {
+          report.staleDropped += group2.length;
+          continue;
+        }
+        const attempts = Math.max(...currentGroup.map((item) => item.target.sniffer.recordAttemptFailure(item.question, pass)));
+        if (attempts >= SNIFFER_MAX_ATTEMPTS) {
+          const failSafe = { tier: "private", category: "other", confidence: 0, failSafe: true };
+          for (const item of group2) {
+            item.target.sniffer.putVerdict(key2, failSafe);
+            apply(item, failSafe);
+          }
         }
       }
     }
-  }
+  };
+  await Promise.all(Array.from({ length: concurrency }, () => ask()));
   return finish(report);
 }
 function snifferStoreTurn(dispatches) {
@@ -189356,7 +189360,7 @@ function finish(report) {
   report.estimatedOutputTokens = Math.ceil(report.responseChars / 4);
   return report;
 }
-var DEFAULT_SNIFFER_MAX_CALLS_PER_DAY = 20000, DEFAULT_SNIFFER_PASS_TIME_MS = 30000, MAX_CONSECUTIVE_TRANSPORT_FAILURES = 2, OUTPUT_CHARS_PER_ITEM = 110, SECRET_SCREEN_CACHE_LIMIT = 20000, secretScreenCache;
+var DEFAULT_SNIFFER_MAX_CALLS_PER_DAY = 20000, DEFAULT_SNIFFER_PASS_TIME_MS = 30000, SNIFFER_MAX_CONCURRENT_CALLS = 8, MAX_CONSECUTIVE_TRANSPORT_FAILURES = 2, OUTPUT_CHARS_PER_ITEM = 110, SECRET_SCREEN_CACHE_LIMIT = 20000, secretScreenCache;
 var init_sniffer_resolver = __esm(() => {
   init_atomic_file();
   init_sniffer();
@@ -189876,6 +189880,7 @@ class TierSnifferService {
       ...ownerContext ? { ownerContext } : {},
       budget: this.budget,
       maxCallsPerPass: this.options.maxCallsPerPass,
+      concurrentCalls: this.options.concurrentCalls,
       passTimeMs: this.options.passTimeMs,
       shouldYield: () => this.yieldNow(),
       signal
@@ -190246,6 +190251,7 @@ function tierSnifferServiceEnv(env) {
     enabled: !(enabledRaw === "0" || enabledRaw === "false" || enabledRaw === "no" || enabledRaw === "off"),
     intervalMs: positiveInteger7(env.OLYMPUS_TIER_SNIFFER_INTERVAL_MS, DEFAULT_TIER_SNIFFER_INTERVAL_MS, 100),
     ...env.OLYMPUS_TIER_SNIFFER_MAX_CALLS_PER_PASS?.trim() ? { maxCallsPerPass: positiveInteger7(env.OLYMPUS_TIER_SNIFFER_MAX_CALLS_PER_PASS, 1, 1) } : {},
+    ...env.OLYMPUS_TIER_SNIFFER_CONCURRENT_CALLS?.trim() ? { concurrentCalls: Math.min(SNIFFER_MAX_CONCURRENT_CALLS, positiveInteger7(env.OLYMPUS_TIER_SNIFFER_CONCURRENT_CALLS, 1, 1)) } : {},
     maxCallsPerDay: positiveInteger7(env.OLYMPUS_TIER_SNIFFER_MAX_CALLS_PER_DAY, DEFAULT_SNIFFER_MAX_CALLS_PER_DAY, 0)
   };
 }
@@ -214412,6 +214418,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     budgetStatePath: join130(dirname99(resolveClassificationLedgerPath(process.env)), "tier-sniffer-budget.json"),
     intervalMs: snifferEnv.intervalMs,
     ...snifferEnv.maxCallsPerPass !== undefined ? { maxCallsPerPass: snifferEnv.maxCallsPerPass } : {},
+    ...snifferEnv.concurrentCalls !== undefined ? { concurrentCalls: snifferEnv.concurrentCalls } : {},
     maxCallsPerDay: snifferEnv.maxCallsPerDay,
     answersInFlight: () => snifferResource !== undefined && localModelActivity.busy(snifferResource),
     shouldYield: () => localPrivateAnswers?.overdue() ?? false,
