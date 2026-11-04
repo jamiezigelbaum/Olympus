@@ -72022,6 +72022,8 @@ class TierSnifferService {
           this.moveFailures.delete(failureKey);
         } catch (error2) {
           report.failed += 1;
+          const why = moveFailureName(error2);
+          report.failedBy = { ...report.failedBy, [why]: (report.failedBy?.[why] ?? 0) + 1 };
           if (error2 instanceof TierMoveContentChangedError) {
             const current2 = set2.ledger.getCurrent(identity);
             if (current2 && current2.state !== "moving") {
@@ -72051,7 +72053,7 @@ class TierSnifferService {
       }
     }
     if (report.moved > 0 || report.failed > 0) {
-      this.options.log?.(`Olympus tier sniffer: ${report.moved} automatic tier move(s), ${report.failed} failed` + `${report.abandoned ? `, ${report.abandoned} stale move(s) given up (back where they were)` : ""}` + `${report.staleRaises ? `, ${report.staleRaises} stale raise(s) kept hidden and queued` : ""}.`);
+      this.options.log?.(`Olympus tier sniffer: ${report.moved} automatic tier move(s), ${report.failed} failed` + `${report.failedBy ? ` (${Object.entries(report.failedBy).map(([why, n]) => `${why} ×${n}`).join(", ")})` : ""}` + `${report.abandoned ? `, ${report.abandoned} stale move(s) given up (back where they were)` : ""}` + `${report.staleRaises ? `, ${report.staleRaises} stale raise(s) kept hidden and queued` : ""}.`);
     }
     return report;
   }
@@ -72107,6 +72109,13 @@ function setEmbedsWithBuiltInOnly(set2) {
   } catch {
     return false;
   }
+}
+function moveFailureName(error2) {
+  if (!(error2 instanceof Error))
+    return "unknown";
+  if (error2.constructor !== Error)
+    return error2.name || error2.constructor.name || "Error";
+  return /^[a-z][a-z ]{0,39}$/.test(error2.message) ? error2.message : "Error";
 }
 
 // src/workers/email-source/server.ts
