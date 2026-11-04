@@ -142700,7 +142700,7 @@ function createExtractionReadinessLedger(jobs, options = {}) {
     setTimeout(() => {
       try {
         taken.set(corpusId, { at: now(), snapshot: takeSnapshot(corpusId) });
-      } finally {
+      } catch {} finally {
         taking.delete(corpusId);
       }
     }, 0);

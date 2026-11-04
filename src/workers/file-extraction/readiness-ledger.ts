@@ -86,8 +86,13 @@ export function createExtractionReadinessLedger(
     if (taking.has(corpusId)) return;
     taking.add(corpusId);
     setTimeout(() => {
+      // Nothing may escape a timer: an uncaught throw here would stop the
+      // worker. A failed background take (the scope fence moved under it,
+      // say) keeps the last snapshot, and the next poll tries again.
       try {
         taken.set(corpusId, { at: now(), snapshot: takeSnapshot(corpusId) });
+      } catch {
+        // Keep the previous snapshot.
       } finally {
         taking.delete(corpusId);
       }
