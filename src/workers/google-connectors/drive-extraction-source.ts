@@ -178,7 +178,7 @@ function driveFetchFailure(error: unknown): FileExtractionSourceError {
     return new FileExtractionSourceError('source_too_large');
   }
   if (error instanceof GoogleRequestBudgetError) {
-    return new FileExtractionSourceError('source_budget_exhausted');
+    return new FileExtractionSourceError('source_budget_exhausted', { retryAt: error.retryAt });
   }
   if (error instanceof GoogleDriveApiError) {
     const options = { detailForHash: `${error.status}` };
