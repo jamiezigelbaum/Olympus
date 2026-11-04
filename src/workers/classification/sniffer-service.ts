@@ -56,6 +56,7 @@ import { applyMediaJudgments } from '../connector-store/tier-media-judgment-swee
 import {
   TierLedger,
   TierLedgerRaiseAbandonRefusedError,
+  TIER_LEDGER_UNREAD_RELABEL_DONE,
   copyServingLayer,
   tierLedgerIdentityKey,
   tierLedgerPathForStore,
@@ -211,6 +212,8 @@ export interface TierAutoMoveReport {
   abandoned?: number;
   /** Failed raises older than the stale bound: kept hidden and queued, never rolled back. */
   staleRaises?: number;
+  /** Why the failed moves failed, by error name (never an item's names or content): the log says what to look at. */
+  failedBy?: Record<string, number>;
 }
 
 export interface TierClassificationBacklog {
@@ -878,6 +881,11 @@ export class TierSnifferService {
             || tierLedgerPathForStore(store.dbPath) === ledgerPath));
         // An unavailable store is not evidence that its items were deleted.
         if (stores.length === 0 || stores.some(store => !store.exportItemCopy)) continue;
+        // Once per ledger, a page per pass: older unread settlements get the
+        // `unread` label they would get now (#847).
+        if (ledger.readMeta(TIER_LEDGER_UNREAD_RELABEL_DONE) !== '1' && ledger.relabelUnreadFailSafe() === 0) {
+          ledger.writeMeta(TIER_LEDGER_UNREAD_RELABEL_DONE, '1');
+        }
         const saved = ledger.readMeta(cursorKey);
         const after = saved ? JSON.parse(saved) as TierLedgerIdentity : undefined;
         const rows = ledger.listPending({ limit: 100, ...(after ? { after } : {}) });
@@ -1214,6 +1222,8 @@ export class TierSnifferService {
           // The move stays queued (held, never shown twice); the next pass or
           // the owner-approved migration picks it up.
           report.failed += 1;
+          const why = moveFailureName(error);
+          report.failedBy = { ...report.failedBy, [why]: (report.failedBy?.[why] ?? 0) + 1 };
           if (error instanceof TierMoveContentChangedError) {
             // A stale lowering was refused before import and taken out of
             // moving. Re-read the actual stored body, even when this model
@@ -1251,6 +1261,7 @@ export class TierSnifferService {
     if (report.moved > 0 || report.failed > 0) {
       this.options.log?.(
         `Olympus tier sniffer: ${report.moved} automatic tier move(s), ${report.failed} failed`
+        + `${report.failedBy ? ` (${Object.entries(report.failedBy).map(([why, n]) => `${why} ×${n}`).join(', ')})` : ''}`
         + `${report.abandoned ? `, ${report.abandoned} stale move(s) given up (back where they were)` : ''}`
         + `${report.staleRaises ? `, ${report.staleRaises} stale raise(s) kept hidden and queued` : ''}.`,
       );
@@ -1372,4 +1383,15 @@ function positiveInteger(value: string | undefined, fallback: number, minimum: n
   if (!value?.trim()) return fallback;
   const parsed = Number(value);
   return Number.isInteger(parsed) && parsed >= minimum ? parsed : fallback;
+}
+
+/**
+ * A failed move's reason for the log: the error's class, or a short fixed
+ * message it was thrown with ("no current copy"). Nothing longer, so no item
+ * name or content can reach the log through it.
+ */
+export function moveFailureName(error: unknown): string {
+  if (!(error instanceof Error)) return 'unknown';
+  if (error.constructor !== Error) return error.name || error.constructor.name || 'Error';
+  return /^[a-z][a-z ]{0,39}$/.test(error.message) ? error.message : 'Error';
 }
