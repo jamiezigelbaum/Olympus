@@ -234,6 +234,15 @@ describe('connector-store status readiness', () => {
         ...current.identity,
         sourceVersion: 'superseded-version',
       }, contentScope.filters)).toBe(false);
+      // The batched check answers what the per-item one does, in order.
+      const other = candidates.candidates[1]!;
+      expect(store.itemsMatchingExtractionRefs([
+        { ...current.identity, ...(current.contentHash ? { contentHash: current.contentHash } : {}) },
+        { ...current.identity, sourceVersion: 'superseded-version' },
+        { ...other.identity, localItemId: 'no-such-item' },
+        { ...other.identity, ...(other.contentHash ? { contentHash: other.contentHash } : {}) },
+      ], contentScope.filters)).toEqual([true, false, false, true]);
+      expect(store.itemsMatchingExtractionRefs([], contentScope.filters)).toEqual([]);
     } finally {
       store.close();
     }

@@ -224,6 +224,41 @@ function filesOver(items: ExtractionUnreadableItem[], overrides: Partial<Paramet
   return { files, opened };
 }
 
+describe('counts off the request path', () => {
+  test('a recheck answers the last count and recounts in turns in the background', async () => {
+    let clock = 1_000;
+    let asked = 0;
+    let turns = 0;
+    let verdict: 'unreadable' | 'blocked_policy' = 'unreadable';
+    const { files } = filesOver(itemsOf(250), {
+      verdict: () => { asked += 1; return verdict; },
+      countsMaxAgeMs: 60_000,
+      now: () => clock,
+      turn: () => { turns += 1; return new Promise<void>((resolve) => setTimeout(resolve, 0)); },
+    });
+    const settle = () => new Promise((resolve) => setTimeout(resolve, 20));
+
+    // No count yet: nothing asked on the request, one recount scheduled.
+    expect(files.recheck(LANE.corpusId)).toBeUndefined();
+    expect(files.recheck(LANE.corpusId)).toBeUndefined();
+    expect(asked).toBe(0);
+    await settle();
+    expect(asked).toBe(250);
+    expect(turns).toBe(2);
+    expect(files.recheck(LANE.corpusId)).toEqual({ unreadable: 250, blocked: 0 });
+
+    // Stale: the last count now, the fresh one after its recount.
+    verdict = 'blocked_policy';
+    clock += 60_000;
+    expect(files.recheck(LANE.corpusId)).toEqual({ unreadable: 250, blocked: 0 });
+    expect(asked).toBe(250);
+    await settle();
+    expect(files.recheck(LANE.corpusId)).toEqual({ unreadable: 0, blocked: 250 });
+    // Names still ask each file now.
+    expect(files.names([LANE.corpusId], 5)).toEqual([]);
+  });
+});
+
 describe('the list', () => {
   test('names are newest failure first, and "more" is the rest', () => {
     const { files } = filesOver(itemsOf(7));

@@ -60,12 +60,15 @@ export function createExtractionReadinessLedger(
     lanesForCorpus?: (corpusId: string) => readonly ExtractionLaneKey[] | undefined;
     // Current store identity/scope fence for scoped queue rows.
     currentItem?: (ref: ExtractionItemRef) => boolean;
+    // The same fence for many rows at once (ExtractionScopedReadinessOptions.currentItems).
+    currentItems?: (refs: readonly ExtractionItemRef[]) => readonly boolean[];
     // Terminal failures the runner will still retry: their items are not
     // counted as unreadable until that last try has run.
     terminalRetryPaths?: readonly ExtractionTerminalRetryPath[];
     // Asked about every item extraction gave up on (ExtractionUnreadableVerdict):
     // a Secrets item counts with the policy exit, one no store serves is left out.
     classifyUnreadable?: (item: ExtractionUnreadableItem) => ExtractionUnreadableVerdict;
+    now?: () => number;
   } = {},
 ): ExtractionReadinessLedger {
   const lastUnreadable = new Map<string, readonly ExtractionUnreadableItem[]>();
@@ -75,40 +78,80 @@ export function createExtractionReadinessLedger(
       lastUnreadable.set(corpusId, items);
     },
   });
-  const ledger: ExtractionReadinessLedger = {
-    snapshotForCorpus(corpusId: string) {
-      const lanes = options.lanesForCorpus?.(corpusId);
-      if (lanes !== undefined) {
-        if (!jobs.scopedReadiness) return undefined;
-        try {
-          return readinessSnapshot(jobs.scopedReadiness(lanes, {
-            ...(options.currentItem ? { currentItem: options.currentItem } : {}),
-            ...(options.terminalRetryPaths ? { terminalRetryPaths: options.terminalRetryPaths } : {}),
-            ...listing(corpusId),
-          }));
-        } catch {
-          return undefined;
-        }
-      }
-      let readiness: ExtractionCorpusReadiness;
+  type Snapshot = ReturnType<SourceIndexReadinessLedger['snapshotForCorpus']>;
+  const now = options.now ?? Date.now;
+  const taken = new Map<string, { at: number; snapshot: Snapshot }>();
+  const taking = new Set<string>();
+  const take = (corpusId: string): void => {
+    if (taking.has(corpusId)) return;
+    taking.add(corpusId);
+    setTimeout(() => {
+      // Nothing may escape a timer: an uncaught throw here would stop the
+      // worker. A failed background take (the scope fence moved under it,
+      // say) keeps the last snapshot, and the next poll tries again.
       try {
-        readiness = jobs.corpusReadiness(corpusId, new Date(), {
-          ...(options.terminalRetryPaths ? { terminalRetryPaths: options.terminalRetryPaths } : {}),
-          ...listing(corpusId),
-        });
+        taken.set(corpusId, { at: now(), snapshot: takeSnapshot(corpusId) });
       } catch {
-        // A status poll must not fail because the queue is momentarily
-        // unreadable. Absent counts leave the coverage math on its own honest
-        // fallback, which understates rather than claiming a full corpus.
-        return undefined;
+        // Keep the previous snapshot.
+      } finally {
+        taking.delete(corpusId);
       }
-      return readinessSnapshot(readiness);
+    }, 0);
+  };
+  // Set once a caller has accepted a stale snapshot: from then on nothing
+  // here is taken on a request, only in the background.
+  let servesStale = false;
+  const ledger: ExtractionReadinessLedger = {
+    snapshotForCorpus(corpusId: string, read: { maxAgeMs?: number } = {}) {
+      // A caller that states an allowance (the dashboard's polls) gets the
+      // last snapshot taken, no older than that, else still the last one
+      // while a fresh one is taken in the background: on a large queue taking
+      // one held the worker for seconds on every poll (Sparta, 2026-11-04).
+      // None taken yet answers absent counts, the honest fallback below.
+      const maxAgeMs = read.maxAgeMs ?? 0;
+      if (!(maxAgeMs > 0)) return takeSnapshot(corpusId);
+      servesStale = true;
+      const last = taken.get(corpusId);
+      if (!last || now() - last.at >= maxAgeMs) take(corpusId);
+      return last?.snapshot;
     },
     unreadableItems(corpusId: string) {
-      if (!lastUnreadable.has(corpusId)) ledger.snapshotForCorpus(corpusId);
+      if (!lastUnreadable.has(corpusId)) {
+        if (servesStale) take(corpusId);
+        else takeSnapshot(corpusId);
+      }
       return lastUnreadable.get(corpusId) ?? [];
     },
   };
+  function takeSnapshot(corpusId: string): Snapshot {
+    const lanes = options.lanesForCorpus?.(corpusId);
+    if (lanes !== undefined) {
+      if (!jobs.scopedReadiness) return undefined;
+      try {
+        return readinessSnapshot(jobs.scopedReadiness(lanes, {
+          ...(options.currentItem ? { currentItem: options.currentItem } : {}),
+          ...(options.currentItems ? { currentItems: options.currentItems } : {}),
+          ...(options.terminalRetryPaths ? { terminalRetryPaths: options.terminalRetryPaths } : {}),
+          ...listing(corpusId),
+        }));
+      } catch {
+        return undefined;
+      }
+    }
+    let readiness: ExtractionCorpusReadiness;
+    try {
+      readiness = jobs.corpusReadiness(corpusId, new Date(), {
+        ...(options.terminalRetryPaths ? { terminalRetryPaths: options.terminalRetryPaths } : {}),
+        ...listing(corpusId),
+      });
+    } catch {
+      // A status poll must not fail because the queue is momentarily
+      // unreadable. Absent counts leave the coverage math on its own honest
+      // fallback, which understates rather than claiming a full corpus.
+      return undefined;
+    }
+    return readinessSnapshot(readiness);
+  }
   return ledger;
 }
 

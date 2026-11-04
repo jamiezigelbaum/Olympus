@@ -1189,6 +1189,65 @@ describe('local messaging pairing', () => {
   });
 });
 
+describe('a slow computer during pairing', () => {
+  test('a failed status read while pairing runs keeps polling and never shows the step as failed', async () => {
+    const root = document.createElement('div');
+    root.innerHTML = '<section data-source="whatsapp.personal.messages" data-messaging-source="whatsapp"><form method="dialog" data-messaging-kind="start"><button type="submit">Pair WhatsApp</button></form><p data-messaging-status></p><div data-messaging-input></div><img data-messaging-qr hidden><div data-messaging-chats></div></section>';
+    document.body.append(root);
+    const answers: Array<{ status: number; body: Record<string, unknown> } | 'throw'> = [
+      { status: 200, body: { state: 'idle' } },
+      { status: 200, body: { ok: true, state: 'starting' } },
+      { status: 504, body: { ok: false } },
+      'throw',
+      { status: 200, body: { ok: true, state: 'waiting', qr: 'data:image/png;base64,YQ==' } },
+    ];
+    const seen: string[] = [];
+    const controller = mountDashboardController({ root, canWrite: true, signal: new AbortController().signal, navigate() {}, refresh: async () => undefined, returnUrl: 'http://localhost/dashboard?keys', transport: {
+      control: async () => ({ status: 200, body: {} }),
+      messaging: async () => {
+        const next = answers.shift() ?? { status: 200, body: { ok: true, state: 'waiting', qr: 'data:image/png;base64,YQ==' } };
+        if (next === 'throw') throw new Error('timed out');
+        return next;
+      },
+    } });
+    const status = () => root.querySelector('[data-messaging-status]')!.textContent ?? '';
+    await new Promise(resolve => setTimeout(resolve, 0));
+    root.querySelector('form')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    await new Promise(resolve => setTimeout(resolve, 0));
+    seen.push(status());
+    await new Promise(resolve => setTimeout(resolve, 1300));
+    seen.push(status());
+    await new Promise(resolve => setTimeout(resolve, 2500));
+    seen.push(status());
+    await new Promise(resolve => setTimeout(resolve, 4900));
+    seen.push(status());
+    expect(seen[0]).toBe('Preparing WhatsApp. The first time can take about a minute.');
+    expect(seen[1]).toContain('Still preparing WhatsApp');
+    expect(seen[2]).toContain('Still preparing WhatsApp');
+    expect(seen.join(' ')).not.toContain('Could not');
+    expect(seen[3]).toContain('scan the QR code');
+    expect(root.querySelector('img')!.hidden).toBe(false);
+    controller.dispose();
+    root.remove();
+  }, 15_000);
+
+  test('a failed status read when no pairing is running still says so', async () => {
+    const root = document.createElement('div');
+    root.innerHTML = '<section data-source="whatsapp.personal.messages" data-messaging-source="whatsapp"><p data-messaging-status></p><div data-messaging-input></div><img data-messaging-qr hidden><div data-messaging-chats></div></section>';
+    document.body.append(root);
+    let calls = 0;
+    const controller = mountDashboardController({ root, canWrite: true, signal: new AbortController().signal, navigate() {}, refresh: async () => undefined, returnUrl: 'http://localhost/dashboard?keys', transport: {
+      control: async () => ({ status: 200, body: {} }),
+      messaging: async () => { calls++; return { status: 500, body: { ok: false } }; },
+    } });
+    await new Promise(resolve => setTimeout(resolve, 1500));
+    expect(root.querySelector('[data-messaging-status]')!.textContent).toContain('Could not complete this step');
+    expect(calls).toBe(1);
+    controller.dispose();
+    root.remove();
+  });
+});
+
 test('messaging cards remain visible when another source sheet opens', () => {
   const root = document.createElement('div');
   root.innerHTML = renderMessagingCard('telegram', true) + renderMessagingCard('whatsapp', true) + '<button data-sheet-toggle="#other">Connect</button><section id="other" class="sheet"></section>';

@@ -34509,6 +34509,39 @@ var init_local_index = __esm(() => {
         return false;
       return true;
     }
+    itemsMatchingExtractionRefs(refs, filters) {
+      if (refs.length === 0)
+        return [];
+      const predicate = connectorStoreFilterSql(filters);
+      const ids = [...new Set(refs.map((ref) => ref.localItemId))];
+      const first = new Map;
+      const keyOf = (localItemId, providerItemId, provider, accountScope) => JSON.stringify([localItemId, providerItemId, provider, accountScope]);
+      for (let offset = 0;offset < ids.length; offset += 5000) {
+        const rows = this.db.query(`
+        SELECT i.local_item_id, i.provider_item_id, i.provider, i.account_scope, i.source_version, i.content_hash
+        FROM items i
+        WHERE i.local_item_id IN (SELECT value FROM json_each(?))
+          AND i.tombstoned = 0
+          ${predicate.sql}
+        ORDER BY i.item_pk
+      `).all(JSON.stringify(ids.slice(offset, offset + 5000)), ...predicate.params);
+        for (const row of rows) {
+          const key2 = keyOf(row.local_item_id, row.provider_item_id, row.provider, row.account_scope);
+          if (!first.has(key2))
+            first.set(key2, { source_version: row.source_version, content_hash: row.content_hash });
+        }
+      }
+      return refs.map((ref) => {
+        const row = first.get(keyOf(ref.localItemId, ref.providerItemId, ref.provider, ref.accountScope));
+        if (!row)
+          return false;
+        if (ref.sourceVersion !== undefined && row.source_version !== ref.sourceVersion)
+          return false;
+        if (ref.contentHash !== undefined && row.content_hash !== ref.contentHash)
+          return false;
+        return true;
+      });
+    }
     [READ_RESULT_PROJECTION_LOCATOR_URI](identity2, locatorPathScope) {
       const scopePredicate = connectorStoreFilterSql(locatorPathScope ? { locatorPathScope } : undefined);
       const rows = this.db.query(`
@@ -40130,15 +40163,18 @@ async function resolveHelper(options, packageRoot) {
     return output;
   }
   const which = options.which ?? ((command) => Bun.which(command));
-  const go = which("go");
-  const compiler = which("cc") ?? which("clang") ?? which("gcc");
+  const home = options.homeDir ?? options.env?.HOME ?? homedir18();
+  const userBins = [join35(home, ".local", "bin"), join35(home, "go", "bin"), "/usr/local/go/bin", "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"];
+  const find = (command) => which(command) ?? (options.which ? undefined : userBins.map((dir) => join35(dir, command)).find((path) => isExecutableFile2(path)));
+  const go = find("go");
+  const compiler = find("cc") ?? find("clang") ?? find("gcc");
   if (!go || !compiler) {
-    throw new Error("WhatsApp pairing requires Go and a C compiler. Install Go plus cc/clang/gcc, then re-run olympus connect whatsapp --pair; Olympus will build the pinned bridge automatically.");
+    throw codedPairingError("WhatsApp pairing requires Go and a C compiler. Install Go plus cc/clang/gcc, then re-run olympus connect whatsapp --pair; Olympus will build the pinned bridge automatically.", "bridge_build_tools_missing");
   }
   mkdirSync18(join35(output, ".."), { recursive: true, mode: 448 });
   const built = await (options.buildWhatsAppBridge ?? buildWhatsAppBridge)({ go, sourceDir, outputPath: output });
   if (!built || !existsSync30(output)) {
-    throw new Error("The pinned WhatsApp bridge could not be built. Verify Go and the C compiler, then re-run olympus connect whatsapp --pair.");
+    throw codedPairingError("The pinned WhatsApp bridge could not be built. Verify Go and the C compiler, then re-run olympus connect whatsapp --pair.", "bridge_build_failed");
   }
   chmodSync9(output, 448);
   return output;
@@ -40411,6 +40447,19 @@ function processAlive(pid) {
 function removeTelegramLogin(base) {
   for (const suffix of [".session", ".session-journal"])
     rmSync10(`${base}${suffix}`, { force: true });
+}
+function codedPairingError(message2, code) {
+  const error = new Error(message2);
+  error.code = code;
+  return error;
+}
+function isExecutableFile2(path) {
+  try {
+    const stat2 = statSync16(path);
+    return stat2.isFile() && (stat2.mode & 73) !== 0;
+  } catch {
+    return false;
+  }
 }
 function pairingFailure(source, code) {
   const error = pairingFailureMessage(source, code);
@@ -41119,7 +41168,7 @@ var init_dashboard_launch = __esm(() => {
   <body>
     <main>
       <h1 id="status">Opening Olympus…</h1>
-      <p id="detail">If this does not continue, run <code>olympus dashboard</code> again for a fresh link.</p>
+      <p id="detail">If this does not continue, <a href="/dashboard">open the dashboard</a>.</p>
     </main>
     <script>
       (function () {
@@ -41168,7 +41217,8 @@ var init_dashboard_launch = __esm(() => {
               : PRIVATE.test(open) ? '/dashboard?private-answers' + (open.indexOf('page.private.') === 0 ? '#' + open.slice(13) : '') : '/dashboard');
             return;
           }
-          status.textContent = 'Opening failed.';
+          // Anything else: the dashboard is the way in (its session, or how to get one).
+          window.location.replace('/dashboard');
         }).catch(function () {
           status.textContent = 'Opening failed.';
         });
@@ -53949,6 +53999,7 @@ var init_vocabulary = __esm(() => {
   DASHBOARD_CHATGPT_PAGE_COPY = {
     title: "Olympus",
     loading: "Checking your computer…",
+    loadingSlow: "Loading. This can take a minute while Olympus is importing.",
     upToDate: "Olympus is up to date.",
     needsYou: "Needs you",
     sources: "Sources",
@@ -83690,7 +83741,15 @@ class LocalFileExtractionJobStore {
       for (const row of rows2)
         byJobId.set(row.job_id, row);
     }
-    const rows = [...byJobId.values()].filter((row) => options.currentItem ? options.currentItem(refFromRow(row)) : true);
+    const allRows = [...byJobId.values()];
+    let rows = allRows;
+    if (options.currentItems) {
+      const current2 = options.currentItems(allRows.map(refFromRow));
+      rows = allRows.filter((_row, index) => current2[index] === true);
+    } else if (options.currentItem) {
+      const currentItem = options.currentItem;
+      rows = allRows.filter((row) => currentItem(refFromRow(row)));
+    }
     const byItem = new Map;
     for (const row of rows) {
       const existing = byItem.get(row.local_item_id);
@@ -87666,7 +87725,7 @@ var init_remote_vlm = __esm(() => {
 });
 
 // src/workers/source-index/built-in-reasoning/install.ts
-import { spawnSync as spawnSync11 } from "node:child_process";
+import { spawn as spawn5 } from "node:child_process";
 import { createHash as createHash62, randomUUID as randomUUID20 } from "node:crypto";
 import {
   closeSync as closeSync24,
@@ -87938,7 +87997,7 @@ async function installRuntime2(fetchImpl, runtimeDir, archive, reporter, extract
     await downloadVerified2(fetchImpl, archive.url, archivePath, archive.bytes, archive.sha256, reporter, "Downloading the built-in model server", stallMs, space);
     reporter.set("verifying", "Unpacking the built-in model server");
     try {
-      extract(archivePath, staging);
+      await extract(archivePath, staging);
     } catch (error) {
       if (isNoSpaceError(error)) {
         throw spaceShortfallError(space, archive.bytes * RUNTIME_UNPACK_FACTOR + space.headroomBytes, space.freeBytes(dirname61(runtimeDir)) ?? 0, "the disk filled up while unpacking");
@@ -87961,15 +88020,29 @@ async function installRuntime2(fetchImpl, runtimeDir, archive, reporter, extract
   }
 }
 function extractWithTar(archivePath, targetDir) {
-  const result = spawnSync11("tar", ["-xzf", archivePath, "-C", targetDir], {
-    stdio: ["ignore", "ignore", "pipe"],
-    timeout: EXTRACT_TIMEOUT_MS
+  return new Promise((resolve20, reject) => {
+    const child2 = spawn5("tar", ["-xzf", archivePath, "-C", targetDir], { stdio: ["ignore", "ignore", "pipe"] });
+    let stderr = "";
+    child2.stderr?.on("data", (chunk) => {
+      if (stderr.length < 4000)
+        stderr += chunk.toString();
+    });
+    const timer = setTimeout(() => {
+      child2.kill("SIGKILL");
+      reject(new Error(`tar did not finish within ${Math.round(EXTRACT_TIMEOUT_MS / 60000)} min`));
+    }, EXTRACT_TIMEOUT_MS);
+    child2.on("error", (error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
+    child2.on("close", (status, signal) => {
+      clearTimeout(timer);
+      if (status === 0)
+        resolve20();
+      else
+        reject(new Error(stderr.trim() || `tar exited with ${status ?? signal}`));
+    });
   });
-  if (result.error)
-    throw result.error;
-  if (result.status !== 0) {
-    throw new Error(result.stderr?.toString().trim() || `tar exited with ${result.status ?? result.signal}`);
-  }
 }
 function locateFile(root, name, depth = 0, prefix = "") {
   let entries;
@@ -88227,7 +88300,7 @@ var init_install = __esm(() => {
 });
 
 // src/workers/source-index/built-in-reasoning/server.ts
-import { spawn as spawn5 } from "node:child_process";
+import { spawn as spawn6 } from "node:child_process";
 import { randomBytes as randomBytes13 } from "node:crypto";
 import { mkdtempSync as mkdtempSync2, rmSync as rmSync24, writeFileSync as writeFileSync13 } from "node:fs";
 import { createServer as createServer2 } from "node:net";
@@ -88285,7 +88358,7 @@ function llamaServerArguments(launch, port, tokenFile) {
   ];
 }
 function createLlamaServerHandle(launch, options = {}) {
-  const spawnImpl = options.spawnImpl ?? spawn5;
+  const spawnImpl = options.spawnImpl ?? spawn6;
   const fetchImpl = options.fetchImpl ?? fetch;
   const stopGraceMs = options.stopGraceMs ?? DEFAULT_STOP_GRACE_MS;
   const killWaitMs = options.killWaitMs ?? DEFAULT_KILL_WAIT_MS;
@@ -91729,6 +91802,19 @@ function tieredExtractionView(set, options = {}) {
     itemMatchesExtractionRef(ref, filters) {
       return storesHoldingRow(ref.localItemId).some((store) => store.itemMatchesExtractionRef(ref, filters));
     },
+    itemsMatchingExtractionRefs(refs, filters) {
+      const matched = refs.map(() => false);
+      for (const domain of order()) {
+        const store = set.store(domain);
+        if (!store)
+          continue;
+        const here = store.itemsMatchingExtractionRefs(refs, filters);
+        for (let index = 0;index < here.length; index += 1)
+          if (here[index])
+            matched[index] = true;
+      }
+      return matched;
+    },
     itemTrustTier(localItemId) {
       let tier;
       let routed = false;
@@ -94716,10 +94802,12 @@ function createSourceIndexStatusHandler(options = {}) {
         const cached2 = maxAgeMs > 0 ? cache.get(cacheKey) : undefined;
         if (cached2 && nowMs() - cached2.recordedAtMs <= maxAgeMs)
           return cached2.status;
-        const readiness = store && request.include_readiness_ledger === true ? options.readinessLedger?.snapshotForCorpus(corpus.corpusId) : undefined;
+        const readiness = store && request.include_readiness_ledger === true ? options.readinessLedger?.snapshotForCorpus(corpus.corpusId, maxAgeMs > 0 ? { maxAgeMs } : {}) : undefined;
         const status = store ? connectorStoreStatus(corpus, store.status(statusScope, { countsMaxAgeMs: snapshot.countsMaxAgeMs ?? 0 }), readiness?.counts, readiness?.contentExtractionThroughput, availability?.modelId, secretLocationCount(store)) : configuredCorpusStatus(corpus);
         if (status.configured && request.include_readiness_ledger === true && options.unreadableCount) {
-          status.counts[UNREADABLE_ITEMS_COUNT_KEY] = options.unreadableCount(corpus.corpusId);
+          const unreadable = options.unreadableCount(corpus.corpusId);
+          if (unreadable !== undefined)
+            status.counts[UNREADABLE_ITEMS_COUNT_KEY] = unreadable;
         }
         const enforced = withRetrievalEnforcementStatus(corpus, status, availability);
         const withBacklog = store && availability?.modelId ? withEmbeddingBacklogEstimate(enforced, store, availability.modelId, availability, statusScope, snapshot.countsMaxAgeMs ?? 0) : enforced;
@@ -98704,7 +98792,7 @@ var init_source_forget_registry = __esm(() => {
 });
 
 // src/data-lifecycle.ts
-import { spawnSync as spawnSync12 } from "node:child_process";
+import { spawnSync as spawnSync11 } from "node:child_process";
 import { createHash as createHash67, randomUUID as randomUUID21 } from "node:crypto";
 import {
   closeSync as closeSync25,
@@ -98998,7 +99086,7 @@ function deleteAllOlympusData(options) {
   const removesDaemon = options.dryRun !== true && targets.some((target) => target.path === MAC_ENGINE_DAEMON_PLIST);
   if (removesDaemon) {
     authorizeMacServerMode(false, {}, (command, args) => {
-      const result = spawnSync12(command, args, { encoding: "utf8" });
+      const result = spawnSync11(command, args, { encoding: "utf8" });
       return { status: result.status, stdout: result.stdout ?? "", stderr: result.stderr ?? "" };
     });
   }
@@ -102578,7 +102666,7 @@ var init_engine_maintenance = __esm(() => {
 });
 
 // src/core/engine-children.ts
-import { spawnSync as spawnSync13 } from "node:child_process";
+import { spawnSync as spawnSync12 } from "node:child_process";
 import { existsSync as existsSync66, mkdirSync as mkdirSync42, readFileSync as readFileSync51 } from "node:fs";
 import { dirname as dirname69, join as join93 } from "node:path";
 function engineChildrenPath(env = process.env) {
@@ -102769,7 +102857,7 @@ function normalizeStart(value) {
   return value.trim().replace(/\s+/g, " ");
 }
 function listProcessTable() {
-  const result = spawnSync13("ps", ["-axww", "-o", "pid=,pgid=,lstart=,command="], {
+  const result = spawnSync12("ps", ["-axww", "-o", "pid=,pgid=,lstart=,command="], {
     encoding: "utf8",
     timeout: 1e4,
     maxBuffer: 32 * 1024 * 1024,
@@ -102782,7 +102870,7 @@ function listProcessTable() {
 function processStartTime(pid) {
   if (!Number.isSafeInteger(pid) || pid <= 1)
     return;
-  const result = spawnSync13("ps", ["-o", "lstart=", "-p", String(pid)], { encoding: "utf8", timeout: 5000, env: PS_ENV });
+  const result = spawnSync12("ps", ["-o", "lstart=", "-p", String(pid)], { encoding: "utf8", timeout: 5000, env: PS_ENV });
   if (result.status !== 0 || typeof result.stdout !== "string")
     return;
   const value = normalizeStart(result.stdout);
@@ -105470,7 +105558,7 @@ __export(exports_consult_transport_zkapi, {
   WATCHDOG_SCRIPT: () => WATCHDOG_SCRIPT,
   DEFAULT_EXECUTABLE_TRUST: () => DEFAULT_EXECUTABLE_TRUST
 });
-import { spawn as spawn6, execFileSync as execFileSync4 } from "node:child_process";
+import { spawn as spawn7, execFileSync as execFileSync4 } from "node:child_process";
 import { createHash as createHash70, randomUUID as randomUUID24 } from "node:crypto";
 import { accessSync as accessSync10, chmodSync as chmodSync27, closeSync as closeSync26, constants as constants13, existsSync as existsSync67, mkdirSync as mkdirSync44, mkdtempSync as mkdtempSync3, readdirSync as readdirSync21, readFileSync as readFileSync55, readlinkSync as readlinkSync3, realpathSync as realpathSync18, rmSync as rmSync29, statSync as statSync32, writeFileSync as writeFileSync16 } from "node:fs";
 import { createConnection as createConnection4, createServer as createServer4 } from "node:net";
@@ -105874,7 +105962,7 @@ function supervise(role, watchdog, argv, env, onLine, onExit, onStatus, onStatus
   const statusChannel = onStatus ? linuxBunStatusChannel() : undefined;
   let child2;
   try {
-    child2 = spawn6(process.execPath, [watchdog, String(process.pid), ...onStatus ? ["--private-status", String(inheritedFds.length)] : [], ...argv], { env, detached: true, stdio: onStatus ? ["pipe", "pipe", "pipe", statusChannel?.writer ?? "pipe", ...inheritedFds] : ["pipe", "pipe", "pipe"] });
+    child2 = spawn7(process.execPath, [watchdog, String(process.pid), ...onStatus ? ["--private-status", String(inheritedFds.length)] : [], ...argv], { env, detached: true, stdio: onStatus ? ["pipe", "pipe", "pipe", statusChannel?.writer ?? "pipe", ...inheritedFds] : ["pipe", "pipe", "pipe"] });
   } catch (error) {
     statusChannel?.reader.destroy();
     throw error;
@@ -107794,7 +107882,7 @@ __export(exports_engine_service, {
   ENGINE_HEALTH_TIMEOUT_MS: () => ENGINE_HEALTH_TIMEOUT_MS,
   ENGINE_BUILD_ENV: () => ENGINE_BUILD_ENV
 });
-import { spawn as spawn7, spawnSync as spawnSync14 } from "node:child_process";
+import { spawn as spawn8, spawnSync as spawnSync13 } from "node:child_process";
 import { createHash as createHash71, randomBytes as randomBytes17 } from "node:crypto";
 import { existsSync as existsSync68, lstatSync as lstatSync35, readdirSync as readdirSync22, readFileSync as readFileSync56, renameSync as renameSync14, statSync as statSync33 } from "node:fs";
 import { homedir as homedir30, platform as osPlatform3 } from "node:os";
@@ -108938,7 +109026,7 @@ function boundedDetail(result) {
   return (text3 || `exit ${result.status ?? "unknown"}`).slice(0, 300);
 }
 function defaultExec2(command, args) {
-  const result = spawnSync14(command, args, { encoding: "utf8" });
+  const result = spawnSync13(command, args, { encoding: "utf8" });
   return {
     status: result.status,
     stdout: result.stdout ?? "",
@@ -109167,7 +109255,7 @@ function requestMacServerMode(enable, options = {}) {
     }
     return { ok: true, status_message: message2 };
   }
-  const child2 = (options.spawn ?? spawn7)(program.runtimePath, ["--no-env-file", program.entryPath, "__engine-server-mode", enable ? "on" : "off"], {
+  const child2 = (options.spawn ?? spawn8)(program.runtimePath, ["--no-env-file", program.entryPath, "__engine-server-mode", enable ? "on" : "off"], {
     detached: true,
     stdio: "ignore",
     env: { HOME: options.homeDir ?? homedir30(), PATH: "/usr/bin:/bin:/usr/sbin:/sbin", ...macOwnerEnv(options) }
@@ -109251,14 +109339,14 @@ var init_engine_service = __esm(() => {
 });
 
 // src/core/linux-engine-service.ts
-import { spawnSync as spawnSync15 } from "node:child_process";
+import { spawnSync as spawnSync14 } from "node:child_process";
 import { chmodSync as chmodSync28, closeSync as closeSync27, constants as constants14, copyFileSync, existsSync as existsSync69, fstatSync as fstatSync5, fsyncSync as fsyncSync7, ftruncateSync, lstatSync as lstatSync36, linkSync as linkSync3, mkdirSync as mkdirSync45, openSync as openSync26, readFileSync as readFileSync57, readlinkSync as readlinkSync4, readdirSync as readdirSync23, realpathSync as realpathSync19, renameSync as renameSync15, rmSync as rmSync30, rmdirSync as rmdirSync7, statSync as statSync34, symlinkSync as symlinkSync2, writeFileSync as writeFileSync17 } from "node:fs";
 import { createRequire as createRequire7 } from "node:module";
 import { basename as basename16, dirname as dirname74, join as join99, relative as relative15, resolve as resolve21, sep as sep17 } from "node:path";
 import { userInfo as userInfo2 } from "node:os";
 import { randomBytes as randomBytes18, createHash as createHash72, randomUUID as randomUUID25 } from "node:crypto";
 function linuxEngineExec(command, args) {
-  const r = spawnSync15(command, args, { encoding: "utf8", timeout: 35000, env: { ...process.env, SYSTEMD_PAGER: "", SYSTEMD_COLORS: "0" } });
+  const r = spawnSync14(command, args, { encoding: "utf8", timeout: 35000, env: { ...process.env, SYSTEMD_PAGER: "", SYSTEMD_COLORS: "0" } });
   return { status: r.status, stdout: r.stdout ?? "", stderr: r.stderr ?? r.error?.message ?? "" };
 }
 function value(s, exec = false) {
@@ -114622,7 +114710,7 @@ var init_consult_settings = __esm(() => {
 });
 
 // src/core/doctor.ts
-import { spawnSync as spawnSync16 } from "node:child_process";
+import { spawnSync as spawnSync15 } from "node:child_process";
 import { existsSync as existsSync72, readFileSync as readFileSync59 } from "node:fs";
 import { join as join102 } from "node:path";
 import { homedir as homedir32 } from "node:os";
@@ -116015,7 +116103,7 @@ function defaultCommandExists(command) {
   return path.split(":").some((dir) => Boolean(dir) && existsSync72(join102(dir, command)));
 }
 function defaultPythonModuleExists(pythonCommand, moduleName) {
-  const proc = spawnSync16(pythonCommand, ["-c", `import ${moduleName}`], { stdio: "ignore" });
+  const proc = spawnSync15(pythonCommand, ["-c", `import ${moduleName}`], { stdio: "ignore" });
   return proc.status === 0;
 }
 function asRecord12(value2) {
@@ -142634,39 +142722,70 @@ function createExtractionReadinessLedger(jobs, options = {}) {
       lastUnreadable.set(corpusId, items);
     }
   });
-  const ledger = {
-    snapshotForCorpus(corpusId) {
-      const lanes = options.lanesForCorpus?.(corpusId);
-      if (lanes !== undefined) {
-        if (!jobs.scopedReadiness)
-          return;
-        try {
-          return readinessSnapshot(jobs.scopedReadiness(lanes, {
-            ...options.currentItem ? { currentItem: options.currentItem } : {},
-            ...options.terminalRetryPaths ? { terminalRetryPaths: options.terminalRetryPaths } : {},
-            ...listing(corpusId)
-          }));
-        } catch {
-          return;
-        }
-      }
-      let readiness;
+  const now = options.now ?? Date.now;
+  const taken = new Map;
+  const taking = new Set;
+  const take = (corpusId) => {
+    if (taking.has(corpusId))
+      return;
+    taking.add(corpusId);
+    setTimeout(() => {
       try {
-        readiness = jobs.corpusReadiness(corpusId, new Date, {
-          ...options.terminalRetryPaths ? { terminalRetryPaths: options.terminalRetryPaths } : {},
-          ...listing(corpusId)
-        });
-      } catch {
-        return;
+        taken.set(corpusId, { at: now(), snapshot: takeSnapshot(corpusId) });
+      } catch {} finally {
+        taking.delete(corpusId);
       }
-      return readinessSnapshot(readiness);
+    }, 0);
+  };
+  let servesStale = false;
+  const ledger = {
+    snapshotForCorpus(corpusId, read = {}) {
+      const maxAgeMs = read.maxAgeMs ?? 0;
+      if (!(maxAgeMs > 0))
+        return takeSnapshot(corpusId);
+      servesStale = true;
+      const last = taken.get(corpusId);
+      if (!last || now() - last.at >= maxAgeMs)
+        take(corpusId);
+      return last?.snapshot;
     },
     unreadableItems(corpusId) {
-      if (!lastUnreadable.has(corpusId))
-        ledger.snapshotForCorpus(corpusId);
+      if (!lastUnreadable.has(corpusId)) {
+        if (servesStale)
+          take(corpusId);
+        else
+          takeSnapshot(corpusId);
+      }
       return lastUnreadable.get(corpusId) ?? [];
     }
   };
+  function takeSnapshot(corpusId) {
+    const lanes = options.lanesForCorpus?.(corpusId);
+    if (lanes !== undefined) {
+      if (!jobs.scopedReadiness)
+        return;
+      try {
+        return readinessSnapshot(jobs.scopedReadiness(lanes, {
+          ...options.currentItem ? { currentItem: options.currentItem } : {},
+          ...options.currentItems ? { currentItems: options.currentItems } : {},
+          ...options.terminalRetryPaths ? { terminalRetryPaths: options.terminalRetryPaths } : {},
+          ...listing(corpusId)
+        }));
+      } catch {
+        return;
+      }
+    }
+    let readiness;
+    try {
+      readiness = jobs.corpusReadiness(corpusId, new Date, {
+        ...options.terminalRetryPaths ? { terminalRetryPaths: options.terminalRetryPaths } : {},
+        ...listing(corpusId)
+      });
+    } catch {
+      return;
+    }
+    return readinessSnapshot(readiness);
+  }
   return ledger;
 }
 function readinessSnapshot(readiness) {
@@ -142895,8 +143014,43 @@ function createUnreadableFiles(options) {
     bucket -= 1;
     return true;
   }
+  const RECOUNT_SLICE = 100;
+  const counted = new Map;
+  const recounting = new Set;
+  async function recount(corpusId) {
+    const items = listed(corpusId);
+    let unreadable = 0;
+    let blocked = 0;
+    for (let index = 0;index < items.length; index += 1) {
+      if (index > 0 && index % RECOUNT_SLICE === 0) {
+        await (options.turn?.() ?? new Promise((resolve24) => setImmediate(resolve24)));
+      }
+      const verdict = verdictOf(items[index]);
+      if (verdict === "unreadable")
+        unreadable += 1;
+      else if (verdict === "blocked_policy")
+        blocked += 1;
+    }
+    counted.set(corpusId, { at: now(), value: { unreadable, blocked } });
+  }
+  function scheduleRecount(corpusId) {
+    if (recounting.has(corpusId))
+      return;
+    recounting.add(corpusId);
+    setTimeout(() => {
+      recount(corpusId).catch(() => {
+        return;
+      }).finally(() => recounting.delete(corpusId));
+    }, 0);
+  }
   return {
     recheck(corpusId) {
+      if (options.countsMaxAgeMs !== undefined) {
+        const last = counted.get(corpusId);
+        if (!last || now() - last.at >= options.countsMaxAgeMs)
+          scheduleRecount(corpusId);
+        return last?.value;
+      }
       let unreadable = 0;
       let blocked = 0;
       for (const item of listed(corpusId)) {
@@ -144034,9 +144188,9 @@ function codedError(message2, code) {
 var ATTEMPTS_KEPT = 5;
 
 // src/workers/email-source/dashboard-messaging-runner.ts
-import { spawn as spawn10 } from "node:child_process";
+import { spawn as spawn11 } from "node:child_process";
 async function runDashboardPairingCommand(request, hooks) {
-  const child2 = spawn10(request.executable, request.args, {
+  const child2 = spawn11(request.executable, request.args, {
     env: { ...request.env, OLYMPUS_TELEGRAM_LIST_CHATS: "", OLYMPUS_TELEGRAM_DASHBOARD_PROMPTS: "1" },
     stdio: ["pipe", "pipe", "pipe", "pipe", ...request.inheritFds ?? []]
   });
@@ -144131,7 +144285,7 @@ var init_dashboard_messaging_runner = __esm(() => {
 });
 
 // src/workers/email-source/dashboard-messaging-service.ts
-import { spawn as spawn11 } from "node:child_process";
+import { spawn as spawn12 } from "node:child_process";
 import { closeSync as closeSync30, constants as constants16, fstatSync as fstatSync7, openSync as openSync29, readFileSync as readFileSync76 } from "node:fs";
 import { arch, platform as platform2, release } from "node:os";
 import { basename as basename19, join as join118 } from "node:path";
@@ -144188,7 +144342,7 @@ function readQr(path) {
   }
 }
 async function unlinkHelper(command, env) {
-  const child2 = spawn11(command, ["--unlink"], { env, stdio: ["ignore", "ignore", "pipe"] });
+  const child2 = spawn12(command, ["--unlink"], { env, stdio: ["ignore", "ignore", "pipe"] });
   let errorTail = "";
   child2.stderr?.on("data", (chunk) => {
     errorTail = (errorTail + Buffer.from(chunk).toString("utf8")).slice(-4096);
@@ -144215,7 +144369,7 @@ function listingErrorCode(stderr) {
   return;
 }
 async function listHelper(command, args, env, input) {
-  const child2 = spawn11(command, args, { env, stdio: ["pipe", "pipe", "pipe"] });
+  const child2 = spawn12(command, args, { env, stdio: ["pipe", "pipe", "pipe"] });
   const stdin = child2.stdin;
   const stdout = child2.stdout;
   const stderr = child2.stderr;
@@ -144400,6 +144554,8 @@ function createDashboardMessagingService(options) {
       if (operation === "start") {
         if (selecting.has(source))
           throw new Error("Finish choosing chats first.");
+        if (manager.busy(source))
+          return manager.status(source);
         return options.withGrantMutation(async () => {
           if (manager.busy(source))
             throw new Error("Pairing is already running.");
@@ -147313,6 +147469,27 @@ function mountDashboardController(options) {
   const messagingBusy = new WeakSet;
   const messagingQueued = new Map;
   const messagingSeen = new Set;
+  const messagingActive = new WeakSet;
+  const messagingMisses = new Map;
+  const PAIRING_ACTIVE = (state) => state !== "" && !["paired", "complete", "completed", "failed", "cancelled", "idle", "not_paired", "scope_selection_required"].includes(state);
+  const stillWorkingWords = (source) => source === "whatsapp" ? "Still preparing WhatsApp on this computer. The first time can take about a minute." : "Still working on this computer…";
+  function keepPolling(card) {
+    if (!messagingActive.has(card))
+      return false;
+    const misses = (messagingMisses.get(card) ?? 0) + 1;
+    if (misses > 60) {
+      messagingMisses.delete(card);
+      messagingActive.delete(card);
+      return false;
+    }
+    messagingMisses.set(card, misses);
+    const delay2 = Math.min(1e4, 1200 * 2 ** Math.min(misses - 1, 3));
+    messagingTimers.set(card, setTimeout(() => {
+      messagingTimers.delete(card);
+      messagingRequest(card, "status");
+    }, delay2));
+    return true;
+  }
   function resumeMessaging() {
     messagingTimers.forEach((timer, card) => {
       if (!card.isConnected) {
@@ -147366,6 +147543,11 @@ function mountDashboardController(options) {
       const inputSlot = card.querySelector("[data-messaging-input]");
       const qr = card.querySelector("[data-messaging-qr]");
       if (result.status < 200 || result.status >= 300 || body.ok === false) {
+        if (operation === "status" && result.status !== 401 && result.status !== 403 && keepPolling(card)) {
+          if (status)
+            status.textContent = stillWorkingWords(source);
+          return;
+        }
         if (status)
           status.textContent = result.status === 401 || result.status === 403 ? "Open dashboard controls on this computer to use this, then try again." : "Could not complete this step. Try again from this computer.";
         if (qr) {
@@ -147377,6 +147559,11 @@ function mountDashboardController(options) {
         return;
       }
       const state = typeof body.state === "string" ? body.state : "";
+      messagingMisses.delete(card);
+      if (PAIRING_ACTIVE(state))
+        messagingActive.add(card);
+      else
+        messagingActive.delete(card);
       if (["paired", "complete", "completed"].includes(state)) {
         const row = card.querySelector(".actionrow");
         const start = row?.querySelector('form[data-messaging-kind="start"]');
@@ -147441,7 +147628,7 @@ function mountDashboardController(options) {
           const summary = document.createElement("summary");
           summary.textContent = "How to fix";
           const hint = document.createElement("p");
-          hint.textContent = source === "whatsapp" ? body.unlinked === "removed" ? "Olympus removed itself from your phone's linked devices, so there is nothing to clean up. Pair again; if it fails again, press Copy details and send what it copies to support." : body.unlinked === "offline" || body.unlinked === "failed" ? "Olympus could not remove itself from your phone. Remove the Olympus entry in WhatsApp → Settings → Linked devices, then pair again. If it fails again, press Copy details and send what it copies to support." : "Pair again. If it fails again, press Copy details and send what it copies to support." : "Check api_id and api_hash at my.telegram.org/apps. Enter the latest code from Telegram and your two-step verification password if asked. Then try pairing again.";
+          hint.textContent = source === "whatsapp" ? body.reason === "bridge_build_tools_missing" ? "This install has no ready WhatsApp helper, and this computer has no Go and C compiler to build one. Reinstall Olympus with the installer from olympusplugin.ai, which includes the helper, then pair again." : body.reason === "bridge_build_failed" ? "Olympus could not build its WhatsApp helper on this computer. Reinstall Olympus with the installer from olympusplugin.ai, which includes the helper, then pair again." : body.unlinked === "removed" ? "Olympus removed itself from your phone's linked devices, so there is nothing to clean up. Pair again; if it fails again, press Copy details and send what it copies to support." : body.unlinked === "offline" || body.unlinked === "failed" ? "Olympus could not remove itself from your phone. Remove the Olympus entry in WhatsApp → Settings → Linked devices, then pair again. If it fails again, press Copy details and send what it copies to support." : "Pair again. If it fails again, press Copy details and send what it copies to support." : "Check api_id and api_hash at my.telegram.org/apps. Enter the latest code from Telegram and your two-step verification password if asked. Then try pairing again.";
           details.append(summary, hint);
           const retry = document.createElement("button");
           retry.type = "button";
@@ -147475,7 +147662,7 @@ function mountDashboardController(options) {
       if (cardCancel)
         cardCancel.hidden = ["idle", "failed", "cancelled", "completed", "complete", "paired", "not_paired"].includes(state);
       if (status)
-        status.textContent = label ? `Enter ${label.toLowerCase()} to continue.` : state === "failed" ? (body.registrationMayBeSaved === true ? "Pairing could not finish. The connection may already be saved; check connection and capture status before retrying." : "Pairing failed. Start pairing again to retry.") + (typeof body.reason === "string" && /^[a-z0-9_]{1,64}$/.test(body.reason) ? ` (${body.reason})` : "") : state === "not_paired" ? "Not paired yet. Pair this account first, then choose the chats Olympus may read." : state === "idle" ? "Pair this account to choose the chats Olympus may read." : state === "scope_selection_required" ? "Paired. Nothing is being captured. Choose what Olympus may read." : state === "committing" ? "Saving the connection and chat permission…" : state === "paired" || state === "complete" || state === "completed" ? "Pairing completed. Manage chat choices below; check current connection and sync status on the main dashboard." : state === "cancelled" ? source === "whatsapp" ? body.unlinked === "removed" ? "Setup cancelled. Capture permission was not changed, and Olympus removed itself from your phone's linked devices." : body.unlinked === "offline" || body.unlinked === "failed" ? "Setup cancelled. Capture permission was not changed. Olympus could not remove itself from your phone: remove Olympus in WhatsApp linked devices." : "Setup cancelled. Capture permission was not changed. If your phone linked Olympus, Olympus removes it from WhatsApp linked devices." : "Setup cancelled. Capture permission was not changed. If you linked a new device, remove Olympus in Telegram active sessions to unlink it." : operation === "scope" ? "Chat choices saved. Capture will use this selection." : operation === "chats" ? "Choose the chats Olympus may read." : source === "whatsapp" ? body.linked === true ? "Linked. Reading your chat list from WhatsApp; this can take a minute…" : "Open WhatsApp → Settings → Linked devices and scan the QR code." : "Pairing is running on this computer…";
+        status.textContent = label ? `Enter ${label.toLowerCase()} to continue.` : state === "failed" ? (body.registrationMayBeSaved === true ? "Pairing could not finish. The connection may already be saved; check connection and capture status before retrying." : "Pairing failed. Start pairing again to retry.") + (typeof body.reason === "string" && /^[a-z0-9_]{1,64}$/.test(body.reason) ? ` (${body.reason})` : "") : state === "not_paired" ? "Not paired yet. Pair this account first, then choose the chats Olympus may read." : state === "idle" ? "Pair this account to choose the chats Olympus may read." : state === "scope_selection_required" ? "Paired. Nothing is being captured. Choose what Olympus may read." : state === "committing" ? "Saving the connection and chat permission…" : state === "paired" || state === "complete" || state === "completed" ? "Pairing completed. Manage chat choices below; check current connection and sync status on the main dashboard." : state === "cancelled" ? source === "whatsapp" ? body.unlinked === "removed" ? "Setup cancelled. Capture permission was not changed, and Olympus removed itself from your phone's linked devices." : body.unlinked === "offline" || body.unlinked === "failed" ? "Setup cancelled. Capture permission was not changed. Olympus could not remove itself from your phone: remove Olympus in WhatsApp linked devices." : "Setup cancelled. Capture permission was not changed. If your phone linked Olympus, Olympus removes it from WhatsApp linked devices." : "Setup cancelled. Capture permission was not changed. If you linked a new device, remove Olympus in Telegram active sessions to unlink it." : operation === "scope" ? "Chat choices saved. Capture will use this selection." : operation === "chats" ? "Choose the chats Olympus may read." : source === "whatsapp" ? body.linked === true ? "Linked. Reading your chat list from WhatsApp; this can take a minute…" : typeof body.qr === "string" && body.qr ? "Open WhatsApp → Settings → Linked devices and scan the QR code." : "Preparing WhatsApp. The first time can take about a minute." : "Pairing is running on this computer…";
       if (qr) {
         const value2 = typeof body.qr === "string" ? body.qr : "";
         if (/^data:image\/(?:png|jpeg|webp);base64,[A-Za-z0-9+/=]+$/.test(value2)) {
@@ -147601,7 +147788,10 @@ function mountDashboardController(options) {
         }, 1200));
       }
     } catch {
-      if (status)
+      if (operation === "status" && keepPolling(card)) {
+        if (status)
+          status.textContent = stillWorkingWords(source);
+      } else if (status)
         status.textContent = "Could not reach pairing on this computer. Try again.";
     } finally {
       messagingBusy.delete(card);
@@ -148144,14 +148334,14 @@ function mountDashboardController(options) {
 var DASHBOARD_REDRAW_EVENT = "olympus:redraw";
 
 // src/core/computer-identity.ts
-import { spawnSync as spawnSync21 } from "node:child_process";
+import { spawnSync as spawnSync20 } from "node:child_process";
 import { hostname, userInfo as userInfo3 } from "node:os";
 function dashboardComputerIdentity() {
   if (fixedIdentity !== undefined)
     return fixedIdentity;
   let name = hostname();
   if (process.platform === "darwin") {
-    const result = spawnSync21("/usr/sbin/scutil", ["--get", "ComputerName"], { encoding: "utf8", timeout: 1000 });
+    const result = spawnSync20("/usr/sbin/scutil", ["--get", "ComputerName"], { encoding: "utf8", timeout: 1000 });
     if (result.status === 0 && result.stdout.trim())
       name = result.stdout.trim();
   }
@@ -149963,6 +150153,8 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
   const C2 = config2.connection;
   const GLOBAL_STATES = ["not_connected", "installing", "mac_offline", "relay_unavailable"];
   const BUSY_GRACE_MS = 120000;
+  const LOADING_SLOW_AFTER_MS = 8000;
+  const startedAt = Date.now();
   const state = {
     data: null,
     relayDown: false,
@@ -150103,6 +150295,15 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
   function onComputer() {
     return state.hostKind === "computer";
   }
+  function callTimeoutMs() {
+    return onComputer() ? Math.max(config2.resultTimeoutMs, config2.computerResultTimeoutMs) : config2.resultTimeoutMs;
+  }
+  function timedOutOnComputer(error2) {
+    return onComputer() && error2 instanceof Error && error2.message === "timeout";
+  }
+  function loadingWords() {
+    return state.slow || Date.now() - startedAt >= LOADING_SLOW_AFTER_MS ? P.loadingSlow : P.loading;
+  }
   function readOpenAiGlobals() {
     const host = openai();
     if (!host)
@@ -150126,7 +150327,7 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
       clearTimeout(resultTimer);
     resultTimer = setTimeout(() => {
       resultTimer = null;
-      if (!state.data) {
+      if (!state.data && !onComputer()) {
         relayFailed({ kind: "no_answer" });
         render();
       }
@@ -150228,7 +150429,7 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     state.notice = "";
     state.actionError = null;
     render();
-    request("tools/call", { name, arguments: args || {} }, config2.resultTimeoutMs).then((result) => {
+    request("tools/call", { name, arguments: args || {} }, callTimeoutMs()).then((result) => {
       if (state.busy === key2)
         state.busy = "";
       if (mine !== generation) {
@@ -150300,7 +150501,13 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
         state.busy = "";
       if (name === config2.syncTool)
         state.syncPressed = {};
-      if (mine === generation)
+      if (mine === generation && name === config2.toolName && timedOutOnComputer(error2)) {
+        state.slow = true;
+        if (refreshTimer)
+          clearTimeout(refreshTimer);
+        refreshTimer = setTimeout(backgroundRefresh, R.activeMs);
+        nextRefreshAt = Date.now() + R.activeMs;
+      } else if (mine === generation)
         relayFailed(rejectionFailure(error2));
       redraw();
     });
@@ -150311,7 +150518,7 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
   function callRaw(name, args) {
     const privacyInference = name === config2.privacy.tools.questions || name === config2.privacy.tools.check;
     const providerListing = name === config2.picker.tools.scopeList || name === config2.picker.tools.scopeSet;
-    const timeoutMs = privacyInference ? Math.max(config2.resultTimeoutMs, 150000) : providerListing ? Math.max(config2.resultTimeoutMs, 120000) : config2.resultTimeoutMs;
+    const timeoutMs = privacyInference ? Math.max(config2.resultTimeoutMs, 150000) : providerListing ? Math.max(config2.resultTimeoutMs, 120000) : callTimeoutMs();
     return request("tools/call", { name, arguments: args || {} }, timeoutMs);
   }
   function openLink(href) {
@@ -151287,10 +151494,10 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
       add(item, add(el("div", "archive-actions"), fixControl({ label: fill2(A.account.add, { source }), tool: H.archiveApproveTool, args: { request_id: request2.id, confirm_account: true } }, key2 + ":confirm", "plain", false), ...asked.reconfirm ? [] : [fixControl({ label: A.account.apart, tool: H.archiveApproveTool, args: { request_id: request2.id, keep_apart: true } }, key2 + ":apart", "plain", false)], fixControl({ label: A.decline, tool: H.archiveDeclineTool, args: { request_id: request2.id } }, key2 + ":decline", "plain", false)));
       return item;
     }
-    const startedAt = state.archiveStarting[request2.id];
-    if (request2.status !== "pending" || startedAt !== undefined && Date.now() - startedAt > 60000)
+    const startedAt2 = state.archiveStarting[request2.id];
+    if (request2.status !== "pending" || startedAt2 !== undefined && Date.now() - startedAt2 > 60000)
       delete state.archiveStarting[request2.id];
-    else if (startedAt !== undefined) {
+    else if (startedAt2 !== undefined) {
       const line2 = el("p", "muted", fill2(A.startingLine, { name: request2.name }));
       line2.setAttribute("role", "status");
       return add(item, line2);
@@ -152038,7 +152245,7 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     const top = connectionBanner() || (data2 && data2.blocker ? itemBanner(data2.blocker, "blocker", false) : null) || (data2 && data2.needsYou && data2.needsYou[0] ? itemBanner(data2.needsYou[0], "need:" + String(data2.needsYou[0].id || 0), false) : null);
     add(card, top);
     if (!top && !data2)
-      add(card, el("p", "muted", P.loading));
+      add(card, el("p", "muted", loadingWords()));
     if (data2 && data2.progress && !state.relayDown && !progressFinished(data2.progress))
       add(card, el("p", "progress-line", progressText(data2.progress)));
     else if (!top && data2)
@@ -152062,7 +152269,7 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     }
     if (!data2) {
       if (!state.relayDown)
-        add(page2, el("p", "muted", P.loading));
+        add(page2, el("p", "muted", loadingWords()));
       return page2;
     }
     add(page2, data2.blocker ? itemBanner(data2.blocker, "blocker", true) : null);
@@ -152200,7 +152407,7 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
       const mine = supersede();
       state.busy = "refresh";
       render(focusKey);
-      request("tools/call", { name: config2.toolName, arguments: {} }, config2.resultTimeoutMs).then((result) => {
+      request("tools/call", { name: config2.toolName, arguments: {} }, callTimeoutMs()).then((result) => {
         if (state.busy === "refresh")
           state.busy = "";
         if (mine !== generation)
@@ -152305,7 +152512,7 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     }
     refreshing = true;
     const mine = generation;
-    request("tools/call", { name: config2.toolName, arguments: {} }, config2.resultTimeoutMs).then((result) => {
+    request("tools/call", { name: config2.toolName, arguments: {} }, callTimeoutMs()).then((result) => {
       refreshing = false;
       if (mine !== generation)
         return scheduleRefresh();
@@ -152318,7 +152525,7 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
       refreshing = false;
       if (mine !== generation)
         return scheduleRefresh();
-      if (busyNotGone(error2)) {
+      if (busyNotGone(error2) || timedOutOnComputer(error2)) {
         state.slow = true;
         redraw();
         refreshTimer = setTimeout(backgroundRefresh, R.activeMs);
@@ -152372,6 +152579,10 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
   });
   if (!state.data)
     waitForResult();
+  setTimeout(() => {
+    if (!state.data)
+      redraw();
+  }, LOADING_SLOW_AFTER_MS);
 }
 var RELAY_FAILURE_TEXT_MAX = 300;
 
@@ -155996,6 +156207,7 @@ function chatgptDashboardPageHtml(options = {}) {
     page: DASHBOARD_CHATGPT_PAGE_COPY,
     statusTone: STATUS_TONE,
     resultTimeoutMs: options.resultTimeoutMs ?? CHATGPT_DASHBOARD_RESULT_TIMEOUT_MS,
+    computerResultTimeoutMs: options.computerResultTimeoutMs ?? options.resultTimeoutMs ?? CHATGPT_DASHBOARD_COMPUTER_RESULT_TIMEOUT_MS,
     staleAfterMs: options.staleAfterMs ?? CHATGPT_DASHBOARD_STALE_AFTER_MS,
     refresh: { ...CHATGPT_DASHBOARD_REFRESH, ...options.refresh },
     picker: {
@@ -156057,7 +156269,7 @@ function privacyProgramSource() {
 function scriptJson(value2) {
   return JSON.stringify(value2).split("<").join("\\u003c").split("\u2028").join("\\u2028").split("\u2029").join("\\u2029");
 }
-var CHATGPT_DASHBOARD_RESULT_TIMEOUT_MS = 20000, CHATGPT_INLINE_ERROR_CODES, CHATGPT_DASHBOARD_STALE_AFTER_MS, CHATGPT_DASHBOARD_REFRESH, STATUS_TONE, CHATGPT_DASHBOARD_LIGHT, CHATGPT_DASHBOARD_DARK, CHATGPT_DASHBOARD_CSS, CHATGPT_ARCHIVES_SOURCE_ID = "archive.imports", CHATGPT_DASHBOARD_LANDED_MS = 4000;
+var CHATGPT_DASHBOARD_RESULT_TIMEOUT_MS = 20000, CHATGPT_DASHBOARD_COMPUTER_RESULT_TIMEOUT_MS = 120000, CHATGPT_INLINE_ERROR_CODES, CHATGPT_DASHBOARD_STALE_AFTER_MS, CHATGPT_DASHBOARD_REFRESH, STATUS_TONE, CHATGPT_DASHBOARD_LIGHT, CHATGPT_DASHBOARD_DARK, CHATGPT_DASHBOARD_CSS, CHATGPT_ARCHIVES_SOURCE_ID = "archive.imports", CHATGPT_DASHBOARD_LANDED_MS = 4000;
 var init_page = __esm(() => {
   init_vocabulary();
   init_dashboard_contract();
@@ -159350,7 +159562,7 @@ function dashboardLaunchRefusedResponse(status) {
     error: {
       code: status === "origin_mismatch" ? "dashboard_launch_origin_mismatch" : "dashboard_launch_ticket_invalid",
       status: 403,
-      message: "This opening link is no longer valid. Run the dashboard command again for a fresh one."
+      message: "This opening link was already used or has expired. Open the dashboard from your bookmark, or ask your agent for a new link."
     },
     policy: { single_use: true, origin_bound: true, durable_secret_in_url: false }
   }), {
@@ -185043,7 +185255,7 @@ var init_source_scope_browser = __esm(() => {
 });
 
 // src/workers/local-files/mac-settings.ts
-import { spawn as spawn12 } from "node:child_process";
+import { spawn as spawn13 } from "node:child_process";
 import { existsSync as existsSync95 } from "node:fs";
 import { homedir as homedir46 } from "node:os";
 import { join as join126 } from "node:path";
@@ -185052,7 +185264,7 @@ function helperAppPathForHome(home2 = homedir46()) {
 }
 function revealHelperAndOpenFullDiskAccess(deps = {}) {
   const run2 = deps.run ?? ((command, args) => {
-    spawn12(command, args, { stdio: "ignore", detached: true }).unref();
+    spawn13(command, args, { stdio: "ignore", detached: true }).unref();
   });
   const helper = deps.helperApp ?? helperAppPathForHome();
   if ((deps.exists ?? existsSync95)(helper))
@@ -212910,6 +213122,26 @@ ${key2}`;
   const extractionReadinessLedger = fileExtractionRuntime ? createExtractionReadinessLedger(fileExtractionRuntime.jobs, {
     terminalRetryPaths: fileExtractionRuntime.terminalRetryPaths,
     classifyUnreadable: unreadableVerdict,
+    currentItems(refs) {
+      const answers = refs.map(() => false);
+      const check = (corpusId, store, view3) => {
+        if (!store)
+          return;
+        const indexes = refs.flatMap((ref, index) => ref.corpusId === corpusId ? [index] : []);
+        if (indexes.length === 0)
+          return;
+        const readScope = connectorStoreReadScope(store);
+        if (!readScope.allowed || !readScope.contentAllowed)
+          return;
+        const matched = (view3 ?? store).itemsMatchingExtractionRefs(indexes.map((index) => refs[index]), readScope.contentFilters);
+        indexes.forEach((index, position) => {
+          answers[index] = matched[position] === true;
+        });
+      };
+      check(LOCAL_FILES_CORPUS_ID, localFilesConnectorStore, localFilesExtractionView);
+      check(DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID, dropboxConnectorStore, dropboxExtractionView);
+      return answers;
+    },
     currentItem(ref) {
       if (ref.corpusId === LOCAL_FILES_CORPUS_ID && localFilesConnectorStore) {
         const readScope2 = connectorStoreReadScope(localFilesConnectorStore);
@@ -212972,6 +213204,8 @@ ${key2}`;
     verdict: unreadableVerdict,
     locate: locateUnreadableItem,
     parentOf: unreadableParentOfItem,
+    countsMaxAgeMs: DASHBOARD_READINESS_LEDGER_MAX_AGE_MS,
+    turn: ingestionTurn,
     openTarget: (provider, locator) => Object.hasOwn(unreadableOpenTargets, provider) ? unreadableOpenTargets[provider](locator) : provider === "google_drive" && googleFilePage(locator) ? { url: locator } : provider === "gmail" && /^https:\/\/mail\.google\.com\/mail\/u\/0\/#all\/[A-Za-z0-9_-]+$/.test(locator) ? { url: locator } : undefined,
     ...process.platform === "darwin" || process.platform === "linux" ? {
       openFile: (path, eligible) => openLocalFile(path, eligible, [...unreadableDropboxRoots(), ...localFilesOpenableRoots()])
@@ -212984,7 +213218,7 @@ ${key2}`;
     },
     connectorStores,
     connectorStoreStatusScope,
-    ...unreadableFiles ? { unreadableCount: (corpusId) => unreadableFiles.recheck(corpusId).unreadable } : {},
+    ...unreadableFiles ? { unreadableCount: (corpusId) => unreadableFiles.recheck(corpusId)?.unreadable } : {},
     retrievalPolicy: (domain) => sovereigntyEngine.config.retrieval.trustDomains[domain],
     retrievalAvailability,
     tierClassification: () => {
@@ -216403,7 +216637,7 @@ init_remote_open();
 init_worker_transport();
 init_atomic_file();
 import { createHash as createHash76 } from "node:crypto";
-import { spawnSync as spawnSync18 } from "node:child_process";
+import { spawnSync as spawnSync17 } from "node:child_process";
 import { existsSync as existsSync76, lstatSync as lstatSync39, mkdirSync as mkdirSync46, readFileSync as readFileSync64 } from "node:fs";
 import { homedir as homedir33, platform as osPlatform4 } from "node:os";
 import { dirname as dirname77, isAbsolute as isAbsolute32, join as join106 } from "node:path";
@@ -216412,7 +216646,7 @@ import { dirname as dirname77, isAbsolute as isAbsolute32, join as join106 } fro
 init_atomic_file();
 init_operation_error();
 import { createHash as createHash75, randomUUID as randomUUID26 } from "node:crypto";
-import { spawnSync as spawnSync17 } from "node:child_process";
+import { spawnSync as spawnSync16 } from "node:child_process";
 import {
   chmodSync as chmodSync29,
   closeSync as closeSync29,
@@ -216587,7 +216821,7 @@ function extractArchive(artifactPath, staging) {
   runTar(["-xzf", artifactPath, "-C", staging, "--strip-components=1"], "extract");
 }
 function runTar(args, action) {
-  const result = spawnSync17("tar", args, { encoding: "utf8", maxBuffer: 16 * 1024 * 1024 });
+  const result = spawnSync16("tar", args, { encoding: "utf8", maxBuffer: 16 * 1024 * 1024 });
   if (result.status !== 0) {
     throw new OperationError("invalid_params", `Could not ${action} the Olympus upgrade artifact.`, (result.stderr || result.stdout || "").trim().slice(0, 240) || undefined);
   }
@@ -216623,7 +216857,7 @@ function validateExtractedPackage(root, bunBin, executePreflight) {
     throw new OperationError("invalid_params", "Upgrade artifact package and plugin manifest versions do not match.");
   }
   if (executePreflight) {
-    const result = spawnSync17(bunBin, [cliPath, "--version"], { encoding: "utf8", timeout: 15000 });
+    const result = spawnSync16(bunBin, [cliPath, "--version"], { encoding: "utf8", timeout: 15000 });
     if (result.status !== 0 || result.stdout.trim() !== `olympus ${version}`) {
       throw new OperationError("invalid_params", "Upgrade artifact CLI preflight did not report its declared Olympus version.");
     }
@@ -217416,7 +217650,7 @@ function defaultWorkerReadinessProbe(url, bunBin) {
     "} catch { process.exit(1); }"
   ].join(`
 `);
-  const result = spawnSync18(executable, ["-e", script2, url], {
+  const result = spawnSync17(executable, ["-e", script2, url], {
     encoding: "utf8",
     stdio: ["ignore", "ignore", "ignore"],
     timeout: 5000
@@ -217675,7 +217909,7 @@ init_privacy_language();
 init_messaging_runtime();
 import { existsSync as existsSync80, readFileSync as readFileSync66 } from "node:fs";
 import { randomBytes as randomBytes19 } from "node:crypto";
-import { spawnSync as spawnSync19 } from "node:child_process";
+import { spawnSync as spawnSync18 } from "node:child_process";
 import { homedir as homedir34 } from "node:os";
 init_operation_error();
 init_sovereignty();
@@ -217918,17 +218152,17 @@ function normalizeSetupPlatform(platform2) {
   return "other";
 }
 function defaultCommandExists2(command) {
-  const result = spawnSync19("sh", ["-lc", `command -v ${shellQuote4(command)} >/dev/null 2>&1`], {
+  const result = spawnSync18("sh", ["-lc", `command -v ${shellQuote4(command)} >/dev/null 2>&1`], {
     stdio: "ignore"
   });
   return result.status === 0;
 }
 function defaultPythonModuleExists2(pythonCommand, moduleName) {
-  const result = spawnSync19(pythonCommand, ["-c", `import ${moduleName}`], { stdio: "ignore" });
+  const result = spawnSync18(pythonCommand, ["-c", `import ${moduleName}`], { stdio: "ignore" });
   return result.status === 0;
 }
 function defaultCommandVersion(command) {
-  const result = spawnSync19(command, ["--version"], {
+  const result = spawnSync18(command, ["--version"], {
     encoding: "utf8",
     stdio: ["ignore", "pipe", "ignore"]
   });
@@ -217982,7 +218216,7 @@ init_worker_transport();
 init_config();
 init_engine_brief();
 init_engine_service();
-import { spawn as spawn8 } from "node:child_process";
+import { spawn as spawn9 } from "node:child_process";
 import { createInterface as createInterface2 } from "node:readline";
 import { existsSync as existsSync83, readFileSync as readFileSync68 } from "node:fs";
 import { homedir as homedir37 } from "node:os";
@@ -217992,7 +218226,7 @@ import { dirname as dirname83, join as join110 } from "node:path";
 init_engine_service();
 init_operation_error();
 init_package_root();
-import { spawnSync as spawnSync20 } from "node:child_process";
+import { spawnSync as spawnSync19 } from "node:child_process";
 import { existsSync as existsSync82, lstatSync as lstatSync41, mkdirSync as mkdirSync50, mkdtempSync as mkdtempSync5, renameSync as renameSync18, rmSync as rmSync32 } from "node:fs";
 import { homedir as homedir36 } from "node:os";
 import { join as join109, resolve as resolve22 } from "node:path";
@@ -218001,7 +218235,7 @@ var MACOS_HELPER_TEAM_ENV = "OLYMPUS_MACOS_HELPER_TEAM_ID";
 function run(exec, command, args, env) {
   if (exec)
     return exec(command, args);
-  const result = spawnSync20(command, args, { encoding: "utf8", ...env ? { env } : {} });
+  const result = spawnSync19(command, args, { encoding: "utf8", ...env ? { env } : {} });
   return { status: result.status, stdout: result.stdout ?? "", stderr: result.stderr ?? "" };
 }
 function parseCodesignDetails(text3) {
@@ -218397,7 +218631,7 @@ async function probeWorker(fetchImpl, baseUrl, socket) {
 }
 async function followEngineLogs(deps, lines) {
   const paths = engineServicePaths(deps);
-  const child2 = spawn8("tail", ["-n", String(lines), "-F", paths.logPath, paths.errorLogPath], { stdio: ["ignore", "pipe", "ignore"] });
+  const child2 = spawn9("tail", ["-n", String(lines), "-F", paths.logPath, paths.errorLogPath], { stdio: ["ignore", "pipe", "ignore"] });
   const reader = createInterface2({ input: child2.stdout });
   reader.on("line", (line2) => console.log(redactLogLine(line2)));
   await new Promise((resolve23) => child2.once("exit", () => resolve23()));

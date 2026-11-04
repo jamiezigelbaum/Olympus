@@ -309,6 +309,24 @@ describe('connection states', () => {
     expect(host.button('Try again').disabled).toBe(false);
   });
 
+  test('on the computer a slow read is busy, never unreachable, and the page reads again by itself', async () => {
+    const host = mount({ html: chatgptDashboardPageHtml({ resultTimeoutMs: 20, computerResultTimeoutMs: 60, refresh: { activeMs: 10 } }) });
+    host.respond('ui/initialize', { hostContext: { 'olympus/host': { kind: 'computer', readOnly: false, links: {} } } });
+    await sleep(0);
+    expect(host.toolCalls()).toEqual([{ name: 'olympus_dashboard', arguments: {} }]);
+    // Past the relay's limit, inside the computer's: still loading.
+    await sleep(40);
+    expect(host.text()).not.toContain(DASHBOARD_CHATGPT_CONNECTION_COPY.relay_unavailable.title);
+    // Past the computer's too: the calm line, and another read on its own.
+    await sleep(70);
+    expect(host.text()).not.toContain(DASHBOARD_CHATGPT_CONNECTION_COPY.relay_unavailable.title);
+    expect(host.text()).toContain(DASHBOARD_CHATGPT_PAGE_COPY.loadingSlow);
+    expect(host.toolCalls().length).toBe(2);
+    host.respond('tools/call', { structuredContent: model() });
+    await sleep(0);
+    expect(host.text()).not.toContain(DASHBOARD_CHATGPT_PAGE_COPY.loadingSlow);
+  });
+
   test('an error tool result is relay unavailable too', () => {
     const host = mount();
     host.push({ isError: true, content: [{ type: 'text', text: 'Your computer is offline' }] });

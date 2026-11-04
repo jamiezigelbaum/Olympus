@@ -468,6 +468,13 @@ export interface ExtractionScopedReadinessOptions {
   /** Current store identity/scope fence for rows read from this separate queue. */
   currentItem?: (ref: ExtractionItemRef) => boolean;
   /**
+   * The same fence for many rows at once, one answer per ref in order. Used
+   * instead of currentItem when given: a store with a large queue was asked
+   * one query per job, which held the worker for seconds on every status read
+   * (Sparta, 2026-11-04: most of 9-12 s dashboard freezes).
+   */
+  currentItems?: (refs: readonly ExtractionItemRef[]) => readonly boolean[];
+  /**
    * Asked about every item extraction gave up on before it is counted, so the
    * unreadable count and the list of unreadable files come from one decision
    * (ExtractionUnreadableVerdict). Absent: every such item is unreadable.
@@ -1614,9 +1621,15 @@ export class LocalFileExtractionJobStore {
       ) as ExtractionJobSqlRow[];
       for (const row of rows) byJobId.set(row.job_id, row);
     }
-    const rows = [...byJobId.values()].filter((row) => (
-      options.currentItem ? options.currentItem(refFromRow(row)) : true
-    ));
+    const allRows = [...byJobId.values()];
+    let rows = allRows;
+    if (options.currentItems) {
+      const current = options.currentItems(allRows.map(refFromRow));
+      rows = allRows.filter((_row, index) => current[index] === true);
+    } else if (options.currentItem) {
+      const currentItem = options.currentItem;
+      rows = allRows.filter((row) => currentItem(refFromRow(row)));
+    }
     const byItem = new Map<string, ExtractionJobSqlRow[]>();
     for (const row of rows) {
       const existing = byItem.get(row.local_item_id);
