@@ -7077,6 +7077,7 @@ export async function main(): Promise<void> {
         budgetStatePath: join(dirname(resolveClassificationLedgerPath(process.env)), 'tier-sniffer-budget.json'),
         intervalMs: snifferEnv.intervalMs,
         ...(snifferEnv.maxCallsPerPass !== undefined ? { maxCallsPerPass: snifferEnv.maxCallsPerPass } : {}),
+        ...(snifferEnv.concurrentCalls !== undefined ? { concurrentCalls: snifferEnv.concurrentCalls } : {}),
         maxCallsPerDay: snifferEnv.maxCallsPerDay,
         answersInFlight: () => snifferResource !== undefined && localModelActivity.busy(snifferResource),
         // A waiting Inbox question past its deferral stops the pass, so its answer runs, then classification resumes.
