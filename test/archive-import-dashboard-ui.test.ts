@@ -1523,6 +1523,22 @@ describe('an import inside its source\'s card', () => {
     expect(lines[1]).toContain(A.inSource.alreadyThere.one);
   });
 
+  test('a later read with a lower percent never moves the bar back (owner, Sparta 2026-11-04)', async () => {
+    let answer = withSourceImports([{ sourceId: SOURCE, imports: [{ ...IMPORT, status: 'importing', percent: 42, read: 500, alreadyThere: 0 }] }]);
+    const page = await mount({
+      [DASHBOARD_TOOL_NAME]: () => answer,
+      [ARCHIVE_STOP_TOOL_NAME]: () => ({ content: [{ type: 'text', text: 'Not stopped.' }], structuredContent: { ok: false } }),
+    });
+    expect(sourceCard(page).querySelector('li[data-source-import]')!.textContent).toContain(fill(A.inSource.importingLineNone, { percent: '42' }));
+    answer = withSourceImports([{ sourceId: SOURCE, imports: [{ ...IMPORT, status: 'importing', percent: 30, read: 650, alreadyThere: 0 }] }]);
+    const reads = page.calls(DASHBOARD_TOOL_NAME).length;
+    page.button(A.inSource.stop).click();
+    await until(() => page.calls(DASHBOARD_TOOL_NAME).length > reads && (sourceCard(page).querySelector('li[data-source-import]')?.textContent ?? '').includes('650'));
+    const item = sourceCard(page).querySelector('li[data-source-import]')!;
+    expect(item.textContent).toContain(fill(A.inSource.importingLine, { percent: '42', items: fill(A.nouns.email.many, { n: '650' }) }));
+    expect(item.querySelector('[role="progressbar"]')!.getAttribute('aria-valuenow')).toBe('42');
+  });
+
   test('importing: how far, and Stop; pressing Stop calls the stop tool and keeps what was imported', async () => {
     let answer = withSourceImports([{ sourceId: SOURCE, imports: [{ ...IMPORT, status: 'importing', percent: 42, read: 500, alreadyThere: 120 }] }]);
     const page = await mount({

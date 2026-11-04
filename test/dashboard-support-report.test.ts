@@ -72,3 +72,11 @@ test('the Help route is reachable, and only locally opened controls get a system
     expect(report).not.toContain('SecretNotebook');
   } finally { worker.close(); rmSync(dir, { recursive: true, force: true }); }
 });
+
+test('a source that needs its owner says what it needs, as a closed code', () => {
+  const details = sourceSupportDetails({ sourceId: 'dropbox.files', state: 'Needs you', need: 'answer_readiness' });
+  expect(details).toContain('Failure: none');
+  expect(details).toContain('Needs: answer_readiness');
+  expect(sourceSupportDetails({ sourceId: 'dropbox.files', state: 'Needs you', need: account })).toContain('Needs: unknown');
+  expect(sourceSupportDetails({ sourceId: 'dropbox.files', state: 'Fresh' })).not.toContain('Needs:');
+});

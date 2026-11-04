@@ -175,6 +175,8 @@ export function chatgptDashboardClient(
     archiveConfirm: Record<string, { source: string; reconfirm?: boolean }>;
     /** Requests the person approved here, until a read stops listing them as pending (or the hold runs out). */
     archiveStarting: Record<string, number>;
+    /** The highest percent shown for each importing archive on this page: a read never moves its bar back. */
+    archivePeak: Record<string, number>;
     /** Computer only: the source an open link asked to land on, until the panel has landed there. */
     landing: string;
     /** The landing opens that card's Import an archive (a Keys link), not its See why. */
@@ -209,6 +211,7 @@ export function chatgptDashboardClient(
     // Agent requests whose export did not prove its account: asked in the request's own row, by request id.
     archiveConfirm: {},
     archiveStarting: {},
+    archivePeak: {},
     unreadablePages: {},
     landing: '',
     landingImport: false,
@@ -364,6 +367,16 @@ export function chatgptDashboardClient(
     state.relayDown = true;
     state.slow = false;
     state.lastFailure = { ...failure, at: Date.now() };
+  }
+
+  /** An importing archive's percent, never below what this page already showed for it. */
+  function steadyPercent(archive: Any): number {
+    const raw = typeof archive.percent === 'number' && isFinite(archive.percent) ? archive.percent : 0;
+    const id = typeof archive.id === 'string' ? archive.id : '';
+    if (!id) return raw;
+    const shown = Math.max(state.archivePeak[id] ?? 0, raw);
+    state.archivePeak[id] = shown;
+    return shown;
   }
 
   /** A read that ran out of time while the computer answered within BUSY_GRACE_MS: busy, not unreachable. */
@@ -1625,7 +1638,7 @@ export function chatgptDashboardClient(
       const pct = typeof entry.percent === 'number' && isFinite(entry.percent) ? entry.percent : 0;
       add(item, el('p', 'muted', fill(S.notRunningLine, { percent: percent(pct) })));
     } else if (entry.status === 'importing') {
-      const pct = typeof entry.percent === 'number' && isFinite(entry.percent) ? entry.percent : 0;
+      const pct = steadyPercent(entry);
       const line = read > 0
         ? fill(S.importingLine, { percent: percent(pct), items: itemCount(entry, read) }) + alreadyThereNote(entry)
         : fill(S.importingLineNone, { percent: percent(pct) });
@@ -1792,7 +1805,7 @@ export function chatgptDashboardClient(
     } else if (halted) {
       add(item, el('p', 'muted', A.removingNotRunningLine));
     } else if (archive.status === 'importing') {
-      const pct = typeof archive.percent === 'number' && isFinite(archive.percent) ? archive.percent : 0;
+      const pct = steadyPercent(archive);
       const line = uncounted ? fill(A.importingLineUncounted, { percent: percent(pct) }) : fill(A.importingLine, { percent: percent(pct), items: itemCount(archive, items) });
       add(item, add(el('div', 'archive-progress'), progressBar(pct, line), el('p', 'muted', line)));
     } else if (archive.status === 'imported') {
