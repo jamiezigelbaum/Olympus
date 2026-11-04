@@ -32,6 +32,9 @@ import {
   CHATGPT_DASHBOARD_LIGHT,
 } from './chatgpt/page.ts';
 import { dashboardHostBridge, type DashboardHostBridgeConfig } from './host-bridge.ts';
+import { mountDashboardController } from '../../control-ui/browser-controller.ts';
+import { renderMessagingCard } from './messaging.ts';
+import { DASHBOARD_THEME_CSS } from './theme.ts';
 import { ARCHIVE_UPLOAD_CHUNK_BYTES } from '../archive-import/staging.ts';
 import {
   DASHBOARD_HOST_GATE_COPY,
@@ -178,6 +181,9 @@ summary{cursor:pointer;color:var(--muted);font-size:0.875rem}
 form{display:flex;flex-wrap:wrap;gap:0.5rem;align-items:center;margin-top:0.5rem}
 input{font:inherit;font-size:0.875rem;min-height:2.25rem;padding:0.375rem 0.75rem;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--text);min-width:0;max-width:100%}
 .status{color:var(--muted);font-size:0.875rem}
+.pairing{width:min(40rem,calc(100% - 2rem));max-height:calc(100% - 2rem);padding:0;border:1px solid var(--line);border-radius:12px;background:var(--bg);color:var(--text)}
+.pairing::backdrop{background:rgba(0,0,0,0.45)}
+.pairing .bar{display:flex;justify-content:flex-end;padding:0.5rem 0.75rem 0}
 `;
 
 /**
@@ -231,7 +237,13 @@ function hostProgram(input: {
   words: typeof DASHBOARD_HOST_GATE_COPY;
   updateWords: { notice: string; copied: string; copyFailed: string };
   updateSupported: boolean;
-}, bridge: typeof dashboardHostBridge): void {
+  /**
+   * Pairing WhatsApp or Telegram in place: Connect on the card opens these
+   * controls over the dashboard instead of the Keys page. `urls` are the
+   * connect links that mean it; `cards` each source's card markup.
+   */
+  pairing: { urls: Record<string, 'telegram' | 'whatsapp'>; cards: Record<string, string>; css: string; messagingPath: string };
+}, bridge: typeof dashboardHostBridge, mount: typeof mountDashboardController): void {
   const frame = document.getElementById('olympus-panel') as HTMLIFrameElement | null;
   if (!frame) return;
   function failed(): never {
@@ -396,12 +408,102 @@ function hostProgram(input: {
     const card = wanted.indexOf(input.importLanding) === 0 ? wanted.slice(input.importLanding.length) : '';
     if (/^[a-z0-9_.]{1,64}$/.test(card)) landing = { sourceId: card, import: true };
   }
+  /** Opens a local-grade session (the messaging routes need one); true once it is. */
+  function openLocalSession(): Promise<boolean> {
+    return fetch(input.localSessionPath, { method: 'POST', cache: 'no-store', credentials: 'same-origin' })
+      .then((response) => (response.ok ? response.json() : undefined))
+      .then((body: { csrf_token?: unknown } | undefined) => {
+        if (body && typeof body.csrf_token === 'string' && body.csrf_token) {
+          csrfToken = body.csrf_token;
+          localSession = true;
+          return true;
+        }
+        return false;
+      }, () => false);
+  }
+  // The pairing controls run here, outside the sandboxed panel, so the QR
+  // and login codes never enter the panel (the same panel ChatGPT loads).
+  // They sit in a shadow root with the local pages' own stylesheet.
+  let closePairing: (() => void) | undefined;
+  const pairingDialog = document.querySelector<HTMLDialogElement>('[data-pairing-dialog]');
+  pairingDialog?.querySelector('[data-pairing-close]')?.addEventListener('click', () => pairingDialog.close());
+  pairingDialog?.addEventListener('close', () => {
+    const close = closePairing;
+    closePairing = undefined;
+    if (close) close();
+  });
+  function openPairing(source: 'telegram' | 'whatsapp'): boolean {
+    const markup = input.pairing.cards[source];
+    const place = pairingDialog?.querySelector<HTMLElement>('[data-pairing-root]');
+    if (!pairingDialog || !place || !markup || !csrfToken || expired || typeof pairingDialog.showModal !== 'function') return false;
+    if (closePairing) closePairing();
+    const shadow = place.shadowRoot || place.attachShadow({ mode: 'open' });
+    shadow.innerHTML = '';
+    const abort = new AbortController();
+    let controller: { dispose(): void } | undefined;
+    closePairing = () => {
+      abort.abort();
+      if (controller) controller.dispose();
+      // Erases the QR and any typed value with the markup.
+      shadow.innerHTML = '';
+    };
+    pairingDialog.showModal();
+    const start = () => {
+      if (abort.signal.aborted) return;
+      shadow.innerHTML = '<style>' + input.pairing.css + '</style><div class="page">' + markup + '</div>';
+      controller = mount({
+        root: shadow,
+        canWrite: true,
+        signal: abort.signal,
+        returnUrl: window.location.href,
+        navigate: (href: string) => window.location.assign(href),
+        refresh: () => Promise.resolve(undefined),
+        transport: {
+          openLocalControls: openLocalSession,
+          control: () => Promise.resolve({ status: 400, body: {} }),
+          messaging: (operation: string, params: Record<string, unknown>) => fetch(input.pairing.messagingPath + operation, {
+            method: 'POST',
+            cache: 'no-store',
+            credentials: 'same-origin',
+            headers: { 'X-Olympus-CSRF': csrfToken, 'Content-Type': 'application/json' },
+            body: JSON.stringify(params),
+          }).then((response) => response.json().then((body: Record<string, unknown>) => body, () => ({})).then((body) => ({ status: response.status, body }))),
+        },
+      } as Parameters<typeof mount>[0]);
+    };
+    // Connect means pair: an account not paired yet goes straight to the QR
+    // (WhatsApp) or to the walkthrough (Telegram). A paired one stays as it
+    // is, with Pair again and Choose chats on the card.
+    const begin = () => {
+      start();
+      void fetch(input.pairing.messagingPath + 'status', {
+        method: 'POST', cache: 'no-store', credentials: 'same-origin',
+        headers: { 'X-Olympus-CSRF': csrfToken, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ source }),
+      }).then((response) => (response.ok ? response.json() : undefined)).then((body: { state?: unknown } | undefined) => {
+        if (abort.signal.aborted || !body || (body.state !== 'idle' && body.state !== 'not_paired')) return;
+        if (source === 'telegram') {
+          shadow.querySelector<HTMLButtonElement>('[data-sheet-toggle="#telegram-setup"]')?.click();
+          return;
+        }
+        const form = shadow.querySelector<HTMLFormElement>('form[data-messaging-kind="start"]');
+        if (form) form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+      }, () => undefined);
+    };
+    // Pairing needs this computer's own session: open it first, as Keys does on a press.
+    if (localSession) begin();
+    else void openLocalSession().then(begin);
+    return true;
+  }
   handle = bridge(landing ? { ...input.bridge, landing } : input.bridge, {
     frame,
     callTool,
     uploadFile,
     abortUpload,
     openUrl(url: string) {
+      // Connect on the WhatsApp or Telegram card pairs right here.
+      const pairingSource = Object.prototype.hasOwnProperty.call(input.pairing.urls, url) ? input.pairing.urls[url] : undefined;
+      if (pairingSource && openPairing(pairingSource)) return;
       // On the computer the dashboard is already the whole app: its own pages
       // open in place (an Omarchy app window would otherwise hand them to a
       // browser tab). Only pages elsewhere open in the browser (owner
@@ -529,6 +631,24 @@ function hostProgram(input: {
   }
 }
 
+const DASHBOARD_PAIRING_DIALOG_LABEL = 'Pair a messaging account';
+
+/** What the host needs to pair WhatsApp and Telegram over the dashboard (hostProgram `pairing`). */
+function computerPairing(openTargets: Record<string, string>): {
+  urls: Record<string, 'telegram' | 'whatsapp'>; cards: Record<string, string>; css: string; messagingPath: string;
+} {
+  const urls: Record<string, 'telegram' | 'whatsapp'> = {};
+  const cards: Record<string, string> = {};
+  for (const source of ['whatsapp', 'telegram'] as const) {
+    const url = openTargets[openTargetPath({ kind: 'connect', source })];
+    if (url) urls[url] = source;
+    cards[source] = renderMessagingCard(source, true);
+  }
+  // The local pages' stylesheet, scoped to the shadow root it is placed in.
+  const css = DASHBOARD_THEME_CSS.replaceAll(':root', ':host').replace(/(^|\n)body\s*\{/g, '$1:host{display:block;').concat('\n:host{padding:0 1rem 1rem}');
+  return { urls, cards, css, messagingPath: '/dashboard/messaging/' };
+}
+
 export function renderComputerHostPage(input: ComputerHostPageInput): string {
   const installer = installerForPlatform(input.platform ?? 'darwin');
   const update = installer ? input.updateAvailable : undefined;
@@ -568,7 +688,8 @@ export function renderComputerHostPage(input: ComputerHostPageInput): string {
     words: DASHBOARD_HOST_GATE_COPY,
     updateSupported: installer !== undefined,
     updateWords: { notice: DASHBOARD_UPDATE_COPY.notice('{version}'), copied: DASHBOARD_UPDATE_COPY.copied, copyFailed: DASHBOARD_UPDATE_COPY.copyFailed },
-  })}, ${dashboardHostBridge.toString()});`.replaceAll('</script', '<\\/script');
+    pairing: computerPairing(bridge.openTargets),
+  })}, ${dashboardHostBridge.toString()}, ${mountDashboardController.toString()});`.replaceAll('</script', '<\\/script');
   return [
     '<!doctype html>',
     '<html lang="en">',
@@ -597,6 +718,7 @@ export function renderComputerHostPage(input: ComputerHostPageInput): string {
     // this page's (cookies, storage, DOM) and talks only through postMessage.
     `<iframe class="panel" id="olympus-panel" title="Olympus dashboard" sandbox="allow-scripts" srcdoc="${attribute(input.panelHtml)}"></iframe>`,
     '</main>',
+    `<dialog class="pairing" data-pairing-dialog aria-label="${attribute(DASHBOARD_PAIRING_DIALOG_LABEL)}"><div class="bar"><button class="btn" type="button" data-pairing-close>Close</button></div><div data-pairing-root></div></dialog>`,
     `<script>${program}</script>`,
     '</body>',
     '</html>',

@@ -156664,6 +156664,31 @@ function dashboardHostBridge(config2, io) {
   };
 }
 
+// src/workers/dashboard/messaging.ts
+function telegramSetupSheet() {
+  const walkthrough = setupStepsSheet({
+    id: "telegram-setup",
+    provider: "Telegram",
+    submitLabel: "Check keys and continue",
+    steps: [
+      { title: "Sign in to Telegram", text: "Sign in at my.telegram.org with your Telegram phone number. Telegram sends the login code to your Telegram app.", link: { label: "Sign in to Telegram", url: "https://my.telegram.org/auth" } },
+      { title: "Open API development tools", text: "Choose API development tools. If you have not created an app, enter an app title and short name and create it. Keep the app page open.", link: { label: "API development tools", url: "https://my.telegram.org/apps" } },
+      { title: "Enter your Telegram app credentials", text: "Find api_id and api_hash on the app page. Check keys and continue starts pairing on this computer: enter the API ID and API hash when prompted, then your phone number, Telegram login code and two-step verification password if requested." }
+    ],
+    finalForm: (formId) => `<form id="${formId}" method="dialog" data-messaging-kind="start"></form>`
+  });
+  return '<div class="sheet" id="telegram-setup" aria-hidden="true" data-messaging-setup><h4>Connect Telegram</h4><p data-messaging-status role="status" aria-live="polite"></p>' + `<div data-messaging-setup-intro>${walkthrough}</div>` + "<div data-messaging-view><div data-messaging-input></div><div data-messaging-chats></div></div>" + '<form method="dialog" data-messaging-kind="cancel" hidden><button class="btn" type="submit">Cancel pairing</button></form></div>';
+}
+function renderMessagingCard(source, localSession, connection = { paired: false }) {
+  const label = source === "telegram" ? "Telegram" : "WhatsApp";
+  const sourceId = source === "telegram" ? "telegram.messages" : "whatsapp.personal.messages";
+  const form = (kind, text3) => `<form method="dialog" data-messaging-kind="${kind}"${kind === "cancel" ? " hidden" : ""}><button class="btn${(connection.paired ? kind === "chats" : kind === "start") ? " primary" : ""}" type="submit">${text3}</button></form>`;
+  return `<section id="agent-${source}-personal" class="messaging-card" aria-hidden="false" data-source="${sourceId}" data-source-id="${sourceId}" data-messaging-source="${source}"><h3>${escapeHtml2(label)}</h3>` + (connection.paired ? `<p data-messaging-account>${connection.account ? `Linked account: ${escapeHtml2(connection.account)}` : `Your linked ${label} account`}</p>` : "") + (source === "whatsapp" ? "<p>The chat list includes saved contacts and groups and may omit unsaved chats. Choose all chats to include those.</p>" : "") + "<p>Pairing alone does not start capture. After pairing, choose which chats Olympus reads. Each message is classified on its own; choosing a chat does not set its privacy tier.</p>" + (!localSession ? '<p>Open dashboard controls on this computer to pair and choose chats.</p><form method="dialog" data-messaging-open-controls><button class="btn" type="submit">Open controls on this computer</button><span data-action-message role="status"></span></form></section>' : source === "telegram" ? `<div class="actionrow">${connection.paired ? form("chats", "Choose chats") + form("status", "Check connection") + '<button class="btn" type="button" data-sheet-toggle="#telegram-setup" aria-controls="telegram-setup" aria-expanded="false">Pair again</button>' : '<button class="btn primary" type="button" data-sheet-toggle="#telegram-setup" aria-controls="telegram-setup" aria-expanded="false">Pair Telegram</button>' + form("chats", "Choose chats")}</div>${telegramSetupSheet()}</section>` : `<div class="actionrow">${connection.paired ? form("chats", "Choose chats") + form("status", "Check connection") + form("start", "Pair again") : form("start", `Pair ${label}`) + form("chats", "Choose chats")}${form("cancel", "Cancel pairing")}</div><div data-messaging-view><p data-messaging-status role="status" aria-live="polite"></p><img data-messaging-qr hidden alt="Scan this QR code in WhatsApp to link Olympus" width="256" height="256"><div data-messaging-input></div><div data-messaging-chats></div></div></section>`);
+}
+var init_messaging = __esm(() => {
+  init_components();
+});
+
 // src/workers/dashboard/host-page.ts
 function dashboardLocalPageHref(page2, token) {
   const query = token ? `${DASHBOARD_LOCAL_PAGES[page2]}&token=${encodeURIComponent(token)}` : DASHBOARD_LOCAL_PAGES[page2];
@@ -156701,7 +156726,7 @@ function lockedGate(hidden) {
   const C2 = DASHBOARD_HOST_GATE_COPY;
   return `<section class="gate" data-dashboard-control-gate data-state="locked" aria-label="${attribute2(C2.title)}"${hidden ? " hidden" : ""}>` + `<div class="row"><div class="grow"><p class="title">${text3(C2.title)}</p>` + `<p class="line"><a class="btn primary" href="${attribute2(olympusOpenUrl({ kind: "dashboard" }))}" data-gate-open>${text3(C2.open)}</a> ` + `${text3(C2.fallbackBefore)}<code>${text3(C2.fallbackCommand)}</code>${text3(C2.fallbackAfter)}</p></div>` + `<button class="btn plain" type="button" data-gate-toggle aria-controls="gate-how" aria-expanded="false">${text3(C2.button)}</button></div>` + `<div class="how" id="gate-how" hidden><p class="line">${text3(C2.how)}</p>` + `<p class="prompt" id="gate-prompt">${text3(DASHBOARD_WORKER_TOKEN_AGENT_PROMPT)}</p>` + `<button class="btn" type="button" data-gate-copy>${text3(C2.copy)}</button> <span class="status" data-gate-copy-status aria-live="polite"></span>` + `<details><summary>${text3(C2.advanced)}</summary>` + `<form data-gate-unlock><input type="password" required autocomplete="off" placeholder="${attribute2(C2.tokenField)}" aria-label="${attribute2(C2.tokenField)}">` + `<button class="btn" type="submit">${text3(C2.unlock)}</button><span class="status" data-gate-status role="status"></span></form>` + `</details></div></section>`;
 }
-function hostProgram(input, bridge) {
+function hostProgram(input, bridge, mount) {
   const frame = document.getElementById("olympus-panel");
   if (!frame)
     return;
@@ -156859,12 +156884,104 @@ function hostProgram(input, bridge) {
     if (/^[a-z0-9_.]{1,64}$/.test(card))
       landing = { sourceId: card, import: true };
   }
+  function openLocalSession() {
+    return fetch(input.localSessionPath, { method: "POST", cache: "no-store", credentials: "same-origin" }).then((response) => response.ok ? response.json() : undefined).then((body) => {
+      if (body && typeof body.csrf_token === "string" && body.csrf_token) {
+        csrfToken = body.csrf_token;
+        localSession = true;
+        return true;
+      }
+      return false;
+    }, () => false);
+  }
+  let closePairing;
+  const pairingDialog = document.querySelector("[data-pairing-dialog]");
+  pairingDialog?.querySelector("[data-pairing-close]")?.addEventListener("click", () => pairingDialog.close());
+  pairingDialog?.addEventListener("close", () => {
+    const close = closePairing;
+    closePairing = undefined;
+    if (close)
+      close();
+  });
+  function openPairing(source) {
+    const markup = input.pairing.cards[source];
+    const place = pairingDialog?.querySelector("[data-pairing-root]");
+    if (!pairingDialog || !place || !markup || !csrfToken || expired || typeof pairingDialog.showModal !== "function")
+      return false;
+    if (closePairing)
+      closePairing();
+    const shadow = place.shadowRoot || place.attachShadow({ mode: "open" });
+    shadow.innerHTML = "";
+    const abort = new AbortController;
+    let controller;
+    closePairing = () => {
+      abort.abort();
+      if (controller)
+        controller.dispose();
+      shadow.innerHTML = "";
+    };
+    pairingDialog.showModal();
+    const start = () => {
+      if (abort.signal.aborted)
+        return;
+      shadow.innerHTML = "<style>" + input.pairing.css + '</style><div class="page">' + markup + "</div>";
+      controller = mount({
+        root: shadow,
+        canWrite: true,
+        signal: abort.signal,
+        returnUrl: window.location.href,
+        navigate: (href) => window.location.assign(href),
+        refresh: () => Promise.resolve(undefined),
+        transport: {
+          openLocalControls: openLocalSession,
+          control: () => Promise.resolve({ status: 400, body: {} }),
+          messaging: (operation, params) => fetch(input.pairing.messagingPath + operation, {
+            method: "POST",
+            cache: "no-store",
+            credentials: "same-origin",
+            headers: { "X-Olympus-CSRF": csrfToken, "Content-Type": "application/json" },
+            body: JSON.stringify(params)
+          }).then((response) => response.json().then((body) => body, () => ({})).then((body) => ({ status: response.status, body })))
+        }
+      });
+    };
+    const begin = () => {
+      start();
+      fetch(input.pairing.messagingPath + "status", {
+        method: "POST",
+        cache: "no-store",
+        credentials: "same-origin",
+        headers: { "X-Olympus-CSRF": csrfToken, "Content-Type": "application/json" },
+        body: JSON.stringify({ source })
+      }).then((response) => response.ok ? response.json() : undefined).then((body) => {
+        if (abort.signal.aborted || !body || body.state !== "idle" && body.state !== "not_paired")
+          return;
+        if (source === "telegram") {
+          shadow.querySelector('[data-sheet-toggle="#telegram-setup"]')?.click();
+          return;
+        }
+        const form2 = shadow.querySelector('form[data-messaging-kind="start"]');
+        if (form2)
+          form2.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+      }, () => {
+        return;
+      });
+    };
+    if (localSession)
+      begin();
+    else
+      openLocalSession().then(begin);
+    return true;
+  }
   handle = bridge(landing ? { ...input.bridge, landing } : input.bridge, {
     frame,
     callTool,
     uploadFile,
     abortUpload,
     openUrl(url2) {
+      const pairingSource = Object.prototype.hasOwnProperty.call(input.pairing.urls, url2) ? input.pairing.urls[url2] : undefined;
+      if (pairingSource && openPairing(pairingSource))
+        return;
       const own3 = Object.keys(input.bridge.links).map((key2) => input.bridge.links[key2]).concat(Object.keys(input.bridge.openTargets).map((key2) => input.bridge.openTargets[key2]));
       let parsed;
       try {
@@ -156993,6 +157110,19 @@ function hostProgram(input, bridge) {
     });
   }
 }
+function computerPairing(openTargets) {
+  const urls = {};
+  const cards = {};
+  for (const source of ["whatsapp", "telegram"]) {
+    const url2 = openTargets[openTargetPath({ kind: "connect", source })];
+    if (url2)
+      urls[url2] = source;
+    cards[source] = renderMessagingCard(source, true);
+  }
+  const css = DASHBOARD_THEME_CSS.replaceAll(":root", ":host").replace(/(^|\n)body\s*\{/g, "$1:host{display:block;").concat(`
+:host{padding:0 1rem 1rem}`);
+  return { urls, cards, css, messagingPath: "/dashboard/messaging/" };
+}
 function renderComputerHostPage(input) {
   const installer = installerForPlatform(input.platform ?? "darwin");
   const update = installer ? input.updateAvailable : undefined;
@@ -157031,8 +157161,9 @@ function renderComputerHostPage(input) {
     uploadChunkBytes: ARCHIVE_UPLOAD_CHUNK_BYTES,
     words: DASHBOARD_HOST_GATE_COPY,
     updateSupported: installer !== undefined,
-    updateWords: { notice: DASHBOARD_UPDATE_COPY.notice("{version}"), copied: DASHBOARD_UPDATE_COPY.copied, copyFailed: DASHBOARD_UPDATE_COPY.copyFailed }
-  })}, ${dashboardHostBridge.toString()});`.replaceAll("</script", "<\\/script");
+    updateWords: { notice: DASHBOARD_UPDATE_COPY.notice("{version}"), copied: DASHBOARD_UPDATE_COPY.copied, copyFailed: DASHBOARD_UPDATE_COPY.copyFailed },
+    pairing: computerPairing(bridge.openTargets)
+  })}, ${dashboardHostBridge.toString()}, ${mountDashboardController.toString()});`.replaceAll("</script", "<\\/script");
   return [
     "<!doctype html>",
     '<html lang="en">',
@@ -157054,6 +157185,7 @@ function renderComputerHostPage(input) {
     ...input.modelReadiness ? [`<details class="gate"><summary>Built-in models on this computer</summary>${input.modelReadiness.map((model) => `<p><strong>${text3(model.name)} — ${text3(model.state)}</strong>: ${text3(model.detail)} (${(model.downloadBytes / 1e9).toFixed(2)} GB download)</p>`).join("")}</details>`] : [],
     `<iframe class="panel" id="olympus-panel" title="Olympus dashboard" sandbox="allow-scripts" srcdoc="${attribute2(input.panelHtml)}"></iframe>`,
     "</main>",
+    `<dialog class="pairing" data-pairing-dialog aria-label="${attribute2(DASHBOARD_PAIRING_DIALOG_LABEL)}"><div class="bar"><button class="btn" type="button" data-pairing-close>Close</button></div><div data-pairing-root></div></dialog>`,
     `<script>${program}</script>`,
     "</body>",
     "</html>",
@@ -157061,13 +157193,15 @@ function renderComputerHostPage(input) {
   ].join(`
 `);
 }
-var DASHBOARD_HTML_PATH = "/dashboard", DASHBOARD_TOOLS_CALL_PATH = "/dashboard/tools/call", DASHBOARD_PANEL_READ_QUERY_PARAM = "panel-read", DASHBOARD_ARCHIVE_UPLOAD_FILE_PATH = "/dashboard/archive-import/upload-file", DASHBOARD_LOCAL_PAGES, HOST_CSS, COMPUTER_HOST_PAGE_CSP;
+var DASHBOARD_HTML_PATH = "/dashboard", DASHBOARD_TOOLS_CALL_PATH = "/dashboard/tools/call", DASHBOARD_PANEL_READ_QUERY_PARAM = "panel-read", DASHBOARD_ARCHIVE_UPLOAD_FILE_PATH = "/dashboard/archive-import/upload-file", DASHBOARD_LOCAL_PAGES, HOST_CSS, DASHBOARD_PAIRING_DIALOG_LABEL = "Pair a messaging account", COMPUTER_HOST_PAGE_CSP;
 var init_host_page = __esm(() => {
   init_computer_identity();
   init_update_check();
   init_dashboard_contract();
   init_outside_help();
   init_page();
+  init_messaging();
+  init_theme();
   init_staging();
   init_vocabulary();
   init_open_targets();
@@ -157113,6 +157247,9 @@ summary{cursor:pointer;color:var(--muted);font-size:0.875rem}
 form{display:flex;flex-wrap:wrap;gap:0.5rem;align-items:center;margin-top:0.5rem}
 input{font:inherit;font-size:0.875rem;min-height:2.25rem;padding:0.375rem 0.75rem;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--text);min-width:0;max-width:100%}
 .status{color:var(--muted);font-size:0.875rem}
+.pairing{width:min(40rem,calc(100% - 2rem));max-height:calc(100% - 2rem);padding:0;border:1px solid var(--line);border-radius:12px;background:var(--bg);color:var(--text)}
+.pairing::backdrop{background:rgba(0,0,0,0.45)}
+.pairing .bar{display:flex;justify-content:flex-end;padding:0.5rem 0.75rem 0}
 `;
   COMPUTER_HOST_PAGE_CSP = [
     "default-src 'none'",
@@ -157125,31 +157262,6 @@ input{font:inherit;font-size:0.875rem;min-height:2.25rem;padding:0.375rem 0.75re
     "form-action 'none'",
     "frame-ancestors 'none'"
   ].join("; ");
-});
-
-// src/workers/dashboard/messaging.ts
-function telegramSetupSheet() {
-  const walkthrough = setupStepsSheet({
-    id: "telegram-setup",
-    provider: "Telegram",
-    submitLabel: "Check keys and continue",
-    steps: [
-      { title: "Sign in to Telegram", text: "Sign in at my.telegram.org with your Telegram phone number. Telegram sends the login code to your Telegram app.", link: { label: "Sign in to Telegram", url: "https://my.telegram.org/auth" } },
-      { title: "Open API development tools", text: "Choose API development tools. If you have not created an app, enter an app title and short name and create it. Keep the app page open.", link: { label: "API development tools", url: "https://my.telegram.org/apps" } },
-      { title: "Enter your Telegram app credentials", text: "Find api_id and api_hash on the app page. Check keys and continue starts pairing on this computer: enter the API ID and API hash when prompted, then your phone number, Telegram login code and two-step verification password if requested." }
-    ],
-    finalForm: (formId) => `<form id="${formId}" method="dialog" data-messaging-kind="start"></form>`
-  });
-  return '<div class="sheet" id="telegram-setup" aria-hidden="true" data-messaging-setup><h4>Connect Telegram</h4><p data-messaging-status role="status" aria-live="polite"></p>' + `<div data-messaging-setup-intro>${walkthrough}</div>` + "<div data-messaging-view><div data-messaging-input></div><div data-messaging-chats></div></div>" + '<form method="dialog" data-messaging-kind="cancel" hidden><button class="btn" type="submit">Cancel pairing</button></form></div>';
-}
-function renderMessagingCard(source, localSession, connection = { paired: false }) {
-  const label = source === "telegram" ? "Telegram" : "WhatsApp";
-  const sourceId = source === "telegram" ? "telegram.messages" : "whatsapp.personal.messages";
-  const form = (kind, text4) => `<form method="dialog" data-messaging-kind="${kind}"${kind === "cancel" ? " hidden" : ""}><button class="btn${(connection.paired ? kind === "chats" : kind === "start") ? " primary" : ""}" type="submit">${text4}</button></form>`;
-  return `<section id="agent-${source}-personal" class="messaging-card" aria-hidden="false" data-source="${sourceId}" data-source-id="${sourceId}" data-messaging-source="${source}"><h3>${escapeHtml2(label)}</h3>` + (connection.paired ? `<p data-messaging-account>${connection.account ? `Linked account: ${escapeHtml2(connection.account)}` : `Your linked ${label} account`}</p>` : "") + (source === "whatsapp" ? "<p>The chat list includes saved contacts and groups and may omit unsaved chats. Choose all chats to include those.</p>" : "") + "<p>Pairing alone does not start capture. After pairing, choose which chats Olympus reads. Each message is classified on its own; choosing a chat does not set its privacy tier.</p>" + (!localSession ? '<p>Open dashboard controls on this computer to pair and choose chats.</p><form method="dialog" data-messaging-open-controls><button class="btn" type="submit">Open controls on this computer</button><span data-action-message role="status"></span></form></section>' : source === "telegram" ? `<div class="actionrow">${connection.paired ? form("chats", "Choose chats") + form("status", "Check connection") + '<button class="btn" type="button" data-sheet-toggle="#telegram-setup" aria-controls="telegram-setup" aria-expanded="false">Pair again</button>' : '<button class="btn primary" type="button" data-sheet-toggle="#telegram-setup" aria-controls="telegram-setup" aria-expanded="false">Pair Telegram</button>' + form("chats", "Choose chats")}</div>${telegramSetupSheet()}</section>` : `<div class="actionrow">${connection.paired ? form("chats", "Choose chats") + form("status", "Check connection") + form("start", "Pair again") : form("start", `Pair ${label}`) + form("chats", "Choose chats")}${form("cancel", "Cancel pairing")}</div><div data-messaging-view><p data-messaging-status role="status" aria-live="polite"></p><img data-messaging-qr hidden alt="Scan this QR code in WhatsApp to link Olympus" width="256" height="256"><div data-messaging-input></div><div data-messaging-chats></div></div></section>`);
-}
-var init_messaging = __esm(() => {
-  init_components();
 });
 
 // src/workers/agent-connections.ts

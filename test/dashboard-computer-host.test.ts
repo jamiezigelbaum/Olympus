@@ -44,6 +44,7 @@ import { chatgptDashboardPageHtml } from '../src/workers/dashboard/chatgpt/page.
 import { dashboardHostBridge, type DashboardHostBridgeConfig } from '../src/workers/dashboard/host-bridge.ts';
 import { COMPUTER_HOST_PAGE_CSP, DASHBOARD_TOOLS_CALL_PATH, computerOpenTargets, renderComputerHostPage } from '../src/workers/dashboard/host-page.ts';
 import { DASHBOARD_COMPUTER_PANEL_COPY, DASHBOARD_HOST_GATE_COPY } from '../src/workers/dashboard/vocabulary.ts';
+import { DASHBOARD_OUTSIDE_HELP_PATHS } from '../src/workers/dashboard/outside-help.ts';
 import { createSovereigntyEngine, loadSovereigntyPreset } from '../src/core/sovereignty.ts';
 import { dashboardQueryTokenFromWorkerAuthToken } from '../src/core/worker-auth.ts';
 import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
@@ -939,6 +940,99 @@ describe('Privacy saves through the panel tools', () => {
     // Spent: the same confirmation does not confirm a second change.
     const again = await panelTools.call('olympus_privacy_set', { revision: 'prv1.saved', confirmation: meta.confirmation, description: 'Money.' }, { origin: ORIGIN });
     expect(again.structuredContent).toEqual({ error: 'privacy_owner_only' });
+  });
+});
+
+// ---- pairing WhatsApp and Telegram over the dashboard ------------------------
+
+describe('Connect on a messaging card pairs in place', () => {
+  const restores: Array<() => void> = [];
+  afterEach(() => { while (restores.length) restores.pop()!(); });
+  function pairingPage(localSession: boolean, state = 'idle') {
+    const html = renderComputerHostPage({ panelHtml: '<p></p>', origin: ORIGIN, csrfToken: 'csrf-123', localSession });
+    const start = html.indexOf('<script>') + '<script>'.length;
+    const script = html.slice(start, html.indexOf('</script>', start));
+    const win = new Window({ url: `${ORIGIN}/dashboard`, settings: { disableIframePageLoading: true } });
+    windows.push(win);
+    // The pairing controller reads the DOM classes as globals, as in a browser.
+    const names = ['Element', 'HTMLElement', 'HTMLFormElement', 'HTMLInputElement', 'HTMLTextAreaElement', 'HTMLSelectElement', 'HTMLButtonElement', 'HTMLAnchorElement', 'ShadowRoot', 'Event', 'MouseEvent', 'FormData', 'CSS'];
+    const old = new Map(names.map((name) => [name, Object.getOwnPropertyDescriptor(globalThis, name)]));
+    for (const name of names) Object.defineProperty(globalThis, name, { configurable: true, value: (win as any)[name] });
+    restores.push(() => {
+      for (const name of names) { const descriptor = old.get(name); if (descriptor) Object.defineProperty(globalThis, name, descriptor); else delete (globalThis as any)[name]; }
+    });
+    win.document.write(html.slice(0, start - '<script>'.length) + html.slice(html.indexOf('</script>', start) + '</script>'.length));
+    const frame = win.document.getElementById('olympus-panel')!;
+    const child = { postMessage: () => undefined };
+    Object.defineProperty(frame, 'contentWindow', { configurable: true, get: () => child });
+    const assigned: string[] = [];
+    const requests: Array<{ url: string; csrf: string | null }> = [];
+    const fakeFetch = async (url: string, init: RequestInit = {}) => {
+      if (url === '/v1/health') return Response.json({});
+      requests.push({ url, csrf: new Headers(init.headers).get('X-Olympus-CSRF') });
+      if (url === DASHBOARD_OUTSIDE_HELP_PATHS.unlock) return Response.json({ csrf_token: 'csrf-local' });
+      if (url === '/dashboard/messaging/status') return Response.json({ ok: true, state });
+      if (url === '/dashboard/messaging/start') return Response.json({ ok: true, state: 'waiting', qr: 'data:image/png;base64,YQ==' });
+      return new Response('{}', { status: 404 });
+    };
+    const fakeWindow = {
+      setInterval: win.setInterval.bind(win),
+      location: { hash: '', pathname: '/dashboard', search: '', href: `${ORIGIN}/dashboard`, origin: ORIGIN, assign: (url: string) => assigned.push(url), reload: () => assigned.push('reload') },
+      history: { replaceState: () => undefined },
+      open: () => null,
+    };
+    new Function('window', 'document', 'fetch', 'navigator', script)(fakeWindow, win.document, fakeFetch, win.navigator);
+    const send = (message: Record<string, unknown>) => win.dispatchEvent(new win.MessageEvent('message', { data: { jsonrpc: '2.0', ...message }, source: child as any }));
+    const dialog = win.document.querySelector('[data-pairing-dialog]') as unknown as HTMLDialogElement;
+    const shadow = () => (win.document.querySelector('[data-pairing-root]') as unknown as HTMLElement).shadowRoot!;
+    return { win, assigned, requests, send, dialog, shadow };
+  }
+
+  test('WhatsApp: the card opens its pairing over the dashboard, shows the QR there, and closing erases it', async () => {
+    const page = pairingPage(false);
+    page.send({ id: 1, method: 'ui/open-link', params: { url: `${OPEN_BASE}connect/whatsapp/` } });
+    await settle();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    // No trip to Keys: the pairing opened here, after this computer's own session.
+    expect(page.assigned).toEqual([]);
+    expect(page.dialog.open).toBe(true);
+    expect(page.requests[0]!.url).toBe(DASHBOARD_OUTSIDE_HELP_PATHS.unlock);
+    const card = page.shadow().querySelector('[data-messaging-source="whatsapp"]')!;
+    expect(card).not.toBeNull();
+    // Not paired yet: Connect starts the pairing by itself, no second press.
+    expect(page.requests.filter((request) => request.url === '/dashboard/messaging/start')).toHaveLength(1);
+    expect(page.requests.find((request) => request.url === '/dashboard/messaging/start')?.csrf).toBe('csrf-local');
+    const qr = page.shadow().querySelector('[data-messaging-qr]') as HTMLImageElement;
+    expect(qr.getAttribute('src')).toBe('data:image/png;base64,YQ==');
+    expect(qr.hidden).toBe(false);
+    page.dialog.close();
+    await settle();
+    expect(page.shadow().querySelector('[data-messaging-qr]')).toBeNull();
+  });
+
+  test('an account already paired is not paired again by Connect', async () => {
+    const page = pairingPage(true, 'paired');
+    page.send({ id: 1, method: 'ui/open-link', params: { url: `${OPEN_BASE}connect/whatsapp/` } });
+    await settle();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(page.dialog.open).toBe(true);
+    expect(page.requests.some((request) => request.url === '/dashboard/messaging/start')).toBe(false);
+  });
+
+  test('Telegram opens its own walkthrough in place; other Connect links still go to Keys', async () => {
+    const page = pairingPage(true);
+    page.send({ id: 1, method: 'ui/open-link', params: { url: `${OPEN_BASE}connect/telegram/` } });
+    await settle();
+    expect(page.assigned).toEqual([]);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    const sheet = page.shadow().querySelector('[data-messaging-source="telegram"] #telegram-setup')!;
+    // Not paired yet: its walkthrough is open, and nothing started without the owner.
+    expect(sheet.classList.contains('on')).toBe(true);
+    expect(page.requests.some((request) => request.url === '/dashboard/messaging/start')).toBe(false);
+    page.dialog.close();
+    page.send({ id: 2, method: 'ui/open-link', params: { url: `${OPEN_BASE}connect/x/` } });
+    await settle();
+    expect(page.assigned).toEqual(['/dashboard?keys#olympus-open=connect.x']);
   });
 });
 

@@ -66808,6 +66808,9 @@ summary{cursor:pointer;color:var(--muted);font-size:0.875rem}
 form{display:flex;flex-wrap:wrap;gap:0.5rem;align-items:center;margin-top:0.5rem}
 input{font:inherit;font-size:0.875rem;min-height:2.25rem;padding:0.375rem 0.75rem;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--text);min-width:0;max-width:100%}
 .status{color:var(--muted);font-size:0.875rem}
+.pairing{width:min(40rem,calc(100% - 2rem));max-height:calc(100% - 2rem);padding:0;border:1px solid var(--line);border-radius:12px;background:var(--bg);color:var(--text)}
+.pairing::backdrop{background:rgba(0,0,0,0.45)}
+.pairing .bar{display:flex;justify-content:flex-end;padding:0.5rem 0.75rem 0}
 `;
 var COMPUTER_HOST_PAGE_CSP = [
   "default-src 'none'",
