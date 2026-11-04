@@ -63,6 +63,11 @@ export interface TieredExtractionView {
     ref: Parameters<LocalConnectorStore['itemMatchesExtractionRef']>[0],
     filters: ConnectorStoreSearchFilters | undefined,
   ): boolean;
+  /** itemMatchesExtractionRef for many refs, one answer per ref in order. */
+  itemsMatchingExtractionRefs(
+    refs: ReadonlyArray<Parameters<LocalConnectorStore['itemMatchesExtractionRef']>[0]>,
+    filters: ConnectorStoreSearchFilters | undefined,
+  ): boolean[];
   /** The tier egress decisions read: never below Private for a routed item. */
   itemTrustTier(localItemId: string): SourceTrustTier | undefined;
   /**
@@ -205,6 +210,19 @@ export function tieredExtractionView(
 
     itemMatchesExtractionRef(ref, filters) {
       return storesHoldingRow(ref.localItemId).some((store) => store.itemMatchesExtractionRef(ref, filters));
+    },
+
+    itemsMatchingExtractionRefs(refs, filters) {
+      // A ref matches when any store of the set holds an active row for it
+      // (an active row is what storesHoldingRow looks for).
+      const matched = refs.map(() => false);
+      for (const domain of order()) {
+        const store = set.store(domain);
+        if (!store) continue;
+        const here = store.itemsMatchingExtractionRefs(refs, filters);
+        for (let index = 0; index < here.length; index += 1) if (here[index]) matched[index] = true;
+      }
+      return matched;
     },
 
     itemTrustTier(localItemId) {
