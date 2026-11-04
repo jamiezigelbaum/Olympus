@@ -699,7 +699,7 @@ var init_linux_desktop_entry = __esm(() => {
 import { execFileSync } from "node:child_process";
 import { closeSync as closeSync2, existsSync as existsSync2, mkdirSync as mkdirSync2, openSync as openSync2, readFileSync as readFileSync2 } from "node:fs";
 import { mkdir } from "node:fs/promises";
-import { createRequire as createRequire2 } from "node:module";
+import { createRequire as createRequire3 } from "node:module";
 import { dirname as dirname3 } from "node:path";
 async function withFileLease(targetPath, callback, options = {}) {
   const owner = await acquireFileLease(targetPath, normalizeOptions(options));
@@ -884,7 +884,7 @@ var init_file_lease = __esm(() => {
     acquireTimeoutMs: 1e4,
     pollIntervalMs: 25
   };
-  runtimeRequire = createRequire2(import.meta.url);
+  runtimeRequire = createRequire3(import.meta.url);
   FileLeaseBusyError = class FileLeaseBusyError extends Error {
     code = "file_lease_busy";
     targetPath;
@@ -6655,7 +6655,7 @@ var init_config = __esm(() => {
 
 // src/core/data-owner-lock.ts
 import { closeSync as closeSync6, constants as constants3, existsSync as existsSync8, mkdirSync as mkdirSync6, openSync as openSync6 } from "node:fs";
-import { createRequire as createRequire3 } from "node:module";
+import { createRequire as createRequire4 } from "node:module";
 import { constants as osConstants } from "node:os";
 import { dirname as dirname11 } from "node:path";
 function dataOwnerLockPath(env = process.env) {
@@ -6768,7 +6768,7 @@ function isPromiseLike(value) {
 var runtimeRequire2, LOCK_EX = 2, LOCK_NB = 4, LOCK_UN = 8, O_CLOEXEC, STOP_OLYMPUS_HINT = "olympus engine stop, or olympus worker stop if it runs as a worker service, or stop the OpenClaw Gateway that hosts it", DataOwnerBusyError, library;
 var init_data_owner_lock = __esm(() => {
   init_olympus_layout();
-  runtimeRequire2 = createRequire3(import.meta.url);
+  runtimeRequire2 = createRequire4(import.meta.url);
   O_CLOEXEC = process.platform === "darwin" ? 16777216 : 524288;
   DataOwnerBusyError = class DataOwnerBusyError extends Error {
     code = "data_owner_busy";
@@ -7080,7 +7080,7 @@ var init_engine_children = __esm(() => {
 });
 
 // src/core/linux-engine-service.ts
-import { createRequire as createRequire4 } from "node:module";
+import { createRequire as createRequire5 } from "node:module";
 var runtimeRequire3, heldLifecycleLocks;
 var init_linux_engine_service = __esm(() => {
   init_file_lease();
@@ -7093,7 +7093,7 @@ var init_linux_engine_service = __esm(() => {
   init_engine_children();
   init_linux_secret_backend();
   init_worker_transport();
-  runtimeRequire3 = createRequire4(import.meta.url);
+  runtimeRequire3 = createRequire5(import.meta.url);
   heldLifecycleLocks = new Set;
 });
 
@@ -18101,6 +18101,16 @@ var init_tier_ledger = __esm(() => {
     secure_local: 2
   };
 });
+
+// src/core/sqlite-rows.ts
+function* iterateRows(db, sql, ...params) {
+  const statement = db.prepare(sql);
+  try {
+    yield* statement.iterate(...params);
+  } finally {
+    statement.finalize();
+  }
+}
 // src/workers/file-extraction/job-names.ts
 import { existsSync as existsSync13 } from "node:fs";
 import { Database as Database4 } from "bun:sqlite";
@@ -26454,7 +26464,7 @@ var init_local_index = __esm(() => {
       const maxCandidates = input.maxFoldCandidates ?? LOCATOR_FOLD_SCAN_MAX_CANDIDATES;
       const wanted = `${foldLocator(folder)}/`;
       const matches = [];
-      const candidates = this.db.query(`
+      const candidatesSql = `
       SELECT
         i.provider_item_id, i.provider_file_id, i.local_item_id,
         i.source_version, i.locator_uri
@@ -26466,9 +26476,9 @@ var init_local_index = __esm(() => {
         ${range.sql}
         AND i.tombstoned = 0
       ORDER BY locator.normalized_locator, locator.item_pk
-    `);
+    `;
       let examined = 0;
-      for (const row of candidates.iterate(input.provider, input.accountScope, ...range.params)) {
+      for (const row of iterateRows(this.db, candidatesSql, input.provider, input.accountScope, ...range.params)) {
         examined += 1;
         if (examined > maxCandidates)
           return [];
@@ -26860,7 +26870,7 @@ var init_local_index = __esm(() => {
         missingEmbeddingLocalItemIds: [],
         chunkHashDisagreementLocalItemIds: []
       };
-      const rows = this.db.query(`
+      const rowsSql = `
       WITH fts_counts AS (
         SELECT owned.item_pk, COUNT(*) AS fts_rows
         FROM connector_store_fts_rows owned
@@ -26892,7 +26902,8 @@ var init_local_index = __esm(() => {
       LEFT JOIN fts_counts ON fts_counts.item_pk = i.item_pk
       WHERE i.tombstoned = 0
       ORDER BY i.item_pk, c.chunk_index
-    `).iterate(embeddingModelId);
+    `;
+      const rows = iterateRows(this.db, rowsSql, embeddingModelId);
       let currentItemPk;
       let currentLocalItemId = "";
       let currentFtsRows = 0;
@@ -27688,12 +27699,12 @@ var init_local_index = __esm(() => {
       return { excluded, metadataOnlyContent };
     }
     *itemLocatorCensus() {
-      const rows = this.db.query(`
+      const rows = iterateRows(this.db, `
       SELECT
         i.locator_uri AS locator_uri,
         EXISTS (SELECT 1 FROM chunks c WHERE c.item_pk = i.item_pk) AS has_content
       FROM items i
-    `).iterate();
+    `);
       for (const row of rows) {
         yield { locator: row.locator_uri, hasContent: row.has_content === 1 };
       }
@@ -32102,12 +32113,12 @@ var init_litert_runtime = __esm(() => {
 });
 
 // src/workers/source-index/built-in-embedding/runtime.ts
-import { createRequire as createRequire5 } from "node:module";
+import { createRequire as createRequire6 } from "node:module";
 import { join as join22 } from "node:path";
 function onnxRuntimeFromDirectory(runtimeDir) {
   return {
     async createSession(modelPath, options) {
-      const requireFromPack = createRequire5(join22(runtimeDir, "olympus-runtime.json"));
+      const requireFromPack = createRequire6(join22(runtimeDir, "olympus-runtime.json"));
       const ort = requireFromPack("onnxruntime-node");
       const session = await ort.InferenceSession.create(modelPath, {
         executionProviders: ["cpu"],
@@ -35611,10 +35622,10 @@ var init_tokenizer = __esm(() => {
 });
 
 // src/core/scope-safe-fs.ts
-import { createRequire as createRequire6 } from "node:module";
+import { createRequire as createRequire7 } from "node:module";
 var runtimeRequire4, SCOPE_FILE_MAX_RANGE_BYTES;
 var init_scope_safe_fs = __esm(() => {
-  runtimeRequire4 = createRequire6(import.meta.url);
+  runtimeRequire4 = createRequire7(import.meta.url);
   SCOPE_FILE_MAX_RANGE_BYTES = 64 * 1024 * 1024;
 });
 
@@ -65112,6 +65123,16 @@ var init_tier_migration = __esm(() => {
   ]);
 });
 
+// src/core/sqlite-statement-cache.ts
+import { createRequire as createRequire2 } from "node:module";
+var SQLITE_STATEMENT_CACHE_SIZE = 1000;
+if (typeof globalThis.Bun !== "undefined") {
+  const { Database } = createRequire2(import.meta.url)("bun:sqlite");
+  if ((Database.MAX_QUERY_CACHE_SIZE ?? 0) < SQLITE_STATEMENT_CACHE_SIZE) {
+    Database.MAX_QUERY_CACHE_SIZE = SQLITE_STATEMENT_CACHE_SIZE;
+  }
+}
+
 // scripts/source-embedding-drain.ts
 init_source_placement();
 init_file_lease();
@@ -66829,7 +66850,7 @@ init_paths();
 init_scope();
 
 // src/workers/local-files/watch-hub.ts
-import { createRequire as createRequire7 } from "node:module";
+import { createRequire as createRequire8 } from "node:module";
 import { existsSync as existsSync23, readFileSync as readFileSync21 } from "node:fs";
 import { dirname as dirname32, join as join32 } from "node:path";
 
@@ -67023,7 +67044,7 @@ async function loadParcelWatcher(extraDirs = []) {
     if (!existsSync23(join32(candidate, "@parcel", "watcher")))
       continue;
     try {
-      const requireFrom = createRequire7(join32(dirname32(candidate), "package.json"));
+      const requireFrom = createRequire8(join32(dirname32(candidate), "package.json"));
       return unwrap(requireFrom(specifier));
     } catch (error) {
       failures.push(error instanceof Error ? error.message : String(error));

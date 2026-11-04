@@ -1,3 +1,4 @@
+import './core/sqlite-statement-cache.ts';
 import { PRIVATE_ANSWER_OPTIONS } from './core/privacy-language.ts';
 import { resolvedRawPath } from './core/source-placement.ts';
 import { DESKTOP_OWNER_OPEN_PATH } from './core/linux-owner-bridge.ts';
