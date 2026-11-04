@@ -11907,14 +11907,7 @@ export class LocalConnectorStore {
     if (identities.length === 0) return [];
     const keys = JSON.stringify(identities.map((identity) =>
       [identity.provider, identity.accountScope, conversationOf(identity), identity.providerItemId]));
-    return this.db.query(`
-      SELECT CAST(j.key AS INTEGER) AS idx, i.item_pk, i.local_item_id, i.title, i.source_version
-      FROM json_each(?) j
-      JOIN items i ON i.provider = json_extract(j.value, '$[0]') AND i.account_scope = json_extract(j.value, '$[1]')
-        AND i.normalized_conversation = json_extract(j.value, '$[2]') AND i.provider_item_id = json_extract(j.value, '$[3]')
-      WHERE i.tombstoned = 0 ${extra.sql}
-      ORDER BY j.key
-    `).all(keys, ...extra.params) as Array<{ idx: number; item_pk: number; local_item_id: string; title: string | null; source_version: string | null }>;
+    return this.db.query(identityRowsSql(extra.sql)).all(keys, ...extra.params) as Array<{ idx: number; item_pk: number; local_item_id: string; title: string | null; source_version: string | null }>;
   }
 
   /** Fail-safe decisions with no readable content: the count and the problem list share this query. */
@@ -14848,6 +14841,26 @@ function identityAmbiguous(
 ): boolean {
   if (counts.matching_provider_id_rows <= 1) return false;
   return normalizeConversationId(identity.providerConversationId) === '' || counts.exact_identity_rows !== 1;
+}
+
+/**
+ * The one-query lookup of ledger identities (itemRowsForIdentities). CROSS
+ * JOIN fixes the order: the identities drive, and each probes the identity
+ * index. With a plain JOIN and a scope filter naming the provider, SQLite
+ * walked every item of the provider and account and scanned the whole
+ * identity list for each one, and on Sparta (2026-11-04) one status build
+ * held the worker for 796 s.
+ */
+export function identityRowsSql(extraSql: string): string {
+  return `
+      SELECT CAST(j.key AS INTEGER) AS idx, i.item_pk, i.local_item_id, i.title, i.source_version
+      FROM json_each(?) j
+      CROSS JOIN items i
+      WHERE i.provider = json_extract(j.value, '$[0]') AND i.account_scope = json_extract(j.value, '$[1]')
+        AND i.normalized_conversation = json_extract(j.value, '$[2]') AND i.provider_item_id = json_extract(j.value, '$[3]')
+        AND i.tombstoned = 0 ${extraSql}
+      ORDER BY j.key
+    `;
 }
 
 function connectorStoreFilterSql(filters: ConnectorStoreSearchFilters | undefined): {
