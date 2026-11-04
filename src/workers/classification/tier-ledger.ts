@@ -3230,7 +3230,8 @@ export class TierLedger {
    */
   corpusCopyIdentities(
     corpusId: string,
-    filter: 'superseded' | 'staged' | 'held' | 'metadata_layer' | 'metadata_layer_content_unread' | 'metadata_layer_settled_unreadable',
+    filter: 'superseded' | 'staged' | 'held' | 'metadata_layer' | 'metadata_layer_content_unread' | 'metadata_layer_settled_unreadable'
+      | 'metadata_layer_settled_unreadable_not_secret',
   ): TierLedgerIdentity[] {
     // `metadata_layer_content_unread`: a names copy here whose text no current
     // copy anywhere holds yet. That item is still waiting to be read (the
@@ -3239,8 +3240,12 @@ export class TierLedger {
       ? `copy_state = 'current' AND embed_hold = 1`
       : filter === 'metadata_layer'
         ? `copy_state = 'current' AND layers = 'metadata'`
-        : filter === 'metadata_layer_settled_unreadable'
-          ? `copy_state = 'current' AND layers = 'metadata'
+        : filter === 'metadata_layer_settled_unreadable' || filter === 'metadata_layer_settled_unreadable_not_secret'
+          ? `copy_state = 'current' AND layers = 'metadata'${filter === 'metadata_layer_settled_unreadable_not_secret' ? `
+            AND NOT EXISTS (SELECT 1 FROM tier_overrides o
+              WHERE o.provider = tier_copies.provider AND o.account_scope = tier_copies.account_scope
+                AND o.conversation_key = tier_copies.conversation_key AND o.provider_item_id = tier_copies.provider_item_id
+                AND json_extract(o.override_json, '$.kind') = 'tier' AND json_extract(o.override_json, '$.tier') = 'secrets')` : ''}
             AND EXISTS (SELECT 1 FROM tier_items t
               WHERE t.provider = tier_copies.provider AND t.account_scope = tier_copies.account_scope
                 AND t.conversation_key = tier_copies.conversation_key AND t.provider_item_id = tier_copies.provider_item_id
