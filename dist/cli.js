@@ -40187,7 +40187,7 @@ async function resolveHelper(options, packageRoot) {
     throw codedPairingError("WhatsApp pairing requires Go and a C compiler. Install Go plus cc/clang/gcc, then re-run olympus connect whatsapp --pair; Olympus will build the pinned bridge automatically.", "bridge_build_tools_missing");
   }
   mkdirSync18(join35(output, ".."), { recursive: true, mode: 448 });
-  const built = await (options.buildWhatsAppBridge ?? buildWhatsAppBridge)({ go, sourceDir, outputPath: output });
+  const built = await (options.buildWhatsAppBridge ?? buildWhatsAppBridge)({ go, compiler, sourceDir, outputPath: output });
   if (!built || !existsSync30(output)) {
     throw codedPairingError("The pinned WhatsApp bridge could not be built. Verify Go and the C compiler, then re-run olympus connect whatsapp --pair.", "bridge_build_failed");
   }
@@ -40213,12 +40213,17 @@ function assertTrustedBridge(path, message2) {
     throw new Error(message2);
   }
 }
+function whatsappBridgeBuildEnv(input, base = process.env) {
+  const dirs = [...new Set([dirname31(input.go), dirname31(input.compiler)])];
+  const path = [...dirs, ...(base.PATH ?? "").split(":").filter((dir) => dir && !dirs.includes(dir))].join(":");
+  return { ...base, CGO_ENABLED: "1", CC: input.compiler, PATH: path };
+}
 async function buildWhatsAppBridge(input) {
   const temporary = `${input.outputPath}.tmp.${process.pid}`;
   rmSync10(temporary, { force: true });
   const child = Bun.spawn([input.go, "build", "-trimpath", "-o", temporary, "."], {
     cwd: input.sourceDir,
-    env: { ...process.env, CGO_ENABLED: "1" },
+    env: whatsappBridgeBuildEnv(input),
     stdin: "ignore",
     stdout: "ignore",
     stderr: "ignore"
