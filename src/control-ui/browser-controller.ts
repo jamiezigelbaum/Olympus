@@ -1194,9 +1194,11 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
       if (PAIRING_ACTIVE(state)) messagingActive.add(card); else messagingActive.delete(card);
       if (['paired', 'complete', 'completed'].includes(state)) {
         const row = card.querySelector('.actionrow');
-        const start = row?.querySelector<HTMLFormElement>('form[data-messaging-kind="start"]');
+        // A card rendered paired already has its own Check connection form; its start form stays "Pair again".
+        const hasStatus = !!row?.querySelector('form[data-messaging-kind="status"]');
+        const start = hasStatus ? null : row?.querySelector<HTMLFormElement>('form[data-messaging-kind="start"]');
         if (start) { start.dataset.messagingKind = 'status'; const button = start.querySelector('button'); if (button) { button.textContent = 'Check connection'; button.classList.remove('primary'); } }
-        const toggle = row?.querySelector<HTMLButtonElement>('[data-sheet-toggle="#telegram-setup"]');
+        const toggle = hasStatus ? null : row?.querySelector<HTMLButtonElement>('[data-sheet-toggle="#telegram-setup"]');
         if (toggle) { const form = document.createElement('form'); form.method = 'dialog'; form.dataset.messagingKind = 'status'; toggle.removeAttribute('data-sheet-toggle'); toggle.textContent = 'Check connection'; toggle.type = 'submit'; toggle.classList.remove('primary'); toggle.replaceWith(form); form.append(toggle); }
         row?.querySelector('[data-messaging-kind="chats"] button')?.classList.add('primary');
         const chats = row?.querySelector('[data-messaging-kind="chats"]');

@@ -376,6 +376,9 @@ describe('the scheduler source', () => {
     const target = planStoreEmbedding({ store: internal, provider, servedByMeaning: true, scope: { allowed: true } })!;
     expect(target.wholeStore).toBe(true);
     const [run] = await embedPendingChunks([target], { maxItems: 32 });
+    // #791: one CI run embedded nothing. Name why first (a busy lease, a
+    // deferral, an out-of-scope or failed item, or nothing found at all).
+    expect({ ...run, chunksEmbedded: undefined }).toEqual({ corpusId: run!.corpusId, itemsAttempted: 1, chunksEmbedded: undefined, itemsFailed: 0, itemsOutOfScope: 0 });
     expect(run!.chunksEmbedded).toBeGreaterThan(0);
   });
 
