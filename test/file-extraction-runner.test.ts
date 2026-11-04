@@ -68,6 +68,7 @@ import {
   EXTRACTION_ERROR_KIND_MODEL_ENDPOINT_REDIRECT,
   EXTRACTION_ERROR_KIND_UNKNOWN_EXTRACTOR,
   EXTRACTION_PAUSE_CONSECUTIVE_FAILURES,
+  EXTRACTION_PAUSE_SOURCE_BUDGET,
   EXTRACTION_PAUSE_HEALTH_PROBE,
   PLAN_REFUSED_EXTRACTOR_VERSION,
   PLAN_REFUSED_ITEM_FIELD,
@@ -299,6 +300,49 @@ describe('extraction runner: one bad item never aborts a run', () => {
     }
   });
 
+  test('a spent source budget parks the lane: the job goes back uncharged and nothing fails', async () => {
+    const jobs = jobStore();
+    try {
+      enqueue(jobs, 5);
+      let reads = 0;
+      const resetAt = '2026-11-05T00:00:00.000Z';
+      const runner = runnerFor({
+        jobs,
+        maxConsecutiveRetryableFailures: 2,
+        corpus: {
+          source: fakeSource({
+            async fetch(): Promise<FetchedBytes> {
+              reads += 1;
+              if (reads > 1) throw new FileExtractionSourceError('source_budget_exhausted', { retryAt: resetAt });
+              return { bytes: new TextEncoder().encode('bytes'), mimeType: 'text/plain' };
+            },
+          }),
+        },
+      });
+
+      const result = await runner.run({ ...LANE });
+
+      expect(result.paused).toBe(true);
+      expect(result.pauseReason).toBe(EXTRACTION_PAUSE_SOURCE_BUDGET);
+      expect(result.parkedUntil).toBe(resetAt);
+      expect(reads).toBe(2);
+      expect(result.processedJobs).toBe(1);
+      expect(result.abandonedLeases).toBe(4);
+      expect(result.counts.indexed).toBe(1);
+      expect(result.counts.failed_retryable).toBe(0);
+      expect(result.records).toHaveLength(1);
+
+      // After the reset every job that waited is read, none charged for the park.
+      const resumed = runnerFor({ jobs });
+      const after = await resumed.run({ ...LANE });
+      expect(after.paused).toBe(false);
+      expect(after.counts.indexed).toBe(4);
+      expect(after.records.every((record) => record.attempts === 1)).toBe(true);
+    } finally {
+      jobs.close();
+    }
+  });
+
   test('a settled job between two retryable ones resets the counter', async () => {
     const jobs = jobStore();
     try {
@@ -426,6 +470,13 @@ describe('extraction runner: settlement comes from the source, never re-derived'
 
         const result = await runner.run({ ...LANE });
 
+        if (errorKind === 'source_budget_exhausted') {
+          // A spent budget is the day's, not the item's: the lane parks and
+          // the job waits uncharged (see the park test above).
+          expect(result.records).toHaveLength(0);
+          expect(result.pauseReason).toBe(EXTRACTION_PAUSE_SOURCE_BUDGET);
+          return;
+        }
         expect(result.records[0]!.status).toBe(settlement);
         expect(result.records[0]!.errorKind).toBe(errorKind);
       } finally {

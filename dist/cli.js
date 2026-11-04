@@ -55574,6 +55574,7 @@ var init_file_extraction_source = __esm(() => {
     settleAs;
     retryable;
     errorHash;
+    retryAt;
     constructor(errorKind, options = {}) {
       super(errorKind);
       this.name = "FileExtractionSourceError";
@@ -55583,6 +55584,8 @@ var init_file_extraction_source = __esm(() => {
       const errorHash = options.detailForHash === undefined ? undefined : createHash32("sha256").update(options.detailForHash).digest("hex").slice(0, ERROR_HASH_CHARS);
       if (errorHash)
         this.errorHash = errorHash;
+      if (options.retryAt !== undefined && Number.isFinite(Date.parse(options.retryAt)))
+        this.retryAt = options.retryAt;
     }
   };
 });
@@ -79077,7 +79080,7 @@ function driveFetchFailure(error) {
     return new FileExtractionSourceError("source_too_large");
   }
   if (error instanceof GoogleRequestBudgetError) {
-    return new FileExtractionSourceError("source_budget_exhausted");
+    return new FileExtractionSourceError("source_budget_exhausted", { retryAt: error.retryAt });
   }
   if (error instanceof GoogleDriveApiError) {
     const options = { detailForHash: `${error.status}` };
@@ -90336,6 +90339,7 @@ function createFileExtractionRunner(options) {
       const records = [];
       let consecutiveRetryableFailures = 0;
       let paused = false;
+      let parkedUntil;
       let processedJobs = 0;
       let localOnly = true;
       let source;
@@ -90360,6 +90364,12 @@ function createFileExtractionRunner(options) {
           ...spoolAnchor !== undefined ? { spoolAnchor } : {},
           now
         });
+        if (outcome.sourceParked !== undefined) {
+          processedJobs -= 1;
+          paused = true;
+          parkedUntil = outcome.sourceParked ?? new Date(now().getTime() + SOURCE_PARK_FALLBACK_MS).toISOString();
+          break;
+        }
         const record = await recordOutcome(jobs, job, workerId, outcome);
         records.push(record);
         if (record.status === "failed_retryable") {
@@ -90392,7 +90402,8 @@ function createFileExtractionRunner(options) {
         records,
         counts: countRecords(records),
         paused,
-        ...paused ? { pauseReason: EXTRACTION_PAUSE_CONSECUTIVE_FAILURES } : {},
+        ...paused ? { pauseReason: parkedUntil !== undefined ? EXTRACTION_PAUSE_SOURCE_BUDGET : EXTRACTION_PAUSE_CONSECUTIVE_FAILURES } : {},
+        ...parkedUntil !== undefined ? { parkedUntil } : {},
         consecutiveRetryableFailures,
         ...nextRetryAt !== undefined ? { nextRetryAt } : {},
         ...reclassification ? { reclassification } : {},
@@ -90501,7 +90512,8 @@ async function settleOneJobHeld(input, staged) {
         return {
           status: error.settleAs,
           errorKind: error.errorKind,
-          ...error.errorHash ? { errorHash: error.errorHash } : {}
+          ...error.errorHash ? { errorHash: error.errorHash } : {},
+          ...error.errorKind === "source_budget_exhausted" ? { sourceParked: error.retryAt ?? null } : {}
         };
       }
       return retryable(EXTRACTION_ERROR_KIND_SOURCE_FETCH_FAILED, error);
@@ -90959,7 +90971,7 @@ function refusesImageContent(corpus, ref) {
     return false;
   }
 }
-var DEFAULT_EXTRACTION_WORKER_ID = "olympus-file-extraction-worker", DEFAULT_MAX_CONSECUTIVE_RETRYABLE_FAILURES = 5, DEFAULT_RECLASSIFICATION_LIMIT = 100, EXTRACTION_ERROR_KIND_UNKNOWN_EXTRACTOR = "extractor_kind_unknown", EXTRACTION_ERROR_KIND_EXTRACTOR_THREW = "extractor_threw", EXTRACTION_ERROR_KIND_EXTRACTOR_TIMEOUT = "extractor_command_timeout", EXTRACTION_ERROR_KIND_MODEL_ENDPOINT_REDIRECT = "model_endpoint_redirect", EXTRACTION_ERROR_KIND_SOURCE_FETCH_FAILED = "source_fetch_failed", EXTRACTION_ERROR_KIND_BYTES_UNVERIFIED = "source_bytes_hash_mismatch", EXTRACTION_ERROR_KIND_EMPTY_OUTPUT = "extractor_empty_output", EXTRACTION_ERROR_KIND_SINK_FAILED = "sink_write_failed", EXTRACTION_ERROR_KIND_LEASE_LOST = "lease_lost", EXTRACTION_ERROR_KIND_SOURCE_SCOPE_SUPERSEDED = "source_scope_superseded", EXTRACTION_ERROR_KIND_INTERNAL_ERROR = "extraction_internal_error", EXTRACTION_ERROR_KIND_RECORD_REFUSED = "extraction_record_refused", EXTRACTION_EGRESS_REFUSED_NO_POLICY = "egress_remote_not_permitted", EXTRACTION_EGRESS_REFUSED_DECISION = "egress_policy_decision_forbids", EXTRACTION_EGRESS_REFUSED_DEFERRED = "egress_policy_default_deferred", EXTRACTION_EGRESS_REFUSED_TRUST_TIER = "egress_policy_trust_tier", EXTRACTION_EGRESS_REFUSED_TIER_UNKNOWN = "egress_trust_tier_unknown", EXTRACTION_EGRESS_REFUSED_JOB_UNKNOWN = "egress_job_policy_unreadable", EXTRACTION_PAUSE_CONSECUTIVE_FAILURES = "consecutive_retryable_failures", EXTRACTION_PAUSE_HEALTH_PROBE = "extractor_health_probe_failed", ERROR_HASH_CHARS2 = 32, SINK_SKIP_SETTLEMENTS, ExtractionEgressRefusedError, PLAN_REFUSED_EXTRACTOR_KIND = "extractor_kind_refused", PLAN_REFUSED_EXTRACTOR_VERSION = "extractor_version_refused", PLAN_REFUSED_ITEM_FIELD = "item_field_refused", PLAN_REFUSED_ROUTING_FAILED = "routing_failed", ITEM_REF_FIELDS, PDF_MIME_TYPES, PDF_DRAIN_PLAN_PAGE = 500, PDF_DRAIN_BATCH = 1;
+var DEFAULT_EXTRACTION_WORKER_ID = "olympus-file-extraction-worker", DEFAULT_MAX_CONSECUTIVE_RETRYABLE_FAILURES = 5, DEFAULT_RECLASSIFICATION_LIMIT = 100, EXTRACTION_ERROR_KIND_UNKNOWN_EXTRACTOR = "extractor_kind_unknown", EXTRACTION_ERROR_KIND_EXTRACTOR_THREW = "extractor_threw", EXTRACTION_ERROR_KIND_EXTRACTOR_TIMEOUT = "extractor_command_timeout", EXTRACTION_ERROR_KIND_MODEL_ENDPOINT_REDIRECT = "model_endpoint_redirect", EXTRACTION_ERROR_KIND_SOURCE_FETCH_FAILED = "source_fetch_failed", EXTRACTION_ERROR_KIND_BYTES_UNVERIFIED = "source_bytes_hash_mismatch", EXTRACTION_ERROR_KIND_EMPTY_OUTPUT = "extractor_empty_output", EXTRACTION_ERROR_KIND_SINK_FAILED = "sink_write_failed", EXTRACTION_ERROR_KIND_LEASE_LOST = "lease_lost", EXTRACTION_ERROR_KIND_SOURCE_SCOPE_SUPERSEDED = "source_scope_superseded", EXTRACTION_ERROR_KIND_INTERNAL_ERROR = "extraction_internal_error", EXTRACTION_ERROR_KIND_RECORD_REFUSED = "extraction_record_refused", EXTRACTION_EGRESS_REFUSED_NO_POLICY = "egress_remote_not_permitted", EXTRACTION_EGRESS_REFUSED_DECISION = "egress_policy_decision_forbids", EXTRACTION_EGRESS_REFUSED_DEFERRED = "egress_policy_default_deferred", EXTRACTION_EGRESS_REFUSED_TRUST_TIER = "egress_policy_trust_tier", EXTRACTION_EGRESS_REFUSED_TIER_UNKNOWN = "egress_trust_tier_unknown", EXTRACTION_EGRESS_REFUSED_JOB_UNKNOWN = "egress_job_policy_unreadable", EXTRACTION_PAUSE_CONSECUTIVE_FAILURES = "consecutive_retryable_failures", EXTRACTION_PAUSE_SOURCE_BUDGET = "source_budget_exhausted", SOURCE_PARK_FALLBACK_MS, EXTRACTION_PAUSE_HEALTH_PROBE = "extractor_health_probe_failed", ERROR_HASH_CHARS2 = 32, SINK_SKIP_SETTLEMENTS, ExtractionEgressRefusedError, PLAN_REFUSED_EXTRACTOR_KIND = "extractor_kind_refused", PLAN_REFUSED_EXTRACTOR_VERSION = "extractor_version_refused", PLAN_REFUSED_ITEM_FIELD = "item_field_refused", PLAN_REFUSED_ROUTING_FAILED = "routing_failed", ITEM_REF_FIELDS, PDF_MIME_TYPES, PDF_DRAIN_PLAN_PAGE = 500, PDF_DRAIN_BATCH = 1;
 var init_runner = __esm(() => {
   init_control_path_headroom();
   init_media_cache();
@@ -90972,6 +90984,7 @@ var init_runner = __esm(() => {
   init_bounded_text();
   init_job_store();
   init_store_sink();
+  SOURCE_PARK_FALLBACK_MS = 60 * 60000;
   SINK_SKIP_SETTLEMENTS = Object.freeze({
     [EXTRACTION_SINK_SKIPPED_ITEM_MISSING]: "failed_terminal",
     [EXTRACTION_SINK_SKIPPED_IDENTITY_AMBIGUOUS]: "failed_terminal",
@@ -171216,6 +171229,15 @@ function fileExtractionSchedulerTask(input) {
         jobs_failed_retryable: settled.failed_retryable,
         jobs_failed_terminal: settled.failed_terminal
       };
+      if (run2.paused && run2.parkedUntil !== undefined) {
+        return {
+          status: processedJobs > 0 || jobsQueued > 0 ? "progress" : "idle",
+          counts,
+          ...extractionWarnings(jobsRefused, run2.pauseReason),
+          checkpoint: done ? null : cursor ?? null,
+          retryAt: { at: run2.parkedUntil, degradedReason: run2.pauseReason ?? "source_budget_exhausted" }
+        };
+      }
       if (run2.paused) {
         throw new SourceSchedulerTaskFailure("File extraction paused at the extractor health gate.", {
           errorKind: run2.preflightErrorKind ?? run2.pauseReason ?? "extractor_health_probe_failed",
@@ -188459,7 +188481,15 @@ function gmailAttachmentConnector(input) {
       const live = input.live();
       if (!live)
         throw new FileExtractionSourceError("source_unavailable");
-      const item = await live.fetchItemWithin(localItemId, { deferredBytes: { locator }, ...options.maxBytes !== undefined ? { maxBytes: options.maxBytes } : {} });
+      let item;
+      try {
+        item = await live.fetchItemWithin(localItemId, { deferredBytes: { locator }, ...options.maxBytes !== undefined ? { maxBytes: options.maxBytes } : {} });
+      } catch (error2) {
+        if (error2 instanceof GoogleRequestBudgetError) {
+          throw new FileExtractionSourceError("source_budget_exhausted", { retryAt: error2.retryAt });
+        }
+        throw error2;
+      }
       if (item.content.kind === "bytes" && options.maxBytes !== undefined && item.content.bytes.byteLength > options.maxBytes) {
         throw new FileExtractionSourceError("source_too_large");
       }
@@ -188511,6 +188541,7 @@ var init_gmail_attachment_extraction = __esm(() => {
   init_child_extraction_runtime();
   init_gmail();
   init_gmail_archive_target();
+  init_request_budget();
   init_gmail_input();
   GMAIL_ATTACHMENT_CORPUS_IDS = [GMAIL_SECURE_CONNECTOR_CORPUS_ID, GMAIL_INTERNAL_CONNECTOR_CORPUS_ID];
 });

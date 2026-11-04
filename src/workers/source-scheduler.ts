@@ -1660,6 +1660,18 @@ export function fileExtractionSchedulerTask(input: {
         jobs_failed_retryable: settled.failed_retryable,
         jobs_failed_terminal: settled.failed_terminal,
       };
+      if (run.paused && run.parkedUntil !== undefined) {
+        // The source's request budget is spent: a planned park until it
+        // resets, not a failure, so the lane neither fail-loops nor counts
+        // toward a failure streak.
+        return {
+          status: processedJobs > 0 || jobsQueued > 0 ? 'progress' : 'idle',
+          counts,
+          ...extractionWarnings(jobsRefused, run.pauseReason),
+          checkpoint: done ? null : cursor ?? null,
+          retryAt: { at: run.parkedUntil, degradedReason: run.pauseReason ?? 'source_budget_exhausted' },
+        };
+      }
       if (run.paused) {
         throw new SourceSchedulerTaskFailure('File extraction paused at the extractor health gate.', {
           errorKind: run.preflightErrorKind ?? run.pauseReason ?? 'extractor_health_probe_failed',

@@ -179,6 +179,34 @@ describe('backed-off retries', () => {
     const result = await fileExtractionSchedulerTask({ id: 'x', runner: fake, lane, planLimit: 5, batchSize: 4 }).run();
     expect(result.wakeAt).toBe(nextRetryAt);
   });
+
+  test('a lane parked on a spent source budget waits for the reset instead of failing', async () => {
+    const parkedUntil = '2026-11-05T00:00:00.000Z';
+    const fake = {
+      async plan() {
+        return {
+          candidates: 0, jobsQueued: 0, jobsExisting: 0, jobsForced: 0,
+          jobsSkippedTooLarge: 0, jobsUnroutable: 0, extractorKinds: [], done: true,
+        };
+      },
+      async run() {
+        return {
+          processedJobs: 3,
+          paused: true,
+          pauseReason: 'source_budget_exhausted',
+          parkedUntil,
+          counts: {
+            indexed: 3, metadata_only: 0, skipped_unsupported: 0, skipped_too_large: 0,
+            blocked_policy: 0, failed_retryable: 0, failed_terminal: 0,
+          },
+        };
+      },
+    } as unknown as FileExtractionRunner;
+    const lane = { corpusId: 'c', provider: 'fixture', accountScope: 'personal', approvedScopeKey: 'fixture.personal:/x' };
+    const result = await fileExtractionSchedulerTask({ id: 'x', runner: fake, lane, planLimit: 5, batchSize: 4 }).run();
+    expect(result.status).toBe('progress');
+    expect(result.retryAt).toEqual({ at: parkedUntil, degradedReason: 'source_budget_exhausted' });
+  });
 });
 
 describe('extraction pass over a shared candidate store', () => {

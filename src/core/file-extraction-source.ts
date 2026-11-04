@@ -105,6 +105,12 @@ export interface FileExtractionSourceErrorOptions {
    * row by way of `message`.
    */
   detailForHash?: string;
+  /**
+   * When the source can be asked again (ISO time). Set with
+   * `source_budget_exhausted`: a spent request budget is a statement about
+   * the day, so the runner parks the lane until then instead of failing items.
+   */
+  retryAt?: string;
 }
 
 const ERROR_HASH_CHARS = 32;
@@ -121,6 +127,7 @@ export class FileExtractionSourceError extends Error {
   readonly settleAs: FileExtractionSourceSettlement;
   readonly retryable: boolean;
   readonly errorHash?: string;
+  readonly retryAt?: string;
 
   constructor(errorKind: FileExtractionSourceErrorKind, options: FileExtractionSourceErrorOptions = {}) {
     super(errorKind);
@@ -132,6 +139,7 @@ export class FileExtractionSourceError extends Error {
       ? undefined
       : createHash('sha256').update(options.detailForHash).digest('hex').slice(0, ERROR_HASH_CHARS);
     if (errorHash) this.errorHash = errorHash;
+    if (options.retryAt !== undefined && Number.isFinite(Date.parse(options.retryAt))) this.retryAt = options.retryAt;
   }
 }
 
