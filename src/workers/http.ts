@@ -440,7 +440,7 @@ function dashboardLaunchRefusedResponse(status: 'unknown' | 'expired' | 'origin_
     error: {
       code: status === 'origin_mismatch' ? 'dashboard_launch_origin_mismatch' : 'dashboard_launch_ticket_invalid',
       status: 403,
-      message: 'This opening link is no longer valid. Run the dashboard command again for a fresh one.',
+      message: 'This opening link was already used or has expired. Open the dashboard from your bookmark, or ask your agent for a new link.',
     },
     policy: { single_use: true, origin_bound: true, durable_secret_in_url: false },
   }), {
