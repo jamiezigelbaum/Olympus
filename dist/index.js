@@ -22426,6 +22426,7 @@ var init_pdf_raster_ocr = __esm(() => {
 });
 
 // src/workers/file-extraction/extractors/ocr.ts
+var OCR_PDF_TIMEOUT_BYTES_PER_STEP, OCR_PDF_MAX_TIMEOUT_MS;
 var init_ocr = __esm(() => {
   init_bounded_text();
   init_command_runner();
@@ -22434,6 +22435,8 @@ var init_ocr = __esm(() => {
   init_ocr_capability();
   init_pdf_raster_ocr();
   init_input_limits();
+  OCR_PDF_TIMEOUT_BYTES_PER_STEP = 5 * 1024 * 1024;
+  OCR_PDF_MAX_TIMEOUT_MS = 12 * 60000;
 });
 
 // src/workers/file-extraction/extractors/remote-vlm.ts

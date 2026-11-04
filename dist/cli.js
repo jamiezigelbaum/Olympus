@@ -86780,6 +86780,10 @@ var init_pdf_raster_ocr = __esm(() => {
 import { mkdtemp as mkdtemp6, readFile as readFile7, rm as rm7, writeFile as writeFile5 } from "node:fs/promises";
 import { tmpdir as tmpdir8 } from "node:os";
 import { join as join77 } from "node:path";
+function pdfOcrTimeoutMs(baseMs, sizeBytes) {
+  const steps = Math.max(1, Math.ceil((Number.isFinite(sizeBytes) ? Math.max(0, sizeBytes) : 0) / OCR_PDF_TIMEOUT_BYTES_PER_STEP));
+  return Math.max(baseMs, Math.min(baseMs * steps, OCR_PDF_MAX_TIMEOUT_MS));
+}
 function createOcrEngine(input) {
   const options = input.options ?? {};
   let vision;
@@ -87002,7 +87006,7 @@ async function commandPdfOcr(engine, input) {
       sizeBytes: input.sizeBytes
     }, {
       commandRunner: input.commandRunner,
-      timeoutMs: input.timeoutMs,
+      timeoutMs: pdfOcrTimeoutMs(input.timeoutMs, input.sizeBytes),
       maxBoundedTextChars: input.maxBoundedTextChars,
       ...engine.limits
     }));
@@ -87064,7 +87068,7 @@ async function extractPdfOcr(input) {
       await input.commandRunner({
         command: OCR_PDF_COMMAND,
         args: ocrmypdfArguments({ inputPath, outputPath, sidecarPath }),
-        timeoutMs: input.timeoutMs
+        timeoutMs: pdfOcrTimeoutMs(input.timeoutMs, input.sizeBytes)
       });
     } catch (error) {
       const rejectionKind = classifyOcrDeterministicPdfRejection(error);
@@ -87179,7 +87183,7 @@ function imageExtensionForMimeType(mimeType) {
     return ".heif";
   return ".img";
 }
-var OCR_EXTRACTOR_KIND = "local_ocr_tesseract", OCR_EXTRACTOR_VERSION = "ocr-v1", DEFAULT_OCR_TIMEOUT_MS = 120000, OCR_PDF_COMMAND, OCR_IMAGE_COMMAND, TEMP_DIR_PREFIX4 = "olympus-extraction-ocr-", OCR_DETERMINISTIC_PDF_REJECTION_KINDS, OcrUnavailableError;
+var OCR_EXTRACTOR_KIND = "local_ocr_tesseract", OCR_EXTRACTOR_VERSION = "ocr-v1", DEFAULT_OCR_TIMEOUT_MS = 120000, OCR_PDF_TIMEOUT_BYTES_PER_STEP, OCR_PDF_MAX_TIMEOUT_MS, OCR_PDF_COMMAND, OCR_IMAGE_COMMAND, TEMP_DIR_PREFIX4 = "olympus-extraction-ocr-", OCR_DETERMINISTIC_PDF_REJECTION_KINDS, OcrUnavailableError;
 var init_ocr = __esm(() => {
   init_bounded_text();
   init_command_runner();
@@ -87188,6 +87192,8 @@ var init_ocr = __esm(() => {
   init_ocr_capability();
   init_pdf_raster_ocr();
   init_input_limits();
+  OCR_PDF_TIMEOUT_BYTES_PER_STEP = 5 * 1024 * 1024;
+  OCR_PDF_MAX_TIMEOUT_MS = 12 * 60000;
   OCR_PDF_COMMAND = OCRMYPDF_COMMAND;
   OCR_IMAGE_COMMAND = TESSERACT_COMMAND;
   OCR_DETERMINISTIC_PDF_REJECTION_KINDS = [
