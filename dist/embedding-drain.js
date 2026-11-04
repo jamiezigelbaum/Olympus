@@ -15765,6 +15765,13 @@ class TierLedger {
             -- Rests on a retired whole-source prior (RETIRED_SOURCE_PRIOR_REASON):
             -- wrong under the owner ruling of 2026-10-28, so judged again now.
             OR instr(i.reasons_json, '"metadata:prior:source_') > 0
+            -- Content settled fail-safe because its question was missing from
+            -- the queue, not because anything judged it (an enqueue lost while
+            -- the private model was off: about 2,400 messages on 2026-11-04):
+            -- its text is stored, so it is asked again (#606).
+            OR (instr(i.reasons_json, ':fail_safe:missing_question"') > 0
+              AND EXISTS (SELECT 1 FROM json_each(i.reasons_json) r
+                WHERE r.value GLOB 'content:sniffer:*:fail_safe:missing_question'))
             OR i.engine_version != ?
             OR (? IS NOT NULL AND instr(i.reasons_json, '"metadata:sniffer:') > 0 AND instr(i.reasons_json, ?) = 0)
             OR (? IS NOT NULL AND instr(i.reasons_json, ?) = 0
