@@ -952,17 +952,19 @@ export class TierSnifferService {
   }
 
   /**
-   * An unread file that no store holds text for yet, and extraction still
-   * owes it. Only a routed file has an extraction lane at all: a message,
-   * a note or a legacy unrouted row with no job is genuinely unread, and
-   * keeps the fail-safe settlement rather than waiting for a job that will
-   * never come. A file with no job waits only for EXTRACTION_ENQUEUE_GRACE_MS
+   * An unread routed item (a file, or a chat's photo, voice note or
+   * attachment) that no store holds text for yet, and extraction still owes
+   * it. A legacy unrouted row has no extraction lane, and an item extraction
+   * no longer owes is genuinely unread: both keep the fail-safe settlement
+   * rather than waiting for a job that will never come (Sparta, 2026-11-04:
+   * Telegram media were settled while their extraction was still queued,
+   * because only the file family was let wait). An item with no job waits only for EXTRACTION_ENQUEUE_GRACE_MS
    * after it was listed: past that, nothing will queue it (a names-only
    * folder, a job deleted when its scope changed) and it settles as before.
    */
   private waitingForExtraction(ledger: TierLedger, row: TierLedgerRecord, identity: TierLedgerIdentity): boolean {
     try {
-      if (!this.options.extractionState || row.family !== 'file' || !row.routed) return false;
+      if (!this.options.extractionState || !row.routed) return false;
       const copies = ledger.copies(identity);
       if (copies.length === 0) return false;
       if (copies.some(copy => copy.state === 'current' && copy.layers !== 'metadata')) return false;

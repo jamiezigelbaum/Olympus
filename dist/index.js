@@ -18189,6 +18189,7 @@ var init_tier_placement = __esm(() => {
   init_types();
   init_engine();
   init_tier_classifier();
+  init_tier_ledger();
 });
 
 // src/workers/source-index/built-in-reasoning/manifest.ts

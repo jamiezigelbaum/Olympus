@@ -31,7 +31,7 @@ import {
   type TierDecision,
   type TierSniffer,
 } from '../classification/tier-classifier.ts';
-import type { TierLedger, TierLedgerIdentity, TierLedgerRecord } from '../classification/tier-ledger.ts';
+import { isFailSafeMissingContentQuestion, type TierLedger, type TierLedgerIdentity, type TierLedgerRecord } from '../classification/tier-ledger.ts';
 import { registeredInstalledTierClassification } from '../classification/installed-tier-classification-registry.ts';
 
 /**
@@ -245,7 +245,8 @@ export function decideItemTiers(
  * cache alone can miss it, since a re-judge asks with the names the stored
  * copy kept, which need not match the listing's; the unchanged item would
  * otherwise fall back to pending, and be asked again, on every listing.
- * Every other question goes to `sniffer`.
+ * Every other question goes to `sniffer`. Content settled fail-safe because
+ * its question went missing was never judged, so a listing asks it again.
  */
 export function recordedContentVerdictSniffer(
   sniffer: TierSniffer,
@@ -260,7 +261,8 @@ export function recordedContentVerdictSniffer(
   const tier = recorded.contentTier;
   const prefix = `content:sniffer:${sniffer.id}:`;
   const code = recorded.reasons.find((reason) => reason.startsWith(prefix))?.slice(prefix.length);
-  if ((tier !== 'private' && tier !== 'secure') || !code || code === 'undecided') return sniffer;
+  if ((tier !== 'private' && tier !== 'secure') || !code || code === 'undecided'
+    || isFailSafeMissingContentQuestion(`${prefix}${code}`)) return sniffer;
   return {
     id: sniffer.id,
     judge: (request) => request.pass === 'content' && (request.mapRevision ?? 'none') === recorded.mapRevision
