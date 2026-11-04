@@ -20332,7 +20332,7 @@ import { Database as Database3 } from "bun:sqlite";
 import { chmodSync as chmodSync6, closeSync as closeSync12, existsSync as existsSync20, mkdirSync as mkdirSync13, openSync as openSync12, statSync as statSync11 } from "node:fs";
 import { dirname as dirname25 } from "node:path";
 function isFailSafeMissingContentQuestion(reason) {
-  return reason.startsWith("content:sniffer:") && reason.endsWith(":fail_safe:missing_question");
+  return reason.startsWith("content:sniffer:") && (reason.endsWith(":fail_safe:missing_question") || reason.endsWith(":fail_safe:unread"));
 }
 function tierLedgerConversationKey(identity2) {
   return identity2.providerConversationId ?? "";
@@ -20832,7 +20832,8 @@ class TierLedger {
       WHERE routed = 1 AND content_read = 0 AND metadata_pending = 0
         AND ((state = 'pending' AND content_pending = 1)
           OR (state = 'current' AND EXISTS (SELECT 1 FROM json_each(reasons_json) r
-            WHERE r.value GLOB 'content:sniffer:*:fail_safe:missing_question')))
+            WHERE r.value GLOB 'content:sniffer:*:fail_safe:missing_question'
+              OR r.value GLOB 'content:sniffer:*:fail_safe:unread')))
         AND (? IS NULL OR (provider, account_scope, conversation_key, provider_item_id) > (?, ?, ?, ?))
       ORDER BY provider, account_scope, conversation_key, provider_item_id
       LIMIT ?
@@ -20881,7 +20882,7 @@ class TierLedger {
         next.contentPending = false;
         next.reasons = [
           ...next.reasons.filter((reason) => !isOpenSnifferReason(reason, "content")),
-          `content:sniffer:${options.snifferId}:fail_safe:missing_question`
+          `content:sniffer:${options.snifferId}:fail_safe:${next.contentRead ? "missing_question" : "unread"}`
         ];
       }
       next.contentTier = maxTier(next.contentTier, next.metadataTier);
@@ -20896,6 +20897,19 @@ class TierLedger {
         this.writeRow(identity2, next, undefined, current2);
       return true;
     })();
+  }
+  relabelUnreadFailSafe(limit = 2000) {
+    return this.db.query(`
+      UPDATE tier_items SET reasons_json = (
+        SELECT json_group_array(CASE WHEN r.value GLOB 'content:sniffer:*:fail_safe:missing_question'
+          THEN substr(r.value, 1, length(r.value) - length('missing_question')) || 'unread' ELSE r.value END)
+        FROM json_each(tier_items.reasons_json) r)
+      WHERE rowid IN (
+        SELECT rowid FROM tier_items
+        WHERE content_read = 0 AND instr(reasons_json, ':fail_safe:missing_question"') > 0
+          AND EXISTS (SELECT 1 FROM json_each(reasons_json) r WHERE r.value GLOB 'content:sniffer:*:fail_safe:missing_question')
+        LIMIT ?)
+    `).run(Math.max(1, Math.min(limit, 1e4))).changes;
   }
   retireAbsentPending(record) {
     const identity2 = {
@@ -22267,7 +22281,8 @@ class TierLedger {
                 AND t.state = 'current' AND t.content_read = 0
                 AND t.metadata_tier <> 'secrets' AND t.content_tier <> 'secrets'
                 AND EXISTS (SELECT 1 FROM json_each(t.reasons_json) r
-                  WHERE r.value GLOB 'content:sniffer:*:fail_safe:missing_question'))
+                  WHERE r.value GLOB 'content:sniffer:*:fail_safe:missing_question'
+                    OR r.value GLOB 'content:sniffer:*:fail_safe:unread'))
             AND NOT EXISTS (SELECT 1 FROM tier_copies other
               WHERE other.provider = tier_copies.provider AND other.account_scope = tier_copies.account_scope
                 AND other.conversation_key = tier_copies.conversation_key AND other.provider_item_id = tier_copies.provider_item_id
@@ -23054,7 +23069,7 @@ function tierLedgerMigrations() {
     }
   ];
 }
-var TIER_LEDGER_SCHEMA_VERSION = 10, DEFAULT_REJUDGE_SCAN_ROWS = 2000, TierLedgerGenerationConflictError, TierLedgerRaiseAbandonRefusedError, TierLedgerPurgedRollbackRefusedError, TierLedgerSecretsRollbackRefusedError, TIER_LEDGER_IDENTITY_FIELDS, TRUST_DOMAIN_RANK, STORED_NAMES_REASON = "metadata:names_from_store", STORED_NAMES_ASKED_REASON = "metadata:names_from_store:asked", TIER_CHECK = `IN ('public', 'private', 'secure', 'secrets')`;
+var TIER_LEDGER_SCHEMA_VERSION = 10, TIER_LEDGER_UNREAD_RELABEL_DONE = "fail_safe_unread_relabel_v1", DEFAULT_REJUDGE_SCAN_ROWS = 2000, TierLedgerGenerationConflictError, TierLedgerRaiseAbandonRefusedError, TierLedgerPurgedRollbackRefusedError, TierLedgerSecretsRollbackRefusedError, TIER_LEDGER_IDENTITY_FIELDS, TRUST_DOMAIN_RANK, STORED_NAMES_REASON = "metadata:names_from_store", STORED_NAMES_ASKED_REASON = "metadata:names_from_store:asked", TIER_CHECK = `IN ('public', 'private', 'secure', 'secrets')`;
 var init_tier_ledger = __esm(() => {
   init_sqlite_migrations();
   init_tier_classifier();
@@ -190357,6 +190372,9 @@ class TierSnifferService {
         const stores = set2?.openStores() ?? this.options.stores().filter((store) => (store.tierLedgerPathInUse?.() ?? tierLedgerPathForStore(store.dbPath)) === ledgerPath || tierLedgerPathForStore(store.dbPath) === ledgerPath);
         if (stores.length === 0 || stores.some((store) => !store.exportItemCopy))
           continue;
+        if (ledger.readMeta(TIER_LEDGER_UNREAD_RELABEL_DONE) !== "1" && ledger.relabelUnreadFailSafe() === 0) {
+          ledger.writeMeta(TIER_LEDGER_UNREAD_RELABEL_DONE, "1");
+        }
         const saved = ledger.readMeta(cursorKey);
         const after = saved ? JSON.parse(saved) : undefined;
         const rows = ledger.listPending({ limit: 100, ...after ? { after } : {} });
