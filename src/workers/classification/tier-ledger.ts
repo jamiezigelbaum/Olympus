@@ -3297,16 +3297,21 @@ export class TierLedger {
     pageSize = 5_000,
   ): Generator<void, TierLedgerIdentity[]> {
     const query = this.db.query(`
-      SELECT rowid AS row_id, provider, account_scope, conversation_key, provider_item_id FROM tier_copies
-      WHERE corpus_id = ? AND rowid > ? AND ${corpusCopyWhere(filter)}
-      ORDER BY rowid LIMIT ?
+      SELECT rowid AS row_id, embed_hold, provider, account_scope, conversation_key, provider_item_id FROM tier_copies
+      WHERE corpus_id = ? AND (embed_hold, rowid) > (?, ?) AND ${corpusCopyWhere(filter)}
+      ORDER BY embed_hold, rowid LIMIT ?
     `);
+    // Every filter fixes one copy_state, so (embed_hold, rowid) is the order
+    // of tier_copies_corpus (corpus_id, copy_state, embed_hold) and each page
+    // seeks into that index instead of rescanning and sorting the backlog.
     const out: TierLedgerIdentity[] = [];
-    for (let after = 0; ;) {
-      const rows = query.all(corpusId, after, pageSize) as Array<TierIdentityRow & { row_id: number }>;
+    for (let hold = -1, after = 0; ;) {
+      const rows = query.all(corpusId, hold, after, pageSize) as Array<TierIdentityRow & { row_id: number; embed_hold: number }>;
       for (const row of rows) out.push(identityFromRow(row));
       if (rows.length < pageSize) return out;
-      after = rows[rows.length - 1]!.row_id;
+      const last = rows[rows.length - 1]!;
+      hold = last.embed_hold;
+      after = last.row_id;
       yield;
     }
   }
