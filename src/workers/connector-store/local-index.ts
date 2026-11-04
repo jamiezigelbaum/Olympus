@@ -1,4 +1,4 @@
-import '../../core/sqlite-statement-cache.ts';
+import { iterateRows } from '../../core/sqlite-rows.ts';
 import type { ExtractionUnreadableItem } from '../file-extraction/job-store.ts';
 import { extractionJobsDbPaths, oweExtractionRereadAfterRevive } from '../file-extraction/job-names.ts';
 import { CHILD_ITEM_ID_SEPARATOR } from '../../core/child-item-id.ts';
@@ -1869,12 +1869,12 @@ export function* connectorStoreCurrentEmbeddingRowsIterator(
   options: ConnectorStoreCurrentEmbeddingRowsOptions,
 ): Generator<ConnectorStoreCurrentEmbeddingRow> {
   const { sql, params } = connectorStoreCurrentEmbeddingRowsQuery(options, false);
-  const rows = db.query(sql).iterate(...params) as Iterable<{
+  const rows = iterateRows<{
     item_pk: number;
     chunk_pk: number;
     local_item_id: string;
     embedding: unknown;
-  }>;
+  }>(db, sql, ...params);
   for (const row of rows) {
     yield {
       itemPk: row.item_pk,
@@ -5441,7 +5441,7 @@ export class LocalConnectorStore {
     const maxCandidates = input.maxFoldCandidates ?? LOCATOR_FOLD_SCAN_MAX_CANDIDATES;
     const wanted = `${foldLocator(folder)}/`;
     const matches: Array<{ identity: SourceItemIdentity; locatorUri: string }> = [];
-    const candidates = this.db.query(`
+    const candidatesSql = `
       SELECT
         i.provider_item_id, i.provider_file_id, i.local_item_id,
         i.source_version, i.locator_uri
@@ -5453,9 +5453,9 @@ export class LocalConnectorStore {
         ${range.sql}
         AND i.tombstoned = 0
       ORDER BY locator.normalized_locator, locator.item_pk
-    `);
+    `;
     let examined = 0;
-    for (const row of candidates.iterate(input.provider, input.accountScope, ...range.params) as Iterable<Row>) {
+    for (const row of iterateRows<Row>(this.db, candidatesSql, input.provider, input.accountScope, ...range.params)) {
       examined += 1;
       if (examined > maxCandidates) return [];
       if (!row.locator_uri || !foldLocator(row.locator_uri).startsWith(wanted)) continue;
@@ -6134,7 +6134,7 @@ export class LocalConnectorStore {
       missingEmbeddingLocalItemIds: [] as string[],
       chunkHashDisagreementLocalItemIds: [] as string[],
     };
-    const rows = this.db.query(`
+    const rowsSql = `
       WITH fts_counts AS (
         SELECT owned.item_pk, COUNT(*) AS fts_rows
         FROM connector_store_fts_rows owned
@@ -6166,7 +6166,8 @@ export class LocalConnectorStore {
       LEFT JOIN fts_counts ON fts_counts.item_pk = i.item_pk
       WHERE i.tombstoned = 0
       ORDER BY i.item_pk, c.chunk_index
-    `).iterate(embeddingModelId) as Iterable<{
+    `;
+    const rows = iterateRows<{
       item_pk: number;
       local_item_id: string;
       chunk_pk: number | null;
@@ -6175,7 +6176,7 @@ export class LocalConnectorStore {
       fts_rows: number;
       chunk_fts_mapped: number;
       embedding_current: number;
-    }>;
+    }>(this.db, rowsSql, embeddingModelId);
 
     let currentItemPk: number | undefined;
     let currentLocalItemId = '';
@@ -7452,12 +7453,12 @@ export class LocalConnectorStore {
    * the caller only needs each locator once, to fold into a tree.
    */
   *itemLocatorCensus(): Generator<{ locator: string | null; hasContent: boolean }> {
-    const rows = this.db.query(`
+    const rows = iterateRows<{ locator_uri: string | null; has_content: number }>(this.db, `
       SELECT
         i.locator_uri AS locator_uri,
         EXISTS (SELECT 1 FROM chunks c WHERE c.item_pk = i.item_pk) AS has_content
       FROM items i
-    `).iterate() as Iterable<{ locator_uri: string | null; has_content: number }>;
+    `);
     for (const row of rows) {
       yield { locator: row.locator_uri, hasContent: row.has_content === 1 };
     }

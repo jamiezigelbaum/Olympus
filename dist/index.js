@@ -17792,25 +17792,11 @@ var init_sniffer_store = __esm(() => {
   init_tier_classifier();
 });
 
-// src/core/sqlite-statement-cache.ts
-import { createRequire as createRequire5 } from "node:module";
-var SQLITE_STATEMENT_CACHE_SIZE = 1000;
-var init_sqlite_statement_cache = __esm(() => {
-  if (typeof globalThis.Bun !== "undefined") {
-    const { Database } = createRequire5(import.meta.url)("bun:sqlite");
-    if ((Database.MAX_QUERY_CACHE_SIZE ?? 0) < SQLITE_STATEMENT_CACHE_SIZE) {
-      Database.MAX_QUERY_CACHE_SIZE = SQLITE_STATEMENT_CACHE_SIZE;
-    }
-  }
-});
-
 // src/workers/classification/tier-ledger.ts
 var init_tier_ledger = __esm(() => {
-  init_sqlite_statement_cache();
   init_sqlite_migrations();
   init_tier_classifier();
 });
-
 // src/workers/file-extraction/job-names.ts
 var openLedgerPaths;
 var init_job_names = __esm(() => {
@@ -18575,7 +18561,6 @@ function connectorStoreContentPreference(vettedVectorItemIds) {
 }
 var READ_RESULT_PROJECTION_LOCATOR_URI, DEFAULT_SEMANTIC_RELEVANCE_BAR = 0.62, CALIBRATED_CONTENT_PREFERENCE_BARS, CALIBRATED_SEMANTIC_RELEVANCE_BARS, CONTAINER_MIME_TYPES, CONTAINER_MIME_TYPES_SQL, CHUNK_MEDIA_RETRY_BASE_MS, CONNECTOR_STORE_FTS_MIGRATION, TIER_SET_BINDING_CONNECTOR_ID = "tiered_store_set_binding", TIER_MOVE_CONNECTOR_ID = "olympus_tier_move", NON_SYNC_RUN_CONNECTORS_SQL, lexicalContentPreference, CONNECTOR_STORE_V4_ITEM_COLUMNS, CONNECTOR_STORE_V5_ITEM_COLUMNS, CONNECTOR_STORE_V7_ITEM_COLUMNS, CONNECTOR_STORE_V9_ITEM_COLUMNS, CONNECTOR_STORE_V12_ITEM_COLUMNS, CONNECTOR_STORE_V15_ITEM_COLUMNS, LOCAL_RELAXED_STOPWORDS;
 var init_local_index = __esm(() => {
-  init_sqlite_statement_cache();
   init_job_names();
   init_keyword_context();
   init_keyword_languages();
@@ -20731,10 +20716,10 @@ var init_tokenizer = __esm(() => {
 });
 
 // src/core/scope-safe-fs.ts
-import { createRequire as createRequire6 } from "node:module";
+import { createRequire as createRequire5 } from "node:module";
 var runtimeRequire4, SCOPE_FILE_MAX_RANGE_BYTES;
 var init_scope_safe_fs = __esm(() => {
-  runtimeRequire4 = createRequire6(import.meta.url);
+  runtimeRequire4 = createRequire5(import.meta.url);
   SCOPE_FILE_MAX_RANGE_BYTES = 64 * 1024 * 1024;
 });
 

@@ -13,6 +13,11 @@ import { createRequire } from 'node:module';
  * The limit is read on each call, so raising it once, before or after
  * connections open, covers every connection in the process. Bun never
  * evicts, so this is also the ceiling on statements one connection holds.
+ *
+ * Imported only by the Bun-run entries (the CLI that runs the worker, the
+ * embedding drain), never by a store module: a load-time side effect in a
+ * store module would pull it into the Node-run plugin bundle
+ * (test/plugin-bundle-no-bun-sqlite.test.ts).
  */
 export const SQLITE_STATEMENT_CACHE_SIZE = 1000;
 

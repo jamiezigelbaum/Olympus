@@ -20,7 +20,6 @@
 // keys, content-free reason codes and version ids. Never a title, path,
 // sender, text or excerpt. The file is created owner-only (0600).
 
-import '../../core/sqlite-statement-cache.ts';
 import { Database } from 'bun:sqlite';
 import { chmodSync, closeSync, existsSync, mkdirSync, openSync, statSync } from 'node:fs';
 import { dirname } from 'node:path';
