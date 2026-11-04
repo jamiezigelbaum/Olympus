@@ -105,6 +105,8 @@ const MAX_REASON_LENGTH = 256;
  * was paused is not the job's fault and must not burn its retry budget.
  */
 const RECYCLED_ERROR_KIND = 'provider_pause_recycled';
+// The store sink refusal of an identity that matched several rows (store-sink.ts).
+const AMBIGUOUS_IDENTITY_ERROR_KIND = 'store_identity_ambiguous';
 const JANITOR_RETRYABLE_ERROR_KIND = 'janitor_retryable_requeued';
 const JANITOR_TERMINAL_ERROR_KIND = 'janitor_terminal_requeued';
 
@@ -703,7 +705,14 @@ export class LocalFileExtractionJobStore {
         // artifacts went with its name). Owed until a pass can queue it.
         const reread = !redacted && existing !== undefined && existing !== null && status === 'queued'
           && takeRestoredReread(this.db, existing.job_id);
-        const forceExisting = Boolean(existing) && (force || reread) && status === 'queued';
+        // A chat item refused as an ambiguous identity, because another
+        // conversation repeated its message id, is read once more: the store now
+        // tells such items apart by their conversation (Sparta, 2026-11-04: 548
+        // chat media jobs). Once ever, so a truly ambiguous item settles.
+        const identityReread = !redacted && status === 'queued' && existing !== undefined && existing !== null
+          && existing.status === 'failed_terminal' && existing.last_error_kind === AMBIGUOUS_IDENTITY_ERROR_KIND
+          && (existing.janitor_terminal_requeue_count ?? 0) < 1;
+        const forceExisting = Boolean(existing) && (force || reread || identityReread) && status === 'queued';
         const reset = forceExisting ? 1 : 0;
 
         this.db.query(`
@@ -772,6 +781,11 @@ export class LocalFileExtractionJobStore {
           reset,
         );
 
+        if (identityReread) {
+          this.db.query(`UPDATE extraction_jobs
+            SET janitor_terminal_requeue_count = COALESCE(janitor_terminal_requeue_count, 0) + 1
+            WHERE job_id = ?`).run(jobId);
+        }
         if (forceExisting) {
           jobsForced += 1;
         } else if (existing) {

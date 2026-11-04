@@ -31746,6 +31746,11 @@ function normalizeConnectorStoreSearchFilters(value) {
   };
   return Object.keys(normalized).length > 0 ? normalized : undefined;
 }
+function identityAmbiguous(identity2, counts) {
+  if (counts.matching_provider_id_rows <= 1)
+    return false;
+  return normalizeConversationId(identity2.providerConversationId) === "" || counts.exact_identity_rows !== 1;
+}
 function connectorStoreFilterSql(filters) {
   const normalized = normalizeConnectorStoreSearchFilters(filters);
   if (!normalized)
@@ -33757,7 +33762,7 @@ var init_local_index = __esm(() => {
           FROM items
           WHERE provider = ? AND account_scope = ? AND provider_item_id = ?
         `).get(normalizeConversationId(identity2.providerConversationId), normalizeConversationId(identity2.providerConversationId), normalizeConversationId(identity2.providerConversationId), normalizeConversationId(identity2.providerConversationId), identity2.provider, identity2.accountScope, identity2.providerItemId);
-          if (existing.matching_provider_id_rows > 1)
+          if (identityAmbiguous(identity2, existing))
             return "ambiguous";
           if (existing.exact_identity_rows !== 1 || existing.item_pk === null || existing.tombstoned === 1)
             return "missing";
@@ -35352,7 +35357,7 @@ var init_local_index = __esm(() => {
           FROM items
           WHERE provider = ? AND account_scope = ? AND provider_item_id = ?
         `).get(normalizeConversationId(item.identity.providerConversationId), normalizeConversationId(item.identity.providerConversationId), normalizeConversationId(item.identity.providerConversationId), item.identity.provider, item.identity.accountScope, item.identity.providerItemId);
-          if (existing.matching_provider_id_rows > 1) {
+          if (identityAmbiguous(item.identity, existing)) {
             throw new Error("Representation restore refused because a targeted identity matches multiple store rows.");
           }
           if (existing.exact_identity_rows !== 1 || existing.item_pk === null) {
@@ -82817,7 +82822,8 @@ class LocalFileExtractionJobStore {
         const redacted = itemNameRedacted(this.db, ref);
         const name = redacted ? null : ref.name ?? null;
         const reread = !redacted && existing !== undefined && existing !== null && status === "queued" && takeRestoredReread(this.db, existing.job_id);
-        const forceExisting = Boolean(existing) && (force || reread) && status === "queued";
+        const identityReread = !redacted && status === "queued" && existing !== undefined && existing !== null && existing.status === "failed_terminal" && existing.last_error_kind === AMBIGUOUS_IDENTITY_ERROR_KIND && (existing.janitor_terminal_requeue_count ?? 0) < 1;
+        const forceExisting = Boolean(existing) && (force || reread || identityReread) && status === "queued";
         const reset = forceExisting ? 1 : 0;
         this.db.query(`
           INSERT INTO extraction_jobs (
@@ -82852,6 +82858,11 @@ class LocalFileExtractionJobStore {
             temp_bytes_cleaned = CASE WHEN ? THEN 1 ELSE extraction_jobs.temp_bytes_cleaned END,
             updated_at = excluded.updated_at
         `).run(jobId, ref.corpusId, ref.provider, ref.accountScope, ref.approvedScopeKey, ref.providerItemId, ref.localItemId, ref.sourceVersion ?? "", ref.contentHash ?? "", name, ref.mimeType ?? null, ref.sizeBytes ?? null, extractorKind, extractorVersion, policyDecision, status, priority, maxBytesPerFile ?? null, now, now, policyDecisionSupplied, reset, reset, reset, reset, reset, reset, reset, reset, reset, reset);
+        if (identityReread) {
+          this.db.query(`UPDATE extraction_jobs
+            SET janitor_terminal_requeue_count = COALESCE(janitor_terminal_requeue_count, 0) + 1
+            WHERE job_id = ?`).run(jobId);
+        }
         if (forceExisting) {
           jobsForced += 1;
         } else if (existing) {
@@ -84123,7 +84134,7 @@ function terminalRetryPathSql(alias, paths) {
     return { sql: "0", params };
   return { sql: `(${alias}.status = 'failed_terminal' AND (${clauses.join(" OR ")}))`, params };
 }
-var FILE_EXTRACTION_JOBS_STORE_ID = "file-extraction-jobs", FILE_EXTRACTION_JOBS_SCHEMA_VERSION = 7, DEFAULT_EXTRACTION_LEASE_LIMIT = 10, MAX_EXTRACTION_LEASE_LIMIT = 500, DEFAULT_EXTRACTION_LEASE_SECONDS = 900, MAX_EXTRACTION_LEASE_SECONDS = 3600, DEFAULT_EXTRACTION_RETRY_BACKOFF_SECONDS = 300, MAX_EXTRACTION_RETRY_BACKOFF_SECONDS = 3600, MAX_EXTRACTION_RETRY_ATTEMPTS = 3, EXTRACTION_LEASE_EXHAUSTED_ERROR_KIND = "extraction_lease_exhausted", DEFAULT_SQLITE_BUSY_TIMEOUT_MS = 1e4, DEFAULT_READ_ONLY_SQLITE_BUSY_TIMEOUT_MS = 250, DEFAULT_JANITOR_LIMIT = 100, MAX_JANITOR_LIMIT = 5000, DEFAULT_RECYCLE_LIMIT = 50, MAX_RECYCLE_LIMIT = 500, MAX_REASON_LENGTH = 256, RECYCLED_ERROR_KIND = "provider_pause_recycled", JANITOR_RETRYABLE_ERROR_KIND = "janitor_retryable_requeued", JANITOR_TERMINAL_ERROR_KIND = "janitor_terminal_requeued", NETWORK_ERROR_KINDS, SAFE_TOKEN2, SAFE_KEY_PART, SAFE_HASH2, POLICY_DECISIONS, TERMINAL_STATUSES, ExtractionJobFieldError;
+var FILE_EXTRACTION_JOBS_STORE_ID = "file-extraction-jobs", FILE_EXTRACTION_JOBS_SCHEMA_VERSION = 7, DEFAULT_EXTRACTION_LEASE_LIMIT = 10, MAX_EXTRACTION_LEASE_LIMIT = 500, DEFAULT_EXTRACTION_LEASE_SECONDS = 900, MAX_EXTRACTION_LEASE_SECONDS = 3600, DEFAULT_EXTRACTION_RETRY_BACKOFF_SECONDS = 300, MAX_EXTRACTION_RETRY_BACKOFF_SECONDS = 3600, MAX_EXTRACTION_RETRY_ATTEMPTS = 3, EXTRACTION_LEASE_EXHAUSTED_ERROR_KIND = "extraction_lease_exhausted", DEFAULT_SQLITE_BUSY_TIMEOUT_MS = 1e4, DEFAULT_READ_ONLY_SQLITE_BUSY_TIMEOUT_MS = 250, DEFAULT_JANITOR_LIMIT = 100, MAX_JANITOR_LIMIT = 5000, DEFAULT_RECYCLE_LIMIT = 50, MAX_RECYCLE_LIMIT = 500, MAX_REASON_LENGTH = 256, RECYCLED_ERROR_KIND = "provider_pause_recycled", AMBIGUOUS_IDENTITY_ERROR_KIND = "store_identity_ambiguous", JANITOR_RETRYABLE_ERROR_KIND = "janitor_retryable_requeued", JANITOR_TERMINAL_ERROR_KIND = "janitor_terminal_requeued", NETWORK_ERROR_KINDS, SAFE_TOKEN2, SAFE_KEY_PART, SAFE_HASH2, POLICY_DECISIONS, TERMINAL_STATUSES, ExtractionJobFieldError;
 var init_job_store = __esm(() => {
   init_sqlite_migrations();
   init_job_names();

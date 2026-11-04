@@ -3933,7 +3933,7 @@ export class LocalConnectorStore {
           tombstoned: number | null;
           source_version: string | null;
         };
-        if (existing.matching_provider_id_rows > 1) return 'ambiguous';
+        if (identityAmbiguous(identity, existing)) return 'ambiguous';
         if (existing.exact_identity_rows !== 1 || existing.item_pk === null || existing.tombstoned === 1) return 'missing';
         // The text judged Secret is one revision's. When the row has since
         // moved to another, that revision's verdict says nothing about the
@@ -6387,7 +6387,7 @@ export class LocalConnectorStore {
           item_pk: number | null;
           tombstoned: number | null;
         };
-        if (existing.matching_provider_id_rows > 1) {
+        if (identityAmbiguous(item.identity, existing)) {
           throw new Error(
             'Representation restore refused because a targeted identity matches multiple store rows.',
           );
@@ -14808,6 +14808,22 @@ export function normalizeConnectorStoreSearchFilters(
     ...(metadataOnlySourceScopeFolderKeys.length > 0 ? { metadataOnlySourceScopeFolderKeys } : {}),
   };
   return Object.keys(normalized).length > 0 ? normalized : undefined;
+}
+
+/**
+ * Whether a targeted identity cannot name one store row. A chat repeats
+ * message ids across its conversations, so an identity that names its
+ * conversation and matches exactly one row there is that row, whatever other
+ * conversations hold (Sparta, 2026-11-04: 548 chat media items were
+ * refused their text). An identity with no conversation still refuses when
+ * the id is held more than once: it could mean any of them.
+ */
+function identityAmbiguous(
+  identity: { providerConversationId?: string },
+  counts: { matching_provider_id_rows: number; exact_identity_rows: number },
+): boolean {
+  if (counts.matching_provider_id_rows <= 1) return false;
+  return normalizeConversationId(identity.providerConversationId) === '' || counts.exact_identity_rows !== 1;
 }
 
 function connectorStoreFilterSql(filters: ConnectorStoreSearchFilters | undefined): {
