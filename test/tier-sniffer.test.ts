@@ -778,6 +778,61 @@ describe('bounds and the owner-approval gate', () => {
     }
   });
 
+  test('while the model is not answering, scheduled passes wait 30 s, then 60 s; a direct pass still runs (Sparta, 2026-11-04)', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'olympus-tier-sniffer-backoff-'));
+    const installed = new InstalledTierClassification({ env: {}, lane: LOCAL_LANE });
+    const ledger = new TierLedger({ dbPath: join(dir, 'store.tier-ledger.sqlite') });
+    try {
+      for (let n = 1; n <= 3; n += 1) recordFlagged(ledger, installed.snifferStoreForLedger(ledger.dbPath), n, `lab results ${n}`);
+      const ledgerPath = join(dir, 'classification-ledger.jsonl');
+      await appendClassificationLedgerEntry(ledgerPath, {
+        recorded_at: new Date().toISOString(), kind: 'classifier_model_decision', what: 'Owner approved the fixture sniffer.',
+        model_id: LOCAL_LANE.modelId, prompt_version: SNIFFER_PROMPT_VERSION, lane: LOCAL_LANE.kind, profile_id: LOCAL_LANE.profileId,
+        approved_by: 'owner', status: 'complete',
+      });
+      let clock = Date.parse('2026-11-04T10:00:00Z');
+      let attempts = 0;
+      const service = new TierSnifferService({
+        installed,
+        lane: LOCAL_LANE,
+        model: { complete: () => { attempts += 1; return Promise.reject(new Error('connection refused')); } },
+        stores: () => [{ dbPath: join(dir, 'store.sqlite') }],
+        classificationLedgerPath: ledgerPath,
+        intervalMs: 10,
+        now: () => new Date(clock),
+      });
+      const settle = () => new Promise((resolve) => setTimeout(resolve, 150));
+      expect(await service.runOnce()).toMatchObject({ state: 'ran', report: { stoppedBy: 'transport_failures' } });
+      const afterFirst = attempts;
+      service.start();
+      await settle();
+      expect(attempts).toBe(afterFirst);
+      clock += 29_000;
+      await settle();
+      expect(attempts).toBe(afterFirst);
+      clock += 2_000;
+      await settle();
+      const afterSecond = attempts;
+      expect(afterSecond).toBeGreaterThan(afterFirst);
+      // The second failed pass waits the longer time.
+      clock += 31_000;
+      await settle();
+      expect(attempts).toBe(afterSecond);
+      clock += 30_000;
+      await settle();
+      expect(attempts).toBeGreaterThan(afterSecond);
+      // A direct pass (Check now, a test) is never held back.
+      const beforeDirect = attempts;
+      await service.runOnce();
+      expect(attempts).toBeGreaterThan(beforeDirect);
+      service.stop();
+    } finally {
+      installed.close();
+      ledger.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   test('one question left and one failed call: the model reads as not answering, though the pass never reached its failure stop', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'olympus-tier-sniffer-one-failed-'));
     const installed = new InstalledTierClassification({ env: {}, lane: LOCAL_LANE });
