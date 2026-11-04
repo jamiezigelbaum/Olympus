@@ -63,6 +63,15 @@ import {
 } from './tier-ledger.ts';
 
 export const DEFAULT_TIER_SNIFFER_INTERVAL_MS = 1_000;
+/**
+ * While the private model is not answering, the scheduled passes wait this
+ * long after the first failed pass, and NOT_ANSWERING_MAX_BACKOFF_MS after
+ * later ones. A pass every second against a model that was off rescanned the
+ * whole queue each time (Sparta, 2026-11-04, Delphi off: about 110% CPU).
+ * A direct runOnce is never held back.
+ */
+export const NOT_ANSWERING_FIRST_BACKOFF_MS = 30_000;
+export const NOT_ANSWERING_MAX_BACKOFF_MS = 60_000;
 
 /**
  * A connector store, by what the sniffer needs: its path, and the tiered
@@ -254,6 +263,9 @@ export class TierSnifferService {
   private moving: Promise<TierAutoMoveReport> | undefined;
   private running = false;
   private runningSinceMs = 0;
+  /** Scheduled passes wait until this time while the model is not answering (0: no wait). */
+  private notAnsweringUntilMs = 0;
+  private notAnsweringPasses = 0;
   private overrunReported = false;
   /** When the running pass was aborted for overrunning (0: not aborted). */
   private overrunAbortedAtMs = 0;
@@ -285,7 +297,7 @@ export class TierSnifferService {
 
   start(): void {
     if (this.timer) return;
-    this.timer = setInterval(() => { void this.drainMoves(); void this.runOnce(); }, this.options.intervalMs ?? DEFAULT_TIER_SNIFFER_INTERVAL_MS);
+    this.timer = setInterval(() => { void this.drainMoves(); void this.scheduledRun(); }, this.options.intervalMs ?? DEFAULT_TIER_SNIFFER_INTERVAL_MS);
     this.timer.unref?.();
     this.wake();
   }
@@ -293,8 +305,14 @@ export class TierSnifferService {
   /** Real local contention ended: resume immediately, including between idle polls. */
   wake(): void {
     if (this.stopped || this.continuation) return;
-    this.continuation = setTimeout(() => { this.continuation = undefined; void this.runOnce(); }, 0);
+    this.continuation = setTimeout(() => { this.continuation = undefined; void this.scheduledRun(); }, 0);
     this.continuation.unref?.();
+  }
+
+  /** A pass the timer or a wake asked for: held back while the model is not answering. */
+  private async scheduledRun(): Promise<TierSnifferTick> {
+    if (this.notAnsweringUntilMs > this.clockMs()) return { state: 'skipped_running' };
+    return this.runOnce();
   }
 
   /** Stop the tick. A pass in flight is aborted; its ledgers close when it ends. */
@@ -461,6 +479,14 @@ export class TierSnifferService {
     this.abort = undefined;
     this.lastTick = tick;
     this.reportWaiting(tick, overran);
+    if (this.waitingReason === 'model_not_answering') {
+      this.notAnsweringPasses += 1;
+      this.notAnsweringUntilMs = this.clockMs()
+        + (this.notAnsweringPasses === 1 ? NOT_ANSWERING_FIRST_BACKOFF_MS : NOT_ANSWERING_MAX_BACKOFF_MS);
+    } else if (tick.state === 'ran' && tick.report.calls > tick.report.failedCalls) {
+      this.notAnsweringPasses = 0;
+      this.notAnsweringUntilMs = 0;
+    }
     if (this.options.log && this.clockMs() - this.lastBacklogLogMs >= 60_000) {
       this.lastBacklogLogMs = this.clockMs();
       const backlog = this.backlog();

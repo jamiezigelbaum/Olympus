@@ -3947,6 +3947,13 @@ export async function main(): Promise<void> {
     generation: () => sourceLaneGeneration,
     beforeCurrent: () => mountSourceLanes(readActiveConnectedHandles(process.env)),
   });
+  // A file store counts an item unreadable only once its extraction has ended
+  // (LocalConnectorStore.setExtractionEndedProbe); a tier store opened later gets it in registerTierLegStore.
+  const probeExtractionEnded = (store: LocalConnectorStore): void => {
+    if (store.family !== 'file' || !fileExtractionRuntime) return;
+    store.setExtractionEndedProbe((identity) => fileExtractionRuntime.jobs.itemExtractionState(identity) === 'settled');
+  };
+  for (const store of connectorStores) probeExtractionEnded(store);
   const connectorStoreEmbeddingProviders = new Map<string, SourceEmbeddingProvider>();
   const connectorStoreAccountScopes = new Map<string, string>();
   const connectorStorePrincipals = new Map<string, ConnectorStoreDeclaredPrincipal>();
@@ -4105,6 +4112,7 @@ export async function main(): Promise<void> {
   // Private or Personal store is handed the identity for its domain.
   registerTierLegStore = (store, siblingCorpusId, embeddingProvider) => {
     if (!connectorStores.includes(store)) connectorStores.push(store);
+    probeExtractionEnded(store);
     if (!fullyDefinedCorpusIds.has(store.corpusId)) {
       const definition = registeredCorpusDefinitions.get(store.corpusId);
       fullCorpusDefinitions.push(defineConnectorCorpus({
@@ -4805,16 +4813,8 @@ export async function main(): Promise<void> {
         items: (corpusId) => {
           const items = [...(extractionReadinessLedger?.unreadableItems(corpusId) ?? []),
             ...connectorStores.filter(store => store.corpusId === corpusId)
-              .flatMap(store => store.settledUnreadableItems(connectorStoreStatusScope(store))
-                // A file kept Private before its text was read is waiting to
-                // be read while extraction still owes it (queued, or in scope
-                // and not reached yet), not unreadable; once its extraction
-                // ends without text it counts. Sparta, 2026-11-04: 7,249
-                // Dropbox files waiting in the queue read as "could not be
-                // read", and checking each on every dashboard read froze the
-                // worker for 8-14 s.
-                .filter(item => store.family !== 'file' || !fileExtractionRuntime
-                  || fileExtractionRuntime.jobs.itemExtractionState(item.ref) === 'settled'))];
+              // A file store leaves out files still waiting for extraction (setExtractionEndedProbe).
+              .flatMap(store => store.settledUnreadableItems(connectorStoreStatusScope(store)))];
           return Array.from(new Map(items.map(item => [item.ref.localItemId, item])).values());
         },
         verdict: unreadableVerdict,

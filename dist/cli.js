@@ -20729,6 +20729,13 @@ class TierLedger {
             -- Rests on a retired whole-source prior (RETIRED_SOURCE_PRIOR_REASON):
             -- wrong under the owner ruling of 2026-10-28, so judged again now.
             OR instr(i.reasons_json, '"metadata:prior:source_') > 0
+            -- Content settled fail-safe because its question was missing from
+            -- the queue, not because anything judged it (an enqueue lost while
+            -- the private model was off: about 2,400 messages on 2026-11-04):
+            -- its text is stored, so it is asked again (#606).
+            OR (instr(i.reasons_json, ':fail_safe:missing_question"') > 0
+              AND EXISTS (SELECT 1 FROM json_each(i.reasons_json) r
+                WHERE r.value GLOB 'content:sniffer:*:fail_safe:missing_question'))
             OR i.engine_version != ?
             OR (? IS NOT NULL AND instr(i.reasons_json, '"metadata:sniffer:') > 0 AND instr(i.reasons_json, ?) = 0)
             OR (? IS NOT NULL AND instr(i.reasons_json, ?) = 0
@@ -31825,9 +31832,9 @@ function connectorStoreFilterSql(filters) {
     const locatorPath = normalized.locatorPathScope;
     clauses.push("AND i.locator_uri IS NOT NULL");
     if (locatorPath === "/") {
-      clauses.push("AND LOWER(i.locator_uri) LIKE '/%' ESCAPE '\\'");
+      clauses.push("AND i.locator_uri LIKE '/%' ESCAPE '\\'");
     } else {
-      clauses.push("AND (LOWER(i.locator_uri) = LOWER(?) OR LOWER(i.locator_uri) LIKE LOWER(?) ESCAPE '\\')");
+      clauses.push("AND (i.locator_uri = ? COLLATE NOCASE OR i.locator_uri LIKE ? ESCAPE '\\')");
       params.push(locatorPath, `${escapeSqlLike(locatorPath)}/%`);
     }
   }
@@ -31836,9 +31843,9 @@ function connectorStoreFilterSql(filters) {
     clauses.push("AND i.locator_uri IS NOT NULL");
     for (const locatorPath of normalized.locatorPathScopes) {
       if (locatorPath === "/") {
-        alternatives.push("LOWER(i.locator_uri) LIKE '/%' ESCAPE '\\'");
+        alternatives.push("i.locator_uri LIKE '/%' ESCAPE '\\'");
       } else {
-        alternatives.push("(LOWER(i.locator_uri) = LOWER(?) OR LOWER(i.locator_uri) LIKE LOWER(?) ESCAPE '\\')");
+        alternatives.push("(i.locator_uri = ? COLLATE NOCASE OR i.locator_uri LIKE ? ESCAPE '\\')");
         params.push(locatorPath, `${escapeSqlLike(locatorPath)}/%`);
       }
     }
@@ -31847,9 +31854,9 @@ function connectorStoreFilterSql(filters) {
   if (normalized.locatorPathExcludedScopes?.length) {
     for (const locatorPath of normalized.locatorPathExcludedScopes) {
       if (locatorPath === "/") {
-        clauses.push("AND NOT (LOWER(i.locator_uri) LIKE '/%' ESCAPE '\\')");
+        clauses.push("AND NOT (i.locator_uri LIKE '/%' ESCAPE '\\')");
       } else {
-        clauses.push("AND NOT (LOWER(i.locator_uri) = LOWER(?) OR LOWER(i.locator_uri) LIKE LOWER(?) ESCAPE '\\')");
+        clauses.push("AND NOT (i.locator_uri = ? COLLATE NOCASE OR i.locator_uri LIKE ? ESCAPE '\\')");
         params.push(locatorPath, `${escapeSqlLike(locatorPath)}/%`);
       }
     }
@@ -31893,9 +31900,9 @@ function connectorStoreFtsScopeSql(filters) {
   const params = [];
   for (const locatorPath of normalized.metadataOnlyLocatorPathScopes ?? []) {
     if (locatorPath === "/") {
-      metadataOnly.push("LOWER(i.locator_uri) LIKE '/%' ESCAPE '\\'");
+      metadataOnly.push("i.locator_uri LIKE '/%' ESCAPE '\\'");
     } else {
-      metadataOnly.push("(LOWER(i.locator_uri) = LOWER(?) OR LOWER(i.locator_uri) LIKE LOWER(?) ESCAPE '\\')");
+      metadataOnly.push("(i.locator_uri = ? COLLATE NOCASE OR i.locator_uri LIKE ? ESCAPE '\\')");
       params.push(locatorPath, `${escapeSqlLike(locatorPath)}/%`);
     }
   }
@@ -38629,6 +38636,11 @@ var init_local_index = __esm(() => {
       return count;
     }
     settledUnreadableCountMemo;
+    extractionEnded;
+    setExtractionEndedProbe(probe) {
+      this.extractionEnded = probe;
+      this.settledUnreadableCountMemo = undefined;
+    }
     settledUnreadableRows(scope, options = {}) {
       if (scope?.itemsAllowed === false || scope?.contentAllowed === false)
         return [];
@@ -38638,10 +38650,11 @@ var init_local_index = __esm(() => {
       const identities = ledger.corpusCopyIdentities(this.corpusId, options.withoutSecretsOverrides ? "metadata_layer_settled_unreadable_not_secret" : "metadata_layer_settled_unreadable");
       const filters = connectorStoreFilterSql(scope?.contentFilters ?? scope?.itemFilters);
       const account = normalizeOptionalAccountScope(scope?.accountScope);
+      const ended = this.extractionEnded;
       return this.itemRowsForIdentities(identities, (identity2) => identity2.providerConversationId ?? "", {
         sql: `${account ? "AND i.account_scope = ?" : ""} ${filters.sql}`,
         params: [...account ? [account] : [], ...filters.params]
-      }).map((row) => ({ identity: identities[row.idx], row }));
+      }).map((row) => ({ identity: identities[row.idx], row })).filter(({ identity: identity2 }) => !ended || ended(identity2));
     }
     itemRowsForIdentities(identities, conversationOf, extra = { sql: "", params: [] }) {
       if (identities.length === 0)
@@ -38732,42 +38745,52 @@ var init_local_index = __esm(() => {
       const outsideWindowSql = Number.isFinite(contentNotBeforeMs) ? `(COALESCE(julianday(i.authored_at) < julianday(?), 0) = 1
           AND NOT EXISTS (SELECT 1 FROM chunks oc WHERE oc.item_pk = i.item_pk))` : undefined;
       const outsideWindowParams = outsideWindowSql ? [new Date(contentNotBeforeMs).toISOString()] : [];
-      const counts = this.db.query(`
+      const itemCounts = this.db.query(`
+      WITH flags AS MATERIALIZED (
+        SELECT
+          i.tombstoned AS t,
+          LOWER(i.mime_type) = 'inode/directory' AS dir,
+          (1 ${itemWhere}) AS in_items,
+          (1 ${hiddenNotIn}) AS stored,
+          i.item_pk IN (SELECT value FROM json_each(?)) AS elsewhere,
+          (1 ${fileScopeWhere}) AS in_file_scope
+        FROM items i
+      )
       SELECT
-        (SELECT COUNT(*) FROM items i WHERE i.tombstoned = 0 ${itemWhere}) AS items,
-        (SELECT COUNT(*) FROM items i WHERE i.tombstoned = 0 ${hiddenNotIn}) AS stored_items,
-        (SELECT COUNT(*) FROM items i WHERE i.tombstoned = 0 ${itemWhere}
-          AND i.item_pk IN (SELECT value FROM json_each(?))) AS content_elsewhere_items,
-        (SELECT COUNT(*) FROM items i WHERE i.tombstoned = 0
-          AND LOWER(i.mime_type) <> 'inode/directory' ${itemWhere}) AS files,
-        (SELECT COUNT(*) FROM items i WHERE i.tombstoned = 0
-          AND LOWER(i.mime_type) = 'inode/directory' ${itemWhere}) AS folders,
-        (SELECT COUNT(*) FROM items i WHERE i.tombstoned = 1 ${itemWhere}) AS tombstoned_items,
-        (SELECT COUNT(*) FROM chunks c JOIN items i ON i.item_pk = c.item_pk
+        COALESCE(SUM(t = 0 AND in_items), 0) AS items,
+        COALESCE(SUM(t = 0 AND stored), 0) AS stored_items,
+        COALESCE(SUM(t = 0 AND in_items AND elsewhere), 0) AS content_elsewhere_items,
+        COALESCE(SUM(t = 0 AND in_items AND NOT dir), 0) AS files,
+        COALESCE(SUM(t = 0 AND in_items AND dir), 0) AS folders,
+        COALESCE(SUM(t = 1 AND in_items), 0) AS tombstoned_items,
+        COALESCE(SUM(t = 0 AND NOT dir AND in_file_scope), 0) AS full_ingestion_files
+      FROM flags
+    `).get(...itemParams, ...jsonList(tier.hidden), JSON.stringify(keptNamesOnlyPks), ...fileScopeParams);
+      const textCounts = this.db.query(`
+      SELECT
+        -- CROSS JOIN keeps chunks and vectors as the outer loop: with items
+        -- outer, the scope tests ran on every item, chunk or not.
+        (SELECT COUNT(*) FROM chunks c CROSS JOIN items i ON i.item_pk = c.item_pk
           WHERE i.tombstoned = 0 ${parityWhere}) AS chunks,
         (SELECT COUNT(*)
           FROM chunk_embeddings emb
-          JOIN chunks c ON c.chunk_pk = emb.chunk_pk
-          JOIN items i ON i.item_pk = emb.item_pk
+          CROSS JOIN chunks c ON c.chunk_pk = emb.chunk_pk
+          CROSS JOIN items i ON i.item_pk = emb.item_pk
           WHERE i.tombstoned = 0 AND emb.content_hash = c.embedding_input_hash
             ${parityWhere}
         ) AS embedded_chunks,
         (SELECT COUNT(*) FROM sync_runs
           WHERE connector_id NOT IN ${NON_SYNC_RUN_CONNECTORS_SQL}
         ) AS sync_runs,
-        -- EXISTS rather than COUNT(DISTINCT ...) so the per-item probe stops at
-        -- the first chunk row instead of walking every chunk of every item.
-        (SELECT COUNT(*) FROM items i
+        -- Driven from the items that hold a chunk, so the scope tests run only
+        -- on those rows, not on every names-only item.
+        (SELECT COUNT(*) FROM (SELECT DISTINCT item_pk FROM chunks) ck
+          CROSS JOIN items i ON i.item_pk = ck.item_pk
           WHERE i.tombstoned = 0
-            AND EXISTS (SELECT 1 FROM chunks c WHERE c.item_pk = i.item_pk)
             ${contentWhere}
-        ) AS items_with_text,
-        (SELECT COUNT(*) FROM items i
-          WHERE i.tombstoned = 0
-            AND LOWER(i.mime_type) <> 'inode/directory'
-            ${fileScopeWhere}
-        ) AS full_ingestion_files
-    `).get(...itemParams, ...jsonList(tier.hidden), ...itemParams, JSON.stringify(keptNamesOnlyPks), ...itemParams, ...itemParams, ...itemParams, ...parityParams, ...parityParams, ...contentParams, ...fileScopeParams);
+        ) AS items_with_text
+    `).get(...parityParams, ...parityParams, ...contentParams);
+      const counts = { ...itemCounts, ...textCounts };
       const outsideContentWindowItems = outsideWindowSql ? this.db.query(`
           SELECT COUNT(*) AS n FROM items i
           WHERE i.tombstoned = 0
@@ -171366,14 +171389,14 @@ function createReadwiseSchedulerSource(input) {
     lastSyncCompletedAt: () => input.liveSync?.lastStoreRunCompletedAt()
   };
 }
-function withEmbeddingSweep(sources, targetsFor) {
+function withEmbeddingSweep(sources, targetsFor, options = {}) {
   return sources.map((source) => {
     const targets = targetsFor(source);
     if (!targets)
       return source;
     return {
       ...source,
-      tasks: [...source.tasks, embeddingSweepTask(source, targets)],
+      tasks: [...source.tasks, embeddingSweepTask(source, targets, options.storeDeadlineMs)],
       embeddingDeferredReason: () => targets().some((target) => target.store.embeddingDeferredReason() !== undefined) ? EMBEDDING_PROVIDER_UNAVAILABLE_REASON : undefined
     };
   });
@@ -171381,7 +171404,7 @@ function withEmbeddingSweep(sources, targetsFor) {
 function embeddingSweepConcurrencyKey(source) {
   return `${source.corpusId}.embeddings`;
 }
-function embeddingSweepTask(source, targets) {
+function embeddingSweepTask(source, targets, deadlineMs = EMBEDDING_SWEEP_STORE_DEADLINE_MS) {
   return {
     id: `${source.sourceId}_embeddings`,
     kind: "embed",
@@ -171391,7 +171414,30 @@ function embeddingSweepTask(source, targets) {
     freshnessThresholdMs: EMBEDDING_SWEEP_FRESHNESS_THRESHOLD_MS,
     run: async (context2) => {
       const passTargets = targets();
-      const runs = await embedPendingChunks(passTargets, { maxItems: EMBEDDING_SWEEP_MAX_ITEMS });
+      const runs = [];
+      for (const target of passTargets) {
+        const overran = Symbol("overran");
+        let timer;
+        const result = await Promise.race([
+          embedPendingChunks([target], { maxItems: EMBEDDING_SWEEP_MAX_ITEMS }),
+          new Promise((resolve27) => {
+            timer = setTimeout(() => resolve27(overran), deadlineMs);
+          })
+        ]).finally(() => clearTimeout(timer));
+        if (result !== overran) {
+          runs.push(...result);
+          continue;
+        }
+        console.error(`[olympus:embedding-sweep] pass_overran source=${source.sourceId} corpus=${target.store.corpusId} after_ms=${deadlineMs}; the source's turn was given back`);
+        runs.push({
+          corpusId: target.store.corpusId,
+          itemsAttempted: 0,
+          chunksEmbedded: 0,
+          itemsFailed: 0,
+          itemsOutOfScope: 0,
+          deferredReason: EMBEDDING_PROVIDER_UNAVAILABLE_REASON
+        });
+      }
       const deferred2 = runs.filter((run2) => run2.deferredReason !== undefined).length;
       const counts = {
         chunks_embedded: runs.reduce((sum2, run2) => sum2 + run2.chunksEmbedded, 0),
@@ -172155,7 +172201,7 @@ function accountFromApprovedScope(scope) {
   const match = /^dropbox\.([a-z0-9_-]+):/i.exec(scope ?? "");
   return match?.[1];
 }
-var SOURCE_SCHEDULER_MAX_FUTURE_DEFERRAL_MS, SOURCE_SCHEDULER_CONTINUE_AFTER_MS = 5000, SOURCE_SCHEDULER_SOURCE_IDS_ENV = "OLYMPUS_WORKER_SCHEDULER_SOURCE_IDS", GMAIL_REQUEST_BUDGET_CLOCK_REGRESSION = "gmail_request_budget_clock_regression", GOOGLE_DRIVE_REQUEST_BUDGET_CLOCK_REGRESSION = "google_drive_request_budget_clock_regression", GMAIL_REQUEST_BUDGET_LEDGER_BUSY = "gmail_request_budget_ledger_busy", GOOGLE_DRIVE_REQUEST_BUDGET_LEDGER_BUSY = "google_drive_request_budget_ledger_busy", SCHEDULER_SOURCE_IDS, SOURCE_SCHEDULER_CHANGE_DEBOUNCE_MS = 500, SourceSchedulerTaskFailure, FILE_EXTRACTION_MAX_PLAN_PAGES_PER_PASS = 40, FILE_EXTRACTION_PASS_BUDGET_MS = 20000, FILE_EXTRACTION_MAX_BATCHES_PER_PASS = 25, EMBEDDING_SWEEP_INTERVAL_MS = 60000, EMBEDDING_SWEEP_MAX_BACKOFF_MS, EMBEDDING_SWEEP_MAX_ITEMS = 32, EMBEDDING_SWEEP_FRESHNESS_THRESHOLD_MS, DEFAULT_ZERO_CHANGE_DEGRADE_RUNS = 5, LANE_NOT_ADVANCING_DEGRADED_REASON = "traversal_not_advancing", HONEST_SCHEDULER_ERROR_KINDS, UTC_DAY_SCOPED_DEGRADED_REASONS, EXTRACTION_JOBS_REFUSED_WARNING = "extraction_jobs_refused", LOCAL_FILES_SCHEDULER_WARNINGS, VERBATIM_SCHEDULER_WARNINGS;
+var SOURCE_SCHEDULER_MAX_FUTURE_DEFERRAL_MS, SOURCE_SCHEDULER_CONTINUE_AFTER_MS = 5000, SOURCE_SCHEDULER_SOURCE_IDS_ENV = "OLYMPUS_WORKER_SCHEDULER_SOURCE_IDS", GMAIL_REQUEST_BUDGET_CLOCK_REGRESSION = "gmail_request_budget_clock_regression", GOOGLE_DRIVE_REQUEST_BUDGET_CLOCK_REGRESSION = "google_drive_request_budget_clock_regression", GMAIL_REQUEST_BUDGET_LEDGER_BUSY = "gmail_request_budget_ledger_busy", GOOGLE_DRIVE_REQUEST_BUDGET_LEDGER_BUSY = "google_drive_request_budget_ledger_busy", SCHEDULER_SOURCE_IDS, SOURCE_SCHEDULER_CHANGE_DEBOUNCE_MS = 500, SourceSchedulerTaskFailure, FILE_EXTRACTION_MAX_PLAN_PAGES_PER_PASS = 40, FILE_EXTRACTION_PASS_BUDGET_MS = 20000, FILE_EXTRACTION_MAX_BATCHES_PER_PASS = 25, EMBEDDING_SWEEP_INTERVAL_MS = 60000, EMBEDDING_SWEEP_MAX_BACKOFF_MS, EMBEDDING_SWEEP_MAX_ITEMS = 32, EMBEDDING_SWEEP_STORE_DEADLINE_MS, EMBEDDING_SWEEP_FRESHNESS_THRESHOLD_MS, DEFAULT_ZERO_CHANGE_DEGRADE_RUNS = 5, LANE_NOT_ADVANCING_DEGRADED_REASON = "traversal_not_advancing", HONEST_SCHEDULER_ERROR_KINDS, UTC_DAY_SCOPED_DEGRADED_REASONS, EXTRACTION_JOBS_REFUSED_WARNING = "extraction_jobs_refused", LOCAL_FILES_SCHEDULER_WARNINGS, VERBATIM_SCHEDULER_WARNINGS;
 var init_source_scheduler = __esm(() => {
   init_config();
   init_control_path_headroom();
@@ -172202,6 +172248,7 @@ var init_source_scheduler = __esm(() => {
     }
   };
   EMBEDDING_SWEEP_MAX_BACKOFF_MS = 30 * 60000;
+  EMBEDDING_SWEEP_STORE_DEADLINE_MS = 10 * 60000;
   EMBEDDING_SWEEP_FRESHNESS_THRESHOLD_MS = 26 * 60 * 60000;
   HONEST_SCHEDULER_ERROR_KINDS = new Set([
     "api_request_guard",
@@ -189329,6 +189376,8 @@ class TierSnifferService {
   moving;
   running = false;
   runningSinceMs = 0;
+  notAnsweringUntilMs = 0;
+  notAnsweringPasses = 0;
   overrunReported = false;
   overrunAbortedAtMs = 0;
   passGeneration = 0;
@@ -189355,7 +189404,7 @@ class TierSnifferService {
       return;
     this.timer = setInterval(() => {
       this.drainMoves();
-      this.runOnce();
+      this.scheduledRun();
     }, this.options.intervalMs ?? DEFAULT_TIER_SNIFFER_INTERVAL_MS);
     this.timer.unref?.();
     this.wake();
@@ -189365,9 +189414,14 @@ class TierSnifferService {
       return;
     this.continuation = setTimeout(() => {
       this.continuation = undefined;
-      this.runOnce();
+      this.scheduledRun();
     }, 0);
     this.continuation.unref?.();
+  }
+  async scheduledRun() {
+    if (this.notAnsweringUntilMs > this.clockMs())
+      return { state: "skipped_running" };
+    return this.runOnce();
   }
   stop() {
     this.stopped = true;
@@ -189505,6 +189559,13 @@ class TierSnifferService {
     this.abort = undefined;
     this.lastTick = tick;
     this.reportWaiting(tick, overran);
+    if (this.waitingReason === "model_not_answering") {
+      this.notAnsweringPasses += 1;
+      this.notAnsweringUntilMs = this.clockMs() + (this.notAnsweringPasses === 1 ? NOT_ANSWERING_FIRST_BACKOFF_MS : NOT_ANSWERING_MAX_BACKOFF_MS);
+    } else if (tick.state === "ran" && tick.report.calls > tick.report.failedCalls) {
+      this.notAnsweringPasses = 0;
+      this.notAnsweringUntilMs = 0;
+    }
     if (this.options.log && this.clockMs() - this.lastBacklogLogMs >= 60000) {
       this.lastBacklogLogMs = this.clockMs();
       const backlog = this.backlog();
@@ -190192,7 +190253,7 @@ function positiveInteger7(value2, fallback, minimum) {
   const parsed = Number(value2);
   return Number.isInteger(parsed) && parsed >= minimum ? parsed : fallback;
 }
-var DEFAULT_TIER_SNIFFER_INTERVAL_MS = 1000, DEFAULT_AUTO_MOVES_PER_PASS = 25, DEFAULT_TIER_SNIFFER_MAX_PASS_MS, EXTRACTION_ENQUEUE_GRACE_MS, DEFAULT_TIER_SNIFFER_ABANDON_MS, DEFAULT_STALE_MOVE_MS, BUILT_IN_CLASSIFIER_DEFAULT_APPROVAL_REASON = "built-in local model, nothing leaves the Mac (owner default 2026-10-01)", AUTO_MOVE_WHY = "Automatic tier move after the privacy check: every embedding involved is the built-in local model (owner approval 2026-10-01).";
+var DEFAULT_TIER_SNIFFER_INTERVAL_MS = 1000, NOT_ANSWERING_FIRST_BACKOFF_MS = 30000, NOT_ANSWERING_MAX_BACKOFF_MS = 60000, DEFAULT_AUTO_MOVES_PER_PASS = 25, DEFAULT_TIER_SNIFFER_MAX_PASS_MS, EXTRACTION_ENQUEUE_GRACE_MS, DEFAULT_TIER_SNIFFER_ABANDON_MS, DEFAULT_STALE_MOVE_MS, BUILT_IN_CLASSIFIER_DEFAULT_APPROVAL_REASON = "built-in local model, nothing leaves the Mac (owner default 2026-10-01)", AUTO_MOVE_WHY = "Automatic tier move after the privacy check: every embedding involved is the built-in local model (owner approval 2026-10-01).";
 var init_sniffer_service = __esm(() => {
   init_tier_move();
   init_control_path_headroom();
@@ -211953,6 +212014,13 @@ ${key2}`;
     generation: () => sourceLaneGeneration,
     beforeCurrent: () => mountSourceLanes(readActiveConnectedHandles(process.env))
   });
+  const probeExtractionEnded = (store) => {
+    if (store.family !== "file" || !fileExtractionRuntime)
+      return;
+    store.setExtractionEndedProbe((identity2) => fileExtractionRuntime.jobs.itemExtractionState(identity2) === "settled");
+  };
+  for (const store of connectorStores)
+    probeExtractionEnded(store);
   const connectorStoreEmbeddingProviders = new Map;
   const connectorStoreAccountScopes = new Map;
   const connectorStorePrincipals = new Map;
@@ -212079,6 +212147,7 @@ ${key2}`;
   registerTierLegStore = (store, siblingCorpusId, embeddingProvider) => {
     if (!connectorStores.includes(store))
       connectorStores.push(store);
+    probeExtractionEnded(store);
     if (!fullyDefinedCorpusIds.has(store.corpusId)) {
       const definition = registeredCorpusDefinitions.get(store.corpusId);
       fullCorpusDefinitions.push(defineConnectorCorpus({
@@ -212566,7 +212635,7 @@ ${key2}`;
     items: (corpusId) => {
       const items = [
         ...extractionReadinessLedger?.unreadableItems(corpusId) ?? [],
-        ...connectorStores.filter((store) => store.corpusId === corpusId).flatMap((store) => store.settledUnreadableItems(connectorStoreStatusScope(store)).filter((item) => store.family !== "file" || !fileExtractionRuntime || fileExtractionRuntime.jobs.itemExtractionState(item.ref) === "settled"))
+        ...connectorStores.filter((store) => store.corpusId === corpusId).flatMap((store) => store.settledUnreadableItems(connectorStoreStatusScope(store)))
       ];
       return Array.from(new Map(items.map((item) => [item.ref.localItemId, item])).values());
     },
