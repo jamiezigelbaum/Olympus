@@ -184,13 +184,30 @@ test('an item an older build settled fail-safe with its text unread is judged wh
   expect(f.lane.ledger.getCurrent(identity)).toMatchObject({ state: 'current', contentPending: false, contentRead: true, contentTier: 'private' });
 });
 
-for (const shape of [
-  { what: 'a message (not a file)', set: `family = 'message'` },
-  { what: 'a legacy unrouted row', set: `routed = 0` },
-]) test(`unread content of ${shape.what} has no extraction lane, so it is settled fail-safe Private even with no job`, async () => {
+// A chat's photo, voice note or attachment is a message-family child whose
+// bytes extraction reads later (Sparta, 2026-11-04: 8,630 Telegram media
+// items settled fail-safe while their extraction was still owed).
+test('unread media of a message waiting for extraction stays pending, not settled for a missing question', async () => {
   const f = await connected();
-  // Owed says "no job yet", which for anything extraction does not serve is never going to change.
   const state = { ready: false, extraction: 'active' as 'active' | 'none' | 'settled', prompts: [] as AnalystModelRequest[] };
+  const { service } = serviceFor(f, state);
+  const db = new Database(f.lane.ledger.dbPath);
+  db.query(`UPDATE tier_items SET state = 'pending', metadata_pending = 0, content_pending = 1, content_read = 0, family = 'message',
+    decided_at = ?`).run(new Date(Date.now() - 24 * 3_600_000).toISOString());
+  db.close();
+  await service.runOnce();
+  const waiting = f.lane.ledger.getCurrent(identity)!;
+  expect(waiting).toMatchObject({ state: 'pending', contentPending: true, contentRead: false });
+  expect(waiting.reasons.some((reason) => FAIL_SAFE.test(reason))).toBe(false);
+});
+
+for (const shape of [
+  { what: 'a message extraction no longer owes', set: `family = 'message'`, extraction: 'settled' as const },
+  { what: 'a legacy unrouted row', set: `routed = 0`, extraction: 'active' as const },
+]) test(`unread content of ${shape.what} is settled fail-safe Private`, async () => {
+  const f = await connected();
+  // A legacy row has no extraction lane, whatever the job store says.
+  const state = { ready: false, extraction: shape.extraction as 'active' | 'none' | 'settled', prompts: [] as AnalystModelRequest[] };
   const { service } = serviceFor(f, state);
   const db = new Database(f.lane.ledger.dbPath);
   db.query(`UPDATE tier_items SET state = 'pending', metadata_pending = 0, content_pending = 1, content_read = 0, ${shape.set},

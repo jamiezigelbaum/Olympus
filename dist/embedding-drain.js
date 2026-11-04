@@ -15360,6 +15360,9 @@ var init_sniffer_store = __esm(() => {
 import { Database as Database3 } from "bun:sqlite";
 import { chmodSync as chmodSync5, closeSync as closeSync8, existsSync as existsSync12, mkdirSync as mkdirSync11, openSync as openSync8, statSync as statSync8 } from "node:fs";
 import { dirname as dirname17 } from "node:path";
+function isFailSafeMissingContentQuestion(reason) {
+  return reason.startsWith("content:sniffer:") && reason.endsWith(":fail_safe:missing_question");
+}
 function tierLedgerConversationKey(identity) {
   return identity.providerConversationId ?? "";
 }
@@ -20080,7 +20083,7 @@ function recordedContentVerdictSniffer(sniffer, recorded, text2, names) {
   const tier = recorded.contentTier;
   const prefix = `content:sniffer:${sniffer.id}:`;
   const code = recorded.reasons.find((reason) => reason.startsWith(prefix))?.slice(prefix.length);
-  if (tier !== "private" && tier !== "secure" || !code || code === "undecided")
+  if (tier !== "private" && tier !== "secure" || !code || code === "undecided" || isFailSafeMissingContentQuestion(`${prefix}${code}`))
     return sniffer;
   return {
     id: sniffer.id,
@@ -20103,6 +20106,7 @@ var init_tier_placement = __esm(() => {
   init_types();
   init_engine();
   init_tier_classifier();
+  init_tier_ledger();
   DEFAULT_TIER_FOR_DOMAIN = {
     public_safe: "S0",
     internal: "S3",
@@ -71541,7 +71545,7 @@ class TierSnifferService {
   }
   waitingForExtraction(ledger, row, identity) {
     try {
-      if (!this.options.extractionState || row.family !== "file" || !row.routed)
+      if (!this.options.extractionState || !row.routed)
         return false;
       const copies = ledger.copies(identity);
       if (copies.length === 0)
