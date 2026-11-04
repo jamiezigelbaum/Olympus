@@ -53,7 +53,7 @@ for (const contentRead of [true, false]) test(`an upgraded pending row with no q
   expect(f.ledger.getCurrent(f.identity)).toMatchObject({ state: 'current', contentTier: 'secure', contentPending: false });
   expect(f.service.backlog().checkingItems).toBe(0);
   expect(f.calls()).toBe(0);
-  expect(f.ledger.getCurrent(f.identity)?.reasons).toContainEqual(expect.stringMatching(/^content:sniffer:.*:fail_safe:missing_question$/));
+  expect(f.ledger.getCurrent(f.identity)?.reasons).toContainEqual(expect.stringMatching(contentRead ? /^content:sniffer:.*:fail_safe:missing_question$/ : /^content:sniffer:.*:fail_safe:unread$/));
   await f.service.runOnce();
   expect(f.ledger.counts().byState.pending).toBe(0);
 });
@@ -119,4 +119,24 @@ for (const mismatch of ['unflagged', 'not_secret'] as const) test(`recovery also
   await f.service.runOnce();
   expect(f.ledger.getCurrent(f.identity)).toMatchObject({ state: 'current', contentTier: 'secure' });
   if (mismatch === 'not_secret') expect(f.ledger.getOverride(f.identity)).toEqual({ kind: 'not_secret' });
+});
+
+test('an older unread settlement is relabelled once as unread, and a read one keeps missing_question (#847)', async () => {
+  const f = await fixture(true);
+  await f.service.runOnce();
+  const db = new Database(f.ledger.dbPath);
+  // As an older build left it: unread text labelled as a lost question, beside a names reason that stays.
+  db.query('UPDATE tier_items SET content_read = 0, reasons_json = ?').run(JSON.stringify(['metadata:sniffer:old:fail_safe:missing_question', 'content:sniffer:old:fail_safe:missing_question']));
+  db.query("DELETE FROM tier_ledger_meta WHERE key = 'fail_safe_unread_relabel_v1'").run();
+  const generation = (db.query('SELECT generation AS g FROM tier_items').get() as { g: number }).g;
+  expect(f.ledger.relabelUnreadFailSafe()).toBe(1);
+  const reasons = JSON.parse((db.query('SELECT reasons_json AS r FROM tier_items').get() as { r: string }).r) as string[];
+  expect(reasons).toEqual(['metadata:sniffer:old:fail_safe:missing_question', 'content:sniffer:old:fail_safe:unread']);
+  // Only the label: the generation is unchanged, and a second page finds nothing.
+  expect((db.query('SELECT generation AS g FROM tier_items').get() as { g: number }).g).toBe(generation);
+  expect(f.ledger.relabelUnreadFailSafe()).toBe(0);
+  // Read text keeps the lost-question label, which the re-ask pass reads.
+  db.query('UPDATE tier_items SET content_read = 1, reasons_json = ?').run(JSON.stringify(['content:sniffer:old:fail_safe:missing_question']));
+  expect(f.ledger.relabelUnreadFailSafe()).toBe(0);
+  db.close();
 });

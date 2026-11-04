@@ -55,10 +55,19 @@ export type TierLedgerState = 'pending' | 'current' | 'moving';
  * make two different messages one ledger row. Absent means "no conversation"
  * (''), exactly as the connector store normalizes it.
  */
-/** Whether a reason records a content question settled fail-safe because none was ever asked. */
+/**
+ * Whether a reason records content held fail-safe Private without a verdict on
+ * its text: a question lost from the queue (`missing_question`), or text never
+ * read, so no question could exist yet (`unread`). Either way the item is owed
+ * a verdict once its text is read.
+ */
 export function isFailSafeMissingContentQuestion(reason: string): boolean {
-  return reason.startsWith('content:sniffer:') && reason.endsWith(':fail_safe:missing_question');
+  return reason.startsWith('content:sniffer:')
+    && (reason.endsWith(':fail_safe:missing_question') || reason.endsWith(':fail_safe:unread'));
 }
+
+/** The meta key set once every unread fail-safe row carries the `unread` label (#847). */
+export const TIER_LEDGER_UNREAD_RELABEL_DONE = 'fail_safe_unread_relabel_v1';
 
 export type TierLedgerIdentity = Pick<SourceItemIdentity, 'provider' | 'accountScope' | 'providerItemId'>
   & Partial<Pick<SourceItemIdentity, 'family' | 'providerConversationId'>>;
@@ -1096,7 +1105,8 @@ export class TierLedger {
       WHERE routed = 1 AND content_read = 0 AND metadata_pending = 0
         AND ((state = 'pending' AND content_pending = 1)
           OR (state = 'current' AND EXISTS (SELECT 1 FROM json_each(reasons_json) r
-            WHERE r.value GLOB 'content:sniffer:*:fail_safe:missing_question')))
+            WHERE r.value GLOB 'content:sniffer:*:fail_safe:missing_question'
+              OR r.value GLOB 'content:sniffer:*:fail_safe:unread')))
         AND (? IS NULL OR (provider, account_scope, conversation_key, provider_item_id) > (?, ?, ?, ?))
       ORDER BY provider, account_scope, conversation_key, provider_item_id
       LIMIT ?
@@ -1155,8 +1165,10 @@ export class TierLedger {
       if (options.missingContent && (next.contentPending || !next.metadataPending)) {
         next.contentTier = maxTier(next.contentTier, 'secure');
         next.contentPending = false;
+        // Unread text was never a question that went missing: say what it is,
+        // so the counts do not read as lost questions (#847).
         next.reasons = [...next.reasons.filter(reason => !isOpenSnifferReason(reason, 'content')),
-          `content:sniffer:${options.snifferId}:fail_safe:missing_question`];
+          `content:sniffer:${options.snifferId}:fail_safe:${next.contentRead ? 'missing_question' : 'unread'}`];
       }
       next.contentTier = maxTier(next.contentTier, next.metadataTier);
       next.decidedBy = 'sniffer';
@@ -1168,6 +1180,26 @@ export class TierLedger {
       } else this.writeRow(identity, next, undefined, current);
       return true;
     })();
+  }
+
+  /**
+   * One page of the once-only relabel (#847): rows settled fail-safe before
+   * the `unread` label existed, with their text still unread, get it in place
+   * of `missing_question`. Only the label changes: tiers, copies and the
+   * generation stay as they are. Returns how many rows changed; 0 means done.
+   */
+  relabelUnreadFailSafe(limit = 2_000): number {
+    return this.db.query(`
+      UPDATE tier_items SET reasons_json = (
+        SELECT json_group_array(CASE WHEN r.value GLOB 'content:sniffer:*:fail_safe:missing_question'
+          THEN substr(r.value, 1, length(r.value) - length('missing_question')) || 'unread' ELSE r.value END)
+        FROM json_each(tier_items.reasons_json) r)
+      WHERE rowid IN (
+        SELECT rowid FROM tier_items
+        WHERE content_read = 0 AND instr(reasons_json, ':fail_safe:missing_question"') > 0
+          AND EXISTS (SELECT 1 FROM json_each(reasons_json) r WHERE r.value GLOB 'content:sniffer:*:fail_safe:missing_question')
+        LIMIT ?)
+    `).run(Math.max(1, Math.min(limit, 10_000))).changes;
   }
 
   /** Retire only an unchanged pending row after every relevant store confirmed absence. */
@@ -3259,7 +3291,8 @@ export class TierLedger {
                 AND t.state = 'current' AND t.content_read = 0
                 AND t.metadata_tier <> 'secrets' AND t.content_tier <> 'secrets'
                 AND EXISTS (SELECT 1 FROM json_each(t.reasons_json) r
-                  WHERE r.value GLOB 'content:sniffer:*:fail_safe:missing_question'))
+                  WHERE r.value GLOB 'content:sniffer:*:fail_safe:missing_question'
+                    OR r.value GLOB 'content:sniffer:*:fail_safe:unread'))
             AND NOT EXISTS (SELECT 1 FROM tier_copies other
               WHERE other.provider = tier_copies.provider AND other.account_scope = tier_copies.account_scope
                 AND other.conversation_key = tier_copies.conversation_key AND other.provider_item_id = tier_copies.provider_item_id

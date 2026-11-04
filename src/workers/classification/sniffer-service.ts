@@ -56,6 +56,7 @@ import { applyMediaJudgments } from '../connector-store/tier-media-judgment-swee
 import {
   TierLedger,
   TierLedgerRaiseAbandonRefusedError,
+  TIER_LEDGER_UNREAD_RELABEL_DONE,
   copyServingLayer,
   tierLedgerIdentityKey,
   tierLedgerPathForStore,
@@ -880,6 +881,11 @@ export class TierSnifferService {
             || tierLedgerPathForStore(store.dbPath) === ledgerPath));
         // An unavailable store is not evidence that its items were deleted.
         if (stores.length === 0 || stores.some(store => !store.exportItemCopy)) continue;
+        // Once per ledger, a page per pass: older unread settlements get the
+        // `unread` label they would get now (#847).
+        if (ledger.readMeta(TIER_LEDGER_UNREAD_RELABEL_DONE) !== '1' && ledger.relabelUnreadFailSafe() === 0) {
+          ledger.writeMeta(TIER_LEDGER_UNREAD_RELABEL_DONE, '1');
+        }
         const saved = ledger.readMeta(cursorKey);
         const after = saved ? JSON.parse(saved) as TierLedgerIdentity : undefined;
         const rows = ledger.listPending({ limit: 100, ...(after ? { after } : {}) });

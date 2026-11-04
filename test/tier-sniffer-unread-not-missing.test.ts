@@ -36,7 +36,9 @@ import { createTieredStoreExtractionSink } from '../src/workers/file-extraction/
 const SECURE_CORPUS = 'secure_local.dropbox.files';
 const FILE = { id: 'id:garden', name: 'orchard-plan.pdf', path: '/Notes/orchard-plan.pdf', text: 'Orchard pruning plan for the apple trees this winter.' };
 const identity = { provider: 'dropbox', accountScope: 'personal', providerItemId: FILE.id };
-const FAIL_SAFE = /^content:sniffer:.*:fail_safe:missing_question$/;
+// Unread text is labelled for what it is, not as a lost question (#847).
+const FAIL_SAFE = /^content:sniffer:.*:fail_safe:unread$/;
+const ANY_FAIL_SAFE = /^content:sniffer:.*:fail_safe:(?:missing_question|unread)$/;
 
 let root: string;
 let env: Record<string, string>;
@@ -133,7 +135,7 @@ test('unread content waiting for extraction is not a lost question: it stays pen
   expect(await service.runOnce()).toMatchObject({ state: 'model_unavailable' });
   const waiting = f.lane.ledger.getCurrent(identity)!;
   expect(waiting).toMatchObject({ state: 'pending', contentPending: true, contentRead: false });
-  expect(waiting.reasons.some((reason) => FAIL_SAFE.test(reason))).toBe(false);
+  expect(waiting.reasons.some((reason) => ANY_FAIL_SAFE.test(reason))).toBe(false);
 
   // Extraction lands: the text is held Private, not refused, and a question is waiting.
   expect((await f.extract()).accepted).toBe(true);
@@ -176,7 +178,7 @@ test('an item an older build settled fail-safe with its text unread is judged wh
   const landed = f.lane.ledger.getCurrent(identity)!;
   expect(landed).toMatchObject({ contentRead: true, state: 'pending', contentPending: true });
   expect(landed.reasons).toContain('content:held_until_judged');
-  expect(landed.reasons.some((reason) => FAIL_SAFE.test(reason))).toBe(false);
+  expect(landed.reasons.some((reason) => /:fail_safe:(?:missing_question|unread)$/.test(reason))).toBe(false);
 
   await approve();
   await service.runOnce();
@@ -198,7 +200,7 @@ test('unread media of a message waiting for extraction stays pending, not settle
   await service.runOnce();
   const waiting = f.lane.ledger.getCurrent(identity)!;
   expect(waiting).toMatchObject({ state: 'pending', contentPending: true, contentRead: false });
-  expect(waiting.reasons.some((reason) => FAIL_SAFE.test(reason))).toBe(false);
+  expect(waiting.reasons.some((reason) => ANY_FAIL_SAFE.test(reason))).toBe(false);
 });
 
 for (const shape of [
@@ -233,7 +235,7 @@ for (const { listedAgoMs, waits } of [{ listedAgoMs: 60_000, waits: true }, { li
     const row = f.lane.ledger.getCurrent(identity)!;
     if (waits) {
       expect(row).toMatchObject({ state: 'pending', contentPending: true, contentRead: false });
-      expect(row.reasons.some((reason) => FAIL_SAFE.test(reason))).toBe(false);
+      expect(row.reasons.some((reason) => ANY_FAIL_SAFE.test(reason))).toBe(false);
     } else {
       expect(row).toMatchObject({ state: 'current', contentTier: 'secure', contentRead: false });
       expect(row.reasons.some((reason) => FAIL_SAFE.test(reason))).toBe(true);
