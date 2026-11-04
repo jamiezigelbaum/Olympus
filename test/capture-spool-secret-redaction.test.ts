@@ -223,45 +223,45 @@ describe('Telegram capture spool: Secrets leave the spool', () => {
 });
 
 describe('Capture spool clearing: retries and later decisions', () => {
-  test('a window that failed is cleared again by the next pull, though ingestion moved past it', () => {
+  test('a window that failed is cleared again by the next pull, though ingestion moved past it', async () => {
     const root = workspace('olympus-spool-clear-retry-');
     const ledger = new TierLedger({ dbPath: join(root, 'ledger.sqlite') });
     closers.push(() => ledger.close());
     const windows: Array<{ from?: string; through: string }> = [];
     let fail = true;
-    const redact = (window: { from?: string; through: string }) => {
+    const redact = async (window: { from?: string; through: string }) => {
       windows.push(window);
       if (fail && window.from !== undefined) throw new Error('disk full');
       return { recordsRedacted: 0, recordsBlanked: 0 };
     };
     // First pull: never cleared before, so its window starts at the very
     // beginning; the first-run sweep is due too. Both pass cleanly.
-    clearCaptureSpoolSecrets({ ledger, stateKey: 'lane', from: 'a.jsonl:0', through: 'a.jsonl:5', redact: (w) => { fail = false; const r = redact(w); fail = true; return r; } });
+    await clearCaptureSpoolSecrets({ ledger, stateKey: 'lane', from: 'a.jsonl:0', through: 'a.jsonl:5', redact: async (w) => { fail = false; const r = await redact(w); fail = true; return r; } });
     expect(windows[0]).toEqual({ through: 'a.jsonl:5' });
-    expect(() => clearCaptureSpoolSecrets({ ledger, stateKey: 'lane', from: 'a.jsonl:5', through: 'a.jsonl:9', redact })).toThrow('disk full');
+    await expect(clearCaptureSpoolSecrets({ ledger, stateKey: 'lane', from: 'a.jsonl:5', through: 'a.jsonl:9', redact })).rejects.toThrow('disk full');
     fail = false;
     windows.length = 0;
     // The next pull's own window starts at 9, but the failed one ended at 5.
-    clearCaptureSpoolSecrets({ ledger, stateKey: 'lane', from: 'a.jsonl:9', through: 'a.jsonl:12', redact });
+    await clearCaptureSpoolSecrets({ ledger, stateKey: 'lane', from: 'a.jsonl:9', through: 'a.jsonl:12', redact });
     expect(windows[0]).toEqual({ from: 'a.jsonl:5', through: 'a.jsonl:12' });
     windows.length = 0;
-    clearCaptureSpoolSecrets({ ledger, stateKey: 'lane', from: 'a.jsonl:12', through: 'a.jsonl:14', redact });
+    await clearCaptureSpoolSecrets({ ledger, stateKey: 'lane', from: 'a.jsonl:12', through: 'a.jsonl:14', redact });
     expect(windows[0]).toEqual({ from: 'a.jsonl:12', through: 'a.jsonl:14' });
   });
 
-  test('a Telegram record cleared of its text loses its names too once the names are judged Secrets', () => {
+  test('a Telegram record cleared of its text loses its names too once the names are judged Secrets', async () => {
     const root = workspace('olympus-telegram-spool-upgrade-');
     const spoolDir = join(root, 'spool');
     mkdirSync(spoolDir);
     const file = join(spoolDir, TELEGRAM_FILE);
     writeFileSync(file, `${telegramLine('4', `see ${GITHUB_TOKEN}`)}\n`);
-    redactTelegramCaptureSpoolSecrets({ spoolDir, judge: () => 'content' });
+    await redactTelegramCaptureSpoolSecrets({ spoolDir, judge: () => 'content' });
     let message = JSON.parse(readFileSync(file, 'utf8').split('\n')[0]!).message;
     expect(message).toMatchObject({ secretRedacted: true, chatTitle: 'Porto trip', senderDisplayName: 'Sam' });
     expect(message).not.toHaveProperty('boundedText');
     // A content-level judgment again changes nothing.
-    expect(redactTelegramCaptureSpoolSecrets({ spoolDir, judge: () => 'content' }).recordsRedacted).toBe(0);
-    expect(redactTelegramCaptureSpoolSecrets({ spoolDir, judge: () => 'names' }).recordsRedacted).toBe(1);
+    expect((await redactTelegramCaptureSpoolSecrets({ spoolDir, judge: () => 'content' })).recordsRedacted).toBe(0);
+    expect((await redactTelegramCaptureSpoolSecrets({ spoolDir, judge: () => 'names' })).recordsRedacted).toBe(1);
     message = JSON.parse(readFileSync(file, 'utf8').split('\n')[0]!).message;
     expect(message).not.toHaveProperty('chatTitle');
     expect(message).not.toHaveProperty('senderDisplayName');
@@ -418,7 +418,7 @@ describe('WhatsApp capture spool: Secrets leave the spool', () => {
     expect(record).not.toHaveProperty('media_path');
     expect(record).not.toHaveProperty('media_direct_path');
   });
-  test('audio two Secret messages share is deleted by the last one to let go of it', () => {
+  test('audio two Secret messages share is deleted by the last one to let go of it', async () => {
     const root = workspace('olympus-whatsapp-spool-shared-secret-');
     const spoolDir = join(root, 'spool');
     const mediaDir = join(root, 'media', 'audio');
@@ -430,12 +430,12 @@ describe('WhatsApp capture spool: Secrets leave the spool', () => {
       whatsappLine({ id: 'TWIN', text: '', media_type: 'audio', media_path: shared }),
       whatsappLine({ id: 'TWIN', chat_jid: '15550002222@s.whatsapp.net', text: '', media_type: 'audio', media_path: shared }),
     ].join('\n')}\n`);
-    const result = redactWhatsAppLiveSpoolSecrets({ spoolDir, mediaDir, judge: () => 'content' });
+    const result = await redactWhatsAppLiveSpoolSecrets({ spoolDir, mediaDir, judge: () => 'content' });
     expect(result).toEqual({ recordsRedacted: 2, recordsBlanked: 0 });
     expect(existsSync(shared)).toBe(false);
   });
 
-  test('mentions go with the text, and audio another chat\'s message also names is kept', () => {
+  test('mentions go with the text, and audio another chat\'s message also names is kept', async () => {
     const root = workspace('olympus-whatsapp-spool-mentions-');
     const spoolDir = join(root, 'spool');
     const mediaDir = join(root, 'media', 'audio');
@@ -457,7 +457,7 @@ describe('WhatsApp capture spool: Secrets leave the spool', () => {
       media_file_sha256: 'c2hhMjU2LWZpeHR1cmUtdmFsdWUtZm9yLXRlc3Rpbmc=',
     })}\n`);
     const secret = new Set(['M1', '15550001111@s.whatsapp.net SAME', '15550003333@s.whatsapp.net ALIAS']);
-    const result = redactWhatsAppLiveSpoolSecrets({
+    const result = await redactWhatsAppLiveSpoolSecrets({
       spoolDir,
       mediaDir,
       judge: (identity) => secret.has(identity.providerItemId)

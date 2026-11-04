@@ -64032,28 +64032,28 @@ function localModelResourceKey(profile) {
 }
 function createLocalModelActivity() {
   const queues = new Map;
-  const dispatch = (key2, work) => new Promise((resolve14, reject) => {
+  const dispatch = (key2, work, limit = 1) => new Promise((resolve14, reject) => {
     let queue = queues.get(key2);
     if (!queue) {
-      queue = { running: false, tasks: [] };
+      queue = { running: [], tasks: [] };
       queues.set(key2, queue);
     }
     const pending = queue;
     const pump = () => {
-      if (pending.running)
-        return;
-      const first = pending.tasks.reduce((best, task, index) => task.priority < pending.tasks[best].priority ? index : best, 0);
-      const next = pending.tasks.splice(first, 1)[0];
-      if (!next)
-        return;
-      pending.running = true;
-      next.run().finally(() => {
-        pending.running = false;
-        pump();
-      });
+      while (pending.tasks.length > 0) {
+        const first = pending.tasks.reduce((best, task, index) => task.priority < pending.tasks[best].priority ? index : best, 0);
+        if (pending.running.length >= Math.min(pending.tasks[first].limit, ...pending.running))
+          return;
+        const next = pending.tasks.splice(first, 1)[0];
+        pending.running.push(next.limit);
+        next.run().finally(() => {
+          pending.running.splice(pending.running.indexOf(next.limit), 1);
+          pump();
+        });
+      }
     };
     const kind = localInferencePriority?.getStore() ?? "owner";
-    pending.tasks.push({ priority: localInferencePriority?.getStore() === "background" ? 2 : localInferencePriority?.getStore() === "maintenance" ? 1 : 0, run: async () => {
+    pending.tasks.push({ priority: localInferencePriority?.getStore() === "background" ? 2 : localInferencePriority?.getStore() === "maintenance" ? 1 : 0, limit: Math.max(1, Math.floor(limit)), run: async () => {
       try {
         resolve14(await (localInferencePriority ? localInferencePriority.run(kind, () => get(key2).run(work)) : get(key2).run(work)));
       } catch (error) {
@@ -64062,6 +64062,7 @@ function createLocalModelActivity() {
     } });
     queueMicrotask(pump);
   });
+  const taggedRunning = new Map;
   const resources = new Map;
   const busyListeners = new Map;
   const get = (key2) => {
@@ -64079,6 +64080,7 @@ function createLocalModelActivity() {
   };
   return {
     busy: (key2) => get(key2).busy,
+    busyExcept: (key2, tag) => get(key2).inFlight > (taggedRunning.get(`${key2}\x00${tag}`) ?? 0),
     run: (key2, work) => get(key2).run(work),
     onBusy(key2, listener) {
       const listeners = busyListeners.get(key2) ?? new Set;
@@ -64092,8 +64094,22 @@ function createLocalModelActivity() {
     track(key2, model, options = {}) {
       return { ...model, complete: (request) => {
         const guards = localInferenceGuards?.getStore() ?? [];
-        const run = options.serialize === false ? (work) => get(key2).run(work) : (work) => dispatch(key2, work);
-        return run(async () => {
+        const run = options.serialize === false ? (work) => get(key2).run(work) : (work) => dispatch(key2, work, options.concurrency ?? 1);
+        const tagged = (work) => {
+          const tag = options.tag;
+          if (tag === undefined)
+            return work;
+          const tagKey = `${key2}\x00${tag}`;
+          return async () => {
+            taggedRunning.set(tagKey, (taggedRunning.get(tagKey) ?? 0) + 1);
+            try {
+              return await work();
+            } finally {
+              taggedRunning.set(tagKey, (taggedRunning.get(tagKey) ?? 1) - 1);
+            }
+          };
+        };
+        return run(tagged(async () => {
           request.signal?.throwIfAborted();
           for (const guard of guards) {
             try {
@@ -64105,7 +64121,7 @@ function createLocalModelActivity() {
           }
           request.signal?.throwIfAborted();
           return model.complete(request);
-        });
+        }));
       } };
     }
   };
@@ -75114,7 +75130,7 @@ var init_source_inputs = __esm(() => {
 import { createHash as createHash50 } from "node:crypto";
 import { closeSync as closeSync15, fsyncSync as fsyncSync3, lstatSync as lstatSync26, openSync as openSync15, readSync as readSync3, writeSync as writeSync4 } from "node:fs";
 import { join as join60 } from "node:path";
-function redactCaptureSpoolLines(options) {
+async function redactCaptureSpoolLines(options) {
   const result = { recordsRedacted: 0, recordsBlanked: 0 };
   for (const name of options.files) {
     if (options.from && name < options.from.file)
@@ -75193,6 +75209,7 @@ function redactCaptureSpoolLines(options) {
             if (lineIndex >= endLine)
               break scan;
             at = newline + 1;
+            await ingestionTurn();
           }
           position += read;
         }
@@ -75223,16 +75240,16 @@ function createSpoolSecretJudge(options) {
     return detectSecretFindingKinds(text2).length > 0 ? "content" : undefined;
   };
 }
-function clearCaptureSpoolSecrets(options) {
+async function clearCaptureSpoolSecrets(options) {
   const through = options.through;
   if (!through)
     return addCaptureSpoolRedactions();
   const clearedKey = `${options.stateKey}:cleared_through`;
   const cleared = options.ledger.readMeta(clearedKey);
   const from = options.from === undefined || cleared === undefined ? undefined : earlierSpoolCursor(cleared, options.from);
-  const window2 = options.redact({ ...from === undefined ? {} : { from }, through }, createSpoolSecretJudge({ ledger: options.ledger, floor: true }));
+  const window2 = await options.redact({ ...from === undefined ? {} : { from }, through }, createSpoolSecretJudge({ ledger: options.ledger, floor: true }));
   options.ledger.writeMeta(clearedKey, through);
-  const sweep = sweepCaptureSpoolWhenSecretsChange({
+  const sweep = await sweepCaptureSpoolWhenSecretsChange({
     ledger: options.ledger,
     stateKey: options.stateKey,
     sweep: (judge2) => options.redact({ through }, judge2)
@@ -75254,7 +75271,7 @@ function parseSpoolCursor(cursor) {
   const line = separator > 0 ? cursor.slice(separator + 1) : "";
   return file && /^\d+$/.test(line) ? { file, line: Number(line) } : undefined;
 }
-function sweepCaptureSpoolWhenSecretsChange(options) {
+async function sweepCaptureSpoolWhenSecretsChange(options) {
   if (secretsDisposition() !== "tombstone_now")
     return;
   const digest3 = secretsDigest(options.ledger);
@@ -75262,7 +75279,7 @@ function sweepCaptureSpoolWhenSecretsChange(options) {
   const versionDue = state?.version !== CAPTURE_SPOOL_SWEEP_VERSION;
   if (!versionDue && state?.secrets === digest3)
     return;
-  const result = options.sweep(createSpoolSecretJudge({ ledger: options.ledger, floor: versionDue }));
+  const result = await options.sweep(createSpoolSecretJudge({ ledger: options.ledger, floor: versionDue }));
   const next = { version: CAPTURE_SPOOL_SWEEP_VERSION, secrets: digest3 };
   options.ledger.writeMeta(options.stateKey, JSON.stringify(next));
   return result;
@@ -75302,6 +75319,7 @@ var SPOOL_SCAN_CHUNK_BYTES, SPOOL_MAX_LINE_BYTES, CAPTURE_SPOOL_SWEEP_VERSION = 
 var init_capture_spool_secrets = __esm(() => {
   init_engine();
   init_secrets_disposition();
+  init_control_path_headroom();
   SPOOL_SCAN_CHUNK_BYTES = 1 << 20;
   SPOOL_MAX_LINE_BYTES = 32 * 1024 * 1024;
 });
@@ -76493,7 +76511,7 @@ function spoolTailLines(path) {
     closeSync17(fd2);
   }
 }
-function redactTelegramCaptureSpoolSecrets(options) {
+async function redactTelegramCaptureSpoolSecrets(options) {
   assertTelegramCaptureSpoolDirectory(options.spoolDir);
   const from = parseTelegramCaptureSpoolCursor(options.from);
   const through = parseTelegramCaptureSpoolCursor(options.through);
@@ -81449,7 +81467,7 @@ function rawItemFromChild(message2, child2, account, fetchedAt) {
 function spoolMessageText(message2) {
   return enrichWithLinkPreview(resolveMentionText(message2.text, message2.mentions), message2);
 }
-function redactWhatsAppLiveSpoolSecrets(options) {
+async function redactWhatsAppLiveSpoolSecrets(options) {
   const account = options.account === undefined ? DEFAULT_ACCOUNT : requireNonEmpty7(options.account, "WhatsApp account");
   const from = positionFromCursor(options.from);
   const through = positionFromCursor(options.through);
@@ -82522,7 +82540,7 @@ function createWhatsAppConnectorStoreSyncHandler(options) {
         tiered = tieredLaneReceiptCounts({ routing: setRun.routing });
         try {
           const committed = sanitizeWhatsAppLiveCursor(tierSet.committedCursor(WHATSAPP_PRODUCT_CONNECTOR_ID)?.cursor ?? undefined);
-          redacted = clearWhatsAppSpoolSecrets({
+          redacted = await clearWhatsAppSpoolSecrets({
             spoolDir,
             account,
             mediaDir,
@@ -82564,7 +82582,7 @@ function createWhatsAppConnectorStoreSyncHandler(options) {
     }
   };
 }
-function clearWhatsAppSpoolSecrets(options) {
+async function clearWhatsAppSpoolSecrets(options) {
   const redact = (window2, judge4) => redactWhatsAppLiveSpoolSecrets({
     spoolDir: options.spoolDir,
     account: options.account,
@@ -82606,7 +82624,7 @@ function clearWhatsAppSpoolSecrets(options) {
     if (scanned === undefined || scanned.offset === undefined)
       continue;
     try {
-      const cleared = redact({ from: `${file}:${start}`, through: `${file}:${scanned.lines}` }, judge3);
+      const cleared = await redact({ from: `${file}:${start}`, through: `${file}:${scanned.lines}` }, judge3);
       if (cleared.recordsRedacted + cleared.recordsBlanked > 0)
         rewritten.add(file);
       result = addCaptureSpoolRedactions(result, cleared);
@@ -82643,7 +82661,7 @@ function clearWhatsAppSpoolSecrets(options) {
       if (scanned === undefined)
         continue;
       try {
-        const cleared = redact({ from: `${file}:0`, through: `${file}:${scanned.lines}` }, judge3);
+        const cleared = await redact({ from: `${file}:0`, through: `${file}:${scanned.lines}` }, judge3);
         if (cleared.recordsRedacted + cleared.recordsBlanked > 0)
           rewritten.add(file);
         result = addCaptureSpoolRedactions(result, cleared);
@@ -82663,7 +82681,7 @@ function clearWhatsAppSpoolSecrets(options) {
   refreshIndex(options.spoolDir, rewritten);
   if (failure !== undefined)
     throw failure;
-  const sweep = sweepCaptureSpoolWhenSecretsChange({
+  const sweep = await sweepCaptureSpoolWhenSecretsChange({
     ledger: options.ledger,
     stateKey: WHATSAPP_SPOOL_REDACTION_STATE_KEY,
     sweep: (sweepJudge) => redact({ through: options.through }, sweepJudge)
@@ -86823,6 +86841,10 @@ var init_pdf_raster_ocr = __esm(() => {
 import { mkdtemp as mkdtemp6, readFile as readFile7, rm as rm7, writeFile as writeFile5 } from "node:fs/promises";
 import { tmpdir as tmpdir8 } from "node:os";
 import { join as join77 } from "node:path";
+function pdfOcrTimeoutMs(baseMs, sizeBytes) {
+  const steps = Math.max(1, Math.ceil((Number.isFinite(sizeBytes) ? Math.max(0, sizeBytes) : 0) / OCR_PDF_TIMEOUT_BYTES_PER_STEP));
+  return Math.max(baseMs, Math.min(baseMs * steps, OCR_PDF_MAX_TIMEOUT_MS));
+}
 function createOcrEngine(input) {
   const options = input.options ?? {};
   let vision;
@@ -87045,7 +87067,7 @@ async function commandPdfOcr(engine, input) {
       sizeBytes: input.sizeBytes
     }, {
       commandRunner: input.commandRunner,
-      timeoutMs: input.timeoutMs,
+      timeoutMs: pdfOcrTimeoutMs(input.timeoutMs, input.sizeBytes),
       maxBoundedTextChars: input.maxBoundedTextChars,
       ...engine.limits
     }));
@@ -87107,7 +87129,7 @@ async function extractPdfOcr(input) {
       await input.commandRunner({
         command: OCR_PDF_COMMAND,
         args: ocrmypdfArguments({ inputPath, outputPath, sidecarPath }),
-        timeoutMs: input.timeoutMs
+        timeoutMs: pdfOcrTimeoutMs(input.timeoutMs, input.sizeBytes)
       });
     } catch (error) {
       const rejectionKind = classifyOcrDeterministicPdfRejection(error);
@@ -87222,7 +87244,7 @@ function imageExtensionForMimeType(mimeType) {
     return ".heif";
   return ".img";
 }
-var OCR_EXTRACTOR_KIND = "local_ocr_tesseract", OCR_EXTRACTOR_VERSION = "ocr-v1", DEFAULT_OCR_TIMEOUT_MS = 120000, OCR_PDF_COMMAND, OCR_IMAGE_COMMAND, TEMP_DIR_PREFIX4 = "olympus-extraction-ocr-", OCR_DETERMINISTIC_PDF_REJECTION_KINDS, OcrUnavailableError;
+var OCR_EXTRACTOR_KIND = "local_ocr_tesseract", OCR_EXTRACTOR_VERSION = "ocr-v1", DEFAULT_OCR_TIMEOUT_MS = 120000, OCR_PDF_TIMEOUT_BYTES_PER_STEP, OCR_PDF_MAX_TIMEOUT_MS, OCR_PDF_COMMAND, OCR_IMAGE_COMMAND, TEMP_DIR_PREFIX4 = "olympus-extraction-ocr-", OCR_DETERMINISTIC_PDF_REJECTION_KINDS, OcrUnavailableError;
 var init_ocr = __esm(() => {
   init_bounded_text();
   init_command_runner();
@@ -87231,6 +87253,8 @@ var init_ocr = __esm(() => {
   init_ocr_capability();
   init_pdf_raster_ocr();
   init_input_limits();
+  OCR_PDF_TIMEOUT_BYTES_PER_STEP = 5 * 1024 * 1024;
+  OCR_PDF_MAX_TIMEOUT_MS = 12 * 60000;
   OCR_PDF_COMMAND = OCRMYPDF_COMMAND;
   OCR_IMAGE_COMMAND = TESSERACT_COMMAND;
   OCR_DETERMINISTIC_PDF_REJECTION_KINDS = [
@@ -92465,7 +92489,7 @@ function createTelegramConnectorStoreSyncHandler(options) {
       let redacted;
       let redactionFailed = false;
       try {
-        redacted = clearTelegramSpoolSecrets({
+        redacted = await clearTelegramSpoolSecrets({
           spoolDir,
           ledger: tierSet.ledger,
           ...preflightCursor ? { from: preflightCursor } : {},
@@ -92532,7 +92556,7 @@ function telegramCaptureSince(spoolDir) {
     return;
   }
 }
-function clearTelegramSpoolSecrets(options) {
+async function clearTelegramSpoolSecrets(options) {
   return clearCaptureSpoolSecrets({
     ledger: options.ledger,
     stateKey: TELEGRAM_SPOOL_REDACTION_STATE_KEY,
@@ -171536,10 +171560,12 @@ function embeddingSweepTask(source, targets, deadlineMs = EMBEDDING_SWEEP_STORE_
           })
         ]).finally(() => clearTimeout(timer));
         if (result !== overran) {
-          runs.push(...result);
+          const outage = target.store.embeddingDeferredReason();
+          runs.push(...result.map((run2) => run2.busy === true && run2.deferredReason === undefined && outage !== undefined ? { ...run2, deferredReason: outage } : run2));
           continue;
         }
         console.error(`[olympus:embedding-sweep] pass_overran source=${source.sourceId} corpus=${target.store.corpusId} after_ms=${deadlineMs}; the source's turn was given back`);
+        target.store.setEmbeddingDeferral(EMBEDDING_PROVIDER_UNAVAILABLE_REASON);
         runs.push({
           corpusId: target.store.corpusId,
           itemsAttempted: 0,
@@ -189147,6 +189173,7 @@ async function runSnifferPass(options) {
   const promptVersion = options.promptVersion ?? SNIFFER_PROMPT_VERSION;
   const id = snifferId(options.lane, promptVersion);
   const maxCallsPerPass = Math.max(0, Math.floor(options.maxCallsPerPass ?? Number.MAX_SAFE_INTEGER));
+  const concurrency = Math.max(1, Math.min(SNIFFER_MAX_CONCURRENT_CALLS, Math.floor(options.concurrentCalls ?? 1)));
   const monotonicNow = options.monotonicNow ?? (() => performance.now());
   const deadline = monotonicNow() + (options.passTimeMs ?? DEFAULT_SNIFFER_PASS_TIME_MS);
   const report = {
@@ -189327,107 +189354,110 @@ async function runSnifferPass(options) {
   let consecutiveTransportFailures = 0;
   const pending = [...work.metadata, ...work.content].sort(compareRecent);
   let dispatches = options.targets.reduce((total, target) => total + target.sniffer.dispatchCount(), 0);
-  while (pending.length > 0) {
-    const aged = pending.filter((item) => dispatches % 5 === 4 && item.target.sniffer.clockMs() - Date.parse(item.question.queuedAt) >= 5 * 60000).sort((a, b) => a.question.queuedAt.localeCompare(b.question.queuedAt) || a.question.sequence - b.question.sequence);
-    let next = aged[0] ?? nextInTurn(pending, options.targets, dispatches);
-    if (next.question.pass === "content")
-      next = pending.find((item) => item.question.pass === "metadata" && item.target === next.target && tierLedgerIdentityKey(item.question) === tierLedgerIdentityKey(next.question)) ?? next;
-    pending.splice(pending.indexOf(next), 1);
-    const pass = next.question.pass;
-    if (!stillOpen(next.target, next.question)) {
-      if (!midMove(next.target, next.question)) {
-        next.target.sniffer.deleteQuestion(next.question, pass, next.question.materialHash);
-        report.staleDropped += 1;
+  const ask = async () => {
+    while (pending.length > 0 && report.stoppedBy === undefined) {
+      const aged = pending.filter((item) => dispatches % 5 === 4 && item.target.sniffer.clockMs() - Date.parse(item.question.queuedAt) >= 5 * 60000).sort((a, b) => a.question.queuedAt.localeCompare(b.question.queuedAt) || a.question.sequence - b.question.sequence);
+      let next = aged[0] ?? nextInTurn(pending, options.targets, dispatches);
+      if (next.question.pass === "content")
+        next = pending.find((item) => item.question.pass === "metadata" && item.target === next.target && tierLedgerIdentityKey(item.question) === tierLedgerIdentityKey(next.question)) ?? next;
+      pending.splice(pending.indexOf(next), 1);
+      const pass = next.question.pass;
+      if (!stillOpen(next.target, next.question)) {
+        if (!midMove(next.target, next.question)) {
+          next.target.sniffer.deleteQuestion(next.question, pass, next.question.materialHash);
+          report.staleDropped += 1;
+        }
+        continue;
       }
-      continue;
-    }
-    if (!screenQuestion(next.target, next.question))
-      continue;
-    const group = [next];
-    for (let i2 = pending.length - 1;i2 >= 0; i2--) {
-      const item = pending[i2];
-      if (item.question.pass === pass && item.question.materialHash === next.question.materialHash && item.question.mapRevision === next.question.mapRevision && stillOpen(item.target, item.question) && screenQuestion(item.target, item.question)) {
-        group.push(item);
-        pending.splice(i2, 1);
+      if (!screenQuestion(next.target, next.question))
+        continue;
+      const group = [next];
+      for (let i2 = pending.length - 1;i2 >= 0; i2--) {
+        const item = pending[i2];
+        if (item.question.pass === pass && item.question.materialHash === next.question.materialHash && item.question.mapRevision === next.question.mapRevision && stillOpen(item.target, item.question) && screenQuestion(item.target, item.question)) {
+          group.push(item);
+          pending.splice(i2, 1);
+        }
       }
-    }
-    const batch = [group];
-    const stop = stopReason(options, report, maxCallsPerPass, monotonicNow() >= deadline);
-    if (stop) {
-      report.stoppedBy = stop;
-      return finish(report);
-    }
-    assertSnifferProfileAllowed(options.lane.profileId, options.lane.profile);
-    const prompt = buildSnifferBatchPrompt(pass, batch.map((group2, index) => ({ i: index + 1, material: snifferMaterialForModel(group2[0].question.material) })), options.ownerContext);
-    next.target.sniffer.recordDispatch();
-    dispatches += 1;
-    for (const item of group)
-      report.maxQueueWaitMs = Math.max(report.maxQueueWaitMs, item.target.sniffer.clockMs() - Date.parse(item.question.queuedAt));
-    const callStarted = monotonicNow();
-    report.calls += 1;
-    report.itemsAsked += batch.length;
-    report.promptChars += SNIFFER_SYSTEM_PROMPT.length + prompt.length;
-    let text4;
-    try {
-      const completion = await options.model.complete({
-        system: SNIFFER_SYSTEM_PROMPT,
-        prompt,
-        localOnly: true,
-        responseSchema: SNIFFER_RESPONSE_SCHEMA,
-        maxOutputChars: batch.length * OUTPUT_CHARS_PER_ITEM + 200,
-        ...options.signal ? { signal: options.signal } : {}
-      });
-      text4 = completion.text;
-    } catch {
+      const batch = [group];
+      const stop = stopReason(options, report, maxCallsPerPass, monotonicNow() >= deadline);
+      if (stop) {
+        report.stoppedBy = stop;
+        return;
+      }
+      assertSnifferProfileAllowed(options.lane.profileId, options.lane.profile);
+      const prompt = buildSnifferBatchPrompt(pass, batch.map((group2, index) => ({ i: index + 1, material: snifferMaterialForModel(group2[0].question.material) })), options.ownerContext);
+      next.target.sniffer.recordDispatch();
+      dispatches += 1;
+      for (const item of group)
+        report.maxQueueWaitMs = Math.max(report.maxQueueWaitMs, item.target.sniffer.clockMs() - Date.parse(item.question.queuedAt));
+      const callStarted = monotonicNow();
+      report.calls += 1;
+      report.itemsAsked += batch.length;
+      report.promptChars += SNIFFER_SYSTEM_PROMPT.length + prompt.length;
+      let text4;
+      try {
+        const completion = await options.model.complete({
+          system: SNIFFER_SYSTEM_PROMPT,
+          prompt,
+          localOnly: true,
+          responseSchema: SNIFFER_RESPONSE_SCHEMA,
+          maxOutputChars: batch.length * OUTPUT_CHARS_PER_ITEM + 200,
+          ...options.signal ? { signal: options.signal } : {}
+        });
+        text4 = completion.text;
+      } catch {
+        if (options.signal?.aborted) {
+          report.stoppedBy = "preempted";
+          return;
+        }
+        report.failedCalls += 1;
+        consecutiveTransportFailures += 1;
+        if (consecutiveTransportFailures >= MAX_CONSECUTIVE_TRANSPORT_FAILURES) {
+          report.stoppedBy = "transport_failures";
+          return;
+        }
+        continue;
+      } finally {
+        report.callMs += Math.max(0, monotonicNow() - callStarted);
+      }
       if (options.signal?.aborted) {
         report.stoppedBy = "preempted";
-        return finish(report);
+        return;
       }
-      report.failedCalls += 1;
-      consecutiveTransportFailures += 1;
-      if (consecutiveTransportFailures >= MAX_CONSECUTIVE_TRANSPORT_FAILURES) {
-        report.stoppedBy = "transport_failures";
-        return finish(report);
-      }
-      continue;
-    } finally {
-      report.callMs += Math.max(0, monotonicNow() - callStarted);
-    }
-    if (options.signal?.aborted) {
-      report.stoppedBy = "preempted";
-      return finish(report);
-    }
-    consecutiveTransportFailures = 0;
-    report.responseChars += text4.length;
-    const verdicts = parseSnifferBatchResponse(text4, new Set(batch.map((_, index) => index + 1)));
-    for (const [index, group2] of batch.entries()) {
-      const verdict = verdicts.get(index + 1);
-      const key2 = keyOf2(group2[0].question);
-      if (verdict) {
-        const stored = { ...verdict, failSafe: false };
-        group2[0].target.sniffer.putVerdict(key2, stored);
-        for (const item of group2) {
-          if (item.target !== group2[0].target)
-            item.target.sniffer.putVerdict(key2, stored);
-          apply(item, stored);
+      consecutiveTransportFailures = 0;
+      report.responseChars += text4.length;
+      const verdicts = parseSnifferBatchResponse(text4, new Set(batch.map((_, index) => index + 1)));
+      for (const [index, group2] of batch.entries()) {
+        const verdict = verdicts.get(index + 1);
+        const key2 = keyOf2(group2[0].question);
+        if (verdict) {
+          const stored = { ...verdict, failSafe: false };
+          group2[0].target.sniffer.putVerdict(key2, stored);
+          for (const item of group2) {
+            if (item.target !== group2[0].target)
+              item.target.sniffer.putVerdict(key2, stored);
+            apply(item, stored);
+          }
+          continue;
         }
-        continue;
-      }
-      const currentGroup = group2.filter((item) => sameQuestion(item.target, item.question));
-      if (currentGroup.length === 0) {
-        report.staleDropped += group2.length;
-        continue;
-      }
-      const attempts = Math.max(...currentGroup.map((item) => item.target.sniffer.recordAttemptFailure(item.question, pass)));
-      if (attempts >= SNIFFER_MAX_ATTEMPTS) {
-        const failSafe = { tier: "private", category: "other", confidence: 0, failSafe: true };
-        for (const item of group2) {
-          item.target.sniffer.putVerdict(key2, failSafe);
-          apply(item, failSafe);
+        const currentGroup = group2.filter((item) => sameQuestion(item.target, item.question));
+        if (currentGroup.length === 0) {
+          report.staleDropped += group2.length;
+          continue;
+        }
+        const attempts = Math.max(...currentGroup.map((item) => item.target.sniffer.recordAttemptFailure(item.question, pass)));
+        if (attempts >= SNIFFER_MAX_ATTEMPTS) {
+          const failSafe = { tier: "private", category: "other", confidence: 0, failSafe: true };
+          for (const item of group2) {
+            item.target.sniffer.putVerdict(key2, failSafe);
+            apply(item, failSafe);
+          }
         }
       }
     }
-  }
+  };
+  await Promise.all(Array.from({ length: concurrency }, () => ask()));
   return finish(report);
 }
 function snifferStoreTurn(dispatches) {
@@ -189465,7 +189495,7 @@ function finish(report) {
   report.estimatedOutputTokens = Math.ceil(report.responseChars / 4);
   return report;
 }
-var DEFAULT_SNIFFER_MAX_CALLS_PER_DAY = 20000, DEFAULT_SNIFFER_PASS_TIME_MS = 30000, MAX_CONSECUTIVE_TRANSPORT_FAILURES = 2, OUTPUT_CHARS_PER_ITEM = 110, SECRET_SCREEN_CACHE_LIMIT = 20000, secretScreenCache;
+var DEFAULT_SNIFFER_MAX_CALLS_PER_DAY = 20000, DEFAULT_SNIFFER_PASS_TIME_MS = 30000, SNIFFER_MAX_CONCURRENT_CALLS = 8, MAX_CONSECUTIVE_TRANSPORT_FAILURES = 2, OUTPUT_CHARS_PER_ITEM = 110, SECRET_SCREEN_CACHE_LIMIT = 20000, secretScreenCache;
 var init_sniffer_resolver = __esm(() => {
   init_atomic_file();
   init_sniffer();
@@ -189670,12 +189700,12 @@ class TierSnifferService {
     this.abort = undefined;
     this.lastTick = tick;
     this.reportWaiting(tick, overran);
-    if (this.waitingReason === "model_not_answering") {
-      this.notAnsweringPasses += 1;
-      this.notAnsweringUntilMs = this.clockMs() + (this.notAnsweringPasses === 1 ? NOT_ANSWERING_FIRST_BACKOFF_MS : NOT_ANSWERING_MAX_BACKOFF_MS);
-    } else if (tick.state === "ran" && tick.report.calls > tick.report.failedCalls) {
+    if (tick.state === "ran" && tick.report.calls > tick.report.failedCalls) {
       this.notAnsweringPasses = 0;
       this.notAnsweringUntilMs = 0;
+    } else if (this.waitingReason === "model_not_answering") {
+      this.notAnsweringPasses += 1;
+      this.notAnsweringUntilMs = this.clockMs() + (this.notAnsweringPasses === 1 ? NOT_ANSWERING_FIRST_BACKOFF_MS : NOT_ANSWERING_MAX_BACKOFF_MS);
     }
     if (this.options.log && this.clockMs() - this.lastBacklogLogMs >= 60000) {
       this.lastBacklogLogMs = this.clockMs();
@@ -189985,6 +190015,7 @@ class TierSnifferService {
       ...ownerContext ? { ownerContext } : {},
       budget: this.budget,
       maxCallsPerPass: this.options.maxCallsPerPass,
+      concurrentCalls: this.options.concurrentCalls,
       passTimeMs: this.options.passTimeMs,
       shouldYield: () => this.yieldNow(),
       signal
@@ -190355,6 +190386,7 @@ function tierSnifferServiceEnv(env) {
     enabled: !(enabledRaw === "0" || enabledRaw === "false" || enabledRaw === "no" || enabledRaw === "off"),
     intervalMs: positiveInteger7(env.OLYMPUS_TIER_SNIFFER_INTERVAL_MS, DEFAULT_TIER_SNIFFER_INTERVAL_MS, 100),
     ...env.OLYMPUS_TIER_SNIFFER_MAX_CALLS_PER_PASS?.trim() ? { maxCallsPerPass: positiveInteger7(env.OLYMPUS_TIER_SNIFFER_MAX_CALLS_PER_PASS, 1, 1) } : {},
+    ...env.OLYMPUS_TIER_SNIFFER_CONCURRENT_CALLS?.trim() ? { concurrentCalls: Math.min(SNIFFER_MAX_CONCURRENT_CALLS, positiveInteger7(env.OLYMPUS_TIER_SNIFFER_CONCURRENT_CALLS, 1, 1)) } : {},
     maxCallsPerDay: positiveInteger7(env.OLYMPUS_TIER_SNIFFER_MAX_CALLS_PER_DAY, DEFAULT_SNIFFER_MAX_CALLS_PER_DAY, 0)
   };
 }
@@ -214537,7 +214569,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     lane: snifferLane,
     model: snifferResource ? {
       ...snifferModel,
-      complete: (request) => runClassificationInference(() => localModelActivity.track(snifferResource, snifferModel).complete(request))
+      complete: (request) => runClassificationInference(() => localModelActivity.track(snifferResource, snifferModel, { concurrency: snifferEnv.concurrentCalls ?? 1, tag: "tier_sniffer" }).complete(request))
     } : snifferModel,
     stores: () => connectorStores,
     classificationLedgerPath: resolveClassificationLedgerPath(process.env),
@@ -214551,8 +214583,9 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     budgetStatePath: join130(dirname99(resolveClassificationLedgerPath(process.env)), "tier-sniffer-budget.json"),
     intervalMs: snifferEnv.intervalMs,
     ...snifferEnv.maxCallsPerPass !== undefined ? { maxCallsPerPass: snifferEnv.maxCallsPerPass } : {},
+    ...snifferEnv.concurrentCalls !== undefined ? { concurrentCalls: snifferEnv.concurrentCalls } : {},
     maxCallsPerDay: snifferEnv.maxCallsPerDay,
-    answersInFlight: () => snifferResource !== undefined && localModelActivity.busy(snifferResource),
+    answersInFlight: () => snifferResource !== undefined && localModelActivity.busyExcept(snifferResource, "tier_sniffer"),
     shouldYield: () => localPrivateAnswers?.overdue() ?? false,
     breakerOpen: () => secureAnalystPoolState.isBreakerOpen("secure_local", snifferLane.profileId),
     log: (line2) => console.log(line2),

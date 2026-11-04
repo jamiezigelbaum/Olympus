@@ -64,6 +64,8 @@ export const DEFAULT_SNIFFER_MAX_CALLS_PER_DAY = 20_000;
  * stopped after one call). Preemption still stops a pass at once.
  */
 export const DEFAULT_SNIFFER_PASS_TIME_MS = 30_000;
+/** The most sniffer calls a pass keeps in flight at once. */
+export const SNIFFER_MAX_CONCURRENT_CALLS = 8;
 const MAX_CONSECUTIVE_TRANSPORT_FAILURES = 2;
 /** Output budget per item: one short JSON verdict. */
 const OUTPUT_CHARS_PER_ITEM = 110;
@@ -157,6 +159,12 @@ export interface SnifferPassOptions {
   ownerContext?: string;
   budget?: SnifferCallBudget;
   maxCallsPerPass?: number | undefined;
+  /**
+   * Calls in flight at once, each still one item's material alone in its own
+   * prompt (default 1). Worth raising only for a model server that decodes
+   * several requests in parallel.
+   */
+  concurrentCalls?: number | undefined;
   /** A soft time slice: finish the current call, then give new arrivals a turn. */
   passTimeMs?: number | undefined;
   monotonicNow?: () => number;
@@ -234,6 +242,7 @@ export async function runSnifferPass(options: SnifferPassOptions): Promise<Sniff
   const promptVersion = options.promptVersion ?? SNIFFER_PROMPT_VERSION;
   const id = snifferId(options.lane, promptVersion);
   const maxCallsPerPass = Math.max(0, Math.floor(options.maxCallsPerPass ?? Number.MAX_SAFE_INTEGER));
+  const concurrency = Math.max(1, Math.min(SNIFFER_MAX_CONCURRENT_CALLS, Math.floor(options.concurrentCalls ?? 1)));
   const monotonicNow = options.monotonicNow ?? (() => performance.now());
   const deadline = monotonicNow() + (options.passTimeMs ?? DEFAULT_SNIFFER_PASS_TIME_MS);
   const report: SnifferPassReport = {
@@ -425,7 +434,7 @@ export async function runSnifferPass(options: SnifferPassOptions): Promise<Sniff
   let consecutiveTransportFailures = 0;
   const pending = [...work.metadata, ...work.content].sort(compareRecent);
   let dispatches = options.targets.reduce((total, target) => total + target.sniffer.dispatchCount(), 0);
-  while (pending.length > 0) {
+  const ask = async (): Promise<void> => { while (pending.length > 0 && report.stoppedBy === undefined) {
     // Reserve every fifth dispatch for an aged question, even across short passes.
     const aged = pending.filter(item => dispatches % 5 === 4
       && item.target.sniffer.clockMs() - Date.parse(item.question.queuedAt) >= 5 * 60_000)
@@ -462,7 +471,7 @@ export async function runSnifferPass(options: SnifferPassOptions): Promise<Sniff
     const stop = stopReason(options, report, maxCallsPerPass, monotonicNow() >= deadline);
     if (stop) {
       report.stoppedBy = stop;
-      return finish(report);
+      return;
     }
     // Re-checked at every dispatch: a policy that changed under a running
     // worker still cannot route possibly-private names to a cloud model.
@@ -496,7 +505,7 @@ export async function runSnifferPass(options: SnifferPassOptions): Promise<Sniff
         // Preempted by an answer that needs the private pool: not a failure
         // of anything, so nothing is counted against the items or the lane.
         report.stoppedBy = 'preempted';
-        return finish(report);
+        return;
       }
       // Transport failure: nothing about the items is known. They stay
       // pending (held Private) and are asked again on a later pass.
@@ -504,13 +513,13 @@ export async function runSnifferPass(options: SnifferPassOptions): Promise<Sniff
       consecutiveTransportFailures += 1;
       if (consecutiveTransportFailures >= MAX_CONSECUTIVE_TRANSPORT_FAILURES) {
         report.stoppedBy = 'transport_failures';
-        return finish(report);
+        return;
       }
       continue;
     } finally {
       report.callMs += Math.max(0, monotonicNow() - callStarted);
     }
-    if (options.signal?.aborted) { report.stoppedBy = 'preempted'; return finish(report); }
+    if (options.signal?.aborted) { report.stoppedBy = 'preempted'; return; }
     consecutiveTransportFailures = 0;
     report.responseChars += text.length;
     const verdicts = parseSnifferBatchResponse(text, new Set(batch.map((_, index) => index + 1)));
@@ -540,7 +549,10 @@ export async function runSnifferPass(options: SnifferPassOptions): Promise<Sniff
         }
       }
     }
-  }
+  } };
+  // Each call carries one item's material; several calls may be in flight at
+  // once when the model serves them in parallel. None shares a prompt.
+  await Promise.all(Array.from({ length: concurrency }, () => ask()));
   return finish(report);
 }
 

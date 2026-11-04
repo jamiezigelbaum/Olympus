@@ -7061,7 +7061,7 @@ export async function main(): Promise<void> {
         lane: snifferLane,
         model: snifferResource ? {
           ...snifferModel,
-          complete: request => runClassificationInference(() => localModelActivity.track(snifferResource, snifferModel).complete(request)),
+          complete: request => runClassificationInference(() => localModelActivity.track(snifferResource, snifferModel, { concurrency: snifferEnv.concurrentCalls ?? 1, tag: 'tier_sniffer' }).complete(request)),
         } : snifferModel,
         stores: () => connectorStores,
         classificationLedgerPath: resolveClassificationLedgerPath(process.env),
@@ -7077,8 +7077,10 @@ export async function main(): Promise<void> {
         budgetStatePath: join(dirname(resolveClassificationLedgerPath(process.env)), 'tier-sniffer-budget.json'),
         intervalMs: snifferEnv.intervalMs,
         ...(snifferEnv.maxCallsPerPass !== undefined ? { maxCallsPerPass: snifferEnv.maxCallsPerPass } : {}),
+        ...(snifferEnv.concurrentCalls !== undefined ? { concurrentCalls: snifferEnv.concurrentCalls } : {}),
         maxCallsPerDay: snifferEnv.maxCallsPerDay,
-        answersInFlight: () => snifferResource !== undefined && localModelActivity.busy(snifferResource),
+        // Its own parallel calls are not answers: only someone else's call holds it back.
+        answersInFlight: () => snifferResource !== undefined && localModelActivity.busyExcept(snifferResource, 'tier_sniffer'),
         // A waiting Inbox question past its deferral stops the pass, so its answer runs, then classification resumes.
         shouldYield: () => localPrivateAnswers?.overdue() ?? false,
         breakerOpen: () => secureAnalystPoolState.isBreakerOpen('secure_local', snifferLane.profileId),

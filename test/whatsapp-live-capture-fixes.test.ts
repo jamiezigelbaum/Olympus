@@ -201,12 +201,12 @@ describe('captions', () => {
     expect(plain?.content).toEqual({ kind: 'metadata_only' });
   });
 
-  test('a caption is judged for Secrets by its own text, and cleared from the spool', () => {
+  test('a caption is judged for Secrets by its own text, and cleared from the spool', async () => {
     const dir = spoolDir({
       '2026-10-25.jsonl': line('photo-secret', { media_type: 'image', text: 'door code 4471' }),
     });
     const judged: Array<string | undefined> = [];
-    const result = redactWhatsAppLiveSpoolSecrets({
+    const result = await redactWhatsAppLiveSpoolSecrets({
       spoolDir: dir,
       judge: (_identity, text) => {
         judged.push(text);
