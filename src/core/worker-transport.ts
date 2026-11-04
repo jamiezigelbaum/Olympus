@@ -120,6 +120,20 @@ export function releaseSystemdWorkerSocket(options: WorkerTransportOptions = {})
  try{return removeReleasedWorkerSocket(options,{previousWorkerReleased:true});}catch{return false;}
 }
 
+/**
+ * Options every Bun server on a worker's unix socket takes. Bun closes a request
+ * its handler has not answered within 10 s, and on a unix socket
+ * `server.timeout(request, 0)` does not lift that (Bun 1.3.14), so a slow owner
+ * read (a status build while imports run) came back empty (Sparta, 2026-11-04).
+ * The socket is the owner's alone; each client bounds its own wait.
+ */
+export const WORKER_SOCKET_SERVE_OPTIONS: { idleTimeout: number } = { idleTimeout: 0 };
+
+/** A unix-socket server's options with WORKER_SOCKET_SERVE_OPTIONS (Bun's types list idleTimeout for TCP only; Bun applies it to both). */
+export function workerSocketServe<T extends object>(options: T): T {
+  return Object.assign(options, WORKER_SOCKET_SERVE_OPTIONS);
+}
+
 /** Bind synchronously under a private umask, before any request can run. */
 export function bindWorkerSocket<T>(path: string, bind: () => T): T {
   const previous = process.umask(0o177);
