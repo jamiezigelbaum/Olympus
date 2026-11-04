@@ -38629,6 +38629,11 @@ var init_local_index = __esm(() => {
       return count;
     }
     settledUnreadableCountMemo;
+    extractionEnded;
+    setExtractionEndedProbe(probe) {
+      this.extractionEnded = probe;
+      this.settledUnreadableCountMemo = undefined;
+    }
     settledUnreadableRows(scope, options = {}) {
       if (scope?.itemsAllowed === false || scope?.contentAllowed === false)
         return [];
@@ -38638,10 +38643,11 @@ var init_local_index = __esm(() => {
       const identities = ledger.corpusCopyIdentities(this.corpusId, options.withoutSecretsOverrides ? "metadata_layer_settled_unreadable_not_secret" : "metadata_layer_settled_unreadable");
       const filters = connectorStoreFilterSql(scope?.contentFilters ?? scope?.itemFilters);
       const account = normalizeOptionalAccountScope(scope?.accountScope);
+      const ended = this.family === "file" ? this.extractionEnded : undefined;
       return this.itemRowsForIdentities(identities, (identity2) => identity2.providerConversationId ?? "", {
         sql: `${account ? "AND i.account_scope = ?" : ""} ${filters.sql}`,
         params: [...account ? [account] : [], ...filters.params]
-      }).map((row) => ({ identity: identities[row.idx], row }));
+      }).map((row) => ({ identity: identities[row.idx], row })).filter(({ identity: identity2 }) => !ended || ended(identity2));
     }
     itemRowsForIdentities(identities, conversationOf, extra = { sql: "", params: [] }) {
       if (identities.length === 0)
@@ -211963,6 +211969,13 @@ ${key2}`;
     generation: () => sourceLaneGeneration,
     beforeCurrent: () => mountSourceLanes(readActiveConnectedHandles(process.env))
   });
+  const probeExtractionEnded = (store) => {
+    if (store.family !== "file" || !fileExtractionRuntime)
+      return;
+    store.setExtractionEndedProbe((identity2) => fileExtractionRuntime.jobs.itemExtractionState(identity2) === "settled");
+  };
+  for (const store of connectorStores)
+    probeExtractionEnded(store);
   const connectorStoreEmbeddingProviders = new Map;
   const connectorStoreAccountScopes = new Map;
   const connectorStorePrincipals = new Map;
@@ -212089,6 +212102,7 @@ ${key2}`;
   registerTierLegStore = (store, siblingCorpusId, embeddingProvider) => {
     if (!connectorStores.includes(store))
       connectorStores.push(store);
+    probeExtractionEnded(store);
     if (!fullyDefinedCorpusIds.has(store.corpusId)) {
       const definition = registeredCorpusDefinitions.get(store.corpusId);
       fullCorpusDefinitions.push(defineConnectorCorpus({
@@ -212576,7 +212590,7 @@ ${key2}`;
     items: (corpusId) => {
       const items = [
         ...extractionReadinessLedger?.unreadableItems(corpusId) ?? [],
-        ...connectorStores.filter((store) => store.corpusId === corpusId).flatMap((store) => store.settledUnreadableItems(connectorStoreStatusScope(store)).filter((item) => store.family !== "file" || !fileExtractionRuntime || fileExtractionRuntime.jobs.itemExtractionState(item.ref) === "settled"))
+        ...connectorStores.filter((store) => store.corpusId === corpusId).flatMap((store) => store.settledUnreadableItems(connectorStoreStatusScope(store)))
       ];
       return Array.from(new Map(items.map((item) => [item.ref.localItemId, item])).values());
     },
