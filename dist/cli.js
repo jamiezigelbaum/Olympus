@@ -41152,7 +41152,7 @@ var init_dashboard_launch = __esm(() => {
   <body>
     <main>
       <h1 id="status">Opening Olympus…</h1>
-      <p id="detail">If this does not continue, run <code>olympus dashboard</code> again for a fresh link.</p>
+      <p id="detail">If this does not continue, <a href="/dashboard">open the dashboard</a>.</p>
     </main>
     <script>
       (function () {
@@ -41201,7 +41201,8 @@ var init_dashboard_launch = __esm(() => {
               : PRIVATE.test(open) ? '/dashboard?private-answers' + (open.indexOf('page.private.') === 0 ? '#' + open.slice(13) : '') : '/dashboard');
             return;
           }
-          status.textContent = 'Opening failed.';
+          // Anything else: the dashboard is the way in (its session, or how to get one).
+          window.location.replace('/dashboard');
         }).catch(function () {
           status.textContent = 'Opening failed.';
         });
@@ -159472,7 +159473,7 @@ function dashboardLaunchRefusedResponse(status) {
     error: {
       code: status === "origin_mismatch" ? "dashboard_launch_origin_mismatch" : "dashboard_launch_ticket_invalid",
       status: 403,
-      message: "This opening link is no longer valid. Run the dashboard command again for a fresh one."
+      message: "This opening link was already used or has expired. Open the dashboard from your bookmark, or ask your agent for a new link."
     },
     policy: { single_use: true, origin_bound: true, durable_secret_in_url: false }
   }), {

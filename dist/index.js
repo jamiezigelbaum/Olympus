@@ -24445,7 +24445,7 @@ var DASHBOARD_LAUNCH_PAGE_HTML = `<!doctype html>
   <body>
     <main>
       <h1 id="status">Opening Olympus…</h1>
-      <p id="detail">If this does not continue, run <code>olympus dashboard</code> again for a fresh link.</p>
+      <p id="detail">If this does not continue, <a href="/dashboard">open the dashboard</a>.</p>
     </main>
     <script>
       (function () {
@@ -24494,7 +24494,8 @@ var DASHBOARD_LAUNCH_PAGE_HTML = `<!doctype html>
               : PRIVATE.test(open) ? '/dashboard?private-answers' + (open.indexOf('page.private.') === 0 ? '#' + open.slice(13) : '') : '/dashboard');
             return;
           }
-          status.textContent = 'Opening failed.';
+          // Anything else: the dashboard is the way in (its session, or how to get one).
+          window.location.replace('/dashboard');
         }).catch(function () {
           status.textContent = 'Opening failed.';
         });
