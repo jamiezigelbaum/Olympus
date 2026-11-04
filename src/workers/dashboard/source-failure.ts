@@ -91,12 +91,21 @@ export function sourceFailureRef(value: unknown): string | undefined {
 /** Support reports project closed codes only; escaping arbitrary text is insufficient. */
 const SUPPORT_SOURCES = new Set(['gmail.email', 'google_drive.docs', 'dropbox.files', 'local.files', 'readwise.library', 'x.bookmarks', 'evernote.notes', 'telegram.messages', 'whatsapp.personal.messages', 'archive.imports']);
 const SUPPORT_STATES = new Set(['Off', 'Waiting', 'Working', 'Fresh', 'Needs you', 'Failing', 'not_connected', 'needs_setup', 'awaiting_consent', 'reauth_required', 'connected', 'waiting_for_first_sync', 'syncing', 'synced']);
-export interface SourceSupportState { sourceId: unknown; state: unknown; failure?: unknown; ref?: unknown }
+/**
+ * What a source in Needs you or Failing waits on, as a closed code, so a report
+ * whose failure is none still says why (owner, Sparta 2026-11-04: "State: Needs
+ * you / Failure: none" named nothing).
+ */
+const SUPPORT_NEEDS = new Set(['finish_sign_in', 'sign_in', 'choose_folders', 'import_attention', 'waiting_for_credentials', 'scope_pending',
+  'scope_root_missing', 'scope_root_permission_needed', 'scope_root_helper_needed', 'scope_root_unreadable', 'provider_unavailable', 'model_downloading', 'storage_move', 'disk_full', 'live_feed', 'answer_readiness', 'queue', 'unknown']);
+export interface SourceSupportState { sourceId: unknown; state: unknown; failure?: unknown; ref?: unknown; need?: unknown }
 
 export function sourceSupportDetails(input: SourceSupportState): string {
   const source = typeof input.sourceId === 'string' && SUPPORT_SOURCES.has(input.sourceId) ? input.sourceId : 'unknown';
   const state = typeof input.state === 'string' && SUPPORT_STATES.has(input.state) ? input.state : 'unknown';
-  return [`Source: ${source}`, `State: ${state}`, `Failure: ${isSourceFailureKind(input.failure) ? input.failure : input.failure === undefined ? 'none' : 'unknown'}`, ...(sourceFailureRef(input.ref) ? [`Reference: ${sourceFailureRef(input.ref)}`] : [])].join('\n');
+  return [`Source: ${source}`, `State: ${state}`, `Failure: ${isSourceFailureKind(input.failure) ? input.failure : input.failure === undefined ? 'none' : 'unknown'}`,
+    ...(input.need === undefined ? [] : [`Needs: ${typeof input.need === 'string' && SUPPORT_NEEDS.has(input.need) ? input.need : 'unknown'}`]),
+    ...(sourceFailureRef(input.ref) ? [`Reference: ${sourceFailureRef(input.ref)}`] : [])].join('\n');
 }
 
 export interface SystemSupportFacts {

@@ -132,7 +132,7 @@ export interface PairMessagingSourceOptions extends TelegramPythonSeams {
   runCommand?: (request: PairingCommandRequest) => Promise<PairingCommandResult>;
   registerSession?: MessagingSessionRegistrar;
   which?: (command: string) => string | null;
-  buildWhatsAppBridge?: (input: { go: string; sourceDir: string; outputPath: string }) => Promise<boolean>;
+  buildWhatsAppBridge?: (input: { go: string; compiler: string; sourceDir: string; outputPath: string }) => Promise<boolean>;
   /** Test seam: replaces the transport to the running worker, which decides a new account's layout while it owns the data. */
   workerFetch?: typeof fetch;
 }
@@ -474,15 +474,22 @@ async function resolveHelper(options: PairMessagingSourceOptions, packageRoot: s
     return output;
   }
   const which = options.which ?? ((command: string) => Bun.which(command));
-  const go = which('go');
-  const compiler = which('cc') ?? which('clang') ?? which('gcc');
+  // A service's PATH is often narrower than the user's shell: look where Go
+  // is usually installed for one user too, not only on PATH (Sparta,
+  // 2026-11-04: Go in ~/.local/bin, invisible to the worker).
+  const home = options.homeDir ?? options.env?.HOME ?? homedir();
+  const userBins = [join(home, '.local', 'bin'), join(home, 'go', 'bin'), '/usr/local/go/bin', '/opt/homebrew/bin', '/usr/local/bin', '/usr/bin'];
+  const find = (command: string): string | undefined => which(command)
+    ?? (options.which ? undefined : userBins.map((dir) => join(dir, command)).find((path) => isExecutableFile(path)));
+  const go = find('go');
+  const compiler = find('cc') ?? find('clang') ?? find('gcc');
   if (!go || !compiler) {
-    throw new Error('WhatsApp pairing requires Go and a C compiler. Install Go plus cc/clang/gcc, then re-run olympus connect whatsapp --pair; Olympus will build the pinned bridge automatically.');
+    throw codedPairingError('WhatsApp pairing requires Go and a C compiler. Install Go plus cc/clang/gcc, then re-run olympus connect whatsapp --pair; Olympus will build the pinned bridge automatically.', 'bridge_build_tools_missing');
   }
   mkdirSync(join(output, '..'), { recursive: true, mode: 0o700 });
-  const built = await (options.buildWhatsAppBridge ?? buildWhatsAppBridge)({ go, sourceDir, outputPath: output });
+  const built = await (options.buildWhatsAppBridge ?? buildWhatsAppBridge)({ go, compiler, sourceDir, outputPath: output });
   if (!built || !existsSync(output)) {
-    throw new Error('The pinned WhatsApp bridge could not be built. Verify Go and the C compiler, then re-run olympus connect whatsapp --pair.');
+    throw codedPairingError('The pinned WhatsApp bridge could not be built. Verify Go and the C compiler, then re-run olympus connect whatsapp --pair.', 'bridge_build_failed');
   }
   chmodSync(output, 0o700);
   return output;
@@ -519,12 +526,22 @@ function assertTrustedBridge(path: string, message: string): void {
 }
 
 
-async function buildWhatsAppBridge(input: { go: string; sourceDir: string; outputPath: string }): Promise<boolean> {
+/**
+ * The bridge build's environment. Tools found outside PATH are handed to the
+ * build directly: cgo reads CC, and Go's own helpers resolve through PATH.
+ */
+export function whatsappBridgeBuildEnv(input: { go: string; compiler: string }, base: Record<string, string | undefined> = process.env): Record<string, string | undefined> {
+  const dirs = [...new Set([dirname(input.go), dirname(input.compiler)])];
+  const path = [...dirs, ...(base.PATH ?? '').split(':').filter((dir) => dir && !dirs.includes(dir))].join(':');
+  return { ...base, CGO_ENABLED: '1', CC: input.compiler, PATH: path };
+}
+
+async function buildWhatsAppBridge(input: { go: string; compiler: string; sourceDir: string; outputPath: string }): Promise<boolean> {
   const temporary = `${input.outputPath}.tmp.${process.pid}`;
   rmSync(temporary, { force: true });
   const child = Bun.spawn([input.go, 'build', '-trimpath', '-o', temporary, '.'], {
     cwd: input.sourceDir,
-    env: { ...process.env, CGO_ENABLED: '1' },
+    env: whatsappBridgeBuildEnv(input),
     stdin: 'ignore', stdout: 'ignore', stderr: 'ignore',
   });
   let timeout: ReturnType<typeof setTimeout> | undefined;
@@ -801,6 +818,21 @@ function processAlive(pid: number): boolean {
 
 function removeTelegramLogin(base: string): void {
   for (const suffix of ['.session', '.session-journal']) rmSync(`${base}${suffix}`, { force: true });
+}
+
+function codedPairingError(message: string, code: string): Error {
+  const error = new Error(message) as Error & { code?: string };
+  error.code = code;
+  return error;
+}
+
+function isExecutableFile(path: string): boolean {
+  try {
+    const stat = statSync(path);
+    return stat.isFile() && (stat.mode & 0o111) !== 0;
+  } catch {
+    return false;
+  }
 }
 
 function pairingFailure(source: MessagingPairingSource, code: string | undefined): Error {

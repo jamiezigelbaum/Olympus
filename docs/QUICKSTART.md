@@ -542,7 +542,7 @@ when you import it: its messages are the same items as the live ones, so
 nothing is stored twice. Takeout names each message by Gmail's id, so this
 costs no Gmail requests. Messages without that id are looked up in Gmail, and
 imports may spend at most half of the day's Gmail requests
-(`OLYMPUS_SOURCE_INDEX_GMAIL_DAILY_API_REQUEST_BUDGET`, 5,000 by default), so
+(`OLYMPUS_SOURCE_INDEX_GMAIL_DAILY_API_REQUEST_BUDGET`, 1,000,000 by default), so
 live mail always keeps the rest. Below 32 a day an import cannot move: its row
 and Needs you say so, and setting the budget to 32 or more, then restarting
 Olympus, lets it go on.

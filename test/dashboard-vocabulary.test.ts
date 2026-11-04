@@ -827,7 +827,7 @@ describe('against the real view model', () => {
     // aggregate branches through the real builder is what catches a renamed
     // worker literal before it silently falls back to Waiting.
     const branches: Array<[Record<string, number>, DashboardQueueHealthLabel]> = [
-      [{ extraction_jobs_failed_actionable: 3, extraction_jobs_failed: 3 }, 'Needs attention'],
+      [{ metadata_sync_folders_blocked: 3 }, 'Needs attention'],
       [{}, 'Working now'],
       [
         { extraction_jobs_leased_current: 0, extraction_jobs_leased_current_actionable: 0 },

@@ -359,4 +359,23 @@ describe('launch handoff boundary regressions', () => {
     expect(csp).toContain("script-src 'sha256-");
     expect(csp).not.toContain("script-src 'unsafe-inline'");
   });
+  test('a used or expired link, or a reload without one, still lands on the dashboard (2026-11-04)', async () => {
+    // Its session is in the cookie the first open set; without one the
+    // dashboard itself shows how to get back in. Never a dead end.
+    const script = DASHBOARD_LAUNCH_PAGE_HTML.split('<script>')[1]!.split('</script>')[0]!;
+    for (const [hash, status] of [[`#olympus_launch_ticket=${'B'.repeat(43)}`, 403], ['', 0]] as const) {
+      const landed: string[] = [];
+      const shown = { textContent: '' };
+      const window = {
+        location: { hash, pathname: '/dashboard/launch', search: '', replace: (to: string) => landed.push(to) },
+        history: { replaceState: () => { window.location.hash = ''; } },
+      };
+      const fetch = async () => new Response('{}', { status });
+      new Function('window', 'document', 'fetch', 'URLSearchParams', script)(window, { getElementById: () => shown }, fetch, URLSearchParams);
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(landed).toEqual(['/dashboard']);
+      expect(shown.textContent).toBe('');
+    }
+  });
 });

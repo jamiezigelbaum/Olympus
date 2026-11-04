@@ -138,6 +138,17 @@ export interface UnreadableFilesOptions {
    * How long a token stays good from when it was issued (absolute: reading the list again never extends it).
    */
   tokenTtlMs?: number;
+  /**
+   * Off the request path: a recheck answers the counts last counted (no older
+   * than this, else still answered while a fresh count runs in the
+   * background, in turns). Left out, every recheck asks each verdict now.
+   * Counts only: names, the computer's list and opening still ask each file.
+   */
+  countsMaxAgeMs?: number;
+  /**
+   * Yields between slices of a background recount (ingestionTurn).
+   */
+  turn?: () => Promise<void> | undefined;
 }
 
 export type UnreadableOpenResult =
@@ -157,8 +168,48 @@ export type UnreadableParentRoute =
   | { kind: 'archive'; archiveId: string }
   | { kind: 'source' };
 
+/**
+ * Why one file could not be read, as a closed code the dashboard words
+ * (owner rule, 2026-11-04: a file Olympus can't ingest at all is called out
+ * with exactly the reason and a link to the file). Derived from the failed
+ * job's bounded error kind; never the reader's own message.
+ */
+export const UNREADABLE_FILE_REASONS = [
+  'password',
+  'damaged',
+  'too_large',
+  'no_text',
+  'timed_out',
+  'missing',
+  'no_access',
+  'unsupported',
+  'privacy_check_missing',
+  'other',
+] as const;
+export type UnreadableFileReason = (typeof UNREADABLE_FILE_REASONS)[number];
+
+// The error kind settled for an item kept Private before its text was read, in connector-store.
+export const UNREAD_PRIVACY_CHECK_MISSING_KIND = 'privacy_check_missing';
+
+export function unreadableFileReason(errorKind: string | undefined): UnreadableFileReason {
+  const kind = (errorKind ?? '').toLowerCase();
+  if (!kind) return 'other';
+  if (kind === UNREAD_PRIVACY_CHECK_MISSING_KIND) return 'privacy_check_missing';
+  if (kind.includes('encrypted') || kind.includes('password')) return 'password';
+  if (kind.includes('too_large')) return 'too_large';
+  if (kind.includes('timeout')) return 'timed_out';
+  if (kind.includes('not_found') || kind.includes('content_unavailable') || kind.includes('missing_bytes')) return 'missing';
+  if (kind.includes('permission') || kind.includes('auth')) return 'no_access';
+  if (kind.includes('unsupported')) return 'unsupported';
+  if (kind.includes('empty')) return 'no_text';
+  if (kind.includes('invalid') || kind.includes('undecodable') || kind.includes('corrupt') || kind.includes('damaged')) return 'damaged';
+  return 'other';
+}
+
 export interface UnreadableFileEntry {
   name: string;
+  // Why it could not be read: unreadableFileReason.
+  reason: UnreadableFileReason;
   /**
    * Present when the file has a place to open: the one-time capability the open tool takes.
    */
@@ -184,8 +235,9 @@ export interface UnreadableFiles {
   /**
    * The corpus's last counted list, each verdict asked again now: the count a
    * dashboard publishes beside the names, so neither lags a Secrets change.
+   * With countsMaxAgeMs, the last count (undefined until one has run).
    */
-  recheck(corpusId: string): UnreadableRecheck;
+  recheck(corpusId: string): UnreadableRecheck | undefined;
   /**
    * The newest unreadable files' names across these corpora, newest failure first (verdicts asked again now).
    */
@@ -424,8 +476,40 @@ export function createUnreadableFiles(options: UnreadableFilesOptions): Unreadab
     return true;
   }
 
+  const RECOUNT_SLICE = 100;
+  const counted = new Map<string, { at: number; value: UnreadableRecheck }>();
+  const recounting = new Set<string>();
+
+  async function recount(corpusId: string): Promise<void> {
+    const items = listed(corpusId);
+    let unreadable = 0;
+    let blocked = 0;
+    for (let index = 0; index < items.length; index += 1) {
+      if (index > 0 && index % RECOUNT_SLICE === 0) {
+        await (options.turn?.() ?? new Promise<void>((resolve) => setImmediate(resolve)));
+      }
+      const verdict = verdictOf(items[index]!);
+      if (verdict === 'unreadable') unreadable += 1;
+      else if (verdict === 'blocked_policy') blocked += 1;
+    }
+    counted.set(corpusId, { at: now(), value: { unreadable, blocked } });
+  }
+
+  function scheduleRecount(corpusId: string): void {
+    if (recounting.has(corpusId)) return;
+    recounting.add(corpusId);
+    setTimeout(() => {
+      void recount(corpusId).catch(() => undefined).finally(() => recounting.delete(corpusId));
+    }, 0);
+  }
+
   return {
     recheck(corpusId) {
+      if (options.countsMaxAgeMs !== undefined) {
+        const last = counted.get(corpusId);
+        if (!last || now() - last.at >= options.countsMaxAgeMs) scheduleRecount(corpusId);
+        return last?.value;
+      }
       let unreadable = 0;
       let blocked = 0;
       for (const item of listed(corpusId)) {
@@ -467,7 +551,8 @@ export function createUnreadableFiles(options: UnreadableFilesOptions): Unreadab
       const files = shown.map((item): UnreadableFileEntry => {
         const name = displayName(item);
         const parent = parentOf(item);
-        const base: UnreadableFileEntry = opener && target(item) ? { name, token: mint(item, opener, at) } : { name };
+        const reason = unreadableFileReason(item.errorKind);
+        const base: UnreadableFileEntry = opener && target(item) ? { name, reason, token: mint(item, opener, at) } : { name, reason };
         return parent ? { ...base, parent } : base;
       });
       const last = shown.at(-1);

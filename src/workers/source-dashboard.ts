@@ -2023,7 +2023,7 @@ export const DASHBOARD_SUPPORTED_SOURCES: DashboardSupportedSourceDefinition[] =
       source: 'telegram',
       instructions: [
         'Telegram pairs with a phone-number login on this computer.',
-        'Ask your agent to start Telegram pairing; this card updates once the login completes.',
+        'Open Keys in the dashboard on this computer and press Pair Telegram; this card updates once the login completes.',
       ],
     },
   },
@@ -2047,7 +2047,7 @@ export const DASHBOARD_SUPPORTED_SOURCES: DashboardSupportedSourceDefinition[] =
       instructions: [
         'WhatsApp pairs by scanning a QR code from your phone (WhatsApp, then Linked devices).',
         WHATSAPP_UNOFFICIAL_CLIENT_NOTICE,
-        'Ask your agent to start WhatsApp pairing; this card updates once the scan completes.',
+        'Open Keys in the dashboard on this computer and press Pair WhatsApp to show the QR code; this card updates once the scan completes.',
       ],
     },
   },
@@ -5026,10 +5026,13 @@ function queueHealth(
   // retrying for a day read as hundreds of broken items next to "0 found". The
   // signal is kept as a count of tasks, which is a real quantity.
   const retryingTasks = scheduler?.tasks.filter((task) => task.consecutive_failures > 0).length ?? 0;
-  const extractionFailures = firstCount(mergedCounts, [
-    'extraction_jobs_failed_actionable',
-    'extraction_jobs_failed',
-  ]);
+  // A failed extraction job that will be tried again is not counted here
+  // (owner rule, 2026-11-04: "if it fails at first, but then it goes into a
+  // repair pipeline, that's not an error"). The actionable count is exactly
+  // those: a job whose item nothing has read yet and that still has a retry
+  // owed. An item extraction gave up on is a fact the card states with its
+  // reason (unreadable items), and a pipeline that stops moving reads
+  // "Content extraction is stalled"; neither is this count.
   // `qa_blocked_policy` is deliberately absent. A privacy-fenced file is the
   // fence working exactly as configured — there is no retry, no reconnect and
   // no operator decision behind it, and the ~60 fenced entries on the live
@@ -5047,8 +5050,9 @@ function queueHealth(
   //
   // `metadata_sync_folders_blocked` stays: a folder Dropbox refuses to hand
   // over is a sync that did not happen, not a fence the owner asked for.
-  const needsAttention = extractionFailures + sumCounts(mergedCounts, [
-    'metadata_sync_folders_retryable_failed',
+  // A folder whose listing failed and is retrying is the same repair
+  // pipeline; one whose retries ran out, or that Dropbox refuses, is not.
+  const needsAttention = sumCounts(mergedCounts, [
     'metadata_sync_folders_exhausted_retry',
     'metadata_sync_folders_blocked',
     'metadata_sync_folders_failed',

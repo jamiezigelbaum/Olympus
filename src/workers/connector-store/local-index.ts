@@ -911,6 +911,27 @@ class ConnectorStoreTierWriteRefusedError extends Error {
  */
 export const STATUS_COUNTS_MAX_AGE_MS = 5 * 60_000;
 
+// Identities looked up per step when the hidden-copy set is rebuilt in turns.
+const IDENTITY_LOOKUP_SLICE = 5_000;
+
+// A step generator run straight through, for a read that must be current.
+function runSteps<T>(steps: Generator<void, T>): T {
+  let step = steps.next();
+  while (!step.done) step = steps.next();
+  return step.value;
+}
+
+// The same steps with a turn before each one, so requests answer in between.
+async function runStepsInTurns<T>(steps: Generator<void, T>): Promise<T> {
+  await ingestionTurn();
+  let step = steps.next();
+  while (!step.done) {
+    await ingestionTurn();
+    step = steps.next();
+  }
+  return step.value;
+}
+
 interface TierLedgerHiddenItemPks {
   hidden: number[];
   held: number[];
@@ -1645,7 +1666,7 @@ export async function embedPendingChunks(
     const queued = groups.reduce((sum, group) => sum + group.localItemIds.length, 0);
     if (target.wholeStore === true && queued < options.maxItems) {
       const queuedIds = new Set(groups.flatMap((group) => group.localItemIds));
-      const missing = store.missingEmbeddingItemIds(target.provider, options.maxItems - queued, target)
+      const missing = (await store.missingEmbeddingItemIdsInTurns(target.provider, options.maxItems - queued, target))
         .filter((localItemId) => !queuedIds.has(localItemId));
       if (missing.length > 0) groups.push({ provider: target.provider, localItemIds: missing });
     }
@@ -3062,16 +3083,67 @@ export class LocalConnectorStore {
     // and always see the current set.
     const maxAgeMs = options.countsMaxAgeMs ?? 0;
     const counted = this.tierHiddenCountsMemo;
-    if (maxAgeMs > 0 && counted && Date.now() - counted.at < maxAgeMs) return counted.value;
-    const base = this.tierLedgerHiddenItemPks();
-    // A child whose parent is not served is hidden with the copies the ledger hides.
-    const children = this.hiddenChildItemPks();
-    const value = children.length === 0 ? base : { ...base, hidden: [...new Set([...base.hidden, ...children])] };
+    if (maxAgeMs > 0 && counted) {
+      // An older set is served while a new one is built in turns: a status
+      // caller never holds the worker's thread for the whole rebuild, which
+      // on a large tiered store took 10 s and more (Sparta, 2026-11-04: a
+      // status command froze the worker and the dashboard lost it).
+      if (Date.now() - counted.at >= maxAgeMs) this.refreshTierHiddenCountsInTurns();
+      return counted.value;
+    }
+    const value = this.withHiddenChildren(this.tierLedgerHiddenItemPks());
     this.tierHiddenCountsMemo = { at: Date.now(), value };
     return value;
   }
 
+  // A child whose parent is not served is hidden with the copies the ledger hides.
+  private withHiddenChildren(base: TierLedgerHiddenItemPks): TierLedgerHiddenItemPks {
+    const children = this.hiddenChildItemPks();
+    return children.length === 0 ? base : { ...base, hidden: [...new Set([...base.hidden, ...children])] };
+  }
+
   private tierHiddenCountsMemo: { at: number; value: TierLedgerHiddenItemPks } | undefined;
+  private tierHiddenCountsRefresh: Promise<void> | undefined;
+
+  /** Rebuilds the counts' hidden set with a turn between lookups; a failed rebuild keeps the older set. */
+  private refreshTierHiddenCountsInTurns(): Promise<void> {
+    this.tierHiddenCountsRefresh ??= (async () => {
+      try {
+        const value = await this.tierHiddenItemPksInTurns();
+        this.tierHiddenCountsMemo = { at: Date.now(), value };
+      } catch {
+        // A closed or busy store: the older set stands until the next ask.
+      } finally {
+        this.tierHiddenCountsRefresh = undefined;
+      }
+    })();
+    return this.tierHiddenCountsRefresh;
+  }
+
+  /**
+   * The current hidden-copy set, rebuilt with a turn between lookups when the
+   * store or its ledger changed since the last build. For the embedding pass
+   * and the status refresh: on Sparta (2026-11-04) the embedding sweep's own
+   * synchronous rebuild, on a store an import writes to between every two
+   * passes, held the worker's thread for most of each sampled freeze. The
+   * set is current as of the start of the build; a copy hidden after that is
+   * caught by the embedding batch recheck right before dispatch.
+   */
+  private async tierHiddenItemPksInTurns(): Promise<TierLedgerHiddenItemPks> {
+    const marker = this.tierLedgerHiddenMemoMarker();
+    const memo = this.tierLedgerHiddenMemo;
+    let base: TierLedgerHiddenItemPks;
+    if (marker && memo && memo.ledger === marker.ledger && memo.marker === marker.value) {
+      base = memo.value;
+    } else {
+      base = await runStepsInTurns(this.tierLedgerHiddenSteps());
+      // Keyed on the marker read before the build: a write during it leaves
+      // the memo stale, so the next read that must be current rebuilds.
+      this.tierLedgerHiddenMemo = marker ? { ledger: marker.ledger, marker: marker.value, value: base } : undefined;
+      await ingestionTurn();
+    }
+    return this.withHiddenChildren(base);
+  }
 
   private tierLedgerHiddenItemPks(): TierLedgerHiddenItemPks {
     // One status build asks for these several times back to back (counts,
@@ -3104,6 +3176,13 @@ export class LocalConnectorStore {
   }
 
   private computeTierLedgerHiddenItemPks(): TierLedgerHiddenItemPks {
+    return runSteps(this.tierLedgerHiddenSteps());
+  }
+
+  // The hidden-copy lookups, a slice of identities at a time: run straight
+  // through for a read that must be current, or a turn between slices for a
+  // status count (refreshTierHiddenCountsInTurns).
+  private *tierLedgerHiddenSteps(): Generator<void, TierLedgerHiddenItemPks> {
     const ledger = this.visibilityLedger();
     if (!ledger || !ledger.corpusHasCopies(this.corpusId)) {
       return { hidden: [], held: [], metadataLayer: [], metadataLayerContentUnread: [], moving: 0 };
@@ -3112,37 +3191,48 @@ export class LocalConnectorStore {
     const conversationOf = (identity: Identity): string => normalizeConversationId(identity.providerConversationId);
     const keyOf = (identity: Identity): string =>
       JSON.stringify([identity.provider, identity.accountScope, conversationOf(identity), identity.providerItemId]);
-    const pksFor = (identities: ReadonlyArray<Identity>): number[] =>
-      this.itemRowsForIdentities(identities, conversationOf).map((row) => row.item_pk);
+    const rowsFor = (identities: ReadonlyArray<Identity>) => this.itemRowsForIdentitiesSteps(identities, conversationOf);
+    const pksFor = function* (identities: ReadonlyArray<Identity>): Generator<void, number[]> {
+      return (yield* rowsFor(identities)).map((row) => row.item_pk);
+    };
     // A copy that serves only the names keeps any chunks it already had
     // (e.g. kept vectors after a split move) but never serves, counts or
     // embeds them.
-    const metadataIdentities = ledger.corpusCopyIdentities(this.corpusId, 'metadata_layer');
-    const metadataRows = this.itemRowsForIdentities(metadataIdentities, conversationOf);
+    // Each identity list is read a page at a time with a turn between pages (#858).
+    const metadataIdentities = yield* ledger.corpusCopyIdentitiesSteps(this.corpusId, 'metadata_layer');
+    const metadataRows = yield* rowsFor(metadataIdentities);
     // Unread names copies are a subset of the names copies (same corpus, same
     // current names-only filter), so their rows are read off the lookup above
     // instead of a second lookup of nearly the same set: on a names-only
     // archive both sets are about 100k items (Sparta, 2026-11-04).
     const pksByKey = new Map<string, number[]>();
-    for (const row of metadataRows) {
+    for (let index = 0; index < metadataRows.length; index += 1) {
+      if (index > 0 && index % IDENTITY_LOOKUP_SLICE === 0) yield;
+      const row = metadataRows[index]!;
       const key = keyOf(metadataIdentities[row.idx]!);
       const pks = pksByKey.get(key);
       if (pks) pks.push(row.item_pk); else pksByKey.set(key, [row.item_pk]);
     }
-    const unreadIdentities = ledger.corpusCopyIdentities(this.corpusId, 'metadata_layer_content_unread');
-    const unreadMissed = unreadIdentities.filter((identity) => !pksByKey.has(keyOf(identity)));
+    const unreadIdentities = yield* ledger.corpusCopyIdentitiesSteps(this.corpusId, 'metadata_layer_content_unread');
+    const unreadMissed: Identity[] = [];
+    const unreadPks: number[] = [];
+    for (let index = 0; index < unreadIdentities.length; index += 1) {
+      if (index > 0 && index % IDENTITY_LOOKUP_SLICE === 0) yield;
+      const identity = unreadIdentities[index]!;
+      const pks = pksByKey.get(keyOf(identity));
+      if (pks) unreadPks.push(...pks); else unreadMissed.push(identity);
+    }
+    const superseded = yield* ledger.corpusCopyIdentitiesSteps(this.corpusId, 'superseded');
+    const staged = yield* ledger.corpusCopyIdentitiesSteps(this.corpusId, 'staged');
+    const hidden = yield* pksFor(superseded.concat(staged));
+    const held = yield* pksFor(yield* ledger.corpusCopyIdentitiesSteps(this.corpusId, 'held'));
+    // Only if the ledger changed between the two reads.
+    const missed = yield* pksFor(unreadMissed);
     return {
-      hidden: pksFor([
-        ...ledger.corpusCopyIdentities(this.corpusId, 'superseded'),
-        ...ledger.corpusCopyIdentities(this.corpusId, 'staged'),
-      ]),
-      held: pksFor(ledger.corpusCopyIdentities(this.corpusId, 'held')),
+      hidden,
+      held,
       metadataLayer: metadataRows.map((row) => row.item_pk),
-      metadataLayerContentUnread: [
-        ...unreadIdentities.flatMap((identity) => pksByKey.get(keyOf(identity)) ?? []),
-        // Only if the ledger changed between the two reads.
-        ...pksFor(unreadMissed),
-      ],
+      metadataLayerContentUnread: unreadPks.concat(missed),
       moving: ledger.corpusCopyCounts(this.corpusId).moving,
     };
   }
@@ -3650,24 +3740,42 @@ export class LocalConnectorStore {
    */
   activeChildParents(after: ParentRef | undefined, limit: number): ParentRef[] {
     if (!this.childItemColumnsPresent) return [];
-    const rows = this.db.query(`
-      SELECT parent_local_item_id, provider, account_scope, MIN(provider_item_id) AS child_item_id, provider_conversation_id FROM items
-      WHERE parent_local_item_id IS NOT NULL AND (tombstoned = 0 OR trust_tier = 'S5')
-        AND (parent_local_item_id, provider, account_scope) > (?, ?, ?)
-      GROUP BY parent_local_item_id, provider, account_scope
-      ORDER BY parent_local_item_id, provider, account_scope LIMIT ?
-    `).all(
-      after?.parentLocalItemId ?? '',
-      after?.provider ?? '',
-      after?.accountScope ?? '',
-      Math.max(1, Math.floor(limit)),
-    ) as Array<{
+    const want = Math.max(1, Math.floor(limit));
+    const afterKey = [after?.parentLocalItemId ?? '', after?.provider ?? '', after?.accountScope ?? ''] as const;
+    // The parent ids come off the parent index a window at a time, and only
+    // the rows under them are grouped. Grouping every child after `after` in
+    // one query sorted all the remaining children on each page, so a sweep
+    // cost grew with the square of the children (Sparta, 2026-11-04: about
+    // 18% of a sampled freeze on a large Telegram store).
+    const rows: Array<{
       parent_local_item_id: string;
       provider: string;
       account_scope: string;
       child_item_id: string;
       provider_conversation_id: string | null;
-    }>;
+    }> = [];
+    let from = afterKey[0];
+    let inclusive = true;
+    while (rows.length < want) {
+      const window = (this.db.query(`
+        SELECT parent_local_item_id AS parent FROM items
+        WHERE parent_local_item_id IS NOT NULL AND parent_local_item_id ${inclusive ? '>=' : '>'} ?
+        GROUP BY parent_local_item_id ORDER BY parent_local_item_id LIMIT ?
+      `).all(from, want) as Array<{ parent: string }>).map((row) => row.parent);
+      if (window.length === 0) break;
+      rows.push(...this.db.query(`
+        SELECT parent_local_item_id, provider, account_scope, MIN(provider_item_id) AS child_item_id, provider_conversation_id FROM items
+        WHERE parent_local_item_id IN (SELECT value FROM json_each(?)) AND (tombstoned = 0 OR trust_tier = 'S5')
+          AND (parent_local_item_id, provider, account_scope) > (?, ?, ?)
+        GROUP BY parent_local_item_id, provider, account_scope
+        ORDER BY parent_local_item_id, provider, account_scope LIMIT ?
+      `).all(JSON.stringify(window), ...afterKey, want - rows.length) as typeof rows);
+      // A short window is the last; otherwise every row under it was taken
+      // (or the page is full), so the next window starts past it.
+      if (window.length < want) break;
+      from = window[window.length - 1]!;
+      inclusive = false;
+    }
     return rows.map((row) => ({
       provider: row.provider,
       accountScope: row.account_scope,
@@ -4828,6 +4936,51 @@ export class LocalConnectorStore {
     if (ref.sourceVersion !== undefined && row.source_version !== ref.sourceVersion) return false;
     if (ref.contentHash !== undefined && row.content_hash !== ref.contentHash) return false;
     return true;
+  }
+
+  /**
+   * itemMatchesExtractionRef for many refs at once, one answer per ref in
+   * order: a few queries for a whole queue instead of one per job.
+   */
+  itemsMatchingExtractionRefs(
+    refs: ReadonlyArray<Parameters<LocalConnectorStore['itemMatchesExtractionRef']>[0]>,
+    filters: ConnectorStoreSearchFilters | undefined,
+  ): boolean[] {
+    if (refs.length === 0) return [];
+    const predicate = connectorStoreFilterSql(filters);
+    const ids = [...new Set(refs.map((ref) => ref.localItemId))];
+    // The first active row per identity, as the single check's LIMIT 1 reads it.
+    const first = new Map<string, { source_version: string | null; content_hash: string | null }>();
+    const keyOf = (localItemId: string, providerItemId: string, provider: string, accountScope: string): string =>
+      JSON.stringify([localItemId, providerItemId, provider, accountScope]);
+    for (let offset = 0; offset < ids.length; offset += 5_000) {
+      const rows = this.db.query(`
+        SELECT i.local_item_id, i.provider_item_id, i.provider, i.account_scope, i.source_version, i.content_hash
+        FROM items i
+        WHERE i.local_item_id IN (SELECT value FROM json_each(?))
+          AND i.tombstoned = 0
+          ${predicate.sql}
+        ORDER BY i.item_pk
+      `).all(JSON.stringify(ids.slice(offset, offset + 5_000)), ...predicate.params) as Array<{
+        local_item_id: string;
+        provider_item_id: string;
+        provider: string;
+        account_scope: string;
+        source_version: string | null;
+        content_hash: string | null;
+      }>;
+      for (const row of rows) {
+        const key = keyOf(row.local_item_id, row.provider_item_id, row.provider, row.account_scope);
+        if (!first.has(key)) first.set(key, { source_version: row.source_version, content_hash: row.content_hash });
+      }
+    }
+    return refs.map((ref) => {
+      const row = first.get(keyOf(ref.localItemId, ref.providerItemId, ref.provider, ref.accountScope));
+      if (!row) return false;
+      if (ref.sourceVersion !== undefined && row.source_version !== ref.sourceVersion) return false;
+      if (ref.contentHash !== undefined && row.content_hash !== ref.contentHash) return false;
+      return true;
+    });
   }
 
   [READ_RESULT_PROJECTION_LOCATOR_URI](
@@ -9700,13 +9853,14 @@ export class LocalConnectorStore {
     embedder: Pick<SourceEmbeddingProvider, 'modelId' | 'provider' | 'backend'>,
     limit: number,
     scope: Pick<ConnectorStoreEmbedOptions, 'accountScope' | 'filters'> = {},
+    tierHidden?: TierLedgerHiddenItemPks,
   ): string[] {
     if (limit <= 0) return [];
     const modelId = embedder.modelId;
     const accountScope = normalizeOptionalAccountScope(scope.accountScope);
     const scoped = connectorStoreFilterSql(scope.filters);
     const failed = this.embeddingFailureState;
-    const tierExclusion = this.embeddingTierExclusionFilter();
+    const tierExclusion = this.embeddingTierExclusionFilter(0, tierHidden);
     const privateTier = this.privateTierEmbeddingFilter(embedder);
     const filter = `${tierExclusion.filter} ${privateTier.filter} ${accountScope ? 'AND i.account_scope = ?' : ''} ${scoped.sql}`;
     const params = [...tierExclusion.params, ...privateTier.params, ...(accountScope ? [accountScope] : []), ...scoped.params];
@@ -9726,6 +9880,21 @@ export class LocalConnectorStore {
       .map((row) => row.local_item_id)
       .filter((localItemId) => !failed?.has(localItemId))
       .slice(0, limit);
+  }
+
+  /**
+   * missingEmbeddingItemIds for the embedding sweep: the hidden-copy set is
+   * built in turns first instead of synchronously, so a sweep over a store
+   * that is being written never holds the worker's thread for the rebuild.
+   */
+  async missingEmbeddingItemIdsInTurns(
+    embedder: Pick<SourceEmbeddingProvider, 'modelId' | 'provider' | 'backend'>,
+    limit: number,
+    scope: Pick<ConnectorStoreEmbedOptions, 'accountScope' | 'filters'> = {},
+  ): Promise<string[]> {
+    if (limit <= 0) return [];
+    const tierHidden = await this.tierHiddenItemPksInTurns();
+    return this.missingEmbeddingItemIds(embedder, limit, scope, tierHidden);
   }
 
   /**
@@ -9804,8 +9973,11 @@ export class LocalConnectorStore {
   }
 
   /** `countsMaxAgeMs` only for counts a status snapshot shows (see STATUS_COUNTS_MAX_AGE_MS); never for what is embedded. */
-  private embeddingTierExclusionFilter(countsMaxAgeMs = 0): { filter: string; params: string[] } {
-    const tierExcluded = this.tierHiddenItemPks({ countsMaxAgeMs });
+  private embeddingTierExclusionFilter(
+    countsMaxAgeMs = 0,
+    tierHidden?: TierLedgerHiddenItemPks,
+  ): { filter: string; params: string[] } {
+    const tierExcluded = tierHidden ?? this.tierHiddenItemPks({ countsMaxAgeMs });
     const excludedPks = [...tierExcluded.hidden, ...tierExcluded.held, ...tierExcluded.metadataLayer];
     return excludedPks.length > 0
       ? { filter: 'AND i.item_pk NOT IN (SELECT value FROM json_each(?))', params: [JSON.stringify(excludedPks)] }
@@ -9817,20 +9989,30 @@ export class LocalConnectorStore {
    * from the store as it is now: a row whose item is now Private by its own
    * tier (or carries an unknown tier) is counted `privateTier`; one now
    * deleted or kept out of view by the tier ledger is counted `notVisible`.
-   * Synchronous, so the caller can dispatch with no await in between.
+   * With no `embeddableTiers` (an embedder approved for Private content)
+   * only visibility is rechecked. Synchronous, so the caller can dispatch
+   * with no await in between. Visibility is looked up for the batch's items
+   * alone, not by rebuilding the store's whole hidden-copy set.
    */
   private embeddingBatchRecheck<T extends { item_pk: number }>(
     batch: readonly T[],
-    embeddableTiers: readonly SourceTrustTier[],
+    embeddableTiers: readonly SourceTrustTier[] | undefined,
   ): { kept: T[]; privateTier: number; notVisible: number } {
     const itemPks = [...new Set(batch.map((row) => row.item_pk))];
-    const current = new Map((this.db.query(`
-      SELECT item_pk, trust_tier, tombstoned FROM items
+    const currentRows = this.db.query(`
+      SELECT item_pk, trust_tier, tombstoned, provider, account_scope, provider_item_id, provider_conversation_id FROM items
       WHERE item_pk IN (SELECT value FROM json_each(?))
-    `).all(JSON.stringify(itemPks)) as Array<{ item_pk: number; trust_tier: string; tombstoned: number }>)
-      .map((row) => [row.item_pk, row] as const));
-    const tierHidden = this.tierHiddenItemPks();
-    const hidden = new Set([...tierHidden.hidden, ...tierHidden.held, ...tierHidden.metadataLayer]);
+    `).all(JSON.stringify(itemPks)) as Array<{
+      item_pk: number;
+      trust_tier: string;
+      tombstoned: number;
+      provider: string;
+      account_scope: string;
+      provider_item_id: string;
+      provider_conversation_id: string | null;
+    }>;
+    const current = new Map(currentRows.map((row) => [row.item_pk, row] as const));
+    const hidden = this.embeddingHiddenAmong(currentRows);
     const kept: T[] = [];
     let privateTier = 0;
     let notVisible = 0;
@@ -9838,13 +10020,54 @@ export class LocalConnectorStore {
       const item = current.get(row.item_pk);
       if (!item || item.tombstoned !== 0 || hidden.has(row.item_pk)) {
         notVisible += 1;
-      } else if (!(embeddableTiers as readonly string[]).includes(item.trust_tier)) {
+      } else if (embeddableTiers !== undefined && !(embeddableTiers as readonly string[]).includes(item.trust_tier)) {
         privateTier += 1;
       } else {
         kept.push(row);
       }
     }
     return { kept, privateTier, notVisible };
+  }
+
+  /**
+   * Of these rows, the item pks the tier ledger keeps from embedding now: this
+   * store's copy superseded or staged (or its deletion or Secret under way),
+   * held pending classification, or serving names only; and children whose
+   * parent is not served. The same rule as the hidden-copy set
+   * (tierLedgerHiddenSteps, withHiddenChildren), looked up for these items only.
+   */
+  private embeddingHiddenAmong(rows: ReadonlyArray<{
+    item_pk: number;
+    provider: string;
+    account_scope: string;
+    provider_item_id: string;
+    provider_conversation_id: string | null;
+  }>): Set<number> {
+    const hidden = new Set<number>();
+    if (rows.length === 0) return hidden;
+    const identityOf = (row: (typeof rows)[number]) => ({
+      provider: row.provider,
+      accountScope: row.account_scope,
+      providerItemId: row.provider_item_id,
+      ...(row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}),
+    });
+    const ledger = this.visibilityLedger();
+    if (ledger && ledger.corpusHasCopies(this.corpusId)) {
+      const copies = ledger.copiesForMany(rows.map(identityOf));
+      for (const row of rows) {
+        const here = (copies.get(tierLedgerIdentityKey(identityOf(row))) ?? [])
+          .filter((copy) => copy.corpusId === this.corpusId);
+        if (here.some((copy) => copy.state === 'superseded' || copy.state === 'staged'
+          || (copy.state === 'current' && (copy.embedHold || copy.layers === 'metadata')))) {
+          hidden.add(row.item_pk);
+        }
+      }
+    }
+    const children = hiddenChildKeys(this.childVisibilityLane(), rows.map(identityOf));
+    if (children.size > 0) {
+      for (const row of rows) if (children.has(tierLedgerIdentityKey(identityOf(row)))) hidden.add(row.item_pk);
+    }
+    return hidden;
   }
 
   /**
@@ -9998,10 +10221,14 @@ export class LocalConnectorStore {
     )) {
       throw new Error('Connector store embedding journal provider changed.');
     }
+    // Built in turns: a pass over a store that is being written would
+    // otherwise rebuild it synchronously on every call (Sparta, 2026-11-04).
+    const tierHidden = await this.tierHiddenItemPksInTurns();
     const selectedRows = this.embeddingSourceRows(
       options.localItemIds,
       options.accountScope,
       options.filters,
+      tierHidden,
     );
     // A row that is Private by its own stored tier (or carries a tier the
     // store does not recognise) never reaches an embedder that is not approved
@@ -10193,7 +10420,7 @@ export class LocalConnectorStore {
       // lease, so a row can turn Private (or be hidden) while an earlier batch
       // is out. Re-read each row's current tier and visibility right before
       // its batch is dispatched, with no await in between.
-      if (embeddableTiers !== undefined) {
+      {
         const recheck = this.embeddingBatchRecheck(batch, embeddableTiers);
         privateTierWithheldChunks += recheck.privateTier;
         // Seen and not embedded: skipped, and the Private ones also withheld.
@@ -11138,6 +11365,7 @@ export class LocalConnectorStore {
     localItemIds?: readonly string[],
     accountScope?: string,
     filters?: ConnectorStoreSearchFilters,
+    tierHidden?: TierLedgerHiddenItemPks,
   ): Array<{
     chunk_pk: number;
     item_pk: number;
@@ -11162,7 +11390,7 @@ export class LocalConnectorStore {
     // Copies the tier ledger keeps hidden (superseded, staged) are never
     // embedded, and items pending classification are held back until their
     // tier is final (design section 4.2). Legacy items are never held.
-    const tierExcluded = this.tierHiddenItemPks();
+    const tierExcluded = tierHidden ?? this.tierHiddenItemPks();
     const excludedPks = [...tierExcluded.hidden, ...tierExcluded.held, ...tierExcluded.metadataLayer];
     // One JSON parameter, however many items: no bound-parameter ceiling.
     const tierFilter = excludedPks.length > 0
@@ -11878,11 +12106,36 @@ export class LocalConnectorStore {
     const key = JSON.stringify(scope ?? null);
     const memos = this.settledUnreadableCountMemo ??= new Map();
     const memo = memos.get(key);
-    if (maxAgeMs > 0 && memo && Date.now() - memo.at < maxAgeMs) return memo.count;
-    const count = this.settledUnreadableRows(scope, { withoutSecretsOverrides: true }).length;
+    if (maxAgeMs > 0 && memo) {
+      // As the hidden-copy set: an older count is served while a new one is
+      // counted in turns (refreshTierHiddenCountsInTurns).
+      if (Date.now() - memo.at >= maxAgeMs) this.refreshSettledUnreadableCountInTurns(key, scope);
+      return memo.count;
+    }
+    const count = runSteps(this.settledUnreadableRowsSteps(scope, { withoutSecretsOverrides: true })).length;
     if (memos.size > 32) memos.clear();
     memos.set(key, { at: Date.now(), count });
     return count;
+  }
+
+  private settledUnreadableCountRefresh: Set<string> | undefined;
+
+  private refreshSettledUnreadableCountInTurns(key: string, scope: ConnectorStoreStatusScope | undefined): void {
+    const running = this.settledUnreadableCountRefresh ??= new Set();
+    if (running.has(key)) return;
+    running.add(key);
+    void (async () => {
+      try {
+        const count = (await runStepsInTurns(this.settledUnreadableRowsSteps(scope, { withoutSecretsOverrides: true }))).length;
+        const memos = this.settledUnreadableCountMemo ??= new Map();
+        if (memos.size > 32) memos.clear();
+        memos.set(key, { at: Date.now(), count });
+      } catch {
+        // A closed or busy store: the older count stands until the next ask.
+      } finally {
+        running.delete(key);
+      }
+    })();
   }
 
   // Made on first use: a class-field initializer is a load-time side effect
@@ -11914,6 +12167,13 @@ export class LocalConnectorStore {
     scope: ConnectorStoreStatusScope | undefined,
     options: { withoutSecretsOverrides?: boolean } = {},
   ): Array<{ identity: TierLedgerIdentity; row: { local_item_id: string; title: string | null; source_version: string | null } }> {
+    return runSteps(this.settledUnreadableRowsSteps(scope, options));
+  }
+
+  private *settledUnreadableRowsSteps(
+    scope: ConnectorStoreStatusScope | undefined,
+    options: { withoutSecretsOverrides?: boolean } = {},
+  ): Generator<void, Array<{ identity: TierLedgerIdentity; row: { local_item_id: string; title: string | null; source_version: string | null } }>> {
     if (scope?.itemsAllowed === false || scope?.contentAllowed === false) return [];
     const ledger = this.visibilityLedger();
     if (!ledger) return [];
@@ -11923,10 +12183,17 @@ export class LocalConnectorStore {
     const filters = connectorStoreFilterSql(scope?.contentFilters ?? scope?.itemFilters);
     const account = normalizeOptionalAccountScope(scope?.accountScope);
     const ended = this.extractionEnded;
-    return this.itemRowsForIdentities(identities, (identity) => identity.providerConversationId ?? '', {
-      sql: `${account ? 'AND i.account_scope = ?' : ''} ${filters.sql}`,
+    const rows = yield* this.itemRowsForIdentitiesSteps(identities, (identity) => identity.providerConversationId ?? '', {
+      // A child whose source said it has no bytes (media an export left out, a
+      // chat file the capture did not keep) was never a file Olympus failed to
+      // read: the archive's Not imported list says so, once, for all of them.
+      // Listing each as "can't be read" made thousands of rows of one fact
+      // (Sparta, 2026-11-04: 5,453 Telegram photos and videos).
+      // (A read-only store from before schema v15 has no such column, and no such children.)
+      sql: `${this.childItemColumnsPresent ? 'AND COALESCE(i.bytes_available, 1) <> 0' : ''} ${account ? 'AND i.account_scope = ?' : ''} ${filters.sql}`,
       params: [...(account ? [account] : []), ...filters.params],
-    }).map((row) => ({ identity: identities[row.idx]!, row }))
+    });
+    return rows.map((row) => ({ identity: identities[row.idx]!, row }))
       .filter(({ identity }) => !ended || ended(identity));
   }
 
@@ -11940,6 +12207,24 @@ export class LocalConnectorStore {
    * expression there left SQLite scanning every item per identity
    * (2026-11-03). `idx` is the identity's position in the input.
    */
+  // The same rows as itemRowsForIdentities, looked up a slice at a time with a
+  // step between slices; `idx` still indexes the whole list.
+  private *itemRowsForIdentitiesSteps<T extends { provider: string; accountScope: string; providerItemId: string }>(
+    identities: readonly T[],
+    conversationOf: (identity: T) => string,
+    extra: { sql: string; params: readonly string[] } = { sql: '', params: [] },
+  ): Generator<void, Array<{ idx: number; item_pk: number; local_item_id: string; title: string | null; source_version: string | null }>> {
+    const out: Array<{ idx: number; item_pk: number; local_item_id: string; title: string | null; source_version: string | null }> = [];
+    for (let offset = 0; offset < identities.length; offset += IDENTITY_LOOKUP_SLICE) {
+      if (offset > 0) yield;
+      for (const row of this.itemRowsForIdentities(identities.slice(offset, offset + IDENTITY_LOOKUP_SLICE), conversationOf, extra)) {
+        row.idx += offset;
+        out.push(row);
+      }
+    }
+    return out;
+  }
+
   private itemRowsForIdentities<T extends { provider: string; accountScope: string; providerItemId: string }>(
     identities: readonly T[],
     conversationOf: (identity: T) => string,
@@ -11967,7 +12252,8 @@ export class LocalConnectorStore {
         providerItemId: identity.providerItemId, localItemId: row.local_item_id,
         approvedScopeKey: `${identity.provider}.${identity.accountScope}`,
         ...(row.title ? { name: row.title } : {}), ...(row.source_version ? { sourceVersion: row.source_version } : {}) },
-        failedAt: record.decidedAt });
+        // Kept Private before its text was read: unreadable-files.ts UNREAD_PRIVACY_CHECK_MISSING_KIND.
+        failedAt: record.decidedAt, errorKind: 'privacy_check_missing' });
     }
     return out;
   }

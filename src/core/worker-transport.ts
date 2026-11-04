@@ -103,6 +103,37 @@ export function removeReleasedWorkerSocket(
  return true;
 }
 
+/**
+ * The worker's own start under its systemd unit (OLYMPUS_MANAGED_WORKER=1 and
+ * systemd's INVOCATION_ID): systemd runs ExecStart only once every process of
+ * the unit's previous run has exited, so a socket still on the path was left
+ * by a worker it already stopped (Sparta, 2026-11-04: a hung worker took the
+ * stop timeout and SIGKILL, and the next start failed until someone removed
+ * the file by hand). That is the supervisor custody removeReleasedWorkerSocket
+ * asks for; it still refuses a socket a listener answers on, or one that is not
+ * owner-owned 0600. Anywhere else this does nothing. Returns true when a
+ * socket was removed; a refusal is left for prepareWorkerSocket to report.
+ */
+export function releaseSystemdWorkerSocket(options: WorkerTransportOptions = {}): boolean {
+ const env=options.env??process.env;
+ if((options.platform??process.platform)!=='linux'||env.OLYMPUS_MANAGED_WORKER!=='1'||!env.INVOCATION_ID)return false;
+ try{return removeReleasedWorkerSocket(options,{previousWorkerReleased:true});}catch{return false;}
+}
+
+/**
+ * Options every Bun server on a worker's unix socket takes. Bun closes a request
+ * its handler has not answered within 10 s, and on a unix socket
+ * `server.timeout(request, 0)` does not lift that (Bun 1.3.14), so a slow owner
+ * read (a status build while imports run) came back empty (Sparta, 2026-11-04).
+ * The socket is the owner's alone; each client bounds its own wait.
+ */
+export const WORKER_SOCKET_SERVE_OPTIONS: { idleTimeout: number } = { idleTimeout: 0 };
+
+/** A unix-socket server's options with WORKER_SOCKET_SERVE_OPTIONS (Bun's types list idleTimeout for TCP only; Bun applies it to both). */
+export function workerSocketServe<T extends object>(options: T): T {
+  return Object.assign(options, WORKER_SOCKET_SERVE_OPTIONS);
+}
+
 /** Bind synchronously under a private umask, before any request can run. */
 export function bindWorkerSocket<T>(path: string, bind: () => T): T {
   const previous = process.umask(0o177);

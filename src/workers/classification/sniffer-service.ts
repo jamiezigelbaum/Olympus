@@ -56,6 +56,7 @@ import { applyMediaJudgments } from '../connector-store/tier-media-judgment-swee
 import {
   TierLedger,
   TierLedgerRaiseAbandonRefusedError,
+  TIER_LEDGER_UNREAD_RELABEL_DONE,
   copyServingLayer,
   tierLedgerIdentityKey,
   tierLedgerPathForStore,
@@ -211,6 +212,8 @@ export interface TierAutoMoveReport {
   abandoned?: number;
   /** Failed raises older than the stale bound: kept hidden and queued, never rolled back. */
   staleRaises?: number;
+  /** Why the failed moves failed, by error name (never an item's names or content): the log says what to look at. */
+  failedBy?: Record<string, number>;
 }
 
 export interface TierClassificationBacklog {
@@ -482,13 +485,15 @@ export class TierSnifferService {
     this.abort = undefined;
     this.lastTick = tick;
     this.reportWaiting(tick, overran);
-    if (this.waitingReason === 'model_not_answering') {
+    // Any call that answered clears the hold, even when the pass then
+    // stopped on failures: a model that is making progress is never held.
+    if (tick.state === 'ran' && tick.report.calls > tick.report.failedCalls) {
+      this.notAnsweringPasses = 0;
+      this.notAnsweringUntilMs = 0;
+    } else if (this.waitingReason === 'model_not_answering') {
       this.notAnsweringPasses += 1;
       this.notAnsweringUntilMs = this.clockMs()
         + (this.notAnsweringPasses === 1 ? NOT_ANSWERING_FIRST_BACKOFF_MS : NOT_ANSWERING_MAX_BACKOFF_MS);
-    } else if (tick.state === 'ran' && tick.report.calls > tick.report.failedCalls) {
-      this.notAnsweringPasses = 0;
-      this.notAnsweringUntilMs = 0;
     }
     if (this.options.log && this.clockMs() - this.lastBacklogLogMs >= 60_000) {
       this.lastBacklogLogMs = this.clockMs();
@@ -876,6 +881,11 @@ export class TierSnifferService {
             || tierLedgerPathForStore(store.dbPath) === ledgerPath));
         // An unavailable store is not evidence that its items were deleted.
         if (stores.length === 0 || stores.some(store => !store.exportItemCopy)) continue;
+        // Once per ledger, a page per pass: older unread settlements get the
+        // `unread` label they would get now (#847).
+        if (ledger.readMeta(TIER_LEDGER_UNREAD_RELABEL_DONE) !== '1' && ledger.relabelUnreadFailSafe() === 0) {
+          ledger.writeMeta(TIER_LEDGER_UNREAD_RELABEL_DONE, '1');
+        }
         const saved = ledger.readMeta(cursorKey);
         const after = saved ? JSON.parse(saved) as TierLedgerIdentity : undefined;
         const rows = ledger.listPending({ limit: 100, ...(after ? { after } : {}) });
@@ -950,17 +960,19 @@ export class TierSnifferService {
   }
 
   /**
-   * An unread file that no store holds text for yet, and extraction still
-   * owes it. Only a routed file has an extraction lane at all: a message,
-   * a note or a legacy unrouted row with no job is genuinely unread, and
-   * keeps the fail-safe settlement rather than waiting for a job that will
-   * never come. A file with no job waits only for EXTRACTION_ENQUEUE_GRACE_MS
+   * An unread routed item (a file, or a chat's photo, voice note or
+   * attachment) that no store holds text for yet, and extraction still owes
+   * it. A legacy unrouted row has no extraction lane, and an item extraction
+   * no longer owes is genuinely unread: both keep the fail-safe settlement
+   * rather than waiting for a job that will never come (Sparta, 2026-11-04:
+   * Telegram media were settled while their extraction was still queued,
+   * because only the file family was let wait). An item with no job waits only for EXTRACTION_ENQUEUE_GRACE_MS
    * after it was listed: past that, nothing will queue it (a names-only
    * folder, a job deleted when its scope changed) and it settles as before.
    */
   private waitingForExtraction(ledger: TierLedger, row: TierLedgerRecord, identity: TierLedgerIdentity): boolean {
     try {
-      if (!this.options.extractionState || row.family !== 'file' || !row.routed) return false;
+      if (!this.options.extractionState || !row.routed) return false;
       const copies = ledger.copies(identity);
       if (copies.length === 0) return false;
       if (copies.some(copy => copy.state === 'current' && copy.layers !== 'metadata')) return false;
@@ -1210,6 +1222,8 @@ export class TierSnifferService {
           // The move stays queued (held, never shown twice); the next pass or
           // the owner-approved migration picks it up.
           report.failed += 1;
+          const why = moveFailureName(error);
+          report.failedBy = { ...report.failedBy, [why]: (report.failedBy?.[why] ?? 0) + 1 };
           if (error instanceof TierMoveContentChangedError) {
             // A stale lowering was refused before import and taken out of
             // moving. Re-read the actual stored body, even when this model
@@ -1247,6 +1261,7 @@ export class TierSnifferService {
     if (report.moved > 0 || report.failed > 0) {
       this.options.log?.(
         `Olympus tier sniffer: ${report.moved} automatic tier move(s), ${report.failed} failed`
+        + `${report.failedBy ? ` (${Object.entries(report.failedBy).map(([why, n]) => `${why} ×${n}`).join(', ')})` : ''}`
         + `${report.abandoned ? `, ${report.abandoned} stale move(s) given up (back where they were)` : ''}`
         + `${report.staleRaises ? `, ${report.staleRaises} stale raise(s) kept hidden and queued` : ''}.`,
       );
@@ -1368,4 +1383,15 @@ function positiveInteger(value: string | undefined, fallback: number, minimum: n
   if (!value?.trim()) return fallback;
   const parsed = Number(value);
   return Number.isInteger(parsed) && parsed >= minimum ? parsed : fallback;
+}
+
+/**
+ * A failed move's reason for the log: the error's class, or a short fixed
+ * message it was thrown with ("no current copy"). Nothing longer, so no item
+ * name or content can reach the log through it.
+ */
+export function moveFailureName(error: unknown): string {
+  if (!(error instanceof Error)) return 'unknown';
+  if (error.constructor !== Error) return error.name || error.constructor.name || 'Error';
+  return /^[a-z][a-z ]{0,39}$/.test(error.message) ? error.message : 'Error';
 }

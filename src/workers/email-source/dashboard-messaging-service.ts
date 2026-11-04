@@ -262,6 +262,9 @@ export function createDashboardMessagingService(options: {
       const source = sourceOf(record.source);
       if (operation === 'start') {
         if (selecting.has(source)) throw new Error('Finish choosing chats first.');
+        // Pressing Pair while a pairing runs (the card lost track of it during
+        // a slow first build) shows that pairing instead of an error.
+        if (manager.busy(source)) return manager.status(source);
         return options.withGrantMutation(async () => {
           if (manager.busy(source)) throw new Error('Pairing is already running.');
           // Persist the stop before the helper can mutate the session. Failure, cancel,

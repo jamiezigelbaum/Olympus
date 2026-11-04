@@ -543,7 +543,7 @@ function sourceEntry(
   }
   return {
     id: definition.source_id,
-    supportDetails: sourceSupportDetails({ sourceId: definition.source_id, state: status, failure: card.schedule?.last_error_kind || card.schedule?.degraded_reason ? sourceFailureKind(card.schedule?.last_error_kind, card.schedule?.degraded_reason) : undefined, ref: card.schedule?.last_error_hash }),
+    supportDetails: sourceSupportDetails({ sourceId: definition.source_id, state: status, failure: card.schedule?.last_error_kind || card.schedule?.degraded_reason ? sourceFailureKind(card.schedule?.last_error_kind, card.schedule?.degraded_reason) : undefined, ref: card.schedule?.last_error_hash, need: sourceNeed(card, status, degraded, connecting, progress) }),
     label: definition.label,
     ...(definition.sync_name ? { syncNoun: definition.sync_name.mid } : {}),
     group: sourceGroup(definition),
@@ -1100,6 +1100,28 @@ function connectFix(definition: DashboardSupportedSourceDefinition): DashboardFi
   return source
     ? { label: CHATGPT_SETUP_LABELS.connect, tool: CONNECT_SOURCE_TOOL_NAME, args: { source } }
     : helpLinkFix(CHATGPT_SETUP_LABELS.connect, openOnComputer(definition, 'connect'));
+}
+
+/** Why a Needs you or Failing source waits on its owner, as the support report's closed code. */
+function sourceNeed(
+  card: DashboardSourceCard,
+  status: DashboardStatus,
+  degraded: WorkerCredentialDegradation[] | undefined,
+  connecting: Connecting | undefined,
+  progress: SourceProgress | undefined,
+): string | undefined {
+  if (status !== 'Needs you' && status !== 'Failing') return undefined;
+  if (connecting) return 'finish_sign_in';
+  if (card.connection.imports_attention?.length) return 'import_attention';
+  if (credentialProblem(card, degraded)) return 'sign_in';
+  if (missingScope(card)) return 'choose_folders';
+  if (card.storage_notice) return 'storage_move';
+  if (card.media_storage) return 'disk_full';
+  if (dashboardCaptureProblem(card) !== undefined) return 'live_feed';
+  if (progress?.stalled && progress.stalledReason) return progress.stalledReason;
+  if (card.answer_readiness.state === 'needs_attention') return 'answer_readiness';
+  if (card.queue_health.label === 'Needs attention') return 'queue';
+  return 'unknown';
 }
 
 function missingScope(card: DashboardSourceCard): boolean {

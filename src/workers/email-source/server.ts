@@ -21,7 +21,7 @@ import { mintDashboardOpeningUrl } from '../../core/dashboard-opening.ts';
 import { workerFetch } from '../../core/worker-transport.ts';
 import { linuxModelReadiness } from '../../core/linux-model-readiness.ts';
 import { withEngineWorkerAdmission, EngineMaintenanceInProgressError } from '../../core/engine-maintenance.ts';
-import { prepareWorkerSocket, bindWorkerSocket, workerSocketPath } from '../../core/worker-transport.ts';
+import { prepareWorkerSocket, bindWorkerSocket, releaseSystemdWorkerSocket, workerSocketPath, workerSocketServe } from '../../core/worker-transport.ts';
 import { modelInstallFailedReason, modelInstallSpaceToFree } from '../../core/model-install-failure.ts';
 import { accountFromGoogleHandle } from '../google-connectors/classification.ts';
 import { olympusPackageRoot } from '../../core/package-root.ts';
@@ -95,6 +95,7 @@ import type { EvidencePackBuildDetail } from '../../core/evidence-pack.ts';
 import type { SourceIndexAnswerRequest } from '../source-index/answer-types.ts';
 import {
   createSourceIndexStatusHandler,
+  DASHBOARD_READINESS_LEDGER_MAX_AGE_MS,
   resolveStatusRetrievalAvailability,
   type SourceIndexStatusRetrievalAvailability,
 } from '../source-index/status.ts';
@@ -531,7 +532,7 @@ import { resolveClassificationLedgerPath, readClassificationLedger, isClassifier
 import type { AnalystModel } from '../../core/analyst.ts';
 import { resolveTierMigrationPaths, tierMigrationStatusSummary } from '../classification/tier-migration.ts';
 import { resolveEmbeddingLedgerPath } from '../embedding-ledger.ts';
-import { startCpuSampleLog } from '../control-path-headroom.ts';
+import { ingestionTurn, startCpuSampleLog } from '../control-path-headroom.ts';
 
 /**
  * The least time between two scheduler status snapshots for the ingestion
@@ -4749,6 +4750,27 @@ export async function main(): Promise<void> {
     ? createExtractionReadinessLedger(fileExtractionRuntime.jobs, {
         terminalRetryPaths: fileExtractionRuntime.terminalRetryPaths,
         classifyUnreadable: unreadableVerdict,
+        currentItems(refs) {
+          // One batched check per store for the whole queue (the per-job
+          // check below held the worker for seconds on a large Dropbox queue).
+          const answers = refs.map(() => false);
+          const check = (
+            corpusId: string,
+            store: LocalConnectorStore | undefined,
+            view: { itemsMatchingExtractionRefs: LocalConnectorStore['itemsMatchingExtractionRefs'] } | undefined,
+          ): void => {
+            if (!store) return;
+            const indexes = refs.flatMap((ref, index) => (ref.corpusId === corpusId ? [index] : []));
+            if (indexes.length === 0) return;
+            const readScope = connectorStoreReadScope(store);
+            if (!readScope.allowed || !readScope.contentAllowed) return;
+            const matched = (view ?? store).itemsMatchingExtractionRefs(indexes.map((index) => refs[index]!), readScope.contentFilters);
+            indexes.forEach((index, position) => { answers[index] = matched[position] === true; });
+          };
+          check(LOCAL_FILES_CORPUS_ID, localFilesConnectorStore, localFilesExtractionView);
+          check(DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID, dropboxConnectorStore, dropboxExtractionView);
+          return answers;
+        },
         currentItem(ref) {
           if (ref.corpusId === LOCAL_FILES_CORPUS_ID && localFilesConnectorStore) {
             const readScope = connectorStoreReadScope(localFilesConnectorStore);
@@ -4820,6 +4842,11 @@ export async function main(): Promise<void> {
         verdict: unreadableVerdict,
         locate: locateUnreadableItem,
         parentOf: unreadableParentOfItem,
+        // Counts are recounted off the request path, in turns: asking every
+        // listed file's verdict on each poll froze the dashboard for 23 s on a
+        // large list (Sparta, 2026-11-04). Names and opening still ask each file.
+        countsMaxAgeMs: DASHBOARD_READINESS_LEDGER_MAX_AGE_MS,
+        turn: ingestionTurn,
         // The provider's own resolver, else a Drive file's own Google page.
         // Nothing else opens: a locator is provider data, not a link to trust.
         openTarget: (provider, locator) => (Object.hasOwn(unreadableOpenTargets, provider)
@@ -4845,7 +4872,7 @@ export async function main(): Promise<void> {
       },
       connectorStores,
       connectorStoreStatusScope,
-      ...(unreadableFiles ? { unreadableCount: (corpusId: string) => unreadableFiles.recheck(corpusId).unreadable } : {}),
+      ...(unreadableFiles ? { unreadableCount: (corpusId: string) => unreadableFiles.recheck(corpusId)?.unreadable } : {}),
       retrievalPolicy: (domain) => sovereigntyEngine.config.retrieval.trustDomains[domain as keyof typeof sovereigntyEngine.config.retrieval.trustDomains],
       retrievalAvailability,
       tierClassification: () => {
@@ -6908,6 +6935,9 @@ export async function main(): Promise<void> {
       ? { search: { evidenceSearch: remoteEvidenceSearch, answerModelAvailable: chatgptAnswerModelAvailable } }
       : {}),
   };
+  // A socket left by the unit's previous run, which systemd has already
+  // stopped (worker-transport.ts).
+  if (releaseSystemdWorkerSocket()) console.warn('[olympus:worker] removed the socket left by the previous worker run');
   const socketPath = prepareWorkerSocket();
   const serverOptions = {
     // Remote agent routes authenticate connection credentials only (bearer
@@ -6963,7 +6993,7 @@ export async function main(): Promise<void> {
   // indexed inside Olympus's own folders is gone (own-roots-cleanup.ts).
   await localFilesInitialCleanup;
   const startServer = () => socketPath
-    ? Bun.serve({ unix: socketPath, fetch(request, server) {
+    ? Bun.serve(workerSocketServe({ unix: socketPath, fetch(request, server) {
         server.timeout(request, 0);
         if (new URL(request.url).pathname === DESKTOP_OWNER_OPEN_PATH) {
           if (request.method !== 'POST' || !authToken || request.headers.get('authorization') !== `Bearer ${authToken}`) return new Response(null, { status: 403 });
@@ -6990,7 +7020,7 @@ export async function main(): Promise<void> {
           return Response.json({ ...await value.json() as object, built_in_models: linuxModelReadiness(process.env), desktop_bridge: desktopBridge?.status() }, { status: value.status, headers: value.headers });
         });
         return response;
-      } })
+      } }))
     : Bun.serve({ hostname, port, idleTimeout: 0, ...serverOptions });
   const server = socketPath ? bindWorkerSocket(socketPath, startServer) : startServer();
   // This Bun worker owns listener lifecycle on standalone Mac/Linux and
@@ -7061,7 +7091,7 @@ export async function main(): Promise<void> {
         lane: snifferLane,
         model: snifferResource ? {
           ...snifferModel,
-          complete: request => runClassificationInference(() => localModelActivity.track(snifferResource, snifferModel).complete(request)),
+          complete: request => runClassificationInference(() => localModelActivity.track(snifferResource, snifferModel, { concurrency: snifferEnv.concurrentCalls ?? 1, tag: 'tier_sniffer' }).complete(request)),
         } : snifferModel,
         stores: () => connectorStores,
         classificationLedgerPath: resolveClassificationLedgerPath(process.env),
@@ -7079,7 +7109,8 @@ export async function main(): Promise<void> {
         ...(snifferEnv.maxCallsPerPass !== undefined ? { maxCallsPerPass: snifferEnv.maxCallsPerPass } : {}),
         ...(snifferEnv.concurrentCalls !== undefined ? { concurrentCalls: snifferEnv.concurrentCalls } : {}),
         maxCallsPerDay: snifferEnv.maxCallsPerDay,
-        answersInFlight: () => snifferResource !== undefined && localModelActivity.busy(snifferResource),
+        // Its own parallel calls are not answers: only someone else's call holds it back.
+        answersInFlight: () => snifferResource !== undefined && localModelActivity.busyExcept(snifferResource, 'tier_sniffer'),
         // A waiting Inbox question past its deferral stops the pass, so its answer runs, then classification resumes.
         shouldYield: () => localPrivateAnswers?.overdue() ?? false,
         breakerOpen: () => secureAnalystPoolState.isBreakerOpen('secure_local', snifferLane.profileId),

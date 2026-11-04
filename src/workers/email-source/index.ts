@@ -1221,7 +1221,9 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           options.refreshConnectorStores?.();
           const statusRequest = await parseSourceIndexStatusRequest(request, connectorStores);
           const result = withCredentialDegradations(
-            await sourceIndexStatus.status(statusRequest),
+            // The same reuse window as the dashboard: a status command never
+            // rebuilds every store's hidden-copy set in one go.
+            await sourceIndexStatus.status(statusRequest, { countsMaxAgeMs: STATUS_COUNTS_MAX_AGE_MS }),
             credentialDegradations?.() ?? [],
           );
           const resultWithLatencyHealth = sourceAnswerLatencyLog?.health

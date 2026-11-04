@@ -8116,7 +8116,7 @@ var init_scheduler_markers = __esm(() => {
 });
 
 // src/workers/dashboard/source-failure.ts
-var SOURCE_FAILURE_KINDS, KIND_SET, SUPPORT_SOURCES, SUPPORT_STATES;
+var SOURCE_FAILURE_KINDS, KIND_SET, SUPPORT_SOURCES, SUPPORT_STATES, SUPPORT_NEEDS;
 var init_source_failure = __esm(() => {
   init_scheduler_markers();
   SOURCE_FAILURE_KINDS = [
@@ -8137,6 +8137,26 @@ var init_source_failure = __esm(() => {
   KIND_SET = new Set(SOURCE_FAILURE_KINDS);
   SUPPORT_SOURCES = new Set(["gmail.email", "google_drive.docs", "dropbox.files", "local.files", "readwise.library", "x.bookmarks", "evernote.notes", "telegram.messages", "whatsapp.personal.messages", "archive.imports"]);
   SUPPORT_STATES = new Set(["Off", "Waiting", "Working", "Fresh", "Needs you", "Failing", "not_connected", "needs_setup", "awaiting_consent", "reauth_required", "connected", "waiting_for_first_sync", "syncing", "synced"]);
+  SUPPORT_NEEDS = new Set([
+    "finish_sign_in",
+    "sign_in",
+    "choose_folders",
+    "import_attention",
+    "waiting_for_credentials",
+    "scope_pending",
+    "scope_root_missing",
+    "scope_root_permission_needed",
+    "scope_root_helper_needed",
+    "scope_root_unreadable",
+    "provider_unavailable",
+    "model_downloading",
+    "storage_move",
+    "disk_full",
+    "live_feed",
+    "answer_readiness",
+    "queue",
+    "unknown"
+  ]);
 });
 
 // src/workers/dashboard/answer-ready-coverage.ts
@@ -15360,6 +15380,9 @@ var init_sniffer_store = __esm(() => {
 import { Database as Database3 } from "bun:sqlite";
 import { chmodSync as chmodSync5, closeSync as closeSync8, existsSync as existsSync12, mkdirSync as mkdirSync11, openSync as openSync8, statSync as statSync8 } from "node:fs";
 import { dirname as dirname17 } from "node:path";
+function isFailSafeMissingContentQuestion(reason) {
+  return reason.startsWith("content:sniffer:") && (reason.endsWith(":fail_safe:missing_question") || reason.endsWith(":fail_safe:unread"));
+}
 function tierLedgerConversationKey(identity) {
   return identity.providerConversationId ?? "";
 }
@@ -15858,7 +15881,8 @@ class TierLedger {
       WHERE routed = 1 AND content_read = 0 AND metadata_pending = 0
         AND ((state = 'pending' AND content_pending = 1)
           OR (state = 'current' AND EXISTS (SELECT 1 FROM json_each(reasons_json) r
-            WHERE r.value GLOB 'content:sniffer:*:fail_safe:missing_question')))
+            WHERE r.value GLOB 'content:sniffer:*:fail_safe:missing_question'
+              OR r.value GLOB 'content:sniffer:*:fail_safe:unread')))
         AND (? IS NULL OR (provider, account_scope, conversation_key, provider_item_id) > (?, ?, ?, ?))
       ORDER BY provider, account_scope, conversation_key, provider_item_id
       LIMIT ?
@@ -15907,7 +15931,7 @@ class TierLedger {
         next.contentPending = false;
         next.reasons = [
           ...next.reasons.filter((reason) => !isOpenSnifferReason(reason, "content")),
-          `content:sniffer:${options.snifferId}:fail_safe:missing_question`
+          `content:sniffer:${options.snifferId}:fail_safe:${next.contentRead ? "missing_question" : "unread"}`
         ];
       }
       next.contentTier = maxTier(next.contentTier, next.metadataTier);
@@ -15922,6 +15946,19 @@ class TierLedger {
         this.writeRow(identity, next, undefined, current2);
       return true;
     })();
+  }
+  relabelUnreadFailSafe(limit = 2000) {
+    return this.db.query(`
+      UPDATE tier_items SET reasons_json = (
+        SELECT json_group_array(CASE WHEN r.value GLOB 'content:sniffer:*:fail_safe:missing_question'
+          THEN substr(r.value, 1, length(r.value) - length('missing_question')) || 'unread' ELSE r.value END)
+        FROM json_each(tier_items.reasons_json) r)
+      WHERE rowid IN (
+        SELECT rowid FROM tier_items
+        WHERE content_read = 0 AND instr(reasons_json, ':fail_safe:missing_question"') > 0
+          AND EXISTS (SELECT 1 FROM json_each(reasons_json) r WHERE r.value GLOB 'content:sniffer:*:fail_safe:missing_question')
+        LIMIT ?)
+    `).run(Math.max(1, Math.min(limit, 1e4))).changes;
   }
   retireAbsentPending(record) {
     const identity = {
@@ -17282,36 +17319,31 @@ class TierLedger {
     return `${version.data_version}:${row.changes}`;
   }
   corpusCopyIdentities(corpusId, filter) {
-    const where = filter === "held" ? `copy_state = 'current' AND embed_hold = 1` : filter === "metadata_layer" ? `copy_state = 'current' AND layers = 'metadata'` : filter === "metadata_layer_settled_unreadable" || filter === "metadata_layer_settled_unreadable_not_secret" ? `copy_state = 'current' AND layers = 'metadata'${filter === "metadata_layer_settled_unreadable_not_secret" ? `
-            AND NOT EXISTS (SELECT 1 FROM tier_overrides o
-              WHERE o.provider = tier_copies.provider AND o.account_scope = tier_copies.account_scope
-                AND o.conversation_key = tier_copies.conversation_key AND o.provider_item_id = tier_copies.provider_item_id
-                AND json_extract(o.override_json, '$.kind') = 'tier' AND json_extract(o.override_json, '$.tier') = 'secrets')` : ""}
-            AND EXISTS (SELECT 1 FROM tier_items t
-              WHERE t.provider = tier_copies.provider AND t.account_scope = tier_copies.account_scope
-                AND t.conversation_key = tier_copies.conversation_key AND t.provider_item_id = tier_copies.provider_item_id
-                AND t.state = 'current' AND t.content_read = 0
-                AND t.metadata_tier <> 'secrets' AND t.content_tier <> 'secrets'
-                AND EXISTS (SELECT 1 FROM json_each(t.reasons_json) r
-                  WHERE r.value GLOB 'content:sniffer:*:fail_safe:missing_question'))
-            AND NOT EXISTS (SELECT 1 FROM tier_copies other
-              WHERE other.provider = tier_copies.provider AND other.account_scope = tier_copies.account_scope
-                AND other.conversation_key = tier_copies.conversation_key AND other.provider_item_id = tier_copies.provider_item_id
-                AND other.copy_state = 'current' AND other.layers IN ('content', 'both'))` : filter === "metadata_layer_content_unread" ? `copy_state = 'current' AND layers = 'metadata'
-            AND NOT EXISTS (
-              SELECT 1 FROM tier_copies other
-              WHERE other.provider = tier_copies.provider AND other.account_scope = tier_copies.account_scope
-                AND other.conversation_key = tier_copies.conversation_key
-                AND other.provider_item_id = tier_copies.provider_item_id
-                AND other.corpus_id <> tier_copies.corpus_id
-                AND other.copy_state = 'current' AND other.layers IN ('content', 'both')
-            )` : `copy_state = '${filter === "superseded" ? "superseded" : "staged"}'`;
     const rows = this.db.query(`
       SELECT provider, account_scope, conversation_key, provider_item_id FROM tier_copies
-      WHERE corpus_id = ? AND ${where}
+      WHERE corpus_id = ? AND ${corpusCopyWhere(filter)}
       ORDER BY provider, account_scope, conversation_key, provider_item_id
     `).all(corpusId);
     return rows.map(identityFromRow);
+  }
+  *corpusCopyIdentitiesSteps(corpusId, filter, pageSize = 5000) {
+    const query = this.db.query(`
+      SELECT rowid AS row_id, embed_hold, provider, account_scope, conversation_key, provider_item_id FROM tier_copies
+      WHERE corpus_id = ? AND (embed_hold, rowid) > (?, ?) AND ${corpusCopyWhere(filter)}
+      ORDER BY embed_hold, rowid LIMIT ?
+    `);
+    const out = [];
+    for (let hold = -1, after = 0;; ) {
+      const rows = query.all(corpusId, hold, after, pageSize);
+      for (const row of rows)
+        out.push(identityFromRow(row));
+      if (rows.length < pageSize)
+        return out;
+      const last = rows[rows.length - 1];
+      hold = last.embed_hold;
+      after = last.row_id;
+      yield;
+    }
   }
   corpusCopyCounts(corpusId) {
     const row = this.db.query(`
@@ -17470,6 +17502,34 @@ function proposalFromRow(row) {
     outcome: row.outcome_json ? JSON.parse(row.outcome_json) : null,
     updatedAt: row.updated_at
   };
+}
+function corpusCopyWhere(filter) {
+  const where = filter === "held" ? `copy_state = 'current' AND embed_hold = 1` : filter === "metadata_layer" ? `copy_state = 'current' AND layers = 'metadata'` : filter === "metadata_layer_settled_unreadable" || filter === "metadata_layer_settled_unreadable_not_secret" ? `copy_state = 'current' AND layers = 'metadata'${filter === "metadata_layer_settled_unreadable_not_secret" ? `
+          AND NOT EXISTS (SELECT 1 FROM tier_overrides o
+            WHERE o.provider = tier_copies.provider AND o.account_scope = tier_copies.account_scope
+              AND o.conversation_key = tier_copies.conversation_key AND o.provider_item_id = tier_copies.provider_item_id
+              AND json_extract(o.override_json, '$.kind') = 'tier' AND json_extract(o.override_json, '$.tier') = 'secrets')` : ""}
+          AND EXISTS (SELECT 1 FROM tier_items t
+            WHERE t.provider = tier_copies.provider AND t.account_scope = tier_copies.account_scope
+              AND t.conversation_key = tier_copies.conversation_key AND t.provider_item_id = tier_copies.provider_item_id
+              AND t.state = 'current' AND t.content_read = 0
+              AND t.metadata_tier <> 'secrets' AND t.content_tier <> 'secrets'
+              AND EXISTS (SELECT 1 FROM json_each(t.reasons_json) r
+                WHERE r.value GLOB 'content:sniffer:*:fail_safe:missing_question'
+                  OR r.value GLOB 'content:sniffer:*:fail_safe:unread'))
+          AND NOT EXISTS (SELECT 1 FROM tier_copies other
+            WHERE other.provider = tier_copies.provider AND other.account_scope = tier_copies.account_scope
+              AND other.conversation_key = tier_copies.conversation_key AND other.provider_item_id = tier_copies.provider_item_id
+              AND other.copy_state = 'current' AND other.layers IN ('content', 'both'))` : filter === "metadata_layer_content_unread" ? `copy_state = 'current' AND layers = 'metadata'
+          AND NOT EXISTS (
+            SELECT 1 FROM tier_copies other
+            WHERE other.provider = tier_copies.provider AND other.account_scope = tier_copies.account_scope
+              AND other.conversation_key = tier_copies.conversation_key
+              AND other.provider_item_id = tier_copies.provider_item_id
+              AND other.corpus_id <> tier_copies.corpus_id
+              AND other.copy_state = 'current' AND other.layers IN ('content', 'both')
+          )` : `copy_state = '${filter === "superseded" ? "superseded" : "staged"}'`;
+  return where;
 }
 function identityFromRow(row) {
   return {
@@ -18080,7 +18140,7 @@ function tierLedgerMigrations() {
     }
   ];
 }
-var TIER_LEDGER_SCHEMA_VERSION = 10, DEFAULT_REJUDGE_SCAN_ROWS = 2000, TierLedgerGenerationConflictError, TierLedgerRaiseAbandonRefusedError, TierLedgerPurgedRollbackRefusedError, TierLedgerSecretsRollbackRefusedError, TIER_LEDGER_IDENTITY_FIELDS, TRUST_DOMAIN_RANK, STORED_NAMES_REASON = "metadata:names_from_store", STORED_NAMES_ASKED_REASON = "metadata:names_from_store:asked", TIER_CHECK = `IN ('public', 'private', 'secure', 'secrets')`;
+var TIER_LEDGER_SCHEMA_VERSION = 10, TIER_LEDGER_UNREAD_RELABEL_DONE = "fail_safe_unread_relabel_v1", DEFAULT_REJUDGE_SCAN_ROWS = 2000, TierLedgerGenerationConflictError, TierLedgerRaiseAbandonRefusedError, TierLedgerPurgedRollbackRefusedError, TierLedgerSecretsRollbackRefusedError, TIER_LEDGER_IDENTITY_FIELDS, TRUST_DOMAIN_RANK, STORED_NAMES_REASON = "metadata:names_from_store", STORED_NAMES_ASKED_REASON = "metadata:names_from_store:asked", TIER_CHECK = `IN ('public', 'private', 'secure', 'secrets')`;
 var init_tier_ledger = __esm(() => {
   init_sqlite_migrations();
   init_tier_classifier();
@@ -20080,7 +20140,7 @@ function recordedContentVerdictSniffer(sniffer, recorded, text2, names) {
   const tier = recorded.contentTier;
   const prefix = `content:sniffer:${sniffer.id}:`;
   const code = recorded.reasons.find((reason) => reason.startsWith(prefix))?.slice(prefix.length);
-  if (tier !== "private" && tier !== "secure" || !code || code === "undecided")
+  if (tier !== "private" && tier !== "secure" || !code || code === "undecided" || isFailSafeMissingContentQuestion(`${prefix}${code}`))
     return sniffer;
   return {
     id: sniffer.id,
@@ -20103,6 +20163,7 @@ var init_tier_placement = __esm(() => {
   init_types();
   init_engine();
   init_tier_classifier();
+  init_tier_ledger();
   DEFAULT_TIER_FOR_DOMAIN = {
     public_safe: "S0",
     internal: "S3",
@@ -22701,6 +22762,21 @@ function exclusionCounts(tally) {
     }))
   };
 }
+function runSteps(steps) {
+  let step = steps.next();
+  while (!step.done)
+    step = steps.next();
+  return step.value;
+}
+async function runStepsInTurns(steps) {
+  await ingestionTurn();
+  let step = steps.next();
+  while (!step.done) {
+    await ingestionTurn();
+    step = steps.next();
+  }
+  return step.value;
+}
 function connectorStoreCurrentEmbeddingRowsPage(db, options, afterChunkPk, limit = CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE) {
   const modelId = requireNonEmpty(options.modelId, "Connector store embedding model id");
   const accountScope = normalizeOptionalAccountScope(options.accountScope);
@@ -24556,7 +24632,7 @@ function fileIdentity(path) {
     return;
   }
 }
-var DEFAULT_MAX_CHUNK_CHARS = 4000, MAX_MAX_CHUNK_CHARS = 32000, MAX_SEARCH_RESULTS = 50, CONNECTOR_STORE_FTS_TITLE_WEIGHT = 1.5, EMBEDDING_BATCH_SIZE = 32, MAX_SELECTED_EMBED_ITEM_IDS = 25000, MAX_CONVERSATION_TITLE_LOOKUP_ROWS = 100, MIN_VECTOR_SCORE = 0.18, MAX_REQUIRED_CONCEPTS = 3, RARE_CONCEPT_WEIGHT_SHARE = 0.6, READ_RESULT_PROJECTION_LOCATOR_URI, DEFAULT_SEMANTIC_RELEVANCE_BAR = 0.62, CALIBRATED_CONTENT_PREFERENCE_BARS, CALIBRATED_SEMANTIC_RELEVANCE_BARS, CONTAINER_MIME_TYPES, CONTAINER_MIME_TYPES_SQL, SQLITE_STORE_ID = "connector-store", CONNECTOR_STORE_SQLITE_SCHEMA_VERSION = 15, IMAGE_CONTENT_PRIVATE_ONLY_CONNECTOR_ID = "olympus_image_content_private_only", CHUNK_MEDIA_RETRY_BASE_MS, CHUNK_MEDIA_MAX_ATTEMPTS = 3, MEDIA_JUDGE_MAX_PER_PASS = 200, MEDIA_JUDGE_RETRY_BASE_MS, MEDIA_JUDGE_MAX_ATTEMPTS = 3, MAX_CONSECUTIVE_CONTENT_FETCH_FAILURES = 3, CONNECTOR_STORE_FTS_MIGRATION, ConnectorStoreExclusionViolationError, ConnectorStoreMetadataOnlyViolationError, ConnectorStoreTierWriteRefusedError, STATUS_COUNTS_MAX_AGE_MS, TierLedgerUnavailableError, TIER_SET_BINDING_RUN_ID = "tiered-store-set-binding", TIER_SET_BINDING_CONNECTOR_ID = "tiered_store_set_binding", TIER_MOVE_CONNECTOR_ID = "olympus_tier_move", NON_SYNC_RUN_CONNECTORS_SQL, ConnectorStoreLocatorIdentityIndexNotReadyError, CONNECTOR_STORE_EMBEDDING_LEASE_SUFFIX = ".embedding", CONNECTOR_STORE_EMBEDDING_LEASE_WAIT_MS = 120000, CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE = 256, CONNECTOR_STORE_CURRENT_EMBEDDING_JOINS_AND_FILTER = `
+var DEFAULT_MAX_CHUNK_CHARS = 4000, MAX_MAX_CHUNK_CHARS = 32000, MAX_SEARCH_RESULTS = 50, CONNECTOR_STORE_FTS_TITLE_WEIGHT = 1.5, EMBEDDING_BATCH_SIZE = 32, MAX_SELECTED_EMBED_ITEM_IDS = 25000, MAX_CONVERSATION_TITLE_LOOKUP_ROWS = 100, MIN_VECTOR_SCORE = 0.18, MAX_REQUIRED_CONCEPTS = 3, RARE_CONCEPT_WEIGHT_SHARE = 0.6, READ_RESULT_PROJECTION_LOCATOR_URI, DEFAULT_SEMANTIC_RELEVANCE_BAR = 0.62, CALIBRATED_CONTENT_PREFERENCE_BARS, CALIBRATED_SEMANTIC_RELEVANCE_BARS, CONTAINER_MIME_TYPES, CONTAINER_MIME_TYPES_SQL, SQLITE_STORE_ID = "connector-store", CONNECTOR_STORE_SQLITE_SCHEMA_VERSION = 15, IMAGE_CONTENT_PRIVATE_ONLY_CONNECTOR_ID = "olympus_image_content_private_only", CHUNK_MEDIA_RETRY_BASE_MS, CHUNK_MEDIA_MAX_ATTEMPTS = 3, MEDIA_JUDGE_MAX_PER_PASS = 200, MEDIA_JUDGE_RETRY_BASE_MS, MEDIA_JUDGE_MAX_ATTEMPTS = 3, MAX_CONSECUTIVE_CONTENT_FETCH_FAILURES = 3, CONNECTOR_STORE_FTS_MIGRATION, ConnectorStoreExclusionViolationError, ConnectorStoreMetadataOnlyViolationError, ConnectorStoreTierWriteRefusedError, STATUS_COUNTS_MAX_AGE_MS, IDENTITY_LOOKUP_SLICE = 5000, TierLedgerUnavailableError, TIER_SET_BINDING_RUN_ID = "tiered-store-set-binding", TIER_SET_BINDING_CONNECTOR_ID = "tiered_store_set_binding", TIER_MOVE_CONNECTOR_ID = "olympus_tier_move", NON_SYNC_RUN_CONNECTORS_SQL, ConnectorStoreLocatorIdentityIndexNotReadyError, CONNECTOR_STORE_EMBEDDING_LEASE_SUFFIX = ".embedding", CONNECTOR_STORE_EMBEDDING_LEASE_WAIT_MS = 120000, CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE = 256, CONNECTOR_STORE_CURRENT_EMBEDDING_JOINS_AND_FILTER = `
   FROM chunk_embeddings emb
   JOIN chunks c ON c.chunk_pk = emb.chunk_pk
   JOIN items i ON i.item_pk = emb.item_pk
@@ -24952,15 +25028,45 @@ var init_local_index = __esm(() => {
     tierHiddenItemPks(options = {}) {
       const maxAgeMs = options.countsMaxAgeMs ?? 0;
       const counted = this.tierHiddenCountsMemo;
-      if (maxAgeMs > 0 && counted && Date.now() - counted.at < maxAgeMs)
+      if (maxAgeMs > 0 && counted) {
+        if (Date.now() - counted.at >= maxAgeMs)
+          this.refreshTierHiddenCountsInTurns();
         return counted.value;
-      const base = this.tierLedgerHiddenItemPks();
-      const children = this.hiddenChildItemPks();
-      const value = children.length === 0 ? base : { ...base, hidden: [...new Set([...base.hidden, ...children])] };
+      }
+      const value = this.withHiddenChildren(this.tierLedgerHiddenItemPks());
       this.tierHiddenCountsMemo = { at: Date.now(), value };
       return value;
     }
+    withHiddenChildren(base) {
+      const children = this.hiddenChildItemPks();
+      return children.length === 0 ? base : { ...base, hidden: [...new Set([...base.hidden, ...children])] };
+    }
     tierHiddenCountsMemo;
+    tierHiddenCountsRefresh;
+    refreshTierHiddenCountsInTurns() {
+      this.tierHiddenCountsRefresh ??= (async () => {
+        try {
+          const value = await this.tierHiddenItemPksInTurns();
+          this.tierHiddenCountsMemo = { at: Date.now(), value };
+        } catch {} finally {
+          this.tierHiddenCountsRefresh = undefined;
+        }
+      })();
+      return this.tierHiddenCountsRefresh;
+    }
+    async tierHiddenItemPksInTurns() {
+      const marker = this.tierLedgerHiddenMemoMarker();
+      const memo = this.tierLedgerHiddenMemo;
+      let base;
+      if (marker && memo && memo.ledger === marker.ledger && memo.marker === marker.value) {
+        base = memo.value;
+      } else {
+        base = await runStepsInTurns(this.tierLedgerHiddenSteps());
+        this.tierLedgerHiddenMemo = marker ? { ledger: marker.ledger, marker: marker.value, value: base } : undefined;
+        await ingestionTurn();
+      }
+      return this.withHiddenChildren(base);
+    }
     tierLedgerHiddenItemPks() {
       const marker = this.tierLedgerHiddenMemoMarker();
       const memo = this.tierLedgerHiddenMemo;
@@ -24984,17 +25090,26 @@ var init_local_index = __esm(() => {
       }
     }
     computeTierLedgerHiddenItemPks() {
+      return runSteps(this.tierLedgerHiddenSteps());
+    }
+    *tierLedgerHiddenSteps() {
       const ledger = this.visibilityLedger();
       if (!ledger || !ledger.corpusHasCopies(this.corpusId)) {
         return { hidden: [], held: [], metadataLayer: [], metadataLayerContentUnread: [], moving: 0 };
       }
       const conversationOf = (identity) => normalizeConversationId(identity.providerConversationId);
       const keyOf = (identity) => JSON.stringify([identity.provider, identity.accountScope, conversationOf(identity), identity.providerItemId]);
-      const pksFor = (identities) => this.itemRowsForIdentities(identities, conversationOf).map((row) => row.item_pk);
-      const metadataIdentities = ledger.corpusCopyIdentities(this.corpusId, "metadata_layer");
-      const metadataRows = this.itemRowsForIdentities(metadataIdentities, conversationOf);
+      const rowsFor = (identities) => this.itemRowsForIdentitiesSteps(identities, conversationOf);
+      const pksFor = function* (identities) {
+        return (yield* rowsFor(identities)).map((row) => row.item_pk);
+      };
+      const metadataIdentities = yield* ledger.corpusCopyIdentitiesSteps(this.corpusId, "metadata_layer");
+      const metadataRows = yield* rowsFor(metadataIdentities);
       const pksByKey = new Map;
-      for (const row of metadataRows) {
+      for (let index = 0;index < metadataRows.length; index += 1) {
+        if (index > 0 && index % IDENTITY_LOOKUP_SLICE === 0)
+          yield;
+        const row = metadataRows[index];
         const key2 = keyOf(metadataIdentities[row.idx]);
         const pks = pksByKey.get(key2);
         if (pks)
@@ -25002,19 +25117,29 @@ var init_local_index = __esm(() => {
         else
           pksByKey.set(key2, [row.item_pk]);
       }
-      const unreadIdentities = ledger.corpusCopyIdentities(this.corpusId, "metadata_layer_content_unread");
-      const unreadMissed = unreadIdentities.filter((identity) => !pksByKey.has(keyOf(identity)));
+      const unreadIdentities = yield* ledger.corpusCopyIdentitiesSteps(this.corpusId, "metadata_layer_content_unread");
+      const unreadMissed = [];
+      const unreadPks = [];
+      for (let index = 0;index < unreadIdentities.length; index += 1) {
+        if (index > 0 && index % IDENTITY_LOOKUP_SLICE === 0)
+          yield;
+        const identity = unreadIdentities[index];
+        const pks = pksByKey.get(keyOf(identity));
+        if (pks)
+          unreadPks.push(...pks);
+        else
+          unreadMissed.push(identity);
+      }
+      const superseded = yield* ledger.corpusCopyIdentitiesSteps(this.corpusId, "superseded");
+      const staged = yield* ledger.corpusCopyIdentitiesSteps(this.corpusId, "staged");
+      const hidden = yield* pksFor(superseded.concat(staged));
+      const held = yield* pksFor(yield* ledger.corpusCopyIdentitiesSteps(this.corpusId, "held"));
+      const missed = yield* pksFor(unreadMissed);
       return {
-        hidden: pksFor([
-          ...ledger.corpusCopyIdentities(this.corpusId, "superseded"),
-          ...ledger.corpusCopyIdentities(this.corpusId, "staged")
-        ]),
-        held: pksFor(ledger.corpusCopyIdentities(this.corpusId, "held")),
+        hidden,
+        held,
         metadataLayer: metadataRows.map((row) => row.item_pk),
-        metadataLayerContentUnread: [
-          ...unreadIdentities.flatMap((identity) => pksByKey.get(keyOf(identity)) ?? []),
-          ...pksFor(unreadMissed)
-        ],
+        metadataLayerContentUnread: unreadPks.concat(missed),
         moving: ledger.corpusCopyCounts(this.corpusId).moving
       };
     }
@@ -25334,13 +25459,31 @@ var init_local_index = __esm(() => {
     activeChildParents(after, limit) {
       if (!this.childItemColumnsPresent)
         return [];
-      const rows = this.db.query(`
-      SELECT parent_local_item_id, provider, account_scope, MIN(provider_item_id) AS child_item_id, provider_conversation_id FROM items
-      WHERE parent_local_item_id IS NOT NULL AND (tombstoned = 0 OR trust_tier = 'S5')
-        AND (parent_local_item_id, provider, account_scope) > (?, ?, ?)
-      GROUP BY parent_local_item_id, provider, account_scope
-      ORDER BY parent_local_item_id, provider, account_scope LIMIT ?
-    `).all(after?.parentLocalItemId ?? "", after?.provider ?? "", after?.accountScope ?? "", Math.max(1, Math.floor(limit)));
+      const want = Math.max(1, Math.floor(limit));
+      const afterKey = [after?.parentLocalItemId ?? "", after?.provider ?? "", after?.accountScope ?? ""];
+      const rows = [];
+      let from = afterKey[0];
+      let inclusive = true;
+      while (rows.length < want) {
+        const window2 = this.db.query(`
+        SELECT parent_local_item_id AS parent FROM items
+        WHERE parent_local_item_id IS NOT NULL AND parent_local_item_id ${inclusive ? ">=" : ">"} ?
+        GROUP BY parent_local_item_id ORDER BY parent_local_item_id LIMIT ?
+      `).all(from, want).map((row) => row.parent);
+        if (window2.length === 0)
+          break;
+        rows.push(...this.db.query(`
+        SELECT parent_local_item_id, provider, account_scope, MIN(provider_item_id) AS child_item_id, provider_conversation_id FROM items
+        WHERE parent_local_item_id IN (SELECT value FROM json_each(?)) AND (tombstoned = 0 OR trust_tier = 'S5')
+          AND (parent_local_item_id, provider, account_scope) > (?, ?, ?)
+        GROUP BY parent_local_item_id, provider, account_scope
+        ORDER BY parent_local_item_id, provider, account_scope LIMIT ?
+      `).all(JSON.stringify(window2), ...afterKey, want - rows.length));
+        if (window2.length < want)
+          break;
+        from = window2[window2.length - 1];
+        inclusive = false;
+      }
       return rows.map((row) => ({
         provider: row.provider,
         accountScope: row.account_scope,
@@ -26111,6 +26254,39 @@ var init_local_index = __esm(() => {
       if (ref.contentHash !== undefined && row.content_hash !== ref.contentHash)
         return false;
       return true;
+    }
+    itemsMatchingExtractionRefs(refs, filters) {
+      if (refs.length === 0)
+        return [];
+      const predicate = connectorStoreFilterSql(filters);
+      const ids = [...new Set(refs.map((ref) => ref.localItemId))];
+      const first = new Map;
+      const keyOf = (localItemId, providerItemId, provider, accountScope) => JSON.stringify([localItemId, providerItemId, provider, accountScope]);
+      for (let offset = 0;offset < ids.length; offset += 5000) {
+        const rows = this.db.query(`
+        SELECT i.local_item_id, i.provider_item_id, i.provider, i.account_scope, i.source_version, i.content_hash
+        FROM items i
+        WHERE i.local_item_id IN (SELECT value FROM json_each(?))
+          AND i.tombstoned = 0
+          ${predicate.sql}
+        ORDER BY i.item_pk
+      `).all(JSON.stringify(ids.slice(offset, offset + 5000)), ...predicate.params);
+        for (const row of rows) {
+          const key2 = keyOf(row.local_item_id, row.provider_item_id, row.provider, row.account_scope);
+          if (!first.has(key2))
+            first.set(key2, { source_version: row.source_version, content_hash: row.content_hash });
+        }
+      }
+      return refs.map((ref) => {
+        const row = first.get(keyOf(ref.localItemId, ref.providerItemId, ref.provider, ref.accountScope));
+        if (!row)
+          return false;
+        if (ref.sourceVersion !== undefined && row.source_version !== ref.sourceVersion)
+          return false;
+        if (ref.contentHash !== undefined && row.content_hash !== ref.contentHash)
+          return false;
+        return true;
+      });
     }
     [READ_RESULT_PROJECTION_LOCATOR_URI](identity, locatorPathScope) {
       const scopePredicate = connectorStoreFilterSql(locatorPathScope ? { locatorPathScope } : undefined);
@@ -29059,14 +29235,14 @@ var init_local_index = __esm(() => {
     embeddingFailedItemCount() {
       return this.embeddingFailureState?.size ?? 0;
     }
-    missingEmbeddingItemIds(embedder, limit, scope = {}) {
+    missingEmbeddingItemIds(embedder, limit, scope = {}, tierHidden) {
       if (limit <= 0)
         return [];
       const modelId = embedder.modelId;
       const accountScope = normalizeOptionalAccountScope(scope.accountScope);
       const scoped = connectorStoreFilterSql(scope.filters);
       const failed = this.embeddingFailureState;
-      const tierExclusion = this.embeddingTierExclusionFilter();
+      const tierExclusion = this.embeddingTierExclusionFilter(0, tierHidden);
       const privateTier = this.privateTierEmbeddingFilter(embedder);
       const filter = `${tierExclusion.filter} ${privateTier.filter} ${accountScope ? "AND i.account_scope = ?" : ""} ${scoped.sql}`;
       const params = [...tierExclusion.params, ...privateTier.params, ...accountScope ? [accountScope] : [], ...scoped.params];
@@ -29083,6 +29259,12 @@ var init_local_index = __esm(() => {
       LIMIT ?
     `).all(modelId, ...params, limit + (failed?.size ?? 0));
       return rows.map((row) => row.local_item_id).filter((localItemId) => !failed?.has(localItemId)).slice(0, limit);
+    }
+    async missingEmbeddingItemIdsInTurns(embedder, limit, scope = {}) {
+      if (limit <= 0)
+        return [];
+      const tierHidden = await this.tierHiddenItemPksInTurns();
+      return this.missingEmbeddingItemIds(embedder, limit, scope, tierHidden);
     }
     embeddingOwedItemIds(modelId, localItemIds) {
       if (localItemIds.length === 0)
@@ -29133,19 +29315,19 @@ var init_local_index = __esm(() => {
         extractedChars: row.chars
       };
     }
-    embeddingTierExclusionFilter(countsMaxAgeMs = 0) {
-      const tierExcluded = this.tierHiddenItemPks({ countsMaxAgeMs });
+    embeddingTierExclusionFilter(countsMaxAgeMs = 0, tierHidden) {
+      const tierExcluded = tierHidden ?? this.tierHiddenItemPks({ countsMaxAgeMs });
       const excludedPks = [...tierExcluded.hidden, ...tierExcluded.held, ...tierExcluded.metadataLayer];
       return excludedPks.length > 0 ? { filter: "AND i.item_pk NOT IN (SELECT value FROM json_each(?))", params: [JSON.stringify(excludedPks)] } : { filter: "", params: [] };
     }
     embeddingBatchRecheck(batch, embeddableTiers) {
       const itemPks = [...new Set(batch.map((row) => row.item_pk))];
-      const current2 = new Map(this.db.query(`
-      SELECT item_pk, trust_tier, tombstoned FROM items
+      const currentRows = this.db.query(`
+      SELECT item_pk, trust_tier, tombstoned, provider, account_scope, provider_item_id, provider_conversation_id FROM items
       WHERE item_pk IN (SELECT value FROM json_each(?))
-    `).all(JSON.stringify(itemPks)).map((row) => [row.item_pk, row]));
-      const tierHidden = this.tierHiddenItemPks();
-      const hidden = new Set([...tierHidden.hidden, ...tierHidden.held, ...tierHidden.metadataLayer]);
+    `).all(JSON.stringify(itemPks));
+      const current2 = new Map(currentRows.map((row) => [row.item_pk, row]));
+      const hidden = this.embeddingHiddenAmong(currentRows);
       const kept = [];
       let privateTier = 0;
       let notVisible = 0;
@@ -29153,13 +29335,41 @@ var init_local_index = __esm(() => {
         const item = current2.get(row.item_pk);
         if (!item || item.tombstoned !== 0 || hidden.has(row.item_pk)) {
           notVisible += 1;
-        } else if (!embeddableTiers.includes(item.trust_tier)) {
+        } else if (embeddableTiers !== undefined && !embeddableTiers.includes(item.trust_tier)) {
           privateTier += 1;
         } else {
           kept.push(row);
         }
       }
       return { kept, privateTier, notVisible };
+    }
+    embeddingHiddenAmong(rows) {
+      const hidden = new Set;
+      if (rows.length === 0)
+        return hidden;
+      const identityOf2 = (row) => ({
+        provider: row.provider,
+        accountScope: row.account_scope,
+        providerItemId: row.provider_item_id,
+        ...row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}
+      });
+      const ledger = this.visibilityLedger();
+      if (ledger && ledger.corpusHasCopies(this.corpusId)) {
+        const copies = ledger.copiesForMany(rows.map(identityOf2));
+        for (const row of rows) {
+          const here = (copies.get(tierLedgerIdentityKey(identityOf2(row))) ?? []).filter((copy) => copy.corpusId === this.corpusId);
+          if (here.some((copy) => copy.state === "superseded" || copy.state === "staged" || copy.state === "current" && (copy.embedHold || copy.layers === "metadata"))) {
+            hidden.add(row.item_pk);
+          }
+        }
+      }
+      const children = hiddenChildKeys(this.childVisibilityLane(), rows.map(identityOf2));
+      if (children.size > 0) {
+        for (const row of rows)
+          if (children.has(tierLedgerIdentityKey(identityOf2(row))))
+            hidden.add(row.item_pk);
+      }
+      return hidden;
     }
     privateTierEmbeddingFilter(embedder) {
       const tiers = connectorStoreEmbeddableRowTiers(this.trustDomain, embedder);
@@ -29235,7 +29445,8 @@ var init_local_index = __esm(() => {
       if (priorCounts && (priorCounts.modelId !== provider.modelId || priorCounts.embeddingProvider !== provider.provider || priorCounts.embeddingBackend !== provider.backend || priorCounts.embeddingDimension !== provider.dimension || priorCounts.embeddingEpoch !== provider.epochId)) {
         throw new Error("Connector store embedding journal provider changed.");
       }
-      const selectedRows = this.embeddingSourceRows(options.localItemIds, options.accountScope, options.filters);
+      const tierHidden = await this.tierHiddenItemPksInTurns();
+      const selectedRows = this.embeddingSourceRows(options.localItemIds, options.accountScope, options.filters, tierHidden);
       const embeddableTiers = connectorStoreEmbeddableRowTiers(this.trustDomain, provider);
       const rows = embeddableTiers === undefined ? selectedRows : selectedRows.filter((row) => embeddableTiers.includes(row.trust_tier));
       let privateTierWithheldChunks = 0;
@@ -29337,7 +29548,7 @@ var init_local_index = __esm(() => {
       for (let offset = 0;offset < pending.length; offset += EMBEDDING_BATCH_SIZE) {
         let batch = pending.slice(offset, offset + EMBEDDING_BATCH_SIZE);
         await options.assertAuthorized?.();
-        if (embeddableTiers !== undefined) {
+        {
           const recheck = this.embeddingBatchRecheck(batch, embeddableTiers);
           privateTierWithheldChunks += recheck.privateTier;
           staleSkipped += recheck.notVisible + recheck.privateTier;
@@ -29888,14 +30099,14 @@ var init_local_index = __esm(() => {
       }
       return { token };
     }
-    embeddingSourceRows(localItemIds, accountScope, filters) {
+    embeddingSourceRows(localItemIds, accountScope, filters, tierHidden) {
       const selectedLocalItemIds = normalizeEmbedLocalItemIds(localItemIds);
       if (selectedLocalItemIds && selectedLocalItemIds.length === 0)
         return [];
       const selectedAccount = normalizeOptionalAccountScope(accountScope);
       const selectedFilters = connectorStoreFilterSql(filters);
       const itemFilter = selectedLocalItemIds ? ` AND i.local_item_id IN (${selectedLocalItemIds.map(() => "?").join(", ")})` : "";
-      const tierExcluded = this.tierHiddenItemPks();
+      const tierExcluded = tierHidden ?? this.tierHiddenItemPks();
       const excludedPks = [...tierExcluded.hidden, ...tierExcluded.held, ...tierExcluded.metadataLayer];
       const tierFilter = excludedPks.length > 0 ? " AND i.item_pk NOT IN (SELECT value FROM json_each(?))" : "";
       return this.db.query(`
@@ -30313,13 +30524,34 @@ var init_local_index = __esm(() => {
       const key2 = JSON.stringify(scope ?? null);
       const memos = this.settledUnreadableCountMemo ??= new Map;
       const memo = memos.get(key2);
-      if (maxAgeMs > 0 && memo && Date.now() - memo.at < maxAgeMs)
+      if (maxAgeMs > 0 && memo) {
+        if (Date.now() - memo.at >= maxAgeMs)
+          this.refreshSettledUnreadableCountInTurns(key2, scope);
         return memo.count;
-      const count = this.settledUnreadableRows(scope, { withoutSecretsOverrides: true }).length;
+      }
+      const count = runSteps(this.settledUnreadableRowsSteps(scope, { withoutSecretsOverrides: true })).length;
       if (memos.size > 32)
         memos.clear();
       memos.set(key2, { at: Date.now(), count });
       return count;
+    }
+    settledUnreadableCountRefresh;
+    refreshSettledUnreadableCountInTurns(key2, scope) {
+      const running = this.settledUnreadableCountRefresh ??= new Set;
+      if (running.has(key2))
+        return;
+      running.add(key2);
+      (async () => {
+        try {
+          const count = (await runStepsInTurns(this.settledUnreadableRowsSteps(scope, { withoutSecretsOverrides: true }))).length;
+          const memos = this.settledUnreadableCountMemo ??= new Map;
+          if (memos.size > 32)
+            memos.clear();
+          memos.set(key2, { at: Date.now(), count });
+        } catch {} finally {
+          running.delete(key2);
+        }
+      })();
     }
     settledUnreadableCountMemo;
     extractionEnded;
@@ -30328,6 +30560,9 @@ var init_local_index = __esm(() => {
       this.settledUnreadableCountMemo = undefined;
     }
     settledUnreadableRows(scope, options = {}) {
+      return runSteps(this.settledUnreadableRowsSteps(scope, options));
+    }
+    *settledUnreadableRowsSteps(scope, options = {}) {
       if (scope?.itemsAllowed === false || scope?.contentAllowed === false)
         return [];
       const ledger = this.visibilityLedger();
@@ -30337,10 +30572,23 @@ var init_local_index = __esm(() => {
       const filters = connectorStoreFilterSql(scope?.contentFilters ?? scope?.itemFilters);
       const account = normalizeOptionalAccountScope(scope?.accountScope);
       const ended = this.extractionEnded;
-      return this.itemRowsForIdentities(identities, (identity) => identity.providerConversationId ?? "", {
-        sql: `${account ? "AND i.account_scope = ?" : ""} ${filters.sql}`,
+      const rows = yield* this.itemRowsForIdentitiesSteps(identities, (identity) => identity.providerConversationId ?? "", {
+        sql: `${this.childItemColumnsPresent ? "AND COALESCE(i.bytes_available, 1) <> 0" : ""} ${account ? "AND i.account_scope = ?" : ""} ${filters.sql}`,
         params: [...account ? [account] : [], ...filters.params]
-      }).map((row) => ({ identity: identities[row.idx], row })).filter(({ identity }) => !ended || ended(identity));
+      });
+      return rows.map((row) => ({ identity: identities[row.idx], row })).filter(({ identity }) => !ended || ended(identity));
+    }
+    *itemRowsForIdentitiesSteps(identities, conversationOf, extra = { sql: "", params: [] }) {
+      const out = [];
+      for (let offset = 0;offset < identities.length; offset += IDENTITY_LOOKUP_SLICE) {
+        if (offset > 0)
+          yield;
+        for (const row of this.itemRowsForIdentities(identities.slice(offset, offset + IDENTITY_LOOKUP_SLICE), conversationOf, extra)) {
+          row.idx += offset;
+          out.push(row);
+        }
+      }
+      return out;
     }
     itemRowsForIdentities(identities, conversationOf, extra = { sql: "", params: [] }) {
       if (identities.length === 0)
@@ -30374,7 +30622,8 @@ var init_local_index = __esm(() => {
             ...row.title ? { name: row.title } : {},
             ...row.source_version ? { sourceVersion: row.source_version } : {}
           },
-          failedAt: record.decidedAt
+          failedAt: record.decidedAt,
+          errorKind: "privacy_check_missing"
         });
       }
       return out;
@@ -37815,7 +38064,7 @@ var init_source_dashboard = __esm(() => {
         source: "telegram",
         instructions: [
           "Telegram pairs with a phone-number login on this computer.",
-          "Ask your agent to start Telegram pairing; this card updates once the login completes."
+          "Open Keys in the dashboard on this computer and press Pair Telegram; this card updates once the login completes."
         ]
       }
     },
@@ -37837,7 +38086,7 @@ var init_source_dashboard = __esm(() => {
         instructions: [
           "WhatsApp pairs by scanning a QR code from your phone (WhatsApp, then Linked devices).",
           WHATSAPP_UNOFFICIAL_CLIENT_NOTICE,
-          "Ask your agent to start WhatsApp pairing; this card updates once the scan completes."
+          "Open Keys in the dashboard on this computer and press Pair WhatsApp to show the QR code; this card updates once the scan completes."
         ]
       }
     },
@@ -37897,7 +38146,7 @@ function syncMid(name) {
 function archivePickIntro(formats = ARCHIVE_FORMATS) {
   return `Drop a file or folder from this computer: ${formats.map((format) => format.chooseHint ?? format.label).join("; or ")}. Olympus keeps a copy in its own storage to read it until you remove the import, and never changes the original.`;
 }
-var DASHBOARD_MISSING_FOLDER = "A folder you chose is missing", DASHBOARD_FOLDER_NEEDS_PERMISSION = "Your Mac will not let Olympus open a folder you chose. In System Settings, choose Privacy & Security, then Files & Folders, and switch on Olympus Engine (or the app your Mac named when it asked).", DASHBOARD_FOLDER_NEEDS_HELPER = "Desktop, Documents, Downloads, iCloud Drive and other disks need the Olympus helper app. Update Olympus to add it, or choose a folder outside them.", DASHBOARD_FOLDER_UNREADABLE = "Your user account is not allowed to open a folder you chose. Change who may open that folder, or choose another one.", DASHBOARD_STATUS_PRESENTATION, DASHBOARD_UNCONNECTED_STATES, DASHBOARD_SIGNED_OUT = "signed out", DASHBOARD_MANY_UNREADABLE_LABEL = "Many files cannot be read", READINESS_REASONS, CAPTURE_JUDGED_CONNECTION_STATES, CAPTURE_UNEXPECTED_STOP_REASONS, REDIRECT_REFUSAL_CODES, DASHBOARD_INDEX_FASTER, DASHBOARD_LIVE_PASS_ERROR_COPY, DASHBOARD_UNREADABLE_NOTE = "Olympus does not retry these, and nothing is waiting on you.", DASHBOARD_UNREADABLE_MORE = "and {count} more", DASHBOARD_UNREADABLE_NOTE_MANY, DASHBOARD_UNREADABLE_REASON_WORDS, DASHBOARD_SOURCE_FAILURE_WORDS, DASHBOARD_FAILURE_REF = "Olympus's log on the computer has the details under reference {ref}.", DASHBOARD_FAILURE_LOG = "Olympus's log on the computer has the details.", DASHBOARD_CHATGPT_VOCABULARY, DASHBOARD_CHATGPT_CONNECTION_COPY, DASHBOARD_CHATGPT_PAGE_COPY, DASHBOARD_WORKER_TOKEN_AGENT_PROMPT, ARCHIVE_PICK_INTRO, DASHBOARD_ARCHIVE_NOUNS, DASHBOARD_ARCHIVE_COPY, DASHBOARD_COMPUTER_PANEL_COPY, DASHBOARD_CHATGPT_SETUP_LABELS, DASHBOARD_CHATGPT_PICKER_COPY, DASHBOARD_PRIVACY_QUESTIONS_COPY, DASHBOARD_CHATGPT_PRIVACY_COPY, DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY, DASHBOARD_LOCAL_COPY;
+var DASHBOARD_MISSING_FOLDER = "A folder you chose is missing", DASHBOARD_FOLDER_NEEDS_PERMISSION = "Your Mac will not let Olympus open a folder you chose. In System Settings, choose Privacy & Security, then Files & Folders, and switch on Olympus Engine (or the app your Mac named when it asked).", DASHBOARD_FOLDER_NEEDS_HELPER = "Desktop, Documents, Downloads, iCloud Drive and other disks need the Olympus helper app. Update Olympus to add it, or choose a folder outside them.", DASHBOARD_FOLDER_UNREADABLE = "Your user account is not allowed to open a folder you chose. Change who may open that folder, or choose another one.", DASHBOARD_STATUS_PRESENTATION, DASHBOARD_UNCONNECTED_STATES, DASHBOARD_SIGNED_OUT = "signed out", DASHBOARD_MANY_UNREADABLE_LABEL = "Many files cannot be read", READINESS_REASONS, CAPTURE_JUDGED_CONNECTION_STATES, CAPTURE_UNEXPECTED_STOP_REASONS, REDIRECT_REFUSAL_CODES, DASHBOARD_INDEX_FASTER, DASHBOARD_LIVE_PASS_ERROR_COPY, DASHBOARD_UNREADABLE_FILE_REASON_WORDS, DASHBOARD_UNREADABLE_NOTE = "Olympus does not retry these, and nothing is waiting on you.", DASHBOARD_UNREADABLE_MORE = "and {count} more", DASHBOARD_UNREADABLE_NOTE_MANY, DASHBOARD_UNREADABLE_REASON_WORDS, DASHBOARD_SOURCE_FAILURE_WORDS, DASHBOARD_FAILURE_REF = "Olympus's log on the computer has the details under reference {ref}.", DASHBOARD_FAILURE_LOG = "Olympus's log on the computer has the details.", DASHBOARD_CHATGPT_VOCABULARY, DASHBOARD_CHATGPT_CONNECTION_COPY, DASHBOARD_CHATGPT_PAGE_COPY, DASHBOARD_WORKER_TOKEN_AGENT_PROMPT, ARCHIVE_PICK_INTRO, DASHBOARD_ARCHIVE_NOUNS, DASHBOARD_ARCHIVE_COPY, DASHBOARD_COMPUTER_PANEL_COPY, DASHBOARD_CHATGPT_SETUP_LABELS, DASHBOARD_CHATGPT_PICKER_COPY, DASHBOARD_PRIVACY_QUESTIONS_COPY, DASHBOARD_CHATGPT_PRIVACY_COPY, DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY, DASHBOARD_LOCAL_COPY;
 var init_vocabulary = __esm(() => {
   init_source_dashboard();
   init_archive_formats();
@@ -37947,6 +38196,18 @@ var init_vocabulary = __esm(() => {
     account_changed: "the last check found a different Evernote account than the notes stored here, so nothing was changed: reconnect the earlier account, or delete this card's indexed data first",
     unavailable: "the last check could not reach the provider"
   });
+  DASHBOARD_UNREADABLE_FILE_REASON_WORDS = {
+    password: "locked with a password",
+    damaged: "the file is damaged",
+    too_large: "too large for Olympus to read",
+    no_text: "no text Olympus could find in it",
+    timed_out: "reading it took too long, even with extra time",
+    missing: "the file is no longer where it was",
+    no_access: "Olympus isn't allowed to open it",
+    unsupported: "a format Olympus can't read",
+    privacy_check_missing: "kept Private before it was read",
+    other: "Olympus couldn't read it"
+  };
   DASHBOARD_UNREADABLE_NOTE_MANY = "That is more than a healthy source has, so it may be a problem in Olympus rather than your files." + " The other files still answer questions.";
   DASHBOARD_UNREADABLE_REASON_WORDS = {
     privacy_check_missing: {
@@ -37954,8 +38215,8 @@ var init_vocabulary = __esm(() => {
       other: "{count} items were kept Private without being read because their privacy checks were missing. Open them below to check them, then use Sync now to try reading them again."
     },
     damaged_or_unsupported: {
-      one: "{count} file is damaged or in a format Olympus can't read",
-      other: "{count} files are damaged or in a format Olympus can't read"
+      one: "{count} file Olympus can't read at all",
+      other: "{count} files Olympus can't read at all"
     }
   };
   DASHBOARD_SOURCE_FAILURE_WORDS = {
@@ -38047,6 +38308,7 @@ var init_vocabulary = __esm(() => {
   DASHBOARD_CHATGPT_PAGE_COPY = {
     title: "Olympus",
     loading: "Checking your computer…",
+    loadingSlow: "Loading. This can take a minute while Olympus is importing.",
     upToDate: "Olympus is up to date.",
     needsYou: "Needs you",
     sources: "Sources",
@@ -38105,6 +38367,7 @@ var init_vocabulary = __esm(() => {
     },
     synced: "Synced {when}",
     updated: "Updated {when}",
+    busySlow: "Olympus is busy. Trying again…",
     checkAgain: "Check again",
     tryAgain: "Try again",
     openOlympus: "Open Olympus",
@@ -38191,6 +38454,7 @@ var init_vocabulary = __esm(() => {
     unreadableMore: DASHBOARD_UNREADABLE_MORE,
     unreadableOpen: "Open {name}",
     unreadableReasons: DASHBOARD_UNREADABLE_REASON_WORDS,
+    unreadableFileReasons: DASHBOARD_UNREADABLE_FILE_REASON_WORDS,
     unreadableNote: DASHBOARD_UNREADABLE_NOTE,
     unreadableNoteMany: DASHBOARD_UNREADABLE_NOTE_MANY
   };
@@ -38293,8 +38557,9 @@ var init_vocabulary = __esm(() => {
     },
     inSource: {
       listLabel: "Imported archives",
-      importingLine: "{percent}% read · {items} from this archive so far",
-      importingLineNone: "{percent}% read",
+      importingLine: "Reading your export: {percent}% · {items} so far",
+      importingNote: "The bar above counts these as they become searchable.",
+      importingLineNone: "Reading your export: {percent}%",
       importedLine: "{items} from this archive",
       importedWhen: " · imported {when}",
       alreadyThere: { one: ", of which 1 was already there", many: ", of which {n} were already there" },
@@ -38406,6 +38671,7 @@ var init_vocabulary = __esm(() => {
     remove: "Remove",
     removeConfirm: "Remove {name}? Everything Olympus made from it is deleted. The file itself stays where it is.",
     requestLine: "An agent asked to import {name} from {where}.",
+    startingLine: "Starting to import {name}…",
     fullPath: "Full path: {path}",
     removeRequestLine: "An agent asked to remove {name}, imported from {where}.",
     removeRequestLineNoWhere: "An agent asked to remove {name}.",
@@ -40865,7 +41131,7 @@ var init_dashboard_launch = __esm(() => {
   <body>
     <main>
       <h1 id="status">Opening Olympus…</h1>
-      <p id="detail">If this does not continue, run <code>olympus dashboard</code> again for a fresh link.</p>
+      <p id="detail">If this does not continue, <a href="/dashboard">open the dashboard</a>.</p>
     </main>
     <script>
       (function () {
@@ -40889,7 +41155,8 @@ var init_dashboard_launch = __esm(() => {
         }
         var ticket = take();
         if (!ticket) {
-          status.textContent = 'This link is missing its opening ticket.';
+          // A reload of this page after its ticket was taken: the dashboard has the session, or the way back in.
+          window.location.replace('/dashboard');
           return;
         }
         fetch('/dashboard/control/launch/redeem', {
@@ -40898,7 +41165,10 @@ var init_dashboard_launch = __esm(() => {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ ticket: ticket })
         }).then(function (response) {
-          if (response.ok) {
+          // A link already used or expired (a reload, a second open) still
+          // lands on the dashboard: the session it opened is in its cookie,
+          // and without one the dashboard itself offers the way back in.
+          if (response.ok || response.status === 403) {
             // A Keys target (Connect, a model fix) lands on Keys, where the computer's setup
             // sheets and Models live; it only opens a panel there, never submits anything.
             // A panel target (See why on one source) lands on the dashboard there.
@@ -40910,9 +41180,8 @@ var init_dashboard_launch = __esm(() => {
               : PRIVATE.test(open) ? '/dashboard?private-answers' + (open.indexOf('page.private.') === 0 ? '#' + open.slice(13) : '') : '/dashboard');
             return;
           }
-          status.textContent = response.status === 403
-            ? 'This opening link is no longer valid.'
-            : 'Opening failed.';
+          // Anything else: the dashboard is the way in (its session, or how to get one).
+          window.location.replace('/dashboard');
         }).catch(function () {
           status.textContent = 'Opening failed.';
         });
@@ -41383,9 +41652,14 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
   const P = config.page;
   const C = config.connection;
   const GLOBAL_STATES = ["not_connected", "installing", "mac_offline", "relay_unavailable"];
+  const BUSY_GRACE_MS = 120000;
+  const LOADING_SLOW_AFTER_MS = 8000;
+  const startedAt = Date.now();
   const state = {
     data: null,
     relayDown: false,
+    lastGoodAt: 0,
+    slow: false,
     deleting: {},
     busy: "",
     confirming: "",
@@ -41403,6 +41677,8 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     hostLinks: {},
     computerMeta: null,
     archiveConfirm: {},
+    archiveStarting: {},
+    archivePeak: {},
     unreadablePages: {},
     landing: "",
     landingImport: false,
@@ -41519,6 +41795,15 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
   function onComputer() {
     return state.hostKind === "computer";
   }
+  function callTimeoutMs() {
+    return onComputer() ? Math.max(config.resultTimeoutMs, config.computerResultTimeoutMs) : config.resultTimeoutMs;
+  }
+  function timedOutOnComputer(error) {
+    return onComputer() && error instanceof Error && error.message === "timeout";
+  }
+  function loadingWords() {
+    return state.slow || Date.now() - startedAt >= LOADING_SLOW_AFTER_MS ? P.loadingSlow : P.loading;
+  }
   function readOpenAiGlobals() {
     const host = openai();
     if (!host)
@@ -41542,7 +41827,7 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
       clearTimeout(resultTimer);
     resultTimer = setTimeout(() => {
       resultTimer = null;
-      if (!state.data) {
+      if (!state.data && !onComputer()) {
         relayFailed({ kind: "no_answer" });
         render();
       }
@@ -41550,7 +41835,20 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
   }
   function relayFailed(failure) {
     state.relayDown = true;
+    state.slow = false;
     state.lastFailure = { ...failure, at: Date.now() };
+  }
+  function steadyPercent(archive) {
+    const raw = typeof archive.percent === "number" && isFinite(archive.percent) ? archive.percent : 0;
+    const id = typeof archive.id === "string" ? archive.id : "";
+    if (!id)
+      return raw;
+    const shown = Math.max(state.archivePeak[id] ?? 0, raw);
+    state.archivePeak[id] = shown;
+    return shown;
+  }
+  function busyNotGone(error) {
+    return error instanceof Error && error.message === "timeout" && !state.relayDown && state.lastGoodAt > 0 && Date.now() - state.lastGoodAt < BUSY_GRACE_MS;
   }
   function resultFailure(result) {
     if (!result || !result.isError)
@@ -41597,6 +41895,8 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
       state.computerMeta = meta && typeof meta === "object" ? meta : null;
       state.unreadablePages = {};
       state.relayDown = false;
+      state.lastGoodAt = Date.now();
+      state.slow = false;
       settleDeleting(content);
       if (!state.busy)
         state.syncPressed = {};
@@ -41629,7 +41929,7 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     state.notice = "";
     state.actionError = null;
     render();
-    request("tools/call", { name, arguments: args || {} }, config.resultTimeoutMs).then((result) => {
+    request("tools/call", { name, arguments: args || {} }, callTimeoutMs()).then((result) => {
       if (state.busy === key2)
         state.busy = "";
       if (mine !== generation) {
@@ -41701,7 +42001,13 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
         state.busy = "";
       if (name === config.syncTool)
         state.syncPressed = {};
-      if (mine === generation)
+      if (mine === generation && name === config.toolName && timedOutOnComputer(error)) {
+        state.slow = true;
+        if (refreshTimer)
+          clearTimeout(refreshTimer);
+        refreshTimer = setTimeout(backgroundRefresh, R.activeMs);
+        nextRefreshAt = Date.now() + R.activeMs;
+      } else if (mine === generation)
         relayFailed(rejectionFailure(error));
       redraw();
     });
@@ -41712,7 +42018,7 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
   function callRaw(name, args) {
     const privacyInference = name === config.privacy.tools.questions || name === config.privacy.tools.check;
     const providerListing = name === config.picker.tools.scopeList || name === config.picker.tools.scopeSet;
-    const timeoutMs = privacyInference ? Math.max(config.resultTimeoutMs, 150000) : providerListing ? Math.max(config.resultTimeoutMs, 120000) : config.resultTimeoutMs;
+    const timeoutMs = privacyInference ? Math.max(config.resultTimeoutMs, 150000) : providerListing ? Math.max(config.resultTimeoutMs, 120000) : callTimeoutMs();
     return request("tools/call", { name, arguments: args || {} }, timeoutMs);
   }
   function openLink(href) {
@@ -41974,7 +42280,8 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
       return wrap;
     const blocked = globalReason();
     if (blocked || fix.disabledReason) {
-      add(wrap, button(fix.label, key2, null, style), rowReason(blocked || String(fix.disabledReason)));
+      const saidAbove = !fix.disabledReason && (connectionState() === "relay_unavailable" || connectionState() === "mac_offline");
+      add(wrap, button(fix.label, key2, null, style), saidAbove ? null : rowReason(blocked || String(fix.disabledReason)));
       if (!blocked)
         add(wrap, howLink(fix, key2, source));
       return wrap;
@@ -42155,6 +42462,8 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     const data2 = state.data;
     if (!data2 || state.relayDown)
       return "";
+    if (state.slow)
+      return P.busySlow;
     const at = Date.parse(data2.generatedAt);
     if (!isFinite(at) || Date.now() - at < config.staleAfterMs)
       return "";
@@ -42263,8 +42572,8 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
       const report = el("pre", "help", source.supportDetails);
       const copy = copyControl(report, "support:" + id);
       copy.textContent = "Copy details";
-      const details2 = add(el("details", "disclosure"), el("summary", "", "Details for support"), report, copy, el("p", "muted", "No names, numbers, emails, chats or folder titles."));
-      add(main, details2);
+      const support = add(details("support-details:" + id, doc.createTextNode("Details for support"), "disclosure"), report, copy, el("p", "muted", "No names, numbers, emails, chats or folder titles."));
+      add(main, support);
     }
     if (why)
       add(main, why);
@@ -42491,8 +42800,10 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
         if (content && content.status === "confirm_account") {
           const source = content.source && typeof content.source.label === "string" ? content.source.label : "";
           state.archiveConfirm[requestId] = { source, ...content.reconfirm === true ? { reconfirm: true } : {} };
-        } else
+        } else {
           delete state.archiveConfirm[requestId];
+          state.archiveStarting[requestId] = Date.now();
+        }
       }
     }
     return archiveOutcome(result && result.structuredContent);
@@ -42606,9 +42917,9 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
       const pct = typeof entry.percent === "number" && isFinite(entry.percent) ? entry.percent : 0;
       add(item, el("p", "muted", fill2(S.notRunningLine, { percent: percent(pct) })));
     } else if (entry.status === "importing") {
-      const pct = typeof entry.percent === "number" && isFinite(entry.percent) ? entry.percent : 0;
+      const pct = steadyPercent(entry);
       const line = read > 0 ? fill2(S.importingLine, { percent: percent(pct), items: itemCount(entry, read) }) + alreadyThereNote(entry) : fill2(S.importingLineNone, { percent: percent(pct) });
-      add(item, add(el("div", "archive-progress"), progressBar(pct, line), el("p", "muted", line)));
+      add(item, add(el("div", "archive-progress"), progressBar(pct, line), el("p", "muted", line), el("p", "muted", S.importingNote)));
     } else if (entry.status === "imported") {
       const when = typeof entry.importedAt === "string" ? ago(entry.importedAt) : "";
       if (read === 0) {
@@ -42683,6 +42994,14 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
       add(item, add(el("div", "archive-actions"), fixControl({ label: fill2(A.account.add, { source }), tool: H.archiveApproveTool, args: { request_id: request2.id, confirm_account: true } }, key2 + ":confirm", "plain", false), ...asked.reconfirm ? [] : [fixControl({ label: A.account.apart, tool: H.archiveApproveTool, args: { request_id: request2.id, keep_apart: true } }, key2 + ":apart", "plain", false)], fixControl({ label: A.decline, tool: H.archiveDeclineTool, args: { request_id: request2.id } }, key2 + ":decline", "plain", false)));
       return item;
     }
+    const startedAt2 = state.archiveStarting[request2.id];
+    if (request2.status !== "pending" || startedAt2 !== undefined && Date.now() - startedAt2 > 60000)
+      delete state.archiveStarting[request2.id];
+    else if (startedAt2 !== undefined) {
+      const line = el("p", "muted", fill2(A.startingLine, { name: request2.name }));
+      line.setAttribute("role", "status");
+      return add(item, line);
+    }
     if (request2.status === "pending") {
       add(item, isolatedLine("", A.requestLine, { name: request2.name, where }));
       add(item, archiveFullPath(request2));
@@ -42739,7 +43058,7 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     } else if (halted) {
       add(item, el("p", "muted", A.removingNotRunningLine));
     } else if (archive.status === "importing") {
-      const pct = typeof archive.percent === "number" && isFinite(archive.percent) ? archive.percent : 0;
+      const pct = steadyPercent(archive);
       const line = uncounted ? fill2(A.importingLineUncounted, { percent: percent(pct) }) : fill2(A.importingLine, { percent: percent(pct), items: itemCount(archive, items) });
       add(item, add(el("div", "archive-progress"), progressBar(pct, line), el("p", "muted", line)));
     } else if (archive.status === "imported") {
@@ -42871,6 +43190,9 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
           add(item, control);
         } else
           add(item, document.createTextNode(file.name));
+        const why = file.reason ? P.unreadableFileReasons[file.reason] : "";
+        if (typeof why === "string" && why)
+          add(item, el("span", "muted file-why", " · " + why));
         add(list, item);
       });
       if (own3.more > 0) {
@@ -42903,7 +43225,10 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     return typeof value === "string" && value.length <= 64 && /^[0-9TZ:.+-]+~[A-Za-z0-9_-]+$/.test(value) ? value : "";
   }
   function unreadableEntries(input) {
-    return input.filter((file) => file && typeof file.name === "string" && file.name).map((file) => typeof file.token === "string" && /^[A-Za-z0-9_-]{16,128}$/.test(file.token) ? { name: file.name, token: file.token } : { name: file.name });
+    return input.filter((file) => file && typeof file.name === "string" && file.name).map((file) => {
+      const reason = typeof file.reason === "string" && Object.prototype.hasOwnProperty.call(P.unreadableFileReasons, file.reason) ? { reason: file.reason } : {};
+      return typeof file.token === "string" && /^[A-Za-z0-9_-]{16,128}$/.test(file.token) ? { name: file.name, token: file.token, ...reason } : { name: file.name, ...reason };
+    });
   }
   function moreCount(value) {
     return typeof value === "number" && isFinite(value) && value > 0 ? Math.floor(value) : 0;
@@ -43420,7 +43745,7 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     const top = connectionBanner() || (data2 && data2.blocker ? itemBanner(data2.blocker, "blocker", false) : null) || (data2 && data2.needsYou && data2.needsYou[0] ? itemBanner(data2.needsYou[0], "need:" + String(data2.needsYou[0].id || 0), false) : null);
     add(card, top);
     if (!top && !data2)
-      add(card, el("p", "muted", P.loading));
+      add(card, el("p", "muted", loadingWords()));
     if (data2 && data2.progress && !state.relayDown && !progressFinished(data2.progress))
       add(card, el("p", "progress-line", progressText(data2.progress)));
     else if (!top && data2)
@@ -43444,7 +43769,7 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     }
     if (!data2) {
       if (!state.relayDown)
-        add(page2, el("p", "muted", P.loading));
+        add(page2, el("p", "muted", loadingWords()));
       return page2;
     }
     add(page2, data2.blocker ? itemBanner(data2.blocker, "blocker", true) : null);
@@ -43582,7 +43907,7 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
       const mine = supersede();
       state.busy = "refresh";
       render(focusKey);
-      request("tools/call", { name: config.toolName, arguments: {} }, config.resultTimeoutMs).then((result) => {
+      request("tools/call", { name: config.toolName, arguments: {} }, callTimeoutMs()).then((result) => {
         if (state.busy === "refresh")
           state.busy = "";
         if (mine !== generation)
@@ -43687,7 +44012,7 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     }
     refreshing = true;
     const mine = generation;
-    request("tools/call", { name: config.toolName, arguments: {} }, config.resultTimeoutMs).then((result) => {
+    request("tools/call", { name: config.toolName, arguments: {} }, callTimeoutMs()).then((result) => {
       refreshing = false;
       if (mine !== generation)
         return scheduleRefresh();
@@ -43700,6 +44025,13 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
       refreshing = false;
       if (mine !== generation)
         return scheduleRefresh();
+      if (busyNotGone(error) || timedOutOnComputer(error)) {
+        state.slow = true;
+        redraw();
+        refreshTimer = setTimeout(backgroundRefresh, R.activeMs);
+        nextRefreshAt = Date.now() + R.activeMs;
+        return;
+      }
       refreshFailures++;
       relayFailed(rejectionFailure(error));
       redraw();
@@ -43747,6 +44079,10 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
   });
   if (!state.data)
     waitForResult();
+  setTimeout(() => {
+    if (!state.data)
+      redraw();
+  }, LOADING_SLOW_AFTER_MS);
 }
 var RELAY_FAILURE_TEXT_MAX = 300;
 
@@ -47371,6 +47707,7 @@ function chatgptDashboardPageHtml(options = {}) {
     page: DASHBOARD_CHATGPT_PAGE_COPY,
     statusTone: STATUS_TONE,
     resultTimeoutMs: options.resultTimeoutMs ?? CHATGPT_DASHBOARD_RESULT_TIMEOUT_MS,
+    computerResultTimeoutMs: options.computerResultTimeoutMs ?? options.resultTimeoutMs ?? CHATGPT_DASHBOARD_COMPUTER_RESULT_TIMEOUT_MS,
     staleAfterMs: options.staleAfterMs ?? CHATGPT_DASHBOARD_STALE_AFTER_MS,
     refresh: { ...CHATGPT_DASHBOARD_REFRESH, ...options.refresh },
     picker: {
@@ -47432,7 +47769,7 @@ function privacyProgramSource() {
 function scriptJson(value) {
   return JSON.stringify(value).split("<").join("\\u003c").split("\u2028").join("\\u2028").split("\u2029").join("\\u2029");
 }
-var CHATGPT_DASHBOARD_RESULT_TIMEOUT_MS = 20000, CHATGPT_INLINE_ERROR_CODES, CHATGPT_DASHBOARD_STALE_AFTER_MS, CHATGPT_DASHBOARD_REFRESH, STATUS_TONE, CHATGPT_DASHBOARD_LIGHT, CHATGPT_DASHBOARD_DARK, CHATGPT_DASHBOARD_CSS, CHATGPT_ARCHIVES_SOURCE_ID = "archive.imports", CHATGPT_DASHBOARD_LANDED_MS = 4000;
+var CHATGPT_DASHBOARD_RESULT_TIMEOUT_MS = 20000, CHATGPT_DASHBOARD_COMPUTER_RESULT_TIMEOUT_MS = 120000, CHATGPT_INLINE_ERROR_CODES, CHATGPT_DASHBOARD_STALE_AFTER_MS, CHATGPT_DASHBOARD_REFRESH, STATUS_TONE, CHATGPT_DASHBOARD_LIGHT, CHATGPT_DASHBOARD_DARK, CHATGPT_DASHBOARD_CSS, CHATGPT_ARCHIVES_SOURCE_ID = "archive.imports", CHATGPT_DASHBOARD_LANDED_MS = 4000;
 var init_page = __esm(() => {
   init_vocabulary();
   init_dashboard_contract();
@@ -66542,6 +66879,9 @@ summary{cursor:pointer;color:var(--muted);font-size:0.875rem}
 form{display:flex;flex-wrap:wrap;gap:0.5rem;align-items:center;margin-top:0.5rem}
 input{font:inherit;font-size:0.875rem;min-height:2.25rem;padding:0.375rem 0.75rem;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--text);min-width:0;max-width:100%}
 .status{color:var(--muted);font-size:0.875rem}
+.pairing{width:min(40rem,calc(100% - 2rem));max-height:calc(100% - 2rem);padding:0;border:1px solid var(--line);border-radius:12px;background:var(--bg);color:var(--text)}
+.pairing::backdrop{background:rgba(0,0,0,0.45)}
+.pairing .bar{display:flex;justify-content:flex-end;padding:0.5rem 0.75rem 0}
 `;
 var COMPUTER_HOST_PAGE_CSP = [
   "default-src 'none'",
@@ -67188,6 +67528,7 @@ init_operation_error();
 init_source_ingestion_policy();
 init_dropbox_files();
 init_provider_client();
+init_runner();
 init_drive_extraction_source();
 init_connector_store();
 init_google_connectors();
@@ -71136,12 +71477,12 @@ class TierSnifferService {
     this.abort = undefined;
     this.lastTick = tick;
     this.reportWaiting(tick, overran);
-    if (this.waitingReason === "model_not_answering") {
-      this.notAnsweringPasses += 1;
-      this.notAnsweringUntilMs = this.clockMs() + (this.notAnsweringPasses === 1 ? NOT_ANSWERING_FIRST_BACKOFF_MS : NOT_ANSWERING_MAX_BACKOFF_MS);
-    } else if (tick.state === "ran" && tick.report.calls > tick.report.failedCalls) {
+    if (tick.state === "ran" && tick.report.calls > tick.report.failedCalls) {
       this.notAnsweringPasses = 0;
       this.notAnsweringUntilMs = 0;
+    } else if (this.waitingReason === "model_not_answering") {
+      this.notAnsweringPasses += 1;
+      this.notAnsweringUntilMs = this.clockMs() + (this.notAnsweringPasses === 1 ? NOT_ANSWERING_FIRST_BACKOFF_MS : NOT_ANSWERING_MAX_BACKOFF_MS);
     }
     if (this.options.log && this.clockMs() - this.lastBacklogLogMs >= 60000) {
       this.lastBacklogLogMs = this.clockMs();
@@ -71476,6 +71817,9 @@ class TierSnifferService {
         const stores = set2?.openStores() ?? this.options.stores().filter((store) => (store.tierLedgerPathInUse?.() ?? tierLedgerPathForStore(store.dbPath)) === ledgerPath || tierLedgerPathForStore(store.dbPath) === ledgerPath);
         if (stores.length === 0 || stores.some((store) => !store.exportItemCopy))
           continue;
+        if (ledger.readMeta(TIER_LEDGER_UNREAD_RELABEL_DONE) !== "1" && ledger.relabelUnreadFailSafe() === 0) {
+          ledger.writeMeta(TIER_LEDGER_UNREAD_RELABEL_DONE, "1");
+        }
         const saved = ledger.readMeta(cursorKey);
         const after = saved ? JSON.parse(saved) : undefined;
         const rows = ledger.listPending({ limit: 100, ...after ? { after } : {} });
@@ -71541,7 +71885,7 @@ class TierSnifferService {
   }
   waitingForExtraction(ledger, row, identity) {
     try {
-      if (!this.options.extractionState || row.family !== "file" || !row.routed)
+      if (!this.options.extractionState || !row.routed)
         return false;
       const copies = ledger.copies(identity);
       if (copies.length === 0)
@@ -71731,6 +72075,8 @@ class TierSnifferService {
           this.moveFailures.delete(failureKey);
         } catch (error2) {
           report.failed += 1;
+          const why = moveFailureName(error2);
+          report.failedBy = { ...report.failedBy, [why]: (report.failedBy?.[why] ?? 0) + 1 };
           if (error2 instanceof TierMoveContentChangedError) {
             const current2 = set2.ledger.getCurrent(identity);
             if (current2 && current2.state !== "moving") {
@@ -71760,7 +72106,7 @@ class TierSnifferService {
       }
     }
     if (report.moved > 0 || report.failed > 0) {
-      this.options.log?.(`Olympus tier sniffer: ${report.moved} automatic tier move(s), ${report.failed} failed` + `${report.abandoned ? `, ${report.abandoned} stale move(s) given up (back where they were)` : ""}` + `${report.staleRaises ? `, ${report.staleRaises} stale raise(s) kept hidden and queued` : ""}.`);
+      this.options.log?.(`Olympus tier sniffer: ${report.moved} automatic tier move(s), ${report.failed} failed` + `${report.failedBy ? ` (${Object.entries(report.failedBy).map(([why, n]) => `${why} ×${n}`).join(", ")})` : ""}` + `${report.abandoned ? `, ${report.abandoned} stale move(s) given up (back where they were)` : ""}` + `${report.staleRaises ? `, ${report.staleRaises} stale raise(s) kept hidden and queued` : ""}.`);
     }
     return report;
   }
@@ -71816,6 +72162,13 @@ function setEmbedsWithBuiltInOnly(set2) {
   } catch {
     return false;
   }
+}
+function moveFailureName(error2) {
+  if (!(error2 instanceof Error))
+    return "unknown";
+  if (error2.constructor !== Error)
+    return error2.name || error2.constructor.name || "Error";
+  return /^[a-z][a-z ]{0,39}$/.test(error2.message) ? error2.message : "Error";
 }
 
 // src/workers/email-source/server.ts

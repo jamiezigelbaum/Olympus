@@ -177,6 +177,9 @@ describe('the set ledger governs every handle, and its loss fails closed', () =>
     const real = ledger.corpusCopyIdentities.bind(ledger);
     let reads = 0;
     ledger.corpusCopyIdentities = ((...args: Parameters<typeof real>) => { reads += 1; return real(...args); }) as typeof real;
+    const realSteps = ledger.corpusCopyIdentitiesSteps.bind(ledger);
+    // The paged form (#858) reads the hidden copies too.
+    ledger.corpusCopyIdentitiesSteps = ((...args: Parameters<typeof realSteps>) => { reads += 1; return realSteps(...args); }) as typeof realSteps;
     try {
       const statusReads = (): number => {
         const before = reads;
@@ -199,6 +202,7 @@ describe('the set ledger governs every handle, and its loss fails closed', () =>
       expect(statusReads()).toBe(fresh);
     } finally {
       ledger.corpusCopyIdentities = real;
+      ledger.corpusCopyIdentitiesSteps = realSteps;
       tiered.close();
     }
   });
@@ -211,6 +215,9 @@ describe('the set ledger governs every handle, and its loss fails closed', () =>
     const real = ledger.corpusCopyIdentities.bind(ledger);
     let reads = 0;
     ledger.corpusCopyIdentities = ((...args: Parameters<typeof real>) => { reads += 1; return real(...args); }) as typeof real;
+    const realSteps = ledger.corpusCopyIdentitiesSteps.bind(ledger);
+    // The paged form (#858) reads the hidden copies too.
+    ledger.corpusCopyIdentitiesSteps = ((...args: Parameters<typeof realSteps>) => { reads += 1; return realSteps(...args); }) as typeof realSteps;
     try {
       const readsFor = (options?: { countsMaxAgeMs: number }): number => {
         const before = reads;
@@ -232,6 +239,40 @@ describe('the set ledger governs every handle, and its loss fails closed', () =>
       expect(readsFor({ countsMaxAgeMs: 0 })).toBeGreaterThan(0);
     } finally {
       ledger.corpusCopyIdentities = real;
+      ledger.corpusCopyIdentitiesSteps = realSteps;
+      tiered.close();
+    }
+  });
+
+  test('an expired snapshot set is served at once and rebuilt in turns, never in the status call', async () => {
+    const dir = workspace();
+    const tiered = await raised(dir);
+    const store = tiered.stores.internal!;
+    const ledger = tiered.ledger;
+    const real = ledger.corpusCopyIdentities.bind(ledger);
+    let reads = 0;
+    ledger.corpusCopyIdentities = ((...args: Parameters<typeof real>) => { reads += 1; return real(...args); }) as typeof real;
+    const realSteps = ledger.corpusCopyIdentitiesSteps.bind(ledger);
+    // The paged form (#858) reads the hidden copies too.
+    ledger.corpusCopyIdentitiesSteps = ((...args: Parameters<typeof realSteps>) => { reads += 1; return realSteps(...args); }) as typeof realSteps;
+    try {
+      const readsFor = (): number => {
+        const before = reads;
+        store.status(undefined, { countsMaxAgeMs: 5 });
+        return reads - before;
+      };
+      expect(readsFor()).toBeGreaterThan(0);
+      ledger.recordDecision(identityOf('unrelated'), ledger.getCurrent(identityOf('garden'))! as unknown as Parameters<typeof ledger.recordDecision>[1]);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      // Expired: the call itself reads nothing and answers from the older set.
+      const before = reads;
+      expect(readsFor()).toBe(0);
+      // The rebuild runs in later turns.
+      for (let i = 0; i < 40 && reads === before; i += 1) await new Promise((resolve) => setTimeout(resolve, 5));
+      expect(reads).toBeGreaterThan(before);
+    } finally {
+      ledger.corpusCopyIdentities = real;
+      ledger.corpusCopyIdentitiesSteps = realSteps;
       tiered.close();
     }
   });

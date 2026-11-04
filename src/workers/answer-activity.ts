@@ -171,26 +171,32 @@ export function localModelResourceKey(profile: { baseUrl?: string; model?: strin
 }
 
 export function createLocalModelActivity() {
-  const queues = new Map<string, { running: boolean; tasks: Array<{ priority: number; run: () => Promise<void> }> }>();
-  const dispatch = <T>(key: string, work: () => Promise<T>): Promise<T> => new Promise((resolve, reject) => {
+  const queues = new Map<string, { running: number[]; tasks: Array<{ priority: number; limit: number; run: () => Promise<void> }> }>();
+  // `limit` is how many calls on this resource may run alongside this one. The
+  // next task in owner-first order starts only while fewer run than its own
+  // limit and the limit of every call already running, so an owner call
+  // (limit 1) always runs alone.
+  const dispatch = <T>(key: string, work: () => Promise<T>, limit = 1): Promise<T> => new Promise((resolve, reject) => {
     let queue = queues.get(key);
-    if (!queue) { queue = { running: false, tasks: [] }; queues.set(key, queue); }
+    if (!queue) { queue = { running: [], tasks: [] }; queues.set(key, queue); }
     const pending = queue;
     const pump = () => {
-      if (pending.running) return;
-      const first = pending.tasks.reduce((best, task, index) => task.priority < pending.tasks[best]!.priority ? index : best, 0);
-      const next = pending.tasks.splice(first, 1)[0];
-      if (!next) return;
-      pending.running = true;
-      void next.run().finally(() => { pending.running = false; pump(); });
+      while (pending.tasks.length > 0) {
+        const first = pending.tasks.reduce((best, task, index) => task.priority < pending.tasks[best]!.priority ? index : best, 0);
+        if (pending.running.length >= Math.min(pending.tasks[first]!.limit, ...pending.running)) return;
+        const next = pending.tasks.splice(first, 1)[0]!;
+        pending.running.push(next.limit);
+        void next.run().finally(() => { pending.running.splice(pending.running.indexOf(next.limit), 1); pump(); });
+      }
     };
     const kind = localInferencePriority?.getStore() ?? 'owner';
-    pending.tasks.push({ priority: localInferencePriority?.getStore() === 'background' ? 2 : localInferencePriority?.getStore() === 'maintenance' ? 1 : 0, run: async () => {
+    pending.tasks.push({ priority: localInferencePriority?.getStore() === 'background' ? 2 : localInferencePriority?.getStore() === 'maintenance' ? 1 : 0, limit: Math.max(1, Math.floor(limit)), run: async () => {
       try { resolve(await (localInferencePriority ? localInferencePriority.run(kind, () => get(key).run(work)) : get(key).run(work))); } catch (error) { reject(error); }
     } });
     // Gather simultaneous dispatches before choosing owner-first.
     queueMicrotask(pump);
   });
+  const taggedRunning = new Map<string, number>();
   const resources = new Map<string, ReturnType<typeof createAnswerActivity>>();
   const busyListeners = new Map<string, Set<() => void>>();
   const get = (key: string) => {
@@ -207,6 +213,8 @@ export function createLocalModelActivity() {
   };
   return {
     busy: (key: string) => get(key).busy,
+    // Busy with calls other than the ones tracked under `tag`.
+    busyExcept: (key: string, tag: string) => get(key).inFlight > (taggedRunning.get(`${key}\u0000${tag}`) ?? 0),
     run: <T>(key: string, work: () => Promise<T>) => get(key).run(work),
     onBusy(key: string, listener: () => void) {
       const listeners = busyListeners.get(key) ?? new Set<() => void>();
@@ -215,11 +223,25 @@ export function createLocalModelActivity() {
       return () => { listeners.delete(listener); };
     },
     onIdle: (key: string, listener: () => void) => get(key).onInteractiveIdle(listener),
-    track<T extends import('../core/analyst.ts').AnalystModel>(key: string, model: T, options: { serialize?: boolean } = {}): T {
+    // `concurrency` lets this caller's calls share the resource with up to that
+    // many in flight (default 1); owner work is still started first.
+    // `tag` names the caller's own calls, so `busyExcept` can tell whether
+    // anyone else holds the resource (a caller never yields to itself).
+    track<T extends import('../core/analyst.ts').AnalystModel>(key: string, model: T, options: { serialize?: boolean; concurrency?: number; tag?: string } = {}): T {
       return { ...model, complete: request => {
         const guards = localInferenceGuards?.getStore() ?? [];
-        const run = options.serialize === false ? <R>(work: () => Promise<R>) => get(key).run(work) : <R>(work: () => Promise<R>) => dispatch(key, work);
-        return run(async () => {
+        const run = options.serialize === false ? <R>(work: () => Promise<R>) => get(key).run(work) : <R>(work: () => Promise<R>) => dispatch(key, work, options.concurrency ?? 1);
+        const tagged = <R>(work: () => Promise<R>): (() => Promise<R>) => {
+          const tag = options.tag;
+          if (tag === undefined) return work;
+          const tagKey = `${key}\u0000${tag}`;
+          // Counted inside the lease, so the count never exceeds the leases held.
+          return async () => {
+            taggedRunning.set(tagKey, (taggedRunning.get(tagKey) ?? 0) + 1);
+            try { return await work(); } finally { taggedRunning.set(tagKey, (taggedRunning.get(tagKey) ?? 1) - 1); }
+          };
+        };
+        return run(tagged(async () => {
           request.signal?.throwIfAborted();
           for (const guard of guards) {
             try { await guard(); } catch (error) {
@@ -229,7 +251,7 @@ export function createLocalModelActivity() {
           }
           request.signal?.throwIfAborted();
           return model.complete(request);
-        });
+        }));
       } };
     },
   };
