@@ -6,6 +6,7 @@ import { dirname, join } from 'node:path';
 import {
   pairMessagingSource,
   whatsappBridgePathForPackage,
+  whatsappBridgeBuildEnv,
   TELEGRAM_API_HASH_SECRET_KEY,
   TELEGRAM_API_ID_SECRET_KEY,
   type PairingCommandRequest,
@@ -409,21 +410,32 @@ describe('packaged messaging pairing', () => {
   test('builds pinned WhatsApp sources into a versioned owner cache when toolchains exist', async () => {
     const root = packageFixture();
     let builtPath = '';
+    let compiler = '';
     const result = await pairMessagingSource({
       source: 'whatsapp',
       packageRoot: root,
       homeDir: join(root, 'home'),
       env: { XDG_CACHE_HOME: join(root, 'fresh-cache') },
       which: (command) => command === 'go' || command === 'cc' ? `/fixture/${command}` : null,
-      buildWhatsAppBridge: async ({ outputPath }) => {
-        builtPath = outputPath;
-        writeFileSync(outputPath, '#!/bin/sh\n');
+      buildWhatsAppBridge: async (input) => {
+        builtPath = input.outputPath;
+        compiler = input.compiler;
+        writeFileSync(input.outputPath, '#!/bin/sh\n');
         return true;
       },
       runCommand: async () => whatsappReady('/private/qr.png'),
     });
     expect(builtPath).toMatch(/fresh-cache\/olympus\/bin\/olympus-whatsapp-bridge-[0-9a-f]{16}$/);
+    expect(compiler).toBe('/fixture/cc');
     expect(result.status).toBe('scope_selection_required');
+  });
+
+  test('the bridge build sees a Go and C compiler that were found outside PATH', () => {
+    const env = whatsappBridgeBuildEnv({ go: '/home/owner/.local/bin/go', compiler: '/opt/tools/bin/clang' }, { PATH: '/usr/bin:/bin', HOME: '/home/owner' });
+    expect(env.CC).toBe('/opt/tools/bin/clang');
+    expect(env.CGO_ENABLED).toBe('1');
+    expect(env.PATH).toBe('/home/owner/.local/bin:/opt/tools/bin:/usr/bin:/bin');
+    expect(env.HOME).toBe('/home/owner');
   });
 
   test('the release\'s prebuilt bridge in the package is used with no Go or C compiler, for pairing and capture alike', async () => {
