@@ -177,6 +177,9 @@ describe('the set ledger governs every handle, and its loss fails closed', () =>
     const real = ledger.corpusCopyIdentities.bind(ledger);
     let reads = 0;
     ledger.corpusCopyIdentities = ((...args: Parameters<typeof real>) => { reads += 1; return real(...args); }) as typeof real;
+    const realSteps = ledger.corpusCopyIdentitiesSteps.bind(ledger);
+    // The paged form (#858) reads the hidden copies too.
+    ledger.corpusCopyIdentitiesSteps = ((...args: Parameters<typeof realSteps>) => { reads += 1; return realSteps(...args); }) as typeof realSteps;
     try {
       const statusReads = (): number => {
         const before = reads;
@@ -199,6 +202,7 @@ describe('the set ledger governs every handle, and its loss fails closed', () =>
       expect(statusReads()).toBe(fresh);
     } finally {
       ledger.corpusCopyIdentities = real;
+      ledger.corpusCopyIdentitiesSteps = realSteps;
       tiered.close();
     }
   });
@@ -211,6 +215,9 @@ describe('the set ledger governs every handle, and its loss fails closed', () =>
     const real = ledger.corpusCopyIdentities.bind(ledger);
     let reads = 0;
     ledger.corpusCopyIdentities = ((...args: Parameters<typeof real>) => { reads += 1; return real(...args); }) as typeof real;
+    const realSteps = ledger.corpusCopyIdentitiesSteps.bind(ledger);
+    // The paged form (#858) reads the hidden copies too.
+    ledger.corpusCopyIdentitiesSteps = ((...args: Parameters<typeof realSteps>) => { reads += 1; return realSteps(...args); }) as typeof realSteps;
     try {
       const readsFor = (options?: { countsMaxAgeMs: number }): number => {
         const before = reads;
@@ -232,6 +239,7 @@ describe('the set ledger governs every handle, and its loss fails closed', () =>
       expect(readsFor({ countsMaxAgeMs: 0 })).toBeGreaterThan(0);
     } finally {
       ledger.corpusCopyIdentities = real;
+      ledger.corpusCopyIdentitiesSteps = realSteps;
       tiered.close();
     }
   });
@@ -244,6 +252,9 @@ describe('the set ledger governs every handle, and its loss fails closed', () =>
     const real = ledger.corpusCopyIdentities.bind(ledger);
     let reads = 0;
     ledger.corpusCopyIdentities = ((...args: Parameters<typeof real>) => { reads += 1; return real(...args); }) as typeof real;
+    const realSteps = ledger.corpusCopyIdentitiesSteps.bind(ledger);
+    // The paged form (#858) reads the hidden copies too.
+    ledger.corpusCopyIdentitiesSteps = ((...args: Parameters<typeof realSteps>) => { reads += 1; return realSteps(...args); }) as typeof realSteps;
     try {
       const readsFor = (): number => {
         const before = reads;
@@ -261,6 +272,7 @@ describe('the set ledger governs every handle, and its loss fails closed', () =>
       expect(reads).toBeGreaterThan(before);
     } finally {
       ledger.corpusCopyIdentities = real;
+      ledger.corpusCopyIdentitiesSteps = realSteps;
       tiered.close();
     }
   });

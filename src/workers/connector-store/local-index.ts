@@ -3198,35 +3198,41 @@ export class LocalConnectorStore {
     // A copy that serves only the names keeps any chunks it already had
     // (e.g. kept vectors after a split move) but never serves, counts or
     // embeds them.
-    const metadataIdentities = ledger.corpusCopyIdentities(this.corpusId, 'metadata_layer');
+    // Each identity list is read a page at a time with a turn between pages (#858).
+    const metadataIdentities = yield* ledger.corpusCopyIdentitiesSteps(this.corpusId, 'metadata_layer');
     const metadataRows = yield* rowsFor(metadataIdentities);
     // Unread names copies are a subset of the names copies (same corpus, same
     // current names-only filter), so their rows are read off the lookup above
     // instead of a second lookup of nearly the same set: on a names-only
     // archive both sets are about 100k items (Sparta, 2026-11-04).
     const pksByKey = new Map<string, number[]>();
-    for (const row of metadataRows) {
+    for (let index = 0; index < metadataRows.length; index += 1) {
+      if (index > 0 && index % IDENTITY_LOOKUP_SLICE === 0) yield;
+      const row = metadataRows[index]!;
       const key = keyOf(metadataIdentities[row.idx]!);
       const pks = pksByKey.get(key);
       if (pks) pks.push(row.item_pk); else pksByKey.set(key, [row.item_pk]);
     }
-    const unreadIdentities = ledger.corpusCopyIdentities(this.corpusId, 'metadata_layer_content_unread');
-    const unreadMissed = unreadIdentities.filter((identity) => !pksByKey.has(keyOf(identity)));
-    const hidden = yield* pksFor([
-      ...ledger.corpusCopyIdentities(this.corpusId, 'superseded'),
-      ...ledger.corpusCopyIdentities(this.corpusId, 'staged'),
-    ]);
-    const held = yield* pksFor(ledger.corpusCopyIdentities(this.corpusId, 'held'));
+    const unreadIdentities = yield* ledger.corpusCopyIdentitiesSteps(this.corpusId, 'metadata_layer_content_unread');
+    const unreadMissed: Identity[] = [];
+    const unreadPks: number[] = [];
+    for (let index = 0; index < unreadIdentities.length; index += 1) {
+      if (index > 0 && index % IDENTITY_LOOKUP_SLICE === 0) yield;
+      const identity = unreadIdentities[index]!;
+      const pks = pksByKey.get(keyOf(identity));
+      if (pks) unreadPks.push(...pks); else unreadMissed.push(identity);
+    }
+    const superseded = yield* ledger.corpusCopyIdentitiesSteps(this.corpusId, 'superseded');
+    const staged = yield* ledger.corpusCopyIdentitiesSteps(this.corpusId, 'staged');
+    const hidden = yield* pksFor(superseded.concat(staged));
+    const held = yield* pksFor(yield* ledger.corpusCopyIdentitiesSteps(this.corpusId, 'held'));
     // Only if the ledger changed between the two reads.
     const missed = yield* pksFor(unreadMissed);
     return {
       hidden,
       held,
       metadataLayer: metadataRows.map((row) => row.item_pk),
-      metadataLayerContentUnread: [
-        ...unreadIdentities.flatMap((identity) => pksByKey.get(keyOf(identity)) ?? []),
-        ...missed,
-      ],
+      metadataLayerContentUnread: unreadPks.concat(missed),
       moving: ledger.corpusCopyCounts(this.corpusId).moving,
     };
   }
