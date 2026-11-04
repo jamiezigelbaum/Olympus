@@ -63987,28 +63987,28 @@ function localModelResourceKey(profile) {
 }
 function createLocalModelActivity() {
   const queues = new Map;
-  const dispatch = (key2, work) => new Promise((resolve14, reject) => {
+  const dispatch = (key2, work, limit = 1) => new Promise((resolve14, reject) => {
     let queue = queues.get(key2);
     if (!queue) {
-      queue = { running: false, tasks: [] };
+      queue = { running: [], tasks: [] };
       queues.set(key2, queue);
     }
     const pending = queue;
     const pump = () => {
-      if (pending.running)
-        return;
-      const first = pending.tasks.reduce((best, task, index) => task.priority < pending.tasks[best].priority ? index : best, 0);
-      const next = pending.tasks.splice(first, 1)[0];
-      if (!next)
-        return;
-      pending.running = true;
-      next.run().finally(() => {
-        pending.running = false;
-        pump();
-      });
+      while (pending.tasks.length > 0) {
+        const first = pending.tasks.reduce((best, task, index) => task.priority < pending.tasks[best].priority ? index : best, 0);
+        if (pending.running.length >= Math.min(pending.tasks[first].limit, ...pending.running))
+          return;
+        const next = pending.tasks.splice(first, 1)[0];
+        pending.running.push(next.limit);
+        next.run().finally(() => {
+          pending.running.splice(pending.running.indexOf(next.limit), 1);
+          pump();
+        });
+      }
     };
     const kind = localInferencePriority?.getStore() ?? "owner";
-    pending.tasks.push({ priority: localInferencePriority?.getStore() === "background" ? 2 : localInferencePriority?.getStore() === "maintenance" ? 1 : 0, run: async () => {
+    pending.tasks.push({ priority: localInferencePriority?.getStore() === "background" ? 2 : localInferencePriority?.getStore() === "maintenance" ? 1 : 0, limit: Math.max(1, Math.floor(limit)), run: async () => {
       try {
         resolve14(await (localInferencePriority ? localInferencePriority.run(kind, () => get(key2).run(work)) : get(key2).run(work)));
       } catch (error) {
@@ -64017,6 +64017,7 @@ function createLocalModelActivity() {
     } });
     queueMicrotask(pump);
   });
+  const taggedRunning = new Map;
   const resources = new Map;
   const busyListeners = new Map;
   const get = (key2) => {
@@ -64034,6 +64035,7 @@ function createLocalModelActivity() {
   };
   return {
     busy: (key2) => get(key2).busy,
+    busyExcept: (key2, tag) => get(key2).inFlight > (taggedRunning.get(`${key2}\x00${tag}`) ?? 0),
     run: (key2, work) => get(key2).run(work),
     onBusy(key2, listener) {
       const listeners = busyListeners.get(key2) ?? new Set;
@@ -64047,8 +64049,22 @@ function createLocalModelActivity() {
     track(key2, model, options = {}) {
       return { ...model, complete: (request) => {
         const guards = localInferenceGuards?.getStore() ?? [];
-        const run = options.serialize === false ? (work) => get(key2).run(work) : (work) => dispatch(key2, work);
-        return run(async () => {
+        const run = options.serialize === false ? (work) => get(key2).run(work) : (work) => dispatch(key2, work, options.concurrency ?? 1);
+        const tagged = (work) => {
+          const tag = options.tag;
+          if (tag === undefined)
+            return work;
+          const tagKey = `${key2}\x00${tag}`;
+          return async () => {
+            taggedRunning.set(tagKey, (taggedRunning.get(tagKey) ?? 0) + 1);
+            try {
+              return await work();
+            } finally {
+              taggedRunning.set(tagKey, (taggedRunning.get(tagKey) ?? 1) - 1);
+            }
+          };
+        };
+        return run(tagged(async () => {
           request.signal?.throwIfAborted();
           for (const guard of guards) {
             try {
@@ -64060,7 +64076,7 @@ function createLocalModelActivity() {
           }
           request.signal?.throwIfAborted();
           return model.complete(request);
-        });
+        }));
       } };
     }
   };
@@ -214412,7 +214428,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     lane: snifferLane,
     model: snifferResource ? {
       ...snifferModel,
-      complete: (request) => runClassificationInference(() => localModelActivity.track(snifferResource, snifferModel).complete(request))
+      complete: (request) => runClassificationInference(() => localModelActivity.track(snifferResource, snifferModel, { concurrency: snifferEnv.concurrentCalls ?? 1, tag: "tier_sniffer" }).complete(request))
     } : snifferModel,
     stores: () => connectorStores,
     classificationLedgerPath: resolveClassificationLedgerPath(process.env),
@@ -214428,7 +214444,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     ...snifferEnv.maxCallsPerPass !== undefined ? { maxCallsPerPass: snifferEnv.maxCallsPerPass } : {},
     ...snifferEnv.concurrentCalls !== undefined ? { concurrentCalls: snifferEnv.concurrentCalls } : {},
     maxCallsPerDay: snifferEnv.maxCallsPerDay,
-    answersInFlight: () => snifferResource !== undefined && localModelActivity.busy(snifferResource),
+    answersInFlight: () => snifferResource !== undefined && localModelActivity.busyExcept(snifferResource, "tier_sniffer"),
     shouldYield: () => localPrivateAnswers?.overdue() ?? false,
     breakerOpen: () => secureAnalystPoolState.isBreakerOpen("secure_local", snifferLane.profileId),
     log: (line2) => console.log(line2),
