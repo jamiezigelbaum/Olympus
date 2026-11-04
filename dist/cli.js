@@ -34509,6 +34509,39 @@ var init_local_index = __esm(() => {
         return false;
       return true;
     }
+    itemsMatchingExtractionRefs(refs, filters) {
+      if (refs.length === 0)
+        return [];
+      const predicate = connectorStoreFilterSql(filters);
+      const ids = [...new Set(refs.map((ref) => ref.localItemId))];
+      const first = new Map;
+      const keyOf = (localItemId, providerItemId, provider, accountScope) => JSON.stringify([localItemId, providerItemId, provider, accountScope]);
+      for (let offset = 0;offset < ids.length; offset += 5000) {
+        const rows = this.db.query(`
+        SELECT i.local_item_id, i.provider_item_id, i.provider, i.account_scope, i.source_version, i.content_hash
+        FROM items i
+        WHERE i.local_item_id IN (SELECT value FROM json_each(?))
+          AND i.tombstoned = 0
+          ${predicate.sql}
+        ORDER BY i.item_pk
+      `).all(JSON.stringify(ids.slice(offset, offset + 5000)), ...predicate.params);
+        for (const row of rows) {
+          const key2 = keyOf(row.local_item_id, row.provider_item_id, row.provider, row.account_scope);
+          if (!first.has(key2))
+            first.set(key2, { source_version: row.source_version, content_hash: row.content_hash });
+        }
+      }
+      return refs.map((ref) => {
+        const row = first.get(keyOf(ref.localItemId, ref.providerItemId, ref.provider, ref.accountScope));
+        if (!row)
+          return false;
+        if (ref.sourceVersion !== undefined && row.source_version !== ref.sourceVersion)
+          return false;
+        if (ref.contentHash !== undefined && row.content_hash !== ref.contentHash)
+          return false;
+        return true;
+      });
+    }
     [READ_RESULT_PROJECTION_LOCATOR_URI](identity2, locatorPathScope) {
       const scopePredicate = connectorStoreFilterSql(locatorPathScope ? { locatorPathScope } : undefined);
       const rows = this.db.query(`
@@ -83690,7 +83723,15 @@ class LocalFileExtractionJobStore {
       for (const row of rows2)
         byJobId.set(row.job_id, row);
     }
-    const rows = [...byJobId.values()].filter((row) => options.currentItem ? options.currentItem(refFromRow(row)) : true);
+    const allRows = [...byJobId.values()];
+    let rows = allRows;
+    if (options.currentItems) {
+      const current2 = options.currentItems(allRows.map(refFromRow));
+      rows = allRows.filter((_row, index) => current2[index] === true);
+    } else if (options.currentItem) {
+      const currentItem = options.currentItem;
+      rows = allRows.filter((row) => currentItem(refFromRow(row)));
+    }
     const byItem = new Map;
     for (const row of rows) {
       const existing = byItem.get(row.local_item_id);
@@ -91729,6 +91770,19 @@ function tieredExtractionView(set, options = {}) {
     itemMatchesExtractionRef(ref, filters) {
       return storesHoldingRow(ref.localItemId).some((store) => store.itemMatchesExtractionRef(ref, filters));
     },
+    itemsMatchingExtractionRefs(refs, filters) {
+      const matched = refs.map(() => false);
+      for (const domain of order()) {
+        const store = set.store(domain);
+        if (!store)
+          continue;
+        const here = store.itemsMatchingExtractionRefs(refs, filters);
+        for (let index = 0;index < here.length; index += 1)
+          if (here[index])
+            matched[index] = true;
+      }
+      return matched;
+    },
     itemTrustTier(localItemId) {
       let tier;
       let routed = false;
@@ -94716,10 +94770,12 @@ function createSourceIndexStatusHandler(options = {}) {
         const cached2 = maxAgeMs > 0 ? cache.get(cacheKey) : undefined;
         if (cached2 && nowMs() - cached2.recordedAtMs <= maxAgeMs)
           return cached2.status;
-        const readiness = store && request.include_readiness_ledger === true ? options.readinessLedger?.snapshotForCorpus(corpus.corpusId) : undefined;
+        const readiness = store && request.include_readiness_ledger === true ? options.readinessLedger?.snapshotForCorpus(corpus.corpusId, maxAgeMs > 0 ? { maxAgeMs } : {}) : undefined;
         const status = store ? connectorStoreStatus(corpus, store.status(statusScope, { countsMaxAgeMs: snapshot.countsMaxAgeMs ?? 0 }), readiness?.counts, readiness?.contentExtractionThroughput, availability?.modelId, secretLocationCount(store)) : configuredCorpusStatus(corpus);
         if (status.configured && request.include_readiness_ledger === true && options.unreadableCount) {
-          status.counts[UNREADABLE_ITEMS_COUNT_KEY] = options.unreadableCount(corpus.corpusId);
+          const unreadable = options.unreadableCount(corpus.corpusId);
+          if (unreadable !== undefined)
+            status.counts[UNREADABLE_ITEMS_COUNT_KEY] = unreadable;
         }
         const enforced = withRetrievalEnforcementStatus(corpus, status, availability);
         const withBacklog = store && availability?.modelId ? withEmbeddingBacklogEstimate(enforced, store, availability.modelId, availability, statusScope, snapshot.countsMaxAgeMs ?? 0) : enforced;
@@ -142634,39 +142690,70 @@ function createExtractionReadinessLedger(jobs, options = {}) {
       lastUnreadable.set(corpusId, items);
     }
   });
-  const ledger = {
-    snapshotForCorpus(corpusId) {
-      const lanes = options.lanesForCorpus?.(corpusId);
-      if (lanes !== undefined) {
-        if (!jobs.scopedReadiness)
-          return;
-        try {
-          return readinessSnapshot(jobs.scopedReadiness(lanes, {
-            ...options.currentItem ? { currentItem: options.currentItem } : {},
-            ...options.terminalRetryPaths ? { terminalRetryPaths: options.terminalRetryPaths } : {},
-            ...listing(corpusId)
-          }));
-        } catch {
-          return;
-        }
-      }
-      let readiness;
+  const now = options.now ?? Date.now;
+  const taken = new Map;
+  const taking = new Set;
+  const take = (corpusId) => {
+    if (taking.has(corpusId))
+      return;
+    taking.add(corpusId);
+    setTimeout(() => {
       try {
-        readiness = jobs.corpusReadiness(corpusId, new Date, {
-          ...options.terminalRetryPaths ? { terminalRetryPaths: options.terminalRetryPaths } : {},
-          ...listing(corpusId)
-        });
-      } catch {
-        return;
+        taken.set(corpusId, { at: now(), snapshot: takeSnapshot(corpusId) });
+      } finally {
+        taking.delete(corpusId);
       }
-      return readinessSnapshot(readiness);
+    }, 0);
+  };
+  let servesStale = false;
+  const ledger = {
+    snapshotForCorpus(corpusId, read = {}) {
+      const maxAgeMs = read.maxAgeMs ?? 0;
+      if (!(maxAgeMs > 0))
+        return takeSnapshot(corpusId);
+      servesStale = true;
+      const last = taken.get(corpusId);
+      if (!last || now() - last.at >= maxAgeMs)
+        take(corpusId);
+      return last?.snapshot;
     },
     unreadableItems(corpusId) {
-      if (!lastUnreadable.has(corpusId))
-        ledger.snapshotForCorpus(corpusId);
+      if (!lastUnreadable.has(corpusId)) {
+        if (servesStale)
+          take(corpusId);
+        else
+          takeSnapshot(corpusId);
+      }
       return lastUnreadable.get(corpusId) ?? [];
     }
   };
+  function takeSnapshot(corpusId) {
+    const lanes = options.lanesForCorpus?.(corpusId);
+    if (lanes !== undefined) {
+      if (!jobs.scopedReadiness)
+        return;
+      try {
+        return readinessSnapshot(jobs.scopedReadiness(lanes, {
+          ...options.currentItem ? { currentItem: options.currentItem } : {},
+          ...options.currentItems ? { currentItems: options.currentItems } : {},
+          ...options.terminalRetryPaths ? { terminalRetryPaths: options.terminalRetryPaths } : {},
+          ...listing(corpusId)
+        }));
+      } catch {
+        return;
+      }
+    }
+    let readiness;
+    try {
+      readiness = jobs.corpusReadiness(corpusId, new Date, {
+        ...options.terminalRetryPaths ? { terminalRetryPaths: options.terminalRetryPaths } : {},
+        ...listing(corpusId)
+      });
+    } catch {
+      return;
+    }
+    return readinessSnapshot(readiness);
+  }
   return ledger;
 }
 function readinessSnapshot(readiness) {
@@ -142895,8 +142982,43 @@ function createUnreadableFiles(options) {
     bucket -= 1;
     return true;
   }
+  const RECOUNT_SLICE = 100;
+  const counted = new Map;
+  const recounting = new Set;
+  async function recount(corpusId) {
+    const items = listed(corpusId);
+    let unreadable = 0;
+    let blocked = 0;
+    for (let index = 0;index < items.length; index += 1) {
+      if (index > 0 && index % RECOUNT_SLICE === 0) {
+        await (options.turn?.() ?? new Promise((resolve24) => setImmediate(resolve24)));
+      }
+      const verdict = verdictOf(items[index]);
+      if (verdict === "unreadable")
+        unreadable += 1;
+      else if (verdict === "blocked_policy")
+        blocked += 1;
+    }
+    counted.set(corpusId, { at: now(), value: { unreadable, blocked } });
+  }
+  function scheduleRecount(corpusId) {
+    if (recounting.has(corpusId))
+      return;
+    recounting.add(corpusId);
+    setTimeout(() => {
+      recount(corpusId).catch(() => {
+        return;
+      }).finally(() => recounting.delete(corpusId));
+    }, 0);
+  }
   return {
     recheck(corpusId) {
+      if (options.countsMaxAgeMs !== undefined) {
+        const last = counted.get(corpusId);
+        if (!last || now() - last.at >= options.countsMaxAgeMs)
+          scheduleRecount(corpusId);
+        return last?.value;
+      }
       let unreadable = 0;
       let blocked = 0;
       for (const item of listed(corpusId)) {
@@ -212910,6 +213032,26 @@ ${key2}`;
   const extractionReadinessLedger = fileExtractionRuntime ? createExtractionReadinessLedger(fileExtractionRuntime.jobs, {
     terminalRetryPaths: fileExtractionRuntime.terminalRetryPaths,
     classifyUnreadable: unreadableVerdict,
+    currentItems(refs) {
+      const answers = refs.map(() => false);
+      const check = (corpusId, store, view3) => {
+        if (!store)
+          return;
+        const indexes = refs.flatMap((ref, index) => ref.corpusId === corpusId ? [index] : []);
+        if (indexes.length === 0)
+          return;
+        const readScope = connectorStoreReadScope(store);
+        if (!readScope.allowed || !readScope.contentAllowed)
+          return;
+        const matched = (view3 ?? store).itemsMatchingExtractionRefs(indexes.map((index) => refs[index]), readScope.contentFilters);
+        indexes.forEach((index, position) => {
+          answers[index] = matched[position] === true;
+        });
+      };
+      check(LOCAL_FILES_CORPUS_ID, localFilesConnectorStore, localFilesExtractionView);
+      check(DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID, dropboxConnectorStore, dropboxExtractionView);
+      return answers;
+    },
     currentItem(ref) {
       if (ref.corpusId === LOCAL_FILES_CORPUS_ID && localFilesConnectorStore) {
         const readScope2 = connectorStoreReadScope(localFilesConnectorStore);
@@ -212972,6 +213114,8 @@ ${key2}`;
     verdict: unreadableVerdict,
     locate: locateUnreadableItem,
     parentOf: unreadableParentOfItem,
+    countsMaxAgeMs: DASHBOARD_READINESS_LEDGER_MAX_AGE_MS,
+    turn: ingestionTurn,
     openTarget: (provider, locator) => Object.hasOwn(unreadableOpenTargets, provider) ? unreadableOpenTargets[provider](locator) : provider === "google_drive" && googleFilePage(locator) ? { url: locator } : provider === "gmail" && /^https:\/\/mail\.google\.com\/mail\/u\/0\/#all\/[A-Za-z0-9_-]+$/.test(locator) ? { url: locator } : undefined,
     ...process.platform === "darwin" || process.platform === "linux" ? {
       openFile: (path, eligible) => openLocalFile(path, eligible, [...unreadableDropboxRoots(), ...localFilesOpenableRoots()])
@@ -212984,7 +213128,7 @@ ${key2}`;
     },
     connectorStores,
     connectorStoreStatusScope,
-    ...unreadableFiles ? { unreadableCount: (corpusId) => unreadableFiles.recheck(corpusId).unreadable } : {},
+    ...unreadableFiles ? { unreadableCount: (corpusId) => unreadableFiles.recheck(corpusId)?.unreadable } : {},
     retrievalPolicy: (domain) => sovereigntyEngine.config.retrieval.trustDomains[domain],
     retrievalAvailability,
     tierClassification: () => {

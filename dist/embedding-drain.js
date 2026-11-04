@@ -26208,6 +26208,39 @@ var init_local_index = __esm(() => {
         return false;
       return true;
     }
+    itemsMatchingExtractionRefs(refs, filters) {
+      if (refs.length === 0)
+        return [];
+      const predicate = connectorStoreFilterSql(filters);
+      const ids = [...new Set(refs.map((ref) => ref.localItemId))];
+      const first = new Map;
+      const keyOf = (localItemId, providerItemId, provider, accountScope) => JSON.stringify([localItemId, providerItemId, provider, accountScope]);
+      for (let offset = 0;offset < ids.length; offset += 5000) {
+        const rows = this.db.query(`
+        SELECT i.local_item_id, i.provider_item_id, i.provider, i.account_scope, i.source_version, i.content_hash
+        FROM items i
+        WHERE i.local_item_id IN (SELECT value FROM json_each(?))
+          AND i.tombstoned = 0
+          ${predicate.sql}
+        ORDER BY i.item_pk
+      `).all(JSON.stringify(ids.slice(offset, offset + 5000)), ...predicate.params);
+        for (const row of rows) {
+          const key2 = keyOf(row.local_item_id, row.provider_item_id, row.provider, row.account_scope);
+          if (!first.has(key2))
+            first.set(key2, { source_version: row.source_version, content_hash: row.content_hash });
+        }
+      }
+      return refs.map((ref) => {
+        const row = first.get(keyOf(ref.localItemId, ref.providerItemId, ref.provider, ref.accountScope));
+        if (!row)
+          return false;
+        if (ref.sourceVersion !== undefined && row.source_version !== ref.sourceVersion)
+          return false;
+        if (ref.contentHash !== undefined && row.content_hash !== ref.contentHash)
+          return false;
+        return true;
+      });
+    }
     [READ_RESULT_PROJECTION_LOCATOR_URI](identity, locatorPathScope) {
       const scopePredicate = connectorStoreFilterSql(locatorPathScope ? { locatorPathScope } : undefined);
       const rows = this.db.query(`
