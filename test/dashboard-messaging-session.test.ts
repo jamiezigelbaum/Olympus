@@ -28,7 +28,7 @@ test('the first Pair press renews an expired local session and starts pairing ex
     for (let i = 0; i < 10; i++) await Bun.sleep(0);
     expect(renewals).toBe(1);
     expect(starts).toBe(1);
-    expect(root.querySelector('[data-messaging-status]')!.textContent).toContain('QR');
+    expect(root.querySelector('[data-messaging-status]')!.textContent).toContain('Preparing WhatsApp');
   } finally {
     abort.abort(); happy.close();
     for (const name of names) { const descriptor = old.get(name); if (descriptor) Object.defineProperty(globalThis, name, descriptor); else delete (globalThis as any)[name]; }

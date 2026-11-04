@@ -1116,6 +1116,25 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
   const messagingBusy = new WeakSet<HTMLElement>();
   const messagingQueued = new Map<HTMLElement, () => void>();
   const messagingSeen = new Set<string>();
+  // Cards whose last answer was a pairing still running, and how many status
+  // reads in a row have failed since.
+  const messagingActive = new WeakSet<HTMLElement>();
+  const messagingMisses = new Map<HTMLElement, number>();
+  const PAIRING_ACTIVE = (state: string): boolean => state !== '' && !['paired', 'complete', 'completed', 'failed', 'cancelled', 'idle', 'not_paired', 'scope_selection_required'].includes(state);
+  const stillWorkingWords = (source: string): string => source === 'whatsapp'
+    ? 'Still preparing WhatsApp on this computer. The first time can take about a minute.'
+    : 'Still working on this computer…';
+  /** Schedules the next status read with backoff when a pairing was running; false when it was not. */
+  function keepPolling(card: HTMLElement): boolean {
+    if (!messagingActive.has(card)) return false;
+    const misses = (messagingMisses.get(card) ?? 0) + 1;
+    // About ten minutes of failed reads, the bridge build's own limit, then the error stands.
+    if (misses > 60) { messagingMisses.delete(card); messagingActive.delete(card); return false; }
+    messagingMisses.set(card, misses);
+    const delay = Math.min(10_000, 1_200 * 2 ** Math.min(misses - 1, 3));
+    messagingTimers.set(card, setTimeout(() => { messagingTimers.delete(card); void messagingRequest(card, 'status'); }, delay));
+    return true;
+  }
 
   function resumeMessaging(): void {
     messagingTimers.forEach((timer, card) => { if (!card.isConnected) { clearTimeout(timer); messagingTimers.delete(card); } });
@@ -1157,12 +1176,22 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
       const inputSlot = card.querySelector<HTMLElement>('[data-messaging-input]');
       const qr = card.querySelector<HTMLImageElement>('[data-messaging-qr]');
       if (result.status < 200 || result.status >= 300 || body.ok === false) {
+        // A status read can fail while the computer is busy (the first
+        // WhatsApp pairing builds its helper for about a minute). The pairing
+        // itself is still running, so keep asking, more slowly, and say so;
+        // only the pairing's own failed state is an error.
+        if (operation === 'status' && result.status !== 401 && result.status !== 403 && keepPolling(card)) {
+          if (status) status.textContent = stillWorkingWords(source);
+          return;
+        }
         if (status) status.textContent = result.status === 401 || result.status === 403 ? 'Open dashboard controls on this computer to use this, then try again.' : 'Could not complete this step. Try again from this computer.';
         if (qr) { qr.hidden = true; qr.removeAttribute('src'); }
         if (inputSlot) inputSlot.replaceChildren();
         return;
       }
       const state = typeof body.state === 'string' ? body.state : '';
+      messagingMisses.delete(card);
+      if (PAIRING_ACTIVE(state)) messagingActive.add(card); else messagingActive.delete(card);
       if (['paired', 'complete', 'completed'].includes(state)) {
         const row = card.querySelector('.actionrow');
         const start = row?.querySelector<HTMLFormElement>('form[data-messaging-kind="start"]');
@@ -1197,7 +1226,9 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
           const details = document.createElement('details'); details.className = 'howto';
           const summary = document.createElement('summary'); summary.textContent = 'How to fix';
           const hint = document.createElement('p'); hint.textContent = source === 'whatsapp'
-            ? (body.unlinked === 'removed' ? 'Olympus removed itself from your phone\'s linked devices, so there is nothing to clean up. Pair again; if it fails again, press Copy details and send what it copies to support.'
+            ? (body.reason === 'bridge_build_tools_missing' ? 'This install has no ready WhatsApp helper, and this computer has no Go and C compiler to build one. Reinstall Olympus with the installer from olympusplugin.ai, which includes the helper, then pair again.'
+              : body.reason === 'bridge_build_failed' ? 'Olympus could not build its WhatsApp helper on this computer. Reinstall Olympus with the installer from olympusplugin.ai, which includes the helper, then pair again.'
+              : body.unlinked === 'removed' ? 'Olympus removed itself from your phone\'s linked devices, so there is nothing to clean up. Pair again; if it fails again, press Copy details and send what it copies to support.'
               : body.unlinked === 'offline' || body.unlinked === 'failed' ? 'Olympus could not remove itself from your phone. Remove the Olympus entry in WhatsApp → Settings → Linked devices, then pair again. If it fails again, press Copy details and send what it copies to support.'
                 : 'Pair again. If it fails again, press Copy details and send what it copies to support.')
             : 'Check api_id and api_hash at my.telegram.org/apps. Enter the latest code from Telegram and your two-step verification password if asked. Then try pairing again.';
@@ -1223,7 +1254,7 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
         ? (body.unlinked === 'removed' ? 'Setup cancelled. Capture permission was not changed, and Olympus removed itself from your phone\'s linked devices.'
           : body.unlinked === 'offline' || body.unlinked === 'failed' ? 'Setup cancelled. Capture permission was not changed. Olympus could not remove itself from your phone: remove Olympus in WhatsApp linked devices.'
             : 'Setup cancelled. Capture permission was not changed. If your phone linked Olympus, Olympus removes it from WhatsApp linked devices.')
-        : 'Setup cancelled. Capture permission was not changed. If you linked a new device, remove Olympus in Telegram active sessions to unlink it.') : operation === 'scope' ? 'Chat choices saved. Capture will use this selection.' : operation === 'chats' ? 'Choose the chats Olympus may read.' : source === 'whatsapp' ? (body.linked === true ? 'Linked. Reading your chat list from WhatsApp; this can take a minute…' : 'Open WhatsApp → Settings → Linked devices and scan the QR code.') : 'Pairing is running on this computer…';
+        : 'Setup cancelled. Capture permission was not changed. If you linked a new device, remove Olympus in Telegram active sessions to unlink it.') : operation === 'scope' ? 'Chat choices saved. Capture will use this selection.' : operation === 'chats' ? 'Choose the chats Olympus may read.' : source === 'whatsapp' ? (body.linked === true ? 'Linked. Reading your chat list from WhatsApp; this can take a minute…' : typeof body.qr === 'string' && body.qr ? 'Open WhatsApp → Settings → Linked devices and scan the QR code.' : 'Preparing WhatsApp. The first time can take about a minute.') : 'Pairing is running on this computer…';
       if (qr) {
         const value = typeof body.qr === 'string' ? body.qr : '';
         // Only the local helper's raster QR image is displayed; no external requests or SVG markup.
@@ -1277,7 +1308,9 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
         messagingTimers.set(card, setTimeout(() => { messagingTimers.delete(card); void messagingRequest(card, 'status'); }, 1200));
       }
     } catch {
-      if (status) status.textContent = 'Could not reach pairing on this computer. Try again.';
+      if (operation === 'status' && keepPolling(card)) {
+        if (status) status.textContent = stillWorkingWords(source);
+      } else if (status) status.textContent = 'Could not reach pairing on this computer. Try again.';
     } finally {
       messagingBusy.delete(card);
       const queued = messagingQueued.get(card);
