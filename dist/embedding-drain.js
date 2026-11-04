@@ -25009,14 +25009,26 @@ var init_local_index = __esm(() => {
     refreshTierHiddenCountsInTurns() {
       this.tierHiddenCountsRefresh ??= (async () => {
         try {
-          const base = await runStepsInTurns(this.tierLedgerHiddenSteps());
-          await ingestionTurn();
-          this.tierHiddenCountsMemo = { at: Date.now(), value: this.withHiddenChildren(base) };
+          const value = await this.tierHiddenItemPksInTurns();
+          this.tierHiddenCountsMemo = { at: Date.now(), value };
         } catch {} finally {
           this.tierHiddenCountsRefresh = undefined;
         }
       })();
       return this.tierHiddenCountsRefresh;
+    }
+    async tierHiddenItemPksInTurns() {
+      const marker = this.tierLedgerHiddenMemoMarker();
+      const memo = this.tierLedgerHiddenMemo;
+      let base;
+      if (marker && memo && memo.ledger === marker.ledger && memo.marker === marker.value) {
+        base = memo.value;
+      } else {
+        base = await runStepsInTurns(this.tierLedgerHiddenSteps());
+        this.tierLedgerHiddenMemo = marker ? { ledger: marker.ledger, marker: marker.value, value: base } : undefined;
+        await ingestionTurn();
+      }
+      return this.withHiddenChildren(base);
     }
     tierLedgerHiddenItemPks() {
       const marker = this.tierLedgerHiddenMemoMarker();
@@ -25400,13 +25412,31 @@ var init_local_index = __esm(() => {
     activeChildParents(after, limit) {
       if (!this.childItemColumnsPresent)
         return [];
-      const rows = this.db.query(`
-      SELECT parent_local_item_id, provider, account_scope, MIN(provider_item_id) AS child_item_id, provider_conversation_id FROM items
-      WHERE parent_local_item_id IS NOT NULL AND (tombstoned = 0 OR trust_tier = 'S5')
-        AND (parent_local_item_id, provider, account_scope) > (?, ?, ?)
-      GROUP BY parent_local_item_id, provider, account_scope
-      ORDER BY parent_local_item_id, provider, account_scope LIMIT ?
-    `).all(after?.parentLocalItemId ?? "", after?.provider ?? "", after?.accountScope ?? "", Math.max(1, Math.floor(limit)));
+      const want = Math.max(1, Math.floor(limit));
+      const afterKey = [after?.parentLocalItemId ?? "", after?.provider ?? "", after?.accountScope ?? ""];
+      const rows = [];
+      let from = afterKey[0];
+      let inclusive = true;
+      while (rows.length < want) {
+        const window2 = this.db.query(`
+        SELECT parent_local_item_id AS parent FROM items
+        WHERE parent_local_item_id IS NOT NULL AND parent_local_item_id ${inclusive ? ">=" : ">"} ?
+        GROUP BY parent_local_item_id ORDER BY parent_local_item_id LIMIT ?
+      `).all(from, want).map((row) => row.parent);
+        if (window2.length === 0)
+          break;
+        rows.push(...this.db.query(`
+        SELECT parent_local_item_id, provider, account_scope, MIN(provider_item_id) AS child_item_id, provider_conversation_id FROM items
+        WHERE parent_local_item_id IN (SELECT value FROM json_each(?)) AND (tombstoned = 0 OR trust_tier = 'S5')
+          AND (parent_local_item_id, provider, account_scope) > (?, ?, ?)
+        GROUP BY parent_local_item_id, provider, account_scope
+        ORDER BY parent_local_item_id, provider, account_scope LIMIT ?
+      `).all(JSON.stringify(window2), ...afterKey, want - rows.length));
+        if (window2.length < want)
+          break;
+        from = window2[window2.length - 1];
+        inclusive = false;
+      }
       return rows.map((row) => ({
         provider: row.provider,
         accountScope: row.account_scope,
@@ -29125,14 +29155,14 @@ var init_local_index = __esm(() => {
     embeddingFailedItemCount() {
       return this.embeddingFailureState?.size ?? 0;
     }
-    missingEmbeddingItemIds(embedder, limit, scope = {}) {
+    missingEmbeddingItemIds(embedder, limit, scope = {}, tierHidden) {
       if (limit <= 0)
         return [];
       const modelId = embedder.modelId;
       const accountScope = normalizeOptionalAccountScope(scope.accountScope);
       const scoped = connectorStoreFilterSql(scope.filters);
       const failed = this.embeddingFailureState;
-      const tierExclusion = this.embeddingTierExclusionFilter();
+      const tierExclusion = this.embeddingTierExclusionFilter(0, tierHidden);
       const privateTier = this.privateTierEmbeddingFilter(embedder);
       const filter = `${tierExclusion.filter} ${privateTier.filter} ${accountScope ? "AND i.account_scope = ?" : ""} ${scoped.sql}`;
       const params = [...tierExclusion.params, ...privateTier.params, ...accountScope ? [accountScope] : [], ...scoped.params];
@@ -29149,6 +29179,12 @@ var init_local_index = __esm(() => {
       LIMIT ?
     `).all(modelId, ...params, limit + (failed?.size ?? 0));
       return rows.map((row) => row.local_item_id).filter((localItemId) => !failed?.has(localItemId)).slice(0, limit);
+    }
+    async missingEmbeddingItemIdsInTurns(embedder, limit, scope = {}) {
+      if (limit <= 0)
+        return [];
+      const tierHidden = await this.tierHiddenItemPksInTurns();
+      return this.missingEmbeddingItemIds(embedder, limit, scope, tierHidden);
     }
     embeddingOwedItemIds(modelId, localItemIds) {
       if (localItemIds.length === 0)
@@ -29199,19 +29235,19 @@ var init_local_index = __esm(() => {
         extractedChars: row.chars
       };
     }
-    embeddingTierExclusionFilter(countsMaxAgeMs = 0) {
-      const tierExcluded = this.tierHiddenItemPks({ countsMaxAgeMs });
+    embeddingTierExclusionFilter(countsMaxAgeMs = 0, tierHidden) {
+      const tierExcluded = tierHidden ?? this.tierHiddenItemPks({ countsMaxAgeMs });
       const excludedPks = [...tierExcluded.hidden, ...tierExcluded.held, ...tierExcluded.metadataLayer];
       return excludedPks.length > 0 ? { filter: "AND i.item_pk NOT IN (SELECT value FROM json_each(?))", params: [JSON.stringify(excludedPks)] } : { filter: "", params: [] };
     }
     embeddingBatchRecheck(batch, embeddableTiers) {
       const itemPks = [...new Set(batch.map((row) => row.item_pk))];
-      const current2 = new Map(this.db.query(`
-      SELECT item_pk, trust_tier, tombstoned FROM items
+      const currentRows = this.db.query(`
+      SELECT item_pk, trust_tier, tombstoned, provider, account_scope, provider_item_id, provider_conversation_id FROM items
       WHERE item_pk IN (SELECT value FROM json_each(?))
-    `).all(JSON.stringify(itemPks)).map((row) => [row.item_pk, row]));
-      const tierHidden = this.tierHiddenItemPks();
-      const hidden = new Set([...tierHidden.hidden, ...tierHidden.held, ...tierHidden.metadataLayer]);
+    `).all(JSON.stringify(itemPks));
+      const current2 = new Map(currentRows.map((row) => [row.item_pk, row]));
+      const hidden = this.embeddingHiddenAmong(currentRows);
       const kept = [];
       let privateTier = 0;
       let notVisible = 0;
@@ -29219,13 +29255,41 @@ var init_local_index = __esm(() => {
         const item = current2.get(row.item_pk);
         if (!item || item.tombstoned !== 0 || hidden.has(row.item_pk)) {
           notVisible += 1;
-        } else if (!embeddableTiers.includes(item.trust_tier)) {
+        } else if (embeddableTiers !== undefined && !embeddableTiers.includes(item.trust_tier)) {
           privateTier += 1;
         } else {
           kept.push(row);
         }
       }
       return { kept, privateTier, notVisible };
+    }
+    embeddingHiddenAmong(rows) {
+      const hidden = new Set;
+      if (rows.length === 0)
+        return hidden;
+      const identityOf2 = (row) => ({
+        provider: row.provider,
+        accountScope: row.account_scope,
+        providerItemId: row.provider_item_id,
+        ...row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}
+      });
+      const ledger = this.visibilityLedger();
+      if (ledger && ledger.corpusHasCopies(this.corpusId)) {
+        const copies = ledger.copiesForMany(rows.map(identityOf2));
+        for (const row of rows) {
+          const here = (copies.get(tierLedgerIdentityKey(identityOf2(row))) ?? []).filter((copy) => copy.corpusId === this.corpusId);
+          if (here.some((copy) => copy.state === "superseded" || copy.state === "staged" || copy.state === "current" && (copy.embedHold || copy.layers === "metadata"))) {
+            hidden.add(row.item_pk);
+          }
+        }
+      }
+      const children = hiddenChildKeys(this.childVisibilityLane(), rows.map(identityOf2));
+      if (children.size > 0) {
+        for (const row of rows)
+          if (children.has(tierLedgerIdentityKey(identityOf2(row))))
+            hidden.add(row.item_pk);
+      }
+      return hidden;
     }
     privateTierEmbeddingFilter(embedder) {
       const tiers = connectorStoreEmbeddableRowTiers(this.trustDomain, embedder);
@@ -29301,7 +29365,8 @@ var init_local_index = __esm(() => {
       if (priorCounts && (priorCounts.modelId !== provider.modelId || priorCounts.embeddingProvider !== provider.provider || priorCounts.embeddingBackend !== provider.backend || priorCounts.embeddingDimension !== provider.dimension || priorCounts.embeddingEpoch !== provider.epochId)) {
         throw new Error("Connector store embedding journal provider changed.");
       }
-      const selectedRows = this.embeddingSourceRows(options.localItemIds, options.accountScope, options.filters);
+      const tierHidden = await this.tierHiddenItemPksInTurns();
+      const selectedRows = this.embeddingSourceRows(options.localItemIds, options.accountScope, options.filters, tierHidden);
       const embeddableTiers = connectorStoreEmbeddableRowTiers(this.trustDomain, provider);
       const rows = embeddableTiers === undefined ? selectedRows : selectedRows.filter((row) => embeddableTiers.includes(row.trust_tier));
       let privateTierWithheldChunks = 0;
@@ -29403,7 +29468,7 @@ var init_local_index = __esm(() => {
       for (let offset = 0;offset < pending.length; offset += EMBEDDING_BATCH_SIZE) {
         let batch = pending.slice(offset, offset + EMBEDDING_BATCH_SIZE);
         await options.assertAuthorized?.();
-        if (embeddableTiers !== undefined) {
+        {
           const recheck = this.embeddingBatchRecheck(batch, embeddableTiers);
           privateTierWithheldChunks += recheck.privateTier;
           staleSkipped += recheck.notVisible + recheck.privateTier;
@@ -29954,14 +30019,14 @@ var init_local_index = __esm(() => {
       }
       return { token };
     }
-    embeddingSourceRows(localItemIds, accountScope, filters) {
+    embeddingSourceRows(localItemIds, accountScope, filters, tierHidden) {
       const selectedLocalItemIds = normalizeEmbedLocalItemIds(localItemIds);
       if (selectedLocalItemIds && selectedLocalItemIds.length === 0)
         return [];
       const selectedAccount = normalizeOptionalAccountScope(accountScope);
       const selectedFilters = connectorStoreFilterSql(filters);
       const itemFilter = selectedLocalItemIds ? ` AND i.local_item_id IN (${selectedLocalItemIds.map(() => "?").join(", ")})` : "";
-      const tierExcluded = this.tierHiddenItemPks();
+      const tierExcluded = tierHidden ?? this.tierHiddenItemPks();
       const excludedPks = [...tierExcluded.hidden, ...tierExcluded.held, ...tierExcluded.metadataLayer];
       const tierFilter = excludedPks.length > 0 ? " AND i.item_pk NOT IN (SELECT value FROM json_each(?))" : "";
       return this.db.query(`
