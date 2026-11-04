@@ -11892,11 +11892,12 @@ export class LocalConnectorStore {
   private extractionEnded: ((identity: TierLedgerIdentity) => boolean) | undefined;
 
   /**
-   * For a file store: whether an item's extraction has ended (a job ran and
-   * none is owed). A file kept Private before its text was read is waiting,
-   * not unreadable, until then, so the count and the list leave it out
-   * (Sparta, 2026-11-04: 7,249 Dropbox files waiting for extraction read as
-   * "could not be read"). Without a probe every settled item counts.
+   * Whether an item's extraction has ended (a job ran and none is owed). The
+   * worker sets it on file stores only. A file kept Private before its text
+   * was read is waiting, not unreadable, until then, so the count and the
+   * list leave it out (2026-11-04: 7,249 Dropbox files waiting for
+   * extraction read as "could not be read"). Without a probe every settled
+   * item counts.
    */
   setExtractionEndedProbe(probe: ((identity: TierLedgerIdentity) => boolean) | undefined): void {
     this.extractionEnded = probe;
@@ -11921,7 +11922,7 @@ export class LocalConnectorStore {
       : 'metadata_layer_settled_unreadable');
     const filters = connectorStoreFilterSql(scope?.contentFilters ?? scope?.itemFilters);
     const account = normalizeOptionalAccountScope(scope?.accountScope);
-    const ended = this.family === 'file' ? this.extractionEnded : undefined;
+    const ended = this.extractionEnded;
     return this.itemRowsForIdentities(identities, (identity) => identity.providerConversationId ?? '', {
       sql: `${account ? 'AND i.account_scope = ?' : ''} ${filters.sql}`,
       params: [...(account ? [account] : []), ...filters.params],

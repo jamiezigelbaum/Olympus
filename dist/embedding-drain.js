@@ -30329,7 +30329,7 @@ var init_local_index = __esm(() => {
       const identities = ledger.corpusCopyIdentities(this.corpusId, options.withoutSecretsOverrides ? "metadata_layer_settled_unreadable_not_secret" : "metadata_layer_settled_unreadable");
       const filters = connectorStoreFilterSql(scope?.contentFilters ?? scope?.itemFilters);
       const account = normalizeOptionalAccountScope(scope?.accountScope);
-      const ended = this.family === "file" ? this.extractionEnded : undefined;
+      const ended = this.extractionEnded;
       return this.itemRowsForIdentities(identities, (identity) => identity.providerConversationId ?? "", {
         sql: `${account ? "AND i.account_scope = ?" : ""} ${filters.sql}`,
         params: [...account ? [account] : [], ...filters.params]
