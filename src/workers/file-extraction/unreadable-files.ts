@@ -177,7 +177,7 @@ export const UNREADABLE_FILE_REASONS = [
 ] as const;
 export type UnreadableFileReason = (typeof UNREADABLE_FILE_REASONS)[number];
 
-/** The error kind settled for an item kept Private before its text was read (connector-store). */
+// The error kind settled for an item kept Private before its text was read, in connector-store.
 export const UNREAD_PRIVACY_CHECK_MISSING_KIND = 'privacy_check_missing';
 
 export function unreadableFileReason(errorKind: string | undefined): UnreadableFileReason {
@@ -197,7 +197,7 @@ export function unreadableFileReason(errorKind: string | undefined): UnreadableF
 
 export interface UnreadableFileEntry {
   name: string;
-  /** Why it could not be read (unreadableFileReason). */
+  // Why it could not be read: unreadableFileReason.
   reason: UnreadableFileReason;
   /**
    * Present when the file has a place to open: the one-time capability the open tool takes.

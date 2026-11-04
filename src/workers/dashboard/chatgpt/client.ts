@@ -2007,7 +2007,7 @@ export function chatgptDashboardClient(
     return input
       .filter((file: Any) => file && typeof file.name === 'string' && file.name)
       .map((file: Any) => {
-        const reason = typeof file.reason === 'string' && /^[a-z_]{1,40}$/.test(file.reason) ? { reason: file.reason } : {};
+        const reason = typeof file.reason === 'string' && Object.prototype.hasOwnProperty.call(P.unreadableFileReasons, file.reason) ? { reason: file.reason } : {};
         return typeof file.token === 'string' && /^[A-Za-z0-9_-]{16,128}$/.test(file.token)
           ? { name: file.name, token: file.token, ...reason }
           : { name: file.name, ...reason };
