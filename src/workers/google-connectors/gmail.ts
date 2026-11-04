@@ -65,10 +65,13 @@ export const GMAIL_DAILY_REQUEST_BUDGET_ENV =
 export const GMAIL_DAILY_REQUEST_BUDGET_STATE_PATH_ENV =
   'OLYMPUS_SOURCE_INDEX_GMAIL_DAILY_API_REQUEST_BUDGET_STATE_PATH';
 // Gmail costs one list request per 100-id page plus one get per message, so a
-// day's budget is spent overwhelmingly on gets. 5,000/day is the host default:
-// wide enough for the head to keep up, narrow enough that a runaway loop parks
-// instead of burning the project's whole provider quota.
-export const DEFAULT_GMAIL_DAILY_REQUEST_BUDGET = 5_000;
+// day's budget is spent overwhelmingly on gets. 1,000,000/day is the host
+// default (owner, 2026-11-04): Google itself limits how fast requests go, not
+// how many a day, and a full import of a large mailbox with its attachments is
+// a few hundred thousand requests, so normal use never parks here. The budget
+// only stops a runaway loop from burning the project's shared provider quota.
+// 5,000 parked a large first import for most of each day.
+export const DEFAULT_GMAIL_DAILY_REQUEST_BUDGET = 1_000_000;
 const DEFAULT_GMAIL_PAGE_SIZE = 100;
 const MAX_GMAIL_SYNC_MESSAGES = 1_000;
 /** List pages one run may walk: pages of already-held mail spend no gets. */
