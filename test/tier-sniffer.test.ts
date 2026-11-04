@@ -187,6 +187,35 @@ describe('secrets are never sent', () => {
 });
 
 describe('batching, cache and threshold', () => {
+  test('parallel calls still carry one item each, and never more in flight than asked (2026-11-04)', async () => {
+    const ledger = new TierLedger({ dbPath: ':memory:' });
+    const store = new TierSnifferStore({ dbPath: ':memory:' });
+    try {
+      for (let n = 0; n < 12; n += 1) recordFlagged(ledger, store, n, `bank statement ${n}`);
+      let inFlight = 0;
+      let peak = 0;
+      const prompts: string[] = [];
+      const model: AnalystModel = {
+        async complete(request) {
+          inFlight += 1;
+          peak = Math.max(peak, inFlight);
+          prompts.push(request.prompt);
+          await new Promise((resolve) => setTimeout(resolve, 5));
+          inFlight -= 1;
+          const items = request.prompt.split('\n').filter((line) => line.startsWith('{')).map((line) => JSON.parse(line) as Record<string, unknown>);
+          return { text: verdictsFor(items, { tier: 'private', category: 'financial', confidence: 0.97 }), modelId: LOCAL_LANE.modelId };
+        },
+      };
+      const report = await runSnifferPass({ targets: [{ ledger, sniffer: store }], lane: VENICE_LANE, model, maxCallsPerPass: 100, concurrentCalls: 4 });
+      expect(peak).toBe(4);
+      expect(prompts.map((prompt) => prompt.split('\n').filter((line) => line.startsWith('{')).length)).toEqual(Array(12).fill(1));
+      expect(report).toMatchObject({ calls: 12, verdictsApplied: 12, resolvedPrivate: 12 });
+    } finally {
+      ledger.close();
+      store.close();
+    }
+  });
+
   test('every flagged name is asked on its own call, with localOnly set', async () => {
     const ledger = new TierLedger({ dbPath: ':memory:' });
     const store = new TierSnifferStore({ dbPath: ':memory:' });

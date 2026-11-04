@@ -28,6 +28,7 @@ import { snifferId, snifferMaterialCarriesSecret, snifferPromptVersions } from '
 import type { SnifferLane } from './sniffer-lane.ts';
 import {
   DEFAULT_SNIFFER_MAX_CALLS_PER_DAY,
+  SNIFFER_MAX_CONCURRENT_CALLS,
   SnifferCallBudget,
   runSnifferPass,
   type SnifferPassReport,
@@ -131,6 +132,8 @@ export interface TierSnifferServiceOptions {
    */
   abandonAfterMs?: number;
   maxCallsPerPass?: number;
+  /** Sniffer calls in flight at once, each one item alone (runSnifferPass `concurrentCalls`). */
+  concurrentCalls?: number;
   passTimeMs?: number;
   maxCallsPerDay?: number;
   /** Any other reason to yield the private pool (the pass also yields to `answersInFlight` and `breakerOpen`). */
@@ -833,6 +836,7 @@ export class TierSnifferService {
       ...(ownerContext ? { ownerContext } : {}),
       budget: this.budget,
       maxCallsPerPass: this.options.maxCallsPerPass,
+      concurrentCalls: this.options.concurrentCalls,
       passTimeMs: this.options.passTimeMs,
       shouldYield: () => this.yieldNow(),
       signal,
@@ -1342,6 +1346,8 @@ export function tierSnifferServiceEnv(env: Record<string, string | undefined>): 
   intervalMs: number;
   /** Optional legacy override; absent means time-bounded passes. */
   maxCallsPerPass?: number;
+  /** Calls in flight at once (default 1, at most SNIFFER_MAX_CONCURRENT_CALLS). */
+  concurrentCalls?: number;
   maxCallsPerDay: number;
 } {
   const enabledRaw = env.OLYMPUS_TIER_SNIFFER_ENABLED?.trim().toLowerCase();
@@ -1350,6 +1356,9 @@ export function tierSnifferServiceEnv(env: Record<string, string | undefined>): 
     intervalMs: positiveInteger(env.OLYMPUS_TIER_SNIFFER_INTERVAL_MS, DEFAULT_TIER_SNIFFER_INTERVAL_MS, 100),
     ...(env.OLYMPUS_TIER_SNIFFER_MAX_CALLS_PER_PASS?.trim()
       ? { maxCallsPerPass: positiveInteger(env.OLYMPUS_TIER_SNIFFER_MAX_CALLS_PER_PASS, 1, 1) }
+      : {}),
+    ...(env.OLYMPUS_TIER_SNIFFER_CONCURRENT_CALLS?.trim()
+      ? { concurrentCalls: Math.min(SNIFFER_MAX_CONCURRENT_CALLS, positiveInteger(env.OLYMPUS_TIER_SNIFFER_CONCURRENT_CALLS, 1, 1)) }
       : {}),
     maxCallsPerDay: positiveInteger(env.OLYMPUS_TIER_SNIFFER_MAX_CALLS_PER_DAY, DEFAULT_SNIFFER_MAX_CALLS_PER_DAY, 0),
   };

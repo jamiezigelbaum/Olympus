@@ -480,7 +480,7 @@ export function createTelegramConnectorStoreSyncHandler(options: {
       let redacted: CaptureSpoolRedactionResult | undefined;
       let redactionFailed = false;
       try {
-        redacted = clearTelegramSpoolSecrets({
+        redacted = await clearTelegramSpoolSecrets({
           spoolDir,
           ledger: tierSet.ledger,
           ...(preflightCursor ? { from: preflightCursor } : {}),
@@ -586,12 +586,12 @@ function telegramCaptureSince(spoolDir: string): string | undefined {
  * (connector-store/capture-spool-secrets.ts). An earlier version of an edited
  * message is judged on its own text.
  */
-export function clearTelegramSpoolSecrets(options: {
+export async function clearTelegramSpoolSecrets(options: {
   spoolDir: string;
   ledger: TierLedger;
   from?: string;
   through: string | undefined;
-}): CaptureSpoolRedactionResult {
+}): Promise<CaptureSpoolRedactionResult> {
   return clearCaptureSpoolSecrets({
     ledger: options.ledger,
     stateKey: TELEGRAM_SPOOL_REDACTION_STATE_KEY,

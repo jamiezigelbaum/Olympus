@@ -20729,6 +20729,13 @@ class TierLedger {
             -- Rests on a retired whole-source prior (RETIRED_SOURCE_PRIOR_REASON):
             -- wrong under the owner ruling of 2026-10-28, so judged again now.
             OR instr(i.reasons_json, '"metadata:prior:source_') > 0
+            -- Content settled fail-safe because its question was missing from
+            -- the queue, not because anything judged it (an enqueue lost while
+            -- the private model was off: about 2,400 messages on 2026-11-04):
+            -- its text is stored, so it is asked again (#606).
+            OR (instr(i.reasons_json, ':fail_safe:missing_question"') > 0
+              AND EXISTS (SELECT 1 FROM json_each(i.reasons_json) r
+                WHERE r.value GLOB 'content:sniffer:*:fail_safe:missing_question'))
             OR i.engine_version != ?
             OR (? IS NOT NULL AND instr(i.reasons_json, '"metadata:sniffer:') > 0 AND instr(i.reasons_json, ?) = 0)
             OR (? IS NOT NULL AND instr(i.reasons_json, ?) = 0
@@ -38629,6 +38636,11 @@ var init_local_index = __esm(() => {
       return count;
     }
     settledUnreadableCountMemo;
+    extractionEnded;
+    setExtractionEndedProbe(probe) {
+      this.extractionEnded = probe;
+      this.settledUnreadableCountMemo = undefined;
+    }
     settledUnreadableRows(scope, options = {}) {
       if (scope?.itemsAllowed === false || scope?.contentAllowed === false)
         return [];
@@ -38638,10 +38650,11 @@ var init_local_index = __esm(() => {
       const identities = ledger.corpusCopyIdentities(this.corpusId, options.withoutSecretsOverrides ? "metadata_layer_settled_unreadable_not_secret" : "metadata_layer_settled_unreadable");
       const filters = connectorStoreFilterSql(scope?.contentFilters ?? scope?.itemFilters);
       const account = normalizeOptionalAccountScope(scope?.accountScope);
+      const ended = this.extractionEnded;
       return this.itemRowsForIdentities(identities, (identity2) => identity2.providerConversationId ?? "", {
         sql: `${account ? "AND i.account_scope = ?" : ""} ${filters.sql}`,
         params: [...account ? [account] : [], ...filters.params]
-      }).map((row) => ({ identity: identities[row.idx], row }));
+      }).map((row) => ({ identity: identities[row.idx], row })).filter(({ identity: identity2 }) => !ended || ended(identity2));
     }
     itemRowsForIdentities(identities, conversationOf, extra = { sql: "", params: [] }) {
       if (identities.length === 0)
@@ -75056,7 +75069,7 @@ var init_source_inputs = __esm(() => {
 import { createHash as createHash50 } from "node:crypto";
 import { closeSync as closeSync15, fsyncSync as fsyncSync3, lstatSync as lstatSync26, openSync as openSync15, readSync as readSync3, writeSync as writeSync4 } from "node:fs";
 import { join as join60 } from "node:path";
-function redactCaptureSpoolLines(options) {
+async function redactCaptureSpoolLines(options) {
   const result = { recordsRedacted: 0, recordsBlanked: 0 };
   for (const name of options.files) {
     if (options.from && name < options.from.file)
@@ -75135,6 +75148,7 @@ function redactCaptureSpoolLines(options) {
             if (lineIndex >= endLine)
               break scan;
             at = newline + 1;
+            await ingestionTurn();
           }
           position += read;
         }
@@ -75165,16 +75179,16 @@ function createSpoolSecretJudge(options) {
     return detectSecretFindingKinds(text2).length > 0 ? "content" : undefined;
   };
 }
-function clearCaptureSpoolSecrets(options) {
+async function clearCaptureSpoolSecrets(options) {
   const through = options.through;
   if (!through)
     return addCaptureSpoolRedactions();
   const clearedKey = `${options.stateKey}:cleared_through`;
   const cleared = options.ledger.readMeta(clearedKey);
   const from = options.from === undefined || cleared === undefined ? undefined : earlierSpoolCursor(cleared, options.from);
-  const window2 = options.redact({ ...from === undefined ? {} : { from }, through }, createSpoolSecretJudge({ ledger: options.ledger, floor: true }));
+  const window2 = await options.redact({ ...from === undefined ? {} : { from }, through }, createSpoolSecretJudge({ ledger: options.ledger, floor: true }));
   options.ledger.writeMeta(clearedKey, through);
-  const sweep = sweepCaptureSpoolWhenSecretsChange({
+  const sweep = await sweepCaptureSpoolWhenSecretsChange({
     ledger: options.ledger,
     stateKey: options.stateKey,
     sweep: (judge2) => options.redact({ through }, judge2)
@@ -75196,7 +75210,7 @@ function parseSpoolCursor(cursor) {
   const line = separator > 0 ? cursor.slice(separator + 1) : "";
   return file && /^\d+$/.test(line) ? { file, line: Number(line) } : undefined;
 }
-function sweepCaptureSpoolWhenSecretsChange(options) {
+async function sweepCaptureSpoolWhenSecretsChange(options) {
   if (secretsDisposition() !== "tombstone_now")
     return;
   const digest3 = secretsDigest(options.ledger);
@@ -75204,7 +75218,7 @@ function sweepCaptureSpoolWhenSecretsChange(options) {
   const versionDue = state?.version !== CAPTURE_SPOOL_SWEEP_VERSION;
   if (!versionDue && state?.secrets === digest3)
     return;
-  const result = options.sweep(createSpoolSecretJudge({ ledger: options.ledger, floor: versionDue }));
+  const result = await options.sweep(createSpoolSecretJudge({ ledger: options.ledger, floor: versionDue }));
   const next = { version: CAPTURE_SPOOL_SWEEP_VERSION, secrets: digest3 };
   options.ledger.writeMeta(options.stateKey, JSON.stringify(next));
   return result;
@@ -75244,6 +75258,7 @@ var SPOOL_SCAN_CHUNK_BYTES, SPOOL_MAX_LINE_BYTES, CAPTURE_SPOOL_SWEEP_VERSION = 
 var init_capture_spool_secrets = __esm(() => {
   init_engine();
   init_secrets_disposition();
+  init_control_path_headroom();
   SPOOL_SCAN_CHUNK_BYTES = 1 << 20;
   SPOOL_MAX_LINE_BYTES = 32 * 1024 * 1024;
 });
@@ -76435,7 +76450,7 @@ function spoolTailLines(path) {
     closeSync17(fd2);
   }
 }
-function redactTelegramCaptureSpoolSecrets(options) {
+async function redactTelegramCaptureSpoolSecrets(options) {
   assertTelegramCaptureSpoolDirectory(options.spoolDir);
   const from = parseTelegramCaptureSpoolCursor(options.from);
   const through = parseTelegramCaptureSpoolCursor(options.through);
@@ -81391,7 +81406,7 @@ function rawItemFromChild(message2, child2, account, fetchedAt) {
 function spoolMessageText(message2) {
   return enrichWithLinkPreview(resolveMentionText(message2.text, message2.mentions), message2);
 }
-function redactWhatsAppLiveSpoolSecrets(options) {
+async function redactWhatsAppLiveSpoolSecrets(options) {
   const account = options.account === undefined ? DEFAULT_ACCOUNT : requireNonEmpty7(options.account, "WhatsApp account");
   const from = positionFromCursor(options.from);
   const through = positionFromCursor(options.through);
@@ -82464,7 +82479,7 @@ function createWhatsAppConnectorStoreSyncHandler(options) {
         tiered = tieredLaneReceiptCounts({ routing: setRun.routing });
         try {
           const committed = sanitizeWhatsAppLiveCursor(tierSet.committedCursor(WHATSAPP_PRODUCT_CONNECTOR_ID)?.cursor ?? undefined);
-          redacted = clearWhatsAppSpoolSecrets({
+          redacted = await clearWhatsAppSpoolSecrets({
             spoolDir,
             account,
             mediaDir,
@@ -82506,7 +82521,7 @@ function createWhatsAppConnectorStoreSyncHandler(options) {
     }
   };
 }
-function clearWhatsAppSpoolSecrets(options) {
+async function clearWhatsAppSpoolSecrets(options) {
   const redact = (window2, judge4) => redactWhatsAppLiveSpoolSecrets({
     spoolDir: options.spoolDir,
     account: options.account,
@@ -82548,7 +82563,7 @@ function clearWhatsAppSpoolSecrets(options) {
     if (scanned === undefined || scanned.offset === undefined)
       continue;
     try {
-      const cleared = redact({ from: `${file}:${start}`, through: `${file}:${scanned.lines}` }, judge3);
+      const cleared = await redact({ from: `${file}:${start}`, through: `${file}:${scanned.lines}` }, judge3);
       if (cleared.recordsRedacted + cleared.recordsBlanked > 0)
         rewritten.add(file);
       result = addCaptureSpoolRedactions(result, cleared);
@@ -82585,7 +82600,7 @@ function clearWhatsAppSpoolSecrets(options) {
       if (scanned === undefined)
         continue;
       try {
-        const cleared = redact({ from: `${file}:0`, through: `${file}:${scanned.lines}` }, judge3);
+        const cleared = await redact({ from: `${file}:0`, through: `${file}:${scanned.lines}` }, judge3);
         if (cleared.recordsRedacted + cleared.recordsBlanked > 0)
           rewritten.add(file);
         result = addCaptureSpoolRedactions(result, cleared);
@@ -82605,7 +82620,7 @@ function clearWhatsAppSpoolSecrets(options) {
   refreshIndex(options.spoolDir, rewritten);
   if (failure !== undefined)
     throw failure;
-  const sweep = sweepCaptureSpoolWhenSecretsChange({
+  const sweep = await sweepCaptureSpoolWhenSecretsChange({
     ledger: options.ledger,
     stateKey: WHATSAPP_SPOOL_REDACTION_STATE_KEY,
     sweep: (sweepJudge) => redact({ through: options.through }, sweepJudge)
@@ -92413,7 +92428,7 @@ function createTelegramConnectorStoreSyncHandler(options) {
       let redacted;
       let redactionFailed = false;
       try {
-        redacted = clearTelegramSpoolSecrets({
+        redacted = await clearTelegramSpoolSecrets({
           spoolDir,
           ledger: tierSet.ledger,
           ...preflightCursor ? { from: preflightCursor } : {},
@@ -92480,7 +92495,7 @@ function telegramCaptureSince(spoolDir) {
     return;
   }
 }
-function clearTelegramSpoolSecrets(options) {
+async function clearTelegramSpoolSecrets(options) {
   return clearCaptureSpoolSecrets({
     ledger: options.ledger,
     stateKey: TELEGRAM_SPOOL_REDACTION_STATE_KEY,
@@ -171382,14 +171397,14 @@ function createReadwiseSchedulerSource(input) {
     lastSyncCompletedAt: () => input.liveSync?.lastStoreRunCompletedAt()
   };
 }
-function withEmbeddingSweep(sources, targetsFor) {
+function withEmbeddingSweep(sources, targetsFor, options = {}) {
   return sources.map((source) => {
     const targets = targetsFor(source);
     if (!targets)
       return source;
     return {
       ...source,
-      tasks: [...source.tasks, embeddingSweepTask(source, targets)],
+      tasks: [...source.tasks, embeddingSweepTask(source, targets, options.storeDeadlineMs)],
       embeddingDeferredReason: () => targets().some((target) => target.store.embeddingDeferredReason() !== undefined) ? EMBEDDING_PROVIDER_UNAVAILABLE_REASON : undefined
     };
   });
@@ -171397,7 +171412,7 @@ function withEmbeddingSweep(sources, targetsFor) {
 function embeddingSweepConcurrencyKey(source) {
   return `${source.corpusId}.embeddings`;
 }
-function embeddingSweepTask(source, targets) {
+function embeddingSweepTask(source, targets, deadlineMs = EMBEDDING_SWEEP_STORE_DEADLINE_MS) {
   return {
     id: `${source.sourceId}_embeddings`,
     kind: "embed",
@@ -171407,7 +171422,30 @@ function embeddingSweepTask(source, targets) {
     freshnessThresholdMs: EMBEDDING_SWEEP_FRESHNESS_THRESHOLD_MS,
     run: async (context2) => {
       const passTargets = targets();
-      const runs = await embedPendingChunks(passTargets, { maxItems: EMBEDDING_SWEEP_MAX_ITEMS });
+      const runs = [];
+      for (const target of passTargets) {
+        const overran = Symbol("overran");
+        let timer;
+        const result = await Promise.race([
+          embedPendingChunks([target], { maxItems: EMBEDDING_SWEEP_MAX_ITEMS }),
+          new Promise((resolve27) => {
+            timer = setTimeout(() => resolve27(overran), deadlineMs);
+          })
+        ]).finally(() => clearTimeout(timer));
+        if (result !== overran) {
+          runs.push(...result);
+          continue;
+        }
+        console.error(`[olympus:embedding-sweep] pass_overran source=${source.sourceId} corpus=${target.store.corpusId} after_ms=${deadlineMs}; the source's turn was given back`);
+        runs.push({
+          corpusId: target.store.corpusId,
+          itemsAttempted: 0,
+          chunksEmbedded: 0,
+          itemsFailed: 0,
+          itemsOutOfScope: 0,
+          deferredReason: EMBEDDING_PROVIDER_UNAVAILABLE_REASON
+        });
+      }
       const deferred2 = runs.filter((run2) => run2.deferredReason !== undefined).length;
       const counts = {
         chunks_embedded: runs.reduce((sum2, run2) => sum2 + run2.chunksEmbedded, 0),
@@ -172171,7 +172209,7 @@ function accountFromApprovedScope(scope) {
   const match = /^dropbox\.([a-z0-9_-]+):/i.exec(scope ?? "");
   return match?.[1];
 }
-var SOURCE_SCHEDULER_MAX_FUTURE_DEFERRAL_MS, SOURCE_SCHEDULER_CONTINUE_AFTER_MS = 5000, SOURCE_SCHEDULER_SOURCE_IDS_ENV = "OLYMPUS_WORKER_SCHEDULER_SOURCE_IDS", GMAIL_REQUEST_BUDGET_CLOCK_REGRESSION = "gmail_request_budget_clock_regression", GOOGLE_DRIVE_REQUEST_BUDGET_CLOCK_REGRESSION = "google_drive_request_budget_clock_regression", GMAIL_REQUEST_BUDGET_LEDGER_BUSY = "gmail_request_budget_ledger_busy", GOOGLE_DRIVE_REQUEST_BUDGET_LEDGER_BUSY = "google_drive_request_budget_ledger_busy", SCHEDULER_SOURCE_IDS, SOURCE_SCHEDULER_CHANGE_DEBOUNCE_MS = 500, SourceSchedulerTaskFailure, FILE_EXTRACTION_MAX_PLAN_PAGES_PER_PASS = 40, FILE_EXTRACTION_PASS_BUDGET_MS = 20000, FILE_EXTRACTION_MAX_BATCHES_PER_PASS = 25, EMBEDDING_SWEEP_INTERVAL_MS = 60000, EMBEDDING_SWEEP_MAX_BACKOFF_MS, EMBEDDING_SWEEP_MAX_ITEMS = 32, EMBEDDING_SWEEP_FRESHNESS_THRESHOLD_MS, DEFAULT_ZERO_CHANGE_DEGRADE_RUNS = 5, LANE_NOT_ADVANCING_DEGRADED_REASON = "traversal_not_advancing", HONEST_SCHEDULER_ERROR_KINDS, UTC_DAY_SCOPED_DEGRADED_REASONS, EXTRACTION_JOBS_REFUSED_WARNING = "extraction_jobs_refused", LOCAL_FILES_SCHEDULER_WARNINGS, VERBATIM_SCHEDULER_WARNINGS;
+var SOURCE_SCHEDULER_MAX_FUTURE_DEFERRAL_MS, SOURCE_SCHEDULER_CONTINUE_AFTER_MS = 5000, SOURCE_SCHEDULER_SOURCE_IDS_ENV = "OLYMPUS_WORKER_SCHEDULER_SOURCE_IDS", GMAIL_REQUEST_BUDGET_CLOCK_REGRESSION = "gmail_request_budget_clock_regression", GOOGLE_DRIVE_REQUEST_BUDGET_CLOCK_REGRESSION = "google_drive_request_budget_clock_regression", GMAIL_REQUEST_BUDGET_LEDGER_BUSY = "gmail_request_budget_ledger_busy", GOOGLE_DRIVE_REQUEST_BUDGET_LEDGER_BUSY = "google_drive_request_budget_ledger_busy", SCHEDULER_SOURCE_IDS, SOURCE_SCHEDULER_CHANGE_DEBOUNCE_MS = 500, SourceSchedulerTaskFailure, FILE_EXTRACTION_MAX_PLAN_PAGES_PER_PASS = 40, FILE_EXTRACTION_PASS_BUDGET_MS = 20000, FILE_EXTRACTION_MAX_BATCHES_PER_PASS = 25, EMBEDDING_SWEEP_INTERVAL_MS = 60000, EMBEDDING_SWEEP_MAX_BACKOFF_MS, EMBEDDING_SWEEP_MAX_ITEMS = 32, EMBEDDING_SWEEP_STORE_DEADLINE_MS, EMBEDDING_SWEEP_FRESHNESS_THRESHOLD_MS, DEFAULT_ZERO_CHANGE_DEGRADE_RUNS = 5, LANE_NOT_ADVANCING_DEGRADED_REASON = "traversal_not_advancing", HONEST_SCHEDULER_ERROR_KINDS, UTC_DAY_SCOPED_DEGRADED_REASONS, EXTRACTION_JOBS_REFUSED_WARNING = "extraction_jobs_refused", LOCAL_FILES_SCHEDULER_WARNINGS, VERBATIM_SCHEDULER_WARNINGS;
 var init_source_scheduler = __esm(() => {
   init_config();
   init_control_path_headroom();
@@ -172218,6 +172256,7 @@ var init_source_scheduler = __esm(() => {
     }
   };
   EMBEDDING_SWEEP_MAX_BACKOFF_MS = 30 * 60000;
+  EMBEDDING_SWEEP_STORE_DEADLINE_MS = 10 * 60000;
   EMBEDDING_SWEEP_FRESHNESS_THRESHOLD_MS = 26 * 60 * 60000;
   HONEST_SCHEDULER_ERROR_KINDS = new Set([
     "api_request_guard",
@@ -189005,6 +189044,7 @@ async function runSnifferPass(options) {
   const promptVersion = options.promptVersion ?? SNIFFER_PROMPT_VERSION;
   const id = snifferId(options.lane, promptVersion);
   const maxCallsPerPass = Math.max(0, Math.floor(options.maxCallsPerPass ?? Number.MAX_SAFE_INTEGER));
+  const concurrency = Math.max(1, Math.min(SNIFFER_MAX_CONCURRENT_CALLS, Math.floor(options.concurrentCalls ?? 1)));
   const monotonicNow = options.monotonicNow ?? (() => performance.now());
   const deadline = monotonicNow() + (options.passTimeMs ?? DEFAULT_SNIFFER_PASS_TIME_MS);
   const report = {
@@ -189185,107 +189225,110 @@ async function runSnifferPass(options) {
   let consecutiveTransportFailures = 0;
   const pending = [...work.metadata, ...work.content].sort(compareRecent);
   let dispatches = options.targets.reduce((total, target) => total + target.sniffer.dispatchCount(), 0);
-  while (pending.length > 0) {
-    const aged = pending.filter((item) => dispatches % 5 === 4 && item.target.sniffer.clockMs() - Date.parse(item.question.queuedAt) >= 5 * 60000).sort((a, b) => a.question.queuedAt.localeCompare(b.question.queuedAt) || a.question.sequence - b.question.sequence);
-    let next = aged[0] ?? nextInTurn(pending, options.targets, dispatches);
-    if (next.question.pass === "content")
-      next = pending.find((item) => item.question.pass === "metadata" && item.target === next.target && tierLedgerIdentityKey(item.question) === tierLedgerIdentityKey(next.question)) ?? next;
-    pending.splice(pending.indexOf(next), 1);
-    const pass = next.question.pass;
-    if (!stillOpen(next.target, next.question)) {
-      if (!midMove(next.target, next.question)) {
-        next.target.sniffer.deleteQuestion(next.question, pass, next.question.materialHash);
-        report.staleDropped += 1;
+  const ask = async () => {
+    while (pending.length > 0 && report.stoppedBy === undefined) {
+      const aged = pending.filter((item) => dispatches % 5 === 4 && item.target.sniffer.clockMs() - Date.parse(item.question.queuedAt) >= 5 * 60000).sort((a, b) => a.question.queuedAt.localeCompare(b.question.queuedAt) || a.question.sequence - b.question.sequence);
+      let next = aged[0] ?? nextInTurn(pending, options.targets, dispatches);
+      if (next.question.pass === "content")
+        next = pending.find((item) => item.question.pass === "metadata" && item.target === next.target && tierLedgerIdentityKey(item.question) === tierLedgerIdentityKey(next.question)) ?? next;
+      pending.splice(pending.indexOf(next), 1);
+      const pass = next.question.pass;
+      if (!stillOpen(next.target, next.question)) {
+        if (!midMove(next.target, next.question)) {
+          next.target.sniffer.deleteQuestion(next.question, pass, next.question.materialHash);
+          report.staleDropped += 1;
+        }
+        continue;
       }
-      continue;
-    }
-    if (!screenQuestion(next.target, next.question))
-      continue;
-    const group = [next];
-    for (let i2 = pending.length - 1;i2 >= 0; i2--) {
-      const item = pending[i2];
-      if (item.question.pass === pass && item.question.materialHash === next.question.materialHash && item.question.mapRevision === next.question.mapRevision && stillOpen(item.target, item.question) && screenQuestion(item.target, item.question)) {
-        group.push(item);
-        pending.splice(i2, 1);
+      if (!screenQuestion(next.target, next.question))
+        continue;
+      const group = [next];
+      for (let i2 = pending.length - 1;i2 >= 0; i2--) {
+        const item = pending[i2];
+        if (item.question.pass === pass && item.question.materialHash === next.question.materialHash && item.question.mapRevision === next.question.mapRevision && stillOpen(item.target, item.question) && screenQuestion(item.target, item.question)) {
+          group.push(item);
+          pending.splice(i2, 1);
+        }
       }
-    }
-    const batch = [group];
-    const stop = stopReason(options, report, maxCallsPerPass, monotonicNow() >= deadline);
-    if (stop) {
-      report.stoppedBy = stop;
-      return finish(report);
-    }
-    assertSnifferProfileAllowed(options.lane.profileId, options.lane.profile);
-    const prompt = buildSnifferBatchPrompt(pass, batch.map((group2, index) => ({ i: index + 1, material: snifferMaterialForModel(group2[0].question.material) })), options.ownerContext);
-    next.target.sniffer.recordDispatch();
-    dispatches += 1;
-    for (const item of group)
-      report.maxQueueWaitMs = Math.max(report.maxQueueWaitMs, item.target.sniffer.clockMs() - Date.parse(item.question.queuedAt));
-    const callStarted = monotonicNow();
-    report.calls += 1;
-    report.itemsAsked += batch.length;
-    report.promptChars += SNIFFER_SYSTEM_PROMPT.length + prompt.length;
-    let text4;
-    try {
-      const completion = await options.model.complete({
-        system: SNIFFER_SYSTEM_PROMPT,
-        prompt,
-        localOnly: true,
-        responseSchema: SNIFFER_RESPONSE_SCHEMA,
-        maxOutputChars: batch.length * OUTPUT_CHARS_PER_ITEM + 200,
-        ...options.signal ? { signal: options.signal } : {}
-      });
-      text4 = completion.text;
-    } catch {
+      const batch = [group];
+      const stop = stopReason(options, report, maxCallsPerPass, monotonicNow() >= deadline);
+      if (stop) {
+        report.stoppedBy = stop;
+        return;
+      }
+      assertSnifferProfileAllowed(options.lane.profileId, options.lane.profile);
+      const prompt = buildSnifferBatchPrompt(pass, batch.map((group2, index) => ({ i: index + 1, material: snifferMaterialForModel(group2[0].question.material) })), options.ownerContext);
+      next.target.sniffer.recordDispatch();
+      dispatches += 1;
+      for (const item of group)
+        report.maxQueueWaitMs = Math.max(report.maxQueueWaitMs, item.target.sniffer.clockMs() - Date.parse(item.question.queuedAt));
+      const callStarted = monotonicNow();
+      report.calls += 1;
+      report.itemsAsked += batch.length;
+      report.promptChars += SNIFFER_SYSTEM_PROMPT.length + prompt.length;
+      let text4;
+      try {
+        const completion = await options.model.complete({
+          system: SNIFFER_SYSTEM_PROMPT,
+          prompt,
+          localOnly: true,
+          responseSchema: SNIFFER_RESPONSE_SCHEMA,
+          maxOutputChars: batch.length * OUTPUT_CHARS_PER_ITEM + 200,
+          ...options.signal ? { signal: options.signal } : {}
+        });
+        text4 = completion.text;
+      } catch {
+        if (options.signal?.aborted) {
+          report.stoppedBy = "preempted";
+          return;
+        }
+        report.failedCalls += 1;
+        consecutiveTransportFailures += 1;
+        if (consecutiveTransportFailures >= MAX_CONSECUTIVE_TRANSPORT_FAILURES) {
+          report.stoppedBy = "transport_failures";
+          return;
+        }
+        continue;
+      } finally {
+        report.callMs += Math.max(0, monotonicNow() - callStarted);
+      }
       if (options.signal?.aborted) {
         report.stoppedBy = "preempted";
-        return finish(report);
+        return;
       }
-      report.failedCalls += 1;
-      consecutiveTransportFailures += 1;
-      if (consecutiveTransportFailures >= MAX_CONSECUTIVE_TRANSPORT_FAILURES) {
-        report.stoppedBy = "transport_failures";
-        return finish(report);
-      }
-      continue;
-    } finally {
-      report.callMs += Math.max(0, monotonicNow() - callStarted);
-    }
-    if (options.signal?.aborted) {
-      report.stoppedBy = "preempted";
-      return finish(report);
-    }
-    consecutiveTransportFailures = 0;
-    report.responseChars += text4.length;
-    const verdicts = parseSnifferBatchResponse(text4, new Set(batch.map((_, index) => index + 1)));
-    for (const [index, group2] of batch.entries()) {
-      const verdict = verdicts.get(index + 1);
-      const key2 = keyOf2(group2[0].question);
-      if (verdict) {
-        const stored = { ...verdict, failSafe: false };
-        group2[0].target.sniffer.putVerdict(key2, stored);
-        for (const item of group2) {
-          if (item.target !== group2[0].target)
-            item.target.sniffer.putVerdict(key2, stored);
-          apply(item, stored);
+      consecutiveTransportFailures = 0;
+      report.responseChars += text4.length;
+      const verdicts = parseSnifferBatchResponse(text4, new Set(batch.map((_, index) => index + 1)));
+      for (const [index, group2] of batch.entries()) {
+        const verdict = verdicts.get(index + 1);
+        const key2 = keyOf2(group2[0].question);
+        if (verdict) {
+          const stored = { ...verdict, failSafe: false };
+          group2[0].target.sniffer.putVerdict(key2, stored);
+          for (const item of group2) {
+            if (item.target !== group2[0].target)
+              item.target.sniffer.putVerdict(key2, stored);
+            apply(item, stored);
+          }
+          continue;
         }
-        continue;
-      }
-      const currentGroup = group2.filter((item) => sameQuestion(item.target, item.question));
-      if (currentGroup.length === 0) {
-        report.staleDropped += group2.length;
-        continue;
-      }
-      const attempts = Math.max(...currentGroup.map((item) => item.target.sniffer.recordAttemptFailure(item.question, pass)));
-      if (attempts >= SNIFFER_MAX_ATTEMPTS) {
-        const failSafe = { tier: "private", category: "other", confidence: 0, failSafe: true };
-        for (const item of group2) {
-          item.target.sniffer.putVerdict(key2, failSafe);
-          apply(item, failSafe);
+        const currentGroup = group2.filter((item) => sameQuestion(item.target, item.question));
+        if (currentGroup.length === 0) {
+          report.staleDropped += group2.length;
+          continue;
+        }
+        const attempts = Math.max(...currentGroup.map((item) => item.target.sniffer.recordAttemptFailure(item.question, pass)));
+        if (attempts >= SNIFFER_MAX_ATTEMPTS) {
+          const failSafe = { tier: "private", category: "other", confidence: 0, failSafe: true };
+          for (const item of group2) {
+            item.target.sniffer.putVerdict(key2, failSafe);
+            apply(item, failSafe);
+          }
         }
       }
     }
-  }
+  };
+  await Promise.all(Array.from({ length: concurrency }, () => ask()));
   return finish(report);
 }
 function snifferStoreTurn(dispatches) {
@@ -189323,7 +189366,7 @@ function finish(report) {
   report.estimatedOutputTokens = Math.ceil(report.responseChars / 4);
   return report;
 }
-var DEFAULT_SNIFFER_MAX_CALLS_PER_DAY = 20000, DEFAULT_SNIFFER_PASS_TIME_MS = 30000, MAX_CONSECUTIVE_TRANSPORT_FAILURES = 2, OUTPUT_CHARS_PER_ITEM = 110, SECRET_SCREEN_CACHE_LIMIT = 20000, secretScreenCache;
+var DEFAULT_SNIFFER_MAX_CALLS_PER_DAY = 20000, DEFAULT_SNIFFER_PASS_TIME_MS = 30000, SNIFFER_MAX_CONCURRENT_CALLS = 8, MAX_CONSECUTIVE_TRANSPORT_FAILURES = 2, OUTPUT_CHARS_PER_ITEM = 110, SECRET_SCREEN_CACHE_LIMIT = 20000, secretScreenCache;
 var init_sniffer_resolver = __esm(() => {
   init_atomic_file();
   init_sniffer();
@@ -189843,6 +189886,7 @@ class TierSnifferService {
       ...ownerContext ? { ownerContext } : {},
       budget: this.budget,
       maxCallsPerPass: this.options.maxCallsPerPass,
+      concurrentCalls: this.options.concurrentCalls,
       passTimeMs: this.options.passTimeMs,
       shouldYield: () => this.yieldNow(),
       signal
@@ -190213,6 +190257,7 @@ function tierSnifferServiceEnv(env) {
     enabled: !(enabledRaw === "0" || enabledRaw === "false" || enabledRaw === "no" || enabledRaw === "off"),
     intervalMs: positiveInteger7(env.OLYMPUS_TIER_SNIFFER_INTERVAL_MS, DEFAULT_TIER_SNIFFER_INTERVAL_MS, 100),
     ...env.OLYMPUS_TIER_SNIFFER_MAX_CALLS_PER_PASS?.trim() ? { maxCallsPerPass: positiveInteger7(env.OLYMPUS_TIER_SNIFFER_MAX_CALLS_PER_PASS, 1, 1) } : {},
+    ...env.OLYMPUS_TIER_SNIFFER_CONCURRENT_CALLS?.trim() ? { concurrentCalls: Math.min(SNIFFER_MAX_CONCURRENT_CALLS, positiveInteger7(env.OLYMPUS_TIER_SNIFFER_CONCURRENT_CALLS, 1, 1)) } : {},
     maxCallsPerDay: positiveInteger7(env.OLYMPUS_TIER_SNIFFER_MAX_CALLS_PER_DAY, DEFAULT_SNIFFER_MAX_CALLS_PER_DAY, 0)
   };
 }
@@ -211983,6 +212028,13 @@ ${key2}`;
     generation: () => sourceLaneGeneration,
     beforeCurrent: () => mountSourceLanes(readActiveConnectedHandles(process.env))
   });
+  const probeExtractionEnded = (store) => {
+    if (store.family !== "file" || !fileExtractionRuntime)
+      return;
+    store.setExtractionEndedProbe((identity2) => fileExtractionRuntime.jobs.itemExtractionState(identity2) === "settled");
+  };
+  for (const store of connectorStores)
+    probeExtractionEnded(store);
   const connectorStoreEmbeddingProviders = new Map;
   const connectorStoreAccountScopes = new Map;
   const connectorStorePrincipals = new Map;
@@ -212109,6 +212161,7 @@ ${key2}`;
   registerTierLegStore = (store, siblingCorpusId, embeddingProvider) => {
     if (!connectorStores.includes(store))
       connectorStores.push(store);
+    probeExtractionEnded(store);
     if (!fullyDefinedCorpusIds.has(store.corpusId)) {
       const definition = registeredCorpusDefinitions.get(store.corpusId);
       fullCorpusDefinitions.push(defineConnectorCorpus({
@@ -212596,7 +212649,7 @@ ${key2}`;
     items: (corpusId) => {
       const items = [
         ...extractionReadinessLedger?.unreadableItems(corpusId) ?? [],
-        ...connectorStores.filter((store) => store.corpusId === corpusId).flatMap((store) => store.settledUnreadableItems(connectorStoreStatusScope(store)).filter((item) => store.family !== "file" || !fileExtractionRuntime || fileExtractionRuntime.jobs.itemExtractionState(item.ref) === "settled"))
+        ...connectorStores.filter((store) => store.corpusId === corpusId).flatMap((store) => store.settledUnreadableItems(connectorStoreStatusScope(store)))
       ];
       return Array.from(new Map(items.map((item) => [item.ref.localItemId, item])).values());
     },
@@ -214371,6 +214424,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     budgetStatePath: join130(dirname99(resolveClassificationLedgerPath(process.env)), "tier-sniffer-budget.json"),
     intervalMs: snifferEnv.intervalMs,
     ...snifferEnv.maxCallsPerPass !== undefined ? { maxCallsPerPass: snifferEnv.maxCallsPerPass } : {},
+    ...snifferEnv.concurrentCalls !== undefined ? { concurrentCalls: snifferEnv.concurrentCalls } : {},
     maxCallsPerDay: snifferEnv.maxCallsPerDay,
     answersInFlight: () => snifferResource !== undefined && localModelActivity.busy(snifferResource),
     shouldYield: () => localPrivateAnswers?.overdue() ?? false,
