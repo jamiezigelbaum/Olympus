@@ -235,7 +235,8 @@ export const DASHBOARD_LAUNCH_PAGE_HTML = `<!doctype html>
         }
         var ticket = take();
         if (!ticket) {
-          status.textContent = 'This link is missing its opening ticket.';
+          // A reload of this page after its ticket was taken: the dashboard has the session, or the way back in.
+          window.location.replace('/dashboard');
           return;
         }
         fetch('/dashboard/control/launch/redeem', {
@@ -244,7 +245,10 @@ export const DASHBOARD_LAUNCH_PAGE_HTML = `<!doctype html>
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ ticket: ticket })
         }).then(function (response) {
-          if (response.ok) {
+          // A link already used or expired (a reload, a second open) still
+          // lands on the dashboard: the session it opened is in its cookie,
+          // and without one the dashboard itself offers the way back in.
+          if (response.ok || response.status === 403) {
             // A Keys target (Connect, a model fix) lands on Keys, where the computer's setup
             // sheets and Models live; it only opens a panel there, never submits anything.
             // A panel target (See why on one source) lands on the dashboard there.
@@ -256,9 +260,7 @@ export const DASHBOARD_LAUNCH_PAGE_HTML = `<!doctype html>
               : PRIVATE.test(open) ? '/dashboard?private-answers' + (open.indexOf('page.private.') === 0 ? '#' + open.slice(13) : '') : '/dashboard');
             return;
           }
-          status.textContent = response.status === 403
-            ? 'This opening link is no longer valid.'
-            : 'Opening failed.';
+          status.textContent = 'Opening failed.';
         }).catch(function () {
           status.textContent = 'Opening failed.';
         });

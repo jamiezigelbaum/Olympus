@@ -296,6 +296,12 @@ function copyItem(item: DashboardItem): DashboardItem {
   return { id: identifier(item.id), sentence: text(item.sentence), fix: copyFix(item.fix) };
 }
 
+/** The engine's own closed Needs code, re-checked by sourceSupportDetails; a report without one names none. */
+function supportNeed(details: unknown): string | undefined {
+  const match = typeof details === 'string' ? /^Needs: ([a-z_]+)$/m.exec(details) : null;
+  return match ? match[1] : undefined;
+}
+
 function copySource(source: DashboardSource): DashboardSource {
   const out: DashboardSource = {
     id: identifier(source.id),
@@ -304,7 +310,7 @@ function copySource(source: DashboardSource): DashboardSource {
     group: source.group === 'local' ? 'local' : 'cloud',
     status: STATUSES.has(source.status) ? source.status : 'Waiting',
   };
-  out.supportDetails = sourceSupportDetails({ sourceId: source.id, state: out.status, failure: source.progress?.stall?.failure ?? source.lastManualSync?.failure, ref: source.progress?.stall?.ref ?? source.lastManualSync?.ref });
+  out.supportDetails = sourceSupportDetails({ sourceId: source.id, state: out.status, failure: source.progress?.stall?.failure ?? source.lastManualSync?.failure, ref: source.progress?.stall?.ref ?? source.lastManualSync?.ref, need: supportNeed(source.supportDetails) });
   if (source.detail) out.detail = text(source.detail);
   if (iso(source.lastSyncAt)) out.lastSyncAt = iso(source.lastSyncAt)!;
   if (source.primary) out.primary = copyFix(source.primary);

@@ -3755,13 +3755,23 @@ describe('retry counters are not item counts', () => {
   });
 
   test('a park does not absorb a genuine failure — real broken work still needs attention', () => {
-    const card = parkedBookmarksCard({ counts: { extraction_jobs_failed: 4 } });
+    const card = parkedBookmarksCard({ counts: { metadata_sync_folders_blocked: 4 } });
 
     expect(card?.queue_health.needs_attention).toBe(4);
     expect(card?.answer_readiness).toEqual({
       state: 'needs_attention',
       label: 'Needs attention before answers',
     });
+  });
+
+  test('a failed read that will be tried again is no error (owner rule, 2026-11-04)', () => {
+    // "If it fails at first, but then it goes into a repair pipeline, that's
+    // not an error." Extraction failures with a retry owed, and folder
+    // listings that are retrying, never ask the owner for anything.
+    const card = parkedBookmarksCard({ counts: { extraction_jobs_failed: 4, extraction_jobs_failed_actionable: 4, metadata_sync_folders_retryable_failed: 2 } });
+
+    expect(card?.queue_health.needs_attention).toBe(0);
+    expect(card?.answer_readiness.state).not.toBe('needs_attention');
   });
 
   test('a park absorbs the staleness it can account for', () => {

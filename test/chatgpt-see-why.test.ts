@@ -214,7 +214,7 @@ describe('the panel renders See why', () => {
     const why = row.querySelector('details.why')!;
     expect(why.querySelector('summary')!.textContent).toBe(DASHBOARD_CHATGPT_PAGE_COPY.seeWhy);
     expect(Array.from(why.querySelectorAll('li')).map((node) => node.textContent))
-      .toEqual(["2 files are damaged or in a format Olympus can't read"]);
+      .toEqual(["2 files Olympus can't read at all"]);
     expect(why.querySelector('.why-note')!.textContent).toBe(DASHBOARD_UNREADABLE_NOTE);
   });
 
@@ -232,7 +232,7 @@ describe('the panel renders See why', () => {
   test('one file is singular; past the alarm share the note says it may be Olympus', () => {
     const win = mount(fresh({ unreadable: { count: 1, many: true, reasons: [{ code: 'damaged_or_unsupported', count: 1 }] } }));
     const why = win.document.querySelector('details.why')!;
-    expect(why.querySelector('li')!.textContent).toBe("1 file is damaged or in a format Olympus can't read");
+    expect(why.querySelector('li')!.textContent).toBe("1 file Olympus can't read at all");
     expect(why.querySelector('.why-note')!.textContent).toBe(DASHBOARD_UNREADABLE_NOTE_MANY);
   });
 

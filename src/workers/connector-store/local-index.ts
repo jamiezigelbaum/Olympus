@@ -12078,7 +12078,8 @@ export class LocalConnectorStore {
         providerItemId: identity.providerItemId, localItemId: row.local_item_id,
         approvedScopeKey: `${identity.provider}.${identity.accountScope}`,
         ...(row.title ? { name: row.title } : {}), ...(row.source_version ? { sourceVersion: row.source_version } : {}) },
-        failedAt: record.decidedAt });
+        // Kept Private before its text was read: unreadable-files.ts UNREAD_PRIVACY_CHECK_MISSING_KIND.
+        failedAt: record.decidedAt, errorKind: 'privacy_check_missing' });
     }
     return out;
   }

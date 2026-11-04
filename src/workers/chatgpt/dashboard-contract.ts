@@ -720,6 +720,8 @@ export interface ComputerUnreadableEntry {
   sourceId: string;
   files: Array<{
     name: string;
+    /** Why it could not be read: a closed code (file-extraction/unreadable-files.ts UNREADABLE_FILE_REASONS). */
+    reason?: string;
     token?: string;
     /** A file that came inside another item: the parent's label and the route to its archive or source. */
     parent?: { label?: string; route: { kind: 'archive'; archiveId: string } | { kind: 'source' } };

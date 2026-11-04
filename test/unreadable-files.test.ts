@@ -47,6 +47,7 @@ import {
   createUnreadableFiles,
   createUnreadableVerdict,
   type UnreadableFiles,
+  unreadableFileReason,
 } from '../src/workers/file-extraction/unreadable-files.ts';
 
 const LANE = {
@@ -153,6 +154,8 @@ describe('Secrets never count as unreadable', () => {
     const listed: Record<string, string[]> = {};
     const onUnreadable = (path: string) => (items: readonly ExtractionUnreadableItem[]) => {
       listed[path] = items.map((item) => item.ref.providerItemId);
+      // Each carries its failed job's error kind, for the reason its line gives.
+      expect(items.every((item) => item.errorKind === 'extractor_crashed')).toBe(true);
     };
     expect(store.corpusReadiness(LANE.corpusId, new Date(), { classifyUnreadable, onUnreadable: onUnreadable('corpus') })).toMatchObject(expected);
     expect(store.scopedReadiness([LANE], { classifyUnreadable, onUnreadable: onUnreadable('scoped') })).toMatchObject(expected);
@@ -335,10 +338,24 @@ describe('opening a file', () => {
     expect((await files.open(fresh!.token, OPENER)).status).toBe('open_link');
   });
 
+  test('each file says exactly why it could not be read, from its failed job (owner rule, 2026-11-04)', () => {
+    const kinds = ['ocrmypdf_pdf_encrypted', 'ocrmypdf_pdf_invalid', undefined];
+    const items = itemsOf(3).map((item, index) => (kinds[index] ? { ...item, errorKind: kinds[index]! } : item));
+    const listed = filesOver(items).files.computerList([LANE.corpusId], 10, AS_OPENER).files;
+    expect(listed.map((file) => file.reason).sort()).toEqual(['damaged', 'other', 'password']);
+    expect(listed.every((file) => typeof file.token === 'string')).toBe(true);
+    expect([
+      'source_too_large', 'ocr_command_timeout', 'source_item_not_found', 'source_permission_denied',
+      'skipped_unsupported', 'ocr_empty', 'transcribe_audio_undecodable', 'privacy_check_missing', 'something_new',
+    ].map(unreadableFileReason)).toEqual([
+      'too_large', 'timed_out', 'missing', 'no_access', 'unsupported', 'no_text', 'damaged', 'privacy_check_missing', 'other',
+    ]);
+  });
+
   test('tokens only for an opener, and only that opener redeems them', async () => {
     const { files, opened } = filesOver(itemsOf(1));
     // A locked reader: names, no tokens.
-    expect(files.computerList([LANE.corpusId], 10).files).toEqual([{ name: 'file-000.pdf' }]);
+    expect(files.computerList([LANE.corpusId], 10).files).toEqual([{ name: 'file-000.pdf', reason: 'other' }]);
     const [mine] = files.computerList([LANE.corpusId], 10, AS_OPENER).files;
     const [theirs] = files.computerList([LANE.corpusId], 10, { opener: 'session:other' }).files;
     expect(theirs!.token).not.toBe(mine!.token);

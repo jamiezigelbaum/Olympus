@@ -21,6 +21,13 @@ const ROOT = join(import.meta.dir, '..');
 const CONFIG = 'config/dashboard-design-review.json';
 const TEST = 'test/dashboard-design-review.test.ts';
 
+// The panel embeds transpiled client code, so another Bun renders other bytes.
+const pinnedBun = readFileSync(join(ROOT, '.bun-version'), 'utf8').trim();
+if (Bun.version !== pinnedBun) {
+  console.error(`Run this under Bun ${pinnedBun} (the CI pin), not ${Bun.version}: the digests would not match CI.`);
+  process.exit(1);
+}
+
 const sha256 = (value: string | Buffer): string => createHash('sha256').update(value).digest('hex');
 
 function allFiles(path: string): string[] {
@@ -44,6 +51,10 @@ const receipt = JSON.parse(readFileSync(join(ROOT, CONFIG), 'utf8')) as {
 
 const pairs: Array<[pinned: string, current: string]> = [[receipt.implementation_guard_sha256, filesDigest(receipt.implementation_guard_paths)]];
 
+// The same fixed computer name the test preload sets (test/support/isolated-home.ts),
+// so the digests match what CI renders rather than this machine's name.
+const { fixDashboardComputerIdentity } = await import('../src/core/computer-identity.ts');
+fixDashboardComputerIdentity('Test computer · tester');
 const { dashboardResourceHtml } = await import('../src/workers/chatgpt/dashboard-resource.ts');
 const { renderComputerHostPage } = await import('../src/workers/dashboard/host-page.ts');
 const { renderDashboardAgentsSection } = await import('../src/workers/dashboard/agents.ts');

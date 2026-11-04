@@ -8116,7 +8116,7 @@ var init_scheduler_markers = __esm(() => {
 });
 
 // src/workers/dashboard/source-failure.ts
-var SOURCE_FAILURE_KINDS, KIND_SET, SUPPORT_SOURCES, SUPPORT_STATES;
+var SOURCE_FAILURE_KINDS, KIND_SET, SUPPORT_SOURCES, SUPPORT_STATES, SUPPORT_NEEDS;
 var init_source_failure = __esm(() => {
   init_scheduler_markers();
   SOURCE_FAILURE_KINDS = [
@@ -8137,6 +8137,26 @@ var init_source_failure = __esm(() => {
   KIND_SET = new Set(SOURCE_FAILURE_KINDS);
   SUPPORT_SOURCES = new Set(["gmail.email", "google_drive.docs", "dropbox.files", "local.files", "readwise.library", "x.bookmarks", "evernote.notes", "telegram.messages", "whatsapp.personal.messages", "archive.imports"]);
   SUPPORT_STATES = new Set(["Off", "Waiting", "Working", "Fresh", "Needs you", "Failing", "not_connected", "needs_setup", "awaiting_consent", "reauth_required", "connected", "waiting_for_first_sync", "syncing", "synced"]);
+  SUPPORT_NEEDS = new Set([
+    "finish_sign_in",
+    "sign_in",
+    "choose_folders",
+    "import_attention",
+    "waiting_for_credentials",
+    "scope_pending",
+    "scope_root_missing",
+    "scope_root_permission_needed",
+    "scope_root_helper_needed",
+    "scope_root_unreadable",
+    "provider_unavailable",
+    "model_downloading",
+    "storage_move",
+    "disk_full",
+    "live_feed",
+    "answer_readiness",
+    "queue",
+    "unknown"
+  ]);
 });
 
 // src/workers/dashboard/answer-ready-coverage.ts
@@ -30453,7 +30473,8 @@ var init_local_index = __esm(() => {
             ...row.title ? { name: row.title } : {},
             ...row.source_version ? { sourceVersion: row.source_version } : {}
           },
-          failedAt: record.decidedAt
+          failedAt: record.decidedAt,
+          errorKind: "privacy_check_missing"
         });
       }
       return out;
@@ -37976,7 +37997,7 @@ function syncMid(name) {
 function archivePickIntro(formats = ARCHIVE_FORMATS) {
   return `Drop a file or folder from this computer: ${formats.map((format) => format.chooseHint ?? format.label).join("; or ")}. Olympus keeps a copy in its own storage to read it until you remove the import, and never changes the original.`;
 }
-var DASHBOARD_MISSING_FOLDER = "A folder you chose is missing", DASHBOARD_FOLDER_NEEDS_PERMISSION = "Your Mac will not let Olympus open a folder you chose. In System Settings, choose Privacy & Security, then Files & Folders, and switch on Olympus Engine (or the app your Mac named when it asked).", DASHBOARD_FOLDER_NEEDS_HELPER = "Desktop, Documents, Downloads, iCloud Drive and other disks need the Olympus helper app. Update Olympus to add it, or choose a folder outside them.", DASHBOARD_FOLDER_UNREADABLE = "Your user account is not allowed to open a folder you chose. Change who may open that folder, or choose another one.", DASHBOARD_STATUS_PRESENTATION, DASHBOARD_UNCONNECTED_STATES, DASHBOARD_SIGNED_OUT = "signed out", DASHBOARD_MANY_UNREADABLE_LABEL = "Many files cannot be read", READINESS_REASONS, CAPTURE_JUDGED_CONNECTION_STATES, CAPTURE_UNEXPECTED_STOP_REASONS, REDIRECT_REFUSAL_CODES, DASHBOARD_INDEX_FASTER, DASHBOARD_LIVE_PASS_ERROR_COPY, DASHBOARD_UNREADABLE_NOTE = "Olympus does not retry these, and nothing is waiting on you.", DASHBOARD_UNREADABLE_MORE = "and {count} more", DASHBOARD_UNREADABLE_NOTE_MANY, DASHBOARD_UNREADABLE_REASON_WORDS, DASHBOARD_SOURCE_FAILURE_WORDS, DASHBOARD_FAILURE_REF = "Olympus's log on the computer has the details under reference {ref}.", DASHBOARD_FAILURE_LOG = "Olympus's log on the computer has the details.", DASHBOARD_CHATGPT_VOCABULARY, DASHBOARD_CHATGPT_CONNECTION_COPY, DASHBOARD_CHATGPT_PAGE_COPY, DASHBOARD_WORKER_TOKEN_AGENT_PROMPT, ARCHIVE_PICK_INTRO, DASHBOARD_ARCHIVE_NOUNS, DASHBOARD_ARCHIVE_COPY, DASHBOARD_COMPUTER_PANEL_COPY, DASHBOARD_CHATGPT_SETUP_LABELS, DASHBOARD_CHATGPT_PICKER_COPY, DASHBOARD_PRIVACY_QUESTIONS_COPY, DASHBOARD_CHATGPT_PRIVACY_COPY, DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY, DASHBOARD_LOCAL_COPY;
+var DASHBOARD_MISSING_FOLDER = "A folder you chose is missing", DASHBOARD_FOLDER_NEEDS_PERMISSION = "Your Mac will not let Olympus open a folder you chose. In System Settings, choose Privacy & Security, then Files & Folders, and switch on Olympus Engine (or the app your Mac named when it asked).", DASHBOARD_FOLDER_NEEDS_HELPER = "Desktop, Documents, Downloads, iCloud Drive and other disks need the Olympus helper app. Update Olympus to add it, or choose a folder outside them.", DASHBOARD_FOLDER_UNREADABLE = "Your user account is not allowed to open a folder you chose. Change who may open that folder, or choose another one.", DASHBOARD_STATUS_PRESENTATION, DASHBOARD_UNCONNECTED_STATES, DASHBOARD_SIGNED_OUT = "signed out", DASHBOARD_MANY_UNREADABLE_LABEL = "Many files cannot be read", READINESS_REASONS, CAPTURE_JUDGED_CONNECTION_STATES, CAPTURE_UNEXPECTED_STOP_REASONS, REDIRECT_REFUSAL_CODES, DASHBOARD_INDEX_FASTER, DASHBOARD_LIVE_PASS_ERROR_COPY, DASHBOARD_UNREADABLE_FILE_REASON_WORDS, DASHBOARD_UNREADABLE_NOTE = "Olympus does not retry these, and nothing is waiting on you.", DASHBOARD_UNREADABLE_MORE = "and {count} more", DASHBOARD_UNREADABLE_NOTE_MANY, DASHBOARD_UNREADABLE_REASON_WORDS, DASHBOARD_SOURCE_FAILURE_WORDS, DASHBOARD_FAILURE_REF = "Olympus's log on the computer has the details under reference {ref}.", DASHBOARD_FAILURE_LOG = "Olympus's log on the computer has the details.", DASHBOARD_CHATGPT_VOCABULARY, DASHBOARD_CHATGPT_CONNECTION_COPY, DASHBOARD_CHATGPT_PAGE_COPY, DASHBOARD_WORKER_TOKEN_AGENT_PROMPT, ARCHIVE_PICK_INTRO, DASHBOARD_ARCHIVE_NOUNS, DASHBOARD_ARCHIVE_COPY, DASHBOARD_COMPUTER_PANEL_COPY, DASHBOARD_CHATGPT_SETUP_LABELS, DASHBOARD_CHATGPT_PICKER_COPY, DASHBOARD_PRIVACY_QUESTIONS_COPY, DASHBOARD_CHATGPT_PRIVACY_COPY, DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY, DASHBOARD_LOCAL_COPY;
 var init_vocabulary = __esm(() => {
   init_source_dashboard();
   init_archive_formats();
@@ -38026,6 +38047,18 @@ var init_vocabulary = __esm(() => {
     account_changed: "the last check found a different Evernote account than the notes stored here, so nothing was changed: reconnect the earlier account, or delete this card's indexed data first",
     unavailable: "the last check could not reach the provider"
   });
+  DASHBOARD_UNREADABLE_FILE_REASON_WORDS = {
+    password: "locked with a password",
+    damaged: "the file is damaged",
+    too_large: "too large for Olympus to read",
+    no_text: "no text Olympus could find in it",
+    timed_out: "reading it took too long, even with extra time",
+    missing: "the file is no longer where it was",
+    no_access: "Olympus isn't allowed to open it",
+    unsupported: "a format Olympus can't read",
+    privacy_check_missing: "kept Private before it was read",
+    other: "Olympus couldn't read it"
+  };
   DASHBOARD_UNREADABLE_NOTE_MANY = "That is more than a healthy source has, so it may be a problem in Olympus rather than your files." + " The other files still answer questions.";
   DASHBOARD_UNREADABLE_REASON_WORDS = {
     privacy_check_missing: {
@@ -38033,8 +38066,8 @@ var init_vocabulary = __esm(() => {
       other: "{count} items were kept Private without being read because their privacy checks were missing. Open them below to check them, then use Sync now to try reading them again."
     },
     damaged_or_unsupported: {
-      one: "{count} file is damaged or in a format Olympus can't read",
-      other: "{count} files are damaged or in a format Olympus can't read"
+      one: "{count} file Olympus can't read at all",
+      other: "{count} files Olympus can't read at all"
     }
   };
   DASHBOARD_SOURCE_FAILURE_WORDS = {
@@ -38184,6 +38217,7 @@ var init_vocabulary = __esm(() => {
     },
     synced: "Synced {when}",
     updated: "Updated {when}",
+    busySlow: "Olympus is busy. Trying again…",
     checkAgain: "Check again",
     tryAgain: "Try again",
     openOlympus: "Open Olympus",
@@ -38270,6 +38304,7 @@ var init_vocabulary = __esm(() => {
     unreadableMore: DASHBOARD_UNREADABLE_MORE,
     unreadableOpen: "Open {name}",
     unreadableReasons: DASHBOARD_UNREADABLE_REASON_WORDS,
+    unreadableFileReasons: DASHBOARD_UNREADABLE_FILE_REASON_WORDS,
     unreadableNote: DASHBOARD_UNREADABLE_NOTE,
     unreadableNoteMany: DASHBOARD_UNREADABLE_NOTE_MANY
   };
@@ -38372,8 +38407,9 @@ var init_vocabulary = __esm(() => {
     },
     inSource: {
       listLabel: "Imported archives",
-      importingLine: "{percent}% read · {items} from this archive so far",
-      importingLineNone: "{percent}% read",
+      importingLine: "Reading your export: {percent}% · {items} so far",
+      importingNote: "The bar above counts these as they become searchable.",
+      importingLineNone: "Reading your export: {percent}%",
       importedLine: "{items} from this archive",
       importedWhen: " · imported {when}",
       alreadyThere: { one: ", of which 1 was already there", many: ", of which {n} were already there" },
@@ -38485,6 +38521,7 @@ var init_vocabulary = __esm(() => {
     remove: "Remove",
     removeConfirm: "Remove {name}? Everything Olympus made from it is deleted. The file itself stays where it is.",
     requestLine: "An agent asked to import {name} from {where}.",
+    startingLine: "Starting to import {name}…",
     fullPath: "Full path: {path}",
     removeRequestLine: "An agent asked to remove {name}, imported from {where}.",
     removeRequestLineNoWhere: "An agent asked to remove {name}.",
@@ -40968,7 +41005,8 @@ var init_dashboard_launch = __esm(() => {
         }
         var ticket = take();
         if (!ticket) {
-          status.textContent = 'This link is missing its opening ticket.';
+          // A reload of this page after its ticket was taken: the dashboard has the session, or the way back in.
+          window.location.replace('/dashboard');
           return;
         }
         fetch('/dashboard/control/launch/redeem', {
@@ -40977,7 +41015,10 @@ var init_dashboard_launch = __esm(() => {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ ticket: ticket })
         }).then(function (response) {
-          if (response.ok) {
+          // A link already used or expired (a reload, a second open) still
+          // lands on the dashboard: the session it opened is in its cookie,
+          // and without one the dashboard itself offers the way back in.
+          if (response.ok || response.status === 403) {
             // A Keys target (Connect, a model fix) lands on Keys, where the computer's setup
             // sheets and Models live; it only opens a panel there, never submits anything.
             // A panel target (See why on one source) lands on the dashboard there.
@@ -40989,9 +41030,7 @@ var init_dashboard_launch = __esm(() => {
               : PRIVATE.test(open) ? '/dashboard?private-answers' + (open.indexOf('page.private.') === 0 ? '#' + open.slice(13) : '') : '/dashboard');
             return;
           }
-          status.textContent = response.status === 403
-            ? 'This opening link is no longer valid.'
-            : 'Opening failed.';
+          status.textContent = 'Opening failed.';
         }).catch(function () {
           status.textContent = 'Opening failed.';
         });
@@ -41462,9 +41501,12 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
   const P = config.page;
   const C = config.connection;
   const GLOBAL_STATES = ["not_connected", "installing", "mac_offline", "relay_unavailable"];
+  const BUSY_GRACE_MS = 120000;
   const state = {
     data: null,
     relayDown: false,
+    lastGoodAt: 0,
+    slow: false,
     deleting: {},
     busy: "",
     confirming: "",
@@ -41482,6 +41524,8 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     hostLinks: {},
     computerMeta: null,
     archiveConfirm: {},
+    archiveStarting: {},
+    archivePeak: {},
     unreadablePages: {},
     landing: "",
     landingImport: false,
@@ -41629,7 +41673,20 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
   }
   function relayFailed(failure) {
     state.relayDown = true;
+    state.slow = false;
     state.lastFailure = { ...failure, at: Date.now() };
+  }
+  function steadyPercent(archive) {
+    const raw = typeof archive.percent === "number" && isFinite(archive.percent) ? archive.percent : 0;
+    const id = typeof archive.id === "string" ? archive.id : "";
+    if (!id)
+      return raw;
+    const shown = Math.max(state.archivePeak[id] ?? 0, raw);
+    state.archivePeak[id] = shown;
+    return shown;
+  }
+  function busyNotGone(error) {
+    return error instanceof Error && error.message === "timeout" && !state.relayDown && state.lastGoodAt > 0 && Date.now() - state.lastGoodAt < BUSY_GRACE_MS;
   }
   function resultFailure(result) {
     if (!result || !result.isError)
@@ -41676,6 +41733,8 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
       state.computerMeta = meta && typeof meta === "object" ? meta : null;
       state.unreadablePages = {};
       state.relayDown = false;
+      state.lastGoodAt = Date.now();
+      state.slow = false;
       settleDeleting(content);
       if (!state.busy)
         state.syncPressed = {};
@@ -42053,7 +42112,8 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
       return wrap;
     const blocked = globalReason();
     if (blocked || fix.disabledReason) {
-      add(wrap, button(fix.label, key2, null, style), rowReason(blocked || String(fix.disabledReason)));
+      const saidAbove = !fix.disabledReason && (connectionState() === "relay_unavailable" || connectionState() === "mac_offline");
+      add(wrap, button(fix.label, key2, null, style), saidAbove ? null : rowReason(blocked || String(fix.disabledReason)));
       if (!blocked)
         add(wrap, howLink(fix, key2, source));
       return wrap;
@@ -42234,6 +42294,8 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     const data2 = state.data;
     if (!data2 || state.relayDown)
       return "";
+    if (state.slow)
+      return P.busySlow;
     const at = Date.parse(data2.generatedAt);
     if (!isFinite(at) || Date.now() - at < config.staleAfterMs)
       return "";
@@ -42570,8 +42632,10 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
         if (content && content.status === "confirm_account") {
           const source = content.source && typeof content.source.label === "string" ? content.source.label : "";
           state.archiveConfirm[requestId] = { source, ...content.reconfirm === true ? { reconfirm: true } : {} };
-        } else
+        } else {
           delete state.archiveConfirm[requestId];
+          state.archiveStarting[requestId] = Date.now();
+        }
       }
     }
     return archiveOutcome(result && result.structuredContent);
@@ -42685,9 +42749,9 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
       const pct = typeof entry.percent === "number" && isFinite(entry.percent) ? entry.percent : 0;
       add(item, el("p", "muted", fill2(S.notRunningLine, { percent: percent(pct) })));
     } else if (entry.status === "importing") {
-      const pct = typeof entry.percent === "number" && isFinite(entry.percent) ? entry.percent : 0;
+      const pct = steadyPercent(entry);
       const line = read > 0 ? fill2(S.importingLine, { percent: percent(pct), items: itemCount(entry, read) }) + alreadyThereNote(entry) : fill2(S.importingLineNone, { percent: percent(pct) });
-      add(item, add(el("div", "archive-progress"), progressBar(pct, line), el("p", "muted", line)));
+      add(item, add(el("div", "archive-progress"), progressBar(pct, line), el("p", "muted", line), el("p", "muted", S.importingNote)));
     } else if (entry.status === "imported") {
       const when = typeof entry.importedAt === "string" ? ago(entry.importedAt) : "";
       if (read === 0) {
@@ -42762,6 +42826,14 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
       add(item, add(el("div", "archive-actions"), fixControl({ label: fill2(A.account.add, { source }), tool: H.archiveApproveTool, args: { request_id: request2.id, confirm_account: true } }, key2 + ":confirm", "plain", false), ...asked.reconfirm ? [] : [fixControl({ label: A.account.apart, tool: H.archiveApproveTool, args: { request_id: request2.id, keep_apart: true } }, key2 + ":apart", "plain", false)], fixControl({ label: A.decline, tool: H.archiveDeclineTool, args: { request_id: request2.id } }, key2 + ":decline", "plain", false)));
       return item;
     }
+    const startedAt = state.archiveStarting[request2.id];
+    if (request2.status !== "pending" || startedAt !== undefined && Date.now() - startedAt > 60000)
+      delete state.archiveStarting[request2.id];
+    else if (startedAt !== undefined) {
+      const line = el("p", "muted", fill2(A.startingLine, { name: request2.name }));
+      line.setAttribute("role", "status");
+      return add(item, line);
+    }
     if (request2.status === "pending") {
       add(item, isolatedLine("", A.requestLine, { name: request2.name, where }));
       add(item, archiveFullPath(request2));
@@ -42818,7 +42890,7 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     } else if (halted) {
       add(item, el("p", "muted", A.removingNotRunningLine));
     } else if (archive.status === "importing") {
-      const pct = typeof archive.percent === "number" && isFinite(archive.percent) ? archive.percent : 0;
+      const pct = steadyPercent(archive);
       const line = uncounted ? fill2(A.importingLineUncounted, { percent: percent(pct) }) : fill2(A.importingLine, { percent: percent(pct), items: itemCount(archive, items) });
       add(item, add(el("div", "archive-progress"), progressBar(pct, line), el("p", "muted", line)));
     } else if (archive.status === "imported") {
@@ -42950,6 +43022,9 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
           add(item, control);
         } else
           add(item, document.createTextNode(file.name));
+        const why = file.reason ? P.unreadableFileReasons[file.reason] : "";
+        if (typeof why === "string" && why)
+          add(item, el("span", "muted file-why", " · " + why));
         add(list, item);
       });
       if (own3.more > 0) {
@@ -42982,7 +43057,10 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     return typeof value === "string" && value.length <= 64 && /^[0-9TZ:.+-]+~[A-Za-z0-9_-]+$/.test(value) ? value : "";
   }
   function unreadableEntries(input) {
-    return input.filter((file) => file && typeof file.name === "string" && file.name).map((file) => typeof file.token === "string" && /^[A-Za-z0-9_-]{16,128}$/.test(file.token) ? { name: file.name, token: file.token } : { name: file.name });
+    return input.filter((file) => file && typeof file.name === "string" && file.name).map((file) => {
+      const reason = typeof file.reason === "string" && Object.prototype.hasOwnProperty.call(P.unreadableFileReasons, file.reason) ? { reason: file.reason } : {};
+      return typeof file.token === "string" && /^[A-Za-z0-9_-]{16,128}$/.test(file.token) ? { name: file.name, token: file.token, ...reason } : { name: file.name, ...reason };
+    });
   }
   function moreCount(value) {
     return typeof value === "number" && isFinite(value) && value > 0 ? Math.floor(value) : 0;
@@ -43779,6 +43857,13 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
       refreshing = false;
       if (mine !== generation)
         return scheduleRefresh();
+      if (busyNotGone(error)) {
+        state.slow = true;
+        redraw();
+        refreshTimer = setTimeout(backgroundRefresh, R.activeMs);
+        nextRefreshAt = Date.now() + R.activeMs;
+        return;
+      }
       refreshFailures++;
       relayFailed(rejectionFailure(error));
       redraw();

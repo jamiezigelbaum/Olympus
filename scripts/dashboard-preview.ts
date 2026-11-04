@@ -517,6 +517,17 @@ export function buildDashboardPreviewView(state: string): SourceDashboardViewMod
   if (state.startsWith('archives-')) return archivesPreview(state);
   if (state === 'dropbox-initial') return dropboxPreview('initial');
   if (state === 'dropbox-update') return dropboxPreview('update');
+  if (state === 'dropbox-unreadable') {
+    // Jamie's rule (2026-11-04): retries are no error; a file that can't be
+    // read at all says exactly why and opens. 3 files given up on, and 6
+    // failed reads still being retried (not shown as anything wrong).
+    const result = dropboxPreview('update');
+    const card = result.sources.find((source) => source.source_id === 'dropbox.files')!;
+    card.coverage.unreadable_items = 3;
+    card.unreadable_files = { corpus_ids: ['secure_local.dropbox.files'], names: PREVIEW_UNREADABLE_FILES.map((file) => file.name) };
+    card.queue_health = { ...card.queue_health, retrying_tasks: 0 };
+    return result;
+  }
   if (state === 'connect-google-full') { const result = connectPreview('google'); result.google_pilot!.mode = 'advanced_byo_required'; return result; }
   if (state === 'connect-google-error') return connectPreview('google', { refused: true });
   if (state === 'connect-x-error') return connectPreview('x', { refused: true });
@@ -1551,6 +1562,13 @@ function deleteDataPreview(done: boolean): SourceDashboardViewModel {
   return view;
 }
 
+/** The preview's unreadable Dropbox files: one per reason the computer list words. */
+const PREVIEW_UNREADABLE_FILES = [
+  { name: 'Lease 2019 (signed).docx', reason: 'damaged', token: 'previewtoken0000000001' },
+  { name: 'Tax return 2023.pdf', reason: 'password', token: 'previewtoken0000000002' },
+  { name: 'Scan of old letters.pdf', reason: 'no_text', token: 'previewtoken0000000003' },
+];
+
 function dropboxPreview(mode: 'initial' | 'update') {
   const status = emptyStatus();
   const dropbox = corpus('secure_local.dropbox.files', 'file', 'secure_local', 'dropbox', 30_012, 600_000);
@@ -1701,7 +1719,7 @@ export const DASHBOARD_PREVIEW_STATES = [
   'inbox-failed', 'secret-notice', 'secret-inbox',
   'review', 'review-unconfigured', 'review-indexing', 'privacy-edit', 'privacy-empty', 'privacy-description-editing', 'privacy-questions', 'privacy-conflict',
   'privacy-add-kind', 'privacy-add-pick', 'privacy-add-confirm', 'privacy-details', 'privacy-add-folder', 'privacy-add-label',
-  'first-run', 'models', 'models-applying', 'first-install', 'gmail-scope-pending', 'tier-migration', 'partial', 'fresh', 'full', 'dropbox-initial', 'dropbox-update',
+  'first-run', 'models', 'models-applying', 'first-install', 'gmail-scope-pending', 'tier-migration', 'partial', 'fresh', 'full', 'dropbox-initial', 'dropbox-update', 'dropbox-unreadable',
   'connect-google-full', 'connect-google-error', 'connect-x-error', 'telegram-setup', 'telegram-pair-api-id', 'telegram-pair-api-hash',
   'connect-google', 'connect-google-loopback', 'connect-dropbox', 'connect-x',
   'connect-venice', 'connect-dropbox-connecting', 'connect-dropbox-refused', 'connect-dropbox-publisher', 'connect-google-publisher',
@@ -1927,6 +1945,7 @@ export function previewDashboardToolResult(state: string, indexFasterOn: boolean
         ...(previewArchivesMeta(state) && previewSplitArchives(previewArchivesMeta(state)!).cards.some((card) => card.archives.length > 0)
           ? { archiveCards: previewSplitArchives(previewArchivesMeta(state)!).cards.filter((card) => card.archives.length > 0) } : {}),
         ...(previewSourceImports(state) ? { sourceImports: previewSourceImports(state) } : {}),
+        ...(state === 'dropbox-unreadable' ? { unreadable: [{ sourceId: 'dropbox.files', files: PREVIEW_UNREADABLE_FILES, more: 0 }] } : {}),
         ...(previewArchiveSources(state) ? { archiveSources: previewArchiveSources(state) } : {}),
       },
     },

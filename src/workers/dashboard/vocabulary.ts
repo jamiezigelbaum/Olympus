@@ -1359,6 +1359,24 @@ export function dashboardUnreadableSentence(source: DashboardSourceCard): string
     : `${lead} ${DASHBOARD_UNREADABLE_NOTE}`;
 }
 
+/**
+ * Why one file could not be read, after its name under See why (owner rule,
+ * 2026-11-04: exactly the reason, and a link to the file). Keys are
+ * file-extraction/unreadable-files.ts UNREADABLE_FILE_REASONS.
+ */
+export const DASHBOARD_UNREADABLE_FILE_REASON_WORDS: Readonly<Record<string, string>> = {
+  password: 'locked with a password',
+  damaged: 'the file is damaged',
+  too_large: 'too large for Olympus to read',
+  no_text: 'no text Olympus could find in it',
+  timed_out: 'reading it took too long, even with extra time',
+  missing: 'the file is no longer where it was',
+  no_access: 'Olympus isn\'t allowed to open it',
+  unsupported: 'a format Olympus can\'t read',
+  privacy_check_missing: 'kept Private before it was read',
+  other: 'Olympus couldn\'t read it',
+};
+
 /** The note under See why, and the detail page's tail: nothing to do, the rest answers. */
 export const DASHBOARD_UNREADABLE_NOTE = 'Olympus does not retry these, and nothing is waiting on you.';
 
@@ -1396,8 +1414,8 @@ export const DASHBOARD_UNREADABLE_REASON_WORDS: Readonly<
     other: "{count} items were kept Private without being read because their privacy checks were missing. Open them below to check them, then use Sync now to try reading them again.",
   },
   damaged_or_unsupported: {
-    one: "{count} file is damaged or in a format Olympus can't read",
-    other: "{count} files are damaged or in a format Olympus can't read",
+    one: "{count} file Olympus can't read at all",
+    other: "{count} files Olympus can't read at all",
   },
 };
 
@@ -1889,6 +1907,8 @@ export const DASHBOARD_CHATGPT_PAGE_COPY = {
   },
   synced: 'Synced {when}',
   updated: 'Updated {when}',
+  /** A read ran out of time while the computer answered moments ago: busy, not gone; the page tries again by itself. */
+  busySlow: 'Olympus is busy. Trying again…',
   checkAgain: 'Check again',
   tryAgain: 'Try again',
   openOlympus: 'Open Olympus',
@@ -2033,6 +2053,7 @@ export const DASHBOARD_CHATGPT_PAGE_COPY = {
   /** The accessible name of an unreadable file's open control: "Open report.pdf". */
   unreadableOpen: 'Open {name}',
   unreadableReasons: DASHBOARD_UNREADABLE_REASON_WORDS,
+  unreadableFileReasons: DASHBOARD_UNREADABLE_FILE_REASON_WORDS,
   unreadableNote: DASHBOARD_UNREADABLE_NOTE,
   unreadableNoteMany: DASHBOARD_UNREADABLE_NOTE_MANY,
 } as const;
@@ -2263,8 +2284,10 @@ export const DASHBOARD_ARCHIVE_COPY = {
    */
   inSource: {
     listLabel: 'Imported archives',
-    importingLine: '{percent}% read · {items} from this archive so far',
-    importingLineNone: '{percent}% read',
+    importingLine: 'Reading your export: {percent}% · {items} so far',
+    /** Under an import's own bar: the source's bar above is the same items, counted as they become searchable. */
+    importingNote: 'The bar above counts these as they become searchable.',
+    importingLineNone: 'Reading your export: {percent}%',
     importedLine: '{items} from this archive',
     importedWhen: ' · imported {when}',
     /** Appended to a count line when the source already had some of the archive's items. */
@@ -2414,6 +2437,8 @@ export const DASHBOARD_ARCHIVE_COPY = {
   removeConfirm: 'Remove {name}? Everything Olympus made from it is deleted. The file itself stays where it is.',
   /** An agent's request, waiting for the person. */
   requestLine: 'An agent asked to import {name} from {where}.',
+  /** Right after Import on an agent's request, until the import shows. */
+  startingLine: 'Starting to import {name}…',
   /** Under an agent's request: the whole path it acts on, with hidden characters written out. */
   fullPath: 'Full path: {path}',
   /** An agent's request to remove an archive; the archive's own name and folder. */

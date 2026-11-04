@@ -157,8 +157,48 @@ export type UnreadableParentRoute =
   | { kind: 'archive'; archiveId: string }
   | { kind: 'source' };
 
+/**
+ * Why one file could not be read, as a closed code the dashboard words
+ * (owner rule, 2026-11-04: a file Olympus can't ingest at all is called out
+ * with exactly the reason and a link to the file). Derived from the failed
+ * job's bounded error kind; never the reader's own message.
+ */
+export const UNREADABLE_FILE_REASONS = [
+  'password',
+  'damaged',
+  'too_large',
+  'no_text',
+  'timed_out',
+  'missing',
+  'no_access',
+  'unsupported',
+  'privacy_check_missing',
+  'other',
+] as const;
+export type UnreadableFileReason = (typeof UNREADABLE_FILE_REASONS)[number];
+
+// The error kind settled for an item kept Private before its text was read, in connector-store.
+export const UNREAD_PRIVACY_CHECK_MISSING_KIND = 'privacy_check_missing';
+
+export function unreadableFileReason(errorKind: string | undefined): UnreadableFileReason {
+  const kind = (errorKind ?? '').toLowerCase();
+  if (!kind) return 'other';
+  if (kind === UNREAD_PRIVACY_CHECK_MISSING_KIND) return 'privacy_check_missing';
+  if (kind.includes('encrypted') || kind.includes('password')) return 'password';
+  if (kind.includes('too_large')) return 'too_large';
+  if (kind.includes('timeout')) return 'timed_out';
+  if (kind.includes('not_found') || kind.includes('content_unavailable') || kind.includes('missing_bytes')) return 'missing';
+  if (kind.includes('permission') || kind.includes('auth')) return 'no_access';
+  if (kind.includes('unsupported')) return 'unsupported';
+  if (kind.includes('empty')) return 'no_text';
+  if (kind.includes('invalid') || kind.includes('undecodable') || kind.includes('corrupt') || kind.includes('damaged')) return 'damaged';
+  return 'other';
+}
+
 export interface UnreadableFileEntry {
   name: string;
+  // Why it could not be read: unreadableFileReason.
+  reason: UnreadableFileReason;
   /**
    * Present when the file has a place to open: the one-time capability the open tool takes.
    */
@@ -467,7 +507,8 @@ export function createUnreadableFiles(options: UnreadableFilesOptions): Unreadab
       const files = shown.map((item): UnreadableFileEntry => {
         const name = displayName(item);
         const parent = parentOf(item);
-        const base: UnreadableFileEntry = opener && target(item) ? { name, token: mint(item, opener, at) } : { name };
+        const reason = unreadableFileReason(item.errorKind);
+        const base: UnreadableFileEntry = opener && target(item) ? { name, reason, token: mint(item, opener, at) } : { name, reason };
         return parent ? { ...base, parent } : base;
       });
       const last = shown.at(-1);

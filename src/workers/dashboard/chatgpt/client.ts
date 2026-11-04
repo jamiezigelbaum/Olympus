@@ -136,10 +136,16 @@ export function chatgptDashboardClient(
   const P = config.page;
   const C = config.connection;
   const GLOBAL_STATES = ['not_connected', 'installing', 'mac_offline', 'relay_unavailable'];
+  // How long after its last answer a computer that does not answer in time is still called busy.
+  const BUSY_GRACE_MS = 120_000;
 
   const state: {
     data: Any;
     relayDown: boolean;
+    /** When a dashboard read last answered (0: never on this page). */
+    lastGoodAt: number;
+    /** A read timed out while the computer answered recently: it is busy, not gone, and the page tries again by itself. */
+    slow: boolean;
     busy: string;
     confirming: string;
     helpOpen: boolean;
@@ -164,9 +170,13 @@ export function chatgptDashboardClient(
     /** The computer-only facts from the last dashboard result (`_meta[computerMetaKey]`). */
     computerMeta: Any;
     /** Computer only: further pages of a source's unreadable files read since the last dashboard result. */
-    unreadablePages: Record<string, { files: Array<{ name: string; token?: string }>; more: number; after: string }>;
+    unreadablePages: Record<string, { files: Array<{ name: string; token?: string; reason?: string }>; more: number; after: string }>;
     /** Computer only: an agent's request whose export did not prove its account, by request id, until the person answers. */
     archiveConfirm: Record<string, { source: string; reconfirm?: boolean }>;
+    /** Requests the person approved here, until a read stops listing them as pending (or the hold runs out). */
+    archiveStarting: Record<string, number>;
+    /** The highest percent shown for each importing archive on this page: a read never moves its bar back. */
+    archivePeak: Record<string, number>;
     /** Computer only: the source an open link asked to land on, until the panel has landed there. */
     landing: string;
     /** The landing opens that card's Import an archive (a Keys link), not its See why. */
@@ -180,6 +190,8 @@ export function chatgptDashboardClient(
   } = {
     data: null,
     relayDown: false,
+    lastGoodAt: 0,
+    slow: false,
     deleting: {},
     busy: '',
     confirming: '',
@@ -198,6 +210,8 @@ export function chatgptDashboardClient(
     computerMeta: null,
     // Agent requests whose export did not prove its account: asked in the request's own row, by request id.
     archiveConfirm: {},
+    archiveStarting: {},
+    archivePeak: {},
     unreadablePages: {},
     landing: '',
     landingImport: false,
@@ -351,7 +365,24 @@ export function chatgptDashboardClient(
    */
   function relayFailed(failure: Omit<RelayFailure, 'at'>): void {
     state.relayDown = true;
+    state.slow = false;
     state.lastFailure = { ...failure, at: Date.now() };
+  }
+
+  /** An importing archive's percent, never below what this page already showed for it. */
+  function steadyPercent(archive: Any): number {
+    const raw = typeof archive.percent === 'number' && isFinite(archive.percent) ? archive.percent : 0;
+    const id = typeof archive.id === 'string' ? archive.id : '';
+    if (!id) return raw;
+    const shown = Math.max(state.archivePeak[id] ?? 0, raw);
+    state.archivePeak[id] = shown;
+    return shown;
+  }
+
+  /** A read that ran out of time while the computer answered within BUSY_GRACE_MS: busy, not unreachable. */
+  function busyNotGone(error: Any): boolean {
+    return error instanceof Error && error.message === 'timeout' && !state.relayDown
+      && state.lastGoodAt > 0 && Date.now() - state.lastGoodAt < BUSY_GRACE_MS;
   }
 
   /** A tool error result's own fixed sentence (it names its log reference when it has one). */
@@ -413,6 +444,8 @@ export function chatgptDashboardClient(
       // A fresh list starts from its first page (its tokens are new too).
       state.unreadablePages = {};
       state.relayDown = false;
+      state.lastGoodAt = Date.now();
+      state.slow = false;
       settleDeleting(content);
       // The engine's own `lastManualSync` now says whether a press is still checking.
       if (!state.busy) state.syncPressed = {};
@@ -834,7 +867,9 @@ export function chatgptDashboardClient(
     if (!fix || typeof fix.label !== 'string') return wrap;
     const blocked = globalReason();
     if (blocked || fix.disabledReason) {
-      add(wrap, button(fix.label, key, null, style), rowReason(blocked || String(fix.disabledReason)));
+      // The call-out at the top already says the computer can't be reached or is offline: the control is only disabled.
+      const saidAbove = !fix.disabledReason && (connectionState() === 'relay_unavailable' || connectionState() === 'mac_offline');
+      add(wrap, button(fix.label, key, null, style), saidAbove ? null : rowReason(blocked || String(fix.disabledReason)));
       // A repair only the computer can make still says how, unless the whole page is waiting.
       if (!blocked) add(wrap, howLink(fix, key, source));
       return wrap;
@@ -1035,6 +1070,7 @@ export function chatgptDashboardClient(
   function staleWords(): string {
     const data = state.data;
     if (!data || state.relayDown) return '';
+    if (state.slow) return P.busySlow;
     const at = Date.parse(data.generatedAt);
     if (!isFinite(at) || Date.now() - at < config.staleAfterMs) return '';
     return fill(P.updated, { when: ago(data.generatedAt) });
@@ -1459,7 +1495,12 @@ export function chatgptDashboardClient(
         if (content && content.status === 'confirm_account') {
           const source = content.source && typeof content.source.label === 'string' ? content.source.label : '';
           state.archiveConfirm[requestId] = { source, ...(content.reconfirm === true ? { reconfirm: true } : {}) };
-        } else delete state.archiveConfirm[requestId];
+        } else {
+          delete state.archiveConfirm[requestId];
+          // Approved: the row says the import is starting until the next read
+          // shows it, so it never reads as the same untouched request.
+          state.archiveStarting[requestId] = Date.now();
+        }
       }
     }
     return archiveOutcome(result && result.structuredContent);
@@ -1597,11 +1638,11 @@ export function chatgptDashboardClient(
       const pct = typeof entry.percent === 'number' && isFinite(entry.percent) ? entry.percent : 0;
       add(item, el('p', 'muted', fill(S.notRunningLine, { percent: percent(pct) })));
     } else if (entry.status === 'importing') {
-      const pct = typeof entry.percent === 'number' && isFinite(entry.percent) ? entry.percent : 0;
+      const pct = steadyPercent(entry);
       const line = read > 0
         ? fill(S.importingLine, { percent: percent(pct), items: itemCount(entry, read) }) + alreadyThereNote(entry)
         : fill(S.importingLineNone, { percent: percent(pct) });
-      add(item, add(el('div', 'archive-progress'), progressBar(pct, line), el('p', 'muted', line)));
+      add(item, add(el('div', 'archive-progress'), progressBar(pct, line), el('p', 'muted', line), el('p', 'muted', S.importingNote)));
     } else if (entry.status === 'imported') {
       const when = typeof entry.importedAt === 'string' ? ago(entry.importedAt) : '';
       if (read === 0) {
@@ -1692,6 +1733,13 @@ export function chatgptDashboardClient(
         fixControl({ label: A.decline, tool: H.archiveDeclineTool, args: { request_id: request.id } }, key + ':decline', 'plain', false)));
       return item;
     }
+    const startedAt = state.archiveStarting[request.id];
+    if (request.status !== 'pending' || (startedAt !== undefined && Date.now() - startedAt > 60_000)) delete state.archiveStarting[request.id];
+    else if (startedAt !== undefined) {
+      const line = el('p', 'muted', fill(A.startingLine, { name: request.name }));
+      line.setAttribute('role', 'status');
+      return add(item, line);
+    }
     if (request.status === 'pending') {
       add(item, isolatedLine('', A.requestLine, { name: request.name, where }));
       add(item, archiveFullPath(request));
@@ -1757,7 +1805,7 @@ export function chatgptDashboardClient(
     } else if (halted) {
       add(item, el('p', 'muted', A.removingNotRunningLine));
     } else if (archive.status === 'importing') {
-      const pct = typeof archive.percent === 'number' && isFinite(archive.percent) ? archive.percent : 0;
+      const pct = steadyPercent(archive);
       const line = uncounted ? fill(A.importingLineUncounted, { percent: percent(pct) }) : fill(A.importingLine, { percent: percent(pct), items: itemCount(archive, items) });
       add(item, add(el('div', 'archive-progress'), progressBar(pct, line), el('p', 'muted', line)));
     } else if (archive.status === 'imported') {
@@ -1915,6 +1963,9 @@ export function chatgptDashboardClient(
           }
           add(item, control);
         } else add(item, document.createTextNode(file.name));
+        // Exactly why, after the name (owner rule, 2026-11-04).
+        const why = file.reason ? (P.unreadableFileReasons as Any)[file.reason] : '';
+        if (typeof why === 'string' && why) add(item, el('span', 'muted file-why', ' · ' + why));
         add(list, item);
       });
       if (own.more > 0) {
@@ -1935,7 +1986,7 @@ export function chatgptDashboardClient(
   }
 
   /** Computer only: this source's unreadable files from the computer meta (names, open tokens), or null. */
-  function computerUnreadable(id: string): { files: Array<{ name: string; token?: string }>; more: number; after: string } | null {
+  function computerUnreadable(id: string): { files: Array<{ name: string; token?: string; reason?: string }>; more: number; after: string } | null {
     const meta = state.computerMeta;
     if (!onComputer() || !meta || !Array.isArray(meta.unreadable)) return null;
     const entry = meta.unreadable.filter((item: Any) => item && item.sourceId === id)[0];
@@ -1952,12 +2003,15 @@ export function chatgptDashboardClient(
     return typeof value === 'string' && value.length <= 64 && /^[0-9TZ:.+-]+~[A-Za-z0-9_-]+$/.test(value) ? value : '';
   }
 
-  function unreadableEntries(input: Any[]): Array<{ name: string; token?: string }> {
+  function unreadableEntries(input: Any[]): Array<{ name: string; token?: string; reason?: string }> {
     return input
       .filter((file: Any) => file && typeof file.name === 'string' && file.name)
-      .map((file: Any) => (typeof file.token === 'string' && /^[A-Za-z0-9_-]{16,128}$/.test(file.token)
-        ? { name: file.name, token: file.token }
-        : { name: file.name }));
+      .map((file: Any) => {
+        const reason = typeof file.reason === 'string' && Object.prototype.hasOwnProperty.call(P.unreadableFileReasons, file.reason) ? { reason: file.reason } : {};
+        return typeof file.token === 'string' && /^[A-Za-z0-9_-]{16,128}$/.test(file.token)
+          ? { name: file.name, token: file.token, ...reason }
+          : { name: file.name, ...reason };
+      });
   }
 
   function moreCount(value: Any): number {
@@ -2842,6 +2896,15 @@ export function chatgptDashboardClient(
     }, (error: Any) => {
       refreshing = false;
       if (mine !== generation) return scheduleRefresh();
+      if (busyNotGone(error)) {
+        // Olympus answered a moment ago and only this read ran out of time:
+        // say it is busy and try again soon, with every control still usable.
+        state.slow = true;
+        redraw();
+        refreshTimer = setTimeout(backgroundRefresh, R.activeMs);
+        nextRefreshAt = Date.now() + R.activeMs;
+        return;
+      }
       refreshFailures++;
       relayFailed(rejectionFailure(error));
       redraw();
