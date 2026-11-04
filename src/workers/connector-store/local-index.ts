@@ -82,6 +82,7 @@ import {
   tierLedgerIdentityKey,
   tierLedgerPathForStore,
   type TierCopy,
+  type TierLedgerIdentity,
   type TierSearchLayer,
 } from '../classification/tier-ledger.ts';
 import { classifyContentTier, heldUntilJudged, isImageMediaType, namesDecidedByOwner, ownerRuleMatches, type OwnerTierRule } from '../classification/tier-classifier.ts';
@@ -3107,24 +3108,9 @@ export class LocalConnectorStore {
     if (!ledger || !ledger.corpusHasCopies(this.corpusId)) {
       return { hidden: [], held: [], metadataLayer: [], metadataLayerContentUnread: [], moving: 0 };
     }
-    const pksFor = (identities: ReadonlyArray<{ provider: string; accountScope: string; providerItemId: string; providerConversationId?: string }>): number[] => {
-      const lookup = this.db.query(`
-        SELECT item_pk FROM items
-        WHERE provider = ? AND account_scope = ? AND normalized_conversation = ? AND provider_item_id = ?
-          AND tombstoned = 0
-      `);
-      const pks: number[] = [];
-      for (const identity of identities) {
-        const row = lookup.get(
-          identity.provider,
-          identity.accountScope,
-          normalizeConversationId(identity.providerConversationId),
-          identity.providerItemId,
-        ) as { item_pk: number } | null;
-        if (row) pks.push(row.item_pk);
-      }
-      return pks;
-    };
+    const pksFor = (identities: ReadonlyArray<{ provider: string; accountScope: string; providerItemId: string; providerConversationId?: string }>): number[] =>
+      this.itemRowsForIdentities(identities, (identity) => normalizeConversationId(identity.providerConversationId))
+        .map((row) => row.item_pk);
     return {
       hidden: pksFor([
         ...ledger.corpusCopyIdentities(this.corpusId, 'superseded'),
@@ -11869,7 +11855,7 @@ export class LocalConnectorStore {
     const memos = this.settledUnreadableCountMemo ??= new Map();
     const memo = memos.get(key);
     if (maxAgeMs > 0 && memo && Date.now() - memo.at < maxAgeMs) return memo.count;
-    const count = this.settledUnreadableItems(scope).length;
+    const count = this.settledUnreadableRows(scope, { withoutSecretsOverrides: true }).length;
     if (memos.size > 32) memos.clear();
     memos.set(key, { at: Date.now(), count });
     return count;
@@ -11879,32 +11865,70 @@ export class LocalConnectorStore {
   // that pulls this module into the plugin bundle (plugin-bundle-no-bun-sqlite).
   private settledUnreadableCountMemo: Map<string, { at: number; count: number }> | undefined;
 
+  /**
+   * The settled-unreadable copies this store holds a row for, in scope. The
+   * count and the problem list share it; the count asks the ledger to leave
+   * out items the owner marked Secrets in the same read, instead of one
+   * lookup per item (Sparta, 2026-11-04: 1.7-2.9 s of a status build).
+   */
+  private settledUnreadableRows(
+    scope: ConnectorStoreStatusScope | undefined,
+    options: { withoutSecretsOverrides?: boolean } = {},
+  ): Array<{ identity: TierLedgerIdentity; row: { local_item_id: string; title: string | null; source_version: string | null } }> {
+    if (scope?.itemsAllowed === false || scope?.contentAllowed === false) return [];
+    const ledger = this.visibilityLedger();
+    if (!ledger) return [];
+    const identities = ledger.corpusCopyIdentities(this.corpusId, options.withoutSecretsOverrides
+      ? 'metadata_layer_settled_unreadable_not_secret'
+      : 'metadata_layer_settled_unreadable');
+    const filters = connectorStoreFilterSql(scope?.contentFilters ?? scope?.itemFilters);
+    const account = normalizeOptionalAccountScope(scope?.accountScope);
+    return this.itemRowsForIdentities(identities, (identity) => identity.providerConversationId ?? '', {
+      sql: `${account ? 'AND i.account_scope = ?' : ''} ${filters.sql}`,
+      params: [...(account ? [account] : []), ...filters.params],
+    }).map((row) => ({ identity: identities[row.idx]!, row }));
+  }
+
+  /**
+   * This store's live rows for ledger identities, in ONE query: the
+   * identities travel as one JSON parameter and SQLite looks each up in the
+   * identity index itself. A loop of per-identity reads cost tens of
+   * thousands of round trips per status build (Sparta, 2026-11-04: about
+   * 2 s each for the hidden-copy set and the unreadable count). Matches on
+   * normalized_conversation, the stored column the identity index holds; an
+   * expression there left SQLite scanning every item per identity
+   * (2026-11-03). `idx` is the identity's position in the input.
+   */
+  private itemRowsForIdentities<T extends { provider: string; accountScope: string; providerItemId: string }>(
+    identities: readonly T[],
+    conversationOf: (identity: T) => string,
+    extra: { sql: string; params: readonly string[] } = { sql: '', params: [] },
+  ): Array<{ idx: number; item_pk: number; local_item_id: string; title: string | null; source_version: string | null }> {
+    if (identities.length === 0) return [];
+    const keys = JSON.stringify(identities.map((identity) =>
+      [identity.provider, identity.accountScope, conversationOf(identity), identity.providerItemId]));
+    return this.db.query(`
+      SELECT CAST(j.key AS INTEGER) AS idx, i.item_pk, i.local_item_id, i.title, i.source_version
+      FROM json_each(?) j
+      JOIN items i ON i.provider = json_extract(j.value, '$[0]') AND i.account_scope = json_extract(j.value, '$[1]')
+        AND i.normalized_conversation = json_extract(j.value, '$[2]') AND i.provider_item_id = json_extract(j.value, '$[3]')
+      WHERE i.tombstoned = 0 ${extra.sql}
+      ORDER BY j.key
+    `).all(keys, ...extra.params) as Array<{ idx: number; item_pk: number; local_item_id: string; title: string | null; source_version: string | null }>;
+  }
+
   /** Fail-safe decisions with no readable content: the count and the problem list share this query. */
   settledUnreadableItems(scope?: ConnectorStoreStatusScope): ExtractionUnreadableItem[] {
     if (scope?.itemsAllowed === false || scope?.contentAllowed === false) return [];
     const ledger = this.visibilityLedger();
     if (!ledger) return [];
-    const identities = ledger.corpusCopyIdentities(this.corpusId, 'metadata_layer_settled_unreadable');
-    const filters = connectorStoreFilterSql(scope?.contentFilters ?? scope?.itemFilters);
-    const account = normalizeOptionalAccountScope(scope?.accountScope);
-    // normalized_conversation, not COALESCE(provider_conversation_id, ''):
-    // only the stored column is in the identity index. The expression left
-    // SQLite scanning the account's every item per identity, which held
-    // Sparta's worker 35-130 s on each status publish with a 28k-item
-    // Dropbox store (2026-11-03).
-    const lookup = this.db.query(`SELECT i.local_item_id, i.title, i.source_version FROM items i
-      WHERE i.tombstoned = 0 AND i.provider = ? AND i.account_scope = ? AND i.provider_item_id = ?
-        AND i.normalized_conversation = ?
-        ${account ? 'AND i.account_scope = ?' : ''} ${filters.sql}`);
+    const matched = this.settledUnreadableRows(scope);
     const out: ExtractionUnreadableItem[] = [];
-    for (const identity of identities) {
+    for (const { identity, row } of matched) {
       const override = ledger.getOverride(identity);
       if (override?.kind === 'tier' && override.tier === 'secrets') continue;
-      const row = lookup.get(identity.provider, identity.accountScope, identity.providerItemId,
-        identity.providerConversationId ?? '', ...(account ? [account] : []), ...filters.params) as
-        { local_item_id: string; title: string | null; source_version: string | null } | null;
       const record = ledger.getCurrent(identity);
-      if (!row || !record) continue;
+      if (!record) continue;
       out.push({ ref: { corpusId: this.corpusId, provider: identity.provider, accountScope: identity.accountScope,
         providerItemId: identity.providerItemId, localItemId: row.local_item_id,
         approvedScopeKey: `${identity.provider}.${identity.accountScope}`,
