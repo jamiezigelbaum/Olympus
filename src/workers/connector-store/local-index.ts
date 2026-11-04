@@ -11889,6 +11889,21 @@ export class LocalConnectorStore {
   // that pulls this module into the plugin bundle (plugin-bundle-no-bun-sqlite).
   private settledUnreadableCountMemo: Map<string, { at: number; count: number }> | undefined;
 
+  private extractionEnded: ((identity: TierLedgerIdentity) => boolean) | undefined;
+
+  /**
+   * Whether an item's extraction has ended (a job ran and none is owed). The
+   * worker sets it on file stores only. A file kept Private before its text
+   * was read is waiting, not unreadable, until then, so the count and the
+   * list leave it out (2026-11-04: 7,249 Dropbox files waiting for
+   * extraction read as "could not be read"). Without a probe every settled
+   * item counts.
+   */
+  setExtractionEndedProbe(probe: ((identity: TierLedgerIdentity) => boolean) | undefined): void {
+    this.extractionEnded = probe;
+    this.settledUnreadableCountMemo = undefined;
+  }
+
   /**
    * The settled-unreadable copies this store holds a row for, in scope. The
    * count and the problem list share it; the count asks the ledger to leave
@@ -11907,10 +11922,12 @@ export class LocalConnectorStore {
       : 'metadata_layer_settled_unreadable');
     const filters = connectorStoreFilterSql(scope?.contentFilters ?? scope?.itemFilters);
     const account = normalizeOptionalAccountScope(scope?.accountScope);
+    const ended = this.extractionEnded;
     return this.itemRowsForIdentities(identities, (identity) => identity.providerConversationId ?? '', {
       sql: `${account ? 'AND i.account_scope = ?' : ''} ${filters.sql}`,
       params: [...(account ? [account] : []), ...filters.params],
-    }).map((row) => ({ identity: identities[row.idx]!, row }));
+    }).map((row) => ({ identity: identities[row.idx]!, row }))
+      .filter(({ identity }) => !ended || ended(identity));
   }
 
   /**

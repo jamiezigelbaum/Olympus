@@ -454,6 +454,29 @@ describe('settled names copies', () => {
     expect(store.settledUnreadableItems()).toEqual([]);
     expect(store.status().counts.contentElsewhereItems).toBe(1);
   });
+
+  test('a file still waiting for its extraction is not counted unreadable until the extraction ends (Sparta, 2026-11-04)', async () => {
+    const lane = openLane(workspace());
+    cleanups.unshift(() => lane.close());
+    await listAll(lane, [NEW[1]!]);
+    const identity = identityOf(NEW[1]!.id);
+    const decision = { ...classifyItemTiers({ signals: { title: NEW[1]!.name } }), state: 'current' as const,
+      decidedBy: 'sniffer' as const, snifferId: 'fixture',
+      contentTier: 'secure' as const, contentRead: false, contentPending: false, metadataPending: false,
+      reasons: ['content:sniffer:fixture:fail_safe:missing_question'] };
+    lane.ledger.recordRoutedPlacement(identity, decision, lane.set.placementFor(decision));
+    const store = lane.stores.internal!;
+    let ended = false;
+    const asked: string[] = [];
+    store.setExtractionEndedProbe((item) => { asked.push(item.providerItemId); return ended; });
+    expect(store.status().counts.settledUnreadableItems ?? 0).toBe(0);
+    expect(store.settledUnreadableItems()).toEqual([]);
+    expect(asked).toContain(identity.providerItemId);
+    ended = true;
+    store.setExtractionEndedProbe((item) => { asked.push(item.providerItemId); return ended; });
+    expect(store.status().counts.settledUnreadableItems).toBe(1);
+    expect(store.settledUnreadableItems().map(item => item.ref.name)).toEqual(['scan-0413.pdf']);
+  });
 });
 
 describe('status with names-only copies that keep their text', () => {
