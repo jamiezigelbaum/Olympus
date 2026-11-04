@@ -89,9 +89,9 @@ import { DOCUMENT_READER_MAX_INPUT_BYTES } from './input-limits.ts';
 export const OCR_EXTRACTOR_KIND = 'local_ocr_tesseract';
 export const OCR_EXTRACTOR_VERSION = 'ocr-v1';
 export const DEFAULT_OCR_TIMEOUT_MS = 120_000;
-/** A PDF gets the base time per this many bytes (each page is rasterized and read). */
+// A PDF gets the base time per this many bytes: each page is rasterized and read.
 export const OCR_PDF_TIMEOUT_BYTES_PER_STEP = 5 * 1024 * 1024;
-/** No PDF waits longer than this, however large: under the job's 15-minute lease (DEFAULT_EXTRACTION_LEASE_SECONDS). */
+// No PDF waits longer than this, however large: under the 15-minute job lease, DEFAULT_EXTRACTION_LEASE_SECONDS.
 export const OCR_PDF_MAX_TIMEOUT_MS = 12 * 60_000;
 
 /**
