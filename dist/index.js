@@ -15785,6 +15785,7 @@ var init_file_extraction_source = __esm(() => {
     settleAs;
     retryable;
     errorHash;
+    retryAt;
     constructor(errorKind, options = {}) {
       super(errorKind);
       this.name = "FileExtractionSourceError";
@@ -15794,6 +15795,8 @@ var init_file_extraction_source = __esm(() => {
       const errorHash = options.detailForHash === undefined ? undefined : createHash8("sha256").update(options.detailForHash).digest("hex").slice(0, ERROR_HASH_CHARS);
       if (errorHash)
         this.errorHash = errorHash;
+      if (options.retryAt !== undefined && Number.isFinite(Date.parse(options.retryAt)))
+        this.retryAt = options.retryAt;
     }
   };
 });
@@ -22553,7 +22556,7 @@ var init_store_sink = __esm(() => {
 });
 
 // src/workers/file-extraction/runner.ts
-var SINK_SKIP_SETTLEMENTS, ITEM_REF_FIELDS, PDF_MIME_TYPES;
+var SOURCE_PARK_FALLBACK_MS, SINK_SKIP_SETTLEMENTS, ITEM_REF_FIELDS, PDF_MIME_TYPES;
 var init_runner = __esm(() => {
   init_control_path_headroom();
   init_media_cache();
@@ -22566,6 +22569,7 @@ var init_runner = __esm(() => {
   init_bounded_text();
   init_job_store();
   init_store_sink();
+  SOURCE_PARK_FALLBACK_MS = 60 * 60000;
   SINK_SKIP_SETTLEMENTS = Object.freeze({
     [EXTRACTION_SINK_SKIPPED_ITEM_MISSING]: "failed_terminal",
     [EXTRACTION_SINK_SKIPPED_IDENTITY_AMBIGUOUS]: "failed_terminal",

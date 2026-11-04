@@ -29,6 +29,7 @@ import type { ExtractorRegistryConfig } from '../file-extraction/types.ts';
 import type { FileExtractionRuntime } from '../email-source/file-extraction-runtime.ts';
 import { GMAIL_INTERNAL_CONNECTOR_CORPUS_ID, GMAIL_SECURE_CONNECTOR_CORPUS_ID, gmailPartLocatorPrefix } from './gmail.ts';
 import { GMAIL_ARCHIVE_SOURCE_ID } from './gmail-archive-target.ts';
+import { GoogleRequestBudgetError } from './request-budget.ts';
 import { MBOX_PART_LOCATOR_PREFIX } from '../archive-import/mbox/gmail-input.ts';
 
 /** The roster's key for Gmail's attachments (its corpus is the Gmail Private store, which lists the other stores). */
@@ -103,7 +104,18 @@ export function gmailAttachmentConnector(input: {
       const live = input.live();
       if (!live) throw new FileExtractionSourceError('source_unavailable');
       // The connector binds the locator to the child, re-checks the scope and the approval, and bounds the size.
-      const item = await live.fetchItemWithin(localItemId, { deferredBytes: { locator }, ...(options.maxBytes !== undefined ? { maxBytes: options.maxBytes } : {}) });
+      let item: RawItem;
+      try {
+        item = await live.fetchItemWithin(localItemId, { deferredBytes: { locator }, ...(options.maxBytes !== undefined ? { maxBytes: options.maxBytes } : {}) });
+      } catch (error) {
+        // The day's request budget is spent: a statement about the day, not
+        // the attachment, so the lane parks until the reset (Sparta,
+        // 2026-11-04: 55 attachments failed as unavailable on it).
+        if (error instanceof GoogleRequestBudgetError) {
+          throw new FileExtractionSourceError('source_budget_exhausted', { retryAt: error.retryAt });
+        }
+        throw error;
+      }
       if (item.content.kind === 'bytes' && options.maxBytes !== undefined && item.content.bytes.byteLength > options.maxBytes) {
         throw new FileExtractionSourceError('source_too_large');
       }
