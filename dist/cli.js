@@ -79306,7 +79306,42 @@ function typeFor(ref, mimeType) {
   return (mimeType === undefined || mimeType === "application/octet-stream") && ref.mimeType ? ref.mimeType : mimeType;
 }
 function asSourceError(error) {
-  return isFileExtractionSourceError(error) ? error : new FileExtractionSourceError("source_unavailable");
+  if (isFileExtractionSourceError(error))
+    return error;
+  const cause = unavailableCause(error);
+  logUnavailableCause(cause);
+  return new FileExtractionSourceError("source_unavailable", { detailForHash: cause });
+}
+function unavailableCause(error) {
+  const parts = [error instanceof Error ? error.name || "Error" : typeof error];
+  const fields = typeof error === "object" && error !== null ? error : {};
+  for (const key2 of ["code", "status", "statusCode"]) {
+    const value = fields[key2];
+    if (typeof value === "number" && Number.isInteger(value))
+      parts.push(`${key2}=${value}`);
+    else if (typeof value === "string" && isShortToken(value))
+      parts.push(`${key2}=${value}`);
+  }
+  return parts.join(" ").slice(0, 120);
+}
+function isShortToken(value) {
+  if (value.length === 0 || value.length > 40)
+    return false;
+  for (const char of value) {
+    const code = char.charCodeAt(0);
+    const alnum = code >= 48 && code <= 57 || code >= 65 && code <= 90 || code >= 97 && code <= 122;
+    if (!alnum && char !== "_" && char !== "." && char !== "-")
+      return false;
+  }
+  return true;
+}
+function logUnavailableCause(cause) {
+  const at = Date.now();
+  const last = unavailableCauseLoggedAt.get(cause);
+  if (last !== undefined && at - last < UNAVAILABLE_CAUSE_LOG_INTERVAL_MS)
+    return;
+  unavailableCauseLoggedAt.set(cause, at);
+  console.warn(`[olympus:file-extraction] source_unavailable cause=${JSON.stringify(cause)}`);
 }
 function fileHandOver(path, spooled, spoolDir, tidy) {
   return {
@@ -79322,9 +79357,11 @@ function fileHandOver(path, spooled, spoolDir, tidy) {
     }
   };
 }
+var UNAVAILABLE_CAUSE_LOG_INTERVAL_MS = 60000, unavailableCauseLoggedAt;
 var init_connector_source = __esm(() => {
   init_spool();
   init_file_extraction_source();
+  unavailableCauseLoggedAt = new Map;
 });
 
 // src/workers/whatsapp/child-media.ts
@@ -170583,8 +170620,16 @@ class SourceScheduler {
   }
   async runStates(states, dueAt, provenance) {
     const groups = new Map;
+    const keyOf = (state) => {
+      const own3 = taskConcurrencyKey(state.source, state.task);
+      if (state.task.kind !== "embed")
+        return own3;
+      const sourceKey = state.source.corpusId;
+      const joins = !this.busyConcurrencyKeys.has(sourceKey) && states.some((other) => other !== state && other.source === state.source && taskConcurrencyKey(other.source, other.task) === sourceKey);
+      return joins ? sourceKey : own3;
+    };
     for (const state of states) {
-      const concurrencyKey = taskConcurrencyKey(state.source, state.task);
+      const concurrencyKey = keyOf(state);
       const group = groups.get(concurrencyKey) ?? [];
       group.push(state);
       groups.set(concurrencyKey, group);
@@ -170609,10 +170654,17 @@ class SourceScheduler {
         if (provenance === "scheduled") {
           const ran = new Set(group);
           const now = this.now().getTime();
-          const due = this.states.filter((state) => !ran.has(state) && !state.running && taskCadence(state.source, state.task) === "continuous" && taskConcurrencyKey(state.source, state.task) === concurrencyKey && state.nextRunAt <= now);
+          const sources = new Set(group.map((state) => state.source));
+          const due = this.states.filter((state) => !ran.has(state) && !state.running && taskCadence(state.source, state.task) === "continuous" && (taskConcurrencyKey(state.source, state.task) === concurrencyKey || sources.has(state.source) && state.task.kind === "embed") && state.nextRunAt <= now);
           for (const state of due) {
             if (state.running)
               continue;
+            const ownKey = taskConcurrencyKey(state.source, state.task);
+            if (ownKey !== concurrencyKey) {
+              if (this.busyConcurrencyKeys.has(ownKey))
+                continue;
+              this.busyConcurrencyKeys.add(ownKey);
+            }
             state.running = true;
             this.executingStates.add(state);
             try {
@@ -170620,6 +170672,8 @@ class SourceScheduler {
             } finally {
               state.running = false;
               this.executingStates.delete(state);
+              if (ownKey !== concurrencyKey)
+                this.busyConcurrencyKeys.delete(ownKey);
             }
           }
         }
@@ -171223,11 +171277,15 @@ function withEmbeddingSweep(sources, targetsFor) {
     };
   });
 }
+function embeddingSweepConcurrencyKey(source) {
+  return `${source.corpusId}.embeddings`;
+}
 function embeddingSweepTask(source, targets) {
   return {
     id: `${source.sourceId}_embeddings`,
     kind: "embed",
     writer: true,
+    concurrencyKey: embeddingSweepConcurrencyKey(source),
     intervalMs: EMBEDDING_SWEEP_INTERVAL_MS,
     freshnessThresholdMs: EMBEDDING_SWEEP_FRESHNESS_THRESHOLD_MS,
     run: async (context2) => {
