@@ -21903,9 +21903,11 @@ var init_drive_extraction_source = __esm(() => {
 });
 
 // src/workers/file-extraction/connector-source.ts
+var unavailableCauseLoggedAt;
 var init_connector_source = __esm(() => {
   init_spool();
   init_file_extraction_source();
+  unavailableCauseLoggedAt = new Map;
 });
 
 // src/workers/whatsapp/child-media.ts
