@@ -169465,7 +169465,7 @@ function dashboardSecretStore(sourceDashboard) {
 async function dashboardExclusionSources(sourceDashboard, cache) {
   if (!sourceDashboard.ingestionDispositions)
     return [];
-  const runtime = await sourceDashboard.ingestionDispositions();
+  const runtime = await sourceDashboard.ingestionDispositions({ lazyStores: true });
   const nowMs = Date.now();
   try {
     return runtime.sources.map((source) => ({
@@ -169498,7 +169498,12 @@ function resolveDashboardExclusionDebt(cache, source, nowMs) {
   if (cached3 && ageMs !== undefined && ageMs >= 0 && ageMs <= DASHBOARD_EXCLUSION_DEBT_MAX_AGE_MS) {
     return cached3.debt;
   }
-  const debt = readDashboardExclusionDebt(source);
+  let debt;
+  try {
+    debt = readDashboardExclusionDebt(source);
+  } catch {
+    return {};
+  }
   if (!debt)
     return {};
   cache.set(key2, { debt, computed_at_ms: nowMs });
@@ -211891,7 +211896,7 @@ function storedExclusionDebtReader(handles) {
     return total;
   };
 }
-function openIngestionDispositionsRuntime(env = process.env) {
+function openIngestionDispositionsRuntime(env = process.env, options = {}) {
   const opened = [];
   const sources = [];
   for (const definition of INGESTION_DISPOSITION_SOURCES) {
@@ -211901,34 +211906,48 @@ function openIngestionDispositionsRuntime(env = process.env) {
     try {
       stores = definition.stores(env);
       const matcher = definition.matcher(env);
-      for (const store of stores) {
-        if (!existsSync101(store.dbPath))
-          continue;
-        const handle = openConnectorStore(definition.account, {
-          dbPath: store.dbPath,
-          corpusId: store.corpusId,
-          family: "file",
-          trustDomain: store.trustDomain,
-          exclusions: matcher,
-          readOnly: true
-        }, env);
-        handles.push(handle);
-        opened.push(handle);
-      }
+      const present = stores.filter((store) => existsSync101(store.dbPath));
+      let openedAll = false;
+      const openStores = () => {
+        if (openedAll)
+          return handles;
+        for (const store of present) {
+          const handle = openConnectorStore(definition.account, {
+            dbPath: store.dbPath,
+            corpusId: store.corpusId,
+            family: "file",
+            trustDomain: store.trustDomain,
+            exclusions: matcher,
+            readOnly: true
+          }, env);
+          handles.push(handle);
+          opened.push(handle);
+        }
+        openedAll = true;
+        return handles;
+      };
+      if (options.lazyStores !== true)
+        openStores();
       sources.push({
         source_id: definition.sourceId,
         label: definition.label,
         corpus_ids: stores.map((store) => store.corpusId),
         enforceable: definition.enforceable,
         matcher,
-        store_present: handles.length > 0,
-        ...handles.length > 0 ? {
+        store_present: present.length > 0,
+        ...present.length > 0 ? {
           items: function* () {
-            for (const handle of handles)
+            for (const handle of openStores())
               yield* handle.itemLocatorCensus();
           },
-          excludedItemsPresent: () => readDebt().excluded,
-          metadataOnlyContentPresent: () => readDebt().metadataOnlyContent
+          excludedItemsPresent: () => {
+            openStores();
+            return readDebt().excluded;
+          },
+          metadataOnlyContentPresent: () => {
+            openStores();
+            return readDebt().metadataOnlyContent;
+          }
         } : {}
       });
     } catch (error2) {
@@ -215250,7 +215269,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
         corpusRegistry: sourceCorpusRegistry2,
         registryPath: handleRegistryPathFromEnv(process.env, true),
         ...sourceDashboardHistory ? { history: sourceDashboardHistory } : {},
-        ingestionDispositions: () => openIngestionDispositionsRuntime(process.env),
+        ingestionDispositions: (options) => openIngestionDispositionsRuntime(process.env, options),
         oauthHandback: () => chatgptOAuthHandback(),
         loopbackPort: port,
         ...fileSourceScopes ? { fileSourceScopes } : {},

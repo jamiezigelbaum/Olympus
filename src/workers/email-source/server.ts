@@ -1339,6 +1339,16 @@ function storedExclusionDebtReader(handles: readonly LocalConnectorStore[]): () 
 
 export function openIngestionDispositionsRuntime(
   env: Record<string, string | undefined> = process.env,
+  options: {
+    /**
+     * Open each store only when its items or debt are first read. The
+     * dashboard reads the debt once per reuse window, yet opened (and
+     * schema-checked) every store on every poll: the longest freeze in
+     * Sparta's 2007d67 window, 9.7 s (2026-11-05). A store that then fails
+     * to open throws from the accessor instead of being carried as an error.
+     */
+    lazyStores?: boolean;
+  } = {},
 ): { sources: SourceDispositionsSource[]; close: () => void } {
   const opened: LocalConnectorStore[] = [];
   const sources: SourceDispositionsSource[] = [];
@@ -1349,33 +1359,46 @@ export function openIngestionDispositionsRuntime(
     try {
       stores = definition.stores(env);
       const matcher = definition.matcher(env);
-      for (const store of stores) {
-        if (!existsSync(store.dbPath)) continue;
-        const handle = openConnectorStore(definition.account, {
-          dbPath: store.dbPath,
-          corpusId: store.corpusId,
-          family: 'file',
-          trustDomain: store.trustDomain,
-          exclusions: matcher,
-          readOnly: true,
-        }, env);
-        handles.push(handle);
-        opened.push(handle);
-      }
+      const present = stores.filter((store) => existsSync(store.dbPath));
+      let openedAll = false;
+      const openStores = (): readonly LocalConnectorStore[] => {
+        if (openedAll) return handles;
+        for (const store of present) {
+          const handle = openConnectorStore(definition.account, {
+            dbPath: store.dbPath,
+            corpusId: store.corpusId,
+            family: 'file',
+            trustDomain: store.trustDomain,
+            exclusions: matcher,
+            readOnly: true,
+          }, env);
+          handles.push(handle);
+          opened.push(handle);
+        }
+        openedAll = true;
+        return handles;
+      };
+      if (options.lazyStores !== true) openStores();
       sources.push({
         source_id: definition.sourceId,
         label: definition.label,
         corpus_ids: stores.map((store) => store.corpusId),
         enforceable: definition.enforceable,
         matcher,
-        store_present: handles.length > 0,
-        ...(handles.length > 0
+        store_present: present.length > 0,
+        ...(present.length > 0
           ? {
             items: function* (): Generator<SourceDispositionItem> {
-              for (const handle of handles) yield* handle.itemLocatorCensus();
+              for (const handle of openStores()) yield* handle.itemLocatorCensus();
             },
-            excludedItemsPresent: () => readDebt().excluded,
-            metadataOnlyContentPresent: () => readDebt().metadataOnlyContent,
+            excludedItemsPresent: () => {
+              openStores();
+              return readDebt().excluded;
+            },
+            metadataOnlyContentPresent: () => {
+              openStores();
+              return readDebt().metadataOnlyContent;
+            },
           }
           : {}),
       });
@@ -6078,7 +6101,7 @@ export async function main(): Promise<void> {
             corpusRegistry: sourceCorpusRegistry,
             registryPath: handleRegistryPathFromEnv(process.env, true)!,
             ...(sourceDashboardHistory ? { history: sourceDashboardHistory } : {}),
-            ingestionDispositions: () => openIngestionDispositionsRuntime(process.env),
+            ingestionDispositions: (options?: { lazyStores?: boolean }) => openIngestionDispositionsRuntime(process.env, options),
             oauthHandback: () => chatgptOAuthHandback(),
             loopbackPort: port,
             ...(fileSourceScopes ? { fileSourceScopes } : {}),

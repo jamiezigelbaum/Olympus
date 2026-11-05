@@ -59,4 +59,50 @@ describe('ingestion dispositions runtime', () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  // The dashboard asks for its debt once per reuse window, so a poll in between
+  // must not open (and schema-check) every store.
+  test('lazy stores open only when their items or debt are read', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'olympus-dispositions-lazy-'));
+    try {
+      const env = {
+        HOME: join(dir, 'home'),
+        OLYMPUS_SOURCE_INGESTION_EXCLUSIONS_PATH: join(dir, 'no-exclusions.json'),
+      };
+      const dropboxDb = resolvedStorePath('dropbox.files', 'secure_local', env);
+      seedStore(dropboxDb, 'secure_local.dropbox.files', 'secure_local');
+      const opens: string[] = [];
+      const original = LocalConnectorStore.prototype.close;
+      const runtime = openIngestionDispositionsRuntime(env, { lazyStores: true });
+      try {
+        const dropbox = runtime.sources.find((source) => source.label === 'Dropbox');
+        expect(dropbox?.store_present).toBe(true);
+        LocalConnectorStore.prototype.close = function (this: LocalConnectorStore) {
+          opens.push(this.dbPath);
+          return original.call(this);
+        };
+        // Nothing was opened, so nothing is closed.
+        runtime.close();
+        expect(opens).toEqual([]);
+      } finally {
+        LocalConnectorStore.prototype.close = original;
+      }
+      const reading = openIngestionDispositionsRuntime(env, { lazyStores: true });
+      try {
+        const dropbox = reading.sources.find((source) => source.label === 'Dropbox');
+        // An empty store has no debt; reading it opens the store.
+        expect(dropbox?.excludedItemsPresent?.()).toEqual({ items: 0, unevaluable: 0 });
+        LocalConnectorStore.prototype.close = function (this: LocalConnectorStore) {
+          opens.push(this.dbPath);
+          return original.call(this);
+        };
+        reading.close();
+        expect(opens).toEqual([dropboxDb]);
+      } finally {
+        LocalConnectorStore.prototype.close = original;
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });
