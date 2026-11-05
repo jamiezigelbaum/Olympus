@@ -96,6 +96,10 @@ export interface TierSnifferServiceOptions {
   model: AnalystModel;
   stores: () => readonly TierSnifferServiceStore[];
   classificationLedgerPath: string;
+  /** Test seam: ledger and queue rows at or below which the backlog is counted on every read. */
+  backlogExactRows?: number;
+  /** Test seam: rowids read per event-loop turn by a large backlog's count. */
+  backlogSliceRows?: number;
   /**
    * The model is not always there (the built-in private model downloads on
    * first use): while this answers false the pass asks nothing and every
@@ -216,6 +220,19 @@ export interface TierAutoMoveReport {
   failedBy?: Record<string, number>;
 }
 
+type BacklogCounts = Pick<TierClassificationBacklog, 'checkingItems' | 'remainingQuestions' | 'pendingItems' | 'pendingWithoutQuestion' | 'oldestPendingAgeMs'>;
+
+function emptyBacklogCounts(): BacklogCounts {
+  return { checkingItems: 0, remainingQuestions: 0, pendingItems: 0, pendingWithoutQuestion: 0, oldestPendingAgeMs: 0 };
+}
+
+/** Ledger and queue rows at or below which the backlog is counted on every read. */
+const BACKLOG_EXACT_ROWS = 20_000;
+/** How old a large backlog's served count may be before a new count starts. */
+const BACKLOG_REFRESH_MS = 60_000;
+/** Rowids read per event-loop turn by a large backlog's count. */
+const BACKLOG_SLICE_ROWS = 5_000;
+
 export interface TierClassificationBacklog {
   /** Union of pending ledger items and items with open questions, including re-judges. */
   checkingItems: number;
@@ -280,6 +297,8 @@ export class TierSnifferService {
   /** The last reported reason a tick asked nothing (or 'asking'). */
   private waitingReason: string | undefined;
   private lastBacklogLogMs = Number.NEGATIVE_INFINITY;
+  private backlogCache: { counts: BacklogCounts; atMs: number } | undefined;
+  private backlogRefresh: Promise<void> | undefined;
   private waiting: TierSnifferWaiting | undefined;
   /** When each queued move (ledger, item, generation) first failed in this process. */
   private readonly moveFailures = new Map<string, number>();
@@ -347,53 +366,33 @@ export class TierSnifferService {
    * The classification backlog, counts only: how many items are waiting on
    * the sniffer and how many questions are still to ask. No time estimate
    * (owner ruling: an unreliable one is worse than none).
+   *
+   * A small backlog is counted on every read. A large one is counted in
+   * bounded slices off the read path and served from the last count, at most
+   * a minute old: one full count of 650k pending items held the event loop
+   * for seconds, and the status read and the minute log line both ran it
+   * (Sparta CPU samples, 2026-11-05).
    */
   backlog(): TierClassificationBacklog {
-    let checkingItems = 0;
-    let remainingQuestions = 0;
-    let pendingItems = 0;
-    let pendingWithoutQuestion = 0;
-    let oldestPendingAgeMs = 0;
-    for (const ledgerPath of this.ledgerPaths()) {
-      let db: Database | undefined;
-      try {
-        db = new Database(ledgerPath, { readonly: true, create: false });
-        db.exec('PRAGMA busy_timeout = 10000; PRAGMA query_only = ON;');
-        const expectedId = this.boundLedgerIds.get(ledgerPath);
-        if (expectedId !== undefined) {
-          const row = db.query(`SELECT value FROM tier_ledger_meta WHERE key = 'ledger_id'`).get() as { value?: unknown } | null;
-          // Counted for the ledger its store is bound to, not for whatever sits at the path now.
-          if (row?.value !== expectedId) continue;
-        }
-        const path = tierSnifferPathForLedger(ledgerPath);
-        const hasQueue = existsSync(path);
-        if (hasQueue) db.query('ATTACH DATABASE ? AS queue').run(path);
-        const queued = hasQueue ? `EXISTS (SELECT 1 FROM queue.sniffer_questions q
-          WHERE q.provider = t.provider AND q.account_scope = t.account_scope
-          AND q.conversation_key = t.conversation_key AND q.provider_item_id = t.provider_item_id)` : '0';
-        const pending = db.query(`SELECT COUNT(*) AS n,
-          SUM(CASE WHEN ${queued} THEN 0 ELSE 1 END) AS missing,
-          MIN(decided_at) AS oldest FROM tier_items t WHERE state = 'pending'`).get() as { n: number; missing: number | null; oldest: string | null };
-        pendingItems += pending.n;
-        pendingWithoutQuestion += pending.missing ?? 0;
-        checkingItems += pending.n;
-        if (pending.oldest) oldestPendingAgeMs = Math.max(oldestPendingAgeMs, this.clockMs() - Date.parse(pending.oldest));
-        if (hasQueue) {
-          remainingQuestions += (db.query('SELECT COUNT(*) AS n FROM queue.sniffer_questions').get() as { n: number }).n;
-          checkingItems += (db.query(`SELECT COUNT(*) AS n FROM (
-            SELECT DISTINCT provider, account_scope, conversation_key, provider_item_id FROM queue.sniffer_questions q
-            WHERE NOT EXISTS (SELECT 1 FROM tier_items t WHERE t.state = 'pending'
-              AND t.provider = q.provider AND t.account_scope = q.account_scope
-              AND t.conversation_key = q.conversation_key AND t.provider_item_id = q.provider_item_id))`).get() as { n: number }).n;
-        }
-      } catch {
-        // No writes, migrations, or invented zero-valued rows on a status read.
-      } finally { db?.close(); }
+    return this.backlogFrom(this.backlogCounts());
+  }
+
+  private backlogCounts(): BacklogCounts {
+    if (this.backlogRows() <= (this.options.backlogExactRows ?? BACKLOG_EXACT_ROWS)) return this.countBacklogNow();
+    if (this.backlogCache && this.clockMs() - this.backlogCache.atMs < BACKLOG_REFRESH_MS) return this.backlogCache.counts;
+    if (!this.backlogRefresh) {
+      this.backlogRefresh = this.countBacklogInSlices()
+        .then((counts) => { if (counts) this.backlogCache = { counts, atMs: this.clockMs() }; })
+        .catch(() => undefined)
+        .finally(() => { this.backlogRefresh = undefined; });
     }
+    return this.backlogCache?.counts ?? this.roughBacklog();
+  }
+
+  private backlogFrom(counts: BacklogCounts): TierClassificationBacklog {
+    const { checkingItems, remainingQuestions, pendingWithoutQuestion, oldestPendingAgeMs } = counts;
     return {
-      checkingItems,
-      remainingQuestions,
-      pendingItems, pendingWithoutQuestion, oldestPendingAgeMs,
+      ...counts,
       summary: checkingItems === 0
         ? 'No items waiting for classification.'
         : `Checking ${checkingItems} item${checkingItems === 1 ? '' : 's'}, about ${remainingQuestions} question${remainingQuestions === 1 ? '' : 's'} remaining.`
@@ -403,6 +402,139 @@ export class TierSnifferService {
       awaitingOwnerApproval: this.lastTick?.state === 'awaiting_owner_approval',
       ...(checkingItems > 0 && this.waiting ? { waiting: { ...this.waiting } } : {}),
     };
+  }
+
+  /** Opens a ledger for a backlog count, with its queue attached; undefined when it is not the bound ledger or cannot be read. */
+  private openBacklogLedger(ledgerPath: string): { db: Database; hasQueue: boolean } | undefined {
+    let db: Database | undefined;
+    try {
+      db = new Database(ledgerPath, { readonly: true, create: false });
+      db.exec('PRAGMA busy_timeout = 10000; PRAGMA query_only = ON;');
+      const expectedId = this.boundLedgerIds.get(ledgerPath);
+      if (expectedId !== undefined) {
+        const row = db.query(`SELECT value FROM tier_ledger_meta WHERE key = 'ledger_id'`).get() as { value?: unknown } | null;
+        // Counted for the ledger its store is bound to, not for whatever sits at the path now.
+        if (row?.value !== expectedId) { db.close(); return undefined; }
+      }
+      const path = tierSnifferPathForLedger(ledgerPath);
+      const hasQueue = existsSync(path);
+      if (hasQueue) db.query('ATTACH DATABASE ? AS queue').run(path);
+      return { db, hasQueue };
+    } catch {
+      db?.close();
+      return undefined;
+    }
+  }
+
+  /** Upper bound on the rows a full count reads (largest rowids), without reading them. */
+  private backlogRows(): number {
+    let rows = 0;
+    for (const ledgerPath of this.ledgerPaths()) {
+      const opened = this.openBacklogLedger(ledgerPath);
+      if (!opened) continue;
+      try {
+        rows += (opened.db.query('SELECT COALESCE(MAX(rowid), 0) AS n FROM tier_items').get() as { n: number }).n;
+        if (opened.hasQueue) rows += (opened.db.query('SELECT COALESCE(MAX(question_pk), 0) AS n FROM queue.sniffer_questions').get() as { n: number }).n;
+      } catch {
+        // An unreadable ledger counts nothing, as in the count itself.
+      } finally { opened.db.close(); }
+    }
+    return rows;
+  }
+
+  /** Index-only counts for the first read of a large backlog, before its first full count lands. */
+  private roughBacklog(): BacklogCounts {
+    let pendingItems = 0;
+    let remainingQuestions = 0;
+    for (const ledgerPath of this.ledgerPaths()) {
+      const opened = this.openBacklogLedger(ledgerPath);
+      if (!opened) continue;
+      try {
+        pendingItems += (opened.db.query(`SELECT COUNT(*) AS n FROM tier_items WHERE state = 'pending'`).get() as { n: number }).n;
+        if (opened.hasQueue) remainingQuestions += (opened.db.query('SELECT COUNT(*) AS n FROM queue.sniffer_questions').get() as { n: number }).n;
+      } catch {
+        // No writes, migrations, or invented zero-valued rows on a status read.
+      } finally { opened.db.close(); }
+    }
+    return { checkingItems: Math.max(pendingItems, remainingQuestions ? 1 : 0), remainingQuestions, pendingItems, pendingWithoutQuestion: 0, oldestPendingAgeMs: 0 };
+  }
+
+  private countBacklogNow(): BacklogCounts {
+    const counts = emptyBacklogCounts();
+    for (const ledgerPath of this.ledgerPaths()) {
+      const opened = this.openBacklogLedger(ledgerPath);
+      if (!opened) continue;
+      try {
+        this.addPendingSlice(counts, opened, undefined);
+        if (opened.hasQueue) this.addQuestionSlice(counts, opened.db, undefined);
+      } catch {
+        // No writes, migrations, or invented zero-valued rows on a status read.
+      } finally { opened.db.close(); }
+    }
+    return counts;
+  }
+
+  /** The same count as `countBacklogNow`, a rowid slice per event-loop turn; undefined when stopped part-way. */
+  private async countBacklogInSlices(): Promise<BacklogCounts | undefined> {
+    const counts = emptyBacklogCounts();
+    const slice = Math.max(1, this.options.backlogSliceRows ?? BACKLOG_SLICE_ROWS);
+    for (const ledgerPath of this.ledgerPaths()) {
+      const opened = this.openBacklogLedger(ledgerPath);
+      if (!opened) continue;
+      try {
+        const maxItem = (opened.db.query('SELECT COALESCE(MAX(rowid), 0) AS n FROM tier_items').get() as { n: number }).n;
+        for (let lo = 0; lo < maxItem; lo += slice) {
+          this.addPendingSlice(counts, opened, [lo, lo + slice]);
+          await ingestionTurn();
+          if (this.stopped) return undefined;
+        }
+        if (opened.hasQueue) {
+          const maxQuestion = (opened.db.query('SELECT COALESCE(MAX(question_pk), 0) AS n FROM queue.sniffer_questions').get() as { n: number }).n;
+          for (let lo = 0; lo < maxQuestion; lo += slice) {
+            this.addQuestionSlice(counts, opened.db, [lo, lo + slice]);
+            await ingestionTurn();
+            if (this.stopped) return undefined;
+          }
+        }
+      } catch {
+        // No writes, migrations, or invented zero-valued rows on a status read.
+      } finally { opened.db.close(); }
+    }
+    return counts;
+  }
+
+  /** Pending items (all, or rowids in (lo, hi]), with those that have no question and the oldest decision. */
+  private addPendingSlice(counts: BacklogCounts, opened: { db: Database; hasQueue: boolean }, range: [number, number] | undefined): void {
+    const queued = opened.hasQueue ? `EXISTS (SELECT 1 FROM queue.sniffer_questions q
+      WHERE q.provider = t.provider AND q.account_scope = t.account_scope
+      AND q.conversation_key = t.conversation_key AND q.provider_item_id = t.provider_item_id)` : '0';
+    // NOT INDEXED keeps a slice on its rowid range instead of the state index (rowid lookups stay allowed).
+    const pending = (range
+      ? opened.db.query(`SELECT COUNT(*) AS n, SUM(CASE WHEN ${queued} THEN 0 ELSE 1 END) AS missing, MIN(decided_at) AS oldest
+          FROM tier_items t NOT INDEXED WHERE t.rowid > ? AND t.rowid <= ? AND state = 'pending'`).get(range[0], range[1])
+      : opened.db.query(`SELECT COUNT(*) AS n, SUM(CASE WHEN ${queued} THEN 0 ELSE 1 END) AS missing, MIN(decided_at) AS oldest
+          FROM tier_items t WHERE state = 'pending'`).get()) as { n: number; missing: number | null; oldest: string | null };
+    counts.pendingItems += pending.n;
+    counts.pendingWithoutQuestion += pending.missing ?? 0;
+    counts.checkingItems += pending.n;
+    if (pending.oldest) counts.oldestPendingAgeMs = Math.max(counts.oldestPendingAgeMs, this.clockMs() - Date.parse(pending.oldest));
+  }
+
+  /** Questions (all, or question_pks in (lo, hi]), and the items they ask about that are not pending, each item once. */
+  private addQuestionSlice(counts: BacklogCounts, db: Database, range: [number, number] | undefined): void {
+    const where = range ? 'WHERE q.question_pk > ? AND q.question_pk <= ?' : '';
+    const row = db.query(`SELECT COUNT(*) AS n, SUM(CASE
+        WHEN EXISTS (SELECT 1 FROM queue.sniffer_questions e
+          WHERE e.provider = q.provider AND e.account_scope = q.account_scope
+          AND e.conversation_key = q.conversation_key AND e.provider_item_id = q.provider_item_id
+          AND e.question_pk < q.question_pk) THEN 0
+        WHEN EXISTS (SELECT 1 FROM tier_items t WHERE t.state = 'pending'
+          AND t.provider = q.provider AND t.account_scope = q.account_scope
+          AND t.conversation_key = q.conversation_key AND t.provider_item_id = q.provider_item_id) THEN 0
+        ELSE 1 END) AS other
+      FROM queue.sniffer_questions q ${where}`).get(...(range ?? [])) as { n: number; other: number | null };
+    counts.remainingQuestions += row.n;
+    counts.checkingItems += row.other ?? 0;
   }
 
   /**

@@ -921,6 +921,9 @@ function runSteps<T>(steps: Generator<void, T>): T {
   return step.value;
 }
 
+/** Parents judged per step when the hidden-children set is built in turns. */
+const HIDDEN_CHILD_PARENT_SLICE = 2_000;
+
 // The same steps with a turn before each one, so requests answer in between.
 async function runStepsInTurns<T>(steps: Generator<void, T>): Promise<T> {
   await ingestionTurn();
@@ -3097,8 +3100,7 @@ export class LocalConnectorStore {
   }
 
   // A child whose parent is not served is hidden with the copies the ledger hides.
-  private withHiddenChildren(base: TierLedgerHiddenItemPks): TierLedgerHiddenItemPks {
-    const children = this.hiddenChildItemPks();
+  private withHiddenChildren(base: TierLedgerHiddenItemPks, children = this.hiddenChildItemPks()): TierLedgerHiddenItemPks {
     return children.length === 0 ? base : { ...base, hidden: [...new Set([...base.hidden, ...children])] };
   }
 
@@ -3142,7 +3144,9 @@ export class LocalConnectorStore {
       this.tierLedgerHiddenMemo = marker ? { ledger: marker.ledger, marker: marker.value, value: base } : undefined;
       await ingestionTurn();
     }
-    return this.withHiddenChildren(base);
+    // The children too: judging every parent in one go was about a tenth of
+    // the sampled freezes on Sparta (2026-11-05).
+    return this.withHiddenChildren(base, await runStepsInTurns(this.hiddenChildSteps()));
   }
 
   private tierLedgerHiddenItemPks(): TierLedgerHiddenItemPks {
@@ -3691,6 +3695,11 @@ export class LocalConnectorStore {
    * with no child.
    */
   private hiddenChildItemPks(): number[] {
+    return runSteps(this.hiddenChildSteps());
+  }
+
+  /** `hiddenChildItemPks` with a step between bounded slices of parents, for the builds that run in turns. */
+  private *hiddenChildSteps(): Generator<void, number[]> {
     if (!this.hasChildItems()) return [];
     const groups = this.db.query(`
       SELECT provider, account_scope, parent_local_item_id, MIN(provider_item_id) AS child_item_id, provider_conversation_id FROM items
@@ -3714,10 +3723,18 @@ export class LocalConnectorStore {
         ...(group.provider_conversation_id ? { providerConversationId: group.provider_conversation_id } : {}),
       }),
     }));
-    const verdicts = parentVerdicts(this.childVisibilityLane(), parents);
-    const hiddenParents = parents.filter((parent) => verdicts.get(parentKey(parent))?.visible !== true);
+    // Parents are judged independently, so a slice at a time gives the same set.
+    const lane = this.childVisibilityLane();
+    const hiddenParents: ParentRef[] = [];
+    for (let offset = 0; offset < parents.length; offset += HIDDEN_CHILD_PARENT_SLICE) {
+      yield;
+      const slice = parents.slice(offset, offset + HIDDEN_CHILD_PARENT_SLICE);
+      const verdicts = parentVerdicts(lane, slice);
+      for (const parent of slice) if (verdicts.get(parentKey(parent))?.visible !== true) hiddenParents.push(parent);
+    }
     const pks: number[] = [];
     for (let offset = 0; offset < hiddenParents.length; offset += 20_000) {
+      yield;
       const rows = this.db.query(`
         SELECT item_pk FROM items
         WHERE tombstoned = 0 AND parent_local_item_id IS NOT NULL

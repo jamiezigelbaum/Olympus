@@ -597,6 +597,39 @@ describe('pace, daily cap and the visible backlog', () => {
     expect(status.tier_classification).toMatchObject({ checking_items: 2, remaining_questions: 3 });
   });
 
+  test('a large backlog is counted in slices off the read path and matches the full count', async () => {
+    const dir = workspace();
+    const storePath = join(dir, 'store.sqlite');
+    const ledgerPath = tierLedgerPathForStore(storePath);
+    const ledger = new TierLedger({ dbPath: ledgerPath });
+    cleanups.push(() => ledger.close());
+    const installed = new InstalledTierClassification({ env: {}, lane: LANE });
+    cleanups.push(() => installed.close());
+    const sniffer = new CachedTierSniffer(installed.snifferStoreForLedger(ledgerPath), LANE);
+    ledger.recordDecision(subject(1), classifyItemTiers({ signals: { title: 'bank', labels: [STRUCTURED_METADATA_LABEL] }, text: 'Lunch on Friday.', subject: subject(1) }, { sniffer }));
+    ledger.recordDecision(subject(2), classifyItemTiers({ signals: { title: 'tax', labels: [STRUCTURED_METADATA_LABEL] }, subject: subject(2) }, { sniffer }));
+    ledger.recordDecision(subject(99), classifyItemTiers({ signals: { title: 'bank letter' }, subject: subject(99) }));
+    const options = {
+      installed,
+      lane: LANE,
+      model: answering(() => ({ tier: 'private' as const, category: 'other', confidence: 1 })),
+      stores: () => [{ dbPath: storePath }],
+      classificationLedgerPath: join(dir, 'classification-ledger.jsonl'),
+    };
+    const exact = new TierSnifferService(options);
+    cleanups.push(() => exact.stop());
+    const sliced = new TierSnifferService({ ...options, backlogExactRows: 0, backlogSliceRows: 1 });
+    cleanups.push(() => sliced.stop());
+    const full = exact.backlog();
+    expect(full).toMatchObject({ pendingItems: 3, pendingWithoutQuestion: 1 });
+    // First read: index-only counts while the sliced count runs.
+    expect(sliced.backlog()).toMatchObject({ pendingItems: 3, remainingQuestions: full.remainingQuestions, pendingWithoutQuestion: 0 });
+    for (let i = 0; i < 100 && sliced.backlog().pendingWithoutQuestion === 0; i += 1) await Bun.sleep(5);
+    const { summary: _s, ...counted } = sliced.backlog();
+    const { summary: _f, ...expected } = full;
+    expect({ ...counted, oldestPendingAgeMs: 0 }).toEqual({ ...expected, oldestPendingAgeMs: 0 });
+  });
+
   test('the backlog reads sniffer queues read-only and never creates one beside a ledger that has none', () => {
     const dir = workspace();
     const storePath = join(dir, 'store.sqlite');
