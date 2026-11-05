@@ -370,6 +370,22 @@ export function createSourceIndexStatusHandler(
     storeStatusCache.set(key, { recordedAtMs: nowMs(), status });
     return status;
   };
+  // The backlog estimates beside a store's counts (embedding backlog, Private
+  // chunks withheld, unread PDFs) are whole-store passes too, and were read on
+  // every dashboard status outside that reuse: 15-20% of Sparta's sampled
+  // freezes on 14b9be8 (2026-11-05). Reused for the same window.
+  const storeReadCache = new Map<string, { recordedAtMs: number; value: unknown }>();
+  const reusedStoreRead = <T>(countsMaxAgeMs: number, key: unknown[], read: () => T): T => {
+    const reuseMs = Math.min(countsMaxAgeMs, STORE_STATUS_REUSE_MS);
+    if (reuseMs <= 0) return read();
+    const cacheKey = JSON.stringify(key);
+    const cached = storeReadCache.get(cacheKey);
+    if (cached && nowMs() - cached.recordedAtMs <= reuseMs) return cached.value as T;
+    const value = read();
+    if (storeReadCache.size > 256) storeReadCache.clear();
+    storeReadCache.set(cacheKey, { recordedAtMs: nowMs(), value });
+    return value;
+  };
 
   return {
     async status(request: SourceIndexStatusRequest = {}, snapshot: { countsMaxAgeMs?: number } = {}): Promise<SourceIndexStatusResult> {
@@ -440,12 +456,12 @@ export function createSourceIndexStatusHandler(
         }
         const enforced = withRetrievalEnforcementStatus(corpus, status, availability);
         const withBacklog = store && availability?.modelId
-          ? withEmbeddingBacklogEstimate(enforced, store, availability.modelId, availability, statusScope, snapshot.countsMaxAgeMs ?? 0)
+          ? withEmbeddingBacklogEstimate(enforced, store, availability.modelId, availability, statusScope, snapshot.countsMaxAgeMs ?? 0, reusedStoreRead)
           : enforced;
         const resolved = store && corpus.family === 'file'
           ? withPdfExtractionBacklog(withBacklog, store, withBacklog.embedding_parity?.required === true
             ? availability?.modelId
-            : undefined)
+            : undefined, (read) => reusedStoreRead(snapshot.countsMaxAgeMs ?? 0, ['pdf', store.corpusId], read))
           : withBacklog;
         if (maxAgeMs > 0) cache.set(cacheKey, { recordedAtMs: nowMs(), status: resolved });
         return resolved;
@@ -771,6 +787,7 @@ function withEmbeddingBacklogEstimate<T extends SourceIndexStatusCorpus>(
   availability: SourceIndexHybridAvailability,
   scope: ConnectorStoreStatusScope | undefined,
   countsMaxAgeMs: number,
+  reused: <R>(countsMaxAgeMs: number, key: unknown[], read: () => R) => R = (_age, _key, read) => read(),
 ): T {
   const parity = status.embedding_parity;
   if (!parity?.required) return status;
@@ -780,8 +797,12 @@ function withEmbeddingBacklogEstimate<T extends SourceIndexStatusCorpus>(
     ? { modelId, provider: availability.provider, backend: availability.backend as SourceEmbeddingBackend }
     : undefined;
   // The same scoped population as the parity counts above (store.status(scope)).
-  const backlog = store.embeddingBacklogEstimate(modelId, embedder, scope, { countsMaxAgeMs });
-  const withheld = embedder ? store.privateTierEmbeddingWithheld(embedder, scope, { countsMaxAgeMs }) : undefined;
+  const backlog = reused(countsMaxAgeMs, ['embedding-backlog', store.corpusId, modelId, embedder ?? null, scope ?? null],
+    () => store.embeddingBacklogEstimate(modelId, embedder, scope, { countsMaxAgeMs }));
+  const withheld = embedder
+    ? reused(countsMaxAgeMs, ['private-withheld', store.corpusId, embedder, scope ?? null],
+      () => store.privateTierEmbeddingWithheld(embedder, scope, { countsMaxAgeMs }))
+    : undefined;
   const { source } = embeddingModelEstimate(modelId);
   return {
     ...status,
@@ -814,8 +835,9 @@ function withPdfExtractionBacklog<T extends SourceIndexStatusCorpus>(
   status: T,
   store: LocalConnectorStore,
   modelId: string | undefined,
+  reused: <R>(read: () => R) => R = (read) => read(),
 ): T {
-  const backlog = store.pdfExtractionBacklog();
+  const backlog = reused(() => store.pdfExtractionBacklog());
   if (backlog.pendingPdfs === 0 && backlog.extractedPdfs === 0) return status;
   const averageChars = backlog.extractedPdfs > 0
     ? backlog.extractedChars / backlog.extractedPdfs

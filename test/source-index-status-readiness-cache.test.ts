@@ -79,6 +79,35 @@ describe('connector-store status readiness', () => {
     } finally { store.close(); }
   });
 
+  test('snapshot callers share one read of the embedding and PDF backlogs within the reuse window; current callers always read', async () => {
+    const store = new LocalConnectorStore({ dbPath: ':memory:', corpusId: CORPUS_ID, family: 'file', trustDomain: 'secure_local' });
+    let backlogReads = 0;
+    let pdfReads = 0;
+    const backlog = store.embeddingBacklogEstimate.bind(store);
+    store.embeddingBacklogEstimate = ((...args: Parameters<typeof store.embeddingBacklogEstimate>) => { backlogReads += 1; return backlog(...args); }) as typeof store.embeddingBacklogEstimate;
+    const pdf = store.pdfExtractionBacklog.bind(store);
+    store.pdfExtractionBacklog = (() => { pdfReads += 1; return pdf(); }) as typeof store.pdfExtractionBacklog;
+    let now = 1_000_000;
+    try {
+      await store.syncFromConnector(connector([file('backlog.txt', 'synthetic text')]), { fetchContent: true });
+      const handler = createSourceIndexStatusHandler({
+        corpusDefinitions: [defineDropboxFilesCorpus()], connectorStores: [store], nowMs: () => now,
+        retrievalPolicy: () => ({ embeddingProfile: 'approved-local', activationMode: 'hybrid_shadow' }),
+        retrievalAvailability: { [CORPUS_ID]: { servable: false, modelId: 'fake-embed-v1', reason: 'no_current_embedding_artifacts' } },
+      });
+      const first = (await handler.status({ include_items: false }, { countsMaxAgeMs: 300_000 })).corpora[0]!;
+      expect(first.embedding_parity?.backlog_estimate?.missing_chunks).toBe(1);
+      await handler.status({ include_items: false }, { countsMaxAgeMs: 300_000 });
+      expect([backlogReads, pdfReads]).toEqual([1, 1]);
+      now += STORE_STATUS_REUSE_MS + 1;
+      await handler.status({ include_items: false }, { countsMaxAgeMs: 300_000 });
+      expect([backlogReads, pdfReads]).toEqual([2, 2]);
+      await handler.status({ include_items: false });
+      await handler.status({ include_items: false });
+      expect([backlogReads, pdfReads]).toEqual([4, 4]);
+    } finally { store.close(); }
+  });
+
   test('reports a mounted empty store through the one canonical shape', async () => {
     const store = new LocalConnectorStore({
       dbPath: ':memory:',
