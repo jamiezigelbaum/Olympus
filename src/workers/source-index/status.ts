@@ -326,8 +326,13 @@ export type SourceIndexStatusRetrievalAvailability =
  * whole-corpus counts while preserving live reads for callers that omit it.
  */
 export const DASHBOARD_READINESS_LEDGER_MAX_AGE_MS = 120_000;
-/** How long a snapshot caller reuses a store's counts (never longer than its own `countsMaxAgeMs`). */
-export const STORE_STATUS_REUSE_MS = 60_000;
+/**
+ * How long a snapshot caller reuses a store's counts (never longer than its
+ * own `countsMaxAgeMs`). Five minutes, the snapshot allowance itself: at one
+ * read a minute the counts were still a third of Sparta's freeze time
+ * (2026-11-05, 2065a89), because each read is a pass over the whole store.
+ */
+export const STORE_STATUS_REUSE_MS = 5 * 60_000;
 
 /** A live names-only policy is a status fact, not a content retrieval mode. */
 type StatusCorpusDefinition = Omit<SourceIndexCorpusDefinition, 'activationMode'> & {
@@ -344,7 +349,7 @@ export function createSourceIndexStatusHandler(
     ?? buildSourceIndexCorpusRegistry((options.corpusDefinitions as () => SourceIndexCorpusDefinition[])());
   const cache = new Map<string, { recordedAtMs: number; status: SourceIndexStatusCorpus }>();
   // A store's own counts, shared by every snapshot caller (the dashboard and
-  // the scheduler's status publish) for STORE_STATUS_REUSE_MS: each read is a
+  // the scheduler's status publish) for up to STORE_STATUS_REUSE_MS: each read is a
   // synchronous pass over the whole store, and the two callers' separate
   // reads were most of the worker's freezes (Sparta CPU samples, 2026-11-05).
   const storeStatusCache = new Map<string, { recordedAtMs: number; status: ConnectorStoreStatus }>();

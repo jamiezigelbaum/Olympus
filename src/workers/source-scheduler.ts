@@ -14,6 +14,7 @@ import {
 } from './dropbox-files/index.ts';
 import { DropboxPathNotFoundError } from './dropbox-files/provider-client.ts';
 import type { DropboxProviderStoreSyncHandler } from './dropbox-files/provider-store-sync.ts';
+import { ingestionTurn } from './control-path-headroom.ts';
 import type { FileExtractionRunner } from './file-extraction/runner.ts';
 import { EXTRACTION_PAUSE_CONSECUTIVE_FAILURES } from './file-extraction/runner.ts';
 import { GOOGLE_DRIVE_EXTRACTION_SCOPE_KEY } from './google-connectors/drive-extraction-source.ts';
@@ -1600,6 +1601,9 @@ export function fileExtractionSchedulerTask(input: {
       let jobsRefused = 0;
       const extractorKinds = new Set<string>();
       for (let page = 0; page < maxPages; page += 1) {
+        // A page can hold no candidate (a window of items already read), so
+        // nothing inside it yields: turn here between pages.
+        await ingestionTurn();
         const plan = await input.runner.plan({
           ...input.lane,
           limit: input.planLimit,

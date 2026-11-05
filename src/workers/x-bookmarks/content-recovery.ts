@@ -146,6 +146,8 @@ export function createXBookmarksContentRecoveryHandler(
         accountScope: account,
         withoutChunksOnly: true,
         mimeTypes: ['text/plain; charset=utf-8'],
+        // One page, never followed: read the whole store.
+        maxExamined: Number.POSITIVE_INFINITY,
       }).candidates;
       const routed = options.tierLedger
         ? candidates.filter((candidate) => options.tierLedger!.isRouted(candidate.identity)).length

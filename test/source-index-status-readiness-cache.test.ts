@@ -52,7 +52,7 @@ describe('connector-store status readiness', () => {
     } finally { store.close(); }
   });
 
-  test('snapshot callers share one read of a store\'s counts for a minute; current callers always read', async () => {
+  test('snapshot callers share one read of a store\'s counts within the reuse window; current callers always read', async () => {
     const store = new LocalConnectorStore({ dbPath: ':memory:', corpusId: CORPUS_ID, family: 'file', trustDomain: 'secure_local' });
     let reads = 0;
     const read = store.status.bind(store);

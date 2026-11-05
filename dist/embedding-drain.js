@@ -24632,7 +24632,7 @@ function fileIdentity(path) {
     return;
   }
 }
-var DEFAULT_MAX_CHUNK_CHARS = 4000, MAX_MAX_CHUNK_CHARS = 32000, MAX_SEARCH_RESULTS = 50, CONNECTOR_STORE_FTS_TITLE_WEIGHT = 1.5, EMBEDDING_BATCH_SIZE = 32, MAX_SELECTED_EMBED_ITEM_IDS = 25000, MAX_CONVERSATION_TITLE_LOOKUP_ROWS = 100, MIN_VECTOR_SCORE = 0.18, MAX_REQUIRED_CONCEPTS = 3, RARE_CONCEPT_WEIGHT_SHARE = 0.6, READ_RESULT_PROJECTION_LOCATOR_URI, DEFAULT_SEMANTIC_RELEVANCE_BAR = 0.62, CALIBRATED_CONTENT_PREFERENCE_BARS, CALIBRATED_SEMANTIC_RELEVANCE_BARS, CONTAINER_MIME_TYPES, CONTAINER_MIME_TYPES_SQL, SQLITE_STORE_ID = "connector-store", CONNECTOR_STORE_SQLITE_SCHEMA_VERSION = 15, IMAGE_CONTENT_PRIVATE_ONLY_CONNECTOR_ID = "olympus_image_content_private_only", CHUNK_MEDIA_RETRY_BASE_MS, CHUNK_MEDIA_MAX_ATTEMPTS = 3, MEDIA_JUDGE_MAX_PER_PASS = 200, MEDIA_JUDGE_RETRY_BASE_MS, MEDIA_JUDGE_MAX_ATTEMPTS = 3, MAX_CONSECUTIVE_CONTENT_FETCH_FAILURES = 3, CONNECTOR_STORE_FTS_MIGRATION, ConnectorStoreExclusionViolationError, ConnectorStoreMetadataOnlyViolationError, ConnectorStoreTierWriteRefusedError, STATUS_COUNTS_MAX_AGE_MS, IDENTITY_LOOKUP_SLICE = 5000, HIDDEN_CHILD_PARENT_SLICE = 2000, TierLedgerUnavailableError, TIER_SET_BINDING_RUN_ID = "tiered-store-set-binding", TIER_SET_BINDING_CONNECTOR_ID = "tiered_store_set_binding", TIER_MOVE_CONNECTOR_ID = "olympus_tier_move", NON_SYNC_RUN_CONNECTORS_SQL, ConnectorStoreLocatorIdentityIndexNotReadyError, CONNECTOR_STORE_EMBEDDING_LEASE_SUFFIX = ".embedding", CONNECTOR_STORE_EMBEDDING_LEASE_WAIT_MS = 120000, CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE = 256, CONNECTOR_STORE_CURRENT_EMBEDDING_JOINS_AND_FILTER = `
+var DEFAULT_MAX_CHUNK_CHARS = 4000, MAX_MAX_CHUNK_CHARS = 32000, MAX_SEARCH_RESULTS = 50, CONNECTOR_STORE_FTS_TITLE_WEIGHT = 1.5, EMBEDDING_BATCH_SIZE = 32, MAX_SELECTED_EMBED_ITEM_IDS = 25000, MAX_CONVERSATION_TITLE_LOOKUP_ROWS = 100, MIN_VECTOR_SCORE = 0.18, MAX_REQUIRED_CONCEPTS = 3, RARE_CONCEPT_WEIGHT_SHARE = 0.6, READ_RESULT_PROJECTION_LOCATOR_URI, DEFAULT_SEMANTIC_RELEVANCE_BAR = 0.62, CALIBRATED_CONTENT_PREFERENCE_BARS, CALIBRATED_SEMANTIC_RELEVANCE_BARS, CONTAINER_MIME_TYPES, CONTAINER_MIME_TYPES_SQL, SQLITE_STORE_ID = "connector-store", CONNECTOR_STORE_SQLITE_SCHEMA_VERSION = 15, IMAGE_CONTENT_PRIVATE_ONLY_CONNECTOR_ID = "olympus_image_content_private_only", CHUNK_MEDIA_RETRY_BASE_MS, CHUNK_MEDIA_MAX_ATTEMPTS = 3, MEDIA_JUDGE_MAX_PER_PASS = 200, MEDIA_JUDGE_RETRY_BASE_MS, MEDIA_JUDGE_MAX_ATTEMPTS = 3, MAX_CONSECUTIVE_CONTENT_FETCH_FAILURES = 3, CONNECTOR_STORE_FTS_MIGRATION, ConnectorStoreExclusionViolationError, ConnectorStoreMetadataOnlyViolationError, ConnectorStoreTierWriteRefusedError, STATUS_COUNTS_MAX_AGE_MS, IDENTITY_LOOKUP_SLICE = 5000, EXTRACTION_CANDIDATE_WINDOW = 5000, EXTRACTION_CANDIDATE_MAX_EXAMINED = 50000, HIDDEN_CHILD_PARENT_SLICE = 2000, TierLedgerUnavailableError, TIER_SET_BINDING_RUN_ID = "tiered-store-set-binding", TIER_SET_BINDING_CONNECTOR_ID = "tiered_store_set_binding", TIER_MOVE_CONNECTOR_ID = "olympus_tier_move", NON_SYNC_RUN_CONNECTORS_SQL, ConnectorStoreLocatorIdentityIndexNotReadyError, CONNECTOR_STORE_EMBEDDING_LEASE_SUFFIX = ".embedding", CONNECTOR_STORE_EMBEDDING_LEASE_WAIT_MS = 120000, CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE = 256, CONNECTOR_STORE_CURRENT_EMBEDDING_JOINS_AND_FILTER = `
   FROM chunk_embeddings emb
   JOIN chunks c ON c.chunk_pk = emb.chunk_pk
   JOIN items i ON i.item_pk = emb.item_pk
@@ -26901,7 +26901,7 @@ var init_local_index = __esm(() => {
       WHERE i.tombstoned = 0
         AND LOWER(i.mime_type) <> 'inode/directory'
         ${this.childItemColumnsPresent ? "AND (i.bytes_available IS NULL OR i.bytes_available <> 0)" : ""}
-        AND i.item_pk > ?
+        AND i.item_pk > ? AND i.item_pk <= ?
         AND (? IS NULL OR i.account_scope = ?)
         AND (? = 0 OR NOT EXISTS (SELECT 1 FROM chunks c WHERE c.item_pk = i.item_pk)
           ${staleChunksSql}
@@ -26917,12 +26917,17 @@ var init_local_index = __esm(() => {
       const candidates = [];
       let skippedByDisposition = 0;
       let exhausted = false;
+      const maxPk = this.db.query("SELECT COALESCE(MAX(item_pk), 0) AS n FROM items").get().n;
+      const examineUntil = Math.min(maxPk, lastExaminedPk + Math.max(1, options.maxExamined ?? EXTRACTION_CANDIDATE_MAX_EXAMINED));
+      let windowEnd = Math.min(examineUntil, lastExaminedPk + EXTRACTION_CANDIDATE_WINDOW);
       while (candidates.length < limit) {
-        const rows = query.all(lastExaminedPk, accountScope ?? null, accountScope ?? null, options.withoutChunksOnly === true ? 1 : 0, ...selectedFilters.params, scanBatch);
-        if (rows.length === 0) {
+        if (lastExaminedPk >= maxPk) {
           exhausted = true;
           break;
         }
+        if (lastExaminedPk >= examineUntil)
+          break;
+        const rows = query.all(lastExaminedPk, windowEnd, accountScope ?? null, accountScope ?? null, options.withoutChunksOnly === true ? 1 : 0, ...selectedFilters.params, scanBatch);
         for (const row of rows) {
           lastExaminedPk = row.item_pk;
           if (matchesMimeType && !matchesMimeType(row.mime_type))
@@ -26943,8 +26948,8 @@ var init_local_index = __esm(() => {
         if (candidates.length === limit)
           break;
         if (rows.length < scanBatch) {
-          exhausted = true;
-          break;
+          lastExaminedPk = windowEnd;
+          windowEnd = Math.min(examineUntil, windowEnd + EXTRACTION_CANDIDATE_WINDOW);
         }
       }
       return {
@@ -37743,6 +37748,7 @@ var init_telegram_messages = __esm(() => {
 });
 
 // src/workers/source-index/status.ts
+var STORE_STATUS_REUSE_MS;
 var init_status = __esm(() => {
   init_corpus();
   init_embedding_cost_estimates();
@@ -37757,6 +37763,7 @@ var init_status = __esm(() => {
   init_operation_error();
   init_control_path_headroom();
   init_secret_locations();
+  STORE_STATUS_REUSE_MS = 5 * 60000;
 });
 
 // src/core/public-source-capabilities.ts
@@ -67539,6 +67546,7 @@ init_operation_error();
 init_source_ingestion_policy();
 init_dropbox_files();
 init_provider_client();
+init_control_path_headroom();
 init_runner();
 init_drive_extraction_source();
 init_connector_store();
