@@ -479,7 +479,19 @@ export function createSourceIndexStatusHandler(
         const countsMaxAgeMs = snapshot.countsMaxAgeMs ?? 0;
         if (store && countsMaxAgeMs > 0) {
           const statusScope = options.connectorStoreStatusScope?.(store);
-          if (!storeStatusFresh(store, statusScope, countsMaxAgeMs)) await store.prepareStatusCounts?.(statusScope);
+          if (!storeStatusFresh(store, statusScope, countsMaxAgeMs)) {
+            await store.prepareStatusCounts?.(statusScope);
+            // The counts themselves are read on the second thread where the
+            // store allows it (#870), and statusFor below finds them fresh.
+            if (store.statusOffThread) {
+              try {
+                const status = await store.statusOffThread(statusScope, { countsMaxAgeMs });
+                storeStatusCache.set(storeStatusKey(store, statusScope), { recordedAtMs: nowMs(), status });
+              } catch {
+                // Read on this thread by statusFor, as before.
+              }
+            }
+          }
         }
         statuses.push(statusFor(declaredCorpus));
       }
