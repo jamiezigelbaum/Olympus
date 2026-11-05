@@ -71776,6 +71776,19 @@ async function prepareSnifferModel(options) {
   }
   return stopped();
 }
+async function completeSnifferQuestion(model, options) {
+  const material = snifferMaterialForModel(options.material);
+  const request = {
+    system: SNIFFER_SYSTEM_PROMPT,
+    prompt: buildSnifferBatchPrompt(options.pass, [{ i: 1, material }], options.ownerContext),
+    localOnly: true,
+    responseSchema: SNIFFER_RESPONSE_SCHEMA,
+    maxOutputChars: OUTPUT_CHARS_PER_ITEM + 200,
+    ...options.signal ? { signal: options.signal } : {},
+    snifferItem: { pass: options.pass, material, ownerContext: options.ownerContext }
+  };
+  return await model.complete(request);
+}
 async function runSnifferPass(options) {
   const promptVersion = options.promptVersion ?? SNIFFER_PROMPT_VERSION;
   let id = snifferId(options.lane, promptVersion);
@@ -72024,16 +72037,12 @@ async function runSnifferPass(options) {
       let text3;
       let decisionVerdict;
       try {
-        const request = {
-          system: SNIFFER_SYSTEM_PROMPT,
-          prompt,
-          localOnly: true,
-          responseSchema: SNIFFER_RESPONSE_SCHEMA,
-          maxOutputChars: batch.length * OUTPUT_CHARS_PER_ITEM + 200,
-          ...options.signal ? { signal: options.signal } : {},
-          snifferItem: { pass, material: snifferMaterialForModel(next.question.material), ownerContext: options.ownerContext }
-        };
-        const completion = await options.model.complete(request);
+        const completion = await completeSnifferQuestion(options.model, {
+          pass,
+          material: next.question.material,
+          ownerContext: options.ownerContext,
+          signal: options.signal
+        });
         text3 = completion.text;
         decisionVerdict = completion.decisionVerdict;
       } catch {

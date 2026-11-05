@@ -140491,8 +140491,8 @@ function createDecisionSnifferModel(lane, full, options = {}) {
   const sharedState = state;
   let signal;
   const post2 = async (path, body) => {
+    const timeout = AbortSignal.timeout(60000);
     try {
-      const timeout = AbortSignal.timeout(60000);
       const response = await fetchModelEndpoint(fetch, `${endpoint}${path}`, {
         method: "POST",
         headers: { "content-type": "application/json", ...options.apiKey ? { authorization: `Bearer ${options.apiKey}` } : {} },
@@ -140503,7 +140503,7 @@ function createDecisionSnifferModel(lane, full, options = {}) {
         throw new NativeRequestError([404, 405, 501].includes(response.status));
       return await response.json();
     } catch (error2) {
-      throw error2 instanceof NativeRequestError ? error2 : new NativeRequestError;
+      throw error2 instanceof NativeRequestError ? error2 : new NativeRequestError(false, timeout.aborted);
     }
   };
   let shapeKey = "";
@@ -140578,23 +140578,25 @@ function createDecisionSnifferModel(lane, full, options = {}) {
             sharedState.primed = shape.shared;
           }
           const reply = await post2("/completion", { prompt: `${shape.render(material)}${REPLY_TO_TIER}${written}`, n_predict: 1, n_probs: 40, temperature: 0, cache_prompt: true, id_slot: 0 });
-          const chance = privateChance(tierMass(replyTokens(reply), written));
+          const mass = tierMass(replyTokens(reply), written);
+          const chance = privateChance(mass);
+          const decisionMetrics = { privateProbability: chance ?? null, coverage: mass.private + mass.personal + mass.ambiguous };
           if (reply?.tokens_cached === 0)
             reset();
           if (chance === undefined || !Number.isFinite(chance)) {
             reset();
-            return { text: "", modelId: lane.modelId };
+            return { text: "", modelId: lane.modelId, decisionMetrics };
           }
-          return { text: "", modelId: lane.modelId, decisionVerdict: {
+          return { text: "", modelId: lane.modelId, decisionMetrics, decisionVerdict: {
             tier: chance >= SNIFFER_DECISION_PRIVATE_BAR ? "private" : "personal",
             category: SNIFFER_DECISION_CATEGORY,
             confidence: chance >= SNIFFER_DECISION_PRIVATE_BAR ? chance : 1 - chance,
             failSafe: false
           } };
-        } catch {
+        } catch (error2) {
           reset();
           sharedState.supported = undefined;
-          throw new Error("The native privacy sniffer request failed.");
+          throw error2 instanceof NativeRequestError ? error2 : new NativeRequestError;
         }
       });
     }
@@ -140607,9 +140609,11 @@ var init_sniffer_decision = __esm(() => {
   init_sniffer();
   NativeRequestError = class NativeRequestError extends Error {
     unsupported;
-    constructor(unsupported = false) {
+    timedOut;
+    constructor(unsupported = false, timedOut = false) {
       super("The native privacy sniffer request failed.");
       this.unsupported = unsupported;
+      this.timedOut = timedOut;
     }
   };
   endpoints = new Map;
@@ -190139,6 +190143,19 @@ async function prepareSnifferModel(options) {
   }
   return stopped();
 }
+async function completeSnifferQuestion(model, options) {
+  const material = snifferMaterialForModel(options.material);
+  const request = {
+    system: SNIFFER_SYSTEM_PROMPT,
+    prompt: buildSnifferBatchPrompt(options.pass, [{ i: 1, material }], options.ownerContext),
+    localOnly: true,
+    responseSchema: SNIFFER_RESPONSE_SCHEMA,
+    maxOutputChars: OUTPUT_CHARS_PER_ITEM + 200,
+    ...options.signal ? { signal: options.signal } : {},
+    snifferItem: { pass: options.pass, material, ownerContext: options.ownerContext }
+  };
+  return await model.complete(request);
+}
 async function runSnifferPass(options) {
   const promptVersion = options.promptVersion ?? SNIFFER_PROMPT_VERSION;
   let id = snifferId(options.lane, promptVersion);
@@ -190387,16 +190404,12 @@ async function runSnifferPass(options) {
       let text4;
       let decisionVerdict;
       try {
-        const request = {
-          system: SNIFFER_SYSTEM_PROMPT,
-          prompt,
-          localOnly: true,
-          responseSchema: SNIFFER_RESPONSE_SCHEMA,
-          maxOutputChars: batch.length * OUTPUT_CHARS_PER_ITEM + 200,
-          ...options.signal ? { signal: options.signal } : {},
-          snifferItem: { pass, material: snifferMaterialForModel(next.question.material), ownerContext: options.ownerContext }
-        };
-        const completion = await options.model.complete(request);
+        const completion = await completeSnifferQuestion(options.model, {
+          pass,
+          material: next.question.material,
+          ownerContext: options.ownerContext,
+          signal: options.signal
+        });
         text4 = completion.text;
         decisionVerdict = completion.decisionVerdict;
       } catch {

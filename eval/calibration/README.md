@@ -210,10 +210,13 @@ measurement); the repository estimate is $0.0125 per million tokens.
 ## Replay stored sniffer verdicts
 
 `sniffer-replay.ts` reads only explicitly supplied SQLite backup copies, never
-opens the live lane, and matches saved verdict hashes to exact queued inputs
-or inputs reconstructed through the sampler's `storedSignals` / `judgeInput`
-path. All six source folders use the same reader. Missing files and unmatched
-verdicts are counted; unmatched verdicts are never sent to the model.
+opens the live lane, and takes each judged item from the tier ledger. Its input
+is rebuilt through the sampler's `storedSignals` / `judgeInput` path; the
+inventory's `exactInput` says how many rebuilt inputs hash to a stored verdict,
+since the stores do not keep every name the judge saw (Gmail's labels, for one).
+Copies must not be in WAL mode (`PRAGMA journal_mode=DELETE` on the copy) or a
+read-only open fails. All six source folders use the same reader, and items
+that cannot be rebuilt are counted and never sent to the model.
 
 ```bash
 bun eval/calibration/sniffer-replay.ts --stores DIR \
