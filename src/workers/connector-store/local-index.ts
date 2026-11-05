@@ -6,7 +6,7 @@ import { keywordAlternatives, withKeywordAlternatives, keywordExpansionDisabled,
 import { storeKeywordLanguages } from '../../core/source-index/keyword-languages.ts';
 import { expandSourceIndexKeywords, withExpandedSourceIndexKeywords } from '../../core/source-index/keyword-expansion.ts';
 import { ingestionTurn } from '../control-path-headroom.ts';
-import { offThreadReadsAvailable, readOffThread, type StoreRead } from './off-thread-reads.ts';
+import { offThreadReadsAvailable, withOffThreadSnapshot, type StoreRead } from './off-thread-reads.ts';
 // The shared connector ingest spine: ONE generic local store that turns any
 // Contract 1 SourceConnector into a searchable, analyst-served corpus with
 // zero new storage code.
@@ -12359,10 +12359,12 @@ export class LocalConnectorStore {
     options: { countsMaxAgeMs?: number } = {},
   ): Promise<ConnectorStoreStatus> {
     if (!offThreadReadsAvailable(this.dbPath)) return this.status(scope, options);
-    const steps = this.statusSteps(scope, options);
-    let step = steps.next();
-    while (!step.done) step = steps.next(await readOffThread(this.dbPath, step.value));
-    return step.value;
+    return withOffThreadSnapshot(this.dbPath, async (read) => {
+      const steps = this.statusSteps(scope, options);
+      let step = steps.next();
+      while (!step.done) step = steps.next(await read(step.value));
+      return step.value;
+    });
   }
 
   private *statusSteps(

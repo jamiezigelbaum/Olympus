@@ -20696,10 +20696,7 @@ function retire(stopped, error) {
 function offThreadReadsAvailable(dbPath) {
   return dbPath !== ":memory:" && !dbPath.startsWith("file::memory:") && readerThread() !== undefined;
 }
-function readOffThread(dbPath, read) {
-  const reader = readerThread();
-  if (!reader)
-    return Promise.reject(new Error("off-thread reads are unavailable"));
+function send(reader, message2) {
   const id = nextId++;
   return new Promise((resolve7, reject) => {
     const timer = setTimeout(() => {
@@ -20707,7 +20704,7 @@ function readOffThread(dbPath, read) {
     }, OFF_THREAD_READ_TIMEOUT_MS);
     reader.pending.set(id, { resolve: resolve7, reject, timer });
     try {
-      reader.worker.postMessage({ id, path: dbPath, sql: read.sql, params: read.params, mode: read.mode });
+      reader.worker.postMessage({ ...message2, id });
     } catch (error) {
       reader.pending.delete(id);
       clearTimeout(timer);
@@ -20715,21 +20712,45 @@ function readOffThread(dbPath, read) {
     }
   });
 }
+async function withOffThreadSnapshot(dbPath, work) {
+  const reader = readerThread();
+  if (!reader)
+    throw new Error("off-thread reads are unavailable");
+  const snapshot = nextId++;
+  await send(reader, { op: "open", snapshot, path: dbPath });
+  try {
+    return await work((query) => send(reader, { op: "read", snapshot, sql: query.sql, params: query.params, mode: query.mode }));
+  } finally {
+    await send(reader, { op: "close", snapshot }).catch(() => {
+      return;
+    });
+  }
+}
 var OFF_THREAD_READ_TIMEOUT_MS = 120000, WORKER_SOURCE = `
 import { Database } from 'bun:sqlite';
-const dbs = new Map();
+const snapshots = new Map();
 self.onmessage = (event) => {
-  const { id, path, sql, params, mode } = event.data;
+  const { id, op, snapshot, path, sql, params, mode } = event.data;
   try {
-    let db = dbs.get(path);
-    if (!db) {
-      db = new Database(path, { readonly: true });
-      db.exec('PRAGMA busy_timeout = 10000; PRAGMA query_only = ON;');
-      dbs.set(path, db);
+    if (op === 'open') {
+      const db = new Database(path, { readonly: true });
+      db.exec('PRAGMA busy_timeout = 10000; PRAGMA query_only = ON; BEGIN');
+      snapshots.set(snapshot, db);
+      postMessage({ id, ok: true, rows: null });
+    } else if (op === 'close') {
+      const db = snapshots.get(snapshot);
+      snapshots.delete(snapshot);
+      if (db) {
+        try { db.exec('COMMIT'); } finally { db.close(); }
+      }
+      postMessage({ id, ok: true, rows: null });
+    } else {
+      const db = snapshots.get(snapshot);
+      if (!db) throw new Error('unknown snapshot');
+      const query = db.query(sql);
+      const rows = mode === 'all' ? query.all(...params) : query.get(...params);
+      postMessage({ id, ok: true, rows });
     }
-    const query = db.query(sql);
-    const rows = mode === 'all' ? query.all(...params) : query.get(...params);
-    postMessage({ id, ok: true, rows });
   } catch (error) {
     postMessage({ id, ok: false, error: error instanceof Error ? error.message : String(error) });
   }
@@ -31329,11 +31350,13 @@ var init_local_index = __esm(() => {
     async statusOffThread(scope, options = {}) {
       if (!offThreadReadsAvailable(this.dbPath))
         return this.status(scope, options);
-      const steps = this.statusSteps(scope, options);
-      let step = steps.next();
-      while (!step.done)
-        step = steps.next(await readOffThread(this.dbPath, step.value));
-      return step.value;
+      return withOffThreadSnapshot(this.dbPath, async (read) => {
+        const steps = this.statusSteps(scope, options);
+        let step = steps.next();
+        while (!step.done)
+          step = steps.next(await read(step.value));
+        return step.value;
+      });
     }
     *statusSteps(scope, options) {
       const accountScope = normalizeOptionalAccountScope(scope?.accountScope);
@@ -47434,12 +47457,12 @@ function chatgptPrivacyProgram(kit, makeLogic) {
       kit.render("privacy:confirm:yes");
       return;
     }
-    send(false, false);
+    send2(false, false);
   }
   const CONFIRMATION_FRESH_MS = 25 * 60000;
-  function send(confirmed, retried) {
+  function send2(confirmed, retried) {
     if (confirmed && (!s.confirmation || Date.now() - s.confirmedAt > CONFIRMATION_FRESH_MS)) {
-      renewConfirmation(() => send(true, true));
+      renewConfirmation(() => send2(true, true));
       return;
     }
     const args = { description: s.description.trim(), rules: rulesOut() };
@@ -47459,7 +47482,7 @@ function chatgptPrivacyProgram(kit, makeLogic) {
       const content = result && result.structuredContent && typeof result.structuredContent === "object" ? result.structuredContent : null;
       if (confirmed && result && result.isError && content && content.error === "privacy_owner_only" && !retried) {
         s.confirmation = "";
-        renewConfirmation(() => send(true, true));
+        renewConfirmation(() => send2(true, true));
         return;
       }
       const data2 = settings(result);
@@ -47576,7 +47599,7 @@ function chatgptPrivacyProgram(kit, makeLogic) {
     }
     if (change.described)
       add(box, el("p", change.removed.length ? "" : "strong", W.confirmDescription));
-    add(box, add(el("div", "actions"), kit.button(W.confirm, "privacy:confirm:yes", () => send(lowers(), false), "danger"), kit.button(W.cancel, "privacy:confirm:no", () => {
+    add(box, add(el("div", "actions"), kit.button(W.confirm, "privacy:confirm:yes", () => send2(lowers(), false), "danger"), kit.button(W.cancel, "privacy:confirm:no", () => {
       s.confirmStep = false;
       kit.render("privacy:save");
     }, "plain")));
