@@ -456,6 +456,14 @@ testers have exercised the normal product journey without custom engineering.
 
 ## Decisions
 
+- **2026-11-05 — Decision mode for local judging.** Local llama.cpp servers
+  now answer the privacy question with a one-token read instead of a written
+  JSON reply; Venice and the built-in model keep full mode. The owner approved
+  moving Delphi's judge to Qwen 35B-A3B on llama.cpp, live since 16:50Z: 128
+  verdicts a minute against 14 to 17 before, with no sniffer errors. On the
+  owner's install, re-judges can't lower an item from Private to Personal until
+  the owner's labels on the model's disagreements come back clean. Design:
+  `docs/design/per-item-four-tier-classification.md`.
 - **2026-10-28 — One indexing pass for every store.** Owner direction: "one
   process by which all new information coming into the spine is judged … it
   shouldn't be different for each connection." Judging was already one
