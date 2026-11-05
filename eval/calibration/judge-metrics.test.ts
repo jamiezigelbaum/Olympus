@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { confusion, medianAndRange, privateChance, reweighted, tierMass, type ScoredRow } from './judge-metrics.ts';
+import { confusion, medianAndRange, privateByImportance, privateChance, reweighted, tierMass, type ScoredRow } from './judge-metrics.ts';
 
 const row = (owner: ScoredRow['owner'], judge: ScoredRow['judge'], stratum?: string): ScoredRow => ({
   id: 'x', owner, judge, source: 'telegram', split: 'dev', ...(stratum ? { stratum } : {}),
@@ -55,4 +55,18 @@ describe('tierMass', () => {
 test('medianAndRange', () => {
   expect(medianAndRange([3, 1, 2])).toEqual({ median: 2, min: 1, max: 3 });
   expect(medianAndRange([4, 1]).median).toBe(2.5);
+});
+
+test('privateByImportance splits misses and counts a Not sure tag as untagged', () => {
+  const rows: ScoredRow[] = [
+    { ...row('private', 'personal'), id: 'a' },
+    { ...row('private', 'private'), id: 'b' },
+    { ...row('private', 'personal'), id: 'c' },
+    { ...row('private', 'personal'), id: 'd' },
+    { ...row('personal', 'private'), id: 'e' },
+  ];
+  const split = privateByImportance(rows, { a: { label: 'important' }, b: { label: 'important' }, c: { label: 'minor' }, d: { label: 'unsure' } });
+  expect(split.important).toEqual({ items: 2, missed: 1, recall: 0.5 });
+  expect(split.minor).toEqual({ items: 1, missed: 1, recall: 0 });
+  expect(split.untagged).toEqual({ items: 1, missed: 1, recall: 0 });
 });

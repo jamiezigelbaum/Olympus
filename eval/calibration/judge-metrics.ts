@@ -76,6 +76,33 @@ export function reweighted(rows: readonly ScoredRow[], sizes: StratumSizes): Sco
   });
 }
 
+export interface ImportanceLine {
+  items: number;
+  missed: number;
+  recall: number | null;
+}
+
+/**
+ * The owner's Private items split by how much they matter: how many of each the
+ * judge sent to Personal. A Not sure or untagged item is `untagged`.
+ */
+export function privateByImportance(
+  rows: readonly ScoredRow[],
+  importance: Readonly<Record<string, { label: string }>>,
+): { important: ImportanceLine; minor: ImportanceLine; untagged: ImportanceLine } {
+  const line = (members: readonly ScoredRow[]): ImportanceLine => {
+    const missed = members.filter((row) => row.judge === 'personal').length;
+    return { items: members.length, missed, recall: members.length === 0 ? null : 1 - missed / members.length };
+  };
+  const own = rows.filter((row) => row.owner === 'private');
+  const tagged = (label: string) => own.filter((row) => importance[row.id]?.label === label);
+  return {
+    important: line(tagged('important')),
+    minor: line(tagged('minor')),
+    untagged: line(own.filter((row) => !['important', 'minor'].includes(importance[row.id]?.label ?? ''))),
+  };
+}
+
 export interface TokenChance {
   token: string;
   logprob: number;

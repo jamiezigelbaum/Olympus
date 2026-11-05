@@ -48,12 +48,13 @@ import {
 } from '../../src/workers/classification/sniffer.ts';
 import { createVeniceAnalystModel } from '../../src/core/analyst-venice.ts';
 import type { AnalystModel } from '../../src/core/analyst.ts';
-import { CALIBRATION_DIR_DEFAULT, readLabels, readSample, type CalibrationSampleItem } from './files.ts';
+import { CALIBRATION_DIR_DEFAULT, readImportance, readLabels, readSample, type CalibrationSampleItem } from './files.ts';
 import { judgeInput } from './judge-input.ts';
 import {
   confusion,
   groupedConfusion,
   medianAndRange,
+  privateByImportance,
   privateChance,
   reweighted,
   tierMass,
@@ -446,7 +447,10 @@ async function main(): Promise<void> {
   const weighted = sizes ? reweighted(rows, sizes) : undefined;
   const speed = timed.length > 0 ? medianAndRange(timed.map((pass) => pass.itemsPerMinute)) : undefined;
 
+  const importance = readImportance(dir).labels;
   const result = {
+    // First, because a missed Important item is the mistake that matters most.
+    privateMissed: Object.keys(importance).length > 0 ? privateByImportance(rows, importance) : undefined,
     at: new Date().toISOString(),
     mode,
     model: modelName,
@@ -529,7 +533,10 @@ async function mainVenice(): Promise<void> {
   }));
   const sizes = stratumSizes(sample.recipe);
   const weighted = sizes ? reweighted(rows, sizes) : undefined;
+  const importance = readImportance(dir).labels;
   const result = {
+    // First, because a missed Important item is the mistake that matters most.
+    privateMissed: Object.keys(importance).length > 0 ? privateByImportance(rows, importance) : undefined,
     at: new Date().toISOString(),
     mode: 'full',
     backend: 'venice',

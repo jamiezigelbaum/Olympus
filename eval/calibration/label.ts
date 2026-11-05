@@ -2,16 +2,27 @@
 //
 // A local page for the owner to mark each sampled file Personal or Private.
 // It listens on 127.0.0.1 only, behind a random one-time token in the URL,
-// and writes nothing but labels.json in the calibration directory. It never
+// and writes nothing but its labels file in the calibration directory. It never
 // opens an Olympus store, ledger or engine.
 //
-//   bun eval/calibration/label.ts [--dir DIR] [--port N] [--no-open]
+//   bun eval/calibration/label.ts [--dir DIR] [--port N] [--no-open] [--importance]
+//
+// --importance is a second pass over the items labeled Private: Important or
+// Minor, saved to importance.json. labels.json is only read.
 
 import { spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import { CALIBRATION_DIR_DEFAULT, readLabels, readSample, writeLabels, type CalibrationLabel } from './files.ts';
+import {
+  CALIBRATION_DIR_DEFAULT,
+  readImportance,
+  readLabels,
+  readSample,
+  writeImportance,
+  writeLabels,
+  type CalibrationImportance,
+  type CalibrationLabels,
+} from './files.ts';
 
-const LABELS: readonly CalibrationLabel[] = ['personal', 'private', 'unsure', 'skip'];
 const EXCERPT_CHARS = 6_000;
 
 const argv = process.argv.slice(2);
@@ -20,10 +31,39 @@ const flag = (name: string) => {
   return index >= 0 ? argv[index + 1] : undefined;
 };
 const dir = flag('--dir') ?? CALIBRATION_DIR_DEFAULT;
+const importancePass = argv.includes('--importance');
+/** A choice on the page: what is saved, what it reads, its key, and the button style it borrows. */
+const CHOICES = importancePass
+  ? [
+      { label: 'important', name: 'Important', key: 'I', style: 'private' },
+      { label: 'minor', name: 'Minor', key: 'M', style: 'personal' },
+      { label: 'unsure', name: 'Not sure', key: 'U', style: 'unsure' },
+    ]
+  : [
+      { label: 'personal', name: 'Personal', key: 'P', style: 'personal' },
+      { label: 'private', name: 'Private', key: 'X', style: 'private' },
+      { label: 'unsure', name: 'Not sure', key: 'U', style: 'unsure' },
+      { label: 'skip', name: 'Skip', key: 'S', style: 'skip' },
+    ];
+const HEADING = importancePass ? 'Olympus calibration: how much does this Private item matter?' : 'Olympus calibration: Personal or Private?';
+const RULE = importancePass
+  ? `<details class="rule" open><summary>What counts as Important</summary>
+<p><b>Important</b>: the things that must stay Private, such as a full blood lab report, full tax returns or a complete bank statement.</p>
+<p><b>Minor</b>: Private, but a rare slip would be acceptable, such as a meal receipt, an Uber receipt or a casual question to a doctor.</p>
+<p>Your Personal and Private labels do not change here.</p></details>`
+  : `<details class="rule"><summary>What counts as Private</summary>
+<p><b>Private</b>: a real person's own information. Their records and results (labs, medical, therapy), statements, bills,
+tax and bank papers, contracts and legal papers about them, filled-in forms, identity documents, intimate or family matters.</p>
+<p><b>Personal</b>: everything else, including books, articles, guides, courses and program rules on sensitive topics
+(health, money, law, psychology), work, plans, notes and hobbies.</p>
+<p>Judge the file as it is. Nothing here changes Olympus; labels only measure it.</p></details>`;
 const sample = readSample(dir);
-const labels = readLabels(dir);
+const ownerLabels = readLabels(dir);
+const items = importancePass ? sample.items.filter((item) => ownerLabels.labels[item.id]?.label === 'private') : sample.items;
+const labels: { labels: Record<string, { label: string; at: string }> } = importancePass ? readImportance(dir) : ownerLabels;
+const save = () => (importancePass ? writeImportance(dir, labels as CalibrationImportance) : writeLabels(dir, labels as CalibrationLabels));
 const token = randomBytes(16).toString('hex');
-const byId = new Map(sample.items.map((item) => [item.id, item]));
+const byId = new Map(items.map((item) => [item.id, item]));
 
 const server = Bun.serve({
   hostname: '127.0.0.1',
@@ -41,7 +81,7 @@ const server = Bun.serve({
     if (request.method === 'GET' && route === '/items') {
       return Response.json({
         root: sample.root,
-        items: sample.items.map((item) => ({
+        items: items.map((item) => ({
           id: item.id,
           name: item.name,
           folder: item.rel.includes('/') ? item.rel.slice(0, item.rel.lastIndexOf('/')) : '',
@@ -59,10 +99,10 @@ const server = Bun.serve({
       const body = await request.json() as { id?: string; label?: string | null };
       if (!body.id || !byId.has(body.id)) return new Response('Unknown item', { status: 400 });
       if (body.label === null) delete labels.labels[body.id];
-      else if (LABELS.includes(body.label as CalibrationLabel)) {
-        labels.labels[body.id] = { label: body.label as CalibrationLabel, at: new Date().toISOString() };
+      else if (CHOICES.some((choice) => choice.label === body.label)) {
+        labels.labels[body.id] = { label: body.label!, at: new Date().toISOString() };
       } else return new Response('Unknown label', { status: 400 });
-      writeLabels(dir, labels);
+      save();
       return Response.json({ ok: true, labeled: Object.keys(labels.labels).length });
     }
     if (request.method === 'POST' && route === '/reveal') {
@@ -77,7 +117,7 @@ const server = Bun.serve({
 });
 
 const address = `http://127.0.0.1:${server.port}/${token}/`;
-console.log(`Labeling ${sample.items.length} files (${Object.keys(labels.labels).length} already labeled).`);
+console.log(`Labeling ${items.length} items (${Object.keys(labels.labels).length} already labeled).`);
 console.log(`Open: ${address}`);
 console.log('Labels are saved after every click to the calibration folder. Ctrl-C to stop.');
 if (!argv.includes('--no-open')) spawn('open', [address], { stdio: 'ignore', detached: true }).unref();
@@ -118,20 +158,16 @@ kbd { font:12px ui-monospace, Menlo, monospace; opacity:.8; margin-left:4px; }
 @media (max-width: 520px) { .buttons { grid-template-columns: repeat(2, minmax(0,1fr)); } }
 </style></head>
 <body><main>
-<header><h1>Olympus calibration: Personal or Private?</h1><div class="progress" id="progress"></div></header>
+<header><h1>${HEADING}</h1><div class="progress" id="progress"></div></header>
 <div class="bar"><div id="bar"></div></div>
-<details class="rule"><summary>What counts as Private</summary>
-<p><b>Private</b>: a real person's own information. Their records and results (labs, medical, therapy), statements, bills,
-tax and bank papers, contracts and legal papers about them, filled-in forms, identity documents, intimate or family matters.</p>
-<p><b>Personal</b>: everything else, including books, articles, guides, courses and program rules on sensitive topics
-(health, money, law, psychology), work, plans, notes and hobbies.</p>
-<p>Judge the file as it is. Nothing here changes Olympus; labels only measure it.</p></details>
+${RULE}
 <div id="view"></div>
 </main>
 <script>
 const base = location.pathname.endsWith('/') ? location.pathname : location.pathname + '/';
 let items = [], labels = {}, index = 0;
-const NAMES = { personal: 'Personal', private: 'Private', unsure: 'Not sure', skip: 'Skip' };
+const CHOICES = ${JSON.stringify(CHOICES)};
+const NAMES = Object.fromEntries(CHOICES.map((c) => [c.label, c.name]));
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;' }[c]));
 const fmtSize = (n) => n > 1048576 ? (n / 1048576).toFixed(1) + ' MB' : Math.max(1, Math.round(n / 1024)) + ' KB';
 function counts() {
@@ -164,8 +200,8 @@ function render() {
     (chosen ? '<div class="current">Labeled: <b>' + NAMES[chosen] + '</b></div>' : '') +
     '<pre>' + esc(judged ? it.judgeSees : it.excerpt) + '</pre>' +
     '<div class="buttons">' +
-      ['personal', 'private', 'unsure', 'skip'].map((l, i) => '<button class="label ' + l + (chosen === l ? ' chosen' : '') + '" data-label="' + l + '">' +
-        NAMES[l] + '<kbd>' + ['P', 'X', 'U', 'S'][i] + '</kbd></button>').join('') +
+      CHOICES.map((c) => '<button class="label ' + c.style + (chosen === c.label ? ' chosen' : '') + '" data-label="' + c.label + '">' +
+        c.name + '<kbd>' + c.key + '</kbd></button>').join('') +
     '</div>' +
     '<div class="nav"><button id="prev">← Previous</button>' + (judged ? '' : '<button id="reveal">Show in Finder<kbd>F</kbd></button>') +
       '<button id="next">Next →</button><button id="nextOpen">Next unlabeled<kbd>N</kbd></button></div></div>';
@@ -205,7 +241,7 @@ async function reveal() { await fetch(base + 'reveal', { method: 'POST', headers
 document.addEventListener('keydown', (e) => {
   if (e.metaKey || e.ctrlKey || e.altKey || index >= items.length) return;
   const k = e.key.toLowerCase();
-  const map = { p: 'personal', x: 'private', u: 'unsure', s: 'skip' };
+  const map = Object.fromEntries(CHOICES.map((c) => [c.key.toLowerCase(), c.label]));
   if (map[k]) { e.preventDefault(); choose(map[k]); }
   else if (k === 'n') nextUnlabeled();
   else if (k === 'f') reveal();
