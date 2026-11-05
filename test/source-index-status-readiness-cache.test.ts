@@ -12,6 +12,7 @@ import {
 } from '../src/workers/source-scope-runtime.ts';
 import {
   DASHBOARD_READINESS_LEDGER_MAX_AGE_MS,
+  STORE_STATUS_REUSE_MS,
   createSourceIndexStatusHandler,
   resolveStatusRetrievalAvailability,
 } from '../src/workers/source-index/status.ts';
@@ -48,6 +49,26 @@ describe('connector-store status readiness', () => {
       activationMode = 'hybrid_shadow';
       const owed = (await handler.status({ readiness_ledger_max_age_ms: 120_000 })).corpora[0]!;
       expect(owed.embedding_parity).toMatchObject({ required: true, missing_chunks: 1, refresh_needed: true });
+    } finally { store.close(); }
+  });
+
+  test('snapshot callers share one read of a store\'s counts for a minute; current callers always read', async () => {
+    const store = new LocalConnectorStore({ dbPath: ':memory:', corpusId: CORPUS_ID, family: 'file', trustDomain: 'secure_local' });
+    let reads = 0;
+    const read = store.status.bind(store);
+    store.status = ((...args: Parameters<typeof store.status>) => { reads += 1; return read(...args); }) as typeof store.status;
+    let now = 1_000_000;
+    try {
+      const handler = createSourceIndexStatusHandler({ corpusDefinitions: [defineDropboxFilesCorpus()], connectorStores: [store], nowMs: () => now });
+      await handler.status({ include_items: false }, { countsMaxAgeMs: 300_000 });
+      await handler.status({ include_items: false, include_readiness_ledger: true, readiness_ledger_max_age_ms: 120_000 }, { countsMaxAgeMs: 300_000 });
+      expect(reads).toBe(1);
+      now += STORE_STATUS_REUSE_MS + 1;
+      await handler.status({ include_items: false }, { countsMaxAgeMs: 300_000 });
+      expect(reads).toBe(2);
+      await handler.status({ include_items: false });
+      await handler.status({ include_items: false });
+      expect(reads).toBe(4);
     } finally { store.close(); }
   });
 

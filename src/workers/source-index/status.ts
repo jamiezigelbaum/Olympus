@@ -326,6 +326,8 @@ export type SourceIndexStatusRetrievalAvailability =
  * whole-corpus counts while preserving live reads for callers that omit it.
  */
 export const DASHBOARD_READINESS_LEDGER_MAX_AGE_MS = 120_000;
+/** How long a snapshot caller reuses a store's counts (never longer than its own `countsMaxAgeMs`). */
+export const STORE_STATUS_REUSE_MS = 60_000;
 
 /** A live names-only policy is a status fact, not a content retrieval mode. */
 type StatusCorpusDefinition = Omit<SourceIndexCorpusDefinition, 'activationMode'> & {
@@ -341,7 +343,22 @@ export function createSourceIndexStatusHandler(
   const currentRegistry = () => staticRegistry
     ?? buildSourceIndexCorpusRegistry((options.corpusDefinitions as () => SourceIndexCorpusDefinition[])());
   const cache = new Map<string, { recordedAtMs: number; status: SourceIndexStatusCorpus }>();
+  // A store's own counts, shared by every snapshot caller (the dashboard and
+  // the scheduler's status publish) for STORE_STATUS_REUSE_MS: each read is a
+  // synchronous pass over the whole store, and the two callers' separate
+  // reads were most of the worker's freezes (Sparta CPU samples, 2026-11-05).
+  const storeStatusCache = new Map<string, { recordedAtMs: number; status: ConnectorStoreStatus }>();
   const nowMs = options.nowMs ?? Date.now;
+  const storeStatus = (store: LocalConnectorStore, statusScope: ConnectorStoreStatusScope | undefined, countsMaxAgeMs: number): ConnectorStoreStatus => {
+    const reuseMs = Math.min(countsMaxAgeMs, STORE_STATUS_REUSE_MS);
+    if (reuseMs <= 0) return store.status(statusScope, { countsMaxAgeMs: 0 });
+    const key = JSON.stringify([store.corpusId, statusScope ?? null]);
+    const cached = storeStatusCache.get(key);
+    if (cached && nowMs() - cached.recordedAtMs <= reuseMs) return cached.status;
+    const status = store.status(statusScope, { countsMaxAgeMs });
+    storeStatusCache.set(key, { recordedAtMs: nowMs(), status });
+    return status;
+  };
 
   return {
     async status(request: SourceIndexStatusRequest = {}, snapshot: { countsMaxAgeMs?: number } = {}): Promise<SourceIndexStatusResult> {
@@ -399,7 +416,7 @@ export function createSourceIndexStatusHandler(
         const status = store
           ? connectorStoreStatus(
             corpus,
-            store.status(statusScope, { countsMaxAgeMs: snapshot.countsMaxAgeMs ?? 0 }),
+            storeStatus(store, statusScope, snapshot.countsMaxAgeMs ?? 0),
             readiness?.counts,
             readiness?.contentExtractionThroughput,
             availability?.modelId,
