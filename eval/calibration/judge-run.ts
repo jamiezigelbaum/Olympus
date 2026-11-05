@@ -8,7 +8,7 @@
 //     [--primed-check N] [--slot 0] [--n-probs 40] [--thinking]
 //
 //   VENICE_API_KEY=... bun eval/calibration/judge-run.ts --venice MODEL_ID --allow-venice
-//     --dir DIR (--owner-words FILE | --no-owner-words) [--concurrency 8] [--passes 3]
+//     --dir DIR (--owner-words FILE | --no-owner-words) [--concurrency 8] [--passes 3] [--exclude ID,ID]
 //
 // --venice sends each item to Venice through production's own Venice judge
 // adapter (createVeniceAnalystModel, configured as the tier sniffer builds it),
@@ -85,7 +85,9 @@ const nProbs = numberFlag('--n-probs', 40);
 const passes = numberFlag('--passes', 3);
 const primedCheck = numberFlag('--primed-check', 0);
 const veniceModel = flag('--venice');
-const concurrency = Math.max(1, Math.min(8, Math.floor(numberFlag('--concurrency', 1))));
+/** Venice runs on a cluster, so the test may go past the sniffer's local cap of 8 to find the key's real limit. */
+const VENICE_MAX_CONCURRENCY = 64;
+const concurrency = Math.max(1, Math.min(VENICE_MAX_CONCURRENCY, Math.floor(numberFlag('--concurrency', 1))));
 
 /** What Venice reported for the calls of one pass: usage, latency and the key's limits. */
 interface VeniceMeter {
@@ -175,7 +177,7 @@ async function askVenice(model: AnalystModel, material: string, ownerContext: st
   }
   const verdict = parseSnifferBatchResponse(text, new Set([1])).get(1);
   if (!verdict) return { judge: 'private', via: 'no_answer' };
-  return { judge: snifferTierKey(verdict) === 'secure' ? 'private' : 'personal', via: 'judge' };
+  return { judge: snifferTierKey(verdict) === 'secure' ? 'private' : 'personal', via: 'judge', privateKind: verdict.privateKind };
 }
 
 async function runVenicePass(asked: readonly Asked[], model: AnalystModel, ownerContext: string | undefined) {
@@ -478,12 +480,14 @@ function selectLabeled() {
   if (split !== undefined && split !== 'dev' && split !== 'test') throw new Error('--split is dev or test.');
   const sample = readSample(dir);
   const labels = readLabels(dir).labels;
+  const excluded = new Set((flag('--exclude') ?? '').split(',').filter(Boolean));
   const labeled = sample.items
+    .filter((item) => !excluded.has(item.id))
     .filter((item) => labels[item.id]?.label === 'personal' || labels[item.id]?.label === 'private')
     .filter((item) => split === undefined || splitOf(item.id) === split)
     .slice(0, numberFlag('--limit', Number.MAX_SAFE_INTEGER));
   if (labeled.length === 0) throw new Error('No Personal or Private labels to score.');
-  return { sample, labels, labeled };
+  return { sample, labels, labeled, excluded: excluded.size };
 }
 
 function readOwnerContext(): string | undefined {
@@ -499,7 +503,7 @@ async function mainVenice(): Promise<void> {
   if (flag('--endpoint') !== undefined) throw new Error('--endpoint does not apply to --venice.');
   if (flag('--mode') !== undefined && flag('--mode') !== 'full') throw new Error('--venice runs full mode only.');
   const ownerContext = readOwnerContext();
-  const { sample, labels, labeled } = selectLabeled();
+  const { sample, labels, labeled, excluded } = selectLabeled();
   const asked = labeled.map(ask);
   const judge = veniceJudge(veniceModel);
 
@@ -528,6 +532,7 @@ async function mainVenice(): Promise<void> {
     prompt: snifferPromptVersions(ownerContext).cache,
     ownerWords: ownerContext ? 'supplied' : 'none',
     items: rows.length,
+    excluded,
     answeredBy: count([...warm.answers.values()].map((answer) => answer.via)),
     verdictsMovedAcrossPasses: moved.length,
     speedItemsPerMinute: timed.length > 0 ? medianAndRange(timed.map((pass) => pass.itemsPerMinute)) : undefined,
