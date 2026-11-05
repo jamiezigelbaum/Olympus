@@ -21678,12 +21678,12 @@ class TierLedger {
   }
   listRoutedOverrides() {
     const rows = this.db.query(`
-      SELECT i.*, o.override_json AS override_json FROM tier_items i
-      JOIN tier_overrides o
-        ON o.provider = i.provider AND o.account_scope = i.account_scope
-        AND o.conversation_key = i.conversation_key AND o.provider_item_id = i.provider_item_id
+      SELECT i.*, o.override_json AS override_json FROM tier_overrides o
+      CROSS JOIN tier_items i
+        ON i.provider = o.provider AND i.account_scope = o.account_scope
+        AND i.conversation_key = o.conversation_key AND i.provider_item_id = o.provider_item_id
       WHERE i.routed = 1
-      ORDER BY i.provider, i.account_scope, i.conversation_key, i.provider_item_id
+      ORDER BY o.provider, o.account_scope, o.conversation_key, o.provider_item_id
     `).all();
     const result = [];
     for (const row of rows) {

@@ -2287,16 +2287,19 @@ export class TierLedger {
   /**
    * Routed items that carry a per-item owner override, with it, in key order.
    * Overrides are set by hand, one item at a time, so the list is small; the
-   * override pass (tier-override-settle.ts) reads it whole.
+   * override pass (tier-override-settle.ts) reads it whole. The read starts
+   * from the overrides (CROSS JOIN fixes the order): started from tier_items
+   * it walked every item on each sniffer tick, an eighth of Sparta's sampled
+   * freezes (14b9be8, 2026-11-05).
    */
   listRoutedOverrides(): Array<{ record: TierLedgerRecord; override: ItemTierOverride }> {
     const rows = this.db.query(`
-      SELECT i.*, o.override_json AS override_json FROM tier_items i
-      JOIN tier_overrides o
-        ON o.provider = i.provider AND o.account_scope = i.account_scope
-        AND o.conversation_key = i.conversation_key AND o.provider_item_id = i.provider_item_id
+      SELECT i.*, o.override_json AS override_json FROM tier_overrides o
+      CROSS JOIN tier_items i
+        ON i.provider = o.provider AND i.account_scope = o.account_scope
+        AND i.conversation_key = o.conversation_key AND i.provider_item_id = o.provider_item_id
       WHERE i.routed = 1
-      ORDER BY i.provider, i.account_scope, i.conversation_key, i.provider_item_id
+      ORDER BY o.provider, o.account_scope, o.conversation_key, o.provider_item_id
     `).all() as Array<TierItemRow & { override_json: string }>;
     const result: Array<{ record: TierLedgerRecord; override: ItemTierOverride }> = [];
     for (const row of rows) {
