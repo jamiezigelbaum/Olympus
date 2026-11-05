@@ -300,6 +300,30 @@ describe('connector-store status readiness', () => {
         { ...other.identity, ...(other.contentHash ? { contentHash: other.contentHash } : {}) },
       ], contentScope.filters)).toEqual([true, false, false, true]);
       expect(store.itemsMatchingExtractionRefs([], contentScope.filters)).toEqual([]);
+      // Each ref is a lookup by item id whatever the filters: an `IN (…)` list
+      // let a provider filter scan the whole provider once per slice instead.
+      type Statement = { all: (...params: unknown[]) => unknown[] };
+      const db = (store as unknown as { db: { query: (sql: string) => Statement } }).db;
+      const original = db.query.bind(db);
+      let lookup: { sql: string; params: unknown[] } | undefined;
+      db.query = (sql: string) => {
+        const statement = original(sql);
+        if (!sql.includes('json_each(?) wanted')) return statement;
+        return { all: (...params: unknown[]) => {
+          lookup = { sql, params };
+          return statement.all(...params);
+        } };
+      };
+      try {
+        store.itemsMatchingExtractionRefs([{ ...current.identity }], { ...contentScope.filters, provider: current.identity.provider });
+      } finally {
+        db.query = original;
+      }
+      expect(lookup).toBeDefined();
+      const plan = (original(`EXPLAIN QUERY PLAN ${lookup!.sql}`).all(...lookup!.params) as Array<{ detail: string }>)
+        .map((row) => row.detail);
+      expect(plan.some((detail) => /SEARCH i USING INDEX idx_items_local_item_id/.test(detail))).toBe(true);
+      expect(plan.some((detail) => /^(SCAN|SEARCH) i\b(?!.*idx_items_local_item_id)/.test(detail))).toBe(false);
     } finally {
       store.close();
     }
