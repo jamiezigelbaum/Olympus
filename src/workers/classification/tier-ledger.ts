@@ -1117,6 +1117,52 @@ export class TierLedger {
     return (rows as TierItemRow[]).map(recordFromRow);
   }
 
+  /**
+   * listAwaitingText over a bounded window: at most `examine` rows in key
+   * order after `after` are looked at, matching or not, and the result says
+   * where the next call resumes. Unbounded, a call with few matching rows
+   * walked the whole ledger to fill its page (Sparta, 2007d67, 2026-11-05: a
+   * 10 s freeze on one names-only settle pass).
+   */
+  listAwaitingTextWindow(options: { limit?: number; after?: TierLedgerIdentity; examine?: number } = {}): {
+    records: TierLedgerRecord[];
+    /** Where the next call resumes; undefined once the end of the ledger is reached. */
+    resumeAfter?: TierLedgerIdentity;
+  } {
+    const limit = Math.max(1, Math.min(options.limit ?? 500, 5_000));
+    const examine = Math.max(limit, options.examine ?? 20_000);
+    const after = options.after
+      ? [options.after.provider, options.after.accountScope, tierLedgerConversationKey(options.after), options.after.providerItemId]
+      : undefined;
+    const keyAfter = after ? 'WHERE (provider, account_scope, conversation_key, provider_item_id) > (?, ?, ?, ?)' : '';
+    const rows = this.db.query(`
+      SELECT * FROM (
+        SELECT * FROM tier_items ${keyAfter}
+        ORDER BY provider, account_scope, conversation_key, provider_item_id
+        LIMIT ?
+      )
+      WHERE routed = 1 AND content_read = 0 AND metadata_pending = 0
+        AND ((state = 'pending' AND content_pending = 1)
+          OR (state = 'current' AND EXISTS (SELECT 1 FROM json_each(reasons_json) r
+            WHERE r.value GLOB 'content:sniffer:*:fail_safe:missing_question'
+              OR r.value GLOB 'content:sniffer:*:fail_safe:unread')))
+      ORDER BY provider, account_scope, conversation_key, provider_item_id
+      LIMIT ?
+    `).all(...(after ?? []), examine, limit) as TierItemRow[];
+    const records = rows.map(recordFromRow);
+    const identityOfRow = (row: { provider: string; account_scope: string; conversation_key: string; provider_item_id: string }): TierLedgerIdentity => ({
+      provider: row.provider, accountScope: row.account_scope, providerItemId: row.provider_item_id,
+      ...(row.conversation_key ? { providerConversationId: row.conversation_key } : {}),
+    });
+    if (rows.length >= limit) return { records, resumeAfter: identityOfRow(rows[rows.length - 1]!) };
+    const windowEnd = this.db.query(`
+      SELECT provider, account_scope, conversation_key, provider_item_id FROM tier_items ${keyAfter}
+      ORDER BY provider, account_scope, conversation_key, provider_item_id
+      LIMIT 1 OFFSET ?
+    `).get(...(after ?? []), examine - 1) as { provider: string; account_scope: string; conversation_key: string; provider_item_id: string } | null;
+    return windowEnd ? { records, resumeAfter: identityOfRow(windowEnd) } : { records };
+  }
+
   /** Items waiting on an unanswered sniffer question, oldest first. */
   listPending(options: { limit?: number; after?: TierLedgerIdentity } = {}): TierLedgerRecord[] {
     const limit = Math.max(1, Math.min(options.limit ?? 500, 5_000));

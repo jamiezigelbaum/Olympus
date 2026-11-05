@@ -20867,6 +20867,41 @@ class TierLedger {
     `).all(after ? 1 : null, ...after ?? [null, null, null, null], limit);
     return rows.map(recordFromRow);
   }
+  listAwaitingTextWindow(options = {}) {
+    const limit = Math.max(1, Math.min(options.limit ?? 500, 5000));
+    const examine = Math.max(limit, options.examine ?? 20000);
+    const after = options.after ? [options.after.provider, options.after.accountScope, tierLedgerConversationKey(options.after), options.after.providerItemId] : undefined;
+    const keyAfter = after ? "WHERE (provider, account_scope, conversation_key, provider_item_id) > (?, ?, ?, ?)" : "";
+    const rows = this.db.query(`
+      SELECT * FROM (
+        SELECT * FROM tier_items ${keyAfter}
+        ORDER BY provider, account_scope, conversation_key, provider_item_id
+        LIMIT ?
+      )
+      WHERE routed = 1 AND content_read = 0 AND metadata_pending = 0
+        AND ((state = 'pending' AND content_pending = 1)
+          OR (state = 'current' AND EXISTS (SELECT 1 FROM json_each(reasons_json) r
+            WHERE r.value GLOB 'content:sniffer:*:fail_safe:missing_question'
+              OR r.value GLOB 'content:sniffer:*:fail_safe:unread')))
+      ORDER BY provider, account_scope, conversation_key, provider_item_id
+      LIMIT ?
+    `).all(...after ?? [], examine, limit);
+    const records = rows.map(recordFromRow);
+    const identityOfRow = (row) => ({
+      provider: row.provider,
+      accountScope: row.account_scope,
+      providerItemId: row.provider_item_id,
+      ...row.conversation_key ? { providerConversationId: row.conversation_key } : {}
+    });
+    if (rows.length >= limit)
+      return { records, resumeAfter: identityOfRow(rows[rows.length - 1]) };
+    const windowEnd = this.db.query(`
+      SELECT provider, account_scope, conversation_key, provider_item_id FROM tier_items ${keyAfter}
+      ORDER BY provider, account_scope, conversation_key, provider_item_id
+      LIMIT 1 OFFSET ?
+    `).get(...after ?? [], examine - 1);
+    return windowEnd ? { records, resumeAfter: identityOfRow(windowEnd) } : { records };
+  }
   listPending(options = {}) {
     const limit = Math.max(1, Math.min(options.limit ?? 500, 5000));
     const rows = options.after ? this.db.query(`
@@ -59235,7 +59270,7 @@ function settleNamesOnlyItems(options) {
   const ledger = set.ledger;
   const limit = Math.max(1, options.limit ?? DEFAULT_NAMES_ONLY_SETTLE_ROWS);
   const after = parseIdentity(ledger.readMeta(SETTLE_META_KEY));
-  const rows = ledger.listAwaitingText({ limit, ...after ? { after } : {} });
+  const { records: rows, resumeAfter } = ledger.listAwaitingTextWindow({ limit, ...after ? { after } : {} });
   for (const record of rows) {
     report.checked += 1;
     try {
@@ -59243,8 +59278,7 @@ function settleNamesOnlyItems(options) {
         report.settled += 1;
     } catch {}
   }
-  const last = rows.at(-1);
-  ledger.writeMeta(SETTLE_META_KEY, rows.length >= limit && last ? JSON.stringify(identityOf2(last)) : "");
+  ledger.writeMeta(SETTLE_META_KEY, resumeAfter ? JSON.stringify(resumeAfter) : "");
   return report;
 }
 function settleOne(set, record) {
