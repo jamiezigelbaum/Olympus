@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.3.4 - 2026-11-05
+
+- **The dashboard stays available on a busy, large install.** Building status, counting unreadable files and rebuilding a store's hidden copies no longer hold the engine for seconds at a time, so reads keep answering while big sources import (#797, #798, #804, #805, #808, #809, #811, #813, #817, #830, #834, #838, #839, #858, #859, #860). Long requests between Olympus's own parts no longer drop after 10 seconds (#857).
+- **Ingestion keeps moving, and only real failures are called errors.** Retries and repairs show as progress; a file Olympus truly cannot read says why. Files still waiting to be read are not counted as unreadable (#818, #821, #831, #836). Large scanned PDFs get OCR time in proportion to their size (#820). Attachment extraction pauses when Google's request budget runs out instead of failing items, and Gmail's daily budget is now 1,000,000 requests (#810, #835).
+- **Privacy judging keeps up.** Every source's privacy questions take turns, a local model can take several at once, and items filed Private only because their question went missing are judged again (#802, #822, #823, #826, #827, #832, #853).
+- **Connect on WhatsApp and Telegram pairs right on the card.** WhatsApp pairing survives a slow first build, finds Go and a C compiler on its own, and says when Go is missing (#850, #851, #854).
+- A source's Details for support stays open when the page refreshes (#856). A used or expired dashboard link opens the dashboard (#848).
+
 ## 1.3.3 - 2026-11-03
 
 - **The dashboard keeps answering while sources import.** A first import of several large sources could hold the engine at full load, so the dashboard said Olympus could not reach your computer until the imports ended (#786).
