@@ -24632,7 +24632,7 @@ function fileIdentity(path) {
     return;
   }
 }
-var DEFAULT_MAX_CHUNK_CHARS = 4000, MAX_MAX_CHUNK_CHARS = 32000, MAX_SEARCH_RESULTS = 50, CONNECTOR_STORE_FTS_TITLE_WEIGHT = 1.5, EMBEDDING_BATCH_SIZE = 32, MAX_SELECTED_EMBED_ITEM_IDS = 25000, MAX_CONVERSATION_TITLE_LOOKUP_ROWS = 100, MIN_VECTOR_SCORE = 0.18, MAX_REQUIRED_CONCEPTS = 3, RARE_CONCEPT_WEIGHT_SHARE = 0.6, READ_RESULT_PROJECTION_LOCATOR_URI, DEFAULT_SEMANTIC_RELEVANCE_BAR = 0.62, CALIBRATED_CONTENT_PREFERENCE_BARS, CALIBRATED_SEMANTIC_RELEVANCE_BARS, CONTAINER_MIME_TYPES, CONTAINER_MIME_TYPES_SQL, SQLITE_STORE_ID = "connector-store", CONNECTOR_STORE_SQLITE_SCHEMA_VERSION = 15, IMAGE_CONTENT_PRIVATE_ONLY_CONNECTOR_ID = "olympus_image_content_private_only", CHUNK_MEDIA_RETRY_BASE_MS, CHUNK_MEDIA_MAX_ATTEMPTS = 3, MEDIA_JUDGE_MAX_PER_PASS = 200, MEDIA_JUDGE_RETRY_BASE_MS, MEDIA_JUDGE_MAX_ATTEMPTS = 3, MAX_CONSECUTIVE_CONTENT_FETCH_FAILURES = 3, CONNECTOR_STORE_FTS_MIGRATION, ConnectorStoreExclusionViolationError, ConnectorStoreMetadataOnlyViolationError, ConnectorStoreTierWriteRefusedError, STATUS_COUNTS_MAX_AGE_MS, IDENTITY_LOOKUP_SLICE = 5000, TierLedgerUnavailableError, TIER_SET_BINDING_RUN_ID = "tiered-store-set-binding", TIER_SET_BINDING_CONNECTOR_ID = "tiered_store_set_binding", TIER_MOVE_CONNECTOR_ID = "olympus_tier_move", NON_SYNC_RUN_CONNECTORS_SQL, ConnectorStoreLocatorIdentityIndexNotReadyError, CONNECTOR_STORE_EMBEDDING_LEASE_SUFFIX = ".embedding", CONNECTOR_STORE_EMBEDDING_LEASE_WAIT_MS = 120000, CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE = 256, CONNECTOR_STORE_CURRENT_EMBEDDING_JOINS_AND_FILTER = `
+var DEFAULT_MAX_CHUNK_CHARS = 4000, MAX_MAX_CHUNK_CHARS = 32000, MAX_SEARCH_RESULTS = 50, CONNECTOR_STORE_FTS_TITLE_WEIGHT = 1.5, EMBEDDING_BATCH_SIZE = 32, MAX_SELECTED_EMBED_ITEM_IDS = 25000, MAX_CONVERSATION_TITLE_LOOKUP_ROWS = 100, MIN_VECTOR_SCORE = 0.18, MAX_REQUIRED_CONCEPTS = 3, RARE_CONCEPT_WEIGHT_SHARE = 0.6, READ_RESULT_PROJECTION_LOCATOR_URI, DEFAULT_SEMANTIC_RELEVANCE_BAR = 0.62, CALIBRATED_CONTENT_PREFERENCE_BARS, CALIBRATED_SEMANTIC_RELEVANCE_BARS, CONTAINER_MIME_TYPES, CONTAINER_MIME_TYPES_SQL, SQLITE_STORE_ID = "connector-store", CONNECTOR_STORE_SQLITE_SCHEMA_VERSION = 15, IMAGE_CONTENT_PRIVATE_ONLY_CONNECTOR_ID = "olympus_image_content_private_only", CHUNK_MEDIA_RETRY_BASE_MS, CHUNK_MEDIA_MAX_ATTEMPTS = 3, MEDIA_JUDGE_MAX_PER_PASS = 200, MEDIA_JUDGE_RETRY_BASE_MS, MEDIA_JUDGE_MAX_ATTEMPTS = 3, MAX_CONSECUTIVE_CONTENT_FETCH_FAILURES = 3, CONNECTOR_STORE_FTS_MIGRATION, ConnectorStoreExclusionViolationError, ConnectorStoreMetadataOnlyViolationError, ConnectorStoreTierWriteRefusedError, STATUS_COUNTS_MAX_AGE_MS, IDENTITY_LOOKUP_SLICE = 5000, HIDDEN_CHILD_PARENT_SLICE = 2000, TierLedgerUnavailableError, TIER_SET_BINDING_RUN_ID = "tiered-store-set-binding", TIER_SET_BINDING_CONNECTOR_ID = "tiered_store_set_binding", TIER_MOVE_CONNECTOR_ID = "olympus_tier_move", NON_SYNC_RUN_CONNECTORS_SQL, ConnectorStoreLocatorIdentityIndexNotReadyError, CONNECTOR_STORE_EMBEDDING_LEASE_SUFFIX = ".embedding", CONNECTOR_STORE_EMBEDDING_LEASE_WAIT_MS = 120000, CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE = 256, CONNECTOR_STORE_CURRENT_EMBEDDING_JOINS_AND_FILTER = `
   FROM chunk_embeddings emb
   JOIN chunks c ON c.chunk_pk = emb.chunk_pk
   JOIN items i ON i.item_pk = emb.item_pk
@@ -25037,8 +25037,7 @@ var init_local_index = __esm(() => {
       this.tierHiddenCountsMemo = { at: Date.now(), value };
       return value;
     }
-    withHiddenChildren(base) {
-      const children = this.hiddenChildItemPks();
+    withHiddenChildren(base, children = this.hiddenChildItemPks()) {
       return children.length === 0 ? base : { ...base, hidden: [...new Set([...base.hidden, ...children])] };
     }
     tierHiddenCountsMemo;
@@ -25065,7 +25064,7 @@ var init_local_index = __esm(() => {
         this.tierLedgerHiddenMemo = marker ? { ledger: marker.ledger, marker: marker.value, value: base } : undefined;
         await ingestionTurn();
       }
-      return this.withHiddenChildren(base);
+      return this.withHiddenChildren(base, await runStepsInTurns(this.hiddenChildSteps()));
     }
     tierLedgerHiddenItemPks() {
       const marker = this.tierLedgerHiddenMemoMarker();
@@ -25422,6 +25421,9 @@ var init_local_index = __esm(() => {
       return out;
     }
     hiddenChildItemPks() {
+      return runSteps(this.hiddenChildSteps());
+    }
+    *hiddenChildSteps() {
       if (!this.hasChildItems())
         return [];
       const groups = this.db.query(`
@@ -25440,10 +25442,19 @@ var init_local_index = __esm(() => {
           ...group.provider_conversation_id ? { providerConversationId: group.provider_conversation_id } : {}
         })
       }));
-      const verdicts = parentVerdicts(this.childVisibilityLane(), parents);
-      const hiddenParents = parents.filter((parent) => verdicts.get(parentKey(parent))?.visible !== true);
+      const lane = this.childVisibilityLane();
+      const hiddenParents = [];
+      for (let offset = 0;offset < parents.length; offset += HIDDEN_CHILD_PARENT_SLICE) {
+        yield;
+        const slice = parents.slice(offset, offset + HIDDEN_CHILD_PARENT_SLICE);
+        const verdicts = parentVerdicts(lane, slice);
+        for (const parent of slice)
+          if (verdicts.get(parentKey(parent))?.visible !== true)
+            hiddenParents.push(parent);
+      }
       const pks = [];
       for (let offset = 0;offset < hiddenParents.length; offset += 20000) {
+        yield;
         const rows = this.db.query(`
         SELECT item_pk FROM items
         WHERE tombstoned = 0 AND parent_local_item_id IS NOT NULL
@@ -71284,6 +71295,12 @@ var EXTRACTION_ENQUEUE_GRACE_MS = 15 * 60000;
 var DEFAULT_TIER_SNIFFER_ABANDON_MS = 2 * 60000;
 var DEFAULT_STALE_MOVE_MS = 60 * 60000;
 var BUILT_IN_CLASSIFIER_DEFAULT_APPROVAL_REASON = "built-in local model, nothing leaves the Mac (owner default 2026-10-01)";
+function emptyBacklogCounts() {
+  return { checkingItems: 0, remainingQuestions: 0, pendingItems: 0, pendingWithoutQuestion: 0, oldestPendingAgeMs: 0 };
+}
+var BACKLOG_EXACT_ROWS = 20000;
+var BACKLOG_REFRESH_MS = 60000;
+var BACKLOG_SLICE_ROWS = 5000;
 
 class TierSnifferService {
   options;
@@ -71301,6 +71318,8 @@ class TierSnifferService {
   passGeneration = 0;
   waitingReason;
   lastBacklogLogMs = Number.NEGATIVE_INFINITY;
+  backlogCache;
+  backlogRefresh;
   waiting;
   moveFailures = new Map;
   abort;
@@ -71358,59 +71377,163 @@ class TierSnifferService {
     this.abort?.abort();
   }
   backlog() {
-    let checkingItems = 0;
-    let remainingQuestions = 0;
-    let pendingItems = 0;
-    let pendingWithoutQuestion = 0;
-    let oldestPendingAgeMs = 0;
-    for (const ledgerPath of this.ledgerPaths()) {
-      let db;
-      try {
-        db = new Database6(ledgerPath, { readonly: true, create: false });
-        db.exec("PRAGMA busy_timeout = 10000; PRAGMA query_only = ON;");
-        const expectedId = this.boundLedgerIds.get(ledgerPath);
-        if (expectedId !== undefined) {
-          const row = db.query(`SELECT value FROM tier_ledger_meta WHERE key = 'ledger_id'`).get();
-          if (row?.value !== expectedId)
-            continue;
-        }
-        const path = tierSnifferPathForLedger(ledgerPath);
-        const hasQueue = existsSync27(path);
-        if (hasQueue)
-          db.query("ATTACH DATABASE ? AS queue").run(path);
-        const queued = hasQueue ? `EXISTS (SELECT 1 FROM queue.sniffer_questions q
-          WHERE q.provider = t.provider AND q.account_scope = t.account_scope
-          AND q.conversation_key = t.conversation_key AND q.provider_item_id = t.provider_item_id)` : "0";
-        const pending = db.query(`SELECT COUNT(*) AS n,
-          SUM(CASE WHEN ${queued} THEN 0 ELSE 1 END) AS missing,
-          MIN(decided_at) AS oldest FROM tier_items t WHERE state = 'pending'`).get();
-        pendingItems += pending.n;
-        pendingWithoutQuestion += pending.missing ?? 0;
-        checkingItems += pending.n;
-        if (pending.oldest)
-          oldestPendingAgeMs = Math.max(oldestPendingAgeMs, this.clockMs() - Date.parse(pending.oldest));
-        if (hasQueue) {
-          remainingQuestions += db.query("SELECT COUNT(*) AS n FROM queue.sniffer_questions").get().n;
-          checkingItems += db.query(`SELECT COUNT(*) AS n FROM (
-            SELECT DISTINCT provider, account_scope, conversation_key, provider_item_id FROM queue.sniffer_questions q
-            WHERE NOT EXISTS (SELECT 1 FROM tier_items t WHERE t.state = 'pending'
-              AND t.provider = q.provider AND t.account_scope = q.account_scope
-              AND t.conversation_key = q.conversation_key AND t.provider_item_id = q.provider_item_id))`).get().n;
-        }
-      } catch {} finally {
-        db?.close();
-      }
+    return this.backlogFrom(this.backlogCounts());
+  }
+  backlogCounts() {
+    if (this.backlogRows() <= (this.options.backlogExactRows ?? BACKLOG_EXACT_ROWS))
+      return this.countBacklogNow();
+    if (this.backlogCache && this.clockMs() - this.backlogCache.atMs < BACKLOG_REFRESH_MS)
+      return this.backlogCache.counts;
+    if (!this.backlogRefresh) {
+      this.backlogRefresh = this.countBacklogInSlices().then((counts) => {
+        if (counts)
+          this.backlogCache = { counts, atMs: this.clockMs() };
+      }).catch(() => {
+        return;
+      }).finally(() => {
+        this.backlogRefresh = undefined;
+      });
     }
+    return this.backlogCache?.counts ?? this.roughBacklog();
+  }
+  backlogFrom(counts) {
+    const { checkingItems, remainingQuestions, pendingWithoutQuestion, oldestPendingAgeMs } = counts;
     return {
-      checkingItems,
-      remainingQuestions,
-      pendingItems,
-      pendingWithoutQuestion,
-      oldestPendingAgeMs,
+      ...counts,
       summary: checkingItems === 0 ? "No items waiting for classification." : `Checking ${checkingItems} item${checkingItems === 1 ? "" : "s"}, about ${remainingQuestions} question${remainingQuestions === 1 ? "" : "s"} remaining.` + (pendingWithoutQuestion > 0 ? ` ${pendingWithoutQuestion} pending item(s) have no question.` : "") + (oldestPendingAgeMs >= 3600000 ? ` Oldest pending item: ${Math.floor(oldestPendingAgeMs / 60000)} minutes.` : "") + (this.waiting ? ` Nothing asked now: ${this.waiting.label}.` : ""),
       awaitingOwnerApproval: this.lastTick?.state === "awaiting_owner_approval",
       ...checkingItems > 0 && this.waiting ? { waiting: { ...this.waiting } } : {}
     };
+  }
+  openBacklogLedger(ledgerPath) {
+    let db;
+    try {
+      db = new Database6(ledgerPath, { readonly: true, create: false });
+      db.exec("PRAGMA busy_timeout = 10000; PRAGMA query_only = ON;");
+      const expectedId = this.boundLedgerIds.get(ledgerPath);
+      if (expectedId !== undefined) {
+        const row = db.query(`SELECT value FROM tier_ledger_meta WHERE key = 'ledger_id'`).get();
+        if (row?.value !== expectedId) {
+          db.close();
+          return;
+        }
+      }
+      const path = tierSnifferPathForLedger(ledgerPath);
+      const hasQueue = existsSync27(path);
+      if (hasQueue)
+        db.query("ATTACH DATABASE ? AS queue").run(path);
+      return { db, hasQueue };
+    } catch {
+      db?.close();
+      return;
+    }
+  }
+  backlogRows() {
+    let rows = 0;
+    for (const ledgerPath of this.ledgerPaths()) {
+      const opened = this.openBacklogLedger(ledgerPath);
+      if (!opened)
+        continue;
+      try {
+        rows += opened.db.query("SELECT COALESCE(MAX(rowid), 0) AS n FROM tier_items").get().n;
+        if (opened.hasQueue)
+          rows += opened.db.query("SELECT COALESCE(MAX(question_pk), 0) AS n FROM queue.sniffer_questions").get().n;
+      } catch {} finally {
+        opened.db.close();
+      }
+    }
+    return rows;
+  }
+  roughBacklog() {
+    let pendingItems = 0;
+    let remainingQuestions = 0;
+    for (const ledgerPath of this.ledgerPaths()) {
+      const opened = this.openBacklogLedger(ledgerPath);
+      if (!opened)
+        continue;
+      try {
+        pendingItems += opened.db.query(`SELECT COUNT(*) AS n FROM tier_items WHERE state = 'pending'`).get().n;
+        if (opened.hasQueue)
+          remainingQuestions += opened.db.query("SELECT COUNT(*) AS n FROM queue.sniffer_questions").get().n;
+      } catch {} finally {
+        opened.db.close();
+      }
+    }
+    return { checkingItems: Math.max(pendingItems, remainingQuestions ? 1 : 0), remainingQuestions, pendingItems, pendingWithoutQuestion: 0, oldestPendingAgeMs: 0 };
+  }
+  countBacklogNow() {
+    const counts = emptyBacklogCounts();
+    for (const ledgerPath of this.ledgerPaths()) {
+      const opened = this.openBacklogLedger(ledgerPath);
+      if (!opened)
+        continue;
+      try {
+        this.addPendingSlice(counts, opened, undefined);
+        if (opened.hasQueue)
+          this.addQuestionSlice(counts, opened.db, undefined);
+      } catch {} finally {
+        opened.db.close();
+      }
+    }
+    return counts;
+  }
+  async countBacklogInSlices() {
+    const counts = emptyBacklogCounts();
+    const slice = Math.max(1, this.options.backlogSliceRows ?? BACKLOG_SLICE_ROWS);
+    for (const ledgerPath of this.ledgerPaths()) {
+      const opened = this.openBacklogLedger(ledgerPath);
+      if (!opened)
+        continue;
+      try {
+        const maxItem = opened.db.query("SELECT COALESCE(MAX(rowid), 0) AS n FROM tier_items").get().n;
+        for (let lo = 0;lo < maxItem; lo += slice) {
+          this.addPendingSlice(counts, opened, [lo, lo + slice]);
+          await ingestionTurn();
+          if (this.stopped)
+            return;
+        }
+        if (opened.hasQueue) {
+          const maxQuestion = opened.db.query("SELECT COALESCE(MAX(question_pk), 0) AS n FROM queue.sniffer_questions").get().n;
+          for (let lo = 0;lo < maxQuestion; lo += slice) {
+            this.addQuestionSlice(counts, opened.db, [lo, lo + slice]);
+            await ingestionTurn();
+            if (this.stopped)
+              return;
+          }
+        }
+      } catch {} finally {
+        opened.db.close();
+      }
+    }
+    return counts;
+  }
+  addPendingSlice(counts, opened, range) {
+    const queued = opened.hasQueue ? `EXISTS (SELECT 1 FROM queue.sniffer_questions q
+      WHERE q.provider = t.provider AND q.account_scope = t.account_scope
+      AND q.conversation_key = t.conversation_key AND q.provider_item_id = t.provider_item_id)` : "0";
+    const pending = range ? opened.db.query(`SELECT COUNT(*) AS n, SUM(CASE WHEN ${queued} THEN 0 ELSE 1 END) AS missing, MIN(decided_at) AS oldest
+          FROM tier_items t NOT INDEXED WHERE t.rowid > ? AND t.rowid <= ? AND state = 'pending'`).get(range[0], range[1]) : opened.db.query(`SELECT COUNT(*) AS n, SUM(CASE WHEN ${queued} THEN 0 ELSE 1 END) AS missing, MIN(decided_at) AS oldest
+          FROM tier_items t WHERE state = 'pending'`).get();
+    counts.pendingItems += pending.n;
+    counts.pendingWithoutQuestion += pending.missing ?? 0;
+    counts.checkingItems += pending.n;
+    if (pending.oldest)
+      counts.oldestPendingAgeMs = Math.max(counts.oldestPendingAgeMs, this.clockMs() - Date.parse(pending.oldest));
+  }
+  addQuestionSlice(counts, db, range) {
+    const where = range ? "WHERE q.question_pk > ? AND q.question_pk <= ?" : "";
+    const row = db.query(`SELECT COUNT(*) AS n, SUM(CASE
+        WHEN EXISTS (SELECT 1 FROM queue.sniffer_questions e
+          WHERE e.provider = q.provider AND e.account_scope = q.account_scope
+          AND e.conversation_key = q.conversation_key AND e.provider_item_id = q.provider_item_id
+          AND e.question_pk < q.question_pk) THEN 0
+        WHEN EXISTS (SELECT 1 FROM tier_items t WHERE t.state = 'pending'
+          AND t.provider = q.provider AND t.account_scope = q.account_scope
+          AND t.conversation_key = q.conversation_key AND t.provider_item_id = q.provider_item_id) THEN 0
+        ELSE 1 END) AS other
+      FROM queue.sniffer_questions q ${where}`).get(...range ?? []);
+    counts.remainingQuestions += row.n;
+    counts.checkingItems += row.other ?? 0;
   }
   get hasPriority() {
     if (!this.running && this.continuation === undefined)
