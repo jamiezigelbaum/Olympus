@@ -56,6 +56,11 @@ export function initialSnifferMode(profile: SovereigntyModelProfile): 'pending' 
   return profile.snifferMode === 'decision' ? 'decision' : profile.snifferMode === 'full' ? 'full' : 'pending';
 }
 
+/** Whether a lane may use the native one-token read: a local server not forced to full mode. */
+export function snifferLaneOffersDecision(lane: SnifferLane): boolean {
+  return lane.kind === 'local' && lane.profile.provider === 'local-openai-compatible' && lane.profile.snifferMode !== 'full';
+}
+
 /**
  * The per-dispatch check: throws SnifferLaneRefusedError unless the profile is
  * a loopback local model (never a cloud-forwarding model id) or a Venice

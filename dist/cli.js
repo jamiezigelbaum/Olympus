@@ -20096,6 +20096,9 @@ class TierSnifferStore {
         provider, account_scope, conversation_key, provider_item_id, pass, material_hash, map_revision, material, flags_json, attempts, queued_at, priority
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
       ON CONFLICT (provider, account_scope, conversation_key, provider_item_id, pass) DO UPDATE SET
+        held_sniffer_id = CASE WHEN sniffer_questions.material_hash = excluded.material_hash
+          AND sniffer_questions.map_revision = excluded.map_revision AND sniffer_questions.flags_json = excluded.flags_json
+          THEN sniffer_questions.held_sniffer_id ELSE NULL END,
         attempts = CASE WHEN sniffer_questions.material_hash = excluded.material_hash
           AND sniffer_questions.map_revision = excluded.map_revision
           THEN sniffer_questions.attempts ELSE 0 END,
@@ -20211,7 +20214,7 @@ class TierSnifferStore {
   }
   rekey(subject, pass, mapRevision) {
     this.db.query(`
-      UPDATE sniffer_questions SET map_revision = ?, attempts = 0
+      UPDATE sniffer_questions SET map_revision = ?, attempts = 0, held_sniffer_id = NULL
       WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND pass = ?
     `).run(mapRevision, ...subjectParams(subject), pass);
   }
@@ -20221,6 +20224,17 @@ class TierSnifferStore {
       WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND pass = ?
     `).run(...subjectParams(subject), pass);
     return this.questionFor(subject, pass)?.attempts ?? 0;
+  }
+  markHeldLowering(question, snifferId) {
+    this.db.query(`UPDATE sniffer_questions SET held_sniffer_id = ?
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND pass = ?
+        AND material_hash = ? AND map_revision = ?`).run(snifferId, ...subjectParams(question), question.pass, question.materialHash, question.mapRevision);
+  }
+  questionWorkCounts(snifferId) {
+    return this.db.query(`SELECT
+      COUNT(CASE WHEN held_sniffer_id IS NULL OR held_sniffer_id != ? THEN 1 END) AS unanswered,
+      COUNT(CASE WHEN held_sniffer_id = ? THEN 1 END) AS heldLowering
+      FROM sniffer_questions`).get(snifferId, snifferId);
   }
   counts() {
     const byPass = { metadata: 0, content: 0 };
@@ -20322,6 +20336,13 @@ function snifferMigrations() {
             scan_key TEXT PRIMARY KEY, priority INTEGER NOT NULL,
             queued_at TEXT NOT NULL, question_pk INTEGER NOT NULL, candidate_pk INTEGER
           );`);
+      }
+    },
+    {
+      version: 4,
+      name: "held_lowering_answers",
+      up(db) {
+        db.exec("ALTER TABLE sniffer_questions ADD COLUMN held_sniffer_id TEXT;");
       }
     }
   ];
@@ -25222,6 +25243,14 @@ var init_sovereignty = __esm(() => {
 });
 
 // src/workers/classification/sniffer-lane.ts
+function initialSnifferMode(profile) {
+  if (profile.provider !== "local-openai-compatible")
+    return "full";
+  return profile.snifferMode === "decision" ? "decision" : profile.snifferMode === "full" ? "full" : "pending";
+}
+function snifferLaneOffersDecision(lane) {
+  return lane.kind === "local" && lane.profile.provider === "local-openai-compatible" && lane.profile.snifferMode !== "full";
+}
 function assertSnifferProfileAllowed(profileId, profile) {
   if (profile.trust === "standard_cloud")
     throw new SnifferLaneRefusedError("standard_cloud", profileId);
@@ -25269,7 +25298,7 @@ function pickLane(candidates) {
     try {
       const kind = assertSnifferProfileAllowed(candidate.id, candidate.profile);
       const modelId = "model" in candidate.profile && candidate.profile.model ? candidate.profile.model : candidate.id;
-      allowed.push({ kind, modelId, profileId: candidate.id, profile: candidate.profile });
+      allowed.push({ kind, modelId, profileId: candidate.id, profile: candidate.profile, snifferMode: initialSnifferMode(candidate.profile) });
     } catch (error) {
       if (!(error instanceof SnifferLaneRefusedError))
         throw error;
@@ -27710,6 +27739,8 @@ function snifferMaterialLooksLikeInjection(material) {
 }
 function snifferCacheModelId(lane) {
   const weights = lane.cacheModelId ?? lane.modelId;
+  if (lane.snifferMode === "pending")
+    return `${weights}:pending`;
   return lane.snifferMode === "decision" ? `${weights}:${SNIFFER_DECISION_VERSION}` : weights;
 }
 function snifferId(lane, promptVersion = SNIFFER_PROMPT_VERSION) {
@@ -27817,7 +27848,7 @@ class CachedTierSniffer {
     return snifferId(this.lane, this.promptVersion);
   }
   get rejudgeReady() {
-    return this.lane.rejudgeReady !== false;
+    return this.lane.snifferMode !== "pending" && this.lane.rejudgeReady !== false;
   }
   store;
   lane;
@@ -27841,7 +27872,7 @@ class CachedTierSniffer {
     }
     const mapRevision = request.mapRevision ?? "none";
     try {
-      const cached2 = this.store.getVerdict({
+      const cached2 = this.lane.snifferMode === "pending" ? undefined : this.store.getVerdict({
         materialHash: request.materialHash ?? snifferMaterialHash(request.pass, material),
         modelId: snifferCacheModelId(this.lane),
         promptVersion: this.promptVersion,
@@ -64449,37 +64480,36 @@ function createLocalModelActivity() {
     },
     onIdle: (key2, listener) => get(key2).onInteractiveIdle(listener),
     track(key2, model, options = {}) {
-      return { ...model, complete: (request) => {
+      const coordinate = (work, signal, limit = options.concurrency ?? 1) => {
         const guards = localInferenceGuards?.getStore() ?? [];
-        const run = options.serialize === false ? (work) => get(key2).run(work) : (work) => dispatch(key2, work, options.concurrency ?? 1);
-        const tagged = (work) => {
-          const tag = options.tag;
-          if (tag === undefined)
-            return work;
-          const tagKey = `${key2}\x00${tag}`;
-          return async () => {
+        const run = options.serialize === false ? (work2) => get(key2).run(work2) : (work2) => dispatch(key2, work2, limit);
+        return run(async () => {
+          const tagKey = options.tag === undefined ? undefined : `${key2}\x00${options.tag}`;
+          if (tagKey !== undefined)
             taggedRunning.set(tagKey, (taggedRunning.get(tagKey) ?? 0) + 1);
-            try {
-              return await work();
-            } finally {
+          try {
+            signal?.throwIfAborted();
+            for (const guard of guards) {
+              try {
+                await guard();
+              } catch (error) {
+                signal?.throwIfAborted();
+                throw error;
+              }
+            }
+            signal?.throwIfAborted();
+            return await work();
+          } finally {
+            if (tagKey !== undefined)
               taggedRunning.set(tagKey, (taggedRunning.get(tagKey) ?? 1) - 1);
-            }
-          };
-        };
-        return run(tagged(async () => {
-          request.signal?.throwIfAborted();
-          for (const guard of guards) {
-            try {
-              await guard();
-            } catch (error) {
-              request.signal?.throwIfAborted();
-              throw error;
-            }
           }
-          request.signal?.throwIfAborted();
-          return model.complete(request);
-        }));
-      } };
+        });
+      };
+      return {
+        ...model,
+        ...model.prepareSniffer ? { prepareSniffer: (signal) => coordinate(() => model.prepareSniffer(signal), signal, 1) } : {},
+        complete: (request) => coordinate(() => model.complete(request), request.signal)
+      };
     }
   };
 }
@@ -140438,7 +140468,8 @@ async function exclusive(state, run2) {
   return result;
 }
 function createDecisionSnifferModel(lane, full, options = {}) {
-  if (lane.kind !== "local" || lane.profile.provider !== "local-openai-compatible" || lane.profile.snifferMode === "full")
+  lane.snifferMode = initialSnifferMode(lane.profile);
+  if (!snifferLaneOffersDecision(lane))
     return full;
   assertSnifferProfileAllowed(lane.profileId, lane.profile);
   const endpoint = lane.profile.baseUrl.trim().replace(/\/+$/, "").replace(/\/v1$/, "");
@@ -140519,7 +140550,7 @@ function createDecisionSnifferModel(lane, full, options = {}) {
       return exclusive(sharedState, async () => {
         signal = request.signal;
         assertSnifferProfileAllowed(lane.profileId, lane.profile);
-        if (lane.snifferMode === undefined)
+        if (lane.snifferMode === undefined || lane.snifferMode === "pending")
           await prepare();
         if (lane.snifferMode !== "decision")
           return full.complete(request);
@@ -190079,6 +190110,25 @@ function materialCarriesSecret(question) {
   secretScreenCache.set(key2, carries);
   return carries;
 }
+async function prepareSnifferModel(options) {
+  const stopped = () => options.signal?.aborted ? "aborted" : options.shouldYield?.() ? "yield" : undefined;
+  if (stopped())
+    return stopped();
+  try {
+    await runWithLocalInferenceGuard(async () => {
+      if (stopped())
+        throw new Error("Privacy sniffer preparation yielded.");
+    }, async () => {
+      await options.model.prepareSniffer?.(options.signal);
+    });
+  } catch (error2) {
+    const reason = stopped();
+    if (reason)
+      return reason;
+    throw error2;
+  }
+  return stopped();
+}
 async function runSnifferPass(options) {
   const promptVersion = options.promptVersion ?? SNIFFER_PROMPT_VERSION;
   let id = snifferId(options.lane, promptVersion);
@@ -190149,6 +190199,7 @@ async function runSnifferPass(options) {
     if (applied?.outcome === "held_moving")
       return;
     if (applied?.outcome === "held_lowering") {
+      item.target.sniffer.markHeldLowering(item.question, id);
       report.heldLowering += 1;
       return;
     }
@@ -190261,7 +190312,11 @@ async function runSnifferPass(options) {
   }
   if (work.metadata.length + work.content.length > 0) {
     assertSnifferProfileAllowed(options.lane.profileId, options.lane.profile);
-    await options.model.prepareSniffer?.(options.signal);
+    const stopped = await prepareSnifferModel(options);
+    if (stopped) {
+      report.stoppedBy = stopped;
+      return finish(report);
+    }
     id = snifferId(options.lane, promptVersion);
   }
   for (const pass of ["metadata", "content"]) {
@@ -190425,6 +190480,7 @@ function finish(report) {
 }
 var DEFAULT_SNIFFER_MAX_CALLS_PER_DAY = 20000, DEFAULT_DECISION_SNIFFER_MAX_CALLS_PER_DAY = 250000, DEFAULT_SNIFFER_PASS_TIME_MS = 30000, SNIFFER_MAX_CONCURRENT_CALLS = 8, MAX_CONSECUTIVE_TRANSPORT_FAILURES = 2, OUTPUT_CHARS_PER_ITEM = 110, SECRET_SCREEN_CACHE_LIMIT = 20000, secretScreenCache;
 var init_sniffer_resolver = __esm(() => {
+  init_answer_activity();
   init_atomic_file();
   init_sniffer();
   init_sniffer_lane();
@@ -190934,9 +190990,10 @@ class TierSnifferService {
       await this.drainMoves();
       return { state: "awaiting_owner_approval", modelId: lane.modelId, promptVersion: versions2.approval };
     }
-    await this.options.model.prepareSniffer?.(signal);
-    await this.recoverMissingQuestions(true);
-    const rejudged = await this.rejudge();
+    const preparationStopped = await prepareSnifferModel({ model: this.options.model, signal, shouldYield: () => this.yieldNow() });
+    if (!preparationStopped)
+      await this.recoverMissingQuestions(true);
+    const rejudged = preparationStopped ? emptyTierRejudgeReport() : await this.rejudge();
     const targets = [];
     for (const ledgerPath of this.ledgerPaths()) {
       let ledger2;
@@ -191249,7 +191306,8 @@ class TierSnifferService {
       if (!set2)
         continue;
       try {
-        if (this.options.installed.snifferStoreForLedger(ledgerPath).counts().questions >= maxOpen)
+        const id = snifferId(this.options.lane, snifferPromptVersions(this.options.ownerContext?.()).cache);
+        if (this.options.installed.snifferStoreForLedger(ledgerPath).questionWorkCounts(id).unanswered >= maxOpen)
           continue;
         const after = this.rejudgeCursors.get(ledgerPath);
         const { report, next } = rejudgeRoutedItems({
@@ -215672,6 +215730,9 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     lane: snifferLane,
     model: snifferResource ? {
       ...snifferModel,
+      ...snifferModel.prepareSniffer ? {
+        prepareSniffer: (signal) => runClassificationInference(() => localModelActivity.track(snifferResource, snifferModel, { tag: "tier_sniffer" }).prepareSniffer(signal))
+      } : {},
       complete: (request) => runClassificationInference(() => localModelActivity.track(snifferResource, snifferModel, { concurrency: snifferEnv.concurrentCalls ?? 1, tag: "tier_sniffer" }).complete(request))
     } : snifferModel,
     stores: () => connectorStores,

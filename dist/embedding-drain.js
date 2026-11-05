@@ -10235,6 +10235,9 @@ class TierSnifferStore {
         provider, account_scope, conversation_key, provider_item_id, pass, material_hash, map_revision, material, flags_json, attempts, queued_at, priority
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
       ON CONFLICT (provider, account_scope, conversation_key, provider_item_id, pass) DO UPDATE SET
+        held_sniffer_id = CASE WHEN sniffer_questions.material_hash = excluded.material_hash
+          AND sniffer_questions.map_revision = excluded.map_revision AND sniffer_questions.flags_json = excluded.flags_json
+          THEN sniffer_questions.held_sniffer_id ELSE NULL END,
         attempts = CASE WHEN sniffer_questions.material_hash = excluded.material_hash
           AND sniffer_questions.map_revision = excluded.map_revision
           THEN sniffer_questions.attempts ELSE 0 END,
@@ -10350,7 +10353,7 @@ class TierSnifferStore {
   }
   rekey(subject, pass, mapRevision) {
     this.db.query(`
-      UPDATE sniffer_questions SET map_revision = ?, attempts = 0
+      UPDATE sniffer_questions SET map_revision = ?, attempts = 0, held_sniffer_id = NULL
       WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND pass = ?
     `).run(mapRevision, ...subjectParams(subject), pass);
   }
@@ -10360,6 +10363,17 @@ class TierSnifferStore {
       WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND pass = ?
     `).run(...subjectParams(subject), pass);
     return this.questionFor(subject, pass)?.attempts ?? 0;
+  }
+  markHeldLowering(question, snifferId) {
+    this.db.query(`UPDATE sniffer_questions SET held_sniffer_id = ?
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND pass = ?
+        AND material_hash = ? AND map_revision = ?`).run(snifferId, ...subjectParams(question), question.pass, question.materialHash, question.mapRevision);
+  }
+  questionWorkCounts(snifferId) {
+    return this.db.query(`SELECT
+      COUNT(CASE WHEN held_sniffer_id IS NULL OR held_sniffer_id != ? THEN 1 END) AS unanswered,
+      COUNT(CASE WHEN held_sniffer_id = ? THEN 1 END) AS heldLowering
+      FROM sniffer_questions`).get(snifferId, snifferId);
   }
   counts() {
     const byPass = { metadata: 0, content: 0 };
@@ -10462,6 +10476,13 @@ function snifferMigrations() {
             queued_at TEXT NOT NULL, question_pk INTEGER NOT NULL, candidate_pk INTEGER
           );`);
       }
+    },
+    {
+      version: 4,
+      name: "held_lowering_answers",
+      up(db) {
+        db.exec("ALTER TABLE sniffer_questions ADD COLUMN held_sniffer_id TEXT;");
+      }
     }
   ];
 }
@@ -10563,6 +10584,8 @@ function snifferMaterialLooksLikeInjection(material) {
 }
 function snifferCacheModelId(lane) {
   const weights = lane.cacheModelId ?? lane.modelId;
+  if (lane.snifferMode === "pending")
+    return `${weights}:pending`;
   return lane.snifferMode === "decision" ? `${weights}:${SNIFFER_DECISION_VERSION}` : weights;
 }
 function snifferId(lane, promptVersion = SNIFFER_PROMPT_VERSION) {
@@ -10670,7 +10693,7 @@ class CachedTierSniffer {
     return snifferId(this.lane, this.promptVersion);
   }
   get rejudgeReady() {
-    return this.lane.rejudgeReady !== false;
+    return this.lane.snifferMode !== "pending" && this.lane.rejudgeReady !== false;
   }
   store;
   lane;
@@ -10694,7 +10717,7 @@ class CachedTierSniffer {
     }
     const mapRevision = request.mapRevision ?? "none";
     try {
-      const cached = this.store.getVerdict({
+      const cached = this.lane.snifferMode === "pending" ? undefined : this.store.getVerdict({
         materialHash: request.materialHash ?? snifferMaterialHash(request.pass, material),
         modelId: snifferCacheModelId(this.lane),
         promptVersion: this.promptVersion,
@@ -34652,7 +34675,12 @@ var init_connector_store = __esm(() => {
   init_filter_capabilities();
 });
 // src/workers/answer-activity.ts
-var DEFAULT_ANSWER_LEASE_MS;
+import { AsyncLocalStorage as AsyncLocalStorage3 } from "node:async_hooks";
+function runWithLocalInferenceGuard(guard, work) {
+  localInferenceGuards ??= new AsyncLocalStorage3;
+  return localInferenceGuards.run([...localInferenceGuards?.getStore() ?? [], guard], work);
+}
+var localInferenceGuards, DEFAULT_ANSWER_LEASE_MS;
 var init_answer_activity = __esm(() => {
   DEFAULT_ANSWER_LEASE_MS = 20 * 60000;
 });
@@ -34670,7 +34698,7 @@ var init_evidence_versions = __esm(() => {
 });
 
 // src/core/analyst.ts
-import { AsyncLocalStorage as AsyncLocalStorage3 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage4 } from "node:async_hooks";
 var analystAbortSignalStorage, CONFLICT_RULE = "- If items give different values for the same thing, give each value with its item's name and date; never pick one silently.", ANALYST_SYSTEM, ANALYST_COMPACT_SYSTEM, ANALYST_AUDIT_SYSTEM, DEFAULT_ANALYST_MAX_OUTPUT_CHARS = 1600, AUDIT_OUTPUT_HEADROOM_CHARS = 800, DEFAULT_AUDIT_MAX_OUTPUT_CHARS, promptEncoder, STOP_WORDS2, MEANING_BEARING_MODIFIERS, TOKEN_EDGE_PUNCTUATION;
 var init_analyst = __esm(() => {
   init_opsec();
@@ -34679,7 +34707,7 @@ var init_analyst = __esm(() => {
   init_types();
   init_operation_error();
   init_evidence_versions();
-  analystAbortSignalStorage = new AsyncLocalStorage3;
+  analystAbortSignalStorage = new AsyncLocalStorage4;
   ANALYST_SYSTEM = [
     "You are an evidence analyst. Answer the question USING ONLY the numbered evidence provided.",
     "Rules:",
@@ -34939,10 +34967,10 @@ var init_parent_label = __esm(() => {
 });
 
 // src/workers/source-index/answer-latency-trace.ts
-import { AsyncLocalStorage as AsyncLocalStorage4 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage5 } from "node:async_hooks";
 var storage, CONTENT_FREE_ERROR_CLASSES;
 var init_answer_latency_trace = __esm(() => {
-  storage = new AsyncLocalStorage4;
+  storage = new AsyncLocalStorage5;
   CONTENT_FREE_ERROR_CLASSES = new Set([
     "AbortError",
     "AnalystUnavailable",
@@ -35017,10 +35045,10 @@ var init_evidence_pack = __esm(() => {
 });
 
 // src/core/release-manifest.ts
-import { AsyncLocalStorage as AsyncLocalStorage5 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage6 } from "node:async_hooks";
 var storage2, withheldAnswers;
 var init_release_manifest = __esm(() => {
-  storage2 = new AsyncLocalStorage5;
+  storage2 = new AsyncLocalStorage6;
   withheldAnswers = new WeakSet;
 });
 
@@ -71638,6 +71666,7 @@ init_sniffer();
 import { Database as Database6 } from "bun:sqlite";
 
 // src/workers/classification/sniffer-resolver.ts
+init_answer_activity();
 init_atomic_file();
 init_sniffer();
 init_sniffer_lane();
@@ -71718,6 +71747,25 @@ function materialCarriesSecret(question) {
   secretScreenCache.set(key2, carries);
   return carries;
 }
+async function prepareSnifferModel(options) {
+  const stopped = () => options.signal?.aborted ? "aborted" : options.shouldYield?.() ? "yield" : undefined;
+  if (stopped())
+    return stopped();
+  try {
+    await runWithLocalInferenceGuard(async () => {
+      if (stopped())
+        throw new Error("Privacy sniffer preparation yielded.");
+    }, async () => {
+      await options.model.prepareSniffer?.(options.signal);
+    });
+  } catch (error2) {
+    const reason = stopped();
+    if (reason)
+      return reason;
+    throw error2;
+  }
+  return stopped();
+}
 async function runSnifferPass(options) {
   const promptVersion = options.promptVersion ?? SNIFFER_PROMPT_VERSION;
   let id = snifferId(options.lane, promptVersion);
@@ -71788,6 +71836,7 @@ async function runSnifferPass(options) {
     if (applied?.outcome === "held_moving")
       return;
     if (applied?.outcome === "held_lowering") {
+      item.target.sniffer.markHeldLowering(item.question, id);
       report.heldLowering += 1;
       return;
     }
@@ -71900,7 +71949,11 @@ async function runSnifferPass(options) {
   }
   if (work.metadata.length + work.content.length > 0) {
     assertSnifferProfileAllowed(options.lane.profileId, options.lane.profile);
-    await options.model.prepareSniffer?.(options.signal);
+    const stopped = await prepareSnifferModel(options);
+    if (stopped) {
+      report.stoppedBy = stopped;
+      return finish(report);
+    }
     id = snifferId(options.lane, promptVersion);
   }
   for (const pass of ["metadata", "content"]) {
@@ -72584,9 +72637,10 @@ class TierSnifferService {
       await this.drainMoves();
       return { state: "awaiting_owner_approval", modelId: lane.modelId, promptVersion: versions2.approval };
     }
-    await this.options.model.prepareSniffer?.(signal);
-    await this.recoverMissingQuestions(true);
-    const rejudged = await this.rejudge();
+    const preparationStopped = await prepareSnifferModel({ model: this.options.model, signal, shouldYield: () => this.yieldNow() });
+    if (!preparationStopped)
+      await this.recoverMissingQuestions(true);
+    const rejudged = preparationStopped ? emptyTierRejudgeReport() : await this.rejudge();
     const targets = [];
     for (const ledgerPath of this.ledgerPaths()) {
       let ledger2;
@@ -72899,7 +72953,8 @@ class TierSnifferService {
       if (!set2)
         continue;
       try {
-        if (this.options.installed.snifferStoreForLedger(ledgerPath).counts().questions >= maxOpen)
+        const id = snifferId(this.options.lane, snifferPromptVersions(this.options.ownerContext?.()).cache);
+        if (this.options.installed.snifferStoreForLedger(ledgerPath).questionWorkCounts(id).unanswered >= maxOpen)
           continue;
         const after = this.rejudgeCursors.get(ledgerPath);
         const { report, next } = rejudgeRoutedItems({
