@@ -24,21 +24,34 @@ export interface StoreRead {
 // past it the thread is presumed stuck, replaced, and the caller reads itself.
 const OFF_THREAD_READ_TIMEOUT_MS = 120_000;
 
+// Each snapshot is its own read-only connection inside one read transaction,
+// so every count in one status describes the same database state, as they did
+// when status() ran them back to back with no write in between.
 const WORKER_SOURCE = `
 import { Database } from 'bun:sqlite';
-const dbs = new Map();
+const snapshots = new Map();
 self.onmessage = (event) => {
-  const { id, path, sql, params, mode } = event.data;
+  const { id, op, snapshot, path, sql, params, mode } = event.data;
   try {
-    let db = dbs.get(path);
-    if (!db) {
-      db = new Database(path, { readonly: true });
-      db.exec('PRAGMA busy_timeout = 10000; PRAGMA query_only = ON;');
-      dbs.set(path, db);
+    if (op === 'open') {
+      const db = new Database(path, { readonly: true });
+      db.exec('PRAGMA busy_timeout = 10000; PRAGMA query_only = ON; BEGIN');
+      snapshots.set(snapshot, db);
+      postMessage({ id, ok: true, rows: null });
+    } else if (op === 'close') {
+      const db = snapshots.get(snapshot);
+      snapshots.delete(snapshot);
+      if (db) {
+        try { db.exec('COMMIT'); } finally { db.close(); }
+      }
+      postMessage({ id, ok: true, rows: null });
+    } else {
+      const db = snapshots.get(snapshot);
+      if (!db) throw new Error('unknown snapshot');
+      const query = db.query(sql);
+      const rows = mode === 'all' ? query.all(...params) : query.get(...params);
+      postMessage({ id, ok: true, rows });
     }
-    const query = db.query(sql);
-    const rows = mode === 'all' ? query.all(...params) : query.get(...params);
-    postMessage({ id, ok: true, rows });
   } catch (error) {
     postMessage({ id, ok: false, error: error instanceof Error ? error.message : String(error) });
   }
@@ -50,6 +63,7 @@ type Pending = { resolve: (rows: unknown) => void; reject: (error: Error) => voi
 interface ReaderThread {
   worker: Worker;
   pending: Map<number, Pending>;
+  retired?: boolean;
 }
 
 let thread: ReaderThread | undefined;
@@ -90,6 +104,7 @@ function readerThread(): ReaderThread | undefined {
 }
 
 function retire(stopped: ReaderThread, error: Error): void {
+  stopped.retired = true;
   if (thread === stopped) thread = undefined;
   for (const waiting of stopped.pending.values()) {
     clearTimeout(waiting.timer);
@@ -108,10 +123,9 @@ export function offThreadReadsAvailable(dbPath: string): boolean {
   return dbPath !== ':memory:' && !dbPath.startsWith('file::memory:') && readerThread() !== undefined;
 }
 
-/** Runs one read-only query against `dbPath` on the second thread. */
-export function readOffThread(dbPath: string, read: StoreRead): Promise<unknown> {
-  const reader = readerThread();
-  if (!reader) return Promise.reject(new Error('off-thread reads are unavailable'));
+function send(reader: ReaderThread, message: Record<string, unknown>): Promise<unknown> {
+  // A retired thread answers nothing: fail at once rather than wait out the timeout.
+  if (reader.retired) return Promise.reject(new Error('off-thread reader stopped'));
   const id = nextId++;
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
@@ -120,11 +134,30 @@ export function readOffThread(dbPath: string, read: StoreRead): Promise<unknown>
     // Left referenced: a one-shot command waiting on a count must not exit first.
     reader.pending.set(id, { resolve, reject, timer });
     try {
-      reader.worker.postMessage({ id, path: dbPath, sql: read.sql, params: read.params, mode: read.mode });
+      reader.worker.postMessage({ ...message, id });
     } catch (error) {
       reader.pending.delete(id);
       clearTimeout(timer);
       reject(error instanceof Error ? error : new Error(String(error)));
     }
   });
+}
+
+/**
+ * Runs `work` with a reader over one snapshot of `dbPath` on the second
+ * thread: every query it makes sees the same committed state.
+ */
+export async function withOffThreadSnapshot<T>(
+  dbPath: string,
+  work: (read: (query: StoreRead) => Promise<unknown>) => Promise<T>,
+): Promise<T> {
+  const reader = readerThread();
+  if (!reader) throw new Error('off-thread reads are unavailable');
+  const snapshot = nextId++;
+  await send(reader, { op: 'open', snapshot, path: dbPath });
+  try {
+    return await work((query) => send(reader, { op: 'read', snapshot, sql: query.sql, params: query.params, mode: query.mode }));
+  } finally {
+    await send(reader, { op: 'close', snapshot }).catch(() => undefined);
+  }
 }

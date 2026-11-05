@@ -370,6 +370,30 @@ export function createSourceIndexStatusHandler(
     storeStatusCache.set(key, { recordedAtMs: nowMs(), status });
     return status;
   };
+  // One off-thread refresh per store and scope at a time: a dashboard poll and
+  // the scheduler's publish that both find the counts expired share one pass.
+  const storeStatusRefreshing = new Map<string, Promise<void>>();
+  const refreshStoreStatusOffThread = (
+    store: LocalConnectorStore,
+    statusScope: ConnectorStoreStatusScope | undefined,
+    countsMaxAgeMs: number,
+  ): Promise<void> => {
+    const key = storeStatusKey(store, statusScope);
+    const running = storeStatusRefreshing.get(key);
+    if (running) return running;
+    const refresh = (async () => {
+      try {
+        const status = await store.statusOffThread(statusScope, { countsMaxAgeMs });
+        storeStatusCache.set(key, { recordedAtMs: nowMs(), status });
+      } catch {
+        // Read on this thread by statusFor, as before.
+      } finally {
+        storeStatusRefreshing.delete(key);
+      }
+    })();
+    storeStatusRefreshing.set(key, refresh);
+    return refresh;
+  };
   // The backlog estimates beside a store's counts (embedding backlog, Private
   // chunks withheld, unread PDFs) are whole-store passes too, and were read on
   // every dashboard status outside that reuse: 15-20% of Sparta's sampled
@@ -483,14 +507,8 @@ export function createSourceIndexStatusHandler(
             await store.prepareStatusCounts?.(statusScope);
             // The counts themselves are read on the second thread where the
             // store allows it (#870), and statusFor below finds them fresh.
-            if (store.statusOffThread) {
-              try {
-                const status = await store.statusOffThread(statusScope, { countsMaxAgeMs });
-                storeStatusCache.set(storeStatusKey(store, statusScope), { recordedAtMs: nowMs(), status });
-              } catch {
-                // Read on this thread by statusFor, as before.
-              }
-            }
+            // Test doubles and older stores may lack it.
+            if (typeof store.statusOffThread === 'function') await refreshStoreStatusOffThread(store, statusScope, countsMaxAgeMs);
           }
         }
         statuses.push(statusFor(declaredCorpus));

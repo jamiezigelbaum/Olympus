@@ -26347,6 +26347,7 @@ function readerThread() {
   }
 }
 function retire(stopped, error) {
+  stopped.retired = true;
   if (thread === stopped)
     thread = undefined;
   for (const waiting of stopped.pending.values()) {
@@ -26361,10 +26362,9 @@ function retire(stopped, error) {
 function offThreadReadsAvailable(dbPath) {
   return dbPath !== ":memory:" && !dbPath.startsWith("file::memory:") && readerThread() !== undefined;
 }
-function readOffThread(dbPath, read) {
-  const reader = readerThread();
-  if (!reader)
-    return Promise.reject(new Error("off-thread reads are unavailable"));
+function send(reader, message2) {
+  if (reader.retired)
+    return Promise.reject(new Error("off-thread reader stopped"));
   const id = nextId++;
   return new Promise((resolve10, reject) => {
     const timer = setTimeout(() => {
@@ -26372,7 +26372,7 @@ function readOffThread(dbPath, read) {
     }, OFF_THREAD_READ_TIMEOUT_MS);
     reader.pending.set(id, { resolve: resolve10, reject, timer });
     try {
-      reader.worker.postMessage({ id, path: dbPath, sql: read.sql, params: read.params, mode: read.mode });
+      reader.worker.postMessage({ ...message2, id });
     } catch (error) {
       reader.pending.delete(id);
       clearTimeout(timer);
@@ -26380,21 +26380,45 @@ function readOffThread(dbPath, read) {
     }
   });
 }
+async function withOffThreadSnapshot(dbPath, work) {
+  const reader = readerThread();
+  if (!reader)
+    throw new Error("off-thread reads are unavailable");
+  const snapshot = nextId++;
+  await send(reader, { op: "open", snapshot, path: dbPath });
+  try {
+    return await work((query) => send(reader, { op: "read", snapshot, sql: query.sql, params: query.params, mode: query.mode }));
+  } finally {
+    await send(reader, { op: "close", snapshot }).catch(() => {
+      return;
+    });
+  }
+}
 var OFF_THREAD_READ_TIMEOUT_MS = 120000, WORKER_SOURCE = `
 import { Database } from 'bun:sqlite';
-const dbs = new Map();
+const snapshots = new Map();
 self.onmessage = (event) => {
-  const { id, path, sql, params, mode } = event.data;
+  const { id, op, snapshot, path, sql, params, mode } = event.data;
   try {
-    let db = dbs.get(path);
-    if (!db) {
-      db = new Database(path, { readonly: true });
-      db.exec('PRAGMA busy_timeout = 10000; PRAGMA query_only = ON;');
-      dbs.set(path, db);
+    if (op === 'open') {
+      const db = new Database(path, { readonly: true });
+      db.exec('PRAGMA busy_timeout = 10000; PRAGMA query_only = ON; BEGIN');
+      snapshots.set(snapshot, db);
+      postMessage({ id, ok: true, rows: null });
+    } else if (op === 'close') {
+      const db = snapshots.get(snapshot);
+      snapshots.delete(snapshot);
+      if (db) {
+        try { db.exec('COMMIT'); } finally { db.close(); }
+      }
+      postMessage({ id, ok: true, rows: null });
+    } else {
+      const db = snapshots.get(snapshot);
+      if (!db) throw new Error('unknown snapshot');
+      const query = db.query(sql);
+      const rows = mode === 'all' ? query.all(...params) : query.get(...params);
+      postMessage({ id, ok: true, rows });
     }
-    const query = db.query(sql);
-    const rows = mode === 'all' ? query.all(...params) : query.get(...params);
-    postMessage({ id, ok: true, rows });
   } catch (error) {
     postMessage({ id, ok: false, error: error instanceof Error ? error.message : String(error) });
   }
@@ -39224,11 +39248,13 @@ var init_local_index = __esm(() => {
     async statusOffThread(scope, options = {}) {
       if (!offThreadReadsAvailable(this.dbPath))
         return this.status(scope, options);
-      const steps = this.statusSteps(scope, options);
-      let step = steps.next();
-      while (!step.done)
-        step = steps.next(await readOffThread(this.dbPath, step.value));
-      return step.value;
+      return withOffThreadSnapshot(this.dbPath, async (read) => {
+        const steps = this.statusSteps(scope, options);
+        let step = steps.next();
+        while (!step.done)
+          step = steps.next(await read(step.value));
+        return step.value;
+      });
     }
     *statusSteps(scope, options) {
       const accountScope = normalizeOptionalAccountScope(scope?.accountScope);
@@ -95268,6 +95294,23 @@ function createSourceIndexStatusHandler(options = {}) {
     storeStatusCache.set(key2, { recordedAtMs: nowMs(), status });
     return status;
   };
+  const storeStatusRefreshing = new Map;
+  const refreshStoreStatusOffThread = (store, statusScope, countsMaxAgeMs) => {
+    const key2 = storeStatusKey(store, statusScope);
+    const running = storeStatusRefreshing.get(key2);
+    if (running)
+      return running;
+    const refresh = (async () => {
+      try {
+        const status = await store.statusOffThread(statusScope, { countsMaxAgeMs });
+        storeStatusCache.set(key2, { recordedAtMs: nowMs(), status });
+      } catch {} finally {
+        storeStatusRefreshing.delete(key2);
+      }
+    })();
+    storeStatusRefreshing.set(key2, refresh);
+    return refresh;
+  };
   const storeReadCache = new Map;
   const reusedStoreRead = (countsMaxAgeMs, key2, read) => {
     const reuseMs = Math.min(countsMaxAgeMs, STORE_STATUS_REUSE_MS);
@@ -95338,12 +95381,8 @@ function createSourceIndexStatusHandler(options = {}) {
           const statusScope = options.connectorStoreStatusScope?.(store);
           if (!storeStatusFresh(store, statusScope, countsMaxAgeMs)) {
             await store.prepareStatusCounts?.(statusScope);
-            if (store.statusOffThread) {
-              try {
-                const status = await store.statusOffThread(statusScope, { countsMaxAgeMs });
-                storeStatusCache.set(storeStatusKey(store, statusScope), { recordedAtMs: nowMs(), status });
-              } catch {}
-            }
+            if (typeof store.statusOffThread === "function")
+              await refreshStoreStatusOffThread(store, statusScope, countsMaxAgeMs);
           }
         }
         statuses.push(statusFor(declaredCorpus));
@@ -155973,12 +156012,12 @@ function chatgptPrivacyProgram(kit, makeLogic) {
       kit.render("privacy:confirm:yes");
       return;
     }
-    send(false, false);
+    send2(false, false);
   }
   const CONFIRMATION_FRESH_MS = 25 * 60000;
-  function send(confirmed, retried) {
+  function send2(confirmed, retried) {
     if (confirmed && (!s.confirmation || Date.now() - s.confirmedAt > CONFIRMATION_FRESH_MS)) {
-      renewConfirmation(() => send(true, true));
+      renewConfirmation(() => send2(true, true));
       return;
     }
     const args = { description: s.description.trim(), rules: rulesOut() };
@@ -155998,7 +156037,7 @@ function chatgptPrivacyProgram(kit, makeLogic) {
       const content = result && result.structuredContent && typeof result.structuredContent === "object" ? result.structuredContent : null;
       if (confirmed && result && result.isError && content && content.error === "privacy_owner_only" && !retried) {
         s.confirmation = "";
-        renewConfirmation(() => send(true, true));
+        renewConfirmation(() => send2(true, true));
         return;
       }
       const data2 = settings(result);
@@ -156115,7 +156154,7 @@ function chatgptPrivacyProgram(kit, makeLogic) {
     }
     if (change.described)
       add(box, el("p", change.removed.length ? "" : "strong", W.confirmDescription));
-    add(box, add(el("div", "actions"), kit.button(W.confirm, "privacy:confirm:yes", () => send(lowers(), false), "danger"), kit.button(W.cancel, "privacy:confirm:no", () => {
+    add(box, add(el("div", "actions"), kit.button(W.confirm, "privacy:confirm:yes", () => send2(lowers(), false), "danger"), kit.button(W.cancel, "privacy:confirm:no", () => {
       s.confirmStep = false;
       kit.render("privacy:save");
     }, "plain")));
@@ -157669,7 +157708,7 @@ function hostProgram(input, bridge, mount) {
       }
       const size = upload.file.size;
       const piece = input.uploadChunkBytes > 0 ? input.uploadChunkBytes : size || 1;
-      function send(offset) {
+      function send2(offset) {
         if (stopped[upload.uploadId]) {
           resolve26({ ok: false, cancelled: true });
           return;
@@ -157705,7 +157744,7 @@ function hostProgram(input, bridge, mount) {
             if (last)
               resolve26({ ok: true });
             else
-              send(end);
+              send2(end);
             return;
           }
           let message2;
@@ -157728,7 +157767,7 @@ function hostProgram(input, bridge, mount) {
         };
         request.send(offset === 0 && last ? upload.file : upload.file.slice(offset, end));
       }
-      send(0);
+      send2(0);
     }));
   }
   let landing;
@@ -162749,17 +162788,17 @@ function mcpAuthorizedFetch(tokens, serverUrl, baseFetch = fetch) {
   return async (url2, init) => {
     if (new URL(url2).origin !== origin)
       throw new McpSourceError("server_error");
-    const send = async (token) => {
+    const send2 = async (token) => {
       const headers = new Headers(init?.headers);
       headers.set("authorization", `Bearer ${token}`);
       return baseFetch(url2, { ...init, headers });
     };
-    let response = await send(await tokens.accessToken());
+    let response = await send2(await tokens.accessToken());
     if (response.status === 401) {
       await response.body?.cancel().catch(() => {
         return;
       });
-      response = await send(await tokens.refresh());
+      response = await send2(await tokens.refresh());
       if (response.status === 401) {
         await response.body?.cancel().catch(() => {
           return;
@@ -182985,7 +183024,7 @@ function createEvernoteArchiveConnector(input) {
         let positions = [];
         let units = 0;
         let pending = false;
-        const send = (done) => {
+        const send2 = (done) => {
           input.reportPosition?.({ fileIndex: Math.min(cursor.file, input.files.length - 1), offset: cursor.done ? input.files[input.files.length - 1]?.version.size ?? 0 : cursor.offset });
           input.reportItemPositions?.(positions);
           return done ? { items: page2, nextCursor: encode3(DONE2), done: true } : { items: page2, nextCursor: encode3(cursor), done: false };
@@ -183002,17 +183041,17 @@ function createEvernoteArchiveConnector(input) {
             pending = true;
           if (segment.stopped) {
             if (pending)
-              yield send(false);
+              yield send2(false);
             return;
           }
           if (cursor.done) {
-            yield send(true);
+            yield send2(true);
             return;
           }
           const spentBudget = segment.budgetHit || bytesRead >= byteBudget;
           const full = page2.length >= Math.min(pageSizeDefault, limit - emitted);
           if (full || spentBudget || units >= EVERNOTE_MAX_UNITS_PER_PAGE) {
-            yield send(false);
+            yield send2(false);
             emitted += page2.length;
             page2 = [];
             positions = [];
@@ -195324,7 +195363,7 @@ function chatgptPrivateQuestionProgram(config2) {
       network: value2.networkIdentity === "hidden" || value2.networkIdentity === "visible" ? value2.networkIdentity : "not_verified"
     };
   }
-  async function send() {
+  async function send2() {
     if (!info || phase !== "compose" && phase !== "error")
       return;
     const question = draft.trim();
@@ -195522,7 +195561,7 @@ function chatgptPrivateQuestionProgram(config2) {
     field.addEventListener("keydown", (event) => {
       if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
         event.preventDefault();
-        send();
+        send2();
       }
     });
     form.appendChild(field);
@@ -195570,7 +195609,7 @@ function chatgptPrivateQuestionProgram(config2) {
     button.type = "button";
     button.setAttribute("data-key", "send");
     button.addEventListener("click", () => {
-      send();
+      send2();
     });
     actions.appendChild(button);
     actions.appendChild(el("span", "q-note", T.cost));

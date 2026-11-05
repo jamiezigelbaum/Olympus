@@ -116,3 +116,53 @@ describe('connector store status off the worker thread', () => {
     }
   });
 });
+
+describe('off-thread snapshot', () => {
+  test('every read in one snapshot sees the same state, whatever is written meanwhile', async () => {
+    const store = fileStore();
+    try {
+      await store.syncFromConnector(connector(MAIL.slice(0, 1)), { fetchContent: true });
+      const { withOffThreadSnapshot } = await import('../src/workers/connector-store/off-thread-reads.ts');
+      const count = { sql: 'SELECT COUNT(*) AS n FROM items WHERE tombstoned = 0', params: [], mode: 'get' as const };
+      const [before, after] = await withOffThreadSnapshot(store.dbPath, async (read) => {
+        const first = (await read(count)) as { n: number };
+        await store.syncFromConnector(connector(MAIL), { fetchContent: true });
+        const second = (await read(count)) as { n: number };
+        return [first.n, second.n];
+      });
+      expect(before).toBe(1);
+      expect(after).toBe(1);
+      expect((await store.statusOffThread()).counts.items).toBe(3);
+    } finally {
+      store.close();
+    }
+  });
+});
+
+describe('status handler', () => {
+  test('callers that find the counts expired together share one off-thread read', async () => {
+    const { createSourceIndexStatusHandler } = await import('../src/workers/source-index/status.ts');
+    const store = fileStore();
+    try {
+      await store.syncFromConnector(connector(MAIL), { fetchContent: true });
+      let reads = 0;
+      const read = store.statusOffThread.bind(store);
+      store.statusOffThread = ((...args: Parameters<typeof store.statusOffThread>) => {
+        reads += 1;
+        return read(...args);
+      }) as typeof store.statusOffThread;
+      const handler = createSourceIndexStatusHandler({
+        corpusDefinitions: [{ corpusId: 'internal.email', family: 'email', trustDomain: 'internal' } as never],
+        connectorStores: [store],
+      });
+      const [a, b] = await Promise.all([
+        handler.status({}, { countsMaxAgeMs: 60_000 }),
+        handler.status({}, { countsMaxAgeMs: 60_000 }),
+      ]);
+      expect(reads).toBe(1);
+      expect(b.corpora[0]).toEqual(a.corpora[0]);
+    } finally {
+      store.close();
+    }
+  });
+});
