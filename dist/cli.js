@@ -26113,6 +26113,12 @@ class ControlPathHeadroom {
 function ingestionTurn() {
   return controlPathHeadroom.ingestionTurn();
 }
+function tracesInStalls(traces, stalls, offsetS) {
+  if (stalls.length === 0)
+    return [];
+  const windows = stalls.map((stall) => [stall.startMs / 1000 + offsetS, stall.endMs / 1000 + offsetS]);
+  return traces.filter((trace) => trace.timestamp !== undefined && windows.some(([start, end]) => trace.timestamp >= start && trace.timestamp <= end));
+}
 function summarizeCpuSamples(traces, top = CPU_SAMPLE_TOP, sources = []) {
   const self = new Map;
   const total = new Map;
@@ -26144,13 +26150,36 @@ async function startCpuSampleLog(env = process.env) {
     return;
   const { appendFileSync } = await import("node:fs");
   jsc.startSamplingProfiler();
+  let stalls = [];
+  let lastTick = performance.now();
+  const lag = setInterval(() => {
+    const now = performance.now();
+    if (now - lastTick - CPU_SAMPLE_LAG_TICK_MS >= CPU_SAMPLE_STALL_MS)
+      stalls.push({ startMs: lastTick, endMs: now });
+    lastTick = now;
+  }, CPU_SAMPLE_LAG_TICK_MS);
+  lag.unref?.();
   let last = Date.now();
   const flush = () => {
     const now = Date.now();
     try {
+      const spinUntil = performance.now() + 3;
+      while (performance.now() < spinUntil) {}
       const sampled = jsc.samplingProfilerStackTraces();
-      const summary = summarizeCpuSamples(sampled.traces ?? [], CPU_SAMPLE_TOP, sampled.sources ?? []);
-      appendFileSync(path, `${JSON.stringify({ at: new Date(now).toISOString(), windowMs: now - last, headroom: controlPathHeadroom.snapshot(), ...summary })}
+      const traces = sampled.traces ?? [];
+      const newest = traces.reduce((max, trace) => Math.max(max, trace.timestamp ?? -Infinity), -Infinity);
+      const offsetS = Number.isFinite(newest) ? newest - performance.now() / 1000 : 0;
+      const window2 = stalls;
+      stalls = [];
+      const stalled = Number.isFinite(newest) ? tracesInStalls(traces, window2, offsetS) : [];
+      const summary = summarizeCpuSamples(traces, CPU_SAMPLE_TOP, sampled.sources ?? []);
+      const freezes = {
+        count: window2.length,
+        totalMs: Math.round(window2.reduce((sum, stall) => sum + stall.endMs - stall.startMs, 0)),
+        maxMs: Math.round(window2.reduce((max, stall) => Math.max(max, stall.endMs - stall.startMs), 0)),
+        ...summarizeCpuSamples(stalled, CPU_SAMPLE_TOP, sampled.sources ?? [])
+      };
+      appendFileSync(path, `${JSON.stringify({ at: new Date(now).toISOString(), windowMs: now - last, headroom: controlPathHeadroom.snapshot(), ...summary, freezes })}
 `, { mode: 384 });
     } catch (error) {
       console.error(`[olympus:control-path] cpu sample log failed: ${error instanceof Error ? error.name : "error"}`);
@@ -26160,9 +26189,12 @@ async function startCpuSampleLog(env = process.env) {
   const timer = setInterval(flush, CPU_SAMPLE_FLUSH_MS);
   timer.unref?.();
   console.error(`[olympus:control-path] sampling CPU to ${CPU_SAMPLE_LOG_ENV}`);
-  return () => clearInterval(timer);
+  return () => {
+    clearInterval(timer);
+    clearInterval(lag);
+  };
 }
-var CONTROL_PATH_SLICE_MS = 20, CONTROL_PATH_LAG_REST_THRESHOLD_MS = 200, CONTROL_PATH_REST_MS = 25, HEARTBEAT_MS = 50, CONTROL_PATH_FREEZE_LOG_MS = 2000, controlPathHeadroom, CPU_SAMPLE_LOG_ENV = "OLYMPUS_CPU_SAMPLE_LOG", CPU_SAMPLE_FLUSH_MS = 30000, CPU_SAMPLE_TOP = 30;
+var CONTROL_PATH_SLICE_MS = 20, CONTROL_PATH_LAG_REST_THRESHOLD_MS = 200, CONTROL_PATH_REST_MS = 25, HEARTBEAT_MS = 50, CONTROL_PATH_FREEZE_LOG_MS = 2000, controlPathHeadroom, CPU_SAMPLE_LOG_ENV = "OLYMPUS_CPU_SAMPLE_LOG", CPU_SAMPLE_FLUSH_MS = 30000, CPU_SAMPLE_TOP = 30, CPU_SAMPLE_STALL_MS = 1000, CPU_SAMPLE_LAG_TICK_MS = 100;
 var init_control_path_headroom = __esm(() => {
   controlPathHeadroom = new ControlPathHeadroom;
 });
