@@ -206,3 +206,56 @@ The runner imports the production embedding provider and exits nonzero if no
 hundredth separates the controls from the expected positive documents. It never
 prints credentials. API usage is fixture-sized (42 input embeddings per final
 measurement); the repository estimate is $0.0125 per million tokens.
+
+## Replay stored sniffer verdicts
+
+`sniffer-replay.ts` reads only explicitly supplied SQLite backup copies, never
+opens the live lane, and matches saved verdict hashes to exact queued inputs
+or inputs reconstructed through the sampler's `storedSignals` / `judgeInput`
+path. All six source folders use the same reader. Missing files and unmatched
+verdicts are counted; unmatched verdicts are never sent to the model.
+
+```bash
+bun eval/calibration/sniffer-replay.ts --stores DIR \
+  --endpoint http://127.0.0.1:8012 --model NAME --owner-words FILE \
+  --out replay.jsonl --disagreements disagreements.jsonl --deadline-seconds 600
+bun eval/calibration/sniffer-replay.ts --out replay.jsonl --report
+```
+
+Use an SSH tunnel to a llama.cpp server (`--jinja -np 1`); only literal IPv4
+loopback addresses and `::1` are allowed. `--sources a,b` selects source folder
+names; `--limit N` bounds additional comparison rows. Runs interleave sources.
+Repeating the same command resumes the checkpoint, reusing completed hash
+judgments, including when several old model/prompt/map rows share a hash.
+Changing the model, endpoint, owner words, production prompt or saved verdicts
+requires a new checkpoint. A torn final JSONL line is refused; restore or
+remove that incomplete line before resuming. Both output files are mode 600
+and appended with an fsync per row. Disagreements contain only source, hash
+and matching item IDs; the checkpoint contains no item IDs or text. Keep both
+files outside the stores directory. Raw responses and error details are never
+logged. The llama.cpp server must also have prompt/request logging disabled.
+
+The tool calls production's `completeSnifferQuestion` and
+`createDecisionSnifferModel`: same owner-context prompt, parent-context
+filter, secret/injection screens, strict parser, coverage floor and decision
+bar. Coverage and P(Private) come from the production adapter itself. Full-mode
+fallback is refused. One failed call stays undecided; replay does not invent a
+Private fail-safe or spend production's three-attempt retry budget.
+
+Reports show inventory, agreement matrices, counts and inference throughput
+(the median latency converted to items/minute, and unique hash attempts divided
+by their total call time; store reconstruction and checkpoint I/O excluded).
+Only real old Personal/Private decisions compared to real new decisions enter
+agreement percentages. Stored undecided, fail-safe and injection verdicts have
+separate matrix buckets. Errors, timeouts, parse failures, below-floor coverage,
+secret refusals, fail-safes and injection regressions are explicit, including zeros.
+Coverage and probability are null for screened inputs or transport failures.
+
+This is a decision replay, not a live resolver run: it cannot exercise owner
+approval/sovereignty discovery, queue scheduling, budgets, live revalidation,
+cache/ledger writes, retries, held lowerings or small-built-in-model record
+holds. Those require the live item state and are intentionally outside this
+read-only tool. The production transport still enforces redirects and its
+zkAPI endpoint refusal. No live stores, owner calibration data or model server
+are needed by `test/sniffer-replay.test.ts`; it uses invented SQLite fixtures
+and a loopback fake server only.

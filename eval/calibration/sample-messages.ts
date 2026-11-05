@@ -27,10 +27,8 @@
 import { Database } from 'bun:sqlite';
 import { chmodSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { storedSignals } from '../../src/workers/connector-store/stored-names.ts';
-import type { ConnectorStoreItemCopy } from '../../src/workers/connector-store/local-index.ts';
 import { CALIBRATION_DIR_DEFAULT, SAMPLE_FILE, type CalibrationSample, type CalibrationSampleItem } from './files.ts';
-import { judgeInput } from './judge-input.ts';
+import { storedJudgeInput } from './stored-input.ts';
 import { rng, shuffle } from './sample-random.ts';
 
 const MAX_TEXT_CHARS = 60_000;
@@ -124,16 +122,6 @@ class Stores {
     }
     return undefined;
   }
-}
-
-/** What the production classifier would ask the judge about this stored item. */
-function storedJudgeInput(item: Row, text: string, provider: string) {
-  const conversation = typeof item['provider_conversation_id'] === 'string' ? item['provider_conversation_id'] : undefined;
-  const signals = storedSignals({
-    columns: item,
-    identity: { providerConversationId: conversation },
-  } as unknown as ConnectorStoreItemCopy);
-  return { signals, ...judgeInput(signals, text, provider) };
 }
 
 function quarter(iso: string): string {

@@ -266,6 +266,22 @@ export async function prepareSnifferModel(options: {
   return stopped();
 }
 
+/** One production dispatch, shared with read-only replay. Screens run before this call. */
+export async function completeSnifferQuestion(model: AnalystModel, options: {
+  pass: SnifferPass; material: string; ownerContext?: string | undefined; signal?: AbortSignal | undefined;
+}): Promise<SnifferModelCompletion> {
+  const material = snifferMaterialForModel(options.material);
+  const request: SnifferModelRequest = {
+    system: SNIFFER_SYSTEM_PROMPT,
+    prompt: buildSnifferBatchPrompt(options.pass, [{ i: 1, material }], options.ownerContext),
+    localOnly: true, responseSchema: SNIFFER_RESPONSE_SCHEMA,
+    maxOutputChars: OUTPUT_CHARS_PER_ITEM + 200,
+    ...(options.signal ? { signal: options.signal } : {}),
+    snifferItem: { pass: options.pass, material, ownerContext: options.ownerContext },
+  };
+  return await model.complete(request) as SnifferModelCompletion;
+}
+
 export async function runSnifferPass(options: SnifferPassOptions): Promise<SnifferPassReport> {
   const promptVersion = options.promptVersion ?? SNIFFER_PROMPT_VERSION;
   let id = snifferId(options.lane, promptVersion);
@@ -539,16 +555,9 @@ export async function runSnifferPass(options: SnifferPassOptions): Promise<Sniff
     let text: string;
     let decisionVerdict: SnifferModelCompletion['decisionVerdict'];
     try {
-      const request: SnifferModelRequest = {
-        system: SNIFFER_SYSTEM_PROMPT,
-        prompt,
-        localOnly: true,
-        responseSchema: SNIFFER_RESPONSE_SCHEMA,
-        maxOutputChars: batch.length * OUTPUT_CHARS_PER_ITEM + 200,
-        ...(options.signal ? { signal: options.signal } : {}),
-        snifferItem: { pass, material: snifferMaterialForModel(next.question.material), ownerContext: options.ownerContext },
-      };
-      const completion = await options.model.complete(request) as SnifferModelCompletion;
+      const completion = await completeSnifferQuestion(options.model, {
+        pass, material: next.question.material, ownerContext: options.ownerContext, signal: options.signal,
+      });
       text = completion.text;
       decisionVerdict = completion.decisionVerdict;
     } catch {
