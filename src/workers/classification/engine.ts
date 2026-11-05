@@ -219,21 +219,60 @@ export function detectSecretFindingKinds(text: string): string[] {
   // seconds (Sparta, 2026-11-04: 8 s per scan of 16-19 MB chat files), so a
   // large text's result is reused, keyed by a digest of the whole text. Only
   // kinds are kept, never the text.
-  const key = text.length >= SECRET_SCAN_MEMO_MIN_CHARS ? createHash('sha256').update(text).digest('hex') : undefined;
+  const key = secretScanMemoKey(text);
   const memo = key ? secretScanMemo?.get(key) : undefined;
   if (memo) return [...memo];
+  const kinds = scanSecretFindingKinds(text);
+  if (key) rememberScan(key, kinds);
+  return [...kinds];
+}
+
+/**
+ * The secret scan itself, with no reuse: what detectSecretFindingKinds runs
+ * on a text it has not seen. The off-thread scanner (secret-scan-worker.ts)
+ * runs exactly this, so its answer is the one this thread would have reached.
+ */
+export function scanSecretFindingKinds(text: string): string[] {
+  if (!text.trim()) return [];
   const scan = scanDropboxContentPolicyText({ text });
-  const kinds = [...new Set(
+  return [...new Set(
     scan.findings
       .map((finding) => finding.finding_type)
       .filter((type) => SECRET_FINDING_TYPES.has(type)),
   )].sort();
-  if (key) {
-    secretScanMemo ??= new Map();
-    if (secretScanMemo.size >= SECRET_SCAN_MEMO_MAX_ENTRIES) secretScanMemo.delete(secretScanMemo.keys().next().value!);
-    secretScanMemo.set(key, kinds);
-  }
-  return [...kinds];
+}
+
+/**
+ * Whether `text` is long enough for its scan to be reused, and so worth
+ * scanning on the second thread first (secret-scan-off-thread.ts).
+ */
+export function secretScanReusable(text: string): boolean {
+  return text.length >= SECRET_SCAN_MEMO_MIN_CHARS;
+}
+
+/** Whether a reused scan of `text` is already held. */
+export function secretScanRemembered(text: string): boolean {
+  const key = secretScanMemoKey(text);
+  return key !== undefined && secretScanMemo?.has(key) === true;
+}
+
+/**
+ * Keeps a scan of `text` made on the second thread, so the next
+ * detectSecretFindingKinds of the same text reuses it. Only kinds are kept.
+ */
+export function rememberSecretFindingKinds(text: string, kinds: readonly string[]): void {
+  const key = secretScanMemoKey(text);
+  if (key) rememberScan(key, [...new Set(kinds)].filter((kind) => SECRET_FINDING_TYPES.has(kind)).sort());
+}
+
+function secretScanMemoKey(text: string): string | undefined {
+  return secretScanReusable(text) ? createHash('sha256').update(text).digest('hex') : undefined;
+}
+
+function rememberScan(key: string, kinds: string[]): void {
+  secretScanMemo ??= new Map();
+  if (secretScanMemo.size >= SECRET_SCAN_MEMO_MAX_ENTRIES) secretScanMemo.delete(secretScanMemo.keys().next().value!);
+  secretScanMemo.set(key, kinds);
 }
 
 /** Texts at least this long have their secret scan reused (detectSecretFindingKinds). */

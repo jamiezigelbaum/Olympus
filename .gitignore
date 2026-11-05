@@ -6,6 +6,7 @@ dist/*
 !dist/index.js
 !dist/cli.js
 !dist/litert-helper.js
+!dist/secret-scan-worker.js
 !dist/control-ui/
 dist/control-ui/*
 !dist/control-ui/index.js

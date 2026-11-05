@@ -70,6 +70,7 @@ import type {
 } from './job-store.ts';
 import { ExtractionJobFieldError } from './job-store.ts';
 import type { ExtractionReclassificationRule, ExtractionHealthProbeMap } from './registry.ts';
+import { scanSecretsAhead } from '../classification/secret-scan-off-thread.ts';
 import {
   EXTRACTION_SINK_SKIPPED_CLAIM_SUPERSEDED,
   EXTRACTION_SINK_SKIPPED_EMPTY_TEXT,
@@ -1258,6 +1259,11 @@ async function settleOneJobHeld(input: SettleOneJobInput, staged: { media?: Extr
     };
   }
 
+  // A large text's secret scan runs on the second thread first, so the
+  // classifier inside accept() reuses its answer instead of holding this
+  // thread for seconds (secret-scan-off-thread.ts). Before the scope check, so
+  // that check still comes right before the write.
+  await scanSecretsAhead(output.text);
   let accepted;
   if (!(await extractionAuthorizationCurrent(corpus, job.ref))) {
     return { status: 'blocked_policy', errorKind: EXTRACTION_ERROR_KIND_SOURCE_SCOPE_SUPERSEDED };

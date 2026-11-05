@@ -8880,19 +8880,32 @@ function buildHaystack(input) {
 function detectSecretFindingKinds(text2) {
   if (!text2.trim())
     return [];
-  const key = text2.length >= SECRET_SCAN_MEMO_MIN_CHARS ? createHash4("sha256").update(text2).digest("hex") : undefined;
+  const key = secretScanMemoKey(text2);
   const memo = key ? secretScanMemo?.get(key) : undefined;
   if (memo)
     return [...memo];
-  const scan = scanDropboxContentPolicyText({ text: text2 });
-  const kinds = [...new Set(scan.findings.map((finding) => finding.finding_type).filter((type) => SECRET_FINDING_TYPES.has(type)))].sort();
-  if (key) {
-    secretScanMemo ??= new Map;
-    if (secretScanMemo.size >= SECRET_SCAN_MEMO_MAX_ENTRIES)
-      secretScanMemo.delete(secretScanMemo.keys().next().value);
-    secretScanMemo.set(key, kinds);
-  }
+  const kinds = scanSecretFindingKinds(text2);
+  if (key)
+    rememberScan(key, kinds);
   return [...kinds];
+}
+function scanSecretFindingKinds(text2) {
+  if (!text2.trim())
+    return [];
+  const scan = scanDropboxContentPolicyText({ text: text2 });
+  return [...new Set(scan.findings.map((finding) => finding.finding_type).filter((type) => SECRET_FINDING_TYPES.has(type)))].sort();
+}
+function secretScanReusable(text2) {
+  return text2.length >= SECRET_SCAN_MEMO_MIN_CHARS;
+}
+function secretScanMemoKey(text2) {
+  return secretScanReusable(text2) ? createHash4("sha256").update(text2).digest("hex") : undefined;
+}
+function rememberScan(key, kinds) {
+  secretScanMemo ??= new Map;
+  if (secretScanMemo.size >= SECRET_SCAN_MEMO_MAX_ENTRIES)
+    secretScanMemo.delete(secretScanMemo.keys().next().value);
+  secretScanMemo.set(key, kinds);
 }
 function detectSensitiveContent(input) {
   const haystack = buildHaystack(input);
@@ -38342,6 +38355,11 @@ var init_registry = __esm(() => {
   init_vlm();
 });
 
+// src/workers/classification/secret-scan-off-thread.ts
+var init_secret_scan_off_thread = __esm(() => {
+  init_engine();
+});
+
 // src/workers/file-extraction/store-sink.ts
 var EXTRACTION_SINK_SKIPPED_ITEM_MISSING = "store_item_missing", EXTRACTION_SINK_SKIPPED_NOT_ELIGIBLE = "store_item_not_eligible", EXTRACTION_SINK_SKIPPED_OWNED_ELSEWHERE = "store_item_owned_elsewhere", EXTRACTION_SINK_SKIPPED_EMPTY_TEXT = "extracted_text_empty", EXTRACTION_SINK_SKIPPED_IDENTITY_AMBIGUOUS = "store_identity_ambiguous", EXTRACTION_SINK_SKIPPED_METADATA_ONLY = "store_item_metadata_only", EXTRACTION_SINK_SKIPPED_TIER_MOVE_QUEUED = "store_item_tier_move_queued", EXTRACTION_SINK_SKIPPED_SECRETS = "store_item_secrets", EXTRACTION_SINK_SKIPPED_SOURCE_VERSION_STALE = "store_item_source_version_stale", EXTRACTION_SINK_SKIPPED_IMAGE_PRIVATE_ONLY = "store_image_content_private_only";
 var init_store_sink = __esm(() => {
@@ -38365,6 +38383,7 @@ var init_runner = __esm(() => {
   init_tier_classifier();
   init_bounded_text();
   init_job_store();
+  init_secret_scan_off_thread();
   init_store_sink();
   SOURCE_PARK_FALLBACK_MS = 60 * 60000;
   SINK_SKIP_SETTLEMENTS = Object.freeze({
