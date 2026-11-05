@@ -274,6 +274,19 @@ describe('the list', () => {
     expect(files.computerList([LANE.corpusId], COMPUTER_UNREADABLE_FILES_LIMIT).more).toBe(0);
   });
 
+  test('with moreAtLeast the verdicts stop at the first file past the page', () => {
+    let asked = 0;
+    const { files } = filesOver(itemsOf(50), { verdict: () => { asked += 1; return 'unreadable'; } });
+    const listed = files.computerList([LANE.corpusId], 5, { ...AS_OPENER, moreAtLeast: true });
+    expect(listed.files.map((file) => file.name)).toEqual(files.names([LANE.corpusId], 5));
+    expect(listed.more).toBe(1);
+    expect(listed.after).toBeDefined();
+    asked = 0;
+    files.computerList([LANE.corpusId], 5, { moreAtLeast: true });
+    expect(asked).toBe(6);
+    expect(files.computerList([LANE.corpusId], 50, { moreAtLeast: true }).more).toBe(0);
+  });
+
   test('a file with no place to open is plain text: no token', () => {
     const { files } = filesOver(itemsOf(2), { openTarget: (_p, locator) => (locator.endsWith('file-000.pdf') ? undefined : { url: 'http://insecure.example/x' }) });
     expect(files.computerList([LANE.corpusId], 10, AS_OPENER).files.every((file) => file.token === undefined)).toBe(true);

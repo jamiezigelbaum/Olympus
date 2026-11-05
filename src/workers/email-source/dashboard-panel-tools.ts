@@ -520,7 +520,9 @@ export function computerUnreadableEntries(
     if (count === 0 || corpusIds.length === 0) return [];
     let listed: ReturnType<UnreadableFiles['computerList']>;
     try {
-      listed = files.computerList(corpusIds, COMPUTER_UNREADABLE_FILES_LIMIT, opener ? { opener } : {});
+      // The card's count is the word for how many more (below), so the list
+      // only needs to know whether any follow its first page.
+      listed = files.computerList(corpusIds, COMPUTER_UNREADABLE_FILES_LIMIT, { moreAtLeast: true, ...(opener ? { opener } : {}) });
     } catch {
       return [];
     }

@@ -143919,8 +143919,11 @@ function createUnreadableFiles(options) {
           continue;
         if (shown.length < Math.max(0, limit))
           shown.push(item);
-        else
+        else {
           more += 1;
+          if (list.moreAtLeast)
+            break;
+        }
       }
       const opener = list.opener;
       const files = shown.map((item) => {
@@ -211130,7 +211133,7 @@ function computerUnreadableEntries(view3, files, opener) {
       return [];
     let listed;
     try {
-      listed = files.computerList(corpusIds, COMPUTER_UNREADABLE_FILES_LIMIT, opener ? { opener } : {});
+      listed = files.computerList(corpusIds, COMPUTER_UNREADABLE_FILES_LIMIT, { moreAtLeast: true, ...opener ? { opener } : {} });
     } catch {
       return [];
     }
