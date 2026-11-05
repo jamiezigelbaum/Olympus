@@ -145,8 +145,9 @@ bun eval/calibration/label.ts --importance --dir ~/.local/share/olympus-calibrat
 ```
 
 It shows only the items labeled Private: **I** Important, **M** Minor, **U** Not
-sure. The answers go to `importance.json` beside the labels, and `labels.json` is
-only read. When that file exists, a run leads with `privateMissed`: Private
+sure, **P** Actually Personal. The answers go to `importance.json` beside the
+labels. P instead changes that item's label in `labels.json` to Personal, marked
+`correctedInImportancePass`, and clears any tag. When `importance.json` exists, a run leads with `privateMissed`: Private
 items sent to Personal, as important, minor and untagged.
 
 Output and the saved `judge-*.json` carry ids, counts and metrics, never text.

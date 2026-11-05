@@ -8,7 +8,8 @@
 //   bun eval/calibration/label.ts [--dir DIR] [--port N] [--no-open] [--importance]
 //
 // --importance is a second pass over the items labeled Private: Important or
-// Minor, saved to importance.json. labels.json is only read.
+// Minor, saved to importance.json. Its only write to labels.json is P, Actually
+// Personal, which corrects that item's label and records that it was corrected.
 
 import { spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
@@ -38,6 +39,7 @@ const CHOICES = importancePass
       { label: 'important', name: 'Important', key: 'I', style: 'private' },
       { label: 'minor', name: 'Minor', key: 'M', style: 'personal' },
       { label: 'unsure', name: 'Not sure', key: 'U', style: 'unsure' },
+      { label: 'personal', name: 'Actually Personal', key: 'P', style: 'skip' },
     ]
   : [
       { label: 'personal', name: 'Personal', key: 'P', style: 'personal' },
@@ -50,7 +52,7 @@ const RULE = importancePass
   ? `<details class="rule" open><summary>What counts as Important</summary>
 <p><b>Important</b>: the things that must stay Private, such as a full blood lab report, full tax returns or a complete bank statement.</p>
 <p><b>Minor</b>: Private, but a rare slip would be acceptable, such as a meal receipt, an Uber receipt or a casual question to a doctor.</p>
-<p>Your Personal and Private labels do not change here.</p></details>`
+<p><b>Actually Personal</b>: this should not have been labeled Private. Pressing P corrects its label.</p></details>`
   : `<details class="rule"><summary>What counts as Private</summary>
 <p><b>Private</b>: a real person's own information. Their records and results (labs, medical, therapy), statements, bills,
 tax and bank papers, contracts and legal papers about them, filled-in forms, identity documents, intimate or family matters.</p>
@@ -59,9 +61,27 @@ tax and bank papers, contracts and legal papers about them, filled-in forms, ide
 <p>Judge the file as it is. Nothing here changes Olympus; labels only measure it.</p></details>`;
 const sample = readSample(dir);
 const ownerLabels = readLabels(dir);
-const items = importancePass ? sample.items.filter((item) => ownerLabels.labels[item.id]?.label === 'private') : sample.items;
+// A corrected item stays listed, so a slip of the P key can be undone.
+const items = importancePass
+  ? sample.items.filter((item) => ownerLabels.labels[item.id]?.label === 'private' || ownerLabels.labels[item.id]?.correctedInImportancePass)
+  : sample.items;
 const labels: { labels: Record<string, { label: string; at: string }> } = importancePass ? readImportance(dir) : ownerLabels;
 const save = () => (importancePass ? writeImportance(dir, labels as CalibrationImportance) : writeLabels(dir, labels as CalibrationLabels));
+/** Importance pass: P turns the item's owner label to Personal and clears its tag; any other answer undoes that. */
+function applyCorrection(id: string, label: string | null | undefined): void {
+  const at = new Date().toISOString();
+  if (label === 'personal') {
+    delete labels.labels[id];
+    ownerLabels.labels[id] = { label: 'personal', at, correctedInImportancePass: true };
+  } else if (ownerLabels.labels[id]?.correctedInImportancePass) {
+    ownerLabels.labels[id] = { label: 'private', at };
+  } else return;
+  writeLabels(dir, ownerLabels);
+}
+/** What the page shows as answered: a corrected item has no tag, so its label stands in. */
+const pageLabels = () => (importancePass
+  ? { ...labels.labels, ...Object.fromEntries(items.flatMap((item) => (ownerLabels.labels[item.id]?.correctedInImportancePass ? [[item.id, ownerLabels.labels[item.id]]] : []))) }
+  : labels.labels);
 const token = randomBytes(16).toString('hex');
 const byId = new Map(items.map((item) => [item.id, item]));
 
@@ -92,7 +112,7 @@ const server = Bun.serve({
           source: item.source,
           judgeSees: item.judgeSees,
         })),
-        labels: labels.labels,
+        labels: pageLabels(),
       }, { headers: { 'cache-control': 'no-store' } });
     }
     if (request.method === 'POST' && route === '/label') {
@@ -102,6 +122,7 @@ const server = Bun.serve({
       else if (CHOICES.some((choice) => choice.label === body.label)) {
         labels.labels[body.id] = { label: body.label!, at: new Date().toISOString() };
       } else return new Response('Unknown label', { status: 400 });
+      if (importancePass) applyCorrection(body.id, body.label);
       save();
       return Response.json({ ok: true, labeled: Object.keys(labels.labels).length });
     }
