@@ -354,10 +354,16 @@ export function createSourceIndexStatusHandler(
   // reads were most of the worker's freezes (Sparta CPU samples, 2026-11-05).
   const storeStatusCache = new Map<string, { recordedAtMs: number; status: ConnectorStoreStatus }>();
   const nowMs = options.nowMs ?? Date.now;
+  const storeStatusKey = (store: LocalConnectorStore, statusScope: ConnectorStoreStatusScope | undefined) => JSON.stringify([store.corpusId, statusScope ?? null]);
+  const storeStatusFresh = (store: LocalConnectorStore, statusScope: ConnectorStoreStatusScope | undefined, countsMaxAgeMs: number): boolean => {
+    const reuseMs = Math.min(countsMaxAgeMs, STORE_STATUS_REUSE_MS);
+    const cached = reuseMs > 0 ? storeStatusCache.get(storeStatusKey(store, statusScope)) : undefined;
+    return cached !== undefined && nowMs() - cached.recordedAtMs <= reuseMs;
+  };
   const storeStatus = (store: LocalConnectorStore, statusScope: ConnectorStoreStatusScope | undefined, countsMaxAgeMs: number): ConnectorStoreStatus => {
     const reuseMs = Math.min(countsMaxAgeMs, STORE_STATUS_REUSE_MS);
     if (reuseMs <= 0) return store.status(statusScope, { countsMaxAgeMs: 0 });
-    const key = JSON.stringify([store.corpusId, statusScope ?? null]);
+    const key = storeStatusKey(store, statusScope);
     const cached = storeStatusCache.get(key);
     if (cached && nowMs() - cached.recordedAtMs <= reuseMs) return cached.status;
     const status = store.status(statusScope, { countsMaxAgeMs });
@@ -451,6 +457,14 @@ export function createSourceIndexStatusHandler(
       const statuses: SourceIndexStatusCorpus[] = [];
       for (const declaredCorpus of corpora) {
         await ingestionTurn();
+        // A snapshot builds the store's reused sets in turns first, so its
+        // count below does not build them in one go.
+        const store = storesByCorpusId.get(declaredCorpus.corpusId);
+        const countsMaxAgeMs = snapshot.countsMaxAgeMs ?? 0;
+        if (store && countsMaxAgeMs > 0) {
+          const statusScope = options.connectorStoreStatusScope?.(store);
+          if (!storeStatusFresh(store, statusScope, countsMaxAgeMs)) await store.prepareStatusCounts?.(statusScope);
+        }
         statuses.push(statusFor(declaredCorpus));
       }
       const tierClassification = options.tierClassification?.();

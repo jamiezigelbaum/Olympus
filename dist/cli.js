@@ -38878,6 +38878,20 @@ var init_local_index = __esm(() => {
       const current2 = fileIdentity(this.dbPath);
       return !current2 || current2.dev !== this.openedFile.dev || current2.ino !== this.openedFile.ino;
     }
+    async prepareStatusCounts(scope) {
+      if (!this.tierHiddenCountsMemo)
+        await this.refreshTierHiddenCountsInTurns();
+      const key2 = JSON.stringify(scope ?? null);
+      if (!this.settledUnreadableCountMemo?.has(key2)) {
+        try {
+          const count = (await runStepsInTurns(this.settledUnreadableRowsSteps(scope, { withoutSecretsOverrides: true }))).length;
+          const memos = this.settledUnreadableCountMemo ??= new Map;
+          if (memos.size > 32)
+            memos.clear();
+          memos.set(key2, { at: Date.now(), count });
+        } catch {}
+      }
+    }
     settledUnreadableCount(scope, maxAgeMs) {
       const key2 = JSON.stringify(scope ?? null);
       const memos = this.settledUnreadableCountMemo ??= new Map;
@@ -94881,11 +94895,17 @@ function createSourceIndexStatusHandler(options = {}) {
   const cache = new Map;
   const storeStatusCache = new Map;
   const nowMs = options.nowMs ?? Date.now;
+  const storeStatusKey = (store, statusScope) => JSON.stringify([store.corpusId, statusScope ?? null]);
+  const storeStatusFresh = (store, statusScope, countsMaxAgeMs) => {
+    const reuseMs = Math.min(countsMaxAgeMs, STORE_STATUS_REUSE_MS);
+    const cached2 = reuseMs > 0 ? storeStatusCache.get(storeStatusKey(store, statusScope)) : undefined;
+    return cached2 !== undefined && nowMs() - cached2.recordedAtMs <= reuseMs;
+  };
   const storeStatus = (store, statusScope, countsMaxAgeMs) => {
     const reuseMs = Math.min(countsMaxAgeMs, STORE_STATUS_REUSE_MS);
     if (reuseMs <= 0)
       return store.status(statusScope, { countsMaxAgeMs: 0 });
-    const key2 = JSON.stringify([store.corpusId, statusScope ?? null]);
+    const key2 = storeStatusKey(store, statusScope);
     const cached2 = storeStatusCache.get(key2);
     if (cached2 && nowMs() - cached2.recordedAtMs <= reuseMs)
       return cached2.status;
@@ -94942,6 +94962,13 @@ function createSourceIndexStatusHandler(options = {}) {
       const statuses = [];
       for (const declaredCorpus of corpora) {
         await ingestionTurn();
+        const store = storesByCorpusId.get(declaredCorpus.corpusId);
+        const countsMaxAgeMs = snapshot.countsMaxAgeMs ?? 0;
+        if (store && countsMaxAgeMs > 0) {
+          const statusScope = options.connectorStoreStatusScope?.(store);
+          if (!storeStatusFresh(store, statusScope, countsMaxAgeMs))
+            await store.prepareStatusCounts?.(statusScope);
+        }
         statuses.push(statusFor(declaredCorpus));
       }
       const tierClassification = options.tierClassification?.();

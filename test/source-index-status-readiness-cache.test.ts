@@ -57,18 +57,25 @@ describe('connector-store status readiness', () => {
     let reads = 0;
     const read = store.status.bind(store);
     store.status = ((...args: Parameters<typeof store.status>) => { reads += 1; return read(...args); }) as typeof store.status;
+    let prepared = 0;
+    const prepare = store.prepareStatusCounts.bind(store);
+    store.prepareStatusCounts = async (...args: Parameters<typeof store.prepareStatusCounts>) => { prepared += 1; await prepare(...args); };
     let now = 1_000_000;
     try {
       const handler = createSourceIndexStatusHandler({ corpusDefinitions: [defineDropboxFilesCorpus()], connectorStores: [store], nowMs: () => now });
       await handler.status({ include_items: false }, { countsMaxAgeMs: 300_000 });
       await handler.status({ include_items: false, include_readiness_ledger: true, readiness_ledger_max_age_ms: 120_000 }, { countsMaxAgeMs: 300_000 });
       expect(reads).toBe(1);
+      // The reused sets are built in turns before the one count, not again while it is fresh.
+      expect(prepared).toBe(1);
       now += STORE_STATUS_REUSE_MS + 1;
       await handler.status({ include_items: false }, { countsMaxAgeMs: 300_000 });
       expect(reads).toBe(2);
+      expect(prepared).toBe(2);
       await handler.status({ include_items: false });
       await handler.status({ include_items: false });
       expect(reads).toBe(4);
+      expect(prepared).toBe(2);
     } finally { store.close(); }
   });
 
