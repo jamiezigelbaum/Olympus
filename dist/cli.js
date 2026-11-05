@@ -22324,26 +22324,36 @@ class TierLedger {
     }
   }
   corpusCopyCounts(corpusId) {
-    const row = this.db.query(`
-      SELECT
-        SUM(CASE WHEN c.copy_state = 'current' THEN 1 ELSE 0 END) AS current,
-        SUM(CASE WHEN c.copy_state = 'superseded' THEN 1 ELSE 0 END) AS superseded,
-        SUM(CASE WHEN c.copy_state = 'staged' THEN 1 ELSE 0 END) AS staged,
-        SUM(CASE WHEN c.copy_state = 'current' AND c.embed_hold = 1 THEN 1 ELSE 0 END) AS held,
-        SUM(CASE WHEN t.state = 'moving' THEN 1 ELSE 0 END) AS moving
-      FROM tier_copies c
-      JOIN tier_items t
-        ON t.provider = c.provider AND t.account_scope = c.account_scope
-          AND t.conversation_key = c.conversation_key AND t.provider_item_id = c.provider_item_id
-      WHERE c.corpus_id = ?
-    `).get(corpusId);
-    return {
-      current: row["current"] ?? 0,
-      superseded: row["superseded"] ?? 0,
-      staged: row["staged"] ?? 0,
-      held: row["held"] ?? 0,
-      moving: row["moving"] ?? 0
-    };
+    const rows = this.db.query(`
+      SELECT copy_state, embed_hold, COUNT(*) AS n FROM tier_copies
+      WHERE corpus_id = ? AND copy_state IN ('current', 'staged')
+      GROUP BY copy_state, embed_hold
+    `).all(corpusId);
+    let current2 = 0, staged = 0, held = 0;
+    for (const row of rows) {
+      if (row.copy_state === "current") {
+        current2 += row.n;
+        if (row.embed_hold === 1)
+          held += row.n;
+      } else
+        staged += row.n;
+    }
+    const superseded = this.db.query(`
+      SELECT COUNT(*) AS n FROM tier_copies c
+      WHERE c.corpus_id = ? AND c.copy_state = 'superseded' AND EXISTS (
+        SELECT 1 FROM tier_items t
+        WHERE t.provider = c.provider AND t.account_scope = c.account_scope
+          AND t.conversation_key = c.conversation_key AND t.provider_item_id = c.provider_item_id)
+    `).get(corpusId).n;
+    const moving = this.db.query(`
+      SELECT COUNT(*) AS n FROM tier_items t
+      JOIN tier_copies c
+        ON c.provider = t.provider AND c.account_scope = t.account_scope
+          AND c.conversation_key = t.conversation_key AND c.provider_item_id = t.provider_item_id
+          AND c.corpus_id = ?
+      WHERE t.state = 'moving'
+    `).get(corpusId).n;
+    return { current: current2, superseded, staged, held, moving };
   }
   commitSetCursor(setId, connectorId, cursor) {
     this.db.query(`
