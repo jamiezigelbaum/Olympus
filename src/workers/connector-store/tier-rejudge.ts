@@ -74,6 +74,8 @@ import type { ConnectorStoreItemCopy } from './local-index.ts';
 import { settleSecretsCopies } from './secrets-disposition.ts';
 import { secretFencedSniffer } from './tier-placement.ts';
 import type { TieredStoreSet } from './tiered-store-set.ts';
+import { scanSecretsAhead } from '../classification/secret-scan-off-thread.ts';
+import { secretScanReusable } from '../classification/engine.ts';
 
 /** Items re-judged per call (one call per sniffer tick, per set). */
 export const DEFAULT_TIER_REJUDGE_PER_PASS = 100;
@@ -116,6 +118,50 @@ export function emptyTierRejudgeReport(): TierRejudgeReport {
 }
 
 export function rejudgeRoutedItems(options: TierRejudgeOptions): { report: TierRejudgeReport; next?: TierLedgerIdentity } {
+  const steps = rejudgeSteps(options);
+  let step = steps.next();
+  while (!step.done) step = steps.next();
+  return step.value;
+}
+
+/**
+ * rejudgeRoutedItems with the thread given back between items, and a large
+ * stored text's secret scan made on the second thread first
+ * (secret-scan-off-thread.ts), so the classifier reuses it. A page of 100
+ * re-judges in one go, each scanning its text, was 18% of Sparta's freeze
+ * time on 2007d67 (2026-11-05). The decisions are the same either way.
+ */
+export async function rejudgeRoutedItemsInTurns(
+  options: TierRejudgeOptions & { turn: () => Promise<void> | undefined },
+): Promise<{ report: TierRejudgeReport; next?: TierLedgerIdentity }> {
+  const steps = rejudgeSteps(options);
+  let step = steps.next();
+  while (!step.done) {
+    await options.turn();
+    const text = step.value === undefined ? undefined : storedContentText(options.set, step.value);
+    if (text !== undefined && secretScanReusable(text)) await scanSecretsAhead(text);
+    step = steps.next();
+  }
+  return step.value;
+}
+
+// The stored text a re-judge of `record` will read, for scanning ahead only:
+// rejudgeStoredContent reads it again itself, after any wait.
+function storedContentText(set: TieredStoreSet, record: TierLedgerRecord): string | undefined {
+  try {
+    const identity = identityOf(record);
+    const current = set.ledger.copies(identity).filter((copy) => copy.state === 'current');
+    const serving = copyServingLayer(current, 'content');
+    const domain = serving ? set.domainForCorpus(serving.corpusId) : undefined;
+    const exported = domain ? set.store(domain)?.exportItemCopy(identity) : undefined;
+    return exported?.chunks.map((chunk) => chunk.boundedText).join('');
+  } catch {
+    return undefined;
+  }
+}
+
+// Yields each candidate before it is re-judged (a turn point for the caller).
+function* rejudgeSteps(options: TierRejudgeOptions): Generator<TierLedgerRecord, { report: TierRejudgeReport; next?: TierLedgerIdentity }> {
   const report = emptyTierRejudgeReport();
   const { set } = options;
   const classification = set.classification();
@@ -130,6 +176,7 @@ export function rejudgeRoutedItems(options: TierRejudgeOptions): { report: TierR
     limit,
   });
   for (const record of page.records) {
+    yield record;
     report.seen += 1;
     try {
       rejudgeStoredContent(set, record, {

@@ -19236,6 +19236,11 @@ var init_tier_row_rehome = __esm(() => {
   MOVE_WHY = "Automatic re-home of a Private row found in a Personal or Public store: the owner approved on 2026-10-07 " + "that moved items are re-embedded by the local Private embedder (the move itself makes no provider call).";
 });
 
+// src/workers/classification/secret-scan-off-thread.ts
+var init_secret_scan_off_thread = __esm(() => {
+  init_engine();
+});
+
 // src/workers/connector-store/tier-rejudge.ts
 var init_tier_rejudge = __esm(() => {
   init_media_judge();
@@ -19246,6 +19251,8 @@ var init_tier_rejudge = __esm(() => {
   init_tier_ledger();
   init_secrets_disposition();
   init_tier_placement();
+  init_secret_scan_off_thread();
+  init_engine();
 });
 
 // src/workers/connector-store/tier-override-settle.ts
@@ -22589,11 +22596,6 @@ var init_registry = __esm(() => {
   init_still_image_readiness();
   init_transcription();
   init_vlm();
-});
-
-// src/workers/classification/secret-scan-off-thread.ts
-var init_secret_scan_off_thread = __esm(() => {
-  init_engine();
 });
 
 // src/workers/file-extraction/store-sink.ts

@@ -42,7 +42,7 @@ import { tierSetForLedger } from '../connector-store/tier-set-registry.ts';
 import {
   DEFAULT_TIER_REJUDGE_PER_PASS,
   emptyTierRejudgeReport,
-  rejudgeRoutedItems,
+  rejudgeRoutedItemsInTurns,
   rejudgeStoredContent,
   settleRoutedSecrets,
   settleLegacySecrets,
@@ -1250,8 +1250,9 @@ export class TierSnifferService {
         const id = snifferId(this.options.lane, snifferPromptVersions(this.options.ownerContext?.()).cache);
         if (this.options.installed.snifferStoreForLedger(ledgerPath).questionWorkCounts(id).unanswered >= maxOpen) continue;
         const after = this.rejudgeCursors.get(ledgerPath);
-        const { report, next } = rejudgeRoutedItems({
+        const { report, next } = await rejudgeRoutedItemsInTurns({
           set,
+          turn: ingestionTurn,
           limit: perPass,
           ...(after ? { after } : {}),
           autoMoves: this.autoMovesFor(set),
