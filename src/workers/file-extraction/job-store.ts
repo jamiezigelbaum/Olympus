@@ -461,6 +461,9 @@ export interface ExtractionTerminalRetryPath {
   escalateToExtractorKind?: string;
 }
 
+// Queue rows per current-item check when a scoped snapshot is taken in turns.
+const SCOPED_READINESS_CURRENT_SLICE = 2_000;
+
 export interface ExtractionScopedReadinessOptions {
   now?: Date;
   // Terminal failures that still have a retry path (ExtractionTerminalRetryPath).
@@ -1602,6 +1605,34 @@ export class LocalFileExtractionJobStore {
     lanes: readonly ExtractionLaneKey[],
     options: ExtractionScopedReadinessOptions = {},
   ): ExtractionCorpusReadiness {
+    const steps = this.scopedReadinessSteps(lanes, options);
+    let step = steps.next();
+    while (!step.done) step = steps.next();
+    return step.value;
+  }
+
+  /**
+   * scopedReadiness with the thread given back between lanes and between
+   * slices of the current-item check: in one go a large queue's snapshot held
+   * the worker for 22.6 s (Sparta, 2007d67, 2026-11-05).
+   */
+  async scopedReadinessInTurns(
+    lanes: readonly ExtractionLaneKey[],
+    options: ExtractionScopedReadinessOptions & { turn: () => Promise<void> | undefined },
+  ): Promise<ExtractionCorpusReadiness> {
+    const steps = this.scopedReadinessSteps(lanes, options);
+    let step = steps.next();
+    while (!step.done) {
+      await options.turn();
+      step = steps.next();
+    }
+    return step.value;
+  }
+
+  private *scopedReadinessSteps(
+    lanes: readonly ExtractionLaneKey[],
+    options: ExtractionScopedReadinessOptions,
+  ): Generator<void, ExtractionCorpusReadiness> {
     const uniqueLanes = new Map<string, ExtractionLaneKey>();
     for (const lane of lanes) {
       const key = requireLaneKey(lane);
@@ -1620,12 +1651,20 @@ export class LocalFileExtractionJobStore {
         lane.approvedScopeKey,
       ) as ExtractionJobSqlRow[];
       for (const row of rows) byJobId.set(row.job_id, row);
+      yield;
     }
     const allRows = [...byJobId.values()];
     let rows = allRows;
     if (options.currentItems) {
-      const current = options.currentItems(allRows.map(refFromRow));
+      const current: boolean[] = [];
+      for (let start = 0; start < allRows.length; start += SCOPED_READINESS_CURRENT_SLICE) {
+        if (start > 0) yield;
+        const slice = allRows.slice(start, start + SCOPED_READINESS_CURRENT_SLICE);
+        const answers = options.currentItems(slice.map(refFromRow));
+        for (let index = 0; index < slice.length; index += 1) current.push(answers[index] === true);
+      }
       rows = allRows.filter((_row, index) => current[index] === true);
+      yield;
     } else if (options.currentItem) {
       const currentItem = options.currentItem;
       rows = allRows.filter((row) => currentItem(refFromRow(row)));

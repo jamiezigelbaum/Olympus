@@ -83952,6 +83952,22 @@ class LocalFileExtractionJobStore {
     return row?.next_retry_at ?? undefined;
   }
   scopedReadiness(lanes, options = {}) {
+    const steps = this.scopedReadinessSteps(lanes, options);
+    let step = steps.next();
+    while (!step.done)
+      step = steps.next();
+    return step.value;
+  }
+  async scopedReadinessInTurns(lanes, options) {
+    const steps = this.scopedReadinessSteps(lanes, options);
+    let step = steps.next();
+    while (!step.done) {
+      await options.turn();
+      step = steps.next();
+    }
+    return step.value;
+  }
+  *scopedReadinessSteps(lanes, options) {
     const uniqueLanes = new Map;
     for (const lane of lanes) {
       const key2 = requireLaneKey(lane);
@@ -83966,12 +83982,22 @@ class LocalFileExtractionJobStore {
       const rows2 = select.all(lane.corpusId, lane.provider, lane.accountScope, lane.approvedScopeKey);
       for (const row of rows2)
         byJobId.set(row.job_id, row);
+      yield;
     }
     const allRows = [...byJobId.values()];
     let rows = allRows;
     if (options.currentItems) {
-      const current2 = options.currentItems(allRows.map(refFromRow));
+      const current2 = [];
+      for (let start = 0;start < allRows.length; start += SCOPED_READINESS_CURRENT_SLICE) {
+        if (start > 0)
+          yield;
+        const slice = allRows.slice(start, start + SCOPED_READINESS_CURRENT_SLICE);
+        const answers = options.currentItems(slice.map(refFromRow));
+        for (let index = 0;index < slice.length; index += 1)
+          current2.push(answers[index] === true);
+      }
       rows = allRows.filter((_row, index) => current2[index] === true);
+      yield;
     } else if (options.currentItem) {
       const currentItem = options.currentItem;
       rows = allRows.filter((row) => currentItem(refFromRow(row)));
@@ -84712,7 +84738,7 @@ function terminalRetryPathSql(alias, paths) {
     return { sql: "0", params };
   return { sql: `(${alias}.status = 'failed_terminal' AND (${clauses.join(" OR ")}))`, params };
 }
-var FILE_EXTRACTION_JOBS_STORE_ID = "file-extraction-jobs", FILE_EXTRACTION_JOBS_SCHEMA_VERSION = 7, DEFAULT_EXTRACTION_LEASE_LIMIT = 10, MAX_EXTRACTION_LEASE_LIMIT = 500, DEFAULT_EXTRACTION_LEASE_SECONDS = 900, MAX_EXTRACTION_LEASE_SECONDS = 3600, DEFAULT_EXTRACTION_RETRY_BACKOFF_SECONDS = 300, MAX_EXTRACTION_RETRY_BACKOFF_SECONDS = 3600, MAX_EXTRACTION_RETRY_ATTEMPTS = 3, EXTRACTION_LEASE_EXHAUSTED_ERROR_KIND = "extraction_lease_exhausted", DEFAULT_SQLITE_BUSY_TIMEOUT_MS = 1e4, DEFAULT_READ_ONLY_SQLITE_BUSY_TIMEOUT_MS = 250, DEFAULT_JANITOR_LIMIT = 100, MAX_JANITOR_LIMIT = 5000, DEFAULT_RECYCLE_LIMIT = 50, MAX_RECYCLE_LIMIT = 500, MAX_REASON_LENGTH = 256, RECYCLED_ERROR_KIND = "provider_pause_recycled", AMBIGUOUS_IDENTITY_ERROR_KIND = "store_identity_ambiguous", JANITOR_RETRYABLE_ERROR_KIND = "janitor_retryable_requeued", JANITOR_TERMINAL_ERROR_KIND = "janitor_terminal_requeued", NETWORK_ERROR_KINDS, SAFE_TOKEN2, SAFE_KEY_PART, SAFE_HASH2, POLICY_DECISIONS, TERMINAL_STATUSES, ExtractionJobFieldError;
+var FILE_EXTRACTION_JOBS_STORE_ID = "file-extraction-jobs", FILE_EXTRACTION_JOBS_SCHEMA_VERSION = 7, DEFAULT_EXTRACTION_LEASE_LIMIT = 10, MAX_EXTRACTION_LEASE_LIMIT = 500, DEFAULT_EXTRACTION_LEASE_SECONDS = 900, MAX_EXTRACTION_LEASE_SECONDS = 3600, DEFAULT_EXTRACTION_RETRY_BACKOFF_SECONDS = 300, MAX_EXTRACTION_RETRY_BACKOFF_SECONDS = 3600, MAX_EXTRACTION_RETRY_ATTEMPTS = 3, EXTRACTION_LEASE_EXHAUSTED_ERROR_KIND = "extraction_lease_exhausted", DEFAULT_SQLITE_BUSY_TIMEOUT_MS = 1e4, DEFAULT_READ_ONLY_SQLITE_BUSY_TIMEOUT_MS = 250, DEFAULT_JANITOR_LIMIT = 100, MAX_JANITOR_LIMIT = 5000, DEFAULT_RECYCLE_LIMIT = 50, MAX_RECYCLE_LIMIT = 500, MAX_REASON_LENGTH = 256, RECYCLED_ERROR_KIND = "provider_pause_recycled", AMBIGUOUS_IDENTITY_ERROR_KIND = "store_identity_ambiguous", JANITOR_RETRYABLE_ERROR_KIND = "janitor_retryable_requeued", JANITOR_TERMINAL_ERROR_KIND = "janitor_terminal_requeued", NETWORK_ERROR_KINDS, SAFE_TOKEN2, SAFE_KEY_PART, SAFE_HASH2, POLICY_DECISIONS, TERMINAL_STATUSES, SCOPED_READINESS_CURRENT_SLICE = 2000, ExtractionJobFieldError;
 var init_job_store = __esm(() => {
   init_sqlite_migrations();
   init_job_names();
@@ -143219,11 +143245,13 @@ function createExtractionReadinessLedger(jobs, options = {}) {
       return;
     taking.add(corpusId);
     setTimeout(() => {
-      try {
-        taken.set(corpusId, { at: now(), snapshot: takeSnapshot(corpusId) });
-      } catch {} finally {
-        taking.delete(corpusId);
-      }
+      (async () => {
+        try {
+          taken.set(corpusId, { at: now(), snapshot: await takeSnapshotInTurns(corpusId) });
+        } catch {} finally {
+          taking.delete(corpusId);
+        }
+      })();
     }, 0);
   };
   let servesStale = false;
@@ -143248,6 +143276,22 @@ function createExtractionReadinessLedger(jobs, options = {}) {
       return lastUnreadable.get(corpusId) ?? [];
     }
   };
+  async function takeSnapshotInTurns(corpusId) {
+    const lanes = options.lanesForCorpus?.(corpusId);
+    if (lanes === undefined || !jobs.scopedReadinessInTurns)
+      return takeSnapshot(corpusId);
+    try {
+      return readinessSnapshot(await jobs.scopedReadinessInTurns(lanes, {
+        turn: ingestionTurn,
+        ...options.currentItem ? { currentItem: options.currentItem } : {},
+        ...options.currentItems ? { currentItems: options.currentItems } : {},
+        ...options.terminalRetryPaths ? { terminalRetryPaths: options.terminalRetryPaths } : {},
+        ...listing(corpusId)
+      }));
+    } catch {
+      return;
+    }
+  }
   function takeSnapshot(corpusId) {
     const lanes = options.lanesForCorpus?.(corpusId);
     if (lanes !== undefined) {
@@ -143300,6 +143344,7 @@ function readinessSnapshot(readiness) {
 }
 var init_readiness_ledger = __esm(() => {
   init_answer_ready_coverage();
+  init_control_path_headroom();
 });
 
 // src/workers/file-extraction/unreadable-files.ts
