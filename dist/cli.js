@@ -94981,6 +94981,21 @@ function createSourceIndexStatusHandler(options = {}) {
     storeStatusCache.set(key2, { recordedAtMs: nowMs(), status });
     return status;
   };
+  const storeReadCache = new Map;
+  const reusedStoreRead = (countsMaxAgeMs, key2, read) => {
+    const reuseMs = Math.min(countsMaxAgeMs, STORE_STATUS_REUSE_MS);
+    if (reuseMs <= 0)
+      return read();
+    const cacheKey = JSON.stringify(key2);
+    const cached2 = storeReadCache.get(cacheKey);
+    if (cached2 && nowMs() - cached2.recordedAtMs <= reuseMs)
+      return cached2.value;
+    const value = read();
+    if (storeReadCache.size > 256)
+      storeReadCache.clear();
+    storeReadCache.set(cacheKey, { recordedAtMs: nowMs(), value });
+    return value;
+  };
   return {
     async status(request = {}, snapshot = {}) {
       assertSupportedStatusRequest(request);
@@ -95021,8 +95036,8 @@ function createSourceIndexStatusHandler(options = {}) {
             status.counts[UNREADABLE_ITEMS_COUNT_KEY] = unreadable;
         }
         const enforced = withRetrievalEnforcementStatus(corpus, status, availability);
-        const withBacklog = store && availability?.modelId ? withEmbeddingBacklogEstimate(enforced, store, availability.modelId, availability, statusScope, snapshot.countsMaxAgeMs ?? 0) : enforced;
-        const resolved = store && corpus.family === "file" ? withPdfExtractionBacklog(withBacklog, store, withBacklog.embedding_parity?.required === true ? availability?.modelId : undefined) : withBacklog;
+        const withBacklog = store && availability?.modelId ? withEmbeddingBacklogEstimate(enforced, store, availability.modelId, availability, statusScope, snapshot.countsMaxAgeMs ?? 0, reusedStoreRead) : enforced;
+        const resolved = store && corpus.family === "file" ? withPdfExtractionBacklog(withBacklog, store, withBacklog.embedding_parity?.required === true ? availability?.modelId : undefined, (read) => reusedStoreRead(snapshot.countsMaxAgeMs ?? 0, ["pdf", store.corpusId], read)) : withBacklog;
         if (maxAgeMs > 0)
           cache.set(cacheKey, { recordedAtMs: nowMs(), status: resolved });
         return resolved;
@@ -95260,13 +95275,13 @@ function withRetrievalEnforcementStatus(corpus, status, hybridAvailability) {
     }
   };
 }
-function withEmbeddingBacklogEstimate(status, store, modelId, availability, scope, countsMaxAgeMs) {
+function withEmbeddingBacklogEstimate(status, store, modelId, availability, scope, countsMaxAgeMs, reused = (_age, _key, read) => read()) {
   const parity = status.embedding_parity;
   if (!parity?.required)
     return status;
   const embedder = availability.backend !== undefined && availability.provider !== undefined ? { modelId, provider: availability.provider, backend: availability.backend } : undefined;
-  const backlog = store.embeddingBacklogEstimate(modelId, embedder, scope, { countsMaxAgeMs });
-  const withheld = embedder ? store.privateTierEmbeddingWithheld(embedder, scope, { countsMaxAgeMs }) : undefined;
+  const backlog = reused(countsMaxAgeMs, ["embedding-backlog", store.corpusId, modelId, embedder ?? null, scope ?? null], () => store.embeddingBacklogEstimate(modelId, embedder, scope, { countsMaxAgeMs }));
+  const withheld = embedder ? reused(countsMaxAgeMs, ["private-withheld", store.corpusId, embedder, scope ?? null], () => store.privateTierEmbeddingWithheld(embedder, scope, { countsMaxAgeMs })) : undefined;
   const { source } = embeddingModelEstimate(modelId);
   return {
     ...status,
@@ -95286,8 +95301,8 @@ function withEmbeddingBacklogEstimate(status, store, modelId, availability, scop
     }
   };
 }
-function withPdfExtractionBacklog(status, store, modelId) {
-  const backlog = store.pdfExtractionBacklog();
+function withPdfExtractionBacklog(status, store, modelId, reused = (read) => read()) {
+  const backlog = reused(() => store.pdfExtractionBacklog());
   if (backlog.pendingPdfs === 0 && backlog.extractedPdfs === 0)
     return status;
   const averageChars = backlog.extractedPdfs > 0 ? backlog.extractedChars / backlog.extractedPdfs : FALLBACK_PDF_EXTRACTED_CHARS;
