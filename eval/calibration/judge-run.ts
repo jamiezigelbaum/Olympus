@@ -401,6 +401,10 @@ async function main(): Promise<void> {
     .slice(0, numberFlag('--limit', Number.MAX_SAFE_INTEGER));
   if (labeled.length === 0) throw new Error('No Personal or Private labels to score.');
   const asked = labeled.map(ask);
+  // Not sure items never touch the score: the share called Private is its own line.
+  const unsure = sample.items
+    .filter((item) => !excluded.has(item.id) && labels[item.id]?.label === 'unsure')
+    .map(ask);
 
   const shape = await promptShape(ownerContext);
   const written = mode === 'decision' ? await divergence() : '';
@@ -425,6 +429,7 @@ async function main(): Promise<void> {
   const warm = await runPass(asked, shape, written, true);
   const timed: Array<Awaited<ReturnType<typeof runPass>>> = [];
   for (let pass = 0; pass < passes; pass += 1) timed.push(await runPass(asked, shape, written, true));
+  const unsureAnswers = unsure.length > 0 ? [...(await runPass(unsure, shape, written, true)).answers.values()] : [];
   const moved = asked.filter((entry) => timed.some((pass) => pass.answers.get(entry.item.id)?.judge !== warm.answers.get(entry.item.id)?.judge));
 
   const rows: ScoredRow[] = labeled.map((item) => ({
@@ -456,6 +461,7 @@ async function main(): Promise<void> {
     wordMass: coverage.length > 0 ? medianAndRange(coverage) : undefined,
     speedItemsPerMinute: speed,
     primedCheck: primedResult,
+    notSure: { items: unsureAnswers.length, calledPrivate: unsureAnswers.filter((answer) => answer.judge === 'private').length },
     unweighted: {
       all: confusion(rows),
       bySource: groupedConfusion(rows, (row) => row.source),
