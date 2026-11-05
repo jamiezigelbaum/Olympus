@@ -5,7 +5,7 @@ import { fetchModelEndpoint } from '../../core/model-transport.ts';
 import { assertSnifferProfileAllowed, type SnifferLane } from './sniffer-lane.ts';
 import { buildSnifferBatchPrompt, SNIFFER_DECISION_CATEGORY, SNIFFER_SYSTEM_PROMPT } from './sniffer.ts';
 import type { SnifferPass, StoredSnifferVerdict } from './sniffer-store.ts';
-import { privateChance, tierMass, type TokenChance } from './sniffer-decision-mass.ts';
+import { privateChance, tierMass, SNIFFER_DECISION_PRIVATE_BAR, type TokenChance } from './sniffer-decision-mass.ts';
 
 export const REPLY_TO_TIER = '{"verdicts":[{"i":1,"tier":"';
 const PLACEHOLDER = 'CALIBRATION_ITEM_PLACEHOLDER';
@@ -48,18 +48,28 @@ export interface SnifferModel extends AnalystModel {
   /** Content-free probe, before cache/re-judge identity is read. Starts a new run. */
   prepareSniffer?(signal?: AbortSignal): Promise<void>;
 }
-function replyTokens(reply: Reply): TokenChance[] {
-  const tokens = reply.completion_probabilities?.[0]?.top_logprobs;
-  return Array.isArray(tokens) ? tokens.filter(token => token && typeof token.token === 'string' && Number.isFinite(token.logprob)) : [];
+function replyTokens(reply: unknown): TokenChance[] {
+  if (!reply || typeof reply !== 'object') return [];
+  const probabilities = (reply as Reply).completion_probabilities;
+  if (!Array.isArray(probabilities)) return [];
+  const tokens = probabilities[0]?.top_logprobs;
+  if (!Array.isArray(tokens) || !tokens.every(token => token && typeof token.token === 'string'
+    && typeof token.logprob === 'number' && Number.isFinite(token.logprob) && token.logprob <= 0)) return [];
+  return tokens;
 }
 
 interface Reply {
   completion_probabilities?: Array<{ top_logprobs?: TokenChance[] }>;
   tokens_cached?: number;
 }
+/** Capability absence differs from an unavailable server; never includes response text. */
+class NativeRequestError extends Error {
+  constructor(readonly unsupported = false) { super('The native privacy sniffer request failed.'); }
+}
 interface EndpointState {
   tail: Promise<unknown>;
   supported?: boolean | undefined;
+  rejudgeReady?: boolean;
   probedAt?: number;
   primed?: string | undefined;
 }
@@ -87,11 +97,11 @@ export function createDecisionSnifferModel(lane: SnifferLane, full: AnalystModel
         body: JSON.stringify(body),
         signal: signal ? AbortSignal.any([timeout, signal]) : timeout,
       });
-      if (!response.ok) throw new Error('Native request failed.');
+      if (!response.ok) throw new NativeRequestError([404, 405, 501].includes(response.status));
       return await response.json() as T;
-    } catch {
+    } catch (error) {
       // Neither server errors (which can echo a prompt) nor fetch causes escape.
-      throw new Error('The native privacy sniffer request failed.');
+      throw error instanceof NativeRequestError ? error : new NativeRequestError();
     }
   };
   let shapeKey = '';
@@ -103,7 +113,7 @@ export function createDecisionSnifferModel(lane: SnifferLane, full: AnalystModel
     chat_template_kwargs: { enable_thinking: false },
   })).prompt;
   const prepare = async () => {
-    if (lane.profile.snifferMode === 'decision') { lane.snifferMode = 'decision'; return; }
+    if (lane.profile.snifferMode === 'decision') { lane.snifferMode = 'decision'; lane.rejudgeReady = true; return; }
     // Successful capability proof is cached; unsupported servers are re-probed
     // once a minute so a server replacement needs no owner action.
     if (sharedState.supported === undefined || (!sharedState.supported && Date.now() - (sharedState.probedAt ?? 0) >= 60_000)) {
@@ -113,11 +123,16 @@ export function createDecisionSnifferModel(lane: SnifferLane, full: AnalystModel
         const reply = await post<Reply>('/completion', { prompt: `${prompt}${REPLY_TO_TIER}`, n_predict: 1, n_probs: 40, temperature: 0, cache_prompt: true, id_slot: 0 });
         sharedState.supported = replyTokens(reply).length > 0;
         if (sharedState.supported) await decisionDivergence(post);
-      } catch { sharedState.supported = false; }
+        sharedState.rejudgeReady = true;
+      } catch (error) {
+        sharedState.supported = false;
+        sharedState.rejudgeReady = error instanceof NativeRequestError && error.unsupported;
+      }
       sharedState.probedAt = Date.now();
       reset();
     }
     lane.snifferMode = sharedState.supported ? 'decision' : 'full';
+    lane.rejudgeReady = sharedState.rejudgeReady !== false;
   };
   return {
     async prepareSniffer(nextSignal) {
@@ -156,11 +171,11 @@ export function createDecisionSnifferModel(lane: SnifferLane, full: AnalystModel
           const reply = await post<Reply>('/completion', { prompt: `${shape.render(material)}${REPLY_TO_TIER}${written}`, n_predict: 1, n_probs: 40, temperature: 0, cache_prompt: true, id_slot: 0 });
           const chance = privateChance(tierMass(replyTokens(reply), written));
           // A cold slot (e.g. a server restart between calls) must be primed again.
-          if (reply.tokens_cached === 0) reset();
+          if (reply?.tokens_cached === 0) reset();
           if (chance === undefined || !Number.isFinite(chance)) { reset(); return { text: '', modelId: lane.modelId }; }
           return { text: '', modelId: lane.modelId, decisionVerdict: {
-            tier: chance >= 0.5 ? 'private' : 'personal', category: SNIFFER_DECISION_CATEGORY,
-            confidence: chance >= 0.5 ? chance : 1 - chance, failSafe: false,
+            tier: chance >= SNIFFER_DECISION_PRIVATE_BAR ? 'private' : 'personal', category: SNIFFER_DECISION_CATEGORY,
+            confidence: chance >= SNIFFER_DECISION_PRIVATE_BAR ? chance : 1 - chance, failSafe: false,
           } };
         } catch {
           reset();

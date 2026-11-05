@@ -183,6 +183,8 @@ export interface SnifferPassOptions {
 export type SnifferPassStop = 'pass_budget' | 'daily_budget' | 'yield' | 'preempted' | 'transport_failures' | 'aborted';
 
 export interface SnifferPassReport {
+  /** Re-judge answers held at the previous Private placement during rollout. */
+  heldLowering: number;
   callMs: number;
   maxQueueWaitMs: number;
   /** Queued questions read this pass. */
@@ -251,6 +253,7 @@ export async function runSnifferPass(options: SnifferPassOptions): Promise<Sniff
   const monotonicNow = options.monotonicNow ?? (() => performance.now());
   const deadline = monotonicNow() + (options.passTimeMs ?? DEFAULT_SNIFFER_PASS_TIME_MS);
   const report: SnifferPassReport = {
+    heldLowering: 0,
     callMs: 0,
     maxQueueWaitMs: 0,
     pendingSeen: 0,
@@ -310,6 +313,7 @@ export async function runSnifferPass(options: SnifferPassOptions): Promise<Sniff
       return;
     }
     if (applied?.outcome === 'held_moving') return;
+    if (applied?.outcome === 'held_lowering') { report.heldLowering += 1; return; }
     if (applied?.outcome === 'needs_placement') {
       // A routed item whose set is not open here: the verdict is cached, the
       // question stays, and the next pass (or sync) with the set applies it.

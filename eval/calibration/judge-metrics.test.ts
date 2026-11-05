@@ -34,7 +34,7 @@ describe('tierMass', () => {
   const lp = Math.log;
   test('splits whole-word tokens and ignores anything else', () => {
     const mass = tierMass([{ token: 'private', logprob: lp(0.6) }, { token: 'personal', logprob: lp(0.2) }, { token: 'public', logprob: lp(0.2) }]);
-    expect(privateChance(mass)).toBeCloseTo(0.75);
+    expect(privateChance(mass)).toBeUndefined();
   });
 
   test('counts word pieces, and a piece shared by both words decides nothing', () => {

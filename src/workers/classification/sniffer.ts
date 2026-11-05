@@ -85,6 +85,8 @@ export interface SnifferLaneIdentity {
   kind: SnifferLaneKind;
   /** Effective native mode, set by the content-free capability probe. */
   snifferMode?: 'decision' | 'full';
+  /** False after a transient auto probe failure: bulk re-judging must wait. */
+  rejudgeReady?: boolean;
   /** Stable owner-approval identity. */
   modelId: string;
   /** Actual weights/revision identity; never used to look up owner consent. */
@@ -158,7 +160,9 @@ export function snifferReasonCode(verdict: Pick<StoredSnifferVerdict, 'category'
 export const SNIFFER_INJECTION_CATEGORY = 'injection';
 /** Reserved for the native adapter, never accepted from full-mode JSON. */
 export const SNIFFER_DECISION_CATEGORY = 'decision';
-export const SNIFFER_DECISION_VERSION = 'decision-v1';
+/** Single semantic identity of native mode, its bar, coverage floor and decoder.
+ * Bump for any change to those semantics; cache and re-judge ids derive from it. */
+export const SNIFFER_DECISION_VERSION = 'decision-v2';
 
 /**
  * A cached verdict that still answers its question. The injection screen
@@ -540,7 +544,8 @@ export function snifferMaterialForModel(material: string): string {
  * pending, held Private): the sniffer can make an item wait, never less private.
  */
 export class CachedTierSniffer implements TierSniffer {
-  readonly id: string;
+  get id(): string { return snifferId(this.lane, this.promptVersion); }
+  get rejudgeReady(): boolean { return this.lane.rejudgeReady !== false; }
   private readonly store: TierSnifferStore;
   private readonly lane: SnifferLaneIdentity;
   private readonly promptVersion: string;
@@ -549,7 +554,6 @@ export class CachedTierSniffer implements TierSniffer {
     this.store = store;
     this.lane = lane;
     this.promptVersion = promptVersion;
-    this.id = snifferId(lane, promptVersion);
   }
 
   judge(request: TierSnifferRequest): TierSnifferVerdict {

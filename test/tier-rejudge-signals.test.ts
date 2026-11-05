@@ -3,7 +3,9 @@ import { Database } from 'bun:sqlite';
 import { join } from 'node:path';
 import { InstalledTierClassification } from '../src/workers/classification/installed-tier-classification.ts';
 import { BUILT_IN_SNIFFER_LANE } from '../src/workers/classification/built-in-sniffer.ts';
-import { SNIFFER_PROMPT_VERSION, snifferCacheModelId } from '../src/workers/classification/sniffer.ts';
+import { SNIFFER_PROMPT_VERSION, snifferCacheModelId, CachedTierSniffer } from '../src/workers/classification/sniffer.ts';
+import { TierSnifferStore } from '../src/workers/classification/sniffer-store.ts';
+import { runSnifferPass } from '../src/workers/classification/sniffer-resolver.ts';
 import { TierSnifferService } from '../src/workers/classification/sniffer-service.ts';
 import { classifyItemTiers, tierSnifferInputHash, type TierSnifferRequest } from '../src/workers/classification/tier-classifier.ts';
 import { emptyTierRejudgeReport, rejudgeStoredContent, settleRoutedSecrets, settleLegacySecrets } from '../src/workers/connector-store/tier-rejudge.ts';
@@ -413,4 +415,91 @@ test(`legacy full-body screening before resolving a clean excerpt: ${scenario}`,
       expect(calls).toBe(scenario === 'changed-during-model' ? 1 : 0);
     }
   } finally { store.exportItemCopy = exportCopy; store.tombstoneCopy = tombstoneCopy; service.stop(); installed.close(); }
+});
+
+test('rollout holds immediate lowering without stamping, then automatically reconsiders it when off', async () => {
+  const previous = process.env.OLYMPUS_TIER_SNIFFER_HOLD_LOWERING;
+  try {
+    const f = await storedPrivate('private');
+    rejudgeStoredContent(f.set, f.ledger.getCurrent(identity)!, { autoMoves: true, report: emptyTierRejudgeReport(), sniffer: judging('prompt-a', 'secure') });
+    await moveTieredItem({ set: f.set, identity, target: { metadataTier: 'secure', contentTier: 'secure' } });
+    const before = f.ledger.getCurrent(identity)!;
+    const copies = f.ledger.copies(identity);
+    const key = { engineVersion: before.engineVersion, snifferId: 'prompt-b' };
+    process.env.OLYMPUS_TIER_SNIFFER_HOLD_LOWERING = '1';
+    const held = emptyTierRejudgeReport();
+    rejudgeStoredContent(f.set, before, { autoMoves: true, report: held, key, sniffer: judging('prompt-b', 'private') });
+    expect(held).toMatchObject({ heldLowering: 1, movesQueued: 0, updated: 0 });
+    expect(f.ledger.getCurrent(identity)).toEqual(before);
+    expect(f.ledger.copies(identity)).toEqual(copies);
+    expect(f.ledger.rejudgeCandidatePage(key).records).toHaveLength(1);
+    delete process.env.OLYMPUS_TIER_SNIFFER_HOLD_LOWERING;
+    const released = emptyTierRejudgeReport();
+    rejudgeStoredContent(f.set, f.ledger.rejudgeCandidatePage(key).records[0]!, { autoMoves: true, report: released, key, sniffer: judging('prompt-b', 'private') });
+    expect(released).toMatchObject({ heldLowering: 0, movesQueued: 1 });
+    expect(f.ledger.getCurrent(identity)).toMatchObject({ state: 'moving', targetContentTier: 'private' });
+  } finally {
+    if (previous === undefined) delete process.env.OLYMPUS_TIER_SNIFFER_HOLD_LOWERING;
+    else process.env.OLYMPUS_TIER_SNIFFER_HOLD_LOWERING = previous;
+  }
+});
+
+test('queued re-judge lowering stays put and replays its cached answer when rollout hold is off', async () => {
+  const previous = process.env.OLYMPUS_TIER_SNIFFER_HOLD_LOWERING;
+  const f = await storedPrivate('private');
+  const store = new TierSnifferStore({ dbPath: ':memory:' });
+  try {
+    process.env.OLYMPUS_TIER_SNIFFER_HOLD_LOWERING = '1';
+    // Raises still apply during rollout, including an asynchronous re-judge.
+    const queued = { id: 'prompt-a', judge: (request: TierSnifferRequest) => request.pass === 'metadata'
+      ? { verdict: 'undecided' as const, queued: true as const }
+      : { verdict: 'decided' as const, tier: 'private' as const, code: 'ordinary' } };
+    rejudgeStoredContent(f.set, f.ledger.getCurrent(identity)!, { autoMoves: true, report: emptyTierRejudgeReport(), sniffer: queued });
+    expect(f.ledger.applySnifferVerdict(identity, { pass: 'metadata', tier: 'secure', reason: 'metadata:sniffer:prompt-a:identity', modelId: 'fixture' },
+      { placementFor: f.set.placementFor.bind(f.set) })?.outcome).toBe('queued_move');
+    await moveTieredItem({ set: f.set, identity, target: { metadataTier: 'secure', contentTier: 'secure' } });
+    const lane = { ...BUILT_IN_SNIFFER_LANE, snifferMode: 'decision' as const };
+    const cached = new CachedTierSniffer(store, lane);
+    const before = f.ledger.getCurrent(identity)!;
+    rejudgeStoredContent(f.set, before, { autoMoves: true, report: emptyTierRejudgeReport(), sniffer: cached });
+    const copies = f.ledger.copies(identity);
+    let calls = 0;
+    const model = { async complete() { calls++; return { text: '', modelId: lane.modelId,
+      decisionVerdict: { tier: 'personal' as const, category: 'decision', confidence: 0.7, failSafe: false } }; } };
+    const run = () => runSnifferPass({ targets: [{ ledger: f.ledger, sniffer: store, placementFor: f.set.placementFor.bind(f.set) }], lane, model });
+    expect(await run()).toMatchObject({ heldLowering: 1, calls: 2 });
+    expect(f.ledger.getCurrent(identity)).toEqual(before);
+    expect(f.ledger.copies(identity)).toEqual(copies);
+    expect(store.counts().questions).toBeGreaterThan(0);
+    delete process.env.OLYMPUS_TIER_SNIFFER_HOLD_LOWERING;
+    expect(await run()).toMatchObject({ heldLowering: 0, calls: 0, cacheHits: 1, movesQueued: 1 });
+    expect(calls).toBe(2);
+    expect(f.ledger.getCurrent(identity)).toMatchObject({ state: 'moving', targetMetadataTier: 'private', targetContentTier: 'private' });
+  } finally {
+    store.close();
+    if (previous === undefined) delete process.env.OLYMPUS_TIER_SNIFFER_HOLD_LOWERING;
+    else process.env.OLYMPUS_TIER_SNIFFER_HOLD_LOWERING = previous;
+  }
+});
+
+test('rollout also holds Personal names when the body remains Private', async () => {
+  const previous = process.env.OLYMPUS_TIER_SNIFFER_HOLD_LOWERING;
+  try {
+    const f = await storedPrivate('private');
+    rejudgeStoredContent(f.set, f.ledger.getCurrent(identity)!, { autoMoves: true, report: emptyTierRejudgeReport(), sniffer: judging('prompt-a', 'secure') });
+    await moveTieredItem({ set: f.set, identity, target: { metadataTier: 'secure', contentTier: 'secure' } });
+    const before = f.ledger.getCurrent(identity)!;
+    const copies = f.ledger.copies(identity);
+    process.env.OLYMPUS_TIER_SNIFFER_HOLD_LOWERING = '1';
+    const report = emptyTierRejudgeReport();
+    rejudgeStoredContent(f.set, before, { autoMoves: true, report, sniffer: {
+      id: 'prompt-b', judge: request => ({ verdict: 'decided', tier: request.pass === 'metadata' ? 'private' : 'secure', code: 'decision:0.70' }),
+    } });
+    expect(report).toMatchObject({ heldLowering: 1, movesQueued: 0 });
+    expect(f.ledger.getCurrent(identity)).toEqual(before);
+    expect(f.ledger.copies(identity)).toEqual(copies);
+  } finally {
+    if (previous === undefined) delete process.env.OLYMPUS_TIER_SNIFFER_HOLD_LOWERING;
+    else process.env.OLYMPUS_TIER_SNIFFER_HOLD_LOWERING = previous;
+  }
 });

@@ -1,5 +1,9 @@
 // Shared one-token decision maths. No item text.
 
+/** Bump SNIFFER_DECISION_VERSION whenever the bar, floor or decoder changes. */
+export const SNIFFER_DECISION_PRIVATE_BAR = 0.5;
+export const SNIFFER_DECISION_MIN_COVERAGE = 0.9;
+
 export interface TokenChance {
   token: string;
   logprob: number;
@@ -15,9 +19,14 @@ export interface TierMass {
 /** The probability mass on each word, from the top tokens at the point where the two diverge. */
 export function tierMass(tokens: readonly TokenChance[], alreadyWritten = ''): TierMass {
   const left = (word: string) => word.slice(alreadyWritten.length);
-  const starts = (token: string, word: string) => token.length > 0 && (left(word).startsWith(token) || token.startsWith(left(word)));
+  const starts = (token: string, word: string) => {
+    const rest = left(word);
+    return word.startsWith(alreadyWritten) && rest.length > 0 && token.length > 0
+      && (rest.startsWith(token) || token.startsWith(rest + '"'));
+  };
   const mass: TierMass = { private: 0, personal: 0, ambiguous: 0 };
   for (const { token, logprob } of tokens) {
+    if (!Number.isFinite(logprob) || logprob > 0) continue;
     const isPrivate = starts(token, 'private');
     const isPersonal = starts(token, 'personal');
     const chance = Math.exp(logprob);
@@ -28,8 +37,11 @@ export function tierMass(tokens: readonly TokenChance[], alreadyWritten = ''): T
   return mass;
 }
 
-/** P(Private), or undefined when the model put no mass on either word. */
+/** Relative Private token mass, only with adequate coverage and a non-ambiguous vote. */
 export function privateChance(mass: TierMass): number | undefined {
+  const coverage = mass.private + mass.personal + mass.ambiguous;
+  if (![mass.private, mass.personal, mass.ambiguous].every(value => Number.isFinite(value) && value >= 0)
+    || coverage + Number.EPSILON < SNIFFER_DECISION_MIN_COVERAGE) return undefined;
   const total = mass.private + mass.personal;
   return total > 0 ? mass.private / total : undefined;
 }

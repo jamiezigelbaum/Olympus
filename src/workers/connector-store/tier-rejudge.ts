@@ -62,6 +62,7 @@ import {
 } from '../classification/tier-classifier.ts';
 import {
   copyServingLayer,
+  holdSnifferLowering,
   type TierLedgerIdentity,
   type TierLedgerRecord,
   type TierOwnerOverrideGuard,
@@ -79,6 +80,8 @@ export const DEFAULT_TIER_REJUDGE_PER_PASS = 100;
 export const TIER_REJUDGE_CONNECTOR_ID = 'olympus_tier_rejudge';
 
 export interface TierRejudgeReport {
+  /** Settled Private decisions kept in place by the rollout switch. */
+  heldLowering: number;
   /** Candidates read from the ledger. */
   seen: number;
   /** Decisions recorded with no change of stores. */
@@ -109,7 +112,7 @@ export interface TierRejudgeOptions {
 }
 
 export function emptyTierRejudgeReport(): TierRejudgeReport {
-  return { seen: 0, updated: 0, movesQueued: 0, asked: 0, secrets: 0, skipped: 0, failed: 0 };
+  return { heldLowering: 0, seen: 0, updated: 0, movesQueued: 0, asked: 0, secrets: 0, skipped: 0, failed: 0 };
 }
 
 export function rejudgeRoutedItems(options: TierRejudgeOptions): { report: TierRejudgeReport; next?: TierLedgerIdentity } {
@@ -117,7 +120,7 @@ export function rejudgeRoutedItems(options: TierRejudgeOptions): { report: TierR
   const { set } = options;
   const classification = set.classification();
   // No sniffer, or inputs that cannot be trusted: recorded decisions stand.
-  if (!classification?.sniffer || classification.unavailableReason) return { report };
+  if (!classification?.sniffer || classification.unavailableReason || classification.sniffer.rejudgeReady === false) return { report };
   const ledger = set.ledger;
   const limit = Math.max(1, options.limit ?? DEFAULT_TIER_REJUDGE_PER_PASS);
   const key = { engineVersion: TIER_CLASSIFIER_VERSION, snifferId: classification.sniffer.id };
@@ -295,6 +298,11 @@ export function rejudgeStoredContent(
   // The row this decision was made from must still be the row it writes:
   // the same generation and still no owner override (re-judge candidates
   // have none). An owner who set the item meanwhile decides it, not this pass.
+  if (holdSnifferLowering(record, decision)) {
+    // No stamp: turning the switch off makes the same cached answer eligible.
+    report.heldLowering += 1;
+    return;
+  }
   const recorded = ledger.recordRoutedPlacement(
     identity,
     decision,

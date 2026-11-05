@@ -1,4 +1,8 @@
-import { describe, expect, test } from 'bun:test';
+import { describe, expect, test, spyOn } from 'bun:test';
+import { join } from 'node:path';
+import { tempDir, openTierFixture, fixtureConnector, FIXTURE_PLACEMENT, identityOf } from './helpers/tier-fixtures.ts';
+import { rejudgeRoutedItems } from '../src/workers/connector-store/tier-rejudge.ts';
+import { registerInstalledTierClassification } from '../src/workers/classification/installed-tier-classification-registry.ts';
 import type { AnalystModel } from '../src/core/analyst.ts';
 import { createSovereigntyEngine, loadSovereigntyPreset } from '../src/core/sovereignty.ts';
 import { createDecisionSnifferModel, REPLY_TO_TIER, type SnifferModelRequest } from '../src/workers/classification/sniffer-decision.ts';
@@ -18,6 +22,8 @@ function fakeServer(options: { unsupported?: boolean; sharedToken?: boolean; pri
   let unsupported = options.unsupported ?? false;
   let noMass = false;
   let cold = false;
+  let down = false;
+  let customReply: unknown;
   let active = 0;
   let peak = 0;
   const render = (messages: Array<{ role: string; content: string }>) => messages.map(m => `<${m.role}>${m.content}</${m.role}>`).join('') + '<assistant>';
@@ -27,6 +33,7 @@ function fakeServer(options: { unsupported?: boolean; sharedToken?: boolean; pri
     events.push({ path, body });
     active++; peak = Math.max(active, peak);
     try {
+      if (down) return new Response('unavailable', { status: 503 });
       if (unsupported) return new Response('unsupported', { status: 404 });
       if (path === '/apply-template') return Response.json({ prompt: render(body.messages) });
       if (path === '/tokenize') return Response.json({ tokens: [{ piece: options.sharedToken ? 'p' : body.content }] });
@@ -39,7 +46,7 @@ function fakeServer(options: { unsupported?: boolean; sharedToken?: boolean; pri
           { token: options.sharedToken ? 'rivate' : 'private', logprob: Math.log(options.privateProbability ?? 0.3) },
         ] }] };
         cold = false;
-        return Response.json(result);
+        return Response.json(customReply === undefined ? result : customReply);
       }
       return new Response('', { status: 404 });
     } finally { active--; }
@@ -49,25 +56,66 @@ function fakeServer(options: { unsupported?: boolean; sharedToken?: boolean; pri
   } };
   const fullRequests: unknown[] = [];
   const full: AnalystModel = { async complete(request) { fullRequests.push(request); return { modelId: lane.modelId, text: JSON.stringify({ verdicts: [{ i: 1, tier: 'personal', category: 'ordinary', confidence: 0.7, ownRecord: false, privateKind: 'none' }] }) }; } };
-  return { events, lane, render, fullRequests, model: () => createDecisionSnifferModel(lane, full), stop: () => server.stop(true), fail: () => { fail = true; }, noMass: () => { noMass = true; }, cold: () => { cold = true; }, peak: () => peak, unsupported: () => { unsupported = true; } };
+  return { events, lane, render, fullRequests, model: () => createDecisionSnifferModel(lane, full), stop: () => server.stop(true), fail: () => { fail = true; }, noMass: () => { noMass = true; }, cold: () => { cold = true; }, peak: () => peak, unsupported: () => { unsupported = true; }, down: () => { down = true; }, recover: () => { down = false; unsupported = false; }, reply: (value: unknown) => { customReply = value; } };
 }
 function request(material: string, ownerContext?: string): SnifferModelRequest {
   return { system: SNIFFER_SYSTEM_PROMPT, prompt: buildSnifferBatchPrompt('content', [{ i: 1, material }], ownerContext), localOnly: true,
     snifferItem: { pass: 'content', material, ...(ownerContext ? { ownerContext } : {}) } };
 }
 const subject = (n: number) => ({ provider: 'fixture', accountScope: 'fixture', providerItemId: String(n) });
-function queue(ledger: TierLedger, store: TierSnifferStore, lane: SnifferLane, n: number, material = `therapy letter ${n}`) {
-  const decision = classifyItemTiers({ subject: subject(n), signals: { title: `therapy letter ${n}`, labels: ['SSN 123-45-6789'] } }, { sniffer: new CachedTierSniffer(store, lane) });
+function queue(ledger: TierLedger, store: TierSnifferStore, lane: SnifferLane, n: number, material = `therapy letter ${n}`, namesOnly = false) {
+  const decision = classifyItemTiers({ subject: subject(n), signals: { title: `therapy letter ${n}`, labels: ['SSN 123-45-6789'] }, namesOnly }, { sniffer: new CachedTierSniffer(store, lane) });
   ledger.recordDecision(subject(n), decision);
   // Force only the test material into the pending question, through the real queue.
   store.enqueue({ subject: subject(n), pass: 'metadata', material, mapRevision: decision.mapRevision, flags: [] });
 }
 
 describe('native sniffer decision', () => {
+  test('coverage floor, ambiguous-only mass, finite logprobs and strict tier boundaries', () => {
+    const lp = Math.log;
+    expect(privateChance({ private: 0.2, personal: 0.69, ambiguous: 0 })).toBeUndefined();
+    expect(privateChance({ private: 0.2, personal: 0.7, ambiguous: 0 })).toBeCloseTo(2 / 9);
+    expect(privateChance({ private: 0.2, personal: 0.5, ambiguous: 0.3 })).toBeCloseTo(2 / 7);
+    expect(privateChance({ private: 0, personal: 0, ambiguous: 1 })).toBeUndefined();
+    for (const logprob of [NaN, Infinity, -Infinity]) {
+      expect(privateChance(tierMass([{ token: 'private', logprob }]))).toBeUndefined();
+    }
+    for (const token of ['privateer', 'personality', 'privately', 'personalized', '']) {
+      expect(tierMass([{ token, logprob: 0 }])).toEqual({ private: 0, personal: 0, ambiguous: 0 });
+    }
+    expect(tierMass([{ token: 'unrelated', logprob: 0 }], 'private')).toEqual({ private: 0, personal: 0, ambiguous: 0 });
+    expect(tierMass([{ token: 'rivate', logprob: lp(0.7) }, { token: 'ersonal', logprob: lp(0.3) }], 'p').private).toBeCloseTo(0.7);
+    expect(tierMass([{ token: 'private"', logprob: 0 }]).private).toBe(1);
+  });
+
+  for (const [name, reply] of [
+    ['low coverage', { completion_probabilities: [{ top_logprobs: [{ token: 'personal', logprob: Math.log(0.8) }] }] }],
+    ['ambiguous only', { completion_probabilities: [{ top_logprobs: [{ token: 'p', logprob: 0 }] }] }],
+    ['tier-like unrelated token', { completion_probabilities: [{ top_logprobs: [{ token: 'personality', logprob: 0 }] }] }],
+    ['non-finite logprob on wire', { completion_probabilities: [{ top_logprobs: [{ token: 'personal', logprob: null }] }] }],
+    ['null reply', null],
+    ['malformed probabilities', { completion_probabilities: { 0: { top_logprobs: [{ token: 'personal', logprob: 0 }] } } }],
+    ['malformed token list', { completion_probabilities: [{ top_logprobs: 'personal' }] }],
+    ['null probability entry', { completion_probabilities: [null] }],
+  ] as const) test(name + ' retries then fails safe', async () => {
+    const f = fakeServer(); f.reply(reply);
+    const ledger = new TierLedger({ dbPath: ':memory:' });
+    const store = new TierSnifferStore({ dbPath: ':memory:' });
+    try {
+      queue(ledger, store, f.lane, 1);
+      const model = f.model();
+      const run = () => runSnifferPass({ targets: [{ ledger, sniffer: store }], lane: f.lane, model });
+      expect((await run()).verdictsApplied).toBe(0);
+      expect((await run()).verdictsApplied).toBe(0);
+      expect((await run()).failSafePrivate).toBe(1);
+      expect(ledger.getCurrent(subject(1))?.metadataTier).toBe('secure');
+    } finally { store.close(); ledger.close(); f.stop(); }
+  });
+
   test('mass at divergence, ambiguity and missing mass', () => {
     const tokens = [{ token: 'p', logprob: Math.log(0.1) }, { token: 'private', logprob: Math.log(0.2) }, { token: 'personal', logprob: Math.log(0.5) }, { token: 'other', logprob: Math.log(0.2) }];
     expect(tierMass(tokens).ambiguous).toBeCloseTo(0.1);
-    expect(privateChance(tierMass(tokens))).toBeCloseTo(2 / 7);
+    expect(privateChance(tierMass(tokens))).toBeUndefined();
     expect(privateChance(tierMass([{ token: 'rivate', logprob: Math.log(0.6) }, { token: 'ersonal', logprob: Math.log(0.4) }], 'p'))).toBeCloseTo(0.6);
     expect(privateChance(tierMass([]))).toBeUndefined();
     expect(privateChance(tierMass([{ token: 'p', logprob: 0 }]))).toBeUndefined();
@@ -124,7 +172,9 @@ describe('native sniffer decision', () => {
   test('decision Personal 0.7 survives persistence/cache and full mode retains 0.9 bar', async () => {
     const f = fakeServer();
     const ledger = new TierLedger({ dbPath: ':memory:' });
-    const store = new TierSnifferStore({ dbPath: ':memory:' });
+    const tmp = tempDir('sniffer-decision-');
+    const dbPath = join(tmp.dir, 'sniffer.sqlite');
+    let store = new TierSnifferStore({ dbPath });
     try {
       const before = snifferId(f.lane);
       queue(ledger, store, f.lane, 1);
@@ -132,18 +182,26 @@ describe('native sniffer decision', () => {
       const report = await runSnifferPass({ targets: [{ ledger, sniffer: store }], lane: f.lane, model, concurrentCalls: 8 });
       expect(report.resolvedPersonal).toBe(1);
       expect(snifferId(f.lane)).not.toBe(before);
+      store.close();
+      store = new TierSnifferStore({ dbPath });
       const stored = store.getVerdict({ materialHash: snifferMaterialHash('metadata', 'therapy letter 1'), modelId: snifferCacheModelId(f.lane), promptVersion: snifferPromptVersions().cache, mapRevision: 'none' })!;
       expect(stored).toMatchObject({ tier: 'personal', category: 'decision', confidence: 0.7 });
       expect(cachedSnifferVerdictHolds(stored)).toBe(true);
       expect(snifferTierKey(stored)).toBe('private');
       expect(snifferReasonCode(stored)).toBe('decision:0.70');
       expect(new CachedTierSniffer(store, f.lane).judge({ pass: 'metadata', material: 'therapy letter 1', mapRevision: 'none', flags: [], subject: subject(2) })).toMatchObject({ verdict: 'decided', tier: 'private' });
+      queue(ledger, store, f.lane, 2, 'therapy letter 1');
+      const completions = f.events.filter(e => e.path === '/completion').length;
+      const replay = await runSnifferPass({ targets: [{ ledger, sniffer: store }], lane: f.lane, model });
+      expect(replay).toMatchObject({ cacheHits: 1, calls: 0, resolvedPersonal: 1 });
+      expect(ledger.getCurrent(subject(2))?.reasons).toContain('metadata:sniffer:' + snifferId(f.lane) + ':decision:0.70');
+      expect(f.events.filter(e => e.path === '/completion')).toHaveLength(completions);
       expect(snifferTierKey({ ...stored, category: 'ordinary' })).toBe('secure');
       expect(snifferTierKey({ ...stored, category: 'ordinary', confidence: 0.9 })).toBe('private');
       const small = BUILT_IN_REASONING_MODELS.find(m => m.sizeClass === 'small')!;
       expect(snifferVerdictTier(stored, { ...f.lane, cacheModelId: small.modelId }, ['content:own_record:fixture']).tier).toBe('secure');
       expect(parseSnifferBatchResponse(JSON.stringify({ verdicts: [{ i: 1, tier: 'personal', category: 'decision', confidence: 0.7, ownRecord: false, privateKind: 'none' }] }), new Set([1])).size).toBe(0);
-    } finally { store.close(); ledger.close(); f.stop(); }
+    } finally { store.close(); ledger.close(); f.stop(); tmp.cleanup(); }
   });
 
   test('no mass uses existing three-attempt fail-safe, re-priming each retry', async () => {
@@ -268,4 +326,107 @@ describe('native sniffer decision', () => {
     const explicit = new SnifferCallBudget({ maxCallsPerDay: 1 });
     expect(explicit.tryConsume(true)).toBe(true); expect(explicit.tryConsume(true)).toBe(false);
   });
+});
+
+test('injection fail-safe persists but never becomes a reusable decision verdict', async () => {
+  const f = fakeServer(); const tmp = tempDir('sniffer-injection-cache-');
+  const ledger = new TierLedger({ dbPath: ':memory:' });
+  const dbPath = join(tmp.dir, 'sniffer.sqlite');
+  let store = new TierSnifferStore({ dbPath });
+  try {
+    const model = f.model(); await model.prepareSniffer?.();
+    const key = { materialHash: snifferMaterialHash('metadata', 'therapy letter 1'), modelId: snifferCacheModelId(f.lane), promptVersion: snifferPromptVersions().cache, mapRevision: 'none' };
+    store.putVerdict(key, { tier: 'private', category: 'injection', confidence: 0, failSafe: true });
+    store.close(); store = new TierSnifferStore({ dbPath });
+    const stored = store.getVerdict(key)!;
+    expect(stored).toMatchObject({ category: 'injection', failSafe: true });
+    expect(cachedSnifferVerdictHolds(stored)).toBe(false);
+    expect(snifferTierKey(stored)).toBe('secure');
+    expect(snifferReasonCode(stored)).toBe('injection:classifier_instruction:0.00');
+    queue(ledger, store, f.lane, 1);
+    const report = await runSnifferPass({ targets: [{ ledger, sniffer: store }], lane: f.lane, model });
+    expect(report).toMatchObject({ calls: 1, cacheHits: 0, resolvedPersonal: 1 });
+  } finally { store.close(); ledger.close(); tmp.cleanup(); f.stop(); }
+});
+
+test('decision cache is isolated when a failed auto probe switches the lane to full', async () => {
+  const f = fakeServer(); f.lane.profile.snifferMode = 'auto';
+  const ledger = new TierLedger({ dbPath: ':memory:' });
+  const store = new TierSnifferStore({ dbPath: ':memory:' });
+  try {
+    const model = f.model(); await model.prepareSniffer?.();
+    queue(ledger, store, f.lane, 1);
+    await runSnifferPass({ targets: [{ ledger, sniffer: store }], lane: f.lane, model });
+    const cached = new CachedTierSniffer(store, f.lane);
+    const decisionId = cached.id;
+    f.down();
+    await expect(model.complete(request('outage'))).rejects.toThrow();
+    queue(ledger, store, f.lane, 2, 'therapy letter 1');
+    const report = await runSnifferPass({ targets: [{ ledger, sniffer: store }], lane: f.lane, model });
+    expect(f.lane.snifferMode).toBe('full');
+    expect(cached.id).not.toBe(decisionId);
+    expect(report).toMatchObject({ calls: 1, cacheHits: 0, resolvedPrivate: 1 });
+    expect(f.fullRequests).toHaveLength(1);
+  } finally { store.close(); ledger.close(); f.stop(); }
+});
+
+test('auto outage pauses corpus re-judging without stamps or recovery churn', async () => {
+  const f = fakeServer(); f.lane.profile.snifferMode = 'auto';
+  const tmp = tempDir('sniffer-flap-');
+  const fixture = openTierFixture(tmp.dir, { embed: false });
+  const store = new TierSnifferStore({ dbPath: join(tmp.dir, 'sniffer.sqlite') });
+  let clock: ReturnType<typeof spyOn> | undefined;
+  try {
+    await fixture.set.sync(fixtureConnector(() => [{ id: 'record', name: 'Notes', text: 'Ordinary orchard notes.' }]), { fetchContent: true, placement: FIXTURE_PLACEMENT });
+    const model = f.model(); await model.prepareSniffer?.();
+    const id = snifferId(f.lane);
+    const identity = identityOf('record');
+    const base = classifyItemTiers({ signals: { title: 'Notes' }, text: 'Ordinary orchard notes.' });
+    const decision = { ...base, snifferId: id, reasons: ['content:sniffer:' + id + ':decision:0.70'] };
+    fixture.ledger.recordRoutedPlacement(identity, decision, fixture.set.placementFor(decision));
+    const key = { engineVersion: TIER_CLASSIFIER_VERSION, snifferId: id };
+    fixture.ledger.markRejudged(identity, key);
+    const cached = new CachedTierSniffer(store, f.lane);
+    registerInstalledTierClassification({ forLedger: () => ({ sniffer: cached }) });
+    const before = fixture.ledger.getCurrent(identity);
+    f.down();
+    await expect(model.complete(request('outage'))).rejects.toThrow();
+    await model.prepareSniffer?.();
+    expect(f.lane).toMatchObject({ snifferMode: 'full', rejudgeReady: false });
+    // The fallback identity would otherwise select this already-judged row.
+    expect(fixture.ledger.rejudgeCandidatePage({ ...key, snifferId: cached.id }).records).toHaveLength(1);
+    expect(rejudgeRoutedItems({ set: fixture.set, autoMoves: true }).report.seen).toBe(0);
+    expect(fixture.ledger.getCurrent(identity)).toEqual(before);
+    expect(store.counts().questions).toBe(0);
+    // Recovery invalidates the negative probe cache without waiting a minute.
+    const later = Date.now() + 61_000;
+    clock = spyOn(Date, 'now').mockReturnValue(later);
+    f.recover(); await model.prepareSniffer?.();
+    expect(f.lane).toMatchObject({ snifferMode: 'decision', rejudgeReady: true });
+    expect(cached.id).toBe(id);
+    expect(fixture.ledger.rejudgeCandidatePage(key).records).toHaveLength(0);
+    expect(rejudgeRoutedItems({ set: fixture.set, autoMoves: true }).report.seen).toBe(0);
+    expect(store.counts().questions).toBe(0);
+  } finally { clock?.mockRestore(); registerInstalledTierClassification(undefined); store.close(); fixture.close(); tmp.cleanup(); f.stop(); }
+});
+
+test('hold-lowering leaves first Personal judgments and Private raises enabled', async () => {
+  const previous = process.env.OLYMPUS_TIER_SNIFFER_HOLD_LOWERING;
+  process.env.OLYMPUS_TIER_SNIFFER_HOLD_LOWERING = '1';
+  try {
+    for (const probability of [0.3, 0.7]) {
+      const f = fakeServer({ privateProbability: probability });
+      const ledger = new TierLedger({ dbPath: ':memory:' });
+      const store = new TierSnifferStore({ dbPath: ':memory:' });
+      try {
+        queue(ledger, store, f.lane, 1, 'therapy letter 1', true);
+        const report = await runSnifferPass({ targets: [{ ledger, sniffer: store }], lane: f.lane, model: f.model() });
+        expect(report.heldLowering).toBe(0);
+        expect(ledger.getCurrent(subject(1))).toMatchObject({ state: 'current', metadataPending: false, metadataTier: probability > 0.5 ? 'secure' : 'private' });
+      } finally { store.close(); ledger.close(); f.stop(); }
+    }
+  } finally {
+    if (previous === undefined) delete process.env.OLYMPUS_TIER_SNIFFER_HOLD_LOWERING;
+    else process.env.OLYMPUS_TIER_SNIFFER_HOLD_LOWERING = previous;
+  }
 });

@@ -627,6 +627,9 @@ export class TierLedger {
         .run(JSON.stringify(decision), ...idParams(identity));
       return 'updated';
     }
+    // A rollout hold leaves the settled row, copies and open question intact.
+    // The cached answer is retried automatically when the setting is off.
+    if (holdSnifferLowering(this.getCurrent(identity)!, decision)) return 'held_lowering';
     this.db.query(`
       UPDATE tier_items SET rejudge_json = NULL
       WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
@@ -3907,7 +3910,17 @@ interface EffectiveRow {
 }
 
 /** What applying a sniffer verdict did: a P1a row update, a P1b routed outcome, or nothing yet. */
-export type SnifferVerdictOutcome = 'stale_question' | TierLedgerRecordOutcome | TierRoutedOutcome | 'needs_placement' | 'stale_map';
+export type SnifferVerdictOutcome = 'held_lowering' | 'stale_question' | TierLedgerRecordOutcome | TierRoutedOutcome | 'needs_placement' | 'stale_map';
+
+/** Source-neutral rollout switch; first judgments and raises still settle. */
+export function holdSnifferLowering(
+  current: Pick<TierLedgerRecord, 'metadataTier' | 'contentTier' | 'state'>,
+  next: Pick<TierDecision, 'metadataTier' | 'contentTier'>,
+): boolean {
+  return process.env.OLYMPUS_TIER_SNIFFER_HOLD_LOWERING === '1'
+    && current.state === 'current' && current.contentTier === 'secure' && next.contentTier !== 'secrets'
+    && (next.contentTier === 'private' || (current.metadataTier === 'secure' && next.metadataTier === 'private'));
+}
 
 /** A settled row as the classifier decision the P1b router takes. */
 function decisionOfRow(row: EffectiveRow): TierDecision {
