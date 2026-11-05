@@ -159,6 +159,27 @@ const CPU_SAMPLE_FLUSH_MS = 30_000;
 const CPU_SAMPLE_TOP = 30;
 
 interface SampledFrame { name?: string; sourceID?: number; sourceURL?: string; line?: number; category?: string }
+interface SampledTrace { timestamp?: number; frames?: readonly SampledFrame[] }
+
+/** How long the thread must go without a turn before its samples count as a freeze. */
+export const CPU_SAMPLE_STALL_MS = 1_000;
+const CPU_SAMPLE_LAG_TICK_MS = 100;
+
+/**
+ * The traces taken while the thread did not turn: each stall is a window of
+ * `performance.now()` milliseconds, and `offsetS` maps those onto the
+ * profiler's own clock (seconds), so trace timestamps can be compared.
+ */
+export function tracesInStalls<T extends SampledTrace>(
+  traces: readonly T[],
+  stalls: readonly { startMs: number; endMs: number }[],
+  offsetS: number,
+): T[] {
+  if (stalls.length === 0) return [];
+  const windows = stalls.map((stall) => [stall.startMs / 1000 + offsetS, stall.endMs / 1000 + offsetS] as const);
+  return traces.filter((trace) => trace.timestamp !== undefined
+    && windows.some(([start, end]) => trace.timestamp! >= start && trace.timestamp! <= end));
+}
 
 /**
  * Summarizes JSC sampling-profiler traces: the functions on top of the stack
@@ -166,7 +187,7 @@ interface SampledFrame { name?: string; sourceID?: number; sourceURL?: string; l
  * (what that time is spent under). Names and code positions only, never data.
  */
 export function summarizeCpuSamples(
-  traces: readonly { frames?: readonly SampledFrame[] }[],
+  traces: readonly SampledTrace[],
   top = CPU_SAMPLE_TOP,
   sources: readonly { sourceID?: number; url?: string }[] = [],
 ): {
@@ -205,18 +226,43 @@ export async function startCpuSampleLog(env: Record<string, string | undefined> 
   if (!path) return undefined;
   const jsc = await import('bun:jsc') as unknown as {
     startSamplingProfiler?: () => void;
-    samplingProfilerStackTraces?: () => { traces?: { frames?: SampledFrame[] }[]; sources?: { sourceID?: number; url?: string }[] };
+    samplingProfilerStackTraces?: () => { traces?: SampledTrace[]; sources?: { sourceID?: number; url?: string }[] };
   };
   if (!jsc.startSamplingProfiler || !jsc.samplingProfilerStackTraces) return undefined;
   const { appendFileSync } = await import('node:fs');
   jsc.startSamplingProfiler();
+  // A tick that arrives late by more than CPU_SAMPLE_STALL_MS marks a freeze:
+  // the samples inside it are what held the thread, summarized apart from the rest.
+  let stalls: { startMs: number; endMs: number }[] = [];
+  let lastTick = performance.now();
+  const lag = setInterval(() => {
+    const now = performance.now();
+    if (now - lastTick - CPU_SAMPLE_LAG_TICK_MS >= CPU_SAMPLE_STALL_MS) stalls.push({ startMs: lastTick, endMs: now });
+    lastTick = now;
+  }, CPU_SAMPLE_LAG_TICK_MS);
+  lag.unref?.();
   let last = Date.now();
   const flush = () => {
     const now = Date.now();
     try {
+      // Busy for a few milliseconds so the newest trace is "now" on the profiler's clock.
+      const spinUntil = performance.now() + 3;
+      while (performance.now() < spinUntil) { /* spin */ }
       const sampled = jsc.samplingProfilerStackTraces!();
-      const summary = summarizeCpuSamples(sampled.traces ?? [], CPU_SAMPLE_TOP, sampled.sources ?? []);
-      appendFileSync(path, `${JSON.stringify({ at: new Date(now).toISOString(), windowMs: now - last, headroom: controlPathHeadroom.snapshot(), ...summary })}\n`, { mode: 0o600 });
+      const traces = sampled.traces ?? [];
+      const newest = traces.reduce((max, trace) => Math.max(max, trace.timestamp ?? -Infinity), -Infinity);
+      const offsetS = Number.isFinite(newest) ? newest - performance.now() / 1000 : 0;
+      const window = stalls;
+      stalls = [];
+      const stalled = Number.isFinite(newest) ? tracesInStalls(traces, window, offsetS) : [];
+      const summary = summarizeCpuSamples(traces, CPU_SAMPLE_TOP, sampled.sources ?? []);
+      const freezes = {
+        count: window.length,
+        totalMs: Math.round(window.reduce((sum, stall) => sum + stall.endMs - stall.startMs, 0)),
+        maxMs: Math.round(window.reduce((max, stall) => Math.max(max, stall.endMs - stall.startMs), 0)),
+        ...summarizeCpuSamples(stalled, CPU_SAMPLE_TOP, sampled.sources ?? []),
+      };
+      appendFileSync(path, `${JSON.stringify({ at: new Date(now).toISOString(), windowMs: now - last, headroom: controlPathHeadroom.snapshot(), ...summary, freezes })}\n`, { mode: 0o600 });
     } catch (error) {
       console.error(`[olympus:control-path] cpu sample log failed: ${error instanceof Error ? error.name : 'error'}`);
     }
@@ -225,5 +271,5 @@ export async function startCpuSampleLog(env: Record<string, string | undefined> 
   const timer = setInterval(flush, CPU_SAMPLE_FLUSH_MS);
   timer.unref?.();
   console.error(`[olympus:control-path] sampling CPU to ${CPU_SAMPLE_LOG_ENV}`);
-  return () => clearInterval(timer);
+  return () => { clearInterval(timer); clearInterval(lag); };
 }

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from 'bun:test';
-import { ControlPathHeadroom, summarizeCpuSamples } from '../src/workers/control-path-headroom.ts';
+import { ControlPathHeadroom, summarizeCpuSamples, tracesInStalls } from '../src/workers/control-path-headroom.ts';
 
 const busy = (ms: number) => {
   const end = performance.now() + ms;
@@ -93,5 +93,36 @@ describe('cpu sample summary from the profiler', () => {
     const summary = summarizeCpuSamples(stripped, 30, raw.sources);
     expect(summary.samples).toBeGreaterThan(0);
     expect(summary.total.some(([key]) => key.includes('control-path-headroom.test.ts'))).toBe(true);
+  });
+});
+
+describe('cpu samples taken during a freeze', () => {
+  test('keeps only the traces inside a stall window, on the profiler clock', () => {
+    const traces = [{ timestamp: 100.0 }, { timestamp: 100.5 }, { timestamp: 101.2 }, { timestamp: 103 }, {}];
+    // performance.now() 1000 ms is profiler 100.0 s.
+    const kept = tracesInStalls(traces, [{ startMs: 1_400, endMs: 2_300 }], 99);
+    expect(kept).toEqual([{ timestamp: 100.5 }, { timestamp: 101.2 }]);
+    expect(tracesInStalls(traces, [], 99)).toEqual([]);
+  });
+
+  test('a busy stretch on the real profiler lands in its own window', async () => {
+    const jsc = await import('bun:jsc') as unknown as { startSamplingProfiler: () => void; samplingProfilerStackTraces: () => { traces: { timestamp?: number; frames?: { name?: string }[] }[] } };
+    jsc.startSamplingProfiler();
+    jsc.samplingProfilerStackTraces();
+    function heldTheThread(ms: number) { const end = performance.now() + ms; let x = 0; while (performance.now() < end) x += Math.sqrt(x + 1); return x; }
+    function afterwards(ms: number) { const end = performance.now() + ms; let x = 0; while (performance.now() < end) x += Math.sqrt(x + 1); return x; }
+    const startMs = performance.now();
+    heldTheThread(150);
+    const endMs = performance.now();
+    afterwards(60);
+    const spinUntil = performance.now() + 3;
+    while (performance.now() < spinUntil) { /* spin */ }
+    const traces = jsc.samplingProfilerStackTraces().traces;
+    const newest = Math.max(...traces.map((trace) => trace.timestamp ?? -Infinity));
+    const kept = tracesInStalls(traces, [{ startMs, endMs }], newest - performance.now() / 1000);
+    const named = (trace: { frames?: { name?: string }[] }, name: string) => (trace.frames ?? []).some((frame) => frame.name === name);
+    expect(kept.length).toBeGreaterThan(0);
+    expect(kept.filter((trace) => named(trace, 'heldTheThread')).length / kept.length).toBeGreaterThan(0.8);
+    expect(kept.some((trace) => named(trace, 'afterwards'))).toBe(false);
   });
 });
