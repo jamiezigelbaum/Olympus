@@ -31123,7 +31123,7 @@ var init_local_index = __esm(() => {
       const ledger = this.visibilityLedger();
       if (!ledger)
         return [];
-      const identities = ledger.corpusCopyIdentities(this.corpusId, options.withoutSecretsOverrides ? "metadata_layer_settled_unreadable_not_secret" : "metadata_layer_settled_unreadable");
+      const identities = yield* ledger.corpusCopyIdentitiesSteps(this.corpusId, options.withoutSecretsOverrides ? "metadata_layer_settled_unreadable_not_secret" : "metadata_layer_settled_unreadable");
       const filters = connectorStoreFilterSql(scope?.contentFilters ?? scope?.itemFilters);
       const account = normalizeOptionalAccountScope(scope?.accountScope);
       const ended = this.extractionEnded;
