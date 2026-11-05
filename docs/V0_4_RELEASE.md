@@ -156,6 +156,14 @@ while sources import) and #788 (server mode off, #785), which merged just after
 the 1.3.2 commit; tested by diff against 1.3.2 (exact-head CI and a test-mac
 canary). Follow-ups: #784 (speech-model start-up freeze), #787, #790, #791.
 
+1.3.4 shipped 2026-11-05: GitHub release v1.3.4 at 7bf960b, the ingestion
+reliability release (#795 to #861: the dashboard stays available on large
+installs, ingestion errors only for real failures, privacy judging keeps up,
+WhatsApp and Telegram pair on the card). Tested with the Linux release check on
+2a9acece (217 pass, 1 fail: the known #787 Telegram beside-import search, which
+also failed before 1.3.1) and exact-head CI for #820, the one OCR-only change
+after it. Follow-up: #787.
+
 1.3.1 shipped 2026-11-03: GitHub release v1.3.1 (latest) at 16a91267, with the
 WhatsApp fixes (#744 via #757, #745, #746, #747, and the WhatsApp Web version
 update #759), the Evernote picker fix (#743) and #742. The owner chose a
