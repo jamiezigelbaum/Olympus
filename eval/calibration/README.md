@@ -137,6 +137,18 @@ bun eval/calibration/judge-run.ts --endpoint http://127.0.0.1:8012 \
   could read, including kinds the sample leaves out, so the weights are close
   rather than exact.
 
+Private items can be split by how much they matter, one pass per folder:
+
+```bash
+bun eval/calibration/label.ts --importance --dir ~/.local/share/olympus-calibration
+bun eval/calibration/label.ts --importance --dir ~/.local/share/olympus-calibration/round2
+```
+
+It shows only the items labeled Private: **I** Important, **M** Minor, **U** Not
+sure. The answers go to `importance.json` beside the labels, and `labels.json` is
+only read. When that file exists, a run leads with `privateMissed`: Private
+items sent to Personal, as important, minor and untagged.
+
 Output and the saved `judge-*.json` carry ids, counts and metrics, never text.
 
 ### On Venice
