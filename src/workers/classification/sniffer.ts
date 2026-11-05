@@ -84,7 +84,7 @@ export type SnifferLaneKind = 'local' | 'venice';
 export interface SnifferLaneIdentity {
   kind: SnifferLaneKind;
   /** Effective native mode, set by the content-free capability probe. */
-  snifferMode?: 'decision' | 'full';
+  snifferMode?: 'pending' | 'decision' | 'full';
   /** False after a transient auto probe failure: bulk re-judging must wait. */
   rejudgeReady?: boolean;
   /** Stable owner-approval identity. */
@@ -264,6 +264,7 @@ export function snifferMaterialLooksLikeInjection(material: string): boolean {
 
 export function snifferCacheModelId(lane: SnifferLaneIdentity): string {
   const weights = lane.cacheModelId ?? lane.modelId;
+  if (lane.snifferMode === 'pending') return `${weights}:pending`;
   return lane.snifferMode === 'decision' ? `${weights}:${SNIFFER_DECISION_VERSION}` : weights;
 }
 
@@ -545,7 +546,7 @@ export function snifferMaterialForModel(material: string): string {
  */
 export class CachedTierSniffer implements TierSniffer {
   get id(): string { return snifferId(this.lane, this.promptVersion); }
-  get rejudgeReady(): boolean { return this.lane.rejudgeReady !== false; }
+  get rejudgeReady(): boolean { return this.lane.snifferMode !== 'pending' && this.lane.rejudgeReady !== false; }
   private readonly store: TierSnifferStore;
   private readonly lane: SnifferLaneIdentity;
   private readonly promptVersion: string;
@@ -574,7 +575,7 @@ export class CachedTierSniffer implements TierSniffer {
     }
     const mapRevision = request.mapRevision ?? 'none';
     try {
-      const cached = this.store.getVerdict({
+      const cached = this.lane.snifferMode === 'pending' ? undefined : this.store.getVerdict({
         materialHash: request.materialHash ?? snifferMaterialHash(request.pass, material),
         modelId: snifferCacheModelId(this.lane),
         promptVersion: this.promptVersion,

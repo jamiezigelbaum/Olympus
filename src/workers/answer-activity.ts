@@ -227,32 +227,33 @@ export function createLocalModelActivity() {
     // many in flight (default 1); owner work is still started first.
     // `tag` names the caller's own calls, so `busyExcept` can tell whether
     // anyone else holds the resource (a caller never yields to itself).
-    track<T extends import('../core/analyst.ts').AnalystModel>(key: string, model: T, options: { serialize?: boolean; concurrency?: number; tag?: string } = {}): T {
-      return { ...model, complete: request => {
+    track<T extends import('../core/analyst.ts').AnalystModel & { prepareSniffer?(signal?: AbortSignal): Promise<void> }>(key: string, model: T, options: { serialize?: boolean; concurrency?: number; tag?: string } = {}): T {
+      const coordinate = <R>(work: () => Promise<R>, signal?: AbortSignal, limit = options.concurrency ?? 1): Promise<R> => {
         const guards = localInferenceGuards?.getStore() ?? [];
-        const run = options.serialize === false ? <R>(work: () => Promise<R>) => get(key).run(work) : <R>(work: () => Promise<R>) => dispatch(key, work, options.concurrency ?? 1);
-        const tagged = <R>(work: () => Promise<R>): (() => Promise<R>) => {
-          const tag = options.tag;
-          if (tag === undefined) return work;
-          const tagKey = `${key}\u0000${tag}`;
-          // Counted inside the lease, so the count never exceeds the leases held.
-          return async () => {
-            taggedRunning.set(tagKey, (taggedRunning.get(tagKey) ?? 0) + 1);
-            try { return await work(); } finally { taggedRunning.set(tagKey, (taggedRunning.get(tagKey) ?? 1) - 1); }
-          };
-        };
-        return run(tagged(async () => {
-          request.signal?.throwIfAborted();
-          for (const guard of guards) {
-            try { await guard(); } catch (error) {
-              request.signal?.throwIfAborted();
-              throw error;
+        const run = options.serialize === false ? <V>(work: () => Promise<V>) => get(key).run(work) : <V>(work: () => Promise<V>) => dispatch(key, work, limit);
+        return run(async () => {
+          const tagKey = options.tag === undefined ? undefined : `${key}\u0000${options.tag}`;
+          if (tagKey !== undefined) taggedRunning.set(tagKey, (taggedRunning.get(tagKey) ?? 0) + 1);
+          try {
+            signal?.throwIfAborted();
+            for (const guard of guards) {
+              try { await guard(); } catch (error) {
+                signal?.throwIfAborted();
+                throw error;
+              }
             }
+            signal?.throwIfAborted();
+            return await work();
+          } finally {
+            if (tagKey !== undefined) taggedRunning.set(tagKey, (taggedRunning.get(tagKey) ?? 1) - 1);
           }
-          request.signal?.throwIfAborted();
-          return model.complete(request);
-        }));
-      } };
+        });
+      };
+      return { ...model,
+        // Probes and priming use the same slot as completions, exclusively.
+        ...(model.prepareSniffer ? { prepareSniffer: (signal?: AbortSignal) => coordinate(() => model.prepareSniffer!(signal), signal, 1) } : {}),
+        complete: request => coordinate(() => model.complete(request), request.signal),
+      };
     },
   };
 }

@@ -1,9 +1,10 @@
 import { afterEach, expect, test } from 'bun:test';
 import { Database } from 'bun:sqlite';
 import { join } from 'node:path';
+import { registerInstalledTierClassification } from '../src/workers/classification/installed-tier-classification-registry.ts';
 import { InstalledTierClassification } from '../src/workers/classification/installed-tier-classification.ts';
 import { BUILT_IN_SNIFFER_LANE } from '../src/workers/classification/built-in-sniffer.ts';
-import { SNIFFER_PROMPT_VERSION, snifferCacheModelId, CachedTierSniffer } from '../src/workers/classification/sniffer.ts';
+import { SNIFFER_PROMPT_VERSION, snifferCacheModelId, snifferId, CachedTierSniffer } from '../src/workers/classification/sniffer.ts';
 import { TierSnifferStore } from '../src/workers/classification/sniffer-store.ts';
 import { runSnifferPass } from '../src/workers/classification/sniffer-resolver.ts';
 import { TierSnifferService } from '../src/workers/classification/sniffer-service.ts';
@@ -499,6 +500,63 @@ test('rollout also holds Personal names when the body remains Private', async ()
     expect(f.ledger.getCurrent(identity)).toEqual(before);
     expect(f.ledger.copies(identity)).toEqual(copies);
   } finally {
+    if (previous === undefined) delete process.env.OLYMPUS_TIER_SNIFFER_HOLD_LOWERING;
+    else process.env.OLYMPUS_TIER_SNIFFER_HOLD_LOWERING = previous;
+  }
+});
+
+
+test('200 held lowering answers do not block later re-judging or raises, and release automatically', async () => {
+  const previous = process.env.OLYMPUS_TIER_SNIFFER_HOLD_LOWERING;
+  const tmp = tempDir();
+  const f = openTierFixture(tmp.dir, { embed: false });
+  const lane = { ...BUILT_IN_SNIFFER_LANE, snifferMode: 'decision' as const };
+  let installed = new InstalledTierClassification({ env: {}, lane });
+  let service: TierSnifferService | undefined;
+  try {
+    registerInstalledTierClassification({ forLedger: () => ({ sniffer: {
+      id: 'old-prompt', judge: request => ({ verdict: 'decided',
+        tier: request.material?.includes('zraise') ? 'private' : 'secure', code: 'ordinary:0.99' }),
+    } }) });
+    const items = Array.from({ length: 200 }, (_, n) => ({ id: `held${String(n).padStart(3, '0')}`, name: `Notes ${n}`, text }));
+    items.push({ id: 'zraise', name: 'Notes zraise', text });
+    await f.set.sync(fixtureConnector(() => items), { fetchContent: true, placement: FIXTURE_PLACEMENT });
+    expect(f.ledger.getCurrent(identityOf('held000'))?.contentTier).toBe('secure');
+    expect(f.ledger.getCurrent(identityOf('zraise'))?.contentTier).toBe('private');
+    registerInstalledTierClassification(installed);
+    process.env.OLYMPUS_TIER_SNIFFER_HOLD_LOWERING = '1';
+    let calls = 0;
+    const model = { async complete(request: { prompt: string }) {
+      calls++;
+      return { text: '', modelId: lane.modelId, decisionVerdict: {
+        tier: request.prompt.includes('zraise') ? 'private' as const : 'personal' as const,
+        category: 'decision', confidence: 0.99, failSafe: false,
+      } };
+    } };
+    const makeService = () => new TierSnifferService({ installed, lane, model,
+      stores: () => f.set.openStores(), classificationLedgerPath: join(tmp.dir, 'classification.jsonl'),
+      autoApproveBuiltIn: true, rejudgePerPass: 100, rejudgeMaxOpenQuestions: 200,
+    });
+    service = makeService();
+    for (let n = 0; n < 2; n++) expect((await service.runOnce()).state).toBe('ran');
+    const queue = installed.snifferStoreForLedger(f.ledger.dbPath);
+    expect(queue.counts().questions).toBe(200);
+    expect(queue.questionWorkCounts(snifferId(lane))).toEqual({ unanswered: 0, heldLowering: 200 });
+    // Reopen the service and queue: held status is durable, not a tick-local count.
+    service.stop(); installed.close();
+    installed = new InstalledTierClassification({ env: {}, lane });
+    registerInstalledTierClassification(installed);
+    service = makeService();
+    expect(await service.runOnce()).toMatchObject({ state: 'ran', rejudged: { seen: 1 }, report: { resolvedPrivate: 1 } });
+    expect(f.ledger.getCurrent(identityOf('zraise'))).toMatchObject({ state: 'moving', targetContentTier: 'secure' });
+    const beforeRelease = calls;
+    delete process.env.OLYMPUS_TIER_SNIFFER_HOLD_LOWERING;
+    await service.runOnce();
+    expect(f.ledger.getCurrent(identityOf('held000'))).toMatchObject({ state: 'moving', targetContentTier: 'private' });
+    expect(calls).toBe(beforeRelease);
+    expect(installed.snifferStoreForLedger(f.ledger.dbPath).counts().questions).toBe(0);
+  } finally {
+    service?.stop(); installed.close(); registerInstalledTierClassification(undefined); f.close(); tmp.cleanup();
     if (previous === undefined) delete process.env.OLYMPUS_TIER_SNIFFER_HOLD_LOWERING;
     else process.env.OLYMPUS_TIER_SNIFFER_HOLD_LOWERING = previous;
   }

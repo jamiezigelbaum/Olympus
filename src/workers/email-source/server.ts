@@ -1,4 +1,4 @@
-import { createDecisionSnifferModel } from '../classification/sniffer-decision.ts';
+import { createDecisionSnifferModel, type SnifferModel } from '../classification/sniffer-decision.ts';
 import { macComputerSetupView, saveMacComputerUseChoice } from '../../core/engine-service.ts';
 import { release } from 'node:os';
 import { createPrivacyQuestionEngine } from '../classification/privacy-questions.ts';
@@ -7122,7 +7122,7 @@ export async function main(): Promise<void> {
 
   // The privacy-safe sniffer's bounded background pass over pending items.
   const snifferEnv = tierSnifferServiceEnv(process.env);
-  const snifferModel = !snifferEnv.enabled || snifferRuntime.source === 'off'
+  const snifferModel: SnifferModel | undefined = !snifferEnv.enabled || snifferRuntime.source === 'off'
     ? undefined
     : snifferRuntime.source === 'built_in'
       ? snifferRuntime.builtIn.model
@@ -7135,6 +7135,9 @@ export async function main(): Promise<void> {
         lane: snifferLane,
         model: snifferResource ? {
           ...snifferModel,
+          ...(snifferModel.prepareSniffer ? {
+            prepareSniffer: (signal?: AbortSignal) => runClassificationInference(() => localModelActivity.track(snifferResource, snifferModel, { tag: 'tier_sniffer' }).prepareSniffer!(signal)),
+          } : {}),
           complete: request => runClassificationInference(() => localModelActivity.track(snifferResource, snifferModel, { concurrency: snifferEnv.concurrentCalls ?? 1, tag: 'tier_sniffer' }).complete(request)),
         } : snifferModel,
         stores: () => connectorStores,

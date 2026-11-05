@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { createAnswerActivity, createLocalModelActivity, runBackgroundInference, runClassificationInference } from '../src/workers/answer-activity.ts';
+import { createAnswerActivity, createLocalModelActivity, runBackgroundInference, runClassificationInference, runWithLocalInferenceGuard } from '../src/workers/answer-activity.ts';
 
 describe('answer activity', () => {
   test('preempts on the first answer and releases each lease once', () => {
@@ -157,4 +157,38 @@ test('busyExcept ignores the caller\'s own tagged calls and still sees anyone el
   while (release.length > 0) { release.shift()!(); await tick(); }
   await Promise.all([a, b, c]);
   expect(activity.busyExcept('local', 'sorter')).toBe(false);
+});
+
+
+test('sniffer preparation shares the exclusive resource queue, tags and live guards with answers', async () => {
+  const activity = createLocalModelActivity();
+  const events: string[] = [];
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const owner = activity.track('local', { complete: async (_request: { signal?: AbortSignal }) => {
+    events.push('owner'); await gate; events.push('owner done'); return { text: '', modelId: 'fixture' };
+  } });
+  const sorting = activity.track('local', {
+    complete: async () => ({ text: '', modelId: 'fixture' }),
+    prepareSniffer: async () => {
+      expect(activity.busy('local')).toBe(true);
+      expect(activity.busyExcept('local', 'sorter')).toBe(false);
+      events.push('probe');
+    },
+  }, { concurrency: 8, tag: 'sorter' });
+  const answer = owner.complete({});
+  await new Promise(resolve => setTimeout(resolve, 0));
+  let yieldNow = false;
+  const preparation = runWithLocalInferenceGuard(async () => {
+    if (yieldNow) throw new Error('yield to owner');
+  }, () => runClassificationInference(() => sorting.prepareSniffer()));
+  // Handle a rejection immediately; the guard is checked only after the wait.
+  const stopped = preparation.then(() => 'prepared', error => error.message);
+  await new Promise(resolve => setTimeout(resolve, 0));
+  expect(events).toEqual(['owner']);
+  yieldNow = true;
+  release(); await answer; expect(await stopped).toBe('yield to owner');
+  expect(events).toEqual(['owner', 'owner done']);
+  await runClassificationInference(() => sorting.prepareSniffer());
+  expect(events).toEqual(['owner', 'owner done', 'probe']);
 });

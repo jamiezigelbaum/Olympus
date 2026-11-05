@@ -1,4 +1,3 @@
-import type { SnifferModel } from './sniffer-decision.ts';
 import { resumeVerifiedTierMove, flushTierMoveNotes } from '../connector-store/tier-move.ts';
 import { controlPathHeadroom, ingestionTurn } from '../control-path-headroom.ts';
 // The worker's background tick for the privacy-safe sniffer: a bounded
@@ -32,6 +31,7 @@ import {
   SNIFFER_MAX_CONCURRENT_CALLS,
   SnifferCallBudget,
   runSnifferPass,
+  prepareSnifferModel,
   type SnifferPassReport,
   type SnifferTarget,
 } from './sniffer-resolver.ts';
@@ -858,12 +858,12 @@ export class TierSnifferService {
       await this.drainMoves();
       return { state: 'awaiting_owner_approval', modelId: lane.modelId, promptVersion: versions.approval };
     }
-    await (this.options.model as SnifferModel).prepareSniffer?.(signal);
+    const preparationStopped = await prepareSnifferModel({ model: this.options.model, signal, shouldYield: () => this.yieldNow() });
     // Items decided under an older classifier or sniffer prompt are judged
     // again first (tier-rejudge.ts), a bounded page per set per tick: their
     // questions join the queue this pass answers.
-    await this.recoverMissingQuestions(true);
-    const rejudged = await this.rejudge();
+    if (!preparationStopped) await this.recoverMissingQuestions(true);
+    const rejudged = preparationStopped ? emptyTierRejudgeReport() : await this.rejudge();
     const targets: SnifferTarget[] = [];
     for (const ledgerPath of this.ledgerPaths()) {
       let ledger: TierLedger;
@@ -1247,7 +1247,8 @@ export class TierSnifferService {
       try {
         // Questions already waiting: re-judging more than the sniffer can
         // answer only grows the queue.
-        if (this.options.installed.snifferStoreForLedger(ledgerPath).counts().questions >= maxOpen) continue;
+        const id = snifferId(this.options.lane, snifferPromptVersions(this.options.ownerContext?.()).cache);
+        if (this.options.installed.snifferStoreForLedger(ledgerPath).questionWorkCounts(id).unanswered >= maxOpen) continue;
         const after = this.rejudgeCursors.get(ledgerPath);
         const { report, next } = rejudgeRoutedItems({
           set,

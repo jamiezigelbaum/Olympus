@@ -2,7 +2,7 @@
 // Endpoint state serializes every probe, prime and decision across clients.
 import type { AnalystModel, AnalystModelCompletion, AnalystModelRequest } from '../../core/analyst.ts';
 import { fetchModelEndpoint } from '../../core/model-transport.ts';
-import { assertSnifferProfileAllowed, type SnifferLane } from './sniffer-lane.ts';
+import { assertSnifferProfileAllowed, initialSnifferMode, type SnifferLane } from './sniffer-lane.ts';
 import { buildSnifferBatchPrompt, SNIFFER_DECISION_CATEGORY, SNIFFER_SYSTEM_PROMPT } from './sniffer.ts';
 import type { SnifferPass, StoredSnifferVerdict } from './sniffer-store.ts';
 import { privateChance, tierMass, SNIFFER_DECISION_PRIVATE_BAR, type TokenChance } from './sniffer-decision-mass.ts';
@@ -81,6 +81,7 @@ async function exclusive<T>(state: EndpointState, run: () => Promise<T>): Promis
 }
 
 export function createDecisionSnifferModel(lane: SnifferLane, full: AnalystModel, options: { apiKey?: string | undefined } = {}): SnifferModel {
+  lane.snifferMode = initialSnifferMode(lane.profile);
   if (lane.kind !== 'local' || lane.profile.provider !== 'local-openai-compatible' || lane.profile.snifferMode === 'full') return full;
   assertSnifferProfileAllowed(lane.profileId, lane.profile);
   const endpoint = lane.profile.baseUrl!.trim().replace(/\/+$/, '').replace(/\/v1$/, '');
@@ -153,7 +154,7 @@ export function createDecisionSnifferModel(lane: SnifferLane, full: AnalystModel
         assertSnifferProfileAllowed(lane.profileId, lane.profile);
         // Freeze the effective mode for a resolver run: its cache/reason id
         // was chosen before dispatch. A failed capability is re-probed next run.
-        if (lane.snifferMode === undefined) await prepare();
+        if (lane.snifferMode === undefined || lane.snifferMode === 'pending') await prepare();
         if (lane.snifferMode !== 'decision') return full.complete(request);
         try {
           const { pass, material, ownerContext } = request.snifferItem!;

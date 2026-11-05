@@ -26,6 +26,7 @@ import { createHash } from 'node:crypto';
 import { mkdirSync, readFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import type { AnalystModel } from '../../core/analyst.ts';
+import { runWithLocalInferenceGuard } from '../answer-activity.ts';
 import { writePrivateFileAtomicSync } from '../../core/atomic-file.ts';
 import {
   SNIFFER_INJECTION_CATEGORY,
@@ -245,6 +246,26 @@ function materialCarriesSecret(question: SnifferQuestion): boolean {
   return carries;
 }
 
+/** Recheck contention after a resource-queue wait, before any capability call. */
+export async function prepareSnifferModel(options: {
+  model: AnalystModel;
+  signal?: AbortSignal | undefined;
+  shouldYield?: (() => boolean) | undefined;
+}): Promise<'yield' | 'aborted' | undefined> {
+  const stopped = () => options.signal?.aborted ? 'aborted' as const : options.shouldYield?.() ? 'yield' as const : undefined;
+  if (stopped()) return stopped();
+  try {
+    await runWithLocalInferenceGuard(async () => {
+      if (stopped()) throw new Error('Privacy sniffer preparation yielded.');
+    }, async () => { await (options.model as SnifferModel).prepareSniffer?.(options.signal); });
+  } catch (error) {
+    const reason = stopped();
+    if (reason) return reason;
+    throw error;
+  }
+  return stopped();
+}
+
 export async function runSnifferPass(options: SnifferPassOptions): Promise<SnifferPassReport> {
   const promptVersion = options.promptVersion ?? SNIFFER_PROMPT_VERSION;
   let id = snifferId(options.lane, promptVersion);
@@ -313,7 +334,11 @@ export async function runSnifferPass(options: SnifferPassOptions): Promise<Sniff
       return;
     }
     if (applied?.outcome === 'held_moving') return;
-    if (applied?.outcome === 'held_lowering') { report.heldLowering += 1; return; }
+    if (applied?.outcome === 'held_lowering') {
+      item.target.sniffer.markHeldLowering(item.question, id);
+      report.heldLowering += 1;
+      return;
+    }
     if (applied?.outcome === 'needs_placement') {
       // A routed item whose set is not open here: the verdict is cached, the
       // question stays, and the next pass (or sync) with the set applies it.
@@ -437,7 +462,8 @@ export async function runSnifferPass(options: SnifferPassOptions): Promise<Sniff
   // contains synthetic material only; it selects the cache/re-judge identity.
   if (work.metadata.length + work.content.length > 0) {
     assertSnifferProfileAllowed(options.lane.profileId, options.lane.profile);
-    await (options.model as SnifferModel).prepareSniffer?.(options.signal);
+    const stopped = await prepareSnifferModel(options);
+    if (stopped) { report.stoppedBy = stopped; return finish(report); }
     id = snifferId(options.lane, promptVersion);
   }
   for (const pass of ['metadata', 'content'] as const) {

@@ -50,6 +50,12 @@ export interface SnifferLane extends SnifferLaneIdentity {
   profile: SovereigntyModelProfile;
 }
 
+/** Known before synchronous classification is installed; auto must probe first. */
+export function initialSnifferMode(profile: SovereigntyModelProfile): 'pending' | 'decision' | 'full' {
+  if (profile.provider !== 'local-openai-compatible') return 'full';
+  return profile.snifferMode === 'decision' ? 'decision' : profile.snifferMode === 'full' ? 'full' : 'pending';
+}
+
 /**
  * The per-dispatch check: throws SnifferLaneRefusedError unless the profile is
  * a loopback local model (never a cloud-forwarding model id) or a Venice
@@ -128,7 +134,7 @@ function pickLane(candidates: readonly SovereigntyResolvedProfile[]): SnifferLan
     try {
       const kind = assertSnifferProfileAllowed(candidate.id, candidate.profile);
       const modelId = 'model' in candidate.profile && candidate.profile.model ? candidate.profile.model : candidate.id;
-      allowed.push({ kind, modelId, profileId: candidate.id, profile: candidate.profile });
+      allowed.push({ kind, modelId, profileId: candidate.id, profile: candidate.profile, snifferMode: initialSnifferMode(candidate.profile) });
     } catch (error) {
       if (!(error instanceof SnifferLaneRefusedError)) throw error;
       if (error.reason === 'standard_cloud') throw error;

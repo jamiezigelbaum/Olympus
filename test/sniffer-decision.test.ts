@@ -1,6 +1,10 @@
 import { describe, expect, test, spyOn } from 'bun:test';
 import { join } from 'node:path';
 import { tempDir, openTierFixture, fixtureConnector, FIXTURE_PLACEMENT, identityOf } from './helpers/tier-fixtures.ts';
+import { InstalledTierClassification } from '../src/workers/classification/installed-tier-classification.ts';
+import { TierSnifferService } from '../src/workers/classification/sniffer-service.ts';
+import { BUILT_IN_SNIFFER_LANE } from '../src/workers/classification/built-in-sniffer.ts';
+import { createLocalModelActivity, runClassificationInference } from '../src/workers/answer-activity.ts';
 import { rejudgeRoutedItems } from '../src/workers/connector-store/tier-rejudge.ts';
 import { registerInstalledTierClassification } from '../src/workers/classification/installed-tier-classification-registry.ts';
 import type { AnalystModel } from '../src/core/analyst.ts';
@@ -9,7 +13,7 @@ import { createDecisionSnifferModel, REPLY_TO_TIER, type SnifferModelRequest } f
 import { privateChance, tierMass } from '../src/workers/classification/sniffer-decision-mass.ts';
 import { CachedTierSniffer, buildSnifferBatchPrompt, cachedSnifferVerdictHolds, parseSnifferBatchResponse, SNIFFER_SYSTEM_PROMPT, snifferCacheModelId, snifferId, snifferPromptVersions, snifferReasonCode, snifferTierKey, snifferVerdictTier } from '../src/workers/classification/sniffer.ts';
 import { runSnifferPass, SnifferCallBudget, DEFAULT_SNIFFER_MAX_CALLS_PER_DAY, DEFAULT_DECISION_SNIFFER_MAX_CALLS_PER_DAY } from '../src/workers/classification/sniffer-resolver.ts';
-import type { SnifferLane } from '../src/workers/classification/sniffer-lane.ts';
+import { resolveSnifferLane, type SnifferLane } from '../src/workers/classification/sniffer-lane.ts';
 import { TierSnifferStore, snifferMaterialHash } from '../src/workers/classification/sniffer-store.ts';
 import { TierLedger } from '../src/workers/classification/tier-ledger.ts';
 import { TIER_CLASSIFIER_VERSION, classifyItemTiers } from '../src/workers/classification/tier-classifier.ts';
@@ -429,4 +433,82 @@ test('hold-lowering leaves first Personal judgments and Private raises enabled',
     if (previous === undefined) delete process.env.OLYMPUS_TIER_SNIFFER_HOLD_LOWERING;
     else process.env.OLYMPUS_TIER_SNIFFER_HOLD_LOWERING = previous;
   }
+});
+
+
+test('resolved forced modes isolate synchronous cache reads before a model is created; auto waits', () => {
+  const store = new TierSnifferStore({ dbPath: ':memory:' });
+  try {
+    for (const mode of ['decision', 'auto', 'full'] as const) {
+      const config = structuredClone(loadSovereigntyPreset('local-first'));
+      config.modelProfiles['local-source-answer']!.snifferMode = mode;
+      const lane = resolveSnifferLane(createSovereigntyEngine(config));
+      const material = 'therapy letter';
+      store.putVerdict({ materialHash: snifferMaterialHash('metadata', material), modelId: lane.modelId,
+        promptVersion: snifferPromptVersions().cache, mapRevision: 'none' },
+      { tier: 'personal', category: 'ordinary', confidence: 0.99, failSafe: false });
+      const sniffer = new CachedTierSniffer(store, lane);
+      const result = sniffer.judge({ pass: 'metadata', material, flags: [], subject: subject(900) });
+      expect(result.verdict).toBe(mode === 'full' ? 'decided' : 'undecided');
+      expect(sniffer.rejudgeReady).toBe(mode !== 'auto');
+      if (mode === 'decision') expect(snifferCacheModelId(lane)).not.toBe(lane.modelId);
+    }
+  } finally { store.close(); }
+});
+
+test('a resolver yields before capability preparation without spending an item attempt', async () => {
+  const f = fakeServer(); f.lane.profile.snifferMode = 'auto';
+  const ledger = new TierLedger({ dbPath: ':memory:' });
+  const store = new TierSnifferStore({ dbPath: ':memory:' });
+  try {
+    queue(ledger, store, f.lane, 1);
+    const report = await runSnifferPass({ targets: [{ ledger, sniffer: store }], lane: f.lane, model: f.model(), shouldYield: () => true });
+    expect(report).toMatchObject({ stoppedBy: 'yield', calls: 0 });
+    expect(f.events).toHaveLength(0);
+    expect(store.questionFor(subject(1), 'metadata')?.attempts).toBe(0);
+  } finally { ledger.close(); store.close(); f.stop(); }
+});
+
+
+test('the service does not prepare while an answer owns the model', async () => {
+  const tmp = tempDir(); const f = openTierFixture(tmp.dir, { embed: false });
+  const lane = { ...BUILT_IN_SNIFFER_LANE };
+  const installed = new InstalledTierClassification({ env: {}, lane });
+  let answering = true;
+  let probes = 0;
+  const model = { async prepareSniffer() { probes++; }, async complete() { throw new Error('no question'); } };
+  const service = new TierSnifferService({ installed, lane, model, stores: () => f.set.openStores(),
+    classificationLedgerPath: join(tmp.dir, 'classification.jsonl'), autoApproveBuiltIn: true, answersInFlight: () => answering });
+  try {
+    expect((await service.runOnce()).state).toBe('ran');
+    expect(probes).toBe(0);
+    answering = false;
+    expect((await service.runOnce()).state).toBe('ran');
+    expect(probes).toBe(1);
+  } finally { service.stop(); installed.close(); f.close(); tmp.cleanup(); }
+});
+
+test('a capability probe queued behind an answer rechecks yield before any native request', async () => {
+  const f = fakeServer(); f.lane.profile.snifferMode = 'auto';
+  const ledger = new TierLedger({ dbPath: ':memory:' }); const store = new TierSnifferStore({ dbPath: ':memory:' });
+  const activity = createLocalModelActivity();
+  let release!: () => void;
+  let entered!: () => void;
+  const started = new Promise<void>(resolve => { entered = resolve; });
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const owner = activity.track('local', { async complete(_request: { signal?: AbortSignal }) { entered(); await gate; return { text: '', modelId: 'owner' }; } });
+  const answer = owner.complete({}); await started;
+  let yieldNow = false;
+  try {
+    queue(ledger, store, f.lane, 1);
+    const model = activity.track('local', f.model(), { tag: 'tier_sniffer' });
+    const pass = runClassificationInference(() => runSnifferPass({ targets: [{ ledger, sniffer: store }],
+      lane: f.lane, model, shouldYield: () => yieldNow }));
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(f.events).toHaveLength(0);
+    yieldNow = true; release(); await answer;
+    expect(await pass).toMatchObject({ stoppedBy: 'yield', calls: 0, failedCalls: 0 });
+    expect(f.events).toHaveLength(0);
+    expect(store.questionFor(subject(1), 'metadata')?.attempts).toBe(0);
+  } finally { release(); await answer; ledger.close(); store.close(); f.stop(); }
 });
