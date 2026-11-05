@@ -32974,7 +32974,7 @@ function fileIdentity(path) {
     return;
   }
 }
-var DEFAULT_MAX_CHUNK_CHARS = 4000, MAX_MAX_CHUNK_CHARS = 32000, MAX_SEARCH_RESULTS = 50, CONNECTOR_STORE_FTS_TITLE_WEIGHT = 1.5, EMBEDDING_BATCH_SIZE = 32, MAX_SELECTED_EMBED_ITEM_IDS = 25000, MAX_CONVERSATION_TITLE_LOOKUP_ROWS = 100, MIN_VECTOR_SCORE = 0.18, MAX_REQUIRED_CONCEPTS = 3, RARE_CONCEPT_WEIGHT_SHARE = 0.6, READ_RESULT_PROJECTION_LOCATOR_URI, DEFAULT_SEMANTIC_RELEVANCE_BAR = 0.62, CALIBRATED_CONTENT_PREFERENCE_BARS, CALIBRATED_SEMANTIC_RELEVANCE_BARS, CONTAINER_MIME_TYPES, CONTAINER_MIME_TYPES_SQL, VECTOR_BACKEND = "exact_scan", SQLITE_STORE_ID = "connector-store", CONNECTOR_STORE_SQLITE_SCHEMA_VERSION = 15, IMAGE_CONTENT_PRIVATE_ONLY_CONNECTOR_ID = "olympus_image_content_private_only", CHUNK_MEDIA_RETRY_BASE_MS, CHUNK_MEDIA_MAX_ATTEMPTS = 3, MEDIA_JUDGE_MAX_PER_PASS = 200, MEDIA_JUDGE_RETRY_BASE_MS, MEDIA_JUDGE_MAX_ATTEMPTS = 3, MAX_CONSECUTIVE_CONTENT_FETCH_FAILURES = 3, CONNECTOR_STORE_FTS_MIGRATION, ConnectorStoreExclusionViolationError, ConnectorStoreMetadataOnlyViolationError, ConnectorStoreTierWriteRefusedError, STATUS_COUNTS_MAX_AGE_MS, IDENTITY_LOOKUP_SLICE = 5000, EXTRACTION_CANDIDATE_WINDOW = 5000, EXTRACTION_CANDIDATE_MAX_EXAMINED = 50000, HIDDEN_CHILD_PARENT_SLICE = 2000, TierLedgerUnavailableError, TIER_SET_BINDING_RUN_ID = "tiered-store-set-binding", TIER_SET_BINDING_CONNECTOR_ID = "tiered_store_set_binding", TIER_MOVE_CONNECTOR_ID = "olympus_tier_move", NON_SYNC_RUN_CONNECTORS_SQL, ConnectorStoreLocatorIdentityIndexNotReadyError, EMBEDDING_PROVIDER_UNAVAILABLE_REASON = "embedding_provider_unavailable", EMBEDDING_ITEMS_FAILED_REASON = "embedding_items_failed", CONNECTOR_STORE_EMBEDDING_LEASE_SUFFIX = ".embedding", CONNECTOR_STORE_EMBEDDING_LEASE_WAIT_MS = 120000, CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE = 256, CONNECTOR_STORE_CURRENT_EMBEDDING_JOINS_AND_FILTER = `
+var DEFAULT_MAX_CHUNK_CHARS = 4000, MAX_MAX_CHUNK_CHARS = 32000, MAX_SEARCH_RESULTS = 50, CONNECTOR_STORE_FTS_TITLE_WEIGHT = 1.5, EMBEDDING_BATCH_SIZE = 32, MAX_SELECTED_EMBED_ITEM_IDS = 25000, MAX_CONVERSATION_TITLE_LOOKUP_ROWS = 100, MIN_VECTOR_SCORE = 0.18, MAX_REQUIRED_CONCEPTS = 3, RARE_CONCEPT_WEIGHT_SHARE = 0.6, READ_RESULT_PROJECTION_LOCATOR_URI, DEFAULT_SEMANTIC_RELEVANCE_BAR = 0.62, CALIBRATED_CONTENT_PREFERENCE_BARS, CALIBRATED_SEMANTIC_RELEVANCE_BARS, CONTAINER_MIME_TYPES, CONTAINER_MIME_TYPES_SQL, VECTOR_BACKEND = "exact_scan", SQLITE_STORE_ID = "connector-store", CONNECTOR_STORE_SQLITE_SCHEMA_VERSION = 15, IMAGE_CONTENT_PRIVATE_ONLY_CONNECTOR_ID = "olympus_image_content_private_only", CHUNK_MEDIA_RETRY_BASE_MS, CHUNK_MEDIA_MAX_ATTEMPTS = 3, MEDIA_JUDGE_MAX_PER_PASS = 200, MEDIA_JUDGE_RETRY_BASE_MS, MEDIA_JUDGE_MAX_ATTEMPTS = 3, MAX_CONSECUTIVE_CONTENT_FETCH_FAILURES = 3, CONNECTOR_STORE_FTS_MIGRATION, ConnectorStoreExclusionViolationError, ConnectorStoreMetadataOnlyViolationError, ConnectorStoreTierWriteRefusedError, STATUS_COUNTS_MAX_AGE_MS, IDENTITY_LOOKUP_SLICE = 5000, EXTRACTION_CANDIDATE_WINDOW = 5000, EXTRACTION_CANDIDATE_MAX_EXAMINED = 50000, SETTLED_UNREADABLE_ITEMS_SLICE = 500, HIDDEN_CHILD_PARENT_SLICE = 2000, TierLedgerUnavailableError, TIER_SET_BINDING_RUN_ID = "tiered-store-set-binding", TIER_SET_BINDING_CONNECTOR_ID = "tiered_store_set_binding", TIER_MOVE_CONNECTOR_ID = "olympus_tier_move", NON_SYNC_RUN_CONNECTORS_SQL, ConnectorStoreLocatorIdentityIndexNotReadyError, EMBEDDING_PROVIDER_UNAVAILABLE_REASON = "embedding_provider_unavailable", EMBEDDING_ITEMS_FAILED_REASON = "embedding_items_failed", CONNECTOR_STORE_EMBEDDING_LEASE_SUFFIX = ".embedding", CONNECTOR_STORE_EMBEDDING_LEASE_WAIT_MS = 120000, CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE = 256, CONNECTOR_STORE_CURRENT_EMBEDDING_JOINS_AND_FILTER = `
   FROM chunk_embeddings emb
   JOIN chunks c ON c.chunk_pk = emb.chunk_pk
   JOIN items i ON i.item_pk = emb.item_pk
@@ -38931,9 +38931,6 @@ var init_local_index = __esm(() => {
       this.extractionEnded = probe;
       this.settledUnreadableCountMemo = undefined;
     }
-    settledUnreadableRows(scope, options = {}) {
-      return runSteps(this.settledUnreadableRowsSteps(scope, options));
-    }
     *settledUnreadableRowsSteps(scope, options = {}) {
       if (scope?.itemsAllowed === false || scope?.contentAllowed === false)
         return [];
@@ -38969,14 +38966,23 @@ var init_local_index = __esm(() => {
       return this.db.query(identityRowsSql(extra.sql)).all(keys, ...extra.params);
     }
     settledUnreadableItems(scope) {
+      return runSteps(this.settledUnreadableItemsSteps(scope));
+    }
+    settledUnreadableItemsInTurns(scope) {
+      return runStepsInTurns(this.settledUnreadableItemsSteps(scope));
+    }
+    *settledUnreadableItemsSteps(scope) {
       if (scope?.itemsAllowed === false || scope?.contentAllowed === false)
         return [];
       const ledger = this.visibilityLedger();
       if (!ledger)
         return [];
-      const matched = this.settledUnreadableRows(scope);
+      const matched = yield* this.settledUnreadableRowsSteps(scope);
       const out = [];
-      for (const { identity: identity2, row } of matched) {
+      for (let index = 0;index < matched.length; index += 1) {
+        if (index > 0 && index % SETTLED_UNREADABLE_ITEMS_SLICE === 0)
+          yield;
+        const { identity: identity2, row } = matched[index];
         const override = ledger.getOverride(identity2);
         if (override?.kind === "tier" && override.tier === "secrets")
           continue;
@@ -213608,12 +213614,29 @@ ${key2}`;
     dropbox: unreadableDropboxTargets(),
     [LOCAL_FILES_PROVIDER]: localFilesOpenTarget
   };
+  const settledUnreadableByCorpus = new Map;
+  const settledUnreadableBuilding = new Set;
+  const settledUnreadableFor = (corpusId) => {
+    const built = settledUnreadableByCorpus.get(corpusId);
+    if ((!built || Date.now() - built.at >= DASHBOARD_READINESS_LEDGER_MAX_AGE_MS) && !settledUnreadableBuilding.has(corpusId)) {
+      settledUnreadableBuilding.add(corpusId);
+      (async () => {
+        try {
+          const items = [];
+          for (const store of connectorStores.filter((store2) => store2.corpusId === corpusId)) {
+            items.push(...await store.settledUnreadableItemsInTurns(connectorStoreStatusScope(store)));
+          }
+          settledUnreadableByCorpus.set(corpusId, { at: Date.now(), items });
+        } catch {} finally {
+          settledUnreadableBuilding.delete(corpusId);
+        }
+      })();
+    }
+    return built?.items ?? [];
+  };
   const unreadableFiles = createUnreadableFiles({
     items: (corpusId) => {
-      const items = [
-        ...extractionReadinessLedger?.unreadableItems(corpusId) ?? [],
-        ...connectorStores.filter((store) => store.corpusId === corpusId).flatMap((store) => store.settledUnreadableItems(connectorStoreStatusScope(store)))
-      ];
+      const items = [...extractionReadinessLedger?.unreadableItems(corpusId) ?? [], ...settledUnreadableFor(corpusId)];
       return Array.from(new Map(items.map((item) => [item.ref.localItemId, item])).values());
     },
     verdict: unreadableVerdict,
@@ -215002,7 +215025,15 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
   const { createChatGptHandoffs: createChatGptHandoffs2, createChatGptHandoffHandler: createChatGptHandoffHandler2, withChatGptHandoffRoutes: withChatGptHandoffRoutes2 } = await Promise.resolve().then(() => (init_handoff(), exports_handoff));
   const { createChatGptSetupBackend: createChatGptSetupBackend2, readChatGptPrivacySettings: readChatGptPrivacySettings2 } = await Promise.resolve().then(() => (init_setup_backend(), exports_setup_backend));
   const chatgptHandoffs = createChatGptHandoffs2();
+  let pendingClassificationCounted;
   const pendingClassificationCount = () => {
+    if (pendingClassificationCounted && Date.now() - pendingClassificationCounted.at < 60000)
+      return pendingClassificationCounted.total;
+    const total = countPendingClassification();
+    pendingClassificationCounted = { at: Date.now(), total };
+    return total;
+  };
+  const countPendingClassification = () => {
     let total = 0;
     for (const lane of tierLanes) {
       for (const corpusId of lane.corpusIds) {

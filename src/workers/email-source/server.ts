@@ -302,6 +302,7 @@ import {
 import { canonicalConnectorStoreChatPrincipal } from '../connector-store/principal.ts';
 import { createSourceAnswerLanes } from './source-answer-lanes.ts';
 import type { ConnectorStoreStatusScope } from '../connector-store/local-index.ts';
+import type { ExtractionUnreadableItem } from '../file-extraction/job-store.ts';
 import { gmailInternalStoreStatusScope, gmailPrivateStoreStatusScope } from './gmail-status-scope.ts';
 import {
   onDemandTierStore,
@@ -4831,12 +4832,36 @@ export async function main(): Promise<void> {
     dropbox: unreadableDropboxTargets(),
     [LOCAL_FILES_PROVIDER]: localFilesOpenTarget,
   };
+  // Each store's list of files kept Private before they were read, built in
+  // turns off the request path and reused for the readiness window: built on
+  // each read it was about a quarter of Sparta's sampled freezes
+  // (2026-11-05). Until the first build lands a store lists none of them.
+  const settledUnreadableByCorpus = new Map<string, { at: number; items: readonly ExtractionUnreadableItem[] }>();
+  const settledUnreadableBuilding = new Set<string>();
+  const settledUnreadableFor = (corpusId: string): readonly ExtractionUnreadableItem[] => {
+    const built = settledUnreadableByCorpus.get(corpusId);
+    if ((!built || Date.now() - built.at >= DASHBOARD_READINESS_LEDGER_MAX_AGE_MS) && !settledUnreadableBuilding.has(corpusId)) {
+      settledUnreadableBuilding.add(corpusId);
+      void (async () => {
+        try {
+          const items: ExtractionUnreadableItem[] = [];
+          // A file store leaves out files still waiting for extraction (setExtractionEndedProbe).
+          for (const store of connectorStores.filter(store => store.corpusId === corpusId)) {
+            items.push(...await store.settledUnreadableItemsInTurns(connectorStoreStatusScope(store)));
+          }
+          settledUnreadableByCorpus.set(corpusId, { at: Date.now(), items });
+        } catch {
+          // A closed or busy store: the older list stands until the next read.
+        } finally {
+          settledUnreadableBuilding.delete(corpusId);
+        }
+      })();
+    }
+    return built?.items ?? [];
+  };
   const unreadableFiles = createUnreadableFiles({
         items: (corpusId) => {
-          const items = [...(extractionReadinessLedger?.unreadableItems(corpusId) ?? []),
-            ...connectorStores.filter(store => store.corpusId === corpusId)
-              // A file store leaves out files still waiting for extraction (setExtractionEndedProbe).
-              .flatMap(store => store.settledUnreadableItems(connectorStoreStatusScope(store)))];
+          const items = [...(extractionReadinessLedger?.unreadableItems(corpusId) ?? []), ...settledUnreadableFor(corpusId)];
           return Array.from(new Map(items.map(item => [item.ref.localItemId, item])).values());
         },
         verdict: unreadableVerdict,
@@ -6655,7 +6680,17 @@ export async function main(): Promise<void> {
   const chatgptHandoffs = createChatGptHandoffs();
   // Items held for the privacy check (pending, Private, not embedded), every
   // tier ledger counted once per corpus. Counts only.
+  // Reused for a minute: each count reads every copy the tier ledgers hold,
+  // and the dashboard's privacy panel asks on every poll (Sparta, 2026-11-05:
+  // about a tenth of the sampled freezes).
+  let pendingClassificationCounted: { at: number; total: number } | undefined;
   const pendingClassificationCount = (): number => {
+    if (pendingClassificationCounted && Date.now() - pendingClassificationCounted.at < 60_000) return pendingClassificationCounted.total;
+    const total = countPendingClassification();
+    pendingClassificationCounted = { at: Date.now(), total };
+    return total;
+  };
+  const countPendingClassification = (): number => {
     let total = 0;
     for (const lane of tierLanes) {
       for (const corpusId of lane.corpusIds) {

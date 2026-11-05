@@ -926,6 +926,9 @@ const EXTRACTION_CANDIDATE_WINDOW = 5_000;
 /** Item pks one extraction-candidate call examines before it returns a short page. */
 export const EXTRACTION_CANDIDATE_MAX_EXAMINED = 50_000;
 
+/** Ledger lookups per step when the settled-unreadable list is built in turns. */
+const SETTLED_UNREADABLE_ITEMS_SLICE = 500;
+
 /** Parents judged per step when the hidden-children set is built in turns. */
 const HIDDEN_CHILD_PARENT_SLICE = 2_000;
 
@@ -12223,13 +12226,6 @@ export class LocalConnectorStore {
    * out items the owner marked Secrets in the same read, instead of one
    * lookup per item (Sparta, 2026-11-04: 1.7-2.9 s of a status build).
    */
-  private settledUnreadableRows(
-    scope: ConnectorStoreStatusScope | undefined,
-    options: { withoutSecretsOverrides?: boolean } = {},
-  ): Array<{ identity: TierLedgerIdentity; row: { local_item_id: string; title: string | null; source_version: string | null } }> {
-    return runSteps(this.settledUnreadableRowsSteps(scope, options));
-  }
-
   private *settledUnreadableRowsSteps(
     scope: ConnectorStoreStatusScope | undefined,
     options: { withoutSecretsOverrides?: boolean } = {},
@@ -12298,12 +12294,27 @@ export class LocalConnectorStore {
 
   /** Fail-safe decisions with no readable content: the count and the problem list share this query. */
   settledUnreadableItems(scope?: ConnectorStoreStatusScope): ExtractionUnreadableItem[] {
+    return runSteps(this.settledUnreadableItemsSteps(scope));
+  }
+
+  /**
+   * `settledUnreadableItems` with a turn between slices, for the dashboard's
+   * problem list: built in one go on each read it was about a quarter of
+   * Sparta's sampled freezes (2026-11-05, fe2aef4).
+   */
+  settledUnreadableItemsInTurns(scope?: ConnectorStoreStatusScope): Promise<ExtractionUnreadableItem[]> {
+    return runStepsInTurns(this.settledUnreadableItemsSteps(scope));
+  }
+
+  private *settledUnreadableItemsSteps(scope?: ConnectorStoreStatusScope): Generator<void, ExtractionUnreadableItem[]> {
     if (scope?.itemsAllowed === false || scope?.contentAllowed === false) return [];
     const ledger = this.visibilityLedger();
     if (!ledger) return [];
-    const matched = this.settledUnreadableRows(scope);
+    const matched = yield* this.settledUnreadableRowsSteps(scope);
     const out: ExtractionUnreadableItem[] = [];
-    for (const { identity, row } of matched) {
+    for (let index = 0; index < matched.length; index += 1) {
+      if (index > 0 && index % SETTLED_UNREADABLE_ITEMS_SLICE === 0) yield;
+      const { identity, row } = matched[index]!;
       const override = ledger.getOverride(identity);
       if (override?.kind === 'tier' && override.tier === 'secrets') continue;
       const record = ledger.getCurrent(identity);
