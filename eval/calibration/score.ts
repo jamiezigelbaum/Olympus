@@ -139,7 +139,7 @@ async function main(): Promise<void> {
     const subjectOf = (id: string) => ({ provider: 'dropbox', accountScope: 'calibration', providerItemId: id });
     for (const item of labeled) {
       const decision = classifyItemTiers(
-        { signals: { title: item.name, path: `/${item.rel}` }, provider: 'dropbox', text: item.text, subject: subjectOf(item.id) },
+        { signals: item.signals ?? { title: item.name, path: `/${item.rel}` }, provider: item.source ?? 'dropbox', text: item.text, subject: subjectOf(item.id) },
         { sniffer, rules, retirePublic: true },
       );
       ledger.recordDecision(subjectOf(item.id), decision);
@@ -172,7 +172,7 @@ async function main(): Promise<void> {
         olympus: held ? 'held' : madePrivate ? 'private' : 'personal',
         madePrivate,
         why: record.reasons.filter((reason) => reason !== 'metadata:default:personal'),
-        modelSaid: said(item.name),
+        modelSaid: said(item.judgeSees ?? item.name),
       };
     });
     const tp = rows.filter((row) => row.madePrivate && row.owner === 'private').length;

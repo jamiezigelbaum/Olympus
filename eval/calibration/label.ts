@@ -49,6 +49,8 @@ const server = Bun.serve({
           modifiedAt: item.modifiedAt,
           textChars: item.text.length,
           excerpt: item.text.slice(0, EXCERPT_CHARS),
+          source: item.source,
+          judgeSees: item.judgeSees,
         })),
         labels: labels.labels,
       }, { headers: { 'cache-control': 'no-store' } });
@@ -66,7 +68,7 @@ const server = Bun.serve({
     if (request.method === 'POST' && route === '/reveal') {
       const body = await request.json() as { id?: string };
       const item = body.id ? byId.get(body.id) : undefined;
-      if (!item) return new Response('Unknown item', { status: 400 });
+      if (!item?.path) return new Response('Unknown item', { status: 400 });
       spawn('open', ['-R', item.path], { stdio: 'ignore', detached: true }).unref();
       return Response.json({ ok: true });
     }
@@ -151,24 +153,27 @@ function render() {
   }
   const it = items[index];
   const chosen = labels[it.id]?.label;
-  view.innerHTML = '<div class="card">' +
+  const judged = it.judgeSees !== undefined;
+  view.innerHTML = '<div class="card">' + (judged ?
+    '<div class="name">' + esc(it.source) + '</div>' +
+    '<div class="meta">Exactly what the private judge reads · item ' + (index + 1) + ' of ' + items.length + '</div>' :
     '<div class="name">' + esc(it.name) + '</div>' +
     '<div class="meta">' + esc(it.folder || '(top level)') + '</div>' +
     '<div class="meta">' + fmtSize(it.sizeBytes) + ' · modified ' + esc(it.modifiedAt.slice(0, 10)) + ' · item ' + (index + 1) + ' of ' + items.length +
-      (it.textChars > it.excerpt.length ? ' · showing the first ' + it.excerpt.length.toLocaleString() + ' characters' : '') + '</div>' +
+      (it.textChars > it.excerpt.length ? ' · showing the first ' + it.excerpt.length.toLocaleString() + ' characters' : '') + '</div>') +
     (chosen ? '<div class="current">Labeled: <b>' + NAMES[chosen] + '</b></div>' : '') +
-    '<pre>' + esc(it.excerpt) + '</pre>' +
+    '<pre>' + esc(judged ? it.judgeSees : it.excerpt) + '</pre>' +
     '<div class="buttons">' +
       ['personal', 'private', 'unsure', 'skip'].map((l, i) => '<button class="label ' + l + (chosen === l ? ' chosen' : '') + '" data-label="' + l + '">' +
         NAMES[l] + '<kbd>' + ['P', 'X', 'U', 'S'][i] + '</kbd></button>').join('') +
     '</div>' +
-    '<div class="nav"><button id="prev">← Previous</button><button id="reveal">Show in Finder<kbd>F</kbd></button>' +
+    '<div class="nav"><button id="prev">← Previous</button>' + (judged ? '' : '<button id="reveal">Show in Finder<kbd>F</kbd></button>') +
       '<button id="next">Next →</button><button id="nextOpen">Next unlabeled<kbd>N</kbd></button></div></div>';
   for (const b of view.querySelectorAll('button[data-label]')) b.onclick = () => choose(b.dataset.label);
   document.getElementById('prev').onclick = () => { index = Math.max(0, index - 1); render(); };
   document.getElementById('next').onclick = () => { index = Math.min(items.length, index + 1); render(); };
   document.getElementById('nextOpen').onclick = nextUnlabeled;
-  document.getElementById('reveal').onclick = reveal;
+  if (!judged) document.getElementById('reveal').onclick = reveal;
 }
 function nextUnlabeled() {
   for (let step = 1; step <= items.length; step += 1) {
