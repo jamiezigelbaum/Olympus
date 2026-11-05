@@ -8,7 +8,7 @@
 //     [--primed-check N] [--slot 0] [--n-probs 40] [--thinking]
 //
 //   VENICE_API_KEY=... bun eval/calibration/judge-run.ts --venice MODEL_ID --allow-venice
-//     --dir DIR (--owner-words FILE | --no-owner-words) [--concurrency 8] [--passes 3] [--exclude ID,ID]
+//     --dir DIR (--owner-words FILE | --no-owner-words) [--concurrency 8] [--max-rpm 140] [--passes 3] [--exclude ID,ID]
 //
 // --venice sends each item to Venice through production's own Venice judge
 // adapter (createVeniceAnalystModel, configured as the tier sniffer builds it),
@@ -92,6 +92,7 @@ const concurrency = Math.max(1, Math.min(VENICE_MAX_CONCURRENCY, Math.floor(numb
 
 /** What Venice reported for the calls of one pass: usage, latency and the key's limits. */
 interface VeniceMeter {
+  statuses: Record<string, number>;
   calls: number;
   failedCalls: number;
   latencyMs: number[];
@@ -102,8 +103,19 @@ interface VeniceMeter {
   rateLimits: Record<string, string>;
 }
 
+const maxRpm = numberFlag('--max-rpm', 0);
+let nextSlot = 0;
+/** Spaces call starts so a run stays under the key's request limit. */
+async function paced(): Promise<void> {
+  if (maxRpm <= 0) return;
+  const now = performance.now();
+  const slot = Math.max(now, nextSlot);
+  nextSlot = slot + 60_000 / maxRpm;
+  if (slot > now) await new Promise((resolve) => setTimeout(resolve, slot - now));
+}
+
 function newMeter(): VeniceMeter {
-  return { calls: 0, failedCalls: 0, latencyMs: [], promptTokens: 0, cachedTokens: 0, completionTokens: 0, reasoningTokens: 0, rateLimits: {} };
+  return { statuses: {}, calls: 0, failedCalls: 0, latencyMs: [], promptTokens: 0, cachedTokens: 0, completionTokens: 0, reasoningTokens: 0, rateLimits: {} };
 }
 
 let meter = newMeter();
@@ -121,6 +133,7 @@ function veniceJudge(model: string): AnalystModel {
     timeoutMs: 60_000,
     async fetchImpl(url, init) {
       if (!url.includes('/chat/completions')) return await fetch(url, init);
+      await paced();
       meter.calls += 1;
       const started = performance.now();
       let response: Response;
@@ -136,10 +149,10 @@ function veniceJudge(model: string): AnalystModel {
       }
       meter.latencyMs.push(performance.now() - started);
       if (!response.ok) meter.failedCalls += 1;
-      for (const name of ['x-ratelimit-limit-requests', 'x-ratelimit-limit-tokens']) {
-        const value = response.headers.get(name);
-        if (value) meter.rateLimits[name] = value;
-      }
+      meter.statuses[response.status] = (meter.statuses[response.status] ?? 0) + 1;
+      response.headers.forEach((value, name) => {
+        if (name.startsWith('x-ratelimit-') || name === 'retry-after') meter.rateLimits[name] = value;
+      });
       try {
         // Counts only: the body's text is never kept or printed.
         const usage = (JSON.parse(body) as { usage?: {
@@ -211,6 +224,7 @@ function meterSummary(pass: VeniceMeter, items: number) {
   return {
     calls: pass.calls,
     failedCalls: pass.failedCalls,
+    statuses: pass.statuses,
     latencyMs: { median: percentile(pass.latencyMs, 0.5), p95: percentile(pass.latencyMs, 0.95) },
     tokensPerItem: {
       prompt: per(pass.promptTokens),
