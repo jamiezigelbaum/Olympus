@@ -3,6 +3,7 @@ import { Database } from 'bun:sqlite';
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { loadSource, loopbackEndpoint, replay, reportFile, summarize, type Result } from '../eval/calibration/sniffer-replay.ts';
+import { pick } from '../eval/calibration/sample-replay.ts';
 import { storedJudgeInput } from '../eval/calibration/stored-input.ts';
 import { snifferMaterialHash } from '../src/workers/classification/sniffer-store.ts';
 
@@ -143,4 +144,13 @@ test('report isolates stored non-decisions and injection regressions', () => {
 test('literal loopback only, no redirects or credentials in configured endpoint', () => {
   for (const endpoint of ['https://example.com', 'http://localhost:8012', 'http://0.0.0.0:8012', 'http://127.0.0.1.evil.test', 'http://user:pass@127.0.0.1', 'http://127.0.0.1/?q=example']) expect(() => loopbackEndpoint(endpoint)).toThrow();
   for (const endpoint of ['http://127.0.0.1:8012', 'http://127.0.0.2:8012/v1', 'http://[::1]:8012']) expect(loopbackEndpoint(endpoint)).toContain('http:');
+});
+
+test('a labeling set takes each stratum once per input, in a seeded order', () => {
+  const row = (n: number, storedBucket: string, newTier: string) => ({ type: 'result', source: 'fixture', materialHash: String(n).padStart(64, '0'), storedBucket, newTier }) as Result;
+  const rows = [row(1, 'private', 'personal'), row(1, 'private', 'personal'), row(2, 'private', 'personal'), row(3, 'personal', 'private'), row(4, 'personal', 'personal'), row(5, 'private', 'private')];
+  const first = pick(rows, { lowered: 5, raised: 5, agreed: 5 }, 7);
+  expect(first.map(entry => entry.stratum).sort()).toEqual(['agreed', 'lowered', 'lowered', 'raised']);
+  expect(pick(rows, { lowered: 5, raised: 5, agreed: 5 }, 7)).toEqual(first);
+  expect(pick(rows, { lowered: 1, raised: 0, agreed: 0 }, 7).length).toBe(1);
 });
