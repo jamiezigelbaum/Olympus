@@ -674,7 +674,7 @@ export interface EmailSourceWorkerOptions {
      * configured, which is honest — the alternative is a page showing an empty
      * tree that reads as "you have no folders".
      */
-    ingestionDispositions?: () => Promise<SourceDispositionsRuntime> | SourceDispositionsRuntime;
+    ingestionDispositions?: (options?: { lazyStores?: boolean }) => Promise<SourceDispositionsRuntime> | SourceDispositionsRuntime;
     /**
      * Where a sign-in started for ChatGPT returns: the relay's public origin
      * and this install's relay id (docs/design/chatgpt-plugin.md, "Setup from
@@ -6811,7 +6811,8 @@ async function dashboardExclusionSources(
   cache: DashboardExclusionDebtCache,
 ): Promise<SourceIngestionLedgerExclusionSource[]> {
   if (!sourceDashboard.ingestionDispositions) return [];
-  const runtime = await sourceDashboard.ingestionDispositions();
+  // Stores open only when a source's debt is counted again, once per reuse window.
+  const runtime = await sourceDashboard.ingestionDispositions({ lazyStores: true });
   // One reading for the whole render, so two sources counted in the same page
   // can never straddle the reuse window's edge.
   const nowMs = Date.now();
@@ -6902,7 +6903,13 @@ function resolveDashboardExclusionDebt(
   if (cached && ageMs !== undefined && ageMs >= 0 && ageMs <= DASHBOARD_EXCLUSION_DEBT_MAX_AGE_MS) {
     return cached.debt;
   }
-  const debt = readDashboardExclusionDebt(source);
+  let debt: DashboardExclusionDebt | undefined;
+  try {
+    debt = readDashboardExclusionDebt(source);
+  } catch {
+    // A store that will not open leaves the counts absent, as an unopened source's are.
+    return {};
+  }
   if (!debt) return {};
   cache.set(key, { debt, computed_at_ms: nowMs });
   return debt;
