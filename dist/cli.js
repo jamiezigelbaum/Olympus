@@ -90558,14 +90558,14 @@ function workerPath() {
   return;
 }
 function scanThread() {
-  if (thread)
-    return thread;
-  if (unavailable)
+  if (thread2)
+    return thread2;
+  if (unavailable2)
     return;
   try {
     const path = typeof Worker === "function" && globalThis.Bun ? workerPath() : undefined;
     if (!path) {
-      unavailable = true;
+      unavailable2 = true;
       return;
     }
     const worker = new Worker(path);
@@ -90583,17 +90583,17 @@ function scanThread() {
       else
         waiting.reject(new Error(message2.error ?? "off-thread secret scan failed"));
     };
-    worker.onerror = (event) => retire(started, new Error(event.message || "secret scan thread stopped"));
-    thread = started;
+    worker.onerror = (event) => retire2(started, new Error(event.message || "secret scan thread stopped"));
+    thread2 = started;
     return started;
   } catch {
-    unavailable = true;
+    unavailable2 = true;
     return;
   }
 }
-function retire(stopped, error) {
-  if (thread === stopped)
-    thread = undefined;
+function retire2(stopped, error) {
+  if (thread2 === stopped)
+    thread2 = undefined;
   for (const waiting of stopped.pending.values()) {
     clearTimeout(waiting.timer);
     waiting.reject(error);
@@ -90609,10 +90609,10 @@ async function scanSecretsAhead(text3) {
   const scanner = scanThread();
   if (!scanner)
     return;
-  const id = nextId++;
+  const id = nextId2++;
   try {
     const kinds = await new Promise((resolve20, reject) => {
-      const timer = setTimeout(() => retire(scanner, new Error("off-thread secret scan timed out")), OFF_THREAD_SCAN_TIMEOUT_MS);
+      const timer = setTimeout(() => retire2(scanner, new Error("off-thread secret scan timed out")), OFF_THREAD_SCAN_TIMEOUT_MS);
       scanner.pending.set(id, { resolve: resolve20, reject, timer });
       scanner.worker.postMessage({ id, text: text3 });
     });
@@ -90621,7 +90621,7 @@ async function scanSecretsAhead(text3) {
     scanner.pending.delete(id);
   }
 }
-var OFF_THREAD_SCAN_TIMEOUT_MS = 120000, thread, unavailable = false, nextId = 1;
+var OFF_THREAD_SCAN_TIMEOUT_MS = 120000, thread2, unavailable2 = false, nextId2 = 1;
 var init_secret_scan_off_thread = __esm(() => {
   init_engine();
 });
@@ -118639,7 +118639,7 @@ function createBuiltInAnalystModel(options = {}) {
         const pending = ensureInstalled();
         if (options.waitForInstall) {
           paths = await pending.catch((error) => {
-            throw unavailable2(error);
+            throw unavailable3(error);
           });
         } else {
           pending.catch(() => {
@@ -118661,13 +118661,13 @@ function createBuiltInAnalystModel(options = {}) {
           throw error;
         if (error instanceof LlamaServerStillExitingError) {
           reportBuiltInReasoningState({ model: spec, env }, "ready");
-          throw unavailable2(error);
+          throw unavailable3(error);
         }
         reportBuiltInReasoningState({ model: spec, env }, "failed", {
           reason: "runtime_load_failed",
           message: error instanceof Error ? error.message : String(error)
         });
-        throw unavailable2(error);
+        throw unavailable3(error);
       }
       try {
         return await chatCompletion(fetchImpl, endpoint, spec, request, requestTimeoutMs);
@@ -118678,7 +118678,7 @@ function createBuiltInAnalystModel(options = {}) {
   };
   return model;
 }
-function unavailable2(error) {
+function unavailable3(error) {
   if (error instanceof OperationError)
     return error;
   const message2 = error instanceof Error ? error.message : String(error);
@@ -150248,21 +150248,21 @@ function renderOutsideHelpCard(status, input) {
   const canUnlock = input.csrfToken !== undefined && input.localSession !== true;
   const route = status.route;
   const on = status.settings.state === "on";
-  const unavailable3 = summary.state === "unavailable";
+  const unavailable4 = summary.state === "unavailable";
   const parts = [];
   if (input.untitled !== true)
     parts.push(`<h2 class="ptitle">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.title)}</h2>`);
-  if (canUnlock && (on || !unavailable3 || status.confinementInstallRequired)) {
+  if (canUnlock && (on || !unavailable4 || status.confinementInstallRequired)) {
     parts.push(`<form class="ohform ohunlock" data-outside-form="unlock" data-outside-unlock>` + `<button type="submit" class="btn primary">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.unlock)}</button><span class="hint">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.unlockIntro)}</span>` + `<span class="actmsg" data-action-message role="status"></span></form>`);
   }
   const access = canEdit ? "edit" : canUnlock ? "unlock" : "read";
-  const missingRoute = !unavailable3 && route.state === "not_configured";
+  const missingRoute = !unavailable4 && route.state === "not_configured";
   if (missingRoute)
     parts.push(renderProblems(status, access));
   parts.push(renderStatusBlock(status, summary, access));
   if (status.restartPending)
     parts.push(`<p class="pnote ohwarn" data-outside-restart-pending>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.restartPending)}</p>`);
-  if (unavailable3) {
+  if (unavailable4) {
     if (status.confinementInstallRequired)
       parts.push(renderOutsideHelpTools(status.tools, { canEdit, requireLauncher: true }));
     const toolsScript2 = status.confinementInstallRequired ? renderOutsideHelpToolsScript(status.tools, { canEdit, ...input.csrfToken !== undefined ? { csrfToken: input.csrfToken } : {} }) : "";
@@ -150315,12 +150315,12 @@ function renderStatusBlock(status, summary, access) {
   const route = status.route;
   const on = status.settings.state === "on";
   const invalid4 = status.settings.state === "invalid";
-  const unavailable3 = summary.state === "unavailable";
+  const unavailable4 = summary.state === "unavailable";
   const blockedReason = invalid4 ? undefined : route.state === "not_configured" ? DASHBOARD_OUTSIDE_HELP_COPY.enableBlockedRoute : !route.acknowledgements.complete ? DASHBOARD_OUTSIDE_HELP_COPY.enableBlockedAcks : undefined;
-  const button = access === "read" || unavailable3 && !on ? "" : access === "unlock" ? unlockFirst(invalid4 ? DASHBOARD_OUTSIDE_HELP_COPY.replaceFile : on ? DASHBOARD_OUTSIDE_HELP_COPY.turnOff : DASHBOARD_OUTSIDE_HELP_COPY.turnOn, !on) : invalid4 ? `<button type="submit" class="btn primary" data-outside-replace>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.replaceFile)}</button>` : on ? `<button type="submit" class="btn" data-outside-enabled="false">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.turnOff)}</button>` : blockedReason ? `<span class="blocked"><button type="button" class="btn primary" disabled aria-disabled="true">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.turnOn)}</button><span class="hint">${escapeHtml2(blockedReason)}</span></span>` : `<button type="submit" class="btn primary" data-outside-enabled="true">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.turnOn)}</button>`;
+  const button = access === "read" || unavailable4 && !on ? "" : access === "unlock" ? unlockFirst(invalid4 ? DASHBOARD_OUTSIDE_HELP_COPY.replaceFile : on ? DASHBOARD_OUTSIDE_HELP_COPY.turnOff : DASHBOARD_OUTSIDE_HELP_COPY.turnOn, !on) : invalid4 ? `<button type="submit" class="btn primary" data-outside-replace>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.replaceFile)}</button>` : on ? `<button type="submit" class="btn" data-outside-enabled="false">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.turnOff)}</button>` : blockedReason ? `<span class="blocked"><button type="button" class="btn primary" disabled aria-disabled="true">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.turnOn)}</button><span class="hint">${escapeHtml2(blockedReason)}</span></span>` : `<button type="submit" class="btn primary" data-outside-enabled="true">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.turnOn)}</button>`;
   const tone = summary.state === "on" ? "on" : summary.state === "off" || summary.state === "unavailable" ? "off" : "attn";
-  const usage = !unavailable3 && route.state === "configured" && route.readiness ? usageLine(route.readiness) : "";
-  const head = `<div class="ohhead"><div class="ohstatewrap"><p class="ohstate"><span class="dot ${tone}" aria-hidden="true"></span>` + `<span data-outside-state-text data-outside-state="${escapeHtml2(summary.state)}">${escapeHtml2(outsideHelpStateLine(summary))}</span></p>` + (usage ? `<p class="ohline" data-outside-usage>${escapeHtml2(usage)}</p>` : "") + (!unavailable3 && route.state === "configured" && route.readiness?.torMode === "off" ? `<p class="ohline attn" data-outside-address-visible>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.addressVisible)}</p>` : "") + `</div>${button ? `<div class="pbuttons">${button}</div>` : ""}</div>`;
+  const usage = !unavailable4 && route.state === "configured" && route.readiness ? usageLine(route.readiness) : "";
+  const head = `<div class="ohhead"><div class="ohstatewrap"><p class="ohstate"><span class="dot ${tone}" aria-hidden="true"></span>` + `<span data-outside-state-text data-outside-state="${escapeHtml2(summary.state)}">${escapeHtml2(outsideHelpStateLine(summary))}</span></p>` + (usage ? `<p class="ohline" data-outside-usage>${escapeHtml2(usage)}</p>` : "") + (!unavailable4 && route.state === "configured" && route.readiness?.torMode === "off" ? `<p class="ohline attn" data-outside-address-visible>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.addressVisible)}</p>` : "") + `</div>${button ? `<div class="pbuttons">${button}</div>` : ""}</div>`;
   return `<form class="ohpanel" data-outside-form="enable" data-outside-current="${on ? "on" : "off"}" data-outside-invalid="${invalid4 ? "yes" : "no"}">` + head + `<span class="actmsg" data-action-message role="status"></span></form>`;
 }
 function usageLine(ready) {
@@ -150955,14 +150955,14 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     lastFailure: null
   };
   const H = config2.host;
-  let nextId2 = 1;
+  let nextId3 = 1;
   const pending = {};
   function post2(message2) {
     if (window.parent && window.parent !== window)
       window.parent.postMessage(message2, "*");
   }
   function request(method, params, timeoutMs) {
-    const id = nextId2++;
+    const id = nextId3++;
     post2({ jsonrpc: "2.0", id, method, params: params || {} });
     return new Promise((resolve26, reject) => {
       const timer = timeoutMs ? setTimeout(() => {
@@ -150980,7 +150980,7 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
   }
   const uploadProgress = {};
   function uploadFile(uploadId, path, file, modified, progress) {
-    const id = nextId2++;
+    const id = nextId3++;
     uploadProgress[id] = progress;
     const finish = (value2) => {
       delete uploadProgress[id];
@@ -164826,7 +164826,7 @@ function createEvernoteSourceConnector(options) {
       const readNotes = {};
       const pending = [];
       let stoppedBy;
-      const retire2 = (noteId, entry) => {
+      const retire3 = (noteId, entry) => {
         pending.push(deletedItem(noteId), ...(entry?.children ?? []).map((key2) => deletedItem(childProviderItemId(noteId, key2))));
         counts.notes_deleted += 1;
       };
@@ -164837,7 +164837,7 @@ function createEvernoteSourceConnector(options) {
           continue;
         if (deletable > 0) {
           deletable -= 1;
-          retire2(noteId, entry);
+          retire3(noteId, entry);
         } else {
           nextNotes[noteId] = entry;
           counts.notes_deletion_held += 1;
@@ -164845,7 +164845,7 @@ function createEvernoteSourceConnector(options) {
       }
       const withhold = (noteId, before, owned) => {
         if (before && !before.v.startsWith("shared|"))
-          retire2(noteId, before);
+          retire3(noteId, before);
         if (owned)
           counts.notes_excluded += 1;
         else
@@ -164912,19 +164912,19 @@ function createEvernoteSourceConnector(options) {
         const notebookId = typeof note.notebookId === "string" && note.notebookId !== "" ? note.notebookId : undefined;
         if (!notebookId) {
           if (before && !before.v.startsWith("shared|"))
-            retire2(noteId, before);
+            retire3(noteId, before);
           nextNotes[noteId] = { v: `shared|${hit.updatedAt}` };
           counts.shared_not_imported += 1;
           continue;
         }
         if (note.active === false) {
-          retire2(noteId, before);
+          retire3(noteId, before);
           continue;
         }
         const actual = book?.id === notebookId ? book : notebooks.find((entry) => entry.id === notebookId) ?? { id: notebookId, label: "", owned: true, disposition: gate({ id: notebookId, label: "" }) };
         if (actual.disposition !== "ingest") {
           if (before && !before.v.startsWith("shared|"))
-            retire2(noteId, before);
+            retire3(noteId, before);
           counts.notes_excluded += 1;
           continue;
         }
@@ -179346,7 +179346,7 @@ async function parseMboxMessage(raw, options = {}) {
   const authoredAt = isoDate(email2.date) ?? isoDate(dateHeader);
   const to = decoded(headerValue(email2, "to"));
   const messageId = bareMessageId2(email2.messageId ?? headerValue(email2, "message-id"));
-  const thread2 = headerValue(email2, "x-gm-thrid");
+  const thread3 = headerValue(email2, "x-gm-thrid");
   const deliveredTo = headerValue(email2, "delivered-to");
   const threadRoot = firstMessageId(email2.references) ?? firstMessageId(email2.inReplyTo) ?? messageId;
   return {
@@ -179361,7 +179361,7 @@ async function parseMboxMessage(raw, options = {}) {
     ...messageId ? { messageId } : {},
     body: email2.text?.trim() || (email2.html ? stripHtml2(email2.html) : ""),
     messageHash: sha25610(raw),
-    ...thread2 && /^\d{1,20}$/.test(thread2) ? { gmailThread: thread2 } : {},
+    ...thread3 && /^\d{1,20}$/.test(thread3) ? { gmailThread: thread3 } : {},
     ...threadRoot ? { threadRoot } : {},
     charsetNotDecoded: declaredCharsets(raw).some((charset2) => !charsetDecodable(charset2)),
     ...deliveredTo ? { deliveredTo } : {}
@@ -193563,14 +193563,14 @@ function chatgptPrivateAnswerProgram(config2) {
   let theme = "";
   let focusAfter = "";
   const acked = {};
-  let nextId2 = 1;
+  let nextId3 = 1;
   const pending = {};
   function post2(message2) {
     if (window.parent && window.parent !== window)
       window.parent.postMessage(message2, "*");
   }
   function request(method, params, onResult) {
-    const id = nextId2++;
+    const id = nextId3++;
     pending[id] = onResult;
     post2({ jsonrpc: "2.0", id, method, params });
   }
@@ -194929,14 +194929,14 @@ function chatgptPrivateQuestionProgram(config2) {
   let run2 = 0;
   let theme = "";
   let focusAfter = "";
-  let nextId2 = 1;
+  let nextId3 = 1;
   const pending = {};
   function post2(message2) {
     if (window.parent && window.parent !== window)
       window.parent.postMessage(message2, "*");
   }
   function request(method, params, onResult) {
-    const id = nextId2++;
+    const id = nextId3++;
     pending[id] = onResult;
     post2({ jsonrpc: "2.0", id, method, params });
   }
