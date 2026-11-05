@@ -14,8 +14,8 @@
 // placement of an unread item in a lane whose text arrives later is its
 // names' copy either way, so no store is written and nothing moves.
 //
-// Bounded: a page of rows per call, resumed from the ledger, starting over
-// once the end is reached.
+// Bounded: a page of rows per call from a bounded window of the ledger,
+// resumed from the ledger, starting over once the end is reached.
 
 import type { TierDecision } from '../classification/tier-classifier.ts';
 import { copyServingLayer, type TierLedgerIdentity, type TierLedgerRecord } from '../classification/tier-ledger.ts';
@@ -40,7 +40,8 @@ export function settleNamesOnlyItems(options: { set: TieredStoreSet; limit?: num
   const ledger = set.ledger;
   const limit = Math.max(1, options.limit ?? DEFAULT_NAMES_ONLY_SETTLE_ROWS);
   const after = parseIdentity(ledger.readMeta(SETTLE_META_KEY));
-  const rows = ledger.listAwaitingText({ limit, ...(after ? { after } : {}) });
+  // A bounded window of the ledger per call, matching or not (listAwaitingTextWindow).
+  const { records: rows, resumeAfter } = ledger.listAwaitingTextWindow({ limit, ...(after ? { after } : {}) });
   for (const record of rows) {
     report.checked += 1;
     try {
@@ -49,8 +50,7 @@ export function settleNamesOnlyItems(options: { set: TieredStoreSet; limit?: num
       // Left pending; the item's next listing or a later pass settles it.
     }
   }
-  const last = rows.at(-1);
-  ledger.writeMeta(SETTLE_META_KEY, rows.length >= limit && last ? JSON.stringify(identityOf(last)) : '');
+  ledger.writeMeta(SETTLE_META_KEY, resumeAfter ? JSON.stringify(resumeAfter) : '');
   return report;
 }
 
