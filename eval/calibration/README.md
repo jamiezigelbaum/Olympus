@@ -106,6 +106,37 @@ bun eval/calibration/score.ts --dir ~/.local/share/olympus-calibration/round2
 `score.ts` classifies from the stored names, so it has the same gaps as a
 rebuilt input.
 
+## Judge runs on a llama.cpp server
+
+`judge-run.ts` runs the private judge over either round and scores it against
+the labels. The system prompt, user message, secret and injection screens, and
+the answer parser are imported from production, so they cannot drift. Only
+labeled Personal and Private items run; Not sure and Skip are left out.
+
+```bash
+bun eval/calibration/judge-run.ts --endpoint http://127.0.0.1:8012 \
+  --dir ~/.local/share/olympus-calibration/round2 \
+  --model NAME --owner-words FILE --primed-check 20
+```
+
+- **Server:** `llama-server --jinja -np 1`. Only a loopback endpoint is accepted,
+  so reach another machine through an SSH tunnel.
+- **Modes:** `decision` (the default) pre-fills the reply up to the tier and
+  reads one token's probabilities; the verdict is Private at P(Private) of 0.5
+  or above. `full` is production's whole JSON answer.
+- **Reasoning:** off, unless `--thinking` is passed. `decision` needs it off.
+- **Priming:** each pass first loads the shared prompt. `--primed-check N` runs N
+  items primed and unprimed and reports any answer that differs.
+- **Speed:** a warm-up pass gives the verdicts, then 3 timed passes give the
+  median and range. Any verdict that moves between passes is counted.
+- **Score:** both kinds of mistake, Private and Personal recall and balanced
+  accuracy, by source, split and stratum. Round 2 also reports a score
+  reweighted to the natural mix. Its stratum sizes count every item the judge
+  could read, including kinds the sample leaves out, so the weights are close
+  rather than exact.
+
+Output and the saved `judge-*.json` carry ids, counts and metrics, never text.
+
 ## Venice embedding content preference (2026-10-10)
 
 Owner-approved on 2026-10-10, using only committed synthetic eval fixtures:
