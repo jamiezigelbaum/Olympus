@@ -921,6 +921,11 @@ function runSteps<T>(steps: Generator<void, T>): T {
   return step.value;
 }
 
+/** Item pks one extraction-candidate query reads. */
+const EXTRACTION_CANDIDATE_WINDOW = 5_000;
+/** Item pks one extraction-candidate call examines before it returns a short page. */
+export const EXTRACTION_CANDIDATE_MAX_EXAMINED = 50_000;
+
 /** Parents judged per step when the hidden-children set is built in turns. */
 const HIDDEN_CHILD_PARENT_SLICE = 2_000;
 
@@ -2140,6 +2145,12 @@ export interface ConnectorStoreExtractionCandidateOptions {
   includeStaleChunks?: boolean;
   /** Trusted current-account/scope boundary, applied before pagination. */
   filters?: ConnectorStoreSearchFilters;
+  /**
+   * Item pks one call examines before it returns a short page with
+   * `done: false` (default EXTRACTION_CANDIDATE_MAX_EXAMINED). A caller that
+   * reads one page and never follows the cursor passes Infinity.
+   */
+  maxExamined?: number;
 }
 
 export interface ConnectorStoreExtractionCandidatePage {
@@ -5993,7 +6004,7 @@ export class LocalConnectorStore {
       WHERE i.tombstoned = 0
         AND LOWER(i.mime_type) <> 'inode/directory'
         ${this.childItemColumnsPresent ? 'AND (i.bytes_available IS NULL OR i.bytes_available <> 0)' : ''}
-        AND i.item_pk > ?
+        AND i.item_pk > ? AND i.item_pk <= ?
         AND (? IS NULL OR i.account_scope = ?)
         AND (? = 0 OR NOT EXISTS (SELECT 1 FROM chunks c WHERE c.item_pk = i.item_pk)
           ${staleChunksSql}
@@ -6010,19 +6021,28 @@ export class LocalConnectorStore {
     const candidates: ConnectorStoreExtractionCandidate[] = [];
     let skippedByDisposition = 0;
     let exhausted = false;
+    // Each query reads one window of item pks: with few matches left (most
+    // items already read) an unbounded LIMIT query walked the rest of the
+    // table in one go, about a fifth of the sampled freezes on Sparta
+    // (2026-11-05). A call stops after `maxExamined` pks and resumes there.
+    const maxPk = (this.db.query('SELECT COALESCE(MAX(item_pk), 0) AS n FROM items').get() as { n: number }).n;
+    const examineUntil = Math.min(maxPk, lastExaminedPk + Math.max(1, options.maxExamined ?? EXTRACTION_CANDIDATE_MAX_EXAMINED));
+    let windowEnd = Math.min(examineUntil, lastExaminedPk + EXTRACTION_CANDIDATE_WINDOW);
     while (candidates.length < limit) {
+      if (lastExaminedPk >= maxPk) {
+        exhausted = true;
+        break;
+      }
+      if (lastExaminedPk >= examineUntil) break;
       const rows = query.all(
         lastExaminedPk,
+        windowEnd,
         accountScope ?? null,
         accountScope ?? null,
         options.withoutChunksOnly === true ? 1 : 0,
         ...selectedFilters.params,
         scanBatch,
       ) as ConnectorStoreExtractionCandidateRow[];
-      if (rows.length === 0) {
-        exhausted = true;
-        break;
-      }
       for (const row of rows) {
         lastExaminedPk = row.item_pk;
         if (matchesMimeType && !matchesMimeType(row.mime_type)) continue;
@@ -6049,8 +6069,9 @@ export class LocalConnectorStore {
       }
       if (candidates.length === limit) break;
       if (rows.length < scanBatch) {
-        exhausted = true;
-        break;
+        // The window held no more matches: go on after it.
+        lastExaminedPk = windowEnd;
+        windowEnd = Math.min(examineUntil, windowEnd + EXTRACTION_CANDIDATE_WINDOW);
       }
     }
 

@@ -144,6 +144,33 @@ describe('connector store: extraction candidates', () => {
     }
   });
 
+  test('a call examines at most maxExamined item pks, returns a short page, and the cursor still reaches every match', async () => {
+    const specs: SeedSpec[] = [];
+    for (let i = 0; i < 40; i += 1) specs.push(i % 10 === 9 ? { id: `bare-${i}` } : { id: `read-${i}`, text: `body ${i}` });
+    const store = await seededStore(specs);
+    try {
+      const found: string[] = [];
+      let cursor: string | undefined;
+      let shortPages = 0;
+      for (let calls = 0; calls < 100; calls += 1) {
+        const page = store.extractionCandidates({ limit: 10, withoutChunksOnly: true, maxExamined: 7, ...(cursor ? { cursor } : {}) });
+        found.push(...ids(page));
+        if (page.done) break;
+        if (page.candidates.length < 10) shortPages += 1;
+        expect(page.nextCursor).toBeDefined();
+        cursor = page.nextCursor;
+      }
+      expect(found.sort()).toEqual(['bare-19', 'bare-29', 'bare-39', 'bare-9']);
+      expect(shortPages).toBeGreaterThan(0);
+      // Left at the default, one call reaches all of them.
+      const all = store.extractionCandidates({ limit: 10, withoutChunksOnly: true });
+      expect(all.done).toBe(true);
+      expect(ids(all).sort()).toEqual(['bare-19', 'bare-29', 'bare-39', 'bare-9']);
+    } finally {
+      store.close();
+    }
+  });
+
   test('a tombstoned item is excluded', async () => {
     const store = await seededStore([
       { id: 'kept', text: 'kept body' },
