@@ -12233,7 +12233,9 @@ export class LocalConnectorStore {
     if (scope?.itemsAllowed === false || scope?.contentAllowed === false) return [];
     const ledger = this.visibilityLedger();
     if (!ledger) return [];
-    const identities = ledger.corpusCopyIdentities(this.corpusId, options.withoutSecretsOverrides
+    // A page of copies at a time: one read of every metadata-only copy was a
+    // tenth of Sparta's sampled freezes (34b0edb, 2026-11-05).
+    const identities = yield* ledger.corpusCopyIdentitiesSteps(this.corpusId, options.withoutSecretsOverrides
       ? 'metadata_layer_settled_unreadable_not_secret'
       : 'metadata_layer_settled_unreadable');
     const filters = connectorStoreFilterSql(scope?.contentFilters ?? scope?.itemFilters);
