@@ -20,22 +20,27 @@ function fixture() {
   for (const source of ['gmail.email', 'telegram.messages']) {
     const dir = join(stores, source); mkdirSync(dir);
     const db = new Database(join(dir, 'internal.sqlite'));
-    db.exec(`CREATE TABLE items(item_pk INTEGER, provider TEXT, provider_item_id TEXT, provider_conversation_id TEXT, title TEXT, tombstoned INTEGER);
+    db.exec(`CREATE TABLE items(item_pk INTEGER, provider TEXT, provider_item_id TEXT, provider_conversation_id TEXT, title TEXT, tombstoned INTEGER, account_scope TEXT, normalized_conversation TEXT);
       CREATE TABLE chunks(item_pk INTEGER, chunk_index INTEGER, bounded_text TEXT);`);
     const sniff = new Database(join(dir, 'secure_local.tier-sniffer.sqlite'));
     sniff.exec(`CREATE TABLE sniffer_verdicts(material_hash TEXT, tier TEXT, model_id TEXT, prompt_version TEXT, map_revision TEXT, category TEXT, fail_safe INTEGER);
       CREATE TABLE sniffer_questions(material TEXT, provider_item_id TEXT, pass TEXT);`);
+    const ledger = new Database(join(dir, 'secure_local.tier-ledger.sqlite'));
+    ledger.exec('CREATE TABLE tier_items(provider TEXT, account_scope TEXT, conversation_key TEXT, provider_item_id TEXT, content_tier TEXT, map_revision TEXT, reasons_json TEXT)');
+    const judged = (id: string, tier: string, code: string) => ledger.query('INSERT INTO tier_items VALUES (?,?,?,?,?,?,?)').run('fixture', 'scope', '', id, tier, 'none', JSON.stringify([`content:sniffer:old-model:old-prompt:${code}`]));
     inputs.forEach((text, n) => {
-      const item = { item_pk: n, provider: 'fixture', provider_item_id: String(n), provider_conversation_id: null, title: 'Imaginary picnic', tombstoned: 0 };
-      db.query('INSERT INTO items VALUES (?,?,?,?,?,?)').run(...Object.values(item));
+      const item = { item_pk: n, provider: 'fixture', provider_item_id: String(n), provider_conversation_id: null, title: 'Imaginary picnic', tombstoned: 0, account_scope: 'scope', normalized_conversation: '' };
+      db.query('INSERT INTO items VALUES (?,?,?,?,?,?,?,?)').run(...Object.values(item));
       db.query('INSERT INTO chunks VALUES (?,?,?)').run(n, 0, text);
+      judged(String(n), 'secure', n ? 'injection:rule:0.00' : 'ordinary:0.90');
       // Injection is refused during reconstruction: a queued exact input can still match.
       const material = storedJudgeInput(item, text, 'fixture').material ?? text;
       sniff.query('INSERT INTO sniffer_verdicts VALUES (?,?,?,?,?,?,?)').run(snifferMaterialHash('content', material), 'private', 'old-model', 'old-prompt', 'none', n ? 'injection' : 'ordinary', n ? 1 : 0);
       if (n) sniff.query('INSERT INTO sniffer_questions VALUES (?,?,?)').run(material, String(n), 'content');
     });
     sniff.query('INSERT INTO sniffer_verdicts VALUES (?,?,?,?,?,?,?)').run('0'.repeat(64), 'personal', 'old-model', 'old-prompt', 'none', 'ordinary', 0);
-    db.close(); sniff.close();
+    judged('missing', 'private', 'ordinary:0.90'); judged('waiting', 'private', 'undecided'); judged('failed', 'secure', 'fail_safe');
+    db.close(); sniff.close(); ledger.close();
   }
   return { root, stores, ownerWords, out: join(root, 'out.jsonl'), disagreements: join(root, 'disagreements.jsonl'), sources: ['gmail.email', 'telegram.messages'], model: 'fixture-model' };
 }
@@ -66,7 +71,7 @@ test('hash reconstruction, exact queued match, unmatched rows, read-only inputs,
   const f = fixture(), s = server();
   try {
     const source = loadSource(f.stores, 'gmail.email');
-    expect(source.counts).toEqual({ verdictRows: 3, matched: 2, unmatched: 1 });
+    expect(source.counts).toMatchObject({ verdictRows: 3, matched: 2, unmatched: 1 });
     const dbPath = join(f.stores, 'gmail.email', 'internal.sqlite');
     const before = readFileSync(dbPath);
     const first = await replay({ ...f, endpoint: s.endpoint, limit: 1 });

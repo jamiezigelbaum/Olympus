@@ -13,10 +13,11 @@ import { storedJudgeInput, type Row } from './stored-input.ts';
 
 export const SOURCES = ['dropbox.files', 'gmail.email', 'google_drive.docs', 'telegram.messages', 'whatsapp.personal.messages', 'x.bookmarks'] as const;
 interface Verdict { material_hash: string; tier: string; model_id: string; prompt_version: string; map_revision: string; category: string; fail_safe: number }
+interface LedgerRow { provider: string; account_scope: string; conversation_key: string; provider_item_id: string; content_tier: string; map_revision: string | null; reasons_json: string }
 interface Material { material: string; ids: Set<string> }
 export interface ReplaySource {
   source: string; verdicts: Verdict[]; materials: Map<string, Material>;
-  counts: { verdictRows: number; matched: number; unmatched: number };
+  counts: { verdictRows: number; matched: number; unmatched: number; exactInput: number };
 }
 type Failure = 'error' | 'timeout' | 'parse' | 'coverage' | 'secret' | null;
 export interface Result {
@@ -45,47 +46,63 @@ export function loopbackEndpoint(endpoint: string): string {
 const digest = (value: string) => createHash('sha256').update(value).digest('hex');
 const hasTable = (db: Database, name: string) => Boolean(db.query("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(name));
 
+/** A real content verdict in a ledger row: model, prompt version and category. Undecided and fail-safe rows are not verdicts. */
+function ledgerVerdict(reasons: string): { model: string; prompt: string; category: string } | undefined {
+  const found = /"content:sniffer:([^":]*):([^":]*):([^":]+)[^"]*"/.exec(reasons);
+  if (!found || found[3] === 'undecided' || found[3]!.startsWith('fail')) return undefined;
+  return { model: found[1]!, prompt: found[2]!, category: found[3]! };
+}
+
+// The verdict table is keyed by a hash of the complete input, which the stores
+// do not fully keep. The tier ledger names each judged item, so the item comes
+// from there and its input is rebuilt; `exactInput` says how many rebuilt inputs
+// hash to a stored verdict. Same stored names and bounded chunks as sample-messages.
 export function loadSource(root: string, source: string): ReplaySource {
-  const materials = new Map<string, Material>();
-  let wanted = new Set<string>();
-  const add = (material: string | undefined, id: string) => {
-    if (material === undefined) return;
-    const hash = snifferMaterialHash('content', material);
-    if (!wanted.has(hash)) return;
-    const found = materials.get(hash);
-    if (found) found.ids.add(id);
-    else materials.set(hash, { material, ids: new Set([id]) });
-  };
   const open = (file: string) => {
     const path = join(root, source, file);
     return existsSync(path) ? new Database(path, { readonly: true, create: false }) : undefined;
   };
-  let verdicts: Verdict[] = [];
+  const materials = new Map<string, Material>();
+  const verdicts = new Map<string, Verdict>();
+  const counts = { verdictRows: 0, matched: 0, unmatched: 0, exactInput: 0 };
   const sniffer = open('secure_local.tier-sniffer.sqlite');
+  const stored = new Set(sniffer && hasTable(sniffer, 'sniffer_verdicts')
+    ? (sniffer.query('SELECT material_hash FROM sniffer_verdicts').all() as Array<{ material_hash: string }>).map(row => row.material_hash) : []);
+  sniffer?.close();
+  const ledger = open('secure_local.tier-ledger.sqlite');
+  const dbs = ['secure_local.sqlite', 'internal.sqlite'].map(open).filter((db): db is Database => db !== undefined && hasTable(db, 'items') && hasTable(db, 'chunks'));
+  const reads = dbs.map(db => ({
+    item: db.query('SELECT * FROM items WHERE provider=? AND account_scope=? AND normalized_conversation=? AND provider_item_id=? AND tombstoned=0'),
+    chunks: db.query('SELECT bounded_text FROM chunks WHERE item_pk=? ORDER BY chunk_index'),
+  }));
   try {
-    if (sniffer && hasTable(sniffer, 'sniffer_verdicts')) verdicts = sniffer.query('SELECT material_hash, tier, model_id, prompt_version, map_revision, category, fail_safe FROM sniffer_verdicts ORDER BY material_hash, model_id, prompt_version, map_revision').all() as Verdict[];
-    wanted = new Set(verdicts.map(row => row.material_hash));
-    if (sniffer && wanted.size && hasTable(sniffer, 'sniffer_questions')) {
-      for (const row of sniffer.query("SELECT material, provider_item_id FROM sniffer_questions WHERE pass='content'").all() as Array<{ material: string; provider_item_id: string }>) add(row.material, row.provider_item_id);
-    }
-  } finally { sniffer?.close(); }
-  // Same stored names and ordered bounded chunks as sample-messages; no source branches.
-  for (const file of ['secure_local.sqlite', 'internal.sqlite']) {
-    if (!wanted.size) break;
-    const db = open(file);
-    try {
-      if (!db || !hasTable(db, 'items') || !hasTable(db, 'chunks')) continue;
-      const chunks = db.query('SELECT bounded_text FROM chunks WHERE item_pk=? ORDER BY chunk_index');
-      for (const item of db.query('SELECT * FROM items WHERE tombstoned=0').all() as Row[]) {
-        const parts = chunks.all(item['item_pk'] as number) as Array<{ bounded_text: string }>;
-        if (!parts.length) continue;
-        const input = storedJudgeInput(item, parts.map(part => part.bounded_text).join('\n').slice(0, 60_000), String(item['provider']));
-        add(input.material, String(item['provider_item_id']));
+    if (!ledger || !hasTable(ledger, 'tier_items')) return { source, verdicts: [], materials, counts };
+    const rows = ledger.query(`SELECT provider, account_scope, conversation_key, provider_item_id, content_tier, map_revision, reasons_json FROM tier_items WHERE reasons_json LIKE '%"content:sniffer:%'`).all() as LedgerRow[];
+    for (const row of rows) {
+      const verdict = ledgerVerdict(row.reasons_json);
+      if (!verdict) continue;
+      counts.verdictRows++;
+      let input: ReturnType<typeof storedJudgeInput> | undefined;
+      for (const read of reads) {
+        const item = read.item.get(row.provider, row.account_scope, row.conversation_key, row.provider_item_id) as Row | null;
+        const parts = item ? read.chunks.all(item['item_pk'] as number) as Array<{ bounded_text: string }> : [];
+        if (!item || !parts.length) continue;
+        input = storedJudgeInput(item, parts.map(part => part.bounded_text).join('\n').slice(0, 60_000), String(item['provider']));
+        break;
       }
-    } finally { db?.close(); }
-  }
-  const matched = verdicts.filter(row => materials.has(row.material_hash)).length;
-  return { source, verdicts, materials, counts: { verdictRows: verdicts.length, matched, unmatched: verdicts.length - matched } };
+      if (input?.material === undefined) { counts.unmatched++; continue; }
+      counts.matched++;
+      if (input.materialHash && stored.has(input.materialHash)) counts.exactInput++;
+      const hash = snifferMaterialHash('content', input.material);
+      const found = materials.get(hash);
+      if (found) found.ids.add(row.provider_item_id);
+      else materials.set(hash, { material: input.material, ids: new Set([row.provider_item_id]) });
+      const old: Verdict = { material_hash: hash, tier: row.content_tier === 'secure' ? 'private' : 'personal', model_id: verdict.model,
+        prompt_version: verdict.prompt, map_revision: row.map_revision ?? 'none', category: verdict.category, fail_safe: 0 };
+      verdicts.set(key({ source, materialHash: hash, storedModelId: old.model_id, storedPromptVersion: old.prompt_version, storedMapRevision: old.map_revision }), old);
+    }
+  } finally { ledger?.close(); for (const db of dbs) db.close(); }
+  return { source, verdicts: [...verdicts.values()].sort((a, b) => a.material_hash.localeCompare(b.material_hash)), materials, counts };
 }
 function bucket(row: Verdict): string {
   if (row.category === 'injection') return 'injection';

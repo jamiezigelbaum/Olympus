@@ -7,6 +7,8 @@ import { classifyItemTiers, type TierSniffer } from '../../src/workers/classific
 export interface JudgeInput {
   /** The judge's input. Absent when production would not ask the judge. */
   material?: string;
+  /** The hash production files this input's verdict under. */
+  materialHash?: string;
   secret: boolean;
   /** The classifier's own answer without the judge: a structured identifier is Private at once. */
   privateWithoutJudge: boolean;
@@ -14,17 +16,18 @@ export interface JudgeInput {
 
 export function judgeInput(signals: SourceClassificationSignals, text: string, provider: string): JudgeInput {
   let material: string | undefined;
+  let materialHash: string | undefined;
   const sniffer: TierSniffer = {
     id: 'calibration-recorder',
     judge(request) {
-      if (request.pass === 'content') material = request.material;
+      if (request.pass === 'content') { material = request.material; materialHash = request.materialHash; }
       return { verdict: 'undecided' };
     },
   };
   const decision = classifyItemTiers({ signals, provider, text }, { sniffer, retirePublic: true });
   const secret = decision.metadataTier === 'secrets' || decision.contentTier === 'secrets';
   return {
-    ...(secret || material === undefined ? {} : { material }),
+    ...(secret || material === undefined ? {} : { material, ...(materialHash ? { materialHash } : {}) }),
     secret,
     privateWithoutJudge: decision.contentTier === 'secure',
   };
