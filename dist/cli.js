@@ -20566,6 +20566,8 @@ class TierLedger {
         WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?`).run(JSON.stringify(decision), ...idParams(identity2));
       return "updated";
     }
+    if (holdSnifferLowering(this.getCurrent(identity2), decision))
+      return "held_lowering";
     this.db.query(`
       UPDATE tier_items SET rejudge_json = NULL
       WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
@@ -22613,6 +22615,9 @@ function recordFromRow(row) {
     decidedAt: row.decided_at,
     routed: row.routed === 1
   };
+}
+function holdSnifferLowering(current2, next) {
+  return process.env.OLYMPUS_TIER_SNIFFER_HOLD_LOWERING === "1" && current2.state === "current" && current2.contentTier === "secure" && next.contentTier !== "secrets" && (next.contentTier === "private" || current2.metadataTier === "secure" && next.metadataTier === "private");
 }
 function decisionOfRow(row) {
   const pending = row.metadataPending || row.contentPending;
@@ -24835,7 +24840,8 @@ function parseProfiles(value, label) {
     const common = {
       trust,
       ...optionalString3(profile, "baseUrl"),
-      ...optionalString3(profile, "secretRef")
+      ...optionalString3(profile, "secretRef"),
+      ...profile.snifferMode !== undefined ? { snifferMode: profile.snifferMode } : {}
     };
     const parsedProfile = provider === "openclaw-infer" ? {
       provider,
@@ -24926,6 +24932,9 @@ function validateProfile(id, profile, daemonPorts) {
   }
   if (!["local", "encrypted_cloud", "standard_cloud"].includes(profile.trust)) {
     throw new OperationError("config_error", `Sovereignty profile "${id}" has unsupported trust "${profile.trust}".`);
+  }
+  if (profile.snifferMode !== undefined && (profile.provider !== "local-openai-compatible" || profile.trust !== "local" || !["auto", "decision", "full"].includes(profile.snifferMode))) {
+    throw new OperationError("config_error", `Sovereignty profile "${id}" snifferMode requires a local profile and auto, decision or full.`);
   }
   if (profile.provider === "zkapi")
     validateZkapiProfile(id, profile);
@@ -27613,6 +27622,8 @@ import { createHash as createHash14 } from "node:crypto";
 function snifferTierKey(verdict) {
   if (verdict.failSafe || verdict.tier === "private" || recordRequiresPrivate(verdict))
     return "secure";
+  if (verdict.category === SNIFFER_DECISION_CATEGORY)
+    return "private";
   return verdict.confidence >= SNIFFER_PERSONAL_MIN_CONFIDENCE ? "private" : "secure";
 }
 function snifferVerdictTier(verdict, lane, flags) {
@@ -27624,7 +27635,7 @@ function snifferVerdictTier(verdict, lane, flags) {
   return { tier, code };
 }
 function snifferLaneIsSmall(lane) {
-  const id = snifferCacheModelId(lane);
+  const id = lane.cacheModelId ?? lane.modelId;
   return BUILT_IN_REASONING_MODELS.some((model) => model.sizeClass === "small" && (id === model.modelId || id.startsWith(`${model.modelId}:`)));
 }
 function recordRequiresPrivate(verdict) {
@@ -27633,6 +27644,8 @@ function recordRequiresPrivate(verdict) {
 function snifferReasonCode(verdict) {
   if (verdict.failSafe)
     return verdict.category === SNIFFER_INJECTION_CATEGORY ? "injection:classifier_instruction:0.00" : "unresolved:0.00";
+  if (verdict.category === SNIFFER_DECISION_CATEGORY)
+    return `decision:${verdict.confidence.toFixed(2)}`;
   const category = SNIFFER_CATEGORIES.includes(verdict.category) ? verdict.category : "other";
   return `${category}:${verdict.confidence.toFixed(2)}`;
 }
@@ -27696,7 +27709,8 @@ function snifferMaterialLooksLikeInjection(material) {
   return snifferInjectionRule(material) !== undefined;
 }
 function snifferCacheModelId(lane) {
-  return lane.cacheModelId ?? lane.modelId;
+  const weights = lane.cacheModelId ?? lane.modelId;
+  return lane.snifferMode === "decision" ? `${weights}:${SNIFFER_DECISION_VERSION}` : weights;
 }
 function snifferId(lane, promptVersion = SNIFFER_PROMPT_VERSION) {
   const model = createHash14("sha256").update(snifferCacheModelId(lane)).digest("hex").slice(0, 16);
@@ -27799,7 +27813,12 @@ function snifferMaterialForModel(material) {
 }
 
 class CachedTierSniffer {
-  id;
+  get id() {
+    return snifferId(this.lane, this.promptVersion);
+  }
+  get rejudgeReady() {
+    return this.lane.rejudgeReady !== false;
+  }
   store;
   lane;
   promptVersion;
@@ -27807,7 +27826,6 @@ class CachedTierSniffer {
     this.store = store;
     this.lane = lane;
     this.promptVersion = promptVersion;
-    this.id = snifferId(lane, promptVersion);
   }
   judge(request) {
     const asked = request.material?.trim();
@@ -27849,7 +27867,7 @@ class CachedTierSniffer {
     return { verdict: "undecided" };
   }
 }
-var SNIFFER_PERSONAL_MIN_CONFIDENCE = 0.9, SNIFFER_MAX_ATTEMPTS = 3, SNIFFER_CATEGORIES, SNIFFER_PRIVATE_KINDS, OWN_RECORD_FLAG_PREFIX = "content:own_record:", SNIFFER_RECORD_HELD_CODE_PREFIX = "record_held:", SNIFFER_INJECTION_CATEGORY = "injection", INJECTION_RULES, INSTRUCTION_VERBS, VERDICT_SCHEMA, TIER_WORD, OBJECT_GLUE, CONFUSABLE_FROM = "авеёкмнорстухіїјѕԁԛԝɡɩαβεηικνορτυχγωѵℓı", CONFUSABLE_TO = "abeekmhopctyxiijsdqwgiabenikvoptuxywvli", SNIFFER_SYSTEM_PROMPT, SNIFFER_RESPONSE_SCHEMA, SNIFFER_OWNER_CONTEXT_MAX_CHARS = 2000, SNIFFER_PROMPT_VERSION, SNIFFER_OWNER_CONTEXT_PROMPT_VERSION, SNIFFER_CATEGORY_SYNONYMS;
+var SNIFFER_PERSONAL_MIN_CONFIDENCE = 0.9, SNIFFER_MAX_ATTEMPTS = 3, SNIFFER_CATEGORIES, SNIFFER_PRIVATE_KINDS, OWN_RECORD_FLAG_PREFIX = "content:own_record:", SNIFFER_RECORD_HELD_CODE_PREFIX = "record_held:", SNIFFER_INJECTION_CATEGORY = "injection", SNIFFER_DECISION_CATEGORY = "decision", SNIFFER_DECISION_VERSION = "decision-v2", INJECTION_RULES, INSTRUCTION_VERBS, VERDICT_SCHEMA, TIER_WORD, OBJECT_GLUE, CONFUSABLE_FROM = "авеёкмнорстухіїјѕԁԛԝɡɩαβεηικνορτυχγωѵℓı", CONFUSABLE_TO = "abeekmhopctyxiijsdqwgiabenikvoptuxywvli", SNIFFER_SYSTEM_PROMPT, SNIFFER_RESPONSE_SCHEMA, SNIFFER_OWNER_CONTEXT_MAX_CHARS = 2000, SNIFFER_PROMPT_VERSION, SNIFFER_OWNER_CONTEXT_PROMPT_VERSION, SNIFFER_CATEGORY_SYNONYMS;
 var init_sniffer = __esm(() => {
   init_secret_patterns();
   init_manifest2();
@@ -61670,13 +61688,13 @@ var init_tier_row_rehome = __esm(() => {
 
 // src/workers/connector-store/tier-rejudge.ts
 function emptyTierRejudgeReport() {
-  return { seen: 0, updated: 0, movesQueued: 0, asked: 0, secrets: 0, skipped: 0, failed: 0 };
+  return { heldLowering: 0, seen: 0, updated: 0, movesQueued: 0, asked: 0, secrets: 0, skipped: 0, failed: 0 };
 }
 function rejudgeRoutedItems(options) {
   const report = emptyTierRejudgeReport();
   const { set } = options;
   const classification = set.classification();
-  if (!classification?.sniffer || classification.unavailableReason)
+  if (!classification?.sniffer || classification.unavailableReason || classification.sniffer.rejudgeReady === false)
     return { report };
   const ledger = set.ledger;
   const limit = Math.max(1, options.limit ?? DEFAULT_TIER_REJUDGE_PER_PASS);
@@ -61811,6 +61829,10 @@ function rejudgeStoredContent(set, record, options) {
       report.asked += 1;
     else
       report.skipped += 1;
+    return;
+  }
+  if (holdSnifferLowering(record, decision)) {
+    report.heldLowering += 1;
     return;
   }
   const recorded = ledger.recordRoutedPlacement(identity2, decision, set.placementFor(decision), {
@@ -140336,6 +140358,222 @@ var init_remote_relay_runtime = __esm(() => {
   init_remote_access();
 });
 
+// src/workers/classification/sniffer-decision-mass.ts
+function tierMass(tokens, alreadyWritten = "") {
+  const left = (word) => word.slice(alreadyWritten.length);
+  const starts = (token, word) => {
+    const rest = left(word);
+    return word.startsWith(alreadyWritten) && rest.length > 0 && token.length > 0 && (rest.startsWith(token) || token.startsWith(rest + '"'));
+  };
+  const mass = { private: 0, personal: 0, ambiguous: 0 };
+  for (const { token, logprob } of tokens) {
+    if (!Number.isFinite(logprob) || logprob > 0)
+      continue;
+    const isPrivate = starts(token, "private");
+    const isPersonal = starts(token, "personal");
+    const chance = Math.exp(logprob);
+    if (isPrivate && isPersonal)
+      mass.ambiguous += chance;
+    else if (isPrivate)
+      mass.private += chance;
+    else if (isPersonal)
+      mass.personal += chance;
+  }
+  return mass;
+}
+function privateChance(mass) {
+  const coverage = mass.private + mass.personal + mass.ambiguous;
+  if (![mass.private, mass.personal, mass.ambiguous].every((value2) => Number.isFinite(value2) && value2 >= 0) || coverage + Number.EPSILON < SNIFFER_DECISION_MIN_COVERAGE)
+    return;
+  const total = mass.private + mass.personal;
+  return total > 0 ? mass.private / total : undefined;
+}
+var SNIFFER_DECISION_PRIVATE_BAR = 0.5, SNIFFER_DECISION_MIN_COVERAGE = 0.9;
+
+// src/workers/classification/sniffer-decision.ts
+async function decisionPromptShape(format) {
+  const formatted = await format(PLACEHOLDER);
+  if (typeof formatted !== "string")
+    throw new Error("The sniffer chat template gave no prompt.");
+  const at = formatted.indexOf(PLACEHOLDER);
+  if (at < 0)
+    throw new Error("The sniffer chat template changed the item.");
+  const before = formatted.slice(0, at);
+  const after = formatted.slice(at + PLACEHOLDER.length);
+  const render = (material) => `${before}${JSON.stringify(material).slice(1, -1)}${after}`;
+  const probe = `Names: a "quoted" name
+Excerpt: a line	with é and \\ in it`;
+  if (render(probe) !== await format(probe))
+    throw new Error("The sniffer prompt shape does not match the chat template.");
+  return { shared: before, render };
+}
+async function decisionDivergence(post2) {
+  const first = async (word) => {
+    const { tokens } = await post2("/tokenize", { content: word, with_pieces: true });
+    const piece = tokens[0]?.piece;
+    if (typeof piece !== "string")
+      throw new Error("The sniffer tokenizer gave no text piece.");
+    return piece;
+  };
+  const personal = await first("personal");
+  const privateWord = await first("private");
+  return personal === privateWord ? personal : "";
+}
+function replyTokens(reply) {
+  if (!reply || typeof reply !== "object")
+    return [];
+  const probabilities = reply.completion_probabilities;
+  if (!Array.isArray(probabilities))
+    return [];
+  const tokens = probabilities[0]?.top_logprobs;
+  if (!Array.isArray(tokens) || !tokens.every((token) => token && typeof token.token === "string" && typeof token.logprob === "number" && Number.isFinite(token.logprob) && token.logprob <= 0))
+    return [];
+  return tokens;
+}
+async function exclusive(state, run2) {
+  const result = state.tail.then(run2, run2);
+  state.tail = result.catch(() => {
+    return;
+  });
+  return result;
+}
+function createDecisionSnifferModel(lane, full, options = {}) {
+  if (lane.kind !== "local" || lane.profile.provider !== "local-openai-compatible" || lane.profile.snifferMode === "full")
+    return full;
+  assertSnifferProfileAllowed(lane.profileId, lane.profile);
+  const endpoint = lane.profile.baseUrl.trim().replace(/\/+$/, "").replace(/\/v1$/, "");
+  let state = endpoints.get(endpoint);
+  if (!state) {
+    state = { tail: Promise.resolve() };
+    endpoints.set(endpoint, state);
+  }
+  const sharedState = state;
+  let signal;
+  const post2 = async (path, body) => {
+    try {
+      const timeout = AbortSignal.timeout(60000);
+      const response = await fetchModelEndpoint(fetch, `${endpoint}${path}`, {
+        method: "POST",
+        headers: { "content-type": "application/json", ...options.apiKey ? { authorization: `Bearer ${options.apiKey}` } : {} },
+        body: JSON.stringify(body),
+        signal: signal ? AbortSignal.any([timeout, signal]) : timeout
+      });
+      if (!response.ok)
+        throw new NativeRequestError([404, 405, 501].includes(response.status));
+      return await response.json();
+    } catch (error2) {
+      throw error2 instanceof NativeRequestError ? error2 : new NativeRequestError;
+    }
+  };
+  let shapeKey = "";
+  let shape;
+  let written;
+  const reset = () => {
+    sharedState.primed = undefined;
+    shape = undefined;
+    written = undefined;
+  };
+  const format = async (prompt) => (await post2("/apply-template", {
+    messages: [{ role: "system", content: SNIFFER_SYSTEM_PROMPT }, { role: "user", content: prompt }],
+    chat_template_kwargs: { enable_thinking: false }
+  })).prompt;
+  const prepare = async () => {
+    if (lane.profile.snifferMode === "decision") {
+      lane.snifferMode = "decision";
+      lane.rejudgeReady = true;
+      return;
+    }
+    if (sharedState.supported === undefined || !sharedState.supported && Date.now() - (sharedState.probedAt ?? 0) >= 60000) {
+      try {
+        const prompt = await format(buildSnifferBatchPrompt("content", [{ i: 1, material: "capability probe" }]));
+        if (typeof prompt !== "string")
+          throw new Error("No template.");
+        const reply = await post2("/completion", { prompt: `${prompt}${REPLY_TO_TIER}`, n_predict: 1, n_probs: 40, temperature: 0, cache_prompt: true, id_slot: 0 });
+        sharedState.supported = replyTokens(reply).length > 0;
+        if (sharedState.supported)
+          await decisionDivergence(post2);
+        sharedState.rejudgeReady = true;
+      } catch (error2) {
+        sharedState.supported = false;
+        sharedState.rejudgeReady = error2 instanceof NativeRequestError && error2.unsupported;
+      }
+      sharedState.probedAt = Date.now();
+      reset();
+    }
+    lane.snifferMode = sharedState.supported ? "decision" : "full";
+    lane.rejudgeReady = sharedState.rejudgeReady !== false;
+  };
+  return {
+    async prepareSniffer(nextSignal) {
+      await exclusive(sharedState, async () => {
+        signal = nextSignal;
+        await prepare();
+        sharedState.primed = undefined;
+      });
+    },
+    async complete(request) {
+      if (!request.snifferItem || lane.snifferMode === "full") {
+        sharedState.primed = undefined;
+        return full.complete(request);
+      }
+      return exclusive(sharedState, async () => {
+        signal = request.signal;
+        assertSnifferProfileAllowed(lane.profileId, lane.profile);
+        if (lane.snifferMode === undefined)
+          await prepare();
+        if (lane.snifferMode !== "decision")
+          return full.complete(request);
+        try {
+          const { pass, material, ownerContext } = request.snifferItem;
+          const key2 = buildSnifferBatchPrompt(pass, [{ i: 1, material: PLACEHOLDER }], ownerContext);
+          if (!shape || shapeKey !== key2) {
+            shape = await decisionPromptShape((value2) => format(buildSnifferBatchPrompt(pass, [{ i: 1, material: value2 }], ownerContext)));
+            shapeKey = key2;
+            sharedState.primed = undefined;
+          }
+          written ??= await decisionDivergence(post2);
+          if (sharedState.primed !== shape.shared) {
+            await post2("/completion", { prompt: shape.shared, n_predict: 0, cache_prompt: true, id_slot: 0 });
+            sharedState.primed = shape.shared;
+          }
+          const reply = await post2("/completion", { prompt: `${shape.render(material)}${REPLY_TO_TIER}${written}`, n_predict: 1, n_probs: 40, temperature: 0, cache_prompt: true, id_slot: 0 });
+          const chance = privateChance(tierMass(replyTokens(reply), written));
+          if (reply?.tokens_cached === 0)
+            reset();
+          if (chance === undefined || !Number.isFinite(chance)) {
+            reset();
+            return { text: "", modelId: lane.modelId };
+          }
+          return { text: "", modelId: lane.modelId, decisionVerdict: {
+            tier: chance >= SNIFFER_DECISION_PRIVATE_BAR ? "private" : "personal",
+            category: SNIFFER_DECISION_CATEGORY,
+            confidence: chance >= SNIFFER_DECISION_PRIVATE_BAR ? chance : 1 - chance,
+            failSafe: false
+          } };
+        } catch {
+          reset();
+          sharedState.supported = undefined;
+          throw new Error("The native privacy sniffer request failed.");
+        }
+      });
+    }
+  };
+}
+var REPLY_TO_TIER = '{"verdicts":[{"i":1,"tier":"', PLACEHOLDER = "CALIBRATION_ITEM_PLACEHOLDER", NativeRequestError, endpoints;
+var init_sniffer_decision = __esm(() => {
+  init_model_transport();
+  init_sniffer_lane();
+  init_sniffer();
+  NativeRequestError = class NativeRequestError extends Error {
+    unsupported;
+    constructor(unsupported = false) {
+      super("The native privacy sniffer request failed.");
+      this.unsupported = unsupported;
+    }
+  };
+  endpoints = new Map;
+});
+
 // src/workers/classification/privacy-questions.ts
 function matches2(value2, schema) {
   if (schema.enum)
@@ -183278,7 +183516,7 @@ function createArchiveImportDashboard(options) {
   let checks4 = Promise.resolve();
   const running = new Set;
   const cancelled = new Set;
-  const exclusive = (run2) => withArchiveImportApprovals(state.path, run2);
+  const exclusive2 = (run2) => withArchiveImportApprovals(state.path, run2);
   const stillChecking = (requestId) => {
     if (cancelled.has(requestId))
       return false;
@@ -183407,7 +183645,7 @@ function createArchiveImportDashboard(options) {
         }
         if (closed)
           return;
-        exclusive(() => {
+        exclusive2(() => {
           if (stillChecking(requestId))
             outcome(requestId, commitArchiveImport(state, prepared, digests));
         });
@@ -183464,7 +183702,7 @@ function createArchiveImportDashboard(options) {
       return;
     }
     try {
-      exclusive(() => {
+      exclusive2(() => {
         if (stillChecking(requestId))
           outcome(requestId, commitArchiveImport(state, reopened));
       });
@@ -183556,7 +183794,7 @@ function createArchiveImportDashboard(options) {
           return refusal4("source_unavailable", ARCHIVE_APPROVE_COPY.source_unavailable);
         throw error2;
       }
-      return exclusive(() => {
+      return exclusive2(() => {
         if (from && requests.get(from.requestId)?.status !== from.status)
           return refusal4("not_waiting", ARCHIVE_APPROVE_COPY.not_waiting);
         if (prepared.copies.length === 0) {
@@ -189487,7 +189725,7 @@ function createSourceAccountGuard(options) {
   const broker = options.broker ?? createEnvCredentialBroker();
   const now = options.now ?? (() => new Date);
   const bindingsPath = sourceAccountBindingsPath(options.registryPath);
-  const exclusive = options.exclusive ?? sourceExclusiveRunner(bindingsPath, options.sourceId);
+  const exclusive2 = options.exclusive ?? sourceExclusiveRunner(bindingsPath, options.sourceId);
   const verified = new Map;
   let lastAccessToken;
   const evidenceChecked = new Map;
@@ -189576,7 +189814,7 @@ ${folderIds.join(",")}`).digest("hex");
         await guard.assertAccount();
         return task();
       };
-      return exclusive(checked);
+      return exclusive2(checked);
     },
     async assertAccount() {
       await verifyAccount();
@@ -189783,7 +190021,9 @@ class SnifferCallBudget {
   statePath;
   day = "";
   used = 0;
+  explicitLimit;
   constructor(options = {}) {
+    this.explicitLimit = options.maxCallsPerDay !== undefined;
     this.maxCallsPerDay = Math.max(0, Math.floor(options.maxCallsPerDay ?? DEFAULT_SNIFFER_MAX_CALLS_PER_DAY));
     this.now = options.now ?? (() => new Date);
     this.statePath = options.statePath;
@@ -189797,9 +190037,10 @@ class SnifferCallBudget {
       } catch {}
     }
   }
-  tryConsume() {
+  tryConsume(decisionMode = false) {
     this.roll();
-    if (this.used >= this.maxCallsPerDay)
+    const limit2 = decisionMode && !this.explicitLimit ? DEFAULT_DECISION_SNIFFER_MAX_CALLS_PER_DAY : this.maxCallsPerDay;
+    if (this.used >= limit2)
       return false;
     this.used += 1;
     this.save();
@@ -189840,12 +190081,12 @@ function materialCarriesSecret(question) {
 }
 async function runSnifferPass(options) {
   const promptVersion = options.promptVersion ?? SNIFFER_PROMPT_VERSION;
-  const id = snifferId(options.lane, promptVersion);
+  let id = snifferId(options.lane, promptVersion);
   const maxCallsPerPass = Math.max(0, Math.floor(options.maxCallsPerPass ?? Number.MAX_SAFE_INTEGER));
-  const concurrency = Math.max(1, Math.min(SNIFFER_MAX_CONCURRENT_CALLS, Math.floor(options.concurrentCalls ?? 1)));
   const monotonicNow = options.monotonicNow ?? (() => performance.now());
   const deadline = monotonicNow() + (options.passTimeMs ?? DEFAULT_SNIFFER_PASS_TIME_MS);
   const report = {
+    heldLowering: 0,
     callMs: 0,
     maxQueueWaitMs: 0,
     pendingSeen: 0,
@@ -189907,6 +190148,10 @@ async function runSnifferPass(options) {
     }
     if (applied?.outcome === "held_moving")
       return;
+    if (applied?.outcome === "held_lowering") {
+      report.heldLowering += 1;
+      return;
+    }
     if (applied?.outcome === "needs_placement") {
       report.awaitingPlacement += 1;
       return;
@@ -190007,12 +190252,6 @@ async function runSnifferPass(options) {
         report.injectionRefused += 1;
         continue;
       }
-      const cached3 = target.sniffer.getVerdict(keyOf2(question));
-      if (cached3 && cachedSnifferVerdictHolds(cached3)) {
-        apply({ target, question }, cached3);
-        report.cacheHits += 1;
-        continue;
-      }
       work[question.pass].push({ target, question });
     }
     for (const row of target.ledger.listPending({ limit: options.pendingPageSize ?? 500 })) {
@@ -190020,6 +190259,22 @@ async function runSnifferPass(options) {
         report.awaitingResync += 1;
     }
   }
+  if (work.metadata.length + work.content.length > 0) {
+    assertSnifferProfileAllowed(options.lane.profileId, options.lane.profile);
+    await options.model.prepareSniffer?.(options.signal);
+    id = snifferId(options.lane, promptVersion);
+  }
+  for (const pass of ["metadata", "content"]) {
+    work[pass] = work[pass].filter((item) => {
+      const cached3 = item.target.sniffer.getVerdict(keyOf2(item.question));
+      if (!cached3 || !cachedSnifferVerdictHolds(cached3))
+        return true;
+      apply(item, cached3);
+      report.cacheHits += 1;
+      return false;
+    });
+  }
+  const concurrency = options.lane.snifferMode === "decision" ? 1 : Math.max(1, Math.min(SNIFFER_MAX_CONCURRENT_CALLS, Math.floor(options.concurrentCalls ?? 1)));
   let consecutiveTransportFailures = 0;
   const pending = [...work.metadata, ...work.content].sort(compareRecent);
   let dispatches = options.targets.reduce((total, target) => total + target.sniffer.dispatchCount(), 0);
@@ -190065,16 +190320,20 @@ async function runSnifferPass(options) {
       report.itemsAsked += batch.length;
       report.promptChars += SNIFFER_SYSTEM_PROMPT.length + prompt.length;
       let text4;
+      let decisionVerdict;
       try {
-        const completion = await options.model.complete({
+        const request = {
           system: SNIFFER_SYSTEM_PROMPT,
           prompt,
           localOnly: true,
           responseSchema: SNIFFER_RESPONSE_SCHEMA,
           maxOutputChars: batch.length * OUTPUT_CHARS_PER_ITEM + 200,
-          ...options.signal ? { signal: options.signal } : {}
-        });
+          ...options.signal ? { signal: options.signal } : {},
+          snifferItem: { pass, material: snifferMaterialForModel(next.question.material), ownerContext: options.ownerContext }
+        };
+        const completion = await options.model.complete(request);
         text4 = completion.text;
+        decisionVerdict = completion.decisionVerdict;
       } catch {
         if (options.signal?.aborted) {
           report.stoppedBy = "preempted";
@@ -190098,7 +190357,7 @@ async function runSnifferPass(options) {
       report.responseChars += text4.length;
       const verdicts = parseSnifferBatchResponse(text4, new Set(batch.map((_, index) => index + 1)));
       for (const [index, group2] of batch.entries()) {
-        const verdict = verdicts.get(index + 1);
+        const verdict = decisionVerdict ?? verdicts.get(index + 1);
         const key2 = keyOf2(group2[0].question);
         if (verdict) {
           const stored = { ...verdict, failSafe: false };
@@ -190155,7 +190414,7 @@ function stopReason(options, report, maxCallsPerPass, timeUp) {
     return "pass_budget";
   if (options.shouldYield?.())
     return "yield";
-  if (options.budget && !options.budget.tryConsume())
+  if (options.budget && !options.budget.tryConsume(options.lane.snifferMode === "decision"))
     return "daily_budget";
   return;
 }
@@ -190164,7 +190423,7 @@ function finish(report) {
   report.estimatedOutputTokens = Math.ceil(report.responseChars / 4);
   return report;
 }
-var DEFAULT_SNIFFER_MAX_CALLS_PER_DAY = 20000, DEFAULT_SNIFFER_PASS_TIME_MS = 30000, SNIFFER_MAX_CONCURRENT_CALLS = 8, MAX_CONSECUTIVE_TRANSPORT_FAILURES = 2, OUTPUT_CHARS_PER_ITEM = 110, SECRET_SCREEN_CACHE_LIMIT = 20000, secretScreenCache;
+var DEFAULT_SNIFFER_MAX_CALLS_PER_DAY = 20000, DEFAULT_DECISION_SNIFFER_MAX_CALLS_PER_DAY = 250000, DEFAULT_SNIFFER_PASS_TIME_MS = 30000, SNIFFER_MAX_CONCURRENT_CALLS = 8, MAX_CONSECUTIVE_TRANSPORT_FAILURES = 2, OUTPUT_CHARS_PER_ITEM = 110, SECRET_SCREEN_CACHE_LIMIT = 20000, secretScreenCache;
 var init_sniffer_resolver = __esm(() => {
   init_atomic_file();
   init_sniffer();
@@ -190209,7 +190468,7 @@ class TierSnifferService {
   constructor(options) {
     this.options = options;
     this.budget = new SnifferCallBudget({
-      maxCallsPerDay: options.maxCallsPerDay ?? DEFAULT_SNIFFER_MAX_CALLS_PER_DAY,
+      ...options.maxCallsPerDay !== undefined ? { maxCallsPerDay: options.maxCallsPerDay } : {},
       ...options.now ? { now: options.now } : {},
       ...options.budgetStatePath ? { statePath: options.budgetStatePath } : {}
     });
@@ -190675,6 +190934,7 @@ class TierSnifferService {
       await this.drainMoves();
       return { state: "awaiting_owner_approval", modelId: lane.modelId, promptVersion: versions2.approval };
     }
+    await this.options.model.prepareSniffer?.(signal);
     await this.recoverMissingQuestions(true);
     const rejudged = await this.rejudge();
     const targets = [];
@@ -190798,8 +191058,8 @@ class TierSnifferService {
       shouldYield: () => this.yieldNow(),
       signal
     });
-    if (report.calls > 0 || report.verdictsApplied > 0) {
-      this.options.log?.(`Olympus tier sniffer: ${report.calls} call(s), ${report.verdictsApplied} verdict(s) applied ` + `(${report.resolvedPersonal} Personal, ${report.resolvedPrivate} Private, ${report.failSafePrivate} fail-safe Private), ` + `${report.cacheHits} from cache${report.stoppedBy ? `, stopped: ${report.stoppedBy}` : ""}; ` + `call_ms=${Math.round(report.callMs)} mean_call_ms=${report.calls ? Math.round(report.callMs / report.calls) : 0} queue_wait_max_ms=${Math.round(report.maxQueueWaitMs)}.`);
+    if (report.calls > 0 || report.verdictsApplied > 0 || report.heldLowering > 0) {
+      this.options.log?.(`Olympus tier sniffer: ${report.calls} call(s), ${report.verdictsApplied} verdict(s) applied ` + `(${report.resolvedPersonal} Personal, ${report.resolvedPrivate} Private, ${report.failSafePrivate} fail-safe Private), ` + `${report.cacheHits} from cache; ${report.heldLowering} lowering(s) held${report.stoppedBy ? `, stopped: ${report.stoppedBy}` : ""}; ` + `call_ms=${Math.round(report.callMs)} mean_call_ms=${report.calls ? Math.round(report.callMs / report.calls) : 0} queue_wait_max_ms=${Math.round(report.maxQueueWaitMs)}.`);
     }
     const autoMoves = await this.drainMoves();
     if (autoMoves && autoMoves.moved > 0)
@@ -191006,8 +191266,8 @@ class TierSnifferService {
           total[key2] += report[key2];
       } catch {}
     }
-    if (total.updated > 0 || total.movesQueued > 0 || total.asked > 0 || total.secrets > 0) {
-      this.options.log?.(`Olympus tier sniffer: re-judged ${total.updated + total.movesQueued + total.asked + total.secrets} item(s) under the current classifier ` + `(${total.asked} asked about, still where they were; ${total.movesQueued} tier move(s) queued` + `${total.secrets ? `; ${total.secrets} Secret(s) found and hidden` : ""}).`);
+    if (total.updated > 0 || total.movesQueued > 0 || total.asked > 0 || total.secrets > 0 || total.heldLowering > 0) {
+      this.options.log?.(`Olympus tier sniffer: re-judged ${total.updated + total.movesQueued + total.asked + total.secrets} item(s) under the current classifier ` + `(${total.asked} asked about, still where they were; ${total.movesQueued} tier move(s) queued` + `; ${total.heldLowering} lowering(s) held${total.secrets ? `; ${total.secrets} Secret(s) found and hidden` : ""}).`);
     }
     return total;
   }
@@ -191170,7 +191430,7 @@ function tierSnifferServiceEnv(env) {
     intervalMs: positiveInteger7(env.OLYMPUS_TIER_SNIFFER_INTERVAL_MS, DEFAULT_TIER_SNIFFER_INTERVAL_MS, 100),
     ...env.OLYMPUS_TIER_SNIFFER_MAX_CALLS_PER_PASS?.trim() ? { maxCallsPerPass: positiveInteger7(env.OLYMPUS_TIER_SNIFFER_MAX_CALLS_PER_PASS, 1, 1) } : {},
     ...env.OLYMPUS_TIER_SNIFFER_CONCURRENT_CALLS?.trim() ? { concurrentCalls: Math.min(SNIFFER_MAX_CONCURRENT_CALLS, positiveInteger7(env.OLYMPUS_TIER_SNIFFER_CONCURRENT_CALLS, 1, 1)) } : {},
-    maxCallsPerDay: positiveInteger7(env.OLYMPUS_TIER_SNIFFER_MAX_CALLS_PER_DAY, DEFAULT_SNIFFER_MAX_CALLS_PER_DAY, 0)
+    ...env.OLYMPUS_TIER_SNIFFER_MAX_CALLS_PER_DAY?.trim() ? { maxCallsPerDay: positiveInteger7(env.OLYMPUS_TIER_SNIFFER_MAX_CALLS_PER_DAY, DEFAULT_SNIFFER_MAX_CALLS_PER_DAY, 0) } : {}
   };
 }
 function positiveInteger7(value2, fallback, minimum) {
@@ -211544,10 +211804,10 @@ function createTierSnifferModel(input) {
       ...profile.secretRef ? { secretRef: profile.secretRef } : {},
       purpose: "text_reasoning"
     };
-    return createDelphiAnalystModel(new DelphiClient(config2, undefined, { resolveSecretRef: () => apiKey }), {
+    return createDecisionSnifferModel(lane, createDelphiAnalystModel(new DelphiClient(config2, undefined, { resolveSecretRef: () => apiKey }), {
       profile: "source_answer",
       preflightTimeoutMs: 5000
-    });
+    }), { apiKey });
   }
   if (lane.kind === "venice" && profile.provider === "venice") {
     const apiKey = resolveSecretRefSync(profile.secretRef, input.env, "Tier sniffer Venice model profile", bootSecretOptions(input.bootSecretResolver, [lane.profileId], ["classification"], { id: lane.profileId, profile }));
@@ -215427,7 +215687,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     intervalMs: snifferEnv.intervalMs,
     ...snifferEnv.maxCallsPerPass !== undefined ? { maxCallsPerPass: snifferEnv.maxCallsPerPass } : {},
     ...snifferEnv.concurrentCalls !== undefined ? { concurrentCalls: snifferEnv.concurrentCalls } : {},
-    maxCallsPerDay: snifferEnv.maxCallsPerDay,
+    ...snifferEnv.maxCallsPerDay !== undefined ? { maxCallsPerDay: snifferEnv.maxCallsPerDay } : {},
     answersInFlight: () => snifferResource !== undefined && localModelActivity.busyExcept(snifferResource, "tier_sniffer"),
     shouldYield: () => localPrivateAnswers?.overdue() ?? false,
     breakerOpen: () => secureAnalystPoolState.isBreakerOpen("secure_local", snifferLane.profileId),
@@ -216107,6 +216367,7 @@ function googleFilePage(locator) {
 }
 var SOURCE_STATUS_PUBLISH_MIN_INTERVAL_MS = 120000, GMAIL_ATTACHMENT_READER_REUSE_MS, SCOPE_APPROVED_SOURCE_IDS, INGESTION_DISPOSITION_SOURCES, BUILT_IN_MODEL_RETRY_MS, CONNECTOR_STORE_ANSWER_FILTER_CAPABILITIES, workerLaunch, dataOwnerLock;
 var init_server5 = __esm(async () => {
+  init_sniffer_decision();
   init_engine_service();
   init_privacy_questions();
   init_sniffer();

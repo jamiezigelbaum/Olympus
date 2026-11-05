@@ -7223,7 +7223,8 @@ function parseProfiles(value, label) {
     const common = {
       trust,
       ...optionalString2(profile, "baseUrl"),
-      ...optionalString2(profile, "secretRef")
+      ...optionalString2(profile, "secretRef"),
+      ...profile.snifferMode !== undefined ? { snifferMode: profile.snifferMode } : {}
     };
     const parsedProfile = provider === "openclaw-infer" ? {
       provider,
@@ -7314,6 +7315,9 @@ function validateProfile(id, profile, daemonPorts) {
   }
   if (!["local", "encrypted_cloud", "standard_cloud"].includes(profile.trust)) {
     throw new OperationError("config_error", `Sovereignty profile "${id}" has unsupported trust "${profile.trust}".`);
+  }
+  if (profile.snifferMode !== undefined && (profile.provider !== "local-openai-compatible" || profile.trust !== "local" || !["auto", "decision", "full"].includes(profile.snifferMode))) {
+    throw new OperationError("config_error", `Sovereignty profile "${id}" snifferMode requires a local profile and auto, decision or full.`);
   }
   if (profile.provider === "zkapi")
     validateZkapiProfile(id, profile);
