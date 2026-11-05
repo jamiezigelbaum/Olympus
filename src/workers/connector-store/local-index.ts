@@ -6,6 +6,7 @@ import { keywordAlternatives, withKeywordAlternatives, keywordExpansionDisabled,
 import { storeKeywordLanguages } from '../../core/source-index/keyword-languages.ts';
 import { expandSourceIndexKeywords, withExpandedSourceIndexKeywords } from '../../core/source-index/keyword-expansion.ts';
 import { ingestionTurn } from '../control-path-headroom.ts';
+import { offThreadReadsAvailable, readOffThread, type StoreRead } from './off-thread-reads.ts';
 // The shared connector ingest spine: ONE generic local store that turns any
 // Contract 1 SourceConnector into a searchable, analyst-served corpus with
 // zero new storage code.
@@ -36,7 +37,7 @@ import { ingestionTurn } from '../control-path-headroom.ts';
 import { createHash, randomUUID } from 'node:crypto';
 import { existsSync, lstatSync, mkdirSync, statSync } from 'node:fs';
 import { dirname } from 'node:path';
-import { Database } from 'bun:sqlite';
+import { Database, type SQLQueryBindings } from 'bun:sqlite';
 import type {
   RawItem,
   SourceClassificationSignals,
@@ -12337,6 +12338,37 @@ export class LocalConnectorStore {
    * (see STATUS_COUNTS_MAX_AGE_MS). Left out, every count is current.
    */
   status(scope?: ConnectorStoreStatusScope, options: { countsMaxAgeMs?: number } = {}): ConnectorStoreStatus {
+    const steps = this.statusSteps(scope, options);
+    let step = steps.next();
+    while (!step.done) {
+      const read = step.value;
+      const query = this.db.query(read.sql);
+      step = steps.next(read.mode === 'all' ? query.all(...(read.params as SQLQueryBindings[])) : query.get(...(read.params as SQLQueryBindings[])));
+    }
+    return step.value;
+  }
+
+  /**
+   * status() with its whole-store counts read on the second thread
+   * (off-thread-reads.ts): the same queries, so the same counts, without
+   * holding this thread for the seconds they take on a large store (#870).
+   * Where that thread cannot read this store, it is status() itself.
+   */
+  async statusOffThread(
+    scope?: ConnectorStoreStatusScope,
+    options: { countsMaxAgeMs?: number } = {},
+  ): Promise<ConnectorStoreStatus> {
+    if (!offThreadReadsAvailable(this.dbPath)) return this.status(scope, options);
+    const steps = this.statusSteps(scope, options);
+    let step = steps.next();
+    while (!step.done) step = steps.next(await readOffThread(this.dbPath, step.value));
+    return step.value;
+  }
+
+  private *statusSteps(
+    scope: ConnectorStoreStatusScope | undefined,
+    options: { countsMaxAgeMs?: number },
+  ): Generator<StoreRead, ConnectorStoreStatus, unknown> {
     const accountScope = normalizeOptionalAccountScope(scope?.accountScope);
     const itemFilters = connectorStoreFilterSql(scope?.itemFilters);
     const contentFilters = connectorStoreFilterSql(scope?.contentFilters);
@@ -12359,11 +12391,11 @@ export class LocalConnectorStore {
     // building a lookup of every names-only item: on a names-only archive of
     // about 100k items that was most of each status freeze (Sparta, 2026-11-04).
     const namesOnlyWithText = tier.metadataLayer.length > 0
-      ? (this.db.query(`
+      ? ((yield { sql: `
           SELECT j.value AS pk FROM json_each(?) j
           WHERE EXISTS (SELECT 1 FROM chunks c WHERE c.item_pk = j.value)
             OR EXISTS (SELECT 1 FROM chunk_embeddings emb WHERE emb.item_pk = j.value)
-        `).all(JSON.stringify(tier.metadataLayer)) as Array<{ pk: number }>).map((row) => row.pk)
+        `, params: [JSON.stringify(tier.metadataLayer)], mode: 'all' }) as Array<{ pk: number }>).map((row) => row.pk)
       : [];
     const namesOnlyNotIn = namesOnlyWithText.length > 0
       ? 'AND i.item_pk NOT IN (SELECT value FROM json_each(?))'
@@ -12427,7 +12459,7 @@ export class LocalConnectorStore {
     // once per count. Seven separate passes were about 0.8 s on a 104k-item
     // store with folder scopes (Sparta, 2026-11-04: 2.8 s every 2 minutes).
     // MATERIALIZED keeps SQLite from copying each test back into every SUM.
-    const itemCounts = this.db.query(`
+    const itemCounts = (yield { sql: `
       WITH flags AS MATERIALIZED (
         SELECT
           i.tombstoned AS t,
@@ -12447,12 +12479,12 @@ export class LocalConnectorStore {
         COALESCE(SUM(t = 1 AND in_items), 0) AS tombstoned_items,
         COALESCE(SUM(t = 0 AND NOT dir AND in_file_scope), 0) AS full_ingestion_files
       FROM flags
-    `).get(
+    `, params: [
       ...itemParams,
       ...jsonList(tier.hidden),
       JSON.stringify(keptNamesOnlyPks),
       ...fileScopeParams,
-    ) as {
+    ], mode: 'get' }) as {
       items: number;
       stored_items: number;
       content_elsewhere_items: number;
@@ -12461,7 +12493,7 @@ export class LocalConnectorStore {
       tombstoned_items: number;
       full_ingestion_files: number;
     };
-    const textCounts = this.db.query(`
+    const textCounts = (yield { sql: `
       SELECT
         -- CROSS JOIN keeps chunks and vectors as the outer loop: with items
         -- outer, the scope tests ran on every item, chunk or not.
@@ -12484,33 +12516,33 @@ export class LocalConnectorStore {
           WHERE i.tombstoned = 0
             ${contentWhere}
         ) AS items_with_text
-    `).get(
+    `, params: [
       ...parityParams,
       ...parityParams,
       ...contentParams,
-    ) as { chunks: number; embedded_chunks: number; sync_runs: number; items_with_text: number };
+    ], mode: 'get' }) as { chunks: number; embedded_chunks: number; sync_runs: number; items_with_text: number };
     const counts = { ...itemCounts, ...textCounts };
     // Of the files the scope reads in full, the ones the window keeps as names
     // only. Counted before the policy pass so a row is never both.
     const outsideContentWindowItems = outsideWindowSql
-      ? (this.db.query(`
+      ? ((yield { sql: `
           SELECT COUNT(*) AS n FROM items i
           WHERE i.tombstoned = 0
             AND LOWER(i.mime_type) <> 'inode/directory'
             ${fileScopeWhere}
             AND ${outsideWindowSql}
-        `).get(...fileScopeParams, ...outsideWindowParams) as { n: number }).n
+        `, params: [...fileScopeParams, ...outsideWindowParams], mode: 'get' }) as { n: number }).n
       : 0;
     let policyDeferredItems = 0;
     if (fileScoped && scope?.contentAllowed !== false && counts.full_ingestion_files > 0) {
-      const rows = this.db.query(`
+      const rows = (yield { sql: `
         SELECT i.locator_uri, i.title, i.mime_type
         FROM items i
         WHERE i.tombstoned = 0
           AND LOWER(i.mime_type) <> 'inode/directory'
           ${fileScopeWhere}
           ${outsideWindowSql ? `AND NOT ${outsideWindowSql}` : ''}
-      `).all(...fileScopeParams, ...outsideWindowParams) as Array<{
+      `, params: [...fileScopeParams, ...outsideWindowParams], mode: 'all' }) as Array<{
         locator_uri: string | null;
         title: string | null;
         mime_type: string | null;
@@ -12528,7 +12560,7 @@ export class LocalConnectorStore {
     }
     // Parity per model. The inner probe is a primary-key lookup on
     // (chunk_pk, model_id), so it stays an indexed point read per chunk.
-    const byModel = this.db.query(`
+    const byModel = (yield { sql: `
       SELECT
         m.model_id AS model_id,
         (SELECT COUNT(*)
@@ -12560,22 +12592,24 @@ export class LocalConnectorStore {
         WHERE i.tombstoned = 0 ${contentWhere}
       ) m
       ORDER BY m.model_id
-    `).all(
+    `, params: [
       ...parityParams,
       ...parityParams,
       ...contentParams,
-    ) as Array<{ model_id: string; embedded_chunks: number; items_embedded: number }>;
+    ], mode: 'all' }) as Array<{ model_id: string; embedded_chunks: number; items_embedded: number }>;
     const tierStatus: ConnectorStoreTierStatus | undefined = tier.hidden.length > 0 || tier.held.length > 0
       || tier.moving > 0 || tier.metadataLayer.length > 0
       ? {
           pendingClassificationItems: tier.held.length,
           supersededChunks: tier.hidden.length > 0
-            ? (this.db.query(`
+            ? ((yield { sql: `
                 SELECT COUNT(*) AS n FROM chunks WHERE item_pk IN (SELECT value FROM json_each(?))
-              `).get(JSON.stringify(tier.hidden)) as { n: number }).n
+              `, params: [JSON.stringify(tier.hidden)], mode: 'get' }) as { n: number }).n
             : 0,
           tierMoveInProgress: tier.moving,
-          ...namesOnlyKept(this.db, namesOnlyWithText),
+          ...namesOnlyKeptCount(namesOnlyWithText.length > 0
+            ? ((yield { sql: NAMES_ONLY_KEPT_SQL, params: [JSON.stringify(namesOnlyWithText)], mode: 'get' }) as { n: number }).n
+            : 0),
         }
       : undefined;
     const settledUnreadableItems = this.settledUnreadableCount(scope, options.countsMaxAgeMs ?? 0);
@@ -14638,10 +14672,9 @@ export function tierRowVisible(
 }
 
 /** Chunks held by names-only copies, as a status field present only when non-zero. */
-function namesOnlyKept(db: Database, itemPks: readonly number[]): { namesOnlyKeptChunks?: number } {
-  if (itemPks.length === 0) return {};
-  const n = (db.query('SELECT COUNT(*) AS n FROM chunks WHERE item_pk IN (SELECT value FROM json_each(?))')
-    .get(JSON.stringify(itemPks)) as { n: number }).n;
+const NAMES_ONLY_KEPT_SQL = 'SELECT COUNT(*) AS n FROM chunks WHERE item_pk IN (SELECT value FROM json_each(?))';
+
+function namesOnlyKeptCount(n: number): { namesOnlyKeptChunks?: number } {
   return n > 0 ? { namesOnlyKeptChunks: n } : {};
 }
 

@@ -26309,6 +26309,98 @@ var init_control_path_headroom = __esm(() => {
   controlPathHeadroom = new ControlPathHeadroom;
 });
 
+// src/workers/connector-store/off-thread-reads.ts
+function readerThread() {
+  if (thread)
+    return thread;
+  if (unavailable)
+    return;
+  try {
+    if (typeof Worker !== "function" || typeof Blob !== "function" || !globalThis.Bun) {
+      unavailable = true;
+      return;
+    }
+    const url = URL.createObjectURL(new Blob([WORKER_SOURCE], { type: "application/javascript" }));
+    const worker = new Worker(url);
+    worker.unref?.();
+    const started = { worker, pending: new Map };
+    worker.onmessage = (event) => {
+      const message2 = event.data;
+      const waiting = started.pending.get(message2.id);
+      if (!waiting)
+        return;
+      started.pending.delete(message2.id);
+      clearTimeout(waiting.timer);
+      if (message2.ok)
+        waiting.resolve(message2.rows ?? null);
+      else
+        waiting.reject(new Error(message2.error ?? "off-thread read failed"));
+    };
+    worker.onerror = (event) => {
+      retire(started, new Error(event.message || "off-thread reader stopped"));
+    };
+    thread = started;
+    return started;
+  } catch {
+    unavailable = true;
+    return;
+  }
+}
+function retire(stopped, error) {
+  if (thread === stopped)
+    thread = undefined;
+  for (const waiting of stopped.pending.values()) {
+    clearTimeout(waiting.timer);
+    waiting.reject(error);
+  }
+  stopped.pending.clear();
+  try {
+    stopped.worker.terminate();
+  } catch {}
+}
+function offThreadReadsAvailable(dbPath) {
+  return dbPath !== ":memory:" && !dbPath.startsWith("file::memory:") && readerThread() !== undefined;
+}
+function readOffThread(dbPath, read) {
+  const reader = readerThread();
+  if (!reader)
+    return Promise.reject(new Error("off-thread reads are unavailable"));
+  const id = nextId++;
+  return new Promise((resolve10, reject) => {
+    const timer = setTimeout(() => {
+      retire(reader, new Error("off-thread read timed out"));
+    }, OFF_THREAD_READ_TIMEOUT_MS);
+    reader.pending.set(id, { resolve: resolve10, reject, timer });
+    try {
+      reader.worker.postMessage({ id, path: dbPath, sql: read.sql, params: read.params, mode: read.mode });
+    } catch (error) {
+      reader.pending.delete(id);
+      clearTimeout(timer);
+      reject(error instanceof Error ? error : new Error(String(error)));
+    }
+  });
+}
+var OFF_THREAD_READ_TIMEOUT_MS = 120000, WORKER_SOURCE = `
+import { Database } from 'bun:sqlite';
+const dbs = new Map();
+self.onmessage = (event) => {
+  const { id, path, sql, params, mode } = event.data;
+  try {
+    let db = dbs.get(path);
+    if (!db) {
+      db = new Database(path, { readonly: true });
+      db.exec('PRAGMA busy_timeout = 10000; PRAGMA query_only = ON;');
+      dbs.set(path, db);
+    }
+    const query = db.query(sql);
+    const rows = mode === 'all' ? query.all(...params) : query.get(...params);
+    postMessage({ id, ok: true, rows });
+  } catch (error) {
+    postMessage({ id, ok: false, error: error instanceof Error ? error.message : String(error) });
+  }
+};
+`, thread, unavailable = false, nextId = 1;
+
 // src/core/classification-signals.ts
 function namesOnlyContentScopeMetadata() {
   return { [CONTENT_SCOPE_METADATA_KEY]: CONTENT_SCOPE_NAMES_ONLY };
@@ -31655,10 +31747,7 @@ function tierRowVisible(copies, corpusId, layer) {
   const here = copies.filter((copy) => copy.corpusId === corpusId && copy.state === "current");
   return copyServingLayer(here, layer) !== undefined;
 }
-function namesOnlyKept(db, itemPks) {
-  if (itemPks.length === 0)
-    return {};
-  const n = db.query("SELECT COUNT(*) AS n FROM chunks WHERE item_pk IN (SELECT value FROM json_each(?))").get(JSON.stringify(itemPks)).n;
+function namesOnlyKeptCount(n) {
   return n > 0 ? { namesOnlyKeptChunks: n } : {};
 }
 function migrationFingerprint(contentHash, chunkHashes) {
@@ -33096,7 +33185,7 @@ var DEFAULT_MAX_CHUNK_CHARS = 4000, MAX_MAX_CHUNK_CHARS = 32000, MAX_SEARCH_RESU
   JOIN items i ON i.item_pk = emb.item_pk
   WHERE i.tombstoned = 0
     AND emb.content_hash = c.embedding_input_hash
-`, LocalConnectorStore, CHAT_RECENCY_LANE_LIMIT = 8, CHAT_RECENCY_WEIGHT = 0.25, CHAT_RECENCY_PIN_COUNT = 2, lexicalContentPreference, CONNECTOR_STORE_CONTENT_PRIVATE_GAP = "this item's contents are marked Private; only its name is in this tier.", CONNECTOR_STORE_NAMES_ONLY_SCOPE_GAP = "the owner set this item's folder to Names only; its name is searchable and its contents are not read.", CONNECTOR_STORE_COPY_ITEM_COLUMNS, CONNECTOR_STORE_CHILD_ITEM_COLUMNS, MAX_PASSAGES_PER_CANDIDATE = 3, PASSAGE_TIE_MARGIN = 0.03, CONNECTOR_STORE_PRIVATE_TIER_EMBEDDING_WITHHELD_REASON = "private_tier_requires_private_embedder", lastMediaCacheSweepMs = 0, reassertedMediaHolders, CONNECTOR_STORE_OWNED_SCHEMA_OBJECTS, CONNECTOR_STORE_V13_CHUNK_COLUMNS, CONNECTOR_STORE_REQUIRED_COLUMNS, CONNECTOR_STORE_EMBEDDING_MODEL_COLUMNS, CONNECTOR_STORE_V4_ITEM_COLUMNS, CONNECTOR_STORE_V5_ITEM_COLUMNS, CONNECTOR_STORE_V7_ITEM_COLUMNS, CONNECTOR_STORE_V9_ITEM_COLUMNS, CONNECTOR_STORE_V12_ITEM_COLUMNS, CONNECTOR_STORE_V15_ITEM_COLUMNS, CONNECTOR_STORE_ITEM_WRITE_CLAIM_COLUMNS, CONNECTOR_STORE_MEDIA_JUDGMENT_COLUMNS, LOCATOR_FOLD_SCAN_MAX_CANDIDATES = 50000, LOCAL_RELAXED_STOPWORDS, TRUST_RECONCILIATION_CURSOR_PATTERN;
+`, LocalConnectorStore, CHAT_RECENCY_LANE_LIMIT = 8, CHAT_RECENCY_WEIGHT = 0.25, CHAT_RECENCY_PIN_COUNT = 2, lexicalContentPreference, CONNECTOR_STORE_CONTENT_PRIVATE_GAP = "this item's contents are marked Private; only its name is in this tier.", CONNECTOR_STORE_NAMES_ONLY_SCOPE_GAP = "the owner set this item's folder to Names only; its name is searchable and its contents are not read.", CONNECTOR_STORE_COPY_ITEM_COLUMNS, CONNECTOR_STORE_CHILD_ITEM_COLUMNS, NAMES_ONLY_KEPT_SQL = "SELECT COUNT(*) AS n FROM chunks WHERE item_pk IN (SELECT value FROM json_each(?))", MAX_PASSAGES_PER_CANDIDATE = 3, PASSAGE_TIE_MARGIN = 0.03, CONNECTOR_STORE_PRIVATE_TIER_EMBEDDING_WITHHELD_REASON = "private_tier_requires_private_embedder", lastMediaCacheSweepMs = 0, reassertedMediaHolders, CONNECTOR_STORE_OWNED_SCHEMA_OBJECTS, CONNECTOR_STORE_V13_CHUNK_COLUMNS, CONNECTOR_STORE_REQUIRED_COLUMNS, CONNECTOR_STORE_EMBEDDING_MODEL_COLUMNS, CONNECTOR_STORE_V4_ITEM_COLUMNS, CONNECTOR_STORE_V5_ITEM_COLUMNS, CONNECTOR_STORE_V7_ITEM_COLUMNS, CONNECTOR_STORE_V9_ITEM_COLUMNS, CONNECTOR_STORE_V12_ITEM_COLUMNS, CONNECTOR_STORE_V15_ITEM_COLUMNS, CONNECTOR_STORE_ITEM_WRITE_CLAIM_COLUMNS, CONNECTOR_STORE_MEDIA_JUDGMENT_COLUMNS, LOCATOR_FOLD_SCAN_MAX_CANDIDATES = 50000, LOCAL_RELAXED_STOPWORDS, TRUST_RECONCILIATION_CURSOR_PATTERN;
 var init_local_index = __esm(() => {
   init_job_names();
   init_keyword_context();
@@ -39123,17 +39212,36 @@ var init_local_index = __esm(() => {
       return out;
     }
     status(scope, options = {}) {
+      const steps = this.statusSteps(scope, options);
+      let step = steps.next();
+      while (!step.done) {
+        const read = step.value;
+        const query = this.db.query(read.sql);
+        step = steps.next(read.mode === "all" ? query.all(...read.params) : query.get(...read.params));
+      }
+      return step.value;
+    }
+    async statusOffThread(scope, options = {}) {
+      if (!offThreadReadsAvailable(this.dbPath))
+        return this.status(scope, options);
+      const steps = this.statusSteps(scope, options);
+      let step = steps.next();
+      while (!step.done)
+        step = steps.next(await readOffThread(this.dbPath, step.value));
+      return step.value;
+    }
+    *statusSteps(scope, options) {
       const accountScope = normalizeOptionalAccountScope(scope?.accountScope);
       const itemFilters = connectorStoreFilterSql(scope?.itemFilters);
       const contentFilters = connectorStoreFilterSql(scope?.contentFilters);
       const tier = this.tierHiddenItemPks({ countsMaxAgeMs: options.countsMaxAgeMs ?? 0 });
       const hiddenNotIn = tier.hidden.length > 0 ? "AND i.item_pk NOT IN (SELECT value FROM json_each(?))" : "";
       const heldNotIn = tier.held.length > 0 ? "AND i.item_pk NOT IN (SELECT value FROM json_each(?))" : "";
-      const namesOnlyWithText = tier.metadataLayer.length > 0 ? this.db.query(`
+      const namesOnlyWithText = tier.metadataLayer.length > 0 ? (yield { sql: `
           SELECT j.value AS pk FROM json_each(?) j
           WHERE EXISTS (SELECT 1 FROM chunks c WHERE c.item_pk = j.value)
             OR EXISTS (SELECT 1 FROM chunk_embeddings emb WHERE emb.item_pk = j.value)
-        `).all(JSON.stringify(tier.metadataLayer)).map((row) => row.pk) : [];
+        `, params: [JSON.stringify(tier.metadataLayer)], mode: "all" }).map((row) => row.pk) : [];
       const namesOnlyNotIn = namesOnlyWithText.length > 0 ? "AND i.item_pk NOT IN (SELECT value FROM json_each(?))" : "";
       const itemWhere = `${scope?.itemsAllowed === false ? "AND 0" : ""}
       ${accountScope ? "AND i.account_scope = ?" : ""}
@@ -39174,7 +39282,7 @@ var init_local_index = __esm(() => {
       const outsideWindowSql = Number.isFinite(contentNotBeforeMs) ? `(COALESCE(julianday(i.authored_at) < julianday(?), 0) = 1
           AND NOT EXISTS (SELECT 1 FROM chunks oc WHERE oc.item_pk = i.item_pk))` : undefined;
       const outsideWindowParams = outsideWindowSql ? [new Date(contentNotBeforeMs).toISOString()] : [];
-      const itemCounts = this.db.query(`
+      const itemCounts = yield { sql: `
       WITH flags AS MATERIALIZED (
         SELECT
           i.tombstoned AS t,
@@ -39194,8 +39302,13 @@ var init_local_index = __esm(() => {
         COALESCE(SUM(t = 1 AND in_items), 0) AS tombstoned_items,
         COALESCE(SUM(t = 0 AND NOT dir AND in_file_scope), 0) AS full_ingestion_files
       FROM flags
-    `).get(...itemParams, ...jsonList(tier.hidden), JSON.stringify(keptNamesOnlyPks), ...fileScopeParams);
-      const textCounts = this.db.query(`
+    `, params: [
+        ...itemParams,
+        ...jsonList(tier.hidden),
+        JSON.stringify(keptNamesOnlyPks),
+        ...fileScopeParams
+      ], mode: "get" };
+      const textCounts = yield { sql: `
       SELECT
         -- CROSS JOIN keeps chunks and vectors as the outer loop: with items
         -- outer, the scope tests ran on every item, chunk or not.
@@ -39218,25 +39331,29 @@ var init_local_index = __esm(() => {
           WHERE i.tombstoned = 0
             ${contentWhere}
         ) AS items_with_text
-    `).get(...parityParams, ...parityParams, ...contentParams);
+    `, params: [
+        ...parityParams,
+        ...parityParams,
+        ...contentParams
+      ], mode: "get" };
       const counts = { ...itemCounts, ...textCounts };
-      const outsideContentWindowItems = outsideWindowSql ? this.db.query(`
+      const outsideContentWindowItems = outsideWindowSql ? (yield { sql: `
           SELECT COUNT(*) AS n FROM items i
           WHERE i.tombstoned = 0
             AND LOWER(i.mime_type) <> 'inode/directory'
             ${fileScopeWhere}
             AND ${outsideWindowSql}
-        `).get(...fileScopeParams, ...outsideWindowParams).n : 0;
+        `, params: [...fileScopeParams, ...outsideWindowParams], mode: "get" }).n : 0;
       let policyDeferredItems = 0;
       if (fileScoped && scope?.contentAllowed !== false && counts.full_ingestion_files > 0) {
-        const rows = this.db.query(`
+        const rows = yield { sql: `
         SELECT i.locator_uri, i.title, i.mime_type
         FROM items i
         WHERE i.tombstoned = 0
           AND LOWER(i.mime_type) <> 'inode/directory'
           ${fileScopeWhere}
           ${outsideWindowSql ? `AND NOT ${outsideWindowSql}` : ""}
-      `).all(...fileScopeParams, ...outsideWindowParams);
+      `, params: [...fileScopeParams, ...outsideWindowParams], mode: "all" };
         for (const row of rows) {
           const decision = this.exclusions.evaluateItem({
             path: row.locator_uri,
@@ -39248,7 +39365,7 @@ var init_local_index = __esm(() => {
           }
         }
       }
-      const byModel = this.db.query(`
+      const byModel = yield { sql: `
       SELECT
         m.model_id AS model_id,
         (SELECT COUNT(*)
@@ -39280,14 +39397,18 @@ var init_local_index = __esm(() => {
         WHERE i.tombstoned = 0 ${contentWhere}
       ) m
       ORDER BY m.model_id
-    `).all(...parityParams, ...parityParams, ...contentParams);
+    `, params: [
+        ...parityParams,
+        ...parityParams,
+        ...contentParams
+      ], mode: "all" };
       const tierStatus = tier.hidden.length > 0 || tier.held.length > 0 || tier.moving > 0 || tier.metadataLayer.length > 0 ? {
         pendingClassificationItems: tier.held.length,
-        supersededChunks: tier.hidden.length > 0 ? this.db.query(`
+        supersededChunks: tier.hidden.length > 0 ? (yield { sql: `
                 SELECT COUNT(*) AS n FROM chunks WHERE item_pk IN (SELECT value FROM json_each(?))
-              `).get(JSON.stringify(tier.hidden)).n : 0,
+              `, params: [JSON.stringify(tier.hidden)], mode: "get" }).n : 0,
         tierMoveInProgress: tier.moving,
-        ...namesOnlyKept(this.db, namesOnlyWithText)
+        ...namesOnlyKeptCount(namesOnlyWithText.length > 0 ? (yield { sql: NAMES_ONLY_KEPT_SQL, params: [JSON.stringify(namesOnlyWithText)], mode: "get" }).n : 0)
       } : undefined;
       const settledUnreadableItems = this.settledUnreadableCount(scope, options.countsMaxAgeMs ?? 0);
       const last = this.lastSyncRun();
@@ -64393,7 +64514,7 @@ function createAnswerActivity(onBusy, options = {}) {
   const leases = new Map;
   const idleListeners = new Set;
   let interactive = 0;
-  let nextId = 0;
+  let nextId2 = 0;
   let expired = 0;
   const drop = (id) => {
     const lease = leases.get(id);
@@ -64446,7 +64567,7 @@ function createAnswerActivity(onBusy, options = {}) {
     },
     begin(kind = "owner") {
       sweep();
-      const id = nextId++;
+      const id = nextId2++;
       leases.set(id, { startedAt: now(), kind });
       if (kind !== "background")
         interactive += 1;
@@ -68050,9 +68171,9 @@ function secureLocalExclusionCoverageNotes(detail) {
   if (noRoute.length > 0) {
     notes.push(`Private sources were not searched (${noRoute.join(", ")}): the active sovereignty policy ` + "approves no private analyst for them under this request.");
   }
-  const unavailable = corpora("private_analyst_unavailable");
-  if (unavailable.length > 0) {
-    notes.push(`Private sources were left out of this answer (${unavailable.join(", ")}): ` + "the private analyst is unavailable right now.");
+  const unavailable2 = corpora("private_analyst_unavailable");
+  if (unavailable2.length > 0) {
+    notes.push(`Private sources were left out of this answer (${unavailable2.join(", ")}): ` + "the private analyst is unavailable right now.");
   }
   const bulk = corpora("bulk_secure_local_release_requires_approval");
   if (bulk.length > 0) {
@@ -89361,7 +89482,7 @@ function createBuiltInTranscriber(options = {}) {
   const chunkTimeoutMs = options.chunkTimeoutMs ?? DEFAULT_CHUNK_TIMEOUT_MS;
   const fileDeadlineMs = options.fileDeadlineMs ?? DEFAULT_FILE_DEADLINE_MS;
   const maxChars = options.maxTranscriptChars ?? Number.POSITIVE_INFINITY;
-  let unavailable = (options.totalMemoryBytes ?? totalmem()) < model.minimumMemoryBytes ? "This computer does not have enough memory for the built-in transcription model." : undefined;
+  let unavailable2 = (options.totalMemoryBytes ?? totalmem()) < model.minimumMemoryBytes ? "This computer does not have enough memory for the built-in transcription model." : undefined;
   let installed;
   let installing2;
   let failedAt;
@@ -89370,7 +89491,7 @@ function createBuiltInTranscriber(options = {}) {
   const readyListeners = [];
   let server;
   const prepare = () => {
-    if (unavailable)
+    if (unavailable2)
       return "unavailable";
     if (installed)
       return "ready";
@@ -89390,7 +89511,7 @@ function createBuiltInTranscriber(options = {}) {
       }
     }, (error) => {
       if (error instanceof BuiltInReasoningInstallError && (error.reason === "unsupported_platform" || error.reason === "insufficient_memory")) {
-        unavailable = error.message;
+        unavailable2 = error.message;
       } else {
         failedAt = now();
         consecutiveFailures = error instanceof BuiltInReasoningInstallError && error.reason === "insufficient_space" ? 1 : consecutiveFailures + 1;
@@ -89433,7 +89554,7 @@ function createBuiltInTranscriber(options = {}) {
   return {
     prepare,
     downloadNow() {
-      if (failedAt !== undefined && manualSkipFor !== failedAt && !installing2 && !installed && !unavailable) {
+      if (failedAt !== undefined && manualSkipFor !== failedAt && !installing2 && !installed && !unavailable2) {
         manualSkipFor = failedAt;
         failedAt = undefined;
       }
@@ -89466,7 +89587,7 @@ function createBuiltInTranscriber(options = {}) {
         state = prepare();
       }
       if (state === "unavailable")
-        throw new TranscriberUnavailableError(unavailable ?? "Built-in transcription is unavailable.");
+        throw new TranscriberUnavailableError(unavailable2 ?? "Built-in transcription is unavailable.");
       if (state === "pending" || !installed) {
         throw new TranscriberPendingError("The built-in transcription model is still being set up.");
       }
@@ -89478,7 +89599,7 @@ function createBuiltInTranscriber(options = {}) {
           await convert(input.inputPath, wavPath);
         } catch (error) {
           if (error instanceof TranscriberUnavailableError)
-            unavailable = error.message;
+            unavailable2 = error.message;
           throw error;
         }
         let audio;
@@ -95215,8 +95336,15 @@ function createSourceIndexStatusHandler(options = {}) {
         const countsMaxAgeMs = snapshot.countsMaxAgeMs ?? 0;
         if (store && countsMaxAgeMs > 0) {
           const statusScope = options.connectorStoreStatusScope?.(store);
-          if (!storeStatusFresh(store, statusScope, countsMaxAgeMs))
+          if (!storeStatusFresh(store, statusScope, countsMaxAgeMs)) {
             await store.prepareStatusCounts?.(statusScope);
+            if (store.statusOffThread) {
+              try {
+                const status = await store.statusOffThread(statusScope, { countsMaxAgeMs });
+                storeStatusCache.set(storeStatusKey(store, statusScope), { recordedAtMs: nowMs(), status });
+              } catch {}
+            }
+          }
         }
         statuses.push(statusFor(declaredCorpus));
       }
@@ -96846,17 +96974,17 @@ function tierClassificationFromCorpora(corpora, migration) {
   const secrets = sum2("secret_locations");
   const pending = sum2("pending_classification_items");
   const superseded = sum2("superseded_chunks");
-  const namesOnlyKept2 = sum2("names_only_kept_chunks");
+  const namesOnlyKept = sum2("names_only_kept_chunks");
   const ids = new Set(corpora.map((corpus) => corpus.corpus_id));
   const touched = migration !== undefined && migration.state !== "superseded" && migration.corpora.some((corpusId) => ids.has(corpusId));
-  if (secrets === 0 && pending === 0 && superseded === 0 && namesOnlyKept2 === 0 && !touched)
+  if (secrets === 0 && pending === 0 && superseded === 0 && namesOnlyKept === 0 && !touched)
     return;
   const label = touched ? migration.state === "done" && migration.purged ? "Tier migration done" : TIER_MIGRATION_STATE_LABELS[migration.state] ?? `Tier migration ${migration.state}` : undefined;
   return {
     secrets_located: secrets,
     pending_classification_items: pending,
     superseded_chunks: superseded,
-    names_only_kept_chunks: namesOnlyKept2,
+    names_only_kept_chunks: namesOnlyKept,
     ...touched && label ? {
       migration: {
         state: migration.state,
