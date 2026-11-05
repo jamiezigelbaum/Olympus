@@ -4,7 +4,7 @@
 //
 //   bun eval/calibration/judge-run.ts --endpoint http://127.0.0.1:8012 --dir DIR
 //     --model NAME (--owner-words FILE | --no-owner-words)
-//     [--mode decision|full] [--split dev|test] [--limit N] [--passes 3]
+//     [--mode decision|full] [--split dev|test] [--limit N] [--passes 3] [--exclude ID,ID]
 //     [--primed-check N] [--slot 0] [--n-probs 40] [--thinking]
 //
 //   VENICE_API_KEY=... bun eval/calibration/judge-run.ts --venice MODEL_ID --allow-venice
@@ -340,7 +340,7 @@ async function askModel(prompt: string, written: string, primed: boolean): Promi
   });
   const verdict = parseSnifferBatchResponse(reply.content ?? '', new Set([1])).get(1);
   if (!verdict) return { judge: 'private', via: 'no_answer' };
-  return { judge: snifferTierKey(verdict) === 'secure' ? 'private' : 'personal', via: 'judge' };
+  return { judge: snifferTierKey(verdict) === 'secure' ? 'private' : 'personal', via: 'judge', privateKind: verdict.privateKind };
 }
 
 async function prime(shared: string): Promise<void> {
@@ -393,7 +393,9 @@ async function main(): Promise<void> {
 
   const sample = readSample(dir);
   const labels = readLabels(dir).labels;
+  const excluded = new Set((flag('--exclude') ?? '').split(',').filter(Boolean));
   const labeled = sample.items
+    .filter((item) => !excluded.has(item.id))
     .filter((item) => labels[item.id]?.label === 'personal' || labels[item.id]?.label === 'private')
     .filter((item) => split === undefined || splitOf(item.id) === split)
     .slice(0, numberFlag('--limit', Number.MAX_SAFE_INTEGER));
@@ -448,6 +450,7 @@ async function main(): Promise<void> {
     primed: true,
     privateBar: mode === 'decision' ? PRIVATE_BAR : undefined,
     items: rows.length,
+    excluded: excluded.size,
     answeredBy: count(answers.map((answer) => answer.via)),
     verdictsMovedAcrossPasses: moved.length,
     wordMass: coverage.length > 0 ? medianAndRange(coverage) : undefined,
