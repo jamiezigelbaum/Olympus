@@ -213617,22 +213617,26 @@ ${key2}`;
   const settledUnreadableByCorpus = new Map;
   const settledUnreadableBuilding = new Set;
   const settledUnreadableFor = (corpusId) => {
+    const scoped = connectorStores.filter((store) => store.corpusId === corpusId).map((store) => ({ store, scope: connectorStoreStatusScope(store) }));
+    const key2 = JSON.stringify(scoped.map(({ scope }) => scope ?? null));
     const built = settledUnreadableByCorpus.get(corpusId);
-    if ((!built || Date.now() - built.at >= DASHBOARD_READINESS_LEDGER_MAX_AGE_MS) && !settledUnreadableBuilding.has(corpusId)) {
-      settledUnreadableBuilding.add(corpusId);
+    const usable = built?.key === key2 ? built : undefined;
+    const buildKey = `${corpusId}\x00${key2}`;
+    if ((!usable || Date.now() - usable.at >= DASHBOARD_READINESS_LEDGER_MAX_AGE_MS) && !settledUnreadableBuilding.has(buildKey)) {
+      settledUnreadableBuilding.add(buildKey);
       (async () => {
         try {
           const items = [];
-          for (const store of connectorStores.filter((store2) => store2.corpusId === corpusId)) {
-            items.push(...await store.settledUnreadableItemsInTurns(connectorStoreStatusScope(store)));
+          for (const { store, scope } of scoped) {
+            items.push(...await store.settledUnreadableItemsInTurns(scope));
           }
-          settledUnreadableByCorpus.set(corpusId, { at: Date.now(), items });
+          settledUnreadableByCorpus.set(corpusId, { at: Date.now(), key: key2, items });
         } catch {} finally {
-          settledUnreadableBuilding.delete(corpusId);
+          settledUnreadableBuilding.delete(buildKey);
         }
       })();
     }
-    return built?.items ?? [];
+    return usable?.items ?? [];
   };
   const unreadableFiles = createUnreadableFiles({
     items: (corpusId) => {

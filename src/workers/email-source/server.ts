@@ -4836,28 +4836,36 @@ export async function main(): Promise<void> {
   // turns off the request path and reused for the readiness window: built on
   // each read it was about a quarter of Sparta's sampled freezes
   // (2026-11-05). Until the first build lands a store lists none of them.
-  const settledUnreadableByCorpus = new Map<string, { at: number; items: readonly ExtractionUnreadableItem[] }>();
+  // Each entry is keyed by the source scope it was built under: a folder the
+  // owner takes out of scope must leave the list on the next read, not at the
+  // next rebuild, and a build that started under the old scope never serves.
+  const settledUnreadableByCorpus = new Map<string, { at: number; key: string; items: readonly ExtractionUnreadableItem[] }>();
   const settledUnreadableBuilding = new Set<string>();
   const settledUnreadableFor = (corpusId: string): readonly ExtractionUnreadableItem[] => {
+    const scoped = connectorStores.filter(store => store.corpusId === corpusId)
+      .map(store => ({ store, scope: connectorStoreStatusScope(store) }));
+    const key = JSON.stringify(scoped.map(({ scope }) => scope ?? null));
     const built = settledUnreadableByCorpus.get(corpusId);
-    if ((!built || Date.now() - built.at >= DASHBOARD_READINESS_LEDGER_MAX_AGE_MS) && !settledUnreadableBuilding.has(corpusId)) {
-      settledUnreadableBuilding.add(corpusId);
+    const usable = built?.key === key ? built : undefined;
+    const buildKey = `${corpusId}\0${key}`;
+    if ((!usable || Date.now() - usable.at >= DASHBOARD_READINESS_LEDGER_MAX_AGE_MS) && !settledUnreadableBuilding.has(buildKey)) {
+      settledUnreadableBuilding.add(buildKey);
       void (async () => {
         try {
           const items: ExtractionUnreadableItem[] = [];
           // A file store leaves out files still waiting for extraction (setExtractionEndedProbe).
-          for (const store of connectorStores.filter(store => store.corpusId === corpusId)) {
-            items.push(...await store.settledUnreadableItemsInTurns(connectorStoreStatusScope(store)));
+          for (const { store, scope } of scoped) {
+            items.push(...await store.settledUnreadableItemsInTurns(scope));
           }
-          settledUnreadableByCorpus.set(corpusId, { at: Date.now(), items });
+          settledUnreadableByCorpus.set(corpusId, { at: Date.now(), key, items });
         } catch {
           // A closed or busy store: the older list stands until the next read.
         } finally {
-          settledUnreadableBuilding.delete(corpusId);
+          settledUnreadableBuilding.delete(buildKey);
         }
       })();
     }
-    return built?.items ?? [];
+    return usable?.items ?? [];
   };
   const unreadableFiles = createUnreadableFiles({
         items: (corpusId) => {
