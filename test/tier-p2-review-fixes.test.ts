@@ -554,11 +554,12 @@ describe('6b. one item per call: no name can steer another item', () => {
 });
 
 describe('pace, daily cap and the visible backlog', () => {
-  test('defaults: 20,000 calls a day, prompt idle polling, optional legacy call cap', () => {
+  test('defaults: 20,000 full-mode calls a day, prompt idle polling, optional explicit caps', () => {
     expect(DEFAULT_SNIFFER_MAX_CALLS_PER_DAY).toBe(20_000);
     expect(DEFAULT_SNIFFER_PASS_TIME_MS).toBe(30_000);
-    expect(tierSnifferServiceEnv({})).toEqual({ enabled: true, intervalMs: 1_000, maxCallsPerDay: 20_000 });
+    expect(tierSnifferServiceEnv({})).toEqual({ enabled: true, intervalMs: 1_000 });
     expect(tierSnifferServiceEnv({ OLYMPUS_TIER_SNIFFER_MAX_CALLS_PER_PASS: '5' }).maxCallsPerPass).toBe(5);
+    expect(tierSnifferServiceEnv({ OLYMPUS_TIER_SNIFFER_MAX_CALLS_PER_DAY: '20000' }).maxCallsPerDay).toBe(20_000);
   });
 
   test('the backlog says "checking N items, about X remaining", counts only, and reaches source index status', async () => {

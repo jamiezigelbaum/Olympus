@@ -67,6 +67,8 @@ const SUPPORTED_PROVIDERS: readonly SovereigntyProfileProvider[] = [
 interface SovereigntyModelProfileBase {
   trust: SovereigntyProfileTrust;
   baseUrl?: string;
+  /** Native one-token privacy sniffer; local OpenAI-compatible profiles only. */
+  snifferMode?: 'auto' | 'decision' | 'full';
   secretRef?: string;
   // `consult` carries one approved question and never raw evidence: a consult
   // profile is refused for every analyst route, embedding, vision and
@@ -908,6 +910,7 @@ function parseProfiles(value: unknown, label: string): Record<string, Sovereignt
       trust,
       ...optionalString(profile, 'baseUrl'),
       ...optionalString(profile, 'secretRef'),
+      ...(profile.snifferMode !== undefined ? { snifferMode: profile.snifferMode as NonNullable<SovereigntyModelProfile['snifferMode']> } : {}),
     };
     // openclaw-infer alone may omit model: absent means OpenClaw's configured
     // default model (the infer CLI runs without --model). Every other provider
@@ -1021,6 +1024,10 @@ function validateProfile(id: string, profile: SovereigntyModelProfile, daemonPor
   }
   if (!['local', 'encrypted_cloud', 'standard_cloud'].includes(profile.trust)) {
     throw new OperationError('config_error', `Sovereignty profile "${id}" has unsupported trust "${profile.trust}".`);
+  }
+  if (profile.snifferMode !== undefined && (profile.provider !== 'local-openai-compatible'
+    || profile.trust !== 'local' || !['auto', 'decision', 'full'].includes(profile.snifferMode))) {
+    throw new OperationError('config_error', `Sovereignty profile "${id}" snifferMode requires a local profile and auto, decision or full.`);
   }
   if (profile.provider === 'zkapi') validateZkapiProfile(id, profile);
   if (profile.provider === 'built-in') {

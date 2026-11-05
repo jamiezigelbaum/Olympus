@@ -1,3 +1,4 @@
+import { createDecisionSnifferModel } from '../classification/sniffer-decision.ts';
 import { macComputerSetupView, saveMacComputerUseChoice } from '../../core/engine-service.ts';
 import { release } from 'node:os';
 import { createPrivacyQuestionEngine } from '../classification/privacy-questions.ts';
@@ -1909,10 +1910,10 @@ function createTierSnifferModel(input: {
       ...(profile.secretRef ? { secretRef: profile.secretRef } : {}),
       purpose: 'text_reasoning',
     };
-    return createDelphiAnalystModel(new DelphiClient(config, undefined, { resolveSecretRef: () => apiKey }), {
+    return createDecisionSnifferModel(lane, createDelphiAnalystModel(new DelphiClient(config, undefined, { resolveSecretRef: () => apiKey }), {
       profile: 'source_answer',
       preflightTimeoutMs: 5_000,
-    });
+    }), { apiKey });
   }
   if (lane.kind === 'venice' && profile.provider === 'venice') {
     const apiKey = resolveSecretRefSync(
@@ -7151,7 +7152,7 @@ export async function main(): Promise<void> {
         intervalMs: snifferEnv.intervalMs,
         ...(snifferEnv.maxCallsPerPass !== undefined ? { maxCallsPerPass: snifferEnv.maxCallsPerPass } : {}),
         ...(snifferEnv.concurrentCalls !== undefined ? { concurrentCalls: snifferEnv.concurrentCalls } : {}),
-        maxCallsPerDay: snifferEnv.maxCallsPerDay,
+        ...(snifferEnv.maxCallsPerDay !== undefined ? { maxCallsPerDay: snifferEnv.maxCallsPerDay } : {}),
         // Its own parallel calls are not answers: only someone else's call holds it back.
         answersInFlight: () => snifferResource !== undefined && localModelActivity.busyExcept(snifferResource, 'tier_sniffer'),
         // A waiting Inbox question past its deferral stops the pass, so its answer runs, then classification resumes.

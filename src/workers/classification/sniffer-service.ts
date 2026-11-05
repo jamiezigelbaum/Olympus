@@ -1,3 +1,4 @@
+import type { SnifferModel } from './sniffer-decision.ts';
 import { resumeVerifiedTierMove, flushTierMoveNotes } from '../connector-store/tier-move.ts';
 import { controlPathHeadroom, ingestionTurn } from '../control-path-headroom.ts';
 // The worker's background tick for the privacy-safe sniffer: a bounded
@@ -314,7 +315,7 @@ export class TierSnifferService {
   constructor(options: TierSnifferServiceOptions) {
     this.options = options;
     this.budget = new SnifferCallBudget({
-      maxCallsPerDay: options.maxCallsPerDay ?? DEFAULT_SNIFFER_MAX_CALLS_PER_DAY,
+      ...(options.maxCallsPerDay !== undefined ? { maxCallsPerDay: options.maxCallsPerDay } : {}),
       ...(options.now ? { now: options.now } : {}),
       ...(options.budgetStatePath ? { statePath: options.budgetStatePath } : {}),
     });
@@ -857,6 +858,7 @@ export class TierSnifferService {
       await this.drainMoves();
       return { state: 'awaiting_owner_approval', modelId: lane.modelId, promptVersion: versions.approval };
     }
+    await (this.options.model as SnifferModel).prepareSniffer?.(signal);
     // Items decided under an older classifier or sniffer prompt are judged
     // again first (tier-rejudge.ts), a bounded page per set per tick: their
     // questions join the queue this pass answers.
@@ -1495,7 +1497,7 @@ export function tierSnifferServiceEnv(env: Record<string, string | undefined>): 
   maxCallsPerPass?: number;
   /** Calls in flight at once (default 1, at most SNIFFER_MAX_CONCURRENT_CALLS). */
   concurrentCalls?: number;
-  maxCallsPerDay: number;
+  maxCallsPerDay?: number;
 } {
   const enabledRaw = env.OLYMPUS_TIER_SNIFFER_ENABLED?.trim().toLowerCase();
   return {
@@ -1507,7 +1509,8 @@ export function tierSnifferServiceEnv(env: Record<string, string | undefined>): 
     ...(env.OLYMPUS_TIER_SNIFFER_CONCURRENT_CALLS?.trim()
       ? { concurrentCalls: Math.min(SNIFFER_MAX_CONCURRENT_CALLS, positiveInteger(env.OLYMPUS_TIER_SNIFFER_CONCURRENT_CALLS, 1, 1)) }
       : {}),
-    maxCallsPerDay: positiveInteger(env.OLYMPUS_TIER_SNIFFER_MAX_CALLS_PER_DAY, DEFAULT_SNIFFER_MAX_CALLS_PER_DAY, 0),
+    ...(env.OLYMPUS_TIER_SNIFFER_MAX_CALLS_PER_DAY?.trim()
+      ? { maxCallsPerDay: positiveInteger(env.OLYMPUS_TIER_SNIFFER_MAX_CALLS_PER_DAY, DEFAULT_SNIFFER_MAX_CALLS_PER_DAY, 0) } : {}),
   };
 }
 
