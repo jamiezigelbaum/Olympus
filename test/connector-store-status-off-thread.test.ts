@@ -160,7 +160,7 @@ describe('status handler', () => {
         handler.status({}, { countsMaxAgeMs: 60_000 }),
       ]);
       expect(reads).toBe(1);
-      expect(a.corpora[0]?.counts).toEqual(b.corpora[0]?.counts);
+      expect(b.corpora[0]).toEqual(a.corpora[0]);
     } finally {
       store.close();
     }
