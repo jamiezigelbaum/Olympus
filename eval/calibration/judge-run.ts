@@ -133,7 +133,6 @@ function veniceJudge(model: string): AnalystModel {
     timeoutMs: 60_000,
     async fetchImpl(url, init) {
       if (!url.includes('/chat/completions')) return await fetch(url, init);
-      await paced();
       meter.calls += 1;
       const started = performance.now();
       let response: Response;
@@ -174,6 +173,8 @@ function veniceJudge(model: string): AnalystModel {
 }
 
 async function askVenice(model: AnalystModel, material: string, ownerContext: string | undefined): Promise<Answer> {
+  // Wait for a pacing slot before complete() starts its timeout, so queueing never eats it.
+  await paced();
   let text: string;
   try {
     text = (await model.complete({
