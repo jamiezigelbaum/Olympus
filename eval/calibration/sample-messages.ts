@@ -118,7 +118,7 @@ class Stores {
     for (let index = 0; index < this.dbs.length; index += 1) {
       const item = this.lookups[index]!.get(row.provider, row.account_scope, row.conversation_key, row.provider_item_id) as Row | null;
       if (!item) continue;
-      const parts = this.chunks[index]!.all(item['item_pk']) as Array<{ bounded_text: string }>;
+      const parts = this.chunks[index]!.all(item['item_pk'] as number) as Array<{ bounded_text: string }>;
       if (parts.length === 0) continue;
       return { item, text: parts.map((part) => part.bounded_text).join('\n').slice(0, MAX_TEXT_CHARS) };
     }
