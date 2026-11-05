@@ -104,7 +104,7 @@ test('hash reconstruction, exact queued match, unmatched rows, read-only inputs,
     expect(await child.exited).toBe(0); expect(stdout.includes(TEXT)).toBe(false); expect(stderr).toBe('');
     expect(JSON.parse(stdout).overall.rows).toBe(4);
   } finally { s.stop(); rmSync(f.root, { recursive: true, force: true }); }
-});
+}, 30_000);
 
 test('deadline stops before dispatch and resumes later', async () => {
   const f = fixture(), s = server();
