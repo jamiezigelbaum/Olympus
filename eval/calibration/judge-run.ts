@@ -85,7 +85,9 @@ const nProbs = numberFlag('--n-probs', 40);
 const passes = numberFlag('--passes', 3);
 const primedCheck = numberFlag('--primed-check', 0);
 const veniceModel = flag('--venice');
-const concurrency = Math.max(1, Math.min(8, Math.floor(numberFlag('--concurrency', 1))));
+/** Venice runs on a cluster, so the test may go past the sniffer's local cap of 8 to find the key's real limit. */
+const VENICE_MAX_CONCURRENCY = 64;
+const concurrency = Math.max(1, Math.min(VENICE_MAX_CONCURRENCY, Math.floor(numberFlag('--concurrency', 1))));
 
 /** What Venice reported for the calls of one pass: usage, latency and the key's limits. */
 interface VeniceMeter {

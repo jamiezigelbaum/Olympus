@@ -153,7 +153,7 @@ VENICE_API_KEY=... bun eval/calibration/judge-run.ts \
 
 - **Policy:** a model whose Venice privacy category is below Private stops the
   run, as it would in production.
-- **Concurrency:** `--concurrency N`, 1 to 8, the sniffer's own range.
+- **Concurrency:** `--concurrency N`, 1 to 64. Production's sniffer allows at most 8 today; a higher value measures what a Venice key could sustain.
 - **Recorded per pass:** latency (median and 95th percentile), prompt, cached,
   completion and reasoning tokens per item from Venice's usage report, failed
   calls, and the key's request and token limits. Cost follows from the tokens
