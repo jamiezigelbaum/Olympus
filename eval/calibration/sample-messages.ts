@@ -27,10 +27,10 @@
 import { Database } from 'bun:sqlite';
 import { chmodSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { classifyItemTiers, type TierSniffer } from '../../src/workers/classification/tier-classifier.ts';
 import { storedSignals } from '../../src/workers/connector-store/stored-names.ts';
 import type { ConnectorStoreItemCopy } from '../../src/workers/connector-store/local-index.ts';
 import { CALIBRATION_DIR_DEFAULT, SAMPLE_FILE, type CalibrationSample, type CalibrationSampleItem } from './files.ts';
+import { judgeInput } from './judge-input.ts';
 import { rng, shuffle } from './sample-random.ts';
 
 const MAX_TEXT_CHARS = 60_000;
@@ -126,24 +126,14 @@ class Stores {
   }
 }
 
-/** What the production classifier would ask the judge about this item, or why it would not ask. */
-function judgeInput(item: Row, text: string, provider: string) {
+/** What the production classifier would ask the judge about this stored item. */
+function storedJudgeInput(item: Row, text: string, provider: string) {
   const conversation = typeof item['provider_conversation_id'] === 'string' ? item['provider_conversation_id'] : undefined;
   const signals = storedSignals({
     columns: item,
     identity: { providerConversationId: conversation },
   } as unknown as ConnectorStoreItemCopy);
-  let material: string | undefined;
-  const sniffer: TierSniffer = {
-    id: 'calibration-recorder',
-    judge(request) {
-      if (request.pass === 'content') material = request.material;
-      return { verdict: 'undecided' };
-    },
-  };
-  const decision = classifyItemTiers({ signals, provider, text }, { sniffer, retirePublic: true });
-  const secret = decision.metadataTier === 'secrets' || decision.contentTier === 'secrets';
-  return { signals, material: secret ? undefined : material, secret };
+  return { signals, ...judgeInput(signals, text, provider) };
 }
 
 function quarter(iso: string): string {
@@ -214,7 +204,7 @@ function sampleSource(spec: SourceSpec, stores: Stores, since: string, privateSh
         if ((groups.get(group) ?? 0) >= pass.cap) continue;
         if (pass.spreadTime && (quarters.get(when) ?? 0) >= quarterQuota) continue;
         if (pass.spreadLength && (buckets.get(bucket) ?? 0) >= bucketQuota) continue;
-        const input = judgeInput(found.item, found.text, spec.name);
+        const input = storedJudgeInput(found.item, found.text, spec.name);
         if (!input.material) {
           if (input.secret) skipped.secret += 1;
           else skipped.judgeNotAsked += 1;
@@ -295,7 +285,7 @@ function checkAgainstQueue(spec: SourceSpec, stores: Stores, limit: number) {
   for (const question of questions) {
     const found = stores.read(question);
     if (!found || !spec.mime(String(found.item['mime_type'] ?? ''))) continue;
-    const rebuilt = judgeInput(found.item, found.text, spec.name).material ?? '';
+    const rebuilt = storedJudgeInput(found.item, found.text, spec.name).material ?? '';
     result.checked += 1;
     if (rebuilt === question.material) result.identical += 1;
     if (parts(rebuilt).names === parts(question.material).names) result.sameNames += 1;
