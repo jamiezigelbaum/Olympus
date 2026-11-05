@@ -117,9 +117,10 @@ describe('cpu samples taken during a freeze', () => {
     afterwards(60);
     const spinUntil = performance.now() + 3;
     while (performance.now() < spinUntil) { /* spin */ }
+    const anchorMs = performance.now();
     const traces = jsc.samplingProfilerStackTraces().traces;
     const newest = Math.max(...traces.map((trace) => trace.timestamp ?? -Infinity));
-    const kept = tracesInStalls(traces, [{ startMs, endMs }], newest - performance.now() / 1000);
+    const kept = tracesInStalls(traces, [{ startMs, endMs }], newest - anchorMs / 1000);
     const named = (trace: { frames?: { name?: string }[] }, name: string) => (trace.frames ?? []).some((frame) => frame.name === name);
     expect(kept.length).toBeGreaterThan(0);
     expect(kept.filter((trace) => named(trace, 'heldTheThread')).length / kept.length).toBeGreaterThan(0.8);
