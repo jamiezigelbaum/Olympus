@@ -20682,6 +20682,7 @@ function readerThread() {
   }
 }
 function retire(stopped, error) {
+  stopped.retired = true;
   if (thread === stopped)
     thread = undefined;
   for (const waiting of stopped.pending.values()) {
@@ -20697,6 +20698,8 @@ function offThreadReadsAvailable(dbPath) {
   return dbPath !== ":memory:" && !dbPath.startsWith("file::memory:") && readerThread() !== undefined;
 }
 function send(reader, message2) {
+  if (reader.retired)
+    return Promise.reject(new Error("off-thread reader stopped"));
   const id = nextId++;
   return new Promise((resolve7, reject) => {
     const timer = setTimeout(() => {

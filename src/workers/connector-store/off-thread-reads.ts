@@ -63,6 +63,7 @@ type Pending = { resolve: (rows: unknown) => void; reject: (error: Error) => voi
 interface ReaderThread {
   worker: Worker;
   pending: Map<number, Pending>;
+  retired?: boolean;
 }
 
 let thread: ReaderThread | undefined;
@@ -103,6 +104,7 @@ function readerThread(): ReaderThread | undefined {
 }
 
 function retire(stopped: ReaderThread, error: Error): void {
+  stopped.retired = true;
   if (thread === stopped) thread = undefined;
   for (const waiting of stopped.pending.values()) {
     clearTimeout(waiting.timer);
@@ -122,6 +124,8 @@ export function offThreadReadsAvailable(dbPath: string): boolean {
 }
 
 function send(reader: ReaderThread, message: Record<string, unknown>): Promise<unknown> {
+  // A retired thread answers nothing: fail at once rather than wait out the timeout.
+  if (reader.retired) return Promise.reject(new Error('off-thread reader stopped'));
   const id = nextId++;
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
