@@ -34847,8 +34847,9 @@ var init_local_index = __esm(() => {
       for (let offset = 0;offset < ids.length; offset += 5000) {
         const rows = this.db.query(`
         SELECT i.local_item_id, i.provider_item_id, i.provider, i.account_scope, i.source_version, i.content_hash
-        FROM items i
-        WHERE i.local_item_id IN (SELECT value FROM json_each(?))
+        FROM json_each(?) wanted
+        CROSS JOIN items i
+        WHERE i.local_item_id = wanted.value
           AND i.tombstoned = 0
           ${predicate.sql}
         ORDER BY i.item_pk
