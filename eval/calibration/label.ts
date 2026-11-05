@@ -82,7 +82,8 @@ function applyCorrection(id: string, label: string | null | undefined): void {
 const pageLabels = () => (importancePass
   ? { ...labels.labels, ...Object.fromEntries(items.flatMap((item) => (ownerLabels.labels[item.id]?.correctedInImportancePass ? [[item.id, ownerLabels.labels[item.id]]] : []))) }
   : labels.labels);
-const token = randomBytes(16).toString('hex');
+// A fixed --token keeps the link working when the labeler is restarted.
+const token = flag('--token') ?? randomBytes(16).toString('hex');
 const byId = new Map(items.map((item) => [item.id, item]));
 
 const server = Bun.serve({
@@ -98,6 +99,7 @@ const server = Bun.serve({
     if (request.method === 'GET' && route === '/') {
       return new Response(PAGE, { headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' } });
     }
+    if (request.method === 'GET' && route === '/ping') return Response.json({ ok: true });
     if (request.method === 'GET' && route === '/items') {
       return Response.json({
         root: sample.root,
@@ -253,14 +255,26 @@ function choose(label) {
     } catch {
       if (before) labels[it.id] = before; else delete labels[it.id];
       counts();
-      alertBox('Could not save "' + it.name + '". Is the labeler still running?');
+      stopLabeling();
     }
   });
 }
-function alertBox(text) { document.getElementById('progress').textContent = text; }
+// A lost server must stop the work at once: clicks that cannot save are wasted.
+let stopped = false;
+function stopLabeling() {
+  stopped = true;
+  document.getElementById('view').innerHTML = '<div class="card done" style="border:2px solid #c00"><div class="name" style="color:#c00">Stop: labels are not saving</div>' +
+    '<p>The labeler is not answering, so nothing you click now would be kept. This page continues by itself when it comes back.</p></div>';
+}
+setInterval(async () => {
+  let up = false;
+  try { up = (await fetch(base + 'ping', { cache: 'no-store' })).ok; } catch {}
+  if (!up && !stopped) stopLabeling();
+  if (up && stopped) location.reload();
+}, 3000);
 async function reveal() { await fetch(base + 'reveal', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: items[index].id }) }); }
 document.addEventListener('keydown', (e) => {
-  if (e.metaKey || e.ctrlKey || e.altKey || index >= items.length) return;
+  if (stopped || e.metaKey || e.ctrlKey || e.altKey || index >= items.length) return;
   const k = e.key.toLowerCase();
   const map = Object.fromEntries(CHOICES.map((c) => [c.key.toLowerCase(), c.label]));
   if (map[k]) { e.preventDefault(); choose(map[k]); }
