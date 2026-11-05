@@ -248,11 +248,15 @@ export interface UnreadableFiles {
    * cursor to read those (`after`, present when a file was listed). Only with
    * an `opener` (an unlocked control session, or the worker bearer) does a
    * file carry an open token, bound to that opener.
+   *
+   * With `moreAtLeast`, the verdicts stop once one file past the page is
+   * found, so `more` is only 0 or 1: for a caller that takes the count from
+   * elsewhere and needs only to know whether there are more.
    */
   computerList(
     corpusIds: readonly string[],
     limit: number,
-    options?: { after?: string; opener?: string },
+    options?: { after?: string; opener?: string; moreAtLeast?: boolean },
   ): { files: UnreadableFileEntry[]; more: number; after?: string };
   /**
    * Opens the file a token from computerList names, for the opener it was issued to. A token opens once.
@@ -545,7 +549,14 @@ export function createUnreadableFiles(options: UnreadableFilesOptions): Unreadab
       for (const item of all) {
         if (verdictOf(item) !== 'unreadable') continue;
         if (shown.length < Math.max(0, limit)) shown.push(item);
-        else more += 1;
+        else {
+          more += 1;
+          // Every verdict is a few store reads, and the dashboard's own read
+          // asked one for each of a source's unreadable files just to count
+          // the rest (Sparta, d4a8cee, 2026-11-05: a quarter of the longest
+          // freezes). Its count comes from the source card.
+          if (list.moreAtLeast) break;
+        }
       }
       const opener = list.opener;
       const files = shown.map((item): UnreadableFileEntry => {
