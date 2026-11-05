@@ -12139,6 +12139,28 @@ export class LocalConnectorStore {
     return !current || current.dev !== this.openedFile.dev || current.ino !== this.openedFile.ino;
   }
 
+  /**
+   * Builds, a turn at a time, what a status snapshot reuses (the hidden-copy
+   * set and the settled-unreadable count) when it has not been built yet, so
+   * the snapshot's `status(..., { countsMaxAgeMs })` that follows finds both
+   * and does not rebuild them in one go. The first status after a start did,
+   * about a tenth of the sampled freezes on Sparta (2026-11-05, b826b19).
+   */
+  async prepareStatusCounts(scope?: ConnectorStoreStatusScope): Promise<void> {
+    if (!this.tierHiddenCountsMemo) await this.refreshTierHiddenCountsInTurns();
+    const key = JSON.stringify(scope ?? null);
+    if (!this.settledUnreadableCountMemo?.has(key)) {
+      try {
+        const count = (await runStepsInTurns(this.settledUnreadableRowsSteps(scope, { withoutSecretsOverrides: true }))).length;
+        const memos = this.settledUnreadableCountMemo ??= new Map();
+        if (memos.size > 32) memos.clear();
+        memos.set(key, { at: Date.now(), count });
+      } catch {
+        // A closed or busy store: the status read counts it itself.
+      }
+    }
+  }
+
   /** How many settled unreadable items the counts show, reused up to `maxAgeMs` per scope. */
   private settledUnreadableCount(scope: ConnectorStoreStatusScope | undefined, maxAgeMs: number): number {
     const key = JSON.stringify(scope ?? null);

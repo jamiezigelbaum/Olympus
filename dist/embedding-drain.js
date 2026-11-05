@@ -30536,6 +30536,20 @@ var init_local_index = __esm(() => {
       const current2 = fileIdentity(this.dbPath);
       return !current2 || current2.dev !== this.openedFile.dev || current2.ino !== this.openedFile.ino;
     }
+    async prepareStatusCounts(scope) {
+      if (!this.tierHiddenCountsMemo)
+        await this.refreshTierHiddenCountsInTurns();
+      const key2 = JSON.stringify(scope ?? null);
+      if (!this.settledUnreadableCountMemo?.has(key2)) {
+        try {
+          const count = (await runStepsInTurns(this.settledUnreadableRowsSteps(scope, { withoutSecretsOverrides: true }))).length;
+          const memos = this.settledUnreadableCountMemo ??= new Map;
+          if (memos.size > 32)
+            memos.clear();
+          memos.set(key2, { at: Date.now(), count });
+        } catch {}
+      }
+    }
     settledUnreadableCount(scope, maxAgeMs) {
       const key2 = JSON.stringify(scope ?? null);
       const memos = this.settledUnreadableCountMemo ??= new Map;
