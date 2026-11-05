@@ -5,6 +5,7 @@
 import { chmodSync, existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import type { SourceClassificationSignals } from '../../src/core/contracts.ts';
 
 export const CALIBRATION_DIR_DEFAULT = process.env.OLYMPUS_CALIBRATION_DIR?.trim()
   || join(homedir(), '.local', 'share', 'olympus-calibration');
@@ -24,6 +25,16 @@ export interface CalibrationSampleItem {
   recordsHint: boolean;
   /** Extracted text, bounded. */
   text: string;
+  /** Message and email items: the source the classifier is told. Files leave it out. */
+  source?: string;
+  /** How the item was sampled, for reweighting a score to the natural mix. Never shown when labeling. */
+  stratum?: string;
+  /** The item's stored names, as the classifier reads them. */
+  signals?: SourceClassificationSignals;
+  /** The private judge's exact input for this item: what the labeling page shows. */
+  judgeSees?: string;
+  /** True when `judgeSees` is the production question itself, false when it was rebuilt from the store. */
+  judgeSeesExact?: boolean;
 }
 
 export interface CalibrationSample {
@@ -33,6 +44,8 @@ export interface CalibrationSample {
   seed: number;
   candidates: number;
   items: CalibrationSampleItem[];
+  /** How a message sample was drawn. */
+  recipe?: unknown;
 }
 
 export type CalibrationLabel = 'personal' | 'private' | 'unsure' | 'skip';

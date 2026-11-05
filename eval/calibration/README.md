@@ -72,6 +72,40 @@ model counts as Private, because that is what you experience.
 
 Targets: 95% precision and 99% recall. It takes about 2 to 3 seconds per file.
 
+## Round 2: messages and email
+
+Round 1 is files only. Round 2 adds Telegram, WhatsApp and Gmail, labeled from
+what the private judge actually reads: the item's names and its excerpt of at
+most 1,200 characters. Its data lives in `round2/` inside the calibration
+folder, so it has its own labels and never mixes with round 1.
+
+```bash
+bun eval/calibration/sample-messages.ts --stores DIR
+```
+
+`DIR` holds copies of each source's four stores, made with `sqlite3 ".backup"`.
+It never reads a live store and prints counts only. By default it takes 100
+Telegram, 50 WhatsApp and 60 Gmail items from the last two years, at most 3 per
+chat or sender while a source has enough to spare. Secrets and anything the
+judge would not read are left out.
+
+- **Stratified:** 30% come from items the judge already called Private, so both
+  classes are big enough to measure. A score on this sample overstates recall
+  unless it is reweighted with each item's `stratum` and the populations in the
+  sample's `recipe`.
+- **Judge input:** a queued item shows the production input verbatim. An
+  answered item's input is rebuilt, because its question is gone, and
+  `judgeSeesExact` is false. A rebuilt input lacks names the stores do not keep:
+  Gmail's labels, and a Telegram forward's origin or attachment names.
+
+```bash
+bun eval/calibration/label.ts --dir ~/.local/share/olympus-calibration/round2
+bun eval/calibration/score.ts --dir ~/.local/share/olympus-calibration/round2
+```
+
+`score.ts` classifies from the stored names, so it has the same gaps as a
+rebuilt input.
+
 ## Venice embedding content preference (2026-10-10)
 
 Owner-approved on 2026-10-10, using only committed synthetic eval fixtures:

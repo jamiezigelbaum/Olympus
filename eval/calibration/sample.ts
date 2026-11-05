@@ -21,6 +21,7 @@ import { basename, dirname, extname, join, relative } from 'node:path';
 import { createTextExtractor } from '../../src/workers/file-extraction/extractors/text.ts';
 import type { ExtractorInput } from '../../src/workers/file-extraction/types.ts';
 import { CALIBRATION_DIR_DEFAULT, SAMPLE_FILE, type CalibrationSample, type CalibrationSampleItem } from './files.ts';
+import { rng, shuffle } from './sample-random.ts';
 
 // Documents a person writes or receives. Machine files (JSON, XML) are left
 // out: they are mostly app data and would crowd the sample.
@@ -73,26 +74,6 @@ function parseArgs(argv: readonly string[]) {
     out: value('--out') ?? CALIBRATION_DIR_DEFAULT,
     force: argv.includes('--force'),
   };
-}
-
-/** Deterministic PRNG (mulberry32), so a sample can be reproduced from its seed. */
-function rng(seed: number): () => number {
-  let state = seed >>> 0;
-  return () => {
-    state = (state + 0x6d2b79f5) >>> 0;
-    let t = state;
-    t = Math.imul(t ^ (t >>> 15), t | 1);
-    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
-    return ((t ^ (t >>> 14)) >>> 0) / 4_294_967_296;
-  };
-}
-
-function shuffle<T>(items: T[], random: () => number): T[] {
-  for (let i = items.length - 1; i > 0; i -= 1) {
-    const j = Math.floor(random() * (i + 1));
-    [items[i], items[j]] = [items[j]!, items[i]!];
-  }
-  return items;
 }
 
 function walk(root: string): Candidate[] {
