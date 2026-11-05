@@ -137,6 +137,28 @@ bun eval/calibration/judge-run.ts --endpoint http://127.0.0.1:8012 \
 
 Output and the saved `judge-*.json` carry ids, counts and metrics, never text.
 
+### On Venice
+
+`--venice MODEL_ID --allow-venice` runs the same items through production's
+Venice judge (the adapter the tier sniffer builds, thinking off), in full mode.
+Item text then goes to api.venice.ai, so both flags are required and the
+loopback guard stays the default. Run it only on items the owner has said may
+go to Venice. The key comes from `VENICE_API_KEY` and is never printed.
+
+```bash
+VENICE_API_KEY=... bun eval/calibration/judge-run.ts \
+  --venice google-gemma-4-26b-a4b-it --allow-venice \
+  --dir ~/.local/share/olympus-calibration/round2 --owner-words FILE --concurrency 8
+```
+
+- **Policy:** a model whose Venice privacy category is below Private stops the
+  run, as it would in production.
+- **Concurrency:** `--concurrency N`, 1 to 8, the sniffer's own range.
+- **Recorded per pass:** latency (median and 95th percentile), prompt, cached,
+  completion and reasoning tokens per item from Venice's usage report, failed
+  calls, and the key's request and token limits. Cost follows from the tokens
+  and Venice's price list.
+
 ## Venice embedding content preference (2026-10-10)
 
 Owner-approved on 2026-10-10, using only committed synthetic eval fixtures:

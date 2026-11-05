@@ -7,6 +7,16 @@
 //     [--mode decision|full] [--split dev|test] [--limit N] [--passes 3]
 //     [--primed-check N] [--slot 0] [--n-probs 40] [--thinking]
 //
+//   VENICE_API_KEY=... bun eval/calibration/judge-run.ts --venice MODEL_ID --allow-venice
+//     --dir DIR (--owner-words FILE | --no-owner-words) [--concurrency 8] [--passes 3]
+//
+// --venice sends each item to Venice through production's own Venice judge
+// adapter (createVeniceAnalystModel, configured as the tier sniffer builds it),
+// so the request, the privacy-category check and the parser are production's.
+// It runs full mode only and needs --allow-venice as well: item text then goes
+// to api.venice.ai, so only run it on items the owner has said may go there.
+// Without both flags the loopback guard below holds.
+//
 // decision (the default): the reply is pre-filled up to the tier and the model
 // writes one token. P(Private) is its mass on "private" over "private" plus
 // "personal", and the verdict is Private at 0.5 or above, a bar fixed in advance.
@@ -36,6 +46,8 @@ import {
   snifferPromptVersions,
   snifferTierKey,
 } from '../../src/workers/classification/sniffer.ts';
+import { createVeniceAnalystModel } from '../../src/core/analyst-venice.ts';
+import type { AnalystModel } from '../../src/core/analyst.ts';
 import { CALIBRATION_DIR_DEFAULT, readLabels, readSample, type CalibrationSampleItem } from './files.ts';
 import { judgeInput } from './judge-input.ts';
 import {
@@ -72,6 +84,140 @@ const slot = numberFlag('--slot', 0);
 const nProbs = numberFlag('--n-probs', 40);
 const passes = numberFlag('--passes', 3);
 const primedCheck = numberFlag('--primed-check', 0);
+const veniceModel = flag('--venice');
+const concurrency = Math.max(1, Math.min(8, Math.floor(numberFlag('--concurrency', 1))));
+
+/** What Venice reported for the calls of one pass: usage, latency and the key's limits. */
+interface VeniceMeter {
+  calls: number;
+  failedCalls: number;
+  latencyMs: number[];
+  promptTokens: number;
+  cachedTokens: number;
+  completionTokens: number;
+  reasoningTokens: number;
+  rateLimits: Record<string, string>;
+}
+
+function newMeter(): VeniceMeter {
+  return { calls: 0, failedCalls: 0, latencyMs: [], promptTokens: 0, cachedTokens: 0, completionTokens: 0, reasoningTokens: 0, rateLimits: {} };
+}
+
+let meter = newMeter();
+
+/** Production's Venice judge, as the tier sniffer builds it, with a fetch that reads usage. */
+function veniceJudge(model: string): AnalystModel {
+  const apiKey = process.env.VENICE_API_KEY?.trim();
+  if (!apiKey) throw new Error('Set VENICE_API_KEY for --venice. It is read from the environment only and never printed.');
+  return createVeniceAnalystModel({
+    apiKey,
+    model,
+    thinking: 'disabled',
+    reasoningEffort: 'low',
+    reasoningHeadroomTokens: 0,
+    timeoutMs: 60_000,
+    async fetchImpl(url, init) {
+      if (!url.includes('/chat/completions')) return await fetch(url, init);
+      meter.calls += 1;
+      const started = performance.now();
+      let response: Response;
+      let body: string;
+      try {
+        response = await fetch(url, init);
+        // Latency runs to the end of the body, as the judge experiences it.
+        body = await response.clone().text();
+      } catch (error) {
+        meter.failedCalls += 1;
+        meter.latencyMs.push(performance.now() - started);
+        throw error;
+      }
+      meter.latencyMs.push(performance.now() - started);
+      if (!response.ok) meter.failedCalls += 1;
+      for (const name of ['x-ratelimit-limit-requests', 'x-ratelimit-limit-tokens']) {
+        const value = response.headers.get(name);
+        if (value) meter.rateLimits[name] = value;
+      }
+      try {
+        // Counts only: the body's text is never kept or printed.
+        const usage = (JSON.parse(body) as { usage?: {
+          prompt_tokens?: number;
+          completion_tokens?: number;
+          prompt_tokens_details?: { cached_tokens?: number };
+          completion_tokens_details?: { reasoning_tokens?: number };
+        } }).usage;
+        meter.promptTokens += usage?.prompt_tokens ?? 0;
+        meter.completionTokens += usage?.completion_tokens ?? 0;
+        meter.cachedTokens += usage?.prompt_tokens_details?.cached_tokens ?? 0;
+        meter.reasoningTokens += usage?.completion_tokens_details?.reasoning_tokens ?? 0;
+      } catch {
+        // No usage on this reply.
+      }
+      return response;
+    },
+  });
+}
+
+async function askVenice(model: AnalystModel, material: string, ownerContext: string | undefined): Promise<Answer> {
+  let text: string;
+  try {
+    text = (await model.complete({
+      system: SNIFFER_SYSTEM_PROMPT,
+      prompt: buildSnifferBatchPrompt('content', [{ i: 1, material }], ownerContext),
+      localOnly: true,
+      responseSchema: SNIFFER_RESPONSE_SCHEMA,
+      maxOutputChars: 110 + 200,
+    })).text;
+  } catch (error) {
+    // A policy refusal (the model is not Venice Private) stops the run; any
+    // other failure is production's fail-safe for this item.
+    if (error instanceof Error && error.name === 'VeniceModelPolicyDeniedError') throw error;
+    return { judge: 'private', via: 'no_answer' };
+  }
+  const verdict = parseSnifferBatchResponse(text, new Set([1])).get(1);
+  if (!verdict) return { judge: 'private', via: 'no_answer' };
+  return { judge: snifferTierKey(verdict) === 'secure' ? 'private' : 'personal', via: 'judge' };
+}
+
+async function runVenicePass(asked: readonly Asked[], model: AnalystModel, ownerContext: string | undefined) {
+  meter = newMeter();
+  const answers = new Map<string, Answer>();
+  const queue = asked.filter((entry) => {
+    if (entry.settled) answers.set(entry.item.id, entry.settled);
+    return !entry.settled;
+  });
+  const started = performance.now();
+  let next = 0;
+  await Promise.all(Array.from({ length: concurrency }, async () => {
+    while (next < queue.length) {
+      const entry = queue[next++]!;
+      answers.set(entry.item.id, await askVenice(model, entry.material!, ownerContext));
+    }
+  }));
+  const minutes = (performance.now() - started) / 60_000;
+  return { answers, itemsPerMinute: minutes > 0 ? queue.length / minutes : 0, meter };
+}
+
+function percentile(values: readonly number[], p: number): number | undefined {
+  if (values.length === 0) return undefined;
+  const sorted = [...values].sort((a, b) => a - b);
+  return sorted[Math.min(sorted.length - 1, Math.floor(p * sorted.length))];
+}
+
+function meterSummary(pass: VeniceMeter, items: number) {
+  const per = (value: number) => (items > 0 ? value / items : 0);
+  return {
+    calls: pass.calls,
+    failedCalls: pass.failedCalls,
+    latencyMs: { median: percentile(pass.latencyMs, 0.5), p95: percentile(pass.latencyMs, 0.95) },
+    tokensPerItem: {
+      prompt: per(pass.promptTokens),
+      cached: per(pass.cachedTokens),
+      completion: per(pass.completionTokens),
+      reasoning: per(pass.reasoningTokens),
+    },
+    rateLimits: pass.rateLimits,
+  };
+}
 
 function assertLoopback(url: string): void {
   let host = '';
@@ -231,6 +377,7 @@ function count<T extends string>(values: readonly T[]): Record<string, number> {
 }
 
 async function main(): Promise<void> {
+  if (veniceModel !== undefined || argv.includes('--allow-venice')) return await mainVenice();
   assertLoopback(endpoint);
   if (mode !== 'decision' && mode !== 'full') throw new Error('--mode is decision or full.');
   if (!modelName) throw new Error('--model NAME is required, so a result always says what produced it.');
@@ -313,6 +460,87 @@ async function main(): Promise<void> {
       : undefined,
   };
   const path = join(dir, `judge-${mode}-${result.at.replace(/[:.]/g, '-')}.json`);
+  const perItem = rows.map((row) => ({ ...row, ...warm.answers.get(row.id) }));
+  writeFileSync(path, JSON.stringify({ ...result, rows: perItem }, null, 1), { mode: 0o600 });
+  chmodSync(path, 0o600);
+  console.log(JSON.stringify(result, null, 1));
+  console.log(`Full result: ${path}`);
+}
+
+/** The labeled items to score, as the flags select them. */
+function selectLabeled() {
+  const split = flag('--split');
+  if (split !== undefined && split !== 'dev' && split !== 'test') throw new Error('--split is dev or test.');
+  const sample = readSample(dir);
+  const labels = readLabels(dir).labels;
+  const labeled = sample.items
+    .filter((item) => labels[item.id]?.label === 'personal' || labels[item.id]?.label === 'private')
+    .filter((item) => split === undefined || splitOf(item.id) === split)
+    .slice(0, numberFlag('--limit', Number.MAX_SAFE_INTEGER));
+  if (labeled.length === 0) throw new Error('No Personal or Private labels to score.');
+  return { sample, labels, labeled };
+}
+
+function readOwnerContext(): string | undefined {
+  const wordsFile = flag('--owner-words');
+  if (!wordsFile && !argv.includes('--no-owner-words')) throw new Error('Pass --owner-words FILE, or --no-owner-words to run without them.');
+  return wordsFile ? readFileSync(wordsFile, 'utf8').trim() || undefined : undefined;
+}
+
+async function mainVenice(): Promise<void> {
+  if (!veniceModel || !argv.includes('--allow-venice')) {
+    throw new Error('Venice needs both --venice MODEL_ID and --allow-venice: item text goes to api.venice.ai.');
+  }
+  if (flag('--endpoint') !== undefined) throw new Error('--endpoint does not apply to --venice.');
+  if (flag('--mode') !== undefined && flag('--mode') !== 'full') throw new Error('--venice runs full mode only.');
+  const ownerContext = readOwnerContext();
+  const { sample, labels, labeled } = selectLabeled();
+  const asked = labeled.map(ask);
+  const judge = veniceJudge(veniceModel);
+
+  const warm = await runVenicePass(asked, judge, ownerContext);
+  const timed: Array<Awaited<ReturnType<typeof runVenicePass>>> = [];
+  for (let pass = 0; pass < passes; pass += 1) timed.push(await runVenicePass(asked, judge, ownerContext));
+  const moved = asked.filter((entry) => timed.some((pass) => pass.answers.get(entry.item.id)?.judge !== warm.answers.get(entry.item.id)?.judge));
+  const modelItems = asked.filter((entry) => !entry.settled).length;
+
+  const rows: ScoredRow[] = labeled.map((item) => ({
+    id: item.id,
+    owner: labels[item.id]!.label as Tier,
+    judge: warm.answers.get(item.id)!.judge,
+    source: item.source ?? 'files',
+    split: splitOf(item.id),
+    ...(item.stratum ? { stratum: item.stratum } : {}),
+  }));
+  const sizes = stratumSizes(sample.recipe);
+  const weighted = sizes ? reweighted(rows, sizes) : undefined;
+  const result = {
+    at: new Date().toISOString(),
+    mode: 'full',
+    backend: 'venice',
+    model: veniceModel,
+    concurrency,
+    prompt: snifferPromptVersions(ownerContext).cache,
+    ownerWords: ownerContext ? 'supplied' : 'none',
+    items: rows.length,
+    answeredBy: count([...warm.answers.values()].map((answer) => answer.via)),
+    verdictsMovedAcrossPasses: moved.length,
+    speedItemsPerMinute: timed.length > 0 ? medianAndRange(timed.map((pass) => pass.itemsPerMinute)) : undefined,
+    venice: {
+      warm: meterSummary(warm.meter, modelItems),
+      timed: timed.map((pass) => meterSummary(pass.meter, modelItems)),
+    },
+    unweighted: {
+      all: confusion(rows),
+      bySource: groupedConfusion(rows, (row) => row.source),
+      bySplit: groupedConfusion(rows, (row) => row.split),
+      byStratum: sizes ? groupedConfusion(rows, (row) => `${row.source}/${row.stratum}`) : undefined,
+    },
+    reweighted: weighted
+      ? { all: confusion(weighted), bySource: groupedConfusion(weighted, (row) => row.source) }
+      : undefined,
+  };
+  const path = join(dir, `judge-venice-${veniceModel.replace(/[^a-z0-9.-]/gi, '_')}-${result.at.replace(/[:.]/g, '-')}.json`);
   const perItem = rows.map((row) => ({ ...row, ...warm.answers.get(row.id) }));
   writeFileSync(path, JSON.stringify({ ...result, rows: perItem }, null, 1), { mode: 0o600 });
   chmodSync(path, 0o600);
