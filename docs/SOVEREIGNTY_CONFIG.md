@@ -496,14 +496,17 @@ never for a hard category.
 
 Cost: one call per flagged name. Per call about 300 input and 20 output
 tokens (measured on the eval corpus), so 100k flagged names is about 30M
-input and 2M output tokens. Pace: one pass a minute
-(`OLYMPUS_TIER_SNIFFER_INTERVAL_MS`), at most 10 calls a pass on a local model
-(it is shared with answers, which also preempt it at once) and 30 on Venice
-(`OLYMPUS_TIER_SNIFFER_MAX_CALLS_PER_PASS` overrides both). The daily cap
-(`OLYMPUS_TIER_SNIFFER_MAX_CALLS_PER_DAY`, default 20,000) works through a
-100k-item backlog in about five days; on Venice that is at most about $1.10 a
-day at an assumed, unverified price, and a local model is bounded by its own
-throughput first. Source index status reports the backlog as counts only
+input and 2M output tokens. Pace: the service checks for work every second
+(`OLYMPUS_TIER_SNIFFER_INTERVAL_MS`) and a pass keeps asking for up to 30
+seconds. A local model is shared with answers, which preempt the sniffer at
+once. `OLYMPUS_TIER_SNIFFER_MAX_CALLS_PER_PASS` sets an optional call limit per
+pass. The daily cap (`OLYMPUS_TIER_SNIFFER_MAX_CALLS_PER_DAY`) defaults to
+20,000 attempts in full mode, which works through a 100k-item backlog in about
+five days; on Venice that is at most about $1.10 a day at an assumed,
+unverified price. A local llama.cpp server can use decision mode, a one-token
+read of the same question, where the default is 250,000 attempts a day
+([design](design/per-item-four-tier-classification.md)). A local model is
+bounded by its own throughput first. Source index status reports the backlog as counts only
 (`tier_classification`: "Checking N items, about X questions remaining"), and
 each store's `pending_classification_items`; there is deliberately no time
 estimate. Knobs: `OLYMPUS_TIER_SNIFFER_ENABLED`,
