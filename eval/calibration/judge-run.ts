@@ -161,6 +161,8 @@ interface Answer {
   pPrivate?: number;
   /** Mass the two words took between them. */
   coverage?: number;
+  /** full mode: the kind of private information the model named. */
+  privateKind?: string;
 }
 
 interface CompletionReply {
@@ -190,7 +192,7 @@ async function askModel(prompt: string, written: string, primed: boolean): Promi
   });
   const verdict = parseSnifferBatchResponse(reply.content ?? '', new Set([1])).get(1);
   if (!verdict) return { judge: 'private', via: 'no_answer' };
-  return { judge: snifferTierKey(verdict) === 'secure' ? 'private' : 'personal', via: 'judge' };
+  return { judge: snifferTierKey(verdict) === 'secure' ? 'private' : 'personal', via: 'judge', privateKind: verdict.privateKind };
 }
 
 async function prime(shared: string): Promise<void> {
