@@ -53,7 +53,7 @@ export type CalibrationLabel = 'personal' | 'private' | 'unsure' | 'skip';
 
 export interface CalibrationLabels {
   version: 1;
-  labels: Record<string, { label: CalibrationLabel; at: string }>;
+  labels: Record<string, { label: CalibrationLabel; at: string; correctedInImportancePass?: true }>;
 }
 
 /** How much an item the owner called Private matters: a second pass, kept apart from the labels. */
