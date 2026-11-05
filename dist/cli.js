@@ -26163,12 +26163,17 @@ async function startCpuSampleLog(env = process.env) {
   const flush = () => {
     const now = Date.now();
     try {
+      const flushStart = performance.now();
+      if (flushStart - lastTick - CPU_SAMPLE_LAG_TICK_MS >= CPU_SAMPLE_STALL_MS)
+        stalls.push({ startMs: lastTick, endMs: flushStart });
+      lastTick = flushStart;
       const spinUntil = performance.now() + 3;
       while (performance.now() < spinUntil) {}
+      const anchorMs = performance.now();
       const sampled = jsc.samplingProfilerStackTraces();
       const traces = sampled.traces ?? [];
       const newest = traces.reduce((max, trace) => Math.max(max, trace.timestamp ?? -Infinity), -Infinity);
-      const offsetS = Number.isFinite(newest) ? newest - performance.now() / 1000 : 0;
+      const offsetS = Number.isFinite(newest) ? newest - anchorMs / 1000 : 0;
       const window2 = stalls;
       stalls = [];
       const stalled = Number.isFinite(newest) ? tracesInStalls(traces, window2, offsetS) : [];
