@@ -66590,6 +66590,7 @@ init_file_extraction_runtime();
 
 // src/workers/file-extraction/readiness-ledger.ts
 init_answer_ready_coverage();
+init_control_path_headroom();
 
 // src/workers/email-source/server.ts
 init_unreadable_files();

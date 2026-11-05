@@ -1069,6 +1069,21 @@ describe('extraction job store: corpus readiness', () => {
     });
   });
 
+  test('a scoped snapshot taken in turns matches the one taken in one go, and gives the thread back between slices', async () => {
+    const { store } = newStore();
+    settle(store, 'damaged', 'failed_terminal');
+    for (let i = 0; i < 4_500; i += 1) enqueueOne(store, `item-${i}`);
+    const checked: number[] = [];
+    const currentItems = (refs: readonly unknown[]) => { checked.push(refs.length); return refs.map(() => true); };
+    let turns = 0;
+    const inTurns = await store.scopedReadinessInTurns([LANE], { currentItems, turn: async () => { turns += 1; } });
+    // 4,501 rows, checked 2,000 at a time.
+    expect(checked).toEqual([2_000, 2_000, 501]);
+    expect(turns).toBeGreaterThanOrEqual(3);
+    expect(inTurns).toEqual(store.scopedReadiness([LANE], { currentItems: (refs) => refs.map(() => true) }));
+    expect(inTurns).toMatchObject({ queuedJobs: 4_500, unreadableItems: 1 });
+  });
+
   test('a terminal failure the runner will still retry is not unreadable yet', () => {
     const { store, dbPath } = newStore();
     // A once-ever reread for this lane's error kind, and an escalation to OCR.

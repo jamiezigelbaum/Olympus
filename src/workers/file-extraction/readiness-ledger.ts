@@ -20,6 +20,7 @@ import {
   UNREADABLE_ITEMS_COUNT_KEY,
 } from '../dashboard/answer-ready-coverage.ts';
 import type { SourceIndexReadinessLedger } from '../source-index/status.ts';
+import { ingestionTurn } from '../control-path-headroom.ts';
 import type { ContentExtractionThroughputSignal } from '../../core/ingestion-throughput.ts';
 import type {
   ExtractionCorpusReadiness,
@@ -54,7 +55,7 @@ export interface ExtractionReadinessLedger extends SourceIndexReadinessLedger {
 
 export function createExtractionReadinessLedger(
   jobs: Pick<LocalFileExtractionJobStore, 'corpusReadiness'>
-    & Partial<Pick<LocalFileExtractionJobStore, 'scopedReadiness'>>,
+    & Partial<Pick<LocalFileExtractionJobStore, 'scopedReadiness' | 'scopedReadinessInTurns'>>,
   options: {
     // Current approved lanes; undefined preserves the ordinary corpus-wide ledger.
     lanesForCorpus?: (corpusId: string) => readonly ExtractionLaneKey[] | undefined;
@@ -89,13 +90,15 @@ export function createExtractionReadinessLedger(
       // Nothing may escape a timer: an uncaught throw here would stop the
       // worker. A failed background take (the scope fence moved under it,
       // say) keeps the last snapshot, and the next poll tries again.
-      try {
-        taken.set(corpusId, { at: now(), snapshot: takeSnapshot(corpusId) });
-      } catch {
-        // Keep the previous snapshot.
-      } finally {
-        taking.delete(corpusId);
-      }
+      void (async () => {
+        try {
+          taken.set(corpusId, { at: now(), snapshot: await takeSnapshotInTurns(corpusId) });
+        } catch {
+          // Keep the previous snapshot.
+        } finally {
+          taking.delete(corpusId);
+        }
+      })();
     }, 0);
   };
   // Set once a caller has accepted a stale snapshot: from then on nothing
@@ -123,6 +126,24 @@ export function createExtractionReadinessLedger(
       return lastUnreadable.get(corpusId) ?? [];
     },
   };
+  // A background take gives the thread back between a scoped snapshot's
+  // lanes and slices (scopedReadinessInTurns); the corpus-wide ledger has no
+  // such steps and is taken in one go, as on a request.
+  async function takeSnapshotInTurns(corpusId: string): Promise<Snapshot> {
+    const lanes = options.lanesForCorpus?.(corpusId);
+    if (lanes === undefined || !jobs.scopedReadinessInTurns) return takeSnapshot(corpusId);
+    try {
+      return readinessSnapshot(await jobs.scopedReadinessInTurns(lanes, {
+        turn: ingestionTurn,
+        ...(options.currentItem ? { currentItem: options.currentItem } : {}),
+        ...(options.currentItems ? { currentItems: options.currentItems } : {}),
+        ...(options.terminalRetryPaths ? { terminalRetryPaths: options.terminalRetryPaths } : {}),
+        ...listing(corpusId),
+      }));
+    } catch {
+      return undefined;
+    }
+  }
   function takeSnapshot(corpusId: string): Snapshot {
     const lanes = options.lanesForCorpus?.(corpusId);
     if (lanes !== undefined) {
