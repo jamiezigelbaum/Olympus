@@ -511,16 +511,11 @@ async function mainVenice(): Promise<void> {
   const ownerContext = readOwnerContext();
   const { sample, labels, labeled, excluded } = selectLabeled();
   const asked = labeled.map(ask);
-  // Not sure items never touch the score: the share called Private is its own line.
-  const unsure = sample.items
-    .filter((item) => !excluded.has(item.id) && labels[item.id]?.label === 'unsure')
-    .map(ask);
   const judge = veniceJudge(veniceModel);
 
   const warm = await runVenicePass(asked, judge, ownerContext);
   const timed: Array<Awaited<ReturnType<typeof runVenicePass>>> = [];
   for (let pass = 0; pass < passes; pass += 1) timed.push(await runVenicePass(asked, judge, ownerContext));
-  const unsureAnswers = unsure.length > 0 ? [...(await runPass(unsure, shape, written, true)).answers.values()] : [];
   const moved = asked.filter((entry) => timed.some((pass) => pass.answers.get(entry.item.id)?.judge !== warm.answers.get(entry.item.id)?.judge));
   const modelItems = asked.filter((entry) => !entry.settled).length;
 
