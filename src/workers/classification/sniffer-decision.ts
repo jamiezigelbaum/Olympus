@@ -43,6 +43,8 @@ export interface SnifferModelRequest extends AnalystModelRequest {
 }
 export interface SnifferModelCompletion extends AnalystModelCompletion {
   decisionVerdict?: Omit<StoredSnifferVerdict, 'decidedAt'>;
+  /** Content-free native decoder diagnostics, including rejected coverage. */
+  decisionMetrics?: { privateProbability: number | null; coverage: number };
 }
 export interface SnifferModel extends AnalystModel {
   /** Content-free probe, before cache/re-judge identity is read. Starts a new run. */
@@ -63,8 +65,8 @@ interface Reply {
   tokens_cached?: number;
 }
 /** Capability absence differs from an unavailable server; never includes response text. */
-class NativeRequestError extends Error {
-  constructor(readonly unsupported = false) { super('The native privacy sniffer request failed.'); }
+export class NativeRequestError extends Error {
+  constructor(readonly unsupported = false, readonly timedOut = false) { super('The native privacy sniffer request failed.'); }
 }
 interface EndpointState {
   tail: Promise<unknown>;
@@ -90,8 +92,8 @@ export function createDecisionSnifferModel(lane: SnifferLane, full: AnalystModel
   const sharedState = state;
   let signal: AbortSignal | undefined;
   const post: DecisionPost = async <T>(path: string, body: unknown): Promise<T> => {
+    const timeout = AbortSignal.timeout(60_000);
     try {
-      const timeout = AbortSignal.timeout(60_000);
       const response = await fetchModelEndpoint(fetch, `${endpoint}${path}`, {
         method: 'POST',
         headers: { 'content-type': 'application/json', ...(options.apiKey ? { authorization: `Bearer ${options.apiKey}` } : {}) },
@@ -102,7 +104,7 @@ export function createDecisionSnifferModel(lane: SnifferLane, full: AnalystModel
       return await response.json() as T;
     } catch (error) {
       // Neither server errors (which can echo a prompt) nor fetch causes escape.
-      throw error instanceof NativeRequestError ? error : new NativeRequestError();
+      throw error instanceof NativeRequestError ? error : new NativeRequestError(false, timeout.aborted);
     }
   };
   let shapeKey = '';
@@ -170,18 +172,20 @@ export function createDecisionSnifferModel(lane: SnifferLane, full: AnalystModel
             sharedState.primed = shape.shared;
           }
           const reply = await post<Reply>('/completion', { prompt: `${shape.render(material)}${REPLY_TO_TIER}${written}`, n_predict: 1, n_probs: 40, temperature: 0, cache_prompt: true, id_slot: 0 });
-          const chance = privateChance(tierMass(replyTokens(reply), written));
+          const mass = tierMass(replyTokens(reply), written);
+          const chance = privateChance(mass);
+          const decisionMetrics = { privateProbability: chance ?? null, coverage: mass.private + mass.personal + mass.ambiguous };
           // A cold slot (e.g. a server restart between calls) must be primed again.
           if (reply?.tokens_cached === 0) reset();
-          if (chance === undefined || !Number.isFinite(chance)) { reset(); return { text: '', modelId: lane.modelId }; }
-          return { text: '', modelId: lane.modelId, decisionVerdict: {
+          if (chance === undefined || !Number.isFinite(chance)) { reset(); return { text: '', modelId: lane.modelId, decisionMetrics }; }
+          return { text: '', modelId: lane.modelId, decisionMetrics, decisionVerdict: {
             tier: chance >= SNIFFER_DECISION_PRIVATE_BAR ? 'private' : 'personal', category: SNIFFER_DECISION_CATEGORY,
             confidence: chance >= SNIFFER_DECISION_PRIVATE_BAR ? chance : 1 - chance, failSafe: false,
           } };
-        } catch {
+        } catch (error) {
           reset();
           sharedState.supported = undefined;
-          throw new Error('The native privacy sniffer request failed.');
+          throw error instanceof NativeRequestError ? error : new NativeRequestError();
         }
       });
     },
