@@ -31,6 +31,7 @@
 // is accepted: reach another machine through an SSH tunnel. Output and the saved
 // result carry item ids, counts and metrics, never text.
 
+import { decisionPromptShape, decisionDivergence, REPLY_TO_TIER } from '../../src/workers/classification/sniffer-decision.ts';
 import { createHash } from 'node:crypto';
 import { chmodSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -65,9 +66,6 @@ import {
 } from './judge-metrics.ts';
 
 const PRIVATE_BAR = 0.5;
-const REPLY_TO_TIER = '{"verdicts":[{"i":1,"tier":"';
-/** Stands in for an item while the shared prompt is worked out. */
-const PLACEHOLDER = 'CALIBRATION_ITEM_PLACEHOLDER';
 const FULL_ANSWER_TOKENS = 256;
 
 const argv = process.argv.slice(2);
@@ -269,27 +267,11 @@ async function promptShape(ownerContext: string | undefined) {
     ],
     ...(argv.includes('--thinking') ? {} : { chat_template_kwargs: { enable_thinking: false } }),
   })).prompt;
-  const formatted = await format(PLACEHOLDER);
-  const at = formatted.indexOf(PLACEHOLDER);
-  if (at < 0) throw new Error('The chat template changed the item.');
-  const before = formatted.slice(0, at);
-  const after = formatted.slice(at + PLACEHOLDER.length);
-  const render = (material: string) => `${before}${JSON.stringify(material).slice(1, -1)}${after}`;
-  const probe = 'Names: a "quoted" name\nExcerpt: a line\twith é and \\ in it';
-  if (render(probe) !== await format(probe)) throw new Error('Filling the prompt shape does not match the chat template.');
-  return { shared: before, render };
+  return decisionPromptShape(format);
 }
 
-/** What the reply must add before the two words part, if they share a first token. */
 async function divergence(): Promise<string> {
-  const first = async (word: string) => {
-    const { tokens } = await post<{ tokens: Array<{ piece: string | number[] }> }>('/tokenize', { content: word, with_pieces: true });
-    const piece = tokens[0]?.piece;
-    if (typeof piece !== 'string') throw new Error(`The tokenizer gave no text piece for "${word}".`);
-    return piece;
-  };
-  const [personal, privateWord] = [await first('personal'), await first('private')];
-  return personal === privateWord ? personal : '';
+  return decisionDivergence(post);
 }
 
 type Via = 'judge' | 'no_answer' | 'secret' | 'injection' | 'detector' | 'not_asked';

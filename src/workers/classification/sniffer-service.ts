@@ -31,6 +31,7 @@ import {
   SNIFFER_MAX_CONCURRENT_CALLS,
   SnifferCallBudget,
   runSnifferPass,
+  prepareSnifferModel,
   type SnifferPassReport,
   type SnifferTarget,
 } from './sniffer-resolver.ts';
@@ -314,7 +315,7 @@ export class TierSnifferService {
   constructor(options: TierSnifferServiceOptions) {
     this.options = options;
     this.budget = new SnifferCallBudget({
-      maxCallsPerDay: options.maxCallsPerDay ?? DEFAULT_SNIFFER_MAX_CALLS_PER_DAY,
+      ...(options.maxCallsPerDay !== undefined ? { maxCallsPerDay: options.maxCallsPerDay } : {}),
       ...(options.now ? { now: options.now } : {}),
       ...(options.budgetStatePath ? { statePath: options.budgetStatePath } : {}),
     });
@@ -857,11 +858,12 @@ export class TierSnifferService {
       await this.drainMoves();
       return { state: 'awaiting_owner_approval', modelId: lane.modelId, promptVersion: versions.approval };
     }
+    const preparationStopped = await prepareSnifferModel({ model: this.options.model, signal, shouldYield: () => this.yieldNow() });
     // Items decided under an older classifier or sniffer prompt are judged
     // again first (tier-rejudge.ts), a bounded page per set per tick: their
     // questions join the queue this pass answers.
-    await this.recoverMissingQuestions(true);
-    const rejudged = await this.rejudge();
+    if (!preparationStopped) await this.recoverMissingQuestions(true);
+    const rejudged = preparationStopped ? emptyTierRejudgeReport() : await this.rejudge();
     const targets: SnifferTarget[] = [];
     for (const ledgerPath of this.ledgerPaths()) {
       let ledger: TierLedger;
@@ -978,11 +980,11 @@ export class TierSnifferService {
       shouldYield: () => this.yieldNow(),
       signal,
     });
-    if (report.calls > 0 || report.verdictsApplied > 0) {
+    if (report.calls > 0 || report.verdictsApplied > 0 || report.heldLowering > 0) {
       this.options.log?.(
         `Olympus tier sniffer: ${report.calls} call(s), ${report.verdictsApplied} verdict(s) applied `
         + `(${report.resolvedPersonal} Personal, ${report.resolvedPrivate} Private, ${report.failSafePrivate} fail-safe Private), `
-        + `${report.cacheHits} from cache${report.stoppedBy ? `, stopped: ${report.stoppedBy}` : ''}; `
+        + `${report.cacheHits} from cache; ${report.heldLowering} lowering(s) held${report.stoppedBy ? `, stopped: ${report.stoppedBy}` : ''}; `
         + `call_ms=${Math.round(report.callMs)} mean_call_ms=${report.calls ? Math.round(report.callMs / report.calls) : 0} queue_wait_max_ms=${Math.round(report.maxQueueWaitMs)}.`,
       );
     }
@@ -1245,7 +1247,8 @@ export class TierSnifferService {
       try {
         // Questions already waiting: re-judging more than the sniffer can
         // answer only grows the queue.
-        if (this.options.installed.snifferStoreForLedger(ledgerPath).counts().questions >= maxOpen) continue;
+        const id = snifferId(this.options.lane, snifferPromptVersions(this.options.ownerContext?.()).cache);
+        if (this.options.installed.snifferStoreForLedger(ledgerPath).questionWorkCounts(id).unanswered >= maxOpen) continue;
         const after = this.rejudgeCursors.get(ledgerPath);
         const { report, next } = rejudgeRoutedItems({
           set,
@@ -1260,11 +1263,11 @@ export class TierSnifferService {
         // A set that cannot be read keeps its recorded decisions this tick.
       }
     }
-    if (total.updated > 0 || total.movesQueued > 0 || total.asked > 0 || total.secrets > 0) {
+    if (total.updated > 0 || total.movesQueued > 0 || total.asked > 0 || total.secrets > 0 || total.heldLowering > 0) {
       this.options.log?.(
         `Olympus tier sniffer: re-judged ${total.updated + total.movesQueued + total.asked + total.secrets} item(s) under the current classifier `
         + `(${total.asked} asked about, still where they were; ${total.movesQueued} tier move(s) queued`
-        + `${total.secrets ? `; ${total.secrets} Secret(s) found and hidden` : ''}).`,
+        + `; ${total.heldLowering} lowering(s) held${total.secrets ? `; ${total.secrets} Secret(s) found and hidden` : ''}).`,
       );
     }
     return total;
@@ -1495,7 +1498,7 @@ export function tierSnifferServiceEnv(env: Record<string, string | undefined>): 
   maxCallsPerPass?: number;
   /** Calls in flight at once (default 1, at most SNIFFER_MAX_CONCURRENT_CALLS). */
   concurrentCalls?: number;
-  maxCallsPerDay: number;
+  maxCallsPerDay?: number;
 } {
   const enabledRaw = env.OLYMPUS_TIER_SNIFFER_ENABLED?.trim().toLowerCase();
   return {
@@ -1507,7 +1510,8 @@ export function tierSnifferServiceEnv(env: Record<string, string | undefined>): 
     ...(env.OLYMPUS_TIER_SNIFFER_CONCURRENT_CALLS?.trim()
       ? { concurrentCalls: Math.min(SNIFFER_MAX_CONCURRENT_CALLS, positiveInteger(env.OLYMPUS_TIER_SNIFFER_CONCURRENT_CALLS, 1, 1)) }
       : {}),
-    maxCallsPerDay: positiveInteger(env.OLYMPUS_TIER_SNIFFER_MAX_CALLS_PER_DAY, DEFAULT_SNIFFER_MAX_CALLS_PER_DAY, 0),
+    ...(env.OLYMPUS_TIER_SNIFFER_MAX_CALLS_PER_DAY?.trim()
+      ? { maxCallsPerDay: positiveInteger(env.OLYMPUS_TIER_SNIFFER_MAX_CALLS_PER_DAY, DEFAULT_SNIFFER_MAX_CALLS_PER_DAY, 0) } : {}),
   };
 }
 

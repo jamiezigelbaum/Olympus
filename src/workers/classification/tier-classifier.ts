@@ -190,6 +190,7 @@ export type TierSnifferVerdict =
 
 export interface TierSniffer {
   readonly id: string;
+  readonly rejudgeReady?: boolean;
   judge(request: TierSnifferRequest): TierSnifferVerdict;
 }
 

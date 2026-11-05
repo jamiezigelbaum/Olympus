@@ -355,6 +355,33 @@ section consolidates and supersedes all other policy wording.
 
 ### Change log
 
+- 2026-11-05 (no contract type version change; native sniffer cache
+  `decision-v1`): **one token decides Personal or Private on a capable local
+  llama.cpp server.** A local profile's `snifferMode` is `auto` (default),
+  `decision`, or `full`. Auto proves native template/logprob support with
+  synthetic material; other servers, Venice and the built-in model retain
+  full JSON. Decision mode uses the same system and one-item user prompt,
+  rendered by `/apply-template` with thinking disabled, then prefills the
+  reply through the tier's opening quote (and the two words' shared first
+  token, if any). One greedy token's Private mass divided by Private plus
+  Personal mass decides Private at 0.5. The eval and production import the
+  same prompt-shape, divergence and mass functions. No usable mass follows
+  the existing three-attempt fail-safe Private path.
+  The existing cache stores the chosen tier, its probability and the fixed
+  `decision` category; no record fields or item text are stored in a verdict.
+  The full-mode 0.9 Personal threshold and small-model record hold remain.
+  The effective mode changes the cache model id and sniffer id, so the
+  existing bounded re-judge path revisits stored decisions without a new
+  approval; approval identity and prompt text are unchanged. Native requests
+  are serialized per endpoint on slot 0, prime the exact shared prefix each
+  run, and re-prime after errors or an observed cold slot. The daily cap
+  counts item attempts, including retries: default 250,000 in decision mode,
+  20,000 in full mode; an explicit owner cap wins. Probes and primes carry no
+  item attempt and do not spend that cap. SourceConnector, EvidencePack and
+  Analyst semantics and shapes are unchanged, so the contract-evolution
+  version gate does not require a version increment. Focused fake-server
+  tests cover rendering, priming, screens, fallback, persistence and budget.
+
 - 2026-10-30 (no version change): **an id is not a name.** On the 1.2.1
   canary, the #625 re-judge asked each Telegram message's names question with
   the chat's key, Telegram's numeric peer id ("Tiago Ferreira | 8122045531 |
