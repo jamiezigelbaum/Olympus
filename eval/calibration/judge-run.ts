@@ -4,7 +4,7 @@
 //
 //   bun eval/calibration/judge-run.ts --endpoint http://127.0.0.1:8012 --dir DIR
 //     --model NAME (--owner-words FILE | --no-owner-words)
-//     [--mode decision|full] [--split dev|test] [--limit N] [--passes 3]
+//     [--mode decision|full] [--split dev|test] [--limit N] [--passes 3] [--exclude ID,ID]
 //     [--primed-check N] [--slot 0] [--n-probs 40] [--thinking]
 //
 // decision (the default): the reply is pre-filled up to the tier and the model
@@ -242,7 +242,9 @@ async function main(): Promise<void> {
 
   const sample = readSample(dir);
   const labels = readLabels(dir).labels;
+  const excluded = new Set((flag('--exclude') ?? '').split(',').filter(Boolean));
   const labeled = sample.items
+    .filter((item) => !excluded.has(item.id))
     .filter((item) => labels[item.id]?.label === 'personal' || labels[item.id]?.label === 'private')
     .filter((item) => split === undefined || splitOf(item.id) === split)
     .slice(0, numberFlag('--limit', Number.MAX_SAFE_INTEGER));
@@ -297,6 +299,7 @@ async function main(): Promise<void> {
     primed: true,
     privateBar: mode === 'decision' ? PRIVATE_BAR : undefined,
     items: rows.length,
+    excluded: excluded.size,
     answeredBy: count(answers.map((answer) => answer.via)),
     verdictsMovedAcrossPasses: moved.length,
     wordMass: coverage.length > 0 ? medianAndRange(coverage) : undefined,

@@ -111,7 +111,8 @@ rebuilt input.
 `judge-run.ts` runs the private judge over either round and scores it against
 the labels. The system prompt, user message, secret and injection screens, and
 the answer parser are imported from production, so they cannot drift. Only
-labeled Personal and Private items run; Not sure and Skip are left out.
+labeled Personal and Private items run; Not sure and Skip are left out, and
+`--exclude ID,ID` leaves out any others.
 
 ```bash
 bun eval/calibration/judge-run.ts --endpoint http://127.0.0.1:8012 \
