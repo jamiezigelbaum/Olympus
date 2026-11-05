@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test';
+import { writeConnectedHandleRegistry } from '../src/workers/credential-broker/connected-handles.ts';
 import { mkdtempSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -129,6 +130,35 @@ describe('file-source scope approval', () => {
     }));
     expect(readFileSourceScopeApproval({ sourceId: 'dropbox.files', registry: registry(), statePath }))
       .toMatchObject({ status: 'scope_pending', reason: 'malformed' });
+  });
+
+  test('authority reuses a pass only while its files are unchanged: a reconnect or a new approval is read again', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'olympus-scope-'));
+    const registryPath = join(dir, 'handles.json');
+    writeConnectedHandleRegistry(registry(), registryPath);
+    const authority = new FileSourceScopeAuthority({ registryPath, statePath: join(dir, 'scope.json') });
+    const pending = authority.snapshot('dropbox.files');
+    authority.approve({
+      sourceId: 'dropbox.files', accountGeneration: pending.accountGeneration!,
+      expectedRevision: pending.revision, selections: [{ key: '/work', state: 'ingest' }],
+      wholeAccount: false, explicitWholeAccountConfirmation: false,
+    });
+    const ref = authority.policyRef('dropbox.files')!;
+    expect(authority.assertCurrent(ref).status).toBe('approved');
+    expect(authority.assertCurrent(ref).status).toBe('approved');
+    // A new approval: the old ref no longer passes.
+    const current = authority.snapshot('dropbox.files');
+    authority.approve({
+      sourceId: 'dropbox.files', accountGeneration: current.accountGeneration!,
+      expectedRevision: current.revision, selections: [{ key: '/other', state: 'ingest' }],
+      wholeAccount: false, explicitWholeAccountConfirmation: false,
+    });
+    expect(() => authority.assertCurrent(ref)).toThrow('scope approval is required');
+    const next = authority.policyRef('dropbox.files')!;
+    expect(authority.assertCurrent(next).status).toBe('approved');
+    // A reconnect replaces the registry: the approval no longer passes.
+    writeConnectedHandleRegistry(registry('2026-09-10T11:00:00.000Z'), registryPath);
+    expect(() => authority.assertCurrent(next)).toThrow('scope approval is required');
   });
 
   test('authority fails closed when the registry is unreadable', () => {

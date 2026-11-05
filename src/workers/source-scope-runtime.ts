@@ -15,7 +15,8 @@ import {
   getFileScopeSource,
   type FileScopeSourceDefinition,
 } from '../core/file-scope-sources.ts';
-import { readThisComputerHandles } from '../core/this-computer.ts';
+import { statSync } from 'node:fs';
+import { defaultThisComputerStatePath, readThisComputerHandles } from '../core/this-computer.ts';
 import {
   defaultHandleRegistryPath,
   readConnectedHandleRegistry,
@@ -71,6 +72,10 @@ export class FileSourceScopeAuthority {
   readonly mailStatePath: string;
   private readonly readRegistry: () => ConnectedHandleRegistry;
   private readonly mailPinnedHandle: () => string | undefined;
+  /** False when the registry is read through an injected reader, whose source no file signature covers. */
+  private readonly registryFromFile: boolean;
+  /** The last approval each source passed, keyed on the files it was read from. */
+  private readonly approvedByFiles = new Map<FileSourceScopeId, { key: string; snapshot: FileSourceScopeApprovalSnapshot }>();
 
   constructor(options: {
     registryPath?: string;
@@ -84,6 +89,7 @@ export class FileSourceScopeAuthority {
     this.statePath = options.statePath ?? defaultFileSourceScopeStatePath(this.registryPath);
     this.mailStatePath = options.mailStatePath ?? defaultMailSourceScopeStatePath(this.registryPath);
     this.readRegistry = options.readRegistry ?? (() => readConnectedHandleRegistry(this.registryPath));
+    this.registryFromFile = options.readRegistry === undefined;
     this.mailPinnedHandle = options.mailPinnedHandle ?? (() => undefined);
   }
 
@@ -185,14 +191,41 @@ export class FileSourceScopeAuthority {
     });
   }
 
+  /**
+   * Throws unless the scope is still approved as `ref` says. A sync asks once
+   * or more per listed item, and each ask read and parsed three files: on a
+   * large Dropbox delta that was about 5% of Sparta's sampled freezes
+   * (2026-11-05). A pass is reused while all three files are the same file
+   * (inode, modification time, size); every writer replaces them by atomic
+   * rename, so any change is a new signature and is read again. A refusal is
+   * never reused.
+   */
   assertCurrent(ref: FileSourceScopePolicyRef): FileSourceScopeApprovalSnapshot {
-    return assertFileSourceScopeApproved({
+    const key = this.approvalFilesKey(ref);
+    const reused = key === undefined ? undefined : this.approvedByFiles.get(ref.sourceId);
+    if (reused && reused.key === key) return reused.snapshot;
+    const snapshot = assertFileSourceScopeApproved({
       sourceId: ref.sourceId,
       registry: this.fileScopeRegistry(),
       statePath: this.statePath,
       expectedAccountGeneration: ref.accountGeneration,
       expectedRevision: ref.revision,
     });
+    if (key !== undefined) this.approvedByFiles.set(ref.sourceId, { key, snapshot });
+    return snapshot;
+  }
+
+  private approvalFilesKey(ref: FileSourceScopePolicyRef): string | undefined {
+    if (!this.registryFromFile) return undefined;
+    try {
+      const files = [this.registryPath, defaultThisComputerStatePath(this.registryPath), this.statePath].map((path) => {
+        const stat = statSync(path, { throwIfNoEntry: false });
+        return stat ? [stat.ino, stat.mtimeMs, stat.size] : null;
+      });
+      return JSON.stringify([ref.accountGeneration, ref.revision, files]);
+    } catch {
+      return undefined;
+    }
   }
 
   policyRef(sourceId: FileSourceScopeId): FileSourceScopePolicyRef | undefined {

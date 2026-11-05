@@ -188663,6 +188663,7 @@ var init_archive_target2 = __esm(() => {
 });
 
 // src/workers/source-scope-runtime.ts
+import { statSync as statSync42 } from "node:fs";
 function isMailSourceScopePolicyRef(ref) {
   return ref.sourceId === "gmail.email";
 }
@@ -188673,11 +188674,14 @@ class FileSourceScopeAuthority {
   mailStatePath;
   readRegistry;
   mailPinnedHandle;
+  registryFromFile;
+  approvedByFiles = new Map;
   constructor(options = {}) {
     this.registryPath = options.registryPath ?? defaultHandleRegistryPath();
     this.statePath = options.statePath ?? defaultFileSourceScopeStatePath(this.registryPath);
     this.mailStatePath = options.mailStatePath ?? defaultMailSourceScopeStatePath(this.registryPath);
     this.readRegistry = options.readRegistry ?? (() => readConnectedHandleRegistry(this.registryPath));
+    this.registryFromFile = options.readRegistry === undefined;
     this.mailPinnedHandle = options.mailPinnedHandle ?? (() => {
       return;
     });
@@ -188757,13 +188761,33 @@ class FileSourceScopeAuthority {
     });
   }
   assertCurrent(ref) {
-    return assertFileSourceScopeApproved({
+    const key2 = this.approvalFilesKey(ref);
+    const reused = key2 === undefined ? undefined : this.approvedByFiles.get(ref.sourceId);
+    if (reused && reused.key === key2)
+      return reused.snapshot;
+    const snapshot = assertFileSourceScopeApproved({
       sourceId: ref.sourceId,
       registry: this.fileScopeRegistry(),
       statePath: this.statePath,
       expectedAccountGeneration: ref.accountGeneration,
       expectedRevision: ref.revision
     });
+    if (key2 !== undefined)
+      this.approvedByFiles.set(ref.sourceId, { key: key2, snapshot });
+    return snapshot;
+  }
+  approvalFilesKey(ref) {
+    if (!this.registryFromFile)
+      return;
+    try {
+      const files = [this.registryPath, defaultThisComputerStatePath(this.registryPath), this.statePath].map((path) => {
+        const stat6 = statSync42(path, { throwIfNoEntry: false });
+        return stat6 ? [stat6.ino, stat6.mtimeMs, stat6.size] : null;
+      });
+      return JSON.stringify([ref.accountGeneration, ref.revision, files]);
+    } catch {
+      return;
+    }
   }
   policyRef(sourceId) {
     const snapshot = this.snapshot(sourceId);
@@ -209253,7 +209277,7 @@ var init_setup_backend = __esm(() => {
 });
 
 // src/core/consult-settings-writer.ts
-import { chmodSync as chmodSync35, lstatSync as lstatSync51, mkdirSync as mkdirSync62, statSync as statSync42 } from "node:fs";
+import { chmodSync as chmodSync35, lstatSync as lstatSync51, mkdirSync as mkdirSync62, statSync as statSync43 } from "node:fs";
 import { dirname as dirname97, isAbsolute as isAbsolute37 } from "node:path";
 function writeConsultSettings(input, location = {}) {
   let path;
@@ -209339,7 +209363,7 @@ function ensureSettingsDirectory(directory) {
     if (error2?.code !== "ENOENT")
       return "directory_unavailable";
     try {
-      statSync42(dirname97(directory));
+      statSync43(dirname97(directory));
     } catch {
       return "home_missing";
     }
