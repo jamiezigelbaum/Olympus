@@ -245,13 +245,21 @@ export async function startCpuSampleLog(env: Record<string, string | undefined> 
   const flush = () => {
     const now = Date.now();
     try {
-      // Busy for a few milliseconds so the newest trace is "now" on the profiler's clock.
+      // A freeze still running into this flush (its lag tick not yet come) is
+      // recorded now, before the read below drains its samples.
+      const flushStart = performance.now();
+      if (flushStart - lastTick - CPU_SAMPLE_LAG_TICK_MS >= CPU_SAMPLE_STALL_MS) stalls.push({ startMs: lastTick, endMs: flushStart });
+      lastTick = flushStart;
+      // Busy for a few milliseconds so the newest trace is "now" on the
+      // profiler's clock; the anchor is taken before the read, which itself
+      // takes time on a full window.
       const spinUntil = performance.now() + 3;
       while (performance.now() < spinUntil) { /* spin */ }
+      const anchorMs = performance.now();
       const sampled = jsc.samplingProfilerStackTraces!();
       const traces = sampled.traces ?? [];
       const newest = traces.reduce((max, trace) => Math.max(max, trace.timestamp ?? -Infinity), -Infinity);
-      const offsetS = Number.isFinite(newest) ? newest - performance.now() / 1000 : 0;
+      const offsetS = Number.isFinite(newest) ? newest - anchorMs / 1000 : 0;
       const window = stalls;
       stalls = [];
       const stalled = Number.isFinite(newest) ? tracesInStalls(traces, window, offsetS) : [];
