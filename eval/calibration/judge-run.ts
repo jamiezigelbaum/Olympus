@@ -117,10 +117,20 @@ function veniceJudge(model: string): AnalystModel {
     reasoningHeadroomTokens: 0,
     timeoutMs: 60_000,
     async fetchImpl(url, init) {
-      const started = performance.now();
-      const response = await fetch(url, init);
-      if (!url.includes('/chat/completions')) return response;
+      if (!url.includes('/chat/completions')) return await fetch(url, init);
       meter.calls += 1;
+      const started = performance.now();
+      let response: Response;
+      let body: string;
+      try {
+        response = await fetch(url, init);
+        // Latency runs to the end of the body, as the judge experiences it.
+        body = await response.clone().text();
+      } catch (error) {
+        meter.failedCalls += 1;
+        meter.latencyMs.push(performance.now() - started);
+        throw error;
+      }
       meter.latencyMs.push(performance.now() - started);
       if (!response.ok) meter.failedCalls += 1;
       for (const name of ['x-ratelimit-limit-requests', 'x-ratelimit-limit-tokens']) {
@@ -129,7 +139,7 @@ function veniceJudge(model: string): AnalystModel {
       }
       try {
         // Counts only: the body's text is never kept or printed.
-        const usage = (await response.clone().json() as { usage?: {
+        const usage = (JSON.parse(body) as { usage?: {
           prompt_tokens?: number;
           completion_tokens?: number;
           prompt_tokens_details?: { cached_tokens?: number };
