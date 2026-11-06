@@ -18769,6 +18769,18 @@ class TierLedger {
           AND w.conversation_key = c.conversation_key AND w.provider_item_id = c.provider_item_id
           AND w.kind IN ('secret', 'deletion')) AS hidden,
       c.copy_state = 'current' AND c.embed_hold = 1 AS held,
+      c.copy_state = 'current' AND c.embed_hold = 1 AND c.trust_domain = 'secure_local'
+        AND c.layers IN ('content', 'both') AND EXISTS (
+          SELECT 1 FROM tier_items t WHERE t.provider = c.provider AND t.account_scope = c.account_scope
+            AND t.conversation_key = c.conversation_key AND t.provider_item_id = c.provider_item_id
+            AND t.state = 'pending' AND t.content_read = 1 AND (t.metadata_pending = 1 OR t.content_pending = 1)
+            AND t.metadata_tier <> 'secrets' AND t.content_tier <> 'secrets'
+            AND COALESCE(t.target_metadata_tier, '') <> 'secrets' AND COALESCE(t.target_content_tier, '') <> 'secrets'
+        ) AND NOT EXISTS (
+          SELECT 1 FROM tier_overrides o WHERE o.provider = c.provider AND o.account_scope = c.account_scope
+            AND o.conversation_key = c.conversation_key AND o.provider_item_id = c.provider_item_id
+            AND json_extract(o.override_json, '$.kind') = 'tier' AND json_extract(o.override_json, '$.tier') = 'secrets'
+        ) AS held_for_judgment,
       c.copy_state = 'current' AND c.layers = 'metadata' AS metadata_layer,
       c.copy_state = 'current' AND c.layers = 'metadata' AND NOT EXISTS (
         SELECT 1 FROM tier_copies other WHERE other.provider = c.provider AND other.account_scope = c.account_scope
@@ -18781,6 +18793,7 @@ class TierLedger {
       ...identityFromRow(row),
       hidden: !!row.hidden,
       held: !!row.held,
+      heldForJudgment: !!row.held_for_judgment,
       metadataLayer: !!row.metadata_layer,
       metadataLayerContentUnread: !!row.metadata_unread,
       moving: !!row.moving
@@ -25809,7 +25822,7 @@ var init_local_index = __esm(() => {
     }
   };
   STATUS_COUNTS_MAX_AGE_MS = 5 * 60000;
-  VISIBILITY_PK_FLAGS = ["hidden", "held", "metadataLayer", "metadataLayerContentUnread"];
+  VISIBILITY_PK_FLAGS = ["hidden", "held", "heldForJudgment", "metadataLayer", "metadataLayerContentUnread"];
   TierLedgerUnavailableError = class TierLedgerUnavailableError extends Error {
     constructor(corpusId) {
       super(`The tier ledger governing ${corpusId} is missing or was replaced, so which copies are visible ` + "cannot be decided. Restore the set ledger (beside the source's secure_local store) before " + "syncing or reading this store.");
@@ -25995,6 +26008,23 @@ var init_local_index = __esm(() => {
         this.tierLedgerHandle?.close();
       this.tierLedgerHandle = ledger;
       this.tierLedgerOwned = false;
+    }
+    personalEmbeddingProvider;
+    usePersonalEmbeddingProvider(provider) {
+      this.personalEmbeddingProvider = provider;
+    }
+    canEmbedHeld(provider) {
+      if (this.trustDomain !== "secure_local" || !provider || provider.backend !== "local" || !isApprovedSecureSourceEmbeddingProvider(provider))
+        return false;
+      try {
+        const personal = this.personalEmbeddingProvider?.();
+        if (!personal)
+          return false;
+        personal.assertBindingCurrent?.();
+        return personal.backend === "local" && personal.provider === provider.provider && personal.modelId === provider.modelId && personal.dimension === provider.dimension && personal.epochId === provider.epochId;
+      } catch {
+        return false;
+      }
     }
     visibilityLedger() {
       const binding = this.tierSetBinding();
@@ -26186,7 +26216,7 @@ var init_local_index = __esm(() => {
           this.db.exec("DELETE FROM temp.tier_visibility_pks");
         this.visibilitySqlMemo = undefined;
         this.tierLedgerHiddenMemo = undefined;
-        return { hidden: [], held: [], metadataLayer: [], metadataLayerContentUnread: [], moving: 0 };
+        return { hidden: [], held: [], heldForJudgment: [], metadataLayer: [], metadataLayerContentUnread: [], moving: 0 };
       }
       const version = this.db.query("PRAGMA data_version").get().data_version;
       const prior = this.tierLedgerHiddenMemo;
@@ -26204,11 +26234,12 @@ var init_local_index = __esm(() => {
         lists: {
           hidden: new MutablePkList,
           held: new MutablePkList,
+          heldForJudgment: new MutablePkList,
           metadataLayer: new MutablePkList,
           metadataLayerContentUnread: new MutablePkList
         },
         members: new Map,
-        value: { hidden: [], held: [], metadataLayer: [], metadataLayerContentUnread: [], moving: 0 }
+        value: { hidden: [], held: [], heldForJudgment: [], metadataLayer: [], metadataLayerContentUnread: [], moving: 0 }
       };
       for (const flag of VISIBILITY_PK_FLAGS)
         memo.value[flag] = memo.lists[flag].values;
@@ -30419,7 +30450,7 @@ var init_local_index = __esm(() => {
       const accountScope = normalizeOptionalAccountScope(scope.accountScope);
       const scoped = connectorStoreFilterSql(scope.filters);
       const failed = this.embeddingFailureState;
-      const tierExclusion = this.embeddingTierExclusionFilter(0, tierHidden);
+      const tierExclusion = this.embeddingWorkListExclusionFilter(0, tierHidden, this.canEmbedHeld(embedder));
       const privateTier = this.privateTierEmbeddingFilter(embedder);
       const filter = `${tierExclusion.filter} ${privateTier.filter} ${accountScope ? "AND i.account_scope = ?" : ""} ${scoped.sql}`;
       const params = [...tierExclusion.params, ...privateTier.params, ...accountScope ? [accountScope] : [], ...scoped.params];
@@ -30428,7 +30459,7 @@ var init_local_index = __esm(() => {
       FROM chunks c
       JOIN items i ON i.item_pk = c.item_pk
       LEFT JOIN chunk_embeddings e ON e.chunk_pk = c.chunk_pk AND e.model_id = ?
-      WHERE i.tombstoned = 0
+      WHERE i.tombstoned = 0 AND i.trust_tier <> 'S5'
         AND (e.chunk_pk IS NULL OR e.content_hash != c.embedding_input_hash)
         ${filter}
       GROUP BY i.item_pk
@@ -30458,7 +30489,7 @@ var init_local_index = __esm(() => {
       return rows.map((row) => row.local_item_id);
     }
     embeddingBacklogEstimate(modelId, embedder, scope, options = {}) {
-      const tierExclusion = this.embeddingTierExclusionFilter(options.countsMaxAgeMs ?? 0);
+      const tierExclusion = this.embeddingWorkListExclusionFilter(options.countsMaxAgeMs ?? 0);
       const privateTier = embedder ? this.privateTierEmbeddingFilter(embedder) : { filter: "", params: [] };
       const scoped = statusScopeContentFilter(scope);
       const filter = `${tierExclusion.filter} ${privateTier.filter} ${scoped.filter}`;
@@ -30492,34 +30523,36 @@ var init_local_index = __esm(() => {
         extractedChars: row.chars
       };
     }
-    embeddingTierExclusionFilter(countsMaxAgeMs = 0, tierHidden) {
+    embeddingWorkListExclusionFilter(countsMaxAgeMs = 0, tierHidden, allowHeld = false) {
       const tierExcluded = tierHidden ?? this.tierHiddenItemPks({ countsMaxAgeMs });
       if (this.visibilityJournal && this.visibilitySqlMemo) {
         const children = tierExcluded.hidden === this.visibilitySqlMemo.value.hidden ? [] : tierExcluded.hidden;
         return {
           filter: `AND NOT EXISTS (SELECT 1 FROM temp.tier_visibility_pks v
-        WHERE v.flag IN ('hidden', 'held', 'metadataLayer') AND v.item_pk = i.item_pk)
+        WHERE v.flag IN ('hidden', 'held', 'metadataLayer') AND v.item_pk = i.item_pk
+          ${allowHeld ? "AND (v.flag <> 'held' OR NOT EXISTS (SELECT 1 FROM temp.tier_visibility_pks j WHERE j.flag = 'heldForJudgment' AND j.item_pk = i.item_pk))" : ""})
         ${children.length ? "AND i.item_pk NOT IN (SELECT value FROM json_each(?))" : ""}`,
           params: children.length ? [JSON.stringify(children)] : []
         };
       }
-      const excludedPks = [...tierExcluded.hidden, ...tierExcluded.held, ...tierExcluded.metadataLayer];
+      const eligibleHeld = allowHeld ? new Set(tierExcluded.heldForJudgment) : undefined;
+      const excludedPks = [...tierExcluded.hidden, ...tierExcluded.held.filter((pk) => !eligibleHeld?.has(pk)), ...tierExcluded.metadataLayer];
       return excludedPks.length > 0 ? { filter: "AND i.item_pk NOT IN (SELECT value FROM json_each(?))", params: [JSON.stringify(excludedPks)] } : { filter: "", params: [] };
     }
-    embeddingBatchRecheck(batch, embeddableTiers) {
+    embeddingBatchRecheck(batch, embeddableTiers, provider) {
       const itemPks = [...new Set(batch.map((row) => row.item_pk))];
       const currentRows = this.db.query(`
       SELECT item_pk, trust_tier, tombstoned, provider, account_scope, provider_item_id, provider_conversation_id FROM items
       WHERE item_pk IN (SELECT value FROM json_each(?))
     `).all(JSON.stringify(itemPks));
       const current2 = new Map(currentRows.map((row) => [row.item_pk, row]));
-      const hidden = this.embeddingHiddenAmong(currentRows);
+      const hidden = this.embeddingHiddenAmong(currentRows, this.canEmbedHeld(provider));
       const kept = [];
       let privateTier = 0;
       let notVisible = 0;
       for (const row of batch) {
         const item = current2.get(row.item_pk);
-        if (!item || item.tombstoned !== 0 || hidden.has(row.item_pk)) {
+        if (!item || item.tombstoned !== 0 || item.trust_tier === "S5" || hidden.has(row.item_pk)) {
           notVisible += 1;
         } else if (embeddableTiers !== undefined && !embeddableTiers.includes(item.trust_tier)) {
           privateTier += 1;
@@ -30529,7 +30562,7 @@ var init_local_index = __esm(() => {
       }
       return { kept, privateTier, notVisible };
     }
-    embeddingHiddenAmong(rows) {
+    embeddingHiddenAmong(rows, allowHeld = false) {
       const hidden = new Set;
       if (rows.length === 0)
         return hidden;
@@ -30544,7 +30577,11 @@ var init_local_index = __esm(() => {
         const copies = ledger.copiesForMany(rows.map(identityOf2));
         for (const row of rows) {
           const here = (copies.get(tierLedgerIdentityKey(identityOf2(row))) ?? []).filter((copy) => copy.corpusId === this.corpusId);
-          if (here.some((copy) => copy.state === "superseded" || copy.state === "staged" || copy.state === "current" && (copy.embedHold || copy.layers === "metadata"))) {
+          const identity = identityOf2(row);
+          const intent = ledger.writeIntent(identity);
+          const decision = allowHeld ? ledger.getCurrent(identity) : undefined;
+          const pendingJudgment = decision?.state === "pending" && decision.contentRead && (decision.metadataPending || decision.contentPending);
+          if (ledger.itemIsSecret(identity) || intent?.kind === "secret" || intent?.kind === "deletion" || here.some((copy) => copy.state === "superseded" || copy.state === "staged" || copy.state === "current" && (copy.layers === "metadata" || copy.embedHold && !(allowHeld && pendingJudgment && copy.trustDomain === "secure_local")))) {
             hidden.add(row.item_pk);
           }
         }
@@ -30566,7 +30603,7 @@ var init_local_index = __esm(() => {
       const tiers = connectorStoreEmbeddableRowTiers(this.trustDomain, embedder);
       if (tiers === undefined)
         return { items: 0, chunks: 0, reason };
-      const tierExclusion = this.embeddingTierExclusionFilter(options.countsMaxAgeMs ?? 0);
+      const tierExclusion = this.embeddingWorkListExclusionFilter(options.countsMaxAgeMs ?? 0);
       const scoped = statusScopeContentFilter(scope);
       const filter = `${tierExclusion.filter} ${scoped.filter}`;
       const params = [...tierExclusion.params, ...scoped.params];
@@ -30635,7 +30672,7 @@ var init_local_index = __esm(() => {
         throw new Error("Connector store embedding journal provider changed.");
       }
       const tierHidden = await this.tierHiddenItemPksInTurns();
-      const selectedRows = this.embeddingSourceRows(options.localItemIds, options.accountScope, options.filters, tierHidden);
+      const selectedRows = this.embeddingSourceRows(options.localItemIds, options.accountScope, options.filters, tierHidden, this.canEmbedHeld(provider));
       const embeddableTiers = connectorStoreEmbeddableRowTiers(this.trustDomain, provider);
       const rows = embeddableTiers === undefined ? selectedRows : selectedRows.filter((row) => embeddableTiers.includes(row.trust_tier));
       let privateTierWithheldChunks = 0;
@@ -30742,14 +30779,6 @@ var init_local_index = __esm(() => {
         }
         let batch = pending.slice(offset, offset + EMBEDDING_BATCH_SIZE);
         await options.assertAuthorized?.();
-        {
-          const recheck = this.embeddingBatchRecheck(batch, embeddableTiers);
-          privateTierWithheldChunks += recheck.privateTier;
-          staleSkipped += recheck.notVisible + recheck.privateTier;
-          batch = recheck.kept;
-          if (batch.length === 0)
-            continue;
-        }
         if (provider.imageSupport && batch.some((row) => row.media_sha256)) {
           readsImages ??= await provider.imageSupport();
           const skip = new Set;
@@ -30769,6 +30798,14 @@ var init_local_index = __esm(() => {
             if (batch.length === 0)
               continue;
           }
+        }
+        {
+          const recheck = this.embeddingBatchRecheck(batch, embeddableTiers, provider);
+          privateTierWithheldChunks += recheck.privateTier;
+          staleSkipped += recheck.notVisible + recheck.privateTier;
+          batch = recheck.kept;
+          if (batch.length === 0)
+            continue;
         }
         const inputsFor = (rows2) => rows2.map((row) => ({
           ...row.title ? { title: row.title } : {},
@@ -30815,6 +30852,12 @@ var init_local_index = __esm(() => {
           batch = batch.filter((row) => !failedRows.has(row));
           if (batch.length === 0)
             continue;
+          const recheck = this.embeddingBatchRecheck(batch, embeddableTiers, provider);
+          privateTierWithheldChunks += recheck.privateTier;
+          staleSkipped += recheck.notVisible + recheck.privateTier;
+          batch = recheck.kept;
+          if (batch.length === 0)
+            continue;
           vectors = await provider.embed(inputsFor(batch), { taskType: "RETRIEVAL_DOCUMENT" });
         }
         if (vectors.length !== batch.length) {
@@ -30825,8 +30868,11 @@ var init_local_index = __esm(() => {
         let written = 0;
         this.db.transaction(() => {
           this.assertEmbeddingWriteAuthority(provider, providerEpoch);
+          const stillEligible = new Set(this.embeddingBatchRecheck(batch, embeddableTiers, provider).kept);
           for (let index = 0;index < batch.length; index += 1) {
             const row = batch[index];
+            if (!stillEligible.has(row))
+              continue;
             const vector = vectors[index];
             if (!vector)
               throw new Error("Connector store embedding provider returned no vector for a chunk.");
@@ -31295,7 +31341,7 @@ var init_local_index = __esm(() => {
       }
       return { token };
     }
-    embeddingSourceRows(localItemIds, accountScope, filters, tierHidden) {
+    embeddingSourceRows(localItemIds, accountScope, filters, tierHidden, allowHeld = false) {
       const selectedLocalItemIds = normalizeEmbedLocalItemIds(localItemIds);
       if (selectedLocalItemIds && selectedLocalItemIds.length === 0)
         return [];
@@ -31303,7 +31349,7 @@ var init_local_index = __esm(() => {
       const selectedFilters = connectorStoreFilterSql(filters);
       const itemFilter = selectedLocalItemIds ? ` AND i.local_item_id IN (${selectedLocalItemIds.map(() => "?").join(", ")})` : "";
       const tierExcluded = tierHidden ?? this.tierHiddenItemPks();
-      const tierExclusion = this.embeddingTierExclusionFilter(0, tierExcluded);
+      const tierExclusion = this.embeddingWorkListExclusionFilter(0, tierExcluded, allowHeld);
       const tierFilter = tierExclusion.filter;
       return this.db.query(`
       SELECT
@@ -31320,7 +31366,7 @@ var init_local_index = __esm(() => {
         ${this.chunkMediaColumnsPresent ? "c.media_path, c.media_sha256" : "NULL AS media_path, NULL AS media_sha256"}
       FROM chunks c
       JOIN items i ON i.item_pk = c.item_pk
-      WHERE i.tombstoned = 0
+      WHERE i.tombstoned = 0 AND i.trust_tier <> 'S5'
         ${itemFilter}
         ${tierFilter}
         ${selectedAccount ? "AND i.account_scope = ?" : ""}
@@ -31336,7 +31382,8 @@ var init_local_index = __esm(() => {
         const rows = this.db.query(`SELECT i.item_pk, i.provider, i.account_scope, i.provider_item_id, i.provider_conversation_id
         FROM items i WHERE i.item_pk IN (${batch.map(() => "?").join(",")}) AND i.tombstoned = 0
         ${accountScope ? "AND i.account_scope = ?" : ""} ${selectedFilters.sql}`).all(...batch, ...accountScope ? [accountScope] : [], ...selectedFilters.params);
-        for (const row of this.tierVisibleRows(rows, (row2) => ({
+        const excluded = this.embeddingHiddenAmong(rows);
+        for (const row of this.tierVisibleRows(rows.filter((row2) => !excluded.has(row2.item_pk)), (row2) => ({
           provider: row2.provider,
           accountScope: row2.account_scope,
           providerItemId: row2.provider_item_id,
