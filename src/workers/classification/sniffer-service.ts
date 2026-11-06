@@ -261,6 +261,7 @@ export type TierSnifferWaitReason =
   | 'awaiting_owner_approval'
   | 'no_model'
   | 'daily_budget'
+  | 'cloud_stopped'
   | 'model_not_answering'
   | 'failed';
 
@@ -623,7 +624,10 @@ export class TierSnifferService {
     this.reportWaiting(tick, overran);
     // Any call that answered clears the hold, even when the pass then
     // stopped on failures: a model that is making progress is never held.
-    if (tick.state === 'ran' && tick.report.calls > tick.report.failedCalls) {
+    if (this.waitingReason === 'cloud_stopped') {
+      // Terminal: only an explicit run or the setup reload may resume it.
+      this.notAnsweringUntilMs = Infinity;
+    } else if (tick.state === 'ran' && tick.report.calls > tick.report.failedCalls) {
       this.notAnsweringPasses = 0;
       this.notAnsweringUntilMs = 0;
     } else if (this.waitingReason === 'model_not_answering') {
@@ -638,7 +642,7 @@ export class TierSnifferService {
     }
     if (this.stopped) this.closeLedgers();
     else if (this.timer && tick.state === 'ran' && !this.yieldNow()
-      && tick.report.stoppedBy !== 'daily_budget' && tick.report.stoppedBy !== 'transport_failures'
+      && tick.report.stoppedBy !== 'daily_budget' && tick.report.stoppedBy !== 'transport_failures' && tick.report.stoppedBy !== 'cloud_stopped'
       && (tick.report.verdictsApplied > 0 || tick.report.calls > tick.report.failedCalls
         || (tick.autoMoves?.moved ?? 0) > 0 || (tick.rejudged?.seen ?? 0) > 0
         || tick.report.stoppedBy === 'preempted')) this.wake();
@@ -659,6 +663,7 @@ export class TierSnifferService {
     if (tick.state === 'model_unavailable') reason = 'no_model';
     else if (tick.state === 'awaiting_owner_approval') reason = 'awaiting_owner_approval';
     else if (tick.state === 'failed') reason = 'failed';
+    else if (tick.state === 'ran' && tick.report.stoppedBy === 'cloud_stopped') reason = 'cloud_stopped';
     // A model that is not answering: the pass stopped on its transport
     // failures, or every call it made failed (one question left fails once,
     // below the stop threshold). Each failed dispatch still counts as a
@@ -719,6 +724,7 @@ export class TierSnifferService {
         return `the private model is not available${state ? ` (${state})` : ''}`;
       }
       case 'daily_budget': return 'the daily call budget is used up';
+      case 'cloud_stopped': return 'cloud privacy sorting is stopped; open Keys to check the spending limit or Venice account; remaining items stay Private';
       case 'model_not_answering': return 'the private model is not answering';
       case 'failed': return `the pass failed (${tick?.state === 'failed' ? tick.error : 'unknown'})`;
     }

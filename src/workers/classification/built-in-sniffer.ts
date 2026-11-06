@@ -60,7 +60,7 @@ export function registeredBuiltInPrivateModel(): BuiltInPrivateModel | undefined
 export type TierSnifferRuntime =
   | { source: 'configured'; lane: SnifferLane }
   | { source: 'built_in'; lane: SnifferLane; builtIn: BuiltInPrivateModel }
-  | { source: 'off'; reason: SnifferLaneRefusalReason };
+  | { source: 'off'; reason: SnifferLaneRefusalReason; cloudChoiceRequired?: boolean; cloudLane?: SnifferLane };
 
 /**
  * The sniffer's lane. A configured private lane wins. A REFUSED configured
@@ -94,4 +94,28 @@ export function resolveTierSnifferRuntime(input: {
     if (error.reason === 'no_private_lane' && input.builtIn) return builtInLane(input.builtIn);
     return { source: 'off', reason: error.reason };
   }
+}
+
+/** Setup selects among the already policy-eligible lanes; it grants no new route.
+ * A recommendation alone never selects cloud. A terminal cloud stop uses local. */
+export function resolveJudgeChoiceRuntime(
+  input: Parameters<typeof resolveTierSnifferRuntime>[0],
+  choice: { choice: 'local' | 'venice'; stop: string | null; remainingDollars: number; uncapped?: boolean },
+): TierSnifferRuntime {
+  const original = resolveTierSnifferRuntime(input);
+  if (original.source === 'off' && original.reason !== 'no_private_lane') return original;
+  const kind = choice.choice === 'venice' && !choice.stop && (choice.uncapped === true || choice.remainingDollars > 0) ? 'venice' : 'local';
+  const engine = {
+    config: { ...input.engine.config, modelProfiles: Object.fromEntries(Object.entries(input.engine.config.modelProfiles)
+      .filter(([, profile]) => profile.purpose !== 'classification' || (kind === 'venice' ? profile.provider === 'venice' : profile.trust === 'local'))) },
+    resolveAnalystPool: (...args: Parameters<typeof input.engine.resolveAnalystPool>) => {
+      const pool = input.engine.resolveAnalystPool(...args);
+      const accepts = (member: { profile: { provider: string; trust: string } }) => kind === 'venice' ? member.profile.provider === 'venice' : member.profile.trust === 'local';
+      return { ...pool, members: pool.members.filter(accepts), ...(pool.explicitOrder ? { explicitOrder: pool.explicitOrder.filter(accepts) } : {}) };
+    },
+  };
+  const { builtIn, ...rest } = input;
+  const selected = resolveTierSnifferRuntime({ ...rest, engine, ...(kind === 'local' && builtIn ? { builtIn } : {}) });
+  return selected.source === 'off' && selected.reason === 'no_private_lane' && original.source !== 'off' && original.lane.kind === 'venice'
+    ? { ...selected, cloudChoiceRequired: true, cloudLane: original.lane } : selected;
 }

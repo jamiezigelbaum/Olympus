@@ -217,3 +217,28 @@ function stampOrder(recordedAt: string): number {
   const at = Date.parse(recordedAt);
   return Number.isFinite(at) ? at : Number.NEGATIVE_INFINITY;
 }
+
+/** The CLI and local setup screen record the same exact-model owner approval. */
+export async function approveClassifier(path: string, lane: { kind: string; profileId: string; modelId: string }, promptVersion: string, why: string, now = new Date()) {
+  const entry: ClassificationLedgerEntry = {
+    recorded_at: now.toISOString(), kind: 'classifier_model_decision',
+    what: `The owner approved ${lane.kind} classifier model ${lane.modelId} (profile ${lane.profileId}) with prompt ${promptVersion} for the privacy sniffer.`,
+    model_id: lane.modelId, profile_id: lane.profileId, lane: lane.kind, prompt_version: promptVersion,
+    why, approved_by: CLASSIFICATION_LEDGER_OWNER_APPROVAL, status: 'complete',
+  };
+  await appendClassificationLedgerEntry(path, entry);
+  return entry;
+}
+
+/** Choosing local withdraws the exact cloud classifier approval, including
+ * when a damaged spending record cannot be rewritten. No spend is erased. */
+export async function revokeClassifier(path: string, lane: { kind: string; profileId: string; modelId: string }, promptVersion: string, why?: string, now = new Date()) {
+  const entry: ClassificationLedgerEntry = {
+    recorded_at: now.toISOString(), kind: 'classifier_model_revoked',
+    what: `The owner declined ${lane.kind} classifier model ${lane.modelId} (profile ${lane.profileId}) with prompt ${promptVersion} for the privacy sniffer; possibly-private items stay held as Private.`,
+    model_id: lane.modelId, profile_id: lane.profileId, lane: lane.kind, prompt_version: promptVersion,
+    ...(why ? { why } : {}), approved_by: CLASSIFICATION_LEDGER_OWNER_APPROVAL, status: 'complete',
+  };
+  await appendClassificationLedgerEntry(path, entry);
+  return entry;
+}

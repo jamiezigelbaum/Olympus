@@ -29,6 +29,7 @@ import type { AnalystModel } from '../../core/analyst.ts';
 import { runWithLocalInferenceGuard } from '../answer-activity.ts';
 import { writePrivateFileAtomicSync } from '../../core/atomic-file.ts';
 import {
+  JudgeCloudStopped,
   SNIFFER_INJECTION_CATEGORY,
   SNIFFER_MAX_ATTEMPTS,
   SNIFFER_PROMPT_VERSION,
@@ -182,7 +183,7 @@ export interface SnifferPassOptions {
   signal?: AbortSignal;
 }
 
-export type SnifferPassStop = 'pass_budget' | 'daily_budget' | 'yield' | 'preempted' | 'transport_failures' | 'aborted';
+export type SnifferPassStop = 'pass_budget' | 'daily_budget' | 'yield' | 'preempted' | 'transport_failures' | 'aborted' | 'cloud_stopped';
 
 export interface SnifferPassReport {
   /** Re-judge answers held at the previous Private placement during rollout. */
@@ -538,7 +539,7 @@ export async function runSnifferPass(options: SnifferPassOptions): Promise<Sniff
     // ledger, so one source's lane): newest first within a store, but a busy
     // source's steady stream of new mail no longer keeps every other source
     // waiting (Sparta, 2026-11-03: Dropbox questions never asked in 5 hours).
-    let next = aged[0] ?? nextInTurn(pending, options.targets, dispatches);
+    let next = options.lane.kind === 'venice' ? pending[0]! : aged[0] ?? nextInTurn(pending, options.targets, dispatches);
     // Within an item, names go first: a Private names verdict can settle both.
     if (next.question.pass === 'content') next = pending.find(item => item.question.pass === 'metadata'
       && item.target === next.target
@@ -600,7 +601,11 @@ export async function runSnifferPass(options: SnifferPassOptions): Promise<Sniff
       });
       text = completion.text;
       decisionVerdict = completion.decisionVerdict;
-    } catch {
+    } catch (error) {
+      if (error instanceof JudgeCloudStopped) {
+        report.stoppedBy = 'cloud_stopped';
+        return;
+      }
       if (options.signal?.aborted) {
         // Preempted by an answer that needs the private pool: not a failure
         // of anything, so nothing is counted against the items or the lane.
