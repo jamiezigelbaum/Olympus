@@ -16,4 +16,4 @@ def doc(title,text):
     t=(title or '').replace('\n',' ').strip() or 'none'
     return f'title: {t} | text: {text}'
 def local_embedder(threads=4):
-    return Emb(os.path.dirname(os.path.abspath(__file__))+'/helper/litert-helper.ts', M+'/litert-lm-0.18.0-darwin-arm64/liblitert-lm.dylib', M+'/embeddinggemma-2-litert-24d962e/embeddinggemma-2-740m.litertlm', '/private/tmp/claude-501/bb-cache', threads)
+    return Emb(os.path.join(os.path.dirname(os.path.abspath(__file__)),'../../../src/workers/source-index/built-in-embedding/litert-helper.ts'), M+'/litert-lm-0.18.0-darwin-arm64/liblitert-lm.dylib', M+'/embeddinggemma-2-litert-24d962e/embeddinggemma-2-740m.litertlm', '/private/tmp/claude-501/bb-cache', threads)
