@@ -126,7 +126,7 @@ test('a ready legacy embedding installation keeps its migration notice visible o
   expect(note).toBeGreaterThan(-1);
   expect(note).toBeLessThan(html.indexOf('<div class="modelcards">'));
   expect(html).toContain('preserve vectors');
-  expect(html).toContain('SOVEREIGNTY_CONFIG.md#legacy-embedding-migration');
+  expect(html).toContain('docs/SOVEREIGNTY_CONFIG.md');
   expect(html).not.toContain('aistudio.google.com');
   expect(html).toContain('Existing Gemini installations only');
 });

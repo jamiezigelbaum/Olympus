@@ -64,7 +64,7 @@ export function renderModelSetup(view: ModelSetupView | undefined, options: { he
     + (view.ready
       ? `<p class="quiet" role="status">${options.heading === false ? 'Models are ready.' : 'Models are ready. You can connect sources below.'}</p>`
       : '<p class="modelintro">Add the keys required by your privacy choice. Olympus checks them and updates this page when they are ready. Saved keys are not displayed.</p>')
-    + (view.migration_notes ?? []).map(note => `<p role="status" data-embedding-migration>${escapeHtml(note)} <a href="https://github.com/jamiezigelbaum/Olympus/blob/main/docs/SOVEREIGNTY_CONFIG.md#legacy-embedding-migration" target="_blank" rel="noopener noreferrer">Embedding migration guide</a></p>`).join('')
+    + (view.migration_notes ?? []).map(note => `<p role="status" data-embedding-migration>${escapeHtml(note)} See "Legacy embedding migration" in docs/SOVEREIGNTY_CONFIG.md.</p>`).join('')
     + (view.attention ? `<p role="status">${escapeHtml(view.attention)}</p>` : '')
     + `<div class="modelcards">${cards}</div>`
     + extras

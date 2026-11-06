@@ -26114,7 +26114,7 @@ var init_local_index = __esm(() => {
       }
       return hidden;
     }
-    tierVisibleRows(rows, identityOf2, layerOf, throwOnUnavailable = false) {
+    tierVisibleRows(rows, identityOf2, layerOf, throwOnUnavailable = false, copiesAllowed) {
       if (rows.length === 0)
         return [];
       let copies;
@@ -26127,7 +26127,10 @@ var init_local_index = __esm(() => {
           throw error;
         return [];
       }
-      const served = copies ? rows.filter((row) => tierRowVisible(copies.get(tierLedgerIdentityKey(identityOf2(row))), this.corpusId, layerOf(row))) : [...rows];
+      const served = copies ? rows.filter((row) => {
+        const here = copies.get(tierLedgerIdentityKey(identityOf2(row)));
+        return tierRowVisible(here, this.corpusId, layerOf(row)) && (copiesAllowed?.(here ?? []) ?? true);
+      }) : [...rows];
       return this.withoutChildrenOfHiddenParents(served, identityOf2);
     }
     withoutChildrenOfHiddenParents(rows, identityOf2) {
@@ -31384,13 +31387,12 @@ var init_local_index = __esm(() => {
         const rows = this.db.query(`SELECT i.item_pk, i.provider, i.account_scope, i.provider_item_id, i.provider_conversation_id
         FROM items i WHERE i.item_pk IN (${batch.map(() => "?").join(",")}) AND i.tombstoned = 0
         ${accountScope ? "AND i.account_scope = ?" : ""} ${selectedFilters.sql}`).all(...batch, ...accountScope ? [accountScope] : [], ...selectedFilters.params);
-        const excluded = this.embeddingHiddenAmong(rows);
-        for (const row of this.tierVisibleRows(rows.filter((row2) => !excluded.has(row2.item_pk)), (row2) => ({
+        for (const row of this.tierVisibleRows(rows, (row2) => ({
           provider: row2.provider,
           accountScope: row2.account_scope,
           providerItemId: row2.provider_item_id,
           ...row2.provider_conversation_id ? { providerConversationId: row2.provider_conversation_id } : {}
-        }), () => "content"))
+        }), () => "content", false, (copies) => !copies.some((copy) => copy.corpusId === this.corpusId && copy.state === "current" && copy.embedHold)))
           visible.add(row.item_pk);
       }
       return visible;

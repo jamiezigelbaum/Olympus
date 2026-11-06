@@ -33875,7 +33875,7 @@ var init_local_index = __esm(() => {
       }
       return hidden;
     }
-    tierVisibleRows(rows, identityOf, layerOf, throwOnUnavailable = false) {
+    tierVisibleRows(rows, identityOf, layerOf, throwOnUnavailable = false, copiesAllowed) {
       if (rows.length === 0)
         return [];
       let copies;
@@ -33888,7 +33888,10 @@ var init_local_index = __esm(() => {
           throw error;
         return [];
       }
-      const served = copies ? rows.filter((row) => tierRowVisible(copies.get(tierLedgerIdentityKey(identityOf(row))), this.corpusId, layerOf(row))) : [...rows];
+      const served = copies ? rows.filter((row) => {
+        const here = copies.get(tierLedgerIdentityKey(identityOf(row)));
+        return tierRowVisible(here, this.corpusId, layerOf(row)) && (copiesAllowed?.(here ?? []) ?? true);
+      }) : [...rows];
       return this.withoutChildrenOfHiddenParents(served, identityOf);
     }
     withoutChildrenOfHiddenParents(rows, identityOf) {
@@ -39145,13 +39148,12 @@ var init_local_index = __esm(() => {
         const rows = this.db.query(`SELECT i.item_pk, i.provider, i.account_scope, i.provider_item_id, i.provider_conversation_id
         FROM items i WHERE i.item_pk IN (${batch.map(() => "?").join(",")}) AND i.tombstoned = 0
         ${accountScope ? "AND i.account_scope = ?" : ""} ${selectedFilters.sql}`).all(...batch, ...accountScope ? [accountScope] : [], ...selectedFilters.params);
-        const excluded = this.embeddingHiddenAmong(rows);
-        for (const row of this.tierVisibleRows(rows.filter((row2) => !excluded.has(row2.item_pk)), (row2) => ({
+        for (const row of this.tierVisibleRows(rows, (row2) => ({
           provider: row2.provider,
           accountScope: row2.account_scope,
           providerItemId: row2.provider_item_id,
           ...row2.provider_conversation_id ? { providerConversationId: row2.provider_conversation_id } : {}
-        }), () => "content"))
+        }), () => "content", false, (copies) => !copies.some((copy) => copy.corpusId === this.corpusId && copy.state === "current" && copy.embedHold)))
           visible.add(row.item_pk);
       }
       return visible;
@@ -159868,7 +159870,7 @@ function renderModelSetup(view3, options = {}) {
   }).join("");
   const localCard = view3.cards.some((card) => card.id === "local");
   const extras = view3.ready ? '<div class="modelextras">' + (localCard ? "" : `<button type="button" class="btn" ${LOCAL_MODELS_TOGGLE}`) + `${CHECK_FORM_OPEN}<button class="btn" type="submit">Check readiness</button>${CHECK_FORM_TAIL}` + "</div>" + (localCard ? "" : localModelsSheet()) : localCard ? "" : '<div class="modeltools">' + `<p>Optional: your agent can help connect models you already run and review the matching privacy choice.</p><button type="button" class="btn" ${LOCAL_MODELS_TOGGLE}` + `${CHECK_FORM_OPEN}<button class="btn" type="submit">Check readiness</button>${CHECK_FORM_TAIL}` + "</div>" + localModelsSheet();
-  return status + engine + (view3.ready ? privateModelProgress(view3) : "") + `<section aria-label="Models">${options.heading === false ? "" : '<div class="sect">Models</div>'}` + (view3.ready ? `<p class="quiet" role="status">${options.heading === false ? "Models are ready." : "Models are ready. You can connect sources below."}</p>` : '<p class="modelintro">Add the keys required by your privacy choice. Olympus checks them and updates this page when they are ready. Saved keys are not displayed.</p>') + (view3.migration_notes ?? []).map((note) => `<p role="status" data-embedding-migration>${escapeHtml2(note)} <a href="https://github.com/jamiezigelbaum/Olympus/blob/main/docs/SOVEREIGNTY_CONFIG.md#legacy-embedding-migration" target="_blank" rel="noopener noreferrer">Embedding migration guide</a></p>`).join("") + (view3.attention ? `<p role="status">${escapeHtml2(view3.attention)}</p>` : "") + `<div class="modelcards">${cards}</div>` + extras + "</section>";
+  return status + engine + (view3.ready ? privateModelProgress(view3) : "") + `<section aria-label="Models">${options.heading === false ? "" : '<div class="sect">Models</div>'}` + (view3.ready ? `<p class="quiet" role="status">${options.heading === false ? "Models are ready." : "Models are ready. You can connect sources below."}</p>` : '<p class="modelintro">Add the keys required by your privacy choice. Olympus checks them and updates this page when they are ready. Saved keys are not displayed.</p>') + (view3.migration_notes ?? []).map((note) => `<p role="status" data-embedding-migration>${escapeHtml2(note)} See "Legacy embedding migration" in docs/SOVEREIGNTY_CONFIG.md.</p>`).join("") + (view3.attention ? `<p role="status">${escapeHtml2(view3.attention)}</p>` : "") + `<div class="modelcards">${cards}</div>` + extras + "</section>";
 }
 function renderFirstRunPrivacyChoice() {
   const choices = PRIVATE_ANSWER_OPTIONS.map((option) => `<label class="modelcard"><input type="radio" name="choice" value="${escapeHtml2(option.id)}"${option.recommended ? " checked" : ""}> <b>${escapeHtml2(option.label)}${option.recommended ? " — Recommended" : ""}</b><p>${escapeHtml2(option.description)}</p></label>`).join("");

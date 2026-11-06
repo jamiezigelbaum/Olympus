@@ -3143,6 +3143,7 @@ export class LocalConnectorStore {
     identityOf: (row: T) => { provider: string; accountScope: string; providerItemId: string; providerConversationId?: string },
     layerOf: (row: T) => TierSearchLayer,
     throwOnUnavailable = false,
+    copiesAllowed?: (copies: readonly TierCopy[]) => boolean,
   ): T[] {
     if (rows.length === 0) return [];
     let copies: Map<string, TierCopy[]> | undefined;
@@ -3154,11 +3155,10 @@ export class LocalConnectorStore {
       return [];
     }
     const served = copies
-      ? rows.filter((row) => tierRowVisible(
-        copies.get(tierLedgerIdentityKey(identityOf(row))),
-        this.corpusId,
-        layerOf(row),
-      ))
+      ? rows.filter((row) => {
+        const here = copies.get(tierLedgerIdentityKey(identityOf(row)));
+        return tierRowVisible(here, this.corpusId, layerOf(row)) && (copiesAllowed?.(here ?? []) ?? true);
+      })
       : [...rows];
     return this.withoutChildrenOfHiddenParents(served, identityOf);
   }
@@ -11678,11 +11678,12 @@ export class LocalConnectorStore {
         }>;
       // Embedding admission never releases a vector to search: the copy's
       // hold must clear, even though lexical/Private reads may already serve it.
-      const excluded = this.embeddingHiddenAmong(rows);
-      for (const row of this.tierVisibleRows(rows.filter(row => !excluded.has(row.item_pk)), row => ({
+      // One ledger read serves both checks, and an unreadable ledger hides the batch.
+      for (const row of this.tierVisibleRows(rows, row => ({
         provider: row.provider, accountScope: row.account_scope, providerItemId: row.provider_item_id,
         ...(row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}),
-      }), () => 'content')) visible.add(row.item_pk);
+      }), () => 'content', false, copies => !copies.some(copy => copy.corpusId === this.corpusId
+        && copy.state === 'current' && copy.embedHold))) visible.add(row.item_pk);
     }
     return visible;
   }
