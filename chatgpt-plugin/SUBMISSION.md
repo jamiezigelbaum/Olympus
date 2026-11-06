@@ -280,6 +280,11 @@ Reviewer demo
   the old one had been pasted in a chat. `openclaw config get` shows only a
   redacted placeholder. The reviewer path, the demo sign-in and a Personal
   question passed afterwards.
+- 2026-11-06: the demo's zkAPI note was renewed by hand and now expires
+  2026-12-07. `fundingDate` in `sovereignty.json` is 2026-11-06 and the worker
+  was restarted. One paid question answered end to end afterwards (77 s, about
+  4,200 gwei). A daily job on the demo host now renews the note before it
+  expires; the runbook is `docs/ops/DEMO_ZKAPI_RENEWAL.md` in olympus-ops.
 - The relay keeps shipping while the demo engine is frozen. The directory
   endpoint serves the submitted listing, not the current engine's
   (`connect-relay/server/directory/approved.ts`); CI holds the relay's
