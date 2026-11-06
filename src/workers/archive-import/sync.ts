@@ -187,7 +187,7 @@ function fileStop(error: unknown, relPath: string): unknown {
   if (error.code === 'changed' || error.code === 'escape' || error.code === 'not_regular') {
     return new ArchiveImportStoppedError('file_changed', 'A file of this archive changed since the import started.', relPath);
   }
-  return new ArchiveImportStoppedError('file_unreadable', 'A file of this archive could not be read.', relPath);
+  return new ArchiveImportStoppedError('file_unreadable', 'A file of this archive could not be read.', relPath, { cause: error });
 }
 
 /**
