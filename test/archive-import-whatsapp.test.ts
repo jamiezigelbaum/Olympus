@@ -1096,7 +1096,10 @@ describe('whatsapp connector resumes', () => {
     appendFileSync(path, chatText(syntheticChat(1, { label: 'late' }), { style: 'ios-24-dmy' }));
     await expect(listAll(connector)).rejects.toMatchObject({ code: 'file_changed', relPath: '_chat.txt' });
     unlinkSync(path);
-    await expect(listAll(connector)).rejects.toMatchObject({ code: 'file_missing', relPath: '_chat.txt' });
+    // The read error behind the stop is part of what is compared, so a run that stops otherwise names it (#951).
+    const missing = await listAll(connector).then(() => undefined, (error: unknown) => error as { code?: string; relPath?: string; cause?: unknown });
+    expect({ code: missing?.code, relPath: missing?.relPath, cause: missing?.cause === undefined ? undefined : String(missing.cause) })
+      .toEqual({ code: 'file_missing', relPath: '_chat.txt', cause: undefined });
   });
 
   test('a file changed after the first page stops the listing, though its messages were already read', async () => {

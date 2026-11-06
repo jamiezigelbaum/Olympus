@@ -1190,8 +1190,9 @@ export type ArchiveConnectorFactory = (input: ArchiveConnectorInput) => SourceCo
 export class ArchiveImportStoppedError extends Error {
   readonly code: 'file_changed' | 'file_missing' | 'file_unreadable' | 'resume_point_invalid';
   readonly relPath: string | undefined;
-  constructor(code: ArchiveImportStoppedError['code'], message: string, relPath?: string) {
-    super(message);
+  /** `cause` is the read error behind the stop, kept for diagnosis (#951); it is never shown to the person. */
+  constructor(code: ArchiveImportStoppedError['code'], message: string, relPath?: string, options?: { cause?: unknown }) {
+    super(message, options);
     this.name = 'ArchiveImportStoppedError';
     this.code = code;
     this.relPath = relPath;

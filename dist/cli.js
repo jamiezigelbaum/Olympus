@@ -651,8 +651,8 @@ var init_archive_formats = __esm(() => {
   ArchiveImportStoppedError = class ArchiveImportStoppedError extends Error {
     code;
     relPath;
-    constructor(code, message, relPath) {
-      super(message);
+    constructor(code, message, relPath, options) {
+      super(message, options);
       this.name = "ArchiveImportStoppedError";
       this.code = code;
       this.relPath = relPath;
@@ -47320,7 +47320,7 @@ function archiveStopFromScopeError(error, relPath) {
   if (error.code === "changed" || error.code === "escape" || error.code === "not_regular") {
     return new ArchiveImportStoppedError("file_changed", "A file of this archive changed since the import started.", relPath);
   }
-  return new ArchiveImportStoppedError("file_unreadable", "A file of this archive could not be read.", relPath);
+  return new ArchiveImportStoppedError("file_unreadable", "A file of this archive could not be read.", relPath, { cause: error });
 }
 var init_stop_errors = __esm(() => {
   init_archive_formats();
@@ -186165,7 +186165,7 @@ function fileStop(error2, relPath) {
   if (error2.code === "changed" || error2.code === "escape" || error2.code === "not_regular") {
     return new ArchiveImportStoppedError("file_changed", "A file of this archive changed since the import started.", relPath);
   }
-  return new ArchiveImportStoppedError("file_unreadable", "A file of this archive could not be read.", relPath);
+  return new ArchiveImportStoppedError("file_unreadable", "A file of this archive could not be read.", relPath, { cause: error2 });
 }
 function changeSinceApproval(root, record8, at) {
   try {
