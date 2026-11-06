@@ -199,6 +199,8 @@ export type TierSnifferVerdict =
 export interface TierSniffer {
   readonly id: string;
   readonly rejudgeReady?: boolean;
+  /** An eligible final verdict for this item's unchanged content and names. */
+  readonly recordedContentVerdict?: { readonly tier: 'private' | 'secure'; readonly code: string; readonly mapRevision: string };
   judge(request: TierSnifferRequest): TierSnifferVerdict;
 }
 
@@ -1079,6 +1081,13 @@ function contentPass(args: {
   // The link itself may grant access. This rests on own text only, after
   // Secrets and owner force rules, and cannot lower the names' tier.
   if (isBareShareLink(text)) {
+    // A new content rule does not replace an existing final judgment. The
+    // store wrapper supplies this only after checking the verdict's receipts.
+    const recorded = args.sniffer.recordedContentVerdict;
+    if (recorded && recorded.mapRevision === args.mapRevision) {
+      const verdict = withSnifferVerdict(decided, recorded.tier, `content:sniffer:${args.sniffer.id}:${recorded.code}`);
+      return { ...verdict, reasons: [...verdict.reasons, ...mark], pending: false };
+    }
     return {
       tier: maxTier(metadata.tier, 'secure'),
       decidedBy: 'content_rule',

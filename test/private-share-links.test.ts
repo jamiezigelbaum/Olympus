@@ -1,8 +1,11 @@
 import { expect, test } from 'bun:test';
 import {
-  classifyContentTier, classifyItemTiers, isBareShareLink, TIER_CLASSIFIER_VERSION,
+  classifyContentTier, classifyItemTiers, contentDigestReason, contentNamesReason, isBareShareLink, TIER_CLASSIFIER_VERSION,
   type TierSniffer, type TierSnifferRequest,
 } from '../src/workers/classification/tier-classifier.ts';
+import { TierLedger } from '../src/workers/classification/tier-ledger.ts';
+import { decideItemTiers } from '../src/workers/connector-store/tier-placement.ts';
+import type { RawItem } from '../src/core/contracts.ts';
 
 const share = 'https://drive.google.com/file/d/unknown-document/view?usp=sharing';
 const shareLinks = [
@@ -23,7 +26,6 @@ const shareLinks = [
   'https://example.sharepoint.com/:w:/s/team/example',
   'https://example.sharepoint.com/sites/team/_layouts/15/Doc.aspx?sourcedoc=example',
   'https://www.notion.so/Document-0123456789abcdef0123456789abcdef',
-  'https://workspace.notion.site/0123456789abcdef0123456789abcdef',
   'https://app.box.com/s/example',
   'https://example.box.com/file/123456',
 ];
@@ -110,4 +112,79 @@ test('delayed content uses the same rule, including archive holds and no model',
     metadataFlagged: false, holdUntilJudged: true });
   expect(result).toMatchObject({ contentTier: 'secure', contentPending: false, decidedBy: 'content_rule' });
   expect(result.reasons).toContain('content:rule:private_share_link');
+});
+
+test('relisting preserves an eligible final p8 content verdict for an unchanged bare link', () => {
+  const item: RawItem = {
+    identity: { provider: 'fixture', accountScope: 'test', providerItemId: 'link', localItemId: 'link', family: 'file' },
+    mimeType: 'text/plain', content: { kind: 'text', text: share }, metadata: { textComplete: true },
+    fetchedAt: '2026-11-06T00:00:00Z',
+  };
+  for (const contentTier of ['private', 'secure'] as const) {
+    const ledger = new TierLedger({ dbPath: ':memory:' });
+    try {
+      // A final pre-rule p8 judgment, with receipts for these exact bytes and names.
+      ledger.recordDecision(item.identity, {
+        ...classifyItemTiers({ signals: {}, text: share }), contentTier, decidedBy: 'sniffer',
+        reasons: ['metadata:default:personal', contentDigestReason(share), contentNamesReason({}),
+          `content:sniffer:fixture:${contentTier === 'private' ? 'ordinary' : 'medical'}:0.99`],
+      });
+      const { sniffer, requests } = spy();
+      const replay = decideItemTiers({ classificationSignals: () => ({}) }, item, share, { sniffer }, ledger);
+      expect(replay).toMatchObject({ contentTier, contentPending: false, state: 'current' });
+      expect(replay.reasons).not.toContain('content:rule:private_share_link');
+      expect(replay.reasons).toContain(`content:sniffer:fixture:${contentTier === 'private' ? 'ordinary' : 'medical'}:0.99`);
+      expect(requests).toHaveLength(0);
+      // Changed bytes have no eligible verdict, so the link rule now applies.
+      expect(decideItemTiers({ classificationSignals: () => ({}) }, item, `${share}&v=2`, { sniffer }, ledger))
+        .toMatchObject({ contentTier: 'secure', decidedBy: 'content_rule' });
+      expect(requests).toHaveLength(0);
+    } finally { ledger.close(); }
+  }
+});
+
+test('identifiable Google publishing URLs and Notion sites remain eligible for content judgment', () => {
+  for (const text of [
+    'https://docs.google.com/document/d/e/2PACX-example/pub',
+    'https://docs.google.com/spreadsheets/d/e/2PACX-example/pubhtml',
+    'https://docs.google.com/presentation/d/e/2PACX-example/pub',
+    'https://workspace.notion.site/Public-guide-0123456789abcdef0123456789abcdef',
+    'https://workspace.notion.site/0123456789abcdef0123456789abcdef',
+  ]) {
+    expect(isBareShareLink(text)).toBe(false);
+    const { sniffer, requests } = spy();
+    expect(classifyItemTiers({ signals: {}, text }, { sniffer }).contentTier).toBe('private');
+    expect(requests.map(r => r.pass)).toEqual(['content']);
+  }
+});
+
+test('current Notion app page links settle Private with bounded page paths', () => {
+  for (const path of ['/p/Document-0123456789abcdef0123456789abcdef',
+    '/0123456789abcdef0123456789abcdef', '/p/01234567-89ab-cdef-0123-456789abcdef/']) {
+    const text = `https://app.notion.com${path}`;
+    expect(isBareShareLink(text)).toBe(true);
+    const { sniffer, requests } = spy();
+    expect(classifyItemTiers({ signals: {}, text }, { sniffer }))
+      .toMatchObject({ contentTier: 'secure', decidedBy: 'content_rule', contentPending: false });
+    expect(requests).toHaveLength(0);
+  }
+  for (const text of ['https://app.notion.com/product',
+    'https://app.notion.com/help/0123456789abcdef0123456789abcdef',
+    'https://app.notion.com/p/Document-0123456789abcdef0123456789abcdef/extra',
+    'https://app.notion.com/p/Document-0123456789abcdef0123456789abcdef-extra',
+    'https://app.notion.com.evil.example/p/Document-0123456789abcdef0123456789abcdef']) {
+    expect(isBareShareLink(text)).toBe(false);
+  }
+});
+
+test('link boundaries preserve adjacent meaningful text and public URLs for the judge', () => {
+  for (const text of [`[Document](${share})Approved`, `[Document](${share})Rejected`,
+    `${share},https://www.bbc.com/news/articles/example`, `${share},Approved`]) {
+    expect(isBareShareLink(text)).toBe(false);
+    const { sniffer, requests } = spy();
+    expect(classifyItemTiers({ signals: {}, text }, { sniffer }).contentTier).toBe('private');
+    expect(requests.map(r => r.pass)).toEqual(['content']);
+    expect(requests[0]!.material).toContain(text);
+  }
+  expect(isBareShareLink(`${share},${shareLinks[6]}`)).toBe(true);
 });

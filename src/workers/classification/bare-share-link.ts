@@ -6,14 +6,22 @@ function isDocumentShareUrl(url: URL): boolean {
     return /^\/(?:file\/d\/|drive\/(?:u\/\d+\/)?folders\/)[^/]+/.test(path)
       || (/^\/(?:open|uc)\/?$/.test(path) && url.searchParams.has('id'));
   }
-  if (host === 'docs.google.com') return /^\/(?:document|spreadsheets|presentation|forms|drawings)\/(?:u\/\d+\/)?d\/[^/]+/.test(path);
+  if (host === 'docs.google.com') {
+    // Published pages use a separate URL from the editable/shared document.
+    if (/\/d\/e\//.test(path) || /\/(?:pub|pubhtml|embed)\/?$/.test(path)) return false;
+    return /^\/(?:document|spreadsheets|presentation|forms|drawings)\/(?:u\/\d+\/)?d\/[^/]+/.test(path);
+  }
   if (host === 'dropbox.com' || host === 'www.dropbox.com') return /^\/(?:s|sh|scl\/(?:fi|fo))\/[^/]+/.test(path);
   if (host === 'db.tt' || host === '1drv.ms') return path.length > 1;
   if (host === 'icloud.com' || host === 'www.icloud.com') return /^\/(?:iclouddrive|pages|numbers|keynote|notes)\/[^/]+/.test(path);
   if (host === 'onedrive.live.com') return url.searchParams.has('id') || url.searchParams.has('resid') || url.searchParams.has('cid');
   if (host.endsWith('.sharepoint.com')) return /^\/:[a-z]:\//i.test(path)
     || (/\/Doc\.aspx$/i.test(path) && url.searchParams.has('sourcedoc'));
-  if (host === 'notion.so' || host.endsWith('.notion.so') || host.endsWith('.notion.site')) {
+  // notion.site hosts published sites; app.notion.com hosts workspace pages.
+  if (host === 'app.notion.com') {
+    return /^\/(?:p\/)?(?:[^/]+-)?(?:[a-f0-9]{32}|[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12})\/?$/i.test(path);
+  }
+  if (host === 'notion.so' || host.endsWith('.notion.so')) {
     return /(?:^|[/-])[a-f0-9]{32}\/?$/i.test(path) || /\/[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}\/?$/i.test(path);
   }
   if (host === 'box.com' || host.endsWith('.box.com')) return /^\/(?:s\/[^/]+|(?:file|folder)\/\d+)(?:\/|$)/.test(path);
@@ -29,7 +37,10 @@ export function isBareShareLink(text: string): boolean {
   let links = 0;
   let linkChars = 0;
   let otherUrl = false;
-  const rest = text.replace(/https?:\/\/[^\s<>"\[\]]+/giu, raw => {
+  // Treat Markdown delimiters and commas as boundaries before removing URLs,
+  // so adjacent prose and a second URL are still evaluated. Encoded URL
+  // punctuation remains part of the URL.
+  const rest = text.replace(/https?:\/\/[^\s<>"\[\](),]+/giu, raw => {
     const link = raw.replace(/[.,!?;:'")\]}>]+$/u, '');
     try {
       if (!isDocumentShareUrl(new URL(link))) otherUrl = true;

@@ -269,6 +269,7 @@ export function recordedContentVerdictSniffer(
     || isFailSafeMissingContentQuestion(`${prefix}${code}`)) return sniffer;
   return {
     id: sniffer.id,
+    recordedContentVerdict: { tier, code, mapRevision: recorded.mapRevision },
     judge: (request) => request.pass === 'content' && (request.mapRevision ?? 'none') === recorded.mapRevision
       ? { verdict: 'decided', tier, code }
       : sniffer.judge(request),

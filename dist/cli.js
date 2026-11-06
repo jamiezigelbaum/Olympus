@@ -19130,8 +19130,11 @@ function isDocumentShareUrl(url) {
   if (host === "drive.google.com") {
     return /^\/(?:file\/d\/|drive\/(?:u\/\d+\/)?folders\/)[^/]+/.test(path) || /^\/(?:open|uc)\/?$/.test(path) && url.searchParams.has("id");
   }
-  if (host === "docs.google.com")
+  if (host === "docs.google.com") {
+    if (/\/d\/e\//.test(path) || /\/(?:pub|pubhtml|embed)\/?$/.test(path))
+      return false;
     return /^\/(?:document|spreadsheets|presentation|forms|drawings)\/(?:u\/\d+\/)?d\/[^/]+/.test(path);
+  }
   if (host === "dropbox.com" || host === "www.dropbox.com")
     return /^\/(?:s|sh|scl\/(?:fi|fo))\/[^/]+/.test(path);
   if (host === "db.tt" || host === "1drv.ms")
@@ -19142,7 +19145,10 @@ function isDocumentShareUrl(url) {
     return url.searchParams.has("id") || url.searchParams.has("resid") || url.searchParams.has("cid");
   if (host.endsWith(".sharepoint.com"))
     return /^\/:[a-z]:\//i.test(path) || /\/Doc\.aspx$/i.test(path) && url.searchParams.has("sourcedoc");
-  if (host === "notion.so" || host.endsWith(".notion.so") || host.endsWith(".notion.site")) {
+  if (host === "app.notion.com") {
+    return /^\/(?:p\/)?(?:[^/]+-)?(?:[a-f0-9]{32}|[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12})\/?$/i.test(path);
+  }
+  if (host === "notion.so" || host.endsWith(".notion.so")) {
     return /(?:^|[/-])[a-f0-9]{32}\/?$/i.test(path) || /\/[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}\/?$/i.test(path);
   }
   if (host === "box.com" || host.endsWith(".box.com"))
@@ -19153,7 +19159,7 @@ function isBareShareLink(text2) {
   let links = 0;
   let linkChars = 0;
   let otherUrl = false;
-  const rest = text2.replace(/https?:\/\/[^\s<>"\[\]]+/giu, (raw) => {
+  const rest = text2.replace(/https?:\/\/[^\s<>"\[\](),]+/giu, (raw) => {
     const link = raw.replace(/[.,!?;:'")\]}>]+$/u, "");
     try {
       if (!isDocumentShareUrl(new URL(link)))
@@ -19584,6 +19590,11 @@ function contentPass(args) {
   }
   let decided = { tier: metadata.tier, decidedBy: metadata.decidedBy, reasons: [] };
   if (isBareShareLink(text2)) {
+    const recorded = args.sniffer.recordedContentVerdict;
+    if (recorded && recorded.mapRevision === args.mapRevision) {
+      const verdict = withSnifferVerdict(decided, recorded.tier, `content:sniffer:${args.sniffer.id}:${recorded.code}`);
+      return { ...verdict, reasons: [...verdict.reasons, ...mark], pending: false };
+    }
     return {
       tier: maxTier(metadata.tier, "secure"),
       decidedBy: "content_rule",
@@ -27895,6 +27906,7 @@ function recordedContentVerdictSniffer(sniffer, recorded, text2, names) {
     return sniffer;
   return {
     id: sniffer.id,
+    recordedContentVerdict: { tier, code, mapRevision: recorded.mapRevision },
     judge: (request) => request.pass === "content" && (request.mapRevision ?? "none") === recorded.mapRevision ? { verdict: "decided", tier, code } : sniffer.judge(request)
   };
 }
