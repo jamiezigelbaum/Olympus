@@ -512,7 +512,8 @@ writes on the reader's own connection have a separate bounded temporary feed.
 Embedding exclusions probe indexed temporary membership instead of rebuilding a
 held-item JSON list. Secret/deletion intents hide their copies before cleanup.
 Search, layer selection, counts, classifier identity and source contracts retain
-their meaning; embedding batches still recheck visibility before dispatch.
+their meaning; each status count keeps its own visibility snapshot across
+off-thread reads, and embedding batches still recheck visibility before dispatch.
 
 Queued moves use an index in their existing retry/age order. Extraction candidate
 calls examine at most 2,000 item keys in 500-key windows, resuming at the last key

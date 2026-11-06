@@ -190,3 +190,41 @@ test('a yielded refresh cannot rewind a newer cache or lose held flags when a pk
     expect(probe.tierLedgerHiddenItemPks()).toMatchObject({ hidden: [], held: [1] });
   } finally { store.close(); ledger.close(); }
 });
+
+test('status snapshots keep their held counts when a verdict arrives between count queries', async () => {
+  const ledger = new TierLedger({ dbPath: ':memory:' });
+  const store = new LocalConnectorStore({ dbPath: ':memory:', corpusId: CORPORA.internal,
+    family: 'file', trustDomain: 'internal', tierLedger: ledger });
+  const probe = store as unknown as StoreProbe & {
+    statusSteps(scope: undefined, options: Record<string, never>): Generator<{
+      sql: string; params: import('bun:sqlite').SQLQueryBindings[]; mode: 'get' | 'all';
+    }, ReturnType<LocalConnectorStore['status']>, unknown>;
+  };
+  try {
+    await store.syncFromConnector(fixtureConnector(() => [{ id: 'a', name: 'Notes', text: 'ordinary' }]), { fetchContent: true, placement: FIXTURE_PLACEMENT });
+    const decision = { ...classifyItemTiers({ signals: {}, text: 'ordinary' }), state: 'pending' as const, contentPending: true };
+    ledger.recordRoutedPlacement(identityOf('a'), decision, { copies: [
+      { corpusId: store.corpusId, trustDomain: 'internal', layers: 'both' },
+    ], embedHold: true });
+    const steps = probe.statusSteps(undefined, {});
+    let step = steps.next();
+    let released = false;
+    while (!step.done) {
+      const read = step.value;
+      const query = probe.db.query(read.sql);
+      const result = read.mode === 'get' ? query.get(...read.params) : query.all(...read.params);
+      if (!released) {
+        released = true;
+        const ldb = (ledger as unknown as { db: Database }).db;
+        ldb.query("UPDATE tier_copies SET embed_hold = 0 WHERE provider_item_id = 'a'").run();
+        probe.tierLedgerHiddenItemPks();
+      }
+      step = steps.next(result);
+    }
+    expect(released).toBe(true);
+    expect(step.value.counts.chunks).toBe(0);
+    expect(step.value.tier?.pendingClassificationItems).toBe(1);
+    expect(store.status().counts.chunks).toBe(1);
+    expect(store.status().tier?.pendingClassificationItems ?? 0).toBe(0);
+  } finally { store.close(); ledger.close(); }
+});

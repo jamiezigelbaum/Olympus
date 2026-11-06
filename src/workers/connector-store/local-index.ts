@@ -12519,7 +12519,14 @@ export class LocalConnectorStore {
     // never counted, and neither they nor items pending classification are in
     // the parity denominator. A store without routed copies gets exactly the
     // pre-P1b queries (the fragments below are empty).
-    const tier = this.tierHiddenItemPks({ countsMaxAgeMs: options.countsMaxAgeMs ?? 0 });
+    const currentTier = this.tierHiddenItemPks({ countsMaxAgeMs: options.countsMaxAgeMs ?? 0 });
+    // Counts may yield to the off-thread reader. Freeze this snapshot's
+    // projection while subsequent verdicts keep updating the shared cache.
+    const tier = { ...currentTier,
+      hidden: currentTier.hidden.slice(), held: currentTier.held.slice(),
+      metadataLayer: currentTier.metadataLayer.slice(),
+      metadataLayerContentUnread: currentTier.metadataLayerContentUnread.slice(),
+    };
     // Each list is ONE JSON parameter, so no count of routed copies can hit
     // SQLite's bound-parameter ceiling.
     const hiddenNotIn = tier.hidden.length > 0
