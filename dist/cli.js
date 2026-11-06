@@ -30597,6 +30597,10 @@ async function embedPendingChunks(targets, options) {
     }
     let answered = false;
     for (const group of groups) {
+      if (answered && options.stopAtMs !== undefined && Date.now() >= options.stopAtMs) {
+        run.stoppedAtDeadline = true;
+        break;
+      }
       try {
         group.provider.assertBindingCurrent?.();
         await target.assertAuthorized?.();
@@ -30605,7 +30609,10 @@ async function embedPendingChunks(targets, options) {
         run.itemsOutOfScope += group.localItemIds.length;
         continue;
       }
-      const outcome = await embedItemsIsolated(store, group.provider, group.localItemIds, target);
+      const outcome = await embedItemsIsolated(store, group.provider, group.localItemIds, {
+        ...target,
+        ...options.stopAtMs !== undefined ? { stopAtMs: options.stopAtMs } : {}
+      });
       run.itemsAttempted += group.localItemIds.length;
       run.chunksEmbedded += outcome.chunksEmbedded;
       run.itemsFailed += outcome.itemsFailed;
@@ -30618,6 +30625,10 @@ async function embedPendingChunks(targets, options) {
         break;
       }
       answered = true;
+      if (outcome.stoppedAtDeadline) {
+        run.stoppedAtDeadline = true;
+        break;
+      }
     }
     if (run.deferredReason)
       store.setEmbeddingDeferral(run.deferredReason);
@@ -30636,8 +30647,11 @@ async function embedItemsIsolated(store, provider, localItemIds, scope = {}) {
       localItemIds: [...localItemIds],
       ...scope.accountScope ? { accountScope: scope.accountScope } : {},
       ...scope.filters ? { filters: scope.filters } : {},
-      ...scope.assertAuthorized ? { assertAuthorized: scope.assertAuthorized } : {}
+      ...scope.assertAuthorized ? { assertAuthorized: scope.assertAuthorized } : {},
+      ...scope.stopAtMs !== undefined ? { stopAtMs: scope.stopAtMs } : {}
     });
+    if (embed.stoppedAtDeadline)
+      return { chunksEmbedded: embed.chunksEmbedded, itemsFailed: 0, stoppedAtDeadline: true };
     store.completeQueuedEmbedding(localItemIds);
     return { chunksEmbedded: embed.chunksEmbedded, itemsFailed: 0 };
   } catch (error) {
@@ -30657,7 +30671,7 @@ async function embedItemsIsolated(store, provider, localItemIds, scope = {}) {
       const single = await embedItemsIsolated(store, provider, [localItemId], scope);
       chunksEmbedded += single.chunksEmbedded;
       itemsFailed += single.itemsFailed;
-      if (single.busy || single.deferredReason)
+      if (single.busy || single.deferredReason || single.stoppedAtDeadline)
         return { ...single, chunksEmbedded, itemsFailed };
     }
     return { chunksEmbedded, itemsFailed };
@@ -38012,6 +38026,9 @@ var init_local_index = __esm(() => {
       if (invalidateCurrentModelEmbeddings && !journalId) {
         throw new TypeError("Connector store embedding invalidation requires a durable journal id.");
       }
+      if (journalId && options.stopAtMs !== undefined) {
+        throw new TypeError("Connector store embedding journals cannot stop at a deadline.");
+      }
       if (invalidateCurrentModelEmbeddings && limit !== undefined) {
         throw new TypeError("Connector store embedding invalidation cannot use a partial embed limit.");
       }
@@ -38133,7 +38150,12 @@ var init_local_index = __esm(() => {
       let staleSkipped = heldPictures;
       const judging = this.mediaJudgmentsPresent && provider.imageSupport && canJudgeMedia(provider) ? provider : undefined;
       const judgedThisPass = new Set;
+      let stoppedAtDeadline = false;
       for (let offset = 0;offset < pending.length; offset += EMBEDDING_BATCH_SIZE) {
+        if (offset > 0 && options.stopAtMs !== undefined && Date.now() >= options.stopAtMs) {
+          stoppedAtDeadline = true;
+          break;
+        }
         let batch = pending.slice(offset, offset + EMBEDDING_BATCH_SIZE);
         await options.assertAuthorized?.();
         {
@@ -38280,7 +38302,7 @@ var init_local_index = __esm(() => {
         staleSkipped += batch.length - written;
       }
       skipped += staleSkipped;
-      if (judging && rows.some((row) => row.media_sha256 && !this.mediaJudgmentSettled(row.media_sha256, mediaJudgeId(judging)))) {
+      if (!stoppedAtDeadline && judging && rows.some((row) => row.media_sha256 && !this.mediaJudgmentSettled(row.media_sha256, mediaJudgeId(judging)))) {
         readsImages ??= await judging.imageSupport();
         if (readsImages)
           await this.judgeUnjudgedMedia(judging, rows, options.assertAuthorized);
@@ -38306,6 +38328,8 @@ var init_local_index = __esm(() => {
       }
       this.clearEmbeddingCurrencyRebuildDebt(provider, providerEpoch);
       const summary = connectorStoreEmbedSummary(this.corpusId, this.trustDomain, provider, rows.length, embedded, skipped);
+      if (stoppedAtDeadline)
+        summary.stoppedAtDeadline = true;
       return privateTierWithheldChunks > 0 ? {
         ...summary,
         privateTierWithheld: {
@@ -172882,8 +172906,9 @@ function embeddingSweepTask(source, targets, deadlineMs = EMBEDDING_SWEEP_STORE_
       for (const target of passTargets) {
         const overran = Symbol("overran");
         let timer;
+        const stopAtMs = Date.now() + Math.floor(deadlineMs / 2);
         const result = await Promise.race([
-          embedPendingChunks([target], { maxItems: EMBEDDING_SWEEP_MAX_ITEMS }),
+          embedPendingChunks([target], { maxItems: EMBEDDING_SWEEP_MAX_ITEMS, stopAtMs }),
           new Promise((resolve27) => {
             timer = setTimeout(() => resolve27(overran), deadlineMs);
           })
@@ -172916,7 +172941,7 @@ function embeddingSweepTask(source, targets, deadlineMs = EMBEDDING_SWEEP_STORE_
       const status = counts.chunks_embedded > 0 ? "progress" : "idle";
       const attemptedAt = Date.parse(context2?.attemptedAt ?? "") || Date.now();
       if (deferred2 === 0) {
-        const more = runs.some((run2) => run2.busy !== true && run2.chunksEmbedded > 0 && run2.itemsAttempted >= EMBEDDING_SWEEP_MAX_ITEMS);
+        const more = runs.some((run2) => run2.busy !== true && run2.chunksEmbedded > 0 && (run2.itemsAttempted >= EMBEDDING_SWEEP_MAX_ITEMS || run2.stoppedAtDeadline === true));
         if (counts.items_failed === 0)
           return { status, counts, ...more ? { continueSoon: true } : {} };
         return {

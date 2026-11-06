@@ -1865,8 +1865,14 @@ function embeddingSweepTask(
       for (const target of passTargets) {
         const overran = Symbol('overran');
         let timer: ReturnType<typeof setTimeout> | undefined;
+        // The pass stops starting batches at half the deadline, so a store
+        // whose 32 items hold thousands of chunks ends in time and continues
+        // next pass, instead of overrunning and backing off as if the
+        // provider were down (Sparta, 2026-11-06: 94 overruns, 70 of them
+        // Dropbox, whose Private store then embedded nothing for an hour).
+        const stopAtMs = Date.now() + Math.floor(deadlineMs / 2);
         const result = await Promise.race([
-          embedPendingChunks([target], { maxItems: EMBEDDING_SWEEP_MAX_ITEMS }),
+          embedPendingChunks([target], { maxItems: EMBEDDING_SWEEP_MAX_ITEMS, stopAtMs }),
           new Promise<typeof overran>((resolve) => { timer = setTimeout(() => resolve(overran), deadlineMs); }),
         ]).finally(() => clearTimeout(timer));
         if (result !== overran) {
@@ -1896,7 +1902,8 @@ function embeddingSweepTask(
       const attemptedAt = Date.parse(context?.attemptedAt ?? '') || Date.now();
       if (deferred === 0) {
         // A store that filled its bound has more owed: a backlog drains pass after pass, not one bound a minute.
-        const more = runs.some((run) => run.busy !== true && run.chunksEmbedded > 0 && run.itemsAttempted >= EMBEDDING_SWEEP_MAX_ITEMS);
+        const more = runs.some((run) => run.busy !== true && run.chunksEmbedded > 0
+          && (run.itemsAttempted >= EMBEDDING_SWEEP_MAX_ITEMS || run.stoppedAtDeadline === true));
         if (counts.items_failed === 0) return { status, counts, ...(more ? { continueSoon: true } : {}) };
         // Skipped items are surfaced, not retried. A backlog still drains pass
         // after pass: one failed item, ever, once held every later pass of the

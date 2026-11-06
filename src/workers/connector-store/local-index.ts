@@ -1516,6 +1516,12 @@ export interface ConnectorStoreEmbedOptions {
   assertAuthorized?: () => void | Promise<void>;
   /** Optional item selection for latency-sensitive incremental ingest. */
   localItemIds?: readonly string[];
+  /**
+   * A wall-clock time (epoch ms) after which no further batch starts. What was
+   * embedded stays; the rest is still owed and waits for the next pass. The
+   * first batch always runs, so every pass makes progress. Not with a journal.
+   */
+  stopAtMs?: number;
   /** Durable idempotency key for a maintenance page's embedding phase. */
   journalId?: string;
   /** Monotonic owner generation used to fence a superseded maintenance run. */
@@ -1540,6 +1546,8 @@ export interface ConnectorStoreEmbedSummary {
   chunksSeen: number;
   chunksEmbedded: number;
   chunksSkipped: number;
+  /** Set when the pass reached `stopAtMs` with chunks still owed. Counts only. */
+  stoppedAtDeadline?: true;
   /**
    * Set when the embedding provider stopped answering part-way (a transient
    * outage or timeout that outlived its own retries). What was embedded before
@@ -1631,6 +1639,8 @@ export interface ConnectorStoreEmbedStoreRun {
   deferredReason?: string;
   /** Another embedder held this store's lease for the whole wait; nothing was lost. */
   busy?: boolean;
+  /** The pass reached its time budget with chunks still owed; they wait for the next pass. */
+  stoppedAtDeadline?: boolean;
 }
 
 /**
@@ -1654,7 +1664,9 @@ export interface ConnectorStoreEmbedStoreRun {
  */
 export async function embedPendingChunks(
   targets: readonly ConnectorStoreEmbeddingTarget[],
-  options: { maxItems: number },
+  // stopAtMs: no batch starts after it (the first always runs). Items count
+  // badly as work: one long file can hold more chunks than a pass has time for.
+  options: { maxItems: number; stopAtMs?: number },
 ): Promise<ConnectorStoreEmbedStoreRun[]> {
   const runs: ConnectorStoreEmbedStoreRun[] = [];
   for (const target of targets) {
@@ -1684,6 +1696,10 @@ export async function embedPendingChunks(
     }
     let answered = false;
     for (const group of groups) {
+      if (answered && options.stopAtMs !== undefined && Date.now() >= options.stopAtMs) {
+        run.stoppedAtDeadline = true;
+        break;
+      }
       try {
         group.provider.assertBindingCurrent?.();
         await target.assertAuthorized?.();
@@ -1692,7 +1708,10 @@ export async function embedPendingChunks(
         run.itemsOutOfScope += group.localItemIds.length;
         continue;
       }
-      const outcome = await embedItemsIsolated(store, group.provider, group.localItemIds, target);
+      const outcome = await embedItemsIsolated(store, group.provider, group.localItemIds, {
+        ...target,
+        ...(options.stopAtMs !== undefined ? { stopAtMs: options.stopAtMs } : {}),
+      });
       run.itemsAttempted += group.localItemIds.length;
       run.chunksEmbedded += outcome.chunksEmbedded;
       run.itemsFailed += outcome.itemsFailed;
@@ -1705,6 +1724,10 @@ export async function embedPendingChunks(
         break;
       }
       answered = true;
+      if (outcome.stoppedAtDeadline) {
+        run.stoppedAtDeadline = true;
+        break;
+      }
     }
     if (run.deferredReason) store.setEmbeddingDeferral(run.deferredReason);
     else if (answered) store.setEmbeddingDeferral(undefined);
@@ -1725,15 +1748,19 @@ async function embedItemsIsolated(
   store: LocalConnectorStore,
   provider: SourceEmbeddingProvider,
   localItemIds: readonly string[],
-  scope: Pick<ConnectorStoreEmbedOptions, 'accountScope' | 'filters' | 'assertAuthorized'> = {},
-): Promise<{ chunksEmbedded: number; itemsFailed: number; deferredReason?: string; busy?: boolean }> {
+  scope: Pick<ConnectorStoreEmbedOptions, 'accountScope' | 'filters' | 'assertAuthorized' | 'stopAtMs'> = {},
+): Promise<{ chunksEmbedded: number; itemsFailed: number; deferredReason?: string; busy?: boolean; stoppedAtDeadline?: boolean }> {
   try {
     const embed = await store.embedChunks({
       provider, localItemIds: [...localItemIds],
       ...(scope.accountScope ? { accountScope: scope.accountScope } : {}),
       ...(scope.filters ? { filters: scope.filters } : {}),
       ...(scope.assertAuthorized ? { assertAuthorized: scope.assertAuthorized } : {}),
+      ...(scope.stopAtMs !== undefined ? { stopAtMs: scope.stopAtMs } : {}),
     });
+    // Stopped part-way, the items stay queued: the next pass skips the chunks
+    // that already hold a current vector and embeds the rest.
+    if (embed.stoppedAtDeadline) return { chunksEmbedded: embed.chunksEmbedded, itemsFailed: 0, stoppedAtDeadline: true };
     store.completeQueuedEmbedding(localItemIds);
     return { chunksEmbedded: embed.chunksEmbedded, itemsFailed: 0 };
   } catch (error) {
@@ -1754,7 +1781,7 @@ async function embedItemsIsolated(
       const single = await embedItemsIsolated(store, provider, [localItemId], scope);
       chunksEmbedded += single.chunksEmbedded;
       itemsFailed += single.itemsFailed;
-      if (single.busy || single.deferredReason) return { ...single, chunksEmbedded, itemsFailed };
+      if (single.busy || single.deferredReason || single.stoppedAtDeadline) return { ...single, chunksEmbedded, itemsFailed };
     }
     return { chunksEmbedded, itemsFailed };
   }
@@ -10225,6 +10252,9 @@ export class LocalConnectorStore {
         'Connector store embedding invalidation requires a durable journal id.',
       );
     }
+    if (journalId && options.stopAtMs !== undefined) {
+      throw new TypeError('Connector store embedding journals cannot stop at a deadline.');
+    }
     if (invalidateCurrentModelEmbeddings && limit !== undefined) {
       throw new TypeError(
         'Connector store embedding invalidation cannot use a partial embed limit.',
@@ -10459,7 +10489,12 @@ export class LocalConnectorStore {
     // One judgment per picture per pass: several items carrying the same
     // picture are one try, not several.
     const judgedThisPass = new Set<string>();
+    let stoppedAtDeadline = false;
     for (let offset = 0; offset < pending.length; offset += EMBEDDING_BATCH_SIZE) {
+      if (offset > 0 && options.stopAtMs !== undefined && Date.now() >= options.stopAtMs) {
+        stoppedAtDeadline = true;
+        break;
+      }
       let batch = pending.slice(offset, offset + EMBEDDING_BATCH_SIZE);
       await options.assertAuthorized?.();
       // The rows were selected before any provider round trip, and ordinary
@@ -10667,7 +10702,7 @@ export class LocalConnectorStore {
       staleSkipped += batch.length - written;
     }
     skipped += staleSkipped;
-    if (judging && rows.some((row) => row.media_sha256 && !this.mediaJudgmentSettled(row.media_sha256, mediaJudgeId(judging)))) {
+    if (!stoppedAtDeadline && judging && rows.some((row) => row.media_sha256 && !this.mediaJudgmentSettled(row.media_sha256, mediaJudgeId(judging)))) {
       readsImages ??= await judging.imageSupport!();
       if (readsImages) await this.judgeUnjudgedMedia(judging, rows, options.assertAuthorized);
     }
@@ -10716,6 +10751,7 @@ export class LocalConnectorStore {
       embedded,
       skipped,
     );
+    if (stoppedAtDeadline) summary.stoppedAtDeadline = true;
     return privateTierWithheldChunks > 0
       ? {
           ...summary,
