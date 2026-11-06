@@ -316,6 +316,7 @@ export function createEvernoteSourceConnector(options: EvernoteConnectorOptions)
         authoredAt,
         ...(createdAt ? { createdAt } : {}),
         ...(updatedAt ? { updatedAt } : {}),
+        attachmentCount: resources.length,
         contentHash: createHash('sha256').update(text).digest('hex'),
       }),
       fetchedAt: now().toISOString(),

@@ -389,6 +389,9 @@ export function createWhatsAppArchiveConnector(input: ArchiveConnectorInput): So
         senderLabel: sender,
         ...(authoredAt ? { authoredAt } : {}),
         contentHash: textHash,
+        titleIsConversation: true,
+        attachmentCount: whatsAppMediaMarkerCount(raw.text),
+        ...(whatsAppMediaMarkerCount(raw.text) === 0 ? { textComplete: true } : {}),
         // The export this copy of the message was read from.
         sourceFile: unit.file.relPath,
         ...(unit.entry ? { sourceMember: unit.entry.name } : {}),

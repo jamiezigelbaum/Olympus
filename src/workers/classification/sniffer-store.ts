@@ -20,7 +20,7 @@ import { closeSqliteStore } from '../../core/sqlite-store.ts';
 import { HELD_UNTIL_JUDGED_PRIORITY, type TierSnifferSubject } from './tier-classifier.ts';
 import { TIER_SNIFFER_SQLITE_STORE_ID } from './tier-ledger-path.ts';
 
-export const TIER_SNIFFER_SCHEMA_VERSION = 4;
+export const TIER_SNIFFER_SCHEMA_VERSION = 5;
 
 export type SnifferPass = 'metadata' | 'content';
 export type SnifferTier = 'personal' | 'private';
@@ -39,6 +39,8 @@ export interface StoredSnifferVerdict {
   /** True when this verdict is the fail-safe Private recorded after repeated failures. */
   failSafe: boolean;
   decidedAt: string;
+  contentHash?: string;
+  modelSubject?: string;
 }
 
 export interface SnifferQuestion {
@@ -49,6 +51,7 @@ export interface SnifferQuestion {
   providerConversationId?: string;
   pass: SnifferPass;
   materialHash: string;
+  contentHash?: string;
   mapRevision: string;
   material: string;
   flags: string[];
@@ -61,6 +64,16 @@ export interface SnifferQuestion {
 
 export function snifferMaterialHash(pass: SnifferPass, material: string): string {
   return createHash('sha256').update(`${pass}\n${material}`).digest('hex');
+}
+
+/** Non-content identity of the item whose model answer is awaiting final settlement. */
+export function snifferSubjectKey(subject: TierSnifferSubject): string {
+  return createHash('sha256').update(JSON.stringify([subject.provider, subject.accountScope, subject.providerConversationId ?? '', subject.providerItemId])).digest('hex');
+}
+
+export function contentVerdictReusable(verdict: StoredSnifferVerdict, contentHash: string, subject?: TierSnifferSubject): boolean {
+  return !verdict.failSafe && (verdict.contentHash === contentHash
+    || (subject !== undefined && verdict.modelSubject === snifferSubjectKey(subject)));
 }
 
 export class TierSnifferStore {
@@ -108,7 +121,7 @@ export class TierSnifferStore {
 
   getVerdict(key: SnifferVerdictKey): StoredSnifferVerdict | undefined {
     const row = this.db.query(`
-      SELECT tier, category, confidence, fail_safe, decided_at FROM sniffer_verdicts
+      SELECT tier, category, confidence, fail_safe, decided_at, content_hash, model_subject FROM sniffer_verdicts
       WHERE material_hash = ? AND model_id = ? AND prompt_version = ? AND map_revision = ?
     `).get(key.materialHash, key.modelId, key.promptVersion, key.mapRevision) as {
       tier: SnifferTier;
@@ -116,6 +129,8 @@ export class TierSnifferStore {
       confidence: number;
       fail_safe: number;
       decided_at: string;
+      content_hash: string | null;
+      model_subject: string | null;
     } | null;
     if (!row) return undefined;
     return {
@@ -124,16 +139,18 @@ export class TierSnifferStore {
       confidence: row.confidence,
       failSafe: row.fail_safe === 1,
       decidedAt: row.decided_at,
+      ...(row.content_hash ? { contentHash: row.content_hash } : {}),
+      ...(row.model_subject ? { modelSubject: row.model_subject } : {}),
     };
   }
 
-  putVerdict(key: SnifferVerdictKey, verdict: Omit<StoredSnifferVerdict, 'decidedAt'>): void {
+  putVerdict(key: SnifferVerdictKey, verdict: Omit<StoredSnifferVerdict, 'decidedAt'>, subject?: TierSnifferSubject): void {
     this.db.query(`
-      INSERT INTO sniffer_verdicts (material_hash, model_id, prompt_version, map_revision, tier, category, confidence, fail_safe, decided_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO sniffer_verdicts (material_hash, model_id, prompt_version, map_revision, tier, category, confidence, fail_safe, decided_at, model_subject)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT (material_hash, model_id, prompt_version, map_revision) DO UPDATE SET
         tier = excluded.tier, category = excluded.category, confidence = excluded.confidence,
-        fail_safe = excluded.fail_safe, decided_at = excluded.decided_at
+        fail_safe = excluded.fail_safe, decided_at = excluded.decided_at, content_hash = NULL, model_subject = excluded.model_subject
     `).run(
       key.materialHash,
       key.modelId,
@@ -144,7 +161,26 @@ export class TierSnifferStore {
       verdict.confidence,
       verdict.failSafe ? 1 : 0,
       this.now().toISOString(),
+      subject ? snifferSubjectKey(subject) : null,
     );
+  }
+
+  /** Only a model answer applied to a final item may answer another item's content. */
+  markFinalModelContent(key: SnifferVerdictKey, contentHash: string): void {
+    this.db.query(`UPDATE sniffer_verdicts SET content_hash = ?
+      WHERE material_hash = ? AND model_id = ? AND prompt_version = ? AND map_revision = ? AND fail_safe = 0`)
+      .run(contentHash, key.materialHash, key.modelId, key.promptVersion, key.mapRevision);
+  }
+
+  // Private can only raise across names. Personal requires the complete same
+  // input (including names); missing identity never authorizes a lowering.
+  getFinalModelContentVerdict(key: Omit<SnifferVerdictKey, 'materialHash'> & { contentHash: string; materialHash?: string }): StoredSnifferVerdict | undefined {
+    const row = this.db.query(`SELECT material_hash FROM sniffer_verdicts
+      WHERE content_hash = ? AND model_id = ? AND prompt_version = ? AND map_revision = ? AND fail_safe = 0
+        AND (tier = 'private' OR material_hash = ?)
+      ORDER BY CASE tier WHEN 'private' THEN 1 ELSE 0 END DESC, decided_at DESC LIMIT 1`)
+      .get(key.contentHash, key.modelId, key.promptVersion, key.mapRevision, key.materialHash ?? null) as { material_hash: string } | null;
+    return row ? this.getVerdict({ ...key, materialHash: row.material_hash }) : undefined;
   }
 
   /**
@@ -161,6 +197,7 @@ export class TierSnifferStore {
     material: string;
     /** Full classification input digest, including text outside the excerpt. */
     materialHash?: string;
+    contentHash?: string;
     mapRevision: string;
     flags: readonly string[];
     priority?: number;
@@ -180,8 +217,8 @@ export class TierSnifferStore {
       `).get(...subjectParams(question.subject), question.pass) as { priority: number } | null;
       this.db.query(`
       INSERT INTO sniffer_questions (
-        provider, account_scope, conversation_key, provider_item_id, pass, material_hash, map_revision, material, flags_json, attempts, queued_at, priority
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
+        provider, account_scope, conversation_key, provider_item_id, pass, material_hash, map_revision, material, flags_json, attempts, queued_at, priority, content_hash
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)
       ON CONFLICT (provider, account_scope, conversation_key, provider_item_id, pass) DO UPDATE SET
         held_sniffer_id = CASE WHEN sniffer_questions.material_hash = excluded.material_hash
           AND sniffer_questions.map_revision = excluded.map_revision AND sniffer_questions.flags_json = excluded.flags_json
@@ -189,6 +226,7 @@ export class TierSnifferStore {
         attempts = CASE WHEN sniffer_questions.material_hash = excluded.material_hash
           AND sniffer_questions.map_revision = excluded.map_revision
           THEN sniffer_questions.attempts ELSE 0 END,
+        content_hash = excluded.content_hash,
         material_hash = excluded.material_hash,
         map_revision = excluded.map_revision,
         material = excluded.material,
@@ -203,6 +241,7 @@ export class TierSnifferStore {
       JSON.stringify([...question.flags]),
       this.now().toISOString(),
       priority,
+      question.contentHash ?? null,
     );
       // Recent order is priority, then queue time, which an update keeps.
       if (priority > 0 && (!before || priority > before.priority)) {
@@ -404,6 +443,7 @@ interface QuestionRow {
   provider_item_id: string;
   pass: SnifferPass;
   material_hash: string;
+  content_hash?: string | null;
   map_revision: string;
   material: string;
   flags_json: string;
@@ -419,6 +459,7 @@ function questionFromRow(row: QuestionRow): SnifferQuestion {
     ...(row.conversation_key ? { providerConversationId: row.conversation_key } : {}),
     pass: row.pass,
     materialHash: row.material_hash,
+    ...(row.content_hash ? { contentHash: row.content_hash } : {}),
     mapRevision: row.map_revision,
     material: row.material,
     flags: JSON.parse(row.flags_json) as string[],
@@ -505,6 +546,17 @@ function snifferMigrations(): SqliteMigration[] {
       name: 'held_lowering_answers',
       up(db) {
         db.exec('ALTER TABLE sniffer_questions ADD COLUMN held_sniffer_id TEXT;');
+      },
+    },
+    {
+      version: 5,
+      name: 'final_model_content_reuse',
+      up(db) {
+        db.exec(`ALTER TABLE sniffer_questions ADD COLUMN content_hash TEXT;
+          ALTER TABLE sniffer_verdicts ADD COLUMN content_hash TEXT;
+          ALTER TABLE sniffer_verdicts ADD COLUMN model_subject TEXT;
+          CREATE INDEX sniffer_final_content ON sniffer_verdicts(content_hash, model_id, prompt_version, map_revision)
+            WHERE fail_safe = 0 AND content_hash IS NOT NULL;`);
       },
     },
   ];

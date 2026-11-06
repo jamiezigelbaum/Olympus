@@ -243,6 +243,8 @@ describe('WhatsApp live SourceConnector (Contract 1)', () => {
       senderIsOwner: false,
       fromMe: false,
       sentAt: '2026-06-11T12:34:56Z',
+      titleIsConversation: true,
+      textComplete: true,
     });
   });
 
@@ -271,6 +273,8 @@ describe('WhatsApp live SourceConnector (Contract 1)', () => {
       fromMe: false,
       sentAt: '2026-07-09T07:29:01Z',
       mentions: { '98765430009999': 'you' },
+      titleIsConversation: true,
+      textComplete: true,
     });
   });
 

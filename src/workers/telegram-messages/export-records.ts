@@ -277,6 +277,8 @@ export function telegramExportMessageRecord(
     ...(senderName ? { senderDisplayName: senderName } : {}),
     ...(senderId && context.ownUserId ? { senderIsOwner: senderId === context.ownUserId } : {}),
     ...(content && content.hasContent ? { boundedText: content.text } : {}),
+    ...(content && !content.unsupported && content.mediaFiles === 0 && content.attachments.length === 0
+      ? { textComplete: true } : {}),
     ...(service ? { service: serviceEvent } : {}),
     ...(replyTo ? { replyToMessageId: replyTo } : {}),
     ...(forwardedFrom ? { forwardSource: 'telegram_forward', forwardFromName: forwardedFrom } : {}),

@@ -16035,6 +16035,7 @@ function gmailMessageItem(record2, account, fetchedAt = new Date().toISOString()
     mimeType: "message/rfc822",
     content: !metadataOnly && text2.trim() ? { kind: "text", text: text2 } : { kind: "metadata_only" },
     metadata: Object.freeze({
+      ...record2.textComplete === true && !metadataOnly && attachments.length === 0 ? { textComplete: true } : {},
       title: subject,
       subject,
       from,
@@ -16802,6 +16803,7 @@ function gmailMailRecordFromMessage(message, options = {}) {
 
 `),
     metadataOnly,
+    ...!metadataOnly && gmailTextComplete(message.payload) ? { textComplete: true } : {},
     attachments: gmailAttachments(message.id, message.payload, false, children)
   };
 }
@@ -16874,6 +16876,13 @@ function gmailPartAt(part, partId) {
       return found;
   }
   return;
+}
+function gmailTextComplete(part) {
+  if (!part || part.filename?.trim() || part.body?.attachmentId || headersFromPart(part).get("content-disposition")?.split(";")[0]?.trim().toLowerCase() === "attachment")
+    return false;
+  if (part.mimeType === "text/plain")
+    return part.body?.data !== undefined && !part.parts?.length;
+  return !!part.mimeType?.startsWith("multipart/") && !!part.parts?.length && part.parts.every(gmailTextComplete);
 }
 function collectPartText(part, plain, html, children = false) {
   if (!part)

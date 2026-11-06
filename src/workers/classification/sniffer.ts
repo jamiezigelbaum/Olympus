@@ -32,6 +32,8 @@ import { detectSecretFindingKinds } from './engine.ts';
 import { isUnitConfidence, parseStrictJsonObject } from './delphi-scorer.ts';
 import {
   snifferMaterialHash,
+  contentVerdictReusable,
+  snifferSubjectKey,
   type SnifferPass,
   type SnifferTier,
   type StoredSnifferVerdict,
@@ -566,23 +568,38 @@ export class CachedTierSniffer implements TierSniffer {
     const own = snifferOwnMaterial(material);
     // A deterministic refusal is terminal, using the existing Secrets disposition.
     // The model still returns Personal or Private only.
-    if (snifferMaterialCarriesSecret(own)) return { verdict: 'decided', tier: 'secrets', code: 'secret_refused' };
+    if (snifferMaterialCarriesSecret(own)) return { verdict: 'decided', tier: 'secrets', code: 'secret_refused', origin: 'rule', rule: 'secret_refused' };
     // Material that tries to instruct the model is Private at once, and is
     // neither queued nor sent.
     const injectionRule = snifferInjectionRule(own);
     if (injectionRule) {
-      return { verdict: 'decided', tier: 'secure', code: `injection:${injectionRule}:0.00` };
+      return { verdict: 'decided', tier: 'secure', code: `injection:${injectionRule}:0.00`, origin: 'rule', rule: 'injection' };
     }
     const mapRevision = request.mapRevision ?? 'none';
     try {
-      const cached = this.lane.snifferMode === 'pending' ? undefined : this.store.getVerdict({
+      let cached = this.lane.snifferMode === 'pending' ? undefined : this.store.getVerdict({
         materialHash: request.materialHash ?? snifferMaterialHash(request.pass, material),
         modelId: snifferCacheModelId(this.lane),
         promptVersion: this.promptVersion,
         mapRevision,
       });
+      if (cached && request.contentHash && !contentVerdictReusable(cached, request.contentHash, request.subject)) cached = undefined;
+      let duplicate = cached !== undefined && request.contentHash !== undefined
+        && (!request.subject || cached.modelSubject !== snifferSubjectKey(request.subject));
+      if (!cached && request.pass === 'content' && request.contentHash && this.lane.snifferMode !== 'pending') {
+        cached = this.store.getFinalModelContentVerdict({
+          materialHash: request.materialHash ?? snifferMaterialHash(request.pass, material),
+          contentHash: request.contentHash, modelId: snifferCacheModelId(this.lane),
+          promptVersion: this.promptVersion, mapRevision,
+        });
+        duplicate = cached !== undefined;
+      }
       if (cached && cachedSnifferVerdictHolds(cached)) {
-        return { verdict: 'decided', ...snifferVerdictTier(cached, this.lane, request.flags) };
+        const answer = snifferVerdictTier(cached, this.lane, request.flags);
+        return { verdict: 'decided', ...answer,
+          origin: duplicate || cached.failSafe ? 'rule' : 'model',
+          ...(duplicate ? { rule: 'duplicate_model' } : cached.failSafe ? { rule: 'fail_safe' } : {}),
+          code: duplicate ? `rule:duplicate_model:${answer.code}` : answer.code };
       }
       if (request.subject) {
         const queued = this.store.enqueue({
@@ -590,6 +607,7 @@ export class CachedTierSniffer implements TierSniffer {
           pass: request.pass,
           material,
           ...(request.materialHash ? { materialHash: request.materialHash } : {}),
+          ...(request.contentHash ? { contentHash: request.contentHash } : {}),
           mapRevision,
           flags: request.flags,
           ...(request.priority !== undefined ? { priority: request.priority } : {}),

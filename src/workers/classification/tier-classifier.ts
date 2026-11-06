@@ -27,6 +27,7 @@ import { hasCredentialUrl } from '../../core/secret-patterns.ts';
 export { hasCredentialUrl } from '../../core/secret-patterns.ts';
 import { createHash } from 'node:crypto';
 import type {
+  RawItem,
   SourceClassificationSignals,
   SourceClassificationTier,
 } from '../../core/contracts.ts';
@@ -60,6 +61,9 @@ export const TIER_CLASSIFIER_KIND = 'olympus_shared_four_tier_classifier';
 // p8 (2026-10-29): on the small built-in model a Personal answer holds an item
 // whose text shows a populated record Private (sniffer.ts, snifferVerdictTier).
 // Items decided under p7 are judged again; cached answers settle them at once.
+// The content rules (`content_rule`) deliberately kept p8: they only spare
+// a model call for items not yet judged, and a new version here makes every
+// decided item eligible for judging again.
 export const TIER_CLASSIFIER_VERSION = '2026-10-29.p8';
 
 /**
@@ -165,6 +169,8 @@ export interface TierSnifferRequest {
   material?: string;
   /** Digest of the full input, so an unchanged excerpt cannot reuse a changed document's verdict. */
   materialHash?: string;
+  /** Normalized complete own text, only for items with no other content or context. */
+  contentHash?: string;
   /** Always TIER_MAP_REVISION (a cache-key part kept from the retired sensitivity map). */
   mapRevision?: string;
   subject?: TierSnifferSubject;
@@ -186,7 +192,7 @@ export interface TierSnifferRequest {
  */
 export type TierSnifferVerdict =
   | { verdict: 'undecided'; /** True only after the question is durably queued. */ queued?: true }
-  | { verdict: 'decided'; tier: 'private' | 'secure' | 'secrets'; code: string };
+  | { verdict: 'decided'; tier: 'private' | 'secure' | 'secrets'; code: string; origin?: 'model' | 'rule'; rule?: string };
 
 export interface TierSniffer {
   readonly id: string;
@@ -334,6 +340,38 @@ export function tierSnifferInputHash(
   ])).digest('hex');
 }
 
+/** Conservative capability check; no source identities or group privacy decisions. */
+export function itemHasNonTextContent(item: RawItem): boolean {
+  if (item.metadata.textComplete !== true || item.content.kind !== 'text' || item.deferredBytes || item.identity.parent
+    || item.identity.providerFileId || !textOnlyMime(item.mimeType)) return true;
+  return Object.entries(item.metadata).some(([key, value]) =>
+    /attachment|media|resource/i.test(key)
+    && value !== undefined && value !== null && value !== false && value !== 0 && value !== ''
+    && (!Array.isArray(value) || value.length > 0));
+}
+
+function textOnlyMime(mimeType?: string): boolean {
+  return mimeType === undefined || ['text/plain', 'text/markdown', 'message/rfc822'].includes(mimeType.split(';')[0]!.trim().toLowerCase());
+}
+
+/** Case and internal whitespace remain significant; normalize encoding only. */
+export function normalizedContentHash(text: string): string {
+  return createHash('sha256').update(text.normalize('NFC').replace(/\r\n?/g, '\n').trim()).digest('hex');
+}
+
+function trivialContentRule(text: string, parentContext?: string): string | undefined {
+  const own = text.trim();
+  if (!own) return parentContext?.trim() ? undefined : 'empty_text';
+  if (parentContext?.trim()) return undefined;
+  // Remove keycaps as units so ordinary digits are not accepted as emoji.
+  const symbols = own.replace(/[0-9#*]\ufe0f?\u20e3/gu, '😀')
+    .replace(/\u{1f3f4}[\u{e0061}-\u{e007a}]+\u{e007f}/gu, '😀');
+  if (/^[\p{P}\p{Extended_Pictographic}\p{Regional_Indicator}\p{Emoji_Modifier}\s\u200d\ufe0f\u20e3]+$/u.test(symbols)
+    && /[\p{P}\p{Extended_Pictographic}\p{Regional_Indicator}]/u.test(symbols)) return 'emoji_or_punctuation';
+  if ([...own].length <= 3 && !/(?=\p{L})[\p{Script_Extensions=Han}\p{Script_Extensions=Hangul}\p{Script_Extensions=Hiragana}\p{Script_Extensions=Katakana}]/u.test(own)) return 'short_text';
+  return undefined;
+}
+
 // --- Input / output -----------------------------------------------------------
 
 export interface TierClassificationInput {
@@ -360,6 +398,12 @@ export interface TierClassificationInput {
    * ordinary (`imageJudgment`).
    */
   mimeType?: string;
+  /** True when a file, attachment, media or deferred content remains behind this text. */
+  hasNonTextContent?: boolean;
+  /** Connector fact: the title names the conversation, not the item. Rule eligibility only. */
+  titleIsConversation?: boolean;
+  /** An existing per-item Secret hold, read from the authoritative ledger. */
+  heldSecret?: boolean;
   /** The photo judge's verdict on a still image's picture (media-judge.ts). Absent: unjudged. */
   imageJudgment?: ImageJudgmentSignal;
   /**
@@ -510,6 +554,7 @@ export type TierDecidedBy =
   | 'public_evidence'
   | 'sensitive_detector'
   | 'sniffer'
+  | 'content_rule'
   | 'default';
 
 // --- Classifier ----------------------------------------------------------------
@@ -520,6 +565,7 @@ export function classifyItemTiers(
 ): TierDecision {
   const decision = classifyItemTiersWithPublic(input, options);
   if (input.text !== undefined && decision.contentTier !== 'secrets') {
+    if (input.hasNonTextContent !== true && textOnlyMime(input.mimeType)) decision.reasons.push('content:text_only');
     decision.reasons.push(contentDigestReason(input.text), contentNamesReason(input.signals, input.parentContext));
   }
   return options.retirePublic ? withPublicRetired(decision) : decision;
@@ -536,7 +582,7 @@ function classifyItemTiersWithPublic(
     mapRevision: TIER_MAP_REVISION,
     snifferId: sniffer.id,
   };
-  const text = input.text?.trim() ? input.text : undefined;
+  const text = input.text;
   const holdUntilJudged = input.holdUntilJudged === true;
 
   // [1] Per-item owner override (sticky). A tier override is final for both
@@ -582,6 +628,9 @@ function classifyItemTiersWithPublic(
   const content = contentPass({
     signals,
     text,
+    textOnly: input.hasNonTextContent !== true && textOnlyMime(input.mimeType),
+    titleIsConversation: input.titleIsConversation === true,
+    ...(input.heldSecret ? { heldSecret: true } : {}),
     ...(input.namesOnly ? { namesOnly: true } : {}),
     ...(holdUntilJudged ? { holdUntilJudged: true } : {}),
     ...(isImageMediaType(input.mimeType) ? { image: true } : {}),
@@ -597,7 +646,7 @@ function classifyItemTiersWithPublic(
     ...(input.subject ? { subject: input.subject } : {}),
   });
 
-  const contentRead = text !== undefined || metadata.tier === 'secrets';
+  const contentRead = (text !== undefined && (!!text.trim() || (input.hasNonTextContent !== true && textOnlyMime(input.mimeType)))) || content.tier === 'secrets';
   // Unread text keeps the content decision open, unless the owner chose that
   // it is never read: then the names are the whole decision.
   const namesOnly = input.namesOnly === true && text === undefined;
@@ -644,6 +693,12 @@ export interface ContentTierInput {
   sender?: string;
   /** The item's media type: a still image's content rests Private unless judged ordinary. */
   mimeType?: string;
+  /** True when a file, attachment, media or deferred content remains behind this text. */
+  hasNonTextContent?: boolean;
+  /** Connector fact: the title names the conversation, not the item. Rule eligibility only. */
+  titleIsConversation?: boolean;
+  /** An existing per-item Secret hold, read from the authoritative ledger. */
+  heldSecret?: boolean;
   /** The photo judge's verdict on a still image's picture. Absent: unjudged. */
   imageJudgment?: ImageJudgmentSignal;
   /**
@@ -689,7 +744,7 @@ export function classifyContentTier(
       contentPending: false,
     };
   }
-  const text = input.text.trim() ? input.text : undefined;
+  const text = input.text;
   const content = contentPass({
     signals: {
       ...(input.title ? { title: input.title } : {}),
@@ -697,6 +752,9 @@ export function classifyContentTier(
       ...(input.sender ? { sender: input.sender } : {}),
     },
     text,
+    textOnly: input.hasNonTextContent !== true && textOnlyMime(input.mimeType),
+    titleIsConversation: input.titleIsConversation === true,
+    ...(input.heldSecret ? { heldSecret: true } : {}),
     ...(holdUntilJudged ? { holdUntilJudged: true } : {}),
     ...(isImageMediaType(input.mimeType) ? { image: true } : {}),
     ...(input.imageJudgment ? { imageJudgment: input.imageJudgment } : {}),
@@ -732,8 +790,9 @@ export function classifyContentTier(
     contentTier: lifted ? 'private' : content.tier,
     decidedBy: content.decidedBy,
     reasons: [...content.reasons, ...(lifted ? [PUBLIC_RETIRED_REASON] : []),
+      ...(content.tier !== 'secrets' && input.hasNonTextContent !== true && textOnlyMime(input.mimeType) ? ['content:text_only'] : []),
       ...(content.tier !== 'secrets' ? [contentDigestReason(input.text), contentNamesReason(input, input.parentContext)] : [])],
-    contentPending: content.pending || text === undefined,
+    contentPending: content.pending || (content.tier !== 'secrets' && !text.trim() && (input.hasNonTextContent === true || !textOnlyMime(input.mimeType))),
   };
 }
 
@@ -927,6 +986,9 @@ function metadataPass(args: {
 function contentPass(args: {
   signals: SourceClassificationSignals;
   text: string | undefined;
+  textOnly: boolean;
+  titleIsConversation?: boolean;
+  heldSecret?: boolean;
   /** The owner keeps the content unread (TierClassificationInput.namesOnly). */
   namesOnly?: boolean;
   /** The item is a still image: its content rests Private unless its picture was judged ordinary. */
@@ -955,7 +1017,8 @@ function contentPass(args: {
   // The lane's hold travels with every decision but a Secrets one, so a later
   // pass over the stored decision holds the same way (HELD_UNTIL_JUDGED_REASON).
   const mark = heldMark(args.holdUntilJudged === true, metadata.tier);
-  if (text === undefined) {
+  // A held Secret's stored text reads as empty, which isn't an empty item.
+  if (text === undefined || (!text.trim() && (!args.textOnly || args.heldSecret))) {
     return {
       tier: metadata.tier,
       decidedBy: metadata.decidedBy,
@@ -1011,6 +1074,19 @@ function contentPass(args: {
 
   let decided: ResolvedVerdict = { tier: metadata.tier, decidedBy: metadata.decidedBy, reasons: [] };
 
+  // Only complete own text may settle by content rule. Names have already
+  // run independently and their tier remains the floor.
+  const rule = args.textOnly && !args.heldSecret && (args.titleIsConversation === true || !args.signals.title?.trim())
+    ? trivialContentRule(text, args.parentContext) : undefined;
+  if (rule) {
+    return {
+      tier: maxTier(metadata.tier, 'private'),
+      decidedBy: tierRank(metadata.tier) > tierRank('private') ? metadata.decidedBy : 'content_rule',
+      reasons: [`content:rule:${rule}`, `content:rule_sniffer:${args.sniffer.id}`, ...mark],
+      pending: false,
+    };
+  }
+
   // [10] Structured identifiers raise at once. Topic vocabulary only
   // selects useful passages for the model; it never holds or raises.
   const detection = detectSensitiveContent({
@@ -1051,15 +1127,19 @@ function contentPass(args: {
       pass: 'content',
       priority: args.holdUntilJudged === true ? HELD_UNTIL_JUDGED_PRIORITY
         : recordFlags.length > 0 || metadata.pending ? HELD_RECORD_PRIORITY : 0,
-      flags,
+      flags: args.textOnly && !args.parentContext?.trim()
+        ? [...flags, contentDigestReason(text), contentNamesReason(args.signals, args.parentContext)] : flags,
       material: snifferContentMaterial(args.names, snifferExcerpt(text, vocabularyTerms(detection.vocabulary)), args.parentContext),
       materialHash: tierSnifferInputHash('content', args.signals, text, args.parentContext),
+      ...(args.textOnly && !args.parentContext?.trim() ? { contentHash: normalizedContentHash(text) } : {}),
       mapRevision: args.mapRevision,
       ...(args.subject ? { subject: args.subject } : {}),
     });
     if (verdict.verdict === 'decided') {
       decided = withSnifferVerdict(decided, verdict.tier, `content:sniffer:${args.sniffer.id}:${verdict.code}`);
       reasons.splice(0, reasons.length, ...decided.reasons);
+      if (verdict.origin === 'model') reasons.push('content:provenance:model');
+      if (verdict.origin === 'rule' && verdict.rule) reasons.push(`content:rule:${verdict.rule}`);
     } else {
       pending = true;
       // A held lane never releases content before its judgment, even where

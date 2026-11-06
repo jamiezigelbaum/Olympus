@@ -86,7 +86,7 @@ import {
   type TierLedgerIdentity,
   type TierSearchLayer,
 } from '../classification/tier-ledger.ts';
-import { classifyContentTier, heldUntilJudged, isImageMediaType, namesDecidedByOwner, ownerRuleMatches, type OwnerTierRule } from '../classification/tier-classifier.ts';
+import { itemHasNonTextContent, classifyContentTier, heldUntilJudged, isImageMediaType, namesDecidedByOwner, ownerRuleMatches, type OwnerTierRule } from '../classification/tier-classifier.ts';
 import { screenedSecretLocator } from '../classification/secret-locations.ts';
 import { findTierSetLedger } from '../classification/tier-set-binding.ts';
 import {
@@ -2898,6 +2898,9 @@ export class LocalConnectorStore {
           ...(title ? { title } : {}),
           ...(path ? { path } : {}),
           mimeType: item.mimeType,
+          hasNonTextContent: itemHasNonTextContent(item),
+          titleIsConversation: item.metadata.titleIsConversation === true,
+          ...(read?.secret ? { heldSecret: true } : {}),
           // The lane's hold, or the one its listing-time decision recorded.
           ...(inputs?.holdContentUntilJudged === true || heldUntilJudged(existing.reasons) ? { holdUntilJudged: true } : {}),
           subject: item.identity,

@@ -19184,6 +19184,31 @@ function tierSnifferInputHash(pass, signals, text2, parentContext) {
     ...context ? [context] : []
   ])).digest("hex");
 }
+function itemHasNonTextContent(item) {
+  if (item.metadata.textComplete !== true || item.content.kind !== "text" || item.deferredBytes || item.identity.parent || item.identity.providerFileId || !textOnlyMime(item.mimeType))
+    return true;
+  return Object.entries(item.metadata).some(([key, value]) => /attachment|media|resource/i.test(key) && value !== undefined && value !== null && value !== false && value !== 0 && value !== "" && (!Array.isArray(value) || value.length > 0));
+}
+function textOnlyMime(mimeType) {
+  return mimeType === undefined || ["text/plain", "text/markdown", "message/rfc822"].includes(mimeType.split(";")[0].trim().toLowerCase());
+}
+function normalizedContentHash(text2) {
+  return createHash10("sha256").update(text2.normalize("NFC").replace(/\r\n?/g, `
+`).trim()).digest("hex");
+}
+function trivialContentRule(text2, parentContext) {
+  const own = text2.trim();
+  if (!own)
+    return parentContext?.trim() ? undefined : "empty_text";
+  if (parentContext?.trim())
+    return;
+  const symbols = own.replace(/[0-9#*]\ufe0f?\u20e3/gu, "\uD83D\uDE00").replace(/\u{1f3f4}[\u{e0061}-\u{e007a}]+\u{e007f}/gu, "\uD83D\uDE00");
+  if (/^[\p{P}\p{Extended_Pictographic}\p{Regional_Indicator}\p{Emoji_Modifier}\s\u200d\ufe0f\u20e3]+$/u.test(symbols) && /[\p{P}\p{Extended_Pictographic}\p{Regional_Indicator}]/u.test(symbols))
+    return "emoji_or_punctuation";
+  if ([...own].length <= 3 && !/(?=\p{L})[\p{Script_Extensions=Han}\p{Script_Extensions=Hangul}\p{Script_Extensions=Hiragana}\p{Script_Extensions=Katakana}]/u.test(own))
+    return "short_text";
+  return;
+}
 function isImageMediaType(mimeType) {
   return (mimeType?.split(";", 1)[0]?.trim().toLowerCase() ?? "").startsWith("image/");
 }
@@ -19200,6 +19225,8 @@ function withPublicRetired(decision) {
 function classifyItemTiers(input, options = {}) {
   const decision = classifyItemTiersWithPublic(input, options);
   if (input.text !== undefined && decision.contentTier !== "secrets") {
+    if (input.hasNonTextContent !== true && textOnlyMime(input.mimeType))
+      decision.reasons.push("content:text_only");
     decision.reasons.push(contentDigestReason(input.text), contentNamesReason(input.signals, input.parentContext));
   }
   return options.retirePublic ? withPublicRetired(decision) : decision;
@@ -19212,7 +19239,7 @@ function classifyItemTiersWithPublic(input, options) {
     mapRevision: TIER_MAP_REVISION,
     snifferId: sniffer.id
   };
-  const text2 = input.text?.trim() ? input.text : undefined;
+  const text2 = input.text;
   const holdUntilJudged = input.holdUntilJudged === true;
   if (options.override?.kind === "tier") {
     return {
@@ -19249,6 +19276,9 @@ function classifyItemTiersWithPublic(input, options) {
   const content = contentPass({
     signals,
     text: text2,
+    textOnly: input.hasNonTextContent !== true && textOnlyMime(input.mimeType),
+    titleIsConversation: input.titleIsConversation === true,
+    ...input.heldSecret ? { heldSecret: true } : {},
     ...input.namesOnly ? { namesOnly: true } : {},
     ...holdUntilJudged ? { holdUntilJudged: true } : {},
     ...isImageMediaType(input.mimeType) ? { image: true } : {},
@@ -19263,7 +19293,7 @@ function classifyItemTiersWithPublic(input, options) {
     ...input.parentContext ? { parentContext: input.parentContext } : {},
     ...input.subject ? { subject: input.subject } : {}
   });
-  const contentRead = text2 !== undefined || metadata.tier === "secrets";
+  const contentRead = text2 !== undefined && (!!text2.trim() || input.hasNonTextContent !== true && textOnlyMime(input.mimeType)) || content.tier === "secrets";
   const namesOnly = input.namesOnly === true && text2 === undefined;
   const contentPending = content.pending || !contentRead && !namesOnly;
   return {
@@ -19304,7 +19334,7 @@ function classifyContentTier(input, options = {}) {
       contentPending: false
     };
   }
-  const text2 = input.text.trim() ? input.text : undefined;
+  const text2 = input.text;
   const content = contentPass({
     signals: {
       ...input.title ? { title: input.title } : {},
@@ -19312,6 +19342,9 @@ function classifyContentTier(input, options = {}) {
       ...input.sender ? { sender: input.sender } : {}
     },
     text: text2,
+    textOnly: input.hasNonTextContent !== true && textOnlyMime(input.mimeType),
+    titleIsConversation: input.titleIsConversation === true,
+    ...input.heldSecret ? { heldSecret: true } : {},
     ...holdUntilJudged ? { holdUntilJudged: true } : {},
     ...isImageMediaType(input.mimeType) ? { image: true } : {},
     ...input.imageJudgment ? { imageJudgment: input.imageJudgment } : {},
@@ -19349,9 +19382,10 @@ function classifyContentTier(input, options = {}) {
     reasons: [
       ...content.reasons,
       ...lifted ? [PUBLIC_RETIRED_REASON] : [],
+      ...content.tier !== "secrets" && input.hasNonTextContent !== true && textOnlyMime(input.mimeType) ? ["content:text_only"] : [],
       ...content.tier !== "secrets" ? [contentDigestReason(input.text), contentNamesReason(input, input.parentContext)] : []
     ],
-    contentPending: content.pending || text2 === undefined
+    contentPending: content.pending || content.tier !== "secrets" && !text2.trim() && (input.hasNonTextContent === true || !textOnlyMime(input.mimeType))
   };
 }
 function restsOnRetiredSourcePrior(reasons) {
@@ -19462,7 +19496,7 @@ function contentPass(args) {
     return { tier: "secrets", decidedBy: metadata.decidedBy, reasons: [], pending: false };
   }
   const mark = heldMark(args.holdUntilJudged === true, metadata.tier);
-  if (text2 === undefined) {
+  if (text2 === undefined || !text2.trim() && (!args.textOnly || args.heldSecret)) {
     return {
       tier: metadata.tier,
       decidedBy: metadata.decidedBy,
@@ -19500,6 +19534,15 @@ function contentPass(args) {
     return { tier: metadata.tier, decidedBy: metadata.decidedBy, reasons: [...mark], pending: false };
   }
   let decided = { tier: metadata.tier, decidedBy: metadata.decidedBy, reasons: [] };
+  const rule = args.textOnly && !args.heldSecret && (args.titleIsConversation === true || !args.signals.title?.trim()) ? trivialContentRule(text2, args.parentContext) : undefined;
+  if (rule) {
+    return {
+      tier: maxTier(metadata.tier, "private"),
+      decidedBy: tierRank(metadata.tier) > tierRank("private") ? metadata.decidedBy : "content_rule",
+      reasons: [`content:rule:${rule}`, `content:rule_sniffer:${args.sniffer.id}`, ...mark],
+      pending: false
+    };
+  }
   const detection = detectSensitiveContent({
     text: text2,
     ...args.matchInput.title ? { title: args.matchInput.title } : {},
@@ -19530,15 +19573,20 @@ function contentPass(args) {
     const verdict = args.sniffer.judge({
       pass: "content",
       priority: args.holdUntilJudged === true ? HELD_UNTIL_JUDGED_PRIORITY : recordFlags.length > 0 || metadata.pending ? HELD_RECORD_PRIORITY : 0,
-      flags,
+      flags: args.textOnly && !args.parentContext?.trim() ? [...flags, contentDigestReason(text2), contentNamesReason(args.signals, args.parentContext)] : flags,
       material: snifferContentMaterial(args.names, snifferExcerpt(text2, vocabularyTerms(detection.vocabulary)), args.parentContext),
       materialHash: tierSnifferInputHash("content", args.signals, text2, args.parentContext),
+      ...args.textOnly && !args.parentContext?.trim() ? { contentHash: normalizedContentHash(text2) } : {},
       mapRevision: args.mapRevision,
       ...args.subject ? { subject: args.subject } : {}
     });
     if (verdict.verdict === "decided") {
       decided = withSnifferVerdict(decided, verdict.tier, `content:sniffer:${args.sniffer.id}:${verdict.code}`);
       reasons.splice(0, reasons.length, ...decided.reasons);
+      if (verdict.origin === "model")
+        reasons.push("content:provenance:model");
+      if (verdict.origin === "rule" && verdict.rule)
+        reasons.push(`content:rule:${verdict.rule}`);
     } else {
       pending = true;
       if (verdict.queued === true && recordFlags.length === 0 && !metadata.pending && args.holdUntilJudged !== true) {
@@ -20034,6 +20082,12 @@ function snifferMaterialHash(pass, material) {
   return createHash12("sha256").update(`${pass}
 ${material}`).digest("hex");
 }
+function snifferSubjectKey(subject) {
+  return createHash12("sha256").update(JSON.stringify([subject.provider, subject.accountScope, subject.providerConversationId ?? "", subject.providerItemId])).digest("hex");
+}
+function contentVerdictReusable(verdict, contentHash, subject) {
+  return !verdict.failSafe && (verdict.contentHash === contentHash || subject !== undefined && verdict.modelSubject === snifferSubjectKey(subject));
+}
 
 class TierSnifferStore {
   dbPath;
@@ -20081,7 +20135,7 @@ class TierSnifferStore {
   }
   getVerdict(key) {
     const row = this.db.query(`
-      SELECT tier, category, confidence, fail_safe, decided_at FROM sniffer_verdicts
+      SELECT tier, category, confidence, fail_safe, decided_at, content_hash, model_subject FROM sniffer_verdicts
       WHERE material_hash = ? AND model_id = ? AND prompt_version = ? AND map_revision = ?
     `).get(key.materialHash, key.modelId, key.promptVersion, key.mapRevision);
     if (!row)
@@ -20091,17 +20145,30 @@ class TierSnifferStore {
       category: row.category,
       confidence: row.confidence,
       failSafe: row.fail_safe === 1,
-      decidedAt: row.decided_at
+      decidedAt: row.decided_at,
+      ...row.content_hash ? { contentHash: row.content_hash } : {},
+      ...row.model_subject ? { modelSubject: row.model_subject } : {}
     };
   }
-  putVerdict(key, verdict) {
+  putVerdict(key, verdict, subject) {
     this.db.query(`
-      INSERT INTO sniffer_verdicts (material_hash, model_id, prompt_version, map_revision, tier, category, confidence, fail_safe, decided_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO sniffer_verdicts (material_hash, model_id, prompt_version, map_revision, tier, category, confidence, fail_safe, decided_at, model_subject)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT (material_hash, model_id, prompt_version, map_revision) DO UPDATE SET
         tier = excluded.tier, category = excluded.category, confidence = excluded.confidence,
-        fail_safe = excluded.fail_safe, decided_at = excluded.decided_at
-    `).run(key.materialHash, key.modelId, key.promptVersion, key.mapRevision, verdict.tier, verdict.category, verdict.confidence, verdict.failSafe ? 1 : 0, this.now().toISOString());
+        fail_safe = excluded.fail_safe, decided_at = excluded.decided_at, content_hash = NULL, model_subject = excluded.model_subject
+    `).run(key.materialHash, key.modelId, key.promptVersion, key.mapRevision, verdict.tier, verdict.category, verdict.confidence, verdict.failSafe ? 1 : 0, this.now().toISOString(), subject ? snifferSubjectKey(subject) : null);
+  }
+  markFinalModelContent(key, contentHash) {
+    this.db.query(`UPDATE sniffer_verdicts SET content_hash = ?
+      WHERE material_hash = ? AND model_id = ? AND prompt_version = ? AND map_revision = ? AND fail_safe = 0`).run(contentHash, key.materialHash, key.modelId, key.promptVersion, key.mapRevision);
+  }
+  getFinalModelContentVerdict(key) {
+    const row = this.db.query(`SELECT material_hash FROM sniffer_verdicts
+      WHERE content_hash = ? AND model_id = ? AND prompt_version = ? AND map_revision = ? AND fail_safe = 0
+        AND (tier = 'private' OR material_hash = ?)
+      ORDER BY CASE tier WHEN 'private' THEN 1 ELSE 0 END DESC, decided_at DESC LIMIT 1`).get(key.contentHash, key.modelId, key.promptVersion, key.mapRevision, key.materialHash ?? null);
+    return row ? this.getVerdict({ ...key, materialHash: row.material_hash }) : undefined;
   }
   enqueue(question) {
     const materialHash = question.materialHash ?? snifferMaterialHash(question.pass, question.material);
@@ -20115,8 +20182,8 @@ class TierSnifferStore {
       `).get(...subjectParams(question.subject), question.pass);
       this.db.query(`
       INSERT INTO sniffer_questions (
-        provider, account_scope, conversation_key, provider_item_id, pass, material_hash, map_revision, material, flags_json, attempts, queued_at, priority
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
+        provider, account_scope, conversation_key, provider_item_id, pass, material_hash, map_revision, material, flags_json, attempts, queued_at, priority, content_hash
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)
       ON CONFLICT (provider, account_scope, conversation_key, provider_item_id, pass) DO UPDATE SET
         held_sniffer_id = CASE WHEN sniffer_questions.material_hash = excluded.material_hash
           AND sniffer_questions.map_revision = excluded.map_revision AND sniffer_questions.flags_json = excluded.flags_json
@@ -20124,12 +20191,13 @@ class TierSnifferStore {
         attempts = CASE WHEN sniffer_questions.material_hash = excluded.material_hash
           AND sniffer_questions.map_revision = excluded.map_revision
           THEN sniffer_questions.attempts ELSE 0 END,
+        content_hash = excluded.content_hash,
         material_hash = excluded.material_hash,
         map_revision = excluded.map_revision,
         material = excluded.material,
         priority = excluded.priority,
         flags_json = excluded.flags_json
-    `).run(...subjectParams(question.subject), question.pass, materialHash, question.mapRevision, question.material, JSON.stringify([...question.flags]), this.now().toISOString(), priority);
+    `).run(...subjectParams(question.subject), question.pass, materialHash, question.mapRevision, question.material, JSON.stringify([...question.flags]), this.now().toISOString(), priority, question.contentHash ?? null);
       if (priority > 0 && (!before || priority > before.priority)) {
         this.db.query("DELETE FROM sniffer_scan WHERE scan_key IN (?, ?)").run("all:recent", `${question.pass}:recent`);
       }
@@ -20282,6 +20350,7 @@ function questionFromRow(row) {
     ...row.conversation_key ? { providerConversationId: row.conversation_key } : {},
     pass: row.pass,
     materialHash: row.material_hash,
+    ...row.content_hash ? { contentHash: row.content_hash } : {},
     mapRevision: row.map_revision,
     material: row.material,
     flags: JSON.parse(row.flags_json),
@@ -20365,6 +20434,17 @@ function snifferMigrations() {
       name: "held_lowering_answers",
       up(db) {
         db.exec("ALTER TABLE sniffer_questions ADD COLUMN held_sniffer_id TEXT;");
+      }
+    },
+    {
+      version: 5,
+      name: "final_model_content_reuse",
+      up(db) {
+        db.exec(`ALTER TABLE sniffer_questions ADD COLUMN content_hash TEXT;
+          ALTER TABLE sniffer_verdicts ADD COLUMN content_hash TEXT;
+          ALTER TABLE sniffer_verdicts ADD COLUMN model_subject TEXT;
+          CREATE INDEX sniffer_final_content ON sniffer_verdicts(content_hash, model_id, prompt_version, map_revision)
+            WHERE fail_safe = 0 AND content_hash IS NOT NULL;`);
       }
     }
   ];
@@ -20759,7 +20839,7 @@ class TierLedger {
       SELECT i.*, CASE WHEN
           i.routed = 1 AND i.content_read = 1
           AND i.metadata_forced = 0 AND i.content_tier != 'secrets'
-          AND i.decided_by IN ('default', 'sensitive_detector', 'sniffer', 'move', 'source_prior')
+          AND i.decided_by IN ('default', 'sensitive_detector', 'sniffer', 'move', 'source_prior', 'content_rule')
           -- A held row's stamp names the exact decision it re-read, so it
           -- never outlives that decision (rejudgeKeyForHeld).
           AND (i.rejudged_key IS NULL OR i.rejudged_key != CASE WHEN i.state = 'pending'
@@ -20783,6 +20863,10 @@ class TierLedger {
             WHERE o.provider = i.provider AND o.account_scope = i.account_scope
               AND o.conversation_key = i.conversation_key AND o.provider_item_id = i.provider_item_id
           )
+          -- A rule needs an actual identity change, never an absent model marker.
+          AND (i.decided_by != 'content_rule' OR i.engine_version != ?
+            OR (instr(i.reasons_json, '"content:rule_sniffer:') > 0
+              AND ? IS NOT NULL AND instr(i.reasons_json, ?) = 0))
           AND (
             i.state = 'pending'
             -- Rests on a retired whole-source prior (RETIRED_SOURCE_PRIOR_REASON):
@@ -20795,6 +20879,8 @@ class TierLedger {
             OR (instr(i.reasons_json, ':fail_safe:missing_question"') > 0
               AND EXISTS (SELECT 1 FROM json_each(i.reasons_json) r
                 WHERE r.value GLOB 'content:sniffer:*:fail_safe:missing_question'))
+            OR (i.decided_by = 'content_rule' AND ? IS NOT NULL
+              AND instr(i.reasons_json, ?) = 0)
             OR i.engine_version != ?
             OR (? IS NOT NULL AND instr(i.reasons_json, '"metadata:sniffer:') > 0 AND instr(i.reasons_json, ?) = 0)
             OR (? IS NOT NULL AND instr(i.reasons_json, ?) = 0
@@ -20804,7 +20890,7 @@ class TierLedger {
         THEN 1 ELSE 0 END AS rejudge_candidate
       FROM win i
       ORDER BY i.provider, i.account_scope, i.conversation_key, i.provider_item_id
-    `).all(after ? 1 : null, ...after ?? [null, null, null, null], scanLimit, key, key, options.engineVersion, metadataMarker, metadataMarker ?? "", snifferMarker, snifferMarker ?? "");
+    `).all(after ? 1 : null, ...after ?? [null, null, null, null], scanLimit, key, key, options.engineVersion, options.snifferId ?? null, JSON.stringify(`content:rule_sniffer:${options.snifferId}`), options.snifferId ?? null, JSON.stringify(`content:rule_sniffer:${options.snifferId}`), options.engineVersion, metadataMarker, metadataMarker ?? "", snifferMarker, snifferMarker ?? "");
     const records = [];
     let last;
     for (const row of rows) {
@@ -27608,6 +27694,9 @@ function decideItemTiers(connector, item, text2, options, ledger, extra = {}) {
     ...holdUntilJudged ? { holdUntilJudged: true } : {},
     ...parentContext ? { parentContext } : {},
     mimeType: item.mimeType,
+    hasNonTextContent: itemHasNonTextContent(item),
+    titleIsConversation: item.metadata.titleIsConversation === true,
+    ...read?.secret ? { heldSecret: true } : {},
     subject: item.identity
   }, {
     ...options?.rules ? { rules: options.rules } : {},
@@ -28048,21 +28137,41 @@ class CachedTierSniffer {
     const material = snifferMaterialForModel(asked);
     const own3 = snifferOwnMaterial(material);
     if (snifferMaterialCarriesSecret(own3))
-      return { verdict: "decided", tier: "secrets", code: "secret_refused" };
+      return { verdict: "decided", tier: "secrets", code: "secret_refused", origin: "rule", rule: "secret_refused" };
     const injectionRule = snifferInjectionRule(own3);
     if (injectionRule) {
-      return { verdict: "decided", tier: "secure", code: `injection:${injectionRule}:0.00` };
+      return { verdict: "decided", tier: "secure", code: `injection:${injectionRule}:0.00`, origin: "rule", rule: "injection" };
     }
     const mapRevision = request.mapRevision ?? "none";
     try {
-      const cached2 = this.lane.snifferMode === "pending" ? undefined : this.store.getVerdict({
+      let cached2 = this.lane.snifferMode === "pending" ? undefined : this.store.getVerdict({
         materialHash: request.materialHash ?? snifferMaterialHash(request.pass, material),
         modelId: snifferCacheModelId(this.lane),
         promptVersion: this.promptVersion,
         mapRevision
       });
+      if (cached2 && request.contentHash && !contentVerdictReusable(cached2, request.contentHash, request.subject))
+        cached2 = undefined;
+      let duplicate = cached2 !== undefined && request.contentHash !== undefined && (!request.subject || cached2.modelSubject !== snifferSubjectKey(request.subject));
+      if (!cached2 && request.pass === "content" && request.contentHash && this.lane.snifferMode !== "pending") {
+        cached2 = this.store.getFinalModelContentVerdict({
+          materialHash: request.materialHash ?? snifferMaterialHash(request.pass, material),
+          contentHash: request.contentHash,
+          modelId: snifferCacheModelId(this.lane),
+          promptVersion: this.promptVersion,
+          mapRevision
+        });
+        duplicate = cached2 !== undefined;
+      }
       if (cached2 && cachedSnifferVerdictHolds(cached2)) {
-        return { verdict: "decided", ...snifferVerdictTier(cached2, this.lane, request.flags) };
+        const answer = snifferVerdictTier(cached2, this.lane, request.flags);
+        return {
+          verdict: "decided",
+          ...answer,
+          origin: duplicate || cached2.failSafe ? "rule" : "model",
+          ...duplicate ? { rule: "duplicate_model" } : cached2.failSafe ? { rule: "fail_safe" } : {},
+          code: duplicate ? `rule:duplicate_model:${answer.code}` : answer.code
+        };
       }
       if (request.subject) {
         const queued = this.store.enqueue({
@@ -28070,6 +28179,7 @@ class CachedTierSniffer {
           pass: request.pass,
           material,
           ...request.materialHash ? { materialHash: request.materialHash } : {},
+          ...request.contentHash ? { contentHash: request.contentHash } : {},
           mapRevision,
           flags: request.flags,
           ...request.priority !== undefined ? { priority: request.priority } : {},
@@ -33479,6 +33589,9 @@ var init_local_index = __esm(() => {
           ...title ? { title } : {},
           ...path ? { path } : {},
           mimeType: item.mimeType,
+          hasNonTextContent: itemHasNonTextContent(item),
+          titleIsConversation: item.metadata.titleIsConversation === true,
+          ...read?.secret ? { heldSecret: true } : {},
           ...inputs?.holdContentUntilJudged === true || heldUntilJudged(existing.reasons) ? { holdUntilJudged: true } : {},
           subject: item.identity
         }, {
@@ -56507,6 +56620,7 @@ function gmailMessageItem(record, account, fetchedAt = new Date().toISOString())
     mimeType: "message/rfc822",
     content: !metadataOnly && text2.trim() ? { kind: "text", text: text2 } : { kind: "metadata_only" },
     metadata: Object.freeze({
+      ...record.textComplete === true && !metadataOnly && attachments.length === 0 ? { textComplete: true } : {},
       title: subject,
       subject,
       from,
@@ -57697,6 +57811,7 @@ function gmailMailRecordFromMessage(message2, options = {}) {
 
 `),
     metadataOnly,
+    ...!metadataOnly && gmailTextComplete(message2.payload) ? { textComplete: true } : {},
     attachments: gmailAttachments(message2.id, message2.payload, false, children)
   };
 }
@@ -57772,6 +57887,13 @@ function gmailPartAt(part, partId) {
       return found;
   }
   return;
+}
+function gmailTextComplete(part) {
+  if (!part || part.filename?.trim() || part.body?.attachmentId || headersFromPart(part).get("content-disposition")?.split(";")[0]?.trim().toLowerCase() === "attachment")
+    return false;
+  if (part.mimeType === "text/plain")
+    return part.body?.data !== undefined && !part.parts?.length;
+  return !!part.mimeType?.startsWith("multipart/") && !!part.parts?.length && part.parts.every(gmailTextComplete);
 }
 function collectPartText(part, plain, html2, children = false) {
   if (!part)
@@ -62324,6 +62446,7 @@ function rejudgeStoredContent(set, record, options) {
   const metadata = rejudgeMetadata(record, sniffer, { title, path, sender, folderKeys }, identity2, holdUntilJudged, parentContext);
   const content = classifyContentTier({
     text: text2,
+    hasNonTextContent: !record.reasons.includes("content:text_only"),
     metadataTier: metadata.metadataTier,
     metadataForced: metadata.metadataForced,
     metadataFlagged: metadata.metadataFlagged,
@@ -77653,6 +77776,8 @@ function telegramMessageItem(input) {
     ...optionalString7(input.message.sourceVersion) ? { sourceVersion: optionalString7(input.message.sourceVersion) } : {}
   };
   const metadata = {
+    titleIsConversation: true,
+    ...input.message.textComplete === true && body !== undefined && !service && attachmentNames.length === 0 && (!Array.isArray(input.message.attachments) || input.message.attachments.length === 0) && input.message.secretRedacted !== true ? { textComplete: true } : {},
     title: chatTitle ?? `Telegram conversation ${sha2563(input.conversationId).slice(0, 12)}`,
     ...searchText ? { searchText } : {},
     sentAt: optionalTimestamp(input.message.sentAt, "sent timestamp"),
@@ -78423,6 +78548,8 @@ function messageOutcome(input, event, fetchedAt) {
       ...reply ? { replyToMessageId: reply } : {},
       ...forwarded ? { forwardSource: forwarded } : {},
       ...content.attachments.length > 0 ? { attachments: content.attachments } : {},
+      titleIsConversation: true,
+      ...!service && !content.unsupported && content.mediaFiles === 0 && content.attachments.length === 0 ? { textComplete: true } : {},
       attachmentsNotIngested: content.mediaFiles,
       contentHash: sha2564(body)
     }),
@@ -78992,6 +79119,7 @@ function telegramExportMessageRecord(context2, chat, value) {
     ...senderName ? { senderDisplayName: senderName } : {},
     ...senderId && context2.ownUserId ? { senderIsOwner: senderId === context2.ownUserId } : {},
     ...content && content.hasContent ? { boundedText: content.text } : {},
+    ...content && !content.unsupported && content.mediaFiles === 0 && content.attachments.length === 0 ? { textComplete: true } : {},
     ...service ? { service: serviceEvent2 } : {},
     ...replyTo ? { replyToMessageId: replyTo } : {},
     ...forwardedFrom ? { forwardSource: "telegram_forward", forwardFromName: forwardedFrom } : {},
@@ -82336,6 +82464,8 @@ function rawItemFromSpoolMessage(message2, account, fetchedAt, reactions) {
     mimeType: isMedia ? message2.mediaMime ?? "application/octet-stream" : TEXT_MIME_TYPE,
     content: isMedia || redacted || mediaIsChild && message2.text === "" ? { kind: "metadata_only" } : { kind: "text", text: text3 },
     metadata: Object.freeze({
+      titleIsConversation: true,
+      ...message2.mediaType === undefined && !redacted ? { textComplete: true } : {},
       chat: status ? WHATSAPP_STATUS_CHAT_LABEL : message2.chatName || message2.chatJid,
       sender: senderName || message2.senderJid,
       senderId: message2.senderJid || undefined,
@@ -92210,6 +92340,8 @@ function createTieredStoreExtractionSink(options) {
       const parentContext = tierClassification?.sniffer ? parentNamesContext(set, identity2) : undefined;
       const content = classifyContentTier({
         text: request.text,
+        hasNonTextContent: true,
+        ...read.secret ? { heldSecret: true } : {},
         metadataTier: record.metadataTier,
         metadataForced: record.metadataForced,
         metadataFlagged: record.metadataFlagged,
@@ -119747,6 +119879,8 @@ async function planTierMigration(options) {
             ...item.locatorUri ? { locators: [item.locatorUri] } : {},
             provider: item.identity.provider,
             text: item.chunks.map((chunk) => chunk.text).join(""),
+            hasNonTextContent: true,
+            ...read.secret ? { heldSecret: true } : {},
             ...item.mimeType ? { mimeType: item.mimeType } : {},
             ...holdUntilJudged ? { holdUntilJudged: true } : {},
             ...imageJudgment ? { imageJudgment: imageJudgmentSignal(imageJudgment) } : {},
@@ -165027,6 +165161,7 @@ function createEvernoteSourceConnector(options) {
         authoredAt,
         ...createdAt ? { createdAt } : {},
         ...updatedAt ? { updatedAt } : {},
+        attachmentCount: resources.length,
         contentHash: createHash88("sha256").update(text4).digest("hex")
       }),
       fetchedAt: now().toISOString()
@@ -180753,6 +180888,9 @@ function createWhatsAppArchiveConnector(input) {
         senderLabel: sender,
         ...authoredAt ? { authoredAt } : {},
         contentHash: textHash,
+        titleIsConversation: true,
+        attachmentCount: whatsAppMediaMarkerCount(raw.text),
+        ...whatsAppMediaMarkerCount(raw.text) === 0 ? { textComplete: true } : {},
         sourceFile: unit.file.relPath,
         ...unit.entry ? { sourceMember: unit.entry.name } : {},
         sourceFileIndex: unit.fileIndex,
@@ -183057,7 +183195,11 @@ function createEvernoteArchiveConnector(input) {
     if (built.dateAssumed)
       report(NOTE_FINDINGS.dateAssumed, "gap", fileIndex, start);
     const notebook = notebookOfExport(input.files[fileIndex].relPath);
-    const parent = notebook ? { ...built.item, metadata: Object.freeze({ ...built.item.metadata, notebook }) } : built.item;
+    const parent = { ...built.item, metadata: Object.freeze({
+      ...built.item.metadata,
+      ...notebook ? { notebook } : {},
+      attachmentCount: Math.max(resources.length, body.media)
+    }) };
     const items = [parent];
     const positions = [start];
     const seen = new Map;
@@ -190812,16 +190954,16 @@ async function runSnifferPass(options) {
   });
   const sameQuestion = (target, question) => {
     const current2 = target.sniffer.questionFor(question, question.pass);
-    return current2?.materialHash === question.materialHash && current2.mapRevision === question.mapRevision;
+    return current2?.materialHash === question.materialHash && current2.mapRevision === question.mapRevision && current2.contentHash === question.contentHash;
   };
-  const apply = (item, verdict) => {
+  const apply = (item, verdict, reused = false) => {
     if (sameQuestion(item.target, item.question) && stillOpen(item.target, item.question, false) && !screenQuestion(item.target, item.question))
       return;
     const { tier, code } = snifferVerdictTier(verdict, options.lane, item.question.flags);
     const applied = item.target.ledger.applySnifferVerdict(item.question, {
       pass: item.question.pass,
       tier,
-      reason: `${item.question.pass}:sniffer:${id}:${code}`,
+      reason: `${item.question.pass}:sniffer:${id}:${reused ? "rule:duplicate_model:" : ""}${code}`,
       modelId: snifferCacheModelId(options.lane),
       mapRevision: item.question.mapRevision
     }, {
@@ -190851,9 +190993,15 @@ async function runSnifferPass(options) {
       report.awaitingPlacement += 1;
       return;
     }
+    const final = item.target.ledger.getCurrent(item.question);
+    if (applied && applied.outcome !== "unchanged" && !verdict.failSafe && !reused && item.question.pass === "content" && item.question.contentHash && final?.state === "current" && !final.contentPending && !final.metadataPending && final.decidedBy !== "override" && final.decidedBy !== "owner_rule") {
+      item.target.sniffer.markFinalModelContent(keyOf2(item.question), item.question.contentHash);
+    }
     if (applied?.outcome === "queued_move")
       report.movesQueued += 1;
-    item.target.sniffer.deleteQuestion(item.question, item.question.pass, item.question.materialHash);
+    const retainDonor = !reused && !verdict.failSafe && item.question.contentHash && final && (final.state === "moving" || final.metadataPending);
+    if (!retainDonor)
+      item.target.sniffer.deleteQuestion(item.question, item.question.pass, item.question.materialHash);
     if (!applied || applied.outcome === "unchanged")
       return;
     report.verdictsApplied += 1;
@@ -190922,11 +191070,28 @@ async function runSnifferPass(options) {
       report.awaitingPlacement += 1;
     return false;
   };
+  const finishContentDonor = (target, question) => {
+    if (!question.contentHash || question.pass !== "content")
+      return false;
+    const row = target.ledger.getCurrent(question);
+    const cached3 = target.sniffer.getVerdict(keyOf2(question));
+    if (!row || !cached3 || cached3.failSafe || cached3.modelSubject !== snifferSubjectKey(question))
+      return false;
+    const receipts = question.flags.filter((flag) => flag.startsWith("content:sha256:") || flag.startsWith("content:names:"));
+    const reason = `content:sniffer:${id}:${snifferVerdictTier(cached3, options.lane, question.flags).code}`;
+    if (receipts.length !== 2 || row.mapRevision !== question.mapRevision || (row.decidedBy === "override" || row.decidedBy === "owner_rule") || !receipts.every((receipt) => row.reasons.includes(receipt)) || !row.reasons.includes(reason))
+      return false;
+    if (row.state === "moving" || row.metadataPending || row.contentPending)
+      return true;
+    if (row.state === "current")
+      target.sniffer.markFinalModelContent(keyOf2(question), question.contentHash);
+    return false;
+  };
   const work = { metadata: [], content: [] };
   for (const target of options.targets) {
     const questions = target.sniffer.listQuestions({ limit: options.pendingPageSize ?? 500, eligible: (question) => {
       report.pendingSeen += 1;
-      if (midMove(target, question))
+      if (finishContentDonor(target, question) || midMove(target, question))
         return false;
       if (stillOpen(target, question))
         return screenQuestion(target, question);
@@ -190966,9 +191131,9 @@ async function runSnifferPass(options) {
   for (const pass of ["metadata", "content"]) {
     work[pass] = work[pass].filter((item) => {
       const cached3 = item.target.sniffer.getVerdict(keyOf2(item.question));
-      if (!cached3 || !cachedSnifferVerdictHolds(cached3))
+      if (!cached3 || !cachedSnifferVerdictHolds(cached3) || item.question.contentHash && !contentVerdictReusable(cached3, item.question.contentHash, item.question))
         return true;
-      apply(item, cached3);
+      apply(item, cached3, item.question.contentHash !== undefined && cached3.modelSubject !== snifferSubjectKey(item.question));
       report.cacheHits += 1;
       return false;
     });
@@ -190994,10 +191159,16 @@ async function runSnifferPass(options) {
       }
       if (!screenQuestion(next.target, next.question))
         continue;
+      const duplicate = next.question.contentHash && next.question.pass === "content" ? next.target.sniffer.getFinalModelContentVerdict({ ...keyOf2(next.question), contentHash: next.question.contentHash }) : undefined;
+      if (duplicate && cachedSnifferVerdictHolds(duplicate)) {
+        apply(next, duplicate, true);
+        report.cacheHits += 1;
+        continue;
+      }
       const group = [next];
       for (let i2 = pending.length - 1;i2 >= 0; i2--) {
         const item = pending[i2];
-        if (item.question.pass === pass && item.question.materialHash === next.question.materialHash && item.question.mapRevision === next.question.mapRevision && stillOpen(item.target, item.question) && screenQuestion(item.target, item.question)) {
+        if (!next.question.contentHash && item.question.pass === pass && item.question.materialHash === next.question.materialHash && item.question.mapRevision === next.question.mapRevision && stillOpen(item.target, item.question) && screenQuestion(item.target, item.question)) {
           group.push(item);
           pending.splice(i2, 1);
         }
@@ -191056,10 +191227,10 @@ async function runSnifferPass(options) {
         const key2 = keyOf2(group2[0].question);
         if (verdict) {
           const stored = { ...verdict, failSafe: false };
-          group2[0].target.sniffer.putVerdict(key2, stored);
+          group2[0].target.sniffer.putVerdict(key2, stored, group2[0].question);
           for (const item of group2) {
             if (item.target !== group2[0].target)
-              item.target.sniffer.putVerdict(key2, stored);
+              item.target.sniffer.putVerdict(key2, stored, group2[0].question);
             apply(item, stored);
           }
           continue;
@@ -191124,6 +191295,7 @@ var init_sniffer_resolver = __esm(() => {
   init_atomic_file();
   init_sniffer();
   init_sniffer_lane();
+  init_sniffer_store();
   init_tier_ledger();
   secretScreenCache = new Map;
 });

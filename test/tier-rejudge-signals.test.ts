@@ -554,7 +554,9 @@ test('200 held lowering answers do not block later re-judging or raises, and rel
     await service.runOnce();
     expect(f.ledger.getCurrent(identityOf('held000'))).toMatchObject({ state: 'moving', targetContentTier: 'private' });
     expect(calls).toBe(beforeRelease);
-    expect(installed.snifferStoreForLedger(f.ledger.dbPath).counts().questions).toBe(0);
+    // This connector never attested text completeness. Answered questions
+    // leave the queue and cannot become duplicate donors, even after a move.
+    expect(installed.snifferStoreForLedger(f.ledger.dbPath).listQuestions({ limit: 500 })).toEqual([]);
   } finally {
     service?.stop(); installed.close(); registerInstalledTierClassification(undefined); f.close(); tmp.cleanup();
     if (previous === undefined) delete process.env.OLYMPUS_TIER_SNIFFER_HOLD_LOWERING;

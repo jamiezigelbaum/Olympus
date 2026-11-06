@@ -915,7 +915,7 @@ export class TierLedger {
       SELECT i.*, CASE WHEN
           i.routed = 1 AND i.content_read = 1
           AND i.metadata_forced = 0 AND i.content_tier != 'secrets'
-          AND i.decided_by IN ('default', 'sensitive_detector', 'sniffer', 'move', 'source_prior')
+          AND i.decided_by IN ('default', 'sensitive_detector', 'sniffer', 'move', 'source_prior', 'content_rule')
           -- A held row's stamp names the exact decision it re-read, so it
           -- never outlives that decision (rejudgeKeyForHeld).
           AND (i.rejudged_key IS NULL OR i.rejudged_key != CASE WHEN i.state = 'pending'
@@ -939,6 +939,10 @@ export class TierLedger {
             WHERE o.provider = i.provider AND o.account_scope = i.account_scope
               AND o.conversation_key = i.conversation_key AND o.provider_item_id = i.provider_item_id
           )
+          -- A rule needs an actual identity change, never an absent model marker.
+          AND (i.decided_by != 'content_rule' OR i.engine_version != ?
+            OR (instr(i.reasons_json, '"content:rule_sniffer:') > 0
+              AND ? IS NOT NULL AND instr(i.reasons_json, ?) = 0))
           AND (
             i.state = 'pending'
             -- Rests on a retired whole-source prior (RETIRED_SOURCE_PRIOR_REASON):
@@ -951,6 +955,8 @@ export class TierLedger {
             OR (instr(i.reasons_json, ':fail_safe:missing_question"') > 0
               AND EXISTS (SELECT 1 FROM json_each(i.reasons_json) r
                 WHERE r.value GLOB 'content:sniffer:*:fail_safe:missing_question'))
+            OR (i.decided_by = 'content_rule' AND ? IS NOT NULL
+              AND instr(i.reasons_json, ?) = 0)
             OR i.engine_version != ?
             OR (? IS NOT NULL AND instr(i.reasons_json, '"metadata:sniffer:') > 0 AND instr(i.reasons_json, ?) = 0)
             OR (? IS NOT NULL AND instr(i.reasons_json, ?) = 0
@@ -966,6 +972,11 @@ export class TierLedger {
       scanLimit,
       key,
       key,
+      options.engineVersion,
+      options.snifferId ?? null,
+      JSON.stringify(`content:rule_sniffer:${options.snifferId}`),
+      options.snifferId ?? null,
+      JSON.stringify(`content:rule_sniffer:${options.snifferId}`),
       options.engineVersion,
       metadataMarker,
       metadataMarker ?? '',

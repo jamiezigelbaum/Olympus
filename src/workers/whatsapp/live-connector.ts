@@ -1323,6 +1323,8 @@ function rawItemFromSpoolMessage(
     mimeType: isMedia ? (message.mediaMime ?? 'application/octet-stream') : TEXT_MIME_TYPE,
     content: isMedia || redacted || (mediaIsChild && message.text === '') ? { kind: 'metadata_only' } : { kind: 'text', text },
     metadata: Object.freeze({
+      titleIsConversation: true,
+      ...(message.mediaType === undefined && !redacted ? { textComplete: true } : {}),
       chat: status ? WHATSAPP_STATUS_CHAT_LABEL : message.chatName || message.chatJid,
       sender: senderName || message.senderJid,
       senderId: message.senderJid || undefined,
