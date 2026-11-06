@@ -12378,7 +12378,7 @@ async function connectGeminiApiKey(options) {
     source: "gemini",
     handles: [],
     secretRefs: [`env:${stored.key}`],
-    next: `Stored in ${stored.path}. Run olympus worker restart so the worker picks it up.`
+    next: `Stored in ${stored.path}. Run olympus worker restart so the worker picks it up. Legacy Gemini embeddings remain configured; new setup offers built-in local EmbeddingGemma or Venice. See docs/SOVEREIGNTY_CONFIG.md#legacy-embedding-migration for an explicitly approved migration. No automatic re-embed.`
   };
 }
 async function validateGeminiApiKey(options) {
@@ -22458,6 +22458,18 @@ class TierLedger {
           AND w.conversation_key = c.conversation_key AND w.provider_item_id = c.provider_item_id
           AND w.kind IN ('secret', 'deletion')) AS hidden,
       c.copy_state = 'current' AND c.embed_hold = 1 AS held,
+      c.copy_state = 'current' AND c.embed_hold = 1 AND c.trust_domain = 'secure_local'
+        AND c.layers IN ('content', 'both') AND EXISTS (
+          SELECT 1 FROM tier_items t WHERE t.provider = c.provider AND t.account_scope = c.account_scope
+            AND t.conversation_key = c.conversation_key AND t.provider_item_id = c.provider_item_id
+            AND t.state = 'pending' AND t.content_read = 1 AND (t.metadata_pending = 1 OR t.content_pending = 1)
+            AND t.metadata_tier <> 'secrets' AND t.content_tier <> 'secrets'
+            AND COALESCE(t.target_metadata_tier, '') <> 'secrets' AND COALESCE(t.target_content_tier, '') <> 'secrets'
+        ) AND NOT EXISTS (
+          SELECT 1 FROM tier_overrides o WHERE o.provider = c.provider AND o.account_scope = c.account_scope
+            AND o.conversation_key = c.conversation_key AND o.provider_item_id = c.provider_item_id
+            AND json_extract(o.override_json, '$.kind') = 'tier' AND json_extract(o.override_json, '$.tier') = 'secrets'
+        ) AS held_for_judgment,
       c.copy_state = 'current' AND c.layers = 'metadata' AS metadata_layer,
       c.copy_state = 'current' AND c.layers = 'metadata' AND NOT EXISTS (
         SELECT 1 FROM tier_copies other WHERE other.provider = c.provider AND other.account_scope = c.account_scope
@@ -22470,6 +22482,7 @@ class TierLedger {
       ...identityFromRow(row),
       hidden: !!row.hidden,
       held: !!row.held,
+      heldForJudgment: !!row.held_for_judgment,
       metadataLayer: !!row.metadata_layer,
       metadataLayerContentUnread: !!row.metadata_unread,
       moving: !!row.moving
@@ -33570,7 +33583,7 @@ var init_local_index = __esm(() => {
     }
   };
   STATUS_COUNTS_MAX_AGE_MS = 5 * 60000;
-  VISIBILITY_PK_FLAGS = ["hidden", "held", "metadataLayer", "metadataLayerContentUnread"];
+  VISIBILITY_PK_FLAGS = ["hidden", "held", "heldForJudgment", "metadataLayer", "metadataLayerContentUnread"];
   TierLedgerUnavailableError = class TierLedgerUnavailableError extends Error {
     constructor(corpusId) {
       super(`The tier ledger governing ${corpusId} is missing or was replaced, so which copies are visible ` + "cannot be decided. Restore the set ledger (beside the source's secure_local store) before " + "syncing or reading this store.");
@@ -33757,6 +33770,23 @@ var init_local_index = __esm(() => {
       this.tierLedgerHandle = ledger;
       this.tierLedgerOwned = false;
     }
+    personalEmbeddingProvider;
+    usePersonalEmbeddingProvider(provider) {
+      this.personalEmbeddingProvider = provider;
+    }
+    canEmbedHeld(provider) {
+      if (this.trustDomain !== "secure_local" || !provider || provider.backend !== "local" || !isApprovedSecureSourceEmbeddingProvider(provider))
+        return false;
+      try {
+        const personal = this.personalEmbeddingProvider?.();
+        if (!personal)
+          return false;
+        personal.assertBindingCurrent?.();
+        return personal.backend === "local" && personal.provider === provider.provider && personal.modelId === provider.modelId && personal.dimension === provider.dimension && personal.epochId === provider.epochId;
+      } catch {
+        return false;
+      }
+    }
     visibilityLedger() {
       const binding = this.tierSetBinding();
       if (binding)
@@ -33845,7 +33875,7 @@ var init_local_index = __esm(() => {
       }
       return hidden;
     }
-    tierVisibleRows(rows, identityOf, layerOf, throwOnUnavailable = false) {
+    tierVisibleRows(rows, identityOf, layerOf, throwOnUnavailable = false, copiesAllowed) {
       if (rows.length === 0)
         return [];
       let copies;
@@ -33858,7 +33888,10 @@ var init_local_index = __esm(() => {
           throw error;
         return [];
       }
-      const served = copies ? rows.filter((row) => tierRowVisible(copies.get(tierLedgerIdentityKey(identityOf(row))), this.corpusId, layerOf(row))) : [...rows];
+      const served = copies ? rows.filter((row) => {
+        const here = copies.get(tierLedgerIdentityKey(identityOf(row)));
+        return tierRowVisible(here, this.corpusId, layerOf(row)) && (copiesAllowed?.(here ?? []) ?? true);
+      }) : [...rows];
       return this.withoutChildrenOfHiddenParents(served, identityOf);
     }
     withoutChildrenOfHiddenParents(rows, identityOf) {
@@ -33947,7 +33980,7 @@ var init_local_index = __esm(() => {
           this.db.exec("DELETE FROM temp.tier_visibility_pks");
         this.visibilitySqlMemo = undefined;
         this.tierLedgerHiddenMemo = undefined;
-        return { hidden: [], held: [], metadataLayer: [], metadataLayerContentUnread: [], moving: 0 };
+        return { hidden: [], held: [], heldForJudgment: [], metadataLayer: [], metadataLayerContentUnread: [], moving: 0 };
       }
       const version = this.db.query("PRAGMA data_version").get().data_version;
       const prior = this.tierLedgerHiddenMemo;
@@ -33965,11 +33998,12 @@ var init_local_index = __esm(() => {
         lists: {
           hidden: new MutablePkList,
           held: new MutablePkList,
+          heldForJudgment: new MutablePkList,
           metadataLayer: new MutablePkList,
           metadataLayerContentUnread: new MutablePkList
         },
         members: new Map,
-        value: { hidden: [], held: [], metadataLayer: [], metadataLayerContentUnread: [], moving: 0 }
+        value: { hidden: [], held: [], heldForJudgment: [], metadataLayer: [], metadataLayerContentUnread: [], moving: 0 }
       };
       for (const flag of VISIBILITY_PK_FLAGS)
         memo.value[flag] = memo.lists[flag].values;
@@ -38180,7 +38214,7 @@ var init_local_index = __esm(() => {
       const accountScope = normalizeOptionalAccountScope(scope.accountScope);
       const scoped = connectorStoreFilterSql(scope.filters);
       const failed = this.embeddingFailureState;
-      const tierExclusion = this.embeddingTierExclusionFilter(0, tierHidden);
+      const tierExclusion = this.embeddingWorkListExclusionFilter(0, tierHidden, this.canEmbedHeld(embedder));
       const privateTier = this.privateTierEmbeddingFilter(embedder);
       const filter = `${tierExclusion.filter} ${privateTier.filter} ${accountScope ? "AND i.account_scope = ?" : ""} ${scoped.sql}`;
       const params = [...tierExclusion.params, ...privateTier.params, ...accountScope ? [accountScope] : [], ...scoped.params];
@@ -38189,7 +38223,7 @@ var init_local_index = __esm(() => {
       FROM chunks c
       JOIN items i ON i.item_pk = c.item_pk
       LEFT JOIN chunk_embeddings e ON e.chunk_pk = c.chunk_pk AND e.model_id = ?
-      WHERE i.tombstoned = 0
+      WHERE i.tombstoned = 0 AND i.trust_tier <> 'S5'
         AND (e.chunk_pk IS NULL OR e.content_hash != c.embedding_input_hash)
         ${filter}
       GROUP BY i.item_pk
@@ -38219,7 +38253,7 @@ var init_local_index = __esm(() => {
       return rows.map((row) => row.local_item_id);
     }
     embeddingBacklogEstimate(modelId, embedder, scope, options = {}) {
-      const tierExclusion = this.embeddingTierExclusionFilter(options.countsMaxAgeMs ?? 0);
+      const tierExclusion = this.embeddingWorkListExclusionFilter(options.countsMaxAgeMs ?? 0);
       const privateTier = embedder ? this.privateTierEmbeddingFilter(embedder) : { filter: "", params: [] };
       const scoped = statusScopeContentFilter(scope);
       const filter = `${tierExclusion.filter} ${privateTier.filter} ${scoped.filter}`;
@@ -38253,34 +38287,36 @@ var init_local_index = __esm(() => {
         extractedChars: row.chars
       };
     }
-    embeddingTierExclusionFilter(countsMaxAgeMs = 0, tierHidden) {
+    embeddingWorkListExclusionFilter(countsMaxAgeMs = 0, tierHidden, allowHeld = false) {
       const tierExcluded = tierHidden ?? this.tierHiddenItemPks({ countsMaxAgeMs });
       if (this.visibilityJournal && this.visibilitySqlMemo) {
         const children = tierExcluded.hidden === this.visibilitySqlMemo.value.hidden ? [] : tierExcluded.hidden;
         return {
           filter: `AND NOT EXISTS (SELECT 1 FROM temp.tier_visibility_pks v
-        WHERE v.flag IN ('hidden', 'held', 'metadataLayer') AND v.item_pk = i.item_pk)
+        WHERE v.flag IN ('hidden', 'held', 'metadataLayer') AND v.item_pk = i.item_pk
+          ${allowHeld ? "AND (v.flag <> 'held' OR NOT EXISTS (SELECT 1 FROM temp.tier_visibility_pks j WHERE j.flag = 'heldForJudgment' AND j.item_pk = i.item_pk))" : ""})
         ${children.length ? "AND i.item_pk NOT IN (SELECT value FROM json_each(?))" : ""}`,
           params: children.length ? [JSON.stringify(children)] : []
         };
       }
-      const excludedPks = [...tierExcluded.hidden, ...tierExcluded.held, ...tierExcluded.metadataLayer];
+      const eligibleHeld = allowHeld ? new Set(tierExcluded.heldForJudgment) : undefined;
+      const excludedPks = [...tierExcluded.hidden, ...tierExcluded.held.filter((pk) => !eligibleHeld?.has(pk)), ...tierExcluded.metadataLayer];
       return excludedPks.length > 0 ? { filter: "AND i.item_pk NOT IN (SELECT value FROM json_each(?))", params: [JSON.stringify(excludedPks)] } : { filter: "", params: [] };
     }
-    embeddingBatchRecheck(batch, embeddableTiers) {
+    embeddingBatchRecheck(batch, embeddableTiers, provider) {
       const itemPks = [...new Set(batch.map((row) => row.item_pk))];
       const currentRows = this.db.query(`
       SELECT item_pk, trust_tier, tombstoned, provider, account_scope, provider_item_id, provider_conversation_id FROM items
       WHERE item_pk IN (SELECT value FROM json_each(?))
     `).all(JSON.stringify(itemPks));
       const current2 = new Map(currentRows.map((row) => [row.item_pk, row]));
-      const hidden = this.embeddingHiddenAmong(currentRows);
+      const hidden = this.embeddingHiddenAmong(currentRows, this.canEmbedHeld(provider));
       const kept = [];
       let privateTier = 0;
       let notVisible = 0;
       for (const row of batch) {
         const item = current2.get(row.item_pk);
-        if (!item || item.tombstoned !== 0 || hidden.has(row.item_pk)) {
+        if (!item || item.tombstoned !== 0 || item.trust_tier === "S5" || hidden.has(row.item_pk)) {
           notVisible += 1;
         } else if (embeddableTiers !== undefined && !embeddableTiers.includes(item.trust_tier)) {
           privateTier += 1;
@@ -38290,7 +38326,7 @@ var init_local_index = __esm(() => {
       }
       return { kept, privateTier, notVisible };
     }
-    embeddingHiddenAmong(rows) {
+    embeddingHiddenAmong(rows, allowHeld = false) {
       const hidden = new Set;
       if (rows.length === 0)
         return hidden;
@@ -38305,7 +38341,11 @@ var init_local_index = __esm(() => {
         const copies = ledger.copiesForMany(rows.map(identityOf));
         for (const row of rows) {
           const here = (copies.get(tierLedgerIdentityKey(identityOf(row))) ?? []).filter((copy) => copy.corpusId === this.corpusId);
-          if (here.some((copy) => copy.state === "superseded" || copy.state === "staged" || copy.state === "current" && (copy.embedHold || copy.layers === "metadata"))) {
+          const identity2 = identityOf(row);
+          const intent = ledger.writeIntent(identity2);
+          const decision = allowHeld ? ledger.getCurrent(identity2) : undefined;
+          const pendingJudgment = decision?.state === "pending" && decision.contentRead && (decision.metadataPending || decision.contentPending);
+          if (ledger.itemIsSecret(identity2) || intent?.kind === "secret" || intent?.kind === "deletion" || here.some((copy) => copy.state === "superseded" || copy.state === "staged" || copy.state === "current" && (copy.layers === "metadata" || copy.embedHold && !(allowHeld && pendingJudgment && copy.trustDomain === "secure_local")))) {
             hidden.add(row.item_pk);
           }
         }
@@ -38327,7 +38367,7 @@ var init_local_index = __esm(() => {
       const tiers = connectorStoreEmbeddableRowTiers(this.trustDomain, embedder);
       if (tiers === undefined)
         return { items: 0, chunks: 0, reason };
-      const tierExclusion = this.embeddingTierExclusionFilter(options.countsMaxAgeMs ?? 0);
+      const tierExclusion = this.embeddingWorkListExclusionFilter(options.countsMaxAgeMs ?? 0);
       const scoped = statusScopeContentFilter(scope);
       const filter = `${tierExclusion.filter} ${scoped.filter}`;
       const params = [...tierExclusion.params, ...scoped.params];
@@ -38396,7 +38436,7 @@ var init_local_index = __esm(() => {
         throw new Error("Connector store embedding journal provider changed.");
       }
       const tierHidden = await this.tierHiddenItemPksInTurns();
-      const selectedRows = this.embeddingSourceRows(options.localItemIds, options.accountScope, options.filters, tierHidden);
+      const selectedRows = this.embeddingSourceRows(options.localItemIds, options.accountScope, options.filters, tierHidden, this.canEmbedHeld(provider));
       const embeddableTiers = connectorStoreEmbeddableRowTiers(this.trustDomain, provider);
       const rows = embeddableTiers === undefined ? selectedRows : selectedRows.filter((row) => embeddableTiers.includes(row.trust_tier));
       let privateTierWithheldChunks = 0;
@@ -38503,14 +38543,6 @@ var init_local_index = __esm(() => {
         }
         let batch = pending.slice(offset, offset + EMBEDDING_BATCH_SIZE);
         await options.assertAuthorized?.();
-        {
-          const recheck = this.embeddingBatchRecheck(batch, embeddableTiers);
-          privateTierWithheldChunks += recheck.privateTier;
-          staleSkipped += recheck.notVisible + recheck.privateTier;
-          batch = recheck.kept;
-          if (batch.length === 0)
-            continue;
-        }
         if (provider.imageSupport && batch.some((row) => row.media_sha256)) {
           readsImages ??= await provider.imageSupport();
           const skip = new Set;
@@ -38530,6 +38562,14 @@ var init_local_index = __esm(() => {
             if (batch.length === 0)
               continue;
           }
+        }
+        {
+          const recheck = this.embeddingBatchRecheck(batch, embeddableTiers, provider);
+          privateTierWithheldChunks += recheck.privateTier;
+          staleSkipped += recheck.notVisible + recheck.privateTier;
+          batch = recheck.kept;
+          if (batch.length === 0)
+            continue;
         }
         const inputsFor = (rows2) => rows2.map((row) => ({
           ...row.title ? { title: row.title } : {},
@@ -38576,6 +38616,12 @@ var init_local_index = __esm(() => {
           batch = batch.filter((row) => !failedRows.has(row));
           if (batch.length === 0)
             continue;
+          const recheck = this.embeddingBatchRecheck(batch, embeddableTiers, provider);
+          privateTierWithheldChunks += recheck.privateTier;
+          staleSkipped += recheck.notVisible + recheck.privateTier;
+          batch = recheck.kept;
+          if (batch.length === 0)
+            continue;
           vectors = await provider.embed(inputsFor(batch), { taskType: "RETRIEVAL_DOCUMENT" });
         }
         if (vectors.length !== batch.length) {
@@ -38586,8 +38632,11 @@ var init_local_index = __esm(() => {
         let written = 0;
         this.db.transaction(() => {
           this.assertEmbeddingWriteAuthority(provider, providerEpoch);
+          const stillEligible = new Set(this.embeddingBatchRecheck(batch, embeddableTiers, provider).kept);
           for (let index = 0;index < batch.length; index += 1) {
             const row = batch[index];
+            if (!stillEligible.has(row))
+              continue;
             const vector = vectors[index];
             if (!vector)
               throw new Error("Connector store embedding provider returned no vector for a chunk.");
@@ -38884,6 +38933,7 @@ var init_local_index = __esm(() => {
     hasEmbeddings(modelId) {
       if (this.embeddingCurrencyRebuildPending(modelId))
         return false;
+      const exclusion = this.embeddingWorkListExclusionFilter();
       const row = this.db.query(`
       SELECT 1 AS present
       FROM chunk_embeddings emb
@@ -38892,8 +38942,9 @@ var init_local_index = __esm(() => {
       WHERE emb.model_id = ?
         AND i.tombstoned = 0
         AND emb.content_hash = c.embedding_input_hash
+        ${exclusion.filter}
       LIMIT 1
-    `).get(modelId);
+    `).get(modelId, ...exclusion.params);
       return row !== null;
     }
     async vectorSearchItems(query, provider, maxResults, accountScope, filters, deadlineAtMs) {
@@ -39056,7 +39107,7 @@ var init_local_index = __esm(() => {
       }
       return { token };
     }
-    embeddingSourceRows(localItemIds, accountScope, filters, tierHidden) {
+    embeddingSourceRows(localItemIds, accountScope, filters, tierHidden, allowHeld = false) {
       const selectedLocalItemIds = normalizeEmbedLocalItemIds(localItemIds);
       if (selectedLocalItemIds && selectedLocalItemIds.length === 0)
         return [];
@@ -39064,7 +39115,7 @@ var init_local_index = __esm(() => {
       const selectedFilters = connectorStoreFilterSql(filters);
       const itemFilter = selectedLocalItemIds ? ` AND i.local_item_id IN (${selectedLocalItemIds.map(() => "?").join(", ")})` : "";
       const tierExcluded = tierHidden ?? this.tierHiddenItemPks();
-      const tierExclusion = this.embeddingTierExclusionFilter(0, tierExcluded);
+      const tierExclusion = this.embeddingWorkListExclusionFilter(0, tierExcluded, allowHeld);
       const tierFilter = tierExclusion.filter;
       return this.db.query(`
       SELECT
@@ -39081,7 +39132,7 @@ var init_local_index = __esm(() => {
         ${this.chunkMediaColumnsPresent ? "c.media_path, c.media_sha256" : "NULL AS media_path, NULL AS media_sha256"}
       FROM chunks c
       JOIN items i ON i.item_pk = c.item_pk
-      WHERE i.tombstoned = 0
+      WHERE i.tombstoned = 0 AND i.trust_tier <> 'S5'
         ${itemFilter}
         ${tierFilter}
         ${selectedAccount ? "AND i.account_scope = ?" : ""}
@@ -39102,7 +39153,7 @@ var init_local_index = __esm(() => {
           accountScope: row2.account_scope,
           providerItemId: row2.provider_item_id,
           ...row2.provider_conversation_id ? { providerConversationId: row2.provider_conversation_id } : {}
-        }), () => "content"))
+        }), () => "content", false, (copies) => !copies.some((copy) => copy.corpusId === this.corpusId && copy.state === "current" && copy.embedHold)))
           visible.add(row.item_pk);
       }
       return visible;
@@ -63556,6 +63607,7 @@ class TieredStoreSet {
       }
       spec.store?.useTierLedger(this.ledger);
       spec.store?.useChildVisibility(this.childLane);
+      spec.store?.usePersonalEmbeddingProvider(() => this.legs.get("internal")?.spec.embeddingProvider);
       this.legs.set(spec.trustDomain, { spec, store: spec.store });
     }
     if (!this.legs.has("secure_local"))
@@ -63725,6 +63777,7 @@ class TieredStoreSet {
     }
     store.useTierLedger(this.ledger);
     store.useChildVisibility(this.childLane);
+    store.usePersonalEmbeddingProvider(() => this.legs.get("internal")?.spec.embeddingProvider);
     leg.store = store;
     this.onLegOpened?.(store, leg.spec);
     return store;
@@ -112194,7 +112247,7 @@ async function secretRefPrerequisite(profileId, profile, env, getSecretStore) {
 }
 function envSecretRemedy(displayKey) {
   if (displayKey === "GEMINI_API_KEY") {
-    return "Open Models in Olympus Setup to connect Gemini. Headless fallback: olympus connect gemini --api-key-prompt";
+    return "Existing legacy Gemini policy: restore its key with olympus connect gemini --api-key-prompt, or follow docs/SOVEREIGNTY_CONFIG.md#legacy-embedding-migration to move to built-in local EmbeddingGemma or Venice. No automatic re-embed.";
   }
   return `Set ${displayKey} in the environment the Olympus worker runs with, then restart it with olympus worker restart.`;
 }
@@ -144040,6 +144093,12 @@ class ModelSetupService {
   status() {
     const required4 = requiredModelProfiles(this.config);
     const cards = [];
+    const legacyEmbeddings = Object.values(this.config.retrieval.trustDomains).some((policy) => {
+      if (!policy?.embeddingProfile)
+        return false;
+      const provider = this.config.modelProfiles[policy.embeddingProfile]?.provider;
+      return provider !== undefined && provider !== "built-in" && provider !== "venice";
+    });
     const gemini = required4.filter(({ profile }) => profile.provider === "google-gemini");
     if (gemini.length > 0)
       cards.push(this.credentialCard("gemini", gemini));
@@ -144061,7 +144120,8 @@ class ModelSetupService {
     return {
       ready: !isPendingPrivacyPolicy(this.config) && additionalReady && cards.every((card) => !card.required || card.state === "ready"),
       ...isPendingPrivacyPolicy(this.config) ? { privacy_choice_pending: true } : {},
-      ...!additionalReady ? { attention: "An additional model provider in your policy needs agent-assisted setup. These key forms manage Gemini and Venice only." } : {},
+      ...!additionalReady ? { attention: "An additional model provider in your policy needs agent-assisted setup. These key forms manage Venice and existing legacy Gemini credentials only." } : {},
+      ...legacyEmbeddings ? { migration_notes: ["Your saved policy uses a legacy embedding provider. Existing settings and vectors are preserved. New setup offers built-in local EmbeddingGemma or Venice only. To migrate, follow docs/SOVEREIGNTY_CONFIG.md#legacy-embedding-migration; changing models requires explicit approval and a planned re-embed. Nothing is migrated automatically."] } : {},
       checked_at: this.now().toISOString(),
       cards
     };
@@ -144334,8 +144394,8 @@ var init_model_setup = __esm(() => {
   LOCAL_RESPONSE_LIMIT_BYTES = 64 * 1024;
   CARD_COPY = {
     gemini: {
-      label: "Gemini",
-      missing: "Gemini makes everything you have not marked private searchable. Add its API key to continue.",
+      label: "Gemini (legacy)",
+      missing: "Your saved policy uses legacy Gemini embeddings. Restore its key to keep it running, or follow the embedding migration guide.",
       applying: "Applying the Gemini key.",
       ready: "The Gemini key is connected."
     },
@@ -159810,7 +159870,7 @@ function renderModelSetup(view3, options = {}) {
   }).join("");
   const localCard = view3.cards.some((card) => card.id === "local");
   const extras = view3.ready ? '<div class="modelextras">' + (localCard ? "" : `<button type="button" class="btn" ${LOCAL_MODELS_TOGGLE}`) + `${CHECK_FORM_OPEN}<button class="btn" type="submit">Check readiness</button>${CHECK_FORM_TAIL}` + "</div>" + (localCard ? "" : localModelsSheet()) : localCard ? "" : '<div class="modeltools">' + `<p>Optional: your agent can help connect models you already run and review the matching privacy choice.</p><button type="button" class="btn" ${LOCAL_MODELS_TOGGLE}` + `${CHECK_FORM_OPEN}<button class="btn" type="submit">Check readiness</button>${CHECK_FORM_TAIL}` + "</div>" + localModelsSheet();
-  return status + engine + (view3.ready ? privateModelProgress(view3) : "") + `<section aria-label="Models">${options.heading === false ? "" : '<div class="sect">Models</div>'}` + (view3.ready ? `<p class="quiet" role="status">${options.heading === false ? "Models are ready." : "Models are ready. You can connect sources below."}</p>` : '<p class="modelintro">Add the keys required by your privacy choice. Olympus checks them and updates this page when they are ready. Saved keys are not displayed.</p>') + (view3.attention ? `<p role="status">${escapeHtml2(view3.attention)}</p>` : "") + `<div class="modelcards">${cards}</div>` + extras + "</section>";
+  return status + engine + (view3.ready ? privateModelProgress(view3) : "") + `<section aria-label="Models">${options.heading === false ? "" : '<div class="sect">Models</div>'}` + (view3.ready ? `<p class="quiet" role="status">${options.heading === false ? "Models are ready." : "Models are ready. You can connect sources below."}</p>` : '<p class="modelintro">Add the keys required by your privacy choice. Olympus checks them and updates this page when they are ready. Saved keys are not displayed.</p>') + (view3.migration_notes ?? []).map((note) => `<p role="status" data-embedding-migration>${escapeHtml2(note)} See "Legacy embedding migration" in docs/SOVEREIGNTY_CONFIG.md.</p>`).join("") + (view3.attention ? `<p role="status">${escapeHtml2(view3.attention)}</p>` : "") + `<div class="modelcards">${cards}</div>` + extras + "</section>";
 }
 function renderFirstRunPrivacyChoice() {
   const choices = PRIVATE_ANSWER_OPTIONS.map((option) => `<label class="modelcard"><input type="radio" name="choice" value="${escapeHtml2(option.id)}"${option.recommended ? " checked" : ""}> <b>${escapeHtml2(option.label)}${option.recommended ? " — Recommended" : ""}</b><p>${escapeHtml2(option.description)}</p></label>`).join("");
@@ -159906,7 +159966,9 @@ function modelKeyAction(card, lead) {
   if (card.id === "venice" && lead.includes("<form")) {
     return `<span id="model-venice-start" tabindex="-1"></span>` + setupStepsSheet({ id: `model-venice-${card.state}`, provider: "Venice", steps: VENICE_SETUP_STEPS, finalForm: (formId) => modelKeyForm(card, formId) });
   }
-  const href = card.id === "gemini" ? "https://aistudio.google.com/apikey" : "https://venice.ai";
+  if (card.id === "gemini")
+    return `<div class="modelaction">${lead}<span class="modelnote">Existing Gemini installations only. New embedding setup uses built-in local EmbeddingGemma or Venice. See the embedding migration guide above.</span></div>`;
+  const href = "https://venice.ai";
   return `<div class="modelaction">${lead}<a href="${href}" target="_blank" rel="noopener noreferrer">Get a ${card.label} API key</a></div>`;
 }
 function renderComputerUseChoice(view3) {
@@ -192916,7 +192978,9 @@ function matchingVectorIdentities(set2, exported) {
       const store = set2.store(domain);
       if (!store)
         continue;
-      const own3 = store.embeddingAuthorities().find((authority) => exported.vectorAuthorities.some((minted) => minted.modelId === authority.modelId && minted.provider === authority.provider && minted.backend === authority.backend && minted.dimension === authority.dimension && minted.epochId === authority.epochId));
+      const configured = domain === "secure_local" ? set2.privateEmbeddingProvider() : set2.legSpec(domain)?.embeddingProvider;
+      const candidates2 = configured ? [configured] : store.embeddingAuthorities();
+      const own3 = candidates2.find((authority) => exported.vectorAuthorities.some((minted) => minted.modelId === authority.modelId && minted.provider === authority.provider && minted.backend === authority.backend && minted.dimension === authority.dimension && minted.epochId === authority.epochId));
       if (!own3 || own3.backend !== "local" && own3.backend !== "cloud")
         continue;
       identities[domain] = {
@@ -212616,6 +212680,7 @@ function registerConnectorStoreEmbeddingLane(options) {
   if (options.store.trustDomain === "secure_local" && !isApprovedSecureSourceEmbeddingProvider(options.provider)) {
     throw new Error("Connector store secure_local embeddings require a local/private or approved Venice embedding provider.");
   }
+  options.store.usePersonalEmbeddingProvider(() => options.personalProvider);
   options.providers.set(options.store.corpusId, options.provider);
   options.retrievalAvailability[options.store.corpusId] = () => {
     const servable = options.store.hasEmbeddings(options.provider.modelId);
@@ -214928,6 +214993,7 @@ ${key2}`;
       registerConnectorStoreEmbeddingLane({
         store,
         provider,
+        personalProvider: sourceIndexEmbeddingProvider,
         providers: connectorStoreEmbeddingProviders,
         retrievalAvailability
       });
@@ -215105,6 +215171,7 @@ ${key2}`;
     registerConnectorStoreEmbeddingLane({
       store: xBookmarksConnectorStore,
       provider: xBookmarksEmbeddingProvider,
+      personalProvider: sourceIndexEmbeddingProvider,
       providers: connectorStoreEmbeddingProviders,
       retrievalAvailability
     });
@@ -215113,6 +215180,7 @@ ${key2}`;
     registerConnectorStoreEmbeddingLane({
       store: readwiseConnectorStore,
       provider: readwiseEmbeddingProvider,
+      personalProvider: sourceIndexEmbeddingProvider,
       providers: connectorStoreEmbeddingProviders,
       retrievalAvailability
     });
@@ -215126,6 +215194,7 @@ ${key2}`;
     registerConnectorStoreEmbeddingLane({
       store,
       provider,
+      personalProvider: sourceIndexEmbeddingProvider,
       providers: connectorStoreEmbeddingProviders,
       retrievalAvailability
     });
@@ -222127,7 +222196,7 @@ function printHelp() {
   console.log("  olympus connect dropbox --client-id <id> [--redirect-port <port>] [--oauth-timeout-ms <ms>]");
   console.log("  olympus connect telegram|whatsapp --pair");
   console.log("  olympus connect venice|readwise --api-key-prompt");
-  console.log("  olympus connect gemini --api-key-prompt");
+  console.log("  olympus connect gemini --api-key-prompt  # existing legacy installs only; see docs/SOVEREIGNTY_CONFIG.md#legacy-embedding-migration");
   console.log("  olympus connect status [google|gmail|google-drive|dropbox]");
   console.log("  olympus connect finish <address>");
   console.log("  olympus connections add <name>");
@@ -222259,7 +222328,7 @@ var COMMAND_GROUP_HELP = {
     "  olympus connect dropbox --client-id <id>",
     "  olympus connect telegram|whatsapp --pair",
     "  olympus connect venice|readwise --api-key-prompt",
-    "  olympus connect gemini --api-key-prompt"
+    "  olympus connect gemini --api-key-prompt  # existing legacy installs only; see docs/SOVEREIGNTY_CONFIG.md#legacy-embedding-migration"
   ],
   connections: [
     "Usage: olympus connections <command>",
@@ -222974,7 +223043,7 @@ async function runConnect(args) {
         "olympus connect dropbox --client-id <id> [--detach] [--redirect-port <port>] [--no-open] [--oauth-timeout-ms <ms>]",
         "olympus connect telegram|whatsapp --pair",
         "olympus connect venice|readwise --api-key-prompt",
-        "olympus connect gemini --api-key-prompt",
+        "olympus connect gemini --api-key-prompt  # existing legacy installs only; see docs/SOVEREIGNTY_CONFIG.md#legacy-embedding-migration",
         "olympus connect status [google|gmail|google-drive|dropbox]",
         "olympus connect finish <address>"
       ]

@@ -514,6 +514,9 @@ export function buildEnvBridgeSovereigntyConfig(env: Record<string, string | und
   }
 
   const embeddingProvider = env.OLYMPUS_SOURCE_INDEX_EMBEDDING_PROVIDER?.trim();
+  // Saved environment-only installs retain legacy providers and model identity.
+  // New setup offers built-in local EmbeddingGemma or Venice; migration is
+  // explicit and never changes this compatibility bridge's vectors on upgrade.
   if (embeddingProvider === 'local-openai-compatible') {
     profiles['local-source-embedding'] = {
       provider: 'local-openai-compatible',

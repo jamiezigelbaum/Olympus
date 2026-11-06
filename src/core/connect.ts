@@ -1257,12 +1257,10 @@ export async function connectPublicApiKeySource(options: {
 /**
  * Store the Gemini API key where the supervised worker will actually read it.
  *
- * Every preset needs this key for source-index embeddings, and before this
- * command there was no way to supply it: the worker reads it from ITS process
- * environment, which the service manager loads from worker.env, so an `export`
- * in the operator's shell reaches nothing, and the install guide forbids
- * editing worker.env by hand. The key is validated before it is stored so a
- * mistyped paste fails here rather than as a degraded embedding lane later.
+ * Compatibility for existing Gemini embedding installations only. New setup
+ * offers built-in local EmbeddingGemma or Venice. Keep this credential repair
+ * path so an upgrade never strands a saved Gemini policy or replaces vectors.
+ * The key is validated before it is stored in the managed worker environment.
  */
 export async function connectGeminiApiKey(options: {
   apiKey: string;
@@ -1296,7 +1294,7 @@ export async function connectGeminiApiKey(options: {
     source: 'gemini',
     handles: [],
     secretRefs: [`env:${stored.key}`],
-    next: `Stored in ${stored.path}. Run olympus worker restart so the worker picks it up.`,
+    next: `Stored in ${stored.path}. Run olympus worker restart so the worker picks it up. Legacy Gemini embeddings remain configured; new setup offers built-in local EmbeddingGemma or Venice. See docs/SOVEREIGNTY_CONFIG.md#legacy-embedding-migration for an explicitly approved migration. No automatic re-embed.`,
   };
 }
 

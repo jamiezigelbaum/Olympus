@@ -1406,7 +1406,7 @@ export class TierSnifferService {
             set,
             identity: { ...identity, family: exported.identity.family, localItemId: exported.identity.localItemId },
             target: { metadataTier: record.targetMetadataTier!, contentTier: record.targetContentTier! },
-            // Vectors made by the very model a destination already embeds
+            // Vectors made by the very model a destination embeds
             // with are copied, not made again (a judged-ordinary photo keeps
             // its picture vector when it leaves the Private store).
             vectorIdentities: contentCopy ? matchingVectorIdentities(set, contentCopy) : {},
@@ -1513,9 +1513,9 @@ function isBuiltInLane(lane: SnifferLane): boolean {
 }
 
 /**
- * For each store of the set, the embedding identity it already writes
- * vectors under when that is exactly the identity the item's vectors were
- * minted under: a move may copy those vectors there instead of embedding
+ * For each store of the set, its configured embedding identity (or recorded
+ * identity when the lane declares none), if it matches the identity the
+ * item's vectors were minted under: a move may copy them instead of embedding
  * again. A store with no such identity gets none (it embeds with its own model).
  */
 function matchingVectorIdentities(
@@ -1527,7 +1527,11 @@ function matchingVectorIdentities(
     try {
       const store = set.store(domain);
       if (!store) continue;
-      const own = store.embeddingAuthorities().find((authority) => exported.vectorAuthorities.some((minted) =>
+      const configured = domain === 'secure_local'
+        ? set.privateEmbeddingProvider()
+        : set.legSpec(domain)?.embeddingProvider;
+      const candidates = configured ? [configured] : store.embeddingAuthorities();
+      const own = candidates.find((authority) => exported.vectorAuthorities.some((minted) =>
         minted.modelId === authority.modelId
         && minted.provider === authority.provider
         && minted.backend === authority.backend

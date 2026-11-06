@@ -310,6 +310,7 @@ export class TieredStoreSet {
       }
       spec.store?.useTierLedger(this.ledger);
       spec.store?.useChildVisibility(this.childLane);
+      spec.store?.usePersonalEmbeddingProvider(() => this.legs.get('internal')?.spec.embeddingProvider);
       this.legs.set(spec.trustDomain, { spec, store: spec.store });
     }
     // Private and pending items must always have somewhere to go.
@@ -546,6 +547,7 @@ export class TieredStoreSet {
     }
     store.useTierLedger(this.ledger);
     store.useChildVisibility(this.childLane);
+    store.usePersonalEmbeddingProvider(() => this.legs.get('internal')?.spec.embeddingProvider);
     leg.store = store;
     this.onLegOpened?.(store, leg.spec);
     return store;

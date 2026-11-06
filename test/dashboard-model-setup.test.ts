@@ -115,3 +115,18 @@ test('model bytes keep refreshing while the first-run choice sheet stays in plac
     for (const name of names) { const descriptor = old.get(name); if (descriptor) Object.defineProperty(globalThis, name, descriptor); else delete (globalThis as any)[name]; }
   }
 });
+
+
+test('a ready legacy embedding installation keeps its migration notice visible outside collapsed key forms', async () => {
+  const { renderModelSetup } = await import('../src/workers/dashboard/model-setup.ts');
+  const view = modelView(true);
+  view.migration_notes = ['Legacy embeddings: preserve vectors until an explicitly approved migration.'];
+  const html = renderModelSetup(view);
+  const note = html.indexOf('data-embedding-migration');
+  expect(note).toBeGreaterThan(-1);
+  expect(note).toBeLessThan(html.indexOf('<div class="modelcards">'));
+  expect(html).toContain('preserve vectors');
+  expect(html).toContain('docs/SOVEREIGNTY_CONFIG.md');
+  expect(html).not.toContain('aistudio.google.com');
+  expect(html).toContain('Existing Gemini installations only');
+});

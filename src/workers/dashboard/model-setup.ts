@@ -64,6 +64,7 @@ export function renderModelSetup(view: ModelSetupView | undefined, options: { he
     + (view.ready
       ? `<p class="quiet" role="status">${options.heading === false ? 'Models are ready.' : 'Models are ready. You can connect sources below.'}</p>`
       : '<p class="modelintro">Add the keys required by your privacy choice. Olympus checks them and updates this page when they are ready. Saved keys are not displayed.</p>')
+    + (view.migration_notes ?? []).map(note => `<p role="status" data-embedding-migration>${escapeHtml(note)} See "Legacy embedding migration" in docs/SOVEREIGNTY_CONFIG.md.</p>`).join('')
     + (view.attention ? `<p role="status">${escapeHtml(view.attention)}</p>` : '')
     + `<div class="modelcards">${cards}</div>`
     + extras
@@ -186,7 +187,8 @@ function modelKeyAction(card: ModelSetupCard, lead: string): string {
   if (card.id === 'venice' && lead.includes('<form')) {
     return `<span id="model-venice-start" tabindex="-1"></span>` + setupStepsSheet({ id: `model-venice-${card.state}`, provider: 'Venice', steps: VENICE_SETUP_STEPS, finalForm: (formId) => modelKeyForm(card, formId) });
   }
-  const href = card.id === 'gemini' ? 'https://aistudio.google.com/apikey' : 'https://venice.ai';
+  if (card.id === 'gemini') return `<div class="modelaction">${lead}<span class="modelnote">Existing Gemini installations only. New embedding setup uses built-in local EmbeddingGemma or Venice. See the embedding migration guide above.</span></div>`;
+  const href = 'https://venice.ai';
   return `<div class="modelaction">${lead}<a href="${href}" target="_blank" rel="noopener noreferrer">Get a ${card.label} API key</a></div>`;
 }
 

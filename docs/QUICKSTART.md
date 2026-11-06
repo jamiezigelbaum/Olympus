@@ -37,8 +37,8 @@ For the credentials and models that choice requires, follow the
 [agent-led model setup guide](SOVEREIGNTY_CONFIG.md#agent-led-model-setup-for-the-v04-beta).
 It covers account creation, API spending, exact password-manager references,
 local models, and embedding dimensions. Shipped models use their registered
-defaults when no dimension override exists: Gemini Embedding 2 uses 3072 and
-the registered local embedding model uses 2560. Unknown/custom models still
+defaults when no dimension override exists: built-in EmbeddingGemma 2 uses 768
+and Venice Qwen3 Embedding 8B uses 4096. Unknown/custom models still
 require a verified dimension; the complete custom-settings CLI is a follow-up.
 Do not edit generated worker files or disguise a custom model as a shipped one.
 
@@ -54,8 +54,9 @@ The preset prerequisites are:
 Every preset makes content searchable with the built-in embedding model: a
 small model (Google's EmbeddingGemma 2) that runs on this computer, downloads
 once (checksum pinned) on first use, needs no account or key, and sends
-nothing off the computer. Gemini, a local embedding server, or a Venice Private embedding
-model remain opt-in choices; see
+nothing off the computer. The other embedding choice is Venice; existing
+Gemini and local-server embeddings are compatibility paths only. See the
+[legacy embedding migration guide](SOVEREIGNTY_CONFIG.md#legacy-embedding-migration) and
 [SOVEREIGNTY_CONFIG.md](SOVEREIGNTY_CONFIG.md#built-in-embeddings).
 
 A local runtime means a server actually answering at the effective policy's
@@ -188,7 +189,7 @@ worker rather than installing a second one.
 
 If setup reports missing model keys, finish base activation and open the
 dashboard. Its **Keys** page (under **On this computer**, or through **Change**
-under **Models**) accepts the required Gemini/Venice keys and applies them;
+under **Models**) accepts the required Venice keys (or a legacy Gemini repair key) and applies them;
 source connections unlock when models are ready. Existing local models use the
 agent-assisted starting point and Check readiness. No local model software is
 installed or maintained by Olympus.
@@ -197,7 +198,6 @@ Only for an explicitly chosen headless workflow, run one key command at a time
 on the Olympus host, completing its private prompt before the next:
 
 ```bash
-olympus connect gemini --api-key-prompt
 olympus connect venice --api-key-prompt
 ```
 
@@ -211,13 +211,12 @@ keys pasted into commands:
 
 
 ```bash
-printf '%s' "$GEMINI_API_KEY" | olympus connect gemini --api-key-stdin
 printf '%s' "$VENICE_API_KEY" | olympus connect venice --api-key-stdin
 ```
 
 Connect is how API keys reach the worker: it validates the key, stores it in
 the worker environment at mode 600, and tells you to run `olympus worker
-restart` so the worker picks it up. Exporting `GEMINI_API_KEY` in your own shell
+restart` so the worker picks it up. Exporting a provider key in your own shell
 does not reach the background worker, and `worker.env` is a generated managed
 file — do not hand-edit it. A key containing a single quote is refused rather
 than stored; rotate it at the provider for one without.
@@ -294,14 +293,15 @@ lane in flags, then Olympus writes the sovereignty policy and worker auth token.
 
   In `private-cloud-only`, Private answers are served by the approved Venice
   Private model, with no local-model prerequisite or fallback. The Venice
-  option handles Private data: Gemini still handles Personal
-  embeddings, while Private search uses an approved Venice Private embedding model.
+  option handles Private answers. Every shipped preset uses built-in local
+  EmbeddingGemma for both Personal and Private search. Venice embeddings need
+  a separate explicit choice and approval.
   `local-first` explicitly orders local before Venice; a pool without `order` selects equal
   members from recent health/latency. Olympus does not provide or qualify E2EE
   out of the box in v0.4; custom integrations are user-owned and outside the
   release claim. Existing lexical-only installations require an approved
   embedding activation/backfill; preserve their current vectors and settings.
-  Local presets configure local Private embeddings. Olympus never falls back
+  All presets configure built-in local embeddings. Olympus never falls back
   to an ordinary cloud embedding provider for Private data. `local-only` never uses
   Venice. Secrets never leave the local secret store, and ordinary cloud never
   sees Private data.
@@ -719,7 +719,7 @@ not on the counts; `M` is doctor's whole check list, 15 on a current build.
 
 One missing key can show up as several failures. `email_worker`,
 `worker_credential_lanes`, and `source_index_status` all question the same
-worker, so a missing Gemini embedding key reddens all three at once. If the
+worker, so a missing key for a legacy Gemini embedding policy reddens all three at once. If the
 worker answered, their details say `degraded` and name the same credential —
 connect the key, `olympus worker restart`, done. If it did not answer, they
 say `not reachable at http://127.0.0.1:8010/v1` and the fix is

@@ -90,6 +90,10 @@ describe('preflight over the managed worker environment', () => {
       expect(before.map((item) => item.id)).toContain('env:GEMINI_API_KEY');
       expect(before.find((item) => item.id === 'env:GEMINI_API_KEY')?.remedy)
         .toContain('olympus connect gemini --api-key-prompt');
+      expect(before.find((item) => item.id === 'env:GEMINI_API_KEY')?.remedy)
+        .toContain('Existing legacy Gemini policy');
+      expect(before.find((item) => item.id === 'env:GEMINI_API_KEY')?.remedy)
+        .toContain('legacy-embedding-migration');
 
       // Exactly what the connect command does.
       writeManagedWorkerEnvSecret({

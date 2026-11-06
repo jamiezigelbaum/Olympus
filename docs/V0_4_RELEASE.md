@@ -5,6 +5,25 @@ Status: active
 Owner: Olympus product owner
 Planning authority: this document defines release scope, sequence, and completion: Olympus 1.0 first, then the 0.4 record. It supersedes dated CTO planning handoffs and migration plans. [`CONTRACTS.md`](CONTRACTS.md) remains the architecture authority.
 
+## Private embedding choices and pending judgments (#937; owner, 2026-11-06)
+
+New embedding setup offers built-in local EmbeddingGemma or Venice; the laptop
+default stays local and Personal/Private use one identity. Existing Gemini and
+local-server policies remain compatible, with a visible migration notice and
+an explicit migration procedure; an upgrade never changes vectors or starts a
+re-embed. Answer models remain separate.
+
+Pending judgments may embed only in Private under a shared approved local
+identity. Venice and all other cloud providers continue to wait. Embedding must
+not change query reach: held content remains available to lexical search and
+Private answers with existing counts and coverage, while vector search excludes
+it until the hold clears. Names-only, staged, superseded, deletion and
+Secret-in-progress copies remain excluded. Secret verdicts remove vectors;
+moves to Personal copy matching vectors. Work-list admission builds on #941's
+incremental visibility cache, without a full-corpus walk per verdict. No
+classifier version, embedding identity or source-contract change is involved.
+Implementation and synthetic proof only; live activation is separate.
+
 ## 1.3.2 Servers and second accounts (owner decision 2026-11-03)
 
 Why: Mark Alexander's 1.3.0 install on a headless Mac Studio took about 7

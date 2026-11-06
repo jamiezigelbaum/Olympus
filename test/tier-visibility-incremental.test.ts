@@ -10,7 +10,7 @@ import { CORPORA, FIXTURE_PLACEMENT, fixtureConnector, identityOf, localProvider
 
 interface StoreProbe {
   db: Database;
-  tierLedgerHiddenItemPks(): { hidden: number[]; held: number[]; metadataLayer: number[]; metadataLayerContentUnread: number[]; moving: number };
+  tierLedgerHiddenItemPks(): { hidden: number[]; held: number[]; heldForJudgment: number[]; metadataLayer: number[]; metadataLayerContentUnread: number[]; moving: number };
   itemRowsForIdentities(ids: readonly TierLedgerIdentity[], ...rest: unknown[]): unknown[];
 }
 
@@ -56,6 +56,7 @@ test('535k held items: each verdict refreshes one identity; moves, Secrets and d
     probe.db.transaction(() => multiply(probe.db, 'items', seedCount,
       { provider_item_id: id, local_item_id: id, title: 'NULL', search_text: 'NULL' }, "t.provider_item_id = 'a'"))();
     expect(probe.tierLedgerHiddenItemPks().held.length).toBe(535_000);
+    expect(probe.tierLedgerHiddenItemPks().heldForJudgment.length).toBe(535_000);
     expect(store.missingEmbeddingItemIds(provider, 10)).toEqual([]);
 
     const original = probe.itemRowsForIdentities.bind(store);
@@ -71,6 +72,11 @@ test('535k held items: each verdict refreshes one identity; moves, Secrets and d
       verdict('a', 'secure');
       expect(probe.tierLedgerHiddenItemPks().held.length).toBe(534_999);
       expect(work).toBe(1); // the old cache remapped the entire remaining held set
+      expect(probe.tierLedgerHiddenItemPks().heldForJudgment.length).toBe(534_999);
+      store.usePersonalEmbeddingProvider(() => provider);
+      expect(store.missingEmbeddingItemIds(provider, 10).sort()).toEqual(specs.map(spec => localId(spec.id)).sort());
+      expect(work).toBe(1); // admitting held work reuses the same indexed cache
+      store.usePersonalEmbeddingProvider(() => undefined);
       expect(store.missingEmbeddingItemIds(provider, 10)).toEqual([localId('a')]);
       // The query probes membership by pk; it must not expand the held set to
       // JSON or build a new IN-list B-tree each time.

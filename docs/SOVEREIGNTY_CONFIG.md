@@ -6,7 +6,7 @@ Updated: 2026-09-14
 ## Agent-led model setup for the v0.4 beta
 
 After base activation, open **Setup → Models** in the Olympus dashboard.
-Enter the required Gemini/Venice keys there; Connect validates and saves them,
+Enter the required Venice keys (or repair keys for an existing legacy Gemini policy) there; Connect validates and saves them,
 and the managed worker applies them automatically. Models shows whether a key
 is missing, applying, ready, or needs attention. The requirements come from the
 active privacy policy, so local-only and no-sensitive do not demand Venice.
@@ -29,10 +29,9 @@ Use this guide with your own agent after the plugin is installed. The
 sourcing, existing-install safety, and restart procedures.
 
 **Shipped model defaults:** the worker uses Olympus's registered dimensions
-when no dimension override is supplied: Gemini Embedding 2 uses 3072 and the
-registered local `secure-local-qwen3-embed` model uses 2560. The Venice
+when no dimension override is supplied: built-in EmbeddingGemma 2 uses 768. The Venice
 `text-embedding-qwen3-8b` model uses 4096. A fresh install
-using those models needs no dimension flag or generated-file edit. Explicit
+using these offered models needs no dimension flag or generated-file edit. Explicit
 settings retain precedence and invalid values still refuse startup.
 
 **Custom-model limit:** an unregistered model still needs its authoritative
@@ -150,11 +149,54 @@ install configured only by environment: `OLYMPUS_SOURCE_INDEX_EMBEDDING_PROVIDER
 with no `OLYMPUS_SOURCE_INDEX_EMBEDDING_MODEL` keeps running Arctic, so an
 upgrade never re-embeds on its own; name the EmbeddingGemma 2 model id to move.
 
-Gemini, a local OpenAI-compatible embedding server, and Venice Private
-embeddings stay available as opt-in profiles. Switching an existing corpus to
-a different embedding model is a re-embed and needs the owner's approval and
-an embedding-ledger entry. Installs set up before the built-in model keep the
-policy they were written with, and keep their current embeddings.
+The offered embedding choices are **built-in local EmbeddingGemma** (the
+laptop and fresh-install default) or **Venice**. Ordinary cloud providers such
+as Gemini and custom local OpenAI-compatible embedding servers are legacy
+compatibility paths, not new setup choices. Local answer servers are still
+supported independently of the embedding choice.
+
+### Legacy embedding migration
+
+An upgrade preserves existing Gemini, custom local-server, and older built-in
+embedding profiles, their dimensions, settings, and stored vectors. The Models
+page displays a migration notice for legacy provider policies, including when
+the existing models are ready. There is no automatic switch or re-embed.
+A legacy Gemini key can still be repaired with
+`olympus connect gemini --api-key-prompt` (or the existing stdin command).
+This repairs the saved configuration; it does not choose Gemini for a new setup.
+
+To migrate an existing corpus:
+
+1. Inspect the effective policy (file, inline policy, or environment bridge),
+   each corpus's current model identity, dimensions and generation, and the
+   saved vectors. Back up the policy and preserve the existing vectors.
+2. Choose built-in local EmbeddingGemma 2 (768 dimensions) or Venice
+   `text-embedding-qwen3-8b` (4096 dimensions). For Venice, verify the endpoint,
+   credentials, approved handling and expected usage cost with synthetic text.
+3. Obtain explicit approval for the provider/model change and bounded re-embed.
+   Record the old and new identities and the approved scope in the embedding
+   ledger. Changing the policy alone is not a vector migration; do not relabel
+   old vectors or reuse them in the new space, even if dimensions happen to match.
+4. In the authoritative policy, add a separate embedding profile and point
+   only the approved retrieval domains at it, updating allowed embedding trust
+   to local or approved Venice as appropriate. Preserve answer routes and any
+   existing Public tier. Keep other corpora on their existing policy until their
+   migration is approved. For an environment-only install, use its supported
+   managed configuration pathway; do not hand-edit generated `worker.env`.
+5. Apply the approved worker restart and bounded backfill through the install's
+   supported maintenance path, then verify the actual provider identity,
+   dimensions, generation, coverage and cited retrieval. Keep the prior vectors
+   available for rollback until the new generation is verified. If the installed
+   version cannot perform this migration safely, keep the old configuration and
+   report that limit; do not force startup by changing a dimension or identity.
+
+For a new explicit policy, the built-in profile is shown above. A Venice
+embedding profile uses `provider: "venice"`, `trust: "encrypted_cloud"`,
+`purpose: "embedding"`, model `text-embedding-qwen3-8b`, base URL
+`https://api.venice.ai/api/v1`, and `secretRef: "store:venice.api_key"`.
+Point approved retrieval domains at that profile with
+`allowedEmbeddingTrust: ["encrypted_cloud"]`. Merely connecting a Venice
+answer key does not activate Venice embeddings.
 
 Private content never goes to Gemini. No preset requires a GPU or a local
 embedding server. An unavailable embedding provider never silently changes the
@@ -175,7 +217,9 @@ proof that the embedding endpoint, account balance, or dimensions work.
 
 > Help me configure Olympus's models for this beta using the installed
 > `docs/SOVEREIGNTY_CONFIG.md` and `INSTALL_FOR_AGENTS.md`. Explain which data
-> goes to Gemini, Venice, or local models before asking me to choose a preset.
+> goes to built-in local EmbeddingGemma, Venice, or local answer models before
+> choosing a preset. Treat existing Gemini and local-server embeddings as legacy
+> compatibility; explain the migration guide without changing vectors.
 > First check the installed version and effective model identities. Use the
 > registered dimensions for shipped models when no override is configured.
 > If a custom model needs unsupported settings, report the limitation instead
@@ -197,7 +241,7 @@ Choose the route before the agent asks for an item reference:
 
 - **Web and manual paste:** open your password manager's website and paste the
   key yourself into a supported local dashboard field or silent terminal input.
-  Gemini uses the documented stdin command below. This route requires no
+  Legacy Gemini repair uses the documented stdin command below. This route requires no
   password-manager desktop app or CLI; never paste the key into chat.
 - **Authenticated CLI:** if you want the agent to fetch it, first verify the
   manager CLI is installed and authenticated. For 1Password, an exact
@@ -211,38 +255,18 @@ once, directly into the documented stdin connect flow. It never lists/searches
 the vault or types a fetched secret into the browser. An item reference is not
 permission to read it; keep the value out of output, files, notes, and logs.
 
-### Gemini: create and connect your own key
+### Legacy Gemini: repair an existing key only
 
-1. Open [Google AI Studio's API Keys page](https://aistudio.google.com/apikey)
-   in your own Google account. Create or select the Cloud project for Olympus;
-   an existing project may need to be imported into AI Studio first. Follow
-   Google's [API-key instructions](https://ai.google.dev/gemini-api/docs/api-key).
-2. Review the current [Gemini pricing and data-use terms](https://ai.google.dev/gemini-api/docs/pricing#gemini-embedding-2).
-   Free and paid tiers have different data-use terms. Do not infer a privacy
-   guarantee from a tier label in Olympus, and do not enable billing
-   without your own approval. Set appropriate quota/billing alerts; an alert
-   alone is not a spending cap.
-3. Create a key for this installation, keep it in your password manager, and
-   use the method you chose above. For an authorized CLI fetch, give the agent
-   its exact item/field reference. For manual input, run the resolved Olympus
-   executable with `connect gemini --api-key-prompt` in a terminal on the host
-   running Olympus. It opens masked input; no shell snippet or temporary script
-   is needed. For an authenticated manager read, continue to pipe directly to
-   `connect gemini --api-key-stdin`. The key must never enter a command argument,
-   chat, or log.
-
-The connect command validates the key before storing it in the owner-only
-managed worker environment. That confirms authentication, not successful
-embedding or sufficient quota. Confirm the dimension prerequisite **before**
-this step and follow the managed restart procedure only after it is met.
-
-Gemini Embedding 2's [documented default](https://ai.google.dev/gemini-api/docs/embeddings)
-is 3072 dimensions, matching Olympus's registered default. Existing
-`OLYMPUS_SOURCE_INDEX_CLOUD_EMBEDDING_OUTPUT_DIMENSIONALITY` settings take
-precedence; no new setting is needed for the shipped model. Record the chosen
-model, output size, and expected usage cost. Never change an
-existing embedding size merely to make startup pass. An existing corpus needs
-an approved migration/re-embedding decision, with vectors preserved.
+Gemini is no longer an offered embedding setup choice. Existing installations
+remain loadable; see [Legacy embedding migration](#legacy-embedding-migration).
+If the owner chooses to keep an existing Gemini policy running, repair its key
+with `olympus connect gemini --api-key-prompt` on the Olympus host, or pipe an
+authorized password-manager read directly to `connect gemini --api-key-stdin`.
+Never put a key in chat, a command argument or a log. The command validates
+credentials and stores them in the managed worker environment; follow its
+restart instruction and verify the existing model and dimensions separately.
+Legacy Gemini Embedding 2 retains its registered 3072-dimensional default;
+explicit dimension overrides and existing vectors are preserved.
 
 ### Venice: create an account with API access
 
@@ -274,33 +298,19 @@ provider. Keep the preset's existing model choice unless you approve a change.
 
 ### Local models: bring a running server
 
-For local presets, the agent should inventory your hardware and existing
-model software, then help you run an answer model and a separate embedding
-model. A model file, an OpenClaw provider plugin, or a chat-only server is not
-enough. The server must expose working OpenAI-compatible chat and embedding
-endpoints. [Ollama](https://docs.ollama.com/api/openai-compatibility) and
-[LM Studio](https://lmstudio.ai/docs/developer/openai-compat) document compatible
-interfaces; check the chosen runtime and model rather than assuming parity.
+For local answer presets, inventory the hardware and existing model software,
+then verify the running answer server with synthetic text through `/models`
+and `/chat/completions`. Olympus connects to servers you already run; it does
+not install or maintain them. The shipped `local-first` and `local-only`
+answer profile expects `http://127.0.0.1:28090/v1` and `delphi/source-answer`;
+verify the actual endpoint and ID before applying an approved configuration.
 
-Read the installed preset and effective policy first. The shipped
-`local-first` and `local-only` presets use `http://127.0.0.1:28090/v1` for both
-profiles, with model IDs `delphi/source-answer` and `secure-local-qwen3-embed`.
-These are expected model IDs, not proof a server exists. Your agent must verify
-that the endpoint serves those IDs, or explain the explicitly approved policy
-configuration needed for your server. Do not blindly use ports from an older
-guide or download a particular model without checking hardware requirements.
-
-Using synthetic text only, verify `/models`, a short `/chat/completions`
-request, and an `/embeddings` response. Record the actual model ID and vector
-length. Local dimensions come from the model, not the Gemini default. The
-registered `secure-local-qwen3-embed` model defaults to 2560; an existing
-`OLYMPUS_SOURCE_INDEX_EMBEDDING_OUTPUT_DIMENSIONALITY` setting takes precedence.
-Do not assign that model ID to a different model or vector space. An
-unregistered model without an explicit dimension still refuses startup, and
-the current custom-settings limitation applies to that case.
-For local-model presets, keep Private embedding requests on loopback; local reasoning with optional
-Venice escalation does not permit Venice or Gemini to receive Private
-embedding inputs.
+Search uses built-in local EmbeddingGemma independently of that answer server.
+No new setup needs an OpenAI-compatible embedding endpoint. Existing local
+embedding servers retain their saved configuration and readiness checks,
+including the measured output dimension; they can stay running until an
+explicit migration to built-in local EmbeddingGemma or Venice is approved.
+Do not change an old model ID or dimensions to make startup pass.
 
 ### Verify readiness, then connect a source
 
@@ -426,11 +436,9 @@ Technical route keys:
 - `secure_local`: Private corpora. Local retrieval and local embeddings,
   or separately approved Venice Private embeddings when configured;
   secure-custodian callers only.
-- `internal`: Personal corpora approved for ordinary assistant reasoning. Cloud
-  embeddings are allowed by default once material is classified Personal.
+- `internal`: Personal corpora approved for ordinary assistant reasoning. New setup uses built-in local embeddings or explicitly chosen Venice.
 - `public_safe`: explicitly Public corpora, on installs made before 1.0 only.
-  Cloud embeddings are allowed in stores that never mix with Personal or
-  Private material.
+  Its saved embedding policy remains compatible; migration is explicit.
 
 Retrieval trust domains govern search, embedding, and model-context routing.
 They do not by themselves forbid approved cloud service providers from acting as
@@ -452,13 +460,9 @@ Rules:
 - ordinary cloud embeddings are never allowed for Private data; the Venice
   embedding lane requires its own explicit provider approval, corpus policy,
   and audit proof
-- cloud embeddings are the default for classified Personal and Public corpora,
-  because those corpora are approved for ordinary cloud-model use
-- the default cloud-capable embedding provider for Personal and Public corpora
-  is Gemini Embedding 2, so text, images, diagrams, video, audio, and documents
-  can live in one multimodal semantic space per corpus
-- local embeddings may still be used for offline, cost, fallback, or evaluation
-  reasons, but they are not the durable default for cloud-approved material
+- new setup offers built-in local EmbeddingGemma (the default) or Venice only
+- legacy ordinary-cloud and local-server profiles remain readable for existing
+  installations; migration requires approval and a bounded re-embed
 - Personal and Public stores must remain separate even when they use the same
   embedding provider or model family
 - local and cloud embeddings must not mix inside the same corpus generation
@@ -791,6 +795,12 @@ Minimal schema:
 {
   "schemaVersion": 1,
   "modelProfiles": {
+    "built-in-embedding": {
+      "provider": "built-in",
+      "trust": "local",
+      "model": "embeddinggemma-2-litert-24d962e",
+      "purpose": "embedding"
+    },
     "local-source-answer": {
       "provider": "local-openai-compatible",
       "baseUrl": "http://127.0.0.1:8000/v1",
@@ -833,7 +843,7 @@ Minimal schema:
       "internal": {
         "minimumExecutionTrust": "standard_cloud",
         "allowedEmbeddingTrust": ["local", "standard_cloud"],
-        "embeddingProfile": "gemini-source-embedding",
+        "embeddingProfile": "built-in-embedding",
         "allowCloudQuery": true,
         "activationMode": "hybrid_shadow"
       }
@@ -912,7 +922,7 @@ sends `redirect: 'error'` and treats any 3xx it still receives as a refusal,
 but a custom fetch implementation that followed a redirect on its own would
 already have re-sent the request.
 
-An opt-in Gemini embedding profile references
+A legacy Gemini embedding profile references
 `env:OLYMPUS_SOURCE_INDEX_GEMINI_API_KEY`, matching the supervised worker
 launcher. The env-derived compatibility bridge and embedding provider also
 accept `GEMINI_API_KEY` for existing interactive installs.

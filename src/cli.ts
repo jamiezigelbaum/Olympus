@@ -1441,7 +1441,7 @@ function printHelp(): void {
   console.log('  olympus connect dropbox --client-id <id> [--redirect-port <port>] [--oauth-timeout-ms <ms>]');
   console.log('  olympus connect telegram|whatsapp --pair');
   console.log('  olympus connect venice|readwise --api-key-prompt');
-  console.log('  olympus connect gemini --api-key-prompt');
+  console.log('  olympus connect gemini --api-key-prompt  # existing legacy installs only; see docs/SOVEREIGNTY_CONFIG.md#legacy-embedding-migration');
   console.log('  olympus connect status [google|gmail|google-drive|dropbox]');
   console.log('  olympus connect finish <address>');
   console.log('  olympus connections add <name>');
@@ -1576,7 +1576,7 @@ const COMMAND_GROUP_HELP: Record<string, string[]> = {
     '  olympus connect dropbox --client-id <id>',
     '  olympus connect telegram|whatsapp --pair',
     '  olympus connect venice|readwise --api-key-prompt',
-    '  olympus connect gemini --api-key-prompt',
+    '  olympus connect gemini --api-key-prompt  # existing legacy installs only; see docs/SOVEREIGNTY_CONFIG.md#legacy-embedding-migration',
   ],
   connections: [
     'Usage: olympus connections <command>',
@@ -2453,7 +2453,7 @@ async function runConnect(args: string[]): Promise<unknown> {
         'olympus connect dropbox --client-id <id> [--detach] [--redirect-port <port>] [--no-open] [--oauth-timeout-ms <ms>]',
         'olympus connect telegram|whatsapp --pair',
         'olympus connect venice|readwise --api-key-prompt',
-        'olympus connect gemini --api-key-prompt',
+        'olympus connect gemini --api-key-prompt  # existing legacy installs only; see docs/SOVEREIGNTY_CONFIG.md#legacy-embedding-migration',
         'olympus connect status [google|gmail|google-drive|dropbox]',
         'olympus connect finish <address>',
       ],

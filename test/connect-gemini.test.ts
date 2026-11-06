@@ -48,6 +48,9 @@ describe('olympus connect gemini', () => {
       });
       expect(result.next).toContain('olympus worker restart');
       expect(JSON.stringify(result)).not.toContain('gemini-test-key');
+      expect(result.next).toContain('Legacy Gemini');
+      expect(result.next).toContain('legacy-embedding-migration');
+      expect(result.next).toContain('No automatic re-embed');
 
       const stored = parseEnvFile(readFileSync(envPath, 'utf8'));
       expect(stored.OLYMPUS_SOURCE_INDEX_GEMINI_API_KEY).toBe('gemini-test-key');

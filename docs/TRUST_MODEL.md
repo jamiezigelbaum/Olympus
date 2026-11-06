@@ -390,17 +390,18 @@ Segregation happens before search:
 
 Default trust domains:
 
-- `secure_local`: raw `S4` and `S4+` corpora. Local-only retrieval and local
-  embeddings only. No ordinary cloud embedding or cloud query path. The
+- `secure_local`: raw `S4` and `S4+` corpora. Local retrieval and built-in
+  local embeddings by default, or explicitly approved Venice embeddings. No
+  ordinary cloud embedding or cloud query path. The
   model-context exception is defined only by the
   [canonical Venice S4 policy](CONTRACTS.md#venice-s4-policy-normative); it does
   not widen retrieval or embedding policy.
-- `internal`: approved non-secure `S0-S3` corpora. Cloud embeddings are allowed
-  by default after classification because this material is approved for
-  ordinary cloud-model use.
+- `internal`: approved non-secure `S0-S3` corpora. New setup uses built-in
+  local EmbeddingGemma or explicitly chosen Venice for embeddings. Ordinary
+  cloud answer models remain a separate approved reasoning choice.
 - `public_safe`: explicitly public-safe corpora, on installs made before 1.0
-  only. Cloud embeddings are allowed by default in stores that never mix with
-  `internal` or `secure_local`.
+  only. Its saved embedding policy remains compatible until an approved
+  migration; stores never mix with `internal` or `secure_local`.
 
 The `secure_local` trust-domain name describes Olympus retrieval, embeddings,
 query routing, and model-context defaults. It does not mean every upstream vault,
@@ -414,12 +415,11 @@ Rules:
 - Embeddings, chunks, FTS rows, summaries, and caches are derived private data;
   they do not automatically declassify the source.
 - Do not mix local and cloud embeddings inside the same corpus generation epoch.
-- Use Gemini Embedding 2 as the default cloud-capable embedding model for
-  classified `internal` and `public_safe` corpora, especially when text,
-  diagrams, images, video, audio, or documents should be searchable in one
-  semantic space.
-- Local embeddings for `internal` or `public_safe` are allowed as an offline,
-  cost, fallback, or evaluation path, not as the default product posture.
+- Offer built-in local EmbeddingGemma (the laptop default) or Venice for
+  embeddings. Existing Gemini and local OpenAI-compatible embedding policies
+  remain compatibility paths, with a visible migration note and no automatic
+  re-embed. Follow the [migration guide](SOVEREIGNTY_CONFIG.md#legacy-embedding-migration)
+  before changing an existing corpus's model or provider.
 - `S4` may have full search quality, but only inside `secure_local` search
   spaces and secure-custodian routes.
 - Ordinary Castor/cloud-led sessions may receive deliberately distilled `S3`

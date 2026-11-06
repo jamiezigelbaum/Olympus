@@ -166,7 +166,7 @@ Duplicate text uses the existing per-store sniffer verdict table, not a separate
 Classifier p8 is retained, so this change does not trigger an archive-wide version sweep. A future classifier-version change selects already-final automatic model decisions too. `content_rule` decisions qualify only after a classifier version or their recorded `content:rule_sniffer:<identity>` changes; an absent model-sniffer marker alone never selects them. Rejudging without the conversation-title fact safely uses the model for titled items. The pass excludes owner decisions, Secrets, unread content and moving items, then rereads eligible stored text and runs the shared classifier. Unchanged model/prompt/map/full-input cache keys can answer without a call; the classifier version alone does not invalidate that cache. Missing cache entries can cause a fresh content call per eligible item. A newer sniffer identity can also require a names call. Thus a 1.25-million-item archive can require up to 1.25 million content calls, or 2.5 million names-plus-content calls when both passes need new answers, before retries; its actual cost cannot be inferred from item count alone. Text rereads, secret screening and ledger writes still run on cache hits. Default preparation is 100 candidates per set per tick, scanning up to 2,000 ledger rows, with preparation paused at 200 unanswered questions per set. The model lane defaults to one in-flight call (maximum eight), 30-second passes and a one-second scheduler interval; daily caps are 20,000 calls for the full lane or 250,000 for decision mode. These are configured limits, not a throughput measurement of the live archive (source inspection, 2026-11-06).
 
 
-**Vocabulary is a question, not a verdict (owner ruling 2026-10-01).** "It shouldn't give me a private answer if there's nothing actually private in the thing I've asked about." A book chapter that says "treatment" and "symptoms" went straight to Private on two weak health words. Since classifier version `2026-10-01.p2`, vocabulary-only detector hits make their family borderline and the privacy-safe model judges the item: a hard category (health, therapy, financial, legal, identity) is Private whatever tier the model pairs it with, anything else confidently Personal is Personal. For a vocabulary question the excerpt is the document's opening plus the passages around the first matched words, still bounded by `SNIFFER_EXCERPT_MAX_CHARS`, so the model reads what the detector saw. Until it answers, the item is pending (held Private, not embedded). With no private model at all, vocabulary still raises to Private, so nothing words flagged reaches Personal without a model's judgment. Structured identifiers and secrets stay deterministic and immediate, and owner rules and overrides still win.
+**Vocabulary is a question, not a verdict (owner ruling 2026-10-01).** "It shouldn't give me a private answer if there's nothing actually private in the thing I've asked about." A book chapter that says "treatment" and "symptoms" went straight to Private on two weak health words. Since classifier version `2026-10-01.p2`, vocabulary-only detector hits make their family borderline and the privacy-safe model judges the item: a hard category (health, therapy, financial, legal, identity) is Private whatever tier the model pairs it with, anything else confidently Personal is Personal. For a vocabulary question the excerpt is the document's opening plus the passages around the first matched words, still bounded by `SNIFFER_EXCERPT_MAX_CHARS`, so the model reads what the detector saw. Until it answers, the item is pending (held Private, with local embedding allowed only under §4.1). With no private model at all, vocabulary still raises to Private, so nothing words flagged reaches Personal without a model's judgment. Structured identifiers and secrets stay deterministic and immediate, and owner rules and overrides still win.
 
 **Re-judging what is already stored (classifier p3, review fixes 2026-10-02).** Content is classified when its text arrives, and the classifier or the sniffer's prompt (new owner words) can change afterwards. With a sniffer approved, its background tick re-judges routed items decided under another classifier version or sniffer prompt (`tier-rejudge.ts`), a bounded page per set per tick: it reads the stored text back and runs the same content pass. Owner overrides, force rules, owner rules on the names, Secrets, pending and mid-move items are never re-judged.
 
@@ -182,7 +182,7 @@ An owner `olympus tier set` override still settles one item at once.
 
 **Names-only items are decided on their names.** Pass 2 runs only for items approved for full ingestion. An item the owner keeps names-only is recorded `content:names_only` and is current once its names are decided, instead of waiting forever as `content:unread` for text that never arrives. That covers an owner Names-only folder in any lane and an item the connector lists by name only because of the owner's scope (Gmail mail older than the approved window; the connector sets `contentScope: names_only` in the item's metadata, `src/core/classification-signals.ts`). Both settle at ingest on the legacy path too, in every write of the item. An item that gains content later (the owner widens the window) is judged like any new read item. Rows that settled as fail-safe Private before this rule stay as they were: a content tier is never lowered by it.
 
-Content can only **raise** the tier that pass 1 set, never lower it, unless the owner overrides the item. Embedding happens only after pass 2, so each chunk is embedded once, in its final tier's model.
+Content can only **raise** the tier that pass 1 set, never lower it, unless the owner overrides the item. The shared local identity may embed pending content before the model judgment (§4.1); all other providers wait for pass 2 to settle.
 
 **The sniffer (updated 2026-11-05).** It is a small, fast classifier call on the privacy-safe lane: a configured local model or Venice Private, otherwise the built-in private model when available. It never uses an ordinary cloud model. It sees metadata in pass 1 or a short excerpt in pass 2; all existing secret, stored-copy and injection screens run before item dispatch. Each call carries one item's material; identical questions can share a verdict, distinct items never share a prompt.
 
@@ -310,16 +310,31 @@ This guarantees **never searchable in two tiers at once**, and makes **rollback 
 
 ### 4.1 In plain terms
 
-Each tier has its own search index and its own embedding model, and the model per tier does not change:
+Each tier keeps its own search index. New setup uses one embedder for Personal
+and Private: built-in local EmbeddingGemma (the laptop default) or explicitly
+chosen Venice. Saved legacy identities and vectors stay unchanged until an
+approved migration; see [the migration guide](../SOVEREIGNTY_CONFIG.md#legacy-embedding-migration).
+Secrets are never embedded.
 
-- **Public and Personal** use Gemini Embedding 2 in every preset.
-- **Private** uses your local model or Venice, depending on the preset.
-- **Secrets** are never embedded.
+**Pending judgments (owner correction, 2026-11-06; #937).** A read content copy
+held solely for per-item judgment may embed in its current Private store only
+under an approved local provider whose provider, backend, model, dimension and
+epoch match the current Personal provider. Unknown or differing identities,
+Venice and other cloud providers retain the hold. The work list uses #941's
+incremental visibility cache; verdicts refresh the changed identities rather
+than walking the corpus. Dispatch and vector writes recheck the batch.
 
-When an item changes tier, it gets vectors from the destination tier's model:
+Embedding changes no query reach: held copies remain searchable by keyword
+and available to Private answers, with the same counts and coverage. Their
+vectors remain excluded from vector search until judgment clears the hold.
+Names-only, staged, superseded, deletion and Secret-in-progress copies remain
+excluded from embedding. A Secret verdict tombstones chunks and vectors and
+scrubs side stores, retaining the location only. A move to Personal copies
+vectors only under the destination's matching identity and input hash.
 
-- **Items whose tier does not change keep their vectors untouched. There is no global re-embed.**
-- A move between Public and Personal needs no new embedding. Both use the same Gemini model and epoch, so the vectors are copied.
+The table below records legacy mixed-model moves; when both stores use the
+same identity, their vectors copy without a provider call. No tier move
+changes a corpus identity or starts a global re-embed.
 
 ### 4.2 Precisely
 
@@ -335,7 +350,7 @@ When an item changes tier, it gets vectors from the destination tier's model:
 
 1. A tier move never rebinds embedding write authority, and can never reach the whole-corpus `invalidateEmbeddingModelCurrency` path. The first embed into a new store is a first mint.
 2. No new embedding model, epoch or dimension is introduced. Each store uses its existing canonical identity.
-3. Pending items are embedded only after their tier is final.
+3. Pending items may embed only under the shared local identity above; vector search still waits for the final tier.
 4. Every tier move writes a ledger entry with a chunk count.
 
 ### 4.3 Epochs and parity
