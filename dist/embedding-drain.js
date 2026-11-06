@@ -30139,6 +30139,9 @@ var init_local_index = __esm(() => {
       if (invalidateCurrentModelEmbeddings && !journalId) {
         throw new TypeError("Connector store embedding invalidation requires a durable journal id.");
       }
+      if (journalId && options.stopAtMs !== undefined) {
+        throw new TypeError("Connector store embedding journals cannot stop at a deadline.");
+      }
       if (invalidateCurrentModelEmbeddings && limit !== undefined) {
         throw new TypeError("Connector store embedding invalidation cannot use a partial embed limit.");
       }
@@ -30260,7 +30263,12 @@ var init_local_index = __esm(() => {
       let staleSkipped = heldPictures;
       const judging = this.mediaJudgmentsPresent && provider.imageSupport && canJudgeMedia(provider) ? provider : undefined;
       const judgedThisPass = new Set;
+      let stoppedAtDeadline = false;
       for (let offset = 0;offset < pending.length; offset += EMBEDDING_BATCH_SIZE) {
+        if (offset > 0 && options.stopAtMs !== undefined && Date.now() >= options.stopAtMs) {
+          stoppedAtDeadline = true;
+          break;
+        }
         let batch = pending.slice(offset, offset + EMBEDDING_BATCH_SIZE);
         await options.assertAuthorized?.();
         {
@@ -30407,7 +30415,7 @@ var init_local_index = __esm(() => {
         staleSkipped += batch.length - written;
       }
       skipped += staleSkipped;
-      if (judging && rows.some((row) => row.media_sha256 && !this.mediaJudgmentSettled(row.media_sha256, mediaJudgeId(judging)))) {
+      if (!stoppedAtDeadline && judging && rows.some((row) => row.media_sha256 && !this.mediaJudgmentSettled(row.media_sha256, mediaJudgeId(judging)))) {
         readsImages ??= await judging.imageSupport();
         if (readsImages)
           await this.judgeUnjudgedMedia(judging, rows, options.assertAuthorized);
@@ -30433,6 +30441,8 @@ var init_local_index = __esm(() => {
       }
       this.clearEmbeddingCurrencyRebuildDebt(provider, providerEpoch);
       const summary = connectorStoreEmbedSummary(this.corpusId, this.trustDomain, provider, rows.length, embedded, skipped);
+      if (stoppedAtDeadline)
+        summary.stoppedAtDeadline = true;
       return privateTierWithheldChunks > 0 ? {
         ...summary,
         privateTierWithheld: {
