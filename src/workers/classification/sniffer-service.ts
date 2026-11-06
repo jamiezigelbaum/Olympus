@@ -198,6 +198,8 @@ export interface TierSnifferServiceOptions {
   };
 }
 
+/** Each tick has at most two recovery phases; each yields after this much work. */
+export const MISSING_QUESTION_RECOVERY_PHASE_MS = 25;
 export const DEFAULT_AUTO_MOVES_PER_PASS = 25;
 /** A pass running longer than this is aborted at the next tick. */
 export const DEFAULT_TIER_SNIFFER_MAX_PASS_MS = 15 * 60_000;
@@ -314,6 +316,8 @@ export class TierSnifferService {
   private readonly boundLedgerIds = new Map<string, string>();
   /** Where each set's re-judge page stopped (tier-rejudge.ts). */
   private readonly rejudgeCursors = new Map<string, TierLedgerIdentity>();
+  /** Rotate each recovery phase independently so a large first ledger cannot starve others. */
+  private readonly recoveryLedgerOffsets = new Map<string, number>();
 
   constructor(options: TierSnifferServiceOptions) {
     this.options = options;
@@ -487,15 +491,30 @@ export class TierSnifferService {
       if (!opened) continue;
       try {
         const maxItem = (opened.db.query('SELECT COALESCE(MAX(rowid), 0) AS n FROM tier_items').get() as { n: number }).n;
-        for (let lo = 0; lo < maxItem; lo += slice) {
-          this.addPendingSlice(counts, opened, [lo, lo + slice]);
+        const maxQuestion = opened.hasQueue
+          ? (opened.db.query('SELECT COALESCE(MAX(question_pk), 0) AS n FROM queue.sniffer_questions').get() as { n: number }).n : 0;
+        // Bound each slice by actual rows rather than the numeric key span:
+        // retired items and drained questions leave arbitrarily large holes.
+        // The initial high-water marks keep new inserts from extending a count.
+        for (let lo = 0; lo < maxItem;) {
+          const hi = (opened.db.query(`SELECT MAX(rowid) AS n FROM (
+            SELECT rowid FROM tier_items WHERE rowid > ? AND rowid <= ? ORDER BY rowid LIMIT ?
+          )`).get(lo, maxItem, slice) as { n: number | null }).n;
+          if (hi === null) break;
+          this.addPendingSlice(counts, opened, [lo, hi]);
+          lo = hi;
           await ingestionTurn();
           if (this.stopped) return undefined;
         }
         if (opened.hasQueue) {
-          const maxQuestion = (opened.db.query('SELECT COALESCE(MAX(question_pk), 0) AS n FROM queue.sniffer_questions').get() as { n: number }).n;
-          for (let lo = 0; lo < maxQuestion; lo += slice) {
-            this.addQuestionSlice(counts, opened.db, [lo, lo + slice]);
+          for (let lo = 0; lo < maxQuestion;) {
+            const hi = (opened.db.query(`SELECT MAX(question_pk) AS n FROM (
+              SELECT question_pk FROM queue.sniffer_questions
+              WHERE question_pk > ? AND question_pk <= ? ORDER BY question_pk LIMIT ?
+            )`).get(lo, maxQuestion, slice) as { n: number | null }).n;
+            if (hi === null) break;
+            this.addQuestionSlice(counts, opened.db, [lo, hi]);
+            lo = hi;
             await ingestionTurn();
             if (this.stopped) return undefined;
           }
@@ -824,7 +843,7 @@ export class TierSnifferService {
     // whatever the model's state: no model is asked.
     await this.settleStoredItems();
     phase('settle');
-    await this.recoverMissingQuestions();
+    await this.recoverMissingQuestions(signal);
     phase('recover');
     if (this.options.modelAvailable && !this.options.modelAvailable()) {
       // Nothing is asked and nothing is counted: flagged items wait, pending
@@ -887,7 +906,7 @@ export class TierSnifferService {
     // Items decided under an older classifier or sniffer prompt are judged
     // again first (tier-rejudge.ts), a bounded page per set per tick: their
     // questions join the queue this pass answers.
-    if (!preparationStopped) await this.recoverMissingQuestions(true);
+    if (!preparationStopped) await this.recoverMissingQuestions(signal, true);
     phase('recover');
     const rejudged = preparationStopped ? emptyTierRejudgeReport() : await this.rejudge();
     phase('rejudge');
@@ -1032,11 +1051,20 @@ export class TierSnifferService {
    * an unread item with no possible excerpt, or an orphaned ledger row.
    * Reconcile a bounded, durable page before model availability/approval.
    */
-  private async recoverMissingQuestions(allowReask = false): Promise<void> {
+  private async recoverMissingQuestions(signal: AbortSignal, allowReask = false): Promise<void> {
+    // Cooperative bound: one row (including its synchronous store reads) may
+    // finish after the deadline. Two phases cost at most two such overruns.
+    const deadline = performance.now() + MISSING_QUESTION_RECOVERY_PHASE_MS;
     // Separate cursors keep model-independent recovery and approved re-asking
     // from skipping alternating pages of a large ledger.
     const cursorKey = allowReask ? 'sniffer_missing_question_reask_cursor_v1' : 'sniffer_missing_question_cursor_v1';
-    for (const ledgerPath of this.ledgerPaths()) {
+    const paths = this.ledgerPaths();
+    const offset = (this.recoveryLedgerOffsets.get(cursorKey) ?? 0) % (paths.length || 1);
+    for (let n = 0; n < paths.length; n++) {
+      if (signal.aborted || this.stopped || (n > 0 && performance.now() >= deadline)) break;
+      const index = (offset + n) % paths.length;
+      const ledgerPath = paths[index]!;
+      this.recoveryLedgerOffsets.set(cursorKey, (index + 1) % paths.length);
       try {
         const ledger = this.ledgerAt(ledgerPath);
         if (this.options.installed.forLedger(ledgerPath).unavailableReason) continue;
@@ -1057,10 +1085,15 @@ export class TierSnifferService {
         const rows = ledger.listPending({ limit: 100, ...(after ? { after } : {}) });
         let settled = 0;
         let retired = 0;
+        let lastProcessed: TierLedgerIdentity | undefined;
+        let processed = 0;
         for (const row of rows) {
           // Each row can re-judge a stored body: let requests in between.
           await ingestionTurn();
+          if (signal.aborted || this.stopped || (processed > 0 && performance.now() >= deadline)) break;
           const identity = recordIdentity(row);
+          lastProcessed = identity;
+          processed++;
           const missingMetadata = row.metadataPending && !queue.questionFor(identity, 'metadata');
           const missingContent = (row.contentPending || !row.metadataPending) && !queue.questionFor(identity, 'content');
           // Existing questions include durable Secrets cleanup retries. Let the
@@ -1116,8 +1149,11 @@ export class TierSnifferService {
             // Read/write failures keep the item held; the cursor wraps and retries.
           }
         }
-        const last = rows.at(-1);
-        ledger.writeMeta(cursorKey, rows.length === 100 && last ? JSON.stringify(recordIdentity(last)) : '');
+        // Persist only the rows actually examined, including held/retry rows.
+        // A partial short page must resume too; wrap only after reaching its end.
+        if (lastProcessed) ledger.writeMeta(cursorKey,
+          processed < rows.length || rows.length === 100 ? JSON.stringify(lastProcessed) : '');
+        else if (rows.length === 0) ledger.writeMeta(cursorKey, '');
         if (settled || retired) this.options.log?.(`Olympus tier sniffer: recovered ${settled} pending item(s) as fail-safe Private; retired ${retired} missing item(s).`);
       } catch {
         // A queue/ledger that cannot be read remains held, retried next tick.

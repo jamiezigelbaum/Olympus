@@ -20757,12 +20757,12 @@ class TierLedger {
   beginMove(identity2, target, expectedGeneration) {
     assertTier(target.metadataTier);
     assertTier(target.contentTier);
-    const result = this.db.query(`
+    this.db.query(`
       UPDATE tier_items SET state = 'moving', target_metadata_tier = ?, target_content_tier = ?, move_attempts = 0
       WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND generation = ?
         AND state != 'moving'
     `).run(target.metadataTier, target.contentTier, ...idParams(identity2), expectedGeneration);
-    if (result.changes !== 1)
+    if (this.db.query("SELECT changes() AS n").get().n !== 1)
       throw new TierLedgerGenerationConflictError;
     return this.getCurrent(identity2);
   }
@@ -20802,7 +20802,7 @@ class TierLedger {
   listMoving(options = {}) {
     const limit = Math.max(1, Math.min(options.limit ?? 100, 5000));
     const rows = this.db.query(`
-      SELECT * FROM tier_items WHERE state = 'moving'
+      SELECT * FROM tier_items INDEXED BY tier_items_move_order WHERE state = 'moving'
       ORDER BY move_attempts, decided_at, provider, account_scope, provider_item_id, conversation_key
       LIMIT ?
     `).all(limit);
@@ -22440,6 +22440,63 @@ class TierLedger {
     const version = this.db.query("PRAGMA data_version").get();
     return `${version.data_version}:${row.changes}`;
   }
+  visibilityChangesSince(after) {
+    return this.db.transaction(() => {
+      const bounds = this.db.query("SELECT (SELECT MIN(seq) FROM tier_visibility_changes) AS first, (SELECT MAX(seq) FROM tier_visibility_changes) AS last").get();
+      const cursor = bounds.last ?? 0;
+      if (after === undefined || after > cursor || bounds.first !== null && after < bounds.first - 1)
+        return { cursor };
+      const rows = this.db.query(`SELECT DISTINCT provider, account_scope, conversation_key, provider_item_id
+        FROM tier_visibility_changes WHERE seq > ?`).all(after);
+      return { cursor, identities: rows.map(identityFromRow) };
+    })();
+  }
+  *corpusVisibilityPages(corpusId, identities) {
+    const flags = `c.provider, c.account_scope, c.conversation_key, c.provider_item_id,
+      c.copy_state <> 'current' OR EXISTS (SELECT 1 FROM tier_write_intents w
+        WHERE w.provider = c.provider AND w.account_scope = c.account_scope
+          AND w.conversation_key = c.conversation_key AND w.provider_item_id = c.provider_item_id
+          AND w.kind IN ('secret', 'deletion')) AS hidden,
+      c.copy_state = 'current' AND c.embed_hold = 1 AS held,
+      c.copy_state = 'current' AND c.layers = 'metadata' AS metadata_layer,
+      c.copy_state = 'current' AND c.layers = 'metadata' AND NOT EXISTS (
+        SELECT 1 FROM tier_copies other WHERE other.provider = c.provider AND other.account_scope = c.account_scope
+          AND other.conversation_key = c.conversation_key AND other.provider_item_id = c.provider_item_id
+          AND other.corpus_id <> c.corpus_id AND other.copy_state = 'current' AND other.layers IN ('content', 'both')
+      ) AS metadata_unread,
+      EXISTS (SELECT 1 FROM tier_items t WHERE t.provider = c.provider AND t.account_scope = c.account_scope
+        AND t.conversation_key = c.conversation_key AND t.provider_item_id = c.provider_item_id AND t.state = 'moving') AS moving`;
+    const convert = (rows) => rows.map((row) => ({
+      ...identityFromRow(row),
+      hidden: !!row.hidden,
+      held: !!row.held,
+      metadataLayer: !!row.metadata_layer,
+      metadataLayerContentUnread: !!row.metadata_unread,
+      moving: !!row.moving
+    }));
+    if (identities) {
+      for (let offset = 0;offset < identities.length; offset += 200) {
+        const batch = identities.slice(offset, offset + 200);
+        const rows = this.db.query(`SELECT ${flags} FROM json_each(?) j CROSS JOIN tier_copies c
+          WHERE c.provider = json_extract(j.value, '$[0]') AND c.account_scope = json_extract(j.value, '$[1]')
+            AND c.conversation_key = json_extract(j.value, '$[2]') AND c.provider_item_id = json_extract(j.value, '$[3]')
+            AND c.corpus_id = ?`).all(JSON.stringify(batch.map((identity2) => [...idParams(identity2)])), corpusId);
+        yield convert(rows);
+      }
+      return;
+    }
+    const query = this.db.query(`SELECT c.rowid AS row_id, ${flags} FROM tier_copies c
+      INDEXED BY tier_copies_visibility_walk WHERE c.corpus_id = ? AND c.rowid > ? ORDER BY c.rowid LIMIT 500`);
+    for (let after = 0;; ) {
+      const rows = query.all(corpusId, after);
+      if (rows.length === 0)
+        return;
+      yield convert(rows);
+      after = rows.at(-1).row_id;
+      if (rows.length < 500)
+        return;
+    }
+  }
   corpusCopyIdentities(corpusId, filter) {
     const rows = this.db.query(`
       SELECT provider, account_scope, conversation_key, provider_item_id FROM tier_copies
@@ -22527,14 +22584,16 @@ class TierLedger {
   withdrawAccountScope(provider, accountScope) {
     return this.db.transaction(() => {
       const now = this.now().toISOString();
-      const copies = this.db.query(`
+      this.db.query(`
         UPDATE tier_copies
         SET copy_state = 'superseded',
           superseded_by_generation = COALESCE(superseded_by_generation, generation + 1),
           updated_at = ?
         WHERE provider = ? AND account_scope = ? AND copy_state <> 'superseded'
-      `).run(now, provider, accountScope).changes;
-      const items = this.db.query("DELETE FROM tier_items WHERE provider = ? AND account_scope = ?").run(provider, accountScope).changes;
+      `).run(now, provider, accountScope);
+      const copies = this.db.query("SELECT changes() AS n").get().n;
+      this.db.query("DELETE FROM tier_items WHERE provider = ? AND account_scope = ?").run(provider, accountScope);
+      const items = this.db.query("SELECT changes() AS n").get().n;
       for (const table of [
         "tier_history",
         "tier_overrides",
@@ -22549,7 +22608,8 @@ class TierLedger {
     })();
   }
   deleteAccountScopeCopies(provider, accountScope) {
-    return this.db.query("DELETE FROM tier_copies WHERE provider = ? AND account_scope = ?").run(provider, accountScope).changes;
+    this.db.query("DELETE FROM tier_copies WHERE provider = ? AND account_scope = ?").run(provider, accountScope);
+    return this.db.query("SELECT changes() AS n").get().n;
   }
   insertCopies(identity2, plan, state, generation, now) {
     const insert = this.db.query(`
@@ -22828,7 +22888,7 @@ function rowOf(record) {
   };
 }
 function settleStaleEmbedHolds(db, now) {
-  return db.query(`
+  db.query(`
     UPDATE tier_copies SET embed_hold = 0, updated_at = ?
     WHERE embed_hold = 1 AND copy_state = 'current'
       AND EXISTS (
@@ -22837,7 +22897,8 @@ function settleStaleEmbedHolds(db, now) {
           AND t.conversation_key = tier_copies.conversation_key AND t.provider_item_id = tier_copies.provider_item_id
           AND t.state = 'current' AND t.metadata_pending = 0 AND t.content_pending = 0
       )
-  `).run(now).changes;
+  `).run(now);
+  return db.query("SELECT changes() AS n").get().n;
 }
 function settleStoredNamesMark(reasons, askedTier, answeredTier) {
   if (!reasons.includes(STORED_NAMES_ASKED_REASON))
@@ -23244,7 +23305,7 @@ function tierLedgerMigrations() {
       }
     },
     {
-      version: TIER_LEDGER_SCHEMA_VERSION,
+      version: 10,
       name: "tier_write_intents",
       up(db) {
         db.exec(`
@@ -23272,10 +23333,40 @@ function tierLedgerMigrations() {
           );
         `);
       }
+    },
+    {
+      version: TIER_LEDGER_SCHEMA_VERSION,
+      name: "incremental_copy_visibility",
+      up(db) {
+        db.exec(`
+          CREATE INDEX IF NOT EXISTS tier_items_move_order ON tier_items
+            (move_attempts, decided_at, provider, account_scope, provider_item_id, conversation_key)
+            WHERE state = 'moving';
+          CREATE INDEX IF NOT EXISTS tier_copies_visibility_walk ON tier_copies (corpus_id);
+          CREATE TABLE IF NOT EXISTS tier_visibility_changes (
+            seq INTEGER PRIMARY KEY AUTOINCREMENT,
+            provider TEXT NOT NULL, account_scope TEXT NOT NULL,
+            conversation_key TEXT NOT NULL, provider_item_id TEXT NOT NULL
+          );
+        `);
+        const note = (row) => `
+          INSERT INTO tier_visibility_changes (provider, account_scope, conversation_key, provider_item_id)
+          VALUES (${row}.provider, ${row}.account_scope, ${row}.conversation_key, ${row}.provider_item_id);
+          DELETE FROM tier_visibility_changes WHERE seq <= (SELECT MAX(seq) - 8192 FROM tier_visibility_changes);`;
+        for (const table of ["tier_copies", "tier_items", "tier_write_intents"]) {
+          const columns = table === "tier_copies" ? "copy_state, embed_hold, layers, corpus_id" : table === "tier_items" ? "state" : "kind";
+          db.exec(`
+            CREATE TRIGGER IF NOT EXISTS ${table}_visibility_insert AFTER INSERT ON ${table} BEGIN ${note("NEW")} END;
+            CREATE TRIGGER IF NOT EXISTS ${table}_visibility_delete AFTER DELETE ON ${table} BEGIN ${note("OLD")} END;
+            CREATE TRIGGER IF NOT EXISTS ${table}_visibility_update AFTER UPDATE OF ${columns}, provider, account_scope, conversation_key, provider_item_id ON ${table}
+              BEGIN ${note("OLD")} ${note("NEW")} END;
+          `);
+        }
+      }
     }
   ];
 }
-var TIER_LEDGER_SCHEMA_VERSION = 10, TIER_LEDGER_UNREAD_RELABEL_DONE = "fail_safe_unread_relabel_v1", DEFAULT_REJUDGE_SCAN_ROWS = 2000, TierLedgerGenerationConflictError, TierLedgerRaiseAbandonRefusedError, TierLedgerPurgedRollbackRefusedError, TierLedgerSecretsRollbackRefusedError, TIER_LEDGER_IDENTITY_FIELDS, TRUST_DOMAIN_RANK, STORED_NAMES_REASON = "metadata:names_from_store", STORED_NAMES_ASKED_REASON = "metadata:names_from_store:asked", TIER_CHECK = `IN ('public', 'private', 'secure', 'secrets')`;
+var TIER_LEDGER_SCHEMA_VERSION = 11, TIER_LEDGER_UNREAD_RELABEL_DONE = "fail_safe_unread_relabel_v1", DEFAULT_REJUDGE_SCAN_ROWS = 2000, TierLedgerGenerationConflictError, TierLedgerRaiseAbandonRefusedError, TierLedgerPurgedRollbackRefusedError, TierLedgerSecretsRollbackRefusedError, TIER_LEDGER_IDENTITY_FIELDS, TRUST_DOMAIN_RANK, STORED_NAMES_REASON = "metadata:names_from_store", STORED_NAMES_ASKED_REASON = "metadata:names_from_store:asked", TIER_CHECK = `IN ('public', 'private', 'secure', 'secrets')`;
 var init_tier_ledger = __esm(() => {
   init_sqlite_migrations();
   init_tier_classifier();
@@ -30702,6 +30793,28 @@ async function runStepsInTurns(steps) {
   }
   return step.value;
 }
+
+class MutablePkList {
+  values = [];
+  positions = new Map;
+  add(pk) {
+    if (this.positions.has(pk))
+      return;
+    this.positions.set(pk, this.values.length);
+    this.values.push(pk);
+  }
+  delete(pk) {
+    const index = this.positions.get(pk);
+    if (index === undefined)
+      return;
+    const last = this.values.pop();
+    this.positions.delete(pk);
+    if (index < this.values.length) {
+      this.values[index] = last;
+      this.positions.set(last, index);
+    }
+  }
+}
 function connectorStoreEmbeddingDeferredReason(error) {
   return `embedding_provider_unavailable:${error.reason}`;
 }
@@ -33355,7 +33468,7 @@ function fileIdentity(path) {
     return;
   }
 }
-var DEFAULT_MAX_CHUNK_CHARS = 4000, MAX_MAX_CHUNK_CHARS = 32000, MAX_SEARCH_RESULTS = 50, CONNECTOR_STORE_FTS_TITLE_WEIGHT = 1.5, EMBEDDING_BATCH_SIZE = 32, MAX_SELECTED_EMBED_ITEM_IDS = 25000, MAX_CONVERSATION_TITLE_LOOKUP_ROWS = 100, MIN_VECTOR_SCORE = 0.18, MAX_REQUIRED_CONCEPTS = 3, RARE_CONCEPT_WEIGHT_SHARE = 0.6, READ_RESULT_PROJECTION_LOCATOR_URI, DEFAULT_SEMANTIC_RELEVANCE_BAR = 0.62, CALIBRATED_CONTENT_PREFERENCE_BARS, CALIBRATED_SEMANTIC_RELEVANCE_BARS, CONTAINER_MIME_TYPES, CONTAINER_MIME_TYPES_SQL, VECTOR_BACKEND = "exact_scan", SQLITE_STORE_ID = "connector-store", CONNECTOR_STORE_SQLITE_SCHEMA_VERSION = 15, IMAGE_CONTENT_PRIVATE_ONLY_CONNECTOR_ID = "olympus_image_content_private_only", CHUNK_MEDIA_RETRY_BASE_MS, CHUNK_MEDIA_MAX_ATTEMPTS = 3, MEDIA_JUDGE_MAX_PER_PASS = 200, MEDIA_JUDGE_RETRY_BASE_MS, MEDIA_JUDGE_MAX_ATTEMPTS = 3, MAX_CONSECUTIVE_CONTENT_FETCH_FAILURES = 3, CONNECTOR_STORE_FTS_MIGRATION, ConnectorStoreExclusionViolationError, ConnectorStoreMetadataOnlyViolationError, ConnectorStoreTierWriteRefusedError, STATUS_COUNTS_MAX_AGE_MS, IDENTITY_LOOKUP_SLICE = 5000, EXTRACTION_CANDIDATE_WINDOW = 5000, EXTRACTION_CANDIDATE_MAX_EXAMINED = 50000, SETTLED_UNREADABLE_ITEMS_SLICE = 500, HIDDEN_CHILD_PARENT_SLICE = 2000, TierLedgerUnavailableError, TIER_SET_BINDING_RUN_ID = "tiered-store-set-binding", TIER_SET_BINDING_CONNECTOR_ID = "tiered_store_set_binding", TIER_MOVE_CONNECTOR_ID = "olympus_tier_move", NON_SYNC_RUN_CONNECTORS_SQL, ConnectorStoreLocatorIdentityIndexNotReadyError, EMBEDDING_PROVIDER_UNAVAILABLE_REASON = "embedding_provider_unavailable", EMBEDDING_ITEMS_FAILED_REASON = "embedding_items_failed", CONNECTOR_STORE_EMBEDDING_LEASE_SUFFIX = ".embedding", CONNECTOR_STORE_EMBEDDING_LEASE_WAIT_MS = 120000, CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE = 256, CONNECTOR_STORE_CURRENT_EMBEDDING_JOINS_AND_FILTER = `
+var DEFAULT_MAX_CHUNK_CHARS = 4000, MAX_MAX_CHUNK_CHARS = 32000, MAX_SEARCH_RESULTS = 50, CONNECTOR_STORE_FTS_TITLE_WEIGHT = 1.5, EMBEDDING_BATCH_SIZE = 32, MAX_SELECTED_EMBED_ITEM_IDS = 25000, MAX_CONVERSATION_TITLE_LOOKUP_ROWS = 100, MIN_VECTOR_SCORE = 0.18, MAX_REQUIRED_CONCEPTS = 3, RARE_CONCEPT_WEIGHT_SHARE = 0.6, READ_RESULT_PROJECTION_LOCATOR_URI, DEFAULT_SEMANTIC_RELEVANCE_BAR = 0.62, CALIBRATED_CONTENT_PREFERENCE_BARS, CALIBRATED_SEMANTIC_RELEVANCE_BARS, CONTAINER_MIME_TYPES, CONTAINER_MIME_TYPES_SQL, VECTOR_BACKEND = "exact_scan", SQLITE_STORE_ID = "connector-store", CONNECTOR_STORE_SQLITE_SCHEMA_VERSION = 15, IMAGE_CONTENT_PRIVATE_ONLY_CONNECTOR_ID = "olympus_image_content_private_only", CHUNK_MEDIA_RETRY_BASE_MS, CHUNK_MEDIA_MAX_ATTEMPTS = 3, MEDIA_JUDGE_MAX_PER_PASS = 200, MEDIA_JUDGE_RETRY_BASE_MS, MEDIA_JUDGE_MAX_ATTEMPTS = 3, MAX_CONSECUTIVE_CONTENT_FETCH_FAILURES = 3, CONNECTOR_STORE_FTS_MIGRATION, ConnectorStoreExclusionViolationError, ConnectorStoreMetadataOnlyViolationError, ConnectorStoreTierWriteRefusedError, STATUS_COUNTS_MAX_AGE_MS, IDENTITY_LOOKUP_SLICE = 5000, EXTRACTION_CANDIDATE_WINDOW = 500, EXTRACTION_CANDIDATE_MAX_EXAMINED = 2000, SETTLED_UNREADABLE_ITEMS_SLICE = 500, HIDDEN_CHILD_PARENT_SLICE = 2000, VISIBILITY_PK_FLAGS, TierLedgerUnavailableError, TIER_SET_BINDING_RUN_ID = "tiered-store-set-binding", TIER_SET_BINDING_CONNECTOR_ID = "tiered_store_set_binding", TIER_MOVE_CONNECTOR_ID = "olympus_tier_move", NON_SYNC_RUN_CONNECTORS_SQL, ConnectorStoreLocatorIdentityIndexNotReadyError, EMBEDDING_PROVIDER_UNAVAILABLE_REASON = "embedding_provider_unavailable", EMBEDDING_ITEMS_FAILED_REASON = "embedding_items_failed", CONNECTOR_STORE_EMBEDDING_LEASE_SUFFIX = ".embedding", CONNECTOR_STORE_EMBEDDING_LEASE_WAIT_MS = 120000, CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE = 256, CONNECTOR_STORE_CURRENT_EMBEDDING_JOINS_AND_FILTER = `
   FROM chunk_embeddings emb
   JOIN chunks c ON c.chunk_pk = emb.chunk_pk
   JOIN items i ON i.item_pk = emb.item_pk
@@ -33457,6 +33570,7 @@ var init_local_index = __esm(() => {
     }
   };
   STATUS_COUNTS_MAX_AGE_MS = 5 * 60000;
+  VISIBILITY_PK_FLAGS = ["hidden", "held", "metadataLayer", "metadataLayerContentUnread"];
   TierLedgerUnavailableError = class TierLedgerUnavailableError extends Error {
     constructor(corpusId) {
       super(`The tier ledger governing ${corpusId} is missing or was replaced, so which copies are visible ` + "cannot be decided. Restore the set ledger (beside the source's secure_local store) before " + "syncing or reading this store.");
@@ -33546,6 +33660,8 @@ var init_local_index = __esm(() => {
           createConnectorStoreItemTextVersions(this.db);
           validateConnectorStoreSchema(this.db);
         }
+        if (options.readOnly !== true)
+          this.createVisibilityJournal();
         this.reactionsColumnPresent = tableColumns(this.db, "items", false).includes("reactions_json");
         this.childItemColumnsPresent = tableColumns(this.db, "items", false).includes("parent_local_item_id");
         this.chunkMediaColumnsPresent = tableColumns(this.db, "chunks", false).includes("media_sha256");
@@ -33780,93 +33896,170 @@ var init_local_index = __esm(() => {
       return this.tierHiddenCountsRefresh;
     }
     async tierHiddenItemPksInTurns() {
-      const marker = this.tierLedgerHiddenMemoMarker();
-      const memo = this.tierLedgerHiddenMemo;
-      let base;
-      if (marker && memo && memo.ledger === marker.ledger && memo.marker === marker.value) {
-        base = memo.value;
-      } else {
-        base = await runStepsInTurns(this.tierLedgerHiddenSteps());
-        this.tierLedgerHiddenMemo = marker ? { ledger: marker.ledger, marker: marker.value, value: base } : undefined;
-        await ingestionTurn();
-      }
+      const base = await runStepsInTurns(this.tierLedgerHiddenSteps());
       return this.withHiddenChildren(base, await runStepsInTurns(this.hiddenChildSteps()));
     }
     tierLedgerHiddenItemPks() {
-      const marker = this.tierLedgerHiddenMemoMarker();
-      const memo = this.tierLedgerHiddenMemo;
-      if (marker && memo && memo.ledger === marker.ledger && memo.marker === marker.value)
-        return memo.value;
-      const value = this.computeTierLedgerHiddenItemPks();
-      this.tierLedgerHiddenMemo = marker ? { ledger: marker.ledger, marker: marker.value, value } : undefined;
-      return value;
+      return runSteps(this.tierLedgerHiddenSteps());
     }
     tierLedgerHiddenMemo;
-    tierLedgerHiddenMemoMarker() {
-      try {
-        const ledger = this.visibilityLedger();
-        if (!ledger)
-          return;
-        const own3 = this.db.query("SELECT total_changes() AS changes").get();
-        const version = this.db.query("PRAGMA data_version").get();
-        return { ledger, value: `${version.data_version}:${own3.changes}:${ledger.changeMarker()}` };
-      } catch {
-        return;
-      }
+    visibilityJournal = false;
+    visibilitySqlMemo;
+    createVisibilityJournal() {
+      this.db.exec(`CREATE TEMP TABLE tier_visibility_pks (flag TEXT, item_pk INTEGER, PRIMARY KEY (flag, item_pk));
+      CREATE TEMP TABLE item_visibility_changes (
+      seq INTEGER PRIMARY KEY AUTOINCREMENT, provider TEXT, account_scope TEXT,
+      conversation_key TEXT, provider_item_id TEXT
+    );`);
+      const note = (row) => `
+      INSERT INTO item_visibility_changes (provider, account_scope, conversation_key, provider_item_id)
+        VALUES (${row}.provider, ${row}.account_scope, ${row}.normalized_conversation, ${row}.provider_item_id);
+      DELETE FROM item_visibility_changes WHERE seq <= (SELECT MAX(seq) - 8192 FROM item_visibility_changes);`;
+      this.db.exec(`
+      CREATE TEMP TRIGGER item_visibility_insert AFTER INSERT ON main.items BEGIN ${note("NEW")} END;
+      CREATE TEMP TRIGGER item_visibility_delete AFTER DELETE ON main.items BEGIN ${note("OLD")} END;
+      CREATE TEMP TRIGGER item_visibility_update
+        AFTER UPDATE OF item_pk, provider, account_scope, provider_conversation_id, provider_item_id, tombstoned ON main.items
+        BEGIN ${note("OLD")} ${note("NEW")} END;
+    `);
+      this.visibilityJournal = true;
     }
-    computeTierLedgerHiddenItemPks() {
-      return runSteps(this.tierLedgerHiddenSteps());
+    itemVisibilityChangesSince(after) {
+      if (!this.visibilityJournal)
+        return { cursor: 0, identities: [] };
+      const bounds = this.db.query("SELECT (SELECT MIN(seq) FROM item_visibility_changes) AS first, (SELECT MAX(seq) FROM item_visibility_changes) AS last").get();
+      const cursor = bounds.last ?? 0;
+      if (after === undefined || after > cursor || bounds.first !== null && after < bounds.first - 1)
+        return { cursor };
+      const rows = this.db.query(`SELECT DISTINCT provider, account_scope, conversation_key, provider_item_id
+      FROM item_visibility_changes WHERE seq > ?`).all(after);
+      return { cursor, identities: rows.map((row) => ({
+        provider: row.provider,
+        accountScope: row.account_scope,
+        providerItemId: row.provider_item_id,
+        providerConversationId: row.conversation_key
+      })) };
     }
     *tierLedgerHiddenSteps() {
       const ledger = this.visibilityLedger();
-      if (!ledger || !ledger.corpusHasCopies(this.corpusId)) {
+      if (!ledger) {
+        if (this.visibilitySqlMemo)
+          this.db.exec("DELETE FROM temp.tier_visibility_pks");
+        this.visibilitySqlMemo = undefined;
+        this.tierLedgerHiddenMemo = undefined;
         return { hidden: [], held: [], metadataLayer: [], metadataLayerContentUnread: [], moving: 0 };
       }
-      const conversationOf = (identity2) => normalizeConversationId(identity2.providerConversationId);
-      const keyOf = (identity2) => JSON.stringify([identity2.provider, identity2.accountScope, conversationOf(identity2), identity2.providerItemId]);
-      const rowsFor = (identities) => this.itemRowsForIdentitiesSteps(identities, conversationOf);
-      const pksFor = function* (identities) {
-        return (yield* rowsFor(identities)).map((row) => row.item_pk);
+      const version = this.db.query("PRAGMA data_version").get().data_version;
+      const prior = this.tierLedgerHiddenMemo;
+      const priorLedgerCursor = prior?.ledgerCursor;
+      const priorStoreCursor = prior?.storeCursor;
+      const same = prior?.ledger === ledger && prior.dataVersion === version;
+      const ledgerChanges = ledger.visibilityChangesSince(same ? prior.ledgerCursor : undefined);
+      const storeChanges = this.itemVisibilityChangesSince(same ? prior.storeCursor : undefined);
+      const incremental = same && ledgerChanges.identities !== undefined && storeChanges.identities !== undefined;
+      const memo = incremental ? prior : {
+        ledger,
+        ledgerCursor: ledgerChanges.cursor,
+        storeCursor: storeChanges.cursor,
+        dataVersion: version,
+        lists: {
+          hidden: new MutablePkList,
+          held: new MutablePkList,
+          metadataLayer: new MutablePkList,
+          metadataLayerContentUnread: new MutablePkList
+        },
+        members: new Map,
+        value: { hidden: [], held: [], metadataLayer: [], metadataLayerContentUnread: [], moving: 0 }
       };
-      const metadataIdentities = yield* ledger.corpusCopyIdentitiesSteps(this.corpusId, "metadata_layer");
-      const metadataRows = yield* rowsFor(metadataIdentities);
-      const pksByKey = new Map;
-      for (let index = 0;index < metadataRows.length; index += 1) {
-        if (index > 0 && index % IDENTITY_LOOKUP_SLICE === 0)
-          yield;
-        const row = metadataRows[index];
-        const key2 = keyOf(metadataIdentities[row.idx]);
-        const pks = pksByKey.get(key2);
-        if (pks)
-          pks.push(row.item_pk);
-        else
-          pksByKey.set(key2, [row.item_pk]);
-      }
-      const unreadIdentities = yield* ledger.corpusCopyIdentitiesSteps(this.corpusId, "metadata_layer_content_unread");
-      const unreadMissed = [];
-      const unreadPks = [];
-      for (let index = 0;index < unreadIdentities.length; index += 1) {
-        if (index > 0 && index % IDENTITY_LOOKUP_SLICE === 0)
-          yield;
-        const identity2 = unreadIdentities[index];
-        const pks = pksByKey.get(keyOf(identity2));
-        if (pks)
-          unreadPks.push(...pks);
-        else
-          unreadMissed.push(identity2);
-      }
-      const superseded = yield* ledger.corpusCopyIdentitiesSteps(this.corpusId, "superseded");
-      const staged = yield* ledger.corpusCopyIdentitiesSteps(this.corpusId, "staged");
-      const hidden = yield* pksFor(superseded.concat(staged));
-      const held = yield* pksFor(yield* ledger.corpusCopyIdentitiesSteps(this.corpusId, "held"));
-      const missed = yield* pksFor(unreadMissed);
-      return {
-        hidden,
-        held,
-        metadataLayer: metadataRows.map((row) => row.item_pk),
-        metadataLayerContentUnread: unreadPks.concat(missed),
-        moving: ledger.corpusCopyCounts(this.corpusId).moving
+      for (const flag of VISIBILITY_PK_FLAGS)
+        memo.value[flag] = memo.lists[flag].values;
+      const changed = incremental ? [...new Map([...ledgerChanges.identities, ...storeChanges.identities].map((identity2) => [tierLedgerIdentityKey(identity2), identity2])).values()] : undefined;
+      const updates = [];
+      const pages = ledger.corpusVisibilityPages(this.corpusId, changed);
+      const prepare = function* (store, identities, flags) {
+        const rows = yield* store.itemRowsForIdentitiesSteps(identities, (identity2) => normalizeConversationId(identity2.providerConversationId));
+        const pks = new Map;
+        for (const row of rows) {
+          const list = pks.get(row.idx);
+          if (list)
+            list.push(row.item_pk);
+          else
+            pks.set(row.idx, [row.item_pk]);
+        }
+        const byKey = new Map(flags.map((row) => [tierLedgerIdentityKey(row), row]));
+        return identities.map((identity2, idx) => ({ identity: identity2, pks: pks.get(idx) ?? [], flags: byKey.get(tierLedgerIdentityKey(identity2)) }));
       };
+      if (changed) {
+        const flags = [];
+        for (const page2 of pages) {
+          flags.push(...page2);
+          yield;
+        }
+        updates.push(...yield* prepare(this, changed, flags));
+      } else {
+        for (const page2 of pages) {
+          const batch = yield* prepare(this, page2, page2);
+          this.applyVisibilityUpdates(memo, batch);
+          yield;
+        }
+      }
+      if (this.tierLedgerHiddenMemo !== prior || incremental && (memo.ledgerCursor !== priorLedgerCursor || memo.storeCursor !== priorStoreCursor)) {
+        return yield* this.tierLedgerHiddenSteps();
+      }
+      try {
+        this.applyVisibilityUpdates(memo, updates);
+      } catch (error) {
+        this.tierLedgerHiddenMemo = undefined;
+        this.visibilitySqlMemo = undefined;
+        throw error;
+      }
+      if (this.visibilityJournal && this.visibilitySqlMemo !== memo) {
+        this.db.transaction(() => {
+          this.db.exec("DELETE FROM temp.tier_visibility_pks");
+          for (const flag of VISIBILITY_PK_FLAGS)
+            this.db.query(`INSERT INTO temp.tier_visibility_pks
+          SELECT ?, value FROM json_each(?)`).run(flag, JSON.stringify(memo.value[flag]));
+        })();
+        this.visibilitySqlMemo = memo;
+      }
+      memo.ledgerCursor = ledgerChanges.cursor;
+      memo.storeCursor = storeChanges.cursor;
+      this.tierLedgerHiddenMemo = memo;
+      return memo.value;
+    }
+    applyVisibilityUpdates(memo, updates) {
+      for (const { identity: identity2 } of updates) {
+        const key2 = tierLedgerIdentityKey(identity2);
+        const previous = memo.members.get(key2);
+        if (previous) {
+          for (const flag of VISIBILITY_PK_FLAGS)
+            if (previous.flags[flag]) {
+              for (const pk of previous.pks) {
+                memo.lists[flag].delete(pk);
+                if (this.visibilitySqlMemo === memo)
+                  this.db.query("DELETE FROM temp.tier_visibility_pks WHERE flag = ? AND item_pk = ?").run(flag, pk);
+              }
+            }
+          if (previous.flags.moving)
+            memo.value.moving -= 1;
+          memo.members.delete(key2);
+        }
+      }
+      for (const { identity: identity2, pks, flags } of updates) {
+        const key2 = tierLedgerIdentityKey(identity2);
+        if (!flags || !flags.moving && !VISIBILITY_PK_FLAGS.some((flag) => flags[flag]))
+          continue;
+        for (const flag of VISIBILITY_PK_FLAGS)
+          if (flags[flag])
+            for (const pk of pks) {
+              memo.lists[flag].add(pk);
+              if (this.visibilitySqlMemo === memo)
+                this.db.query("INSERT OR IGNORE INTO temp.tier_visibility_pks VALUES (?, ?)").run(flag, pk);
+            }
+        if (flags.moving)
+          memo.value.moving += 1;
+        memo.members.set(key2, { pks, flags });
+      }
     }
     contentHeldPrivate(localItemId) {
       if (this.trustDomain === "secure_local")
@@ -35097,15 +35290,17 @@ var init_local_index = __esm(() => {
       }
       const scopeTiers = isSecureSensitivity({ trustDomain: this.trustDomain }) ? SOURCE_TRUST_TIERS : SOURCE_TRUST_TIERS.filter((trustTier) => !isSecureSensitivity({ trustDomain: this.trustDomain, trustTier }));
       const tierHidden = this.tierHiddenItemPks();
+      const heldSql = this.visibilityJournal && this.visibilitySqlMemo;
       const providerClause = `${provider ? "AND i.provider = ?" : ""}
           AND i.trust_tier IN (SELECT value FROM json_each(?))
-          AND i.item_pk NOT IN (SELECT value FROM json_each(?))`;
+          AND i.item_pk NOT IN (SELECT value FROM json_each(?))
+          ${heldSql ? "AND NOT EXISTS (SELECT 1 FROM temp.tier_visibility_pks v WHERE v.flag = 'held' AND v.item_pk = i.item_pk)" : ""}`;
       const scopeParams = [
         accountScope,
         conversationId,
         ...provider ? [provider] : [],
         JSON.stringify(scopeTiers),
-        JSON.stringify([...tierHidden.hidden, ...tierHidden.held])
+        JSON.stringify(heldSql ? tierHidden.hidden : [...tierHidden.hidden, ...tierHidden.held])
       ];
       const summary = this.db.query(`
       SELECT
@@ -38060,6 +38255,15 @@ var init_local_index = __esm(() => {
     }
     embeddingTierExclusionFilter(countsMaxAgeMs = 0, tierHidden) {
       const tierExcluded = tierHidden ?? this.tierHiddenItemPks({ countsMaxAgeMs });
+      if (this.visibilityJournal && this.visibilitySqlMemo) {
+        const children = tierExcluded.hidden === this.visibilitySqlMemo.value.hidden ? [] : tierExcluded.hidden;
+        return {
+          filter: `AND NOT EXISTS (SELECT 1 FROM temp.tier_visibility_pks v
+        WHERE v.flag IN ('hidden', 'held', 'metadataLayer') AND v.item_pk = i.item_pk)
+        ${children.length ? "AND i.item_pk NOT IN (SELECT value FROM json_each(?))" : ""}`,
+          params: children.length ? [JSON.stringify(children)] : []
+        };
+      }
       const excludedPks = [...tierExcluded.hidden, ...tierExcluded.held, ...tierExcluded.metadataLayer];
       return excludedPks.length > 0 ? { filter: "AND i.item_pk NOT IN (SELECT value FROM json_each(?))", params: [JSON.stringify(excludedPks)] } : { filter: "", params: [] };
     }
@@ -38860,8 +39064,8 @@ var init_local_index = __esm(() => {
       const selectedFilters = connectorStoreFilterSql(filters);
       const itemFilter = selectedLocalItemIds ? ` AND i.local_item_id IN (${selectedLocalItemIds.map(() => "?").join(", ")})` : "";
       const tierExcluded = tierHidden ?? this.tierHiddenItemPks();
-      const excludedPks = [...tierExcluded.hidden, ...tierExcluded.held, ...tierExcluded.metadataLayer];
-      const tierFilter = excludedPks.length > 0 ? " AND i.item_pk NOT IN (SELECT value FROM json_each(?))" : "";
+      const tierExclusion = this.embeddingTierExclusionFilter(0, tierExcluded);
+      const tierFilter = tierExclusion.filter;
       return this.db.query(`
       SELECT
         c.chunk_pk,
@@ -38883,7 +39087,7 @@ var init_local_index = __esm(() => {
         ${selectedAccount ? "AND i.account_scope = ?" : ""}
         ${selectedFilters.sql}
       ORDER BY c.chunk_pk ASC
-    `).all(...selectedLocalItemIds ?? [], ...excludedPks.length > 0 ? [JSON.stringify(excludedPks)] : [], ...selectedAccount ? [selectedAccount] : [], ...selectedFilters.params);
+    `).all(...selectedLocalItemIds ?? [], ...tierExclusion.params, ...selectedAccount ? [selectedAccount] : [], ...selectedFilters.params);
     }
     visibleVectorItemPks(itemPks, accountScope, filters) {
       const visible = new Set;
@@ -39426,7 +39630,14 @@ var init_local_index = __esm(() => {
       const accountScope = normalizeOptionalAccountScope(scope?.accountScope);
       const itemFilters = connectorStoreFilterSql(scope?.itemFilters);
       const contentFilters = connectorStoreFilterSql(scope?.contentFilters);
-      const tier = this.tierHiddenItemPks({ countsMaxAgeMs: options.countsMaxAgeMs ?? 0 });
+      const currentTier = this.tierHiddenItemPks({ countsMaxAgeMs: options.countsMaxAgeMs ?? 0 });
+      const tier = {
+        ...currentTier,
+        hidden: currentTier.hidden.slice(),
+        held: currentTier.held.slice(),
+        metadataLayer: currentTier.metadataLayer.slice(),
+        metadataLayerContentUnread: currentTier.metadataLayerContentUnread.slice()
+      };
       const hiddenNotIn = tier.hidden.length > 0 ? "AND i.item_pk NOT IN (SELECT value FROM json_each(?))" : "";
       const heldNotIn = tier.held.length > 0 ? "AND i.item_pk NOT IN (SELECT value FROM json_each(?))" : "";
       const namesOnlyWithText = tier.metadataLayer.length > 0 ? (yield { sql: `
@@ -191710,6 +191921,7 @@ class TierSnifferService {
   ledgers = new Map;
   boundLedgerIds = new Map;
   rejudgeCursors = new Map;
+  recoveryLedgerOffsets = new Map;
   constructor(options) {
     this.options = options;
     this.budget = new SnifferCallBudget({
@@ -191868,16 +192080,29 @@ class TierSnifferService {
         continue;
       try {
         const maxItem = opened.db.query("SELECT COALESCE(MAX(rowid), 0) AS n FROM tier_items").get().n;
-        for (let lo = 0;lo < maxItem; lo += slice) {
-          this.addPendingSlice(counts, opened, [lo, lo + slice]);
+        const maxQuestion = opened.hasQueue ? opened.db.query("SELECT COALESCE(MAX(question_pk), 0) AS n FROM queue.sniffer_questions").get().n : 0;
+        for (let lo = 0;lo < maxItem; ) {
+          const hi = opened.db.query(`SELECT MAX(rowid) AS n FROM (
+            SELECT rowid FROM tier_items WHERE rowid > ? AND rowid <= ? ORDER BY rowid LIMIT ?
+          )`).get(lo, maxItem, slice).n;
+          if (hi === null)
+            break;
+          this.addPendingSlice(counts, opened, [lo, hi]);
+          lo = hi;
           await ingestionTurn();
           if (this.stopped)
             return;
         }
         if (opened.hasQueue) {
-          const maxQuestion = opened.db.query("SELECT COALESCE(MAX(question_pk), 0) AS n FROM queue.sniffer_questions").get().n;
-          for (let lo = 0;lo < maxQuestion; lo += slice) {
-            this.addQuestionSlice(counts, opened.db, [lo, lo + slice]);
+          for (let lo = 0;lo < maxQuestion; ) {
+            const hi = opened.db.query(`SELECT MAX(question_pk) AS n FROM (
+              SELECT question_pk FROM queue.sniffer_questions
+              WHERE question_pk > ? AND question_pk <= ? ORDER BY question_pk LIMIT ?
+            )`).get(lo, maxQuestion, slice).n;
+            if (hi === null)
+              break;
+            this.addQuestionSlice(counts, opened.db, [lo, hi]);
+            lo = hi;
             await ingestionTurn();
             if (this.stopped)
               return;
@@ -192151,7 +192376,7 @@ class TierSnifferService {
     };
     await this.settleStoredItems();
     phase("settle");
-    await this.recoverMissingQuestions();
+    await this.recoverMissingQuestions(signal);
     phase("recover");
     if (this.options.modelAvailable && !this.options.modelAvailable()) {
       try {
@@ -192201,7 +192426,7 @@ class TierSnifferService {
     const preparationStopped = await prepareSnifferModel({ model: this.options.model, signal, shouldYield: () => this.yieldNow() });
     phase("prepare");
     if (!preparationStopped)
-      await this.recoverMissingQuestions(true);
+      await this.recoverMissingQuestions(signal, true);
     phase("recover");
     const rejudged = preparationStopped ? emptyTierRejudgeReport() : await this.rejudge();
     phase("rejudge");
@@ -192338,9 +192563,17 @@ class TierSnifferService {
       this.applyOwnerOverrides();
     return { state: "ran", report, ...rejudged.seen > 0 ? { rejudged } : {}, ...autoMoves ? { autoMoves } : {} };
   }
-  async recoverMissingQuestions(allowReask = false) {
+  async recoverMissingQuestions(signal, allowReask = false) {
+    const deadline = performance.now() + MISSING_QUESTION_RECOVERY_PHASE_MS;
     const cursorKey = allowReask ? "sniffer_missing_question_reask_cursor_v1" : "sniffer_missing_question_cursor_v1";
-    for (const ledgerPath of this.ledgerPaths()) {
+    const paths = this.ledgerPaths();
+    const offset = (this.recoveryLedgerOffsets.get(cursorKey) ?? 0) % (paths.length || 1);
+    for (let n = 0;n < paths.length; n++) {
+      if (signal.aborted || this.stopped || n > 0 && performance.now() >= deadline)
+        break;
+      const index = (offset + n) % paths.length;
+      const ledgerPath = paths[index];
+      this.recoveryLedgerOffsets.set(cursorKey, (index + 1) % paths.length);
       try {
         const ledger = this.ledgerAt(ledgerPath);
         if (this.options.installed.forLedger(ledgerPath).unavailableReason)
@@ -192358,9 +192591,15 @@ class TierSnifferService {
         const rows = ledger.listPending({ limit: 100, ...after ? { after } : {} });
         let settled = 0;
         let retired = 0;
+        let lastProcessed;
+        let processed = 0;
         for (const row of rows) {
           await ingestionTurn();
+          if (signal.aborted || this.stopped || processed > 0 && performance.now() >= deadline)
+            break;
           const identity2 = recordIdentity2(row);
+          lastProcessed = identity2;
+          processed++;
           const missingMetadata = row.metadataPending && !queue.questionFor(identity2, "metadata");
           const missingContent = (row.contentPending || !row.metadataPending) && !queue.questionFor(identity2, "content");
           if (queue.questionFor(identity2, "metadata") || queue.questionFor(identity2, "content"))
@@ -192409,8 +192648,10 @@ class TierSnifferService {
               settled++;
           } catch {}
         }
-        const last = rows.at(-1);
-        ledger.writeMeta(cursorKey, rows.length === 100 && last ? JSON.stringify(recordIdentity2(last)) : "");
+        if (lastProcessed)
+          ledger.writeMeta(cursorKey, processed < rows.length || rows.length === 100 ? JSON.stringify(lastProcessed) : "");
+        else if (rows.length === 0)
+          ledger.writeMeta(cursorKey, "");
         if (settled || retired)
           this.options.log?.(`Olympus tier sniffer: recovered ${settled} pending item(s) as fail-safe Private; retired ${retired} missing item(s).`);
       } catch {}
@@ -192720,7 +192961,7 @@ function moveFailureName(error2) {
     return error2.name || error2.constructor.name || "Error";
   return /^[a-z][a-z ]{0,39}$/.test(error2.message) ? error2.message : "Error";
 }
-var DEFAULT_TIER_SNIFFER_INTERVAL_MS = 1000, NOT_ANSWERING_FIRST_BACKOFF_MS = 30000, NOT_ANSWERING_MAX_BACKOFF_MS = 60000, DEFAULT_AUTO_MOVES_PER_PASS = 25, DEFAULT_TIER_SNIFFER_MAX_PASS_MS, EXTRACTION_ENQUEUE_GRACE_MS, DEFAULT_TIER_SNIFFER_ABANDON_MS, DEFAULT_STALE_MOVE_MS, BUILT_IN_CLASSIFIER_DEFAULT_APPROVAL_REASON = "built-in local model, nothing leaves the Mac (owner default 2026-10-01)", BACKLOG_EXACT_ROWS = 20000, BACKLOG_REFRESH_MS = 60000, BACKLOG_SLICE_ROWS = 5000, AUTO_MOVE_WHY = "Automatic tier move after the privacy check: every embedding involved is the built-in local model (owner approval 2026-10-01).";
+var DEFAULT_TIER_SNIFFER_INTERVAL_MS = 1000, NOT_ANSWERING_FIRST_BACKOFF_MS = 30000, NOT_ANSWERING_MAX_BACKOFF_MS = 60000, MISSING_QUESTION_RECOVERY_PHASE_MS = 25, DEFAULT_AUTO_MOVES_PER_PASS = 25, DEFAULT_TIER_SNIFFER_MAX_PASS_MS, EXTRACTION_ENQUEUE_GRACE_MS, DEFAULT_TIER_SNIFFER_ABANDON_MS, DEFAULT_STALE_MOVE_MS, BUILT_IN_CLASSIFIER_DEFAULT_APPROVAL_REASON = "built-in local model, nothing leaves the Mac (owner default 2026-10-01)", BACKLOG_EXACT_ROWS = 20000, BACKLOG_REFRESH_MS = 60000, BACKLOG_SLICE_ROWS = 5000, AUTO_MOVE_WHY = "Automatic tier move after the privacy check: every embedding involved is the built-in local model (owner approval 2026-10-01).";
 var init_sniffer_service = __esm(() => {
   init_tier_move();
   init_control_path_headroom();

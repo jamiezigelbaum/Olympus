@@ -39,7 +39,7 @@ import {
 import { TIER_LEDGER_SQLITE_STORE_ID, tierLedgerPathForStore } from './tier-ledger-path.ts';
 
 export { TIER_LEDGER_SQLITE_STORE_ID, tierLedgerPathForStore };
-export const TIER_LEDGER_SCHEMA_VERSION = 10;
+export const TIER_LEDGER_SCHEMA_VERSION = 11;
 
 /** A scrub's start: the revision it took and the item's generation then. */
 export interface SecretScrubMark {
@@ -758,12 +758,13 @@ export class TierLedger {
   ): TierLedgerRecord {
     assertTier(target.metadataTier);
     assertTier(target.contentTier);
-    const result = this.db.query(`
+    this.db.query(`
       UPDATE tier_items SET state = 'moving', target_metadata_tier = ?, target_content_tier = ?, move_attempts = 0
       WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND generation = ?
         AND state != 'moving'
     `).run(target.metadataTier, target.contentTier, ...idParams(identity), expectedGeneration);
-    if (result.changes !== 1) throw new TierLedgerGenerationConflictError();
+    // Bun's run().changes includes trigger writes; CAS counts only the row matched.
+    if ((this.db.query('SELECT changes() AS n').get() as { n: number }).n !== 1) throw new TierLedgerGenerationConflictError();
     return this.getCurrent(identity)!;
   }
 
@@ -838,7 +839,7 @@ export class TierLedger {
   listMoving(options: { limit?: number } = {}): TierLedgerRecord[] {
     const limit = Math.max(1, Math.min(options.limit ?? 100, 5_000));
     const rows = this.db.query(`
-      SELECT * FROM tier_items WHERE state = 'moving'
+      SELECT * FROM tier_items INDEXED BY tier_items_move_order WHERE state = 'moving'
       ORDER BY move_attempts, decided_at, provider, account_scope, provider_item_id, conversation_key
       LIMIT ?
     `).all(limit);
@@ -3326,6 +3327,68 @@ export class TierLedger {
   }
 
   /**
+   * A bounded, transactional change feed for derived visibility. Every writer
+   * (including other connections) records the identity in the write's own
+   * transaction. A reader that fell behind retention must rebuild; it may
+   * never treat a gap as evidence that its old visible set is current.
+   */
+  visibilityChangesSince(after?: number): { cursor: number; identities?: TierLedgerIdentity[] } {
+    return this.db.transaction(() => {
+      const bounds = this.db.query('SELECT (SELECT MIN(seq) FROM tier_visibility_changes) AS first, (SELECT MAX(seq) FROM tier_visibility_changes) AS last')
+        .get() as { first: number | null; last: number | null };
+      const cursor = bounds.last ?? 0;
+      if (after === undefined || after > cursor || (bounds.first !== null && after < bounds.first - 1)) return { cursor };
+      const rows = this.db.query(`SELECT DISTINCT provider, account_scope, conversation_key, provider_item_id
+        FROM tier_visibility_changes WHERE seq > ?`).all(after) as TierIdentityRow[];
+      return { cursor, identities: rows.map(identityFromRow) };
+    })();
+  }
+
+  /** All copy flags in one indexed walk, or just the changed identities. */
+  *corpusVisibilityPages(corpusId: string, identities?: readonly TierLedgerIdentity[]): Generator<TierCorpusVisibility[]> {
+    const flags = `c.provider, c.account_scope, c.conversation_key, c.provider_item_id,
+      c.copy_state <> 'current' OR EXISTS (SELECT 1 FROM tier_write_intents w
+        WHERE w.provider = c.provider AND w.account_scope = c.account_scope
+          AND w.conversation_key = c.conversation_key AND w.provider_item_id = c.provider_item_id
+          AND w.kind IN ('secret', 'deletion')) AS hidden,
+      c.copy_state = 'current' AND c.embed_hold = 1 AS held,
+      c.copy_state = 'current' AND c.layers = 'metadata' AS metadata_layer,
+      c.copy_state = 'current' AND c.layers = 'metadata' AND NOT EXISTS (
+        SELECT 1 FROM tier_copies other WHERE other.provider = c.provider AND other.account_scope = c.account_scope
+          AND other.conversation_key = c.conversation_key AND other.provider_item_id = c.provider_item_id
+          AND other.corpus_id <> c.corpus_id AND other.copy_state = 'current' AND other.layers IN ('content', 'both')
+      ) AS metadata_unread,
+      EXISTS (SELECT 1 FROM tier_items t WHERE t.provider = c.provider AND t.account_scope = c.account_scope
+        AND t.conversation_key = c.conversation_key AND t.provider_item_id = c.provider_item_id AND t.state = 'moving') AS moving`;
+    const convert = (rows: Array<TierIdentityRow & { hidden: number; held: number; metadata_layer: number; metadata_unread: number; moving: number }>) =>
+      rows.map(row => ({ ...identityFromRow(row), hidden: !!row.hidden, held: !!row.held,
+        metadataLayer: !!row.metadata_layer, metadataLayerContentUnread: !!row.metadata_unread, moving: !!row.moving }));
+    if (identities) {
+      for (let offset = 0; offset < identities.length; offset += 200) {
+        const batch = identities.slice(offset, offset + 200);
+        // Identities drive the primary-key probes; a corpus index must never
+        // tempt the planner to walk the held corpus for one changed item.
+        const rows = this.db.query(`SELECT ${flags} FROM json_each(?) j CROSS JOIN tier_copies c
+          WHERE c.provider = json_extract(j.value, '$[0]') AND c.account_scope = json_extract(j.value, '$[1]')
+            AND c.conversation_key = json_extract(j.value, '$[2]') AND c.provider_item_id = json_extract(j.value, '$[3]')
+            AND c.corpus_id = ?`)
+          .all(JSON.stringify(batch.map(identity => [...idParams(identity)])), corpusId) as Parameters<typeof convert>[0];
+        yield convert(rows);
+      }
+      return;
+    }
+    const query = this.db.query(`SELECT c.rowid AS row_id, ${flags} FROM tier_copies c
+      INDEXED BY tier_copies_visibility_walk WHERE c.corpus_id = ? AND c.rowid > ? ORDER BY c.rowid LIMIT 500`);
+    for (let after = 0; ;) {
+      const rows = query.all(corpusId, after) as Array<Parameters<typeof convert>[0][number] & { row_id: number }>;
+      if (rows.length === 0) return;
+      yield convert(rows);
+      after = rows.at(-1)!.row_id;
+      if (rows.length < 500) return;
+    }
+  }
+
+  /**
    * Every item with a copy in this store in the given state, with no ceiling:
    * a filter that silently stopped at N items would let the N+1st superseded
    * copy be searched and counted.
@@ -3465,21 +3528,22 @@ export class TierLedger {
    * side-store note is deleted, so no later pass (a move, a re-judge, a
    * migration, a settle) acts on them. The superseded copies stay as the
    * mark that hides the stores' rows until those are purged; then
-   * `deleteAccountScopeCopies` removes them. Deleting a decision fires no
-   * trigger (they watch inserts and updates only).
+   * `deleteAccountScopeCopies` removes them. The visibility feed records
+   * deletions too, so readers can retire cached copy membership.
    */
   withdrawAccountScope(provider: string, accountScope: string): { items: number; copies: number } {
     return this.db.transaction(() => {
       const now = this.now().toISOString();
-      const copies = this.db.query(`
+      this.db.query(`
         UPDATE tier_copies
         SET copy_state = 'superseded',
           superseded_by_generation = COALESCE(superseded_by_generation, generation + 1),
           updated_at = ?
         WHERE provider = ? AND account_scope = ? AND copy_state <> 'superseded'
-      `).run(now, provider, accountScope).changes;
-      const items = this.db.query('DELETE FROM tier_items WHERE provider = ? AND account_scope = ?')
-        .run(provider, accountScope).changes;
+      `).run(now, provider, accountScope);
+      const copies = (this.db.query('SELECT changes() AS n').get() as { n: number }).n;
+      this.db.query('DELETE FROM tier_items WHERE provider = ? AND account_scope = ?').run(provider, accountScope);
+      const items = (this.db.query('SELECT changes() AS n').get() as { n: number }).n;
       for (const table of [
         'tier_history',
         'tier_overrides',
@@ -3496,8 +3560,8 @@ export class TierLedger {
 
   /** The last step of removing one account scope: its copy rows, once its stores hold none of its rows. */
   deleteAccountScopeCopies(provider: string, accountScope: string): number {
-    return this.db.query('DELETE FROM tier_copies WHERE provider = ? AND account_scope = ?')
-      .run(provider, accountScope).changes;
+    this.db.query('DELETE FROM tier_copies WHERE provider = ? AND account_scope = ?').run(provider, accountScope);
+    return (this.db.query('SELECT changes() AS n').get() as { n: number }).n;
   }
 
   private insertCopies(
@@ -3756,6 +3820,14 @@ interface TierCopyRow {
   superseded_by_generation: number | null;
   previous_layers: TierCopyLayers | null;
   updated_at: string;
+}
+
+export interface TierCorpusVisibility extends TierLedgerIdentity {
+  hidden: boolean;
+  held: boolean;
+  metadataLayer: boolean;
+  metadataLayerContentUnread: boolean;
+  moving: boolean;
 }
 
 export type TierCorpusCopyFilter = 'superseded' | 'staged' | 'held' | 'metadata_layer' | 'metadata_layer_content_unread' | 'metadata_layer_settled_unreadable'
@@ -4046,7 +4118,7 @@ function rowOf(record: TierLedgerRecord): EffectiveRow {
  * hold is cleared where the decision already placed the copy).
  */
 function settleStaleEmbedHolds(db: Database, now: string): number {
-  return db.query(`
+  db.query(`
     UPDATE tier_copies SET embed_hold = 0, updated_at = ?
     WHERE embed_hold = 1 AND copy_state = 'current'
       AND EXISTS (
@@ -4055,7 +4127,8 @@ function settleStaleEmbedHolds(db: Database, now: string): number {
           AND t.conversation_key = tier_copies.conversation_key AND t.provider_item_id = tier_copies.provider_item_id
           AND t.state = 'current' AND t.metadata_pending = 0 AND t.content_pending = 0
       )
-  `).run(now).changes;
+  `).run(now);
+  return (db.query('SELECT changes() AS n').get() as { n: number }).n;
 }
 
 /** The reasons that say a question is still open: the flags, the borderline families and `sniffer:<id>:undecided`. */
@@ -4532,7 +4605,7 @@ function tierLedgerMigrations(): SqliteMigration[] {
     {
       // The write an item's legs are about to receive, kept until every leg has it: a crash between the legs
       // leaves this row, and the next pass finishes the write from it before anything else reads the item.
-      version: TIER_LEDGER_SCHEMA_VERSION,
+      version: 10,
       name: 'tier_write_intents',
       up(db) {
         db.exec(`
@@ -4559,6 +4632,39 @@ function tierLedgerMigrations(): SqliteMigration[] {
             PRIMARY KEY (provider, account_scope, conversation_key, provider_item_id)
           );
         `);
+      },
+    },
+    {
+      version: TIER_LEDGER_SCHEMA_VERSION,
+      name: 'incremental_copy_visibility',
+      up(db) {
+        db.exec(`
+          CREATE INDEX IF NOT EXISTS tier_items_move_order ON tier_items
+            (move_attempts, decided_at, provider, account_scope, provider_item_id, conversation_key)
+            WHERE state = 'moving';
+          CREATE INDEX IF NOT EXISTS tier_copies_visibility_walk ON tier_copies (corpus_id);
+          CREATE TABLE IF NOT EXISTS tier_visibility_changes (
+            seq INTEGER PRIMARY KEY AUTOINCREMENT,
+            provider TEXT NOT NULL, account_scope TEXT NOT NULL,
+            conversation_key TEXT NOT NULL, provider_item_id TEXT NOT NULL
+          );
+        `);
+        const note = (row: 'NEW' | 'OLD') => `
+          INSERT INTO tier_visibility_changes (provider, account_scope, conversation_key, provider_item_id)
+          VALUES (${row}.provider, ${row}.account_scope, ${row}.conversation_key, ${row}.provider_item_id);
+          DELETE FROM tier_visibility_changes WHERE seq <= (SELECT MAX(seq) - 8192 FROM tier_visibility_changes);`;
+        for (const table of ['tier_copies', 'tier_items', 'tier_write_intents']) {
+          // State changes affect moving counts; reasons, verdict history, queue
+          // cursors and other metadata cannot invalidate copy visibility.
+          const columns = table === 'tier_copies' ? 'copy_state, embed_hold, layers, corpus_id'
+            : table === 'tier_items' ? 'state' : 'kind';
+          db.exec(`
+            CREATE TRIGGER IF NOT EXISTS ${table}_visibility_insert AFTER INSERT ON ${table} BEGIN ${note('NEW')} END;
+            CREATE TRIGGER IF NOT EXISTS ${table}_visibility_delete AFTER DELETE ON ${table} BEGIN ${note('OLD')} END;
+            CREATE TRIGGER IF NOT EXISTS ${table}_visibility_update AFTER UPDATE OF ${columns}, provider, account_scope, conversation_key, provider_item_id ON ${table}
+              BEGIN ${note('OLD')} ${note('NEW')} END;
+          `);
+        }
       },
     },
   ];

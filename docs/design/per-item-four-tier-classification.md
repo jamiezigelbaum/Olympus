@@ -500,3 +500,26 @@ Scope: new, clean installs only. Existing installs keep their policy and stores 
 - **Privacy profile.** Set once in ChatGPT (`olympus_privacy_set`), editable from the dashboard: the owner's own words (quoted into the sniffer prompt as data; the approved prompt version is `SNIFFER_OWNER_CONTEXT_PROMPT_VERSION`) and always-Private folder, label and sender rules, written as `privacy-*` owner tier rules. Stored owner-only in `~/.olympus/privacy.json`. A new raising rule (always Private, or Secrets) also applies to items already stored: the sniffer tick and each set sync sweep routed items once per new rule (`tier-rules-sweep.ts`, a bounded page per call, matched on what the store keeps: title, path, scope and chat keys, sender) and raise every match at once, hidden first. Label rules, which a store does not keep, are applied by the provider's own lane (`sweepLabelRuleRaises`): the Gmail lane asks Gmail which messages carry the label (by label id, Spam and Trash included) at the start of each pull and reconcile, raises the stored ones the same way, and records the rule as applied only after Gmail answered every page, so a failure leaves it pending and the next run retries (the receipt carries `gmail_label_rules_pending` meanwhile); the daily reconcile also re-asks, for mail labelled later. A rule that would lower an item never acts on stored items.
 - **Names-only folders.** Since classifier p4 an item in a folder the owner keeps Names only is decided on its names at listing (`content:names_only`) and never waits for text. Items recorded before p4 were left pending on text that never comes; the same tick and each set sync settle them without a re-list (`tier-names-only-settle.ts`: a routed row held only for unread text whose store's names-only rule covers its path is recorded exactly as a p4 listing would; its names copy stays where it is). Items with no readable content for other reasons (folders, unsupported types, terminal extraction failures) still wait for a later change; telling the ledger about them belongs to the extraction runner and is not done yet.
 - **Diagnosis that led here.** On the owner's fresh install the two PDFs were routed correctly (Personal, content in `internal.dropbox.files`; `secure_local.dropbox.files` was only the extraction job's lane id). Their text was control-character noise: the launchd agent's PATH hid Homebrew's `pdftotext`, and the inline decoder cannot read composite-font PDFs. Extraction commands now resolve from package-manager directories, and undecodable inline text counts as no text layer.
+
+### Worker scan cost (6 November 2026)
+
+Disposition: fix. Verdicts changed the ledger's database-wide marker, invalidating
+whole-corpus hidden/held identity lists even when only one item changed. Store
+readers now bootstrap their visibility projection once and apply changed identities
+from a transactional SQLite trigger feed. The feed retains 8,192 events; a gap,
+ledger rebinding, or an external store commit forces a full refresh. Store item
+writes on the reader's own connection have a separate bounded temporary feed.
+Embedding exclusions probe indexed temporary membership instead of rebuilding a
+held-item JSON list. Secret/deletion intents hide their copies before cleanup.
+Search, layer selection, counts, classifier identity and source contracts retain
+their meaning; each status count keeps its own visibility snapshot across
+off-thread reads, and embedding batches still recheck visibility before dispatch.
+
+Queued moves use an index in their existing retry/age order. Extraction candidate
+calls examine at most 2,000 item keys in 500-key windows, resuming at the last key
+examined. Backlog counts seek through existing keys, bounded by their initial
+high-water marks. Missing-question recovery has 25 ms per phase, rotating ledgers
+and persisting only examined rows; a synchronous row already started may overrun.
+These are cooperative scheduling bounds, not a live throughput measurement. The
+#938 verdict-rate/gap targets and #929 recovery p90 still require a separate
+Sparta runtime measurement after authorized deployment.

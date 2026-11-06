@@ -18610,6 +18610,27 @@ var init_media_judge = __esm(() => {
 });
 
 // src/workers/connector-store/local-index.ts
+class MutablePkList {
+  values = [];
+  positions = new Map;
+  add(pk) {
+    if (this.positions.has(pk))
+      return;
+    this.positions.set(pk, this.values.length);
+    this.values.push(pk);
+  }
+  delete(pk) {
+    const index = this.positions.get(pk);
+    if (index === undefined)
+      return;
+    const last = this.values.pop();
+    this.positions.delete(pk);
+    if (index < this.values.length) {
+      this.values[index] = last;
+      this.positions.set(last, index);
+    }
+  }
+}
 function connectorStoreContentPreference(vettedVectorItemIds) {
   return (candidate) => candidate.item.chunk?.lane === "keyword" || candidate.laneRanks.has("recency") || candidate.laneRanks.has("vector") && vettedVectorItemIds.has(candidate.item.sourceItem.localItemId);
 }
