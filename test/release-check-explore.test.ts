@@ -5,7 +5,7 @@
  */
 import { describe, expect, test } from 'bun:test';
 import { Window } from 'happy-dom';
-import { EXPECTATIONS, exploreChecks, explore, auditAccessibility, pagesAccessibilityAudit, withPageAudits, type AxeViolation, type Seed } from '../scripts/release-check/explore.ts';
+import { EXPECTATIONS, exploreChecks, explore, rowWords, auditAccessibility, pagesAccessibilityAudit, withPageAudits, type AxeViolation, type Seed } from '../scripts/release-check/explore.ts';
 import { buildInventory, setLiteral } from '../scripts/release-check/explore-inventory.ts';
 import { kindOf } from '../scripts/release-check/explore-kinds.ts';
 import type { ElementInfo, JourneyDriver, PageEvents } from '../scripts/release-check/journey.ts';
@@ -63,6 +63,8 @@ interface PanelState {
   otherSections?: boolean;
   privacyOpen?: boolean;
   privacyEditing?: boolean;
+  /** Readwise's row has a closed "Details for support" (with its Copy details) on the first load only, as a passing stall would (#935). */
+  supportOnFirstLoad?: boolean;
 }
 
 /** A panel with one source, Readwise, that behaves the way the dashboard's does: a row, a ⋯ menu, a question before Disconnect. */
@@ -92,7 +94,7 @@ class PanelDriver implements JourneyDriver {
       ? `<span class="fix confirm"><span class="reason strong">Disconnect Readwise?</span><button data-key="menu:readwise.library:1:yes">Confirm disconnect</button><button data-key="menu:readwise.library:1:no">Cancel</button></span>`
       : `<span class="fix"><button data-key="menu:readwise.library:1">Disconnect</button></span>`;
     const row = s.connected
-      ? `<li class="row source"><div class="source-main"><p class="source-head"><span class="source-name">Readwise</span></p><p class="muted">${s.line}</p></div>
+      ? `<li class="row source"><div class="source-main"><p class="source-head"><span class="source-name">Readwise</span></p><p class="muted">${s.supportOnFirstLoad && this.loads <= 1 ? 'Stalled while reading' : s.line}</p>${s.supportOnFirstLoad && this.loads <= 1 ? '<details class="disclosure" data-open-key="support-details:readwise.library"><summary data-key="summary:support-details:readwise.library">Details for support</summary><pre>failure: unknown</pre><button data-key="support:readwise.library">Copy details</button></details>' : ''}</div>
           <details class="menu" data-open-key="menu:readwise.library" ${s.menuOpen ? 'open' : ''}><summary data-key="summary:menu:readwise.library">⋯<span class="sr">More actions for Readwise</span></summary><div class="menu-panel"><span class="fix">${sync}</span>${disconnect}${s.extraAfter !== undefined && this.loads >= s.extraAfter ? '<span class="fix"><button data-key="menu:readwise.library:9">Check now</button></span>' : ''}</div></details></li>`
       : `<li class="row source"><div class="source-main"><p class="source-head"><span class="source-name">Readwise</span></p><p class="muted">Not connected</p></div><div class="source-actions"><span class="fix"><button data-key="primary:readwise.library">Connect</button></span></div></li>`;
     const need = s.bareProblem ? '<ul><li class="row need"><div class="need-body"><p class="row-text">Readwise is stuck</p></div></li></ul>' : '';
@@ -426,6 +428,20 @@ describe('exploring the Sources section', () => {
     const result = await explore({ driver, seeds: [populated(driver)], inventory: inventory(), ...quick() });
     const cancel = result.traces.flatMap((trace) => trace.steps).find((step) => step.name.startsWith('Readwise: Cancel'));
     expect(cancel).toMatchObject({ ok: true, actual: 'the question closed' });
+  });
+
+  test('a row that showed a section only as seeded is failed, quoting what the row said then and says now', async () => {
+    const driver = new PanelDriver({ supportOnFirstLoad: true });
+    const result = await explore({ driver, seeds: [populated(driver)], inventory: inventory(), ...quick() });
+    const failed = result.traces.flatMap((trace) => trace.steps).find((step) => step.name === 'summary:support-details:readwise.library > support:readwise.library');
+    expect(failed?.ok).toBe(false);
+    expect(failed?.actual).toContain('a control on its way could not be pressed; as seeded the row read "Readwise Stalled while reading');
+    expect(failed?.actual).toContain('now it reads "Readwise Synced 5 min ago');
+  });
+
+  test('a row\'s words run from its name to the next row\'s', () => {
+    expect(rowWords('Files on this computer Checking Readwise Synced', 'Files on this computer', ['Files on this computer', 'Readwise'])).toBe('Files on this computer Checking');
+    expect(rowWords('Readwise Synced', 'Gmail', ['Readwise'])).toBe('(the row is not on the page)');
   });
 
   test('See why has to open and say something', () => {

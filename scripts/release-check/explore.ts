@@ -150,6 +150,19 @@ const OWN_HOSTS = /^https:\/\/(www\.)?olympusplugin\.ai\//;
 const keyed = (key: string): { css: string } => ({ css: `[data-key="${key.replace(/"/g, '\\"')}"]` });
 const squash = (text: string): string => text.replace(/\s+/g, ' ').trim();
 
+/**
+ * What a source's row says, from the panel's visible text: from the row's name up to the next source's name (at most 240 characters).
+ * A failure to reach a control quotes it from the page as seeded and from the fresh page, so a row that changed state between the two
+ * loads (a section that showed once and was gone) says what it showed (#935).
+ */
+export function rowWords(text: string, row: string, rows: readonly string[]): string {
+  const at = row ? text.indexOf(row) : -1;
+  if (at < 0) return '(the row is not on the page)';
+  const ends = rows.filter((other) => other && other !== row).map((other) => text.indexOf(other, at + row.length)).filter((index) => index > at);
+  const end = Math.min(at + 240, ...ends);
+  return text.slice(at, end).trim();
+}
+
 /** The page's own rules for a seeded state, as `(driver, seed) => findings`. */
 export interface Outcome { ok: boolean; expected: string; actual: string }
 export interface PressContext {
@@ -452,6 +465,7 @@ export async function explore(options: ExploreOptions): Promise<ExploreResult> {
     const loadRequests = load.requests.filter((request) => !ALWAYS_ALLOWED_REQUESTS.some((rule) => rule.test(request.url)) && !(loadRefusal && REFUSAL_REQUESTS.some((rule) => rule.test(request.url))));
     const loadConsole = load.console.filter((message) => !ALWAYS_ALLOWED_CONSOLE.some((rule) => rule.test(message)) && !(/Failed to load resource/.test(message) && load.requests.length > 0));
     const base = await panelControls(driver);
+    const baseText = await panelText(driver);
     // The accessibility audit of the page as seeded (before any press changes it).
     if (options.axeSource) {
       const audited = await auditAccessibility(driver, options.axeSource, seed.id);
@@ -556,10 +570,12 @@ export async function explore(options: ExploreOptions): Promise<ExploreResult> {
         }
         controlsNow = await panelControls(driver);
         control = controlsNow.find((candidate) => candidate.key === finalKey);
-        if (!reachable) break;
+        // A control on its way that could not be pressed is looked for once more too: the row may have been between two states.
       }
       if (!reachable || !control) {
-        steps.push(failureStep(steps.length + 1, item.path, !reachable ? 'a control on its way could not be pressed' : 'it was on the page as seeded but is not there on a fresh page'));
+        const rows = [...new Set([...base, ...controlsNow].map((candidate) => candidate.rowName).filter(Boolean))];
+        const seen = item.row.startsWith('section:') ? '' : `; as seeded the row read "${rowWords(baseText, item.row, rows)}", now it reads "${rowWords(await panelText(driver), item.row, rows)}"`;
+        steps.push(failureStep(steps.length + 1, item.path, `${!reachable ? 'a control on its way could not be pressed' : 'it was on the page as seeded but is not there on a fresh page'}${seen}`));
         failedHere += 1;
         continue;
       }
