@@ -340,7 +340,7 @@ export function tierSnifferInputHash(
 
 /** Conservative capability check; no source identities or group privacy decisions. */
 export function itemHasNonTextContent(item: RawItem): boolean {
-  if (item.content.kind !== 'text' || item.deferredBytes || item.identity.parent
+  if (item.metadata.textComplete !== true || item.content.kind !== 'text' || item.deferredBytes || item.identity.parent
     || item.identity.providerFileId || !textOnlyMime(item.mimeType)) return true;
   return Object.entries(item.metadata).some(([key, value]) =>
     /attachment|media|resource/i.test(key)
@@ -1069,7 +1069,8 @@ function contentPass(args: {
 
   // Only complete own text may settle by content rule. Names have already
   // run independently and their tier remains the floor.
-  const rule = args.textOnly ? trivialContentRule(text, args.parentContext) : undefined;
+  const rule = args.textOnly && !args.signals.title?.trim()
+    ? trivialContentRule(text, args.parentContext) : undefined;
   if (rule) {
     return {
       tier: maxTier(metadata.tier, 'private'),

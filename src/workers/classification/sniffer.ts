@@ -588,6 +588,7 @@ export class CachedTierSniffer implements TierSniffer {
         && (!request.subject || cached.modelSubject !== snifferSubjectKey(request.subject));
       if (!cached && request.pass === 'content' && request.contentHash && this.lane.snifferMode !== 'pending') {
         cached = this.store.getFinalModelContentVerdict({
+          materialHash: request.materialHash ?? snifferMaterialHash(request.pass, material),
           contentHash: request.contentHash, modelId: snifferCacheModelId(this.lane),
           promptVersion: this.promptVersion, mapRevision,
         });

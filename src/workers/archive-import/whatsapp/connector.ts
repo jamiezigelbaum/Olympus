@@ -390,6 +390,7 @@ export function createWhatsAppArchiveConnector(input: ArchiveConnectorInput): So
         ...(authoredAt ? { authoredAt } : {}),
         contentHash: textHash,
         attachmentCount: whatsAppMediaMarkerCount(raw.text),
+        ...(whatsAppMediaMarkerCount(raw.text) === 0 ? { textComplete: true } : {}),
         // The export this copy of the message was read from.
         sourceFile: unit.file.relPath,
         ...(unit.entry ? { sourceMember: unit.entry.name } : {}),
@@ -816,7 +817,7 @@ export function createWhatsAppArchiveConnector(input: ArchiveConnectorInput): So
       const chat = typeof item.metadata.chat === 'string' && item.metadata.chat ? item.metadata.chat : undefined;
       const sender = typeof item.metadata.sender === 'string' && item.metadata.sender ? item.metadata.sender : undefined;
       return {
-        ...(chat ? { title: chat } : {}),
+        ...(chat ? { labels: [chat] } : {}),
         ...(sender ? { sender } : {}),
       };
     },

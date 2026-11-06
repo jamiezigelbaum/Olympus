@@ -19185,7 +19185,7 @@ function tierSnifferInputHash(pass, signals, text2, parentContext) {
   ])).digest("hex");
 }
 function itemHasNonTextContent(item) {
-  if (item.content.kind !== "text" || item.deferredBytes || item.identity.parent || item.identity.providerFileId || !textOnlyMime(item.mimeType))
+  if (item.metadata.textComplete !== true || item.content.kind !== "text" || item.deferredBytes || item.identity.parent || item.identity.providerFileId || !textOnlyMime(item.mimeType))
     return true;
   return Object.entries(item.metadata).some(([key, value]) => /attachment|media|resource/i.test(key) && value !== undefined && value !== null && value !== false && value !== 0 && value !== "" && (!Array.isArray(value) || value.length > 0));
 }
@@ -19535,7 +19535,7 @@ function contentPass(args) {
     return { tier: metadata.tier, decidedBy: metadata.decidedBy, reasons: [...mark], pending: false };
   }
   let decided = { tier: metadata.tier, decidedBy: metadata.decidedBy, reasons: [] };
-  const rule = args.textOnly ? trivialContentRule(text2, args.parentContext) : undefined;
+  const rule = args.textOnly && !args.signals.title?.trim() ? trivialContentRule(text2, args.parentContext) : undefined;
   if (rule) {
     return {
       tier: maxTier(metadata.tier, "private"),
@@ -20167,7 +20167,8 @@ class TierSnifferStore {
   getFinalModelContentVerdict(key) {
     const row = this.db.query(`SELECT material_hash FROM sniffer_verdicts
       WHERE content_hash = ? AND model_id = ? AND prompt_version = ? AND map_revision = ? AND fail_safe = 0
-      ORDER BY CASE tier WHEN 'private' THEN 1 ELSE 0 END DESC, decided_at DESC LIMIT 1`).get(key.contentHash, key.modelId, key.promptVersion, key.mapRevision);
+        AND (tier = 'private' OR material_hash = ?)
+      ORDER BY CASE tier WHEN 'private' THEN 1 ELSE 0 END DESC, decided_at DESC LIMIT 1`).get(key.contentHash, key.modelId, key.promptVersion, key.mapRevision, key.materialHash ?? null);
     return row ? this.getVerdict({ ...key, materialHash: row.material_hash }) : undefined;
   }
   enqueue(question) {
@@ -20839,7 +20840,7 @@ class TierLedger {
       SELECT i.*, CASE WHEN
           i.routed = 1 AND i.content_read = 1
           AND i.metadata_forced = 0 AND i.content_tier != 'secrets'
-          AND i.decided_by IN ('default', 'sensitive_detector', 'sniffer', 'move', 'source_prior')
+          AND i.decided_by IN ('default', 'sensitive_detector', 'sniffer', 'move', 'source_prior', 'content_rule')
           -- A held row's stamp names the exact decision it re-read, so it
           -- never outlives that decision (rejudgeKeyForHeld).
           AND (i.rejudged_key IS NULL OR i.rejudged_key != CASE WHEN i.state = 'pending'
@@ -28148,6 +28149,7 @@ class CachedTierSniffer {
       let duplicate = cached2 !== undefined && request.contentHash !== undefined && (!request.subject || cached2.modelSubject !== snifferSubjectKey(request.subject));
       if (!cached2 && request.pass === "content" && request.contentHash && this.lane.snifferMode !== "pending") {
         cached2 = this.store.getFinalModelContentVerdict({
+          materialHash: request.materialHash ?? snifferMaterialHash(request.pass, material),
           contentHash: request.contentHash,
           modelId: snifferCacheModelId(this.lane),
           promptVersion: this.promptVersion,
@@ -56611,6 +56613,7 @@ function gmailMessageItem(record, account, fetchedAt = new Date().toISOString())
     mimeType: "message/rfc822",
     content: !metadataOnly && text2.trim() ? { kind: "text", text: text2 } : { kind: "metadata_only" },
     metadata: Object.freeze({
+      ...record.textComplete === true && !metadataOnly && attachments.length === 0 ? { textComplete: true } : {},
       title: subject,
       subject,
       from,
@@ -57801,6 +57804,7 @@ function gmailMailRecordFromMessage(message2, options = {}) {
 
 `),
     metadataOnly,
+    ...!metadataOnly && gmailTextComplete(message2.payload) ? { textComplete: true } : {},
     attachments: gmailAttachments(message2.id, message2.payload, false, children)
   };
 }
@@ -57876,6 +57880,13 @@ function gmailPartAt(part, partId) {
       return found;
   }
   return;
+}
+function gmailTextComplete(part) {
+  if (!part || part.filename?.trim() || part.body?.attachmentId || headersFromPart(part).get("content-disposition")?.split(";")[0]?.trim().toLowerCase() === "attachment")
+    return false;
+  if (part.mimeType === "text/plain")
+    return part.body?.data !== undefined && !part.parts?.length;
+  return !!part.mimeType?.startsWith("multipart/") && !!part.parts?.length && part.parts.every(gmailTextComplete);
 }
 function collectPartText(part, plain, html2, children = false) {
   if (!part)
@@ -76981,10 +76992,10 @@ function telegramClassificationSignals(item, fallbackTrust = "internal") {
     prior: trustDomainPrior(trust),
     ...redacted ? { floor: { tier: "secrets", basis: TELEGRAM_SECRET_REDACTED_FLOOR_BASIS } } : conversationKind === "secret_chat" ? { floor: { tier: "secure", basis: "provider:secret_chat" } } : {},
     conversationKind,
-    title: signalText(item.metadata, "title"),
+    ...item.identity.parent || item.metadata["recordKind"] ? { title: signalText(item.metadata, "title") } : {},
     sender: signalText(item.metadata, "senderDisplayName", "senderId"),
     folderKeys: item.identity.providerConversationId ? [item.identity.providerConversationId] : [],
-    labels: telegramContextNames(item)
+    labels: [...!item.identity.parent && signalText(item.metadata, "title") ? [signalText(item.metadata, "title")] : [], ...telegramContextNames(item)]
   });
 }
 function telegramContextNames(item) {
@@ -77758,6 +77769,7 @@ function telegramMessageItem(input) {
     ...optionalString7(input.message.sourceVersion) ? { sourceVersion: optionalString7(input.message.sourceVersion) } : {}
   };
   const metadata = {
+    ...input.message.textComplete === true && body !== undefined && !service && attachmentNames.length === 0 && (!Array.isArray(input.message.attachments) || input.message.attachments.length === 0) && input.message.secretRedacted !== true ? { textComplete: true } : {},
     title: chatTitle ?? `Telegram conversation ${sha2563(input.conversationId).slice(0, 12)}`,
     ...searchText ? { searchText } : {},
     sentAt: optionalTimestamp(input.message.sentAt, "sent timestamp"),
@@ -78528,6 +78540,7 @@ function messageOutcome(input, event, fetchedAt) {
       ...reply ? { replyToMessageId: reply } : {},
       ...forwarded ? { forwardSource: forwarded } : {},
       ...content.attachments.length > 0 ? { attachments: content.attachments } : {},
+      ...!service && !content.unsupported && content.mediaFiles === 0 && content.attachments.length === 0 ? { textComplete: true } : {},
       attachmentsNotIngested: content.mediaFiles,
       contentHash: sha2564(body)
     }),
@@ -78774,7 +78787,7 @@ function createTelegramArchiveConnector(input) {
       const conversationKind = chatType ? CHAT_TYPE_KINDS[chatType] : undefined;
       const conversation = item.identity.providerConversationId;
       return {
-        ...title ? { title } : {},
+        ...title ? item.metadata.accountSection ? { title } : { labels: [title] } : {},
         ...sender ? { sender } : {},
         ...conversationKind ? { conversationKind } : {},
         ...conversation ? { folderKeys: [conversation] } : {}
@@ -79097,6 +79110,7 @@ function telegramExportMessageRecord(context2, chat, value) {
     ...senderName ? { senderDisplayName: senderName } : {},
     ...senderId && context2.ownUserId ? { senderIsOwner: senderId === context2.ownUserId } : {},
     ...content && content.hasContent ? { boundedText: content.text } : {},
+    ...content && !content.unsupported && content.mediaFiles === 0 && content.attachments.length === 0 ? { textComplete: true } : {},
     ...service ? { service: serviceEvent2 } : {},
     ...replyTo ? { replyToMessageId: replyTo } : {},
     ...forwardedFrom ? { forwardSource: "telegram_forward", forwardFromName: forwardedFrom } : {},
@@ -81803,7 +81817,8 @@ function createWhatsAppLiveSourceConnector(options) {
 function whatsAppClassificationSignals(item) {
   return compactClassificationSignals({
     ...item.metadata["secretRedacted"] === true ? { floor: { tier: "secrets", basis: WHATSAPP_SECRET_REDACTED_FLOOR_BASIS } } : {},
-    title: signalText(item.metadata, "chat"),
+    title: signalText(item.metadata, "title"),
+    labels: [signalText(item.metadata, "chat")].filter((name) => Boolean(name)),
     sender: signalText(item.metadata, "sender"),
     folderKeys: item.identity.providerConversationId ? [item.identity.providerConversationId] : []
   });
@@ -82441,6 +82456,7 @@ function rawItemFromSpoolMessage(message2, account, fetchedAt, reactions) {
     mimeType: isMedia ? message2.mediaMime ?? "application/octet-stream" : TEXT_MIME_TYPE,
     content: isMedia || redacted || mediaIsChild && message2.text === "" ? { kind: "metadata_only" } : { kind: "text", text: text3 },
     metadata: Object.freeze({
+      ...message2.mediaType === undefined && !redacted ? { textComplete: true } : {},
       chat: status ? WHATSAPP_STATUS_CHAT_LABEL : message2.chatName || message2.chatJid,
       sender: senderName || message2.senderJid,
       senderId: message2.senderJid || undefined,
@@ -180864,6 +180880,7 @@ function createWhatsAppArchiveConnector(input) {
         ...authoredAt ? { authoredAt } : {},
         contentHash: textHash,
         attachmentCount: whatsAppMediaMarkerCount(raw.text),
+        ...whatsAppMediaMarkerCount(raw.text) === 0 ? { textComplete: true } : {},
         sourceFile: unit.file.relPath,
         ...unit.entry ? { sourceMember: unit.entry.name } : {},
         sourceFileIndex: unit.fileIndex,
@@ -181256,7 +181273,7 @@ function createWhatsAppArchiveConnector(input) {
       const chat = typeof item.metadata.chat === "string" && item.metadata.chat ? item.metadata.chat : undefined;
       const sender = typeof item.metadata.sender === "string" && item.metadata.sender ? item.metadata.sender : undefined;
       return {
-        ...chat ? { title: chat } : {},
+        ...chat ? { labels: [chat] } : {},
         ...sender ? { sender } : {}
       };
     }

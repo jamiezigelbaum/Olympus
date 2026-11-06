@@ -77,6 +77,18 @@ print(json.dumps([norm(Msg(1, MessageActionPhoneCall())), norm(Msg(2, MessageAct
     expect(out[3]).not.toHaveProperty('service');
   });
 
+  pythonTest('text completeness is decided before unsupported media and actions are dropped', async () => {
+    const out = await python(`${STUBS}
+plain = Msg(1, text="+")
+media = Msg(2, text="+")
+media.media = object()
+print(json.dumps([norm(plain), norm(media), norm(Msg(3, MessageActionSuggestedPostApproval(), text="+"))]))
+`);
+    expect(out[0].textComplete).toBe(true);
+    expect(out[1]).not.toHaveProperty('textComplete');
+    expect(out[2]).not.toHaveProperty('textComplete');
+  });
+
   pythonTest('a forward names where it came from when Telethon holds it, else keeps the bare flag', async () => {
     const out = await python(`${STUBS}
 print(json.dumps([norm(Msg(1, forward=Forward(from_name="Hidden Name"), text="a")), norm(Msg(2, forward=Forward(sender=User()), text="b")), norm(Msg(3, forward=Forward(), text="c"))]))

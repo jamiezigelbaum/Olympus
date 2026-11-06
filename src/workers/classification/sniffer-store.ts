@@ -172,11 +172,14 @@ export class TierSnifferStore {
       .run(contentHash, key.materialHash, key.modelId, key.promptVersion, key.mapRevision);
   }
 
-  getFinalModelContentVerdict(key: Omit<SnifferVerdictKey, 'materialHash'> & { contentHash: string }): StoredSnifferVerdict | undefined {
+  // Private can only raise across names. Personal requires the complete same
+  // input (including names); missing identity never authorizes a lowering.
+  getFinalModelContentVerdict(key: Omit<SnifferVerdictKey, 'materialHash'> & { contentHash: string; materialHash?: string }): StoredSnifferVerdict | undefined {
     const row = this.db.query(`SELECT material_hash FROM sniffer_verdicts
       WHERE content_hash = ? AND model_id = ? AND prompt_version = ? AND map_revision = ? AND fail_safe = 0
+        AND (tier = 'private' OR material_hash = ?)
       ORDER BY CASE tier WHEN 'private' THEN 1 ELSE 0 END DESC, decided_at DESC LIMIT 1`)
-      .get(key.contentHash, key.modelId, key.promptVersion, key.mapRevision) as { material_hash: string } | null;
+      .get(key.contentHash, key.modelId, key.promptVersion, key.mapRevision, key.materialHash ?? null) as { material_hash: string } | null;
     return row ? this.getVerdict({ ...key, materialHash: row.material_hash }) : undefined;
   }
 

@@ -1344,6 +1344,7 @@ export function gmailMailRecordFromMessage(
     ...(message.snippet && !metadataOnly ? { snippet: message.snippet } : {}),
     body: plain.length > 0 ? plain.join('\n\n') : html.map(stripHtml).join('\n\n'),
     metadataOnly,
+    ...(!metadataOnly && gmailTextComplete(message.payload) ? { textComplete: true } : {}),
     attachments: gmailAttachments(message.id, message.payload, false, children),
   };
 }
@@ -1441,6 +1442,15 @@ function gmailPartAt(part: GmailMessagePart | undefined, partId: string): GmailM
     if (found) return found;
   }
   return undefined;
+}
+
+// Only plain text is attested: HTML can contain images or unsupported parts
+// that stripping tags drops. Missing MIME/body data is never proof.
+function gmailTextComplete(part: GmailMessagePart | undefined): boolean {
+  if (!part || part.filename?.trim() || part.body?.attachmentId
+    || headersFromPart(part).get('content-disposition')?.split(';')[0]?.trim().toLowerCase() === 'attachment') return false;
+  if (part.mimeType === 'text/plain') return part.body?.data !== undefined && !(part.parts?.length);
+  return !!part.mimeType?.startsWith('multipart/') && !!part.parts?.length && part.parts.every(gmailTextComplete);
 }
 
 function collectPartText(part: GmailMessagePart | undefined, plain: string[], html: string[], children = false): void {

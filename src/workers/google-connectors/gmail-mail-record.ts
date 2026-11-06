@@ -70,6 +70,8 @@ export interface GmailMailRecord {
   body: string;
   /** Kept by name only: no body, no snippet, no children. */
   metadataOnly: boolean;
+  /** Input verified that no MIME content was dropped. Absent is unproven. */
+  textComplete?: boolean;
   attachments: readonly GmailMailAttachment[];
   /** The version the item carries: live, Gmail's history id; an import, its content digest. */
   sourceVersion?: string;
@@ -235,6 +237,7 @@ export function gmailMessageItem(record: GmailMailRecord, account: string, fetch
     mimeType: 'message/rfc822',
     content: !metadataOnly && text.trim() ? { kind: 'text', text } : { kind: 'metadata_only' },
     metadata: Object.freeze({
+      ...(record.textComplete === true && !metadataOnly && attachments.length === 0 ? { textComplete: true } : {}),
       title: subject,
       subject,
       from,

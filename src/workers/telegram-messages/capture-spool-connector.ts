@@ -858,6 +858,10 @@ export function telegramMessageItem(input: {
     ...(optionalString(input.message.sourceVersion) ? { sourceVersion: optionalString(input.message.sourceVersion)! } : {}),
   };
   const metadata = {
+    // Older captures did not attest completeness; absence stays unproven.
+    ...(input.message.textComplete === true && body !== undefined && !service
+      && attachmentNames.length === 0 && (!Array.isArray(input.message.attachments) || input.message.attachments.length === 0)
+      && input.message.secretRedacted !== true ? { textComplete: true } : {}),
     title: chatTitle ?? `Telegram conversation ${sha256(input.conversationId).slice(0, 12)}`,
     ...(searchText ? { searchText } : {}),
     sentAt: optionalTimestamp(input.message.sentAt, 'sent timestamp'),

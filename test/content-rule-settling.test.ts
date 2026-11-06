@@ -87,10 +87,12 @@ test('absent text means extraction is still owed; parent context prevents trivia
 
 test('shared raw-item capability check excludes attachments, media, files, bytes and deferred extraction', () => {
   const raw: RawItem = { identity: { ...subject('raw'), family: 'chat', localItemId: 'raw' },
-    mimeType: 'text/plain', content: { kind: 'text', text: 'ok' }, metadata: {}, fetchedAt: '2026-11-06T00:00:00Z' };
+    mimeType: 'text/plain', content: { kind: 'text', text: 'ok' }, metadata: { textComplete: true }, fetchedAt: '2026-11-06T00:00:00Z' };
   expect(itemHasNonTextContent(raw)).toBe(false);
+  expect(itemHasNonTextContent({ ...raw, metadata: {} })).toBe(true);
+  expect(itemHasNonTextContent({ ...raw, metadata: { textComplete: false } })).toBe(true);
   for (const metadata of [{ attachments: ['photo'] }, { mediaType: 'photo' }, { attachmentCount: 1 }, { resources: [{}] }]) {
-    expect(itemHasNonTextContent({ ...raw, metadata })).toBe(true);
+    expect(itemHasNonTextContent({ ...raw, metadata: { textComplete: true, ...metadata } })).toBe(true);
   }
   expect(itemHasNonTextContent({ ...raw, identity: { ...raw.identity, family: 'file', providerFileId: 'file-id' } })).toBe(true);
   expect(itemHasNonTextContent({ ...raw, content: { kind: 'metadata_only' } })).toBe(true);
@@ -117,7 +119,7 @@ test('duplicate reuse requires a final model verdict, same judge/prompt/map; pro
     expect(report.calls).toBe(0);
     expect(ledger.getCurrent(subject('first'))?.contentPending).toBe(false);
     expect(store.getFinalModelContentVerdict({ ...key, contentHash: hash })).toBeDefined();
-    const duplicate = classifyItemTiers({ ...input('duplicate'), text: `  ${text}\r\n` }, { sniffer });
+    const duplicate = classifyItemTiers({ ...input('duplicate'), signals: { title: 'first' } }, { sniffer });
     expect(duplicate.contentPending).toBe(false);
     expect(duplicate.reasons.some(r => r.includes('rule:duplicate_model'))).toBe(true);
     expect(classifyItemTiers(input('changed-judge'), { sniffer: new CachedTierSniffer(store, { ...lane, modelId: 'other' }) }).contentPending).toBe(true);
@@ -222,4 +224,68 @@ test('a model donor becomes reusable only after its routed move finishes', async
     expect(store.getFinalModelContentVerdict(key)).toBeDefined();
     expect(store.questionFor(identity, 'content')).toBeUndefined();
   } finally { ledger.close(); store.close(); }
+});
+
+for (const tier of ['personal', 'private'] as const) {
+  test(`final ${tier} duplicate reuse respects names in classifier and queued resolver`, async () => {
+    const store = new TierSnifferStore({ dbPath: ':memory:' });
+    const ledger = new TierLedger({ dbPath: ':memory:' });
+    const text = 'Positive';
+    const donorTitle = tier === 'private' ? 'My HIV test result' : 'Movie review';
+    const receiverTitle = tier === 'private' ? 'Movie review' : 'My HIV test result';
+    const donorSignals = { title: donorTitle };
+    const key = { materialHash: tierSnifferInputHash('content', donorSignals, text),
+      modelId: snifferCacheModelId(lane), promptVersion: SNIFFER_PROMPT_VERSION, mapRevision: 'none' };
+    const sniffer = new CachedTierSniffer(store, lane);
+    try {
+      const input = (id: string, title: string) => ({ signals: { title }, text, subject: subject(id) });
+      // Queue before the donor becomes final: the worker must enforce the same direction.
+      ledger.recordDecision(subject('queued'), classifyItemTiers(input('queued', receiverTitle), { sniffer }));
+      store.putVerdict(key, { tier, category: tier === 'private' ? 'other' : 'ordinary', confidence: 0.99, failSafe: false }, subject('donor'));
+      store.markFinalModelContent(key, normalizedContentHash(text));
+      const changed = classifyItemTiers(input('changed', receiverTitle), { sniffer });
+      expect(changed.contentPending).toBe(tier === 'personal');
+      if (tier === 'private') expect(changed.contentTier).toBe('secure');
+      const same = classifyItemTiers(input('same', donorTitle), { sniffer });
+      expect(same.contentPending).toBe(false);
+      let calls = 0;
+      const report = await runSnifferPass({ targets: [{ ledger, sniffer: store }], lane, concurrentCalls: 1,
+        model: { async complete() { calls++; return { modelId: lane.modelId, text: JSON.stringify({ verdicts: [
+          { i: 1, tier: 'private', category: 'health', ownRecord: true, privateKind: 'health', confidence: 0.99 },
+        ] }) }; } } });
+      expect(calls).toBe(tier === 'personal' ? 1 : 0);
+      expect(report.cacheHits).toBe(tier === 'private' ? 1 : 0);
+      expect(ledger.getCurrent(subject('queued'))?.contentTier).toBe('secure');
+    } finally { ledger.close(); store.close(); }
+  });
+}
+
+for (const title of ['My HIV test result', 'blood-test.pdf']) {
+  for (const text of ['', '+', 'ok', '😀']) {
+    test(`own title ${title} prevents trivial settling of ${JSON.stringify(text)}`, () => {
+      const { requests, sniffer } = spy();
+      const decision = classifyItemTiers({ signals: { title }, text }, { sniffer });
+      expect(decision.contentPending).toBe(true);
+      expect(decision.reasons.some(r => r.startsWith('content:rule:'))).toBe(false);
+      expect(requests.some(r => r.pass === 'content')).toBe(true);
+    });
+  }
+}
+
+test('sender and chat context do not prevent a complete trivial message rule', () => {
+  expect(classifyItemTiers({ signals: { sender: 'Alex', labels: ['Chat name'] }, text: '+' })
+    .decidedBy).toBe('content_rule');
+});
+
+test('content-rule decisions are candidates after classifier or sniffer identity changes', () => {
+  const ledger = new TierLedger({ dbPath: ':memory:' });
+  try {
+    const identity = subject('rule');
+    const decision = classifyItemTiers({ signals: {}, text: 'ok' });
+    ledger.recordRoutedPlacement(identity, decision, {
+      copies: [{ corpusId: 'fixture', trustDomain: 'internal', layers: 'both' }], embedHold: false,
+    });
+    expect(ledger.rejudgeCandidatePage({ engineVersion: 'newer' }).records).toHaveLength(1);
+    expect(ledger.rejudgeCandidatePage({ engineVersion: decision.engineVersion, snifferId: 'newer-sniffer' }).records).toHaveLength(1);
+  } finally { ledger.close(); }
 });

@@ -1256,6 +1256,10 @@ def normalize_message(
     text = getattr(message, "raw_text", None)
     if isinstance(text, str) and text.strip():
         item["boundedText"] = text.strip()
+    # raw_text is uncut; any media (including unsupported media) or service
+    # action prevents a text-only attestation before normalization drops it.
+    if isinstance(text, str) and getattr(message, "media", None) is None and getattr(message, "action", None) is None:
+        item["textComplete"] = True
     reply_to = getattr(message, "reply_to_msg_id", None)
     if reply_to is not None:
         item["replyToMessageId"] = str(reply_to)

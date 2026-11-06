@@ -9615,7 +9615,7 @@ function tierSnifferInputHash(pass, signals, text2, parentContext) {
   ])).digest("hex");
 }
 function itemHasNonTextContent(item) {
-  if (item.content.kind !== "text" || item.deferredBytes || item.identity.parent || item.identity.providerFileId || !textOnlyMime(item.mimeType))
+  if (item.metadata.textComplete !== true || item.content.kind !== "text" || item.deferredBytes || item.identity.parent || item.identity.providerFileId || !textOnlyMime(item.mimeType))
     return true;
   return Object.entries(item.metadata).some(([key, value]) => /attachment|media|resource/i.test(key) && value !== undefined && value !== null && value !== false && value !== 0 && value !== "" && (!Array.isArray(value) || value.length > 0));
 }
@@ -9965,7 +9965,7 @@ function contentPass(args) {
     return { tier: metadata.tier, decidedBy: metadata.decidedBy, reasons: [...mark], pending: false };
   }
   let decided = { tier: metadata.tier, decidedBy: metadata.decidedBy, reasons: [] };
-  const rule = args.textOnly ? trivialContentRule(text2, args.parentContext) : undefined;
+  const rule = args.textOnly && !args.signals.title?.trim() ? trivialContentRule(text2, args.parentContext) : undefined;
   if (rule) {
     return {
       tier: maxTier(metadata.tier, "private"),
@@ -10306,7 +10306,8 @@ class TierSnifferStore {
   getFinalModelContentVerdict(key) {
     const row = this.db.query(`SELECT material_hash FROM sniffer_verdicts
       WHERE content_hash = ? AND model_id = ? AND prompt_version = ? AND map_revision = ? AND fail_safe = 0
-      ORDER BY CASE tier WHEN 'private' THEN 1 ELSE 0 END DESC, decided_at DESC LIMIT 1`).get(key.contentHash, key.modelId, key.promptVersion, key.mapRevision);
+        AND (tier = 'private' OR material_hash = ?)
+      ORDER BY CASE tier WHEN 'private' THEN 1 ELSE 0 END DESC, decided_at DESC LIMIT 1`).get(key.contentHash, key.modelId, key.promptVersion, key.mapRevision, key.materialHash ?? null);
     return row ? this.getVerdict({ ...key, materialHash: row.material_hash }) : undefined;
   }
   enqueue(question) {
@@ -10830,6 +10831,7 @@ class CachedTierSniffer {
       let duplicate = cached !== undefined && request.contentHash !== undefined && (!request.subject || cached.modelSubject !== snifferSubjectKey(request.subject));
       if (!cached && request.pass === "content" && request.contentHash && this.lane.snifferMode !== "pending") {
         cached = this.store.getFinalModelContentVerdict({
+          materialHash: request.materialHash ?? snifferMaterialHash(request.pass, material),
           contentHash: request.contentHash,
           modelId: snifferCacheModelId(this.lane),
           promptVersion: this.promptVersion,
@@ -14783,6 +14785,7 @@ function gmailMessageItem(record, account, fetchedAt = new Date().toISOString())
     mimeType: "message/rfc822",
     content: !metadataOnly && text2.trim() ? { kind: "text", text: text2 } : { kind: "metadata_only" },
     metadata: Object.freeze({
+      ...record.textComplete === true && !metadataOnly && attachments.length === 0 ? { textComplete: true } : {},
       title: subject,
       subject,
       from,
@@ -15550,6 +15553,7 @@ function gmailMailRecordFromMessage(message2, options = {}) {
 
 `),
     metadataOnly,
+    ...!metadataOnly && gmailTextComplete(message2.payload) ? { textComplete: true } : {},
     attachments: gmailAttachments(message2.id, message2.payload, false, children)
   };
 }
@@ -15622,6 +15626,13 @@ function gmailPartAt(part, partId) {
       return found;
   }
   return;
+}
+function gmailTextComplete(part) {
+  if (!part || part.filename?.trim() || part.body?.attachmentId || headersFromPart(part).get("content-disposition")?.split(";")[0]?.trim().toLowerCase() === "attachment")
+    return false;
+  if (part.mimeType === "text/plain")
+    return part.body?.data !== undefined && !part.parts?.length;
+  return !!part.mimeType?.startsWith("multipart/") && !!part.parts?.length && part.parts.every(gmailTextComplete);
 }
 function collectPartText(part, plain, html, children = false) {
   if (!part)
@@ -16984,7 +16995,7 @@ class TierLedger {
       SELECT i.*, CASE WHEN
           i.routed = 1 AND i.content_read = 1
           AND i.metadata_forced = 0 AND i.content_tier != 'secrets'
-          AND i.decided_by IN ('default', 'sensitive_detector', 'sniffer', 'move', 'source_prior')
+          AND i.decided_by IN ('default', 'sensitive_detector', 'sniffer', 'move', 'source_prior', 'content_rule')
           -- A held row's stamp names the exact decision it re-read, so it
           -- never outlives that decision (rejudgeKeyForHeld).
           AND (i.rejudged_key IS NULL OR i.rejudged_key != CASE WHEN i.state = 'pending'
