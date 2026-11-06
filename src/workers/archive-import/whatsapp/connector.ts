@@ -389,6 +389,7 @@ export function createWhatsAppArchiveConnector(input: ArchiveConnectorInput): So
         senderLabel: sender,
         ...(authoredAt ? { authoredAt } : {}),
         contentHash: textHash,
+        titleIsConversation: true,
         attachmentCount: whatsAppMediaMarkerCount(raw.text),
         ...(whatsAppMediaMarkerCount(raw.text) === 0 ? { textComplete: true } : {}),
         // The export this copy of the message was read from.
@@ -817,7 +818,7 @@ export function createWhatsAppArchiveConnector(input: ArchiveConnectorInput): So
       const chat = typeof item.metadata.chat === 'string' && item.metadata.chat ? item.metadata.chat : undefined;
       const sender = typeof item.metadata.sender === 'string' && item.metadata.sender ? item.metadata.sender : undefined;
       return {
-        ...(chat ? { labels: [chat] } : {}),
+        ...(chat ? { title: chat } : {}),
         ...(sender ? { sender } : {}),
       };
     },

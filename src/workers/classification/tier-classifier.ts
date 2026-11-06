@@ -400,6 +400,8 @@ export interface TierClassificationInput {
   mimeType?: string;
   /** True when a file, attachment, media or deferred content remains behind this text. */
   hasNonTextContent?: boolean;
+  /** Connector fact: the title names the conversation, not the item. Rule eligibility only. */
+  titleIsConversation?: boolean;
   /** An existing per-item Secret hold, read from the authoritative ledger. */
   heldSecret?: boolean;
   /** The photo judge's verdict on a still image's picture (media-judge.ts). Absent: unjudged. */
@@ -627,6 +629,7 @@ function classifyItemTiersWithPublic(
     signals,
     text,
     textOnly: input.hasNonTextContent !== true && textOnlyMime(input.mimeType),
+    titleIsConversation: input.titleIsConversation === true,
     ...(input.heldSecret ? { heldSecret: true } : {}),
     ...(input.namesOnly ? { namesOnly: true } : {}),
     ...(holdUntilJudged ? { holdUntilJudged: true } : {}),
@@ -692,6 +695,8 @@ export interface ContentTierInput {
   mimeType?: string;
   /** True when a file, attachment, media or deferred content remains behind this text. */
   hasNonTextContent?: boolean;
+  /** Connector fact: the title names the conversation, not the item. Rule eligibility only. */
+  titleIsConversation?: boolean;
   /** An existing per-item Secret hold, read from the authoritative ledger. */
   heldSecret?: boolean;
   /** The photo judge's verdict on a still image's picture. Absent: unjudged. */
@@ -748,6 +753,7 @@ export function classifyContentTier(
     },
     text,
     textOnly: input.hasNonTextContent !== true && textOnlyMime(input.mimeType),
+    titleIsConversation: input.titleIsConversation === true,
     ...(input.heldSecret ? { heldSecret: true } : {}),
     ...(holdUntilJudged ? { holdUntilJudged: true } : {}),
     ...(isImageMediaType(input.mimeType) ? { image: true } : {}),
@@ -981,6 +987,7 @@ function contentPass(args: {
   signals: SourceClassificationSignals;
   text: string | undefined;
   textOnly: boolean;
+  titleIsConversation?: boolean;
   heldSecret?: boolean;
   /** The owner keeps the content unread (TierClassificationInput.namesOnly). */
   namesOnly?: boolean;
@@ -1071,13 +1078,13 @@ function contentPass(args: {
 
   // Only complete own text may settle by content rule. Names have already
   // run independently and their tier remains the floor.
-  const rule = args.textOnly && !args.signals.title?.trim()
+  const rule = args.textOnly && (args.titleIsConversation === true || !args.signals.title?.trim())
     ? trivialContentRule(text, args.parentContext) : undefined;
   if (rule) {
     return {
       tier: maxTier(metadata.tier, 'private'),
       decidedBy: tierRank(metadata.tier) > tierRank('private') ? metadata.decidedBy : 'content_rule',
-      reasons: [`content:rule:${rule}`, ...mark],
+      reasons: [`content:rule:${rule}`, `content:rule_sniffer:${args.sniffer.id}`, ...mark],
       pending: false,
     };
   }

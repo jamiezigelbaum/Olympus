@@ -2899,6 +2899,7 @@ export class LocalConnectorStore {
           ...(path ? { path } : {}),
           mimeType: item.mimeType,
           hasNonTextContent: itemHasNonTextContent(item),
+          titleIsConversation: item.metadata.titleIsConversation === true,
           ...(read?.secret ? { heldSecret: true } : {}),
           // The lane's hold, or the one its listing-time decision recorded.
           ...(inputs?.holdContentUntilJudged === true || heldUntilJudged(existing.reasons) ? { holdUntilJudged: true } : {}),

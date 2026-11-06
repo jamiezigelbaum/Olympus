@@ -858,6 +858,7 @@ export function telegramMessageItem(input: {
     ...(optionalString(input.message.sourceVersion) ? { sourceVersion: optionalString(input.message.sourceVersion)! } : {}),
   };
   const metadata = {
+    titleIsConversation: true,
     // Older captures did not attest completeness; absence stays unproven.
     ...(input.message.textComplete === true && body !== undefined && !service
       && attachmentNames.length === 0 && (!Array.isArray(input.message.attachments) || input.message.attachments.length === 0)

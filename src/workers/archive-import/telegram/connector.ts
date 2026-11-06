@@ -314,6 +314,7 @@ function messageOutcome(
       ...(reply ? { replyToMessageId: reply } : {}),
       ...(forwarded ? { forwardSource: forwarded } : {}),
       ...(content.attachments.length > 0 ? { attachments: content.attachments } : {}),
+      titleIsConversation: true,
       ...(!service && !content.unsupported && content.mediaFiles === 0 && content.attachments.length === 0
         ? { textComplete: true } : {}),
       attachmentsNotIngested: content.mediaFiles,
@@ -609,7 +610,7 @@ export function createTelegramArchiveConnector(input: ArchiveConnectorInput): So
       const conversationKind = chatType ? CHAT_TYPE_KINDS[chatType] : undefined;
       const conversation = item.identity.providerConversationId;
       return {
-        ...(title ? (item.metadata.accountSection ? { title } : { labels: [title] }) : {}),
+        ...(title ? { title } : {}),
         ...(sender ? { sender } : {}),
         ...(conversationKind ? { conversationKind } : {}),
         ...(conversation ? { folderKeys: [conversation] } : {}),

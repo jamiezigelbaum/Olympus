@@ -87,14 +87,11 @@ export function telegramClassificationSignals(
         ? { floor: { tier: 'secure' as const, basis: 'provider:secret_chat' } }
         : {}),
     conversationKind,
-    // Message titles are chat context; a child file's title belongs to the item.
-    ...(item.identity.parent || item.metadata['recordKind']
-      ? { title: signalText(item.metadata, 'title') } : {}),
+    title: signalText(item.metadata, 'title'),
     sender: signalText(item.metadata, 'senderDisplayName', 'senderId'),
     folderKeys: item.identity.providerConversationId ? [item.identity.providerConversationId] : [],
     // Every name the item adds to its search context beside the chat and the sender is judged with them.
-    labels: [...(!item.identity.parent && signalText(item.metadata, 'title')
-      ? [signalText(item.metadata, 'title')!] : []), ...telegramContextNames(item)],
+    labels: telegramContextNames(item),
   });
 }
 

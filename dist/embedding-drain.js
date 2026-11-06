@@ -9707,6 +9707,7 @@ function classifyItemTiersWithPublic(input, options) {
     signals,
     text: text2,
     textOnly: input.hasNonTextContent !== true && textOnlyMime(input.mimeType),
+    titleIsConversation: input.titleIsConversation === true,
     ...input.heldSecret ? { heldSecret: true } : {},
     ...input.namesOnly ? { namesOnly: true } : {},
     ...holdUntilJudged ? { holdUntilJudged: true } : {},
@@ -9772,6 +9773,7 @@ function classifyContentTier(input, options = {}) {
     },
     text: text2,
     textOnly: input.hasNonTextContent !== true && textOnlyMime(input.mimeType),
+    titleIsConversation: input.titleIsConversation === true,
     ...input.heldSecret ? { heldSecret: true } : {},
     ...holdUntilJudged ? { holdUntilJudged: true } : {},
     ...isImageMediaType(input.mimeType) ? { image: true } : {},
@@ -9965,12 +9967,12 @@ function contentPass(args) {
     return { tier: metadata.tier, decidedBy: metadata.decidedBy, reasons: [...mark], pending: false };
   }
   let decided = { tier: metadata.tier, decidedBy: metadata.decidedBy, reasons: [] };
-  const rule = args.textOnly && !args.signals.title?.trim() ? trivialContentRule(text2, args.parentContext) : undefined;
+  const rule = args.textOnly && (args.titleIsConversation === true || !args.signals.title?.trim()) ? trivialContentRule(text2, args.parentContext) : undefined;
   if (rule) {
     return {
       tier: maxTier(metadata.tier, "private"),
       decidedBy: tierRank(metadata.tier) > tierRank("private") ? metadata.decidedBy : "content_rule",
-      reasons: [`content:rule:${rule}`, ...mark],
+      reasons: [`content:rule:${rule}`, `content:rule_sniffer:${args.sniffer.id}`, ...mark],
       pending: false
     };
   }
@@ -17019,6 +17021,10 @@ class TierLedger {
             WHERE o.provider = i.provider AND o.account_scope = i.account_scope
               AND o.conversation_key = i.conversation_key AND o.provider_item_id = i.provider_item_id
           )
+          -- A rule needs an actual identity change, never an absent model marker.
+          AND (i.decided_by != 'content_rule' OR i.engine_version != ?
+            OR (instr(i.reasons_json, '"content:rule_sniffer:') > 0
+              AND ? IS NOT NULL AND instr(i.reasons_json, ?) = 0))
           AND (
             i.state = 'pending'
             -- Rests on a retired whole-source prior (RETIRED_SOURCE_PRIOR_REASON):
@@ -17031,6 +17037,8 @@ class TierLedger {
             OR (instr(i.reasons_json, ':fail_safe:missing_question"') > 0
               AND EXISTS (SELECT 1 FROM json_each(i.reasons_json) r
                 WHERE r.value GLOB 'content:sniffer:*:fail_safe:missing_question'))
+            OR (i.decided_by = 'content_rule' AND ? IS NOT NULL
+              AND instr(i.reasons_json, ?) = 0)
             OR i.engine_version != ?
             OR (? IS NOT NULL AND instr(i.reasons_json, '"metadata:sniffer:') > 0 AND instr(i.reasons_json, ?) = 0)
             OR (? IS NOT NULL AND instr(i.reasons_json, ?) = 0
@@ -17040,7 +17048,7 @@ class TierLedger {
         THEN 1 ELSE 0 END AS rejudge_candidate
       FROM win i
       ORDER BY i.provider, i.account_scope, i.conversation_key, i.provider_item_id
-    `).all(after ? 1 : null, ...after ?? [null, null, null, null], scanLimit, key, key, options.engineVersion, metadataMarker, metadataMarker ?? "", snifferMarker, snifferMarker ?? "");
+    `).all(after ? 1 : null, ...after ?? [null, null, null, null], scanLimit, key, key, options.engineVersion, options.snifferId ?? null, JSON.stringify(`content:rule_sniffer:${options.snifferId}`), options.snifferId ?? null, JSON.stringify(`content:rule_sniffer:${options.snifferId}`), options.engineVersion, metadataMarker, metadataMarker ?? "", snifferMarker, snifferMarker ?? "");
     const records = [];
     let last;
     for (const row of rows) {
@@ -21492,6 +21500,7 @@ function decideItemTiers(connector, item, text2, options, ledger, extra = {}) {
     ...parentContext ? { parentContext } : {},
     mimeType: item.mimeType,
     hasNonTextContent: itemHasNonTextContent(item),
+    titleIsConversation: item.metadata.titleIsConversation === true,
     ...read?.secret ? { heldSecret: true } : {},
     subject: item.identity
   }, {
@@ -25703,6 +25712,7 @@ var init_local_index = __esm(() => {
           ...path ? { path } : {},
           mimeType: item.mimeType,
           hasNonTextContent: itemHasNonTextContent(item),
+          titleIsConversation: item.metadata.titleIsConversation === true,
           ...read?.secret ? { heldSecret: true } : {},
           ...inputs?.holdContentUntilJudged === true || heldUntilJudged(existing.reasons) ? { holdUntilJudged: true } : {},
           subject: item.identity

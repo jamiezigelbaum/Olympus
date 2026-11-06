@@ -656,7 +656,7 @@ describe('whatsapp connector over text files', () => {
     put(dir, '_chat.txt', chatText(syntheticChat(1), { style: 'ios-24-dmy' }));
     const { connector } = connectorFor(dir, ['_chat.txt']);
     const { items } = await listAll(connector);
-    expect(connector.classificationSignals(items[0]!)).toEqual({ labels: ['WhatsApp chat'], sender: 'Sam Example' });
+    expect(connector.classificationSignals(items[0]!)).toEqual({ title: 'WhatsApp chat', sender: 'Sam Example' });
     await expect(connector.fetchItem('x')).rejects.toThrow();
   });
 });

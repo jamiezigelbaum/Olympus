@@ -229,6 +229,7 @@ export function decideItemTiers(
       ...(parentContext ? { parentContext } : {}),
       mimeType: item.mimeType,
       hasNonTextContent: itemHasNonTextContent(item),
+      titleIsConversation: item.metadata.titleIsConversation === true,
       ...(read?.secret ? { heldSecret: true } : {}),
       subject: item.identity,
     },

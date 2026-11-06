@@ -281,11 +281,43 @@ test('content-rule decisions are candidates after classifier or sniffer identity
   const ledger = new TierLedger({ dbPath: ':memory:' });
   try {
     const identity = subject('rule');
-    const decision = classifyItemTiers({ signals: {}, text: 'ok' });
+    const decision = classifyItemTiers({ signals: {}, text: 'ok' }, { sniffer: spy().sniffer });
     ledger.recordRoutedPlacement(identity, decision, {
       copies: [{ corpusId: 'fixture', trustDomain: 'internal', layers: 'both' }], embedHold: false,
     });
+    expect(ledger.rejudgeCandidatePage({ engineVersion: decision.engineVersion, snifferId: 'fixture' }).records).toHaveLength(0);
+    expect(ledger.rejudgeCandidatePage({ engineVersion: decision.engineVersion }).records).toHaveLength(0);
     expect(ledger.rejudgeCandidatePage({ engineVersion: 'newer' }).records).toHaveLength(1);
     expect(ledger.rejudgeCandidatePage({ engineVersion: decision.engineVersion, snifferId: 'newer-sniffer' }).records).toHaveLength(1);
+  } finally { ledger.close(); }
+});
+
+
+test('conversation title fact affects only rule eligibility; its loss safely asks the model', () => {
+  const signals = { title: 'Chat', sender: 'Alex' };
+  const { requests, sniffer } = spy();
+  const input = { signals, text: 'ok' };
+  const marked = classifyItemTiers({ ...input, titleIsConversation: true }, { sniffer });
+  expect(marked.decidedBy).toBe('content_rule');
+  expect(requests).toHaveLength(0);
+  const unmarked = classifyItemTiers(input, { sniffer });
+  expect(unmarked.contentPending).toBe(true);
+  expect(requests.map(r => r.pass)).toEqual(['content']);
+  expect(marked.reasons.find(r => r.startsWith('content:names:')))
+    .toBe(unmarked.reasons.find(r => r.startsWith('content:names:')));
+  expect(marked.reasons.some(r => /conversation/i.test(r))).toBe(false);
+});
+
+
+test('a legacy content rule without an identity receipt is not rejudged for a missing sniffer marker', () => {
+  const ledger = new TierLedger({ dbPath: ':memory:' });
+  try {
+    const decision = classifyItemTiers({ signals: {}, text: 'ok' });
+    decision.reasons = decision.reasons.filter(r => !r.startsWith('content:rule_sniffer:'));
+    ledger.recordRoutedPlacement(subject('legacy-rule'), decision, {
+      copies: [{ corpusId: 'fixture', trustDomain: 'internal', layers: 'both' }], embedHold: false,
+    });
+    expect(ledger.rejudgeCandidatePage({ engineVersion: decision.engineVersion, snifferId: 'fixture' }).records).toHaveLength(0);
+    expect(ledger.rejudgeCandidatePage({ engineVersion: 'newer', snifferId: 'fixture' }).records).toHaveLength(1);
   } finally { ledger.close(); }
 });

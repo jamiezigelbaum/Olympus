@@ -404,8 +404,7 @@ export function whatsAppClassificationSignals(item: RawItem): SourceClassificati
     ...(item.metadata['secretRedacted'] === true
       ? { floor: { tier: 'secrets' as const, basis: WHATSAPP_SECRET_REDACTED_FLOOR_BASIS } }
       : {}),
-    title: signalText(item.metadata, 'title'),
-    labels: [signalText(item.metadata, 'chat')].filter((name): name is string => Boolean(name)),
+    title: signalText(item.metadata, 'chat'),
     sender: signalText(item.metadata, 'sender'),
     folderKeys: item.identity.providerConversationId ? [item.identity.providerConversationId] : [],
   });
@@ -1324,6 +1323,7 @@ function rawItemFromSpoolMessage(
     mimeType: isMedia ? (message.mediaMime ?? 'application/octet-stream') : TEXT_MIME_TYPE,
     content: isMedia || redacted || (mediaIsChild && message.text === '') ? { kind: 'metadata_only' } : { kind: 'text', text },
     metadata: Object.freeze({
+      titleIsConversation: true,
       ...(message.mediaType === undefined && !redacted ? { textComplete: true } : {}),
       chat: status ? WHATSAPP_STATUS_CHAT_LABEL : message.chatName || message.chatJid,
       sender: senderName || message.senderJid,

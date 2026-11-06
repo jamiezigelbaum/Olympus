@@ -765,14 +765,14 @@ describe('telegram connector: items', () => {
     expect(items.map((item) => item.metadata.title)).toEqual(['Saved Messages', 'Unnamed Telegram chat 2', 'Unnamed Telegram chat 3']);
   });
 
-  test('the connector separates chat context from item titles and publishes sender and kind, and nothing else of the text', async () => {
+  test('the connector hands the classifier the title, sender and kind of chat, and nothing else of the text', async () => {
     const file = exportFile(TEXT);
     const { connector } = connectorFor(file.dir, file.name);
     const { items } = await listAll(connector);
     const signals = items.map((item) => connector.classificationSignals!(item));
-    expect(signals[0]).toEqual({ labels: ['Alex Example'], sender: 'Alex Example', conversationKind: 'direct', folderKeys: ['chats:0'] });
-    expect(signals[2]).toMatchObject({ labels: ['Synthetic Harbour Group'], conversationKind: 'group' });
-    expect(signals[4]).toMatchObject({ labels: ['Old Channel'], conversationKind: 'channel', folderKeys: ['left_chats:0'] });
+    expect(signals[0]).toEqual({ title: 'Alex Example', sender: 'Alex Example', conversationKind: 'direct', folderKeys: ['chats:0'] });
+    expect(signals[2]).toMatchObject({ title: 'Synthetic Harbour Group', conversationKind: 'group' });
+    expect(signals[4]).toMatchObject({ title: 'Old Channel', conversationKind: 'channel', folderKeys: ['left_chats:0'] });
   });
 
   test('links in formatted messages are kept in the item text', async () => {
