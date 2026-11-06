@@ -101,6 +101,21 @@ describe('web clients: what a turn is held to', () => {
     expect(forbiddenFor({ ...pickup, expect: ['12:30', 'LDL'] }, shared)).toEqual(['162', '4471']);
   });
 
+  test('another question\'s forbidden string in this question\'s own prompt is not a leak', () => {
+    const shared = ['picking up', '4471'];
+    expect(forbiddenFor(pickup, shared)).toEqual(['162', '4471']);
+    const turn = 'Olympus: for picking up the kids, Maya comes at 12:30 with Nina [Conferences].';
+    expect(statusOf(evaluateTurn('chatgpt', pickup, { turn, frames: '', ms: 1, olympus: used }, shared))['web.chatgpt.pickup.no-leak']).toBe('pass');
+  });
+
+  test('a bare evidence id counts as a citation only when Olympus was used', () => {
+    const turn = 'Maya picks them up at 12:30 and Nina brings Leo home [E1].';
+    const passed = evaluateTurn('grok', pickup, { turn, frames: '', ms: 1, olympus: used }).find((check) => check.id === 'web.grok.pickup.cited');
+    expect(passed).toMatchObject({ status: 'pass', detail: 'cites Olympus evidence by id ([E1]); the source is not named in the reply' });
+    const unused = evaluateTurn('grok', pickup, { turn, frames: '', ms: 1, olympus: { used: false, detail: 'none used' } });
+    expect(statusOf(unused)['web.grok.pickup.cited']).toBe('fail');
+  });
+
   test('another question\'s forbidden string is not a leak when this question may say it, or its own prompt says it', () => {
     // Live canary 2026-10-29: "18:00" was the lawyer list's Private time and leo-weekend's Personal pickup; "parenting plan" was the lawyer question's own words.
     const lawyer = { id: 'lawyer', prompt: 'Use Olympus: what did the lawyer say about the parenting plan?', kind: 'private' as const, forbid: ['18:00', 'parenting plan', 'clause 7'] };
