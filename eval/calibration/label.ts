@@ -113,6 +113,7 @@ const server = Bun.serve({
           excerpt: item.text.slice(0, EXCERPT_CHARS),
           source: item.source,
           judgeSees: item.judgeSees,
+          context: item.context,
         })),
         labels: pageLabels(),
       }, { headers: { 'cache-control': 'no-store' } });
@@ -162,6 +163,10 @@ h1 { font-size:17px; margin:0; }
 .bar > div { height:100%; background:var(--personal); transform-origin:left; transform:scaleX(0); transition: transform .2s; }
 details.rule { color:var(--muted); margin-bottom:14px; }
 details.rule p { margin:6px 0; }
+.context { margin:10px 0; padding:8px 10px; border-left:3px solid var(--line); opacity:.55; font-size:12px; line-height:1.45; }
+.context-tag { font-weight:600; text-transform:uppercase; letter-spacing:.04em; font-size:10px; margin-bottom:4px; }
+.context-line { white-space:pre-wrap; word-break:break-word; margin-top:4px; }
+.context-line span { display:block; font-size:10px; }
 .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:18px; }
 .name { font-size:19px; font-weight:600; word-break:break-word; }
 .meta { color:var(--muted); font-size:13px; margin-top:4px; word-break:break-word; }
@@ -221,7 +226,9 @@ function render() {
     '<div class="meta">' + fmtSize(it.sizeBytes) + ' · modified ' + esc(it.modifiedAt.slice(0, 10)) + ' · item ' + (index + 1) + ' of ' + items.length +
       (it.textChars > it.excerpt.length ? ' · showing the first ' + it.excerpt.length.toLocaleString() + ' characters' : '') + '</div>') +
     (chosen ? '<div class="current">Labeled: <b>' + NAMES[chosen] + '</b></div>' : '') +
+    contextBlock(it.context?.before) +
     '<pre>' + esc(judged ? it.judgeSees : it.excerpt) + '</pre>' +
+    contextBlock(it.context?.after) +
     '<div class="buttons">' +
       CHOICES.map((c) => '<button class="label ' + c.style + (chosen === c.label ? ' chosen' : '') + '" data-label="' + c.label + '">' +
         c.name + '<kbd>' + c.key + '</kbd></button>').join('') +
@@ -233,6 +240,11 @@ function render() {
   document.getElementById('next').onclick = () => { index = Math.min(items.length, index + 1); render(); };
   document.getElementById('nextOpen').onclick = nextUnlabeled;
   if (!judged) document.getElementById('reveal').onclick = reveal;
+}
+function contextBlock(messages) {
+  if (!messages || messages.length === 0) return '';
+  return '<div class="context"><div class="context-tag">Context only · not labeled</div>' +
+    messages.map((m) => '<div class="context-line"><span>' + esc(m.sender) + ' · ' + esc(m.at.slice(0, 16).replace('T', ' ')) + '</span>' + esc(m.text) + '</div>').join('') + '</div>';
 }
 function nextUnlabeled() {
   for (let step = 1; step <= items.length; step += 1) {

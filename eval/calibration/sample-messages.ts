@@ -8,6 +8,7 @@
 //
 //   bun eval/calibration/sample-messages.ts --stores DIR [--source NAME=DIR:COUNT ...]
 //     [--out DIR] [--seed N] [--since YYYY-MM-DD] [--private-share 0.3] [--check N] [--force]
+//     [--context N]
 //
 // `judgeSees` is the judge's input. An item still in the store's question queue
 // uses the queued input verbatim (`judgeSeesExact`). An answered item has lost
@@ -23,11 +24,16 @@
 // keeps its `stratum` and the recipe keeps each stratum's population, so a
 // score can be reweighted to the natural mix; unweighted recall on this sample
 // flatters the judge.
+//
+// `--context N` keeps the N messages either side of each item, for the labeling
+// page only. They hold other people's messages, so they stay in the owner-only
+// sample file on this machine and no judge run reads them.
 
 import { Database } from 'bun:sqlite';
 import { chmodSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { CALIBRATION_DIR_DEFAULT, SAMPLE_FILE, type CalibrationSample, type CalibrationSampleItem } from './files.ts';
+import { messageContext } from './message-context.ts';
 import { storedJudgeInput } from './stored-input.ts';
 import { rng, shuffle } from './sample-random.ts';
 
@@ -60,6 +66,8 @@ const flag = (name: string) => {
   const index = argv.indexOf(name);
   return index >= 0 ? argv[index + 1] : undefined;
 };
+
+const contextCount = Number(flag('--context') ?? 0);
 
 interface LedgerRow {
   account_scope: string;
@@ -103,6 +111,17 @@ class Stores {
       `SELECT material FROM sniffer_questions WHERE provider = ? AND account_scope = ? AND conversation_key = ?
          AND provider_item_id = ? AND pass = 'content'`,
     );
+  }
+
+  /** The messages either side of an item, read from every tier's copy of the conversation. */
+  context(item: Row, count: number) {
+    return messageContext(this.dbs, {
+      provider: String(item['provider']),
+      account_scope: String(item['account_scope']),
+      normalized_conversation: String(item['normalized_conversation']),
+      provider_item_id: String(item['provider_item_id']),
+      authored_at: String(item['authored_at']),
+    }, count);
   }
 
   /** The production input of a question still waiting for the judge. */
@@ -229,6 +248,7 @@ function sampleSource(spec: SourceSpec, stores: Stores, since: string, privateSh
           signals: input.signals,
           judgeSees,
           judgeSeesExact: queued !== undefined,
+          ...(contextCount > 0 ? { context: stores.context(found.item, contextCount) } : {}),
         });
       }
     }

@@ -13,6 +13,13 @@ export const SAMPLE_FILE = 'sample.json';
 export const LABELS_FILE = 'labels.json';
 export const IMPORTANCE_FILE = 'importance.json';
 
+/** A neighbouring message shown to the owner as context. Never judged, never labeled. */
+export interface CalibrationContextMessage {
+  at: string;
+  sender: string;
+  text: string;
+}
+
 export interface CalibrationSampleItem {
   id: string;
   path: string;
@@ -36,6 +43,8 @@ export interface CalibrationSampleItem {
   judgeSees?: string;
   /** True when `judgeSees` is the production question itself, false when it was rebuilt from the store. */
   judgeSeesExact?: boolean;
+  /** The messages either side of this one, for the owner only: judge runs ignore this. */
+  context?: { before: CalibrationContextMessage[]; after: CalibrationContextMessage[] };
 }
 
 export interface CalibrationSample {
