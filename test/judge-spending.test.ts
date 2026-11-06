@@ -253,6 +253,45 @@ test('cloud judging spends its calls on newest items before an aged backlog', as
   expect(prompts.length).toBe(5); expect(prompts.every(prompt => !prompt.includes('oldest health file'))).toBe(true);
 });
 
+test('saving the choice already shown still says it saved, and Local needs no spending limit (#950)', async () => {
+  const { Window } = await import('happy-dom');
+  const { mountDashboardController } = await import('../src/control-ui/browser-controller.ts');
+  const browser = new Window({ url: 'http://localhost/dashboard?keys' });
+  const keys = ['window', 'document', 'navigator', 'Element', 'HTMLElement', 'HTMLFormElement', 'HTMLInputElement', 'HTMLTextAreaElement', 'HTMLSelectElement', 'HTMLButtonElement', 'ShadowRoot', 'Event', 'MouseEvent', 'FormData', 'CSS'] as const;
+  const previous = new Map(keys.map(key => [key, Object.getOwnPropertyDescriptor(globalThis, key)]));
+  for (const key of keys) Object.defineProperty(globalThis, key, { configurable: true, writable: true, value: browser[key] });
+  let dispose = () => {};
+  try {
+    // An existing Venice approval with no limit yet: the limit field is empty.
+    const html = renderJudgeChoice(buildDashboardPreviewView('ready'), { controlSessionCsrfToken: 'synthetic', judgeSetup: { choice: 'local', capDollars: 0, spentDollars: 0, remainingDollars: 0, stop: null, uncapped: true, cloudModel: 'kimi-k3', cloudAvailable: true } });
+    const root = document.createElement('div'); root.innerHTML = html; document.body.append(root);
+    expect(root.querySelector<HTMLInputElement>('input[name="cap_dollars"]')!.value).toBe('');
+    expect(root.querySelector<HTMLInputElement>('input[name="cap_dollars"]')!.required).toBe(false);
+    const calls: unknown[] = [];
+    let redraws = 0;
+    // The server answers with the same page: nothing else on it shows the save happened.
+    const controller = mountDashboardController({ root, canWrite: true, signal: new AbortController().signal, pollIntervalMs: -1, returnUrl: 'http://localhost/dashboard?keys', navigate() {},
+      refresh: async () => ({ status: 200, title: 'Keys', body: html, controller: 'dashboard', can_write: true, signature: `redraw-${++redraws}`, poll_interval_ms: -1 }),
+      transport: { control: async params => { calls.push(params); return { status: 200, body: { ok: true, status_message: 'Cloud judging is off. Olympus is applying local judging.' } }; } },
+    }); dispose = () => controller.dispose();
+    root.querySelector('form')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    await browser.happyDOM.waitUntilComplete();
+    await new Promise(resolve => setTimeout(resolve, 30));
+    expect(calls).toEqual([{ action: 'save_judge', choice: 'local', cap_dollars: 0 }]);
+    expect(redraws).toBeGreaterThan(0);
+    expect(root.querySelector('[data-action-message]')!.textContent).toBe('Cloud judging is off. Olympus is applying local judging.');
+    // Venice with no limit is explained on the page and sends nothing.
+    root.querySelector<HTMLInputElement>('input[value="venice"]')!.click();
+    root.querySelector('form')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    await browser.happyDOM.waitUntilComplete();
+    expect(calls.length).toBe(1);
+    expect(root.querySelector('[data-action-message]')!.textContent).toBe('Enter a total cloud spending limit in dollars to use Venice.');
+  } finally {
+    dispose(); browser.close();
+    for (const key of keys) { const descriptor = previous.get(key); if (descriptor) Object.defineProperty(globalThis, key, descriptor); else delete (globalThis as Record<string, unknown>)[key]; }
+  }
+});
+
 test('the choice form defaults to local even for a large archive and submits only an explicit choice', async () => {
   const { Window } = await import('happy-dom');
   const { mountDashboardController } = await import('../src/control-ui/browser-controller.ts');
@@ -392,7 +431,8 @@ test('the screen shows the upgrade note once and asks for a limit instead of sho
   const first = renderJudgeChoice(view, { judgeSetup: { ...judgeSetup, upgradeNote: true } });
   expect(first).toContain('You can now set a spending limit');
   expect(first).toContain('No spending limit is set');
-  expect(first).toContain('required value=""');
+  // Empty, not $0. Saving Venice with it empty is refused on the page; Local saves without one (#950).
+  expect(first).toContain('step="0.01" value=""');
   expect(renderJudgeChoice(view, { judgeSetup })).not.toContain('You can now set a spending limit');
 });
 

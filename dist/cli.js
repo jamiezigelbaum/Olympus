@@ -148714,8 +148714,15 @@ function mountDashboardController(options) {
       return { action: "discover_local_models", base_url: body.base_url ?? "" };
     if (form.hasAttribute("data-local-models-test"))
       return { action: "save_local_answer_model", base_url: body.base_url ?? "", answer_model: body.answer_model ?? "" };
-    if (form.hasAttribute("data-judge-choice"))
-      return { action: "save_judge", choice: body.choice === "venice" ? "venice" : "local", cap_dollars: Number(body.cap_dollars) };
+    if (form.hasAttribute("data-judge-choice")) {
+      const choice = body.choice === "venice" ? "venice" : "local";
+      const cap = (body.cap_dollars ?? "").trim();
+      if (choice === "venice" && cap === "") {
+        say(form, "Enter a total cloud spending limit in dollars to use Venice.");
+        return;
+      }
+      return { action: "save_judge", choice, cap_dollars: cap === "" ? 0 : Number(cap) };
+    }
     if (form.hasAttribute("data-computer-use"))
       return { action: "set_computer_use", choice: (form.hasAttribute("data-server-mode") ? body.server === "on" : body.choice === "server") ? "server" : "everyday" };
     if (form.hasAttribute("data-first-run-privacy"))
@@ -148929,6 +148936,11 @@ function mountDashboardController(options) {
       const again = query("form[data-model-check]");
       if (again && !again.querySelector("[data-action-message]")?.textContent)
         say(again, "Checked just now.");
+    }
+    if (params.action === "save_judge" && typeof statusMessage === "string" && !disposed) {
+      const again = query("form[data-judge-choice]");
+      if (again && !again.querySelector("[data-action-message]")?.textContent)
+        say(again, statusMessage);
     }
   }
   function renderDiscoveredModels(form, value2) {
@@ -160346,7 +160358,7 @@ function renderJudgeChoice(view3, options) {
     <p>The cloud judge reads every item before it is sorted, including items it marks Private. An end-to-end encrypted option is not available yet. You use your own Venice account and API key; you pay Venice. Olympus pays for nothing.</p>
     <p>Cloud estimates assume 800 input and 80 output tokens per item, one call per item, and about ${VENICE_JUDGE_ESTIMATE.itemsPerMinute} items a minute (${VENICE_JUDGE_ESTIMATE.date}). Your account limits, document length and additional privacy checks can change the time and cost. Listed prices checked ${JUDGE_PRICE_DATE}.</p>
     ${cloud || status.stop === "storage" ? "" : "<p>Set up an allowed Venice model in Private answers first. A listed price is required. Add your own key in the Venice section below.</p>"}
-    <label>Total cloud spending limit (US dollars) <input type="number" name="cap_dollars" min="0" step="0.01" required value="${status.uncapped ? "" : status.capDollars}"></label>
+    <label>Total cloud spending limit (US dollars) <input type="number" name="cap_dollars" min="0" step="0.01" value="${status.uncapped ? "" : status.capDollars}"></label>
     <p>${status.uncapped ? "No spending limit is set, so Olympus isn't tracking cloud spending yet. Your Venice account shows what you've spent." : `${status.stop === "storage" ? "Spending amounts are unavailable." : `Spent or reserved: ${money(status.spentDollars)}. Remaining: ${money(status.remainingDollars)}.`} This total survives restarts. Olympus reserves an estimated maximum before each call; uncertain calls keep that reservation. A call that will not fit stops cloud judging. Newest items are checked first; remaining items stay Private and continue with the free local judge when available. Your Venice bill may differ from these estimates.`}</p>
     ${status.upgradeNote ? '<p role="status">You can now set a spending limit for cloud judging. Venice keeps sorting your items as you approved, with no limit, until you set one.</p>' : ""}${stopped}<button class="btn primary" type="submit">Save and approve this choice</button><span data-action-message role="status"></span>
     </fieldset></form></section>`;
