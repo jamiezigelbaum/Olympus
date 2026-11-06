@@ -188,3 +188,11 @@ test('link boundaries preserve adjacent meaningful text and public URLs for the 
   }
   expect(isBareShareLink(`${share},${shareLinks[6]}`)).toBe(true);
 });
+
+test('punctuation inside a share link filename stays part of the link', () => {
+  for (const text of ['https://www.dropbox.com/s/example/Budget(2026).pdf?dl=0', 'https://www.dropbox.com/s/example/Budget,2026.pdf?dl=0',
+    '[Document](https://www.dropbox.com/s/example/Budget(2026).pdf?dl=0)']) {
+    expect(isBareShareLink(text)).toBe(true);
+  }
+  expect(isBareShareLink('https://www.dropbox.com/s/example/Budget(2026).pdf?dl=0 Approved by the board')).toBe(false);
+});

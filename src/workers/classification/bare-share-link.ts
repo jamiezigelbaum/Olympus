@@ -28,6 +28,20 @@ function isDocumentShareUrl(url: URL): boolean {
   return false;
 }
 
+/** Where a URL candidate really ends: before an unmatched `)`, or a comma that precedes another URL or plain words. */
+function urlEnd(raw: string): number {
+  let depth = 0;
+  for (let index = 0; index < raw.length; index += 1) {
+    const char = raw[index];
+    if (char === '(') depth += 1;
+    else if (char === ')') {
+      if (depth === 0) return index;
+      depth -= 1;
+    } else if (char === ',' && /^(?:https?:\/\/|[^./?=&]*$)/i.test(raw.slice(index + 1))) return index;
+  }
+  return raw.length;
+}
+
 /**
  * Own text consisting of document/storage share URLs and at most a short
  * neutral wrapper ("here is the link", "FYI"). Meaningful surrounding words
@@ -37,18 +51,25 @@ export function isBareShareLink(text: string): boolean {
   let links = 0;
   let linkChars = 0;
   let otherUrl = false;
-  // Treat Markdown delimiters and commas as boundaries before removing URLs,
-  // so adjacent prose and a second URL are still evaluated. Encoded URL
-  // punctuation remains part of the URL.
-  const rest = text.replace(/https?:\/\/[^\s<>"\[\](),]+/giu, raw => {
-    const link = raw.replace(/[.,!?;:'")\]}>]+$/u, '');
+  // Filenames may hold balanced parentheses and commas. An unmatched closing
+  // parenthesis ends a Markdown link, and a comma before another URL or plain
+  // words ends this one, so adjacent prose and a second URL are still evaluated.
+  const pattern = /https?:\/\/[^\s<>"[\]]+/giu;
+  let remaining = '';
+  let cursor = 0;
+  for (let match = pattern.exec(text); match; match = pattern.exec(text)) {
+    const end = urlEnd(match[0]);
+    const link = match[0].slice(0, end).replace(/[.,!?;:'"\]}>]+$/u, '');
     try {
       if (!isDocumentShareUrl(new URL(link))) otherUrl = true;
     } catch { otherUrl = true; }
     links++;
     linkChars += link.length;
-    return ' ';
-  }).replace(/[\p{P}\p{S}]+/gu, ' ').replace(/\s+/gu, ' ').trim().toLowerCase();
+    remaining += `${text.slice(cursor, match.index)} `;
+    cursor = match.index + end;
+    pattern.lastIndex = cursor;
+  }
+  const rest = `${remaining}${text.slice(cursor)}`.replace(/[\p{P}\p{S}]+/gu, ' ').replace(/\s+/gu, ' ').trim().toLowerCase();
   if (!links || otherUrl || rest.length > 24 || linkChars < rest.length * 2) return false;
   const words = rest ? rest.split(' ') : [];
   return words.length <= 4 && words.every(word =>
