@@ -19204,6 +19204,120 @@ var init_litert_runtime = __esm(() => {
   REQUEST_TIMEOUT_MS = 3 * 60000;
 });
 
+// src/workers/source-index/built-in-embedding/remote-litert-runtime.ts
+import { readFileSync as readFileSync30 } from "node:fs";
+
+class RemoteLiteRtEmbedder {
+  options;
+  device = "cpu";
+  vision = false;
+  verified = false;
+  retryAt = 0;
+  state = "unused";
+  slot = Promise.resolve();
+  url;
+  constructor(options) {
+    this.options = options;
+    try {
+      this.url = new URL(options.url);
+    } catch {
+      throw new Error("Invalid built-in embedding remote URL.");
+    }
+    const loopback = this.url.hostname === "localhost" || this.url.hostname === "[::1]" || /^127(?:\.\d{1,3}){3}$/.test(this.url.hostname);
+    if (this.url.protocol !== "https:" && !(this.url.protocol === "http:" && loopback) || this.url.username || this.url.password || this.url.search || this.url.hash) {
+      throw new Error("Built-in embedding remote requires HTTPS or loopback HTTP, without URL credentials, query or fragment.");
+    }
+  }
+  get active() {
+    return this.state === "remote";
+  }
+  async embed(items) {
+    const previous = this.slot;
+    let unlock;
+    this.slot = new Promise((resolve10) => {
+      unlock = resolve10;
+    });
+    await previous;
+    try {
+      const now = this.options.now ?? Date.now;
+      if (now() < this.retryAt)
+        throw new Error("Remote embedding cooling down.");
+      try {
+        if (items.length === 0 || items.length > 8 || items.some((item) => typeof item !== "string")) {
+          throw new Error("Remote embedding requires a text-only batch.");
+        }
+        if (!this.verified) {
+          const handshake = await this.request("/v1/handshake");
+          for (const [field, value] of Object.entries(this.options.identity)) {
+            if (handshake[field] !== value)
+              throw new Error("Remote embedding identity mismatch.");
+          }
+          if (handshake.device !== "cpu" && handshake.device !== "gpu")
+            throw new Error("Invalid remote device.");
+          if (handshake.vision !== false)
+            throw new Error("Invalid remote vision capability.");
+          this.device = handshake.device;
+          this.verified = true;
+        }
+        const response = await this.request("/v1/embed", items);
+        const identity = this.options.identity;
+        if (response.weightsSha256 !== identity.weightsSha256 || response.runtime !== identity.runtime || response.dimension !== identity.dimension || typeof response.vectors !== "string") {
+          throw new Error("Remote embedding identity mismatch.");
+        }
+        const bytes = Buffer.from(response.vectors, "base64");
+        if (bytes.length !== items.length * identity.dimension * 4)
+          throw new Error("Invalid remote vector length.");
+        const vectors = items.map((_, row) => Float32Array.from({ length: identity.dimension }, (_2, column) => bytes.readFloatLE((row * identity.dimension + column) * 4)));
+        if (vectors.some((vector) => vector.some((value) => !Number.isFinite(value)) || !vector.some((value) => value !== 0))) {
+          throw new Error("Invalid remote vector values.");
+        }
+        this.transition("remote");
+        return vectors;
+      } catch {
+        this.verified = false;
+        this.retryAt = now() + 60000;
+        this.transition("local");
+        throw new Error("Remote embedding unavailable; using local helper.");
+      }
+    } finally {
+      unlock();
+    }
+  }
+  async release() {
+    this.verified = false;
+  }
+  transition(state) {
+    if (this.state === state)
+      return;
+    this.state = state;
+    console.warn(state === "remote" ? "[built-in embedding] document text embedding is using the remote helper." : "[built-in embedding] remote helper unavailable; document text embedding is using the local helper.");
+  }
+  async request(path, texts) {
+    const headers = {};
+    if (this.options.tokenFile) {
+      const token = readFileSync30(this.options.tokenFile, "utf8").trim();
+      if (!token)
+        throw new Error("Empty remote token file.");
+      headers.Authorization = `Bearer ${token}`;
+    }
+    if (texts)
+      headers["Content-Type"] = "application/json";
+    const response = await fetch(new URL(path, this.url), {
+      method: texts ? "POST" : "GET",
+      headers,
+      ...texts ? { body: JSON.stringify({ texts }) } : {},
+      signal: AbortSignal.timeout(this.options.requestTimeoutMs ?? 30000),
+      redirect: "error"
+    });
+    if (!response.ok) {
+      await response.body?.cancel();
+      throw new Error("Remote request failed.");
+    }
+    return await response.json();
+  }
+}
+var init_remote_litert_runtime = () => {};
+
 // src/workers/source-index/built-in-embedding/runtime.ts
 var init_runtime = () => {};
 
@@ -19220,6 +19334,7 @@ var init_provider = __esm(() => {
   init_assets();
   init_manifest();
   init_litert_runtime();
+  init_remote_litert_runtime();
   init_runtime();
   init_wordpiece();
   RETRY_AFTER_FAILURE_MS = 2 * 60000;
@@ -23362,7 +23477,7 @@ var init_remote_connections = __esm(() => {
 });
 
 // src/core/ingestion-health-state.ts
-import { existsSync as existsSync19, mkdirSync as mkdirSync16, readFileSync as readFileSync30, writeFileSync as writeFileSync10 } from "node:fs";
+import { existsSync as existsSync19, mkdirSync as mkdirSync16, readFileSync as readFileSync31, writeFileSync as writeFileSync10 } from "node:fs";
 import { dirname as dirname31 } from "node:path";
 function defaultIngestionHealthStatePath(env = process.env) {
   return sharedDataPath("ingestion-doctor-state", env);
@@ -23371,7 +23486,7 @@ function readIngestionHealthState(path) {
   try {
     if (!existsSync19(path))
       return;
-    const parsed = JSON.parse(readFileSync30(path, "utf8"));
+    const parsed = JSON.parse(readFileSync31(path, "utf8"));
     const record2 = asRecord16(parsed);
     const sources = asRecord16(record2.sources);
     const normalized = {};
@@ -30191,7 +30306,7 @@ init_linux_engine_layout();
 init_model_transport();
 init_config();
 import { spawnSync as spawnSync8 } from "node:child_process";
-import { existsSync as existsSync21, readFileSync as readFileSync32 } from "node:fs";
+import { existsSync as existsSync21, readFileSync as readFileSync33 } from "node:fs";
 import { join as join43 } from "node:path";
 import { homedir as homedir17 } from "node:os";
 init_openclaw_executable();
@@ -30656,7 +30771,7 @@ init_consult_transport_zkapi();
 // src/core/consult-gate.ts
 init_owner_config_read();
 import { createHash as createHash14 } from "node:crypto";
-import { existsSync as existsSync20, readFileSync as readFileSync31, statSync as statSync19 } from "node:fs";
+import { existsSync as existsSync20, readFileSync as readFileSync32, statSync as statSync19 } from "node:fs";
 import { homedir as homedir16 } from "node:os";
 import { basename as basename7, dirname as dirname32, join as join41 } from "node:path";
 import { fileURLToPath as fileURLToPath8 } from "node:url";
@@ -30905,7 +31020,7 @@ function verifiedPackFile(path, sha256) {
       return "missing";
     if (statSync19(path).size > CONSULT_VOCABULARY_MAX_COMPRESSED_BYTES)
       return "too_large";
-    const gz = readFileSync31(path);
+    const gz = readFileSync32(path);
     return createHash14("sha256").update(gz).digest("hex") === sha256 ? gz : "hash_mismatch";
   } catch {
     return "unreadable";
@@ -30941,7 +31056,7 @@ function userManifestEntries(userDir) {
     const path = join41(userDir, "manifest.json");
     if (!existsSync20(path) || statSync19(path).size > 1024 * 1024)
       return [];
-    const manifest = JSON.parse(readFileSync31(path, "utf8"));
+    const manifest = JSON.parse(readFileSync32(path, "utf8"));
     if (!manifest || typeof manifest !== "object" || Array.isArray(manifest))
       return [];
     const packs = manifest.packs;
@@ -32456,7 +32571,7 @@ async function photoSearchCheck(deps) {
 }
 function defaultOsRelease() {
   try {
-    return readFileSync32("/etc/os-release", "utf8");
+    return readFileSync33("/etc/os-release", "utf8");
   } catch {
     return;
   }
@@ -33793,7 +33908,7 @@ function errorDetail(error) {
 // src/core/ocr-readiness.ts
 init_apple_vision_ocr();
 init_ocr_capability();
-import { existsSync as existsSync22, readFileSync as readFileSync33 } from "node:fs";
+import { existsSync as existsSync22, readFileSync as readFileSync34 } from "node:fs";
 var ARCH_IDS2 = ["arch", "archlinux", "omarchy", "manjaro", "endeavouros", "cachyos", "arcolinux", "garuda"];
 var DEBIAN_IDS2 = ["debian", "ubuntu", "linuxmint", "pop", "raspbian", "neon", "elementary", "zorin"];
 var FEDORA_IDS2 = ["fedora", "rhel", "centos", "rocky", "almalinux", "ol", "nobara"];
@@ -33829,7 +33944,7 @@ function linuxFamilyFromOsRelease2(text3) {
 function readOsRelease() {
   for (const path of ["/etc/os-release", "/usr/lib/os-release"]) {
     try {
-      return readFileSync33(path, "utf8");
+      return readFileSync34(path, "utf8");
     } catch {}
   }
   return;

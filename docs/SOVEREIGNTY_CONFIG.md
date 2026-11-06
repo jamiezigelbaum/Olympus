@@ -67,7 +67,7 @@ New installs embed every tier with the **built-in model**: Google's
 EmbeddingGemma 2 (Apache-2.0), 768 dimensions, in Google's own LiteRT build
 (text, image and audio encoders in one file). It runs on the computer through
 LiteRT-LM, in a small helper process Olympus starts under Bun, needs no
-account, no key and no extra app, and nothing leaves the computer. On first
+account, no key and no extra app, and by default nothing leaves the computer. On first
 use Olympus downloads the model (485 MB) and the LiteRT-LM library for this
 platform (from Google's `litert-lm-api` 0.18.0 wheel: 21 MB on macOS, 47 MB on
 Linux) once into
@@ -81,6 +81,30 @@ CPU. The first start compiles its GPU programs (up to half a minute; later
 starts take seconds). On the CPU it uses at most half the cores, capped at
 four (`OLYMPUS_BUILT_IN_EMBEDDING_THREADS` overrides). Supported: macOS on
 Apple silicon, Linux x64 and arm64 (glibc 2.27 or newer).
+
+An owner may optionally send built-in **document text** to the same model on
+another machine by setting `OLYMPUS_BUILT_IN_EMBEDDING_REMOTE_URL` (the service
+origin, for example `https://embedding.example.com`). HTTPS is required except
+for loopback HTTP. `OLYMPUS_BUILT_IN_EMBEDDING_REMOTE_TOKEN_FILE` optionally
+names a file containing a bearer token; it is read for each request. Leave the
+URL unset for the existing entirely local path. This setting sends document
+text from every tier using this provider to the configured machine: configure
+only an endpoint you trust to read that text. Queries and any batch containing
+a picture stay on the local helpers; local model installation is still required.
+
+The remote uses `/v1/handshake` and `/v1/embed`, with at most eight already
+framed texts per call and a 30-second timeout per request. The handshake must
+match the local model ID, weights digest, runtime pack version, dimension,
+maximum tokens and chunk-and-average overflow policy. Every embed response
+must still match the weights, runtime and dimension and contain a complete
+batch of finite, nonzero vectors. Any remote failure discards that response and
+runs the batch locally; after 60 seconds it tries again with a fresh handshake.
+Transitions emit one message without text or credentials. The process-local
+provider status includes `remoteDocuments` when configured (true after a
+successful remote batch, false before first use or during fallback). The
+provider, backend, model, epoch and configuration hash remain unchanged, so
+existing vectors need no re-embed. This does not configure or start the remote
+service or change its GPU scheduling.
 
 Photos are searched by their picture too (2026-10-07,
 `docs/design/photo-embeddings.md`). Mac only for now: elsewhere photos stay
