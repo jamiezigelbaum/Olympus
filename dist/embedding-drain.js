@@ -9629,6 +9629,82 @@ function pathPrefixMatches(path, prefix) {
   return value === folder || value.startsWith(`${folder}/`);
 }
 
+// src/workers/classification/bare-share-link.ts
+function isDocumentShareUrl(url) {
+  const host = url.hostname.toLowerCase();
+  const path = url.pathname;
+  if (host === "drive.google.com") {
+    return /^\/(?:file\/d\/|drive\/(?:u\/\d+\/)?folders\/)[^/]+/.test(path) || /^\/(?:open|uc)\/?$/.test(path) && url.searchParams.has("id");
+  }
+  if (host === "docs.google.com") {
+    if (/\/d\/e\//.test(path) || /\/(?:pub|pubhtml|embed)\/?$/.test(path))
+      return false;
+    return /^\/(?:document|spreadsheets|presentation|forms|drawings)\/(?:u\/\d+\/)?d\/[^/]+/.test(path);
+  }
+  if (host === "dropbox.com" || host === "www.dropbox.com")
+    return /^\/(?:s|sh|scl\/(?:fi|fo))\/[^/]+/.test(path);
+  if (host === "db.tt" || host === "1drv.ms")
+    return path.length > 1;
+  if (host === "icloud.com" || host === "www.icloud.com")
+    return /^\/(?:iclouddrive|pages|numbers|keynote|notes)\/[^/]+/.test(path);
+  if (host === "onedrive.live.com")
+    return url.searchParams.has("id") || url.searchParams.has("resid") || url.searchParams.has("cid");
+  if (host.endsWith(".sharepoint.com"))
+    return /^\/:[a-z]:\//i.test(path) || /\/Doc\.aspx$/i.test(path) && url.searchParams.has("sourcedoc");
+  if (host === "app.notion.com") {
+    return /^\/(?:p\/)?(?:[^/]+-)?(?:[a-f0-9]{32}|[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12})\/?$/i.test(path);
+  }
+  if (host === "notion.so" || host.endsWith(".notion.so")) {
+    return /(?:^|[/-])[a-f0-9]{32}\/?$/i.test(path) || /\/[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}\/?$/i.test(path);
+  }
+  if (host === "box.com" || host.endsWith(".box.com"))
+    return /^\/(?:s\/[^/]+|(?:file|folder)\/\d+)(?:\/|$)/.test(path);
+  return false;
+}
+function urlEnd(raw) {
+  let depth = 0;
+  for (let index = 0;index < raw.length; index += 1) {
+    const char = raw[index];
+    if (char === "(")
+      depth += 1;
+    else if (char === ")") {
+      if (depth === 0)
+        return index;
+      depth -= 1;
+    } else if (char === "," && /^(?:https?:\/\/|[^./?=&]*$)/i.test(raw.slice(index + 1)))
+      return index;
+  }
+  return raw.length;
+}
+function isBareShareLink(text2) {
+  let links = 0;
+  let linkChars = 0;
+  let otherUrl = false;
+  const pattern = /https?:\/\/[^\s<>"[\]]+/giu;
+  let remaining = "";
+  let cursor = 0;
+  for (let match = pattern.exec(text2);match; match = pattern.exec(text2)) {
+    const end = urlEnd(match[0]);
+    const link = match[0].slice(0, end).replace(/[.,!?;:'"\]}>]+$/u, "");
+    try {
+      if (!isDocumentShareUrl(new URL(link)))
+        otherUrl = true;
+    } catch {
+      otherUrl = true;
+    }
+    links++;
+    linkChars += link.length;
+    remaining += `${text2.slice(cursor, match.index)} `;
+    cursor = match.index + end;
+    pattern.lastIndex = cursor;
+  }
+  const rest = `${remaining}${text2.slice(cursor)}`.replace(/[\p{P}\p{S}]+/gu, " ").replace(/\s+/gu, " ").trim().toLowerCase();
+  if (!links || otherUrl || rest.length > 24 || linkChars < rest.length * 2)
+    return false;
+  const words = rest ? rest.split(" ") : [];
+  return words.length <= 4 && words.every((word) => ["here", "s", "is", "the", "a", "link", "doc", "document", "file", "folder", "fyi", "see", "please", "this", "you", "go", "it"].includes(word));
+}
+
 // src/workers/classification/tier-classifier.ts
 import { createHash as createHash5 } from "node:crypto";
 function tierRank(tier) {
@@ -10038,6 +10114,19 @@ function contentPass(args) {
     return { tier: metadata.tier, decidedBy: metadata.decidedBy, reasons: [...mark], pending: false };
   }
   let decided = { tier: metadata.tier, decidedBy: metadata.decidedBy, reasons: [] };
+  if (isBareShareLink(text2)) {
+    const recorded = args.sniffer.recordedContentVerdict;
+    if (recorded && recorded.mapRevision === args.mapRevision) {
+      const verdict = withSnifferVerdict(decided, recorded.tier, `content:sniffer:${args.sniffer.id}:${recorded.code}`);
+      return { ...verdict, reasons: [...verdict.reasons, ...mark], pending: false };
+    }
+    return {
+      tier: maxTier(metadata.tier, "secure"),
+      decidedBy: "content_rule",
+      reasons: ["content:rule:private_share_link", `content:rule_sniffer:${args.sniffer.id}`, ...mark],
+      pending: false
+    };
+  }
   const rule = args.textOnly && !args.heldSecret && (args.titleIsConversation === true || !args.signals.title?.trim()) ? trivialContentRule(text2, args.parentContext) : undefined;
   if (rule) {
     return {
@@ -21768,6 +21857,7 @@ function recordedContentVerdictSniffer(sniffer, recorded, text2, names) {
     return sniffer;
   return {
     id: sniffer.id,
+    recordedContentVerdict: { tier, code, mapRevision: recorded.mapRevision },
     judge: (request) => request.pass === "content" && (request.mapRevision ?? "none") === recorded.mapRevision ? { verdict: "decided", tier, code } : sniffer.judge(request)
   };
 }

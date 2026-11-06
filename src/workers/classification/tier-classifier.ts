@@ -37,6 +37,8 @@ import {
 } from './engine.ts';
 import { ownerSenderRuleMatches } from '../../core/sender-rules.ts';
 import { pathPrefixMatches } from '../../core/location-rules.ts';
+import { isBareShareLink } from './bare-share-link.ts';
+export { isBareShareLink } from './bare-share-link.ts';
 
 export const TIER_CLASSIFIER_KIND = 'olympus_shared_four_tier_classifier';
 // 2026-10-01.p2: vocabulary-only detector hits go to the privacy-safe model
@@ -197,6 +199,8 @@ export type TierSnifferVerdict =
 export interface TierSniffer {
   readonly id: string;
   readonly rejudgeReady?: boolean;
+  /** An eligible final verdict for this item's unchanged content and names. */
+  readonly recordedContentVerdict?: { readonly tier: 'private' | 'secure'; readonly code: string; readonly mapRevision: string };
   judge(request: TierSnifferRequest): TierSnifferVerdict;
 }
 
@@ -1073,6 +1077,24 @@ function contentPass(args: {
   }
 
   let decided: ResolvedVerdict = { tier: metadata.tier, decidedBy: metadata.decidedBy, reasons: [] };
+
+  // The link itself may grant access. This rests on own text only, after
+  // Secrets and owner force rules, and cannot lower the names' tier.
+  if (isBareShareLink(text)) {
+    // A new content rule does not replace an existing final judgment. The
+    // store wrapper supplies this only after checking the verdict's receipts.
+    const recorded = args.sniffer.recordedContentVerdict;
+    if (recorded && recorded.mapRevision === args.mapRevision) {
+      const verdict = withSnifferVerdict(decided, recorded.tier, `content:sniffer:${args.sniffer.id}:${recorded.code}`);
+      return { ...verdict, reasons: [...verdict.reasons, ...mark], pending: false };
+    }
+    return {
+      tier: maxTier(metadata.tier, 'secure'),
+      decidedBy: 'content_rule',
+      reasons: ['content:rule:private_share_link', `content:rule_sniffer:${args.sniffer.id}`, ...mark],
+      pending: false,
+    };
+  }
 
   // Only complete own text may settle by content rule. Names have already
   // run independently and their tier remains the floor.

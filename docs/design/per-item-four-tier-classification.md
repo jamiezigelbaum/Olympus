@@ -155,7 +155,7 @@ The owner's rule (2026-09-23): **the default tier is Personal.** Things are rais
   [11] (retired 2026-10-03: sensitivity map v2 on text)
   [12] SNIFFER on a short text excerpt plus the item's names, while the content is below Private:
        with a privacy-safe model configured (a private lane, or the built-in model, ready or not),
-       every read item is asked except the content-only rules below (classifier p9); without one, only items pass 1
+       every read item is asked except the content-only rules below (classifier p8); without one, only items pass 1
        flagged wait, and borderline vocabulary raised to Private in [10]
 ```
 
@@ -164,6 +164,38 @@ The owner's rule (2026-09-23): **the default tier is Personal.** Things are rais
 Duplicate text uses the existing per-store sniffer verdict table, not a separate cache. The original full-input hash still covers names, labels, folder keys, complete text and parent context. A schema-5 indexed content hash adds NFC, line-ending and outer-whitespace normalization only (case and internal whitespace stay significant). Only a non-fail-safe model answer applied to a final, current item without pending passes publishes that content hash. Answered donor questions remain queued as receipts while placement or names are unfinished; after settlement the resolver publishes their content hash and removes the receipt. Before settlement the full-input cache answer can retry only the original item; no other item borrows it. A final Private model verdict can be reused across names because it only raises the recipient; a Personal verdict requires an identical full-input hash too, including names (even normalized body variants with changed full input go to the judge). Reuse retains model/weights, prompt and map-revision keys and reruns the receiving item's metadata, detectors and floors. Context and non-text content prohibit this shortcut. `content:rule:duplicate_model` identifies reuse, while ordinary model answers retain `content:sniffer:<judge>:<verdict>` provenance. Rule, owner and fail-safe outcomes are never duplicate donors. Old cache rows have no eligibility receipt and are not backfilled by guessing.
 
 Classifier p8 is retained, so this change does not trigger an archive-wide version sweep. A future classifier-version change selects already-final automatic model decisions too. `content_rule` decisions qualify only after a classifier version or their recorded `content:rule_sniffer:<identity>` changes; an absent model-sniffer marker alone never selects them. Rejudging without the conversation-title fact safely uses the model for titled items. The pass excludes owner decisions, Secrets, unread content and moving items, then rereads eligible stored text and runs the shared classifier. Unchanged model/prompt/map/full-input cache keys can answer without a call; the classifier version alone does not invalidate that cache. Missing cache entries can cause a fresh content call per eligible item. A newer sniffer identity can also require a names call. Thus a 1.25-million-item archive can require up to 1.25 million content calls, or 2.5 million names-plus-content calls when both passes need new answers, before retries; its actual cost cannot be inferred from item count alone. Text rereads, secret screening and ledger writes still run on cache hits. Default preparation is 100 candidates per set per tick, scanning up to 2,000 ledger rows, with preparation paused at 200 unanswered questions per set. The model lane defaults to one in-flight call (maximum eight), 30-second passes and a one-second scheduler interval; daily caps are 20,000 calls for the full lane or 250,000 for decision mode. These are configured limits, not a throughput measurement of the live archive (source inspection, 2026-11-06).
+
+#### Bare document share links (#940, 6 November 2026)
+
+The shared content pass settles text made mostly of document/storage share URLs
+as Private, with `content:rule:private_share_link`. The exported
+`isBareShareLink(text)` predicate recognizes Google Drive/Docs, Dropbox, iCloud,
+OneDrive/SharePoint, Notion and Box URL shapes without network calls. A neutral
+wrapper is limited to four framing words and 24 characters, at most half the
+URL length; meaningful words, public/news/video/social URLs, mixed public/share
+links and provider marketing pages use the usual judge path. URL host matching
+is exact or bounded by a subdomain suffix. This is a signal in the item's own
+text, independent of its source, title or conversation. Secrets screening and
+owner overrides/force rules precede it; names retain their independent tier.
+It only raises content to Private, so it does not require the completeness
+attestation that permits trivial text to settle Personal. Rule outcomes never
+seed the model duplicate cache. The predicate is available for #939; no embedding
+classifier is added here.
+
+Linked-item tier inheritance is deferred: `activeIdentityForLocator` in
+`src/workers/connector-store/local-index.ts` requires a known provider/account
+and compares a lowercased stored locator; its index begins with provider,
+account and conversation. It cannot resolve an arbitrary share URL or its
+aliases across sources. `TierLedger.getCurrent` in
+`src/workers/classification/tier-ledger.ts` then requires the full item identity;
+`decideItemTiers` in `src/workers/connector-store/tier-placement.ts` has only the
+current item's ledger and no cross-store URL resolver. Inheritance would need
+provider-specific alias mapping or cross-store lookups per item, so this change
+adds neither. A known document's Secret verdict is therefore not inherited by
+its link; the bare link itself settles Private. Classifier p8 stays unchanged:
+new classifications use the rule, with no archive-wide sweep or retroactive
+change to already-final decisions. Existing final decisions need a separate
+explicit reclassification to pick it up.
 
 
 **Vocabulary is a question, not a verdict (owner ruling 2026-10-01).** "It shouldn't give me a private answer if there's nothing actually private in the thing I've asked about." A book chapter that says "treatment" and "symptoms" went straight to Private on two weak health words. Since classifier version `2026-10-01.p2`, vocabulary-only detector hits make their family borderline and the privacy-safe model judges the item: a hard category (health, therapy, financial, legal, identity) is Private whatever tier the model pairs it with, anything else confidently Personal is Personal. For a vocabulary question the excerpt is the document's opening plus the passages around the first matched words, still bounded by `SNIFFER_EXCERPT_MAX_CHARS`, so the model reads what the detector saw. Until it answers, the item is pending (held Private, with local embedding allowed only under §4.1). With no private model at all, vocabulary still raises to Private, so nothing words flagged reaches Personal without a model's judgment. Structured identifiers and secrets stay deterministic and immediate, and owner rules and overrides still win.

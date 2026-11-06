@@ -225,6 +225,13 @@ const PUBLIC_README_URLS = new Set([
 ]);
 
 /**
+ * The public hosts the share-link rule recognises in message text
+ * (src/workers/classification/bare-share-link.ts). Exact quoted hostnames only:
+ * anything else naming that provider is still refused.
+ */
+const PUBLIC_SHARE_LINK_HOST_LITERAL = /(['"])(?:app\.notion\.com|\.?notion\.so)\1/g;
+
+/**
  * The pinned zkAPI download (src/core/managed-tools.ts): the Olympus fork's
  * public release, which the shipped installer must name. The four exact asset
  * URLs, each a quoted literal, in the managed-tools source and its two bundles.
@@ -244,7 +251,7 @@ const PUBLIC_DOWNLOAD_URLS = new Set([
 
 export function scannableText(relativePath: string, text: string): string {
   if (PUBLIC_DOWNLOAD_URL_FILES.has(relativePath)) {
-    return text.replace(/(['"])(https:\/\/[^\s<>"'`()]+)\1/g, (quoted, quote: string, url: string) => (
+    return text.replace(PUBLIC_SHARE_LINK_HOST_LITERAL, '"<public-share-link-host>"').replace(/(['"])(https:\/\/[^\s<>"'`()]+)\1/g, (quoted, quote: string, url: string) => (
       PUBLIC_DOWNLOAD_URLS.has(url) ? `${quote}<public-zkapi-download-url>${quote}` : quoted
     ));
   }
