@@ -89,6 +89,13 @@ Telegram, 50 WhatsApp and 60 Gmail items from the last two years, at most 3 per
 chat or sender while a source has enough to spare. Secrets and anything the
 judge would not read are left out.
 
+- **Context:** `--context 2` keeps the 2 messages either side of each item, so
+  a bare link or a short reply can be read. The labeling page greys them out and
+  marks them context only; you label the middle message alone. They stay in the
+  owner-only sample file, and no judge run reads them.
+- **Long messages:** a message longer than the judge's excerpt shows in full on
+  the labeling page, up to its 6,000-character limit, with a badge. The parts the
+  judge reads are highlighted and the rest dimmed, so you label the whole message.
 - **Stratified:** 30% come from items the judge already called Private, so both
   classes are big enough to measure. A score on this sample overstates recall
   unless it is reweighted with each item's `stratum` and the populations in the
