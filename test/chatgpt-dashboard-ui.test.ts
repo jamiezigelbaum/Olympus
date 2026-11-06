@@ -8,7 +8,7 @@ import { afterEach, describe, expect, jest, test } from 'bun:test';
 import { Window } from 'happy-dom';
 import { dashboardResourceHtml } from '../src/workers/chatgpt/dashboard-resource.ts';
 import { CHATGPT_PRIVACY_META_KEY, CHATGPT_PRIVACY_TOOLS } from '../src/workers/dashboard/chatgpt/privacy.ts';
-import type { DashboardFix, DashboardViewModelV1 } from '../src/workers/chatgpt/dashboard-contract.ts';
+import type { DashboardFix, DashboardViewModelV1, SourceProgress } from '../src/workers/chatgpt/dashboard-contract.ts';
 import { copyDashboardViewModel } from '../src/workers/chatgpt/response-builder.ts';
 import { previewDashboardToolResult } from '../scripts/dashboard-preview.ts';
 import {
@@ -1483,6 +1483,27 @@ describe('Sync now keeps the page reading while it checks', () => {
       jest.useRealTimers();
     }
   });
+});
+
+test('a Working row whose stall is ordinary progress offers no Details for support (#935)', () => {
+  const host = mount({});
+  const ordinary: SourceProgress[] = [
+    { stage: 'indexing', unit: 'files', total: 3, done: 0, stalled: true, stalledReason: 'model_downloading' },
+    { stage: 'indexing', unit: 'files', total: 3, done: 0, stalled: true, stall: { cause: 'no_movement', stage: 'indexing' } },
+  ];
+  for (const progress of ordinary) {
+    host.push({ structuredContent: copyDashboardViewModel(model({ sources: [{
+      id: 'local.files', label: 'Files on this computer', group: 'local', status: 'Working',
+      supportDetails: 'Failure: none', progress,
+    }] })) });
+    expect(host.win.document.querySelector('details[data-open-key="support-details:local.files"]')).toBeNull();
+  }
+  // A stall a failure caused still offers them.
+  host.push({ structuredContent: copyDashboardViewModel(model({ sources: [{
+    id: 'local.files', label: 'Files on this computer', group: 'local', status: 'Working',
+    supportDetails: 'Failure: timeout', progress: { stage: 'reading', unit: 'files', total: 3, stalled: true, stall: { cause: 'failing', failure: 'timeout' } },
+  }] })) });
+  expect(host.win.document.querySelector('details[data-open-key="support-details:local.files"]')).not.toBeNull();
 });
 
 test('failed and stalled source rows offer code-only Copy details', () => {

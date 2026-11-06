@@ -44236,7 +44236,8 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     }
     const joined = sourceImportsMeta(id);
     const why = seeWhy(source, id, !!progress && !!progress.stalled && !checking && !manual) || (archives ? archiveUnreadable(archives, id) || archiveNotRunning(archives, id) : null) || (joined ? archiveNotRunning(joined, id) : null);
-    if (source.supportDetails && (progress?.stalled || status === "Failing" || status === "Needs you" || source.lastManualSync?.outcome === "failed")) {
+    const failedStall = !!progress?.stalled && (progress.stalledReason === "provider_unavailable" || progress.stall?.cause === "failing");
+    if (source.supportDetails && (failedStall || status === "Failing" || status === "Needs you" || source.lastManualSync?.outcome === "failed")) {
       const report = el("pre", "help", source.supportDetails);
       const copy = copyControl(report, "support:" + id);
       copy.textContent = "Copy details";

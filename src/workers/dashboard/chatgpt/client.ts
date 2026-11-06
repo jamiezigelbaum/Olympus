@@ -1233,7 +1233,11 @@ export function chatgptDashboardClient(
     const why = seeWhy(source, id, !!progress && !!progress.stalled && !checking && !manual)
       || (archives ? archiveUnreadable(archives, id) || archiveNotRunning(archives, id) : null)
       || (joined ? archiveNotRunning(joined, id) : null);
-    if (source.supportDetails && (progress?.stalled || status === 'Failing' || status === 'Needs you' || source.lastManualSync?.outcome === 'failed')) {
+    // Details for support are for a source with a problem: Failing, Needs you, a Sync now that failed, or a stall a failure
+    // caused. A stall that is ordinary progress (the model still downloading, a stage that has not moved yet) leaves the row
+    // Working and offers none (owner rule 2026-11-04: an error only when Olympus truly can't ingest; #935).
+    const failedStall = !!progress?.stalled && (progress.stalledReason === 'provider_unavailable' || progress.stall?.cause === 'failing');
+    if (source.supportDetails && (failedStall || status === 'Failing' || status === 'Needs you' || source.lastManualSync?.outcome === 'failed')) {
       const report = el('pre', 'help', source.supportDetails);
       const copy = copyControl(report, 'support:' + id);
       copy.textContent = 'Copy details';
