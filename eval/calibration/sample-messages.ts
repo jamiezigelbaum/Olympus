@@ -8,7 +8,7 @@
 //
 //   bun eval/calibration/sample-messages.ts --stores DIR [--source NAME=DIR:COUNT ...]
 //     [--out DIR] [--seed N] [--since YYYY-MM-DD] [--private-share 0.3] [--check N] [--force]
-//     [--context N]
+//     [--context N] [--queued-only] [--per-group-cap N]
 //
 // `judgeSees` is the judge's input. An item still in the store's question queue
 // uses the queued input verbatim (`judgeSeesExact`). An answered item has lost
@@ -40,7 +40,6 @@ import { rng, shuffle } from './sample-random.ts';
 const MAX_TEXT_CHARS = 60_000;
 /** Shorter than this, a message ("ok", "thanks") only spends the owner's time. */
 const MIN_TEXT_CHARS = 15;
-const PER_GROUP_CAP = 3;
 const SHORT_CHARS = 80;
 const LONG_CHARS = 400;
 
@@ -68,6 +67,9 @@ const flag = (name: string) => {
 };
 
 const contextCount = Number(flag('--context') ?? 0);
+/** Only items still waiting for the judge: what a first pass would meet. */
+const queuedOnly = argv.includes('--queued-only');
+const PER_GROUP_CAP = Number(flag('--per-group-cap') ?? 3);
 
 interface LedgerRow {
   account_scope: string;
@@ -190,6 +192,10 @@ function sampleSource(spec: SourceSpec, stores: Stores, since: string, privateSh
       for (const row of pools[stratum]) {
         if (got >= quota) return;
         if (taken.has(row) || rejected.has(row)) continue;
+        if (queuedOnly && stores.queuedInput(row) === undefined) {
+          rejected.add(row);
+          continue;
+        }
         const found = stores.read(row);
         const authored = typeof found?.item['authored_at'] === 'string' ? found.item['authored_at'] : '';
         const mime = String(found?.item['mime_type'] ?? '');
@@ -319,6 +325,7 @@ function main(): void {
   const items: CalibrationSampleItem[] = [];
   const sources: Record<string, unknown> = {};
   for (const spec of SOURCES) {
+    if (!existsSync(join(storesDir, spec.dir))) continue;
     const stores = new Stores(join(storesDir, spec.dir));
     const { picked, report } = sampleSource(spec, stores, since, privateShare, random);
     items.push(...picked);
