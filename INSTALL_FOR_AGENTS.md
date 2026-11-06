@@ -938,10 +938,17 @@ lane, model and prompt version. Read what it would use (you run this):
 olympus tier classifier status
 ```
 
-Cloud privacy judging is off until the owner chooses **Venice** and a dollar
-spending limit in **Keys → Sort your archive by privacy** on this computer and
-approves it there. This applies after upgrading too: an old classifier approval
-alone is not the new spending choice. The screen states that Venice reads every
+On a new install, cloud privacy judging is off until the owner chooses **Venice**
+and a dollar spending limit in **Keys → Sort your archive by privacy** on this
+computer and approves it there. An upgrade depends on what the install was using:
+
+- If Venice is the active judge and that exact model and prompt are approved,
+  it keeps judging on Venice with no cap and is not asked again. Keys shows a
+  one-time note that a limit can now be set; the cap applies once one is saved.
+- If an old Venice approval exists but the install judges locally now, it stays
+  local. That approval is not a choice of cloud judging.
+
+The screen states that Venice reads every
 item, including items it marks Private, that E2EE is not available yet, and that
 the owner uses and pays for their own Venice account/key. A recommendation is
 not consent. Do not use the CLI approval as a substitute for that screen choice.
