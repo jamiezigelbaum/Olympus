@@ -91,6 +91,9 @@ URL unset for the existing entirely local path. This setting sends document
 text from every tier using this provider to the configured machine: configure
 only an endpoint you trust to read that text. Queries and any batch containing
 a picture stay on the local helpers; local model installation is still required.
+`OLYMPUS_EMBEDDING_SWEEP_MAX_ITEMS` raises the items per store per embedding
+pass (default 32, at most 4,096), so a fast remote helper isn't held to the pause
+between passes.
 
 The remote uses `/v1/handshake` and `/v1/embed`, with at most eight already
 framed texts per call and a 30-second timeout per request. The handshake must

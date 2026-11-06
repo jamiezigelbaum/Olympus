@@ -1780,6 +1780,20 @@ export const EMBEDDING_SWEEP_MAX_BACKOFF_MS = 30 * 60_000;
 /** Items per store per sweep pass. */
 export const EMBEDDING_SWEEP_MAX_ITEMS = 32;
 /**
+ * Raises the bound for a fast embedder (a GPU helper on another machine), where
+ * 32 items take about a second and the pause between passes would set the pace.
+ * The store deadline still ends a long pass.
+ */
+export const EMBEDDING_SWEEP_MAX_ITEMS_ENV = 'OLYMPUS_EMBEDDING_SWEEP_MAX_ITEMS';
+const EMBEDDING_SWEEP_MAX_ITEMS_CEILING = 4_096;
+
+export function embeddingSweepMaxItems(env: Record<string, string | undefined> = process.env): number {
+  const value = Number(env[EMBEDDING_SWEEP_MAX_ITEMS_ENV]);
+  return Number.isInteger(value) && value > 0
+    ? Math.min(value, EMBEDDING_SWEEP_MAX_ITEMS_CEILING)
+    : EMBEDDING_SWEEP_MAX_ITEMS;
+}
+/**
  * The longest one store's part of a sweep pass may take. A pass holds its
  * source's exclusive turn (source-account-guard.ts), so one that never ended
  * held every later sync and extraction of the source behind it (Sparta,
@@ -1847,6 +1861,7 @@ function embeddingSweepTask(
   targets: () => readonly ConnectorStoreEmbeddingTarget[],
   deadlineMs = EMBEDDING_SWEEP_STORE_DEADLINE_MS,
 ): SourceSchedulerTask {
+  const maxItems = embeddingSweepMaxItems();
   return {
     id: `${source.sourceId}_embeddings`,
     kind: 'embed',
@@ -1872,7 +1887,7 @@ function embeddingSweepTask(
         // Dropbox, whose Private store then embedded nothing for an hour).
         const stopAtMs = Date.now() + Math.floor(deadlineMs / 2);
         const result = await Promise.race([
-          embedPendingChunks([target], { maxItems: EMBEDDING_SWEEP_MAX_ITEMS, stopAtMs }),
+          embedPendingChunks([target], { maxItems, stopAtMs }),
           new Promise<typeof overran>((resolve) => { timer = setTimeout(() => resolve(overran), deadlineMs); }),
         ]).finally(() => clearTimeout(timer));
         if (result !== overran) {
@@ -1903,7 +1918,7 @@ function embeddingSweepTask(
       if (deferred === 0) {
         // A store that filled its bound has more owed: a backlog drains pass after pass, not one bound a minute.
         const more = runs.some((run) => run.busy !== true && run.chunksEmbedded > 0
-          && (run.itemsAttempted >= EMBEDDING_SWEEP_MAX_ITEMS || run.stoppedAtDeadline === true));
+          && (run.itemsAttempted >= maxItems || run.stoppedAtDeadline === true));
         if (counts.items_failed === 0) return { status, counts, ...(more ? { continueSoon: true } : {}) };
         // Skipped items are surfaced, not retried. A backlog still drains pass
         // after pass: one failed item, ever, once held every later pass of the

@@ -10,7 +10,7 @@ import type { RawItem, SourceConnector, SourceConnectorListPage } from '../src/c
 import { buildSourceSensitivity } from '../src/core/source-index/types.ts';
 import { embedPendingChunks, LocalConnectorStore } from '../src/workers/connector-store/index.ts';
 import type { SourceEmbeddingInput, SourceEmbeddingProvider } from '../src/workers/source-index/embeddings.ts';
-import { withEmbeddingSweep, type SourceSchedulerSource } from '../src/workers/source-scheduler.ts';
+import { EMBEDDING_SWEEP_MAX_ITEMS, EMBEDDING_SWEEP_MAX_ITEMS_ENV, embeddingSweepMaxItems, withEmbeddingSweep, type SourceSchedulerSource } from '../src/workers/source-scheduler.ts';
 
 const ACCOUNT = 'personal';
 // About 4,000 characters a chunk: 100 chunks, four batches of 32 and one of 4.
@@ -100,6 +100,15 @@ function lane(): SourceSchedulerSource {
 }
 
 describe('embedding pass time budget', () => {
+  test('the sweep bound rises only for a valid setting, and stays capped', () => {
+    const read = (value?: string) => embeddingSweepMaxItems({ [EMBEDDING_SWEEP_MAX_ITEMS_ENV]: value });
+    expect(read()).toBe(EMBEDDING_SWEEP_MAX_ITEMS);
+    expect(read('0')).toBe(EMBEDDING_SWEEP_MAX_ITEMS);
+    expect(read('many')).toBe(EMBEDDING_SWEEP_MAX_ITEMS);
+    expect(read('1024')).toBe(1024);
+    expect(read('999999')).toBe(4096);
+  });
+
   test('a pass past its budget keeps what it embedded, leaves the item queued, and the next pass finishes it', async () => {
     const store = await storeWith([rawItem('long', LONG_TEXT)]);
     const provider = slowProvider(25);
