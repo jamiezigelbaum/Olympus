@@ -20936,8 +20936,11 @@ class TierLedger {
             THEN ? || char(0) || 'held' || char(0) || i.generation || char(0) || i.decided_at
             ELSE ? END)
           -- Settled by a verdict under this classifier and sniffer (markJudged):
-          -- not re-asked while its decision stays under this classifier.
-          AND NOT (COALESCE(i.rejudged_key, '') = ? || char(0) || 'judged' AND i.state != 'pending' AND i.engine_version = ?)
+          -- not re-asked while its decision stays settled under this
+          -- classifier. A later decision that left it owed a verdict (fail-safe,
+          -- a retired source prior) is a candidate again, stamp or not.
+          AND NOT (COALESCE(i.rejudged_key, '') = ? || char(0) || 'judged' AND i.state != 'pending' AND i.engine_version = ?
+            AND instr(i.reasons_json, ':fail_safe:') = 0 AND instr(i.reasons_json, '"metadata:prior:source_') = 0)
           AND (i.state = 'current'
             -- Held for its text question alone: re-read once per classifier
             -- and sniffer, so a question lost from the sniffer's queue (a

@@ -101,3 +101,15 @@ test('a row still owed a verdict is never stamped: held, fail-safe, older classi
   prior.ledger.markJudged(prior.identity, KEY);
   expect(prior.ledger.rejudgeCandidatePage(KEY).causes).toEqual(['retired_prior']);
 });
+
+test('a stamp does not outlive a later decision that left the row owed a verdict', async () => {
+  const f = await lane();
+  f.judge();
+  f.ledger.markJudged(f.identity, KEY);
+  expect(f.ledger.rejudgeCandidatePage(KEY).records).toEqual([]);
+  // Later: another decision, its question lost, settled fail-safe (settleMissingQuestions).
+  const row = f.ledger.getCurrent(f.identity)!;
+  poke(f.ledger, 'UPDATE tier_items SET reasons_json = ?, content_tier = ? WHERE provider_item_id = ?',
+    JSON.stringify([...row.reasons.filter((reason) => !reason.startsWith('content:sniffer:')), `content:sniffer:${SNIFFER}:fail_safe:missing_question`]), 'secure', 'note');
+  expect(f.ledger.rejudgeCandidatePage(KEY).causes).toEqual(['missing_question']);
+});
