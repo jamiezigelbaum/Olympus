@@ -30667,7 +30667,10 @@ async function embedItemsIsolated(store, provider, localItemIds, scope = {}) {
     }
     let chunksEmbedded = 0;
     let itemsFailed = 0;
-    for (const localItemId of localItemIds) {
+    for (const [index, localItemId] of localItemIds.entries()) {
+      if (index > 0 && scope.stopAtMs !== undefined && Date.now() >= scope.stopAtMs) {
+        return { chunksEmbedded, itemsFailed, stoppedAtDeadline: true };
+      }
       const single = await embedItemsIsolated(store, provider, [localItemId], scope);
       chunksEmbedded += single.chunksEmbedded;
       itemsFailed += single.itemsFailed;

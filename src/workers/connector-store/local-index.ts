@@ -1777,7 +1777,12 @@ async function embedItemsIsolated(
     }
     let chunksEmbedded = 0;
     let itemsFailed = 0;
-    for (const localItemId of localItemIds) {
+    for (const [index, localItemId] of localItemIds.entries()) {
+      // One budget for the whole retry: each item's first batch always runs,
+      // so without this check every item past the deadline would still run.
+      if (index > 0 && scope.stopAtMs !== undefined && Date.now() >= scope.stopAtMs) {
+        return { chunksEmbedded, itemsFailed, stoppedAtDeadline: true };
+      }
       const single = await embedItemsIsolated(store, provider, [localItemId], scope);
       chunksEmbedded += single.chunksEmbedded;
       itemsFailed += single.itemsFailed;
