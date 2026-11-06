@@ -14,7 +14,7 @@ import { mkdtempSync, rmSync, writeFileSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { JudgeSpending, JudgeCloudStopped, judgeArchiveEstimate, readJudgeSpending, withJudgeSpendingStop } from '../src/workers/classification/judge-spending.ts';
-import { resolveJudgeChoiceRuntime } from '../src/workers/classification/built-in-sniffer.ts';
+import { resolveJudgeChoiceRuntime, resolveTierSnifferRuntime } from '../src/workers/classification/built-in-sniffer.ts';
 import { createSovereigntyEngine, loadSovereigntyPreset } from '../src/core/sovereignty.ts';
 import { renderJudgeChoice } from '../src/workers/dashboard/pages/local.ts';
 import { buildDashboardPreviewView } from '../scripts/dashboard-preview.ts';
@@ -317,23 +317,38 @@ test('Venice-only setup can record a no before visiting Keys and reports the pen
   await expect(runTierClassifier(['approve', '--why', 'Synthetic'], { env })).rejects.toThrow('Keys');
 });
 
+/** An install whose only classification lane is Venice, as before limits existed. */
+function veniceActive() {
+  const engine = createSovereigntyEngine(loadSovereigntyPreset('local-first'));
+  const isVenice = (profile: { provider: string }) => profile.provider === 'venice';
+  const input = { engine: {
+    config: { ...engine.config, modelProfiles: Object.fromEntries(Object.entries(engine.config.modelProfiles).filter(([, profile]) => profile.purpose !== 'classification' || isVenice(profile))) },
+    resolveAnalystPool: (...args: Parameters<typeof engine.resolveAnalystPool>) => {
+      const pool = engine.resolveAnalystPool(...args);
+      const accepts = (member: { profile: { provider: string } }) => isVenice(member.profile);
+      return { ...pool, members: pool.members.filter(accepts), ...(pool.explicitOrder ? { explicitOrder: pool.explicitOrder.filter(accepts) } : {}) };
+    },
+  } };
+  const cloud = resolveTierSnifferRuntime(input);
+  if (cloud.source === 'off' || cloud.lane.kind !== 'venice') throw new Error('expected Venice to be the active lane');
+  return { input, cloud };
+}
+
 test('an upgrade keeps an exact Venice approval judging with no cap until the owner sets one', async () => {
   const { budget, path } = fixture();
-  const engine = createSovereigntyEngine(loadSovereigntyPreset('local-first'));
-  const cloud = resolveJudgeChoiceRuntime({ engine }, { choice: 'venice', stop: null, remainingDollars: 20 });
-  if (cloud.source === 'off') throw new Error('expected a cloud lane');
+  const { input, cloud } = veniceActive();
   const promptVersion = snifferPromptVersions().approval;
   const ledger = path + '.ledger';
 
   // No approval: a new install stays local and nothing is written.
-  await adoptExistingCloudApproval(budget, cloud, ledger, promptVersion);
+  await adoptExistingCloudApproval(budget, input, ledger, promptVersion);
   expect(budget.hasRecord()).toBe(false);
   expect(budget.status().choice).toBe('local');
 
   await approveClassifier(ledger, cloud.lane, promptVersion, 'approved before limits existed');
-  await adoptExistingCloudApproval(budget, cloud, ledger, promptVersion);
+  await adoptExistingCloudApproval(budget, input, ledger, promptVersion);
   expect(budget.status()).toMatchObject({ choice: 'venice', uncapped: true, stop: null });
-  const running = resolveJudgeChoiceRuntime({ engine }, budget.status());
+  const running = resolveJudgeChoiceRuntime(input, budget.status());
   expect(running.source !== 'off' && running.lane.kind).toBe('venice');
 
   // Calls pass with no cap and no listed price; a 402 stays as it was before.
@@ -356,20 +371,18 @@ test('an upgrade keeps an exact Venice approval judging with no cap until the ow
 
 test('a saved choice is never overridden by an old approval, and a declined model is not adopted', async () => {
   const { budget, path } = fixture();
-  const engine = createSovereigntyEngine(loadSovereigntyPreset('local-first'));
-  const cloud = resolveJudgeChoiceRuntime({ engine }, { choice: 'venice', stop: null, remainingDollars: 20 });
-  if (cloud.source === 'off') throw new Error('expected a cloud lane');
+  const { input, cloud } = veniceActive();
   const promptVersion = snifferPromptVersions().approval;
   const ledger = path + '.ledger';
   await approveClassifier(ledger, cloud.lane, promptVersion, 'approved');
   budget.choose('local', 0);
-  await adoptExistingCloudApproval(budget, cloud, ledger, promptVersion);
+  await adoptExistingCloudApproval(budget, input, ledger, promptVersion);
   expect(budget.status().choice).toBe('local');
 
   const other = fixture();
   await approveClassifier(other.path + '.ledger', cloud.lane, promptVersion, 'approved');
   await revokeClassifier(other.path + '.ledger', cloud.lane, promptVersion, 'changed my mind');
-  await adoptExistingCloudApproval(other.budget, cloud, other.path + '.ledger', promptVersion);
+  await adoptExistingCloudApproval(other.budget, input, other.path + '.ledger', promptVersion);
   expect(other.budget.hasRecord()).toBe(false);
 });
 
@@ -381,4 +394,53 @@ test('the screen shows the upgrade note once and asks for a limit instead of sho
   expect(first).toContain('No spending limit is set');
   expect(first).toContain('required value=""');
   expect(renderJudgeChoice(view, { judgeSetup })).not.toContain('You can now set a spending limit');
+});
+
+test('an old Venice approval on an install judging locally now stays local', async () => {
+  const { budget, path } = fixture();
+  const engine = createSovereigntyEngine(loadSovereigntyPreset('local-first'));
+  const active = resolveTierSnifferRuntime({ engine });
+  expect(active.source !== 'off' && active.lane.kind).toBe('local');
+  const cloud = resolveJudgeChoiceRuntime({ engine }, { choice: 'venice', stop: null, remainingDollars: 20 });
+  if (cloud.source === 'off') throw new Error('expected a cloud lane');
+  const promptVersion = snifferPromptVersions().approval;
+  await approveClassifier(path + '.ledger', cloud.lane, promptVersion, 'approved earlier, then moved to a local judge');
+  await adoptExistingCloudApproval(budget, { engine }, path + '.ledger', promptVersion);
+  expect(budget.hasRecord()).toBe(false);
+  expect(budget.status().choice).toBe('local');
+  const selected = resolveJudgeChoiceRuntime({ engine }, budget.status());
+  expect(selected.source !== 'off' && selected.lane.kind).toBe('local');
+});
+
+test('the Keys page renders through the real setup object and shows the upgrade note once', async () => {
+  const { budget, path } = fixture();
+  budget.adoptExistingApproval();
+  const engine = createSovereigntyEngine(loadSovereigntyPreset('local-first'));
+  const judgeSetup = createJudgeSetup({ spending: budget, cloud: resolveJudgeChoiceRuntime({ engine }, { choice: 'venice', stop: null, remainingDollars: 20 }),
+    local: () => resolveJudgeChoiceRuntime({ engine }, { choice: 'local', stop: null, remainingDollars: 0 }),
+    ledgerPath: path + '.ledger', promptVersion: () => snifferPromptVersions().approval, credentialReady: () => true, requestReload: () => false });
+  const worker = createEmailSourceWorker({
+    sourceIndexStatus: { status: async () => ({ kind: 'source_index_status', generated_at: '2026-11-06T00:00:00.000Z', corpora: [],
+      policy: { read_only: true, raw_source_exposed: false, source_text_returned: false, secure_local_item_metadata_exposed: false, castor_visible: true } }) as never },
+    sourceDashboard: { sovereigntyEngine: engine, registryPath: path + '-handles.json', judgeSetup },
+  });
+  cleanup.push(() => worker.close());
+  const fetcher = withWorkerBearerAuth(worker.fetch, { authToken: 'synthetic-bearer' });
+  const origin = 'http://127.0.0.1:17777';
+  const mintRequest = new Request(origin + DASHBOARD_LOCAL_CONTROL_SESSION_PATH, { method: 'POST', headers: { Origin: origin } });
+  recordRequestPeer(mintRequest, '127.0.0.1');
+  const cookie = (await fetcher(mintRequest)).headers.get('Set-Cookie')!.split(';')[0]!;
+  const keys = async () => {
+    const page = new Request(origin + '/dashboard?keys', { headers: { Cookie: cookie } });
+    recordRequestPeer(page, '127.0.0.1');
+    const reply = await fetcher(page);
+    expect(reply.status).toBe(200);
+    return reply.text();
+  };
+  const first = await keys();
+  expect(first).toContain('Sort your archive by privacy');
+  expect(first).toContain('You can now set a spending limit');
+  const second = await keys();
+  expect(second).toContain('Sort your archive by privacy');
+  expect(second).not.toContain('You can now set a spending limit');
 });

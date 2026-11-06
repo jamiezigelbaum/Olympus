@@ -1,15 +1,19 @@
 import { approveClassifier, isClassifierApproved, readClassificationLedger, revokeClassifier } from '../classification-ledger.ts';
-import type { TierSnifferRuntime } from './built-in-sniffer.ts';
+import { resolveTierSnifferRuntime, type TierSnifferRuntime } from './built-in-sniffer.ts';
 import type { SnifferLane } from './sniffer-lane.ts';
 import { JudgeSpending, judgeCapMicros, JUDGE_PRICES } from './judge-spending.ts';
 import { normalizeVeniceAnalystModelId } from '../../core/venice-models.ts';
 
-/** Existing installs are never re-asked: an exact approval already on the ledger,
- * with no spending record yet, is the owner's opt-in. New choices stay local. */
-export async function adoptExistingCloudApproval(spending: JudgeSpending, cloud: TierSnifferRuntime, ledgerPath: string, promptVersion: string): Promise<void> {
-  if (cloud.source === 'off' || cloud.lane.kind !== 'venice' || spending.hasRecord()) return;
+/** Existing installs are never re-asked: when the lane this install would use
+ * without any saved choice is Venice, and that exact lane is approved, the
+ * approval is the owner's opt-in. An old Venice approval on an install that
+ * now judges locally is not: it stays local. New choices stay local too. */
+export async function adoptExistingCloudApproval(spending: JudgeSpending, input: Parameters<typeof resolveTierSnifferRuntime>[0], ledgerPath: string, promptVersion: string): Promise<void> {
+  if (spending.hasRecord()) return;
+  const active = resolveTierSnifferRuntime(input);
+  if (active.source === 'off' || active.lane.kind !== 'venice') return;
   const { entries } = await readClassificationLedger(ledgerPath);
-  if (isClassifierApproved(entries, { lane: cloud.lane.kind, profileId: cloud.lane.profileId, modelId: cloud.lane.modelId, promptVersion })) spending.adoptExistingApproval();
+  if (isClassifierApproved(entries, { lane: active.lane.kind, profileId: active.lane.profileId, modelId: active.lane.modelId, promptVersion })) spending.adoptExistingApproval();
 }
 
 /** The local screen uses the CLI's exact-model approval ledger. Opting out
@@ -24,12 +28,13 @@ export function createJudgeSetup(options: {
   requestReload: () => boolean;
 }) {
   const cloud = options.cloud;
+  const status = () => ({ ...options.spending.status(),
+    cloudModel: cloud.source === 'off' ? null : cloud.lane.modelId,
+    cloudAvailable: cloud.source !== 'off' && Boolean(JUDGE_PRICES[normalizeVeniceAnalystModelId(cloud.lane.modelId)]),
+  });
   return {
-    status: () => ({ ...options.spending.status(),
-      cloudModel: cloud.source === 'off' ? null : cloud.lane.modelId,
-      cloudAvailable: cloud.source !== 'off' && Boolean(JUDGE_PRICES[normalizeVeniceAnalystModelId(cloud.lane.modelId)]),
-    }),
-    pageStatus() { return { ...this.status(), upgradeNote: options.spending.takeUpgradeNote() }; },
+    status,
+    pageStatus: () => ({ ...status(), upgradeNote: options.spending.takeUpgradeNote() }),
     async save(choice: 'local' | 'venice', capDollars: number): Promise<{ ok: true; status_message: string }> {
       judgeCapMicros(capDollars);
       if (choice === 'local') {

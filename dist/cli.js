@@ -141375,24 +141375,26 @@ var init_remote_relay_runtime = __esm(() => {
 });
 
 // src/workers/classification/judge-setup.ts
-async function adoptExistingCloudApproval(spending, cloud, ledgerPath, promptVersion) {
-  if (cloud.source === "off" || cloud.lane.kind !== "venice" || spending.hasRecord())
+async function adoptExistingCloudApproval(spending, input, ledgerPath, promptVersion) {
+  if (spending.hasRecord())
+    return;
+  const active = resolveTierSnifferRuntime(input);
+  if (active.source === "off" || active.lane.kind !== "venice")
     return;
   const { entries } = await readClassificationLedger(ledgerPath);
-  if (isClassifierApproved(entries, { lane: cloud.lane.kind, profileId: cloud.lane.profileId, modelId: cloud.lane.modelId, promptVersion }))
+  if (isClassifierApproved(entries, { lane: active.lane.kind, profileId: active.lane.profileId, modelId: active.lane.modelId, promptVersion }))
     spending.adoptExistingApproval();
 }
 function createJudgeSetup(options) {
   const cloud = options.cloud;
+  const status = () => ({
+    ...options.spending.status(),
+    cloudModel: cloud.source === "off" ? null : cloud.lane.modelId,
+    cloudAvailable: cloud.source !== "off" && Boolean(JUDGE_PRICES[normalizeVeniceAnalystModelId(cloud.lane.modelId)])
+  });
   return {
-    status: () => ({
-      ...options.spending.status(),
-      cloudModel: cloud.source === "off" ? null : cloud.lane.modelId,
-      cloudAvailable: cloud.source !== "off" && Boolean(JUDGE_PRICES[normalizeVeniceAnalystModelId(cloud.lane.modelId)])
-    }),
-    pageStatus() {
-      return { ...this.status(), upgradeNote: options.spending.takeUpgradeNote() };
-    },
+    status,
+    pageStatus: () => ({ ...status(), upgradeNote: options.spending.takeUpgradeNote() }),
     async save(choice, capDollars) {
       judgeCapMicros(capDollars);
       if (choice === "local") {
@@ -141434,6 +141436,7 @@ function createJudgeSetup(options) {
 }
 var init_judge_setup = __esm(() => {
   init_classification_ledger();
+  init_built_in_sniffer();
   init_judge_spending();
   init_venice_models();
 });
@@ -166818,7 +166821,7 @@ function createEmailSourceWorker(options = {}) {
               view: view3,
               options: {
                 ...controlSessionCsrfToken ? { controlSessionCsrfToken } : {},
-                ...sourceDashboard.judgeSetup ? { judgeSetup: (sourceDashboard.judgeSetup.pageStatus ?? sourceDashboard.judgeSetup.status)() } : {},
+                ...sourceDashboard.judgeSetup ? { judgeSetup: sourceDashboard.judgeSetup.pageStatus?.() ?? sourceDashboard.judgeSetup.status() } : {},
                 outsideHelpLocalSession: request.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER) === "local",
                 messagingLocalSession: Boolean(controlSessionCsrfToken) && request.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER) === "local",
                 ...controlSessionCsrfToken && sourceDashboard.consult ? { outsideHelp: await sourceDashboard.consult.status().catch(() => {
@@ -213425,7 +213428,7 @@ async function main() {
     standaloneEngine: isStandaloneEngineProcess(process.env)
   };
   const cloudJudgeRuntime = resolveJudgeChoiceRuntime(judgeRuntimeInput, { choice: "venice", stop: null, remainingDollars: 1 });
-  await adoptExistingCloudApproval(judgeSpending, cloudJudgeRuntime, resolveClassificationLedgerPath(process.env), snifferPromptVersions(privacyOwnerContext({ env: process.env })).approval);
+  await adoptExistingCloudApproval(judgeSpending, judgeRuntimeInput, resolveClassificationLedgerPath(process.env), snifferPromptVersions(privacyOwnerContext({ env: process.env })).approval);
   const snifferRuntime = resolveJudgeChoiceRuntime(judgeRuntimeInput, judgeSpending.status());
   const snifferLane = snifferRuntime.source === "off" ? undefined : snifferRuntime.lane;
   if (snifferRuntime.source === "off") {

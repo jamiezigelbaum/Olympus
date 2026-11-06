@@ -1628,7 +1628,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
               view,
               options: {
                 ...(controlSessionCsrfToken ? { controlSessionCsrfToken } : {}),
-                ...(sourceDashboard.judgeSetup ? { judgeSetup: (sourceDashboard.judgeSetup.pageStatus ?? sourceDashboard.judgeSetup.status)() } : {}),
+                ...(sourceDashboard.judgeSetup ? { judgeSetup: sourceDashboard.judgeSetup.pageStatus?.() ?? sourceDashboard.judgeSetup.status() } : {}),
                 outsideHelpLocalSession: request.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER) === 'local',
                 messagingLocalSession: Boolean(controlSessionCsrfToken) && request.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER) === 'local',
                 ...(controlSessionCsrfToken && sourceDashboard.consult ? { outsideHelp: await sourceDashboard.consult.status().catch(() => undefined) } : {}),
