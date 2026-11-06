@@ -1,3 +1,4 @@
+import { judgeArchiveEstimate, JUDGE_PRICE_DATE, LOCAL_JUDGE_MEASUREMENT, VENICE_JUDGE_ESTIMATE, type JudgeSpendingStatus } from '../../classification/judge-spending.ts';
 import { sourceFailureKind, sourceSupportDetails } from '../source-failure.ts';
 /**
  * The computer's own pages (unified dashboard phase 4, 2026-10-09): what
@@ -59,7 +60,9 @@ import {
   dashboardSetupLead,
 } from '../vocabulary.ts';
 
+export interface DashboardJudgeSetup extends JudgeSpendingStatus { cloudModel: string | null; cloudAvailable: boolean }
 export interface DashboardPageOptions {
+  judgeSetup?: DashboardJudgeSetup;
   now?: Date;
   /** Pairing credentials and chat choices require locally minted controls. */
   messagingLocalSession?: boolean;
@@ -162,6 +165,7 @@ export function renderDashboardKeysPage(view: SourceDashboardViewModel, options?
   const body = [
     dashboardControlGate({ connected: unlocked(options) }),
     renderModelSetupBlocker(view.model_setup),
+    renderJudgeChoice(view, options),
     `<div id="private-routing"><div${view.model_setup?.cards.some(card => card.id === 'venice') ? ' id="venice-setup"' : ''}>${renderModelSetup(view.model_setup)}</div></div>`,
     view.model_setup?.cards.some(card => card.id === 'venice') ? '' : `<section id="venice-setup"><h3 class="sect">${escapeHtml(DASHBOARD_PRIVATE_ANSWERS_COPY.setUpVenice)}</h3><p class="pnote">${escapeHtml(DASHBOARD_PRIVATE_ANSWERS_COPY.veniceSetupHelp)}</p><div class="modelaction"><form method="post" action="/dashboard/connect/api-key" data-connect-kind="api_key" data-model-provider="venice"><input type="hidden" name="source" value="venice"><input class="keyfield" type="password" name="api_key" required autocomplete="new-password" placeholder="${escapeHtml(DASHBOARD_PRIVATE_ANSWERS_COPY.veniceKey)}" aria-label="${escapeHtml(DASHBOARD_PRIVATE_ANSWERS_COPY.veniceKey)}"><button type="submit" class="btn primary">${escapeHtml(DASHBOARD_PRIVATE_ANSWERS_COPY.connectVenice)}</button><span data-action-message role="status"></span></form></div></section>`,
     `<section id="anonymous"><h3 class="sect">${escapeHtml(DASHBOARD_PRIVATE_ANSWERS_COPY.anonymousTitle)}</h3>${options?.outsideHelp ? renderOutsideHelpCard(options.outsideHelp, { ...(options.controlSessionCsrfToken !== undefined ? { csrfToken: options.controlSessionCsrfToken } : {}), localSession: options.outsideHelpLocalSession === true, untitled: true }) : `<p data-outside-unavailable>${escapeHtml(DASHBOARD_PRIVATE_ANSWERS_COPY.anonymousNotSetUp)}</p>`}</section>`,
@@ -381,4 +385,34 @@ function sourceSupportBlock(source: DashboardSourceCard): string {
   const id = `source-support-${source.source_id.replace(/[^a-z0-9-]/gi, '-')}`;
   const report = sourceSupportDetails({ sourceId: source.source_id, state: source.connection.state, failure: sourceFailureKind(source.schedule?.last_error_kind, source.schedule?.degraded_reason), ref: source.schedule?.last_error_hash });
   return `<details><summary>Details for support</summary><pre class="promptbox" id="${id}">${escapeHtml(report)}</pre><button type="button" class="btn" data-copy-target="#${id}">Copy details</button><span data-copy-status aria-live="polite"></span><p>No names, numbers, emails, chats or folder titles.</p></details>`;
+}
+
+/** Counts are the connected sources' stored items, not a promise of full discovery. */
+export function renderJudgeChoice(view: SourceDashboardViewModel, options?: DashboardPageOptions): string {
+  const status = options?.judgeSetup;
+  if (!status) return '';
+  const items = view.sources.reduce((sum, source) => sum + (source.coverage.stored_items ?? source.coverage.indexed_items), 0);
+  const estimate = judgeArchiveEstimate(items, status.cloudModel ?? '');
+  const money = (n: number) => n.toLocaleString('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: 2, maximumFractionDigits: 4 });
+  const hours = (n: number) => n.toLocaleString('en-US', { maximumFractionDigits: 1 });
+  const cloud = status.stop !== 'storage' && status.cloudAvailable && estimate.cloudDollars !== null;
+  const stopped = status.stop === 'storage'
+    ? '<p role="alert">The saved spending record cannot be read. Cloud judging is off; local judging can continue. Restore the spending record from a backup or repair its access, then restart Olympus. <a href="/dashboard?help">Open Help</a></p>'
+    : status.stop === 'payment'
+    ? '<p role="alert">Venice stopped because your account needs credit (HTTP 402). <a href="https://venice.ai/settings/api" target="_blank" rel="noopener noreferrer">Check your Venice credit or account</a>, then approve cloud judging again below. Your remaining items stay Private and use the free local judge when available.</p>'
+    : status.stop === 'cap' ? '<p role="status">Cloud judging reached your spending limit. Remaining items stay Private and use the free local judge when available. Raise the total limit below to continue with Venice.</p>' : '';
+  return `<section id="privacy-judge"><h3 class="sect">Sort your archive by privacy</h3>
+    <p>Estimates for ${items.toLocaleString('en-US')} items found so far in your connected sources. Counts grow as Olympus reads more. Long documents take longer and cost more.</p>
+    <p>Recommended: ${estimate.recommended === 'venice' ? 'Venice for this archive size, if you choose to send it to the cloud' : 'the free judge on this computer'}. Cloud stays off until you choose and approve it.</p>
+    <form data-judge-choice><fieldset${unlocked(options) ? '' : ' disabled'}><legend>Choose where privacy sorting happens</legend>
+    <label><input type="radio" name="choice" value="local"${status.choice === 'local' ? ' checked' : ''}> This computer — free ($0), about ${hours(estimate.shortHours)}–${hours(estimate.longHours)} hours, or ${hours(estimate.shortHours / 8)}–${hours(estimate.longHours / 8)} nights of 8 hours (estimate).</label>
+    <p>With this choice, nothing is sent to a cloud judge. Based on a ${LOCAL_JUDGE_MEASUREMENT.computer} with a ${LOCAL_JUDGE_MEASUREMENT.model}: ${LOCAL_JUDGE_MEASUREMENT.shortPerMinute} short or ${LOCAL_JUDGE_MEASUREMENT.longPerMinute} long items a minute, measured ${LOCAL_JUDGE_MEASUREMENT.date}. Your computer may differ. This estimate does not schedule overnight work.</p>
+    <label><input type="radio" name="choice" value="venice"${status.choice === 'venice' ? ' checked' : ''}${cloud ? '' : ' disabled'}> Venice${status.cloudModel ? ' (' + escapeHtml(status.cloudModel) + ')' : ''} — ${estimate.cloudDollars === null ? 'cost unavailable' : 'about ' + money(estimate.cloudDollars)}, about ${hours(estimate.cloudHours)} hours continuously (estimate).</label>
+    <p>The cloud judge reads every item before it is sorted, including items it marks Private. An end-to-end encrypted option is not available yet. You use your own Venice account and API key; you pay Venice. Olympus pays for nothing.</p>
+    <p>Cloud estimates assume 800 input and 80 output tokens per item, one call per item, and about ${VENICE_JUDGE_ESTIMATE.itemsPerMinute} items a minute (${VENICE_JUDGE_ESTIMATE.date}). Your account limits, document length and additional privacy checks can change the time and cost. Listed prices checked ${JUDGE_PRICE_DATE}.</p>
+    ${cloud || status.stop === 'storage' ? '' : '<p>Set up an allowed Venice model in Private answers first. A listed price is required. Add your own key in the Venice section below.</p>'}
+    <label>Total cloud spending limit (US dollars) <input type="number" name="cap_dollars" min="0" step="0.01" required value="${status.capDollars}"></label>
+    <p>${status.stop === 'storage' ? 'Spending amounts are unavailable.' : `Spent or reserved: ${money(status.spentDollars)}. Remaining: ${money(status.remainingDollars)}.`} This total survives restarts. Olympus reserves an estimated maximum before each call; uncertain calls keep that reservation. A call that will not fit stops cloud judging. Newest items are checked first; remaining items stay Private and continue with the free local judge when available. Your Venice bill may differ from these estimates.</p>
+    ${stopped}<button class="btn primary" type="submit">Save and approve this choice</button><span data-action-message role="status"></span>
+    </fieldset></form></section>`;
 }

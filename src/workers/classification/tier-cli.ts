@@ -1,3 +1,4 @@
+import { approveClassifier, revokeClassifier } from '../classification-ledger.ts';
 // `olympus tier ...` (design section 2.4): per-item overrides, explanations,
 // owner tier rules, and the classifier approval.
 //
@@ -552,11 +553,13 @@ export async function runTierClassifier(args: readonly string[], context: TierCl
     : { lane: lane.kind, profile: lane.profileId, modelId: lane.modelId };
   if (command === 'status') {
     const ledger = await readClassificationLedger(ledgerPath);
+    const cloudDeclined = runtime.source === 'off' && runtime.cloudLane && classifierDecision(ledger.entries, { lane: runtime.cloudLane.kind, profileId: runtime.cloudLane.profileId, modelId: runtime.cloudLane.modelId, promptVersion }) === 'declined';
     const decision = 'refused' in lane
-      ? (lane.refused === 'no_private_lane' ? 'not_applicable' : 'refused')
+      ? (runtime.source === 'off' && runtime.cloudChoiceRequired ? (cloudDeclined ? 'declined' : 'not_asked') : lane.refused === 'no_private_lane' ? 'not_applicable' : 'refused')
       : classifierDecision(ledger.entries, { lane: lane.kind, profileId: lane.profileId, modelId: lane.modelId, promptVersion: promptVersion });
     return {
       ...laneSummary,
+      ...(runtime.source === 'off' && runtime.cloudChoiceRequired ? { next_step: cloudDeclined ? 'Cloud judging is off by your choice. Remaining items stay Private until a local judge is available.' : 'Cloud judging is off until you choose Venice and a spending limit in Keys on this computer. Remaining items stay Private.' } : {}),
       promptVersion: promptVersion,
       approved: decision === 'approved',
       // What the install receipt reports: approved, declined, refused,
@@ -573,48 +576,21 @@ export async function runTierClassifier(args: readonly string[], context: TierCl
     const why = options.get('why')?.trim();
     if (!why) throw new OperationError('invalid_params', '--why is required: say what is approved and why.');
     if ('refused' in lane) {
+      if (runtime.source === 'off' && runtime.cloudChoiceRequired) throw new OperationError('invalid_params', 'Open Keys on this computer, choose Venice and a spending limit, then approve it there. Cloud judging is off until that choice.');
       throw new OperationError('invalid_params', `No private sniffer lane is configured (${lane.refused}); there is nothing to approve.`);
     }
     // The approval names exactly what the worker would use: the resolved
     // lane, profile and model, and the prompt version derived from the
     // prompt text. Any change to one of them needs a new approval.
-    const modelId = lane.modelId;
-    const entry = {
-      recorded_at: (context.now?.() ?? new Date()).toISOString(),
-      kind: 'classifier_model_decision' as const,
-      what: `The owner approved ${lane.kind} classifier model ${modelId} (profile ${lane.profileId}) with prompt ${promptVersion} for the privacy sniffer.`,
-      model_id: modelId,
-      prompt_version: promptVersion,
-      lane: lane.kind,
-      profile_id: lane.profileId,
-      why,
-      approved_by: CLASSIFICATION_LEDGER_OWNER_APPROVAL,
-      status: 'complete' as const,
-    };
-    await appendClassificationLedgerEntry(ledgerPath, entry);
+    const entry = await approveClassifier(ledgerPath, lane, promptVersion, why, context.now?.() ?? new Date());
     return { ledger: ledgerPath, recorded: entry };
   }
   if (command === 'decline') {
-    // A no is a complete answer, so a reason is optional; recording it is
-    // what lets status tell "declined" from "never asked".
     const options = parseFlags(rest, ['why']);
     const why = options.get('why')?.trim();
-    if ('refused' in lane) {
-      throw new OperationError('invalid_params', `No private sniffer lane is configured (${lane.refused}); there is nothing to decline.`);
-    }
-    const entry = {
-      recorded_at: (context.now?.() ?? new Date()).toISOString(),
-      kind: 'classifier_model_revoked' as const,
-      what: `The owner declined ${lane.kind} classifier model ${lane.modelId} (profile ${lane.profileId}) with prompt ${promptVersion} for the privacy sniffer; possibly-private items stay held as Private.`,
-      model_id: lane.modelId,
-      prompt_version: promptVersion,
-      lane: lane.kind,
-      profile_id: lane.profileId,
-      ...(why ? { why } : {}),
-      approved_by: CLASSIFICATION_LEDGER_OWNER_APPROVAL,
-      status: 'complete' as const,
-    };
-    await appendClassificationLedgerEntry(ledgerPath, entry);
+    const declinedLane = 'refused' in lane ? runtime.source === 'off' ? runtime.cloudLane : undefined : lane;
+    if (!declinedLane) throw new OperationError('invalid_params', 'No private sniffer lane is configured; there is nothing to decline.');
+    const entry = await revokeClassifier(ledgerPath, declinedLane, promptVersion, why, context.now?.() ?? new Date());
     return { ledger: ledgerPath, recorded: entry };
   }
   throw new OperationError('invalid_params', `Usage: ${TIER_CLI_USAGE['tier classifier']}`);

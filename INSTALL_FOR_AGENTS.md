@@ -938,8 +938,25 @@ lane, model and prompt version. Read what it would use (you run this):
 olympus tier classifier status
 ```
 
+Cloud privacy judging is off until the owner chooses **Venice** and a dollar
+spending limit in **Keys → Sort your archive by privacy** on this computer and
+approves it there. This applies after upgrading too: an old classifier approval
+alone is not the new spending choice. The screen states that Venice reads every
+item, including items it marks Private, that E2EE is not available yet, and that
+the owner uses and pays for their own Venice account/key. A recommendation is
+not consent. Do not use the CLI approval as a substitute for that screen choice.
+If status supplies `next_step`, follow it: open **Keys → Sort your archive by
+privacy** before completing Steps 3 and 6. This setup-screen visit is allowed
+before the final dashboard handoff; do not wait for a completed classifier
+receipt to let the owner reach its approval screen. A Venice-only policy with
+no local fallback can say `not_asked` while awaiting this choice. The owner may
+choose local/off in Keys, or decline with the CLI; status then reports
+`declined`, even with no local judge available. Remaining items stay Private.
+The local judge remains the default when available. Cap/payment stops keep
+remaining items Private and use the free local judge when available.
+
 It reports `lane` (`local` or `venice`), `profile`, `modelId`, `approved` and
-`decision`, or `lane: null` with a `refused` reason. On `no-sensitive` the
+`decision`, or `lane: null` with a `refused` reason. Only when the chosen preset is `no-sensitive`, the
 reason is `no_private_lane` and `decision` is `not_applicable`: there is
 nothing to approve, so skip this gate and do not explain or ask about the
 classifier. Its only mention is the one Step 6 summary line, "Privacy
@@ -983,9 +1000,11 @@ olympus tier classifier decline --why "<operator's reason, if given>"
 
 A later change of model, lane or prompt stops the classifier until the
 operator approves again. Either way, `olympus tier classifier status` then
-reports `decision` as `approved` or `declined`; `not_asked` means this gate
-has not been cleared. The Step 6 completion receipt reads that field, so this
-gate cannot be skipped on the way to the handoff.
+reports `decision` as `approved` or `declined`. A `not_asked` result with
+`next_step` sends the owner to Keys to choose and approve cloud judging or
+choose local/off. Open that setup screen now, before the completion receipt;
+it must not be held behind the final dashboard handoff. Other `not_asked`
+results still need the classifier question above.
 
 ## Step 4 — Verify the worker
 
@@ -1395,9 +1414,14 @@ readiness checks documented in Step 3. Then prove the worker consumes that wirin
   (`approved`, the operator's recorded yes), **declined** (`declined`, the
   operator's recorded no), **refused** (`refused`, with the `refused`
   reason), or **not applicable** (`not_applicable`: `no-sensitive`, reason
-  `no_private_lane`). `not_asked` means the Step 3 gate was never cleared: go
-  back and ask it now. Do not send the dashboard handoff until this line reads
-  one of those four outcomes.
+  `no_private_lane`). For `not_asked` with `next_step`, open Keys now so the
+  owner can make the cloud choice and set a cap, or choose local/off. Report
+  the decision as pending until they answer; still hand over the working
+  dashboard so they can reach that screen. Other `not_asked` results need the
+  Step 3 classifier question. Do not describe a pending choice as approved.
+  For the final completed-installation receipt only: Do not send the dashboard
+  handoff until this line reads one of those four outcomes. This final receipt
+  rule never blocks the earlier Keys handoff needed to collect that answer.
 
 A provider key being present, a configured model profile, or a check reported
 as **Skipped** is not readiness. A Venice key also does not prove usable API

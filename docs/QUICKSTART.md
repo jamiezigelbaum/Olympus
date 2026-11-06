@@ -225,25 +225,45 @@ than stored; rotate it at the provider for one without.
 For `local-first` and `local-only`, start your local OpenAI-compatible model
 server before relying on Private source answers.
 
-Then decide on the private classifier. For items whose names look possibly
-private, Olympus asks a private model — your local model, or Venice Private on
-`private-cloud-only` — whether they are Personal or Private, one item at a
-time. It sends the title, folder path and folder names, labels and sender,
-and, when the content itself looks sensitive, a short excerpt of up to the
-first 1,200 characters of text; never anything that looks like a secret. It
-never uses an ordinary cloud model, and it does nothing until you approve the
-exact model:
+Choose privacy sorting in the dashboard's **Keys → Sort your archive by privacy**.
+The screen estimates time and cost from the items found so far in your connected
+sources. The free local judge is the default. Venice is recommended only when
+even the measured short-item rate would take more than fourteen 8-hour nights.
+These are estimates, not an overnight schedule; this slice adds no idle mode.
 
-```bash
-olympus tier classifier status
-olympus tier classifier approve --why "<your reason>"
-```
+Cloud judging stays off until you explicitly choose and approve it on this
+computer. It uses an existing Venice model allowed by your Private-answer
+policy and your own Venice account/key; Olympus pays for nothing. The cloud
+judge reads every item before sorting, including items it marks Private. An
+end-to-end encrypted judge is not available yet. The existing model privacy
+and exact-model/prompt approval gates still apply.
 
-Without approval those items stay Private and are found only by keyword
-search meanwhile. To record a no, run `olympus tier classifier decline`;
-`status` then reports `decision: "declined"` rather than `"not_asked"`. `no-sensitive` has no classifier lane and nothing to
-approve; if `status` reports any other refusal, the policy names a model the
-classifier may not use, and it stays off.
+Set a **total cloud spending limit** in dollars, not a fresh allowance per
+restart. Keys shows spent/reserved and remaining amounts. Before sending a
+judge request, Olympus durably reserves the estimated maximum input/output
+cost at the dated listed price. Successful usage reports release excess
+reservation; definite rejected requests release theirs, and unknown outcomes
+retain it. An unreadable spending record stops cloud judging, is shown in Keys,
+and leaves the rest of Olympus available with the local judge. These estimates can differ from
+Venice's bill. A call that cannot fit stops cloud judging. The managed worker
+reloads onto the free local judge when available; questions stay pending and
+Private until judged, without a failed attempt or a tier change from the stop.
+Cloud judging works newest first. Its dollar cap replaces the default daily
+call cap; an explicitly configured daily call limit still applies.
+
+A Venice HTTP 402 stops cloud judging durably and appears in Keys with a link
+to check your Venice account/credit. Fix the account, then approve cloud
+judging again. Raising the total cap or reapproving never erases prior spend.
+A model without a listed price cannot be selected for cloud judging. Managed workers apply the choice through the existing reload support. A
+hand-started worker must be restarted to change its active judge or resume judging after a stop; opting out
+and lowering an active cloud cap take effect at the dispatch gate immediately.
+
+The judge sends names and, for the content pass, a short excerpt of up to the
+first 1,200 characters; Secrets screens run first. Model approval uses the same
+classification ledger as `olympus tier classifier approve --why "<reason>"`.
+`olympus tier classifier status` reports the active lane. Without its approval,
+items needing the judge stay Private and remain available by keyword search.
+Use `olympus tier classifier decline` to revoke that model's approval.
 
 On `no-sensitive`, setup and doctor still show `secure_local` routed
 `"mode": "disabled"` with an empty pool: Private items are searched by meaning

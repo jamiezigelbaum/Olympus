@@ -566,6 +566,10 @@ export interface EmailSourceWorkerOptions {
     apiKeyFetch?: OAuthFetch;
     connectApiKey?: typeof connectPublicApiKeySource;
     systemReport?: () => SystemSupportFacts;
+    judgeSetup?: {
+      status: () => import('../dashboard/pages/local.ts').DashboardJudgeSetup;
+      save: (choice: 'local' | 'venice', capDollars: number) => Promise<{ ok: true; status_message: string }>;
+    };
     modelSetup?: () => ModelSetupView;
     checkModelSetup?: () => Promise<ModelSetupView>;
     discoverLocalModels?: (baseUrl?: string) => Promise<LocalModelDiscoveryResult[]>;
@@ -1623,6 +1627,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
               view,
               options: {
                 ...(controlSessionCsrfToken ? { controlSessionCsrfToken } : {}),
+                ...(sourceDashboard.judgeSetup ? { judgeSetup: sourceDashboard.judgeSetup.status() } : {}),
                 outsideHelpLocalSession: request.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER) === 'local',
                 messagingLocalSession: Boolean(controlSessionCsrfToken) && request.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER) === 'local',
                 ...(controlSessionCsrfToken && sourceDashboard.consult ? { outsideHelp: await sourceDashboard.consult.status().catch(() => undefined) } : {}),
@@ -2117,6 +2122,19 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
                 : 'No connection attempt was pending.',
             });
           });
+        }
+
+        if (request.method === 'POST' && url.pathname === '/dashboard/models/judge') {
+          if (!request.headers.has(DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER) || request.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER) !== 'local') {
+            return json({ ok: false, error: { code: 'local_dashboard_only', message: 'Choose this in an unlocked dashboard on this computer.' } }, 403);
+          }
+          const input = await parseObjectBody(request);
+          if ((input.choice !== 'local' && input.choice !== 'venice') || typeof input.cap_dollars !== 'number' || !Number.isFinite(input.cap_dollars) || input.cap_dollars < 0) {
+            throw new EmailSourceWorkerError(400, 'invalid_request', 'Choose a judge and enter a spending limit in dollars.');
+          }
+          if (!sourceDashboard?.judgeSetup) throw new EmailSourceWorkerError(501, 'not_available', 'Judge setup is unavailable.');
+          try { return json(await sourceDashboard.judgeSetup.save(input.choice, input.cap_dollars)); }
+          catch (error) { return json({ ok: false, error: { code: 'judge_setup_failed', message: error instanceof Error ? error.message : 'The judge choice could not be saved.' } }, 409); }
         }
 
         if (request.method === 'POST' && url.pathname === '/dashboard/engine/computer-use') {

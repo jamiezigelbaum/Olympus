@@ -480,7 +480,7 @@ model is chosen from this policy, never from an ordinary cloud lane:
 |---|---|
 | local-first | local model (`local-source-answer`) |
 | local-only | local model |
-| private-cloud-only | Venice Private (`venice-private`) |
+| private-cloud-only | Venice Private (`venice-private`) after the Keys cloud-judging opt-in and spending limit; local fallback when available |
 | no-sensitive | none: flagged items stay pending, held Private |
 
 The sniffer uses only what the secure_local route already approves for
@@ -496,13 +496,22 @@ the lane stops it until the owner approves again; flagged items wait, pending
 and held Private, meanwhile. An answer that needs the private pool aborts the
 sniffer's in-flight call.
 
-**Which model, when both are allowed.** Without a declared classifier the
-sniffer uses the pool's local model when there is one, and Venice only when
-there is none. A profile the owner declares with `"purpose":
-"classification"` is an explicit choice and is used as declared, even when
-the pool also has a local model. So `local-first` plus a declared Venice
-classifier sends flagged names (and short excerpts) to Venice Private, off the
-box; declare a local classifier, or none, to keep them on it.
+**Which model, when both are allowed (2026-11-06).** The policy defines eligible
+lanes; it does not grant cloud-judging consent. The judge defaults to local,
+including on upgrades with an older Venice classifier approval. To select an
+eligible Venice model, the owner chooses Venice and a total dollar cap in
+**Keys → Sort your archive by privacy** on this computer. That screen records
+the same exact-model/prompt approval as the CLI. A declared classification
+profile supplies the model within the chosen kind; otherwise the secure pool
+supplies it. Existing category and E2EE readiness gates still apply.
+
+Without cloud opt-in, or after a cap/payment stop, the judge uses an eligible
+local model or the built-in local model when available. With neither, items
+remain pending and Private. CLI status distinguishes a Venice-only policy
+waiting for the screen's choice (`not_asked`, with `next_step`) from
+`no-sensitive` (`not_applicable`). An unreadable spending record disables cloud
+judging and is visible in Keys; it never becomes a fresh allowance. See
+[the setup guide](QUICKSTART.md) for estimates, account repair and reservations.
 
 **One item per call.** Every flagged name and every excerpt is asked on its
 own call. No source can prove who named an item: a Dropbox file request, an

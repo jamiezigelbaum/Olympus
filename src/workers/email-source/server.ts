@@ -1,3 +1,5 @@
+import { createJudgeSetup } from '../classification/judge-setup.ts';
+import { JudgeSpending, withJudgeSpendingStop, judgeSpendingPath } from '../classification/judge-spending.ts';
 import { createDecisionSnifferModel, type SnifferModel } from '../classification/sniffer-decision.ts';
 import { macComputerSetupView, saveMacComputerUseChoice } from '../../core/engine-service.ts';
 import { release } from 'node:os';
@@ -526,7 +528,7 @@ import {
 import { withoutUnpairedLaneHandles } from '../credential-broker/unpaired-sources.ts';
 import { configureInstalledTierClassification } from '../classification/installed-tier-classification.ts';
 import { type SnifferLane } from '../classification/sniffer-lane.ts';
-import { registerBuiltInPrivateModel, registeredBuiltInPrivateModel, resolveTierSnifferRuntime } from '../classification/built-in-sniffer.ts';
+import { registerBuiltInPrivateModel, registeredBuiltInPrivateModel, resolveJudgeChoiceRuntime } from '../classification/built-in-sniffer.ts';
 import { createAnswerActivity, createLocalModelActivity, runBackgroundInference, runClassificationInference, localModelResourceKey, type LocalModelActivity } from '../answer-activity.ts';
 import { privacyOwnerContext } from '../classification/privacy-profile.ts';
 import { TierSnifferService, tierSnifferServiceEnv } from '../classification/sniffer-service.ts';
@@ -1907,6 +1909,9 @@ export function createAnalystForSovereigntyProfile(input: {
  * per item.
  */
 function createTierSnifferModel(input: {
+  judgeFetch?: import('../../core/analyst-openai.ts').OpenAIAnalystFetch;
+  judgeStatus?: () => import('../classification/judge-spending.ts').JudgeSpendingStatus;
+  judgeOnStop?: () => void;
   lane: SnifferLane;
   olympusConfig: ReturnType<typeof loadConfig>;
   env: Record<string, string | undefined>;
@@ -1946,15 +1951,17 @@ function createTierSnifferModel(input: {
       bootSecretOptions(input.bootSecretResolver, [lane.profileId], ['classification'], { id: lane.profileId, profile }),
     );
     if (!apiKey) return undefined;
-    return createVeniceAnalystModel({
+    const model = createVeniceAnalystModel({
       apiKey,
       model: profile.model,
       ...(profile.baseUrl ? { baseUrl: profile.baseUrl } : {}),
+      ...(input.judgeFetch ? { fetchImpl: input.judgeFetch } : {}),
       thinking: 'disabled',
       reasoningEffort: 'low',
       reasoningHeadroomTokens: 0,
       timeoutMs: 60_000,
     });
+    return input.judgeStatus ? withJudgeSpendingStop(model, input.judgeStatus, input.judgeOnStop) : model;
   }
   return undefined;
 }
@@ -2450,11 +2457,14 @@ export async function main(): Promise<void> {
   // built-in private model when this machine has one (it registers itself
   // with registerBuiltInPrivateModel before this point); without any,
   // flagged items stay pending and unflagged items are Personal at once.
-  const snifferRuntime = resolveTierSnifferRuntime({
+  const judgeSpending = new JudgeSpending(judgeSpendingPath(process.env));
+  const judgeRuntimeInput = {
     engine: sovereigntyEngine,
     ...(registeredBuiltInPrivateModel() ? { builtIn: registeredBuiltInPrivateModel()! } : {}),
     standaloneEngine: isStandaloneEngineProcess(process.env),
-  });
+  };
+  const cloudJudgeRuntime = resolveJudgeChoiceRuntime(judgeRuntimeInput, { choice: 'venice', stop: null, remainingDollars: 1 });
+  const snifferRuntime = resolveJudgeChoiceRuntime(judgeRuntimeInput, judgeSpending.status());
   const snifferLane: SnifferLane | undefined = snifferRuntime.source === 'off' ? undefined : snifferRuntime.lane;
   if (snifferRuntime.source === 'off') {
     console.warn(`Olympus tier sniffer is off (${snifferRuntime.reason}): items whose names look private stay pending, held Private; every other item is Personal.`);
@@ -6028,6 +6038,13 @@ export async function main(): Promise<void> {
               remote: dashboardRemoteAccess?.().state ?? 'off',
               logs: process.env.OLYMPUS_ENGINE_HOST === '1' ? (() => { const logs = readEngineLogs({ lines: 30 }); return [...logs.stdout, ...logs.stderr]; })() : [],
             }),
+            judgeSetup: createJudgeSetup({
+              spending: judgeSpending, cloud: cloudJudgeRuntime,
+              local: () => resolveJudgeChoiceRuntime(judgeRuntimeInput, { choice: 'local', stop: null, remainingDollars: 0 }),
+              ledgerPath: resolveClassificationLedgerPath(process.env), promptVersion: () => snifferPromptVersions(privacyOwnerWords()).approval,
+              credentialReady: lane => Boolean(safeModelCredential(lane.profile, { ...process.env, ...(readWorkerSetupEnv() ?? {}) })),
+              requestReload: () => requestModelReload(),
+            }),
             modelSetup: getModelSetup,
             computerSetup: macComputerSetupView,
             saveComputerUseChoice: saveMacComputerUseChoice,
@@ -7149,7 +7166,7 @@ export async function main(): Promise<void> {
     ? undefined
     : snifferRuntime.source === 'built_in'
       ? snifferRuntime.builtIn.model
-      : createTierSnifferModel({ lane: snifferRuntime.lane, olympusConfig, env: process.env, bootSecretResolver });
+      : createTierSnifferModel({ lane: snifferRuntime.lane, olympusConfig, env: process.env, bootSecretResolver, judgeStatus: () => judgeSpending.status(), judgeFetch: judgeSpending.fetch(fetch), judgeOnStop: () => { requestModelReload(); } });
   const snifferResource = snifferRuntime.source === 'built_in' ? 'built_in'
     : snifferLane?.kind === 'local' ? localModelResourceKey(snifferLane.profile) : undefined;
   const tierSniffer = snifferLane && snifferModel
@@ -7178,7 +7195,7 @@ export async function main(): Promise<void> {
         intervalMs: snifferEnv.intervalMs,
         ...(snifferEnv.maxCallsPerPass !== undefined ? { maxCallsPerPass: snifferEnv.maxCallsPerPass } : {}),
         ...(snifferEnv.concurrentCalls !== undefined ? { concurrentCalls: snifferEnv.concurrentCalls } : {}),
-        ...(snifferEnv.maxCallsPerDay !== undefined ? { maxCallsPerDay: snifferEnv.maxCallsPerDay } : {}),
+        ...(snifferEnv.maxCallsPerDay !== undefined ? { maxCallsPerDay: snifferEnv.maxCallsPerDay } : snifferLane.kind === 'venice' ? { maxCallsPerDay: Number.MAX_SAFE_INTEGER } : {}),
         // Its own parallel calls are not answers: only someone else's call holds it back.
         answersInFlight: () => snifferResource !== undefined && localModelActivity.busyExcept(snifferResource, 'tier_sniffer'),
         // A waiting Inbox question past its deferral stops the pass, so its answer runs, then classification resumes.

@@ -413,6 +413,11 @@ export const KEPT_SHARED_FILES: readonly KeptSharedFile[] = [
     reason: 'Request counts per provider and UTC day. They must outlive a delete, or a reconnect would reset the provider\'s daily guard.',
   },
   {
+    file: 'judge-spending.json',
+    modules: [],
+    reason: 'The global cloud-judge choice, dollar cap, spend/reservations and terminal stop, with no source or item data. It must survive source deletion and reconnects so they cannot reset the spending limit.',
+  },
+  {
     file: 'tier-sniffer-budget.json',
     modules: [],
     reason: 'One global counter of the day\'s sniffer calls ({ day, used }).',

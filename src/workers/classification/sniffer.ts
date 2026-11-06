@@ -81,6 +81,11 @@ export interface SnifferVerdict {
   privateKind: SnifferPrivateKind;
 }
 
+/** A cloud stop is not an item's failed classification attempt. */
+export class JudgeCloudStopped extends Error {
+  constructor(readonly reason: 'cap' | 'payment' | 'opt_in' | 'price' | 'storage') { super(`Cloud judging stopped: ${reason}`); }
+}
+
 export type SnifferLaneKind = 'local' | 'venice';
 
 export interface SnifferLaneIdentity {
