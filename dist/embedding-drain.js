@@ -32205,7 +32205,7 @@ var init_tier_names_only_settle = __esm(() => {
 });
 
 // src/workers/embedding-ledger.ts
-import { mkdir as mkdir3, open as open2, readFile as readFile2 } from "node:fs/promises";
+import { mkdir as mkdir3, open as open2, readFile as readFile2, stat as stat2 } from "node:fs/promises";
 import { dirname as dirname24 } from "node:path";
 async function appendEmbeddingLedgerEntry(path, entry) {
   const line = `${JSON.stringify(entry)}
@@ -32226,26 +32226,51 @@ async function appendEmbeddingLedgerEntryOnce(path, entry) {
     await appendEmbeddingLedgerEntry(path, entry);
     return true;
   }
-  const existing = await readEmbeddingLedger(path);
-  if (existing.entries.some((recorded) => recorded.entry_id === id))
+  const known = await recordedEntryIds(path);
+  if (known.has(id))
     return false;
   await appendEmbeddingLedgerEntry(path, entry);
   return true;
 }
-async function readEmbeddingLedger(path) {
-  let raw = "";
+async function recordedEntryIds(path) {
+  let size = 0;
+  let inode = 0;
   try {
-    raw = await readFile2(path, "utf8");
+    ({ size, ino: inode } = await stat2(path));
   } catch (error) {
     if (error?.code !== "ENOENT")
       throw error;
   }
-  const parsed = parseEmbeddingLedgerJsonl(raw);
-  return {
-    entries: mergeEmbeddingLedgerEntries(EMBEDDING_LEDGER_BACKFILL, parsed.entries),
-    skipped: parsed.skipped,
-    path
-  };
+  let cached2 = recordedIdCache.get(path);
+  if (!cached2 || size < cached2.bytes || inode !== cached2.inode) {
+    cached2 = { inode, bytes: 0, ids: new Set };
+    for (const entry of EMBEDDING_LEDGER_BACKFILL) {
+      const id = entry.entry_id?.trim();
+      if (id)
+        cached2.ids.add(id);
+    }
+    recordedIdCache.set(path, cached2);
+  }
+  if (size > cached2.bytes) {
+    const from = cached2.bytes;
+    const handle = await open2(path, "r");
+    try {
+      const tail = Buffer.alloc(size - from);
+      const { bytesRead } = await handle.read(tail, 0, tail.length, from);
+      const complete = tail.subarray(0, bytesRead).lastIndexOf(10) + 1;
+      if (complete > 0) {
+        for (const entry of parseEmbeddingLedgerJsonl(tail.subarray(0, complete).toString("utf8")).entries) {
+          const id = entry.entry_id?.trim();
+          if (id)
+            cached2.ids.add(id);
+        }
+        cached2.bytes = Math.max(cached2.bytes, from + complete);
+      }
+    } finally {
+      await handle.close();
+    }
+  }
+  return cached2.ids;
 }
 function parseEmbeddingLedgerJsonl(text2) {
   const entries = [];
@@ -32267,23 +32292,6 @@ function parseEmbeddingLedgerJsonl(text2) {
       skipped += 1;
   }
   return { entries, skipped };
-}
-function mergeEmbeddingLedgerEntries(backfill, recorded) {
-  const byId = new Map;
-  const unidentified = [];
-  for (const entry of [...backfill, ...recorded]) {
-    const id = entry.entry_id?.trim();
-    if (id)
-      byId.set(id, entry);
-    else
-      unidentified.push(entry);
-  }
-  const merged = [...byId.values(), ...unidentified];
-  return merged.map((entry, index) => ({ entry, index, at: stampOrder(entry.recorded_at) })).sort((left, right) => right.at - left.at || right.index - left.index).map((row) => row.entry);
-}
-function stampOrder(recordedAt) {
-  const at = Date.parse(recordedAt);
-  return Number.isFinite(at) ? at : Number.NEGATIVE_INFINITY;
 }
 function isEmbeddingLedgerEntry(value) {
   if (!value || typeof value !== "object" || Array.isArray(value))
@@ -32332,10 +32340,11 @@ function isScope(value) {
   }
   return true;
 }
-var EMBEDDING_LEDGER_OWNER_APPROVAL, EMBEDDING_LEDGER_KIND_TEXT, EMBEDDING_LEDGER_APPROVAL_TEXT, EMBEDDING_LEDGER_STATUS_TEXT, WIPED_CORPORA, QWEN3_MODEL_ID = "secure-local-qwen3-embed", QWEN3_EPOCH = "local:openai-compatible:secure-local-qwen3-embed:2560", DELPHI_ROUTER_ENDPOINT = "http://127.0.0.1:28090/v1", PREVIOUS_ENDPOINT = "http://127.0.0.1:28011/v1", GEMINI_MODEL_ID = "gemini-embedding-2", LANE_ENABLEMENT_CORPORA, EMBEDDING_LEDGER_BACKFILL;
+var EMBEDDING_LEDGER_OWNER_APPROVAL, recordedIdCache, EMBEDDING_LEDGER_KIND_TEXT, EMBEDDING_LEDGER_APPROVAL_TEXT, EMBEDDING_LEDGER_STATUS_TEXT, WIPED_CORPORA, QWEN3_MODEL_ID = "secure-local-qwen3-embed", QWEN3_EPOCH = "local:openai-compatible:secure-local-qwen3-embed:2560", DELPHI_ROUTER_ENDPOINT = "http://127.0.0.1:28090/v1", PREVIOUS_ENDPOINT = "http://127.0.0.1:28011/v1", GEMINI_MODEL_ID = "gemini-embedding-2", LANE_ENABLEMENT_CORPORA, EMBEDDING_LEDGER_BACKFILL;
 var init_embedding_ledger = __esm(() => {
   init_olympus_layout();
   EMBEDDING_LEDGER_OWNER_APPROVAL = PUBLIC_RUNTIME_BUILD ? "owner" : "jamie";
+  recordedIdCache = new Map;
   EMBEDDING_LEDGER_KIND_TEXT = {
     model_decision: "Model decision",
     epoch_change: "Epoch changed",
@@ -37663,7 +37672,7 @@ var init_spool = __esm(() => {
 });
 
 // src/workers/dropbox-files/extraction-source.ts
-import { readFile as readFile3, realpath, stat as stat2 } from "node:fs/promises";
+import { readFile as readFile3, realpath, stat as stat3 } from "node:fs/promises";
 import { relative as relative5, resolve as resolve9, sep as sep5 } from "node:path";
 
 class DropboxExtractionSource {
@@ -37914,7 +37923,7 @@ function singleAccount(scopes) {
 async function readVerifiedCandidate(input) {
   let fileStat;
   try {
-    fileStat = await stat2(input.candidatePath);
+    fileStat = await stat3(input.candidatePath);
   } catch {
     return;
   }
@@ -41037,12 +41046,12 @@ function sanitizedDesktopEnvironment(manager, runtime, uid, inspectPath) {
 }
 function inspectLinuxPath(path) {
   try {
-    const stat3 = lstatSync11(path);
+    const stat4 = lstatSync11(path);
     return {
-      kind: stat3.isDirectory() ? "directory" : stat3.isFile() ? "file" : stat3.isSocket() ? "socket" : "other",
-      uid: stat3.uid,
-      mode: stat3.mode,
-      symbolicLink: stat3.isSymbolicLink()
+      kind: stat4.isDirectory() ? "directory" : stat4.isFile() ? "file" : stat4.isSocket() ? "socket" : "other",
+      uid: stat4.uid,
+      mode: stat4.mode,
+      symbolicLink: stat4.isSymbolicLink()
     };
   } catch {
     return;
@@ -41060,9 +41069,9 @@ function isTrustedExecutable(path) {
     return false;
   try {
     accessSync3(path, fsConstants2.X_OK);
-    const stat3 = lstatSync11(path);
+    const stat4 = lstatSync11(path);
     const uid = typeof process.getuid === "function" ? process.getuid() : -1;
-    return stat3.isFile() && !stat3.isSymbolicLink() && (stat3.uid === 0 || stat3.uid === uid) && (stat3.mode & 18) === 0;
+    return stat4.isFile() && !stat4.isSymbolicLink() && (stat4.uid === 0 || stat4.uid === uid) && (stat4.mode & 18) === 0;
   } catch {
     return false;
   }
@@ -41164,10 +41173,10 @@ async function openLinuxOwnerTicketFile(path, dependencies = {}) {
   const runtime = readiness.environment.XDG_RUNTIME_DIR;
   if (!runtime || dirname29(path) !== `${runtime}/olympus` || !/^owner-ticket-[a-f0-9]{32}\.html$/.test(path.slice(dirname29(path).length + 1)))
     throw new Error("Invalid owner ticket path.");
-  const stat3 = lstatSync11(path);
+  const stat4 = lstatSync11(path);
   const parent = lstatSync11(dirname29(path));
   const uid = dependencies.uid ?? process.getuid?.();
-  if (realpathSync6(path) !== path || !stat3.isFile() || stat3.isSymbolicLink() || stat3.uid !== uid || (stat3.mode & 511) !== 384 || !parent.isDirectory() || parent.isSymbolicLink() || parent.uid !== uid || (parent.mode & 511) !== 448)
+  if (realpathSync6(path) !== path || !stat4.isFile() || stat4.isSymbolicLink() || stat4.uid !== uid || (stat4.mode & 511) !== 384 || !parent.isDirectory() || parent.isSymbolicLink() || parent.uid !== uid || (parent.mode & 511) !== 448)
     throw new Error("Unsafe owner ticket file.");
   const dispatch = async (opener) => {
     const scopeUnit = dependencies.scopeUnit?.() ?? `olympus-open-${process.pid}-${randomBytes2(8).toString("hex")}`;
@@ -42163,20 +42172,20 @@ function unpairedSourcesPath(registryPath) {
   return `${registryPath}.unpaired`;
 }
 function inspectRecordNode(path) {
-  let stat3;
+  let stat4;
   try {
-    stat3 = lstatSync12(path);
+    stat4 = lstatSync12(path);
   } catch (error) {
     const code = error.code ?? "UNKNOWN";
     if (code === "ENOENT" || code === "ENOTDIR")
       return { kind: "missing" };
     return { kind: "unreadable", reason: `${code}: ${error.message}` };
   }
-  if (stat3.isSymbolicLink())
+  if (stat4.isSymbolicLink())
     return { kind: "unreadable", reason: "record path is a symbolic link" };
-  if (!stat3.isFile())
+  if (!stat4.isFile())
     return { kind: "unreadable", reason: "record path is not a regular file" };
-  return { kind: "file", stat: stat3 };
+  return { kind: "file", stat: stat4 };
 }
 function readRecordText(path) {
   const node = inspectRecordNode(path);
@@ -49622,9 +49631,9 @@ function isClassificationLedgerEntry(value) {
   return true;
 }
 function newestFirst(entries) {
-  return entries.map((entry, index) => ({ entry, index, at: stampOrder2(entry.recorded_at) })).sort((left, right) => right.at - left.at || right.index - left.index).map((row) => row.entry);
+  return entries.map((entry, index) => ({ entry, index, at: stampOrder(entry.recorded_at) })).sort((left, right) => right.at - left.at || right.index - left.index).map((row) => row.entry);
 }
-function stampOrder2(recordedAt) {
+function stampOrder(recordedAt) {
   const at = Date.parse(recordedAt);
   return Number.isFinite(at) ? at : Number.NEGATIVE_INFINITY;
 }
@@ -71819,8 +71828,8 @@ class FileSourceScopeAuthority {
       return;
     try {
       const files = [this.registryPath, defaultThisComputerStatePath(this.registryPath), this.statePath].map((path) => {
-        const stat3 = statSync13(path, { throwIfNoEntry: false });
-        return stat3 ? [stat3.ino, stat3.mtimeMs, stat3.size] : null;
+        const stat4 = statSync13(path, { throwIfNoEntry: false });
+        return stat4 ? [stat4.ino, stat4.mtimeMs, stat4.size] : null;
       });
       return JSON.stringify([ref.accountGeneration, ref.revision, files]);
     } catch {
