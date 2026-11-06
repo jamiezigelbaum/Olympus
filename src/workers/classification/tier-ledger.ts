@@ -897,7 +897,7 @@ export class TierLedger {
     limit?: number;
     /** Ledger rows read per call (default DEFAULT_REJUDGE_SCAN_ROWS). */
     scanLimit?: number;
-  }): { records: TierLedgerRecord[]; next?: TierLedgerIdentity } {
+  }): { records: TierLedgerRecord[]; causes: TierRejudgeCause[]; next?: TierLedgerIdentity } {
     const limit = Math.max(1, Math.min(options.limit ?? 100, 5_000));
     const scanLimit = Math.max(limit, Math.min(options.scanLimit ?? DEFAULT_REJUDGE_SCAN_ROWS, 50_000));
     const snifferMarker = options.snifferId ? `"content:sniffer:${options.snifferId}:` : null;
@@ -922,6 +922,9 @@ export class TierLedger {
           AND (i.rejudged_key IS NULL OR i.rejudged_key != CASE WHEN i.state = 'pending'
             THEN ? || char(0) || 'held' || char(0) || i.generation || char(0) || i.decided_at
             ELSE ? END)
+          -- Settled by a verdict under this classifier and sniffer (markJudged):
+          -- not re-asked while its decision stays under this classifier.
+          AND NOT (COALESCE(i.rejudged_key, '') = ? || char(0) || 'judged' AND i.state != 'pending' AND i.engine_version = ?)
           AND (i.state = 'current'
             -- Held for its text question alone: re-read once per classifier
             -- and sniffer, so a question lost from the sniffer's queue (a
@@ -964,7 +967,16 @@ export class TierLedger {
               AND instr(i.reasons_json, '"metadata:sensitivity_map:') = 0
               AND (i.content_tier IN ('public', 'private') OR instr(i.reasons_json, '"content:sniffer:') > 0))
           )
-        THEN 1 ELSE 0 END AS rejudge_candidate
+        THEN 1 ELSE 0 END AS rejudge_candidate,
+        -- Which rule made it a candidate (content-free, for the pass's log line).
+        CASE
+          WHEN i.state = 'pending' THEN 'held'
+          WHEN instr(i.reasons_json, '"metadata:prior:source_') > 0 THEN 'retired_prior'
+          WHEN instr(i.reasons_json, ':fail_safe:missing_question"') > 0 THEN 'missing_question'
+          WHEN i.engine_version != ? THEN 'classifier'
+          WHEN ? IS NOT NULL AND instr(i.reasons_json, '"metadata:sniffer:') > 0 AND instr(i.reasons_json, ?) = 0 THEN 'names_prompt'
+          ELSE 'content_prompt'
+        END AS rejudge_cause
       FROM win i
       ORDER BY i.provider, i.account_scope, i.conversation_key, i.provider_item_id
     `).all(
@@ -973,6 +985,8 @@ export class TierLedger {
       scanLimit,
       key,
       key,
+      key,
+      options.engineVersion,
       options.engineVersion,
       options.snifferId ?? null,
       JSON.stringify(`content:rule_sniffer:${options.snifferId}`),
@@ -983,18 +997,24 @@ export class TierLedger {
       metadataMarker ?? '',
       snifferMarker,
       snifferMarker ?? '',
-    ) as Array<TierItemRow & { rejudge_candidate: number }>;
+      options.engineVersion,
+      metadataMarker,
+      metadataMarker ?? '',
+    ) as Array<TierItemRow & { rejudge_candidate: number; rejudge_cause: TierRejudgeCause }>;
     const records: TierLedgerRecord[] = [];
+    const causes: TierRejudgeCause[] = [];
     let last: TierItemRow | undefined;
     for (const row of rows) {
       last = row;
       if (row.rejudge_candidate !== 1) continue;
       records.push(recordFromRow(row));
+      causes.push(row.rejudge_cause);
       if (records.length >= limit) break;
     }
     const more = records.length >= limit || rows.length >= scanLimit;
     return {
       records,
+      causes,
       ...(more && last ? { next: identityOfRow(last) } : {}),
     };
   }
@@ -1022,6 +1042,28 @@ export class TierLedger {
       UPDATE tier_items SET rejudged_key = ?
       WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
     `).run(rejudgeKey(key.engineVersion, key.snifferId), ...idParams(identity));
+  }
+
+  /**
+   * Stamp that a sniffer verdict just settled the row under this classifier
+   * and sniffer (#954): an item judged a moment ago is not a re-judge
+   * candidate for the same inputs, whatever another pass did to its reasons
+   * since. Only a settled row decided under this very classifier version is
+   * stamped; one still waiting on a question, or held fail-safe without a
+   * verdict, or resting on a retired whole-source prior, stays a candidate.
+   * The stamp counts only while the row's decision is under this classifier
+   * and not pending: a new classifier or sniffer, or a later decision under
+   * another version, makes it a candidate again.
+   */
+  markJudged(identity: TierLedgerIdentity, key: { engineVersion: string; snifferId: string }): void {
+    this.db.query(`
+      UPDATE tier_items SET rejudged_key = ? || char(0) || 'judged'
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+        AND state != 'pending' AND metadata_pending = 0 AND content_pending = 0
+        AND engine_version = ? AND decided_by != 'override'
+        AND instr(reasons_json, '"metadata:prior:source_') = 0
+        AND instr(reasons_json, ':fail_safe:') = 0
+    `).run(rejudgeKey(key.engineVersion, key.snifferId), ...idParams(identity), key.engineVersion);
   }
 
   /**
@@ -4073,6 +4115,9 @@ interface EffectiveRow {
 }
 
 /** What applying a sniffer verdict did: a P1a row update, a P1b routed outcome, or nothing yet. */
+/** The rule that made a row a re-judge candidate (`rejudgeCandidatePage`). */
+export type TierRejudgeCause = 'held' | 'retired_prior' | 'missing_question' | 'classifier' | 'names_prompt' | 'content_prompt';
+
 export type SnifferVerdictOutcome = 'held_lowering' | 'stale_question' | TierLedgerRecordOutcome | TierRoutedOutcome | 'needs_placement' | 'stale_map';
 
 /** Source-neutral rollout switch; first judgments and raises still settle. */

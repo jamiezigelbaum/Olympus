@@ -20935,6 +20935,9 @@ class TierLedger {
           AND (i.rejudged_key IS NULL OR i.rejudged_key != CASE WHEN i.state = 'pending'
             THEN ? || char(0) || 'held' || char(0) || i.generation || char(0) || i.decided_at
             ELSE ? END)
+          -- Settled by a verdict under this classifier and sniffer (markJudged):
+          -- not re-asked while its decision stays under this classifier.
+          AND NOT (COALESCE(i.rejudged_key, '') = ? || char(0) || 'judged' AND i.state != 'pending' AND i.engine_version = ?)
           AND (i.state = 'current'
             -- Held for its text question alone: re-read once per classifier
             -- and sniffer, so a question lost from the sniffer's queue (a
@@ -20977,23 +20980,35 @@ class TierLedger {
               AND instr(i.reasons_json, '"metadata:sensitivity_map:') = 0
               AND (i.content_tier IN ('public', 'private') OR instr(i.reasons_json, '"content:sniffer:') > 0))
           )
-        THEN 1 ELSE 0 END AS rejudge_candidate
+        THEN 1 ELSE 0 END AS rejudge_candidate,
+        -- Which rule made it a candidate (content-free, for the pass's log line).
+        CASE
+          WHEN i.state = 'pending' THEN 'held'
+          WHEN instr(i.reasons_json, '"metadata:prior:source_') > 0 THEN 'retired_prior'
+          WHEN instr(i.reasons_json, ':fail_safe:missing_question"') > 0 THEN 'missing_question'
+          WHEN i.engine_version != ? THEN 'classifier'
+          WHEN ? IS NOT NULL AND instr(i.reasons_json, '"metadata:sniffer:') > 0 AND instr(i.reasons_json, ?) = 0 THEN 'names_prompt'
+          ELSE 'content_prompt'
+        END AS rejudge_cause
       FROM win i
       ORDER BY i.provider, i.account_scope, i.conversation_key, i.provider_item_id
-    `).all(after ? 1 : null, ...after ?? [null, null, null, null], scanLimit, key, key, options.engineVersion, options.snifferId ?? null, JSON.stringify(`content:rule_sniffer:${options.snifferId}`), options.snifferId ?? null, JSON.stringify(`content:rule_sniffer:${options.snifferId}`), options.engineVersion, metadataMarker, metadataMarker ?? "", snifferMarker, snifferMarker ?? "");
+    `).all(after ? 1 : null, ...after ?? [null, null, null, null], scanLimit, key, key, key, options.engineVersion, options.engineVersion, options.snifferId ?? null, JSON.stringify(`content:rule_sniffer:${options.snifferId}`), options.snifferId ?? null, JSON.stringify(`content:rule_sniffer:${options.snifferId}`), options.engineVersion, metadataMarker, metadataMarker ?? "", snifferMarker, snifferMarker ?? "", options.engineVersion, metadataMarker, metadataMarker ?? "");
     const records = [];
+    const causes = [];
     let last;
     for (const row of rows) {
       last = row;
       if (row.rejudge_candidate !== 1)
         continue;
       records.push(recordFromRow(row));
+      causes.push(row.rejudge_cause);
       if (records.length >= limit)
         break;
     }
     const more = records.length >= limit || rows.length >= scanLimit;
     return {
       records,
+      causes,
       ...more && last ? { next: identityOfRow(last) } : {}
     };
   }
@@ -21013,6 +21028,16 @@ class TierLedger {
       UPDATE tier_items SET rejudged_key = ?
       WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
     `).run(rejudgeKey(key.engineVersion, key.snifferId), ...idParams(identity2));
+  }
+  markJudged(identity2, key) {
+    this.db.query(`
+      UPDATE tier_items SET rejudged_key = ? || char(0) || 'judged'
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+        AND state != 'pending' AND metadata_pending = 0 AND content_pending = 0
+        AND engine_version = ? AND decided_by != 'override'
+        AND instr(reasons_json, '"metadata:prior:source_') = 0
+        AND instr(reasons_json, ':fail_safe:') = 0
+    `).run(rejudgeKey(key.engineVersion, key.snifferId), ...idParams(identity2), key.engineVersion);
   }
   markHeldRejudged(record, key) {
     this.db.query(`
@@ -62722,7 +62747,22 @@ var init_secret_scan_off_thread = __esm(() => {
 
 // src/workers/connector-store/tier-rejudge.ts
 function emptyTierRejudgeReport() {
-  return { heldLowering: 0, seen: 0, updated: 0, movesQueued: 0, asked: 0, secrets: 0, skipped: 0, failed: 0 };
+  return {
+    heldLowering: 0,
+    seen: 0,
+    updated: 0,
+    movesQueued: 0,
+    asked: 0,
+    secrets: 0,
+    skipped: 0,
+    failed: 0,
+    causeHeld: 0,
+    causeRetiredPrior: 0,
+    causeMissingQuestion: 0,
+    causeClassifier: 0,
+    causeNamesPrompt: 0,
+    causeContentPrompt: 0
+  };
 }
 async function rejudgeRoutedItemsInTurns(options) {
   const steps = rejudgeSteps(options);
@@ -62762,9 +62802,12 @@ function* rejudgeSteps(options) {
     ...options.after ? { after: options.after } : {},
     limit
   });
-  for (const record of page2.records) {
+  for (const [index, record] of page2.records.entries()) {
     yield record;
     report.seen += 1;
+    const cause = page2.causes[index];
+    if (cause)
+      report[CAUSE_FIELD[cause]] += 1;
     try {
       rejudgeStoredContent(set, record, {
         sniffer: classification.sniffer,
@@ -63024,7 +63067,7 @@ function storedFolderKeys(value) {
     return [];
   }
 }
-var DEFAULT_TIER_REJUDGE_PER_PASS = 100, TIER_REJUDGE_CONNECTOR_ID = "olympus_tier_rejudge";
+var DEFAULT_TIER_REJUDGE_PER_PASS = 100, TIER_REJUDGE_CONNECTOR_ID = "olympus_tier_rejudge", CAUSE_FIELD;
 var init_tier_rejudge = __esm(() => {
   init_media_judge();
   init_parent_context();
@@ -63036,6 +63079,14 @@ var init_tier_rejudge = __esm(() => {
   init_tier_placement();
   init_secret_scan_off_thread();
   init_engine();
+  CAUSE_FIELD = {
+    held: "causeHeld",
+    retired_prior: "causeRetiredPrior",
+    missing_question: "causeMissingQuestion",
+    classifier: "causeClassifier",
+    names_prompt: "causeNamesPrompt",
+    content_prompt: "causeContentPrompt"
+  };
 });
 
 // src/workers/connector-store/tier-override-settle.ts
@@ -191745,6 +191796,9 @@ async function runSnifferPass(options) {
     if (applied && applied.outcome !== "unchanged" && !verdict.failSafe && !reused && item.question.pass === "content" && item.question.contentHash && final?.state === "current" && !final.contentPending && !final.metadataPending && final.decidedBy !== "override" && final.decidedBy !== "owner_rule") {
       item.target.sniffer.markFinalModelContent(keyOf2(item.question), item.question.contentHash);
     }
+    if (applied && applied.outcome !== "unchanged" && !verdict.failSafe && final) {
+      item.target.ledger.markJudged(item.question, { engineVersion: TIER_CLASSIFIER_VERSION, snifferId: id });
+    }
     if (applied?.outcome === "queued_move")
       report.movesQueued += 1;
     const retainDonor = !reused && !verdict.failSafe && item.question.contentHash && final && (final.state === "moving" || final.metadataPending);
@@ -192048,6 +192102,7 @@ var init_sniffer_resolver = __esm(() => {
   init_sniffer();
   init_sniffer_lane();
   init_sniffer_store();
+  init_tier_classifier();
   init_tier_ledger();
   secretScreenCache = new Map;
 });
@@ -192947,7 +193002,7 @@ class TierSnifferService {
       } catch {}
     }
     if (total.updated > 0 || total.movesQueued > 0 || total.asked > 0 || total.secrets > 0 || total.heldLowering > 0) {
-      this.options.log?.(`Olympus tier sniffer: re-judged ${total.updated + total.movesQueued + total.asked + total.secrets} item(s) under the current classifier ` + `(${total.asked} asked about, still where they were; ${total.movesQueued} tier move(s) queued` + `; ${total.heldLowering} lowering(s) held${total.secrets ? `; ${total.secrets} Secret(s) found and hidden` : ""}).`);
+      this.options.log?.(`Olympus tier sniffer: re-judged ${total.updated + total.movesQueued + total.asked + total.secrets} item(s) under the current classifier ` + `(${total.asked} asked about, still where they were; ${total.movesQueued} tier move(s) queued` + `; ${total.heldLowering} lowering(s) held${total.secrets ? `; ${total.secrets} Secret(s) found and hidden` : ""})` + `; picked for: held=${total.causeHeld} retired_prior=${total.causeRetiredPrior} missing_question=${total.causeMissingQuestion}` + ` classifier=${total.causeClassifier} names_prompt=${total.causeNamesPrompt} content_prompt=${total.causeContentPrompt}.`);
     }
     return total;
   }

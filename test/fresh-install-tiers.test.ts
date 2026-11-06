@@ -37,7 +37,7 @@ import {
   configureInstalledTierClassification,
 } from '../src/workers/classification/installed-tier-classification.ts';
 import { SecretLocationsIndex } from '../src/workers/classification/secret-locations.ts';
-import { snifferPromptVersions } from '../src/workers/classification/sniffer.ts';
+import { snifferId, snifferPromptVersions } from '../src/workers/classification/sniffer.ts';
 import { TierSnifferStore } from '../src/workers/classification/sniffer-store.ts';
 import { tierSnifferPathForLedger } from '../src/workers/classification/tier-ledger-path.ts';
 import { BUILT_IN_CLASSIFIER_DEFAULT_APPROVAL_REASON, TierSnifferService } from '../src/workers/classification/sniffer-service.ts';
@@ -499,7 +499,7 @@ describe('owner defaults (2026-10-01): the registered built-in model is approved
   });
 
   test('a Personal verdict on a held item moves it at once when every embedding is the built-in local model', async () => {
-    const { builtIn, runtime } = registeredBuiltIn(PERSONAL_VERDICT);
+    const { builtIn, runtime, prompts } = registeredBuiltIn(PERSONAL_VERDICT);
     const install = await freshInstall(runtime.source === 'built_in' ? { lane: runtime.lane, bankStructuredName: false } : {});
     expect(install.lane.ledger.getCurrent(identity('id:bank'))).toMatchObject({ state: 'pending' });
     const service = snifferFor(install, builtIn, { localEmbeddingsOnly: true });
@@ -514,6 +514,13 @@ describe('owner defaults (2026-10-01): the registered built-in model is approved
     expect(JSON.stringify((await olympusSearch(install, 'orchard')).result)).toContain('pruning plan');
     const ledger = await readEmbeddingLedgerEntries(join(root, 'embedding-ledger.jsonl'));
     expect(ledger.some((entry) => entry.approved_by === 'system-automatic')).toBe(true);
+    // Judged just now: the next ticks ask nothing again (#954), and a re-judge
+    // finds nothing to re-read under this classifier and sniffer.
+    const calls = prompts.length;
+    for (let pass = 0; pass < 2; pass += 1) expect(await service.runOnce()).not.toHaveProperty('rejudged');
+    expect(prompts.length).toBe(calls);
+    const id = snifferId(runtime.source === 'built_in' ? runtime.lane : BUILT_IN_SNIFFER_LANE, snifferPromptVersions(undefined).cache);
+    expect(install.lane.ledger.listRejudgeCandidates({ engineVersion: TIER_CLASSIFIER_VERSION, snifferId: id })).toEqual([]);
   });
 
   for (const missingReceipt of [false, true]) test(`automatic moves re-judge stored content after a ${missingReceipt ? 'missing' : 'mismatched'} receipt`, async () => {
