@@ -3244,7 +3244,7 @@ export class LocalConnectorStore {
       CREATE TEMP TRIGGER item_visibility_insert AFTER INSERT ON main.items BEGIN ${note('NEW')} END;
       CREATE TEMP TRIGGER item_visibility_delete AFTER DELETE ON main.items BEGIN ${note('OLD')} END;
       CREATE TEMP TRIGGER item_visibility_update
-        AFTER UPDATE OF item_pk, provider, account_scope, provider_conversation_id, provider_item_id ON main.items
+        AFTER UPDATE OF item_pk, provider, account_scope, provider_conversation_id, provider_item_id, tombstoned ON main.items
         BEGIN ${note('OLD')} ${note('NEW')} END;
     `);
     this.visibilityJournal = true;

@@ -228,3 +228,20 @@ test('status snapshots keep their held counts when a verdict arrives between cou
     expect(store.status().tier?.pendingClassificationItems ?? 0).toBe(0);
   } finally { store.close(); ledger.close(); }
 });
+
+test('tombstoning a held item updates a warm visibility cache', async () => {
+  const ledger = new TierLedger({ dbPath: ':memory:' });
+  const store = new LocalConnectorStore({ dbPath: ':memory:', corpusId: CORPORA.internal,
+    family: 'file', trustDomain: 'internal', tierLedger: ledger });
+  const probe = store as unknown as StoreProbe;
+  try {
+    await store.syncFromConnector(fixtureConnector(() => [{ id: 'a', name: 'Notes', text: 'ordinary' }]), { fetchContent: true, placement: FIXTURE_PLACEMENT });
+    const decision = { ...classifyItemTiers({ signals: {}, text: 'ordinary' }), state: 'pending' as const, contentPending: true };
+    ledger.recordRoutedPlacement(identityOf('a'), decision, { copies: [
+      { corpusId: store.corpusId, trustDomain: 'internal', layers: 'both' },
+    ], embedHold: true });
+    expect(store.status().tier?.pendingClassificationItems).toBe(1);
+    probe.db.query("UPDATE items SET tombstoned = 1 WHERE provider_item_id = 'a'").run();
+    expect(store.status().tier?.pendingClassificationItems ?? 0).toBe(0);
+  } finally { store.close(); ledger.close(); }
+});
