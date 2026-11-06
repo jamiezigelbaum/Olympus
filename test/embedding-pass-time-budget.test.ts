@@ -125,6 +125,30 @@ describe('embedding pass time budget', () => {
     }
   });
 
+  test('retrying a failed group one item at a time stops at the same budget', async () => {
+    const items = Array.from({ length: 5 }, (_, index) => rawItem(`short-${index}`, `short note ${index}`));
+    const store = await storeWith(items);
+    const provider = slowProvider(25);
+    const embed = provider.embed.bind(provider);
+    let calls = 0;
+    // The group's call fails for a reason no retry fixes, so each item is tried alone.
+    provider.embed = async (inputs, options) => {
+      calls += 1;
+      if (calls === 1) throw new Error('bad input');
+      return embed(inputs, options);
+    };
+    try {
+      const ids = items.map((item) => item.identity.localItemId);
+      store.queueEmbedding(ids, provider);
+      const [run] = await embedPendingChunks([{ store, provider }], { maxItems: 32, stopAtMs: Date.now() + 5 });
+      // The first item alone always runs; the budget is spent by then.
+      expect(run).toMatchObject({ chunksEmbedded: 1, stoppedAtDeadline: true, itemsFailed: 0 });
+      expect(store.queuedEmbeddingItemIds()).toEqual(ids.slice(1));
+    } finally {
+      store.close();
+    }
+  });
+
   test('the sweep ends a long pass in time and asks to continue, without reading as an outage', async () => {
     const store = await storeWith([rawItem('long', LONG_TEXT)]);
     // Five calls of 40 ms take 200 ms; the deadline is 120 ms, so a pass that
