@@ -19492,14 +19492,11 @@ function metadataPass(args) {
 }
 function contentPass(args) {
   const { metadata, text: text2 } = args;
-  if (args.heldSecret && !args.secretsCleared) {
-    return { tier: "secrets", decidedBy: "secret_detector", reasons: ["content:held_secret"], pending: false };
-  }
   if (metadata.tier === "secrets") {
     return { tier: "secrets", decidedBy: metadata.decidedBy, reasons: [], pending: false };
   }
   const mark = heldMark(args.holdUntilJudged === true, metadata.tier);
-  if (text2 === undefined || !text2.trim() && !args.textOnly) {
+  if (text2 === undefined || !text2.trim() && (!args.textOnly || args.heldSecret)) {
     return {
       tier: metadata.tier,
       decidedBy: metadata.decidedBy,
@@ -19537,7 +19534,7 @@ function contentPass(args) {
     return { tier: metadata.tier, decidedBy: metadata.decidedBy, reasons: [...mark], pending: false };
   }
   let decided = { tier: metadata.tier, decidedBy: metadata.decidedBy, reasons: [] };
-  const rule = args.textOnly && (args.titleIsConversation === true || !args.signals.title?.trim()) ? trivialContentRule(text2, args.parentContext) : undefined;
+  const rule = args.textOnly && !args.heldSecret && (args.titleIsConversation === true || !args.signals.title?.trim()) ? trivialContentRule(text2, args.parentContext) : undefined;
   if (rule) {
     return {
       tier: maxTier(metadata.tier, "private"),

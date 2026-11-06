@@ -165,15 +165,15 @@ test('production resolver publishes only settled model donors and reuses queued 
 });
 
 
-test('held Secrets are checked before content shortcuts, including empty text', () => {
-  const { sniffer, requests } = spy();
-  for (const text of ['', 'ok', 'A duplicate eligible body']) {
+test('a content rule never settles a held Secret, and a new version is judged on its own', () => {
+  const { sniffer } = spy();
+  for (const text of ['', 'ok']) {
     const decision = classifyItemTiers({ signals: {}, text, heldSecret: true }, { sniffer });
-    expect(decision).toMatchObject({ contentTier: 'secrets', contentPending: false, state: 'current' });
-    expect(decision.reasons).toContain('content:held_secret');
+    expect(decision.decidedBy).not.toBe('content_rule');
+    expect(decision.reasons.some((reason) => reason.startsWith('content:rule:'))).toBe(false);
   }
-  expect(requests).toHaveLength(0);
-  expect(classifyContentTier({ text: '', metadataTier: 'private', metadataForced: false, metadataFlagged: false, heldSecret: true, mimeType: 'image/png' }).contentPending).toBe(false);
+  expect(classifyContentTier({ text: '', metadataTier: 'private', metadataForced: false, metadataFlagged: false, heldSecret: true }, { sniffer }).reasons)
+    .toContain('content:unread');
 });
 
 test('media arriving during a model call invalidates the old text-only question', async () => {

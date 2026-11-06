@@ -1009,9 +1009,6 @@ function contentPass(args: {
   subject?: TierSnifferSubject;
 }): { tier: TierKey; decidedBy: TierDecidedBy; reasons: string[]; pending: boolean } {
   const { metadata, text } = args;
-  if (args.heldSecret && !args.secretsCleared) {
-    return { tier: 'secrets', decidedBy: 'secret_detector', reasons: ['content:held_secret'], pending: false };
-  }
   if (metadata.tier === 'secrets') {
     // The whole item is Secrets (design 2.3, beta 4 unit). Pass 2 never runs,
     // so no text of a secret-bearing item is scanned further or excerpted.
@@ -1020,7 +1017,8 @@ function contentPass(args: {
   // The lane's hold travels with every decision but a Secrets one, so a later
   // pass over the stored decision holds the same way (HELD_UNTIL_JUDGED_REASON).
   const mark = heldMark(args.holdUntilJudged === true, metadata.tier);
-  if (text === undefined || (!text.trim() && !args.textOnly)) {
+  // A held Secret's stored text reads as empty, which isn't an empty item.
+  if (text === undefined || (!text.trim() && (!args.textOnly || args.heldSecret))) {
     return {
       tier: metadata.tier,
       decidedBy: metadata.decidedBy,
@@ -1078,7 +1076,7 @@ function contentPass(args: {
 
   // Only complete own text may settle by content rule. Names have already
   // run independently and their tier remains the floor.
-  const rule = args.textOnly && (args.titleIsConversation === true || !args.signals.title?.trim())
+  const rule = args.textOnly && !args.heldSecret && (args.titleIsConversation === true || !args.signals.title?.trim())
     ? trivialContentRule(text, args.parentContext) : undefined;
   if (rule) {
     return {
