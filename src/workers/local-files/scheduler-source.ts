@@ -20,7 +20,7 @@ import {
 } from '../source-scheduler.ts';
 import { realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { MacPermissions } from './mac-permissions.ts';
+import { folderAccessMemoryPath, MacPermissions } from './mac-permissions.ts';
 import { LocalFilesRootMissingError, LocalFilesRootPermissionError } from './connector.ts';
 import { realPathOfScopePath } from './locations.ts';
 import { isWithinScopePath } from './paths.ts';
@@ -63,7 +63,7 @@ export function createLocalFilesSchedulerSource(input: LocalFilesSchedulerSource
   // Defence in depth: whatever was saved, a guarded folder is not read unless
   // the engine runs under the helper app (a read from Bun would be asked in
   // Bun's name). Those folders stay idle and report that the helper is needed.
-  const macPermissions = input.macPermissions ?? new MacPermissions({ home: realpathSync(homedir()) });
+  const macPermissions = input.macPermissions ?? new MacPermissions({ home: realpathSync(homedir()), memoryPath: folderAccessMemoryPath() });
   const volumeResolver = input.volumes ?? input.watch?.volumes;
   const needsHelper = (scopePath: string): boolean => {
     if (!macPermissions.active || macPermissions.hasHelper()) return false;
@@ -126,6 +126,12 @@ export function createLocalFilesSchedulerSource(input: LocalFilesSchedulerSource
             );
           }
           throw error;
+        }
+        // The read went through, so the Mac allows the guarded folder it sits in: the picker stops saying "Needs permission".
+        if (macPermissions.active) {
+          const real = root.path === '/' ? undefined : volumeResolver ? realPathOfScopePath(volumeResolver, root.path) : root.path;
+          const guard = real === undefined ? undefined : macPermissions.guardOf(real, volumeResolver?.volumeOf(real));
+          if (guard) macPermissions.noteGranted(guard);
         }
         return {
           status: outcome.receipt.status,

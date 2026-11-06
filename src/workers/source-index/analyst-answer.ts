@@ -1,3 +1,4 @@
+import { withPriorityQueryEmbedding } from './embeddings.ts';
 // Analyst-backed source answer handler (Lane B of the execution plan).
 //
 // Durable SourceIndexAnswerHandler that routes `source_answer` through the
@@ -129,6 +130,7 @@ export interface AnalystAnswerLanes {
    */
   visibilityGate?: SourceIndexVisibilityGate;
   secretLocations?: (query: string, searchedCorpora: readonly string[]) => readonly SecretLocationNote[];
+  checkSecretLocations?: (locations: readonly import('../../core/evidence-pack.ts').SavedSecretLocation[]) => boolean;
   classificationCoverage?: (searchedCorpora: readonly string[]) => readonly ClassificationCoverageNote[];
   /**
    * A child item's parent, for the label its citation carries. Names only,
@@ -2845,6 +2847,8 @@ export async function searchReleasedEvidence(input: {
 // their count leaves the engine. No Analyst call, no per-question logic.
 
 export interface PrivateEvidenceResult {
+  // Location-only Secret match; no metadata leaves this function.
+  secretMatch?: true;
   // Private items the bounded search matched, readable or not.
   matched: number;
   // Every matched Private candidate, with whatever passages its store could
@@ -2878,6 +2882,7 @@ export async function searchPrivateEvidence(input: {
   evidenceByteBudget?: number;
   laneTimeoutMs?: number;
 }): Promise<PrivateEvidenceResult> {
+  return withPriorityQueryEmbedding(async () => {
   const question = input.question.trim();
   if (!question) throw new OperationError('invalid_params', 'A question is required.');
   const maxResults = Math.max(1, Math.min(MAX_EVIDENCE_CANDIDATES, input.maxResults ?? PRIVATE_EVIDENCE_MAX_RESULTS));
@@ -2890,6 +2895,7 @@ export async function searchPrivateEvidence(input: {
     max_results: maxResults,
   };
   const lanes = input.lanes(request, 'private_search');
+  let secretMatch = false;
   const build = async (adapters: SourceIndexRouterAdapterMap): Promise<PrivateEvidenceCandidate[]> => {
     const detail = await buildEvidencePackDetailed({
       question,
@@ -2899,11 +2905,13 @@ export async function searchPrivateEvidence(input: {
       registry: lanes.registry,
       adapters,
       contentProviders: lanes.contentProviders,
+      ...(lanes.secretLocations ? { secretLocations: lanes.secretLocations } : {}),
       maxCharsPerCandidate: input.maxCharsPerCandidate ?? DEFAULT_MAX_CHARS_PER_CANDIDATE,
       evidenceByteBudget: input.evidenceByteBudget ?? PRIVATE_EVIDENCE_BYTE_BUDGET,
       ...(input.laneTimeoutMs !== undefined ? { laneTimeoutMs: input.laneTimeoutMs } : {}),
       ...(lanes.visibilityGate ? { visibilityGate: lanes.visibilityGate } : {}),
     });
+    secretMatch ||= (detail.secretLocations?.length ?? 0) > 0;
     assertEvidencePackModelEligible(detail.pack);
     return detail.pack.candidates
       .map((candidate, index) => ({ ...candidate, corpusId: detail.candidateCorpusIds[index] ?? '' }))
@@ -2914,11 +2922,12 @@ export async function searchPrivateEvidence(input: {
   // unless nothing matched and the translation could still find something.
   const translation: CachedKeywordExpansion = { missing: false };
   let matches = await withCachedKeywordExpansion(translation, () => build(lanes.adapters));
-  if (matches.length === 0 && translation.missing) matches = await build(lanes.adapters);
+  if (matches.length === 0 && !secretMatch && translation.missing) matches = await build(lanes.adapters);
   // Only a question that matched gets neighbours: the count (what leaves this
   // computer) and whether there is a panel at all stay the matches' alone.
-  if (matches.length === 0) return { matched: 0, candidates: [] };
-  return { matched: matches.length, candidates: [...matches, ...await privateNeighbours(lanes.adapters, build, matches)] };
+  if (matches.length === 0) return { matched: secretMatch ? 1 : 0, candidates: [], ...(secretMatch ? { secretMatch: true } : {}) };
+  return { matched: matches.length, candidates: [...matches, ...await privateNeighbours(lanes.adapters, build, matches)], ...(secretMatch ? { secretMatch: true as const } : {}) };
+  });
 }
 
 /**
@@ -2987,11 +2996,12 @@ export async function probePrivateMatch(input: {
   lanes: (request: SourceIndexAnswerRequest, mode?: 'private_search') => AnalystAnswerLanes;
   request: SourceIndexAnswerRequest;
   timeoutMs: number;
-}): Promise<'match' | 'no_match' | 'unknown'> {
+  distinguishSecret?: boolean;
+}): Promise<'match' | 'secret_match' | 'no_match' | 'unknown'> {
   const question = typeof input.request.question === 'string' ? input.request.question.trim() : '';
   if (!question) return 'no_match';
   let timer: ReturnType<typeof setTimeout> | undefined;
-  const run = async (): Promise<'match' | 'no_match' | 'unknown'> => {
+  const run = async (): Promise<'match' | 'secret_match' | 'no_match' | 'unknown'> => {
     const request: SourceIndexAnswerRequest = {
       ...input.request,
       question,
@@ -3064,17 +3074,22 @@ export async function probePrivateMatch(input: {
     // 3. Only when the model's translation could still change the answer: the
     //    full match, which waits for it as long as the bound allows.
     const translation: CachedKeywordExpansion = { missing: false };
-    if (request.retrieval_mode === 'hybrid' && matched(await withCachedKeywordExpansion(translation, () => search({ lexicalOnly: true })))) return 'match';
-    let routed = await withCachedKeywordExpansion(translation, () => search({}));
-    if (matched(routed)) return 'match';
-    // A matching Secret (location only, never content) waits on this computer too: its answer there says where it is.
-    try {
-      if ((lanes.secretLocations?.(question, routed.searchedCorpora) ?? []).length > 0) return 'match';
-    } catch {
-      // The index unreadable: the search's own verdict stands.
+    const secretVerdict = (routed: Awaited<ReturnType<typeof search>>) => {
+      try {
+        return (lanes.secretLocations?.(question, routed.searchedCorpora) ?? []).length > 0;
+      } catch { return false; }
+    };
+    if (request.retrieval_mode === 'hybrid') {
+      const lexical = await withCachedKeywordExpansion(translation, () => search({ lexicalOnly: true }));
+      if (secretVerdict(lexical)) return input.distinguishSecret ? 'secret_match' : 'match';
+      if (matched(lexical)) return 'match';
     }
+    let routed = await withCachedKeywordExpansion(translation, () => search({}));
+    if (secretVerdict(routed)) return input.distinguishSecret ? 'secret_match' : 'match';
+    if (matched(routed)) return 'match';
     if (translation.missing) {
       routed = await search({});
+      if (secretVerdict(routed)) return input.distinguishSecret ? 'secret_match' : 'match';
       if (matched(routed)) return 'match';
     }
     // A Private corpus in scope that was not searched, or searched with a lane
@@ -3089,7 +3104,7 @@ export async function probePrivateMatch(input: {
   };
   try {
     return await Promise.race([
-      run(),
+      withPriorityQueryEmbedding(run),
       new Promise<'unknown'>((resolve) => {
         timer = setTimeout(() => resolve('unknown'), input.timeoutMs);
         timer.unref?.();

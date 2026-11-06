@@ -40,6 +40,6 @@ const ctx: OperationContext = {
 };
 const result = await doctor.handler(ctx, {}) as { ok: boolean; checks: Array<{ name: string; ok: boolean }> };
 process.stdout.write(JSON.stringify({
-  result: { ok: result.ok, checks: result.checks.map(({ name, ok }) => ({ name, ok })) },
+  result,
   profiles,
 }));

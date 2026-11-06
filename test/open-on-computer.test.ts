@@ -752,7 +752,8 @@ describe('olympusplugin.ai /open/ pages', () => {
     for (const target of allOpenTargets()) {
       const html = pages.get(join(openTargetPath(target), 'index.html'))!;
       const link = olympusOpenUrl(target);
-      expect(html).toContain(`<meta http-equiv="refresh" content="0; url=${link}">`);
+      if (target.kind === 'private_answers') expect(html).toContain('<script src="/assets/open-private.js" defer></script>');
+      else expect(html).toContain(`<meta http-equiv="refresh" content="0; url=${link}">`);
       expect(html).toContain(`<a class="button" href="${link}">Open Olympus</a>`);
       expect(html).toContain('Opening Olympus on your computer…');
       expect(html).toContain('<code>olympus dashboard</code>');
@@ -760,9 +761,24 @@ describe('olympusplugin.ai /open/ pages', () => {
       if (target.kind === 'connect') expect(html).toContain(`<strong>${OPEN_CONNECT_SOURCES[target.source].label}</strong>`);
       if (target.kind === 'unreadable') expect(html).toContain(`open <strong>See why</strong> under <strong>${OPEN_UNREADABLE_SOURCES[target.source].label}</strong>`);
       // Plain: no script, nothing from another site, no Mac-only wording.
-      expect(html).not.toMatch(/<script|<iframe|<img/i);
+      expect(html).not.toMatch(/<iframe|<img/i);
+      if (target.kind !== 'private_answers') expect(html).not.toContain('<script');
       expect(html.match(/(?:src|href)="https?:\/\/[^"]*"/g) ?? []).toEqual([]);
       expect(html).not.toMatch(/\bMac\b/);
     }
   });
+});
+
+test('the Inbox landing page forwards only an opaque fragment to the local handler', () => {
+  const html = expectedOpenPages().get('private/index.html')!;
+  expect(html).toContain('/assets/open-private.js');
+  const script = readFileSync(join(REPO, 'site/assets/open-private.js'), 'utf8');
+  for (const hash of ['#' + 'S'.repeat(22), '#/secret/path', '#name', '#<script>']) {
+    let opened = ''; const anchor = { href: '' };
+    new Function('location', 'document', 'addEventListener', script)(
+      { hash, replace: (value: string) => { opened = value; } },
+      { querySelector: () => anchor }, (_event: string, run: () => void) => run());
+    const expected = hash === '#' + 'S'.repeat(22) ? 'olympus://open/private/' + 'S'.repeat(22) : 'olympus://open/private';
+    expect(opened).toBe(expected); expect(anchor.href).toBe(expected);
+  }
 });

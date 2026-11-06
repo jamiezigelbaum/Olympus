@@ -252,6 +252,12 @@ export function fitFirstAnswer(answer: { answer: string; citations: readonly Pri
  */
 export function serializePrivateAnswerPlaintext(plaintext: PrivateAnswerPlaintextV1): string {
   const ack = typeof plaintext.ack === 'string' && ACK_PATTERN.test(plaintext.ack) ? plaintext.ack : undefined;
-  return JSON.stringify({ v: 1, ...fitFirstAnswer(plaintext), ...(ack ? { ack } : {}) });
+  const notice = plaintext.secretInbox;
+  const secretInbox = notice ? {
+    ...(typeof notice.handle === 'string' && /^[A-Za-z0-9_-]{22}$/.test(notice.handle) ? { handle: notice.handle } : {}),
+    ...(notice.remote && typeof notice.remote.onComputer === 'string' && typeof notice.remote.onServer === 'string'
+      ? { remote: { onComputer: notice.remote.onComputer.slice(0, 1024), onServer: notice.remote.onServer.slice(0, 1024) } } : {}),
+  } : undefined;
+  return JSON.stringify({ v: 1, ...fitFirstAnswer(plaintext), ...(ack ? { ack } : {}), ...(secretInbox ? { secretInbox } : {}) });
 }
 const ACK_PATTERN = new RegExp(`^[A-Za-z0-9_-]{${PRIVATE_ANSWER_PAYLOAD_LIMITS.openTokenChars}}$`);

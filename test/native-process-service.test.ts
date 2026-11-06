@@ -12,20 +12,21 @@
  */
 import { afterEach, expect, test } from 'bun:test';
 import { EventEmitter } from 'node:events';
-import { spawn as spawnProcess, type ChildProcess } from 'node:child_process';
+import { spawn as spawnProcess, spawnSync, type ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { lstatSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   createNativeProcessService,
+  NativeProcessRetryableStartError,
   setNativeProcessChildObserver,
   type NativeProcessServiceContext,
   type NativeProcessServiceDefinition,
 } from '../src/core/native-process-service.ts';
 
 import { createNativeWorkerService } from '../src/core/native-worker-service.ts';
-import { workerSocketPath } from '../src/core/worker-transport.ts';
+import { prepareWorkerSocket, workerSocketPath } from '../src/core/worker-transport.ts';
 
 const READY_ENV = 'OLYMPUS_RESTART_READY_PATH';
 const INSTANCE_ENV = 'OLYMPUS_RESTART_INSTANCE';
@@ -58,7 +59,7 @@ interface Harness {
 
 type Launch = string | { command: string; args: string[] };
 
-function harness(scriptForLaunch: (launchIndex: number) => Launch, options: { descendantSettleMs?: number } = {}): Harness {
+function harness(scriptForLaunch: (launchIndex: number) => Launch, options: { retryInitialStartFailure?: boolean; descendantSettleMs?: number; restartDelaysMs?: readonly number[]; stableUptimeMs?: number } = {}): Harness {
   const directory = mkdtempSync(join(tmpdir(), 'olympus-native-restart-'));
   cleanups.push(() => rmSync(directory, { recursive: true, force: true }));
   const readyPath = join(directory, 'ready');
@@ -73,9 +74,11 @@ function harness(scriptForLaunch: (launchIndex: number) => Launch, options: { de
     label: 'fixture',
     initialConfig: {},
     reload: { configPrefixes: [] },
+    ...(options.retryInitialStartFailure === undefined ? {} : {retryInitialStartFailure: options.retryInitialStartFailure}),
     readinessPollMs: 10,
     stopGraceMs: 200,
-    restartDelaysMs: [20, 40],
+    restartDelaysMs: options.restartDelaysMs ?? [20, 40],
+    ...(options.stableUptimeMs === undefined ? {} : { stableUptimeMs: options.stableUptimeMs }),
     ...(options.descendantSettleMs === undefined ? {} : { descendantSettleMs: options.descendantSettleMs }),
     spawn: ((command: string, args: readonly string[], spawnOptions: object) => {
       const child = spawnProcess(command, args as string[], spawnOptions as Parameters<typeof spawnProcess>[2]);
@@ -224,7 +227,7 @@ for (const confirmed of [true, false]) {
     expect(service.isReady()).toBe(true);
     expect(pids).toHaveLength(2);
    } else {
-    await expect(replacement).rejects.toThrow('failed to become ready');
+    await expect(replacement).rejects.toThrow('olympus engine restart');
     expect(lstatSync(socket).ino).toBe(retained[0]!);
     expect(warnings.join(' ')).toContain('could not be confirmed stopped');
     expect(service.isReady()).toBe(false);
@@ -535,3 +538,84 @@ test('stop() never reports success while the child took every signal but has not
     await run.finish();
   }
 }, 15_000);
+
+test('a deliberate self-restart (exit 75) never climbs the crash backoff: a second one inside the stable uptime restarts at the first delay', async () => {
+  // Delete indexed data restarts the worker. Pressed within the stable uptime
+  // of an earlier restart it used to wait out the climbed delay (up to 30 s in
+  // production) while the row kept offering the delete.
+  const run = harness((launch) => (launch < 2 ? SELF_RESTART_75 : STAY_ALIVE), { restartDelaysMs: [20, 4_000], stableUptimeMs: 60_000 });
+  try {
+    const startedAt = Date.now();
+    await run.service.start(run.context);
+    await waitUntil(() => readyCount(run) === 3, 'the third child to become ready', 3_000);
+    expect(Date.now() - startedAt).toBeLessThan(3_000);
+  } finally {
+    await run.service.stop();
+  }
+}, 15_000);
+
+test('a child that keeps restarting itself still backs off once its fast restarts are used up', async () => {
+  // Three deliberate restarts skip the backoff; the fourth and fifth count as crashes, and the fifth waits the second delay.
+  // Measured from the fifth child's start to the sixth's: without the bound that gap is the child's own 150 ms plus the 20 ms first delay.
+  const run = harness((launch) => (launch < 5 ? SELF_RESTART_75 : STAY_ALIVE), { restartDelaysMs: [20, 1_000], stableUptimeMs: 60_000 });
+  try {
+    await run.service.start(run.context);
+    await waitUntil(() => readyCount(run) === 5, 'the fifth child to become ready', 8_000);
+    const fifthAt = Date.now();
+    await waitUntil(() => readyCount(run) === 6, 'the sixth child to become ready', 8_000);
+    expect(Date.now() - fifthAt).toBeGreaterThanOrEqual(1_000);
+  } finally {
+    await run.service.stop();
+  }
+}, 20_000);
+
+test('a crash still climbs the backoff inside the stable uptime', async () => {
+  const run = harness((launch) => (launch < 2 ? SIGTERM_UNHANDLED : STAY_ALIVE), { restartDelaysMs: [20, 600], stableUptimeMs: 60_000 });
+  try {
+    const startedAt = Date.now();
+    await run.service.start(run.context);
+    await waitUntil(() => readyCount(run) === 3, 'the third child to become ready', 5_000);
+    expect(Date.now() - startedAt).toBeGreaterThanOrEqual(600);
+  } finally {
+    await run.service.stop();
+  }
+}, 15_000);
+
+
+test('a resolved ownership conflict does not mask a later unrelated startup failure', async () => {
+  let attempts = 0;
+  const run = harness(() => {
+    if (attempts++ === 0) throw new NativeProcessRetryableStartError('Known ownership conflict; retrying.');
+    return 'process.exit(17)';
+  }, {retryInitialStartFailure: true});
+  try {
+    await expect(run.service.start(run.context)).rejects.toThrow('Known ownership conflict');
+    await waitUntil(() => run.spawned.length >= 1 && run.spawned[0]!.exitCode !== null, 'the unrelated startup failure');
+    await waitUntil(() => run.health.length >= 2, 'the next startup diagnosis');
+    expect(run.health.at(-1)).toBe('Olympus fixture failed to become ready.');
+  } finally { await run.service.stop(); }
+}, 15_000);
+
+test.skipIf(process.platform !== 'linux')('a legacy retained socket reports the verified engine restart remedy without unlinking it or spawning', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'worker-retained-'));
+  cleanups.push(() => rmSync(root, {recursive: true, force: true}));
+  const env = {HOME: root, XDG_RUNTIME_DIR: root, XDG_CONFIG_HOME: join(root, 'config'), XDG_DATA_HOME: join(root, 'data'), XDG_STATE_HOME: join(root, 'state'), XDG_CACHE_HOME: join(root, 'cache')};
+  const previous = Object.fromEntries(Object.keys(env).map(key => [key, process.env[key]]));
+  Object.assign(process.env, env);
+  cleanups.push(() => { for (const [key, value] of Object.entries(previous)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; } });
+  const socket = prepareWorkerSocket({env})!;
+  const made = spawnSync('python3', ['-c', 'import socket,sys,os;s=socket.socket(socket.AF_UNIX);s.bind(sys.argv[1]);os.chmod(sys.argv[1],0o600);s.close()', socket]);
+  expect(made.status).toBe(0);
+  const inode = lstatSync(socket).ino;
+  const script = join(root, 'worker.mjs'); writeFileSync(script, 'process.exit(17)');
+  let spawned = 0;
+  setNativeProcessChildObserver({spawned: () => { spawned++; }, stopped() {}});
+  cleanups.push(() => setNativeProcessChildObserver(undefined));
+  const service = createNativeWorkerService({initialPluginConfig: {worker: {authToken: 'fixture', service: {enabled: true, runtimePath: process.execPath, executablePath: script}}},
+    moduleUrl: import.meta.url, workerEnvPath: join(root, 'absent.env'), startupTimeoutMs: 500, readinessPollMs: 10, restartDelaysMs: [20]});
+  try {
+    await expect(service.start({})).rejects.toThrow('olympus engine restart');
+    expect(lstatSync(socket).ino).toBe(inode);
+    expect(spawned).toBe(0);
+  } finally { await service.stop(); }
+}, 10_000);

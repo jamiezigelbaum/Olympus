@@ -105,6 +105,8 @@ const MAX_REASON_LENGTH = 256;
  * was paused is not the job's fault and must not burn its retry budget.
  */
 const RECYCLED_ERROR_KIND = 'provider_pause_recycled';
+// The store sink refusal of an identity that matched several rows (store-sink.ts).
+const AMBIGUOUS_IDENTITY_ERROR_KIND = 'store_identity_ambiguous';
 const JANITOR_RETRYABLE_ERROR_KIND = 'janitor_retryable_requeued';
 const JANITOR_TERMINAL_ERROR_KIND = 'janitor_terminal_requeued';
 
@@ -459,12 +461,22 @@ export interface ExtractionTerminalRetryPath {
   escalateToExtractorKind?: string;
 }
 
+// Queue rows per current-item check when a scoped snapshot is taken in turns.
+const SCOPED_READINESS_CURRENT_SLICE = 2_000;
+
 export interface ExtractionScopedReadinessOptions {
   now?: Date;
   // Terminal failures that still have a retry path (ExtractionTerminalRetryPath).
   terminalRetryPaths?: readonly ExtractionTerminalRetryPath[];
   /** Current store identity/scope fence for rows read from this separate queue. */
   currentItem?: (ref: ExtractionItemRef) => boolean;
+  /**
+   * The same fence for many rows at once, one answer per ref in order. Used
+   * instead of currentItem when given: a store with a large queue was asked
+   * one query per job, which held the worker for seconds on every status read
+   * (Sparta, 2026-11-04: most of 9-12 s dashboard freezes).
+   */
+  currentItems?: (refs: readonly ExtractionItemRef[]) => readonly boolean[];
   /**
    * Asked about every item extraction gave up on before it is counted, so the
    * unreadable count and the list of unreadable files come from one decision
@@ -489,6 +501,11 @@ export interface ExtractionUnreadableItem {
    * When that job failed for good (its `updated_at`).
    */
   failedAt: string;
+  /**
+   * That job's bounded error kind (`last_error_kind`), for the reason the
+   * file's line gives (unreadable-files.ts `unreadableFileReason`).
+   */
+  errorKind?: string;
 }
 
 /**
@@ -539,7 +556,9 @@ function unreadableCandidate(itemRows: readonly ExtractionJobSqlRow[]): Extracti
     if (row.status !== 'failed_terminal') continue;
     if (!newest || row.updated_at > newest.updated_at) newest = row;
   }
-  return newest ? { ref: refFromRow(newest), failedAt: newest.updated_at } : undefined;
+  return newest
+    ? { ref: refFromRow(newest), failedAt: newest.updated_at, ...(newest.last_error_kind ? { errorKind: newest.last_error_kind } : {}) }
+    : undefined;
 }
 
 interface ExtractionJobSqlRow {
@@ -703,7 +722,14 @@ export class LocalFileExtractionJobStore {
         // artifacts went with its name). Owed until a pass can queue it.
         const reread = !redacted && existing !== undefined && existing !== null && status === 'queued'
           && takeRestoredReread(this.db, existing.job_id);
-        const forceExisting = Boolean(existing) && (force || reread) && status === 'queued';
+        // A chat item refused as an ambiguous identity, because another
+        // conversation repeated its message id, is read once more: the store now
+        // tells such items apart by their conversation (Sparta, 2026-11-04: 548
+        // chat media jobs). Once ever, so a truly ambiguous item settles.
+        const identityReread = !redacted && status === 'queued' && existing !== undefined && existing !== null
+          && existing.status === 'failed_terminal' && existing.last_error_kind === AMBIGUOUS_IDENTITY_ERROR_KIND
+          && (existing.janitor_terminal_requeue_count ?? 0) < 1;
+        const forceExisting = Boolean(existing) && (force || reread || identityReread) && status === 'queued';
         const reset = forceExisting ? 1 : 0;
 
         this.db.query(`
@@ -772,6 +798,11 @@ export class LocalFileExtractionJobStore {
           reset,
         );
 
+        if (identityReread) {
+          this.db.query(`UPDATE extraction_jobs
+            SET janitor_terminal_requeue_count = COALESCE(janitor_terminal_requeue_count, 0) + 1
+            WHERE job_id = ?`).run(jobId);
+        }
         if (forceExisting) {
           jobsForced += 1;
         } else if (existing) {
@@ -1574,6 +1605,34 @@ export class LocalFileExtractionJobStore {
     lanes: readonly ExtractionLaneKey[],
     options: ExtractionScopedReadinessOptions = {},
   ): ExtractionCorpusReadiness {
+    const steps = this.scopedReadinessSteps(lanes, options);
+    let step = steps.next();
+    while (!step.done) step = steps.next();
+    return step.value;
+  }
+
+  /**
+   * scopedReadiness with the thread given back between lanes and between
+   * slices of the current-item check: in one go a large queue's snapshot held
+   * the worker for 22.6 s (Sparta, 2007d67, 2026-11-05).
+   */
+  async scopedReadinessInTurns(
+    lanes: readonly ExtractionLaneKey[],
+    options: ExtractionScopedReadinessOptions & { turn: () => Promise<void> | undefined },
+  ): Promise<ExtractionCorpusReadiness> {
+    const steps = this.scopedReadinessSteps(lanes, options);
+    let step = steps.next();
+    while (!step.done) {
+      await options.turn();
+      step = steps.next();
+    }
+    return step.value;
+  }
+
+  private *scopedReadinessSteps(
+    lanes: readonly ExtractionLaneKey[],
+    options: ExtractionScopedReadinessOptions,
+  ): Generator<void, ExtractionCorpusReadiness> {
     const uniqueLanes = new Map<string, ExtractionLaneKey>();
     for (const lane of lanes) {
       const key = requireLaneKey(lane);
@@ -1592,10 +1651,24 @@ export class LocalFileExtractionJobStore {
         lane.approvedScopeKey,
       ) as ExtractionJobSqlRow[];
       for (const row of rows) byJobId.set(row.job_id, row);
+      yield;
     }
-    const rows = [...byJobId.values()].filter((row) => (
-      options.currentItem ? options.currentItem(refFromRow(row)) : true
-    ));
+    const allRows = [...byJobId.values()];
+    let rows = allRows;
+    if (options.currentItems) {
+      const current: boolean[] = [];
+      for (let start = 0; start < allRows.length; start += SCOPED_READINESS_CURRENT_SLICE) {
+        if (start > 0) yield;
+        const slice = allRows.slice(start, start + SCOPED_READINESS_CURRENT_SLICE);
+        const answers = options.currentItems(slice.map(refFromRow));
+        for (let index = 0; index < slice.length; index += 1) current.push(answers[index] === true);
+      }
+      rows = allRows.filter((_row, index) => current[index] === true);
+      yield;
+    } else if (options.currentItem) {
+      const currentItem = options.currentItem;
+      rows = allRows.filter((row) => currentItem(refFromRow(row)));
+    }
     const byItem = new Map<string, ExtractionJobSqlRow[]>();
     for (const row of rows) {
       const existing = byItem.get(row.local_item_id);
@@ -1749,7 +1822,7 @@ export class LocalFileExtractionJobStore {
     for (const row of failedRows) {
       if (seen.has(row.local_item_id)) continue;
       seen.add(row.local_item_id);
-      candidates.push({ ref: refFromRow(row), failedAt: row.updated_at });
+      candidates.push({ ref: refFromRow(row), failedAt: row.updated_at, ...(row.last_error_kind ? { errorKind: row.last_error_kind } : {}) });
     }
     const unreadable = settleUnreadable(candidates, options.classifyUnreadable);
     options.onUnreadable?.(unreadable.items);

@@ -1,3 +1,4 @@
+import { macEngineManager } from '../../core/mac-engine-daemon.ts';
 /**
  * The Mac's own permission rules for the folders Olympus is asked to read.
  *
@@ -20,12 +21,17 @@ import { existsSync, mkdirSync, opendirSync, readFileSync } from 'node:fs';
 import { opendir } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { writePrivateFileAtomicSync } from '../../core/atomic-file.ts';
+import { olympusDataDir } from '../../core/remote-access.ts';
 import type { OlympusFolderAccess } from '../../control-ui-contract.ts';
 import { isWithinScopePath } from './paths.ts';
 import type { MountedVolume } from './volume-identity.ts';
 
 /** The helper sets this in the engine's environment (native/macos-engine-host/main.c). */
 export const ENGINE_HELPER_ENV = 'OLYMPUS_ENGINE_HELPER';
+/** Where the Mac's remembered answers live: one file for the folder picker and the scheduler's reads. */
+export function folderAccessMemoryPath(): string {
+  return join(olympusDataDir(), 'local-files', 'folder-access.json');
+}
 export const FULL_DISK_ACCESS_URL = 'x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles';
 export const FILES_AND_FOLDERS_URL = 'x-apple.systempreferences:com.apple.preference.security?Privacy_FilesAndFolders';
 
@@ -61,6 +67,8 @@ export type AccessAnswer = 'granted' | 'denied' | 'waiting' | 'unreadable';
 
 export interface MacPermissionsOptions {
   platform?: NodeJS.Platform;
+  /** Test seam; production reads the installed daemon for this account. */
+  serverMode?: () => boolean;
   home: string;
   /** True when the engine runs through the signed helper. Default: the helper's environment flag. */
   helperPresent?: () => boolean;
@@ -83,7 +91,7 @@ export interface MacPermissionsOptions {
  *  - `engine_helper`: the standalone engine, started through the signed helper:
  *    the Mac names "Olympus Engine".
  *  - `engine_without_helper`: the standalone engine with no helper installed
- *    (the signed helper app fixes it; release builds do not ship it yet).
+ *    (the signed helper app fixes it).
  *  - `managed_worker`: the worker OpenClaw's Gateway supervises as its own
  *    LaunchAgent. It is never started through the helper, so installing the
  *    helper for the standalone engine does not change what the Mac names.
@@ -98,10 +106,11 @@ const OTHER_APP = 'the app that runs Olympus (the one your Mac named when it ask
 
 /** Copy, in one place so the picker and the tests read the same words. */
 export const MAC_ACCESS_COPY = {
+  serverMode: 'Olympus runs while no one is signed in, so your Mac cannot show a folder question. Using Screen Sharing, open System Settings, choose Privacy & Security, then Full Disk Access, and switch on Olympus Engine once. Then choose Try again, or drag files onto the dashboard.',
   needsPermission: 'Your Mac will ask before Olympus opens this folder.',
   waiting: 'Your Mac is asking whether Olympus may open this folder. Answer on your Mac, then choose Try again.',
-  needsHelper: 'Olympus cannot open this folder on this Mac yet. Desktop, Documents, Downloads, iCloud Drive and other disks need the Olympus helper app, which comes in a later update. Choose a folder outside them, or drag files onto the dashboard.',
-  needsHelperWholeComputer: 'Olympus cannot read the whole computer on this Mac yet. That needs the Olympus helper app, which comes in a later update. Choose folders outside Desktop, Documents, Downloads, iCloud Drive and other disks, or drag files onto the dashboard.',
+  needsHelper: 'Desktop, Documents, Downloads, iCloud Drive and other disks need the Olympus helper app. Update Olympus to add it, or choose a folder outside them.',
+  needsHelperWholeComputer: 'Reading the whole computer needs the Olympus helper app. Update Olympus to add it, or choose folders outside Desktop, Documents, Downloads, iCloud Drive and other disks.',
   /** Olympus runs as OpenClaw's own worker: the helper is not part of that setup, so say what does work. */
   needsHelperManagedWorker: 'Olympus is running as an OpenClaw background worker here, and your Mac cannot ask you about this folder for it. Choose a folder outside Desktop, Documents, Downloads, iCloud Drive and other disks, or drag files onto the dashboard.',
   needsHelperManagedWorkerWholeComputer: 'Olympus is running as an OpenClaw background worker here, and your Mac cannot ask you about the whole computer for it. Choose folders outside Desktop, Documents, Downloads, iCloud Drive and other disks, or drag files onto the dashboard.',
@@ -140,6 +149,7 @@ export function permissionHostPresent(env: Record<string, string | undefined>): 
 export class MacPermissions {
   private readonly platform: NodeJS.Platform;
   private readonly home: string;
+  private readonly serverMode: () => boolean;
   private readonly helperPresent: () => boolean;
   private readonly hostKind: () => PermissionHostKind;
   private readonly memoryPath: string | undefined;
@@ -153,6 +163,7 @@ export class MacPermissions {
   constructor(options: MacPermissionsOptions) {
     this.platform = options.platform ?? process.platform;
     this.home = options.home;
+    this.serverMode = options.serverMode ?? (() => this.active && ['engine_helper', 'engine_without_helper'].includes(this.hostKind()) && macEngineManager(this.home) === 'daemon');
     this.helperPresent = options.helperPresent ?? (() => permissionHostPresent(process.env));
     this.hostKind = options.hostKind
       ?? (options.helperPresent
@@ -192,6 +203,7 @@ export class MacPermissions {
    * the standalone engine; OpenClaw's own worker gets the words that fit it.
    */
   helperNeededCopy(wholeComputer = false): string {
+    if (this.serverMode()) return MAC_ACCESS_COPY.serverMode;
     if (this.hostKind() === 'managed_worker') {
       return wholeComputer ? MAC_ACCESS_COPY.needsHelperManagedWorkerWholeComputer : MAC_ACCESS_COPY.needsHelperManagedWorker;
     }
@@ -253,6 +265,7 @@ export class MacPermissions {
 
   /** What a folder row says before anything is asked: "Needs permission" unless the Mac already allowed it. */
   nodeAccess(guard: GuardedFolder): OlympusFolderAccess | undefined {
+    if (this.serverMode()) return this.hasFullDiskAccess() ? undefined : this.serverAccess();
     if (this.recall(guard) === 'granted') return undefined;
     return {
       state: this.hasHelper() ? 'needs_permission' : 'needs_helper',
@@ -266,19 +279,31 @@ export class MacPermissions {
    * nothing is read, so the question never names the wrong app.
    */
   async open(guard: GuardedFolder): Promise<OlympusFolderAccess | undefined> {
+    if (this.serverMode() && !this.hasFullDiskAccess()) return this.serverAccess();
     if (!this.hasHelper()) {
       return { state: 'needs_helper', message: this.helperNeededCopy() };
     }
     const answer = await this.ask(guard);
     if (answer === 'granted') return undefined;
-    if (answer === 'waiting') return { state: 'waiting', message: MAC_ACCESS_COPY.waiting };
+    if (answer === 'waiting') return { state: 'waiting', message: this.serverMode() ? 'This folder is taking longer to open. Check that it is available on this Mac, then choose Try again, or drag files onto the dashboard.' : MAC_ACCESS_COPY.waiting };
     // The folder's own permissions refused (not the Mac's privacy rule): nothing in System Settings changes that.
     if (answer === 'unreadable') return { state: 'denied', message: this.unreadableCopy() };
+    if (this.serverMode()) return this.serverAccess();
     return { state: 'denied', message: MAC_ACCESS_COPY.denied(guard.kind, this.appName()), settings_url: FILES_AND_FOLDERS_URL };
   }
 
+  /** A guarded folder that was just read: the Mac allowed it, so its row stops saying "Needs permission". */
+  noteGranted(guard: GuardedFolder): void {
+    this.remember(guard, 'granted');
+  }
+
   /** What an unreadable folder, found while reading, means: a denial, or a plain failure. */
+  private serverAccess(): OlympusFolderAccess {
+    return { state: 'needs_full_disk_access', message: MAC_ACCESS_COPY.serverMode, settings_url: FULL_DISK_ACCESS_URL };
+  }
+
   noteDenied(guard: GuardedFolder): OlympusFolderAccess {
+    if (this.serverMode()) return this.serverAccess();
     this.remember(guard, 'denied');
     return { state: 'denied', message: MAC_ACCESS_COPY.denied(guard.kind, this.appName()), settings_url: FILES_AND_FOLDERS_URL };
   }
@@ -286,6 +311,7 @@ export class MacPermissions {
   /** The top level's note about searching the whole computer, when Full Disk Access is not on. */
   fullDiskAccessNote(): OlympusFolderAccess | undefined {
     if (!this.active || this.hasFullDiskAccess()) return undefined;
+    if (this.serverMode()) return this.serverAccess();
     if (!this.hasHelper()) return { state: 'needs_helper', message: this.helperNeededCopy(true) };
     return { state: 'needs_full_disk_access', message: MAC_ACCESS_COPY.fullDiskAccess(this.appName()), settings_url: FULL_DISK_ACCESS_URL };
   }
@@ -354,7 +380,8 @@ export class MacPermissions {
   }
 
   private load(): Record<string, { answer: 'granted' | 'denied'; at: string }> {
-    if (this.memory) return this.memory;
+    // The file is shared with the scheduler's reads, so it is read again rather than held.
+    if (this.memory && !this.memoryPath) return this.memory;
     let loaded: Record<string, { answer: 'granted' | 'denied'; at: string }> = {};
     if (this.memoryPath && existsSync(this.memoryPath)) {
       try {

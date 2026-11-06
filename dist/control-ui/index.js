@@ -43,6 +43,8 @@ var PANEL_TOOL_NAMES = [
   MODEL_RETRY_TOOL_NAME,
   "olympus_privacy_get",
   "olympus_privacy_set",
+  "olympus_privacy_questions",
+  "olympus_privacy_check",
   SYNC_SOURCE_TOOL_NAME
 ];
 var COMPUTER_HOST_TOOL_NAMES = [

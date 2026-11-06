@@ -169,6 +169,114 @@ describe('the set ledger governs every handle, and its loss fails closed', () =>
     }
   });
 
+  test('status reads reuse the hidden copies until the store or ledger changes', async () => {
+    const dir = workspace();
+    const tiered = await raised(dir);
+    const store = tiered.stores.internal!;
+    const ledger = tiered.ledger;
+    const real = ledger.corpusCopyIdentities.bind(ledger);
+    let reads = 0;
+    ledger.corpusCopyIdentities = ((...args: Parameters<typeof real>) => { reads += 1; return real(...args); }) as typeof real;
+    const realSteps = ledger.corpusCopyIdentitiesSteps.bind(ledger);
+    // The paged form (#858) reads the hidden copies too.
+    ledger.corpusCopyIdentitiesSteps = ((...args: Parameters<typeof realSteps>) => { reads += 1; return realSteps(...args); }) as typeof realSteps;
+    try {
+      const statusReads = (): number => {
+        const before = reads;
+        expect(store.status().counts.chunks).toBe(0);
+        return reads - before;
+      };
+      const fresh = statusReads();
+      // Same turn, nothing changed: the hidden copies are not read again.
+      const reused = statusReads();
+      expect(reused).toBeLessThan(fresh);
+      expect(statusReads()).toBe(reused);
+      // A ledger write in the same turn is seen at once.
+      ledger.recordDecision(identityOf('unrelated'), ledger.getCurrent(identityOf('garden'))! as unknown as Parameters<typeof ledger.recordDecision>[1]);
+      expect(statusReads()).toBe(fresh);
+      // A later turn with nothing changed still reuses them.
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(statusReads()).toBe(reused);
+      // A write to the store itself is seen at once.
+      store.advanceItemVersion(identityOf('garden'));
+      expect(statusReads()).toBe(fresh);
+    } finally {
+      ledger.corpusCopyIdentities = real;
+      ledger.corpusCopyIdentitiesSteps = realSteps;
+      tiered.close();
+    }
+  });
+
+  test('a status snapshot may reuse the hidden copies for a while; other reads never do', async () => {
+    const dir = workspace();
+    const tiered = await raised(dir);
+    const store = tiered.stores.internal!;
+    const ledger = tiered.ledger;
+    const real = ledger.corpusCopyIdentities.bind(ledger);
+    let reads = 0;
+    ledger.corpusCopyIdentities = ((...args: Parameters<typeof real>) => { reads += 1; return real(...args); }) as typeof real;
+    const realSteps = ledger.corpusCopyIdentitiesSteps.bind(ledger);
+    // The paged form (#858) reads the hidden copies too.
+    ledger.corpusCopyIdentitiesSteps = ((...args: Parameters<typeof realSteps>) => { reads += 1; return realSteps(...args); }) as typeof realSteps;
+    try {
+      const readsFor = (options?: { countsMaxAgeMs: number }): number => {
+        const before = reads;
+        store.status(undefined, options);
+        return reads - before;
+      };
+      const fresh = readsFor({ countsMaxAgeMs: 60_000 });
+      expect(fresh).toBeGreaterThan(0);
+      // Writes on both sides, as an importing store has between snapshots.
+      ledger.recordDecision(identityOf('unrelated'), ledger.getCurrent(identityOf('garden'))! as unknown as Parameters<typeof ledger.recordDecision>[1]);
+      store.advanceItemVersion(identityOf('garden'));
+      // The snapshot reuses what it read; it still checks unreadable items
+      // through its own memo, so it reads no copy identities at all.
+      expect(readsFor({ countsMaxAgeMs: 60_000 })).toBe(0);
+      // A read that states no age sees the change at once.
+      expect(readsFor()).toBeGreaterThan(0);
+      // An age of zero is no allowance.
+      store.advanceItemVersion(identityOf('garden'));
+      expect(readsFor({ countsMaxAgeMs: 0 })).toBeGreaterThan(0);
+    } finally {
+      ledger.corpusCopyIdentities = real;
+      ledger.corpusCopyIdentitiesSteps = realSteps;
+      tiered.close();
+    }
+  });
+
+  test('an expired snapshot set is served at once and rebuilt in turns, never in the status call', async () => {
+    const dir = workspace();
+    const tiered = await raised(dir);
+    const store = tiered.stores.internal!;
+    const ledger = tiered.ledger;
+    const real = ledger.corpusCopyIdentities.bind(ledger);
+    let reads = 0;
+    ledger.corpusCopyIdentities = ((...args: Parameters<typeof real>) => { reads += 1; return real(...args); }) as typeof real;
+    const realSteps = ledger.corpusCopyIdentitiesSteps.bind(ledger);
+    // The paged form (#858) reads the hidden copies too.
+    ledger.corpusCopyIdentitiesSteps = ((...args: Parameters<typeof realSteps>) => { reads += 1; return realSteps(...args); }) as typeof realSteps;
+    try {
+      const readsFor = (): number => {
+        const before = reads;
+        store.status(undefined, { countsMaxAgeMs: 5 });
+        return reads - before;
+      };
+      expect(readsFor()).toBeGreaterThan(0);
+      ledger.recordDecision(identityOf('unrelated'), ledger.getCurrent(identityOf('garden'))! as unknown as Parameters<typeof ledger.recordDecision>[1]);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      // Expired: the call itself reads nothing and answers from the older set.
+      const before = reads;
+      expect(readsFor()).toBe(0);
+      // The rebuild runs in later turns.
+      for (let i = 0; i < 40 && reads === before; i += 1) await new Promise((resolve) => setTimeout(resolve, 5));
+      expect(reads).toBeGreaterThan(before);
+    } finally {
+      ledger.corpusCopyIdentities = real;
+      ledger.corpusCopyIdentitiesSteps = realSteps;
+      tiered.close();
+    }
+  });
+
   test('with the set ledger lost, a routed store refuses to sync and serves nothing', async () => {
     const dir = workspace();
     const first = await raised(dir);

@@ -52,6 +52,13 @@ async function dropboxServer(account: { tokenAccountId?: string; lookupAccountId
       }));
       return;
     }
+    // The final permission check is separate from account identification.
+    if (url.pathname === '/2/files/list_folder' && request.method === 'POST') {
+      response.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({
+        entries: [], cursor: 'permission-check', has_more: false,
+      }));
+      return;
+    }
     if (url.pathname === '/2/users/get_current_account' && request.method === 'POST') {
       lookups.push(String(request.headers.authorization));
       const byToken = account.lookupByToken?.[String(request.headers.authorization).replace(/^Bearer /, '')];

@@ -95,6 +95,12 @@ export const evernoteCredentialKey = (accountRole: string = EVERNOTE_ACCOUNT_ROL
 const ATTACHMENT_CALL_BUDGET = 4;
 /** Calls listing the notebooks for the picker may make (more than 100 notebooks are found by name fragments). */
 const NOTEBOOKS_CALL_BUDGET = 400;
+/**
+ * How long a finished notebook list answers the picker again. Over 100 notebooks the list takes
+ * one paced search per name fragment (a minute or more), so the picker's open, its Try again and
+ * its save share one listing instead of each starting over.
+ */
+export const EVERNOTE_NOTEBOOK_LIST_TTL_MS = 10 * 60_000;
 /** What the exclusion rules can name of a notebook: its id, or `/<name>` as its path. */
 const EVERNOTE_ENFORCEABLE_EXCLUSION_CRITERIA = ['path_prefix', 'folder_id'] as const;
 
@@ -395,6 +401,8 @@ export function createEvernoteLiveSync(options: EvernoteLiveSyncOptions): Everno
   let lastCompletedAt: string | undefined = readPassFile(passPath).status.last_completed_at;
   // One pass at a time: a manual sync beside the scheduled one waits for it.
   let running: Promise<EvernotePassReceipt> | undefined;
+  let notebookList: { at: number; books: EvernoteNotebook[] } | undefined;
+  let notebookListing: Promise<EvernoteNotebook[]> | undefined;
 
   const failed = (file: PassFile, error: unknown): never => {
     const name = (error as { name?: string } | undefined)?.name;
@@ -493,14 +501,21 @@ export function createEvernoteLiveSync(options: EvernoteLiveSyncOptions): Everno
       })();
       return running;
     },
-    async notebooks() {
-      const listing = session('notebooks');
-      await listing.open();
-      try {
-        return await listNotebooks(listing);
-      } finally {
-        await listing.close();
-      }
+    notebooks() {
+      if (notebookList && now().getTime() - notebookList.at < EVERNOTE_NOTEBOOK_LIST_TTL_MS) return Promise.resolve(notebookList.books);
+      // One listing at a time: a caller that gave up waiting leaves it running, and the next one joins it.
+      notebookListing ??= (async () => {
+        const listing = session('notebooks');
+        await listing.open();
+        try {
+          const books = await listNotebooks(listing);
+          notebookList = { at: now().getTime(), books };
+          return books;
+        } finally {
+          await listing.close();
+        }
+      })().finally(() => { notebookListing = undefined; });
+      return notebookListing;
     },
     attachmentConnector: () => attachments,
     bindNotebookChoice: (choice) => { boundChoice = choice; },

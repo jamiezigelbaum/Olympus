@@ -1,3 +1,4 @@
+import { providerSourceLabel } from '../../core/remote-result.ts';
 import { DASHBOARD_PRIVATE_ANSWERS_COPY as W } from '../dashboard/vocabulary.ts';
 /**
  * Local Private answers inbox and Ask privately. HTTP admits only a local
@@ -9,13 +10,13 @@ import { DASHBOARD_PRIVATE_ANSWERS_COPY as W } from '../dashboard/vocabulary.ts'
  * Source opens are opaque, session-bound, expire after 30 minutes and recheck
  * every source immediately before desktop dispatch. No external URL is sent
  * to the page. Delete/revoke/withdrawal invalidates every outstanding completion.
- * Retries persist only attempts and next-attempt, never exception text.
+ * Retries persist bounded content-free reason codes and settle after eight attempts; never exception text.
  */
 import { TIER_LEDGER_IDENTITY_FIELDS } from '../classification/tier-ledger.ts';
 import { lstatSync } from 'node:fs';
 import { answerReleaseWithheldReason, type ReleaseCheck } from '../../core/release-manifest.ts';
 import { randomBytes } from 'node:crypto';
-import { CHATGPT_INBOX_GRACE_MS, type StoredPrivateAnswer, type WaitingQuestion, type WaitingQuestionRef, type WaitingQuestionStore } from '../../core/waiting-private-questions.ts';
+import { CHATGPT_INBOX_GRACE_MS, WAITING_QUESTION_RETRY_REASONS, type WaitingQuestionRetryReason, type StoredPrivateAnswer, type WaitingQuestion, type WaitingQuestionRef, type WaitingQuestionStore } from '../../core/waiting-private-questions.ts';
 import { answerPrivately, type BuiltInAnalystModel } from '../../core/analyst-built-in.ts';
 import type { PrivateAnswerSourceCitation, PrivateEvidenceItem } from '../chatgpt/private-answer-contract.ts';
 import {
@@ -29,6 +30,7 @@ import type { SourceIndexAnswerRequest } from '../source-index/answer-types.ts';
 import type { SourceEmbeddingProvider } from '../source-index/embeddings.ts';
 import {
   answerOnThisComputer,
+  localAnswerRequest,
   checkLocalEvidenceItems,
   readLocalEvidenceItem,
   type LocalAnswerRequest,
@@ -65,9 +67,10 @@ export interface WaitingQuestionView {
   askedAt: string;
   /** The local probe could not tell yet whether Private items match. */
   unchecked: boolean;
-  state: 'answering' | 'retrying' | 'answered' | 'unchecked' | 'queued' | 'changed';
+  state: 'answering' | 'retrying' | 'answered' | 'unchecked' | 'queued' | 'changed' | 'failed';
   unread: boolean;
   answeredAt?: string;
+  failureReason?: WaitingQuestionRetryReason;
 }
 
 /** A citation as the page gets it: never a path; a local file opens by token. */
@@ -80,6 +83,10 @@ export interface LocalCitationView {
 }
 
 export interface LocalPrivateAnswersOptions {
+  panelSecretNotice?: (ref: WaitingQuestionRef) => boolean;
+  panelSecretOnlyNotice?: (ref: WaitingQuestionRef) => boolean;
+  resolveSecretInbox?: (handle: string) => WaitingQuestionRef | undefined;
+  secretSources?: (input: LocalAnswerRequest, locations: readonly import('../../core/evidence-pack.ts').SavedSecretLocation[]) => PrivateAnswerSourceCitation[];
   /** The computer's own ask identity; omitted by read-only/test adapters. */
   localConnectionId?: string;
   anonymousAsk?: (input: import('../../core/consult-ask.ts').ConsultAskInput) => Promise<import('../../core/consult-ask.ts').ConsultAskResult>;
@@ -91,6 +98,7 @@ export interface LocalPrivateAnswersOptions {
   connectionName?: (connectionId: string) => string | undefined;
   /** The live eligibility guard, re-asked before a cited file opens. */
   eligible?: (items: readonly PrivateEvidenceItem[]) => Promise<readonly boolean[]>;
+  eligibleSecrets?: (input: LocalAnswerRequest, locations: readonly import('../../core/evidence-pack.ts').SavedSecretLocation[]) => boolean;
   /** Opens a local file (macOS `open`, checked by the caller). Absent: local files do not open. */
   openFile?: (path: string, eligible: () => Promise<boolean>) => Promise<void>;
   now?: () => number;
@@ -161,6 +169,8 @@ export interface LocalAnswerPathOptions {
  */
 export function createLocalAnswerPath(options: LocalAnswerPathOptions): {
   eligible: (items: readonly PrivateEvidenceItem[]) => Promise<readonly boolean[]>;
+  eligibleSecrets: (input: LocalAnswerRequest, locations: readonly import('../../core/evidence-pack.ts').SavedSecretLocation[]) => boolean;
+  secretSources: NonNullable<LocalPrivateAnswersOptions['secretSources']>;
   answer: (input: LocalAnswerRequest) => Promise<LocalAnswerResult>;
 } {
   const lanes = (request: SourceIndexAnswerRequest) => options.lanes(request, 'built_in_only');
@@ -198,6 +208,21 @@ export function createLocalAnswerPath(options: LocalAnswerPathOptions): {
   });
   return {
     eligible,
+    secretSources: (input, locations) => {
+      const request = localAnswerRequest(input.question, input.selectors);
+      const current = lanes(request);
+      if (current.checkSecretLocations?.(locations) !== true) return [];
+      const matches = current.secretLocations?.(request.query?.trim() || input.question, current.registry.list().map(c => c.corpusId)) ?? [];
+      return matches.filter(location => (location.title || location.locator) && locations.some(saved => saved.source === location.source && saved.ref === location.ref)).map(location => {
+        const links = location.locator ? options.sourceLinks?.({ provenance: { sourceItem: { provider: location.source }, citation: { uri: location.locator } } }) : undefined;
+        return { title: location.title ?? location.locator ?? 'Secret', source: providerSourceLabel(location.source) ?? location.source, ...links };
+      });
+    },
+    eligibleSecrets: (input, locations) => {
+      if (!locations.length) return true;
+      const current = lanes(localAnswerRequest(input.question, input.selectors));
+      return current.checkSecretLocations?.(locations) === true;
+    },
     answer: (input) => answerOnThisComputer(input, {
       lanes,
       model,
@@ -246,11 +271,13 @@ export function createLocalPrivateAnswers(options: LocalPrivateAnswersOptions): 
   const active = (q: WaitingQuestion) => {
     try { return !closed && (!options.isActive || options.isActive(q.connectionId)); } catch { return false; }
   };
-  const hidden = (q: WaitingQuestion) => q.surface === 'chatgpt' && (
+  const hidden = (q: WaitingQuestion) => q.surface === 'chatgpt' && options.panelSecretNotice?.(refOf(q)) !== true && (
     now() < Date.parse(q.askedAt) + CHATGPT_INBOX_GRACE_MS || options.panelClaimed?.(refOf(q)) === true
   );
   const autoAnswerable = (q: WaitingQuestion) => q.path !== 'anonymous' && q.path !== 'venice' && !q.hasResult && !q.result
-    && q.state === 'waiting' && q.nextAttemptAt <= now() && !hidden(q) && active(q);
+    && q.state === 'waiting' && q.nextAttemptAt <= now() && !hidden(q) && active(q)
+    // Showing a mixed Secret notice must not start inference ahead of its panel.
+    && (q.surface !== 'chatgpt' || now() >= Date.parse(q.askedAt) + CHATGPT_INBOX_GRACE_MS || options.panelSecretOnlyNotice?.(refOf(q)) === true);
   const current = (q: WaitingQuestion) => {
     const fresh = store()?.get(q.id);
     return fresh && fresh.generation === q.generation && active(fresh) && !hidden(fresh) ? fresh : undefined;
@@ -276,11 +303,18 @@ export function createLocalPrivateAnswers(options: LocalPrivateAnswersOptions): 
     for (const [id, entry] of opens) if (entry.ref?.id === q.id) opens.delete(id);
     wake();
   };
+  const failureReason = (q: WaitingQuestion | undefined): { failureReason?: WaitingQuestionRetryReason } => {
+    if (!q || !(q.failed || q.result?.status === 'failed')) return {};
+    const reason = q.retryReasons?.at(-1);
+    return reason && WAITING_QUESTION_RETRY_REASONS.includes(reason) ? { failureReason: reason } : {};
+  };
   const answerBody = (result: LocalAnswerResult | StoredPrivateAnswer, session: string, q?: WaitingQuestion): Record<string, unknown> => {
     if (result.status === 'withdrawn') return { status: 'withdrawn', sent_items: result.sentItems, reason: result.reason };
-    if (result.status !== 'answered') return { status: result.status, ...('leftOut' in result ? { left_out: result.leftOut } : {}) };
+    if (result.status !== 'answered') return { status: result.status, ...(result.status === 'failed' ? failureReason(q) : {}), ...('leftOut' in result ? { left_out: result.leftOut } : {}) };
     sweep();
-    const citations: LocalCitationView[] = result.citations.map(citation => {
+    const secretSources = q && result.secretLocations?.length
+      ? options.secretSources?.({ question: q.question, selectors: q.selectors }, result.secretLocations) ?? [] : [];
+    const citations: LocalCitationView[] = [...result.citations, ...secretSources].map(citation => {
       const view: LocalCitationView = {
         ...(citation.title ? { title: citation.title } : {}),
         ...(citation.source ? { source: citation.source } : {}),
@@ -321,13 +355,17 @@ export function createLocalPrivateAnswers(options: LocalPrivateAnswersOptions): 
           const result = await answerFor({ question: q.question, selectors: q.selectors, detail: q.detail, signal: abort.signal }, true)
             .finally(() => { autoAnswering = false; });
           if (!current(q)) continue;
-          if ((result.status === 'answered' && await eligible(result.read) === 'eligible') || result.status === 'not_found') {
+          let check = result.status === 'answered' ? await eligible(result.read) : undefined;
+          if (result.status === 'answered' && (result.secretLocations?.length ?? 0) > 0 && options.eligibleSecrets?.({ question: q.question, selectors: q.selectors }, result.secretLocations!) !== true) check = 'ineligible';
+          if ((result.status === 'answered' && check === 'eligible') || result.status === 'not_found') {
             if (!current(q)) continue;
             const saved: StoredPrivateAnswer = result.status === 'answered'
-              ? { status: 'answered', answer: result.answer, citations: result.citations.map(c => ({ ...(c.title ? { title: c.title } : {}), ...(c.source ? { source: c.source } : {}), ...(c.date ? { date: c.date } : {}), ...(c.url ? { url: c.url } : {}), ...(c.localPath ? { localPath: c.localPath } : {}) })), ...(result.sentItems ? { sentItems: result.sentItems } : {}), unanswered: result.unanswered, leftOut: result.leftOut, read: result.read.map(inboxEvidenceIdentity) }
+              ? { status: 'answered', answer: result.answer, citations: result.citations.map(c => ({ ...(c.title ? { title: c.title } : {}), ...(c.source ? { source: c.source } : {}), ...(c.date ? { date: c.date } : {}), ...(c.url ? { url: c.url } : {}), ...(c.localPath ? { localPath: c.localPath } : {}) })), ...(result.sentItems ? { sentItems: result.sentItems } : {}), unanswered: result.unanswered, leftOut: result.leftOut, read: result.read.map(inboxEvidenceIdentity), secretLocations: result.secretLocations ?? [] }
               : { status: 'not_found', citations: [], unanswered: [], leftOut: result.leftOut, read: [] };
-            if (!currentStore.saveAnswer?.(refOf(q), saved)) currentStore.retry?.(refOf(q));
-          } else currentStore.retry?.(refOf(q));
+            if (!currentStore.saveAnswer?.(refOf(q), saved)) currentStore.retry?.(refOf(q), 'save_refused');
+          } else currentStore.retry?.(refOf(q), check === 'unknown' ? 'eligibility_unavailable'
+            : check === 'ineligible' || result.status === 'changed' ? 'evidence_changed'
+            : result.status === 'no_model' || result.status === 'model_downloading' ? result.status : 'answer_failed');
         }
       })().catch(() => undefined).finally(() => { pass = undefined; });
       return pass;
@@ -354,16 +392,22 @@ export function createLocalPrivateAnswers(options: LocalPrivateAnswersOptions): 
         if (!listed) return undefined;
         return { questions: listed.questions.filter(q => active(q) && !hidden(q) && (q.path !== 'anonymous' || q.hasResult || q.result)).map(q => ({
           id: q.id, path: q.path ?? 'private', question: q.question, from: options.connectionName?.(q.connectionId)?.trim() || (q.surface === 'chatgpt' ? 'ChatGPT' : 'An agent'),
-          askedAt: q.askedAt, unchecked: q.state === 'unchecked', unread: !q.seen,
-          state: q.hasResult || q.result ? 'answered' : q.path === 'venice' && q.answeredAt ? 'changed' : q.state === 'unchecked' ? 'unchecked' : q.attempts > 0 ? 'retrying' : q.nextAttemptAt > now() || options.backgroundBusy?.() ? 'queued' : 'answering',
+          askedAt: q.askedAt, unchecked: q.state === 'unchecked', unread: !q.seen, ...failureReason(q),
+          state: q.failed || q.result?.status === 'failed' ? 'failed' : q.hasResult || q.result ? 'answered' : q.path === 'venice' && q.answeredAt ? 'changed' : q.state === 'unchecked' ? 'unchecked' : q.attempts > 0 ? 'retrying' : q.nextAttemptAt > now() || options.backgroundBusy?.() ? 'queued' : 'answering',
           ...(q.answeredAt ? { answeredAt: q.answeredAt } : {}),
         })), olderRemoved: listed.olderRemoved };
       } catch { return undefined; }
     },
     destinations() { const states = options.destinations?.() ?? { computer: 'ready' as const, venice: 'not_set_up' as const }; return running ? { ...states, [runningDestination]: 'busy' as const } : states; },
-    waitingCount() { return api.waiting()?.questions.filter(q => q.unread && q.state === 'answered').length ?? 0; },
+    waitingCount() { return api.waiting()?.questions.filter(q => q.unread && (q.state === 'answered' || q.state === 'failed')).length ?? 0; },
     async handle(body, session) {
       const action = body.action;
+      if (action === 'resolve_secret') {
+        const ref = typeof body.handle === 'string' ? options.resolveSecretInbox?.(body.handle) : undefined;
+        const q = ref ? store()?.get(ref.id) : undefined;
+        if (!ref || !q || q.generation !== ref.generation || q.connectionId !== ref.connectionId || !current(q)) return refused(410, 'gone', 'Open Olympus on your computer, then Inbox');
+        return { status: 200, body: { ok: true, id: q.id } };
+      }
       if (action === 'list') return { status: 200, body: { ok: true, ...api.waiting(), destinations: api.destinations() } };
       if (action === 'ask_anonymous') {
         if (!options.anonymousAsk) return refused(503, 'unavailable', W.anonymousNotSetUp);
@@ -397,14 +441,14 @@ export function createLocalPrivateAnswers(options: LocalPrivateAnswersOptions): 
             try { result = venice ? await options.veniceAnswer!(request) : await answerFor(request); } catch { result = { status: 'failed' }; }
             if (result.status === 'answered') {
               const check = await eligible(result.read);
-              if (check !== 'eligible') {
+              if (check !== 'eligible' || (!venice && (result.secretLocations?.length ?? 0) > 0 && options.eligibleSecrets?.(request, result.secretLocations!) !== true)) {
                 if (venice && result.sentItems) result = { status: 'withdrawn', sentItems: result.sentItems, reason: check === 'unknown' ? 'Sent to Venice, but source eligibility could not be checked. No answer was kept.' : 'Sent to Venice, but the sources changed. No answer was kept.' };
                 else return { status: 200, body: { ok: true, status: check === 'unknown' ? 'check_unavailable' : 'changed' } };
               }
             }
             if (ref && (result.status === 'answered' || result.status === 'not_found' || result.status === 'withdrawn')) {
               retained = currentStore?.saveAnswer?.(ref, result.status === 'answered'
-                ? { status: 'answered', answer: result.answer, citations: result.citations.map(c => ({ ...(c.title ? { title: c.title } : {}), ...(c.source ? { source: c.source } : {}), ...(c.date ? { date: c.date } : {}), ...(c.url ? { url: c.url } : {}), ...(c.localPath ? { localPath: c.localPath } : {}) })), ...(result.sentItems ? { sentItems: result.sentItems } : {}), unanswered: result.unanswered, leftOut: result.leftOut, read: result.read.map(inboxEvidenceIdentity) }
+                ? { status: 'answered', answer: result.answer, citations: result.citations.map(c => ({ ...(c.title ? { title: c.title } : {}), ...(c.source ? { source: c.source } : {}), ...(c.date ? { date: c.date } : {}), ...(c.url ? { url: c.url } : {}), ...(c.localPath ? { localPath: c.localPath } : {}) })), ...(result.sentItems ? { sentItems: result.sentItems } : {}), unanswered: result.unanswered, leftOut: result.leftOut, read: result.read.map(inboxEvidenceIdentity), ...(!venice ? { secretLocations: result.secretLocations ?? [] } : {}) }
                 : result.status === 'withdrawn' ? { ...result, citations: [], unanswered: [], leftOut: [], read: [] } : { status: 'not_found', citations: [], unanswered: [], leftOut: result.leftOut, read: [] }) === true;
             }
             if (ref && !retained && (result.status === 'answered' || result.status === 'not_found' || result.status === 'withdrawn')) return refused(410, 'gone', W.deleted);
@@ -416,10 +460,12 @@ export function createLocalPrivateAnswers(options: LocalPrivateAnswersOptions): 
         const q = typeof body.id === 'string' ? store()?.get(body.id) : undefined;
         if (!q || !current(q)) return refused(410, 'gone', 'That answer was deleted');
         if (!q.result) return { status: 200, body: { ok: true, status: q.path === 'venice' && q.answeredAt ? 'changed' : q.state === 'unchecked' ? 'unchecked' : q.attempts ? 'retrying' : q.nextAttemptAt > now() || options.backgroundBusy?.() ? 'queued' : 'answering' } };
-        if (q.result.status === 'withdrawn') return { status: 200, body: { ok: true, generation: q.generation, ...answerBody(q.result, session, q) } };
+        if (q.result.status === 'withdrawn' || q.result.status === 'failed') return { status: 200, body: { ok: true, generation: q.generation, ...answerBody(q.result, session, q) } };
         const check = await eligible(q.result.read);
         if (check === 'unknown') return { status: 200, body: { ok: true, status: 'check_unavailable' } };
-        if (check === 'ineligible' || !current(q)) {
+        const secretCheck = q.result.status !== 'answered' || q.path === 'venice' || q.path === 'anonymous'
+          || (q.result.secretLocations !== undefined && (q.result.secretLocations.length === 0 || options.eligibleSecrets?.({ question: q.question, selectors: q.selectors }, q.result.secretLocations) === true));
+        if (check === 'ineligible' || !secretCheck || !current(q)) {
           invalidate(q);
           const fresh = store()?.get(q.id);
           const withdrawn = fresh?.result;
@@ -458,6 +504,7 @@ export function createLocalPrivateAnswers(options: LocalPrivateAnswersOptions): 
           if (entry.ref) {
             const q = store()?.get(entry.ref.id);
             if (!q || q.generation !== entry.ref.generation || !q.result || !current(q)) return false;
+            if (q.result.secretLocations?.length && options.eligibleSecrets?.({ question: q.question, selectors: q.selectors }, q.result.secretLocations) !== true) return false;
           }
           const check = await eligible(entry.read);
           if (check === 'unknown') checkUnavailable = true;
@@ -468,6 +515,7 @@ export function createLocalPrivateAnswers(options: LocalPrivateAnswersOptions): 
           if (entry.ref) {
             const q = store()?.get(entry.ref.id);
             if (!q || q.generation !== entry.ref.generation || !q.result || !current(q)) return false;
+            if (q.result.secretLocations?.length && options.eligibleSecrets?.({ question: q.question, selectors: q.selectors }, q.result.secretLocations) !== true) return false;
           }
           return true;
         };

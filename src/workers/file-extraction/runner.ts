@@ -42,6 +42,7 @@
  * no regular expressions in this module.
  */
 
+import { ingestionTurn } from '../control-path-headroom.ts';
 import { createHash } from 'node:crypto';
 import { dirname } from 'node:path';
 import { boundedLogErrorMessage } from '../../core/log-redaction.ts';
@@ -69,6 +70,7 @@ import type {
 } from './job-store.ts';
 import { ExtractionJobFieldError } from './job-store.ts';
 import type { ExtractionReclassificationRule, ExtractionHealthProbeMap } from './registry.ts';
+import { scanSecretsAhead } from '../classification/secret-scan-off-thread.ts';
 import {
   EXTRACTION_SINK_SKIPPED_CLAIM_SUPERSEDED,
   EXTRACTION_SINK_SKIPPED_EMPTY_TEXT,
@@ -140,6 +142,10 @@ export const EXTRACTION_EGRESS_REFUSED_TIER_UNKNOWN = 'egress_trust_tier_unknown
 export const EXTRACTION_EGRESS_REFUSED_JOB_UNKNOWN = 'egress_job_policy_unreadable';
 
 export const EXTRACTION_PAUSE_CONSECUTIVE_FAILURES = 'consecutive_retryable_failures';
+// The request budget of the source is spent; the lane waits for parkedUntil.
+export const EXTRACTION_PAUSE_SOURCE_BUDGET = 'source_budget_exhausted';
+// How long a lane parks when a spent budget names no reset time.
+const SOURCE_PARK_FALLBACK_MS = 60 * 60_000;
 export const EXTRACTION_PAUSE_HEALTH_PROBE = 'extractor_health_probe_failed';
 
 const ERROR_HASH_CHARS = 32;
@@ -418,6 +424,8 @@ export interface ExtractionRunResult {
   // Bounded categorical reason for a pre-lease health refusal.
   preflightErrorKind?: string;
   consecutiveRetryableFailures: number;
+  // Set with pauseReason source_budget_exhausted: when the source can be asked again.
+  parkedUntil?: string;
   /**
    * The lane's earliest backed-off retry still in the future, so a scheduled
    * caller can come back when it is due instead of at its idle interval.
@@ -696,6 +704,7 @@ export function createFileExtractionRunner(
         refused.set(reason, (refused.get(reason) ?? 0) + count);
       };
       for (const ref of page.candidates) {
+        await ingestionTurn();
         if (isImageMediaType(ref.mimeType) && refusesImageContent(corpus, ref)) {
           jobsSkippedImageNotPrivate += 1;
           continue;
@@ -762,6 +771,7 @@ export function createFileExtractionRunner(
           let refusedRefs = 0;
           let firstRefusal: unknown;
           for (const ref of refs) {
+            await ingestionTurn();
             try {
               results.push(enqueue([ref]));
             } catch (refError) {
@@ -868,12 +878,14 @@ export function createFileExtractionRunner(
       const records: ExtractionRunRecord[] = [];
       let consecutiveRetryableFailures = 0;
       let paused = false;
+      let parkedUntil: string | undefined;
       let processedJobs = 0;
       let localOnly = true;
       let source: FileExtractionSource | undefined;
 
       for (const job of lease.leasedJobs) {
         if (paused) break;
+        await ingestionTurn();
         processedJobs += 1;
         const extractor = registry.get(job.extractorKind);
         // Read off the extractor's declared egress rather than off what the
@@ -899,6 +911,14 @@ export function createFileExtractionRunner(
           now,
         });
 
+        if (outcome.sourceParked !== undefined) {
+          // Not counted against the job: it goes back with the rest of the
+          // lease, without an attempt, and waits for the budget to reset.
+          processedJobs -= 1;
+          paused = true;
+          parkedUntil = outcome.sourceParked ?? new Date(now().getTime() + SOURCE_PARK_FALLBACK_MS).toISOString();
+          break;
+        }
         const record = await recordOutcome(jobs, job, workerId, outcome);
         records.push(record);
 
@@ -938,7 +958,8 @@ export function createFileExtractionRunner(
         records,
         counts: countRecords(records),
         paused,
-        ...(paused ? { pauseReason: EXTRACTION_PAUSE_CONSECUTIVE_FAILURES } : {}),
+        ...(paused ? { pauseReason: parkedUntil !== undefined ? EXTRACTION_PAUSE_SOURCE_BUDGET : EXTRACTION_PAUSE_CONSECUTIVE_FAILURES } : {}),
+        ...(parkedUntil !== undefined ? { parkedUntil } : {}),
         consecutiveRetryableFailures,
         ...(nextRetryAt !== undefined ? { nextRetryAt } : {}),
         ...(reclassification ? { reclassification } : {}),
@@ -980,6 +1001,12 @@ interface JobOutcome {
    * text is dropped and no write is attempted.
    */
   leaseExpired?: boolean;
+  /**
+   * The source's request budget is spent (`source_budget_exhausted`): not
+   * this item's failure. The runner hands the job back unrecorded and parks
+   * the lane until this time (null: the source named none).
+   */
+  sourceParked?: string | null;
 }
 
 /**
@@ -1119,6 +1146,7 @@ async function settleOneJobHeld(input: SettleOneJobInput, staged: { media?: Extr
           status: error.settleAs,
           errorKind: error.errorKind,
           ...(error.errorHash ? { errorHash: error.errorHash } : {}),
+          ...(error.errorKind === 'source_budget_exhausted' ? { sourceParked: error.retryAt ?? null } : {}),
         };
       }
       return retryable(EXTRACTION_ERROR_KIND_SOURCE_FETCH_FAILED, error);
@@ -1231,6 +1259,11 @@ async function settleOneJobHeld(input: SettleOneJobInput, staged: { media?: Extr
     };
   }
 
+  // A large text's secret scan runs on the second thread first, so the
+  // classifier inside accept() reuses its answer instead of holding this
+  // thread for seconds (secret-scan-off-thread.ts). Before the scope check, so
+  // that check still comes right before the write.
+  await scanSecretsAhead(output.text);
   let accepted;
   if (!(await extractionAuthorizationCurrent(corpus, job.ref))) {
     return { status: 'blocked_policy', errorKind: EXTRACTION_ERROR_KIND_SOURCE_SCOPE_SUPERSEDED };

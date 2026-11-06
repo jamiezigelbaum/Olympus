@@ -1,4 +1,4 @@
-import { telegramPythonExecutable } from './messaging-runtime.ts';
+import { readyTelegramPython, type TelegramPythonSeams } from './messaging-runtime.ts';
 import { existsSync, mkdirSync, rmSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -39,6 +39,10 @@ export interface MessagingCaptureGrant {
   sessionPath?: string;
   producer: Pick<MessagingProducerLaunch, 'source' | 'env' | 'secretEnvironment'>;
   grantedAt: string;
+  /** Verified Telegram account reference; absent on older grants and WhatsApp. */
+  accountProof?: string;
+  /** Pairing may have changed the session. Only publication of renewed consent clears this. */
+  pairingPending?: true;
 }
 
 export class NativeMessagingCaptureOwnerError extends Error {
@@ -74,6 +78,8 @@ export function saveMessagingCaptureGrant(input: {
     version: 1,
     source: input.pairing.source as MessagingPairingSource,
     handle,
+    ...(input.pairing.source === 'telegram' && /^telegram:[a-f0-9]{16}$/.test(input.pairing.accountProof)
+      ? { accountProof: input.pairing.accountProof } : {}),
     ...(input.pairing.sessionLayout === 'folder' ? {} : { sessionPath: input.pairing.sessionPath }),
     producer: {
       source: input.pairing.producer.source,
@@ -120,7 +126,7 @@ export function readMessagingCaptureGrantFacts(
 ): MessagingCaptureGrantFacts {
   try {
     const read = readGrant(grantPath);
-    if (read.kind !== 'valid' || read.grant.source !== source) return {};
+    if (read.kind !== 'valid' || read.grant.source !== source || read.grant.pairingPending) return {};
     const facts: MessagingCaptureGrantFacts = {};
     const grantedAt = typeof read.grant.grantedAt === 'string' ? Date.parse(read.grant.grantedAt) : Number.NaN;
     if (Number.isFinite(grantedAt)) facts.pairedAt = new Date(grantedAt).toISOString();
@@ -131,7 +137,8 @@ export function readMessagingCaptureGrantFacts(
     if (typeof raw === 'string') {
       const scopes = raw.split(',').map((item) => item.trim()).filter(Boolean);
       if (scopes.length > 0) {
-        facts.scope = scopes.includes('*') ? { kind: 'whole_account' } : { kind: 'chats', count: new Set(scopes).size };
+        if (scopes.length === 1 && scopes[0] === '*') facts.scope = { kind: 'whole_account' };
+        else if (scopes.every((scope) => !scope.includes('*'))) facts.scope = { kind: 'chats', count: new Set(scopes).size };
       }
     }
     return facts;
@@ -250,7 +257,7 @@ export class MessagingCaptureSupervisor {
     whatsappBridgePath?: string;
     stopTimeoutMs?: number;
     now?: () => number;
-  }) {}
+  } & TelegramPythonSeams) {}
 
   /** Whether the helper is alive right now, for the dashboard: a cached reconcile result can be ten seconds old. */
   liveness(): MessagingCaptureLiveness {
@@ -286,6 +293,10 @@ export class MessagingCaptureSupervisor {
     if (grant.source !== this.options.source) {
       await this.stop();
       return { state: 'blocked', reason: 'grant_invalid' };
+    }
+    if (grant.pairingPending) {
+      await this.stop();
+      return { source: grant.source, state: 'stopped', reason: 'grant_missing' };
     }
     // The durable Unpair latch is authoritative even if a crash left the
     // grant, session and registry handle intact. Unreadable latches fail closed.
@@ -332,10 +343,12 @@ export class MessagingCaptureSupervisor {
     if (generation !== this.generation) return { source: grant.source, state: 'stopped', reason: 'grant_missing' };
     const nextFingerprint = JSON.stringify(grant);
     if (this.child && this.fingerprint === nextFingerprint) return { source: grant.source, state: 'running' };
+    // Resolved before the generation check below: making Telegram's Python ready can take minutes, and a stop
+    // (Unpair, shutdown) during it must keep this reconcile from starting a helper on the grant it read.
+    const launch = await resolveCurrentLaunch(this.options, grant.source, layoutEnv);
     await this.stop();
     if (generation !== this.generation - 1) return { source: grant.source, state: 'stopped', reason: 'grant_missing' };
     const spawn = this.options.spawn ?? spawnCapture;
-    const launch = resolveCurrentLaunch(this.options, grant.source);
     // A WhatsApp bridge holds its session's lock for its whole life: taken here and handed to it as
     // an inherited descriptor. Another bridge on the session (one left running) keeps this one from starting.
     const lock = grant.source === 'whatsapp' ? tryHoldFileFlock(join(whatsappStateDirOf(grant, account, layoutEnv), WHATSAPP_BRIDGE_LOCK_NAME)) : undefined;
@@ -393,17 +406,24 @@ async function observeChildExit(child: CaptureChild, timeoutMs: number): Promise
 
 const readGrant = readCaptureGrantFile;
 
-function resolveCurrentLaunch(
+async function resolveCurrentLaunch(
   options: {
     packageRoot?: string;
     pythonExecutable?: string;
     whatsappBridgePath?: string;
-  },
+  } & TelegramPythonSeams,
   source: MessagingPairingSource,
-): { executable: string; args: string[] } {
+  env: Record<string, string>,
+): Promise<{ executable: string; args: string[] }> {
   if (source === 'telegram') {
-    const executable = telegramPythonExecutable({ ...(options.pythonExecutable ? { pythonExecutable: options.pythonExecutable } : {}) });
-    if (!executable) throw new Error('Python 3 is required to start Telegram capture.');
+    // Made ready the way pairing makes it: a missing private environment is installed, and one that cannot be
+    // throws, which the worker reports as a capture that could not start. A Python without Telethon never runs.
+    const executable = await readyTelegramPython({
+      env,
+      ...(options.pythonExecutable ? { pythonExecutable: options.pythonExecutable } : {}),
+      ...(options.pythonHasTelethon ? { pythonHasTelethon: options.pythonHasTelethon } : {}),
+      ...(options.provisionTelegramPython ? { provisionTelegramPython: options.provisionTelegramPython } : {}),
+    });
     const packageRoot = options.packageRoot ?? join(dirname(fileURLToPath(import.meta.url)), '..', '..');
     return { executable, args: [join(packageRoot, 'scripts', 'telegram-telethon-reader.py'), '--gateway'] };
   }

@@ -25,9 +25,9 @@
       ],
       "_meta": {
         "ui": {
-          "resourceUri": "ui://olympus/dashboard?v=774d3a9f5fab"
+          "resourceUri": "ui://olympus/dashboard?v=45d43ae731cf"
         },
-        "openai/outputTemplate": "ui://olympus/dashboard?v=774d3a9f5fab",
+        "openai/outputTemplate": "ui://olympus/dashboard?v=45d43ae731cf",
         "openai/ui": {
           "entrypoints": [
             {
@@ -81,9 +81,9 @@
       ],
       "_meta": {
         "ui": {
-          "resourceUri": "ui://olympus/private-answer?v=ab3d6500c799"
+          "resourceUri": "ui://olympus/private-answer?v=294f06194b13"
         },
-        "openai/outputTemplate": "ui://olympus/private-answer?v=ab3d6500c799"
+        "openai/outputTemplate": "ui://olympus/private-answer?v=294f06194b13"
       }
     },
     {
@@ -145,9 +145,9 @@
       ],
       "_meta": {
         "ui": {
-          "resourceUri": "ui://olympus/private-answer?v=ab3d6500c799"
+          "resourceUri": "ui://olympus/private-answer?v=294f06194b13"
         },
-        "openai/outputTemplate": "ui://olympus/private-answer?v=ab3d6500c799"
+        "openai/outputTemplate": "ui://olympus/private-answer?v=294f06194b13"
       }
     },
     {
@@ -180,9 +180,9 @@
       ],
       "_meta": {
         "ui": {
-          "resourceUri": "ui://olympus/private-answer?v=ab3d6500c799"
+          "resourceUri": "ui://olympus/private-answer?v=294f06194b13"
         },
-        "openai/outputTemplate": "ui://olympus/private-answer?v=ab3d6500c799"
+        "openai/outputTemplate": "ui://olympus/private-answer?v=294f06194b13"
       }
     },
     {
@@ -250,9 +250,9 @@
       },
       "_meta": {
         "ui": {
-          "resourceUri": "ui://olympus/private-question?v=d87fa9f76ad4"
+          "resourceUri": "ui://olympus/private-question?v=6a855045efb7"
         },
-        "openai/outputTemplate": "ui://olympus/private-question?v=d87fa9f76ad4"
+        "openai/outputTemplate": "ui://olympus/private-question?v=6a855045efb7"
       },
       "annotations": {
         "readOnlyHint": false,
@@ -818,6 +818,16 @@
       "inputSchema": {
         "type": "object",
         "properties": {
+          "private_answer_mode": {
+            "type": "string",
+            "enum": [
+              "local-first",
+              "local-only",
+              "private-cloud-only",
+              "no-sensitive"
+            ],
+            "description": "First-run Private-answer mode chosen by the owner in the panel."
+          },
           "description": {
             "type": "string",
             "maxLength": 2000,
@@ -905,6 +915,97 @@
       }
     },
     {
+      "name": "olympus_privacy_questions",
+      "title": "Privacy follow-up questions",
+      "description": "For the owner in the Olympus panel: privately check an unsaved privacy description. Saves nothing.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "description": {
+            "type": "string",
+            "maxLength": 2000
+          },
+          "confirmation": {
+            "type": "string",
+            "maxLength": 128
+          }
+        },
+        "required": [
+          "description",
+          "confirmation"
+        ]
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "openWorldHint": false
+      },
+      "securitySchemes": [
+        {
+          "type": "oauth2",
+          "scopes": []
+        }
+      ],
+      "_meta": {
+        "ui": {
+          "visibility": [
+            "app"
+          ]
+        },
+        "openai/widgetAccessible": true,
+        "openai/visibility": "private"
+      }
+    },
+    {
+      "name": "olympus_privacy_check",
+      "title": "Check privacy understanding",
+      "description": "For the owner in the Olympus panel: privately check an unsaved privacy description. Saves nothing.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "description": {
+            "type": "string",
+            "maxLength": 2000
+          },
+          "confirmation": {
+            "type": "string",
+            "maxLength": 128
+          },
+          "sample": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 120
+          }
+        },
+        "required": [
+          "description",
+          "confirmation"
+        ]
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "openWorldHint": false
+      },
+      "securitySchemes": [
+        {
+          "type": "oauth2",
+          "scopes": []
+        }
+      ],
+      "_meta": {
+        "ui": {
+          "visibility": [
+            "app"
+          ]
+        },
+        "openai/widgetAccessible": true,
+        "openai/visibility": "private"
+      }
+    },
+    {
       "name": "olympus_sync_source",
       "title": "Sync a source now",
       "description": "For the Olympus panel: check a connected source for anything new now. Answers at once; the panel shows what the check found.",
@@ -953,17 +1054,17 @@
   ],
   "resources": [
     {
-      "uri": "ui://olympus/dashboard?v=774d3a9f5fab",
+      "uri": "ui://olympus/dashboard?v=45d43ae731cf",
       "name": "Olympus dashboard",
       "mimeType": "text/html;profile=mcp-app"
     },
     {
-      "uri": "ui://olympus/private-answer?v=ab3d6500c799",
+      "uri": "ui://olympus/private-answer?v=294f06194b13",
       "name": "Olympus private answer",
       "mimeType": "text/html;profile=mcp-app"
     },
     {
-      "uri": "ui://olympus/private-question?v=d87fa9f76ad4",
+      "uri": "ui://olympus/private-question?v=6a855045efb7",
       "name": "Olympus private question",
       "mimeType": "text/html;profile=mcp-app"
     }

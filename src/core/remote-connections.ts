@@ -43,7 +43,7 @@ import { standaloneLinuxDataDir } from './linux-engine-layout.ts';
 import { sharedDataPath } from './olympus-layout.ts';
 
 export const REMOTE_CONNECTIONS_STORE_ID = 'remote-connections';
-export const REMOTE_CONNECTIONS_SCHEMA_VERSION = 3;
+export const REMOTE_CONNECTIONS_SCHEMA_VERSION = 4;
 export const REMOTE_CONNECTION_TOKEN_PREFIX = 'olympus_conn_';
 /** How stale `last_used_at` may get before a successful call rewrites it. */
 export const REMOTE_CONNECTION_LAST_USED_RESOLUTION_MS = 60_000;
@@ -57,6 +57,7 @@ const TOKEN_PATTERN = /^olympus_conn_([a-f0-9]{18})_([A-Za-z0-9_-]{43})$/;
 
 /** `bearer`: a token from `olympus connections add`. `oauth`: an OAuth grant. */
 export type RemoteConnectionKind = 'bearer' | 'oauth';
+export type RemoteConnectionRoute = 'remote' | 'loopback' | 'tailnet';
 
 export interface RemoteConnectionRecord {
   id: string;
@@ -64,6 +65,8 @@ export interface RemoteConnectionRecord {
   kind: RemoteConnectionKind;
   /** The OAuth client the grant was issued to (oauth connections only). */
   clientId: string | null;
+  /** Absent on legacy in-memory records means the existing relay/own-tunnel route. */
+  route?: RemoteConnectionRoute;
   /** Who hosts the agent (remoteConnectionProvider). */
   provider: RemoteConnectionProvider;
   createdAt: string;
@@ -87,10 +90,10 @@ export interface RemoteConnectionStore {
    * A bearer connection. `provider`: the agent the owner chose it for (the
    * Agents page); absent, the host its name names, else `other`.
    */
-  create(displayName: string, options?: { provider?: RemoteConnectionProvider; installId?: string }): CreatedRemoteConnection;
+  create(displayName: string, options?: { provider?: RemoteConnectionProvider; installId?: string; route?: RemoteConnectionRoute }): CreatedRemoteConnection;
   list(): RemoteConnectionRecord[];
   revoke(id: string): RemoteConnectionRecord;
-  verifyToken(token: string): RemoteConnectionVerification;
+  verifyToken(token: string, route?: RemoteConnectionRoute): RemoteConnectionVerification;
   /** OAuth grants, tokens, registered clients and pairing codes (same database). */
   readonly oauth: RemoteOAuthStore;
   close(): void;
@@ -107,6 +110,7 @@ interface ConnectionRow {
   revoked_at: string | null;
   /** NULL only on a row an older build wrote after a rollback; read as remoteConnectionProvider derives it. */
   provider: string | null;
+  route: RemoteConnectionRoute;
 }
 
 /**
@@ -232,10 +236,14 @@ export function openRemoteConnectionStore(
 
     oauth,
 
-    create(displayName: string, options: { provider?: RemoteConnectionProvider; installId?: string } = {}): CreatedRemoteConnection {
+    create(displayName: string, options: { provider?: RemoteConnectionProvider; installId?: string; route?: RemoteConnectionRoute } = {}): CreatedRemoteConnection {
       const name = requireDisplayName(displayName);
       if (options.provider !== undefined && !isRemoteConnectionProvider(options.provider)) {
         throw new OperationError('invalid_params', 'A connection\'s host must be openai, xai, meta, anthropic or other.');
+      }
+      const route = options.route ?? 'remote';
+      if (!['remote', 'loopback', 'tailnet'].includes(route) || (route !== 'remote' && options.installId)) {
+        throw new OperationError('invalid_params', 'Choose a supported connection route.');
       }
       const provider = remoteConnectionProvider({ displayName: name, chosen: options.provider ?? null });
       const id = randomBytes(CONNECTION_ID_BYTES).toString('hex');
@@ -243,9 +251,9 @@ export function openRemoteConnectionStore(
       const token = options.installId ? mintCredential('access', options.installId) : `${REMOTE_CONNECTION_TOKEN_PREFIX}${id}_${secret}`;
       const createdAt = now().toISOString();
       db.query(`
-        INSERT INTO remote_connections (id, display_name, kind, token_hash, created_at, provider)
-        VALUES (?, ?, 'bearer', ?, ?, ?)
-      `).run(id, name, hashRemoteConnectionToken(token), createdAt, provider);
+        INSERT INTO remote_connections (id, display_name, kind, token_hash, created_at, provider, route)
+        VALUES (?, ?, 'bearer', ?, ?, ?, ?)
+      `).run(id, name, hashRemoteConnectionToken(token), createdAt, provider, route);
       const row = readRow(id);
       if (!row) throw new Error('Remote connection could not be read after creation.');
       return { connection: toRecord(row), token };
@@ -286,7 +294,7 @@ export function openRemoteConnectionStore(
       return toRecord(row);
     },
 
-    verifyToken(token: string): RemoteConnectionVerification {
+    verifyToken(token: string, route: RemoteConnectionRoute = 'remote'): RemoteConnectionVerification {
       const match = typeof token === 'string' ? TOKEN_PATTERN.exec(token) : null;
       const routed = typeof token === 'string' ? credentialInstallId('access', token) : undefined;
       if (!match && !routed) return { ok: false, reason: 'malformed' };
@@ -297,7 +305,7 @@ export function openRemoteConnectionStore(
       const bearer = row && row.kind === 'bearer' && row.token_hash ? row : null;
       const stored = bearer ? Buffer.from(bearer.token_hash!) : Buffer.alloc(presented.length);
       const equal = stored.length === presented.length && timingSafeEqual(stored, presented);
-      if (!bearer || !equal) return { ok: false, reason: 'unknown' };
+      if (!bearer || !equal || bearer.route !== route) return { ok: false, reason: 'unknown' };
       if (bearer.revoked_at !== null) return { ok: false, reason: 'revoked' };
       const at = now();
       const lastUsedMs = bearer.last_used_at ? Date.parse(bearer.last_used_at) : Number.NaN;
@@ -320,6 +328,7 @@ function toRecord(row: ConnectionRow): RemoteConnectionRecord {
     displayName: row.display_name,
     kind: row.kind === 'oauth' ? 'oauth' : 'bearer',
     clientId: row.client_id ?? null,
+    route: row.route,
     provider: remoteConnectionProvider({
       clientId: row.client_id,
       displayName: row.display_name,
@@ -356,7 +365,20 @@ function remoteConnectionMigrations(): SqliteMigration[] {
         );
       `);
     },
-  }, remoteOAuthSchemaMigration(2), connectionProviderMigration(3)];
+  }, remoteOAuthSchemaMigration(2), connectionProviderMigration(3), {
+    version: 4,
+    name: 'bind_connection_route',
+    up(db) {
+      // Older binaries refuse schema 4. Do not downgrade this database: an
+      // older verifier would accept a local key on the public route.
+      // Idempotent, like v3: a second process that opened the file first, or a
+      // re-upgrade after a manual version rollback, finds the column and keeps
+      // every recorded route.
+      const columns = db.query('PRAGMA table_info(remote_connections)').all() as Array<{ name: string }>;
+      if (columns.some((column) => column.name === 'route')) return;
+      db.exec("ALTER TABLE remote_connections ADD COLUMN route TEXT NOT NULL DEFAULT 'remote' CHECK(route IN ('remote', 'loopback', 'tailnet'));");
+    },
+  }];
 }
 
 /**

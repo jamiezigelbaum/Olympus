@@ -2,7 +2,7 @@ import { afterAll, afterEach, describe, expect, test } from 'bun:test';
 import { spawn as spawnChild, spawnSync, type ChildProcess } from 'node:child_process';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { engineStatusReport, parseInstallArgs, parseLogsArgs, parseVerifyArgs } from '../src/core/engine-cli.ts';
 import { engineHostServices, engineStatusPath, startEngineHost } from '../src/core/engine-host.ts';
 import {
@@ -13,6 +13,8 @@ import {
   engineBuildIdentity,
   engineDataCustody,
   enginePaths,
+  engineServicePaths,
+  resolveInstallationPrivacyState,
   engineSovereigntySeedBlocker,
   inspectEngine,
   installEngine,
@@ -22,6 +24,7 @@ import {
   parseLaunchctlPrint,
   preflightEnginePaths,
   readEngineLogs,
+  readEngineWorkerProblem,
   reconcileEngineConfig,
   renderEnginePlist,
   restartEngine,
@@ -37,6 +40,8 @@ import {
 import { dataDeleteCustody, deleteOlympusDataWithCustody } from '../src/data-lifecycle.ts';
 import { runDoctor, type DoctorDeps, type DoctorHostFacts } from '../src/core/doctor.ts';
 import { emptyRemoteAccessStatus, remoteAccessDir, writeRemoteAccessStatus } from '../src/core/remote-access.ts';
+import { workerServicePaths } from '../src/core/worker-service.ts';
+import { createPendingPrivacyPolicy } from '../src/core/first-run-privacy.ts';
 import { defaultConfig } from '../src/core/config.ts';
 import { createOpenClawInferAnalystModel } from '../src/core/analyst-openclaw-infer.ts';
 import { buildEnvBridgeSovereigntyConfig, loadSovereigntyPreset, type SovereigntyConfig } from '../src/core/sovereignty.ts';
@@ -256,6 +261,7 @@ describe('olympus engine install/uninstall', () => {
     const result = reconcileEngineConfig(path);
     expect(result.wrote).toBe(true);
     expect(result.config).toEqual({
+      olympusStandalone: true,
       remote: { enabled: false },
       email: { baseUrl: 'http://127.0.0.1:9010/v1' },
       worker: { service: { enabled: true }, scheduler: { enabled: true } },
@@ -512,6 +518,79 @@ if (env.LAUNCH === '0') {
     await expect(model.complete({ system: 's', prompt: 'p' } as never)).rejects.toThrow('OpenClaw CLI not found');
   });
 
+  test('engine status rejects a reachable competing worker until its own worker proves readiness', async () => {
+    const { home, checkout, bun } = fixture();
+    const launchctl = fakeLaunchctl();
+    installEngine({ platform: 'darwin', homeDir: home, exec: launchctl.exec, fromCheckout: checkout, bunBin: bun });
+    writeRemoteAccessStatus(remoteAccessDir({ HOME: home }), { ...emptyRemoteAccessStatus('relay'), pid: process.pid,
+      relay: { state: 'online', reason: null, retry_in_ms: null } });
+    const path = engineStatusPath({ HOME: home });
+    mkdirSync(join(path, '..'), { recursive: true });
+    const report = () => engineStatusReport({ homeDir: home, platform: 'darwin', env: { HOME: home }, exec: launchctl.exec,
+      openclawPath: () => undefined, fetchImpl: (async () => Response.json({ ok: true })) as unknown as typeof fetch });
+    expect((await report()).ok).toBe(false);
+    const health = (state: string, message: string | null) => writeFileSync(path, JSON.stringify({ schema: 'olympus.engine.status.v1', pid: process.pid, state: 'running', services: {
+      'olympus-worker': { state, message },
+    } }));
+    health('failing', 'Olympus worker cannot start because another process owns its data. Run olympus worker uninstall. Retrying automatically.');
+    const blocked = await report();
+    expect(blocked.ok).toBe(false);
+    expect(JSON.stringify(blocked.missing)).toContain('another process owns its data');
+    expect(JSON.stringify(blocked.missing)).toContain('olympus worker uninstall');
+    health('starting', 'Olympus worker is starting.');
+    expect((await report()).ok).toBe(false);
+    health('ok', null);
+    expect((await report()).ok).toBe(true);
+  });
+
+  for (const platform of ['darwin', 'linux']) {
+    test(`${platform} engine status reads worker health from the service path with custom XDG data`, async () => {
+      const { home } = fixture();
+      const env = { HOME: home, XDG_DATA_HOME: join(home, 'custom-data'), XDG_RUNTIME_DIR: join(home, 'run') };
+      const paths = engineServicePaths({ homeDir: home, platform, env });
+      const statusPath = platform === 'darwin'
+        ? join(home, '.local/share/openclaw/olympus/engine/status.json')
+        : join(env.XDG_DATA_HOME, 'olympus/engine/status.json');
+      expect(paths.statusPath).toBe(statusPath);
+      mkdirSync(join(paths.configPath, '..'), { recursive: true });
+      writeFileSync(paths.configPath, JSON.stringify({ remote: { mode: 'off' } }));
+      mkdirSync(join(paths.plistPath, '..'), { recursive: true });
+      writeFileSync(paths.plistPath, '');
+      const health = (path: string, state: string, message: string | null) => {
+        mkdirSync(join(path, '..'), { recursive: true });
+        writeFileSync(path, JSON.stringify({ schema: 'olympus.engine.status.v1', pid: process.pid, state: 'running',
+          services: { 'olympus-worker': { state, message } } }));
+      };
+      const otherPath = platform === 'darwin'
+        ? join(env.XDG_DATA_HOME, 'openclaw/olympus/engine/status.json')
+        : join(home, '.local/share/openclaw/olympus/engine/status.json');
+      health(statusPath, 'ok', null);
+      // An existing Linux dataset keeps the service on its XDG data root even
+      // when an older, populated legacy directory is also present.
+      if (paths.linux) writeFileSync(join(paths.linux.dataDir, 'dataset.sqlite'), 'fixture');
+      health(otherPath, 'failing', 'Wrong data directory');
+      const report = () => engineStatusReport({ homeDir: home, platform, env,
+        exec: () => ({ status: 0, stderr: '', stdout: platform === 'darwin'
+          ? `state = running\npid = ${process.pid}\n`
+          : `LoadState=loaded\nActiveState=active\nSubState=running\nMainPID=${process.pid}\nUnitFileState=enabled\nFragmentPath=${paths.plistPath}\n` }),
+        openclawPath: () => undefined, fetchImpl: (async () => Response.json({ ok: true })) as unknown as typeof fetch });
+      const ready = await report();
+      expect(ready.agent).toMatchObject({ state: 'running' });
+      expect(ready.engine).toMatchObject({ services: { 'olympus-worker': { state: 'ok' } } });
+      expect(JSON.stringify(ready.missing)).not.toContain('The engine worker is not ready yet');
+      expect(JSON.stringify(ready.missing)).not.toContain('Wrong data directory');
+      if (platform === 'darwin') expect(ready.ok).toBe(true);
+      // A healthy file in the other directory must not hide the host's real failure.
+      health(otherPath, 'ok', null);
+      health(statusPath, 'failing', 'Actual worker data conflict');
+      const blocked = await report();
+      expect(blocked.ok).toBe(false);
+      expect(blocked.missing).toContain('Actual worker data conflict');
+      // Doctor's problem reader must use the same resolved service path.
+      expect(readEngineWorkerProblem(statusPath)).toBe('Actual worker data conflict');
+    });
+  }
+
   test('engine status says plainly that OpenClaw is not needed and what is missing', async () => {
     const { home } = fixture();
     const report = await engineStatusReport({
@@ -531,6 +610,11 @@ if (env.LAUNCH === '0') {
     const { home, checkout, bun } = fixture();
     const launchctl = fakeLaunchctl();
     installEngine({ platform: 'darwin', homeDir: home, exec: launchctl.exec, fromCheckout: checkout, bunBin: bun });
+    const statusPath = engineStatusPath({ HOME: home });
+    mkdirSync(join(statusPath, '..'), { recursive: true });
+    writeFileSync(statusPath, JSON.stringify({ schema: 'olympus.engine.status.v1', pid: process.pid, state: 'running', services: {
+      'olympus-worker': { state: 'ok', message: null },
+    } }));
     const report = () => engineStatusReport({
       homeDir: home,
       platform: 'darwin',
@@ -585,6 +669,12 @@ describe('doctor without OpenClaw', () => {
     expect(result.checks.find((check) => check.name === 'host')).toMatchObject({ ok: true });
     expect(result.checks.find((check) => check.name === 'host')?.detail).toContain('OpenClaw is not installed (optional)');
     expect(result.checks.find((check) => check.name === 'dependencies')).toMatchObject({ ok: true });
+  });
+
+  test('doctor names the standalone daemon manager and state', async () => {
+    const result = await runDoctor(deps({ engine: { manager: 'daemon', installed: true, state: 'running' }, legacyWorkerUnit: false }));
+    expect(result.checks.find(check => check.name === 'host')).toMatchObject({ ok: true });
+    expect(result.checks.find(check => check.name === 'host')?.detail).toContain('daemon, running');
   });
 
   test('says what is missing when nothing hosts the engine', async () => {
@@ -1082,15 +1172,60 @@ describe('engine install preflight, policy seeding, and what uninstall keeps', (
     expect(existsSync(paths.configPath)).toBe(false);
   });
 
+  test('an existing engine without a policy file is not treated as a fresh install', () => {
+    const { home, checkout, bun } = fixture();
+    const paths = enginePaths(home);
+    mkdirSync(dirname(paths.configPath), { recursive: true });
+    writeFileSync(paths.configPath, JSON.stringify(defaultEngineConfig()));
+    const result = installEngine({ platform: 'darwin', homeDir: home, exec: fakeLaunchctl().exec, fromCheckout: checkout, bunBin: bun, env: {} });
+    expect(result.sovereignty.action).toBe('skipped');
+    expect(existsSync(paths.sovereigntyPath)).toBe(false);
+  });
+
   test('a fresh Mac gets the keyless policy seeded', () => {
     const { home, checkout, bun } = fixture();
     const result = installEngine({ platform: 'darwin', homeDir: home, exec: fakeLaunchctl().exec, fromCheckout: checkout, bunBin: bun, env: {} });
-    expect(result.sovereignty).toMatchObject({ action: 'seeded', preset: 'no-sensitive' });
-    expect(result.seeded_sovereignty).toBe('no-sensitive');
+    expect(result.sovereignty).toMatchObject({ action: 'seeded', preset: 'pending' });
+    expect(result.seeded_sovereignty).toBe('pending');
     expect(existsSync(enginePaths(home).sovereigntyPath)).toBe(true);
   });
 
+  for (const mode of ['ambient-key', 'leftover-inline', 'leftover-path', 'malformed-leftover'] as const) {
+    test(`fresh install still asks when the shell has ${mode}`, () => {
+      const { home, checkout, bun } = fixture();
+      const env: Record<string, string> = mode === 'ambient-key' ? { GEMINI_API_KEY: 'synthetic-unrelated-key' } : {};
+      if (mode !== 'ambient-key') {
+        mkdirSync(join(home, '.olympus'), { recursive: true });
+        const configPath = join(home, 'leftover-policy.json');
+        writeFileSync(configPath, JSON.stringify(loadSovereigntyPreset('local-only')));
+        writeFileSync(join(home, '.olympus', 'config.json'), mode === 'malformed-leftover' ? '{' : JSON.stringify({ sovereignty:
+          mode === 'leftover-inline' ? { policy: loadSovereigntyPreset('local-only') } : { configPath } }));
+      }
+      const result = installEngine({ platform: 'darwin', homeDir: home, exec: fakeLaunchctl().exec, fromCheckout: checkout, bunBin: bun, env });
+      expect(result.sovereignty).toMatchObject({ action: 'seeded', preset: 'pending' });
+      expect(JSON.parse(readFileSync(enginePaths(home).sovereigntyPath, 'utf8')).privacyChoicePending).toBe(true);
+    });
+  }
+
   const blockers: Array<[string, (home: string, root: string) => Record<string, string>, string]> = [
+    ['an environment-backed policy', (home) => {
+      const path = enginePaths(home).workerEnvPath;
+      mkdirSync(dirname(path), { recursive: true });
+      writeFileSync(path, 'OLYMPUS_ARGUS_BASE_URL=http://127.0.0.1:11434/v1\n');
+      return {};
+    }, 'already sets OLYMPUS_ARGUS_BASE_URL'],
+    ['an inline policy', (home) => {
+      mkdirSync(join(home, '.olympus'), { recursive: true });
+      writeFileSync(enginePaths(home).configPath, JSON.stringify({ ...defaultEngineConfig(), sovereignty: { policy: loadSovereigntyPreset('local-only') } }));
+      return {};
+    }, 'existing engine installation'],
+    ['a custom-path policy', (home) => {
+      mkdirSync(join(home, '.olympus'), { recursive: true });
+      const configPath = join(home, 'custom-policy.json');
+      writeFileSync(configPath, JSON.stringify(loadSovereigntyPreset('local-only')));
+      writeFileSync(enginePaths(home).configPath, JSON.stringify({ ...defaultEngineConfig(), sovereignty: { configPath } }));
+      return {};
+    }, 'existing engine installation'],
     ['an OpenClaw config with an Olympus entry', (home) => {
       mkdirSync(join(home, '.openclaw'), { recursive: true });
       writeFileSync(join(home, '.openclaw', 'openclaw.json'), JSON.stringify({ plugins: { entries: { olympus: { config: {} } }, installs: { olympus: { source: 'npm' } } } }));
@@ -1189,3 +1324,26 @@ describe('engine install preflight, policy seeding, and what uninstall keeps', (
     expect(kept[paths.previousAppDir]).toBeUndefined();
   });
 });
+
+for (const platform of ['linux', 'darwin'] as const) {
+  for (const policyKind of ['inline', 'custom-path', 'pending'] as const) {
+    test(`installed ${platform} worker resolves its ${policyKind} policy without engine.json`, () => {
+      const { home } = fixture();
+      const env = { HOME: home, XDG_CONFIG_HOME: join(home, 'custom-config') };
+      const paths = engineServicePaths({ platform, env });
+      const unit = workerServicePaths(platform, home, env).unitPath;
+      mkdirSync(dirname(unit), { recursive: true });
+      writeFileSync(unit, platform === 'linux' ? '[Service]\nExecStart=/synthetic/olympus worker run\n' : '<plist/>');
+      mkdirSync(join(home, '.olympus'), { recursive: true });
+      const policy = policyKind === 'pending' ? createPendingPrivacyPolicy() : loadSovereigntyPreset('local-only');
+      const configPath = join(home, 'custom-policy.json');
+      writeFileSync(configPath, JSON.stringify(policy));
+      writeFileSync(join(home, '.olympus', 'config.json'), JSON.stringify({ sovereignty:
+        policyKind === 'custom-path' ? { configPath } : { policy } }));
+      expect(existsSync(paths.configPath)).toBe(false);
+      expect(existsSync(paths.sovereigntyPath)).toBe(false);
+      expect(resolveInstallationPrivacyState({ homeDir: home, paths, env }).state)
+        .toBe(policyKind === 'pending' ? 'pending' : 'configured');
+    });
+  }
+}

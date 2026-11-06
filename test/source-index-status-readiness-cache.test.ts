@@ -12,6 +12,7 @@ import {
 } from '../src/workers/source-scope-runtime.ts';
 import {
   DASHBOARD_READINESS_LEDGER_MAX_AGE_MS,
+  STORE_STATUS_REUSE_MS,
   createSourceIndexStatusHandler,
   resolveStatusRetrievalAvailability,
 } from '../src/workers/source-index/status.ts';
@@ -48,6 +49,62 @@ describe('connector-store status readiness', () => {
       activationMode = 'hybrid_shadow';
       const owed = (await handler.status({ readiness_ledger_max_age_ms: 120_000 })).corpora[0]!;
       expect(owed.embedding_parity).toMatchObject({ required: true, missing_chunks: 1, refresh_needed: true });
+    } finally { store.close(); }
+  });
+
+  test('snapshot callers share one read of a store\'s counts within the reuse window; current callers always read', async () => {
+    const store = new LocalConnectorStore({ dbPath: ':memory:', corpusId: CORPUS_ID, family: 'file', trustDomain: 'secure_local' });
+    let reads = 0;
+    const read = store.status.bind(store);
+    store.status = ((...args: Parameters<typeof store.status>) => { reads += 1; return read(...args); }) as typeof store.status;
+    let prepared = 0;
+    const prepare = store.prepareStatusCounts.bind(store);
+    store.prepareStatusCounts = async (...args: Parameters<typeof store.prepareStatusCounts>) => { prepared += 1; await prepare(...args); };
+    let now = 1_000_000;
+    try {
+      const handler = createSourceIndexStatusHandler({ corpusDefinitions: [defineDropboxFilesCorpus()], connectorStores: [store], nowMs: () => now });
+      await handler.status({ include_items: false }, { countsMaxAgeMs: 300_000 });
+      await handler.status({ include_items: false, include_readiness_ledger: true, readiness_ledger_max_age_ms: 120_000 }, { countsMaxAgeMs: 300_000 });
+      expect(reads).toBe(1);
+      // The reused sets are built in turns before the one count, not again while it is fresh.
+      expect(prepared).toBe(1);
+      now += STORE_STATUS_REUSE_MS + 1;
+      await handler.status({ include_items: false }, { countsMaxAgeMs: 300_000 });
+      expect(reads).toBe(2);
+      expect(prepared).toBe(2);
+      await handler.status({ include_items: false });
+      await handler.status({ include_items: false });
+      expect(reads).toBe(4);
+      expect(prepared).toBe(2);
+    } finally { store.close(); }
+  });
+
+  test('snapshot callers share one read of the embedding and PDF backlogs within the reuse window; current callers always read', async () => {
+    const store = new LocalConnectorStore({ dbPath: ':memory:', corpusId: CORPUS_ID, family: 'file', trustDomain: 'secure_local' });
+    let backlogReads = 0;
+    let pdfReads = 0;
+    const backlog = store.embeddingBacklogEstimate.bind(store);
+    store.embeddingBacklogEstimate = ((...args: Parameters<typeof store.embeddingBacklogEstimate>) => { backlogReads += 1; return backlog(...args); }) as typeof store.embeddingBacklogEstimate;
+    const pdf = store.pdfExtractionBacklog.bind(store);
+    store.pdfExtractionBacklog = (() => { pdfReads += 1; return pdf(); }) as typeof store.pdfExtractionBacklog;
+    let now = 1_000_000;
+    try {
+      await store.syncFromConnector(connector([file('backlog.txt', 'synthetic text')]), { fetchContent: true });
+      const handler = createSourceIndexStatusHandler({
+        corpusDefinitions: [defineDropboxFilesCorpus()], connectorStores: [store], nowMs: () => now,
+        retrievalPolicy: () => ({ embeddingProfile: 'approved-local', activationMode: 'hybrid_shadow' }),
+        retrievalAvailability: { [CORPUS_ID]: { servable: false, modelId: 'fake-embed-v1', reason: 'no_current_embedding_artifacts' } },
+      });
+      const first = (await handler.status({ include_items: false }, { countsMaxAgeMs: 300_000 })).corpora[0]!;
+      expect(first.embedding_parity?.backlog_estimate?.missing_chunks).toBe(1);
+      await handler.status({ include_items: false }, { countsMaxAgeMs: 300_000 });
+      expect([backlogReads, pdfReads]).toEqual([1, 1]);
+      now += STORE_STATUS_REUSE_MS + 1;
+      await handler.status({ include_items: false }, { countsMaxAgeMs: 300_000 });
+      expect([backlogReads, pdfReads]).toEqual([2, 2]);
+      await handler.status({ include_items: false });
+      await handler.status({ include_items: false });
+      expect([backlogReads, pdfReads]).toEqual([4, 4]);
     } finally { store.close(); }
   });
 
@@ -234,6 +291,39 @@ describe('connector-store status readiness', () => {
         ...current.identity,
         sourceVersion: 'superseded-version',
       }, contentScope.filters)).toBe(false);
+      // The batched check answers what the per-item one does, in order.
+      const other = candidates.candidates[1]!;
+      expect(store.itemsMatchingExtractionRefs([
+        { ...current.identity, ...(current.contentHash ? { contentHash: current.contentHash } : {}) },
+        { ...current.identity, sourceVersion: 'superseded-version' },
+        { ...other.identity, localItemId: 'no-such-item' },
+        { ...other.identity, ...(other.contentHash ? { contentHash: other.contentHash } : {}) },
+      ], contentScope.filters)).toEqual([true, false, false, true]);
+      expect(store.itemsMatchingExtractionRefs([], contentScope.filters)).toEqual([]);
+      // Each ref is a lookup by item id whatever the filters: an `IN (…)` list
+      // let a provider filter scan the whole provider once per slice instead.
+      type Statement = { all: (...params: unknown[]) => unknown[] };
+      const db = (store as unknown as { db: { query: (sql: string) => Statement } }).db;
+      const original = db.query.bind(db);
+      let lookup: { sql: string; params: unknown[] } | undefined;
+      db.query = (sql: string) => {
+        const statement = original(sql);
+        if (!sql.includes('json_each(?) wanted')) return statement;
+        return { all: (...params: unknown[]) => {
+          lookup = { sql, params };
+          return statement.all(...params);
+        } };
+      };
+      try {
+        store.itemsMatchingExtractionRefs([{ ...current.identity }], { ...contentScope.filters, provider: current.identity.provider });
+      } finally {
+        db.query = original;
+      }
+      expect(lookup).toBeDefined();
+      const plan = (original(`EXPLAIN QUERY PLAN ${lookup!.sql}`).all(...lookup!.params) as Array<{ detail: string }>)
+        .map((row) => row.detail);
+      expect(plan.some((detail) => /SEARCH i USING INDEX idx_items_local_item_id/.test(detail))).toBe(true);
+      expect(plan.some((detail) => /^(SCAN|SEARCH) i\b(?!.*idx_items_local_item_id)/.test(detail))).toBe(false);
     } finally {
       store.close();
     }
@@ -520,3 +610,30 @@ function connector(items: RawItem[]): SourceConnector {
     },
   };
 }
+
+describe('status build shares the worker thread', () => {
+  test('a timer due during a long status build runs between corpora, not after all of them', async () => {
+    const { defineLocalFilesCorpus } = await import('../src/workers/local-files/store.ts');
+    const definitions = [defineDropboxFilesCorpus(), defineLocalFilesCorpus()];
+    const stores = definitions.map((definition) => new LocalConnectorStore({
+      dbPath: ':memory:', corpusId: definition.corpusId, family: 'file', trustDomain: definition.trustDomain,
+    }));
+    const order: string[] = [];
+    for (const store of stores) {
+      const real = store.status.bind(store);
+      store.status = ((...args: Parameters<typeof store.status>) => {
+        order.push(`status:${store.corpusId}`);
+        const until = Date.now() + 40; // a store whose counts take a while
+        while (Date.now() < until) { /* busy */ }
+        return real(...args);
+      }) as typeof store.status;
+    }
+    try {
+      const handler = createSourceIndexStatusHandler({ corpusDefinitions: definitions, connectorStores: stores });
+      setTimeout(() => order.push('request'), 5);
+      const result = await handler.status({});
+      expect(result.corpora).toHaveLength(2);
+      expect(order).toEqual([`status:${definitions[0]!.corpusId}`, 'request', `status:${definitions[1]!.corpusId}`]);
+    } finally { for (const store of stores) store.close(); }
+  });
+});

@@ -2,6 +2,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, test } from 'bun:test';
+import { createPendingPrivacyPolicy } from '../src/core/first-run-privacy.ts';
 import { defaultConfig } from '../src/core/config.ts';
 import type { RawItem, SourceConnector, SourceConnectorListPage } from '../src/core/contracts.ts';
 import { DirectHttpEmailTransport, EmailClient } from '../src/core/email.ts';
@@ -12,7 +13,7 @@ import type { OperationContext } from '../src/core/operations.ts';
 import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
 import { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
 
-type DoctorRun = { result: { ok: boolean; checks: Array<{ name: string; ok: boolean }> }; profiles: unknown[] };
+type DoctorRun = { result: { ok: boolean; checks: Array<{ name: string; ok: boolean; detail?: string }> }; profiles: unknown[] };
 
 const DOCTOR_CHILD = join(import.meta.dir, 'fixtures', 'doctor-operation-child.ts');
 
@@ -88,6 +89,22 @@ function decoyOlympusHome(): string {
   }));
   return home;
 }
+
+test('doctor operation withholds source diagnostics before the first-run choice', () => {
+  const home = decoyOlympusHome();
+  try {
+    writeFileSync(join(home, process.platform === 'linux' ? '.config/olympus' : '.olympus', 'sovereignty.json'), JSON.stringify(createPendingPrivacyPolicy()));
+    const { result } = runDoctorOperationUnderHome(home);
+    const output = JSON.stringify(result);
+    expect(output).not.toContain('gmail.personal');
+    expect(output).not.toContain('reauth_required');
+    expect(output).not.toContain('connected.');
+    expect(result.checks.find(check => check.name === 'credential_handles')?.detail).toContain('privacy choice');
+    for (const name of ['host', 'dependencies', 'ocr_reading', 'photo_search']) {
+      expect(result.checks.find(check => check.name === name)?.ok).toBe(true);
+    }
+  } finally { rmSync(home, { recursive: true, force: true }); }
+}, 30_000);
 
 describe('operations', () => {
   test('defines the current operation surface', () => {

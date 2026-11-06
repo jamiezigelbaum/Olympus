@@ -114,9 +114,12 @@ export function selectLinuxSecretBackend(
         if (requested !== 'auto' && requested !== selected.backend) throw new SecretStoreError('configuration', 'ambient backend conflicts with the durable selection; no migration is supported.');
         return selected.backend as 'file' | 'libsecret';
       }
-      if (readSecretFile(paths.encryptedFilePath) !== undefined || readSecretFile(paths.keyFilePath) !== undefined) {
-        throw new SecretStoreError('configuration', `Existing secret data at ${paths.encryptedFilePath} or ${paths.keyFilePath} has no selection. Restore the selection or choose a fresh empty layout; no migration is supported.`);
+      const hasCiphertext = readSecretFile(paths.encryptedFilePath) !== undefined;
+      const hasKey = readSecretFile(paths.keyFilePath) !== undefined;
+      if (hasCiphertext !== hasKey) {
+        throw new SecretStoreError('configuration', 'The old secret store is missing one of its two files. Restore the missing file from your backup before restarting Olympus.');
       }
+      if (hasCiphertext && requested === 'libsecret') throw new SecretStoreError('configuration', 'The old secret store uses the file backend. Keep that backend to use your existing connections.');
       const backend = requested === 'libsecret' ? 'libsecret' : 'file';
       lease.commit(() => writePrivateFileAtomicSync(paths.backendFilePath, JSON.stringify({ version: 1, backend }) + '\n'));
       return backend;

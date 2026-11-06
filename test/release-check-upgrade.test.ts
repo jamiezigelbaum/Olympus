@@ -273,6 +273,10 @@ if (verb === 'provision') {
   mark('upgraded');
 } else if (verb === 'exec') {
   const script = await new Response(Bun.stdin.stream()).text();
+  // The anonymous-answer confinement check: a host without the AppArmor restriction, ready with no administrator step.
+  if (script.includes('apparmor_restrict_unprivileged_userns')) { console.log('absent'); process.exit(0); }
+  if (script.includes('zkapi install-tools')) process.exit(0);
+  if (script.includes('zkapi check-confinement')) { console.log('network confinement: ready (scripted)'); process.exit(0); }
   const sub = /agent\.js (\S+)/.exec(script)?.[1];
   const upgraded = flag('upgraded');
   const say = (value) => console.log(JSON.stringify(value));

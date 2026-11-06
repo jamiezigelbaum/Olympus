@@ -498,7 +498,9 @@ export async function explore(options: ExploreOptions): Promise<ExploreResult> {
     for (const control of base.filter(inScope)) {
       // Only the source the machine can drive (its stand-in): another source's Connect would start a real sign-in at its provider.
       if (!drivable(control)) continue;
-      if (control.menuKey && control.tag !== 'summary') enqueue([`summary:${control.menuKey}`, control.key], control.rowName);
+      // A control in a closed section of its row (a failed card's "Details for support") is reached through that section's summary.
+      const opener = control.tag === 'summary' ? '' : control.menuKey || (control.visible ? '' : control.openKey ?? '');
+      if (opener) enqueue([`summary:${opener}`, control.key], control.rowName);
       else enqueue([control.key], control.rowName);
     }
     // The other sections do not change with the sources' states, so they are pressed from the first state produced only.
@@ -515,7 +517,8 @@ export async function explore(options: ExploreOptions): Promise<ExploreResult> {
       }
     }
     const lastKinds = new Set(seed.last ?? []);
-    const orderKey = (entry: { path: string[]; parentKind?: ControlKind }): number => (entry.parentKind && lastKinds.has(entry.parentKind) && /:yes$/.test(entry.path[entry.path.length - 1]!) ? 1 : 0);
+    // A confirmation can remove the control needed to replay its Cancel path.
+    const orderKey = (entry: { path: string[] }): number => (/:yes$/.test(entry.path[entry.path.length - 1]!) ? 1 : 0);
 
     let presses = 0;
     let dirty = false;

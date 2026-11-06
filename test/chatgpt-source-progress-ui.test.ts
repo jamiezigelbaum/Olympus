@@ -380,3 +380,8 @@ describe('a chosen folder the computer will not open: the action fits the cause'
     }
   });
 });
+
+test('dashboard helper guidance uses the approved wording', async () => {
+  const { DASHBOARD_FOLDER_NEEDS_HELPER } = await import('../src/workers/dashboard/vocabulary.ts');
+  expect(DASHBOARD_FOLDER_NEEDS_HELPER).toBe('Desktop, Documents, Downloads, iCloud Drive and other disks need the Olympus helper app. Update Olympus to add it, or choose a folder outside them.');
+});

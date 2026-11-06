@@ -1,5 +1,5 @@
 // olympusplugin.ai home: the long launch film, scene by scene down the page. Each .stage holds one of the film's own
-// scenes (/film/scene.html) in a frame, scaled to fit. A scene plays once, at the film's own timing, when its middle
+// scenes (/film/scene.html) in a frame, zoomed to fit. A scene plays once, at the film's own timing, when its middle
 // reaches the middle of the screen (Jamie, 2026-10-12: earlier felt too soon). With reduced motion, or ?still for
 // screenshots, every scene shows its last frame instead.
 (function () {
@@ -17,14 +17,23 @@
     f.tabIndex = -1;
     f.setAttribute("aria-hidden", "true");
     f.setAttribute("scrolling", "no");
-    f.src = "/film/scene.html?v=1.0.0&s=" + encodeURIComponent(stage.getAttribute("data-film-scene")) + (motion ? "" : "&still");
+    f.src = "/film/scene.html?v=1.0.1&s=" + encodeURIComponent(stage.getAttribute("data-film-scene")) + (motion ? "" : "&still");
     stage.appendChild(f);
     frames.set(scene, f);
   });
 
-  // The frame is 1920 wide, cropped to 1540 (see home.css): scale it to the stage's width.
+  // The frame is 1920 wide, cropped to 1540 (see home.css): size it to the stage's width, and zoom the scene inside it
+  // to match (film/scene.html zooms itself on load from its frame's width). Shrinking a full 1920x1080 frame with a
+  // transform made phones paint and blur the whole film size for every card: animations stuttered, and a fast scroll
+  // ran the browser out of memory, so it reloaded the page at the top (Jamie, 2026-10-30).
   function fit() {
-    frames.forEach(function (f) { f.style.setProperty("--k", f.parentNode.clientWidth / 1540); });
+    frames.forEach(function (f) {
+      var k = f.parentNode.clientWidth / 1540;
+      f.style.width = 1920 * k + "px";
+      f.style.height = 1080 * k + "px";
+      f.style.left = -190 * k + "px";
+      try { f.contentDocument.documentElement.style.zoom = k; } catch (e) { /* not loaded yet: it zooms itself */ }
+    });
   }
   fit();
   if ("ResizeObserver" in window) new ResizeObserver(fit).observe(document.querySelector(".reel"));
@@ -105,7 +114,9 @@
       var op = +g.getProperty(C.el, "opacity");
       if (op < 0.01) { d.style.opacity = "0"; return; }
       var tip = C.el.getBoundingClientRect(), fr = f.getBoundingClientRect();
-      var px = fr.left + tip.left * k, py = fr.top + tip.top * k;
+      // the scene is zoomed: some browsers measure inside it in the page's pixels, some in the film's
+      var z = k * 1920 / w.document.documentElement.getBoundingClientRect().width;
+      var px = fr.left + tip.left * z, py = fr.top + tip.top * z;
       var x = +g.getProperty(C.el, "x"), y = +g.getProperty(C.el, "y"), m = 360 * k;
       // inside a leg: how far along it is (per axis, so each keeps its own ease), stretched to the window's edge
       var now = w.olympusScene.tl.time();

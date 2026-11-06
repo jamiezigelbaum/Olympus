@@ -349,7 +349,7 @@ describe('end to end with the MCP SDK OAuth client', () => {
       expect(callback.searchParams.get('iss')).toBe(base);
       expect(callback.searchParams.get('state')).toBe('state-123');
       const tools = await client.listTools();
-      expect(tools.tools.map((tool) => tool.name).sort()).toEqual(['ask_anonymously', 'source_answer', 'source_answer_result', 'source_index_status']);
+      expect(tools.tools.map((tool) => tool.name).sort()).toEqual(['source_answer', 'source_answer_result', 'source_index_status']);
       await client.callTool({ name: 'source_answer', arguments: { question: 'what changed?' } });
     } finally {
       await client.close();
@@ -1505,7 +1505,7 @@ describe('connection database migration', () => {
     try {
       expect(upgraded.verifyToken(token)).toMatchObject({ ok: true, connection: { displayName: 'Muse', kind: 'bearer' } });
       const check = new Database(legacyPath);
-      expect((check.query("SELECT version FROM schema_version WHERE store_id = 'remote-connections'").get() as { version: number }).version).toBe(3);
+      expect((check.query("SELECT version FROM schema_version WHERE store_id = 'remote-connections'").get() as { version: number }).version).toBe(4);
       check.close();
       // Something approved after the upgrade, which the rollback will not keep.
       upgraded.create('Later');

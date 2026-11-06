@@ -18,6 +18,10 @@ export interface OlympusDashboardPageRead {
 
 export interface OlympusDashboardTransport {
   control(params: OlympusDashboardControlParams): Promise<OlympusDashboardControlResult>;
+  /** Local-only session mint; never supplied by the native or remote bridge. */
+  openLocalControls?(): Promise<boolean>;
+  /** Only the standalone local dashboard supplies this direct same-origin transport. */
+  messaging?(operation: 'start' | 'status' | 'respond' | 'cancel' | 'scope' | 'chats', params: { source: 'telegram' | 'whatsapp'; field?: string; value?: string; wholeAccount?: boolean; chatScopes?: string[] }): Promise<OlympusDashboardControlResult>;
   /** The control-session exchange: a pasted worker token for a session cookie. */
   unlock?(workerToken: string): Promise<{ ok: boolean; csrf_token?: string }>;
   lock?(): Promise<boolean>;
@@ -84,6 +88,7 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
   /** That start's wait line and the sheet it shows in: a redraw replaces the form, so it is said again until the owner comes back. */
   let authorizationWait: { sheetId: string; message: string } | undefined;
   const root = options.root;
+  const uploadedClientFiles = new WeakMap<HTMLFormElement, string>();
   const submittedFormValues = new WeakMap<HTMLFormElement, Record<string, string>>();
   const startedFromSheet = new WeakSet<HTMLFormElement>();
   const pendingForms = new WeakSet<HTMLFormElement>();
@@ -92,6 +97,99 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
   const redrawEvent = 'olympus:redraw';
   /** A redraw was asked for while a read or a control was in flight: the next read is forced. */
   let redrawOwed = false;
+  // Only this tab's successful save keeps the walkthrough alive. A reload
+  // renders the saved policy normally; upgrades never create this state.
+  let firstRunChoice: string | undefined;
+  let firstRunCheckRequested = false;
+
+  function showSetupStep(sheet: HTMLElement, next: number): void {
+    const panels = Array.from(sheet.querySelectorAll<HTMLElement>(':scope > [data-setup-panel]'));
+    const firstRun = sheet.closest('[data-first-run-sheet]');
+    const noConnection = firstRun && firstRunChoice === 'no-sensitive';
+    panels.forEach((panel, index) => { panel.hidden = index !== next; });
+    const count = noConnection ? 2 : panels.length;
+    const position = noConnection && next === 2 ? 2 : next + 1;
+    const counter = sheet.querySelector<HTMLElement>('[data-setup-counter]');
+    if (counter) counter.textContent = sheet.hasAttribute('data-setup-guided') ? `STEP ${position} OF ${count}` : `Step ${position} of ${count}`;
+    sheet.querySelectorAll<HTMLElement>('[data-setup-segment]').forEach((segment, index) => segment.classList.toggle('filled', index <= next));
+    sheet.querySelector('[role="progressbar"]')?.setAttribute('aria-valuenow', String(position));
+    const progress = sheet.querySelector<HTMLProgressElement>('[data-setup-progress]');
+    if (progress) { progress.max = count; progress.value = position; }
+    const forward = sheet.querySelector<HTMLElement>('[data-setup-next]');
+    if (forward) forward.hidden = next === panels.length - 1 || Boolean(firstRun && next === 0);
+    const back = sheet.querySelector<HTMLButtonElement>('[data-setup-back]');
+    if (back) back.disabled = next === 0 || Boolean(firstRun && (next < 2 || noConnection));
+    const submit = sheet.querySelector<HTMLButtonElement>('[data-setup-submit]');
+    const actionForm = panels[next]?.dataset.setupForm;
+    if (submit) {
+      submit.hidden = !actionForm && next !== panels.length - 1;
+      if (actionForm) {
+        submit.setAttribute('form', actionForm);
+        submit.textContent = panels[next]!.dataset.setupLabel ?? 'Continue';
+      }
+    }
+    const actions = sheet.querySelector<HTMLElement>('[data-setup-actions]');
+    if (actions) actions.hidden = false;
+    const done = sheet.querySelector<HTMLElement>('[data-first-run-done]');
+    if (done) done.hidden = true;
+    if (sheet.querySelector('[data-setup-error]')) {
+      sheet.querySelectorAll<HTMLFormElement>('form').forEach(form => say(form, ''));
+      sheet.querySelector('[data-setup-error]')?.remove();
+    }
+    const heading = panels[next]?.querySelector<HTMLElement>('h2, h4');
+    if (heading) { heading.tabIndex = -1; heading.focus(); }
+  }
+
+  function firstRunResult(message: string, working = false, redo?: string): void {
+    const slot = query<HTMLElement>('[data-first-run-result]');
+    if (slot) slot.textContent = message;
+    const done = query<HTMLElement>('[data-first-run-done]');
+    const verifying = query<HTMLElement>('[data-first-run-sheet] [data-model-check]')?.closest<HTMLElement>('[data-setup-panel]')?.hidden === false;
+    if (done) done.hidden = !working || !verifying;
+    const primary = query<HTMLElement>('[data-first-run-sheet] [data-setup-submit]');
+    if (primary && verifying) primary.hidden = working;
+    const retry = query<HTMLElement>('[data-first-run-redo]');
+    if (retry) { retry.hidden = !redo; retry.textContent = redo ?? ''; }
+    const keys = query<HTMLElement>('[data-first-run-keys]');
+    if (keys) keys.hidden = working || !firstRunCheckRequested;
+  }
+
+  async function readFirstRunReadiness(): Promise<void> {
+    try {
+      const page = await options.refresh();
+      if (disposed || options.signal.aborted || !firstRunChoice) return;
+      if (!page || page.status !== 200) throw new Error('unavailable');
+      canWrite = page.can_write;
+      applyWriteCapability();
+      const template = document.createElement('template');
+      template.innerHTML = page.body;
+      // The walkthrough keeps its inputs. Only the independent download line
+      // is replaced from this read, even before the readiness check is pressed.
+      const previousProgress = query<HTMLElement>('[data-private-model-progress]');
+      const nextProgress = template.content.querySelector<HTMLElement>('[data-private-model-progress]');
+      if (previousProgress) {
+        if (nextProgress) previousProgress.replaceWith(document.importNode(nextProgress, true));
+        else previousProgress.remove();
+      } else if (nextProgress) query('[data-first-run-sheet]')?.before(document.importNode(nextProgress, true));
+      if (!firstRunCheckRequested) return;
+      const encoded = template.content.querySelector<HTMLElement>('[data-model-setup-status]')?.dataset.modelSetupStatus;
+      if (!encoded) throw new Error('missing readiness');
+      const status = JSON.parse(encoded);
+      if (status.privacy_choice_pending === true) {
+        firstRunResult('Olympus is still applying your choice. Check readiness again after it restarts.');
+      } else if (status.ready === true) {
+        firstRunResult('Working', true);
+      } else {
+        const card = Array.isArray(status.cards) ? status.cards.find((item: { required: boolean; state: string }) => item.required && item.state !== 'ready') : undefined;
+        const redo = card?.id === 'venice' && ['local-first', 'private-cloud-only'].includes(firstRunChoice)
+          ? 'Redo Add a Venice key' : card?.id === 'local' && firstRunChoice === 'local-only' ? 'Redo Connect my local models' : undefined;
+        firstRunResult(typeof card?.detail === 'string' ? card.detail
+          : typeof status.attention === 'string' ? status.attention : 'Olympus is not ready yet. Check readiness again after it finishes applying your choice.', false, redo);
+      }
+    } catch {
+      if (firstRunCheckRequested) firstRunResult('Could not read readiness. Olympus may be restarting; check again.');
+    }
+  }
 
   function query<T extends Element = Element>(selector: string): T | null {
     return root.querySelector(selector) as T | null;
@@ -105,6 +203,16 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
   function setSheetOpen(sheet: HTMLElement, open: boolean): void {
     sheet.classList.toggle('on', open);
     sheet.setAttribute('aria-hidden', open ? 'false' : 'true');
+    if (!open) {
+      const choice = sheet.querySelector<HTMLElement>('[data-setup-choice], [data-setup-lead]');
+      const walkthrough = sheet.querySelector<HTMLElement>('[data-setup-walkthrough]');
+      if (choice && walkthrough) {
+        choice.hidden = false;
+        walkthrough.hidden = true;
+        const note = choice.querySelector<HTMLElement>('[data-shared-app-note]');
+        if (note) note.hidden = false;
+      }
+    }
     if (!sheet.id) return;
     queryAll<HTMLElement>('[data-sheet-toggle]').forEach((toggle) => {
       if (toggle.dataset.sheetToggle === `#${sheet.id}`) toggle.setAttribute('aria-expanded', open ? 'true' : 'false');
@@ -114,6 +222,45 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
   function say(form: ParentNode, message: string): void {
     const slot = form.querySelector('[data-action-message]');
     if (slot) slot.textContent = message;
+  }
+
+  function errorCode(result: OlympusDashboardControlResult): string | undefined {
+    const error = result.body.error;
+    if (!error || typeof error !== 'object' || Array.isArray(error)) return undefined;
+    const code = (error as Record<string, unknown>).code;
+    return typeof code === 'string' ? code : undefined;
+  }
+
+  /**
+   * A change that only a session opened on this computer may make (the first-run
+   * privacy choice, local models): the session is fine, it is just not local yet.
+   * Say so and offer the unlock in place; the person presses it, then the form is sent again.
+   */
+  function askLocalUnlock(form: HTMLFormElement): void {
+    say(form, 'Unlock on this computer to save this.');
+    if (!options.transport.openLocalControls) return;
+    const slot = form.querySelector('[data-action-message]');
+    if (!slot || slot.parentElement?.querySelector('[data-unlock-here]')) return;
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'btn';
+    button.setAttribute('data-unlock-here', '');
+    button.textContent = 'Unlock on this computer';
+    button.addEventListener('click', () => {
+      button.disabled = true;
+      void (async () => {
+        let opened = false;
+        try { opened = await options.transport.openLocalControls!(); } catch { opened = false; }
+        if (!opened) {
+          button.disabled = false;
+          say(form, 'Could not unlock. Open this dashboard in a browser on this computer and try again.');
+          return;
+        }
+        button.remove();
+        form.requestSubmit();
+      })();
+    });
+    slot.after(button);
   }
 
   function errorMessage(result: OlympusDashboardControlResult): string {
@@ -127,13 +274,13 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
 
   function applyWriteCapability(): void {
     root.querySelectorAll<HTMLFormElement>(
-      'form[data-connect-kind],form[data-model-check],form[data-agent-kind]',
+      'form[data-connect-kind],form[data-model-check],form[data-first-run-privacy],form[data-computer-use],form[data-local-models-discover],form[data-local-models-test],form[data-agent-kind]',
     ).forEach((form) => {
       // A form whose request is still outstanding keeps its submit controls
       // disabled, so a second click cannot issue a second transport call,
       // without taking the caret out of the fields the owner is still typing.
       const pending = pendingForms.has(form) || form.dataset.keyAccepted === 'true';
-      form.querySelectorAll<HTMLButtonElement | HTMLInputElement>('button,input:not([type="hidden"])')
+      Array.from(form.elements).filter((control): control is HTMLButtonElement | HTMLInputElement => control.matches('button,input:not([type="hidden"])'))
         .forEach((control) => {
           if (control.dataset.olympusOriginallyDisabled === undefined) {
             control.dataset.olympusOriginallyDisabled = control.disabled ? 'true' : 'false';
@@ -326,6 +473,10 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
   function controlParams(form: HTMLFormElement): OlympusDashboardControlParams | undefined {
     if (form.hasAttribute('data-model-check')) return { action: 'check_model_setup' };
     const body = formRecord(form);
+    if (form.hasAttribute('data-local-models-discover')) return { action: 'discover_local_models', base_url: body.base_url ?? '' };
+    if (form.hasAttribute('data-local-models-test')) return { action: 'save_local_answer_model', base_url: body.base_url ?? '', answer_model: body.answer_model ?? '' };
+    if (form.hasAttribute('data-computer-use')) return { action: 'set_computer_use', choice: (form.hasAttribute('data-server-mode') ? body.server === 'on' : body.choice === 'server') ? 'server' : 'everyday' };
+    if (form.hasAttribute('data-first-run-privacy')) return { action: 'save_first_run_privacy', choice: body.choice ?? '' };
     const connect = form.dataset.connectKind;
     if (connect === 'oauth') {
       return {
@@ -333,6 +484,8 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
         source: body.source as Extract<OlympusDashboardControlParams, { action: 'start_oauth' }>['source'],
         ...(body.client_id ? { client_id: body.client_id } : {}),
         ...(body.client_secret ? { client_secret: body.client_secret } : {}),
+        ...(body.google_desktop === 'true' ? { google_desktop: true } : {}),
+        ...(uploadedClientFiles.has(form) ? { google_client_json: uploadedClientFiles.get(form)! } : {}),
       };
     }
     if (connect === 'this_computer') {
@@ -412,7 +565,14 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
       closeAuthorizationTab(authorizationTab);
       return;
     }
-    if (params.action === 'start_oauth') clearAuthorizationFallback(form);
+    if (params.action === 'start_oauth') {
+      clearAuthorizationFallback(form);
+      uploadedClientFiles.delete(form);
+    }
+    if (firstRunChoice && ['check_model_setup', 'save_local_answer_model', 'connect_api_key'].includes(params.action)) {
+      firstRunCheckRequested = false;
+      firstRunResult('Check readiness after Olympus applies your changes.');
+    }
     // A form that words its own wait ("Checking Dropbox…") says that instead.
     setFormPending(form, true, form.dataset.pendingMessage || pendingMessage(params));
     let result: OlympusDashboardControlResult;
@@ -431,6 +591,7 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
     }
     if (result.status === 401 || result.status === 403) {
       closeAuthorizationTab(authorizationTab);
+      if (result.status === 403 && errorCode(result) === 'mac_dashboard_only') { askLocalUnlock(form); return; }
       if (options.authority === 'worker-session') {
         csrfToken = '';
         say(form, 'The control session expired — open dashboard controls again, then try again.');
@@ -444,7 +605,45 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
     const authorizationUrl = result.body.authorization_url;
     if (result.status < 200 || result.status >= 300 || result.body.ok !== true) {
       closeAuthorizationTab(authorizationTab);
-      say(form, errorMessage(result));
+      const message = errorMessage(result);
+      say(form, message);
+      showSetupFailure(form, message);
+      return;
+    }
+    if (params.action === 'discover_local_models') {
+      renderDiscoveredModels(form, result.body.results);
+      return;
+    }
+    if (params.action === 'save_first_run_privacy' && form.closest('[data-first-run-sheet]')) {
+      firstRunChoice = params.choice;
+      releaseSubmittedForm(form, submittedValues);
+      form.querySelectorAll<HTMLInputElement | HTMLButtonElement>('input,button').forEach(control => { control.disabled = true; });
+      const venice = query<HTMLElement>('[data-first-run-venice]');
+      const local = query<HTMLElement>('[data-first-run-local]');
+      if (venice) venice.hidden = !['local-first', 'private-cloud-only'].includes(params.choice);
+      if (local) local.hidden = params.choice !== 'local-only';
+      const help = query<HTMLElement>('[data-first-run-venice-help]');
+      if (help) help.textContent = params.choice === 'local-first'
+        ? 'Optional: add a key for Venice fallback, or continue with the built-in model on this computer.'
+        : 'Add your Venice key in the existing field below, then return here to check readiness.';
+      const steps = form.closest<HTMLElement>('[data-setup-steps]');
+      if (steps) showSetupStep(steps, params.choice === 'no-sensitive' ? 2 : 1);
+      return;
+    }
+    if (params.action === 'check_model_setup' && form.closest('[data-first-run-sheet]')) {
+      firstRunCheckRequested = true;
+      say(form, 'Readiness check requested.');
+      firstRunResult('Checking readiness…');
+      await readFirstRunReadiness();
+      return;
+    }
+    if (params.action === 'test_local_models') {
+      const checked = result.body.result;
+      if (checked && typeof checked === 'object' && !Array.isArray(checked)) {
+        const detail = checked as Record<string, unknown>;
+        say(form, detail.working === true ? 'Working. Synthetic checks passed. Your configured models have not changed.'
+          : `${typeof detail.step === 'string' ? detail.step : 'Model'}: ${typeof detail.detail === 'string' ? detail.detail : 'The model check failed.'}`);
+      } else say(form, 'The local model check did not return a result.');
       return;
     }
     if (typeof authorizationUrl === 'string' && authorizationUrl.startsWith('https://')) {
@@ -470,12 +669,16 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
       return;
     }
     closeAuthorizationTab(authorizationTab);
+    if (firstRunChoice && (params.action === 'save_local_answer_model' || params.action === 'connect_api_key')) {
+      firstRunCheckRequested = false;
+      firstRunResult('Saved. Check readiness after Olympus applies the change.');
+    }
     const statusMessage = result.body.status_message;
     const released = releaseSubmittedForm(form, submittedValues);
     if (released && params.action === 'connect_api_key') {
       form.dataset.keyAccepted = 'true';
       form.querySelectorAll<HTMLInputElement>('input[name="api_key"]').forEach((input) => { input.value = ''; input.hidden = true; });
-      form.querySelectorAll<HTMLButtonElement>('button[type="submit"],button:not([type])').forEach((button) => {
+      Array.from(form.elements).filter((control): control is HTMLButtonElement => control.matches('button[type="submit"],button:not([type])')).forEach((button) => {
         button.textContent = params.source === 'readwise' ? 'Connected' : 'Key saved';
       });
       applyWriteCapability();
@@ -489,6 +692,65 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
     // read is not deferred by the owner's own finished form. Unrelated unsaved
     // input still defers it: `refreshNow` keeps those guards.
     await refreshNow(false, released);
+    // Checking changes nothing on a page whose models are already ready, and a redraw clears the line the form just said:
+    // the owner must still see that the check ran.
+    if (params.action === 'check_model_setup' && !disposed) {
+      const again = query<HTMLFormElement>('form[data-model-check]');
+      if (again && !again.querySelector('[data-action-message]')?.textContent) say(again, 'Checked just now.');
+    }
+  }
+
+  function renderDiscoveredModels(form: HTMLFormElement, value: unknown): void {
+    const sheet = form.closest('.sheet');
+    const output = sheet?.querySelector<HTMLElement>('[data-local-models-results]');
+    const testForm = sheet?.querySelector<HTMLFormElement>('[data-local-models-test]');
+    if (!output || !testForm) return;
+    output.replaceChildren();
+    testForm.hidden = true;
+    const results = Array.isArray(value) ? value : [];
+    if (!results.length) { say(form, 'No model servers were found. Start an existing server or enter its loopback URL.'); return; }
+    let selected = false;
+    results.forEach(result => {
+      if (!result || typeof result !== 'object' || Array.isArray(result)) return;
+      const item = result as Record<string, unknown>;
+      const row = document.createElement('div');
+      const description = document.createElement('p');
+      description.textContent = `${typeof item.provider === 'string' ? item.provider : 'Local server'}: ${typeof item.detail === 'string' ? item.detail : 'No result'}`;
+      row.append(description);
+      const models = Array.isArray(item.models) ? item.models.filter(model => model && typeof model === 'object' && !Array.isArray(model) && typeof model.id === 'string') : [];
+      models.filter(model => model.allowed !== true).forEach(model => {
+        const notice = document.createElement('p');
+        notice.textContent = `${model.id}: ${typeof model.reason === 'string' ? model.reason : 'Cannot be used as a local model.'}`;
+        row.append(notice);
+      });
+      const allowed = models.filter(model => model.allowed === true);
+      if (item.working === true && allowed.length && typeof item.baseUrl === 'string') {
+        const choose = (): void => {
+          const endpoint = testForm.querySelector<HTMLInputElement>('input[name="base_url"]');
+          if (endpoint) endpoint.value = item.baseUrl as string;
+          testForm.querySelectorAll<HTMLSelectElement>('select').forEach(select => {
+            select.replaceChildren();
+            allowed.forEach(model => {
+              const option = document.createElement('option');
+              option.value = model.id;
+              option.textContent = model.id;
+              select.append(option);
+            });
+          });
+          testForm.hidden = false;
+          say(testForm, `Using ${item.baseUrl}. Choose an answer model, then test.`);
+        };
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'btn';
+        button.textContent = `Use ${item.baseUrl}`;
+        button.addEventListener('click', choose);
+        row.append(button);
+        if (!selected) { choose(); selected = true; }
+      }
+      output.append(row);
+    });
+    say(form, selected ? 'Server detected. Select an answer model below.' : 'No usable local models found. Olympus does not download models.');
   }
 
   /**
@@ -502,8 +764,10 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
     if (kind === 'pair') return { action: 'mint_agent_pairing_code' };
     if (kind === 'key') {
       // The agent chosen on Connect an agent sets who hosts the connection.
-      const agent = form.closest<HTMLElement>('[data-agent]')?.dataset.agent;
-      return { action: 'create_agent_key', name: formRecord(form).name || '', ...(agent ? { agent } : {}) };
+      const route = form.dataset.privateRoute;
+      const privateRoute = route === 'loopback' || route === 'tailnet' ? route : undefined;
+      const agent = privateRoute ? 'other' : form.closest<HTMLElement>('[data-agent]')?.dataset.agent;
+      return { action: 'create_agent_key', name: formRecord(form).name || '', ...(agent ? { agent } : {}), ...(privateRoute ? { route: privateRoute } : {}) };
     }
     if (kind === 'revoke') return { action: 'revoke_agent_connection', connection_id: formRecord(form).connection_id || '' };
     if (kind === 'remote-on') return { action: 'set_remote_access', enabled: true };
@@ -557,12 +821,17 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
     }
   }
 
-  function showAgentSecret(form: HTMLFormElement, value: string, note: string): void {
+  function showAgentSecret(form: HTMLFormElement, value: string, note: string, mcpUrl?: string): void {
     const holder = form.closest('[data-agent-step]') || form.parentElement || form;
     const slot = holder.querySelector<HTMLElement>('[data-agent-secret-slot]');
     const field = slot?.querySelector<HTMLInputElement>('[data-agent-secret]');
     if (!slot || !field) return;
     field.value = value;
+    slot.querySelectorAll<HTMLInputElement>('[data-agent-setup]').forEach(setup => {
+      setup.value = mcpUrl
+        ? `Connect Olympus to ${setup.dataset.agentSetup}. Add a remote MCP server named olympus with URL ${mcpUrl} and header Authorization: Bearer ${value}. Keep this key private. Confirm that Olympus tools are available.`
+        : '';
+    });
     const noteSlot = slot.querySelector('[data-agent-secret-note]');
     if (noteSlot) noteSlot.textContent = note;
     slot.hidden = false;
@@ -665,7 +934,8 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
     }
     if (params.action === 'create_agent_key' && typeof result.body.token === 'string') {
       say(form, '');
-      showAgentSecret(form, result.body.token, 'Copy it now. Olympus keeps only a fingerprint of this key and cannot show it again.');
+      showAgentSecret(form, result.body.token, 'Copy it now. Olympus keeps only a fingerprint of this key and cannot show it again. Each setup line includes this key; keep it private.',
+        typeof result.body.mcp_url === 'string' ? result.body.mcp_url : undefined);
       await refreshAgentList();
       return;
     }
@@ -751,7 +1021,7 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
     });
     for (const id of openSheets) {
       const sheet = queryAll<HTMLElement>('.sheet').find((candidate) => candidate.id === id);
-      sheet?.classList.add('on');
+      if (sheet) setSheetOpen(sheet, true);
       queryAll<HTMLElement>('[data-sheet-toggle]').filter((toggle) => toggle.dataset.sheetToggle === `#${id}`).forEach((toggle) => toggle.setAttribute('aria-expanded', 'true'));
     }
     const wait = authorizationWait;
@@ -771,15 +1041,23 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
     pollIntervalMs = result.poll_interval_ms;
     deferredSince = 0;
     applyWriteCapability();
+    resumeMessaging();
   }
 
   async function refreshNow(force: boolean, requested = false): Promise<void> {
     if (disposed || inFlight || pendingFormCount > 0 || options.signal.aborted) return;
+    if (firstRunChoice) {
+      // Read authoritative readiness while leaving the active walkthrough and
+      // any typed key/model fields in place, even during worker activation.
+      inFlight = true;
+      try { await readFirstRunReadiness(); } finally { inFlight = false; }
+      return;
+    }
     if (redrawOwed) { redrawOwed = false; force = true; }
     if (!force && !presented) return;
     const ownerDocument = root.ownerDocument;
     if (!force && !requested && ownerDocument.visibilityState === 'hidden') return;
-    if (!force && query('.sheet.on input:not([type="hidden"]),.sheet.on textarea,.sheet.on select')) return;
+    if (!force && (query('[data-messaging-input] input,[data-messaging-chats] input') || messagingTimers.size > 0 || query('.sheet.on input:not([type="hidden"]),.sheet.on textarea,.sheet.on select'))) return;
     // The owner is reading the agreement: a poll must not close it under them.
     if (!force && query('[data-remote-terms]:not([hidden])')) return;
     // A typed secret or folder query is the only copy of the user's work and
@@ -793,6 +1071,8 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
     try {
       const result = await options.refresh();
       if (!result || disposed || options.signal.aborted) return;
+      // A choice may have saved while this earlier poll was in flight.
+      if (firstRunChoice) return;
       if (!force && (hasDirtyInput() || hasFocusedControl())) {
         canWrite = result.can_write;
         applyWriteCapability();
@@ -826,9 +1106,261 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
       : undefined;
   }
 
+  options.signal.addEventListener('abort', () => {
+    messagingTimers.forEach(timer => clearTimeout(timer));
+    messagingTimers.clear();
+    queryAll<HTMLInputElement>('[data-messaging-input] input').forEach(input => { input.value = ''; });
+    queryAll<HTMLImageElement>('[data-messaging-qr]').forEach(qr => { qr.removeAttribute('src'); qr.hidden = true; });
+  }, { once: true });
+  const messagingTimers = new Map<HTMLElement, ReturnType<typeof setTimeout>>();
+  const messagingBusy = new WeakSet<HTMLElement>();
+  const messagingQueued = new Map<HTMLElement, () => void>();
+  const messagingSeen = new Set<string>();
+  // Cards whose last answer was a pairing still running, and how many status
+  // reads in a row have failed since.
+  const messagingActive = new WeakSet<HTMLElement>();
+  const messagingMisses = new Map<HTMLElement, number>();
+  const PAIRING_ACTIVE = (state: string): boolean => state !== '' && !['paired', 'complete', 'completed', 'failed', 'cancelled', 'idle', 'not_paired', 'scope_selection_required'].includes(state);
+  const stillWorkingWords = (source: string): string => source === 'whatsapp'
+    ? 'Still preparing WhatsApp on this computer. The first time can take about a minute.'
+    : 'Still working on this computer…';
+  /** Schedules the next status read with backoff when a pairing was running; false when it was not. */
+  function keepPolling(card: HTMLElement): boolean {
+    if (!messagingActive.has(card)) return false;
+    const misses = (messagingMisses.get(card) ?? 0) + 1;
+    // About ten minutes of failed reads, the bridge build's own limit, then the error stands.
+    if (misses > 60) { messagingMisses.delete(card); messagingActive.delete(card); return false; }
+    messagingMisses.set(card, misses);
+    const delay = Math.min(10_000, 1_200 * 2 ** Math.min(misses - 1, 3));
+    messagingTimers.set(card, setTimeout(() => { messagingTimers.delete(card); void messagingRequest(card, 'status'); }, delay));
+    return true;
+  }
+
+  function resumeMessaging(): void {
+    messagingTimers.forEach((timer, card) => { if (!card.isConnected) { clearTimeout(timer); messagingTimers.delete(card); } });
+    // A card showing "Open controls on this computer" has no pairing controls: this session cannot use the routes, so it must not ask them.
+    queryAll<HTMLElement>('[data-messaging-source]').forEach(card => { if (!card.querySelector('[data-messaging-open-controls]')) void messagingRequest(card, 'status'); });
+  }
+
+  async function messagingRequest(card: HTMLElement, operation: 'start' | 'status' | 'respond' | 'cancel' | 'scope' | 'chats', extra: { field?: string; value?: string; wholeAccount?: boolean; chatScopes?: string[] } = {}): Promise<void> {
+    if (!canWrite || disposed || !options.transport.messaging) return;
+    if (messagingBusy.has(card)) {
+      // A status poll is in flight: run the user's action right after it instead of dropping it.
+      if (operation !== 'status') messagingQueued.set(card, () => { void messagingRequest(card, operation, extra); });
+      return;
+    }
+    const source = card.dataset.messagingSource;
+    if (source !== 'telegram' && source !== 'whatsapp') return;
+    if (card.querySelector('[data-messaging-open-controls]')) return;
+    const timer = messagingTimers.get(card);
+    if (timer) clearTimeout(timer);
+    messagingTimers.delete(card);
+    messagingBusy.add(card);
+    const status = card.querySelector<HTMLElement>('[data-messaging-status]');
+    if (status && operation !== 'status') status.textContent = 'Working…';
+    try {
+      const params = { source: source as 'telegram' | 'whatsapp', ...extra };
+      let result: OlympusDashboardControlResult;
+      try {
+        result = await options.transport.messaging(operation, params);
+        // Authentication rejects the request before the pairing handler runs.
+        // Renew only for a gesture, once, so the first press after an idle tab works.
+        if (operation !== 'status' && (result.status === 401 || result.status === 403)
+          && options.transport.openLocalControls && await options.transport.openLocalControls()) {
+          result = await options.transport.messaging(operation, params);
+        }
+      }
+      finally { delete params.value; delete extra.value; }
+      if (disposed || !card.isConnected) return;
+      const body = result.body;
+      const inputSlot = card.querySelector<HTMLElement>('[data-messaging-input]');
+      const qr = card.querySelector<HTMLImageElement>('[data-messaging-qr]');
+      if (result.status < 200 || result.status >= 300 || body.ok === false) {
+        // A status read can fail while the computer is busy (the first
+        // WhatsApp pairing builds its helper for about a minute). The pairing
+        // itself is still running, so keep asking, more slowly, and say so;
+        // only the pairing's own failed state is an error.
+        if (operation === 'status' && result.status !== 401 && result.status !== 403 && keepPolling(card)) {
+          if (status) status.textContent = stillWorkingWords(source);
+          return;
+        }
+        if (status) status.textContent = result.status === 401 || result.status === 403 ? 'Open dashboard controls on this computer to use this, then try again.' : 'Could not complete this step. Try again from this computer.';
+        if (qr) { qr.hidden = true; qr.removeAttribute('src'); }
+        if (inputSlot) inputSlot.replaceChildren();
+        return;
+      }
+      const state = typeof body.state === 'string' ? body.state : '';
+      messagingMisses.delete(card);
+      if (PAIRING_ACTIVE(state)) messagingActive.add(card); else messagingActive.delete(card);
+      if (['paired', 'complete', 'completed'].includes(state)) {
+        const row = card.querySelector('.actionrow');
+        // A card rendered paired already has its own Check connection form; its start form stays "Pair again".
+        const hasStatus = !!row?.querySelector('form[data-messaging-kind="status"]');
+        const start = hasStatus ? null : row?.querySelector<HTMLFormElement>('form[data-messaging-kind="start"]');
+        if (start) { start.dataset.messagingKind = 'status'; const button = start.querySelector('button'); if (button) { button.textContent = 'Check connection'; button.classList.remove('primary'); } }
+        const toggle = hasStatus ? null : row?.querySelector<HTMLButtonElement>('[data-sheet-toggle="#telegram-setup"]');
+        if (toggle) { const form = document.createElement('form'); form.method = 'dialog'; form.dataset.messagingKind = 'status'; toggle.removeAttribute('data-sheet-toggle'); toggle.textContent = 'Check connection'; toggle.type = 'submit'; toggle.classList.remove('primary'); toggle.replaceWith(form); form.append(toggle); }
+        row?.querySelector('[data-messaging-kind="chats"] button')?.classList.add('primary');
+        const chats = row?.querySelector('[data-messaging-kind="chats"]');
+        if (chats) row?.prepend(chats);
+        if (!card.querySelector('[data-messaging-account]')) { const account = document.createElement('p'); account.dataset.messagingAccount = ''; account.textContent = source === 'whatsapp' ? 'Your linked WhatsApp account' : 'Your linked Telegram account'; row?.before(account); }
+      }
+
+      const field = typeof body.field === 'string' ? body.field : '';
+      const labels: Record<string, string> = { api_id: 'Telegram API ID', api_hash: 'Telegram API hash', phone: 'Phone number (with country code)', code: 'Telegram login code', password: 'Telegram two-step verification password' };
+      const label = labels[field];
+      const restoring = operation === 'status' && !messagingSeen.has(source);
+      messagingSeen.add(source);
+      const setupSheet = card.querySelector<HTMLElement>('[data-messaging-setup]');
+      if (setupSheet) {
+        const intro = setupSheet.querySelector<HTMLElement>('[data-messaging-setup-intro]');
+        const active = !['idle', 'failed', 'cancelled', 'completed', 'complete', 'paired', 'not_paired'].includes(state);
+        if (intro) intro.hidden = active || state === 'failed';
+        const cancel = setupSheet.querySelector<HTMLElement>('[data-messaging-kind="cancel"]');
+        if (cancel) cancel.hidden = !active;
+        if (operation !== 'status' || (restoring && (active || state === 'failed'))) {
+          queryAll<HTMLElement>('.sheet.on').forEach(other => { if (other !== setupSheet) setSheetOpen(other, false); });
+          setSheetOpen(setupSheet, true);
+        }
+        setupSheet.querySelector('[data-pairing-error]')?.remove();
+        if (state === 'failed') {
+          const error = document.createElement('div'); error.dataset.pairingError = '';
+          const details = document.createElement('details'); details.className = 'howto';
+          const summary = document.createElement('summary'); summary.textContent = 'How to fix';
+          const hint = document.createElement('p'); hint.textContent = source === 'whatsapp'
+            ? (body.reason === 'bridge_build_tools_missing' ? 'This install has no ready WhatsApp helper, and this computer has no Go and C compiler to build one. Reinstall Olympus with the installer from olympusplugin.ai, which includes the helper, then pair again.'
+              : body.reason === 'bridge_build_failed' ? 'Olympus could not build its WhatsApp helper on this computer. Reinstall Olympus with the installer from olympusplugin.ai, which includes the helper, then pair again.'
+              : body.unlinked === 'removed' ? 'Olympus removed itself from your phone\'s linked devices, so there is nothing to clean up. Pair again; if it fails again, press Copy details and send what it copies to support.'
+              : body.unlinked === 'offline' || body.unlinked === 'failed' ? 'Olympus could not remove itself from your phone. Remove the Olympus entry in WhatsApp → Settings → Linked devices, then pair again. If it fails again, press Copy details and send what it copies to support.'
+                : 'Pair again. If it fails again, press Copy details and send what it copies to support.')
+            : 'Check api_id and api_hash at my.telegram.org/apps. Enter the latest code from Telegram and your two-step verification password if asked. Then try pairing again.';
+          details.append(summary, hint);
+          const retry = document.createElement('button'); retry.type = 'button'; retry.className = 'btn'; retry.dataset.messagingRetry = ''; retry.textContent = 'Back to setup';
+          error.append(details, retry);
+          // What support needs instead of a Terminal command: fixed codes, version and OS only (built by the engine).
+          if (typeof body.details === 'string' && body.details) {
+            const report = document.createElement('div'); report.className = 'promptbox'; report.id = `pairing-details-${source}`; report.textContent = body.details;
+            const copy = document.createElement('button'); copy.type = 'button'; copy.className = 'btn'; copy.dataset.copyTarget = `#${report.id}`; copy.textContent = 'Copy details';
+            const said = document.createElement('span'); said.dataset.copyStatus = ''; said.setAttribute('aria-live', 'polite');
+            const note = document.createElement('p'); note.textContent = 'Nothing from your account: no names, numbers or chats.';
+            const row = document.createElement('div'); row.append(copy, said);
+            error.append(report, note, row);
+          }
+          setupSheet.append(error);
+        }
+      }
+      // Cancel pairing is offered only while a pairing is running, including while it waits for the chat choice; at any other time it would do nothing.
+      const cardCancel = card.querySelector<HTMLElement>('.actionrow [data-messaging-kind="cancel"]');
+      if (cardCancel) cardCancel.hidden = ['idle', 'failed', 'cancelled', 'completed', 'complete', 'paired', 'not_paired'].includes(state);
+      if (status) status.textContent = label ? `Enter ${label.toLowerCase()} to continue.` : state === 'failed' ? (body.registrationMayBeSaved === true ? 'Pairing could not finish. The connection may already be saved; check connection and capture status before retrying.' : 'Pairing failed. Start pairing again to retry.') + (typeof body.reason === 'string' && /^[a-z0-9_]{1,64}$/.test(body.reason) ? ` (${body.reason})` : '') : state === 'not_paired' ? 'Not paired yet. Pair this account first, then choose the chats Olympus may read.' : state === 'idle' ? 'Pair this account to choose the chats Olympus may read.' : state === 'scope_selection_required' ? 'Paired. Nothing is being captured. Choose what Olympus may read.' : state === 'committing' ? 'Saving the connection and chat permission…' : state === 'paired' || state === 'complete' || state === 'completed' ? 'Pairing completed. Manage chat choices below; check current connection and sync status on the main dashboard.' : state === 'cancelled' ? (source === 'whatsapp'
+        ? (body.unlinked === 'removed' ? 'Setup cancelled. Capture permission was not changed, and Olympus removed itself from your phone\'s linked devices.'
+          : body.unlinked === 'offline' || body.unlinked === 'failed' ? 'Setup cancelled. Capture permission was not changed. Olympus could not remove itself from your phone: remove Olympus in WhatsApp linked devices.'
+            : 'Setup cancelled. Capture permission was not changed. If your phone linked Olympus, Olympus removes it from WhatsApp linked devices.')
+        : 'Setup cancelled. Capture permission was not changed. If you linked a new device, remove Olympus in Telegram active sessions to unlink it.') : operation === 'scope' ? 'Chat choices saved. Capture will use this selection.' : operation === 'chats' ? 'Choose the chats Olympus may read.' : source === 'whatsapp' ? (body.linked === true ? 'Linked. Reading your chat list from WhatsApp; this can take a minute…' : typeof body.qr === 'string' && body.qr ? 'Open WhatsApp → Settings → Linked devices and scan the QR code.' : 'Preparing WhatsApp. The first time can take about a minute.') : 'Pairing is running on this computer…';
+      if (qr) {
+        const value = typeof body.qr === 'string' ? body.qr : '';
+        // Only the local helper's raster QR image is displayed; no external requests or SVG markup.
+        if (/^data:image\/(?:png|jpeg|webp);base64,[A-Za-z0-9+/=]+$/.test(value)) { qr.src = value; qr.hidden = false; }
+        else { qr.hidden = true; qr.removeAttribute('src'); }
+      }
+      if (inputSlot && inputSlot.dataset.field !== field) {
+        inputSlot.replaceChildren();
+        inputSlot.dataset.field = field;
+        if (label) {
+          const form = document.createElement('form'); form.method = 'dialog'; form.dataset.messagingKind = 'respond'; form.dataset.field = field;
+          const wrapper = document.createElement('label'); wrapper.textContent = label + ' ';
+          const input = document.createElement('input'); input.name = 'value'; input.required = true; input.type = field === 'phone' || field === 'api_id' ? 'text' : 'password'; input.autocomplete = 'off'; input.setAttribute('autocapitalize', 'off'); input.spellcheck = false;
+          wrapper.append(input); form.append(wrapper);
+          const button = document.createElement('button'); button.type = 'submit'; button.textContent = 'Continue'; button.className = 'btn'; form.append(button); inputSlot.append(form); input.focus();
+        }
+      }
+      const choosingScope = state === 'scope_selection_required';
+      const chatSlot = card.querySelector<HTMLElement>('[data-messaging-chats]');
+      if (!choosingScope && chatSlot?.dataset.pendingChoice === 'true') chatSlot.replaceChildren();
+      if (chatSlot) { chatSlot.dataset.pendingChoice = String(choosingScope); chatSlot.classList.toggle('messagingchoices', choosingScope); }
+      if (Array.isArray(body.chats) && typeof body.wholeAccount === 'boolean' && Array.isArray(body.chatScopes)) {
+        const slot = card.querySelector<HTMLElement>('[data-messaging-chats]');
+        if (slot) {
+          slot.replaceChildren();
+          const form = document.createElement('form'); form.method = 'dialog'; form.dataset.messagingKind = 'scope';
+          if (!choosingScope) {
+            const allLabel = document.createElement('label'); const all = document.createElement('input'); all.type = 'checkbox'; all.name = 'wholeAccount'; all.checked = body.wholeAccount === true; allLabel.append(all, ' Read all chats, including new chats'); form.append(allLabel);
+          }
+          const selected = Array.isArray(body.chatScopes) ? body.chatScopes : [];
+          for (const entry of body.chats) {
+            if (!entry || typeof entry !== 'object') continue;
+            const chat = entry as Record<string, unknown>;
+            if (typeof chat.chatScope !== 'string' || typeof chat.title !== 'string') continue;
+            const line = document.createElement('label'); line.style.display = 'block'; const check = document.createElement('input'); check.type = 'checkbox'; check.name = 'chatScope'; check.value = chat.chatScope; check.checked = selected.includes(chat.chatScope); line.append(check, ' ' + chat.title); form.append(line);
+          }
+          const button = document.createElement('button'); button.type = 'submit'; button.className = 'btn'; button.textContent = choosingScope ? 'Read selected chats' : 'Save chat choices'; form.append(button);
+          if (choosingScope) {
+            const pick = document.createElement('details');
+            const summary = document.createElement('summary'); summary.className = 'btn primary'; summary.textContent = 'Pick chats (recommended)'; pick.append(summary, form); slot.append(pick);
+            if (!body.chats.length) { const empty = document.createElement('p'); empty.textContent = 'No chats are available to select yet. You can cancel and try pairing again later.'; form.prepend(empty); button.disabled = true; }
+            const allForm = document.createElement('form'); allForm.method = 'dialog'; allForm.dataset.messagingKind = 'scope';
+            const all = document.createElement('input'); all.type = 'checkbox'; all.name = 'wholeAccount'; all.checked = true; all.hidden = true;
+            const allButton = document.createElement('button'); allButton.type = 'submit'; allButton.className = 'btn'; allButton.textContent = 'Everything in this account';
+            const explanation = document.createElement('p'); explanation.className = 'hint'; explanation.textContent = 'Allow Olympus to read every chat, including new chats.';
+            allForm.append(all, allButton); slot.append(allForm, explanation);
+          } else slot.append(form);
+        }
+      }
+      if ((state === 'cancelled' && body.cleaning === true) || (operation !== 'chats' && (operation !== 'cancel' || state === 'committing') && !['paired', 'complete', 'completed', 'failed', 'cancelled', 'idle', 'not_paired', 'scope_selection_required'].includes(state))) {
+        messagingTimers.set(card, setTimeout(() => { messagingTimers.delete(card); void messagingRequest(card, 'status'); }, 1200));
+      }
+    } catch {
+      if (operation === 'status' && keepPolling(card)) {
+        if (status) status.textContent = stillWorkingWords(source);
+      } else if (status) status.textContent = 'Could not reach pairing on this computer. Try again.';
+    } finally {
+      messagingBusy.delete(card);
+      const queued = messagingQueued.get(card);
+      messagingQueued.delete(card);
+      if (queued && !disposed) queued();
+    }
+  }
+
+  function submitMessaging(form: HTMLFormElement): void {
+    const card = form.closest<HTMLElement>('[data-messaging-source]');
+    const kind = form.dataset.messagingKind;
+    if (!card) return;
+    if (kind === 'respond') {
+      const input = form.querySelector<HTMLInputElement>('input[name="value"]');
+      if (!input) return;
+      const value = input.value; input.value = '';
+      void messagingRequest(card, 'respond', { ...(form.dataset.field ? { field: form.dataset.field } : {}), value });
+    } else if (kind === 'scope') {
+      const wholeAccount = form.querySelector<HTMLInputElement>('[name="wholeAccount"]')?.checked === true;
+      void messagingRequest(card, 'scope', { wholeAccount, chatScopes: wholeAccount ? [] : Array.from(form.querySelectorAll<HTMLInputElement>('[name="chatScope"]:checked')).map(input => input.value) });
+    } else if (kind === 'start' || kind === 'chats' || kind === 'cancel' || kind === 'status') void messagingRequest(card, kind);
+  }
+
+  async function openMessagingControls(form: HTMLFormElement): Promise<void> {
+    if (pendingForms.has(form)) return;
+    if (!options.transport.openLocalControls) { say(form, 'Open this dashboard in a browser on this computer.'); return; }
+    pendingForms.add(form);
+    say(form, 'Opening controls…');
+    try {
+      if (await options.transport.openLocalControls()) options.navigate(options.returnUrl);
+      else say(form, 'Could not open controls. Open this dashboard in a browser on this computer and try again.');
+    } catch { say(form, 'Could not open controls. Open this dashboard in a browser on this computer and try again.'); }
+    finally { pendingForms.delete(form); }
+  }
+
   function onSubmit(event: Event): void {
     const form = event.target instanceof HTMLFormElement ? event.target : null;
     if (!form || !root.contains(form)) return;
+    if (form.hasAttribute('data-messaging-open-controls')) {
+      event.preventDefault();
+      void openMessagingControls(form);
+      return;
+    }
+    if (form.hasAttribute('data-messaging-kind')) {
+      event.preventDefault();
+      submitMessaging(form);
+      return;
+    }
     if (form.hasAttribute('data-control-session-kind')) {
       event.preventDefault();
       if (form.dataset.controlSessionKind === 'lock') void lock(form);
@@ -841,7 +1373,7 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
       return;
     }
     if (!form.matches(
-      '[data-connect-kind],[data-model-check]',
+      '[data-connect-kind],[data-model-check],[data-first-run-privacy],[data-computer-use],[data-local-models-discover],[data-local-models-test]',
     )) return;
     event.preventDefault();
     // Every control form records what it submitted: the answer may only
@@ -852,9 +1384,167 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
     void submitControl(form, tab, submittedValues);
   }
 
+  function showSetupFailure(form: HTMLFormElement, message: string): void {
+      const setup = form.closest<HTMLElement>('[data-setup-steps]');
+      const step = message.includes('Redo the Set up your account step') ? 0 : message.includes('Redo the Create an API key step') ? 1 : -1;
+      if (setup && form.querySelector('[data-client-file-drop]')) {
+        const panels = Array.from(setup.querySelectorAll<HTMLElement>('[data-setup-panel]'));
+        showSetupStep(setup, panels.length - 1);
+        const error = document.createElement('div'); error.dataset.setupError = '';
+        const banner = document.createElement('p'); banner.className = 'why'; banner.setAttribute('role', 'alert'); banner.textContent = message;
+        const details = document.createElement('details'); details.className = 'howto';
+        const summary = document.createElement('summary'); summary.textContent = 'How to fix';
+        const hint = document.createElement('p'); hint.textContent = 'Check the app settings in Google Cloud, then choose the Desktop app file again or paste the ID and secret.';
+        details.append(summary, hint); error.append(banner, details);
+        form.querySelector('[data-client-file-drop]')!.after(error);
+        return;
+      }
+      if (setup) {
+        const panels = Array.from(setup.querySelectorAll<HTMLElement>('[data-setup-panel]'));
+        const current = panels.findIndex(panel => !panel.hidden);
+        panels.forEach(panel => { panel.hidden = true; });
+        const actions = setup.querySelector<HTMLElement>('[data-setup-actions]');
+        if (actions) actions.hidden = true;
+        setup.querySelector('[data-setup-error]')?.remove();
+        const error = document.createElement('div');
+        error.dataset.setupError = '';
+        const banner = document.createElement('p');
+        banner.className = 'why'; banner.setAttribute('role', 'alert'); banner.textContent = message;
+        const retry = document.createElement('button');
+        retry.type = 'button'; retry.className = 'btn'; retry.dataset.setupRetry = String(step >= 0 ? step : Math.max(0, current));
+        retry.textContent = step === 0 ? 'Go to account and credit' : step === 1 ? 'Go to API key' : 'Try again';
+        const details = document.createElement('details'); details.className = 'howto';
+        const summary = document.createElement('summary'); summary.textContent = 'How to fix';
+        const hint = document.createElement('p'); hint.textContent = 'Return to setup, check the app settings and add the key again. Your login code and password are never shown here.';
+        details.append(summary, hint); error.append(banner, details, retry); setup.append(error); retry.focus();
+      }
+  }
+
+  async function readClientFile(form: HTMLFormElement, file: File | undefined): Promise<void> {
+    const revision = form.querySelector<HTMLInputElement>('[name="client_file_revision"]');
+    const status = form.querySelector<HTMLElement>('[data-client-file-status]');
+    if (!revision || !status || !file) return;
+    uploadedClientFiles.delete(form);
+    try {
+      if (file.size > 64 * 1024) throw new Error();
+      const text = await file.text();
+      const app = JSON.parse(text)?.installed;
+      if (!app || typeof app.client_id !== 'string' || typeof app.client_secret !== 'string' || !app.client_id.endsWith('.apps.googleusercontent.com') || !app.client_secret.trim()) throw new Error();
+      uploadedClientFiles.set(form, text);
+      revision.value = String(Number(revision.value) + 1);
+      for (const field of Array.from(form.querySelectorAll<HTMLInputElement>('[name="client_id"], [name="client_secret"]'))) { field.value = ''; field.disabled = true; field.dataset.olympusOriginallyDisabled = 'true'; }
+      status.textContent = 'Desktop app file ready. Connect to check the key with Google.';
+    } catch {
+      status.textContent = '';
+      showSetupFailure(form, 'Choose the JSON downloaded for a Desktop app in Google Cloud Clients. Web app keys cannot use this flow.');
+      for (const field of Array.from(form.querySelectorAll<HTMLInputElement>('[name="client_id"], [name="client_secret"]'))) { field.disabled = false; field.dataset.olympusOriginallyDisabled = 'false'; }
+    }
+    const picker = form.querySelector<HTMLInputElement>('[data-client-file]');
+    if (picker) picker.value = '';
+  }
+
+  function onClientFileKeydown(event: Event): void {
+    const target = event.target instanceof HTMLElement ? event.target : null;
+    const key = (event as KeyboardEvent).key;
+    if (target?.matches('[data-client-file-drop]') && (key === 'Enter' || key === ' ')) {
+      event.preventDefault();
+      target.querySelector<HTMLInputElement>('[data-client-file]')?.click();
+    }
+  }
+
+  function onClientFileChange(event: Event): void {
+    const input = event.target instanceof HTMLInputElement ? event.target : null;
+    if (input?.matches('[data-client-file]') && input.form) void readClientFile(input.form, input.files?.[0]);
+  }
+  function onClientFileDrop(event: Event): void {
+    const zone = event.target instanceof Element ? event.target.closest('[data-client-file-drop]') : null;
+    if (!zone) return;
+    event.preventDefault();
+    const form = zone.closest('form');
+    if (form && event.type === 'drop') void readClientFile(form, (event as DragEvent).dataTransfer?.files[0]);
+  }
+
   function onClick(event: Event): void {
     const target = event.target instanceof Element ? event.target : null;
     if (!target || !root.contains(target)) return;
+    const fileZone = target.closest('[data-client-file-drop]');
+    if (fileZone && !target.matches('[data-client-file]')) {
+      fileZone.querySelector<HTMLInputElement>('[data-client-file]')?.click();
+      return;
+    }
+    const messagingRetry = target.closest('[data-messaging-retry]');
+    if (messagingRetry) {
+      const sheet = messagingRetry.closest('[data-messaging-setup]');
+      const intro = sheet?.querySelector<HTMLElement>('[data-messaging-setup-intro]');
+      if (intro) intro.hidden = false;
+      sheet?.querySelector('[data-pairing-error]')?.remove();
+      const status = sheet?.querySelector<HTMLElement>('[data-messaging-status]');
+      if (status) status.textContent = '';
+      return;
+    }
+    if (target.closest('[data-client-paste] summary')) {
+      const form = target.closest('form');
+      if (form) uploadedClientFiles.delete(form);
+      const fileStatus = form?.querySelector<HTMLElement>('[data-client-file-status]');
+      if (fileStatus) fileStatus.textContent = '';
+      form?.querySelectorAll<HTMLInputElement>('[name="client_id"], [name="client_secret"]').forEach(field => { field.disabled = false; field.dataset.olympusOriginallyDisabled = 'false'; });
+    }
+    const begin = target.closest('[data-setup-begin]');
+    if (begin) {
+      const sheet = begin.closest('.sheet');
+      const walkthrough = sheet?.querySelector<HTMLElement>('[data-setup-walkthrough]');
+      if (walkthrough) {
+        walkthrough.hidden = false;
+        const heading = walkthrough.querySelector<HTMLElement>('h2, h4');
+        if (heading) { heading.tabIndex = -1; heading.focus(); }
+      }
+      const choice = sheet?.querySelector<HTMLElement>('[data-setup-choice]');
+      if (choice) choice.hidden = true;
+      const sharedNote = sheet?.querySelector<HTMLElement>('[data-shared-app-note]');
+      if (sharedNote) sharedNote.hidden = true;
+      const lead = sheet?.querySelector<HTMLElement>('[data-setup-lead]');
+      if (lead) lead.hidden = true;
+      return;
+    }
+    if (target.closest('[data-first-run-done],[data-first-run-keys]')) {
+      firstRunChoice = undefined;
+      query('[data-first-run-sheet]')?.remove();
+      void refreshNow(false, true);
+      return;
+    }
+    if (target.closest('[data-first-run-redo]')) {
+      const steps = query<HTMLElement>('[data-first-run-sheet] [data-setup-steps]');
+      if (steps) showSetupStep(steps, 1);
+      return;
+    }
+    if (target.closest('[data-connect-retry]')) {
+      const sheet = target.closest('.sheet');
+      const error = sheet?.querySelector<HTMLElement>('[data-connect-error]');
+      const content = sheet?.querySelector<HTMLElement>('[data-connect-content]');
+      if (error) error.hidden = true;
+      if (content) {
+        content.hidden = false;
+        const steps = content.querySelector<HTMLElement>('[data-setup-steps]');
+        if (steps) showSetupStep(steps, 0);
+      }
+      return;
+    }
+    const setupOpen = target.closest<HTMLElement>('[data-setup-open]');
+    if (setupOpen) {
+      const url = setupOpen.dataset.setupOpen;
+      if (url && !openAuthorizationExternally(url)) window.open(url, '_blank', 'noopener,noreferrer');
+      return;
+    }
+    const setupControl = target.closest<HTMLElement>('[data-setup-next], [data-setup-back], [data-setup-retry]');
+    if (setupControl) {
+      const sheet = setupControl.closest<HTMLElement>('[data-setup-steps]');
+      if (!sheet) return;
+      const panels = Array.from(sheet.querySelectorAll<HTMLElement>(':scope > [data-setup-panel]'));
+      const current = panels.findIndex(panel => !panel.hidden);
+      const next = Math.max(0, Math.min(panels.length - 1, setupControl.hasAttribute('data-setup-retry') ? Number(setupControl.dataset.setupRetry) : current + (setupControl.hasAttribute('data-setup-next') ? 1 : -1)));
+      showSetupStep(sheet, next);
+      return;
+    }
     // A row's ⋯ menu closes when anything else is clicked, and after one of
     // its own items is chosen.
     const menu = target.closest('details.rowmenu');
@@ -887,7 +1577,7 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
       // Keep BYO forms and pending attempts for explicit input/review, and do
       // not create another attempt when this same panel is reopened.
       const form = sheet.querySelector<HTMLFormElement>('form[data-connect-kind="oauth"][data-oauth-autostart]');
-      if (open && form && (canWrite || csrfToken) && !startedFromSheet.has(form)
+      if (open && form && !form.closest('[hidden]') && (canWrite || csrfToken) && !startedFromSheet.has(form)
         && !form.hasAttribute('data-native-oauth-unavailable')) {
         startedFromSheet.add(form);
         form.requestSubmit();
@@ -994,6 +1684,7 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
       'connect.telegram': 'telegram.messages',
       'connect.whatsapp': 'whatsapp.personal.messages',
       'connect.evernote': 'evernote.notes',
+      'dropbox.permissions': 'dropbox.files',
     };
     let focus: HTMLElement | null = null;
     const sourceId = Object.prototype.hasOwnProperty.call(sources, wanted) ? sources[wanted] : undefined;
@@ -1006,6 +1697,19 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
         if (sheet) {
           queryAll<HTMLElement>('.sheet.on').forEach((other) => { if (other !== sheet) setSheetOpen(other, false); });
           setSheetOpen(sheet, true);
+          if (wanted === 'dropbox.permissions') {
+            const walkthrough = sheet.querySelector<HTMLElement>('[data-setup-steps]');
+            const panels = walkthrough ? Array.from(walkthrough.querySelectorAll<HTMLElement>('[data-setup-panel]')) : [];
+            if (walkthrough && panels.length > 2) {
+              const error = sheet.querySelector<HTMLElement>('[data-connect-error]');
+              const content = sheet.querySelector<HTMLElement>('[data-connect-content]');
+              if (error) error.hidden = true;
+              if (content) content.hidden = false;
+              showSetupStep(walkthrough, 2);
+              const disclosure = walkthrough.closest('details');
+              if (disclosure) disclosure.open = true;
+            }
+          }
           if (!sheet.hasAttribute('tabindex')) sheet.setAttribute('tabindex', '-1');
           focus = sheet;
         } else {
@@ -1032,6 +1736,10 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
 
   root.addEventListener('submit', onSubmit);
   root.addEventListener('click', onClick);
+  root.addEventListener('change', onClientFileChange);
+  root.addEventListener('keydown', onClientFileKeydown);
+  root.addEventListener('dragover', onClientFileDrop);
+  root.addEventListener('drop', onClientFileDrop);
   // Coming back from the approval browser or tab is the moment the exchange
   // may have just landed: one authoritative read, and only while this
   // controller still owes the owner an answer about a start it performed.
@@ -1052,15 +1760,24 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
   applyWriteCapability();
   applyOpenTarget();
   restartPoll();
+  resumeMessaging();
 
   const dispose = (): void => {
     if (disposed) return;
     disposed = true;
+    messagingTimers.forEach(timer => clearTimeout(timer));
+    messagingTimers.clear();
+    queryAll<HTMLInputElement>('[data-messaging-input] input').forEach(input => { input.value = ''; });
+    queryAll<HTMLImageElement>('[data-messaging-qr]').forEach(qr => { qr.removeAttribute('src'); qr.hidden = true; });
     if (interval) clearInterval(interval);
     view.removeEventListener('focus', refreshOnReturn);
     root.ownerDocument.removeEventListener('visibilitychange', onVisibilityReturn);
     root.removeEventListener('submit', onSubmit);
     root.removeEventListener('click', onClick);
+    root.removeEventListener('change', onClientFileChange);
+    root.removeEventListener('keydown', onClientFileKeydown);
+    root.removeEventListener('dragover', onClientFileDrop);
+    root.removeEventListener('drop', onClientFileDrop);
     root.removeEventListener(redrawEvent, onRedrawRequest);
   };
   options.signal.addEventListener('abort', dispose, { once: true });

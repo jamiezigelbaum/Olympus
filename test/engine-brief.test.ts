@@ -423,6 +423,10 @@ describe('brief platform integration', () => {
 
   test('Darwin preserves historical paths even with XDG overrides', () => {
     const home = '/Users/brief-fixture';
-    expect(engineServicePaths({ homeDir: home, platform: 'darwin', env: { XDG_CONFIG_HOME: '/ignored', XDG_DATA_HOME: '/ignored' } })).toEqual(enginePaths(home));
+    expect(engineServicePaths({ homeDir: home, platform: 'darwin', env: { XDG_CONFIG_HOME: '/ignored', XDG_DATA_HOME: '/ignored' } })).toEqual({
+      ...enginePaths(home),
+      daemonPlistPath: '/Library/LaunchDaemons/ai.olympusplugin.engine.plist',
+      engineManager: 'agent',
+    });
   });
 });

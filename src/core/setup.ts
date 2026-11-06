@@ -1,7 +1,9 @@
+import { existsSync, readFileSync } from 'node:fs';
+import { isPendingPrivacyPolicy, saveFirstRunPrivacyChoice } from './first-run-privacy.ts';
 import { PRIVACY_PRESET_LABELS } from './privacy-language.ts';
 import { randomBytes } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
-import { telegramPythonExecutable, TELEGRAM_DEPENDENCY_HINT } from './messaging-runtime.ts';
+import { defaultTelegramPython, TELEGRAM_DEPENDENCY_HINT } from './messaging-runtime.ts';
 import { homedir } from 'node:os';
 import { installManagedWorkerFiles, type ManagedWorkerFilesResult } from './lifecycle.ts';
 import { OperationError } from './operation-error.ts';
@@ -129,7 +131,7 @@ export const VENICE_PITCH_TEXT = [
   `Private source answers follow your choice: ${PRIVACY_PRESET_LABELS['local-first']} tries your local lane first; ${PRIVACY_PRESET_LABELS['private-cloud-only']} has no local-model requirement.`,
   'In v0.4, Venice uses its ordinary API with a live-catalog Private or plain TEE model. Olympus does not provide or qualify E2EE out of the box; custom integrations are user-owned.',
   'Semantic search uses a small model built into Olympus: it downloads once, runs on this computer, and needs no account or key. Gemini, a local embedding server, or a Venice Private embedding model are opt-in; Private content never goes to ordinary cloud embedding providers.',
-  `Choosing ${PRIVACY_PRESET_LABELS['no-sensitive']} keeps Private meaning search on this computer without configuring an agent answer lane.`,
+  `Choosing ${PRIVACY_PRESET_LABELS['no-sensitive']} lets you search Private items and use Ask privately on this computer. Connected agents cannot use Private items to answer.`,
 ] as const;
 
 export function runSetupDependencyCheck(input: {
@@ -196,7 +198,9 @@ export function runSetupDependencyCheck(input: {
       required: false,
       ok: Boolean(pythonCommand && pythonModuleExists(pythonCommand, 'telethon')),
       detail: 'Optional Telegram guided-session reader.',
-      repairHint: TELEGRAM_DEPENDENCY_HINT,
+      repairHint: platform === 'darwin'
+        ? 'Install Python 3 for macOS, then run olympus connect telegram --pair. Olympus sets up Telethon when needed.'
+        : TELEGRAM_DEPENDENCY_HINT,
     }),
     dependencyFinding({
       id: 'go',
@@ -247,11 +251,22 @@ export async function runSetupWizard(options: SetupWizardOptions): Promise<Setup
   if (options.dryRun) {
     managedWorker = installManagedWorkerFiles(workerOptions(options, workerToken));
   } else {
-    writeSovereigntyConfigFile({
-      config: presetConfig,
-      path: sovereigntyPath,
-      ...(options.force !== undefined ? { force: options.force } : {}),
-    });
+    let pending = false;
+    if (existsSync(sovereigntyPath)) {
+      try { pending = isPendingPrivacyPolicy(JSON.parse(readFileSync(sovereigntyPath, 'utf8')) as SovereigntyConfig); }
+      catch { /* Existing unreadable policies remain the normal writer's refusal. */ }
+    }
+    if (pending) {
+      if (cloudLane !== 'subscription') throw new OperationError('invalid_params', 'Choose the Private-answer mode before changing the Personal cloud lane.');
+      const saved = saveFirstRunPrivacyChoice(sovereigntyPath, options.preset);
+      if (!saved.ok || !saved.changed) throw new OperationError('invalid_params', 'The privacy choice changed elsewhere. Review the current policy before continuing.');
+    } else {
+      writeSovereigntyConfigFile({
+        config: presetConfig,
+        path: sovereigntyPath,
+        ...(options.force !== undefined ? { force: options.force } : {}),
+      });
+    }
     wroteSovereignty = true;
     // Writing the unit and walking away left the operator with an inactive
     // worker and a guide whose next step was to verify it was running
@@ -406,14 +421,6 @@ function defaultCommandExists(command: string): boolean {
     stdio: 'ignore',
   });
   return result.status === 0;
-}
-
-function defaultTelegramPython(platform: SetupDependencyCheck['platform']): string | undefined {
-  const python = telegramPythonExecutable();
-  // Without the Command Line Tools, macOS's /usr/bin/python3 is a stub whose first run opens an install dialog:
-  // doctor never starts one. `xcode-select -p` only reads where the tools are.
-  if (platform === 'darwin' && python === '/usr/bin/python3' && spawnSync('/usr/bin/xcode-select', ['-p'], { stdio: 'ignore' }).status !== 0) return undefined;
-  return python;
 }
 
 function defaultPythonModuleExists(pythonCommand: string, moduleName: string): boolean {

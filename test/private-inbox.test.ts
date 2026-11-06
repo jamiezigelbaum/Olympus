@@ -26,7 +26,7 @@ function result(): Extract<LocalAnswerResult, { status: 'answered' }> {
     unanswered: [], leftOut: [], read: [{ ...identity, text: SOURCE_TEXT, futurePrivateField: SOURCE_TEXT }] };
 }
 function stored(corpusId = identity.corpusId): StoredPrivateAnswer {
-  return { ...result(), read: [{ ...identity, corpusId }] };
+  return { ...result(), secretLocations: [], read: [{ ...identity, corpusId }] };
 }
 const cleanups: Array<() => void> = [];
 afterEach(() => { for (const cleanup of cleanups.splice(0).reverse()) cleanup(); });

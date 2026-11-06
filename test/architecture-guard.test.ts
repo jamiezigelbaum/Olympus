@@ -27,6 +27,44 @@ import { pathCarriesOwnerIdentityToken } from '../scripts/owner-identifier-patte
 import { trackedFiles } from '../scripts/public-flip-scan.ts';
 
 const repoRoot = join(import.meta.dir, '..');
+
+// Exact pre-existing lines at main cca43289; never exempt a file, function,
+// family or source. Each line may occur only once. Delete its entry when the
+// capability replaces the family test. Line numbers below are baseline
+// coordinates; matching uses the full line so unrelated insertions are safe.
+const CONNECTOR_STORE_FAMILY_DEBT = [
+  { line: "if (this.family !== 'chat') {", mainLine: 4888,
+    retire: 'Replace sender-aggregation eligibility with sender metadata capability.' },
+  { line: "if (store.family !== 'chat') return [];", mainLine: 12644,
+    retire: 'Replace recency-lane eligibility with a source-neutral recency capability.' },
+  { line: "?? (item.identity.family === 'chat' ? metadataString(item.metadata, 'chat') : undefined);", mainLine: 13536,
+    retire: 'Have connectors normalize conversation titles into shared metadata.' },
+  { line: "...(item.identity.family === 'chat'", mainLine: 13558,
+    retire: 'Have connectors normalize sender and conversation search metadata.' },
+  { line: "...(item.identity.family === 'email'", mainLine: 13572,
+    retire: 'Have connectors normalize sender and recipient search metadata.' },
+  { line: "...(row.family === 'chat' && row.title ? { conversationLabel: row.title } : {}),", mainLine: 15038,
+    retire: 'Project conversation labels from normalized conversation metadata.' },
+] as const;
+
+function connectorStoreSourceBranches(content: string): Array<{ line: number; text: string }> {
+  // Preserve newlines for diagnostics and ignore comments. Compare literals,
+  // not two dynamic identities (scope/connector compatibility checks are valid).
+  const code = content.replace(/\/\*[\s\S]*?\*\/|\/\/[^\n]*/g, (comment) => comment.replace(/[^\n]/g, ' '));
+  const field = String.raw`(?:\b(?:family|source|sourceName|sourceId)\b|\[\s*['"](?:family|source|sourceName|sourceId)['"]\s*\])`;
+  const literal = String.raw`(?:'[^'\n]+'|"[^"\n]+"|\x60[^\x60\n]+\x60)`;
+  const comparison = String.raw`(?:===?|!==?)`;
+  const receiver = String.raw`(?:[\w$]+\s*\.\s*)*`;
+  const pattern = new RegExp(
+    `${field}\\s*${comparison}\\s*${literal}|${literal}\\s*${comparison}\\s*${receiver}${field}|switch\\s*\\(\\s*${receiver}${field}\\s*\\)`,
+    'g',
+  );
+  return [...code.matchAll(pattern)].map((match) => {
+    const line = code.slice(0, match.index).split('\n').length;
+    return { line, text: content.split('\n')[line - 1]!.trim() };
+  });
+}
+
 const SLICE_2_DELETION_COUNT = 154;
 const SLICE_2_ACTIVE_SURFACE_GLOBS = [
   'src/**/*.ts',
@@ -562,6 +600,38 @@ function lineContainsRegexLiteral(line: string): boolean {
 }
 
 describe('architecture guard: capability, not per-source/per-question code', () => {
+  test('connector-store retrieval adds no family or source-name branches', () => {
+    const remaining = new Set(CONNECTOR_STORE_FAMILY_DEBT.map((entry) => entry.line as string));
+    const offenders: string[] = [];
+    for (const rel of new Glob('src/workers/connector-store/**/*.ts').scanSync({ cwd: repoRoot })) {
+      for (const branch of connectorStoreSourceBranches(read(rel))) {
+        if (rel === 'src/workers/connector-store/local-index.ts' && remaining.delete(branch.text)) continue;
+        offenders.push(`${rel}:${branch.line}: ${branch.text}`);
+      }
+    }
+    expect(offenders).toEqual([]);
+    // Removed debt must remove its allowance; copying an allowed line also fails.
+    expect([...remaining]).toEqual([]);
+  });
+
+  test('connector-store branch guard catches literal comparisons and switches', () => {
+    for (const code of [
+      "if (this.family === 'chat') return true;",
+      'return source == "telegram" ? yes : no;',
+      "if ('email' !== item.identity.family) return;",
+      "if (item['family'] === 'note') return;",
+      "if (this.family\n === 'chat') return;",
+      "switch (request.source) { case 'gmail': return; }",
+      "return sourceName !== 'dropbox';",
+    ]) expect(connectorStoreSourceBranches(code)).toHaveLength(1);
+    expect(connectorStoreSourceBranches([
+      "// if (family === 'chat') return;",
+      "/* source === 'telegram' */",
+      'if (request.family !== store.family) throw new Error("scope");',
+      'const family = "chat";',
+    ].join('\n'))).toEqual([]);
+  });
+
   test('the deleted template path stays deleted', () => {
     for (const rel of DELETED_PATHS) {
       expect(existsSync(join(repoRoot, rel))).toBe(false);

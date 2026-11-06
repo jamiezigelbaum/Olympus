@@ -12,12 +12,12 @@
 // `private_search` keeps the configured meaning lane and enables the bounded
 // keyword retry only for Private stores. Neither mode changes a model or epoch.
 
-import type { ClassificationCoverageNote, SecretLocationNote } from '../../core/evidence-pack.ts';
+import type { ClassificationCoverageNote, SecretLocationNote, SavedSecretLocation } from '../../core/evidence-pack.ts';
 import type { ParentLabelResolver } from '../../core/parent-label.ts';
 import type { SourceIndexAnswerRequest } from '../source-index/answer-types.ts';
 import type { SourceIndexCorpusRegistry } from '../../core/source-index/corpus.ts';
 import type { SourceIndexCorpusSearchAdapter, SourceIndexVisibilityGate } from '../../core/source-index/router.ts';
-import type { AnalystAnswerLanes } from '../source-index/analyst-answer.ts';
+import { sourceAnswerCorpusIds, type AnalystAnswerLanes } from '../source-index/analyst-answer.ts';
 import {
   builtInEmbeddingOnly,
   isApprovedSecureSourceEmbeddingProvider,
@@ -73,6 +73,10 @@ export interface SourceAnswerLaneDependencies {
     query: string,
     searched: ReadonlyArray<{ corpusId: string; accountScope?: string; filters?: ConnectorStoreSearchFilters }>,
   ) => readonly SecretLocationNote[];
+  checkSecretLocations?: (
+    locations: readonly SavedSecretLocation[],
+    searched: ReadonlyArray<{ corpusId: string; accountScope?: string; filters?: ConnectorStoreSearchFilters }>,
+  ) => boolean;
   /** Items still waiting for their tier in a corpus (0 when none or unknown). */
   heldItems?: (corpusId: string) => number;
   /** A child item's parent, for the label its citation carries (names only, authorized per candidate). */
@@ -159,6 +163,14 @@ export function createSourceAnswerLanes(
           ),
         }
         : {}),
+      ...(deps.checkSecretLocations ? {
+        checkSecretLocations: (locations: readonly SavedSecretLocation[]) => {
+          const selected = sourceAnswerCorpusIds(request);
+          const secure = new Set(deps.registry().list().filter(c => c.trustDomain === 'secure_local' && (!selected || selected.includes(c.corpusId))).map(c => c.corpusId));
+          const scopes = [...searchScopes].flatMap(([corpusId, scope]) => secure.has(corpusId) ? [{ corpusId, ...scope }] : []);
+          return deps.checkSecretLocations!(locations, scopes);
+        },
+      } : {}),
       ...(deps.heldItems
         ? {
           classificationCoverage: (searchedCorpora: readonly string[]): ClassificationCoverageNote[] => searchedCorpora.flatMap((corpusId) => {

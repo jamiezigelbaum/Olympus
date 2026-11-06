@@ -1,5 +1,5 @@
 import { ensurePrivateRootDirectorySync, ensurePrivateDirectoryTreeSync } from './atomic-file.ts';
-import { telegramPythonExecutable, telegramPythonVenvDir, TELEGRAM_DEPENDENCY_HINT, TELEGRAM_TELETHON_REQUIREMENT } from './messaging-runtime.ts';
+import { readyTelegramPython, TELEGRAM_DEPENDENCY_HINT, TELEGRAM_TELETHON_REQUIREMENT, type TelegramPythonSeams } from './messaging-runtime.ts';
 import { Database } from 'bun:sqlite';
 import { chmodSync, existsSync, linkSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, rmdirSync, statSync } from 'node:fs';
 import { spawn as spawnChild } from 'node:child_process';
@@ -17,6 +17,7 @@ import { tryHoldFileFlock, type HeldFileFlock } from './data-owner-lock.ts';
 import { pairingLayoutEnv, telegramSessionBasePath, telegramStagedLogins, telegramStagedSessionBase, whatsappStateDir } from './pairing-session-paths.ts';
 import { recordPairingAccount, settlePairingPlacement } from './pairing-placement.ts';
 import { whatsappBridgeFileName } from './whatsapp-bridge-name.ts';
+import { captureGrantPathBeside, captureGrantPathFromEnv, readCaptureGrantFile } from './messaging-capture-grant-file.ts';
 import { assertTelegramHistoryAccount, telegramHistoryAccount, telegramHistoryAccountError } from './provider-account-history.ts';
 
 export type MessagingPairingSource = 'telegram' | 'whatsapp';
@@ -33,7 +34,8 @@ export type MessagingCaptureScopeApproval =
   | {
     source: 'telegram';
     explicitApproval: true;
-    chatScopes: readonly string[];
+    wholeAccount?: boolean;
+    chatScopes?: readonly string[];
   }
   | {
     source: 'whatsapp';
@@ -98,7 +100,8 @@ export interface PairingCommandResult {
   privatePayload?: string;
 }
 
-export interface PairMessagingSourceOptions {
+/** Test seams for the Telegram Python (TelegramPythonSeams): whether one imports Telethon, and making the private one. */
+export interface PairMessagingSourceOptions extends TelegramPythonSeams {
   source: MessagingPairingSource;
   accountRole?: string;
   homeDir?: string;
@@ -113,19 +116,23 @@ export interface PairMessagingSourceOptions {
   requestCaptureScope?: (input: {
     source: MessagingPairingSource;
     accountProof: string;
+    sessionPath: string;
     chats: readonly MessagingChatMetadata[];
   }) => Promise<MessagingCaptureScopeApproval | undefined>;
   onWhatsAppQr?: (pngPath: string) => void | Promise<void>;
+  /** The bridge proved the linked device (its `ready` event), before Olympus lists chats. */
+  /**
+   * The phone accepted the link (`linked`: this run created the device, so a later failure should unlink it), or the bridge
+   * proved an existing device (`ready` on a re-pair: never unlinked). The state folder is the one an unlink runs against.
+   */
+  onWhatsAppLinked?: (link: { created: boolean; sessionPath: string }) => void | Promise<void>;
   whatsappQrMode?: 'terminal' | 'artifact';
   signal?: AbortSignal;
+  onCommitStart?: () => void;
   runCommand?: (request: PairingCommandRequest) => Promise<PairingCommandResult>;
   registerSession?: MessagingSessionRegistrar;
   which?: (command: string) => string | null;
-  buildWhatsAppBridge?: (input: { go: string; sourceDir: string; outputPath: string }) => Promise<boolean>;
-  /** Test seam: whether a Python already imports Telethon. */
-  pythonHasTelethon?: (python: string) => Promise<boolean>;
-  /** Test seam: makes the private Telegram environment with the pinned Telethon; true when it is ready. */
-  provisionTelegramPython?: (input: { python3: string; venvDir: string }) => Promise<boolean>;
+  buildWhatsAppBridge?: (input: { go: string; compiler: string; sourceDir: string; outputPath: string }) => Promise<boolean>;
   /** Test seam: replaces the transport to the running worker, which decides a new account's layout while it owns the data. */
   workerFetch?: typeof fetch;
 }
@@ -230,6 +237,9 @@ export async function pairMessagingSource(options: PairMessagingSourceOptions): 
           qrPngPath = event.qr_png_path;
           await options.onWhatsAppQr?.(qrPngPath);
         }
+        if (options.source === 'whatsapp' && (event.event === 'linked' || event.event === 'ready')) {
+          await options.onWhatsAppLinked?.({ created: event.event === 'linked', sessionPath });
+        }
       },
     });
     // Injected runners may return completed output without invoking the streaming
@@ -279,6 +289,7 @@ export async function pairMessagingSource(options: PairMessagingSourceOptions): 
     const approval = options.captureScopeApproval ?? await options.requestCaptureScope?.({
       source: options.source,
       accountProof,
+      sessionPath,
       chats,
     });
     if (!approval) {
@@ -295,6 +306,26 @@ export async function pairMessagingSource(options: PairMessagingSourceOptions): 
       };
     }
 
+    if (options.signal?.aborted) throw new Error('Pairing was cancelled.');
+    options.onCommitStart?.();
+
+    // A grant bound to this freshly verified account retains exact consent even
+    // if a chat disappeared from the listing or the session changed location.
+    // Legacy grants still require the existing history-account/session evidence.
+    const prior = options.source === 'telegram' ? readCaptureGrantFile(options.registryPath
+      ? captureGrantPathBeside('telegram', options.registryPath)
+      : captureGrantPathFromEnv('telegram', registryEnv)) : undefined;
+    const priorGrant = prior?.kind === 'valid' && prior.grant.source === 'telegram' ? prior.grant : undefined;
+    const sameAccount = /^telegram:[a-f0-9]{16}$/.test(accountProof) && priorGrant?.accountProof === accountProof;
+    const legacySameSession = priorGrant?.accountProof === undefined && historyAccount === accountProof
+      && (priorGrant?.sessionPath === sessionPath || (layout === 'folder' && priorGrant?.sessionPath === undefined));
+    const priorEnv = sameAccount || legacySameSession ? priorGrant?.producer.env : undefined;
+    const priorRaw = priorEnv?.OLYMPUS_TELEGRAM_ALLOWED_CHAT_SCOPES;
+    const priorScopes = typeof priorRaw === 'string' ? priorRaw.split(',') : [];
+    const alternate = priorEnv?.OLYMPUS_SOURCE_INDEX_TELEGRAM_APPROVED_CHAT_SCOPES;
+    const retained = (priorRaw === alternate || (sameAccount && alternate === undefined))
+      && priorScopes.every(scope => /^telegram\.personal:chat:[A-Za-z0-9_-]+$/.test(scope)) ? priorScopes : [];
+    const producer = producerLaunch(options.source, approval, helper, packageRoot, sessionPath, chats, layout, retained);
     if (options.source === 'telegram') {
       // Decided under the entry's lease by whoever owns the data, so an account it
       // was given since the read above decides. Not recorded (no worker answered)
@@ -307,7 +338,6 @@ export async function pairMessagingSource(options: PairMessagingSourceOptions): 
         throw telegramHistoryAccountError('different');
       }
     }
-    const producer = producerLaunch(options.source, approval, helper, packageRoot, sessionPath, chats, layout);
     const rollbackCredentials = options.source === 'telegram'
       ? await persistTelegramCredentials(secretStore, result.privatePayload)
       : async () => {};
@@ -413,22 +443,10 @@ async function resolveHelper(options: PairMessagingSourceOptions, packageRoot: s
   if (options.source === 'telegram') {
     const script = options.telegramHelperPath ?? join(packageRoot, 'scripts', 'telegram-pair.py');
     if (!existsSync(script)) throw new Error('The packaged Telegram pairing helper is missing. Reinstall Olympus and retry.');
-    const python = telegramPythonExecutable(options);
-    if (!python) {
-      throw new Error(`Python 3 is required for Telegram pairing. ${TELEGRAM_DEPENDENCY_HINT}`);
-    }
-    const venvDir = telegramPythonVenvDir(options);
-    const isolated = join(venvDir, 'bin', 'python');
-    if (options.pythonExecutable || python === isolated) return python;
-    // A missing default is provisioned, the way WhatsApp's bridge is built: every new Telegram user needs
-    // Telethon, and the hint alone was a dead end (test-omarchy, 2026-10-29). A Python that has it already is used.
-    if (await (options.pythonHasTelethon ?? pythonImportsTelethon)(python)) return python;
-    process.stderr.write(`Installing ${TELEGRAM_TELETHON_REQUIREMENT} for Telegram into ${venvDir} (once; about a minute)...\n`);
-    const ready = await (options.provisionTelegramPython ?? provisionTelegramPython)({ python3: python, venvDir });
-    if (!ready || !existsSync(isolated)) {
-      throw new Error(`Olympus could not install Telethon for Telegram pairing. ${TELEGRAM_DEPENDENCY_HINT}`);
-    }
-    return isolated;
+    return readyTelegramPython({
+      ...options,
+      onInstall: (venvDir) => process.stderr.write(`Installing ${TELEGRAM_TELETHON_REQUIREMENT} for Telegram into ${venvDir} (once; about a minute)...\n`),
+    });
   }
   if (options.whatsappBridgePath) {
     if (!existsSync(options.whatsappBridgePath)) throw new Error('The configured WhatsApp pairing bridge does not exist.');
@@ -456,15 +474,22 @@ async function resolveHelper(options: PairMessagingSourceOptions, packageRoot: s
     return output;
   }
   const which = options.which ?? ((command: string) => Bun.which(command));
-  const go = which('go');
-  const compiler = which('cc') ?? which('clang') ?? which('gcc');
+  // A service's PATH is often narrower than the user's shell: look where Go
+  // is usually installed for one user too, not only on PATH (Sparta,
+  // 2026-11-04: Go in ~/.local/bin, invisible to the worker).
+  const home = options.homeDir ?? options.env?.HOME ?? homedir();
+  const userBins = [join(home, '.local', 'bin'), join(home, 'go', 'bin'), '/usr/local/go/bin', '/opt/homebrew/bin', '/usr/local/bin', '/usr/bin'];
+  const find = (command: string): string | undefined => which(command)
+    ?? (options.which ? undefined : userBins.map((dir) => join(dir, command)).find((path) => isExecutableFile(path)));
+  const go = find('go');
+  const compiler = find('cc') ?? find('clang') ?? find('gcc');
   if (!go || !compiler) {
-    throw new Error('WhatsApp pairing requires Go and a C compiler. Install Go plus cc/clang/gcc, then re-run olympus connect whatsapp --pair; Olympus will build the pinned bridge automatically.');
+    throw codedPairingError('WhatsApp pairing requires Go and a C compiler. Install Go plus cc/clang/gcc, then re-run olympus connect whatsapp --pair; Olympus will build the pinned bridge automatically.', 'bridge_build_tools_missing');
   }
   mkdirSync(join(output, '..'), { recursive: true, mode: 0o700 });
-  const built = await (options.buildWhatsAppBridge ?? buildWhatsAppBridge)({ go, sourceDir, outputPath: output });
+  const built = await (options.buildWhatsAppBridge ?? buildWhatsAppBridge)({ go, compiler, sourceDir, outputPath: output });
   if (!built || !existsSync(output)) {
-    throw new Error('The pinned WhatsApp bridge could not be built. Verify Go and the C compiler, then re-run olympus connect whatsapp --pair.');
+    throw codedPairingError('The pinned WhatsApp bridge could not be built. Verify Go and the C compiler, then re-run olympus connect whatsapp --pair.', 'bridge_build_failed');
   }
   chmodSync(output, 0o700);
   return output;
@@ -501,41 +526,22 @@ function assertTrustedBridge(path: string, message: string): void {
 }
 
 
-async function pythonImportsTelethon(python: string): Promise<boolean> {
-  const child = Bun.spawn([python, '-c', 'import telethon'], { stdin: 'ignore', stdout: 'ignore', stderr: 'ignore' });
-  return await child.exited === 0;
+/**
+ * The bridge build's environment. Tools found outside PATH are handed to the
+ * build directly: cgo reads CC, and Go's own helpers resolve through PATH.
+ */
+export function whatsappBridgeBuildEnv(input: { go: string; compiler: string }, base: Record<string, string | undefined> = process.env): Record<string, string | undefined> {
+  const dirs = [...new Set([dirname(input.go), dirname(input.compiler)])];
+  const path = [...dirs, ...(base.PATH ?? '').split(':').filter((dir) => dir && !dirs.includes(dir))].join(':');
+  return { ...base, CGO_ENABLED: '1', CC: input.compiler, PATH: path };
 }
 
-/** A fresh private venv with the pinned Telethon. A half-made one is removed, so the next pairing starts clean. */
-async function provisionTelegramPython(input: { python3: string; venvDir: string }): Promise<boolean> {
-  const run = async (argv: string[]): Promise<boolean> => {
-    const child = Bun.spawn(argv, { env: { ...process.env, PIP_DISABLE_PIP_VERSION_CHECK: '1' }, stdin: 'ignore', stdout: 'ignore', stderr: 'ignore' });
-    let timeout: ReturnType<typeof setTimeout> | undefined;
-    const result = await Promise.race([
-      child.exited,
-      new Promise<'timeout'>((resolve) => { timeout = setTimeout(() => resolve('timeout'), 5 * 60 * 1000); }),
-    ]);
-    if (timeout) clearTimeout(timeout);
-    if (result === 'timeout') child.kill('SIGKILL');
-    return result === 0;
-  };
-  const cacheHome = dirname(dirname(input.venvDir));
-  ensurePrivateRootDirectorySync(cacheHome);
-  ensurePrivateDirectoryTreeSync(cacheHome, dirname(input.venvDir));
-  const python = join(input.venvDir, 'bin', 'python');
-  const ok = await run([input.python3, '-m', 'venv', input.venvDir])
-    && await run([python, '-m', 'pip', 'install', '--quiet', TELEGRAM_TELETHON_REQUIREMENT])
-    && await run([python, '-c', 'import telethon']);
-  if (!ok) rmSync(input.venvDir, { recursive: true, force: true });
-  return ok;
-}
-
-async function buildWhatsAppBridge(input: { go: string; sourceDir: string; outputPath: string }): Promise<boolean> {
+async function buildWhatsAppBridge(input: { go: string; compiler: string; sourceDir: string; outputPath: string }): Promise<boolean> {
   const temporary = `${input.outputPath}.tmp.${process.pid}`;
   rmSync(temporary, { force: true });
   const child = Bun.spawn([input.go, 'build', '-trimpath', '-o', temporary, '.'], {
     cwd: input.sourceDir,
-    env: { ...process.env, CGO_ENABLED: '1' },
+    env: whatsappBridgeBuildEnv(input),
     stdin: 'ignore', stdout: 'ignore', stderr: 'ignore',
   });
   let timeout: ReturnType<typeof setTimeout> | undefined;
@@ -582,14 +588,17 @@ function producerLaunch(
   sessionPath: string,
   chats: readonly MessagingChatMetadata[],
   layout: LayoutAccountLayout,
+  retainedChatScopes: readonly string[],
 ): MessagingProducerLaunch {
   if (approval.source !== source || approval.explicitApproval !== true) {
     throw new Error('Capture scope approval must name the paired source and be explicit.');
   }
   if (source === 'telegram') {
-    const scopes = uniqueNonEmpty(approval.source === 'telegram' ? approval.chatScopes : []);
-    if (scopes.length === 0) throw new Error('Choose at least one Telegram chat before capture can start.');
-    const listed = new Set(chats.map((chat) => chat.chatScope));
+    const scopes = uniqueNonEmpty(approval.source === 'telegram' ? approval.chatScopes ?? [] : []);
+    const wholeAccount = approval.source === 'telegram' && approval.wholeAccount === true;
+    if (wholeAccount === (scopes.length > 0)) throw new Error('Approve either the whole Telegram account or at least one exact chat, but not both.');
+    if (scopes.some((scope) => scope.includes('*'))) throw new Error('Telegram capture approval requires exact chat identifiers.');
+    const listed = new Set([...chats.map((chat) => chat.chatScope), ...retainedChatScopes]);
     if (scopes.some((scope) => !listed.has(scope))) {
       throw new Error('Telegram capture approval contains a chat that was not in the verified account listing.');
     }
@@ -601,8 +610,8 @@ function producerLaunch(
         // A folder account's spawner sets its paths from its folder (core/olympus-layout.ts, folderCaptureEnv).
         ...(layout === 'folder' ? {} : { OLYMPUS_TELEGRAM_SESSION_PATH: sessionPath }),
         OLYMPUS_SOURCE_INDEX_TELEGRAM_ACCOUNT: 'telegram.personal',
-        OLYMPUS_SOURCE_INDEX_TELEGRAM_APPROVED_CHAT_SCOPES: scopes.join(','),
-        OLYMPUS_TELEGRAM_ALLOWED_CHAT_SCOPES: scopes.join(','),
+        OLYMPUS_SOURCE_INDEX_TELEGRAM_APPROVED_CHAT_SCOPES: wholeAccount ? '*' : scopes.join(','),
+        OLYMPUS_TELEGRAM_ALLOWED_CHAT_SCOPES: wholeAccount ? '*' : scopes.join(','),
       },
       secretEnvironment: [
         { env: 'OLYMPUS_TELEGRAM_API_ID', secretKey: TELEGRAM_API_ID_SECRET_KEY },
@@ -811,7 +820,28 @@ function removeTelegramLogin(base: string): void {
   for (const suffix of ['.session', '.session-journal']) rmSync(`${base}${suffix}`, { force: true });
 }
 
+function codedPairingError(message: string, code: string): Error {
+  const error = new Error(message) as Error & { code?: string };
+  error.code = code;
+  return error;
+}
+
+function isExecutableFile(path: string): boolean {
+  try {
+    const stat = statSync(path);
+    return stat.isFile() && (stat.mode & 0o111) !== 0;
+  } catch {
+    return false;
+  }
+}
+
 function pairingFailure(source: MessagingPairingSource, code: string | undefined): Error {
+  const error = pairingFailureMessage(source, code) as Error & { code?: string };
+  error.code = code ?? 'helper_failed';
+  return error;
+}
+
+function pairingFailureMessage(source: MessagingPairingSource, code: string | undefined): Error {
   if (source === 'whatsapp' && code?.startsWith('unsupported_')) {
     return new Error(`WhatsApp requested a linking step this bridge does not support (${code}). No account was connected or capture started. Ask your agent to check compatibility before another scan.`);
   }

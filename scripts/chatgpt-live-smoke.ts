@@ -30,6 +30,7 @@ import { dirname, join } from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { PRIVATE_ANSWER_META_KEY } from '../src/workers/chatgpt/private-answer-contract.ts';
+import { REMOTE_PRIVATE_NOTE, REMOTE_SECRET_NOTE } from '../src/core/remote-result.ts';
 import { generatePanelKeyPair, openPrivateAnswer } from '../src/workers/chatgpt/private-answer-crypto.ts';
 import {
   PRIVATE_MATCH_NOTE,
@@ -251,11 +252,13 @@ export function findPrivateLeaks(
     if (FORBIDDEN_KEYS.has(key)) violations.push(`key material field "${key}" at ${path}`);
   });
   const questionShingles = shingles(question, SHINGLE_WORDS);
+  // The product's fixed notes may open a sealed answer and also appear in model-visible text by design; they are not Private content.
+  const noteShingles = new Set([...shingles(REMOTE_PRIVATE_NOTE, SHINGLE_WORDS), ...shingles(REMOTE_SECRET_NOTE, SHINGLE_WORDS)]);
   const visibleShingles = shingles(`${text}\n${structured}\n${JSON.stringify(result._meta ?? {})}`, SHINGLE_WORDS);
   const visibleWords = new Set(words(whole));
   for (const [index, seen] of privateAnswers.entries()) {
     const label = `private answer #${index + 1}`;
-    const overlap = [...shingles(seen.answer, SHINGLE_WORDS)].filter((s) => !questionShingles.has(s) && visibleShingles.has(s));
+    const overlap = [...shingles(seen.answer, SHINGLE_WORDS)].filter((s) => !questionShingles.has(s) && !noteShingles.has(s) && visibleShingles.has(s));
     if (overlap.length > 0) violations.push(`${overlap.length} phrase(s) of ${label} appear in tool output`);
     for (const secret of seen.secrets ?? []) {
       if (secret && whole.includes(secret)) violations.push(`a value from inside ${label}'s sealed plaintext appears in tool output`);

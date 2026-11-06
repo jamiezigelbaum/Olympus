@@ -130,7 +130,7 @@ async function handleRemoteCallTool(
     // (to Secret, say) is caught by checking the release again right before
     // it leaves. The note follows the output that actually leaves.
     const output = privatePart ? release() : approved;
-    return { content: text(privateMayAnswer ? withRemotePrivateNote(output, privatePart?.answerId) : output) };
+    return { content: text(privateMayAnswer ? withRemotePrivateNote(output, privatePart?.answerId, privatePart?.secretMatch) : output) };
   } catch (error) {
     return { content: text(remoteErrorOutput(error, { declaredParams })), isError: true };
   }

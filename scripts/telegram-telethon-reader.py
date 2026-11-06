@@ -17,6 +17,7 @@ import fcntl
 import hashlib
 import json
 import os
+import re
 import shutil
 import sys
 import uuid
@@ -112,7 +113,7 @@ async def list_dialogs(request: dict[str, Any]) -> dict[str, Any]:
             else:
                 kind = "group"
             chat_scope = f"{account}:chat:{dialog.id}"
-            if chat_scope not in approved_scopes:
+            if "*" not in approved_scopes and chat_scope not in approved_scopes:
                 continue
             dialogs.append({
                 "chat_id": dialog.id,
@@ -237,6 +238,10 @@ class GatewayConfig:
     interval_seconds: int
     stale_threshold_seconds: int
 
+    @property
+    def whole_account(self) -> bool:
+        return self.approved_scopes == ("*",)
+
 
 @asynccontextmanager
 async def gateway_client_session(client: Any, native: bool):
@@ -335,7 +340,8 @@ async def run_gateway(run_once: bool = False) -> None:
                 # the reconcile sweep snapshots its per-scope forward cursors.
                 await asyncio.sleep(0)
                 captured = 0
-                for chat_scope in config.approved_scopes:
+                sweep_scopes = await gateway_sweep_scopes(client, config)
+                for chat_scope in sweep_scopes:
                     cursor = state["forward_cursors"].get(chat_scope)
                     page = await read_messages_with_client(
                         client,
@@ -387,7 +393,7 @@ async def resolve_gateway_event_scopes(
 ) -> tuple[dict[str, str], dict[str, Any]]:
     scopes: dict[str, str] = {}
     entities: dict[str, Any] = {}
-    for chat_scope in config.approved_scopes:
+    for chat_scope in (() if config.whole_account else config.approved_scopes):
         chat_ref = chat_id_from_scope(chat_scope)
         if isinstance(chat_ref, int):
             scopes[str(chat_ref)] = chat_scope
@@ -418,6 +424,8 @@ async def capture_gateway_event(
         gateway_event_lane(state)["events_seen"] += 1
     try:
         chat_scope = event_scopes.get(str(getattr(event, "chat_id", "")))
+        if not chat_scope and config.whole_account:
+            chat_scope = numeric_account_scope(config.account, getattr(event, "chat_id", None))
         if not chat_scope:
             async with state_lock:
                 gateway_event_lane(state)["events_dropped_unapproved"] += 1
@@ -508,6 +516,8 @@ async def capture_gateway_reaction(
         gateway_event_lane(state)["reactions_seen"] += 1
     try:
         chat_scope = await reaction_chat_scope(client, update, event_scopes)
+        if not chat_scope and config.whole_account:
+            chat_scope = numeric_account_scope(config.account, await client.get_peer_id(update.peer))
         if not chat_scope:
             async with state_lock:
                 gateway_event_lane(state)["reactions_dropped_unapproved"] += 1
@@ -694,7 +704,7 @@ async def process_backfill_requests(
             raise SafeConfigError("invalid_backfill_request")
         request_id = require_text(request, "request_id")
         chat_scope = require_text(request, "chat_scope")
-        if chat_scope not in config.approved_scopes:
+        if not gateway_scope_allowed(config, chat_scope):
             raise SafeConfigError("chat_scope_not_allowed")
         provider_cursor = require_text(request, "provider_cursor")
         offset_id_from_cursor(provider_cursor)
@@ -728,7 +738,7 @@ def gateway_config() -> GatewayConfig:
         "OLYMPUS_SOURCE_INDEX_TELEGRAM_APPROVED_CHAT_SCOPES",
         "OLYMPUS_TELEGRAM_ALLOWED_CHAT_SCOPES",
     )
-    approved_scopes = exact_chat_scopes(approved_raw, account, "approved_chat_scopes_required")
+    approved_scopes = capture_chat_scopes(approved_raw, account)
     # Every approved chat is captured alike: each message is judged by its own
     # content downstream. No chat is routed Private as a whole (a user's own
     # rule for a chat is an owner rule, applied where every source's are).
@@ -991,7 +1001,9 @@ def newest_spool_captured_at(path: Path) -> str:
 
 
 def gateway_report(config: GatewayConfig, state: dict[str, Any], captured: int) -> dict[str, Any]:
-    paths = sorted(config.spool_dir.glob("*.jsonl"))
+    # Only dated capture files count. The media waiting ledger is also JSONL
+    # but is not a captured message and must not inflate coverage on low disk.
+    paths = sorted(config.spool_dir.glob("????-??-??.jsonl"))
     spool_records = sum(count_spool_records(path) for path in paths)
     newest = ""
     for path in reversed(paths):
@@ -1100,6 +1112,37 @@ def gateway_process_lock(path: Path):
         yield
 
 
+def capture_chat_scopes(value: str | None, account: str) -> list[str]:
+    if (value or "").strip() == "*":
+        return ["*"]
+    return exact_chat_scopes(value, account, "approved_chat_scopes_required")
+
+
+def numeric_account_scope(account: str, chat_id: Any) -> str | None:
+    text = str(chat_id)
+    if not re.fullmatch(r"-?[1-9][0-9]*", text):
+        return None
+    return f"{account}:chat:{text}"
+
+
+def gateway_scope_allowed(config: GatewayConfig, scope: str) -> bool:
+    if config.whole_account:
+        return scope.startswith(f"{config.account}:chat:") and numeric_account_scope(config.account, scope.rsplit(":", 1)[-1]) == scope
+    return scope in config.approved_scopes
+
+
+async def gateway_sweep_scopes(client: Any, config: GatewayConfig) -> tuple[str, ...]:
+    if not config.whole_account:
+        return config.approved_scopes
+    # Refresh every sweep: whole-account approval includes dialogs created later.
+    scopes: list[str] = []
+    async for dialog in client.iter_dialogs(limit=None):
+        scope = numeric_account_scope(config.account, dialog.id)
+        if scope and scope not in scopes:
+            scopes.append(scope)
+    return tuple(scopes)
+
+
 def exact_chat_scopes(value: str | None, account: str, empty_error: str | None) -> list[str]:
     scopes = []
     for scope in (value or "").split(","):
@@ -1108,7 +1151,7 @@ def exact_chat_scopes(value: str | None, account: str, empty_error: str | None) 
             continue
         if "*" in normalized:
             raise SafeConfigError("wildcard_chat_scope_denied")
-        if not normalized.startswith(f"{account}:chat:") or not normalized.rsplit(":", 1)[-1]:
+        if not normalized.startswith(f"{account}:chat:") or len(normalized.split(":")) != 3 or not normalized.rsplit(":", 1)[-1]:
             raise SafeConfigError("invalid_chat_scope")
         if normalized not in scopes:
             scopes.append(normalized)
@@ -1742,7 +1785,7 @@ async def retry_waiting_media(client: Any, config: GatewayConfig, state_lock: as
         waiting = read_media_waiting(spool_dir)
     if not waiting or disk_low(folder):
         return 0
-    scopes = {str(chat_id_from_scope(scope)): scope for scope in config.approved_scopes}
+    scopes = {str(chat_id_from_scope(scope)): scope for scope in config.approved_scopes if scope != "*"}
     done: set[tuple[str, str]] = set()
     appended = 0
     paused = False
@@ -1753,6 +1796,8 @@ async def retry_waiting_media(client: Any, config: GatewayConfig, state_lock: as
         if paused:
             break
         scope = scopes.get(chat)
+        if not scope and config.whole_account:
+            scope = numeric_account_scope(config.account, chat)
         if not scope:
             done.update((chat, message_id) for message_id in ids)
             continue
@@ -1977,47 +2022,33 @@ def attachment_type_from_mime(mime_type: Any) -> str:
 
 def chat_id_from_scope(chat_scope: str) -> str | int:
     parts = chat_scope.split(":")
-    if len(parts) < 3 or parts[-2] != "chat" or not parts[-1]:
+    if len(parts) != 3 or parts[-2] != "chat" or not parts[-1] or "*" in chat_scope:
         raise SafeConfigError("invalid_chat_scope")
     chat_ref = parts[-1]
     return int(chat_ref) if chat_ref.lstrip("-").isdigit() else chat_ref
 
 
 def assert_chat_scope_allowed(chat_scope: str) -> None:
-    if chat_scope == "*":
-        raise SafeConfigError("wildcard_chat_scope_denied")
-    configured = [
-        item.strip()
-        for item in os.environ.get("OLYMPUS_TELEGRAM_ALLOWED_CHAT_SCOPES", "").split(",")
-        if item.strip()
-    ]
-    if configured and chat_scope not in configured:
+    account = os.environ.get("OLYMPUS_SOURCE_INDEX_TELEGRAM_ACCOUNT", "telegram.personal").strip()
+    exact_chat_scopes(chat_scope, account, "invalid_chat_scope")
+    configured_raw = os.environ.get("OLYMPUS_TELEGRAM_ALLOWED_CHAT_SCOPES", "").strip()
+    if not configured_raw:
+        return
+    configured = capture_chat_scopes(configured_raw, account)
+    if configured != ["*"] and chat_scope not in configured:
         raise SafeConfigError("chat_scope_not_allowed")
 
 
 def approved_dialog_scopes(request: dict[str, Any], account: str) -> set[str]:
-    configured = [
-        item.strip()
-        for item in os.environ.get("OLYMPUS_TELEGRAM_ALLOWED_CHAT_SCOPES", "").split(",")
-        if item.strip()
-    ]
+    raw = os.environ.get("OLYMPUS_TELEGRAM_ALLOWED_CHAT_SCOPES", "").strip()
+    configured = capture_chat_scopes(raw, account) if raw else []
     requested = optional_text_list(request.get("approved_chat_scopes"))
-    scopes = requested or configured
+    scopes = capture_chat_scopes(",".join(requested), account) if requested else configured
     if not scopes:
         raise SafeConfigError("approved_chat_scopes_required")
-    allowed = set(configured) if configured else None
-    approved: set[str] = set()
-    for scope in scopes:
-        if scope == "*":
-            raise SafeConfigError("wildcard_chat_scope_denied")
-        if not scope.startswith(f"{account}:chat:"):
-            raise SafeConfigError("invalid_chat_scope")
-        if allowed is not None and scope not in allowed:
-            raise SafeConfigError("chat_scope_not_allowed")
-        approved.add(scope)
-    if not approved:
-        raise SafeConfigError("approved_chat_scopes_required")
-    return approved
+    if configured and configured != ["*"] and any(scope not in configured for scope in scopes):
+        raise SafeConfigError("chat_scope_not_allowed")
+    return set(scopes)
 
 
 def offset_id_from_cursor(cursor: str | None) -> int:

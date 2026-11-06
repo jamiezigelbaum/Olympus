@@ -45,6 +45,8 @@ export type BuiltInEmbeddingFailureReason =
   | 'runtime_load_failed';
 
 export interface BuiltInEmbeddingStatus {
+  /** Process-local routing state; present only when a remote helper is configured. */
+  remoteDocuments?: boolean;
   state: BuiltInEmbeddingState;
   modelId: string;
   /** 0-100, whole numbers. */

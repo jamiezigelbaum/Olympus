@@ -328,12 +328,12 @@ describe('the live item carries the richer text', () => {
     expect(item.metadata).toMatchObject({ forwardedFrom: 'News Channel', forwardSource: 'telegram_forward', senderLabel: 'Sam' });
   });
 
-  test('a Secrets rewrite takes the forward name with the names, and a service event\'s words with the text', () => {
+  test('a Secrets rewrite takes the forward name with the names, and a service event\'s words with the text', async () => {
     const dir = spool({
       '2026-10-01.jsonl': record('1', { extra: { forwardFromName: 'Origin Name', participantDisplayNames: { 'sender-1': 'Sam' } } })
         + record('2', { text: '', extra: { boundedText: undefined, service: { action: 'edit_group_title', title: 'Secret title words' } } }),
     });
-    const result = redactTelegramCaptureSpoolSecrets({
+    const result = await redactTelegramCaptureSpoolSecrets({
       spoolDir: dir,
       judge: (identity) => (identity.providerItemId === '1' ? 'names' : 'content'),
     });
@@ -409,14 +409,14 @@ describe('review fixes (Astra, #545)', () => {
     }
   });
 
-  test('a Secrets rewrite reads a spool file in chunks and stays inside its window', () => {
+  test('a Secrets rewrite reads a spool file in chunks and stays inside its window', async () => {
     // Records of about 300 KB each, so the window crosses the reader's 1 MB chunks.
     let text = '';
     for (let id = 1; id <= 10; id += 1) text += record(String(id), { text: `${id} ${'z'.repeat(300_000)}` });
     const dir = spool({ '2026-10-01.jsonl': text });
     const before = readFileSync(join(dir, '2026-10-01.jsonl'));
     const judged: string[] = [];
-    const result = redactTelegramCaptureSpoolSecrets({
+    const result = await redactTelegramCaptureSpoolSecrets({
       spoolDir: dir,
       from: '2026-10-01.jsonl:3',
       through: '2026-10-01.jsonl:7',

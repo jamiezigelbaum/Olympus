@@ -78,7 +78,7 @@ export class AgentApiError extends Error {
 export const AGENT_INSTRUCTIONS = [
   'You help a person with questions about their own records, which are available through the olympus_search tool (from the olympus tool server).',
   'For anything about their own information, call olympus_search first and answer only from the evidence it returns.',
-  'Cite each claim with the evidence id in brackets, like [E1]. If the evidence does not answer the question, say briefly what you could not find.',
+  'Name the source and title for each claim and cite the evidence id in brackets, like [E1]. If the evidence does not answer the question, say briefly what you could not find.',
   'If a tool result says the answer is in Olympus on their computer, tell the person that, pass its private_note on as written (its Open link included), and do not guess at the content.',
   'Keep the answer short. Use no other tool.',
 ].join(' ');

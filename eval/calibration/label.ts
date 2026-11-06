@@ -2,16 +2,28 @@
 //
 // A local page for the owner to mark each sampled file Personal or Private.
 // It listens on 127.0.0.1 only, behind a random one-time token in the URL,
-// and writes nothing but labels.json in the calibration directory. It never
+// and writes nothing but its labels file in the calibration directory. It never
 // opens an Olympus store, ledger or engine.
 //
-//   bun eval/calibration/label.ts [--dir DIR] [--port N] [--no-open]
+//   bun eval/calibration/label.ts [--dir DIR] [--port N] [--no-open] [--importance]
+//
+// --importance is a second pass over the items labeled Private: Important or
+// Minor, saved to importance.json. Its only write to labels.json is P, Actually
+// Personal, which corrects that item's label and records that it was corrected.
 
 import { spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import { CALIBRATION_DIR_DEFAULT, readLabels, readSample, writeLabels, type CalibrationLabel } from './files.ts';
+import {
+  CALIBRATION_DIR_DEFAULT,
+  readImportance,
+  readLabels,
+  readSample,
+  writeImportance,
+  writeLabels,
+  type CalibrationImportance,
+  type CalibrationLabels,
+} from './files.ts';
 
-const LABELS: readonly CalibrationLabel[] = ['personal', 'private', 'unsure', 'skip'];
 const EXCERPT_CHARS = 6_000;
 
 const argv = process.argv.slice(2);
@@ -20,10 +32,59 @@ const flag = (name: string) => {
   return index >= 0 ? argv[index + 1] : undefined;
 };
 const dir = flag('--dir') ?? CALIBRATION_DIR_DEFAULT;
+const importancePass = argv.includes('--importance');
+/** A choice on the page: what is saved, what it reads, its key, and the button style it borrows. */
+const CHOICES = importancePass
+  ? [
+      { label: 'important', name: 'Important', key: 'I', style: 'private' },
+      { label: 'minor', name: 'Minor', key: 'M', style: 'personal' },
+      { label: 'unsure', name: 'Not sure', key: 'U', style: 'unsure' },
+      { label: 'personal', name: 'Actually Personal', key: 'P', style: 'skip' },
+    ]
+  : [
+      { label: 'personal', name: 'Personal', key: 'P', style: 'personal' },
+      { label: 'private', name: 'Private', key: 'X', style: 'private' },
+      { label: 'unsure', name: 'Not sure', key: 'U', style: 'unsure' },
+      { label: 'skip', name: 'Skip', key: 'S', style: 'skip' },
+    ];
+const HEADING = importancePass ? 'Olympus calibration: how much does this Private item matter?' : 'Olympus calibration: Personal or Private?';
+const RULE = importancePass
+  ? `<details class="rule" open><summary>What counts as Important</summary>
+<p><b>Important</b>: the things that must stay Private, such as a full blood lab report, full tax returns or a complete bank statement.</p>
+<p><b>Minor</b>: Private, but a rare slip would be acceptable, such as a meal receipt, an Uber receipt or a casual question to a doctor.</p>
+<p><b>Actually Personal</b>: this should not have been labeled Private. Pressing P corrects its label.</p></details>`
+  : `<details class="rule"><summary>What counts as Private</summary>
+<p><b>Private</b>: a real person's own information. Their records and results (labs, medical, therapy), statements, bills,
+tax and bank papers, contracts and legal papers about them, filled-in forms, identity documents, intimate or family matters.</p>
+<p><b>Personal</b>: everything else, including books, articles, guides, courses and program rules on sensitive topics
+(health, money, law, psychology), work, plans, notes and hobbies.</p>
+<p>Judge the file as it is. Nothing here changes Olympus; labels only measure it.</p></details>`;
 const sample = readSample(dir);
-const labels = readLabels(dir);
-const token = randomBytes(16).toString('hex');
-const byId = new Map(sample.items.map((item) => [item.id, item]));
+const ownerLabels = readLabels(dir);
+// A corrected item stays listed, so a slip of the P key can be undone.
+const items = importancePass
+  ? sample.items.filter((item) => ownerLabels.labels[item.id]?.label === 'private' || ownerLabels.labels[item.id]?.correctedInImportancePass)
+  : sample.items;
+const labels: { labels: Record<string, { label: string; at: string }> } = importancePass ? readImportance(dir) : ownerLabels;
+const save = () => (importancePass ? writeImportance(dir, labels as CalibrationImportance) : writeLabels(dir, labels as CalibrationLabels));
+/** Importance pass: P turns the item's owner label to Personal and clears its tag; any other answer undoes that. */
+function applyCorrection(id: string, label: string | null | undefined): void {
+  const at = new Date().toISOString();
+  if (label === 'personal') {
+    delete labels.labels[id];
+    ownerLabels.labels[id] = { label: 'personal', at, correctedInImportancePass: true };
+  } else if (ownerLabels.labels[id]?.correctedInImportancePass) {
+    ownerLabels.labels[id] = { label: 'private', at };
+  } else return;
+  writeLabels(dir, ownerLabels);
+}
+/** What the page shows as answered: a corrected item has no tag, so its label stands in. */
+const pageLabels = () => (importancePass
+  ? { ...labels.labels, ...Object.fromEntries(items.flatMap((item) => (ownerLabels.labels[item.id]?.correctedInImportancePass ? [[item.id, ownerLabels.labels[item.id]]] : []))) }
+  : labels.labels);
+// A fixed --token keeps the link working when the labeler is restarted.
+const token = flag('--token') ?? randomBytes(16).toString('hex');
+const byId = new Map(items.map((item) => [item.id, item]));
 
 const server = Bun.serve({
   hostname: '127.0.0.1',
@@ -38,10 +99,11 @@ const server = Bun.serve({
     if (request.method === 'GET' && route === '/') {
       return new Response(PAGE, { headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' } });
     }
+    if (request.method === 'GET' && route === '/ping') return Response.json({ ok: true });
     if (request.method === 'GET' && route === '/items') {
       return Response.json({
         root: sample.root,
-        items: sample.items.map((item) => ({
+        items: items.map((item) => ({
           id: item.id,
           name: item.name,
           folder: item.rel.includes('/') ? item.rel.slice(0, item.rel.lastIndexOf('/')) : '',
@@ -49,24 +111,27 @@ const server = Bun.serve({
           modifiedAt: item.modifiedAt,
           textChars: item.text.length,
           excerpt: item.text.slice(0, EXCERPT_CHARS),
+          source: item.source,
+          judgeSees: item.judgeSees,
         })),
-        labels: labels.labels,
+        labels: pageLabels(),
       }, { headers: { 'cache-control': 'no-store' } });
     }
     if (request.method === 'POST' && route === '/label') {
       const body = await request.json() as { id?: string; label?: string | null };
       if (!body.id || !byId.has(body.id)) return new Response('Unknown item', { status: 400 });
       if (body.label === null) delete labels.labels[body.id];
-      else if (LABELS.includes(body.label as CalibrationLabel)) {
-        labels.labels[body.id] = { label: body.label as CalibrationLabel, at: new Date().toISOString() };
+      else if (CHOICES.some((choice) => choice.label === body.label)) {
+        labels.labels[body.id] = { label: body.label!, at: new Date().toISOString() };
       } else return new Response('Unknown label', { status: 400 });
-      writeLabels(dir, labels);
+      if (importancePass) applyCorrection(body.id, body.label);
+      save();
       return Response.json({ ok: true, labeled: Object.keys(labels.labels).length });
     }
     if (request.method === 'POST' && route === '/reveal') {
       const body = await request.json() as { id?: string };
       const item = body.id ? byId.get(body.id) : undefined;
-      if (!item) return new Response('Unknown item', { status: 400 });
+      if (!item?.path) return new Response('Unknown item', { status: 400 });
       spawn('open', ['-R', item.path], { stdio: 'ignore', detached: true }).unref();
       return Response.json({ ok: true });
     }
@@ -75,7 +140,7 @@ const server = Bun.serve({
 });
 
 const address = `http://127.0.0.1:${server.port}/${token}/`;
-console.log(`Labeling ${sample.items.length} files (${Object.keys(labels.labels).length} already labeled).`);
+console.log(`Labeling ${items.length} items (${Object.keys(labels.labels).length} already labeled).`);
 console.log(`Open: ${address}`);
 console.log('Labels are saved after every click to the calibration folder. Ctrl-C to stop.');
 if (!argv.includes('--no-open')) spawn('open', [address], { stdio: 'ignore', detached: true }).unref();
@@ -116,20 +181,16 @@ kbd { font:12px ui-monospace, Menlo, monospace; opacity:.8; margin-left:4px; }
 @media (max-width: 520px) { .buttons { grid-template-columns: repeat(2, minmax(0,1fr)); } }
 </style></head>
 <body><main>
-<header><h1>Olympus calibration: Personal or Private?</h1><div class="progress" id="progress"></div></header>
+<header><h1>${HEADING}</h1><div class="progress" id="progress"></div></header>
 <div class="bar"><div id="bar"></div></div>
-<details class="rule"><summary>What counts as Private</summary>
-<p><b>Private</b>: a real person's own information. Their records and results (labs, medical, therapy), statements, bills,
-tax and bank papers, contracts and legal papers about them, filled-in forms, identity documents, intimate or family matters.</p>
-<p><b>Personal</b>: everything else, including books, articles, guides, courses and program rules on sensitive topics
-(health, money, law, psychology), work, plans, notes and hobbies.</p>
-<p>Judge the file as it is. Nothing here changes Olympus; labels only measure it.</p></details>
+${RULE}
 <div id="view"></div>
 </main>
 <script>
 const base = location.pathname.endsWith('/') ? location.pathname : location.pathname + '/';
 let items = [], labels = {}, index = 0;
-const NAMES = { personal: 'Personal', private: 'Private', unsure: 'Not sure', skip: 'Skip' };
+const CHOICES = ${JSON.stringify(CHOICES)};
+const NAMES = Object.fromEntries(CHOICES.map((c) => [c.label, c.name]));
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;' }[c]));
 const fmtSize = (n) => n > 1048576 ? (n / 1048576).toFixed(1) + ' MB' : Math.max(1, Math.round(n / 1024)) + ' KB';
 function counts() {
@@ -151,24 +212,27 @@ function render() {
   }
   const it = items[index];
   const chosen = labels[it.id]?.label;
-  view.innerHTML = '<div class="card">' +
+  const judged = it.judgeSees !== undefined;
+  view.innerHTML = '<div class="card">' + (judged ?
+    '<div class="name">' + esc(it.source) + '</div>' +
+    '<div class="meta">Exactly what the private judge reads · item ' + (index + 1) + ' of ' + items.length + '</div>' :
     '<div class="name">' + esc(it.name) + '</div>' +
     '<div class="meta">' + esc(it.folder || '(top level)') + '</div>' +
     '<div class="meta">' + fmtSize(it.sizeBytes) + ' · modified ' + esc(it.modifiedAt.slice(0, 10)) + ' · item ' + (index + 1) + ' of ' + items.length +
-      (it.textChars > it.excerpt.length ? ' · showing the first ' + it.excerpt.length.toLocaleString() + ' characters' : '') + '</div>' +
+      (it.textChars > it.excerpt.length ? ' · showing the first ' + it.excerpt.length.toLocaleString() + ' characters' : '') + '</div>') +
     (chosen ? '<div class="current">Labeled: <b>' + NAMES[chosen] + '</b></div>' : '') +
-    '<pre>' + esc(it.excerpt) + '</pre>' +
+    '<pre>' + esc(judged ? it.judgeSees : it.excerpt) + '</pre>' +
     '<div class="buttons">' +
-      ['personal', 'private', 'unsure', 'skip'].map((l, i) => '<button class="label ' + l + (chosen === l ? ' chosen' : '') + '" data-label="' + l + '">' +
-        NAMES[l] + '<kbd>' + ['P', 'X', 'U', 'S'][i] + '</kbd></button>').join('') +
+      CHOICES.map((c) => '<button class="label ' + c.style + (chosen === c.label ? ' chosen' : '') + '" data-label="' + c.label + '">' +
+        c.name + '<kbd>' + c.key + '</kbd></button>').join('') +
     '</div>' +
-    '<div class="nav"><button id="prev">← Previous</button><button id="reveal">Show in Finder<kbd>F</kbd></button>' +
+    '<div class="nav"><button id="prev">← Previous</button>' + (judged ? '' : '<button id="reveal">Show in Finder<kbd>F</kbd></button>') +
       '<button id="next">Next →</button><button id="nextOpen">Next unlabeled<kbd>N</kbd></button></div></div>';
   for (const b of view.querySelectorAll('button[data-label]')) b.onclick = () => choose(b.dataset.label);
   document.getElementById('prev').onclick = () => { index = Math.max(0, index - 1); render(); };
   document.getElementById('next').onclick = () => { index = Math.min(items.length, index + 1); render(); };
   document.getElementById('nextOpen').onclick = nextUnlabeled;
-  document.getElementById('reveal').onclick = reveal;
+  if (!judged) document.getElementById('reveal').onclick = reveal;
 }
 function nextUnlabeled() {
   for (let step = 1; step <= items.length; step += 1) {
@@ -191,16 +255,28 @@ function choose(label) {
     } catch {
       if (before) labels[it.id] = before; else delete labels[it.id];
       counts();
-      alertBox('Could not save "' + it.name + '". Is the labeler still running?');
+      stopLabeling();
     }
   });
 }
-function alertBox(text) { document.getElementById('progress').textContent = text; }
+// A lost server must stop the work at once: clicks that cannot save are wasted.
+let stopped = false;
+function stopLabeling() {
+  stopped = true;
+  document.getElementById('view').innerHTML = '<div class="card done" style="border:2px solid #c00"><div class="name" style="color:#c00">Stop: labels are not saving</div>' +
+    '<p>The labeler is not answering, so nothing you click now would be kept. This page continues by itself when it comes back.</p></div>';
+}
+setInterval(async () => {
+  let up = false;
+  try { up = (await fetch(base + 'ping', { cache: 'no-store' })).ok; } catch {}
+  if (!up && !stopped) stopLabeling();
+  if (up && stopped) location.reload();
+}, 3000);
 async function reveal() { await fetch(base + 'reveal', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: items[index].id }) }); }
 document.addEventListener('keydown', (e) => {
-  if (e.metaKey || e.ctrlKey || e.altKey || index >= items.length) return;
+  if (stopped || e.metaKey || e.ctrlKey || e.altKey || index >= items.length) return;
   const k = e.key.toLowerCase();
-  const map = { p: 'personal', x: 'private', u: 'unsure', s: 'skip' };
+  const map = Object.fromEntries(CHOICES.map((c) => [c.key.toLowerCase(), c.label]));
   if (map[k]) { e.preventDefault(); choose(map[k]); }
   else if (k === 'n') nextUnlabeled();
   else if (k === 'f') reveal();

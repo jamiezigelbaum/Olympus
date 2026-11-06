@@ -16,6 +16,10 @@ import * as childProcessModule from 'node:child_process';
 import { createRequire } from 'node:module';
 import { promisify } from 'node:util';
 import { afterAll, mock } from 'bun:test';
+import { fixDashboardComputerIdentity } from '../../src/core/computer-identity.ts';
+
+// Rendered dashboard digests must be the same on every machine that runs the tests.
+fixDashboardComputerIdentity('Test computer · tester');
 
 // One spelling per directory: a trailing slash, `..` or a symlink alias of a
 // directory compares equal to the directory itself. The kernel follows a

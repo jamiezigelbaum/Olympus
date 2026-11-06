@@ -1,3 +1,4 @@
+import type { PRIVATE_ANSWER_OPTIONS } from '../../core/privacy-language.ts';
 /**
  * The ChatGPT dashboard view-model, version 1: `structuredContent` of the
  * `olympus_dashboard` tool, rendered by `ui://olympus/dashboard`. The engine
@@ -139,6 +140,8 @@ export interface SourceProgress {
 }
 
 export interface DashboardSource {
+  /** Code-only details for support, rebuilt at the release boundary. */
+  supportDetails?: string;
   id: string;
   label: string;
   /** How a sentence names this source ("your files"); absent: the label. */
@@ -468,7 +471,7 @@ export interface OlympusHostContext {
   /** The local dashboard controls are locked: every control is disabled with the locked reason. */
   readOnly?: boolean;
   /** Computer only: the local pages the "On this computer" section opens. */
-  links?: Partial<Record<'keys' | 'agents' | 'privateAnswers' | 'connector', string>>;
+  links?: Partial<Record<'keys' | 'agents' | 'privateAnswers' | 'connector' | 'help', string>>;
   /**
    * Computer only, in the first `ui/initialize` answer only: the source an
    * open link asked to land on (core/open-targets.ts `unreadable/<source>`).
@@ -717,6 +720,8 @@ export interface ComputerUnreadableEntry {
   sourceId: string;
   files: Array<{
     name: string;
+    /** Why it could not be read: a closed code (file-extraction/unreadable-files.ts UNREADABLE_FILE_REASONS). */
+    reason?: string;
     token?: string;
     /** A file that came inside another item: the parent's label and the route to its archive or source. */
     parent?: { label?: string; route: { kind: 'archive'; archiveId: string } | { kind: 'source' } };
@@ -829,6 +834,8 @@ export const PANEL_TOOL_NAMES = [
   MODEL_RETRY_TOOL_NAME,
   'olympus_privacy_get',
   'olympus_privacy_set',
+  'olympus_privacy_questions',
+  'olympus_privacy_check',
   SYNC_SOURCE_TOOL_NAME,
 ] as const;
 
@@ -1102,6 +1109,8 @@ export interface ModelRetryResult {
 
 export const PRIVACY_GET_TOOL_NAME = 'olympus_privacy_get';
 export const PRIVACY_SET_TOOL_NAME = 'olympus_privacy_set';
+export const PRIVACY_QUESTIONS_TOOL_NAME = 'olympus_privacy_questions';
+export const PRIVACY_CHECK_TOOL_NAME = 'olympus_privacy_check';
 /** The `_meta` key carrying the privacy rules to the widget only. */
 export const PRIVACY_META_KEY = 'olympus/privacy';
 
@@ -1141,6 +1150,10 @@ export type PrivacyRuleView = PrivacyFolderRule | PrivacyLabelRule | PrivacySend
 
 /** `olympus_privacy_get {}` → `_meta[PRIVACY_META_KEY]`; also `olympus_privacy_set`'s. */
 export interface PrivacySettings {
+  /** First-run only; never returned after either setup path chooses a policy. */
+  privateAnswerChoice?: { pending: true; options: typeof PRIVATE_ANSWER_OPTIONS };
+  /** Current Private-answer mode and the same choices first run offers. */
+  privateAnswerMode?: { id: typeof PRIVATE_ANSWER_OPTIONS[number]['id'] | 'custom'; label: string; options: typeof PRIVATE_ANSWER_OPTIONS };
   /** False until the owner has saved privacy settings once. */
   configured: boolean;
   /** The owner's own words; empty until set. At most 2000 characters. */
@@ -1192,6 +1205,7 @@ export interface PrivacySummary {
  * panels cannot silently overwrite each other's always-Private rules.
  */
 export interface PrivacySetInput {
+  private_answer_mode?: typeof PRIVATE_ANSWER_OPTIONS[number]['id'];
   description?: string;
   rules?: PrivacyRuleView[];
   confirmation?: string;

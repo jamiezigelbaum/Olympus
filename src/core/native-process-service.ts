@@ -4,6 +4,18 @@ const DEFAULT_READINESS_POLL_MS = 100;
 const DEFAULT_STOP_GRACE_MS = 2_000;
 const DEFAULT_RESTART_DELAYS_MS = [250, 1_000, 5_000, 15_000, 30_000] as const;
 /**
+ * The exit code of a child's deliberate self-restart (EX_TEMPFAIL): the worker
+ * reloads itself after a model-key change or a Delete indexed data. It is a
+ * request, not a crash, so it must not climb the crash backoff.
+ */
+const SELF_RESTART_EXIT_CODE = 75;
+/**
+ * How many deliberate self-restarts in a row skip the backoff before the
+ * stable uptime resets the allowance. Past it they count as crashes, so a
+ * child stuck reloading itself still backs off instead of looping at 250 ms.
+ */
+const FAST_SELF_RESTARTS = 3;
+/**
  * How long a group whose leader has exited may stay unsignalable (EPERM) after
  * the forced kill before the supervisor stops waiting for it. On macOS a
  * process group left holding only exiting or zombie members answers every
@@ -96,6 +108,8 @@ export interface NativeProcessStartSettings {
   endpointOccupied: boolean;
   /** Per-child readiness probe. `true` means this exact instance is serving. */
   readinessProbe(child: ChildProcess): Promise<boolean>;
+  /** Safe, categorical startup diagnosis from a child exit (never stderr). */
+  startupFailure?(child: ChildProcess): NativeProcessRetryableStartError | undefined;
 }
 
 export interface NativeProcessStartInput<TSettings extends NativeProcessStartSettings> {
@@ -137,6 +151,11 @@ export interface NativeProcessServiceOptions<TSettings extends NativeProcessStar
    * exit without an exact-instance readiness receipt stays a startup failure.
    */
   restartOnCleanExit?: boolean;
+  /**
+   * Keep the lifetime and retry an unsuccessful initial launch. Defaults to
+   * false: callers such as finite-job loops own their failure/cleanup policy.
+   */
+  retryInitialStartFailure?: boolean;
   /**
    * How long a ready child must stay up before restart backoff resets.
    * Default 0: readiness resets it at once (the historical behavior). A
@@ -184,8 +203,11 @@ interface ServiceLifetime<TSettings extends NativeProcessStartSettings> {
   context: NativeProcessServiceContext;
   child: ChildProcess | undefined;
   childReady: boolean;
+  startupFailure: string | undefined;
   stopping: boolean;
   restartAttempt: number;
+  /** Deliberate self-restarts that skipped the backoff since the last stable uptime. */
+  fastRestarts: number;
   restartTimer: ReturnType<typeof setTimeout> | undefined;
   /** Resets backoff once a ready child has stayed up for `stableUptimeMs`. */
   stableTimer: ReturnType<typeof setTimeout> | undefined;
@@ -209,6 +231,9 @@ export class NativeProcessServiceStoppedError extends Error {}
  * verbatim, unlike raw spawn/HTTP failures.
  */
 export class NativeProcessConfigurationError extends Error {}
+
+/** A positively identified temporary failure safe to keep visible while retrying. */
+export class NativeProcessRetryableStartError extends Error {}
 
 /** The child accepted the forced kill but has not exited; custody is kept. */
 class NativeProcessChildAliveError extends Error {
@@ -321,11 +346,17 @@ export function createNativeProcessService<TSettings extends NativeProcessStartS
     }
   };
 
-  const scheduleRestart = (lifetime: ServiceLifetime<TSettings>): void => {
+  const scheduleRestart = (lifetime: ServiceLifetime<TSettings>, deliberate = false): void => {
     if (!isCurrent(lifetime) || lifetime.restartTimer) return;
-    const index = Math.min(lifetime.restartAttempt, Math.max(restartDelaysMs.length - 1, 0));
+    // A deliberate self-restart restarts at the first delay and leaves the
+    // crash counter alone: a Delete indexed data pressed within the stable
+    // uptime of an earlier restart used to wait out a climbed backoff (up to
+    // 30 s) before the worker came back. A child that crashes still climbs.
+    const fast = deliberate && lifetime.fastRestarts < FAST_SELF_RESTARTS;
+    if (fast) lifetime.fastRestarts += 1;
+    const index = fast ? 0 : Math.min(lifetime.restartAttempt, Math.max(restartDelaysMs.length - 1, 0));
     const delay = restartDelaysMs[index] ?? 30_000;
-    lifetime.restartAttempt += 1;
+    if (!fast) lifetime.restartAttempt += 1;
     lifetime.restartTimer = setTimeout(() => {
       lifetime.restartTimer = undefined;
       if (!isCurrent(lifetime)) return;
@@ -334,11 +365,19 @@ export function createNativeProcessService<TSettings extends NativeProcessStartS
         // Never spawn over a failed start's child that is still alive: wait
         // until its exit is confirmed, however long the cleanup takes.
         if (!await stopFailedStart(lifetime)) return;
-        reportFailure(lifetime, `Olympus ${options.label} failed to become ready.`);
-        scheduleRestart(lifetime);
+        reportStartFailure(lifetime, error);
+        if (!(error instanceof NativeProcessConfigurationError)) scheduleRestart(lifetime);
       });
     }, delay);
     lifetime.restartTimer.unref?.();
+  };
+
+  const reportStartFailure = (lifetime: ServiceLifetime<TSettings>, error: unknown): string => {
+    lifetime.startupFailure = error instanceof NativeProcessRetryableStartError ? error.message : undefined;
+    const message = error instanceof NativeProcessConfigurationError ? error.message
+      : lifetime.startupFailure ?? `Olympus ${options.label} failed to become ready.`;
+    reportFailure(lifetime, message);
+    return message;
   };
 
   /**
@@ -423,7 +462,7 @@ export function createNativeProcessService<TSettings extends NativeProcessStartS
     if (settings.endpointOccupied) {
       throw new Error(`Olympus ${options.label} endpoint is already occupied.`);
     }
-    reportFailure(lifetime, `Olympus ${options.label} is starting.`);
+    if (!lifetime.startupFailure) reportFailure(lifetime, `Olympus ${options.label} is starting.`);
     if (!isCurrent(lifetime)) throw new NativeProcessServiceStoppedError();
     const child = spawnChild(settings.command, [...settings.args], {
       env: settings.env,
@@ -473,7 +512,7 @@ export function createNativeProcessService<TSettings extends NativeProcessStartS
       ).then(() => {
         // The leader is gone, so nothing is left to keep custody of. A host
         // left alive with no child is the failure this must never produce.
-        scheduleRestart(lifetime);
+        scheduleRestart(lifetime, code === SELF_RESTART_EXIT_CODE && signal === null);
       });
     });
 
@@ -483,16 +522,21 @@ export function createNativeProcessService<TSettings extends NativeProcessStartS
       // platform errors can include command arguments and environment detail.
     });
 
-    const outcome = await waitForChildReadiness({
-      lifetime,
-      child,
-      settings,
-      isCurrent,
-      startupTimeoutMs: options.startupTimeoutMs ?? settings.startupTimeoutMs,
-      readinessPollMs,
-      restartOnCleanExit,
-      spawnFailed: () => spawnFailed,
-    });
+    let outcome: 'ready' | 'cleanCompletion';
+    try {
+      outcome = await waitForChildReadiness({
+        lifetime,
+        child,
+        settings,
+        isCurrent,
+        startupTimeoutMs: options.startupTimeoutMs ?? settings.startupTimeoutMs,
+        readinessPollMs,
+        restartOnCleanExit,
+        spawnFailed: () => spawnFailed,
+      });
+    } catch (error) {
+      throw settings.startupFailure?.(child) ?? error;
+    }
     if (!isCurrent(lifetime) || lifetime.child !== child) throw new NativeProcessServiceStoppedError();
     if (outcome === 'cleanCompletion' || (!restartOnCleanExit && !spawnFailed && isCleanExit(child))) {
       await completeCleanExit(lifetime, child);
@@ -504,12 +548,14 @@ export function createNativeProcessService<TSettings extends NativeProcessStartS
       if (lifetime.stableTimer) clearTimeout(lifetime.stableTimer);
       lifetime.stableTimer = setTimeout(() => {
         lifetime.stableTimer = undefined;
-        if (isCurrent(lifetime) && lifetime.child === child && lifetime.childReady) lifetime.restartAttempt = 0;
+        if (isCurrent(lifetime) && lifetime.child === child && lifetime.childReady) { lifetime.restartAttempt = 0; lifetime.fastRestarts = 0; }
       }, stableUptimeMs);
       lifetime.stableTimer.unref?.();
     } else {
       lifetime.restartAttempt = 0;
+      lifetime.fastRestarts = 0;
     }
+    lifetime.startupFailure = undefined;
     clearFailure(lifetime);
     lifetime.context.logger?.info?.(`Olympus ${options.label} is ready.`);
   };
@@ -527,8 +573,10 @@ export function createNativeProcessService<TSettings extends NativeProcessStartS
         context,
         child: undefined,
         childReady: false,
+        startupFailure: undefined,
         stopping: false,
         restartAttempt: 0,
+        fastRestarts: 0,
         restartTimer: undefined,
         stableTimer: undefined,
         cleanupPromise: undefined,
@@ -539,12 +587,21 @@ export function createNativeProcessService<TSettings extends NativeProcessStartS
         await launch(lifetime);
       } catch (error) {
         if (error instanceof NativeProcessServiceStoppedError) return;
-        await stopChild(lifetime);
-        const message = error instanceof NativeProcessConfigurationError
-          ? error.message
-          : `Olympus ${options.label} failed to become ready.`;
-        reportFailure(lifetime, message);
-        if (current === lifetime) current = undefined;
+        if (!options.retryInitialStartFailure) {
+          // Preserve the shared kernel's caller-owned initial failure path.
+          // A failed cleanup throws while retaining the exact child's custody.
+          await stopChild(lifetime);
+          const message = reportStartFailure(lifetime, error);
+          if (current === lifetime) current = undefined;
+          throw new NativeProcessReportedStartError(message);
+        }
+        // Keep the lifetime after an initial failure, just as after a failed
+        // restart. Cleanup retains custody until the direct child is gone.
+        if (!await stopFailedStart(lifetime)) return;
+        const message = reportStartFailure(lifetime, error);
+        if (error instanceof NativeProcessConfigurationError) {
+          if (current === lifetime) current = undefined;
+        } else scheduleRestart(lifetime);
         throw new NativeProcessReportedStartError(message);
       }
     },

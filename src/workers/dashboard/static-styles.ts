@@ -54,7 +54,7 @@ export const AGENT_CONNECT_CSS = `.agentpick { display: grid; gap: 6px; margin: 
 .remoteterms { border: 1px solid var(--line); border-radius: 8px; background: var(--panel); padding: 12px 14px; margin: 6px 0 10px; font-size: var(--fs-body); color: var(--t2); }
 .remoteterms[hidden] { display: none; }
 .remoteterms p { margin: 0 0 8px; max-width: 72ch; }
-.remoteterms .rowform { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 4px; }
+.remoteterms .rowform { margin-top: 4px; }
 .promptbox.prose { word-break: normal; overflow-wrap: anywhere; }`;
 
 /**
@@ -63,6 +63,9 @@ export const AGENT_CONNECT_CSS = `.agentpick { display: grid; gap: 6px; margin: 
  * field, Connect, and the "Get a key" link side by side).
  */
 export const MODEL_SETUP_CSS = `
+[data-first-run-computer] fieldset{border:0;padding:0}[data-first-run-computer] [data-server-checklist]{display:none}[data-first-run-computer]:has(input[value="server"]:checked) [data-server-checklist]{display:block}
+[data-first-run-privacy]{display:grid;gap:12px;margin:16px 0}[data-first-run-privacy] .modelcard{display:block;cursor:pointer}
+[data-first-run-sheet] [hidden]{display:none!important}
 .modelcards{display:grid;gap:12px;margin:16px 0 20px}.modelcard{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:16px 18px;min-width:0}
 .modelcard header{display:flex;align-items:baseline;flex-wrap:wrap;gap:2px 10px;margin:0}.modelcard header [role=status]{color:var(--t3);font-size:var(--fs-caption)}
 .modelcard header b{font-size:var(--fs-row)}.modelcard p{margin:6px 0 0;color:var(--t2)}.modelintro{color:var(--t2);margin:0 0 4px;max-width:72ch}
@@ -95,7 +98,8 @@ export const DASHBOARD_OUTSIDE_HELP_CSS = `
 .outside .ohfix li > span { flex: 1 1 200px; min-width: 0; }
 .outside .ohfix li::before { content: '!'; flex: 0 0 20px; height: 20px; border-radius: 50%; background: var(--warn-fill); color: var(--bg); font-weight: 800; font-size: var(--fs-caption); line-height: 20px; text-align: center; }
 .outside .ohfix .ohform { margin: 0; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.outside .ohfix .ohactions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.outside .ohfix .ohactions { display: flex; align-items: center; gap: 12px; }
+@media (max-width: 480px) { .outside .ohfix .ohactions { flex-direction: column; align-items: stretch; } }
 .outside .ohfix .actmsg:empty, .outside .ohpanel .actmsg:empty { display: none; }
 /* The statements, in full only until accepted. */
 .outside .ohaccept { margin: 0 0 12px; padding: 14px 18px; border: 1px solid var(--warn-line); border-radius: 10px; }

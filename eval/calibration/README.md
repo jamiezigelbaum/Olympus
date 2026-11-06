@@ -72,6 +72,108 @@ model counts as Private, because that is what you experience.
 
 Targets: 95% precision and 99% recall. It takes about 2 to 3 seconds per file.
 
+## Round 2: messages and email
+
+Round 1 is files only. Round 2 adds Telegram, WhatsApp and Gmail, labeled from
+what the private judge actually reads: the item's names and its excerpt of at
+most 1,200 characters. Its data lives in `round2/` inside the calibration
+folder, so it has its own labels and never mixes with round 1.
+
+```bash
+bun eval/calibration/sample-messages.ts --stores DIR
+```
+
+`DIR` holds copies of each source's four stores, made with `sqlite3 ".backup"`.
+It never reads a live store and prints counts only. By default it takes 100
+Telegram, 50 WhatsApp and 60 Gmail items from the last two years, at most 3 per
+chat or sender while a source has enough to spare. Secrets and anything the
+judge would not read are left out.
+
+- **Stratified:** 30% come from items the judge already called Private, so both
+  classes are big enough to measure. A score on this sample overstates recall
+  unless it is reweighted with each item's `stratum` and the populations in the
+  sample's `recipe`.
+- **Judge input:** a queued item shows the production input verbatim. An
+  answered item's input is rebuilt, because its question is gone, and
+  `judgeSeesExact` is false. A rebuilt input lacks names the stores do not keep:
+  Gmail's labels, and a Telegram forward's origin or attachment names.
+
+```bash
+bun eval/calibration/label.ts --dir ~/.local/share/olympus-calibration/round2
+bun eval/calibration/score.ts --dir ~/.local/share/olympus-calibration/round2
+```
+
+`score.ts` classifies from the stored names, so it has the same gaps as a
+rebuilt input.
+
+## Judge runs on a llama.cpp server
+
+`judge-run.ts` runs the private judge over either round and scores it against
+the labels. The system prompt, user message, secret and injection screens, and
+the answer parser are imported from production, so they cannot drift. Only
+labeled Personal and Private items are scored. Skip is left out, Not sure is
+reported on its own line as the share called Private, and `--exclude ID,ID`
+leaves out any others.
+
+```bash
+bun eval/calibration/judge-run.ts --endpoint http://127.0.0.1:8012 \
+  --dir ~/.local/share/olympus-calibration/round2 \
+  --model NAME --owner-words FILE --primed-check 20
+```
+
+- **Server:** `llama-server --jinja -np 1`. Only a loopback endpoint is accepted,
+  so reach another machine through an SSH tunnel.
+- **Modes:** `decision` (the default) pre-fills the reply up to the tier and
+  reads one token's probabilities; the verdict is Private at P(Private) of 0.5
+  or above. `full` is production's whole JSON answer.
+- **Reasoning:** off, unless `--thinking` is passed. `decision` needs it off.
+- **Priming:** each pass first loads the shared prompt. `--primed-check N` runs N
+  items primed and unprimed and reports any answer that differs.
+- **Speed:** a warm-up pass gives the verdicts, then 3 timed passes give the
+  median and range. Any verdict that moves between passes is counted.
+- **Score:** both kinds of mistake, Private and Personal recall and balanced
+  accuracy, by source, split and stratum. Round 2 also reports a score
+  reweighted to the natural mix. Its stratum sizes count every item the judge
+  could read, including kinds the sample leaves out, so the weights are close
+  rather than exact.
+
+Private items can be split by how much they matter, one pass per folder:
+
+```bash
+bun eval/calibration/label.ts --importance --dir ~/.local/share/olympus-calibration
+bun eval/calibration/label.ts --importance --dir ~/.local/share/olympus-calibration/round2
+```
+
+It shows only the items labeled Private: **I** Important, **M** Minor, **U** Not
+sure, **P** Actually Personal. The answers go to `importance.json` beside the
+labels. P instead changes that item's label in `labels.json` to Personal, marked
+`correctedInImportancePass`, and clears any tag. When `importance.json` exists, a run leads with `privateMissed`: Private
+items sent to Personal, as important, minor and untagged.
+
+Output and the saved `judge-*.json` carry ids, counts and metrics, never text.
+
+### On Venice
+
+`--venice MODEL_ID --allow-venice` runs the same items through production's
+Venice judge (the adapter the tier sniffer builds, thinking off), in full mode.
+Item text then goes to api.venice.ai, so both flags are required and the
+loopback guard stays the default. Run it only on items the owner has said may
+go to Venice. The key comes from `VENICE_API_KEY` and is never printed.
+
+```bash
+VENICE_API_KEY=... bun eval/calibration/judge-run.ts \
+  --venice google-gemma-4-26b-a4b-it --allow-venice \
+  --dir ~/.local/share/olympus-calibration/round2 --owner-words FILE --concurrency 8
+```
+
+- **Policy:** a model whose Venice privacy category is below Private stops the
+  run, as it would in production.
+- **Concurrency:** `--concurrency N`, 1 to 64. Production's sniffer allows at most 8 today; a higher value measures what a Venice key could sustain.
+- **Recorded per pass:** latency (median and 95th percentile), prompt, cached,
+  completion and reasoning tokens per item from Venice's usage report, failed
+  calls, and the key's request and token limits. Cost follows from the tokens
+  and Venice's price list.
+
 ## Venice embedding content preference (2026-10-10)
 
 Owner-approved on 2026-10-10, using only committed synthetic eval fixtures:
@@ -104,3 +206,59 @@ The runner imports the production embedding provider and exits nonzero if no
 hundredth separates the controls from the expected positive documents. It never
 prints credentials. API usage is fixture-sized (42 input embeddings per final
 measurement); the repository estimate is $0.0125 per million tokens.
+
+## Replay stored sniffer verdicts
+
+`sniffer-replay.ts` reads only explicitly supplied SQLite backup copies, never
+opens the live lane, and takes each judged item from the tier ledger. Its input
+is rebuilt through the sampler's `storedSignals` / `judgeInput` path; the
+inventory's `exactInput` says how many rebuilt inputs hash to a stored verdict,
+since the stores do not keep every name the judge saw (Gmail's labels, for one).
+Copies must not be in WAL mode (`PRAGMA journal_mode=DELETE` on the copy) or a
+read-only open fails. All six source folders use the same reader, and items
+that cannot be rebuilt are counted and never sent to the model.
+
+```bash
+bun eval/calibration/sniffer-replay.ts --stores DIR \
+  --endpoint http://127.0.0.1:8012 --model NAME --owner-words FILE \
+  --out replay.jsonl --disagreements disagreements.jsonl --deadline-seconds 600
+bun eval/calibration/sniffer-replay.ts --out replay.jsonl --report
+```
+
+Use an SSH tunnel to a llama.cpp server (`--jinja -np 1`); only literal IPv4
+loopback addresses and `::1` are allowed. `--sources a,b` selects source folder
+names; `--limit N` bounds additional comparison rows. Runs interleave sources.
+Repeating the same command resumes the checkpoint, reusing completed hash
+judgments, including when several old model/prompt/map rows share a hash.
+Changing the model, endpoint, owner words, production prompt or saved verdicts
+requires a new checkpoint. A torn final JSONL line is refused; restore or
+remove that incomplete line before resuming. Both output files are mode 600
+and appended with an fsync per row. Disagreements contain only source, hash
+and matching item IDs; the checkpoint contains no item IDs or text. Keep both
+files outside the stores directory. Raw responses and error details are never
+logged. The llama.cpp server must also have prompt/request logging disabled.
+
+The tool calls production's `completeSnifferQuestion` and
+`createDecisionSnifferModel`: same owner-context prompt, parent-context
+filter, secret/injection screens, strict parser, coverage floor and decision
+bar. Coverage and P(Private) come from the production adapter itself. Full-mode
+fallback is refused. One failed call stays undecided; replay does not invent a
+Private fail-safe or spend production's three-attempt retry budget.
+
+Reports show inventory, agreement matrices, counts and inference throughput
+(the median latency converted to items/minute, and unique hash attempts divided
+by their total call time; store reconstruction and checkpoint I/O excluded).
+Only real old Personal/Private decisions compared to real new decisions enter
+agreement percentages. Stored undecided, fail-safe and injection verdicts have
+separate matrix buckets. Errors, timeouts, parse failures, below-floor coverage,
+secret refusals, fail-safes and injection regressions are explicit, including zeros.
+Coverage and probability are null for screened inputs or transport failures.
+
+This is a decision replay, not a live resolver run: it cannot exercise owner
+approval/sovereignty discovery, queue scheduling, budgets, live revalidation,
+cache/ledger writes, retries, held lowerings or small-built-in-model record
+holds. Those require the live item state and are intentionally outside this
+read-only tool. The production transport still enforces redirects and its
+zkAPI endpoint refusal. No live stores, owner calibration data or model server
+are needed by `test/sniffer-replay.test.ts`; it uses invented SQLite fixtures
+and a loopback fake server only.

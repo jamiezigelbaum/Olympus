@@ -19,11 +19,11 @@
  */
 import type { DASHBOARD_CHATGPT_PRIVACY_COPY } from '../vocabulary.ts';
 import type { ChatGptPicker } from './picker.ts';
-import { PRIVACY_GET_TOOL_NAME, PRIVACY_META_KEY, PRIVACY_SET_TOOL_NAME } from '../../chatgpt/dashboard-contract.ts';
+import { PRIVACY_GET_TOOL_NAME, PRIVACY_META_KEY, PRIVACY_SET_TOOL_NAME, PRIVACY_QUESTIONS_TOOL_NAME, PRIVACY_CHECK_TOOL_NAME } from '../../chatgpt/dashboard-contract.ts';
 import type { privacyLogic } from '../shared-privacy-logic.ts';
 
 /** The privacy tools: get {} and set {description?, rules?}; both answer with the settings in `_meta`. */
-export const CHATGPT_PRIVACY_TOOLS = { get: PRIVACY_GET_TOOL_NAME, set: PRIVACY_SET_TOOL_NAME } as const;
+export const CHATGPT_PRIVACY_TOOLS = { get: PRIVACY_GET_TOOL_NAME, set: PRIVACY_SET_TOOL_NAME, questions: PRIVACY_QUESTIONS_TOOL_NAME, check: PRIVACY_CHECK_TOOL_NAME } as const;
 
 /** The result `_meta` key that carries the description and rule names to the widget only. */
 export const CHATGPT_PRIVACY_META_KEY = PRIVACY_META_KEY;
@@ -104,6 +104,7 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
 
   let s: Any = null;
   let session = 0;
+  let questionTimer: ReturnType<typeof setTimeout> | undefined;
 
   function handles(fix: Any): boolean {
     return !!fix && fix.tool === T.get;
@@ -114,7 +115,7 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
     if (kit.compact()) kit.fullscreen();
     s = {
       screen: 'main', returnKey, loaded: false, loading: true, error: '',
-      description: '', rules: [], pendingCount: 0,
+      description: '', rules: [], intents: [], savedRules: [], pendingCount: 0, answerChoice: null, answerMode: 'local-first',
       // The saved settings this view started from: the compare-and-swap revision,
       // the saved description, and the owner's confirmation for a save that lowers protection.
       revision: '', savedDescription: '', confirmation: '', confirmedAt: 0, confirmStep: false,
@@ -125,7 +126,9 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
       edited: false, saving: false, saveError: '', discarding: false, picking: false,
       labels: [], labelsLoading: false, labelsError: '',
       sender: '', senderError: '',
-      questionsError: '',
+      questionKey: null, questionVersion: 0, questionLoading: false, generated: null, questionAnswers: {},
+      checkKey: null, checking: false, checkResult: null, checkError: '',
+      editingDescription: false, questionsError: '', detailsOpen: false, conflictDetailsOpen: false, candidate: null, ruleKind: '',
     };
     load();
   }
@@ -167,13 +170,22 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
    * spent only by the save that uses it.
    */
   function take(data: Any): void {
+    clearTimeout(questionTimer);
+    s.questionVersion++;
+    s.questionKey = null; s.generated = null; s.questionAnswers = {};
+    s.checkKey = null; s.checkResult = null; s.checkError = ''; s.checking = false;
     s.description = typeof data.description === 'string' ? data.description : '';
     s.savedDescription = s.description;
     s.revision = typeof data.revision === 'string' ? data.revision : '';
+    s.answerChoice = data.privateAnswerChoice && data.privateAnswerChoice.pending === true && Array.isArray(data.privateAnswerChoice.options) ? data.privateAnswerChoice
+      : data.privateAnswerMode && Array.isArray(data.privateAnswerMode.options) ? data.privateAnswerMode : null;
+    if (s.answerChoice && typeof s.answerChoice.id === 'string') s.answerMode = s.answerChoice.id;
     s.edited = false;
     s.confirmStep = false;
     // `saved`: removing it lowers protection, so the save needs the owner's confirmation.
     s.rules = data.rules.filter(validRule).map(viewRule);
+    s.savedRules = s.rules.map(ruleOut);
+    s.intents = [];
     s.hidden = data.rules.filter((rule: Any) => !validRule(rule));
     s.server = null;
     s.pendingCount = typeof data.pendingCount === 'number' && isFinite(data.pendingCount) ? Math.max(0, data.pendingCount) : 0;
@@ -199,7 +211,8 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
       }
       take(data);
       s.loaded = true;
-      kit.render('privacy:description');
+      if (s.answerChoice?.pending) s.screen = 'answers';
+      kit.render(s.screen === 'answers' ? 'privacy:answer:local-first' : 'privacy:title');
     }, () => {
       if (mine !== session || !s) return;
       s.loading = false;
@@ -235,13 +248,53 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
 
   /** Whether Save has anything to do: a change, or questions whose shown choices are not yet in the description. */
   function canSave(): boolean {
-    return !s.server && (s.edited || L.withShownAnswers(s.description) !== s.description);
+    return !s.server && !s.questionLoading && !s.checking && (s.edited || (s.editingDescription && askedQuestions().length > 0));
   }
 
   function addRule(rule: Any): void {
+    if (s.saving || s.server) return;
+    // Save only the addition against the saved revision. Other draft edits may
+    // lower protection and must retain their separate confirmation.
+    const baseline = s.savedRules.slice().concat(s.hidden);
+    if (!s.savedRules.some((item: Any) => identity(item) === identity(rule))) baseline.push(ruleOut(rule));
+    // Record the choice before sending: failures and conflicts do not erase it.
     L.addTo(s.rules, rule);
+    L.setIntent(s.intents, rule, true);
     changed();
+    const draft = { intents: s.intents, description: s.description, savedDescription: s.savedDescription };
+    const args: Any = { description: s.savedDescription, rules: baseline };
+    if (s.revision) args.revision = s.revision;
+    s.saving = true;
     s.saveError = '';
+    const mine = session;
+    kit.call(T.set, args).then((result) => {
+      if (mine !== session || !s) return;
+      s.saving = false;
+      const data = settings(result);
+      const content = result && result.structuredContent;
+      if (data && content && content.status === 'conflict') return conflict(data);
+      if (!data || !content || content.status !== 'saved') {
+        s.saveError = W.addRuleFailed;
+        kit.render('privacy:save');
+        return;
+      }
+      // This immediate save covers only this addition, never other pending edits.
+      if (!L.satisfies([{ rule, present: true }], data.rules)) return conflict(data);
+      draft.intents = draft.intents.filter((intent: Any) => identity(intent.rule) !== identity(rule));
+      take(data);
+      s.intents = draft.intents;
+      const replayed = L.replay(draft, s.rules);
+      s.rules = replayed.rules;
+      if (replayed.description !== null) s.description = replayed.description;
+      s.edited = s.intents.length > 0 || s.description !== s.savedDescription;
+      kit.remember(data.rules.filter(validRule).length);
+      kit.render('privacy:add');
+    }, () => {
+      if (mine !== session || !s) return;
+      s.saving = false;
+      s.saveError = W.addRuleFailed;
+      kit.render('privacy:save');
+    });
   }
 
   /** Saved rules this save would drop, and whether it changes the saved description: both lower protection. */
@@ -254,12 +307,16 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
 
   /** Save: a save that lowers protection first asks inline, then carries the owner's confirmation. */
   function save(): void {
-    if (!s || !s.loaded || s.saving || !canSave()) return;
-    // The questions' choices as shown, defaults included, become their sentences before anything is decided.
-    const shown = L.withShownAnswers(s.description);
-    if (shown !== s.description) {
-      s.description = shown;
-      changed();
+    if (!s || !s.loaded || s.saving) return;
+    if (s.server) {
+      kit.render('privacy:conflict:apply');
+      return;
+    }
+    if (!canSave()) return;
+    if (!settleQuestions()) return;
+    if (s.generated && !s.generated.fallback && s.checkKey !== s.description) {
+      runCheck();
+      return;
     }
     if (lowers()) {
       s.confirmStep = true;
@@ -300,13 +357,20 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
       }
       const data = settings(result);
       if (data && content && content.status === 'conflict') return conflict(data);
-      if (!data || result.isError) {
+      if (!data || !content || content.status !== 'saved') {
         s.saveError = W.saveFailed;
         kit.render('privacy:save');
         return;
       }
       if (confirmed) s.confirmation = '';
+      if (!L.satisfies(s.intents, data.rules) || data.description !== args.description) return conflict(data);
       kit.remember(data.rules.filter(validRule).length);
+      take(data);
+      if (s.answerChoice?.pending) {
+        s.screen = 'answers';
+        kit.render('privacy:answer:local-first');
+        return;
+      }
       leave(W.saved, true);
     }, () => {
       if (mine !== session || !s) return;
@@ -332,8 +396,9 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
   function applyAgain(): void {
     const server = s.server;
     if (!server) return;
-    const draft = { rules: s.rules, description: s.description, savedDescription: s.savedDescription };
+    const draft = { intents: s.intents, description: s.description, savedDescription: s.savedDescription };
     take(server);
+    s.intents = draft.intents;
     const replayed = L.replay(draft, s.rules);
     s.rules = replayed.rules;
     s.confirmStep = false;
@@ -348,7 +413,7 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
     const server = s.server;
     if (!server) return;
     take(server);
-    kit.render('privacy:description');
+    kit.render('privacy:add');
   }
 
   /** The conflict box: what happened, what is saved now, and the two ways on. */
@@ -362,7 +427,9 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
     const rules = s.server.rules.filter(validRule);
     if (!rules.length) add(list, el('li', '', W.rulesEmpty));
     for (const rule of rules) add(list, el('li', '', displayOf(rule) + ' · ' + kindText(rule)));
-    add(box, list, add(el('div', 'actions'),
+    const detail = disclosure(true);
+    add(detail, list);
+    add(box, detail, add(el('div', 'actions'),
       kit.button(W.applyAgain, 'privacy:conflict:apply', applyAgain, 'main'),
       kit.button(W.discardMine, 'privacy:conflict:discard', discardMine, 'plain')));
     return box;
@@ -460,15 +527,16 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
       back: W.backToPrivacy,
       title: W.folderTitle,
       intro: W.folderIntro,
-      makePrivate: W.makePrivate,
-      makePrivateFor: W.makePrivateFor,
+      makePrivate: W.select,
+      makePrivateFor: W.selectFor,
+      stepSheet: { step: W.stepPick, next: W.next, back: W.sheetBack },
       alreadyPrivate: W.alreadyPrivate,
     }, taken, (folder) => {
       if (mine !== session || !s) return;
       s.picking = false;
-      s.screen = 'main';
-      if (folder) addRule({ kind: 'folder', source_id: id, key: folder.key, display: folder.name, removed: false });
-      kit.render('privacy:add:folder');
+      s.screen = 'kinds';
+      if (folder) reviewRule({ kind: 'folder', source_id: id, key: folder.key, display: folder.name, removed: false });
+      kit.render(folder ? 'privacy:sheet:confirm' : 'privacy:add:folder');
     });
   }
 
@@ -507,7 +575,6 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
   // ---- add a sender ------------------------------------------------------
   function addSender(): void {
     s.screen = 'sender';
-    s.sender = '';
     s.senderError = '';
     kit.render('privacy:sender');
   }
@@ -525,9 +592,7 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
       kit.render('privacy:sender');
       return;
     }
-    addRule(rule);
-    s.screen = 'main';
-    kit.render('privacy:add:sender');
+    reviewRule(rule);
   }
 
   // ---- views -------------------------------------------------------------
@@ -537,11 +602,12 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
   }
 
   function ruleRow(rule: Any, index: number): HTMLElement {
-    const li = el('li', 'frow pick rule');
+    const li = el('li', 'rule rule-chip');
     if (rule.removed) {
       add(li, el('p', 'fname leaf muted', fill(W.removed, { name: rule.display })));
       const undo = kit.button(W.undo, 'privacy:rule:' + index, s.saving ? null : () => {
         rule.removed = false;
+        L.setIntent(s.intents, rule, true);
         changed();
         kit.render('privacy:rule:' + index);
       }, 'plain');
@@ -549,78 +615,190 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
       return add(li, undo);
     }
     add(li, add(el('p', 'fname leaf two-line'), el('span', 'two-top', rule.display), el('span', 'two-bottom', kindText(rule))));
-    const remove = kit.button(W.remove, 'privacy:rule:' + index, s.saving ? null : () => {
+    const remove = kit.button('×', 'privacy:rule:' + index, s.saving ? null : () => {
       rule.removed = true;
+      L.setIntent(s.intents, rule, false);
       changed();
       s.saveError = '';
-      kit.render('privacy:rule:' + index);
+      save();
     }, 'plain');
     remove.setAttribute('aria-label', fill(W.removeFor, { name: rule.display }));
     return add(li, remove);
   }
 
-  /**
-   * The follow-up questions for the broad areas the description names: each
-   * choice is a pair of radio buttons, Private or Fine to share, at its
-   * default or the answer the description already carries. A change rewrites
-   * that area's sentence in the description, so what is saved is visible text
-   * (shared-privacy-logic.ts answerTopic), and marks the draft changed.
-   */
-  function questionsSection(): HTMLElement | null {
-    const Q = W.questions;
-    const asked = L.questions(s.description);
-    if (!asked.length) return null;
-    const section = add(el('section', 'fsection questions'), el('h2', '', Q.title), el('p', 'reason', Q.intro));
-    for (const topic of asked) {
-      const heading = el('h3', 'qtitle', topic.question);
-      heading.id = 'privacy-q-' + topic.id;
-      const group = add(el('div', 'qtopic'), heading);
-      for (const option of topic.options) {
-        const id = 'privacy-q-' + topic.id + '-' + option.id;
-        const row = el('div', 'qopt');
-        row.setAttribute('role', 'radiogroup');
-        row.setAttribute('aria-labelledby', heading.id + ' ' + id);
-        const name = el('span', 'qlabel', option.label);
-        name.id = id;
-        const choices = el('span', 'qchoices');
-        for (const side of ['private', 'share'] as const) {
-          const choice = el('label', 'qchoice');
-          const input = el('input') as HTMLInputElement;
-          input.type = 'radio';
-          input.name = id;
-          input.value = side;
-          input.checked = option.side === side;
-          input.disabled = s.saving;
-          input.setAttribute('data-key', 'privacy:q:' + topic.id + ':' + option.id + ':' + side);
-          input.addEventListener('change', () => {
-            if (!input.checked || !s) return;
-            const next = L.answerTopic(s.description, topic.id, option.id, side);
-            // Too long to add: nothing changes, the radio redraws as it was, and the owner is told why.
-            s.questionsError = next.fits ? '' : Q.tooLong;
-            if (next.fits) {
-              s.description = next.description;
-              changed();
-              s.saveError = '';
-            }
-            kit.render('privacy:q:' + topic.id + ':' + option.id + ':' + side);
-          });
-          add(choices, add(choice, input, el('span', '', side === 'private' ? Q.private : Q.share)));
-        }
-        add(group, add(row, name, choices));
-      }
-      add(section, group);
+  /** All draft inference stays in this session. Debounce and discard stale replies. */
+  function requestQuestions(): void {
+    if (!s || !s.loaded || s.questionKey === s.description) return;
+    clearTimeout(questionTimer);
+    s.questionKey = s.description;
+    const description = s.description;
+    const version = ++s.questionVersion;
+    const mine = session;
+    s.questionLoading = true;
+    s.checkKey = null; s.checkResult = null; s.checkError = '';
+    questionTimer = setTimeout(() => {
+      if (!s || mine !== session || version !== s.questionVersion) return;
+      kit.call(T.questions, { description, confirmation: s.confirmation }).then(result => {
+        if (!s || mine !== session || version !== s.questionVersion) return;
+        const data = result && !result.isError && result._meta && result._meta[kit.config.metaKey];
+        s.generated = data && !data.fallback && Array.isArray(data.questions) ? data : fallbackQuestions(description);
+        s.questionLoading = false;
+        s.questionAnswers = {};
+        kit.render();
+      }, () => {
+        if (!s || mine !== session || version !== s.questionVersion) return;
+        s.generated = fallbackQuestions(description); s.questionLoading = false;
+        s.questionAnswers = {};
+        kit.render();
+      });
+    }, 450);
+  }
+
+  function fallbackQuestions(description: string): Any {
+    return { fallback: true, questions: L.questions(description).flatMap(topic => topic.options.map(option => ({
+      id: topic.id + ':' + option.id, question: option.label, topic: option.label, side: option.side,
+    }))) };
+  }
+
+  function askedQuestions(): Any[] {
+    return s.generated ? s.generated.questions : [];
+  }
+
+  /** The topic an answer writes for a question. */
+  function topicOf(question: Any): string {
+    return L.cleanTopic(String(question.topic || question.question));
+  }
+
+  /** The side a question shows: this session's answer, else what the description's answer lines already say. */
+  function shownSide(question: Any): string {
+    return s.questionAnswers[question.id] || L.savedAnswers(s.description)[topicOf(question)] || '';
+  }
+
+  /** Rewrite the answer lines; at Save, questions still unanswered anywhere count as Private. */
+  function writeAnswers(answers: Any, skippedPrivate: boolean): { description: string; fits: boolean } {
+    const byTopic: Record<string, 'private' | 'share'> = {};
+    const unanswered: Record<string, 'private' | 'share'> = {};
+    for (const question of askedQuestions()) {
+      if (answers[question.id]) byTopic[topicOf(question)] = answers[question.id];
+      else if (skippedPrivate) unanswered[topicOf(question)] = 'private';
     }
-    if (s.questionsError) {
-      const message = el('p', 'reason error', s.questionsError);
-      message.setAttribute('role', 'alert');
-      add(section, message);
+    return L.answerLines(s.description, byTopic, unanswered);
+  }
+
+  function chooseQuestion(question: Any, side: 'private' | 'share'): void {
+    const answers = { ...s.questionAnswers, [question.id]: side };
+    const next = writeAnswers(answers, false);
+    s.questionsError = next.fits ? '' : W.questions.tooLong;
+    if (next.fits) {
+      s.description = next.description; s.questionKey = s.description;
+      s.questionAnswers = answers;
+      s.checkKey = null; s.checkResult = null; s.checkError = '';
+      changed();
+    }
+    kit.render('privacy:q:' + question.id + ':' + side);
+  }
+
+  function settleQuestions(): boolean {
+    const next = writeAnswers(s.questionAnswers, true);
+    if (!next.fits) { s.questionsError = W.questions.tooLong; kit.render(); return false; }
+    if (next.description !== s.description) {
+      s.description = next.description;
+      changed();
+    }
+    s.questionKey = s.description;
+    return true;
+  }
+
+  function runCheck(sample?: string): void {
+    if (!s || s.checking || s.questionLoading || (!sample && !settleQuestions())) return;
+    const description = s.description;
+    const mine = session;
+    s.checking = true; s.checkError = '';
+    kit.render('privacy:check:title');
+    kit.call(T.check, { description, confirmation: s.confirmation, ...(sample ? { sample } : {}) }).then(result => {
+      if (!s || mine !== session) return;
+      s.checking = false;
+      if (s.description !== description) { kit.render(); return; }
+      const data = result && !result.isError && result._meta && result._meta[kit.config.metaKey];
+      s.checkKey = description;
+      if (data && Array.isArray(data.samples)) {
+        if (sample && s.checkResult) {
+          s.checkResult.private = data.private; s.checkResult.share = data.share;
+          s.checkResult.samples = s.checkResult.samples.map((old: Any) => old.name === sample ? { ...data.samples[0], correction: old.correction } : old);
+        } else s.checkResult = data;
+      } else { s.checkResult = null; s.checkError = W.questions.checkFailed; }
+      kit.render();
+    }, () => {
+      if (!s || mine !== session) return;
+      s.checking = false; s.checkKey = description; s.checkResult = null; s.checkError = W.questions.checkFailed;
+      kit.render();
+    });
+  }
+
+  function checkSection(): HTMLElement | null {
+    if (!s.generated || s.generated.fallback) return null;
+    const Q = W.questions;
+    const title = el('h2', '', Q.checkTitle);
+    title.setAttribute('tabindex', '-1'); title.setAttribute('data-key', 'privacy:check:title');
+    const section = add(el('section', 'fsection'), title);
+    add(section, kit.button(s.checking ? Q.checking : Q.check, 'privacy:check',
+      s.checking || s.questionLoading || s.saving ? null : () => runCheck(), 'plain'));
+    if (s.checkError) add(section, el('p', 'reason', s.checkError));
+    if (s.checkResult) for (const side of ['private', 'share'] as const) {
+      add(section, el('h3', '', side === 'private' ? Q.private : Q.share));
+      const list = el('ul');
+      for (const text of s.checkResult[side]) add(list, el('li', '', text));
+      add(section, list, el('p', 'strong', side === 'private' ? Q.privateExamples : Q.shareExamples));
+      s.checkResult.samples.filter((sample: Any) => sample.side === side).forEach((sample: Any, index: number) => {
+        const row = add(el('div', 'qopt'), el('span', 'qlabel', sample.name));
+        add(row, kit.button(Q.wrong, 'privacy:wrong:' + side + ':' + index, s.checking || s.saving ? null : () => {
+          // The correction joins the answer lines, on the other side from Olympus's judgment.
+          const next = L.answerLines(s.description, { [sample.name]: side === 'private' ? 'share' : 'private' });
+          s.questionsError = next.fits ? '' : Q.tooLong;
+          if (next.fits) {
+            s.description = next.description; s.questionKey = s.description;
+            changed(); runCheck(sample.name);
+          } else kit.render();
+        }, 'plain'));
+        add(section, row);
+      });
     }
     return section;
   }
 
+  function questionsSection(): HTMLElement | null {
+    requestQuestions();
+    const Q = W.questions;
+    const section = add(el('section', 'fsection questions'), el('h2', '', Q.title), el('p', 'reason', Q.intro));
+    if (s.questionLoading) {
+      const loading = el('p', 'reason', Q.loading); loading.setAttribute('role', 'status');
+      return add(section, loading);
+    }
+    if (s.generated?.fallback) add(section, el('p', 'reason', Q.fallback));
+    for (const question of askedQuestions()) {
+      const row = add(el('div', 'qopt'), el('span', 'qlabel', question.question));
+      if (question.quote) add(row, el('q', 'reason', question.quote));
+      const pair = el('span', 'qchoices');
+      pair.setAttribute('role', 'group'); pair.setAttribute('aria-label', question.question);
+      for (const side of ['private', 'share'] as const) {
+        const selected = shownSide(question) === side;
+        const control = kit.button(side === 'private' ? Q.private : Q.share, 'privacy:q:' + question.id + ':' + side,
+          s.saving || s.checking ? null : () => chooseQuestion(question, side), selected ? 'main' : 'plain');
+        control.setAttribute('aria-pressed', String(selected));
+        add(pair, control);
+      }
+      add(section, add(row, pair));
+    }
+    if (s.questionsError) { const error = el('p', 'error', s.questionsError); error.setAttribute('role', 'alert'); add(section, error); }
+    return section;
+  }
+
   function mainView(page: HTMLElement): void {
-    add(page, el('h1', '', W.title));
-    add(page, el('p', 'muted intro', W.intro));
+    const title = el('h1', '', W.title);
+    title.setAttribute('tabindex', '-1');
+    title.setAttribute('data-key', 'privacy:title');
+    add(page, title, el('p', 'muted intro', W.intro));
+
     if (s.server) add(page, conflictBox());
     if (s.error) {
       const error = el('div', 'banner');
@@ -637,76 +815,112 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
       }
       return;
     }
-    const field = el('label', 'field');
-    add(field, el('span', 'field-label', W.descriptionLabel));
-    const area = el('textarea', 'text') as HTMLTextAreaElement;
-    area.rows = 4;
-    area.placeholder = W.descriptionPlaceholder;
-    area.value = s.description;
-    area.disabled = s.saving;
-    area.setAttribute('data-key', 'privacy:description');
-    area.setAttribute('aria-describedby', 'privacy-description-shared');
-    const asked = L.questionsKey(s.description);
-    area.addEventListener('input', () => {
-      s.description = area.value;
-      const open = s.confirmStep;
-      const could = canSave();
-      changed();
-      // Redrawn (caret kept) when the step closes, a too-long note clears, or
-      // what the questions show changes (an area, or an answer edited by hand).
-      const noted = !!s.questionsError;
-      s.questionsError = '';
-      if (open || noted || could !== canSave() || L.questionsKey(s.description) !== asked) kit.render('privacy:description');
-    });
-    add(page, add(field, area));
+    if (s.answerChoice && !s.answerChoice.pending) {
+      add(page, add(el('section', 'fsection'), el('h2', '', 'Private-answer mode'), el('p', '', s.answerChoice.label || 'Custom Private-answer mode'), kit.button('Change', 'privacy:answer:change', () => { s.screen = 'answers'; kit.render('privacy:answer:' + s.answerMode); }, 'plain')));
+    }
+    const description = add(el('section', 'fsection privacy-description'), el('h2', '', W.descriptionLabel));
+    const summary = el('p', 'privacy-summary', s.description);
+    summary.setAttribute('data-key', 'privacy:summary');
+    const openEditor = s.saving ? null : () => {
+      s.editingDescription = true;
+      kit.render('privacy:description');
+    };
+    if (!s.editingDescription && s.description) {
+      add(description, summary, kit.button(W.edit, 'privacy:description:edit', openEditor, 'plain'));
+    } else if (!s.editingDescription) {
+      // Nothing written yet: say so, and show the example greyed so it never reads as saved text.
+      summary.textContent = W.descriptionEmpty;
+      add(description, summary, el('p', 'muted privacy-example', W.descriptionPlaceholder),
+        kit.button(W.descriptionStart, 'privacy:description:edit', openEditor, 'main'));
+    } else {
+      const field = el('label', 'field');
+      const area = el('textarea', 'text') as HTMLTextAreaElement;
+      area.rows = 4;
+      area.placeholder = W.descriptionPlaceholder;
+      area.value = s.description;
+      area.disabled = s.saving;
+      area.setAttribute('aria-label', W.descriptionLabel);
+      area.setAttribute('data-key', 'privacy:description');
+      area.setAttribute('aria-describedby', 'privacy-description-shared');
+      const asked = L.questionsKey(s.description);
+      area.addEventListener('input', () => {
+        s.description = area.value;
+        const wasLoading = s.questionLoading;
+        requestQuestions();
+        const open = s.confirmStep;
+        const could = canSave();
+        changed();
+        s.edited = s.intents.length > 0 || s.description !== s.savedDescription;
+        // Preserve the caret unless questions, confirmation or save availability change.
+        const noted = !!s.questionsError;
+        s.questionsError = '';
+        if (!wasLoading || open || noted || could !== canSave() || L.questionsKey(s.description) !== asked) kit.render('privacy:description');
+      });
+      add(description, add(field, area));
+    }
     const shared = el('p', 'reason field-note', W.descriptionShared);
     shared.id = 'privacy-description-shared';
-    add(page, shared);
+    add(description, shared);
+    add(page, description);
     const questions = questionsSection();
     if (questions) add(page, questions);
+    const readback = checkSection();
+    if (readback) add(page, readback);
+    const details = disclosure();
+    add(details, el('p', 'reason', W.judgingDetails));
 
     const rules = add(el('section', 'fsection'), el('h2', '', W.rulesTitle));
     if (s.rules.length) {
-      const listNode = el('ul', 'flist');
+      const listNode = el('ul', 'rule-chips');
       s.rules.forEach((rule: Any, index: number) => add(listNode, ruleRow(rule, index)));
       add(rules, listNode);
     } else add(rules, el('p', 'muted fempty', W.rulesEmpty));
-    const folders = folderSources().length > 0 && !!kit.picker;
-    const gmail = gmailConnected();
-    add(rules, add(el('div', 'actions add-rules'),
-      kit.button(W.addFolder, 'privacy:add:folder', folders && !s.saving ? addFolder : null, 'plain'),
-      kit.button(W.addLabel, 'privacy:add:label', gmail && !s.saving ? addLabel : null, 'plain'),
-      kit.button(W.addSender, 'privacy:add:sender', s.saving ? null : addSender, 'plain')));
-    if (!folders) add(rules, el('p', 'reason', W.needFolderSource));
-    if (!gmail) add(rules, el('p', 'reason', W.needGmail));
+    add(rules, kit.button(W.addRule, 'privacy:add', !s.saving && !s.server ? () => {
+      s.screen = 'kinds'; s.ruleKind = ''; s.candidate = null; s.sender = ''; s.senderError = '';
+      kit.render('privacy:add:folder');
+    } : null, 'plain'));
+    if (s.server) add(rules, el('p', 'reason', W.conflictAddBlocked));
     add(rules, el('p', 'reason', W.namesShared));
-    add(page, rules);
+    if (!folderSources().length || !kit.picker) add(rules, el('p', 'reason', W.needFolderSource));
+    if (!gmailConnected()) add(rules, el('p', 'reason', W.needGmail));
+    add(page, rules, details);
 
     const footer = el('section', 'picker-footer');
-    if (s.pendingCount > 0) {
-      add(footer, el('p', '', fill(s.pendingCount === 1 ? W.pending.one : W.pending.many, { n: kit.count(s.pendingCount) })));
-    }
+    const saveHost = s.editingDescription || s.description !== s.savedDescription ? description : page;
     // The confirmation step stands in for Save while it is open (and while the change still lowers protection).
     if (s.confirmStep && !s.saving && lowers()) {
-      add(page, add(footer, confirmBox()));
+      add(saveHost, add(footer, confirmBox()));
       return;
     }
-    const row = el('div', 'actions');
+    // Rule writes apply immediately. Only description/question edits get a save bar.
+    const pendingDescription = s.description !== s.savedDescription;
+    const wrap = el('div', 'save');
     if (s.saving) {
       const busy = kit.button(W.saving, 'privacy:save', null, 'main');
       busy.setAttribute('aria-busy', 'true');
-      add(row, busy);
-    } else {
-      const button = kit.button(W.save, 'privacy:save', canSave() ? save : null, 'main');
-      // A Save with nothing to do says why it is off, as the folder picker's does.
-      if (!canSave()) button.setAttribute('aria-describedby', 'privacy-save-reason');
-      add(row, button);
+      add(wrap, busy);
+    } else if (!s.server && (s.editingDescription || pendingDescription)) {
+      add(wrap, add(el('div', 'actions'),
+        kit.button(W.save, 'privacy:save', canSave() ? save : null, 'main'),
+        kit.button(W.cancel, 'privacy:cancel', () => {
+          clearTimeout(questionTimer); s.questionVersion++;
+          s.questionKey = null; s.generated = null; s.questionAnswers = {};
+          s.description = s.savedDescription;
+          s.editingDescription = false;
+          s.questionsError = '';
+          s.confirmStep = false;
+          s.saveError = '';
+          s.edited = s.intents.length > 0;
+          kit.render('privacy:description:edit');
+        }, 'plain')));
+    } else if (!s.server && s.intents.length) {
+      // A failed addition or cancelled removal still needs its existing retry path.
+      add(wrap, kit.button(W.applyAgain, 'privacy:save', save, 'main'));
     }
-    add(row, kit.button(W.cancel, 'privacy:cancel', s.saving ? null : backOut, 'plain'));
-    const wrap = add(el('div', 'save'), row);
-    if (!s.saving && !canSave()) {
+    if (s.editingDescription && !s.saving && !s.server && !canSave()) {
       const reason = el('p', 'reason', W.nothingToSave);
       reason.id = 'privacy-save-reason';
+      wrap.querySelector('[data-key="privacy:save"]')?.setAttribute('aria-describedby', reason.id);
       add(wrap, reason);
     }
     if (s.saveError) {
@@ -714,7 +928,7 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
       error.setAttribute('role', 'alert');
       add(wrap, error);
     }
-    add(page, add(footer, wrap));
+    if (wrap.childNodes.length) add(saveHost, add(footer, wrap));
   }
 
   function sourcesView(page: HTMLElement): void {
@@ -760,12 +974,11 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
       if (kept().some((other: Any) => other.kind === 'label' && other.source_id === mail && other.key === label.id)) {
         add(li, kit.button(W.alreadyPrivate, 'privacy:label:' + index, null, 'plain'));
       } else {
-        const control = kit.button(W.makePrivate, 'privacy:label:' + index, () => {
-          addRule(rule);
-          s.screen = 'main';
-          kit.render('privacy:add:label');
+        const control = kit.button(s.candidate && identity(s.candidate) === identity(rule) ? W.selected : W.select, 'privacy:label:' + index, () => {
+          s.candidate = rule;
+          kit.render('privacy:sheet:next');
         }, 'plain');
-        control.setAttribute('aria-label', fill(W.makePrivateFor, { name }));
+        control.setAttribute('aria-label', fill(W.selectFor, { name }));
         add(li, control);
       }
       add(listNode, li);
@@ -804,7 +1017,156 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
       add(field, error);
     }
     add(page, field);
-    add(page, add(el('div', 'actions'), kit.button(W.senderAdd, 'privacy:sender:add', submitSender, 'main')));
+
+  }
+
+  function disclosure(conflict = false): HTMLElement {
+    const details = el('details', 'privacy-details') as HTMLDetailsElement;
+    const key = conflict ? 'conflictDetailsOpen' : 'detailsOpen';
+    details.open = s[key];
+    const summary = el('summary', '', W.details);
+    summary.setAttribute('data-key', conflict ? 'privacy:conflict:details' : 'privacy:details');
+    add(details, summary);
+    details.addEventListener('toggle', () => { if (s) s[key] = details.open; });
+    return details;
+  }
+
+  function reviewRule(rule: Any): void {
+    s.candidate = rule;
+    s.screen = 'review';
+    kit.render('privacy:sheet:confirm');
+  }
+
+  function kindsView(page: HTMLElement): void {
+    add(page, el('h1', '', W.addRule), el('p', 'muted intro', W.kindPrompt));
+    const folders = folderSources().length > 0 && !!kit.picker;
+    const choices = el('div', 'privacy-kinds');
+    choices.setAttribute('role', 'group');
+    choices.setAttribute('aria-label', W.kindPrompt);
+    for (const [kind, label, enabled] of [
+      ['folder', W.addFolder, folders], ['label', W.addLabel, gmailConnected()], ['sender', W.addSender, true],
+    ] as const) {
+      const button = kit.button(label, 'privacy:add:' + kind, enabled ? () => {
+        s.candidate = null; s.ruleKind = kind; kit.render('privacy:add:' + kind);
+      } : null, 'plain');
+      button.setAttribute('aria-pressed', String(s.ruleKind === kind));
+      add(choices, button);
+    }
+    add(page, choices);
+    if (!folders) add(page, el('p', 'reason', W.needFolderSource));
+    if (!gmailConnected()) add(page, el('p', 'reason', W.needGmail));
+  }
+
+  function sheetBack(): void {
+    if (!s || s.saving) return;
+    if (s.screen === 'review') {
+      if (s.ruleKind === 'sender') s.screen = 'sender';
+      else if (s.ruleKind === 'label') s.screen = 'labels';
+      else { addFolder(); return; }
+    } else s.screen = s.screen === 'kinds' ? 'main' : 'kinds';
+    kit.render(s.screen === 'main' ? 'privacy:add' : 'privacy:sheet:back');
+  }
+
+  function sheetView(page: HTMLElement): void {
+    const step = s.screen === 'kinds' ? 1 : s.screen === 'review' ? 3 : 2;
+    add(page, el('p', 'muted', fill(W.step, { step })));
+    const progress = el('progress') as HTMLProgressElement;
+    progress.max = 3; progress.value = step;
+    progress.setAttribute('aria-label', fill(W.step, { step }));
+    add(page, progress);
+    if (s.screen === 'kinds') kindsView(page);
+    else if (s.screen === 'sources') sourcesView(page);
+    else if (s.screen === 'labels') labelsView(page);
+    else if (s.screen === 'sender') senderView(page);
+    else {
+      add(page, el('h1', '', W.confirmRule), el('p', '', s.candidate.display), el('p', 'reason', kindText(s.candidate)), el('p', 'reason', W.namesShared));
+    }
+    const row = add(el('div', 'actions privacy-sheet-actions'), kit.button(W.sheetBack, 'privacy:sheet:back', sheetBack, 'plain'));
+    if (s.screen === 'kinds') add(row, kit.button(W.next, 'privacy:sheet:next', s.ruleKind ? () => {
+      if (s.ruleKind === 'folder') addFolder();
+      else if (s.ruleKind === 'label') addLabel();
+      else addSender();
+    } : null, 'main'));
+    if (s.screen === 'sender') add(row, kit.button(W.next, 'privacy:sender:add', submitSender, 'main'));
+    if (s.screen === 'labels') add(row, kit.button(W.next, 'privacy:sheet:next', s.candidate ? () => reviewRule(s.candidate) : null, 'main'));
+    if (s.screen === 'review') add(row, kit.button(W.makePrivate, 'privacy:sheet:confirm', () => {
+      if (!s || s.screen !== 'review' || s.saving || s.server) return;
+      const rule = s.candidate; s.screen = 'main'; addRule(rule); kit.render('privacy:add');
+    }, 'main'));
+    add(page, row);
+  }
+
+  function saveAnswerMode(): void {
+    if (!s || s.saving || !s.answerChoice) return;
+    if (!s.confirmation || Date.now() - s.confirmedAt > CONFIRMATION_FRESH_MS) {
+      renewConfirmation(saveAnswerMode);
+      return;
+    }
+    s.saving = true;
+    s.saveError = '';
+    kit.render('privacy:answer:save');
+    const mine = session;
+    kit.call(T.set, { private_answer_mode: s.answerMode, revision: s.revision, confirmation: s.confirmation }).then(result => {
+      if (mine !== session || !s) return;
+      s.saving = false;
+      const data = settings(result);
+      const content = result && result.structuredContent;
+      if (data && content && content.status === 'conflict') {
+        // Nothing was applied. Show what is saved now, keep the requested
+        // mode selected, and let the person save it again on purpose.
+        const wanted = s.answerMode;
+        take(data);
+        s.answerMode = wanted;
+        s.saveError = W.conflict;
+        kit.render('privacy:answer:save');
+        return;
+      }
+      if (!data || result.isError || !content || content.status !== 'saved') {
+        s.saveError = W.saveFailed;
+        kit.render('privacy:answer:save');
+        return;
+      }
+      take(data);
+      if (!s.answerChoice?.pending) return leave(W.saved, true);
+      s.saveError = W.saveFailed;
+      kit.render('privacy:answer:save');
+    }, () => {
+      if (mine !== session || !s) return;
+      s.saving = false;
+      s.saveError = W.saveFailed;
+      kit.render('privacy:answer:save');
+    });
+  }
+
+  function answersView(page: HTMLElement): void {
+    add(page, el('h1', '', 'How should Olympus answer with Private items?'));
+    add(page, el('p', 'muted intro', s.answerChoice?.pending ? 'Until you save a choice, nothing leaves this computer.' : 'Choose how Private answers may be made. Your current mode stays in use until you save.'));
+    if (!s.answerChoice) return;
+    const choices = el('fieldset', 'field');
+    add(choices, el('legend', 'field-label', 'Private-answer mode'));
+    s.answerChoice.options.forEach((option: Any) => {
+      if (!option || typeof option.id !== 'string' || typeof option.label !== 'string' || typeof option.description !== 'string') return;
+      const label = el('label', 'field');
+      const input = el('input') as HTMLInputElement;
+      input.type = 'radio';
+      input.name = 'private-answer-mode';
+      input.value = option.id;
+      input.checked = s.answerMode === option.id;
+      input.disabled = s.saving;
+      input.setAttribute('data-key', 'privacy:answer:' + option.id);
+      input.addEventListener('change', () => { if (input.checked) s.answerMode = option.id; });
+      add(label, input, el('span', 'strong', option.label + (option.recommended ? ' — Recommended' : '')), el('span', 'muted', option.description));
+      add(choices, label);
+    });
+    add(page, choices);
+    if (s.saveError) {
+      const error = el('p', 'banner', s.saveError);
+      error.setAttribute('role', 'alert');
+      add(page, error);
+    }
+    const save = kit.button(s.saving ? 'Saving…' : 'Save Private-answer mode', 'privacy:answer:save', saveAnswerMode, 'main');
+    save.disabled = s.saving;
+    add(page, save);
   }
 
   function view(): HTMLElement {
@@ -813,7 +1175,7 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
     const top = el('div', 'picker-top');
     const backButton = kit.button(s.screen === 'main' ? W.back : W.backToPrivacy, 'privacy:back', escape, 'plain');
     backButton.className = 'btn back';
-    add(page, add(top, backButton));
+    if (s.screen === 'main' || (s.screen === 'answers' && !s.answerChoice?.pending)) add(page, add(top, backButton));
     if (s.discarding) {
       const confirm = el('div', 'confirm-box');
       confirm.setAttribute('role', 'alert');
@@ -825,15 +1187,14 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
         }, 'plain')));
       add(page, confirm);
     }
-    if (s.screen === 'sources') sourcesView(page);
-    else if (s.screen === 'labels') labelsView(page);
-    else if (s.screen === 'sender') senderView(page);
+    if (s.screen === 'answers') answersView(page);
+    else if (s.screen !== 'main') sheetView(page);
     else mainView(page);
     return page;
   }
 
   function backOut(): void {
-    if (!s) return;
+    if (!s || s.saving) return;
     if (s.edited && !s.saving) {
       s.discarding = true;
       kit.render('privacy:discard:no');
@@ -844,14 +1205,14 @@ export function chatgptPrivacyProgram(kit: ChatGptPrivacyKit, makeLogic: typeof 
 
   /** Back and Escape: the discard prompt, then a sub-screen, then leave. */
   function escape(): void {
-    if (!s || s.picking) return;
+    if (!s || s.picking || s.saving) return;
     if (s.discarding) {
       s.discarding = false;
       kit.render('privacy:back');
-    } else if (s.screen !== 'main') {
-      const from = s.screen;
-      s.screen = 'main';
-      kit.render(from === 'sources' ? 'privacy:add:folder' : from === 'labels' ? 'privacy:add:label' : 'privacy:add:sender');
+    } else if (s.screen === 'answers' && !s.answerChoice?.pending) {
+      s.screen = 'main'; kit.render('privacy:title');
+    } else if (s.screen !== 'main' && s.screen !== 'answers') {
+      sheetBack();
     } else backOut();
   }
 

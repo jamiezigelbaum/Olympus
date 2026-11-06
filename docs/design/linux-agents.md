@@ -16,6 +16,36 @@ No Linux end-to-end qualification is claimed before those tracks integrate.
 | Claude Code / Codex | Linux installer `~/.local/bin/olympus serve` → stdio MCP | Linux container launcher and tools/list fixture; SVC config and OPENER worker transport pending | Correct installer name; no OpenClaw dependency for standalone path |
 | Other | Owner tunnel → registered OAuth client + pairing code, or key | Handler and key fixtures; owner-only transport pending OPENER | Owner-tunnel steps include headless handoff |
 
+## Private connections (1.3.2, issue #764)
+
+The Agents page also offers **Agent on another account of this computer**
+(OpenClaw, Hermes, or another MCP client) and **Agent on my tailnet**. Creating
+an owner-approved named key shows the key and copyable setup lines once. The
+existing connections list identifies its route and revokes it. No OAuth
+approval or public tunnel is involved; remote access may remain off.
+
+The worker binds port 17841 only to 127.0.0.1 for the second-account route,
+and only to detected 100.64.0.0/10 or fd7a:115c:a1e0::/48 interface addresses
+for the tailnet route. It reads OS interfaces without contacting Tailscale.
+HTTP over the tailnet uses Tailscale's WireGuard encryption. Addresses are
+reconciled every two seconds and before requests; disappearing addresses stop
+listening and never fall back to another interface. No Tailscale address means
+“Tailscale isn't running on this computer”, with no key control.
+
+Each listener exists only while its route has an unrevoked bearer key. Only
+`/mcp` is composed: the same remote tools, evidence search, Private handling,
+first-run privacy gate and release checks as the existing remote route. It
+serves no dashboard, approval page, control API, directory listing or OpenAPI
+routes, and adds no question limits. Route checks also prevent private keys
+from opening public MCP/OpenAPI routes. Standalone Mac/Linux and Bun workers
+hosted by OpenClaw own this lifecycle; backends without listener custody omit
+the choices.
+
+Connection schema 4 adds a route column, preserving existing connections as
+`remote`. Older binaries refuse this schema. Do not downgrade the schema
+number: older verifiers do not enforce routes. An operational rollback needs
+a compatible reader or a reviewed store recovery while the engine is stopped.
+
 ## Integration seam
 
 `AgentConnectHost` in `src/workers/dashboard/agents.ts` accepts injected

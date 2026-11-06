@@ -858,8 +858,10 @@ describe('a handed-off answer starts its private panel job only for its own conn
   let base: string;
   let jobs: PrivateAnswerJobs;
   let release: () => void;
+  let probeTimesOut: boolean;
 
   beforeEach(() => {
+    probeTimesOut = false;
     dir = mkdtempSync(join(tmpdir(), 'olympus-private-handoff-'));
     store = openRemoteConnectionStore(join(dir, 'state', 'remote-connections.sqlite'));
     jobs = makeJobs(readyModel());
@@ -889,7 +891,8 @@ describe('a handed-off answer starts its private panel job only for its own conn
       chatgpt: {
         servesRequest: () => true,
         privateAnswers: jobs,
-        async privateMatchProbe() { return { count: 2, evidence: EVIDENCE }; },
+        async privateMatchProbe() { return probeTimesOut ? new Promise(() => {}) : { count: 2, evidence: EVIDENCE }; },
+        privateMatchProbeTimeoutMs: 30,
         async dashboardView() { throw new Error('unused'); },
       },
     });
@@ -945,6 +948,23 @@ describe('a handed-off answer starts its private panel job only for its own conn
     } finally {
       await owner.close();
       await other.close();
+    }
+  });
+
+  test('a timed-out private check survives the answer job handoff', async () => {
+    probeTimesOut = true;
+    const owner = await connect('ChatGPT');
+    try {
+      const handed = await owner.callTool({ name: 'source_answer', arguments: { question: 'When does the lease end?' } }) as Record<string, unknown>;
+      const jobId = (handed.structuredContent as { job_id: string }).job_id;
+      const working = await owner.callTool({ name: 'source_answer_result', arguments: { job_id: jobId } }) as Record<string, unknown>;
+      expect((working.structuredContent as { status: string }).status).toBe('working');
+      release();
+      await Bun.sleep(50);
+      const answered = await owner.callTool({ name: 'source_answer_result', arguments: { job_id: jobId } }) as Record<string, unknown>;
+      expect(JSON.stringify(answered)).toContain('waiting in Olympus on their computer');
+    } finally {
+      await owner.close();
     }
   });
 });

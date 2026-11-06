@@ -142,6 +142,15 @@ describe('test lane partition', () => {
     expect(timing.deployMs[goKey]).toBeUndefined();
   });
 
+  test('the fast shards cover every fast file exactly once', () => {
+    const timing = JSON.parse(readFileSync(join(TEST_DIR, '..', 'config/test-timings.json'), 'utf8'));
+    const { fast } = partitionTestLanes(TEST_DIR);
+    const plan = planWeightedShards(fast, 3, { schemaVersion: 1, unknownP95Ms: timing.fastUnknownP95Ms, deployMs: timing.fastMs });
+    expect(plan.shards.every((shard) => shard.length > 0)).toBe(true);
+    expect(plan.shards.flat().sort()).toEqual([...fast].sort());
+    expect(new Set(plan.shards.flat()).size).toBe(fast.length);
+  });
+
   test('the lane runner rejects invalid or ambiguous shards', () => {
     expect(() => parseTestLaneArgs(['deploy', '--shard=0/6'])).toThrow();
     expect(() => parseTestLaneArgs(['deploy', '--shard=7/6'])).toThrow();

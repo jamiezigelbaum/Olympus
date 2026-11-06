@@ -1,5 +1,8 @@
+import { isPendingPrivacyPolicy } from './first-run-privacy.ts';
+import { WORKER_DATA_OWNER_CONFLICT_MESSAGE, WORKER_ENDPOINT_CONFLICT_MESSAGE, WORKER_SOCKET_RETAINED_MESSAGE } from './native-worker-service.ts';
+import { defaultTelegramPython } from './messaging-runtime.ts';
 import { readEngineLinger, linuxInstalledBuild } from './linux-engine-service.ts';
-import { engineServicePaths, waitForEngineHealthy } from './engine-service.ts';
+import { engineServicePaths, readEngineWorkerProblem, waitForEngineHealthy } from './engine-service.ts';
 import { resolveLinuxEngineLayout } from './linux-engine-layout.ts';
 import { workerFetch } from './worker-transport.ts';
 // Olympus doctor: a read-only health walk across the chain the calling assistant depends on
@@ -79,6 +82,7 @@ import {
   consultVocabularyFileStatus,
   type ConsultVocabularyFileStatus,
 } from './consult-gate.ts';
+import { ZKAPI_RISK_ACKNOWLEDGEMENTS_VERSION } from './zkapi-consult-settings.ts';
 import { photoSearchStatus } from './photo-search-status.ts';
 import { stillImageReadiness, type StillImageReadiness } from './still-image-readiness.ts';
 import {
@@ -101,6 +105,7 @@ export interface DoctorDeps {
   /** The running interpreter is a valid standalone runtime even when Bun is not on PATH. Test seam. */
   runningBun?: boolean;
   commandExists?: (command: string) => boolean | Promise<boolean>;
+  telegramPython?: string | undefined;
   pythonModuleExists?: (pythonCommand: string, moduleName: string) => boolean | Promise<boolean>;
   handleRegistry?: ConnectedHandleRegistry;
   readHandleRegistry?: () => ConnectedHandleRegistry;
@@ -151,7 +156,7 @@ export interface DoctorHostFacts {
   /** Absolute `openclaw` executable, when one is installed. */
   openclawPath?: string;
   /** The standalone engine LaunchAgent (macOS). */
-  engine: { installed: boolean; state: string; healthy?: boolean; detail?: string; linger?: boolean | undefined };
+  engine: { manager?: 'agent' | 'daemon' | 'systemd'; installed: boolean; state: string; workerProblem?: string | undefined; healthy?: boolean; detail?: string; linger?: boolean | undefined };
   /** The legacy worker unit from `olympus worker install`. */
   legacyWorkerUnit: boolean;
   /** Doctor is running inside the OpenClaw Gateway (the native tool surface). */
@@ -163,6 +168,7 @@ export async function defaultDoctorHostProbe(
   options: { insideOpenClaw?: boolean } = {},
 ): Promise<DoctorHostFacts> {
   const home = env.HOME?.trim() || homedir();
+  const paths = engineServicePaths({ homeDir: home, env });
   const openclawPath = resolveOpenClawExecutable({ env, homeDir: home });
   const engine = (process.platform === 'darwin' || process.platform === 'linux')
     ? inspectEngine({ homeDir: home, env })
@@ -170,10 +176,10 @@ export async function defaultDoctorHostProbe(
   const legacyWorkerUnit = process.platform === 'darwin' || process.platform === 'linux'
     ? existsSync(workerServicePaths(process.platform, home).unitPath)
     : false;
-  const health = process.platform === 'linux' && engine.installed ? await waitForEngineHealthy({ paths: engineServicePaths({ homeDir: home, env }), expectedBuild: linuxInstalledBuild({ homeDir: home, env }) }, { timeoutMs: 0 }) : undefined;
+  const health = process.platform === 'linux' && engine.installed ? await waitForEngineHealthy({ paths, expectedBuild: linuxInstalledBuild({ homeDir: home, env }) }, { timeoutMs: 0 }) : undefined;
   return {
     ...(openclawPath ? { openclawPath } : {}),
-    engine: { installed: engine.installed, state: engine.state, ...(process.platform === 'linux' ? { healthy: (health?.ok ?? false) && readEngineLinger() === true, detail: health?.reason ?? ('detail' in engine ? engine.detail : ''), linger: readEngineLinger() } : {}) },
+    engine: { ...('manager' in engine && engine.manager !== 'systemd' ? { manager: engine.manager } : {}), installed: engine.installed, state: engine.state, ...(engine.state === 'running' ? { workerProblem: readEngineWorkerProblem(paths.statusPath) } : {}), ...(process.platform === 'linux' ? { healthy: (health?.ok ?? false) && readEngineLinger() === true, detail: health?.reason ?? ('detail' in engine ? engine.detail : ''), linger: readEngineLinger() } : {}) },
     legacyWorkerUnit,
     ...(options.insideOpenClaw ? { insideOpenClaw: true } : {}),
   };
@@ -219,28 +225,46 @@ export async function runDoctor(input: DoctorDeps): Promise<DoctorResult> {
   const deps: DoctorDeps = inputEnv === undefined
     ? input
     : doctorDepsWithLayeredEnvironment(input, inputEnv);
+  // This shared operation runs in CLI, native and stdio MCP too: HTTP's
+  // response gate cannot protect diagnostics read directly from local state.
+  // Skip the probes themselves so identifiers cannot escape in errors either.
+  let sourceDiagnostics: 'allowed' | 'pending' | 'unavailable';
+  try {
+    const policy = doctorSovereigntyEngine(deps)?.config;
+    sourceDiagnostics = policy && isPendingPrivacyPolicy(policy) ? 'pending' : 'allowed';
+  } catch {
+    sourceDiagnostics = 'unavailable';
+  }
+  const sourceCheck = (name: string, run: () => Promise<DoctorCheck>): Promise<DoctorCheck> =>
+    sourceDiagnostics === 'allowed' ? safeCheck(name, run) : Promise.resolve({
+      name,
+      ok: sourceDiagnostics === 'pending',
+      detail: sourceDiagnostics === 'pending'
+        ? 'Skipped: source diagnostics await the first-run privacy choice.'
+        : 'Skipped: source diagnostics are unavailable until the privacy policy can be read.',
+    });
   const checks = [
     ...(deps.hostProbe ? [await safeCheck('host', () => hostCheck(deps))] : []),
     await safeCheck('dependencies', () => dependencyCheck(deps)),
     ...(deps.ocrProbe ? [await safeCheck('ocr_reading', () => ocrReadingCheck(deps))] : []),
-    await safeCheck('source_capability_catalog', () => sourceCapabilityCatalogCheck(deps)),
+    await sourceCheck('source_capability_catalog', () => sourceCapabilityCatalogCheck(deps)),
     await safeCheck('sovereignty_prerequisites', () => sovereigntyPrerequisiteCheck(deps)),
-    await safeCheck('credential_handles', () => credentialHandleCheck(deps)),
-    await safeCheck('detached_oauth_connections', () => detachedOAuthConnectionCheck(deps)),
-    await safeCheck('google_oauth_refresh_lifetime', () => googleOAuthRefreshLifetimeCheck(deps)),
-    await safeCheck('credential_reauthorization_backlog', () => credentialReauthorizationBacklogCheck(deps)),
+    await sourceCheck('credential_handles', () => credentialHandleCheck(deps)),
+    await sourceCheck('detached_oauth_connections', () => detachedOAuthConnectionCheck(deps)),
+    await sourceCheck('google_oauth_refresh_lifetime', () => googleOAuthRefreshLifetimeCheck(deps)),
+    await sourceCheck('credential_reauthorization_backlog', () => credentialReauthorizationBacklogCheck(deps)),
     await safeCheck('argus_model_pool', () => argusProfileCheck(deps, deps.config.argus.defaultProfile)),
     await safeCheck('sovereignty_model_lanes', () => sovereigntyModelLaneCheck(deps)),
     await safeCheck('zkapi_consult_transport', () => zkapiConsultTransportCheck(deps)),
     await safeCheck('consult_settings', () => consultSettingsCheck(deps)),
     await safeCheck('consult_vocabulary', () => consultVocabularyCheck(deps)),
-    await safeCheck('email_worker', () => emailWorkerCheck(deps)),
-    await safeCheck('worker_credential_lanes', () => workerCredentialLanesCheck(deps)),
-    await safeCheck('dropbox_content_extraction_throughput', () => dropboxContentExtractionThroughputCheck(deps)),
+    await sourceCheck('email_worker', () => emailWorkerCheck(deps)),
+    await sourceCheck('worker_credential_lanes', () => workerCredentialLanesCheck(deps)),
+    await sourceCheck('dropbox_content_extraction_throughput', () => dropboxContentExtractionThroughputCheck(deps)),
     await safeCheck('photo_search', () => photoSearchCheck(deps)),
-    await safeCheck('source_index_status', () => sourceIndexStatusCheck(deps)),
-    await safeCheck('source_scheduler_status', () => sourceSchedulerStatusCheck(deps)),
-    await safeCheck('source_ingestion_health', () => sourceIngestionHealthCheck(deps)),
+    await sourceCheck('source_index_status', () => sourceIndexStatusCheck(deps)),
+    await sourceCheck('source_scheduler_status', () => sourceSchedulerStatusCheck(deps)),
+    await sourceCheck('source_ingestion_health', () => sourceIngestionHealthCheck(deps)),
   ];
   return {
     ok: checks.every((check) => check.ok),
@@ -468,16 +492,16 @@ async function argusLaneCheck(deps: DoctorDeps, lane: ArgusLane): Promise<Doctor
 
 async function dependencyCheck(deps: DoctorDeps): Promise<DoctorCheck> {
   const commandExists = deps.commandExists ?? defaultCommandExists;
-  const bun = await commandExists('bun') || ((deps.platform ?? process.platform) === 'linux' && (deps.runningBun ?? typeof Bun !== 'undefined'));
+  const bun = await commandExists('bun') || (deps.runningBun ?? typeof Bun !== 'undefined');
   const node = await commandExists('node');
   // Node runs the plugin inside an OpenClaw host; the standalone engine and
   // the CLI run on Bun alone.
   const openclaw = await commandExists('openclaw');
   const gog = await commandExists('gog');
   const op = await commandExists('op');
-  const python3 = await commandExists('python3');
-  const python = python3 ? false : await commandExists('python');
-  const pythonCommand = python3 ? 'python3' : python ? 'python' : undefined;
+  const systemPlatform = deps.platform ?? process.platform;
+  const platform = systemPlatform === 'darwin' || systemPlatform === 'linux' ? systemPlatform : 'other';
+  const pythonCommand = 'telegramPython' in deps ? deps.telegramPython : defaultTelegramPython(platform);
   const telethon = Boolean(pythonCommand && await (deps.pythonModuleExists ?? defaultPythonModuleExists)(pythonCommand, 'telethon'));
   const go = await commandExists('go');
   const missingRequired = [
@@ -532,11 +556,17 @@ async function ocrReadingCheck(deps: DoctorDeps): Promise<DoctorCheck> {
  */
 async function hostCheck(deps: DoctorDeps): Promise<DoctorCheck> {
   const facts = await deps.hostProbe!();
+  if (facts.engine.workerProblem) return { name: 'host', ok: false, detail: facts.engine.workerProblem,
+    hint: facts.engine.workerProblem === WORKER_SOCKET_RETAINED_MESSAGE
+      ? 'Run olympus worker uninstall, then olympus engine restart to safely clear the retained socket.'
+      : [WORKER_DATA_OWNER_CONFLICT_MESSAGE, WORKER_ENDPOINT_CONFLICT_MESSAGE].includes(facts.engine.workerProblem)
+      ? 'Run olympus worker uninstall to remove an older worker service; otherwise stop the competing Olympus process. The engine retries automatically.'
+      : 'Run olympus engine status and olympus engine logs to diagnose the worker startup failure.' };
   // Checked first: a competing worker unit is a common reason the engine's own worker is not ready.
   if (facts.engine.installed && facts.legacyWorkerUnit) return { name: 'host', ok: false, detail: 'A worker service from olympus worker install is installed beside the engine and competes with it for the same data and port.', hint: 'Run olympus worker uninstall. The engine keeps running and owns the worker.' };
   if (facts.engine.installed && (facts.engine.healthy === false || facts.engine.linger === false)) return { name: 'host', ok: false, detail: facts.engine.detail || 'The Linux engine has not proved healthy and persistent.', hint: 'Run olympus engine status and olympus engine logs. Repair configuration, then run systemctl --user reset-failed olympus-engine.service followed by olympus engine start.' };
   const hosts: string[] = [];
-  if (facts.engine.installed) hosts.push(`standalone engine (${facts.engine.state})`);
+  if (facts.engine.installed) hosts.push(`standalone engine (${facts.engine.manager === 'agent' || facts.engine.manager === 'daemon' ? facts.engine.manager + ', ' : ''}${facts.engine.state})`);
   if (facts.insideOpenClaw) hosts.push('OpenClaw (this Gateway)');
   else if (facts.openclawPath) hosts.push(`OpenClaw (${facts.openclawPath})`);
   if (facts.legacyWorkerUnit) hosts.push('worker unit from olympus worker install');
@@ -691,6 +721,14 @@ async function zkapiConsultTransportCheck(deps: DoctorDeps): Promise<DoctorCheck
       ? {}
       : {
         hint: [
+          lines.some((line) => line.includes('daemon_version_unsupported'))
+            ? 'The zkAPI client needs an update. Open Anonymous answers in the dashboard and choose Install tools. For an agent managing this computer, the repair is olympus zkapi install-tools.'
+            : undefined,
+          lines.some((line) => line.includes('acknowledgements_incomplete'))
+            ? profiles.some(([, profile]) => profile.zkapi!.acknowledgements.version > 0 && profile.zkapi!.acknowledgements.version !== ZKAPI_RISK_ACKNOWLEDGEMENTS_VERSION)
+              ? 'The cost and risk statements have changed since you accepted them. Open Anonymous answers in the dashboard, read the current statements, and accept them again before asking another question.'
+              : 'Open Anonymous answers in the dashboard, read the cost and risk statements, and accept them before asking a question.'
+            : undefined,
           lines.some((line) => line.includes('confinement_unavailable'))
             ? 'Anonymous answers are not available on this computer: they need network confinement, which this version of Olympus does not have here. Nothing is ever sent without it.'
             : undefined,

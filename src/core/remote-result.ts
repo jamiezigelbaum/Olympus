@@ -73,8 +73,10 @@ export const REMOTE_ANSWER_CHANGED = 'Olympus withheld this answer because an it
 export const REMOTE_ANSWER_UNVERIFIED = 'Olympus withheld this answer because it could not confirm the items it drew on may still be shared. Ask the question again.';
 /** The one sentence a remote agent is told when Private items it was not given may answer its question. */
 export const REMOTE_PRIVATE_NOTE = 'Your answer is in Olympus on your computer.';
+/** Fixed Secret pointer: no location, title or count. */
+export const REMOTE_SECRET_NOTE = 'A matching item is a Secret. Open it in Olympus on your computer.';
 /** The `private_note` field's whole shape: that sentence, then the Open link when the waiting question has an id. */
-export const REMOTE_PRIVATE_NOTE_PATTERN = '^Your answer is in Olympus on your computer\\.(?: \\[Open answer\\]\\(olympus://open/private/[A-Za-z0-9_-]{22}\\))?$';
+export const REMOTE_PRIVATE_NOTE_PATTERN = '^Your answer is in Olympus on your computer\\.(?: \\[Open answer\\]\\(olympus://open/private/[A-Za-z0-9_-]{22}\\))?(?: A matching item is a Secret\\. Open it in Olympus on your computer\\.)?$';
 const PRIVATE_ANSWER_ID = /^[A-Za-z0-9_-]{22}$/;
 export const REMOTE_ANSWER_WITHHELD = 'Olympus withheld this answer under the owner\'s privacy rules.';
 export const REMOTE_REPLY_WITHHELD = 'Olympus withheld the reply because it looked like it contained a password, key or token.';
@@ -341,9 +343,9 @@ function sourceAnswerOutput(raw: unknown, options: RemoteOutputOptions): Record<
  * matching Private items (core/remote-private-part.ts). The fixed sentence
  * and nothing else about them. Any other output is returned unchanged.
  */
-export function withRemotePrivateNote(output: Record<string, unknown>, answerId?: string): Record<string, unknown> {
+export function withRemotePrivateNote(output: Record<string, unknown>, answerId?: string, secretMatch = false): Record<string, unknown> {
   return output.kind === 'source_answer' && output.status === 'answered'
-    ? { ...output, private_note: remotePrivateNote(answerId) }
+    ? { ...output, private_note: remotePrivateNote(answerId, secretMatch) }
     : output;
 }
 
@@ -352,8 +354,9 @@ export function withRemotePrivateNote(output: Record<string, unknown>, answerId?
  * question id, the one Open link to it. The source answer and the evidence
  * search (workers/remote-search.ts) both put exactly this in front of an agent.
  */
-export function remotePrivateNote(answerId?: string): string {
-  return answerId && PRIVATE_ANSWER_ID.test(answerId) ? `${REMOTE_PRIVATE_NOTE} [Open answer](olympus://open/private/${answerId})` : REMOTE_PRIVATE_NOTE;
+export function remotePrivateNote(answerId?: string, secretMatch = false): string {
+  const pointer = answerId && PRIVATE_ANSWER_ID.test(answerId) ? `${REMOTE_PRIVATE_NOTE} [Open answer](olympus://open/private/${answerId})` : REMOTE_PRIVATE_NOTE;
+  return secretMatch ? `${pointer} ${REMOTE_SECRET_NOTE}` : pointer;
 }
 
 function withheldAnswer(message: string): Record<string, unknown> {

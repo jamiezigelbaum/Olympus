@@ -1,6 +1,15 @@
 # Olympus: ChatGPT directory submission kit
 
-Status: package complete 2026-10-10 (directory endpoint `/openai/mcp`, review
+Status: 1.3.0 approved with no findings and published 2026-11-02, listed
+publicly by OCU Inc. (1.0.0-rc.3 was published 2026-10-27). The 1.3.0
+listing update was prepared 2026-11-01: crowned-mountain icon and clay brand colours, the
+tagline "A private second brain" (#628, from the site and README), the softer Secrets wording,
+Evernote and Mac files in the long description, and new release notes. The
+tool surface on `/openai/mcp` stays pinned to the approved listing
+(`connect-relay/server/directory/approved.ts`): engines through 1.3.0 serve
+that pinned copy themselves, so re-pinning needs an engine release first.
+
+Earlier: package complete 2026-10-10 (directory endpoint `/openai/mcp`, review
 cases and release notes in `plugin.json`, own logo, final privacy policy and
 terms); earlier: draft 2026-10-01; tools, tiers and the private answer panel updated
 2026-10-02; installer, sources and sensitive-data items updated after the
@@ -19,7 +28,7 @@ out of the uploaded ZIP (see the checklist).
 | Field | Value | Limit |
 |---|---|---|
 | Name (`displayName`) | Olympus | ≤30 |
-| Short description | Ask your own mail and files | ≤30 (27) |
+| Short description | A private second brain | ≤30 (22) |
 | Developer name | OCU Inc. (`author.name`: OCU Inc. (Open Coordination Unlimited, Inc.)) | ≤80 |
 | Category | Productivity | fixed list |
 | Website | https://olympusplugin.ai | HTTPS |
@@ -115,8 +124,9 @@ or credentials). Credentials live in 1Password, never in this repository.
 > Personal, Private or Secret on the Mac. Only Personal items can reach
 > ChatGPT's model. Private items are answered on the Mac and shown only in
 > an encrypted Olympus panel that ChatGPT's model does not receive, and
-> Secret items (passwords, recovery codes, keys) are never given to any
-> model. The plugin does not ask users for sensitive data, OCU keeps no
+> Olympus never sends what it recognizes as a Secret (passwords, recovery
+> codes, keys) to any model or answers from it. Labels are automatic and can
+> be wrong. The plugin does not ask users for sensitive data, OCU keeps no
 > hosted copy of anyone's content, and the privacy policy asks users not to
 > submit such data through the plugin. Owner decision 2026-10-10: submit with
 > this explanation rather than narrow the build.
@@ -177,9 +187,10 @@ Package
 - [ ] ZIP contains only `plugin.json`, `mcp.json`, `skills/`, `assets/`. Not
       `SUBMISSION.md`, not `demo-data/`, no `.app.json`, no hooks.
 - [x] Icons: square, ≥48 px, PNG/JPEG/WebP/SVG, ≤5 MiB (test enforced).
-      `assets/icon.png` is the site's mountain mark (2026-10-10), replacing
-      the emoji-style placeholder; `brandColor` #2f5d50, `brandColorDark`
-      #7fbfa9.
+      `assets/icon.png` is the crowned mountain (`assets/app-icon.png`,
+      512 px), replacing the green mountain mark for the 1.3.0 listing
+      update (2026-11-01); `brandColor` #8f5a43, `brandColorDark` #b27e65
+      (the site's clay).
 - [ ] Skills pass the automated scan. The scan flagged the setup skill's
       `curl | sh` line (2026-10-11: "may download or execute code outside
       the reviewed package"), so the skill now sends the user to
@@ -235,6 +246,45 @@ Reviewer demo
   changed until OpenAI's review ends. No engine or plugin updates, config or
   data edits, reinstalls or restarts, and releases skip it. Ask the owner
   before touching it; update it only after the review result.
+- 2026-11-01: OpenAI's review was over, so with the owner's go the demo
+  engine moved from 1.0.0-rc.3 to the 1.3.0 release (OpenClaw 2026.9.5
+  unchanged). The upgrade needed three fixes on the host, kept as they are
+  now (#734): `OLYMPUS_ENGINE_HOST=1` deleted from worker.env,
+  `sovereignty.json` moved unchanged from `~/.olympus/` to
+  `~/.config/olympus/`, and the secret store's `secret-backend.json` written
+  as `file`. Before-upgrade backups: `~/releases/backup-20261101-pre-1.3.0`
+  on the host. Live check through the relay as ChatGPT's client: sign-in,
+  token, the pinned tools, the lease question and the Private and Secret
+  refusals all passed. The policy files are unchanged and nothing is waiting
+  for the privacy choice. 1.3's tier re-check moved `docs/garden-bylaws.md`
+  to Private as a precaution (5 Private, was 4); the owner set it back to
+  Personal the same day (4 Private, as before).
+- 2026-11-01, anonymous answers on the demo after 1.3.0 (#734): the
+  zkapi-clientd went from 0.1.6-olympus2 to 0.1.6-olympus4 through
+  `olympus zkapi install-tools` (the wallet in `~/.config/zkapi-clientd` is
+  unchanged). The owner installed the root-owned helper
+  `/usr/local/libexec/olympus/zkapi-confine` and the AppArmor profile
+  `/etc/apparmor.d/olympus-zkapi-confine` (undo as root:
+  `apparmor_parser -R` on the profile, then delete both files), and recorded the six statements at
+  version 8 in `sovereignty.json` (previous copy: `sovereignty.json.pre-ack-v8`).
+  OpenClaw Labs "Custom plugin UI" is on, but the dashboard still can't
+  reach the worker on this host (#735). `olympus doctor` reports the zkAPI
+  route ready; no paid question has been run. The zkAPI note was funded on
+  2026-10-11 and expires about 2026-11-10; renewing it means withdrawing and
+  making a new deposit, after which the `fundingDate` in `sovereignty.json`
+  needs the new date. Verified the same day: one paid question answered end
+  to end through the confined route (about 77 s, about 3,700 gwei). The first
+  attempt timed out loading the model policy and left a lock that only the
+  dashboard can clear (#740).
+- 2026-11-03: the demo gateway token was rotated after the review, because
+  the old one had been pasted in a chat. `openclaw config get` shows only a
+  redacted placeholder. The reviewer path, the demo sign-in and a Personal
+  question passed afterwards.
+- 2026-11-06: the demo's zkAPI note was renewed by hand and now expires
+  2026-12-07. `fundingDate` in `sovereignty.json` is 2026-11-06 and the worker
+  was restarted. One paid question answered end to end afterwards (77 s, about
+  4,200 gwei). A daily job on the demo host now renews the note before it
+  expires; the runbook is `docs/ops/DEMO_ZKAPI_RENEWAL.md` in olympus-ops.
 - The relay keeps shipping while the demo engine is frozen. The directory
   endpoint serves the submitted listing, not the current engine's
   (`connect-relay/server/directory/approved.ts`); CI holds the relay's

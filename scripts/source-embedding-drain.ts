@@ -1,3 +1,4 @@
+import '../src/core/sqlite-statement-cache.ts';
 import { resolvedStorePath } from '../src/core/source-placement.ts';
 import { FileLeaseBusyError } from '../src/core/file-lease.ts';
 import { writePrivateFileAtomicSync } from '../src/core/atomic-file.ts';

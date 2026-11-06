@@ -15,6 +15,7 @@ import {
   type ToolResultLike,
 } from '../scripts/chatgpt-live-smoke.ts';
 import { PRIVATE_ANSWER_META_KEY } from '../src/workers/chatgpt/private-answer-contract.ts';
+import { REMOTE_PRIVATE_NOTE, REMOTE_SECRET_NOTE } from '../src/core/remote-result.ts';
 import { CHATGPT_PRIVATE_ANSWER_FULL_POLL_CAP_MS } from '../src/workers/dashboard/chatgpt/private-answer.ts';
 import { importPanelPublicKey, sealPrivateAnswer } from '../src/workers/chatgpt/private-answer-crypto.ts';
 import { PRIVATE_MATCH_PANEL_FULL_NOTE, PRIVATE_MATCH_PANEL_NOTE } from '../src/workers/chatgpt/response-builder.ts';
@@ -141,6 +142,15 @@ describe('private content never reaches tool output', () => {
     expect(findPrivateLeaks(inText, seen).violations.join('\n')).toContain('phrase(s) of private answer #1');
     const inStructured = { ...clean, structuredContent: { answer: 'shows ferritin at 41.5 ng/mL and a normal' } };
     expect(findPrivateLeaks(inStructured, seen).violations.length).toBeGreaterThan(0);
+  });
+
+  test('the product\'s fixed Secret note opening a sealed answer is not counted as a leak', () => {
+    // 1.3.0 release check: a sealed answer opens with the Secret note, which the password question's visible result also carries.
+    const opened = [{ answer: `${REMOTE_SECRET_NOTE}\n\n${PLAINTEXT.answer}`, secrets: [] }];
+    const secretOnly = { ...clean, content: [{ type: 'text', text: `${REMOTE_PRIVATE_NOTE} ${REMOTE_SECRET_NOTE}` }] };
+    expect(findPrivateLeaks(secretOnly, opened, 'What is the admin password for my home router?').violations).toEqual([]);
+    const leaked = { ...clean, content: [{ type: 'text', text: `${REMOTE_SECRET_NOTE} Olympus says ferritin at 41.5 ng/mL and a normal thyroid result.` }] };
+    expect(findPrivateLeaks(leaked, opened).violations.join('\n')).toContain('phrase(s) of private answer #1');
   });
 
   test('the question echoed back is not counted against the private answer', () => {

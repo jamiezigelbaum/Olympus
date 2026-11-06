@@ -1,0 +1,162 @@
+{
+  "schemaVersion": 1,
+  "description": "Synthetic items judged under the owner description saved on test-mac on 2026-10-29 whose fine-to-share clauses name things a default policy would hold Private (a child's appointments, friends' plans). From the 2026-10-29 test-mac case: a message about Leo's check-up was judged Private as health although the owner said his appointments are fine to share. Labels follow the owner's words. Material is shaped like production content material (Names, Excerpt).",
+  "privacyProfile": {
+    "schemaVersion": 1,
+    "description": "Money and legal stuff are private, including anything from my lawyer or accountant. Plans with Leo, including his appointments, and plans with friends and my AI projects are fine to share.\nAbout money: private — Bank, card, brokerage and crypto statements, Tax and payroll papers, Invoices, bills and receipts, Loans and proof of funds; fine to share — Articles and guides about money, Crypto project whitepapers and research, Prices and quotes I am researching."
+  },
+  "items": [
+    {
+      "id": "owner-01",
+      "templateFamily": "child-appointment-chat",
+      "split": "dev",
+      "label": "private",
+      "rationale": "The test-mac case (owner's own WhatsApp message, judged Private as health twice). Plans with Leo, including his appointments: fine to share.",
+      "material": "Names: Jamie\nExcerpt: His check-up is Saturday at 10:30 with Dr. Alves. Can you take him? The vaccine booklet is in his blue backpack"
+    },
+    {
+      "id": "owner-17",
+      "templateFamily": "child-appointment-chat",
+      "split": "dev",
+      "label": "private",
+      "rationale": "The test-mac case with other plausible names lines.",
+      "material": "Names: 7971895570630@lid | Jamie\nExcerpt: His check-up is Saturday at 10:30 with Dr. Alves. Can you take him? The vaccine booklet is in his blue backpack"
+    },
+    {
+      "id": "owner-18",
+      "templateFamily": "child-appointment-chat",
+      "split": "dev",
+      "label": "private",
+      "rationale": "The test-mac case with other plausible names lines.",
+      "material": "His check-up is Saturday at 10:30 with Dr. Alves. Can you take him? The vaccine booklet is in his blue backpack"
+    },
+    {
+      "id": "owner-19",
+      "templateFamily": "child-appointment-chat",
+      "split": "dev",
+      "label": "private",
+      "rationale": "The exact test-mac material (hash c30535cd, verified by the testing thread).",
+      "material": "Names: Jamie | Jamie\nExcerpt: His check-up is Saturday at 10:30 with Dr. Alves. Can you take him? The vaccine booklet is in his blue backpack"
+    },
+    {
+      "id": "owner-02",
+      "templateFamily": "clinic-reminder-email",
+      "split": "dev",
+      "label": "private",
+      "rationale": "Leo's appointment reminder: fine to share.",
+      "material": "Names: Appointment reminder for Leo | Clínica Pediátrica do Parque <lembretes@clinica-parque.example>\nExcerpt: Reminder: Leo has an appointment with Dr. Alves on Tuesday 4 November at 09:15 for his 6-year check-up and booster vaccine. Please arrive 10 minutes early and bring his vaccination booklet. To reschedule, reply to this email."
+    },
+    {
+      "id": "owner-03",
+      "templateFamily": "friend-dinner",
+      "split": "dev",
+      "label": "private",
+      "rationale": "Plans with friends: fine to share, even when a friend's diet is mentioned.",
+      "material": "Names: Sam | WhatsApp\nExcerpt: Dinner at ours on Friday at 8? Remember Inês is coeliac now so no gluten, I'll do the risotto. Bring the board game"
+    },
+    {
+      "id": "owner-04",
+      "templateFamily": "school-trip",
+      "split": "dev",
+      "label": "private",
+      "rationale": "Plans with Leo: fine to share.",
+      "material": "Names: Year 1 trip to the Oceanário | Escola Básica das Flores <secretaria@flores.example>\nExcerpt: Dear parents, the Year 1 class will visit the Oceanário on Thursday 13 November. The bus leaves at 9:00 and returns at 15:30. Please send a packed lunch, and tell us about any allergies or medication your child needs during the day."
+    },
+    {
+      "id": "owner-05",
+      "templateFamily": "ai-project-note",
+      "split": "dev",
+      "label": "private",
+      "rationale": "My AI projects: fine to share.",
+      "material": "Names: Olympus eval ideas | Notes\nExcerpt: Try a held-out split per template family. Compare the 4B judge against the 9B on the receipts set. Write up why the photo judge confuses whiteboards with medical documents."
+    },
+    {
+      "id": "owner-06",
+      "templateFamily": "accountant-return",
+      "split": "dev",
+      "label": "secure",
+      "rationale": "Money; anything from my accountant: private.",
+      "material": "Names: Your 2025 tax return draft | Rita Couto, Contabilidade <rita@couto-contas.example>\nExcerpt: Hi Jamie, the draft of your 2025 IRS return is attached. Your taxable income comes to 71,380 EUR and the expected refund is 1,240 EUR. Please check the dependant section for Leo and sign by 20 November."
+    },
+    {
+      "id": "owner-07",
+      "templateFamily": "lawyer-lease",
+      "split": "dev",
+      "label": "secure",
+      "rationale": "Legal; anything from my lawyer: private.",
+      "material": "Names: Re: lease termination | Dr. Paulo Sá, Advogados <psa@sa-advogados.example>\nExcerpt: Jamie, I have reviewed the landlord's letter. Under clause 9 they cannot keep the deposit for ordinary wear. I suggest we reply formally before 7 November; a draft is attached for your approval."
+    },
+    {
+      "id": "owner-08",
+      "templateFamily": "bank-card-statement",
+      "split": "dev",
+      "label": "secure",
+      "rationale": "Money: private.",
+      "material": "Names: Card statement October 2026 | Banco Exemplo <extratos@banco.example>\nExcerpt: Statement for card ending 4417. Balance due 2,031.77 EUR by 25 November. Largest transactions: Continente 184.20, Galp 92.10, Clínica Pediátrica do Parque 45.00."
+    },
+    {
+      "id": "owner-09",
+      "templateFamily": "orthodontist-chat",
+      "split": "held-out",
+      "label": "private",
+      "rationale": "Leo's appointment and getting him there: fine to share.",
+      "material": "Names: Marta | WhatsApp\nExcerpt: The orthodontist moved Leo to Friday at 3pm. Can you drive him? He's had a sore tooth all week so he might be grumpy"
+    },
+    {
+      "id": "owner-10",
+      "templateFamily": "physio-booking",
+      "split": "held-out",
+      "label": "private",
+      "rationale": "Leo's appointments: fine to share.",
+      "material": "Names: Booking confirmed: Leo, physiotherapy | Fisio Saldanha <marcacoes@fisio-saldanha.example>\nExcerpt: Your booking is confirmed. Patient: Leo. Session: paediatric physiotherapy (ankle), Wednesday 12 November, 17:00, with Ana Prata. Wear comfortable clothes."
+    },
+    {
+      "id": "owner-11",
+      "templateFamily": "friend-run",
+      "split": "held-out",
+      "label": "private",
+      "rationale": "Plans with friends: fine to share.",
+      "material": "Names: Tomás | Telegram\nExcerpt: Running club Saturday 8am at the river? I'm back after the knee surgery so I'll go slow, maybe 5k. Coffee after"
+    },
+    {
+      "id": "owner-12",
+      "templateFamily": "ai-job-email",
+      "split": "held-out",
+      "label": "private",
+      "rationale": "My AI projects: fine to share.",
+      "material": "Names: Your evaluation run finished | Model Lab <noreply@modellab.example>\nExcerpt: Run eval-classifier-4b finished in 42 minutes. 47 of 48 cases correct; one Private receipt judged Personal. Open the report to see each case."
+    },
+    {
+      "id": "owner-13",
+      "templateFamily": "football-schedule",
+      "split": "held-out",
+      "label": "private",
+      "rationale": "Plans with Leo: fine to share.",
+      "material": "Names: Under-7 training moves to Tuesdays | Clube Desportivo Benfica Jovem <treinos@cdbj.example>\nExcerpt: From next week Leo's under-7 training is on Tuesdays 18:00 to 19:00 at the small pitch. Bring water, shin pads and his inhaler if he uses one."
+    },
+    {
+      "id": "owner-14",
+      "templateFamily": "vat-payment",
+      "split": "held-out",
+      "label": "secure",
+      "rationale": "Money; from my accountant: private.",
+      "material": "Names: Q3 VAT payment | Rita Couto, Contabilidade <rita@couto-contas.example>\nExcerpt: The Q3 VAT return is filed. The amount to pay is 3,412.06 EUR by 20 November, reference 2026 0931 7741. Let me know once it is paid."
+    },
+    {
+      "id": "owner-15",
+      "templateFamily": "power-of-attorney",
+      "split": "held-out",
+      "label": "secure",
+      "rationale": "Legal: private.",
+      "material": "Names: Signed power of attorney | Cartório Notarial de Lisboa <cartorio@notario.example>\nExcerpt: Please find attached the signed and certified power of attorney granting Marta Z. authority to act for you in the sale of the Rua das Flores property. Keep the original safe."
+    },
+    {
+      "id": "owner-16",
+      "templateFamily": "payslip",
+      "split": "held-out",
+      "label": "secure",
+      "rationale": "Money: private.",
+      "material": "Names: Payslip October 2026 | Payroll <payroll@studio.example>\nExcerpt: Gross pay 6,250.00 EUR. Income tax withheld 1,812.50. Social security 687.50. Net pay 3,750.00 EUR, paid 28 October to account ending 0921."
+    }
+  ]
+}

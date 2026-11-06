@@ -1,3 +1,4 @@
+import { dashboardComputerIdentity } from '../../core/computer-identity.ts';
 /**
  * The page's shared HTML pieces: status glyphs, cards, rows, the connector
  * sheet, and the standalone bootstrap for the shared browser controller.
@@ -14,6 +15,7 @@ import type {
   DashboardCallbackRegistration,
   DashboardConnectField,
   DashboardConnectFieldName,
+  DashboardSetupStep,
   DashboardSourceAction,
   DashboardSourceCard,
   SourceDashboardViewModel,
@@ -193,7 +195,7 @@ export function pageShell(input: DashboardPageShellInput): string {
   const content = `<div class="frame">
       <div class="page">
       <div class="top">
-        <span class="brand">${brand}</span>${input.meta ? `
+        <span class="brand">${brand}</span><span class="meta" data-computer-identity>${escapeHtml(dashboardComputerIdentity())}</span>${input.meta ? `
         <span class="meta">${escapeHtml(input.meta)}</span>` : ''}
       </div>
       ${input.body}
@@ -514,6 +516,11 @@ export interface DashboardConnectSheetInput {
   source: string;
   /** The instructions' declared fields; the route reads them by name. */
   fields: readonly DashboardConnectField[];
+  steps?: readonly DashboardSetupStep[];
+  setupHeading?: string;
+  credentialFile?: 'google_desktop';
+  lead?: { title: string; body: string; button: string; notes: string[] };
+  provider?: string;
   /**
    * The exact callback URI the provider must accept, plus the one line saying
    * where it goes in that provider's console. Rendered ABOVE the Client ID
@@ -568,6 +575,32 @@ export interface DashboardConnectSheetInput {
   };
 }
 
+/** A provider-neutral walkthrough. The last step contains the existing connect form. */
+export function setupStepsSheet(input: { id: string; provider: string; steps: readonly DashboardSetupStep[]; finalForm: (formId: string) => string; submitLabel?: string; redirect?: string; guided?: boolean; footer?: string; initialStep?: number; stepContent?: readonly string[]; stepActions?: readonly ({ formId: string; label: string } | undefined)[]; footerContent?: string }): string {
+  const id = safeId(input.id);
+  const count = input.steps.length;
+  const current = input.initialStep ?? 0;
+  const formId = `${id}-form`;
+  const initialAction = input.stepActions?.[0];
+  const panels = input.steps.map((step, index) => {
+    const url = step.link && safeExternalHref(step.link.url);
+    const link = url ? `<button type="button" class="btn primary" data-setup-open="${escapeHtml(url)}">${escapeHtml(step.button_label ?? `Open this page in ${input.provider}${input.guided ? ' ↗' : ''}`)}</button>` : '';
+    const extraLinks = (step.links ?? []).map(link => { const href = safeExternalHref(link.url); return href ? `<p><a class="ext" href="${escapeHtml(href)}" target="_blank" rel="noopener noreferrer">${escapeHtml(link.label)} ↗</a></p>` : ''; }).join('');
+    const redirect = step.redirect_uri && input.redirect
+      ? `<div class="promptbox" id="${id}-redirect">${escapeHtml(input.redirect)}</div><button class="btn" type="button" data-copy-target="#${id}-redirect">Copy redirect URI</button><span data-copy-status aria-live="polite"></span>` : '';
+    const action = input.stepActions?.[index];
+    const instructions = step.instructions
+      ? `<ol class="steps">${step.instructions.map(click => `<li>${escapeHtml(click).replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')}</li>`).join('')}</ol>`
+      : step.text ? `<p>${escapeHtml(step.text)}</p>` : '';
+    const heading = input.guided ? 'h2' : 'h4';
+    return `<div data-setup-panel${action ? ` data-setup-form="${escapeHtml(action.formId)}" data-setup-label="${escapeHtml(action.label)}"` : ''}${index !== current ? ' hidden' : ''}><${heading}>${escapeHtml(step.title ?? `Step ${index + 1}`)}</${heading}>${instructions}${link}${extraLinks}${redirect}${step.return_note ? `<p class="setupnote">${escapeHtml(step.return_note)}</p>` : ''}${input.stepContent?.[index] ?? ''}${index === count - 1 ? input.finalForm(formId) : ''}</div>`;
+  }).join('');
+  const progress = input.guided
+    ? `<div class="setupsegments" role="progressbar" aria-label="Setup progress" aria-valuemin="1" aria-valuemax="${count}" aria-valuenow="${current + 1}">${input.steps.map((_, i) => `<span data-setup-segment${i <= current ? ' class="filled"' : ''}></span>`).join('')}</div>`
+    : `<progress data-setup-progress max="${count}" value="${current + 1}"></progress>`;
+  return `<div data-setup-steps${input.guided ? ' data-setup-guided' : ''}>${progress}<p data-setup-counter>${input.guided ? `STEP ${current + 1} OF ${count}` : `Step ${current + 1} of ${count}`}</p>${panels}<div class="setupactions actionrow" data-setup-actions><button class="btn" type="button" data-setup-back${current === 0 ? ' disabled' : ''}>Back</button><button class="btn primary" type="button" data-setup-next${current === count - 1 || initialAction ? ' hidden' : ''}>I've done this, next</button><button class="btn primary" type="submit" form="${escapeHtml(initialAction?.formId ?? formId)}" data-setup-submit${current === count - 1 || initialAction ? '' : ' hidden'}>${escapeHtml(initialAction?.label ?? input.submitLabel ?? 'Connect')}</button>${input.footerContent ?? ''}</div>${input.footer ? `<p class="setupfooter">${escapeHtml(input.footer)}</p>` : ''}</div>`;
+}
+
 /**
  * The one-time-setup sheet for a needs_setup source: the copyable agent
  * prompt, and the client id/secret form the oauth start route accepts inline.
@@ -585,17 +618,17 @@ export function connectSetupSheet(input: DashboardConnectSheetInput): string {
     // read-only display: a wrong Client ID is exactly the thing the owner came
     // here to change (owner, 2026-09-03).
     return `<input class="keyfield" type="${field.secret ? 'password' : 'text'}" name="${escapeHtml(field.name)}"`
-      + `${field.required ? ' required' : ''}`
+      + `${field.required ? ' required' : ''} autocomplete="off"`
       + `${value === undefined ? '' : ` value="${escapeHtml(value)}"`}`
       + ` placeholder="${escapeHtml(placeholder)}" aria-label="${escapeHtml(field.label)}">`;
   }).join('');
-  const notice = (input.notice === undefined || input.notice.trim() === ''
-    ? ''
-    : `<p class="why">${escapeHtml(input.notice)}</p>`
-      + detailsDisclosure('How to fix', input.noticeDetail === undefined ? '' : `<p class="hint">${escapeHtml(input.noticeDetail)}</p>`))
-    + (input.providerNote === undefined || input.providerNote.trim() === ''
-      ? ''
-      : `<p class="providernote">${escapeHtml(input.providerNote)}</p>`);
+  const hasError = Boolean(input.notice?.trim());
+  const notice = hasError
+    ? `<div data-connect-error><p class="why" role="alert">${escapeHtml(input.notice!)}</p>`
+      + detailsDisclosure('How to fix', input.noticeDetail ? `<p class="hint">${escapeHtml(input.noticeDetail)}</p>` : '')
+      + `<button class="btn" type="button" data-connect-retry>Back to setup</button></div>`
+    : '';
+  const providerNote = input.providerNote?.trim() && (!input.credentialFile || input.publisher) ? `<p class="providernote"${input.credentialFile ? ' data-shared-app-note' : ''}>${escapeHtml(input.providerNote)}</p>` : '';
   const registration = callbackRegistrationSteps(id, input.registration);
   // The redirect URI sits above the key fields and is selectable text with its
   // own copy button (.promptbox is already `user-select: all`), because every
@@ -625,14 +658,21 @@ export function connectSetupSheet(input: DashboardConnectSheetInput): string {
     + `</details>`;
   const submitLabel = escapeHtml(input.submitLabel ?? 'Connect');
   const sourceField = `<input type="hidden" name="source" value="${escapeHtml(input.source)}">`;
-  const byoForm = `<form class="rowform" data-connect-kind="oauth" style="margin-top:12px">`
+  const byoForm = (formId?: string) => `<form${formId ? ` id="${formId}" class="setupfields"` : ' class="rowform"'} data-connect-kind="oauth" style="margin-top:12px">`
     + sourceField
-    + `${inputs}`
-    + `<button class="btn primary" type="submit">${submitLabel}</button>`
+    + (input.credentialFile ? `<input type="hidden" name="google_desktop" value="true"><input type="hidden" name="client_file_revision" value="0"><div data-client-file-drop tabindex="0" role="button" aria-label="Drop the downloaded file here"><p>Drop the downloaded file here</p><p class="hint">client_secret_….json, or choose it from Downloads</p><input type="file" accept=".json,application/json" data-client-file hidden aria-label="Choose the downloaded file"><p data-client-file-status role="status"></p></div>${hasError ? `<div data-setup-error><p class="why" role="alert">${escapeHtml(input.notice!)}</p>${detailsDisclosure('How to fix', input.noticeDetail ? `<p class="hint">${escapeHtml(input.noticeDetail)}</p>` : '')}</div>` : ''}<p class="hint">The file stays on this computer. Olympus reads the key from it, checks your app is ready, and opens Google's sign-in. Drive uses the same app.</p><details data-client-paste><summary>Paste the ID and secret instead</summary>${inputs.replace(/<input /g, '<input disabled ')}</details>` : inputs)
+    + (formId ? '' : `<button class="btn primary" type="submit">${submitLabel}</button>`)
     + `<span class="actmsg" data-action-message role="status"></span>`
     // Where the authorization link lands when the browser blocks the new tab.
     + `<span class="authfallback" data-authorization-fallback></span>`
     + `</form>`;
+  const walkthroughBody = input.steps?.length && input.provider
+    ? setupStepsSheet({ id, provider: input.provider, steps: input.steps, finalForm: byoForm, submitLabel: input.submitLabel ?? 'Connect', ...(input.credentialFile ? { guided: true, initialStep: hasError ? input.steps!.length - 1 : 0, footer: 'Steps: project · turn on Gmail and Drive · sign-in screen · publish · make the key · paste it here' } : {}), ...(input.redirectUri ? { redirect: input.redirectUri.uri } : {}) })
+    : `${registration}${redirect}${byoForm()}`;
+  const walkthrough = input.credentialFile
+    ? `<div class="setupheader"><h2>${escapeHtml(input.setupHeading ?? input.heading)}</h2><button class="btn setupclose" type="button" data-sheet-toggle="#${id}" aria-label="Close setup">×</button></div><p class="setupintro">${escapeHtml(input.intro)}</p>${walkthroughBody}`
+    : `${input.setupHeading ? `<h4>${escapeHtml(input.setupHeading)}</h4>` : ''}${walkthroughBody}`;
+  const lead = input.lead ? `<div data-setup-lead><h4>${escapeHtml(input.lead.title)}</h4><p>${escapeHtml(input.lead.body)}</p><button type="button" class="btn primary" data-setup-begin>${escapeHtml(input.lead.button)}</button>${input.lead.notes.map(note => `<p class="hint">${escapeHtml(note)}</p>`).join('')}</div>` : '';
   if (input.publisher) {
     // The whole point of publisher mode is that there is nothing to do first.
     // The one-click form carries the source and NOTHING else: no client id
@@ -644,31 +684,23 @@ export function connectSetupSheet(input: DashboardConnectSheetInput): string {
       + `<span class="actmsg" data-action-message role="status"></span>`
       + `<span class="authfallback" data-authorization-fallback></span>`
       + `</form>`;
+    if (input.credentialFile) return `<div class="sheet" id="${id}" aria-hidden="true"><div data-connect-content><div data-setup-choice${hasError ? ' hidden' : ''}><h4>${escapeHtml(input.heading)}</h4>${providerNote}<p>${escapeHtml(input.publisher.intro)}</p><div class="actionrow">${publisherForm}<button type="button" class="btn" data-setup-begin>${escapeHtml(input.publisher.byoSummary)}</button></div>${cancel}</div><div data-setup-walkthrough${hasError ? '' : ' hidden'}>${walkthrough}</div></div></div>`;
     return `<div class="sheet" id="${id}" aria-hidden="true">`
       + `<h4>${escapeHtml(input.heading)}</h4>`
-      + `${notice}`
+      + `${notice}<div data-connect-content${hasError ? ' hidden' : ''}>${providerNote}`
       + `<p>${escapeHtml(input.publisher.intro)}</p>`
       + `${publisherForm}`
       + `${cancel}`
-      + `<details class="agentprompt">`
-      + `<summary>${escapeHtml(input.publisher.byoSummary)}</summary>`
-      + `<p>${escapeHtml(input.intro)}</p>`
-      + `${registration}`
-      + `${redirect}`
-      + `${byoForm}`
-      + `${prompt}`
-      + `</details>`
+      + `<details class="agentprompt"><summary>${escapeHtml(input.publisher.byoSummary)}</summary><p>${escapeHtml(input.intro)}</p>${walkthrough}${prompt}</details>`
+      + `</div>`
       + `</div>`;
   }
+  if (input.credentialFile) return `<div class="sheet" id="${id}" aria-hidden="true"><div data-connect-content>${lead}<div data-setup-walkthrough${input.lead && !hasError ? ' hidden' : ''}>${walkthrough}</div>${cancel}</div></div>`;
   return `<div class="sheet" id="${id}" aria-hidden="true">`
     + `<h4>${escapeHtml(input.heading)}</h4>`
-    + `${notice}`
-    + `<p>${escapeHtml(input.intro)}</p>`
-    + `${registration}`
-    + `${redirect}`
-    + `${byoForm}`
-    + `${cancel}`
-    + `${prompt}`
+    + `${notice}<div data-connect-content${hasError ? ' hidden' : ''}>${providerNote}`
+    + `${lead}<div data-setup-walkthrough${input.lead ? ' hidden' : ''}><p>${escapeHtml(input.intro)}</p>${walkthrough}${prompt}</div>`
+    + `${cancel}</div>`
     + `</div>`;
 }
 
@@ -714,7 +746,7 @@ function callbackRegistrationSteps(
 export function dashboardNeedsSetupSheet(
   source: Pick<DashboardSourceCard, 'source_id' | 'label'>,
   action: Extract<DashboardSourceAction, { kind: 'needs_setup' }>,
-  options: { providerNote?: string } = {},
+  options: { providerNote?: string; lead?: DashboardConnectSheetInput['lead'] } = {},
 ): { sheetId: string; sheet: string } {
   const sheetId = `setup-${source.source_id.replace(/[^A-Za-z0-9_-]+/g, '-')}`;
   const sheet = connectSetupSheet({
@@ -724,6 +756,8 @@ export function dashboardNeedsSetupSheet(
     promptText: action.instructions.agent_prompt,
     source: action.source,
     fields: action.instructions.fields,
+    ...(action.instructions.setup_provider ? { steps: action.instructions.diy_steps, provider: action.instructions.setup_provider, setupHeading: action.instructions.setup_heading, credentialFile: action.instructions.credential_file } : {}),
+    ...(options.lead ? { lead: options.lead } : {}),
     ...(options.providerNote === undefined ? {} : { providerNote: options.providerNote }),
     ...redirectUriInput(action),
   });
@@ -746,7 +780,7 @@ export function dashboardNeedsSetupSheet(
 export function dashboardOAuthConnectSheet(
   source: Pick<DashboardSourceCard, 'source_id' | 'label'>,
   action: Extract<DashboardSourceAction, { kind: 'oauth' }>,
-  options: { notice?: string; noticeDetail?: string; providerNote?: string } = {},
+  options: { notice?: string; noticeDetail?: string; providerNote?: string; lead?: DashboardConnectSheetInput['lead'] } = {},
 ): { sheetId: string; sheet: string } | undefined {
   const instructions = action.instructions;
   if (instructions === undefined) return undefined;
@@ -765,14 +799,7 @@ export function dashboardOAuthConnectSheet(
     field.name === 'client_id' || !secretOnFile ? field : { ...field, required: false }
   ));
   const savedSecrets = secretOnFile ? byo.fields.filter((field) => field.secret).map((field) => field.name) : [];
-  // A provider that does not know this callback URI answers with its own
-  // generic error page and never calls back, so the attempt just sits pending.
-  // Say so while it does: the owner otherwise retries the identical request.
-  const pendingNote = action.pending_attempt && action.redirect_uri_to_register
-    ? `If ${source.label}'s page shows an error instead of asking you to approve, the callback URL below is not`
-      + ` registered exactly on your app. Add it, press Cancel connection attempt, then Connect again.`
-    : undefined;
-  const notice = options.notice ?? pendingNote;
+  const notice = options.notice;
   const sheet = connectSetupSheet({
     id: sheetId,
     heading: `${dashboardActionLabel(action.label)} ${source.label}`,
@@ -780,12 +807,14 @@ export function dashboardOAuthConnectSheet(
     promptText: byo.agent_prompt,
     source: action.source,
     fields,
+    ...(byo.setup_provider ? { steps: byo.diy_steps, provider: byo.setup_provider, setupHeading: byo.setup_heading, credentialFile: byo.credential_file } : {}),
+    ...(options.lead ? { lead: options.lead } : {}),
     submitLabel: dashboardActionLabel(action.label),
     // Publisher mode: Olympus's own registered app does the asking, so the
     // sheet leads with the button and keeps the bring-your-own walkthrough
     // one click away rather than deleting it. The sentence is the action's own
     // plain_intro, so the page and dashboard.json cannot drift apart.
-    ...(action.publisher_client
+    ...(action.publisher_client && !options.lead
       ? {
         publisher: {
           intro: instructions.plain_intro,
@@ -888,7 +917,12 @@ export function standaloneDashboardControllerScript(
       function route(params) {
         var action = params.action;
         if (action === 'start_oauth') return ['/dashboard/connect/oauth/start', withoutAction(params)];
+        if (action === 'discover_local_models') return ['/dashboard/models/local/discover', withoutAction(params)];
+        if (action === 'test_local_models') return ['/dashboard/models/local/test', withoutAction(params)];
+        if (action === 'save_local_answer_model') return ['/dashboard/models/local/save', withoutAction(params)];
         if (action === 'check_model_setup') return ['/dashboard/models/check', {}];
+        if (action === 'set_computer_use') return ['/dashboard/engine/computer-use', withoutAction(params)];
+        if (action === 'save_first_run_privacy') return ['/dashboard/models/first-run-privacy', withoutAction(params)];
         if (action === 'connect_api_key') return ['/dashboard/connect/api-key', withoutAction(params)];
         if (action === 'connect_this_computer') return ['/dashboard/connect/this-computer', withoutAction(params)];
         if (action === 'mint_agent_pairing_code') return ['/dashboard/agents/pairing-code', {}];
@@ -908,6 +942,30 @@ export function standaloneDashboardControllerScript(
       var controller = mount({
         root: root,
         transport: {
+          async openLocalControls() {
+            var response = await fetch('/dashboard/control/session/local', {
+              method: 'POST', credentials: 'same-origin', cache: 'no-store',
+            });
+            // The local session is a new one: later requests carry its CSRF token, not the launch session's,
+            // and the poll expects its marker (the server's hash of that token), so it does not reload the page.
+            var body = await json(response);
+            if (response.ok && typeof body.csrf_token === 'string') {
+              csrfToken = body.csrf_token;
+              try {
+                var digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode('olympus-dashboard-session-marker\\u0000' + csrfToken));
+                sessionMarker = Array.from(new Uint8Array(digest)).map(function (b) { return b.toString(16).padStart(2, '0'); }).join('').slice(0, 24);
+              } catch (error) {}
+            }
+            return response.ok;
+          },
+          async messaging(operation, params) {
+            var response = await fetch('/dashboard/messaging/' + operation, {
+              method: 'POST', credentials: 'same-origin', cache: 'no-store',
+              headers: { 'X-Olympus-CSRF': csrfToken, 'Content-Type': 'application/json' },
+              body: JSON.stringify(params),
+            });
+            return { status: response.status, body: await json(response) };
+          },
           async control(params) {
             var target = route(params);
             if (!target) return { status: 400, body: { error: { message: 'Unsupported dashboard action.' } } };

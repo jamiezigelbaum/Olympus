@@ -1,4 +1,5 @@
 import { resumeVerifiedTierMove, flushTierMoveNotes } from '../connector-store/tier-move.ts';
+import { controlPathHeadroom, ingestionTurn } from '../control-path-headroom.ts';
 // The worker's background tick for the privacy-safe sniffer: a bounded
 // `runSnifferPass` over every connector store, continuously while work remains.
 // It yields only to actual inference using the same local model
@@ -27,8 +28,10 @@ import { snifferId, snifferMaterialCarriesSecret, snifferPromptVersions } from '
 import type { SnifferLane } from './sniffer-lane.ts';
 import {
   DEFAULT_SNIFFER_MAX_CALLS_PER_DAY,
+  SNIFFER_MAX_CONCURRENT_CALLS,
   SnifferCallBudget,
   runSnifferPass,
+  prepareSnifferModel,
   type SnifferPassReport,
   type SnifferTarget,
 } from './sniffer-resolver.ts';
@@ -39,7 +42,7 @@ import { tierSetForLedger } from '../connector-store/tier-set-registry.ts';
 import {
   DEFAULT_TIER_REJUDGE_PER_PASS,
   emptyTierRejudgeReport,
-  rejudgeRoutedItems,
+  rejudgeRoutedItemsInTurns,
   rejudgeStoredContent,
   settleRoutedSecrets,
   settleLegacySecrets,
@@ -54,6 +57,7 @@ import { applyMediaJudgments } from '../connector-store/tier-media-judgment-swee
 import {
   TierLedger,
   TierLedgerRaiseAbandonRefusedError,
+  TIER_LEDGER_UNREAD_RELABEL_DONE,
   copyServingLayer,
   tierLedgerIdentityKey,
   tierLedgerPathForStore,
@@ -62,6 +66,15 @@ import {
 } from './tier-ledger.ts';
 
 export const DEFAULT_TIER_SNIFFER_INTERVAL_MS = 1_000;
+/**
+ * While the private model is not answering, the scheduled passes wait this
+ * long after the first failed pass, and NOT_ANSWERING_MAX_BACKOFF_MS after
+ * later ones. A pass every second against a model that was off rescanned the
+ * whole queue each time (Sparta, 2026-11-04, Delphi off: about 110% CPU).
+ * A direct runOnce is never held back.
+ */
+export const NOT_ANSWERING_FIRST_BACKOFF_MS = 30_000;
+export const NOT_ANSWERING_MAX_BACKOFF_MS = 60_000;
 
 /**
  * A connector store, by what the sniffer needs: its path, and the tiered
@@ -84,6 +97,10 @@ export interface TierSnifferServiceOptions {
   model: AnalystModel;
   stores: () => readonly TierSnifferServiceStore[];
   classificationLedgerPath: string;
+  /** Test seam: ledger and queue rows at or below which the backlog is counted on every read. */
+  backlogExactRows?: number;
+  /** Test seam: rowids read per event-loop turn by a large backlog's count. */
+  backlogSliceRows?: number;
   /**
    * The model is not always there (the built-in private model downloads on
    * first use): while this answers false the pass asks nothing and every
@@ -121,6 +138,8 @@ export interface TierSnifferServiceOptions {
    */
   abandonAfterMs?: number;
   maxCallsPerPass?: number;
+  /** Sniffer calls in flight at once, each one item alone (runSnifferPass `concurrentCalls`). */
+  concurrentCalls?: number;
   passTimeMs?: number;
   maxCallsPerDay?: number;
   /** Any other reason to yield the private pool (the pass also yields to `answersInFlight` and `breakerOpen`). */
@@ -198,7 +217,22 @@ export interface TierAutoMoveReport {
   abandoned?: number;
   /** Failed raises older than the stale bound: kept hidden and queued, never rolled back. */
   staleRaises?: number;
+  /** Why the failed moves failed, by error name (never an item's names or content): the log says what to look at. */
+  failedBy?: Record<string, number>;
 }
+
+type BacklogCounts = Pick<TierClassificationBacklog, 'checkingItems' | 'remainingQuestions' | 'pendingItems' | 'pendingWithoutQuestion' | 'oldestPendingAgeMs'>;
+
+function emptyBacklogCounts(): BacklogCounts {
+  return { checkingItems: 0, remainingQuestions: 0, pendingItems: 0, pendingWithoutQuestion: 0, oldestPendingAgeMs: 0 };
+}
+
+/** Ledger and queue rows at or below which the backlog is counted on every read. */
+const BACKLOG_EXACT_ROWS = 20_000;
+/** How old a large backlog's served count may be before a new count starts. */
+const BACKLOG_REFRESH_MS = 60_000;
+/** Rowids read per event-loop turn by a large backlog's count. */
+const BACKLOG_SLICE_ROWS = 5_000;
 
 export interface TierClassificationBacklog {
   /** Union of pending ledger items and items with open questions, including re-judges. */
@@ -249,10 +283,15 @@ export class TierSnifferService {
   private readonly budget: SnifferCallBudget;
   private timer: ReturnType<typeof setInterval> | undefined;
   private continuation: ReturnType<typeof setTimeout> | undefined;
+  /** When the last tick ended (performance.now()), for the idle time before the next one. */
+  private lastTickEndedAt: number | undefined;
   private readonly moveAbort = new AbortController();
   private moving: Promise<TierAutoMoveReport> | undefined;
   private running = false;
   private runningSinceMs = 0;
+  /** Scheduled passes wait until this time while the model is not answering (0: no wait). */
+  private notAnsweringUntilMs = 0;
+  private notAnsweringPasses = 0;
   private overrunReported = false;
   /** When the running pass was aborted for overrunning (0: not aborted). */
   private overrunAbortedAtMs = 0;
@@ -261,6 +300,8 @@ export class TierSnifferService {
   /** The last reported reason a tick asked nothing (or 'asking'). */
   private waitingReason: string | undefined;
   private lastBacklogLogMs = Number.NEGATIVE_INFINITY;
+  private backlogCache: { counts: BacklogCounts; atMs: number } | undefined;
+  private backlogRefresh: Promise<void> | undefined;
   private waiting: TierSnifferWaiting | undefined;
   /** When each queued move (ledger, item, generation) first failed in this process. */
   private readonly moveFailures = new Map<string, number>();
@@ -276,7 +317,7 @@ export class TierSnifferService {
   constructor(options: TierSnifferServiceOptions) {
     this.options = options;
     this.budget = new SnifferCallBudget({
-      maxCallsPerDay: options.maxCallsPerDay ?? DEFAULT_SNIFFER_MAX_CALLS_PER_DAY,
+      ...(options.maxCallsPerDay !== undefined ? { maxCallsPerDay: options.maxCallsPerDay } : {}),
       ...(options.now ? { now: options.now } : {}),
       ...(options.budgetStatePath ? { statePath: options.budgetStatePath } : {}),
     });
@@ -284,7 +325,7 @@ export class TierSnifferService {
 
   start(): void {
     if (this.timer) return;
-    this.timer = setInterval(() => { void this.drainMoves(); void this.runOnce(); }, this.options.intervalMs ?? DEFAULT_TIER_SNIFFER_INTERVAL_MS);
+    this.timer = setInterval(() => { void this.drainMoves(); void this.scheduledRun(); }, this.options.intervalMs ?? DEFAULT_TIER_SNIFFER_INTERVAL_MS);
     this.timer.unref?.();
     this.wake();
   }
@@ -292,8 +333,14 @@ export class TierSnifferService {
   /** Real local contention ended: resume immediately, including between idle polls. */
   wake(): void {
     if (this.stopped || this.continuation) return;
-    this.continuation = setTimeout(() => { this.continuation = undefined; void this.runOnce(); }, 0);
+    this.continuation = setTimeout(() => { this.continuation = undefined; void this.scheduledRun(); }, 0);
     this.continuation.unref?.();
+  }
+
+  /** A pass the timer or a wake asked for: held back while the model is not answering. */
+  private async scheduledRun(): Promise<TierSnifferTick> {
+    if (this.notAnsweringUntilMs > this.clockMs()) return { state: 'skipped_running' };
+    return this.runOnce();
   }
 
   /** Stop the tick. A pass in flight is aborted; its ledgers close when it ends. */
@@ -322,53 +369,33 @@ export class TierSnifferService {
    * The classification backlog, counts only: how many items are waiting on
    * the sniffer and how many questions are still to ask. No time estimate
    * (owner ruling: an unreliable one is worse than none).
+   *
+   * A small backlog is counted on every read. A large one is counted in
+   * bounded slices off the read path and served from the last count, at most
+   * a minute old: one full count of 650k pending items held the event loop
+   * for seconds, and the status read and the minute log line both ran it
+   * (Sparta CPU samples, 2026-11-05).
    */
   backlog(): TierClassificationBacklog {
-    let checkingItems = 0;
-    let remainingQuestions = 0;
-    let pendingItems = 0;
-    let pendingWithoutQuestion = 0;
-    let oldestPendingAgeMs = 0;
-    for (const ledgerPath of this.ledgerPaths()) {
-      let db: Database | undefined;
-      try {
-        db = new Database(ledgerPath, { readonly: true, create: false });
-        db.exec('PRAGMA busy_timeout = 10000; PRAGMA query_only = ON;');
-        const expectedId = this.boundLedgerIds.get(ledgerPath);
-        if (expectedId !== undefined) {
-          const row = db.query(`SELECT value FROM tier_ledger_meta WHERE key = 'ledger_id'`).get() as { value?: unknown } | null;
-          // Counted for the ledger its store is bound to, not for whatever sits at the path now.
-          if (row?.value !== expectedId) continue;
-        }
-        const path = tierSnifferPathForLedger(ledgerPath);
-        const hasQueue = existsSync(path);
-        if (hasQueue) db.query('ATTACH DATABASE ? AS queue').run(path);
-        const queued = hasQueue ? `EXISTS (SELECT 1 FROM queue.sniffer_questions q
-          WHERE q.provider = t.provider AND q.account_scope = t.account_scope
-          AND q.conversation_key = t.conversation_key AND q.provider_item_id = t.provider_item_id)` : '0';
-        const pending = db.query(`SELECT COUNT(*) AS n,
-          SUM(CASE WHEN ${queued} THEN 0 ELSE 1 END) AS missing,
-          MIN(decided_at) AS oldest FROM tier_items t WHERE state = 'pending'`).get() as { n: number; missing: number | null; oldest: string | null };
-        pendingItems += pending.n;
-        pendingWithoutQuestion += pending.missing ?? 0;
-        checkingItems += pending.n;
-        if (pending.oldest) oldestPendingAgeMs = Math.max(oldestPendingAgeMs, this.clockMs() - Date.parse(pending.oldest));
-        if (hasQueue) {
-          remainingQuestions += (db.query('SELECT COUNT(*) AS n FROM queue.sniffer_questions').get() as { n: number }).n;
-          checkingItems += (db.query(`SELECT COUNT(*) AS n FROM (
-            SELECT DISTINCT provider, account_scope, conversation_key, provider_item_id FROM queue.sniffer_questions q
-            WHERE NOT EXISTS (SELECT 1 FROM tier_items t WHERE t.state = 'pending'
-              AND t.provider = q.provider AND t.account_scope = q.account_scope
-              AND t.conversation_key = q.conversation_key AND t.provider_item_id = q.provider_item_id))`).get() as { n: number }).n;
-        }
-      } catch {
-        // No writes, migrations, or invented zero-valued rows on a status read.
-      } finally { db?.close(); }
+    return this.backlogFrom(this.backlogCounts());
+  }
+
+  private backlogCounts(): BacklogCounts {
+    if (this.backlogRows() <= (this.options.backlogExactRows ?? BACKLOG_EXACT_ROWS)) return this.countBacklogNow();
+    if (this.backlogCache && this.clockMs() - this.backlogCache.atMs < BACKLOG_REFRESH_MS) return this.backlogCache.counts;
+    if (!this.backlogRefresh) {
+      this.backlogRefresh = this.countBacklogInSlices()
+        .then((counts) => { if (counts) this.backlogCache = { counts, atMs: this.clockMs() }; })
+        .catch(() => undefined)
+        .finally(() => { this.backlogRefresh = undefined; });
     }
+    return this.backlogCache?.counts ?? this.roughBacklog();
+  }
+
+  private backlogFrom(counts: BacklogCounts): TierClassificationBacklog {
+    const { checkingItems, remainingQuestions, pendingWithoutQuestion, oldestPendingAgeMs } = counts;
     return {
-      checkingItems,
-      remainingQuestions,
-      pendingItems, pendingWithoutQuestion, oldestPendingAgeMs,
+      ...counts,
       summary: checkingItems === 0
         ? 'No items waiting for classification.'
         : `Checking ${checkingItems} item${checkingItems === 1 ? '' : 's'}, about ${remainingQuestions} question${remainingQuestions === 1 ? '' : 's'} remaining.`
@@ -378,6 +405,139 @@ export class TierSnifferService {
       awaitingOwnerApproval: this.lastTick?.state === 'awaiting_owner_approval',
       ...(checkingItems > 0 && this.waiting ? { waiting: { ...this.waiting } } : {}),
     };
+  }
+
+  /** Opens a ledger for a backlog count, with its queue attached; undefined when it is not the bound ledger or cannot be read. */
+  private openBacklogLedger(ledgerPath: string): { db: Database; hasQueue: boolean } | undefined {
+    let db: Database | undefined;
+    try {
+      db = new Database(ledgerPath, { readonly: true, create: false });
+      db.exec('PRAGMA busy_timeout = 10000; PRAGMA query_only = ON;');
+      const expectedId = this.boundLedgerIds.get(ledgerPath);
+      if (expectedId !== undefined) {
+        const row = db.query(`SELECT value FROM tier_ledger_meta WHERE key = 'ledger_id'`).get() as { value?: unknown } | null;
+        // Counted for the ledger its store is bound to, not for whatever sits at the path now.
+        if (row?.value !== expectedId) { db.close(); return undefined; }
+      }
+      const path = tierSnifferPathForLedger(ledgerPath);
+      const hasQueue = existsSync(path);
+      if (hasQueue) db.query('ATTACH DATABASE ? AS queue').run(path);
+      return { db, hasQueue };
+    } catch {
+      db?.close();
+      return undefined;
+    }
+  }
+
+  /** Upper bound on the rows a full count reads (largest rowids), without reading them. */
+  private backlogRows(): number {
+    let rows = 0;
+    for (const ledgerPath of this.ledgerPaths()) {
+      const opened = this.openBacklogLedger(ledgerPath);
+      if (!opened) continue;
+      try {
+        rows += (opened.db.query('SELECT COALESCE(MAX(rowid), 0) AS n FROM tier_items').get() as { n: number }).n;
+        if (opened.hasQueue) rows += (opened.db.query('SELECT COALESCE(MAX(question_pk), 0) AS n FROM queue.sniffer_questions').get() as { n: number }).n;
+      } catch {
+        // An unreadable ledger counts nothing, as in the count itself.
+      } finally { opened.db.close(); }
+    }
+    return rows;
+  }
+
+  /** Index-only counts for the first read of a large backlog, before its first full count lands. */
+  private roughBacklog(): BacklogCounts {
+    let pendingItems = 0;
+    let remainingQuestions = 0;
+    for (const ledgerPath of this.ledgerPaths()) {
+      const opened = this.openBacklogLedger(ledgerPath);
+      if (!opened) continue;
+      try {
+        pendingItems += (opened.db.query(`SELECT COUNT(*) AS n FROM tier_items WHERE state = 'pending'`).get() as { n: number }).n;
+        if (opened.hasQueue) remainingQuestions += (opened.db.query('SELECT COUNT(*) AS n FROM queue.sniffer_questions').get() as { n: number }).n;
+      } catch {
+        // No writes, migrations, or invented zero-valued rows on a status read.
+      } finally { opened.db.close(); }
+    }
+    return { checkingItems: Math.max(pendingItems, remainingQuestions ? 1 : 0), remainingQuestions, pendingItems, pendingWithoutQuestion: 0, oldestPendingAgeMs: 0 };
+  }
+
+  private countBacklogNow(): BacklogCounts {
+    const counts = emptyBacklogCounts();
+    for (const ledgerPath of this.ledgerPaths()) {
+      const opened = this.openBacklogLedger(ledgerPath);
+      if (!opened) continue;
+      try {
+        this.addPendingSlice(counts, opened, undefined);
+        if (opened.hasQueue) this.addQuestionSlice(counts, opened.db, undefined);
+      } catch {
+        // No writes, migrations, or invented zero-valued rows on a status read.
+      } finally { opened.db.close(); }
+    }
+    return counts;
+  }
+
+  /** The same count as `countBacklogNow`, a rowid slice per event-loop turn; undefined when stopped part-way. */
+  private async countBacklogInSlices(): Promise<BacklogCounts | undefined> {
+    const counts = emptyBacklogCounts();
+    const slice = Math.max(1, this.options.backlogSliceRows ?? BACKLOG_SLICE_ROWS);
+    for (const ledgerPath of this.ledgerPaths()) {
+      const opened = this.openBacklogLedger(ledgerPath);
+      if (!opened) continue;
+      try {
+        const maxItem = (opened.db.query('SELECT COALESCE(MAX(rowid), 0) AS n FROM tier_items').get() as { n: number }).n;
+        for (let lo = 0; lo < maxItem; lo += slice) {
+          this.addPendingSlice(counts, opened, [lo, lo + slice]);
+          await ingestionTurn();
+          if (this.stopped) return undefined;
+        }
+        if (opened.hasQueue) {
+          const maxQuestion = (opened.db.query('SELECT COALESCE(MAX(question_pk), 0) AS n FROM queue.sniffer_questions').get() as { n: number }).n;
+          for (let lo = 0; lo < maxQuestion; lo += slice) {
+            this.addQuestionSlice(counts, opened.db, [lo, lo + slice]);
+            await ingestionTurn();
+            if (this.stopped) return undefined;
+          }
+        }
+      } catch {
+        // No writes, migrations, or invented zero-valued rows on a status read.
+      } finally { opened.db.close(); }
+    }
+    return counts;
+  }
+
+  /** Pending items (all, or rowids in (lo, hi]), with those that have no question and the oldest decision. */
+  private addPendingSlice(counts: BacklogCounts, opened: { db: Database; hasQueue: boolean }, range: [number, number] | undefined): void {
+    const queued = opened.hasQueue ? `EXISTS (SELECT 1 FROM queue.sniffer_questions q
+      WHERE q.provider = t.provider AND q.account_scope = t.account_scope
+      AND q.conversation_key = t.conversation_key AND q.provider_item_id = t.provider_item_id)` : '0';
+    // NOT INDEXED keeps a slice on its rowid range instead of the state index (rowid lookups stay allowed).
+    const pending = (range
+      ? opened.db.query(`SELECT COUNT(*) AS n, SUM(CASE WHEN ${queued} THEN 0 ELSE 1 END) AS missing, MIN(decided_at) AS oldest
+          FROM tier_items t NOT INDEXED WHERE t.rowid > ? AND t.rowid <= ? AND state = 'pending'`).get(range[0], range[1])
+      : opened.db.query(`SELECT COUNT(*) AS n, SUM(CASE WHEN ${queued} THEN 0 ELSE 1 END) AS missing, MIN(decided_at) AS oldest
+          FROM tier_items t WHERE state = 'pending'`).get()) as { n: number; missing: number | null; oldest: string | null };
+    counts.pendingItems += pending.n;
+    counts.pendingWithoutQuestion += pending.missing ?? 0;
+    counts.checkingItems += pending.n;
+    if (pending.oldest) counts.oldestPendingAgeMs = Math.max(counts.oldestPendingAgeMs, this.clockMs() - Date.parse(pending.oldest));
+  }
+
+  /** Questions (all, or question_pks in (lo, hi]), and the items they ask about that are not pending, each item once. */
+  private addQuestionSlice(counts: BacklogCounts, db: Database, range: [number, number] | undefined): void {
+    const where = range ? 'WHERE q.question_pk > ? AND q.question_pk <= ?' : '';
+    const row = db.query(`SELECT COUNT(*) AS n, SUM(CASE
+        WHEN EXISTS (SELECT 1 FROM queue.sniffer_questions e
+          WHERE e.provider = q.provider AND e.account_scope = q.account_scope
+          AND e.conversation_key = q.conversation_key AND e.provider_item_id = q.provider_item_id
+          AND e.question_pk < q.question_pk) THEN 0
+        WHEN EXISTS (SELECT 1 FROM tier_items t WHERE t.state = 'pending'
+          AND t.provider = q.provider AND t.account_scope = q.account_scope
+          AND t.conversation_key = q.conversation_key AND t.provider_item_id = q.provider_item_id) THEN 0
+        ELSE 1 END) AS other
+      FROM queue.sniffer_questions q ${where}`).get(...(range ?? [])) as { n: number; other: number | null };
+    counts.remainingQuestions += row.n;
+    counts.checkingItems += row.other ?? 0;
   }
 
   /**
@@ -441,11 +601,15 @@ export class TierSnifferService {
     const abort = new AbortController();
     this.abort = abort;
     let tick: TierSnifferTick;
+    const leave = controlPathHeadroom.enter('tier-sniffer');
     try {
       tick = await this.tick(abort.signal);
     } catch (error) {
       // Content-free: the class of failure only. Items stay pending.
       tick = { state: 'failed', error: error instanceof Error ? error.name : 'unknown' };
+    } finally {
+      leave();
+      this.lastTickEndedAt = performance.now();
     }
     // An abandoned pass that ends late changes nothing: a newer pass owns the state.
     if (generation !== this.passGeneration) {
@@ -457,6 +621,16 @@ export class TierSnifferService {
     this.abort = undefined;
     this.lastTick = tick;
     this.reportWaiting(tick, overran);
+    // Any call that answered clears the hold, even when the pass then
+    // stopped on failures: a model that is making progress is never held.
+    if (tick.state === 'ran' && tick.report.calls > tick.report.failedCalls) {
+      this.notAnsweringPasses = 0;
+      this.notAnsweringUntilMs = 0;
+    } else if (this.waitingReason === 'model_not_answering') {
+      this.notAnsweringPasses += 1;
+      this.notAnsweringUntilMs = this.clockMs()
+        + (this.notAnsweringPasses === 1 ? NOT_ANSWERING_FIRST_BACKOFF_MS : NOT_ANSWERING_MAX_BACKOFF_MS);
+    }
     if (this.options.log && this.clockMs() - this.lastBacklogLogMs >= 60_000) {
       this.lastBacklogLogMs = this.clockMs();
       const backlog = this.backlog();
@@ -628,10 +802,24 @@ export class TierSnifferService {
 
   private async tick(signal: AbortSignal): Promise<TierSnifferTick> {
     const { lane } = this.options;
+    // Wall time of each step around the pass, for its log line: on Sparta
+    // (2026-11-06) 30 s passes came 32-134 s apart, and nothing said where
+    // the rest of the time went.
+    const phaseStarted = performance.now();
+    const idleMs = this.lastTickEndedAt === undefined ? undefined : phaseStarted - this.lastTickEndedAt;
+    let phaseAt = phaseStarted;
+    const phaseMs: Record<string, number> = {};
+    const phase = (name: string): void => {
+      const now = performance.now();
+      phaseMs[name] = (phaseMs[name] ?? 0) + (now - phaseAt);
+      phaseAt = now;
+    };
     // Owner rules that raise, and names-only folders, apply to stored items
     // whatever the model's state: no model is asked.
-    this.settleStoredItems();
-    this.recoverMissingQuestions();
+    await this.settleStoredItems();
+    phase('settle');
+    await this.recoverMissingQuestions();
+    phase('recover');
     if (this.options.modelAvailable && !this.options.modelAvailable()) {
       // Nothing is asked and nothing is counted: flagged items wait, pending
       // and held Private, until the model is there. A model whose download
@@ -687,11 +875,16 @@ export class TierSnifferService {
       await this.drainMoves();
       return { state: 'awaiting_owner_approval', modelId: lane.modelId, promptVersion: versions.approval };
     }
+    phase('approval');
+    const preparationStopped = await prepareSnifferModel({ model: this.options.model, signal, shouldYield: () => this.yieldNow() });
+    phase('prepare');
     // Items decided under an older classifier or sniffer prompt are judged
     // again first (tier-rejudge.ts), a bounded page per set per tick: their
     // questions join the queue this pass answers.
-    this.recoverMissingQuestions(true);
-    const rejudged = this.rejudge();
+    if (!preparationStopped) await this.recoverMissingQuestions(true);
+    phase('recover');
+    const rejudged = preparationStopped ? emptyTierRejudgeReport() : await this.rejudge();
+    phase('rejudge');
     const targets: SnifferTarget[] = [];
     for (const ledgerPath of this.ledgerPaths()) {
       let ledger: TierLedger;
@@ -795,6 +988,7 @@ export class TierSnifferService {
         },
       });
     }
+    phase('targets');
     const report = await runSnifferPass({
       targets,
       lane,
@@ -803,19 +997,24 @@ export class TierSnifferService {
       ...(ownerContext ? { ownerContext } : {}),
       budget: this.budget,
       maxCallsPerPass: this.options.maxCallsPerPass,
+      concurrentCalls: this.options.concurrentCalls,
       passTimeMs: this.options.passTimeMs,
       shouldYield: () => this.yieldNow(),
       signal,
     });
-    if (report.calls > 0 || report.verdictsApplied > 0) {
+    phase('pass');
+    const autoMoves = await this.drainMoves();
+    phase('moves');
+    if (report.calls > 0 || report.verdictsApplied > 0 || report.heldLowering > 0) {
+      const phases = Object.entries(phaseMs).map(([name, ms]) => `${name}=${Math.round(ms)}`).join(' ');
       this.options.log?.(
         `Olympus tier sniffer: ${report.calls} call(s), ${report.verdictsApplied} verdict(s) applied `
         + `(${report.resolvedPersonal} Personal, ${report.resolvedPrivate} Private, ${report.failSafePrivate} fail-safe Private), `
-        + `${report.cacheHits} from cache${report.stoppedBy ? `, stopped: ${report.stoppedBy}` : ''}; `
-        + `call_ms=${Math.round(report.callMs)} mean_call_ms=${report.calls ? Math.round(report.callMs / report.calls) : 0} queue_wait_max_ms=${Math.round(report.maxQueueWaitMs)}.`,
+        + `${report.cacheHits} from cache; ${report.heldLowering} lowering(s) held${report.stoppedBy ? `, stopped: ${report.stoppedBy}` : ''}; `
+        + `call_ms=${Math.round(report.callMs)} mean_call_ms=${report.calls ? Math.round(report.callMs / report.calls) : 0} queue_wait_max_ms=${Math.round(report.maxQueueWaitMs)}; `
+        + `tick_ms=${Math.round(performance.now() - phaseStarted)} ${phases}${idleMs === undefined ? '' : ` idle_before=${Math.round(idleMs)}`}.`,
       );
     }
-    const autoMoves = await this.drainMoves();
     // A move that just landed may have carried an item whose owner override
     // came while it was queued: apply the override now, not a tick later.
     if (autoMoves && autoMoves.moved > 0) this.applyOwnerOverrides();
@@ -827,7 +1026,7 @@ export class TierSnifferService {
    * an unread item with no possible excerpt, or an orphaned ledger row.
    * Reconcile a bounded, durable page before model availability/approval.
    */
-  private recoverMissingQuestions(allowReask = false): void {
+  private async recoverMissingQuestions(allowReask = false): Promise<void> {
     // Separate cursors keep model-independent recovery and approved re-asking
     // from skipping alternating pages of a large ledger.
     const cursorKey = allowReask ? 'sniffer_missing_question_reask_cursor_v1' : 'sniffer_missing_question_cursor_v1';
@@ -842,12 +1041,19 @@ export class TierSnifferService {
             || tierLedgerPathForStore(store.dbPath) === ledgerPath));
         // An unavailable store is not evidence that its items were deleted.
         if (stores.length === 0 || stores.some(store => !store.exportItemCopy)) continue;
+        // Once per ledger, a page per pass: older unread settlements get the
+        // `unread` label they would get now (#847).
+        if (ledger.readMeta(TIER_LEDGER_UNREAD_RELABEL_DONE) !== '1' && ledger.relabelUnreadFailSafe() === 0) {
+          ledger.writeMeta(TIER_LEDGER_UNREAD_RELABEL_DONE, '1');
+        }
         const saved = ledger.readMeta(cursorKey);
         const after = saved ? JSON.parse(saved) as TierLedgerIdentity : undefined;
         const rows = ledger.listPending({ limit: 100, ...(after ? { after } : {}) });
         let settled = 0;
         let retired = 0;
         for (const row of rows) {
+          // Each row can re-judge a stored body: let requests in between.
+          await ingestionTurn();
           const identity = recordIdentity(row);
           const missingMetadata = row.metadataPending && !queue.questionFor(identity, 'metadata');
           const missingContent = (row.contentPending || !row.metadataPending) && !queue.questionFor(identity, 'content');
@@ -914,17 +1120,19 @@ export class TierSnifferService {
   }
 
   /**
-   * An unread file that no store holds text for yet, and extraction still
-   * owes it. Only a routed file has an extraction lane at all: a message,
-   * a note or a legacy unrouted row with no job is genuinely unread, and
-   * keeps the fail-safe settlement rather than waiting for a job that will
-   * never come. A file with no job waits only for EXTRACTION_ENQUEUE_GRACE_MS
+   * An unread routed item (a file, or a chat's photo, voice note or
+   * attachment) that no store holds text for yet, and extraction still owes
+   * it. A legacy unrouted row has no extraction lane, and an item extraction
+   * no longer owes is genuinely unread: both keep the fail-safe settlement
+   * rather than waiting for a job that will never come (Sparta, 2026-11-04:
+   * Telegram media were settled while their extraction was still queued,
+   * because only the file family was let wait). An item with no job waits only for EXTRACTION_ENQUEUE_GRACE_MS
    * after it was listed: past that, nothing will queue it (a names-only
    * folder, a job deleted when its scope changed) and it settles as before.
    */
   private waitingForExtraction(ledger: TierLedger, row: TierLedgerRecord, identity: TierLedgerIdentity): boolean {
     try {
-      if (!this.options.extractionState || row.family !== 'file' || !row.routed) return false;
+      if (!this.options.extractionState || !row.routed) return false;
       const copies = ledger.copies(identity);
       if (copies.length === 0) return false;
       if (copies.some(copy => copy.state === 'current' && copy.layers !== 'metadata')) return false;
@@ -962,9 +1170,10 @@ export class TierSnifferService {
    * items a names-only folder covers stop waiting for text
    * (tier-names-only-settle.ts). Never throws.
    */
-  private settleStoredItems(): void {
+  private async settleStoredItems(): Promise<void> {
     this.applyOwnerOverrides();
     for (const ledgerPath of this.ledgerPaths()) {
+      await ingestionTurn();
       const set = tierSetForLedger(ledgerPath);
       if (!set) continue;
       void set.repairLowerContent({ ...(this.options.autoMoves ? {
@@ -1052,21 +1261,24 @@ export class TierSnifferService {
   }
 
   /** Re-judges a page of each set's routed items decided under older inputs; never throws. */
-  private rejudge(): TierRejudgeReport {
+  private async rejudge(): Promise<TierRejudgeReport> {
     const total = emptyTierRejudgeReport();
     const perPass = this.options.rejudgePerPass ?? DEFAULT_TIER_REJUDGE_PER_PASS;
     if (perPass <= 0) return total;
     const maxOpen = Math.max(0, this.options.rejudgeMaxOpenQuestions ?? 2 * perPass);
     for (const ledgerPath of this.ledgerPaths()) {
+      await ingestionTurn();
       const set = tierSetForLedger(ledgerPath);
       if (!set) continue;
       try {
         // Questions already waiting: re-judging more than the sniffer can
         // answer only grows the queue.
-        if (this.options.installed.snifferStoreForLedger(ledgerPath).counts().questions >= maxOpen) continue;
+        const id = snifferId(this.options.lane, snifferPromptVersions(this.options.ownerContext?.()).cache);
+        if (this.options.installed.snifferStoreForLedger(ledgerPath).questionWorkCounts(id).unanswered >= maxOpen) continue;
         const after = this.rejudgeCursors.get(ledgerPath);
-        const { report, next } = rejudgeRoutedItems({
+        const { report, next } = await rejudgeRoutedItemsInTurns({
           set,
+          turn: ingestionTurn,
           limit: perPass,
           ...(after ? { after } : {}),
           autoMoves: this.autoMovesFor(set),
@@ -1078,11 +1290,11 @@ export class TierSnifferService {
         // A set that cannot be read keeps its recorded decisions this tick.
       }
     }
-    if (total.updated > 0 || total.movesQueued > 0 || total.asked > 0 || total.secrets > 0) {
+    if (total.updated > 0 || total.movesQueued > 0 || total.asked > 0 || total.secrets > 0 || total.heldLowering > 0) {
       this.options.log?.(
         `Olympus tier sniffer: re-judged ${total.updated + total.movesQueued + total.asked + total.secrets} item(s) under the current classifier `
         + `(${total.asked} asked about, still where they were; ${total.movesQueued} tier move(s) queued`
-        + `${total.secrets ? `; ${total.secrets} Secret(s) found and hidden` : ''}).`,
+        + `; ${total.heldLowering} lowering(s) held${total.secrets ? `; ${total.secrets} Secret(s) found and hidden` : ''}).`,
       );
     }
     return total;
@@ -1172,6 +1384,8 @@ export class TierSnifferService {
           // The move stays queued (held, never shown twice); the next pass or
           // the owner-approved migration picks it up.
           report.failed += 1;
+          const why = moveFailureName(error);
+          report.failedBy = { ...report.failedBy, [why]: (report.failedBy?.[why] ?? 0) + 1 };
           if (error instanceof TierMoveContentChangedError) {
             // A stale lowering was refused before import and taken out of
             // moving. Re-read the actual stored body, even when this model
@@ -1209,6 +1423,7 @@ export class TierSnifferService {
     if (report.moved > 0 || report.failed > 0) {
       this.options.log?.(
         `Olympus tier sniffer: ${report.moved} automatic tier move(s), ${report.failed} failed`
+        + `${report.failedBy ? ` (${Object.entries(report.failedBy).map(([why, n]) => `${why} ×${n}`).join(', ')})` : ''}`
         + `${report.abandoned ? `, ${report.abandoned} stale move(s) given up (back where they were)` : ''}`
         + `${report.staleRaises ? `, ${report.staleRaises} stale raise(s) kept hidden and queued` : ''}.`,
       );
@@ -1308,7 +1523,9 @@ export function tierSnifferServiceEnv(env: Record<string, string | undefined>): 
   intervalMs: number;
   /** Optional legacy override; absent means time-bounded passes. */
   maxCallsPerPass?: number;
-  maxCallsPerDay: number;
+  /** Calls in flight at once (default 1, at most SNIFFER_MAX_CONCURRENT_CALLS). */
+  concurrentCalls?: number;
+  maxCallsPerDay?: number;
 } {
   const enabledRaw = env.OLYMPUS_TIER_SNIFFER_ENABLED?.trim().toLowerCase();
   return {
@@ -1317,7 +1534,11 @@ export function tierSnifferServiceEnv(env: Record<string, string | undefined>): 
     ...(env.OLYMPUS_TIER_SNIFFER_MAX_CALLS_PER_PASS?.trim()
       ? { maxCallsPerPass: positiveInteger(env.OLYMPUS_TIER_SNIFFER_MAX_CALLS_PER_PASS, 1, 1) }
       : {}),
-    maxCallsPerDay: positiveInteger(env.OLYMPUS_TIER_SNIFFER_MAX_CALLS_PER_DAY, DEFAULT_SNIFFER_MAX_CALLS_PER_DAY, 0),
+    ...(env.OLYMPUS_TIER_SNIFFER_CONCURRENT_CALLS?.trim()
+      ? { concurrentCalls: Math.min(SNIFFER_MAX_CONCURRENT_CALLS, positiveInteger(env.OLYMPUS_TIER_SNIFFER_CONCURRENT_CALLS, 1, 1)) }
+      : {}),
+    ...(env.OLYMPUS_TIER_SNIFFER_MAX_CALLS_PER_DAY?.trim()
+      ? { maxCallsPerDay: positiveInteger(env.OLYMPUS_TIER_SNIFFER_MAX_CALLS_PER_DAY, DEFAULT_SNIFFER_MAX_CALLS_PER_DAY, 0) } : {}),
   };
 }
 
@@ -1325,4 +1546,15 @@ function positiveInteger(value: string | undefined, fallback: number, minimum: n
   if (!value?.trim()) return fallback;
   const parsed = Number(value);
   return Number.isInteger(parsed) && parsed >= minimum ? parsed : fallback;
+}
+
+/**
+ * A failed move's reason for the log: the error's class, or a short fixed
+ * message it was thrown with ("no current copy"). Nothing longer, so no item
+ * name or content can reach the log through it.
+ */
+export function moveFailureName(error: unknown): string {
+  if (!(error instanceof Error)) return 'unknown';
+  if (error.constructor !== Error) return error.name || error.constructor.name || 'Error';
+  return /^[a-z][a-z ]{0,39}$/.test(error.message) ? error.message : 'Error';
 }

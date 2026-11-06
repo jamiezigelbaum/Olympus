@@ -30,7 +30,9 @@
  * decrypted the answer and says it rendered it; it does not prove a person
  * read it. A lost one leaves the question waiting there. A source that carries a web
  * address (https only) is handed to the host to open: that address is the one
- * thing the host ever sees, and only on the person's click.
+ * thing the host ever sees, and only on the person's click. A Secret notice
+ * can also send a random, expiring Inbox handle to the open-on-computer
+ * landing page in its fragment. It carries no item identity or metadata.
  *
  * The key pair is kept per job id in this origin's IndexedDB (database
  * `olympus-private-answer`, store `keys`): ChatGPT re-mounts the widget on
@@ -48,7 +50,7 @@
  * info = UTF-8(job id), AES-256-GCM with aad = UTF-8(job id); the plaintext
  * JSON is padded with trailing spaces.
  */
-import { DASHBOARD_CHATGPT_PRIVATE_ANSWER_COPY } from '../vocabulary.ts';
+import { DASHBOARD_CHATGPT_PAGE_COPY, DASHBOARD_CHATGPT_PRIVATE_ANSWER_COPY } from '../vocabulary.ts';
 import { CHATGPT_MARKDOWN_CSS, chatgptMarkdownRender } from './markdown.ts';
 import { PRIVATE_ANSWER_META_KEY } from '../../chatgpt/private-answer-contract.ts';
 import { CHATGPT_DASHBOARD_DARK, CHATGPT_DASHBOARD_LIGHT } from './page.ts';
@@ -59,6 +61,7 @@ export interface ChatGptPrivateAnswerConfig {
   /** Source of the job id pattern (connect-relay/shared/private-answer.ts). */
   jobIdPattern: string;
   copy: typeof DASHBOARD_CHATGPT_PRIVATE_ANSWER_COPY;
+  remoteCopy: typeof DASHBOARD_CHATGPT_PAGE_COPY.remote;
   /** One Retry-After second, in ms (tests shrink it). */
   secondMs: number;
   /** How long one collection keeps polling before offering Try again. */
@@ -137,7 +140,7 @@ export function chatgptPrivateAnswerProgram(config: ChatGptPrivateAnswerConfig):
   let focusAfter = '';
   type Open = { kind: 'mac'; token: string } | { kind: 'web'; url: string };
   type Source = { name: string; open: Open | null };
-  type Answer = { text: string; sources: Source[]; unanswered: string[]; ack: string | null };
+  type Answer = { secretInbox?: { handle?: string; remote?: { onComputer: string; onServer: string } }; text: string; sources: Source[]; unanswered: string[]; ack: string | null };
   // Jobs whose seen acknowledgment has been posted from this frame (once each).
   const acked: Record<string, boolean> = {};
 
@@ -476,7 +479,13 @@ export function chatgptPrivateAnswerProgram(config: ChatGptPrivateAnswerConfig):
       .filter((item: Any) => typeof item === 'string' && item.trim())
       .map((item: string) => item.trim());
     const ack = typeof value.ack === 'string' && /^[A-Za-z0-9_-]{43}$/.test(value.ack) ? value.ack : null;
-    return { text: value.answer, sources, unanswered, ack };
+    const notice = value.secretInbox;
+    const secretInbox = notice && typeof notice === 'object' ? {
+      ...(typeof notice.handle === 'string' && /^[A-Za-z0-9_-]{22}$/.test(notice.handle) ? { handle: notice.handle } : {}),
+      ...(notice.remote && typeof notice.remote.onComputer === 'string' && typeof notice.remote.onServer === 'string'
+        ? { remote: { onComputer: notice.remote.onComputer, onServer: notice.remote.onServer } } : {}),
+    } : undefined;
+    return { text: value.answer, sources, unanswered, ack, ...(secretInbox ? { secretInbox } : {}) };
   }
 
   /**
@@ -898,14 +907,35 @@ export function chatgptPrivateAnswerProgram(config: ChatGptPrivateAnswerConfig):
     body.setAttribute('data-key', 'answer');
     // Rendered Markdown (text-built nodes, never HTML); plain paragraphs when the renderer is missing.
     const markdown = (window as Any).olympusMarkdown;
+    const text = shown.secretInbox?.handle ? shown.text.replace(T.secretOpen + '.', '').trim() : shown.text;
     if (typeof markdown === 'function') {
       body.className = 'answer md';
-      markdown(doc, body, shown.text);
+      markdown(doc, body, text);
     } else {
-      const paragraphs = shown.text.split(/\n\s*\n/).map((part) => part.trim()).filter(Boolean);
+      const paragraphs = text.split(/\n\s*\n/).map((part) => part.trim()).filter(Boolean);
       for (const part of paragraphs) body.appendChild(el('p', '', part));
     }
     view.card.appendChild(body);
+    if (shown.secretInbox) {
+      const notice = shown.secretInbox;
+      if (notice.remote) {
+        const R = config.remoteCopy;
+        view.card.appendChild(el('p', 'sub', R.title));
+        view.card.appendChild(el('p', 'sub', R.onComputer));
+        view.card.appendChild(el('pre', 'remote-command', notice.remote.onComputer));
+        view.card.appendChild(el('p', 'sub', R.onServer));
+        view.card.appendChild(el('pre', 'remote-command', notice.remote.onServer));
+      } else if (notice.handle) {
+        view.card.appendChild(button(T.secretOpen, 'secret-inbox', () => {
+          const href = 'https://olympusplugin.ai/open/private/#' + notice.handle;
+          const host = openai();
+          if (host && typeof host.openExternal === 'function') {
+            try { host.openExternal({ href }); } catch { /* fallback below stays visible */ }
+          } else request('ui/open-link', { url: href }, () => undefined);
+        }));
+      }
+      view.card.appendChild(el('p', 'sub', T.secretFallback));
+    }
     if (shown.sources.length) view.card.appendChild(sourcesView(shown.sources));
     // The backend marks a cut-off item with its own ellipsis; the panel adds none.
     const gaps = shown.unanswered.map((item) => item.trim()).filter(Boolean);
@@ -1066,6 +1096,7 @@ html:root>body #panel>.card{display:block!important;height:auto!important;min-he
 .answer{margin-top:0.625rem;display:flex;flex-direction:column;gap:0.625rem;font-size:0.9375rem;line-height:1.6;white-space:pre-line}
 ${CHATGPT_MARKDOWN_CSS}
 .answer:focus{outline:none}
+.remote-command{white-space:pre-wrap;overflow-wrap:anywhere;font-size:0.8125rem}
 .sources{margin-top:0.5rem}
 .src-toggle{display:inline-flex;align-items:center;gap:0.25rem;font:inherit;font-size:0.8125rem;font-weight:500;line-height:1.4;color:var(--muted);background:none;border:0;border-radius:6px;padding:0.125rem 0;margin:0;cursor:pointer;-webkit-appearance:none;appearance:none}
 .src-toggle:hover{color:var(--text)}
@@ -1096,6 +1127,7 @@ export function chatgptPrivateAnswerPageHtml(options: ChatGptPrivateAnswerPageOp
     metaKey: PRIVATE_ANSWER_META_KEY,
     jobIdPattern: CHATGPT_PRIVATE_ANSWER_JOB_ID.source,
     copy: DASHBOARD_CHATGPT_PRIVATE_ANSWER_COPY,
+    remoteCopy: DASHBOARD_CHATGPT_PAGE_COPY.remote,
     secondMs: options.secondMs ?? 1000,
     pollCapMs: options.pollCapMs ?? CHATGPT_PRIVATE_ANSWER_POLL_CAP_MS,
     fullPollCapMs: options.fullPollCapMs ?? CHATGPT_PRIVATE_ANSWER_FULL_POLL_CAP_MS,

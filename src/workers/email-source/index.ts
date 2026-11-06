@@ -1,3 +1,8 @@
+import { systemSupportReport, type SourceSupportState, type SystemSupportFacts } from '../dashboard/source-failure.ts';
+import { checkGoogleOwnApp, parseGoogleDesktopClient, readGoogleOwnAppRegistration } from '../../core/google-own-app.ts';
+import type { LocalModelDiscoveryResult, LocalModelSelection, LocalModelTestResult } from '../../core/local-model-discovery.ts';
+import { SOVEREIGNTY_PRESETS, type SovereigntyPresetName } from '../../core/sovereignty.ts';
+import { createDashboardMessagingService } from './dashboard-messaging-service.ts';
 import { isFileSourceScopeId } from '../../core/source-scope-approval.ts';
 import { createReleaseManifestSink, runWithReleaseManifestSink, recordReleaseManifest, answerReleaseWithheldReason, type ReleaseCheck, type ReleaseManifest } from '../../core/release-manifest.ts';
 import type { UpdateAvailable } from '../../core/update-check.ts';
@@ -267,6 +272,7 @@ import {
 } from '../credential-broker/index.ts';
 import {
   LocalConnectorStore,
+  STATUS_COUNTS_MAX_AGE_MS,
   connectorStoreFilterCapabilityRegistry,
   createConnectorStoreCorpusAdapter,
   defineConnectorCorpus,
@@ -483,6 +489,8 @@ export interface EmailSourceWorkerOptions {
    * `fileExtractionAliasFor`.
    */
   fileExtraction?: FileExtractionRunner;
+  /** Apply current lane policy before any extraction route reads jobs or items. */
+  authorizeFileExtractionLane?: (lane: ExtractionLaneKey) => void;
   /** The file lanes whose PDFs `/source/index/files/extract-pdfs` drains, resolved per call. */
   pdfExtractionLanes?: () => readonly ExtractionLaneKey[];
   /** False for a drain lane whose file source has no current scope approval. */
@@ -492,6 +500,8 @@ export interface EmailSourceWorkerOptions {
   sourceIndexEmbeddingProvider?: SourceEmbeddingProvider;
   dropboxIngestionPolicy?: SourceIngestionPolicy;
   connectorStores?: LocalConnectorStore[];
+  /** Discover stores that ingestion created after boot; never creates an absent store. */
+  refreshConnectorStores?: () => void;
   /**
    * Per-tier stores (P1b): the sibling corpora of a corpus in a tiered store
    * set. `source_index_search` searches every tier of the named source unless
@@ -533,6 +543,8 @@ export interface EmailSourceWorkerOptions {
   };
   sourceDashboard?: {
     sovereigntyEngine: SovereigntyEngine;
+    /** Pause the native capture reader while pairing or changing its capture grant. */
+    withMessagingCapturePaused?<T>(source: 'telegram' | 'whatsapp', operation: () => Promise<T>): Promise<T>;
     history?: SourceDashboardHistory;
     // Authority on which dashboard card owns which corpus. Omitted means the
     // shipped default registry; pass the operator's when one is configured so
@@ -553,8 +565,15 @@ export interface EmailSourceWorkerOptions {
     evernoteSignIn?: { serverUrl: string; authorizationHosts: readonly string[] };
     apiKeyFetch?: OAuthFetch;
     connectApiKey?: typeof connectPublicApiKeySource;
+    systemReport?: () => SystemSupportFacts;
     modelSetup?: () => ModelSetupView;
     checkModelSetup?: () => Promise<ModelSetupView>;
+    discoverLocalModels?: (baseUrl?: string) => Promise<LocalModelDiscoveryResult[]>;
+    testLocalModels?: (selection: LocalModelSelection) => Promise<LocalModelTestResult>;
+    saveLocalAnswerModel?: (selection: LocalModelSelection) => Promise<{ ok: boolean; detail?: string }>;
+    computerSetup?: () => Pick<ModelSetupView, 'computer_use_pending' | 'engine_server_mode'>;
+    saveComputerUseChoice?: (choice: 'everyday' | 'server') => { ok: true; status_message: string };
+    saveFirstRunPrivacyChoice?: (choice: SovereigntyPresetName) => boolean;
     connectModelKey?: (source: 'gemini' | 'venice', apiKey: string) => Promise<void>;
     /**
      * Outside help (consults): the Mac dashboard card's backend
@@ -655,7 +674,7 @@ export interface EmailSourceWorkerOptions {
      * configured, which is honest — the alternative is a page showing an empty
      * tree that reads as "you have no folders".
      */
-    ingestionDispositions?: () => Promise<SourceDispositionsRuntime> | SourceDispositionsRuntime;
+    ingestionDispositions?: (options?: { lazyStores?: boolean }) => Promise<SourceDispositionsRuntime> | SourceDispositionsRuntime;
     /**
      * Where a sign-in started for ChatGPT returns: the relay's public origin
      * and this install's relay id (docs/design/chatgpt-plugin.md, "Setup from
@@ -875,7 +894,10 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
   // Looked up live: a tiered store set opens its Public store on first need,
   // after this worker was created, and the runtime appends it to this list.
   const connectorStoresByCorpusId = {
-    get: (corpusId: string): LocalConnectorStore | undefined => connectorStores.find((store) => store.corpusId === corpusId),
+    get: (corpusId: string): LocalConnectorStore | undefined => {
+      options.refreshConnectorStores?.();
+      return connectorStores.find((store) => store.corpusId === corpusId);
+    },
   };
   const connectorStoreEmbeddingProviders = options.connectorStoreEmbeddingProviders ?? new Map();
   const connectorStoreAccountScopes = options.connectorStoreAccountScopes ?? new Map();
@@ -964,11 +986,18 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
   // Per worker, so it lives exactly as long as the stores it counted and no
   // test inherits another test's counts.
   const dashboardExclusionDebt: DashboardExclusionDebtCache = new Map();
+  const dashboardMessaging = sourceDashboard?.withMessagingCapturePaused ? createDashboardMessagingService({
+    ...(sourceDashboard.registryPath ? { registryPath: sourceDashboard.registryPath } : {}),
+    secretStore: dashboardSecretStore(sourceDashboard),
+    withMessagingCapturePaused: sourceDashboard.withMessagingCapturePaused,
+    withGrantMutation: withDashboardGrantMutation,
+  }) : undefined;
   const basePath = normalizeBasePath(options.basePath ?? '/v1');
 
   return {
     close(): void {
       dashboardWorkerClosed = true;
+      dashboardMessaging?.close();
       if (dashboardSchedulerAdoptionTick === undefined) return;
       clearInterval(dashboardSchedulerAdoptionTick);
       dashboardSchedulerAdoptionTick = undefined;
@@ -1189,9 +1218,12 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
               'Private source worker does not support source-index status.',
             );
           }
+          options.refreshConnectorStores?.();
           const statusRequest = await parseSourceIndexStatusRequest(request, connectorStores);
           const result = withCredentialDegradations(
-            await sourceIndexStatus.status(statusRequest),
+            // The same reuse window as the dashboard: a status command never
+            // rebuilds every store's hidden-copy set in one go.
+            await sourceIndexStatus.status(statusRequest, { countsMaxAgeMs: STATUS_COUNTS_MAX_AGE_MS }),
             credentialDegradations?.() ?? [],
           );
           const resultWithLatencyHealth = sourceAnswerLatencyLog?.health
@@ -1462,7 +1494,8 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
               },
             }));
           }
-          if (page === 'json' || page === 'keys') {
+          if (page === 'help' && (!controlSessionCsrfToken || request.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER) !== 'local')) return renderHelp(request, url);
+          if (page === 'json' || page === 'keys' || page === 'help') {
             if (!sourceIndexStatus || !sourceDashboard) {
               throw new EmailSourceWorkerError(
                 501,
@@ -1498,7 +1531,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
                 include_items: false,
                 include_readiness_ledger: true,
                 readiness_ledger_max_age_ms: DASHBOARD_READINESS_LEDGER_MAX_AGE_MS,
-              }),
+              }, { countsMaxAgeMs: STATUS_COUNTS_MAX_AGE_MS }),
               credentialDegradations?.() ?? [],
             );
             const schedulerDashboardStatus = sourceScheduler?.status();
@@ -1581,12 +1614,17 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
             });
             assertNoRawEmailFields(view);
             if (page === 'json') return json(view);
+            if (page === 'help') return renderHelp(request, url, view.sources.map(source => ({
+              sourceId: source.source_id, state: source.connection.state,
+              failure: sourceFailureKind(source.schedule?.last_error_kind, source.schedule?.degraded_reason), ref: source.schedule?.last_error_hash,
+            })));
             return html(renderDashboardLocalPage('keys', {
               url,
               view,
               options: {
                 ...(controlSessionCsrfToken ? { controlSessionCsrfToken } : {}),
                 outsideHelpLocalSession: request.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER) === 'local',
+                messagingLocalSession: Boolean(controlSessionCsrfToken) && request.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER) === 'local',
                 ...(controlSessionCsrfToken && sourceDashboard.consult ? { outsideHelp: await sourceDashboard.consult.status().catch(() => undefined) } : {}),
               },
             }));
@@ -1764,7 +1802,9 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
             attempt.consumed = true;
             return dashboardOAuthFailureHtml({
               source,
-              reason: `OAuth provider returned ${errorCode ?? 'an unrecognized error'}.`,
+              reason: source === 'dropbox' && errorCode === 'invalid_scope' && attempt.clientIdSource === 'byo'
+                ? 'Dropbox needs more permissions. Redo the Enable permissions step and sign in again. No credentials were stored.'
+                : `OAuth provider returned ${errorCode ?? 'an unrecognized error'}.`,
               returnTo: attempt.returnTo,
               status: 400,
             });
@@ -1800,10 +1840,15 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
               }
             });
           } catch (error) {
-            clearDashboardOAuthAttempt(dashboardOAuthAttempts, source, attempt);
+            // Keep a fixed, credential-free failure on the original sheet, but
+            // never retain a usable callback state or overwrite a newer attempt.
+            if (dashboardOAuthAttempts.get(source) === attempt) {
+              attempt.consumed = true;
+              attempt.error = { code: 'connection_check_failed', at: new Date().toISOString() };
+            }
             return dashboardOAuthFailureHtml({
               source,
-              reason: dashboardCallbackFailureReason(error, source),
+              reason: dashboardCallbackFailureReason(error, source, attempt.clientIdSource),
               returnTo: attempt.returnTo,
               status: 400,
             });
@@ -1858,7 +1903,13 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           const registry = readDashboardRegistry(sourceDashboard.registryPath);
           assertDashboardAccountCardinality(registry, source);
           const clientIdSets = await dashboardOAuthClientIdSets(registry, secretStore);
-          const submittedClientId = asOptionalString(record.client_id);
+          let uploadedClient: { clientId: string; clientSecret: string } | undefined;
+          const ownDesktop = dashboardGoogleOAuthSource(source) && record.google_desktop === true;
+          if (ownDesktop && typeof record.google_client_json === 'string') {
+            try { uploadedClient = parseGoogleDesktopClient(record.google_client_json); }
+            catch (error) { throw new EmailSourceWorkerError(400, 'google_app_file_invalid', (error as Error).message); }
+          }
+          const submittedClientId = uploadedClient?.clientId ?? asOptionalString(record.client_id);
           // A sign-in started for ChatGPT returns through the relay to this
           // install (the state's nonce carries the install id the relay routes
           // on). Only the publisher apps' relay callback can do that.
@@ -1903,7 +1954,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           // no registration of its own for the source — a submitted client id
           // is a bring-your-own registration and always wins, and so does one
           // already on file. X is never publisher-owned.
-          const publisher = submittedClientId
+          const publisher = submittedClientId || ownDesktop
             ? undefined
             : dashboardPublisherOAuthFlow(
               source,
@@ -1915,15 +1966,15 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           if (computerHandback && (submittedClientId || publisher?.loopback !== true)) {
             throw new EmailSourceWorkerError(409, 'oauth_handback_unavailable', 'This source does not sign in on this computer; connect it in the Olympus dashboard.');
           }
+          const savedDesktop = ownDesktop ? await readGoogleOwnAppRegistration(secretStore) : undefined;
           const clientId = submittedClientId
-            ?? publisher?.clientId
-            ?? dashboardOAuthClientIdForSource(source, clientIdSets.all);
+            ?? (ownDesktop ? savedDesktop?.clientId : publisher?.clientId ?? dashboardOAuthClientIdForSource(source, clientIdSets.all));
           if (!clientId) {
-            throw new EmailSourceWorkerError(409, 'oauth_client_id_missing', `Missing OAuth client id: ${dashboardOAuthClientIdConfigKey(source)}.`);
+            throw new EmailSourceWorkerError(409, 'oauth_client_id_missing', ownDesktop ? 'Choose the downloaded Desktop app file, or paste the Client ID and secret.' : `Missing OAuth client id: ${dashboardOAuthClientIdConfigKey(source)}.`);
           }
           // The saved-secret field's stand-in value means "keep what is stored";
           // it must never be sent to a provider or stored as a secret.
-          const rawClientSecret = asOptionalString(record.client_secret);
+          const rawClientSecret = uploadedClient?.clientSecret ?? asOptionalString(record.client_secret);
           const submittedClientSecret = rawClientSecret === DASHBOARD_SAVED_SECRET_FIELD_VALUE ? undefined : rawClientSecret;
           // Resolved after the client id, because which stored secret may be
           // sent depends on which client this flow is going out with. The
@@ -1937,12 +1988,16 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           if (dashboardOAuthClientSecretRequired(source) && !clientSecret) {
             throw new EmailSourceWorkerError(409, 'oauth_client_secret_missing', `Missing OAuth client secret: ${dashboardOAuthClientSecretConfigKey(source)}.`);
           }
+          if (ownDesktop) {
+            try { await checkGoogleOwnApp({ clientId, clientSecret: clientSecret ?? '' }, sourceDashboard.oauthFetch); }
+            catch (error) { throw new EmailSourceWorkerError(400, 'google_app_check_failed', (error as Error).message); }
+          }
           // A client id in the body is a registration, not one call's argument.
           // It used to reach the store only from a COMPLETED callback, so a
           // flow that died at the provider — as the live X flow did on
           // 2026-08-19 — left the next start call failing with
           // oauth_client_id_missing and the owner re-pasting the same id.
-          if (submittedClientId) {
+          if (submittedClientId && !ownDesktop) {
             await secretStore.set(dashboardOAuthClientIdConfigKey(source), submittedClientId);
             // Explicit, not inferred: an owner-pasted id is bring-your-own by
             // definition, and marking it here means a later render never has
@@ -1960,7 +2015,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           // prepared flow and sends it back at exchange time, which is what the
           // providers' exact-string matching requires. Google's Desktop client
           // returns to this engine on loopback (`dashboardGoogleLoopbackOrigin`).
-          const redirectUri = publisher?.loopback
+          const redirectUri = publisher?.loopback || ownDesktop
             ? `${dashboardGoogleLoopbackOrigin(dashboardOrigin, sourceDashboard.loopbackPort)}/oauth/callback/${encodeURIComponent(source)}`
             : publisher?.redirectUri
               ?? `${dashboardOrigin}/oauth/callback/${encodeURIComponent(source)}`;
@@ -1996,6 +2051,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
             // under the identical key, and mistaking one for the other broke
             // reauthentication after the first successful publisher connect.
             clientIdSource: publisher ? 'publisher' : 'byo',
+            ...(ownDesktop ? { googleOwnApp: true } : {}),
           });
           // The starter is an injectable seam whose URL the owner's browser
           // will follow and whose clock the dashboard displays: the URL is
@@ -2016,6 +2072,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           dashboardOAuthAttempts.set(source, {
             source,
             pending,
+            clientIdSource: publisher ? 'publisher' : 'byo',
             returnTo: handback || computerHandback ? CHATGPT_RETURN_TO : dashboardReturnTo(),
             startedAt: startedAtDate.toISOString(),
             expiresAt,
@@ -2062,6 +2119,56 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           });
         }
 
+        if (request.method === 'POST' && url.pathname === '/dashboard/engine/computer-use') {
+          if (!request.headers.has(DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER) || request.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER) !== 'local') {
+            return json({ ok: false, error: { code: 'mac_dashboard_only', message: 'Open dashboard controls on this Mac before changing how Olympus runs.' } }, 403);
+          }
+          const input = await parseObjectBody(request);
+          if (typeof input.choice !== 'string' || !['everyday', 'server'].includes(input.choice)) throw new EmailSourceWorkerError(400, 'invalid_request', 'Choose how this computer will run.');
+          if (!sourceDashboard?.saveComputerUseChoice || !sourceDashboard.computerSetup?.().engine_server_mode) {
+            return json({ ok: false, error: { code: 'not_available', message: 'This setting is available in the standalone Olympus app on a Mac.' } }, 409);
+          }
+          try { return json(sourceDashboard.saveComputerUseChoice(input.choice as 'everyday' | 'server')); }
+          catch (error) { return json({ ok: false, error: { code: 'server_mode_failed', message: error instanceof Error ? error.message : 'Olympus could not change this setting. Try again in Keys.' } }, 409); }
+        }
+
+        if (request.method === 'POST' && url.pathname === '/dashboard/models/first-run-privacy') {
+          if (!request.headers.has(DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER) || request.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER) !== 'local') {
+            return json({ ok: false, error: { code: 'mac_dashboard_only', message: 'Choose this on the computer in an unlocked dashboard.' } }, 403);
+          }
+          if (sourceDashboard?.computerSetup?.().computer_use_pending) return json({ ok: false, error: { code: 'computer_choice_pending', message: 'Choose how this computer will run first.' } }, 409);
+          const input = await parseObjectBody(request);
+          if (typeof input.choice !== 'string' || !SOVEREIGNTY_PRESETS.includes(input.choice as SovereigntyPresetName)) {
+            throw new EmailSourceWorkerError(400, 'invalid_request', 'Choose a Private-answer mode.');
+          }
+          if (!sourceDashboard?.saveFirstRunPrivacyChoice?.(input.choice as SovereigntyPresetName)) {
+            return json({ ok: false, error: { code: 'privacy_choice_changed', message: 'This choice was already made or the policy changed. Refresh to see the current setting.' } }, 409);
+          }
+          return json({ ok: true, status_message: 'Choice saved. Olympus is applying it.' });
+        }
+
+        if (request.method === 'POST' && ['/dashboard/models/local/discover', '/dashboard/models/local/test', '/dashboard/models/local/save'].includes(url.pathname)) {
+          if (!request.headers.has(DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER) || request.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER) !== 'local') {
+            return json({ ok: false, error: { code: 'mac_dashboard_only', message: 'Check local models in an unlocked dashboard on this computer.' } }, 403);
+          }
+          const input = await parseObjectBody(request);
+          if (url.pathname.endsWith('/discover')) {
+            if (!sourceDashboard?.discoverLocalModels) throw new EmailSourceWorkerError(501, 'model_setup_not_supported', 'Local model discovery is unavailable.');
+            if (input.base_url !== undefined && typeof input.base_url !== 'string') throw new EmailSourceWorkerError(400, 'invalid_request', 'Enter a loopback URL.');
+            const results = await sourceDashboard.discoverLocalModels(typeof input.base_url === 'string' && input.base_url.trim() ? input.base_url.trim() : undefined);
+            return json({ ok: true, results });
+          }
+          if (typeof input.base_url !== 'string' || typeof input.answer_model !== 'string') throw new EmailSourceWorkerError(400, 'invalid_request', 'Choose a server and answer model.');
+          if (url.pathname.endsWith('/save')) {
+            if (!sourceDashboard?.saveLocalAnswerModel) throw new EmailSourceWorkerError(501, 'model_setup_not_supported', 'Local model saving is unavailable.');
+            const result = await sourceDashboard.saveLocalAnswerModel({ baseUrl: input.base_url, answerModel: input.answer_model });
+            return json(result.ok ? { ok: true, status_message: 'Model saved. Olympus is applying it; check readiness after restart.' } : { ok: false, error: { code: 'model_save_failed', message: result.detail } }, result.ok ? 200 : 409);
+          }
+          if (!sourceDashboard?.testLocalModels) throw new EmailSourceWorkerError(501, 'model_setup_not_supported', 'Local model testing is unavailable.');
+          const result = await sourceDashboard.testLocalModels({ baseUrl: input.base_url, answerModel: input.answer_model });
+          return json({ ok: true, result });
+        }
+
         if (request.method === 'POST' && url.pathname === '/dashboard/models/check') {
           if (!sourceDashboard?.checkModelSetup) {
             throw new EmailSourceWorkerError(501, 'model_setup_not_supported', 'This worker does not support model setup checks.');
@@ -2076,6 +2183,21 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
         // Answer, seen, Dismiss and open on a waiting question. Like the
         // consult routes below, it needs the control-session context header
         // of a locally minted session, which only the HTTP boundary sets.
+        if (request.method === 'POST' && url.pathname.startsWith('/dashboard/messaging/')) {
+          if (!request.headers.get(DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER) || request.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER) !== 'local') {
+            return json({ ok: false, error: { code: 'mac_dashboard_only', message: 'Pairing opens only in dashboard controls on this computer.' } }, 403);
+          }
+          const operation = url.pathname.slice('/dashboard/messaging/'.length);
+          if (operation !== 'start' && operation !== 'status' && operation !== 'respond' && operation !== 'cancel' && operation !== 'chats' && operation !== 'scope') return json({ ok: false }, 404);
+          if (!dashboardMessaging) return json({ ok: false, error: { code: 'messaging_unavailable', message: 'Pairing is unavailable on this computer.' } }, 501);
+          try {
+            const record = await parseDashboardMessagingBody(request);
+            return new Response(JSON.stringify(await dashboardMessaging.handle(operation, record)), { headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' } });
+          } catch {
+            return new Response(JSON.stringify({ ok: false, error: { code: 'messaging_request_failed', message: 'Could not complete this pairing step. Try again from this computer.' } }), { status: 400, headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' } });
+          }
+        }
+
         if (request.method === 'POST' && url.pathname === DASHBOARD_PRIVATE_ANSWERS_PATH) {
           const csrf = request.headers.get(DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER);
           if (!csrf || request.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER) !== 'local') {
@@ -2153,7 +2275,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
               throw new EmailSourceWorkerError(501, 'model_setup_not_supported', 'Upgrade the worker to connect model keys here.');
             }
             try { await sourceDashboard.connectModelKey(source, apiKey); }
-            catch { throw new EmailSourceWorkerError(400, 'model_key_setup_failed', 'The model key could not be validated or applied. Check the Models card and retry.'); }
+            catch (error) { throw new EmailSourceWorkerError(400, 'model_key_setup_failed', source === 'venice' ? safeVeniceCheckFailure(error) : 'The model key could not be validated or applied. Check the Models card and retry.'); }
             const modelSetup = sourceDashboard.modelSetup?.();
             return json({ ok: true, source, status_message: modelSetup?.ready
               ? 'Model connection ready.'
@@ -2185,7 +2307,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
             throw new EmailSourceWorkerError(
               400,
               'api_key_validation_failed',
-              `Validating the ${source} API key failed. Paste a current key and try again, or retry when the provider is reachable.`,
+              source === 'venice' ? safeVeniceCheckFailure(error) : `Validating the ${source} API key failed. Paste a current key and try again, or retry when the provider is reachable.`,
             );
           }
           markDashboardSourceConnected(source, dashboardDisconnectedSources);
@@ -2319,6 +2441,11 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
         }
 
         if (request.method === 'POST' && url.pathname === '/dashboard/disconnect') {
+          const disconnectRecord = await parseObjectBody(request);
+          if (disconnectRecord.acknowledge === true) {
+            if (disconnectRecord.source_id === 'telegram.messages') await dashboardMessaging?.cancelAndWait('telegram');
+            if (disconnectRecord.source_id === 'whatsapp.personal.messages') await dashboardMessaging?.cancelAndWait('whatsapp');
+          }
           return await withDashboardGrantMutation(async () => {
           if (!sourceDashboard) {
             throw new EmailSourceWorkerError(
@@ -2327,7 +2454,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
               'Private source worker does not have the source dashboard configured.',
             );
           }
-          const record = await parseObjectBody(request);
+          const record = disconnectRecord;
           if (record.source_id === 'local.files') {
             if (record.acknowledge !== true) {
               throw new EmailSourceWorkerError(
@@ -2502,6 +2629,12 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
         // anything opens them; with no supervisor to restart it the route
         // refuses before marking anything.
         if (request.method === 'POST' && url.pathname === '/dashboard/delete-source-data') {
+          const mutationRecord = await parseObjectBody(request);
+          // A pairing attempt may itself be waiting for the grant lock. Stop it before taking that lock.
+          if (mutationRecord.acknowledge === true) {
+            if (mutationRecord.source_id === 'telegram.messages') await dashboardMessaging?.cancelAndWait('telegram');
+            if (mutationRecord.source_id === 'whatsapp.personal.messages') await dashboardMessaging?.cancelAndWait('whatsapp');
+          }
           return await withDashboardGrantMutation(async () => {
           if (!sourceDashboard) {
             throw new EmailSourceWorkerError(
@@ -2510,7 +2643,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
               'Private source worker does not have the source dashboard configured.',
             );
           }
-          const record = await parseObjectBody(request);
+          const record = mutationRecord;
           const sourceId = record.source_id === 'local.files'
             ? 'local.files' as const
             : parseDashboardDisconnectSource(record.source_id);
@@ -2562,6 +2695,12 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
         //   own lane and nothing more, so the confirmation tells the reader to
         //   stop the capture service first and where to unlink the device.
         if (request.method === 'POST' && url.pathname === '/dashboard/unpair') {
+          const mutationRecord = await parseObjectBody(request);
+          // A pairing attempt may itself be waiting for the grant lock. Stop it before taking that lock.
+          if (mutationRecord.acknowledge === true) {
+            if (mutationRecord.source_id === 'telegram.messages') await dashboardMessaging?.cancelAndWait('telegram');
+            if (mutationRecord.source_id === 'whatsapp.personal.messages') await dashboardMessaging?.cancelAndWait('whatsapp');
+          }
           return await withDashboardGrantMutation(async () => {
           if (!sourceDashboard) {
             throw new EmailSourceWorkerError(
@@ -2570,7 +2709,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
               'Private source worker does not have the source dashboard configured.',
             );
           }
-          const record = await parseObjectBody(request);
+          const record = mutationRecord;
           const sourceId = parseDashboardUnpairSource(record.source_id);
           if (record.acknowledge !== true) {
             throw new EmailSourceWorkerError(
@@ -3156,6 +3295,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           const runner = requireFileExtractionRunner(fileExtraction);
           const record = await parseObjectBody(request);
           const lane = parseFileExtractionLaneRecord(record, filesAliasLane, runner);
+          options.authorizeFileExtractionLane?.(lane);
           const result = await runner.run({
             ...lane,
             ...optionalNumberField(record.limit, 'limit', 'limit'),
@@ -3176,6 +3316,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           const runner = requireFileExtractionRunner(fileExtraction);
           const record = await parseObjectBody(request);
           const lane = parseFileExtractionLaneRecord(record, filesAliasLane, runner);
+          options.authorizeFileExtractionLane?.(lane);
           const result = await runner.plan({
             ...lane,
             limit: asOptionalNumber(record.limit, 'limit') ?? DEFAULT_FILE_EXTRACTION_PLAN_LIMIT,
@@ -3203,6 +3344,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           const runner = requireFileExtractionRunner(fileExtraction);
           const record = await parseObjectBody(request);
           const lane = parseFileExtractionLaneRecord(record, filesAliasLane, runner);
+          options.authorizeFileExtractionLane?.(lane);
           const result = await runner.plan({
             ...lane,
             limit: asOptionalNumber(record.limit, 'limit') ?? DEFAULT_FILE_EXTRACTION_PLAN_LIMIT,
@@ -3219,6 +3361,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           const runner = requireFileExtractionRunner(fileExtraction);
           const record = await parseObjectBody(request);
           const lane = parseFileExtractionLaneRecord(record, filesAliasLane, runner);
+          options.authorizeFileExtractionLane?.(lane);
           const extractorKindPrefix = asOptionalString(record.extractor_kind_prefix);
           if (!extractorKindPrefix) {
             throw new EmailSourceWorkerError(
@@ -3254,6 +3397,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           const runner = requireFileExtractionRunner(fileExtraction);
           const record = await parseObjectBody(request);
           const lane = parseFileExtractionLaneRecord(record, filesAliasLane, runner);
+          options.authorizeFileExtractionLane?.(lane);
           const mode = asOptionalString(record.mode) ?? 'terminal_reclassification';
           if (mode === 'terminal_reclassification' && record.last_error_kind === undefined) {
             const result = runner.reclassifyTerminal({
@@ -3353,6 +3497,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           const runner = requireFileExtractionRunner(fileExtraction);
           const record = await parseObjectBody(request);
           const lane = parseFileExtractionLaneRecord(record, filesAliasLane, runner);
+          options.authorizeFileExtractionLane?.(lane);
           const counts = runner.counts(lane);
           const body = {
             kind: 'file_extraction_status',
@@ -3690,6 +3835,11 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           404,
         );
       } catch (error) {
+        const failedUrl = new URL(request.url);
+        if (request.method === 'GET' && failedUrl.pathname === '/dashboard' && dashboardHtmlRoutePage(failedUrl) === 'help') {
+          console.warn('[olympus] support_source_status_unavailable');
+          return renderHelp(request, failedUrl);
+        }
         if (error instanceof EmailSourceWorkerError) {
           return json(
             {
@@ -3763,6 +3913,18 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
       }
     },
   };
+
+  function renderHelp(request: Request, url: URL, sources: readonly SourceSupportState[] = []): Response {
+    const csrf = request.headers.get(DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER) ?? undefined;
+    let system: SystemSupportFacts | undefined;
+    if (csrf && request.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER) === 'local') {
+      try { system = sourceDashboard?.systemReport?.(); } catch { /* Help remains usable when system facts cannot be read. */ }
+    }
+    return html(renderDashboardLocalPage('help', { url, options: {
+      ...(csrf ? { controlSessionCsrfToken: csrf } : {}),
+      ...(system ? { systemReport: systemSupportReport({ ...system, sources }) } : {}),
+    } }));
+  }
 
   function assertDashboardModelsReady(): void {
     if (sourceDashboard?.modelSetup && !sourceDashboard.modelSetup().ready) {
@@ -5301,6 +5463,30 @@ function parseSourceDispositionsSave(
   };
 }
 
+async function parseDashboardMessagingBody(request: Request): Promise<Record<string, unknown>> {
+  if (!request.body) throw new Error('invalid_request');
+  const reader = request.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  try {
+    for (;;) {
+      const part = await reader.read();
+      if (part.done) break;
+      size += part.value.byteLength;
+      if (size > 32_768) { await reader.cancel(); throw new Error('invalid_request'); }
+      chunks.push(part.value);
+    }
+    const data = new Uint8Array(size);
+    let offset = 0;
+    for (const chunk of chunks) { data.set(chunk, offset); offset += chunk.byteLength; }
+    try {
+      const parsed: unknown = JSON.parse(new TextDecoder().decode(data));
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('invalid_request');
+      return parsed as Record<string, unknown>;
+    } finally { data.fill(0); }
+  } finally { for (const chunk of chunks) chunk.fill(0); reader.releaseLock(); }
+}
+
 async function parseObjectBody(request: Request): Promise<Record<string, unknown>> {
   let body: unknown;
   try {
@@ -6492,6 +6678,7 @@ const DASHBOARD_EVERNOTE_SIGN_IN_TTL_MS = 10 * 60_000;
 interface DashboardOAuthAttempt {
   source: DashboardOAuthSource;
   pending: DashboardPendingOAuth;
+  clientIdSource?: 'publisher' | 'byo';
   returnTo: string;
   startedAt: string;
   expiresAt: string;
@@ -6624,7 +6811,8 @@ async function dashboardExclusionSources(
   cache: DashboardExclusionDebtCache,
 ): Promise<SourceIngestionLedgerExclusionSource[]> {
   if (!sourceDashboard.ingestionDispositions) return [];
-  const runtime = await sourceDashboard.ingestionDispositions();
+  // Stores open only when a source's debt is counted again, once per reuse window.
+  const runtime = await sourceDashboard.ingestionDispositions({ lazyStores: true });
   // One reading for the whole render, so two sources counted in the same page
   // can never straddle the reuse window's edge.
   const nowMs = Date.now();
@@ -6715,7 +6903,13 @@ function resolveDashboardExclusionDebt(
   if (cached && ageMs !== undefined && ageMs >= 0 && ageMs <= DASHBOARD_EXCLUSION_DEBT_MAX_AGE_MS) {
     return cached.debt;
   }
-  const debt = readDashboardExclusionDebt(source);
+  let debt: DashboardExclusionDebt | undefined;
+  try {
+    debt = readDashboardExclusionDebt(source);
+  } catch {
+    // A store that will not open leaves the counts absent, as an unopened source's are.
+    return {};
+  }
   if (!debt) return {};
   cache.set(key, { debt, computed_at_ms: nowMs });
   return debt;
@@ -6863,12 +7057,14 @@ async function readConfiguredDashboardOAuthClientIds(
   output: Partial<Record<DashboardOAuthSource | 'google', string>>,
   secretStore: SecretStore,
 ): Promise<void> {
+  const sharedOwnAppId = (await readGoogleOwnAppRegistration(secretStore))?.clientId;
+  if (sharedOwnAppId) output.google = sharedOwnAppId;
   const sources: Array<DashboardOAuthSource | 'google'> = ['google', 'gmail', 'google-drive', 'dropbox', 'x'];
   for (const source of sources) {
     const clientId = await secretStore.get(dashboardOAuthClientIdConfigKey(source));
     if (!clientId) continue;
     if (await dashboardStoredClientIdIsPublisherOwned(source, clientId, dashboardOAuthClientIdConfigKey(source), secretStore)) continue;
-    output[source] = clientId;
+    if (source !== 'google' || !sharedOwnAppId) output[source] = clientId;
   }
 }
 
@@ -7065,6 +7261,8 @@ async function dashboardGoogleOAuthClientSecret(
   clientId: string,
 ): Promise<string | undefined> {
   if (fallback) return fallback;
+  const ownApp = await readGoogleOwnAppRegistration(secretStore);
+  if (ownApp?.clientId === clientId) return ownApp.clientSecret;
   if (clientId === dashboardGooglePilotClientId()) {
     // The pilot client's own secret, for an operator who packaged a
     // confidential client. Absent is the ordinary case and is not an error:
@@ -7274,12 +7472,46 @@ async function dashboardApiKeyAvailability(secretStore: SecretStore): Promise<Pa
  * value-based redaction layer is deleted with its last caller: a page that
  * only ever speaks bounded text has nothing to redact.
  */
-function dashboardCallbackFailureReason(error: unknown, source: DashboardOAuthSource): string {
+function safeVeniceCheckFailure(error: unknown): string {
   const message = error instanceof Error ? error.message : '';
+  const allowed = new Set([
+    'Venice could not be reached to check your key. No credentials were stored; try again.',
+    'Venice could not accept this key. Redo the Create an API key step and check its restrictions. No credentials were stored.',
+    'Venice could not check the key now. No credentials were stored; try again.',
+    'Venice returned an unreadable check. No credentials were stored; try again.',
+    'Venice returned an incomplete check. No credentials were stored; try again.',
+    'Venice does not permit this key. Redo the Create an API key step and check its restrictions. No credentials were stored.',
+    'Venice did not report a balance. No credentials were stored; try again.',
+    'Venice returned an incomplete balance. No credentials were stored; try again.',
+    'Venice reports no credit. Redo the Set up your account step and add credit. No credentials were stored.',
+  ]);
+  return allowed.has(message) ? message : 'The Venice key could not be validated or applied. Try again.';
+}
+
+function dashboardCallbackFailureReason(error: unknown, source: DashboardOAuthSource, clientIdSource?: 'publisher' | 'byo'): string {
+  const message = error instanceof Error ? error.message : '';
+  if (source === 'dropbox' && clientIdSource === 'byo' && message === 'Dropbox needs more permissions. Redo the Enable permissions step and sign in again. No credentials were stored.') return message;
+  // Only fixed setup-check sentences may cross the callback HTML boundary.
+  const setupMessages = source === 'x' ? [
+    'X could not complete the bookmarks read check. No credentials were stored; try connecting again when X is reachable.',
+    'X did not authorize the bookmarks read. Redo Enable OAuth 2.0 with bookmark.read and sign in again. No credentials were stored.',
+    'X refused the bookmarks read. Redo Check the cost to confirm paid API access and available credits, then Enable OAuth 2.0 with Read permissions and sign in again. No credentials were stored.',
+    'X could not complete the bookmarks read check. No credentials were stored; try connecting again later.',
+    'X returned an invalid bookmarks read result. No credentials were stored; try connecting again later.',
+  ] : dashboardGoogleOAuthSource(source) ? [
+    'Google could not be reached for the API check. Try signing in again.',
+    'Google did not allow this API read. Redo Make the project and turn on Gmail and Drive, then sign in and allow read access.',
+    'Google did not accept the sign-in. Sign in again and allow read access.',
+    'Google could not confirm API access. Check your app settings and sign in again.',
+  ] : [];
+  if (setupMessages.includes(message)) return message;
   const match = /^OAuth token exchange failed with status (\d{3})(?: \(([a-z_]+)\))?\.$/.exec(message);
   // The code inside the shape is re-checked against the allowlist: the shape
   // alone would admit arbitrary lowercase content from a crafted message.
-  if (match && (match[2] === undefined || safeOAuthErrorCode(match[2]) !== undefined)) return message;
+  if (match && (match[2] === undefined || safeOAuthErrorCode(match[2]) !== undefined)) {
+    if (source === 'x' && ['401', '403'].includes(match[1]!)) return 'X did not accept the app key. Redo Enable OAuth 2.0, copy the Client ID and secret from the same app, and check the callback URI.';
+    return message;
+  }
   return `Connecting ${dashboardOAuthSourceLabel(source)} failed partway through. Start connect again from the dashboard.`;
 }
 
@@ -7317,6 +7549,8 @@ function dashboardOAuthFailureHtml(options: {
 }): Response {
   const label = dashboardOAuthSourceLabel(options.source);
   const chatgpt = options.returnTo === CHATGPT_RETURN_TO;
+  const permissions = !chatgpt && options.source === 'dropbox'
+    && options.reason === 'Dropbox needs more permissions. Redo the Enable permissions step and sign in again. No credentials were stored.';
   return dashboardOAuthLandingHtml({
     title: 'Olympus connect failed',
     heading: `Could not connect ${label}`,
@@ -7326,8 +7560,8 @@ function dashboardOAuthFailureHtml(options: {
         ? 'Go back to ChatGPT and try again from your Olympus dashboard.'
         : 'You can close this tab and go back to the Olympus dashboard tab you started from.',
     ],
-    returnTo: options.returnTo,
-    returnLabel: chatgpt ? 'Back to ChatGPT' : 'Back to the dashboard tab',
+    returnTo: permissions ? '/dashboard#olympus-open=dropbox.permissions' : options.returnTo,
+    returnLabel: permissions ? 'Go to Dropbox permissions' : chatgpt ? 'Back to ChatGPT' : 'Back to the dashboard tab',
     status: options.status,
   });
 }

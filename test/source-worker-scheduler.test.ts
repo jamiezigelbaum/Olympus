@@ -13,6 +13,7 @@ import {
   createReadwiseSchedulerSource,
   createXBookmarksSchedulerSource,
   sourceSchedulerSourceIdsFromEnv,
+  withEmbeddingSweep,
   type SourceSchedulerSource,
   type SourceSchedulerTaskRunResult,
 } from '../src/workers/source-scheduler.ts';
@@ -952,6 +953,51 @@ describe('source worker scheduler', () => {
     expect(maxSharedActive).toBe(1);
   });
 
+  test("a source's embedding sweep is not held behind its own long listing", async () => {
+    let now = new Date('2026-07-18T12:00:00.000Z');
+    let syncGate: Promise<void> = Promise.resolve();
+    let syncs = 0;
+    let sweeps = 0;
+    const [swept] = withEmbeddingSweep([source('long.listing', 'continuous', 1_000, undefined, [
+      { ...task('long.listing.sync', async () => {
+        syncs += 1;
+        await syncGate;
+        return { status: 'idle' };
+      }), intervalMs: 1_000 },
+    ])], () => () => {
+      sweeps += 1;
+      return [];
+    });
+    // Target discovery happens while attaching the task; count only runs.
+    sweeps = 0;
+    const scheduler = new SourceScheduler({
+      enabled: true,
+      tickMs: 1_000,
+      errorBackoffMs: 5_000,
+      maxTransientRetries: 1,
+      now: () => now,
+      sources: [swept!],
+    });
+    // Due together: the sweep follows the listing in one turn.
+    await scheduler.runDueTasks();
+    expect(syncs).toBe(1);
+    expect(sweeps).toBeGreaterThan(0);
+
+    // The listing starts again and runs long; the sweep comes due meanwhile.
+    let releaseSync!: () => void;
+    syncGate = new Promise<void>((resolve) => { releaseSync = resolve; });
+    now = new Date('2026-07-18T12:00:02.000Z');
+    const listing = scheduler.runDueTasks();
+    await Promise.resolve();
+    expect(syncs).toBe(2);
+    const sweepsBefore = sweeps;
+    now = new Date('2026-07-18T12:01:05.000Z');
+    await scheduler.runDueTasks();
+    expect(sweeps).toBeGreaterThan(sweepsBefore);
+    releaseSync();
+    await listing;
+  });
+
   test('uses task-owned cadence and bootstrap freshness without an eager restart run', async () => {
     let now = new Date('2026-07-18T12:00:00.000Z');
     let runs = 0;
@@ -1603,6 +1649,31 @@ describe('source worker scheduler', () => {
       '2026-07-18T12:00:02.000Z',
     ]);
     expect(maxActive).toBe(1);
+  });
+
+  test('spaces afterTick deliveries by the minimum interval, delivering the latest status when it passes', async () => {
+    let now = new Date('2026-07-18T12:00:00.000Z');
+    const delivered: string[] = [];
+    const scheduler = new SourceScheduler({
+      enabled: true,
+      tickMs: 1_000,
+      errorBackoffMs: 5_000,
+      maxTransientRetries: 1,
+      now: () => now,
+      sources: [],
+      afterTickMinIntervalMs: 150,
+      afterTick: (status) => { delivered.push(status.generated_at); },
+    });
+    await scheduler.runDueTasks(now);
+    for (const second of ['01', '02', '03']) {
+      now = new Date(`2026-07-18T12:00:${second}.000Z`);
+      await scheduler.runDueTasks(now);
+    }
+    // One delivery per interval: the ticks in between wait, coalesced.
+    expect(delivered).toEqual(['2026-07-18T12:00:00.000Z']);
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(delivered).toEqual(['2026-07-18T12:00:00.000Z', '2026-07-18T12:00:03.000Z']);
+    scheduler.stop();
   });
 
   test('bounds provider retry clocks and effective cadence to the scheduler safety horizon', async () => {

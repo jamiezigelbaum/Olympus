@@ -56,6 +56,8 @@ import {
 export interface ChatGptDashboardPageOptions {
   /** How long to wait for a tool result before saying the Mac is unreachable. */
   resultTimeoutMs?: number;
+  /** On the computer's own dashboard, how long a tool call may take (defaults to resultTimeoutMs when that is given). */
+  computerResultTimeoutMs?: number;
   /** When `generatedAt` is older than this, the page offers Check again. */
   staleAfterMs?: number;
   /** How often the Connect flow checks whether sign-in finished. */
@@ -67,6 +69,8 @@ export interface ChatGptDashboardPageOptions {
 }
 
 export const CHATGPT_DASHBOARD_RESULT_TIMEOUT_MS = 20_000;
+/** The computer's own dashboard: no relay in between, so a slow read is a busy Olympus, and a minute is fine. */
+export const CHATGPT_DASHBOARD_COMPUTER_RESULT_TIMEOUT_MS = 120_000;
 
 /**
  * Setup tool errors whose fixed sentence (the result's text, from
@@ -168,14 +172,16 @@ h3{font-size:0.875rem;font-weight:600;color:var(--muted);margin:0.75rem 0 0.25re
 .source-name{font-weight:600}
 .source-head .source-for{flex:1 1 0;min-width:0;font-weight:400}
 .status{color:var(--muted);font-size:0.875rem}
-.source-actions{display:flex;flex-wrap:wrap;align-items:flex-start;gap:0.5rem;justify-content:flex-end}
+.source-actions{display:flex;flex-wrap:nowrap;align-items:center;gap:12px;justify-content:flex-start}
 .dot{flex:none;width:0.625rem;height:0.625rem;border-radius:50%;display:inline-block;background:var(--off)}
 .tone-good{background:var(--good)}.tone-run{background:var(--run)}.tone-warn{background:var(--warn)}
 .tone-bad{background:var(--bad)}.tone-off{background:var(--off)}.tone-line{background:transparent;border:2px solid var(--idle)}
 .fix{display:inline-flex;flex-wrap:wrap;align-items:center;gap:0.5rem}
 .reason{color:var(--muted);font-size:0.875rem}
 .reason.strong{color:var(--text);font-weight:600}
-.actions{display:flex;flex-wrap:wrap;gap:0.5rem;align-items:center}
+.actions{display:flex;flex-direction:row;flex-wrap:nowrap;gap:12px;align-items:center;justify-content:flex-start}
+.actions > .primary,.source-actions > .primary{order:-1}
+@media(max-width:480px){.actions,.source-actions{flex-direction:column;align-items:stretch}}
 .tag{font-size:0.75rem;font-weight:400;padding:0 0.4rem;border:1px solid var(--line);border-radius:999px;color:var(--muted);margin-left:0.25rem}
 .index-faster{margin-top:0.5rem}
 .btn{font:inherit;font-size:0.875rem;font-weight:500;min-height:2.25rem;padding:0.375rem 0.875rem;border-radius:999px;border:1px solid var(--line);background:var(--bg);color:var(--text);cursor:pointer}
@@ -341,11 +347,26 @@ textarea.text{resize:vertical;min-height:4.5rem}
 .qtitle{font-size:0.9375rem;font-weight:600;margin:0 0 0.25rem}
 .qopt{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:0.25rem 0.75rem;padding:0.25rem 0;border-bottom:1px solid var(--line)}
 .qlabel{flex:1 1 12rem;min-width:0}
-.qchoices{display:flex;flex-wrap:wrap;gap:0.25rem 1rem}
+.qchoices{display:flex;flex-wrap:nowrap;gap:0.25rem 1rem}
 .qchoice{display:inline-flex;align-items:center;gap:0.375rem;min-height:2.5rem;cursor:pointer}
 .qchoice input{flex:none;width:1.125rem;height:1.125rem;margin:0;accent-color:var(--accent)}
 .fsection>.reason{margin-top:0.375rem}
 .privacy>.intro{margin-bottom:0.5rem}
+.privacy-summary{white-space:pre-wrap;overflow-wrap:anywhere;line-height:1.5;margin:0.75rem 0} .privacy-description .actions{flex-direction:row;align-items:center}
+.rule-chips{list-style:none;padding:0;display:flex;flex-wrap:wrap;gap:0.5rem;margin:0.75rem 0}
+.rule-chip{display:flex;align-items:center;gap:0.5rem;border:1px solid var(--line);border-radius:1rem;padding:0.25rem 0.5rem 0.25rem 0.75rem;max-width:100%;overflow-wrap:anywhere}
+.rule-chip .fname{width:auto;min-width:0;padding:0;text-align:left}
+.rule-chip .two-line{display:flex;flex-direction:column;align-items:flex-start;font-size:0.875rem}
+.rule-chip .two-line>span{max-width:100%;white-space:normal}
+.rule-chip .btn{border:0;min-width:2.5rem;flex:none;align-self:center;margin-left:auto}
+.privacy-details{margin-top:1.25rem}
+.privacy-details summary{cursor:pointer;min-height:2.5rem;align-content:center;font-weight:500}
+.privacy-details>.intro{margin:0.75rem 0}
+.privacy-sheet-actions{display:flex;justify-content:flex-start;flex-wrap:nowrap;margin-top:1.5rem;padding-top:1rem;border-top:1px solid var(--line)}
+.privacy .btn[aria-pressed=true]{background:var(--info-bg);border-color:var(--accent)}
+.privacy-kinds{display:flex;flex-direction:column;gap:0.75rem;margin-top:1rem}
+.privacy progress{width:100%;height:0.375rem;accent-color:var(--accent);margin:0.5rem 0 1.5rem}
+.privacy .field,.privacy .text{width:100%;box-sizing:border-box}
 .source-progress{display:flex;flex-direction:column;gap:0.25rem;margin-top:0.375rem}
 .source-progress .bar{height:0.375rem}
 .source-progress.stalled .bar-fill{background:var(--warn)}
@@ -377,6 +398,7 @@ export function chatgptDashboardPageHtml(options: ChatGptDashboardPageOptions = 
     page: DASHBOARD_CHATGPT_PAGE_COPY,
     statusTone: STATUS_TONE,
     resultTimeoutMs: options.resultTimeoutMs ?? CHATGPT_DASHBOARD_RESULT_TIMEOUT_MS,
+    computerResultTimeoutMs: options.computerResultTimeoutMs ?? options.resultTimeoutMs ?? CHATGPT_DASHBOARD_COMPUTER_RESULT_TIMEOUT_MS,
     staleAfterMs: options.staleAfterMs ?? CHATGPT_DASHBOARD_STALE_AFTER_MS,
     refresh: { ...CHATGPT_DASHBOARD_REFRESH, ...options.refresh },
     picker: {

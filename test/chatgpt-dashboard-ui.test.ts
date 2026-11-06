@@ -309,6 +309,24 @@ describe('connection states', () => {
     expect(host.button('Try again').disabled).toBe(false);
   });
 
+  test('on the computer a slow read is busy, never unreachable, and the page reads again by itself', async () => {
+    const host = mount({ html: chatgptDashboardPageHtml({ resultTimeoutMs: 20, computerResultTimeoutMs: 60, refresh: { activeMs: 10 } }) });
+    host.respond('ui/initialize', { hostContext: { 'olympus/host': { kind: 'computer', readOnly: false, links: {} } } });
+    await sleep(0);
+    expect(host.toolCalls()).toEqual([{ name: 'olympus_dashboard', arguments: {} }]);
+    // Past the relay's limit, inside the computer's: still loading.
+    await sleep(40);
+    expect(host.text()).not.toContain(DASHBOARD_CHATGPT_CONNECTION_COPY.relay_unavailable.title);
+    // Past the computer's too: the calm line, and another read on its own.
+    await sleep(70);
+    expect(host.text()).not.toContain(DASHBOARD_CHATGPT_CONNECTION_COPY.relay_unavailable.title);
+    expect(host.text()).toContain(DASHBOARD_CHATGPT_PAGE_COPY.loadingSlow);
+    expect(host.toolCalls().length).toBe(2);
+    host.respond('tools/call', { structuredContent: model() });
+    await sleep(0);
+    expect(host.text()).not.toContain(DASHBOARD_CHATGPT_PAGE_COPY.loadingSlow);
+  });
+
   test('an error tool result is relay unavailable too', () => {
     const host = mount();
     host.push({ isError: true, content: [{ type: 'text', text: 'Your computer is offline' }] });
@@ -609,7 +627,8 @@ describe('ready page', () => {
     expect(narrow).not.toContain('.row.source.has-actions{');
     expect(narrow).toContain('.row.source.has-actions.has-menu>.source-actions{grid-column:1/-1;grid-row:2}');
     expect(narrow).not.toContain('justify-content:flex-start}.row');
-    expect(CHATGPT_DASHBOARD_CSS).toContain('.source-actions{display:flex;flex-wrap:wrap;align-items:flex-start;gap:0.5rem;justify-content:flex-end}');
+    expect(CHATGPT_DASHBOARD_CSS).toContain('.source-actions{display:flex;flex-wrap:nowrap;align-items:center;gap:12px;justify-content:flex-start}');
+    expect(CHATGPT_DASHBOARD_CSS).toContain('@media(max-width:480px){.actions,.source-actions{flex-direction:column;align-items:stretch}}');
     expect(narrow.slice(0, narrow.indexOf('}}'))).not.toContain('width:100%');
   });
 
@@ -1022,6 +1041,8 @@ describe('freshness: the page re-reads the dashboard while it is visible', () =>
       _meta: { [CHATGPT_PRIVACY_META_KEY]: { description: 'my health and money', rules: [], pendingCount: 0 } },
     });
     await flush();
+    expect(host.win.document.querySelector('textarea')).toBeNull();
+    host.button('Edit').click();
     const area = host.win.document.querySelector('textarea') as unknown as HTMLTextAreaElement;
     area.focus();
     area.setSelectionRange(3, 8);
@@ -1462,4 +1483,30 @@ describe('Sync now keeps the page reading while it checks', () => {
       jest.useRealTimers();
     }
   });
+});
+
+test('failed and stalled source rows offer code-only Copy details', () => {
+  const host = mount({});
+  host.push({ structuredContent: copyDashboardViewModel(model({ sources: [{
+    id: 'dropbox.files', label: 'Dropbox', group: 'cloud', status: 'Failing',
+    supportDetails: 'Mark +15551234567 mark@example.test /Users/mark/Notebook',
+    progress: { stage: 'reading', unit: 'files', total: 1, stalled: true, stall: { cause: 'failing', failure: 'timeout' } },
+  }] })) });
+  const report = host.win.document.querySelector('.row.source pre')!;
+  expect(report.textContent).toContain('Failure: timeout');
+  expect(report.textContent).not.toContain('Mark');
+  expect(host.button('Copy details')).toBeDefined();
+  // A keyed section: its summary is a control that opens it (the release check reaches Copy details through it),
+  // and a refresh keeps it open while the owner is reading.
+  const section = host.win.document.querySelector('details[data-open-key="support-details:dropbox.files"]') as unknown as { open: boolean; querySelector(selector: string): { textContent: string | null } | null; dispatchEvent(event: unknown): boolean };
+  const summary = section.querySelector('summary[data-key="summary:support-details:dropbox.files"]')!;
+  expect(summary.textContent).toBe('Details for support');
+  section.open = true;
+  section.dispatchEvent(new host.win.Event('toggle'));
+  host.push({ structuredContent: copyDashboardViewModel(model({ sources: [{
+    id: 'dropbox.files', label: 'Dropbox', group: 'cloud', status: 'Failing',
+    supportDetails: 'Failure: timeout again',
+    progress: { stage: 'reading', unit: 'files', total: 1, stalled: true, stall: { cause: 'failing', failure: 'timeout' } },
+  }] })) });
+  expect((host.win.document.querySelector('details[data-open-key="support-details:dropbox.files"]') as unknown as { open: boolean }).open).toBe(true);
 });

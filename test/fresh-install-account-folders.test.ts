@@ -1,8 +1,8 @@
 // A fresh install puts its accounts in folders from the start (docs/design/
 // source-storage.md, delivery step 4a): the worker boots on an empty home, and
 // every source it connects (here with fakes) writes only under
-// `sources/<source_id>/1/`. Messaging stays on its legacy paths until a later
-// step. Spawning tests carry an explicit timeout (test/spawn-timeout-guard.test.ts).
+// `sources/<source_id>/1/`. Disconnected sources create no stores. Spawning
+// tests carry an explicit timeout (test/spawn-timeout-guard.test.ts).
 
 import { resolvedStorePath } from '../src/core/source-placement.ts';
 import { afterEach, describe, expect, test } from 'bun:test';
@@ -15,7 +15,9 @@ import { readSourceRegistry, sourceRegistryPath } from '../src/core/source-regis
 import { __sourceStorageTestHooks, enableSourceRegistryAdoption, openConnectorStore } from '../src/core/source-storage.ts';
 import { defaultArchiveImportStatePath, ArchiveImportStateStore } from '../src/workers/archive-import/state.ts';
 import { createArchiveConnectorStore } from '../src/workers/archive-import/store.ts';
-import type { ConnectedCredentialHandle } from '../src/workers/credential-broker/connected-handles.ts';
+import { upsertConnectedHandle, type ConnectedCredentialHandle } from '../src/workers/credential-broker/connected-handles.ts';
+import { connectThisComputerSource } from '../src/core/this-computer.ts';
+import { FileSourceScopeAuthority } from '../src/workers/source-scope-runtime.ts';
 import {
   createRefreshableReadwiseConnectorStoreRuntime,
   createXBookmarksConnectorStoreRuntime,
@@ -70,48 +72,84 @@ async function freePort(): Promise<number> {
   return port;
 }
 
-describe('a fresh install: the worker boots', () => {
-  test('Gmail, Drive, Dropbox, local files, Telegram and WhatsApp land in their folders', async () => {
-    const { home, env } = freshHome();
-    const port = await freePort();
-    const child = Bun.spawn([process.execPath, SERVER], {
-      env: { PATH: process.env.PATH ?? '', ...env, OLYMPUS_EMAIL_SOURCE_PORT: String(port) },
-      cwd: REPO,
-      stdout: 'pipe',
-      stderr: 'pipe',
-    });
-    let output = '';
-    let errors = '';
-    const collect = (stream: ReadableStream<Uint8Array>, add: (text: string) => void): void => {
-      void (async () => {
-        const decoder = new TextDecoder();
-        const reader = stream.getReader();
-        for (;;) {
-          const { value, done } = await reader.read();
-          if (done) return;
-          add(decoder.decode(value));
-        }
-      })();
-    };
-    collect(child.stdout, (text) => { output += text; });
-    collect(child.stderr, (text) => { errors += text; });
-    const registryPath = join(home, '.local', 'share', 'openclaw', 'olympus', 'registry.json');
-    try {
-      const deadline = Date.now() + 40_000;
-      while (Date.now() < deadline) {
-        let accounts = 0;
-        try { accounts = JSON.parse(readFileSync(registryPath, 'utf8')).accounts.length; } catch { /* not written yet */ }
-        if (accounts >= 6 && output.includes('worker listening')) break;
-        // A worker that has exited will never listen: say why instead of waiting.
-        if (child.exitCode !== null) break;
-        await Bun.sleep(100);
-      }
-    } finally {
-      child.kill('SIGKILL');
-      await child.exited;
-    }
-    expect(output, `the worker did not listen (exit ${child.exitCode}): ${errors.slice(0, 2000)}`).toContain('worker listening');
+const BOOT_SOURCES = ['gmail.email', 'google_drive.docs', 'dropbox.files', 'local.files', 'telegram.messages', 'whatsapp.personal.messages'];
 
+/** Listen before asserting storage: an absent account registry is the correct disconnected state. */
+async function bootAndStop(env: Record<string, string>): Promise<void> {
+  const port = await freePort();
+  const child = Bun.spawn([process.execPath, SERVER], {
+    env: { PATH: process.env.PATH ?? '', ...env, OLYMPUS_EMAIL_SOURCE_PORT: String(port), OLYMPUS_WORKER_SCHEDULER_ENABLED: 'false' },
+    cwd: REPO,
+    stdout: 'pipe',
+    stderr: 'pipe',
+  });
+  let output = '';
+  let errors = '';
+  const collect = (stream: ReadableStream<Uint8Array>, add: (text: string) => void): void => {
+    void (async () => {
+      const decoder = new TextDecoder();
+      const reader = stream.getReader();
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) return;
+        add(decoder.decode(value));
+      }
+    })();
+  };
+  collect(child.stdout, (text) => { output += text; });
+  collect(child.stderr, (text) => { errors += text; });
+  try {
+    const deadline = Date.now() + 40_000;
+    while (Date.now() < deadline && !output.includes('worker listening') && child.exitCode === null) await Bun.sleep(100);
+    expect(output, `the worker did not listen (exit ${child.exitCode}): ${errors.slice(0, 2000)}`).toContain('worker listening');
+  } finally {
+    child.kill('SIGKILL');
+    await child.exited;
+  }
+}
+
+describe('a fresh install: the worker boots', () => {
+  test('disconnected sources create no stores or account registry at boot', async () => {
+    const { home, env } = freshHome();
+    await bootAndStop(env);
+    expect(existsSync(sourceRegistryPath(env))).toBe(false);
+    expect(readSourceRegistry(env).accounts).toEqual([]);
+    expect(everyPath(join(olympusDataRoot(env), 'sources'))).toEqual([]);
+    for (const sourceId of BOOT_SOURCES) {
+      const folder = accountFolder({ source_id: sourceId, slot: '1' }, env);
+      expect(existsSync(folder), sourceId).toBe(false);
+      for (const domain of ['internal', 'secure_local'] as const) {
+        const path = resolvedStorePath(sourceId, domain, env);
+        expect(path, sourceId).toBe(join(folder, 'stores', `${domain}.sqlite`));
+        expect(existsSync(path), sourceId).toBe(false);
+      }
+    }
+    expect(existsSync(join(home, '.local', 'share', 'olympus', 'whatsapp-live'))).toBe(false);
+    expect(existsSync(join(home, '.local', 'share', 'olympus', 'telegram'))).toBe(false);
+  }, 90_000);
+
+  test('connected Gmail, Drive, Dropbox, local files, Telegram and WhatsApp land in their folders', async () => {
+    const { home, env } = freshHome();
+    const registryPath = sourceRegistryPath(env);
+    const handleRegistryPath = join(home, '.config', 'olympus', 'handles.json');
+    const fixtureHandles: ConnectedCredentialHandle[] = [
+      { handle: 'gmail.personal', provider: 'gmail', allowedCapabilities: ['gmail.email.sync'], scopes: ['gmail.readonly'], connectedAt: '2026-10-31T00:00:00Z' },
+      { handle: 'google_drive.personal', provider: 'google_drive', allowedCapabilities: ['google_drive.docs.sync'], scopes: ['drive.readonly'], connectedAt: '2026-10-31T00:00:00Z' },
+      { handle: 'dropbox.personal', provider: 'dropbox', allowedCapabilities: ['dropbox.files.sync'], scopes: ['files.metadata.read', 'files.content.read'], connectedAt: '2026-10-31T00:00:00Z' },
+      { handle: 'telegram.personal', provider: 'telegram', allowedCapabilities: ['telegram.messages.sync'], scopes: ['messages.read'], connectedAt: '2026-10-31T00:00:00Z' },
+      { handle: 'whatsapp.personal', provider: 'whatsapp_personal', allowedCapabilities: ['whatsapp.personal.messages.sync'], scopes: ['messages.read'], connectedAt: '2026-10-31T00:00:00Z' },
+    ];
+    for (const handle of fixtureHandles) upsertConnectedHandle(handle, handleRegistryPath);
+    connectThisComputerSource(handleRegistryPath, 'local.files');
+    const folder = join(home, 'selected-notes');
+    mkdirSync(folder);
+    const authority = new FileSourceScopeAuthority({ registryPath: handleRegistryPath });
+    const pending = authority.snapshot('local.files');
+    authority.approve({
+      sourceId: 'local.files', accountGeneration: pending.accountGeneration!, expectedRevision: pending.revision,
+      selections: [{ key: folder, state: 'metadata_only' }], wholeAccount: false, explicitWholeAccountConfirmation: false,
+    });
+    await bootAndStop(env);
     const registry = JSON.parse(readFileSync(registryPath, 'utf8')) as { schema: number; accounts: Array<{ source_id: string; layout: string; state: string }> };
     // The first folder account made it schema 2.
     expect(registry.schema).toBe(2);
@@ -125,7 +163,7 @@ describe('a fresh install: the worker boots', () => {
     });
 
     const dataRoot = olympusDataRoot(env);
-    for (const sourceId of ['gmail.email', 'google_drive.docs', 'dropbox.files', 'local.files', 'telegram.messages', 'whatsapp.personal.messages']) {
+    for (const sourceId of BOOT_SOURCES) {
       const stores = join(dataRoot, 'sources', sourceId, '1', 'stores');
       expect(significant(readdirSync(stores)).some((name) => /^secure_local\.sqlite$/.test(name)), sourceId).toBe(true);
     }

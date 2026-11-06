@@ -5,6 +5,176 @@ Status: active
 Owner: Olympus product owner
 Planning authority: this document defines release scope, sequence, and completion: Olympus 1.0 first, then the 0.4 record. It supersedes dated CTO planning handoffs and migration plans. [`CONTRACTS.md`](CONTRACTS.md) remains the architecture authority.
 
+## 1.3.2 Servers and second accounts (owner decision 2026-11-03)
+
+Why: Mark Alexander's 1.3.0 install on a headless Mac Studio took about 7
+hours over 3 days. About 2.5 hours were Olympus bugs and missing controls
+(fixed or planned below). The rest was macOS server setup that a guide
+would have saved. Olympus had been designed only for a laptop with its
+owner logged in.
+
+Supported setups after 1.3.2: an everyday Mac; an always-on Mac with no
+one logged in; headless Linux (standalone already persists via linger);
+and Olympus in its own account with agents in another account or on the
+owner's tailnet. Not supported: Olympus inside an agent's own account when
+the agent must not read Private data, and one install shared by several
+people.
+
+Scope (frozen at build start, 2026-11-03):
+- Mac server mode (#751): a LaunchDaemon that runs as the Olympus account,
+  admin password once through the macOS dialog, switch on the dashboard and
+  a first-run question ("everyday computer or always on, as a server").
+  FileVault still needs a disk unlock after a restart; server mode removes
+  the login step only.
+- Agent address and key for another account on this computer or the
+  tailnet only, never the open LAN or internet (#764; tailnet included by
+  owner, 2026-11-03).
+- No Terminal after install: remote-access switch on standalone installs
+  (#748), Copy details on every failed source and a Copy system report
+  (#747), model download progress (#752), the Private-answer mode shown
+  (#750), installer closing text for any assistant (#749), Pair button
+  after pairing (#762). The dashboard header names the computer and account.
+- OpenClaw-hosted Linux: upgrade in place from 1.0 (#734), Gateway and
+  dashboard reach the worker under Node (#735), stuck anonymous-question
+  lock (#740).
+- Mac server guide on olympusplugin.ai (#753).
+
+The installer still asks nothing. Out of scope: reaching the owner
+dashboard from another device. Testing: CI on the release commit; test-mac
+as a server (second account, agent on a third, restart, unlock, no login);
+an upgrade rehearsal from a 1.0 OpenClaw-hosted Linux layout; one fresh
+laptop-style install.
+
+## 1.3.0 The Mac release (owner decision 2026-10-31)
+
+Releases are now themed and bundled (owner, 2026-10-31): a minor release
+about every two weeks with scope agreed up front and frozen when the build
+starts; patch releases only for security, data loss or a privacy leak, a
+broken install or upgrade, or a directory-reviewer blocker. One full release
+check on the final candidate. Listing updates ride only on a tested minor
+release; the demo box is updated right after the tag, before any upload.
+Before the tag, run `bun run eval:real` on the owner's install with the
+private held-out set to verify chat search (#619).
+
+Centerpiece: the signed, notarized Mac helper under OCU (olympus-ops #64), so
+Files on this computer reads Desktop, Documents, Downloads and iCloud Drive.
+Built first, so it never waits on the rest.
+
+**First-run Private answers (owner decision 2026-10-31).** Supersedes the
+2026-10-14 decision A's silent `no-sensitive` seed for new standalone installs:
+they ask the owner to choose, with `local-first` recommended. Until the choice,
+the policy must keep data on the computer. Existing policies and the narrow
+1.0.0 default migration remain unchanged. Local-first may use Venice only after
+the owner chooses it and adds a key; without a key the built-in model answers
+locally. The agent walkthrough and dashboard share the choice and save path. The pending choice is an explicit durable policy marker; unrelated model
+settings cannot clear it. Until consent, one transport gate denies remote
+source reads, including picker metadata, while the authenticated local
+computer dashboard can browse. Agent setup and engine installation share the
+installed-policy state resolver, preserving environment-backed, inline
+and custom-path upgrades without asking again. Ambient shell keys and abandoned
+config files do not count as an installation. Legacy worker detection uses the
+platform service path (including Linux XDG overrides), then resolves its inline,
+custom-file or environment policy. The shared doctor operation skips source
+diagnostics before consent across CLI, native and stdio MCP while retaining
+non-source health checks. Pending setup shows the choice
+before profile editing and refuses profile writes, preserving any saved rules.
+
+In scope:
+- Mac install and sign-in: #579 (Safari pop-up), #624 and #578 (doctor
+  checks the runtime Olympus uses), verify #631 on Mac.
+- Fresh-install bugs: #588 (Telegram capture on standalone), #591
+  (Local-only with no model server).
+- Messaging: #608 and #621 (pair and choose chats from the dashboard card,
+  Telegram reads chats started after pairing), #609 (WhatsApp delay), #638
+  (re-check one chat), #619 (chat search ranking).
+- Privacy judging and rules: #636, #633, #618.
+- Trust: #615 and olympus-ops #67 (Delete all removes everything), #616
+  (Evernote asks View only), #617.
+- Remote answers and notices: #590, #611, #622, #623, #603, #612, #620, #594.
+- Engine: #630, #604; PR #481.
+- Own Google app made smooth on the dashboard (#581): a guided path that
+  replaces the help-page steps. The owner-approved 2026-10-31 copy leads
+  with the own-app path only on the existing `advanced_byo_required` signal;
+  this signal is not a live measurement of Google's 100-user cap. Shared
+  Connect otherwise stays first. One Desktop app serves Gmail and Drive;
+  the app key is checked before consent and API access after consent.
+  The owner's 2026-10-31 revised wizard has six stops: project, enable both
+  APIs, sign-in screen, publish, Desktop key, then file drop or paste.
+  Step 6 uses Connect; action rows stay horizontal above 480px.
+- Telegram and X guided setup (#656, #655) reuse the shared step sheet.
+  Telegram continues into dashboard pairing and explicit Pick chats / Everything;
+  X checks a bookmarks read before saving its grant. X's 2026-10-31 pricing
+  describes paid usage credits, not a required monthly subscription. No prices
+  are pinned in the sheet.
+- ChatGPT listing update from the tested build: #628 tagline, crowned-mountain
+  icon, Secrets wording (a new OpenAI review).
+
+Not in 1.3: frontier consult C5 (owner, 2026-10-31: skip for 1.3; C1–C4b
+stay inert on main), Evernote live sync unless it lands before the freeze
+(#568, #559, #554), #599, #570, #626 (research runs alongside), #138.
+
+Moved to 1.4 at the freeze (2026-10-31; each issue carries the reason):
+#741 (privacy questions from the owner’s words, unanswered choices and private-model read-back),
+#631, #603, #620, #636, #638, olympus-ops #67, and #581's "lead with your
+own app near the 100-user cap" (the guided own-app path itself ships). #628
+and the listing update stay held: this release does not resubmit the
+listing. To verify on the 1.3.0 candidate's test-Mac and canary runs before
+closing: #588, #609, #621, #633, #654.
+
+eval:real for #619 did not run for 1.3.0 (2026-10-31): no reachable install
+had the synthetic "Olympus Eval Corpus" indexed (test-omarchy holds a different
+demo set; the other test installs hold none), and the owner's own install
+is not set up. A substitute chat-search check on test-omarchy found 4 of 7
+queries at rank 1; the recall gap is #710 (1.4). The real eval run is #707.
+
+Release verification for 1.3.0 (2026-10-31), final candidate 5450c2cc,
+tagged v1.3.0 (main was rewritten on 2026-11-01 to drop two AI co-author
+trailers; v1.3.0 now points at 3181eb39, the same files as 5450c2cc): mac and linux-ubuntu release-check legs pass 227 checks with 0
+failures (warnings are the approved Keys design change and coverage notes);
+canary-test-mac and canary-test-omarchy pass 7/7 and report olympus 1.3.0.
+Fixes found on the way and landed before the tag: the privacy journeys (#721),
+the Keys model routes the dashboard worker refused (#722), Mac folder access
+remembered after a pull (#726, fixes #724), and the first save on a new install
+offering Unlock on this computer (#727). A live first-run check saved the
+choice and Keys then showed models ready. Verified and closed: #654, #591,
+#588 (with follow-up #711). #621's Telegram picker passes (polish #712); #633
+moved to 1.4; #609 is left for an owner hand check. Filed for 1.3.1: #723,
+#728.
+
+1.3.0 shipped 2026-11-01: GitHub release v1.3.0 (latest) and the site publish
+with the signed Mac helper and both WhatsApp bridges; every served file matches
+its release hash, and the post-publish canary-test-mac and canary-test-omarchy
+runs install olympus 1.3.0 from the site and pass 7/7.
+
+1.3.2 shipped 2026-11-03: GitHub release v1.3.2 at 72521dd, "Servers and
+second accounts" (Mac server mode #751, agents on another account or the
+tailnet #764, setup without Terminal, the always-on Mac guide #753, Linux
+upgrade fixes). Tested with the release check (Linux and Mac upgrades from
+1.3.1, test-mac canaries) plus hands-on server-mode checks on test-mac.
+1.3.3 shipped the same day at 533980b with #786 (the dashboard keeps answering
+while sources import) and #788 (server mode off, #785), which merged just after
+the 1.3.2 commit; tested by diff against 1.3.2 (exact-head CI and a test-mac
+canary). Follow-ups: #784 (speech-model start-up freeze), #787, #790, #791.
+
+1.3.4 shipped 2026-11-05: GitHub release v1.3.4 at 7bf960b, the ingestion
+reliability release (#795 to #861: the dashboard stays available on large
+installs, ingestion errors only for real failures, privacy judging keeps up,
+WhatsApp and Telegram pair on the card). Tested with the Linux release check on
+2a9acece (217 pass, 1 fail: the known #787 Telegram beside-import search, which
+also failed before 1.3.1) and exact-head CI for #820, the one OCR-only change
+after it. Follow-up: #787.
+
+1.3.1 shipped 2026-11-03: GitHub release v1.3.1 (latest) at 16a91267, with the
+WhatsApp fixes (#744 via #757, #745, #746, #747, and the WhatsApp Web version
+update #759), the Evernote picker fix (#743) and #742. The owner chose a
+minimal test for this patch instead of the full release check: exact-head CI
+green, in-place upgrades on test-mac and test-omarchy (test-omarchy's existing
+WhatsApp link kept capturing across the session-store upgrade), and one real
+WhatsApp pairing on test-mac that reached the chat list and saved one chat.
+The site serves 1.3.1 with the new bridges (1255fe5f591d6e51) and the
+unchanged signed Mac helper. Follow-ups: #760 (keep the WhatsApp version
+current), #761, #762.
+
 ## 1.1.0 Private answers inbox (owner decision 2026-10-14)
 
 Commit-only implementation in `claude/private-answers-inbox`; do not land
@@ -23,14 +193,14 @@ owned by their respective builders.
 
 ## Local files source (owner direction 2026-10-21)
 
-Planned, not built. Mac Finder and the Linux home become a thin `local.files`
+Built: Mac Finder and the Linux home use a thin `local.files`
 connector on the shared spine. It uses the same folder picker as Dropbox and
 Drive, with nothing selected at first, no sign-in, file-change notifications
 for instant updates, and the same per-item tiers. Spine work lands first: a
 scope-source registry, a "this computer" account basis, and push wake.
 Guarded Mac folders (Desktop, Documents, Downloads, iCloud Drive) need a
 signed Olympus helper app, signed under the Open Coordination Unlimited
-Apple Developer organization account (owner decision 2026-10-21). Design and
+Apple Developer organization account (owner decision 2026-10-21); the installer can pin a notarized helper, with real-Mac permission and upgrade qualification still required. Design and
 delivery sequence:
 [local files](design/local-files.md).
 
@@ -166,7 +336,8 @@ stay after 1.0.
 - **Standalone engine on the Mac.** `olympus engine
   install|status|restart|logs|uninstall` runs and supervises the worker as a
   per-user LaunchAgent, with no OpenClaw. A fresh install is keyless: it
-  seeds the `no-sensitive` preset with the built-in models.
+  formerly seeded the `no-sensitive` preset with the built-in models; the
+  2026-10-31 first-run decision above supersedes that silent choice.
 - **Relay v2** at one fixed host, `mcp.olympusplugin.ai` (Hetzner
   `olympus-relay-1`, Caddy TLS): one WSS session per install, per-request
   routing, static OAuth metadata, the authorize bridge, a Mac-offline
@@ -285,6 +456,14 @@ testers have exercised the normal product journey without custom engineering.
 
 ## Decisions
 
+- **2026-11-05 — Decision mode for local judging.** Local llama.cpp servers
+  now answer the privacy question with a one-token read instead of a written
+  JSON reply; Venice and the built-in model keep full mode. The owner approved
+  moving Delphi's judge to Qwen 35B-A3B on llama.cpp, live since 16:50Z: 128
+  verdicts a minute against 14 to 17 before, with no sniffer errors. On the
+  owner's install, re-judges can't lower an item from Private to Personal until
+  the owner's labels on the model's disagreements come back clean. Design:
+  `docs/design/per-item-four-tier-classification.md`.
 - **2026-10-28 — One indexing pass for every store.** Owner direction: "one
   process by which all new information coming into the spine is judged … it
   shouldn't be different for each connection." Judging was already one
@@ -1264,7 +1443,7 @@ exact-main verify run `35658364460`, GitHub tag `v0.4.0-beta.2`, asset
 968,934 bytes. Anonymous download and checksum/size verification passed. The exact
 archive passed isolated managed install/uninstall and live activation; its dated
 packaged plan is the pre-activation snapshot, while this register records closeout.
-ClawHub publication is on explicit owner hold (September 21); do not publish until the owner reopens it. GitHub is the available beta channel.
+ClawHub publication was on owner hold from September 21 until the owner reopened it on 2026-11-03. The Hermes skill is published there as `olympus-hermes`; the OpenClaw plugin (`clawhub:olympus`) waits on a ClawHub publish failure (out of memory on ClawHub's side), tracked in #794.
 The owner accepted the existing tester feedback instead of another broad source
 and platform qualification campaign. Unperformed qualification is not claimed.
 
@@ -1438,7 +1617,7 @@ measurement. Deferred mail should remain honestly represented in status.
 | 1. Complete shared spine | complete | All seven rows are repository-qualified on the shared spine; the messaging live exit is receipt-green; PR #71 CI `33171581700` and the exact-head 7/7 held-out receipt are recorded below. |
 | 2. Delete migration era | complete | The approved manifest accepts bounded Gmail metadata-only/clamped rows and eight damaged Dropbox entries as honest coverage debt. PR #80 removed the legacy supervisor; PR #87 removed all 154 reviewed migration-era paths; and PR #91 installed the 678 exact-compatible Dropbox vectors, proved none remained importable and the current set was complete, then deleted the embedding importer and import-only authority seam. Later corrective PRs completed managed-state cleanup and fail-closed refresh/resume recovery. Exact-head repository, CI, installed-artifact, and live-cutover receipts passed; deployment-specific receipt details remain in private operations records rather than the public package. |
 | 3. Standalone release candidate | complete | One exact commit/artifact passes 3A public-surface allowlists, 3B lifecycle, 3C dashboard/custody, 3D managed package and ClawHub path, 3E's 427-row private-ops disposition plus canonical-doc closure, and 3F release-harness readiness. `config/private-ops-disposition.json` mechanically binds the separately authorized private-topology rollback receipt before this row can merge. |
-| 4. Pilot and release | beta released | `v0.4.0-beta.2` is published with verified anonymous download, exact-main CI, and live public-package acceptance. The September 21 owner decision accepts the existing tester feedback for this beta; broader source/platform qualification remains future work, not a completed proof. ClawHub publication is on explicit owner hold until separately reopened. |
+| 4. Pilot and release | beta released | `v0.4.0-beta.2` is published with verified anonymous download, exact-main CI, and live public-package acceptance. The September 21 owner decision accepts the existing tester feedback for this beta; broader source/platform qualification remains future work, not a completed proof. ClawHub publication was reopened by the owner on 2026-11-03 (#794). |
 
 Slice 1 runtime-safety proof is merged in PR #48 (CI `33023155341`): product
 and migration capture identities are distinct, degraded retrieval is honest,

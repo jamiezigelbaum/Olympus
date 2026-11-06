@@ -55,10 +55,19 @@ export type TierLedgerState = 'pending' | 'current' | 'moving';
  * make two different messages one ledger row. Absent means "no conversation"
  * (''), exactly as the connector store normalizes it.
  */
-/** Whether a reason records a content question settled fail-safe because none was ever asked. */
+/**
+ * Whether a reason records content held fail-safe Private without a verdict on
+ * its text: a question lost from the queue (`missing_question`), or text never
+ * read, so no question could exist yet (`unread`). Either way the item is owed
+ * a verdict once its text is read.
+ */
 export function isFailSafeMissingContentQuestion(reason: string): boolean {
-  return reason.startsWith('content:sniffer:') && reason.endsWith(':fail_safe:missing_question');
+  return reason.startsWith('content:sniffer:')
+    && (reason.endsWith(':fail_safe:missing_question') || reason.endsWith(':fail_safe:unread'));
 }
+
+/** The meta key set once every unread fail-safe row carries the `unread` label (#847). */
+export const TIER_LEDGER_UNREAD_RELABEL_DONE = 'fail_safe_unread_relabel_v1';
 
 export type TierLedgerIdentity = Pick<SourceItemIdentity, 'provider' | 'accountScope' | 'providerItemId'>
   & Partial<Pick<SourceItemIdentity, 'family' | 'providerConversationId'>>;
@@ -525,7 +534,7 @@ export class TierLedger {
           contentTier,
           decidedBy: contentTier !== existing.contentTier ? 'sniffer' : existing.decidedBy,
           reasons: [
-            ...metadataReasons.filter((reason) => !isOpenSnifferReason(reason, 'metadata')),
+            ...settleStoredNamesMark(metadataReasons.filter((reason) => !isOpenSnifferReason(reason, 'metadata')), existing.metadataTier, metadataTier),
             verdict.reason,
             ...(settlesContent ? contentReasons.filter((reason) => !isOpenSnifferReason(reason, 'content')) : contentReasons),
           ],
@@ -597,14 +606,15 @@ export class TierLedger {
     const metadataTier = verdict.pass === 'metadata' ? maxTier(base.metadataTier, verdict.tier) : base.metadataTier;
     const contentTier = maxTier(base.contentTier, verdict.tier);
     const metadataPending = verdict.pass === 'metadata' ? false : base.metadataPending;
+    const kept = base.reasons.filter(reason => !isOpenSnifferReason(reason, verdict.pass)
+      && !(metadataTier === 'secure' && isOpenSnifferReason(reason, 'content')));
     const contentPending = verdict.pass === 'content' || metadataTier === 'secure' ? false : base.contentPending;
     const decision: TierDecision = {
       ...base,
       metadataTier,
       contentTier,
       decidedBy: 'sniffer',
-      reasons: [...base.reasons.filter(reason => !isOpenSnifferReason(reason, verdict.pass)
-        && !(metadataTier === 'secure' && isOpenSnifferReason(reason, 'content'))), verdict.reason],
+      reasons: [...(verdict.pass === 'metadata' ? settleStoredNamesMark(kept, base.metadataTier, metadataTier) : kept), verdict.reason],
       metadataPending,
       contentPending,
       state: metadataPending || contentPending ? 'pending' : 'current',
@@ -617,6 +627,9 @@ export class TierLedger {
         .run(JSON.stringify(decision), ...idParams(identity));
       return 'updated';
     }
+    // A rollout hold leaves the settled row, copies and open question intact.
+    // The cached answer is retried automatically when the setting is off.
+    if (holdSnifferLowering(this.getCurrent(identity)!, decision)) return 'held_lowering';
     this.db.query(`
       UPDATE tier_items SET rejudge_json = NULL
       WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
@@ -931,6 +944,13 @@ export class TierLedger {
             -- Rests on a retired whole-source prior (RETIRED_SOURCE_PRIOR_REASON):
             -- wrong under the owner ruling of 2026-10-28, so judged again now.
             OR instr(i.reasons_json, '"metadata:prior:source_') > 0
+            -- Content settled fail-safe because its question was missing from
+            -- the queue, not because anything judged it (an enqueue lost while
+            -- the private model was off: about 2,400 messages on 2026-11-04):
+            -- its text is stored, so it is asked again (#606).
+            OR (instr(i.reasons_json, ':fail_safe:missing_question"') > 0
+              AND EXISTS (SELECT 1 FROM json_each(i.reasons_json) r
+                WHERE r.value GLOB 'content:sniffer:*:fail_safe:missing_question'))
             OR i.engine_version != ?
             OR (? IS NOT NULL AND instr(i.reasons_json, '"metadata:sniffer:') > 0 AND instr(i.reasons_json, ?) = 0)
             OR (? IS NOT NULL AND instr(i.reasons_json, ?) = 0
@@ -1088,12 +1108,59 @@ export class TierLedger {
       WHERE routed = 1 AND content_read = 0 AND metadata_pending = 0
         AND ((state = 'pending' AND content_pending = 1)
           OR (state = 'current' AND EXISTS (SELECT 1 FROM json_each(reasons_json) r
-            WHERE r.value GLOB 'content:sniffer:*:fail_safe:missing_question')))
+            WHERE r.value GLOB 'content:sniffer:*:fail_safe:missing_question'
+              OR r.value GLOB 'content:sniffer:*:fail_safe:unread')))
         AND (? IS NULL OR (provider, account_scope, conversation_key, provider_item_id) > (?, ?, ?, ?))
       ORDER BY provider, account_scope, conversation_key, provider_item_id
       LIMIT ?
     `).all(after ? 1 : null, ...(after ?? [null, null, null, null]), limit);
     return (rows as TierItemRow[]).map(recordFromRow);
+  }
+
+  /**
+   * listAwaitingText over a bounded window: at most `examine` rows in key
+   * order after `after` are looked at, matching or not, and the result says
+   * where the next call resumes. Unbounded, a call with few matching rows
+   * walked the whole ledger to fill its page (Sparta, 2007d67, 2026-11-05: a
+   * 10 s freeze on one names-only settle pass).
+   */
+  listAwaitingTextWindow(options: { limit?: number; after?: TierLedgerIdentity; examine?: number } = {}): {
+    records: TierLedgerRecord[];
+    /** Where the next call resumes; undefined once the end of the ledger is reached. */
+    resumeAfter?: TierLedgerIdentity;
+  } {
+    const limit = Math.max(1, Math.min(options.limit ?? 500, 5_000));
+    const examine = Math.max(limit, options.examine ?? 20_000);
+    const after = options.after
+      ? [options.after.provider, options.after.accountScope, tierLedgerConversationKey(options.after), options.after.providerItemId]
+      : undefined;
+    const keyAfter = after ? 'WHERE (provider, account_scope, conversation_key, provider_item_id) > (?, ?, ?, ?)' : '';
+    const rows = this.db.query(`
+      SELECT * FROM (
+        SELECT * FROM tier_items ${keyAfter}
+        ORDER BY provider, account_scope, conversation_key, provider_item_id
+        LIMIT ?
+      )
+      WHERE routed = 1 AND content_read = 0 AND metadata_pending = 0
+        AND ((state = 'pending' AND content_pending = 1)
+          OR (state = 'current' AND EXISTS (SELECT 1 FROM json_each(reasons_json) r
+            WHERE r.value GLOB 'content:sniffer:*:fail_safe:missing_question'
+              OR r.value GLOB 'content:sniffer:*:fail_safe:unread')))
+      ORDER BY provider, account_scope, conversation_key, provider_item_id
+      LIMIT ?
+    `).all(...(after ?? []), examine, limit) as TierItemRow[];
+    const records = rows.map(recordFromRow);
+    const identityOfRow = (row: { provider: string; account_scope: string; conversation_key: string; provider_item_id: string }): TierLedgerIdentity => ({
+      provider: row.provider, accountScope: row.account_scope, providerItemId: row.provider_item_id,
+      ...(row.conversation_key ? { providerConversationId: row.conversation_key } : {}),
+    });
+    if (rows.length >= limit) return { records, resumeAfter: identityOfRow(rows[rows.length - 1]!) };
+    const windowEnd = this.db.query(`
+      SELECT provider, account_scope, conversation_key, provider_item_id FROM tier_items ${keyAfter}
+      ORDER BY provider, account_scope, conversation_key, provider_item_id
+      LIMIT 1 OFFSET ?
+    `).get(...(after ?? []), examine - 1) as { provider: string; account_scope: string; conversation_key: string; provider_item_id: string } | null;
+    return windowEnd ? { records, resumeAfter: identityOfRow(windowEnd) } : { records };
   }
 
   /** Items waiting on an unanswered sniffer question, oldest first. */
@@ -1147,8 +1214,10 @@ export class TierLedger {
       if (options.missingContent && (next.contentPending || !next.metadataPending)) {
         next.contentTier = maxTier(next.contentTier, 'secure');
         next.contentPending = false;
+        // Unread text was never a question that went missing: say what it is,
+        // so the counts do not read as lost questions (#847).
         next.reasons = [...next.reasons.filter(reason => !isOpenSnifferReason(reason, 'content')),
-          `content:sniffer:${options.snifferId}:fail_safe:missing_question`];
+          `content:sniffer:${options.snifferId}:fail_safe:${next.contentRead ? 'missing_question' : 'unread'}`];
       }
       next.contentTier = maxTier(next.contentTier, next.metadataTier);
       next.decidedBy = 'sniffer';
@@ -1160,6 +1229,26 @@ export class TierLedger {
       } else this.writeRow(identity, next, undefined, current);
       return true;
     })();
+  }
+
+  /**
+   * One page of the once-only relabel (#847): rows settled fail-safe before
+   * the `unread` label existed, with their text still unread, get it in place
+   * of `missing_question`. Only the label changes: tiers, copies and the
+   * generation stay as they are. Returns how many rows changed; 0 means done.
+   */
+  relabelUnreadFailSafe(limit = 2_000): number {
+    return this.db.query(`
+      UPDATE tier_items SET reasons_json = (
+        SELECT json_group_array(CASE WHEN r.value GLOB 'content:sniffer:*:fail_safe:missing_question'
+          THEN substr(r.value, 1, length(r.value) - length('missing_question')) || 'unread' ELSE r.value END)
+        FROM json_each(tier_items.reasons_json) r)
+      WHERE rowid IN (
+        SELECT rowid FROM tier_items
+        WHERE content_read = 0 AND instr(reasons_json, ':fail_safe:missing_question"') > 0
+          AND EXISTS (SELECT 1 FROM json_each(reasons_json) r WHERE r.value GLOB 'content:sniffer:*:fail_safe:missing_question')
+        LIMIT ?)
+    `).run(Math.max(1, Math.min(limit, 10_000))).changes;
   }
 
   /** Retire only an unchanged pending row after every relevant store confirmed absence. */
@@ -2244,16 +2333,19 @@ export class TierLedger {
   /**
    * Routed items that carry a per-item owner override, with it, in key order.
    * Overrides are set by hand, one item at a time, so the list is small; the
-   * override pass (tier-override-settle.ts) reads it whole.
+   * override pass (tier-override-settle.ts) reads it whole. The read starts
+   * from the overrides (CROSS JOIN fixes the order): started from tier_items
+   * it walked every item on each sniffer tick, an eighth of Sparta's sampled
+   * freezes (14b9be8, 2026-11-05).
    */
   listRoutedOverrides(): Array<{ record: TierLedgerRecord; override: ItemTierOverride }> {
     const rows = this.db.query(`
-      SELECT i.*, o.override_json AS override_json FROM tier_items i
-      JOIN tier_overrides o
-        ON o.provider = i.provider AND o.account_scope = i.account_scope
-        AND o.conversation_key = i.conversation_key AND o.provider_item_id = i.provider_item_id
+      SELECT i.*, o.override_json AS override_json FROM tier_overrides o
+      CROSS JOIN tier_items i
+        ON i.provider = o.provider AND i.account_scope = o.account_scope
+        AND i.conversation_key = o.conversation_key AND i.provider_item_id = o.provider_item_id
       WHERE i.routed = 1
-      ORDER BY i.provider, i.account_scope, i.conversation_key, i.provider_item_id
+      ORDER BY o.provider, o.account_scope, o.conversation_key, o.provider_item_id
     `).all() as Array<TierItemRow & { override_json: string }>;
     const result: Array<{ record: TierLedgerRecord; override: ItemTierOverride }> = [];
     for (const row of rows) {
@@ -3213,86 +3305,108 @@ export class TierLedger {
   }
 
   /**
-   * Every item with a copy in this store in the given state. Paged by key
-   * internally, with no ceiling: a filter that silently stopped at N items
-   * would let the N+1st superseded copy be searched and counted.
+   * Changes whenever this ledger's database changes, from this connection or
+   * another: lets a reader reuse what it derived from the ledger until then.
+   */
+  changeMarker(): string {
+    const row = this.db.query('SELECT total_changes() AS changes').get() as { changes: number };
+    const version = this.db.query('PRAGMA data_version').get() as { data_version: number };
+    return `${version.data_version}:${row.changes}`;
+  }
+
+  /**
+   * Every item with a copy in this store in the given state, with no ceiling:
+   * a filter that silently stopped at N items would let the N+1st superseded
+   * copy be searched and counted.
    */
   corpusCopyIdentities(
     corpusId: string,
-    filter: 'superseded' | 'staged' | 'held' | 'metadata_layer' | 'metadata_layer_content_unread' | 'metadata_layer_settled_unreadable',
+    filter: TierCorpusCopyFilter,
   ): TierLedgerIdentity[] {
-    // `metadata_layer_content_unread`: a names copy here whose text no current
-    // copy anywhere holds yet. That item is still waiting to be read (the
-    // extraction view's candidate rule), not kept as names only.
-    const where = filter === 'held'
-      ? `copy_state = 'current' AND embed_hold = 1`
-      : filter === 'metadata_layer'
-        ? `copy_state = 'current' AND layers = 'metadata'`
-        : filter === 'metadata_layer_settled_unreadable'
-          ? `copy_state = 'current' AND layers = 'metadata'
-            AND EXISTS (SELECT 1 FROM tier_items t
-              WHERE t.provider = tier_copies.provider AND t.account_scope = tier_copies.account_scope
-                AND t.conversation_key = tier_copies.conversation_key AND t.provider_item_id = tier_copies.provider_item_id
-                AND t.state = 'current' AND t.content_read = 0
-                AND t.metadata_tier <> 'secrets' AND t.content_tier <> 'secrets'
-                AND EXISTS (SELECT 1 FROM json_each(t.reasons_json) r
-                  WHERE r.value GLOB 'content:sniffer:*:fail_safe:missing_question'))
-            AND NOT EXISTS (SELECT 1 FROM tier_copies other
-              WHERE other.provider = tier_copies.provider AND other.account_scope = tier_copies.account_scope
-                AND other.conversation_key = tier_copies.conversation_key AND other.provider_item_id = tier_copies.provider_item_id
-                AND other.copy_state = 'current' AND other.layers IN ('content', 'both'))`
-        : filter === 'metadata_layer_content_unread'
-          ? `copy_state = 'current' AND layers = 'metadata'
-            AND NOT EXISTS (
-              SELECT 1 FROM tier_copies other
-              WHERE other.provider = tier_copies.provider AND other.account_scope = tier_copies.account_scope
-                AND other.conversation_key = tier_copies.conversation_key
-                AND other.provider_item_id = tier_copies.provider_item_id
-                AND other.corpus_id <> tier_copies.corpus_id
-                AND other.copy_state = 'current' AND other.layers IN ('content', 'both')
-            )`
-          : `copy_state = '${filter === 'superseded' ? 'superseded' : 'staged'}'`;
-    const page = this.db.query(`
+    // One read, in key order. It used to page by key 5,000 at a time, which
+    // gained nothing (every identity is returned in one array anyway) and,
+    // because the corpus index does not hold the key order, re-sorted the
+    // corpus's whole match set once per page.
+    const rows = this.db.query(`
       SELECT provider, account_scope, conversation_key, provider_item_id FROM tier_copies
-      WHERE corpus_id = ? AND ${where}
-        AND (provider, account_scope, conversation_key, provider_item_id) > (?, ?, ?, ?)
+      WHERE corpus_id = ? AND ${corpusCopyWhere(filter)}
       ORDER BY provider, account_scope, conversation_key, provider_item_id
-      LIMIT 5000
-    `);
-    const identities: TierLedgerIdentity[] = [];
-    let after: [string, string, string, string] = ['', '', '', ''];
-    for (;;) {
-      const rows = page.all(corpusId, ...after) as TierIdentityRow[];
-      for (const row of rows) identities.push(identityFromRow(row));
-      if (rows.length < 5000) break;
-      const last = rows[rows.length - 1]!;
-      after = [last.provider, last.account_scope, last.conversation_key, last.provider_item_id];
-    }
-    return identities;
+    `).all(corpusId) as TierIdentityRow[];
+    return rows.map(identityFromRow);
   }
 
-  /** Content-free per-store counts for status surfaces. */
+  /**
+   * The same identities as corpusCopyIdentities, a page at a time in rowid
+   * order with a yield between pages, for a caller that gives the thread back
+   * between pages (#858: one read of a 645k staged backlog held the worker for
+   * seconds). Not in key order. A copy whose row changes during the walk may be
+   * seen as of before or after the change, as with a copy changed after a
+   * single read.
+   */
+  *corpusCopyIdentitiesSteps(
+    corpusId: string,
+    filter: TierCorpusCopyFilter,
+    pageSize = 5_000,
+  ): Generator<void, TierLedgerIdentity[]> {
+    const query = this.db.query(`
+      SELECT rowid AS row_id, embed_hold, provider, account_scope, conversation_key, provider_item_id FROM tier_copies
+      WHERE corpus_id = ? AND (embed_hold, rowid) > (?, ?) AND ${corpusCopyWhere(filter)}
+      ORDER BY embed_hold, rowid LIMIT ?
+    `);
+    // Every filter fixes one copy_state, so (embed_hold, rowid) is the order
+    // of tier_copies_corpus (corpus_id, copy_state, embed_hold) and each page
+    // seeks into that index instead of rescanning and sorting the backlog.
+    const out: TierLedgerIdentity[] = [];
+    for (let hold = -1, after = 0; ;) {
+      const rows = query.all(corpusId, hold, after, pageSize) as Array<TierIdentityRow & { row_id: number; embed_hold: number }>;
+      for (const row of rows) out.push(identityFromRow(row));
+      if (rows.length < pageSize) return out;
+      const last = rows[rows.length - 1]!;
+      hold = last.embed_hold;
+      after = last.row_id;
+      yield;
+    }
+  }
+
+  /**
+   * Content-free per-store counts for status surfaces. Each count reads only
+   * the index that answers it: one join of the whole corpus against
+   * tier_items was a fifth of Sparta's sampled freezes (2026-11-05). Current,
+   * staged and held copies come from tier_copies_corpus alone, because a copy
+   * in those states always has its item row (an item is deleted only with its
+   * copies, or after an account removal superseded them). Superseded copies
+   * can outlive their item during an account removal, so they still check
+   * for it; moving items come from tier_items_state.
+   */
   corpusCopyCounts(corpusId: string): { current: number; superseded: number; staged: number; held: number; moving: number } {
-    const row = this.db.query(`
-      SELECT
-        SUM(CASE WHEN c.copy_state = 'current' THEN 1 ELSE 0 END) AS current,
-        SUM(CASE WHEN c.copy_state = 'superseded' THEN 1 ELSE 0 END) AS superseded,
-        SUM(CASE WHEN c.copy_state = 'staged' THEN 1 ELSE 0 END) AS staged,
-        SUM(CASE WHEN c.copy_state = 'current' AND c.embed_hold = 1 THEN 1 ELSE 0 END) AS held,
-        SUM(CASE WHEN t.state = 'moving' THEN 1 ELSE 0 END) AS moving
-      FROM tier_copies c
-      JOIN tier_items t
-        ON t.provider = c.provider AND t.account_scope = c.account_scope
-          AND t.conversation_key = c.conversation_key AND t.provider_item_id = c.provider_item_id
-      WHERE c.corpus_id = ?
-    `).get(corpusId) as Record<string, number | null>;
-    return {
-      current: row['current'] ?? 0,
-      superseded: row['superseded'] ?? 0,
-      staged: row['staged'] ?? 0,
-      held: row['held'] ?? 0,
-      moving: row['moving'] ?? 0,
-    };
+    const rows = this.db.query(`
+      SELECT copy_state, embed_hold, COUNT(*) AS n FROM tier_copies
+      WHERE corpus_id = ? AND copy_state IN ('current', 'staged')
+      GROUP BY copy_state, embed_hold
+    `).all(corpusId) as Array<{ copy_state: string; embed_hold: number; n: number }>;
+    let current = 0, staged = 0, held = 0;
+    for (const row of rows) {
+      if (row.copy_state === 'current') {
+        current += row.n;
+        if (row.embed_hold === 1) held += row.n;
+      } else staged += row.n;
+    }
+    const superseded = (this.db.query(`
+      SELECT COUNT(*) AS n FROM tier_copies c
+      WHERE c.corpus_id = ? AND c.copy_state = 'superseded' AND EXISTS (
+        SELECT 1 FROM tier_items t
+        WHERE t.provider = c.provider AND t.account_scope = c.account_scope
+          AND t.conversation_key = c.conversation_key AND t.provider_item_id = c.provider_item_id)
+    `).get(corpusId) as { n: number }).n;
+    const moving = (this.db.query(`
+      SELECT COUNT(*) AS n FROM tier_items t
+      JOIN tier_copies c
+        ON c.provider = t.provider AND c.account_scope = t.account_scope
+          AND c.conversation_key = t.conversation_key AND c.provider_item_id = t.provider_item_id
+          AND c.corpus_id = ?
+      WHERE t.state = 'moving'
+    `).get(corpusId) as { n: number }).n;
+    return { current, superseded, staged, held, moving };
   }
 
   /**
@@ -3633,6 +3747,50 @@ interface TierCopyRow {
   updated_at: string;
 }
 
+export type TierCorpusCopyFilter = 'superseded' | 'staged' | 'held' | 'metadata_layer' | 'metadata_layer_content_unread' | 'metadata_layer_settled_unreadable'
+  | 'metadata_layer_settled_unreadable_not_secret';
+
+/** The tier_copies condition for one corpus-copy filter (corpusCopyIdentities and its paged form). */
+function corpusCopyWhere(filter: TierCorpusCopyFilter): string {
+  // `metadata_layer_content_unread`: a names copy here whose text no current
+  // copy anywhere holds yet. That item is still waiting to be read (the
+  // extraction view's candidate rule), not kept as names only.
+  const where = filter === 'held'
+    ? `copy_state = 'current' AND embed_hold = 1`
+    : filter === 'metadata_layer'
+      ? `copy_state = 'current' AND layers = 'metadata'`
+      : filter === 'metadata_layer_settled_unreadable' || filter === 'metadata_layer_settled_unreadable_not_secret'
+        ? `copy_state = 'current' AND layers = 'metadata'${filter === 'metadata_layer_settled_unreadable_not_secret' ? `
+          AND NOT EXISTS (SELECT 1 FROM tier_overrides o
+            WHERE o.provider = tier_copies.provider AND o.account_scope = tier_copies.account_scope
+              AND o.conversation_key = tier_copies.conversation_key AND o.provider_item_id = tier_copies.provider_item_id
+              AND json_extract(o.override_json, '$.kind') = 'tier' AND json_extract(o.override_json, '$.tier') = 'secrets')` : ''}
+          AND EXISTS (SELECT 1 FROM tier_items t
+            WHERE t.provider = tier_copies.provider AND t.account_scope = tier_copies.account_scope
+              AND t.conversation_key = tier_copies.conversation_key AND t.provider_item_id = tier_copies.provider_item_id
+              AND t.state = 'current' AND t.content_read = 0
+              AND t.metadata_tier <> 'secrets' AND t.content_tier <> 'secrets'
+              AND EXISTS (SELECT 1 FROM json_each(t.reasons_json) r
+                WHERE r.value GLOB 'content:sniffer:*:fail_safe:missing_question'
+                  OR r.value GLOB 'content:sniffer:*:fail_safe:unread'))
+          AND NOT EXISTS (SELECT 1 FROM tier_copies other
+            WHERE other.provider = tier_copies.provider AND other.account_scope = tier_copies.account_scope
+              AND other.conversation_key = tier_copies.conversation_key AND other.provider_item_id = tier_copies.provider_item_id
+              AND other.copy_state = 'current' AND other.layers IN ('content', 'both'))`
+      : filter === 'metadata_layer_content_unread'
+        ? `copy_state = 'current' AND layers = 'metadata'
+          AND NOT EXISTS (
+            SELECT 1 FROM tier_copies other
+            WHERE other.provider = tier_copies.provider AND other.account_scope = tier_copies.account_scope
+              AND other.conversation_key = tier_copies.conversation_key
+              AND other.provider_item_id = tier_copies.provider_item_id
+              AND other.corpus_id <> tier_copies.corpus_id
+              AND other.copy_state = 'current' AND other.layers IN ('content', 'both')
+          )`
+        : `copy_state = '${filter === 'superseded' ? 'superseded' : 'staged'}'`;
+  return where;
+}
+
 interface TierIdentityRow {
   provider: string;
   account_scope: string;
@@ -3818,7 +3976,17 @@ interface EffectiveRow {
 }
 
 /** What applying a sniffer verdict did: a P1a row update, a P1b routed outcome, or nothing yet. */
-export type SnifferVerdictOutcome = 'stale_question' | TierLedgerRecordOutcome | TierRoutedOutcome | 'needs_placement' | 'stale_map';
+export type SnifferVerdictOutcome = 'held_lowering' | 'stale_question' | TierLedgerRecordOutcome | TierRoutedOutcome | 'needs_placement' | 'stale_map';
+
+/** Source-neutral rollout switch; first judgments and raises still settle. */
+export function holdSnifferLowering(
+  current: Pick<TierLedgerRecord, 'metadataTier' | 'contentTier' | 'state'>,
+  next: Pick<TierDecision, 'metadataTier' | 'contentTier'>,
+): boolean {
+  return process.env.OLYMPUS_TIER_SNIFFER_HOLD_LOWERING === '1'
+    && current.state === 'current' && current.contentTier === 'secure' && next.contentTier !== 'secrets'
+    && (next.contentTier === 'private' || (current.metadataTier === 'secure' && next.metadataTier === 'private'));
+}
 
 /** A settled row as the classifier decision the P1b router takes. */
 function decisionOfRow(row: EffectiveRow): TierDecision {
@@ -3880,6 +4048,18 @@ function settleStaleEmbedHolds(db: Database, now: string): number {
 }
 
 /** The reasons that say a question is still open: the flags, the borderline families and `sniffer:<id>:undecided`. */
+/** Names a re-judge judged from the stored names alone and raised: a later re-judge may lower them (tier-rejudge.ts). */
+export const STORED_NAMES_REASON = 'metadata:names_from_store';
+/** The same question still open: its answer is marked only if it raises the names it was asked about. */
+export const STORED_NAMES_ASKED_REASON = 'metadata:names_from_store:asked';
+
+/** Settles an open stored-names question's mark once its answer is in (Codex on #635: queued answers lost it). */
+function settleStoredNamesMark(reasons: readonly string[], askedTier: TierKey, answeredTier: TierKey): string[] {
+  if (!reasons.includes(STORED_NAMES_ASKED_REASON)) return [...reasons];
+  const rest = reasons.filter((reason) => reason !== STORED_NAMES_ASKED_REASON);
+  return answeredTier !== askedTier ? [...rest, STORED_NAMES_REASON] : rest;
+}
+
 function isOpenSnifferReason(reason: string, pass: 'metadata' | 'content'): boolean {
   if (pass === 'metadata') {
     return reason.startsWith('metadata:possibly_private:')

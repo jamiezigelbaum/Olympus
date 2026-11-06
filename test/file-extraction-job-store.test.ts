@@ -220,6 +220,33 @@ describe('extraction job store: enqueue', () => {
     expect(store.get(result.jobRefs[0]!.jobId)?.status).toBe('skipped_too_large');
   });
 
+  test('a job refused as an ambiguous identity is read once more at its next listing, then settles', () => {
+    const { store } = newStore();
+    const jobId = enqueueOne(store, 'item-a');
+    store.lease({ ...LANE, workerId: 'worker-1' });
+    store.record({ jobId, status: 'failed_terminal', errorKind: 'store_identity_ambiguous' });
+
+    const again = store.enqueue({ refs: [ref('item-a')], extractorKind: KIND, extractorVersion: VERSION, policyDecision: 'index_allowed' });
+    expect(again.jobsForced).toBe(1);
+    expect(store.get(jobId)!.status).toBe('queued');
+
+    store.lease({ ...LANE, workerId: 'worker-1' });
+    store.record({ jobId, status: 'failed_terminal', errorKind: 'store_identity_ambiguous' });
+    const third = store.enqueue({ refs: [ref('item-a')], extractorKind: KIND, extractorVersion: VERSION, policyDecision: 'index_allowed' });
+    expect(third.jobsForced).toBe(0);
+    expect(store.get(jobId)!.status).toBe('failed_terminal');
+  });
+
+  test('other terminal failures are not reopened by a listing', () => {
+    const { store } = newStore();
+    const jobId = enqueueOne(store, 'item-a');
+    store.lease({ ...LANE, workerId: 'worker-1' });
+    store.record({ jobId, status: 'failed_terminal', errorKind: 'extractor_crashed' });
+    const again = store.enqueue({ refs: [ref('item-a')], extractorKind: KIND, extractorVersion: VERSION, policyDecision: 'index_allowed' });
+    expect(again.jobsForced).toBe(0);
+    expect(store.get(jobId)!.status).toBe('failed_terminal');
+  });
+
   test('force resets a spent job back to queued and clears its error state', () => {
     const { store } = newStore();
     const jobId = enqueueOne(store, 'item-a');
@@ -1042,6 +1069,21 @@ describe('extraction job store: corpus readiness', () => {
     });
   });
 
+  test('a scoped snapshot taken in turns matches the one taken in one go, and gives the thread back between slices', async () => {
+    const { store } = newStore();
+    settle(store, 'damaged', 'failed_terminal');
+    for (let i = 0; i < 4_500; i += 1) enqueueOne(store, `item-${i}`);
+    const checked: number[] = [];
+    const currentItems = (refs: readonly unknown[]) => { checked.push(refs.length); return refs.map(() => true); };
+    let turns = 0;
+    const inTurns = await store.scopedReadinessInTurns([LANE], { currentItems, turn: async () => { turns += 1; } });
+    // 4,501 rows, checked 2,000 at a time.
+    expect(checked).toEqual([2_000, 2_000, 501]);
+    expect(turns).toBeGreaterThanOrEqual(3);
+    expect(inTurns).toEqual(store.scopedReadiness([LANE], { currentItems: (refs) => refs.map(() => true) }));
+    expect(inTurns).toMatchObject({ queuedJobs: 4_500, unreadableItems: 1 });
+  });
+
   test('a terminal failure the runner will still retry is not unreadable yet', () => {
     const { store, dbPath } = newStore();
     // A once-ever reread for this lane's error kind, and an escalation to OCR.
@@ -1121,6 +1163,62 @@ describe('extraction job store: corpus readiness', () => {
 
     expect(snapshot?.counts.extraction_jobs_queued).toBe(1);
     expect(snapshot?.contentExtractionThroughput?.oldest_actionable_at).toBe(currentArrivedAt);
+  });
+
+  test('asks one batched currency check for the whole queue when it has one', () => {
+    const { store } = newStore();
+    enqueueOne(store, 'current');
+    enqueueOne(store, 'stale');
+    const batches: number[] = [];
+    const snapshot = createExtractionReadinessLedger(store, {
+      lanesForCorpus: () => [LANE],
+      currentItem: () => { throw new Error('the per-item check is not asked'); },
+      currentItems: (refs) => {
+        batches.push(refs.length);
+        return refs.map((ref) => ref.providerItemId === 'current');
+      },
+    }).snapshotForCorpus(LANE.corpusId);
+
+    expect(batches).toEqual([2]);
+    expect(snapshot?.counts.extraction_jobs_queued).toBe(1);
+  });
+
+  test('answers a stale snapshot at once and takes a fresh one off the request path', async () => {
+    const { store } = newStore();
+    let at = 1_000;
+    let taken = 0;
+    const ledger = createExtractionReadinessLedger({
+      corpusReadiness: (...args) => {
+        taken += 1;
+        return store.corpusReadiness(...args);
+      },
+    }, { now: () => at });
+    const tick = () => new Promise((resolve) => setTimeout(resolve, 5));
+
+    // Nothing taken yet: absent counts now, one snapshot taken in the background.
+    expect(ledger.snapshotForCorpus(LANE.corpusId, { maxAgeMs: 60_000 })).toBeUndefined();
+    expect(ledger.snapshotForCorpus(LANE.corpusId, { maxAgeMs: 60_000 })).toBeUndefined();
+    expect(taken).toBe(0);
+    await tick();
+    expect(taken).toBe(1);
+    expect(ledger.snapshotForCorpus(LANE.corpusId, { maxAgeMs: 60_000 })?.counts.extraction_jobs_queued).toBe(0);
+
+    enqueueOne(store, 'later');
+    // Within the allowance: the last snapshot, and nothing taken.
+    at += 30_000;
+    expect(ledger.snapshotForCorpus(LANE.corpusId, { maxAgeMs: 60_000 })?.counts.extraction_jobs_queued).toBe(0);
+    await tick();
+    expect(taken).toBe(1);
+    // Past it: still the last snapshot now, the fresh one next.
+    at += 60_000;
+    expect(ledger.snapshotForCorpus(LANE.corpusId, { maxAgeMs: 60_000 })?.counts.extraction_jobs_queued).toBe(0);
+    expect(taken).toBe(1);
+    await tick();
+    expect(taken).toBe(2);
+    expect(ledger.snapshotForCorpus(LANE.corpusId, { maxAgeMs: 60_000 })?.counts.extraction_jobs_queued).toBe(1);
+    // A caller without an allowance still gets a snapshot taken now.
+    expect(ledger.snapshotForCorpus(LANE.corpusId)?.counts.extraction_jobs_queued).toBe(1);
+    expect(taken).toBe(3);
   });
 
   test('keeps scoped failure actionability and per-item policy supersession semantics', () => {

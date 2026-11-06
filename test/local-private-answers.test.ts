@@ -25,7 +25,13 @@ import tls from 'node:tls';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { answerPrivately, type BuiltInAnalystModel } from '../src/core/analyst-built-in.ts';
+import { answerPrivately, createBuiltInAnalystModel, type BuiltInAnalystModel } from '../src/core/analyst-built-in.ts';
+import { seedEngineSovereignty } from '../src/core/engine-service.ts';
+import { saveFirstRunPrivacyChoice } from '../src/core/first-run-privacy.ts';
+import { ModelSetupService } from '../src/core/model-setup.ts';
+import { loadConfig } from '../src/core/config.ts';
+import { builtInBacksPrivateAnalyst, createAnalystForSovereigntyProfile, loadSourceWorkerSovereignty } from '../src/workers/email-source/server.ts';
+import { WorkerBootSecretResolver } from '../src/workers/credential-degradation.ts';
 import type { AnalystModelRequest } from '../src/core/analyst.ts';
 import { createRemotePrivateParts } from '../src/core/remote-private-part.ts';
 import { recordRequestPeer } from '../src/core/request-peer.ts';
@@ -92,8 +98,9 @@ afterEach(async () => {
 // ---- network denial ----------------------------------------------------------
 
 /** Every outbound path a request could take from this process, refused and recorded. */
-function denyNetwork() {
+function denyNetwork(loopback?: (url: URL, init?: RequestInit) => Promise<Response>) {
   const attempts: string[] = [];
+  const loopbackRequests: string[] = [];
   const restores: Array<() => void> = [];
   const deny = (target: Record<string, unknown>, key: string, label: string) => {
     const original = target[key];
@@ -106,18 +113,30 @@ function denyNetwork() {
     });
   };
   deny(globalThis as unknown as Record<string, unknown>, 'fetch', 'fetch');
+  if (loopback) {
+    const blocked = globalThis.fetch;
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(input instanceof Request ? input.url : input.toString());
+      if (url.protocol === 'http:' && url.hostname === '127.0.0.1') {
+        loopbackRequests.push(url.href);
+        return loopback(url, init);
+      }
+      return blocked(input, init);
+    }) as typeof fetch;
+  }
   deny(http as unknown as Record<string, unknown>, 'request', 'http.request');
   deny(http as unknown as Record<string, unknown>, 'get', 'http.get');
   deny(https as unknown as Record<string, unknown>, 'request', 'https.request');
   deny(https as unknown as Record<string, unknown>, 'get', 'https.get');
   deny(net as unknown as Record<string, unknown>, 'connect', 'net.connect');
   deny(net as unknown as Record<string, unknown>, 'createConnection', 'net.createConnection');
+  deny(net.Socket.prototype as unknown as Record<string, unknown>, 'connect', 'Socket.connect');
   deny(tls as unknown as Record<string, unknown>, 'connect', 'tls.connect');
   const restore = () => {
     for (const undo of restores.splice(0).reverse()) undo();
   };
   cleanups.push(restore);
-  return { attempts, restore };
+  return { attempts, loopbackRequests, restore };
 }
 
 // ---- the built-in models' stand-ins -------------------------------------------
@@ -281,6 +300,7 @@ function datedConnector(specs: readonly FixtureSpec[], dates: Readonly<Record<st
  * answer must never call.
  */
 async function localFixture(options: {
+  model?: BuiltInAnalystModel;
   embedding?: BuiltInEmbeddingState;
   specs?: readonly FixtureSpec[];
   privateIds?: readonly string[];
@@ -331,7 +351,7 @@ async function localFixture(options: {
   const path = createLocalAnswerPath({
     releaseCheck: createReleaseTierCheck(() => [{ ledger: fixture.ledger, corpusIds: new Set(fixture.set.openStores().map(store => store.corpusId)) }], () => 'approval'),
     lanes,
-    model: stub.model,
+    model: options.model ?? stub.model,
     available: () => true,
     relevanceEmbedding: () => builtInEmbeddingOnly(builtIn.provider, loadedBuiltInEmbedding),
     sourceName: (corpusId) => SOURCE_NAMES[corpusId],
@@ -1136,7 +1156,7 @@ describe('the worker serves Private answers only inside a local control session'
     }
     // Deep-link locators carry no authority: every answer read/list uses the
     // same local-only boundary, including widgets and dash_ read-only viewers.
-    for (const action of [{ action: 'read', id: ref.id }, { action: 'list' }, { action: 'ask_venice', question: 'Sentinel?' }, { action: 'ask_anonymous', question: 'Sentinel?' }, { action: 'ask', question: 'Sentinel?' }]) {
+    for (const action of [{ action: 'resolve_secret', handle: 'S'.repeat(22) }, { action: 'read', id: ref.id }, { action: 'list' }, { action: 'ask_venice', question: 'Sentinel?' }, { action: 'ask_anonymous', question: 'Sentinel?' }, { action: 'ask', question: 'Sentinel?' }]) {
       expect((await fetcher(post(action, { Authorization: `Bearer ${TOKEN}`, Origin: ORIGIN }))).status).toBe(403);
       expect((await fetcher(post(action, { Authorization: 'Bearer dash_reader', Origin: ORIGIN }))).status).toBe(401);
       expect((await fetcher(post(action, { Origin: 'https://chatgpt.com' }))).status).toBe(401);
@@ -1267,7 +1287,7 @@ describe('the waiting count reaches only the computer\'s control session', () =>
 // ---- the page's own script ----------------------------------------------------------
 
 describe('the Private answers page', () => {
-  function renderAndRun(answer: (body: Record<string, unknown>) => { status: number; body: unknown }, url = 'http://127.0.0.1:8010/dashboard?private-answers', markdown = true) {
+  function renderAndRun(answer: (body: Record<string, unknown>) => { status: number; body: unknown } | Promise<{ status: number; body: unknown }>, url = 'http://127.0.0.1:8010/dashboard?private-answers', markdown = true) {
     const html = renderDashboardPrivateAnswersPage({
       now: DASHBOARD_PREVIEW_NOW,
       controlSessionCsrfToken: 'csrf-token',
@@ -1291,7 +1311,7 @@ describe('the Private answers page', () => {
     const fetchStub = async (target: string, init: { headers: Record<string, string>; body: string }) => {
       const parsed = JSON.parse(init.body) as Record<string, unknown>;
       posts.push({ url: target, headers: init.headers, body: parsed });
-      const reply = answer(parsed);
+      const reply = await answer(parsed);
       return { ok: reply.status >= 200 && reply.status < 300, status: reply.status, json: async () => reply.body };
     };
     const timers: Array<() => Promise<void>> = [];
@@ -1301,6 +1321,114 @@ describe('the Private answers page', () => {
     if (!markdown) (pageWindow as { olympusMarkdown?: unknown }).olympusMarkdown = undefined;
     return { html, document, posts, confirmations: () => confirmations, poll: async () => { await timers.shift()?.(); }, settle: () => new Promise((resolve) => setTimeout(resolve, 20)) };
   }
+
+  test.each(['local-first', 'local-only'] as const)('%s standalone without a Venice key unlocks sources and shows a cited built-in answer without outbound requests (#591)', async choice => {
+    const { dir, cleanup } = tempDir('olympus-standalone-answer-');
+    cleanups.push(cleanup);
+    const policyPath = join(dir, 'sovereignty.json');
+    const env = {
+      HOME: dir, OLYMPUS_ENGINE_HOST: '1', OLYMPUS_SOVEREIGNTY_CONFIG: policyPath,
+      OLYMPUS_BUILT_IN_REASONING_DIR: join(dir, 'reasoning'),
+    };
+    const completions: string[] = [];
+    // No socket is opened. The two loopback endpoints model an absent user
+    // server and the installed built-in runtime; every other transport is denied.
+    const network = denyNetwork(async (url, init) => {
+      if (url.port === '28090' && url.pathname.endsWith('/models')) {
+        throw new Error('ECONNREFUSED: no user model server on this standalone install');
+      }
+      expect(url.href).toBe('http://127.0.0.1:40123/v1/chat/completions');
+      expect(init?.method).toBe('POST');
+      completions.push(String(init?.body));
+      return Response.json({ choices: [{ message: { content: ANSWER_JSON } }] });
+    });
+    expect(seedEngineSovereignty(policyPath)).toBe('pending');
+    expect(saveFirstRunPrivacyChoice(policyPath, choice)).toMatchObject({ ok: true, changed: true });
+    const engine = loadSourceWorkerSovereignty({}, env);
+    const members = engine.resolveAnalystPool({ trustDomain: 'secure_local' }).members;
+    const secretReads: string[] = [];
+    const resolver = new WorkerBootSecretResolver({ resolveSecretRefValueSync: ref => { secretReads.push(ref); return undefined; } });
+    for (const { id, profile } of members.filter(member => member.profile.provider === 'venice')) {
+      expect(createAnalystForSovereigntyProfile({ profileId: id, profile, env, olympusConfig: loadConfig({}),
+        bootSecretResolver: resolver, veniceAnalystTimeoutMs: undefined, veniceReasoningHeadroomTokens: undefined,
+      })).toBeUndefined();
+    }
+    if (choice === 'local-first') expect(secretReads.length).toBeGreaterThan(0);
+    const model = createBuiltInAnalystModel({ env, model: QWEN35_4B,
+      install: async () => ({ modelPath: join(dir, 'model.gguf'), serverPath: join(dir, 'llama-server'), gpu: false }),
+      createServer: () => ({ pid: 1, ensureRunning: async () => ({ baseUrl: 'http://127.0.0.1:40123', token: 'synthetic-runtime-token' }), touch() {}, async stop() {} }),
+    });
+    await model.prepare();
+    const setup = new ModelSetupService({ config: engine.config, autoCheck: false,
+      credentialState: (_id, profile) => profile.secretRef ? 'missing' : 'ready',
+      builtInAnswers: id => builtInBacksPrivateAnalyst(id, model.status().state, members),
+    });
+    const ready = await setup.checkLocalModels();
+    expect(ready.ready).toBe(true); // The same gate the source Connect controls use.
+    expect(ready.privacy_choice_pending).toBeUndefined();
+    expect(network.loopbackRequests).toContain('http://127.0.0.1:28090/v1/models');
+    if (choice === 'local-first') expect(ready.cards.find(card => card.id === 'venice')).toMatchObject({ required: false, state: 'not_configured' });
+
+    const local = await localFixture({ model, specs: [SPECS[0]!], privateIds: ['lease'] });
+    const store = waitingStore();
+    const controller = createLocalPrivateAnswers({ answer: local.answer, eligible: local.eligible, store: () => store });
+    cleanups.push(() => controller.close());
+    const replies: Array<Record<string, unknown>> = [];
+    const page = renderAndRun(async body => {
+      const result = await controller.handle(body, 'standalone-owner');
+      replies.push(result.body);
+      return result;
+    });
+    const question = 'When does the orchard flat lease end?';
+    (page.document.querySelector('textarea') as unknown as { value: string }).value = question;
+    page.document.querySelector('form[data-pa-ask]')!.dispatchEvent(new page.document.defaultView!.Event('submit', { cancelable: true }));
+    for (let turn = 0; turn < 100 && !page.document.querySelector('.paanswer'); turn++) await page.settle();
+    expect(replies[0]).toMatchObject({ ok: true, status: 'answered', answer: 'The orchard flat lease ends on 31 May 2027.' });
+    expect(replies[0]!.citations).toMatchObject([{ title: 'orchard-lease.txt' }]);
+    expect(page.document.querySelector('.paanswer')?.textContent).toBe('The orchard flat lease ends on 31 May 2027.');
+    expect(page.document.querySelector('.pameta')?.textContent).toContain('orchard-lease.txt');
+    expect(page.document.querySelector('[data-state="error"]')).toBeNull();
+    expect(completions.length).toBeGreaterThan(0);
+    expect(completions.join('\n')).toContain(LEASE_TEXT);
+    expect(local.builtIn.embedded.some(text => text.includes(question))).toBe(true);
+    expect(model.status().state).toBe('ready');
+
+    // The remote question's automatic local answer survives the inbox read path.
+    const waiting = store.record(store.ticket('chatgpt'), { question, surface: 'remote', state: 'waiting' })!;
+    await controller.tick();
+    const read = await controller.handle({ action: 'read', id: waiting.id }, 'standalone-owner');
+    expect(read.body).toMatchObject({ status: 'answered', answer: 'The orchard flat lease ends on 31 May 2027.', citations: [{ title: 'orchard-lease.txt' }] });
+    await model.stop();
+    await backgroundSettled();
+    expect(network.attempts).toEqual([]);
+  });
+
+  test('an expired Secret handle points back to Inbox without claiming deletion', async () => {
+    const page = renderAndRun(() => ({ status: 410, body: { ok: false } }), 'http://127.0.0.1:8010/dashboard?private-answers#' + 'S'.repeat(22));
+    await page.settle();
+    expect(page.document.querySelector('[data-pa-missing]')!.textContent).toBe('This link has expired or is unavailable. Choose your question in Inbox.');
+    expect(page.document.querySelector('[data-pa-question="wq_1"]')).not.toBeNull();
+  });
+
+  test('a Secret handle opens exactly its resolved Inbox row', async () => {
+    const page = renderAndRun(body => ({ status: 200, body: body.action === 'resolve_secret'
+      ? { ok: true, id: 'wq_1' } : body.action === 'read'
+      ? { ok: true, status: 'answered', answer: 'Matching Secret', citations: [{ title: 'Recovery document', open: 'opaque-source' }] }
+      : { ok: true } }), 'http://127.0.0.1:8010/dashboard?private-answers#' + 'S'.repeat(22));
+    await page.settle();
+    expect(page.posts.map(post => post.body)).toEqual([{ action: 'resolve_secret', handle: 'S'.repeat(22) }, { action: 'read', id: 'wq_1' }]);
+    expect(page.document.querySelector('[data-pa-question="wq_1"] .paanswer')?.textContent).toContain('Matching Secret');
+  });
+
+  test('polling adds and removes the failure tint and icon as the row changes state', async () => {
+    let failed = true;
+    const page = renderAndRun(() => ({ status: 200, body: { ok: true, questions: [{ id: 'wq_1', question: 'Where is the lease?', from: 'ChatGPT', askedAt: '2026-10-01T01:00:00Z', state: failed ? 'failed' : 'answered', failureReason: 'no_model', unread: false }] } }));
+    await page.poll();
+    expect(page.document.querySelector('.pa-failed [data-pa-warning]')).not.toBeNull();
+    failed = false; await page.poll();
+    expect(page.document.querySelector('.pa-failed')).toBeNull();
+    expect(page.document.querySelector('[data-pa-warning]')).toBeNull();
+  });
 
   test('Ask renders Markdown safely in a panel under its question, with ordered section headings', async () => {
     const page = renderAndRun(() => ({ status: 200, body: {
@@ -1383,6 +1511,53 @@ describe('the Private answers page', () => {
     (out.querySelector('.paopen') as unknown as { click(): void }).click();
     await page.settle();
     expect(page.posts.at(-1)!.body).toEqual({ action: 'open', token: 'A'.repeat(32) });
+  });
+
+  for (const [reason, message] of [
+    ['answer_failed', 'The model could not finish the answer.'],
+    ['no_model', 'Your local model is not available.'],
+    ['model_downloading', 'Your local model is still downloading.'],
+    ['evidence_changed', 'Items changed before Olympus could finish the answer.'],
+    ['eligibility_unavailable', 'Olympus could not check whether the items are still available.'],
+    ['save_refused', 'Olympus could not save the answer.'],
+  ]) test(`exhausted Inbox ${reason} explains the failure and links to model setup`, async () => {
+    const page = renderAndRun(body => ({ status: 200, body: body.action === 'list'
+      ? { ok: true, questions: [{ id: 'wq_1', question: 'Where is the lease?', state: 'failed', failureReason: reason, askedAt: DASHBOARD_PREVIEW_NOW.toISOString() }] }
+      : body.action === 'read' ? { ok: true, status: 'failed', failureReason: reason, generation: 2 }
+      : { ok: true } }));
+    await page.poll();
+    const row = page.document.querySelector('[data-pa-question="wq_1"]')!;
+    expect(row.querySelector('[data-pa-failure]')!.textContent).toContain(message!);
+    expect(row.querySelector('[data-pa-failure] a')!.getAttribute('href')).toBe('/dashboard?keys');
+    (row.querySelector('[data-pa-read]') as unknown as { click(): void }).click();
+    await page.settle();
+    const out = row.querySelector('[data-pa-out]')!;
+    expect(out.textContent).toContain(message!);
+    expect(out.querySelector('a')!.getAttribute('href')).toBe('/dashboard?keys');
+    expect(out.querySelector('[data-pa-failure]')!.textContent).not.toContain('Where is the lease?');
+  });
+
+  for (const reason of [undefined, 'PRIVATE EXCEPTION /secret/file', '__proto__', 'constructor'])
+    test(`unknown Inbox failure code ${reason} keeps the content-free fallback`, async () => {
+      const page = renderAndRun(() => ({ status: 200, body: { ok: true, status: 'failed', failureReason: reason, generation: 2 } }));
+      const row = page.document.querySelector('[data-pa-question="wq_1"]')!;
+      (row.querySelector('[data-pa-read]') as unknown as { click(): void }).click();
+      await page.settle();
+      const notice = row.querySelector('[data-pa-out] [data-pa-failure]')!;
+      expect(notice.textContent).toBe('Olympus could not answer this. Try again.');
+      expect(notice.querySelector('a')).toBeNull();
+    });
+
+  test('an exhausted Inbox answer shows failure and marks its generation seen', async () => {
+    const page = renderAndRun(body => ({ status: 200, body: body.action === 'read'
+      ? { ok: true, status: 'failed', generation: 2 }
+      : { ok: true, status: 'read' } }));
+    const row = page.document.querySelector('[data-pa-question="wq_1"]')!;
+    (row.querySelector('[data-pa-read]') as unknown as { click(): void }).click();
+    await page.settle();
+    expect(row.querySelector('[data-pa-out]')!.textContent).toContain('Olympus could not answer this. Try again.');
+    expect(page.posts.map(post => post.body)).toEqual([{ action: 'read', id: 'wq_1' }, { action: 'seen', id: 'wq_1', generation: 2 }]);
+    expect(row.classList.contains('unread')).toBe(false);
   });
 
   test('a withdrawn Venice answer shows its sent list and reason as text, and marks the receipt seen', async () => {
@@ -1815,7 +1990,7 @@ for (const path of ['private', 'venice', 'anonymous'] as const) {
   test(`${path} retained answers survive an unavailable eligibility check`, async () => {
     const store = waitingStore();
     const ref = store.record(store.ticket('sender'), { question: 'Question', path, surface: 'remote', state: 'waiting' })!;
-    store.saveAnswer(ref, A('Keep this answer'), path === 'anonymous' ? 'Exact sent question' : undefined);
+    store.saveAnswer(ref, { ...A('Keep this answer'), ...(path === 'private' ? { secretLocations: [] } : {}) }, path === 'anonymous' ? 'Exact sent question' : undefined);
     let unavailable = true;
     const controller = createLocalPrivateAnswers({ store: () => store, answer: async () => ({ status: 'failed' }), eligible: async items => {
       if (unavailable) throw new Error('Transient ledger failure');
@@ -1862,4 +2037,74 @@ test('re-asking Venice retains answers and restarts not-found without allowing c
   await controller.tick();
   expect(calls).toBe(0);
   expect(store.get(first.id)?.result?.answer).toBe('Venice reply');
+});
+
+test('a repeatedly failing Inbox question settles visibly, keeps safe retry reasons, and can be asked afresh', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'bounded-inbox-'));
+  cleanups.push(() => rmSync(dir, { recursive: true, force: true }));
+  let clock = Date.parse('2026-10-14T12:00:00Z');
+  const store = openWaitingPrivateQuestionStore(join(dir, 'state', 'waiting.sqlite'), { now: () => clock });
+  cleanups.push(() => store.close());
+  const input = { question: 'dentist?', surface: 'remote' as const, state: 'waiting' as const };
+  const ref = store.record(store.ticket('c'), input)!;
+  let calls = 0;
+  const controller = createLocalPrivateAnswers({ store: () => store, now: () => clock, answer: async () => {
+    calls += 1;
+    throw new Error('PRIVATE EXCEPTION TEXT /Users/private/source.pdf');
+  } });
+  cleanups.push(() => controller.close());
+  for (let i = 0; i < 10; i += 1) {
+    await controller.tick();
+    clock = Math.max(clock + 1000, store.get(ref.id)!.nextAttemptAt);
+  }
+  expect(calls).toBe(8);
+  expect(store.get(ref.id)).toMatchObject({ attempts: 8, nextAttemptAt: 0, result: { status: 'failed', read: [], citations: [] }, retryReasons: Array(8).fill('answer_failed') });
+  expect(controller.waiting()!.questions[0]).toMatchObject({ state: 'failed', unread: true, failureReason: 'answer_failed' });
+  expect(controller.waitingCount()).toBe(1);
+  expect((await controller.handle({ action: 'read', id: ref.id }, 'owner')).body).toMatchObject({ status: 'failed', generation: ref.generation });
+  expect(JSON.stringify(store.list())).not.toContain('PRIVATE EXCEPTION TEXT');
+  const again = store.record(store.ticket('c'), input)!;
+  expect(again.generation).toBe(ref.generation + 1);
+  expect(store.get(ref.id)).toMatchObject({ attempts: 0 });
+  expect(store.get(ref.id)?.retryReasons).toBeUndefined();
+  await controller.tick();
+  expect(calls).toBe(9);
+});
+
+for (const [mode, reason] of [
+  ['no_model', 'no_model'], ['model_downloading', 'model_downloading'],
+  ['changed', 'evidence_changed'], ['ineligible', 'evidence_changed'],
+  ['unknown', 'eligibility_unavailable'], ['save_refused', 'save_refused'],
+] as const) test(`Inbox ${mode} retries have a safe reason and a terminal outcome`, async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'retry-reasons-'));
+  cleanups.push(() => rmSync(dir, { recursive: true, force: true }));
+  let clock = Date.parse('2026-10-14T12:00:00Z');
+  const store = openWaitingPrivateQuestionStore(join(dir, 'state', 'waiting.sqlite'), { now: () => clock });
+  cleanups.push(() => store.close());
+  const ref = store.record(store.ticket('c'), { question: 'a question', surface: 'remote', state: 'waiting' })!;
+  if (mode === 'save_refused') store.saveAnswer = () => false;
+  const controller = createLocalPrivateAnswers({ store: () => store, now: () => clock,
+    answer: async () => mode === 'no_model' || mode === 'model_downloading' || mode === 'changed'
+      ? { status: mode } : { ...A('unreleased answer'), read: [{ corpusId: 'private.files', candidateId: 'synthetic' }] },
+    eligible: async items => { if (mode === 'unknown') throw new Error('private exception'); return items.map(() => mode !== 'ineligible'); },
+  });
+  cleanups.push(() => controller.close());
+  for (let i = 0; i < 8; i += 1) {
+    await controller.tick();
+    clock = Math.max(clock + 1000, store.get(ref.id)!.nextAttemptAt);
+  }
+  expect(store.get(ref.id)).toMatchObject({ result: { status: 'failed', read: [], citations: [] }, retryReasons: Array(8).fill(reason) });
+  expect(controller.waiting()!.questions[0]).toMatchObject({ state: 'failed', failureReason: reason });
+  expect((await controller.handle({ action: 'read', id: ref.id }, 'owner')).body).toMatchObject({ status: 'failed', failureReason: reason });
+  expect(JSON.stringify(store.get(ref.id))).not.toContain('unreleased answer');
+});
+
+test('failed Inbox views use only the last recorded retry code', async () => {
+  const { store, controller } = scripted();
+  cleanups.push(() => controller.close());
+  const ref = store.record(store.ticket('conn-a'), { question: 'Private question sentinel', surface: 'remote', state: 'waiting' })!;
+  for (let i = 0; i < 7; i++) store.retry(ref, 'answer_failed');
+  store.retry(ref, 'no_model');
+  expect(controller.waiting()!.questions[0]).toMatchObject({ state: 'failed', failureReason: 'no_model' });
+  expect((await controller.handle({ action: 'read', id: ref.id }, 'owner')).body).toMatchObject({ status: 'failed', failureReason: 'no_model' });
 });

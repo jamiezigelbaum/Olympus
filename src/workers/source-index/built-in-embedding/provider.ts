@@ -1,7 +1,8 @@
 // The built-in embedding provider: a small model that runs inside the Olympus
 // process, needs no account, no extra app and no network once installed, and
-// sends nothing anywhere. The model and its runtime download once, on first
-// use, into the Olympus data directory (see assets.ts).
+// sends nothing anywhere unless the owner configures the remote document
+// helper. The model and runtime download once into the Olympus data directory
+// (see assets.ts).
 
 import { modelInstallFailedReason, type ModelInstallFailedReason } from '../../../core/model-install-failure.ts';
 import { createHash } from 'node:crypto';
@@ -14,6 +15,7 @@ import { isMediaCachePath } from '../../../core/media-cache.ts';
 import {
   SourceEmbeddingInputsFailedError,
   TransientSourceEmbeddingError,
+  priorityQueryEmbeddingRequested,
   type SourceEmbeddingImageInput,
   type SourceEmbeddingInput,
   type SourceEmbeddingProvider,
@@ -46,6 +48,7 @@ import {
   type LiteRtEmbedderOptions,
   type LiteRtEmbedItem,
 } from './litert-runtime.ts';
+import { RemoteLiteRtEmbedder } from './remote-litert-runtime.ts';
 import { onnxRuntimeFromDirectory, type EmbeddingRuntime, type EmbeddingSession } from './runtime.ts';
 import { WordPieceTokenizer } from './wordpiece.ts';
 
@@ -53,6 +56,9 @@ export const BUILT_IN_EMBEDDING_PROVIDER = 'built-in';
 export const BUILT_IN_EMBEDDING_THREADS_ENV = 'OLYMPUS_BUILT_IN_EMBEDDING_THREADS';
 /** `cpu` keeps a LiteRT model off the GPU. */
 export const BUILT_IN_EMBEDDING_DEVICE_ENV = 'OLYMPUS_BUILT_IN_EMBEDDING_DEVICE';
+
+export const BUILT_IN_EMBEDDING_REMOTE_URL_ENV = 'OLYMPUS_BUILT_IN_EMBEDDING_REMOTE_URL';
+export const BUILT_IN_EMBEDDING_REMOTE_TOKEN_FILE_ENV = 'OLYMPUS_BUILT_IN_EMBEDDING_REMOTE_TOKEN_FILE';
 
 /** A document longer than one model window is read as up to this many windows. */
 const MAX_WINDOWS_PER_DOCUMENT = 8;
@@ -87,6 +93,7 @@ export interface BuiltInSourceEmbeddingProviderOptions {
   /** Defaults to the pinned downloader. */
   install?: (options: BuiltInEmbeddingInstallerOptions) => Promise<InstalledBuiltInEmbedding>;
   installerOptions?: Omit<BuiltInEmbeddingInstallerOptions, 'env' | 'model'>;
+  remoteRequestTimeoutMs?: number;
   threads?: number;
   epochId?: string;
   now?: () => number;
@@ -131,6 +138,7 @@ export class BuiltInSourceEmbeddingProvider implements SourceEmbeddingProvider {
   /** A LiteRT model tries the GPU first (`auto`) unless the owner keeps it on the CPU. */
   readonly device: 'auto' | 'cpu';
 
+  private remote: RemoteLiteRtEmbedder | undefined;
   private spec: BuiltInEmbeddingModelSpec;
   private env: Record<string, string | undefined>;
   private runtimeFactory: (installed: InstalledBuiltInEmbedding) => EmbeddingRuntime;
@@ -140,8 +148,12 @@ export class BuiltInSourceEmbeddingProvider implements SourceEmbeddingProvider {
   private now: () => number;
   private loading: Promise<LoadedModel> | undefined;
   private loaded: LoadedModel | undefined;
+  /** Text-only runtime reserved for deadline-bound probes, loaded with the ordinary runtime. */
+  private priorityLoaded: LoadedModel | undefined;
+  private prioritySlotBusy = false;
+  private readonly priorityWaiting: Array<() => void> = [];
   private lastFailure: { atMs: number; error: Error } | undefined;
-  /** One forward pass runs at a time; these wait for the slot, queries first. */
+  /** One ordinary forward pass runs at a time; queries precede waiting documents. */
   private slotBusy = false;
   private imageSupportWarned = false;
   /** Known-good-picture failures in a row, and until when pictures are held after too many. */
@@ -162,6 +174,20 @@ export class BuiltInSourceEmbeddingProvider implements SourceEmbeddingProvider {
     this.install = options.install ?? installBuiltInEmbedding;
     this.installerOptions = options.installerOptions ?? {};
     this.now = options.now ?? Date.now;
+    const remoteUrl = this.env[BUILT_IN_EMBEDDING_REMOTE_URL_ENV]?.trim();
+    if (remoteUrl && this.spec.runtime === 'litert') {
+      this.remote = new RemoteLiteRtEmbedder({
+        url: remoteUrl,
+        tokenFile: this.env[BUILT_IN_EMBEDDING_REMOTE_TOKEN_FILE_ENV],
+        now: this.now,
+        requestTimeoutMs: options.remoteRequestTimeoutMs,
+        identity: {
+          modelId: this.modelId, weightsSha256: this.spec.model.sha256,
+          runtime: `litert-lm-${LITERT_RUNTIME_PACK.version}`, dimension: this.dimension,
+          maxTokens: this.spec.maxTokens, overflow: 'chunk-and-average',
+        },
+      });
+    }
     this.epochId = resolveEmbeddingEpoch({
       provider: this.provider,
       modelId: this.modelId,
@@ -192,7 +218,8 @@ export class BuiltInSourceEmbeddingProvider implements SourceEmbeddingProvider {
 
   /** The install/load status, as last written by any process. */
   status(): BuiltInEmbeddingStatus {
-    return readBuiltInEmbeddingStatus(this.env, this.spec);
+    const status = readBuiltInEmbeddingStatus(this.env, this.spec);
+    return this.remote ? { ...status, remoteDocuments: this.remote.active } : status;
   }
 
   /** Downloads and loads the model now instead of on first use. */
@@ -330,7 +357,7 @@ export class BuiltInSourceEmbeddingProvider implements SourceEmbeddingProvider {
       let model: LoadedModel;
       if (this.spec.runtime === 'litert') {
         if (!installed.libraryPath) throw new Error('the LiteRT-LM runtime is not installed.');
-        const embedder = await this.liteRtFactory({
+        const settings: LiteRtEmbedderOptions = {
           library: installed.libraryPath,
           model: installed.modelPath,
           // LiteRT keeps compiled GPU programs here, so later starts take seconds.
@@ -339,8 +366,19 @@ export class BuiltInSourceEmbeddingProvider implements SourceEmbeddingProvider {
           device: this.device,
           maxInputTokens: this.spec.maxTokens,
           ...(this.spec.vision ? { visionTokensPerImage: this.spec.vision.tokensPerImage } : {}),
-        });
+        };
+        const embedder = await this.liteRtFactory(settings);
         model = { kind: 'litert', embedder };
+        try {
+          // A long answer-relevance batch can hold the ordinary helper beyond
+          // the probe's deadline. Its reserved helper reads only query text,
+          // so it needs no image encoder. The pinned assets/vectors are identical.
+          const { visionTokensPerImage: _vision, ...querySettings } = settings;
+          this.priorityLoaded = { kind: 'litert', embedder: await this.liteRtFactory(querySettings) };
+        } catch (error) {
+          await embedder.release().catch(() => undefined);
+          throw error;
+        }
         // The image encoder starting is what makes photos searchable by
         // content; say whether it did where every process can read it (the
         // ingestion policy admits photos only while it is not known to have
@@ -351,6 +389,13 @@ export class BuiltInSourceEmbeddingProvider implements SourceEmbeddingProvider {
         const tokenizer = loadTokenizer(installed.vocabularyPath);
         const session = await this.runtimeFactory(installed).createSession(installed.modelPath, { threads: this.threads });
         model = { kind: 'onnx', session, tokenizer };
+        try {
+          const querySession = await this.runtimeFactory(installed).createSession(installed.modelPath, { threads: this.threads });
+          this.priorityLoaded = { kind: 'onnx', session: querySession, tokenizer };
+        } catch (error) {
+          await session.release?.().catch(() => undefined);
+          throw error;
+        }
       }
       reportBuiltInEmbeddingState(reporterOptions, 'ready');
       return model;
@@ -365,13 +410,25 @@ export class BuiltInSourceEmbeddingProvider implements SourceEmbeddingProvider {
   }
 
   /**
-   * One forward pass at a time per process, so the thread cap is the CPU cap.
+   * One forward pass at a time per runtime. Probes have a reserved text-only
+   * runtime, so an active answer/index pass cannot hold their query in a queue.
    * A question's pass goes before every waiting document pass: a search never
    * waits behind a whole indexing batch (32 documents of several windows
    * each), only behind the one pass already running. Indexing right after a
    * start once held a ChatGPT question's Private search past its deadline.
    */
   private async withSlot<T>(taskType: SourceEmbeddingTaskType, run: () => Promise<T>): Promise<T> {
+    if (taskType === 'RETRIEVAL_QUERY' && priorityQueryEmbeddingRequested()) {
+      if (this.prioritySlotBusy) await new Promise<void>((resolve) => this.priorityWaiting.push(resolve));
+      else this.prioritySlotBusy = true;
+      try {
+        return await run();
+      } finally {
+        const next = this.priorityWaiting.shift();
+        if (next) next();
+        else this.prioritySlotBusy = false;
+      }
+    }
     if (this.slotBusy) {
       await new Promise<void>((resolve) => this.waiting[taskType === 'RETRIEVAL_QUERY' ? 'query' : 'document'].push(resolve));
     } else {
@@ -392,6 +449,10 @@ export class BuiltInSourceEmbeddingProvider implements SourceEmbeddingProvider {
     inputs: SourceEmbeddingInput[],
     taskType: SourceEmbeddingTaskType,
   ): Promise<number[][]> {
+    if (taskType === 'RETRIEVAL_QUERY' && priorityQueryEmbeddingRequested()) {
+      if (!this.priorityLoaded) throw new BuiltInEmbeddingNotReadyError(this.status());
+      model = this.priorityLoaded;
+    }
     if (model.kind === 'litert') return this.embedLiteRt(model.embedder, inputs, taskType);
     const windowTokens = this.spec.maxTokens - 2;
     const windows: Window[] = [];
@@ -504,6 +565,7 @@ export class BuiltInSourceEmbeddingProvider implements SourceEmbeddingProvider {
       this.liteRtItems(inputs, taskType),
       taskType,
       new Set(taskType === 'RETRIEVAL_DOCUMENT' ? this.refusedPictures(inputs) : []),
+      new Set(inputs.flatMap((input, index) => input.image ? [index] : [])),
     );
     if (failed.length > 0) throw new SourceEmbeddingInputsFailedError(failed, 'image_unreadable');
     return vectors as number[][];
@@ -521,6 +583,7 @@ export class BuiltInSourceEmbeddingProvider implements SourceEmbeddingProvider {
     prompts: readonly LiteRtEmbedItem[],
     taskType: SourceEmbeddingTaskType,
     refused: ReadonlySet<number>,
+    localOnly: ReadonlySet<number> = new Set(),
   ): Promise<{ vectors: Array<number[] | undefined>; failed: number[] }> {
     const out: Array<number[] | undefined> = [];
     const pictures = prompts.flatMap((prompt, index) => (typeof prompt !== 'string' && !refused.has(index) ? [index] : []));
@@ -534,7 +597,15 @@ export class BuiltInSourceEmbeddingProvider implements SourceEmbeddingProvider {
       const batchPictures = batch.flatMap((prompt, row) => (typeof prompt !== 'string' ? [offset + row] : []));
       let vectors: Float32Array[];
       try {
-        vectors = await this.withSlot(taskType, () => embedder.embed(batch));
+        // Keep the remote wait off both local slots. Even an ordinary query
+        // can run while a document request is waiting on the other machine.
+        let remoteVectors: Float32Array[] | undefined;
+        if (this.remote && taskType === 'RETRIEVAL_DOCUMENT'
+          && batch.every((prompt) => typeof prompt === 'string')
+          && !prompts.slice(offset, offset + LITERT_BATCH).some((prompt, row) => typeof prompt !== 'string' || localOnly.has(offset + row))) {
+          try { remoteVectors = await this.remote.embed(batch); } catch { /* Same local batch on any remote failure. */ }
+        }
+        vectors = remoteVectors ?? await this.withSlot(taskType, () => embedder.embed(batch));
         if (batchPictures.length > 0) this.pictureFaults = undefined;
       } catch (error) {
         if (error instanceof LiteRtPictureEngineFaultError) {

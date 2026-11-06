@@ -140,7 +140,7 @@ describe('a new connection records who hosts its agent', () => {
 });
 
 describe('existing connections migrate', () => {
-  test('from their pin, else their name, else other; the version moves to 3', () => {
+  test('from their pin, else their name, else other; the version moves to 4', () => {
     const path = freshDbPath();
     legacyV2Database(path, [...LEGACY_ROWS]);
     const store = openRemoteConnectionStore(path);
@@ -152,7 +152,7 @@ describe('existing connections migrate', () => {
     // Written to the file, not only derived on read.
     expect(providersById(path)).toEqual(LEGACY_EXPECTED);
     const db = new Database(path);
-    expect(readSqliteSchemaVersion(db, STORE_ID)).toBe(3);
+    expect(readSqliteSchemaVersion(db, STORE_ID)).toBe(4);
     db.close();
   });
 
@@ -180,7 +180,7 @@ describe('existing connections migrate', () => {
     again.close();
     expect(providersById(path)).toEqual({ ...before, b00000000000000001: 'xai' });
     const db = new Database(path);
-    expect(readSqliteSchemaVersion(db, STORE_ID)).toBe(3);
+    expect(readSqliteSchemaVersion(db, STORE_ID)).toBe(4);
     db.close();
   });
 
@@ -232,7 +232,7 @@ describe('existing connections migrate', () => {
     }
     expect(providersById(path)).toEqual(LEGACY_EXPECTED);
     const db = new Database(path);
-    expect(readSqliteSchemaVersion(db, STORE_ID)).toBe(3);
+    expect(readSqliteSchemaVersion(db, STORE_ID)).toBe(4);
     db.close();
   }, 30_000);
 });

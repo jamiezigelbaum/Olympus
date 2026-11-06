@@ -13,10 +13,13 @@
 // The caller decides what a refusal means; the classifiers treat it as
 // "hold everything pending", never as "no policy".
 
-import { readFileSync, statSync, lstatSync, type Stats } from 'node:fs';
+import { chmodSync, linkSync, readFileSync, statSync, lstatSync, type Stats } from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
-import { LEGACY_LINUX_POLICY_FILES, resolveLinuxEngineLayout, readLinuxEngineReceipt } from './linux-engine-layout.ts';
+import { dirname, join } from 'node:path';
+import { assertLinuxManagedPath, LEGACY_LINUX_POLICY_FILES, resolveLinuxEngineLayout, readLinuxEngineReceipt } from './linux-engine-layout.ts';
+import { ensurePrivateRootDirectorySync, removeFileDurablySync, syncDirectorySync, writePrivateFileAtomicSync } from './atomic-file.ts';
+import { withFileLeaseSync } from './file-lease.ts';
 
 /** Only receipt-owned or explicitly standalone processes use the install layout.
  * Unreceipted CLI and OpenClaw policies keep their existing roots; sovereignty
@@ -26,10 +29,54 @@ export function linuxOwnerConfigPath(name: string, env: Record<string, string | 
   const layout = resolveLinuxEngineLayout(env);
   const owned = !!readLinuxEngineReceipt(layout.receiptPath) || env.OLYMPUS_ENGINE_HOST === '1' || env.OLYMPUS_STANDALONE === '1';
   if (!owned && name !== 'sovereignty.json') return join(layout.home, '.olympus', name);
+  if (!owned) migrateHostedSovereignty(join(layout.home, '.olympus', name), join(layout.configDir, name));
   if ((owned ? [name, ...LEGACY_LINUX_POLICY_FILES] : [name]).some(file => lstatSync(join(layout.home, '.olympus', file), { throwIfNoEntry: false }))) {
     throw new Error('Legacy Olympus settings still need migration. Complete the Linux engine upgrade, or back up and migrate an unreceipted installation, before using its settings; existing privacy protections were not ignored.');
   }
   return join(layout.configDir, name);
+}
+
+/** Pre-receipt OpenClaw installs already use XDG for sovereignty. Preserve the
+ * exact bytes, including owner edits, before retiring the older pathname.
+ * Both writers' leases are held; exclusive publication never replaces a target. */
+function migrateHostedSovereignty(legacy: string, target: string): void {
+  if (!lstatSync(legacy, { throwIfNoEntry: false })) return;
+  const backup = `${legacy}.pre-xdg-migration.bak`;
+  for (const path of [legacy, target, backup]) assertLinuxManagedPath(path);
+  ensurePrivateRootDirectorySync(dirname(target));
+  withFileLeaseSync(legacy, () => withFileLeaseSync(target, lease => {
+    if (!lstatSync(legacy, { throwIfNoEntry: false })) return;
+    for (const path of [legacy, target, backup]) assertLinuxManagedPath(path);
+    const original = readOwnerConfigFile(legacy);
+    if (original.status !== 'ok') throw new Error('Olympus could not safely move your old privacy settings. Your existing settings were kept. Ask the person who installed Olympus to check the file permissions.');
+    for (const path of [target, backup]) {
+      if (lstatSync(path, { throwIfNoEntry: false }) && readFileSync(path, 'utf8') !== original.text) {
+        throw new Error(`Olympus found different privacy settings at ${path}. Both copies were kept. Ask the person who installed Olympus to choose which settings to keep before restarting.`);
+      }
+    }
+    lease.commit(() => {
+      publishOwnerCopy(backup, original.text);
+      publishOwnerCopy(target, original.text);
+      const current = readOwnerConfigFile(legacy);
+      if (current.status !== 'ok' || current.stamp !== original.stamp) throw new Error('Your old privacy settings changed during migration. Both copies were kept. Restart Olympus to try again.');
+      removeFileDurablySync(legacy);
+    });
+  }));
+}
+
+function publishOwnerCopy(path: string, text: string): void {
+  if (lstatSync(path, { throwIfNoEntry: false })) {
+    assertLinuxManagedPath(path);
+    if (readFileSync(path, 'utf8') !== text) throw new Error(`Olympus found different privacy settings at ${path}. Both copies were kept. Ask the person who installed Olympus to choose which settings to keep before restarting.`);
+    chmodSync(path, 0o600);
+    return;
+  }
+  const temp = `${path}.${randomUUID()}.tmp`;
+  try {
+    writePrivateFileAtomicSync(temp, text);
+    linkSync(temp, path); // atomic, exclusive publish, including across XDG mounts
+    syncDirectorySync(dirname(path));
+  } finally { removeFileDurablySync(temp); }
 }
 /** Owner policy files share the installed Linux layout; Mac keeps its historical root. */
 export function defaultOwnerConfigPath(name: string, env: Record<string, string | undefined> = process.env): string {

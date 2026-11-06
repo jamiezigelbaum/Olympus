@@ -9,12 +9,13 @@
 //   question (names or a short excerpt) for the background pass and answers
 //   `undecided`, which leaves the item pending (held Private).
 // - The background pass (sniffer-resolver.ts) asks the privacy-safe model in
-//   batches, caches the verdicts and applies them to the tier ledger.
+//   one item per call, caches the verdicts and applies them to the tier ledger.
 //
 // Rules, each pinned by test/tier-sniffer.test.ts:
 // - The model answers Personal or Private, never Public. Anything else is no
 //   verdict.
-// - Personal is accepted only at confidence >= 0.9. Topic alone never
+// - Full-mode Personal is accepted only at confidence >= 0.9; decision mode
+//   uses the normalized tier-token mass at 0.5. Topic alone never
 //   decides sensitivity; the owner policy and own-record status do.
 // - The judgment is ONE generic question (prompt p3, owner ruling
 //   2026-10-01): is the item a person's OWN private information (records,
@@ -38,7 +39,7 @@ import {
 } from './sniffer-store.ts';
 import { hasCredentialUrl, PARENT_CONTEXT_MARKER, splitParentContext, type TierSniffer, type TierSnifferRequest, type TierSnifferVerdict } from './tier-classifier.ts';
 
-/** The sniffer may resolve a flagged item to Personal only at or above this confidence. */
+/** Full-mode Personal threshold; native decision verdicts use normalized token mass. */
 export const SNIFFER_PERSONAL_MIN_CONFIDENCE = 0.9;
 /**
  * Every question is asked ONE ITEM PER CALL. A name or excerpt from any
@@ -82,6 +83,10 @@ export type SnifferLaneKind = 'local' | 'venice';
 
 export interface SnifferLaneIdentity {
   kind: SnifferLaneKind;
+  /** Effective native mode, set by the content-free capability probe. */
+  snifferMode?: 'pending' | 'decision' | 'full';
+  /** False after a transient auto probe failure: bulk re-judging must wait. */
+  rejudgeReady?: boolean;
   /** Stable owner-approval identity. */
   modelId: string;
   /** Actual weights/revision identity; never used to look up owner consent. */
@@ -96,6 +101,7 @@ export function snifferTierKey(
     & Partial<Pick<SnifferVerdict, 'ownRecord' | 'privateKind'>>,
 ): 'private' | 'secure' {
   if (verdict.failSafe || verdict.tier === 'private' || recordRequiresPrivate(verdict)) return 'secure';
+  if (verdict.category === SNIFFER_DECISION_CATEGORY) return 'private';
   return verdict.confidence >= SNIFFER_PERSONAL_MIN_CONFIDENCE ? 'private' : 'secure';
 }
 
@@ -130,7 +136,7 @@ export const SNIFFER_RECORD_HELD_CODE_PREFIX = 'record_held:';
 
 /** Whether the lane's model is a small built-in one, by the pinned weights it names. */
 function snifferLaneIsSmall(lane: SnifferLaneIdentity): boolean {
-  const id = snifferCacheModelId(lane);
+  const id = lane.cacheModelId ?? lane.modelId;
   return BUILT_IN_REASONING_MODELS.some((model) => model.sizeClass === 'small' && (id === model.modelId || id.startsWith(`${model.modelId}:`)));
 }
 
@@ -145,12 +151,18 @@ function recordRequiresPrivate(verdict: Partial<Pick<SnifferVerdict, 'ownRecord'
  */
 export function snifferReasonCode(verdict: Pick<StoredSnifferVerdict, 'category' | 'confidence' | 'failSafe'>): string {
   if (verdict.failSafe) return verdict.category === SNIFFER_INJECTION_CATEGORY ? 'injection:classifier_instruction:0.00' : 'unresolved:0.00';
+  if (verdict.category === SNIFFER_DECISION_CATEGORY) return `decision:${verdict.confidence.toFixed(2)}`;
   const category = (SNIFFER_CATEGORIES as readonly string[]).includes(verdict.category) ? verdict.category : 'other';
   return `${category}:${verdict.confidence.toFixed(2)}`;
 }
 
 /** The stored category of the fail-safe verdict given to injection-shaped material. */
 export const SNIFFER_INJECTION_CATEGORY = 'injection';
+/** Reserved for the native adapter, never accepted from full-mode JSON. */
+export const SNIFFER_DECISION_CATEGORY = 'decision';
+/** Single semantic identity of native mode, its bar, coverage floor and decoder.
+ * Bump for any change to those semantics; cache and re-judge ids derive from it. */
+export const SNIFFER_DECISION_VERSION = 'decision-v2';
 
 /**
  * A cached verdict that still answers its question. The injection screen
@@ -251,7 +263,9 @@ export function snifferMaterialLooksLikeInjection(material: string): boolean {
 }
 
 export function snifferCacheModelId(lane: SnifferLaneIdentity): string {
-  return lane.cacheModelId ?? lane.modelId;
+  const weights = lane.cacheModelId ?? lane.modelId;
+  if (lane.snifferMode === 'pending') return `${weights}:pending`;
+  return lane.snifferMode === 'decision' ? `${weights}:${SNIFFER_DECISION_VERSION}` : weights;
 }
 
 export function snifferId(lane: SnifferLaneIdentity, promptVersion = SNIFFER_PROMPT_VERSION): string {
@@ -279,6 +293,7 @@ export const SNIFFER_SYSTEM_PROMPT = [
   'because it names the owner or concerns money or identity. Read what it actually contains.',
   'privateKind is the kind of private information this item actually contains UNDER THE OWNER POLICY,',
   'or none when it is not covered or the owner says it is fine to share. Topic alone is insufficient.',
+  'With an owner description, privateKind is only ever a kind that description calls private; any other kind, even health or family, is none, whoever the item is about.',
   'An owner clause naming a kind of record covers every record of that kind, however small, routine or work-related:',
   'such a record has that privateKind, never none.',
   'An ownRecord with a non-none privateKind is Private. Private conversations can be Private',
@@ -330,8 +345,10 @@ export interface SnifferBatchItem {
 }
 
 export function buildSnifferBatchPrompt(pass: SnifferPass, items: readonly SnifferBatchItem[], ownerContext?: string): string {
+  // "its" (2026-10-30) versions the prompt: names a pass read with a chat's numeric
+  // id beside them (snifferFolderKeyNames) are asked again without it.
   const intro = pass === 'metadata'
-    ? 'Each item below is the NAMES of one file, message or note: title, folder path, labels and sender.'
+    ? 'Each item below is the NAMES of one file, message or note: its title, folder path, labels and sender.'
     : 'Each item below is one document or message: its NAMES (title, folder path, sender) when known, then a short EXCERPT of its text.';
   // One JSON object per line: the material is a JSON string, so nothing inside
   // it can close the item or start a new one.
@@ -528,7 +545,8 @@ export function snifferMaterialForModel(material: string): string {
  * pending, held Private): the sniffer can make an item wait, never less private.
  */
 export class CachedTierSniffer implements TierSniffer {
-  readonly id: string;
+  get id(): string { return snifferId(this.lane, this.promptVersion); }
+  get rejudgeReady(): boolean { return this.lane.snifferMode !== 'pending' && this.lane.rejudgeReady !== false; }
   private readonly store: TierSnifferStore;
   private readonly lane: SnifferLaneIdentity;
   private readonly promptVersion: string;
@@ -537,7 +555,6 @@ export class CachedTierSniffer implements TierSniffer {
     this.store = store;
     this.lane = lane;
     this.promptVersion = promptVersion;
-    this.id = snifferId(lane, promptVersion);
   }
 
   judge(request: TierSnifferRequest): TierSnifferVerdict {
@@ -558,7 +575,7 @@ export class CachedTierSniffer implements TierSniffer {
     }
     const mapRevision = request.mapRevision ?? 'none';
     try {
-      const cached = this.store.getVerdict({
+      const cached = this.lane.snifferMode === 'pending' ? undefined : this.store.getVerdict({
         materialHash: request.materialHash ?? snifferMaterialHash(request.pass, material),
         modelId: snifferCacheModelId(this.lane),
         promptVersion: this.promptVersion,

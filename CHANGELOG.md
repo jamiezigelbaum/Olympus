@@ -1,7 +1,69 @@
 # Changelog
 
+## 1.3.4 - 2026-11-05
+
+- **The dashboard stays available on a busy, large install.** Building status, counting unreadable files and rebuilding a store's hidden copies no longer hold the engine for seconds at a time, so reads keep answering while big sources import (#797, #798, #804, #805, #808, #809, #811, #813, #817, #830, #834, #838, #839, #858, #859, #860). Long requests between Olympus's own parts no longer drop after 10 seconds (#857).
+- **Ingestion keeps moving, and only real failures are called errors.** Retries and repairs show as progress; a file Olympus truly cannot read says why. Files still waiting to be read are not counted as unreadable (#818, #821, #831, #836). Large scanned PDFs get OCR time in proportion to their size (#820). Attachment extraction pauses when Google's request budget runs out instead of failing items, and Gmail's daily budget is now 1,000,000 requests (#810, #835).
+- **Privacy judging keeps up.** Every source's privacy questions take turns, a local model can take several at once, and items filed Private only because their question went missing are judged again (#802, #822, #823, #826, #827, #832, #853).
+- **Connect on WhatsApp and Telegram pairs right on the card.** WhatsApp pairing survives a slow first build, finds Go and a C compiler on its own, and says when Go is missing (#850, #851, #854).
+- A source's Details for support stays open when the page refreshes (#856). A used or expired dashboard link opens the dashboard (#848).
+
+## 1.3.3 - 2026-11-03
+
+- **The dashboard keeps answering while sources import.** A first import of several large sources could hold the engine at full load, so the dashboard said Olympus could not reach your computer until the imports ended (#786).
+- A Mac in server mode can turn server mode off from the dashboard. If no one is signed in to the Mac's desktop, the dashboard says to sign in first, and Olympus keeps running (#785, #788).
+
+## 1.3.2 - 2026-11-03
+
+- **Run Olympus on an always-on Mac.** Choose "Always on, as a server" on the dashboard, or turn on Keep Olympus running when no one is logged in. Your Mac asks for an administrator password once; after that Olympus starts after a restart without anyone logging in (#751). A new help page covers accounts, FileVault, the network and agents for this setup (#753).
+- **Agents on another account or your tailnet.** On the Agents page, choose Agent on another account of this computer or Agent on my tailnet. Each agent gets its own address and key, which you can revoke. Neither opens Olympus to your local network or the internet (#764).
+- **No Terminal after install.** Remote access has a switch on the dashboard (#748). Every failed source card has Copy details, and the Help page has Copy system report, with no names, messages or file paths (#747). Built-in model downloads show their progress (#750), and the Private-answer mode you chose is shown and can be changed on screen (#749). The Mac installer's closing text no longer assumes ChatGPT (#752).
+- Paired WhatsApp and Telegram cards name the linked account and lead with Choose chats; Pair again stays as a secondary button (#762).
+- The dashboard header names this computer and the account Olympus runs as.
+- Linux upgrades from older installs keep working, and anonymous questions held by an interrupted payment are recovered (#734, #735, #740).
+
+## 1.3.1 - 2026-11-03
+
+- **WhatsApp pairing works again.** After the scan, Olympus could not read the chat list when someone was in two of your groups, so pairing failed although your phone showed Olympus as linked (#744). Olympus also now reports WhatsApp's current version, which WhatsApp requires to link a device; with the old one, the phone said "Couldn't link device" (#759).
+- If a WhatsApp pairing fails or you cancel it after scanning, Olympus removes itself from your phone's linked devices and says whether it could (#746).
+- A failed pairing says which step failed and has Copy details, a short report with no names, numbers or chats, to send to support (#745, #747).
+- Evernote's Choose folders loads for accounts with more than 100 notebooks (#743).
+- Privacy follow-up questions are written from your own description (#742).
+
+## 1.3.0 - 2026-10-31
+
+- **Files on this computer reads Desktop, Documents, Downloads and iCloud Drive on a Mac.** The installer brings a signed, notarized Olympus Engine helper, so macOS asks you once to allow each folder (#654).
+- **A new install asks how to answer with Private items.** Local first (recommended) or local only. Until you choose, nothing leaves your computer and no source is read remotely. Without a Venice key, the built-in model answers on your computer (#591).
+- **Guided setup on the dashboard.** Dropbox, Venice, Google (with your own Google app, step by step), Telegram and X each open a short step sheet with Back and Next, and check what you paste before saving.
+- **Pair Telegram and WhatsApp from the dashboard, and choose which chats Olympus reads.** Pairing alone reads nothing. Choosing chats never decides what is private: each message is still judged on its own. Pairing again with a different WhatsApp account asks for its chats again.
+- **Privacy in your own words, on the main page.** What you write is shown in full with Edit, follow-up questions sit beside it, and always-private rules apply as soon as you add them (#618).
+- **Secrets are named.** When only a Secret matches, ChatGPT and other apps say to look on your computer, and the Inbox shows the matching Secret's location (#611, #612, #622).
+- Answers in ChatGPT and other apps name their sources instead of showing bare [E1] (#590).
+- Chat search ranks the message that answers the question ahead of the newest ones (#619).
+- The "Private check still running" notice stays when an answer takes longer (#623). Waiting Private questions record why they retry and stop after a limit (#594).
+- On a Mac, `olympus doctor` checks the runtimes Olympus actually uses (#578, #624).
+- The dashboard sign-in link stays available in Safari (#579).
+- The dashboard shows when another worker owns your data, with a fix (#630). A deliberate engine restart no longer counts as a crash.
+- Anonymous answers are not offered to remote apps while they are off (#617).
+- Disconnected sources' data can still be opened and deleted (#615).
+- Connecting Evernote says to leave only View ticked on Evernote's consent screen (#616).
+
+## 1.2.2 - 2026-10-30
+
+- Olympus supports Ubuntu 24.04 LTS on x86_64. On Ubuntu, restarting or stopping Olympus could be refused because it checked too early that the previous engine had stopped. It now waits for systemd to finish (#642).
+- Run `olympus zkapi check-confinement` to check whether anonymous answers are ready and see any steps needed (#639).
+
+## 1.2.1 - 2026-10-29
+
+- On Linux, an Olympus link opened right after another Olympus window now opens. Before, a second open within ten seconds was refused, so the link did nothing until it was clicked again.
+- When you describe what is private to you, only the kinds you name are Private. A message about a child's check-up stays Personal if you said appointments are fine to share (#625).
+- Telegram keeps syncing when its private Python environment is removed, for example by clearing the cache: Olympus installs it again on its own. If it cannot, the dashboard says Telegram capture could not start, instead of Telegram going quiet.
+
 ## 1.2.0 - 2026-10-28
 
+- **Confirm it's you works from any browser.** The confirmation window shows a code, and you approve when it matches (#631).
+- Olympus sets no limit of its own on how much you use it: no caps on questions or on Inbox answers.
+- On the small built-in model, text that reads like your own records stays Private.
 - **Import your archives.** Each source's card has Import an archive, with a picker for that source's own exports. Drop an export or a whole folder onto the dashboard and Olympus imports a copy of it; your original is never touched. Exports from anywhere else go under Other archives.
 - **One history per account.** A Gmail Takeout export joins your Gmail source, a Telegram Desktop export joins your live Telegram, and a WhatsApp chat export joins the WhatsApp history it overlaps. What both bring is stored once.
 - **Reflect, Roam and Evernote** are sources of their own. Evernote exports come with their attachments.

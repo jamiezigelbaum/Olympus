@@ -454,4 +454,81 @@ describe('settled names copies', () => {
     expect(store.settledUnreadableItems()).toEqual([]);
     expect(store.status().counts.contentElsewhereItems).toBe(1);
   });
+
+  test('a child whose source has no bytes for it is not listed as a file Olympus could not read', async () => {
+    const lane = openLane(workspace());
+    cleanups.unshift(() => lane.close());
+    await listAll(lane, [NEW[1]!]);
+    const identity = identityOf(NEW[1]!.id);
+    const decision = { ...classifyItemTiers({ signals: { title: NEW[1]!.name } }), state: 'current' as const,
+      decidedBy: 'sniffer' as const, snifferId: 'fixture',
+      contentTier: 'secure' as const, contentRead: false, contentPending: false, metadataPending: false,
+      reasons: ['content:sniffer:fixture:fail_safe:missing_question'] };
+    lane.ledger.recordRoutedPlacement(identity, decision, lane.set.placementFor(decision));
+    const store = lane.stores.internal!;
+    expect(store.settledUnreadableItems()).toHaveLength(1);
+    // The export left the media out: the source says there are no bytes.
+    const db = new Database(store.dbPath);
+    db.query("UPDATE items SET deferred_locator = '', bytes_available = 0").run();
+    db.close();
+    expect(store.status().counts.settledUnreadableItems ?? 0).toBe(0);
+    expect(store.settledUnreadableItems()).toEqual([]);
+  });
+
+  test('a file still waiting for its extraction is not counted unreadable until the extraction ends (Sparta, 2026-11-04)', async () => {
+    const lane = openLane(workspace());
+    cleanups.unshift(() => lane.close());
+    await listAll(lane, [NEW[1]!]);
+    const identity = identityOf(NEW[1]!.id);
+    const decision = { ...classifyItemTiers({ signals: { title: NEW[1]!.name } }), state: 'current' as const,
+      decidedBy: 'sniffer' as const, snifferId: 'fixture',
+      contentTier: 'secure' as const, contentRead: false, contentPending: false, metadataPending: false,
+      reasons: ['content:sniffer:fixture:fail_safe:missing_question'] };
+    lane.ledger.recordRoutedPlacement(identity, decision, lane.set.placementFor(decision));
+    const store = lane.stores.internal!;
+    let ended = false;
+    const asked: string[] = [];
+    store.setExtractionEndedProbe((item) => { asked.push(item.providerItemId); return ended; });
+    expect(store.status().counts.settledUnreadableItems ?? 0).toBe(0);
+    expect(store.settledUnreadableItems()).toEqual([]);
+    expect(asked).toContain(identity.providerItemId);
+    ended = true;
+    store.setExtractionEndedProbe((item) => { asked.push(item.providerItemId); return ended; });
+    expect(store.status().counts.settledUnreadableItems).toBe(1);
+    expect(store.settledUnreadableItems().map(item => item.ref.name)).toEqual(['scan-0413.pdf']);
+  });
+});
+
+describe('status with names-only copies that keep their text', () => {
+  test('kept chunks and vectors leave every text count and are reported as kept', async () => {
+    const dir = workspace();
+    await populateLegacy(dir);
+    const lane = openLane(dir);
+    cleanups.unshift(() => lane.close());
+    const store = lane.stores.secure_local!;
+    const before = store.status();
+    expect(before.counts.itemsWithText).toBe(LEGACY.length);
+    expect(before.counts.chunks).toBeGreaterThan(1);
+    const embeddedBefore = before.embeddingByModel.reduce((sum, row) => sum + row.embeddedChunks, 0);
+    expect(embeddedBefore).toBe(before.counts.chunks);
+
+    // One legacy item becomes names-only here while its text lives elsewhere:
+    // its chunks and vectors stay in this store but must not count.
+    const identity = identityOf(LEGACY[0]!.id);
+    const decision = { ...classifyItemTiers({ signals: { title: LEGACY[0]!.name }, text: LEGACY[0]!.body }), state: 'current' as const };
+    lane.ledger.recordRoutedPlacement(identity, decision, {
+      copies: [
+        { corpusId: CORPORA.secure_local!, trustDomain: 'secure_local', layers: 'metadata' },
+        { corpusId: CORPORA.internal!, trustDomain: 'internal', layers: 'content' },
+      ],
+      embedHold: false,
+    });
+    const after = store.status();
+    const kept = after.tier?.namesOnlyKeptChunks ?? 0;
+    expect(kept).toBeGreaterThan(0);
+    expect(after.counts.itemsWithText).toBe(LEGACY.length - 1);
+    expect(after.counts.chunks + kept).toBe(before.counts.chunks);
+    expect(after.counts.embeddedChunks + kept).toBe(before.counts.embeddedChunks);
+    expect(after.embeddingByModel.reduce((sum, row) => sum + row.embeddedChunks, 0)).toBe(after.counts.chunks);
+  });
 });

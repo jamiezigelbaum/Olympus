@@ -95,7 +95,7 @@ export function renderOpenPage(target: OpenTarget): string {
   <meta name="robots" content="noindex">
   <meta name="color-scheme" content="light">
   <meta name="referrer" content="no-referrer">
-  <meta http-equiv="refresh" content="0; url=${link}">
+  ${target.kind === 'private_answers' ? '<script src="/assets/open-private.js" defer></script>' : `<meta http-equiv="refresh" content="0; url=${link}">`}
   <link rel="stylesheet" href="/assets/brand.css?v=1.0.0">
   <link rel="stylesheet" href="/style.css?v=1.0.0">
   <link rel="icon" href="/favicon-32.png" sizes="32x32" type="image/png">

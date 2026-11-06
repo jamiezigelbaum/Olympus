@@ -41,6 +41,7 @@
 // Everything here is source-neutral: a lane declares its legs; nothing
 // branches on which source an item came from.
 
+import { ingestionTurn } from '../control-path-headroom.ts';
 import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import type {
@@ -779,7 +780,7 @@ export class TieredStoreSet {
       const store = this.store(domain, { create: true })!;
       legRuns.push(await this.runLeg(domain, store, traversal, { ...sync, tierRouting: run }, embed));
     }
-    run.finalize();
+    await run.finalize();
     // The only gate for moving on: what the input accepted is read back through the stores, and the set's resume
     // point passes only the pages whose every item is there as accepted.
     run.counts.itemsUnstored += this.unstoredAccepted(traversal.accepted(), (item) => run.plannedKind(item), (item) => run.alreadyOwed(item));
@@ -821,7 +822,7 @@ export class TieredStoreSet {
       if (!store) throw new Error(`No ${entry.trustDomain} leg in this tiered store set.`);
       run.legOptions.set(store.corpusId, entry.sync ?? {});
       legRuns.push(await this.runLeg(entry.trustDomain, store, entry.connector, { ...entry.sync, tierRouting: run }));
-      run.finalize();
+      await run.finalize();
     }
     return tieredRun(legRuns, run.counts, undefined);
   }
@@ -1715,18 +1716,28 @@ class TieredRoutingRun implements ConnectorStoreTierRouting {
     }, run, settle);
   }
 
-  /** Forget the copy rows of routed items this run deleted or found to be Secrets, now that every leg tombstoned them. */
-  finalize(): void {
+  /**
+   * Forget the copy rows of routed items this run deleted or found to be Secrets, now that every leg tombstoned them.
+   * A first listing can leave tens of thousands of items to settle here; each one is a few small writes, so the
+   * worker's requests get a turn between items (Sparta, 2026-11-04: a 25k-item pass held the thread for 34 s).
+   * A cut between items is the same state as a crash here, which the intents already replay.
+   */
+  async finalize(): Promise<void> {
     for (const { item, domains, text } of this.pendingWithdrawals.values()) {
+      await ingestionTurn();
       this.set.withdrawCopies(item, domains);
       for (const domain of text) this.set.store(domain)?.stripCopyContent(item.identity);
     }
     this.pendingWithdrawals.clear();
-    for (const identity of this.copyRemovals.values()) this.set.ledger.removeCopies(identity);
+    for (const identity of this.copyRemovals.values()) {
+      await ingestionTurn();
+      this.set.ledger.removeCopies(identity);
+    }
     this.copyRemovals.clear();
     // The intents go last, once every leg has its write. A `names` write is the version move, done now: later
     // plans of the same item in this run replaced it (one intent per item), so it can never lower a version.
     for (const [key, identity] of this.intents) {
+      await ingestionTurn();
       const intent = this.set.ledger.writeIntent(identity);
       // An edit that empties the body replaces it: the old text goes from every leg while the intent still owes
       // the write, so a cut here is repeated by the record's replay.

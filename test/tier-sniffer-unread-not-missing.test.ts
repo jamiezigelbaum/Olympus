@@ -14,7 +14,6 @@ import { join } from 'node:path';
 import type { AnalystModel, AnalystModelRequest } from '../src/core/analyst.ts';
 import { defaultDropboxIngestionPolicy } from '../src/core/source-ingestion-policy.ts';
 import { loadSovereigntyPreset, isPublicTierRetired } from '../src/core/sovereignty.ts';
-import { STANDALONE_SOVEREIGNTY_PRESET } from '../src/core/engine-service.ts';
 import { appendClassificationLedgerEntry, CLASSIFICATION_LEDGER_OWNER_APPROVAL } from '../src/workers/classification-ledger.ts';
 import { BUILT_IN_SNIFFER_LANE } from '../src/workers/classification/built-in-sniffer.ts';
 import {
@@ -37,7 +36,9 @@ import { createTieredStoreExtractionSink } from '../src/workers/file-extraction/
 const SECURE_CORPUS = 'secure_local.dropbox.files';
 const FILE = { id: 'id:garden', name: 'orchard-plan.pdf', path: '/Notes/orchard-plan.pdf', text: 'Orchard pruning plan for the apple trees this winter.' };
 const identity = { provider: 'dropbox', accountScope: 'personal', providerItemId: FILE.id };
-const FAIL_SAFE = /^content:sniffer:.*:fail_safe:missing_question$/;
+// Unread text is labelled for what it is, not as a lost question (#847).
+const FAIL_SAFE = /^content:sniffer:.*:fail_safe:unread$/;
+const ANY_FAIL_SAFE = /^content:sniffer:.*:fail_safe:(?:missing_question|unread)$/;
 
 let root: string;
 let env: Record<string, string>;
@@ -60,7 +61,7 @@ afterEach(() => {
 
 /** Dropbox connected, names listed, nothing extracted yet. */
 async function connected() {
-  const policy = loadSovereigntyPreset(STANDALONE_SOVEREIGNTY_PRESET);
+  const policy = loadSovereigntyPreset('no-sensitive');
   const installed = configureInstalledTierClassification({
     env,
     lane: { kind: BUILT_IN_SNIFFER_LANE.kind, modelId: BUILT_IN_SNIFFER_LANE.modelId },
@@ -134,7 +135,7 @@ test('unread content waiting for extraction is not a lost question: it stays pen
   expect(await service.runOnce()).toMatchObject({ state: 'model_unavailable' });
   const waiting = f.lane.ledger.getCurrent(identity)!;
   expect(waiting).toMatchObject({ state: 'pending', contentPending: true, contentRead: false });
-  expect(waiting.reasons.some((reason) => FAIL_SAFE.test(reason))).toBe(false);
+  expect(waiting.reasons.some((reason) => ANY_FAIL_SAFE.test(reason))).toBe(false);
 
   // Extraction lands: the text is held Private, not refused, and a question is waiting.
   expect((await f.extract()).accepted).toBe(true);
@@ -177,7 +178,7 @@ test('an item an older build settled fail-safe with its text unread is judged wh
   const landed = f.lane.ledger.getCurrent(identity)!;
   expect(landed).toMatchObject({ contentRead: true, state: 'pending', contentPending: true });
   expect(landed.reasons).toContain('content:held_until_judged');
-  expect(landed.reasons.some((reason) => FAIL_SAFE.test(reason))).toBe(false);
+  expect(landed.reasons.some((reason) => /:fail_safe:(?:missing_question|unread)$/.test(reason))).toBe(false);
 
   await approve();
   await service.runOnce();
@@ -185,13 +186,30 @@ test('an item an older build settled fail-safe with its text unread is judged wh
   expect(f.lane.ledger.getCurrent(identity)).toMatchObject({ state: 'current', contentPending: false, contentRead: true, contentTier: 'private' });
 });
 
-for (const shape of [
-  { what: 'a message (not a file)', set: `family = 'message'` },
-  { what: 'a legacy unrouted row', set: `routed = 0` },
-]) test(`unread content of ${shape.what} has no extraction lane, so it is settled fail-safe Private even with no job`, async () => {
+// A chat's photo, voice note or attachment is a message-family child whose
+// bytes extraction reads later (Sparta, 2026-11-04: 8,630 Telegram media
+// items settled fail-safe while their extraction was still owed).
+test('unread media of a message waiting for extraction stays pending, not settled for a missing question', async () => {
   const f = await connected();
-  // Owed says "no job yet", which for anything extraction does not serve is never going to change.
   const state = { ready: false, extraction: 'active' as 'active' | 'none' | 'settled', prompts: [] as AnalystModelRequest[] };
+  const { service } = serviceFor(f, state);
+  const db = new Database(f.lane.ledger.dbPath);
+  db.query(`UPDATE tier_items SET state = 'pending', metadata_pending = 0, content_pending = 1, content_read = 0, family = 'message',
+    decided_at = ?`).run(new Date(Date.now() - 24 * 3_600_000).toISOString());
+  db.close();
+  await service.runOnce();
+  const waiting = f.lane.ledger.getCurrent(identity)!;
+  expect(waiting).toMatchObject({ state: 'pending', contentPending: true, contentRead: false });
+  expect(waiting.reasons.some((reason) => ANY_FAIL_SAFE.test(reason))).toBe(false);
+});
+
+for (const shape of [
+  { what: 'a message extraction no longer owes', set: `family = 'message'`, extraction: 'settled' as const },
+  { what: 'a legacy unrouted row', set: `routed = 0`, extraction: 'active' as const },
+]) test(`unread content of ${shape.what} is settled fail-safe Private`, async () => {
+  const f = await connected();
+  // A legacy row has no extraction lane, whatever the job store says.
+  const state = { ready: false, extraction: shape.extraction as 'active' | 'none' | 'settled', prompts: [] as AnalystModelRequest[] };
   const { service } = serviceFor(f, state);
   const db = new Database(f.lane.ledger.dbPath);
   db.query(`UPDATE tier_items SET state = 'pending', metadata_pending = 0, content_pending = 1, content_read = 0, ${shape.set},
@@ -217,7 +235,7 @@ for (const { listedAgoMs, waits } of [{ listedAgoMs: 60_000, waits: true }, { li
     const row = f.lane.ledger.getCurrent(identity)!;
     if (waits) {
       expect(row).toMatchObject({ state: 'pending', contentPending: true, contentRead: false });
-      expect(row.reasons.some((reason) => FAIL_SAFE.test(reason))).toBe(false);
+      expect(row.reasons.some((reason) => ANY_FAIL_SAFE.test(reason))).toBe(false);
     } else {
       expect(row).toMatchObject({ state: 'current', contentTier: 'secure', contentRead: false });
       expect(row.reasons.some((reason) => FAIL_SAFE.test(reason))).toBe(true);

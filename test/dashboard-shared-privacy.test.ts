@@ -5,6 +5,7 @@ import {
   PRIVACY_FOLDER_SOURCE_NAMES,
   privacyLogic,
   type PrivacyViewRule,
+  type PrivacyRuleIntent,
 } from '../src/workers/dashboard/shared-privacy-logic.ts';
 
 /**
@@ -111,7 +112,7 @@ describe('replaying a draft onto settings changed elsewhere', () => {
       view({ kind: 'sender', source_id: 'gmail.email', value: 'billing@clinic.example' }),
       view({ kind: 'sender', source_id: 'gmail.email', value: 'new@elsewhere.example' }),
     ];
-    const replayed = L.replay({ rules: draft, description: 'my kids', savedDescription: 'health' }, fresh);
+    const replayed = L.replay({ intents: [{ rule: draft[0]!, present: false }, { rule: draft[2]!, present: true }], description: 'my kids', savedDescription: 'health' }, fresh);
     expect(replayed.description).toBe('my kids');
     expect(replayed.rules.map((rule: PrivacyViewRule) => [rule.display, rule.removed, !!rule.saved])).toEqual([
       ['Legal', true, true],
@@ -121,7 +122,60 @@ describe('replaying a draft onto settings changed elsewhere', () => {
     ]);
     // Measured against what is saved now, the replayed draft still lowers (the label).
     expect(L.lowers(replayed.rules, 'my kids', 'health')).toBe(true);
-    expect(L.replay({ rules: [], description: 'health', savedDescription: 'health' }, []).description).toBeNull();
+    expect(L.replay({ intents: [], description: 'health', savedDescription: 'health' }, []).description).toBeNull();
+  });
+});
+
+describe('durable rule intent', () => {
+  test('random edits and conflicts equal the last owner choice applied to the last server state', () => {
+    const catalog = [
+      { kind: 'folder', source_id: 'dropbox.files', key: '/a', display: 'Folder A' },
+      { kind: 'folder', source_id: 'google_drive.docs', key: '/a', display: 'Folder B' },
+      { kind: 'label', source_id: 'gmail.email', key: 'L1', value: 'Label A' },
+      { kind: 'label', source_id: 'gmail.email', key: 'L2', value: 'Label B' },
+      { kind: 'sender', source_id: 'gmail.email', value: 'a@example.com' },
+      { kind: 'sender', source_id: 'gmail.email', value: 'b@example.com' },
+    ];
+    for (let seed = 1; seed <= 250; seed++) {
+      let rng = seed;
+      const random = (limit: number) => {
+        rng = (Math.imul(rng, 1664525) + 1013904223) >>> 0;
+        return (rng >>> 8) % limit;
+      };
+      const intents: PrivacyRuleIntent[] = [];
+      // Independent oracle uses catalog indexes, not the implementation's identity/replay.
+      const choices = new Map<number, boolean>();
+      let server = new Map<number, Record<string, unknown>>();
+      for (let step = 0; step < 100; step++) {
+        if (random(3) !== 0) {
+          const index = random(catalog.length);
+          const present = random(2) === 1;
+          choices.set(index, present);
+          L.setIntent(intents, view(catalog[index]!), present);
+        } else {
+          // Arbitrary other-editor additions, removals, renamed labels and opaque fields.
+          server = new Map();
+          catalog.forEach((rule, index) => {
+            if (random(2)) server.set(index, { ...rule,
+              ...(rule.kind === 'label' ? { value: `Renamed ${step}` } : {}),
+              version: step,
+            });
+          });
+        }
+        const before = JSON.stringify(intents);
+        const replayed = L.replay({ intents, description: '', savedDescription: '' }, [...server.values()].map((rule) => view(rule)));
+        const persisted = replayed.rules.filter((rule) => !rule.removed).map(L.ruleOut);
+        const expected = new Map(server);
+        for (const [index, present] of choices) {
+          if (!present) expected.delete(index);
+          else if (!expected.has(index)) expected.set(index, catalog[index]!);
+        }
+        const sorted = (rules: Record<string, unknown>[]) => rules.map((rule) => JSON.stringify(rule)).sort();
+        expect(sorted(persisted)).toEqual(sorted([...expected.values()]));
+        expect(L.satisfies(intents, persisted)).toBe(true);
+        expect(JSON.stringify(intents)).toBe(before);
+      }
+    }
   });
 });
 
@@ -139,4 +193,28 @@ describe('one implementation in both pages', () => {
     const source = privacyLogic.toString().split('\n')[0]!.trim();
     expect(chatgptDashboardPageHtml()).toContain(source);
   });
+});
+
+
+describe('draft question sentences on every dashboard host', () => {
+  test('serialized logic folds every answer line into one Private and one Fine to share line, owner text byte for byte', () => {
+    const serialized = new Function('return (' + privacyLogic.toString() + ')')()({ mailSourceId: '', folderSources: {} }) as typeof L;
+    const own = '  My client invoices and poems.  \n';
+    const first = serialized.answerLines(own, { 'client invoices': 'private', 'medical records': 'private' });
+    expect(first).toEqual({ description: own + '\nPrivate: client invoices; medical records.', fits: true });
+    // A changed answer moves its topic; nothing is left on the old side.
+    const second = serialized.answerLines(first.description, { 'client invoices': 'share' });
+    expect(second.description).toBe(own + '\nPrivate: medical records.\nFine to share: client invoices.');
+    expect(serialized.savedAnswers(second.description)).toEqual({ 'medical records': 'private', 'client invoices': 'share' });
+    // Reopened later, the saved lines are the starting point: a flip replaces, never contradicts.
+    const reopened = serialized.answerLines(second.description + '\nMore of my own words.', { 'client invoices': 'private' });
+    expect(reopened.description).toBe(own + '\nPrivate: medical records; client invoices.\nMore of my own words.');
+    // Skipped questions become Private only where no line answers them yet.
+    expect(serialized.answerLines(second.description, {}, { 'client invoices': 'private', diary: 'private' }).description)
+      .toBe(own + '\nPrivate: medical records; diary.\nFine to share: client invoices.');
+    // A topic cannot break the line format.
+    expect(serialized.answerLines('', { 'a; b.\nc': 'private' }).description).toBe('Private: a, b. c.');
+    expect(serialized.answerLines('x'.repeat(2000), { y: 'private' })).toEqual({ description: 'x'.repeat(2000), fits: false });
+  });
+
 });

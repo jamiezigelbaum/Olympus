@@ -5,17 +5,19 @@ import { lstatSync, unlinkSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { linuxGraphicalSessionReadinessAsync } from './linux-desktop-opener.ts';
 import { manageLinuxOwnerBridge, type DesktopBridgeStatus, type LinuxOwnerBridgeOptions } from './linux-owner-bridge.ts';
-import { bindWorkerSocket, validateWorkerSocketDirectory, type WorkerTransportOptions } from './worker-transport.ts';
+import { bindWorkerSocket, validateWorkerSocketDirectory, workerSocketServe, type WorkerTransportOptions } from './worker-transport.ts';
 
 export const OWNER_BRIDGE_HOST_ENV = 'OLYMPUS_OWNER_BRIDGE_HOST_SOCKET';
 
 export function startLinuxOwnerBridgeHost(options: Omit<LinuxOwnerBridgeOptions, 'ready' | 'workerReady'> & {
   desktopReady?: () => Promise<boolean>;
   workerReady: () => Promise<boolean>;
+  /** Synchronous supervisor proof; loss must bypass the debounced endpoint probe. */
+  workerOwned?: () => boolean;
   onChange?: () => void;
 }) {
   let closed = false, probing = false, workerProbing = false, ready = false, workerReady = false;
-  const manager = manageLinuxOwnerBridge({ ...options, platform: 'linux', listenerOwner: 'engine-host', ready: () => !closed && ready, workerReady: () => workerReady });
+  const manager = manageLinuxOwnerBridge({ ...options, platform: 'linux', listenerOwner: 'engine-host', ready: () => !closed && ready, workerReady: () => workerReady && options.workerOwned?.() !== false });
   let workerFailures = 0;
   // Worker availability never delays or coalesces a desktop-presence probe.
   const probeWorker = async () => {
@@ -45,14 +47,14 @@ export function startLinuxOwnerBridgeHost(options: Omit<LinuxOwnerBridgeOptions,
   };
   if (validateWorkerSocketDirectory(options.transport) !== options.socketPath) throw new Error('Owner runtime changed.');
   const controlPath = join(dirname(options.socketPath), `owner-host-${process.pid}-${randomBytes(6).toString('hex')}.sock`);
-  const control = bindWorkerSocket(controlPath, () => Bun.serve({ unix: controlPath, async fetch(request) {
+  const control = bindWorkerSocket(controlPath, () => Bun.serve(workerSocketServe({ unix: controlPath, async fetch(request) {
     if (closed) return new Response(null, { status: 503 });
     const url = new URL(request.url);
     if (url.pathname === '/status' && request.method === 'GET') return Response.json(manager.status());
     if (url.pathname !== '/open' || request.method !== 'POST') return new Response(null, { status: 403 });
     try { return Response.json({ origin: await manager.open(url.searchParams.get('target') ?? '') }); }
     catch { return new Response(null, { status: 503 }); }
-  } }));
+  } })));
   const inode = lstatSync(controlPath);
   const timer = setInterval(() => { void probe(); }, 2_000); timer.unref();
   void probe();

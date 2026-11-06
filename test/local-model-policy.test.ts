@@ -9,7 +9,6 @@ import { OperationError } from '../src/core/operation-error.ts';
 import { assertSnifferProfileAllowed } from '../src/workers/classification/sniffer-lane.ts';
 import { OpenAICompatibleVlmClient } from '../src/workers/file-extraction/extractors/openai-compatible-client.ts';
 import { OpenAICompatibleSourceEmbeddingProvider } from '../src/workers/source-index/embeddings.ts';
-import { STANDALONE_SOVEREIGNTY_PRESET } from '../src/core/engine-service.ts';
 import { loadSovereigntyPreset } from '../src/core/sovereignty.ts';
 import { ANSWER_PROFILE_IDS, answerProfile, applyModelChoice } from '../src/workers/chatgpt/model-choice.ts';
 import {
@@ -145,7 +144,7 @@ describe('cloud tags through the configured lanes', () => {
   });
 
   test('ChatGPT olympus_model_set refuses to route answers to a local profile with a cloud tag', () => {
-    const config = loadSovereigntyPreset(STANDALONE_SOVEREIGNTY_PRESET);
+    const config = loadSovereigntyPreset('no-sensitive');
     const local = answerProfile('local');
     config.modelProfiles[ANSWER_PROFILE_IDS.local] = { ...local, model: 'gpt-oss:120b-cloud' };
     let error: unknown;
@@ -158,7 +157,7 @@ describe('cloud tags through the configured lanes', () => {
     expect((error as OperationError).code).toBe('config_error');
     expect((error as Error).message).toContain('cannot serve as a local model');
 
-    const clean = loadSovereigntyPreset(STANDALONE_SOVEREIGNTY_PRESET);
+    const clean = loadSovereigntyPreset('no-sensitive');
     clean.modelProfiles[ANSWER_PROFILE_IDS.local] = local;
     expect(applyModelChoice(clean, { answers: 'local' }, { venice: false, local: true }).changed).toBe(true);
   });

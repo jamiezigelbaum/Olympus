@@ -26,6 +26,7 @@ import {
 } from '../src/core/source-index/router.ts';
 import {
   buildSourceSensitivity,
+  SOURCE_FAMILIES,
   type SourceFamily,
   type SourceTrustDomain,
   type SourceTrustTier,
@@ -2142,6 +2143,8 @@ describe('LocalConnectorStore sync', () => {
     insert.run('connector-sync-aaa-latest', CORPUS_ID, 'fake', startedAt);
     db.close();
     expect(store.status().lastSyncRun?.syncRunId).toBe('connector-sync-aaa-latest');
+    // The cheap accessor schedulers use answers exactly what status reports.
+    expect(store.lastSyncRun()).toEqual(store.status().lastSyncRun);
     store.close();
   });
 
@@ -2158,6 +2161,7 @@ describe('LocalConnectorStore sync', () => {
     insert.run('connector-sync-move', CORPUS_ID, TIER_MOVE_CONNECTOR_ID, 1, 1, '2026-10-29T10:45:33.000Z', '2026-10-29T10:45:33.000Z');
     db.close();
     expect(store.status().lastSyncRun).toMatchObject({ syncRunId: 'connector-sync-source', itemsSeen: 4 });
+    expect(store.lastSyncRun()).toEqual(store.status().lastSyncRun);
     expect(store.status().counts.syncRuns).toBe(1);
     store.close();
   });
@@ -2489,6 +2493,54 @@ describe('createConnectorStoreCorpusAdapter', () => {
   // Regression for the 2026-07-05 "Test 15" miss: a chat message that
   // arrived seconds ago must reach the candidate cut even when many older
   // items outrank it lexically and no embedding exists for it yet.
+  test('chat relevance beats recency, including with trusted local keyword fallback', async () => {
+    const store = new LocalConnectorStore({ dbPath: ':memory:', corpusId: 'internal.fakechat.messages', family: 'chat', trustDomain: 'internal' });
+    const items: RawItem[] = Array.from({ length: 13 }, (_, index) => ({
+      identity: { family: 'chat', provider: 'fakechat', accountScope: ACCOUNT, providerItemId: String(index), localItemId: `${ACCOUNT}:${index}`, sourceVersion: 'v1' },
+      mimeType: 'text/plain', content: { kind: 'text', text: index === 0 ? 'Tiago drinks after at Duque table for 6 at 9' : `unrelated message ${index}` },
+      metadata: Object.freeze({ sentAt: `2026-07-01T10:${String(index).padStart(2, '0')}:00.000Z` }), fetchedAt: '2026-07-01T10:00:00.000Z',
+    }));
+    const connector: SourceConnector = { id: 'fakechat', family: 'chat', async authenticate() {}, async *listItems() { yield { items, done: true }; }, async fetchItem(id) { return items.find((item) => item.identity.localItemId === id)!; }, classificationSignals() { return {}; } };
+    await store.syncFromConnector(connector, { fetchContent: true });
+    const adapter = createConnectorStoreCorpusAdapter({ store, localKeywordFallback: true });
+    const corpus = defineConnectorCorpus({ corpusId: store.corpusId, family: 'chat', trustDomain: 'internal' });
+    for (const query of ['Tiago drinks after', 'Use Olympus to find what Tiago said about drinks after work']) {
+      const response = await adapter({ query, maxResults: 4, corpus, context: { allowedTrustDomains: ['internal'] } });
+      expect(response.hits[0]?.sourceItem.providerItemId).toBe('0');
+      expect(response.hits[0]!.score ?? 0).toBeGreaterThan(response.hits[1]!.score ?? 0);
+    }
+    const single = await adapter({ query: 'Tiago drinks after', maxResults: 1, corpus, context: { allowedTrustDomains: ['internal'] } });
+    expect(single.hits[0]?.sourceItem.providerItemId).toBe('0');
+    store.close();
+  });
+
+  test.each([...SOURCE_FAMILIES])('strict remote %s search finds two distinctive terms despite unmatched words', async (family) => {
+    const store = new LocalConnectorStore({ dbPath: ':memory:', corpusId: `internal.fake.${family}`, family, trustDomain: 'internal' });
+    const items: RawItem[] = Array.from({ length: 13 }, (_, index) => ({
+      identity: { family, provider: 'fakechat', accountScope: ACCOUNT, providerItemId: String(index), localItemId: `${ACCOUNT}:${index}`, sourceVersion: 'v1' },
+      mimeType: 'text/plain', content: { kind: 'text', text: index === 0 ? 'Tiago drinks after at Duque table for 6 at 9' : `unrelated message ${index}` },
+      metadata: Object.freeze({ sentAt: `2026-07-01T10:${String(index).padStart(2, '0')}:00.000Z` }), fetchedAt: '2026-07-01T10:00:00.000Z',
+    }));
+    const connector: SourceConnector = { id: 'fakechat', family, async authenticate() {}, async *listItems() { yield { items, done: true }; }, async fetchItem(id) { return items.find((item) => item.identity.localItemId === id)!; }, classificationSignals() { return {}; } };
+    await store.syncFromConnector(connector, { fetchContent: true });
+    const adapter = createConnectorStoreCorpusAdapter({ store });
+    const corpus = defineConnectorCorpus({ corpusId: store.corpusId, family, trustDomain: 'internal' });
+    for (const query of ['Tiago drinks work', 'Use Olympus to find what Tiago said about drinks after work']) {
+      const response = await adapter({ query, maxResults: 1, corpus, context: { allowedTrustDomains: ['internal'] } });
+      expect(response.hits[0]?.sourceItem.providerItemId).toBe('0');
+      expect(response.matchCount?.matchedItems).toBe(1);
+    }
+    // Two common concepts do not clear the strict floor in any family.
+    const noise = await adapter({ query: 'unrelated message missing absent', maxResults: 1, corpus, context: { allowedTrustDomains: ['internal'] } });
+    expect(noise.matchCount?.matchedItems).toBe(0);
+    items[1] = { ...items[1]!, identity: { ...items[1]!.identity, sourceVersion: 'v2' }, content: { kind: 'text', text: 'Tiago drinks Duque party' } };
+    await store.syncFromConnector(connector, { fetchContent: true });
+    const ranked = await adapter({ query: 'Tiago drinks Duque party', maxResults: 4, corpus, context: { allowedTrustDomains: ['internal'] } });
+    expect(ranked.hits[0]?.sourceItem.providerItemId).toBe('1');
+    expect(ranked.hits.some((hit) => hit.sourceItem.providerItemId === '0')).toBe(true);
+    store.close();
+  });
+
   test('chat stores fuse a recency lane so the newest message always competes', async () => {
     const store = new LocalConnectorStore({
       dbPath: ':memory:',

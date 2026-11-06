@@ -60,9 +60,18 @@ function page(body: string, status = 200): Response {
   } });
 }
 /** Constant response: no bootstrap, cookie, ticket or origin-storage proof. */
-function restarting(): Response {
-  const response = page(`${openingView().replace('Opening your dashboard…', 'Olympus is restarting…')}<script>setTimeout(()=>location.reload(),1000)</script>`, 503);
+const WORKER_CONFLICT_HEADER = 'X-Olympus-Worker-Conflict';
+const restartWords = (conflict?: string | null): string => conflict === 'retained_socket'
+  ? 'A stopped Olympus worker left its socket behind. Run olympus worker uninstall, then olympus engine restart to safely clear the retained socket.'
+  : conflict === 'data' || conflict === 'endpoint'
+  ? `Olympus cannot start because another process owns its ${conflict}. Run olympus worker uninstall to remove an older worker service; otherwise stop the competing process. Retrying automatically.`
+  : 'Olympus is restarting…';
+/** A closed status code, never arbitrary response copy, crosses into the waiting scripts. */
+const restartWordsScript = (response: string): string => `(${restartWords.toString()})(${response}.headers.get(${JSON.stringify(WORKER_CONFLICT_HEADER)}))`;
+function restarting(conflict?: 'data' | 'endpoint' | 'retained_socket'): Response {
+  const response = page(`${openingView().replace('Opening your dashboard…', restartWords(conflict))}<script>setTimeout(()=>location.reload(),1000)</script>`, 503);
   response.headers.set('Retry-After', '1');
+  if (conflict) response.headers.set(WORKER_CONFLICT_HEADER, conflict);
   return response;
 }
 function refusal(status = 403): Response {
@@ -227,14 +236,14 @@ function approve(request,proof){return new Promise(function(done){
 (async function(){
  const ticket=location.hash.slice(1);history.replaceState(null,'',location.pathname);
  if(!ticket){document.getElementById('message').textContent='Open Olympus from the desktop command, or confirm from the requesting page.';return;}
- try{let r;do{r=await fetch('/owner-proof',{method:'POST',redirect:'error',headers:{'Content-Type':'application/json'},body:JSON.stringify({ticket})});if(r.status===503&&r.headers.has('Retry-After')){document.getElementById('message').textContent='Olympus is restarting…';await new Promise(resolve=>setTimeout(resolve,1000));}else break;}while(true);
+ try{let r;do{r=await fetch('/owner-proof',{method:'POST',redirect:'error',headers:{'Content-Type':'application/json'},body:JSON.stringify({ticket})});if(r.status===503&&r.headers.has('Retry-After')){document.getElementById('message').textContent=${restartWordsScript('r')};await new Promise(resolve=>setTimeout(resolve,1000));}else break;}while(true);
  if(!r.ok)throw new Error();const result=await r.json();localStorage.setItem(${JSON.stringify(STORAGE)},result.proof);
  if(result.approval)await approve(result.approval,result.proof);
  // Render the requested document in this window. The proof stays at this
  // origin. The bridge header policy and worker meta policy constrain this view;
  // header-only worker CSP directives cannot be carried through document.write.
  // The ticket is spent now, so a worker restart here must wait, not fail.
- let documentResponse;do{documentResponse=await fetch(result.target,{redirect:'error',headers:{${JSON.stringify(PROOF_HEADER)}:result.proof}});if(documentResponse.status===503&&documentResponse.headers.has('Retry-After')){document.getElementById('message').textContent='Olympus is restarting…';await new Promise(resolve=>setTimeout(resolve,1000));}else break;}while(true);
+ let documentResponse;do{documentResponse=await fetch(result.target,{redirect:'error',headers:{${JSON.stringify(PROOF_HEADER)}:result.proof}});if(documentResponse.status===503&&documentResponse.headers.has('Retry-After')){document.getElementById('message').textContent=${restartWordsScript('documentResponse')};await new Promise(resolve=>setTimeout(resolve,1000));}else break;}while(true);
  const destination=documentResponse.headers.get('X-Olympus-Owner-Location');
  if(destination){location.replace(destination);return;} // ordinary navigation, without a proof header
  if(!documentResponse.ok||!documentResponse.headers.get('Content-Type')?.includes('text/html'))throw new Error();
@@ -254,6 +263,8 @@ export interface LinuxOwnerBridgeOptions {
   ready: () => boolean;
   /** Host keeps the listener and epoch while its worker is unavailable. */
   workerReady?: () => boolean;
+  /** Set by the engine host only, from its own supervised worker diagnosis. */
+  workerConflict?: () => 'data' | 'endpoint' | 'retained_socket' | undefined;
   fetchSocket: (request: Request) => Promise<Response>;
   openFile?: (path: string) => Promise<void>;
   /** Called under an exclusive private-ticket claim. Null is a final refusal;
@@ -277,7 +288,7 @@ export class LinuxOwnerBridge {
   private tickets = new Map<'control' | 'browser', Ticket>();
   private sessions: Session[] = [];
   private claim: { secret: string; record: Claim } | undefined;
-  private lastOpen = { control: -Infinity, browser: -Infinity };
+  private lastBrowserOpen = -Infinity;
   private browserOpens: number[] = [];
   private closed = false;
   private readonly now: () => number;
@@ -301,24 +312,24 @@ export class LinuxOwnerBridge {
   }
   async openTicket(target: string, lane: 'control' | 'browser' = 'control'): Promise<void> {
     if (!safeTarget(target) || !this.live()) throw new Error('Desktop owner confirmation is unavailable.');
-    const openedAt = this.now(), previousOpen = this.lastOpen[lane];
+    // The owner's own opens (the launcher, an olympus:// link, olympus dashboard) come over the owner socket and are never
+    // refused: a link pressed just after the launcher used to do nothing at all. A newer ticket replaces the pending one.
+    if (lane === 'control') return this.launchTicket(target, lane);
+    // The unauthenticated Confirm button is bounded, so another account cannot flood the owner's screen with windows.
     // The hourly cap is checked first: when both limits apply, it decides the real wait.
-    if (lane === 'browser') {
-      this.browserOpens = this.browserOpens.filter(time => time > openedAt - 60 * 60 * 1000);
-      if (this.browserOpens.length >= 6) throw new OwnerOpenLimited('Wait before opening another owner ticket.', true);
-    }
-    if (openedAt - this.lastOpen[lane] < 10_000) throw new OwnerOpenLimited('Wait ten seconds before opening another owner ticket.', false);
-    if (lane === 'browser') this.browserOpens.push(openedAt);
-    this.lastOpen[lane] = openedAt;
+    const openedAt = this.now(), previousOpen = this.lastBrowserOpen;
+    this.browserOpens = this.browserOpens.filter(time => time > openedAt - 60 * 60 * 1000);
+    if (this.browserOpens.length >= 6) throw new OwnerOpenLimited('Wait before opening another owner ticket.', true);
+    if (openedAt - this.lastBrowserOpen < 10_000) throw new OwnerOpenLimited('Wait ten seconds before opening another owner ticket.', false);
+    this.browserOpens.push(openedAt);
+    this.lastBrowserOpen = openedAt;
     try {
       await this.launchTicket(target, lane);
     } catch (error) {
       // No window opened, so the attempt counts toward neither limiter.
-      if (this.lastOpen[lane] === openedAt) this.lastOpen[lane] = previousOpen;
-      if (lane === 'browser') {
-        const index = this.browserOpens.lastIndexOf(openedAt);
-        if (index >= 0) this.browserOpens.splice(index, 1);
-      }
+      if (this.lastBrowserOpen === openedAt) this.lastBrowserOpen = previousOpen;
+      const index = this.browserOpens.lastIndexOf(openedAt);
+      if (index >= 0) this.browserOpens.splice(index, 1);
       throw error;
     }
   }
@@ -334,7 +345,7 @@ export class LinuxOwnerBridge {
     const html = `<!doctype html><meta charset="utf-8"><meta name="referrer" content="no-referrer"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src ${this.origin}; worker-src 'none'; base-uri 'none'"><title>Olympus</title>${openingView()}<script>
 (async function(){
  const message=document.getElementById('message');
- try{let r;do{r=await fetch(${JSON.stringify(this.origin + '/owner-proof?challenge=' + challenge)},{mode:'cors',credentials:'omit',redirect:'error',cache:'no-store'});if(r.status===503&&r.headers.get('Retry-After')){message.textContent='Olympus is restarting…';await new Promise(resolve=>setTimeout(resolve,1000));}else break;}while(true);
+ try{let r;do{r=await fetch(${JSON.stringify(this.origin + '/owner-proof?challenge=' + challenge)},{mode:'cors',credentials:'omit',redirect:'error',cache:'no-store'});if(r.status===503&&r.headers.get('Retry-After')){message.textContent=${restartWordsScript('r')};await new Promise(resolve=>setTimeout(resolve,1000));}else break;}while(true);
  if(!r.ok||await r.text()!==${JSON.stringify(answer)}){message.textContent='Olympus refused: the private ticket expired or this listener could not prove its identity. The private ticket was not sent. Run olympus dashboard again.';return;}
  location.replace(${JSON.stringify(url)});
  }catch{message.textContent=${JSON.stringify('This browser cannot reach the private *.localhost session origin. The private ticket was not sent. ' + DESKTOP_BRIDGE_REMEDY)};}
@@ -401,25 +412,27 @@ export class LinuxOwnerBridge {
       // ticket, or accept a challenge supplied alongside a caller's ticket.
       const challenge = url.searchParams.get('challenge');
       const ticket = [...this.tickets.values()].find(t => t.expires > this.now() && equal(challenge, t.challenge));
-      const response = !ticket ? refusal() : this.options.workerReady?.() === false ? restarting()
+      const response = !ticket ? refusal() : this.options.workerReady?.() === false ? restarting(this.options.workerConflict?.())
         : new Response(createHmac('sha256', ticket.value).update(ticket.challenge).digest('base64url'), { headers: { 'Cache-Control': 'no-store' } });
       response.headers.set('Access-Control-Allow-Origin', '*');
-      response.headers.set('Access-Control-Expose-Headers', 'Retry-After');
+      response.headers.set('Access-Control-Expose-Headers', `Retry-After, ${WORKER_CONFLICT_HEADER}`);
       return response;
     }
-    if (this.options.workerReady?.() === false) return restarting();
+    if (this.options.workerReady?.() === false) return restarting(this.options.workerConflict?.());
     if (url.pathname === '/owner-proof' && request.method === 'POST') {
       let body: { ticket?: string };
       try { body = JSON.parse(await boundedBody(request, 1024)); } catch { return refusal(); }
       const ticket = [...this.tickets.values()].find(t => equal(body.ticket, t.value));
       if (!this.live() || !ticket || ticket.expires <= this.now() || !equal(body.ticket, ticket.value)) return refusal();
-      if (ticket.claimed) return restarting();
+      if (ticket.claimed) return restarting(this.options.workerConflict?.());
       ticket.claimed = true; // exclusive claim before any asynchronous work
       try { unlinkSync(ticket.path); } catch {}
       const current = () => [...this.tickets.values()].includes(ticket) && ticket.expires > this.now();
       let dashboardCookies: readonly string[];
       try {
+        if (this.options.workerReady?.() === false) throw new Error('Worker ownership changed.');
         const result = this.options.establishDashboard ? await this.options.establishDashboard() : [];
+        if (this.options.workerReady?.() === false) throw new Error('Worker ownership changed.');
         if (result === null) { this.clearTicket(ticket); return refusal(); }
         dashboardCookies = result;
       }
@@ -427,7 +440,7 @@ export class LinuxOwnerBridge {
         // A stale health snapshot may hide a just-restarted worker. Retain
         // only this live, unexpired claim for retry; never restore a replaced
         // ticket, recreate its file, or extend its original expiry.
-        if (this.live() && current()) { ticket.claimed = false; return restarting(); }
+        if (this.live() && current()) { ticket.claimed = false; return restarting(this.options.workerConflict?.()); }
         this.clearTicket(ticket); return refusal(503);
       }
       if (!this.live() || !current()) { this.clearTicket(ticket); return refusal(503); }
@@ -447,16 +460,18 @@ export class LinuxOwnerBridge {
         const declined = refusal(); declined.headers.set(DECLINED_HEADER, '1'); return declined;
       }
       if (claim.state !== 'approved') return new Response(null, { status: 202, headers: { 'Cache-Control': 'no-store' } });
-      if (claim.collecting) return restarting();
+      if (claim.collecting) return restarting(this.options.workerConflict?.());
       claim.collecting = true; // exclusive, like a ticket's claim
       const current = () => this.claim?.record === claim && claim.expires > this.now();
       let dashboardCookies: readonly string[];
       try {
+        if (this.options.workerReady?.() === false) throw new Error('Worker ownership changed.');
         const result = this.options.establishDashboard ? await this.options.establishDashboard() : [];
+        if (this.options.workerReady?.() === false) throw new Error('Worker ownership changed.');
         if (result === null) { if (current()) this.claim = undefined; return refusal(); }
         dashboardCookies = result;
       } catch {
-        if (this.live() && current()) { claim.collecting = false; return restarting(); }
+        if (this.live() && current()) { claim.collecting = false; return restarting(this.options.workerConflict?.()); }
         return refusal(503);
       }
       if (!this.live() || !current()) return refusal(503);
@@ -491,7 +506,7 @@ export class LinuxOwnerBridge {
         const response = page(`<p>${error.hourly ? BROWSER_OPEN_LIMIT_MESSAGE : BROWSER_OPEN_RECENT_MESSAGE}</p>`, 429);
         response.headers.set('X-Olympus-Owner-Refused', '1');
         response.headers.set(OWNER_LIMIT_HEADER, error.hourly ? 'hourly' : 'recent');
-        const retryAt = Math.max(this.lastOpen.browser + 10_000,
+        const retryAt = Math.max(this.lastBrowserOpen + 10_000,
           this.browserOpens.length >= 6 ? this.browserOpens[0]! + 60 * 60 * 1000 : 0);
         response.headers.set('Retry-After', String(Math.max(1, Math.ceil((retryAt - this.now()) / 1000))));
         return response;
@@ -518,6 +533,8 @@ export class LinuxOwnerBridge {
       return refusal();
     }
     if (!this.live()) return refusal(503);
+    // Body parsing and owner proof can await; recheck custody before the hop.
+    if (this.options.workerReady?.() === false) return restarting(this.options.workerConflict?.());
     if (binary && request.body) body = request.body;
     // The worker permits long-running owner operations. Only a proven
     // request may disable the TCP idle timeout; public traffic keeps it.
@@ -536,8 +553,12 @@ export class LinuxOwnerBridge {
       method: request.method, headers, ...(body !== undefined ? { body, duplex: 'half' } : {}), redirect: 'manual',
       // A streamed upload's sender going away ends the hop too, so the worker does not wait on a body nobody sends.
       ...(typeof body === 'object' ? { signal: request.signal } : {}),
-    } as RequestInit)); } catch { return this.live() ? restarting() : refusal(503); }
+    } as RequestInit)); } catch { return this.live() ? restarting(this.options.workerConflict?.()) : refusal(503); }
     if (!this.live()) return refusal(503);
+    if (this.options.workerReady?.() === false) {
+      await response.body?.cancel().catch(() => {});
+      return restarting(this.options.workerConflict?.());
+    }
     const outgoing = new Headers(response.headers);
     outgoing.delete('access-control-allow-origin'); outgoing.delete('access-control-allow-credentials');
     outgoing.set('Cache-Control', 'no-store'); outgoing.set('Cross-Origin-Opener-Policy', 'same-origin');

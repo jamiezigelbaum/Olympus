@@ -31,3 +31,27 @@ describe('Linux app launcher icon', () => {
     expect(icon.readUInt8(25)).toBe(6);
   });
 });
+
+// OpenClaw and ClawHub show assets/icon.png as the plugin's icon and render the
+// packaged README.md as its plugin page.
+describe('OpenClaw plugin page', () => {
+  const root = join(import.meta.dir, '..');
+
+  test('the plugin icon is the crowned app icon, within ClawHub\'s 512 KiB limit', () => {
+    const icon = readFileSync(ICON_PATH);
+    expect(icon.equals(readFileSync(join(root, 'assets', 'app-icon.png')))).toBe(true);
+    expect(icon.length).toBeLessThanOrEqual(512 * 1024);
+  });
+
+  test('the README renders without raw HTML, relative images or a stale version badge', () => {
+    const readme = readFileSync(join(root, 'README.md'), 'utf8');
+    const prose = readme.replace(/```[\s\S]*?```/g, '').replace(/`[^`\n]*`/g, '');
+    expect(prose).not.toMatch(/<\/?(div|img|p|br|picture|source|a)\b/i);
+    for (const [, target] of prose.matchAll(/!\[[^\]]*\]\(([^)\s]+)\)/g)) {
+      expect(target).toMatch(/^https:\/\//);
+    }
+    const { version } = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')) as { version: string };
+    expect(readme).toContain(`https://img.shields.io/badge/version-${version.replaceAll('-', '--')}-`);
+    expect(readme.split('\n').filter((line) => line.includes('img.shields.io/badge/'))).toHaveLength(1);
+  });
+});

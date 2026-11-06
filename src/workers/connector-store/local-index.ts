@@ -1,9 +1,12 @@
+import { iterateRows } from '../../core/sqlite-rows.ts';
 import type { ExtractionUnreadableItem } from '../file-extraction/job-store.ts';
 import { extractionJobsDbPaths, oweExtractionRereadAfterRevive } from '../file-extraction/job-names.ts';
 import { CHILD_ITEM_ID_SEPARATOR } from '../../core/child-item-id.ts';
 import { keywordAlternatives, withKeywordAlternatives, keywordExpansionDisabled, withKeywordExpansionDisabled } from '../../core/source-index/keyword-context.ts';
 import { storeKeywordLanguages } from '../../core/source-index/keyword-languages.ts';
 import { expandSourceIndexKeywords, withExpandedSourceIndexKeywords } from '../../core/source-index/keyword-expansion.ts';
+import { ingestionTurn } from '../control-path-headroom.ts';
+import { offThreadReadsAvailable, withOffThreadSnapshot, type StoreRead } from './off-thread-reads.ts';
 // The shared connector ingest spine: ONE generic local store that turns any
 // Contract 1 SourceConnector into a searchable, analyst-served corpus with
 // zero new storage code.
@@ -34,7 +37,7 @@ import { expandSourceIndexKeywords, withExpandedSourceIndexKeywords } from '../.
 import { createHash, randomUUID } from 'node:crypto';
 import { existsSync, lstatSync, mkdirSync, statSync } from 'node:fs';
 import { dirname } from 'node:path';
-import { Database } from 'bun:sqlite';
+import { Database, type SQLQueryBindings } from 'bun:sqlite';
 import type {
   RawItem,
   SourceClassificationSignals,
@@ -80,6 +83,7 @@ import {
   tierLedgerIdentityKey,
   tierLedgerPathForStore,
   type TierCopy,
+  type TierLedgerIdentity,
   type TierSearchLayer,
 } from '../classification/tier-ledger.ts';
 import { classifyContentTier, heldUntilJudged, isImageMediaType, namesDecidedByOwner, ownerRuleMatches, type OwnerTierRule } from '../classification/tier-classifier.ts';
@@ -303,7 +307,6 @@ const MEDIA_JUDGE_RETRY_BASE_MS = CHUNK_MEDIA_RETRY_BASE_MS;
 /** ... and left unjudged (Private) after this many tries by one judge. */
 const MEDIA_JUDGE_MAX_ATTEMPTS = 3;
 const MAX_CONSECUTIVE_CONTENT_FETCH_FAILURES = 3;
-const CONNECTOR_SYNC_COOPERATIVE_YIELD_ITEMS = 32;
 
 export function connectorStoreMigrations() {
   return [
@@ -901,6 +904,54 @@ class ConnectorStoreTierWriteRefusedError extends Error {
  * set's ledger (missing, replaced, or unreadable). Visibility cannot be judged,
  * so the operation is refused rather than treating routed copies as legacy.
  */
+/**
+ * How old the hidden-copy set and the settled-unreadable count behind a
+ * status snapshot's counts may be. Snapshots are published every two
+ * minutes; at five, a busy store rebuilds them about every third snapshot
+ * instead of on every one. Only the snapshot passes it.
+ */
+export const STATUS_COUNTS_MAX_AGE_MS = 5 * 60_000;
+
+// Identities looked up per step when the hidden-copy set is rebuilt in turns.
+const IDENTITY_LOOKUP_SLICE = 5_000;
+
+// A step generator run straight through, for a read that must be current.
+function runSteps<T>(steps: Generator<void, T>): T {
+  let step = steps.next();
+  while (!step.done) step = steps.next();
+  return step.value;
+}
+
+/** Item pks one extraction-candidate query reads. */
+const EXTRACTION_CANDIDATE_WINDOW = 5_000;
+/** Item pks one extraction-candidate call examines before it returns a short page. */
+export const EXTRACTION_CANDIDATE_MAX_EXAMINED = 50_000;
+
+/** Ledger lookups per step when the settled-unreadable list is built in turns. */
+const SETTLED_UNREADABLE_ITEMS_SLICE = 500;
+
+/** Parents judged per step when the hidden-children set is built in turns. */
+const HIDDEN_CHILD_PARENT_SLICE = 2_000;
+
+// The same steps with a turn before each one, so requests answer in between.
+async function runStepsInTurns<T>(steps: Generator<void, T>): Promise<T> {
+  await ingestionTurn();
+  let step = steps.next();
+  while (!step.done) {
+    await ingestionTurn();
+    step = steps.next();
+  }
+  return step.value;
+}
+
+interface TierLedgerHiddenItemPks {
+  hidden: number[];
+  held: number[];
+  metadataLayer: number[];
+  metadataLayerContentUnread: number[];
+  moving: number;
+}
+
 export class TierLedgerUnavailableError extends Error {
   constructor(corpusId: string) {
     super(
@@ -1465,6 +1516,12 @@ export interface ConnectorStoreEmbedOptions {
   assertAuthorized?: () => void | Promise<void>;
   /** Optional item selection for latency-sensitive incremental ingest. */
   localItemIds?: readonly string[];
+  /**
+   * A wall-clock time (epoch ms) after which no further batch starts. What was
+   * embedded stays; the rest is still owed and waits for the next pass. The
+   * first batch always runs, so every pass makes progress. Not with a journal.
+   */
+  stopAtMs?: number;
   /** Durable idempotency key for a maintenance page's embedding phase. */
   journalId?: string;
   /** Monotonic owner generation used to fence a superseded maintenance run. */
@@ -1489,6 +1546,8 @@ export interface ConnectorStoreEmbedSummary {
   chunksSeen: number;
   chunksEmbedded: number;
   chunksSkipped: number;
+  /** Set when the pass reached `stopAtMs` with chunks still owed. Counts only. */
+  stoppedAtDeadline?: true;
   /**
    * Set when the embedding provider stopped answering part-way (a transient
    * outage or timeout that outlived its own retries). What was embedded before
@@ -1580,6 +1639,8 @@ export interface ConnectorStoreEmbedStoreRun {
   deferredReason?: string;
   /** Another embedder held this store's lease for the whole wait; nothing was lost. */
   busy?: boolean;
+  /** The pass reached its time budget with chunks still owed; they wait for the next pass. */
+  stoppedAtDeadline?: boolean;
 }
 
 /**
@@ -1603,7 +1664,9 @@ export interface ConnectorStoreEmbedStoreRun {
  */
 export async function embedPendingChunks(
   targets: readonly ConnectorStoreEmbeddingTarget[],
-  options: { maxItems: number },
+  // stopAtMs: no batch starts after it (the first always runs). Items count
+  // badly as work: one long file can hold more chunks than a pass has time for.
+  options: { maxItems: number; stopAtMs?: number },
 ): Promise<ConnectorStoreEmbedStoreRun[]> {
   const runs: ConnectorStoreEmbedStoreRun[] = [];
   for (const target of targets) {
@@ -1627,12 +1690,16 @@ export async function embedPendingChunks(
     const queued = groups.reduce((sum, group) => sum + group.localItemIds.length, 0);
     if (target.wholeStore === true && queued < options.maxItems) {
       const queuedIds = new Set(groups.flatMap((group) => group.localItemIds));
-      const missing = store.missingEmbeddingItemIds(target.provider, options.maxItems - queued, target)
+      const missing = (await store.missingEmbeddingItemIdsInTurns(target.provider, options.maxItems - queued, target))
         .filter((localItemId) => !queuedIds.has(localItemId));
       if (missing.length > 0) groups.push({ provider: target.provider, localItemIds: missing });
     }
     let answered = false;
     for (const group of groups) {
+      if (answered && options.stopAtMs !== undefined && Date.now() >= options.stopAtMs) {
+        run.stoppedAtDeadline = true;
+        break;
+      }
       try {
         group.provider.assertBindingCurrent?.();
         await target.assertAuthorized?.();
@@ -1641,7 +1708,10 @@ export async function embedPendingChunks(
         run.itemsOutOfScope += group.localItemIds.length;
         continue;
       }
-      const outcome = await embedItemsIsolated(store, group.provider, group.localItemIds, target);
+      const outcome = await embedItemsIsolated(store, group.provider, group.localItemIds, {
+        ...target,
+        ...(options.stopAtMs !== undefined ? { stopAtMs: options.stopAtMs } : {}),
+      });
       run.itemsAttempted += group.localItemIds.length;
       run.chunksEmbedded += outcome.chunksEmbedded;
       run.itemsFailed += outcome.itemsFailed;
@@ -1654,6 +1724,10 @@ export async function embedPendingChunks(
         break;
       }
       answered = true;
+      if (outcome.stoppedAtDeadline) {
+        run.stoppedAtDeadline = true;
+        break;
+      }
     }
     if (run.deferredReason) store.setEmbeddingDeferral(run.deferredReason);
     else if (answered) store.setEmbeddingDeferral(undefined);
@@ -1674,15 +1748,19 @@ async function embedItemsIsolated(
   store: LocalConnectorStore,
   provider: SourceEmbeddingProvider,
   localItemIds: readonly string[],
-  scope: Pick<ConnectorStoreEmbedOptions, 'accountScope' | 'filters' | 'assertAuthorized'> = {},
-): Promise<{ chunksEmbedded: number; itemsFailed: number; deferredReason?: string; busy?: boolean }> {
+  scope: Pick<ConnectorStoreEmbedOptions, 'accountScope' | 'filters' | 'assertAuthorized' | 'stopAtMs'> = {},
+): Promise<{ chunksEmbedded: number; itemsFailed: number; deferredReason?: string; busy?: boolean; stoppedAtDeadline?: boolean }> {
   try {
     const embed = await store.embedChunks({
       provider, localItemIds: [...localItemIds],
       ...(scope.accountScope ? { accountScope: scope.accountScope } : {}),
       ...(scope.filters ? { filters: scope.filters } : {}),
       ...(scope.assertAuthorized ? { assertAuthorized: scope.assertAuthorized } : {}),
+      ...(scope.stopAtMs !== undefined ? { stopAtMs: scope.stopAtMs } : {}),
     });
+    // Stopped part-way, the items stay queued: the next pass skips the chunks
+    // that already hold a current vector and embeds the rest.
+    if (embed.stoppedAtDeadline) return { chunksEmbedded: embed.chunksEmbedded, itemsFailed: 0, stoppedAtDeadline: true };
     store.completeQueuedEmbedding(localItemIds);
     return { chunksEmbedded: embed.chunksEmbedded, itemsFailed: 0 };
   } catch (error) {
@@ -1699,11 +1777,16 @@ async function embedItemsIsolated(
     }
     let chunksEmbedded = 0;
     let itemsFailed = 0;
-    for (const localItemId of localItemIds) {
+    for (const [index, localItemId] of localItemIds.entries()) {
+      // One budget for the whole retry: each item's first batch always runs,
+      // so without this check every item past the deadline would still run.
+      if (index > 0 && scope.stopAtMs !== undefined && Date.now() >= scope.stopAtMs) {
+        return { chunksEmbedded, itemsFailed, stoppedAtDeadline: true };
+      }
       const single = await embedItemsIsolated(store, provider, [localItemId], scope);
       chunksEmbedded += single.chunksEmbedded;
       itemsFailed += single.itemsFailed;
-      if (single.busy || single.deferredReason) return { ...single, chunksEmbedded, itemsFailed };
+      if (single.busy || single.deferredReason || single.stoppedAtDeadline) return { ...single, chunksEmbedded, itemsFailed };
     }
     return { chunksEmbedded, itemsFailed };
   }
@@ -1860,12 +1943,12 @@ export function* connectorStoreCurrentEmbeddingRowsIterator(
   options: ConnectorStoreCurrentEmbeddingRowsOptions,
 ): Generator<ConnectorStoreCurrentEmbeddingRow> {
   const { sql, params } = connectorStoreCurrentEmbeddingRowsQuery(options, false);
-  const rows = db.query(sql).iterate(...params) as Iterable<{
+  const rows = iterateRows<{
     item_pk: number;
     chunk_pk: number;
     local_item_id: string;
     embedding: unknown;
-  }>;
+  }>(db, sql, ...params);
   for (const row of rows) {
     yield {
       itemPk: row.item_pk,
@@ -2098,6 +2181,12 @@ export interface ConnectorStoreExtractionCandidateOptions {
   includeStaleChunks?: boolean;
   /** Trusted current-account/scope boundary, applied before pagination. */
   filters?: ConnectorStoreSearchFilters;
+  /**
+   * Item pks one call examines before it returns a short page with
+   * `done: false` (default EXTRACTION_CANDIDATE_MAX_EXAMINED). A caller that
+   * reads one page and never follows the cursor passes Infinity.
+   */
+  maxExamined?: number;
 }
 
 export interface ConnectorStoreExtractionCandidatePage {
@@ -3035,60 +3124,166 @@ export class LocalConnectorStore {
    * (superseded and staged), and of copies held back from embedding (pending
    * classification). Empty for a store with no routed copies.
    */
-  private tierHiddenItemPks(): {
-    hidden: number[];
-    held: number[];
-    metadataLayer: number[];
-    /** The subset of `metadataLayer` whose text no current copy holds yet: still to be read. */
-    metadataLayerContentUnread: number[];
-    moving: number;
-  } {
-    const base = this.tierLedgerHiddenItemPks();
-    // A child whose parent is not served is hidden with the copies the ledger hides.
-    const children = this.hiddenChildItemPks();
+  private tierHiddenItemPks(options: { countsMaxAgeMs?: number } = {}): TierLedgerHiddenItemPks {
+    // Counts for a status snapshot may use a set up to `countsMaxAgeMs` old:
+    // an importing store writes between every two snapshots, so a set keyed
+    // on change markers alone was rebuilt on each one, and on Sparta
+    // (2026-11-04) that rebuild was most of every 8-16 s freeze. Searches,
+    // embedding and everything else that decides what is served pass no age
+    // and always see the current set.
+    const maxAgeMs = options.countsMaxAgeMs ?? 0;
+    const counted = this.tierHiddenCountsMemo;
+    if (maxAgeMs > 0 && counted) {
+      // An older set is served while a new one is built in turns: a status
+      // caller never holds the worker's thread for the whole rebuild, which
+      // on a large tiered store took 10 s and more (Sparta, 2026-11-04: a
+      // status command froze the worker and the dashboard lost it).
+      if (Date.now() - counted.at >= maxAgeMs) this.refreshTierHiddenCountsInTurns();
+      return counted.value;
+    }
+    const value = this.withHiddenChildren(this.tierLedgerHiddenItemPks());
+    this.tierHiddenCountsMemo = { at: Date.now(), value };
+    return value;
+  }
+
+  // A child whose parent is not served is hidden with the copies the ledger hides.
+  private withHiddenChildren(base: TierLedgerHiddenItemPks, children = this.hiddenChildItemPks()): TierLedgerHiddenItemPks {
     return children.length === 0 ? base : { ...base, hidden: [...new Set([...base.hidden, ...children])] };
   }
 
-  private tierLedgerHiddenItemPks(): {
-    hidden: number[];
-    held: number[];
-    metadataLayer: number[];
-    metadataLayerContentUnread: number[];
-    moving: number;
-  } {
+  private tierHiddenCountsMemo: { at: number; value: TierLedgerHiddenItemPks } | undefined;
+  private tierHiddenCountsRefresh: Promise<void> | undefined;
+
+  /** Rebuilds the counts' hidden set with a turn between lookups; a failed rebuild keeps the older set. */
+  private refreshTierHiddenCountsInTurns(): Promise<void> {
+    this.tierHiddenCountsRefresh ??= (async () => {
+      try {
+        const value = await this.tierHiddenItemPksInTurns();
+        this.tierHiddenCountsMemo = { at: Date.now(), value };
+      } catch {
+        // A closed or busy store: the older set stands until the next ask.
+      } finally {
+        this.tierHiddenCountsRefresh = undefined;
+      }
+    })();
+    return this.tierHiddenCountsRefresh;
+  }
+
+  /**
+   * The current hidden-copy set, rebuilt with a turn between lookups when the
+   * store or its ledger changed since the last build. For the embedding pass
+   * and the status refresh: on Sparta (2026-11-04) the embedding sweep's own
+   * synchronous rebuild, on a store an import writes to between every two
+   * passes, held the worker's thread for most of each sampled freeze. The
+   * set is current as of the start of the build; a copy hidden after that is
+   * caught by the embedding batch recheck right before dispatch.
+   */
+  private async tierHiddenItemPksInTurns(): Promise<TierLedgerHiddenItemPks> {
+    const marker = this.tierLedgerHiddenMemoMarker();
+    const memo = this.tierLedgerHiddenMemo;
+    let base: TierLedgerHiddenItemPks;
+    if (marker && memo && memo.ledger === marker.ledger && memo.marker === marker.value) {
+      base = memo.value;
+    } else {
+      base = await runStepsInTurns(this.tierLedgerHiddenSteps());
+      // Keyed on the marker read before the build: a write during it leaves
+      // the memo stale, so the next read that must be current rebuilds.
+      this.tierLedgerHiddenMemo = marker ? { ledger: marker.ledger, marker: marker.value, value: base } : undefined;
+      await ingestionTurn();
+    }
+    // The children too: judging every parent in one go was about a tenth of
+    // the sampled freezes on Sparta (2026-11-05).
+    return this.withHiddenChildren(base, await runStepsInTurns(this.hiddenChildSteps()));
+  }
+
+  private tierLedgerHiddenItemPks(): TierLedgerHiddenItemPks {
+    // One status build asks for these several times back to back (counts,
+    // embedding backlog, unread files), and on a large tiered store each ask
+    // is tens of thousands of lookups (Sparta, 2026-11-03: most of a 5-15 s
+    // freeze). They depend only on this store's rows and the ledger, so they
+    // are reused until either changes (any write on this connection or a
+    // commit from another), or the store is bound to another ledger.
+    const marker = this.tierLedgerHiddenMemoMarker();
+    const memo = this.tierLedgerHiddenMemo;
+    if (marker && memo && memo.ledger === marker.ledger && memo.marker === marker.value) return memo.value;
+    const value = this.computeTierLedgerHiddenItemPks();
+    this.tierLedgerHiddenMemo = marker ? { ledger: marker.ledger, marker: marker.value, value } : undefined;
+    return value;
+  }
+
+  private tierLedgerHiddenMemo: { ledger: TierLedger; marker: string; value: TierLedgerHiddenItemPks } | undefined;
+
+  /** Changes whenever this store's database or its ledger's changes. */
+  private tierLedgerHiddenMemoMarker(): { ledger: TierLedger; value: string } | undefined {
+    try {
+      const ledger = this.visibilityLedger();
+      if (!ledger) return undefined;
+      const own = this.db.query('SELECT total_changes() AS changes').get() as { changes: number };
+      const version = this.db.query('PRAGMA data_version').get() as { data_version: number };
+      return { ledger, value: `${version.data_version}:${own.changes}:${ledger.changeMarker()}` };
+    } catch {
+      return undefined;
+    }
+  }
+
+  private computeTierLedgerHiddenItemPks(): TierLedgerHiddenItemPks {
+    return runSteps(this.tierLedgerHiddenSteps());
+  }
+
+  // The hidden-copy lookups, a slice of identities at a time: run straight
+  // through for a read that must be current, or a turn between slices for a
+  // status count (refreshTierHiddenCountsInTurns).
+  private *tierLedgerHiddenSteps(): Generator<void, TierLedgerHiddenItemPks> {
     const ledger = this.visibilityLedger();
     if (!ledger || !ledger.corpusHasCopies(this.corpusId)) {
       return { hidden: [], held: [], metadataLayer: [], metadataLayerContentUnread: [], moving: 0 };
     }
-    const pksFor = (identities: ReadonlyArray<{ provider: string; accountScope: string; providerItemId: string; providerConversationId?: string }>): number[] => {
-      const lookup = this.db.query(`
-        SELECT item_pk FROM items
-        WHERE provider = ? AND account_scope = ? AND normalized_conversation = ? AND provider_item_id = ?
-          AND tombstoned = 0
-      `);
-      const pks: number[] = [];
-      for (const identity of identities) {
-        const row = lookup.get(
-          identity.provider,
-          identity.accountScope,
-          normalizeConversationId(identity.providerConversationId),
-          identity.providerItemId,
-        ) as { item_pk: number } | null;
-        if (row) pks.push(row.item_pk);
-      }
-      return pks;
+    type Identity = { provider: string; accountScope: string; providerItemId: string; providerConversationId?: string };
+    const conversationOf = (identity: Identity): string => normalizeConversationId(identity.providerConversationId);
+    const keyOf = (identity: Identity): string =>
+      JSON.stringify([identity.provider, identity.accountScope, conversationOf(identity), identity.providerItemId]);
+    const rowsFor = (identities: ReadonlyArray<Identity>) => this.itemRowsForIdentitiesSteps(identities, conversationOf);
+    const pksFor = function* (identities: ReadonlyArray<Identity>): Generator<void, number[]> {
+      return (yield* rowsFor(identities)).map((row) => row.item_pk);
     };
+    // A copy that serves only the names keeps any chunks it already had
+    // (e.g. kept vectors after a split move) but never serves, counts or
+    // embeds them.
+    // Each identity list is read a page at a time with a turn between pages (#858).
+    const metadataIdentities = yield* ledger.corpusCopyIdentitiesSteps(this.corpusId, 'metadata_layer');
+    const metadataRows = yield* rowsFor(metadataIdentities);
+    // Unread names copies are a subset of the names copies (same corpus, same
+    // current names-only filter), so their rows are read off the lookup above
+    // instead of a second lookup of nearly the same set: on a names-only
+    // archive both sets are about 100k items (Sparta, 2026-11-04).
+    const pksByKey = new Map<string, number[]>();
+    for (let index = 0; index < metadataRows.length; index += 1) {
+      if (index > 0 && index % IDENTITY_LOOKUP_SLICE === 0) yield;
+      const row = metadataRows[index]!;
+      const key = keyOf(metadataIdentities[row.idx]!);
+      const pks = pksByKey.get(key);
+      if (pks) pks.push(row.item_pk); else pksByKey.set(key, [row.item_pk]);
+    }
+    const unreadIdentities = yield* ledger.corpusCopyIdentitiesSteps(this.corpusId, 'metadata_layer_content_unread');
+    const unreadMissed: Identity[] = [];
+    const unreadPks: number[] = [];
+    for (let index = 0; index < unreadIdentities.length; index += 1) {
+      if (index > 0 && index % IDENTITY_LOOKUP_SLICE === 0) yield;
+      const identity = unreadIdentities[index]!;
+      const pks = pksByKey.get(keyOf(identity));
+      if (pks) unreadPks.push(...pks); else unreadMissed.push(identity);
+    }
+    const superseded = yield* ledger.corpusCopyIdentitiesSteps(this.corpusId, 'superseded');
+    const staged = yield* ledger.corpusCopyIdentitiesSteps(this.corpusId, 'staged');
+    const hidden = yield* pksFor(superseded.concat(staged));
+    const held = yield* pksFor(yield* ledger.corpusCopyIdentitiesSteps(this.corpusId, 'held'));
+    // Only if the ledger changed between the two reads.
+    const missed = yield* pksFor(unreadMissed);
     return {
-      hidden: pksFor([
-        ...ledger.corpusCopyIdentities(this.corpusId, 'superseded'),
-        ...ledger.corpusCopyIdentities(this.corpusId, 'staged'),
-      ]),
-      held: pksFor(ledger.corpusCopyIdentities(this.corpusId, 'held')),
-      // A copy that serves only the names keeps any chunks it already had
-      // (e.g. kept vectors after a split move) but never serves, counts or
-      // embeds them.
-      metadataLayer: pksFor(ledger.corpusCopyIdentities(this.corpusId, 'metadata_layer')),
-      metadataLayerContentUnread: pksFor(ledger.corpusCopyIdentities(this.corpusId, 'metadata_layer_content_unread')),
+      hidden,
+      held,
+      metadataLayer: metadataRows.map((row) => row.item_pk),
+      metadataLayerContentUnread: unreadPks.concat(missed),
       moving: ledger.corpusCopyCounts(this.corpusId).moving,
     };
   }
@@ -3130,8 +3325,11 @@ export class LocalConnectorStore {
   }
 
   private copyServable(identity: { provider: string; accountScope: string; providerItemId: string; providerConversationId?: string }): boolean {
-    return this.tierVisibleRows([identity], (entry) => entry, () => 'metadata').length > 0
-      || this.tierVisibleRows([identity], (entry) => entry, () => 'content').length > 0;
+    // Both layers in one pass: one ledger read and one parent check instead
+    // of two of each. An unreadable-files count asks this for every listed
+    // item (Sparta, 2026-11-04: most of a 14 s dashboard freeze).
+    const layers: TierSearchLayer[] = ['metadata', 'content'];
+    return this.tierVisibleRows(layers, () => identity, (layer) => layer).length > 0;
   }
 
   /**
@@ -3544,6 +3742,11 @@ export class LocalConnectorStore {
    * with no child.
    */
   private hiddenChildItemPks(): number[] {
+    return runSteps(this.hiddenChildSteps());
+  }
+
+  /** `hiddenChildItemPks` with a step between bounded slices of parents, for the builds that run in turns. */
+  private *hiddenChildSteps(): Generator<void, number[]> {
     if (!this.hasChildItems()) return [];
     const groups = this.db.query(`
       SELECT provider, account_scope, parent_local_item_id, MIN(provider_item_id) AS child_item_id, provider_conversation_id FROM items
@@ -3567,10 +3770,18 @@ export class LocalConnectorStore {
         ...(group.provider_conversation_id ? { providerConversationId: group.provider_conversation_id } : {}),
       }),
     }));
-    const verdicts = parentVerdicts(this.childVisibilityLane(), parents);
-    const hiddenParents = parents.filter((parent) => verdicts.get(parentKey(parent))?.visible !== true);
+    // Parents are judged independently, so a slice at a time gives the same set.
+    const lane = this.childVisibilityLane();
+    const hiddenParents: ParentRef[] = [];
+    for (let offset = 0; offset < parents.length; offset += HIDDEN_CHILD_PARENT_SLICE) {
+      yield;
+      const slice = parents.slice(offset, offset + HIDDEN_CHILD_PARENT_SLICE);
+      const verdicts = parentVerdicts(lane, slice);
+      for (const parent of slice) if (verdicts.get(parentKey(parent))?.visible !== true) hiddenParents.push(parent);
+    }
     const pks: number[] = [];
     for (let offset = 0; offset < hiddenParents.length; offset += 20_000) {
+      yield;
       const rows = this.db.query(`
         SELECT item_pk FROM items
         WHERE tombstoned = 0 AND parent_local_item_id IS NOT NULL
@@ -3593,24 +3804,42 @@ export class LocalConnectorStore {
    */
   activeChildParents(after: ParentRef | undefined, limit: number): ParentRef[] {
     if (!this.childItemColumnsPresent) return [];
-    const rows = this.db.query(`
-      SELECT parent_local_item_id, provider, account_scope, MIN(provider_item_id) AS child_item_id, provider_conversation_id FROM items
-      WHERE parent_local_item_id IS NOT NULL AND (tombstoned = 0 OR trust_tier = 'S5')
-        AND (parent_local_item_id, provider, account_scope) > (?, ?, ?)
-      GROUP BY parent_local_item_id, provider, account_scope
-      ORDER BY parent_local_item_id, provider, account_scope LIMIT ?
-    `).all(
-      after?.parentLocalItemId ?? '',
-      after?.provider ?? '',
-      after?.accountScope ?? '',
-      Math.max(1, Math.floor(limit)),
-    ) as Array<{
+    const want = Math.max(1, Math.floor(limit));
+    const afterKey = [after?.parentLocalItemId ?? '', after?.provider ?? '', after?.accountScope ?? ''] as const;
+    // The parent ids come off the parent index a window at a time, and only
+    // the rows under them are grouped. Grouping every child after `after` in
+    // one query sorted all the remaining children on each page, so a sweep
+    // cost grew with the square of the children (Sparta, 2026-11-04: about
+    // 18% of a sampled freeze on a large Telegram store).
+    const rows: Array<{
       parent_local_item_id: string;
       provider: string;
       account_scope: string;
       child_item_id: string;
       provider_conversation_id: string | null;
-    }>;
+    }> = [];
+    let from = afterKey[0];
+    let inclusive = true;
+    while (rows.length < want) {
+      const window = (this.db.query(`
+        SELECT parent_local_item_id AS parent FROM items
+        WHERE parent_local_item_id IS NOT NULL AND parent_local_item_id ${inclusive ? '>=' : '>'} ?
+        GROUP BY parent_local_item_id ORDER BY parent_local_item_id LIMIT ?
+      `).all(from, want) as Array<{ parent: string }>).map((row) => row.parent);
+      if (window.length === 0) break;
+      rows.push(...this.db.query(`
+        SELECT parent_local_item_id, provider, account_scope, MIN(provider_item_id) AS child_item_id, provider_conversation_id FROM items
+        WHERE parent_local_item_id IN (SELECT value FROM json_each(?)) AND (tombstoned = 0 OR trust_tier = 'S5')
+          AND (parent_local_item_id, provider, account_scope) > (?, ?, ?)
+        GROUP BY parent_local_item_id, provider, account_scope
+        ORDER BY parent_local_item_id, provider, account_scope LIMIT ?
+      `).all(JSON.stringify(window), ...afterKey, want - rows.length) as typeof rows);
+      // A short window is the last; otherwise every row under it was taken
+      // (or the page is full), so the next window starts past it.
+      if (window.length < want) break;
+      from = window[window.length - 1]!;
+      inclusive = false;
+    }
     return rows.map((row) => ({
       provider: row.provider,
       accountScope: row.account_scope,
@@ -3886,7 +4115,7 @@ export class LocalConnectorStore {
           tombstoned: number | null;
           source_version: string | null;
         };
-        if (existing.matching_provider_id_rows > 1) return 'ambiguous';
+        if (identityAmbiguous(identity, existing)) return 'ambiguous';
         if (existing.exact_identity_rows !== 1 || existing.item_pk === null || existing.tombstoned === 1) return 'missing';
         // The text judged Secret is one revision's. When the row has since
         // moved to another, that revision's verdict says nothing about the
@@ -4773,6 +5002,56 @@ export class LocalConnectorStore {
     return true;
   }
 
+  /**
+   * itemMatchesExtractionRef for many refs at once, one answer per ref in
+   * order: a few queries for a whole queue instead of one per job.
+   */
+  itemsMatchingExtractionRefs(
+    refs: ReadonlyArray<Parameters<LocalConnectorStore['itemMatchesExtractionRef']>[0]>,
+    filters: ConnectorStoreSearchFilters | undefined,
+  ): boolean[] {
+    if (refs.length === 0) return [];
+    const predicate = connectorStoreFilterSql(filters);
+    const ids = [...new Set(refs.map((ref) => ref.localItemId))];
+    // The first active row per identity, as the single check's LIMIT 1 reads it.
+    const first = new Map<string, { source_version: string | null; content_hash: string | null }>();
+    const keyOf = (localItemId: string, providerItemId: string, provider: string, accountScope: string): string =>
+      JSON.stringify([localItemId, providerItemId, provider, accountScope]);
+    for (let offset = 0; offset < ids.length; offset += 5_000) {
+      // CROSS JOIN keeps the id list outermost, so each id is one lookup on
+      // idx_items_local_item_id. Written as `IN (…)`, a provider filter led
+      // SQLite to scan every item of the provider instead, once per slice of
+      // the readiness check: the longest freezes on Sparta (5b1ddbd, 2026-11-05).
+      const rows = this.db.query(`
+        SELECT i.local_item_id, i.provider_item_id, i.provider, i.account_scope, i.source_version, i.content_hash
+        FROM json_each(?) wanted
+        CROSS JOIN items i
+        WHERE i.local_item_id = wanted.value
+          AND i.tombstoned = 0
+          ${predicate.sql}
+        ORDER BY i.item_pk
+      `).all(JSON.stringify(ids.slice(offset, offset + 5_000)), ...predicate.params) as Array<{
+        local_item_id: string;
+        provider_item_id: string;
+        provider: string;
+        account_scope: string;
+        source_version: string | null;
+        content_hash: string | null;
+      }>;
+      for (const row of rows) {
+        const key = keyOf(row.local_item_id, row.provider_item_id, row.provider, row.account_scope);
+        if (!first.has(key)) first.set(key, { source_version: row.source_version, content_hash: row.content_hash });
+      }
+    }
+    return refs.map((ref) => {
+      const row = first.get(keyOf(ref.localItemId, ref.providerItemId, ref.provider, ref.accountScope));
+      if (!row) return false;
+      if (ref.sourceVersion !== undefined && row.source_version !== ref.sourceVersion) return false;
+      if (ref.contentHash !== undefined && row.content_hash !== ref.contentHash) return false;
+      return true;
+    });
+  }
+
   [READ_RESULT_PROJECTION_LOCATOR_URI](
     identity: SourceItemIdentity,
     locatorPathScope?: string,
@@ -5408,7 +5687,7 @@ export class LocalConnectorStore {
     const maxCandidates = input.maxFoldCandidates ?? LOCATOR_FOLD_SCAN_MAX_CANDIDATES;
     const wanted = `${foldLocator(folder)}/`;
     const matches: Array<{ identity: SourceItemIdentity; locatorUri: string }> = [];
-    const candidates = this.db.query(`
+    const candidatesSql = `
       SELECT
         i.provider_item_id, i.provider_file_id, i.local_item_id,
         i.source_version, i.locator_uri
@@ -5420,9 +5699,9 @@ export class LocalConnectorStore {
         ${range.sql}
         AND i.tombstoned = 0
       ORDER BY locator.normalized_locator, locator.item_pk
-    `);
+    `;
     let examined = 0;
-    for (const row of candidates.iterate(input.provider, input.accountScope, ...range.params) as Iterable<Row>) {
+    for (const row of iterateRows<Row>(this.db, candidatesSql, input.provider, input.accountScope, ...range.params)) {
       examined += 1;
       if (examined > maxCandidates) return [];
       if (!row.locator_uri || !foldLocator(row.locator_uri).startsWith(wanted)) continue;
@@ -5766,7 +6045,7 @@ export class LocalConnectorStore {
       WHERE i.tombstoned = 0
         AND LOWER(i.mime_type) <> 'inode/directory'
         ${this.childItemColumnsPresent ? 'AND (i.bytes_available IS NULL OR i.bytes_available <> 0)' : ''}
-        AND i.item_pk > ?
+        AND i.item_pk > ? AND i.item_pk <= ?
         AND (? IS NULL OR i.account_scope = ?)
         AND (? = 0 OR NOT EXISTS (SELECT 1 FROM chunks c WHERE c.item_pk = i.item_pk)
           ${staleChunksSql}
@@ -5783,19 +6062,28 @@ export class LocalConnectorStore {
     const candidates: ConnectorStoreExtractionCandidate[] = [];
     let skippedByDisposition = 0;
     let exhausted = false;
+    // Each query reads one window of item pks: with few matches left (most
+    // items already read) an unbounded LIMIT query walked the rest of the
+    // table in one go, about a fifth of the sampled freezes on Sparta
+    // (2026-11-05). A call stops after `maxExamined` pks and resumes there.
+    const maxPk = (this.db.query('SELECT COALESCE(MAX(item_pk), 0) AS n FROM items').get() as { n: number }).n;
+    const examineUntil = Math.min(maxPk, lastExaminedPk + Math.max(1, options.maxExamined ?? EXTRACTION_CANDIDATE_MAX_EXAMINED));
+    let windowEnd = Math.min(examineUntil, lastExaminedPk + EXTRACTION_CANDIDATE_WINDOW);
     while (candidates.length < limit) {
+      if (lastExaminedPk >= maxPk) {
+        exhausted = true;
+        break;
+      }
+      if (lastExaminedPk >= examineUntil) break;
       const rows = query.all(
         lastExaminedPk,
+        windowEnd,
         accountScope ?? null,
         accountScope ?? null,
         options.withoutChunksOnly === true ? 1 : 0,
         ...selectedFilters.params,
         scanBatch,
       ) as ConnectorStoreExtractionCandidateRow[];
-      if (rows.length === 0) {
-        exhausted = true;
-        break;
-      }
       for (const row of rows) {
         lastExaminedPk = row.item_pk;
         if (matchesMimeType && !matchesMimeType(row.mime_type)) continue;
@@ -5822,8 +6110,9 @@ export class LocalConnectorStore {
       }
       if (candidates.length === limit) break;
       if (rows.length < scanBatch) {
-        exhausted = true;
-        break;
+        // The window held no more matches: go on after it.
+        lastExaminedPk = windowEnd;
+        windowEnd = Math.min(examineUntil, windowEnd + EXTRACTION_CANDIDATE_WINDOW);
       }
     }
 
@@ -6101,7 +6390,7 @@ export class LocalConnectorStore {
       missingEmbeddingLocalItemIds: [] as string[],
       chunkHashDisagreementLocalItemIds: [] as string[],
     };
-    const rows = this.db.query(`
+    const rowsSql = `
       WITH fts_counts AS (
         SELECT owned.item_pk, COUNT(*) AS fts_rows
         FROM connector_store_fts_rows owned
@@ -6133,7 +6422,8 @@ export class LocalConnectorStore {
       LEFT JOIN fts_counts ON fts_counts.item_pk = i.item_pk
       WHERE i.tombstoned = 0
       ORDER BY i.item_pk, c.chunk_index
-    `).iterate(embeddingModelId) as Iterable<{
+    `;
+    const rows = iterateRows<{
       item_pk: number;
       local_item_id: string;
       chunk_pk: number | null;
@@ -6142,7 +6432,7 @@ export class LocalConnectorStore {
       fts_rows: number;
       chunk_fts_mapped: number;
       embedding_current: number;
-    }>;
+    }>(this.db, rowsSql, embeddingModelId);
 
     let currentItemPk: number | undefined;
     let currentLocalItemId = '';
@@ -6339,7 +6629,7 @@ export class LocalConnectorStore {
           item_pk: number | null;
           tombstoned: number | null;
         };
-        if (existing.matching_provider_id_rows > 1) {
+        if (identityAmbiguous(item.identity, existing)) {
           throw new Error(
             'Representation restore refused because a targeted identity matches multiple store rows.',
           );
@@ -7419,12 +7709,12 @@ export class LocalConnectorStore {
    * the caller only needs each locator once, to fold into a tree.
    */
   *itemLocatorCensus(): Generator<{ locator: string | null; hasContent: boolean }> {
-    const rows = this.db.query(`
+    const rows = iterateRows<{ locator_uri: string | null; has_content: number }>(this.db, `
       SELECT
         i.locator_uri AS locator_uri,
         EXISTS (SELECT 1 FROM chunks c WHERE c.item_pk = i.item_pk) AS has_content
       FROM items i
-    `).iterate() as Iterable<{ locator_uri: string | null; has_content: number }>;
+    `);
     for (const row of rows) {
       yield { locator: row.locator_uri, hasContent: row.has_content === 1 };
     }
@@ -8075,17 +8365,13 @@ export class LocalConnectorStore {
             break;
           }
           itemsSeen += 1;
-          // SQLite's item work is synchronous. Yield between bounded groups so
-          // a large metadata page cannot starve the Bun HTTP server that owns
-          // this same event loop. Put the yield before item handling so every
-          // disposition — excluded, deleted, rejected, or indexed — shares the
-          // same fairness bound.
-          if (
-            itemsSeen > 1
-            && (itemsSeen - 1) % CONNECTOR_SYNC_COOPERATIVE_YIELD_ITEMS === 0
-          ) {
-            await yieldConnectorSyncTurn();
-          }
+          // SQLite's item work is synchronous. Return to the event loop once
+          // the thread has run a time slice, so a large page cannot starve the
+          // Bun HTTP server that owns this same loop (control-path-headroom.ts;
+          // a count of items bounded nothing when each item was slow). Put the
+          // turn before item handling so every disposition — excluded,
+          // deleted, rejected, or indexed — shares the same fairness bound.
+          await ingestionTurn();
 
           // FIRST, before content is fetched, before classification, before
           // any scope or allowlist is consulted. Enforcing here is what makes
@@ -9646,13 +9932,14 @@ export class LocalConnectorStore {
     embedder: Pick<SourceEmbeddingProvider, 'modelId' | 'provider' | 'backend'>,
     limit: number,
     scope: Pick<ConnectorStoreEmbedOptions, 'accountScope' | 'filters'> = {},
+    tierHidden?: TierLedgerHiddenItemPks,
   ): string[] {
     if (limit <= 0) return [];
     const modelId = embedder.modelId;
     const accountScope = normalizeOptionalAccountScope(scope.accountScope);
     const scoped = connectorStoreFilterSql(scope.filters);
     const failed = this.embeddingFailureState;
-    const tierExclusion = this.embeddingTierExclusionFilter();
+    const tierExclusion = this.embeddingTierExclusionFilter(0, tierHidden);
     const privateTier = this.privateTierEmbeddingFilter(embedder);
     const filter = `${tierExclusion.filter} ${privateTier.filter} ${accountScope ? 'AND i.account_scope = ?' : ''} ${scoped.sql}`;
     const params = [...tierExclusion.params, ...privateTier.params, ...(accountScope ? [accountScope] : []), ...scoped.params];
@@ -9672,6 +9959,21 @@ export class LocalConnectorStore {
       .map((row) => row.local_item_id)
       .filter((localItemId) => !failed?.has(localItemId))
       .slice(0, limit);
+  }
+
+  /**
+   * missingEmbeddingItemIds for the embedding sweep: the hidden-copy set is
+   * built in turns first instead of synchronously, so a sweep over a store
+   * that is being written never holds the worker's thread for the rebuild.
+   */
+  async missingEmbeddingItemIdsInTurns(
+    embedder: Pick<SourceEmbeddingProvider, 'modelId' | 'provider' | 'backend'>,
+    limit: number,
+    scope: Pick<ConnectorStoreEmbedOptions, 'accountScope' | 'filters'> = {},
+  ): Promise<string[]> {
+    if (limit <= 0) return [];
+    const tierHidden = await this.tierHiddenItemPksInTurns();
+    return this.missingEmbeddingItemIds(embedder, limit, scope, tierHidden);
   }
 
   /**
@@ -9706,8 +10008,9 @@ export class LocalConnectorStore {
     modelId: string,
     embedder?: Pick<SourceEmbeddingProvider, 'provider' | 'backend'>,
     scope?: ConnectorStoreStatusScope,
+    options: { countsMaxAgeMs?: number } = {},
   ): { missingChunks: number; estimatedTokens: number } {
-    const tierExclusion = this.embeddingTierExclusionFilter();
+    const tierExclusion = this.embeddingTierExclusionFilter(options.countsMaxAgeMs ?? 0);
     const privateTier = embedder ? this.privateTierEmbeddingFilter(embedder) : { filter: '', params: [] };
     const scoped = statusScopeContentFilter(scope);
     const filter = `${tierExclusion.filter} ${privateTier.filter} ${scoped.filter}`;
@@ -9748,8 +10051,12 @@ export class LocalConnectorStore {
     };
   }
 
-  private embeddingTierExclusionFilter(): { filter: string; params: string[] } {
-    const tierExcluded = this.tierHiddenItemPks();
+  /** `countsMaxAgeMs` only for counts a status snapshot shows (see STATUS_COUNTS_MAX_AGE_MS); never for what is embedded. */
+  private embeddingTierExclusionFilter(
+    countsMaxAgeMs = 0,
+    tierHidden?: TierLedgerHiddenItemPks,
+  ): { filter: string; params: string[] } {
+    const tierExcluded = tierHidden ?? this.tierHiddenItemPks({ countsMaxAgeMs });
     const excludedPks = [...tierExcluded.hidden, ...tierExcluded.held, ...tierExcluded.metadataLayer];
     return excludedPks.length > 0
       ? { filter: 'AND i.item_pk NOT IN (SELECT value FROM json_each(?))', params: [JSON.stringify(excludedPks)] }
@@ -9761,20 +10068,30 @@ export class LocalConnectorStore {
    * from the store as it is now: a row whose item is now Private by its own
    * tier (or carries an unknown tier) is counted `privateTier`; one now
    * deleted or kept out of view by the tier ledger is counted `notVisible`.
-   * Synchronous, so the caller can dispatch with no await in between.
+   * With no `embeddableTiers` (an embedder approved for Private content)
+   * only visibility is rechecked. Synchronous, so the caller can dispatch
+   * with no await in between. Visibility is looked up for the batch's items
+   * alone, not by rebuilding the store's whole hidden-copy set.
    */
   private embeddingBatchRecheck<T extends { item_pk: number }>(
     batch: readonly T[],
-    embeddableTiers: readonly SourceTrustTier[],
+    embeddableTiers: readonly SourceTrustTier[] | undefined,
   ): { kept: T[]; privateTier: number; notVisible: number } {
     const itemPks = [...new Set(batch.map((row) => row.item_pk))];
-    const current = new Map((this.db.query(`
-      SELECT item_pk, trust_tier, tombstoned FROM items
+    const currentRows = this.db.query(`
+      SELECT item_pk, trust_tier, tombstoned, provider, account_scope, provider_item_id, provider_conversation_id FROM items
       WHERE item_pk IN (SELECT value FROM json_each(?))
-    `).all(JSON.stringify(itemPks)) as Array<{ item_pk: number; trust_tier: string; tombstoned: number }>)
-      .map((row) => [row.item_pk, row] as const));
-    const tierHidden = this.tierHiddenItemPks();
-    const hidden = new Set([...tierHidden.hidden, ...tierHidden.held, ...tierHidden.metadataLayer]);
+    `).all(JSON.stringify(itemPks)) as Array<{
+      item_pk: number;
+      trust_tier: string;
+      tombstoned: number;
+      provider: string;
+      account_scope: string;
+      provider_item_id: string;
+      provider_conversation_id: string | null;
+    }>;
+    const current = new Map(currentRows.map((row) => [row.item_pk, row] as const));
+    const hidden = this.embeddingHiddenAmong(currentRows);
     const kept: T[] = [];
     let privateTier = 0;
     let notVisible = 0;
@@ -9782,13 +10099,54 @@ export class LocalConnectorStore {
       const item = current.get(row.item_pk);
       if (!item || item.tombstoned !== 0 || hidden.has(row.item_pk)) {
         notVisible += 1;
-      } else if (!(embeddableTiers as readonly string[]).includes(item.trust_tier)) {
+      } else if (embeddableTiers !== undefined && !(embeddableTiers as readonly string[]).includes(item.trust_tier)) {
         privateTier += 1;
       } else {
         kept.push(row);
       }
     }
     return { kept, privateTier, notVisible };
+  }
+
+  /**
+   * Of these rows, the item pks the tier ledger keeps from embedding now: this
+   * store's copy superseded or staged (or its deletion or Secret under way),
+   * held pending classification, or serving names only; and children whose
+   * parent is not served. The same rule as the hidden-copy set
+   * (tierLedgerHiddenSteps, withHiddenChildren), looked up for these items only.
+   */
+  private embeddingHiddenAmong(rows: ReadonlyArray<{
+    item_pk: number;
+    provider: string;
+    account_scope: string;
+    provider_item_id: string;
+    provider_conversation_id: string | null;
+  }>): Set<number> {
+    const hidden = new Set<number>();
+    if (rows.length === 0) return hidden;
+    const identityOf = (row: (typeof rows)[number]) => ({
+      provider: row.provider,
+      accountScope: row.account_scope,
+      providerItemId: row.provider_item_id,
+      ...(row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}),
+    });
+    const ledger = this.visibilityLedger();
+    if (ledger && ledger.corpusHasCopies(this.corpusId)) {
+      const copies = ledger.copiesForMany(rows.map(identityOf));
+      for (const row of rows) {
+        const here = (copies.get(tierLedgerIdentityKey(identityOf(row))) ?? [])
+          .filter((copy) => copy.corpusId === this.corpusId);
+        if (here.some((copy) => copy.state === 'superseded' || copy.state === 'staged'
+          || (copy.state === 'current' && (copy.embedHold || copy.layers === 'metadata')))) {
+          hidden.add(row.item_pk);
+        }
+      }
+    }
+    const children = hiddenChildKeys(this.childVisibilityLane(), rows.map(identityOf));
+    if (children.size > 0) {
+      for (const row of rows) if (children.has(tierLedgerIdentityKey(identityOf(row)))) hidden.add(row.item_pk);
+    }
+    return hidden;
   }
 
   /**
@@ -9814,6 +10172,7 @@ export class LocalConnectorStore {
   privateTierEmbeddingWithheld(
     embedder: Pick<SourceEmbeddingProvider, 'modelId' | 'provider' | 'backend'>,
     scope?: ConnectorStoreStatusScope,
+    options: { countsMaxAgeMs?: number } = {},
   ): {
     items: number;
     chunks: number;
@@ -9822,7 +10181,7 @@ export class LocalConnectorStore {
     const reason = CONNECTOR_STORE_PRIVATE_TIER_EMBEDDING_WITHHELD_REASON;
     const tiers = connectorStoreEmbeddableRowTiers(this.trustDomain, embedder);
     if (tiers === undefined) return { items: 0, chunks: 0, reason };
-    const tierExclusion = this.embeddingTierExclusionFilter();
+    const tierExclusion = this.embeddingTierExclusionFilter(options.countsMaxAgeMs ?? 0);
     const scoped = statusScopeContentFilter(scope);
     const filter = `${tierExclusion.filter} ${scoped.filter}`;
     const params = [...tierExclusion.params, ...scoped.params];
@@ -9898,6 +10257,9 @@ export class LocalConnectorStore {
         'Connector store embedding invalidation requires a durable journal id.',
       );
     }
+    if (journalId && options.stopAtMs !== undefined) {
+      throw new TypeError('Connector store embedding journals cannot stop at a deadline.');
+    }
     if (invalidateCurrentModelEmbeddings && limit !== undefined) {
       throw new TypeError(
         'Connector store embedding invalidation cannot use a partial embed limit.',
@@ -9941,10 +10303,14 @@ export class LocalConnectorStore {
     )) {
       throw new Error('Connector store embedding journal provider changed.');
     }
+    // Built in turns: a pass over a store that is being written would
+    // otherwise rebuild it synchronously on every call (Sparta, 2026-11-04).
+    const tierHidden = await this.tierHiddenItemPksInTurns();
     const selectedRows = this.embeddingSourceRows(
       options.localItemIds,
       options.accountScope,
       options.filters,
+      tierHidden,
     );
     // A row that is Private by its own stored tier (or carries a tier the
     // store does not recognise) never reaches an embedder that is not approved
@@ -10128,7 +10494,12 @@ export class LocalConnectorStore {
     // One judgment per picture per pass: several items carrying the same
     // picture are one try, not several.
     const judgedThisPass = new Set<string>();
+    let stoppedAtDeadline = false;
     for (let offset = 0; offset < pending.length; offset += EMBEDDING_BATCH_SIZE) {
+      if (offset > 0 && options.stopAtMs !== undefined && Date.now() >= options.stopAtMs) {
+        stoppedAtDeadline = true;
+        break;
+      }
       let batch = pending.slice(offset, offset + EMBEDDING_BATCH_SIZE);
       await options.assertAuthorized?.();
       // The rows were selected before any provider round trip, and ordinary
@@ -10136,7 +10507,7 @@ export class LocalConnectorStore {
       // lease, so a row can turn Private (or be hidden) while an earlier batch
       // is out. Re-read each row's current tier and visibility right before
       // its batch is dispatched, with no await in between.
-      if (embeddableTiers !== undefined) {
+      {
         const recheck = this.embeddingBatchRecheck(batch, embeddableTiers);
         privateTierWithheldChunks += recheck.privateTier;
         // Seen and not embedded: skipped, and the Private ones also withheld.
@@ -10336,7 +10707,7 @@ export class LocalConnectorStore {
       staleSkipped += batch.length - written;
     }
     skipped += staleSkipped;
-    if (judging && rows.some((row) => row.media_sha256 && !this.mediaJudgmentSettled(row.media_sha256, mediaJudgeId(judging)))) {
+    if (!stoppedAtDeadline && judging && rows.some((row) => row.media_sha256 && !this.mediaJudgmentSettled(row.media_sha256, mediaJudgeId(judging)))) {
       readsImages ??= await judging.imageSupport!();
       if (readsImages) await this.judgeUnjudgedMedia(judging, rows, options.assertAuthorized);
     }
@@ -10385,6 +10756,7 @@ export class LocalConnectorStore {
       embedded,
       skipped,
     );
+    if (stoppedAtDeadline) summary.stoppedAtDeadline = true;
     return privateTierWithheldChunks > 0
       ? {
           ...summary,
@@ -11081,6 +11453,7 @@ export class LocalConnectorStore {
     localItemIds?: readonly string[],
     accountScope?: string,
     filters?: ConnectorStoreSearchFilters,
+    tierHidden?: TierLedgerHiddenItemPks,
   ): Array<{
     chunk_pk: number;
     item_pk: number;
@@ -11105,7 +11478,7 @@ export class LocalConnectorStore {
     // Copies the tier ledger keeps hidden (superseded, staged) are never
     // embedded, and items pending classification are held back until their
     // tier is final (design section 4.2). Legacy items are never held.
-    const tierExcluded = this.tierHiddenItemPks();
+    const tierExcluded = tierHidden ?? this.tierHiddenItemPks();
     const excludedPks = [...tierExcluded.hidden, ...tierExcluded.held, ...tierExcluded.metadataLayer];
     // One JSON parameter, however many items: no bound-parameter ceiling.
     const tierFilter = excludedPks.length > 0
@@ -11328,7 +11701,15 @@ export class LocalConnectorStore {
       selected = rows.filter((row) => {
         if (enough(row)) return true;
         if (!weights) return false;
-        const matched = (matchedGroupIndexes.get(row.item_pk) ?? []).reduce((sum, index) => sum + weights.of[index]!, 0);
+        const indexes = matchedGroupIndexes.get(row.item_pk) ?? [];
+        // Two rare topic concepts can identify an item even when the question
+        // adds words it never used. Rarity is evidence in every source family.
+        // Keep the strict floor for common words, small corpora, and a lone
+        // rare word. This uses the same scoped FTS candidates and tier filter.
+        if (groups.length >= 3 && weights.population >= 10
+          && indexes.length >= 2 && indexes.length * 2 >= groups.length
+          && indexes.filter((index) => weights.counts[index]! <= Math.floor(weights.population / 10)).length >= 2) return true;
+        const matched = indexes.reduce((sum, index) => sum + weights.of[index]!, 0);
         return weights.total > 0 && matched / weights.total >= RARE_CONCEPT_WEIGHT_SHARE;
       });
     }
@@ -11408,15 +11789,16 @@ export class LocalConnectorStore {
    * weighs the most, so the question's missing words still count against a
    * partial match.
    */
-  private conceptWeights(groups: ReadonlyArray<readonly string[]>, exact: ReadonlyMap<string, unknown>): { of: number[]; total: number } {
+  private conceptWeights(groups: ReadonlyArray<readonly string[]>, exact: ReadonlyMap<string, unknown>): { of: number[]; total: number; counts: number[]; population: number } {
     const items = (this.db.query('SELECT COUNT(*) AS count FROM items WHERE tombstoned = 0').get() as { count: number }).count;
-    const of = groups.map((group) => {
+    const counts = groups.map((group) => {
       const { count } = this.db.query(
         'SELECT COUNT(DISTINCT item_pk) AS count FROM connector_store_fts WHERE connector_store_fts MATCH ?',
       ).get(sourceIndexFtsGroupQuery(group, exact)) as { count: number };
-      return Math.max(0, Math.log((items + 1) / (count + 0.5)));
+      return count;
     });
-    return { of, total: of.reduce((sum, weight) => sum + weight, 0) };
+    const of = counts.map((count) => Math.max(0, Math.log((items + 1) / (count + 0.5))));
+    return { of, total: of.reduce((sum, weight) => sum + weight, 0), counts, population: items };
   }
 
   /**
@@ -11807,37 +12189,234 @@ export class LocalConnectorStore {
     return !current || current.dev !== this.openedFile.dev || current.ino !== this.openedFile.ino;
   }
 
-  /** Fail-safe decisions with no readable content: the count and the problem list share this query. */
-  settledUnreadableItems(scope?: ConnectorStoreStatusScope): ExtractionUnreadableItem[] {
+  /**
+   * Builds, a turn at a time, what a status snapshot reuses (the hidden-copy
+   * set and the settled-unreadable count) when it has not been built yet, so
+   * the snapshot's `status(..., { countsMaxAgeMs })` that follows finds both
+   * and does not rebuild them in one go. The first status after a start did,
+   * about a tenth of the sampled freezes on Sparta (2026-11-05, b826b19).
+   */
+  async prepareStatusCounts(scope?: ConnectorStoreStatusScope): Promise<void> {
+    if (!this.tierHiddenCountsMemo) await this.refreshTierHiddenCountsInTurns();
+    const key = JSON.stringify(scope ?? null);
+    if (!this.settledUnreadableCountMemo?.has(key)) {
+      try {
+        const count = (await runStepsInTurns(this.settledUnreadableRowsSteps(scope, { withoutSecretsOverrides: true }))).length;
+        const memos = this.settledUnreadableCountMemo ??= new Map();
+        if (memos.size > 32) memos.clear();
+        memos.set(key, { at: Date.now(), count });
+      } catch {
+        // A closed or busy store: the status read counts it itself.
+      }
+    }
+  }
+
+  /** How many settled unreadable items the counts show, reused up to `maxAgeMs` per scope. */
+  private settledUnreadableCount(scope: ConnectorStoreStatusScope | undefined, maxAgeMs: number): number {
+    const key = JSON.stringify(scope ?? null);
+    const memos = this.settledUnreadableCountMemo ??= new Map();
+    const memo = memos.get(key);
+    if (maxAgeMs > 0 && memo) {
+      // As the hidden-copy set: an older count is served while a new one is
+      // counted in turns (refreshTierHiddenCountsInTurns).
+      if (Date.now() - memo.at >= maxAgeMs) this.refreshSettledUnreadableCountInTurns(key, scope);
+      return memo.count;
+    }
+    const count = runSteps(this.settledUnreadableRowsSteps(scope, { withoutSecretsOverrides: true })).length;
+    if (memos.size > 32) memos.clear();
+    memos.set(key, { at: Date.now(), count });
+    return count;
+  }
+
+  private settledUnreadableCountRefresh: Set<string> | undefined;
+
+  private refreshSettledUnreadableCountInTurns(key: string, scope: ConnectorStoreStatusScope | undefined): void {
+    const running = this.settledUnreadableCountRefresh ??= new Set();
+    if (running.has(key)) return;
+    running.add(key);
+    void (async () => {
+      try {
+        const count = (await runStepsInTurns(this.settledUnreadableRowsSteps(scope, { withoutSecretsOverrides: true }))).length;
+        const memos = this.settledUnreadableCountMemo ??= new Map();
+        if (memos.size > 32) memos.clear();
+        memos.set(key, { at: Date.now(), count });
+      } catch {
+        // A closed or busy store: the older count stands until the next ask.
+      } finally {
+        running.delete(key);
+      }
+    })();
+  }
+
+  // Made on first use: a class-field initializer is a load-time side effect
+  // that pulls this module into the plugin bundle (plugin-bundle-no-bun-sqlite).
+  private settledUnreadableCountMemo: Map<string, { at: number; count: number }> | undefined;
+
+  private extractionEnded: ((identity: TierLedgerIdentity) => boolean) | undefined;
+
+  /**
+   * Whether an item's extraction has ended (a job ran and none is owed). The
+   * worker sets it on file stores only. A file kept Private before its text
+   * was read is waiting, not unreadable, until then, so the count and the
+   * list leave it out (2026-11-04: 7,249 Dropbox files waiting for
+   * extraction read as "could not be read"). Without a probe every settled
+   * item counts.
+   */
+  setExtractionEndedProbe(probe: ((identity: TierLedgerIdentity) => boolean) | undefined): void {
+    this.extractionEnded = probe;
+    this.settledUnreadableCountMemo = undefined;
+  }
+
+  /**
+   * The settled-unreadable copies this store holds a row for, in scope. The
+   * count and the problem list share it; the count asks the ledger to leave
+   * out items the owner marked Secrets in the same read, instead of one
+   * lookup per item (Sparta, 2026-11-04: 1.7-2.9 s of a status build).
+   */
+  private *settledUnreadableRowsSteps(
+    scope: ConnectorStoreStatusScope | undefined,
+    options: { withoutSecretsOverrides?: boolean } = {},
+  ): Generator<void, Array<{ identity: TierLedgerIdentity; row: { local_item_id: string; title: string | null; source_version: string | null } }>> {
     if (scope?.itemsAllowed === false || scope?.contentAllowed === false) return [];
     const ledger = this.visibilityLedger();
     if (!ledger) return [];
-    const identities = ledger.corpusCopyIdentities(this.corpusId, 'metadata_layer_settled_unreadable');
+    // A page of copies at a time: one read of every metadata-only copy was a
+    // tenth of Sparta's sampled freezes (34b0edb, 2026-11-05).
+    const identities = yield* ledger.corpusCopyIdentitiesSteps(this.corpusId, options.withoutSecretsOverrides
+      ? 'metadata_layer_settled_unreadable_not_secret'
+      : 'metadata_layer_settled_unreadable');
     const filters = connectorStoreFilterSql(scope?.contentFilters ?? scope?.itemFilters);
     const account = normalizeOptionalAccountScope(scope?.accountScope);
-    const lookup = this.db.query(`SELECT i.local_item_id, i.title, i.source_version FROM items i
-      WHERE i.tombstoned = 0 AND i.provider = ? AND i.account_scope = ? AND i.provider_item_id = ?
-        AND COALESCE(i.provider_conversation_id, '') = ?
-        ${account ? 'AND i.account_scope = ?' : ''} ${filters.sql}`);
-    const out: ExtractionUnreadableItem[] = [];
-    for (const identity of identities) {
-      const override = ledger.getOverride(identity);
-      if (override?.kind === 'tier' && override.tier === 'secrets') continue;
-      const row = lookup.get(identity.provider, identity.accountScope, identity.providerItemId,
-        identity.providerConversationId ?? '', ...(account ? [account] : []), ...filters.params) as
-        { local_item_id: string; title: string | null; source_version: string | null } | null;
-      const record = ledger.getCurrent(identity);
-      if (!row || !record) continue;
-      out.push({ ref: { corpusId: this.corpusId, provider: identity.provider, accountScope: identity.accountScope,
-        providerItemId: identity.providerItemId, localItemId: row.local_item_id,
-        approvedScopeKey: `${identity.provider}.${identity.accountScope}`,
-        ...(row.title ? { name: row.title } : {}), ...(row.source_version ? { sourceVersion: row.source_version } : {}) },
-        failedAt: record.decidedAt });
+    const ended = this.extractionEnded;
+    const rows = yield* this.itemRowsForIdentitiesSteps(identities, (identity) => identity.providerConversationId ?? '', {
+      // A child whose source said it has no bytes (media an export left out, a
+      // chat file the capture did not keep) was never a file Olympus failed to
+      // read: the archive's Not imported list says so, once, for all of them.
+      // Listing each as "can't be read" made thousands of rows of one fact
+      // (Sparta, 2026-11-04: 5,453 Telegram photos and videos).
+      // (A read-only store from before schema v15 has no such column, and no such children.)
+      sql: `${this.childItemColumnsPresent ? 'AND COALESCE(i.bytes_available, 1) <> 0' : ''} ${account ? 'AND i.account_scope = ?' : ''} ${filters.sql}`,
+      params: [...(account ? [account] : []), ...filters.params],
+    });
+    return rows.map((row) => ({ identity: identities[row.idx]!, row }))
+      .filter(({ identity }) => !ended || ended(identity));
+  }
+
+  /**
+   * This store's live rows for ledger identities, in ONE query: the
+   * identities travel as one JSON parameter and SQLite looks each up in the
+   * identity index itself. A loop of per-identity reads cost tens of
+   * thousands of round trips per status build (Sparta, 2026-11-04: about
+   * 2 s each for the hidden-copy set and the unreadable count). Matches on
+   * normalized_conversation, the stored column the identity index holds; an
+   * expression there left SQLite scanning every item per identity
+   * (2026-11-03). `idx` is the identity's position in the input.
+   */
+  // The same rows as itemRowsForIdentities, looked up a slice at a time with a
+  // step between slices; `idx` still indexes the whole list.
+  private *itemRowsForIdentitiesSteps<T extends { provider: string; accountScope: string; providerItemId: string }>(
+    identities: readonly T[],
+    conversationOf: (identity: T) => string,
+    extra: { sql: string; params: readonly string[] } = { sql: '', params: [] },
+  ): Generator<void, Array<{ idx: number; item_pk: number; local_item_id: string; title: string | null; source_version: string | null }>> {
+    const out: Array<{ idx: number; item_pk: number; local_item_id: string; title: string | null; source_version: string | null }> = [];
+    for (let offset = 0; offset < identities.length; offset += IDENTITY_LOOKUP_SLICE) {
+      if (offset > 0) yield;
+      for (const row of this.itemRowsForIdentities(identities.slice(offset, offset + IDENTITY_LOOKUP_SLICE), conversationOf, extra)) {
+        row.idx += offset;
+        out.push(row);
+      }
     }
     return out;
   }
 
-  status(scope?: ConnectorStoreStatusScope): ConnectorStoreStatus {
+  private itemRowsForIdentities<T extends { provider: string; accountScope: string; providerItemId: string }>(
+    identities: readonly T[],
+    conversationOf: (identity: T) => string,
+    extra: { sql: string; params: readonly string[] } = { sql: '', params: [] },
+  ): Array<{ idx: number; item_pk: number; local_item_id: string; title: string | null; source_version: string | null }> {
+    if (identities.length === 0) return [];
+    const keys = JSON.stringify(identities.map((identity) =>
+      [identity.provider, identity.accountScope, conversationOf(identity), identity.providerItemId]));
+    return this.db.query(identityRowsSql(extra.sql)).all(keys, ...extra.params) as Array<{ idx: number; item_pk: number; local_item_id: string; title: string | null; source_version: string | null }>;
+  }
+
+  /** Fail-safe decisions with no readable content: the count and the problem list share this query. */
+  settledUnreadableItems(scope?: ConnectorStoreStatusScope): ExtractionUnreadableItem[] {
+    return runSteps(this.settledUnreadableItemsSteps(scope));
+  }
+
+  /**
+   * `settledUnreadableItems` with a turn between slices, for the dashboard's
+   * problem list: built in one go on each read it was about a quarter of
+   * Sparta's sampled freezes (2026-11-05, fe2aef4).
+   */
+  settledUnreadableItemsInTurns(scope?: ConnectorStoreStatusScope): Promise<ExtractionUnreadableItem[]> {
+    return runStepsInTurns(this.settledUnreadableItemsSteps(scope));
+  }
+
+  private *settledUnreadableItemsSteps(scope?: ConnectorStoreStatusScope): Generator<void, ExtractionUnreadableItem[]> {
+    if (scope?.itemsAllowed === false || scope?.contentAllowed === false) return [];
+    const ledger = this.visibilityLedger();
+    if (!ledger) return [];
+    const matched = yield* this.settledUnreadableRowsSteps(scope);
+    const out: ExtractionUnreadableItem[] = [];
+    for (let index = 0; index < matched.length; index += 1) {
+      if (index > 0 && index % SETTLED_UNREADABLE_ITEMS_SLICE === 0) yield;
+      const { identity, row } = matched[index]!;
+      const override = ledger.getOverride(identity);
+      if (override?.kind === 'tier' && override.tier === 'secrets') continue;
+      const record = ledger.getCurrent(identity);
+      if (!record) continue;
+      out.push({ ref: { corpusId: this.corpusId, provider: identity.provider, accountScope: identity.accountScope,
+        providerItemId: identity.providerItemId, localItemId: row.local_item_id,
+        approvedScopeKey: `${identity.provider}.${identity.accountScope}`,
+        ...(row.title ? { name: row.title } : {}), ...(row.source_version ? { sourceVersion: row.source_version } : {}) },
+        // Kept Private before its text was read: unreadable-files.ts UNREAD_PRIVACY_CHECK_MISSING_KIND.
+        failedAt: record.decidedAt, errorKind: 'privacy_check_missing' });
+    }
+    return out;
+  }
+
+  /**
+   * `countsMaxAgeMs`: for a status snapshot only, the hidden-copy set and the
+   * settled-unreadable count behind these counts may be reused up to this old
+   * (see STATUS_COUNTS_MAX_AGE_MS). Left out, every count is current.
+   */
+  status(scope?: ConnectorStoreStatusScope, options: { countsMaxAgeMs?: number } = {}): ConnectorStoreStatus {
+    const steps = this.statusSteps(scope, options);
+    let step = steps.next();
+    while (!step.done) {
+      const read = step.value;
+      const query = this.db.query(read.sql);
+      step = steps.next(read.mode === 'all' ? query.all(...(read.params as SQLQueryBindings[])) : query.get(...(read.params as SQLQueryBindings[])));
+    }
+    return step.value;
+  }
+
+  /**
+   * status() with its whole-store counts read on the second thread
+   * (off-thread-reads.ts): the same queries, so the same counts, without
+   * holding this thread for the seconds they take on a large store (#870).
+   * Where that thread cannot read this store, it is status() itself.
+   */
+  async statusOffThread(
+    scope?: ConnectorStoreStatusScope,
+    options: { countsMaxAgeMs?: number } = {},
+  ): Promise<ConnectorStoreStatus> {
+    if (!offThreadReadsAvailable(this.dbPath)) return this.status(scope, options);
+    return withOffThreadSnapshot(this.dbPath, async (read) => {
+      const steps = this.statusSteps(scope, options);
+      let step = steps.next();
+      while (!step.done) step = steps.next(await read(step.value));
+      return step.value;
+    });
+  }
+
+  private *statusSteps(
+    scope: ConnectorStoreStatusScope | undefined,
+    options: { countsMaxAgeMs?: number },
+  ): Generator<StoreRead, ConnectorStoreStatus, unknown> {
     const accountScope = normalizeOptionalAccountScope(scope?.accountScope);
     const itemFilters = connectorStoreFilterSql(scope?.itemFilters);
     const contentFilters = connectorStoreFilterSql(scope?.contentFilters);
@@ -11845,7 +12424,7 @@ export class LocalConnectorStore {
     // never counted, and neither they nor items pending classification are in
     // the parity denominator. A store without routed copies gets exactly the
     // pre-P1b queries (the fragments below are empty).
-    const tier = this.tierHiddenItemPks();
+    const tier = this.tierHiddenItemPks({ countsMaxAgeMs: options.countsMaxAgeMs ?? 0 });
     // Each list is ONE JSON parameter, so no count of routed copies can hit
     // SQLite's bound-parameter ceiling.
     const hiddenNotIn = tier.hidden.length > 0
@@ -11854,7 +12433,19 @@ export class LocalConnectorStore {
     const heldNotIn = tier.held.length > 0
       ? 'AND i.item_pk NOT IN (SELECT value FROM json_each(?))'
       : '';
-    const namesOnlyNotIn = tier.metadataLayer.length > 0
+    // Every query that excludes names-only copies counts chunks or vectors, so
+    // only names-only items that still hold a chunk or a vector can change its
+    // result. Narrowing the list once here keeps those queries from each
+    // building a lookup of every names-only item: on a names-only archive of
+    // about 100k items that was most of each status freeze (Sparta, 2026-11-04).
+    const namesOnlyWithText = tier.metadataLayer.length > 0
+      ? ((yield { sql: `
+          SELECT j.value AS pk FROM json_each(?) j
+          WHERE EXISTS (SELECT 1 FROM chunks c WHERE c.item_pk = j.value)
+            OR EXISTS (SELECT 1 FROM chunk_embeddings emb WHERE emb.item_pk = j.value)
+        `, params: [JSON.stringify(tier.metadataLayer)], mode: 'all' }) as Array<{ pk: number }>).map((row) => row.pk)
+      : [];
+    const namesOnlyNotIn = namesOnlyWithText.length > 0
       ? 'AND i.item_pk NOT IN (SELECT value FROM json_each(?))'
       : '';
     const itemWhere = `${scope?.itemsAllowed === false ? 'AND 0' : ''}
@@ -11888,7 +12479,7 @@ export class LocalConnectorStore {
       ...(accountScope ? [accountScope] : []),
       ...contentFilters.params,
       ...jsonList(tier.hidden),
-      ...jsonList(tier.metadataLayer),
+      ...jsonList(namesOnlyWithText),
     ];
     const parityParams = [...contentParams, ...jsonList(tier.held)];
     const fileScopeParams = [
@@ -11911,86 +12502,95 @@ export class LocalConnectorStore {
           AND NOT EXISTS (SELECT 1 FROM chunks oc WHERE oc.item_pk = i.item_pk))`
       : undefined;
     const outsideWindowParams = outsideWindowSql ? [new Date(contentNotBeforeMs).toISOString()] : [];
-    const counts = this.db.query(`
+    // Every per-item count in ONE pass over the items: each scope test (the
+    // locator path patterns above all) is worked out once per row instead of
+    // once per count. Seven separate passes were about 0.8 s on a 104k-item
+    // store with folder scopes (Sparta, 2026-11-04: 2.8 s every 2 minutes).
+    // MATERIALIZED keeps SQLite from copying each test back into every SUM.
+    const itemCounts = (yield { sql: `
+      WITH flags AS MATERIALIZED (
+        SELECT
+          i.tombstoned AS t,
+          LOWER(i.mime_type) = 'inode/directory' AS dir,
+          (1 ${itemWhere}) AS in_items,
+          (1 ${hiddenNotIn}) AS stored,
+          i.item_pk IN (SELECT value FROM json_each(?)) AS elsewhere,
+          (1 ${fileScopeWhere}) AS in_file_scope
+        FROM items i
+      )
       SELECT
-        (SELECT COUNT(*) FROM items i WHERE i.tombstoned = 0 ${itemWhere}) AS items,
-        (SELECT COUNT(*) FROM items i WHERE i.tombstoned = 0 ${hiddenNotIn}) AS stored_items,
-        (SELECT COUNT(*) FROM items i WHERE i.tombstoned = 0 ${itemWhere}
-          AND i.item_pk IN (SELECT value FROM json_each(?))) AS content_elsewhere_items,
-        (SELECT COUNT(*) FROM items i WHERE i.tombstoned = 0
-          AND LOWER(i.mime_type) <> 'inode/directory' ${itemWhere}) AS files,
-        (SELECT COUNT(*) FROM items i WHERE i.tombstoned = 0
-          AND LOWER(i.mime_type) = 'inode/directory' ${itemWhere}) AS folders,
-        (SELECT COUNT(*) FROM items i WHERE i.tombstoned = 1 ${itemWhere}) AS tombstoned_items,
-        (SELECT COUNT(*) FROM chunks c JOIN items i ON i.item_pk = c.item_pk
-          WHERE i.tombstoned = 0 ${parityWhere}) AS chunks,
-        (SELECT COUNT(*)
-          FROM chunk_embeddings emb
-          JOIN chunks c ON c.chunk_pk = emb.chunk_pk
-          JOIN items i ON i.item_pk = emb.item_pk
-          WHERE i.tombstoned = 0 AND emb.content_hash = c.embedding_input_hash
-            ${parityWhere}
-        ) AS embedded_chunks,
-        (SELECT COUNT(*) FROM sync_runs
-          WHERE connector_id NOT IN ${NON_SYNC_RUN_CONNECTORS_SQL}
-        ) AS sync_runs,
-        -- EXISTS rather than COUNT(DISTINCT ...) so the per-item probe stops at
-        -- the first chunk row instead of walking every chunk of every item.
-        (SELECT COUNT(*) FROM items i
-          WHERE i.tombstoned = 0
-            AND EXISTS (SELECT 1 FROM chunks c WHERE c.item_pk = i.item_pk)
-            ${contentWhere}
-        ) AS items_with_text,
-        (SELECT COUNT(*) FROM items i
-          WHERE i.tombstoned = 0
-            AND LOWER(i.mime_type) <> 'inode/directory'
-            ${fileScopeWhere}
-        ) AS full_ingestion_files
-    `).get(
+        COALESCE(SUM(t = 0 AND in_items), 0) AS items,
+        COALESCE(SUM(t = 0 AND stored), 0) AS stored_items,
+        COALESCE(SUM(t = 0 AND in_items AND elsewhere), 0) AS content_elsewhere_items,
+        COALESCE(SUM(t = 0 AND in_items AND NOT dir), 0) AS files,
+        COALESCE(SUM(t = 0 AND in_items AND dir), 0) AS folders,
+        COALESCE(SUM(t = 1 AND in_items), 0) AS tombstoned_items,
+        COALESCE(SUM(t = 0 AND NOT dir AND in_file_scope), 0) AS full_ingestion_files
+      FROM flags
+    `, params: [
       ...itemParams,
       ...jsonList(tier.hidden),
-      ...itemParams, JSON.stringify(keptNamesOnlyPks),
-      ...itemParams,
-      ...itemParams,
-      ...itemParams,
-      ...parityParams,
-      ...parityParams,
-      ...contentParams,
+      JSON.stringify(keptNamesOnlyPks),
       ...fileScopeParams,
-    ) as {
+    ], mode: 'get' }) as {
       items: number;
       stored_items: number;
       content_elsewhere_items: number;
       files: number;
       folders: number;
       tombstoned_items: number;
-      chunks: number;
-      embedded_chunks: number;
-      sync_runs: number;
-      items_with_text: number;
       full_ingestion_files: number;
     };
+    const textCounts = (yield { sql: `
+      SELECT
+        -- CROSS JOIN keeps chunks and vectors as the outer loop: with items
+        -- outer, the scope tests ran on every item, chunk or not.
+        (SELECT COUNT(*) FROM chunks c CROSS JOIN items i ON i.item_pk = c.item_pk
+          WHERE i.tombstoned = 0 ${parityWhere}) AS chunks,
+        (SELECT COUNT(*)
+          FROM chunk_embeddings emb
+          CROSS JOIN chunks c ON c.chunk_pk = emb.chunk_pk
+          CROSS JOIN items i ON i.item_pk = emb.item_pk
+          WHERE i.tombstoned = 0 AND emb.content_hash = c.embedding_input_hash
+            ${parityWhere}
+        ) AS embedded_chunks,
+        (SELECT COUNT(*) FROM sync_runs
+          WHERE connector_id NOT IN ${NON_SYNC_RUN_CONNECTORS_SQL}
+        ) AS sync_runs,
+        -- Driven from the items that hold a chunk, so the scope tests run only
+        -- on those rows, not on every names-only item.
+        (SELECT COUNT(*) FROM (SELECT DISTINCT item_pk FROM chunks) ck
+          CROSS JOIN items i ON i.item_pk = ck.item_pk
+          WHERE i.tombstoned = 0
+            ${contentWhere}
+        ) AS items_with_text
+    `, params: [
+      ...parityParams,
+      ...parityParams,
+      ...contentParams,
+    ], mode: 'get' }) as { chunks: number; embedded_chunks: number; sync_runs: number; items_with_text: number };
+    const counts = { ...itemCounts, ...textCounts };
     // Of the files the scope reads in full, the ones the window keeps as names
     // only. Counted before the policy pass so a row is never both.
     const outsideContentWindowItems = outsideWindowSql
-      ? (this.db.query(`
+      ? ((yield { sql: `
           SELECT COUNT(*) AS n FROM items i
           WHERE i.tombstoned = 0
             AND LOWER(i.mime_type) <> 'inode/directory'
             ${fileScopeWhere}
             AND ${outsideWindowSql}
-        `).get(...fileScopeParams, ...outsideWindowParams) as { n: number }).n
+        `, params: [...fileScopeParams, ...outsideWindowParams], mode: 'get' }) as { n: number }).n
       : 0;
     let policyDeferredItems = 0;
     if (fileScoped && scope?.contentAllowed !== false && counts.full_ingestion_files > 0) {
-      const rows = this.db.query(`
+      const rows = (yield { sql: `
         SELECT i.locator_uri, i.title, i.mime_type
         FROM items i
         WHERE i.tombstoned = 0
           AND LOWER(i.mime_type) <> 'inode/directory'
           ${fileScopeWhere}
           ${outsideWindowSql ? `AND NOT ${outsideWindowSql}` : ''}
-      `).all(...fileScopeParams, ...outsideWindowParams) as Array<{
+      `, params: [...fileScopeParams, ...outsideWindowParams], mode: 'all' }) as Array<{
         locator_uri: string | null;
         title: string | null;
         mime_type: string | null;
@@ -12008,7 +12608,7 @@ export class LocalConnectorStore {
     }
     // Parity per model. The inner probe is a primary-key lookup on
     // (chunk_pk, model_id), so it stays an indexed point read per chunk.
-    const byModel = this.db.query(`
+    const byModel = (yield { sql: `
       SELECT
         m.model_id AS model_id,
         (SELECT COUNT(*)
@@ -12040,35 +12640,28 @@ export class LocalConnectorStore {
         WHERE i.tombstoned = 0 ${contentWhere}
       ) m
       ORDER BY m.model_id
-    `).all(
+    `, params: [
       ...parityParams,
       ...parityParams,
       ...contentParams,
-    ) as Array<{ model_id: string; embedded_chunks: number; items_embedded: number }>;
+    ], mode: 'all' }) as Array<{ model_id: string; embedded_chunks: number; items_embedded: number }>;
     const tierStatus: ConnectorStoreTierStatus | undefined = tier.hidden.length > 0 || tier.held.length > 0
       || tier.moving > 0 || tier.metadataLayer.length > 0
       ? {
           pendingClassificationItems: tier.held.length,
           supersededChunks: tier.hidden.length > 0
-            ? (this.db.query(`
+            ? ((yield { sql: `
                 SELECT COUNT(*) AS n FROM chunks WHERE item_pk IN (SELECT value FROM json_each(?))
-              `).get(JSON.stringify(tier.hidden)) as { n: number }).n
+              `, params: [JSON.stringify(tier.hidden)], mode: 'get' }) as { n: number }).n
             : 0,
           tierMoveInProgress: tier.moving,
-          ...namesOnlyKept(this.db, tier.metadataLayer),
+          ...namesOnlyKeptCount(namesOnlyWithText.length > 0
+            ? ((yield { sql: NAMES_ONLY_KEPT_SQL, params: [JSON.stringify(namesOnlyWithText)], mode: 'get' }) as { n: number }).n
+            : 0),
         }
       : undefined;
-    const settledUnreadableItems = this.settledUnreadableItems(scope).length;
-    // "Last" means most-recently-inserted. started_at has only millisecond
-    // resolution, so two runs in the same tick tie on it; sync_run_id is a
-    // random UUID, so tie-breaking on it picks a run at random (an
-    // order-dependent flake in status().lastSyncRun). rowid is monotonic with
-    // insertion, so it breaks the tie by true recency.
-    const last = this.db.query(
-      `SELECT * FROM sync_runs
-       WHERE connector_id NOT IN ${NON_SYNC_RUN_CONNECTORS_SQL}
-       ORDER BY started_at DESC, rowid DESC LIMIT 1`,
-    ).get() as SyncRunRow | null;
+    const settledUnreadableItems = this.settledUnreadableCount(scope, options.countsMaxAgeMs ?? 0);
+    const last = this.lastSyncRun();
     return {
       corpusId: this.corpusId,
       family: this.family,
@@ -12105,8 +12698,27 @@ export class LocalConnectorStore {
         itemsEmbedded: row.items_embedded,
       })),
       ...(tierStatus ? { tier: tierStatus } : {}),
-      ...(last ? { lastSyncRun: syncRunFromRow(last) } : {}),
+      ...(last ? { lastSyncRun: last } : {}),
     };
+  }
+
+  /**
+   * The store's most recent run, as `status().lastSyncRun` reports it, without
+   * the rest of status: schedulers ask this on every status read, and a full
+   * status of a large tiered store is seconds of reads (Sparta, 2026-11-04).
+   */
+  lastSyncRun(): ConnectorStoreSyncRun | undefined {
+    // "Last" means most-recently-inserted. started_at has only millisecond
+    // resolution, so two runs in the same tick tie on it; sync_run_id is a
+    // random UUID, so tie-breaking on it picks a run at random (an
+    // order-dependent flake in status().lastSyncRun). rowid is monotonic with
+    // insertion, so it breaks the tie by true recency.
+    const last = this.db.query(
+      `SELECT * FROM sync_runs
+       WHERE connector_id NOT IN ${NON_SYNC_RUN_CONNECTORS_SQL}
+       ORDER BY started_at DESC, rowid DESC LIMIT 1`,
+    ).get() as SyncRunRow | null;
+    return last ? syncRunFromRow(last) : undefined;
   }
 
   syncRun(syncRunId: string): ConnectorStoreSyncRun | undefined {
@@ -12423,7 +13035,7 @@ export function createConnectorStoreCorpusAdapter(
       }
       const lanes = [
         { name: 'keyword', items: rows },
-        { name: 'recency', items: recencyRows },
+        { name: 'recency', items: recencyRows, weight: CHAT_RECENCY_WEIGHT },
       ];
       const fused = fuseRankedCandidateLanes({
         lanes,
@@ -12629,6 +13241,7 @@ export function createConnectorStoreCorpusAdapter(
 // (capability-not-source): any chat connector store gets it, none of the
 // document/note families pay for it.
 const CHAT_RECENCY_LANE_LIMIT = 8;
+const CHAT_RECENCY_WEIGHT = 0.25;
 // RRF alone cannot guarantee the newest message survives the final cut: when
 // the query matches many items, older recent+matching candidates are
 // dual-lane and outscore a single-lane fresh arrival. The newest messages
@@ -12691,7 +13304,7 @@ function withPinnedNewestChatHits(input: {
   locatorPathScope?: string;
 }): SourceIndexSearchHit[] {
   const limit = Math.max(1, Math.min(Math.floor(input.limit), MAX_SEARCH_RESULTS));
-  const pinCount = Math.min(CHAT_RECENCY_PIN_COUNT, limit, input.recencyRows.length);
+  const pinCount = Math.min(CHAT_RECENCY_PIN_COUNT, input.hits.length ? limit - 1 : limit, input.recencyRows.length);
   if (pinCount === 0) return input.hits;
   const result = [...input.hits];
   const present = new Set(result.map((hit) => hit.sourceItem.localItemId));
@@ -12702,7 +13315,7 @@ function withPinnedNewestChatHits(input: {
     result.push(connectorStoreHitFromRow(
       input.store,
       row,
-      reciprocalRank(index + 1),
+      CHAT_RECENCY_WEIGHT * reciprocalRank(index + 1),
       input.resultProjector,
       input.locatorPathScope,
     ));
@@ -12792,7 +13405,7 @@ async function hybridConnectorStoreSearch(
   const lanes = [
     { name: 'keyword', items: keywordRows },
     { name: 'vector', items: vectorRows },
-    ...(recencyRows.length > 0 ? [{ name: 'recency', items: recencyRows }] : []),
+    ...(recencyRows.length > 0 ? [{ name: 'recency', items: recencyRows, weight: CHAT_RECENCY_WEIGHT }] : []),
   ];
   const fused = fuseRankedCandidateLanes({
     lanes,
@@ -14107,10 +14720,9 @@ export function tierRowVisible(
 }
 
 /** Chunks held by names-only copies, as a status field present only when non-zero. */
-function namesOnlyKept(db: Database, itemPks: readonly number[]): { namesOnlyKeptChunks?: number } {
-  if (itemPks.length === 0) return {};
-  const n = (db.query('SELECT COUNT(*) AS n FROM chunks WHERE item_pk IN (SELECT value FROM json_each(?))')
-    .get(JSON.stringify(itemPks)) as { n: number }).n;
+const NAMES_ONLY_KEPT_SQL = 'SELECT COUNT(*) AS n FROM chunks WHERE item_pk IN (SELECT value FROM json_each(?))';
+
+function namesOnlyKeptCount(n: number): { namesOnlyKeptChunks?: number } {
   return n > 0 ? { namesOnlyKeptChunks: n } : {};
 }
 
@@ -14717,6 +15329,42 @@ export function normalizeConnectorStoreSearchFilters(
   return Object.keys(normalized).length > 0 ? normalized : undefined;
 }
 
+/**
+ * Whether a targeted identity cannot name one store row. A chat repeats
+ * message ids across its conversations, so an identity that names its
+ * conversation and matches exactly one row there is that row, whatever other
+ * conversations hold (Sparta, 2026-11-04: 548 chat media items were
+ * refused their text). An identity with no conversation still refuses when
+ * the id is held more than once: it could mean any of them.
+ */
+function identityAmbiguous(
+  identity: { providerConversationId?: string },
+  counts: { matching_provider_id_rows: number; exact_identity_rows: number },
+): boolean {
+  if (counts.matching_provider_id_rows <= 1) return false;
+  return normalizeConversationId(identity.providerConversationId) === '' || counts.exact_identity_rows !== 1;
+}
+
+/**
+ * The one-query lookup of ledger identities (itemRowsForIdentities). CROSS
+ * JOIN fixes the order: the identities drive, and each probes the identity
+ * index. With a plain JOIN and a scope filter naming the provider, SQLite
+ * walked every item of the provider and account and scanned the whole
+ * identity list for each one, and on Sparta (2026-11-04) one status build
+ * held the worker for 796 s.
+ */
+export function identityRowsSql(extraSql: string): string {
+  return `
+      SELECT CAST(j.key AS INTEGER) AS idx, i.item_pk, i.local_item_id, i.title, i.source_version
+      FROM json_each(?) j
+      CROSS JOIN items i
+      WHERE i.provider = json_extract(j.value, '$[0]') AND i.account_scope = json_extract(j.value, '$[1]')
+        AND i.normalized_conversation = json_extract(j.value, '$[2]') AND i.provider_item_id = json_extract(j.value, '$[3]')
+        AND i.tombstoned = 0 ${extraSql}
+      ORDER BY j.key
+    `;
+}
+
 function connectorStoreFilterSql(filters: ConnectorStoreSearchFilters | undefined): {
   sql: string;
   params: Array<string>;
@@ -14765,9 +15413,9 @@ function connectorStoreFilterSql(filters: ConnectorStoreSearchFilters | undefine
     const locatorPath = normalized.locatorPathScope;
     clauses.push("AND i.locator_uri IS NOT NULL");
     if (locatorPath === '/') {
-      clauses.push("AND LOWER(i.locator_uri) LIKE '/%' ESCAPE '\\'");
+      clauses.push("AND i.locator_uri LIKE '/%' ESCAPE '\\'");
     } else {
-      clauses.push("AND (LOWER(i.locator_uri) = LOWER(?) OR LOWER(i.locator_uri) LIKE LOWER(?) ESCAPE '\\')");
+      clauses.push("AND (i.locator_uri = ? COLLATE NOCASE OR i.locator_uri LIKE ? ESCAPE '\\')");
       params.push(locatorPath, `${escapeSqlLike(locatorPath)}/%`);
     }
   }
@@ -14776,9 +15424,9 @@ function connectorStoreFilterSql(filters: ConnectorStoreSearchFilters | undefine
     clauses.push('AND i.locator_uri IS NOT NULL');
     for (const locatorPath of normalized.locatorPathScopes) {
       if (locatorPath === '/') {
-        alternatives.push("LOWER(i.locator_uri) LIKE '/%' ESCAPE '\\'");
+        alternatives.push("i.locator_uri LIKE '/%' ESCAPE '\\'");
       } else {
-        alternatives.push("(LOWER(i.locator_uri) = LOWER(?) OR LOWER(i.locator_uri) LIKE LOWER(?) ESCAPE '\\')");
+        alternatives.push("(i.locator_uri = ? COLLATE NOCASE OR i.locator_uri LIKE ? ESCAPE '\\')");
         params.push(locatorPath, `${escapeSqlLike(locatorPath)}/%`);
       }
     }
@@ -14787,9 +15435,9 @@ function connectorStoreFilterSql(filters: ConnectorStoreSearchFilters | undefine
   if (normalized.locatorPathExcludedScopes?.length) {
     for (const locatorPath of normalized.locatorPathExcludedScopes) {
       if (locatorPath === '/') {
-        clauses.push("AND NOT (LOWER(i.locator_uri) LIKE '/%' ESCAPE '\\')");
+        clauses.push("AND NOT (i.locator_uri LIKE '/%' ESCAPE '\\')");
       } else {
-        clauses.push("AND NOT (LOWER(i.locator_uri) = LOWER(?) OR LOWER(i.locator_uri) LIKE LOWER(?) ESCAPE '\\')");
+        clauses.push("AND NOT (i.locator_uri = ? COLLATE NOCASE OR i.locator_uri LIKE ? ESCAPE '\\')");
         params.push(locatorPath, `${escapeSqlLike(locatorPath)}/%`);
       }
     }
@@ -14837,9 +15485,9 @@ function connectorStoreFtsScopeSql(filters: ConnectorStoreSearchFilters | undefi
   const params: string[] = [];
   for (const locatorPath of normalized.metadataOnlyLocatorPathScopes ?? []) {
     if (locatorPath === '/') {
-      metadataOnly.push("LOWER(i.locator_uri) LIKE '/%' ESCAPE '\\'");
+      metadataOnly.push("i.locator_uri LIKE '/%' ESCAPE '\\'");
     } else {
-      metadataOnly.push("(LOWER(i.locator_uri) = LOWER(?) OR LOWER(i.locator_uri) LIKE LOWER(?) ESCAPE '\\')");
+      metadataOnly.push("(i.locator_uri = ? COLLATE NOCASE OR i.locator_uri LIKE ? ESCAPE '\\')");
       params.push(locatorPath, `${escapeSqlLike(locatorPath)}/%`);
     }
   }

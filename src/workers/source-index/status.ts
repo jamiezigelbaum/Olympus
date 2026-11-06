@@ -40,6 +40,7 @@ import type { WorkerCredentialDegradation } from '../credential-degradation.ts';
 import type { ContentExtractionThroughputSignal } from '../../core/ingestion-throughput.ts';
 import { OperationError } from '../../core/operation-error.ts';
 import { existsSync } from 'node:fs';
+import { ingestionTurn } from '../control-path-headroom.ts';
 import { SecretLocationsIndex, secretLocationsPathForStore } from '../classification/secret-locations.ts';
 
 /**
@@ -239,12 +240,18 @@ export interface SourceIndexLastRefresh {
 }
 
 export interface SourceIndexStatusHandler {
-  status(request?: SourceIndexStatusRequest): Promise<SourceIndexStatusResult>;
+  /**
+   * `snapshot.countsMaxAgeMs`: for a caller that shows or records a snapshot
+   * (the dashboard, the after-tick ingestion record), how old each store's
+   * hidden-copy set behind the counts may be. Left out, every count is current.
+   */
+  status(request?: SourceIndexStatusRequest, snapshot?: { countsMaxAgeMs?: number }): Promise<SourceIndexStatusResult>;
 }
 
 export interface SourceIndexStatusHandlerOptions {
   /** Live, deduplicated unreadable population when the problem list is wired. */
-  unreadableCount?: (corpusId: string) => number;
+  // Undefined: no recount yet, so the ledger's own count stands.
+  unreadableCount?: (corpusId: string) => number | undefined;
   /**
    * The corpora status reports. A function is read on every request, so a
    * per-tier store a tier set creates at runtime (design
@@ -298,7 +305,12 @@ export interface SourceIndexReadinessSnapshot {
 }
 
 export interface SourceIndexReadinessLedger {
-  snapshotForCorpus(corpusId: string): SourceIndexReadinessSnapshot | undefined;
+  /**
+   * `read.maxAgeMs`: the staleness this caller accepts. A ledger may answer
+   * its last snapshot within it (or older, while it takes a new one off the
+   * request path), and undefined before it has taken one.
+   */
+  snapshotForCorpus(corpusId: string, read?: { maxAgeMs?: number }): SourceIndexReadinessSnapshot | undefined;
 }
 
 export type SourceIndexStatusRetrievalAvailability =
@@ -314,6 +326,13 @@ export type SourceIndexStatusRetrievalAvailability =
  * whole-corpus counts while preserving live reads for callers that omit it.
  */
 export const DASHBOARD_READINESS_LEDGER_MAX_AGE_MS = 120_000;
+/**
+ * How long a snapshot caller reuses a store's counts (never longer than its
+ * own `countsMaxAgeMs`). Five minutes, the snapshot allowance itself: at one
+ * read a minute the counts were still a third of Sparta's freeze time
+ * (2026-11-05, 2065a89), because each read is a pass over the whole store.
+ */
+export const STORE_STATUS_REUSE_MS = 5 * 60_000;
 
 /** A live names-only policy is a status fact, not a content retrieval mode. */
 type StatusCorpusDefinition = Omit<SourceIndexCorpusDefinition, 'activationMode'> & {
@@ -329,10 +348,71 @@ export function createSourceIndexStatusHandler(
   const currentRegistry = () => staticRegistry
     ?? buildSourceIndexCorpusRegistry((options.corpusDefinitions as () => SourceIndexCorpusDefinition[])());
   const cache = new Map<string, { recordedAtMs: number; status: SourceIndexStatusCorpus }>();
+  // A store's own counts, shared by every snapshot caller (the dashboard and
+  // the scheduler's status publish) for up to STORE_STATUS_REUSE_MS: each read is a
+  // synchronous pass over the whole store, and the two callers' separate
+  // reads were most of the worker's freezes (Sparta CPU samples, 2026-11-05).
+  const storeStatusCache = new Map<string, { recordedAtMs: number; status: ConnectorStoreStatus }>();
   const nowMs = options.nowMs ?? Date.now;
+  const storeStatusKey = (store: LocalConnectorStore, statusScope: ConnectorStoreStatusScope | undefined) => JSON.stringify([store.corpusId, statusScope ?? null]);
+  const storeStatusFresh = (store: LocalConnectorStore, statusScope: ConnectorStoreStatusScope | undefined, countsMaxAgeMs: number): boolean => {
+    const reuseMs = Math.min(countsMaxAgeMs, STORE_STATUS_REUSE_MS);
+    const cached = reuseMs > 0 ? storeStatusCache.get(storeStatusKey(store, statusScope)) : undefined;
+    return cached !== undefined && nowMs() - cached.recordedAtMs <= reuseMs;
+  };
+  const storeStatus = (store: LocalConnectorStore, statusScope: ConnectorStoreStatusScope | undefined, countsMaxAgeMs: number): ConnectorStoreStatus => {
+    const reuseMs = Math.min(countsMaxAgeMs, STORE_STATUS_REUSE_MS);
+    if (reuseMs <= 0) return store.status(statusScope, { countsMaxAgeMs: 0 });
+    const key = storeStatusKey(store, statusScope);
+    const cached = storeStatusCache.get(key);
+    if (cached && nowMs() - cached.recordedAtMs <= reuseMs) return cached.status;
+    const status = store.status(statusScope, { countsMaxAgeMs });
+    storeStatusCache.set(key, { recordedAtMs: nowMs(), status });
+    return status;
+  };
+  // One off-thread refresh per store and scope at a time: a dashboard poll and
+  // the scheduler's publish that both find the counts expired share one pass.
+  const storeStatusRefreshing = new Map<string, Promise<void>>();
+  const refreshStoreStatusOffThread = (
+    store: LocalConnectorStore,
+    statusScope: ConnectorStoreStatusScope | undefined,
+    countsMaxAgeMs: number,
+  ): Promise<void> => {
+    const key = storeStatusKey(store, statusScope);
+    const running = storeStatusRefreshing.get(key);
+    if (running) return running;
+    const refresh = (async () => {
+      try {
+        const status = await store.statusOffThread(statusScope, { countsMaxAgeMs });
+        storeStatusCache.set(key, { recordedAtMs: nowMs(), status });
+      } catch {
+        // Read on this thread by statusFor, as before.
+      } finally {
+        storeStatusRefreshing.delete(key);
+      }
+    })();
+    storeStatusRefreshing.set(key, refresh);
+    return refresh;
+  };
+  // The backlog estimates beside a store's counts (embedding backlog, Private
+  // chunks withheld, unread PDFs) are whole-store passes too, and were read on
+  // every dashboard status outside that reuse: 15-20% of Sparta's sampled
+  // freezes on 14b9be8 (2026-11-05). Reused for the same window.
+  const storeReadCache = new Map<string, { recordedAtMs: number; value: unknown }>();
+  const reusedStoreRead = <T>(countsMaxAgeMs: number, key: unknown[], read: () => T): T => {
+    const reuseMs = Math.min(countsMaxAgeMs, STORE_STATUS_REUSE_MS);
+    if (reuseMs <= 0) return read();
+    const cacheKey = JSON.stringify(key);
+    const cached = storeReadCache.get(cacheKey);
+    if (cached && nowMs() - cached.recordedAtMs <= reuseMs) return cached.value as T;
+    const value = read();
+    if (storeReadCache.size > 256) storeReadCache.clear();
+    storeReadCache.set(cacheKey, { recordedAtMs: nowMs(), value });
+    return value;
+  };
 
   return {
-    async status(request: SourceIndexStatusRequest = {}): Promise<SourceIndexStatusResult> {
+    async status(request: SourceIndexStatusRequest = {}, snapshot: { countsMaxAgeMs?: number } = {}): Promise<SourceIndexStatusResult> {
       assertSupportedStatusRequest(request);
       const requestedCorpusId = request.corpus_id
         ? canonicalSourceCorpusId(request.corpus_id)
@@ -341,7 +421,7 @@ export function createSourceIndexStatusHandler(
       const corpora = currentRegistry()
         .list()
         .filter((corpus) => requestedCorpusId === undefined || corpus.corpusId === requestedCorpusId);
-      const statuses = corpora.map((declaredCorpus) => {
+      const statusFor = (declaredCorpus: (typeof corpora)[number]): SourceIndexStatusCorpus => {
         const policy = options.retrievalPolicy?.(declaredCorpus.trustDomain);
         const embeddingDisabled = policy !== undefined
           && (!policy.embeddingProfile || policy.activationMode === 'metadata_only' || policy.activationMode === 'lexical_only');
@@ -382,12 +462,12 @@ export function createSourceIndexStatusHandler(
         // it off for cheap polling, while the dashboard — whose one headline
         // percentage is computed from exactly these counts — always asks.
         const readiness = store && request.include_readiness_ledger === true
-          ? options.readinessLedger?.snapshotForCorpus(corpus.corpusId)
+          ? options.readinessLedger?.snapshotForCorpus(corpus.corpusId, maxAgeMs > 0 ? { maxAgeMs } : {})
           : undefined;
         const status = store
           ? connectorStoreStatus(
             corpus,
-            store.status(statusScope),
+            storeStatus(store, statusScope, snapshot.countsMaxAgeMs ?? 0),
             readiness?.counts,
             readiness?.contentExtractionThroughput,
             availability?.modelId,
@@ -395,20 +475,44 @@ export function createSourceIndexStatusHandler(
           )
           : configuredCorpusStatus(corpus);
         if (status.configured && request.include_readiness_ledger === true && options.unreadableCount) {
-          status.counts[UNREADABLE_ITEMS_COUNT_KEY] = options.unreadableCount(corpus.corpusId);
+          const unreadable = options.unreadableCount(corpus.corpusId);
+          if (unreadable !== undefined) status.counts[UNREADABLE_ITEMS_COUNT_KEY] = unreadable;
         }
         const enforced = withRetrievalEnforcementStatus(corpus, status, availability);
         const withBacklog = store && availability?.modelId
-          ? withEmbeddingBacklogEstimate(enforced, store, availability.modelId, availability, statusScope)
+          ? withEmbeddingBacklogEstimate(enforced, store, availability.modelId, availability, statusScope, snapshot.countsMaxAgeMs ?? 0, reusedStoreRead)
           : enforced;
         const resolved = store && corpus.family === 'file'
           ? withPdfExtractionBacklog(withBacklog, store, withBacklog.embedding_parity?.required === true
             ? availability?.modelId
-            : undefined)
+            : undefined, (read) => reusedStoreRead(snapshot.countsMaxAgeMs ?? 0, ['pdf', store.corpusId], read))
           : withBacklog;
         if (maxAgeMs > 0) cache.set(cacheKey, { recordedAtMs: nowMs(), status: resolved });
         return resolved;
-      });
+      };
+      // Each corpus's counts are synchronous SQLite reads over its whole store;
+      // read in one go they held the worker's thread for seconds on a large
+      // library (Sparta, 2026-11-03: 5–10 s freezes, about half the thread's
+      // time). A turn between corpora lets requests answer in between.
+      const statuses: SourceIndexStatusCorpus[] = [];
+      for (const declaredCorpus of corpora) {
+        await ingestionTurn();
+        // A snapshot builds the store's reused sets in turns first, so its
+        // count below does not build them in one go.
+        const store = storesByCorpusId.get(declaredCorpus.corpusId);
+        const countsMaxAgeMs = snapshot.countsMaxAgeMs ?? 0;
+        if (store && countsMaxAgeMs > 0) {
+          const statusScope = options.connectorStoreStatusScope?.(store);
+          if (!storeStatusFresh(store, statusScope, countsMaxAgeMs)) {
+            await store.prepareStatusCounts?.(statusScope);
+            // The counts themselves are read on the second thread where the
+            // store allows it (#870), and statusFor below finds them fresh.
+            // Test doubles and older stores may lack it.
+            if (typeof store.statusOffThread === 'function') await refreshStoreStatusOffThread(store, statusScope, countsMaxAgeMs);
+          }
+        }
+        statuses.push(statusFor(declaredCorpus));
+      }
       const tierClassification = options.tierClassification?.();
       let tierMigration: SourceIndexTierMigrationStatus | undefined;
       try {
@@ -712,6 +816,8 @@ function withEmbeddingBacklogEstimate<T extends SourceIndexStatusCorpus>(
   modelId: string,
   availability: SourceIndexHybridAvailability,
   scope: ConnectorStoreStatusScope | undefined,
+  countsMaxAgeMs: number,
+  reused: <R>(countsMaxAgeMs: number, key: unknown[], read: () => R) => R = (_age, _key, read) => read(),
 ): T {
   const parity = status.embedding_parity;
   if (!parity?.required) return status;
@@ -721,8 +827,12 @@ function withEmbeddingBacklogEstimate<T extends SourceIndexStatusCorpus>(
     ? { modelId, provider: availability.provider, backend: availability.backend as SourceEmbeddingBackend }
     : undefined;
   // The same scoped population as the parity counts above (store.status(scope)).
-  const backlog = store.embeddingBacklogEstimate(modelId, embedder, scope);
-  const withheld = embedder ? store.privateTierEmbeddingWithheld(embedder, scope) : undefined;
+  const backlog = reused(countsMaxAgeMs, ['embedding-backlog', store.corpusId, modelId, embedder ?? null, scope ?? null],
+    () => store.embeddingBacklogEstimate(modelId, embedder, scope, { countsMaxAgeMs }));
+  const withheld = embedder
+    ? reused(countsMaxAgeMs, ['private-withheld', store.corpusId, embedder, scope ?? null],
+      () => store.privateTierEmbeddingWithheld(embedder, scope, { countsMaxAgeMs }))
+    : undefined;
   const { source } = embeddingModelEstimate(modelId);
   return {
     ...status,
@@ -755,8 +865,9 @@ function withPdfExtractionBacklog<T extends SourceIndexStatusCorpus>(
   status: T,
   store: LocalConnectorStore,
   modelId: string | undefined,
+  reused: <R>(read: () => R) => R = (read) => read(),
 ): T {
-  const backlog = store.pdfExtractionBacklog();
+  const backlog = reused(() => store.pdfExtractionBacklog());
   if (backlog.pendingPdfs === 0 && backlog.extractedPdfs === 0) return status;
   const averageChars = backlog.extractedPdfs > 0
     ? backlog.extractedChars / backlog.extractedPdfs

@@ -9,6 +9,7 @@ export type { SourceIndexCandidateId } from './types.ts';
 export interface RankedCandidateLane<T> {
   name: string;
   items: readonly T[];
+  weight?: number;
 }
 
 export interface FusedRankedCandidate<T> {
@@ -136,14 +137,14 @@ export function fuseRankedCandidateLanes<T>(
       const existing = candidates.get(id);
       if (existing) {
         existing.laneRanks.set(lane.name, rank);
-        existing.score += reciprocalRank(rank, rrfK);
+        existing.score += (lane.weight ?? 1) * reciprocalRank(rank, rrfK);
         return;
       }
 
       candidates.set(id, {
         id,
         item,
-        score: reciprocalRank(rank, rrfK),
+        score: (lane.weight ?? 1) * reciprocalRank(rank, rrfK),
         laneRanks: new Map([[lane.name, rank]]),
       });
     });

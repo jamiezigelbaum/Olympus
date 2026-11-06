@@ -202,6 +202,44 @@ describe('canonical Dropbox scheduler', () => {
     const failure = await extract.run().catch((error) => error);
     expect(failure).toBeInstanceOf(SourceSchedulerTaskFailure);
     expect(failure.errorKind).toBe('vlm_profile_unknown');
+    expect(failure.message).toContain('health gate');
+  });
+
+  test('says files kept failing, not the health gate, when retryable failures pause the lane', async () => {
+    const policy = defaultDropboxIngestionPolicy();
+    const source = createCanonicalDropboxSchedulerSource({
+      policy,
+      config: schedulerConfig(),
+      providerSync: stubProviderSync(),
+      store: {} as LocalConnectorStore,
+      fileExtraction: {
+        async plan() {
+          return {
+            kind: 'file_extraction_plan', corpusId: policy.corpusId, candidates: 1,
+            jobsQueued: 1, jobsExisting: 0, jobsForced: 0, jobsSkippedTooLarge: 0,
+            jobsUnroutable: 0, extractorKinds: ['local_vlm_pdf'], done: true,
+          } as unknown as Awaited<ReturnType<FileExtractionRunner['plan']>>;
+        },
+        async run() {
+          return {
+            kind: 'file_extraction_run', corpusId: policy.corpusId, provider: 'dropbox', accountScope: 'personal',
+            scopeKeyHash: 'scope', workerIdHash: 'worker', leasedJobs: 0, processedJobs: 0, abandonedLeases: 0,
+            records: [], counts: { indexed: 0, metadata_only: 0, skipped_unsupported: 0, skipped_too_large: 0,
+              blocked_policy: 0, failed_retryable: 0, failed_terminal: 0 }, paused: true,
+            pauseReason: 'consecutive_retryable_failures',
+            consecutiveRetryableFailures: 5,
+            policy: { workerPrivateSurface: true, rawSourceExposed: false, sourceTextReturned: false,
+              fileBytesPersisted: false, tempBytesCleaned: true, localOnly: true, trustDomain: 'secure_local' },
+          };
+        },
+      } as unknown as FileExtractionRunner,
+    });
+    const extract = source!.tasks.find((task) => task.kind === 'extract')!;
+    const failure = await extract.run().catch((error) => error);
+    expect(failure).toBeInstanceOf(SourceSchedulerTaskFailure);
+    expect(failure.errorKind).toBe('consecutive_retryable_failures');
+    expect(failure.message).not.toContain('health gate');
+    expect(failure.message).toContain('in a row failed to read');
   });
 });
 

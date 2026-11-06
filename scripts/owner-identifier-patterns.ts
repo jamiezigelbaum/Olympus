@@ -195,9 +195,33 @@ const PUBLIC_INSTALL_URLS = new Set([
   'https://api.github.com/repos/jamiezigelbaum/Olympus/releases/tags/v1.0.1',
   'https://github.com/jamiezigelbaum/Olympus/releases/download/v1.0.1/olympus-1.0.1.tgz',
   'https://github.com/jamiezigelbaum/Olympus/releases/tag/v1.0.1',
-  'https://api.github.com/repos/jamiezigelbaum/Olympus/releases/tags/v1.1.0',
-  'https://github.com/jamiezigelbaum/Olympus/releases/download/v1.1.0/olympus-1.1.0.tgz',
-  'https://github.com/jamiezigelbaum/Olympus/releases/tag/v1.1.0',
+  'https://api.github.com/repos/jamiezigelbaum/Olympus/releases/tags/v1.3.4',
+  'https://github.com/jamiezigelbaum/Olympus/releases/download/v1.3.4/olympus-1.3.4.tgz',
+  'https://github.com/jamiezigelbaum/Olympus/releases/tag/v1.3.4',
+]);
+
+/**
+ * README links and its banner image as absolute public-repository URLs. The
+ * README is also the plugin page in OpenClaw's Control UI and on ClawHub, where
+ * relative paths do not resolve. Exact entries only, and only in README.md.
+ */
+const PUBLIC_README_URLS = new Set([
+  'https://raw.githubusercontent.com/jamiezigelbaum/Olympus/main/assets/olympus-banner.png',
+  'https://github.com/jamiezigelbaum/Olympus/blob/main/CHANGELOG.md',
+  'https://github.com/jamiezigelbaum/Olympus/blob/main/CONTRIBUTING.md',
+  'https://github.com/jamiezigelbaum/Olympus/blob/main/LICENSE',
+  'https://github.com/jamiezigelbaum/Olympus/blob/main/docs/CONTRACTS.md',
+  'https://github.com/jamiezigelbaum/Olympus/blob/main/docs/ENGINEERING_PROCESS.md',
+  'https://github.com/jamiezigelbaum/Olympus/blob/main/docs/QUICKSTART.md',
+  'https://github.com/jamiezigelbaum/Olympus/blob/main/docs/QUICKSTART.md#5-open-your-dashboard-and-connect-sources',
+  'https://github.com/jamiezigelbaum/Olympus/blob/main/docs/SOVEREIGNTY_CONFIG.md',
+  'https://github.com/jamiezigelbaum/Olympus/blob/main/docs/SOVEREIGNTY_CONFIG.md#agent-led-model-setup-for-the-v04-beta',
+  'https://github.com/jamiezigelbaum/Olympus/blob/main/docs/TRUST_MODEL.md',
+  'https://github.com/jamiezigelbaum/Olympus/blob/main/docs/TRUST_MODEL.md#product-tier-names',
+  'https://github.com/jamiezigelbaum/Olympus/blob/main/docs/UNINSTALL.md',
+  'https://github.com/jamiezigelbaum/Olympus/blob/main/docs/design/chatgpt-plugin.md',
+  'https://github.com/jamiezigelbaum/Olympus/blob/main/docs/design/chatgpt-plugin.md#who-can-read-the-answer',
+  'https://github.com/jamiezigelbaum/Olympus/blob/main/integrations/agent-skills/ask-olympus/SKILL.md',
 ]);
 
 /**
@@ -209,6 +233,7 @@ const PUBLIC_DOWNLOAD_URL_FILES = new Set([
   'src/core/managed-tools.ts',
   'dist/cli.js',
   'dist/index.js',
+  'dist/embedding-drain.js',
 ]);
 const PUBLIC_DOWNLOAD_URLS = new Set([
   'https://github.com/jamiezigelbaum/zkapi/releases/download/clientd-v0.1.6-olympus4/zkapi-clientd_0.1.6-olympus4_darwin_arm64.tar.gz',
@@ -225,7 +250,9 @@ export function scannableText(relativePath: string, text: string): string {
   }
   if (PUBLIC_INSTALL_URL_FILES.has(relativePath)) {
     return text.replace(/https:\/\/[^\s<>"'`()]+/g, (url) => (
-      PUBLIC_INSTALL_URLS.has(url) ? '<public-olympus-install-url>' : url
+      PUBLIC_INSTALL_URLS.has(url) || (relativePath === 'README.md' && PUBLIC_README_URLS.has(url))
+        ? '<public-olympus-install-url>'
+        : url
     ));
   }
   return relativePath === 'LICENSE'

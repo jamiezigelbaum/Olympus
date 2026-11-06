@@ -120,11 +120,18 @@ export type OlympusSourceDispositionState = 'ingest' | 'metadata_only' | 'exclud
 /** What a form on the computer's local pages submits (browser-controller.ts). */
 export type OlympusDashboardControlParams =
   | { action: 'check_model_setup' }
+  | { action: 'discover_local_models'; base_url: string }
+  | { action: 'test_local_models'; base_url: string; answer_model: string }
+  | { action: 'save_local_answer_model'; base_url: string; answer_model: string }
+  | { action: 'save_first_run_privacy'; choice: string }
+  | { action: 'set_computer_use'; choice: 'everyday' | 'server' }
   | {
       action: 'start_oauth';
       source: OlympusDashboardOAuthSource;
       client_id?: string;
       client_secret?: string;
+      google_desktop?: boolean;
+      google_client_json?: string;
     }
   | {
       action: 'connect_api_key';
@@ -144,6 +151,7 @@ export type OlympusDashboardControlParams =
       /** A bearer connection for the Grok API or another agent. Its token is shown once. */
       action: 'create_agent_key';
       name: string;
+      route?: 'loopback' | 'tailnet';
       /** The Connect an agent choice it is for (its `data-agent` id), which sets who hosts it. */
       agent?: string;
     }

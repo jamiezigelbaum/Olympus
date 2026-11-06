@@ -187,6 +187,35 @@ describe('secrets are never sent', () => {
 });
 
 describe('batching, cache and threshold', () => {
+  test('parallel calls still carry one item each, and never more in flight than asked (2026-11-04)', async () => {
+    const ledger = new TierLedger({ dbPath: ':memory:' });
+    const store = new TierSnifferStore({ dbPath: ':memory:' });
+    try {
+      for (let n = 0; n < 12; n += 1) recordFlagged(ledger, store, n, `bank statement ${n}`);
+      let inFlight = 0;
+      let peak = 0;
+      const prompts: string[] = [];
+      const model: AnalystModel = {
+        async complete(request) {
+          inFlight += 1;
+          peak = Math.max(peak, inFlight);
+          prompts.push(request.prompt);
+          await new Promise((resolve) => setTimeout(resolve, 5));
+          inFlight -= 1;
+          const items = request.prompt.split('\n').filter((line) => line.startsWith('{')).map((line) => JSON.parse(line) as Record<string, unknown>);
+          return { text: verdictsFor(items, { tier: 'private', category: 'financial', confidence: 0.97 }), modelId: LOCAL_LANE.modelId };
+        },
+      };
+      const report = await runSnifferPass({ targets: [{ ledger, sniffer: store }], lane: VENICE_LANE, model, maxCallsPerPass: 100, concurrentCalls: 4 });
+      expect(peak).toBe(4);
+      expect(prompts.map((prompt) => prompt.split('\n').filter((line) => line.startsWith('{')).length)).toEqual(Array(12).fill(1));
+      expect(report).toMatchObject({ calls: 12, verdictsApplied: 12, resolvedPrivate: 12 });
+    } finally {
+      ledger.close();
+      store.close();
+    }
+  });
+
   test('every flagged name is asked on its own call, with localOnly set', async () => {
     const ledger = new TierLedger({ dbPath: ':memory:' });
     const store = new TierSnifferStore({ dbPath: ':memory:' });
@@ -558,6 +587,9 @@ describe('bounds and the owner-approval gate', () => {
       busy = false;
       await service.runOnce();
       expect(lines).toContain('Olympus tier sniffer: asking again.');
+      // The pass line says where the tick's wall time went, and the idle time before it.
+      const passLine = lines.find((line) => line.includes('verdict(s) applied'));
+      expect(passLine).toMatch(/; tick_ms=\d+ settle=\d+ recover=\d+ approval=\d+ prepare=\d+ rejudge=\d+ targets=\d+ pass=\d+ moves=\d+ idle_before=\d+\.$/);
 
       // A pass whose model call never returns: the next tick past the bound aborts it.
       recordFlagged(ledger, installed.snifferStoreForLedger(ledger.dbPath), 2, 'divorce papers');
@@ -771,6 +803,105 @@ describe('bounds and the owner-approval gate', () => {
       expect(archivePrivateModelFromSniffer(service)).toBe('ready');
       expect(archivePrivateModelFromSniffer(undefined)).toBe('off');
       service.stop();
+    } finally {
+      installed.close();
+      ledger.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('while the model is not answering, scheduled passes wait 30 s, then 60 s; a direct pass still runs (Sparta, 2026-11-04)', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'olympus-tier-sniffer-backoff-'));
+    const installed = new InstalledTierClassification({ env: {}, lane: LOCAL_LANE });
+    const ledger = new TierLedger({ dbPath: join(dir, 'store.tier-ledger.sqlite') });
+    try {
+      for (let n = 1; n <= 3; n += 1) recordFlagged(ledger, installed.snifferStoreForLedger(ledger.dbPath), n, `lab results ${n}`);
+      const ledgerPath = join(dir, 'classification-ledger.jsonl');
+      await appendClassificationLedgerEntry(ledgerPath, {
+        recorded_at: new Date().toISOString(), kind: 'classifier_model_decision', what: 'Owner approved the fixture sniffer.',
+        model_id: LOCAL_LANE.modelId, prompt_version: SNIFFER_PROMPT_VERSION, lane: LOCAL_LANE.kind, profile_id: LOCAL_LANE.profileId,
+        approved_by: 'owner', status: 'complete',
+      });
+      let clock = Date.parse('2026-11-04T10:00:00Z');
+      let attempts = 0;
+      const service = new TierSnifferService({
+        installed,
+        lane: LOCAL_LANE,
+        model: { complete: () => { attempts += 1; return Promise.reject(new Error('connection refused')); } },
+        stores: () => [{ dbPath: join(dir, 'store.sqlite') }],
+        classificationLedgerPath: ledgerPath,
+        intervalMs: 10,
+        now: () => new Date(clock),
+      });
+      const settle = () => new Promise((resolve) => setTimeout(resolve, 150));
+      expect(await service.runOnce()).toMatchObject({ state: 'ran', report: { stoppedBy: 'transport_failures' } });
+      const afterFirst = attempts;
+      service.start();
+      await settle();
+      expect(attempts).toBe(afterFirst);
+      clock += 29_000;
+      await settle();
+      expect(attempts).toBe(afterFirst);
+      clock += 2_000;
+      await settle();
+      const afterSecond = attempts;
+      expect(afterSecond).toBeGreaterThan(afterFirst);
+      // The second failed pass waits the longer time.
+      clock += 31_000;
+      await settle();
+      expect(attempts).toBe(afterSecond);
+      clock += 30_000;
+      await settle();
+      expect(attempts).toBeGreaterThan(afterSecond);
+      // A direct pass (Check now, a test) is never held back.
+      const beforeDirect = attempts;
+      await service.runOnce();
+      expect(attempts).toBeGreaterThan(beforeDirect);
+      service.stop();
+    } finally {
+      installed.close();
+      ledger.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('a pass that got an answer before its failures is not held back', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'olympus-tier-sniffer-partial-'));
+    const installed = new InstalledTierClassification({ env: {}, lane: LOCAL_LANE });
+    const ledger = new TierLedger({ dbPath: join(dir, 'store.tier-ledger.sqlite') });
+    try {
+      for (let n = 1; n <= 6; n += 1) recordFlagged(ledger, installed.snifferStoreForLedger(ledger.dbPath), n, `lab results ${n}`);
+      const ledgerPath = join(dir, 'classification-ledger.jsonl');
+      await appendClassificationLedgerEntry(ledgerPath, {
+        recorded_at: new Date().toISOString(), kind: 'classifier_model_decision', what: 'Owner approved the fixture sniffer.',
+        model_id: LOCAL_LANE.modelId, prompt_version: SNIFFER_PROMPT_VERSION, lane: LOCAL_LANE.kind, profile_id: LOCAL_LANE.profileId,
+        approved_by: 'owner', status: 'complete',
+      });
+      let calls = 0;
+      // First call of each pass answers; the rest fail, so every pass stops on transport failures.
+      let answeredThisPass = false;
+      const model = spyModel((_request, items) => {
+        calls += 1;
+        if (answeredThisPass) return new Error('connection refused');
+        answeredThisPass = true;
+        return verdictsFor(items, { tier: 'private', category: 'health', confidence: 0.9 });
+      });
+      const clock = Date.parse('2026-11-04T10:00:00Z');
+      const service = new TierSnifferService({
+        installed, lane: LOCAL_LANE, model,
+        stores: () => [{ dbPath: join(dir, 'store.sqlite') }],
+        classificationLedgerPath: ledgerPath, intervalMs: 10, now: () => new Date(clock),
+      });
+      const first = await service.runOnce();
+      expect(first).toMatchObject({ state: 'ran', report: { stoppedBy: 'transport_failures' } });
+      expect(first.state === 'ran' && first.report.calls > first.report.failedCalls).toBe(true);
+      const afterFirst = calls;
+      answeredThisPass = false;
+      service.start();
+      // The clock never moves: a held service would ask nothing more.
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      service.stop();
+      expect(calls).toBeGreaterThan(afterFirst);
     } finally {
       installed.close();
       ledger.close();

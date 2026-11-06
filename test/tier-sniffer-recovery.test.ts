@@ -5,7 +5,7 @@ import { InstalledTierClassification } from '../src/workers/classification/insta
 import { BUILT_IN_SNIFFER_LANE } from '../src/workers/classification/built-in-sniffer.ts';
 import { TierSnifferService } from '../src/workers/classification/sniffer-service.ts';
 import { moveTieredItem } from '../src/workers/connector-store/tier-move.ts';
-import { classifyItemTiers } from '../src/workers/classification/tier-classifier.ts';
+import { classifyItemTiers, TIER_CLASSIFIER_VERSION } from '../src/workers/classification/tier-classifier.ts';
 import { FIXTURE_PLACEMENT, fixtureConnector, identityOf, openTierFixture, tempDir } from './helpers/tier-fixtures.ts';
 import { dashboardSourceProgress } from '../src/workers/dashboard/phases.ts';
 import type { DashboardSourceCard } from '../src/workers/source-dashboard.ts';
@@ -53,9 +53,20 @@ for (const contentRead of [true, false]) test(`an upgraded pending row with no q
   expect(f.ledger.getCurrent(f.identity)).toMatchObject({ state: 'current', contentTier: 'secure', contentPending: false });
   expect(f.service.backlog().checkingItems).toBe(0);
   expect(f.calls()).toBe(0);
-  expect(f.ledger.getCurrent(f.identity)?.reasons).toContainEqual(expect.stringMatching(/^content:sniffer:.*:fail_safe:missing_question$/));
+  expect(f.ledger.getCurrent(f.identity)?.reasons).toContainEqual(expect.stringMatching(contentRead ? /^content:sniffer:.*:fail_safe:missing_question$/ : /^content:sniffer:.*:fail_safe:unread$/));
   await f.service.runOnce();
   expect(f.ledger.counts().byState.pending).toBe(0);
+});
+
+test('an item settled only because its question was missing is asked again by the re-judge pass (#606; Sparta, 2026-11-04)', async () => {
+  const f = await fixture(true);
+  await f.service.runOnce();
+  const reason = f.ledger.getCurrent(f.identity)!.reasons.find(r => r.endsWith(':fail_safe:missing_question'))!;
+  expect(reason).toBeDefined();
+  const snifferId = reason.split(':')[2]!;
+  // Under the very sniffer and classifier that settled it: nothing else would bring it back.
+  const page = f.ledger.rejudgeCandidatePage({ engineVersion: TIER_CLASSIFIER_VERSION, snifferId });
+  expect(page.records.map(row => row.providerItemId)).toContain(f.identity.providerItemId);
 });
 
 test('a vanished item retires its pending ledger row without deleting stored content', async () => {
@@ -108,4 +119,24 @@ for (const mismatch of ['unflagged', 'not_secret'] as const) test(`recovery also
   await f.service.runOnce();
   expect(f.ledger.getCurrent(f.identity)).toMatchObject({ state: 'current', contentTier: 'secure' });
   if (mismatch === 'not_secret') expect(f.ledger.getOverride(f.identity)).toEqual({ kind: 'not_secret' });
+});
+
+test('an older unread settlement is relabelled once as unread, and a read one keeps missing_question (#847)', async () => {
+  const f = await fixture(true);
+  await f.service.runOnce();
+  const db = new Database(f.ledger.dbPath);
+  // As an older build left it: unread text labelled as a lost question, beside a names reason that stays.
+  db.query('UPDATE tier_items SET content_read = 0, reasons_json = ?').run(JSON.stringify(['metadata:sniffer:old:fail_safe:missing_question', 'content:sniffer:old:fail_safe:missing_question']));
+  db.query("DELETE FROM tier_ledger_meta WHERE key = 'fail_safe_unread_relabel_v1'").run();
+  const generation = (db.query('SELECT generation AS g FROM tier_items').get() as { g: number }).g;
+  expect(f.ledger.relabelUnreadFailSafe()).toBe(1);
+  const reasons = JSON.parse((db.query('SELECT reasons_json AS r FROM tier_items').get() as { r: string }).r) as string[];
+  expect(reasons).toEqual(['metadata:sniffer:old:fail_safe:missing_question', 'content:sniffer:old:fail_safe:unread']);
+  // Only the label: the generation is unchanged, and a second page finds nothing.
+  expect((db.query('SELECT generation AS g FROM tier_items').get() as { g: number }).g).toBe(generation);
+  expect(f.ledger.relabelUnreadFailSafe()).toBe(0);
+  // Read text keeps the lost-question label, which the re-ask pass reads.
+  db.query('UPDATE tier_items SET content_read = 1, reasons_json = ?').run(JSON.stringify(['content:sniffer:old:fail_safe:missing_question']));
+  expect(f.ledger.relabelUnreadFailSafe()).toBe(0);
+  db.close();
 });

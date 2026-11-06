@@ -1,3 +1,4 @@
+import { workerFetch } from './worker-transport.ts';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { untilAborted } from './http-timeout.ts';
 import {
@@ -30,6 +31,8 @@ export const OLYMPUS_TAB_TOOL_NAMES = [
   'olympus_model_retry',
   'olympus_privacy_get',
   'olympus_privacy_set',
+  'olympus_privacy_questions',
+  'olympus_privacy_check',
   'olympus_sync_source',
 ] as const;
 
@@ -138,7 +141,7 @@ export function registerOlympusDashboardGateway(
   options: OlympusDashboardGatewayOptions = {},
 ): void {
   if (!api.registerGatewayMethod) return;
-  const fetchImpl = options.fetchImpl ?? fetch;
+  const fetchImpl = options.fetchImpl ?? workerFetch;
   // operator.read to reach the method at all; each tool then needs its own
   // scope: the dashboard read needs read, everything else needs write.
   api.registerGatewayMethod(
@@ -205,7 +208,7 @@ export async function requestDashboardTool(input: {
     throw new DashboardGatewayInvalidRequestError('Dashboard tool request is too large.');
   }
   const { response, text } = await boundedWorkerRequest({
-    fetchImpl: input.fetchImpl ?? fetch,
+    fetchImpl: input.fetchImpl ?? workerFetch,
     url: workerRootUrl(input.config, '/dashboard/tools/call'),
     init: {
       method: 'POST',

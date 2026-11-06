@@ -500,7 +500,9 @@ export interface WhatsAppRecordBuilderOptions {
 export function createWhatsAppRecordBuilder(options: WhatsAppRecordBuilderOptions): SourceRecordBuilder<WhatsAppRecord> {
   const account = options.account === undefined ? DEFAULT_ACCOUNT : requireNonEmpty(options.account, 'WhatsApp account');
   const live = createWhatsAppLiveSourceConnector({ spoolDir: options.spoolDir, account });
-  return createRecordBuilder(account, (localItemId) => live.fetchItem(localItemId), () => live.authenticate(), options.readChild);
+  // An export is read from its own files, so it asks nothing of the bridge's spool: a computer that never paired
+  // WhatsApp, or unpaired it and deleted its data, has no spool folder, and the import must still run.
+  return createRecordBuilder(account, (localItemId) => live.fetchItem(localItemId), async () => undefined, options.readChild);
 }
 
 /** The media kinds whose bytes are their message's child: a picture or a video is not what was said. */
@@ -1401,7 +1403,7 @@ function spoolMessageText(message: SpoolMessage): string {
  * Reaction lines name another message and are left alone. Cursors are this
  * spool's `<file>:<lines>`.
  */
-export function redactWhatsAppLiveSpoolSecrets(options: {
+export async function redactWhatsAppLiveSpoolSecrets(options: {
   spoolDir: string;
   account?: string;
   from?: string;
@@ -1417,7 +1419,7 @@ export function redactWhatsAppLiveSpoolSecrets(options: {
    * (core/source-placement.ts, `whatsappMovedPathMapper`). The line keeps its path.
    */
   relocateMediaPath?: (path: string) => string;
-}): CaptureSpoolRedactionResult {
+}): Promise<CaptureSpoolRedactionResult> {
   const account = options.account === undefined ? DEFAULT_ACCOUNT : requireNonEmpty(options.account, 'WhatsApp account');
   const from = positionFromCursor(options.from);
   const through = positionFromCursor(options.through);

@@ -13,7 +13,7 @@ import type { SourceRecordBuilder } from '../../core/source-inputs.ts';
 import { fileByteSource } from '../archive-import/byte-source.ts';
 import { JsonStreamReader } from '../archive-import/json-stream.ts';
 import { withInputs } from '../archive-import/source-input.ts';
-import type { ArchiveAccountEvidence, ArchiveSourceTarget } from '../archive-import/source-targets.ts';
+import type { ArchiveAccountEvidence, ArchiveSourceLane, ArchiveSourceTarget } from '../archive-import/source-targets.ts';
 import { telegramJsonSource } from '../archive-import/telegram/json-repair.ts';
 import { telegramScalar } from '../archive-import/telegram/message.ts';
 import type { ConnectorStoreSyncOptions } from '../connector-store/index.ts';
@@ -61,22 +61,28 @@ export function telegramProviderAccountId(userId: string): string {
   return `telegram:${createHash('sha256').update(userId).digest('hex').slice(0, 16)}`;
 }
 
-export interface TelegramArchiveTargetOptions {
+interface TelegramArchiveTargetMetadata {
+  /** The live account scope (`telegram.personal`). */
+  account: string;
+  /** The day the live capture began, when it is known. Reading this never mounts a lane. */
+  liveSince?(): string | undefined;
+}
+
+export type TelegramArchiveTargetOptions = TelegramArchiveTargetMetadata & ({
+  /** Resolve the canonical lane only when an approved import uses it. */
+  lane(): ArchiveSourceLane;
+} | {
   /** The live lane's one tier store set over the account's stores. */
   set: TieredStoreSet;
   /** The live connector the export becomes an input of. */
   connector: SourceConnector;
   builder: SourceRecordBuilder<TelegramRecordItems>;
-  /** The live account scope (`telegram.personal`). */
-  account: string;
   /** The live lane's sync options, so both inputs place items alike. */
   sync: ConnectorStoreSyncOptions;
-  /** The day the live capture began, when it is known. */
-  liveSince?(): string | undefined;
-}
+});
 
 export function telegramArchiveTarget(options: TelegramArchiveTargetOptions): ArchiveSourceTarget {
-  const connector = withInputs(options.connector, options.builder);
+  let connector: SourceConnector | undefined;
   return {
     sourceId: TELEGRAM_SOURCE_ID,
     label: 'Telegram',
@@ -99,7 +105,11 @@ export function telegramArchiveTarget(options: TelegramArchiveTargetOptions): Ar
       }
       return telegramExportInput(archive, { account: options.account, ...(ownUserId ? { ownUserId } : {}) });
     },
-    lane: () => ({ set: options.set, sync: options.sync, connector }),
+    lane: () => {
+      if ('lane' in options) return options.lane();
+      connector ??= withInputs(options.connector, options.builder);
+      return { set: options.set, sync: options.sync, connector };
+    },
     ...(options.liveSince ? { liveSince: () => options.liveSince!() } : {}),
     // No `exclusive`: Telegram has no account guard that could bind other stores over its account.
   };

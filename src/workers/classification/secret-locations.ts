@@ -245,6 +245,27 @@ export class SecretLocationsIndex {
     return (this.db.query('SELECT COUNT(*) AS n FROM secret_locations').get() as { n: number }).n;
   }
 
+  /** Revalidate a previously displayed location without trusting its saved name. */
+  recheck(
+    expected: import('../../core/evidence-pack.ts').SavedSecretLocation,
+    scope: SecretLocationScope,
+    options: { hide?: (identities: readonly SecretLocationIdentity[]) => ReadonlySet<SecretLocationIdentity> } = {},
+  ): boolean {
+    const rows = this.db.query(`SELECT * FROM secret_locations ${scope.accountScope ? 'WHERE account_scope = ?' : ''}`)
+      .all(...(scope.accountScope ? [scope.accountScope] : [])) as SecretLocationRow[];
+    for (const row of rows) {
+      const location = locationFromRow(row);
+      if (location.source !== expected.source || secretLocationRef(location) !== expected.ref || !secretLocationWithinScope(location, scope)) continue;
+      const identity: SecretLocationIdentity = {
+        provider: location.source, accountScope: location.accountScope, providerItemId: location.providerItemId,
+        ...(location.conversationKey ? { providerConversationId: location.conversationKey } : {}),
+      };
+      try { if (options.hide?.([identity]).has(identity)) return false; } catch { return false; }
+      return secretLocationFingerprint({ locator: location.namesReleasable ? location.locator : null, title: location.namesReleasable ? location.title : null }) === expected.fingerprint;
+    }
+    return false;
+  }
+
   /**
    * Keyword search over locator, title and finding kind, confined to `scope`.
    * A row matches when any query term (stop words dropped) appears in one of
@@ -313,6 +334,11 @@ export class SecretLocationsIndex {
         detectedAt: location.detectedAt,
       }));
   }
+}
+
+/** Detect changed screening without retaining a second copy of the location. */
+export function secretLocationFingerprint(location: { locator: string | null; title: string | null }): string {
+  return createHash('sha256').update(JSON.stringify([location.locator, location.title])).digest('hex');
 }
 
 /** An opaque, stable reference to a located Secret: no name, no path. */

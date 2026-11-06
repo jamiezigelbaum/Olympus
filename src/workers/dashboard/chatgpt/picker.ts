@@ -127,6 +127,8 @@ export interface ChatGptFolderPickWords {
   makePrivate: string;
   makePrivateFor: string;
   alreadyPrivate: string;
+  /** Optional three-step privacy sheet; ordinary pickers keep their existing layout. */
+  stepSheet?: { step: string; next: string; back: string };
 }
 
 /** Words for importing an archive (the computer's Archives row): the drop zone and what follows it; the caller owns them. */
@@ -1541,7 +1543,13 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
   function pickButton(key: string, name: string, focusKey: string): HTMLButtonElement {
     const words = p.pick.words;
     if (p.pick.taken.indexOf(key) >= 0) return kit.button(words.alreadyPrivate, focusKey, null, 'plain');
-    const control = kit.button(words.makePrivate, focusKey, p.loading ? null : () => leave('', false, { key, name }), 'plain');
+    const selected = p.pick.selected && p.pick.selected.key === key;
+    const control = kit.button(words.makePrivate, focusKey, p.loading ? null : () => {
+      if (!words.stepSheet) return leave('', false, { key, name });
+      p.pick.selected = { key, name };
+      kit.render(focusKey);
+    }, 'plain');
+    if (words.stepSheet) control.setAttribute('aria-pressed', String(!!selected));
     control.setAttribute('aria-label', fill(words.makePrivateFor, { name }));
     return control;
   }
@@ -2093,7 +2101,14 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
     }
     backButton.className = 'btn back';
     add(top, backButton);
-    add(page, top);
+    if (p.pick && p.pick.words.stepSheet) {
+      page.className += ' privacy';
+      add(page, el('p', 'muted', p.pick.words.stepSheet.step));
+      const progress = el('progress') as HTMLProgressElement;
+      progress.max = 3; progress.value = 2;
+      progress.setAttribute('aria-label', p.pick.words.stepSheet.step);
+      add(page, progress);
+    } else add(page, top);
     if (p.discarding) {
       const confirm = el('div', 'confirm-box');
       confirm.setAttribute('role', 'alert');
@@ -2108,6 +2123,12 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
     if (p.mode === 'connect') connectView(page);
     else if (p.mode === 'mail') mailView(page);
     else foldersView(page);
+    if (p.pick && p.pick.words.stepSheet) {
+      const words = p.pick.words.stepSheet;
+      add(page, add(el('div', 'actions privacy-sheet-actions'),
+        kit.button(words.back, deep ? 'picker:up' : 'picker:back', escape, 'plain'),
+        kit.button(words.next, 'picker:pick-next', p.pick.selected && !p.loading ? () => leave('', false, p.pick.selected) : null, 'main')));
+    }
     return page;
   }
 

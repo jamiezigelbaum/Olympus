@@ -6,11 +6,13 @@ import { dirname, join } from 'node:path';
 import {
   pairMessagingSource,
   whatsappBridgePathForPackage,
+  whatsappBridgeBuildEnv,
   TELEGRAM_API_HASH_SECRET_KEY,
   TELEGRAM_API_ID_SECRET_KEY,
   type PairingCommandRequest,
   type PairingCommandResult,
 } from '../src/core/messaging-pairing.ts';
+import { readyTelegramPython } from '../src/core/messaging-runtime.ts';
 import type { SecretStore } from '../src/core/secret-store.ts';
 import { readSourceRegistry, updateSourceRegistry } from '../src/core/source-registry.ts';
 import { connectGuidedSession } from '../src/core/connect.ts';
@@ -119,6 +121,21 @@ describe('packaged messaging pairing', () => {
     expect(command?.env.OLYMPUS_TELEGRAM_API_HASH).toBeUndefined();
     expect(secrets.values.size).toBe(0);
     expect(JSON.stringify(result)).not.toContain('fixture-hash');
+  });
+
+  test('Telegram whole-account approval includes chats created after pairing', async () => {
+    const root = packageFixture();
+    const result = await pairMessagingSource({
+      source: 'telegram', packageRoot: root, homeDir: join(root, 'home'), env: {},
+      pythonExecutable: '/usr/bin/python3', secretStore: memorySecretStore(),
+      captureScopeApproval: { source: 'telegram', explicitApproval: true, wholeAccount: true } as never,
+      runCommand: async (request) => telegramReady(request.env.OLYMPUS_TELEGRAM_SESSION_PATH),
+      registerSession: async () => ({ ok: true, source: 'telegram', handles: ['telegram.personal'], secretRefs: [] }),
+    });
+    expect(result.status).toBe('connected');
+    if (result.status !== 'connected') throw new Error('expected connected result');
+    expect(result.producer.env.OLYMPUS_TELEGRAM_ALLOWED_CHAT_SCOPES).toBe('*');
+    expect(result.producer.env.OLYMPUS_SOURCE_INDEX_TELEGRAM_APPROVED_CHAT_SCOPES).toBe('*');
   });
 
   test('Telegram publishes ready only after an exact listed-chat approval', async () => {
@@ -248,6 +265,7 @@ describe('packaged messaging pairing', () => {
     const stateDir = join(root, 'home', '.local/share/openclaw/olympus/sources/whatsapp.personal.messages/1/raw/whatsapp');
     const qrPath = join(stateDir, 'qr.png');
     const seenQr: string[] = [];
+    const links: Array<{ created: boolean; sessionPath: string }> = [];
     let command: PairingCommandRequest | undefined;
     const result = await pairMessagingSource({
       source: 'whatsapp',
@@ -262,8 +280,11 @@ describe('packaged messaging pairing', () => {
         chatJids: ['chat-1@s.whatsapp.net'],
       },
       onWhatsAppQr: async (path) => { seenQr.push(path); },
+      onWhatsAppLinked: async (link) => { links.push(link); },
       runCommand: async (request) => {
         command = request;
+        // The phone accepted the scan: this run created the device.
+        await request.onStdoutLine?.(JSON.stringify({ event: 'linked' }));
         for (const line of whatsappReady(qrPath).stdoutLines) await request.onStdoutLine?.(line);
         return whatsappReady(qrPath);
       },
@@ -278,6 +299,8 @@ describe('packaged messaging pairing', () => {
     expect(command?.env.OLYMPUS_WHATSAPP_QR_STDOUT).toBe('false');
     expect(command?.env.OLYMPUS_WHATSAPP_PAIR_TTY_QR).toBe('false');
     expect(seenQr).toEqual([qrPath]);
+    // `linked` says this run created the device; `ready` (also sent on a re-pair) never does.
+    expect(links).toEqual([{ created: true, sessionPath: stateDir }, { created: false, sessionPath: stateDir }]);
     expect(result.status).toBe('connected');
     if (result.status !== 'connected') throw new Error('expected connected result');
     expect(result.qrPngPath).toBe(qrPath);
@@ -387,21 +410,32 @@ describe('packaged messaging pairing', () => {
   test('builds pinned WhatsApp sources into a versioned owner cache when toolchains exist', async () => {
     const root = packageFixture();
     let builtPath = '';
+    let compiler = '';
     const result = await pairMessagingSource({
       source: 'whatsapp',
       packageRoot: root,
       homeDir: join(root, 'home'),
       env: { XDG_CACHE_HOME: join(root, 'fresh-cache') },
       which: (command) => command === 'go' || command === 'cc' ? `/fixture/${command}` : null,
-      buildWhatsAppBridge: async ({ outputPath }) => {
-        builtPath = outputPath;
-        writeFileSync(outputPath, '#!/bin/sh\n');
+      buildWhatsAppBridge: async (input) => {
+        builtPath = input.outputPath;
+        compiler = input.compiler;
+        writeFileSync(input.outputPath, '#!/bin/sh\n');
         return true;
       },
       runCommand: async () => whatsappReady('/private/qr.png'),
     });
     expect(builtPath).toMatch(/fresh-cache\/olympus\/bin\/olympus-whatsapp-bridge-[0-9a-f]{16}$/);
+    expect(compiler).toBe('/fixture/cc');
     expect(result.status).toBe('scope_selection_required');
+  });
+
+  test('the bridge build sees a Go and C compiler that were found outside PATH', () => {
+    const env = whatsappBridgeBuildEnv({ go: '/home/owner/.local/bin/go', compiler: '/opt/tools/bin/clang' }, { PATH: '/usr/bin:/bin', HOME: '/home/owner' });
+    expect(env.CC).toBe('/opt/tools/bin/clang');
+    expect(env.CGO_ENABLED).toBe('1');
+    expect(env.PATH).toBe('/home/owner/.local/bin:/opt/tools/bin:/usr/bin:/bin');
+    expect(env.HOME).toBe('/home/owner');
   });
 
   test('the release\'s prebuilt bridge in the package is used with no Go or C compiler, for pairing and capture alike', async () => {
@@ -434,6 +468,17 @@ describe('packaged messaging pairing', () => {
       source: 'whatsapp', packageRoot: root, homeDir: join(root, 'home'), env: {}, which: () => null,
       runCommand: async () => whatsappReady('/private/qr.png'),
     })).rejects.toThrow(/installed WhatsApp bridge is not a trusted/);
+  });
+
+  test('no prebuilt bridge and no Go gives a fixed failure code the dashboard can explain', async () => {
+    const root = packageFixture();
+    const error: Error & { code?: string } = await pairMessagingSource({
+      source: 'whatsapp', packageRoot: root, homeDir: join(root, 'home'),
+      env: { XDG_CACHE_HOME: join(root, 'no-go-cache') }, which: () => null,
+      runCommand: async () => { throw new Error('must not run'); },
+    }).then(() => new Error('paired'), (caught: unknown) => caught as Error & { code?: string });
+    expect(error).toBeInstanceOf(Error);
+    expect(error.code).toBe('bridge_build_tools_missing');
   });
 
   test('missing Telethon maps to a fixed command and does not echo helper stderr', async () => {
@@ -484,6 +529,38 @@ describe('Telegram pairing installs Telethon when it is missing', () => {
     expect((await result).status).toBe('scope_selection_required');
     expect(provisioned.map((input) => input.venvDir)).toEqual([venvDir(root)]);
     expect(ran).toEqual([join(venvDir(root), 'bin', 'python')]);
+  });
+
+  test('a caller that arrives while the install is still running waits for it, not for the half-made folder', async () => {
+    // Pairing while capture rebuilds the private Python: bin/python exists before pip has installed Telethon.
+    const root = packageFixture();
+    const env = { XDG_CACHE_HOME: join(root, 'xdg') };
+    let release!: (ok: boolean) => void;
+    const gate = new Promise<boolean>((resolve) => { release = resolve; });
+    let made!: () => void;
+    const folderMade = new Promise<void>((resolve) => { made = resolve; });
+    let installs = 0;
+    const seams = {
+      env,
+      pythonHasTelethon: async () => false,
+      provisionTelegramPython: async (input: { venvDir: string }) => {
+        installs += 1;
+        mkdirSync(join(input.venvDir, 'bin'), { recursive: true });
+        writeFileSync(join(input.venvDir, 'bin', 'python'), '');
+        made();
+        return gate;
+      },
+    };
+    const first = readyTelegramPython(seams);
+    await folderMade;
+    let secondDone = false;
+    const second = readyTelegramPython(seams).finally(() => { secondDone = true; });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(secondDone).toBe(false);
+    release(true);
+    expect(await second).toBe(join(venvDir(root), 'bin', 'python'));
+    expect(await first).toBe(join(venvDir(root), 'bin', 'python'));
+    expect(installs).toBe(1);
   });
 
   test('a Python that has Telethon is used as it is', async () => {
@@ -743,3 +820,39 @@ describe('a Telegram history keeps its account (storage step 4e)', () => {
     expect(hashOf(root)).toBe(PROVED);
   });
 });
+
+
+
+for (const scenario of ['same-account', 'grant-proven-account', 'grant-proven-other-session', 'grant-proven-single-key', 'grant-other-account', 'unapproved', 'unknown-account', 'other-session', 'mismatched-scopes', 'wildcard', 'malformed'] as const) {
+  test(`Telegram retained missing-chat approval: ${scenario}`, async () => {
+    const root = packageFixture();
+    const registryPath = join(root, 'handles.json');
+    if (scenario !== 'unknown-account' && !scenario.startsWith('grant-proven-')) updateSourceRegistry({ HOME: join(root, 'home') }, registry => {
+      registry.accounts.push({ source_id: 'telegram.messages', slot: '1', state: 'active', layout: 'folder', corpus_ids: ['secure_local.telegram.messages'], provider_account_hash: 'telegram:abcdef0123456789', created_at: '2026-10-25T00:00:00.000Z' });
+    });
+    const raw = scenario === 'wildcard' ? '*' : scenario === 'malformed' ? '*,telegram.personal:chat:999' : 'telegram.personal:chat:999';
+    writeFileSync(join(root, 'messaging-capture.telegram.json'), JSON.stringify({ version: 1, source: 'telegram', handle: 'telegram.personal', grantedAt: '2026-01-01', ...(scenario.startsWith('grant-proven-') ? { accountProof: 'telegram:abcdef0123456789', pairingPending: true } : scenario === 'grant-other-account' ? { accountProof: 'telegram:0000000000000001' } : {}), ...(scenario === 'other-session' || scenario === 'grant-proven-other-session' ? { sessionPath: join(root, 'other-session') } : {}), producer: { source: 'telegram', secretEnvironment: [], env: { OLYMPUS_TELEGRAM_ALLOWED_CHAT_SCOPES: raw, ...(scenario === 'grant-proven-single-key' ? {} : { OLYMPUS_SOURCE_INDEX_TELEGRAM_APPROVED_CHAT_SCOPES: scenario === 'mismatched-scopes' ? 'telegram.personal:chat:888' : raw }) } } }), { mode: 0o600 });
+    let registered = false;
+    const pairing = pairMessagingSource({
+      source: 'telegram', packageRoot: root, homeDir: join(root, 'home'), env: {}, registryPath,
+      pythonExecutable: '/usr/bin/python3', secretStore: memorySecretStore(),
+      captureScopeApproval: { source: 'telegram', explicitApproval: true, chatScopes: [scenario === 'unapproved' ? 'telegram.personal:chat:888' : 'telegram.personal:chat:999'] },
+      runCommand: async request => {
+        const base = request.env.OLYMPUS_TELEGRAM_SESSION_PATH!;
+        mkdirSync(dirname(base), { recursive: true }); writeFileSync(`${base}.session`, 'fixture-login');
+        return telegramReady(base);
+      },
+      registerSession: async () => { registered = true; return { ok: true, source: 'telegram', handles: ['telegram.personal'], secretRefs: [] }; },
+    });
+    if (scenario !== 'same-account' && !scenario.startsWith('grant-proven-')) {
+      await expect(pairing).rejects.toThrow('not in the verified account listing');
+      expect(registered).toBe(false);
+      if (scenario === 'unknown-account') expect(readSourceRegistry({ HOME: join(root, 'home') }).accounts[0]?.provider_account_hash).toBeUndefined();
+    } else {
+      const result = await pairing;
+      expect(result.registered).toBe(true);
+      if (!result.registered) throw new Error('Expected re-pair');
+      expect(result.producer.env.OLYMPUS_TELEGRAM_ALLOWED_CHAT_SCOPES).toBe('telegram.personal:chat:999');
+    }
+  });
+}

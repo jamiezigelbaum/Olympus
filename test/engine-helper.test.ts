@@ -284,6 +284,21 @@ describe('olympus engine install-helper', () => {
     expect(result.engine.action).toBe('unchanged');
     expect(restarts).toBe(1);
     expect(result.restarted_engine).toBe(true);
+    expect(result.ok).toBe(false); // No fresh health proof after restart.
+  });
+
+  test('reports failed activation when the engine is unhealthy', async () => {
+    const { root, home, checkout, bun } = fixture();
+    const fake = launchctl();
+    const service = { platform: 'darwin', homeDir: home, uid: 501, exec: fake.exec };
+    installEngine({ ...service, fromCheckout: checkout, bunBin: bun });
+    const helper = installFakeHelper(home);
+    const result = await runEngineCommand(['install-helper', '--from', prebuilt(root)], {
+      ...service, health: { timeoutMs: 0 },
+      installHelper: () => ({ ok: true, app_path: enginePaths(home).helperAppPath!, executable_path: helper, bundle_id: ENGINE_HELPER_BUNDLE_ID, team_id: 'ABCDE12345', signed_with: 'developer_id', built: false, replaced: false }),
+    }) as Record<string, any>;
+    expect(result.engine.ok).toBe(false);
+    expect(result.ok).toBe(false);
   });
 
   test('arguments', () => {

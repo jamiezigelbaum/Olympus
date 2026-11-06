@@ -182,7 +182,7 @@ async function runSearch(
       const withheldBefore = typeof rawRecord.withheld === 'number' && Number.isFinite(rawRecord.withheld) && rawRecord.withheld > 0 ? rawRecord.withheld : 0;
       result = searchToolResult({ ...rawRecord, evidence: [], withheld: withheldBefore + evidence.length });
     }
-    if (recorded) note = remotePrivateNote(privateCall.answerId);
+    if (recorded) note = remotePrivateNote(privateCall.answerId, privateCall.secretMatch);
   }
   if (note === undefined) {
     return {

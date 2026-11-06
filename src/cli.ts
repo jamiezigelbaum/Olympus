@@ -1,3 +1,5 @@
+import './core/sqlite-statement-cache.ts';
+import { PRIVATE_ANSWER_OPTIONS } from './core/privacy-language.ts';
 import { resolvedRawPath } from './core/source-placement.ts';
 import { DESKTOP_OWNER_OPEN_PATH } from './core/linux-owner-bridge.ts';
 import { workerFetch, validateWorkerSocket, workerSocketPath } from './core/worker-transport.ts';
@@ -16,6 +18,68 @@ import { resolve } from 'node:path';
 import { loadConfig } from './core/config.ts';
 import type { OlympusConfig } from './core/config.ts';
 import { mintDashboardOpeningUrl, olympusCommandHint as olympusCommandHintFor, workerRootBaseUrl, type DashboardFetch } from './core/dashboard-opening.ts';
+
+export async function printConfinementStatus(confinement: Pick<import('./core/consult-transport-zkapi.ts').ZkapiConfinement, 'check' | 'limit'>): Promise<boolean> {
+  const result = confinement.check ? await confinement.check() : { ok: false, line: `confinement on this platform: ${confinement.limit}` };
+  console.log(result.line);
+  return result.ok;
+}
+
+export async function runZkapiRecoveryCommand(args: string[], deps: {
+  env?: Record<string, string | undefined>;
+  statePath?: string;
+  sovereignty?: { config: import('./core/sovereignty.ts').SovereigntyConfig };
+  recoverSession?: Parameters<typeof import('./core/zkapi-recovery.ts').recoverHeldZkapiRequest>[0]['recoverSession'];
+  confirm?: (message: string) => Promise<boolean>;
+  print?: (message: string) => void;
+} = {}): Promise<number> {
+  const [verb, ...rest] = args;
+  const values = rest.filter(arg => arg !== '--yes');
+  if ((verb !== 'recover' && verb !== 'abandon') || rest.filter(arg => arg === '--yes').length > 1
+    || (verb === 'recover' ? values.length !== 0 : values.length !== 1 || !/^[0-9a-f]{32}$/.test(values[0]!))) {
+    throw new OperationError('invalid_params', 'Choose recover, or abandon followed by the held request identifier. Only --yes is accepted as an option.');
+  }
+  const { abandonHeldZkapiRequest, recoverHeldZkapiRequest, ZKAPI_ABANDON_CONFIRM, ZKAPI_RECOVER_CONFIRM } = await import('./core/zkapi-recovery.ts');
+  const print = deps.print ?? console.log;
+  const confirm = deps.confirm ?? (async (message: string) => {
+    if (!input.isTTY) {
+      print(message);
+      print('This action needs your confirmation. Open Anonymous answers in the dashboard and choose Recover or Abandon.');
+      return false;
+    }
+    const rl = createInterface({ input, output });
+    try { return (await rl.question(`${message} Type yes to continue: `)).trim().toLowerCase() === 'yes'; }
+    finally { rl.close(); }
+  });
+  if (!rest.includes('--yes') && !await confirm(verb === 'recover' ? ZKAPI_RECOVER_CONFIRM : ZKAPI_ABANDON_CONFIRM)) {
+    print('Cancelled. The held request was kept.');
+    return 2;
+  }
+  const { environmentWithWorkerSetupEnv } = await import('./core/worker-auth.ts');
+  const env = environmentWithWorkerSetupEnv({ env: deps.env ?? process.env });
+  const { defaultZkapiStatePath, recoverZkapiSession, resolveZkapiConsultTransport } = await import('./core/consult-transport-zkapi.ts');
+  const statePath = deps.statePath ?? defaultZkapiStatePath(env.HOME?.trim() || undefined);
+  let result: import('./core/zkapi-recovery.ts').ZkapiRecoveryOutcome;
+  if (verb === 'abandon') {
+    result = abandonHeldZkapiRequest({ confirm: true, statePath, scope: values[0], now: new Date() });
+  } else {
+    const { loadSovereigntyEngine } = await import('./core/sovereignty.ts');
+    const { resolveSecretRefValue } = await import('./core/secret-store.ts');
+    const engine = deps.sovereignty ?? loadSovereigntyEngine({ env });
+    const profiles = Object.values(engine.config.modelProfiles).filter(profile => profile.provider === 'zkapi');
+    result = await recoverHeldZkapiRequest({
+      confirm: true, statePath, env,
+      route: resolveZkapiConsultTransport(engine.config.modelProfiles, () => undefined, { env, statePath }),
+      secretRef: profiles.length === 1 ? profiles[0]!.secretRef : undefined,
+      recoverSession: deps.recoverSession ?? (async (route, secretRef) => {
+        const apiKey = await resolveSecretRefValue(secretRef, { env });
+        return recoverZkapiSession({ ...route, ...(apiKey ? { apiKey } : {}) });
+      }),
+    });
+  }
+  print(result.ok ? result.status_message : result.message);
+  return result.ok ? 0 : 1;
+}
 
 /** How the CLI names itself in hints: plain `olympus` on PATH, else this install's own bin/olympus. */
 export function olympusCommandHint(input: { env?: Record<string, string | undefined>; pluginBin?: string } = {}): string {
@@ -137,7 +201,7 @@ import {
 import { REMOTE_PUBLIC_BASE_URL_ENV } from './core/remote-public-url.ts';
 import { readThisComputerHandles } from './core/this-computer.ts';
 import { ENGINE_CLI_USAGE, runEngineCommand } from './core/engine-cli.ts';
-import { engineDataCustody, engineServicePaths, inspectEngine, restartEngine } from './core/engine-service.ts';
+import { resolveInstallationPrivacyState, engineDataCustody, engineServicePaths, inspectEngine, restartEngine } from './core/engine-service.ts';
 import {
   reachableLoopbackWorkerOrigin,
   readRemoteAccessStatus,
@@ -226,10 +290,17 @@ async function runZkapiTestWriter(rest: string[]): Promise<void> {
   if (report.canaryLeaks.length > 0) process.exitCode = 1;
 }
 
+/** Agents reach for a bare `olympus status`; name the commands that answer it. */
+function printStatusHint(args: readonly string[]): void {
+  if (args[0] !== 'status') return;
+  console.error('Did you mean olympus worker status (the worker service and its health) or olympus doctor (a full check)?');
+}
+
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
   if (!isV04PublicCliInvocation(args)) {
     console.error(`Unknown command: ${args.filter((arg) => !isHelpFlag(arg)).join(' ')}`);
+    printStatusHint(args);
     console.error('Run olympus --help for available commands.');
     process.exit(1);
   }
@@ -276,6 +347,11 @@ async function main(): Promise<void> {
   }
 
   if (args[0] === 'setup') {
+    if (args.length === 2 && args[1] === '--privacy-options') {
+      const { state } = resolveInstallationPrivacyState();
+      console.log(JSON.stringify({ state, options: PRIVATE_ANSWER_OPTIONS }, null, 2));
+      return;
+    }
     try {
       const result = await runSetupWizard(parseSetupArgs(args.slice(1)));
       console.log(JSON.stringify(result, null, 2));
@@ -301,6 +377,14 @@ async function main(): Promise<void> {
 
   if (args[0] === 'worker') {
     await runWorkerCommand(args.slice(1));
+    return;
+  }
+
+  if (args[0] === 'zkapi' && args[1] === 'check-confinement') {
+    if (args.length !== 2) throw new OperationError('invalid_params', 'olympus zkapi check-confinement takes no options.');
+    const { defaultZkapiConfinement } = await import('./core/consult-transport-zkapi.ts');
+    const confinement = defaultZkapiConfinement();
+    if (!await printConfinementStatus(confinement)) process.exitCode = 1;
     return;
   }
 
@@ -332,6 +416,11 @@ async function main(): Promise<void> {
     return;
   }
 
+  if (args[0] === 'zkapi' && (args[1] === 'recover' || args[1] === 'abandon')) {
+    process.exitCode = await runZkapiRecoveryCommand(args.slice(1));
+    return;
+  }
+
   if (args[0] === '__worker-service-run') {
     if (args.length > 2) {
       throw new OperationError('invalid_params', 'Native worker service invocation has unexpected arguments.');
@@ -348,7 +437,7 @@ async function main(): Promise<void> {
       if (result !== undefined) console.log(brief ? JSON.stringify(result) : JSON.stringify(result, null, 2));
       // Linux automation treats every unhealthy/unknown result as nonzero;
       // retain the historical Mac exit contract for non-verifying commands.
-      const healthExit = process.platform === 'linux' || ['install', 'verify', 'rollback'].includes(args[1] ?? '');
+      const healthExit = process.platform === 'linux' || ['install', 'install-helper', 'verify', 'rollback'].includes(args[1] ?? '');
       if (healthExit && result && typeof result === 'object' && (result as { ok?: unknown }).ok === false) process.exitCode = 1;
     } catch (error) {
       if (error instanceof OperationError) {
@@ -358,6 +447,13 @@ async function main(): Promise<void> {
       }
       throw error;
     }
+    return;
+  }
+
+  if (args[0] === '__engine-server-mode') {
+    if (args.length !== 2 || !['on', 'off'].includes(args[1]!)) throw new OperationError('invalid_params', 'Choose whether Olympus should stay running.');
+    const { runMacServerModeChange } = await import('./core/engine-service.ts');
+    await runMacServerModeChange(args[1] === 'on');
     return;
   }
 
@@ -390,8 +486,10 @@ async function main(): Promise<void> {
 
   if (args[0] === 'connect') {
     try {
-      const result = await runConnect(args.slice(1));
-      console.log(JSON.stringify(result, null, 2));
+      const pairing = (args[1] === 'telegram' || args[1] === 'whatsapp') && args.includes('--pair');
+      const json = pairing && args.includes('--json');
+      const result = await runConnect(json ? args.slice(1).filter((arg) => arg !== '--json') : args.slice(1));
+      console.log(pairing && !json ? formatMessagingPairingResult(args[1] as 'telegram' | 'whatsapp', result) : JSON.stringify(result, null, 2));
     } catch (error) {
       if (error instanceof OperationError) {
         console.error(`Error [${error.code}]: ${error.message}`);
@@ -727,6 +825,7 @@ async function main(): Promise<void> {
       return;
     }
     console.error(`Unknown command: ${args.join(' ')}`);
+    printStatusHint(args);
     console.error('Run olympus --help for available commands.');
     process.exit(1);
   }
@@ -1355,6 +1454,9 @@ function printHelp(): void {
   console.log('  olympus data delete --all|--source <id> [--dry-run] [--yes-i-am-sure]');
   for (const usage of Object.values(TIER_CLI_USAGE)) console.log(`  ${usage}`);
   console.log('  olympus zkapi install-tools');
+  console.log('  olympus zkapi check-confinement');
+  console.log('  olympus zkapi recover [--yes]');
+  console.log('  olympus zkapi abandon <scope> [--yes]');
   console.log(`  ${ZKAPI_TEST_WRITER_USAGE}`);
   console.log('  olympus serve');
   console.log('  olympus --tools-json');
@@ -1404,7 +1506,10 @@ const PUBLIC_LEAF_USAGE: Readonly<Record<string, string>> = {
   'data delete': 'olympus data delete --all|--source <id> [--dry-run]',
   ...TIER_CLI_USAGE,
   'zkapi install-tools': 'olympus zkapi install-tools',
+  'zkapi check-confinement': 'olympus zkapi check-confinement',
   'zkapi test-writer': ZKAPI_TEST_WRITER_USAGE,
+  'zkapi recover': 'olympus zkapi recover [--yes]',
+  'zkapi abandon': 'olympus zkapi abandon <scope> [--yes]',
   serve: 'olympus serve',
 };
 
@@ -1501,8 +1606,11 @@ const COMMAND_GROUP_HELP: Record<string, string[]> = {
   zkapi: [
     'Usage: olympus zkapi <command>',
     'Commands:',
+    '  olympus zkapi check-confinement   Check anonymous-answer network confinement',
     '  olympus zkapi install-tools   Install the pinned, verified Tor and zkapi-clientd builds for anonymous answers',
     '  olympus zkapi test-writer     Test your own local model as the anonymous-answer writer on invented cases (sends nothing to zkAPI)',
+    '  olympus zkapi recover         Finish paying for a held anonymous question (asks for confirmation)',
+    '  olympus zkapi abandon <scope> Stop a held question from blocking new ones (asks for confirmation)',
   ],
   'server-mode': [
     'Usage: olympus server-mode <command>',
@@ -1936,7 +2044,7 @@ async function readWorkerHttpState(): Promise<Record<string, unknown>> {
   const baseUrl = `${workerRoot}/v1`;
   const authToken = workerAuthTokenFromConfig(config);
   try {
-    const health = await fetchJson(`${baseUrl}/health`, { method: 'GET' });
+    const health = await fetchJson(`${baseUrl}/health`, { method: 'GET', signal: AbortSignal.timeout(WORKER_STATUS_TIMEOUT_MS) });
     const output: Record<string, unknown> = {
       reachable: true,
       base_url: baseUrl,
@@ -1944,7 +2052,7 @@ async function readWorkerHttpState(): Promise<Record<string, unknown>> {
     };
     if (config.sourceIndex.enabled && authToken) {
       try {
-        output.source_index_status = await fetchJson(`${baseUrl}/source/index/status`, withWorkerAuthHeader({ method: 'GET' }, authToken));
+        output.source_index_status = await fetchJson(`${baseUrl}/source/index/status`, withWorkerAuthHeader({ method: 'GET', signal: AbortSignal.timeout(WORKER_STATUS_TIMEOUT_MS) }, authToken));
       } catch (error) {
         output.source_index_status = {
           reachable: false,
@@ -1960,7 +2068,7 @@ async function readWorkerHttpState(): Promise<Record<string, unknown>> {
         // not under the /v1 API base. Probing `${baseUrl}/dashboard.json`
         // asked for /v1/dashboard.json and reported the resulting 404 as a
         // broken dashboard on every healthy install.
-        output.source_dashboard = await fetchJson(`${workerRoot}/dashboard.json`, withWorkerAuthHeader({ method: 'GET' }, authToken));
+        output.source_dashboard = await fetchJson(`${workerRoot}/dashboard.json`, withWorkerAuthHeader({ method: 'GET', signal: AbortSignal.timeout(WORKER_STATUS_TIMEOUT_MS) }, authToken));
       } catch (error) {
         output.source_dashboard = { reachable: false, error: cliErrorDetail(error) };
       }
@@ -1974,9 +2082,23 @@ async function readWorkerHttpState(): Promise<Record<string, unknown>> {
     return {
       reachable: false,
       base_url: baseUrl,
-      error: cliErrorDetail(error),
+      ...(isTimeoutError(error) ? { busy: true } : {}),
+      error: isTimeoutError(error) ? WORKER_STATUS_BUSY_DETAIL : cliErrorDetail(error),
     };
   }
+}
+
+/**
+ * How long `olympus worker status` waits on each worker request. The service
+ * state comes from the service manager and is always reported; a worker too
+ * busy to answer is said to be so instead of holding the command (Sparta,
+ * 2026-11-03: an agent's status check timed out while the worker was frozen).
+ */
+const WORKER_STATUS_TIMEOUT_MS = 5_000;
+const WORKER_STATUS_BUSY_DETAIL = 'The worker is running but did not answer within 5 seconds. It may be busy with an import; try again shortly, or see olympus engine logs.';
+
+function isTimeoutError(error: unknown): boolean {
+  return error instanceof Error && (error.name === 'TimeoutError' || error.name === 'AbortError');
 }
 
 /** Translate the worker's public dashboard facts into exact no-restart recovery verbs. */
@@ -2492,6 +2614,29 @@ async function runConnect(args: string[]): Promise<unknown> {
   throw new OperationError('invalid_params', `Unsupported connect source: ${source}`);
 }
 
+export function terminalMessagingCaptureApproval(
+  source: 'telegram' | 'whatsapp',
+  tell: (message: string) => void,
+): MessagingCaptureScopeApproval {
+  if (source === 'telegram') {
+    tell('Olympus reads every Telegram chat on this account, including chats started after pairing. Each message is still judged Personal, Private or Secret by what it says.\n');
+    return { source: 'telegram', explicitApproval: true, wholeAccount: true };
+  }
+  tell('Olympus reads every WhatsApp chat on this account, from new messages delivered while its bridge runs; this does not import the full historical archive. Each message is still judged Personal, Private or Secret by what it says.\n');
+  return { source: 'whatsapp', explicitApproval: true, wholeAccount: true };
+}
+
+export function formatMessagingPairingResult(source: 'telegram' | 'whatsapp', result: unknown): string {
+  const label = source === 'telegram' ? 'Telegram' : 'WhatsApp';
+  if (!result || typeof result !== 'object' || (result as { status?: unknown }).status !== 'connected') {
+    return `${label} was not connected. No capture started.`;
+  }
+  if ((result as { captureActivation?: unknown }).captureActivation !== 'requested') {
+    return `${label} is connected, but starting capture needs attention. Open the dashboard for next steps.`;
+  }
+  return `${label} is connected. Olympus is starting capture; open the dashboard to watch messages arrive.`;
+}
+
 async function runMessagingPairing(
   source: 'telegram' | 'whatsapp',
   secretStore: Parameters<typeof pairMessagingSource>[0]['secretStore'],
@@ -2512,15 +2657,7 @@ async function runMessagingPairing(
       whatsappQrMode: 'terminal',
       // Every chat is read, with no question to answer (owner, 2026-10-29): typing a hundred chat numbers made no sense.
       // Running the pairing is the approval; each message is still judged by what it says.
-      requestCaptureScope: async ({ chats }): Promise<MessagingCaptureScopeApproval | undefined> => {
-        if (source === 'telegram') {
-          if (chats.length === 0) { tell('No chats were available to read. Nothing will be captured.\n'); return undefined; }
-          tell(`Olympus reads all ${chats.length} of your most recent Telegram chats. Each message is still judged Personal, Private or Secret by what it says. A chat you start after pairing is read once you pair again.\n`);
-          return { source: 'telegram', explicitApproval: true, chatScopes: [...new Set(chats.map((chat) => chat.chatScope))] };
-        }
-        tell('Olympus reads every WhatsApp chat on this account, from new messages delivered while its bridge runs; this does not import the full historical archive. Each message is still judged Personal, Private or Secret by what it says.\n');
-        return { source: 'whatsapp', explicitApproval: true, wholeAccount: true };
-      },
+      requestCaptureScope: async () => terminalMessagingCaptureApproval(source, tell),
     });
     if (!paired.registered) return paired;
     saveMessagingCaptureGrant({ path: defaultMessagingCaptureGrantPath(source, registryPath), pairing: paired });

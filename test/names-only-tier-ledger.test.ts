@@ -350,7 +350,7 @@ describe('rows already settled, and other lanes', () => {
     });
     const settled = fixture.ledger.getCurrent(id)!;
     expect(settled).toMatchObject({ state: 'current', contentTier: 'secure', contentRead: false });
-    expect(settled.reasons.some((reason) => reason.endsWith(':fail_safe:missing_question'))).toBe(true);
+    expect(settled.reasons.some((reason) => reason.endsWith(':fail_safe:unread'))).toBe(true);
 
     // The next background pass finds nothing to do for it: no storm, no model call.
     let calls = 0;

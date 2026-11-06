@@ -271,3 +271,11 @@ describe('dashboard stylesheet', () => {
     expect(DASHBOARD_THEME_CSS).not.toContain('</style');
   });
 });
+
+
+test('failed Inbox warning colors have AA text and icon contrast in both themes', () => {
+  for (const theme of [DASHBOARD_THEME_TOKENS, DASHBOARD_THEME_TOKENS_LIGHT]) {
+    for (const token of ['t1', 't2', 'link'] as const) expect(contrast(theme[token], theme.warnBg)).toBeGreaterThanOrEqual(4.5);
+    expect(contrast(theme.warn, theme.warnBg)).toBeGreaterThanOrEqual(3);
+  }
+});

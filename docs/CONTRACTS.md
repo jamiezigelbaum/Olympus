@@ -355,6 +355,67 @@ section consolidates and supersedes all other policy wording.
 
 ### Change log
 
+- 2026-11-05 (no contract type version change; native sniffer cache
+  `decision-v1`): **one token decides Personal or Private on a capable local
+  llama.cpp server.** A local profile's `snifferMode` is `auto` (default),
+  `decision`, or `full`. Auto proves native template/logprob support with
+  synthetic material; other servers, Venice and the built-in model retain
+  full JSON. Decision mode uses the same system and one-item user prompt,
+  rendered by `/apply-template` with thinking disabled, then prefills the
+  reply through the tier's opening quote (and the two words' shared first
+  token, if any). One greedy token's Private mass divided by Private plus
+  Personal mass decides Private at 0.5. The eval and production import the
+  same prompt-shape, divergence and mass functions. No usable mass follows
+  the existing three-attempt fail-safe Private path.
+  The existing cache stores the chosen tier, its probability and the fixed
+  `decision` category; no record fields or item text are stored in a verdict.
+  The full-mode 0.9 Personal threshold and small-model record hold remain.
+  The effective mode changes the cache model id and sniffer id, so the
+  existing bounded re-judge path revisits stored decisions without a new
+  approval; approval identity and prompt text are unchanged. Native requests
+  are serialized per endpoint on slot 0, prime the exact shared prefix each
+  run, and re-prime after errors or an observed cold slot. The daily cap
+  counts item attempts, including retries: default 250,000 in decision mode,
+  20,000 in full mode; an explicit owner cap wins. Probes and primes carry no
+  item attempt and do not spend that cap. SourceConnector, EvidencePack and
+  Analyst semantics and shapes are unchanged, so the contract-evolution
+  version gate does not require a version increment. Focused fake-server
+  tests cover rendering, priming, screens, fallback, persistence and budget.
+
+- 2026-10-30 (no version change): **an id is not a name.** On the 1.2.1
+  canary, the #625 re-judge asked each Telegram message's names question with
+  the chat's key, Telegram's numeric peer id ("Tiago Ferreira | 8122045531 |
+  Tiago Ferreira"). The built-in model read the number beside a person's name
+  as their identity and held all of Tiago's ordinary messages Private, so the
+  drinks plan and the EUR 18 he was owed stopped answering. A folder key with
+  no letters is now left out of the names the sniffer reads
+  (`snifferFolderKeyNames`). Owner chat rules and the verdict cache still use
+  every key, and a key with words in it (a folder name) is still read. The
+  names template's wording changes by one word so the prompt version changes
+  and stored names are asked again. Eval set `--set=chat-canary` (every
+  demo-kit chat message): before the fix, all 12 Telegram names items were
+  judged Private under the 1.2.0 prompt and 6 under the 1.2.1 prompt.
+  A re-judge keeps the higher of the old and new names verdicts, because the
+  store does not keep labels, so a raise it made by mistake could never be
+  undone. A raise a re-judge makes from the stored names now carries
+  `metadata:names_from_store`, and a later re-judge may lower such a verdict.
+  A tier held at the old verdict carries no mark, so a floor that rested on
+  labels the store lacks still needs a relist to come down. A queued
+  stored-names question carries `metadata:names_from_store:asked` until its
+  answer, which turns it into the mark only if that answer raised the names.
+- 2026-10-29 (no version change): **under an owner description, only a
+  kind the owner calls private can be private.** On test-mac the owner's
+  description says Leo's appointments are fine to share and names only money
+  and legal as private, yet the built-in model judged "His check-up is
+  Saturday… with Dr. Alves" Private as health whenever the names line held
+  the owner's own name (as chat and sender): it read the item as the owner's own
+  health and applied the no-description default. One generic line in
+  `SNIFFER_SYSTEM_PROMPT` limits privateKind to kinds the description calls
+  private. New eval set `eval/classification/fixtures/owner-exemptions.json`
+  (the description saved on test-mac, 19 items): 17/19 → 19/19 on three runs;
+  inbox set unchanged at 47/48 on two runs (inbox-32 still missed). On the
+  built-in model the new prompt is approved by default and stored items are
+  re-judged automatically.
 - 2026-10-29 (no version change): **an owner clause naming a kind of
   record covers every record of that kind.** The built-in model judged 5 of
   24 Private inbox records Personal with `privateKind` "none", every one a

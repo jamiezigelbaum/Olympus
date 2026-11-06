@@ -1,8 +1,12 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { Window } from 'happy-dom';
+import { DASHBOARD_THEME_CSS } from '../src/workers/dashboard/theme.ts';
 import type { OlympusDashboardControlResult } from '../src/control-ui-contract.ts';
 import { DASHBOARD_REDRAW_EVENT, mountDashboardController, type OlympusDashboardPageRead } from '../src/control-ui/browser-controller.ts';
-import { connectSetupSheet } from '../src/workers/dashboard/components.ts';
+import { connectSetupSheet, setupStepsSheet } from '../src/workers/dashboard/components.ts';
+import { buildDashboardPreviewView, setupPreviewScript } from '../scripts/dashboard-preview.ts';
+import { dashboardHtmlRoutePage, renderDashboardLocalPage } from '../src/workers/dashboard/index.ts';
+import { renderMessagingCard } from '../src/workers/dashboard/messaging.ts';
 
 const GLOBALS = [
   'window', 'document', 'navigator', 'Element', 'HTMLElement', 'HTMLFormElement', 'HTMLInputElement',
@@ -77,6 +81,87 @@ function oauthResult(url: string): OlympusDashboardControlResult {
 }
 
 describe('OAuth browser handoff', () => {
+  test('Dropbox publisher Connect starts its one-click flow even with own-app steps', () => {
+    const root = document.createElement('div');
+    root.innerHTML = '<button data-sheet-toggle="#dropbox-connect">Connect</button>' + connectSetupSheet({
+      id: 'dropbox-connect', heading: 'Connect Dropbox', intro: 'Use your app', promptText: 'Help', source: 'dropbox', fields: [],
+      steps: [{ text: 'Create' }, { text: 'Key' }], provider: 'Dropbox', publisher: { intro: 'Connect Dropbox', byoSummary: 'Use my own app' },
+    });
+    document.body.append(root);
+    const calls: unknown[] = [];
+    const controller = mountDashboardController({ root, transport: { control: async (params) => { calls.push(params); return { status: 200, body: { ok: true } }; } },
+      navigate() {}, async refresh() { return undefined; }, returnUrl: 'https://gateway.test/', canWrite: true, signal: new AbortController().signal, pollIntervalMs: 0 });
+    root.querySelector<HTMLButtonElement>('[data-sheet-toggle]')!.click();
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toMatchObject({ action: 'start_oauth', source: 'dropbox' });
+    controller.dispose();
+  });
+  test('setup opens the provider synchronously without a duplicate link', () => {
+    const root = document.createElement('div');
+    root.innerHTML = setupStepsSheet({ id: 'venice', provider: 'Venice', finalForm: () => '', steps: [
+      { text: 'Account', link: { label: 'Venice', url: 'https://venice.ai/settings/api' } },
+    ] });
+    document.body.append(root);
+    const calls: unknown[][] = [];
+    Object.defineProperty(window, 'open', { configurable: true, value: (...args: unknown[]) => { calls.push(args); return null; } });
+    const controller = mountDashboardController({ root, transport: { control: noControl }, navigate() {}, async refresh() { return undefined; },
+      returnUrl: 'https://gateway.test/', canWrite: true, signal: new AbortController().signal, pollIntervalMs: 0 });
+    root.querySelector<HTMLButtonElement>('[data-setup-open]')!.click();
+    expect(calls).toEqual([['https://venice.ai/settings/api', '_blank', 'noopener,noreferrer']]);
+    expect(root.querySelector('a.ext')).toBeNull();
+    controller.dispose();
+  });
+  for (const [message, index] of [
+    ['Venice reports no credit. Redo the Set up your account step and add credit. No credentials were stored.', 0],
+    ['Venice could not accept this key. Redo the Create an API key step and check its restrictions. No credentials were stored.', 1],
+  ] as const) {
+    test(`Venice failure returns to step ${index + 1}`, async () => {
+      const root = document.createElement('div');
+      root.innerHTML = setupStepsSheet({ id: 'venice', provider: 'Venice', steps: [{ text: 'Account' }, { text: 'Key' }, { text: 'Paste' }],
+        finalForm: (id) => `<form id="${id}" data-connect-kind="api_key"><input name="source" value="venice"><input name="api_key" value="fixture"><span data-action-message></span></form>` });
+      document.body.append(root);
+      const controller = mountDashboardController({ root, transport: { control: async () => ({ status: 400, body: { ok: false, error: { message } } }) },
+        navigate() {}, async refresh() { return undefined; }, returnUrl: 'https://gateway.test/', canWrite: true,
+        signal: new AbortController().signal, pollIntervalMs: 0 });
+      const next = root.querySelector<HTMLButtonElement>('[data-setup-next]')!;
+      next.click(); next.click();
+      root.querySelector<HTMLFormElement>('form')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+      await happyWindow.happyDOM.waitUntilComplete();
+      expect(root.querySelector('[data-setup-error]')?.textContent).toContain(message);
+      expect(Array.from(root.querySelectorAll<HTMLElement>('[data-setup-panel]')).every(panel => panel.hidden)).toBe(true);
+      expect(root.querySelector<HTMLElement>('[data-setup-actions]')!.hidden).toBe(true);
+      root.querySelector<HTMLButtonElement>('[data-setup-retry]')!.click();
+      expect(Array.from(root.querySelectorAll<HTMLElement>('[data-setup-panel]')).findIndex(p => !p.hidden)).toBe(index);
+      expect(root.querySelector('[data-setup-error]')).toBeNull();
+      expect(root.querySelector('[data-action-message]')?.textContent).toBe('');
+      controller.dispose();
+    });
+  }
+  test('a Telegram deep link opens the pairing sheet on the messaging card', () => {
+    happyWindow.location.hash = '#olympus-open=connect.telegram';
+    const root = document.createElement('div');
+    root.innerHTML = renderMessagingCard('telegram', true);
+    document.body.append(root);
+    const controller = mountDashboardController({ root, transport: { control: noControl }, navigate() {}, async refresh() { return undefined; },
+      returnUrl: 'https://gateway.test/', canWrite: true, signal: new AbortController().signal, pollIntervalMs: 0 });
+    try { expect(root.querySelector('#telegram-setup')?.getAttribute('aria-hidden')).toBe('false'); }
+    finally { controller.dispose(); root.remove(); }
+  });
+  test('Dropbox permissions recovery opens the walkthrough at its permissions step', () => {
+    happyWindow.location.hash = '#olympus-open=dropbox.permissions';
+    const root = document.createElement('div');
+    root.innerHTML = '<div data-source-id="dropbox.files"><button data-sheet-toggle="#dropbox-sheet">Connect</button>'
+      + '<div class="sheet" id="dropbox-sheet"><details>' + setupStepsSheet({ id: 'd', provider: 'Dropbox', finalForm: (id) => `<form id="${id}"></form>`,
+        steps: [{ text: 'Create' }, { text: 'Access' }, { text: 'Permissions' }, { text: 'Redirect' }, { text: 'Key' }] }) + '</details></div></div>';
+    document.body.append(root);
+    const controller = mountDashboardController({ root, transport: { control: noControl }, navigate() {}, async refresh() { return undefined; },
+      returnUrl: 'https://gateway.test/', canWrite: true, signal: new AbortController().signal, pollIntervalMs: 0 });
+    expect(root.querySelector('.sheet')?.classList.contains('on')).toBe(true);
+    expect(root.querySelector('details')?.open).toBe(true);
+    expect(Array.from(root.querySelectorAll<HTMLElement>('[data-setup-panel]')).findIndex(p => !p.hidden)).toBe(2);
+    expect(root.querySelector('[data-setup-counter]')?.textContent).toBe('Step 3 of 5');
+    controller.dispose();
+  });
   for (const mode of ['publisher', 'byo', 'pending', 'read-only'] as const) {
     test(`Setup Connect opens ${mode} sheet and starts only ready publisher OAuth`, async () => {
       const root = document.createElement('div');
@@ -932,4 +1017,596 @@ test('a redraw asked for while a Connect is pending runs once that Connect has a
 
 test('the serialized controller listens for the exported redraw event name', () => {
   expect(mountDashboardController.toString()).toMatch(new RegExp(`['"]${DASHBOARD_REDRAW_EVENT}['"]`));
+});
+
+test('local discovery lists models safely and synthetic errors stay beside the selected models', async () => {
+  const root = document.createElement('div');
+  root.innerHTML = '<div class="sheet on"><form data-local-models-discover><input name="base_url"><button type="submit">Detect</button><span data-action-message></span></form><div data-local-models-results></div><form data-local-models-test hidden><input type="hidden" name="base_url"><select name="answer_model"></select><button type="submit">Test</button><span data-action-message></span></form></div>';
+  document.body.append(root);
+  const calls: unknown[] = [];
+  const controller = mountDashboardController({
+    root, transport: { control: async params => {
+      calls.push(params);
+      return params.action === 'discover_local_models'
+        ? { status: 200, body: { ok: true, results: [{ working: true, provider: 'ollama', baseUrl: 'http://127.0.0.1:11434/v1', detail: 'Choose models', models: [{ id: '<img src=x>', allowed: true }, { id: 'embed', allowed: true }, { id: 'x:cloud', allowed: false, reason: 'Cloud models refused' }] }] } }
+        : { status: 409, body: { ok: false, error: { message: 'Model lacks chat.' } } };
+    } },
+    navigate() {}, async refresh() { return undefined; }, returnUrl: 'https://gateway.test/', canWrite: true,
+    signal: new AbortController().signal, pollIntervalMs: 0,
+  });
+  root.querySelector<HTMLFormElement>('[data-local-models-discover]')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+  await new Promise(resolve => setTimeout(resolve, 0));
+  const form = root.querySelector<HTMLFormElement>('[data-local-models-test]')!;
+  expect(form.hidden).toBe(false);
+  expect(root.querySelector('img')).toBeNull();
+  expect(root.querySelectorAll('option')).toHaveLength(2);
+  form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+  await new Promise(resolve => setTimeout(resolve, 0));
+  expect(calls[1]).toEqual({ action: 'save_local_answer_model', base_url: 'http://127.0.0.1:11434/v1', answer_model: '<img src=x>' });
+  expect(form.textContent).toContain('Model lacks chat.');
+  controller.dispose();
+});
+describe('local messaging pairing', () => {
+  function messagingRoot() {
+    const root = document.createElement('div');
+    root.innerHTML = '<section data-source="telegram.messages" data-messaging-source="telegram"><form method="dialog" data-messaging-kind="respond" data-field="code"><input name="value" value="12345"><button type="submit">Continue</button></form><p data-messaging-status></p><div data-messaging-input></div><img data-messaging-qr hidden><div data-messaging-chats></div></section>';
+    document.body.append(root);
+    return root;
+  }
+
+  test('clears a login code before transport and never sends it through native control', async () => {
+    const root = messagingRoot();
+    let controlCalls = 0;
+    let observed = '';
+    const controller = mountDashboardController({ root, canWrite: true, signal: new AbortController().signal, navigate() {}, refresh: async () => undefined, returnUrl: 'http://localhost/dashboard?keys', transport: {
+      control: async () => { controlCalls++; return { status: 200, body: {} }; },
+      messaging: async (operation, params) => {
+        if (operation === 'status') return { status: 200, body: { state: 'idle' } };
+        expect(operation).toBe('respond');
+        expect(root.querySelector<HTMLInputElement>('input')!.value).toBe('');
+        observed = params.value!;
+        return { status: 200, body: { ok: true, state: 'paired' } };
+      },
+    } });
+    await new Promise(resolve => setTimeout(resolve, 0));
+    root.querySelector('form')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(observed).toBe('12345');
+    expect(controlCalls).toBe(0);
+    controller.dispose();
+  });
+
+  test('a login code submitted during a status poll is sent once the poll finishes', async () => {
+    const root = messagingRoot();
+    let releaseStatus: () => void = () => {};
+    const operations: string[] = [];
+    let observed = '';
+    const controller = mountDashboardController({ root, canWrite: true, signal: new AbortController().signal, navigate() {}, refresh: async () => undefined, returnUrl: 'http://localhost/dashboard?keys', transport: {
+      control: async () => ({ status: 200, body: {} }),
+      messaging: async (operation, params) => {
+        operations.push(operation);
+        if (operation === 'status') { await new Promise<void>(resolve => { releaseStatus = resolve; }); return { status: 200, body: { state: 'idle' } }; }
+        observed = params.value!;
+        return { status: 200, body: { ok: true, state: 'paired' } };
+      },
+    } });
+    try {
+      await new Promise(resolve => setTimeout(resolve, 0));
+      expect(operations).toEqual(['status']);
+      root.querySelector('form')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+      expect(root.querySelector<HTMLInputElement>('input')!.value).toBe('');
+      releaseStatus();
+      await new Promise(resolve => setTimeout(resolve, 0));
+      expect(operations).toEqual(['status', 'respond']);
+      expect(observed).toBe('12345');
+    } finally { controller.dispose(); }
+  });
+
+  test('a native transport without the local pairing method receives no secret', async () => {
+    const root = messagingRoot();
+    let controlCalls = 0;
+    const controller = mountDashboardController({ root, canWrite: true, signal: new AbortController().signal, navigate() {}, refresh: async () => undefined, returnUrl: 'http://localhost/dashboard?keys', transport: { control: async () => { controlCalls++; return { status: 200, body: {} }; } } });
+    await new Promise(resolve => setTimeout(resolve, 0));
+    root.querySelector('form')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(controlCalls).toBe(0);
+    expect(root.querySelector<HTMLInputElement>('input')!.value).toBe('');
+    controller.dispose();
+  });
+
+  test('opens local controls through its dedicated transport and reloads the dashboard', async () => {
+    const root = messagingRoot();
+    const form = root.querySelector('form')!;
+    delete form.dataset.messagingKind;
+    form.setAttribute('data-messaging-open-controls', '');
+    form.innerHTML = '<button type="submit">Open controls on this computer</button><span data-action-message></span>';
+    let opened = 0;
+    let controlCalls = 0;
+    let navigated = '';
+    const controller = mountDashboardController({ root, canWrite: false, signal: new AbortController().signal, navigate(href) { navigated = href; }, refresh: async () => undefined, returnUrl: 'http://localhost/dashboard?keys', transport: {
+      control: async () => { controlCalls++; return { status: 200, body: {} }; },
+      openLocalControls: async () => { opened++; return true; },
+    } });
+    await new Promise(resolve => setTimeout(resolve, 0));
+    form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(opened).toBe(1);
+    expect(controlCalls).toBe(0);
+    expect(navigated).toBe('http://localhost/dashboard?keys');
+    controller.dispose();
+  });
+
+  test('pairing status chat previews do not replace the saved-scope picker', async () => {
+    const root = messagingRoot();
+    const form = root.querySelector('form')!;
+    form.dataset.messagingKind = 'start';
+    root.querySelector('[data-messaging-chats]')!.textContent = 'saved selection';
+    const controller = mountDashboardController({ root, canWrite: true, signal: new AbortController().signal, navigate() {}, refresh: async () => undefined, returnUrl: 'http://localhost/dashboard?keys', transport: {
+      control: noControl,
+      messaging: async () => ({ status: 200, body: { ok: true, state: 'paired', chats: [{ chatScope: 'telegram.personal:chat:1', title: 'Preview' }] } }),
+    } });
+    await new Promise(resolve => setTimeout(resolve, 0));
+    form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(root.querySelector('[data-messaging-chats]')!.textContent).toBe('saved selection');
+    controller.dispose();
+  });
+
+  test('whole-account selection clears previously checked chat scopes in the saved grant', async () => {
+    const root = messagingRoot();
+    const form = root.querySelector('form')!;
+    form.dataset.messagingKind = 'scope';
+    form.innerHTML = '<input type="checkbox" name="wholeAccount" checked><input type="checkbox" name="chatScope" value="telegram.personal:chat:123" checked>';
+    let selection: unknown;
+    const controller = mountDashboardController({ root, canWrite: true, signal: new AbortController().signal, navigate() {}, refresh: async () => undefined, returnUrl: 'http://localhost/dashboard?keys', transport: {
+      control: noControl,
+      messaging: async (operation, params) => { if (operation === 'status') return { status: 200, body: { state: 'idle' } }; expect(operation).toBe('scope'); selection = structuredClone(params); return { status: 200, body: { ok: true } }; },
+    } });
+    await new Promise(resolve => setTimeout(resolve, 0));
+    form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(selection).toEqual({ source: 'telegram', wholeAccount: true, chatScopes: [] });
+    controller.dispose();
+  });
+
+  test('disposal cancels pairing status polling and erases the QR', async () => {
+    const root = messagingRoot();
+    const form = root.querySelector('form')!;
+    form.dataset.messagingKind = 'start';
+    let calls = 0;
+    const controller = mountDashboardController({ root, canWrite: true, signal: new AbortController().signal, navigate() {}, refresh: async () => undefined, returnUrl: 'http://localhost/dashboard?keys', transport: {
+      control: noControl,
+      messaging: async () => { calls++; return { status: 200, body: { ok: true, state: 'pairing', qr: 'data:image/png;base64,YQ==' } }; },
+    } });
+    await new Promise(resolve => setTimeout(resolve, 0));
+    form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(root.querySelector('img')!.hasAttribute('src')).toBe(true);
+    controller.dispose();
+    expect(root.querySelector('img')!.hasAttribute('src')).toBe(false);
+    await new Promise(resolve => setTimeout(resolve, 1250));
+    expect(calls).toBe(2);
+  });
+});
+
+describe('a slow computer during pairing', () => {
+  test('a failed status read while pairing runs keeps polling and never shows the step as failed', async () => {
+    const root = document.createElement('div');
+    root.innerHTML = '<section data-source="whatsapp.personal.messages" data-messaging-source="whatsapp"><form method="dialog" data-messaging-kind="start"><button type="submit">Pair WhatsApp</button></form><p data-messaging-status></p><div data-messaging-input></div><img data-messaging-qr hidden><div data-messaging-chats></div></section>';
+    document.body.append(root);
+    const answers: Array<{ status: number; body: Record<string, unknown> } | 'throw'> = [
+      { status: 200, body: { state: 'idle' } },
+      { status: 200, body: { ok: true, state: 'starting' } },
+      { status: 504, body: { ok: false } },
+      'throw',
+      { status: 200, body: { ok: true, state: 'waiting', qr: 'data:image/png;base64,YQ==' } },
+    ];
+    const seen: string[] = [];
+    const controller = mountDashboardController({ root, canWrite: true, signal: new AbortController().signal, navigate() {}, refresh: async () => undefined, returnUrl: 'http://localhost/dashboard?keys', transport: {
+      control: async () => ({ status: 200, body: {} }),
+      messaging: async () => {
+        const next = answers.shift() ?? { status: 200, body: { ok: true, state: 'waiting', qr: 'data:image/png;base64,YQ==' } };
+        if (next === 'throw') throw new Error('timed out');
+        return next;
+      },
+    } });
+    const status = () => root.querySelector('[data-messaging-status]')!.textContent ?? '';
+    await new Promise(resolve => setTimeout(resolve, 0));
+    root.querySelector('form')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    await new Promise(resolve => setTimeout(resolve, 0));
+    seen.push(status());
+    await new Promise(resolve => setTimeout(resolve, 1300));
+    seen.push(status());
+    await new Promise(resolve => setTimeout(resolve, 2500));
+    seen.push(status());
+    await new Promise(resolve => setTimeout(resolve, 4900));
+    seen.push(status());
+    expect(seen[0]).toBe('Preparing WhatsApp. The first time can take about a minute.');
+    expect(seen[1]).toContain('Still preparing WhatsApp');
+    expect(seen[2]).toContain('Still preparing WhatsApp');
+    expect(seen.join(' ')).not.toContain('Could not');
+    expect(seen[3]).toContain('scan the QR code');
+    expect(root.querySelector('img')!.hidden).toBe(false);
+    controller.dispose();
+    root.remove();
+  }, 15_000);
+
+  test('a failed status read when no pairing is running still says so', async () => {
+    const root = document.createElement('div');
+    root.innerHTML = '<section data-source="whatsapp.personal.messages" data-messaging-source="whatsapp"><p data-messaging-status></p><div data-messaging-input></div><img data-messaging-qr hidden><div data-messaging-chats></div></section>';
+    document.body.append(root);
+    let calls = 0;
+    const controller = mountDashboardController({ root, canWrite: true, signal: new AbortController().signal, navigate() {}, refresh: async () => undefined, returnUrl: 'http://localhost/dashboard?keys', transport: {
+      control: async () => ({ status: 200, body: {} }),
+      messaging: async () => { calls++; return { status: 500, body: { ok: false } }; },
+    } });
+    await new Promise(resolve => setTimeout(resolve, 1500));
+    expect(root.querySelector('[data-messaging-status]')!.textContent).toContain('Could not complete this step');
+    expect(calls).toBe(1);
+    controller.dispose();
+    root.remove();
+  });
+});
+
+test('messaging cards remain visible when another source sheet opens', () => {
+  const root = document.createElement('div');
+  root.innerHTML = renderMessagingCard('telegram', true) + renderMessagingCard('whatsapp', true) + '<button data-sheet-toggle="#other">Connect</button><section id="other" class="sheet"></section>';
+  document.body.append(root);
+  const controller = mountDashboardController({ root, canWrite: true, signal: new AbortController().signal, transport: { control: noControl }, navigate() {}, refresh: async () => undefined, returnUrl: 'http://localhost/dashboard?keys' });
+  root.querySelector<HTMLButtonElement>('[data-sheet-toggle]')!.click();
+  for (const card of root.querySelectorAll('[data-messaging-source]')) {
+    expect(card.getAttribute('aria-hidden')).not.toBe('true');
+    expect(card.classList.contains('sheet')).toBe(false);
+  }
+  controller.dispose();
+});
+
+test.each(['telegram', 'whatsapp'])('mount restores %s pairing and continues polling without restarting it', async source => {
+  const root = document.createElement('div'); root.innerHTML = renderMessagingCard(source as 'telegram' | 'whatsapp', true); document.body.append(root);
+  const operations: string[] = [];
+  const controller = mountDashboardController({ root, canWrite: true, signal: new AbortController().signal, transport: { control: noControl,
+    messaging: async operation => { operations.push(operation); return { status: 200, body: source === 'telegram' ? { state: 'waiting', field: 'code' } : { state: 'waiting', qr: 'data:image/png;base64,YQ==' } }; },
+  }, navigate() {}, refresh: async () => undefined, returnUrl: 'http://localhost/dashboard?keys' });
+  try {
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(operations).toEqual(['status']);
+    if (source === 'telegram') expect(root.querySelector('[data-messaging-input] input')).not.toBeNull();
+    else expect(root.querySelector('img')!.getAttribute('src')).toBe('data:image/png;base64,YQ==');
+    await new Promise(resolve => setTimeout(resolve, 1250));
+    expect(operations).toEqual(['status', 'status']);
+  } finally { controller.dispose(); }
+});
+
+test.each([{ source: 'telegram', wholeAccount: false }, { source: 'telegram', wholeAccount: true }, { source: 'whatsapp', wholeAccount: false }, { source: 'whatsapp', wholeAccount: true }] as const)('post-pair choice layout and explicit consent: %j', async ({ source, wholeAccount }) => {
+  const root = document.createElement('div'); root.innerHTML = renderMessagingCard(source, true); document.body.append(root);
+  const choices: unknown[] = [];
+  const controller = mountDashboardController({ root, canWrite: true, signal: new AbortController().signal, transport: { control: noControl,
+    messaging: async (operation, params) => {
+      if (operation === 'scope') { choices.push(structuredClone(params)); return { status: 200, body: { state: 'paired' } }; }
+      return { status: 200, body: { state: 'scope_selection_required', chats: [{ chatScope: 'telegram.personal:chat:101', title: 'One', kind: 'dm' }], wholeAccount: false, chatScopes: [] } };
+    },
+  }, navigate() {}, refresh: async () => undefined, returnUrl: 'http://localhost/dashboard?keys' });
+  try {
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(choices).toEqual([]);
+    expect(root.textContent).toContain('Nothing is being captured');
+    expect(root.textContent).toContain('Pick chats (recommended)');
+    expect(root.textContent).toContain('Everything in this account');
+    const slot = root.querySelector('[data-messaging-chats]')!;
+    expect(slot.classList.contains('messagingchoices')).toBe(true);
+    expect(slot.classList.contains('actionrow')).toBe(false);
+    const explanation = slot.querySelector(':scope > p.hint');
+    expect(explanation?.textContent).toBe('Allow Olympus to read every chat, including new chats.');
+    expect(slot.querySelector('details > summary + form')).not.toBeNull();
+    expect(slot.querySelector(':scope > form > p')).toBeNull();
+    const check = slot.querySelector<HTMLInputElement>('[name="chatScope"]')!;
+    expect(check.checked).toBe(false);
+    check.checked = true;
+    const form = wholeAccount ? slot.querySelector<HTMLInputElement>('[name="wholeAccount"]')!.closest('form')! : check.closest('form')!;
+    form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(choices).toEqual([{ source, wholeAccount, chatScopes: wholeAccount ? [] : ['telegram.personal:chat:101'] }]);
+    expect(slot.textContent).toBe('');
+  } finally { controller.dispose(); }
+});
+
+ test('chat disclosure list spans the row below its grey caption', () => {
+  expect(DASHBOARD_THEME_CSS).toContain('.messagingchoices { display: grid; grid-template-columns: max-content max-content minmax(0, 1fr); align-items: start;');
+  expect(DASHBOARD_THEME_CSS).toContain('.messagingchoices > details > form { grid-column: 1 / -1; grid-row: 3;');
+  expect(DASHBOARD_THEME_CSS).toContain('.messagingchoices > .hint { grid-column: 1 / -1; grid-row: 2; color: var(--t3);');
+  expect(DASHBOARD_THEME_CSS).toContain('.messagingchoices > details:not([open]) > form { display: none; }');
+  // Pair buttons of both cards share one width, so Choose chats starts at the same left edge in every card.
+  expect(DASHBOARD_THEME_CSS).toContain('.messaging-card .actionrow > .btn, .messaging-card .actionrow > form > .btn { min-width: 11rem; }');
+});
+
+
+for (const [state, provider, step] of [
+  ['connect-dropbox', 'dropbox', '1'], ['connect-dropbox', 'dropbox', '5'],
+  ['connect-dropbox-refused', 'dropbox', '1'], ['connect-venice', 'venice', '3'],
+] as const) {
+  test(`preview deep link reaches ${state} step ${step} without starting a connection`, () => {
+    const root = document.createElement('div');
+    const url = new URL(`http://localhost/dashboard?keys&controls&state=${state}&sheet=${provider}&step=${step}`);
+    expect(dashboardHtmlRoutePage(url)).toBe('keys');
+    root.innerHTML = renderDashboardLocalPage('keys', {
+      url, view: buildDashboardPreviewView(state),
+      options: { controlSessionCsrfToken: 'fixture' },
+    });
+    document.body.append(root);
+    let calls = 0;
+    const controller = mountDashboardController({ root, transport: { control: async () => { calls++; return { status: 200, body: { ok: true } }; } },
+      navigate() {}, async refresh() { return undefined; }, returnUrl: 'https://gateway.test/', canWrite: true,
+      signal: new AbortController().signal, pollIntervalMs: 0 });
+    const script = setupPreviewScript(provider, step).replace(/^<script>|<\/script>$/g, '');
+    new Function(script)();
+    happyWindow.dispatchEvent(new happyWindow.Event('DOMContentLoaded'));
+    const sheet = provider === 'dropbox' ? root.querySelector<HTMLElement>('#connect-dropbox-files')!
+      : root.querySelector<HTMLElement>('[data-model-card="venice"]')!;
+    if (state.endsWith('refused')) {
+      expect(sheet.querySelector<HTMLElement>('[data-connect-content]')!.hidden).toBe(true);
+      expect(sheet.querySelector<HTMLElement>('[data-connect-error]')!.hidden).toBe(false);
+      sheet.querySelector<HTMLButtonElement>('[data-connect-retry]')!.click();
+      expect(sheet.querySelector<HTMLElement>('[data-connect-content]')!.hidden).toBe(false);
+      expect(sheet.querySelector<HTMLElement>('[data-connect-error]')!.hidden).toBe(true);
+    }
+    expect(sheet.querySelector('[data-setup-counter]')!.textContent).toContain(`Step ${step} of`);
+    const back = sheet.querySelector<HTMLButtonElement>('[data-setup-back]')!;
+    const submit = sheet.querySelector<HTMLButtonElement>('[data-setup-submit]')!;
+    expect(back.disabled).toBe(step === '1');
+    expect(submit.hidden).toBe(step === '1');
+    expect(back.parentElement).toBe(submit.parentElement);
+    expect(calls).toBe(0);
+    controller.dispose();
+  });
+}
+
+test('shared footer submit respects write access, pending state and accepted keys', async () => {
+  const root = document.createElement('div');
+  root.innerHTML = setupStepsSheet({ id: 'key', provider: 'Venice', steps: [{ text: 'Paste key' }],
+    finalForm: id => `<form id="${id}" data-connect-kind="api_key"><input type="hidden" name="source" value="venice"><input name="api_key" value="fixture"><span data-action-message></span></form>` });
+  document.body.append(root);
+  let complete!: (result: OlympusDashboardControlResult) => void;
+  let calls = 0;
+  const controller = mountDashboardController({ root, transport: { control: () => { calls++; return new Promise(resolve => { complete = resolve; }); } },
+    navigate() {}, async refresh() { return undefined; }, returnUrl: 'https://gateway.test/', canWrite: false,
+    signal: new AbortController().signal, pollIntervalMs: 0 });
+  const submit = root.querySelector<HTMLButtonElement>('[data-setup-submit]')!;
+  expect(submit.disabled).toBe(true);
+  controller.update({ canWrite: true });
+  expect(submit.disabled).toBe(false);
+  submit.click();
+  expect(calls).toBe(1);
+  expect(submit.disabled).toBe(true);
+  submit.click();
+  expect(calls).toBe(1);
+  complete({ status: 200, body: { ok: true } });
+  await happyWindow.happyDOM.waitUntilComplete();
+  expect(submit.disabled).toBe(true);
+  expect(submit.textContent).toBe('Key saved');
+  controller.dispose();
+});
+
+test('Google JSON stays out of visible text and is checked before any provider URL opens', async () => {
+  const root = document.createElement('div');
+  root.innerHTML = renderDashboardLocalPage('keys', { url: new URL('http://localhost/dashboard?keys'), view: buildDashboardPreviewView('connect-google-loopback'), options: { controlSessionCsrfToken: 'fixture' } });
+  document.body.append(root);
+  let submitted: Record<string, unknown> | undefined;
+  const controller = mountDashboardController({ root, canWrite: true, signal: new AbortController().signal, navigate() {}, refresh: async () => undefined, returnUrl: 'http://localhost/dashboard?keys', pollIntervalMs: 0,
+    transport: { control: async params => { submitted = params; return { status: 400, body: { ok: false, error: { message: 'Google did not accept this app key.' } } }; } },
+  });
+  try {
+    const sheet = root.querySelector<HTMLElement>('#connect-gmail-email')!;
+    const picker = sheet.querySelector<HTMLInputElement>('[data-client-file]')!;
+    const file = new happyWindow.File([JSON.stringify({ installed: { client_id: '123-example.apps.googleusercontent.com', client_secret: 'fixture-upload-secret' } })], 'client_secret_fixture.json');
+    const transfer = new happyWindow.DataTransfer(); transfer.items.add(file);
+    picker.files = transfer.files as unknown as FileList;
+    picker.dispatchEvent(new Event('change', { bubbles: true }));
+    await happyWindow.happyDOM.waitUntilComplete();
+    expect(sheet.querySelector('[data-client-file-status]')!.textContent).toContain('Desktop app file ready');
+    expect(sheet.outerHTML).not.toContain('fixture-upload-secret');
+    const form = picker.form!;
+    form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    await happyWindow.happyDOM.waitUntilComplete();
+    expect(submitted?.google_desktop).toBe(true);
+    expect(submitted?.google_client_json).toContain('fixture-upload-secret');
+    expect(sheet.querySelector('[data-setup-error]')!.textContent).toContain('Google did not accept');
+    expect(sheet.querySelector('[data-setup-error] details')!.hasAttribute('open')).toBe(false);
+    expect(sheet.querySelector<HTMLElement>('[data-client-file-drop]')!.closest<HTMLElement>('[data-setup-panel]')!.hidden).toBe(false);
+    expect(sheet.outerHTML).not.toContain('fixture-upload-secret');
+  } finally { controller.dispose(); }
+});
+
+test('Telegram setup hands over to private prompts, shows Cancel only during pairing, and offers error recovery', async () => {
+  const root = document.createElement('div'); root.innerHTML = renderMessagingCard('telegram', true); document.body.append(root);
+  let state: Record<string, unknown> = { state: 'idle' };
+  const controller = mountDashboardController({ root, canWrite: true, signal: new AbortController().signal, navigate() {}, refresh: async () => undefined, returnUrl: 'http://localhost/dashboard?keys', pollIntervalMs: 0,
+    transport: { control: async () => ({ status: 200, body: {} }), messaging: async op => { if (op === 'start') state = { state: 'waiting', field: 'api_id' }; if (op === 'respond') state = { state: 'failed', reason: 'unexpected', details: 'Olympus 1.3.1\nSource: telegram\nFailure: unexpected' }; return { status: 200, body: { ok: true, ...state } }; } },
+  });
+  try {
+    await happyWindow.happyDOM.waitUntilComplete();
+    const cancel = root.querySelector<HTMLElement>('[data-messaging-kind="cancel"]')!;
+    expect(cancel.hidden).toBe(true);
+    root.querySelector('[data-messaging-kind="start"]')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    // Don't drain timers while pairing polls; wait only for the transport microtask.
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(root.querySelector<HTMLElement>('[data-messaging-setup-intro]')!.hidden).toBe(true);
+    expect(cancel.hidden).toBe(false);
+    const input = root.querySelector<HTMLInputElement>('[data-messaging-input] input')!; input.value = '12345';
+    input.form!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(cancel.hidden).toBe(true);
+    expect(root.querySelector('[data-pairing-error] details')!.hasAttribute('open')).toBe(false);
+    // Support gets a copyable, content-free block instead of a Terminal command.
+    const copy = root.querySelector<HTMLButtonElement>('[data-pairing-error] [data-copy-target]')!;
+    expect(copy.textContent).toBe('Copy details');
+    expect(root.querySelector(copy.dataset.copyTarget!)!.textContent).toBe('Olympus 1.3.1\nSource: telegram\nFailure: unexpected');
+    root.querySelector<HTMLButtonElement>('[data-messaging-retry]')!.click();
+    expect(root.querySelector<HTMLElement>('[data-messaging-setup-intro]')!.hidden).toBe(false);
+  } finally { controller.dispose(); }
+});
+
+
+test('Google paste inputs remain editable after refusal and clear after success', async () => {
+  const root = document.createElement('div');
+  root.innerHTML = renderDashboardLocalPage('keys', { url: new URL('http://localhost/dashboard?keys'), view: buildDashboardPreviewView('connect-google-loopback'), options: { controlSessionCsrfToken: 'fixture' } }); document.body.append(root);
+  let success = false;
+  const controller = mountDashboardController({ root, canWrite: true, signal: new AbortController().signal, navigate() {}, refresh: async () => undefined, returnUrl: 'http://localhost/dashboard?keys', pollIntervalMs: 0,
+    transport: { control: async () => success ? { status: 200, body: { ok: true, authorization_url: 'https://accounts.google.com/o/oauth2/v2/auth' } } : { status: 400, body: { ok: false, error: { message: 'Check the app key.' } } } },
+  });
+  try {
+    const sheet = root.querySelector<HTMLElement>('#connect-gmail-email')!;
+    sheet.querySelector<HTMLElement>('[data-client-paste] summary')!.click();
+    const id = sheet.querySelector<HTMLInputElement>('[name="client_id"]')!; id.value = 'fixture.apps.googleusercontent.com';
+    const key = sheet.querySelector<HTMLInputElement>('[name="client_secret"]')!; key.value = 'fixture-manual-secret';
+    id.form!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    await happyWindow.happyDOM.waitUntilComplete();
+    expect(key.disabled).toBe(false);
+    expect(sheet.querySelector<HTMLElement>('[data-client-file-drop]')!.closest<HTMLElement>('[data-setup-panel]')!.hidden).toBe(false);
+    success = true;
+    id.form!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    await happyWindow.happyDOM.waitUntilComplete();
+    expect(key.value).not.toBe('fixture-manual-secret');
+    expect(sheet.outerHTML).not.toContain('fixture-manual-secret');
+  } finally { controller.dispose(); }
+});
+
+test('completed Telegram pairing still offers setup to pair again', async () => {
+  const root = document.createElement('div'); root.innerHTML = renderMessagingCard('telegram', true); document.body.append(root);
+  const controller = mountDashboardController({ root, canWrite: true, signal: new AbortController().signal, navigate() {}, refresh: async () => undefined, returnUrl: 'http://localhost/dashboard?keys', pollIntervalMs: 0,
+    transport: { control: async () => ({ status: 200, body: {} }), messaging: async () => ({ status: 200, body: { ok: true, state: 'paired' } }) },
+  });
+  try { await happyWindow.happyDOM.waitUntilComplete(); expect(root.querySelector<HTMLElement>('[data-messaging-setup-intro]')!.hidden).toBe(false); }
+  finally { controller.dispose(); }
+});
+
+test('Telegram restores an active prompt once without reopening on each poll', async () => {
+  const root = document.createElement('div'); root.innerHTML = renderMessagingCard('telegram', true); document.body.append(root);
+  const controller = mountDashboardController({ root, canWrite: true, signal: new AbortController().signal, navigate() {}, refresh: async () => undefined, returnUrl: 'http://localhost/dashboard?keys', pollIntervalMs: 0,
+    transport: { control: async () => ({ status: 200, body: {} }), messaging: async () => ({ status: 200, body: { ok: true, state: 'waiting', field: 'code' } }) },
+  });
+  try {
+    await new Promise(resolve => setTimeout(resolve, 0));
+    const sheet = root.querySelector<HTMLElement>('#telegram-setup')!;
+    expect(sheet.getAttribute('aria-hidden')).toBe('false');
+    root.querySelector<HTMLButtonElement>('[data-sheet-toggle="#telegram-setup"]')!.click();
+    expect(sheet.getAttribute('aria-hidden')).toBe('true');
+    await new Promise(resolve => setTimeout(resolve, 1300));
+    expect(sheet.getAttribute('aria-hidden')).toBe('true');
+  } finally { controller.dispose(); }
+});
+
+
+test('Telegram preserves an open sheet and a deliberate close across dashboard redraws', async () => {
+  const root = document.createElement('div'); root.innerHTML = renderMessagingCard('telegram', true); document.body.append(root);
+  let reads = 0;
+  const controller = mountDashboardController({ root, canWrite: true, signal: new AbortController().signal, navigate() {}, refresh: async () => result(renderMessagingCard('telegram', true), `read-${++reads}`), returnUrl: 'http://localhost/dashboard?keys', pollIntervalMs: 0,
+    transport: { control: async () => ({ status: 200, body: {} }), messaging: async () => ({ status: 200, body: { ok: true, state: 'failed' } }) },
+  });
+  try {
+    await happyWindow.happyDOM.waitUntilComplete();
+    expect(root.querySelector('#telegram-setup')!.getAttribute('aria-hidden')).toBe('false');
+    await controller.refresh(); await happyWindow.happyDOM.waitUntilComplete();
+    expect(root.querySelector('#telegram-setup')!.getAttribute('aria-hidden')).toBe('false');
+    root.querySelector<HTMLButtonElement>('[data-sheet-toggle="#telegram-setup"]')!.click();
+    await controller.refresh(); await happyWindow.happyDOM.waitUntilComplete();
+    expect(reads).toBe(2);
+    expect(root.querySelector('#telegram-setup')!.getAttribute('aria-hidden')).toBe('true');
+  } finally { controller.dispose(); }
+});
+
+test('Google own-app hides the shared warning and reaches STEP 6 OF 6 with the file input', () => {
+  const root = document.createElement('div');
+  root.innerHTML = renderDashboardLocalPage('keys', { url: new URL('http://localhost/dashboard?keys'), view: buildDashboardPreviewView('connect-google-publisher'), options: { controlSessionCsrfToken: 'fixture' } });
+  document.body.append(root);
+  const controller = mountDashboardController({ root, transport: { control: async () => { throw new Error('No consent should start'); } }, navigate() {}, async refresh() { return undefined; }, returnUrl: 'https://gateway.test/', canWrite: true, signal: new AbortController().signal, pollIntervalMs: 0 });
+  try {
+    const sheet = root.querySelector('#connect-gmail-email')!;
+    sheet.classList.add('on');
+    const note = sheet.querySelector<HTMLElement>('.providernote')!;
+    expect(note.hidden).toBe(false);
+    sheet.querySelector<HTMLButtonElement>('[data-setup-begin]')!.click();
+    expect(note.hidden).toBe(true);
+    expect(sheet.querySelector<HTMLElement>('[data-setup-choice]')!.hidden).toBe(true);
+    const next = sheet.querySelector<HTMLButtonElement>('[data-setup-next]')!;
+    for (let i = 0; i < 5; i++) next.click();
+    expect(sheet.querySelector('[data-setup-counter]')!.textContent).toBe('STEP 6 OF 6');
+    expect(sheet.querySelector<HTMLElement>('[data-client-file-drop]')!.closest<HTMLElement>('[data-setup-panel]')!.hidden).toBe(false);
+    expect(sheet.querySelector<HTMLButtonElement>('[data-setup-submit]')!.hidden).toBe(false);
+    expect(sheet.querySelectorAll('[data-setup-segment].filled').length).toBe(6);
+    const zone = sheet.querySelector<HTMLElement>('[data-client-file-drop]')!;
+    let picked = 0;
+    sheet.querySelector('[data-client-file]')!.addEventListener('click', () => { picked++; });
+    zone.click();
+    zone.dispatchEvent(new happyWindow.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }) as unknown as Event);
+    zone.dispatchEvent(new happyWindow.KeyboardEvent('keydown', { key: ' ', bubbles: true }) as unknown as Event);
+    expect(picked).toBe(3);
+    sheet.querySelector<HTMLButtonElement>('[aria-label="Close setup"]')!.click();
+    expect(sheet.classList.contains('on')).toBe(false);
+    expect(sheet.querySelector<HTMLElement>('[data-setup-choice]')!.hidden).toBe(false);
+    expect(sheet.querySelector<HTMLElement>('[data-setup-walkthrough]')!.hidden).toBe(true);
+  } finally { controller.dispose(); }
+});
+
+describe('messaging card in a session that is not local-grade, and its idle controls', () => {
+  const mount = (html: string, messaging: NonNullable<Parameters<typeof mountDashboardController>[0]['transport']['messaging']>, refresh: () => Promise<undefined | { status: number; body: string; signature: string; can_write: boolean; poll_interval_ms: number }> = async () => undefined) => {
+    const root = document.createElement('div'); root.innerHTML = html; document.body.append(root);
+    const controller = mountDashboardController({ root, canWrite: true, signal: new AbortController().signal, transport: { control: noControl, messaging }, navigate() {}, refresh: refresh as never, returnUrl: 'http://localhost/dashboard?keys' });
+    return { root, controller };
+  };
+
+  test('a card that offers "Open controls" asks no pairing route on mount, on a redraw, or from a press', async () => {
+    const operations: string[] = [];
+    const html = renderMessagingCard('telegram', false) + renderMessagingCard('whatsapp', false);
+    const { root, controller } = mount(html, async operation => { operations.push(operation); return { status: 403, body: { ok: false } }; });
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(operations).toEqual([]);
+    expect(root.textContent).toContain('Open controls on this computer');
+    controller.dispose();
+  });
+
+  test('Choose chats with nothing paired says to pair first and does not keep asking', async () => {
+    const operations: string[] = [];
+    const { root, controller } = mount(renderMessagingCard('whatsapp', true), async operation => { operations.push(operation); return operation === 'chats' ? { status: 200, body: { ok: true, state: 'not_paired' } } : { status: 200, body: { ok: true, state: 'idle' } }; });
+    await new Promise(resolve => setTimeout(resolve, 0));
+    root.querySelector<HTMLFormElement>('[data-messaging-kind="chats"]')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    await new Promise(resolve => setTimeout(resolve, 20));
+    expect(root.querySelector('[data-messaging-status]')!.textContent).toContain('Not paired yet');
+    await new Promise(resolve => setTimeout(resolve, 1400));
+    expect(operations).toEqual(['status', 'chats']);
+    controller.dispose();
+  });
+
+  test('Cancel pairing is hidden until a pairing is running, and hidden again when it ends', async () => {
+    let state = 'idle';
+    const { root, controller } = mount(renderMessagingCard('whatsapp', true), async () => ({ status: 200, body: { ok: true, state } }));
+    const cancel = root.querySelector<HTMLElement>('[data-messaging-kind="cancel"]')!;
+    expect(cancel.hidden).toBe(true);
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(cancel.hidden).toBe(true);
+    state = 'waiting';
+    root.querySelector<HTMLFormElement>('[data-messaging-kind="start"]')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    await new Promise(resolve => setTimeout(resolve, 20));
+    expect(cancel.hidden).toBe(false);
+    // Still running while it waits for the chat choice, so the owner can abandon it there (Codex on #716).
+    state = 'scope_selection_required';
+    root.querySelector<HTMLFormElement>('[data-messaging-kind="start"]')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    await new Promise(resolve => setTimeout(resolve, 20));
+    expect(cancel.hidden).toBe(false);
+    state = 'cancelled';
+    cancel.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    await new Promise(resolve => setTimeout(resolve, 20));
+    expect(cancel.hidden).toBe(true);
+    controller.dispose();
+  });
+
+  test('Check readiness still says it ran when the redraw that follows clears its line', async () => {
+    const page = '<div class="top"><span class="meta">checked</span></div><form data-model-check method="post" action="/dashboard/models/check"><button class="btn" type="submit">Check readiness</button><span data-action-message role="status"></span></form>';
+    const root = document.createElement('div'); root.innerHTML = page; document.body.append(root);
+    const controller = mountDashboardController({ root, canWrite: true, signal: new AbortController().signal, transport: { control: async () => ({ status: 200, body: { ok: true } }) }, navigate() {}, returnUrl: 'http://localhost/dashboard?keys',
+      refresh: async () => ({ status: 200, body: page, signature: 'changed', can_write: true, poll_interval_ms: 0 }) as never });
+    root.querySelector('form')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    await new Promise(resolve => setTimeout(resolve, 30));
+    expect(root.querySelector('[data-action-message]')!.textContent).toBe('Checked just now.');
+    controller.dispose();
+  });
 });

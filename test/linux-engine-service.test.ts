@@ -1,3 +1,4 @@
+import { bindWorkerSocket, prepareWorkerSocket, workerSocketListenerStopped } from '../src/core/worker-transport.ts';
 import { withFileLeaseSync } from '../src/core/file-lease.ts';
 import { createHash } from 'node:crypto';
 import { afterEach, expect, test } from 'bun:test';
@@ -5,7 +6,7 @@ import { closeSync, copyFileSync, lstatSync, readlinkSync, symlinkSync, mkdirSyn
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { resolveLinuxEngineLayout } from '../src/core/linux-engine-layout.ts';
-import { inspectSystemdEngine, linuxEngineCustody, linuxMachineArtifactDigest, recoverInterruptedLinuxEngineInstall, renderEngineSystemdUnit, ensureEngineLinger, rotateEngineLog, preflightSystemdEngine, settleLinuxEngineInstall, withLinuxEngineLifecycleLock } from '../src/core/linux-engine-service.ts';
+import { inspectSystemdEngine, systemdCgroupEmpty, linuxEngineCustody, linuxMachineArtifactDigest, recoverInterruptedLinuxEngineInstall, renderEngineSystemdUnit, ensureEngineLinger, rotateEngineLog, preflightSystemdEngine, settleLinuxEngineInstall, withLinuxEngineLifecycleLock } from '../src/core/linux-engine-service.ts';
 import type { EngineExec } from '../src/core/engine-service.ts';
 const roots: string[] = [];
 function layout() { const home = mkdtempSync(join(tmpdir(), 'svc-systemd-')); roots.push(home); const run = join(home, 'run'); mkdirSync(run, { mode: 0o700 }); return resolveLinuxEngineLayout({ HOME: home, XDG_RUNTIME_DIR: run }); }
@@ -83,6 +84,48 @@ test('Linux lifecycle re-enables boot start on restart, and stop removes custody
  stopEngine(options); calls.length=0; startEngine(options); expect(calls).toContainEqual(['systemctl','--user','enable',l.unitPath]);
  expect(uninstallEngine(options).removed_plist).toBe(true);
  expect(()=>readFileSync(l.unitPath)).toThrow(); expect(readFileSync(l.receiptPath,'utf8')).toContain('olympus.engine.install.v1');
+});
+test('missing cgroup requires a visible user-manager hierarchy and parent',()=>{
+ const l=layout(); const root=join(l.home,'cgroup'); mkdirSync(root);
+ const group=`/user.slice/user-${process.getuid!()}.slice/user@${process.getuid!()}.service/app.slice/engine.service`;
+ expect(systemdCgroupEmpty(group,root)).toBeUndefined();
+ writeFileSync(join(root,'cgroup.controllers'),'cpu');
+ expect(systemdCgroupEmpty(group,root)).toBeUndefined();
+ mkdirSync(dirname(join(root,group)),{recursive:true});
+ expect(systemdCgroupEmpty(group,root)).toBe(true);
+ mkdirSync(join(root,group));
+ expect(systemdCgroupEmpty(group,root)).toBeUndefined();
+ writeFileSync(join(root,group,'cgroup.events'),'populated 1\n'); expect(systemdCgroupEmpty(group,root)).toBe(false);
+ writeFileSync(join(root,group,'cgroup.events'),'populated 0\n'); expect(systemdCgroupEmpty(group,root)).toBe(true);
+});
+test('restart checks a cgroup that appears between inspection and stop',()=>{
+ const {options,exec}=installed(); let shows=0;
+ const raceExec:EngineExec=(cmd,args)=>{const result=exec(cmd,args); if(args.includes('show') && ++shows===1) return {...result,stdout:result.stdout.replace('ControlGroup=/user.slice/engine','ControlGroup=')}; return result;};
+ expect(()=>restartEngine({...options,exec:raceExec,cgroupEmpty:()=>false,sleepMs:()=>{}})).toThrow('custody');
+});
+test('restart waits for asynchronous cgroup teardown but refuses a persistent process',()=>{
+ const {l,options}=installed(); const group=join(l.home,'fake-cgroup'); mkdirSync(group);
+ writeFileSync(join(group,'cgroup.events'),'populated 1\n'); writeFileSync(join(group,'cgroup.procs'),'');
+ let polls=0;
+ const cgroupEmpty=()=>/^populated 0$/m.test(readFileSync(join(group,'cgroup.events'),'utf8'));
+ const sleepMs=()=>{ if(++polls===3) writeFileSync(join(group,'cgroup.events'),'populated 0\n'); };
+ expect(restartEngine({...options,cgroupEmpty,sleepMs})).toMatchObject({ok:true});
+ expect(polls).toBe(3);
+ writeFileSync(join(group,'cgroup.events'),'populated 1\n'); writeFileSync(join(group,'cgroup.procs'),'1234\n');
+ polls=0;
+ expect(()=>restartEngine({...options,cgroupEmpty,sleepMs:()=>{polls++;}})).toThrow('custody');
+ expect(polls).toBe(20);
+});
+test('stop and inactive custody wait for release, and unknown inspection fails closed',()=>{
+ const {l,options}=installed(); let reads=0, sleeps=0;
+ expect(stopEngine({...options,cgroupEmpty:()=>++reads>3,sleepMs:()=>{sleeps++;}})).toMatchObject({ok:true});
+ expect(sleeps).toBe(3);
+ const facts=inspectSystemdEngine(l,options.exec); reads=0; sleeps=0;
+ expect(linuxEngineCustody(l,facts,{...options,cgroupEmpty:()=>++reads>2,sleepMs:()=>{sleeps++;}})).toBe('none');
+ expect(sleeps).toBe(2);
+ reads=0; sleeps=0;
+ expect(linuxEngineCustody(l,facts,{...options,cgroupEmpty:()=>++reads===1?false:undefined,sleepMs:()=>{sleeps++;}})).toBe('unknown');
+ expect(sleeps).toBe(1);
 });
 test('unknown cgroup/listener custody retains unit and receipt; enabled/unknown managers block data deletion',()=>{
  const {l,options}=installed();
@@ -387,3 +430,29 @@ for(const live of [false,true])test(`language-pack manifest PID temporary ${live
  if(live){expect(run).toThrow('language-pack installer is still running');expect(calls.some(args=>args.includes('stop')||args.includes('disable'))).toBe(false);expect(existsSync(join(dir,name))).toBe(true);}
  else{expect(run).not.toThrow();expect(readFileSync(join(l.configDir,'consult/vocabulary/manifest.json'),'utf8')).toBe('{"schema":1,"packs":{}}');expect(existsSync(join(dir,name))).toBe(false);expect(existsSync(join(l.configDir,'consult/vocabulary',name))).toBe(false);}
 },15_000);
+
+
+for (const stale of [true, false]) test.skipIf(process.platform !== 'linux')(`engine restart ${stale ? 'clears a legacy retained socket without an engine child receipt' : 'preserves a live legacy listener'}`, async () => {
+ const {l,options}=installed();
+ const env=linuxEngineEnvironment(l), path=prepareWorkerSocket({platform:'linux',env})!;
+ let listener: ReturnType<typeof Bun.serve> | undefined;
+ if(stale){const made=spawnSync('python3',['-c','import socket,sys,os;s=socket.socket(socket.AF_UNIX);s.bind(sys.argv[1]);os.chmod(sys.argv[1],0o600);s.close()',path]);expect(made.status).toBe(0);}
+ else listener=bindWorkerSocket(path,()=>Bun.serve({unix:path,fetch:()=>new Response('legacy')}));
+ const inode=lstatSync(path).ino;
+ try{
+  const actual={...options,workerStopped:workerSocketListenerStopped};
+  if(stale){expect(restartEngine(actual)).toMatchObject({ok:true});expect(lstatSync(path,{throwIfNoEntry:false})).toBeUndefined();}
+  else{expect(()=>restartEngine(actual)).toThrow('still listening');expect(lstatSync(path).ino).toBe(inode);}
+ }finally{await listener?.stop(true);}
+},10000);
+
+
+test('dry-run preserves an installed engine without a default policy', () => {
+ const l=layout(), checkout=packageAt(l.home,'v1');
+ publishLinuxEngineReceipt(l);
+ mkdirSync(dirname(l.configPath),{recursive:true,mode:0o700});
+ writeFileSync(l.configPath,JSON.stringify({}));
+ const exec:EngineExec=(c,a)=>c==='systemctl'&&a.includes('--version')?good('systemd 256'):a.includes('--property=Version')?good('256'):good('LoadState=not-found');
+ const result=installEngine({platform:'linux',homeDir:l.home,env:linuxEngineEnvironment(l),uid:1000,exec,fromCheckout:checkout,bunBin:runtimeAt(l.home),dryRun:true});
+ expect(result.sovereignty.action).toBe('skipped');
+});

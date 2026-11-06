@@ -757,6 +757,29 @@ describe('review round 2: scope binding, store-wide sweep, isolation, gate', () 
     expect(store.missingEmbeddingItemIds(provider, 100)).toEqual([]);
   });
 
+  test('a store with a failed item still drains its backlog within seconds, not one bound a minute', async () => {
+    const root = workspace();
+    const store = fixtureStore(root, 'failed-backlog');
+    const items = [readwiseItem('bad', 'POISON.'), ...Array.from({ length: EMBEDDING_SWEEP_MAX_ITEMS + 1 }, (_, index) => readwiseItem(`f${index}`, `Backlog item ${index}.`))];
+    await store.syncFromConnector(listConnector(items), { fetchContent: true });
+    const provider = cloudProvider();
+    const original = provider.embed.bind(provider);
+    provider.embed = async (inputs) => {
+      if (inputs.some((input) => input.text.includes('POISON'))) throw new Error('rejected');
+      return original(inputs);
+    };
+    const source: SourceSchedulerSource = {
+      sourceId: 'readwise.library', corpusId: store.corpusId, cadence: 'continuous', intervalMs: 5 * 60_000, freshnessThresholdHours: 26, tasks: [],
+    };
+    const [swept] = withEmbeddingSweep([source], () => () => [{ store, provider, wholeStore: true }]);
+    const sweep = swept!.tasks[0]!;
+    const attemptedAt = '2026-11-03T12:00:00.000Z';
+    const first = await sweep.run({ sourceId: source.sourceId, corpusId: store.corpusId, taskId: sweep.id, attemptedAt, consecutiveFailures: 0, effectiveIntervalMs: 60_000 });
+    expect(first.counts?.items_failed).toBeGreaterThan(0);
+    expect(first.retryAt?.degradedReason).toBe('embedding_items_failed');
+    expect(Date.parse(first.retryAt!.at) - Date.parse(attemptedAt)).toBeLessThanOrEqual(5_000);
+  });
+
   test('the backlog estimate counts chunks and prices tokens', () => {
     const root = workspace();
     const store = fixtureStore(root, 'estimate');

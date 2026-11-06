@@ -47,6 +47,7 @@ import {
   createUnreadableFiles,
   createUnreadableVerdict,
   type UnreadableFiles,
+  unreadableFileReason,
 } from '../src/workers/file-extraction/unreadable-files.ts';
 
 const LANE = {
@@ -153,6 +154,8 @@ describe('Secrets never count as unreadable', () => {
     const listed: Record<string, string[]> = {};
     const onUnreadable = (path: string) => (items: readonly ExtractionUnreadableItem[]) => {
       listed[path] = items.map((item) => item.ref.providerItemId);
+      // Each carries its failed job's error kind, for the reason its line gives.
+      expect(items.every((item) => item.errorKind === 'extractor_crashed')).toBe(true);
     };
     expect(store.corpusReadiness(LANE.corpusId, new Date(), { classifyUnreadable, onUnreadable: onUnreadable('corpus') })).toMatchObject(expected);
     expect(store.scopedReadiness([LANE], { classifyUnreadable, onUnreadable: onUnreadable('scoped') })).toMatchObject(expected);
@@ -221,6 +224,46 @@ function filesOver(items: ExtractionUnreadableItem[], overrides: Partial<Paramet
   return { files, opened };
 }
 
+describe('counts off the request path', () => {
+  test('a recheck answers the last count and recounts in turns in the background', async () => {
+    let clock = 1_000;
+    let asked = 0;
+    let turns = 0;
+    let verdict: 'unreadable' | 'blocked_policy' = 'unreadable';
+    const { files } = filesOver(itemsOf(250), {
+      verdict: () => { asked += 1; return verdict; },
+      countsMaxAgeMs: 60_000,
+      now: () => clock,
+      turn: () => { turns += 1; return new Promise<void>((resolve) => setTimeout(resolve, 0)); },
+    });
+    // The recount runs in timer turns; a loaded runner can take longer than any fixed wait (CI, 2026-11-04: 200 of 250 after 20 ms).
+    const settleUntil = async (done: () => boolean) => {
+      for (const deadline = Date.now() + 5_000; !done() && Date.now() < deadline;) await new Promise((resolve) => setTimeout(resolve, 5));
+      // The count is published right after the last verdict.
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    };
+
+    // No count yet: nothing asked on the request, one recount scheduled.
+    expect(files.recheck(LANE.corpusId)).toBeUndefined();
+    expect(files.recheck(LANE.corpusId)).toBeUndefined();
+    expect(asked).toBe(0);
+    await settleUntil(() => asked >= 250);
+    expect(asked).toBe(250);
+    expect(turns).toBe(2);
+    expect(files.recheck(LANE.corpusId)).toEqual({ unreadable: 250, blocked: 0 });
+
+    // Stale: the last count now, the fresh one after its recount.
+    verdict = 'blocked_policy';
+    clock += 60_000;
+    expect(files.recheck(LANE.corpusId)).toEqual({ unreadable: 250, blocked: 0 });
+    expect(asked).toBe(250);
+    await settleUntil(() => asked >= 500);
+    expect(files.recheck(LANE.corpusId)).toEqual({ unreadable: 0, blocked: 250 });
+    // Names still ask each file now.
+    expect(files.names([LANE.corpusId], 5)).toEqual([]);
+  });
+});
+
 describe('the list', () => {
   test('names are newest failure first, and "more" is the rest', () => {
     const { files } = filesOver(itemsOf(7));
@@ -229,6 +272,19 @@ describe('the list', () => {
     expect(listed.files.map((file) => file.name)).toEqual(files.names([LANE.corpusId], 5));
     expect(listed.more).toBe(2);
     expect(files.computerList([LANE.corpusId], COMPUTER_UNREADABLE_FILES_LIMIT).more).toBe(0);
+  });
+
+  test('with moreAtLeast the verdicts stop at the first file past the page', () => {
+    let asked = 0;
+    const { files } = filesOver(itemsOf(50), { verdict: () => { asked += 1; return 'unreadable'; } });
+    const listed = files.computerList([LANE.corpusId], 5, { ...AS_OPENER, moreAtLeast: true });
+    expect(listed.files.map((file) => file.name)).toEqual(files.names([LANE.corpusId], 5));
+    expect(listed.more).toBe(1);
+    expect(listed.after).toBeDefined();
+    asked = 0;
+    files.computerList([LANE.corpusId], 5, { moreAtLeast: true });
+    expect(asked).toBe(6);
+    expect(files.computerList([LANE.corpusId], 50, { moreAtLeast: true }).more).toBe(0);
   });
 
   test('a file with no place to open is plain text: no token', () => {
@@ -335,10 +391,24 @@ describe('opening a file', () => {
     expect((await files.open(fresh!.token, OPENER)).status).toBe('open_link');
   });
 
+  test('each file says exactly why it could not be read, from its failed job (owner rule, 2026-11-04)', () => {
+    const kinds = ['ocrmypdf_pdf_encrypted', 'ocrmypdf_pdf_invalid', undefined];
+    const items = itemsOf(3).map((item, index) => (kinds[index] ? { ...item, errorKind: kinds[index]! } : item));
+    const listed = filesOver(items).files.computerList([LANE.corpusId], 10, AS_OPENER).files;
+    expect(listed.map((file) => file.reason).sort()).toEqual(['damaged', 'other', 'password']);
+    expect(listed.every((file) => typeof file.token === 'string')).toBe(true);
+    expect([
+      'source_too_large', 'ocr_command_timeout', 'source_item_not_found', 'source_permission_denied',
+      'skipped_unsupported', 'ocr_empty', 'transcribe_audio_undecodable', 'privacy_check_missing', 'something_new',
+    ].map(unreadableFileReason)).toEqual([
+      'too_large', 'timed_out', 'missing', 'no_access', 'unsupported', 'no_text', 'damaged', 'privacy_check_missing', 'other',
+    ]);
+  });
+
   test('tokens only for an opener, and only that opener redeems them', async () => {
     const { files, opened } = filesOver(itemsOf(1));
     // A locked reader: names, no tokens.
-    expect(files.computerList([LANE.corpusId], 10).files).toEqual([{ name: 'file-000.pdf' }]);
+    expect(files.computerList([LANE.corpusId], 10).files).toEqual([{ name: 'file-000.pdf', reason: 'other' }]);
     const [mine] = files.computerList([LANE.corpusId], 10, AS_OPENER).files;
     const [theirs] = files.computerList([LANE.corpusId], 10, { opener: 'session:other' }).files;
     expect(theirs!.token).not.toBe(mine!.token);

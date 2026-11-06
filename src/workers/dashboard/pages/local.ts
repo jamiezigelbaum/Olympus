@@ -1,3 +1,4 @@
+import { sourceFailureKind, sourceSupportDetails } from '../source-failure.ts';
 /**
  * The computer's own pages (unified dashboard phase 4, 2026-10-09): what
  * cannot work through ChatGPT, each opened from the panel's "On this
@@ -28,6 +29,7 @@ import type {
   SourceDashboardViewModel,
 } from '../../source-dashboard.ts';
 import { dashboardGuidedSessionAgentPrompt } from '../../source-dashboard.ts';
+import { renderMessagingCard } from '../messaging.ts';
 import { DASHBOARD_OPEN_FRAGMENT_KEY, dashboardImportLandingToken } from '../../../core/open-targets.ts';
 import { renderDashboardAgentsSection, type AgentConnectHost } from '../agents.ts';
 import {
@@ -40,16 +42,17 @@ import {
   pageShell,
   safeExternalHref,
   setupRow,
+  setupStepsSheet,
   type DashboardActionInput,
 } from '../components.ts';
 import { DASHBOARD_PRIVATE_ANSWERS_COPY } from '../vocabulary.ts';
 import { DASHBOARD_OUTSIDE_HELP_CSS } from '../static-styles.ts';
-import { renderModelSetup, renderModelSetupBlocker } from '../model-setup.ts';
+import { renderModelSetup, renderModelSetupBlocker, dashboardModelsBlockedReason } from '../model-setup.ts';
 import { renderOutsideHelpCard, type DashboardOutsideHelpStatus } from '../outside-help.ts';
 import { AGENT_CONNECT_CSS, LOCAL_PAGE_CSS, MODEL_SETUP_CSS } from '../static-styles.ts';
 import {
   DASHBOARD_COMPUTER_PANEL_COPY,
-  DASHBOARD_MODELS_BLOCKED_REASON,
+  DASHBOARD_EVERNOTE_CONSENT_HELP,
   dashboardCheckedLabel,
   dashboardProviderRefusalDetail,
   dashboardProviderRefusalSentence,
@@ -58,6 +61,8 @@ import {
 
 export interface DashboardPageOptions {
   now?: Date;
+  /** Pairing credentials and chat choices require locally minted controls. */
+  messagingLocalSession?: boolean;
   degradedCredentials?: readonly WorkerCredentialDegradation[];
   /** Where the page's "Olympus" lead links back to: /dashboard, with a dash_ reader's token. */
   basePath?: string;
@@ -65,6 +70,7 @@ export interface DashboardPageOptions {
   controlSessionCsrfToken?: string;
   /** Remote agent connections and remote access, for Agents. */
   agents?: DashboardAgentsView;
+  systemReport?: string;
   /** OPENER supplies the current desktop/headless approval handoff. */
   agentConnectHost?: AgentConnectHost;
   /** The Outside help card's facts, for that page only, with the control session. */
@@ -91,9 +97,10 @@ export interface DashboardWaitingQuestion {
   from: string;
   askedAt: string;
   unchecked: boolean;
-  state?: 'answering' | 'retrying' | 'answered' | 'unchecked' | 'queued' | 'changed';
+  state?: 'answering' | 'retrying' | 'answered' | 'unchecked' | 'queued' | 'changed' | 'failed';
   unread?: boolean;
   answeredAt?: string;
+  failureReason?: string;
 }
 
 const CONNECTOR_SHEET_ID = 'connector-sheet';
@@ -151,18 +158,17 @@ function localShell(input: {
 /** Keys: the model keys, then the sources that connect on this computer. */
 export function renderDashboardKeysPage(view: SourceDashboardViewModel, options?: DashboardPageOptions): string {
   const blocked = view.model_setup !== undefined && !view.model_setup.ready;
-  const sources = view.sources.filter((source) => source.connection.action.kind !== 'none');
+  const sources = view.sources.filter((source) => source.connection.action.kind !== 'none' || source.source_id === 'telegram.messages' || source.source_id === 'whatsapp.personal.messages');
   const body = [
     dashboardControlGate({ connected: unlocked(options) }),
     renderModelSetupBlocker(view.model_setup),
-    `<div${view.model_setup?.cards.some(card => card.id === 'venice') ? ' id="venice-setup"' : ''}>${renderModelSetup(view.model_setup)}</div>`,
+    `<div id="private-routing"><div${view.model_setup?.cards.some(card => card.id === 'venice') ? ' id="venice-setup"' : ''}>${renderModelSetup(view.model_setup)}</div></div>`,
     view.model_setup?.cards.some(card => card.id === 'venice') ? '' : `<section id="venice-setup"><h3 class="sect">${escapeHtml(DASHBOARD_PRIVATE_ANSWERS_COPY.setUpVenice)}</h3><p class="pnote">${escapeHtml(DASHBOARD_PRIVATE_ANSWERS_COPY.veniceSetupHelp)}</p><div class="modelaction"><form method="post" action="/dashboard/connect/api-key" data-connect-kind="api_key" data-model-provider="venice"><input type="hidden" name="source" value="venice"><input class="keyfield" type="password" name="api_key" required autocomplete="new-password" placeholder="${escapeHtml(DASHBOARD_PRIVATE_ANSWERS_COPY.veniceKey)}" aria-label="${escapeHtml(DASHBOARD_PRIVATE_ANSWERS_COPY.veniceKey)}"><button type="submit" class="btn primary">${escapeHtml(DASHBOARD_PRIVATE_ANSWERS_COPY.connectVenice)}</button><span data-action-message role="status"></span></form></div></section>`,
-    `<section id="private-routing"><h3 class="sect">${escapeHtml(DASHBOARD_PRIVATE_ANSWERS_COPY.privacySetting)}</h3><p class="pnote">${escapeHtml(DASHBOARD_PRIVATE_ANSWERS_COPY.privacySettingHelp)}</p></section>`,
     `<section id="anonymous"><h3 class="sect">${escapeHtml(DASHBOARD_PRIVATE_ANSWERS_COPY.anonymousTitle)}</h3>${options?.outsideHelp ? renderOutsideHelpCard(options.outsideHelp, { ...(options.controlSessionCsrfToken !== undefined ? { csrfToken: options.controlSessionCsrfToken } : {}), localSession: options.outsideHelpLocalSession === true, untitled: true }) : `<p data-outside-unavailable>${escapeHtml(DASHBOARD_PRIVATE_ANSWERS_COPY.anonymousNotSetUp)}</p>`}</section>`,
     sources.length === 0 ? '' : '<div class="sect" id="sources">Sources</div>',
     sources.length === 0
       ? ''
-      : `<div class="srows">${sources.map((source) => renderSetupRow(source, view, blocked, options?.basePath ?? '/dashboard')).join('\n')}</div>`,
+      : `<div class="srows">${sources.map((source) => renderSetupRow(source, view, blocked, options?.basePath ?? '/dashboard', options?.messagingLocalSession === true) + sourceSupportBlock(source)).join('\n')}</div>`,
   ].filter((block) => block !== '').join('\n');
   return localShell({
     crumb: W.keys.title,
@@ -213,9 +219,12 @@ function refusalNotice(source: DashboardSourceCard): { notice?: string; noticeDe
   };
 }
 
-function renderSetupRow(source: DashboardSourceCard, view: SourceDashboardViewModel, blocked: boolean, basePath: string): string {
+function renderSetupRow(source: DashboardSourceCard, view: SourceDashboardViewModel, blocked: boolean, basePath: string, messagingLocalSession = false): string {
   const action = source.connection.action;
-  const gate = blocked ? { blockedReason: DASHBOARD_MODELS_BLOCKED_REASON } : {};
+  if (source.source_id === 'telegram.messages' || source.source_id === 'whatsapp.personal.messages') {
+    return renderMessagingCard(source.source_id === 'telegram.messages' ? 'telegram' : 'whatsapp', messagingLocalSession, { paired: ['connected', 'syncing', 'synced', 'waiting_for_first_sync'].includes(source.connection.state) });
+  }
+  const gate = blocked ? { blockedReason: dashboardModelsBlockedReason(view.model_setup) } : {};
   const id = { sourceId: source.source_id };
   // Imports happen on the main page, from the source's card: the button goes there and opens its Import an archive.
   if (action.kind === 'archive_import') {
@@ -225,6 +234,9 @@ function renderSetupRow(source: DashboardSourceCard, view: SourceDashboardViewMo
       blurb: setupBlurb(source),
       action: { label: action.label, kind: 'link', href: `${basePath}#${DASHBOARD_OPEN_FRAGMENT_KEY}=${dashboardImportLandingToken(source.source_id)}` },
     });
+  }
+  if (action.kind === 'guided_session' && (action.source === 'telegram' || action.source === 'whatsapp')) {
+    return renderMessagingCard(action.source, messagingLocalSession);
   }
   if (action.kind === 'guided_session') {
     const sheetId = `agent-${source.source_id.replace(/[^A-Za-z0-9_-]+/g, '-')}`;
@@ -255,7 +267,7 @@ function renderSetupRow(source: DashboardSourceCard, view: SourceDashboardViewMo
       label: source.label,
       blurb: action.instructions.plain_intro,
       ...dashboardSetupLead(source.source_id, action.instructions.plain_intro),
-      action: { label: action.label, kind: 'none', sheet: sheetId, ...gate },
+      action: { label: providerNote(view, action).lead?.button ?? action.label, kind: 'none', sheet: sheetId, ...gate },
       ...(link === undefined ? {} : { blurbLink: link }),
     });
     return `${row}\n${sheet}`;
@@ -268,11 +280,17 @@ function renderSetupRow(source: DashboardSourceCard, view: SourceDashboardViewMo
       const row = setupRow({
         ...id,
         label: source.label,
-        blurb: setupBlurb(source),
-        action: { label: action.label, kind: 'none', sheet: connect.sheetId, ...gate },
+        blurb: providerNote(view, action).lead?.title ?? setupBlurb(source),
+        action: { label: providerNote(view, action).lead?.button ?? action.label, kind: 'none', sheet: connect.sheetId, ...gate },
       });
       return `${row}\n${connect.sheet}`;
     }
+  }
+  if (action.kind === 'api_key' && action.source === 'venice') {
+    const sheetId = 'setup-venice-api';
+    const form = (formId: string) => `<form id="${formId}" class="setupfields" data-connect-kind="api_key"><input type="hidden" name="source" value="venice"><input class="keyfield" type="password" name="api_key" required autocomplete="new-password" placeholder="API key" aria-label="API key"><span class="actmsg" data-action-message role="status"></span></form>`;
+    const sheet = `<div class="sheet" id="${sheetId}" aria-hidden="true"><h4>Set up Venice</h4>${setupStepsSheet({ id: sheetId, provider: 'Venice', steps: action.instructions.diy_steps, finalForm: form })}</div>`;
+    return setupRow({ ...id, label: source.label, blurb: action.instructions.plain_intro, action: { label: action.label, kind: 'none', sheet: sheetId, ...gate } }) + sheet;
   }
   // An api_key row asks for a secret the reader has to go and fetch, so its
   // blurb is the instructions' own plain intro plus the page that issues the
@@ -292,7 +310,13 @@ function renderSetupRow(source: DashboardSourceCard, view: SourceDashboardViewMo
 function providerNote(
   view: SourceDashboardViewModel,
   action: Extract<DashboardSourceAction, { kind: 'oauth' | 'needs_setup' }>,
-): { providerNote?: string } {
+): { providerNote?: string; lead?: { title: string; body: string; button: string; notes: string[] } } {
+  if ((action.source === 'gmail' || action.source === 'google-drive') && view.google_pilot?.mode === 'advanced_byo_required') return { lead: {
+    title: "Olympus's Google sign-in is full",
+    body: "Until Google reviews Olympus, it lets 100 people use Olympus's Google app. You can still connect Gmail and Drive with a free app of your own. It takes about ten minutes.",
+    button: 'Set up my own Google app',
+    notes: ["What changes: Google shows your own name on its warning, not Olympus's.", "What stays the same: Olympus reads your mail on this computer, and judges each message Personal, Private or Secret as before."],
+  } };
   const note = dashboardGoogleProviderNote(view, action);
   return note === undefined ? {} : { providerNote: note };
 }
@@ -318,6 +342,7 @@ function actionStateLabel(source: DashboardSourceCard): string {
 
 function setupBlurb(source: DashboardSourceCard): string {
   const action = source.connection.action;
+  if (action.kind === 'oauth' && action.source === 'evernote') return DASHBOARD_EVERNOTE_CONSENT_HELP;
   if (action.kind === 'guided_session') return action.instructions[0] ?? source.connection.label;
   if (action.kind === 'api_key') return action.instructions.plain_intro;
   if (action.kind === 'this_computer') return 'Choose the folders on this computer Olympus may read. Nothing is read until you choose.';
@@ -338,4 +363,22 @@ function connectAction(source: DashboardSourceCard): DashboardActionInput | unde
   if (action.kind === 'api_key') return { label: action.label, kind: 'api_key', source: action.source, primary: false };
   if (action.kind === 'this_computer') return { label: action.label, kind: 'this_computer', source: action.source, primary: false };
   return undefined;
+}
+
+/** A local, content-free report using the same copy control as pairing errors. */
+export function renderDashboardHelpPage(options?: DashboardPageOptions): string {
+  const report = options?.systemReport;
+  return localShell({ crumb: 'Help', meta: '', options, styles: [], body:
+    dashboardControlGate({ connected: unlocked(options) })
+    + '<h3>Help with Olympus</h3><p>If something is not working, copy the system report and send it to support.</p>'
+    + (report ? `<pre id="system-report" class="promptbox">${escapeHtml(report)}</pre><p>Only system states and error codes: no names, numbers, emails, chats, notebook or folder titles, or home folder paths.</p><button type="button" class="btn" data-copy-target="#system-report">Copy system report</button><span data-copy-status aria-live="polite"></span>` : unlocked(options) ? '<p>Olympus could not read the system report. Try again, or contact support.</p>' : '<p>Open dashboard controls on this computer to copy a system report.</p>')
+    + '<p><a href="https://olympusplugin.ai/support" target="_blank" rel="noopener noreferrer">Contact support</a></p>',
+  });
+}
+
+function sourceSupportBlock(source: DashboardSourceCard): string {
+  if (!(source.schedule?.consecutive_failures || source.connection.state === 'reauth_required' || source.answer_readiness?.state === 'needs_attention')) return '';
+  const id = `source-support-${source.source_id.replace(/[^a-z0-9-]/gi, '-')}`;
+  const report = sourceSupportDetails({ sourceId: source.source_id, state: source.connection.state, failure: sourceFailureKind(source.schedule?.last_error_kind, source.schedule?.degraded_reason), ref: source.schedule?.last_error_hash });
+  return `<details><summary>Details for support</summary><pre class="promptbox" id="${id}">${escapeHtml(report)}</pre><button type="button" class="btn" data-copy-target="#${id}">Copy details</button><span data-copy-status aria-live="polite"></span><p>No names, numbers, emails, chats or folder titles.</p></details>`;
 }

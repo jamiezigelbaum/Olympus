@@ -179,6 +179,34 @@ describe('backed-off retries', () => {
     const result = await fileExtractionSchedulerTask({ id: 'x', runner: fake, lane, planLimit: 5, batchSize: 4 }).run();
     expect(result.wakeAt).toBe(nextRetryAt);
   });
+
+  test('a lane parked on a spent source budget waits for the reset instead of failing', async () => {
+    const parkedUntil = '2026-11-05T00:00:00.000Z';
+    const fake = {
+      async plan() {
+        return {
+          candidates: 0, jobsQueued: 0, jobsExisting: 0, jobsForced: 0,
+          jobsSkippedTooLarge: 0, jobsUnroutable: 0, extractorKinds: [], done: true,
+        };
+      },
+      async run() {
+        return {
+          processedJobs: 3,
+          paused: true,
+          pauseReason: 'source_budget_exhausted',
+          parkedUntil,
+          counts: {
+            indexed: 3, metadata_only: 0, skipped_unsupported: 0, skipped_too_large: 0,
+            blocked_policy: 0, failed_retryable: 0, failed_terminal: 0,
+          },
+        };
+      },
+    } as unknown as FileExtractionRunner;
+    const lane = { corpusId: 'c', provider: 'fixture', accountScope: 'personal', approvedScopeKey: 'fixture.personal:/x' };
+    const result = await fileExtractionSchedulerTask({ id: 'x', runner: fake, lane, planLimit: 5, batchSize: 4 }).run();
+    expect(result.status).toBe('progress');
+    expect(result.retryAt).toEqual({ at: parkedUntil, degradedReason: 'source_budget_exhausted' });
+  });
 });
 
 describe('extraction pass over a shared candidate store', () => {
@@ -237,7 +265,7 @@ describe('extraction pass over a shared candidate store', () => {
       { candidates: 4, next: 'tier:internal:900', done: false },
       { candidates: 0, done: true },
     ]);
-    const extract = fileExtractionSchedulerTask({ id: 'x', runner: fake, lane, planLimit: 3, batchSize: 2 });
+    const extract = fileExtractionSchedulerTask({ id: 'x', runner: fake, lane, planLimit: 3, batchSize: 2, maxBatchesPerPass: 1 });
     const result = await extract.run();
     expect(plans).toEqual([undefined, 'tier:internal:755', 'tier:internal:780']);
     expect(result.counts).toMatchObject({ candidates_seen: 4, jobs_queued: 4, jobs_processed: 2 });
@@ -350,5 +378,106 @@ describe('a refused extraction candidate never fails the pass', () => {
     const line = errors.find((entry) => entry.includes('task_failed'));
     expect(line).toContain('error_kind=network');
     expect(line).not.toContain('error_message=');
+  });
+});
+
+describe('a short retry', () => {
+  test('a retry due before the next tick gets its own wake, keeping its degraded reason', async () => {
+    const clock = { now: T0 };
+    const timeouts: number[] = [];
+    let runs = 0;
+    const sched = new SourceScheduler({
+      enabled: true,
+      tickMs: 60_000,
+      errorBackoffMs: 60_000,
+      maxTransientRetries: 1,
+      now: () => new Date(clock.now),
+      continueAfterMs: 5_000,
+      setIntervalImpl: (() => ({ unref() {} })) as unknown as typeof setInterval,
+      clearIntervalImpl: (() => undefined) as unknown as typeof clearInterval,
+      setTimeoutImpl: ((_: () => void, ms: number) => { timeouts.push(ms); return { unref() {} }; }) as unknown as typeof setTimeout,
+      clearTimeoutImpl: (() => undefined) as unknown as typeof clearTimeout,
+      sources: [source([task('embed', 'embed', async () => {
+        runs += 1;
+        return { status: 'progress', retryAt: { at: new Date(clock.now + 5_000).toISOString(), degradedReason: 'embedding_items_failed' } };
+      })])],
+    });
+    sched.start();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(runs).toBe(1);
+    expect(timeouts).toContain(5_000);
+    const status = sched.status(new Date(clock.now));
+    expect(status.sources[0]!.tasks[0]!.degraded_reason).toBe('embedding_items_failed');
+    sched.stop();
+  });
+});
+
+describe('extraction pass drains queued jobs within its budget', () => {
+  const lane = { corpusId: 'c', provider: 'fixture', accountScope: 'personal', approvedScopeKey: 'fixture.personal:/q' };
+
+  function queue(input: { queued: number; pauseAtRun?: number; msPerRun?: number; clock?: { now: number } }) {
+    let queued = input.queued;
+    const runs: ExtractionRunRequest[] = [];
+    const fake = {
+      async plan(request: ExtractionPlanRequest) {
+        return {
+          kind: 'file_extraction_plan', corpusId: request.corpusId, candidates: 0, jobsQueued: 0,
+          jobsExisting: 0, jobsForced: 0, jobsSkippedTooLarge: 0, jobsUnroutable: 0, jobsRefused: 0,
+          extractorKinds: [], done: true,
+        };
+      },
+      async run(request: ExtractionRunRequest) {
+        runs.push(request);
+        if (input.clock) input.clock.now += input.msPerRun ?? 0;
+        if (input.pauseAtRun === runs.length) {
+          return {
+            processedJobs: 0, paused: true, pauseReason: 'consecutive_failures',
+            counts: { indexed: 0, metadata_only: 0, skipped_unsupported: 0, skipped_too_large: 0, blocked_policy: 0, failed_retryable: 0, failed_terminal: 0 },
+          };
+        }
+        const processed = Math.min(request.limit ?? 0, queued);
+        queued -= processed;
+        return {
+          processedJobs: processed, paused: false,
+          counts: { indexed: processed, metadata_only: 0, skipped_unsupported: 0, skipped_too_large: 0, blocked_policy: 0, failed_retryable: 0, failed_terminal: 0 },
+        };
+      },
+    } as unknown as FileExtractionRunner;
+    return { fake, runs, left: () => queued };
+  }
+
+  test('one pass keeps extracting full batches until the queue runs short', async () => {
+    const { fake, runs, left } = queue({ queued: 9 });
+    const result = await fileExtractionSchedulerTask({ id: 'x', runner: fake, lane, planLimit: 25, batchSize: 2 }).run();
+    expect(runs).toHaveLength(5);
+    expect(left()).toBe(0);
+    expect(result.counts).toMatchObject({ jobs_processed: 9, jobs_indexed: 9 });
+    // Only the first batch runs the extractor health preflight.
+    expect(runs.slice(1).every((run) => run.preflightExtractorKinds === undefined)).toBe(true);
+    expect(result.continueSoon).toBe(false);
+  });
+
+  test('a spent budget ends the pass and asks to continue', async () => {
+    const clock = { now: 0 };
+    const { fake, runs, left } = queue({ queued: 100, msPerRun: 4_000, clock });
+    const result = await fileExtractionSchedulerTask({
+      id: 'x', runner: fake, lane, planLimit: 25, batchSize: 2, passBudgetMs: 10_000, now: () => clock.now,
+    }).run();
+    expect(runs).toHaveLength(3);
+    expect(left()).toBe(94);
+    expect(result.continueSoon).toBe(true);
+  });
+
+  test('the batch bound holds when every batch is quick', async () => {
+    const { fake, runs } = queue({ queued: 1_000 });
+    const result = await fileExtractionSchedulerTask({ id: 'x', runner: fake, lane, planLimit: 25, batchSize: 2, maxBatchesPerPass: 4 }).run();
+    expect(runs).toHaveLength(4);
+    expect(result.counts).toMatchObject({ jobs_processed: 8 });
+  });
+
+  test('a paused batch ends the pass and fails it as before', async () => {
+    const { fake, runs } = queue({ queued: 100, pauseAtRun: 2 });
+    await expect(fileExtractionSchedulerTask({ id: 'x', runner: fake, lane, planLimit: 25, batchSize: 2 }).run()).rejects.toThrow('paused');
+    expect(runs).toHaveLength(2);
   });
 });

@@ -153,6 +153,8 @@ export interface FileExtractionRuntimeOptions {
   env?: Record<string, string | undefined>;
   /** Product wiring may enable the shared factory without an operator env gate. */
   enabled?: boolean;
+  /** Keep the shared queue ready while source lanes wait for their first connect. */
+  allowEmpty?: boolean;
   connectorStores: readonly LocalConnectorStore[];
   extractors?: ExtractorRegistryConfig;
   /**
@@ -226,6 +228,50 @@ export interface FileExtractionRuntime {
   close(): void;
 }
 
+/** A stable queue/readiness handle whose runner follows newly mounted source lanes. */
+export function createRefreshableFileExtractionRuntime(options: {
+  build(): FileExtractionRuntime | undefined;
+  generation(): number;
+  beforeCurrent?(): void;
+}): FileExtractionRuntime | undefined {
+  const first = options.build();
+  if (!first) return undefined;
+  const runtimes = [first];
+  let closed = false;
+  let generation = options.generation();
+  const current = (): FileExtractionRuntime | undefined => {
+    if (closed) return undefined;
+    options.beforeCurrent?.();
+    const nextGeneration = options.generation();
+    if (generation !== nextGeneration) {
+      const next = options.build();
+      if (next) runtimes.push(next);
+      generation = nextGeneration;
+    }
+    return runtimes.at(-1)!;
+  };
+  return {
+    ...first,
+    get corpusIds() { return current()?.corpusIds ?? []; },
+    runner: new Proxy(first.runner, {
+      get(_target, key) {
+        const runtime = current();
+        if (!runtime) throw new Error('File extraction runtime is closed.');
+        const runner = runtime.runner;
+        const value = Reflect.get(runner, key);
+        return typeof value === 'function' ? value.bind(runner) : value;
+      },
+    }),
+    locateItem: (ref) => current()?.locateItem(ref),
+    // Earlier runners stay alive for reads already in flight on their shared durable queue.
+    close() {
+      if (closed) return;
+      closed = true;
+      for (const runtime of runtimes) runtime.close();
+    },
+  };
+}
+
 export interface ExtractionItemLocation {
   locatorUri?: string;
   providerConversationId?: string;
@@ -254,7 +300,7 @@ export function createFileExtractionRuntime(
   ) return undefined;
 
   const roster = options.corpora ?? parseFileExtractionCorporaEnv(env[FILE_EXTRACTION_CORPORA_ENV]);
-  if (roster.length === 0) return undefined;
+  if (roster.length === 0 && options.allowEmpty !== true) return undefined;
 
   const warn = options.warn ?? ((message: string) => console.warn(message));
   const storesByCorpusId = new Map(options.connectorStores.map((store) => [store.corpusId, store]));
@@ -441,7 +487,7 @@ export function createFileExtractionRuntime(
       ...(guardsRefs ? { authorization: { assertCurrent: assertRefCurrent } } : {}),
     });
   }
-  if (corpora.length === 0) {
+  if (corpora.length === 0 && options.allowEmpty !== true) {
     jobs.close();
     return undefined;
   }

@@ -21,11 +21,11 @@ func TestUpgradePreservesExistingUnpairedMappingState(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Recreate the immediately preceding schema: upstream v15 only adds this
+	// Recreate the immediately preceding schema: upstream v16 only adds this
 	// column. Seed opaque mapping state like the existing unpaired installation.
 	for _, statement := range []string{
-		"ALTER TABLE whatsmeow_device DROP COLUMN companion_meta_nonce",
-		"UPDATE whatsmeow_version SET version=14, compat=8",
+		"ALTER TABLE whatsmeow_chat_settings DROP COLUMN wasa_root_secret_id",
+		"UPDATE whatsmeow_version SET version=15, compat=8",
 		"INSERT INTO whatsmeow_lid_map(lid,pn) VALUES ('fixture-lid','fixture-pn')",
 	} {
 		if _, err = db.Exec(statement); err != nil {
@@ -51,8 +51,8 @@ func TestUpgradePreservesExistingUnpairedMappingState(t *testing.T) {
 	if err = db.QueryRow("SELECT version FROM whatsmeow_version").Scan(&version); err != nil {
 		t.Fatal(err)
 	}
-	if version != 15 {
-		t.Fatalf("schema version: got %d, want 15", version)
+	if version != 16 {
+		t.Fatalf("schema version: got %d, want 16", version)
 	}
 	if err = db.QueryRow("SELECT pn FROM whatsmeow_lid_map WHERE lid='fixture-lid'").Scan(&mapping); err != nil {
 		t.Fatal(err)

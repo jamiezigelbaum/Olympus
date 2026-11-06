@@ -5,7 +5,7 @@ cited answer.
 
 This is the OpenClaw path. **Using ChatGPT, Claude or Grok?** Follow
 [Get started](../README.md#get-started) instead: it needs only a Mac or an
-Omarchy computer, with no OpenClaw and no API keys.
+Omarchy or Ubuntu 24.04 LTS x86_64 computer, with no OpenClaw and no API keys.
 
 **You need:** a machine with [OpenClaw](https://openclaw.ai) `2026.7.1+`
 installed, [Bun](https://bun.sh) `1.2+` (`curl -fsSL https://bun.sh/install | bash`),
@@ -78,8 +78,8 @@ Use the [pilot download procedure](../INSTALL_FOR_AGENTS.md#pilot-download)
 to obtain the designated package from GitHub. It retrieves the SHA-256 and
 byte count automatically from the release asset metadata; there is no separate
 receipt to request. For a manual download, open the
-[release](https://github.com/jamiezigelbaum/Olympus/releases/tag/v1.1.0)
-and choose `olympus-1.1.0.tgz` under Assets, not a source-code archive. Compare
+[release](https://github.com/jamiezigelbaum/Olympus/releases/tag/v1.3.4)
+and choose `olympus-1.3.4.tgz` under Assets, not a source-code archive. Compare
 its SHA-256 and byte count with the pin in the linked download procedure and
 record the release tag, asset ID, digest, and size with your install results.
 Stop if the download is
@@ -87,8 +87,8 @@ unavailable or either value differs. Do not build a replacement or substitute
 a Git checkout.
 
 ```bash
-shasum -a 256 /absolute/path/to/olympus-1.1.0.tgz
-wc -c < /absolute/path/to/olympus-1.1.0.tgz
+shasum -a 256 /absolute/path/to/olympus-1.3.4.tgz
+wc -c < /absolute/path/to/olympus-1.3.4.tgz
 ```
 
 Check for an existing installation with `openclaw plugins inspect olympus
@@ -97,7 +97,7 @@ If Olympus is already installed or has saved state, follow that guide's
 existing-install procedure before continuing. On a clean machine:
 
 ```bash
-openclaw plugins install npm-pack:/absolute/path/to/olympus-1.1.0.tgz --force --accept-capabilities
+openclaw plugins install npm-pack:/absolute/path/to/olympus-1.3.4.tgz --force --accept-capabilities
 # ^ on OpenClaw 2026.7.1: --accept-capabilities does not exist, and --force
 #   there only overwrites an existing plugin — re-run with no flags
 openclaw plugins enable olympus
@@ -156,6 +156,21 @@ always Private. That privacy profile is the only privacy configuration
 Olympus reads. Olympus judges each item's names (Personal unless raised) and
 its content (raised to Private or Secrets on evidence); your always-Private
 rules raise matching items, and nothing you write can lower content.
+
+In Privacy, **In your own words** shows your full description. **Edit** opens
+it inline; Save and Cancel sit together. The note underneath explains that
+ChatGPT sees these words, so describe topics rather than private details.
+Olympus’s private classifier reads your draft and asks follow-up questions in your
+own context, then adds any uncovered common privacy checks. Every answer starts
+blank; skipped questions save as Private. Answers stay editable after your own
+words. **Check what Olympus understood** summarizes both sides and tries synthetic
+item names with the real classifier. **This is wrong** adds a correction to your
+draft and checks that sample again. Nothing is saved until Save. When the private
+model is unavailable, general questions appear and the read-back check is hidden. **Always private (optional)** shows your rules and an **Add a rule** sheet;
+the note beside the rules explains that their names are shown to ChatGPT.
+**Details** holds the longer explanations. Changes to the description or
+removal of a rule still ask for confirmation; conflicts keep your changes
+until you choose Apply or Discard.
 
 The legacy sensitivity map (`~/.olympus/sensitivity-map.json` and
 `olympus sensitivity validate`) was retired on 2026-10-03. If an older
@@ -329,7 +344,7 @@ olympus worker install      # idempotent; also the repair for an interrupted ins
 olympus worker start
 olympus worker stop
 olympus worker restart
-olympus worker upgrade --artifact /absolute/path/to/olympus-1.1.0.tgz
+olympus worker upgrade --artifact /absolute/path/to/olympus-1.3.4.tgz
 olympus worker uninstall
 ```
 
@@ -527,7 +542,7 @@ when you import it: its messages are the same items as the live ones, so
 nothing is stored twice. Takeout names each message by Gmail's id, so this
 costs no Gmail requests. Messages without that id are looked up in Gmail, and
 imports may spend at most half of the day's Gmail requests
-(`OLYMPUS_SOURCE_INDEX_GMAIL_DAILY_API_REQUEST_BUDGET`, 5,000 by default), so
+(`OLYMPUS_SOURCE_INDEX_GMAIL_DAILY_API_REQUEST_BUDGET`, 1,000,000 by default), so
 live mail always keeps the rest. Below 32 a day an import cannot move: its row
 and Needs you say so, and setting the budget to 32 or more, then restarting
 Olympus, lets it go on.
@@ -542,6 +557,24 @@ chosen lane becomes ready when its credential or paired session, scope, and
 source-specific prerequisites are satisfied; no legacy read-authority flag or
 migration utility is needed. Omit `--session-ready` for Telegram or WhatsApp
 until its local pairing helper is ready; otherwise it records `reauth_required`.
+
+On this computer's Keys page, pair Telegram or WhatsApp on its card. After a
+first pairing, choose **Pick chats (recommended)** and confirm the selected
+chats, or **Everything in this account** (including new chats). Pairing alone
+does not register a capture grant or start capture. Returning to Keys resumes
+the waiting login prompt, QR or chat choice. Cancelling the first chat choice
+leaves capture off but keeps the provider login: remove Olympus in Telegram
+active sessions or WhatsApp linked devices to unlink it.
+Re-pairing Telegram retains its existing capture scope only when the authenticated
+account reference matches the one saved with that grant. Older grants without
+that reference, a different or unproven account, and every WhatsApp re-pair ask
+for fresh chat choices. Starting a re-pair suspends the old grant on disk before
+the login can change. Cancellation or failure leaves capture off, including
+after a worker restart, until a successful re-pair publishes proven or newly
+approved consent. Choosing chats from the old grant cannot clear that suspension.
+The WhatsApp picker lists saved contacts and joined groups and may omit unsaved
+chats. Each message is still classified individually; chat selection does not
+set its privacy tier.
 
 <details>
 <summary>CLI fallback reference for a chosen source</summary>
@@ -627,6 +660,14 @@ Olympus plugin: see the README's
 [Olympus for ChatGPT](../README.md#olympus-for-chatgpt). (Advanced: the Grok
 API and other cloud agents need a tunnel of your own in
 `remote.publicBaseUrl`, approved with a pairing code or a key.)
+
+For OpenClaw, Hermes or another MCP client under another account, choose
+**Agent on another account of this computer**. For an agent on your Tailscale
+network, choose **Agent on my tailnet**; the page says if Tailscale is not
+running. Name the agent, choose **Create key**, and copy the setup line into
+it. No separate sign-in or remote access switch is needed. Copy before
+**Done**: the key and setup lines are shown once. **Revoke** stops that agent;
+revoking a route's last key stops its listener.
 
 ## Anytime
 

@@ -1,3 +1,7 @@
+import { createPrivacyQuestionEngine, type PrivacyQuestionEngine } from '../classification/privacy-questions.ts';
+import { readFileSync } from 'node:fs';
+import { isPendingPrivacyPolicy, savePrivateAnswerMode, privateAnswerMode } from '../../core/first-run-privacy.ts';
+import { PRIVATE_ANSWER_OPTIONS, PRIVACY_PRESET_LABELS } from '../../core/privacy-language.ts';
 /**
  * The engine side of setup from ChatGPT (setup-tools.ts): each call goes to
  * the worker's own dashboard route in process, so the ChatGPT panel and the
@@ -11,6 +15,7 @@ import { mailScopeDraftView } from '../../core/mail-source-scope.ts';
 import type { RemotePublicUrls } from '../../core/remote-public-url.ts';
 import {
   updateSovereigntyConfigFile,
+  validateSovereigntyConfig,
   type SovereigntyConfig,
   type SovereigntyModelProfile,
 } from '../../core/sovereignty.ts';
@@ -71,6 +76,7 @@ export interface ChatGptSetupBackendOptions {
   requestReload: () => boolean;
   /** Items held for the privacy check across every tier ledger (counts only). */
   pendingClassificationCount?: () => number;
+  privacyQuestionEngine?: PrivacyQuestionEngine;
   /** Starts a built-in model's install again; false when that model is not built in here. */
   retryModel?: (model: 'embedding' | 'answers' | 'transcription') => boolean;
   env?: Record<string, string | undefined>;
@@ -114,6 +120,22 @@ export function privacyRevision(profile: { description: string; rules: readonly 
 
 export function createChatGptSetupBackend(options: ChatGptSetupBackendOptions): ChatGptSetupBackend {
   let policy = options.sovereignty.config;
+  const privacySettings = (): PrivacySettings => {
+    // A separate setup path may already have answered since this worker booted.
+    const current = options.sovereignty.source === 'file' && options.sovereignty.path
+      ? validateSovereigntyConfig(JSON.parse(readFileSync(options.sovereignty.path, 'utf8'))) : policy;
+    policy = current;
+    const policyRevision = createHash('sha256').update(JSON.stringify(current)).digest('hex').slice(0, 16);
+    if (isPendingPrivacyPolicy(current)) return {
+      configured: false, description: '', rules: [], pendingCount: 0,
+      revision: privacyRevision(undefined) + '.' + policyRevision,
+      privateAnswerChoice: { pending: true, options: PRIVATE_ANSWER_OPTIONS },
+    };
+    const settings = readChatGptPrivacySettings(options.env ?? process.env, safeCount(options.pendingClassificationCount));
+    const id = privateAnswerMode(current);
+    return { ...settings, revision: settings.revision + '.' + policyRevision, privateAnswerMode: { id, label: id === 'custom' ? 'Custom Private-answer mode' : PRIVACY_PRESET_LABELS[id], options: PRIVATE_ANSWER_OPTIONS } };
+  };
+
 
   const post = async (path: string, body: Record<string, unknown>): Promise<Record<string, unknown>> => {
     const response = await options.workerFetch(new Request(`${WORKER_ORIGIN}${path}`, {
@@ -293,16 +315,29 @@ export function createChatGptSetupBackend(options: ChatGptSetupBackendOptions): 
       return loadSecretLocations(options.env ?? process.env);
     },
 
+    privacyQuestions: (description) => (options.privacyQuestionEngine ?? createPrivacyQuestionEngine({ runtime: async () => undefined })).questions(description),
+    privacyCheck: (description, sample) => (options.privacyQuestionEngine ?? createPrivacyQuestionEngine({ runtime: async () => undefined })).check(description, sample),
+
     privacySettings() {
-      return readChatGptPrivacySettings(options.env ?? process.env, safeCount(options.pendingClassificationCount));
+      return privacySettings();
+    },
+
+    choosePrivateAnswers(choice) {
+      if (options.sovereignty.source !== 'file' || !options.sovereignty.path) throw new SetupBackendError('invalid_request');
+      const result = savePrivateAnswerMode(options.sovereignty.path, choice, policy);
+      if (!result.ok) throw new SetupBackendError('invalid_request');
+      policy = result.config;
+      if (result.changed) options.requestReload();
+      return privacySettings();
     },
 
     savePrivacy(update) {
+      if (privacySettings().privateAnswerChoice?.pending) throw new SetupBackendError('privacy_choice_required');
       writePrivacyProfile({
         ...(update.description !== undefined ? { description: update.description } : {}),
         ...(update.rules ? { rules: update.rules as PrivacyRule[] } : {}),
       }, { env: options.env ?? process.env });
-      return readChatGptPrivacySettings(options.env ?? process.env, safeCount(options.pendingClassificationCount));
+      return privacySettings();
     },
   };
 }

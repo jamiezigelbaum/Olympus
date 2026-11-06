@@ -610,3 +610,39 @@ test('the agreement summary does not claim there is no account', () => {
   expect(html).toContain('You don\'t sign up for anything or share an email address.');
   expect(html).not.toContain('create no account');
 });
+
+
+test('standalone toggles preserve config and request the existing supervised restart', async () => {
+  const { setEngineRemoteAccessEnabled } = await import('../src/core/engine-service.ts');
+  const { createStandaloneRemoteAccessConfigWriter } = await import('../src/workers/remote-access-control.ts');
+  const { dir } = home();
+  mkdirSync(dir, { recursive: true });
+  const path = join(dir, 'engine.json');
+  const original = { remote: { enabled: true, relayHost: 'relay.example' }, email: { baseUrl: 'http://127.0.0.1:8010/v1' }, custom: 'kept' };
+  const { writeFileSync } = await import('node:fs');
+  writeFileSync(path, JSON.stringify(original));
+  let restarts = 0;
+  const writer = createStandaloneRemoteAccessConfigWriter({
+    write: enabled => setEngineRemoteAccessEnabled(path, enabled),
+    canRestart: () => true,
+    requestRestart: () => { restarts++; return true; },
+  });
+  expect(await writer(false)).toEqual({ ok: true });
+  expect(JSON.parse(readFileSync(path, 'utf8'))).toEqual({ ...original, remote: { ...original.remote, enabled: false } });
+  expect(restarts).toBe(1);
+  expect(await writer(true)).toEqual({ ok: true });
+  expect(restarts).toBe(2);
+  const refused = createStandaloneRemoteAccessConfigWriter({ write: () => { throw new Error('must not write'); }, canRestart: () => false, requestRestart: () => false });
+  expect(await refused(false)).toMatchObject({ ok: false, code: 'restart_unavailable' });
+});
+
+test('the full-engine restart waits for the response, coalesces requests and reports failure', async () => {
+  const { createDashboardEngineRestart, createStandaloneRemoteAccessConfigWriter } = await import('../src/workers/remote-access-control.ts');
+  let run!: () => void; let restarts = 0; let failed = false;
+  const request = createDashboardEngineRestart({ restart: () => { restarts++; throw new Error('private path'); }, failed: () => { failed = true; }, schedule: (work, delay) => { expect(delay).toBe(750); run = work; } });
+  expect(request()).toBe(true); expect(request()).toBe(true);
+  expect(restarts).toBe(0);
+  run(); expect(restarts).toBe(1); expect(failed).toBe(true);
+  const unsupported = createStandaloneRemoteAccessConfigWriter({ unsupportedReason: 'Unavailable on Linux.', write: () => { throw new Error('must not write'); }, canRestart: () => true, requestRestart: request });
+  expect(await unsupported(false)).toMatchObject({ ok: false, status: 501, code: 'restart_unsupported' });
+});

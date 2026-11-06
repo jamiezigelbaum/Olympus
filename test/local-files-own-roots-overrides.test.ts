@@ -12,18 +12,19 @@
 //     judged path by path with the case rules of its volume.
 
 import { afterEach, describe, expect, test } from 'bun:test';
+import { Database } from 'bun:sqlite';
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { configuredCaptureLocations } from '../src/core/config.ts';
-import type { SourceConnector } from '../src/core/contracts.ts';
+import type { SourceConnector, SourceConnectorListPage } from '../src/core/contracts.ts';
 import { isDedicatedOlympusFolder, olympusOwnLocations, olympusOwnRoots } from '../src/core/olympus-layout.ts';
 import { SOURCE_INGESTION_EXCLUSIONS_PATH_ENV } from '../src/core/source-ingestion-exclusions.ts';
 import { defaultLocalFilesIngestionPolicy } from '../src/core/source-ingestion-policy.ts';
 import { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
 import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
 import { localFilesItemId } from '../src/workers/local-files/connector.ts';
-import { LOCAL_FILES_OWN_ROOTS_CLEANUP_CONNECTOR_ID, createLocalFilesOwnRootsCleanup } from '../src/workers/local-files/own-roots-cleanup.ts';
+import { LOCAL_FILES_OWN_ROOTS_CLEANUP_CONNECTOR_ID, createLocalFilesOwnRootsCleanup, createLocalFilesOwnRootsRecovery } from '../src/workers/local-files/own-roots-cleanup.ts';
 import {
   defaultExclusionContext,
   defaultExclusionForFolder,
@@ -618,11 +619,19 @@ describe('5. what an earlier version indexed inside an own folder', () => {
     // Read scopes come from the saved approval alone: no second argument.
     expect(server).not.toMatch(/fileSourceScope(?:Content|Metadata)Filters\([^()]*,/);
     expect(server).not.toContain('alwaysExcluded');
-    const cleanup = server.indexOf('await localFilesOwnRootsCleanup?.run()');
+    const cleanup = server.indexOf('await localFilesInitialCleanup;');
     expect(cleanup).toBeGreaterThan(0);
     expect(cleanup).toBeLessThan(server.indexOf('const startServer = '));
     // And each pass asks again, so a clean-up cut short goes on, and starts only once no batch is in flight.
-    expect(server).toContain('beforePull: async () => { await localFilesOwnRootsCleanup.run(); await localFilesOwnRootsCleanup.idle(); }');
+    const syncFactory = server.slice(server.indexOf('const localFilesSyncFor = '), server.indexOf('const localFilesApprovedScopePaths = '));
+    expect(syncFactory).toContain('const ownRootsCleanup = localFilesOwnRootsCleanup;');
+    expect(syncFactory).toContain('if (!ownRootsCleanup) return undefined;');
+    expect(syncFactory).toContain('beforePull: async () => { await ownRootsCleanup.run(); await ownRootsCleanup.idle(); }');
+    const mount = server.slice(server.indexOf('const mountLocalFiles = '), server.indexOf('const isLocalFilesTierStore = '));
+    expect(mount).toContain('localFilesOwnRootsCleanup = createLocalFilesOwnRootsCleanup(');
+    expect(mount).toContain('localFilesCleanupRecovery = createLocalFilesOwnRootsRecovery(');
+    expect(mount).toContain('localFilesInitialCleanup = localFilesCleanupRecovery.initial;');
+    expect(server).toContain('sourceId === LOCAL_FILES_SOURCE_ID && !localFilesCleanupRecovery?.ready()');
   });
 
   /** A real tier lane (its stores on disk) whose secure store holds `files`. */
@@ -637,6 +646,139 @@ describe('5. what an earlier version indexed inside an own folder', () => {
     return { secure, lane };
   }
   const sleep = (ms: number) => new Promise<void>((resolve) => { setTimeout(resolve, ms); });
+
+  test.each(['kept', 'throws'] as const)('a failed early row does not starve later pages, folders or tiers (%s)', async (failure) => {
+    const failed = `${home}/.config/olympus/a-failed.txt`;
+    const laterPage = `${home}/.config/olympus/z-later.txt`;
+    const laterFolder = `${home}/capture/later.txt`;
+    const laterTier = `${home}/.config/olympus/tier-later.txt`;
+    const sibling = `${home}/Capture/sibling.txt`;
+    const { secure, lane } = await tierLaneHolding([[laterTier, 'zzlatertier'], [budget, 'zzbudgetbody']]);
+    // Personal-tier rows must be routed through the shared ledger; only the
+    // secure store is a legacy leg that accepts unregistered old rows.
+    const items = [[failed, 'zzfailed'], [laterPage, 'zzlaterpage'], [laterFolder, 'zzlaterfolder'], [sibling, 'zzsibling']].map(([path, text]) => rawFile(path!, text!));
+    await lane.set.sync({
+      id: 'local.files.earlier-routed', family: 'file', async authenticate() {},
+      async *listItems() { yield { items, done: true }; },
+      async fetchItem(id) { return items.find(item => item.identity.localItemId === id)!; },
+      classificationSignals() { return {}; },
+    }, { fetchContent: true, placement: { trustTier: 'S4', trustDomain: 'secure_local' } });
+    const internal = lane.internal.open();
+    expect([failed, laterPage, laterFolder, sibling].every(path => present(internal, path))).toBe(true);
+    const sync = lane.set.sync.bind(lane.set);
+    lane.set.sync = async (connector, options, run) => {
+      const pages: SourceConnectorListPage[] = [];
+      for await (const page of connector.listItems()) pages.push(page);
+      if (failure === 'throws' && pages.some(page => page.items.some(item => item.identity.providerItemId === localFilesItemId(failed)))) throw new Error('synthetic row deletion failure');
+      return sync({ ...connector, async *listItems() {
+        for (const page of pages) yield { ...page, items: page.items.filter(item => item.identity.providerItemId !== localFilesItemId(failed)) };
+      } }, options, run);
+    };
+    const messages: string[] = [];
+    const cleanup = createLocalFilesOwnRootsCleanup({
+      tierSet: lane.set, context: { ...ownContext(), ownRoots: [`${home}/.config/olympus`, `${home}/capture`], volumeIgnoresCase: () => false },
+      pageSize: 1, batchSize: 1, maxItems: 1, log: message => messages.push(message),
+    });
+    const results = [];
+    for (let pass = 0; pass < 20; pass++) results.push(await cleanup.run());
+    expect([present(internal, laterPage), present(internal, laterFolder), present(secure, laterTier)]).toEqual([false, false, false]);
+    expect(results.reduce((sum, result) => sum + result.removed, 0)).toBe(3);
+    expect(results.every(result => !result.complete)).toBe(true);
+    expect(present(internal, failed)).toBe(true);
+    expect(present(internal, sibling)).toBe(true);
+    expect(present(secure, budget)).toBe(true);
+    expect(messages).toHaveLength(1);
+    lane.set.sync = sync;
+    let final = await cleanup.run();
+    for (let pass = 0; !final.complete && pass < 20; pass++) final = await cleanup.run();
+    expect(final.complete).toBe(true);
+    expect(present(internal, failed)).toBe(false);
+    expect(present(internal, sibling)).toBe(true);
+    expect(present(secure, budget)).toBe(true);
+  });
+
+  test.each([1, 50])('failed deletions report no removal progress and repeated failure only once (limit %s)', async (maxItems) => {
+    const { secure, lane } = await tierLaneHolding([[secret, 'zzsecretbody'], [budget, 'zzbudgetbody']]);
+    const sync = lane.set.sync.bind(lane.set);
+    lane.set.sync = (connector, options, run) => sync({ ...connector, async *listItems() { yield { items: [], done: true }; } }, options, run);
+    const messages: string[] = [];
+    const cleanup = createLocalFilesOwnRootsCleanup({ tierSet: lane.set, context: ownContext(), maxItems, log: message => messages.push(message) });
+    const results = [await cleanup.run(), await cleanup.run(), await cleanup.run()];
+    expect(results).toEqual(Array.from({ length: 3 }, () => ({ removed: 0, complete: false })));
+    expect(messages.filter(message => message.includes('did not remove'))).toHaveLength(1);
+    expect(present(secure, secret)).toBe(true);
+    expect(present(secure, budget)).toBe(true);
+  });
+
+  test('real failed deletion recovery increases retry delay to its cap without log flooding', async () => {
+    const { secure, lane } = await tierLaneHolding([[secret, 'zzsecretbody']]);
+    const sync = lane.set.sync.bind(lane.set);
+    lane.set.sync = (connector, options, run) => sync({ ...connector, async *listItems() { yield { items: [], done: true }; } }, options, run);
+    const messages: string[] = [];
+    const cleanup = createLocalFilesOwnRootsCleanup({ tierSet: lane.set, context: ownContext(), log: message => messages.push(message) });
+    const delays: number[] = [];
+    const pending: Array<{ handle: object; callback: () => void }> = [];
+    const setTimeoutImpl = ((callback: () => void, delay: number) => {
+      const handle = { unref() {} };
+      delays.push(delay);
+      pending.push({ handle, callback });
+      return handle;
+    }) as unknown as typeof setTimeout;
+    const clearTimeoutImpl = ((handle: unknown) => {
+      const index = pending.findIndex(entry => entry.handle === handle);
+      if (index >= 0) pending.splice(index, 1);
+    }) as typeof clearTimeout;
+    const recovery = createLocalFilesOwnRootsRecovery({ cleanup, stores: () => lane.set.openStores(), retryMs: 10, maxRetryMs: 80, setTimeoutImpl, clearTimeoutImpl });
+    try {
+      await recovery.initial;
+      for (let pass = 0; pass < 4; pass++) {
+        expect(pending).toHaveLength(1);
+        pending.shift()!.callback();
+        const deadline = Date.now() + 1000;
+        while (!pending.length && Date.now() < deadline) await new Promise<void>(resolve => setImmediate(resolve));
+      }
+      expect(delays).toEqual([10, 20, 40, 80, 80]);
+      expect(messages.filter(message => message.includes('did not remove'))).toHaveLength(1);
+      expect(recovery.ready()).toBe(false);
+      expect(present(secure, secret)).toBe(true);
+    } finally { recovery.close(); }
+    expect(pending).toHaveLength(0);
+  });
+
+  test('repeated deletion exceptions are reported once and a later successful pass still cleans', async () => {
+    const { secure, lane } = await tierLaneHolding([[secret, 'zzsecretbody'], [budget, 'zzbudgetbody']]);
+    const sync = lane.set.sync.bind(lane.set);
+    lane.set.sync = async () => { throw new Error('synthetic deletion failure'); };
+    const messages: string[] = [];
+    const cleanup = createLocalFilesOwnRootsCleanup({ tierSet: lane.set, context: ownContext(), log: message => messages.push(message) });
+    for (let pass = 0; pass < 3; pass++) expect(await cleanup.run()).toEqual({ removed: 0, complete: false });
+    expect(messages).toHaveLength(1);
+    lane.set.sync = sync;
+    expect(await cleanup.run()).toEqual({ removed: 1, complete: true });
+    expect(present(secure, secret)).toBe(false);
+    expect(present(secure, budget)).toBe(true);
+  });
+
+  test('an index that becomes unready during a walk cannot certify cleanup complete', async () => {
+    const { secure, lane } = await tierLaneHolding([[secret, 'zzsecretbody'], [budget, 'zzbudgetbody']]);
+    const page = secure.pageActiveItemsUnderLocatorIfIndexed.bind(secure);
+    let invalidated = false;
+    secure.pageActiveItemsUnderLocatorIfIndexed = (input) => {
+      if (!invalidated) {
+        invalidated = true;
+        const db = new Database(secure.dbPath);
+        try { db.exec('DELETE FROM item_locator_identities; UPDATE locator_identity_index_state SET completed = 0, cursor_item_pk = 0'); } finally { db.close(); }
+      }
+      return page(input);
+    };
+    const cleanup = createLocalFilesOwnRootsCleanup({ tierSet: lane.set, context: ownContext() });
+    expect(await cleanup.run()).toEqual({ removed: 0, complete: false });
+    expect(present(secure, secret)).toBe(true);
+    await secure.ensureLocatorIdentityIndexReady();
+    expect(await cleanup.run()).toEqual({ removed: 1, complete: true });
+    expect(present(secure, secret)).toBe(false);
+    expect(present(secure, budget)).toBe(true);
+  });
 
   test('goes through the lane\'s tier set, and moves no folder\'s cursor', async () => {
     const { secure, lane } = await tierLaneHolding([[secret, 'zzsecretbody the session token'], [budget, 'zzbudgetbody']]);
@@ -704,6 +846,93 @@ describe('5. what an earlier version indexed inside an own folder', () => {
     await cleanup.idle();
     expect(inFlight).toBe(false);
     expect(present(secure, secret)).toBe(false);
+  });
+
+  test('each provider pull waits for its cleanup barrier, including a repeated pass', async () => {
+    const base = tempBase();
+    const docs = join(base, 'docs');
+    mkdirSync(docs, { recursive: true });
+    writeFileSync(join(docs, 'a.txt'), 'Synthetic user file');
+    const store = await indexedStore([]);
+    const approval = choose(docs);
+    const decide = (path: string) => decideLocalFilesPath(approval, path, contextFor({ HOME: base }));
+    const events: string[] = [];
+    const scope: LocalFilesContentScope = {
+      generation, revision, assertCurrent() { events.push('scope'); }, decide,
+      snapshotDecider: () => decide, roots: () => localFilesRoots(approval),
+    };
+    let release: (() => void) | undefined;
+    const handler = createLocalFilesProviderStoreSyncHandler({
+      store, tierSet: localFilesTestTierSet(store), scope, volumes: new VolumeResolver(), snapshotDir: join(base, 'watch'),
+      beforePull: async () => {
+        events.push('cleanup-start');
+        await new Promise<void>(resolve => { release = resolve; });
+        events.push('cleanup-idle');
+      },
+    });
+    for (let pass = 0; pass < 2; pass++) {
+      events.length = 0;
+      const pull = handler.pull({ approved_scope_key: `${LOCAL_FILES_POLICY_SOURCE}:${docs}` });
+      await new Promise<void>(resolve => setImmediate(resolve));
+      expect(events).toEqual(['cleanup-start']);
+      release!();
+      await pull;
+      expect(events.slice(0, 2)).toEqual(['cleanup-start', 'cleanup-idle']);
+    }
+  });
+
+  test('recovery never treats an incomplete result as ready and retries transient work', async () => {
+    let calls = 0;
+    const recovery = createLocalFilesOwnRootsRecovery({
+      cleanup: { run: async () => ({ removed: 0, complete: ++calls >= 3 }), idle: async () => {} },
+      stores: () => [], retryMs: 1, maxRetryMs: 4,
+    });
+    try {
+      await recovery.initial;
+      expect(recovery.ready()).toBe(false);
+      const deadline = Date.now() + 1000;
+      while (!recovery.ready() && Date.now() < deadline) await sleep(5);
+      expect(recovery.ready()).toBe(true);
+      expect(calls).toBe(3);
+    } finally { recovery.close(); }
+    expect(recovery.ready()).toBe(false);
+  });
+
+  test('persistent cleanup failures stay closed, report once and stop retrying at shutdown', async () => {
+    let calls = 0;
+    const messages: string[] = [];
+    const recovery = createLocalFilesOwnRootsRecovery({
+      cleanup: { run: async () => { calls++; return { removed: 0, complete: false }; }, idle: async () => {} },
+      stores: () => [], retryMs: 1, maxRetryMs: 4, log: message => messages.push(message),
+    });
+    await recovery.initial;
+    await sleep(20);
+    expect(calls).toBeGreaterThan(1);
+    expect(recovery.ready()).toBe(false);
+    expect(messages).toHaveLength(1);
+    recovery.close();
+    const closedAt = calls;
+    await sleep(20);
+    expect(calls).toBe(closedAt);
+    expect(recovery.ready()).toBe(false);
+  });
+
+  test('shutdown during an in-flight cleanup prevents later backfill or runners', async () => {
+    let release!: () => void;
+    const idle = new Promise<void>(resolve => { release = resolve; });
+    let runs = 0, storeReads = 0;
+    const recovery = createLocalFilesOwnRootsRecovery({
+      cleanup: { run: async () => { runs++; return { removed: 0, complete: false }; }, idle: () => idle },
+      stores: () => { storeReads++; return []; }, retryMs: 1,
+    });
+    await recovery.initial;
+    await sleep(10);
+    recovery.close();
+    release();
+    await sleep(10);
+    expect(runs).toBe(1);
+    expect(storeReads).toBe(0);
+    expect(recovery.ready()).toBe(false);
   });
 
   test('is bounded by count, and what is left goes with the next pass of a chosen folder', async () => {

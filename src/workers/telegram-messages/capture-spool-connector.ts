@@ -580,12 +580,12 @@ function spoolTailLines(path: string): string[] {
  * identity, version and capture id stay, and it is flagged so a replay
  * judges it Secrets again. Cursors are this spool's `<file>:<lines>`.
  */
-export function redactTelegramCaptureSpoolSecrets(options: {
+export async function redactTelegramCaptureSpoolSecrets(options: {
   spoolDir: string;
   from?: string;
   through?: string;
   judge: SpoolSecretJudge;
-}): CaptureSpoolRedactionResult {
+}): Promise<CaptureSpoolRedactionResult> {
   assertTelegramCaptureSpoolDirectory(options.spoolDir);
   const from = parseTelegramCaptureSpoolCursor(options.from);
   const through = parseTelegramCaptureSpoolCursor(options.through);

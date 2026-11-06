@@ -4,7 +4,7 @@
 // across re-syncs, the installed inputs reaching a lane that passes none, and
 // set / explain / rules / classifier.
 
-import { chmodSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, test } from 'bun:test';
@@ -317,6 +317,27 @@ describe('installed inputs, stickiness across re-sync, and the CLI', () => {
     const approved = await runTierCommand(['classifier', 'approve', '--why', 'Owner chose the local model for the sniffer.'], { env: withPolicy });
     expect(approved).toMatchObject({ recorded: { approved_by: 'owner', status: 'complete', kind: 'classifier_model_decision' } });
     expect(await runTierCommand(['classifier', 'status'], { env: withPolicy })).toMatchObject({ approved: true, decision: 'approved' });
+  });
+
+  test('standalone classifier status and approval use the worker built-in lane from the installed engine', async () => {
+    const { dir, env } = setup();
+    const { loadSovereigntyPreset } = await import('../src/core/sovereignty.ts');
+    const policy = join(dir, 'sovereignty.json');
+    writeFileSync(policy, JSON.stringify(loadSovereigntyPreset('local-first')));
+    const home = join(dir, 'home');
+    mkdirSync(join(home, '.olympus'), { recursive: true });
+    mkdirSync(join(home, 'Library', 'LaunchAgents'), { recursive: true });
+    writeFileSync(join(home, '.olympus', 'engine.json'), '{"olympusStandalone":true}');
+    writeFileSync(join(home, 'Library', 'LaunchAgents', 'ai.olympusplugin.engine.plist'), '<plist/>');
+    const installed = { ...env, HOME: home, NODE_ENV: 'production', OLYMPUS_SOVEREIGNTY_CONFIG_PATH: policy };
+    expect(await runTierCommand(['classifier', 'status'], { env: installed })).toMatchObject({ lane: 'local', profile: 'built_in', modelId: 'built_in', approved: false });
+    await runTierCommand(['classifier', 'approve', '--why', 'Use the installed model.'], { env: installed });
+    expect(await runTierCommand(['classifier', 'status'], { env: installed })).toMatchObject({ profile: 'built_in', approved: true });
+    const { installedSnifferRuntime } = await import('../src/workers/classification/installed-sniffer-runtime.ts');
+    expect(installedSnifferRuntime(installed)).toMatchObject({ source: 'built_in', lane: { profileId: 'built_in' } });
+    expect(installedSnifferRuntime({ ...installed, OLYMPUS_BUILT_IN_ANALYST: 'off' })).toMatchObject({ source: 'configured', lane: { profileId: 'local-source-answer' } });
+    writeFileSync(join(home, '.olympus', 'engine.json'), '{}');
+    expect(installedSnifferRuntime(installed)).toMatchObject({ source: 'configured', lane: { profileId: 'local-source-answer' } });
   });
 
   test('classifier CLI approval and decline use the worker prompt with owner privacy words', async () => {

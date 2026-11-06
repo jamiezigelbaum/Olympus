@@ -36,6 +36,8 @@ export const PUBLIC_ENTRYPOINTS = [
   'scripts/source-embedding-drain.ts',
   // Started by the built-in provider as its own process (dist/litert-helper.js).
   'src/workers/source-index/built-in-embedding/litert-helper.ts',
+  // Started as a Bun Worker for large secret scans (dist/secret-scan-worker.js).
+  'src/workers/classification/secret-scan-worker.ts',
 ] as const;
 
 export interface PublicReachability {

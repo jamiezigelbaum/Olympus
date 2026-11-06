@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { parseSchedulerSourceIds, type OlympusConfig } from '../core/config.ts';
 import { boundedLogErrorMessage } from '../core/log-redaction.ts';
+import { controlPathHeadroom } from './control-path-headroom.ts';
 import { OperationError } from '../core/operation-error.ts';
 import type { SourceIngestionPolicy } from '../core/source-ingestion-policy.ts';
 import {
@@ -13,7 +14,9 @@ import {
 } from './dropbox-files/index.ts';
 import { DropboxPathNotFoundError } from './dropbox-files/provider-client.ts';
 import type { DropboxProviderStoreSyncHandler } from './dropbox-files/provider-store-sync.ts';
+import { ingestionTurn } from './control-path-headroom.ts';
 import type { FileExtractionRunner } from './file-extraction/runner.ts';
+import { EXTRACTION_PAUSE_CONSECUTIVE_FAILURES } from './file-extraction/runner.ts';
 import { GOOGLE_DRIVE_EXTRACTION_SCOPE_KEY } from './google-connectors/drive-extraction-source.ts';
 import {
   EMBEDDING_ITEMS_FAILED_REASON,
@@ -381,6 +384,12 @@ export interface SourceSchedulerOptions {
   setIntervalImpl?: typeof setInterval;
   clearIntervalImpl?: typeof clearInterval;
   afterTick?: (status: SourceSchedulerStatus) => void | Promise<void>;
+  /**
+   * The least time between two afterTick deliveries; statuses in between
+   * coalesce to the latest, delivered when the interval has passed. 0 (the
+   * default) delivers after every tick.
+   */
+  afterTickMinIntervalMs?: number;
   stateStore?: SourceSchedulerStateStore;
   /** Consecutive zero-change runs before a lane is marked degraded. */
   zeroChangeDegradeRuns?: number;
@@ -527,6 +536,9 @@ export class SourceScheduler {
   private readonly busyConcurrencyKeys = new Set<string>();
   private pendingAfterTickStatus: SourceSchedulerStatus | undefined;
   private afterTickDrain: Promise<void> | undefined;
+  private readonly afterTickMinIntervalMs: number;
+  private lastAfterTickAt: number | undefined;
+  private afterTickTimer: ReturnType<typeof setTimeout> | undefined;
   private timer: ReturnType<typeof setInterval> | undefined;
   private readonly fastWakeTimers = new Map<number, ReturnType<typeof setInterval>>();
   private readonly continueAfterMs: number;
@@ -550,6 +562,7 @@ export class SourceScheduler {
     this.setIntervalImpl = options.setIntervalImpl ?? setInterval;
     this.clearIntervalImpl = options.clearIntervalImpl ?? clearInterval;
     this.afterTick = options.afterTick;
+    this.afterTickMinIntervalMs = Math.max(0, options.afterTickMinIntervalMs ?? 0);
     this.stateStore = options.stateStore;
     this.zeroChangeDegradeRuns = options.zeroChangeDegradeRuns ?? DEFAULT_ZERO_CHANGE_DEGRADE_RUNS;
     this.continueAfterMs = options.continueAfterMs ?? SOURCE_SCHEDULER_CONTINUE_AFTER_MS;
@@ -617,6 +630,10 @@ export class SourceScheduler {
     if (this.continueWake) {
       this.clearTimeoutImpl(this.continueWake.timer);
       this.continueWake = undefined;
+    }
+    if (this.afterTickTimer) {
+      this.clearTimeoutImpl(this.afterTickTimer);
+      this.afterTickTimer = undefined;
     }
   }
 
@@ -851,9 +868,36 @@ export class SourceScheduler {
   private publishAfterTick(status: SourceSchedulerStatus): Promise<void> {
     if (!this.afterTick) return Promise.resolve();
     this.pendingAfterTickStatus = status;
+    if (this.afterTickDrain) return this.afterTickDrain;
+    // A delivery builds every store's status. Continuation wakes tick every few
+    // seconds during an import, and a status per tick held Sparta's worker for
+    // most of its time (2026-11-03), so deliveries are spaced; the latest
+    // status waits for the next slot instead.
+    const waitMs = this.afterTickWaitMs();
+    if (waitMs > 0) {
+      if (!this.afterTickTimer) {
+        this.afterTickTimer = this.setTimeoutImpl(() => {
+          this.afterTickTimer = undefined;
+          void this.startAfterTickDrain();
+        }, waitMs);
+        (this.afterTickTimer as { unref?: () => void }).unref?.();
+      }
+      return Promise.resolve();
+    }
+    return this.startAfterTickDrain();
+  }
+
+  private afterTickWaitMs(): number {
+    if (this.afterTickMinIntervalMs <= 0 || this.lastAfterTickAt === undefined) return 0;
+    return Math.max(0, this.lastAfterTickAt + this.afterTickMinIntervalMs - Date.now());
+  }
+
+  private startAfterTickDrain(): Promise<void> {
     if (!this.afterTickDrain) {
       this.afterTickDrain = this.drainAfterTickStatuses().finally(() => {
         this.afterTickDrain = undefined;
+        // A status that arrived during the last delivery waits its slot.
+        if (this.pendingAfterTickStatus) void this.publishAfterTick(this.pendingAfterTickStatus);
       });
     }
     return this.afterTickDrain;
@@ -863,11 +907,13 @@ export class SourceScheduler {
     while (this.pendingAfterTickStatus) {
       const status = this.pendingAfterTickStatus;
       this.pendingAfterTickStatus = undefined;
+      this.lastAfterTickAt = Date.now();
       try {
         await this.afterTick!(status);
       } catch (error) {
         console.error(`[olympus:source-scheduler] after_tick_failed error_kind=${safeSchedulerErrorKind(error)}`);
       }
+      if (this.afterTickWaitMs() > 0) break;
     }
   }
 
@@ -877,8 +923,21 @@ export class SourceScheduler {
     provenance: SourceSchedulerRunProvenance,
   ): Promise<void> {
     const groups = new Map<string, SchedulerTaskState[]>();
+    const keyOf = (state: SchedulerTaskState): string => {
+      const own = taskConcurrencyKey(state.source, state.task);
+      if (state.task.kind !== 'embed') return own;
+      // An embedding sweep due with its source's other work joins that turn
+      // and runs after it, so it embeds what the listing just wrote. Only
+      // while that turn is held by a run already under way does it take a
+      // turn of its own.
+      const sourceKey = state.source.corpusId;
+      const joins = !this.busyConcurrencyKeys.has(sourceKey)
+        && states.some((other) => other !== state && other.source === state.source
+          && taskConcurrencyKey(other.source, other.task) === sourceKey);
+      return joins ? sourceKey : own;
+    };
     for (const state of states) {
-      const concurrencyKey = taskConcurrencyKey(state.source, state.task);
+      const concurrencyKey = keyOf(state);
       const group = groups.get(concurrencyKey) ?? [];
       group.push(state);
       groups.set(concurrencyKey, group);
@@ -893,7 +952,7 @@ export class SourceScheduler {
           state.running = true;
           this.executingStates.add(state);
           try {
-            await this.runTask(state, dueAt, provenance);
+            await this.runTaskSharingThread(state, dueAt, provenance);
           } finally {
             state.running = false;
             this.executingStates.delete(state);
@@ -906,20 +965,31 @@ export class SourceScheduler {
         if (provenance === 'scheduled') {
           const ran = new Set(group);
           const now = this.now().getTime();
+          // A source's own embedding sweep keeps a turn of its own (it never
+          // waits out a listing), but when the listing ends it still follows
+          // at once, as it did when the two shared the key.
+          const sources = new Set(group.map((state) => state.source));
           const due = this.states.filter((state) => !ran.has(state)
             && !state.running
             && taskCadence(state.source, state.task) === 'continuous'
-            && taskConcurrencyKey(state.source, state.task) === concurrencyKey
+            && (taskConcurrencyKey(state.source, state.task) === concurrencyKey
+              || (sources.has(state.source) && state.task.kind === 'embed'))
             && state.nextRunAt <= now);
           for (const state of due) {
             if (state.running) continue;
+            const ownKey = taskConcurrencyKey(state.source, state.task);
+            if (ownKey !== concurrencyKey) {
+              if (this.busyConcurrencyKeys.has(ownKey)) continue;
+              this.busyConcurrencyKeys.add(ownKey);
+            }
             state.running = true;
             this.executingStates.add(state);
             try {
-              await this.runTask(state, state.nextRunAt, provenance);
+              await this.runTaskSharingThread(state, state.nextRunAt, provenance);
             } finally {
               state.running = false;
               this.executingStates.delete(state);
+              if (ownKey !== concurrencyKey) this.busyConcurrencyKeys.delete(ownKey);
             }
           }
         }
@@ -927,6 +997,24 @@ export class SourceScheduler {
         this.busyConcurrencyKeys.delete(concurrencyKey);
       }
     }));
+  }
+
+  /**
+   * Every task is named while it runs, so a freeze of the worker's requests is
+   * logged with the tasks that were running (control-path-headroom.ts). The
+   * tasks' own work loops take the turns that keep requests answering.
+   */
+  private async runTaskSharingThread(
+    state: SchedulerTaskState,
+    dueAt: number,
+    provenance: SourceSchedulerRunProvenance,
+  ): Promise<void> {
+    const leave = controlPathHeadroom.enter(`${state.source.sourceId}/${state.task.kind}`);
+    try {
+      await this.runTask(state, dueAt, provenance);
+    } finally {
+      leave();
+    }
   }
 
   private async runTask(
@@ -1041,6 +1129,9 @@ export class SourceScheduler {
       }
       state.nextRunAt = nextRunAt;
       if (continuing || wokenWhileRunning) this.scheduleContinueWake(nextRunAt);
+      // A retry due before the next regular tick gets its own wake, or the tick
+      // would round it up (an embedding backlog asking for 5 s waited 60 s).
+      else if (retryAt && nextRunAt - Date.parse(completedAt) < this.tickMs) this.scheduleContinueWake(nextRunAt);
       if (result.status === 'progress' && !retryAt) this.wakeDownstream(state, continueAt);
     } catch (error) {
       delete state.wakeAfterRun;
@@ -1322,6 +1413,7 @@ export function createSourceSchedulerFromConfig(input: {
   config: OlympusConfig;
   sources: SourceSchedulerSource[];
   afterTick?: (status: SourceSchedulerStatus) => void | Promise<void>;
+  afterTickMinIntervalMs?: number;
   stateStore?: SourceSchedulerStateStore;
 }): SourceScheduler {
   return new SourceScheduler({
@@ -1341,6 +1433,7 @@ export function createSourceSchedulerFromConfig(input: {
       ? { allowedSourceIds: input.config.worker.scheduler.sourceIds }
       : {}),
     ...(input.afterTick ? { afterTick: input.afterTick } : {}),
+    ...(input.afterTickMinIntervalMs !== undefined ? { afterTickMinIntervalMs: input.afterTickMinIntervalMs } : {}),
     ...(input.config.worker.scheduler.enabled
       ? { stateStore: input.stateStore ?? new LocalSourceSchedulerStateStore() }
       : {}),
@@ -1453,6 +1546,16 @@ export function createCanonicalDropboxSchedulerSource(input: {
 export const FILE_EXTRACTION_MAX_PLAN_PAGES_PER_PASS = 40;
 
 /**
+ * How long one extraction pass keeps leasing further full batches after its
+ * first. Bounded so the lane's other tasks (and other lanes sharing its
+ * concurrency key) still get their turn between passes.
+ */
+export const FILE_EXTRACTION_PASS_BUDGET_MS = 20_000;
+
+/** Most batches one extraction pass extracts, whatever the budget. */
+export const FILE_EXTRACTION_MAX_BATCHES_PER_PASS = 25;
+
+/**
  * One scheduled extraction pass for a file lane: queue up to `planLimit`
  * candidates (reading as many candidate pages as that takes, within a bound),
  * then extract a small batch. Every extracted chunk feeds the lane's embedding
@@ -1468,8 +1571,16 @@ export function fileExtractionSchedulerTask(input: {
   batchSize: number;
   mimeTypes?: readonly string[];
   maxPlanPages?: number;
+  /** Time a pass may keep extracting full batches; see FILE_EXTRACTION_PASS_BUDGET_MS. */
+  passBudgetMs?: number;
+  /** Most batches one pass extracts; see FILE_EXTRACTION_MAX_BATCHES_PER_PASS. */
+  maxBatchesPerPass?: number;
+  now?: () => number;
 }): SourceSchedulerTask {
   const maxPages = Math.max(1, input.maxPlanPages ?? FILE_EXTRACTION_MAX_PLAN_PAGES_PER_PASS);
+  const passBudgetMs = Math.max(0, input.passBudgetMs ?? FILE_EXTRACTION_PASS_BUDGET_MS);
+  const maxBatches = Math.max(1, input.maxBatchesPerPass ?? FILE_EXTRACTION_MAX_BATCHES_PER_PASS);
+  const now = input.now ?? Date.now;
   return {
     id: input.id,
     kind: 'extract',
@@ -1479,6 +1590,7 @@ export function fileExtractionSchedulerTask(input: {
     // instead of at the lane's next pass.
     atStart: () => { input.runner.prepareReadersWithWaitingWork?.([input.lane]); },
     run: async (context?: SourceSchedulerTaskRunContext) => {
+      const passStartedAt = now();
       let cursor = context?.checkpoint ?? undefined;
       const startCursor = cursor;
       let done = false;
@@ -1489,6 +1601,9 @@ export function fileExtractionSchedulerTask(input: {
       let jobsRefused = 0;
       const extractorKinds = new Set<string>();
       for (let page = 0; page < maxPages; page += 1) {
+        // A page can hold no candidate (a window of items already read), so
+        // nothing inside it yields: turn here between pages.
+        await ingestionTurn();
         const plan = await input.runner.plan({
           ...input.lane,
           limit: input.planLimit,
@@ -1513,34 +1628,70 @@ export function fileExtractionSchedulerTask(input: {
         cursor = plan.nextCursor;
         if (candidates >= input.planLimit) break;
       }
-      const run = await input.runner.run({
+      // Extract full batches until the pass budget is spent: one small batch
+      // per pass drained a large folder at a few files a minute (Sparta,
+      // 2026-11-03: ~900 queued Dropbox jobs, 2 per 15 s). Every job yields
+      // the thread (ingestionTurn), so a longer pass does not freeze requests.
+      let run = await input.runner.run({
         ...input.lane,
         limit: input.batchSize,
         preflightExtractorKinds: [...extractorKinds],
       });
+      let processedJobs = run.processedJobs;
+      const settled = { ...run.counts };
+      for (let batch = 1; batch < maxBatches; batch += 1) {
+        if (run.paused || run.processedJobs < input.batchSize) break;
+        if (now() - passStartedAt >= passBudgetMs) break;
+        run = await input.runner.run({ ...input.lane, limit: input.batchSize });
+        processedJobs += run.processedJobs;
+        settled.indexed += run.counts.indexed;
+        settled.metadata_only += run.counts.metadata_only;
+        settled.skipped_unsupported += run.counts.skipped_unsupported;
+        settled.skipped_too_large += run.counts.skipped_too_large;
+        settled.failed_retryable += run.counts.failed_retryable;
+        settled.failed_terminal += run.counts.failed_terminal;
+      }
       const counts = {
         candidates_seen: candidates,
         jobs_queued: jobsQueued,
         jobs_existing: jobsExisting,
         jobs_unroutable: jobsUnroutable,
         jobs_refused: jobsRefused,
-        jobs_processed: run.processedJobs,
-        jobs_indexed: run.counts.indexed,
-        jobs_metadata_only: run.counts.metadata_only,
-        jobs_unsupported: run.counts.skipped_unsupported,
-        jobs_too_large: run.counts.skipped_too_large,
-        jobs_failed_retryable: run.counts.failed_retryable,
-        jobs_failed_terminal: run.counts.failed_terminal,
+        jobs_processed: processedJobs,
+        jobs_indexed: settled.indexed,
+        jobs_metadata_only: settled.metadata_only,
+        jobs_unsupported: settled.skipped_unsupported,
+        jobs_too_large: settled.skipped_too_large,
+        jobs_failed_retryable: settled.failed_retryable,
+        jobs_failed_terminal: settled.failed_terminal,
       };
+      if (run.paused && run.parkedUntil !== undefined) {
+        // The source's request budget is spent: a planned park until it
+        // resets, not a failure, so the lane neither fail-loops nor counts
+        // toward a failure streak.
+        return {
+          status: processedJobs > 0 || jobsQueued > 0 ? 'progress' : 'idle',
+          counts,
+          ...extractionWarnings(jobsRefused, run.pauseReason),
+          checkpoint: done ? null : cursor ?? null,
+          retryAt: { at: run.parkedUntil, degradedReason: run.pauseReason ?? 'source_budget_exhausted' },
+        };
+      }
       if (run.paused) {
-        throw new SourceSchedulerTaskFailure('File extraction paused at the extractor health gate.', {
+        // The message names the pause the runner reported: five retryable
+        // failures in a row used to be reported as a health-gate pause too,
+        // which sent a reader of the log looking at the wrong cause.
+        const message = run.pauseReason === EXTRACTION_PAUSE_CONSECUTIVE_FAILURES
+          ? 'File extraction paused after several files in a row failed to read; it tries again later.'
+          : 'File extraction paused at the extractor health gate.';
+        throw new SourceSchedulerTaskFailure(message, {
           errorKind: run.preflightErrorKind ?? run.pauseReason ?? 'extractor_health_probe_failed',
           ...extractionWarnings(jobsRefused, run.pauseReason),
           counts,
         });
       }
       return {
-        status: jobsQueued > 0 || run.processedJobs > 0 ? 'progress' : 'idle',
+        status: jobsQueued > 0 || processedJobs > 0 ? 'progress' : 'idle',
         counts,
         // Refused candidates never fail the pass; they ride as a warning.
         ...extractionWarnings(jobsRefused, undefined),
@@ -1628,6 +1779,30 @@ export const EMBEDDING_SWEEP_INTERVAL_MS = 60_000;
 export const EMBEDDING_SWEEP_MAX_BACKOFF_MS = 30 * 60_000;
 /** Items per store per sweep pass. */
 export const EMBEDDING_SWEEP_MAX_ITEMS = 32;
+/**
+ * Raises the bound for a fast embedder (a GPU helper on another machine), where
+ * 32 items take about a second and the pause between passes would set the pace.
+ * The store deadline still ends a long pass.
+ */
+export const EMBEDDING_SWEEP_MAX_ITEMS_ENV = 'OLYMPUS_EMBEDDING_SWEEP_MAX_ITEMS';
+/** The whole selection's text is in memory at once, before the deadline can apply. */
+const EMBEDDING_SWEEP_MAX_ITEMS_CEILING = 1_024;
+
+export function embeddingSweepMaxItems(env: Record<string, string | undefined> = process.env): number {
+  const value = Number(env[EMBEDDING_SWEEP_MAX_ITEMS_ENV]);
+  return Number.isInteger(value) && value > 0
+    ? Math.min(value, EMBEDDING_SWEEP_MAX_ITEMS_CEILING)
+    : EMBEDDING_SWEEP_MAX_ITEMS;
+}
+/**
+ * The longest one store's part of a sweep pass may take. A pass holds its
+ * source's exclusive turn (source-account-guard.ts), so one that never ended
+ * held every later sync and extraction of the source behind it (Sparta,
+ * 2026-11-04: Dropbox's store pulls and extraction stopped for hours). Past
+ * this the pass gives the turn back and the store reads as deferred; the
+ * store's own embedding lease keeps a second pass off the same chunks.
+ */
+export const EMBEDDING_SWEEP_STORE_DEADLINE_MS = 10 * 60_000;
 const EMBEDDING_SWEEP_FRESHNESS_THRESHOLD_MS = 26 * 60 * 60_000;
 
 /**
@@ -1663,13 +1838,14 @@ const EMBEDDING_SWEEP_FRESHNESS_THRESHOLD_MS = 26 * 60 * 60_000;
 export function withEmbeddingSweep(
   sources: readonly SourceSchedulerSource[],
   targetsFor: (source: SourceSchedulerSource) => (() => readonly ConnectorStoreEmbeddingTarget[]) | undefined,
+  options: { storeDeadlineMs?: number } = {},
 ): SourceSchedulerSource[] {
   return sources.map((source) => {
     const targets = targetsFor(source);
     if (!targets) return source;
     return {
       ...source,
-      tasks: [...source.tasks, embeddingSweepTask(source, targets)],
+      tasks: [...source.tasks, embeddingSweepTask(source, targets, options.storeDeadlineMs)],
       embeddingDeferredReason: () => targets().some((target) => target.store.embeddingDeferredReason() !== undefined)
         ? EMBEDDING_PROVIDER_UNAVAILABLE_REASON
         : undefined,
@@ -1677,19 +1853,58 @@ export function withEmbeddingSweep(
   });
 }
 
+export function embeddingSweepConcurrencyKey(source: Pick<SourceSchedulerSource, 'corpusId'>): string {
+  return `${source.corpusId}.embeddings`;
+}
+
 function embeddingSweepTask(
   source: SourceSchedulerSource,
   targets: () => readonly ConnectorStoreEmbeddingTarget[],
+  deadlineMs = EMBEDDING_SWEEP_STORE_DEADLINE_MS,
 ): SourceSchedulerTask {
+  const maxItems = embeddingSweepMaxItems();
   return {
     id: `${source.sourceId}_embeddings`,
     kind: 'embed',
     writer: true,
+    // Its own turn, not the source's: embedding reads only stores (a store
+    // another writer holds answers busy), never the provider, so nothing it
+    // touches needs the source's serialized access. Under the source's key it
+    // waited out every listing; on Sparta (2026-11-04) Gmail's half-hour
+    // reconcile left new mail unsearchable for as long.
+    concurrencyKey: embeddingSweepConcurrencyKey(source),
     intervalMs: EMBEDDING_SWEEP_INTERVAL_MS,
     freshnessThresholdMs: EMBEDDING_SWEEP_FRESHNESS_THRESHOLD_MS,
     run: async (context?: SourceSchedulerTaskRunContext) => {
       const passTargets = targets();
-      const runs = await embedPendingChunks(passTargets, { maxItems: EMBEDDING_SWEEP_MAX_ITEMS });
+      const runs: Awaited<ReturnType<typeof embedPendingChunks>> = [];
+      for (const target of passTargets) {
+        const overran = Symbol('overran');
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        // The pass stops starting batches at half the deadline, so a store
+        // whose 32 items hold thousands of chunks ends in time and continues
+        // next pass, instead of overrunning and backing off as if the
+        // provider were down (Sparta, 2026-11-06: 94 overruns, 70 of them
+        // Dropbox, whose Private store then embedded nothing for an hour).
+        const stopAtMs = Date.now() + Math.floor(deadlineMs / 2);
+        const result = await Promise.race([
+          embedPendingChunks([target], { maxItems, stopAtMs }),
+          new Promise<typeof overran>((resolve) => { timer = setTimeout(() => resolve(overran), deadlineMs); }),
+        ]).finally(() => clearTimeout(timer));
+        if (result !== overran) {
+          // The abandoned call of an earlier overrun still holds the store's
+          // lease, so this pass answers busy: the store's outage stands until
+          // an embedding pass answers (embedPendingChunks clears it then).
+          const outage = target.store.embeddingDeferredReason();
+          runs.push(...result.map((run) => run.busy === true && run.deferredReason === undefined && outage !== undefined
+            ? { ...run, deferredReason: outage } : run));
+          continue;
+        }
+        console.error(`[olympus:embedding-sweep] pass_overran source=${source.sourceId} corpus=${target.store.corpusId} after_ms=${deadlineMs}; the source's turn was given back`);
+        target.store.setEmbeddingDeferral(EMBEDDING_PROVIDER_UNAVAILABLE_REASON);
+        runs.push({ corpusId: target.store.corpusId, itemsAttempted: 0, chunksEmbedded: 0, itemsFailed: 0, itemsOutOfScope: 0,
+          deferredReason: EMBEDDING_PROVIDER_UNAVAILABLE_REASON });
+      }
       const deferred = runs.filter((run) => run.deferredReason !== undefined).length;
       const counts = {
         chunks_embedded: runs.reduce((sum, run) => sum + run.chunksEmbedded, 0),
@@ -1703,14 +1918,17 @@ function embeddingSweepTask(
       const attemptedAt = Date.parse(context?.attemptedAt ?? '') || Date.now();
       if (deferred === 0) {
         // A store that filled its bound has more owed: a backlog drains pass after pass, not one bound a minute.
-        const more = runs.some((run) => run.busy !== true && run.chunksEmbedded > 0 && run.itemsAttempted >= EMBEDDING_SWEEP_MAX_ITEMS);
+        const more = runs.some((run) => run.busy !== true && run.chunksEmbedded > 0
+          && (run.itemsAttempted >= maxItems || run.stoppedAtDeadline === true));
         if (counts.items_failed === 0) return { status, counts, ...(more ? { continueSoon: true } : {}) };
-        // Skipped items are surfaced, not retried: the sweep keeps its cadence.
+        // Skipped items are surfaced, not retried. A backlog still drains pass
+        // after pass: one failed item, ever, once held every later pass of the
+        // store to one bound a minute (Sparta, 2026-11-03: 21k Dropbox items).
         return {
           status,
           counts,
           retryAt: {
-            at: new Date(attemptedAt + EMBEDDING_SWEEP_INTERVAL_MS).toISOString(),
+            at: new Date(attemptedAt + (more ? SOURCE_SCHEDULER_CONTINUE_AFTER_MS : EMBEDDING_SWEEP_INTERVAL_MS)).toISOString(),
             degradedReason: EMBEDDING_ITEMS_FAILED_REASON,
           },
         };
@@ -1740,6 +1958,7 @@ export function createWhatsAppSchedulerSource(input: {
   maxItems?: number;
   extractionPlanLimit?: number;
   extractionBatchSize?: number;
+  subscribeChanges?: SourceSchedulerSource['subscribeChanges'];
 }): SourceSchedulerSource | undefined {
   if (!input.sync) return undefined;
   const tasks: SourceSchedulerTask[] = [{
@@ -1808,6 +2027,7 @@ export function createWhatsAppSchedulerSource(input: {
   }
   return {
     sourceId: SCHEDULER_SOURCE_IDS.whatsapp,
+    ...(input.subscribeChanges ? { subscribeChanges: input.subscribeChanges } : {}),
     corpusId: WHATSAPP_LIVE_CORPUS_ID,
     cadence: 'continuous',
     intervalMs: input.config.worker.scheduler.syncIntervalSeconds * 1_000,
@@ -1821,10 +2041,12 @@ export function createTelegramSchedulerSource(input: {
   config: OlympusConfig;
   sync?: TelegramConnectorStoreSyncHandler;
   maxItems?: number;
+  subscribeChanges?: SourceSchedulerSource['subscribeChanges'];
 }): SourceSchedulerSource | undefined {
   if (!input.sync) return undefined;
   return {
     sourceId: SCHEDULER_SOURCE_IDS.telegram,
+    ...(input.subscribeChanges ? { subscribeChanges: input.subscribeChanges } : {}),
     corpusId: INTERNAL_TELEGRAM_MESSAGES_CORPUS_ID,
     cadence: 'continuous',
     intervalMs: input.config.worker.scheduler.syncIntervalSeconds * 1_000,
@@ -1928,8 +2150,8 @@ export function createGmailConnectorStoreSchedulerSource(input: {
   if (!input.sync) return undefined;
   const liveConfig = input.liveConfig ?? defaultGmailLiveSyncConfig();
   const lastCompletedAt = () => latestCompletedAt([
-    input.internalStore?.status().lastSyncRun?.completedAt,
-    input.secureStore?.status().lastSyncRun?.completedAt,
+    input.internalStore?.lastSyncRun()?.completedAt,
+    input.secureStore?.lastSyncRun()?.completedAt,
   ]);
   return {
     sourceId: SCHEDULER_SOURCE_IDS.gmail,
@@ -2058,8 +2280,8 @@ export function createGoogleDriveConnectorStoreSchedulerSource(input: {
   if (!input.liveSync) return undefined;
   const liveConfig = input.liveConfig ?? defaultGoogleDriveLiveSyncConfig();
   const lastCompletedAt = () => latestCompletedAt([
-    input.internalStore?.status().lastSyncRun?.completedAt,
-    input.secureStore?.status().lastSyncRun?.completedAt,
+    input.internalStore?.lastSyncRun()?.completedAt,
+    input.secureStore?.lastSyncRun()?.completedAt,
   ]);
   return {
     sourceId: SCHEDULER_SOURCE_IDS.googleDrive,

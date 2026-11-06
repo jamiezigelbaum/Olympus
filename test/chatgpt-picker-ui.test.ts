@@ -37,8 +37,8 @@ afterEach(async () => {
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 const ev = (host: Host, type: string) => new host.win.Event(type) as unknown as Event;
 
-function mount(options: { openai?: Record<string, any> | undefined; serve?: Record<string, Serve>; pollMs?: number; pollCapMs?: number } = {}): Host {
-  const html = chatgptDashboardPageHtml({ resultTimeoutMs: 5_000, connectPollMs: options.pollMs ?? 5, connectPollCapMs: options.pollCapMs ?? 5_000 });
+function mount(options: { openai?: Record<string, any> | undefined; serve?: Record<string, Serve>; pollMs?: number; pollCapMs?: number; resultTimeoutMs?: number; answerDelayMs?: number } = {}): Host {
+  const html = chatgptDashboardPageHtml({ resultTimeoutMs: options.resultTimeoutMs ?? 5_000, connectPollMs: options.pollMs ?? 5, connectPollCapMs: options.pollCapMs ?? 5_000 });
   const start = html.indexOf('<script>') + '<script>'.length;
   const script = html.slice(start, html.indexOf('</script>', start));
   const win = new Window({ url: 'https://sandbox.test/' });
@@ -57,7 +57,7 @@ function mount(options: { openai?: Record<string, any> | undefined; serve?: Reco
       if (answer === 'hang') return;
       setTimeout(() => dispatch(answer === 'fail'
         ? { jsonrpc: '2.0', id: message.id, error: { code: -1, message: 'gone' } }
-        : { jsonrpc: '2.0', id: message.id, result: answer }), 0);
+        : { jsonrpc: '2.0', id: message.id, result: answer }), options.answerDelayMs ?? 0);
     },
   };
   Object.defineProperty(win, 'parent', { value: parent, configurable: true });
@@ -847,6 +847,16 @@ describe('folder picker', () => {
     expect(host.text()).toContain('Tax Returns 2024');
   });
 
+  test('a folder list slower than an ordinary tool call still loads (Evernote over 100 notebooks)', async () => {
+    const host = mount({ resultTimeoutMs: 20, answerDelayMs: 80, serve: { [T.scopeList]: folderServer() } });
+    host.push({ structuredContent: pendingDropbox });
+    host.button('Choose folders').click();
+    await sleep(150);
+    await host.settle();
+    expect(host.text()).not.toContain(Q.loadFailed);
+    expect(host.text()).toContain('Tax Returns 2024');
+  });
+
   test('Back with unsaved choices confirms inline; Back to Olympus leaves no names behind', async () => {
     const host = await openFolders();
     tap(host, 'Medical Records', 'ingest');
@@ -900,7 +910,7 @@ describe('folder picker: folders the computer asks about', () => {
   });
 
   test('a folder the computer cannot open yet offers only Skip, says why on the row, and a refused save says why too', async () => {
-    const HELPER = { state: 'needs_helper', message: 'Olympus cannot open this folder on this Mac yet.' };
+    const HELPER = { state: 'needs_helper', message: 'Desktop, Documents, Downloads, iCloud Drive and other disks need the Olympus helper app. Update Olympus to add it, or choose a folder outside them.' };
     const host = mount({ serve: { [T.scopeList]: () => browse([node('k-desk', 'Desktop', { has_children: true, access: HELPER }), node('k-code', 'Code', { has_children: true })]), olympus_dashboard: () => ({ structuredContent: pendingDropbox }) } });
     host.push({ structuredContent: pendingDropbox });
     host.button('Choose folders').click();

@@ -13,7 +13,6 @@ import { lstatSync, readdirSync, realpathSync, type Dirent, type Stats } from 'n
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { OlympusFolderAccess, OlympusFolderScopeNode } from '../../control-ui-contract.ts';
-import { olympusDataDir } from '../../core/remote-access.ts';
 import {
   decodeCursor,
   effectiveSelections,
@@ -23,7 +22,7 @@ import {
   type SourceFolderScopeBrowser,
 } from '../source-scope-browser.ts';
 import { realPathOfScopePath, scopePathOfRealPath } from './locations.ts';
-import { MacPermissions } from './mac-permissions.ts';
+import { folderAccessMemoryPath, MacPermissions } from './mac-permissions.ts';
 import {
   DEFAULT_EXCLUSION_LABELS,
   defaultExclusionContext,
@@ -87,7 +86,7 @@ function localFilesListing(options: LocalFilesFolderScopeBrowserOptions) {
     ?? ((realPath: string) => readdirSync(realPath, { withFileTypes: true }));
   const permissions = options.permissions ?? new MacPermissions({
     home,
-    memoryPath: join(olympusDataDir(), 'local-files', 'folder-access.json'),
+    memoryPath: folderAccessMemoryPath(),
   });
 
   const node = (

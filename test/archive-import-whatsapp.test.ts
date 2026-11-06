@@ -1663,8 +1663,6 @@ describe('whatsapp archive on the shared spine', () => {
       env: { ...process.env, ...f.env },
     });
     expect(live.exitCode).toBe(0);
-    const liveFiles = (): string[] => readdirSync(liveState, { recursive: true }).map(String).sort();
-    const liveBefore = { files: liveFiles(), digest: createHash('sha256').update(readFileSync(liveDb)).digest('hex'), size: statSync(liveDb).size };
     const liveCount = (): number => {
       const db = new Database(liveDb, { readonly: true });
       try {
@@ -1674,6 +1672,10 @@ describe('whatsapp archive on the shared spine', () => {
       }
     };
     expect(liveCount()).toBe(3);
+    // Read before the snapshot: a read-only open of a WAL store leaves its
+    // -wal and -shm files behind, which is this test's doing, not the import's.
+    const liveFiles = (): string[] => readdirSync(liveState, { recursive: true }).map(String).sort();
+    const liveBefore = { files: liveFiles(), digest: createHash('sha256').update(readFileSync(liveDb)).digest('hex'), size: statSync(liveDb).size };
 
     const removed = f.start(put(f.exports, 'WhatsApp Chat with Removed.txt', chatText(syntheticChat(6, { label: 'removed' }), { style: 'android-24-dmy' })));
     const kept = f.start(put(f.exports, 'WhatsApp Chat with Kept.txt', chatText(syntheticChat(5, { label: 'kept' }), { style: 'android-24-dmy' })));

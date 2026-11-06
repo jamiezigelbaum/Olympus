@@ -44,6 +44,8 @@ export const PRIVATE_ANSWER_RESOURCE = {
 export function privateAnswerResourceMeta(relayOrigin = PRIVATE_ANSWER_RELAY_ORIGIN): Record<string, unknown> {
   return {
     ui: { csp: { connectDomains: [relayOrigin], resourceDomains: [] }, domain: DASHBOARD_UI_DOMAIN, prefersBorder: false },
+    // The Secret Inbox button uses the same website landing domain as the dashboard.
+    'openai/widgetCSP': { connect_domains: [relayOrigin], resource_domains: [], redirect_domains: ['https://olympusplugin.ai'] },
     'openai/widgetDescription': 'Shows how many private items match and, when the user asks, a private answer that ChatGPT never receives.',
   };
 }

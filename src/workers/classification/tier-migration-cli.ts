@@ -19,12 +19,12 @@ import { OperationError } from '../../core/operation-error.ts';
 import { createHash } from 'node:crypto';
 import { isClassifierApproved, readClassificationLedger, resolveClassificationLedgerPath } from '../classification-ledger.ts';
 import { CachedTierSniffer, SNIFFER_PROMPT_VERSION, snifferId } from './sniffer.ts';
-import { SnifferLaneRefusedError, resolveSnifferLane, type SnifferLane } from './sniffer-lane.ts';
+import { installedSnifferRuntime } from './installed-sniffer-runtime.ts';
 import { TierSnifferStore } from './sniffer-store.ts';
 import { tierSnifferPathForLedger } from './tier-ledger-path.ts';
 import { loadOwnerTierRules } from './tier-rules.ts';
-import { TIER_MAP_REVISION } from './tier-classifier.ts';
 import { loadSovereigntyEngine } from '../../core/sovereignty.ts';
+import { TIER_MAP_REVISION } from './tier-classifier.ts';
 import type { SourceTrustDomain } from '../../core/source-index/types.ts';
 import type { TierMoveEmbeddingIdentity } from '../connector-store/tier-move.ts';
 import { resolveEmbeddingLedgerPath } from '../embedding-ledger.ts';
@@ -277,15 +277,11 @@ async function installedInputs(
     revision,
   };
   if (!options.withSniffer) return base;
-  let lane: SnifferLane;
-  try {
-    lane = resolveSnifferLane(loadSovereigntyEngine({ env }));
-  } catch (error) {
-    if (error instanceof SnifferLaneRefusedError) {
-      throw new OperationError('invalid_request', `No privacy-safe sniffer lane is available (${error.reason}); --with-sniffer cannot run.`);
-    }
-    throw error;
+  const runtime = installedSnifferRuntime(env);
+  if (runtime.source === 'off') {
+    throw new OperationError('invalid_request', `No privacy-safe sniffer lane is available (${runtime.reason}); --with-sniffer cannot run.`);
   }
+  const lane = runtime.lane;
   const ledger = await readClassificationLedger(resolveClassificationLedgerPath(env));
   const approved = isClassifierApproved(ledger.entries, {
     lane: lane.kind,

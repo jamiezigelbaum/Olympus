@@ -1,9 +1,11 @@
+import { createPendingPrivacyPolicy } from '../src/core/first-run-privacy.ts';
 import { describe, expect, test } from 'bun:test';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { defaultConfig } from '../src/core/config.ts';
 import { SecretStoreError } from '../src/core/secret-store.ts';
+import { WORKER_DATA_OWNER_CONFLICT_MESSAGE } from '../src/core/native-worker-service.ts';
 import { runDoctor } from '../src/core/doctor.ts';
 import { stillImageReadinessOf } from '../src/core/still-image-readiness.ts';
 import type { DoctorCheck, DoctorDeps } from '../src/core/doctor.ts';
@@ -181,6 +183,7 @@ function doctorDeps(overrides: DoctorDeps): DoctorDeps {
   process.on('exit', () => rmSync(stateRoot, { recursive: true, force: true }));
   return {
     runningBun: false,
+    telegramPython: undefined,
     commandExists: async (command) => command === 'bun' || command === 'node',
     pythonModuleExists: async () => false,
     // Doctor tests must never inherit a live local worker from the host. Tests
@@ -199,6 +202,19 @@ function doctorDeps(overrides: DoctorDeps): DoctorDeps {
 }
 
 describe('runDoctor', () => {
+  test('Mac doctor checks the running Bun and Telegram private Python', async () => {
+    const probed: string[] = [];
+    const result = await runDoctor(doctorDeps({
+      config: defaultConfig(), delphi: healthyDelphi(), platform: 'darwin', runningBun: true,
+      commandExists: () => false, telegramPython: '/private/telegram/bin/python',
+      pythonModuleExists: (python) => { probed.push(python); return true; },
+    }));
+    const dependencies = checkByName(result.checks, 'dependencies');
+    expect(dependencies.ok).toBe(true);
+    expect(dependencies.detail).not.toContain('python-telethon');
+    expect(probed).toEqual(['/private/telegram/bin/python']);
+  });
+
   test('Linux accepts its running managed Bun without a PATH bun and names its socket', async () => {
     const result = await runDoctor(doctorDeps({ config: enabledEmailConfig(), delphi: healthyDelphi(), platform: 'linux', runningBun: true,
       commandExists: () => false, env: { HOME: '/tmp/doctor-linux', XDG_RUNTIME_DIR: '/run/user/1000' },
@@ -215,6 +231,15 @@ describe('runDoctor', () => {
       expect(worker.ok).toBe(platform === 'darwin');
       if (platform === 'linux') { expect(worker.detail).toContain('port_in_use'); expect(worker.hint).toContain('SSH socket forward'); }
     }
+  });
+
+  test('doctor reports the current worker data-lock conflict even when no legacy unit remains', async () => {
+    const result = await runDoctor(doctorDeps({ config: defaultConfig(), delphi: healthyDelphi(),
+      hostProbe: () => ({ engine: { installed: true, state: 'running', workerProblem: WORKER_DATA_OWNER_CONFLICT_MESSAGE }, legacyWorkerUnit: false }) }));
+    const host = checkByName(result.checks, 'host');
+    expect(host.ok).toBe(false);
+    expect(host.detail).toContain('another process owns its data');
+    expect(host.hint).toContain('olympus worker uninstall');
   });
 
   test('a worker unit from olympus worker install beside the engine fails host with its removal step', async () => {
@@ -2536,4 +2561,32 @@ describe('runDoctor: photo search', () => {
     expect(check.detail).toContain('image encoder');
     expect(check.hint).not.toContain('pacman');
   });
+});
+
+test('pending doctor never reads source registries or calls source probes, then resumes after consent', async () => {
+  const config = defaultConfig();
+  config.sourceIndex.enabled = true;
+  config.email.enabled = true;
+  config.sovereignty = { policy: createPendingPrivacyPolicy() };
+  let registryReads = 0;
+  const requests: string[] = [];
+  const deps = doctorDeps({ config, delphi: healthyDelphi(),
+    readHandleRegistry: () => { registryReads++; return { version: 1, handles: [] }; },
+    fetchImpl: (async (url: string | URL | Request) => {
+      requests.push(String(url)); return Response.json({ status: 'ok', reachable: true });
+    }) as typeof fetch,
+  });
+  const pending = await runDoctor(deps);
+  expect(registryReads).toBe(0);
+  expect(requests).toEqual([]);
+  for (const name of ['source_capability_catalog', 'credential_handles', 'detached_oauth_connections',
+    'google_oauth_refresh_lifetime', 'credential_reauthorization_backlog', 'email_worker',
+    'worker_credential_lanes', 'dropbox_content_extraction_throughput', 'source_index_status',
+    'source_scheduler_status', 'source_ingestion_health']) {
+    expect(checkByName(pending.checks, name).detail).toContain('privacy choice');
+  }
+  config.sovereignty = { policy: loadSovereigntyPreset('local-only') };
+  await runDoctor(deps);
+  expect(registryReads).toBeGreaterThan(0);
+  expect(requests.some(url => url.includes('/source/index/status'))).toBe(true);
 });

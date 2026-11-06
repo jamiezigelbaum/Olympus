@@ -396,6 +396,12 @@ contract (`src/workers/chatgpt/dashboard-contract.ts`).
   configured on the Mac only; `olympus_model_set` switches between models
   already set up there and never takes a key. Models are status only in the
   panel.
+  The computer's guided setup sheets share one footer (owner design,
+  2026-10-31): Back on the left, the next step or Connect on the right,
+  with full-width key fields above it. The first step disables Back.
+  A provider refusal replaces the walkthrough until the user returns to
+  setup; its How to fix details start collapsed. Cancel appears only for an
+  active OAuth attempt, not one that has already failed.
 - **Privacy is the owner's** (review P-1, 2026-10-02): `olympus_privacy_set`
   is hidden from the model (`openai/visibility: private`, `ui.visibility:
   ["app"]`, widget-accessible) and marked destructive. The engine also
@@ -405,6 +411,14 @@ contract (`src/workers/chatgpt/dashboard-contract.ts`).
   model). Adding rules needs no confirmation. The model reads the settings
   with `olympus_privacy_get` and sends the owner to the panel's Set up
   privacy to change them.
+  The editor saves additions immediately and retains other unsaved edits.
+  Explicit add, re-add and remove intent is held per rule identity in the
+  page session until that change is confirmed persisted or discarded. Each
+  conflict replay applies that intent to the latest server rules, preserving
+  unrelated rules and current names. A save reports success only when its
+  returned settings contain every intended addition and no intended removal;
+  a contradictory save response returns to conflict resolution. An immediate
+  addition clears only its own confirmed intent, leaving other edits pending.
 - **Folders and mail** (`olympus_scope_list`, `olympus_scope_set`): the Mac
   picker's data and compare-and-swap through the worker's own routes. Names,
   keys and cursors travel only in those results' `_meta` (owner decision:

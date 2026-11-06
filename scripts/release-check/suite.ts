@@ -4,7 +4,7 @@
  * The rules (all exact string matches; nothing here asks a model):
  *   - Personal and file questions: every expected fact is stated, and the
  *     expected item is cited. For a model agent the reply itself must cite it
- *     (its evidence id, or its name); the tool merely returning it is not
+ *     (its evidence id and source); the tool merely returning it is not
  *     enough.
  *   - Private question: nothing the agent saw or said contains the Private
  *     marker or the Private facts; the agent was told, in the product's fixed
@@ -32,6 +32,8 @@ export interface QuestionObservation {
    * left out for the protocol agent, whose answerText is the tool output and so carries the evidence lines itself.
    */
   evidenceIds?: string[];
+  /** Source names aligned with evidenceTitles and evidenceIds. */
+  evidenceSources?: string[];
   /** The product's fixed Private note reached the agent. */
   privateNote: boolean;
   /**
@@ -102,21 +104,21 @@ export function evaluateObservation(obs: QuestionObservation, markers: readonly 
         returned ? `cited "${q.citedTitle}"` : `evidence returned: ${obs.evidenceTitles.length === 0 ? 'none' : obs.evidenceTitles.join(' | ')}`,
       ));
     } else {
-      // A model agent: returning the item is not citing it. The reply must point at the item by its evidence id (or name it).
+      // A model agent: returning the item is not citing it. The reply must identify the item by its evidence id and name its source.
       const citedIds = citedEvidenceIds(obs.answerText);
       const ids = new Set(obs.evidenceTitles.flatMap((title, index) => (q.citedTitle !== undefined && title.includes(q.citedTitle) && obs.evidenceIds![index] ? [obs.evidenceIds![index]!] : [])));
       const citesById = [...ids].some((id) => citedIds.has(id));
-      const citesByName = q.citedTitle !== undefined && obs.answerText.toLowerCase().includes(q.citedTitle.toLowerCase());
-      const cited = returned && (citesById || citesByName);
+      const citesSource = obs.evidenceTitles.some((title, index) => q.citedTitle !== undefined && title.includes(q.citedTitle) && !!obs.evidenceSources?.[index] && answer.includes(obs.evidenceSources[index]!.toLowerCase()));
+      const cited = returned && citesById && citesSource;
       checks.push(check(
         `${prefix}.cited`,
         `${q.id}: the reply cites the expected item`,
         cited,
         cited
-          ? `cited "${q.citedTitle}"${citesById ? ` as [${[...ids].find((id) => citedIds.has(id))}]` : ' by name'}`
+          ? `cited "${q.citedTitle}" as [${[...ids].find((id) => citedIds.has(id))}] with its source`
           : !returned
             ? `the tool never returned the expected item; evidence returned: ${obs.evidenceTitles.length === 0 ? 'none' : obs.evidenceTitles.join(' | ')}`
-            : `the tool returned "${q.citedTitle}" but the reply does not cite it (reply cites: ${citedIds.size === 0 ? 'no evidence ids' : [...citedIds].join(', ')})`,
+            : `the tool returned "${q.citedTitle}" but the reply does not cite it with its source (reply cites: ${citedIds.size === 0 ? 'no evidence ids' : [...citedIds].join(', ')})`,
       ));
     }
   }

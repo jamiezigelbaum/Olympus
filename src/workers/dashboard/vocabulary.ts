@@ -33,7 +33,7 @@ export const DASHBOARD_UPDATE_COPY = {
 
 export const DASHBOARD_MISSING_FOLDER = 'A folder you chose is missing';
 export const DASHBOARD_FOLDER_NEEDS_PERMISSION = 'Your Mac will not let Olympus open a folder you chose. In System Settings, choose Privacy & Security, then Files & Folders, and switch on Olympus Engine (or the app your Mac named when it asked).';
-export const DASHBOARD_FOLDER_NEEDS_HELPER = 'A folder you chose is in Desktop, Documents, Downloads, iCloud Drive or another disk, which Olympus cannot open on this Mac yet. That needs the Olympus helper app, which comes in a later update. Choose a folder outside them, or drag files onto the dashboard.';
+export const DASHBOARD_FOLDER_NEEDS_HELPER = 'Desktop, Documents, Downloads, iCloud Drive and other disks need the Olympus helper app. Update Olympus to add it, or choose a folder outside them.';
 export const DASHBOARD_FOLDER_UNREADABLE = 'Your user account is not allowed to open a folder you chose. Change who may open that folder, or choose another one.';
 
 export type DashboardStatus = 'Fresh' | 'Working' | 'Waiting' | 'Needs you' | 'Failing' | 'Off';
@@ -782,6 +782,7 @@ const REDIRECT_REFUSAL_CODES: ReadonlySet<string> = new Set([
 export function dashboardProviderRefusalLine(source: DashboardSourceCard, options?: DashboardVocabularyOptions): string {
   const code = source.connection.provider_refusal?.code ?? '';
   if (options?.surface === 'chatgpt') return DASHBOARD_CHATGPT_REFUSAL_COPY.line[chatgptRefusalKind(code)];
+  if (code === 'connection_check_failed') return `${source.label} could not complete its access check. How to fix has the details.`;
   if (REDIRECT_REFUSAL_CODES.has(code)) {
     return `rejected the sign-in address — fix it in your ${source.label} app settings`;
   }
@@ -895,6 +896,9 @@ export function dashboardJobsLine(running: number, stalled = 0): string {
 export function dashboardConnectedSummary(connected: number, ready: number): string {
   return `${dashboardCount(connected)} ${plural(connected, 'source')} connected, ${dashboardCount(ready)} ready to answer`;
 }
+
+/** View-only sync verified in #616; OAuth metadata omitted scopes_supported on 2026-10-31. */
+export const DASHBOARD_EVERNOTE_CONSENT_HELP = 'On Evernote’s consent screen, leave only View ticked; untick Create, Edit and Delete.';
 
 /** Why a connect control is greyed out while models are not ready. */
 export const DASHBOARD_MODELS_BLOCKED_REASON = 'Locked until models are ready';
@@ -1355,6 +1359,24 @@ export function dashboardUnreadableSentence(source: DashboardSourceCard): string
     : `${lead} ${DASHBOARD_UNREADABLE_NOTE}`;
 }
 
+/**
+ * Why one file could not be read, after its name under See why (owner rule,
+ * 2026-11-04: exactly the reason, and a link to the file). Keys are
+ * file-extraction/unreadable-files.ts UNREADABLE_FILE_REASONS.
+ */
+export const DASHBOARD_UNREADABLE_FILE_REASON_WORDS: Readonly<Record<string, string>> = {
+  password: 'locked with a password',
+  damaged: 'the file is damaged',
+  too_large: 'too large for Olympus to read',
+  no_text: 'no text Olympus could find in it',
+  timed_out: 'reading it took too long, even with extra time',
+  missing: 'the file is no longer where it was',
+  no_access: 'Olympus isn\'t allowed to open it',
+  unsupported: 'a format Olympus can\'t read',
+  privacy_check_missing: 'kept Private before it was read',
+  other: 'Olympus couldn\'t read it',
+};
+
 /** The note under See why, and the detail page's tail: nothing to do, the rest answers. */
 export const DASHBOARD_UNREADABLE_NOTE = 'Olympus does not retry these, and nothing is waiting on you.';
 
@@ -1392,8 +1414,8 @@ export const DASHBOARD_UNREADABLE_REASON_WORDS: Readonly<
     other: "{count} items were kept Private without being read because their privacy checks were missing. Open them below to check them, then use Sync now to try reading them again.",
   },
   damaged_or_unsupported: {
-    one: "{count} file is damaged or in a format Olympus can't read",
-    other: "{count} files are damaged or in a format Olympus can't read",
+    one: "{count} file Olympus can't read at all",
+    other: "{count} files Olympus can't read at all",
   },
 };
 
@@ -1813,6 +1835,7 @@ export const DASHBOARD_CHATGPT_CONNECTION_COPY = {
 export const DASHBOARD_CHATGPT_PAGE_COPY = {
   title: 'Olympus',
   loading: 'Checking your computer…',
+  loadingSlow: 'Loading. This can take a minute while Olympus is importing.',
   upToDate: 'Olympus is up to date.',
   needsYou: 'Needs you',
   sources: 'Sources',
@@ -1885,6 +1908,8 @@ export const DASHBOARD_CHATGPT_PAGE_COPY = {
   },
   synced: 'Synced {when}',
   updated: 'Updated {when}',
+  /** A read ran out of time while the computer answered moments ago: busy, not gone; the page tries again by itself. */
+  busySlow: 'Olympus is busy. Trying again…',
   checkAgain: 'Check again',
   tryAgain: 'Try again',
   openOlympus: 'Open Olympus',
@@ -2029,6 +2054,7 @@ export const DASHBOARD_CHATGPT_PAGE_COPY = {
   /** The accessible name of an unreadable file's open control: "Open report.pdf". */
   unreadableOpen: 'Open {name}',
   unreadableReasons: DASHBOARD_UNREADABLE_REASON_WORDS,
+  unreadableFileReasons: DASHBOARD_UNREADABLE_FILE_REASON_WORDS,
   unreadableNote: DASHBOARD_UNREADABLE_NOTE,
   unreadableNoteMany: DASHBOARD_UNREADABLE_NOTE_MANY,
 } as const;
@@ -2073,8 +2099,8 @@ export const DASHBOARD_HOST_GATE_COPY = {
   pasteToken: 'Paste the worker bearer token.',
   readToken: 'That is the read-only view token; use the worker bearer token from setup.',
   refused: 'That token was not accepted.',
-  /** Beside the panel when the browser kept a page the panel opened (a sign-in) from opening. */
-  openBlocked: 'Your browser did not open the page.',
+  /** Beside the panel as a fallback when opening an external page. */
+  openBlocked: "If the page didn't open,",
   openBlockedLink: 'Open it',
 } as const;
 
@@ -2259,8 +2285,10 @@ export const DASHBOARD_ARCHIVE_COPY = {
    */
   inSource: {
     listLabel: 'Imported archives',
-    importingLine: '{percent}% read · {items} from this archive so far',
-    importingLineNone: '{percent}% read',
+    importingLine: 'Reading your export: {percent}% · {items} so far',
+    /** Under an import's own bar: the source's bar above is the same items, counted as they become searchable. */
+    importingNote: 'The bar above counts these as they become searchable.',
+    importingLineNone: 'Reading your export: {percent}%',
     importedLine: '{items} from this archive',
     importedWhen: ' · imported {when}',
     /** Appended to a count line when the source already had some of the archive's items. */
@@ -2410,6 +2438,8 @@ export const DASHBOARD_ARCHIVE_COPY = {
   removeConfirm: 'Remove {name}? Everything Olympus made from it is deleted. The file itself stays where it is.',
   /** An agent's request, waiting for the person. */
   requestLine: 'An agent asked to import {name} from {where}.',
+  /** Right after Import on an agent's request, until the import shows. */
+  startingLine: 'Starting to import {name}…',
   /** Under an agent's request: the whole path it acts on, with hidden characters written out. */
   fullPath: 'Full path: {path}',
   /** An agent's request to remove an archive; the archive's own name and folder. */
@@ -2527,6 +2557,7 @@ export const DASHBOARD_COMPUTER_PANEL_COPY = {
   onlyHere: 'only here',
   open: 'Open',
   rows: {
+    help: { title: 'Help', line: 'Copy a system report or contact support' },
     keys: { title: 'Keys', line: 'Venice, Readwise and X keys' },
     agents: { title: 'Agents', line: 'Remote access and connected agents' },
     privateAnswers: { title: 'Inbox', line: 'Answers from every model, kept on this computer.' },
@@ -2700,7 +2731,31 @@ export const DASHBOARD_CHATGPT_PICKER_COPY = {
  */
 export const DASHBOARD_PRIVACY_QUESTIONS_COPY = {
   title: 'A few quick questions',
-  intro: 'Your words name some broad areas. Pick what\'s private in each, so Olympus keeps only those things private. Your answers are added to your description, where you can still edit them.',
+  intro: 'Choose Private or Fine to share. Skipped questions stay Private when you save. Your answers become editable sentences after your own words.',
+  loading: 'Reading your words…',
+  fallback: 'Olympus’s private model isn’t on yet, so these are general questions.',
+  checkTitle: 'Check what Olympus understood',
+  check: 'Check my description',
+  checking: 'Checking your description…',
+  wrong: 'This is wrong',
+  checkFailed: 'Olympus could not check this description yet. You can still save.',
+  privateExamples: 'Olympus would keep these Private',
+  shareExamples: 'Olympus would treat these as fine to share',
+  baseline: {
+    medical: 'Should medical records and results stay Private?',
+    financial: 'Should bank, card and tax papers stay Private?',
+    intimate: 'Should intimate or romantic messages stay Private?',
+    legal: 'Should legal matters (custody, disputes, lawsuits) stay Private?',
+    identity: 'Should ID documents (passport, licence) stay Private?',
+  },
+  /** What an answer to each baseline check writes into the description. */
+  baselineTopics: {
+    medical: 'medical records and results',
+    financial: 'bank, card and tax papers',
+    intimate: 'intimate or romantic messages',
+    legal: 'legal matters (custody, disputes, lawsuits)',
+    identity: 'ID documents (passport, licence)',
+  },
   private: 'Private',
   share: 'Fine to share',
   /** A choice whose sentence would not fit in the description: nothing changes. */
@@ -2788,6 +2843,18 @@ export const DASHBOARD_PRIVACY_QUESTIONS_COPY = {
  * sender names and the person's own description are never part of this copy.
  */
 export const DASHBOARD_CHATGPT_PRIVACY_COPY = {
+  addRule: 'Add a rule',
+  details: 'Details',
+  judgingDetails: 'Olympus reads your own words when judging each item. Your answers to the follow-up questions become sentences in that description. Always-private rules can only add protection; secrets always stay on your computer.',
+  kindPrompt: 'What would you like to keep private?',
+  step: 'Step {step} of 3',
+  stepPick: 'Step 2 of 3',
+  sheetBack: 'Back',
+  next: 'Next',
+  select: 'Choose',
+  selected: 'Selected',
+  selectFor: 'Choose {name}',
+  confirmRule: 'Keep this private?',
   back: 'Back to Olympus',
   title: 'What\'s private for you?',
   intro: 'Olympus shares your items with ChatGPT unless you say they\'re private. Private items are answered on your computer and never sent to ChatGPT. Passwords and other secrets are always kept on your computer.',
@@ -2818,14 +2885,11 @@ export const DASHBOARD_CHATGPT_PRIVACY_COPY = {
   needFolderSource: 'Connect Dropbox or Google Drive to add a folder.',
   needGmail: 'Connect Gmail to add a label.',
   nothingToSave: 'Nothing to save yet. Change a rule or the description first.',
-  pending: {
-    one: '{n} item is waiting to be checked on your computer.',
-    many: '{n} items are waiting to be checked on your computer.',
-  },
-  save: 'Save',
+  save: 'Save description and answers',
   saving: 'Saving…',
   cancel: 'Cancel',
   saveFailed: 'Olympus could not save. Your changes are still here. Try again.',
+  addRuleFailed: 'Olympus could not make this private. Try again.',
   saved: 'Privacy saved.',
   /** The inline step before a save that lowers protection; {list} names the removed rules. */
   confirmRemove: 'This removes protection from {list}.',
@@ -2834,6 +2898,7 @@ export const DASHBOARD_CHATGPT_PRIVACY_COPY = {
   /** A save refused because the settings changed elsewhere: the draft stays until the person picks. */
   conflict: 'Your changes weren\'t saved because the privacy settings changed elsewhere.',
   conflictNow: 'What is saved now:',
+  conflictAddBlocked: 'Resolve the conflict before adding another rule.',
   conflictDescription: 'Your description: {text}',
   conflictNoDescription: 'No description',
   applyAgain: 'Apply my changes again',
@@ -2871,6 +2936,9 @@ export const DASHBOARD_CHATGPT_PRIVACY_COPY = {
   },
   rowNoCount: 'Uses your description and always-private rules.',
   edit: 'Edit',
+  /** The description while nothing is written yet, with its button. */
+  descriptionEmpty: 'You haven\'t said what\'s private yet.',
+  descriptionStart: 'Describe what\'s private',
   editLabel: 'Edit what\'s private',
   dashboardPending: {
     one: '{n} item waiting to be checked',
@@ -2895,6 +2963,9 @@ export const DASHBOARD_CHATGPT_PRIVACY_CLASSIFIER_APPROVAL_COPY = {
  * `{list}` are filled in by the panel. Nothing here names a source item.
  */
 export const DASHBOARD_CHATGPT_PRIVATE_ANSWER_COPY = {
+  secretOpen: 'Open it in Olympus on your computer',
+  secretFallback: 'Open Olympus on your computer, then Inbox',
+
   pageTitle: 'Olympus private answer',
   title: 'Private answer from your computer',
   /** The muted line under the title once the answer is shown. */
@@ -3227,6 +3298,7 @@ export const DASHBOARD_PRIVATE_ANSWERS_COPY = {
   deleteAll: 'Delete all',
   deleteAllConfirm: 'Delete every question and answer in your private inbox?',
   deleted: 'That answer was deleted',
+  secretLinkUnavailable: 'This link has expired or is unavailable. Choose your question in Inbox.',
   // A delete that removed nothing says so; the page keeps what it shows (owner rule: nothing looks deleted when it isn't).
   deleteNotFound: 'Olympus could not find this answer, so nothing was deleted. Reload to see your inbox as it is now.',
   deleteUnavailable: 'Private answers cannot be changed right now, so nothing was deleted. Try again in a moment.',
@@ -3546,4 +3618,20 @@ export const DASHBOARD_OUTSIDE_HELP_COPY = {
 export function archiveFindingList(kind: string): 'not_imported' | 'how_read' {
   const lists: Readonly<Record<string, 'not_imported' | 'how_read'>> = DASHBOARD_ARCHIVE_COPY.listOf;
   return Object.prototype.hasOwnProperty.call(lists, kind) ? lists[kind]! : 'not_imported';
+}
+
+/** Fixed, content-free Inbox failure copy. Broad codes must not invent a key or provider failure. */
+export const PRIVATE_ANSWER_FAILURES = {
+  answer_failed: { message: 'The model could not finish the answer.', href: '/dashboard?keys', action: 'Check models' },
+  no_model: { message: 'Your local model is not available.', href: '/dashboard?keys', action: 'Set up local models' },
+  model_downloading: { message: 'Your local model is still downloading.', href: '/dashboard?keys', action: 'Check models' },
+  evidence_changed: { message: 'Items changed before Olympus could finish the answer.', href: '/dashboard?keys', action: 'Check setup' },
+  eligibility_unavailable: { message: 'Olympus could not check whether the items are still available.', href: '/dashboard?keys', action: 'Check setup' },
+  save_refused: { message: 'Olympus could not save the answer.', href: '/dashboard?keys', action: 'Check setup' },
+} as const satisfies Record<import('../../core/waiting-private-questions.ts').WaitingQuestionRetryReason, { message: string; href: string; action: string }>;
+
+/** Also embedded in the browser controller so initial, polled and opened rows use the same mapping. */
+export function privateAnswerFailure(reason: unknown, mapping = PRIVATE_ANSWER_FAILURES): { message: string; action: string; href?: string } {
+  return typeof reason === 'string' && Object.prototype.hasOwnProperty.call(mapping, reason)
+    ? mapping[reason as keyof typeof mapping] : { message: 'Olympus could not answer this.', action: 'Try again.' };
 }

@@ -106,7 +106,7 @@ describe('the default install finds Private items by meaning locally', () => {
 
   test('fresh standalone seed enables built-in local retrieval without Delphi or Venice', () => {
     const { path, home } = policyFile(); rmSync(path);
-    expect(seedEngineSovereignty(path)).toBe('no-sensitive');
+    expect(seedEngineSovereignty(path)).toBe('pending');
     const config = JSON.parse(readFileSync(path, 'utf8'));
     expect(config.retrieval.trustDomains.secure_local).toEqual(expectedSecure);
     expect(config.modelProfiles['built-in-embedding']).toMatchObject({ provider: 'built-in', trust: 'local', purpose: 'embedding' });

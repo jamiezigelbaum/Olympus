@@ -215,6 +215,17 @@ describe('the inventory, taken from the product\'s source', () => {
 });
 
 describe('exploring the Sources section', () => {
+  test('an empty seed without last presses Cancel before Confirm', async () => {
+    const driver = new PanelDriver();
+    const seed: Seed = { ...populated(driver), id: 'empty', title: 'empty', resetAfter: [] };
+    const result = await explore({ driver, seeds: [seed], inventory: inventory(), ...quick() });
+    const no = driver.pressed.indexOf('menu:readwise.library:1:no');
+    const yes = driver.pressed.indexOf('menu:readwise.library:1:yes');
+    expect(no).toBeGreaterThanOrEqual(0);
+    expect(yes).toBeGreaterThan(no);
+    expect(result.traces[0]!.ok).toBe(true);
+  });
+
   test('every control is pressed by itself from a fresh page, Disconnect asks first and its Confirm and Cancel get their own turn, and all of it passes', async () => {
     const driver = new PanelDriver();
     const result = await explore({ driver, seeds: [populated(driver), disconnected(driver)], inventory: inventory(), ...quick() });

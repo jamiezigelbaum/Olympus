@@ -91,6 +91,8 @@ export interface PrivateAnswerNoneMetaV1 {
 export const PRIVATE_ANSWER_NONE_META: PrivateAnswerNoneMetaV1 = Object.freeze({ v: 1, count: 0, state: 'none' }) as PrivateAnswerNoneMetaV1;
 
 export interface PrivateMatchSummary {
+  secretMatch?: true;
+  hasPrivateEvidence?: boolean;
   count: number;
   panelState: PrivateAnswerPanelState;
   percent?: number;
@@ -129,6 +131,8 @@ export interface PrivateAnswerSourceCitation {
 /** What the panel decrypts. Rendered as text only, never as HTML. */
 export interface PrivateAnswerPlaintextV1 {
   v: 1;
+  /** Sealed only. A local Inbox handle, never an item identity or locator. */
+  secretInbox?: { handle?: string; remote?: { onComputer: string; onServer: string } };
   answer: string;
   /** Only the items the answer cites. The panel lists them on request (a collapsed "Sources"). */
   citations: PrivateAnswerCitation[];

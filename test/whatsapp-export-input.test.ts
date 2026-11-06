@@ -183,6 +183,22 @@ describe('export time zones', () => {
   });
 });
 
+describe('a WhatsApp export with no live capture on this computer', () => {
+  // A computer that never paired WhatsApp, or unpaired it and deleted its data, has no bridge spool folder at all.
+  // Importing an export reads no spool, so it must not ask for one (it once failed with "Start the olympus-whatsapp-bridge daemon").
+  test('is imported although the bridge spool folder does not exist', async () => {
+    const target = lane();
+    rmSync(target.spoolDir, { recursive: true, force: true });
+    expect(existsSync(target.spoolDir)).toBe(false);
+    const exportText = chatText([
+      { at: '2026-07-01T09:00:00', sender: 'Rowan Hale', text: 'Ferry at nine?' },
+      { at: '2026-07-01T09:01:00', sender: 'Jamie Owner', text: 'Yes, see you there' },
+    ], { style: 'android-24-dmy' });
+    await importExport(target, 'WhatsApp Chat with Rowan Hale.txt', exportText);
+    expect(rows(target).filter((row) => row.tombstoned === 0).length).toBeGreaterThanOrEqual(2);
+  });
+});
+
 describe('a WhatsApp export beside live capture', () => {
   // Live capture (UTC instants) and the same chat exported on a phone set to New York (UTC-4 in July).
   const liveLines = [

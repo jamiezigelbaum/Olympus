@@ -310,7 +310,7 @@ describe('the worker boot step', () => {
       if (!(error instanceof Exited)) throw error;
       exited = error;
     }
-    expect(exited?.code).toBe(1);
+    expect(exited?.code).toBe(73);
     expect(lines).toHaveLength(1);
     expect(lines[0]).toContain(`Another Olympus already owns its data at ${olympusDataRoot(env)}`);
     expect(lines[0]).toContain('this worker is exiting');

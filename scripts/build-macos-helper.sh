@@ -38,7 +38,6 @@ if [ -z "$identity" ] && [ "$adhoc" -ne 1 ]; then
 fi
 [ "$(uname -s)" = "Darwin" ] || { echo "The engine host is built on macOS." >&2; exit 64; }
 
-version="$(sed -n 's/^  "version": "\(.*\)",/\1/p' "$root/package.json" | head -1)"
 app="$out/Olympus Engine.app"
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
@@ -46,7 +45,7 @@ trap 'rm -rf "$work"' EXIT
 mkdir -p "$work/Olympus Engine.app/Contents/MacOS"
 clang -O2 -Wall -Werror -arch arm64 -arch x86_64 -mmacosx-version-min=12.0 \
   -o "$work/Olympus Engine.app/Contents/MacOS/OlympusEngineHost" "$src/main.c"
-sed "s/@VERSION@/${version:-0}/g" "$src/Info.plist.in" > "$work/Olympus Engine.app/Contents/Info.plist"
+cp "$src/Info.plist.in" "$work/Olympus Engine.app/Contents/Info.plist"
 plutil -lint "$work/Olympus Engine.app/Contents/Info.plist" >/dev/null
 printf 'APPL????' > "$work/Olympus Engine.app/Contents/PkgInfo"
 

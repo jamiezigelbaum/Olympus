@@ -2,6 +2,8 @@
  * cookies/CSRF; they are not listening TCP endpoints on the engine host. */
 import { lstatSync, mkdirSync, realpathSync, chmodSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
+import { request as httpRequest } from 'node:http';
+import { Readable } from 'node:stream';
 import { dirname, isAbsolute, join, normalize, parse } from 'node:path';
 import { resolveLinuxEngineLayout } from './linux-engine-layout.ts';
 import { removeFileDurablySync } from './atomic-file.ts';
@@ -101,6 +103,37 @@ export function removeReleasedWorkerSocket(
  return true;
 }
 
+/**
+ * The worker's own start under its systemd unit (OLYMPUS_MANAGED_WORKER=1 and
+ * systemd's INVOCATION_ID): systemd runs ExecStart only once every process of
+ * the unit's previous run has exited, so a socket still on the path was left
+ * by a worker it already stopped (Sparta, 2026-11-04: a hung worker took the
+ * stop timeout and SIGKILL, and the next start failed until someone removed
+ * the file by hand). That is the supervisor custody removeReleasedWorkerSocket
+ * asks for; it still refuses a socket a listener answers on, or one that is not
+ * owner-owned 0600. Anywhere else this does nothing. Returns true when a
+ * socket was removed; a refusal is left for prepareWorkerSocket to report.
+ */
+export function releaseSystemdWorkerSocket(options: WorkerTransportOptions = {}): boolean {
+ const env=options.env??process.env;
+ if((options.platform??process.platform)!=='linux'||env.OLYMPUS_MANAGED_WORKER!=='1'||!env.INVOCATION_ID)return false;
+ try{return removeReleasedWorkerSocket(options,{previousWorkerReleased:true});}catch{return false;}
+}
+
+/**
+ * Options every Bun server on a worker's unix socket takes. Bun closes a request
+ * its handler has not answered within 10 s, and on a unix socket
+ * `server.timeout(request, 0)` does not lift that (Bun 1.3.14), so a slow owner
+ * read (a status build while imports run) came back empty (Sparta, 2026-11-04).
+ * The socket is the owner's alone; each client bounds its own wait.
+ */
+export const WORKER_SOCKET_SERVE_OPTIONS: { idleTimeout: number } = { idleTimeout: 0 };
+
+/** A unix-socket server's options with WORKER_SOCKET_SERVE_OPTIONS (Bun's types list idleTimeout for TCP only; Bun applies it to both). */
+export function workerSocketServe<T extends object>(options: T): T {
+  return Object.assign(options, WORKER_SOCKET_SERVE_OPTIONS);
+}
+
 /** Bind synchronously under a private umask, before any request can run. */
 export function bindWorkerSocket<T>(path: string, bind: () => T): T {
   const previous = process.umask(0o177);
@@ -119,11 +152,46 @@ export function createWorkerFetch(options: WorkerTransportOptions = {}, fetchImp
       throw new Error('Linux worker requests require a loopback HTTP origin over the owner socket.');
     }
     const unix = validateWorkerSocket(options)!;
-    // Bun's native Unix transport is also used by the standalone CLI and relay.
-    // A non-Bun host must refuse, never silently fall back to loopback TCP.
-    if (typeof Bun === 'undefined') throw new Error('Linux worker socket requests require the Bun runtime.');
+    if (typeof Bun === 'undefined') return nodeWorkerFetch(unix, input, init, options);
     return fetchImpl(input, { ...init, unix, redirect: init?.redirect === 'manual' ? 'manual' : 'error' } as RequestInit);
   }) as typeof fetch;
+}
+
+/** The Gateway loads plugins under Node. Keep its HTTP origin, body and abort
+ * semantics while connecting exclusively to the same validated owner socket. */
+async function nodeWorkerFetch(unix: string, input: RequestInfo | URL, init: RequestInit | undefined, options: WorkerTransportOptions): Promise<Response> {
+  const request = new Request(input, init);
+  const body = request.body ? Buffer.from(await request.arrayBuffer()) : undefined;
+  const url = new URL(request.url);
+  // Recheck after an asynchronous body read, immediately before dispatch.
+  validateWorkerSocket(options);
+  return new Promise((resolve, reject) => {
+    const outgoing = httpRequest(url, {
+      socketPath: unix,
+      method: request.method,
+      headers: Object.fromEntries(request.headers),
+      signal: request.signal,
+      agent: false,
+    }, incoming => {
+      const status = incoming.statusCode ?? 500;
+      if (status >= 300 && status < 400 && init?.redirect !== 'manual') {
+        incoming.destroy();
+        reject(new TypeError('Worker request redirect refused.'));
+        return;
+      }
+      const headers = new Headers();
+      for (let i = 0; i < incoming.rawHeaders.length; i += 2) headers.append(incoming.rawHeaders[i]!, incoming.rawHeaders[i + 1]!);
+      const noBody = request.method === 'HEAD' || [204, 205, 304].includes(status);
+      const response = new Response(noBody ? null : Readable.toWeb(incoming) as unknown as ReadableStream<Uint8Array>, {
+        status, statusText: incoming.statusMessage ?? '', headers,
+      });
+      if (noBody) incoming.resume();
+      Object.defineProperty(response, 'url', { value: request.url });
+      resolve(response);
+    });
+    outgoing.on('error', reject);
+    outgoing.end(body);
+  });
 }
 
 export const workerFetch: typeof fetch = ((input: RequestInfo | URL, init?: RequestInit) =>

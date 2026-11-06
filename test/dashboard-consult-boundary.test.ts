@@ -269,3 +269,16 @@ describe('the control-session secret file', () => {
     for (const h of homes.splice(0)) rmSync(h, { recursive: true, force: true });
   });
 });
+
+test('first-run and local-model actions require a local session and receive its context', async () => {
+  const f = fixture();
+  const remote = await bearerSession(f);
+  const localMint = await localSession(f);
+  const local = { cookie: cookieOf(localMint), csrf: ((await localMint.json()) as { csrf_token: string }).csrf_token };
+  for (const path of ['/dashboard/models/first-run-privacy', '/dashboard/models/local/discover', '/dashboard/models/local/test', '/dashboard/models/local/save']) {
+    expect((await f.fetch(post(path, { Cookie: remote.cookie, Origin: ORIGIN, 'X-Olympus-CSRF': remote.csrf }))).status).toBe(403);
+    expect((await f.fetch(post(path, { Cookie: local.cookie, Origin: ORIGIN, 'X-Olympus-CSRF': local.csrf }))).status).toBe(200);
+    expect(f.seen.at(-1)?.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER)).toBe('local');
+    expect(f.seen.at(-1)?.headers.get(DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER)).toBe(local.csrf);
+  }
+});

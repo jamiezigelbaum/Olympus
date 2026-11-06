@@ -40,6 +40,7 @@
 
 import { imageJudgmentSignal } from '../source-index/media-judge.ts';
 import { parentNamesContext } from './parent-context.ts';
+import { storedSignals } from './stored-names.ts';
 import {
   classifyContentTier,
   classifyItemTiers,
@@ -47,6 +48,7 @@ import {
   HELD_UNTIL_JUDGED_PRIORITY,
   heldUntilJudged,
   SNIFFER_NAMES_MAX_CHARS,
+  snifferFolderKeyNames,
   tierSnifferInputHash,
   maxTier,
   hasCredentialUrl,
@@ -60,23 +62,28 @@ import {
 } from '../classification/tier-classifier.ts';
 import {
   copyServingLayer,
+  holdSnifferLowering,
   type TierLedgerIdentity,
   type TierLedgerRecord,
   type TierOwnerOverrideGuard,
 } from '../classification/tier-ledger.ts';
 import type { SecretLocationsIndex } from '../classification/secret-locations.ts';
-import type { TierLedger } from '../classification/tier-ledger.ts';
+import { STORED_NAMES_ASKED_REASON, STORED_NAMES_REASON, type TierLedger } from '../classification/tier-ledger.ts';
 import type { LocalConnectorStore } from './local-index.ts';
 import type { ConnectorStoreItemCopy } from './local-index.ts';
 import { settleSecretsCopies } from './secrets-disposition.ts';
 import { secretFencedSniffer } from './tier-placement.ts';
 import type { TieredStoreSet } from './tiered-store-set.ts';
+import { scanSecretsAhead } from '../classification/secret-scan-off-thread.ts';
+import { secretScanReusable } from '../classification/engine.ts';
 
 /** Items re-judged per call (one call per sniffer tick, per set). */
 export const DEFAULT_TIER_REJUDGE_PER_PASS = 100;
 export const TIER_REJUDGE_CONNECTOR_ID = 'olympus_tier_rejudge';
 
 export interface TierRejudgeReport {
+  /** Settled Private decisions kept in place by the rollout switch. */
+  heldLowering: number;
   /** Candidates read from the ledger. */
   seen: number;
   /** Decisions recorded with no change of stores. */
@@ -107,15 +114,59 @@ export interface TierRejudgeOptions {
 }
 
 export function emptyTierRejudgeReport(): TierRejudgeReport {
-  return { seen: 0, updated: 0, movesQueued: 0, asked: 0, secrets: 0, skipped: 0, failed: 0 };
+  return { heldLowering: 0, seen: 0, updated: 0, movesQueued: 0, asked: 0, secrets: 0, skipped: 0, failed: 0 };
 }
 
 export function rejudgeRoutedItems(options: TierRejudgeOptions): { report: TierRejudgeReport; next?: TierLedgerIdentity } {
+  const steps = rejudgeSteps(options);
+  let step = steps.next();
+  while (!step.done) step = steps.next();
+  return step.value;
+}
+
+/**
+ * rejudgeRoutedItems with the thread given back between items, and a large
+ * stored text's secret scan made on the second thread first
+ * (secret-scan-off-thread.ts), so the classifier reuses it. A page of 100
+ * re-judges in one go, each scanning its text, was 18% of Sparta's freeze
+ * time on 2007d67 (2026-11-05). The decisions are the same either way.
+ */
+export async function rejudgeRoutedItemsInTurns(
+  options: TierRejudgeOptions & { turn: () => Promise<void> | undefined },
+): Promise<{ report: TierRejudgeReport; next?: TierLedgerIdentity }> {
+  const steps = rejudgeSteps(options);
+  let step = steps.next();
+  while (!step.done) {
+    await options.turn();
+    const text = step.value === undefined ? undefined : storedContentText(options.set, step.value);
+    if (text !== undefined && secretScanReusable(text)) await scanSecretsAhead(text);
+    step = steps.next();
+  }
+  return step.value;
+}
+
+// The stored text a re-judge of `record` will read, for scanning ahead only:
+// rejudgeStoredContent reads it again itself, after any wait.
+function storedContentText(set: TieredStoreSet, record: TierLedgerRecord): string | undefined {
+  try {
+    const identity = identityOf(record);
+    const current = set.ledger.copies(identity).filter((copy) => copy.state === 'current');
+    const serving = copyServingLayer(current, 'content');
+    const domain = serving ? set.domainForCorpus(serving.corpusId) : undefined;
+    const exported = domain ? set.store(domain)?.exportItemCopy(identity) : undefined;
+    return exported?.chunks.map((chunk) => chunk.boundedText).join('');
+  } catch {
+    return undefined;
+  }
+}
+
+// Yields each candidate before it is re-judged (a turn point for the caller).
+function* rejudgeSteps(options: TierRejudgeOptions): Generator<TierLedgerRecord, { report: TierRejudgeReport; next?: TierLedgerIdentity }> {
   const report = emptyTierRejudgeReport();
   const { set } = options;
   const classification = set.classification();
   // No sniffer, or inputs that cannot be trusted: recorded decisions stand.
-  if (!classification?.sniffer || classification.unavailableReason) return { report };
+  if (!classification?.sniffer || classification.unavailableReason || classification.sniffer.rejudgeReady === false) return { report };
   const ledger = set.ledger;
   const limit = Math.max(1, options.limit ?? DEFAULT_TIER_REJUDGE_PER_PASS);
   const key = { engineVersion: TIER_CLASSIFIER_VERSION, snifferId: classification.sniffer.id };
@@ -125,6 +176,7 @@ export function rejudgeRoutedItems(options: TierRejudgeOptions): { report: TierR
     limit,
   });
   for (const record of page.records) {
+    yield record;
     report.seen += 1;
     try {
       rejudgeStoredContent(set, record, {
@@ -193,7 +245,8 @@ export function rejudgeStoredContent(
   const path = columnString(exported.columns['locator_uri']);
   const sender = columnString(exported.columns['sender_label']);
   const mimeType = columnString(exported.columns['mime_type']);
-  const folderKeys = storedFolderKeys(exported.columns['source_scope_folder_keys_json']);
+  // The same folder keys the owner-rule sweep reads: a message's chat is one of them.
+  const folderKeys = [...(storedSignals(exported).folderKeys ?? [])];
   // A failed cache/queue operation is not an open question. Leave all retry
   // stamps and receipts untouched until every needed question is persisted.
   let questionNotQueued = false;
@@ -292,6 +345,11 @@ export function rejudgeStoredContent(
   // The row this decision was made from must still be the row it writes:
   // the same generation and still no owner override (re-judge candidates
   // have none). An owner who set the item meanwhile decides it, not this pass.
+  if (holdSnifferLowering(record, decision)) {
+    // No stamp: turning the switch off makes the same cached answer eligible.
+    report.heldLowering += 1;
+    return;
+  }
   const recorded = ledger.recordRoutedPlacement(
     identity,
     decision,
@@ -335,15 +393,20 @@ function rejudgeMetadata(
   // Re-judging may raise it, but only a connector relist with complete signals
   // can lower the names and therefore their content floor.
   const providerReasons = previous.reasons.filter(reason => /^metadata:(floor|prior):/.test(reason) && !reason.startsWith(RETIRED_SOURCE_PRIOR_REASON));
-  const baseline = retiredPrior ? fresh.metadataTier : maxTier(fresh.metadataTier, record.metadataTier);
+  // A verdict an earlier re-judge made from these same stored names lacked
+  // nothing this one has, so a better prompt may lower it (1.2.1 canary: names
+  // a re-judge held Private by mistake otherwise stayed Private for good).
+  const fromStoredNames = record.reasons.includes(STORED_NAMES_REASON);
+  const baseline = retiredPrior || fromStoredNames ? fresh.metadataTier : maxTier(fresh.metadataTier, record.metadataTier);
   if (baseline === 'secrets') return { ...previous, metadataTier: baseline, metadataPending: false, reasons: fresh.reasons };
-  const material = [names.title, names.path, ...names.folderKeys, names.sender].filter(Boolean).join(' | ').slice(0, SNIFFER_NAMES_MAX_CHARS);
+  const material = [names.title, names.path, ...snifferFolderKeyNames(names.folderKeys), names.sender].filter(Boolean).join(' | ').slice(0, SNIFFER_NAMES_MAX_CHARS);
   const verdict = sniffer.judge({ pass: 'metadata', material: namesWithParentContext(material, parentContext), flags: ['names:rejudge'], subject,
     materialHash: tierSnifferInputHash('metadata', signals, undefined, parentContext),
     mapRevision: fresh.mapRevision, priority: holdUntilJudged ? HELD_UNTIL_JUDGED_PRIORITY : HELD_RECORD_PRIORITY });
   const pending = verdict.verdict === 'undecided';
+  const metadataTier = pending ? baseline : maxTier(baseline, verdict.tier);
   return {
-    metadataTier: pending ? baseline : maxTier(baseline, verdict.tier),
+    metadataTier,
     metadataForced: false,
     metadataFlagged: pending || fresh.metadataFlagged,
     metadataPending: pending,
@@ -351,6 +414,10 @@ function rejudgeMetadata(
       ...fresh.reasons.filter(reason => reason.startsWith('metadata:') && !reason.startsWith('metadata:sniffer:') && !reason.startsWith('metadata:possibly_private:')),
       ...providerReasons,
       `metadata:sniffer:${sniffer.id}:${pending ? 'undecided' : verdict.code}`,
+      // Mark only a raise this stored-names verdict made. A tier held at the
+      // inherited floor must stay unmarked, or the next re-judge drops it. A
+      // queued question is marked when its answer comes in (tier-ledger.ts).
+      ...(pending ? [STORED_NAMES_ASKED_REASON] : metadataTier !== baseline ? [STORED_NAMES_REASON] : []),
     ],
   };
 }

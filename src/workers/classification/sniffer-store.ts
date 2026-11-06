@@ -20,7 +20,7 @@ import { closeSqliteStore } from '../../core/sqlite-store.ts';
 import { HELD_UNTIL_JUDGED_PRIORITY, type TierSnifferSubject } from './tier-classifier.ts';
 import { TIER_SNIFFER_SQLITE_STORE_ID } from './tier-ledger-path.ts';
 
-export const TIER_SNIFFER_SCHEMA_VERSION = 3;
+export const TIER_SNIFFER_SCHEMA_VERSION = 4;
 
 export type SnifferPass = 'metadata' | 'content';
 export type SnifferTier = 'personal' | 'private';
@@ -183,6 +183,9 @@ export class TierSnifferStore {
         provider, account_scope, conversation_key, provider_item_id, pass, material_hash, map_revision, material, flags_json, attempts, queued_at, priority
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
       ON CONFLICT (provider, account_scope, conversation_key, provider_item_id, pass) DO UPDATE SET
+        held_sniffer_id = CASE WHEN sniffer_questions.material_hash = excluded.material_hash
+          AND sniffer_questions.map_revision = excluded.map_revision AND sniffer_questions.flags_json = excluded.flags_json
+          THEN sniffer_questions.held_sniffer_id ELSE NULL END,
         attempts = CASE WHEN sniffer_questions.material_hash = excluded.material_hash
           AND sniffer_questions.map_revision = excluded.map_revision
           THEN sniffer_questions.attempts ELSE 0 END,
@@ -342,7 +345,7 @@ export class TierSnifferStore {
    */
   rekey(subject: TierSnifferSubject, pass: SnifferPass, mapRevision: string): void {
     this.db.query(`
-      UPDATE sniffer_questions SET map_revision = ?, attempts = 0
+      UPDATE sniffer_questions SET map_revision = ?, attempts = 0, held_sniffer_id = NULL
       WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND pass = ?
     `).run(mapRevision, ...subjectParams(subject), pass);
   }
@@ -354,6 +357,22 @@ export class TierSnifferStore {
       WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND pass = ?
     `).run(...subjectParams(subject), pass);
     return this.questionFor(subject, pass)?.attempts ?? 0;
+  }
+
+  /** An answered lowering stays queued so disabling the rollout hold replays it. */
+  markHeldLowering(question: SnifferQuestion, snifferId: string): void {
+    this.db.query(`UPDATE sniffer_questions SET held_sniffer_id = ?
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND pass = ?
+        AND material_hash = ? AND map_revision = ?`)
+      .run(snifferId, ...subjectParams(question), question.pass, question.materialHash, question.mapRevision);
+  }
+
+  /** Backpressure covers unanswered work under this classifier, not held answers. */
+  questionWorkCounts(snifferId: string): { unanswered: number; heldLowering: number } {
+    return this.db.query(`SELECT
+      COUNT(CASE WHEN held_sniffer_id IS NULL OR held_sniffer_id != ? THEN 1 END) AS unanswered,
+      COUNT(CASE WHEN held_sniffer_id = ? THEN 1 END) AS heldLowering
+      FROM sniffer_questions`).get(snifferId, snifferId) as { unanswered: number; heldLowering: number };
   }
 
   /** Content-free counts for status surfaces and the CLI. */
@@ -479,6 +498,13 @@ function snifferMigrations(): SqliteMigration[] {
             scan_key TEXT PRIMARY KEY, priority INTEGER NOT NULL,
             queued_at TEXT NOT NULL, question_pk INTEGER NOT NULL, candidate_pk INTEGER
           );`);
+      },
+    },
+    {
+      version: 4,
+      name: 'held_lowering_answers',
+      up(db) {
+        db.exec('ALTER TABLE sniffer_questions ADD COLUMN held_sniffer_id TEXT;');
       },
     },
   ];

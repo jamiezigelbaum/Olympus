@@ -244,6 +244,7 @@ print(json.dumps({"kept": [r["attachments"][0].get("mediaFile") for r in records
 describe('waiting media is filled in once space returns', () => {
   const retry = `
 class Config:
+    whole_account = False
     account = "telegram.personal"
     approved_scopes = ["telegram.personal:chat:-1000001"]
 class Client:
@@ -282,6 +283,22 @@ print(json.dumps({"before": before, "low": low, "askedWhileLow": asked_while_low
     expect(out.appended.every((entry: [string, string, string]) => /^media\/-1000001\/3[01]\.[0-9a-f]{12}\.jpg$/.test(entry[2]))).toBe(true);
     expect(out.after).toEqual([]);
     expect(out.files).toHaveLength(2);
+  });
+
+  pythonTest('whole-account grants retry media from chats absent at pairing', async () => {
+    const dir = spool();
+    const out = await python(`${retry}
+Config.whole_account = True
+Config.approved_scopes = ["*"]
+disk["free"], disk["total"] = 1 * GB, 100 * GB
+asyncio.run(reader.capture_message_media(Msg(42), record(42, chat="-2000002")))
+disk["free"] = 500 * GB
+filled = asyncio.run(ask(Client({42: Msg(42)})))
+print(json.dumps({"filled": filled, "after": waiting(), "appended": appended}))
+`, { OLYMPUS_TELEGRAM_GATEWAY_SPOOL_DIR: dir });
+    expect(out.filled).toBe(1);
+    expect(out.appended[0][0]).toBe('telegram.personal:chat:-2000002');
+    expect(out.after).toEqual([]);
   });
 
   pythonTest('a message gone from Telegram, or from a chat no longer approved, is let go', async () => {
