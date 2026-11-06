@@ -4639,11 +4639,11 @@ function tierLedgerMigrations(): SqliteMigration[] {
       name: 'incremental_copy_visibility',
       up(db) {
         db.exec(`
-          CREATE INDEX tier_items_move_order ON tier_items
+          CREATE INDEX IF NOT EXISTS tier_items_move_order ON tier_items
             (move_attempts, decided_at, provider, account_scope, provider_item_id, conversation_key)
             WHERE state = 'moving';
-          CREATE INDEX tier_copies_visibility_walk ON tier_copies (corpus_id);
-          CREATE TABLE tier_visibility_changes (
+          CREATE INDEX IF NOT EXISTS tier_copies_visibility_walk ON tier_copies (corpus_id);
+          CREATE TABLE IF NOT EXISTS tier_visibility_changes (
             seq INTEGER PRIMARY KEY AUTOINCREMENT,
             provider TEXT NOT NULL, account_scope TEXT NOT NULL,
             conversation_key TEXT NOT NULL, provider_item_id TEXT NOT NULL
@@ -4659,9 +4659,9 @@ function tierLedgerMigrations(): SqliteMigration[] {
           const columns = table === 'tier_copies' ? 'copy_state, embed_hold, layers, corpus_id'
             : table === 'tier_items' ? 'state' : 'kind';
           db.exec(`
-            CREATE TRIGGER ${table}_visibility_insert AFTER INSERT ON ${table} BEGIN ${note('NEW')} END;
-            CREATE TRIGGER ${table}_visibility_delete AFTER DELETE ON ${table} BEGIN ${note('OLD')} END;
-            CREATE TRIGGER ${table}_visibility_update AFTER UPDATE OF ${columns}, provider, account_scope, conversation_key, provider_item_id ON ${table}
+            CREATE TRIGGER IF NOT EXISTS ${table}_visibility_insert AFTER INSERT ON ${table} BEGIN ${note('NEW')} END;
+            CREATE TRIGGER IF NOT EXISTS ${table}_visibility_delete AFTER DELETE ON ${table} BEGIN ${note('OLD')} END;
+            CREATE TRIGGER IF NOT EXISTS ${table}_visibility_update AFTER UPDATE OF ${columns}, provider, account_scope, conversation_key, provider_item_id ON ${table}
               BEGIN ${note('OLD')} ${note('NEW')} END;
           `);
         }

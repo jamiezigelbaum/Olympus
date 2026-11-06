@@ -1,3 +1,4 @@
+import type { Database } from 'bun:sqlite';
 // Critical-review fixes for P1b (#78 at d371a174):
 // D1 — the conversation is part of every tier identity: chat message ids
 //      repeat across chats, and a collision must never route, hide or lose a
@@ -174,35 +175,36 @@ describe('the set ledger governs every handle, and its loss fails closed', () =>
     const tiered = await raised(dir);
     const store = tiered.stores.internal!;
     const ledger = tiered.ledger;
-    const real = ledger.corpusCopyIdentities.bind(ledger);
+    // Hidden copies come from one walk, then only the identities that changed (#938).
+    const real = ledger.corpusVisibilityPages.bind(ledger);
     let reads = 0;
-    ledger.corpusCopyIdentities = ((...args: Parameters<typeof real>) => { reads += 1; return real(...args); }) as typeof real;
-    const realSteps = ledger.corpusCopyIdentitiesSteps.bind(ledger);
-    // The paged form (#858) reads the hidden copies too.
-    ledger.corpusCopyIdentitiesSteps = ((...args: Parameters<typeof realSteps>) => { reads += 1; return realSteps(...args); }) as typeof realSteps;
+    ledger.corpusVisibilityPages = ((corpusId: string, identities?: Parameters<typeof real>[1]) => {
+      if (identities === undefined || identities.length > 0) reads += 1;
+      return real(corpusId, identities);
+    }) as typeof real;
     try {
       const statusReads = (): number => {
         const before = reads;
         expect(store.status().counts.chunks).toBe(0);
         return reads - before;
       };
-      const fresh = statusReads();
+      statusReads();
       // Same turn, nothing changed: the hidden copies are not read again.
-      const reused = statusReads();
-      expect(reused).toBeLessThan(fresh);
-      expect(statusReads()).toBe(reused);
+      expect(statusReads()).toBe(0);
       // A ledger write in the same turn is seen at once.
       ledger.recordDecision(identityOf('unrelated'), ledger.getCurrent(identityOf('garden'))! as unknown as Parameters<typeof ledger.recordDecision>[1]);
-      expect(statusReads()).toBe(fresh);
+      expect(statusReads()).toBeGreaterThan(0);
       // A later turn with nothing changed still reuses them.
       await new Promise((resolve) => setTimeout(resolve, 0));
-      expect(statusReads()).toBe(reused);
-      // A write to the store itself is seen at once.
-      store.advanceItemVersion(identityOf('garden'));
-      expect(statusReads()).toBe(fresh);
+      expect(statusReads()).toBe(0);
+      // A write that cannot change which rows are hidden reads nothing.
+      store.advanceItemVersion({ ...identityOf('garden'), sourceVersion: 'v2' });
+      expect(statusReads()).toBe(0);
+      // A write to the store's rows is seen at once.
+      (store as unknown as { db: Database }).db.query("UPDATE items SET tombstoned = 1 WHERE provider_item_id = 'garden'").run();
+      expect(statusReads()).toBeGreaterThan(0);
     } finally {
-      ledger.corpusCopyIdentities = real;
-      ledger.corpusCopyIdentitiesSteps = realSteps;
+      ledger.corpusVisibilityPages = real;
       tiered.close();
     }
   });
