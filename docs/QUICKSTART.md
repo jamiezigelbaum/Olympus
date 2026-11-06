@@ -248,6 +248,10 @@ and leaves the rest of Olympus available with the local judge. These estimates c
 Venice's bill. A call that cannot fit stops cloud judging. The managed worker
 reloads onto the free local judge when available; questions stay pending and
 Private until judged, without a failed attempt or a tier change from the stop.
+
+If you already judged on Venice before limits existed, nothing changes when you
+upgrade: it keeps running with no limit until you set one here. Olympus doesn't
+track cloud spending until then, so check your Venice account.
 Cloud judging works newest first. Its dollar cap replaces the default daily
 call cap; an explicitly configured daily call limit still applies.
 

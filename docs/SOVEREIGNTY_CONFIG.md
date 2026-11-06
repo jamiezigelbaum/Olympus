@@ -497,8 +497,11 @@ and held Private, meanwhile. An answer that needs the private pool aborts the
 sniffer's in-flight call.
 
 **Which model, when both are allowed (2026-11-06).** The policy defines eligible
-lanes; it does not grant cloud-judging consent. The judge defaults to local,
-including on upgrades with an older Venice classifier approval. To select an
+lanes; it does not grant cloud-judging consent. A new install's judge defaults
+to local. On upgrade, an install whose active judge is Venice, with that exact
+model and prompt approved and no spending record yet, keeps judging on Venice
+with no cap until the owner sets one; Keys shows a one-time note. An older
+Venice approval on an install that judges locally now stays local. To select an
 eligible Venice model, the owner chooses Venice and a total dollar cap in
 **Keys → Sort your archive by privacy** on this computer. That screen records
 the same exact-model/prompt approval as the CLI. A declared classification
