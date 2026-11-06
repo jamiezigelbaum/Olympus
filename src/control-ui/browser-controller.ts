@@ -475,7 +475,13 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
     const body = formRecord(form);
     if (form.hasAttribute('data-local-models-discover')) return { action: 'discover_local_models', base_url: body.base_url ?? '' };
     if (form.hasAttribute('data-local-models-test')) return { action: 'save_local_answer_model', base_url: body.base_url ?? '', answer_model: body.answer_model ?? '' };
-    if (form.hasAttribute('data-judge-choice')) return { action: 'save_judge', choice: body.choice === 'venice' ? 'venice' : 'local', cap_dollars: Number(body.cap_dollars) };
+    if (form.hasAttribute('data-judge-choice')) {
+      // A spending limit only governs Venice: Local saves without one (#950).
+      const choice = body.choice === 'venice' ? 'venice' : 'local';
+      const cap = (body.cap_dollars ?? '').trim();
+      if (choice === 'venice' && cap === '') { say(form, 'Enter a total cloud spending limit in dollars to use Venice.'); return undefined; }
+      return { action: 'save_judge', choice, cap_dollars: cap === '' ? 0 : Number(cap) };
+    }
     if (form.hasAttribute('data-computer-use')) return { action: 'set_computer_use', choice: (form.hasAttribute('data-server-mode') ? body.server === 'on' : body.choice === 'server') ? 'server' : 'everyday' };
     if (form.hasAttribute('data-first-run-privacy')) return { action: 'save_first_run_privacy', choice: body.choice ?? '' };
     const connect = form.dataset.connectKind;
@@ -698,6 +704,11 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
     if (params.action === 'check_model_setup' && !disposed) {
       const again = query<HTMLFormElement>('form[data-model-check]');
       if (again && !again.querySelector('[data-action-message]')?.textContent) say(again, 'Checked just now.');
+    }
+    // Saving the choice already shown redraws the same form; its answer must survive that redraw (#950).
+    if (params.action === 'save_judge' && typeof statusMessage === 'string' && !disposed) {
+      const again = query<HTMLFormElement>('form[data-judge-choice]');
+      if (again && !again.querySelector('[data-action-message]')?.textContent) say(again, statusMessage);
     }
   }
 
