@@ -83,6 +83,7 @@ import {
   tierLedgerIdentityKey,
   tierLedgerPathForStore,
   type TierCopy,
+  type TierCorpusVisibility,
   type TierLedgerIdentity,
   type TierSearchLayer,
 } from '../classification/tier-ledger.ts';
@@ -923,9 +924,9 @@ function runSteps<T>(steps: Generator<void, T>): T {
 }
 
 /** Item pks one extraction-candidate query reads. */
-const EXTRACTION_CANDIDATE_WINDOW = 5_000;
+const EXTRACTION_CANDIDATE_WINDOW = 500;
 /** Item pks one extraction-candidate call examines before it returns a short page. */
-export const EXTRACTION_CANDIDATE_MAX_EXAMINED = 50_000;
+export const EXTRACTION_CANDIDATE_MAX_EXAMINED = 2_000;
 
 /** Ledger lookups per step when the settled-unreadable list is built in turns. */
 const SETTLED_UNREADABLE_ITEMS_SLICE = 500;
@@ -950,6 +951,39 @@ interface TierLedgerHiddenItemPks {
   metadataLayer: number[];
   metadataLayerContentUnread: number[];
   moving: number;
+}
+
+/** Unordered pks with constant-work insertion/removal; no held-set copy per verdict. */
+class MutablePkList {
+  readonly values: number[] = [];
+  private readonly positions = new Map<number, number>();
+  add(pk: number): void {
+    if (this.positions.has(pk)) return;
+    this.positions.set(pk, this.values.length);
+    this.values.push(pk);
+  }
+  delete(pk: number): void {
+    const index = this.positions.get(pk);
+    if (index === undefined) return;
+    const last = this.values.pop()!;
+    this.positions.delete(pk);
+    if (index < this.values.length) {
+      this.values[index] = last;
+      this.positions.set(last, index);
+    }
+  }
+}
+
+const VISIBILITY_PK_FLAGS = ['hidden', 'held', 'metadataLayer', 'metadataLayerContentUnread'] as const;
+
+interface TierVisibilityMemo {
+  ledger: TierLedger;
+  ledgerCursor: number;
+  storeCursor: number;
+  dataVersion: number;
+  lists: Record<(typeof VISIBILITY_PK_FLAGS)[number], MutablePkList>;
+  members: Map<string, { pks: number[]; flags: TierCorpusVisibility }>;
+  value: TierLedgerHiddenItemPks;
 }
 
 export class TierLedgerUnavailableError extends Error {
@@ -2804,6 +2838,7 @@ export class LocalConnectorStore {
         createConnectorStoreItemTextVersions(this.db);
         validateConnectorStoreSchema(this.db);
       }
+      if (options.readOnly !== true) this.createVisibilityJournal();
       this.reactionsColumnPresent = tableColumns(this.db, 'items', false).includes('reactions_json');
       this.childItemColumnsPresent = tableColumns(this.db, 'items', false).includes('parent_local_item_id');
       this.chunkMediaColumnsPresent = tableColumns(this.db, 'chunks', false).includes('media_sha256');
@@ -3182,113 +3217,161 @@ export class LocalConnectorStore {
    * caught by the embedding batch recheck right before dispatch.
    */
   private async tierHiddenItemPksInTurns(): Promise<TierLedgerHiddenItemPks> {
-    const marker = this.tierLedgerHiddenMemoMarker();
-    const memo = this.tierLedgerHiddenMemo;
-    let base: TierLedgerHiddenItemPks;
-    if (marker && memo && memo.ledger === marker.ledger && memo.marker === marker.value) {
-      base = memo.value;
-    } else {
-      base = await runStepsInTurns(this.tierLedgerHiddenSteps());
-      // Keyed on the marker read before the build: a write during it leaves
-      // the memo stale, so the next read that must be current rebuilds.
-      this.tierLedgerHiddenMemo = marker ? { ledger: marker.ledger, marker: marker.value, value: base } : undefined;
-      await ingestionTurn();
-    }
-    // The children too: judging every parent in one go was about a tenth of
-    // the sampled freezes on Sparta (2026-11-05).
+    const base = await runStepsInTurns(this.tierLedgerHiddenSteps());
     return this.withHiddenChildren(base, await runStepsInTurns(this.hiddenChildSteps()));
   }
 
   private tierLedgerHiddenItemPks(): TierLedgerHiddenItemPks {
-    // One status build asks for these several times back to back (counts,
-    // embedding backlog, unread files), and on a large tiered store each ask
-    // is tens of thousands of lookups (Sparta, 2026-11-03: most of a 5-15 s
-    // freeze). They depend only on this store's rows and the ledger, so they
-    // are reused until either changes (any write on this connection or a
-    // commit from another), or the store is bound to another ledger.
-    const marker = this.tierLedgerHiddenMemoMarker();
-    const memo = this.tierLedgerHiddenMemo;
-    if (marker && memo && memo.ledger === marker.ledger && memo.marker === marker.value) return memo.value;
-    const value = this.computeTierLedgerHiddenItemPks();
-    this.tierLedgerHiddenMemo = marker ? { ledger: marker.ledger, marker: marker.value, value } : undefined;
-    return value;
-  }
-
-  private tierLedgerHiddenMemo: { ledger: TierLedger; marker: string; value: TierLedgerHiddenItemPks } | undefined;
-
-  /** Changes whenever this store's database or its ledger's changes. */
-  private tierLedgerHiddenMemoMarker(): { ledger: TierLedger; value: string } | undefined {
-    try {
-      const ledger = this.visibilityLedger();
-      if (!ledger) return undefined;
-      const own = this.db.query('SELECT total_changes() AS changes').get() as { changes: number };
-      const version = this.db.query('PRAGMA data_version').get() as { data_version: number };
-      return { ledger, value: `${version.data_version}:${own.changes}:${ledger.changeMarker()}` };
-    } catch {
-      return undefined;
-    }
-  }
-
-  private computeTierLedgerHiddenItemPks(): TierLedgerHiddenItemPks {
     return runSteps(this.tierLedgerHiddenSteps());
   }
 
-  // The hidden-copy lookups, a slice of identities at a time: run straight
-  // through for a read that must be current, or a turn between slices for a
-  // status count (refreshTierHiddenCountsInTurns).
+  private tierLedgerHiddenMemo: TierVisibilityMemo | undefined;
+  private visibilityJournal = false;
+  private visibilitySqlMemo: TierVisibilityMemo | undefined;
+
+  /** Item writes on this connection only; embedding, sync status and other bookkeeping do not invalidate pks. */
+  private createVisibilityJournal(): void {
+    this.db.exec(`CREATE TEMP TABLE tier_visibility_pks (flag TEXT, item_pk INTEGER, PRIMARY KEY (flag, item_pk));
+      CREATE TEMP TABLE item_visibility_changes (
+      seq INTEGER PRIMARY KEY AUTOINCREMENT, provider TEXT, account_scope TEXT,
+      conversation_key TEXT, provider_item_id TEXT
+    );`);
+    const note = (row: 'NEW' | 'OLD') => `
+      INSERT INTO item_visibility_changes (provider, account_scope, conversation_key, provider_item_id)
+        VALUES (${row}.provider, ${row}.account_scope, ${row}.normalized_conversation, ${row}.provider_item_id);
+      DELETE FROM item_visibility_changes WHERE seq <= (SELECT MAX(seq) - 8192 FROM item_visibility_changes);`;
+    this.db.exec(`
+      CREATE TEMP TRIGGER item_visibility_insert AFTER INSERT ON main.items BEGIN ${note('NEW')} END;
+      CREATE TEMP TRIGGER item_visibility_delete AFTER DELETE ON main.items BEGIN ${note('OLD')} END;
+      CREATE TEMP TRIGGER item_visibility_update
+        AFTER UPDATE OF item_pk, provider, account_scope, provider_conversation_id, provider_item_id ON main.items
+        BEGIN ${note('OLD')} ${note('NEW')} END;
+    `);
+    this.visibilityJournal = true;
+  }
+
+  private itemVisibilityChangesSince(after?: number): { cursor: number; identities?: TierLedgerIdentity[] } {
+    if (!this.visibilityJournal) return { cursor: 0, identities: [] }; // read-only: external writes use data_version
+    const bounds = this.db.query('SELECT (SELECT MIN(seq) FROM item_visibility_changes) AS first, (SELECT MAX(seq) FROM item_visibility_changes) AS last')
+      .get() as { first: number | null; last: number | null };
+    const cursor = bounds.last ?? 0;
+    if (after === undefined || after > cursor || (bounds.first !== null && after < bounds.first - 1)) return { cursor };
+    const rows = this.db.query(`SELECT DISTINCT provider, account_scope, conversation_key, provider_item_id
+      FROM item_visibility_changes WHERE seq > ?`).all(after) as Array<{
+        provider: string; account_scope: string; conversation_key: string; provider_item_id: string;
+      }>;
+    return { cursor, identities: rows.map(row => ({ provider: row.provider, accountScope: row.account_scope,
+      providerItemId: row.provider_item_id, providerConversationId: row.conversation_key })) };
+  }
+
+  /**
+   * Bootstrap once, then refresh only identities touched by copy/item writes.
+   * The bounded feeds include other ledger connections. A retention gap or an
+   * external store commit forces a complete rebuild before a current read.
+   * No partial rebuild is published. Changes during a yielded build remain
+   * after its saved cursors and are picked up by the next current read.
+   */
   private *tierLedgerHiddenSteps(): Generator<void, TierLedgerHiddenItemPks> {
-    const ledger = this.visibilityLedger();
-    if (!ledger || !ledger.corpusHasCopies(this.corpusId)) {
+    const ledger = this.visibilityLedger(); // binding verification must precede every cache use
+    if (!ledger) {
+      if (this.visibilitySqlMemo) this.db.exec('DELETE FROM temp.tier_visibility_pks');
+      this.visibilitySqlMemo = undefined;
+      this.tierLedgerHiddenMemo = undefined;
       return { hidden: [], held: [], metadataLayer: [], metadataLayerContentUnread: [], moving: 0 };
     }
-    type Identity = { provider: string; accountScope: string; providerItemId: string; providerConversationId?: string };
-    const conversationOf = (identity: Identity): string => normalizeConversationId(identity.providerConversationId);
-    const keyOf = (identity: Identity): string =>
-      JSON.stringify([identity.provider, identity.accountScope, conversationOf(identity), identity.providerItemId]);
-    const rowsFor = (identities: ReadonlyArray<Identity>) => this.itemRowsForIdentitiesSteps(identities, conversationOf);
-    const pksFor = function* (identities: ReadonlyArray<Identity>): Generator<void, number[]> {
-      return (yield* rowsFor(identities)).map((row) => row.item_pk);
+    const version = (this.db.query('PRAGMA data_version').get() as { data_version: number }).data_version;
+    const prior = this.tierLedgerHiddenMemo;
+    const priorLedgerCursor = prior?.ledgerCursor;
+    const priorStoreCursor = prior?.storeCursor;
+    const same = prior?.ledger === ledger && prior.dataVersion === version;
+    const ledgerChanges = ledger.visibilityChangesSince(same ? prior.ledgerCursor : undefined);
+    const storeChanges = this.itemVisibilityChangesSince(same ? prior.storeCursor : undefined);
+    const incremental = same && ledgerChanges.identities !== undefined && storeChanges.identities !== undefined;
+    const memo: TierVisibilityMemo = incremental ? prior : {
+      ledger, ledgerCursor: ledgerChanges.cursor, storeCursor: storeChanges.cursor, dataVersion: version,
+      lists: { hidden: new MutablePkList(), held: new MutablePkList(), metadataLayer: new MutablePkList(),
+        metadataLayerContentUnread: new MutablePkList() }, members: new Map(),
+      value: { hidden: [], held: [], metadataLayer: [], metadataLayerContentUnread: [], moving: 0 },
     };
-    // A copy that serves only the names keeps any chunks it already had
-    // (e.g. kept vectors after a split move) but never serves, counts or
-    // embeds them.
-    // Each identity list is read a page at a time with a turn between pages (#858).
-    const metadataIdentities = yield* ledger.corpusCopyIdentitiesSteps(this.corpusId, 'metadata_layer');
-    const metadataRows = yield* rowsFor(metadataIdentities);
-    // Unread names copies are a subset of the names copies (same corpus, same
-    // current names-only filter), so their rows are read off the lookup above
-    // instead of a second lookup of nearly the same set: on a names-only
-    // archive both sets are about 100k items (Sparta, 2026-11-04).
-    const pksByKey = new Map<string, number[]>();
-    for (let index = 0; index < metadataRows.length; index += 1) {
-      if (index > 0 && index % IDENTITY_LOOKUP_SLICE === 0) yield;
-      const row = metadataRows[index]!;
-      const key = keyOf(metadataIdentities[row.idx]!);
-      const pks = pksByKey.get(key);
-      if (pks) pks.push(row.item_pk); else pksByKey.set(key, [row.item_pk]);
-    }
-    const unreadIdentities = yield* ledger.corpusCopyIdentitiesSteps(this.corpusId, 'metadata_layer_content_unread');
-    const unreadMissed: Identity[] = [];
-    const unreadPks: number[] = [];
-    for (let index = 0; index < unreadIdentities.length; index += 1) {
-      if (index > 0 && index % IDENTITY_LOOKUP_SLICE === 0) yield;
-      const identity = unreadIdentities[index]!;
-      const pks = pksByKey.get(keyOf(identity));
-      if (pks) unreadPks.push(...pks); else unreadMissed.push(identity);
-    }
-    const superseded = yield* ledger.corpusCopyIdentitiesSteps(this.corpusId, 'superseded');
-    const staged = yield* ledger.corpusCopyIdentitiesSteps(this.corpusId, 'staged');
-    const hidden = yield* pksFor(superseded.concat(staged));
-    const held = yield* pksFor(yield* ledger.corpusCopyIdentitiesSteps(this.corpusId, 'held'));
-    // Only if the ledger changed between the two reads.
-    const missed = yield* pksFor(unreadMissed);
-    return {
-      hidden,
-      held,
-      metadataLayer: metadataRows.map((row) => row.item_pk),
-      metadataLayerContentUnread: unreadPks.concat(missed),
-      moving: ledger.corpusCopyCounts(this.corpusId).moving,
+    for (const flag of VISIBILITY_PK_FLAGS) memo.value[flag] = memo.lists[flag].values;
+    const changed = incremental ? [...new Map([...ledgerChanges.identities!, ...storeChanges.identities!]
+      .map(identity => [tierLedgerIdentityKey(identity), identity])).values()] : undefined;
+    // Prepare deltas off to the side, so a synchronous reader while this walk
+    // yields cannot see a half-applied removal or a half-built held set.
+    const updates: Array<{ identity: TierLedgerIdentity; pks: number[]; flags: TierCorpusVisibility | undefined }> = [];
+    const pages = ledger.corpusVisibilityPages(this.corpusId, changed);
+    const prepare = function* (store: LocalConnectorStore, identities: readonly TierLedgerIdentity[], flags: TierCorpusVisibility[]) {
+      const rows = yield* store.itemRowsForIdentitiesSteps(identities, identity => normalizeConversationId(identity.providerConversationId));
+      const pks = new Map<number, number[]>();
+      for (const row of rows) {
+        const list = pks.get(row.idx);
+        if (list) list.push(row.item_pk); else pks.set(row.idx, [row.item_pk]);
+      }
+      const byKey = new Map(flags.map(row => [tierLedgerIdentityKey(row), row]));
+      return identities.map((identity, idx) => ({ identity, pks: pks.get(idx) ?? [], flags: byKey.get(tierLedgerIdentityKey(identity)) }));
     };
+    if (changed) {
+      const flags: TierCorpusVisibility[] = [];
+      for (const page of pages) { flags.push(...page); yield; }
+      updates.push(...(yield* prepare(this, changed, flags)));
+    } else {
+      for (const page of pages) {
+        // Keep bootstrap memory bounded beyond the resulting cache itself.
+        const batch = yield* prepare(this, page, page);
+        this.applyVisibilityUpdates(memo, batch);
+        yield;
+      }
+    }
+    // Another reader may have replaced or advanced the memo during the walk.
+    // Never overwrite its newer state with this older delta: rebuild against
+    // that state on the next step instead.
+    if (this.tierLedgerHiddenMemo !== prior
+      || (incremental && (memo.ledgerCursor !== priorLedgerCursor || memo.storeCursor !== priorStoreCursor))) {
+      return yield* this.tierLedgerHiddenSteps();
+    }
+    try { this.applyVisibilityUpdates(memo, updates); }
+    catch (error) { this.tierLedgerHiddenMemo = undefined; this.visibilitySqlMemo = undefined; throw error; }
+    if (this.visibilityJournal && this.visibilitySqlMemo !== memo) {
+      this.db.transaction(() => {
+        this.db.exec('DELETE FROM temp.tier_visibility_pks');
+        for (const flag of VISIBILITY_PK_FLAGS) this.db.query(`INSERT INTO temp.tier_visibility_pks
+          SELECT ?, value FROM json_each(?)`).run(flag, JSON.stringify(memo.value[flag]));
+      })();
+      this.visibilitySqlMemo = memo;
+    }
+    memo.ledgerCursor = ledgerChanges.cursor;
+    memo.storeCursor = storeChanges.cursor;
+    this.tierLedgerHiddenMemo = memo;
+    return memo.value;
+  }
+
+  private applyVisibilityUpdates(memo: TierVisibilityMemo, updates: ReadonlyArray<{
+    identity: TierLedgerIdentity; pks: number[]; flags: TierCorpusVisibility | undefined;
+  }>): void {
+    for (const { identity } of updates) {
+      const key = tierLedgerIdentityKey(identity);
+      const previous = memo.members.get(key);
+      if (previous) {
+        for (const flag of VISIBILITY_PK_FLAGS) if (previous.flags[flag]) {
+          for (const pk of previous.pks) {
+            memo.lists[flag].delete(pk);
+            if (this.visibilitySqlMemo === memo) this.db.query('DELETE FROM temp.tier_visibility_pks WHERE flag = ? AND item_pk = ?').run(flag, pk);
+          }
+        }
+        if (previous.flags.moving) memo.value.moving -= 1;
+        memo.members.delete(key);
+      }
+    }
+    for (const { identity, pks, flags } of updates) {
+      const key = tierLedgerIdentityKey(identity);
+      if (!flags || (!flags.moving && !VISIBILITY_PK_FLAGS.some(flag => flags[flag]))) continue;
+      for (const flag of VISIBILITY_PK_FLAGS) if (flags[flag]) for (const pk of pks) {
+        memo.lists[flag].add(pk);
+        if (this.visibilitySqlMemo === memo) this.db.query('INSERT OR IGNORE INTO temp.tier_visibility_pks VALUES (?, ?)').run(flag, pk);
+      }
+      if (flags.moving) memo.value.moving += 1;
+      memo.members.set(key, { pks, flags });
+    }
   }
 
   /** Whether this store's copy of an item may be served for any layer. */
@@ -5182,15 +5265,17 @@ export class LocalConnectorStore {
       ? SOURCE_TRUST_TIERS
       : SOURCE_TRUST_TIERS.filter((trustTier) => !isSecureSensitivity({ trustDomain: this.trustDomain, trustTier }));
     const tierHidden = this.tierHiddenItemPks();
+    const heldSql = this.visibilityJournal && this.visibilitySqlMemo;
     const providerClause = `${provider ? 'AND i.provider = ?' : ''}
           AND i.trust_tier IN (SELECT value FROM json_each(?))
-          AND i.item_pk NOT IN (SELECT value FROM json_each(?))`;
+          AND i.item_pk NOT IN (SELECT value FROM json_each(?))
+          ${heldSql ? "AND NOT EXISTS (SELECT 1 FROM temp.tier_visibility_pks v WHERE v.flag = 'held' AND v.item_pk = i.item_pk)" : ''}`;
     const scopeParams = [
       accountScope,
       conversationId,
       ...(provider ? [provider] : []),
       JSON.stringify(scopeTiers),
-      JSON.stringify([...tierHidden.hidden, ...tierHidden.held]),
+      JSON.stringify(heldSql ? tierHidden.hidden : [...tierHidden.hidden, ...tierHidden.held]),
     ];
     const summary = this.db.query(`
       SELECT
@@ -10060,6 +10145,16 @@ export class LocalConnectorStore {
     tierHidden?: TierLedgerHiddenItemPks,
   ): { filter: string; params: string[] } {
     const tierExcluded = tierHidden ?? this.tierHiddenItemPks({ countsMaxAgeMs });
+    if (this.visibilityJournal && this.visibilitySqlMemo) {
+      // Reuse SQLite's indexed membership set. Re-encoding a 535k-element JSON
+      // exclusion on every verdict would merely move the scan out of the cache.
+      const children = tierExcluded.hidden === this.visibilitySqlMemo.value.hidden ? []
+        : tierExcluded.hidden;
+      return { filter: `AND NOT EXISTS (SELECT 1 FROM temp.tier_visibility_pks v
+        WHERE v.flag IN ('hidden', 'held', 'metadataLayer') AND v.item_pk = i.item_pk)
+        ${children.length ? 'AND i.item_pk NOT IN (SELECT value FROM json_each(?))' : ''}`,
+        params: children.length ? [JSON.stringify(children)] : [] };
+    }
     const excludedPks = [...tierExcluded.hidden, ...tierExcluded.held, ...tierExcluded.metadataLayer];
     return excludedPks.length > 0
       ? { filter: 'AND i.item_pk NOT IN (SELECT value FROM json_each(?))', params: [JSON.stringify(excludedPks)] }
@@ -11482,11 +11577,8 @@ export class LocalConnectorStore {
     // embedded, and items pending classification are held back until their
     // tier is final (design section 4.2). Legacy items are never held.
     const tierExcluded = tierHidden ?? this.tierHiddenItemPks();
-    const excludedPks = [...tierExcluded.hidden, ...tierExcluded.held, ...tierExcluded.metadataLayer];
-    // One JSON parameter, however many items: no bound-parameter ceiling.
-    const tierFilter = excludedPks.length > 0
-      ? ' AND i.item_pk NOT IN (SELECT value FROM json_each(?))'
-      : '';
+    const tierExclusion = this.embeddingTierExclusionFilter(0, tierExcluded);
+    const tierFilter = tierExclusion.filter;
     return this.db.query(`
       SELECT
         c.chunk_pk,
@@ -11510,7 +11602,7 @@ export class LocalConnectorStore {
       ORDER BY c.chunk_pk ASC
     `).all(
       ...(selectedLocalItemIds ?? []),
-      ...(excludedPks.length > 0 ? [JSON.stringify(excludedPks)] : []),
+      ...tierExclusion.params,
       ...(selectedAccount ? [selectedAccount] : []),
       ...selectedFilters.params,
     ) as Array<{
@@ -12433,9 +12525,10 @@ export class LocalConnectorStore {
     const hiddenNotIn = tier.hidden.length > 0
       ? 'AND i.item_pk NOT IN (SELECT value FROM json_each(?))'
       : '';
+    // Status statements also run on a separate read connection. Pass their
+    // snapshot as data; connection-local membership is only for local reads.
     const heldNotIn = tier.held.length > 0
-      ? 'AND i.item_pk NOT IN (SELECT value FROM json_each(?))'
-      : '';
+      ? 'AND i.item_pk NOT IN (SELECT value FROM json_each(?))' : '';
     // Every query that excludes names-only copies counts chunks or vectors, so
     // only names-only items that still hold a chunk or a vector can change its
     // result. Narrowing the list once here keeps those queries from each
