@@ -19123,6 +19123,54 @@ function locationKeyMatches(keys, value) {
   return keys.some((key) => key.trim().toLowerCase() === wanted);
 }
 
+// src/workers/classification/bare-share-link.ts
+function isDocumentShareUrl(url) {
+  const host = url.hostname.toLowerCase();
+  const path = url.pathname;
+  if (host === "drive.google.com") {
+    return /^\/(?:file\/d\/|drive\/(?:u\/\d+\/)?folders\/)[^/]+/.test(path) || /^\/(?:open|uc)\/?$/.test(path) && url.searchParams.has("id");
+  }
+  if (host === "docs.google.com")
+    return /^\/(?:document|spreadsheets|presentation|forms|drawings)\/(?:u\/\d+\/)?d\/[^/]+/.test(path);
+  if (host === "dropbox.com" || host === "www.dropbox.com")
+    return /^\/(?:s|sh|scl\/(?:fi|fo))\/[^/]+/.test(path);
+  if (host === "db.tt" || host === "1drv.ms")
+    return path.length > 1;
+  if (host === "icloud.com" || host === "www.icloud.com")
+    return /^\/(?:iclouddrive|pages|numbers|keynote|notes)\/[^/]+/.test(path);
+  if (host === "onedrive.live.com")
+    return url.searchParams.has("id") || url.searchParams.has("resid") || url.searchParams.has("cid");
+  if (host.endsWith(".sharepoint.com"))
+    return /^\/:[a-z]:\//i.test(path) || /\/Doc\.aspx$/i.test(path) && url.searchParams.has("sourcedoc");
+  if (host === "notion.so" || host.endsWith(".notion.so") || host.endsWith(".notion.site")) {
+    return /(?:^|[/-])[a-f0-9]{32}\/?$/i.test(path) || /\/[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}\/?$/i.test(path);
+  }
+  if (host === "box.com" || host.endsWith(".box.com"))
+    return /^\/(?:s\/[^/]+|(?:file|folder)\/\d+)(?:\/|$)/.test(path);
+  return false;
+}
+function isBareShareLink(text2) {
+  let links = 0;
+  let linkChars = 0;
+  let otherUrl = false;
+  const rest = text2.replace(/https?:\/\/[^\s<>"\[\]]+/giu, (raw) => {
+    const link = raw.replace(/[.,!?;:'")\]}>]+$/u, "");
+    try {
+      if (!isDocumentShareUrl(new URL(link)))
+        otherUrl = true;
+    } catch {
+      otherUrl = true;
+    }
+    links++;
+    linkChars += link.length;
+    return " ";
+  }).replace(/[\p{P}\p{S}]+/gu, " ").replace(/\s+/gu, " ").trim().toLowerCase();
+  if (!links || otherUrl || rest.length > 24 || linkChars < rest.length * 2)
+    return false;
+  const words = rest ? rest.split(" ") : [];
+  return words.length <= 4 && words.every((word) => ["here", "s", "is", "the", "a", "link", "doc", "document", "file", "folder", "fyi", "see", "please", "this", "you", "go", "it"].includes(word));
+}
+
 // src/workers/classification/tier-classifier.ts
 import { createHash as createHash10 } from "node:crypto";
 function tierRank(tier) {
@@ -19535,6 +19583,14 @@ function contentPass(args) {
     return { tier: metadata.tier, decidedBy: metadata.decidedBy, reasons: [...mark], pending: false };
   }
   let decided = { tier: metadata.tier, decidedBy: metadata.decidedBy, reasons: [] };
+  if (isBareShareLink(text2)) {
+    return {
+      tier: maxTier(metadata.tier, "secure"),
+      decidedBy: "content_rule",
+      reasons: ["content:rule:private_share_link", `content:rule_sniffer:${args.sniffer.id}`, ...mark],
+      pending: false
+    };
+  }
   const rule = args.textOnly && !args.heldSecret && (args.titleIsConversation === true || !args.signals.title?.trim()) ? trivialContentRule(text2, args.parentContext) : undefined;
   if (rule) {
     return {

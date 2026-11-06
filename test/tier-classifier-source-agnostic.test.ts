@@ -53,6 +53,8 @@ const IMPORT_ALLOWLIST = new Set([
   './engine.ts',
   './source-index/types.ts',
   './tier-classifier.ts',
+  // Content URL shapes, never the item's provider or connector identity.
+  './bare-share-link.ts',
   './tier-ledger-path.ts',
   // Phase P2: owner rules, the privacy-safe sniffer and its background pass.
   'node:crypto',
