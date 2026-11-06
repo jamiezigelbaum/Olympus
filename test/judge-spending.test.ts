@@ -1,6 +1,6 @@
 import { runTierClassifier } from '../src/workers/classification/tier-cli.ts';
-import { createJudgeSetup } from '../src/workers/classification/judge-setup.ts';
-import { approveClassifier, readClassificationLedger, isClassifierApproved } from '../src/workers/classification-ledger.ts';
+import { adoptExistingCloudApproval, createJudgeSetup } from '../src/workers/classification/judge-setup.ts';
+import { approveClassifier, readClassificationLedger, isClassifierApproved, revokeClassifier } from '../src/workers/classification-ledger.ts';
 import { snifferPromptVersions } from '../src/workers/classification/sniffer.ts';
 import { TierSnifferService } from '../src/workers/classification/sniffer-service.ts';
 import { InstalledTierClassification } from '../src/workers/classification/installed-tier-classification.ts';
@@ -315,4 +315,70 @@ test('Venice-only setup can record a no before visiting Keys and reports the pen
   await runTierClassifier(['decline', '--why', 'Owner chose local/off'], { env });
   expect(await runTierClassifier(['status'], { env })).toMatchObject({ lane: null, decision: 'declined', approved: false });
   await expect(runTierClassifier(['approve', '--why', 'Synthetic'], { env })).rejects.toThrow('Keys');
+});
+
+test('an upgrade keeps an exact Venice approval judging with no cap until the owner sets one', async () => {
+  const { budget, path } = fixture();
+  const engine = createSovereigntyEngine(loadSovereigntyPreset('local-first'));
+  const cloud = resolveJudgeChoiceRuntime({ engine }, { choice: 'venice', stop: null, remainingDollars: 20 });
+  if (cloud.source === 'off') throw new Error('expected a cloud lane');
+  const promptVersion = snifferPromptVersions().approval;
+  const ledger = path + '.ledger';
+
+  // No approval: a new install stays local and nothing is written.
+  await adoptExistingCloudApproval(budget, cloud, ledger, promptVersion);
+  expect(budget.hasRecord()).toBe(false);
+  expect(budget.status().choice).toBe('local');
+
+  await approveClassifier(ledger, cloud.lane, promptVersion, 'approved before limits existed');
+  await adoptExistingCloudApproval(budget, cloud, ledger, promptVersion);
+  expect(budget.status()).toMatchObject({ choice: 'venice', uncapped: true, stop: null });
+  const running = resolveJudgeChoiceRuntime({ engine }, budget.status());
+  expect(running.source !== 'off' && running.lane.kind).toBe('venice');
+
+  // Calls pass with no cap and no listed price; a 402 stays as it was before.
+  let sent = 0;
+  const judged = budget.fetch(async () => { sent++; return new Response('', { status: 402 }); });
+  const unlisted = { ...request, body: JSON.stringify({ model: 'some-unlisted-model', messages: [], max_completion_tokens: 8 }) };
+  expect((await judged('https://venice.test', unlisted)).status).toBe(402);
+  expect(sent).toBe(1);
+  expect(budget.status().stop).toBeNull();
+
+  // The note shows once and survives a restart as already shown.
+  expect(budget.takeUpgradeNote()).toBe(true);
+  expect(new JudgeSpending(path).takeUpgradeNote()).toBe(false);
+
+  // Setting a limit ends the upgrade state and the cap applies from then on.
+  budget.choose('venice', 0);
+  expect(budget.status().uncapped).toBeUndefined();
+  await expect(budget.fetch(async () => response())('https://venice.test', request)).rejects.toBeInstanceOf(JudgeCloudStopped);
+});
+
+test('a saved choice is never overridden by an old approval, and a declined model is not adopted', async () => {
+  const { budget, path } = fixture();
+  const engine = createSovereigntyEngine(loadSovereigntyPreset('local-first'));
+  const cloud = resolveJudgeChoiceRuntime({ engine }, { choice: 'venice', stop: null, remainingDollars: 20 });
+  if (cloud.source === 'off') throw new Error('expected a cloud lane');
+  const promptVersion = snifferPromptVersions().approval;
+  const ledger = path + '.ledger';
+  await approveClassifier(ledger, cloud.lane, promptVersion, 'approved');
+  budget.choose('local', 0);
+  await adoptExistingCloudApproval(budget, cloud, ledger, promptVersion);
+  expect(budget.status().choice).toBe('local');
+
+  const other = fixture();
+  await approveClassifier(other.path + '.ledger', cloud.lane, promptVersion, 'approved');
+  await revokeClassifier(other.path + '.ledger', cloud.lane, promptVersion, 'changed my mind');
+  await adoptExistingCloudApproval(other.budget, cloud, other.path + '.ledger', promptVersion);
+  expect(other.budget.hasRecord()).toBe(false);
+});
+
+test('the screen shows the upgrade note once and asks for a limit instead of showing $0', () => {
+  const view = buildDashboardPreviewView('ready');
+  const judgeSetup = { choice: 'venice' as const, capDollars: 0, spentDollars: 0, remainingDollars: 0, stop: null, uncapped: true, cloudModel: 'qwen3-6-35b-a3b', cloudAvailable: true };
+  const first = renderJudgeChoice(view, { judgeSetup: { ...judgeSetup, upgradeNote: true } });
+  expect(first).toContain('You can now set a spending limit');
+  expect(first).toContain('No spending limit is set');
+  expect(first).toContain('required value=""');
+  expect(renderJudgeChoice(view, { judgeSetup })).not.toContain('You can now set a spending limit');
 });

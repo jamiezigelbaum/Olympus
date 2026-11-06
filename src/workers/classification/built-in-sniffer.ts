@@ -100,11 +100,11 @@ export function resolveTierSnifferRuntime(input: {
  * A recommendation alone never selects cloud. A terminal cloud stop uses local. */
 export function resolveJudgeChoiceRuntime(
   input: Parameters<typeof resolveTierSnifferRuntime>[0],
-  choice: { choice: 'local' | 'venice'; stop: string | null; remainingDollars: number },
+  choice: { choice: 'local' | 'venice'; stop: string | null; remainingDollars: number; uncapped?: boolean },
 ): TierSnifferRuntime {
   const original = resolveTierSnifferRuntime(input);
   if (original.source === 'off' && original.reason !== 'no_private_lane') return original;
-  const kind = choice.choice === 'venice' && !choice.stop && choice.remainingDollars > 0 ? 'venice' : 'local';
+  const kind = choice.choice === 'venice' && !choice.stop && (choice.uncapped === true || choice.remainingDollars > 0) ? 'venice' : 'local';
   const engine = {
     config: { ...input.engine.config, modelProfiles: Object.fromEntries(Object.entries(input.engine.config.modelProfiles)
       .filter(([, profile]) => profile.purpose !== 'classification' || (kind === 'venice' ? profile.provider === 'venice' : profile.trust === 'local'))) },

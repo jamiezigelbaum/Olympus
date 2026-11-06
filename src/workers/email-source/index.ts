@@ -568,6 +568,7 @@ export interface EmailSourceWorkerOptions {
     systemReport?: () => SystemSupportFacts;
     judgeSetup?: {
       status: () => import('../dashboard/pages/local.ts').DashboardJudgeSetup;
+      pageStatus?: () => import('../dashboard/pages/local.ts').DashboardJudgeSetup;
       save: (choice: 'local' | 'venice', capDollars: number) => Promise<{ ok: true; status_message: string }>;
     };
     modelSetup?: () => ModelSetupView;
@@ -1627,7 +1628,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
               view,
               options: {
                 ...(controlSessionCsrfToken ? { controlSessionCsrfToken } : {}),
-                ...(sourceDashboard.judgeSetup ? { judgeSetup: sourceDashboard.judgeSetup.status() } : {}),
+                ...(sourceDashboard.judgeSetup ? { judgeSetup: (sourceDashboard.judgeSetup.pageStatus ?? sourceDashboard.judgeSetup.status)() } : {}),
                 outsideHelpLocalSession: request.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER) === 'local',
                 messagingLocalSession: Boolean(controlSessionCsrfToken) && request.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER) === 'local',
                 ...(controlSessionCsrfToken && sourceDashboard.consult ? { outsideHelp: await sourceDashboard.consult.status().catch(() => undefined) } : {}),

@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { withFileLeaseSync } from '../../core/file-lease.ts';
 import { writePrivateFileAtomicSync } from '../../core/atomic-file.ts';
 import { JudgeCloudStopped } from './sniffer.ts';
@@ -40,6 +40,9 @@ export function judgeArchiveEstimate(count: number, model: string) {
 export interface JudgeSpendingStatus {
   choice: 'local' | 'venice'; capDollars: number; spentDollars: number; remainingDollars: number;
   stop: 'cap' | 'payment' | 'storage' | null;
+  /** Approved before limits existed: keeps judging, no cap, until the owner sets one. */
+  uncapped?: boolean;
+  upgradeNote?: boolean;
 }
 export function judgeSpendingPath(env: Record<string, string | undefined>): string {
   return join(dirname(resolveClassificationLedgerPath(env)), 'judge-spending.json');
@@ -55,11 +58,11 @@ function readBudgetRow(path: string): BudgetRow {
     throw new Error('The saved judge budget cannot be read. Restore the spending record or fix its file permissions; cloud judging is off.');
   }
 }
-interface BudgetRow { choice: 'local' | 'venice'; cap: number; spent: number; stop: 'cap' | 'payment' | null }
+interface BudgetRow { choice: 'local' | 'venice'; cap: number; spent: number; stop: 'cap' | 'payment' | null; uncapped?: true; noted?: true }
 function statusFromRow(row: BudgetRow): JudgeSpendingStatus {
-  if (!row || !['local', 'venice'].includes(row.choice) || !Number.isSafeInteger(row.cap) || !Number.isSafeInteger(row.spent) || row.cap < 0 || row.spent < 0 || ![null, 'cap', 'payment'].includes(row.stop)) throw new Error('The saved judge budget cannot be read. Cloud judging is stopped.');
+  if (!row || !['local', 'venice'].includes(row.choice) || !Number.isSafeInteger(row.cap) || !Number.isSafeInteger(row.spent) || row.cap < 0 || row.spent < 0 || ![null, 'cap', 'payment'].includes(row.stop) || ![undefined, true].includes(row.uncapped)) throw new Error('The saved judge budget cannot be read. Cloud judging is stopped.');
   return { choice: row.choice, capDollars: row.cap / 1_000_000, spentDollars: row.spent / 1_000_000,
-    remainingDollars: Math.max(0, row.cap - row.spent) / 1_000_000, stop: row.stop };
+    remainingDollars: Math.max(0, row.cap - row.spent) / 1_000_000, stop: row.stop, ...(row.uncapped ? { uncapped: true } : {}) };
 }
 /** Reuse the existing kernel file lease and atomic, fsynced private-file writer.
  * They serialize reservations across processes without a new store/sidecar owner.
@@ -78,7 +81,21 @@ export class JudgeSpending {
   }
   choose(choice: 'local' | 'venice', capDollars: number): void {
     const cap = judgeCapMicros(capDollars);
-    this.change(row => { row.choice = choice; row.cap = cap; row.stop = null; });
+    this.change(row => { row.choice = choice; row.cap = cap; row.stop = null; delete row.uncapped; delete row.noted; });
+  }
+  /** Upgrade only: an approval given before this record existed was the owner's
+   * opt-in. Any later saved choice exists as a file, so this never overrides it. */
+  adoptExistingApproval(): void {
+    withFileLeaseSync(this.path, () => {
+      if (existsSync(this.path)) return;
+      writePrivateFileAtomicSync(this.path, `${JSON.stringify({ choice: 'venice', cap: 0, spent: 0, stop: null, uncapped: true } satisfies BudgetRow)}\n`);
+    });
+  }
+  hasRecord(): boolean { return existsSync(this.path); }
+  /** True once, for the page that shows the note. */
+  takeUpgradeNote(): boolean {
+    if (!this.status().uncapped) return false;
+    return this.change(row => { const show = row.uncapped === true && !row.noted; if (show) row.noted = true; return show; });
   }
   lowerCap(capDollars: number): void {
     const cap = judgeCapMicros(capDollars);
@@ -99,6 +116,8 @@ export class JudgeSpending {
   /** Wrap only the judge's completion transport, never answers or catalog reads. */
   fetch(fetchImpl: OpenAIAnalystFetch, onStop: () => void = () => {}): OpenAIAnalystFetch {
     return async (url, init) => {
+      // No limit set yet: exactly the calls this install made before limits existed.
+      if (this.status().uncapped) return fetchImpl(url, init);
       const body = JSON.parse(String(init.body)) as { model: string; messages: unknown; max_completion_tokens: number };
       const price = JUDGE_PRICES[normalizeVeniceAnalystModelId(body.model)];
       if (!price) throw new JudgeCloudStopped('price');
