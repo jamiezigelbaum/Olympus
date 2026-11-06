@@ -587,6 +587,9 @@ describe('bounds and the owner-approval gate', () => {
       busy = false;
       await service.runOnce();
       expect(lines).toContain('Olympus tier sniffer: asking again.');
+      // The pass line says where the tick's wall time went, and the idle time before it.
+      const passLine = lines.find((line) => line.includes('verdict(s) applied'));
+      expect(passLine).toMatch(/; tick_ms=\d+ settle=\d+ recover=\d+ approval=\d+ prepare=\d+ rejudge=\d+ targets=\d+ pass=\d+ moves=\d+ idle_before=\d+\.$/);
 
       // A pass whose model call never returns: the next tick past the bound aborts it.
       recordFlagged(ledger, installed.snifferStoreForLedger(ledger.dbPath), 2, 'divorce papers');
