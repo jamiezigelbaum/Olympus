@@ -150,6 +150,18 @@ describe('append and read', () => {
     expect(await appendEmbeddingLedgerEntryOnce(path, entry({ entry_id: 'first' }))).toBe(false);
   });
 
+  test('overlapping appendOnce calls never skip records appended after them', async () => {
+    const path = tempLedgerPath();
+    await appendEmbeddingLedgerEntryOnce(path, entry({ entry_id: 'seed' }));
+    await Promise.all([
+      appendEmbeddingLedgerEntryOnce(path, entry({ entry_id: 'seed' })),
+      appendEmbeddingLedgerEntryOnce(path, entry({ entry_id: 'a' })),
+      appendEmbeddingLedgerEntryOnce(path, entry({ entry_id: 'b' })),
+    ]);
+    expect(await appendEmbeddingLedgerEntryOnce(path, entry({ entry_id: 'a' }))).toBe(false);
+    expect(await appendEmbeddingLedgerEntryOnce(path, entry({ entry_id: 'b' }))).toBe(false);
+  });
+
   test('appendOnce rereads a ledger that was replaced by a shorter file', async () => {
     const path = tempLedgerPath();
     await appendEmbeddingLedgerEntryOnce(path, entry({ entry_id: 'gone-a' }));

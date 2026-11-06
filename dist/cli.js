@@ -59576,10 +59576,11 @@ async function recordedEntryIds(path) {
     recordedIdCache.set(path, cached2);
   }
   if (size > cached2.bytes) {
+    const from = cached2.bytes;
     const handle = await open2(path, "r");
     try {
-      const tail = Buffer.alloc(size - cached2.bytes);
-      const { bytesRead } = await handle.read(tail, 0, tail.length, cached2.bytes);
+      const tail = Buffer.alloc(size - from);
+      const { bytesRead } = await handle.read(tail, 0, tail.length, from);
       const complete = tail.subarray(0, bytesRead).lastIndexOf(10) + 1;
       if (complete > 0) {
         for (const entry of parseEmbeddingLedgerJsonl(tail.subarray(0, complete).toString("utf8")).entries) {
@@ -59587,7 +59588,7 @@ async function recordedEntryIds(path) {
           if (id)
             cached2.ids.add(id);
         }
-        cached2.bytes += complete;
+        cached2.bytes = Math.max(cached2.bytes, from + complete);
       }
     } finally {
       await handle.close();

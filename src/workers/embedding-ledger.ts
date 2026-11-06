@@ -243,17 +243,20 @@ async function recordedEntryIds(path: string): Promise<Set<string>> {
     recordedIdCache.set(path, cached);
   }
   if (size > cached.bytes) {
+    // Overlapping calls may read the same tail; each advances the cursor to an
+    // absolute position, never by a relative count, so none skips bytes.
+    const from = cached.bytes;
     const handle = await open(path, 'r');
     try {
-      const tail = Buffer.alloc(size - cached.bytes);
-      const { bytesRead } = await handle.read(tail, 0, tail.length, cached.bytes);
+      const tail = Buffer.alloc(size - from);
+      const { bytesRead } = await handle.read(tail, 0, tail.length, from);
       const complete = tail.subarray(0, bytesRead).lastIndexOf(0x0a) + 1;
       if (complete > 0) {
         for (const entry of parseEmbeddingLedgerJsonl(tail.subarray(0, complete).toString('utf8')).entries) {
           const id = entry.entry_id?.trim();
           if (id) cached.ids.add(id);
         }
-        cached.bytes += complete;
+        cached.bytes = Math.max(cached.bytes, from + complete);
       }
     } finally {
       await handle.close();
