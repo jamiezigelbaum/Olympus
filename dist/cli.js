@@ -190995,6 +190995,7 @@ class TierSnifferService {
   budget;
   timer;
   continuation;
+  lastTickEndedAt;
   moveAbort = new AbortController;
   moving;
   running = false;
@@ -191278,6 +191279,7 @@ class TierSnifferService {
       tick = { state: "failed", error: error2 instanceof Error ? error2.name : "unknown" };
     } finally {
       leave();
+      this.lastTickEndedAt = performance.now();
     }
     if (generation !== this.passGeneration) {
       abort.abort();
@@ -191439,8 +191441,19 @@ class TierSnifferService {
   }
   async tick(signal) {
     const { lane } = this.options;
+    const phaseStarted = performance.now();
+    const idleMs = this.lastTickEndedAt === undefined ? undefined : phaseStarted - this.lastTickEndedAt;
+    let phaseAt = phaseStarted;
+    const phaseMs = {};
+    const phase = (name) => {
+      const now = performance.now();
+      phaseMs[name] = (phaseMs[name] ?? 0) + (now - phaseAt);
+      phaseAt = now;
+    };
     await this.settleStoredItems();
+    phase("settle");
     await this.recoverMissingQuestions();
+    phase("recover");
     if (this.options.modelAvailable && !this.options.modelAvailable()) {
       try {
         this.options.startModel?.();
@@ -191485,10 +191498,14 @@ class TierSnifferService {
       await this.drainMoves();
       return { state: "awaiting_owner_approval", modelId: lane.modelId, promptVersion: versions2.approval };
     }
+    phase("approval");
     const preparationStopped = await prepareSnifferModel({ model: this.options.model, signal, shouldYield: () => this.yieldNow() });
+    phase("prepare");
     if (!preparationStopped)
       await this.recoverMissingQuestions(true);
+    phase("recover");
     const rejudged = preparationStopped ? emptyTierRejudgeReport() : await this.rejudge();
+    phase("rejudge");
     const targets = [];
     for (const ledgerPath of this.ledgerPaths()) {
       let ledger2;
@@ -191597,6 +191614,7 @@ class TierSnifferService {
         }
       });
     }
+    phase("targets");
     const report = await runSnifferPass({
       targets,
       lane,
@@ -191610,10 +191628,13 @@ class TierSnifferService {
       shouldYield: () => this.yieldNow(),
       signal
     });
-    if (report.calls > 0 || report.verdictsApplied > 0 || report.heldLowering > 0) {
-      this.options.log?.(`Olympus tier sniffer: ${report.calls} call(s), ${report.verdictsApplied} verdict(s) applied ` + `(${report.resolvedPersonal} Personal, ${report.resolvedPrivate} Private, ${report.failSafePrivate} fail-safe Private), ` + `${report.cacheHits} from cache; ${report.heldLowering} lowering(s) held${report.stoppedBy ? `, stopped: ${report.stoppedBy}` : ""}; ` + `call_ms=${Math.round(report.callMs)} mean_call_ms=${report.calls ? Math.round(report.callMs / report.calls) : 0} queue_wait_max_ms=${Math.round(report.maxQueueWaitMs)}.`);
-    }
+    phase("pass");
     const autoMoves = await this.drainMoves();
+    phase("moves");
+    if (report.calls > 0 || report.verdictsApplied > 0 || report.heldLowering > 0) {
+      const phases = Object.entries(phaseMs).map(([name, ms]) => `${name}=${Math.round(ms)}`).join(" ");
+      this.options.log?.(`Olympus tier sniffer: ${report.calls} call(s), ${report.verdictsApplied} verdict(s) applied ` + `(${report.resolvedPersonal} Personal, ${report.resolvedPrivate} Private, ${report.failSafePrivate} fail-safe Private), ` + `${report.cacheHits} from cache; ${report.heldLowering} lowering(s) held${report.stoppedBy ? `, stopped: ${report.stoppedBy}` : ""}; ` + `call_ms=${Math.round(report.callMs)} mean_call_ms=${report.calls ? Math.round(report.callMs / report.calls) : 0} queue_wait_max_ms=${Math.round(report.maxQueueWaitMs)}; ` + `tick_ms=${Math.round(performance.now() - phaseStarted)} ${phases}${idleMs === undefined ? "" : ` idle_before=${Math.round(idleMs)}`}.`);
+    }
     if (autoMoves && autoMoves.moved > 0)
       this.applyOwnerOverrides();
     return { state: "ran", report, ...rejudged.seen > 0 ? { rejudged } : {}, ...autoMoves ? { autoMoves } : {} };
