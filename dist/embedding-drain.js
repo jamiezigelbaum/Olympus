@@ -33243,6 +33243,120 @@ var init_litert_runtime = __esm(() => {
   REQUEST_TIMEOUT_MS = 3 * 60000;
 });
 
+// src/workers/source-index/built-in-embedding/remote-litert-runtime.ts
+import { readFileSync as readFileSync20 } from "node:fs";
+
+class RemoteLiteRtEmbedder {
+  options;
+  device = "cpu";
+  vision = false;
+  verified = false;
+  retryAt = 0;
+  state = "unused";
+  slot = Promise.resolve();
+  url;
+  constructor(options) {
+    this.options = options;
+    try {
+      this.url = new URL(options.url);
+    } catch {
+      throw new Error("Invalid built-in embedding remote URL.");
+    }
+    const loopback = this.url.hostname === "localhost" || this.url.hostname === "[::1]" || /^127(?:\.\d{1,3}){3}$/.test(this.url.hostname);
+    if (this.url.protocol !== "https:" && !(this.url.protocol === "http:" && loopback) || this.url.username || this.url.password || this.url.search || this.url.hash) {
+      throw new Error("Built-in embedding remote requires HTTPS or loopback HTTP, without URL credentials, query or fragment.");
+    }
+  }
+  get active() {
+    return this.state === "remote";
+  }
+  async embed(items) {
+    const previous = this.slot;
+    let unlock;
+    this.slot = new Promise((resolve9) => {
+      unlock = resolve9;
+    });
+    await previous;
+    try {
+      const now = this.options.now ?? Date.now;
+      if (now() < this.retryAt)
+        throw new Error("Remote embedding cooling down.");
+      try {
+        if (items.length === 0 || items.length > 8 || items.some((item) => typeof item !== "string")) {
+          throw new Error("Remote embedding requires a text-only batch.");
+        }
+        if (!this.verified) {
+          const handshake = await this.request("/v1/handshake");
+          for (const [field, value] of Object.entries(this.options.identity)) {
+            if (handshake[field] !== value)
+              throw new Error("Remote embedding identity mismatch.");
+          }
+          if (handshake.device !== "cpu" && handshake.device !== "gpu")
+            throw new Error("Invalid remote device.");
+          if (handshake.vision !== false)
+            throw new Error("Invalid remote vision capability.");
+          this.device = handshake.device;
+          this.verified = true;
+        }
+        const response = await this.request("/v1/embed", items);
+        const identity = this.options.identity;
+        if (typeof response.vectors !== "string" || Object.entries(identity).some(([field, value]) => response[field] !== value)) {
+          throw new Error("Remote embedding identity mismatch.");
+        }
+        const bytes = Buffer.from(response.vectors, "base64");
+        if (bytes.length !== items.length * identity.dimension * 4)
+          throw new Error("Invalid remote vector length.");
+        const vectors = items.map((_, row) => Float32Array.from({ length: identity.dimension }, (_2, column) => bytes.readFloatLE((row * identity.dimension + column) * 4)));
+        if (vectors.some((vector) => vector.some((value) => !Number.isFinite(value)) || !vector.some((value) => value !== 0))) {
+          throw new Error("Invalid remote vector values.");
+        }
+        this.transition("remote");
+        return vectors;
+      } catch {
+        this.verified = false;
+        this.retryAt = now() + 60000;
+        this.transition("local");
+        throw new Error("Remote embedding unavailable; using local helper.");
+      }
+    } finally {
+      unlock();
+    }
+  }
+  async release() {
+    this.verified = false;
+  }
+  transition(state) {
+    if (this.state === state)
+      return;
+    this.state = state;
+    console.warn(state === "remote" ? "[built-in embedding] document text embedding is using the remote helper." : "[built-in embedding] remote helper unavailable; document text embedding is using the local helper.");
+  }
+  async request(path, texts) {
+    const headers = {};
+    if (this.options.tokenFile) {
+      const token = readFileSync20(this.options.tokenFile, "utf8").trim();
+      if (!token)
+        throw new Error("Empty remote token file.");
+      headers.Authorization = `Bearer ${token}`;
+    }
+    if (texts)
+      headers["Content-Type"] = "application/json";
+    const response = await fetch(new URL(path, this.url), {
+      method: texts ? "POST" : "GET",
+      headers,
+      ...texts ? { body: JSON.stringify({ texts }) } : {},
+      signal: AbortSignal.timeout(this.options.requestTimeoutMs ?? 30000),
+      redirect: "error"
+    });
+    if (!response.ok) {
+      await response.body?.cancel();
+      throw new Error("Remote request failed.");
+    }
+    return await response.json();
+  }
+}
+var init_remote_litert_runtime = () => {};
+
 // src/workers/source-index/built-in-embedding/runtime.ts
 import { createRequire as createRequire6 } from "node:module";
 import { join as join24 } from "node:path";
@@ -33432,7 +33546,7 @@ var init_wordpiece = __esm(() => {
 
 // src/workers/source-index/built-in-embedding/provider.ts
 import { createHash as createHash20 } from "node:crypto";
-import { readFileSync as readFileSync20 } from "node:fs";
+import { readFileSync as readFileSync21 } from "node:fs";
 import { availableParallelism } from "node:os";
 import { dirname as dirname26, join as join25 } from "node:path";
 
@@ -33445,6 +33559,7 @@ class BuiltInSourceEmbeddingProvider {
   backend;
   threads;
   device;
+  remote;
   spec;
   env;
   runtimeFactory;
@@ -33476,6 +33591,23 @@ class BuiltInSourceEmbeddingProvider {
     this.install = options.install ?? installBuiltInEmbedding;
     this.installerOptions = options.installerOptions ?? {};
     this.now = options.now ?? Date.now;
+    const remoteUrl = this.env[BUILT_IN_EMBEDDING_REMOTE_URL_ENV]?.trim();
+    if (remoteUrl && this.spec.runtime === "litert") {
+      this.remote = new RemoteLiteRtEmbedder({
+        url: remoteUrl,
+        tokenFile: this.env[BUILT_IN_EMBEDDING_REMOTE_TOKEN_FILE_ENV],
+        now: this.now,
+        requestTimeoutMs: options.remoteRequestTimeoutMs,
+        identity: {
+          modelId: this.modelId,
+          weightsSha256: this.spec.model.sha256,
+          runtime: `litert-lm-${LITERT_RUNTIME_PACK.version}`,
+          dimension: this.dimension,
+          maxTokens: this.spec.maxTokens,
+          overflow: "chunk-and-average"
+        }
+      });
+    }
     this.epochId = resolveEmbeddingEpoch({
       provider: this.provider,
       modelId: this.modelId,
@@ -33501,7 +33633,8 @@ class BuiltInSourceEmbeddingProvider {
     })).digest("hex");
   }
   status() {
-    return readBuiltInEmbeddingStatus(this.env, this.spec);
+    const status = readBuiltInEmbeddingStatus(this.env, this.spec);
+    return this.remote ? { ...status, remoteDocuments: this.remote.active } : status;
   }
   async prepare() {
     await this.load();
@@ -33785,12 +33918,12 @@ class BuiltInSourceEmbeddingProvider {
     });
   }
   async embedLiteRt(embedder, inputs, taskType) {
-    const { vectors, failed } = await this.liteRtVectors(embedder, this.liteRtItems(inputs, taskType), taskType, new Set(taskType === "RETRIEVAL_DOCUMENT" ? this.refusedPictures(inputs) : []));
+    const { vectors, failed } = await this.liteRtVectors(embedder, this.liteRtItems(inputs, taskType), taskType, new Set(taskType === "RETRIEVAL_DOCUMENT" ? this.refusedPictures(inputs) : []), new Set(inputs.flatMap((input, index) => input.image ? [index] : [])));
     if (failed.length > 0)
       throw new SourceEmbeddingInputsFailedError(failed, "image_unreadable");
     return vectors;
   }
-  async liteRtVectors(embedder, prompts, taskType, refused) {
+  async liteRtVectors(embedder, prompts, taskType, refused, localOnly = new Set) {
     const out = [];
     const pictures = prompts.flatMap((prompt, index) => typeof prompt !== "string" && !refused.has(index) ? [index] : []);
     if (pictures.length > 0 && this.picturesHeld()) {
@@ -33802,7 +33935,13 @@ class BuiltInSourceEmbeddingProvider {
       const batchPictures = batch.flatMap((prompt, row) => typeof prompt !== "string" ? [offset + row] : []);
       let vectors;
       try {
-        vectors = await this.withSlot(taskType, () => embedder.embed(batch));
+        let remoteVectors;
+        if (this.remote && taskType === "RETRIEVAL_DOCUMENT" && batch.every((prompt) => typeof prompt === "string") && !prompts.slice(offset, offset + LITERT_BATCH).some((prompt, row) => typeof prompt !== "string" || localOnly.has(offset + row))) {
+          try {
+            remoteVectors = await this.remote.embed(batch);
+          } catch {}
+        }
+        vectors = remoteVectors ?? await this.withSlot(taskType, () => embedder.embed(batch));
         if (batchPictures.length > 0)
           this.pictureFaults = undefined;
       } catch (error) {
@@ -33885,7 +34024,7 @@ class BuiltInSourceEmbeddingProvider {
   }
 }
 function loadTokenizer(path) {
-  const tokenizer = new WordPieceTokenizer(readFileSync20(path, "utf8"));
+  const tokenizer = new WordPieceTokenizer(readFileSync21(path, "utf8"));
   return {
     tokenize: (text2) => tokenizer.tokenize(text2),
     startId: tokenizer.clsId,
@@ -33972,7 +34111,7 @@ function sharedBuiltInSourceEmbeddingProvider(options) {
   }
   return provider;
 }
-var BUILT_IN_EMBEDDING_PROVIDER = "built-in", BUILT_IN_EMBEDDING_THREADS_ENV = "OLYMPUS_BUILT_IN_EMBEDDING_THREADS", BUILT_IN_EMBEDDING_DEVICE_ENV = "OLYMPUS_BUILT_IN_EMBEDDING_DEVICE", MAX_WINDOWS_PER_DOCUMENT = 8, MAX_BATCH_TOKENS = 2048, MAX_BATCH_ROWS = 32, LITERT_BATCH = 8, RETRY_AFTER_FAILURE_MS, PICTURE_ENGINE_FAULT_LIMIT = 2, PICTURE_HOLD_MS, BuiltInEmbeddingNotReadyError, sharedProviders;
+var BUILT_IN_EMBEDDING_PROVIDER = "built-in", BUILT_IN_EMBEDDING_THREADS_ENV = "OLYMPUS_BUILT_IN_EMBEDDING_THREADS", BUILT_IN_EMBEDDING_DEVICE_ENV = "OLYMPUS_BUILT_IN_EMBEDDING_DEVICE", BUILT_IN_EMBEDDING_REMOTE_URL_ENV = "OLYMPUS_BUILT_IN_EMBEDDING_REMOTE_URL", BUILT_IN_EMBEDDING_REMOTE_TOKEN_FILE_ENV = "OLYMPUS_BUILT_IN_EMBEDDING_REMOTE_TOKEN_FILE", MAX_WINDOWS_PER_DOCUMENT = 8, MAX_BATCH_TOKENS = 2048, MAX_BATCH_ROWS = 32, LITERT_BATCH = 8, RETRY_AFTER_FAILURE_MS, PICTURE_ENGINE_FAULT_LIMIT = 2, PICTURE_HOLD_MS, BuiltInEmbeddingNotReadyError, sharedProviders;
 var init_provider = __esm(() => {
   init_operation_error();
   init_embedding_identity();
@@ -33981,6 +34120,7 @@ var init_provider = __esm(() => {
   init_assets();
   init_manifest();
   init_litert_runtime();
+  init_remote_litert_runtime();
   init_runtime();
   init_wordpiece();
   RETRY_AFTER_FAILURE_MS = 2 * 60000;
@@ -42177,7 +42317,7 @@ var init_messaging_runtime = __esm(() => {
 });
 
 // src/workers/credential-broker/unpaired-sources.ts
-import { closeSync as closeSync11, constants as constants4, fstatSync as fstatSync2, lstatSync as lstatSync12, openSync as openSync11, readFileSync as readFileSync21 } from "node:fs";
+import { closeSync as closeSync11, constants as constants4, fstatSync as fstatSync2, lstatSync as lstatSync12, openSync as openSync11, readFileSync as readFileSync22 } from "node:fs";
 function unpairedSourcesPath(registryPath) {
   return `${registryPath}.unpaired`;
 }
@@ -42216,7 +42356,7 @@ function readRecordText(path) {
     if (!opened.isFile() || opened.dev !== node.stat.dev || opened.ino !== node.stat.ino) {
       return { kind: "unreadable", reason: "record path changed between inspection and opening" };
     }
-    return { kind: "ok", text: readFileSync21(fd2, "utf8") };
+    return { kind: "ok", text: readFileSync22(fd2, "utf8") };
   } catch (error) {
     const code = error.code ?? "UNKNOWN";
     return { kind: "unreadable", reason: `${code}: ${error.message}` };
@@ -49285,7 +49425,7 @@ var init_forget = __esm(() => {
 
 // src/core/this-computer.ts
 import { spawnSync as spawnSync4 } from "node:child_process";
-import { existsSync as existsSync26, readFileSync as readFileSync23 } from "node:fs";
+import { existsSync as existsSync26, readFileSync as readFileSync24 } from "node:fs";
 import { createHash as createHash26, randomUUID as randomUUID10 } from "node:crypto";
 import { dirname as dirname34, join as join34 } from "node:path";
 function hostBinding(machineId, hostIdentity) {
@@ -49308,7 +49448,7 @@ function readState5(path) {
   if (!existsSync26(path))
     return;
   try {
-    const parsed = JSON.parse(readFileSync23(path, "utf8"));
+    const parsed = JSON.parse(readFileSync24(path, "utf8"));
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
       return;
     const record = parsed;
@@ -49364,7 +49504,7 @@ var MACHINE_ID_PATTERN, cachedSystemHostIdentity, systemHostIdentity = () => {
       value = /"IOPlatformUUID" = "([0-9A-Fa-f-]{36})"/.exec(result.stdout ?? "")?.[1];
     } else if (process.platform === "linux") {
       for (const path of ["/etc/machine-id", "/var/lib/dbus/machine-id"]) {
-        const id = existsSync26(path) ? readFileSync23(path, "utf8").trim() : "";
+        const id = existsSync26(path) ? readFileSync24(path, "utf8").trim() : "";
         if (/^[0-9a-f]{32}$/.test(id)) {
           value = id;
           break;
@@ -49764,7 +49904,7 @@ var init_file_mime = __esm(() => {
 });
 
 // src/workers/local-files/mac-permissions.ts
-import { existsSync as existsSync28, mkdirSync as mkdirSync16, opendirSync, readFileSync as readFileSync25 } from "node:fs";
+import { existsSync as existsSync28, mkdirSync as mkdirSync16, opendirSync, readFileSync as readFileSync26 } from "node:fs";
 import { opendir } from "node:fs/promises";
 import { dirname as dirname37, join as join37 } from "node:path";
 function folderAccessMemoryPath() {
@@ -49993,7 +50133,7 @@ class MacPermissions {
     let loaded = {};
     if (this.memoryPath && existsSync28(this.memoryPath)) {
       try {
-        const parsed = JSON.parse(readFileSync25(this.memoryPath, "utf8"));
+        const parsed = JSON.parse(readFileSync26(this.memoryPath, "utf8"));
         if (parsed && typeof parsed === "object")
           loaded = parsed;
       } catch {
@@ -66939,7 +67079,7 @@ init_venice_models();
 import {
   existsSync as existsSync25,
   mkdirSync as mkdirSync15,
-  readFileSync as readFileSync22,
+  readFileSync as readFileSync23,
   renameSync as renameSync5,
   rmSync as rmSync8,
   writeFileSync as writeFileSync6
@@ -67131,7 +67271,7 @@ function readCatalogCache(path, type) {
     return;
   let payload2;
   try {
-    payload2 = JSON.parse(readFileSync22(path, "utf8"));
+    payload2 = JSON.parse(readFileSync23(path, "utf8"));
   } catch {
     return;
   }
@@ -68303,7 +68443,7 @@ init_scope();
 
 // src/workers/local-files/watch-hub.ts
 import { createRequire as createRequire8 } from "node:module";
-import { existsSync as existsSync27, readFileSync as readFileSync24 } from "node:fs";
+import { existsSync as existsSync27, readFileSync as readFileSync25 } from "node:fs";
 import { dirname as dirname36, join as join36 } from "node:path";
 
 class WatchHistoryUnavailableError extends Error {
@@ -68476,7 +68616,7 @@ class WatchHub {
 }
 function readInotifyLimit() {
   try {
-    const value = Number.parseInt(readFileSync24("/proc/sys/fs/inotify/max_user_watches", "utf8").trim(), 10);
+    const value = Number.parseInt(readFileSync25("/proc/sys/fs/inotify/max_user_watches", "utf8").trim(), 10);
     return Number.isFinite(value) && value > 0 ? value : undefined;
   } catch {
     return;
@@ -70803,7 +70943,7 @@ init_source_ingestion_policy();
 init_paths();
 import { createHash as createHash29 } from "node:crypto";
 import { execFileSync as execFileSync2 } from "node:child_process";
-import { existsSync as existsSync29, lstatSync as lstatSync13, readFileSync as readFileSync26, readdirSync as readdirSync3, realpathSync as realpathSync7 } from "node:fs";
+import { existsSync as existsSync29, lstatSync as lstatSync13, readFileSync as readFileSync27, readdirSync as readdirSync3, realpathSync as realpathSync7 } from "node:fs";
 import { homedir as homedir15 } from "node:os";
 var NETWORK_FS_TYPES = new Set([
   "nfs",
@@ -71019,7 +71159,7 @@ function normalizeNetworkSource(source) {
 function defaultReadMounts(platform2) {
   if (platform2 === "darwin")
     return execFileSync2("/sbin/mount", [], { encoding: "utf8", timeout: 5000 });
-  return readFileSync26("/proc/self/mountinfo", "utf8");
+  return readFileSync27("/proc/self/mountinfo", "utf8");
 }
 function defaultDiskutilPlist(mountPoint) {
   try {
@@ -72016,7 +72156,7 @@ init_sniffer();
 init_sniffer_lane();
 init_tier_ledger();
 import { createHash as createHash30 } from "node:crypto";
-import { mkdirSync as mkdirSync17, readFileSync as readFileSync27 } from "node:fs";
+import { mkdirSync as mkdirSync17, readFileSync as readFileSync28 } from "node:fs";
 import { dirname as dirname38 } from "node:path";
 var DEFAULT_SNIFFER_MAX_CALLS_PER_DAY = 20000;
 var DEFAULT_DECISION_SNIFFER_MAX_CALLS_PER_DAY = 250000;
@@ -72039,7 +72179,7 @@ class SnifferCallBudget {
     this.statePath = options.statePath;
     if (this.statePath) {
       try {
-        const saved = JSON.parse(readFileSync27(this.statePath, "utf8"));
+        const saved = JSON.parse(readFileSync28(this.statePath, "utf8"));
         if (typeof saved.day === "string" && typeof saved.used === "number" && Number.isFinite(saved.used)) {
           this.day = saved.day;
           this.used = Math.max(0, Math.floor(saved.used));
