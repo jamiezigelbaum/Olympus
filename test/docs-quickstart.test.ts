@@ -13,9 +13,9 @@ describe('first-run docs', () => {
 
     expect(docs).toContain('olympus setup --preset private-cloud-only --cloud-lane subscription --yes');
     expect(docs).toContain('privacy-approved private cloud inference');
-    expect(docs).toContain('Private search uses an approved Venice Private embedding model');
+    expect(docs).toContain('Every shipped preset uses built-in local');
     expect(docs).toContain('Existing lexical-only installations require an approved');
-    expect(docs).toContain('Local presets configure local Private embeddings');
+    expect(docs).toContain('All presets configure built-in local embeddings');
     expect(docs).not.toContain('Secure corpora remain lexical-only in v0.4');
     expect(docs).toContain('does not provide or qualify E2EE');
     expect(docs).toContain('custom integrations are user-owned');
@@ -152,7 +152,11 @@ describe('first-run docs', () => {
     expect(guide).toContain('Venice answers Private questions');
     expect(guide).toContain('Search indexing for every tier uses EmbeddingGemma 2');
     expect(guide).toContain('built into Olympus');
-    expect(guide).toContain('Venice Private embeddings stay an opt-in choice');
+    expect(guide).toContain('The embedding choices are built-in local EmbeddingGemma or Venice');
+    const migration = readFileSync(join(ROOT, 'docs', 'SOVEREIGNTY_CONFIG.md'), 'utf8');
+    expect(migration).toContain('### Legacy embedding migration');
+    expect(migration).toContain('There is no automatic switch or re-embed');
+    expect(migration).not.toContain('Gemini: create and connect your own key');
     expect(guide).toContain('Private content never goes to Gemini');
   });
 

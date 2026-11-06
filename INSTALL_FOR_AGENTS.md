@@ -26,7 +26,7 @@ worker, run the required gateway restart, and hand over the dashboard. Search in
 embedding model is built into Olympus and downloads itself once on first use. The
 dashboard's **Models** section shows each model's state; its **Change** button,
 and the **Keys** row under **On this computer** when the dashboard is opened on
-the Olympus computer, open the **Keys** page. Venice and any opt-in Gemini keys
+the Olympus computer, open the **Keys** page. Venice keys and any repair key for a legacy Gemini policy
 are entered there, and existing local models have an agent-assisted
 configuration starting point plus **Check readiness**. Missing model keys are
 expected at this stage; do not block the dashboard handoff or send browser users
@@ -708,12 +708,15 @@ report "your keys are set up" after the fact.
 
 **Model readiness before keys.** Follow the packaged
 [agent-led model setup guide](docs/SOVEREIGNTY_CONFIG.md#agent-led-model-setup-for-the-v04-beta)
-before this step. It separates Gemini Personal embeddings, local Private
-embeddings, Venice Private reasoning, and the approved Venice Private embedding
-fallback when no local provider is configured.
+before this step. New embedding setup offers built-in local EmbeddingGemma
+(the laptop default) or Venice. Local answer models and Venice Private reasoning
+are separate choices. Existing Gemini and local-server embeddings remain legacy
+compatibility paths; follow the guide's explicit migration procedure before
+changing them. No automatic re-embed.
 The worker uses registered dimensions for shipped models when there is no
-override (Gemini Embedding 2: 3072; registered local embedding model: 2560;
-Venice Qwen3 Embedding 8B: 4096).
+override (built-in EmbeddingGemma 2: 768; Venice Qwen3 Embedding 8B: 4096).
+Legacy Gemini (3072) and registered local-server embeddings (2560) retain their
+saved dimensions and compatibility support.
 Do not add a dimension flag or edit `worker.env` for those defaults. An unknown
 model still needs a verified explicit dimension; report unsupported custom
 configuration rather than inventing flags or declaring readiness from key
@@ -779,12 +782,13 @@ knowing where a credential lives never authorizes fetching it. Hard limits:
   through chat.
 
 Setup prints `unmet_prerequisites` with an exact remedy per item. In the
-normal browser flow a missing Gemini or Venice key there is expected: report
+normal browser flow a missing Venice key there is expected (a Gemini key is
+needed only to repair an existing legacy policy): report
 it as "finished on the dashboard's Keys page" and continue. Follow the
 key remedies below only in the headless fallback. Typical items:
 
-- Gemini API key (only when the operator opted into Gemini embeddings instead
-  of the built-in model; headless fallback only):
+- Legacy Gemini API key repair (existing saved Gemini policies only, never a
+  new embedding choice; see docs/SOVEREIGNTY_CONFIG.md#legacy-embedding-migration):
   ask the operator to obtain a key from https://aistudio.google.com and provide it (or
   source it per the credential-sourcing rule above). Connect it via
   stdin, exactly like the Venice key, so it never reaches shell history,
@@ -863,7 +867,7 @@ every check is green. `M` is doctor's whole check list — 15 on a current
 build, on a fresh install as much as a loaded one — so read the number off
 the line rather than quoting one you remember.
 
-**`sovereignty_prerequisites` is the check to watch for the Gemini key,
+**`sovereignty_prerequisites` is the check to watch for a legacy Gemini key,
 and it really does evaluate.** Doctor resolves the same policy file every
 other path uses — `~/.olympus/sovereignty.json` by default, or
 `OLYMPUS_SOVEREIGNTY_CONFIG` / an explicit config path — so once setup has
@@ -884,7 +888,7 @@ overridden.
 **One missing key turns three checks red at once. Read that before you
 report "broken."** `email_worker`, `worker_credential_lanes` and
 `source_index_status` all interrogate the same worker, so a single missing
-Gemini embedding key fails all three together. That is ONE problem with
+key for a legacy Gemini embedding policy fails all three together. That is ONE problem with
 three symptoms — the fix is the one connect command above, not three
 investigations. The discriminator is whether the worker answered, and what
 it said:
@@ -1089,7 +1093,7 @@ with the remedy `Read the worker log at <errorLogPath> and <logPath>, then
 run olympus worker status and follow its recovery action.` (on macOS both
 paths are under `~/Library/Logs/Olympus`). Read the log before changing
 anything — the reason a worker exits at boot is one line away, and a
-missing Gemini key is a common one. In the browser flow a missing key is not
+missing key for a legacy Gemini policy is one possible cause. In the browser flow a missing key is not
 yours to supply: the operator pastes it into its **Models** card in Step 6;
 only the headless fallback uses the Step 3 connect command.
 
@@ -1397,13 +1401,16 @@ model as Needs you or Not working; in the headless fallback, use the provider-sp
 readiness checks documented in Step 3. Then prove the worker consumes that wiring with the existing
 `olympus doctor` and `olympus worker status` checks. The receipt must name:
 
-- **Gemini — every posture.** Its wiring is for Personal
-  embeddings. Gemini is not the Private-answer provider and is never a Private
-  embedding requirement.
+- **Embeddings — every posture.** Every shipped preset uses built-in local
+  EmbeddingGemma, with no API key. Venice is the other offered embedding choice
+  and requires explicit approval. Verify legacy Gemini or local-server wiring
+  only when the existing saved policy still uses it; report its migration note
+  and preserve vectors until a migration is approved.
 - **Venice — only when the posture uses it.** `local-first` uses Venice as
   the approved Private-answer escalation; `private-cloud-only` uses Venice for
-  Private answers and, without a local provider, Private embeddings. Verify the
-  embedding model separately: Private catalog classification, endpoint
+  Private answers. Every preset keeps built-in local embeddings unless an
+  explicit Venice embedding configuration is approved. Verify the
+  Private embeddings separately: catalog classification, endpoint
   readiness, matching dimensions, and approved cost. `local-only` and
   `no-sensitive` do not require Venice, so do not ask for or block on a Venice
   key for those postures. Preserve existing vectors and obtain activation or
@@ -1439,8 +1446,10 @@ wiring remains open and keep source Connect unopened.
 Give the operator this honest summary in the same final reply, immediately
 before the source handoff, adapting only the observed facts:
 
-> Base installation is verified. Chosen posture: `<posture>`. Gemini wiring
-> for Personal embeddings: `<verified or still open>`.
+> Base installation is verified. Chosen posture: `<posture>`. Embedding choice:
+> `<built-in local EmbeddingGemma, approved Venice, or existing legacy policy>`.
+> Embedding readiness: `<verified or still open>`; legacy migration: `<not
+> applicable or explicitly planned, with current vectors preserved>`.
 > Venice Private-answer and Private-embedding wiring, reported separately:
 > `<verified, not required for this posture, or
 > still open>`. Privacy classifier: `<approved, declined, refused (reason),

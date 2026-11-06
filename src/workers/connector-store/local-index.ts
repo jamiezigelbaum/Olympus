@@ -948,6 +948,7 @@ async function runStepsInTurns<T>(steps: Generator<void, T>): Promise<T> {
 interface TierLedgerHiddenItemPks {
   hidden: number[];
   held: number[];
+  heldForJudgment: number[];
   metadataLayer: number[];
   metadataLayerContentUnread: number[];
   moving: number;
@@ -974,7 +975,7 @@ class MutablePkList {
   }
 }
 
-const VISIBILITY_PK_FLAGS = ['hidden', 'held', 'metadataLayer', 'metadataLayerContentUnread'] as const;
+const VISIBILITY_PK_FLAGS = ['hidden', 'held', 'heldForJudgment', 'metadataLayer', 'metadataLayerContentUnread'] as const;
 
 interface TierVisibilityMemo {
   ledger: TierLedger;
@@ -1212,7 +1213,7 @@ export interface ConnectorStoreItemCopyImportSummary {
 
 /** Per-store tier counts for status (design section 4.3). */
 export interface ConnectorStoreTierStatus {
-  /** Items whose tier is not final yet: stored, searchable by keyword, not embedded. */
+  /** Items whose tier is not final yet: stored and searchable by keyword; vectors stay out of search. */
   pendingClassificationItems: number;
   /** Chunks of superseded or staged copies: kept, never searched, counted or served. */
   supersededChunks: number;
@@ -2971,6 +2972,28 @@ export class LocalConnectorStore {
     this.tierLedgerOwned = false;
   }
 
+  private personalEmbeddingProvider: (() => SourceEmbeddingProvider | undefined) | undefined;
+
+  /** Current Personal identity, supplied by the tier set or runtime, never inferred from stored vectors. */
+  usePersonalEmbeddingProvider(provider: () => SourceEmbeddingProvider | undefined): void {
+    this.personalEmbeddingProvider = provider;
+  }
+
+  private canEmbedHeld(provider: Partial<ConnectorStoreEmbeddingAuthorityIdentity> | undefined): boolean {
+    if (this.trustDomain !== 'secure_local' || !provider || provider.backend !== 'local'
+      || !isApprovedSecureSourceEmbeddingProvider(provider as SourceEmbeddingProvider)) return false;
+    try {
+      const personal = this.personalEmbeddingProvider?.();
+      if (!personal) return false;
+      personal.assertBindingCurrent?.();
+      return personal.backend === 'local' && personal.provider === provider.provider
+        && personal.modelId === provider.modelId && personal.dimension === provider.dimension
+        && personal.epochId === provider.epochId;
+    } catch {
+      return false;
+    }
+  }
+
   /**
    * The ledger whose copy rows decide what this store may serve. Never creates
    * a ledger file as a side effect of a read: a store whose ledger does not
@@ -3277,7 +3300,7 @@ export class LocalConnectorStore {
       if (this.visibilitySqlMemo) this.db.exec('DELETE FROM temp.tier_visibility_pks');
       this.visibilitySqlMemo = undefined;
       this.tierLedgerHiddenMemo = undefined;
-      return { hidden: [], held: [], metadataLayer: [], metadataLayerContentUnread: [], moving: 0 };
+      return { hidden: [], held: [], heldForJudgment: [], metadataLayer: [], metadataLayerContentUnread: [], moving: 0 };
     }
     const version = (this.db.query('PRAGMA data_version').get() as { data_version: number }).data_version;
     const prior = this.tierLedgerHiddenMemo;
@@ -3289,9 +3312,9 @@ export class LocalConnectorStore {
     const incremental = same && ledgerChanges.identities !== undefined && storeChanges.identities !== undefined;
     const memo: TierVisibilityMemo = incremental ? prior : {
       ledger, ledgerCursor: ledgerChanges.cursor, storeCursor: storeChanges.cursor, dataVersion: version,
-      lists: { hidden: new MutablePkList(), held: new MutablePkList(), metadataLayer: new MutablePkList(),
+      lists: { hidden: new MutablePkList(), held: new MutablePkList(), heldForJudgment: new MutablePkList(), metadataLayer: new MutablePkList(),
         metadataLayerContentUnread: new MutablePkList() }, members: new Map(),
-      value: { hidden: [], held: [], metadataLayer: [], metadataLayerContentUnread: [], moving: 0 },
+      value: { hidden: [], held: [], heldForJudgment: [], metadataLayer: [], metadataLayerContentUnread: [], moving: 0 },
     };
     for (const flag of VISIBILITY_PK_FLAGS) memo.value[flag] = memo.lists[flag].values;
     const changed = incremental ? [...new Map([...ledgerChanges.identities!, ...storeChanges.identities!]
@@ -10011,13 +10034,14 @@ export class LocalConnectorStore {
    * Items with at least one chunk that has no current vector on `modelId`,
    * oldest chunk first, at most `limit`, never one marked failed. The same
    * exclusions every embedder keeps: deleted, tier-hidden, held for
-   * classification, and metadata-only copies. Secrets are never stored as text.
+   * classification (unless the shared local identity admits them), and
+   * metadata-only copies. Secrets are never stored as text.
    * Rows Private by their own tier are left out when the embedder is not
    * approved for Private content: they are withheld, not pending, so the sweep
    * never picks them up again and they never hold the rest of the backlog.
    */
   missingEmbeddingItemIds(
-    embedder: Pick<SourceEmbeddingProvider, 'modelId' | 'provider' | 'backend'>,
+    embedder: Pick<SourceEmbeddingProvider, 'modelId' | 'provider' | 'backend'> & Partial<ConnectorStoreEmbeddingAuthorityIdentity>,
     limit: number,
     scope: Pick<ConnectorStoreEmbedOptions, 'accountScope' | 'filters'> = {},
     tierHidden?: TierLedgerHiddenItemPks,
@@ -10027,7 +10051,7 @@ export class LocalConnectorStore {
     const accountScope = normalizeOptionalAccountScope(scope.accountScope);
     const scoped = connectorStoreFilterSql(scope.filters);
     const failed = this.embeddingFailureState;
-    const tierExclusion = this.embeddingTierExclusionFilter(0, tierHidden);
+    const tierExclusion = this.embeddingWorkListExclusionFilter(0, tierHidden, this.canEmbedHeld(embedder));
     const privateTier = this.privateTierEmbeddingFilter(embedder);
     const filter = `${tierExclusion.filter} ${privateTier.filter} ${accountScope ? 'AND i.account_scope = ?' : ''} ${scoped.sql}`;
     const params = [...tierExclusion.params, ...privateTier.params, ...(accountScope ? [accountScope] : []), ...scoped.params];
@@ -10036,7 +10060,7 @@ export class LocalConnectorStore {
       FROM chunks c
       JOIN items i ON i.item_pk = c.item_pk
       LEFT JOIN chunk_embeddings e ON e.chunk_pk = c.chunk_pk AND e.model_id = ?
-      WHERE i.tombstoned = 0
+      WHERE i.tombstoned = 0 AND i.trust_tier <> 'S5'
         AND (e.chunk_pk IS NULL OR e.content_hash != c.embedding_input_hash)
         ${filter}
       GROUP BY i.item_pk
@@ -10055,7 +10079,7 @@ export class LocalConnectorStore {
    * that is being written never holds the worker's thread for the rebuild.
    */
   async missingEmbeddingItemIdsInTurns(
-    embedder: Pick<SourceEmbeddingProvider, 'modelId' | 'provider' | 'backend'>,
+    embedder: Pick<SourceEmbeddingProvider, 'modelId' | 'provider' | 'backend'> & Partial<ConnectorStoreEmbeddingAuthorityIdentity>,
     limit: number,
     scope: Pick<ConnectorStoreEmbedOptions, 'accountScope' | 'filters'> = {},
   ): Promise<string[]> {
@@ -10089,7 +10113,8 @@ export class LocalConnectorStore {
   /**
    * The chunks still waiting for a vector on `modelId`, and a token estimate of
    * embedding them (characters / 4, the estimate every planner here uses).
-   * Same exclusions as missingEmbeddingItemIds; with the embedder named, rows
+   * Serving counts keep pending judgments excluded, even if local embedding
+   * may work ahead of judging. With the embedder named, rows
    * it may not receive (Private by their own tier) are not a backlog it owes.
    */
   embeddingBacklogEstimate(
@@ -10098,7 +10123,7 @@ export class LocalConnectorStore {
     scope?: ConnectorStoreStatusScope,
     options: { countsMaxAgeMs?: number } = {},
   ): { missingChunks: number; estimatedTokens: number } {
-    const tierExclusion = this.embeddingTierExclusionFilter(options.countsMaxAgeMs ?? 0);
+    const tierExclusion = this.embeddingWorkListExclusionFilter(options.countsMaxAgeMs ?? 0);
     const privateTier = embedder ? this.privateTierEmbeddingFilter(embedder) : { filter: '', params: [] };
     const scoped = statusScopeContentFilter(scope);
     const filter = `${tierExclusion.filter} ${privateTier.filter} ${scoped.filter}`;
@@ -10140,9 +10165,10 @@ export class LocalConnectorStore {
   }
 
   /** `countsMaxAgeMs` only for counts a status snapshot shows (see STATUS_COUNTS_MAX_AGE_MS); never for what is embedded. */
-  private embeddingTierExclusionFilter(
+  private embeddingWorkListExclusionFilter(
     countsMaxAgeMs = 0,
     tierHidden?: TierLedgerHiddenItemPks,
+    allowHeld = false,
   ): { filter: string; params: string[] } {
     const tierExcluded = tierHidden ?? this.tierHiddenItemPks({ countsMaxAgeMs });
     if (this.visibilityJournal && this.visibilitySqlMemo) {
@@ -10151,11 +10177,13 @@ export class LocalConnectorStore {
       const children = tierExcluded.hidden === this.visibilitySqlMemo.value.hidden ? []
         : tierExcluded.hidden;
       return { filter: `AND NOT EXISTS (SELECT 1 FROM temp.tier_visibility_pks v
-        WHERE v.flag IN ('hidden', 'held', 'metadataLayer') AND v.item_pk = i.item_pk)
+        WHERE v.flag IN ('hidden', 'held', 'metadataLayer') AND v.item_pk = i.item_pk
+          ${allowHeld ? "AND (v.flag <> 'held' OR NOT EXISTS (SELECT 1 FROM temp.tier_visibility_pks j WHERE j.flag = 'heldForJudgment' AND j.item_pk = i.item_pk))" : ''})
         ${children.length ? 'AND i.item_pk NOT IN (SELECT value FROM json_each(?))' : ''}`,
         params: children.length ? [JSON.stringify(children)] : [] };
     }
-    const excludedPks = [...tierExcluded.hidden, ...tierExcluded.held, ...tierExcluded.metadataLayer];
+    const eligibleHeld = allowHeld ? new Set(tierExcluded.heldForJudgment) : undefined;
+    const excludedPks = [...tierExcluded.hidden, ...tierExcluded.held.filter(pk => !eligibleHeld?.has(pk)), ...tierExcluded.metadataLayer];
     return excludedPks.length > 0
       ? { filter: 'AND i.item_pk NOT IN (SELECT value FROM json_each(?))', params: [JSON.stringify(excludedPks)] }
       : { filter: '', params: [] };
@@ -10174,6 +10202,7 @@ export class LocalConnectorStore {
   private embeddingBatchRecheck<T extends { item_pk: number }>(
     batch: readonly T[],
     embeddableTiers: readonly SourceTrustTier[] | undefined,
+    provider: SourceEmbeddingProvider,
   ): { kept: T[]; privateTier: number; notVisible: number } {
     const itemPks = [...new Set(batch.map((row) => row.item_pk))];
     const currentRows = this.db.query(`
@@ -10189,13 +10218,13 @@ export class LocalConnectorStore {
       provider_conversation_id: string | null;
     }>;
     const current = new Map(currentRows.map((row) => [row.item_pk, row] as const));
-    const hidden = this.embeddingHiddenAmong(currentRows);
+    const hidden = this.embeddingHiddenAmong(currentRows, this.canEmbedHeld(provider));
     const kept: T[] = [];
     let privateTier = 0;
     let notVisible = 0;
     for (const row of batch) {
       const item = current.get(row.item_pk);
-      if (!item || item.tombstoned !== 0 || hidden.has(row.item_pk)) {
+      if (!item || item.tombstoned !== 0 || item.trust_tier === 'S5' || hidden.has(row.item_pk)) {
         notVisible += 1;
       } else if (embeddableTiers !== undefined && !(embeddableTiers as readonly string[]).includes(item.trust_tier)) {
         privateTier += 1;
@@ -10219,7 +10248,7 @@ export class LocalConnectorStore {
     account_scope: string;
     provider_item_id: string;
     provider_conversation_id: string | null;
-  }>): Set<number> {
+  }>, allowHeld = false): Set<number> {
     const hidden = new Set<number>();
     if (rows.length === 0) return hidden;
     const identityOf = (row: (typeof rows)[number]) => ({
@@ -10234,8 +10263,15 @@ export class LocalConnectorStore {
       for (const row of rows) {
         const here = (copies.get(tierLedgerIdentityKey(identityOf(row))) ?? [])
           .filter((copy) => copy.corpusId === this.corpusId);
-        if (here.some((copy) => copy.state === 'superseded' || copy.state === 'staged'
-          || (copy.state === 'current' && (copy.embedHold || copy.layers === 'metadata')))) {
+        const identity = identityOf(row);
+        const intent = ledger.writeIntent(identity);
+        const decision = allowHeld ? ledger.getCurrent(identity) : undefined;
+        const pendingJudgment = decision?.state === 'pending' && decision.contentRead
+          && (decision.metadataPending || decision.contentPending);
+        if (ledger.itemIsSecret(identity) || intent?.kind === 'secret' || intent?.kind === 'deletion'
+          || here.some((copy) => copy.state === 'superseded' || copy.state === 'staged'
+          || (copy.state === 'current' && (copy.layers === 'metadata'
+            || (copy.embedHold && !(allowHeld && pendingJudgment && copy.trustDomain === 'secure_local')))))) {
           hidden.add(row.item_pk);
         }
       }
@@ -10265,10 +10301,10 @@ export class LocalConnectorStore {
    * Chunks still without a current vector on this embedder's model that it
    * may not receive because their row is Private by its own tier, and how many
    * items they belong to. Zero for an embedder approved for Private content.
-   * Same live, tier-visible population as missingEmbeddingItemIds. Counts only.
+   * Serving population only: pending judgments stay outside these counts.
    */
   privateTierEmbeddingWithheld(
-    embedder: Pick<SourceEmbeddingProvider, 'modelId' | 'provider' | 'backend'>,
+    embedder: Pick<SourceEmbeddingProvider, 'modelId' | 'provider' | 'backend'> & Partial<ConnectorStoreEmbeddingAuthorityIdentity>,
     scope?: ConnectorStoreStatusScope,
     options: { countsMaxAgeMs?: number } = {},
   ): {
@@ -10279,7 +10315,7 @@ export class LocalConnectorStore {
     const reason = CONNECTOR_STORE_PRIVATE_TIER_EMBEDDING_WITHHELD_REASON;
     const tiers = connectorStoreEmbeddableRowTiers(this.trustDomain, embedder);
     if (tiers === undefined) return { items: 0, chunks: 0, reason };
-    const tierExclusion = this.embeddingTierExclusionFilter(options.countsMaxAgeMs ?? 0);
+    const tierExclusion = this.embeddingWorkListExclusionFilter(options.countsMaxAgeMs ?? 0);
     const scoped = statusScopeContentFilter(scope);
     const filter = `${tierExclusion.filter} ${scoped.filter}`;
     const params = [...tierExclusion.params, ...scoped.params];
@@ -10409,6 +10445,7 @@ export class LocalConnectorStore {
       options.accountScope,
       options.filters,
       tierHidden,
+      this.canEmbedHeld(provider),
     );
     // A row that is Private by its own stored tier (or carries a tier the
     // store does not recognise) never reaches an embedder that is not approved
@@ -10600,19 +10637,6 @@ export class LocalConnectorStore {
       }
       let batch = pending.slice(offset, offset + EMBEDDING_BATCH_SIZE);
       await options.assertAuthorized?.();
-      // The rows were selected before any provider round trip, and ordinary
-      // item and classification writes are not serialized by the embedding
-      // lease, so a row can turn Private (or be hidden) while an earlier batch
-      // is out. Re-read each row's current tier and visibility right before
-      // its batch is dispatched, with no await in between.
-      {
-        const recheck = this.embeddingBatchRecheck(batch, embeddableTiers);
-        privateTierWithheldChunks += recheck.privateTier;
-        // Seen and not embedded: skipped, and the Private ones also withheld.
-        staleSkipped += recheck.notVisible + recheck.privateTier;
-        batch = recheck.kept;
-        if (batch.length === 0) continue;
-      }
       // Pictures, for a provider whose model reads them (one that does not
       // embeds a photo's text and ignores the picture). A chunk is never
       // embedded as text alone under an input hash that names its picture:
@@ -10643,6 +10667,15 @@ export class LocalConnectorStore {
           batch = batch.filter((row) => !skip.has(row));
           if (batch.length === 0) continue;
         }
+      }
+      // Item and classification writes are not serialized by the embedding
+      // lease. Recheck after any imageSupport await, immediately before dispatch.
+      {
+        const recheck = this.embeddingBatchRecheck(batch, embeddableTiers, provider);
+        privateTierWithheldChunks += recheck.privateTier;
+        staleSkipped += recheck.notVisible + recheck.privateTier;
+        batch = recheck.kept;
+        if (batch.length === 0) continue;
       }
       const inputsFor = (rows: typeof batch) => rows.map((row) => ({
         ...(row.title ? { title: row.title } : {}),
@@ -10700,6 +10733,11 @@ export class LocalConnectorStore {
         staleSkipped += failedRows.size;
         batch = batch.filter((row) => !failedRows.has(row));
         if (batch.length === 0) continue;
+        const recheck = this.embeddingBatchRecheck(batch, embeddableTiers, provider);
+        privateTierWithheldChunks += recheck.privateTier;
+        staleSkipped += recheck.notVisible + recheck.privateTier;
+        batch = recheck.kept;
+        if (batch.length === 0) continue;
         vectors = await provider.embed(inputsFor(batch), { taskType: 'RETRIEVAL_DOCUMENT' });
       }
       if (vectors.length !== batch.length) {
@@ -10710,8 +10748,10 @@ export class LocalConnectorStore {
       let written = 0;
       this.db.transaction(() => {
         this.assertEmbeddingWriteAuthority(provider, providerEpoch);
+        const stillEligible = new Set(this.embeddingBatchRecheck(batch, embeddableTiers, provider).kept);
         for (let index = 0; index < batch.length; index += 1) {
           const row = batch[index]!;
+          if (!stillEligible.has(row)) continue;
           const vector = vectors[index];
           if (!vector) throw new Error('Connector store embedding provider returned no vector for a chunk.');
           // The chunk keys were snapshotted before the provider round trip, so
@@ -11155,7 +11195,7 @@ export class LocalConnectorStore {
    * existence query, stopped at the first outstanding chunk.
    */
   private embeddingModelCurrencyIncomplete(
-    embedder: Pick<SourceEmbeddingProvider, 'modelId' | 'provider' | 'backend'>,
+    embedder: Pick<SourceEmbeddingProvider, 'modelId' | 'provider' | 'backend'> & Partial<ConnectorStoreEmbeddingAuthorityIdentity>,
   ): boolean {
     // A row withheld from this embedder by its own Private tier is never
     // going to get a vector from it, so it is not currency debt it owes.
@@ -11552,6 +11592,7 @@ export class LocalConnectorStore {
     accountScope?: string,
     filters?: ConnectorStoreSearchFilters,
     tierHidden?: TierLedgerHiddenItemPks,
+    allowHeld = false,
   ): Array<{
     chunk_pk: number;
     item_pk: number;
@@ -11573,11 +11614,10 @@ export class LocalConnectorStore {
     const itemFilter = selectedLocalItemIds
       ? ` AND i.local_item_id IN (${selectedLocalItemIds.map(() => '?').join(', ')})`
       : '';
-    // Copies the tier ledger keeps hidden (superseded, staged) are never
-    // embedded, and items pending classification are held back until their
-    // tier is final (design section 4.2). Legacy items are never held.
+    // Hidden and names-only copies never embed. Pending judgments may embed
+    // only under the shared local identity; search keeps its separate hold gate.
     const tierExcluded = tierHidden ?? this.tierHiddenItemPks();
-    const tierExclusion = this.embeddingTierExclusionFilter(0, tierExcluded);
+    const tierExclusion = this.embeddingWorkListExclusionFilter(0, tierExcluded, allowHeld);
     const tierFilter = tierExclusion.filter;
     return this.db.query(`
       SELECT
@@ -11594,7 +11634,7 @@ export class LocalConnectorStore {
         ${this.chunkMediaColumnsPresent ? 'c.media_path, c.media_sha256' : 'NULL AS media_path, NULL AS media_sha256'}
       FROM chunks c
       JOIN items i ON i.item_pk = c.item_pk
-      WHERE i.tombstoned = 0
+      WHERE i.tombstoned = 0 AND i.trust_tier <> 'S5'
         ${itemFilter}
         ${tierFilter}
         ${selectedAccount ? 'AND i.account_scope = ?' : ''}
@@ -11635,7 +11675,10 @@ export class LocalConnectorStore {
         .all(...batch, ...(accountScope ? [accountScope] : []), ...selectedFilters.params) as Array<{
           item_pk: number; provider: string; account_scope: string; provider_item_id: string; provider_conversation_id: string | null;
         }>;
-      for (const row of this.tierVisibleRows(rows, row => ({
+      // Embedding admission never releases a vector to search: the copy's
+      // hold must clear, even though lexical/Private reads may already serve it.
+      const excluded = this.embeddingHiddenAmong(rows);
+      for (const row of this.tierVisibleRows(rows.filter(row => !excluded.has(row.item_pk)), row => ({
         provider: row.provider, accountScope: row.account_scope, providerItemId: row.provider_item_id,
         ...(row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}),
       }), () => 'content')) visible.add(row.item_pk);

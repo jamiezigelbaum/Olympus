@@ -113,7 +113,7 @@ async function secretRefPrerequisite(
  */
 function envSecretRemedy(displayKey: string): string {
   if (displayKey === 'GEMINI_API_KEY') {
-    return 'Open Models in Olympus Setup to connect Gemini. Headless fallback: olympus connect gemini --api-key-prompt';
+    return 'Existing legacy Gemini policy: restore its key with olympus connect gemini --api-key-prompt, or follow docs/SOVEREIGNTY_CONFIG.md#legacy-embedding-migration to move to built-in local EmbeddingGemma or Venice. No automatic re-embed.';
   }
   return `Set ${displayKey} in the environment the Olympus worker runs with, then restart it with olympus worker restart.`;
 }

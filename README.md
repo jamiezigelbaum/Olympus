@@ -383,8 +383,10 @@ fork:
 Private questions. Search indexing for every tier uses EmbeddingGemma 2,
 Google's small embedding model, built into Olympus: it downloads once, runs on
 your computer, needs no account or key, and sends nothing anywhere. On a Mac it
-also reads pictures, so photos are searchable by what is in them. Gemini, local, or Venice Private embeddings
-stay an opt-in choice, and Private content never goes to Gemini. Personal
+also reads pictures, so photos are searchable by what is in them. The embedding choices are built-in local EmbeddingGemma or Venice. Existing
+Gemini and local-server configurations remain compatible; see the
+[embedding migration guide](docs/SOVEREIGNTY_CONFIG.md#legacy-embedding-migration).
+Private content never goes to Gemini. Personal
 questions use OpenClaw's own configured default model.
 
 One question searches every tier. When it finds Private evidence, the private
@@ -465,7 +467,8 @@ The standalone `olympus dashboard` command remains available for older hosts,
 when custom plugin UI is off, and for direct access when needed. See the
 [dashboard guide](https://github.com/jamiezigelbaum/Olympus/blob/main/docs/QUICKSTART.md#5-open-your-dashboard-and-connect-sources).
 
-For Gemini embeddings, Venice accounts/API credit, or local models, use the
+For Venice embeddings, Venice accounts/API credit, local answer models, or
+legacy embedding migration, use the
 [agent-led model setup guide](https://github.com/jamiezigelbaum/Olympus/blob/main/docs/SOVEREIGNTY_CONFIG.md#agent-led-model-setup-for-the-v04-beta).
 It explains the separate Private and Personal routes, registered embedding
 defaults, and custom-model requirements before you connect keys or restart.

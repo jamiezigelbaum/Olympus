@@ -93,7 +93,9 @@ describe('pilot installation entry points', () => {
     expect(receipt).toBeGreaterThan(0);
     expect(receipt).toBeLessThan(handoff);
     const section = document.slice(receipt, handoff);
-    expect(section).toContain('Gemini — every posture');
+    expect(section).toContain('Embeddings — every posture');
+    expect(section).not.toContain('Gemini — every posture');
+    expect(section).toContain('built-in local');
     expect(section).toContain('Venice — only when the posture uses it');
     expect(section).toContain('Private embeddings');
     expect(section).toContain('approved cost');
@@ -134,7 +136,8 @@ describe('pilot installation entry points', () => {
     );
     expect(step3).toContain('**Model keys are entered in the dashboard, not collected by you.**');
     expect(step3).toContain("not through OpenClaw's own secret prompt or store");
-    expect(document).toContain('Gemini API key (only when the operator opted into Gemini embeddings instead\n  of the built-in model; headless fallback only)');
+    expect(document).toContain('Legacy Gemini API key repair (existing saved Gemini policies only, never a');
+    expect(document).toContain('docs/SOVEREIGNTY_CONFIG.md#legacy-embedding-migration');
     expect(document).toContain('report\nit as "finished on the dashboard\'s Keys page" and continue');
   });
 

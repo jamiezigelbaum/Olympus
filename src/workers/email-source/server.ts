@@ -735,12 +735,15 @@ function reportRehomedChatOverrides(lane: string, result: { rehomed: number; orp
 export function registerConnectorStoreEmbeddingLane(options: {
   store: LocalConnectorStore;
   provider: SourceEmbeddingProvider;
+  /** Current Personal embedder: required before a Private store may embed pending judgments. */
+  personalProvider?: SourceEmbeddingProvider | undefined;
   providers: Map<string, SourceEmbeddingProvider>;
   retrievalAvailability: Record<string, SourceIndexStatusRetrievalAvailability>;
 }): void {
   if (options.store.trustDomain === 'secure_local' && !isApprovedSecureSourceEmbeddingProvider(options.provider)) {
     throw new Error('Connector store secure_local embeddings require a local/private or approved Venice embedding provider.');
   }
+  options.store.usePersonalEmbeddingProvider(() => options.personalProvider);
   options.providers.set(options.store.corpusId, options.provider);
   options.retrievalAvailability[options.store.corpusId] = () => {
     const servable = options.store.hasEmbeddings(options.provider.modelId);
@@ -4170,6 +4173,7 @@ export async function main(): Promise<void> {
       registerConnectorStoreEmbeddingLane({
         store,
         provider,
+        personalProvider: sourceIndexEmbeddingProvider,
         providers: connectorStoreEmbeddingProviders,
         retrievalAvailability,
       });
@@ -4363,6 +4367,7 @@ export async function main(): Promise<void> {
     registerConnectorStoreEmbeddingLane({
       store: xBookmarksConnectorStore,
       provider: xBookmarksEmbeddingProvider,
+      personalProvider: sourceIndexEmbeddingProvider,
       providers: connectorStoreEmbeddingProviders,
       retrievalAvailability,
     });
@@ -4371,6 +4376,7 @@ export async function main(): Promise<void> {
     registerConnectorStoreEmbeddingLane({
       store: readwiseConnectorStore,
       provider: readwiseEmbeddingProvider,
+      personalProvider: sourceIndexEmbeddingProvider,
       providers: connectorStoreEmbeddingProviders,
       retrievalAvailability,
     });
@@ -4384,6 +4390,7 @@ export async function main(): Promise<void> {
     registerConnectorStoreEmbeddingLane({
       store,
       provider,
+      personalProvider: sourceIndexEmbeddingProvider,
       providers: connectorStoreEmbeddingProviders,
       retrievalAvailability,
     });

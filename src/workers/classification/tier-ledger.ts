@@ -3352,6 +3352,18 @@ export class TierLedger {
           AND w.conversation_key = c.conversation_key AND w.provider_item_id = c.provider_item_id
           AND w.kind IN ('secret', 'deletion')) AS hidden,
       c.copy_state = 'current' AND c.embed_hold = 1 AS held,
+      c.copy_state = 'current' AND c.embed_hold = 1 AND c.trust_domain = 'secure_local'
+        AND c.layers IN ('content', 'both') AND EXISTS (
+          SELECT 1 FROM tier_items t WHERE t.provider = c.provider AND t.account_scope = c.account_scope
+            AND t.conversation_key = c.conversation_key AND t.provider_item_id = c.provider_item_id
+            AND t.state = 'pending' AND t.content_read = 1 AND (t.metadata_pending = 1 OR t.content_pending = 1)
+            AND t.metadata_tier <> 'secrets' AND t.content_tier <> 'secrets'
+            AND COALESCE(t.target_metadata_tier, '') <> 'secrets' AND COALESCE(t.target_content_tier, '') <> 'secrets'
+        ) AND NOT EXISTS (
+          SELECT 1 FROM tier_overrides o WHERE o.provider = c.provider AND o.account_scope = c.account_scope
+            AND o.conversation_key = c.conversation_key AND o.provider_item_id = c.provider_item_id
+            AND json_extract(o.override_json, '$.kind') = 'tier' AND json_extract(o.override_json, '$.tier') = 'secrets'
+        ) AS held_for_judgment,
       c.copy_state = 'current' AND c.layers = 'metadata' AS metadata_layer,
       c.copy_state = 'current' AND c.layers = 'metadata' AND NOT EXISTS (
         SELECT 1 FROM tier_copies other WHERE other.provider = c.provider AND other.account_scope = c.account_scope
@@ -3360,8 +3372,8 @@ export class TierLedger {
       ) AS metadata_unread,
       EXISTS (SELECT 1 FROM tier_items t WHERE t.provider = c.provider AND t.account_scope = c.account_scope
         AND t.conversation_key = c.conversation_key AND t.provider_item_id = c.provider_item_id AND t.state = 'moving') AS moving`;
-    const convert = (rows: Array<TierIdentityRow & { hidden: number; held: number; metadata_layer: number; metadata_unread: number; moving: number }>) =>
-      rows.map(row => ({ ...identityFromRow(row), hidden: !!row.hidden, held: !!row.held,
+    const convert = (rows: Array<TierIdentityRow & { hidden: number; held: number; held_for_judgment: number; metadata_layer: number; metadata_unread: number; moving: number }>) =>
+      rows.map(row => ({ ...identityFromRow(row), hidden: !!row.hidden, held: !!row.held, heldForJudgment: !!row.held_for_judgment,
         metadataLayer: !!row.metadata_layer, metadataLayerContentUnread: !!row.metadata_unread, moving: !!row.moving }));
     if (identities) {
       for (let offset = 0; offset < identities.length; offset += 200) {
@@ -3825,6 +3837,8 @@ interface TierCopyRow {
 export interface TierCorpusVisibility extends TierLedgerIdentity {
   hidden: boolean;
   held: boolean;
+  /** A read content copy held solely for a pending per-item judgment; visibility is still held. */
+  heldForJudgment: boolean;
   metadataLayer: boolean;
   metadataLayerContentUnread: boolean;
   moving: boolean;

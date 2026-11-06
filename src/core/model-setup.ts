@@ -25,6 +25,8 @@ export interface ModelSetupView {
   private_model?: { state: string; bytesDone?: number; bytesTotal?: number };
   cards: ModelSetupCard[];
   attention?: string;
+  /** Existing embedding providers kept for compatibility, never new setup choices. */
+  migration_notes?: string[];
 }
 
 export type ModelCredentialState = 'missing' | 'applying' | 'ready';
@@ -74,8 +76,8 @@ const CARD_COPY: Record<ModelSetupCard['id'], {
   ready: string;
 }> = {
   gemini: {
-    label: 'Gemini',
-    missing: 'Gemini makes everything you have not marked private searchable. Add its API key to continue.',
+    label: 'Gemini (legacy)',
+    missing: 'Your saved policy uses legacy Gemini embeddings. Restore its key to keep it running, or follow the embedding migration guide.',
     applying: 'Applying the Gemini key.',
     ready: 'The Gemini key is connected.',
   },
@@ -183,6 +185,11 @@ export class ModelSetupService {
   private status(): ModelSetupView {
     const required = requiredModelProfiles(this.config);
     const cards: ModelSetupCard[] = [];
+    const legacyEmbeddings = Object.values(this.config.retrieval.trustDomains).some(policy => {
+      if (!policy?.embeddingProfile) return false;
+      const provider = this.config.modelProfiles[policy.embeddingProfile]?.provider;
+      return provider !== undefined && provider !== 'built-in' && provider !== 'venice';
+    });
 
     const gemini = required.filter(({ profile }) => profile.provider === 'google-gemini');
     if (gemini.length > 0) cards.push(this.credentialCard('gemini', gemini));
@@ -213,7 +220,8 @@ export class ModelSetupService {
     return {
       ready: !isPendingPrivacyPolicy(this.config) && additionalReady && cards.every((card) => !card.required || card.state === 'ready'),
       ...(isPendingPrivacyPolicy(this.config) ? { privacy_choice_pending: true } : {}),
-      ...(!additionalReady ? { attention: 'An additional model provider in your policy needs agent-assisted setup. These key forms manage Gemini and Venice only.' } : {}),
+      ...(!additionalReady ? { attention: 'An additional model provider in your policy needs agent-assisted setup. These key forms manage Venice and existing legacy Gemini credentials only.' } : {}),
+      ...(legacyEmbeddings ? { migration_notes: ['Your saved policy uses a legacy embedding provider. Existing settings and vectors are preserved. New setup offers built-in local EmbeddingGemma or Venice only. To migrate, follow docs/SOVEREIGNTY_CONFIG.md#legacy-embedding-migration; changing models requires explicit approval and a planned re-embed. Nothing is migrated automatically.'] } : {}),
       checked_at: this.now().toISOString(),
       cards,
     };

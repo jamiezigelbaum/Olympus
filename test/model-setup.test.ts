@@ -65,6 +65,55 @@ describe('requiredModelProfiles', () => {
 });
 
 describe('ModelSetupService status', () => {
+  test('new presets keep embeddings local without a legacy provider card or migration notice', () => {
+    for (const preset of ['local-only', 'local-first', 'private-cloud-only', 'no-sensitive'] as const) {
+      const config = loadSovereigntyPreset(preset);
+      const before = JSON.stringify(config);
+      const view = new ModelSetupService({ config, credentialState: () => 'ready', autoCheck: false }).getStatus();
+      for (const policy of Object.values(config.retrieval.trustDomains)) {
+        if (!policy?.embeddingProfile) continue;
+        expect(config.modelProfiles[policy.embeddingProfile]).toMatchObject({
+          provider: 'built-in', trust: 'local', model: 'embeddinggemma-2-litert-24d962e',
+        });
+      }
+      expect(view.cards.some(card => card.id === 'gemini')).toBe(false);
+      expect(view.migration_notes).toBeUndefined();
+      expect(JSON.stringify(config)).toBe(before);
+    }
+  });
+
+  test('legacy Gemini and local-server policies show migration guidance without mutating their configuration', () => {
+    for (const profile of [gemini, localEmbedding]) {
+      const config = baseConfig({
+        modelProfiles: { legacy: profile },
+        retrieval: { trustDomains: { internal: policy('legacy', 'hybrid_shadow') } },
+      });
+      const before = JSON.stringify(config);
+      const service = new ModelSetupService({ config, credentialState: () => 'ready', autoCheck: false });
+      const view = service.getStatus();
+      expect(view.migration_notes).toHaveLength(1);
+      expect(view.migration_notes![0]).toContain('built-in local EmbeddingGemma or Venice only');
+      expect(view.migration_notes![0]).toContain('explicit approval');
+      expect(view.migration_notes![0]).toContain('Nothing is migrated automatically');
+      if (profile === gemini) {
+        expect(view.ready).toBe(true);
+        expect(view.cards[0]).toMatchObject({ id: 'gemini', label: 'Gemini (legacy)', state: 'ready' });
+      }
+      expect(JSON.stringify(config)).toBe(before);
+    }
+  });
+
+  test('Venice embeddings are offered without a legacy migration notice', () => {
+    const config = baseConfig({
+      modelProfiles: { embedding: { ...venice, purpose: 'embedding', model: 'text-embedding-qwen3-8b' } },
+      retrieval: { trustDomains: { internal: policy('embedding', 'hybrid_shadow') } },
+    });
+    const view = new ModelSetupService({ config, credentialState: () => 'ready', autoCheck: false }).getStatus();
+    expect(view.ready).toBe(true);
+    expect(view.migration_notes).toBeUndefined();
+    expect(view.cards.map(card => card.id)).toEqual(['venice']);
+  });
+
   test('local-first remains usable without the optional Venice key', async () => {
     const service = new ModelSetupService({
       config: loadSovereigntyPreset('local-first'),
@@ -93,6 +142,7 @@ describe('ModelSetupService status', () => {
     expect(service.getStatus()).toEqual({
       ready: false,
       checked_at: '2026-09-14T12:00:00.000Z',
+      migration_notes: [expect.stringContaining('Nothing is migrated automatically')],
       cards: [
         expect.objectContaining({ id: 'gemini', required: true, state: 'ready' }),
         expect.objectContaining({ id: 'venice', required: true, state: 'applying' }),
