@@ -38930,6 +38930,7 @@ var init_local_index = __esm(() => {
     hasEmbeddings(modelId) {
       if (this.embeddingCurrencyRebuildPending(modelId))
         return false;
+      const exclusion = this.embeddingWorkListExclusionFilter();
       const row = this.db.query(`
       SELECT 1 AS present
       FROM chunk_embeddings emb
@@ -38938,8 +38939,9 @@ var init_local_index = __esm(() => {
       WHERE emb.model_id = ?
         AND i.tombstoned = 0
         AND emb.content_hash = c.embedding_input_hash
+        ${exclusion.filter}
       LIMIT 1
-    `).get(modelId);
+    `).get(modelId, ...exclusion.params);
       return row !== null;
     }
     async vectorSearchItems(query, provider, maxResults, accountScope, filters, deadlineAtMs) {
@@ -192974,7 +192976,9 @@ function matchingVectorIdentities(set2, exported) {
       const store = set2.store(domain);
       if (!store)
         continue;
-      const own3 = store.embeddingAuthorities().find((authority) => exported.vectorAuthorities.some((minted) => minted.modelId === authority.modelId && minted.provider === authority.provider && minted.backend === authority.backend && minted.dimension === authority.dimension && minted.epochId === authority.epochId));
+      const configured = domain === "secure_local" ? set2.privateEmbeddingProvider() : set2.legSpec(domain)?.embeddingProvider;
+      const candidates2 = configured ? [configured] : store.embeddingAuthorities();
+      const own3 = candidates2.find((authority) => exported.vectorAuthorities.some((minted) => minted.modelId === authority.modelId && minted.provider === authority.provider && minted.backend === authority.backend && minted.dimension === authority.dimension && minted.epochId === authority.epochId));
       if (!own3 || own3.backend !== "local" && own3.backend !== "cloud")
         continue;
       identities[domain] = {

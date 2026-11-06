@@ -11262,9 +11262,8 @@ export class LocalConnectorStore {
     );
   }
 
-  // True when the store has at least one CURRENT embedding for the model:
-  // stale vectors (content_hash no longer matching the live chunk) never
-  // activate the vector lane.
+  // True when the store has at least one current, visible embedding for the
+  // model: stale or held vectors never activate the vector lane.
   hasEmbeddings(modelId: string): boolean {
     // A rebind deletes this model's vectors across the WHOLE corpus while the
     // call that triggered it re-embeds only its own selection. Until a
@@ -11272,6 +11271,7 @@ export class LocalConnectorStore {
     // the lane can serve the corpus — so the lane stays off and callers fall
     // back to keyword instead of silently fusing a fraction of it.
     if (this.embeddingCurrencyRebuildPending(modelId)) return false;
+    const exclusion = this.embeddingWorkListExclusionFilter();
     // The question is "is there at least one", so the query stops at the first
     // row. It used to be an unbounded COUNT(*) over the whole three-table join,
     // which walked every current embedding in the corpus to answer a boolean —
@@ -11286,8 +11286,9 @@ export class LocalConnectorStore {
       WHERE emb.model_id = ?
         AND i.tombstoned = 0
         AND emb.content_hash = c.embedding_input_hash
+        ${exclusion.filter}
       LIMIT 1
-    `).get(modelId) as { present: number } | null;
+    `).get(modelId, ...exclusion.params) as { present: number } | null;
     return row !== null;
   }
 

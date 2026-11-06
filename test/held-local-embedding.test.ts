@@ -7,6 +7,10 @@ import { SecretLocationsIndex } from '../src/workers/classification/secret-locat
 import { LocalConnectorStore, createConnectorStoreCorpusAdapter, createConnectorStoreContentProvider, defineConnectorCorpus } from '../src/workers/connector-store/index.ts';
 import { TieredStoreSet } from '../src/workers/connector-store/tiered-store-set.ts';
 import { moveTieredItem } from '../src/workers/connector-store/tier-move.ts';
+import { TierSnifferService } from '../src/workers/classification/sniffer-service.ts';
+import { InstalledTierClassification } from '../src/workers/classification/installed-tier-classification.ts';
+import { BUILT_IN_SNIFFER_LANE } from '../src/workers/classification/built-in-sniffer.ts';
+import { BUILT_IN_EMBEDDING_PROVIDER } from '../src/workers/source-index/built-in-embedding/provider.ts';
 import { RecordingProvider, CORPORA, FIXTURE_PLACEMENT, fixtureConnector, identityOf, localId, localProvider, tempDir } from './helpers/tier-fixtures.ts';
 
 const cleanups: Array<() => void> = [];
@@ -83,6 +87,56 @@ test('held vectors copy to Personal under the shared identity without another em
   expect(moved.destinations[0]?.chunksToEmbed).toBe(0);
   expect(f.internal.exportItemCopy(identityOf('held'))?.vectors.map(v => [...v.embedding])).toEqual(source.vectors.map(v => [...v.embedding]));
   expect(f.privateProvider.inputs).toHaveLength(calls);
+});
+
+test('held-only vectors preserve prefix search hits and metadata match counts', async () => {
+  const f = await fixture();
+  const corpus = defineConnectorCorpus({ corpusId: f.store.corpusId, family: f.store.family, trustDomain: f.store.trustDomain });
+  const adapter = createConnectorStoreCorpusAdapter({ store: f.store, embeddingProvider: f.privateProvider });
+  const request = { query: 'Quietorchard', maxResults: 5, corpus, context: { allowedTrustDomains: ['secure_local'] as const } };
+  const before = await adapter(request);
+  const metadataBefore = await adapter.metadataMatches!(request);
+  expect(before.hits).toHaveLength(1);
+  expect(metadataBefore.matchCount?.matchedItems).toBe(1);
+  await f.store.embedChunks({ provider: f.privateProvider });
+  expect(f.vectors()).toBeGreaterThan(0);
+  const after = await adapter(request);
+  const metadataAfter = await adapter.metadataMatches!(request);
+  expect(after.hits).toEqual(before.hits);
+  expect(metadataAfter.hits).toEqual(metadataBefore.hits);
+  expect(metadataAfter.matchCount).toEqual(metadataBefore.matchCount);
+  expect(f.store.hasEmbeddings(f.privateProvider.modelId)).toBe(false);
+  expect(adapter.hybridAvailability!(request).servable).toBe(false);
+  f.verdict('secure');
+  expect(f.store.hasEmbeddings(f.privateProvider.modelId)).toBe(true);
+  expect(adapter.hybridAvailability!(request).servable).toBe(true);
+});
+
+test('automatic Personal move reuses held vectors with a configured identity in a fresh store', async () => {
+  const provider = new RecordingProvider(BUILT_IN_EMBEDDING_PROVIDER, 'fixture-built-in', 'local');
+  const f = await fixture(provider);
+  expect(f.internal.embeddingAuthorities()).toEqual([]);
+  await f.store.embedChunks({ provider });
+  const source = f.store.exportItemCopy(identityOf('held'))!;
+  expect(source.vectors.length).toBeGreaterThan(0);
+  const calls = provider.inputs.length;
+  f.verdict('private');
+  const installed = new InstalledTierClassification({ env: {} });
+  const service = new TierSnifferService({
+    installed, lane: BUILT_IN_SNIFFER_LANE,
+    model: { async complete() { throw new Error('already judged'); } },
+    stores: () => f.set.openStores(), classificationLedgerPath: `${f.ledger.dbPath}.classification.jsonl`,
+    modelAvailable: () => false, rejudgePerPass: 0,
+    autoMoves: { localEmbeddingsOnly: () => true, embeddingLedgerPath: `${f.ledger.dbPath}.embedding.jsonl` },
+  });
+  try {
+    await service.runOnce();
+    expect(f.ledger.getCurrent(identityOf('held'))).toMatchObject({ state: 'current', contentTier: 'private' });
+    expect(f.internal.exportItemCopy(identityOf('held'))?.vectors.map(v => [...v.embedding])).toEqual(source.vectors.map(v => [...v.embedding]));
+    expect(f.internal.missingEmbeddingItemIds(provider, 10)).toEqual([]);
+    expect((await f.internal.embedChunks({ provider })).chunksEmbedded).toBe(0);
+    expect(provider.inputs).toHaveLength(calls);
+  } finally { service.stop(); installed.close(); }
 });
 
 test('a Secret verdict removes held vectors, text and copies and keeps a location only', async () => {
