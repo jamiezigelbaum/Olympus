@@ -1336,7 +1336,9 @@ export class TierSnifferService {
       this.options.log?.(
         `Olympus tier sniffer: re-judged ${total.updated + total.movesQueued + total.asked + total.secrets} item(s) under the current classifier `
         + `(${total.asked} asked about, still where they were; ${total.movesQueued} tier move(s) queued`
-        + `; ${total.heldLowering} lowering(s) held${total.secrets ? `; ${total.secrets} Secret(s) found and hidden` : ''}).`,
+        + `; ${total.heldLowering} lowering(s) held${total.secrets ? `; ${total.secrets} Secret(s) found and hidden` : ''})`
+        + `; picked for: held=${total.causeHeld} retired_prior=${total.causeRetiredPrior} missing_question=${total.causeMissingQuestion}`
+        + ` classifier=${total.causeClassifier} names_prompt=${total.causeNamesPrompt} content_prompt=${total.causeContentPrompt}.`,
       );
     }
     return total;

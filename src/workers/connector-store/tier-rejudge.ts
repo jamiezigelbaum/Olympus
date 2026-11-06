@@ -66,6 +66,7 @@ import {
   type TierLedgerIdentity,
   type TierLedgerRecord,
   type TierOwnerOverrideGuard,
+  type TierRejudgeCause,
 } from '../classification/tier-ledger.ts';
 import type { SecretLocationsIndex } from '../classification/secret-locations.ts';
 import { STORED_NAMES_ASKED_REASON, STORED_NAMES_REASON, type TierLedger } from '../classification/tier-ledger.ts';
@@ -97,7 +98,28 @@ export interface TierRejudgeReport {
   /** Nothing to re-read (no stored text) or an owner override: left as it was. */
   skipped: number;
   failed: number;
+  /**
+   * Candidates by the rule that picked them (content-free, for the pass's
+   * log line, #954): held for a text question, a retired whole-source prior,
+   * a question lost from the queue, another classifier version, names judged
+   * under another sniffer prompt, content without this sniffer's verdict.
+   */
+  causeHeld: number;
+  causeRetiredPrior: number;
+  causeMissingQuestion: number;
+  causeClassifier: number;
+  causeNamesPrompt: number;
+  causeContentPrompt: number;
 }
+
+const CAUSE_FIELD: Record<TierRejudgeCause, keyof TierRejudgeReport> = {
+  held: 'causeHeld',
+  retired_prior: 'causeRetiredPrior',
+  missing_question: 'causeMissingQuestion',
+  classifier: 'causeClassifier',
+  names_prompt: 'causeNamesPrompt',
+  content_prompt: 'causeContentPrompt',
+};
 
 export interface TierRejudgeOptions {
   set: TieredStoreSet;
@@ -114,7 +136,10 @@ export interface TierRejudgeOptions {
 }
 
 export function emptyTierRejudgeReport(): TierRejudgeReport {
-  return { heldLowering: 0, seen: 0, updated: 0, movesQueued: 0, asked: 0, secrets: 0, skipped: 0, failed: 0 };
+  return {
+    heldLowering: 0, seen: 0, updated: 0, movesQueued: 0, asked: 0, secrets: 0, skipped: 0, failed: 0,
+    causeHeld: 0, causeRetiredPrior: 0, causeMissingQuestion: 0, causeClassifier: 0, causeNamesPrompt: 0, causeContentPrompt: 0,
+  };
 }
 
 export function rejudgeRoutedItems(options: TierRejudgeOptions): { report: TierRejudgeReport; next?: TierLedgerIdentity } {
@@ -175,9 +200,11 @@ function* rejudgeSteps(options: TierRejudgeOptions): Generator<TierLedgerRecord,
     ...(options.after ? { after: options.after } : {}),
     limit,
   });
-  for (const record of page.records) {
+  for (const [index, record] of page.records.entries()) {
     yield record;
     report.seen += 1;
+    const cause = page.causes[index];
+    if (cause) report[CAUSE_FIELD[cause]] += 1;
     try {
       rejudgeStoredContent(set, record, {
         sniffer: classification.sniffer,

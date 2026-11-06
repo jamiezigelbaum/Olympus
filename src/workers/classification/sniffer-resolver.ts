@@ -55,7 +55,7 @@ import type {
   StoredSnifferVerdict,
   TierSnifferStore,
 } from './sniffer-store.ts';
-import type { TierDecision } from './tier-classifier.ts';
+import { TIER_CLASSIFIER_VERSION, type TierDecision } from './tier-classifier.ts';
 import { tierLedgerIdentityKey, type TierLedger, type TierLedgerRecord, type TierPlacementPlan } from './tier-ledger.ts';
 
 /** The UTC daily cap survives restart. Time slices, not call counts, set the pace. */
@@ -373,6 +373,12 @@ export async function runSnifferPass(options: SnifferPassOptions): Promise<Sniff
       && final?.state === 'current' && !final.contentPending && !final.metadataPending
       && final.decidedBy !== 'override' && final.decidedBy !== 'owner_rule') {
       item.target.sniffer.markFinalModelContent(keyOf(item.question), item.question.contentHash);
+    }
+    // Judged just now under this classifier and sniffer: not a re-judge
+    // candidate for the same inputs (#954). The ledger stamps only a settled
+    // row decided under this classifier version.
+    if (applied && applied.outcome !== 'unchanged' && !verdict.failSafe && final) {
+      item.target.ledger.markJudged(item.question, { engineVersion: TIER_CLASSIFIER_VERSION, snifferId: id });
     }
     if (applied?.outcome === 'queued_move') report.movesQueued += 1;
     // Keep the donor's receipt until placement and both passes finish.
