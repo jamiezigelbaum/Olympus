@@ -23,6 +23,7 @@ import {
   type CalibrationImportance,
   type CalibrationLabels,
 } from './files.ts';
+import { longMessageView } from './long-message-view.ts';
 
 const EXCERPT_CHARS = 6_000;
 
@@ -114,6 +115,7 @@ const server = Bun.serve({
           source: item.source,
           judgeSees: item.judgeSees,
           context: item.context,
+          long: item.judgeSees === undefined ? undefined : longMessageView(item.text, item.judgeSees, EXCERPT_CHARS),
         })),
         labels: pageLabels(),
       }, { headers: { 'cache-control': 'no-store' } });
@@ -150,9 +152,9 @@ const PAGE = `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Olympus calibration</title>
 <style>
-:root { color-scheme: light dark; --bg:#f7f7f5; --card:#fff; --ink:#1d1d1f; --muted:#6b6b70; --line:#e3e3e0;
+:root { color-scheme: light dark; --bg:#f7f7f5; --card:#fff; --ink:#1d1d1f; --muted:#6b6b70; --line:#e3e3e0; --highlight:#ffe9a8;
   --personal:#1f7a4d; --private:#9b2c2c; --unsure:#8a6d1d; --skip:#55575c; }
-@media (prefers-color-scheme: dark) { :root { --bg:#151517; --card:#1f1f22; --ink:#ececee; --muted:#9a9aa1; --line:#2e2e33; } }
+@media (prefers-color-scheme: dark) { :root { --bg:#151517; --card:#1f1f22; --ink:#ececee; --muted:#9a9aa1; --line:#2e2e33; --highlight:#5c4a12; } }
 * { box-sizing: border-box; }
 body { margin:0; background:var(--bg); color:var(--ink); font:15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
 main { max-width: 900px; margin: 0 auto; padding: 20px 16px 40px; }
@@ -163,6 +165,12 @@ h1 { font-size:17px; margin:0; }
 .bar > div { height:100%; background:var(--personal); transform-origin:left; transform:scaleX(0); transition: transform .2s; }
 details.rule { color:var(--muted); margin-bottom:14px; }
 details.rule p { margin:6px 0; }
+.long-badge { display:inline-block; margin-top:8px; padding:3px 8px; border-radius:6px; font-size:12px; font-weight:600; background:var(--highlight); color:var(--ink); }
+.long-note { margin-top:10px; }
+.long-names { margin-top:8px; font-size:12px; color:var(--muted); white-space:pre-wrap; word-break:break-word; }
+.judge-read { background:var(--highlight); border-radius:2px; }
+.judge-unread { opacity:.5; }
+.cut-off { display:block; margin-top:10px; padding-top:8px; border-top:1px dashed var(--muted); font-weight:600; }
 .context { margin:10px 0; padding:8px 10px; border-left:3px solid var(--line); opacity:.55; font-size:12px; line-height:1.45; }
 .context-tag { font-weight:600; text-transform:uppercase; letter-spacing:.04em; font-size:10px; margin-bottom:4px; }
 .context-line { white-space:pre-wrap; word-break:break-word; margin-top:4px; }
@@ -220,14 +228,15 @@ function render() {
   const judged = it.judgeSees !== undefined;
   view.innerHTML = '<div class="card">' + (judged ?
     '<div class="name">' + esc(it.source) + '</div>' +
-    '<div class="meta">Exactly what the private judge reads · item ' + (index + 1) + ' of ' + items.length + '</div>' :
+    '<div class="meta">' + (it.long ? 'The whole message' : 'Exactly what the private judge reads') + ' · item ' + (index + 1) + ' of ' + items.length + '</div>' +
+    (it.long ? '<div class="long-badge">Long message: the judge reads only part of it</div>' : '') :
     '<div class="name">' + esc(it.name) + '</div>' +
     '<div class="meta">' + esc(it.folder || '(top level)') + '</div>' +
     '<div class="meta">' + fmtSize(it.sizeBytes) + ' · modified ' + esc(it.modifiedAt.slice(0, 10)) + ' · item ' + (index + 1) + ' of ' + items.length +
       (it.textChars > it.excerpt.length ? ' · showing the first ' + it.excerpt.length.toLocaleString() + ' characters' : '') + '</div>') +
     (chosen ? '<div class="current">Labeled: <b>' + NAMES[chosen] + '</b></div>' : '') +
     contextBlock(it.context?.before) +
-    '<pre>' + esc(judged ? it.judgeSees : it.excerpt) + '</pre>' +
+    (it.long ? longBlock(it.long) : '<pre>' + esc(judged ? it.judgeSees : it.excerpt) + '</pre>') +
     contextBlock(it.context?.after) +
     '<div class="buttons">' +
       CHOICES.map((c) => '<button class="label ' + c.style + (chosen === c.label ? ' chosen' : '') + '" data-label="' + c.label + '">' +
@@ -240,6 +249,14 @@ function render() {
   document.getElementById('next').onclick = () => { index = Math.min(items.length, index + 1); render(); };
   document.getElementById('nextOpen').onclick = nextUnlabeled;
   if (!judged) document.getElementById('reveal').onclick = reveal;
+}
+function longBlock(long) {
+  const note = long.located ? 'Highlighted: what the judge reads. Dimmed: what it does not. Label the whole message.' :
+    'The judge reads only part of this, but those parts could not be marked. Label the whole message.';
+  return '<div class="meta long-note">' + note + '</div>' +
+    (long.names ? '<div class="long-names">' + esc(long.names) + '</div>' : '') +
+    '<pre>' + long.parts.map((p) => '<span class="' + (p.read ? 'judge-read' : 'judge-unread') + '">' + esc(p.text) + '</span>').join('') +
+    (long.cutOff ? '<span class="cut-off">Cut off here · ' + long.totalChars.toLocaleString() + ' characters in all</span>' : '') + '</pre>';
 }
 function contextBlock(messages) {
   if (!messages || messages.length === 0) return '';

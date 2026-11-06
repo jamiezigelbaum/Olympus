@@ -93,6 +93,9 @@ judge would not read are left out.
   a bare link or a short reply can be read. The labeling page greys them out and
   marks them context only; you label the middle message alone. They stay in the
   owner-only sample file, and no judge run reads them.
+- **Long messages:** a message longer than the judge's excerpt shows in full on
+  the labeling page, up to its 6,000-character limit, with a badge. The parts the
+  judge reads are highlighted and the rest dimmed, so you label the whole message.
 - **Stratified:** 30% come from items the judge already called Private, so both
   classes are big enough to measure. A score on this sample overstates recall
   unless it is reweighted with each item's `stratum` and the populations in the
