@@ -19261,7 +19261,7 @@ class RemoteLiteRtEmbedder {
         }
         const response = await this.request("/v1/embed", items);
         const identity = this.options.identity;
-        if (response.weightsSha256 !== identity.weightsSha256 || response.runtime !== identity.runtime || response.dimension !== identity.dimension || typeof response.vectors !== "string") {
+        if (typeof response.vectors !== "string" || Object.entries(identity).some(([field, value]) => response[field] !== value)) {
           throw new Error("Remote embedding identity mismatch.");
         }
         const bytes = Buffer.from(response.vectors, "base64");

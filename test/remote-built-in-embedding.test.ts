@@ -40,8 +40,7 @@ function fixture() {
     await state.wait;
     const bytes = Buffer.alloc(texts!.length * 768 * 4);
     for (let row = 0; row < texts!.length; row++) bytes.writeFloatLE(1, row * 768 * 4);
-    return Response.json({ vectors: bytes.toString('base64'), dimension: 768,
-      weightsSha256: identity.weightsSha256, runtime: identity.runtime, ...state.response });
+    return Response.json({ vectors: bytes.toString('base64'), ...identity, ...state.response });
   } };
   let server = Bun.serve(serveOptions);
   const port = server.port!;
@@ -73,7 +72,7 @@ for (const field of Object.keys(identity)) {
   });
 }
 
-for (const field of ['weightsSha256', 'runtime', 'dimension', 'vectors']) {
+for (const field of ['modelId', 'weightsSha256', 'runtime', 'dimension', 'maxTokens', 'overflow', 'vectors']) {
   test(`refuses a mid-run swap or malformed vectors: ${field}`, async () => {
     const f = fixture(); const p = f.provider();
     expect((await p.embed([{ text: 'first' }], document))[0]![0]).toBe(1);

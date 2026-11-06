@@ -105,8 +105,8 @@ describe('embedding pass time budget', () => {
     expect(read()).toBe(EMBEDDING_SWEEP_MAX_ITEMS);
     expect(read('0')).toBe(EMBEDDING_SWEEP_MAX_ITEMS);
     expect(read('many')).toBe(EMBEDDING_SWEEP_MAX_ITEMS);
-    expect(read('1024')).toBe(1024);
-    expect(read('999999')).toBe(4096);
+    expect(read('512')).toBe(512);
+    expect(read('999999')).toBe(1024);
   });
 
   test('a pass past its budget keeps what it embedded, leaves the item queued, and the next pass finishes it', async () => {

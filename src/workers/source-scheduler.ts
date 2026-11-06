@@ -1785,7 +1785,8 @@ export const EMBEDDING_SWEEP_MAX_ITEMS = 32;
  * The store deadline still ends a long pass.
  */
 export const EMBEDDING_SWEEP_MAX_ITEMS_ENV = 'OLYMPUS_EMBEDDING_SWEEP_MAX_ITEMS';
-const EMBEDDING_SWEEP_MAX_ITEMS_CEILING = 4_096;
+/** The whole selection's text is in memory at once, before the deadline can apply. */
+const EMBEDDING_SWEEP_MAX_ITEMS_CEILING = 1_024;
 
 export function embeddingSweepMaxItems(env: Record<string, string | undefined> = process.env): number {
   const value = Number(env[EMBEDDING_SWEEP_MAX_ITEMS_ENV]);
