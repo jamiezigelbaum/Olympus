@@ -245,7 +245,9 @@ export function createEvernoteArchiveConnector(input: ArchiveConnectorInput): So
     if (body.unsupported > 0) report(NOTE_FINDINGS.unsupported, 'gap', fileIndex, start);
     if (built.dateAssumed) report(NOTE_FINDINGS.dateAssumed, 'gap', fileIndex, start);
     const notebook = notebookOfExport(input.files[fileIndex]!.relPath);
-    const parent: RawItem = notebook ? { ...built.item, metadata: Object.freeze({ ...built.item.metadata, notebook }) } : built.item;
+    const parent: RawItem = { ...built.item, metadata: Object.freeze({ ...built.item.metadata,
+      ...(notebook ? { notebook } : {}), attachmentCount: Math.max(resources.length, body.media),
+    }) };
     const items: RawItem[] = [parent];
     const positions = [start];
     const seen = new Map<string, number>();

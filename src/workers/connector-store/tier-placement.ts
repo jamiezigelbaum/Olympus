@@ -24,6 +24,7 @@ import { detectSecretFindingKinds } from '../classification/engine.ts';
 import {
   TIER_CLASSIFIER_VERSION,
   classifyItemTiers,
+  itemHasNonTextContent,
   contentDigestReason,
   contentNamesReason,
   heldUntilJudged,
@@ -227,6 +228,8 @@ export function decideItemTiers(
       ...(holdUntilJudged ? { holdUntilJudged: true } : {}),
       ...(parentContext ? { parentContext } : {}),
       mimeType: item.mimeType,
+      hasNonTextContent: itemHasNonTextContent(item),
+      ...(read?.secret ? { heldSecret: true } : {}),
       subject: item.identity,
     },
     {

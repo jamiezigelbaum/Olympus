@@ -46,6 +46,7 @@ import {
   snifferVerdictTier,
 } from './sniffer.ts';
 import { assertSnifferProfileAllowed, type SnifferLane } from './sniffer-lane.ts';
+import { contentVerdictReusable, snifferSubjectKey } from './sniffer-store.ts';
 import type {
   SnifferPass,
   SnifferQuestion,
@@ -322,9 +323,10 @@ export async function runSnifferPass(options: SnifferPassOptions): Promise<Sniff
   });
   const sameQuestion = (target: SnifferTarget, question: SnifferQuestion): boolean => {
     const current = target.sniffer.questionFor(question, question.pass);
-    return current?.materialHash === question.materialHash && current.mapRevision === question.mapRevision;
+    return current?.materialHash === question.materialHash && current.mapRevision === question.mapRevision
+      && current.contentHash === question.contentHash;
   };
-  const apply = (item: WorkItem, verdict: Omit<StoredSnifferVerdict, 'decidedAt'>): void => {
+  const apply = (item: WorkItem, verdict: Omit<StoredSnifferVerdict, 'decidedAt'>, reused = false): void => {
     // The model awaited external work: re-read before settling its answer,
     // without rekeying the dispatched revision. The ledger rejects stale answers.
     if (sameQuestion(item.target, item.question) && stillOpen(item.target, item.question, false)
@@ -333,7 +335,7 @@ export async function runSnifferPass(options: SnifferPassOptions): Promise<Sniff
     const applied = item.target.ledger.applySnifferVerdict(item.question, {
       pass: item.question.pass,
       tier,
-      reason: `${item.question.pass}:sniffer:${id}:${code}`,
+      reason: `${item.question.pass}:sniffer:${id}:${reused ? 'rule:duplicate_model:' : ''}${code}`,
       modelId: snifferCacheModelId(options.lane),
       mapRevision: item.question.mapRevision,
     }, {
@@ -361,8 +363,21 @@ export async function runSnifferPass(options: SnifferPassOptions): Promise<Sniff
       report.awaitingPlacement += 1;
       return;
     }
+    // Full-input answers are cached before application for retries. The content
+    // alias is published only after this item's verdict is final, never for a
+    // fail-safe, override, stale answer, held lowering or unfinished move.
+    const final = item.target.ledger.getCurrent(item.question);
+    if (applied && applied.outcome !== 'unchanged' && !verdict.failSafe && !reused
+      && item.question.pass === 'content' && item.question.contentHash
+      && final?.state === 'current' && !final.contentPending && !final.metadataPending
+      && final.decidedBy !== 'override' && final.decidedBy !== 'owner_rule') {
+      item.target.sniffer.markFinalModelContent(keyOf(item.question), item.question.contentHash);
+    }
     if (applied?.outcome === 'queued_move') report.movesQueued += 1;
-    item.target.sniffer.deleteQuestion(item.question, item.question.pass, item.question.materialHash);
+    // Keep the donor's receipt until placement and both passes finish.
+    const retainDonor = !reused && !verdict.failSafe && item.question.contentHash
+      && final && (final.state === 'moving' || final.metadataPending);
+    if (!retainDonor) item.target.sniffer.deleteQuestion(item.question, item.question.pass, item.question.materialHash);
     if (!applied || applied.outcome === 'unchanged') return;
     report.verdictsApplied += 1;
     if (verdict.failSafe) report.failSafePrivate += 1;
@@ -434,6 +449,22 @@ export async function runSnifferPass(options: SnifferPassOptions): Promise<Sniff
     return false;
   };
 
+  // A model answer may have queued a move, or finished content before
+  // names. Publish reuse only once the same decision is fully settled.
+  const finishContentDonor = (target: SnifferTarget, question: SnifferQuestion): boolean => {
+    if (!question.contentHash || question.pass !== 'content') return false;
+    const row = target.ledger.getCurrent(question);
+    const cached = target.sniffer.getVerdict(keyOf(question));
+    if (!row || !cached || cached.failSafe || cached.modelSubject !== snifferSubjectKey(question)) return false;
+    const receipts = question.flags.filter(flag => flag.startsWith('content:sha256:') || flag.startsWith('content:names:'));
+    const reason = `content:sniffer:${id}:${snifferVerdictTier(cached, options.lane, question.flags).code}`;
+    if (receipts.length !== 2 || row.mapRevision !== question.mapRevision || (row.decidedBy === 'override' || row.decidedBy === 'owner_rule')
+      || !receipts.every(receipt => row.reasons.includes(receipt)) || !row.reasons.includes(reason)) return false;
+    if (row.state === 'moving' || row.metadataPending || row.contentPending) return true;
+    if (row.state === 'current') target.sniffer.markFinalModelContent(keyOf(question), question.contentHash);
+    return false;
+  };
+
   // 1. Open questions checked against each store's ledger before dispatch.
   // Driven by the queue (exactly the set of open questions), not by a page of
   // pending rows: a store with many unread items would otherwise fill every
@@ -442,7 +473,7 @@ export async function runSnifferPass(options: SnifferPassOptions): Promise<Sniff
   for (const target of options.targets) {
     const questions = target.sniffer.listQuestions({ limit: options.pendingPageSize ?? 500, eligible: question => {
       report.pendingSeen += 1;
-      if (midMove(target, question)) return false;
+      if (finishContentDonor(target, question) || midMove(target, question)) return false;
       if (stillOpen(target, question)) return screenQuestion(target, question);
       target.sniffer.deleteQuestion(question, question.pass, question.materialHash);
       report.staleDropped += 1;
@@ -485,8 +516,9 @@ export async function runSnifferPass(options: SnifferPassOptions): Promise<Sniff
   for (const pass of ['metadata', 'content'] as const) {
     work[pass] = work[pass].filter(item => {
       const cached = item.target.sniffer.getVerdict(keyOf(item.question));
-      if (!cached || !cachedSnifferVerdictHolds(cached)) return true;
-      apply(item, cached);
+      if (!cached || !cachedSnifferVerdictHolds(cached)
+        || (item.question.contentHash && !contentVerdictReusable(cached, item.question.contentHash, item.question))) return true;
+      apply(item, cached, item.question.contentHash !== undefined && cached.modelSubject !== snifferSubjectKey(item.question));
       report.cacheHits += 1;
       return false;
     });
@@ -521,10 +553,18 @@ export async function runSnifferPass(options: SnifferPassOptions): Promise<Sniff
       continue;
     }
     if (!screenQuestion(next.target, next.question)) continue;
+    const duplicate = next.question.contentHash && next.question.pass === 'content'
+      ? next.target.sniffer.getFinalModelContentVerdict({ ...keyOf(next.question), contentHash: next.question.contentHash })
+      : undefined;
+    if (duplicate && cachedSnifferVerdictHolds(duplicate)) {
+      apply(next, duplicate, true);
+      report.cacheHits += 1;
+      continue;
+    }
     const group = [next];
     for (let i = pending.length - 1; i >= 0; i--) {
       const item = pending[i]!;
-      if (item.question.pass === pass && item.question.materialHash === next.question.materialHash
+      if (!next.question.contentHash && item.question.pass === pass && item.question.materialHash === next.question.materialHash
         && item.question.mapRevision === next.question.mapRevision && stillOpen(item.target, item.question)
         && screenQuestion(item.target, item.question)) {
         group.push(item); pending.splice(i, 1);
@@ -588,9 +628,9 @@ export async function runSnifferPass(options: SnifferPassOptions): Promise<Sniff
       const key = keyOf(group[0]!.question);
       if (verdict) {
         const stored = { ...verdict, failSafe: false };
-        group[0]!.target.sniffer.putVerdict(key, stored);
+        group[0]!.target.sniffer.putVerdict(key, stored, group[0]!.question);
         for (const item of group) {
-          if (item.target !== group[0]!.target) item.target.sniffer.putVerdict(key, stored);
+          if (item.target !== group[0]!.target) item.target.sniffer.putVerdict(key, stored, group[0]!.question);
           apply(item, stored);
         }
         continue;

@@ -554,7 +554,11 @@ test('200 held lowering answers do not block later re-judging or raises, and rel
     await service.runOnce();
     expect(f.ledger.getCurrent(identityOf('held000'))).toMatchObject({ state: 'moving', targetContentTier: 'private' });
     expect(calls).toBe(beforeRelease);
-    expect(installed.snifferStoreForLedger(f.ledger.dbPath).counts().questions).toBe(0);
+    // Answered text-only questions remain as donor receipts until their moves
+    // finish. None is still waiting on a model or allowed to seed reuse yet.
+    const receipts = installed.snifferStoreForLedger(f.ledger.dbPath).listQuestions({ limit: 500 });
+    expect(receipts).toHaveLength(201);
+    expect(receipts.every(q => q.contentHash !== undefined && f.ledger.getCurrent(q)?.state === 'moving')).toBe(true);
   } finally {
     service?.stop(); installed.close(); registerInstalledTierClassification(undefined); f.close(); tmp.cleanup();
     if (previous === undefined) delete process.env.OLYMPUS_TIER_SNIFFER_HOLD_LOWERING;

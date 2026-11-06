@@ -270,6 +270,7 @@ export function rejudgeStoredContent(
   const content = classifyContentTier(
     {
       text,
+      hasNonTextContent: !record.reasons.includes('content:text_only'),
       metadataTier: metadata.metadataTier,
       metadataForced: metadata.metadataForced,
       metadataFlagged: metadata.metadataFlagged,

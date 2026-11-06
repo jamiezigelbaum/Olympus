@@ -718,6 +718,9 @@ export async function planTierMigration(options: TierMigrationPlanOptions): Prom
               ...(item.locatorUri ? { locators: [item.locatorUri] } : {}),
               provider: item.identity.provider,
               text: item.chunks.map((chunk) => chunk.text).join(''),
+              // Legacy copies have no positive text-only eligibility receipt.
+              hasNonTextContent: true,
+              ...(read.secret ? { heldSecret: true } : {}),
               ...(item.mimeType ? { mimeType: item.mimeType } : {}),
               ...(holdUntilJudged ? { holdUntilJudged: true } : {}),
               ...(imageJudgment ? { imageJudgment: imageJudgmentSignal(imageJudgment) } : {}),

@@ -192,6 +192,9 @@ export function createTieredStoreExtractionSink(options: TieredStoreExtractionSi
       const content = classifyContentTier(
         {
           text: request.text,
+          // Extraction text does not prove the underlying file/media is trivial.
+          hasNonTextContent: true,
+          ...(read.secret ? { heldSecret: true } : {}),
           metadataTier: record.metadataTier,
           metadataForced: record.metadataForced,
           metadataFlagged: record.metadataFlagged,
