@@ -28,8 +28,10 @@ describe('Telegram beside its live input, as the release check runs it', () => {
     const { record } = { record: (await h.importAll(started.archive_id)).record! };
     expect(record.target?.source_id).toBe(TELEGRAM_SOURCE_ID);
     expect(record.intake).toMatchObject({ read: fx.beside!.read, already_there: fx.beside!.alreadyThere });
-    // The word is in the source's stores (held Private until judged).
-    expect(h.rows().some((row) => h.textOf(row.conversation, row.id).includes(fx.token))).toBe(true);
+    // The word is in the source's stores (held Private until judged), in more than one ordinary message: a lone code-word line
+    // was judged Private by the Linux leg's small judge and never cited (#787).
+    const carrying = new Set(h.rows().filter((row) => h.textOf(row.conversation, row.id).includes(fx.token)).map((row) => row.id));
+    expect(carrying.size).toBeGreaterThanOrEqual(2);
   });
 
   test('the Archives case\'s export is another account\'s, so beside the seeded source it stays apart', async () => {

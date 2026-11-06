@@ -367,8 +367,10 @@ export const TELEGRAM_BESIDE_LIVE = {
 } as const;
 
 /**
- * The paired account's own export: the two messages its live input holds, three more (one with the word), and the profile that names
- * the account. Six records read, two already there.
+ * The paired account's own export: the two messages its live input holds, three more (two with the word), and the profile that names
+ * the account. Six records read, two already there. The word sits in plainly ordinary messages (a packing list, plans for the
+ * evening), never alone: on 2026-11-04 the Linux leg's small built-in judge held a bare "The reference word for the boat trip is
+ * <word>." Private, as it might a shared code, so the search never cited it (Olympus #787); the larger Mac judge let it through.
  */
 function telegramBesideLive(token: string): { bytes: Uint8Array; expect: BesideLiveExpectation } {
   const shared = TELEGRAM_BESIDE_LIVE.shared.map((message) => telegramText(message.index, message.text, telegramAt(message.day)));
@@ -379,8 +381,8 @@ function telegramBesideLive(token: string): { bytes: Uint8Array; expect: BesideL
     messages: [
       ...shared,
       telegramText(2, 'The forecast says calm water until noon.', telegramAt('2024-04-03')),
-      telegramText(3, `The reference word for the boat trip is ${token}.`, telegramAt('2024-04-04')),
-      telegramText(4, 'Back by six, before the light goes.', telegramAt('2024-04-05')),
+      telegramText(3, `Packing for the boat trip: life jackets, a flask of tea, two sandwiches. The reference word for this trip is ${token}.`, telegramAt('2024-04-04')),
+      telegramText(4, `Back by six, before the light goes, then lentil soup at home. Same reference word as before: ${token}.`, telegramAt('2024-04-05')),
     ],
   });
   const exported = telegramFullExport({ chats: [chat], omit: TELEGRAM_OTHER_PARTS });
@@ -442,16 +444,17 @@ function whatsappSmall(token: string): BuiltArchive {
 
 /**
  * The export of the WhatsApp chat the live seed holds (archive-live-seed-whatsapp.ts): the two messages live capture already has, a
- * notice WhatsApp writes (left out, not read), and two new messages with the token, all in the direct chat of the same name, so the
- * import joins the live chat. The owner's own messages show under the owner's name, which the import learns from the shared one.
+ * notice WhatsApp writes (left out, not read), and two new, plainly ordinary messages with the token (a bare code-word line reads
+ * like a shared code to a small judge; see Telegram's above), all in the direct chat of the same name, so the import joins the live
+ * chat. The owner's own messages show under the owner's name, which the import learns from the shared one.
  */
 function whatsappBesideLive(token: string): { bytes: Uint8Array; expect: BesideLiveExpectation } {
   const shared: SyntheticMessage[] = WHATSAPP_BESIDE_SHARED.map(([at, sender, text]) => ({ at, sender: sender ?? WHATSAPP_BESIDE_OWNER, text }));
   const messages: SyntheticMessage[] = [
     notice('2024-04-13T12:00:00'),
     ...shared,
-    { at: '2024-04-15T12:00:00', sender: WHATSAPP_BESIDE_CHAT, text: `The reference word for the trip is ${token}.` },
-    { at: '2024-04-16T12:00:00', sender: WHATSAPP_BESIDE_OWNER, text: `Lunch at the harbour after, same word ${token}.` },
+    { at: '2024-04-15T12:00:00', sender: WHATSAPP_BESIDE_CHAT, text: `Packing for the ferry trip: rain jackets, sandwiches and the map. The reference word for this trip is ${token}.` },
+    { at: '2024-04-16T12:00:00', sender: WHATSAPP_BESIDE_OWNER, text: `Lunch at the harbour after, then the bus home. Same reference word as before: ${token}.` },
   ];
   return {
     bytes: chatZip(chatText(messages, { style: 'ios-24-dmy' }), { textName: `WhatsApp Chat - ${WHATSAPP_BESIDE_CHAT}.txt` }),
