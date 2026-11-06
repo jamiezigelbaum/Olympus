@@ -36,7 +36,7 @@
  * reader is entitled to know the difference.
  */
 import { sharedDataPath } from '../core/olympus-layout.ts';
-import { chmod, mkdir, open, readFile } from 'node:fs/promises';
+import { chmod, mkdir, open, readFile, stat } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { PUBLIC_RUNTIME_BUILD } from '../core/build-flavor.ts';
 
@@ -203,10 +203,63 @@ export async function appendEmbeddingLedgerEntryOnce(
     await appendEmbeddingLedgerEntry(path, entry);
     return true;
   }
-  const existing = await readEmbeddingLedger(path);
-  if (existing.entries.some((recorded) => recorded.entry_id === id)) return false;
+  const known = await recordedEntryIds(path);
+  if (known.has(id)) return false;
+  // Not added to `known`: the next call reads this line back from the file's
+  // tail, so a ledger deleted in between is not remembered as holding it.
   await appendEmbeddingLedgerEntry(path, entry);
   return true;
+}
+
+/**
+ * The ids already recorded at `path`, read incrementally.
+ *
+ * The ledger only grows (no rotation, see the header), so a reader that has
+ * seen the first N bytes only needs the bytes after N. Re-reading the whole
+ * file on every append made each tier move slower than the last: at 63k notes
+ * (55 MB) a third of the worker's main thread went to re-parsing it. A file
+ * that shrank or has a new inode was replaced or truncated by hand, so it is
+ * read again in full.
+ * Only complete lines are consumed; a line still being written by a concurrent
+ * appender is picked up on the next call.
+ */
+const recordedIdCache = new Map<string, { inode: number; bytes: number; ids: Set<string> }>();
+
+async function recordedEntryIds(path: string): Promise<Set<string>> {
+  let size = 0;
+  let inode = 0;
+  try {
+    ({ size, ino: inode } = await stat(path));
+  } catch (error) {
+    if ((error as { code?: unknown } | null | undefined)?.code !== 'ENOENT') throw error;
+  }
+  let cached = recordedIdCache.get(path);
+  if (!cached || size < cached.bytes || inode !== cached.inode) {
+    cached = { inode, bytes: 0, ids: new Set() };
+    for (const entry of EMBEDDING_LEDGER_BACKFILL) {
+      const id = entry.entry_id?.trim();
+      if (id) cached.ids.add(id);
+    }
+    recordedIdCache.set(path, cached);
+  }
+  if (size > cached.bytes) {
+    const handle = await open(path, 'r');
+    try {
+      const tail = Buffer.alloc(size - cached.bytes);
+      const { bytesRead } = await handle.read(tail, 0, tail.length, cached.bytes);
+      const complete = tail.subarray(0, bytesRead).lastIndexOf(0x0a) + 1;
+      if (complete > 0) {
+        for (const entry of parseEmbeddingLedgerJsonl(tail.subarray(0, complete).toString('utf8')).entries) {
+          const id = entry.entry_id?.trim();
+          if (id) cached.ids.add(id);
+        }
+        cached.bytes += complete;
+      }
+    } finally {
+      await handle.close();
+    }
+  }
+  return cached.ids;
 }
 
 /**

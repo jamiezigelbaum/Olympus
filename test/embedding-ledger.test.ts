@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync, statSync } from 'node:fs';
+import { appendFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, test } from 'bun:test';
@@ -136,6 +136,28 @@ describe('append and read', () => {
 
     const ledger = await readEmbeddingLedger(path);
     expect(ledger.entries.filter((found) => found.entry_id === 'only-once')).toHaveLength(1);
+  });
+
+  test('appendOnce sees ids another writer appended, and only reads each byte once', async () => {
+    const path = tempLedgerPath();
+    expect(await appendEmbeddingLedgerEntryOnce(path, entry({ entry_id: 'first' }))).toBe(true);
+    // Another process appends a complete line, then starts a line it has not finished.
+    appendFileSync(path, `${JSON.stringify(entry({ entry_id: 'from-elsewhere' }))}\n`);
+    const partial = JSON.stringify(entry({ entry_id: 'half-written' }));
+    appendFileSync(path, partial.slice(0, 20));
+
+    expect(await appendEmbeddingLedgerEntryOnce(path, entry({ entry_id: 'from-elsewhere' }))).toBe(false);
+    expect(await appendEmbeddingLedgerEntryOnce(path, entry({ entry_id: 'first' }))).toBe(false);
+  });
+
+  test('appendOnce rereads a ledger that was replaced by a shorter file', async () => {
+    const path = tempLedgerPath();
+    await appendEmbeddingLedgerEntryOnce(path, entry({ entry_id: 'gone-a' }));
+    await appendEmbeddingLedgerEntryOnce(path, entry({ entry_id: 'gone-b' }));
+    writeFileSync(path, `${JSON.stringify(entry({ entry_id: 'kept' }))}\n`);
+
+    expect(await appendEmbeddingLedgerEntryOnce(path, entry({ entry_id: 'kept' }))).toBe(false);
+    expect(await appendEmbeddingLedgerEntryOnce(path, entry({ entry_id: 'gone-a' }))).toBe(true);
   });
 
   test('an entry with no id is never deduplicated away', async () => {
