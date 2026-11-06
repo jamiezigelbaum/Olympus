@@ -59520,7 +59520,7 @@ var init_tier_names_only_settle = __esm(() => {
 });
 
 // src/workers/embedding-ledger.ts
-import { mkdir as mkdir3, open as open2, readFile as readFile2 } from "node:fs/promises";
+import { mkdir as mkdir3, open as open2, readFile as readFile2, stat as stat2 } from "node:fs/promises";
 import { dirname as dirname48 } from "node:path";
 function isOwnerApprovedEmbeddingLedgerEntry(entry) {
   return entry.approved_by === EMBEDDING_LEDGER_OWNER_APPROVAL;
@@ -59550,11 +59550,50 @@ async function appendEmbeddingLedgerEntryOnce(path, entry) {
     await appendEmbeddingLedgerEntry(path, entry);
     return true;
   }
-  const existing = await readEmbeddingLedger(path);
-  if (existing.entries.some((recorded) => recorded.entry_id === id))
+  const known = await recordedEntryIds(path);
+  if (known.has(id))
     return false;
   await appendEmbeddingLedgerEntry(path, entry);
   return true;
+}
+async function recordedEntryIds(path) {
+  let size = 0;
+  let inode = 0;
+  try {
+    ({ size, ino: inode } = await stat2(path));
+  } catch (error) {
+    if (error?.code !== "ENOENT")
+      throw error;
+  }
+  let cached2 = recordedIdCache.get(path);
+  if (!cached2 || size < cached2.bytes || inode !== cached2.inode) {
+    cached2 = { inode, bytes: 0, ids: new Set };
+    for (const entry of EMBEDDING_LEDGER_BACKFILL) {
+      const id = entry.entry_id?.trim();
+      if (id)
+        cached2.ids.add(id);
+    }
+    recordedIdCache.set(path, cached2);
+  }
+  if (size > cached2.bytes) {
+    const handle = await open2(path, "r");
+    try {
+      const tail = Buffer.alloc(size - cached2.bytes);
+      const { bytesRead } = await handle.read(tail, 0, tail.length, cached2.bytes);
+      const complete = tail.subarray(0, bytesRead).lastIndexOf(10) + 1;
+      if (complete > 0) {
+        for (const entry of parseEmbeddingLedgerJsonl(tail.subarray(0, complete).toString("utf8")).entries) {
+          const id = entry.entry_id?.trim();
+          if (id)
+            cached2.ids.add(id);
+        }
+        cached2.bytes += complete;
+      }
+    } finally {
+      await handle.close();
+    }
+  }
+  return cached2.ids;
 }
 async function readEmbeddingLedger(path) {
   let raw = "";
@@ -59656,10 +59695,11 @@ function isScope(value) {
   }
   return true;
 }
-var EMBEDDING_LEDGER_PATH_ENV = "OLYMPUS_EMBEDDING_LEDGER_PATH", EMBEDDING_LEDGER_OWNER_APPROVAL, EMBEDDING_LEDGER_KIND_TEXT, EMBEDDING_LEDGER_APPROVAL_TEXT, EMBEDDING_LEDGER_STATUS_TEXT, WIPED_CORPORA, QWEN3_MODEL_ID = "secure-local-qwen3-embed", QWEN3_EPOCH = "local:openai-compatible:secure-local-qwen3-embed:2560", DELPHI_ROUTER_ENDPOINT = "http://127.0.0.1:28090/v1", PREVIOUS_ENDPOINT = "http://127.0.0.1:28011/v1", GEMINI_MODEL_ID = "gemini-embedding-2", LANE_ENABLEMENT_CORPORA, EMBEDDING_LEDGER_BACKFILL;
+var EMBEDDING_LEDGER_PATH_ENV = "OLYMPUS_EMBEDDING_LEDGER_PATH", EMBEDDING_LEDGER_OWNER_APPROVAL, recordedIdCache, EMBEDDING_LEDGER_KIND_TEXT, EMBEDDING_LEDGER_APPROVAL_TEXT, EMBEDDING_LEDGER_STATUS_TEXT, WIPED_CORPORA, QWEN3_MODEL_ID = "secure-local-qwen3-embed", QWEN3_EPOCH = "local:openai-compatible:secure-local-qwen3-embed:2560", DELPHI_ROUTER_ENDPOINT = "http://127.0.0.1:28090/v1", PREVIOUS_ENDPOINT = "http://127.0.0.1:28011/v1", GEMINI_MODEL_ID = "gemini-embedding-2", LANE_ENABLEMENT_CORPORA, EMBEDDING_LEDGER_BACKFILL;
 var init_embedding_ledger = __esm(() => {
   init_olympus_layout();
   EMBEDDING_LEDGER_OWNER_APPROVAL = PUBLIC_RUNTIME_BUILD ? "owner" : "jamie";
+  recordedIdCache = new Map;
   EMBEDDING_LEDGER_KIND_TEXT = {
     model_decision: "Model decision",
     epoch_change: "Epoch changed",
@@ -75849,8 +75889,8 @@ async function redactCaptureSpoolLines(options) {
     if (options.through && name > options.through.file)
       break;
     const path = join61(options.dir, name);
-    const stat2 = lstatSync26(path);
-    if (!stat2.isFile() || stat2.isSymbolicLink())
+    const stat3 = lstatSync26(path);
+    if (!stat3.isFile() || stat3.isSymbolicLink())
       continue;
     const startLine = options.from?.file === name ? options.from.line : 0;
     const endLine = options.through?.file === name ? options.through.line : Number.POSITIVE_INFINITY;
@@ -75895,8 +75935,8 @@ async function redactCaptureSpoolLines(options) {
         lineIndex += 1;
       };
       scan:
-        while (position < stat2.size && lineIndex < endLine) {
-          const read = readSync3(fd2, chunk, 0, Math.min(SPOOL_SCAN_CHUNK_BYTES, stat2.size - position), position);
+        while (position < stat3.size && lineIndex < endLine) {
+          const read = readSync3(fd2, chunk, 0, Math.min(SPOOL_SCAN_CHUNK_BYTES, stat3.size - position), position);
           if (read <= 0)
             break;
           let at = 0;
@@ -76139,14 +76179,14 @@ function* spoolFileLines(fd2, start, size, maxLineBytes) {
     position += read;
   }
 }
-function rememberSpoolOffset(path, stat2, line, offset) {
+function rememberSpoolOffset(path, stat3, line, offset) {
   if (line <= 0)
     return;
   const digest3 = spoolBoundaryDigest(path, offset);
   if (!digest3)
     return;
-  const list = (hints.get(path) ?? []).filter((hint) => hint.line !== line && hint.dev === stat2.dev && hint.ino === stat2.ino);
-  list.push({ dev: stat2.dev, ino: stat2.ino, line, offset, digest: digest3 });
+  const list = (hints.get(path) ?? []).filter((hint) => hint.line !== line && hint.dev === stat3.dev && hint.ino === stat3.ino);
+  list.push({ dev: stat3.dev, ino: stat3.ino, line, offset, digest: digest3 });
   list.sort((a, b) => a.line - b.line);
   while (list.length > MAX_HINTS_PER_FILE)
     list.shift();
@@ -76155,14 +76195,14 @@ function rememberSpoolOffset(path, stat2, line, offset) {
   while (hints.size > MAX_HINT_FILES)
     hints.delete(hints.keys().next().value);
 }
-function spoolLineOffset(fd2, path, stat2, line) {
+function spoolLineOffset(fd2, path, stat3, line) {
   if (line <= 0)
     return 0;
   let fromLine = 0;
   let fromOffset = 0;
   const byte = Buffer.alloc(1);
   for (const hint of hints.get(path) ?? []) {
-    if (hint.line > line || hint.dev !== stat2.dev || hint.ino !== stat2.ino || hint.offset > stat2.size)
+    if (hint.line > line || hint.dev !== stat3.dev || hint.ino !== stat3.ino || hint.offset > stat3.size)
       continue;
     if (hint.offset > 0 && (readSync5(fd2, byte, 0, 1, hint.offset - 1) !== 1 || byte[0] !== 10))
       continue;
@@ -76178,8 +76218,8 @@ function spoolLineOffset(fd2, path, stat2, line) {
   const buffer = Buffer.allocUnsafe(CHUNK_BYTES);
   let position = fromOffset;
   let counted = fromLine;
-  while (position < stat2.size) {
-    const read = readSync5(fd2, buffer, 0, Math.min(CHUNK_BYTES, stat2.size - position), position);
+  while (position < stat3.size) {
+    const read = readSync5(fd2, buffer, 0, Math.min(CHUNK_BYTES, stat3.size - position), position);
     if (read <= 0)
       break;
     let from = 0;
@@ -76190,7 +76230,7 @@ function spoolLineOffset(fd2, path, stat2, line) {
       counted += 1;
       if (counted === line) {
         const offset = position + found + 1;
-        rememberSpoolOffset(path, stat2, line, offset);
+        rememberSpoolOffset(path, stat3, line, offset);
         return offset;
       }
       from = found + 1;
@@ -76763,8 +76803,8 @@ function telegramLiveMediaPath(spoolDir, locator) {
   if (!path.startsWith(`${root}${sep10}`))
     return;
   try {
-    const stat2 = lstatSync27(path);
-    return stat2.isFile() && !stat2.isSymbolicLink() ? path : undefined;
+    const stat3 = lstatSync27(path);
+    return stat3.isFile() && !stat3.isSymbolicLink() ? path : undefined;
   } catch {
     return;
   }
@@ -76872,8 +76912,8 @@ function telegramMediaDiskLow(spoolDir, space = diskSpaceOf) {
   }
 }
 var TELEGRAM_CHILD_KEY = "media", TELEGRAM_MEDIA_CHILD_SUFFIX, TELEGRAM_LIVE_MEDIA_LOCATOR_PREFIX = "telegram-live-media:v1:", LIVE_MEDIA_MAX_READ_BYTES, CAPTURE_MARK2 = "~at:", MEDIA_DISK_FLOOR_BYTES, MEDIA_DISK_FLOOR_SHARE = 0.05, TEMPORARY_MARK = ".tmp.", diskSpaceOf = (path) => {
-  const stat2 = statfsSync(path);
-  return { free: Number(stat2.bavail) * Number(stat2.bsize), total: Number(stat2.blocks) * Number(stat2.bsize) };
+  const stat3 = statfsSync(path);
+  return { free: Number(stat3.bavail) * Number(stat3.bsize), total: Number(stat3.blocks) * Number(stat3.bsize) };
 }, MEDIA_WAITING_FILE = ".capture-media-waiting.jsonl";
 var init_media_child = __esm(() => {
   TELEGRAM_MEDIA_CHILD_SUFFIX = `${CHILD_ITEM_ID_SEPARATOR}${TELEGRAM_CHILD_KEY}`;
@@ -77017,8 +77057,8 @@ function readTelegramCaptureSpool(options) {
       if (admitThrough && name > admitThrough.file)
         break;
       const path = join63(options.spoolDir, name);
-      const stat2 = lstatSync28(path);
-      if (!stat2.isFile() || stat2.isSymbolicLink()) {
+      const stat3 = lstatSync28(path);
+      if (!stat3.isFile() || stat3.isSymbolicLink()) {
         throw new Error("Telegram capture spool refuses non-regular JSONL files.");
       }
       const fd2 = openSync17(path, "r");
@@ -77026,14 +77066,14 @@ function readTelegramCaptureSpool(options) {
       let lastEnd = 0;
       try {
         const startLine = cursor?.file === name ? cursor.line : 0;
-        const startOffset = spoolLineOffset(fd2, path, stat2, startLine);
+        const startOffset = spoolLineOffset(fd2, path, stat3, startLine);
         if (startOffset === undefined)
           throw new Error("Telegram capture spool cursor is beyond the durable spool tail.");
         const admitLine = admitThrough && name === admitThrough.file ? admitThrough.line : Number.POSITIVE_INFINITY;
         const isLastFile = fileIndex === names.length - 1;
         let lineIndex = startLine;
         const bytesBefore = bytesRead;
-        for (const line of spoolFileLines(fd2, startOffset, stat2.size, Math.max(1, options.maxRecordBytes ?? MAX_RECORD_BYTES))) {
+        for (const line of spoolFileLines(fd2, startOffset, stat3.size, Math.max(1, options.maxRecordBytes ?? MAX_RECORD_BYTES))) {
           if (lineIndex >= admitLine)
             break;
           lineIndex += 1;
@@ -77042,7 +77082,7 @@ function readTelegramCaptureSpool(options) {
           resumeCursor = `${name}:${lineIndex}`;
           lastLine = lineIndex;
           lastEnd = line.end;
-          const atEnd = isLastFile && line.end >= stat2.size;
+          const atEnd = isLastFile && line.end >= stat3.size;
           const spent = bytesRead >= maxReadBytes || linesRead >= MAX_LINES_PER_READ;
           const stop = () => {
             if (!spent)
@@ -77099,7 +77139,7 @@ function readTelegramCaptureSpool(options) {
         }
       } finally {
         if (lastLine > 0)
-          rememberSpoolOffset(path, stat2, lastLine, lastEnd);
+          rememberSpoolOffset(path, stat3, lastLine, lastEnd);
         closeSync17(fd2);
       }
     }
@@ -77116,12 +77156,12 @@ function telegramCaptureCursorOffset(spoolDir, cursorText) {
   const cursor = parseTelegramCaptureSpoolCursor(cursorText);
   const path = join63(spoolDir, cursor.file);
   try {
-    const stat2 = lstatSync28(path);
-    if (!stat2.isFile() || stat2.isSymbolicLink())
+    const stat3 = lstatSync28(path);
+    if (!stat3.isFile() || stat3.isSymbolicLink())
       return;
     const fd2 = openSync17(path, "r");
     try {
-      return spoolLineOffset(fd2, path, stat2, cursor.line);
+      return spoolLineOffset(fd2, path, stat3, cursor.line);
     } finally {
       closeSync17(fd2);
     }
@@ -77137,12 +77177,12 @@ function telegramCaptureSpoolCursorState(spoolDir, cursorText, names = telegramC
   if (cursor.line === 0)
     return "ok";
   const path = join63(spoolDir, cursor.file);
-  const stat2 = lstatSync28(path);
-  if (!stat2.isFile() || stat2.isSymbolicLink())
+  const stat3 = lstatSync28(path);
+  if (!stat3.isFile() || stat3.isSymbolicLink())
     return "ok";
   const fd2 = openSync17(path, "r");
   try {
-    return spoolLineOffset(fd2, path, stat2, cursor.line) === undefined ? "reset" : "ok";
+    return spoolLineOffset(fd2, path, stat3, cursor.line) === undefined ? "reset" : "ok";
   } finally {
     closeSync17(fd2);
   }
@@ -77176,10 +77216,10 @@ function readTelegramCaptureSpoolNewestCapturedAt(spoolDir) {
 function readTelegramCaptureHeartbeat(spoolDir) {
   try {
     const path = join63(spoolDir, TELEGRAM_CAPTURE_HEARTBEAT_FILE);
-    const stat2 = lstatSync28(path);
-    if (!stat2.isFile() || stat2.isSymbolicLink() || stat2.size > MAX_HEARTBEAT_BYTES)
+    const stat3 = lstatSync28(path);
+    if (!stat3.isFile() || stat3.isSymbolicLink() || stat3.size > MAX_HEARTBEAT_BYTES)
       return;
-    const buffer = Buffer.alloc(stat2.size);
+    const buffer = Buffer.alloc(stat3.size);
     const fd2 = openSync17(path, "r");
     try {
       readSync6(fd2, buffer, 0, buffer.length, 0);
@@ -77196,11 +77236,11 @@ function readTelegramCaptureHeartbeat(spoolDir) {
   }
 }
 function spoolTailLines(path) {
-  const stat2 = lstatSync28(path);
-  if (!stat2.isFile() || stat2.isSymbolicLink())
+  const stat3 = lstatSync28(path);
+  if (!stat3.isFile() || stat3.isSymbolicLink())
     return [];
-  const start = Math.max(0, stat2.size - MAX_TAIL_SCAN_BYTES);
-  const buffer = Buffer.alloc(stat2.size - start);
+  const start = Math.max(0, stat3.size - MAX_TAIL_SCAN_BYTES);
+  const buffer = Buffer.alloc(stat3.size - start);
   const fd2 = openSync17(path, "r");
   try {
     let read = 0;
@@ -77381,13 +77421,13 @@ function readTelegramCaptureSpoolNewest(options) {
   assertTelegramCaptureSpoolDirectory(options.spoolDir);
   for (const name of telegramCaptureSpoolFiles(options.spoolDir)) {
     const path = join63(options.spoolDir, name);
-    const stat2 = lstatSync28(path);
-    if (!stat2.isFile() || stat2.isSymbolicLink())
+    const stat3 = lstatSync28(path);
+    if (!stat3.isFile() || stat3.isSymbolicLink())
       continue;
     const fd2 = openSync17(path, "r");
     try {
       let lineNumber = 0;
-      for (const line of spoolFileLines(fd2, 0, stat2.size, MAX_RECORD_BYTES)) {
+      for (const line of spoolFileLines(fd2, 0, stat3.size, MAX_RECORD_BYTES)) {
         lineNumber += 1;
         if (line.text === undefined || !line.text.trim())
           continue;
@@ -79477,7 +79517,7 @@ var init_spool = __esm(() => {
 });
 
 // src/workers/dropbox-files/extraction-source.ts
-import { readFile as readFile4, realpath, stat as stat2 } from "node:fs/promises";
+import { readFile as readFile4, realpath, stat as stat3 } from "node:fs/promises";
 import { relative as relative9, resolve as resolve16, sep as sep12 } from "node:path";
 
 class DropboxExtractionSource {
@@ -79728,7 +79768,7 @@ function singleAccount(scopes) {
 async function readVerifiedCandidate(input) {
   let fileStat;
   try {
-    fileStat = await stat2(input.candidatePath);
+    fileStat = await stat3(input.candidatePath);
   } catch {
     return;
   }
@@ -80361,7 +80401,7 @@ var init_child_media = __esm(() => {
 });
 
 // src/workers/whatsapp/extraction-source.ts
-import { readFile as readFile5, realpath as realpath2, stat as stat3 } from "node:fs/promises";
+import { readFile as readFile5, realpath as realpath2, stat as stat4 } from "node:fs/promises";
 import { closeSync as closeSync20, constants as constants9, openSync as openSync20, readSync as readSync8, rmSync as rmSync20 } from "node:fs";
 import { basename as basename11, join as join66, relative as relative11, resolve as resolve19, sep as sep14 } from "node:path";
 
@@ -80421,7 +80461,7 @@ class WhatsAppExtractionSource {
       if (!await this.pathIsInsideMediaRoot(path)) {
         throw new FileExtractionSourceError("source_permission_denied");
       }
-      const file = await stat3(path);
+      const file = await stat4(path);
       if (!file.isFile())
         throw new FileExtractionSourceError("source_content_unavailable");
       if (options.maxBytes !== undefined && file.size > options.maxBytes) {
@@ -100535,8 +100575,8 @@ function assertAccountFolderOwned(target) {
   }
 }
 function assertRegularFileTarget(path) {
-  const stat4 = lstatSync31(path);
-  if (!stat4.isFile()) {
+  const stat5 = lstatSync31(path);
+  if (!stat5.isFile()) {
     throw new OperationError("invalid_params", `Refusing to delete non-file target outside an Olympus-owned root: ${path}`);
   }
 }
@@ -102326,8 +102366,8 @@ function connectLinuxOwnerBridgeHost(path, transport) {
   let closed = false;
   const request = async (suffix, method = "GET") => {
     const workerPath2 = validateWorkerSocketDirectory(transport);
-    const stat4 = lstatSync32(path);
-    if (!workerPath2 || dirname69(path) !== dirname69(workerPath2) || !/^owner-host-\d+-[a-f0-9]{12}\.sock$/.test(path.split("/").at(-1)) || !stat4.isSocket() || stat4.uid !== (transport?.uid ?? process.getuid?.()) || (stat4.mode & 511) !== 384)
+    const stat5 = lstatSync32(path);
+    if (!workerPath2 || dirname69(path) !== dirname69(workerPath2) || !/^owner-host-\d+-[a-f0-9]{12}\.sock$/.test(path.split("/").at(-1)) || !stat5.isSocket() || stat5.uid !== (transport?.uid ?? process.getuid?.()) || (stat5.mode & 511) !== 384)
       throw new Error("Unsafe owner host socket.");
     return fetch("http://localhost" + suffix, { unix: path, method, signal: AbortSignal.timeout(5000) });
   };
@@ -105806,7 +105846,7 @@ function parseLinuxStatus(line2) {
     return;
   }
 }
-function stat4(pid, proc) {
+function stat5(pid, proc) {
   const s = proc.read(`/proc/${pid}/stat`);
   const f = s.slice(s.lastIndexOf(")") + 1).trim().split(/\s+/);
   if (!/^\d+$/.test(f[19] ?? "") || f[0] === "Z" || f[0] === "X")
@@ -105823,7 +105863,7 @@ function verifyLinuxInstance(e, w, proc = realProc) {
   try {
     if (new Set([w.pid, e.stage0Pid, e.stage1Pid, e.daemonPid]).size !== 4)
       return false;
-    const wd = stat4(w.pid, proc), s0 = stat4(e.stage0Pid, proc), s1 = stat4(e.stage1Pid, proc), d = stat4(e.daemonPid, proc);
+    const wd = stat5(w.pid, proc), s0 = stat5(e.stage0Pid, proc), s1 = stat5(e.stage1Pid, proc), d = stat5(e.daemonPid, proc);
     if (wd.start !== w.startTime || s0.start !== e.stage0Start || s1.start !== e.stage1Start || d.start !== e.daemonStart)
       return false;
     if (s0.parent !== w.pid || s1.parent !== e.stage0Pid || d.parent !== e.stage1Pid)
@@ -105874,7 +105914,7 @@ function inspectLinuxNamespace(e, w, ports, proc = realProc) {
         const visited = new Set;
         while (parent !== e.daemonPid && !visited.has(parent) && parent > 1) {
           visited.add(parent);
-          parent = stat4(parent, proc).parent;
+          parent = stat5(parent, proc).parent;
         }
         if (parent !== e.daemonPid)
           continue;
@@ -106821,8 +106861,8 @@ async function recoverStrandedGroups(statePath, now) {
 function processGroupOf(pid) {
   try {
     if (process.platform === "linux") {
-      const stat5 = readFileSync55(`/proc/${pid}/stat`, "utf8");
-      const fields = stat5.slice(stat5.lastIndexOf(")") + 1).trim().split(/\s+/);
+      const stat6 = readFileSync55(`/proc/${pid}/stat`, "utf8");
+      const fields = stat6.slice(stat6.lastIndexOf(")") + 1).trim().split(/\s+/);
       const pgrp = Number(fields[2]);
       return Number.isInteger(pgrp) ? pgrp : undefined;
     }
@@ -109092,10 +109132,10 @@ function preflightEnginePaths(homeDir, paths = enginePaths(homeDir), ownerUid = 
     let problem;
     try {
       assertManagedPathParentsSync(homeDir, dir, label);
-      const stat5 = existsSync69(dir) || isSymlink(dir) ? lstatSync35(dir) : undefined;
-      if (stat5 && (stat5.isSymbolicLink() || !stat5.isDirectory()))
+      const stat6 = existsSync69(dir) || isSymlink(dir) ? lstatSync35(dir) : undefined;
+      if (stat6 && (stat6.isSymbolicLink() || !stat6.isDirectory()))
         problem = `${dir} is not a real folder (a symbolic link or a file).`;
-      else if (stat5 && ownerUid !== undefined && stat5.uid !== ownerUid)
+      else if (stat6 && ownerUid !== undefined && stat6.uid !== ownerUid)
         problem = `${dir} belongs to another user.`;
     } catch (error) {
       problem = error instanceof Error ? error.message : String(error);
@@ -109119,8 +109159,8 @@ function preflightEnginePaths(homeDir, paths = enginePaths(homeDir), ownerUid = 
     }
     if (!existsSync69(path))
       continue;
-    const stat5 = lstatSync35(path);
-    if (!stat5.isFile() || stat5.isSymbolicLink()) {
+    const stat6 = lstatSync35(path);
+    if (!stat6.isFile() || stat6.isSymbolicLink()) {
       throw new OperationError("config_error", `Olympus cannot install here: ${path} is not a regular file.`, "Remove it by hand, then run olympus engine install again. Nothing was changed.");
     }
   }
@@ -109235,8 +109275,8 @@ function uninstallEngineUnderFence(options = {}) {
     mustSucceed(exec("launchctl", ["bootout", serviceTarget(options.uid)]), "stop the login engine");
   let removed = false;
   if (existsSync69(agentPath)) {
-    const stat5 = lstatSync35(agentPath);
-    if (!stat5.isFile() || stat5.isSymbolicLink()) {
+    const stat6 = lstatSync35(agentPath);
+    if (!stat6.isFile() || stat6.isSymbolicLink()) {
       throw new OperationError("config_error", `${paths.plistPath} is not a regular file; remove it by hand.`);
     }
     removed = removeFileDurablySync(agentPath);
@@ -109280,11 +109320,11 @@ function directoryBytes(path, budget = { entries: 20000 }) {
       break;
     const child2 = join99(path, name);
     try {
-      const stat5 = lstatSync35(child2);
-      if (stat5.isDirectory())
+      const stat6 = lstatSync35(child2);
+      if (stat6.isDirectory())
         total += directoryBytes(child2, budget);
-      else if (stat5.isFile())
-        total += stat5.size;
+      else if (stat6.isFile())
+        total += stat6.size;
     } catch {}
   }
   return total;
@@ -109434,8 +109474,8 @@ function installedEngineHelper(paths) {
   if (!path)
     return;
   try {
-    const stat5 = lstatSync35(path);
-    if (!stat5.isFile() || (stat5.mode & 73) === 0)
+    const stat6 = lstatSync35(path);
+    if (!stat6.isFile() || (stat6.mode & 73) === 0)
       return;
     return path;
   } catch {
@@ -109445,8 +109485,8 @@ function installedEngineHelper(paths) {
 function installedProgram(plistPath) {
   let text3;
   try {
-    const stat5 = lstatSync35(plistPath);
-    if (!stat5.isFile() || stat5.isSymbolicLink())
+    const stat6 = lstatSync35(plistPath);
+    if (!stat6.isFile() || stat6.isSymbolicLink())
       return;
     text3 = readFileSync56(plistPath, "utf8");
   } catch {
@@ -109630,8 +109670,8 @@ function defaultExec2(command, args) {
 }
 function writeIfChanged(path, text3) {
   if (existsSync69(path)) {
-    const stat5 = lstatSync35(path);
-    if (!stat5.isFile() || stat5.isSymbolicLink()) {
+    const stat6 = lstatSync35(path);
+    if (!stat6.isFile() || stat6.isSymbolicLink()) {
       throw new OperationError("config_error", `${path} is not a regular file; remove it by hand.`);
     }
     if (readFileSync56(path, "utf8") === text3)
@@ -113036,17 +113076,17 @@ function compareWithSnapshot(model, context2, unnamed, ordinaryWord, asked, thin
       }
       const watched = model.forms.has(token.norm);
       if (watched) {
-        const stat5 = stats.get(token.norm) ?? { capitalized: 0, lower: 0, lowerAnywhere: 0 };
+        const stat6 = stats.get(token.norm) ?? { capitalized: 0, lower: 0, lowerAnywhere: 0 };
         const prose = entry.kind === "text" || entry.kind === "user_question";
         if (token.capitalized)
-          stat5.capitalized += 1;
+          stat6.capitalized += 1;
         else {
           if (entry.kind !== "user_question")
-            stat5.lower += 1;
+            stat6.lower += 1;
           if (prose && !token.labelled)
-            stat5.lowerAnywhere += 1;
+            stat6.lowerAnywhere += 1;
         }
-        stats.set(token.norm, stat5);
+        stats.set(token.norm, stat6);
       }
       const joined = first ? previous !== undefined : token.joined;
       if (previous && joined && previous.capitalized && token.capitalized && !NAME_STOPWORDS.has(previous.norm) && !NAME_STOPWORDS.has(token.norm) && previous.norm.length >= 2 && token.norm.length >= 2) {
@@ -113130,13 +113170,13 @@ function compareWithSnapshot(model, context2, unnamed, ordinaryWord, asked, thin
       continue;
     if (askedToken(token))
       continue;
-    const stat5 = statOf(token);
-    const dominatedByLower = stat5.lower >= 3 && stat5.lower >= 3 * stat5.capitalized;
+    const stat6 = statOf(token);
+    const dominatedByLower = stat6.lower >= 3 && stat6.lower >= 3 * stat6.capitalized;
     if (copiedWords?.has(token)) {
       nameHit(single.source);
       continue;
     }
-    if (single.labelled || (single.initialOnly ? stat5.lower === 0 && stat5.lowerAnywhere === 0 : !dominatedByLower))
+    if (single.labelled || (single.initialOnly ? stat6.lower === 0 && stat6.lowerAnywhere === 0 : !dominatedByLower))
       nameHit(single.source);
   }
   for (const [token, source] of componentCandidates)
@@ -118377,10 +118417,10 @@ function tierDisplayName(tier) {
 }
 function tightenPermissions(path) {
   try {
-    const stat5 = lstatSync40(path);
-    if (!stat5.isFile())
+    const stat6 = lstatSync40(path);
+    if (!stat6.isFile())
       return {};
-    const mode = stat5.mode & 511;
+    const mode = stat6.mode & 511;
     if ((mode & 63) === 0)
       return { permissions: `0${mode.toString(8).padStart(3, "0")}` };
     chmodSync30(path, 384);
@@ -139282,8 +139322,8 @@ function assertUsableFile(path, label) {
 }
 async function embeddingDrainReadinessProbe(readinessPath, instanceId, child2) {
   try {
-    const stat5 = statSync37(readinessPath);
-    if (!stat5.isFile() || stat5.size > 16 * 1024)
+    const stat6 = statSync37(readinessPath);
+    if (!stat6.isFile() || stat6.size > 16 * 1024)
       return false;
     const receipt = JSON.parse(readFileSync71(readinessPath, "utf8"));
     return receipt.kind === "source_embedding_drain_service_readiness" && receipt.schema_version === 1 && receipt.instance_id === instanceId && receipt.pid === child2.pid && receipt.options_validated === true && receipt.content_free === true;
@@ -140050,8 +140090,8 @@ function ensureStateDir(stateDir) {
   mkdirSync53(stateDir, { recursive: true, mode: 448 });
   const dir = join115(stateDir, "connect-relay");
   mkdirSync53(dir, { recursive: true, mode: 448 });
-  const stat5 = lstatSync42(dir);
-  if (!stat5.isDirectory() || stat5.isSymbolicLink() || typeof process.getuid === "function" && stat5.uid !== process.getuid()) {
+  const stat6 = lstatSync42(dir);
+  if (!stat6.isDirectory() || stat6.isSymbolicLink() || typeof process.getuid === "function" && stat6.uid !== process.getuid()) {
     throw new Error("the connect-relay state directory must be a directory owned by this user");
   }
   chmodSync32(dir, 448);
@@ -145168,8 +145208,8 @@ function readQr(path) {
     throw new Error("Invalid QR artifact.");
   const fd2 = openSync29(path, constants16.O_RDONLY | (constants16.O_NOFOLLOW ?? 0));
   try {
-    const stat5 = fstatSync7(fd2);
-    if (!stat5.isFile() || stat5.size > 1024 * 1024 || (stat5.mode & 63) !== 0 || typeof process.getuid === "function" && stat5.uid !== process.getuid())
+    const stat6 = fstatSync7(fd2);
+    if (!stat6.isFile() || stat6.size > 1024 * 1024 || (stat6.mode & 63) !== 0 || typeof process.getuid === "function" && stat6.uid !== process.getuid())
       throw new Error("Invalid QR artifact.");
     const bytes = readFileSync76(fd2);
     if (!bytes.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10])))
@@ -146289,7 +146329,7 @@ import {
   mkdir as mkdir5,
   open as open6,
   rename as rename2,
-  stat as stat5,
+  stat as stat6,
   unlink
 } from "node:fs/promises";
 import { dirname as dirname90 } from "node:path";
@@ -146472,7 +146512,7 @@ async function makeExistingLedgerPrivate(path) {
 async function rotateLatencyLedgerIfNeeded(path, incomingBytes, maxBytes) {
   let currentBytes = 0;
   try {
-    currentBytes = (await stat5(path)).size;
+    currentBytes = (await stat6(path)).size;
   } catch (error2) {
     if (!isMissingFileError(error2))
       throw error2;
@@ -161367,8 +161407,8 @@ function writeSourceIngestionExclusionsFile(options) {
   const stamp = (options.now ?? new Date).toISOString().split(":").join("").split(".").join("");
   let backupPath;
   if (existsSync89(path)) {
-    const stat6 = lstatSync45(path);
-    if (stat6.isSymbolicLink() || !stat6.isFile()) {
+    const stat7 = lstatSync45(path);
+    if (stat7.isSymbolicLink() || !stat7.isFile()) {
       throw new OperationError("config_error", "The ingestion dispositions path is not a regular file; refusing to write through it.");
     }
     backupPath = `${path}.${stamp}.bak`;
@@ -169371,8 +169411,8 @@ function assertDashboardSourceMayRead(source, sourceDashboard, disconnected) {
 }
 function dashboardRegistryStamp(registryPath) {
   try {
-    const stat6 = statSync39(registryPath);
-    return `${stat6.mtimeMs}:${stat6.size}`;
+    const stat7 = statSync39(registryPath);
+    return `${stat7.mtimeMs}:${stat7.size}`;
   } catch {
     return "absent";
   }
@@ -170788,8 +170828,8 @@ function identityFor(scopePath, version2) {
     ...version2 ? { sourceVersion: version2 } : {}
   };
 }
-function localFilesSourceVersion(stat6) {
-  return `${stat6.size}.${Math.trunc(stat6.mtimeMs)}.${stat6.dev}.${stat6.ino}${stat6.dataless ? ".p" : ""}`;
+function localFilesSourceVersion(stat7) {
+  return `${stat7.size}.${Math.trunc(stat7.mtimeMs)}.${stat7.dev}.${stat7.ino}${stat7.dataless ? ".p" : ""}`;
 }
 function parseVersion(version2) {
   if (!version2)
@@ -170855,12 +170895,12 @@ function createLocalFilesSourceConnector(options) {
   const foldPath = (path, forScopePath = root) => options.scope.ignoresCase?.(forScopePath) ? path.toLowerCase() : path;
   const pathIsAtOrBelow = (path, ancestor) => isWithinScopePath(foldPath(path, path), foldPath(ancestor, ancestor));
   const scopePathOf = (relPath) => relPath === "" ? root : posix3.join(root, relPath).normalize("NFC");
-  const fileItem = (scopePath, name, stat6, decision) => {
+  const fileItem = (scopePath, name, stat7, decision) => {
     const mimeType = fileMimeTypeFromName(name);
-    const modified = new Date(stat6.mtimeMs).toISOString();
-    const namesOnly = decision !== "content" || stat6.dataless;
+    const modified = new Date(stat7.mtimeMs).toISOString();
+    const namesOnly = decision !== "content" || stat7.dataless;
     return {
-      identity: identityFor(scopePath, localFilesSourceVersion(stat6)),
+      identity: identityFor(scopePath, localFilesSourceVersion(stat7)),
       mimeType,
       content: { kind: "metadata_only" },
       metadata: Object.freeze({
@@ -170870,11 +170910,11 @@ function createLocalFilesSourceConnector(options) {
         mimeType,
         locatorUri: scopePath,
         pathDisplay: scopePath,
-        sizeBytes: stat6.size,
+        sizeBytes: stat7.size,
         clientModifiedAt: modified,
         updatedAt: modified,
         folderKeys: folderKeysOf(scopePath),
-        ...stat6.dataless ? { placeholder: true } : {},
+        ...stat7.dataless ? { placeholder: true } : {},
         ...namesOnly ? namesOnlyContentScopeMetadata() : {}
       }),
       fetchedAt: now().toISOString()
@@ -171018,9 +171058,9 @@ function createLocalFilesSourceConnector(options) {
             (stats.topLevel ??= []).push(scopePath);
           stack.push(rel);
         } else if (entry.kind === "file" || entry.kind === undefined) {
-          let stat6;
+          let stat7;
           try {
-            stat6 = scopeRoot.statEntry(rel);
+            stat7 = scopeRoot.statEntry(rel);
           } catch (error2) {
             if (error2 instanceof ScopeSafeError) {
               if (error2.code === "escape") {
@@ -171034,20 +171074,20 @@ function createLocalFilesSourceConnector(options) {
             }
             throw error2;
           }
-          if (stat6.kind === "symlink") {
+          if (stat7.kind === "symlink") {
             emitted.add(scopePath);
             yield symlinkItem(scopePath, entry.name);
             continue;
           }
-          if (stat6.kind === "directory") {
+          if (stat7.kind === "directory") {
             stack.push(rel);
             continue;
           }
-          if (stat6.kind !== "file")
+          if (stat7.kind !== "file")
             continue;
           stats.files += 1;
           emitted.add(scopePath);
-          yield fileItem(scopePath, entry.name, stat6, decision);
+          yield fileItem(scopePath, entry.name, stat7, decision);
         }
       }
     }
@@ -171081,10 +171121,10 @@ function createLocalFilesSourceConnector(options) {
       if (emitted.has(scopePath))
         continue;
       const decision = decide2(scopePath);
-      let stat6;
+      let stat7;
       let linkName;
       try {
-        stat6 = scopeRoot.statRelative(rel);
+        stat7 = scopeRoot.statRelative(rel);
       } catch (error2) {
         if (!(error2 instanceof ScopeSafeError))
           throw error2;
@@ -171111,7 +171151,7 @@ function createLocalFilesSourceConnector(options) {
         yield symlinkItem(scopePath, linkName);
         continue;
       }
-      if (!stat6) {
+      if (!stat7) {
         for (const deletion of deletionsFor(scopePath, deletedSeen))
           yield deletion;
         continue;
@@ -171122,11 +171162,11 @@ function createLocalFilesSourceConnector(options) {
         continue;
       }
       const name = rel.slice(rel.lastIndexOf("/") + 1);
-      if (stat6.kind === "file") {
+      if (stat7.kind === "file") {
         stats.files += 1;
         emitted.add(scopePath);
-        yield fileItem(scopePath, name, stat6, decision);
-      } else if (stat6.kind === "directory" && latest.get(rel) !== "update") {
+        yield fileItem(scopePath, name, stat7, decision);
+      } else if (stat7.kind === "directory" && latest.get(rel) !== "update") {
         yield* walk(scopeRoot, rel, decide2, stats, emitted);
       }
     }
@@ -183202,10 +183242,10 @@ function prepareArchiveImport(input) {
   try {
     if (realpathSync23.native(path) !== path)
       return { kind: "unreadable", code: "escape" };
-    const stat6 = lstatSync46(path);
-    if (stat6.isFile())
+    const stat7 = lstatSync46(path);
+    if (stat7.isFile())
       kind = "file";
-    else if (stat6.isDirectory())
+    else if (stat7.isDirectory())
       kind = "directory";
     else
       return { kind: "unreadable", code: "not_regular" };
@@ -186451,15 +186491,15 @@ function createArchivePathResolver(options = {}) {
       if (refused3)
         return refuse3(refused3.state === "needs_helper" ? "needs_helper" : "needs_permission", refused3.message, refused3);
     }
-    let stat6;
+    let stat7;
     try {
-      stat6 = lstatSync48(real);
+      stat7 = lstatSync48(real);
     } catch {
       return refuse3("not_found", ARCHIVE_PATH_COPY.not_found);
     }
-    if (stat6.isSymbolicLink())
+    if (stat7.isSymbolicLink())
       return refuse3("link", ARCHIVE_PATH_COPY.link);
-    if (!stat6.isFile() && !stat6.isDirectory())
+    if (!stat7.isFile() && !stat7.isDirectory())
       return refuse3("not_regular", ARCHIVE_PATH_COPY.not_regular);
     let canonical2;
     try {
@@ -186470,7 +186510,7 @@ function createArchivePathResolver(options = {}) {
     if (canonical2 !== real && canonical2.normalize("NFC").toLowerCase() !== real.normalize("NFC").toLowerCase()) {
       return refuse3("link", ARCHIVE_PATH_COPY.link);
     }
-    return { ok: true, path: canonical2, kind: stat6.isFile() ? "file" : "folder" };
+    return { ok: true, path: canonical2, kind: stat7.isFile() ? "file" : "folder" };
   };
   return {
     async resolvePath(path) {
@@ -187898,13 +187938,13 @@ function look(path) {
 }
 function lookAt(path) {
   try {
-    const stat6 = lstatSync49(path, { bigint: true });
-    if (stat6.isSymbolicLink())
+    const stat7 = lstatSync49(path, { bigint: true });
+    if (stat7.isSymbolicLink())
       return { kind: "link" };
-    if (stat6.isDirectory())
-      return { kind: "dir", dev: stat6.dev, ino: stat6.ino, size: stat6.size };
-    if (stat6.isFile())
-      return { kind: "file", dev: stat6.dev, ino: stat6.ino, size: stat6.size };
+    if (stat7.isDirectory())
+      return { kind: "dir", dev: stat7.dev, ino: stat7.ino, size: stat7.size };
+    if (stat7.isFile())
+      return { kind: "file", dev: stat7.dev, ino: stat7.ino, size: stat7.size };
     return { kind: "other" };
   } catch (error2) {
     return { kind: error2?.code === "ENOENT" ? "absent" : "unreadable" };
@@ -189473,8 +189513,8 @@ class FileSourceScopeAuthority {
       return;
     try {
       const files = [this.registryPath, defaultThisComputerStatePath(this.registryPath), this.statePath].map((path) => {
-        const stat6 = statSync42(path, { throwIfNoEntry: false });
-        return stat6 ? [stat6.ino, stat6.mtimeMs, stat6.size] : null;
+        const stat7 = statSync42(path, { throwIfNoEntry: false });
+        return stat7 ? [stat7.ino, stat7.mtimeMs, stat7.size] : null;
       });
       return JSON.stringify([ref.accountGeneration, ref.revision, files]);
     } catch {
