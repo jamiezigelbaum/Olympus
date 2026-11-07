@@ -273,7 +273,7 @@ and a loopback fake server only.
 ## Counts-only embedding pre-filter comparison
 
 From a source checkout with dependencies available, select a newly trained
-`weights.json` carrying `prior` (older weights are refused):
+`weights.json` carrying `calibration` (older weights are refused):
 
 ```sh
 bun --no-install eval/calibration/score-prefilter.ts --weights /absolute/path/to/weights.json \

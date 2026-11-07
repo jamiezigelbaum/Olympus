@@ -39,7 +39,7 @@ function fixture(options: { trained?: boolean; memory?: boolean; bias?: number; 
   if (options.trained !== false) {
     mkdirSync(modelDir, { mode: 0o755 });
     writeFileSync(join(modelDir, 'weights.json'), JSON.stringify({ version: '00000000-0000-0000-0000-000000000939',
-      trainedAt: Date.now(), judge, prior: { privateRate: 0.5, trainingPrivateRate: 0.5 }, revisions: JSON.stringify([[ledger.ledgerId(), '0']]) + ':0', model: { weights: new Array(D).fill(0), bias: options.bias ?? -5 } }), { mode: 0o644 });
+      trainedAt: Date.now(), judge, calibration: { privateRate: 0.5, trainingPrivateRate: 0.5 }, revisions: JSON.stringify([[ledger.ledgerId(), '0']]) + ':0', model: { weights: new Array(D).fill(0), bias: options.bias ?? -5 } }), { mode: 0o644 });
   }
   const placementFor = (decision: TierDecision): TierPlacementPlan => ({
     copies: [{ corpusId: decision.contentPending ? 'private' : 'personal', trustDomain: decision.contentPending ? 'secure_local' : 'internal',
@@ -383,7 +383,7 @@ test('sliced training uses judge ledger labels without content hashes and writes
   const persisted = readFileSync(join(f.modelDir, 'weights.json'), 'utf8');
   expect(persisted).not.toContain(ownText);
   expect(JSON.parse(persisted).model.weights).toHaveLength(D);
-  expect(JSON.parse(persisted).prior).toMatchObject({ privateRate: 0.5, trainingPrivateRate: 0.5, personal: 1, private: 1 });
+  expect(JSON.parse(persisted).calibration).toMatchObject({ privateRate: 0.5, trainingPrivateRate: 0.5, personal: 1, private: 1 });
   expect(logs).toHaveLength(1);
   expect(logs[0]).toContain('rows_read=4000 personal=2000 private=2000 outcome=trained');
   expect(logs[0]).toContain(`model_version=${JSON.parse(persisted).version}`);
@@ -1408,7 +1408,7 @@ test('each training drop check has a stable first-failure counter', () => {
 test('older saved weights without prior fail closed and are invalidated for retraining', async () => {
   const f = fixture();
   const path = join(f.modelDir, 'weights.json');
-  const saved = JSON.parse(readFileSync(path, 'utf8')); delete saved.prior;
+  const saved = JSON.parse(readFileSync(path, 'utf8')); delete saved.calibration;
   writeFileSync(path, JSON.stringify(saved));
   const filter = f.make(), question = f.add(1);
   expect(filter.tryClear(question, judge)).toBe(false);

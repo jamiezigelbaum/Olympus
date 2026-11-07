@@ -29,7 +29,7 @@ export function calibrationEmbeddingInputs(item: CalibrationSampleItem): SourceE
 
 export async function scorePrefilter(saved: SavedModel, rounds: readonly Round[],
   embed: (inputs: SourceEmbeddingInput[]) => Promise<number[][]>) {
-  if (!validPrefilterPrior(saved.prior)) throw new Error('invalid_model');
+  if (!validPrefilterPrior(saved.calibration)) throw new Error('invalid_model');
   const report = { labelled: { personal: 0, private: 0, unsure: 0 },
     uncorrected: { cleared: 0, privateMisses: 0, misses: [] } as Scores, corrected: { cleared: 0, privateMisses: 0, misses: [] } as Scores, unscorable: 0 };
   for (const { round, sample, labels } of rounds) for (const item of sample.items) {
@@ -45,7 +45,7 @@ export async function scorePrefilter(saved: SavedModel, rounds: readonly Round[]
         vectors: embeddings.map((values, chunkIndex) => ({ chunkIndex, modelId: EMBEDDING_PREFILTER_MODEL_ID,
           contentHash: String(chunkIndex), embedding: new Uint8Array(new Float32Array(values).buffer) })) });
       const raw = vector && privateProbability(saved.model, vector);
-      const corrected = vector && correctedPrivateProbability(saved.model, vector, saved.prior);
+      const corrected = vector && correctedPrivateProbability(saved.model, vector, saved.calibration);
       if (raw === undefined || corrected === undefined) { report.unscorable++; continue; }
       for (const [scores, p] of [[report.uncorrected, raw], [report.corrected, corrected]] as const) if (p < 0.05) {
         scores.cleared++;
@@ -74,7 +74,7 @@ async function main(): Promise<void> {
   const weights = flag('--weights');
   if (!weights) throw new Error('weights_required');
   const saved = JSON.parse(readFileSync(weights, 'utf8')) as SavedModel;
-  if (!validPrefilterPrior(saved.prior) || privateProbability(saved.model, [1, ...new Array(767).fill(0)]) === undefined) throw new Error('invalid_model');
+  if (!validPrefilterPrior(saved.calibration) || privateProbability(saved.model, [1, ...new Array(767).fill(0)]) === undefined) throw new Error('invalid_model');
   const synthetic = process.argv.includes('--synthetic');
   const rounds: Round[] = synthetic ? [{ round: 1, sample: { items: [{ id: 'synthetic', name: 'Picnic', text: 'Bring sandwiches to the picnic.', mimeType: 'text/plain', modifiedAt: '', path: '', rel: '', area: '', sizeBytes: 29, recordsHint: false }] }, labels: { synthetic: { label: 'private' } } }]
     : loadRounds(flag('--calibration-dir') ?? CALIBRATION_DIR_DEFAULT);

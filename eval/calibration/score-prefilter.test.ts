@@ -6,7 +6,7 @@ import { promptText } from '../../src/workers/source-index/built-in-embedding/pr
 import { EMBEDDINGGEMMA_2 } from '../../src/workers/source-index/built-in-embedding/manifest.ts';
 const marker = 'DO_NOT_PRINT_fixture_item';
 const item = { id: marker, name: marker, text: ' picnic '.repeat(900), mimeType: 'text/plain', modifiedAt: '', path: marker, rel: marker, area: marker, sizeBytes: 1, recordsHint: false };
-const saved = { version: marker, revisions: marker, trainedAt: 1, judge: marker, model: { weights: new Array(D).fill(0), bias: 0 }, prior: { privateRate: 0.03, trainingPrivateRate: 0.5, personal: 970, private: 30, since: 0, until: 1 } };
+const saved = { version: marker, revisions: marker, trainedAt: 1, judge: marker, model: { weights: new Array(D).fill(0), bias: 0 }, calibration: { privateRate: 0.03, trainingPrivateRate: 0.5, personal: 970, private: 30, since: 0, until: 1 } };
 test('production chunking and metadata framing feed the document prefix', () => {
   const inputs = calibrationEmbeddingInputs(item);
   expect(inputs.length).toBe(2);
@@ -26,7 +26,7 @@ test('counts-only report contains no sample fields even on misses or embedding f
 
 
 test('scores the normalized mean of complete Float32 chunk vectors, not per-chunk probabilities', async () => {
-  const model = { ...saved, prior: { ...saved.prior, privateRate: 0.5 }, model: { weights: [10, ...new Array(D - 1).fill(0)], bias: -11 } };
+  const model = { ...saved, calibration: { ...saved.calibration, privateRate: 0.5 }, model: { weights: [10, ...new Array(D - 1).fill(0)], bias: -11 } };
   const report = await scorePrefilter(model, [{ round: 2, sample: { items: [item] }, labels: { [marker]: { label: 'private' } } }],
     async () => [[1, ...new Array(D - 1).fill(0)], [0, 1, ...new Array(D - 2).fill(0)]]);
   expect(report.corrected.privateMisses).toBe(1);

@@ -53,7 +53,7 @@ interface TrainingRun {
 }
 export interface SavedModel {
   revisions: string; version: string; trainedAt: number; judge: string; model: LogisticModel;
-  prior: PrefilterPrior & { personal: number; private: number; since: number; until: number };
+  calibration: PrefilterPrior & { personal: number; private: number; since: number; until: number };
 }
 interface Receipt { subject: TierSnifferSubject; hash: string; reason: string; original: TierDecision }
 interface Audit { misses: boolean[]; stopped: boolean; reason?: 'audit_unreadable' }
@@ -295,7 +295,7 @@ export class EmbeddingPrefilter {
     const detail = training ? ` Training ${training.outcome === 'too_few' ? `found too few examples (needs ${EMBEDDING_PREFILTER_MIN_PER_CLASS} per class)`
       : training.outcome === 'trained' ? `completed with model ${training.version}` : training.outcome === 'failed' ? `failed: ${failure}`
       : training.outcome === 'scanning' ? 'is reading the ledger' : 'is fitting the model'}; read ${training.rows} rows, ${training.counts[0]} Personal and ${training.counts[1]} Private examples in ${Math.round(training.elapsedMs)} ms. Next attempt: ${training.outcome === 'scanning' || training.outcome === 'fitting' ? 'continue next tick' : new Date(training.nextAt).toISOString()}${training.outcome === 'too_few' ? ' or after 1,000 new verdicts, whichever comes first' : ''}.` : '';
-    if (!this.saved || !validPrefilterPrior(this.saved.prior)) return detail ? `Embedding clearing waits.${detail}` : `Embedding clearing waits for ${EMBEDDING_PREFILTER_MIN_PER_CLASS} judge verdicts per class with complete stored vectors.`;
+    if (!this.saved || !validPrefilterPrior(this.saved.calibration)) return detail ? `Embedding clearing waits.${detail}` : `Embedding clearing waits for ${EMBEDDING_PREFILTER_MIN_PER_CLASS} judge verdicts per class with complete stored vectors.`;
     return `Embedding clearing is on; ${this.audit.misses.length} of 200 spot checks collected.${detail}`;
   }
   setPlacementFor(placementFor: ((decision: TierDecision) => TierPlacementPlan) | undefined): void {
@@ -384,7 +384,7 @@ export class EmbeddingPrefilter {
       const revisions = this.revisions();
       if (this.saved && (this.saved.judge !== judge || !/^[0-9a-f-]{36}$/.test(this.saved.version) || !Number.isFinite(this.saved.trainedAt)
         || this.saved.revisions !== revisions || !existsSync(this.path)
-        || correctedPrivateProbability(this.saved.model, [1, ...new Array(EMBEDDING_PREFILTER_DIMENSIONS - 1).fill(0)], this.saved.prior) === undefined)) {
+        || correctedPrivateProbability(this.saved.model, [1, ...new Array(EMBEDDING_PREFILTER_DIMENSIONS - 1).fill(0)], this.saved.calibration) === undefined)) {
         if (existsSync(this.path)) removeFileDurablySync(this.path);
         this.saved = undefined;
         if (attempt?.outcome === 'trained') attempt = this.attempt = undefined;
@@ -553,7 +553,7 @@ export class EmbeddingPrefilter {
                 const privateRate = measuredPrivatePrior(personal, privateCount);
                 if (privateRate === undefined) { stage = 'prior_missing'; throw new Error(); }
                 const saved: SavedModel = { model: run.model, judge, revisions, trainedAt: this.now(), version: randomUUID(),
-                  prior: { privateRate, trainingPrivateRate: attempt.counts[1] / (attempt.counts[0] + attempt.counts[1]),
+                  calibration: { privateRate, trainingPrivateRate: attempt.counts[1] / (attempt.counts[0] + attempt.counts[1]),
                     personal, private: privateCount, since: attempt.startedAt - PRIOR_WINDOW_MS, until: attempt.startedAt } };
                 writePrivateFileAtomicSync(this.path, JSON.stringify(saved));
                 this.saved = saved; attempt.version = saved.version;
@@ -624,7 +624,7 @@ export class EmbeddingPrefilter {
     if (!this.enabled()) return skip('disabled');
     if (this.audit.stopped) return skip('audit_stopped');
     if (!this.saved) return skip('model_missing');
-    if (!/^[0-9a-f-]{36}$/.test(this.saved.version) || !Number.isFinite(this.saved.trainedAt) || !validPrefilterPrior(this.saved.prior)) return skip('model_invalid');
+    if (!/^[0-9a-f-]{36}$/.test(this.saved.version) || !Number.isFinite(this.saved.trainedAt) || !validPrefilterPrior(this.saved.calibration)) return skip('model_invalid');
     if (!existsSync(this.path)) return skip('weights_missing');
     if (this.saved.revisions !== this.revisions()) return skip('revisions_changed');
     if (this.saved.judge !== judge) return skip('judge_changed');
@@ -652,7 +652,7 @@ export class EmbeddingPrefilter {
     if (!row.reasons.includes(contentDigestReason(copy.chunks.map(chunk => chunk.boundedText).join('')))) return skip('digest_missing');
     const vector = prefilterVector(copy);
     if (!vector) return skip('no_vector');
-    const probability = correctedPrivateProbability(this.saved.model, vector, this.saved.prior);
+    const probability = correctedPrivateProbability(this.saved.model, vector, this.saved.calibration);
     if (probability === undefined) return skip('score_unavailable');
     if (probability >= 0.05) return skip('probability_high');
     if ((this.options.random?.() ?? Math.random()) < 0.05) {
