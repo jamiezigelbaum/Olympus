@@ -41,6 +41,21 @@
  * Binary frames are `[u32 big-endian stream id][payload]`. Streams interleave,
  * so a long Server-Sent Events response never blocks another request.
  * Text frames are single JSON objects. Both sides send `ping`/`pong`.
+ *
+ * Optional features, negotiated without changing `v`: a relay lists the ones
+ * it speaks in `ready.features`, and an install uses one only when it is
+ * listed (a relay from before a feature closes the session on a frame it
+ * does not know).
+ *
+ *   `surfaces`       install -> relay   surfaces {v: 1, entries}   (text)
+ *                    The engine's current offline tool-list mapping for this
+ *                    install, whole: one entry per live access token for an
+ *                    endpoint, keyed by the token's surface fingerprint
+ *                    (shared/tokens.ts), with the tool surface the engine
+ *                    serves it and the token's expiry. It replaces what the
+ *                    relay held for this install, so a rotated token appears
+ *                    and a revoked or expired one disappears. Content-free:
+ *                    no name, provider, connection id or question.
  */
 import { createHash, createPublicKey, randomBytes, sign, verify, type KeyObject } from 'node:crypto';
 
@@ -75,7 +90,8 @@ export type ChallengeMessage = { type: 'challenge'; v: number; nonce: string; po
 /** `auth` is present for scheme 3 and absent for scheme 2 (the legacy wire form, byte for byte). */
 export type HelloMessage = { type: 'hello'; v: number; installId: string; sig: string; auth?: number };
 export type RegisterMessage = { type: 'register'; v: number; installId: string; publicKey: string; sig: string; pow?: string; auth?: number };
-export type ReadyMessage = { type: 'ready'; installId: string };
+/** `features`: the optional features this relay speaks (absent from relays that predate them). */
+export type ReadyMessage = { type: 'ready'; installId: string; features?: string[] };
 export type PingMessage = { type: 'ping' };
 export type PongMessage = { type: 'pong' };
 export type ErrorMessage = { type: 'error'; code: RelayErrorCode; message: string };
@@ -105,7 +121,56 @@ export type RelayErrorCode =
 
 export type ClientAuthMessage = HelloMessage | RegisterMessage;
 export type RelayToClientMessage = ChallengeMessage | ReadyMessage | PongMessage | ErrorMessage | RequestMessage | EndMessage | CancelMessage;
-export type ClientToRelayMessage = ClientAuthMessage | PingMessage | ResponseHeadMessage | EndMessage | AbortMessage;
+export type ClientToRelayMessage = ClientAuthMessage | PingMessage | ResponseHeadMessage | EndMessage | AbortMessage | SurfacesMessage;
+
+/** The `surfaces` feature (above). */
+export const RELAY_FEATURE_SURFACES = 'surfaces';
+/** Entries one install may hold at the relay; an engine sends at most this many (the latest-expiring). */
+export const MAX_SURFACE_ENTRIES = 32;
+/** Which MCP endpoint a mapping is for (shared/directory-tools.ts McpSurface). */
+export type SurfaceEndpoint = 'default' | 'directory';
+
+export interface SurfaceEntry {
+  /** The endpoint the token was issued for. */
+  readonly endpoint: SurfaceEndpoint;
+  /** The token's surface fingerprint (shared/tokens.ts surfaceFingerprint). */
+  readonly fingerprint: string;
+  /** The tool surface the engine serves that token. */
+  readonly surface: 'chatgpt' | 'remote';
+  /** When the token expires, in whole seconds since the epoch. */
+  readonly expiresAt: number;
+}
+
+export type SurfacesMessage = { type: 'surfaces'; v: 1; entries: SurfaceEntry[] };
+
+/**
+ * The entries of a `surfaces` frame, or undefined when it is malformed: wrong
+ * version, too many entries, or any entry that is not exactly the four fields
+ * with their shapes. Nothing else an install sends is kept.
+ */
+export function parseSurfacesMessage(message: Record<string, unknown>): SurfaceEntry[] | undefined {
+  if (message.type !== 'surfaces' || message.v !== 1 || !Array.isArray(message.entries)) return undefined;
+  if (message.entries.length > MAX_SURFACE_ENTRIES) return undefined;
+  const entries: SurfaceEntry[] = [];
+  for (const raw of message.entries as unknown[]) {
+    const entry = parseSurfaceEntry(raw);
+    if (!entry) return undefined;
+    entries.push(entry);
+  }
+  return entries;
+}
+
+export function parseSurfaceEntry(raw: unknown): SurfaceEntry | undefined {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
+  const keys = Object.keys(raw);
+  if (keys.length !== 4) return undefined;
+  const { endpoint, fingerprint, surface, expiresAt } = raw as Record<string, unknown>;
+  if (endpoint !== 'default' && endpoint !== 'directory') return undefined;
+  if (typeof fingerprint !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(fingerprint)) return undefined;
+  if (surface !== 'chatgpt' && surface !== 'remote') return undefined;
+  if (typeof expiresAt !== 'number' || !Number.isSafeInteger(expiresAt) || expiresAt <= 0) return undefined;
+  return { endpoint, fingerprint, surface, expiresAt };
+}
 
 export function base64url(data: Uint8Array): string {
   return Buffer.from(data).toString('base64url');

@@ -25,9 +25,9 @@
       ],
       "_meta": {
         "ui": {
-          "resourceUri": "ui://olympus/dashboard?v=1c887768189e"
+          "resourceUri": "ui://olympus/dashboard?v=6469d4208307"
         },
-        "openai/outputTemplate": "ui://olympus/dashboard?v=1c887768189e",
+        "openai/outputTemplate": "ui://olympus/dashboard?v=6469d4208307",
         "openai/ui": {
           "entrypoints": [
             {
@@ -81,9 +81,9 @@
       ],
       "_meta": {
         "ui": {
-          "resourceUri": "ui://olympus/private-answer?v=625370ec27fe"
+          "resourceUri": "ui://olympus/private-answer?v=294f06194b13"
         },
-        "openai/outputTemplate": "ui://olympus/private-answer?v=625370ec27fe"
+        "openai/outputTemplate": "ui://olympus/private-answer?v=294f06194b13"
       }
     },
     {
@@ -145,9 +145,9 @@
       ],
       "_meta": {
         "ui": {
-          "resourceUri": "ui://olympus/private-answer?v=625370ec27fe"
+          "resourceUri": "ui://olympus/private-answer?v=294f06194b13"
         },
-        "openai/outputTemplate": "ui://olympus/private-answer?v=625370ec27fe"
+        "openai/outputTemplate": "ui://olympus/private-answer?v=294f06194b13"
       }
     },
     {
@@ -180,9 +180,9 @@
       ],
       "_meta": {
         "ui": {
-          "resourceUri": "ui://olympus/private-answer?v=625370ec27fe"
+          "resourceUri": "ui://olympus/private-answer?v=294f06194b13"
         },
-        "openai/outputTemplate": "ui://olympus/private-answer?v=625370ec27fe"
+        "openai/outputTemplate": "ui://olympus/private-answer?v=294f06194b13"
       }
     },
     {
@@ -250,9 +250,9 @@
       },
       "_meta": {
         "ui": {
-          "resourceUri": "ui://olympus/private-question?v=6a9d8c18b516"
+          "resourceUri": "ui://olympus/private-question?v=6a855045efb7"
         },
-        "openai/outputTemplate": "ui://olympus/private-question?v=6a9d8c18b516"
+        "openai/outputTemplate": "ui://olympus/private-question?v=6a855045efb7"
       },
       "annotations": {
         "readOnlyHint": false,
@@ -321,7 +321,9 @@
             "enum": [
               "gmail.email",
               "google_drive.docs",
-              "dropbox.files"
+              "dropbox.files",
+              "local.files",
+              "evernote.notes"
             ]
           },
           "parent_key": {
@@ -448,7 +450,9 @@
             "enum": [
               "gmail.email",
               "google_drive.docs",
-              "dropbox.files"
+              "dropbox.files",
+              "local.files",
+              "evernote.notes"
             ]
           },
           "account_generation": {
@@ -611,7 +615,57 @@
               "google_drive.docs",
               "dropbox.files",
               "x.bookmarks",
-              "readwise.library"
+              "readwise.library",
+              "evernote.notes",
+              "local.files"
+            ]
+          }
+        },
+        "required": [
+          "source_id"
+        ],
+        "additionalProperties": false
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "openWorldHint": false
+      },
+      "securitySchemes": [
+        {
+          "type": "oauth2",
+          "scopes": []
+        }
+      ],
+      "_meta": {
+        "ui": {
+          "visibility": [
+            "app"
+          ]
+        },
+        "openai/widgetAccessible": true,
+        "openai/visibility": "private"
+      }
+    },
+    {
+      "name": "olympus_delete_source_data",
+      "title": "Delete indexed data for a source",
+      "description": "For the Olympus panel: delete everything Olympus indexed from a source that is already disconnected (search results, summaries and its privacy records). The files and accounts themselves are not touched. Cannot be undone.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "source_id": {
+            "type": "string",
+            "enum": [
+              "gmail.email",
+              "google_drive.docs",
+              "dropbox.files",
+              "x.bookmarks",
+              "readwise.library",
+              "evernote.notes",
+              "local.files",
+              "telegram.messages",
+              "whatsapp.personal.messages"
             ]
           }
         },
@@ -764,6 +818,16 @@
       "inputSchema": {
         "type": "object",
         "properties": {
+          "private_answer_mode": {
+            "type": "string",
+            "enum": [
+              "local-first",
+              "local-only",
+              "private-cloud-only",
+              "no-sensitive"
+            ],
+            "description": "First-run Private-answer mode chosen by the owner in the panel."
+          },
           "description": {
             "type": "string",
             "maxLength": 2000,
@@ -787,7 +851,9 @@
                   "enum": [
                     "gmail.email",
                     "google_drive.docs",
-                    "dropbox.files"
+                    "dropbox.files",
+                    "local.files",
+                    "evernote.notes"
                   ]
                 },
                 "key": {
@@ -849,6 +915,97 @@
       }
     },
     {
+      "name": "olympus_privacy_questions",
+      "title": "Privacy follow-up questions",
+      "description": "For the owner in the Olympus panel: privately check an unsaved privacy description. Saves nothing.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "description": {
+            "type": "string",
+            "maxLength": 2000
+          },
+          "confirmation": {
+            "type": "string",
+            "maxLength": 128
+          }
+        },
+        "required": [
+          "description",
+          "confirmation"
+        ]
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "openWorldHint": false
+      },
+      "securitySchemes": [
+        {
+          "type": "oauth2",
+          "scopes": []
+        }
+      ],
+      "_meta": {
+        "ui": {
+          "visibility": [
+            "app"
+          ]
+        },
+        "openai/widgetAccessible": true,
+        "openai/visibility": "private"
+      }
+    },
+    {
+      "name": "olympus_privacy_check",
+      "title": "Check privacy understanding",
+      "description": "For the owner in the Olympus panel: privately check an unsaved privacy description. Saves nothing.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "description": {
+            "type": "string",
+            "maxLength": 2000
+          },
+          "confirmation": {
+            "type": "string",
+            "maxLength": 128
+          },
+          "sample": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 120
+          }
+        },
+        "required": [
+          "description",
+          "confirmation"
+        ]
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "openWorldHint": false
+      },
+      "securitySchemes": [
+        {
+          "type": "oauth2",
+          "scopes": []
+        }
+      ],
+      "_meta": {
+        "ui": {
+          "visibility": [
+            "app"
+          ]
+        },
+        "openai/widgetAccessible": true,
+        "openai/visibility": "private"
+      }
+    },
+    {
       "name": "olympus_sync_source",
       "title": "Sync a source now",
       "description": "For the Olympus panel: check a connected source for anything new now. Answers at once; the panel shows what the check found.",
@@ -862,7 +1019,9 @@
               "google_drive.docs",
               "dropbox.files",
               "x.bookmarks",
-              "readwise.library"
+              "readwise.library",
+              "evernote.notes",
+              "local.files"
             ]
           }
         },
@@ -895,17 +1054,17 @@
   ],
   "resources": [
     {
-      "uri": "ui://olympus/dashboard?v=1c887768189e",
+      "uri": "ui://olympus/dashboard?v=6469d4208307",
       "name": "Olympus dashboard",
       "mimeType": "text/html;profile=mcp-app"
     },
     {
-      "uri": "ui://olympus/private-answer?v=625370ec27fe",
+      "uri": "ui://olympus/private-answer?v=294f06194b13",
       "name": "Olympus private answer",
       "mimeType": "text/html;profile=mcp-app"
     },
     {
-      "uri": "ui://olympus/private-question?v=6a9d8c18b516",
+      "uri": "ui://olympus/private-question?v=6a855045efb7",
       "name": "Olympus private question",
       "mimeType": "text/html;profile=mcp-app"
     }

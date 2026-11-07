@@ -336,10 +336,13 @@ describe('routing', () => {
         'olympus_scope_list',
         'olympus_scope_set',
         'olympus_disconnect_source',
+        'olympus_delete_source_data',
         'olympus_model_set',
         'olympus_model_retry',
         'olympus_privacy_get',
         'olympus_privacy_set',
+        'olympus_privacy_questions',
+        'olympus_privacy_check',
         'olympus_sync_source',
       ]);
     for (const tool of list.result.tools) {

@@ -20,6 +20,13 @@
 
 export const DIRECTORY_MCP_PATH = '/openai/mcp';
 
+/**
+ * The read-only tools a demo sign-in grant gets on the remote surface
+ * (src/workers/remote-mcp.ts), and the relay's offline list for a
+ * per-app demo install's credentials (server/relay-mcp.ts).
+ */
+export const DEMO_GRANT_REMOTE_TOOLS: readonly string[] = Object.freeze(['olympus_search', 'source_index_status']);
+
 /** Which of the two MCP endpoints a request reached. */
 export type McpSurface = 'default' | 'directory';
 
@@ -39,10 +46,13 @@ export const DIRECTORY_TOOL_NAMES: readonly string[] = Object.freeze([
   'olympus_scope_list',
   'olympus_scope_set',
   'olympus_disconnect_source',
+  'olympus_delete_source_data',
   'olympus_model_set',
   'olympus_model_retry',
   'olympus_privacy_get',
   'olympus_privacy_set',
+  'olympus_privacy_questions',
+  'olympus_privacy_check',
   'olympus_sync_source',
 ]);
 

@@ -29,9 +29,9 @@ import surface from './approved/tools.json';
 
 export const APPROVED = Object.freeze({
   /** The commit whose plugin package, relay and demo engine were submitted. */
-  commit: '6c990f65f52efb524c4ac949348f3c3767a9e512',
+  commit: '2b0291fc905e4de7297965399b31dca41b648580',
   plugin: 'plugin_asdk_app_6acbb7a8a3008191b6f6b3dbfd6f3301',
-  submitted: '2026-10-11',
+  submitted: '2026-11-07',
   status: 'in review',
 });
 

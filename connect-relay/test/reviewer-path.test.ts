@@ -43,10 +43,10 @@ const PANEL_ORIGIN = 'https://web-sandbox.oaiusercontent.com';
 
 /** sha256 of server/directory/approved/*.json, the submitted commit's generated files. */
 const APPROVED_DIGESTS: Record<string, string> = {
-  'dashboard.json': '8425d4db73bd3c274a667dc413b7060067536d64af1cb72207f1bd85036308db',
-  'private-answer.json': 'a0237d4a973735ebf93bcbc31a98227065c9ce263789af8a07b6cf2fb7473484',
-  'private-question.json': 'd6194d5694b2e9b9efaefff3b0cbfcbfc07885338a5f276c183155dec7758c2b',
-  'tools.json': 'ccc21709d33fcac8dbd99ef612159b12eff2099aa9cdb7a539902805721e6ed9',
+  'dashboard.json': 'ded443ece5a99e57f9fa473dc3d895c84448d9e7f03f887e59f98208414c753e',
+  'private-answer.json': 'bd02edb066885b1004356bdbea90e84e5aa77f4ebc9f2034242cdeb95d1ca569',
+  'private-question.json': '2311bc9c804b808fff04910e9471a89b911b0f3551374ed526d601665c3b1663',
+  'tools.json': '35621f84a8726c68eaeb6dba375eb85636297fba233346ce1622842ab8f18ac4',
 };
 
 const dirs: string[] = [];

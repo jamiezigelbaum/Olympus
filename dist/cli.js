@@ -26830,10 +26830,13 @@ var init_directory_tools = __esm(() => {
     "olympus_scope_list",
     "olympus_scope_set",
     "olympus_disconnect_source",
+    "olympus_delete_source_data",
     "olympus_model_set",
     "olympus_model_retry",
     "olympus_privacy_get",
     "olympus_privacy_set",
+    "olympus_privacy_questions",
+    "olympus_privacy_check",
     "olympus_sync_source"
   ]);
   DIRECTORY_TOOLS = new Set(DIRECTORY_TOOL_NAMES);
@@ -199854,7 +199857,7 @@ var init_dashboard3 = __esm(() => {
   dashboard_default = {
     contents: [
       {
-        uri: "ui://olympus/dashboard?v=1c887768189e",
+        uri: "ui://olympus/dashboard?v=6469d4208307",
         mimeType: "text/html;profile=mcp-app",
         text: `<!doctype html>
 <html lang="en">
@@ -199869,7 +199872,7 @@ var init_dashboard3 = __esm(() => {
 :root[data-theme=light]{color-scheme:light}
 :root[data-theme=dark]{color-scheme:dark}
 *{box-sizing:border-box}
-html{font-family:system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;font-size:100%;line-height:1.45}
+html{font-family:-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Noto Sans", Ubuntu, Cantarell, "Liberation Sans", "DejaVu Sans", "Helvetica Neue", Arial, system-ui, sans-serif;font-size:100%;line-height:1.45}
 body{margin:0;background:var(--bg);color:var(--text);font-size:0.9375rem;overflow-wrap:anywhere}
 p{margin:0}
 h1{font-size:1.25rem;font-weight:600;margin:0 0 1rem}
@@ -199892,6 +199895,7 @@ h3{font-size:0.875rem;font-weight:600;color:var(--muted);margin:0.75rem 0 0.25re
 .row-text{flex:1 1 14rem;min-width:0}
 .row.need{display:grid;grid-template-columns:0.625rem minmax(0,1fr);align-items:start;gap:0 0.75rem}
 .need-body{display:flex;flex-wrap:wrap;align-items:flex-start;gap:0.5rem 1rem;min-width:0}
+.need-body>:not(.row-text){margin-left:auto}
 .need .row-text{padding-top:max(0px,calc((2.25rem - 1.45em) / 2))}
 .need .dot{margin-top:calc((2.25rem - 0.625rem) / 2)}
 .row.source{display:grid;grid-template-columns:minmax(0,1fr);align-items:start;position:relative}
@@ -199904,19 +199908,23 @@ h3{font-size:0.875rem;font-weight:600;color:var(--muted);margin:0.75rem 0 0.25re
 .source-main{min-width:0}
 .source-head{display:flex;flex-wrap:wrap;align-items:center;gap:0.25rem 0.5rem}
 .source-name{font-weight:600}
+.source-head .source-for{flex:1 1 0;min-width:0;font-weight:400}
 .status{color:var(--muted);font-size:0.875rem}
-.source-actions{display:flex;flex-wrap:wrap;align-items:flex-start;gap:0.5rem;justify-content:flex-end}
+.source-actions{display:flex;flex-wrap:nowrap;align-items:center;gap:12px;justify-content:flex-start}
 .dot{flex:none;width:0.625rem;height:0.625rem;border-radius:50%;display:inline-block;background:var(--off)}
 .tone-good{background:var(--good)}.tone-run{background:var(--run)}.tone-warn{background:var(--warn)}
 .tone-bad{background:var(--bad)}.tone-off{background:var(--off)}.tone-line{background:transparent;border:2px solid var(--idle)}
 .fix{display:inline-flex;flex-wrap:wrap;align-items:center;gap:0.5rem}
 .reason{color:var(--muted);font-size:0.875rem}
 .reason.strong{color:var(--text);font-weight:600}
-.actions{display:flex;flex-wrap:wrap;gap:0.5rem;align-items:center}
+.actions{display:flex;flex-direction:row;flex-wrap:nowrap;gap:12px;align-items:center;justify-content:flex-start}
+.actions > .primary,.source-actions > .primary{order:-1}
+@media(max-width:480px){.actions,.source-actions{flex-direction:column;align-items:stretch}}
 .tag{font-size:0.75rem;font-weight:400;padding:0 0.4rem;border:1px solid var(--line);border-radius:999px;color:var(--muted);margin-left:0.25rem}
 .index-faster{margin-top:0.5rem}
 .btn{font:inherit;font-size:0.875rem;font-weight:500;min-height:2.25rem;padding:0.375rem 0.875rem;border-radius:999px;border:1px solid var(--line);background:var(--bg);color:var(--text);cursor:pointer}
 .btn:hover:not(:disabled){background:var(--surface)}
+a.btn{display:inline-flex;align-items:center;text-decoration:none}
 .btn.primary{background:var(--accent);border-color:var(--accent);color:var(--on-accent)}
 .btn.primary:hover:not(:disabled){background:var(--accent);filter:brightness(1.08)}
 .btn.danger{border-color:var(--danger);color:var(--danger)}
@@ -199933,6 +199941,10 @@ summary{cursor:pointer;border-radius:0.375rem}
 .progress-line.stalled{font-weight:600}
 .bar{height:0.5rem;border-radius:999px;background:var(--surface);border:1px solid var(--line)}
 .bar-fill{height:100%;border-radius:999px;background:var(--run);min-width:0}
+.bar.indeterminate{position:relative;overflow:hidden}
+.bar.indeterminate .bar-fill{position:absolute;top:0;width:35%;animation:bar-sweep 1.6s ease-in-out infinite}
+@keyframes bar-sweep{0%{left:-35%}100%{left:100%}}
+@media (prefers-reduced-motion:reduce){.bar.indeterminate .bar-fill{animation:none;left:0;width:100%;opacity:.35}}
 .disclosure{margin-top:0.75rem}
 .disclosure summary,.models summary{color:var(--muted);font-size:0.875rem;padding:0.25rem 0}
 .models summary{font-size:1rem;color:var(--text);font-weight:600}
@@ -199948,11 +199960,25 @@ summary{cursor:pointer;border-radius:0.375rem}
 .why-note{font-size:0.8125rem;color:var(--muted)}
 .why .files li{overflow-wrap:anywhere}
 .why .files .btn.link.file{min-height:0;padding:0.125rem 0;color:var(--accent);text-align:left}
+.why-head{margin-top:0.5rem;font-size:0.875rem;font-weight:600}
+.archives{list-style:none;margin:0.5rem 0 0;padding:0}
+.archive{padding:0.625rem 0;border-top:1px solid var(--line)}
+.archive>p+p,.archive>p+div,.archive>div+p,.archive>div+div,.archive>div+details,.archive>p+details{margin-top:0.25rem}
+.archive-head{display:flex;flex-wrap:wrap;align-items:center;gap:0.25rem 0.5rem}
+.archive-name{font-weight:600;min-width:0;overflow-wrap:anywhere}
+.archive-facts{overflow-wrap:anywhere}
+.archive-dates{white-space:nowrap}
+.archive.stopped .ftag{color:var(--text);border-color:var(--warn)}
+.archive-progress{display:flex;flex-direction:column;gap:0.25rem}
+.archive-progress .bar{height:0.375rem}
+.archive-held>p+p{margin-top:0.125rem}
+.archive-actions{display:flex;flex-wrap:wrap;gap:0.5rem;margin-top:0.5rem}
 .landed{outline:3px solid var(--focus);outline-offset:4px;border-radius:10px;animation:landed-fade 2.5s ease-out 1.5s forwards}
 @keyframes landed-fade{to{outline-color:transparent}}
 .notice{margin:0 0 0.75rem;padding:0.5rem 0.75rem;border:1px solid var(--line);background:var(--surface);border-radius:0.5rem}
 .remote-box{flex-basis:100%;margin-top:0.5rem;padding:0.5rem 0.75rem;border:1px solid var(--line);background:var(--surface);border-radius:0.5rem;display:flex;flex-direction:column;gap:0.375rem;font-size:0.875rem}
 .remote-box p{margin:0}
+.more-on-computer{display:flex;flex-wrap:wrap;align-items:center;gap:0.25rem 0.5rem}
 .remote-line{display:flex;flex-wrap:wrap;align-items:center;gap:0.5rem}
 .remote-line code{flex:1 1 16rem;min-width:0;padding:0.25rem 0.5rem;border:1px solid var(--line);border-radius:0.375rem;background:var(--bg);font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:0.8125rem;overflow-wrap:anywhere;user-select:all}
 .strong{font-weight:600}
@@ -199969,6 +199995,18 @@ summary{cursor:pointer;border-radius:0.375rem}
 textarea.text{resize:vertical;min-height:4.5rem}
 .picker-body{display:flex;flex-direction:column;container-type:inline-size}
 .picker-body>.intro{margin-bottom:1rem}
+.drop{display:flex;flex-direction:column;align-items:stretch;gap:0.5rem}
+.drop-zone{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:0.25rem;width:100%;min-height:11rem;padding:1.5rem 1rem;font:inherit;text-align:center;color:var(--text);background:var(--surface);border:2px dashed var(--muted);border-radius:0.75rem;cursor:pointer}
+.drop-zone:hover,.drop-zone[data-over=true]{border-color:var(--accent);background:var(--info-bg)}
+.drop-zone[data-over=true]{border-style:solid}
+.drop-title{font-size:1.125rem;font-weight:600}
+.drop-hint{color:var(--muted);font-size:0.875rem}
+.drop-or{margin:0;text-align:center}
+.drop-or .btn{min-height:0;padding:0.25rem 0.5rem;border:0;background:none;color:var(--accent);font-size:0.875rem;font-weight:500}
+.drop-input{position:absolute;width:1px;height:1px;opacity:0;pointer-events:none;overflow:hidden}
+.drop-progress{display:flex;flex-direction:column;gap:0.5rem;padding:1rem;border:1px solid var(--line);border-radius:0.75rem;background:var(--surface)}
+.drop-progress p{margin:0}
+.drop-progress .bar-fill{transition:width 0.15s linear}
 .account{display:flex;align-items:center;gap:0.75rem;width:100%;min-height:3.5rem;padding:0.625rem 0.875rem;margin:0 0 0.75rem;font:inherit;text-align:left;color:var(--text);background:var(--surface);border:1px solid var(--line);border-radius:0.75rem;cursor:pointer}
 .two-line{flex:1;min-width:0;display:flex;flex-direction:column;gap:0.125rem}
 .two-top{font-weight:600}
@@ -200007,6 +200045,8 @@ textarea.text{resize:vertical;min-height:4.5rem}
 .seg-row>.fname>.fopen{font-size:1.375rem;color:var(--muted)}
 .seg-row>button.fname:hover:not(:disabled)>.fopen{color:var(--text)}
 .seg-row>.seg{margin-left:auto}
+.frow.seg-row.has-note{flex-wrap:wrap}
+.frow-note{flex:1 0 100%;margin:0 0 0.5rem 1.4375rem;font-size:0.8125rem;line-height:1.25rem}
 .seg{flex:none;display:inline-flex;align-items:center;border:1px solid var(--line);border-radius:999px;background:var(--bg)}
 .seg-opt{position:relative;display:inline-flex;align-items:center;justify-content:center;min-width:2.75rem;height:2rem;margin:0;padding:0 0.75rem;font:inherit;font-size:0.8125rem;font-weight:500;color:var(--text);background:none;border:0;border-radius:999px;cursor:pointer;white-space:nowrap}
 .seg-opt::before{content:"";position:absolute;inset:-0.4375rem 0}
@@ -200045,11 +200085,26 @@ textarea.text{resize:vertical;min-height:4.5rem}
 .qtitle{font-size:0.9375rem;font-weight:600;margin:0 0 0.25rem}
 .qopt{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:0.25rem 0.75rem;padding:0.25rem 0;border-bottom:1px solid var(--line)}
 .qlabel{flex:1 1 12rem;min-width:0}
-.qchoices{display:flex;flex-wrap:wrap;gap:0.25rem 1rem}
+.qchoices{display:flex;flex-wrap:nowrap;gap:0.25rem 1rem}
 .qchoice{display:inline-flex;align-items:center;gap:0.375rem;min-height:2.5rem;cursor:pointer}
 .qchoice input{flex:none;width:1.125rem;height:1.125rem;margin:0;accent-color:var(--accent)}
 .fsection>.reason{margin-top:0.375rem}
 .privacy>.intro{margin-bottom:0.5rem}
+.privacy-summary{white-space:pre-wrap;overflow-wrap:anywhere;line-height:1.5;margin:0.75rem 0} .privacy-description .actions{flex-direction:row;align-items:center}
+.rule-chips{list-style:none;padding:0;display:flex;flex-wrap:wrap;gap:0.5rem;margin:0.75rem 0}
+.rule-chip{display:flex;align-items:center;gap:0.5rem;border:1px solid var(--line);border-radius:1rem;padding:0.25rem 0.5rem 0.25rem 0.75rem;max-width:100%;overflow-wrap:anywhere}
+.rule-chip .fname{width:auto;min-width:0;padding:0;text-align:left}
+.rule-chip .two-line{display:flex;flex-direction:column;align-items:flex-start;font-size:0.875rem}
+.rule-chip .two-line>span{max-width:100%;white-space:normal}
+.rule-chip .btn{border:0;min-width:2.5rem;flex:none;align-self:center;margin-left:auto}
+.privacy-details{margin-top:1.25rem}
+.privacy-details summary{cursor:pointer;min-height:2.5rem;align-content:center;font-weight:500}
+.privacy-details>.intro{margin:0.75rem 0}
+.privacy-sheet-actions{display:flex;justify-content:flex-start;flex-wrap:nowrap;margin-top:1.5rem;padding-top:1rem;border-top:1px solid var(--line)}
+.privacy .btn[aria-pressed=true]{background:var(--info-bg);border-color:var(--accent)}
+.privacy-kinds{display:flex;flex-direction:column;gap:0.75rem;margin-top:1rem}
+.privacy progress{width:100%;height:0.375rem;accent-color:var(--accent);margin:0.5rem 0 1.5rem}
+.privacy .field,.privacy .text{width:100%;box-sizing:border-box}
 .source-progress{display:flex;flex-direction:column;gap:0.25rem;margin-top:0.375rem}
 .source-progress .bar{height:0.375rem}
 .source-progress.stalled .bar-fill{background:var(--warn)}
@@ -200057,18 +200112,21 @@ textarea.text{resize:vertical;min-height:4.5rem}
 .reason.error{color:var(--danger)}
 .row.need{background:var(--warn-bg);border-left:4px solid var(--warn);border-radius:8px;padding:0.75rem 1rem;margin:0.5rem 0}.row.need .row-text{font-weight:600}.row.need{grid-template-columns:minmax(0,1fr)}.row.need .dot{display:none}.btn.warnfill{background:var(--warn);border-color:var(--warn);color:#1a1205;font-weight:600}
 .btn.warnfill:hover:not(:disabled){background:var(--warn);filter:brightness(1.08)}
-.sr{position:absolute;width:1px;height:1px;margin:-1px;padding:0;clip:rect(0 0 0 0);clip-path:inset(50%);white-space:nowrap;border:0}
+.sr{overflow:hidden;position:absolute;width:1px;height:1px;margin:-1px;padding:0;clip:rect(0 0 0 0);clip-path:inset(50%);white-space:nowrap;border:0}
 [data-mode=inline] .banner{margin-bottom:0.5rem}
-@media (max-width:30rem){.page{padding:1rem 0.75rem 1.5rem}.row.source.has-actions{grid-template-columns:minmax(0,1fr)}.row.source.has-actions.has-menu{grid-template-columns:minmax(0,1fr) 2.25rem}.row.source>.source-actions{grid-column:1/-1;justify-content:flex-start}.menu{align-items:flex-start}.menu-panel{justify-content:flex-start}}
+@media (max-width:30rem){.page{padding:1rem 0.75rem 1.5rem}.row.source.has-import.has-actions:not(.has-menu){grid-template-columns:minmax(0,1fr)}.row.source.has-import.has-actions:not(.has-menu)>.source-actions{grid-row:2;justify-content:flex-start}.other-archives .row.source.has-actions:not(.has-menu){grid-template-columns:minmax(0,1fr)}.other-archives .row.source.has-actions:not(.has-menu)>.source-actions{grid-row:2}.row.source.has-actions.has-menu{grid-template-columns:minmax(0,1fr) 2.25rem}.row.source.has-actions.has-menu>.source-actions{grid-column:1/-1;grid-row:2}.menu{align-items:flex-start}.menu-panel{justify-content:flex-start}}
 @media (prefers-reduced-motion:reduce){*{transition:none!important}.landed{animation:none}}
 </style>
 </head>
 <body>
 <div id="app"></div>
 <script>(function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
-  const doc = document, root = doc.getElementById("app"), P = config.page, C = config.connection, GLOBAL_STATES = ["not_connected", "installing", "mac_offline", "relay_unavailable"], state = {
+  const doc = document, root = doc.getElementById("app"), P = config.page, C = config.connection, GLOBAL_STATES = ["not_connected", "installing", "mac_offline", "relay_unavailable"], startedAt = Date.now(), state = {
     data: null,
     relayDown: !1,
+    lastGoodAt: 0,
+    slow: !1,
+    deleting: {},
     busy: "",
     confirming: "",
     helpOpen: !1,
@@ -200084,8 +200142,12 @@ textarea.text{resize:vertical;min-height:4.5rem}
     hostReadOnly: !1,
     hostLinks: {},
     computerMeta: null,
+    archiveConfirm: {},
+    archiveStarting: {},
+    archivePeak: {},
     unreadablePages: {},
     landing: "",
+    landingImport: !1,
     landed: null,
     lastFailure: null
   }, H = config.host;
@@ -200112,6 +200174,26 @@ textarea.text{resize:vertical;min-height:4.5rem}
   function openai() {
     return window.openai || null;
   }
+  const uploadProgress = {};
+  function uploadFile(uploadId, path, file, modified, progress) {
+    const id = nextId++;
+    uploadProgress[id] = progress;
+    const finish = (value) => {
+      delete uploadProgress[id];
+      return value;
+    };
+    post({ jsonrpc: "2.0", id, method: "olympus/upload-file", params: { upload_id: uploadId, path, modified, file } });
+    return new Promise((resolve) => {
+      pending[id] = {
+        resolve: (result) => resolve(finish(result && typeof result === "object" ? result : { ok: !1 })),
+        reject: () => resolve(finish({ ok: !1 })),
+        timer: null
+      };
+    });
+  }
+  function abortUpload(uploadId) {
+    notify("olympus/upload-abort", { upload_id: uploadId });
+  }
   window.addEventListener("message", (event) => {
     if (event.source !== window.parent)
       return;
@@ -200127,6 +200209,12 @@ textarea.text{resize:vertical;min-height:4.5rem}
         entry.reject(message.error);
       else
         entry.resolve(message.result);
+      return;
+    }
+    if (message.method === "olympus/upload-progress") {
+      const params = message.params;
+      if (params && typeof params.request === "number" && typeof params.loaded === "number" && uploadProgress[params.request])
+        uploadProgress[params.request](params.loaded);
       return;
     }
     if (message.method === "ui/notifications/tool-result") {
@@ -200155,18 +200243,29 @@ textarea.text{resize:vertical;min-height:4.5rem}
     state.hostKind = value.kind;
     state.hostReadOnly = value.readOnly === !0;
     const links = {}, given = value.links && typeof value.links === "object" ? value.links : {};
-    for (const key of ["keys", "agents", "outsideHelp", "connector"]) {
+    for (const key of ["keys", "agents", "privateAnswers", "connector", "help"]) {
       const href = given[key];
       if (typeof href === "string" && /^https?:\\/\\//.test(href))
         links[key] = href;
     }
     state.hostLinks = value.kind === "computer" ? links : {};
     const landing = value.landing;
-    if (value.kind === "computer" && landing && typeof landing.sourceId === "string" && /^[a-z0-9_.]{1,64}$/.test(landing.sourceId))
+    if (value.kind === "computer" && landing && typeof landing.sourceId === "string" && /^[a-z0-9_.]{1,64}$/.test(landing.sourceId)) {
       state.landing = landing.sourceId;
+      state.landingImport = landing.import === !0;
+    }
   }
   function onComputer() {
     return state.hostKind === "computer";
+  }
+  function callTimeoutMs() {
+    return onComputer() ? Math.max(config.resultTimeoutMs, config.computerResultTimeoutMs) : config.resultTimeoutMs;
+  }
+  function timedOutOnComputer(error) {
+    return onComputer() && error instanceof Error && error.message === "timeout";
+  }
+  function loadingWords() {
+    return state.slow || Date.now() - startedAt >= 8000 ? P.loadingSlow : P.loading;
   }
   function readOpenAiGlobals() {
     const host = openai();
@@ -200191,7 +200290,7 @@ textarea.text{resize:vertical;min-height:4.5rem}
       clearTimeout(resultTimer);
     resultTimer = setTimeout(() => {
       resultTimer = null;
-      if (!state.data) {
+      if (!state.data && !onComputer()) {
         relayFailed({ kind: "no_answer" });
         render();
       }
@@ -200199,7 +200298,19 @@ textarea.text{resize:vertical;min-height:4.5rem}
   }
   function relayFailed(failure) {
     state.relayDown = !0;
+    state.slow = !1;
     state.lastFailure = { ...failure, at: Date.now() };
+  }
+  function steadyPercent(archive) {
+    const raw = typeof archive.percent === "number" && isFinite(archive.percent) ? archive.percent : 0, id = typeof archive.id === "string" ? archive.id : "";
+    if (!id)
+      return raw;
+    const shown = Math.max(state.archivePeak[id] ?? 0, raw);
+    state.archivePeak[id] = shown;
+    return shown;
+  }
+  function busyNotGone(error) {
+    return error instanceof Error && error.message === "timeout" && !state.relayDown && state.lastGoodAt > 0 && Date.now() - state.lastGoodAt < 120000;
   }
   function resultFailure(result) {
     if (!result || !result.isError)
@@ -200244,6 +200355,9 @@ textarea.text{resize:vertical;min-height:4.5rem}
       state.computerMeta = meta && typeof meta === "object" ? meta : null;
       state.unreadablePages = {};
       state.relayDown = !1;
+      state.lastGoodAt = Date.now();
+      state.slow = !1;
+      settleDeleting(content);
       if (!state.busy)
         state.syncPressed = {};
       refreshFailures = 0;
@@ -200262,7 +200376,7 @@ textarea.text{resize:vertical;min-height:4.5rem}
     if (!result || !result.isError)
       return "";
     const code = result.structuredContent && typeof result.structuredContent.error === "string" ? result.structuredContent.error : "";
-    if (config.inlineErrorCodes.indexOf(code) < 0 && !(name && (name === H.unpairTool || name === H.unreadableOpenTool || name === H.unreadablePageTool)))
+    if (config.inlineErrorCodes.indexOf(code) < 0 && !(name && (name === H.unpairTool || name === H.unreadableOpenTool || name === H.unreadablePageTool || name === H.archiveApproveTool || name === H.archiveDeclineTool || name === H.archiveRemoveTool || name === H.archiveStopTool)))
       return "";
     const text = (Array.isArray(result.content) ? result.content : []).filter((part) => part && part.type === "text" && typeof part.text === "string")[0];
     return text ? String(text.text) : "";
@@ -200274,7 +200388,7 @@ textarea.text{resize:vertical;min-height:4.5rem}
     state.notice = "";
     state.actionError = null;
     render();
-    request("tools/call", { name, arguments: args || {} }, config.resultTimeoutMs).then((result) => {
+    request("tools/call", { name, arguments: args || {} }, callTimeoutMs()).then((result) => {
       if (state.busy === key)
         state.busy = "";
       if (mine !== generation) {
@@ -200312,6 +200426,23 @@ textarea.text{resize:vertical;min-height:4.5rem}
         redraw();
         return;
       }
+      if (name === config.deleteDataTool && !(result && result.isError)) {
+        const deletedId = args && typeof args.source_id === "string" ? args.source_id : "";
+        if (deletedId)
+          state.deleting[deletedId] = Date.now() + R.settleForMs;
+        refresh();
+        scheduleRefresh();
+        state.notice = P.deleteDataDone;
+        redraw();
+        return;
+      }
+      if ((name === H.archiveApproveTool || name === H.archiveDeclineTool || name === H.archiveRemoveTool || name === H.archiveStopTool) && result && !result.isError) {
+        const said = archiveNotice(name, args, result);
+        refresh();
+        state.notice = said;
+        redraw();
+        return;
+      }
       if (name === H.unpairTool) {
         const said = (result && Array.isArray(result.content) ? result.content : []).filter((part) => part && part.type === "text" && typeof part.text === "string")[0];
         refresh();
@@ -200328,7 +200459,13 @@ textarea.text{resize:vertical;min-height:4.5rem}
         state.busy = "";
       if (name === config.syncTool)
         state.syncPressed = {};
-      if (mine === generation)
+      if (mine === generation && name === config.toolName && timedOutOnComputer(error)) {
+        state.slow = !0;
+        if (refreshTimer)
+          clearTimeout(refreshTimer);
+        refreshTimer = setTimeout(backgroundRefresh, R.activeMs);
+        nextRefreshAt = Date.now() + R.activeMs;
+      } else if (mine === generation)
         relayFailed(rejectionFailure(error));
       redraw();
     });
@@ -200337,7 +200474,8 @@ textarea.text{resize:vertical;min-height:4.5rem}
     callTool(config.toolName, {}, "refresh");
   }
   function callRaw(name, args) {
-    return request("tools/call", { name, arguments: args || {} }, config.resultTimeoutMs);
+    const privacyInference = name === config.privacy.tools.questions || name === config.privacy.tools.check, providerListing = name === config.picker.tools.scopeList || name === config.picker.tools.scopeSet, timeoutMs = privacyInference ? Math.max(config.resultTimeoutMs, 150000) : providerListing ? Math.max(config.resultTimeoutMs, 120000) : callTimeoutMs();
+    return request("tools/call", { name, arguments: args || {} }, timeoutMs);
   }
   function openLink(href) {
     if (typeof href !== "string")
@@ -200529,7 +200667,7 @@ textarea.text{resize:vertical;min-height:4.5rem}
   function remoteLines(href) {
     const remote = state.data.remote, port = remote.port, target = typeof remote.sshTarget === "string" && /^(?:[A-Za-z0-9][A-Za-z0-9._-]{0,63}@)?[A-Za-z0-9][A-Za-z0-9.-]{0,190}$/.test(remote.sshTarget) ? remote.sshTarget : "you@your-server", path = openPath(href);
     return {
-      onComputer: "ssh -N -L " + port + ":127.0.0.1:" + port + " " + target,
+      onComputer: typeof remote.socketPath === "string" && /^\\/[A-Za-z0-9_./-]+\\/olympus\\/worker\\.sock$/.test(remote.socketPath) && !remote.socketPath.split("/").some((part) => part === ".." || part === ".") ? "ssh -N -o ExitOnForwardFailure=yes -L 127.0.0.1:" + port + ":" + remote.socketPath + " " + target : "ssh -N -L " + port + ":127.0.0.1:" + port + " " + target,
       onServer: "olympus dashboard --no-open" + (path ? " --target " + path : ""),
       port
     };
@@ -200592,7 +200730,8 @@ textarea.text{resize:vertical;min-height:4.5rem}
       return wrap;
     const blocked = globalReason();
     if (blocked || fix.disabledReason) {
-      add(wrap, button(fix.label, key, null, style), rowReason(blocked || String(fix.disabledReason)));
+      const saidAbove = !fix.disabledReason && (connectionState() === "relay_unavailable" || connectionState() === "mac_offline");
+      add(wrap, button(fix.label, key, null, style), saidAbove ? null : rowReason(blocked || String(fix.disabledReason)));
       if (!blocked)
         add(wrap, howLink(fix, key, source));
       return wrap;
@@ -200614,6 +200753,17 @@ textarea.text{resize:vertical;min-height:4.5rem}
       return add(wrap, button(fix.label, key, () => openLink(opens), style));
     if (privacy && privacy.handles(fix))
       action = () => openPrivacy(key);
+    else if (fix.archiveImport === !0 && picker)
+      action = () => {
+        startArchivePick(key, typeof fix.archiveSource === "string" ? fix.archiveSource : "");
+      };
+    else if (typeof fix.archiveFocus === "string" && fix.archiveFocus)
+      action = () => focusArchive(String(fix.archiveFocus));
+    else if (fix.archiveModels === !0)
+      action = () => {
+        state.open.models = !0;
+        render("summary:models");
+      };
     else if (picker && picker.handles(fix))
       action = () => {
         supersede();
@@ -200643,7 +200793,8 @@ textarea.text{resize:vertical;min-height:4.5rem}
       if (state.confirming === key) {
         const run = action;
         wrap.className = "fix confirm";
-        add(wrap, el("span", "reason strong", typeof fix.confirmText === "string" && fix.confirmText ? fix.confirmText : P.confirmPrompt), button(fill(P.confirm, { label: String(fix.label).toLowerCase() }), key + ":yes", run, "danger"), button(P.cancel, key + ":no", () => {
+        const sourceWords = source ? String(source.label || "") : "", importsGo = source && sourceImportsMeta(source.id) ? " " + fill(P.deleteDataImports, { source: sourceWords }) : "", named = sourceWords && fix.tool === config.deleteDataTool ? fill(fix.deletesCopies === "messages_and_media" ? P.deleteDataConfirmMessagesMedia : fix.deletesCopies === "messages" ? P.deleteDataConfirmMessages : P.deleteDataConfirm, { source: sourceWords }) + importsGo : sourceWords && fix.tool === config.disconnectTool ? fill(P.disconnectConfirm, { source: sourceWords }) : "";
+        add(wrap, el("span", "reason strong", typeof fix.confirmText === "string" && fix.confirmText ? fix.confirmText : named || P.confirmPrompt), button(fill(P.confirm, { label: String(fix.label).toLowerCase() }), key + ":yes", run, "danger"), button(P.cancel, key + ":no", () => {
           state.confirming = "";
           render(key);
         }, "plain"));
@@ -200749,6 +200900,8 @@ textarea.text{resize:vertical;min-height:4.5rem}
     const data = state.data;
     if (!data || state.relayDown)
       return "";
+    if (state.slow)
+      return P.busySlow;
     const at = Date.parse(data.generatedAt);
     if (!isFinite(at) || Date.now() - at < config.staleAfterMs)
       return "";
@@ -200763,14 +200916,29 @@ textarea.text{resize:vertical;min-height:4.5rem}
     return add(line, state.busy === "refresh" ? button(P.working, "refresh", null, "plain") : button(P.checkAgain, "refresh", refresh, "plain"));
   }
   function needsYouSection(items) {
-    if (!items.length)
+    const waiting = waitingRow();
+    if (!items.length && !waiting)
       return null;
     const section = add(el("section", "section"), el("h2", "", P.needsYou)), list = el("ul", "rows");
+    add(list, waiting);
     items.forEach((item, index) => {
-      const key = "need:" + String(item.id || index), body = add(el("div", "need-body"), el("p", "row-text", String(item.sentence || "")), fixControl(item.fix, key, "warn", !0, itemSource(item)));
+      const key = "need:" + String(item.id || index), body = add(el("div", "need-body"), el("p", "row-text", String(item.sentence || "")), fixControl(archiveNeedFix(item), key, "warn", !0, itemSource(item)));
       add(list, add(el("li", "row need"), body));
     });
     return add(section, list);
+  }
+  function waitingRow() {
+    const meta = state.computerMeta;
+    if (!onComputer() || !meta)
+      return null;
+    const count = meta.waitingPrivateQuestions, href = state.hostLinks.privateAnswers;
+    if (typeof count !== "number" || !isFinite(count) || count < 1 || !href)
+      return null;
+    const W = H.copy, sentence = count === 1 ? W.waiting.one : fill(W.waiting.many, { count: Math.floor(count) }), open = button(W.open, "need:waiting", () => openLink(href), "warn");
+    open.setAttribute("aria-label", W.open + " " + W.rows.privateAnswers.title);
+    const body = add(el("div", "need-body"), el("p", "row-text", sentence), add(el("span", "fix"), open)), row = add(el("li", "row need"), body);
+    row.setAttribute("data-waiting-private", String(Math.floor(count)));
+    return row;
   }
   function sourceItem(source) {
     return (state.data && Array.isArray(state.data.needsYou) ? state.data.needsYou : []).filter((item) => aboutSource(item, source))[0] || null;
@@ -200784,10 +200952,10 @@ textarea.text{resize:vertical;min-height:4.5rem}
     const label = typeof source.label === "string" ? source.label : "";
     return !!label && typeof item.sentence === "string" && item.sentence.indexOf(label + " \\u2014 ") === 0;
   }
-  function sourceRow(source) {
-    const id = String(source.id || source.label), status = String(source.status || ""), item = sourceItem(source), tone = item ? "warn" : config.statusTone[status] || "off", row = el("li", item ? "row source need-row" : "row source"), main = el("div", "source-main"), dot = el("span", "dot tone-" + tone);
+  function sourceRow(source, other) {
+    const id = String(source.id || source.label), status = String(source.status || ""), archives = archivesMeta(id), item = sourceItem(source), tone = item ? "warn" : config.statusTone[status] || "off", row = el("li", item ? "row source need-row" : "row source"), main = el("div", "source-main"), dot = el("span", "dot tone-" + tone);
     dot.setAttribute("aria-hidden", "true");
-    const head = add(el("p", "source-head"), dot, el("span", "source-name", String(source.label || ""))), off = status === "Off" && !item;
+    const head = add(el("p", "source-head"), dot, other ? add(el("span", "source-name source-for", P.otherArchives.line), el("span", "sr", " \\u2014 " + String(source.label || ""))) : el("span", "source-name", String(source.label || ""))), off = status === "Off" && !item;
     if (!off)
       add(head, el("span", "sr", " \\u2014 " + (item ? P.needsYou : status)));
     add(main, head);
@@ -200798,7 +200966,7 @@ textarea.text{resize:vertical;min-height:4.5rem}
       if (expires)
         meta.push(expires);
     } else if (checking)
-      meta.push(fill(P.syncCheckingLine, { source: String(source.label || "") }));
+      meta.push(fill(P.syncCheckingLine, { source: String(source.syncNoun || source.label || "") }));
     else if (manual)
       meta.push(capitalise(detail));
     else if (progress)
@@ -200816,26 +200984,54 @@ textarea.text{resize:vertical;min-height:4.5rem}
       add(main, el("p", "muted", shown.join(" \\xB7 ")));
     if (progress && !((checking || manual) && progress.stalled))
       add(main, sourceProgressBlock(progress, source, stalledWords || (progress.stalled ? pauseFallback(item, source) : "")));
-    const why = seeWhy(source, id, !!progress && !!progress.stalled && !checking && !manual);
+    const joined = sourceImportsMeta(id), why = seeWhy(source, id, !!progress && !!progress.stalled && !checking && !manual) || (archives ? archiveUnreadable(archives, id) || archiveNotRunning(archives, id) : null) || (joined ? archiveNotRunning(joined, id) : null), failedStall = !!progress?.stalled && (progress.stalledReason === "provider_unavailable" || progress.stall?.cause === "failing");
+    if (source.supportDetails && (failedStall || status === "Failing" || status === "Needs you" || source.lastManualSync?.outcome === "failed")) {
+      const report = el("pre", "help", source.supportDetails), copy = copyControl(report, "support:" + id);
+      copy.textContent = "Copy details";
+      const support = add(details("support-details:" + id, doc.createTextNode("Details for support"), "disclosure"), report, copy, el("p", "muted", "No names, numbers, emails, chats or folder titles."));
+      add(main, support);
+    }
     if (why)
       add(main, why);
-    else if (state.landed && state.landed.id === id)
+    else if (state.landed && state.landed.id === id && !(archives && archiveNeeds(archives)) && !(joined && sourceImportsNeed(joined)))
       row.className += " landed";
+    if (archives)
+      add(main, archiveList(archives));
+    if (joined)
+      add(main, sourceImportList(joined));
     add(row, main);
-    const controls = el("div", "source-actions"), context = { id, label: String(source.label || id) }, fix = item && item.fix ? item.fix : source.primary, isSync = (entry) => !!entry && entry.tool === config.syncTool;
-    if (fix && !(checking && isSync(fix)))
+    const controls = el("div", "source-actions"), context = { id, label: String(source.label || id) }, fix = archiveFix(archives, item && item.fix ? item.fix : source.primary, id), isSync = (entry) => !!entry && entry.tool === config.syncTool, own = archiveSourceMeta(id);
+    if (own) {
+      add(controls, fixControl({ label: H.copy.archives.sourceImport.action, archiveImport: !0, archiveSource: own.sourceId }, "import:" + id, "plain", !0, context));
+      row.className += " has-import";
+    }
+    const ownFix = !!own && !!fix && fix.archiveImport === !0 && fix.archiveSource === own.sourceId;
+    if (fix && !ownFix && !(checking && isSync(fix)))
       add(controls, fixControl(fix, "primary:" + id, "plain", !0, context));
     if (checking)
       add(controls, checkingControl("primary:" + id));
-    const menu = (Array.isArray(source.menu) ? source.menu : []).filter((entry) => (!fix || !entry || entry.label !== fix.label || entry.tool !== fix.tool) && !(checking && isSync(entry))), unpair = unpairEntry(id);
+    const deleted = state.deleting[id] !== void 0, menu = (Array.isArray(source.menu) ? source.menu : []).map((entry) => archiveFix(archives, entry, id)).filter((entry) => (!fix || !entry || entry.label !== fix.label || entry.tool !== fix.tool) && !(checking && isSync(entry)) && !(deleted && entry && entry.tool === config.deleteDataTool));
+    if (other) {
+      const importing = (entry) => !!entry && (entry.archiveImport === !0 || entry.label === H.copy.archives.importAction), shown = menu.filter(importing)[0];
+      if (shown && !importing(fix))
+        add(controls, fixControl(shown, "import:" + id, "plain", !0, context));
+      for (let at = menu.length - 1;at >= 0; at -= 1)
+        if (importing(menu[at]))
+          menu.splice(at, 1);
+    }
+    const unpair = unpairEntry(id);
     if (unpair)
       menu.push(unpair);
     let menuBox = null;
     if (menu.length) {
       const glyph = el("span", "", "\\u22EF");
       glyph.setAttribute("aria-hidden", "true");
-      const hidden = el("span", "sr", fill(P.moreActions, { source: String(source.label || "") })), box = details("menu:" + id, add(el("span"), glyph, hidden), "menu"), panel = el("div", "menu-panel");
-      menu.forEach((fix, index) => add(panel, fixControl(fix, "menu:" + id + ":" + index, "plain", !0, context)));
+      const hidden = el("span", "sr", fill(P.moreActions, { source: String(source.label || "") })), box = details("menu:" + id, add(el("span"), glyph, hidden), "menu"), panel = el("div", "menu-panel"), taken = {};
+      menu.forEach((fix) => {
+        const slug = String(fix && fix.label || "action").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "action";
+        taken[slug] = (taken[slug] || 0) + 1;
+        add(panel, fixControl(fix, "menu:" + id + ":" + slug + (taken[slug] > 1 ? "-" + taken[slug] : ""), "plain", !0, context));
+      });
       menuBox = add(box, panel);
     }
     if (controls.childNodes.length) {
@@ -200847,6 +201043,457 @@ textarea.text{resize:vertical;min-height:4.5rem}
       add(row, menuBox);
     }
     return row;
+  }
+  function archiveGroups() {
+    const meta = state.computerMeta;
+    if (!onComputer() || !meta)
+      return [];
+    return [meta.archives].concat(Array.isArray(meta.archiveCards) ? meta.archiveCards : []).filter((group) => !!group && typeof group === "object" && typeof group.sourceId === "string" && Array.isArray(group.archives) && Array.isArray(group.requests));
+  }
+  function archivesMeta(id) {
+    return archiveGroups().filter((group) => group.sourceId === id)[0] || null;
+  }
+  function archiveFix(archives, fix, id) {
+    if (!fix || fix.openHref !== !0)
+      return fix;
+    if (archives && archives === state.computerMeta.archives && fix.label === H.copy.archives.importAction)
+      return { label: fix.label, archiveImport: !0 };
+    const own = archiveSourceMeta(id);
+    return own && fix.label === H.copy.archives.sourceImport.action ? { label: fix.label, archiveImport: !0, archiveSource: own.sourceId } : fix;
+  }
+  function archiveNeedFix(item) {
+    const fix = item && item.fix, id = item && typeof item.id === "string" ? item.id : "";
+    if (!fix || typeof fix.label !== "string" || archiveGroups().length === 0)
+      return fix;
+    if (id === "archives:held")
+      return { label: fix.label, archiveModels: !0 };
+    if (id === "archives:unreadable" || id === "archives:scheduler" || id.indexOf("archive:") === 0 || id.indexOf("archive-request:") === 0)
+      return { label: fix.label, archiveFocus: id };
+    return fix;
+  }
+  function focusArchive(target) {
+    const meta = state.computerMeta && state.computerMeta.archives, sourceId = meta && typeof meta.sourceId === "string" ? meta.sourceId : "", rowWhy = target === "archives:unreadable" || target === "archives:scheduler";
+    if (rowWhy) {
+      if (!sourceId)
+        return;
+      state.open["why:" + sourceId] = !0;
+      state.landed = { id: sourceId, until: Date.now() + H.landedMs };
+    } else
+      state.landed = { id: target, until: Date.now() + H.landedMs };
+    render(rowWhy ? "summary:why:" + sourceId : "");
+    const node = root.querySelector(".landed");
+    if (node && typeof node.scrollIntoView === "function")
+      node.scrollIntoView({ block: "center" });
+    const control = node ? node.querySelector("button, summary") : null;
+    if (control && typeof control.focus === "function")
+      control.focus();
+    setTimeout(() => {
+      state.landed = null;
+      const shown = root.querySelector(".landed");
+      if (shown)
+        shown.classList.remove("landed");
+    }, H.landedMs);
+  }
+  function archiveNeeds(meta) {
+    return Array.isArray(meta.archives) && meta.archives.some((entry) => !!entry && archiveNeedsPerson(entry)) || Array.isArray(meta.requests) && meta.requests.some((entry) => !!entry && requestNeedsPerson(entry));
+  }
+  function archiveNeedsPerson(archive) {
+    return archive.status === "stopped" || archive.countsUnavailable === !0 && archive.status !== "removing";
+  }
+  function requestNeedsPerson(request) {
+    return request.status === "pending" && request.origin === "agent" || request.status === "failed";
+  }
+  function archiveLanded(own, needsPerson) {
+    const landed = state.landed;
+    if (!landed)
+      return !1;
+    const meta = state.computerMeta && state.computerMeta.archives;
+    return landed.id === own || needsPerson && !!meta && landed.id === meta.sourceId;
+  }
+  function archiveUnreadable(meta, id) {
+    const A = H.copy.archives, unreadable = meta.unreadable;
+    if (!unreadable || typeof unreadable !== "object")
+      return null;
+    const reason = Object.prototype.hasOwnProperty.call(A.unreadable.why, unreadable.reason) ? String(unreadable.reason) : "other", file = typeof unreadable.file === "string" && unreadable.file ? unreadable.file : "", box = details("why:" + id, doc.createTextNode(P.seeWhy), "why");
+    if (state.landed && state.landed.id === id)
+      box.className += " landed";
+    add(box, add(el("ul", "plain"), el("li", "", fill(A.unreadable.why[reason], { file: file || A.thisFile })), el("li", "", A.unreadable.kept), el("li", "", A.unreadable.fix[reason])));
+    return box;
+  }
+  function archiveSetting(meta) {
+    return meta && (meta.notRunning === "disabled" || meta.notRunning === "not_selected") ? String(meta.notRunning) : "";
+  }
+  function archiveNotRunning(meta, id) {
+    const A = H.copy.archives, setting = archiveSetting(meta);
+    if (!setting)
+      return null;
+    const box = details("why:" + id, doc.createTextNode(P.seeWhy), "why");
+    if (state.landed && state.landed.id === id)
+      box.className += " landed";
+    add(box, add(el("ul", "plain"), el("li", "", A.notRunning.why[setting]), el("li", "", A.notRunning.fix[setting])));
+    return box;
+  }
+  function archivesMoving() {
+    if ((onComputer() && state.computerMeta && Array.isArray(state.computerMeta.sourceImports) ? state.computerMeta.sourceImports : []).some((group) => !!group && !archiveSetting(group) && Array.isArray(group.imports) && group.imports.some((entry) => !!entry && entry.status === "importing")))
+      return !0;
+    return archiveGroups().some((meta) => !archiveSetting(meta) && meta.archives.some((entry) => !!entry && (entry.status === "importing" || entry.status === "removing")) || meta.requests.some((entry) => !!entry && entry.status === "checking"));
+  }
+  function startArchivePick(key, sourceId) {
+    supersede();
+    state.notice = "";
+    state.confirming = "";
+    const A = H.copy.archives, own = sourceId ? archiveSourceMeta(sourceId) : null, words = own ? { ...A.pick, title: fill(A.sourceImport.title, { source: String(own.label) }), intro: String(own.intro), account: A.account } : { ...A.pick, account: A.account };
+    picker.pickArchive(words, (picked) => closeScreen(picked ? archiveOutcome(picked) : "", !0, key), own ? String(own.sourceId) : "");
+  }
+  function archiveSourceMeta(id) {
+    const meta = state.computerMeta;
+    if (!onComputer() || !meta || !Array.isArray(meta.archiveSources))
+      return null;
+    return meta.archiveSources.filter((entry) => !!entry && entry.sourceId === id && typeof entry.label === "string" && !!entry.label && typeof entry.intro === "string" && !!entry.intro)[0] || null;
+  }
+  function archiveOutcome(outcome) {
+    const A = H.copy.archives, name = outcome && typeof outcome.name === "string" ? outcome.name : "";
+    if (!name)
+      return "";
+    const archive = typeof outcome.archiveName === "string" ? outcome.archiveName : typeof outcome.archive_name === "string" ? outcome.archive_name : "";
+    if (outcome.status === "checking")
+      return fill(A.checking, { name });
+    if (outcome.status === "already_imported")
+      return archive ? fill(A.already, { name, archive }) : fill(A.alreadyUnnamed, { name });
+    const source = outcome.source && typeof outcome.source.label === "string" ? outcome.source.label : "";
+    if (outcome.status === "started")
+      return source ? fill(A.startedIn, { name, source }) : fill(A.started, { name });
+    return "";
+  }
+  function archiveNotice(name, args, result) {
+    const A = H.copy.archives, meta = state.computerMeta && state.computerMeta.archives;
+    if (name === H.archiveRemoveTool) {
+      const asked = args && args.request_id && meta && Array.isArray(meta.requests) ? meta.requests.filter((entry) => entry && entry.id === args.request_id)[0] : null, target = asked ? asked.archiveId : args && args.archive_id, removed = archiveGroups().flatMap((group) => group.archives).filter((entry) => entry && entry.id === target)[0] || null;
+      return removed && typeof removed.name === "string" ? fill(A.removing, { name: removed.name }) : "";
+    }
+    if (name === H.archiveStopTool) {
+      const stopped = (state.computerMeta && Array.isArray(state.computerMeta.sourceImports) ? state.computerMeta.sourceImports : []).flatMap((group) => group && Array.isArray(group.imports) ? group.imports : []).filter((entry) => entry && entry.id === (args && args.archive_id))[0];
+      return stopped && typeof stopped.name === "string" ? fill(A.inSource.stopped, { name: stopped.name }) : "";
+    }
+    if (name === H.archiveDeclineTool) {
+      const request = meta && Array.isArray(meta.requests) ? meta.requests.filter((entry) => entry && entry.id === (args && args.request_id))[0] : null;
+      if (request && request.status === "checking" && typeof request.name === "string")
+        return fill(A.cancelled, { name: request.name });
+      if (args && typeof args.request_id === "string")
+        delete state.archiveConfirm[args.request_id];
+      return request && request.status === "pending" ? A.declined : "";
+    }
+    if (name === H.archiveApproveTool) {
+      const content = result && result.structuredContent, requestId = args && typeof args.request_id === "string" ? args.request_id : "";
+      if (requestId)
+        if (content && content.status === "confirm_account") {
+          const source = content.source && typeof content.source.label === "string" ? content.source.label : "";
+          state.archiveConfirm[requestId] = { source, ...content.reconfirm === !0 ? { reconfirm: !0 } : {} };
+        } else {
+          delete state.archiveConfirm[requestId];
+          state.archiveStarting[requestId] = Date.now();
+        }
+    }
+    return archiveOutcome(result && result.structuredContent);
+  }
+  const ARCHIVE_STATUSES = ["importing", "imported", "stopped", "removing"], ARCHIVE_REQUEST_STATUSES = ["pending", "checking", "already_imported", "failed"];
+  function validArchive(entry) {
+    return !!entry && typeof entry.id === "string" && !!entry.id && typeof entry.name === "string" && ARCHIVE_STATUSES.indexOf(entry.status) >= 0 && Array.isArray(entry.gaps) && Array.isArray(entry.skipped);
+  }
+  function validArchiveRequest(entry) {
+    return !!entry && typeof entry.id === "string" && !!entry.id && typeof entry.name === "string" && ARCHIVE_REQUEST_STATUSES.indexOf(entry.status) >= 0;
+  }
+  function wholeCount(value) {
+    return typeof value === "number" && isFinite(value) && value > 0 ? Math.floor(value) : 0;
+  }
+  function archiveNouns(archive) {
+    const nouns = H.copy.archives.nouns, family = archive && typeof archive.family === "string" ? archive.family : "";
+    return Object.prototype.hasOwnProperty.call(nouns, family) ? nouns[family] : nouns.other;
+  }
+  function itemCount(archive, n) {
+    const nouns = archiveNouns(archive);
+    return fill(n === 1 ? nouns.one : nouns.many, { n: count(n) });
+  }
+  function archiveList(meta) {
+    const A = H.copy.archives, requests = meta.requests.filter(validArchiveRequest), archives = meta.archives.filter(validArchive);
+    if (!requests.length && !archives.length)
+      return null;
+    const list = el("ul", "archives");
+    list.setAttribute("aria-label", A.listLabel);
+    for (const request of requests)
+      add(list, archiveRequestItem(request));
+    for (const archive of archives)
+      add(list, archiveItem(archive, String(meta.privateModel || ""), archiveSetting(meta)));
+    return list;
+  }
+  function sourceImportsMeta(id) {
+    const meta = state.computerMeta;
+    if (!onComputer() || !meta || !Array.isArray(meta.sourceImports))
+      return null;
+    const found = meta.sourceImports.filter((group) => !!group && group.sourceId === id && Array.isArray(group.imports))[0];
+    return found && found.imports.filter(validArchive).length > 0 ? found : null;
+  }
+  function sourceImportNeedsPerson(entry) {
+    return entry.status === "stopped" && !(entry.stop && entry.stop.code === "stopped_by_owner");
+  }
+  function sourceImportsNeed(group) {
+    return group.imports.filter(validArchive).some(sourceImportNeedsPerson);
+  }
+  function sourceImportList(group) {
+    const S = H.copy.archives.inSource, box = el("div", "archive-source"), covers = group.covers && typeof group.covers === "object" ? group.covers : {}, parts = [];
+    if (typeof covers.importedTo === "string" && covers.importedTo)
+      parts.push(fill(S.covers.imported, { to: covers.importedTo }));
+    if (typeof covers.liveSince === "string" && covers.liveSince)
+      parts.push(fill(S.covers.live, { since: covers.liveSince }));
+    if (parts.length) {
+      const line = parts.join(" \\xB7 ");
+      add(box, el("p", "muted archive-facts archive-covers", line.charAt(0).toUpperCase() + line.slice(1)));
+    }
+    const list = el("ul", "archives");
+    list.setAttribute("aria-label", S.listLabel);
+    const setting = archiveSetting(group);
+    for (const entry of group.imports.filter(validArchive))
+      add(list, sourceImportItem(entry, setting));
+    return add(box, list);
+  }
+  function alreadyThereNote(entry) {
+    const n = wholeCount(entry.alreadyThere), S = H.copy.archives.inSource;
+    return n > 0 ? fill(n === 1 ? S.alreadyThere.one : S.alreadyThere.many, { n: count(n) }) : "";
+  }
+  function sourceImportItem(entry, setting) {
+    const A = H.copy.archives, S = A.inSource, ownStop = entry.status === "stopped" && !sourceImportNeedsPerson(entry), needs = sourceImportNeedsPerson(entry), item = el("li", "archive" + (needs ? " stopped" : ""));
+    item.setAttribute("data-archive", entry.status);
+    item.setAttribute("data-source-import", "true");
+    if (archiveLanded("archive:" + entry.id, needs))
+      item.className += " landed";
+    const halted = !!setting && entry.status === "importing";
+    if (halted)
+      item.setAttribute("data-not-running", setting);
+    add(item, add(el("p", "archive-head"), el("span", "archive-name", entry.name), el("span", "ftag", halted ? A.status.notRunning : A.status[entry.status])));
+    const facts = [entry.format, entry.where].filter((part) => typeof part === "string" && part).map((part) => el("span", "", part)), earliest = typeof entry.earliest === "string" ? entry.earliest : "", latest = typeof entry.latest === "string" ? entry.latest : "";
+    if (earliest && latest) {
+      facts.push(el("span", "archive-dates", earliest === latest ? earliest : fill(A.dates, { earliest, latest })));
+      const snapshot = archiveNouns(entry).snapshot;
+      if (typeof snapshot === "string" && snapshot)
+        facts.push(el("span", "archive-snapshot", snapshot));
+    }
+    if (facts.length) {
+      const line = el("p", "muted archive-facts");
+      facts.forEach((fact, index) => {
+        if (index)
+          add(line, doc.createTextNode(" \\xB7 "));
+        add(line, fact);
+      });
+      add(item, line);
+    }
+    const read = wholeCount(entry.read);
+    if (halted) {
+      const pct = typeof entry.percent === "number" && isFinite(entry.percent) ? entry.percent : 0;
+      add(item, el("p", "muted", fill(S.notRunningLine, { percent: percent(pct) })));
+    } else if (entry.status === "importing") {
+      const pct = steadyPercent(entry), line = read > 0 ? fill(S.importingLine, { percent: percent(pct), items: itemCount(entry, read) }) + alreadyThereNote(entry) : fill(S.importingLineNone, { percent: percent(pct) });
+      add(item, add(el("div", "archive-progress"), progressBar(pct, line), el("p", "muted", line), el("p", "muted", S.importingNote)));
+    } else if (entry.status === "imported") {
+      const when = typeof entry.importedAt === "string" ? ago(entry.importedAt) : "";
+      if (read === 0) {
+        const none = archiveNouns(entry).none;
+        if (archiveHasReasons(entry)) {
+          const None = none.charAt(0).toUpperCase() + none.slice(1);
+          add(item, el("p", "muted", when ? fill(A.nothingImportedWhen, { None, when }) : fill(A.nothingImported, { None })));
+        } else
+          add(item, el("p", "muted", when ? fill(A.emptyImportWhen, { none, when }) : fill(A.emptyImport, { none })));
+      } else
+        add(item, el("p", "muted", fill(S.importedLine, { items: itemCount(entry, read) }) + alreadyThereNote(entry) + (when ? fill(S.importedWhen, { when }) : "")));
+    } else {
+      const stop = entry.stop && typeof entry.stop === "object" ? entry.stop : {}, words = Object.prototype.hasOwnProperty.call(S.stoppedWhy, String(stop.code)) ? S.stoppedWhy[String(stop.code)] : S.stoppedWhy.other, file = typeof stop.file === "string" && stop.file ? stop.file : A.thisFile;
+      add(item, el("p", ownStop ? "muted" : "reason strong", fill(words.why, { file })), el("p", "muted", words.fix));
+      if (read > 0)
+        add(item, el("p", "muted", fill(S.importedLine, { items: itemCount(entry, read) }) + alreadyThereNote(entry)));
+    }
+    const why = archiveWhy(entry);
+    if (why)
+      add(item, why);
+    if (entry.status === "importing")
+      add(item, add(el("div", "archive-actions"), fixControl({ label: S.stop, tool: H.archiveStopTool, args: { archive_id: entry.id } }, "archive-stop:" + entry.id, "plain", !1)));
+    return item;
+  }
+  function isolatedLine(cls, template, values) {
+    const line = el("p", cls);
+    for (const part of template.split(/(\\{[a-z]+\\})/)) {
+      const key = part.slice(1, -1);
+      if (part.charAt(0) === "{" && Object.prototype.hasOwnProperty.call(values, key))
+        add(line, el("bdi", "", values[key]));
+      else if (part)
+        add(line, doc.createTextNode(part));
+    }
+    return line;
+  }
+  function archiveFullPath(request) {
+    const path = typeof request.path === "string" ? request.path : "";
+    return path ? isolatedLine("muted archive-facts request-path", H.copy.archives.fullPath, { path }) : null;
+  }
+  function archiveRequestItem(request) {
+    const A = H.copy.archives, item = el("li", "archive request");
+    item.setAttribute("data-request", String(request.status));
+    if (archiveLanded("archive-request:" + request.id, requestNeedsPerson(request)))
+      item.className += " landed";
+    const key = "archive-request:" + request.id, where = typeof request.where === "string" ? request.where : "";
+    if (request.kind === "remove") {
+      item.setAttribute("data-request", "remove");
+      add(item, where ? isolatedLine("", A.removeRequestLine, { name: request.name, where }) : isolatedLine("", A.removeRequestLineNoWhere, { name: request.name }));
+      add(item, archiveFullPath(request));
+      add(item, el("p", "muted", A.removeRequestNote));
+      add(item, add(el("div", "archive-actions"), fixControl({
+        label: A.remove,
+        tool: H.archiveRemoveTool,
+        args: { request_id: request.id },
+        destructive: !0,
+        confirmText: fill(A.removeConfirm, { name: request.name })
+      }, key + ":remove", "plain", !0), fixControl({ label: A.decline, tool: H.archiveDeclineTool, args: { request_id: request.id } }, key + ":decline", "plain", !1)));
+      return item;
+    }
+    const asked = state.archiveConfirm[request.id];
+    if (request.status === "pending" && asked) {
+      const source = asked.source || A.account.sourceFallback;
+      add(item, isolatedLine("", asked.reconfirm ? A.account.reconfirm.line : A.account.line, { name: request.name, source }));
+      add(item, el("p", "muted", fill(asked.reconfirm ? A.account.reconfirm.note : A.account.note, { source })));
+      add(item, add(el("div", "archive-actions"), fixControl({ label: fill(A.account.add, { source }), tool: H.archiveApproveTool, args: { request_id: request.id, confirm_account: !0 } }, key + ":confirm", "plain", !1), ...asked.reconfirm ? [] : [fixControl({ label: A.account.apart, tool: H.archiveApproveTool, args: { request_id: request.id, keep_apart: !0 } }, key + ":apart", "plain", !1)], fixControl({ label: A.decline, tool: H.archiveDeclineTool, args: { request_id: request.id } }, key + ":decline", "plain", !1)));
+      return item;
+    }
+    const startedAt = state.archiveStarting[request.id];
+    if (request.status !== "pending" || startedAt !== void 0 && Date.now() - startedAt > 60000)
+      delete state.archiveStarting[request.id];
+    else if (startedAt !== void 0) {
+      const line = el("p", "muted", fill(A.startingLine, { name: request.name }));
+      line.setAttribute("role", "status");
+      return add(item, line);
+    }
+    if (request.status === "pending") {
+      add(item, isolatedLine("", A.requestLine, { name: request.name, where }));
+      add(item, archiveFullPath(request));
+      add(item, add(el("div", "archive-actions"), fixControl({ label: A.approve, tool: H.archiveApproveTool, args: { request_id: request.id } }, key + ":approve", "plain", !1), fixControl({ label: A.decline, tool: H.archiveDeclineTool, args: { request_id: request.id } }, key + ":decline", "plain", !1)));
+      return item;
+    }
+    if (request.status === "checking") {
+      const line = el("p", "muted", fill(A.checkingLine, { name: request.name }));
+      line.setAttribute("role", "status");
+      return add(item, line, add(el("div", "archive-actions"), fixControl({ label: A.cancel, tool: H.archiveDeclineTool, args: { request_id: request.id } }, key + ":cancel", "plain", !1)));
+    }
+    const archive = typeof request.archiveName === "string" ? request.archiveName : "", failed = request.status === "failed", sentence = !failed ? archive ? fill(A.alreadyLine, { name: request.name, archive }) : fill(A.alreadyLineUnnamed, { name: request.name }) : fill(A.failedLine, { name: request.name, reason: A.failed[String(request.code)] || A.failed.unreadable });
+    add(item, el("p", failed ? "reason strong" : "", sentence));
+    const actions = el("div", "archive-actions");
+    if (failed)
+      add(actions, fixControl({ label: A.tryAgain, tool: H.archiveApproveTool, args: { request_id: request.id } }, key + ":retry", "plain", !1));
+    return add(item, add(actions, fixControl({ label: A.dismiss, tool: H.archiveDeclineTool, args: { request_id: request.id } }, key + ":dismiss", "plain", !1)));
+  }
+  function archiveItem(archive, model, setting) {
+    const A = H.copy.archives, item = el("li", "archive" + (archive.status === "stopped" ? " stopped" : ""));
+    item.setAttribute("data-archive", archive.status);
+    if (archiveLanded("archive:" + archive.id, archiveNeedsPerson(archive)))
+      item.className += " landed";
+    const halted = !!setting && (archive.status === "importing" || archive.status === "removing");
+    if (halted)
+      item.setAttribute("data-not-running", setting);
+    add(item, add(el("p", "archive-head"), el("span", "archive-name", archive.name), el("span", "ftag", halted ? A.status.notRunning : A.status[archive.status])));
+    const facts = [archive.format, archive.where].filter((part) => typeof part === "string" && part).map((part) => el("span", "", part)), earliest = typeof archive.earliest === "string" ? archive.earliest : "", latest = typeof archive.latest === "string" ? archive.latest : "";
+    if (earliest && latest) {
+      facts.push(el("span", "archive-dates", earliest === latest ? earliest : fill(A.dates, { earliest, latest })));
+      const snapshot = archiveNouns(archive).snapshot;
+      if (typeof snapshot === "string" && snapshot)
+        facts.push(el("span", "archive-snapshot", snapshot));
+    }
+    if (facts.length) {
+      const line = el("p", "muted archive-facts");
+      facts.forEach((fact, index) => {
+        if (index)
+          add(line, doc.createTextNode(" \\xB7 "));
+        add(line, fact);
+      });
+      add(item, line);
+    }
+    const items = wholeCount(archive.items), uncounted = archive.countsUnavailable === !0 && archive.status !== "removing";
+    if (halted && archive.status === "importing") {
+      const pct = typeof archive.percent === "number" && isFinite(archive.percent) ? archive.percent : 0;
+      add(item, el("p", "muted", uncounted ? fill(A.notRunningLineUncounted, { percent: percent(pct) }) : fill(A.notRunningLine, { percent: percent(pct), items: itemCount(archive, items) })));
+    } else if (halted)
+      add(item, el("p", "muted", A.removingNotRunningLine));
+    else if (archive.status === "importing") {
+      const pct = steadyPercent(archive), line = uncounted ? fill(A.importingLineUncounted, { percent: percent(pct) }) : fill(A.importingLine, { percent: percent(pct), items: itemCount(archive, items) });
+      add(item, add(el("div", "archive-progress"), progressBar(pct, line), el("p", "muted", line)));
+    } else if (archive.status === "imported") {
+      const when = typeof archive.importedAt === "string" ? ago(archive.importedAt) : "";
+      if (!uncounted && items === 0) {
+        const none = archiveNouns(archive).none;
+        if (archiveHasReasons(archive)) {
+          const None = none.charAt(0).toUpperCase() + none.slice(1);
+          add(item, el("p", "muted", when ? fill(A.nothingImportedWhen, { None, when }) : fill(A.nothingImported, { None })));
+        } else
+          add(item, el("p", "muted", when ? fill(A.emptyImportWhen, { none, when }) : fill(A.emptyImport, { none })));
+      } else if (!uncounted)
+        add(item, el("p", "muted", when ? fill(A.importedLine, { items: itemCount(archive, items), when }) : fill(A.importedLineNoTime, { items: itemCount(archive, items) })));
+    } else if (archive.status === "removing") {
+      const line = el("p", "muted", A.removingLine);
+      line.setAttribute("role", "status");
+      add(item, line);
+    } else {
+      const stop = archive.stop && typeof archive.stop === "object" ? archive.stop : {}, words = A.stopped[String(stop.code)] || A.stopped.other, file = typeof stop.file === "string" && stop.file ? stop.file : A.thisFile;
+      add(item, el("p", "reason strong", fill(words.why, { file })), el("p", "muted", words.fix));
+    }
+    if (uncounted)
+      add(item, el("p", "reason strong", A.countsUnavailable.why), el("p", "muted", A.countsUnavailable.fix));
+    else if (archive.status !== "removing" && items > 0)
+      add(item, archiveHeld(archive, model));
+    const why = archiveWhy(archive);
+    if (why)
+      add(item, why);
+    if (archive.status !== "removing")
+      add(item, add(el("div", "archive-actions"), fixControl({
+        label: A.remove,
+        tool: H.archiveRemoveTool,
+        args: { archive_id: archive.id },
+        destructive: !0,
+        confirmText: fill(A.removeConfirm, { name: archive.name }),
+        ...setting ? { disabledReason: A.removeNotRunning[setting] } : {}
+      }, "archive-remove:" + archive.id, "plain", !0)));
+    return item;
+  }
+  function archiveHeld(archive, model) {
+    const A = H.copy.archives, held = wholeCount(archive.held), block = el("div", "archive-held");
+    add(block, el("p", "muted", fill(A.judgedLine, { judged: count(wholeCount(archive.judged)), held: count(held) })));
+    if (!held)
+      return block;
+    const level = model === "ready" || model === "off" ? model : "waiting";
+    add(block, el("p", "muted", A.heldWhy[level]));
+    if (level !== "ready")
+      add(block, add(el("div", "archive-actions"), button(A.setUpPrivateModel, "archive-models:" + archive.id, () => {
+        state.open.models = !0;
+        render("summary:models");
+      }, "plain")));
+    return block;
+  }
+  function archiveFindings(archive) {
+    const lists = H.copy.archives.listOf;
+    return archive.gaps.concat(archive.skipped).filter((entry) => entry && typeof entry.kind === "string" && wholeCount(entry.count) > 0).map((entry) => ({
+      list: Object.prototype.hasOwnProperty.call(lists, entry.kind) && lists[entry.kind] === "how_read" ? "how_read" : "not_imported",
+      entry
+    }));
+  }
+  function archiveHasReasons(archive) {
+    return archiveFindings(archive).length > 0;
+  }
+  function archiveWhy(archive) {
+    const A = H.copy.archives, kinds = A.gaps, found = archiveFindings(archive), listed = (list) => found.filter((item) => item.list === list).map((item) => {
+      const entry = item.entry, words = Object.prototype.hasOwnProperty.call(kinds, entry.kind) ? kinds[entry.kind] : kinds.other, n = wholeCount(entry.count), gap = fill(n === 1 ? words.one : words.many, { n: count(n) });
+      return el("li", "", typeof entry.file === "string" && entry.file ? fill(A.gapInFile, { file: entry.file, gap }) : gap);
+    }), notImported = listed("not_imported"), howRead = listed("how_read");
+    if (!notImported.length && !howRead.length)
+      return null;
+    const label = notImported.length && howRead.length ? A.seeWhy.both : howRead.length ? A.seeWhy.howRead : A.seeWhy.notImported, box = details("archive-why:" + archive.id, doc.createTextNode(label), "why");
+    if (notImported.length)
+      add(box, el("p", "why-head", A.lists.notImported), add(el("ul", "plain"), ...notImported));
+    if (howRead.length)
+      add(box, el("p", "why-head", A.lists.howRead), add(el("ul", "plain"), ...howRead));
+    return box;
   }
   function seeWhy(source, id, stalled) {
     const stall = stalled && source.progress ? stallLines(source.progress.stall, source) : [], unreadable = source.unreadable, words = P.unreadableReasons, lines = unreadable && typeof unreadable === "object" && Array.isArray(unreadable.reasons) ? unreadable.reasons.filter((reason) => reason && words[reason.code] && Number(reason.count) > 0).map((reason) => {
@@ -200861,7 +201508,7 @@ textarea.text{resize:vertical;min-height:4.5rem}
     if (stall.length)
       add(box, add(el("ul", "plain stall-why"), ...stall.map((line) => el("li", "", line))));
     if (lines.length)
-      add(box, add(el("ul", "plain"), ...lines), unreadableFiles(unreadable, id), el("p", "why-note", unreadable.many ? P.unreadableNoteMany : P.unreadableNote));
+      add(box, add(el("ul", "plain"), ...lines), unreadableFiles(unreadable, id), el("p", "why-note", unreadable.reasons.some((reason) => reason.code === "privacy_check_missing") ? "" : unreadable.many ? P.unreadableNoteMany : P.unreadableNote));
     return box;
   }
   function unreadableFiles(unreadable, id) {
@@ -200878,6 +201525,9 @@ textarea.text{resize:vertical;min-height:4.5rem}
           add(item, control);
         } else
           add(item, document.createTextNode(file.name));
+        const why = file.reason ? P.unreadableFileReasons[file.reason] : "";
+        if (typeof why === "string" && why)
+          add(item, el("span", "muted file-why", " \\xB7 " + why));
         add(list, item);
       });
       if (own.more > 0) {
@@ -200905,7 +201555,10 @@ textarea.text{resize:vertical;min-height:4.5rem}
     return typeof value === "string" && value.length <= 64 && /^[0-9TZ:.+-]+~[A-Za-z0-9_-]+$/.test(value) ? value : "";
   }
   function unreadableEntries(input) {
-    return input.filter((file) => file && typeof file.name === "string" && file.name).map((file) => typeof file.token === "string" && /^[A-Za-z0-9_-]{16,128}$/.test(file.token) ? { name: file.name, token: file.token } : { name: file.name });
+    return input.filter((file) => file && typeof file.name === "string" && file.name).map((file) => {
+      const reason = typeof file.reason === "string" && Object.prototype.hasOwnProperty.call(P.unreadableFileReasons, file.reason) ? { reason: file.reason } : {};
+      return typeof file.token === "string" && /^[A-Za-z0-9_-]{16,128}$/.test(file.token) ? { name: file.name, token: file.token, ...reason } : { name: file.name, ...reason };
+    });
   }
   function moreCount(value) {
     return typeof value === "number" && isFinite(value) && value > 0 ? Math.floor(value) : 0;
@@ -200915,6 +201568,16 @@ textarea.text{resize:vertical;min-height:4.5rem}
     if (!id || !state.data || state.relayDown || editorOpen() || compact())
       return;
     state.landing = "";
+    if (state.landingImport) {
+      state.landingImport = !1;
+      if (!picker || !onComputer())
+        return;
+      if (id === config.archivesSourceId)
+        startArchivePick("", "");
+      else if (archiveSourceMeta(id))
+        startArchivePick("", id);
+      return;
+    }
     if (!(Array.isArray(state.data.sources) ? state.data.sources : []).some((source) => source && source.id === id))
       return;
     state.open["why:" + id] = !0;
@@ -200996,12 +201659,19 @@ textarea.text{resize:vertical;min-height:4.5rem}
     if (!progress.stalled || !progress.stalledReason)
       return "";
     const words = P.stalledReasons[progress.stalledReason];
+    if (progress.stalledReason === "scope_root_missing" && onComputer()) {
+      const missing = state.computerMeta?.missingFolders, paths = Array.isArray(missing) ? missing.find((entry) => entry.sourceId === source.id)?.paths : void 0;
+      if (Array.isArray(paths) && paths.length)
+        return String(words) + ": " + paths.filter((path) => typeof path === "string").join(", ");
+    }
     return typeof words === "string" ? fill(words, { source: String(source.label || "") }) : "";
   }
   function sourceProgressLabel(progress) {
     const total = Number(progress.total) || 0;
+    if (progress.percent === void 0 && progress.stage !== "listing")
+      return P.sourceStages[progress.stage] || P.findingItems;
     if (total <= 0)
-      return P.findingItems;
+      return foundSoFar(progress.stage === "listing" ? progress.done : 0, progress.unit);
     const stage = P.sourceStages[progress.stage] || P.findingItems;
     return fill(P.sourceProgress, {
       stage,
@@ -201011,18 +201681,42 @@ textarea.text{resize:vertical;min-height:4.5rem}
       unit: unitWord(progress.unit, total)
     });
   }
+  function foundSoFar(found, unit) {
+    const n = Number(found) || 0;
+    if (n <= 0)
+      return P.findingItems;
+    const words = P.units[unit] || P.units.items;
+    return fill(P.findingFound, { unit: words.many, done: count(n) });
+  }
+  function indeterminateBar(label) {
+    const bar = el("div", "bar indeterminate");
+    bar.setAttribute("role", "progressbar");
+    bar.setAttribute("aria-label", label);
+    return add(bar, el("div", "bar-fill"));
+  }
   function sourceProgressBlock(progress, source, stalledWords) {
     const box = el("div", progress.stalled ? "source-progress stalled" : "source-progress"), name = String(source.label || "");
     if (progress.stalled) {
       const real = (Number(progress.total) || 0) > 0 && (Number(progress.percent) || 0) > 0 && progress.stage !== "done";
       if (stalledWords)
         add(box, el("p", "stall-line", stalledWords));
+      const fixes = progress.stalledReason === "scope_root_permission_needed" && onComputer() && state.computerMeta && Array.isArray(state.computerMeta.permissionSettings) ? state.computerMeta.permissionSettings.filter((entry) => entry && entry.sourceId === source.id && typeof entry.url === "string" && entry.url.indexOf("x-apple.systempreferences:") === 0) : [];
+      if (fixes.length) {
+        const link = el("a", "btn", config.picker.copy.openPrivacySettings);
+        link.href = String(fixes[0].url);
+        link.setAttribute("data-key", "source:" + String(source.id) + ":privacy-settings");
+        add(box, add(el("div", "actions"), link));
+      }
       if (real)
         add(box, progressBar(progress.percent, name + ": " + (stalledWords || sourceProgressLabel(progress))));
       return box;
     }
     const label = sourceProgressLabel(progress);
-    add(box, el("p", "muted", label), progressBar(progress.percent, name + ": " + label));
+    add(box, el("p", "muted", label));
+    if (progress.stage === "listing" && (Number(progress.total) || 0) <= 0 && !(Number(progress.percent) > 0))
+      add(box, indeterminateBar(name + ": " + label));
+    else if (progress.percent !== void 0)
+      add(box, progressBar(progress.percent, name + ": " + label));
     return box;
   }
   function progressRepeatsOneRow(sources) {
@@ -201050,6 +201744,15 @@ textarea.text{resize:vertical;min-height:4.5rem}
   }
   function capitalise(text) {
     return text ? text.charAt(0).toUpperCase() + text.slice(1) : text;
+  }
+  function isArchivesCard(source) {
+    return !!source && String(source.id) === config.archivesSourceId;
+  }
+  function otherArchivesSection(source) {
+    if (!source)
+      return null;
+    const section = add(el("section", "section other-archives"), el("h2", "", P.otherArchives.title));
+    return add(section, add(el("ul", "rows"), sourceRow(source, !0)));
   }
   function sourcesSection(sources) {
     const section = add(el("section", "section"), el("h2", "", P.sources));
@@ -201096,24 +201799,29 @@ textarea.text{resize:vertical;min-height:4.5rem}
   }
   function totalUnknown(progress) {
     const stages = Array.isArray(progress.details) ? progress.details : [];
-    return stages.length > 0 && stages.every((stage) => !(Number(stage && stage.total) > 0));
+    if (stages.length === 0)
+      return !1;
+    if (stages.every((stage) => !(Number(stage && stage.total) > 0)))
+      return !0;
+    return progress.percent === void 0 && progress.itemsLeft === void 0 && !(Number(stages[0] && stages[0].total) > 0);
   }
   function progressFinished(progress) {
-    return !!progress && !progress.stalled && !totalUnknown(progress) && (Number(progress.itemsLeft) || 0) <= 0;
+    return !!progress && progress.itemsLeft !== void 0 && !progress.stalled && !totalUnknown(progress) && (Number(progress.itemsLeft) || 0) <= 0;
   }
   function progressText(progress) {
     const phase = progress.phase === "initial" ? P.progressInitial : P.progressRefresh;
     if (totalUnknown(progress)) {
-      const paused = progressPaused() ? ", " + P.progressPaused : progress.stalled ? ", " + stalledNames() : "";
-      return phase + ": " + P.findingItems + paused;
+      const paused = progressPaused() ? ", " + P.progressPaused : progress.stalled ? ", " + stalledNames() : "", first = Array.isArray(progress.details) ? progress.details[0] : void 0;
+      return phase + ": " + foundSoFar(first && first.done, progress.unit) + paused;
     }
-    const parts = [fill(P.percentDone, { percent: percent(progress.percent) })];
+    const parts = progress.percent === void 0 ? [P.sourceStages.indexing] : [fill(P.percentDone, { percent: percent(progress.percent) })];
     if (progressPaused()) {
       parts.push(P.progressPaused);
       return (progress.phase === "initial" ? P.progressInitial : P.progressRefresh) + ": " + parts.join(", ");
     }
     const left = Number(progress.itemsLeft) || 0;
-    parts.push(fill(P.left, { count: count(left), unit: unitWord(progress.unit, left) }));
+    if (progress.itemsLeft !== void 0)
+      parts.push(fill(P.left, { count: count(left), unit: unitWord(progress.unit, left) }));
     if (typeof progress.etaSeconds === "number" && progress.etaSeconds > 0 && !progress.stalled)
       parts.push(fill(P.eta, { duration: duration(progress.etaSeconds) }));
     if (progress.stalled)
@@ -201137,7 +201845,11 @@ textarea.text{resize:vertical;min-height:4.5rem}
     if (!progress || progressFinished(progress))
       return null;
     const section = add(el("section", "section"), el("h2", "", P.progress)), stalled = progress.stalled && !progressPaused(), line = el("p", stalled ? "progress-line stalled" : progressPaused() ? "progress-line paused" : "progress-line", progressText(progress));
-    add(section, line, progressBar(progress.percent, P.progress));
+    add(section, line);
+    if (progress.percent !== void 0)
+      add(section, progressBar(progress.percent, P.progress));
+    else if (totalUnknown(progress) && !stalled && !progressPaused())
+      add(section, indeterminateBar(P.progress));
     const stages = Array.isArray(progress.details) ? progress.details : [], faster = indexFasterControl();
     if (withDetails && (stages.length || faster)) {
       const box = details("progress-details", doc.createTextNode(P.details), "disclosure"), list = el("ul", "plain");
@@ -201315,7 +202027,7 @@ textarea.text{resize:vertical;min-height:4.5rem}
     const card = el("div", "card compact"), data = state.data, top = connectionBanner() || (data && data.blocker ? itemBanner(data.blocker, "blocker", !1) : null) || (data && data.needsYou && data.needsYou[0] ? itemBanner(data.needsYou[0], "need:" + String(data.needsYou[0].id || 0), !1) : null);
     add(card, top);
     if (!top && !data)
-      add(card, el("p", "muted", P.loading));
+      add(card, el("p", "muted", loadingWords()));
     if (data && data.progress && !state.relayDown && !progressFinished(data.progress))
       add(card, el("p", "progress-line", progressText(data.progress)));
     else if (!top && data)
@@ -201338,25 +202050,41 @@ textarea.text{resize:vertical;min-height:4.5rem}
     }
     if (!data) {
       if (!state.relayDown)
-        add(page, el("p", "muted", P.loading));
+        add(page, el("p", "muted", loadingWords()));
       return page;
     }
     add(page, data.blocker ? itemBanner(data.blocker, "blocker", !0) : null);
     add(page, staleLine());
     const listed = Array.isArray(data.sources) ? data.sources : [];
     add(page, needsYouSection((Array.isArray(data.needsYou) ? data.needsYou : []).filter((item) => item && !listed.some((source) => aboutSource(item, source)))));
-    add(page, sourcesSection(Array.isArray(data.sources) ? data.sources : []));
+    const allSources = Array.isArray(data.sources) ? data.sources : [];
+    add(page, sourcesSection(allSources.filter((source) => !isArchivesCard(source))));
+    add(page, otherArchivesSection(allSources.filter(isArchivesCard)[0]));
     add(page, privacySection(data));
     const sourceList = Array.isArray(data.sources) ? data.sources : [];
     add(page, progressRepeatsOneRow(sourceList) && !indexFasterShown() ? null : progressSection(data.progress, !0));
     add(page, modelsSection(data.models));
     add(page, computerSection());
+    add(page, moreOnComputer());
     return page;
+  }
+  function moreOnComputer() {
+    if (onComputer() || GLOBAL_STATES.indexOf(connectionState()) >= 0)
+      return null;
+    const href = helpHref(state.data.computerControls && state.data.computerControls.href);
+    if (!href)
+      return null;
+    const key = "more-on-computer", line = add(el("div", "section more-on-computer"), el("p", "muted", P.moreOnComputer)), remote = remoteMode(), open = button(P.moreOnComputerOpen, key, remote ? () => toggleRemote(key) : () => openLink(href), "plain");
+    open.className = "btn link";
+    open.setAttribute("aria-label", P.moreOnComputerOpenLabel);
+    if (remote)
+      open.setAttribute("aria-expanded", state.open["remote:" + key] ? "true" : "false");
+    return add(line, open, remote ? remoteBox(key, href) : null);
   }
   function computerSection() {
     if (!onComputer())
       return null;
-    const W = H.copy, keys = ["keys", "agents", "outsideHelp", "connector"].filter((key) => !!state.hostLinks[key]);
+    const W = H.copy, keys = ["keys", "agents", "privateAnswers", "connector", "help"].filter((key) => !!state.hostLinks[key]);
     if (!keys.length)
       return null;
     const heading = add(el("h2"), doc.createTextNode(W.section + " "), el("span", "tag", W.onlyHere)), section = add(el("section", "section on-computer"), heading), list = el("ul", "rows");
@@ -201414,6 +202142,8 @@ textarea.text{resize:vertical;min-height:4.5rem}
     fill,
     count,
     call: callRaw,
+    upload: uploadFile,
+    abortUpload,
     render,
     reportHeight,
     openLink,
@@ -201421,6 +202151,10 @@ textarea.text{resize:vertical;min-height:4.5rem}
     fullscreen: goFullscreen,
     isDashboard,
     errorText: inlineError,
+    showModels: () => {
+      state.open.models = !0;
+      closeScreen("", !1, "summary:models");
+    },
     directSignIn: () => state.hostKind !== "",
     setDashboard: (value) => {
       if (!isDashboard(value))
@@ -201438,7 +202172,7 @@ textarea.text{resize:vertical;min-height:4.5rem}
       const mine = supersede();
       state.busy = "refresh";
       render(focusKey);
-      request("tools/call", { name: config.toolName, arguments: {} }, config.resultTimeoutMs).then((result) => {
+      request("tools/call", { name: config.toolName, arguments: {} }, callTimeoutMs()).then((result) => {
         if (state.busy === "refresh")
           state.busy = "";
         if (mine !== generation)
@@ -201493,9 +202227,27 @@ textarea.text{resize:vertical;min-height:4.5rem}
       return !0;
     if (data.progress && !data.progress.stalled && !progressFinished(data.progress))
       return !0;
+    if (archivesMoving())
+      return !0;
     return !!data.models && !!data.models.embedding && installLines(data.models).some((entry) => entry.state !== "failed");
   }
+  function deletePending() {
+    for (const id of Object.keys(state.deleting))
+      if (Date.now() >= (state.deleting[id] ?? 0))
+        delete state.deleting[id];
+    return Object.keys(state.deleting).length > 0;
+  }
+  function settleDeleting(data) {
+    const sources = data && Array.isArray(data.sources) ? data.sources : [];
+    for (const id of Object.keys(state.deleting)) {
+      const row = sources.filter((source) => source && source.id === id)[0];
+      if (!(!!row && Array.isArray(row.menu) && row.menu.some((fix) => fix && fix.tool === config.deleteDataTool)) || Date.now() >= (state.deleting[id] ?? 0))
+        delete state.deleting[id];
+    }
+  }
   function refreshDelay() {
+    if (deletePending())
+      return R.settleMs;
     const base = moving() ? R.activeMs : R.idleMs;
     return refreshFailures ? Math.min(R.maxBackoffMs, base * Math.pow(2, refreshFailures)) : base;
   }
@@ -201518,7 +202270,7 @@ textarea.text{resize:vertical;min-height:4.5rem}
     }
     refreshing = !0;
     const mine = generation;
-    request("tools/call", { name: config.toolName, arguments: {} }, config.resultTimeoutMs).then((result) => {
+    request("tools/call", { name: config.toolName, arguments: {} }, callTimeoutMs()).then((result) => {
       refreshing = !1;
       if (mine !== generation)
         return scheduleRefresh();
@@ -201530,6 +202282,13 @@ textarea.text{resize:vertical;min-height:4.5rem}
       refreshing = !1;
       if (mine !== generation)
         return scheduleRefresh();
+      if (busyNotGone(error) || timedOutOnComputer(error)) {
+        state.slow = !0;
+        redraw();
+        refreshTimer = setTimeout(backgroundRefresh, R.activeMs);
+        nextRefreshAt = Date.now() + R.activeMs;
+        return;
+      }
       refreshFailures++;
       relayFailed(rejectionFailure(error));
       redraw();
@@ -201577,9 +202336,13 @@ textarea.text{resize:vertical;min-height:4.5rem}
   });
   if (!state.data)
     waitForResult();
-})({"toolName":"olympus_dashboard","syncTool":"olympus_sync_source","connection":{"not_connected":{"title":"Olympus isn't connected to ChatGPT yet","disabledReason":"Connect Olympus first","install":"Not installed yet?"},"installing":{"title":"Olympus is setting up on your computer…","disabledReason":"Available once Olympus is set up"},"mac_offline":{"title":"Your computer is offline or asleep, so answers are paused","lastSeen":"Last seen {when}","disabledReason":"Your computer is offline"},"relay_unavailable":{"title":"Olympus can't reach your computer right now.","disabledReason":"Can't reach your computer","why":{"no_answer":"Olympus didn't answer within {seconds} seconds.","error":"Olympus answered with an error: {text}","unreadable":"Olympus answered with something this page can't read.","host":"The connection to Olympus failed: {text}","at":"Last tried {when}."}},"actions":{"connect":{"label":"Connect Olympus","help":""},"open_olympus":{"label":"Open Olympus on your computer","help":"Open Olympus on your computer, then check again here."},"wake_mac":{"label":"How to keep it available","help":"Keep your computer on, awake and online with Olympus running. Answers resume on their own when it is back."},"retry":{"label":"Try again","help":""}}},"page":{"title":"Olympus","loading":"Checking your computer…","upToDate":"Olympus is up to date.","needsYou":"Needs you","sources":"Sources","sourcesLocal":"On your computer","sourcesCloud":"Accounts","notConnected":"Not connected","noSources":"No sources yet.","progress":"Progress","progressInitial":"First index","progressRefresh":"Catching up","percentDone":"{percent}% done","left":"{count} {unit} left","eta":"about {duration}","stalled":"stalled","progressPaused":"paused while your computer is offline","details":"Details","stageLine":"{stage}: {done} of {total} {unit}","models":"Models","modelSearch":"Search","modelAnswers":"Answers","modelBuiltIn":"Built-in","modelCustom":"Custom","modelReady":"Ready","modelDownloading":"Downloading {percent}%","modelNotWorking":"Not working","modelNotReady":"Not ready","modelGettingReady":"Getting ready","modelNeedsYou":"Needs you","modelChecking":"Checking","modelNames":{"search":"the search model","answers":"the private model","transcription":"the transcription model"},"modelTranscription":"Transcription","modelNotNeededNoAudio":"Not needed: no audio in your chosen folders","modelDownloadNow":"Download now","modelNotDownloaded":"Not downloaded","modelDownloadInterrupted":"Download stopped before it finished","modelCouldNotStart":"Couldn't start {model}","modelCouldNotStartBecause":"Couldn't start {model}: {reason}","modelLoadFailedReasons":{"not_installed":"its files are missing or incomplete; Download now fetches them again","stopped_while_starting":"it stopped while starting","too_slow":"it took too long to start","port_taken":"another program was using the port it needs","unknown":"Olympus's log on the computer has the details"},"modelNotWorkingBecause":"Not working: {reason}","modelInstallDownloading":"Downloading {model}","modelInstallVerifying":"Checking {model}…","modelInstallFailed":"Couldn't download {model}: {reason}","modelInstallBytes":"{done} of {total}","modelInstallReasons":{"disk_full":"the disk is full","network":"the connection dropped","checksum":"the download was damaged","unknown":"something went wrong"},"synced":"Synced {when}","updated":"Updated {when}","checkAgain":"Check again","tryAgain":"Try again","openOlympus":"Open Olympus","moreActions":"More actions for {source}","confirmPrompt":"Are you sure?","confirm":"Yes, {label}","cancel":"Cancel","working":"Working…","justNow":"just now","minutesAgo":"{n} min ago","hoursAgo":"{n} hr ago","daysAgo":"{n} days ago","dayAgo":"1 day ago","durationMinutes":"{n} min","durationHours":"{n} hr","durationHoursMinutes":"{h} hr {m} min","durationDays":"{n} days","durationLessThanMinute":"less than a minute","units":{"files":{"one":"file","many":"files"},"messages":{"one":"message","many":"messages"},"items":{"one":"item","many":"items"}},"sourceStages":{"listing":"Finding items","reading":"Reading","indexing":"Indexing"},"findingItems":"Finding items","sourceProgress":"{stage} — {percent}%, {done} of {total} {unit}","stalledSources":"{sources} paused","stalledAnd":"{first} and {last}","stalledMore":"{count} more","sourceFailures":{"sign_in":"{source} needs you to sign in again.","network":"Olympus couldn't reach {source} over the network.","timeout":"{source} took too long to answer.","rate_limited":"{source} asked Olympus to slow down for a while.","provider_busy":"{source} was busy and asked Olympus to try later.","provider_refused":"{source} refused Olympus's request.","daily_limit":"Olympus reached its daily limit for {source}.","search_model_unavailable":"The search model wasn't running.","reader_unavailable":"The file reader wasn't running.","busy_here":"Olympus was busy with other work.","setup":"{source}'s setup isn't finished.","not_started":"The check didn't start.","unknown":"Olympus hit an error it doesn't recognise."},"failureRef":"Olympus's log on the computer has the details under reference {ref}.","failureLog":"Olympus's log on the computer has the details.","stallWhy":{"failedOnce":"The last try failed.","failedMany":"The last {count} tries failed.","switchedOff":"{stage} is turned off in Olympus's settings.","stillFor":"{stage} hasn't moved for {duration}.","still":"{stage} hasn't moved for a while.","lastWorked":"Last worked {when}.","nextTry":"Olympus tries again in {duration}.","watchLog":"Olympus's log on the computer shows what it is doing."},"stalledReasons":{"waiting_for_credentials":"Paused: Olympus needs you to sign in to {source} again","scope_pending":"Paused until you choose folders","provider_unavailable":"Paused: {source} isn't responding; Olympus will retry","model_downloading":"Waiting for the search model to finish downloading"},"linkExpires":"link expires in {n} min","linkExpired":"link expired","howOnComputer":"Do this on your computer","howOnComputerFix":"Fix this on your computer","remote":{"title":"Olympus runs on a server, so this opens on your computer through a secure tunnel.","askLine":"Ask your assistant:","askPhrase":"Open Olympus on my computer","askPhraseFor":"Open Olympus on my computer to connect {source}","byHandAfterAsk":"Or do it yourself:","onComputer":"On your computer, run:","onServer":"Then on the server, run this and open the link it prints in your computer's browser:","portNote":"Keep {port} on both sides of the tunnel: the link only works on that port.","copy":"Copy","copied":"Copied","copySelected":"Selected: press Ctrl+C or ⌘C to copy"},"sourcePaused":"Paused","syncChecking":"Checking…","syncCheckingLine":"Checking {source}…","seeWhy":"See why","unreadableMore":"and {count} more","unreadableOpen":"Open {name}","unreadableReasons":{"damaged_or_unsupported":{"one":"{count} file is damaged or in a format Olympus can't read","other":"{count} files are damaged or in a format Olympus can't read"}},"unreadableNote":"Olympus does not retry these, and nothing is waiting on you.","unreadableNoteMany":"That is more than a healthy source has, so it may be a problem in Olympus rather than your files. The other files still answer questions."},"statusTone":{"Fresh":"good","Working":"run","Waiting":"off","Needs you":"warn","Failing":"bad","Off":"line"},"resultTimeoutMs":20000,"staleAfterMs":600000,"refresh":{"activeMs":15000,"idleMs":60000,"maxBackoffMs":300000,"staleTickMs":30000},"picker":{"tools":{"connectSource":"olympus_connect_source","scopeList":"olympus_scope_list","scopeSet":"olympus_scope_set"},"mailArgs":{"list":"draft","set":"mail"},"scopeMetaKey":"olympus/scope","copy":{"back":"Back to Olympus","cancel":"Cancel","tryAgain":"Try again","checkAgain":"Check again","connectTitle":"Connect {source}","connectStarting":"Opening sign-in…","connectWaiting":"Waiting for you to finish signing in…","connectWaitingHelp":"Sign in to {source} in the window that opened. This page updates on its own when you are done.","connectReopen":"Open sign-in again","connectTimeout":"Olympus has not heard back from {source} yet. If you finished signing in, check again.","connectFailed":"Olympus could not start signing in to {source}. Try again.","connected":"{source} is connected.","foldersTitle":"Choose folders","foldersIntro":"Choose what Olympus may read in {source}. A folder follows the one above it until you change it. Nothing starts until you save.","mailTitle":"Choose mail","mailIntro":"Choose which {source} mail Olympus may read. Nothing starts until you save.","loadingFolders":"Loading folders…","loadingMail":"Reading your labels and senders…","loadFailed":"Olympus could not load this list. Try again.","up":"Back","upTo":"Back to {name}","pathMore":"…","accountRow":"Everything in {source}","exceptions":"Exceptions ({n})","foldersHeading":"Folders","thisFolder":"This folder","unknownFolder":"A folder not opened yet","insideFolder":"A folder inside {name}","noFolders":"No folders here.","loadMore":"Load more folders","loadMoreCount":{"one":"Load 1 more folder","many":"Load {n} more folders"},"truncated":"This folder has more folders than Olympus can list here, so this list is incomplete.","states":{"ingest":"Fully indexed","metadata_only":"Names only","exclude":"Skipped"},"statesLower":{"ingest":"fully indexed","metadata_only":"names only","exclude":"skipped"},"notIncluded":"Not included","mixed":"Mixed","mixedSome":"Mixed: some folders inside are {state}","segments":{"ingest":["Full","Full"],"metadata_only":["Names only","Names"],"exclude":["Skip","Skip"]},"choiceGroup":"Choice for {name}","openFolder":"Open {name}","cannotChoose":"Olympus cannot read this folder.","wholeOnlyFull":"The whole account is all or nothing. Set Names only or Skip on folders instead.","inheritedFrom":"Inherited from {parent}","overridden":"This folder is set to {own}, but {parent} is {state}, which wins.","notPossible":"Not possible while {parent} is {state}.","capReached":"You have {max} folder choices, the most Olympus can save. Clear a folder's choice to choose another.","folderFiles":{"one":"{n} file","many":"{n} files"},"wholePrompt":"Olympus will read every folder in {source}, now and later, except folders you set to Names only or Skip.","wholeConfirm":"Yes, use the entire account","summaryTitle":"What happens when you save","summaryNone":"Nothing chosen yet, so nothing will be read.","summaryWhole":"Everything else in {source}: fully indexed, including folders added later.","summaryFolder":{"one":"folder","many":"folders"},"summaryIngest":"{n} fully indexed","summaryMetadata":"{n} with names only","summaryExclude":"{n} skipped","summarySize":"about {size}","needChoice":"Choose at least one folder first.","needConfirm":"Confirm the entire account first.","saveFolders":"Save and start","saveNoStart":"Save","saveMail":"Save and start","saving":"Saving…","saveFailed":"Olympus could not save. Your choices are still here. Try again.","conflict":"These choices were changed somewhere else, so this view has been refreshed. Check it and save again.","saved":"{source}: saved. Olympus is starting.","discardPrompt":"Discard your changes?","discard":"Discard changes","keep":"Keep choosing","mailWindow":"Read the full text of mail from","mailWindowHelp":"For older mail Olympus keeps only the subject, sender, date and labels.","mailWindows":{"6m":"The last 6 months","1y":"The last year","2y":"The last 2 years","5y":"The last 5 years","all":"All time"},"mailRecommended":"Recommended","mailCategories":"Gmail categories","mailCategoriesHelp":"Checked categories are read. Promotions and Social are skipped at first.","mailCategoryNames":{"primary":["Primary","Personal mail"],"updates":["Updates","Receipts, statements, confirmations"],"forums":["Forums","Mailing lists and groups"],"social":["Social","Social network notifications"],"promotions":["Promotions","Marketing and offers"]},"mailCategoryCount":"{count} in your mailbox","mailLabels":"Labels","mailLabelsHelp":"Checked labels are read. Uncheck a label to skip all mail that has it.","mailLabelsEmpty":"This mailbox has no labels of its own.","mailSentLabel":"Sent","mailSenders":"Senders","mailPrivate":"Always private","mailPrivateHelp":"One address or @domain per line. Their new mail is treated as private and never goes to the cloud.","mailSkip":"Skip","mailSkipHelp":"One address or @domain per line. Their new mail is never read.","mailSuggestions":"Frequent senders in a sample of your recent mail","mailSuggestionCount":"{n} of {total}","mailEstimate":"About {content} messages read in full and {metadata} by subject and sender only.","mailCost":"Indexing costs at most \${cost}.","mailEstimateNote":"Counts are Gmail's own estimates. Nothing has been read yet.","mailUpdateEstimate":"Update estimate","mailSummaryWindow":"Full text from {window}","mailSummarySkipped":{"one":"{n} category or label skipped","many":"{n} categories and labels skipped"},"mailSummaryPrivate":{"one":"{n} sender always private","many":"{n} senders always private"},"mailSummarySkipSenders":{"one":"{n} sender skipped","many":"{n} senders skipped"}},"connectHost":"mcp.olympusplugin.ai","mailSourceId":"gmail.email","pollMs":3000,"pollCapMs":180000},"privacy":{"tools":{"get":"olympus_privacy_get","set":"olympus_privacy_set"},"metaKey":"olympus/privacy","scopeList":"olympus_scope_list","scopeMetaKey":"olympus/scope","mailSourceId":"gmail.email","folderSources":{"dropbox.files":"Dropbox","google_drive.docs":"Google Drive"},"copy":{"back":"Back to Olympus","title":"What's private for you?","intro":"Olympus shares your items with ChatGPT unless you say they're private. Private items are answered on your computer and never sent to ChatGPT. Passwords and other secrets are always kept on your computer.","loading":"Loading your privacy settings…","loadFailed":"Olympus could not load your privacy settings. Try again.","tryAgain":"Try again","descriptionLabel":"In your own words","descriptionPlaceholder":"For example: my health and therapy, money and taxes, anything about my kids, my divorce","descriptionShared":"ChatGPT sees what you type here so it can save it; keep it to topics, like \\"my health\\", not details.","questions":{"title":"A few quick questions","intro":"Your words name some broad areas. Pick what's private in each, so Olympus keeps only those things private. Your answers are added to your description, where you can still edit them.","private":"Private","share":"Fine to share","tooLong":"Your description is too long to add this answer. Shorten your own words, then choose again.","about":"About {topic}:","privateList":"private — {list}","shareList":"fine to share — {list}","topics":{"family":{"name":"family","question":"Which family things are private?","options":{"medical":"Family members' medical records","legal_money":"Family legal and money papers (divorce, custody, trusts)","conversations":"Private family conversations and journals","logistics":"School plans and family logistics","contacts":"Alumni, contact and address lists","history":"Family history and photos"}},"health":{"name":"health","question":"Which health things are private?","options":{"results":"My lab, test and medical results","prescriptions":"Prescriptions and clinic or visit notes","therapy":"Therapy sessions","exports":"Health-data exports","wellness":"Wellness programs, diets and detox plans","guides":"Health books, guides and courses","product_tests":"Product or supplement test reports"}},"money":{"name":"money","question":"Which money things are private?","options":{"statements":"Bank, card, brokerage and crypto statements","tax":"Tax and payroll papers","bills":"Invoices, bills and receipts","loans":"Loans and proof of funds","articles":"Articles and guides about money","projects":"Crypto project whitepapers and research","prices":"Prices and quotes I am researching"}},"work":{"name":"work","question":"Which work things are private?","options":{"contracts":"Contracts, NDAs, offers and salaries","hr":"HR and legal matters","projects":"Project notes, specs and plans","meetings":"Work meeting transcripts","wikis":"Team wikis and assistant instruction files"}},"relationships":{"name":"relationships","question":"Which relationship things are private?","options":{"journals":"Journals and personal session transcripts","conversations":"Private conversations","teachings":"Books and teachings about relationships","groups":"Group sessions and courses"}},"home":{"name":"home","question":"Which home things are private?","options":{"deeds":"Deeds, purchase contracts and leases","info":"Property information and certificates","plans":"Listings, renovation and moving plans"}}}},"rulesTitle":"Always private (optional)","rulesEmpty":"No folders, labels or senders yet.","namesShared":"Folder and label names and senders you add here are shown to ChatGPT.","kindFolder":"Folder in {source}","kindLabel":"Gmail label","kindSender":"Sender","remove":"Remove","removeFor":"Remove {name}","removed":"Removed: {name}","undo":"Undo","undoFor":"Undo removing {name}","addFolder":"Add a folder","addLabel":"Add a Gmail label","addSender":"Add a sender","needFolderSource":"Connect Dropbox or Google Drive to add a folder.","needGmail":"Connect Gmail to add a label.","pending":{"one":"{n} item is waiting to be checked on your computer.","many":"{n} items are waiting to be checked on your computer."},"save":"Save","saving":"Saving…","cancel":"Cancel","saveFailed":"Olympus could not save. Your changes are still here. Try again.","saved":"Privacy saved.","confirmRemove":"This removes protection from {list}.","confirmDescription":"This changes your description, which decides what Olympus keeps private.","confirm":"Confirm","conflict":"Your changes weren't saved because the privacy settings changed elsewhere.","conflictNow":"What is saved now:","conflictDescription":"Your description: {text}","conflictNoDescription":"No description","applyAgain":"Apply my changes again","discardMine":"Discard my changes","folderUnnamed":"A folder in {source}","discardPrompt":"Discard your changes?","discard":"Discard changes","keep":"Keep editing","backToPrivacy":"Back to privacy","folderSourceTitle":"Add a folder","folderSourceIntro":"Which account is the folder in?","folderTitle":"Add a folder","folderIntro":"Open a folder in {source} to look inside it. Make private covers everything in the folder.","makePrivate":"Make private","makePrivateFor":"Make {name} private","alreadyPrivate":"Already private","labelTitle":"Add a Gmail label","labelIntro":"Mail with a private label is answered only on your computer.","loadingLabels":"Loading your labels…","noLabels":"This mailbox has no labels of its own.","sentLabel":"Sent","senderTitle":"Add a sender","senderIntro":"Mail from this sender is answered only on your computer.","senderLabel":"Email address or @domain","senderPlaceholder":"name@example.com or @example.com","senderAdd":"Add","senderInvalid":"Enter an email address like name@example.com, or a domain like @example.com.","senderDuplicate":"That sender is already private.","section":"Privacy","row":{"none":"Uses your description. No always-private rules.","one":"Uses your description and {n} always-private rule.","many":"Uses your description and {n} always-private rules."},"rowNoCount":"Uses your description and always-private rules.","edit":"Edit","editLabel":"Edit what's private","dashboardPending":{"one":"{n} item waiting to be checked","many":"{n} items waiting to be checked"}}},"inlineErrorCodes":["sign_in_failed","source_not_connected","source_busy","sync_unavailable","disconnect_incomplete"],"host":{"contextKey":"olympus/host","computerMetaKey":"olympus/computer","indexFasterTool":"olympus_index_faster","unpairTool":"olympus_unpair_source","unreadableOpenTool":"olympus_open_unreadable_file","unreadablePageTool":"olympus_unreadable_files","landedMs":4000,"copy":{"section":"On this computer","onlyHere":"only here","open":"Open","rows":{"keys":{"title":"Keys","line":"Venice, Readwise and X keys"},"agents":{"title":"Agents","line":"Remote access and connected agents"},"outsideHelp":{"title":"Anonymous answers","line":"Ask top AI models without saying who you are"},"connector":{"title":"Build a connector","line":"For a source Olympus does not have yet"}},"locked":"Open dashboard controls first","readOnlyOpenClaw":"Reconnect OpenClaw with operator.write access to change this","indexFaster":{"on":"Index faster","off":"Stop indexing faster","explainOn":"Syncing pauses until you turn this off.","explainOff":"Syncing is paused until you turn this off."}}}}, function chatgptPickerProgram(kit) {
+  setTimeout(() => {
+    if (!state.data)
+      redraw();
+  }, 8000);
+})({"toolName":"olympus_dashboard","syncTool":"olympus_sync_source","deleteDataTool":"olympus_delete_source_data","disconnectTool":"olympus_disconnect_source","archivesSourceId":"archive.imports","connection":{"not_connected":{"title":"Olympus isn't connected to ChatGPT yet","disabledReason":"Connect Olympus first","install":"Not installed yet?"},"installing":{"title":"Olympus is setting up on your computer…","disabledReason":"Available once Olympus is set up"},"mac_offline":{"title":"Your computer is offline or asleep, so answers are paused","lastSeen":"Last seen {when}","disabledReason":"Your computer is offline"},"relay_unavailable":{"title":"Olympus can't reach your computer right now.","disabledReason":"Can't reach your computer","why":{"no_answer":"Olympus didn't answer within {seconds} seconds.","error":"Olympus answered with an error: {text}","unreadable":"Olympus answered with something this page can't read.","host":"The connection to Olympus failed: {text}","at":"Last tried {when}."}},"actions":{"connect":{"label":"Connect Olympus","help":""},"open_olympus":{"label":"Open Olympus on your computer","help":"Open Olympus on your computer, then check again here."},"wake_mac":{"label":"How to keep it available","help":"Keep your computer on, awake and online with Olympus running. Answers resume on their own when it is back."},"retry":{"label":"Try again","help":""}}},"page":{"title":"Olympus","loading":"Checking your computer…","loadingSlow":"Loading. This can take a minute while Olympus is importing.","upToDate":"Olympus is up to date.","needsYou":"Needs you","sources":"Sources","sourcesLocal":"On your computer","sourcesCloud":"Accounts","notConnected":"Not connected","noSources":"No sources yet.","otherArchives":{"title":"Other archives","line":"For an export that isn't from one of your sources above."},"progress":"Progress","progressInitial":"First index","progressRefresh":"Catching up","percentDone":"{percent}% done","left":"{count} {unit} left","eta":"about {duration}","stalled":"stalled","progressPaused":"paused while your computer is offline","details":"Details","stageLine":"{stage}: {done} of {total} {unit}","models":"Models","modelSearch":"Search","modelAnswers":"Answers","modelBuiltIn":"Built-in","modelCustom":"Custom","modelReady":"Ready","modelDownloading":"Downloading {percent}%","modelNotWorking":"Not working","modelNotReady":"Not ready","modelGettingReady":"Getting ready","modelNeedsYou":"Needs you","modelChecking":"Checking","modelNames":{"search":"the search model","answers":"the private model","transcription":"the transcription model"},"modelTranscription":"Transcription","modelNotNeededNoAudio":"Not needed: no audio in your chosen folders","modelDownloadNow":"Download now","modelNotDownloaded":"Not downloaded","modelDownloadInterrupted":"Download stopped before it finished","modelCouldNotStart":"Couldn't start {model}","modelCouldNotStartBecause":"Couldn't start {model}: {reason}","modelLoadFailedReasons":{"not_installed":"its files are missing or incomplete; Download now fetches them again","stopped_while_starting":"it stopped while starting","too_slow":"it took too long to start","port_taken":"another program was using the port it needs","unknown":"Olympus's log on the computer has the details"},"modelNotWorkingBecause":"Not working: {reason}","modelInstallDownloading":"Downloading {model}","modelInstallVerifying":"Checking {model}…","modelInstallFailed":"Couldn't download {model}: {reason}","modelInstallBytes":"{done} of {total}","modelInstallReasons":{"disk_full":"the disk is full","network":"the connection dropped","checksum":"the download was damaged","unknown":"something went wrong"},"synced":"Synced {when}","updated":"Updated {when}","busySlow":"Olympus is busy. Trying again…","checkAgain":"Check again","tryAgain":"Try again","openOlympus":"Open Olympus","moreActions":"More actions for {source}","confirmPrompt":"Are you sure?","confirm":"Yes, {label}","cancel":"Cancel","working":"Working…","justNow":"just now","minutesAgo":"{n} min ago","hoursAgo":"{n} hr ago","daysAgo":"{n} days ago","dayAgo":"1 day ago","durationMinutes":"{n} min","durationHours":"{n} hr","durationHoursMinutes":"{h} hr {m} min","durationDays":"{n} days","durationLessThanMinute":"less than a minute","units":{"files":{"one":"file","many":"files"},"messages":{"one":"message","many":"messages"},"items":{"one":"item","many":"items"}},"sourceStages":{"listing":"Finding items","reading":"Reading","indexing":"Indexing"},"findingItems":"Finding items","findingFound":"Finding {unit} · {done} found so far","sourceProgress":"{stage} — {percent}%, {done} of {total} {unit}","stalledSources":"{sources} paused","stalledAnd":"{first} and {last}","stalledMore":"{count} more","sourceFailures":{"sign_in":"{source} needs you to sign in again.","network":"Olympus couldn't reach {source} over the network.","timeout":"{source} took too long to answer.","rate_limited":"{source} asked Olympus to slow down for a while.","provider_busy":"{source} was busy and asked Olympus to try later.","provider_refused":"{source} refused Olympus's request.","daily_limit":"Olympus reached its daily limit for {source}.","search_model_unavailable":"The search model wasn't running.","reader_unavailable":"The file reader wasn't running.","busy_here":"Olympus was busy with other work.","setup":"{source}'s setup isn't finished.","not_started":"The check didn't start.","unknown":"Olympus hit an error it doesn't recognise."},"failureRef":"Olympus's log on the computer has the details under reference {ref}.","failureLog":"Olympus's log on the computer has the details.","stallWhy":{"failedOnce":"The last try failed.","failedMany":"The last {count} tries failed.","switchedOff":"{stage} is turned off in Olympus's settings.","stillFor":"{stage} hasn't moved for {duration}.","still":"{stage} hasn't moved for a while.","lastWorked":"Last worked {when}.","nextTry":"Olympus tries again in {duration}.","watchLog":"Olympus's log on the computer shows what it is doing."},"stalledReasons":{"waiting_for_credentials":"Paused: Olympus needs you to sign in to {source} again","scope_pending":"Paused until you choose folders","scope_root_missing":"A folder you chose is missing","scope_root_permission_needed":"Your Mac will not let Olympus open a folder you chose. In System Settings, choose Privacy & Security, then Files & Folders, and switch on Olympus Engine (or the app your Mac named when it asked).","scope_root_helper_needed":"Desktop, Documents, Downloads, iCloud Drive and other disks need the Olympus helper app. Update Olympus to add it, or choose a folder outside them.","scope_root_unreadable":"Your user account is not allowed to open a folder you chose. Change who may open that folder, or choose another one.","provider_unavailable":"Paused: {source} isn't responding; Olympus will retry","model_downloading":"Waiting for the search model to finish downloading"},"linkExpires":"link expires in {n} min","linkExpired":"link expired","howOnComputer":"Do this on your computer","howOnComputerFix":"Fix this on your computer","moreOnComputer":"More controls on your computer: Private answers, anonymous answers, keys and agents","moreOnComputerOpen":"Open","moreOnComputerOpenLabel":"Open Olympus on your computer","remote":{"title":"Olympus runs on a server, so this opens on your computer through a secure tunnel.","askLine":"Ask your assistant:","askPhrase":"Open Olympus on my computer","askPhraseFor":"Open Olympus on my computer to connect {source}","byHandAfterAsk":"Or do it yourself:","onComputer":"On your computer, run:","onServer":"Then on the server, run this and open the link it prints in your computer's browser:","portNote":"Keep {port} on both sides of the tunnel: the link only works on that port.","copy":"Copy","copied":"Copied","copySelected":"Selected: press Ctrl+C or ⌘C to copy"},"sourcePaused":"Paused","syncChecking":"Checking…","deleteDataConfirm":"Delete indexed data for {source}? Olympus removes everything it indexed from {source} on this computer: search results, summaries and its privacy records. Your files and accounts are not touched. This cannot be undone.","deleteDataConfirmMessages":"Delete indexed data for {source}? Olympus removes everything it indexed from {source} on this computer: search results, summaries and its privacy records, and also its own copies of your messages. Your {source} account and the messages in the app are not touched. This cannot be undone.","deleteDataConfirmMessagesMedia":"Delete indexed data for {source}? Olympus removes everything it indexed from {source} on this computer: search results, summaries and its privacy records, and also its own copies of your messages, voice notes and media. Your {source} account and the messages in the app are not touched. This cannot be undone.","deleteDataImports":"Archives you imported into {source} are part of it: their history goes too, and the archive files themselves stay where they are.","deleteDataDone":"Indexed data deleted","disconnectConfirm":"Disconnect {source}? Olympus stops reading it. What it already indexed stays on this computer until you delete it.","syncCheckingLine":"Checking {source}…","seeWhy":"See why","unreadableMore":"and {count} more","unreadableOpen":"Open {name}","unreadableReasons":{"privacy_check_missing":{"one":"{count} item was kept Private without being read because its privacy check was missing. Open it below to check it, then use Sync now to try reading it again.","other":"{count} items were kept Private without being read because their privacy checks were missing. Open them below to check them, then use Sync now to try reading them again."},"damaged_or_unsupported":{"one":"{count} file Olympus can't read at all","other":"{count} files Olympus can't read at all"}},"unreadableFileReasons":{"password":"locked with a password","damaged":"the file is damaged","too_large":"too large for Olympus to read","no_text":"no text Olympus could find in it","timed_out":"reading it took too long, even with extra time","missing":"the file is no longer where it was","no_access":"Olympus isn't allowed to open it","unsupported":"a format Olympus can't read","privacy_check_missing":"kept Private before it was read","other":"Olympus couldn't read it"},"unreadableNote":"Olympus does not retry these, and nothing is waiting on you.","unreadableNoteMany":"That is more than a healthy source has, so it may be a problem in Olympus rather than your files. The other files still answer questions."},"statusTone":{"Fresh":"good","Working":"run","Waiting":"off","Needs you":"warn","Failing":"bad","Off":"line"},"resultTimeoutMs":20000,"computerResultTimeoutMs":120000,"staleAfterMs":600000,"refresh":{"activeMs":15000,"idleMs":60000,"maxBackoffMs":300000,"staleTickMs":30000,"settleMs":2000,"settleForMs":60000},"picker":{"tools":{"connectSource":"olympus_connect_source","scopeList":"olympus_scope_list","scopeSet":"olympus_scope_set","archiveUploadStart":"olympus_archive_upload_start","archiveUploadStatus":"olympus_archive_upload_status","archiveUploadCancel":"olympus_archive_upload_cancel","archiveApprove":"olympus_archive_approve"},"mailArgs":{"list":"draft","set":"mail"},"scopeMetaKey":"olympus/scope","copy":{"back":"Back to Olympus","cancel":"Cancel","tryAgain":"Try again","checkAgain":"Check again","connectTitle":"Connect {source}","connectStarting":"Opening sign-in…","connectWaiting":"Waiting for you to finish signing in…","connectWaitingHelp":"Sign in to {source} in the window that opened. This page updates on its own when you are done.","connectReopen":"Open sign-in again","connectTimeout":"Olympus has not heard back from {source} yet. If you finished signing in, check again.","connectFailed":"Olympus could not start signing in to {source}. Try again.","goToModels":"Go to Models","connected":"{source} is connected.","foldersTitle":"Choose folders","needsPermission":"Needs permission","openPrivacySettings":"Open privacy settings","disk":"Disk","foldersIntro":"Choose what Olympus may read in {source}. A folder follows the one above it until you change it. Nothing starts until you save.","mailTitle":"Choose mail","mailIntro":"Choose which {source} mail Olympus may read. Nothing starts until you save.","loadingFolders":"Loading folders…","loadingMail":"Reading your labels and senders…","loadFailed":"Olympus could not load this list. Try again.","up":"Back","upTo":"Back to {name}","pathMore":"…","accountRow":"Everything in {source}","exceptions":"Exceptions ({n})","foldersHeading":"Folders","thisFolder":"This folder","unknownFolder":"A folder not opened yet","insideFolder":"A folder inside {name}","noFolders":"No folders here.","loadMore":"Load more folders","loadMoreCount":{"one":"Load 1 more folder","many":"Load {n} more folders"},"truncated":"This folder has more folders than Olympus can list here, so this list is incomplete.","states":{"ingest":"Fully indexed","metadata_only":"Names only","exclude":"Skipped"},"statesLower":{"ingest":"fully indexed","metadata_only":"names only","exclude":"skipped"},"notIncluded":"Not included","mixed":"Mixed","mixedSome":"Mixed: some folders inside are {state}","segments":{"ingest":["Full","Full"],"metadata_only":["Names only","Names"],"exclude":["Skip","Skip"]},"choiceGroup":"Choice for {name}","openFolder":"Open {name}","cannotChoose":"Olympus cannot read this folder.","wholeOnlyFull":"The whole account is all or nothing. Set Names only or Skip on folders instead.","inheritedFrom":"Inherited from {parent}","overridden":"This folder is set to {own}, but {parent} is {state}, which wins.","notPossible":"Not possible while {parent} is {state}.","capReached":"You have {max} folder choices, the most Olympus can save. Clear a folder's choice to choose another.","folderFiles":{"one":"{n} file","many":"{n} files"},"wholePrompt":"Olympus will read every folder in {source}, now and later, except folders you set to Names only or Skip.","wholeConfirm":"Yes, use the entire account","summaryTitle":"What happens when you save","summaryNone":"Nothing chosen yet, so nothing will be read.","summaryWhole":"Everything else in {source}: fully indexed, including folders added later.","summaryFolder":{"one":"folder","many":"folders"},"summaryIngest":"{n} fully indexed","summaryMetadata":"{n} with names only","summaryExclude":"{n} skipped","summarySize":"about {size}","needChoice":"Choose at least one folder first.","needConfirm":"Confirm the entire account first.","saveFolders":"Save and start","saveNoStart":"Save","saveMail":"Save and start","saving":"Saving…","saveFailed":"Olympus could not save. Your choices are still here. Try again.","conflict":"These choices were changed somewhere else, so this view has been refreshed. Check it and save again.","saved":"{source}: saved. Olympus is starting.","discardPrompt":"Discard your changes?","discard":"Discard changes","keep":"Keep choosing","mailWindow":"Read the full text of mail from","mailWindowHelp":"For older mail Olympus keeps only the subject, sender, date and labels.","mailWindows":{"6m":"The last 6 months","1y":"The last year","2y":"The last 2 years","5y":"The last 5 years","all":"All time"},"mailRecommended":"Recommended","mailCategories":"Gmail categories","mailCategoriesHelp":"Checked categories are read. Promotions and Social are skipped at first.","mailCategoryNames":{"primary":["Primary","Personal mail"],"updates":["Updates","Receipts, statements, confirmations"],"forums":["Forums","Mailing lists and groups"],"social":["Social","Social network notifications"],"promotions":["Promotions","Marketing and offers"]},"mailCategoryCount":"{count} in your mailbox","mailLabels":"Labels","mailLabelsHelp":"Checked labels are read. Uncheck a label to skip all mail that has it.","mailLabelsEmpty":"This mailbox has no labels of its own.","mailSentLabel":"Sent","mailSenders":"Senders","mailPrivate":"Always private","mailPrivateHelp":"One address or @domain per line. Their new mail is treated as private and never goes to the cloud.","mailSkip":"Skip","mailSkipHelp":"One address or @domain per line. Their new mail is never read.","mailSuggestions":"Frequent senders in a sample of your recent mail","mailSuggestionCount":"{n} of {total}","mailEstimate":"About {content} messages read in full and {metadata} by subject and sender only.","mailCost":"Indexing costs at most \${cost}.","mailEstimateNote":"Counts are Gmail's own estimates. Nothing has been read yet.","mailUpdateEstimate":"Update estimate","mailSummaryWindow":"Full text from {window}","mailSummarySkipped":{"one":"{n} category or label skipped","many":"{n} categories and labels skipped"},"mailSummaryPrivate":{"one":"{n} sender always private","many":"{n} senders always private"},"mailSummarySkipSenders":{"one":"{n} sender skipped","many":"{n} senders skipped"}},"connectHost":"mcp.olympusplugin.ai","mailSourceId":"gmail.email","pollMs":3000,"pollCapMs":180000},"privacy":{"tools":{"get":"olympus_privacy_get","set":"olympus_privacy_set","questions":"olympus_privacy_questions","check":"olympus_privacy_check"},"metaKey":"olympus/privacy","scopeList":"olympus_scope_list","scopeMetaKey":"olympus/scope","mailSourceId":"gmail.email","folderSources":{"dropbox.files":"Dropbox","google_drive.docs":"Google Drive","evernote.notes":"Evernote"},"copy":{"addRule":"Add a rule","details":"Details","judgingDetails":"Olympus reads your own words when judging each item. Your answers to the follow-up questions become sentences in that description. Always-private rules can only add protection; secrets always stay on your computer.","kindPrompt":"What would you like to keep private?","step":"Step {step} of 3","stepPick":"Step 2 of 3","sheetBack":"Back","next":"Next","select":"Choose","selected":"Selected","selectFor":"Choose {name}","confirmRule":"Keep this private?","back":"Back to Olympus","title":"What's private for you?","intro":"Olympus shares your items with ChatGPT unless you say they're private. Private items are answered on your computer and never sent to ChatGPT. Passwords and other secrets are always kept on your computer.","loading":"Loading your privacy settings…","loadFailed":"Olympus could not load your privacy settings. Try again.","tryAgain":"Try again","descriptionLabel":"In your own words","descriptionPlaceholder":"For example: my health and therapy, money and taxes, anything about my kids, my divorce","descriptionShared":"ChatGPT sees what you type here so it can save it; keep it to topics, like \\"my health\\", not details.","questions":{"title":"A few quick questions","intro":"Choose Private or Fine to share. Skipped questions stay Private when you save. Your answers become editable sentences after your own words.","loading":"Reading your words…","fallback":"Olympus’s private model isn’t on yet, so these are general questions.","checkTitle":"Check what Olympus understood","check":"Check my description","checking":"Checking your description…","wrong":"This is wrong","checkFailed":"Olympus could not check this description yet. You can still save.","privateExamples":"Olympus would keep these Private","shareExamples":"Olympus would treat these as fine to share","baseline":{"medical":"Should medical records and results stay Private?","financial":"Should bank, card and tax papers stay Private?","intimate":"Should intimate or romantic messages stay Private?","legal":"Should legal matters (custody, disputes, lawsuits) stay Private?","identity":"Should ID documents (passport, licence) stay Private?"},"baselineTopics":{"medical":"medical records and results","financial":"bank, card and tax papers","intimate":"intimate or romantic messages","legal":"legal matters (custody, disputes, lawsuits)","identity":"ID documents (passport, licence)"},"private":"Private","share":"Fine to share","tooLong":"Your description is too long to add this answer. Shorten your own words, then choose again.","about":"About {topic}:","privateList":"private — {list}","shareList":"fine to share — {list}","topics":{"family":{"name":"family","question":"Which family things are private?","options":{"medical":"Family members' medical records","legal_money":"Family legal and money papers (divorce, custody, trusts)","conversations":"Private family conversations and journals","logistics":"School plans and family logistics","contacts":"Alumni, contact and address lists","history":"Family history and photos"}},"health":{"name":"health","question":"Which health things are private?","options":{"results":"My lab, test and medical results","prescriptions":"Prescriptions and clinic or visit notes","therapy":"Therapy sessions","exports":"Health-data exports","wellness":"Wellness programs, diets and detox plans","guides":"Health books, guides and courses","product_tests":"Product or supplement test reports"}},"money":{"name":"money","question":"Which money things are private?","options":{"statements":"Bank, card, brokerage and crypto statements","tax":"Tax and payroll papers","bills":"Invoices, bills and receipts","loans":"Loans and proof of funds","articles":"Articles and guides about money","projects":"Crypto project whitepapers and research","prices":"Prices and quotes I am researching"}},"work":{"name":"work","question":"Which work things are private?","options":{"contracts":"Contracts, NDAs, offers and salaries","hr":"HR and legal matters","projects":"Project notes, specs and plans","meetings":"Work meeting transcripts","wikis":"Team wikis and assistant instruction files"}},"relationships":{"name":"relationships","question":"Which relationship things are private?","options":{"journals":"Journals and personal session transcripts","conversations":"Private conversations","teachings":"Books and teachings about relationships","groups":"Group sessions and courses"}},"home":{"name":"home","question":"Which home things are private?","options":{"deeds":"Deeds, purchase contracts and leases","info":"Property information and certificates","plans":"Listings, renovation and moving plans"}}}},"rulesTitle":"Always private (optional)","rulesEmpty":"No folders, labels or senders yet.","namesShared":"Folder and label names and senders you add here are shown to ChatGPT.","kindFolder":"Folder in {source}","kindLabel":"Gmail label","kindSender":"Sender","remove":"Remove","removeFor":"Remove {name}","removed":"Removed: {name}","undo":"Undo","undoFor":"Undo removing {name}","addFolder":"Add a folder","addLabel":"Add a Gmail label","addSender":"Add a sender","needFolderSource":"Connect Dropbox or Google Drive to add a folder.","needGmail":"Connect Gmail to add a label.","nothingToSave":"Nothing to save yet. Change a rule or the description first.","save":"Save description and answers","saving":"Saving…","cancel":"Cancel","saveFailed":"Olympus could not save. Your changes are still here. Try again.","addRuleFailed":"Olympus could not make this private. Try again.","saved":"Privacy saved.","confirmRemove":"This removes protection from {list}.","confirmDescription":"This changes your description, which decides what Olympus keeps private.","confirm":"Confirm","conflict":"Your changes weren't saved because the privacy settings changed elsewhere.","conflictNow":"What is saved now:","conflictAddBlocked":"Resolve the conflict before adding another rule.","conflictDescription":"Your description: {text}","conflictNoDescription":"No description","applyAgain":"Apply my changes again","discardMine":"Discard my changes","folderUnnamed":"A folder in {source}","discardPrompt":"Discard your changes?","discard":"Discard changes","keep":"Keep editing","backToPrivacy":"Back to privacy","folderSourceTitle":"Add a folder","folderSourceIntro":"Which account is the folder in?","folderTitle":"Add a folder","folderIntro":"Open a folder in {source} to look inside it. Make private covers everything in the folder.","makePrivate":"Make private","makePrivateFor":"Make {name} private","alreadyPrivate":"Already private","labelTitle":"Add a Gmail label","labelIntro":"Mail with a private label is answered only on your computer.","loadingLabels":"Loading your labels…","noLabels":"This mailbox has no labels of its own.","sentLabel":"Sent","senderTitle":"Add a sender","senderIntro":"Mail from this sender is answered only on your computer.","senderLabel":"Email address or @domain","senderPlaceholder":"name@example.com or @example.com","senderAdd":"Add","senderInvalid":"Enter an email address like name@example.com, or a domain like @example.com.","senderDuplicate":"That sender is already private.","section":"Privacy","row":{"none":"Uses your description. No always-private rules.","one":"Uses your description and {n} always-private rule.","many":"Uses your description and {n} always-private rules."},"rowNoCount":"Uses your description and always-private rules.","edit":"Edit","descriptionEmpty":"You haven't said what's private yet.","descriptionStart":"Describe what's private","editLabel":"Edit what's private","dashboardPending":{"one":"{n} item waiting to be checked","many":"{n} items waiting to be checked"}}},"inlineErrorCodes":["sign_in_failed","source_not_connected","source_busy","sync_unavailable","disconnect_incomplete","delete_needs_disconnect","delete_needs_unpair","delete_unavailable","delete_incomplete","models_not_ready","connect_unavailable","already_connected"],"host":{"contextKey":"olympus/host","computerMetaKey":"olympus/computer","indexFasterTool":"olympus_index_faster","unpairTool":"olympus_unpair_source","unreadableOpenTool":"olympus_open_unreadable_file","unreadablePageTool":"olympus_unreadable_files","archiveApproveTool":"olympus_archive_approve","archiveDeclineTool":"olympus_archive_decline","archiveRemoveTool":"olympus_archive_remove","archiveStopTool":"olympus_archive_stop","landedMs":4000,"copy":{"section":"On this computer","onlyHere":"only here","open":"Open","rows":{"help":{"title":"Help","line":"Copy a system report or contact support"},"keys":{"title":"Keys","line":"Venice, Readwise and X keys"},"agents":{"title":"Agents","line":"Remote access and connected agents"},"privateAnswers":{"title":"Inbox","line":"Answers from every model, kept on this computer."},"connector":{"title":"Build a connector","line":"For a source Olympus does not have yet"}},"waiting":{"one":"1 unread private answer","many":"{count} unread private answers"},"locked":"Open dashboard controls first","readOnlyOpenClaw":"Reconnect OpenClaw with operator.write access to change this","indexFaster":{"on":"Index faster","off":"Stop indexing faster","explainOn":"Syncing pauses until you turn this off.","explainOff":"Syncing is paused until you turn this off."},"archives":{"importAction":"Import another archive","sourceImport":{"action":"Import an archive","title":"Import an archive into {source}"},"pick":{"back":"Back to Olympus","title":"Import another archive","intro":"Drop a file or folder from this computer: a mail export (an .mbox file from Google Takeout or Thunderbird, or an .mbox folder from Apple Mail); or a WhatsApp chat export (the .zip or the text file from Export Chat, or a folder of them); or a Reflect export in JSON (the .json file, or the .zip that holds it); or a Reflect export as Markdown (the .zip file); or a Roam export in JSON (the .json file from Export All, or the .zip that holds it); or a Telegram Desktop export (its result.json file, or the folder that holds it; export it as Machine-readable JSON); or an Evernote export (the .enex file, or a folder of them). Olympus keeps a copy in its own storage to read it until you remove the import, and never changes the original. An export from one of your sources joins that source; any other is kept under Other archives.","zone":"Upload folder","over":"Drop to import","hint":"Drag a folder here, or click to choose one.","zoneLabel":"Upload folder: choose a folder, or drop one here","chooseFile":"or choose a file","reading":"Reading the folder…","uploading":"Uploading {name}","progress":"{sent} of {total}","progressFiles":"{sent} of {total} · {files} of {of} files","paused":"This computer is low on space. The upload waits and goes on by itself when space is free.","cancel":"Cancel","starting":"Starting…","empty":"There was no file in that. Drop a folder or a file from this computer.","unreadable":"Olympus could not read what you dropped. Try again.","failed":"The upload stopped before it finished. Nothing was imported. Try again.","several":"{n} items","chooseAnother":"Start over"},"listLabel":"Imported archives","status":{"importing":"Importing","imported":"Imported","stopped":"Stopped","removing":"Removing","notRunning":"Not running"},"dates":"{earliest} to {latest}","nouns":{"email":{"one":"1 message","many":"{n} messages","none":"no messages","plural":"messages","snapshot":""},"chat":{"one":"1 message","many":"{n} messages","none":"no messages","plural":"messages","snapshot":"Snapshot, not updated"},"note":{"one":"1 note","many":"{n} notes","none":"no notes","plural":"notes","snapshot":""},"other":{"one":"1 item","many":"{n} items","none":"no items","plural":"items","snapshot":""}},"importingLine":"{percent}% read · {items} so far","importingLineUncounted":"{percent}% read","importedLine":"{items} · imported {when}","importedLineNoTime":"{items}","emptyImport":"Imported: {none} found in this archive.","emptyImportWhen":"Imported {when}: {none} found in this archive.","nothingImported":"{None} imported.","nothingImportedWhen":"{None} imported {when}.","removingLine":"Removing everything Olympus made from this archive. The file itself stays where it is.","notRunningLine":"{percent}% read · {items} so far. It goes on from there once imports can run.","notRunningLineUncounted":"{percent}% read. It goes on from there once imports can run.","removingNotRunningLine":"It is removed once removals can run. The file itself stays where it is.","judgedLine":"{judged} judged · {held} waiting for the private model","heldWhy":{"ready":"Until the private model judges them, they stay Private.","waiting":"They stay Private until the private model judges them, and it is not answering right now.","off":"No private model is set up, so they stay Private and are not judged."},"setUpPrivateModel":"Set up the private model","countsUnavailable":{"why":"Olympus can't count what this archive holds right now: its index could not be opened.","fix":"Open this page again in a minute. If it still says this, restart Olympus, or ask for help at olympusplugin.ai/support."},"notRunning":{"why":{"disabled":"Background syncing is turned off in Olympus's settings, so imports can't run.","not_selected":"Background syncing in Olympus's settings leaves out archives, so imports can't run."},"fix":{"disabled":"The setting is worker.scheduler.enabled: turn it on, and restart Olympus after changing it. Each import and removal goes on from where it is.","not_selected":"The setting is worker.scheduler.sourceIds: add archive.imports to it, or empty it, and restart Olympus after changing it. Each import and removal goes on from where it is."}},"removeNotRunning":{"disabled":"Remove can't run while background syncing is turned off.","not_selected":"Remove can't run while background syncing leaves out archives."},"stopped":{"file_changed":{"why":"{file} changed after the import started.","fix":"Remove this archive, then import the file again once it has stopped changing."},"file_missing":{"why":"{file} is no longer where it was.","fix":"Remove this archive, then import it again from where it is now."},"file_unreadable":{"why":"Olympus could not read {file}.","fix":"Check that your user account can open it, then remove this archive and import it again."},"resume_point_invalid":{"why":"Olympus lost its place in this archive.","fix":"Remove this archive and import it again."},"format_unavailable":{"why":"This version of Olympus cannot read this kind of archive.","fix":"Update Olympus, or remove this archive."},"root_changed":{"why":"The folder it was in was moved or replaced.","fix":"Remove this archive, then import it again from where it is now."},"other":{"why":"The import stopped.","fix":"Remove this archive and import it again."}},"thisFile":"A file of this archive","account":{"line":"{name} does not say which {source} account it came from. Is it the {source} account Olympus has connected?","note":"Added to {source}, it joins what Olympus already reads there, and anything {source} already has is not added twice. Kept under Other archives, it stays apart, with its own Remove.","add":"Add to {source}","apart":"Keep it under Other archives","addFor":"Add {name} to {source}","apartFor":"Keep {name} under Other archives","sourceFallback":"this source","reconfirm":{"line":"{source} now holds a different account than the one you said {name} belongs to. Is {name} from the {source} account Olympus has connected now?","note":"To keep it apart instead, delete this import from the {source} card, then import it again under Other archives."}},"inSource":{"listLabel":"Imported archives","importingLine":"Reading your export: {percent}% · {items} so far","importingNote":"The bar above counts these as they become searchable.","importingLineNone":"Reading your export: {percent}%","importedLine":"{items} from this archive","importedWhen":" · imported {when}","alreadyThere":{"one":", of which 1 was already there","many":", of which {n} were already there"},"notRunningLine":"{percent}% read. It goes on from there once imports can run.","stop":"Stop","stopped":"Stopped {name}. What it imported stays.","covers":{"imported":"History imported up to {to}","live":"live since {since}"},"stoppedWhy":{"stopped_by_owner":{"why":"You stopped this import. What it imported stays.","fix":"To go on from here, choose the same file again with Import an archive."},"file_changed":{"why":"{file} changed after the import started.","fix":"Choose the file again with Import an archive once it has stopped changing. What is already here is not added twice."},"file_missing":{"why":"{file} is no longer where it was.","fix":"Choose it again with Import an archive from where it is now. What is already here is not added twice."},"file_unreadable":{"why":"Olympus could not read {file}.","fix":"Check that your user account can open it, then choose it again with Import an archive."},"resume_point_invalid":{"why":"Olympus lost its place in this archive.","fix":"It cannot go on from here, and choosing the file again does not change that. What it imported stays; deleting the source removes it with the rest of its history."},"format_unavailable":{"why":"This version of Olympus cannot read this kind of archive.","fix":"Update Olympus, then choose the file again with Import an archive."},"root_changed":{"why":"The folder it was in was moved or replaced.","fix":"Choose it again with Import an archive from where it is now. What is already here is not added twice."},"account_changed":{"why":"The account this source holds now is not the one this export belongs to, so nothing more was imported.","fix":"What it imported stays. To import it into the account it belongs to, connect that account first, then choose the file again with Import an archive."},"source_unavailable":{"why":"This source was being deleted or moved, so nothing more was imported.","fix":"Once that has finished, choose the file again with Import an archive if you still want it."},"other":{"why":"The import stopped.","fix":"Choose the file again with Import an archive. What is already here is not added twice."}}},"gaps":{"message_too_large":{"one":"1 message too large to read","many":"{n} messages too large to read"},"message_unreadable":{"one":"1 message could not be read","many":"{n} messages could not be read"},"message_content_unsupported":{"one":"1 message with a kind of content Olympus cannot read yet","many":"{n} messages with a kind of content Olympus cannot read yet"},"charset_not_decoded":{"one":"1 message in a character set Olympus could not read","many":"{n} messages in a character set Olympus could not read"},"attachments_not_read":{"one":"1 attachment not read (its name is kept)","many":"{n} attachments not read (their names are kept)"},"text_cut":{"one":"1 message too long: the start of it is kept","many":"{n} messages too long: the start of each is kept"},"spam_or_trash":{"one":"1 message in Spam or Trash left out","many":"{n} messages in Spam or Trash left out"},"mail_for_another_account":{"one":"1 message delivered to another address left out","many":"{n} messages delivered to another address left out"},"gmail_budget_too_small":{"one":"Waiting: the daily limit on Gmail requests is too low to import. Set OLYMPUS_SOURCE_INDEX_GMAIL_DAILY_API_REQUEST_BUDGET to {n} or more, then restart Olympus.","many":"Waiting: the daily limit on Gmail requests is too low to import. Set OLYMPUS_SOURCE_INDEX_GMAIL_DAILY_API_REQUEST_BUDGET to {n} or more, then restart Olympus."},"gmail_import_allowance_spent":{"one":"Waiting until tomorrow: imports have used their share of today's Gmail requests.","many":"Waiting until tomorrow: imports have used their share of today's Gmail requests."},"gmail_requests_spent":{"one":"Waiting until tomorrow: today's Gmail requests are used up.","many":"Waiting until tomorrow: today's Gmail requests are used up."},"gmail_labels_unavailable":{"one":"Waiting: one of your rules names a Gmail label, and Gmail's labels can't be read now.","many":"Waiting: one of your rules names a Gmail label, and Gmail's labels can't be read now."},"system_message":{"one":"1 notice from WhatsApp itself (such as someone joining) left out","many":"{n} notices from WhatsApp itself (such as people joining) left out"},"message_empty":{"one":"1 message with no text left out","many":"{n} messages with no text left out"},"match_near_miss":{"one":"1 message may also be in the live chat, shown differently there (a renamed contact, an edited caption), so it was kept as its own","many":"{n} messages may also be in the live chat, shown differently there (a renamed contact, an edited caption), so each was kept as its own"},"status_updates":{"one":"1 status update left out: it is not a conversation","many":"{n} status updates left out: they are not a conversation"},"note_empty":{"one":"1 note with nothing written in it left out","many":"{n} notes with nothing written in them left out"},"note_unreadable":{"one":"1 note could not be read","many":"{n} notes could not be read"},"note_too_large":{"one":"1 note too large to read","many":"{n} notes too large to read"},"note_content_unsupported":{"one":"1 note with a kind of content Olympus cannot read yet","many":"{n} notes with a kind of content Olympus cannot read yet"},"note_date_assumed":{"one":"1 note has no date in the archive: Olympus used the day the file was saved","many":"{n} notes have no date in the archive: Olympus used the day the file was saved"},"service_message":{"one":"1 service message (a join, a call or a pin) left out","many":"{n} service messages (joins, calls or pins) left out"},"message_without_text":{"one":"1 message with nothing to read (no text, picture or file) left out","many":"{n} messages with nothing to read (no text, picture or file) left out"},"media_not_imported":{"one":"1 picture, recording or other file the archive refers to was not imported","many":"{n} pictures, recordings or other files the archive refers to were not imported"},"item_truncated":{"one":"1 item too long: the start of it is kept","many":"{n} items too long: the start of each is kept"},"time_zone_assumed":{"one":"The times have no time zone, so Olympus read them in this computer's time zone","many":"The times in {n} files have no time zone, so Olympus read them in this computer's time zone"},"date_order_assumed":{"one":"The dates do not say which part is the day, so Olympus read them day first","many":"The dates in {n} files do not say which part is the day, so Olympus read them day first"},"item_start_assumed":{"one":"1 line that looks like the start of a new message was taken as one, though it is dated before the message above it or written in another style, so it may belong to that message","many":"{n} lines that look like the start of a new message were taken as new messages, though each is dated before the message above it or written in another style, so they may belong to those messages"},"zip_overlap_unchecked":{"one":"1 zip is too large to check whether its files share the same bytes, so Olympus took it that they do not (a damaged zip could break that)","many":"{n} zips are too large to check whether their files share the same bytes, so Olympus took it that they do not (a damaged zip could break that)"},"assumption":{"one":"1 thing Olympus had to assume because the archive does not say or is too large to check (this archive was imported before Olympus named each one: remove it and import it again to see which)","many":"{n} things Olympus had to assume because the archive does not say or is too large to check (this archive was imported before Olympus named each one: remove it and import it again to see which)"},"section_not_imported":{"one":"1 part of the archive is not imported","many":"{n} parts of the archive are not imported"},"file_damaged":{"one":"1 file in the archive looks damaged, so what was read from it may be wrong","many":"{n} files in the archive look damaged, so what was read from them may be wrong"},"item_repeated":{"one":"1 message was in more than one export file and was imported once","many":"{n} messages were in more than one export file and were imported once"},"item_refused":{"one":"1 item was not imported because the place it belongs in would not take it (nothing was stored in the wrong place)","many":"{n} items were not imported because the place they belong in would not take them (nothing was stored in the wrong place)"},"files_not_looked_at":{"one":"1 file in what you chose was not looked at, so it was not imported if it is an export","many":"{n} files in what you chose were not looked at, so any of them that are exports were not imported"},"files_unconfirmed":{"one":"1 file in the chosen folder looks like an export but is not named like one, so it was not imported (choose it by itself to import it)","many":"{n} files in the chosen folder look like exports but are not named like one, so they were not imported (choose them by themselves to import them)"},"other":{"one":"1 item not read fully","many":"{n} items not read fully"}},"lists":{"notImported":"Not imported","howRead":"How it was read"},"seeWhy":{"notImported":"See what was not imported","howRead":"See how it was read","both":"See what was not imported and how it was read"},"listOf":{"media_not_imported":"not_imported","item_truncated":"not_imported","section_not_imported":"not_imported","file_damaged":"not_imported","item_refused":"not_imported","files_not_looked_at":"not_imported","files_unconfirmed":"not_imported","time_zone_assumed":"how_read","date_order_assumed":"how_read","item_start_assumed":"how_read","zip_overlap_unchecked":"how_read","assumption":"how_read","item_repeated":"how_read","message_too_large":"not_imported","message_unreadable":"not_imported","charset_not_decoded":"not_imported","attachments_not_read":"not_imported","text_cut":"not_imported","spam_or_trash":"not_imported","mail_for_another_account":"not_imported","gmail_budget_too_small":"not_imported","gmail_import_allowance_spent":"not_imported","gmail_requests_spent":"not_imported","gmail_labels_unavailable":"not_imported","message_content_unsupported":"not_imported","system_message":"how_read","message_empty":"how_read","match_near_miss":"how_read","message_without_text":"how_read","status_updates":"not_imported","service_message":"not_imported","note_unreadable":"not_imported","note_too_large":"not_imported","note_content_unsupported":"not_imported","note_empty":"how_read","note_date_assumed":"how_read","other":"not_imported"},"gapInFile":"{file}: {gap}","remove":"Remove","removeConfirm":"Remove {name}? Everything Olympus made from it is deleted. The file itself stays where it is.","requestLine":"An agent asked to import {name} from {where}.","startingLine":"Starting to import {name}…","fullPath":"Full path: {path}","removeRequestLine":"An agent asked to remove {name}, imported from {where}.","removeRequestLineNoWhere":"An agent asked to remove {name}.","removeRequestNote":"Removing deletes everything Olympus made from it. The file itself stays where it is.","approve":"Import","decline":"Decline","checkingLine":"Checking whether {name} is already imported. Olympus reads it once to compare.","cancel":"Cancel","cancelled":"Cancelled. {name} was not imported.","alreadyLine":"{name} is already imported as {archive}.","alreadyLineUnnamed":"{name} is already imported.","failedLine":"{name} was not imported: {reason}","failed":{"not_found":"it is no longer there.","permission_denied":"your user account is not allowed to open it.","changed":"it changed while Olympus was reading it.","unreadable":"Olympus could not read it.","unsupported":"Olympus does not import this kind of file.","ambiguous":"Olympus could not tell which kind of export it is.","replaced":"it was moved, replaced or changed after you chose it."},"tryAgain":"Try again","dismiss":"Dismiss","started":"Importing {name}. It shows under Other archives as it is read.","startedIn":"Importing {name} into {source}. It shows in {source} as it is read.","checking":"Checking whether {name} is already imported…","already":"{name} is already imported as {archive}.","alreadyUnnamed":"{name} is already imported.","removing":"Removing {name}.","declined":"Declined.","needsYou":{"stopped":"An import stopped: {name}","request":"An agent asked to import {name}","removal":"An agent asked to remove {name}","failed":"An import did not start: {name}","counts":"Olympus can't count what is in {name}","scheduler":{"disabled":"Imports can't run: background syncing is turned off","not_selected":"Imports can't run: background syncing leaves out archives"},"held":{"one":"1 imported item waits for the private model","many":"{n} imported items wait for the private model"},"unreadable":"Olympus can't read its list of imported archives","waiting":{"gmail_budget_too_small":"An import waits: {name}. The daily limit on Gmail requests is too low; set OLYMPUS_SOURCE_INDEX_GMAIL_DAILY_API_REQUEST_BUDGET to {n} or more","other":"An import waits: {name}"},"seeWhy":"See why","review":"Review","setUp":"Set up the private model","check":"Check the private model"},"unreadable":{"why":{"damaged":"{file} is damaged, so Olympus cannot tell which archives it imported.","unknown_form":"{file} was written by a newer version of Olympus, or it is damaged.","permission":"Your user account is not allowed to open {file}.","other":"Olympus could not open {file}."},"kept":"Nothing Olympus imported is deleted. Until it can read this list, no archive can be imported, so nothing overwrites it.","fix":{"damaged":"Restore that file from a backup, or ask for help at olympusplugin.ai/support.","unknown_form":"Update Olympus, then open this page again.","permission":"Check that your user account can open that file, then open this page again.","other":"Open this page again in a minute. If it still says this, ask for help at olympusplugin.ai/support."}}}}}}, function chatgptPickerProgram(kit) {
   const T = kit.config.tools, Q = kit.config.copy, el = kit.el, add = kit.add, fill = kit.fill, STATES = ["ingest", "metadata_only", "exclude"], WINDOWS = ["6m", "1y", "2y", "5y", "all"], CATEGORIES = ["primary", "updates", "forums", "social", "promotions"];
-  let p = null, session = 0, timer = null;
+  let p = null, drop = null, dropSession = 0, session = 0, timer = null;
   const ACCOUNT = "@account", MAX_RULES = 100;
   function handles(fix) {
     return !!fix && (fix.tool === T.connectSource || fix.tool === T.scopeList);
@@ -201602,6 +202365,12 @@ textarea.text{resize:vertical;min-height:4.5rem}
     p = null;
     session++;
     kit.close(notice, refresh, key);
+  }
+  function goToModels() {
+    stopTimer();
+    p = null;
+    session++;
+    kit.showModels();
   }
   function start(fix, sourceId, sourceLabel, returnKey) {
     stopTimer();
@@ -201646,7 +202415,8 @@ textarea.text{resize:vertical;min-height:4.5rem}
       if (!href) {
         p.phase = "error";
         p.errorText = kit.errorText(result);
-        kit.render("picker:connect:retry");
+        p.errorCode = result && result.isError && result.structuredContent && typeof result.structuredContent.error === "string" ? result.structuredContent.error : "";
+        kit.render(p.errorCode === "models_not_ready" ? "picker:connect:models" : "picker:connect:retry");
         return;
       }
       p.href = href;
@@ -201660,6 +202430,7 @@ textarea.text{resize:vertical;min-height:4.5rem}
         return;
       p.phase = "error";
       p.errorText = "";
+      p.errorCode = "";
       kit.render("picker:connect:retry");
     });
   }
@@ -201745,7 +202516,8 @@ textarea.text{resize:vertical;min-height:4.5rem}
     } else {
       const line = el("p", "", p.errorText || fill(Q.connectFailed, { source: p.label }));
       line.setAttribute("role", "alert");
-      add(box, line, add(el("div", "actions"), kit.button(Q.tryAgain, "picker:connect:retry", reopen, "main"), kit.button(Q.cancel, "picker:connect:cancel", () => leave("", !0), "plain")));
+      const models = p.errorCode === "models_not_ready";
+      add(box, line, add(el("div", "actions"), models ? kit.button(Q.goToModels, "picker:connect:models", goToModels, "main") : null, kit.button(Q.tryAgain, "picker:connect:retry", reopen, models ? "plain" : "main"), kit.button(Q.cancel, "picker:connect:cancel", () => leave("", !0), "plain")));
     }
     add(page, box);
   }
@@ -201755,6 +202527,461 @@ textarea.text{resize:vertical;min-height:4.5rem}
     if (kit.compact())
       kit.fullscreen();
     openScope(sourceId, sourceLabel, words.title, "", "", void 0, { words, taken: taken.slice(), done });
+  }
+  const UPLOAD_PARALLEL = 4, UPLOAD_STATUS_MS = 2000, UPLOAD_PAINT_MS = 150;
+  function pickArchive(words, done, sourceId) {
+    stopTimer();
+    session++;
+    p = null;
+    if (kit.compact())
+      kit.fullscreen();
+    dropSession++;
+    drop = {
+      words,
+      done,
+      sourceId: sourceId || "",
+      mine: dropSession,
+      attempt: 0,
+      phase: "idle",
+      name: "",
+      uploadId: "",
+      total: 0,
+      sent: 0,
+      files: 0,
+      filesDone: 0,
+      paused: !1,
+      error: "",
+      access: null,
+      confirm: null,
+      poll: null,
+      paint: null,
+      input: null
+    };
+    kit.render("picker:back");
+  }
+  function dropLive(mine, attempt) {
+    return !!drop && drop.mine === mine && (attempt === void 0 || drop.attempt === attempt);
+  }
+  function errorSentence(result) {
+    const text = (result && Array.isArray(result.content) ? result.content : []).filter((part) => part && part.type === "text" && typeof part.text === "string")[0];
+    return text ? String(text.text) : "";
+  }
+  function stopDropTimers() {
+    if (!drop)
+      return;
+    if (drop.poll)
+      clearInterval(drop.poll);
+    if (drop.paint)
+      clearTimeout(drop.paint);
+    drop.poll = null;
+    drop.paint = null;
+  }
+  function discardUpload() {
+    if (!drop)
+      return;
+    drop.attempt++;
+    stopDropTimers();
+    const id = drop.uploadId;
+    drop.uploadId = "";
+    if (id) {
+      kit.abortUpload(id);
+      kit.call(T.archiveUploadCancel, { upload_id: id }).then(() => {
+        return;
+      }, () => {
+        return;
+      });
+    }
+  }
+  function leaveDrop(picked) {
+    if (!drop)
+      return;
+    if (!picked)
+      discardUpload();
+    stopDropTimers();
+    const done = drop.done;
+    drop = null;
+    dropSession++;
+    done(picked);
+  }
+  function cancelDrop() {
+    if (!drop)
+      return;
+    discardUpload();
+    drop.phase = "idle";
+    drop.error = "";
+    drop.access = null;
+    drop.confirm = null;
+    kit.render("picker:drop:zone");
+  }
+  function dropFail(text, access) {
+    if (!drop)
+      return;
+    discardUpload();
+    drop.phase = "error";
+    drop.error = text || drop.words.failed;
+    drop.access = access && typeof access.message === "string" && access.message ? access : null;
+    kit.render("picker:drop:retry");
+  }
+  function entryFiles(entry, prefix, found, gone) {
+    if (gone() || !entry)
+      return Promise.resolve();
+    if (entry.isFile)
+      return new Promise((resolve, reject) => {
+        entry.file((file) => {
+          found.push({ file, path: prefix + entry.name });
+          resolve();
+        }, reject);
+      });
+    if (!entry.isDirectory)
+      return Promise.resolve();
+    const reader = entry.createReader(), here = prefix + entry.name + "/", next = () => new Promise((resolve, reject) => {
+      reader.readEntries((batch) => {
+        if (!batch.length || gone()) {
+          resolve();
+          return;
+        }
+        batch.reduce((chain, child) => chain.then(() => entryFiles(child, here, found, gone)), Promise.resolve()).then(() => next()).then(resolve, reject);
+      }, reject);
+    });
+    return next();
+  }
+  function dropped(event, gone) {
+    const transfer = event.dataTransfer;
+    if (!transfer)
+      return null;
+    const entries = [], plain = [], items = transfer.items ? Array.prototype.slice.call(transfer.items) : [];
+    for (const item of items) {
+      if (!item || item.kind !== "file")
+        continue;
+      const entry = typeof item.webkitGetAsEntry === "function" ? item.webkitGetAsEntry() : null;
+      if (entry)
+        entries.push(entry);
+      else {
+        const file = typeof item.getAsFile === "function" ? item.getAsFile() : null;
+        if (file)
+          plain.push({ file, path: file.name });
+      }
+    }
+    if (!items.length)
+      for (const file of Array.prototype.slice.call(transfer.files || []))
+        plain.push({ file, path: file.name });
+    if (!entries.length && !plain.length)
+      return null;
+    const found = plain.slice();
+    return entries.reduce((chain, entry) => chain.then(() => entryFiles(entry, "", found, gone)), Promise.resolve()).then(() => found);
+  }
+  function chosen(input) {
+    const items = Array.prototype.slice.call(input.files || []).map((file) => ({ file, path: file.webkitRelativePath || file.name }));
+    try {
+      input.value = "";
+    } catch {}
+    return items;
+  }
+  function topName(items) {
+    const tops = {};
+    for (const item of items)
+      tops[String(item.path).split("/")[0]] = !0;
+    const names = Object.keys(tops);
+    return names.length === 1 ? names[0] : fill(drop.words.several, { n: kit.count(names.length) });
+  }
+  function paintSoon() {
+    if (!drop || drop.paint)
+      return;
+    const mine = drop.mine;
+    drop.paint = setTimeout(() => {
+      if (!dropLive(mine))
+        return;
+      drop.paint = null;
+      if (drop.phase === "uploading")
+        kit.render("picker:drop:cancel");
+    }, UPLOAD_PAINT_MS);
+  }
+  function beginUpload(collect) {
+    if (!drop || drop.phase !== "idle" && drop.phase !== "error")
+      return;
+    const mine = drop.mine;
+    drop.attempt++;
+    const attempt = drop.attempt;
+    drop.phase = "reading";
+    drop.error = "";
+    drop.access = null;
+    drop.name = "";
+    drop.sent = 0;
+    drop.filesDone = 0;
+    kit.render("picker:drop:cancel");
+    collect().then((items) => {
+      if (!dropLive(mine, attempt))
+        return;
+      if (!items.length) {
+        dropFail(drop.words.empty);
+        return;
+      }
+      let total = 0;
+      for (const item of items)
+        total += item.file.size || 0;
+      drop.name = topName(items);
+      drop.total = total;
+      drop.files = items.length;
+      kit.call(T.archiveUploadStart, {}).then((result) => {
+        if (!dropLive(mine, attempt))
+          return;
+        const content = result && result.structuredContent && typeof result.structuredContent === "object" ? result.structuredContent : null;
+        if (!result || result.isError || !content || typeof content.upload_id !== "string" || !content.upload_id) {
+          dropFail(errorSentence(result));
+          return;
+        }
+        drop.uploadId = content.upload_id;
+        drop.phase = "uploading";
+        drop.poll = setInterval(() => pollUpload(mine, attempt), UPLOAD_STATUS_MS);
+        kit.render("picker:drop:cancel");
+        sendAll(mine, attempt, content.upload_id, items);
+      }, () => {
+        if (dropLive(mine, attempt))
+          dropFail("");
+      });
+    }, () => {
+      if (dropLive(mine, attempt))
+        dropFail(drop.words.unreadable);
+    });
+  }
+  function pollUpload(mine, attempt) {
+    if (!dropLive(mine, attempt) || drop.phase !== "uploading" || !drop.uploadId)
+      return;
+    kit.call(T.archiveUploadStatus, { upload_id: drop.uploadId }).then((result) => {
+      if (!dropLive(mine, attempt) || drop.phase !== "uploading")
+        return;
+      const content = result && result.structuredContent && typeof result.structuredContent === "object" ? result.structuredContent : null, paused = !!content && content.status === "paused_disk_full";
+      if (paused !== drop.paused) {
+        drop.paused = paused;
+        kit.render("picker:drop:cancel");
+      }
+    }, () => {
+      return;
+    });
+  }
+  function sendAll(mine, attempt, uploadId, items) {
+    let next = 0, finished = 0, failure = null;
+    const inflight = {}, sentNow = () => {
+      let sum = finished;
+      for (const key of Object.keys(inflight))
+        sum += inflight[Number(key)];
+      return sum;
+    }, worker = () => {
+      if (failure || !dropLive(mine, attempt) || next >= items.length)
+        return Promise.resolve();
+      const at = next++, item = items[at];
+      inflight[at] = 0;
+      return kit.upload(uploadId, item.path, item.file, item.file.lastModified, (loaded) => {
+        inflight[at] = loaded;
+        if (dropLive(mine, attempt)) {
+          drop.sent = sentNow();
+          paintSoon();
+        }
+      }).then((outcome) => {
+        delete inflight[at];
+        if (!outcome || outcome.ok !== !0) {
+          if (failure)
+            return;
+          failure = outcome || {};
+          if (!failure.cancelled && dropLive(mine, attempt))
+            dropFail(typeof failure.message === "string" ? failure.message : "");
+          return;
+        }
+        finished += item.file.size || 0;
+        if (dropLive(mine, attempt)) {
+          drop.filesDone++;
+          drop.sent = sentNow();
+          paintSoon();
+        }
+        return worker();
+      });
+    }, lanes = [];
+    for (let lane = 0;lane < Math.min(UPLOAD_PARALLEL, items.length); lane++)
+      lanes.push(worker());
+    Promise.all(lanes).then(() => {
+      if (!dropLive(mine, attempt) || failure)
+        return;
+      if (drop.paint) {
+        clearTimeout(drop.paint);
+        drop.paint = null;
+      }
+      if (drop.poll) {
+        clearInterval(drop.poll);
+        drop.poll = null;
+      }
+      approveDrop();
+    });
+  }
+  function approveDrop(answer) {
+    if (!drop || !drop.uploadId)
+      return;
+    const { mine, attempt, uploadId, name } = drop;
+    drop.phase = "approving";
+    drop.confirm = null;
+    kit.render("picker:drop:approving");
+    const only = drop.sourceId ? { source_id: drop.sourceId } : {};
+    kit.call(T.archiveApprove, answer ? { upload_id: uploadId, ...only, ...answer } : { upload_id: uploadId, ...only }).then((result) => {
+      if (!dropLive(mine, attempt))
+        return;
+      const content = result && result.structuredContent && typeof result.structuredContent === "object" ? result.structuredContent : null, status = content ? content.status : "";
+      if (!result || result.isError || status !== "started" && status !== "checking" && status !== "already_imported" && status !== "confirm_account") {
+        drop.uploadId = "";
+        dropFail(errorSentence(result), content ? content.access : null);
+        return;
+      }
+      if (status === "confirm_account") {
+        const source = content.source && typeof content.source === "object" && typeof content.source.label === "string" ? content.source.label : "";
+        drop.phase = "confirm";
+        drop.confirm = { name: typeof content.name === "string" && content.name ? content.name : name, source, reconfirm: content.reconfirm === !0 };
+        kit.render("picker:drop:confirm");
+        return;
+      }
+      const picked = { name: typeof content.name === "string" && content.name ? content.name : name, status };
+      if (typeof content.archive_name === "string" && content.archive_name)
+        picked.archiveName = content.archive_name;
+      if (status === "started" && content.source && typeof content.source.label === "string" && content.source.label)
+        picked.source = { label: content.source.label };
+      drop.uploadId = "";
+      leaveDrop(picked);
+    }, () => {
+      if (dropLive(mine, attempt))
+        dropFail("");
+    });
+  }
+  function dropView() {
+    const page = el("main", "page picker"), words = drop.words, top = el("div", "picker-top"), backButton = kit.button(words.back, "picker:back", escape, "plain");
+    backButton.className = "btn back";
+    add(top, backButton);
+    add(page, top);
+    add(page, el("h1", "", words.title));
+    add(page, el("p", "muted", words.intro));
+    const body = el("div", "picker-body drop-body");
+    if (drop.error) {
+      const banner = el("div", "banner");
+      banner.setAttribute("role", "alert");
+      add(banner, add(el("div", "banner-body"), el("p", "", drop.error)));
+      add(body, banner);
+      if (drop.access)
+        add(body, accessNote(drop.access, null));
+    }
+    const phase = drop.phase;
+    if (phase === "idle" || phase === "error")
+      add(body, dropZone());
+    else if (phase === "confirm")
+      add(body, confirmBox());
+    else
+      add(body, progressBox());
+    add(page, body);
+    return page;
+  }
+  function dropZone() {
+    const words = drop.words, wrap = el("div", "drop"), zone = el("button", "drop-zone");
+    zone.type = "button";
+    zone.setAttribute("data-key", "picker:drop:zone");
+    zone.setAttribute("aria-label", words.zoneLabel);
+    const title = el("span", "drop-title", words.zone), hint = el("span", "drop-hint", words.hint);
+    add(zone, title, hint);
+    const folderInput = el("input");
+    folderInput.type = "file";
+    folderInput.setAttribute("webkitdirectory", "");
+    folderInput.setAttribute("directory", "");
+    folderInput.className = "drop-input";
+    folderInput.setAttribute("tabindex", "-1");
+    folderInput.setAttribute("aria-hidden", "true");
+    folderInput.setAttribute("aria-label", words.zoneLabel);
+    folderInput.setAttribute("data-key", "picker:drop:folder-input");
+    const fileInput = el("input");
+    fileInput.type = "file";
+    fileInput.className = "drop-input";
+    fileInput.setAttribute("tabindex", "-1");
+    fileInput.setAttribute("aria-hidden", "true");
+    fileInput.setAttribute("aria-label", words.chooseFile);
+    fileInput.setAttribute("data-key", "picker:drop:file-input");
+    const mine = drop.mine, take = (input) => () => {
+      const items = chosen(input);
+      if (items.length && dropLive(mine))
+        beginUpload(() => Promise.resolve(items));
+    };
+    folderInput.addEventListener("change", take(folderInput));
+    fileInput.addEventListener("change", take(fileInput));
+    zone.addEventListener("click", () => folderInput.click());
+    const over = (on) => {
+      zone.setAttribute("data-over", on ? "true" : "false");
+      title.textContent = on ? words.over : words.zone;
+    };
+    let depth = 0;
+    zone.addEventListener("dragenter", (event) => {
+      event.preventDefault();
+      depth++;
+      over(!0);
+    });
+    zone.addEventListener("dragover", (event) => {
+      event.preventDefault();
+      if (event.dataTransfer)
+        event.dataTransfer.dropEffect = "copy";
+    });
+    zone.addEventListener("dragleave", () => {
+      depth = Math.max(0, depth - 1);
+      if (!depth)
+        over(!1);
+    });
+    zone.addEventListener("drop", (event) => {
+      event.preventDefault();
+      depth = 0;
+      over(!1);
+      const reading = dropped(event, () => !dropLive(mine));
+      if (reading)
+        beginUpload(() => reading);
+      else
+        dropFail(words.empty);
+    });
+    add(wrap, zone, add(el("p", "drop-or"), kit.button(words.chooseFile, "picker:drop:file", () => fileInput.click(), "plain")), folderInput, fileInput);
+    return wrap;
+  }
+  function progressBox() {
+    const words = drop.words, box = el("div", "drop-progress");
+    box.setAttribute("role", "status");
+    if (drop.phase === "reading")
+      add(box, el("p", "", words.reading));
+    else if (drop.phase === "approving")
+      add(box, el("p", "", words.starting));
+    else {
+      const share = drop.total > 0 ? Math.min(1, drop.sent / drop.total) : drop.files > 0 ? Math.min(1, drop.filesDone / drop.files) : 0;
+      add(box, el("p", "strong", fill(words.uploading, { name: drop.name })));
+      const bar = el("div", "bar");
+      bar.setAttribute("role", "progressbar");
+      bar.setAttribute("aria-valuemin", "0");
+      bar.setAttribute("aria-valuemax", "100");
+      bar.setAttribute("aria-valuenow", String(Math.round(share * 100)));
+      bar.setAttribute("aria-label", fill(words.uploading, { name: drop.name }));
+      const fillNode = el("div", "bar-fill");
+      fillNode.style.width = Math.round(share * 1000) / 10 + "%";
+      add(bar, fillNode);
+      add(box, bar);
+      add(box, el("p", "muted", fill(drop.files > 1 ? words.progressFiles : words.progress, {
+        sent: size(drop.sent),
+        total: size(drop.total),
+        files: kit.count(drop.filesDone),
+        of: kit.count(drop.files)
+      })));
+      if (drop.paused)
+        add(box, el("p", "fnote strong", words.paused));
+    }
+    if (drop.phase !== "approving")
+      add(box, add(el("div", "actions"), kit.button(words.cancel, "picker:drop:cancel", cancelDrop, "plain")));
+    return box;
+  }
+  function confirmBox() {
+    const words = drop.words.account, source = drop.confirm.source || words.sourceFallback, name = drop.confirm.name, ask = el("div", "banner");
+    ask.setAttribute("role", "group");
+    ask.setAttribute("aria-label", fill(words.line, { name, source }));
+    const answer = (extra, label, labelFor, focus, style) => {
+      const control = kit.button(label, focus, () => approveDrop(extra), style);
+      control.setAttribute("aria-label", labelFor);
+      return control;
+    }, again = drop.confirm.reconfirm;
+    add(ask, add(el("div", "banner-body"), el("p", "", fill(again ? words.reconfirm.line : words.line, { name, source })), el("p", "muted", fill(again ? words.reconfirm.note : words.note, { name, source })), add(el("div", "actions"), answer({ confirm_account: !0 }, fill(words.add, { name, source }), fill(words.addFor, { name, source }), "picker:confirm", "main"), ...again ? [] : [answer({ keep_apart: !0 }, words.apart, fill(words.apartFor, { name, source }), "picker:confirm-apart", "plain")], kit.button(drop.words.chooseAnother, "picker:confirm-other", cancelDrop, "plain"))));
+    return ask;
   }
   function openScope(id, label, title, returnKey, notice, initial, pick) {
     stopTimer();
@@ -201784,6 +203011,8 @@ textarea.text{resize:vertical;min-height:4.5rem}
       catalog: new Map,
       remaining: new Map,
       truncated: new Set,
+      access: new Map,
+      wholeWords: null,
       ancestors: new Map,
       own: new Map,
       whole: !1,
@@ -201869,6 +203098,7 @@ textarea.text{resize:vertical;min-height:4.5rem}
       p.generation = page.account_generation;
       p.revision = page.scope_revision;
       p.whole = page.whole_account_selected === !0;
+      p.wholeWords = page.whole_words && typeof page.whole_words === "object" ? page.whole_words : null;
       p.wholeConfirmed = p.whole;
       const saved = Array.isArray(page.selections) ? page.selections : [];
       for (const selection of saved) {
@@ -201887,14 +203117,21 @@ textarea.text{resize:vertical;min-height:4.5rem}
       p.catalog.set(node.key, node);
       p.ancestors.set(node.key, trail);
     }
-    const nodes = previous.concat(fresh).sort((a, b) => String(a.name).localeCompare(String(b.name), void 0, { numeric: !0, sensitivity: "base" })), next = typeof page.next_cursor === "string" && page.next_cursor ? page.next_cursor : "", more = typeof page.remaining === "number" && isFinite(page.remaining) && page.remaining > 0 ? Math.round(page.remaining) : 0;
+    const nodes = previous.concat(fresh).sort((a, b) => (a.is_disk === !0 ? 1 : 0) - (b.is_disk === !0 ? 1 : 0) || String(a.name).localeCompare(String(b.name), void 0, { numeric: !0, sensitivity: "base" })), levelAccess = page.access && typeof page.access.message === "string" && page.access.message ? page.access : null;
+    if (levelAccess)
+      p.access.set(parentKey, levelAccess);
+    else
+      p.access.delete(parentKey);
+    const next = typeof page.next_cursor === "string" && page.next_cursor ? page.next_cursor : "", more = typeof page.remaining === "number" && isFinite(page.remaining) && page.remaining > 0 ? Math.round(page.remaining) : 0;
     if (next && more)
       p.remaining.set(parentKey, more);
     else
       p.remaining.delete(parentKey);
     if (page.truncated === !0)
       p.truncated.add(parentKey);
-    if (parentKey) {
+    if (parentKey && blockedByComputer(levelAccess))
+      p.branches.delete(parentKey);
+    else if (parentKey) {
       p.branches.set(parentKey, nodes);
       if (next)
         p.cursors.set(parentKey, next);
@@ -201909,6 +203146,25 @@ textarea.text{resize:vertical;min-height:4.5rem}
       after();
     else
       kit.render(focus);
+  }
+  function blockedByComputer(access) {
+    return !!access && access.state !== "needs_full_disk_access";
+  }
+  function accessNote(access, retry) {
+    const note = el("div", "banner");
+    note.setAttribute("role", "status");
+    const body = add(el("div", "banner-body"), el("p", "", access.message)), actions = el("div", "actions");
+    if (typeof access.settings_url === "string" && access.settings_url.indexOf("x-apple.systempreferences:") === 0) {
+      const link = el("a", "btn", Q.openPrivacySettings);
+      link.href = access.settings_url;
+      link.setAttribute("data-key", "picker:access:settings");
+      add(actions, link);
+    }
+    if (retry)
+      add(actions, kit.button(Q.tryAgain, "picker:access:retry", p.loading || p.saving ? null : retry, "plain"));
+    if (actions.childNodes.length)
+      add(body, actions);
+    return add(note, body);
   }
   function trailOf(key) {
     return (p.ancestors.get(key) || []).concat([key]);
@@ -201986,7 +203242,7 @@ textarea.text{resize:vertical;min-height:4.5rem}
     return state ? Q.states[state] : Q.notIncluded;
   }
   function sourceName(from) {
-    return from === ACCOUNT ? fill(Q.accountRow, { source: p.label }) : nameOf(from);
+    return from === ACCOUNT ? wholeWord("row") : nameOf(from);
   }
   function size(bytes) {
     const units = ["bytes", "KB", "MB", "GB", "TB"];
@@ -202131,7 +203387,7 @@ textarea.text{resize:vertical;min-height:4.5rem}
       parts.push(part);
     }
     if (p.whole)
-      lines.push(fill(Q.summaryWhole, { source: p.label }));
+      lines.push(wholeWord("summary"));
     if (parts.length) {
       const bytes = indexedBytes();
       lines.push(parts.join(", ") + (bytes > 0 ? " \\xB7 " + fill(Q.summarySize, { size: size(bytes) }) : ""));
@@ -202191,7 +203447,8 @@ textarea.text{resize:vertical;min-height:4.5rem}
         leave(fill(Q.saved, { source: p.label }), !0);
         return;
       }
-      p.saveError = Q.saveFailed;
+      const refusal = result && result.isError && result.structuredContent && result.structuredContent.error === "folder_needs_helper" ? String(result.content && result.content[0] && result.content[0].text || "") : "";
+      p.saveError = refusal || Q.saveFailed;
       kit.render(focus);
     }, () => {
       if (mine !== session || !p)
@@ -202201,10 +203458,17 @@ textarea.text{resize:vertical;min-height:4.5rem}
       kit.render(focus);
     });
   }
+  function wholeWord(kind) {
+    const own = p.wholeWords && typeof p.wholeWords[kind] === "string" ? String(p.wholeWords[kind]) : "";
+    if (own)
+      return own;
+    const values = { source: p.label };
+    return kind === "row" ? fill(Q.accountRow, values) : kind === "prompt" ? fill(Q.wholePrompt, values) : kind === "confirm" ? Q.wholeConfirm : kind === "onlyFull" ? Q.wholeOnlyFull : kind === "needConfirm" ? Q.needConfirm : fill(Q.summaryWhole, values);
+  }
   function wholeConfirm() {
     const confirm = el("div", "confirm-box");
     confirm.setAttribute("role", "alert");
-    add(confirm, el("p", "strong", fill(Q.wholePrompt, { source: p.label })), add(el("div", "actions"), kit.button(Q.wholeConfirm, "picker:whole:yes", p.saving ? null : () => {
+    add(confirm, el("p", "strong", wholeWord("prompt")), add(el("div", "actions"), kit.button(wholeWord("confirm"), "picker:whole:yes", p.saving ? null : () => {
       p.wholeConfirmed = !0;
       kit.render("picker:seg:" + ACCOUNT + ":ingest");
     }, "danger"), kit.button(Q.cancel, "picker:whole:no", p.saving ? null : () => {
@@ -202266,13 +203530,15 @@ textarea.text{resize:vertical;min-height:4.5rem}
     return group;
   }
   function folderControl(key, name, node) {
-    const own = p.own.get(key) || "", from = inherited(key), now = effective(key), selectable = !node || node.selectable !== !1, capped = !own && p.own.size >= MAX_RULES;
+    const own = p.own.get(key) || "", from = inherited(key), now = effective(key), selectable = !node || node.selectable !== !1, capped = !own && p.own.size >= MAX_RULES, unreadable = node && node.access && node.access.state === "needs_helper" ? String(node.access.message || Q.cannotChoose) : "";
     return segControl(name, "picker:seg:" + key + ":", {
       pressed: own,
       inherited: own ? now !== own ? now : "" : from.state,
       blocked: (state) => {
         if (!selectable)
           return Q.cannotChoose;
+        if (unreadable && state !== "exclude")
+          return unreadable;
         if (!allowed(key, state))
           return fill(Q.notPossible, { parent: sourceName(from.from), state: Q.statesLower[from.state] });
         if (capped)
@@ -202290,10 +203556,10 @@ textarea.text{resize:vertical;min-height:4.5rem}
     });
   }
   function accountControl() {
-    return segControl(fill(Q.accountRow, { source: p.label }), "picker:seg:" + ACCOUNT + ":", {
+    return segControl(wholeWord("row"), "picker:seg:" + ACCOUNT + ":", {
       pressed: p.whole ? "ingest" : "",
       inherited: "",
-      blocked: (state) => state === "ingest" ? "" : Q.wholeOnlyFull,
+      blocked: (state) => state === "ingest" ? "" : wholeWord("onlyFull"),
       note: () => "",
       pick: (state) => choose(ACCOUNT, p.whole ? "" : state, "picker:seg:" + ACCOUNT + ":" + state)
     });
@@ -202302,17 +203568,27 @@ textarea.text{resize:vertical;min-height:4.5rem}
     const words = p.pick.words;
     if (p.pick.taken.indexOf(key) >= 0)
       return kit.button(words.alreadyPrivate, focusKey, null, "plain");
-    const control = kit.button(words.makePrivate, focusKey, p.loading ? null : () => leave("", !1, { key, name }), "plain");
+    const selected = p.pick.selected && p.pick.selected.key === key, control = kit.button(words.makePrivate, focusKey, p.loading ? null : () => {
+      if (!words.stepSheet)
+        return leave("", !1, { key, name });
+      p.pick.selected = { key, name };
+      kit.render(focusKey);
+    }, "plain");
+    if (words.stepSheet)
+      control.setAttribute("aria-pressed", String(!!selected));
     control.setAttribute("aria-label", fill(words.makePrivateFor, { name }));
     return control;
   }
   function pickRow(node) {
-    const key = node.key, li = el("li", "frow pick");
+    const key = node.key, li = el("li", "frow pick"), label = (target) => {
+      add(target, el("span", "fname-text", node.name));
+      return target;
+    };
     if (node.has_children) {
       const open = el("button", "fname");
       open.type = "button";
       open.setAttribute("data-key", "picker:open:" + key);
-      add(open, el("span", "fname-text", node.name));
+      label(open);
       const chevron = el("span", "chev", "\\u203A");
       chevron.setAttribute("aria-hidden", "true");
       add(open, chevron);
@@ -202322,7 +203598,7 @@ textarea.text{resize:vertical;min-height:4.5rem}
         open.addEventListener("click", () => drill(key));
       add(li, open);
     } else
-      add(li, add(el("p", "fname leaf"), el("span", "fname-text", node.name)));
+      add(li, label(el("p", "fname leaf")));
     if (node.selectable !== !1)
       add(li, pickButton(key, node.name, "picker:pick:" + key));
     return li;
@@ -202334,6 +203610,13 @@ textarea.text{resize:vertical;min-height:4.5rem}
       tag.title = fill(Q.mixedSome, { state: Q.statesLower[differs] });
       add(main, tag);
     }
+    if (node && node.access && (node.access.state === "needs_permission" || node.access.state === "needs_helper")) {
+      const ask = el("span", "ftag", Q.needsPermission);
+      ask.title = String(node.access.message || "");
+      add(main, ask);
+    }
+    if (node && node.is_disk === !0)
+      add(main, el("span", "ftag", Q.disk));
     add(target, main);
     if (node) {
       const [bytes, files] = nodeMeta(node);
@@ -202370,6 +203653,10 @@ textarea.text{resize:vertical;min-height:4.5rem}
     label.title = node.name;
     nameParts(label, node.name, key, node);
     add(li, label, folderControl(key, node.name, node));
+    if (node.access && node.access.state === "needs_helper" && node.access.message) {
+      li.className += " has-note";
+      add(li, el("p", "muted frow-note", String(node.access.message)));
+    }
     return li;
   }
   function loadMore(parentKey) {
@@ -202436,9 +203723,11 @@ textarea.text{resize:vertical;min-height:4.5rem}
       add(body, only);
       return;
     }
-    add(body, topRow(fill(Q.accountRow, { source: p.label }), accountControl()));
+    add(body, topRow(wholeWord("row"), accountControl()));
     if (p.whole && !p.wholeConfirmed)
       add(body, wholeConfirm());
+    if (p.whole && p.access.get("") && p.access.get("").state !== "denied")
+      add(body, accessNote(p.access.get(""), null));
     const rules = exceptions();
     if (rules.length)
       add(body, exceptionList(rules));
@@ -202471,7 +203760,11 @@ textarea.text{resize:vertical;min-height:4.5rem}
     } else
       add(body, topRow(Q.thisFolder, folderControl(key, nameOf(key), node)));
     add(body, loadingLine());
-    add(body, levelList(key, p.branches.get(key) || [], p.cursors.has(key)));
+    const refused = p.access.get(key);
+    if (blockedByComputer(refused) && !p.loading)
+      add(body, accessNote(refused, () => list(key, !1)));
+    else
+      add(body, levelList(key, p.branches.get(key) || [], p.cursors.has(key)));
   }
   function noticeAndError(body) {
     if (p.notice) {
@@ -202496,7 +203789,7 @@ textarea.text{resize:vertical;min-height:4.5rem}
     if (p.own.size >= MAX_RULES)
       add(summary, el("p", "reason strong", fill(Q.capReached, { max: kit.count(MAX_RULES) })));
     add(footer, summary);
-    add(footer, saveRow(canSaveFolders(), p.whole || anyChosen() ? Q.saveFolders : Q.saveNoStart, saveFolders, p.whole && !p.wholeConfirmed ? Q.needConfirm : !anyChosen() && !p.edited ? Q.needChoice : ""));
+    add(footer, saveRow(canSaveFolders(), p.whole || anyChosen() ? Q.saveFolders : Q.saveNoStart, saveFolders, p.whole && !p.wholeConfirmed ? wholeWord("needConfirm") : !anyChosen() && !p.edited ? Q.needChoice : ""));
     return footer;
   }
   function foldersView(page) {
@@ -202779,17 +204072,28 @@ textarea.text{resize:vertical;min-height:4.5rem}
     leave("", !0);
   }
   function view() {
+    if (drop)
+      return dropView();
     const page = el("main", "page picker");
     if (!p)
       return page;
     const top = el("div", "picker-top"), deep = p.mode === "folders" && p.path.length > 0, backButton = deep ? kit.button(Q.up, "picker:up", escape, "plain") : kit.button(p.pick ? p.pick.words.back : Q.back, "picker:back", escape, "plain");
     if (deep) {
-      const above = p.path.length > 1 ? nameOf(p.path[p.path.length - 2]) : p.pick ? p.label : fill(Q.accountRow, { source: p.label });
+      const above = p.path.length > 1 ? nameOf(p.path[p.path.length - 2]) : p.pick ? p.label : wholeWord("row");
       backButton.setAttribute("aria-label", fill(Q.upTo, { name: above }));
     }
     backButton.className = "btn back";
     add(top, backButton);
-    add(page, top);
+    if (p.pick && p.pick.words.stepSheet) {
+      page.className += " privacy";
+      add(page, el("p", "muted", p.pick.words.stepSheet.step));
+      const progress = el("progress");
+      progress.max = 3;
+      progress.value = 2;
+      progress.setAttribute("aria-label", p.pick.words.stepSheet.step);
+      add(page, progress);
+    } else
+      add(page, top);
     if (p.discarding) {
       const confirm = el("div", "confirm-box");
       confirm.setAttribute("role", "alert");
@@ -202805,9 +204109,17 @@ textarea.text{resize:vertical;min-height:4.5rem}
       mailView(page);
     else
       foldersView(page);
+    if (p.pick && p.pick.words.stepSheet) {
+      const words = p.pick.words.stepSheet;
+      add(page, add(el("div", "actions privacy-sheet-actions"), kit.button(words.back, deep ? "picker:up" : "picker:back", escape, "plain"), kit.button(words.next, "picker:pick-next", p.pick.selected && !p.loading ? () => leave("", !1, p.pick.selected) : null, "main")));
+    }
     return page;
   }
   function escape() {
+    if (drop) {
+      leaveDrop(null);
+      return;
+    }
     if (!p)
       return;
     if (p.discarding) {
@@ -202818,18 +204130,25 @@ textarea.text{resize:vertical;min-height:4.5rem}
     else
       back();
   }
-  if (typeof document < "u")
+  if (typeof document < "u") {
+    for (const name of ["dragover", "drop"])
+      document.addEventListener(name, (event) => {
+        if (drop)
+          event.preventDefault();
+      });
     document.addEventListener("keydown", (event) => {
-      if (!p || event.key !== "Escape" || event.defaultPrevented)
+      if (!p && !drop || event.key !== "Escape" || event.defaultPrevented)
         return;
       event.preventDefault();
       escape();
     });
+  }
   return {
     handles,
     start,
     pickFolder,
-    active: () => !!p,
+    pickArchive,
+    active: () => !!p || !!drop,
     view,
     afterRender: () => {
       return;
@@ -202837,7 +204156,7 @@ textarea.text{resize:vertical;min-height:4.5rem}
   };
 }, function (kit) { return (function chatgptPrivacyProgram(kit, makeLogic) {
   const T = kit.config.tools, W = kit.config.copy, el = kit.el, add = kit.add, fill = kit.fill, L = makeLogic({ mailSourceId: kit.config.mailSourceId, folderSources: kit.config.folderSources, topicWords: W.questions });
-  let s = null, session = 0;
+  let s = null, session = 0, questionTimer;
   function handles(fix) {
     return !!fix && fix.tool === T.get;
   }
@@ -202853,7 +204172,11 @@ textarea.text{resize:vertical;min-height:4.5rem}
       error: "",
       description: "",
       rules: [],
+      intents: [],
+      savedRules: [],
       pendingCount: 0,
+      answerChoice: null,
+      answerMode: "local-first",
       revision: "",
       savedDescription: "",
       confirmation: "",
@@ -202871,7 +204194,21 @@ textarea.text{resize:vertical;min-height:4.5rem}
       labelsError: "",
       sender: "",
       senderError: "",
-      questionsError: ""
+      questionKey: null,
+      questionVersion: 0,
+      questionLoading: !1,
+      generated: null,
+      questionAnswers: {},
+      checkKey: null,
+      checking: !1,
+      checkResult: null,
+      checkError: "",
+      editingDescription: !1,
+      questionsError: "",
+      detailsOpen: !1,
+      conflictDetailsOpen: !1,
+      candidate: null,
+      ruleKind: ""
     };
     load();
   }
@@ -202899,12 +204236,26 @@ textarea.text{resize:vertical;min-height:4.5rem}
     return L.viewRule(rule, displayOf(rule));
   }
   function take(data) {
+    clearTimeout(questionTimer);
+    s.questionVersion++;
+    s.questionKey = null;
+    s.generated = null;
+    s.questionAnswers = {};
+    s.checkKey = null;
+    s.checkResult = null;
+    s.checkError = "";
+    s.checking = !1;
     s.description = typeof data.description === "string" ? data.description : "";
     s.savedDescription = s.description;
     s.revision = typeof data.revision === "string" ? data.revision : "";
+    s.answerChoice = data.privateAnswerChoice && data.privateAnswerChoice.pending === !0 && Array.isArray(data.privateAnswerChoice.options) ? data.privateAnswerChoice : data.privateAnswerMode && Array.isArray(data.privateAnswerMode.options) ? data.privateAnswerMode : null;
+    if (s.answerChoice && typeof s.answerChoice.id === "string")
+      s.answerMode = s.answerChoice.id;
     s.edited = !1;
     s.confirmStep = !1;
     s.rules = data.rules.filter(validRule).map(viewRule);
+    s.savedRules = s.rules.map(ruleOut);
+    s.intents = [];
     s.hidden = data.rules.filter((rule) => !validRule(rule));
     s.server = null;
     s.pendingCount = typeof data.pendingCount === "number" && isFinite(data.pendingCount) ? Math.max(0, data.pendingCount) : 0;
@@ -202930,7 +204281,9 @@ textarea.text{resize:vertical;min-height:4.5rem}
       }
       take(data);
       s.loaded = !0;
-      kit.render("privacy:description");
+      if (s.answerChoice?.pending)
+        s.screen = "answers";
+      kit.render(s.screen === "answers" ? "privacy:answer:local-first" : "privacy:title");
     }, () => {
       if (mine !== session || !s)
         return;
@@ -202956,12 +204309,54 @@ textarea.text{resize:vertical;min-height:4.5rem}
     s.confirmStep = !1;
   }
   function canSave() {
-    return !s.server && (s.edited || L.withShownAnswers(s.description) !== s.description);
+    return !s.server && !s.questionLoading && !s.checking && (s.edited || s.editingDescription && askedQuestions().length > 0);
   }
   function addRule(rule) {
+    if (s.saving || s.server)
+      return;
+    const baseline = s.savedRules.slice().concat(s.hidden);
+    if (!s.savedRules.some((item) => identity(item) === identity(rule)))
+      baseline.push(ruleOut(rule));
     L.addTo(s.rules, rule);
+    L.setIntent(s.intents, rule, !0);
     changed();
+    const draft = { intents: s.intents, description: s.description, savedDescription: s.savedDescription }, args = { description: s.savedDescription, rules: baseline };
+    if (s.revision)
+      args.revision = s.revision;
+    s.saving = !0;
     s.saveError = "";
+    const mine = session;
+    kit.call(T.set, args).then((result) => {
+      if (mine !== session || !s)
+        return;
+      s.saving = !1;
+      const data = settings(result), content = result && result.structuredContent;
+      if (data && content && content.status === "conflict")
+        return conflict(data);
+      if (!data || !content || content.status !== "saved") {
+        s.saveError = W.addRuleFailed;
+        kit.render("privacy:save");
+        return;
+      }
+      if (!L.satisfies([{ rule, present: !0 }], data.rules))
+        return conflict(data);
+      draft.intents = draft.intents.filter((intent) => identity(intent.rule) !== identity(rule));
+      take(data);
+      s.intents = draft.intents;
+      const replayed = L.replay(draft, s.rules);
+      s.rules = replayed.rules;
+      if (replayed.description !== null)
+        s.description = replayed.description;
+      s.edited = s.intents.length > 0 || s.description !== s.savedDescription;
+      kit.remember(data.rules.filter(validRule).length);
+      kit.render("privacy:add");
+    }, () => {
+      if (mine !== session || !s)
+        return;
+      s.saving = !1;
+      s.saveError = W.addRuleFailed;
+      kit.render("privacy:save");
+    });
   }
   function lowering() {
     return L.lowering(s.rules, s.description, s.savedDescription);
@@ -202970,12 +204365,19 @@ textarea.text{resize:vertical;min-height:4.5rem}
     return L.lowers(s.rules, s.description, s.savedDescription);
   }
   function save() {
-    if (!s || !s.loaded || s.saving || !canSave())
+    if (!s || !s.loaded || s.saving)
       return;
-    const shown = L.withShownAnswers(s.description);
-    if (shown !== s.description) {
-      s.description = shown;
-      changed();
+    if (s.server) {
+      kit.render("privacy:conflict:apply");
+      return;
+    }
+    if (!canSave())
+      return;
+    if (!settleQuestions())
+      return;
+    if (s.generated && !s.generated.fallback && s.checkKey !== s.description) {
+      runCheck();
+      return;
     }
     if (lowers()) {
       s.confirmStep = !0;
@@ -203014,14 +204416,22 @@ textarea.text{resize:vertical;min-height:4.5rem}
       const data = settings(result);
       if (data && content && content.status === "conflict")
         return conflict(data);
-      if (!data || result.isError) {
+      if (!data || !content || content.status !== "saved") {
         s.saveError = W.saveFailed;
         kit.render("privacy:save");
         return;
       }
       if (confirmed)
         s.confirmation = "";
+      if (!L.satisfies(s.intents, data.rules) || data.description !== args.description)
+        return conflict(data);
       kit.remember(data.rules.filter(validRule).length);
+      take(data);
+      if (s.answerChoice?.pending) {
+        s.screen = "answers";
+        kit.render("privacy:answer:local-first");
+        return;
+      }
       leave(W.saved, !0);
     }, () => {
       if (mine !== session || !s)
@@ -203041,8 +204451,9 @@ textarea.text{resize:vertical;min-height:4.5rem}
     const server = s.server;
     if (!server)
       return;
-    const draft = { rules: s.rules, description: s.description, savedDescription: s.savedDescription };
+    const draft = { intents: s.intents, description: s.description, savedDescription: s.savedDescription };
     take(server);
+    s.intents = draft.intents;
     const replayed = L.replay(draft, s.rules);
     s.rules = replayed.rules;
     s.confirmStep = !1;
@@ -203059,7 +204470,7 @@ textarea.text{resize:vertical;min-height:4.5rem}
     if (!server)
       return;
     take(server);
-    kit.render("privacy:description");
+    kit.render("privacy:add");
   }
   function conflictBox() {
     const box = el("div", "confirm-box");
@@ -203072,7 +204483,9 @@ textarea.text{resize:vertical;min-height:4.5rem}
       add(list, el("li", "", W.rulesEmpty));
     for (const rule of rules)
       add(list, el("li", "", displayOf(rule) + " \\xB7 " + kindText(rule)));
-    add(box, list, add(el("div", "actions"), kit.button(W.applyAgain, "privacy:conflict:apply", applyAgain, "main"), kit.button(W.discardMine, "privacy:conflict:discard", discardMine, "plain")));
+    const detail = disclosure(!0);
+    add(detail, list);
+    add(box, detail, add(el("div", "actions"), kit.button(W.applyAgain, "privacy:conflict:apply", applyAgain, "main"), kit.button(W.discardMine, "privacy:conflict:discard", discardMine, "plain")));
     return box;
   }
   function renewConfirmation(then) {
@@ -203154,17 +204567,18 @@ textarea.text{resize:vertical;min-height:4.5rem}
       back: W.backToPrivacy,
       title: W.folderTitle,
       intro: W.folderIntro,
-      makePrivate: W.makePrivate,
-      makePrivateFor: W.makePrivateFor,
+      makePrivate: W.select,
+      makePrivateFor: W.selectFor,
+      stepSheet: { step: W.stepPick, next: W.next, back: W.sheetBack },
       alreadyPrivate: W.alreadyPrivate
     }, taken, (folder) => {
       if (mine !== session || !s)
         return;
       s.picking = !1;
-      s.screen = "main";
+      s.screen = "kinds";
       if (folder)
-        addRule({ kind: "folder", source_id: id, key: folder.key, display: folder.name, removed: !1 });
-      kit.render("privacy:add:folder");
+        reviewRule({ kind: "folder", source_id: id, key: folder.key, display: folder.name, removed: !1 });
+      kit.render(folder ? "privacy:sheet:confirm" : "privacy:add:folder");
     });
   }
   function addLabel() {
@@ -203201,7 +204615,6 @@ textarea.text{resize:vertical;min-height:4.5rem}
   }
   function addSender() {
     s.screen = "sender";
-    s.sender = "";
     s.senderError = "";
     kit.render("privacy:sender");
   }
@@ -203218,9 +204631,7 @@ textarea.text{resize:vertical;min-height:4.5rem}
       kit.render("privacy:sender");
       return;
     }
-    addRule(rule);
-    s.screen = "main";
-    kit.render("privacy:add:sender");
+    reviewRule(rule);
   }
   function kindText(rule) {
     if (rule.kind === "folder")
@@ -203228,11 +204639,12 @@ textarea.text{resize:vertical;min-height:4.5rem}
     return rule.kind === "label" ? W.kindLabel : W.kindSender;
   }
   function ruleRow(rule, index) {
-    const li = el("li", "frow pick rule");
+    const li = el("li", "rule rule-chip");
     if (rule.removed) {
       add(li, el("p", "fname leaf muted", fill(W.removed, { name: rule.display })));
       const undo = kit.button(W.undo, "privacy:rule:" + index, s.saving ? null : () => {
         rule.removed = !1;
+        L.setIntent(s.intents, rule, !0);
         changed();
         kit.render("privacy:rule:" + index);
       }, "plain");
@@ -203240,67 +204652,211 @@ textarea.text{resize:vertical;min-height:4.5rem}
       return add(li, undo);
     }
     add(li, add(el("p", "fname leaf two-line"), el("span", "two-top", rule.display), el("span", "two-bottom", kindText(rule))));
-    const remove = kit.button(W.remove, "privacy:rule:" + index, s.saving ? null : () => {
+    const remove = kit.button("\\xD7", "privacy:rule:" + index, s.saving ? null : () => {
       rule.removed = !0;
+      L.setIntent(s.intents, rule, !1);
       changed();
       s.saveError = "";
-      kit.render("privacy:rule:" + index);
+      save();
     }, "plain");
     remove.setAttribute("aria-label", fill(W.removeFor, { name: rule.display }));
     return add(li, remove);
   }
-  function questionsSection() {
-    const Q = W.questions, asked = L.questions(s.description);
-    if (!asked.length)
+  function requestQuestions() {
+    if (!s || !s.loaded || s.questionKey === s.description)
+      return;
+    clearTimeout(questionTimer);
+    s.questionKey = s.description;
+    const description = s.description, version = ++s.questionVersion, mine = session;
+    s.questionLoading = !0;
+    s.checkKey = null;
+    s.checkResult = null;
+    s.checkError = "";
+    questionTimer = setTimeout(() => {
+      if (!s || mine !== session || version !== s.questionVersion)
+        return;
+      kit.call(T.questions, { description, confirmation: s.confirmation }).then((result) => {
+        if (!s || mine !== session || version !== s.questionVersion)
+          return;
+        const data = result && !result.isError && result._meta && result._meta[kit.config.metaKey];
+        s.generated = data && !data.fallback && Array.isArray(data.questions) ? data : fallbackQuestions(description);
+        s.questionLoading = !1;
+        s.questionAnswers = {};
+        kit.render();
+      }, () => {
+        if (!s || mine !== session || version !== s.questionVersion)
+          return;
+        s.generated = fallbackQuestions(description);
+        s.questionLoading = !1;
+        s.questionAnswers = {};
+        kit.render();
+      });
+    }, 450);
+  }
+  function fallbackQuestions(description) {
+    return { fallback: !0, questions: L.questions(description).flatMap((topic) => topic.options.map((option) => ({
+      id: topic.id + ":" + option.id,
+      question: option.label,
+      topic: option.label,
+      side: option.side
+    }))) };
+  }
+  function askedQuestions() {
+    return s.generated ? s.generated.questions : [];
+  }
+  function topicOf(question) {
+    return L.cleanTopic(String(question.topic || question.question));
+  }
+  function shownSide(question) {
+    return s.questionAnswers[question.id] || L.savedAnswers(s.description)[topicOf(question)] || "";
+  }
+  function writeAnswers(answers, skippedPrivate) {
+    const byTopic = {}, unanswered = {};
+    for (const question of askedQuestions())
+      if (answers[question.id])
+        byTopic[topicOf(question)] = answers[question.id];
+      else if (skippedPrivate)
+        unanswered[topicOf(question)] = "private";
+    return L.answerLines(s.description, byTopic, unanswered);
+  }
+  function chooseQuestion(question, side) {
+    const answers = { ...s.questionAnswers, [question.id]: side }, next = writeAnswers(answers, !1);
+    s.questionsError = next.fits ? "" : W.questions.tooLong;
+    if (next.fits) {
+      s.description = next.description;
+      s.questionKey = s.description;
+      s.questionAnswers = answers;
+      s.checkKey = null;
+      s.checkResult = null;
+      s.checkError = "";
+      changed();
+    }
+    kit.render("privacy:q:" + question.id + ":" + side);
+  }
+  function settleQuestions() {
+    const next = writeAnswers(s.questionAnswers, !0);
+    if (!next.fits) {
+      s.questionsError = W.questions.tooLong;
+      kit.render();
+      return !1;
+    }
+    if (next.description !== s.description) {
+      s.description = next.description;
+      changed();
+    }
+    s.questionKey = s.description;
+    return !0;
+  }
+  function runCheck(sample) {
+    if (!s || s.checking || s.questionLoading || !sample && !settleQuestions())
+      return;
+    const description = s.description, mine = session;
+    s.checking = !0;
+    s.checkError = "";
+    kit.render("privacy:check:title");
+    kit.call(T.check, { description, confirmation: s.confirmation, ...sample ? { sample } : {} }).then((result) => {
+      if (!s || mine !== session)
+        return;
+      s.checking = !1;
+      if (s.description !== description) {
+        kit.render();
+        return;
+      }
+      const data = result && !result.isError && result._meta && result._meta[kit.config.metaKey];
+      s.checkKey = description;
+      if (data && Array.isArray(data.samples))
+        if (sample && s.checkResult) {
+          s.checkResult.private = data.private;
+          s.checkResult.share = data.share;
+          s.checkResult.samples = s.checkResult.samples.map((old) => old.name === sample ? { ...data.samples[0], correction: old.correction } : old);
+        } else
+          s.checkResult = data;
+      else {
+        s.checkResult = null;
+        s.checkError = W.questions.checkFailed;
+      }
+      kit.render();
+    }, () => {
+      if (!s || mine !== session)
+        return;
+      s.checking = !1;
+      s.checkKey = description;
+      s.checkResult = null;
+      s.checkError = W.questions.checkFailed;
+      kit.render();
+    });
+  }
+  function checkSection() {
+    if (!s.generated || s.generated.fallback)
       return null;
-    const section = add(el("section", "fsection questions"), el("h2", "", Q.title), el("p", "reason", Q.intro));
-    for (const topic of asked) {
-      const heading = el("h3", "qtitle", topic.question);
-      heading.id = "privacy-q-" + topic.id;
-      const group = add(el("div", "qtopic"), heading);
-      for (const option of topic.options) {
-        const id = "privacy-q-" + topic.id + "-" + option.id, row = el("div", "qopt");
-        row.setAttribute("role", "radiogroup");
-        row.setAttribute("aria-labelledby", heading.id + " " + id);
-        const name = el("span", "qlabel", option.label);
-        name.id = id;
-        const choices = el("span", "qchoices");
-        for (const side of ["private", "share"]) {
-          const choice = el("label", "qchoice"), input = el("input");
-          input.type = "radio";
-          input.name = id;
-          input.value = side;
-          input.checked = option.side === side;
-          input.disabled = s.saving;
-          input.setAttribute("data-key", "privacy:q:" + topic.id + ":" + option.id + ":" + side);
-          input.addEventListener("change", () => {
-            if (!input.checked || !s)
-              return;
-            const next = L.answerTopic(s.description, topic.id, option.id, side);
+    const Q = W.questions, title = el("h2", "", Q.checkTitle);
+    title.setAttribute("tabindex", "-1");
+    title.setAttribute("data-key", "privacy:check:title");
+    const section = add(el("section", "fsection"), title);
+    add(section, kit.button(s.checking ? Q.checking : Q.check, "privacy:check", s.checking || s.questionLoading || s.saving ? null : () => runCheck(), "plain"));
+    if (s.checkError)
+      add(section, el("p", "reason", s.checkError));
+    if (s.checkResult)
+      for (const side of ["private", "share"]) {
+        add(section, el("h3", "", side === "private" ? Q.private : Q.share));
+        const list = el("ul");
+        for (const text of s.checkResult[side])
+          add(list, el("li", "", text));
+        add(section, list, el("p", "strong", side === "private" ? Q.privateExamples : Q.shareExamples));
+        s.checkResult.samples.filter((sample) => sample.side === side).forEach((sample, index) => {
+          const row = add(el("div", "qopt"), el("span", "qlabel", sample.name));
+          add(row, kit.button(Q.wrong, "privacy:wrong:" + side + ":" + index, s.checking || s.saving ? null : () => {
+            const next = L.answerLines(s.description, { [sample.name]: side === "private" ? "share" : "private" });
             s.questionsError = next.fits ? "" : Q.tooLong;
             if (next.fits) {
               s.description = next.description;
+              s.questionKey = s.description;
               changed();
-              s.saveError = "";
-            }
-            kit.render("privacy:q:" + topic.id + ":" + option.id + ":" + side);
-          });
-          add(choices, add(choice, input, el("span", "", side === "private" ? Q.private : Q.share)));
-        }
-        add(group, add(row, name, choices));
+              runCheck(sample.name);
+            } else
+              kit.render();
+          }, "plain"));
+          add(section, row);
+        });
       }
-      add(section, group);
+    return section;
+  }
+  function questionsSection() {
+    requestQuestions();
+    const Q = W.questions, section = add(el("section", "fsection questions"), el("h2", "", Q.title), el("p", "reason", Q.intro));
+    if (s.questionLoading) {
+      const loading = el("p", "reason", Q.loading);
+      loading.setAttribute("role", "status");
+      return add(section, loading);
+    }
+    if (s.generated?.fallback)
+      add(section, el("p", "reason", Q.fallback));
+    for (const question of askedQuestions()) {
+      const row = add(el("div", "qopt"), el("span", "qlabel", question.question));
+      if (question.quote)
+        add(row, el("q", "reason", question.quote));
+      const pair = el("span", "qchoices");
+      pair.setAttribute("role", "group");
+      pair.setAttribute("aria-label", question.question);
+      for (const side of ["private", "share"]) {
+        const selected = shownSide(question) === side, control = kit.button(side === "private" ? Q.private : Q.share, "privacy:q:" + question.id + ":" + side, s.saving || s.checking ? null : () => chooseQuestion(question, side), selected ? "main" : "plain");
+        control.setAttribute("aria-pressed", String(selected));
+        add(pair, control);
+      }
+      add(section, add(row, pair));
     }
     if (s.questionsError) {
-      const message = el("p", "reason error", s.questionsError);
-      message.setAttribute("role", "alert");
-      add(section, message);
+      const error = el("p", "error", s.questionsError);
+      error.setAttribute("role", "alert");
+      add(section, error);
     }
     return section;
   }
   function mainView(page) {
-    add(page, el("h1", "", W.title));
-    add(page, el("p", "muted intro", W.intro));
+    const title = el("h1", "", W.title);
+    title.setAttribute("tabindex", "-1");
+    title.setAttribute("data-key", "privacy:title");
+    add(page, title, el("p", "muted intro", W.intro));
     if (s.server)
       add(page, conflictBox());
     if (s.error) {
@@ -203317,69 +204873,121 @@ textarea.text{resize:vertical;min-height:4.5rem}
       }
       return;
     }
-    const field = el("label", "field");
-    add(field, el("span", "field-label", W.descriptionLabel));
-    const area = el("textarea", "text");
-    area.rows = 4;
-    area.placeholder = W.descriptionPlaceholder;
-    area.value = s.description;
-    area.disabled = s.saving;
-    area.setAttribute("data-key", "privacy:description");
-    area.setAttribute("aria-describedby", "privacy-description-shared");
-    const asked = L.questionsKey(s.description);
-    area.addEventListener("input", () => {
-      s.description = area.value;
-      const open = s.confirmStep, could = canSave();
-      changed();
-      const noted = !!s.questionsError;
-      s.questionsError = "";
-      if (open || noted || could !== canSave() || L.questionsKey(s.description) !== asked)
-        kit.render("privacy:description");
-    });
-    add(page, add(field, area));
+    if (s.answerChoice && !s.answerChoice.pending)
+      add(page, add(el("section", "fsection"), el("h2", "", "Private-answer mode"), el("p", "", s.answerChoice.label || "Custom Private-answer mode"), kit.button("Change", "privacy:answer:change", () => {
+        s.screen = "answers";
+        kit.render("privacy:answer:" + s.answerMode);
+      }, "plain")));
+    const description = add(el("section", "fsection privacy-description"), el("h2", "", W.descriptionLabel)), summary = el("p", "privacy-summary", s.description);
+    summary.setAttribute("data-key", "privacy:summary");
+    const openEditor = s.saving ? null : () => {
+      s.editingDescription = !0;
+      kit.render("privacy:description");
+    };
+    if (!s.editingDescription && s.description)
+      add(description, summary, kit.button(W.edit, "privacy:description:edit", openEditor, "plain"));
+    else if (!s.editingDescription) {
+      summary.textContent = W.descriptionEmpty;
+      add(description, summary, el("p", "muted privacy-example", W.descriptionPlaceholder), kit.button(W.descriptionStart, "privacy:description:edit", openEditor, "main"));
+    } else {
+      const field = el("label", "field"), area = el("textarea", "text");
+      area.rows = 4;
+      area.placeholder = W.descriptionPlaceholder;
+      area.value = s.description;
+      area.disabled = s.saving;
+      area.setAttribute("aria-label", W.descriptionLabel);
+      area.setAttribute("data-key", "privacy:description");
+      area.setAttribute("aria-describedby", "privacy-description-shared");
+      const asked = L.questionsKey(s.description);
+      area.addEventListener("input", () => {
+        s.description = area.value;
+        const wasLoading = s.questionLoading;
+        requestQuestions();
+        const open = s.confirmStep, could = canSave();
+        changed();
+        s.edited = s.intents.length > 0 || s.description !== s.savedDescription;
+        const noted = !!s.questionsError;
+        s.questionsError = "";
+        if (!wasLoading || open || noted || could !== canSave() || L.questionsKey(s.description) !== asked)
+          kit.render("privacy:description");
+      });
+      add(description, add(field, area));
+    }
     const shared = el("p", "reason field-note", W.descriptionShared);
     shared.id = "privacy-description-shared";
-    add(page, shared);
+    add(description, shared);
+    add(page, description);
     const questions = questionsSection();
     if (questions)
       add(page, questions);
+    const readback = checkSection();
+    if (readback)
+      add(page, readback);
+    const details = disclosure();
+    add(details, el("p", "reason", W.judgingDetails));
     const rules = add(el("section", "fsection"), el("h2", "", W.rulesTitle));
     if (s.rules.length) {
-      const listNode = el("ul", "flist");
+      const listNode = el("ul", "rule-chips");
       s.rules.forEach((rule, index) => add(listNode, ruleRow(rule, index)));
       add(rules, listNode);
     } else
       add(rules, el("p", "muted fempty", W.rulesEmpty));
-    const folders = folderSources().length > 0 && !!kit.picker, gmail = gmailConnected();
-    add(rules, add(el("div", "actions add-rules"), kit.button(W.addFolder, "privacy:add:folder", folders && !s.saving ? addFolder : null, "plain"), kit.button(W.addLabel, "privacy:add:label", gmail && !s.saving ? addLabel : null, "plain"), kit.button(W.addSender, "privacy:add:sender", s.saving ? null : addSender, "plain")));
-    if (!folders)
-      add(rules, el("p", "reason", W.needFolderSource));
-    if (!gmail)
-      add(rules, el("p", "reason", W.needGmail));
+    add(rules, kit.button(W.addRule, "privacy:add", !s.saving && !s.server ? () => {
+      s.screen = "kinds";
+      s.ruleKind = "";
+      s.candidate = null;
+      s.sender = "";
+      s.senderError = "";
+      kit.render("privacy:add:folder");
+    } : null, "plain"));
+    if (s.server)
+      add(rules, el("p", "reason", W.conflictAddBlocked));
     add(rules, el("p", "reason", W.namesShared));
-    add(page, rules);
-    const footer = el("section", "picker-footer");
-    if (s.pendingCount > 0)
-      add(footer, el("p", "", fill(s.pendingCount === 1 ? W.pending.one : W.pending.many, { n: kit.count(s.pendingCount) })));
+    if (!folderSources().length || !kit.picker)
+      add(rules, el("p", "reason", W.needFolderSource));
+    if (!gmailConnected())
+      add(rules, el("p", "reason", W.needGmail));
+    add(page, rules, details);
+    const footer = el("section", "picker-footer"), saveHost = s.editingDescription || s.description !== s.savedDescription ? description : page;
     if (s.confirmStep && !s.saving && lowers()) {
-      add(page, add(footer, confirmBox()));
+      add(saveHost, add(footer, confirmBox()));
       return;
     }
-    const row = el("div", "actions");
+    const pendingDescription = s.description !== s.savedDescription, wrap = el("div", "save");
     if (s.saving) {
       const busy = kit.button(W.saving, "privacy:save", null, "main");
       busy.setAttribute("aria-busy", "true");
-      add(row, busy);
-    } else
-      add(row, kit.button(W.save, "privacy:save", canSave() ? save : null, "main"));
-    add(row, kit.button(W.cancel, "privacy:cancel", s.saving ? null : backOut, "plain"));
-    const wrap = add(el("div", "save"), row);
+      add(wrap, busy);
+    } else if (!s.server && (s.editingDescription || pendingDescription))
+      add(wrap, add(el("div", "actions"), kit.button(W.save, "privacy:save", canSave() ? save : null, "main"), kit.button(W.cancel, "privacy:cancel", () => {
+        clearTimeout(questionTimer);
+        s.questionVersion++;
+        s.questionKey = null;
+        s.generated = null;
+        s.questionAnswers = {};
+        s.description = s.savedDescription;
+        s.editingDescription = !1;
+        s.questionsError = "";
+        s.confirmStep = !1;
+        s.saveError = "";
+        s.edited = s.intents.length > 0;
+        kit.render("privacy:description:edit");
+      }, "plain")));
+    else if (!s.server && s.intents.length)
+      add(wrap, kit.button(W.applyAgain, "privacy:save", save, "main"));
+    if (s.editingDescription && !s.saving && !s.server && !canSave()) {
+      const reason = el("p", "reason", W.nothingToSave);
+      reason.id = "privacy-save-reason";
+      wrap.querySelector('[data-key="privacy:save"]')?.setAttribute("aria-describedby", reason.id);
+      add(wrap, reason);
+    }
     if (s.saveError) {
       const error = el("p", "error", s.saveError);
       error.setAttribute("role", "alert");
       add(wrap, error);
     }
-    add(page, add(footer, wrap));
+    if (wrap.childNodes.length)
+      add(saveHost, add(footer, wrap));
   }
   function sourcesView(page) {
     add(page, el("h1", "", W.folderSourceTitle));
@@ -203421,12 +205029,11 @@ textarea.text{resize:vertical;min-height:4.5rem}
       if (kept().some((other) => other.kind === "label" && other.source_id === mail && other.key === label.id))
         add(li, kit.button(W.alreadyPrivate, "privacy:label:" + index, null, "plain"));
       else {
-        const control = kit.button(W.makePrivate, "privacy:label:" + index, () => {
-          addRule(rule);
-          s.screen = "main";
-          kit.render("privacy:add:label");
+        const control = kit.button(s.candidate && identity(s.candidate) === identity(rule) ? W.selected : W.select, "privacy:label:" + index, () => {
+          s.candidate = rule;
+          kit.render("privacy:sheet:next");
         }, "plain");
-        control.setAttribute("aria-label", fill(W.makePrivateFor, { name }));
+        control.setAttribute("aria-label", fill(W.selectFor, { name }));
         add(li, control);
       }
       add(listNode, li);
@@ -203465,7 +205072,182 @@ textarea.text{resize:vertical;min-height:4.5rem}
       add(field, error);
     }
     add(page, field);
-    add(page, add(el("div", "actions"), kit.button(W.senderAdd, "privacy:sender:add", submitSender, "main")));
+  }
+  function disclosure(conflict = !1) {
+    const details = el("details", "privacy-details"), key = conflict ? "conflictDetailsOpen" : "detailsOpen";
+    details.open = s[key];
+    const summary = el("summary", "", W.details);
+    summary.setAttribute("data-key", conflict ? "privacy:conflict:details" : "privacy:details");
+    add(details, summary);
+    details.addEventListener("toggle", () => {
+      if (s)
+        s[key] = details.open;
+    });
+    return details;
+  }
+  function reviewRule(rule) {
+    s.candidate = rule;
+    s.screen = "review";
+    kit.render("privacy:sheet:confirm");
+  }
+  function kindsView(page) {
+    add(page, el("h1", "", W.addRule), el("p", "muted intro", W.kindPrompt));
+    const folders = folderSources().length > 0 && !!kit.picker, choices = el("div", "privacy-kinds");
+    choices.setAttribute("role", "group");
+    choices.setAttribute("aria-label", W.kindPrompt);
+    for (const [kind, label, enabled] of [
+      ["folder", W.addFolder, folders],
+      ["label", W.addLabel, gmailConnected()],
+      ["sender", W.addSender, !0]
+    ]) {
+      const button = kit.button(label, "privacy:add:" + kind, enabled ? () => {
+        s.candidate = null;
+        s.ruleKind = kind;
+        kit.render("privacy:add:" + kind);
+      } : null, "plain");
+      button.setAttribute("aria-pressed", String(s.ruleKind === kind));
+      add(choices, button);
+    }
+    add(page, choices);
+    if (!folders)
+      add(page, el("p", "reason", W.needFolderSource));
+    if (!gmailConnected())
+      add(page, el("p", "reason", W.needGmail));
+  }
+  function sheetBack() {
+    if (!s || s.saving)
+      return;
+    if (s.screen === "review")
+      if (s.ruleKind === "sender")
+        s.screen = "sender";
+      else if (s.ruleKind === "label")
+        s.screen = "labels";
+      else {
+        addFolder();
+        return;
+      }
+    else
+      s.screen = s.screen === "kinds" ? "main" : "kinds";
+    kit.render(s.screen === "main" ? "privacy:add" : "privacy:sheet:back");
+  }
+  function sheetView(page) {
+    const step = s.screen === "kinds" ? 1 : s.screen === "review" ? 3 : 2;
+    add(page, el("p", "muted", fill(W.step, { step })));
+    const progress = el("progress");
+    progress.max = 3;
+    progress.value = step;
+    progress.setAttribute("aria-label", fill(W.step, { step }));
+    add(page, progress);
+    if (s.screen === "kinds")
+      kindsView(page);
+    else if (s.screen === "sources")
+      sourcesView(page);
+    else if (s.screen === "labels")
+      labelsView(page);
+    else if (s.screen === "sender")
+      senderView(page);
+    else
+      add(page, el("h1", "", W.confirmRule), el("p", "", s.candidate.display), el("p", "reason", kindText(s.candidate)), el("p", "reason", W.namesShared));
+    const row = add(el("div", "actions privacy-sheet-actions"), kit.button(W.sheetBack, "privacy:sheet:back", sheetBack, "plain"));
+    if (s.screen === "kinds")
+      add(row, kit.button(W.next, "privacy:sheet:next", s.ruleKind ? () => {
+        if (s.ruleKind === "folder")
+          addFolder();
+        else if (s.ruleKind === "label")
+          addLabel();
+        else
+          addSender();
+      } : null, "main"));
+    if (s.screen === "sender")
+      add(row, kit.button(W.next, "privacy:sender:add", submitSender, "main"));
+    if (s.screen === "labels")
+      add(row, kit.button(W.next, "privacy:sheet:next", s.candidate ? () => reviewRule(s.candidate) : null, "main"));
+    if (s.screen === "review")
+      add(row, kit.button(W.makePrivate, "privacy:sheet:confirm", () => {
+        if (!s || s.screen !== "review" || s.saving || s.server)
+          return;
+        const rule = s.candidate;
+        s.screen = "main";
+        addRule(rule);
+        kit.render("privacy:add");
+      }, "main"));
+    add(page, row);
+  }
+  function saveAnswerMode() {
+    if (!s || s.saving || !s.answerChoice)
+      return;
+    if (!s.confirmation || Date.now() - s.confirmedAt > CONFIRMATION_FRESH_MS) {
+      renewConfirmation(saveAnswerMode);
+      return;
+    }
+    s.saving = !0;
+    s.saveError = "";
+    kit.render("privacy:answer:save");
+    const mine = session;
+    kit.call(T.set, { private_answer_mode: s.answerMode, revision: s.revision, confirmation: s.confirmation }).then((result) => {
+      if (mine !== session || !s)
+        return;
+      s.saving = !1;
+      const data = settings(result), content = result && result.structuredContent;
+      if (data && content && content.status === "conflict") {
+        const wanted = s.answerMode;
+        take(data);
+        s.answerMode = wanted;
+        s.saveError = W.conflict;
+        kit.render("privacy:answer:save");
+        return;
+      }
+      if (!data || result.isError || !content || content.status !== "saved") {
+        s.saveError = W.saveFailed;
+        kit.render("privacy:answer:save");
+        return;
+      }
+      take(data);
+      if (!s.answerChoice?.pending)
+        return leave(W.saved, !0);
+      s.saveError = W.saveFailed;
+      kit.render("privacy:answer:save");
+    }, () => {
+      if (mine !== session || !s)
+        return;
+      s.saving = !1;
+      s.saveError = W.saveFailed;
+      kit.render("privacy:answer:save");
+    });
+  }
+  function answersView(page) {
+    add(page, el("h1", "", "How should Olympus answer with Private items?"));
+    add(page, el("p", "muted intro", s.answerChoice?.pending ? "Until you save a choice, nothing leaves this computer." : "Choose how Private answers may be made. Your current mode stays in use until you save."));
+    if (!s.answerChoice)
+      return;
+    const choices = el("fieldset", "field");
+    add(choices, el("legend", "field-label", "Private-answer mode"));
+    s.answerChoice.options.forEach((option) => {
+      if (!option || typeof option.id !== "string" || typeof option.label !== "string" || typeof option.description !== "string")
+        return;
+      const label = el("label", "field"), input = el("input");
+      input.type = "radio";
+      input.name = "private-answer-mode";
+      input.value = option.id;
+      input.checked = s.answerMode === option.id;
+      input.disabled = s.saving;
+      input.setAttribute("data-key", "privacy:answer:" + option.id);
+      input.addEventListener("change", () => {
+        if (input.checked)
+          s.answerMode = option.id;
+      });
+      add(label, input, el("span", "strong", option.label + (option.recommended ? " \\u2014 Recommended" : "")), el("span", "muted", option.description));
+      add(choices, label);
+    });
+    add(page, choices);
+    if (s.saveError) {
+      const error = el("p", "banner", s.saveError);
+      error.setAttribute("role", "alert");
+      add(page, error);
+    }
+    const save = kit.button(s.saving ? "Saving\\u2026" : "Save Private-answer mode", "privacy:answer:save", saveAnswerMode, "main");
+    save.disabled = s.saving;
+    add(page, save);
   }
   function view() {
     const page = el("main", "page picker privacy");
@@ -203473,7 +205255,8 @@ textarea.text{resize:vertical;min-height:4.5rem}
       return page;
     const top = el("div", "picker-top"), backButton = kit.button(s.screen === "main" ? W.back : W.backToPrivacy, "privacy:back", escape, "plain");
     backButton.className = "btn back";
-    add(page, add(top, backButton));
+    if (s.screen === "main" || s.screen === "answers" && !s.answerChoice?.pending)
+      add(page, add(top, backButton));
     if (s.discarding) {
       const confirm = el("div", "confirm-box");
       confirm.setAttribute("role", "alert");
@@ -203483,18 +205266,16 @@ textarea.text{resize:vertical;min-height:4.5rem}
       }, "plain")));
       add(page, confirm);
     }
-    if (s.screen === "sources")
-      sourcesView(page);
-    else if (s.screen === "labels")
-      labelsView(page);
-    else if (s.screen === "sender")
-      senderView(page);
+    if (s.screen === "answers")
+      answersView(page);
+    else if (s.screen !== "main")
+      sheetView(page);
     else
       mainView(page);
     return page;
   }
   function backOut() {
-    if (!s)
+    if (!s || s.saving)
       return;
     if (s.edited && !s.saving) {
       s.discarding = !0;
@@ -203504,16 +205285,17 @@ textarea.text{resize:vertical;min-height:4.5rem}
     leave("", !1);
   }
   function escape() {
-    if (!s || s.picking)
+    if (!s || s.picking || s.saving)
       return;
     if (s.discarding) {
       s.discarding = !1;
       kit.render("privacy:back");
-    } else if (s.screen !== "main") {
-      const from = s.screen;
+    } else if (s.screen === "answers" && !s.answerChoice?.pending) {
       s.screen = "main";
-      kit.render(from === "sources" ? "privacy:add:folder" : from === "labels" ? "privacy:add:label" : "privacy:add:sender");
-    } else
+      kit.render("privacy:title");
+    } else if (s.screen !== "main" && s.screen !== "answers")
+      sheetBack();
+    else
       backOut();
   }
   if (typeof document < "u")
@@ -203592,18 +205374,29 @@ textarea.text{resize:vertical;min-height:4.5rem}
     const change = lowering(rules, description, savedDescription);
     return change.removed.length > 0 || change.described;
   }
+  function setIntent(intents, rule, present) {
+    const id = identity(rule), next = { rule: { ...rule }, present }, index = intents.findIndex((intent) => identity(intent.rule) === id);
+    if (index < 0)
+      intents.push(next);
+    else
+      intents[index] = next;
+  }
+  function satisfies(intents, rules) {
+    const ids = new Set(rules.filter(validRule).map(identity));
+    return intents.every((intent) => ids.has(identity(intent.rule)) === intent.present);
+  }
   function replay(draft, fresh) {
-    const removed = {};
-    for (const rule of draft.rules)
-      if (rule.saved && rule.removed)
-        removed[identity(rule)] = !0;
-    const additions = draft.rules.filter((rule) => !rule.saved && !rule.removed), described = draft.description.trim() !== draft.savedDescription ? draft.description : null;
-    for (const rule of fresh)
-      if (removed[identity(rule)])
-        rule.removed = !0;
-    for (const rule of additions)
-      addTo(fresh, rule);
-    return { rules: fresh, description: described };
+    const rules = fresh.map((rule) => ({ ...rule }));
+    for (const intent of draft.intents) {
+      let rule = rules.find((item) => identity(item) === identity(intent.rule));
+      if (!rule) {
+        rule = { ...intent.rule, saved: !1 };
+        rules.push(rule);
+      }
+      rule.removed = !intent.present;
+    }
+    const described = draft.description.trim() !== draft.savedDescription ? draft.description : null;
+    return { rules, description: described };
   }
   function senderValue(input) {
     const value = String(input || "").trim().toLowerCase();
@@ -203611,48 +205404,48 @@ textarea.text{resize:vertical;min-height:4.5rem}
   }
   const DESCRIPTION_MAX = 2000, TOPICS = [
     { id: "family", words: ["family", "families", "familial", "kid", "kids", "child", "children", "son", "sons", "daughter", "daughters", "parent", "parents", "mother", "father", "mom", "dad", "spouse", "wife", "husband", "sibling", "siblings"], options: [
-      ["medical", "private"],
-      ["legal_money", "private"],
-      ["conversations", "private"],
-      ["logistics", "share"],
-      ["contacts", "share"],
-      ["history", "share"]
+      "medical",
+      "legal_money",
+      "conversations",
+      "logistics",
+      "contacts",
+      "history"
     ] },
     { id: "health", words: ["health", "healthcare", "health care", "medical"], options: [
-      ["results", "private"],
-      ["prescriptions", "private"],
-      ["therapy", "private"],
-      ["exports", "private"],
-      ["wellness", "share"],
-      ["guides", "share"],
-      ["product_tests", "share"]
+      "results",
+      "prescriptions",
+      "therapy",
+      "exports",
+      "wellness",
+      "guides",
+      "product_tests"
     ] },
     { id: "money", words: ["financial", "financials", "finance", "finances", "money", "bank", "banks", "banking"], options: [
-      ["statements", "private"],
-      ["tax", "private"],
-      ["bills", "private"],
-      ["loans", "private"],
-      ["articles", "share"],
-      ["projects", "share"],
-      ["prices", "share"]
+      "statements",
+      "tax",
+      "bills",
+      "loans",
+      "articles",
+      "projects",
+      "prices"
     ] },
     { id: "work", words: ["work", "job", "jobs", "career", "employment"], options: [
-      ["contracts", "private"],
-      ["hr", "private"],
-      ["projects", "share"],
-      ["meetings", "share"],
-      ["wikis", "share"]
+      "contracts",
+      "hr",
+      "projects",
+      "meetings",
+      "wikis"
     ] },
     { id: "relationships", words: ["relationship", "relationships", "love", "love life", "partner", "partners", "intimate", "intimacy", "dating"], options: [
-      ["journals", "private"],
-      ["conversations", "private"],
-      ["teachings", "share"],
-      ["groups", "share"]
+      "journals",
+      "conversations",
+      "teachings",
+      "groups"
     ] },
     { id: "home", words: ["home", "homes", "house", "houses", "property", "properties"], options: [
-      ["deeds", "private"],
-      ["info", "share"],
-      ["plans", "share"]
+      "deeds",
+      "info",
+      "plans"
     ] }
   ], words = config.topicWords;
   function topicById(id) {
@@ -203710,9 +205503,12 @@ textarea.text{resize:vertical;min-height:4.5rem}
       if (!topic || out[id])
         continue;
       const body = line.trim().slice(leadOf(id).length), p = body.indexOf(privatePrefix), q = body.indexOf(sharePrefix), privatePart = p < 0 ? "" : body.slice(p + privatePrefix.length, q > p ? q : body.length), sharePart = q < 0 ? "" : body.slice(q + sharePrefix.length, p > q ? p : body.length), answer = {};
-      for (const [option, side] of topic.options) {
+      for (const option of topic.options) {
         const label = words.topics[id].options[option] || "";
-        answer[option] = label && holds(" " + privatePart, label) ? "private" : label && holds(" " + sharePart, label) ? "share" : side;
+        if (label && holds(" " + privatePart, label))
+          answer[option] = "private";
+        else if (label && holds(" " + sharePart, label))
+          answer[option] = "share";
       }
       out[id] = answer;
     }
@@ -203723,21 +205519,20 @@ textarea.text{resize:vertical;min-height:4.5rem}
     if (!words || !topic || !words.topics[id])
       return "";
     const kept = [], shared = [];
-    for (const [option, side] of topic.options) {
+    for (const option of topic.options) {
       const label = words.topics[id].options[option] || "";
-      if (label)
-        ((answer[option] || side) === "private" ? kept : shared).push(label);
+      if (label && answer[option])
+        (answer[option] === "private" ? kept : shared).push(label);
     }
     const parts = [];
     if (kept.length)
       parts.push(words.privateList.split("{list}").join(kept.join(", ")));
     if (shared.length)
       parts.push(words.shareList.split("{list}").join(shared.join(", ")));
-    return leadOf(id) + " " + parts.join("; ") + ".";
+    return parts.length ? leadOf(id) + " " + parts.join("; ") + "." : "";
   }
   function refineDescription(description, answers) {
-    const text = String(description || "").replace(/\\r\\n/g, \`
-\`), refined = refineUnbounded(text, answers);
+    const text = String(description || ""), refined = refineUnbounded(text, answers);
     return refined.length > DESCRIPTION_MAX ? text : refined;
   }
   function fitsAnswers(description, answers) {
@@ -203756,11 +205551,8 @@ textarea.text{resize:vertical;min-height:4.5rem}
       const at = lines.map(lineTopic).indexOf(topic.id);
       if (at >= 0)
         lines[at] = line;
-      else {
-        while (lines.length && lines[lines.length - 1].trim() === "")
-          lines.pop();
+      else
         lines.push(line);
-      }
     }
     return lines.join(\`
 \`);
@@ -203779,10 +205571,10 @@ textarea.text{resize:vertical;min-height:4.5rem}
         name: said.name,
         question: said.question,
         answered: !!answer,
-        options: topic.options.map(([option, side]) => ({
+        options: topic.options.map((option) => ({
           id: option,
           label: said.options[option] || option,
-          side: answer && answer[option] ? answer[option] : side
+          side: answer?.[option]
         }))
       });
     }
@@ -203794,7 +205586,10 @@ textarea.text{resize:vertical;min-height:4.5rem}
       return null;
     const answer = {};
     for (const option of question.options)
-      answer[option.id] = option.id === optionId ? side : option.side;
+      if (option.id === optionId)
+        answer[option.id] = side;
+      else if (option.side)
+        answer[option.id] = option.side;
     const answers = {};
     answers[topicId] = answer;
     return answers;
@@ -203812,15 +205607,98 @@ textarea.text{resize:vertical;min-height:4.5rem}
     for (const question of questions(description)) {
       const answer = {};
       for (const option of question.options)
-        answer[option.id] = option.side;
+        answer[option.id] = option.side || "private";
       answers[question.id] = answer;
     }
     return refineDescription(description, answers);
   }
+  const ANSWER_LEADS = [["private", "Private: "], ["share", "Fine to share: "]];
+  function answerLineSide(line) {
+    for (const [side, lead] of ANSWER_LEADS)
+      if (line.indexOf(lead) === 0 && line.charAt(line.length - 1) === ".")
+        return side;
+    return "";
+  }
+  function cleanTopic(raw) {
+    return String(raw || "").replace(/\\s+/g, " ").split("; ").join(", ").replace(/[.\\s]+$/, "").trim();
+  }
+  function savedAnswers(description) {
+    const out = {}, legacy = topicAnswers(description);
+    for (const id of Object.keys(legacy))
+      for (const option of Object.keys(legacy[id])) {
+        const label = words && words.topics[id] ? words.topics[id].options[option] || "" : "";
+        if (label)
+          out[cleanTopic(label)] = legacy[id][option];
+      }
+    for (const line of String(description || "").split(\`
+\`)) {
+      const side = answerLineSide(line);
+      if (!side)
+        continue;
+      const lead = side === "private" ? "Private: " : "Fine to share: ";
+      for (const topic of line.slice(lead.length, -1).split("; "))
+        if (topic.trim())
+          out[topic.trim()] = side;
+    }
+    return out;
+  }
+  function answerLines(description, answers, whenUnanswered) {
+    const merged = savedAnswers(description);
+    if (whenUnanswered)
+      for (const raw of Object.keys(whenUnanswered)) {
+        const topic = cleanTopic(raw);
+        if (topic && !merged[topic])
+          merged[topic] = whenUnanswered[raw];
+      }
+    for (const raw of Object.keys(answers)) {
+      const topic = cleanTopic(raw);
+      if (!topic)
+        continue;
+      delete merged[topic];
+      merged[topic] = answers[raw];
+    }
+    const lines = String(description || "").split(\`
+\`);
+    let place = -1;
+    const kept = [];
+    for (const line of lines)
+      if (answerLineSide(line) || lineTopic(line)) {
+        if (place < 0)
+          place = kept.length;
+      } else
+        kept.push(line);
+    const keep = Object.keys(merged).filter((topic) => merged[topic] === "private"), share = Object.keys(merged).filter((topic) => merged[topic] === "share"), added = [];
+    if (keep.length)
+      added.push("Private: " + keep.join("; ") + ".");
+    if (share.length)
+      added.push("Fine to share: " + share.join("; ") + ".");
+    let next;
+    if (place >= 0) {
+      kept.splice(place, 0, ...added);
+      next = kept.join(\`
+\`);
+    } else {
+      const own = kept.join(\`
+\`);
+      next = added.length ? own + (own ? \`
+\` : "") + added.join(\`
+\`) : own;
+    }
+    return next.length <= DESCRIPTION_MAX ? { description: next, fits: !0 } : { description, fits: !1 };
+  }
   function questionsKey(description) {
     return JSON.stringify(questions(description));
   }
+  function summary(description) {
+    return String(description || "").replace(/\\s+/g, " ").trim();
+  }
   return {
+    answerLines,
+    savedAnswers,
+    cleanTopic,
+    summary,
+    setIntent,
+    satisfies,
     validRule,
     displayOf,
     viewRule,
@@ -203880,7 +205758,7 @@ var init_private_answer3 = __esm(() => {
   private_answer_default = {
     contents: [
       {
-        uri: "ui://olympus/private-answer?v=625370ec27fe",
+        uri: "ui://olympus/private-answer?v=294f06194b13",
         mimeType: "text/html;profile=mcp-app",
         text: `<!doctype html>
 <html lang="en">
@@ -203894,7 +205772,7 @@ var init_private_answer3 = __esm(() => {
 :root[data-theme=dark]{--text:#ececec;--muted:#b4b4b4;--line:#4a4a4a;--focus:#8fb0ff;--run:#facc15;--tint:#2f2f2f;--raise:#3a3a3a;--hair:#4a4a4a;--hover:#444444;--warning:#c99a3e;color-scheme:dark}
 :root[data-theme=light]{color-scheme:light}
 *{box-sizing:border-box}
-html{font-family:system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;font-size:100%;line-height:1.45}
+html{font-family:-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Noto Sans", Ubuntu, Cantarell, "Liberation Sans", "DejaVu Sans", "Helvetica Neue", Arial, system-ui, sans-serif;font-size:100%;line-height:1.45}
 html:root,html:root>body{margin:0!important;padding:0!important;height:auto!important;min-height:0!important;display:block!important;background:transparent;color:var(--text);overflow:hidden}
 body{font-size:0.9375rem;overflow-wrap:anywhere}
 p,h2{margin:0}
@@ -203937,6 +205815,7 @@ html:root>body #panel>.card{display:block!important;height:auto!important;min-he
 .answer.md a{color:inherit;text-decoration:underline}
 
 .answer:focus{outline:none}
+.remote-command{white-space:pre-wrap;overflow-wrap:anywhere;font-size:0.8125rem}
 .sources{margin-top:0.5rem}
 .src-toggle{display:inline-flex;align-items:center;gap:0.25rem;font:inherit;font-size:0.8125rem;font-weight:500;line-height:1.4;color:var(--muted);background:none;border:0;border-radius:6px;padding:0.125rem 0;margin:0;cursor:pointer;-webkit-appearance:none;appearance:none}
 .src-toggle:hover{color:var(--text)}
@@ -204180,7 +206059,9 @@ html:root>body #panel>.card{display:block!important;height:auto!important;min-he
   blocks(container, () => !1);
 });(function chatgptPrivateAnswerProgram(config) {
   const doc = document, root = doc.getElementById("panel"), T = config.copy, JOB_ID = new RegExp(config.jobIdPattern);
-  let info = null, phase = "idle", errorText = "", canRetry = !1, answer = null, sourcesOpen = !1, notes = {}, pair = null, run = 0, theme = "", focusAfter = "", nextId = 1;
+  let info = null, phase = "idle", errorText = "", canRetry = !1, answer = null, sourcesOpen = !1, notes = {}, pair = null, run = 0, theme = "", focusAfter = "";
+  const acked = {};
+  let nextId = 1;
   const pending = {};
   function post(message) {
     if (window.parent && window.parent !== window)
@@ -204472,8 +206353,33 @@ html:root>body #panel>.card{display:block!important;height:auto!important;min-he
         sources.push({ name, open: readOpen(c.open) });
       }
     }
-    const unanswered = (Array.isArray(value.unanswered) ? value.unanswered : []).filter((item) => typeof item === "string" && item.trim()).map((item) => item.trim());
-    return { text: value.answer, sources, unanswered };
+    const unanswered = (Array.isArray(value.unanswered) ? value.unanswered : []).filter((item) => typeof item === "string" && item.trim()).map((item) => item.trim()), ack = typeof value.ack === "string" && /^[A-Za-z0-9_-]{43}$/.test(value.ack) ? value.ack : null, notice = value.secretInbox, secretInbox = notice && typeof notice === "object" ? {
+      ...typeof notice.handle === "string" && /^[A-Za-z0-9_-]{22}$/.test(notice.handle) ? { handle: notice.handle } : {},
+      ...notice.remote && typeof notice.remote.onComputer === "string" && typeof notice.remote.onServer === "string" ? { remote: { onComputer: notice.remote.onComputer, onServer: notice.remote.onServer } } : {}
+    } : void 0;
+    return { text: value.answer, sources, unanswered, ack, ...secretInbox ? { secretInbox } : {} };
+  }
+  function acknowledge(jobId, publicKey, ack) {
+    if (!ack || acked[jobId] || !JOB_ID.test(jobId) || typeof window.fetch !== "function")
+      return;
+    acked[jobId] = !0;
+    try {
+      const posting = window.fetch(config.relayOrigin + "/private/" + jobId, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ v: 1, publicKey, ack }),
+        credentials: "omit",
+        cache: "no-store",
+        referrerPolicy: "no-referrer",
+        mode: "cors"
+      });
+      if (posting && typeof posting.then === "function")
+        posting.then(() => {
+          return;
+        }, () => {
+          return;
+        });
+    } catch {}
   }
   function wait(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
@@ -204608,6 +206514,7 @@ html:root>body #panel>.card{display:block!important;height:auto!important;min-he
           phase = "revealed";
           focusAfter = byUser ? "answer" : "";
           render();
+          acknowledge(jobId, keys.publicKey, opened.ack);
           return;
         }
         if (code === 200 && status === "failed")
@@ -204857,16 +206764,39 @@ html:root>body #panel>.card{display:block!important;height:auto!important;min-he
     const body = el("div", "answer");
     body.setAttribute("tabindex", "-1");
     body.setAttribute("data-key", "answer");
-    const markdown = window.olympusMarkdown;
+    const markdown = window.olympusMarkdown, text = shown.secretInbox?.handle ? shown.text.replace(T.secretOpen + ".", "").trim() : shown.text;
     if (typeof markdown === "function") {
       body.className = "answer md";
-      markdown(doc, body, shown.text);
+      markdown(doc, body, text);
     } else {
-      const paragraphs = shown.text.split(/\\n\\s*\\n/).map((part) => part.trim()).filter(Boolean);
+      const paragraphs = text.split(/\\n\\s*\\n/).map((part) => part.trim()).filter(Boolean);
       for (const part of paragraphs)
         body.appendChild(el("p", "", part));
     }
     view.card.appendChild(body);
+    if (shown.secretInbox) {
+      const notice = shown.secretInbox;
+      if (notice.remote) {
+        const R = config.remoteCopy;
+        view.card.appendChild(el("p", "sub", R.title));
+        view.card.appendChild(el("p", "sub", R.onComputer));
+        view.card.appendChild(el("pre", "remote-command", notice.remote.onComputer));
+        view.card.appendChild(el("p", "sub", R.onServer));
+        view.card.appendChild(el("pre", "remote-command", notice.remote.onServer));
+      } else if (notice.handle)
+        view.card.appendChild(button(T.secretOpen, "secret-inbox", () => {
+          const href = "https://olympusplugin.ai/open/private/#" + notice.handle, host = openai();
+          if (host && typeof host.openExternal === "function")
+            try {
+              host.openExternal({ href });
+            } catch {}
+          else
+            request("ui/open-link", { url: href }, () => {
+              return;
+            });
+        }));
+      view.card.appendChild(el("p", "sub", T.secretFallback));
+    }
     if (shown.sources.length)
       view.card.appendChild(sourcesView(shown.sources));
     const gaps = shown.unanswered.map((item) => item.trim()).filter(Boolean);
@@ -204971,7 +206901,7 @@ html:root>body #panel>.card{display:block!important;height:auto!important;min-he
     markInitialized();
   });
   setTimeout(markInitialized, config.initFallbackMs);
-})({"relayOrigin":"https://mcp.olympusplugin.ai","metaKey":"olympus/privateAnswer","jobIdPattern":"^oly2p\\\\.[a-z2-7]{32}\\\\.[A-Za-z0-9_-]{43}$","copy":{"pageTitle":"Olympus private answer","title":"Private answer from your computer","notSent":"Not sent to ChatGPT","hidden":"Private answer hidden","show":"Show","showLabel":"Show private answer","hide":"Hide","hideLabel":"Hide private answer","tryAgain":"Try again","noModel":"Private answers need the private model on your computer. Open the Olympus dashboard to finish setup, then ask again.","downloading":"The private model is downloading ({percent}%). Ask again when it's ready.","downloadingUnknown":"The private model is downloading. Ask again when it's ready.","downloadingLabel":"Private model download","preparing":"Preparing the answer on your computer…","preparingFull":"Reading your report in more detail on your computer…","slow":"Your computer is taking longer than usual to prepare the answer.","failed":"Olympus couldn't answer this on your computer.","claimed":"This answer was already opened in another window.","expired":"This answer has expired. Ask again to get a new one.","rateLimited":"Too many requests — try again in a moment.","macOffline":"Your computer is offline, so the private answer can't be shown.","unreachable":"Olympus couldn't reach your computer. Try again in a moment.","generic":"Olympus couldn't show the private answer here.","sourcesToggle":"Sources ({n})","openedOnMac":"Opened on your computer","openFailed":"Couldn't open it on your computer","unanswered":"Not found in your private items: {list}"},"secondMs":1000,"pollCapMs":120000,"fullPollCapMs":250000,"requestTimeoutMs":20000,"noteMs":4000,"heightResendMs":400,"initFallbackMs":500,"keyStore":{"database":"olympus-private-answer","store":"keys","maxAgeMs":86400000,"timeoutMs":1500}});</script>
+})({"relayOrigin":"https://mcp.olympusplugin.ai","metaKey":"olympus/privateAnswer","jobIdPattern":"^oly2p\\\\.[a-z2-7]{32}\\\\.[A-Za-z0-9_-]{43}$","copy":{"secretOpen":"Open it in Olympus on your computer","secretFallback":"Open Olympus on your computer, then Inbox","pageTitle":"Olympus private answer","title":"Private answer from your computer","notSent":"Not sent to ChatGPT","hidden":"Private answer hidden","show":"Show","showLabel":"Show private answer","hide":"Hide","hideLabel":"Hide private answer","tryAgain":"Try again","noModel":"Private answers need the private model on your computer. Open the Olympus dashboard to finish setup, then ask again.","downloading":"The private model is downloading ({percent}%). Ask again when it's ready.","downloadingUnknown":"The private model is downloading. Ask again when it's ready.","downloadingLabel":"Private model download","preparing":"Preparing the answer on your computer…","preparingFull":"Reading your report in more detail on your computer…","slow":"Your computer is taking longer than usual to prepare the answer.","failed":"Olympus couldn't answer this on your computer.","claimed":"This answer was already opened in another window.","expired":"This answer has expired. Ask again to get a new one.","rateLimited":"Too many requests — try again in a moment.","macOffline":"Your computer is offline, so the private answer can't be shown.","unreachable":"Olympus couldn't reach your computer. Try again in a moment.","generic":"Olympus couldn't show the private answer here.","sourcesToggle":"Sources ({n})","openedOnMac":"Opened on your computer","openFailed":"Couldn't open it on your computer","unanswered":"Not found in your private items: {list}"},"remoteCopy":{"title":"Olympus runs on a server, so this opens on your computer through a secure tunnel.","askLine":"Ask your assistant:","askPhrase":"Open Olympus on my computer","askPhraseFor":"Open Olympus on my computer to connect {source}","byHandAfterAsk":"Or do it yourself:","onComputer":"On your computer, run:","onServer":"Then on the server, run this and open the link it prints in your computer's browser:","portNote":"Keep {port} on both sides of the tunnel: the link only works on that port.","copy":"Copy","copied":"Copied","copySelected":"Selected: press Ctrl+C or ⌘C to copy"},"secondMs":1000,"pollCapMs":120000,"fullPollCapMs":250000,"requestTimeoutMs":20000,"noteMs":4000,"heightResendMs":400,"initFallbackMs":500,"keyStore":{"database":"olympus-private-answer","store":"keys","maxAgeMs":86400000,"timeoutMs":1500}});</script>
 </body>
 </html>
 `,
@@ -204986,6 +206916,15 @@ html:root>body #panel>.card{display:block!important;height:auto!important;min-he
             domain: "https://mcp.olympusplugin.ai",
             prefersBorder: false
           },
+          "openai/widgetCSP": {
+            connect_domains: [
+              "https://mcp.olympusplugin.ai"
+            ],
+            resource_domains: [],
+            redirect_domains: [
+              "https://olympusplugin.ai"
+            ]
+          },
           "openai/widgetDescription": "Shows how many private items match and, when the user asks, a private answer that ChatGPT never receives."
         }
       }
@@ -204999,7 +206938,7 @@ var init_private_question2 = __esm(() => {
   private_question_default = {
     contents: [
       {
-        uri: "ui://olympus/private-question?v=6a9d8c18b516",
+        uri: "ui://olympus/private-question?v=6a855045efb7",
         mimeType: "text/html;profile=mcp-app",
         text: `<!doctype html>
 <html lang="en">
@@ -205013,7 +206952,7 @@ var init_private_question2 = __esm(() => {
 :root[data-theme=dark]{--text:#ececec;--muted:#b4b4b4;--line:#4a4a4a;--focus:#8fb0ff;--run:#facc15;--tint:#2f2f2f;--raise:#3a3a3a;--hair:#4a4a4a;--hover:#444444;--warning:#c99a3e;color-scheme:dark}
 :root[data-theme=light]{color-scheme:light}
 *{box-sizing:border-box}
-html{font-family:system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;font-size:100%;line-height:1.45}
+html{font-family:-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Noto Sans", Ubuntu, Cantarell, "Liberation Sans", "DejaVu Sans", "Helvetica Neue", Arial, system-ui, sans-serif;font-size:100%;line-height:1.45}
 html:root,html:root>body{margin:0!important;padding:0!important;height:auto!important;min-height:0!important;display:block!important;background:transparent;color:var(--text);overflow:hidden}
 body{font-size:0.9375rem;overflow-wrap:anywhere}
 p,h2{margin:0}
@@ -205056,6 +206995,7 @@ html:root>body #panel>.card{display:block!important;height:auto!important;min-he
 .answer.md a{color:inherit;text-decoration:underline}
 
 .answer:focus{outline:none}
+.remote-command{white-space:pre-wrap;overflow-wrap:anywhere;font-size:0.8125rem}
 .sources{margin-top:0.5rem}
 .src-toggle{display:inline-flex;align-items:center;gap:0.25rem;font:inherit;font-size:0.8125rem;font-weight:500;line-height:1.4;color:var(--muted);background:none;border:0;border-radius:6px;padding:0.125rem 0;margin:0;cursor:pointer;-webkit-appearance:none;appearance:none}
 .src-toggle:hover{color:var(--text)}
@@ -206204,9 +208144,9 @@ var init_tools2 = __esm(() => {
         ],
         _meta: {
           ui: {
-            resourceUri: "ui://olympus/dashboard?v=1c887768189e"
+            resourceUri: "ui://olympus/dashboard?v=6469d4208307"
           },
-          "openai/outputTemplate": "ui://olympus/dashboard?v=1c887768189e",
+          "openai/outputTemplate": "ui://olympus/dashboard?v=6469d4208307",
           "openai/ui": {
             entrypoints: [
               {
@@ -206260,9 +208200,9 @@ var init_tools2 = __esm(() => {
         ],
         _meta: {
           ui: {
-            resourceUri: "ui://olympus/private-answer?v=625370ec27fe"
+            resourceUri: "ui://olympus/private-answer?v=294f06194b13"
           },
-          "openai/outputTemplate": "ui://olympus/private-answer?v=625370ec27fe"
+          "openai/outputTemplate": "ui://olympus/private-answer?v=294f06194b13"
         }
       },
       {
@@ -206324,9 +208264,9 @@ var init_tools2 = __esm(() => {
         ],
         _meta: {
           ui: {
-            resourceUri: "ui://olympus/private-answer?v=625370ec27fe"
+            resourceUri: "ui://olympus/private-answer?v=294f06194b13"
           },
-          "openai/outputTemplate": "ui://olympus/private-answer?v=625370ec27fe"
+          "openai/outputTemplate": "ui://olympus/private-answer?v=294f06194b13"
         }
       },
       {
@@ -206359,9 +208299,9 @@ var init_tools2 = __esm(() => {
         ],
         _meta: {
           ui: {
-            resourceUri: "ui://olympus/private-answer?v=625370ec27fe"
+            resourceUri: "ui://olympus/private-answer?v=294f06194b13"
           },
-          "openai/outputTemplate": "ui://olympus/private-answer?v=625370ec27fe"
+          "openai/outputTemplate": "ui://olympus/private-answer?v=294f06194b13"
         }
       },
       {
@@ -206429,9 +208369,9 @@ var init_tools2 = __esm(() => {
         },
         _meta: {
           ui: {
-            resourceUri: "ui://olympus/private-question?v=6a9d8c18b516"
+            resourceUri: "ui://olympus/private-question?v=6a855045efb7"
           },
-          "openai/outputTemplate": "ui://olympus/private-question?v=6a9d8c18b516"
+          "openai/outputTemplate": "ui://olympus/private-question?v=6a855045efb7"
         },
         annotations: {
           readOnlyHint: false,
@@ -206500,7 +208440,9 @@ var init_tools2 = __esm(() => {
               enum: [
                 "gmail.email",
                 "google_drive.docs",
-                "dropbox.files"
+                "dropbox.files",
+                "local.files",
+                "evernote.notes"
               ]
             },
             parent_key: {
@@ -206627,7 +208569,9 @@ var init_tools2 = __esm(() => {
               enum: [
                 "gmail.email",
                 "google_drive.docs",
-                "dropbox.files"
+                "dropbox.files",
+                "local.files",
+                "evernote.notes"
               ]
             },
             account_generation: {
@@ -206790,7 +208734,57 @@ var init_tools2 = __esm(() => {
                 "google_drive.docs",
                 "dropbox.files",
                 "x.bookmarks",
-                "readwise.library"
+                "readwise.library",
+                "evernote.notes",
+                "local.files"
+              ]
+            }
+          },
+          required: [
+            "source_id"
+          ],
+          additionalProperties: false
+        },
+        annotations: {
+          readOnlyHint: false,
+          destructiveHint: true,
+          openWorldHint: false
+        },
+        securitySchemes: [
+          {
+            type: "oauth2",
+            scopes: []
+          }
+        ],
+        _meta: {
+          ui: {
+            visibility: [
+              "app"
+            ]
+          },
+          "openai/widgetAccessible": true,
+          "openai/visibility": "private"
+        }
+      },
+      {
+        name: "olympus_delete_source_data",
+        title: "Delete indexed data for a source",
+        description: "For the Olympus panel: delete everything Olympus indexed from a source that is already disconnected (search results, summaries and its privacy records). The files and accounts themselves are not touched. Cannot be undone.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            source_id: {
+              type: "string",
+              enum: [
+                "gmail.email",
+                "google_drive.docs",
+                "dropbox.files",
+                "x.bookmarks",
+                "readwise.library",
+                "evernote.notes",
+                "local.files",
+                "telegram.messages",
+                "whatsapp.personal.messages"
               ]
             }
           },
@@ -206943,6 +208937,16 @@ var init_tools2 = __esm(() => {
         inputSchema: {
           type: "object",
           properties: {
+            private_answer_mode: {
+              type: "string",
+              enum: [
+                "local-first",
+                "local-only",
+                "private-cloud-only",
+                "no-sensitive"
+              ],
+              description: "First-run Private-answer mode chosen by the owner in the panel."
+            },
             description: {
               type: "string",
               maxLength: 2000,
@@ -206966,7 +208970,9 @@ var init_tools2 = __esm(() => {
                     enum: [
                       "gmail.email",
                       "google_drive.docs",
-                      "dropbox.files"
+                      "dropbox.files",
+                      "local.files",
+                      "evernote.notes"
                     ]
                   },
                   key: {
@@ -207028,6 +209034,97 @@ var init_tools2 = __esm(() => {
         }
       },
       {
+        name: "olympus_privacy_questions",
+        title: "Privacy follow-up questions",
+        description: "For the owner in the Olympus panel: privately check an unsaved privacy description. Saves nothing.",
+        inputSchema: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            description: {
+              type: "string",
+              maxLength: 2000
+            },
+            confirmation: {
+              type: "string",
+              maxLength: 128
+            }
+          },
+          required: [
+            "description",
+            "confirmation"
+          ]
+        },
+        annotations: {
+          readOnlyHint: false,
+          destructiveHint: false,
+          openWorldHint: false
+        },
+        securitySchemes: [
+          {
+            type: "oauth2",
+            scopes: []
+          }
+        ],
+        _meta: {
+          ui: {
+            visibility: [
+              "app"
+            ]
+          },
+          "openai/widgetAccessible": true,
+          "openai/visibility": "private"
+        }
+      },
+      {
+        name: "olympus_privacy_check",
+        title: "Check privacy understanding",
+        description: "For the owner in the Olympus panel: privately check an unsaved privacy description. Saves nothing.",
+        inputSchema: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            description: {
+              type: "string",
+              maxLength: 2000
+            },
+            confirmation: {
+              type: "string",
+              maxLength: 128
+            },
+            sample: {
+              type: "string",
+              minLength: 1,
+              maxLength: 120
+            }
+          },
+          required: [
+            "description",
+            "confirmation"
+          ]
+        },
+        annotations: {
+          readOnlyHint: false,
+          destructiveHint: false,
+          openWorldHint: false
+        },
+        securitySchemes: [
+          {
+            type: "oauth2",
+            scopes: []
+          }
+        ],
+        _meta: {
+          ui: {
+            visibility: [
+              "app"
+            ]
+          },
+          "openai/widgetAccessible": true,
+          "openai/visibility": "private"
+        }
+      },
+      {
         name: "olympus_sync_source",
         title: "Sync a source now",
         description: "For the Olympus panel: check a connected source for anything new now. Answers at once; the panel shows what the check found.",
@@ -207041,7 +209138,9 @@ var init_tools2 = __esm(() => {
                 "google_drive.docs",
                 "dropbox.files",
                 "x.bookmarks",
-                "readwise.library"
+                "readwise.library",
+                "evernote.notes",
+                "local.files"
               ]
             }
           },
@@ -207074,17 +209173,17 @@ var init_tools2 = __esm(() => {
     ],
     resources: [
       {
-        uri: "ui://olympus/dashboard?v=1c887768189e",
+        uri: "ui://olympus/dashboard?v=6469d4208307",
         name: "Olympus dashboard",
         mimeType: "text/html;profile=mcp-app"
       },
       {
-        uri: "ui://olympus/private-answer?v=625370ec27fe",
+        uri: "ui://olympus/private-answer?v=294f06194b13",
         name: "Olympus private answer",
         mimeType: "text/html;profile=mcp-app"
       },
       {
-        uri: "ui://olympus/private-question?v=6a9d8c18b516",
+        uri: "ui://olympus/private-question?v=6a855045efb7",
         name: "Olympus private question",
         mimeType: "text/html;profile=mcp-app"
       }
@@ -207100,9 +209199,9 @@ var init_approved = __esm(() => {
   init_private_question2();
   init_tools2();
   APPROVED = Object.freeze({
-    commit: "6c990f65f52efb524c4ac949348f3c3767a9e512",
+    commit: "2b0291fc905e4de7297965399b31dca41b648580",
     plugin: "plugin_asdk_app_6acbb7a8a3008191b6f6b3dbfd6f3301",
-    submitted: "2026-10-11",
+    submitted: "2026-11-07",
     status: "in review"
   });
   APPROVED_TOOLS = tools_default.tools;

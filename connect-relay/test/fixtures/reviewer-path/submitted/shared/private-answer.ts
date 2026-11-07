@@ -8,6 +8,11 @@
  *   Content-Type: application/json
  *   {"v":1,"publicKey":"<base64url raw P-256 point, 65 bytes>"}
  *
+ *   POST https://<relay>/private/oly2p.<installId>.<secret>
+ *   {"v":1,"publicKey":"<same key>","ack":"<token from the decrypted answer>"}   → 200
+ *   (the panel's seen acknowledgment: the same path and body cap as a claim,
+ *   forwarded unchanged; only the engine reads `ack`)
+ *
  *   POST https://<relay>/private/oly2p.<installId>.<secret>/open
  *   {"v":1,"open":"<token from the decrypted answer>"}   → 204
  *
@@ -111,4 +116,5 @@ export type PrivateAnswerWireStatus =
   | 'rate_limited' // 429 + Retry-After
   | 'mac_offline' // 503 (relay): the install has no live session
   | 'busy' // 503 + Retry-After
-  | 'opened'; // 204, no body (`/open`): the source was opened on the Mac
+  | 'opened' // 204, no body (`/open`): the source was opened on the Mac
+  | 'acknowledged'; // 200 (a collection body with `ack`): the panel's seen acknowledgment was accepted
