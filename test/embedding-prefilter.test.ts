@@ -190,6 +190,60 @@ for (const change of ['judge', 'prompt', 'model'] as const) {
     expect(calls).toBe(1);
     expect(f.ledger.getCurrent(subject(1))!.contentTier).toBe('secure');
     expect(f.ledger.rejudgeQuestion(subject(1))).toBeUndefined();
+    expect(f.filter.retained(question)).toBe(false);
+    expect(f.ledger.metaEntries('embedding-prefilter:clear:')).toHaveLength(0);
+  });
+}
+for (const recovery of ['disable', 'failed audit'] as const) {
+  for (const healthyAudit of [false, true]) test(`failed rejudge keeps rollback available for ${recovery}${healthyAudit ? ' after a healthy audit' : ''}`, async () => {
+    let enabled = true;
+    let sampling = false;
+    const f = fixture({ enabled: () => enabled, random: () => sampling ? 0 : 1 });
+    const original = f.add(1); await pass(f).run();
+    // Select checks before replacement-judge preparation invalidates the old weights.
+    sampling = true;
+    const checks = Array.from({ length: (healthyAudit ? 200 : 0) + (recovery === 'failed audit' ? 5 : 0) }, (_, i) => {
+      const q = f.add(i + 2);
+      expect(f.filter.tryClear(q, judge)).toBe(false);
+      expect(f.filter.isSpotCheck(q)).toBe(true);
+      f.sniffer.deleteQuestion(q, 'content');
+      return q;
+    });
+    const nextLane: SnifferLane = { ...lane, modelId: 'replacement-judge' };
+    const decision = classifyItemTiers({ signals: {}, text: ownText, holdUntilJudged: true, subject: subject(1) }, {
+      sniffer: new CachedTierSniffer(f.sniffer, nextLane),
+    });
+    expect(f.sniffer.questionFor(subject(1), 'content')!.materialHash).toBe(original.materialHash);
+    expect(f.ledger.openRejudgeQuestion(subject(1), {
+      expectedGeneration: f.ledger.getCurrent(subject(1))!.generation, decision, keepVisible: false,
+    })).toBe(true);
+    const report = await runSnifferPass({ targets: [{ ledger: f.ledger, sniffer: f.sniffer, embeddingPrefilter: f.filter }],
+      lane: nextLane, model: { async complete() { throw new Error('synthetic judge unavailable'); } },
+    });
+    expect(report.failedCalls).toBe(1);
+    expect(f.ledger.getCurrent(subject(1))).toMatchObject({ state: 'current', contentPending: false });
+    expect(f.ledger.rejudgeQuestion(subject(1))).toBeDefined();
+    if (healthyAudit) {
+      for (const q of checks.slice(0, 200)) f.filter.observe(q, false);
+      expect(f.filter.status()).not.toContain('stopped');
+      expect(f.sniffer.questionFor(subject(1), 'content')).toBeDefined();
+    }
+    if (recovery === 'disable') enabled = false;
+    else {
+      for (const q of checks.slice(-5)) f.filter.observe(q, true);
+      expect(f.filter.status()).toContain('stopped');
+    }
+    f.make().recover();
+    expect(f.ledger.getCurrent(subject(1))).toMatchObject({ state: 'pending', contentPending: true });
+    expect(f.ledger.getCurrent(subject(1))!.reasons.some(reason => reason.startsWith('content:embedding_prefilter:'))).toBe(false);
+    expect(f.sniffer.questionFor(subject(1), 'content')).toBeDefined();
+    // Once available, the replacement judge still decides the queued item.
+    const resolved = await runSnifferPass({ targets: [{ ledger: f.ledger, sniffer: f.sniffer, embeddingPrefilter: f.filter }],
+      lane: nextLane, maxCallsPerPass: 1, model: { async complete() { return { text: '', modelId: nextLane.modelId,
+        decisionVerdict: { tier: 'private', category: 'fixture', confidence: 1, failSafe: false } }; } },
+    });
+    expect(resolved.resolvedPrivate).toBe(1);
+    expect(f.ledger.getCurrent(subject(1))).toMatchObject({ state: 'current', contentPending: false, contentTier: 'secure' });
   });
 }
 test('rollback fences a queued lowering and supersedes its Personal destination', async () => {

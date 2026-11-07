@@ -176,9 +176,10 @@ export class EmbeddingPrefilter {
     if (!raw) return false;
     const receipt = JSON.parse(raw) as Receipt;
     const row = this.options.ledger.getCurrent(question);
-    // Unchanged text can carry a new judge/prompt question; the old clearance cannot retain it.
-    if (receipt.hash === question.materialHash && row?.reasons.includes(receipt.reason)
-      && !this.options.ledger.rejudgeQuestion(question)) return true;
+    if (receipt.hash === question.materialHash && row?.reasons.includes(receipt.reason)) {
+      // Dispatch an open rejudge without discarding rollback before its verdict lands.
+      return !this.options.ledger.rejudgeQuestion(question);
+    }
     this.options.ledger.deleteMeta(RECEIPTS + tierLedgerIdentityKey(question));
     return false;
   }
@@ -251,11 +252,10 @@ export class EmbeddingPrefilter {
   private acceptClearances(): void {
       for (const entry of this.options.ledger.metaEntries(RECEIPTS)) {
         const receipt = JSON.parse(entry.value) as Receipt;
+        // An open rejudge still needs rollback even after a healthy audit.
+        if (this.options.ledger.rejudgeQuestion(receipt.subject)) continue;
         this.options.ledger.deleteMeta(entry.key);
-        // A healthy audit accepts only the old clearance, never a newer rejudge of the same text.
-        if (!this.options.ledger.rejudgeQuestion(receipt.subject)) {
-          this.options.sniffer.deleteQuestion(receipt.subject, 'content', receipt.hash);
-        }
+        this.options.sniffer.deleteQuestion(receipt.subject, 'content', receipt.hash);
       }
   }
   private rollback(): void {
