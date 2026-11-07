@@ -1776,7 +1776,7 @@ export const DASHBOARD_CHATGPT_REFUSAL_COPY = {
 } as const;
 
 /**
- * The ChatGPT dashboard's own copy for the five connection states. The view
+ * The ChatGPT dashboard's own copy for the connection states. The view
  * model carries only the state; the page owns these words (the relay renders
  * two of the states without reading this file). `disabledReason` is printed
  * beside every other control while the state holds.
@@ -1796,6 +1796,9 @@ export const DASHBOARD_CHATGPT_CONNECTION_COPY = {
   installing: {
     title: 'Olympus is setting up on your computer…',
     disabledReason: 'Available once Olympus is set up',
+  },
+  restarting: {
+    title: 'Olympus is restarting. Search is back in a moment.',
   },
   mac_offline: {
     title: 'Your computer is offline or asleep, so answers are paused',

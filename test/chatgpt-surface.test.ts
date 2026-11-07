@@ -520,6 +520,18 @@ describe('dashboard view-model producer', () => {
     expect(vm.models.embedding).toEqual({ kind: 'built_in', state: 'downloading', percent: 40 });
   });
 
+  test('a search model reload is restarting and survives the response boundary', () => {
+    const vm = buildChatGptDashboardViewModel(view([card('gmail.email'), offCard('dropbox.files')]), {
+      now: NOW, embedding: { kind: 'built_in', state: 'loading' },
+    });
+    expect(vm.connection).toEqual({ state: 'restarting' });
+    expect(vm.models.embedding).toEqual({ kind: 'built_in', state: 'loading' });
+    expect(copyDashboardViewModel(vm)).toEqual(vm);
+    expect(vm.sources.find(source => source.id === 'dropbox.files')?.primary?.tool).toBeDefined();
+    const ready = buildChatGptDashboardViewModel(view([]), { embedding: { kind: 'built_in', state: 'ready' } });
+    expect(ready.connection).toEqual({ state: 'ready' });
+  });
+
   test('a failed built-in install says why in install words and retries with olympus_model_retry', () => {
     const cases = [
       ['disk_full', 'the disk is full. Free up some space, then Try again.'],

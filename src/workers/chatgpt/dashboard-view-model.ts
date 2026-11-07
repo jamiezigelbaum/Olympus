@@ -1156,6 +1156,7 @@ function connectionFor(input: {
   // The built-in private model downloading alone never does: it joins the
   // percent only while the embedding model is downloading too, so the bar
   // reaches 100 when both are done.
+  if (input.embedding.state === 'loading') return { state: 'restarting' };
   if (input.embedding.state === 'downloading' || input.embedding.state === 'verifying') {
     const state: ConnectionState = 'installing';
     let percent = clampPercent(input.embedding.percent ?? 0);

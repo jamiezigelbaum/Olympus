@@ -26,7 +26,7 @@ import type { PRIVATE_ANSWER_OPTIONS } from '../../core/privacy-language.ts';
 import type { DashboardStatus, DashboardUnreadableReasonCode } from '../dashboard/vocabulary.ts';
 import type { SourceFailureKind } from '../dashboard/source-failure.ts';
 
-export type ConnectionState = 'not_connected' | 'not_installed' | 'installing' | 'ready' | 'mac_offline' | 'relay_unavailable';
+export type ConnectionState = 'not_connected' | 'not_installed' | 'installing' | 'restarting' | 'ready' | 'mac_offline' | 'relay_unavailable';
 
 export interface DashboardFix {
   label: string;
@@ -290,7 +290,8 @@ export interface DashboardViewModelV1 {
     embedding: {
       kind: 'built_in' | 'custom';
       /** `verifying`: the downloaded files are being checked against their pinned checksums. */
-      state: ModelInstallState;
+      /** `loading`: a previously ready search model is reloading into memory. */
+      state: ModelInstallState | 'loading';
       /** `downloading` and `verifying` only. */
       percent?: number;
       /** `downloading` and `verifying` (built-in) only, when known. */
@@ -1073,7 +1074,7 @@ export interface ModelSetResult {
   status: 'applied' | 'unchanged';
   embedding: 'built_in' | 'custom';
   answers?: 'local' | 'venice';
-  /** The worker restarts to apply the change; the dashboard reads `installing` briefly. */
+  /** The worker restarts to apply the change; the dashboard reads `restarting` while the search model reloads. */
   restarting: boolean;
 }
 
