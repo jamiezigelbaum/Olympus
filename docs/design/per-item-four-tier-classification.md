@@ -592,7 +592,20 @@ fail-safes and pre-filter outputs are excluded. The ledger supplies the label:
 `private` is Personal and `secure` is Private, only when this judge alone
 decided it. A tier-bearing content-judge receipt binds that verdict's own tier
 and reason to the complete-text digest; a later metadata raise never changes
-the receipt. Rows without this provenance are skipped. Detectors, content rules, owner rules, overrides, metadata floors,
+the receipt. For pre-#982 rows with no tier receipt (2026-11-07), equivalent
+provenance comes from the latest non-fail-safe `sniffer_verdicts` answer for
+that exact subject and the ledger row's model. Its own tier must equal the
+content tier and its timestamp must be no later than the row's decision.
+Conflicting equal-time answers, absent subject/model evidence, unreadable old
+schemas, later answers and mismatched modern receipts all abstain under named
+rejection counters. A historical metadata raise retained in the content tier
+cannot replace the judge's own label. Live lookups use a subject/model/time
+index; read-only diagnostic snapshots of older caches scan once per model and
+retain only subject hashes, tiers and times, without migrating the cache.
+Old training attempts restart their scan immediately under the new label
+version, including attempts waiting after finding zero examples. Verdict-cache
+writes also invalidate a sliced final validation before weights are published.
+Detectors, content rules, owner rules, overrides, metadata floors,
 own-record holds and small-lane `record_held:` answers exclude the row. The
 stored text must still match its complete-text digest; a verdict-cache
 `content_hash` is not required.
@@ -644,6 +657,8 @@ It calls the same training eligibility, serving-copy selection, digest/verdict
 receipt and vector checks as live training. It counts every eligible row rather
 than applying the fitting sample caps. Every rejection name is always present;
 only the first failing check counts, so examples plus rejections equal rows read.
+Accepted-label `provenance` counters distinguish `judge_receipt` from
+`legacy_sniffer`; their sum equals accepted examples.
 The JSON output contains numbers only as values. Ledger array positions replace
 paths, accounts and source names; no row content, item identity, reason text,
 model identity or vectors are printed, even on errors.
@@ -659,8 +674,11 @@ its shared-memory sidecar. Main database and WAL bytes are copied into private
 writes, checkpoint, migrations, metadata updates, permission repairs or lease.
 SQLite's temporary shared-memory files stay there, and all scratch copies are
 removed on normal completion or error. Abrupt process termination can leave
-private scratch copies. Copying detects concurrent main/WAL changes and reports
-numeric errors with a nonzero exit; rerun if the install was changing. Snapshots
+private scratch copies. Copying detects concurrent main/WAL changes and retries
+up to three times after 25, 50 and 75 ms, discarding stale scratch sidecars
+between attempts. Output includes `snapshot_retries` and numeric `error_reasons`
+for busy, unsafe or unreadable snapshot refusals and database-reader failures;
+any final error produces a nonzero exit. Snapshots
 of different files are not one install-wide transaction. Synthetic WAL-backed
 tests compare all install file hashes and mtimes before and after, including the
 built CLI path. The 2026-11-07 live zero-example investigation remains an

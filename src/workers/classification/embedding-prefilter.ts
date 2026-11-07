@@ -28,6 +28,7 @@ const NEW_VERDICTS = 1000;
 const TRAINING = `${PREFIX}training-v1`;
 const SCAN = `${PREFIX}training-scan-v1`;
 interface TrainingAttempt {
+  labelVersion: 2;
   id: string; revisions: string; judge: string; startedAt: number; elapsedMs: number;
   rows: number; counts: [number, number]; nextAt: number;
   outcome: 'scanning' | 'fitting' | 'trained' | 'too_few' | 'failed';
@@ -61,7 +62,9 @@ export const PREFILTER_TRAINING_REJECTIONS = [
   'override_decision', 'item_override', 'rejudge_open', 'metadata_owner_rule', 'metadata_floor',
   'metadata_secret', 'override_reason', 'judge_code_empty', 'judge_code_held', 'judge_code_unsafe',
   'judge_duplicate', 'content_reason_unknown', 'judge_missing', 'copy_missing', 'digest_missing',
-  'verdict_missing', 'chunks_empty', 'media_present', 'secret_material', 'vector_count',
+  'verdict_missing', 'legacy_store_missing', 'legacy_verdict_missing', 'legacy_verdict_ambiguous',
+  'legacy_verdict_time', 'legacy_verdict_tier', 'legacy_verdict_unreadable',
+  'chunks_empty', 'media_present', 'secret_material', 'vector_count',
   'vector_match', 'vector_bytes', 'vector_nonfinite', 'vector_zero',
 ] as const;
 export type PrefilterTrainingRejection = typeof PREFILTER_TRAINING_REJECTIONS[number];
@@ -120,8 +123,9 @@ export function prefilterTrainingCopy(subject: TierSnifferSubject,
 /** Shared by live training and the counts-only diagnostic. First failure wins. */
 export function prefilterTrainingExample(row: TierLedgerRecord, judge: string, options: {
   ledger: Pick<TierLedger, 'getOverride' | 'rejudgeQuestion'>;
+  sniffer?: Pick<TierSnifferStore, 'trainingVerdict'>;
   copyFor: (subject: TierSnifferSubject) => PrefilterCopy | undefined;
-}, reject: Reject = () => undefined): { vector: number[]; copy: PrefilterCopy; private: boolean } | undefined {
+}, reject: Reject = () => undefined): { vector: number[]; copy: PrefilterCopy; private: boolean; provenance: 'judge_receipt' | 'legacy_sniffer' } | undefined {
   if (!row.routed) return reject('not_routed');
   if (row.state !== 'current') return reject('not_current');
   if (row.metadataPending) return reject('metadata_pending');
@@ -160,11 +164,26 @@ export function prefilterTrainingExample(row: TierLedgerRecord, judge: string, o
   if (!copy) return reject('copy_missing');
   const digest = contentDigestReason(copy.chunks.map(chunk => chunk.boundedText).join(''));
   if (!row.reasons.includes(digest)) return reject('digest_missing');
-  if (!row.reasons.includes(contentJudgeVerdictReason(judged, row.contentTier, digest))) return reject('verdict_missing');
+  let provenance: 'judge_receipt' | 'legacy_sniffer' = 'judge_receipt';
+  if (!row.reasons.includes(contentJudgeVerdictReason(judged, row.contentTier, digest))) {
+    // A mismatched modern receipt is evidence against the label, never a legacy row.
+    if (row.reasons.some(reason => reason.startsWith('content:judge_verdict:'))) return reject('verdict_missing');
+    if (!options.sniffer) return reject('legacy_store_missing');
+    let verdict;
+    try { verdict = options.sniffer.trainingVerdict(subjectOf(row), row.modelId); }
+    catch { return reject('legacy_verdict_unreadable'); }
+    if (!verdict) return reject('legacy_verdict_missing');
+    if (verdict.ambiguous) return reject('legacy_verdict_ambiguous');
+    const time = Date.parse(verdict.decidedAt), decisionTime = Date.parse(row.decidedAt);
+    if (!Number.isFinite(time) || !Number.isFinite(decisionTime) || time > decisionTime) return reject('legacy_verdict_time');
+    if ((verdict.tier === 'personal' ? 'private' : verdict.tier === 'private' ? 'secure' : undefined) !== row.contentTier)
+      return reject('legacy_verdict_tier');
+    provenance = 'legacy_sniffer';
+  }
   const vector = prefilterVector(copy, reject);
   if (!vector) return undefined;
   if (Math.hypot(...vector) === 0) return reject('vector_zero');
-  return { vector, copy, private: row.contentTier === 'secure' };
+  return { vector, copy, private: row.contentTier === 'secure', provenance };
 }
 
 export class EmbeddingPrefilter {
@@ -255,7 +274,9 @@ export class EmbeddingPrefilter {
   private trainingFingerprint(row: TierLedgerRecord): string {
     const subject = subjectOf(row);
     return createHash('sha256').update(JSON.stringify([row, this.options.ledger.copies(subject),
-      this.options.ledger.getOverride(subject), this.options.ledger.rejudgeQuestion(subject)])).digest('hex');
+      this.options.ledger.getOverride(subject), this.options.ledger.rejudgeQuestion(subject),
+      row.modelId && !row.reasons.some(reason => reason.startsWith('content:judge_verdict:'))
+        ? this.options.sniffer.trainingVerdict(subject, row.modelId) : null])).digest('hex');
   }
   /** A ledger label is usable only when this judge alone decided the content tier. */
   private trainingExample(row: TierLedgerRecord, judge: string): TrainingExample | undefined {
@@ -305,6 +326,8 @@ export class EmbeddingPrefilter {
     const started = clock();
     const deadline = started + TRAINING_SLICE_MS;
     let attempt = this.attempt;
+    // Old scans skipped pre-#982 labels; resume neither their cursors nor retry delay.
+    if (attempt && attempt.labelVersion !== 2) { attempt = this.attempt = undefined; this.training = undefined; }
     const finishedAtStart = attempt && ['trained', 'too_few', 'failed'].includes(attempt.outcome) ? attempt.id : undefined;
     // A failure before revisions could be read must still honor its retry deadline.
     if (attempt?.outcome === 'failed' && !attempt.revisions && this.now() < attempt.nextAt) return;
@@ -334,7 +357,7 @@ export class EmbeddingPrefilter {
         attempt = undefined;
       }
       if (!attempt) {
-        attempt = this.attempt = { id: randomUUID(), revisions, judge, startedAt: this.now(), elapsedMs: 0,
+        attempt = this.attempt = { labelVersion: 2, id: randomUUID(), revisions, judge, startedAt: this.now(), elapsedMs: 0,
           rows: 0, counts: [0, 0], nextAt: this.now(), outcome: 'scanning' };
         this.training = undefined;
       }
@@ -435,7 +458,7 @@ export class EmbeddingPrefilter {
             }
             if (run.model) {
               const changeMarkers = () => JSON.stringify(run.scans.map(({ member }) => [
-                member.options.ledger.changeMarker(true), member.options.copyChangeMarker(),
+                member.options.ledger.changeMarker(true), member.options.copyChangeMarker(), member.options.sniffer.changeMarker(),
               ]));
               const currentMarkers = changeMarkers();
               if (!run.finalValidation || run.finalValidation.markers !== currentMarkers) {
@@ -488,7 +511,7 @@ export class EmbeddingPrefilter {
         }
       }
     } catch {
-      if (!attempt) attempt = this.attempt = { id: randomUUID(), judge, revisions: '', startedAt: this.now(), elapsedMs: 0, rows: 0, counts: [0, 0], nextAt: this.now(), outcome: 'scanning' };
+      if (!attempt) attempt = this.attempt = { labelVersion: 2, id: randomUUID(), judge, revisions: '', startedAt: this.now(), elapsedMs: 0, rows: 0, counts: [0, 0], nextAt: this.now(), outcome: 'scanning' };
       if (attempt.outcome === 'scanning' || attempt.outcome === 'fitting') this.finishTraining(attempt, 'failed', stage);
     }
     if (attempt && attempt.id !== finishedAtStart) {

@@ -8,13 +8,30 @@ import { LocalConnectorStore } from '../connector-store/local-index.ts';
 import { prefilterTrainingCopy } from './embedding-prefilter.ts';
 import { countPrefilterTraining, type PrefilterTrainingCounts } from './prefilter-training-counts.ts';
 import { TierLedger } from './tier-ledger.ts';
-import { tierLedgerPathForStore } from './tier-ledger-path.ts';
+import { TierSnifferStore } from './sniffer-store.ts';
+import { tierLedgerPathForStore, tierSnifferPathForLedger } from './tier-ledger-path.ts';
 import { tierSetLedgerCandidates } from './tier-set-binding.ts';
 
 /** Counts only; ledger array positions replace all account names, paths and identifiers. */
 export interface PrefilterDryRunReport {
   ledgers: PrefilterTrainingCounts[];
   errors: number;
+  error_reasons: Record<DryRunError, number>;
+  snapshot_retries: number;
+}
+
+const ERROR_REASONS = ['snapshot_busy', 'snapshot_unsafe', 'snapshot_io', 'database_open',
+  'ledger_open', 'store_open', 'sniffer_open', 'training_judge', 'arguments_or_install'] as const;
+type DryRunError = typeof ERROR_REASONS[number];
+function emptyReport(): PrefilterDryRunReport {
+  return { ledgers: [], errors: 0, error_reasons: Object.fromEntries(ERROR_REASONS.map(reason => [reason, 0])) as Record<DryRunError, number>, snapshot_retries: 0 };
+}
+function reportError(report: PrefilterDryRunReport, reason: DryRunError): void {
+  report.errors++;
+  report.error_reasons[reason]++;
+}
+class SnapshotError extends Error {
+  constructor(readonly reason: 'snapshot_busy' | 'snapshot_unsafe' | 'snapshot_io') { super(reason); }
 }
 
 function stamp(path: string): string {
@@ -28,16 +45,32 @@ function stamp(path: string): string {
  * SQLite opens only the snapshots readonly; any shared-memory sidecars stay in scratch.
  * No SQL writes or checkpoints run. All private scratch bytes are removed in finally, including failures.
  */
-function snapshot(path: string, destination: string): void {
+function snapshot(path: string, destination: string, copy: typeof copyFileSync): void {
   const sources = [path, `${path}-wal`];
   const before = sources.map(stamp);
   for (let index = 0; index < sources.length; index++) {
     const source = sources[index]!;
     if (before[index] === 'absent') continue;
-    if (!lstatSync(source).isFile() || lstatSync(source).isSymbolicLink()) throw new Error('Unsafe database file');
-    copyFileSync(source, `${destination}${index ? '-wal' : ''}`);
+    if (!lstatSync(source).isFile() || lstatSync(source).isSymbolicLink()) throw new SnapshotError('snapshot_unsafe');
+    copy(source, `${destination}${index ? '-wal' : ''}`);
   }
-  if (sources.some((source, index) => stamp(source) !== before[index])) throw new Error('Database changed during snapshot');
+  if (sources.some((source, index) => stamp(source) !== before[index])) throw new SnapshotError('snapshot_busy');
+}
+
+/** Four attempts only for overlapping writes; each starts with no stale WAL/SHM bytes. */
+export function snapshotPrefilterDatabase(path: string, destination: string, retry: () => void,
+  copy: typeof copyFileSync = copyFileSync): void {
+  for (let attempt = 0; attempt < 4; attempt++) {
+    for (const suffix of ['', '-wal', '-shm']) rmSync(`${destination}${suffix}`, { force: true });
+    try { snapshot(path, destination, copy); return; }
+    catch (error) {
+      const reason = error instanceof SnapshotError ? error.reason
+        : (error as NodeJS.ErrnoException)?.code === 'ENOENT' ? 'snapshot_busy' : 'snapshot_io';
+      if (reason !== 'snapshot_busy' || attempt === 3) throw new SnapshotError(reason);
+      retry();
+      Bun.sleepSync(25 * (attempt + 1));
+    }
+  }
 }
 
 function* databaseFiles(root: string): Generator<string> {
@@ -51,7 +84,7 @@ function* databaseFiles(root: string): Generator<string> {
 interface Inspected {
   original: string;
   snapshot: string;
-  kind: 'ledger' | 'store';
+  kind: 'ledger' | 'store' | 'sniffer';
   ledgerId?: string;
   corpusId?: string;
 }
@@ -63,7 +96,7 @@ export function runPrefilterTrainingDryRun(options: { dataDir?: string; rowLimit
   if (!lstatSync(root).isDirectory() || lstatSync(root).isSymbolicLink()) throw new Error('Invalid data directory');
   const scratch = mkdtempSync(join(tmpdir(), 'olympus-prefilter-'));
   const opened: Array<{ close(): void }> = [];
-  const report: PrefilterDryRunReport = { ledgers: [], errors: 0 };
+  const report = emptyReport();
   try {
     const inspected: Inspected[] = [];
     for (const original of databaseFiles(root)) {
@@ -72,27 +105,39 @@ export function runPrefilterTrainingDryRun(options: { dataDir?: string; rowLimit
       const target = join(dir, 'snapshot.sqlite');
       let db: Database | undefined;
       try {
-        snapshot(original, target);
+        snapshotPrefilterDatabase(original, target, () => { report.snapshot_retries++; });
         db = new Database(target, { readonly: true, create: false });
         db.exec('PRAGMA query_only = ON;');
         const tables = new Set((db.query("SELECT name FROM sqlite_master WHERE type = 'table'").all() as { name: string }[]).map(row => row.name));
         if (tables.has('tier_items') && tables.has('tier_ledger_meta')) {
           const id = db.query("SELECT value FROM tier_ledger_meta WHERE key = 'ledger_id'").get() as { value: string } | null;
           inspected.push({ original, snapshot: target, kind: 'ledger', ...(id ? { ledgerId: id.value } : {}) });
+        } else if (tables.has('sniffer_verdicts')) {
+          inspected.push({ original, snapshot: target, kind: 'sniffer' });
         } else if (tables.has('items') && tables.has('chunks') && tables.has('sync_runs')) {
           const corpus = db.query('SELECT corpus_id FROM sync_runs LIMIT 1').get() as { corpus_id: string } | null;
           inspected.push({ original, snapshot: target, kind: 'store', ...(corpus ? { corpusId: corpus.corpus_id } : {}) });
         }
-      } catch { report.errors++; }
+      } catch (error) { reportError(report, error instanceof SnapshotError ? error.reason : 'database_open'); }
       finally { db?.close(); }
       // Unrelated files must not collide with the next snapshot directory.
       if (!inspected.some(entry => entry.snapshot === target)) rmSync(dir, { recursive: true, force: true });
     }
     const ledgers = new Map<string, TierLedger>();
     for (const file of inspected.filter(file => file.kind === 'ledger')) {
-      const ledger = new TierLedger({ dbPath: file.snapshot, readOnly: true });
-      opened.push(ledger);
-      ledgers.set(file.original, ledger);
+      try {
+        const ledger = new TierLedger({ dbPath: file.snapshot, readOnly: true });
+        opened.push(ledger);
+        ledgers.set(file.original, ledger);
+      } catch { reportError(report, 'ledger_open'); }
+    }
+    const sniffers = new Map<string, TierSnifferStore>();
+    for (const file of inspected.filter(file => file.kind === 'sniffer')) {
+      try {
+        const store = new TierSnifferStore({ dbPath: file.snapshot, readOnly: true });
+        opened.push(store);
+        sniffers.set(file.original, store);
+      } catch { reportError(report, 'sniffer_open'); }
     }
     const stores: Array<{ store: LocalConnectorStore; ledgerPath: string | undefined; bound: boolean }> = [];
     for (const file of inspected.filter(file => file.kind === 'store')) {
@@ -106,7 +151,7 @@ export function runPrefilterTrainingDryRun(options: { dataDir?: string; rowLimit
             inspected.some(entry => entry.original === candidate && entry.ledgerId === binding.ledgerId))
           : tierLedgerPathForStore(file.original);
         stores.push({ store, ledgerPath, bound: !!binding });
-      } catch { report.errors++; }
+      } catch { reportError(report, 'store_open'); }
     }
     // The active attempt records the exact judge identity (including decision mode/owner prompt).
     // Do not infer a judge from individual row labels, which would hide provenance failures.
@@ -115,12 +160,14 @@ export function runPrefilterTrainingDryRun(options: { dataDir?: string; rowLimit
     const trainingOwners = installState.length ? installState.map(([, ledger]) => ledger) : [...ledgers.values()];
     for (const ledger of trainingOwners) {
       const raw = ledger.readMeta('embedding-prefilter:training-v1');
-      if (raw) {
-        const value = JSON.parse(raw) as { judge?: unknown };
-        if (typeof value.judge === 'string' && value.judge) judges.add(value.judge);
-      }
+      try {
+        if (raw) {
+          const value = JSON.parse(raw) as { judge?: unknown };
+          if (typeof value.judge === 'string' && value.judge) judges.add(value.judge);
+        }
+      } catch { reportError(report, 'training_judge'); return report; }
     }
-    if (judges.size !== 1) throw new Error('No unique recorded training judge');
+    if (judges.size !== 1) { reportError(report, 'training_judge'); return report; }
     const judge = [...judges][0]!;
     for (const [path, ledger] of ledgers) {
       // Match the service roster: existing co-located or bound source ledgers only.
@@ -128,7 +175,8 @@ export function runPrefilterTrainingDryRun(options: { dataDir?: string; rowLimit
       const own = inspected.some(file => file.kind === 'store' && tierLedgerPathForStore(file.original) === path);
       if (!members.length && !own) continue;
       const bound = members.some(member => member.bound);
-      report.ledgers.push(countPrefilterTraining({ ledger, judge, ...(options.rowLimit ? { rowLimit: options.rowLimit } : {}),
+      const sniffer = sniffers.get(tierSnifferPathForLedger(path));
+      report.ledgers.push(countPrefilterTraining({ ledger, judge, ...(sniffer ? { sniffer } : {}), ...(options.rowLimit ? { rowLimit: options.rowLimit } : {}),
         copyFor: subject => prefilterTrainingCopy(subject, ledger, bound ? corpusId =>
           members.find(member => member.store.corpusId === corpusId)?.store.exportItemCopy(subject) : undefined,
         () => {
@@ -163,7 +211,9 @@ export function prefilterTrainingDryRunMain(args: readonly string[]): number {
     console.log(JSON.stringify(report));
     return report.errors ? 1 : 0;
   } catch {
-    console.log(JSON.stringify({ ledgers: [], errors: 1 }));
+    const report = emptyReport();
+    reportError(report, 'arguments_or_install');
+    console.log(JSON.stringify(report));
     return 1;
   }
 }

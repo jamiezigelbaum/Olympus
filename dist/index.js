@@ -5624,9 +5624,113 @@ var init_operation_caller = __esm(() => {
 });
 
 // src/core/sqlite-migrations.ts
+function currentStoreMigrations() {
+  return [
+    {
+      version: CURRENT_OLYMPUS_SQLITE_SCHEMA_VERSION,
+      name: "record_existing_v1_schema",
+      up() {}
+    }
+  ];
+}
+function runSqliteMigrations(db, storeId, migrations = currentStoreMigrations(), options = {}) {
+  const ordered = validateMigrations(migrations);
+  const targetVersion = options.knownVersion ?? ordered.at(-1)?.version ?? CURRENT_OLYMPUS_SQLITE_SCHEMA_VERSION;
+  const currentVersion = readSqliteSchemaVersion(db, storeId);
+  if (currentVersion > targetVersion) {
+    throw new OperationError("config_error", `SQLite store "${storeId}" is at schema_version ${currentVersion}, but this Olympus build only knows schema_version ${targetVersion}.`, "Upgrade Olympus before opening this store. Refusing to open it prevents an older build from corrupting newer data.");
+  }
+  const pending = ordered.filter((migration) => migration.version > currentVersion).map(({ version, name }) => ({ version, name }));
+  if (options.dryRun === true) {
+    return {
+      storeId,
+      currentVersion,
+      targetVersion,
+      dryRun: true,
+      applied: [],
+      pending
+    };
+  }
+  ensureSchemaVersionTable(db);
+  const applied = [];
+  if (pending.length > 0) {
+    db.transaction(() => {
+      const lockedVersion = readSqliteSchemaVersion(db, storeId);
+      if (lockedVersion > targetVersion) {
+        throw new OperationError("config_error", `SQLite store "${storeId}" is at schema_version ${lockedVersion}, but this Olympus build only knows schema_version ${targetVersion}.`, "Upgrade Olympus before opening this store. Refusing to open it prevents an older build from corrupting newer data.");
+      }
+      for (const migration of ordered.filter((entry) => entry.version > lockedVersion)) {
+        migration.up(db);
+        writeSqliteSchemaVersion(db, storeId, migration.version);
+        applied.push({ version: migration.version, name: migration.name });
+      }
+    }).immediate();
+  }
+  return {
+    storeId,
+    currentVersion,
+    targetVersion,
+    dryRun: false,
+    applied,
+    pending: applied
+  };
+}
+function readSqliteSchemaVersion(db, storeId) {
+  if (!schemaVersionTableExists(db))
+    return 0;
+  const row = db.query(`SELECT version FROM ${SQLITE_SCHEMA_VERSION_TABLE} WHERE store_id = ?`).get(storeId);
+  return typeof row?.version === "number" && Number.isInteger(row.version) ? row.version : 0;
+}
+function ensureSchemaVersionTable(db) {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS ${SQLITE_SCHEMA_VERSION_TABLE} (
+      store_id TEXT PRIMARY KEY,
+      version INTEGER NOT NULL,
+      applied_at TEXT NOT NULL
+    );
+  `);
+}
+function writeSqliteSchemaVersion(db, storeId, version) {
+  db.query(`
+    INSERT INTO ${SQLITE_SCHEMA_VERSION_TABLE} (store_id, version, applied_at)
+    VALUES (?, ?, ?)
+    ON CONFLICT(store_id) DO UPDATE SET
+      version = excluded.version,
+      applied_at = excluded.applied_at
+  `).run(storeId, version, new Date().toISOString());
+}
+function schemaVersionTableExists(db) {
+  const row = db.query("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?").get(SQLITE_SCHEMA_VERSION_TABLE);
+  return row?.name === SQLITE_SCHEMA_VERSION_TABLE;
+}
+function validateMigrations(migrations) {
+  const ordered = [...migrations].sort((left, right) => left.version - right.version);
+  let previous = 0;
+  for (const migration of ordered) {
+    if (!Number.isInteger(migration.version) || migration.version <= 0) {
+      throw new OperationError("config_error", `SQLite migration "${migration.name}" must use a positive integer version.`);
+    }
+    if (migration.version === previous) {
+      throw new OperationError("config_error", `Duplicate SQLite migration version ${migration.version}.`);
+    }
+    previous = migration.version;
+  }
+  return ordered;
+}
+var SQLITE_SCHEMA_VERSION_TABLE = "schema_version", CURRENT_OLYMPUS_SQLITE_SCHEMA_VERSION = 1;
 var init_sqlite_migrations = __esm(() => {
   init_operation_error();
 });
+
+// src/core/sqlite-store.ts
+function closeSqliteStore(db, options = {}) {
+  if (options.checkpoint !== false) {
+    try {
+      db.exec("PRAGMA wal_checkpoint(TRUNCATE);");
+    } catch {}
+  }
+  db.close();
+}
 // src/core/source-watch.ts
 function sourceWatchAuthenticatedRouteHeaders(route) {
   const headers = new Headers({
@@ -5756,7 +5860,7 @@ function tierSnifferPathForStore(storeDbPath) {
   const base = storeDbPath.endsWith(".sqlite") ? storeDbPath.slice(0, -".sqlite".length) : storeDbPath;
   return `${base}${TIER_SNIFFER_FILE_SUFFIX}`;
 }
-var TIER_LEDGER_FILE_SUFFIX = ".tier-ledger.sqlite", SECRET_LOCATIONS_FILE_SUFFIX = ".secret-locations.sqlite", TIER_SNIFFER_FILE_SUFFIX = ".tier-sniffer.sqlite";
+var TIER_LEDGER_FILE_SUFFIX = ".tier-ledger.sqlite", SECRET_LOCATIONS_FILE_SUFFIX = ".secret-locations.sqlite", TIER_SNIFFER_SQLITE_STORE_ID = "olympus_tier_sniffer", TIER_SNIFFER_FILE_SUFFIX = ".tier-sniffer.sqlite";
 var init_tier_ledger_path = __esm(() => {
   init_olympus_layout();
 });
@@ -17865,7 +17969,7 @@ var init_engine = __esm(() => {
   CLEAN_GMAIL_CATEGORIES = new Set(["CATEGORY_FORUMS", "CATEGORY_UPDATES"]);
 });
 // src/workers/classification/tier-classifier.ts
-var UNDECIDED_TIER_SNIFFER;
+var HELD_UNTIL_JUDGED_PRIORITY = -1, UNDECIDED_TIER_SNIFFER;
 var init_tier_classifier = __esm(() => {
   init_secret_patterns();
   init_secret_patterns();
@@ -17922,6 +18026,443 @@ var init_secret_locations = __esm(() => {
 });
 
 // src/workers/classification/sniffer-store.ts
+import { Database } from "bun:sqlite";
+import { createHash as createHash12 } from "node:crypto";
+import { chmodSync as chmodSync9, existsSync as existsSync17, mkdirSync as mkdirSync16 } from "node:fs";
+import { dirname as dirname30 } from "node:path";
+function snifferMaterialHash(pass, material) {
+  return createHash12("sha256").update(`${pass}
+${material}`).digest("hex");
+}
+function snifferSubjectKey(subject) {
+  return createHash12("sha256").update(JSON.stringify([subject.provider, subject.accountScope, subject.providerConversationId ?? "", subject.providerItemId])).digest("hex");
+}
+
+class TierSnifferStore {
+  dbPath;
+  db;
+  now;
+  readOnly;
+  trainingReads = new Map;
+  constructor(options) {
+    this.dbPath = options.dbPath;
+    this.now = options.now ?? (() => new Date);
+    if (options.readOnly === true) {
+      this.db = new Database(this.dbPath, { readonly: true, create: false });
+      this.db.exec("PRAGMA busy_timeout = 10000; PRAGMA query_only = ON;");
+      this.readOnly = true;
+      return;
+    }
+    this.readOnly = false;
+    const onDisk = this.dbPath !== ":memory:";
+    if (onDisk)
+      mkdirSync16(dirname30(this.dbPath), { recursive: true, mode: 448 });
+    const previousUmask = onDisk ? process.umask(63) : undefined;
+    let db;
+    try {
+      db = new Database(this.dbPath, { create: true });
+      db.exec("PRAGMA busy_timeout = 10000; PRAGMA journal_mode = WAL;");
+      runSqliteMigrations(db, TIER_SNIFFER_SQLITE_STORE_ID, snifferMigrations());
+      if (onDisk)
+        restrictFiles(this.dbPath);
+    } catch (error) {
+      if (db)
+        closeSqliteStore(db);
+      throw error;
+    } finally {
+      if (previousUmask !== undefined)
+        process.umask(previousUmask);
+    }
+    this.db = db;
+  }
+  close() {
+    try {
+      closeSqliteStore(this.db, this.readOnly ? { checkpoint: false } : undefined);
+    } finally {
+      if (this.dbPath !== ":memory:" && !this.readOnly)
+        restrictFiles(this.dbPath);
+    }
+  }
+  getVerdict(key) {
+    const row = this.db.query(`
+      SELECT tier, category, confidence, fail_safe, decided_at, content_hash, model_subject FROM sniffer_verdicts
+      WHERE material_hash = ? AND model_id = ? AND prompt_version = ? AND map_revision = ?
+    `).get(key.materialHash, key.modelId, key.promptVersion, key.mapRevision);
+    if (!row)
+      return;
+    return {
+      tier: row.tier,
+      category: row.category,
+      confidence: row.confidence,
+      failSafe: row.fail_safe === 1,
+      decidedAt: row.decided_at,
+      ...row.content_hash ? { contentHash: row.content_hash } : {},
+      ...row.model_subject ? { modelSubject: row.model_subject } : {}
+    };
+  }
+  putVerdict(key, verdict, subject) {
+    this.db.query(`
+      INSERT INTO sniffer_verdicts (material_hash, model_id, prompt_version, map_revision, tier, category, confidence, fail_safe, decided_at, model_subject)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT (material_hash, model_id, prompt_version, map_revision) DO UPDATE SET
+        tier = excluded.tier, category = excluded.category, confidence = excluded.confidence,
+        fail_safe = excluded.fail_safe, decided_at = excluded.decided_at, content_hash = NULL, model_subject = excluded.model_subject
+    `).run(key.materialHash, key.modelId, key.promptVersion, key.mapRevision, verdict.tier, verdict.category, verdict.confidence, verdict.failSafe ? 1 : 0, this.now().toISOString(), subject ? snifferSubjectKey(subject) : null);
+  }
+  markFinalModelContent(key, contentHash) {
+    this.db.query(`UPDATE sniffer_verdicts SET content_hash = ?
+      WHERE material_hash = ? AND model_id = ? AND prompt_version = ? AND map_revision = ? AND fail_safe = 0`).run(contentHash, key.materialHash, key.modelId, key.promptVersion, key.mapRevision);
+  }
+  getFinalModelContentVerdict(key) {
+    const row = this.db.query(`SELECT material_hash FROM sniffer_verdicts
+      WHERE content_hash = ? AND model_id = ? AND prompt_version = ? AND map_revision = ? AND fail_safe = 0
+        AND (tier = 'private' OR material_hash = ?)
+      ORDER BY CASE tier WHEN 'private' THEN 1 ELSE 0 END DESC, decided_at DESC LIMIT 1`).get(key.contentHash, key.modelId, key.promptVersion, key.mapRevision, key.materialHash ?? null);
+    return row ? this.getVerdict({ ...key, materialHash: row.material_hash }) : undefined;
+  }
+  judgedContentLabel(subject, modelId, contentHash) {
+    const row = this.db.query(`SELECT tier FROM sniffer_verdicts
+      WHERE model_subject = ? AND model_id = ? AND content_hash = ? AND fail_safe = 0
+      ORDER BY decided_at DESC LIMIT 1`).get(snifferSubjectKey(subject), modelId, contentHash);
+    return row?.tier;
+  }
+  trainingVerdict(subject, modelId) {
+    const key = snifferSubjectKey(subject);
+    if (this.readOnly) {
+      let labels = this.trainingReads.get(modelId);
+      if (!labels) {
+        labels = new Map;
+        const rows = this.db.query(`SELECT model_subject, tier, decided_at FROM sniffer_verdicts
+          WHERE model_id = ? AND fail_safe = 0 AND model_subject IS NOT NULL`).iterate(modelId);
+        for (const row2 of rows) {
+          const prior = labels.get(row2.model_subject);
+          if (!prior || row2.decided_at > prior.decidedAt)
+            labels.set(row2.model_subject, { tier: row2.tier, decidedAt: row2.decided_at, ambiguous: false });
+          else if (row2.decided_at === prior.decidedAt && row2.tier !== prior.tier)
+            prior.ambiguous = true;
+        }
+        this.trainingReads.set(modelId, labels);
+      }
+      return labels.get(key);
+    }
+    const row = this.db.query(`SELECT MIN(tier) AS tier, decided_at, COUNT(DISTINCT tier) AS tiers
+      FROM sniffer_verdicts WHERE model_subject = ? AND model_id = ? AND fail_safe = 0
+      GROUP BY decided_at ORDER BY decided_at DESC LIMIT 1`).get(key, modelId);
+    return row ? { tier: row.tier, decidedAt: row.decided_at, ambiguous: row.tiers !== 1 } : undefined;
+  }
+  changeMarker() {
+    const own = this.db.query("SELECT total_changes() AS changes").get();
+    const external = this.db.query("PRAGMA data_version").get();
+    return `${external.data_version}:${own.changes}`;
+  }
+  enqueue(question) {
+    const materialHash = question.materialHash ?? snifferMaterialHash(question.pass, question.material);
+    const priority = Number.isFinite(question.priority) ? Math.max(HELD_UNTIL_JUDGED_PRIORITY, Math.min(100, Math.floor(question.priority))) : 0;
+    const hinted = question.conversationOrder !== undefined;
+    const hint = question.conversationOrder === 1 ? 1 : question.conversationOrder === -1 ? -1 : 0;
+    return this.db.transaction(() => {
+      if (question.stillAsk && !question.stillAsk())
+        return false;
+      const before = this.db.query(`
+        SELECT priority, conversation_order FROM sniffer_questions
+        WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND pass = ?
+      `).get(...subjectParams(question.subject), question.pass);
+      const conversationOrder = hinted ? hint : before?.conversation_order ?? 0;
+      this.db.query(`
+      INSERT INTO sniffer_questions (
+        provider, account_scope, conversation_key, provider_item_id, pass, material_hash, map_revision, material, flags_json, attempts, queued_at, priority, content_hash, conversation_order
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?)
+      ON CONFLICT (provider, account_scope, conversation_key, provider_item_id, pass) DO UPDATE SET
+        held_sniffer_id = CASE WHEN sniffer_questions.material_hash = excluded.material_hash
+          AND sniffer_questions.map_revision = excluded.map_revision AND sniffer_questions.flags_json = excluded.flags_json
+          THEN sniffer_questions.held_sniffer_id ELSE NULL END,
+        attempts = CASE WHEN sniffer_questions.material_hash = excluded.material_hash
+          AND sniffer_questions.map_revision = excluded.map_revision
+          THEN sniffer_questions.attempts ELSE 0 END,
+        content_hash = excluded.content_hash,
+        material_hash = excluded.material_hash,
+        map_revision = excluded.map_revision,
+        material = excluded.material,
+        priority = excluded.priority,
+        conversation_order = excluded.conversation_order,
+        flags_json = excluded.flags_json
+    `).run(...subjectParams(question.subject), question.pass, materialHash, question.mapRevision, question.material, JSON.stringify([...question.flags]), this.now().toISOString(), priority, question.contentHash ?? null, conversationOrder);
+      if (!before && (priority > 0 || conversationOrder > 0) || before && (priority > before.priority || conversationOrder !== before.conversation_order)) {
+        this.db.query("DELETE FROM sniffer_scan WHERE scan_key IN (?, ?)").run("all:recent", `${question.pass}:recent`);
+      }
+      return true;
+    }).immediate();
+  }
+  questionFor(subject, pass) {
+    const row = this.db.query(`
+      SELECT * FROM sniffer_questions
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND pass = ?
+    `).get(...subjectParams(subject), pass);
+    return row ? questionFromRow(row) : undefined;
+  }
+  listQuestions(options = {}) {
+    const limit = Math.max(1, Math.min(options.limit ?? 500, 5000));
+    const scanLimit = Math.max(64, limit);
+    const accepted = new Map;
+    const eligible = (question) => {
+      if (!accepted.has(question.sequence))
+        accepted.set(question.sequence, options.eligible?.(question) ?? true);
+      return accepted.get(question.sequence);
+    };
+    const read = (oldest2, count) => {
+      const key = `${options.pass ?? "all"}:${oldest2 ? "oldest" : "recent"}`;
+      let cursor = options.eligible && !this.readOnly ? this.db.query("SELECT conversation_order, priority, queued_at, question_pk, candidate_pk FROM sniffer_scan WHERE scan_key = ?").get(key) : null;
+      if (oldest2 && cursor?.candidate_pk != null) {
+        const pinned = this.db.query("SELECT * FROM sniffer_questions WHERE question_pk = ?").get(cursor.candidate_pk);
+        if (pinned) {
+          const question = questionFromRow(pinned);
+          if (eligible(question))
+            return [question];
+        }
+        cursor = null;
+        this.db.query("DELETE FROM sniffer_scan WHERE scan_key = ?").run(key);
+      }
+      const filters = [];
+      const params = [];
+      if (options.pass) {
+        filters.push("pass = ?");
+        params.push(options.pass);
+      }
+      if (cursor) {
+        filters.push(oldest2 ? "(queued_at, question_pk) > (?, ?)" : "(priority, conversation_order, queued_at, question_pk) < (?, ?, ?, ?)");
+        if (!oldest2)
+          params.push(cursor.priority, cursor.conversation_order);
+        params.push(cursor.queued_at, cursor.question_pk);
+      }
+      const rows = this.db.query(`SELECT * FROM sniffer_questions
+        ${filters.length ? `WHERE ${filters.join(" AND ")}` : ""}
+        ORDER BY ${oldest2 ? "queued_at, question_pk" : "priority DESC, conversation_order DESC, queued_at DESC, question_pk DESC"} LIMIT ?`).all(...params, scanLimit);
+      const found = [];
+      for (const row of rows) {
+        const question = questionFromRow(row);
+        if (eligible(question))
+          found.push(question);
+        if (found.length === count)
+          break;
+      }
+      if (options.eligible && !this.readOnly) {
+        const last = rows.at(-1);
+        if (oldest2 && found[0]) {
+          const candidate = found[0];
+          this.db.query(`INSERT OR REPLACE INTO sniffer_scan
+            (scan_key, conversation_order, priority, queued_at, question_pk, candidate_pk) VALUES (?, ?, ?, ?, ?, ?)`).run(key, candidate.conversationOrder ?? 0, candidate.priority, candidate.queuedAt, candidate.sequence, candidate.sequence);
+        } else if (found.length === 0 && rows.length === scanLimit && last) {
+          this.db.query(`INSERT OR REPLACE INTO sniffer_scan
+            (scan_key, conversation_order, priority, queued_at, question_pk) VALUES (?, ?, ?, ?, ?)`).run(key, last.conversation_order, last.priority, last.queued_at, last.question_pk);
+        } else
+          this.db.query("DELETE FROM sniffer_scan WHERE scan_key = ?").run(key);
+      }
+      return found;
+    };
+    const questions = read(false, limit);
+    const oldest = read(true, 1)[0];
+    if (oldest && !questions.some((question) => question.sequence === oldest.sequence))
+      questions.push(oldest);
+    return questions;
+  }
+  dispatchCount() {
+    const used = this.db.query("SELECT dispatches FROM sniffer_schedule WHERE id = 1").get().dispatches;
+    return used;
+  }
+  recordDispatch() {
+    this.db.exec("UPDATE sniffer_schedule SET dispatches = dispatches + 1 WHERE id = 1");
+  }
+  clockMs() {
+    return this.now().getTime();
+  }
+  deleteQuestion(subject, pass, materialHash) {
+    return this.db.query(`
+      DELETE FROM sniffer_questions
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND pass = ?
+        AND (? IS NULL OR material_hash = ?)
+    `).run(...subjectParams(subject), pass, materialHash ?? null, materialHash ?? null).changes > 0;
+  }
+  deleteItemQuestions(subject) {
+    return this.db.query(`
+      DELETE FROM sniffer_questions
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+    `).run(...subjectParams(subject)).changes;
+  }
+  deleteAccountScopeQuestions(provider, accountScope) {
+    return this.db.query("DELETE FROM sniffer_questions WHERE provider = ? AND account_scope = ?").run(provider, accountScope).changes;
+  }
+  rekey(subject, pass, mapRevision) {
+    this.db.query(`
+      UPDATE sniffer_questions SET map_revision = ?, attempts = 0, held_sniffer_id = NULL
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND pass = ?
+    `).run(mapRevision, ...subjectParams(subject), pass);
+  }
+  recordAttemptFailure(subject, pass) {
+    this.db.query(`
+      UPDATE sniffer_questions SET attempts = attempts + 1
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND pass = ?
+    `).run(...subjectParams(subject), pass);
+    return this.questionFor(subject, pass)?.attempts ?? 0;
+  }
+  markHeldLowering(question, snifferId) {
+    this.db.query(`UPDATE sniffer_questions SET held_sniffer_id = ?
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND pass = ?
+        AND material_hash = ? AND map_revision = ?`).run(snifferId, ...subjectParams(question), question.pass, question.materialHash, question.mapRevision);
+  }
+  questionWorkCounts(snifferId) {
+    return this.db.query(`SELECT
+      COUNT(CASE WHEN held_sniffer_id IS NULL OR held_sniffer_id != ? THEN 1 END) AS unanswered,
+      COUNT(CASE WHEN held_sniffer_id = ? THEN 1 END) AS heldLowering
+      FROM sniffer_questions`).get(snifferId, snifferId);
+  }
+  verdictCount() {
+    return this.db.query("SELECT COUNT(*) AS n FROM sniffer_verdicts").get().n;
+  }
+  counts() {
+    const byPass = { metadata: 0, content: 0 };
+    let questions = 0;
+    for (const row of this.db.query("SELECT pass, COUNT(*) AS n FROM sniffer_questions GROUP BY pass").all()) {
+      byPass[row.pass] = row.n;
+      questions += row.n;
+    }
+    const verdicts = this.db.query("SELECT COUNT(*) AS n FROM sniffer_verdicts").get().n;
+    const items = this.db.query(`
+      SELECT COUNT(*) AS n FROM (
+        SELECT DISTINCT provider, account_scope, conversation_key, provider_item_id FROM sniffer_questions
+      )
+    `).get().n;
+    return { questions, items, byPass, verdicts };
+  }
+}
+function questionFromRow(row) {
+  return {
+    provider: row.provider,
+    accountScope: row.account_scope,
+    providerItemId: row.provider_item_id,
+    ...row.conversation_key ? { providerConversationId: row.conversation_key } : {},
+    pass: row.pass,
+    materialHash: row.material_hash,
+    ...row.content_hash ? { contentHash: row.content_hash } : {},
+    mapRevision: row.map_revision,
+    material: row.material,
+    flags: JSON.parse(row.flags_json),
+    attempts: row.attempts,
+    queuedAt: row.queued_at,
+    priority: row.priority ?? 0,
+    conversationOrder: row.conversation_order ?? 0,
+    sequence: row.question_pk
+  };
+}
+function subjectParams(subject) {
+  return [subject.provider, subject.accountScope, subject.providerConversationId ?? "", subject.providerItemId];
+}
+function restrictFiles(dbPath) {
+  for (const path of [dbPath, `${dbPath}-wal`, `${dbPath}-shm`]) {
+    if (existsSync17(path))
+      chmodSync9(path, 384);
+  }
+}
+function snifferMigrations() {
+  return [
+    {
+      version: 1,
+      name: "create_tier_sniffer",
+      up(db) {
+        db.exec(`
+          CREATE TABLE IF NOT EXISTS sniffer_verdicts (
+            material_hash TEXT NOT NULL,
+            model_id TEXT NOT NULL,
+            prompt_version TEXT NOT NULL,
+            map_revision TEXT NOT NULL,
+            tier TEXT NOT NULL CHECK (tier IN ('personal', 'private')),
+            category TEXT NOT NULL,
+            confidence REAL NOT NULL CHECK (confidence >= 0 AND confidence <= 1),
+            fail_safe INTEGER NOT NULL DEFAULT 0 CHECK (fail_safe IN (0, 1)),
+            decided_at TEXT NOT NULL,
+            PRIMARY KEY (material_hash, model_id, prompt_version, map_revision)
+          );
+          CREATE TABLE IF NOT EXISTS sniffer_questions (
+            question_pk INTEGER PRIMARY KEY AUTOINCREMENT,
+            provider TEXT NOT NULL,
+            account_scope TEXT NOT NULL,
+            conversation_key TEXT NOT NULL DEFAULT '',
+            provider_item_id TEXT NOT NULL,
+            pass TEXT NOT NULL CHECK (pass IN ('metadata', 'content')),
+            material_hash TEXT NOT NULL,
+            map_revision TEXT NOT NULL,
+            material TEXT NOT NULL,
+            flags_json TEXT NOT NULL,
+            attempts INTEGER NOT NULL DEFAULT 0,
+            queued_at TEXT NOT NULL,
+            UNIQUE (provider, account_scope, conversation_key, provider_item_id, pass)
+          );
+        `);
+      }
+    },
+    {
+      version: 2,
+      name: "priority_and_aging",
+      up(db) {
+        db.exec(`ALTER TABLE sniffer_questions ADD COLUMN priority INTEGER NOT NULL DEFAULT 0;
+          CREATE INDEX sniffer_recent ON sniffer_questions(priority DESC, queued_at DESC, question_pk DESC);
+          CREATE TABLE sniffer_schedule (id INTEGER PRIMARY KEY, dispatches INTEGER NOT NULL);
+          INSERT INTO sniffer_schedule VALUES (1, 0);`);
+      }
+    },
+    {
+      version: 3,
+      name: "bounded_queue_scans",
+      up(db) {
+        db.exec(`CREATE INDEX sniffer_oldest ON sniffer_questions(queued_at, question_pk);
+          CREATE INDEX sniffer_pass_recent ON sniffer_questions(pass, priority DESC, queued_at DESC, question_pk DESC);
+          CREATE INDEX sniffer_pass_oldest ON sniffer_questions(pass, queued_at, question_pk);
+          CREATE TABLE sniffer_scan (
+            scan_key TEXT PRIMARY KEY, priority INTEGER NOT NULL,
+            queued_at TEXT NOT NULL, question_pk INTEGER NOT NULL, candidate_pk INTEGER
+          );`);
+      }
+    },
+    {
+      version: 4,
+      name: "held_lowering_answers",
+      up(db) {
+        db.exec("ALTER TABLE sniffer_questions ADD COLUMN held_sniffer_id TEXT;");
+      }
+    },
+    {
+      version: 5,
+      name: "final_model_content_reuse",
+      up(db) {
+        db.exec(`ALTER TABLE sniffer_questions ADD COLUMN content_hash TEXT;
+          ALTER TABLE sniffer_verdicts ADD COLUMN content_hash TEXT;
+          ALTER TABLE sniffer_verdicts ADD COLUMN model_subject TEXT;
+          CREATE INDEX sniffer_final_content ON sniffer_verdicts(content_hash, model_id, prompt_version, map_revision)
+            WHERE fail_safe = 0 AND content_hash IS NOT NULL;`);
+      }
+    },
+    {
+      version: 6,
+      name: "conversation_queue_order",
+      up(db) {
+        db.exec(`ALTER TABLE sniffer_questions ADD COLUMN conversation_order INTEGER NOT NULL DEFAULT 0;
+          ALTER TABLE sniffer_scan ADD COLUMN conversation_order INTEGER NOT NULL DEFAULT 0;
+          DROP INDEX sniffer_recent;
+          DROP INDEX sniffer_pass_recent;
+          CREATE INDEX sniffer_recent ON sniffer_questions(priority DESC, conversation_order DESC, queued_at DESC, question_pk DESC);
+          CREATE INDEX sniffer_pass_recent ON sniffer_questions(pass, priority DESC, conversation_order DESC, queued_at DESC, question_pk DESC);
+          DELETE FROM sniffer_scan WHERE scan_key LIKE '%:recent';`);
+      }
+    },
+    {
+      version: 7,
+      name: "subject_training_verdict_lookup",
+      up(db) {
+        db.exec(`CREATE INDEX sniffer_training_subject ON sniffer_verdicts(model_subject, model_id, decided_at DESC)
+          WHERE fail_safe = 0 AND model_subject IS NOT NULL;`);
+      }
+    }
+  ];
+}
 var init_sniffer_store = __esm(() => {
   init_sqlite_migrations();
   init_tier_classifier();
@@ -18421,7 +18962,7 @@ var init_delphi_scorer = __esm(() => {
 });
 
 // src/workers/classification/sniffer.ts
-import { createHash as createHash12 } from "node:crypto";
+import { createHash as createHash13 } from "node:crypto";
 function buildSnifferBatchPrompt(pass, items, ownerContext) {
   const intro = pass === "metadata" ? "Each item below is the NAMES of one file, message or note: its title, folder path, labels and sender." : "Each item below is one document or message: its NAMES (title, folder path, sender) when known, then a short EXCERPT of its text.";
   const lines = items.map((item) => JSON.stringify(pass === "metadata" ? { i: item.i, names: item.material } : { i: item.i, document: item.material }));
@@ -18517,8 +19058,8 @@ var init_sniffer = __esm(() => {
     required: ["verdicts"],
     additionalProperties: false
   };
-  SNIFFER_PROMPT_VERSION = `p-${createHash12("sha256").update(SNIFFER_SYSTEM_PROMPT).update("\x00").update(buildSnifferBatchPrompt("metadata", [{ i: 1, material: "template" }])).update("\x00").update(buildSnifferBatchPrompt("content", [{ i: 1, material: "template" }])).digest("hex").slice(0, 12)}`;
-  SNIFFER_OWNER_CONTEXT_PROMPT_VERSION = `p-${createHash12("sha256").update(SNIFFER_SYSTEM_PROMPT).update("\x00").update(buildSnifferBatchPrompt("metadata", [{ i: 1, material: "template" }], "template")).update("\x00").update(buildSnifferBatchPrompt("content", [{ i: 1, material: "template" }], "template")).digest("hex").slice(0, 12)}`;
+  SNIFFER_PROMPT_VERSION = `p-${createHash13("sha256").update(SNIFFER_SYSTEM_PROMPT).update("\x00").update(buildSnifferBatchPrompt("metadata", [{ i: 1, material: "template" }])).update("\x00").update(buildSnifferBatchPrompt("content", [{ i: 1, material: "template" }])).digest("hex").slice(0, 12)}`;
+  SNIFFER_OWNER_CONTEXT_PROMPT_VERSION = `p-${createHash13("sha256").update(SNIFFER_SYSTEM_PROMPT).update("\x00").update(buildSnifferBatchPrompt("metadata", [{ i: 1, material: "template" }], "template")).update("\x00").update(buildSnifferBatchPrompt("content", [{ i: 1, material: "template" }], "template")).digest("hex").slice(0, 12)}`;
 });
 
 // src/workers/connector-store/secrets-disposition.ts
@@ -19098,9 +19639,9 @@ var init_tier_content_purge = __esm(() => {
 });
 // src/workers/source-index/built-in-embedding/litert-runtime.ts
 import { spawn as spawn4 } from "node:child_process";
-import { closeSync as closeSync8, constants as constants7, existsSync as existsSync17, fstatSync as fstatSync3, openSync as openSync7, readdirSync as readdirSync8, statSync as statSync17 } from "node:fs";
+import { closeSync as closeSync8, constants as constants7, existsSync as existsSync18, fstatSync as fstatSync3, openSync as openSync7, readdirSync as readdirSync8, statSync as statSync17 } from "node:fs";
 import { homedir as homedir16 } from "node:os";
-import { delimiter as delimiter6, dirname as dirname30, isAbsolute as isAbsolute21, join as join37 } from "node:path";
+import { delimiter as delimiter6, dirname as dirname31, isAbsolute as isAbsolute21, join as join37 } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath as fileURLToPath6 } from "node:url";
 function helperEnvironment() {
@@ -19274,10 +19815,10 @@ class HelperProcess {
   }
 }
 function helperPath() {
-  const here = dirname30(fileURLToPath6(import.meta.url));
+  const here = dirname31(fileURLToPath6(import.meta.url));
   for (const name of ["litert-helper.js", "litert-helper.ts"]) {
     const candidate = join37(here, name);
-    if (existsSync17(candidate))
+    if (existsSync18(candidate))
       return candidate;
   }
   throw new Error("The built-in search model helper is missing from this install.");
@@ -20395,14 +20936,14 @@ var init_locator_result_projector = __esm(() => {
 });
 
 // src/workers/dropbox-files/dropbox-content-hash.ts
-import { createHash as createHash13 } from "node:crypto";
+import { createHash as createHash14 } from "node:crypto";
 function computeDropboxContentHash(bytes) {
   const blockDigests = [];
   for (let offset = 0;offset < bytes.byteLength; offset += DROPBOX_CONTENT_HASH_BLOCK_SIZE) {
     const block = bytes.subarray(offset, Math.min(offset + DROPBOX_CONTENT_HASH_BLOCK_SIZE, bytes.byteLength));
-    blockDigests.push(createHash13("sha256").update(block).digest());
+    blockDigests.push(createHash14("sha256").update(block).digest());
   }
-  return createHash13("sha256").update(Buffer.concat(blockDigests)).digest("hex");
+  return createHash14("sha256").update(Buffer.concat(blockDigests)).digest("hex");
 }
 var DROPBOX_CONTENT_HASH_BLOCK_SIZE;
 var init_dropbox_content_hash = __esm(() => {
@@ -22393,16 +22934,16 @@ var init_text = __esm(() => {
 });
 
 // src/workers/file-extraction/extractors/apple-vision-ocr.ts
-import { existsSync as existsSync18 } from "node:fs";
-import { dirname as dirname31, join as join40 } from "node:path";
+import { existsSync as existsSync19 } from "node:fs";
+import { dirname as dirname32, join as join40 } from "node:path";
 import { fileURLToPath as fileURLToPath7 } from "node:url";
-function resolveAppleVisionOcrScript(moduleUrl = import.meta.url, exists = existsSync18) {
-  let directory = dirname31(fileURLToPath7(moduleUrl));
+function resolveAppleVisionOcrScript(moduleUrl = import.meta.url, exists = existsSync19) {
+  let directory = dirname32(fileURLToPath7(moduleUrl));
   for (let depth2 = 0;depth2 < 6; depth2 += 1) {
     const candidate = join40(directory, APPLE_VISION_OCR_SCRIPT);
     if (exists(candidate))
       return candidate;
-    const parent = dirname31(directory);
+    const parent = dirname32(directory);
     if (parent === directory)
       break;
     directory = parent;
@@ -23583,14 +24124,14 @@ var init_remote_connections = __esm(() => {
 });
 
 // src/core/ingestion-health-state.ts
-import { existsSync as existsSync19, mkdirSync as mkdirSync16, readFileSync as readFileSync32, writeFileSync as writeFileSync10 } from "node:fs";
-import { dirname as dirname32 } from "node:path";
+import { existsSync as existsSync20, mkdirSync as mkdirSync17, readFileSync as readFileSync32, writeFileSync as writeFileSync10 } from "node:fs";
+import { dirname as dirname33 } from "node:path";
 function defaultIngestionHealthStatePath(env = process.env) {
   return sharedDataPath("ingestion-doctor-state", env);
 }
 function readIngestionHealthState(path) {
   try {
-    if (!existsSync19(path))
+    if (!existsSync20(path))
       return;
     const parsed = JSON.parse(readFileSync32(path, "utf8"));
     const record2 = asRecord16(parsed);
@@ -23613,7 +24154,7 @@ function readIngestionHealthState(path) {
   }
 }
 function writeIngestionHealthState(path, state) {
-  mkdirSync16(dirname32(path), { recursive: true, mode: 448 });
+  mkdirSync17(dirname33(path), { recursive: true, mode: 448 });
   writeFileSync10(path, `${JSON.stringify(state, null, 2)}
 `);
 }
@@ -26654,7 +27195,7 @@ function asRecord7(value) {
 
 // src/native-plugin.ts
 init_config();
-import { createHash as createHash15 } from "node:crypto";
+import { createHash as createHash16 } from "node:crypto";
 
 // src/core/delphi.ts
 init_operation_error();
@@ -30440,7 +30981,7 @@ init_linux_engine_layout();
 init_model_transport();
 init_config();
 import { spawnSync as spawnSync8 } from "node:child_process";
-import { existsSync as existsSync21, readFileSync as readFileSync34 } from "node:fs";
+import { existsSync as existsSync22, readFileSync as readFileSync34 } from "node:fs";
 import { join as join44 } from "node:path";
 import { homedir as homedir18 } from "node:os";
 init_openclaw_executable();
@@ -30904,10 +31445,10 @@ init_consult_transport_zkapi();
 
 // src/core/consult-gate.ts
 init_owner_config_read();
-import { createHash as createHash14 } from "node:crypto";
-import { existsSync as existsSync20, readFileSync as readFileSync33, statSync as statSync19 } from "node:fs";
+import { createHash as createHash15 } from "node:crypto";
+import { existsSync as existsSync21, readFileSync as readFileSync33, statSync as statSync19 } from "node:fs";
 import { homedir as homedir17 } from "node:os";
-import { basename as basename7, dirname as dirname33, join as join42 } from "node:path";
+import { basename as basename7, dirname as dirname34, join as join42 } from "node:path";
 import { fileURLToPath as fileURLToPath8 } from "node:url";
 init_opsec();
 init_types();
@@ -31150,20 +31691,20 @@ function consultUserVocabularyDir(env = process.env) {
 var vocabularyCache = new Map;
 function verifiedPackFile(path, sha256) {
   try {
-    if (!existsSync20(path))
+    if (!existsSync21(path))
       return "missing";
     if (statSync19(path).size > CONSULT_VOCABULARY_MAX_COMPRESSED_BYTES)
       return "too_large";
     const gz = readFileSync33(path);
-    return createHash14("sha256").update(gz).digest("hex") === sha256 ? gz : "hash_mismatch";
+    return createHash15("sha256").update(gz).digest("hex") === sha256 ? gz : "hash_mismatch";
   } catch {
     return "unreadable";
   }
 }
 function consultVocabularyRoot(moduleUrl = import.meta.url) {
-  const here = dirname33(fileURLToPath8(moduleUrl));
-  const root = basename7(here) === "core" && basename7(dirname33(here)) === "src" ? dirname33(dirname33(here)) : basename7(here) === "dist" ? dirname33(here) : undefined;
-  return root !== undefined && existsSync20(join42(root, ...VOCABULARY_DIR)) ? root : undefined;
+  const here = dirname34(fileURLToPath8(moduleUrl));
+  const root = basename7(here) === "core" && basename7(dirname34(here)) === "src" ? dirname34(dirname34(here)) : basename7(here) === "dist" ? dirname34(here) : undefined;
+  return root !== undefined && existsSync21(join42(root, ...VOCABULARY_DIR)) ? root : undefined;
 }
 function consultVocabularyFileStatus(options = {}, env = process.env) {
   const selection = consultVocabularySelection(options);
@@ -31188,7 +31729,7 @@ function userManifestEntries(userDir) {
     return [];
   try {
     const path = join42(userDir, "manifest.json");
-    if (!existsSync20(path) || statSync19(path).size > 1024 * 1024)
+    if (!existsSync21(path) || statSync19(path).size > 1024 * 1024)
       return [];
     const manifest = JSON.parse(readFileSync33(path, "utf8"));
     if (!manifest || typeof manifest !== "object" || Array.isArray(manifest))
@@ -32624,7 +33165,7 @@ async function defaultDoctorHostProbe(env = process.env, options = {}) {
   const paths = engineServicePaths({ homeDir: home, env });
   const openclawPath = resolveOpenClawExecutable({ env, homeDir: home });
   const engine = process.platform === "darwin" || process.platform === "linux" ? inspectEngine({ homeDir: home, env }) : { installed: false, state: "not_loaded" };
-  const legacyWorkerUnit = process.platform === "darwin" || process.platform === "linux" ? existsSync21(workerServicePaths(process.platform, home).unitPath) : false;
+  const legacyWorkerUnit = process.platform === "darwin" || process.platform === "linux" ? existsSync22(workerServicePaths(process.platform, home).unitPath) : false;
   const health = process.platform === "linux" && engine.installed ? await waitForEngineHealthy({ paths, expectedBuild: linuxInstalledBuild({ homeDir: home, env }) }, { timeoutMs: 0 }) : undefined;
   return {
     ...openclawPath ? { openclawPath } : {},
@@ -32741,7 +33282,7 @@ function doctorSovereigntyEngine(deps) {
   if (inline !== undefined)
     return loadSovereigntyEngine({ inlineConfig: inline });
   const configPath = doctorSovereigntyConfigPath(deps);
-  if (configPath === undefined || !existsSync21(configPath))
+  if (configPath === undefined || !existsSync22(configPath))
     return;
   return loadSovereigntyEngine({ configPath, ...deps.env ? { env: deps.env } : {} });
 }
@@ -34023,7 +34564,7 @@ function readRegistrySafely(deps) {
 }
 function defaultCommandExists(command) {
   const path = process.env.PATH ?? "";
-  return path.split(":").some((dir) => Boolean(dir) && existsSync21(join44(dir, command)));
+  return path.split(":").some((dir) => Boolean(dir) && existsSync22(join44(dir, command)));
 }
 function defaultPythonModuleExists(pythonCommand, moduleName) {
   const proc = spawnSync8(pythonCommand, ["-c", `import ${moduleName}`], { stdio: "ignore" });
@@ -34042,7 +34583,7 @@ function errorDetail(error) {
 // src/core/ocr-readiness.ts
 init_apple_vision_ocr();
 init_ocr_capability();
-import { existsSync as existsSync22, readFileSync as readFileSync35 } from "node:fs";
+import { existsSync as existsSync23, readFileSync as readFileSync35 } from "node:fs";
 var ARCH_IDS2 = ["arch", "archlinux", "omarchy", "manjaro", "endeavouros", "cachyos", "arcolinux", "garuda"];
 var DEBIAN_IDS2 = ["debian", "ubuntu", "linuxmint", "pop", "raspbian", "neon", "elementary", "zorin"];
 var FEDORA_IDS2 = ["fedora", "rhel", "centos", "rocky", "almalinux", "ol", "nobara"];
@@ -34098,7 +34639,7 @@ function ocrInstallRemedy(input) {
   return "Install the packages that provide tesseract (with its English language data) and pdftoppm (poppler-utils) with your package manager.";
 }
 function visionReady(platform2, preference) {
-  return appleVisionOcrSelected(preference, platform2) && resolveAppleVisionOcrScript() !== undefined && existsSync22(APPLE_VISION_OSASCRIPT);
+  return appleVisionOcrSelected(preference, platform2) && resolveAppleVisionOcrScript() !== undefined && existsSync23(APPLE_VISION_OSASCRIPT);
 }
 function describeOcrReadiness(input) {
   if (input.preference === "tesseract")
@@ -36228,7 +36769,7 @@ function sourceWatchRouteFromToolContext(context2) {
   const ownerSeed = context2.requesterSenderId?.trim() || context2.agentId?.trim();
   if (!ownerSeed)
     return;
-  const ownerId2 = `owner:${createHash15("sha256").update(ownerSeed, "utf8").digest("hex")}`;
+  const ownerId2 = `owner:${createHash16("sha256").update(ownerSeed, "utf8").digest("hex")}`;
   const channel = (context2.deliveryContext?.channel || context2.messageChannel)?.trim().toLowerCase();
   const target = context2.deliveryContext?.to?.trim();
   if (channel && target && ["telegram", "whatsapp", "signal", "discord", "slack"].includes(channel)) {

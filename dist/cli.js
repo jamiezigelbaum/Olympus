@@ -20304,6 +20304,7 @@ class TierSnifferStore {
   db;
   now;
   readOnly;
+  trainingReads = new Map;
   constructor(options) {
     this.dbPath = options.dbPath;
     this.now = options.now ?? (() => new Date);
@@ -20385,6 +20386,35 @@ class TierSnifferStore {
       WHERE model_subject = ? AND model_id = ? AND content_hash = ? AND fail_safe = 0
       ORDER BY decided_at DESC LIMIT 1`).get(snifferSubjectKey(subject), modelId, contentHash);
     return row?.tier;
+  }
+  trainingVerdict(subject, modelId) {
+    const key = snifferSubjectKey(subject);
+    if (this.readOnly) {
+      let labels = this.trainingReads.get(modelId);
+      if (!labels) {
+        labels = new Map;
+        const rows = this.db.query(`SELECT model_subject, tier, decided_at FROM sniffer_verdicts
+          WHERE model_id = ? AND fail_safe = 0 AND model_subject IS NOT NULL`).iterate(modelId);
+        for (const row2 of rows) {
+          const prior = labels.get(row2.model_subject);
+          if (!prior || row2.decided_at > prior.decidedAt)
+            labels.set(row2.model_subject, { tier: row2.tier, decidedAt: row2.decided_at, ambiguous: false });
+          else if (row2.decided_at === prior.decidedAt && row2.tier !== prior.tier)
+            prior.ambiguous = true;
+        }
+        this.trainingReads.set(modelId, labels);
+      }
+      return labels.get(key);
+    }
+    const row = this.db.query(`SELECT MIN(tier) AS tier, decided_at, COUNT(DISTINCT tier) AS tiers
+      FROM sniffer_verdicts WHERE model_subject = ? AND model_id = ? AND fail_safe = 0
+      GROUP BY decided_at ORDER BY decided_at DESC LIMIT 1`).get(key, modelId);
+    return row ? { tier: row.tier, decidedAt: row.decided_at, ambiguous: row.tiers !== 1 } : undefined;
+  }
+  changeMarker() {
+    const own = this.db.query("SELECT total_changes() AS changes").get();
+    const external = this.db.query("PRAGMA data_version").get();
+    return `${external.data_version}:${own.changes}`;
   }
   enqueue(question) {
     const materialHash = question.materialHash ?? snifferMaterialHash(question.pass, question.material);
@@ -20682,6 +20712,14 @@ function snifferMigrations() {
           CREATE INDEX sniffer_recent ON sniffer_questions(priority DESC, conversation_order DESC, queued_at DESC, question_pk DESC);
           CREATE INDEX sniffer_pass_recent ON sniffer_questions(pass, priority DESC, conversation_order DESC, queued_at DESC, question_pk DESC);
           DELETE FROM sniffer_scan WHERE scan_key LIKE '%:recent';`);
+      }
+    },
+    {
+      version: 7,
+      name: "subject_training_verdict_lookup",
+      up(db) {
+        db.exec(`CREATE INDEX sniffer_training_subject ON sniffer_verdicts(model_subject, model_id, decided_at DESC)
+          WHERE fail_safe = 0 AND model_subject IS NOT NULL;`);
       }
     }
   ];
@@ -124336,14 +124374,35 @@ function prefilterTrainingExample(row, judge3, options, reject = () => {
   const digest4 = contentDigestReason(copy.chunks.map((chunk) => chunk.boundedText).join(""));
   if (!row.reasons.includes(digest4))
     return reject("digest_missing");
-  if (!row.reasons.includes(contentJudgeVerdictReason(judged, row.contentTier, digest4)))
-    return reject("verdict_missing");
+  let provenance = "judge_receipt";
+  if (!row.reasons.includes(contentJudgeVerdictReason(judged, row.contentTier, digest4))) {
+    if (row.reasons.some((reason) => reason.startsWith("content:judge_verdict:")))
+      return reject("verdict_missing");
+    if (!options.sniffer)
+      return reject("legacy_store_missing");
+    let verdict;
+    try {
+      verdict = options.sniffer.trainingVerdict(subjectOf(row), row.modelId);
+    } catch {
+      return reject("legacy_verdict_unreadable");
+    }
+    if (!verdict)
+      return reject("legacy_verdict_missing");
+    if (verdict.ambiguous)
+      return reject("legacy_verdict_ambiguous");
+    const time = Date.parse(verdict.decidedAt), decisionTime = Date.parse(row.decidedAt);
+    if (!Number.isFinite(time) || !Number.isFinite(decisionTime) || time > decisionTime)
+      return reject("legacy_verdict_time");
+    if ((verdict.tier === "personal" ? "private" : verdict.tier === "private" ? "secure" : undefined) !== row.contentTier)
+      return reject("legacy_verdict_tier");
+    provenance = "legacy_sniffer";
+  }
   const vector = prefilterVector(copy, reject);
   if (!vector)
     return;
   if (Math.hypot(...vector) === 0)
     return reject("vector_zero");
-  return { vector, copy, private: row.contentTier === "secure" };
+  return { vector, copy, private: row.contentTier === "secure", provenance };
 }
 
 class EmbeddingPrefilter {
@@ -124451,7 +124510,8 @@ class EmbeddingPrefilter {
       row,
       this.options.ledger.copies(subject),
       this.options.ledger.getOverride(subject),
-      this.options.ledger.rejudgeQuestion(subject)
+      this.options.ledger.rejudgeQuestion(subject),
+      row.modelId && !row.reasons.some((reason) => reason.startsWith("content:judge_verdict:")) ? this.options.sniffer.trainingVerdict(subject, row.modelId) : null
     ])).digest("hex");
   }
   trainingExample(row, judge3) {
@@ -124513,6 +124573,10 @@ class EmbeddingPrefilter {
     const started = clock2();
     const deadline = started + TRAINING_SLICE_MS;
     let attempt = this.attempt;
+    if (attempt && attempt.labelVersion !== 2) {
+      attempt = this.attempt = undefined;
+      this.training = undefined;
+    }
     const finishedAtStart = attempt && ["trained", "too_few", "failed"].includes(attempt.outcome) ? attempt.id : undefined;
     if (attempt?.outcome === "failed" && !attempt.revisions && this.now() < attempt.nextAt)
       return;
@@ -124544,6 +124608,7 @@ class EmbeddingPrefilter {
       }
       if (!attempt) {
         attempt = this.attempt = {
+          labelVersion: 2,
           id: randomUUID29(),
           revisions,
           judge: judge3,
@@ -124674,7 +124739,8 @@ class EmbeddingPrefilter {
             if (run2.model) {
               const changeMarkers = () => JSON.stringify(run2.scans.map(({ member }) => [
                 member.options.ledger.changeMarker(true),
-                member.options.copyChangeMarker()
+                member.options.copyChangeMarker(),
+                member.options.sniffer.changeMarker()
               ]));
               const currentMarkers = changeMarkers();
               if (!run2.finalValidation || run2.finalValidation.markers !== currentMarkers) {
@@ -124728,7 +124794,7 @@ class EmbeddingPrefilter {
       }
     } catch {
       if (!attempt)
-        attempt = this.attempt = { id: randomUUID29(), judge: judge3, revisions: "", startedAt: this.now(), elapsedMs: 0, rows: 0, counts: [0, 0], nextAt: this.now(), outcome: "scanning" };
+        attempt = this.attempt = { labelVersion: 2, id: randomUUID29(), judge: judge3, revisions: "", startedAt: this.now(), elapsedMs: 0, rows: 0, counts: [0, 0], nextAt: this.now(), outcome: "scanning" };
       if (attempt.outcome === "scanning" || attempt.outcome === "fitting")
         this.finishTraining(attempt, "failed", stage);
     }
@@ -124896,6 +124962,12 @@ var init_embedding_prefilter = __esm(() => {
     "copy_missing",
     "digest_missing",
     "verdict_missing",
+    "legacy_store_missing",
+    "legacy_verdict_missing",
+    "legacy_verdict_ambiguous",
+    "legacy_verdict_time",
+    "legacy_verdict_tier",
+    "legacy_verdict_unreadable",
     "chunks_empty",
     "media_present",
     "secret_material",
@@ -124912,6 +124984,7 @@ function countPrefilterTraining(options) {
   const counts = {
     rows_read: 0,
     examples: { personal: 0, private: 0 },
+    provenance: { judge_receipt: 0, legacy_sniffer: 0 },
     rejections: Object.fromEntries(PREFILTER_TRAINING_REJECTIONS.map((reason) => [reason, 0]))
   };
   let after;
@@ -124934,8 +125007,10 @@ function countPrefilterTraining(options) {
         counts.rejections[reason]++;
         return;
       });
-      if (example)
+      if (example) {
         counts.examples[example.private ? "private" : "personal"]++;
+        counts.provenance[example.provenance]++;
+      }
     }
   }
   return counts;
@@ -124947,6 +125022,7 @@ var init_prefilter_training_counts = __esm(() => {
 // src/workers/classification/prefilter-training-dry-run.ts
 var exports_prefilter_training_dry_run = {};
 __export(exports_prefilter_training_dry_run, {
+  snapshotPrefilterDatabase: () => snapshotPrefilterDatabase,
   runPrefilterTrainingDryRun: () => runPrefilterTrainingDryRun,
   prefilterTrainingDryRunMain: () => prefilterTrainingDryRunMain
 });
@@ -124954,13 +125030,20 @@ import { Database as Database24 } from "bun:sqlite";
 import { copyFileSync as copyFileSync2, existsSync as existsSync87, lstatSync as lstatSync44, mkdirSync as mkdirSync52, mkdtempSync as mkdtempSync6, readdirSync as readdirSync26, rmSync as rmSync33, statSync as statSync37 } from "node:fs";
 import { tmpdir as tmpdir14 } from "node:os";
 import { join as join115, resolve as resolve23 } from "node:path";
+function emptyReport() {
+  return { ledgers: [], errors: 0, error_reasons: Object.fromEntries(ERROR_REASONS.map((reason) => [reason, 0])), snapshot_retries: 0 };
+}
+function reportError(report, reason) {
+  report.errors++;
+  report.error_reasons[reason]++;
+}
 function stamp(path) {
   if (!existsSync87(path))
     return "absent";
   const s = statSync37(path, { bigint: true });
   return `${s.dev}:${s.ino}:${s.size}:${s.mtimeNs}:${s.ctimeNs}`;
 }
-function snapshot(path, destination) {
+function snapshot(path, destination, copy) {
   const sources = [path, `${path}-wal`];
   const before = sources.map(stamp);
   for (let index = 0;index < sources.length; index++) {
@@ -124968,11 +125051,27 @@ function snapshot(path, destination) {
     if (before[index] === "absent")
       continue;
     if (!lstatSync44(source).isFile() || lstatSync44(source).isSymbolicLink())
-      throw new Error("Unsafe database file");
-    copyFileSync2(source, `${destination}${index ? "-wal" : ""}`);
+      throw new SnapshotError("snapshot_unsafe");
+    copy(source, `${destination}${index ? "-wal" : ""}`);
   }
   if (sources.some((source, index) => stamp(source) !== before[index]))
-    throw new Error("Database changed during snapshot");
+    throw new SnapshotError("snapshot_busy");
+}
+function snapshotPrefilterDatabase(path, destination, retry, copy = copyFileSync2) {
+  for (let attempt = 0;attempt < 4; attempt++) {
+    for (const suffix of ["", "-wal", "-shm"])
+      rmSync33(`${destination}${suffix}`, { force: true });
+    try {
+      snapshot(path, destination, copy);
+      return;
+    } catch (error) {
+      const reason = error instanceof SnapshotError ? error.reason : error?.code === "ENOENT" ? "snapshot_busy" : "snapshot_io";
+      if (reason !== "snapshot_busy" || attempt === 3)
+        throw new SnapshotError(reason);
+      retry();
+      Bun.sleepSync(25 * (attempt + 1));
+    }
+  }
 }
 function* databaseFiles(root) {
   for (const entry of readdirSync26(root, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
@@ -124991,7 +125090,7 @@ function runPrefilterTrainingDryRun(options = {}) {
     throw new Error("Invalid data directory");
   const scratch = mkdtempSync6(join115(tmpdir14(), "olympus-prefilter-"));
   const opened = [];
-  const report = { ledgers: [], errors: 0 };
+  const report = emptyReport();
   try {
     const inspected = [];
     for (const original of databaseFiles(root)) {
@@ -125000,19 +125099,23 @@ function runPrefilterTrainingDryRun(options = {}) {
       const target = join115(dir, "snapshot.sqlite");
       let db;
       try {
-        snapshot(original, target);
+        snapshotPrefilterDatabase(original, target, () => {
+          report.snapshot_retries++;
+        });
         db = new Database24(target, { readonly: true, create: false });
         db.exec("PRAGMA query_only = ON;");
         const tables = new Set(db.query("SELECT name FROM sqlite_master WHERE type = 'table'").all().map((row) => row.name));
         if (tables.has("tier_items") && tables.has("tier_ledger_meta")) {
           const id = db.query("SELECT value FROM tier_ledger_meta WHERE key = 'ledger_id'").get();
           inspected.push({ original, snapshot: target, kind: "ledger", ...id ? { ledgerId: id.value } : {} });
+        } else if (tables.has("sniffer_verdicts")) {
+          inspected.push({ original, snapshot: target, kind: "sniffer" });
         } else if (tables.has("items") && tables.has("chunks") && tables.has("sync_runs")) {
           const corpus = db.query("SELECT corpus_id FROM sync_runs LIMIT 1").get();
           inspected.push({ original, snapshot: target, kind: "store", ...corpus ? { corpusId: corpus.corpus_id } : {} });
         }
-      } catch {
-        report.errors++;
+      } catch (error) {
+        reportError(report, error instanceof SnapshotError ? error.reason : "database_open");
       } finally {
         db?.close();
       }
@@ -125021,9 +125124,23 @@ function runPrefilterTrainingDryRun(options = {}) {
     }
     const ledgers = new Map;
     for (const file of inspected.filter((file2) => file2.kind === "ledger")) {
-      const ledger = new TierLedger({ dbPath: file.snapshot, readOnly: true });
-      opened.push(ledger);
-      ledgers.set(file.original, ledger);
+      try {
+        const ledger = new TierLedger({ dbPath: file.snapshot, readOnly: true });
+        opened.push(ledger);
+        ledgers.set(file.original, ledger);
+      } catch {
+        reportError(report, "ledger_open");
+      }
+    }
+    const sniffers = new Map;
+    for (const file of inspected.filter((file2) => file2.kind === "sniffer")) {
+      try {
+        const store = new TierSnifferStore({ dbPath: file.snapshot, readOnly: true });
+        opened.push(store);
+        sniffers.set(file.original, store);
+      } catch {
+        reportError(report, "sniffer_open");
+      }
     }
     const stores = [];
     for (const file of inspected.filter((file2) => file2.kind === "store")) {
@@ -125040,7 +125157,7 @@ function runPrefilterTrainingDryRun(options = {}) {
         const ledgerPath = binding ? tierSetLedgerCandidates(file.original, binding.ledgerPath).find((candidate) => inspected.some((entry) => entry.original === candidate && entry.ledgerId === binding.ledgerId)) : tierLedgerPathForStore(file.original);
         stores.push({ store, ledgerPath, bound: !!binding });
       } catch {
-        report.errors++;
+        reportError(report, "store_open");
       }
     }
     const judges = new Set;
@@ -125048,14 +125165,21 @@ function runPrefilterTrainingDryRun(options = {}) {
     const trainingOwners = installState.length ? installState.map(([, ledger]) => ledger) : [...ledgers.values()];
     for (const ledger of trainingOwners) {
       const raw = ledger.readMeta("embedding-prefilter:training-v1");
-      if (raw) {
-        const value2 = JSON.parse(raw);
-        if (typeof value2.judge === "string" && value2.judge)
-          judges.add(value2.judge);
+      try {
+        if (raw) {
+          const value2 = JSON.parse(raw);
+          if (typeof value2.judge === "string" && value2.judge)
+            judges.add(value2.judge);
+        }
+      } catch {
+        reportError(report, "training_judge");
+        return report;
       }
     }
-    if (judges.size !== 1)
-      throw new Error("No unique recorded training judge");
+    if (judges.size !== 1) {
+      reportError(report, "training_judge");
+      return report;
+    }
     const judge3 = [...judges][0];
     for (const [path, ledger] of ledgers) {
       const members = stores.filter((member) => member.ledgerPath === path);
@@ -125063,9 +125187,11 @@ function runPrefilterTrainingDryRun(options = {}) {
       if (!members.length && !own3)
         continue;
       const bound = members.some((member) => member.bound);
+      const sniffer = sniffers.get(tierSnifferPathForLedger(path));
       report.ledgers.push(countPrefilterTraining({
         ledger,
         judge: judge3,
+        ...sniffer ? { sniffer } : {},
         ...options.rowLimit ? { rowLimit: options.rowLimit } : {},
         copyFor: (subject) => prefilterTrainingCopy(subject, ledger, bound ? (corpusId) => members.find((member) => member.store.corpusId === corpusId)?.store.exportItemCopy(subject) : undefined, () => {
           for (const member of members) {
@@ -125107,18 +125233,40 @@ function prefilterTrainingDryRunMain(args) {
     console.log(JSON.stringify(report));
     return report.errors ? 1 : 0;
   } catch {
-    console.log(JSON.stringify({ ledgers: [], errors: 1 }));
+    const report = emptyReport();
+    reportError(report, "arguments_or_install");
+    console.log(JSON.stringify(report));
     return 1;
   }
 }
+var ERROR_REASONS, SnapshotError;
 var init_prefilter_training_dry_run = __esm(() => {
   init_olympus_layout();
   init_local_index();
   init_embedding_prefilter();
   init_prefilter_training_counts();
   init_tier_ledger();
+  init_sniffer_store();
   init_tier_ledger_path();
   init_tier_set_binding();
+  ERROR_REASONS = [
+    "snapshot_busy",
+    "snapshot_unsafe",
+    "snapshot_io",
+    "database_open",
+    "ledger_open",
+    "store_open",
+    "sniffer_open",
+    "training_judge",
+    "arguments_or_install"
+  ];
+  SnapshotError = class SnapshotError extends Error {
+    reason;
+    constructor(reason) {
+      super(reason);
+      this.reason = reason;
+    }
+  };
 });
 
 // node_modules/zod/v4/core/core.js
@@ -133751,7 +133899,7 @@ var require_errors = __commonJS((exports) => {
   exports.keyword$DataError = {
     message: ({ keyword, schemaType }) => schemaType ? (0, codegen_1.str)`"${keyword}" keyword must be ${schemaType} ($data)` : (0, codegen_1.str)`"${keyword}" keyword is invalid ($data)`
   };
-  function reportError(cxt, error2 = exports.keywordError, errorPaths, overrideAllErrors) {
+  function reportError2(cxt, error2 = exports.keywordError, errorPaths, overrideAllErrors) {
     const { it } = cxt;
     const { gen, compositeRule, allErrors } = it;
     const errObj = errorObjectCode(cxt, error2, errorPaths);
@@ -133761,7 +133909,7 @@ var require_errors = __commonJS((exports) => {
       returnErrors(it, (0, codegen_1._)`[${errObj}]`);
     }
   }
-  exports.reportError = reportError;
+  exports.reportError = reportError2;
   function reportExtraError(cxt, error2 = exports.keywordError, errorPaths) {
     const { it } = cxt;
     const { gen, compositeRule, allErrors } = it;

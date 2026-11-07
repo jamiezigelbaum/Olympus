@@ -747,10 +747,15 @@ test.each(['secrets', 'tier', 'decision', 'removed copy', 'changed vector', 'pub
   }, 30_000);
 
 
-test('a historical metadata raise never replaces the content judge training label', async () => {
+test('a historical metadata raise never replaces a legacy content judge training label', async () => {
   const f = fixture({ trained: false, memory: true, log: () => {} });
   trainingRow(f, 0, [], 'other:1.00', true); // The body was judged Personal.
   trainingRow(f, 1, [], 'other:1.00', true); // A genuine Private label remains usable.
+  for (const n of [0, 1]) {
+    const row = f.ledger.getCurrent(subject(n))!;
+    f.ledger.recordDecision(subject(n), { ...row, state: 'current', snifferId: judge, decidedBy: 'sniffer',
+      reasons: row.reasons.filter(reason => !reason.startsWith('content:judge_verdict:')) });
+  }
   const original = f.ledger.getCurrent(subject(0))!;
   const recordNames = (title: string) => {
     const decision = withRecordedContent(classifyItemTiers({ signals: { title }, subject: subject(0) }, {
@@ -770,18 +775,47 @@ test('a historical metadata raise never replaces the content judge training labe
   expect(trainingState(f)).toMatchObject({ outcome: 'too_few', counts: [0, 1] });
 });
 
-test('training skips a row without provenance of the content judge verdict tier', async () => {
+test('production legacy reasons and digest accept the subject model verdict without content_hash', async () => {
   const f = fixture({ trained: false, memory: true, log: () => {} });
   trainingRow(f, 0);
   trainingRow(f, 1);
-  // Old rows have content reasons and a digest, but no tier-bearing receipt.
+  // Pre-#982 rows have content:sniffer:<id>:<code> and a digest, no tier receipt.
   for (const n of [0, 1]) {
     const row = f.ledger.getCurrent(subject(n))!;
     f.ledger.recordDecision(subject(n), { ...row, state: 'current', snifferId: judge, decidedBy: 'sniffer',
       reasons: row.reasons.filter(reason => !reason.startsWith('content:judge_verdict:')) });
   }
   await f.filter.prepare(judge);
-  expect(trainingState(f)).toMatchObject({ outcome: 'too_few', counts: [0, 0] });
+  expect(trainingState(f)).toMatchObject({ outcome: 'too_few', counts: [1, 1] });
+});
+
+test('legacy metadata raises and differing subject verdict tiers never label', () => {
+  const f = fixture({ trained: false, memory: true });
+  trainingRow(f, 0);
+  const row = f.ledger.getCurrent(subject(0))!;
+  const reasons = row.reasons.filter(reason => !reason.startsWith('content:judge_verdict:'));
+  const options = { ledger: f.ledger, sniffer: f.sniffer, copyFor: () => copy(0) };
+  const drops: string[] = [];
+  expect(prefilterTrainingExample({ ...row, reasons, contentTier: 'secure' }, judge, options,
+    reason => { drops.push(reason); return undefined; })).toBeUndefined();
+  expect(drops).toEqual(['legacy_verdict_tier']);
+});
+
+test('an old zero-example attempt restarts immediately instead of retaining its retry delay', async () => {
+  const f = fixture({ trained: false, memory: true, log: () => {} });
+  await f.filter.prepare(judge);
+  const old = trainingState(f);
+  delete old.labelVersion;
+  f.ledger.writeMeta('embedding-prefilter:training-v1', JSON.stringify(old));
+  trainingRow(f, 0); trainingRow(f, 1);
+  for (const n of [0, 1]) {
+    const row = f.ledger.getCurrent(subject(n))!;
+    f.ledger.recordDecision(subject(n), { ...row, state: 'current', snifferId: judge, decidedBy: 'sniffer',
+      reasons: row.reasons.filter(reason => !reason.startsWith('content:judge_verdict:')) });
+  }
+  await f.make().prepare(judge);
+  expect(trainingState(f)).toMatchObject({ labelVersion: 2, outcome: 'too_few', counts: [1, 1] });
+  expect(trainingState(f).id).not.toBe(old.id);
 });
 
 
@@ -834,7 +868,7 @@ test('costly retained-copy validation yields and still lets fitting finish', asy
   expect(existsSync(join(f.modelDir, 'weights.json'))).toBe(true);
 }, 30_000);
 
-test.each(['secrets', 'external secrets', 'copy'] as const)(
+test.each(['secrets', 'external secrets', 'copy', 'legacy verdict'] as const)(
   'final validation fences an already-checked example changed between ticks: %s', async change => {
     let clock = 0;
     const f = fixture({ trained: false, memory: change !== 'external secrets', monotonicNow: () => clock, log: () => {} });
@@ -848,6 +882,11 @@ test.each(['secrets', 'external secrets', 'copy'] as const)(
     let currentCopy = (n: number) => copy(n);
     let copyRevision = 0;
     for (let n = 0; n < 4000; n++) trainingRow(f, n);
+    if (change === 'legacy verdict') {
+      const row = f.ledger.getCurrent(subject(0))!;
+      f.ledger.recordDecision(subject(0), { ...row, state: 'current', snifferId: judge, decidedBy: 'sniffer',
+        reasons: row.reasons.filter(reason => !reason.startsWith('content:judge_verdict:')) });
+    }
     const runtime = () => (filter as unknown as { training?: {
       fit?: Generator<void, unknown>; finalValidation?: { index: number };
     } }).training;
@@ -861,6 +900,10 @@ test.each(['secrets', 'external secrets', 'copy'] as const)(
     if (change === 'copy') {
       currentCopy = n => n === 0 ? { ...copy(n), chunks: [{ ...copy(n).chunks[0]!, boundedText: 'Updated picnic plan.' }] } : copy(n);
       copyRevision++;
+    } else if (change === 'legacy verdict') {
+      // Only the cache changes; neither the ledger nor serving-copy marker moves.
+      f.sniffer.putVerdict({ materialHash: 'new-answer', modelId: 'fixture', promptVersion: SNIFFER_PROMPT_VERSION, mapRevision: 'none' },
+        { tier: 'private', category: 'fixture', confidence: 1, failSafe: false }, subject(0));
     } else {
       const writer = change === 'external secrets' ? new TierLedger({ dbPath: f.ledger.dbPath }) : f.ledger;
       try {
@@ -1031,7 +1074,9 @@ test('each training drop check has a stable first-failure counter', () => {
     ['judge_code_empty', {}, valid, ''], ['judge_code_held', {}, valid, 'record_held:test'],
     ['judge_code_unsafe', {}, valid, 'fail_safe:test'], ['judge_duplicate'],
     ['content_reason_unknown', {}, valid, 'content:unknown:test'], ['judge_missing'], ['copy_missing'],
-    ['digest_missing'], ['verdict_missing'], ['chunks_empty'], ['media_present'], ['secret_material'],
+    ['digest_missing'], ['verdict_missing'], ['legacy_store_missing'], ['legacy_verdict_missing'],
+    ['legacy_verdict_ambiguous'], ['legacy_verdict_time'], ['legacy_verdict_tier'], ['legacy_verdict_unreadable'],
+    ['chunks_empty'], ['media_present'], ['secret_material'],
     ['vector_count'], ['vector_match'], ['vector_bytes'], ['vector_nonfinite'], ['vector_zero'],
   ];
   const verdict = row.reasons.find(reason => reason.startsWith('content:judge_verdict:'))!;
@@ -1047,7 +1092,8 @@ test('each training drop check has a stable first-failure counter', () => {
     if (expected === 'judge_duplicate') reasons.push(judged);
     if (expected === 'judge_missing') reasons = reasons.filter(reason => reason !== judged);
     if (expected === 'digest_missing') reasons = reasons.filter(reason => !reason.startsWith('content:sha256:'));
-    if (expected === 'verdict_missing') reasons = reasons.filter(reason => reason !== verdict);
+    if (expected === 'verdict_missing') reasons = reasons.map(reason => reason === verdict ? `${verdict}wrong` : reason);
+    if (expected.startsWith('legacy_')) reasons = reasons.filter(reason => reason !== verdict);
     if (expected === 'copy_missing') currentCopy = undefined;
     if (expected === 'chunks_empty') {
       currentCopy!.chunks = [];
@@ -1074,6 +1120,13 @@ test('each training drop check has a stable first-failure counter', () => {
         getOverride: () => expected === 'item_override' ? { kind: 'tier', tier: 'secure' } : undefined,
         rejudgeQuestion: () => expected === 'rejudge_open' ? {} as ReturnType<TierLedger['rejudgeQuestion']> : undefined,
       }, copyFor: () => currentCopy,
+      ...(expected.startsWith('legacy_') && expected !== 'legacy_store_missing' ? { sniffer: { trainingVerdict: () => {
+        if (expected === 'legacy_verdict_unreadable') throw new Error('synthetic old schema');
+        if (expected === 'legacy_verdict_missing') return undefined;
+        return { tier: expected === 'legacy_verdict_tier' ? 'private' as const : 'personal' as const,
+          decidedAt: expected === 'legacy_verdict_time' ? '2099-01-01T00:00:00.000Z' : row.decidedAt,
+          ambiguous: expected === 'legacy_verdict_ambiguous' };
+      } } } : {}),
     }, reason => { drops.push(reason); return undefined; });
     expect(result, expected).toBeUndefined();
     expect(drops, expected).toEqual([expected]);

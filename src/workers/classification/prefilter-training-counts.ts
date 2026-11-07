@@ -5,6 +5,7 @@ import type { TierSnifferSubject } from './tier-classifier.ts';
 export interface PrefilterTrainingCounts {
   rows_read: number;
   examples: { personal: number; private: number };
+  provenance: { judge_receipt: number; legacy_sniffer: number };
   rejections: Record<PrefilterTrainingRejection, number>;
 }
 
@@ -16,6 +17,7 @@ export function countPrefilterTraining(options: Parameters<typeof prefilterTrain
 }): PrefilterTrainingCounts {
   const counts: PrefilterTrainingCounts = {
     rows_read: 0, examples: { personal: 0, private: 0 },
+    provenance: { judge_receipt: 0, legacy_sniffer: 0 },
     rejections: Object.fromEntries(PREFILTER_TRAINING_REJECTIONS.map(reason => [reason, 0])) as Record<PrefilterTrainingRejection, number>,
   };
   let after: TierSnifferSubject | undefined;
@@ -32,7 +34,10 @@ export function countPrefilterTraining(options: Parameters<typeof prefilterTrain
         counts.rejections[reason]++;
         return undefined;
       });
-      if (example) counts.examples[example.private ? 'private' : 'personal']++;
+      if (example) {
+        counts.examples[example.private ? 'private' : 'personal']++;
+        counts.provenance[example.provenance]++;
+      }
     }
   }
   return counts;
