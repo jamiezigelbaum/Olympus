@@ -213,6 +213,7 @@ export class EmbeddingPrefilter {
     return this.owner.enabled() && !this.owner.audit.stopped
       && (this.owner.attempt?.outcome === 'scanning' || this.owner.attempt?.outcome === 'fitting');
   }
+  get trainingFinalizing(): boolean { return this.trainingPending && this.owner.training?.model !== undefined; }
   get trainingOwner(): EmbeddingPrefilter { return this.owner; }
   private readonly auditState: Audit;
   private readonly path: string;
@@ -330,6 +331,19 @@ export class EmbeddingPrefilter {
     const pending = this.prepareSlice(judge, shouldYield);
     this.preparing = pending;
     try { await pending; } finally { this.preparing = undefined; }
+  }
+  /** Finish the publication sweep between judge/move passes, still yielding every slice. */
+  async finishValidation(judge: string, shouldYield: () => boolean): Promise<void> {
+    if (this.owner !== this) return this.owner.finishValidation(judge, shouldYield);
+    let markers: string | undefined;
+    while (this.trainingFinalizing && !shouldYield()) {
+      await this.prepare(judge, shouldYield);
+      const next = this.training?.finalValidation?.markers;
+      // Let the next judge pass run if another writer invalidates this window.
+      // The first slice may restart the sweep after the just-finished moves.
+      if (markers !== undefined && next !== markers) break;
+      markers = next;
+    }
   }
   /** Cooperative 200 ms including scan, fit and validation; one synchronous unit may overrun. */
   private async prepareSlice(judge: string, shouldYield: () => boolean): Promise<void> {

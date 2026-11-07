@@ -125100,6 +125100,9 @@ class EmbeddingPrefilter {
   get trainingPending() {
     return this.owner.enabled() && !this.owner.audit.stopped && (this.owner.attempt?.outcome === "scanning" || this.owner.attempt?.outcome === "fitting");
   }
+  get trainingFinalizing() {
+    return this.trainingPending && this.owner.training?.model !== undefined;
+  }
   get trainingOwner() {
     return this.owner;
   }
@@ -125233,6 +125236,18 @@ class EmbeddingPrefilter {
       await pending;
     } finally {
       this.preparing = undefined;
+    }
+  }
+  async finishValidation(judge3, shouldYield) {
+    if (this.owner !== this)
+      return this.owner.finishValidation(judge3, shouldYield);
+    let markers;
+    while (this.trainingFinalizing && !shouldYield()) {
+      await this.prepare(judge3, shouldYield);
+      const next = this.training?.finalValidation?.markers;
+      if (markers !== undefined && next !== markers)
+        break;
+      markers = next;
     }
   }
   async prepareSlice(judge3, shouldYield) {
@@ -195415,6 +195430,21 @@ class TierSnifferService {
       clearTimeout(this.trainingTimer);
     this.trainingTimer = undefined;
   }
+  async finishTrainingValidation(signal) {
+    const judge3 = this.trainingJudge;
+    const filters = [...new Set([...this.embeddingPrefilters.values()].map((filter) => filter.trainingOwner))];
+    if (!judge3 || !filters.some((filter) => filter.trainingFinalizing))
+      return;
+    this.pauseTraining();
+    await this.trainingJob;
+    try {
+      for (const filter of filters) {
+        await filter.finishValidation(judge3, () => signal.aborted || this.stopped || this.yieldNow());
+      }
+    } finally {
+      this.scheduleTraining(judge3);
+    }
+  }
   stop() {
     this.stopped = true;
     this.pauseTraining();
@@ -195664,6 +195694,7 @@ class TierSnifferService {
       if (tick.state === "ran" && lowerMoves) {
         tick.autoMoves = mergeAutoMoveReports(tick.autoMoves, lowerMoves);
       }
+      await this.finishTrainingValidation(abort.signal);
     } catch (error2) {
       tick = { state: "failed", error: error2 instanceof Error ? error2.name : "unknown" };
     } finally {

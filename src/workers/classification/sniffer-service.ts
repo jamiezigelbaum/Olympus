@@ -408,6 +408,21 @@ export class TierSnifferService {
     this.trainingTimer = undefined;
   }
 
+  private async finishTrainingValidation(signal: AbortSignal): Promise<void> {
+    const judge = this.trainingJudge;
+    const filters = [...new Set([...this.embeddingPrefilters.values()].map(filter => filter.trainingOwner))];
+    if (!judge || !filters.some(filter => filter.trainingFinalizing)) return;
+    this.pauseTraining();
+    await this.trainingJob;
+    try {
+      for (const filter of filters) {
+        await filter.finishValidation(judge, () => signal.aborted || this.stopped || this.yieldNow());
+      }
+    } finally {
+      this.scheduleTraining(judge);
+    }
+  }
+
   /** Stop the tick. A pass in flight is aborted; its ledgers close when it ends. */
   stop(): void {
     this.stopped = true;
@@ -697,6 +712,10 @@ export class TierSnifferService {
       if (tick.state === 'ran' && lowerMoves) {
         tick.autoMoves = mergeAutoMoveReports(tick.autoMoves, lowerMoves);
       }
+      // Final validation can span several 200 ms slices. Our own judge and
+      // copy writes would restart it forever if the next pass ran between
+      // them. Give it a separate window after BOTH budgets, never out of either.
+      await this.finishTrainingValidation(abort.signal);
     } catch (error) {
       // Content-free: the class of failure only. Items stay pending.
       tick = { state: 'failed', error: error instanceof Error ? error.name : 'unknown' };

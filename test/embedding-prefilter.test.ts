@@ -1,5 +1,5 @@
 // All labels, vectors, text and weights in this file are synthetic fixtures.
-import { afterEach, expect, test } from 'bun:test';
+import { afterEach, expect, spyOn, test } from 'bun:test';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -10,6 +10,7 @@ import { TierSnifferStore } from '../src/workers/classification/sniffer-store.ts
 import { CachedTierSniffer, SNIFFER_PROMPT_VERSION, snifferId, snifferCacheModelId } from '../src/workers/classification/sniffer.ts';
 import { withRecordedContent } from '../src/workers/connector-store/tiered-store-set.ts';
 import { runSnifferPass } from '../src/workers/classification/sniffer-resolver.ts';
+import * as resolver from '../src/workers/classification/sniffer-resolver.ts';
 import { classifyItemTiers, contentDigestReason, contentJudgeVerdictReason, normalizedContentHash, type TierDecision } from '../src/workers/classification/tier-classifier.ts';
 import { TierSnifferService, tierSnifferServiceEnv } from '../src/workers/classification/sniffer-service.ts';
 import { InstalledTierClassification } from '../src/workers/classification/installed-tier-classification.ts';
@@ -952,6 +953,96 @@ test('costly retained-copy validation yields and still lets fitting finish', asy
   expect(existsSync(join(f.modelDir, 'weights.json'))).toBe(true);
 }, 30_000);
 
+test('a scanned attempt finishes between continuous judge passes and backlog-sized lowering slices', async () => {
+  let clock = 0;
+  const logs: string[] = [];
+  const f = fixture({ trained: false, monotonicNow: () => clock, log: line => logs.push(line) });
+  for (let n = 0; n < 4000; n++) trainingRow(f, n);
+  const readCopy = (n: number) => { clock += 0.1; return copy(n); };
+  f.setCopy(readCopy); // The complete freshness sweep needs 400 ms, spanning slices.
+  const runtime = () => (f.filter as unknown as { training?: { finalValidation?: { index: number } } }).training;
+  for (let slice = 0; slice < 100 && !runtime()?.finalValidation?.index; slice++) await f.filter.prepare(judge);
+  expect(JSON.parse(f.ledger.readMeta('embedding-prefilter:training-scan-v1')!).done).toBe(true);
+  expect(runtime()?.finalValidation?.index).toBeGreaterThan(0);
+  expect(runtime()?.finalValidation?.index).toBeLessThan(4000);
+
+  const pausedAt = clock;
+  await f.filter.finishValidation(judge, () => true);
+  expect(clock).toBe(pausedAt); // An answer preempts the dedicated window too.
+  let writes = 0;
+  f.setCopy(n => {
+    if (n === 0) f.sniffer.putVerdict({ materialHash: `concurrent-${writes++}`, modelId: 'fixture', promptVersion: SNIFFER_PROMPT_VERSION, mapRevision: 'none' },
+      { tier: 'personal', category: 'fixture', confidence: 1, failSafe: false }, subject(9999));
+    return readCopy(n);
+  });
+  await f.filter.finishValidation(judge, () => false);
+  expect(trainingState(f).outcome).toBe('fitting');
+  expect(writes).toBe(2); // Another writer invalidates the window; the judge gets its next turn.
+  expect(clock - pausedAt).toBeLessThanOrEqual(400.3);
+  f.setCopy(readCopy);
+
+  const installed = new InstalledTierClassification({ env: {}, lane });
+  installed.snifferStoreForLedger = () => f.sniffer;
+  const classificationLedgerPath = join(f.modelDir, '..', 'classification.jsonl');
+  await appendClassificationLedgerEntry(classificationLedgerPath, {
+    recorded_at: new Date().toISOString(), kind: 'classifier_model_decision', what: 'Synthetic fixture approval',
+    approved_by: 'owner', status: 'complete', model_id: lane.modelId, lane: lane.kind,
+    profile_id: lane.profileId, prompt_version: SNIFFER_PROMPT_VERSION,
+  });
+  const service = new TierSnifferService({ installed, lane, model: { complete: async () => { throw new Error('unused'); } },
+    stores: () => [{ dbPath: join(f.modelDir, '..', 'store.sqlite'), tierSetBinding: () => ({ ledgerPath: f.ledger.dbPath }),
+      tierLedgerPathInUse: () => f.ledger.dbPath, exportItemCopy: identity => copy(Number(identity.providerItemId)) }],
+    classificationLedgerPath, intervalMs: 60_000, passTimeMs: 30_000, rejudgePerPass: 0,
+  });
+  const scheduler = service as unknown as {
+    embeddingPrefilters: Map<string, EmbeddingPrefilter>; trainingTimer: ReturnType<typeof setTimeout> | undefined;
+    drainMoves(direction?: 'raise' | 'lower'): Promise<undefined>;
+  };
+  scheduler.embeddingPrefilters.set(f.ledger.dbPath, f.filter);
+  // Drive ticks and inference-wait slices explicitly, without timer races.
+  const wake = spyOn(service, 'wake').mockImplementation(() => {});
+  let judgeMs = 0;
+  let loweringMs = 0;
+  let serial = 0;
+  const busySlice = async (ms: number) => {
+    clock += ms;
+    // Unrelated writes in all three stores covered by the publication fence.
+    const row = f.ledger.getCurrent(subject(3999))!;
+    f.ledger.recordDecision(subject(9999), { ...row, state: 'current', snifferId: judge, decidedBy: 'sniffer' });
+    f.setCopy(readCopy);
+    f.sniffer.putVerdict({ materialHash: `unrelated-${serial++}`, modelId: 'fixture', promptVersion: SNIFFER_PROMPT_VERSION, mapRevision: 'none' },
+      { tier: 'personal', category: 'fixture', confidence: 1, failSafe: false }, subject(9999));
+    await f.filter.prepare(judge);
+  };
+  const pass = spyOn(resolver, 'runSnifferPass').mockImplementation(async options => {
+    expect(options.passTimeMs).toBe(30_000);
+    options.trainingReady!(judge);
+    clearTimeout(scheduler.trainingTimer); scheduler.trainingTimer = undefined;
+    for (let n = 0; n < 3; n++) { await busySlice(10_000); judgeMs += 10_000; }
+    return { calls: 1, failedCalls: 0, verdictsApplied: 1, stoppedBy: 'pass_budget' } as resolver.SnifferPassReport;
+  });
+  const moves = spyOn(scheduler, 'drainMoves').mockImplementation(async direction => {
+    if (direction === 'lower') {
+      for (let n = 0; n < 10; n++) { await busySlice(1000); loweringMs += 1000; }
+    }
+    return undefined;
+  });
+  try {
+    service.start();
+    let ticks = 0;
+    while (trainingState(f).outcome === 'fitting' && ticks < 3) {
+      expect((await service.runOnce()).state).toBe('ran');
+      ticks++;
+    }
+    expect(judgeMs).toBe(ticks * 30_000);
+    expect(loweringMs).toBe(ticks * 10_000);
+    expect(trainingState(f)).toMatchObject({ outcome: 'trained', rows: 4000, counts: [2000, 2000] });
+    expect(logs.filter(line => line.includes('outcome=trained'))).toHaveLength(1);
+  } finally {
+    service.stop(); wake.mockRestore(); pass.mockRestore(); moves.mockRestore(); installed.close();
+  }
+}, 30_000);
+
 test.each(['secrets', 'external secrets', 'copy', 'legacy verdict'] as const)(
   'final validation fences an already-checked example changed between ticks: %s', async change => {
     let clock = 0;
@@ -995,7 +1086,7 @@ test.each(['secrets', 'external secrets', 'copy', 'legacy verdict'] as const)(
           snifferId: judge, decidedBy: 'secret_detector', contentTier: 'secrets' });
       } finally { if (writer !== f.ledger) writer.close(); }
     }
-    await filter.prepare(judge);
+    await filter.finishValidation(judge, () => false);
     expect(JSON.parse(control.readMeta('embedding-prefilter:training-v1')!)).toMatchObject({ outcome: 'failed', reason: 'ledger_or_judge_changed' });
     expect(existsSync(weights)).toBe(false);
   }, 30_000);
