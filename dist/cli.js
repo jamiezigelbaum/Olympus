@@ -31218,6 +31218,8 @@ async function embedPendingChunks(targets, options) {
       itemsOutOfScope: 0
     };
     runs.push(run);
+    if (options.diagnostics)
+      run.inventory = await store.embeddingSweepInventory(target.provider, target, options.stopAtMs);
     const groups = store.queuedEmbeddingGroups(options.maxItems).filter((group) => {
       if (target.wholeStore !== true || sameEmbeddingIdentity(group.provider, target.provider))
         return true;
@@ -38617,6 +38619,67 @@ var init_local_index = __esm(() => {
         return [];
       const tierHidden = await this.tierHiddenItemPksInTurns();
       return this.missingEmbeddingItemIds(embedder, limit, scope, tierHidden);
+    }
+    async embeddingSweepInventory(provider, scope = {}, stopAtMs) {
+      const started = Date.now();
+      const tier = await this.tierHiddenItemPksInTurns();
+      const hidden = new Set(tier.hidden);
+      const held = new Set(tier.held);
+      const heldForJudgment = this.canEmbedHeld(provider) ? new Set(tier.heldForJudgment) : new Set;
+      const namesOnly = new Set(tier.metadataLayer);
+      const moving = new Set;
+      let walked = 0;
+      for (const member of this.tierLedgerHiddenMemo?.members.values() ?? []) {
+        if (member.flags.moving)
+          for (const pk of member.pks)
+            moving.add(pk);
+        if (++walked % 2000 === 0)
+          await ingestionTurn();
+      }
+      const tiers = connectorStoreEmbeddableRowTiers(this.trustDomain, provider);
+      const account = normalizeOptionalAccountScope(scope.accountScope);
+      const scoped = connectorStoreFilterSql(scope.filters);
+      const counts = {
+        pending_chunks: 0,
+        eligible_chunks: 0,
+        skipped_held_chunks: 0,
+        skipped_moving_chunks: 0,
+        skipped_hidden_chunks: 0,
+        skipped_metadata_chunks: 0,
+        skipped_failed_chunks: 0,
+        skipped_out_of_scope_chunks: 0,
+        skipped_private_tier_chunks: 0,
+        skipped_retired_chunks: 0,
+        inventory_complete: 0
+      };
+      const page2 = this.db.query(`
+      SELECT c.chunk_pk, i.item_pk, i.local_item_id, i.tombstoned, i.trust_tier,
+        (e.chunk_pk IS NULL OR e.content_hash != c.embedding_input_hash) AS owed,
+        CASE WHEN 1 = 1 ${account ? "AND i.account_scope = ?" : ""} ${scoped.sql} THEN 1 ELSE 0 END AS in_scope
+      FROM chunks c JOIN items i ON i.item_pk = c.item_pk
+      LEFT JOIN chunk_embeddings e ON e.chunk_pk = c.chunk_pk AND e.model_id = ?
+      WHERE c.chunk_pk > ?
+      ORDER BY c.chunk_pk LIMIT 2048
+    `);
+      let after = 0;
+      while (stopAtMs === undefined || Date.now() < stopAtMs) {
+        const rows = page2.all(...account ? [account] : [], ...scoped.params, provider.modelId, after);
+        for (const row of rows) {
+          if (!row.owed)
+            continue;
+          counts.pending_chunks += 1;
+          const reason = row.tombstoned || row.trust_tier === "S5" ? "skipped_retired_chunks" : moving.has(row.item_pk) ? "skipped_moving_chunks" : hidden.has(row.item_pk) ? "skipped_hidden_chunks" : namesOnly.has(row.item_pk) ? "skipped_metadata_chunks" : held.has(row.item_pk) && !heldForJudgment.has(row.item_pk) ? "skipped_held_chunks" : tiers && !tiers.includes(row.trust_tier) ? "skipped_private_tier_chunks" : this.embeddingFailureState?.has(row.local_item_id) ? "skipped_failed_chunks" : !row.in_scope ? "skipped_out_of_scope_chunks" : "eligible_chunks";
+          counts[reason] += 1;
+        }
+        if (rows.length < 2048) {
+          counts.inventory_complete = 1;
+          break;
+        }
+        after = rows.at(-1).chunk_pk;
+        await ingestionTurn();
+      }
+      counts.inventory_ms = Date.now() - started;
+      return counts;
     }
     embeddingOwedItemIds(modelId, localItemIds) {
       if (localItemIds.length === 0)
@@ -174388,6 +174451,15 @@ class SourceScheduler {
         }
       }
       state.nextRunAt = nextRunAt;
+      for (const { counts, ...store } of result.embeddingSweep ?? []) {
+        console.info(`[olympus:embedding-sweep] ${JSON.stringify({
+          ...store,
+          ...counts,
+          attempted_at: attemptedAt,
+          backoff_ms: retryAt?.effectiveIntervalMs ?? 0,
+          next_run_at: new Date(nextRunAt).toISOString()
+        })}`);
+      }
       if (continuing || wokenWhileRunning)
         this.scheduleContinueWake(nextRunAt);
       else if (retryAt && nextRunAt - Date.parse(completedAt) < this.tickMs)
@@ -174892,13 +174964,13 @@ function embeddingSweepMaxItems(env = process.env) {
   return Number.isInteger(value2) && value2 > 0 ? Math.min(value2, EMBEDDING_SWEEP_MAX_ITEMS_CEILING) : EMBEDDING_SWEEP_MAX_ITEMS;
 }
 function withEmbeddingSweep(sources, targetsFor, options = {}) {
-  return sources.map((source) => {
+  return sources.map((source, sourceIndex) => {
     const targets = targetsFor(source);
     if (!targets)
       return source;
     return {
       ...source,
-      tasks: [...source.tasks, embeddingSweepTask(source, targets, options.storeDeadlineMs)],
+      tasks: [...source.tasks, embeddingSweepTask(source, targets, options.storeDeadlineMs, sourceIndex)],
       embeddingDeferredReason: () => targets().some((target) => target.store.embeddingDeferredReason() !== undefined) ? EMBEDDING_PROVIDER_UNAVAILABLE_REASON : undefined
     };
   });
@@ -174906,7 +174978,7 @@ function withEmbeddingSweep(sources, targetsFor, options = {}) {
 function embeddingSweepConcurrencyKey(source) {
   return `${source.corpusId}.embeddings`;
 }
-function embeddingSweepTask(source, targets, deadlineMs = EMBEDDING_SWEEP_STORE_DEADLINE_MS) {
+function embeddingSweepTask(source, targets, deadlineMs = EMBEDDING_SWEEP_STORE_DEADLINE_MS, sourceIndex = 0) {
   const maxItems = embeddingSweepMaxItems();
   return {
     id: `${source.sourceId}_embeddings`,
@@ -174923,7 +174995,7 @@ function embeddingSweepTask(source, targets, deadlineMs = EMBEDDING_SWEEP_STORE_
         let timer;
         const stopAtMs = Date.now() + Math.floor(deadlineMs / 2);
         const result = await Promise.race([
-          embedPendingChunks([target], { maxItems, stopAtMs }),
+          embedPendingChunks([target], { maxItems, stopAtMs, diagnostics: true }),
           new Promise((resolve27) => {
             timer = setTimeout(() => resolve27(overran), deadlineMs);
           })
@@ -174933,7 +175005,6 @@ function embeddingSweepTask(source, targets, deadlineMs = EMBEDDING_SWEEP_STORE_
           runs.push(...result.map((run2) => run2.busy === true && run2.deferredReason === undefined && outage !== undefined ? { ...run2, deferredReason: outage } : run2));
           continue;
         }
-        console.error(`[olympus:embedding-sweep] pass_overran source=${source.sourceId} corpus=${target.store.corpusId} after_ms=${deadlineMs}; the source's turn was given back`);
         target.store.setEmbeddingDeferral(EMBEDDING_PROVIDER_UNAVAILABLE_REASON);
         runs.push({
           corpusId: target.store.corpusId,
@@ -174941,6 +175012,7 @@ function embeddingSweepTask(source, targets, deadlineMs = EMBEDDING_SWEEP_STORE_
           chunksEmbedded: 0,
           itemsFailed: 0,
           itemsOutOfScope: 0,
+          inventory: { inventory_complete: 0, pass_overran: 1 },
           deferredReason: EMBEDDING_PROVIDER_UNAVAILABLE_REASON
         });
       }
@@ -174954,14 +175026,35 @@ function embeddingSweepTask(source, targets, deadlineMs = EMBEDDING_SWEEP_STORE_
         stores_busy: runs.filter((run2) => run2.busy === true).length
       };
       const status = counts.chunks_embedded > 0 ? "progress" : "idle";
+      const embeddingSweep = runs.map((run2, index) => ({
+        source_index: sourceIndex,
+        store_index: index,
+        trust_domain: passTargets[index].store.trustDomain,
+        family: passTargets[index].store.family,
+        counts: {
+          ...run2.inventory,
+          whole_store: passTargets[index].wholeStore ? 1 : 0,
+          queued_items: passTargets[index].store.queuedEmbeddingItemIds().length,
+          items_attempted: run2.itemsAttempted,
+          chunks_embedded: run2.chunksEmbedded,
+          items_failed: run2.itemsFailed,
+          skipped_out_of_scope_items: run2.itemsOutOfScope,
+          skipped_lease_busy_items: run2.busy ? run2.itemsAttempted : 0,
+          skipped_deferred_items: run2.deferredReason ? run2.itemsAttempted : 0,
+          stores_deferred: run2.deferredReason ? 1 : 0,
+          stores_lease_busy: run2.busy ? 1 : 0,
+          stopped_at_deadline: run2.stoppedAtDeadline ? 1 : 0
+        }
+      }));
       const attemptedAt = Date.parse(context2?.attemptedAt ?? "") || Date.now();
       if (deferred2 === 0) {
         const more = runs.some((run2) => run2.busy !== true && run2.chunksEmbedded > 0 && (run2.itemsAttempted >= maxItems || run2.stoppedAtDeadline === true));
         if (counts.items_failed === 0)
-          return { status, counts, ...more ? { continueSoon: true } : {} };
+          return { status, counts, embeddingSweep, ...more ? { continueSoon: true } : {} };
         return {
           status,
           counts,
+          embeddingSweep,
           retryAt: {
             at: new Date(attemptedAt + (more ? SOURCE_SCHEDULER_CONTINUE_AFTER_MS : EMBEDDING_SWEEP_INTERVAL_MS)).toISOString(),
             degradedReason: EMBEDDING_ITEMS_FAILED_REASON
@@ -174973,6 +175066,7 @@ function embeddingSweepTask(source, targets, deadlineMs = EMBEDDING_SWEEP_STORE_
       return {
         status,
         counts,
+        embeddingSweep,
         retryAt: {
           at: new Date(attemptedAt + backoffMs).toISOString(),
           effectiveIntervalMs: backoffMs,

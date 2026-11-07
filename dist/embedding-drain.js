@@ -30780,6 +30780,67 @@ var init_local_index = __esm(() => {
       const tierHidden = await this.tierHiddenItemPksInTurns();
       return this.missingEmbeddingItemIds(embedder, limit, scope, tierHidden);
     }
+    async embeddingSweepInventory(provider, scope = {}, stopAtMs) {
+      const started = Date.now();
+      const tier = await this.tierHiddenItemPksInTurns();
+      const hidden = new Set(tier.hidden);
+      const held = new Set(tier.held);
+      const heldForJudgment = this.canEmbedHeld(provider) ? new Set(tier.heldForJudgment) : new Set;
+      const namesOnly = new Set(tier.metadataLayer);
+      const moving = new Set;
+      let walked = 0;
+      for (const member of this.tierLedgerHiddenMemo?.members.values() ?? []) {
+        if (member.flags.moving)
+          for (const pk of member.pks)
+            moving.add(pk);
+        if (++walked % 2000 === 0)
+          await ingestionTurn();
+      }
+      const tiers = connectorStoreEmbeddableRowTiers(this.trustDomain, provider);
+      const account = normalizeOptionalAccountScope(scope.accountScope);
+      const scoped = connectorStoreFilterSql(scope.filters);
+      const counts = {
+        pending_chunks: 0,
+        eligible_chunks: 0,
+        skipped_held_chunks: 0,
+        skipped_moving_chunks: 0,
+        skipped_hidden_chunks: 0,
+        skipped_metadata_chunks: 0,
+        skipped_failed_chunks: 0,
+        skipped_out_of_scope_chunks: 0,
+        skipped_private_tier_chunks: 0,
+        skipped_retired_chunks: 0,
+        inventory_complete: 0
+      };
+      const page = this.db.query(`
+      SELECT c.chunk_pk, i.item_pk, i.local_item_id, i.tombstoned, i.trust_tier,
+        (e.chunk_pk IS NULL OR e.content_hash != c.embedding_input_hash) AS owed,
+        CASE WHEN 1 = 1 ${account ? "AND i.account_scope = ?" : ""} ${scoped.sql} THEN 1 ELSE 0 END AS in_scope
+      FROM chunks c JOIN items i ON i.item_pk = c.item_pk
+      LEFT JOIN chunk_embeddings e ON e.chunk_pk = c.chunk_pk AND e.model_id = ?
+      WHERE c.chunk_pk > ?
+      ORDER BY c.chunk_pk LIMIT 2048
+    `);
+      let after = 0;
+      while (stopAtMs === undefined || Date.now() < stopAtMs) {
+        const rows = page.all(...account ? [account] : [], ...scoped.params, provider.modelId, after);
+        for (const row of rows) {
+          if (!row.owed)
+            continue;
+          counts.pending_chunks += 1;
+          const reason = row.tombstoned || row.trust_tier === "S5" ? "skipped_retired_chunks" : moving.has(row.item_pk) ? "skipped_moving_chunks" : hidden.has(row.item_pk) ? "skipped_hidden_chunks" : namesOnly.has(row.item_pk) ? "skipped_metadata_chunks" : held.has(row.item_pk) && !heldForJudgment.has(row.item_pk) ? "skipped_held_chunks" : tiers && !tiers.includes(row.trust_tier) ? "skipped_private_tier_chunks" : this.embeddingFailureState?.has(row.local_item_id) ? "skipped_failed_chunks" : !row.in_scope ? "skipped_out_of_scope_chunks" : "eligible_chunks";
+          counts[reason] += 1;
+        }
+        if (rows.length < 2048) {
+          counts.inventory_complete = 1;
+          break;
+        }
+        after = rows.at(-1).chunk_pk;
+        await ingestionTurn();
+      }
+      counts.inventory_ms = Date.now() - started;
+      return counts;
+    }
     embeddingOwedItemIds(modelId, localItemIds) {
       if (localItemIds.length === 0)
         return [];
@@ -71354,6 +71415,15 @@ class SourceScheduler {
         }
       }
       state.nextRunAt = nextRunAt;
+      for (const { counts, ...store } of result.embeddingSweep ?? []) {
+        console.info(`[olympus:embedding-sweep] ${JSON.stringify({
+          ...store,
+          ...counts,
+          attempted_at: attemptedAt,
+          backoff_ms: retryAt?.effectiveIntervalMs ?? 0,
+          next_run_at: new Date(nextRunAt).toISOString()
+        })}`);
+      }
       if (continuing || wokenWhileRunning)
         this.scheduleContinueWake(nextRunAt);
       else if (retryAt && nextRunAt - Date.parse(completedAt) < this.tickMs)
