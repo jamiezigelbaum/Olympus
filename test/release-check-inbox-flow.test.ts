@@ -89,7 +89,7 @@ if (verb === 'provision') {
       ok: true,
       ownerPath: { bearerStatus: 403, unlockOffered: true, unlocked: true },
       destinations: {
-        computer: { state: 'ready', status: 'Ready', reason: '', control: { tag: 'button', text: 'Ask the local model', href: null, action: 'ask', submit: true, disabled: false } },
+        computer: { state: 'ready', status: 'Ready', reason: '', control: { tag: 'button', text: 'Ask', href: null, action: 'ask', submit: true, disabled: false } },
         venice: { state: 'not_set_up', status: 'Not connected', reason: 'Not connected. Connect Venice to use its models.', control: link('/dashboard?keys#venice-setup', 'Connect Venice') },
         anonymous: { state: 'not_set_up', status: 'Not connected', reason: 'Not connected. Connect zkAPI and add money to use it.', control: link('#anonymous-setup', 'Connect zkAPI') },
       },

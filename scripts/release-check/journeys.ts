@@ -18,7 +18,6 @@ import {
   DASHBOARD_CHATGPT_PAGE_COPY as PANEL,
   DASHBOARD_CHATGPT_PRIVACY_COPY as PRIVACY,
   DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY as PRIVACY_SETUP,
-  DASHBOARD_COMPUTER_PANEL_COPY as COMPUTER,
   DASHBOARD_PRIVATE_ANSWERS_COPY as ASK,
 } from '../../src/workers/dashboard/vocabulary.ts';
 import type { Journey, StepContext } from './journey.ts';
@@ -51,6 +50,18 @@ const onlyDeletedGone = (expected: string) => async ({ count, vars }: StepContex
   return { ok: gone === 0 && kept === 1, expected, actual: `deleted answer: ${gone === 0 ? 'gone' : 'still listed'}; the settled answer: ${kept === 1 ? 'still listed' : 'missing'}` };
 };
 const DISCARDED_NOTE = 'release check: this note is never saved';
+
+/**
+ * Home folds every source under All sources (1.4.0); the owner opens it to reach a source's row. Pressed only while it is folded, so a
+ * fold the page opened on its own (an archive at work, or one that needs the owner) is left open.
+ */
+export const OPEN_ALL_SOURCES: Journey['steps'][number] = {
+  name: 'Open All sources',
+  do: { click: { css: 'details.home-sources:not([open]) > summary' }, frame: 'panel', optional: true },
+  expect: [{ present: { css: 'details.home-sources[open]' }, frame: 'panel' }],
+};
+/** The top bar's tabs (Home, Sources, Privacy, Settings): links on the page around the panel. */
+const tab = (name: string): Target => ({ role: 'link', name });
 const DISCARDED_SENDER = 'release-check@example.com';
 
 export const JOURNEYS: readonly Journey[] = [
@@ -63,19 +74,29 @@ export const JOURNEYS: readonly Journey[] = [
         name: 'Open the dashboard',
         do: { open: 'dashboard' },
         expect: [
-          { text: PANEL.sources, frame: 'panel' },
-          { text: 'Readwise', frame: 'panel' },
+          { text: PANEL.home.allSources, frame: 'panel' },
           // The ingest has settled before the journeys run: nothing is still in progress, and no word says it is stuck.
           { noText: STUCK, frame: 'panel' },
           { noText: /\b[1-9]\d?% done\b/, frame: 'panel' },
+        ],
+      },
+      OPEN_ALL_SOURCES,
+      {
+        name: 'Readwise is listed and reads settled',
+        do: { observe: true },
+        expect: [
+          { text: 'Readwise', frame: 'panel' },
+          { noText: STUCK, frame: 'panel' },
           { noText: /Readwise\s+—\s+(Needs you|Paused)/, frame: 'panel' },
         ],
       },
       {
         name: 'Look again after a reload',
         do: { reload: true },
-        expect: [{ text: 'Readwise', frame: 'panel' }, { noText: STUCK, frame: 'panel' }],
+        expect: [{ text: PANEL.home.allSources, frame: 'panel' }, { noText: STUCK, frame: 'panel' }],
       },
+      OPEN_ALL_SOURCES,
+      { name: 'Readwise is still listed', do: { observe: true }, expect: [{ text: 'Readwise', frame: 'panel' }, { noText: STUCK, frame: 'panel' }] },
     ],
   },
   {
@@ -83,9 +104,11 @@ export const JOURNEYS: readonly Journey[] = [
     title: 'Sources shows the connected source as healthy and the local-files card',
     source: 'owner test plan: dashboard pass; the new "Files on this computer" card (#440, #443)',
     steps: [
+      { name: 'Open the dashboard', do: { open: 'dashboard' }, expect: [{ text: PANEL.home.allSources, frame: 'panel' }] },
+      OPEN_ALL_SOURCES,
       {
-        name: 'Open the dashboard',
-        do: { open: 'dashboard' },
+        name: 'Look at the sources',
+        do: { observe: true },
         expect: [
           { count: { role: 'button', name: PANEL.moreActions.replace('{source}', 'Readwise'), contains: true }, equals: 1, frame: 'panel' },
           { noText: /Readwise\s+—\s+(Needs you|Paused|Working)/, frame: 'panel' },
@@ -140,33 +163,33 @@ export const JOURNEYS: readonly Journey[] = [
   {
     id: 'opens-in-place',
     title: 'The dashboard opens its own pages in place, and the way back works',
-    source: 'bug found by hand: the dashboard opened its own pages in a new window (#370)',
+    source: 'bug found by hand: the dashboard opened its own pages in a new window (#370); the 1.4.0 top bar',
     steps: [
-      { name: 'Open the dashboard', do: { open: 'dashboard' }, expect: [{ text: COMPUTER.section, frame: 'panel' }] },
+      { name: 'Open the dashboard', do: { open: 'dashboard' }, expect: [{ present: tab('Settings'), frame: 'host' }, { text: PANEL.home.allSources, frame: 'panel' }] },
       {
-        name: 'Press Open on Privacy',
-        do: { click: { role: 'button', name: `${COMPUTER.open} ${COMPUTER.rows.privateAnswers.title}` }, frame: 'panel' },
+        name: 'Press Privacy in the top bar',
+        do: { click: tab('Privacy'), frame: 'host' },
         expect: [{ url: /\/dashboard\?private-answers/ }, { noNewWindow: true }, { text: ASK.title, frame: 'host' }],
       },
       {
-        name: 'Go back to the dashboard from the page\'s own Olympus link',
-        do: { click: { role: 'link', name: 'Olympus' }, frame: 'host' },
-        expect: [{ url: /^\/dashboard(?!\?)/ }, { noNewWindow: true }, { text: PANEL.sources, frame: 'panel' }],
+        name: 'Go back with Home',
+        do: { click: tab('Home'), frame: 'host' },
+        expect: [{ url: /^\/dashboard(?!\?)/ }, { noNewWindow: true }, { text: PANEL.home.allSources, frame: 'panel' }],
       },
       {
-        name: 'Press Open on Agents',
-        do: { click: { role: 'button', name: `${COMPUTER.open} ${COMPUTER.rows.agents.title}` }, frame: 'panel' },
-        expect: [{ url: /\/dashboard\?agents/ }, { noNewWindow: true }, { text: 'Connect an agent', frame: 'host' }],
+        name: 'Press Settings in the top bar',
+        do: { click: tab('Settings'), frame: 'host' },
+        expect: [{ url: /\/dashboard\?settings/ }, { noNewWindow: true }, { text: 'Agents and access', frame: 'host' }],
       },
       {
-        name: 'Go back again',
-        do: { click: { role: 'link', name: 'Olympus' }, frame: 'host' },
-        expect: [{ url: /^\/dashboard(?!\?)/ }, { text: PANEL.sources, frame: 'panel' }],
+        name: 'Press Sources in the top bar',
+        do: { click: tab('Sources'), frame: 'host' },
+        expect: [{ url: /\/dashboard\?connect/ }, { noNewWindow: true }, { present: { css: '.srcbar [data-dialog-open="add-source"]' }, frame: 'host' }],
       },
       {
-        name: 'Press Open on Inbox',
-        do: { click: { role: 'button', name: `${COMPUTER.open} ${COMPUTER.rows.privateAnswers.title}` }, frame: 'panel' },
-        expect: [{ url: /\/dashboard\?private-answers/ }, { noNewWindow: true }, { text: ASK.title, frame: 'host' }],
+        name: 'Go back with Home again',
+        do: { click: tab('Home'), frame: 'host' },
+        expect: [{ url: /^\/dashboard(?!\?)/ }, { text: PANEL.home.allSources, frame: 'panel' }],
       },
     ],
   },
@@ -176,16 +199,12 @@ export const JOURNEYS: readonly Journey[] = [
     source: 'bug found by hand: connecting an agent showed "expired" after it worked (#399)',
     needs: ['suite'],
     steps: [
+      { name: 'Open the dashboard', do: { open: 'dashboard' }, expect: [{ present: tab('Settings'), frame: 'host' }] },
       {
-        name: 'Open the Agents page',
-        do: { open: 'dashboard' },
-        expect: [{ text: COMPUTER.rows.agents.title, frame: 'panel' }],
-      },
-      {
-        name: 'Press Open on Agents',
-        do: { click: { role: 'button', name: `${COMPUTER.open} ${COMPUTER.rows.agents.title}` }, frame: 'panel' },
+        name: 'Press Settings: Agents and access lists the connection',
+        do: { click: tab('Settings'), frame: 'host' },
         expect: [
-          { url: /\/dashboard\?agents/ },
+          { url: /\/dashboard\?settings/ },
           { text: /Connected agents\s+—\s+[1-9]/, frame: 'host' },
           { noText: /expired/i, frame: 'host' },
           { count: { role: 'button', name: 'Revoke' }, atLeast: 1, frame: 'host' },
@@ -198,11 +217,11 @@ export const JOURNEYS: readonly Journey[] = [
     title: 'Connect an agent shows the steps and the address to copy',
     source: 'owner test plan: connect ChatGPT, Claude and Grok from the Agents page',
     steps: [
-      { name: 'Open the Agents page', do: { open: 'dashboard' }, expect: [{ text: COMPUTER.rows.agents.title, frame: 'panel' }] },
+      { name: 'Open the dashboard', do: { open: 'dashboard' }, expect: [{ present: tab('Settings'), frame: 'host' }] },
       {
-        name: 'Press Open on Agents',
-        do: { click: { role: 'button', name: `${COMPUTER.open} ${COMPUTER.rows.agents.title}` }, frame: 'panel' },
-        expect: [{ url: /\/dashboard\?agents/ }, { present: { role: 'button', name: 'Connect an agent' }, frame: 'host' }],
+        name: 'Press Settings: Agents and access offers Connect an agent',
+        do: { click: tab('Settings'), frame: 'host' },
+        expect: [{ url: /\/dashboard\?settings/ }, { present: { role: 'button', name: 'Connect an agent' }, frame: 'host' }],
       },
       {
         name: 'Press Connect an agent',

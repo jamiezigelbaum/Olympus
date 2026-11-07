@@ -250,7 +250,7 @@ function destinationChecks(obs: InboxObservation): CheckResult[] {
   const out: CheckResult[] = [];
   const computer = obs.destinations.computer;
   const askButton = computer?.control;
-  const computerOk = computer?.state === 'ready' && askButton?.tag === 'button' && askButton.submit && askButton.action === 'ask' && askButton.text === COPY.askComputer;
+  const computerOk = computer?.state === 'ready' && askButton?.tag === 'button' && askButton.submit && askButton.action === 'ask' && askButton.text === COPY.ask;
   out.push(check(
     'inbox.ask.page',
     'The Ask page offers the local model, Venice and zkAPI, and the local model is ready to be asked',
