@@ -74946,6 +74946,20 @@ function privateProbability(model, vector) {
     score += input[i2] * model.weights[i2];
   return Number.isFinite(score) ? sigmoid(score) : undefined;
 }
+function measuredPrivatePrior(personal, privateCount) {
+  if (![personal, privateCount].every((n) => Number.isSafeInteger(n) && n >= 0) || personal + privateCount === 0)
+    return;
+  return Math.max(0.01, Math.min(0.99, privateCount / (personal + privateCount)));
+}
+function validPrefilterPrior(prior) {
+  return !!prior && Number.isFinite(prior.privateRate) && prior.privateRate >= 0.01 && prior.privateRate <= 0.99 && Number.isFinite(prior.trainingPrivateRate) && prior.trainingPrivateRate > 0 && prior.trainingPrivateRate < 1;
+}
+function correctedPrivateProbability(model, vector, prior) {
+  if (!model || !validPrefilterPrior(prior))
+    return;
+  const shift = Math.log(prior.privateRate / (1 - prior.privateRate)) - Math.log(prior.trainingPrivateRate / (1 - prior.trainingPrivateRate));
+  return privateProbability({ ...model, bias: model.bias + shift }, vector);
+}
 function* trainLogisticSteps(examples, minimumPerClass = EMBEDDING_PREFILTER_MIN_PER_CLASS) {
   if (!Number.isSafeInteger(minimumPerClass) || minimumPerClass < 1)
     return;
@@ -74999,6 +75013,7 @@ var CHECKS = `${PREFIX}check:`;
 var WINDOW = 200;
 var RETRAIN_MS = 24 * 60 * 60 * 1000;
 var MAX_PER_CLASS = 5000;
+var PRIOR_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
 var TRAINING_SLICE_MS = 200;
 var FAILED_RETRY_MS = 3 * 60 * 60 * 1000;
 var NEW_VERDICTS = 1000;
@@ -75258,9 +75273,9 @@ class EmbeddingPrefilter {
     if (!this.enabled())
       return "Embedding clearing is off.";
     const training = this.owner.attempt;
-    const failure = training?.reason === "scan_failed" ? "could not read training examples" : training?.reason === "training_failed" ? "could not fit the model" : training?.reason === "weights_write_failed" ? "could not save the model" : "the ledgers or judge changed";
+    const failure = training?.reason === "prior_missing" ? "found no recent held content-judge verdicts" : training?.reason === "scan_failed" ? "could not read training examples" : training?.reason === "training_failed" ? "could not fit the model" : training?.reason === "weights_write_failed" ? "could not save the model" : "the ledgers or judge changed";
     const detail = training ? ` Training ${training.outcome === "too_few" ? `found too few examples (needs ${EMBEDDING_PREFILTER_MIN_PER_CLASS} per class)` : training.outcome === "trained" ? `completed with model ${training.version}` : training.outcome === "failed" ? `failed: ${failure}` : training.outcome === "scanning" ? "is reading the ledger" : "is fitting the model"}; read ${training.rows} rows, ${training.counts[0]} Personal and ${training.counts[1]} Private examples in ${Math.round(training.elapsedMs)} ms. Next attempt: ${training.outcome === "scanning" || training.outcome === "fitting" ? "continue next tick" : new Date(training.nextAt).toISOString()}${training.outcome === "too_few" ? " or after 1,000 new verdicts, whichever comes first" : ""}.` : "";
-    if (!this.saved)
+    if (!this.saved || !validPrefilterPrior(this.saved.prior))
       return detail ? `Embedding clearing waits.${detail}` : `Embedding clearing waits for ${EMBEDDING_PREFILTER_MIN_PER_CLASS} judge verdicts per class with complete stored vectors.`;
     return `Embedding clearing is on; ${this.audit.misses.length} of 200 spot checks collected.${detail}`;
   }
@@ -75293,7 +75308,7 @@ class EmbeddingPrefilter {
     const fingerprint = this.trainingFingerprint(row);
     const copied = copyFingerprint2(copy);
     const subject = subjectOf(row);
-    return { vector, private: row.contentTier === "secure", current: (checkLedger) => {
+    return { vector, private: row.contentTier === "secure", contentHash: normalizedContentHash(copy.chunks.map((chunk) => chunk.boundedText).join("")), current: (checkLedger) => {
       const currentCopy = this.options.copyFor(subject);
       if (!currentCopy || copyFingerprint2(currentCopy) !== copied)
         return false;
@@ -75356,7 +75371,7 @@ class EmbeddingPrefilter {
     const started = clock2();
     const deadline = started + TRAINING_SLICE_MS;
     let attempt = this.attempt;
-    if (attempt && attempt.labelVersion !== 3) {
+    if (attempt && attempt.labelVersion !== 4) {
       attempt = this.attempt = undefined;
       this.training = undefined;
     }
@@ -75366,7 +75381,7 @@ class EmbeddingPrefilter {
     let stage = "scan_failed";
     try {
       const revisions = this.revisions();
-      if (this.saved && (this.saved.judge !== judge2 || !/^[0-9a-f-]{36}$/.test(this.saved.version) || !Number.isFinite(this.saved.trainedAt) || this.saved.revisions !== revisions || !existsSync32(this.path) || privateProbability(this.saved.model, [1, ...new Array(EMBEDDING_PREFILTER_DIMENSIONS - 1).fill(0)]) === undefined)) {
+      if (this.saved && (this.saved.judge !== judge2 || !/^[0-9a-f-]{36}$/.test(this.saved.version) || !Number.isFinite(this.saved.trainedAt) || this.saved.revisions !== revisions || !existsSync32(this.path) || correctedPrivateProbability(this.saved.model, [1, ...new Array(EMBEDDING_PREFILTER_DIMENSIONS - 1).fill(0)], this.saved.prior) === undefined)) {
         if (existsSync32(this.path))
           removeFileDurablySync(this.path);
         this.saved = undefined;
@@ -75391,7 +75406,7 @@ class EmbeddingPrefilter {
       }
       if (!attempt) {
         attempt = this.attempt = {
-          labelVersion: 3,
+          labelVersion: 4,
           id: randomUUID12(),
           revisions,
           judge: judge2,
@@ -75408,7 +75423,9 @@ class EmbeddingPrefilter {
         const scans = [...this.members].map((member) => {
           const raw = member.options.ledger.readMeta(SCAN);
           const previous = raw ? JSON.parse(raw) : undefined;
-          const scan = previous?.attempt === attempt.id ? previous : { attempt: attempt.id, done: false, rows: 0, samples: [] };
+          const scan = previous?.attempt === attempt.id ? previous : { attempt: attempt.id, done: false, rows: 0, samples: [], priorCounts: [0, 0] };
+          if (!Array.isArray(scan.priorCounts) || scan.priorCounts.length !== 2 || !scan.priorCounts.every((n) => Number.isSafeInteger(n) && n >= 0))
+            throw new Error;
           if (!Array.isArray(scan.samples) || scan.samples.length > MAX_PER_CLASS * 2 || !Number.isSafeInteger(scan.rows))
             throw new Error;
           return { member, scan, dirty: false, revision: member.options.ledger.readMeta(`${PREFIX}training-revision`) ?? "0" };
@@ -75430,8 +75447,7 @@ class EmbeddingPrefilter {
         run.validationRemaining = run.examples.length;
       let worked = false;
       const hasTime = () => !shouldYield() && (!worked || clock2() < deadline);
-      const full = () => attempt.counts.every((count) => count >= MAX_PER_CLASS);
-      while (attempt.outcome !== "fitting" && !full() && run.scans.some(({ scan }) => !scan.done) && hasTime()) {
+      while (attempt.outcome !== "fitting" && run.scans.some(({ scan }) => !scan.done) && hasTime()) {
         const entry = run.scans[run.scanIndex];
         run.scanIndex = (run.scanIndex + 1) % run.scans.length;
         const { member, scan } = entry;
@@ -75439,7 +75455,7 @@ class EmbeddingPrefilter {
           continue;
         const rows = member.options.ledger.listItemWindow({
           ...scan.after ? { after: scan.after } : {},
-          limit: Math.min(32, MAX_PER_CLASS * 2 - attempt.counts[0] - attempt.counts[1])
+          limit: 32
         });
         if (!rows.length) {
           scan.done = true;
@@ -75447,7 +75463,7 @@ class EmbeddingPrefilter {
           continue;
         }
         for (const row of rows) {
-          if (!hasTime() || full())
+          if (!hasTime())
             break;
           worked = true;
           entry.dirty = true;
@@ -75455,17 +75471,27 @@ class EmbeddingPrefilter {
           scan.rows++;
           attempt.rows++;
           const index = Number(row.contentTier === "secure");
-          if (attempt.counts[index] < MAX_PER_CLASS) {
+          const priorEligible = row.reasons.includes(HELD_UNTIL_JUDGED_REASON);
+          if (attempt.counts[index] < MAX_PER_CLASS || priorEligible) {
             const example = member.trainingExample(row, judge2);
             if (example) {
-              scan.samples.push({ subject: subjectOf(row), private: example.private });
-              attempt.counts[Number(example.private)]++;
+              if (priorEligible) {
+                const verdict = member.options.sniffer.trainingVerdict(subjectOf(row), row.modelId);
+                const time3 = Date.parse(verdict?.decidedAt ?? "");
+                if (verdict && !verdict.ambiguous && verdict.contentHash === example.contentHash && verdict.tier === (example.private ? "private" : "personal") && time3 >= attempt.startedAt - PRIOR_WINDOW_MS && time3 <= attempt.startedAt) {
+                  scan.priorCounts[Number(example.private)]++;
+                }
+              }
+              if (attempt.counts[index] < MAX_PER_CLASS) {
+                scan.samples.push({ subject: subjectOf(row), private: example.private });
+                attempt.counts[Number(example.private)]++;
+              }
             }
           }
           await ingestionTurn();
         }
       }
-      if (attempt.outcome === "fitting" || run.scans.every(({ scan }) => scan.done) || attempt.counts.every((count) => count >= MAX_PER_CLASS)) {
+      if (attempt.outcome === "fitting" || run.scans.every(({ scan }) => scan.done)) {
         if (attempt.counts.some((count) => count < EMBEDDING_PREFILTER_MIN_PER_CLASS))
           this.finishTraining(attempt, "too_few");
         else {
@@ -75547,7 +75573,28 @@ class EmbeddingPrefilter {
                   throw new Error;
                 mkdirSync17(directory, { recursive: true, mode: 448 });
                 chmodSync7(directory, 448);
-                const saved = { model: run.model, judge: judge2, revisions, trainedAt: this.now(), version: randomUUID12() };
+                const personal = run.scans.reduce((n, entry) => n + entry.scan.priorCounts[0], 0);
+                const privateCount = run.scans.reduce((n, entry) => n + entry.scan.priorCounts[1], 0);
+                const privateRate = measuredPrivatePrior(personal, privateCount);
+                if (privateRate === undefined) {
+                  stage = "prior_missing";
+                  throw new Error;
+                }
+                const saved = {
+                  model: run.model,
+                  judge: judge2,
+                  revisions,
+                  trainedAt: this.now(),
+                  version: randomUUID12(),
+                  prior: {
+                    privateRate,
+                    trainingPrivateRate: attempt.counts[1] / (attempt.counts[0] + attempt.counts[1]),
+                    personal,
+                    private: privateCount,
+                    since: attempt.startedAt - PRIOR_WINDOW_MS,
+                    until: attempt.startedAt
+                  }
+                };
                 writePrivateFileAtomicSync(this.path, JSON.stringify(saved));
                 this.saved = saved;
                 attempt.version = saved.version;
@@ -75577,7 +75624,7 @@ class EmbeddingPrefilter {
       }
     } catch {
       if (!attempt)
-        attempt = this.attempt = { labelVersion: 3, id: randomUUID12(), judge: judge2, revisions: "", startedAt: this.now(), elapsedMs: 0, rows: 0, counts: [0, 0], nextAt: this.now(), outcome: "scanning" };
+        attempt = this.attempt = { labelVersion: 4, id: randomUUID12(), judge: judge2, revisions: "", startedAt: this.now(), elapsedMs: 0, rows: 0, counts: [0, 0], nextAt: this.now(), outcome: "scanning" };
       if (attempt.outcome === "scanning" || attempt.outcome === "fitting")
         this.finishTraining(attempt, "failed", stage);
     }
@@ -75625,7 +75672,7 @@ class EmbeddingPrefilter {
       return skip("audit_stopped");
     if (!this.saved)
       return skip("model_missing");
-    if (!/^[0-9a-f-]{36}$/.test(this.saved.version) || !Number.isFinite(this.saved.trainedAt))
+    if (!/^[0-9a-f-]{36}$/.test(this.saved.version) || !Number.isFinite(this.saved.trainedAt) || !validPrefilterPrior(this.saved.prior))
       return skip("model_invalid");
     if (!existsSync32(this.path))
       return skip("weights_missing");
@@ -75675,7 +75722,7 @@ class EmbeddingPrefilter {
     const vector = prefilterVector(copy);
     if (!vector)
       return skip("no_vector");
-    const probability = privateProbability(this.saved.model, vector);
+    const probability = correctedPrivateProbability(this.saved.model, vector, this.saved.prior);
     if (probability === undefined)
       return skip("score_unavailable");
     if (probability >= 0.05)
