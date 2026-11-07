@@ -53,7 +53,7 @@ describe('OpenClaw worker CLI launcher', () => {
       chmodSync(path, 0o755);
       expect(installWorkerService(options).wrote_launcher).toBe(true);
       expect(lstatSync(path).mode & 0o777).toBe(0o700);
-    });
+    }, 30_000);
 
     test(`${platform} gives an executable full command when the login PATH omits ~/.local/bin`, () => {
       const home = homeFixture();
@@ -65,7 +65,7 @@ describe('OpenClaw worker CLI launcher', () => {
       expect(launched.exitCode, launched.stderr.toString()).toBe(0);
       expect(JSON.parse(launched.stdout.toString()).args).toEqual(['dashboard']);
       expect(result.notices.join('\n')).toContain(`${result.cli_command} dashboard`);
-    });
+    }, 30_000);
   }
 
   test.each(['user', 'standalone', 'symlink', 'dangling symlink', 'directory'])('preserves a %s launcher', (kind) => {

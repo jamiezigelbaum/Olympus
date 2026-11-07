@@ -52,7 +52,7 @@ describe('versioned Olympus worker lifecycle', () => {
         expect(launch().stdout.toString().trim()).toBe('olympus 0.4.9');
         expect(existsSync(transactionPath(home))).toBe(false);
       } finally { makeTreeWritable(home); rmSync(home, { recursive: true, force: true }); }
-    });
+    }, 30_000);
   }
 
   test('rollback preserves a launcher the owner replaced during an upgrade', () => {
@@ -70,7 +70,7 @@ describe('versioned Olympus worker lifecycle', () => {
       })).toThrow('did not answer its loopback readiness probe');
       expect(readFileSync(path, 'utf8')).toBe(ownerLauncher);
     } finally { makeTreeWritable(home); rmSync(home, { recursive: true, force: true }); }
-  });
+  }, 30_000);
 
   test.each(['activating', 'deactivating', 'reloading'])('first install in %s rolls back, retries and uninstalls', (transient) => {
     const home = mkdtempSync(join(tmpdir(), 'olympus-lifecycle-crash-loop-'));

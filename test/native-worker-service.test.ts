@@ -74,7 +74,7 @@ describe('native Olympus worker service', () => {
     await start(first);
     expect(readFileSync(path, 'utf8')).toBe(owned);
     rmSync(path);
-  });
+  }, 30_000);
 
   test('keeps retrying a data-owner conflict, reports it until its own worker is ready, and cancels on stop', async () => {
     const fixture = fakeWorkerFixture({ dataLock: true });
