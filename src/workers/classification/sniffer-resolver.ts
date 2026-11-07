@@ -1,4 +1,4 @@
-import type { EmbeddingPrefilter } from './embedding-prefilter.ts';
+import type { ClearingCounts, EmbeddingPrefilter } from './embedding-prefilter.ts';
 import type { SnifferModel, SnifferModelRequest, SnifferModelCompletion } from './sniffer-decision.ts';
 // The sniffer's background pass (design section 2.2): resolve pending items.
 //
@@ -190,6 +190,7 @@ export interface SnifferPassOptions {
 export type SnifferPassStop = 'pass_budget' | 'daily_budget' | 'yield' | 'preempted' | 'transport_failures' | 'aborted' | 'cloud_stopped';
 
 export interface SnifferPassReport {
+  clearing: ClearingCounts;
   /** Re-judge answers held at the previous Private placement during rollout. */
   heldLowering: number;
   callMs: number;
@@ -296,6 +297,7 @@ export async function runSnifferPass(options: SnifferPassOptions): Promise<Sniff
   const monotonicNow = options.monotonicNow ?? (() => performance.now());
   const deadline = monotonicNow() + (options.passTimeMs ?? DEFAULT_SNIFFER_PASS_TIME_MS);
   const report: SnifferPassReport = {
+    clearing: { tried: 0, cleared: 0, spotChecks: 0, skipped: {} },
     heldLowering: 0,
     callMs: 0,
     maxQueueWaitMs: 0,
@@ -553,7 +555,7 @@ export async function runSnifferPass(options: SnifferPassOptions): Promise<Sniff
         if (spotCheck) item.target.embeddingPrefilter?.observe(item.question, true);
         apply(item, duplicate, true); report.cacheHits += 1; return false;
       }
-      if (item.target.embeddingPrefilter?.tryClear(item.question, id)) {
+      if (item.target.embeddingPrefilter?.tryClear(item.question, id, report.clearing)) {
         report.verdictsApplied += 1; report.resolvedPersonal += 1;
         return false;
       }

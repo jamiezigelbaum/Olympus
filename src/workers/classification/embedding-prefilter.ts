@@ -198,6 +198,22 @@ export function prefilterTrainingExample(row: TierLedgerRecord, judge: string, o
   return { vector, copy, private: row.contentTier === 'secure', provenance };
 }
 
+/** First failing guard wins; fixed codes only, never item-derived labels. */
+export type ClearingSkipReason =
+  | 'disabled' | 'audit_stopped' | 'model_missing' | 'model_invalid' | 'weights_missing'
+  | 'revisions_changed' | 'judge_changed' | 'not_content' | 'row_missing' | 'row_not_pending'
+  | 'metadata_pending' | 'content_not_pending' | 'content_unread' | 'metadata_tier' | 'content_tier'
+  | 'metadata_forced' | 'override_decision' | 'owner_decision' | 'item_override' | 'metadata_owner_rule'
+  | 'rejudge_open' | 'metadata_question_open' | 'copy_missing' | 'digest_missing' | 'no_vector'
+  | 'score_unavailable' | 'probability_high' | 'clear_rejected';
+export interface ClearingCounts {
+  tried: number;
+  cleared: number;
+  /** Both existing and newly sampled audit selections, once per attempt. */
+  spotChecks: number;
+  skipped: Partial<Record<ClearingSkipReason, number>>;
+}
+
 export class EmbeddingPrefilter {
   private readonly owner: EmbeddingPrefilter;
   private readonly members = new Set<EmbeddingPrefilter>();
@@ -565,25 +581,52 @@ export class EmbeddingPrefilter {
     this.options.ledger.deleteMeta(RECEIPTS + tierLedgerIdentityKey(question));
     return false;
   }
-  tryClear(question: SnifferQuestion, judge: string): boolean {
-    if (!this.enabled() || this.audit.stopped || !this.saved || !/^[0-9a-f-]{36}$/.test(this.saved.version)
-      || !Number.isFinite(this.saved.trainedAt) || !existsSync(this.path) || this.saved.revisions !== this.revisions() || this.saved.judge !== judge || question.pass !== 'content') return false;
+  tryClear(question: SnifferQuestion, judge: string, counts?: ClearingCounts): boolean {
+    if (counts) counts.tried++;
+    const skip = (reason: ClearingSkipReason): false => {
+      if (counts) counts.skipped[reason] = (counts.skipped[reason] ?? 0) + 1;
+      return false;
+    };
+    const spotCheck = (): false => {
+      if (counts) counts.spotChecks++;
+      return false;
+    };
+    if (!this.enabled()) return skip('disabled');
+    if (this.audit.stopped) return skip('audit_stopped');
+    if (!this.saved) return skip('model_missing');
+    if (!/^[0-9a-f-]{36}$/.test(this.saved.version) || !Number.isFinite(this.saved.trainedAt)) return skip('model_invalid');
+    if (!existsSync(this.path)) return skip('weights_missing');
+    if (this.saved.revisions !== this.revisions()) return skip('revisions_changed');
+    if (this.saved.judge !== judge) return skip('judge_changed');
+    if (question.pass !== 'content') return skip('not_content');
     const row = this.options.ledger.getCurrent(question);
-    if (!row || row.state !== 'pending' || row.metadataPending || !row.contentPending || !row.contentRead
-      || row.metadataTier !== 'private' || row.contentTier !== 'private' || row.metadataForced
-      || row.decidedBy === 'override' || row.decidedBy === 'owner_rule' || this.options.ledger.getOverride(question)
-      || row.reasons.some(reason => reason.startsWith('metadata:owner_rule:'))
-      || this.options.ledger.rejudgeQuestion(question) || this.options.sniffer.questionFor(question, 'metadata')) return false;
+    if (!row) return skip('row_missing');
+    if (row.state !== 'pending') return skip('row_not_pending');
+    if (row.metadataPending) return skip('metadata_pending');
+    if (!row.contentPending) return skip('content_not_pending');
+    if (!row.contentRead) return skip('content_unread');
+    if (row.metadataTier !== 'private') return skip('metadata_tier');
+    if (row.contentTier !== 'private') return skip('content_tier');
+    if (row.metadataForced) return skip('metadata_forced');
+    if (row.decidedBy === 'override') return skip('override_decision');
+    if (row.decidedBy === 'owner_rule') return skip('owner_decision');
+    if (this.options.ledger.getOverride(question)) return skip('item_override');
+    if (row.reasons.some(reason => reason.startsWith('metadata:owner_rule:'))) return skip('metadata_owner_rule');
+    if (this.options.ledger.rejudgeQuestion(question)) return skip('rejudge_open');
+    if (this.options.sniffer.questionFor(question, 'metadata')) return skip('metadata_question_open');
     // An existing audit selection survives retry/restart and never takes a cache shortcut.
     const checkKey = this.checkKey(question);
-    if (this.isSpotCheck(question)) return false;
+    if (this.isSpotCheck(question)) return spotCheck();
     const copy = this.options.copyFor(question);
-    if (!copy || !row.reasons.includes(contentDigestReason(copy.chunks.map(chunk => chunk.boundedText).join('')))) return false;
+    if (!copy) return skip('copy_missing');
+    if (!row.reasons.includes(contentDigestReason(copy.chunks.map(chunk => chunk.boundedText).join('')))) return skip('digest_missing');
     const vector = prefilterVector(copy);
-    const probability = vector ? privateProbability(this.saved.model, vector) : undefined;
-    if (probability === undefined || probability >= 0.05) return false;
+    if (!vector) return skip('no_vector');
+    const probability = privateProbability(this.saved.model, vector);
+    if (probability === undefined) return skip('score_unavailable');
+    if (probability >= 0.05) return skip('probability_high');
     if ((this.options.random?.() ?? Math.random()) < 0.05) {
-      this.options.ledger.writeMeta(checkKey, JSON.stringify({ hash: question.materialHash, token: randomUUID() })); return false;
+      this.options.ledger.writeMeta(checkKey, JSON.stringify({ hash: question.materialHash, token: randomUUID() })); return spotCheck();
     }
     const reason = `content:embedding_prefilter:${this.saved.version}:${probability.toFixed(8)}`;
     const original = decisionOf(row);
@@ -599,6 +642,8 @@ export class EmbeddingPrefilter {
       ...(this.options.placementFor ? { placementFor: this.options.placementFor } : {}),
     });
     if (cleared) this.options.ledger.markJudged(question, { engineVersion: TIER_CLASSIFIER_VERSION, snifferId: judge });
+    if (!cleared) return skip('clear_rejected');
+    if (counts) counts.cleared++;
     return cleared;
   }
   private checkKey(question: TierSnifferSubject): string {
