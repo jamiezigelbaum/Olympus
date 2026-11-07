@@ -282,3 +282,25 @@ test('offline CLI refuses install outputs, existing outputs and invalid argument
     }
   } finally { a.close(); rmSync(root, { recursive: true, force: true }); rmSync(output, { recursive: true, force: true }); }
 }, 30_000);
+
+test('a failed unrelated snapshot preserves dry-run counts but refuses offline fitting', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'prefilter-partial-'));
+  const output = mkdtempSync(join(tmpdir(), 'prefilter-partial-output-'));
+  const a = await fixture(root, 'a');
+  a.ledger.writeMeta('embedding-prefilter:training-v1', JSON.stringify({ judge: a.judge }));
+  writeFileSync(join(root, 'broken.sqlite'), 'not a database');
+  const before = files(root);
+  try {
+    const report = runPrefilterTrainingDryRun({ dataDir: root });
+    expect(report.errors).toBe(1);
+    expect(report.ledgers).toHaveLength(1);
+    expect(report.ledgers[0]!.examples).toEqual({ personal: 2, private: 1 });
+    const child = Bun.spawnSync([process.execPath, resolve(process.env.OLYMPUS_PREFILTER_TEST_ENTRY ?? 'src/cli.ts'),
+      'prefilter-train-offline', '--data-dir', root, '--out', join(output, 'weights.json')]);
+    expect(child.exitCode).toBe(1);
+    expect(child.stderr.toString()).toBe('');
+    expect(JSON.parse(child.stdout.toString())).toMatchObject({ outcome: 'failed', per_source: {} });
+    expect(readdirSync(output)).toEqual([]);
+    expect(files(root)).toEqual(before);
+  } finally { a.close(); rmSync(root, { recursive: true, force: true }); rmSync(output, { recursive: true, force: true }); }
+});

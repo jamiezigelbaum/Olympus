@@ -131,7 +131,7 @@ export function prefilterTrainingExample(row: TierLedgerRecord, judge: string, o
   if (!row.routed) return reject('not_routed');
   if (row.state !== 'current' && row.state !== 'moving') return reject('not_current');
   // queueMoveRow stores final decision flags/reasons with target tiers; the old
-  // tiers remain placement until flipMove. Pending questions still disqualify it.
+  // tiers remain placement until completeMove. Pending questions still disqualify it.
   const metadataTier = row.state === 'moving' ? row.targetMetadataTier : row.metadataTier;
   const contentTier = row.state === 'moving' ? row.targetContentTier : row.contentTier;
   if (row.metadataPending) return reject('metadata_pending');
@@ -328,7 +328,8 @@ export class EmbeddingPrefilter {
     const eligible = prefilterTrainingExample(row, judge, this.options);
     if (!eligible) return undefined;
     const { vector, copy } = eligible;
-    const fingerprint = this.trainingFingerprint(row);
+    let fingerprint = this.trainingFingerprint(row);
+    let awaitingMoveCompletion = row.state === 'moving';
     const copied = copyFingerprint(copy);
     const subject = subjectOf(row);
     return { vector, private: eligible.private, current: checkLedger => {
@@ -336,7 +337,23 @@ export class EmbeddingPrefilter {
       if (!currentCopy || copyFingerprint(currentCopy) !== copied) return false;
       if (!checkLedger) return true;
       const current = this.options.ledger.getCurrent(subject);
-      return !!current && this.trainingFingerprint(current) === fingerprint;
+      if (!current) return false;
+      const nextFingerprint = this.trainingFingerprint(current);
+      if (nextFingerprint === fingerprint) return true;
+      // Placement completion is expected for a sampled queued decision. Permit
+      // exactly that one flip, after re-proving the same label and copy. All
+      // later mutations retain the ordinary strict freshness check.
+      if (!awaitingMoveCompletion || current.state !== 'current' || current.generation !== row.generation + 1
+        || current.metadataTier !== row.targetMetadataTier || current.contentTier !== row.targetContentTier
+        || current.targetMetadataTier !== null || current.targetContentTier !== null
+        || current.modelId !== row.modelId || current.engineVersion !== row.engineVersion
+        || current.mapRevision !== row.mapRevision || current.metadataFlagged !== row.metadataFlagged
+        || JSON.stringify(current.reasons) !== JSON.stringify(row.reasons)) return false;
+      const completed = prefilterTrainingExample(current, judge, this.options);
+      if (!completed || completed.private !== eligible.private || copyFingerprint(completed.copy) !== copied) return false;
+      fingerprint = nextFingerprint;
+      awaitingMoveCompletion = false;
+      return true;
     } };
   }
   private verdictCount(): number {

@@ -632,7 +632,11 @@ flags alongside the target, while retaining the old placement tiers until
 placement, but `pending` rows, pending questions and extra raisers stay excluded.
 Serving-copy/vector freshness, owner rules, overrides, rejudges and all other
 provenance checks remain in force. This fixes selection bias from queued moves;
-it does not establish safe calibration or owner-label recall.
+it does not establish safe calibration or owner-label recall. If a selected move
+completes during fitting, exactly its one-generation placement flip may survive
+freshness validation: target tiers, reasons, model/classifier identity and the
+complete copy must agree, and the full provenance checks run again. Further
+decision/copy changes still discard the fit.
 
 Label version 5 restarts old scans and insufficient/failed attempts immediately,
 including their cursors and retry delays. Valid saved weights retain their
@@ -724,7 +728,8 @@ private scratch copies. Copying detects concurrent main/WAL changes and retries
 up to three times after 25, 50 and 75 ms, discarding stale scratch sidecars
 between attempts. Output includes `snapshot_retries` and numeric `error_reasons`
 for busy, unsafe or unreadable snapshot refusals and database-reader failures;
-any final error produces a nonzero exit. Snapshots
+any final error produces a nonzero exit. The dry run still reports readable
+ledgers when another snapshot fails; offline fitting refuses any scan error. Snapshots
 of different files are not one install-wide transaction. Synthetic WAL-backed
 tests compare all install file hashes and mtimes before and after, including the
 built CLI path. The owner's 2026-11-07 read-only Sparta baseline found no

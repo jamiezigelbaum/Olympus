@@ -1406,3 +1406,34 @@ test('each training drop check has a stable first-failure counter', () => {
   }
   expect(cases.map(([reason]) => reason)).toEqual([...PREFILTER_TRAINING_REJECTIONS]);
 });
+
+test.each(['unchanged', 'raiser', 'secrets', 'override', 'vector'] as const)(
+  'a sampled queued lowering may complete only with unchanged label and vectors: %s', async change => {
+    const f = fixture({ trained: false, memory: true, log: () => {} });
+    trainingRow(f, 0);
+    const settled = f.ledger.getCurrent(subject(0))!;
+    f.ledger.recordRoutedPlacement(subject(0), { ...settled, state: 'current', contentTier: 'secure',
+      decidedBy: 'sniffer', snifferId: judge }, f.placementFor({ contentPending: true } as TierDecision));
+    const moving = f.ledger.beginMove(subject(0), { metadataTier: 'private', contentTier: 'private' }, f.ledger.getCurrent(subject(0))!.generation);
+    const example = (f.filter as unknown as { trainingExample(row: typeof moving, judge: string): { current(check: boolean): boolean } }).trainingExample(moving, judge);
+    expect(example.current(true)).toBe(true);
+    f.ledger.completeMove(subject(0), { expectedGeneration: moving.generation,
+      destination: [{ corpusId: 'private', trustDomain: 'secure_local', trustTier: 'S4', layers: 'both' }] });
+    if (change === 'vector') f.setCopy(n => copy(n, -1));
+    if (change === 'override') f.ledger.setOverride(subject(0), { kind: 'tier', tier: 'secure' });
+    if (change === 'raiser' || change === 'secrets') {
+      const row = f.ledger.getCurrent(subject(0))!;
+      f.ledger.recordDecision(subject(0), { ...row, state: 'current', snifferId: judge,
+        decidedBy: change === 'secrets' ? 'secret_detector' : 'sniffer',
+        contentTier: change === 'secrets' ? 'secrets' : row.contentTier,
+        reasons: change === 'raiser' ? [...row.reasons, 'content:own_record:health'] : row.reasons });
+    }
+    expect(example.current(true)).toBe(change === 'unchanged');
+    if (change === 'unchanged') {
+      // Accepting placement completion must not waive later decision changes.
+      const row = f.ledger.getCurrent(subject(0))!;
+      f.ledger.recordDecision(subject(0), { ...row, state: 'current', snifferId: judge,
+        decidedBy: 'sniffer', reasons: [...row.reasons, 'content:borderline:financial'] });
+      expect(example.current(true)).toBe(false);
+    }
+  });

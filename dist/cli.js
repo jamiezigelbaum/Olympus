@@ -125202,7 +125202,8 @@ class EmbeddingPrefilter {
     if (!eligible)
       return;
     const { vector, copy } = eligible;
-    const fingerprint = this.trainingFingerprint(row);
+    let fingerprint = this.trainingFingerprint(row);
+    let awaitingMoveCompletion = row.state === "moving";
     const copied = copyFingerprint2(copy);
     const subject = subjectOf(row);
     return { vector, private: eligible.private, current: (checkLedger) => {
@@ -125212,7 +125213,19 @@ class EmbeddingPrefilter {
       if (!checkLedger)
         return true;
       const current2 = this.options.ledger.getCurrent(subject);
-      return !!current2 && this.trainingFingerprint(current2) === fingerprint;
+      if (!current2)
+        return false;
+      const nextFingerprint = this.trainingFingerprint(current2);
+      if (nextFingerprint === fingerprint)
+        return true;
+      if (!awaitingMoveCompletion || current2.state !== "current" || current2.generation !== row.generation + 1 || current2.metadataTier !== row.targetMetadataTier || current2.contentTier !== row.targetContentTier || current2.targetMetadataTier !== null || current2.targetContentTier !== null || current2.modelId !== row.modelId || current2.engineVersion !== row.engineVersion || current2.mapRevision !== row.mapRevision || current2.metadataFlagged !== row.metadataFlagged || JSON.stringify(current2.reasons) !== JSON.stringify(row.reasons))
+        return false;
+      const completed = prefilterTrainingExample(current2, judge3, this.options);
+      if (!completed || completed.private !== eligible.private || copyFingerprint2(completed.copy) !== copied)
+        return false;
+      fingerprint = nextFingerprint;
+      awaitingMoveCompletion = false;
+      return true;
     } };
   }
   verdictCount() {
@@ -125964,8 +125977,8 @@ function runPrefilterTrainingDryRun(options = {}) {
         })
       });
     }
-    if (!report.errors) {
-      if (options.inspect)
+    if (options.inspect) {
+      if (!report.errors)
         options.inspect({
           judge: judge3,
           members: inputs,
@@ -125974,9 +125987,8 @@ function runPrefilterTrainingDryRun(options = {}) {
             return [member.ledgerId(), member.readMeta("embedding-prefilter:training-revision") ?? "0"];
           }).sort()) + ":" + (trainingOwners[0]?.readMeta("embedding-prefilter:withdrawal") ?? "0")
         });
-      else
-        report.ledgers = inputs.map((input) => countPrefilterTraining(input));
-    }
+    } else
+      report.ledgers = inputs.map((input) => countPrefilterTraining(input));
     return report;
   } finally {
     try {

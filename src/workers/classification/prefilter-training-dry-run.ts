@@ -190,14 +190,13 @@ export function runPrefilterTrainingDryRun(options: { dataDir?: string; rowLimit
         }),
       });
     }
-    if (!report.errors) {
-      if (options.inspect) options.inspect({ judge, members: inputs,
+    if (options.inspect) {
+      if (!report.errors) options.inspect({ judge, members: inputs,
         revisions: JSON.stringify(inputs.map(({ ledger }) => {
           const member = ledger as TierLedger;
           return [member.ledgerId(), member.readMeta('embedding-prefilter:training-revision') ?? '0'];
         }).sort()) + ':' + (trainingOwners[0]?.readMeta('embedding-prefilter:withdrawal') ?? '0') });
-      else report.ledgers = inputs.map(input => countPrefilterTraining(input));
-    }
+    } else report.ledgers = inputs.map(input => countPrefilterTraining(input));
     return report;
   } finally {
     try { for (const handle of opened.reverse()) handle.close(); }
