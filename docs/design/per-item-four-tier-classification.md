@@ -602,8 +602,13 @@ model directory `<ledger>.embedding-prefilter/` (0700) and `weights.json` (0600,
 atomic write). The aggregate audit survives source changes and unavailable source ledgers.
 Selections stay in their own source ledger. Weights never enter logs, exports or releases.
 Deleting any source or withdrawing an archive scope removes the shared weights,
-even below the retraining minimum; it preserves the audit and advances an install-wide withdrawal fence before source bytes disappear, so yielded training cannot republish deleted examples. Archive scope withdrawal removes source-owned selection and clearance receipts. Completed checks physically remove their selection; install state holds only counters and temporary opaque deduplication tokens. Delete-all removes
-both. Empty private model directories may remain after file deletion.
+even below the retraining minimum; it preserves the audit. Source deletion
+advances an install-wide withdrawal fence before source bytes disappear;
+archive withdrawal advances that ledger's training revision. Both prevent
+yielded training from republishing deleted examples. Archive scope withdrawal
+also removes source-owned selection and clearance receipts. Completed checks
+physically remove their selection; install state holds only counters and
+temporary opaque deduplication tokens. Delete-all removes both. Empty private model directories may remain after file deletion.
 The engine environment setting `OLYMPUS_EMBEDDING_PREFILTER_ENABLED=off` disables
 new clearances; the default is on once trained. The ordinary classifier remains
 available throughout training and whenever the filter abstains.
@@ -618,7 +623,7 @@ toggling the setting.
 
 Until the first healthy 200-check window, and thereafter since the most recent
 healthy check, every clearance retains its existing queue question plus a
-content-free ledger receipt. A stop restores the original pending decision,
+content-free ledger receipt. A stop restores a held pending decision,
 hides any Personal copies before moving them back, and fences a lowering in
 flight. Owner decisions made since clearance are left authoritative. A healthy
 window releases the retained questions. The reason for a clearance is
