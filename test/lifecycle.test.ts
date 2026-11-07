@@ -19,6 +19,7 @@ import {
   lifecycleRecoveryPlan,
   runWorkerLifecycle,
 } from '../src/core/lifecycle.ts';
+import { workerCliLauncherPath } from '../src/core/worker-cli-launcher.ts';
 import { acquireLifecycleMutationLock } from '../src/core/lifecycle-lock.ts';
 import {
   installWorkerService,
@@ -27,6 +28,50 @@ import {
 } from '../src/core/worker-service.ts';
 
 describe('versioned Olympus worker lifecycle', () => {
+  for (const platform of ['linux', 'darwin'] as const) {
+    test(`${platform} CLI follows an artifact upgrade and returns to the previous CLI on rollback`, () => {
+      const home = mkdtempSync(join(tmpdir(), 'olympus-cli-upgrade-'));
+      const manager = platform === 'linux' ? linuxManager('active') : darwinManager('active');
+      const options = { platform, homeDir: home, bunBin: process.execPath, exec: manager.exec,
+        activationSettleMs: 0, readinessProbe: () => true };
+      try {
+        installManagedWorkerFiles({ ...options, workingDirectory: process.cwd(), activate: false });
+        const artifact = createUpgradeArtifact(home, '0.4.9');
+        runWorkerLifecycle('upgrade', { ...options, artifactPath: artifact.path });
+        const path = workerCliLauncherPath(home);
+        const launcher = readFileSync(path, 'utf8');
+        expect(launcher).toContain(join(artifact.managedRoot, 'dist/cli.js'));
+        const launch = () => Bun.spawnSync([path, '--version'], { env: { HOME: home, PATH: '/usr/bin:/bin' } });
+        expect(launch().stdout.toString().trim()).toBe('olympus 0.4.9');
+        const next = createUpgradeArtifact(home, '0.4.10');
+        expect(() => runWorkerLifecycle('upgrade', {
+          ...options, artifactPath: next.path, actionSettleTimeoutMs: 0, readinessProbe: () => false,
+        })).toThrow('did not answer its loopback readiness probe');
+        expect(readFileSync(path, 'utf8')).toBe(launcher);
+        expect(lstatSync(path).mode & 0o777).toBe(0o700);
+        expect(launch().stdout.toString().trim()).toBe('olympus 0.4.9');
+        expect(existsSync(transactionPath(home))).toBe(false);
+      } finally { makeTreeWritable(home); rmSync(home, { recursive: true, force: true }); }
+    }, 30_000);
+  }
+
+  test('rollback preserves a launcher the owner replaced during an upgrade', () => {
+    const home = mkdtempSync(join(tmpdir(), 'olympus-cli-takeover-'));
+    const manager = linuxManager('active');
+    try {
+      installWorkerService({ platform: 'linux', homeDir: home, workingDirectory: process.cwd() });
+      const artifact = createUpgradeArtifact(home, '0.4.9');
+      const path = workerCliLauncherPath(home);
+      const ownerLauncher = '#!/bin/sh\necho owner\n';
+      expect(() => runWorkerLifecycle('upgrade', {
+        platform: 'linux', homeDir: home, artifactPath: artifact.path, exec: manager.exec,
+        activationSettleMs: 0, actionSettleTimeoutMs: 0,
+        readinessProbe: () => { writeFileSync(path, ownerLauncher); return false; },
+      })).toThrow('did not answer its loopback readiness probe');
+      expect(readFileSync(path, 'utf8')).toBe(ownerLauncher);
+    } finally { makeTreeWritable(home); rmSync(home, { recursive: true, force: true }); }
+  }, 30_000);
+
   test.each(['activating', 'deactivating', 'reloading'])('first install in %s rolls back, retries and uninstalls', (transient) => {
     const home = mkdtempSync(join(tmpdir(), 'olympus-lifecycle-crash-loop-'));
     let state = 'inactive', crash = true;
@@ -43,6 +88,7 @@ describe('versioned Olympus worker lifecycle', () => {
       authToken:'test-token', exec, activationSettleMs:0, actionSettleTimeoutMs:0 };
     try {
       expect(()=>runWorkerLifecycle('install', options)).toThrow();
+      expect(existsSync(workerCliLauncherPath(home))).toBe(false);
       expect(calls).toContain('systemctl --user stop olympus-worker.service');
       expect(calls).toContain('systemctl --user reset-failed olympus-worker.service');
       expect(existsSync(transactionPath(home))).toBe(false);

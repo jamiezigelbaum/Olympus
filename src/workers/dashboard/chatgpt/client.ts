@@ -1018,10 +1018,11 @@ export function chatgptDashboardClient(
     const current = connectionState();
     if (!current || current === 'ready') return null;
     const copy = (C as Any)[current] || C.relay_unavailable;
-    const tone = current === 'installing' ? 'info' : 'warn';
+    const starting = current === 'installing' || current === 'restarting';
+    const tone = starting ? 'info' : 'warn';
     const banner = el('section', 'banner ' + tone);
-    banner.setAttribute('role', current === 'installing' ? 'status' : 'alert');
-    add(banner, icon(current === 'installing' ? '…' : '!'));
+    banner.setAttribute('role', starting ? 'status' : 'alert');
+    add(banner, icon(starting ? '…' : '!'));
     const body = add(el('div', 'banner-body'), el('p', 'banner-title', copy.title));
     const conn = state.data ? state.data.connection : {};
     if (current === 'installing' && conn.progress) {
@@ -2498,7 +2499,7 @@ export function chatgptDashboardClient(
    * failed.
    */
   function modelInstall(models: DashboardModels, which: 'search' | 'answers' | 'transcription'): ModelInstallLine | null {
-    const source: Partial<ModelInstall> | undefined = which === 'search'
+    const source = which === 'search'
       ? models.embedding
       : which === 'answers' ? (models.answers ? models.answers.install : undefined) : models.transcription as Partial<ModelInstall> | undefined;
     if (!source || typeof source !== 'object') return null;
@@ -2530,6 +2531,7 @@ export function chatgptDashboardClient(
     let ready: string = P.modelReady;
     if (embedding.state === 'downloading') ready = fill(P.modelDownloading, { percent: percent(embedding.percent ?? 0) });
     else if (embedding.state === 'verifying') ready = P.modelChecking;
+    else if (embedding.state === 'loading') ready = P.modelGettingReady;
     else if (embedding.state === 'failed') ready = notWorking(embedding.failedReason);
     const answers = models.answers;
     const answersWords = answers ? String(answers.label || '') + ' · ' + (answers.ready ? P.modelReady : P.modelNotReady) : '';

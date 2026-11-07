@@ -262,6 +262,23 @@ describe('connection states', () => {
     expect(banner.querySelector('[role=progressbar]')!.getAttribute('aria-valuenow')).toBe('37');
   });
 
+  test('restarting shows a short status without locking source controls or claiming setup', () => {
+    const host = mount();
+    const data = model({ connection: { state: 'restarting' }, sources: SOURCES,
+      models: { embedding: { kind: 'built_in', state: 'loading' } } });
+    host.push({ structuredContent: copyDashboardViewModel(data) });
+    const banner = host.win.document.querySelector('.banner')!;
+    expect(banner.textContent).toBe('…Olympus is restarting. Search is back in a moment.');
+    expect(banner.getAttribute('role')).toBe('status');
+    expect(banner.querySelector('[role=progressbar]')).toBeNull();
+    expect(host.text()).not.toContain('Available once Olympus is set up');
+    expect(host.text()).not.toContain('Olympus is setting up');
+    expect(host.text()).toContain('Getting ready');
+    expect(host.button('Connect').disabled).toBe(false);
+    host.button('Connect').click();
+    expect(host.sent.some(message => message.method === 'tools/call' && message.params.name === 'olympus_connect_source')).toBe(true);
+  });
+
   test('mac offline: last seen and its action, opened through openExternal', () => {
     const host = mount({ openai: {} });
     host.push({

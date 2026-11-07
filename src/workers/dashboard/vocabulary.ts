@@ -1776,7 +1776,7 @@ export const DASHBOARD_CHATGPT_REFUSAL_COPY = {
 } as const;
 
 /**
- * The ChatGPT dashboard's own copy for the five connection states. The view
+ * The ChatGPT dashboard's own copy for the connection states. The view
  * model carries only the state; the page owns these words (the relay renders
  * two of the states without reading this file). `disabledReason` is printed
  * beside every other control while the state holds.
@@ -1796,6 +1796,9 @@ export const DASHBOARD_CHATGPT_CONNECTION_COPY = {
   installing: {
     title: 'Olympus is setting up on your computer…',
     disabledReason: 'Available once Olympus is set up',
+  },
+  restarting: {
+    title: 'Olympus is restarting. Search is back in a moment.',
   },
   mac_offline: {
     title: 'Your computer is offline or asleep, so answers are paused',
@@ -2958,7 +2961,13 @@ export const DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY = {
 
 /** needsYou while the privacy check waits for the owner to approve its model (approved on the computer only). */
 export const DASHBOARD_CHATGPT_PRIVACY_CLASSIFIER_APPROVAL_COPY = {
-  sentence: 'Approve the model that checks what\'s private. Until you do, new items it would check wait. On your computer, run olympus tier classifier approve --why, followed by your reason',
+  sentence: 'Approve the model that checks what\'s private. Until you do, new items it would check wait.',
+  machine: 'On the machine running Olympus',
+  server: 'On the server running Olympus',
+  // The worker PATH is set by its service manager, not the owner’s login shell.
+  // Always give the full launcher command; HOME expands on the named host.
+  command: '"$HOME/.local/bin/olympus" tier classifier approve --why',
+  reason: 'followed by your reason',
 } as const;
 
 /**

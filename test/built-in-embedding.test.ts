@@ -18,6 +18,7 @@ import {
   builtInEmbeddingPaths,
   installBuiltInEmbedding,
   readBuiltInEmbeddingStatus,
+  reportBuiltInEmbeddingState,
   readBuiltInEmbeddingVision,
   type BuiltInEmbeddingStatus,
 } from '../src/workers/source-index/built-in-embedding/assets.ts';
@@ -94,6 +95,30 @@ function temporaryDir(): string {
 }
 afterEach(() => {
   for (const dir of temporaryDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+});
+
+describe('search model reload status', () => {
+  test('only a model that reached ready before reports a reload, across repeated restarts', () => {
+    const env = { OLYMPUS_BUILT_IN_EMBEDDING_DIR: temporaryDir() };
+    const options = { env };
+    reportBuiltInEmbeddingState(options, 'loading');
+    expect(builtInEmbeddingDashboardState(readBuiltInEmbeddingStatus(env)).state).toBe('verifying');
+    reportBuiltInEmbeddingState(options, 'ready');
+    // Existing installs have a ready status without the new field.
+    const legacyReady = readBuiltInEmbeddingStatus(env);
+    delete legacyReady.previouslyReady;
+    writeFileSync(builtInEmbeddingPaths(env).statusPath, JSON.stringify(legacyReady));
+    for (let restart = 0; restart < 2; restart++) {
+      reportBuiltInEmbeddingState(options, 'loading');
+      expect(builtInEmbeddingDashboardState(readBuiltInEmbeddingStatus(env))).toEqual({ kind: 'built_in', state: 'loading' });
+    }
+    reportBuiltInEmbeddingState(options, 'failed', { reason: 'runtime_load_failed', message: 'test failure' });
+    expect(builtInEmbeddingDashboardState(readBuiltInEmbeddingStatus(env)).state).toBe('failed');
+    // A different model in the same directory has no prior ready receipt.
+    const other = { ...BUILT_IN_EMBEDDING_MODEL, modelId: 'different-model' };
+    reportBuiltInEmbeddingState({ env, model: other }, 'loading');
+    expect(builtInEmbeddingDashboardState(readBuiltInEmbeddingStatus(env, other)).state).toBe('verifying');
+  });
 });
 
 describe('WordPiece tokenizer', () => {

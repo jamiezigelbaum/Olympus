@@ -867,13 +867,13 @@ export function sharedBuiltInSourceEmbeddingProvider(options: {
 
 /**
  * The dashboard contract's `models.embedding` for the built-in model:
- * installing, verifying and loading all read as `downloading`.
+ * A previously ready model loading again is distinct from first-run setup.
  */
 export function builtInEmbeddingDashboardState(
   status: BuiltInEmbeddingStatus,
 ): {
   kind: 'built_in';
-  state: 'downloading' | 'verifying' | 'ready' | 'failed';
+  state: 'downloading' | 'verifying' | 'loading' | 'ready' | 'failed';
   percent?: number;
   bytesDone?: number;
   bytesTotal?: number;
@@ -886,7 +886,8 @@ export function builtInEmbeddingDashboardState(
     const bytes = failedReason === 'disk_full' && status.bytesTotal > 0 ? { bytesDone: status.bytesDone, bytesTotal: status.bytesTotal } : {};
     return { kind: 'built_in', state: 'failed', failedReason, ...bytes };
   }
-  // Loading the verified model into memory is the last step of checking it.
+  if (status.state === 'loading' && status.previouslyReady) return { kind: 'built_in', state: 'loading' };
+  // The first load is still part of setup.
   const state = status.state === 'verifying' || status.state === 'loading' ? 'verifying' : 'downloading';
   return {
     kind: 'built_in',
