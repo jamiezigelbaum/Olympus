@@ -224645,9 +224645,6 @@ Run: ${ocr.repairHint}`);
   }
   try {
     const params = parseArgs(operation, rest);
-    if (operation.name === "source_answer" && params.analyst_provider === undefined && params.analyst_model === undefined && !Bun.which("openclaw")) {
-      params.analyst_provider = "local";
-    }
     validateRequired(operation, params);
     const ctx = makeContext2();
     if (!shouldExposeOperation(operation, { config: ctx.config, surface: "cli" })) {
