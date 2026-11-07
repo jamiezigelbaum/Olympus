@@ -149534,7 +149534,7 @@ function mountDashboardController(options) {
     return root.ownerDocument.activeElement;
   }
   function hasDirtyInput() {
-    return queryAll('input:not([type="hidden"]),textarea,select').some((field) => field instanceof HTMLSelectElement ? Array.from(field.options).some((option) => option.selected !== option.defaultSelected) : field.value !== field.defaultValue);
+    return queryAll('input:not([type="hidden"]):not([data-source-search]),textarea,select').some((field) => field instanceof HTMLSelectElement ? Array.from(field.options).some((option) => option.selected !== option.defaultSelected) : field.value !== field.defaultValue);
   }
   function hasFocusedControl() {
     const active = activeElement();
@@ -149614,6 +149614,8 @@ function mountDashboardController(options) {
     if (!force && (query("[data-messaging-input] input,[data-messaging-chats] input") || messagingTimers.size > 0 || query('.sheet.on input:not([type="hidden"]),.sheet.on textarea,.sheet.on select')))
       return;
     if (!force && query("[data-remote-terms]:not([hidden])"))
+      return;
+    if (!force && query("dialog[open]"))
       return;
     if (!force && hasDirtyInput())
       return;
@@ -150635,6 +150637,11 @@ function mountDashboardController(options) {
       tile.hidden = words2 !== "" && !(tile.textContent ?? "").toLowerCase().includes(words2);
     });
   };
+  const onDialogClose = (event) => {
+    if (event.target instanceof HTMLDialogElement && !query("dialog[open]"))
+      refreshNow(false);
+  };
+  root.addEventListener("close", onDialogClose, true);
   root.addEventListener("click", onSourcesClick);
   root.addEventListener("input", onSourceSearch);
   root.addEventListener("click", onAddModelClick);
@@ -150685,6 +150692,7 @@ function mountDashboardController(options) {
     view3.removeEventListener("focus", refreshOnReturn);
     root.ownerDocument.removeEventListener("visibilitychange", onVisibilityReturn);
     root.removeEventListener("click", onAddModelClick);
+    root.removeEventListener("close", onDialogClose, true);
     root.removeEventListener("click", onSourcesClick);
     root.removeEventListener("input", onSourceSearch);
     root.removeEventListener("submit", onSubmit);

@@ -1023,7 +1023,7 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
 
   function hasDirtyInput(): boolean {
     return queryAll<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>(
-      'input:not([type="hidden"]),textarea,select',
+      'input:not([type="hidden"]):not([data-source-search]),textarea,select',
     ).some((field) => field instanceof HTMLSelectElement
       ? Array.from(field.options).some((option) => option.selected !== option.defaultSelected)
       : field.value !== field.defaultValue);
@@ -1098,6 +1098,8 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
     if (!force && (query('[data-messaging-input] input,[data-messaging-chats] input') || messagingTimers.size > 0 || query('.sheet.on input:not([type="hidden"]),.sheet.on textarea,.sheet.on select'))) return;
     // The owner is reading the agreement: a poll must not close it under them.
     if (!force && query('[data-remote-terms]:not([hidden])')) return;
+    // Nor a confirmation or Add a source while it is open; closing it reads again.
+    if (!force && query('dialog[open]')) return;
     // A typed secret or folder query is the only copy of the user's work and
     // is never replaced by polling, however old the tab is.
     if (!force && hasDirtyInput()) return;
@@ -1900,6 +1902,11 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
     const words = input.value.trim().toLowerCase();
     sheet.querySelectorAll<HTMLElement>('[data-source-pick]').forEach((tile) => { tile.hidden = words !== '' && !(tile.textContent ?? '').toLowerCase().includes(words); });
   };
+  // `close` does not bubble, so listen in the capture phase.
+  const onDialogClose = (event: Event): void => {
+    if (event.target instanceof HTMLDialogElement && !query('dialog[open]')) void refreshNow(false);
+  };
+  root.addEventListener('close', onDialogClose, true);
   root.addEventListener('click', onSourcesClick);
   root.addEventListener('input', onSourceSearch);
   root.addEventListener('click', onAddModelClick);
@@ -1945,6 +1952,7 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
     view.removeEventListener('focus', refreshOnReturn);
     root.ownerDocument.removeEventListener('visibilitychange', onVisibilityReturn);
     root.removeEventListener('click', onAddModelClick);
+    root.removeEventListener('close', onDialogClose, true);
     root.removeEventListener('click', onSourcesClick);
     root.removeEventListener('input', onSourceSearch);
     root.removeEventListener('submit', onSubmit);

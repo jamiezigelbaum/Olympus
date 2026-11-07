@@ -93,12 +93,13 @@ describe('Sources in the browser', () => {
       const html = renderDashboardConnectPage(view(), unlockedOptions);
       const root = document.createElement('div'); root.innerHTML = html; document.body.append(root);
       const calls: Record<string, unknown>[] = [];
+      let refreshes = 0;
       const controller = mountDashboardController({ root, canWrite: true, signal: new AbortController().signal, pollIntervalMs: -1, returnUrl: 'http://localhost/dashboard?connect', navigate() {},
-        refresh: async () => ({ status: 200, title: 'Sources', body: html, controller: 'dashboard', can_write: true, signature: 'same', poll_interval_ms: -1 }),
+        refresh: async () => { refreshes += 1; return { status: 200, title: 'Sources', body: html, controller: 'dashboard', can_write: true, signature: 'same', poll_interval_ms: -1 }; },
         transport: { control: async params => { calls.push(params as Record<string, unknown>); return params.action === 'disconnect_source' ? { status: 409, body: { ok: false, error: { code: 'disconnect_busy', message: 'This source is finishing a read.' } } } : { status: 200, body: { ok: true, status_message: 'Done.' } }; } },
       }); dispose = () => controller.dispose();
 
-      const sheet = root.querySelector<HTMLDialogElement>('dialog#add-source')!;
+      let sheet = root.querySelector<HTMLDialogElement>('dialog#add-source')!;
       root.querySelector<HTMLButtonElement>('.srcbar [data-dialog-open="add-source"]')!.click();
       expect(sheet.open).toBe(true);
       const search = sheet.querySelector<HTMLInputElement>('[data-source-search]')!;
@@ -110,8 +111,13 @@ describe('Sources in the browser', () => {
       expect(sheet.querySelector<HTMLElement>('[data-source-catalog]')!.hidden).toBe(true);
       sheet.querySelector<HTMLElement>('[data-source-setup="x.bookmarks"] [data-source-back]')!.click();
       expect(sheet.querySelector<HTMLElement>('[data-source-catalog]')!.hidden).toBe(false);
+      const before = refreshes;
       sheet.querySelector<HTMLButtonElement>('[data-dialog-close]')!.click();
       expect(sheet.open).toBe(false);
+      // Closing reads again, and the leftover search text does not hold the page back.
+      await new Promise(resolve => setTimeout(resolve, 20));
+      expect(refreshes).toBeGreaterThan(before);
+      sheet = root.querySelector<HTMLDialogElement>('dialog#add-source')!;
 
       root.querySelector<HTMLButtonElement>('[data-source-row="dropbox.files"] [data-source-open]')!.click();
       expect(sheet.open).toBe(true);
