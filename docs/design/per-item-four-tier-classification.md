@@ -577,8 +577,9 @@ Before dispatching a queued content question, the shared resolver may settle it
 Personal if its own complete stored EmbeddingGemma 2 vectors predict
 `p(Private) < 0.05`. It never settles Private. The existing deterministic
 Secrets checks, structured-identifier raises, owner overrides and rules, and
-names questions precede this step. Existing final verdicts and open re-judges
-are not lowered. Missing, stale, malformed or incomplete vectors, image chunks,
+names questions precede this step. Existing cached or duplicate judge verdicts take precedence over the pre-filter;
+known Private answers awaiting placement are retried. Existing final verdicts
+and open re-judges are not lowered. Missing, stale, malformed or incomplete vectors, image chunks,
 and a mismatch with the ledger's complete-text digest all abstain. Multiple
 text chunks use their mean vector; all must have current vectors of exactly
 `embeddinggemma-2-litert-24d962e`, 768 dimensions. This is classification-only
@@ -595,18 +596,22 @@ membership invalidates the model. Account-scope withdrawal invalidates it too.
 No contract shapes, vector identities, embeddings or classifier version change.
 
 One install-wide model and rolling audit window are shared across the mounted
-ledgers. The first sorted tier ledger owns the model directory
-`<ledger>.embedding-prefilter/` (0700) and `weights.json` (0600, atomic write).
-Weights never enter logs, exports or release artifacts. Deleting a source
-removes its weight directory; account-folder migration moves it with the ledger.
+ledgers. A stable install tier ledger at
+`<classification-ledger-path>.embedding-prefilter.tier-ledger.sqlite` owns the
+model directory `<ledger>.embedding-prefilter/` (0700) and `weights.json` (0600,
+atomic write). The audit and selected checks survive source changes and
+unavailable source ledgers. Weights never enter logs, exports or releases.
+Deleting any source or withdrawing an archive scope removes the shared weights,
+even below the retraining minimum; it preserves the audit. Delete-all removes
+both. Empty private model directories may remain after file deletion.
 The engine environment setting `OLYMPUS_EMBEDDING_PREFILTER_ENABLED=off` disables
 new clearances; the default is on once trained. The ordinary classifier remains
 available throughout training and whenever the filter abstains.
 
 A random **5%** of qualifying candidates stay held and go directly to the
 judge, bypassing verdict reuse. Audit selection survives restart. A window
-of **200** model answers with **5 or more Private** answers durably stops
-clearing across the installation. There is no automatic restart after a stop.
+of at most **200** model answers with **5 or more Private** answers durably stops
+clearing across the installation immediately, even before the first window fills. There is no automatic restart after a stop.
 Status and the classification summary say that clearing stopped and items are
 returning to the privacy judge. The stop is not cleared by retraining or by
 toggling the setting.

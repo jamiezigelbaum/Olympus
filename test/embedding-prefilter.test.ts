@@ -1,6 +1,6 @@
 // All labels, vectors, text and weights in this file are synthetic fixtures.
 import { afterEach, expect, test } from 'bun:test';
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { EmbeddingPrefilter, embeddingPrefilterDirectory, prefilterVector } from '../src/workers/classification/embedding-prefilter.ts';
@@ -27,11 +27,11 @@ function copy(n: number, sign = 1): ConnectorStoreItemCopy {
     trustTier: 'S4', owners: [], chunks: [{ chunkIndex: 0, boundedText: ownText, contentHash: 'fixture', embeddingInputHash: 'fixture' }],
     vectors: [{ chunkIndex: 0, modelId: MODEL, contentHash: 'fixture', embedding: new Uint8Array(vector.buffer) }], vectorAuthorities: [] };
 }
-function fixture(options: { trained?: boolean; bias?: number; random?: () => number; enabled?: () => boolean; routed?: boolean } = {}) {
+function fixture(options: { trained?: boolean; bias?: number; random?: () => number; enabled?: () => boolean; routed?: boolean; stateLedger?: TierLedger } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'prefilter-synthetic-'));
   const ledger = new TierLedger({ dbPath: join(dir, 'tiers.sqlite') });
   const sniffer = new TierSnifferStore({ dbPath: join(dir, 'sniffer.sqlite') });
-  const modelDir = embeddingPrefilterDirectory(ledger.dbPath);
+  const modelDir = embeddingPrefilterDirectory(options.stateLedger?.dbPath ?? ledger.dbPath);
   if (options.trained !== false) {
     mkdirSync(modelDir, { mode: 0o755 });
     writeFileSync(join(modelDir, 'weights.json'), JSON.stringify({ version: '00000000-0000-0000-0000-000000000939',
@@ -42,7 +42,7 @@ function fixture(options: { trained?: boolean; bias?: number; random?: () => num
       layers: 'both' }], embedHold: decision.contentPending,
   });
   let currentCopy = (n: number) => copy(n);
-  const make = () => new EmbeddingPrefilter({ ledger, sniffer, copyFor: identity => currentCopy(Number(identity.providerItemId)),
+  const make = () => new EmbeddingPrefilter({ ledger, sniffer, ...(options.stateLedger ? { stateLedger: options.stateLedger } : {}), copyFor: identity => currentCopy(Number(identity.providerItemId)),
     ...(options.routed ? { placementFor } : {}), random: options.random ?? (() => 1), ...(options.enabled ? { enabled: options.enabled } : {}) });
   const filter = make();
   const add = (n: number, config: Parameters<typeof classifyItemTiers>[1] = {}, text = ownText) => {
@@ -177,6 +177,16 @@ test('daily training uses only own judged synthetic vectors and writes private w
   const persisted = readFileSync(join(f.modelDir, 'weights.json'), 'utf8');
   expect(persisted).not.toContain(ownText);
   expect(JSON.parse(persisted).model.weights).toHaveLength(D);
+  // An archive withdrawal during the asynchronous training scan cannot republish its old vectors.
+  f.ledger.writeMeta('embedding-prefilter:training-revision', 'before-training');
+  let withdrawn = false;
+  f.setCopy(n => {
+    if (!withdrawn) { f.ledger.writeMeta('embedding-prefilter:training-revision', 'withdrawn-during-training'); withdrawn = true; }
+    const c = copy(n, n % 2 ? 1 : -1);
+    return { ...c, chunks: [{ ...c.chunks[0]!, boundedText: `${ownText} ${n}` }] };
+  });
+  await f.filter.prepare(judge);
+  expect(existsSync(join(f.modelDir, 'weights.json'))).toBe(false);
 }, 30_000);
 test('the rolling audit is shared across ledgers and stops both clearers', async () => {
   const a = fixture(); const b = fixture({ trained: false });
@@ -207,4 +217,64 @@ test('a persisted stop recovers clearances before any model preparation', async 
   restarted.recover();
   expect(f.ledger.getCurrent(subject(1))).toMatchObject({ contentPending: true, state: 'pending' });
   expect(f.sniffer.questionFor(subject(1), 'content')).toBeDefined();
+});
+
+test('five misses stop immediately without waiting for a complete first window', () => {
+  const f = fixture({ random: () => 0 });
+  for (let i = 0; i < 4; i++) { const q = f.add(i); f.filter.tryClear(q, judge); f.filter.observe(q, true); }
+  expect(f.filter.status()).not.toContain('stopped');
+  const fifth = f.add(5); f.filter.tryClear(fifth, judge); f.filter.observe(fifth, true);
+  expect(f.filter.status()).toContain('stopped');
+});
+test('known own and duplicate Private judgments beat a low-vector prediction', async () => {
+  for (const duplicate of [false, true]) {
+    const f = fixture(); const q = f.add(1);
+    const key = { materialHash: duplicate ? 'synthetic-donor' : q.materialHash, modelId: snifferCacheModelId(lane), promptVersion: SNIFFER_PROMPT_VERSION, mapRevision: 'none' };
+    f.sniffer.putVerdict(key, { tier: 'private', category: 'fixture', confidence: 1, failSafe: false }, duplicate ? subject(999) : q);
+    if (duplicate) f.sniffer.markFinalModelContent(key, normalizedContentHash(ownText));
+    const p = pass(f); await p.run();
+    expect(p.calls()).toBe(0);
+    expect(f.ledger.getCurrent(subject(1))!.contentTier).toBe('secure');
+    expect(f.ledger.getCurrent(subject(1))!.reasons.some(reason => reason.startsWith('content:embedding_prefilter:'))).toBe(false);
+  }
+});
+test('a cached Private answer awaiting placement is retried and cannot be cleared', async () => {
+  const f = fixture({ routed: true }); const q = f.add(1);
+  f.sniffer.putVerdict({ materialHash: q.materialHash, modelId: snifferCacheModelId(lane), promptVersion: SNIFFER_PROMPT_VERSION, mapRevision: 'none' },
+    { tier: 'private', category: 'fixture', confidence: 1, failSafe: false }, q);
+  const model = { complete: async () => { throw new Error('must use the known judgment'); } };
+  for (let i = 0; i < 2; i++) await runSnifferPass({ lane, model, targets: [{ ledger: f.ledger, sniffer: f.sniffer, embeddingPrefilter: f.filter }] });
+  expect(f.ledger.getCurrent(subject(1))!.contentPending).toBe(true);
+  expect(f.ledger.getCurrent(subject(1))!.reasons.some(reason => reason.startsWith('content:embedding_prefilter:'))).toBe(false);
+});
+test('recovery accepts a planner registered after the filter was constructed', async () => {
+  const f = fixture({ routed: true }); f.add(1); await pass(f).run();
+  f.filter.setPlacementFor(undefined);
+  f.ledger.writeMeta('embedding-prefilter:audit', JSON.stringify({ misses: new Array(5).fill(true), stopped: true }));
+  const restarted = f.make(); restarted.setPlacementFor(undefined); restarted.recover();
+  expect(f.ledger.getCurrent(subject(1))!.contentPending).toBe(false);
+  restarted.setPlacementFor(f.placementFor); restarted.recover();
+  expect(f.ledger.getCurrent(subject(1))!.contentPending).toBe(true);
+});
+test('a withdrawn training scope removes stale weights even below the training minimum', async () => {
+  const f = fixture();
+  f.ledger.writeMeta('embedding-prefilter:training-revision', 'synthetic-withdrawal');
+  await f.filter.prepare(judge);
+  expect(existsSync(join(f.modelDir, 'weights.json'))).toBe(false);
+  expect(f.filter.status()).toContain('2000');
+});
+test('install audit and selections survive replacing the first source ledger', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'prefilter-control-'));
+  const control = new TierLedger({ dbPath: join(dir, 'install.tier-ledger.sqlite') });
+  // This cleanup runs after both source fixtures have finished using the state.
+  const a = fixture({ stateLedger: control, random: () => 0 }); const q = a.add(1);
+  expect(a.filter.tryClear(q, judge)).toBe(false);
+  const b = fixture({ stateLedger: control, trained: false });
+  const restoredA = new EmbeddingPrefilter({ ledger: a.ledger, sniffer: a.sniffer, stateLedger: control,
+    sharedWith: b.filter, copyFor: s => copy(Number(s.providerItemId)) });
+  expect(restoredA.isSpotCheck(q)).toBe(true);
+  control.writeMeta('embedding-prefilter:audit', JSON.stringify({ misses: new Array(5).fill(true), stopped: true }));
+  const afterSourceChange = b.make(); await afterSourceChange.prepare(judge);
+  expect(afterSourceChange.status()).toContain('stopped');
+  cleanups.push(() => { control.close(); rmSync(dir, { recursive: true, force: true }); });
 });

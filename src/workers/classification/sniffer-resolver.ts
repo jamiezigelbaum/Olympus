@@ -526,17 +526,29 @@ export async function runSnifferPass(options: SnifferPassOptions): Promise<Sniff
   for (const target of options.targets) await target.embeddingPrefilter?.prepare(id);
   for (const pass of ['metadata', 'content'] as const) {
     work[pass] = work[pass].filter(item => {
+      const key = keyOf(item.question);
+      const spotCheck = item.target.embeddingPrefilter?.isSpotCheck(item.question) === true;
+      const cached = item.target.sniffer.getVerdict(key);
+      const usable = cached && cachedSnifferVerdictHolds(cached)
+        && (!item.question.contentHash || contentVerdictReusable(cached, item.question.contentHash, item.question));
+      // A known Private answer always wins, including one cached while placement was unavailable.
+      if (usable && (!spotCheck || snifferVerdictTier(cached, options.lane, item.question.flags).tier === 'secure')) {
+        if (spotCheck && cached.modelSubject === snifferSubjectKey(item.question)) item.target.embeddingPrefilter?.observe(item.question, cached.tier === 'private');
+        apply(item, cached, item.question.contentHash !== undefined && cached.modelSubject !== snifferSubjectKey(item.question));
+        report.cacheHits += 1;
+        return false;
+      }
+      const duplicate = item.question.pass === 'content' && item.question.contentHash
+        ? item.target.sniffer.getFinalModelContentVerdict({ ...key, contentHash: item.question.contentHash }) : undefined;
+      if (duplicate && cachedSnifferVerdictHolds(duplicate)
+        && (!spotCheck || snifferVerdictTier(duplicate, options.lane, item.question.flags).tier === 'secure')) {
+        apply(item, duplicate, true); report.cacheHits += 1; return false;
+      }
       if (item.target.embeddingPrefilter?.tryClear(item.question, id)) {
         report.verdictsApplied += 1; report.resolvedPersonal += 1;
         return false;
       }
-      if (item.target.embeddingPrefilter?.isSpotCheck(item.question)) return true;
-      const cached = item.target.sniffer.getVerdict(keyOf(item.question));
-      if (!cached || !cachedSnifferVerdictHolds(cached)
-        || (item.question.contentHash && !contentVerdictReusable(cached, item.question.contentHash, item.question))) return true;
-      apply(item, cached, item.question.contentHash !== undefined && cached.modelSubject !== snifferSubjectKey(item.question));
-      report.cacheHits += 1;
-      return false;
+      return true;
     });
   }
   const concurrency = options.lane.snifferMode === 'decision' ? 1 : Math.max(1, Math.min(SNIFFER_MAX_CONCURRENT_CALLS, Math.floor(options.concurrentCalls ?? 1)));

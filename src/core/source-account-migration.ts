@@ -1,4 +1,3 @@
-import { embeddingPrefilterDirectory } from '../workers/classification/tier-ledger-path.ts';
 /**
  * The boot migration: moves an existing account's files from where they have
  * always been into its account folder (docs/design/source-storage.md,
@@ -300,7 +299,6 @@ function candidates(sourceId: string, slot: string, env: LayoutEnv): Candidate[]
       const to = accountStorePath(account, file.name, env);
       add('store', file.legacy, to, 'file', true);
       add('ledger', tierLedgerPathForStore(file.legacy), tierLedgerPathForStore(to), 'file', true);
-      add('ledger', embeddingPrefilterDirectory(tierLedgerPathForStore(file.legacy)), embeddingPrefilterDirectory(tierLedgerPathForStore(to)), 'dir', false);
       add('secrets', secretLocationsPathForStore(file.legacy), secretLocationsPathForStore(to), 'file', true);
       add('sniffer', tierSnifferPathForStore(file.legacy), tierSnifferPathForStore(to), 'file', true);
     } else {

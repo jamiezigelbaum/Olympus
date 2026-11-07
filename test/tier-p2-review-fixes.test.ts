@@ -1,4 +1,3 @@
-import { embeddingPrefilterDirectory } from '../src/workers/classification/tier-ledger-path.ts';
 // Critical-review findings on PR #79, each pinned by its reproduction.
 //
 // 1. An invalid, half-written or loosely-permissioned map fails CLOSED: new
@@ -16,7 +15,7 @@ import { embeddingPrefilterDirectory } from '../src/workers/classification/tier-
 // running pass; data deletion takes the sniffer's queue.
 
 import { resolvedStorePath } from '../src/core/source-placement.ts';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, test } from 'bun:test';
@@ -55,7 +54,7 @@ import { TierSnifferStore, snifferMaterialHash } from '../src/workers/classifica
 import { classifyItemTiers } from '../src/workers/classification/tier-classifier.ts';
 import { loadOwnerTierRules } from '../src/workers/classification/tier-rules.ts';
 import { TierLedger, tierLedgerPathForStore } from '../src/workers/classification/tier-ledger.ts';
-import { tierSnifferPathForLedger, tierSnifferPathForStore } from '../src/workers/classification/tier-ledger-path.ts';
+import { embeddingPrefilterDirectory, embeddingPrefilterInstallLedgerPath, resolveClassificationLedgerPath, tierSnifferPathForLedger, tierSnifferPathForStore } from '../src/workers/classification/tier-ledger-path.ts';
 import { SecureAnalystPoolState } from '../src/workers/source-index/analyst-pool.ts';
 import {
   CORPORA,
@@ -453,6 +452,26 @@ describe('nits', () => {
     expect((await service.runOnce()).state).toBe('skipped_running');
   });
 
+  test('deleting a non-owning source discards pooled weights even without enough remaining labels, and preserves the install audit', () => {
+    const dir = workspace();
+    const homeDir = join(dir, 'home');
+    const env = { HOME: homeDir, XDG_DATA_HOME: join(dir, 'xdg-data'), OLYMPUS_CLASSIFICATION_LEDGER_PATH: join(dir, 'custom', 'classification.jsonl') };
+    const auditPath = embeddingPrefilterInstallLedgerPath(resolveClassificationLedgerPath(env));
+    const audit = new TierLedger({ dbPath: auditPath });
+    audit.close();
+    const before = readFileSync(auditPath);
+    const weightsDir = embeddingPrefilterDirectory(auditPath);
+    mkdirSync(weightsDir, { recursive: true, mode: 0o700 });
+    const weightsPath = join(weightsDir, 'weights.json');
+    writeFileSync(weightsPath, 'synthetic pooled model trained from another source', { mode: 0o600 });
+    const dryRun = deleteOlympusData({ sourceId: 'readwise.library', homeDir, env, dryRun: true });
+    expect(dryRun.removed).toContain(weightsPath);
+    expect(existsSync(weightsPath)).toBe(true);
+    deleteOlympusData({ sourceId: 'readwise.library', homeDir, env });
+    expect(existsSync(weightsPath)).toBe(false);
+    expect(readFileSync(auditPath).equals(before)).toBe(true);
+  });
+
   test('data deletion takes the sniffer queue beside a source store', () => {
     const dir = workspace();
     const homeDir = join(dir, 'home');
@@ -462,14 +481,10 @@ describe('nits', () => {
     const store = new TierSnifferStore({ dbPath: snifferPath });
     store.enqueue({ subject: subject(1), pass: 'metadata', material: 'bank', mapRevision: 'r', flags: [] });
     store.close();
-    const weightsDir = embeddingPrefilterDirectory(tierLedgerPathForStore(storePath));
-    mkdirSync(weightsDir, { recursive: true, mode: 0o700 });
-    writeFileSync(join(weightsDir, 'weights.json'), 'synthetic fixture weights', { mode: 0o600 });
     expect(existsSync(snifferPath)).toBe(true);
     expect(snifferMaterialHash('metadata', 'bank')).toMatch(/^[0-9a-f]{64}$/);
     deleteOlympusData({ sourceId: 'readwise.library', homeDir, env });
     expect(existsSync(snifferPath)).toBe(false);
-    expect(existsSync(weightsDir)).toBe(false);
   });
 });
 

@@ -2,9 +2,8 @@
 import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { writePrivateFileAtomicSync } from '../../core/atomic-file.ts';
+import { removeFileDurablySync, writePrivateFileAtomicSync } from '../../core/atomic-file.ts';
 import { ingestionTurn } from '../control-path-headroom.ts';
-import type { ConnectorStoreItemCopy } from '../connector-store/local-index.ts';
 import { snifferMaterialCarriesSecret } from './sniffer.ts';
 import type { SnifferQuestion, TierSnifferStore } from './sniffer-store.ts';
 import { tierLedgerIdentityKey, type TierLedger, type TierLedgerRecord, type TierPlacementPlan } from './tier-ledger.ts';
@@ -12,6 +11,11 @@ import { TIER_CLASSIFIER_VERSION, contentDigestReason, normalizedContentHash, ty
 import { EMBEDDING_PREFILTER_MODEL_ID, EMBEDDING_PREFILTER_DIMENSIONS, EMBEDDING_PREFILTER_MIN_PER_CLASS,
   trainLogistic, privateProbability, type LogisticModel, type LogisticExample } from './embedding-logistic.ts';
 
+/** The shared store's read-only projection; no source policy or retrieval access. */
+interface PrefilterCopy {
+  chunks: ReadonlyArray<{ chunkIndex: number; boundedText: string; embeddingInputHash: string | null; mediaPath?: string | null; mediaSha256?: string | null }>;
+  vectors: ReadonlyArray<{ chunkIndex: number; modelId: string; contentHash: string; embedding: Uint8Array }>;
+}
 const PREFIX = 'embedding-prefilter:';
 const RECEIPTS = `${PREFIX}clear:`;
 const CHECKS = `${PREFIX}check:`;
@@ -25,7 +29,7 @@ import { embeddingPrefilterDirectory } from './tier-ledger-path.ts';
 export { embeddingPrefilterDirectory } from './tier-ledger-path.ts';
 
 /** Complete, current own-text vectors only. A partial document never authorizes clearance. */
-export function prefilterVector(copy: ConnectorStoreItemCopy | undefined): number[] | undefined {
+export function prefilterVector(copy: PrefilterCopy | undefined): number[] | undefined {
   if (!copy || copy.chunks.length === 0 || copy.chunks.some(chunk => chunk.mediaSha256 || chunk.mediaPath)
     || snifferMaterialCarriesSecret(copy.chunks.map(chunk => chunk.boundedText).join(''))) return undefined;
   const vectors = copy.vectors.filter(vector => vector.modelId === EMBEDDING_PREFILTER_MODEL_ID);
@@ -55,7 +59,7 @@ function decisionOf(row: TierLedgerRecord): TierDecision {
 export class EmbeddingPrefilter {
   private readonly owner: EmbeddingPrefilter;
   private readonly members = new Set<EmbeddingPrefilter>();
-  private get control(): TierLedger { return this.owner.options.ledger; }
+  private get control(): TierLedger { return this.owner.options.stateLedger ?? this.owner.options.ledger; }
   private get audit(): Audit { return this.owner.auditState; }
   private get saved(): SavedModel | undefined { return this.owner.savedModel; }
   private set saved(value: SavedModel | undefined) { this.owner.savedModel = value; }
@@ -64,14 +68,14 @@ export class EmbeddingPrefilter {
   private readonly auditState: Audit;
   private readonly path: string;
   constructor(private readonly options: {
-    ledger: TierLedger; sniffer: TierSnifferStore; sharedWith?: EmbeddingPrefilter;
-    copyFor: (subject: TierSnifferSubject) => ConnectorStoreItemCopy | undefined;
+    ledger: TierLedger; sniffer: TierSnifferStore; stateLedger?: TierLedger; sharedWith?: EmbeddingPrefilter;
+    copyFor: (subject: TierSnifferSubject) => PrefilterCopy | undefined;
     placementFor?: (decision: TierDecision) => TierPlacementPlan;
     enabled?: () => boolean; random?: () => number; now?: () => number;
   }) {
     this.owner = options.sharedWith?.owner ?? this;
     this.owner.members.add(this);
-    this.path = join(embeddingPrefilterDirectory(this.owner.options.ledger.dbPath), 'weights.json');
+    this.path = join(embeddingPrefilterDirectory(this.control.dbPath), 'weights.json');
     try {
       const audit = this.control.readMeta(`${PREFIX}audit`);
       this.auditState = audit ? JSON.parse(audit) as Audit : { misses: [], stopped: false };
@@ -84,9 +88,9 @@ export class EmbeddingPrefilter {
     if (this.owner !== this) return;
     try {
       if (existsSync(this.path) && !lstatSync(this.path).isSymbolicLink()
-        && lstatSync(embeddingPrefilterDirectory(options.ledger.dbPath)).isDirectory()
-        && !lstatSync(embeddingPrefilterDirectory(options.ledger.dbPath)).isSymbolicLink()) {
-        chmodSync(embeddingPrefilterDirectory(options.ledger.dbPath), 0o700);
+        && lstatSync(embeddingPrefilterDirectory(this.control.dbPath)).isDirectory()
+        && !lstatSync(embeddingPrefilterDirectory(this.control.dbPath)).isSymbolicLink()) {
+        chmodSync(embeddingPrefilterDirectory(this.control.dbPath), 0o700);
         chmodSync(this.path, 0o600);
         this.saved = JSON.parse(readFileSync(this.path, 'utf8')) as SavedModel;
       }
@@ -104,6 +108,10 @@ export class EmbeddingPrefilter {
     if (!this.saved) return `Embedding clearing waits for ${EMBEDDING_PREFILTER_MIN_PER_CLASS} judge verdicts per class with complete stored vectors.`;
     return `Embedding clearing is on; ${this.audit.misses.length} of 200 spot checks collected.`;
   }
+  setPlacementFor(placementFor: ((decision: TierDecision) => TierPlacementPlan) | undefined): void {
+    if (placementFor) this.options.placementFor = placementFor;
+    else delete this.options.placementFor;
+  }
   /** Recovery cannot depend on the judge being available or approved. */
   recover(): void {
     if (this.audit.stopped || !this.enabled()) for (const member of this.owner.members) member.rollback();
@@ -115,10 +123,14 @@ export class EmbeddingPrefilter {
     if (!this.enabled()) { for (const member of this.members) member.rollback(); return; }
     if (this.saved && (this.saved.judge !== judge || !/^[0-9a-f-]{36}$/.test(this.saved.version) || !Number.isFinite(this.saved.trainedAt)
       || privateProbability(this.saved.model, [1, ...new Array(EMBEDDING_PREFILTER_DIMENSIONS - 1).fill(0)]) === undefined)) this.saved = undefined;
-    if (this.saved && this.saved.revisions !== this.revisions()) { this.saved = undefined; this.attemptedAt = -Infinity; }
+    if (this.saved && (this.saved.revisions !== this.revisions() || !existsSync(this.path))) {
+      if (existsSync(this.path)) removeFileDurablySync(this.path);
+      this.saved = undefined; this.attemptedAt = -Infinity;
+    }
     const now = this.now();
     if ((this.saved && now - this.saved.trainedAt < RETRAIN_MS) || now - this.attemptedAt < RETRAIN_MS) return;
     this.attemptedAt = now;
+    const revisions = this.revisions();
     const examples: LogisticExample[] = [];
     const counts = [0, 0];
     for (const member of this.members) {
@@ -150,11 +162,11 @@ export class EmbeddingPrefilter {
       }
     }
     const model = trainLogistic(examples);
-    if (!model || this.options.ledger.dbPath === ':memory:') return;
-    const directory = embeddingPrefilterDirectory(this.options.ledger.dbPath);
+    if (!model || revisions !== this.revisions() || this.control.dbPath === ':memory:') return;
+    const directory = embeddingPrefilterDirectory(this.control.dbPath);
     if (existsSync(directory) && (!lstatSync(directory).isDirectory() || lstatSync(directory).isSymbolicLink())) return;
     mkdirSync(directory, { recursive: true, mode: 0o700 }); chmodSync(directory, 0o700);
-    const saved: SavedModel = { model, judge, revisions: this.revisions(), trainedAt: now, version: randomUUID() };
+    const saved: SavedModel = { model, judge, revisions, trainedAt: now, version: randomUUID() };
     writePrivateFileAtomicSync(this.path, JSON.stringify(saved));
     this.saved = saved;
   }
@@ -169,7 +181,7 @@ export class EmbeddingPrefilter {
     return false;
   }
   tryClear(question: SnifferQuestion, judge: string): boolean {
-    if (!this.enabled() || this.audit.stopped || !this.saved || this.saved.revisions !== this.revisions() || this.saved.judge !== judge || question.pass !== 'content') return false;
+    if (!this.enabled() || this.audit.stopped || !this.saved || !existsSync(this.path) || this.saved.revisions !== this.revisions() || this.saved.judge !== judge || question.pass !== 'content') return false;
     const row = this.options.ledger.getCurrent(question);
     if (!row || row.state !== 'pending' || row.metadataPending || !row.contentPending || !row.contentRead
       || row.metadataTier !== 'private' || row.contentTier !== 'private' || row.metadataForced
@@ -210,7 +222,7 @@ export class EmbeddingPrefilter {
     if (!this.isSpotCheck(question)) return;
     this.audit.misses.push(isPrivate);
     this.audit.misses = this.audit.misses.slice(-WINDOW);
-    this.audit.stopped ||= this.audit.misses.length === WINDOW && this.audit.misses.filter(Boolean).length > 4;
+    this.audit.stopped ||= this.audit.misses.filter(Boolean).length > 4;
     // Persist the stop before any rollback, so a crash retries instead of clearing again.
     this.control.writeMetaBatch([[`${PREFIX}audit`, JSON.stringify(this.audit)], [this.checkKey(question), '']]);
     if (this.audit.stopped) for (const member of this.owner.members) member.rollback();

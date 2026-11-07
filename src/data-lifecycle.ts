@@ -1,7 +1,9 @@
-import { embeddingPrefilterDirectory } from './workers/classification/tier-ledger-path.ts';
 import { MAC_ENGINE_DAEMON_PLIST, authorizeMacServerMode, macEngineManager } from './core/mac-engine-daemon.ts';
 import { spawnSync } from 'node:child_process';
 import {
+  embeddingPrefilterDirectory,
+  embeddingPrefilterInstallLedgerPath,
+  resolveClassificationLedgerPath,
   SECRET_LOCATIONS_SQLITE_STORE_ID,
   TIER_LEDGER_SQLITE_STORE_ID,
   TIER_SNIFFER_SQLITE_STORE_ID,
@@ -54,7 +56,7 @@ import {
   type AccountFiles,
 } from './core/account-files.ts';
 import { sourceDeleteHolds, type SourceDeleteHold } from './core/source-delete-holds.ts';
-import { isUnsupportedDirectorySyncError, writePrivateFileAtomicSync } from './core/atomic-file.ts';
+import { isUnsupportedDirectorySyncError, removeFileDurablySync, writePrivateFileAtomicSync } from './core/atomic-file.ts';
 import { OperationError } from './core/operation-error.ts';
 import { readSqliteSchemaVersion } from './core/sqlite-migrations.ts';
 import {
@@ -201,6 +203,8 @@ interface DeleteTarget {
   sqliteStoreId?: string;
   sqlitePrimaryPath?: string;
   externalSourcePath?: boolean;
+  /** Shared learned weights are disposable after any contributing account is deleted. */
+  embeddingWeights?: boolean;
 }
 
 const DELETE_CONFIRMATION_1 = 'DELETE OLYMPUS DATA';
@@ -1181,6 +1185,9 @@ function allDeleteTargets(context: LifecyclePathContext): DeleteTarget[] {
     ...knownAccounts(context).flatMap((account) => sourceDeleteTargets(account, context)),
     // The registry: every account it lists is being deleted.
     ...registryDeleteTargets(context),
+    // Install-wide audit survives source deletion, but not delete-all (including custom paths).
+    installEmbeddingWeightsTarget(context),
+    ...sqliteDeleteTargets(embeddingPrefilterInstallLedgerPath(resolveClassificationLedgerPath(envForContext(context))), TIER_LEDGER_SQLITE_STORE_ID, context),
     // Approved remote-agent connections. Removing the database revokes every
     // connection token at once. Named on its own because XDG_DATA_HOME can put
     // it outside the known roots below.
@@ -1219,6 +1226,10 @@ function allDeleteTargets(context: LifecyclePathContext): DeleteTarget[] {
  * uninstall removes it, after everything else (docs/design/source-storage.md).
  */
 function rmTargetKeepingOwnerLock(target: DeleteTarget, lockPath: string): void {
+  if (target.embeddingWeights) {
+    removeFileDurablySync(target.path);
+    return;
+  }
   const lock = canonicalPath(lockPath);
   const root = canonicalPath(target.path);
   if (!target.allowRecursive || !isStrictlyInside(lock, root) || !existsSync(lockPath)) {
@@ -1356,6 +1367,15 @@ function looksLikeSqlite(path: string): boolean {
   }
 }
 
+function installEmbeddingWeightsTarget(context: LifecyclePathContext): DeleteTarget {
+  return {
+    path: join(embeddingPrefilterDirectory(embeddingPrefilterInstallLedgerPath(resolveClassificationLedgerPath(envForContext(context)))), 'weights.json'),
+    kind: 'policy_file',
+    allowRecursive: false,
+    embeddingWeights: true,
+  };
+}
+
 function sourceDeleteTargets(source: LifecycleAccount, context: LifecyclePathContext): DeleteTarget[] {
   const { files } = source;
   const folder = files.folder;
@@ -1364,11 +1384,11 @@ function sourceDeleteTargets(source: LifecycleAccount, context: LifecyclePathCon
   const inFolder = (path: string): boolean => folder !== undefined && isStrictlyInside(resolve(path), resolve(folder));
   const sqliteTargets = (path: string, storeId: string): DeleteTarget[] => sqliteDeleteTargets(path, storeId, context, inFolder(path));
   return [
+    // Pooled weights can contain contributions from this account regardless of which store trained them.
+    installEmbeddingWeightsTarget(context),
     ...(files.preCutoverIndex ? sqliteTargets(files.preCutoverIndex.path, files.preCutoverIndex.storeId) : []),
     ...files.stores.flatMap((storePath) => [
       ...sqliteTargets(storePath, CONNECTOR_STORE_SQLITE_STORE_ID),
-      ...(storePath === ':memory:' ? [] : [{ path: embeddingPrefilterDirectory(tierLedgerPathForStore(storePath)),
-        kind: 'source_state_path' as const, allowRecursive: true, externalSourcePath: !isInsideRawStateRoot(embeddingPrefilterDirectory(tierLedgerPathForStore(storePath)), context) }]),
       // Each store's four-tier ledger is co-located with it (tier-ledger-path.ts),
       // so it is found wherever the store is — an account folder, XDG, a capture
       // state directory — and deleting a source takes its ledger rows.
@@ -2089,7 +2109,7 @@ function assertRawStateTargetsContained(
   const protectedPaths = new Set<string>();
   for (const other of knownAccounts(context)) {
     if (own.has(other.sourceId)) continue;
-    for (const path of sourceDeleteTargets(other, context).map((target) => target.path)) protectedPaths.add(path);
+    for (const path of sourceDeleteTargets(other, context).filter((target) => !target.embeddingWeights).map((target) => target.path)) protectedPaths.add(path);
     for (const path of other.files.preserved) protectedPaths.add(path);
     for (const path of other.files.pairing ?? []) protectedPaths.add(path);
   }
@@ -2126,7 +2146,6 @@ function assertRawStateTargetsContained(
       tierLedgerPathForStore(mount.dbPath),
       secretLocationsPathForStore(mount.dbPath),
       tierSnifferPathForStore(mount.dbPath),
-      embeddingPrefilterDirectory(tierLedgerPathForStore(mount.dbPath)),
     ]) protectedPaths.add(path);
   }
   for (const path of [
@@ -2134,6 +2153,7 @@ function assertRawStateTargetsContained(
     defaultSovereigntyConfigPathForHome(context.homeDir),
     join(home, '.config', 'olympus', 'handles.json'),
     join(home, '.config', 'olympus', 'handles.json.unpaired'),
+    ...sqliteDeleteTargets(embeddingPrefilterInstallLedgerPath(resolveClassificationLedgerPath(envForContext(context))), TIER_LEDGER_SQLITE_STORE_ID, context).map((target) => target.path),
     ...remoteConnectionsDeleteTargets(context).map((target) => target.path),
     ...mediaCacheDeleteTargets(context).map((target) => target.path),
   ]) protectedPaths.add(path);

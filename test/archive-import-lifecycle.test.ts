@@ -8,7 +8,7 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import { Database } from 'bun:sqlite';
 import { createHash } from 'node:crypto';
-import { appendFileSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, realpathSync, renameSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
+import { appendFileSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import type { SourceConnector, SourceConnectorListPage } from '../src/core/contracts.ts';
@@ -23,8 +23,8 @@ import {
 import { deleteOlympusData } from '../src/data-lifecycle.ts';
 import { SecretLocationsIndex } from '../src/workers/classification/secret-locations.ts';
 import { TierSnifferStore } from '../src/workers/classification/sniffer-store.ts';
-import { tierLedgerIdentityKey } from '../src/workers/classification/tier-ledger.ts';
-import { secretLocationsPathForStore, tierSnifferPathForLedger } from '../src/workers/classification/tier-ledger-path.ts';
+import { TierLedger, tierLedgerIdentityKey } from '../src/workers/classification/tier-ledger.ts';
+import { embeddingPrefilterDirectory, embeddingPrefilterInstallLedgerPath, resolveClassificationLedgerPath, secretLocationsPathForStore, tierSnifferPathForLedger } from '../src/workers/classification/tier-ledger-path.ts';
 import { tierRowVisible } from '../src/workers/connector-store/local-index.ts';
 import { createMboxArchiveConnector } from '../src/workers/archive-import/mbox/connector.ts';
 import { archiveContinuations } from '../src/workers/archive-import/continuation-cache.ts';
@@ -468,6 +468,16 @@ describe('removing an archive', () => {
     // Still waiting: it has read nothing yet, so nothing ties it to the archive.
     const pending = inbox.record(inbox.ticket('synthetic-agent'), { question: 'Not answered yet?', state: 'waiting', surface: 'remote' })!.id;
 
+    // With no remaining training labels, deleting this scope must still physically remove the learned model.
+    const auditPath = embeddingPrefilterInstallLedgerPath(resolveClassificationLedgerPath(f.env));
+    const audit = new TierLedger({ dbPath: auditPath });
+    audit.close();
+    const auditBefore = readFileSync(auditPath);
+    const modelDir = embeddingPrefilterDirectory(auditPath);
+    mkdirSync(modelDir, { recursive: true, mode: 0o700 });
+    const weightsPath = join(modelDir, 'weights.json');
+    writeFileSync(weightsPath, 'synthetic pooled weights', { mode: 0o600 });
+
     requestArchiveRemoval(f.runtime.state, removed);
     // The archive's own pass stops importing it from here on.
     expect((await pull(f.runtime, removed)).continueSoon).toBe(false);
@@ -481,6 +491,8 @@ describe('removing an archive', () => {
       stepsPerRun: 2,
     });
     expect(step.kind).toBe('progress');
+    expect(existsSync(weightsPath)).toBe(false);
+    expect(readFileSync(auditPath).equals(auditBefore)).toBe(true);
     // Rows still stored are no longer served: every copy is superseded.
     const remaining = storedRows(f.env, removed);
     expect(remaining.length).toBeGreaterThan(0);

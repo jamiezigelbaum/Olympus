@@ -37,7 +37,7 @@ import {
   type SnifferTarget,
 } from './sniffer-resolver.ts';
 import { existsSync } from 'node:fs';
-import { tierSnifferPathForLedger } from './tier-ledger-path.ts';
+import { embeddingPrefilterInstallLedgerPath, tierSnifferPathForLedger } from './tier-ledger-path.ts';
 import { tierSetPlannerForLedger } from './installed-tier-classification-registry.ts';
 import { tierSetForLedger } from '../connector-store/tier-set-registry.ts';
 import {
@@ -581,6 +581,7 @@ export class TierSnifferService {
     }
   }
 
+  private embeddingState: TierLedger | undefined;
   private readonly embeddingPrefilters = new Map<string, EmbeddingPrefilter>();
 
   status(): { lane: string; modelId: string; callsToday: number; embeddingPrefilter: string[]; lastTick?: TierSnifferTick; waiting?: TierSnifferWaiting } {
@@ -830,11 +831,17 @@ export class TierSnifferService {
       }
     }
     this.ledgers.clear();
+    this.embeddingState?.close();
+    this.embeddingState = undefined;
+    this.embeddingPrefilters.clear();
   }
 
   private snifferTargets(): SnifferTarget[] {
     const targets: SnifferTarget[] = [];
     const filterLedgerPaths = this.ledgerPaths().sort();
+    if (filterLedgerPaths.length && !this.embeddingState) this.embeddingState = new TierLedger({
+      dbPath: embeddingPrefilterInstallLedgerPath(this.options.classificationLedgerPath),
+    });
     if ([...this.embeddingPrefilters.keys()].some(path => !filterLedgerPaths.includes(path))) this.embeddingPrefilters.clear();
     for (const ledgerPath of filterLedgerPaths) {
       let ledger: TierLedger;
@@ -846,7 +853,7 @@ export class TierSnifferService {
       const planner = tierSetPlannerForLedger(ledgerPath);
       let embeddingPrefilter = this.embeddingPrefilters.get(ledgerPath);
       if (!embeddingPrefilter) {
-        embeddingPrefilter = new EmbeddingPrefilter({ ledger, ...(this.embeddingPrefilters.size ? { sharedWith: this.embeddingPrefilters.values().next().value! } : {}), sniffer: this.options.installed.snifferStoreForLedger(ledgerPath),
+        embeddingPrefilter = new EmbeddingPrefilter({ ledger, stateLedger: this.embeddingState!, ...(this.embeddingPrefilters.size ? { sharedWith: this.embeddingPrefilters.values().next().value! } : {}), sniffer: this.options.installed.snifferStoreForLedger(ledgerPath),
           ...(planner ? { placementFor: planner } : {}),
           enabled: () => this.options.embeddingPrefilterEnabled?.() !== false,
           copyFor: subject => {
@@ -867,6 +874,7 @@ export class TierSnifferService {
         });
         this.embeddingPrefilters.set(ledgerPath, embeddingPrefilter);
       }
+      embeddingPrefilter.setPlacementFor(planner);
       targets.push({
         ledger,
         embeddingPrefilter,

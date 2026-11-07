@@ -19,11 +19,11 @@
  * use (`isClassifierApproved`). A model or prompt change therefore stops the
  * sniffer — items stay pending, held Private — until the owner approves it.
  */
-import { sharedDataPath } from '../core/olympus-layout.ts';
+import { CLASSIFICATION_LEDGER_PATH_ENV, resolveClassificationLedgerPath } from './classification/tier-ledger-path.ts';
+export { CLASSIFICATION_LEDGER_PATH_ENV, resolveClassificationLedgerPath } from './classification/tier-ledger-path.ts';
 import { mkdir, open, readFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 
-export const CLASSIFICATION_LEDGER_PATH_ENV = 'OLYMPUS_CLASSIFICATION_LEDGER_PATH';
 
 /**
  * The embedding ledger's closed approval vocabulary, with its one approving
@@ -73,11 +73,6 @@ export interface ClassificationLedgerReadResult {
 }
 
 /** Beside the embedding ledger: `<data home>/openclaw/olympus/classification-ledger.jsonl`. */
-export function resolveClassificationLedgerPath(env: Record<string, string | undefined> = process.env): string {
-  const configured = env[CLASSIFICATION_LEDGER_PATH_ENV]?.trim();
-  if (configured) return configured;
-  return sharedDataPath('classification-ledger', env);
-}
 
 export async function appendClassificationLedgerEntry(path: string, entry: ClassificationLedgerEntry): Promise<void> {
   if (!isClassificationLedgerEntry(entry)) throw new Error('Refusing to append a malformed classification ledger entry.');
