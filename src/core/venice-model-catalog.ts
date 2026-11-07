@@ -424,3 +424,13 @@ async function awaitWithAbort<T>(promise: Promise<T>, signal: AbortSignal | unde
     if (abortListener) signal.removeEventListener('abort', abortListener);
   }
 }
+
+/**
+ * The cached text catalog's models (id to privacy category), for the Add a
+ * Venice model list. Read-only: a resolver call refreshes the cache first.
+ */
+export function readVeniceTextCatalogModels(
+  cachePath: string = defaultVeniceModelCatalogCachePath(),
+): Readonly<Record<string, VenicePrivacyCategory>> {
+  return readCatalogCache(cachePath, 'text')?.models ?? {};
+}
