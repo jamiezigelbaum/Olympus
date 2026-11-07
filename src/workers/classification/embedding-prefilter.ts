@@ -44,6 +44,7 @@ interface TrainingRun {
   examples: TrainingExample[]; memberIndex: number; sampleIndex: number;
   fit?: Generator<void, LogisticModel | undefined>;
   markers?: string[];
+  validationIndex: number; validationLedger: boolean; validated: boolean;
 }
 interface SavedModel { revisions: string; version: string; trainedAt: number; judge: string; model: LogisticModel }
 interface Receipt { subject: TierSnifferSubject; hash: string; reason: string; original: TierDecision }
@@ -278,7 +279,7 @@ export class EmbeddingPrefilter {
           if (!Array.isArray(scan.samples) || scan.samples.length > MAX_PER_CLASS * 2 || !Number.isSafeInteger(scan.rows)) throw new Error();
           return { member, scan, dirty: false, revision: member.options.ledger.readMeta(`${PREFIX}training-revision`) ?? '0' };
         });
-        this.training = { id: attempt.id, scans, examples: [], memberIndex: 0, sampleIndex: 0 };
+        this.training = { id: attempt.id, scans, examples: [], memberIndex: 0, sampleIndex: 0, validationIndex: 0, validationLedger: true, validated: false };
         // A restart resumes the durable scan, then rehydrates references and refits in slices.
         attempt.counts = [0, 0];
         attempt.rows = 0;
@@ -291,10 +292,8 @@ export class EmbeddingPrefilter {
       const markers = run.scans.map(({ member }) => member.options.ledger.changeMarker());
       const ledgerChanged = !run.markers || markers.some((marker, index) => marker !== run.markers![index]);
       run.markers = markers;
-      // Retained vectors must still belong to the same decisions and copies on every tick.
-      if (run.examples.some(example => !example.current(ledgerChanged))) {
-        stage = 'ledger_or_judge_changed';
-        throw new Error();
+      if (ledgerChanged) {
+        run.validationIndex = 0; run.validationLedger = true; run.validated = false;
       }
       let worked = false;
       const hasTime = () => !worked || clock() < deadline;
@@ -340,8 +339,25 @@ export class EmbeddingPrefilter {
               for (const example of run.examples) attempt.counts[Number(example.private)]!++;
               run.fit = trainLogisticSteps(run.examples);
             }
-            while (hasTime()) {
+            // Revalidation shares the tick budget. A completed sweep survives an
+            // exhausted tick so the next tick can fit, rather than scan forever.
+            while (!run.validated && run.validationIndex < run.examples.length && hasTime()) {
               worked = true;
+              if (!run.examples[run.validationIndex++]!.current(run.validationLedger)) {
+                stage = 'ledger_or_judge_changed';
+                throw new Error();
+              }
+              await ingestionTurn();
+            }
+            if (run.validationIndex === run.examples.length) {
+              run.validated = true; run.validationLedger = false;
+            }
+            if (run.scans.some(({ member }, index) => member.options.ledger.changeMarker() !== markers[index])) {
+              run.validationIndex = 0; run.validationLedger = true; run.validated = false;
+            }
+            let fitted = false;
+            while (run.validated && hasTime()) {
+              worked = true; fitted = true;
               const step = run.fit.next();
               if (step.done) {
                 if (!step.value) { this.finishTraining(attempt, 'too_few'); break; }
@@ -364,6 +380,7 @@ export class EmbeddingPrefilter {
               }
               await ingestionTurn();
             }
+            if (fitted) { run.validationIndex = 0; run.validated = false; }
           }
         }
       }
@@ -374,9 +391,8 @@ export class EmbeddingPrefilter {
         this.finishTraining(attempt, 'failed', 'ledger_or_judge_changed');
       }
       // Yields may let a decision writer run inside this tick as well.
-      if (run.scans.some(({ member }, index) => member.options.ledger.changeMarker() !== markers[index])
-        && run.examples.some(example => !example.current(true))) {
-        this.finishTraining(attempt, 'failed', 'ledger_or_judge_changed');
+      if (run.scans.some(({ member }, index) => member.options.ledger.changeMarker() !== markers[index])) {
+        run.validationIndex = 0; run.validationLedger = true; run.validated = false;
       }
       for (const entry of run.scans) {
         if (entry.dirty && attempt.revisions === this.revisions()) {

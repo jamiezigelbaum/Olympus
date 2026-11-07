@@ -192385,7 +192385,7 @@ class EmbeddingPrefilter {
             throw new Error;
           return { member, scan, dirty: false, revision: member.options.ledger.readMeta(`${PREFIX3}training-revision`) ?? "0" };
         });
-        this.training = { id: attempt.id, scans, examples: [], memberIndex: 0, sampleIndex: 0 };
+        this.training = { id: attempt.id, scans, examples: [], memberIndex: 0, sampleIndex: 0, validationIndex: 0, validationLedger: true, validated: false };
         attempt.counts = [0, 0];
         attempt.rows = 0;
         for (const { scan } of scans) {
@@ -192398,9 +192398,10 @@ class EmbeddingPrefilter {
       const markers = run2.scans.map(({ member }) => member.options.ledger.changeMarker());
       const ledgerChanged = !run2.markers || markers.some((marker, index) => marker !== run2.markers[index]);
       run2.markers = markers;
-      if (run2.examples.some((example) => !example.current(ledgerChanged))) {
-        stage = "ledger_or_judge_changed";
-        throw new Error;
+      if (ledgerChanged) {
+        run2.validationIndex = 0;
+        run2.validationLedger = true;
+        run2.validated = false;
       }
       let worked = false;
       const hasTime = () => !worked || clock2() < deadline;
@@ -192463,8 +192464,27 @@ class EmbeddingPrefilter {
                 attempt.counts[Number(example.private)]++;
               run2.fit = trainLogisticSteps(run2.examples);
             }
-            while (hasTime()) {
+            while (!run2.validated && run2.validationIndex < run2.examples.length && hasTime()) {
               worked = true;
+              if (!run2.examples[run2.validationIndex++].current(run2.validationLedger)) {
+                stage = "ledger_or_judge_changed";
+                throw new Error;
+              }
+              await ingestionTurn();
+            }
+            if (run2.validationIndex === run2.examples.length) {
+              run2.validated = true;
+              run2.validationLedger = false;
+            }
+            if (run2.scans.some(({ member }, index) => member.options.ledger.changeMarker() !== markers[index])) {
+              run2.validationIndex = 0;
+              run2.validationLedger = true;
+              run2.validated = false;
+            }
+            let fitted = false;
+            while (run2.validated && hasTime()) {
+              worked = true;
+              fitted = true;
               const step = run2.fit.next();
               if (step.done) {
                 if (!step.value) {
@@ -192492,6 +192512,10 @@ class EmbeddingPrefilter {
               }
               await ingestionTurn();
             }
+            if (fitted) {
+              run2.validationIndex = 0;
+              run2.validated = false;
+            }
           }
         }
       }
@@ -192501,8 +192525,10 @@ class EmbeddingPrefilter {
         this.saved = undefined;
         this.finishTraining(attempt, "failed", "ledger_or_judge_changed");
       }
-      if (run2.scans.some(({ member }, index) => member.options.ledger.changeMarker() !== markers[index]) && run2.examples.some((example) => !example.current(true))) {
-        this.finishTraining(attempt, "failed", "ledger_or_judge_changed");
+      if (run2.scans.some(({ member }, index) => member.options.ledger.changeMarker() !== markers[index])) {
+        run2.validationIndex = 0;
+        run2.validationLedger = true;
+        run2.validated = false;
       }
       for (const entry of run2.scans) {
         if (entry.dirty && attempt.revisions === this.revisions()) {

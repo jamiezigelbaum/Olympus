@@ -600,12 +600,13 @@ stored text must still match its complete-text digest; a verdict-cache
 Training takes at most 5,000 examples per class and runs bounded,
 L2-regularized logistic regression in TypeScript on normalized vectors.
 Scanning and fitting share a cooperative 200 ms budget per tick across the
-installation (one synchronous row/update may finish beyond the deadline).
+installation (one synchronous row/update, or the final atomic publication check, may finish beyond the deadline).
 Source ledger meta stores the cursor and selected item references, never text
 or vectors. Restart resumes scanning, rechecks selected rows and copies, then
 refits in slices. Retained examples are revalidated against their decisions,
-copy placement, text and vector bytes before each tick resumes fitting and
-synchronously before publishing weights. A changed or removed selected item,
+copy placement, text and vector bytes in resumable sweeps before fitting
+resumes; a changed ledger restarts that sweep. Publication makes one final
+synchronous check before writing weights. A changed or removed selected item,
 including a Secrets decision, discards the fit. Training starts after both classes reach the cap or all
 ledgers have been read. A completed fit waits 24 hours; a failed attempt retries
 after three hours. A complete read below 2,000 per class waits for 1,000 new

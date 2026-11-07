@@ -809,3 +809,21 @@ test('a newer content verdict replaces the historical tier receipt even when its
   await f.filter.prepare(judge);
   expect(trainingState(f)).toMatchObject({ outcome: 'too_few', counts: [0, 0] });
 });
+
+test('costly retained-copy validation yields and still lets fitting finish', async () => {
+  let clock = 0;
+  const dir = mkdtempSync(join(tmpdir(), 'prefilter-budget-'));
+  const control = new TierLedger({ dbPath: join(dir, 'control.sqlite') });
+  const f = fixture({ trained: false, memory: true, stateLedger: control, monotonicNow: () => clock, log: () => {} });
+  cleanups.push(() => { control.close(); rmSync(dir, { recursive: true, force: true }); });
+  for (let n = 0; n < 4000; n++) trainingRow(f, n);
+  f.setCopy(n => { clock += 0.1; return copy(n); }); // 400 ms for a complete retained-copy sweep.
+  for (let tick = 0; tick < 50 && !existsSync(join(f.modelDir, 'weights.json')); tick++) {
+    const started = clock;
+    await f.filter.prepare(judge);
+    // Only the final atomic publication check may exceed the cooperative budget.
+    if (!existsSync(join(f.modelDir, 'weights.json'))) expect(clock - started).toBeLessThanOrEqual(200.11);
+  }
+  expect(trainingState(f)).toMatchObject({ outcome: 'trained', counts: [2000, 2000] });
+  expect(existsSync(join(f.modelDir, 'weights.json'))).toBe(true);
+}, 30_000);
