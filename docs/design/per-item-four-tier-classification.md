@@ -635,6 +635,37 @@ A changed judge identity or mounted-ledger
 membership invalidates the model. Account-scope withdrawal invalidates it too.
 No contract shapes, vector identities, embeddings or classifier version change.
 
+For a counts-only training diagnostic from an unpacked release, run
+`bun ./dist/cli.js prefilter-training-dry-run`. Optional `--data-dir <directory>`
+selects an install instead of the normal data root; `--row-limit <positive integer>`
+bounds rows examined separately for each ledger. This hidden command does not
+run `source index status`, start workers, fit a model, or acquire a lease.
+It calls the same training eligibility, serving-copy selection, digest/verdict
+receipt and vector checks as live training. It counts every eligible row rather
+than applying the fitting sample caps. Every rejection name is always present;
+only the first failing check counts, so examples plus rejections equal rows read.
+The JSON output contains numbers only as values. Ledger array positions replace
+paths, accounts and source names; no row content, item identity, reason text,
+model identity or vectors are printed, even on errors.
+
+The diagnostic uses the install-wide recorded training attempt's judge identity
+(including its prompt and decision mode), falling back to a unique source-ledger
+attempt for older installs. It refuses ambiguous or missing training identities
+rather than inferring one from accepted rows. Existing co-located and bound
+source ledgers are counted, including moved bindings resolved by ledger identity.
+No install SQLite file is opened by SQLite: a read-only open can still modify
+its shared-memory sidecar. Main database and WAL bytes are copied into private
+0700 temporary directories; snapshots alone are opened read-only, without SQL
+writes, checkpoint, migrations, metadata updates, permission repairs or lease.
+SQLite's temporary shared-memory files stay there, and all scratch copies are
+removed on normal completion or error. Abrupt process termination can leave
+private scratch copies. Copying detects concurrent main/WAL changes and reports
+numeric errors with a nonzero exit; rerun if the install was changing. Snapshots
+of different files are not one install-wide transaction. Synthetic WAL-backed
+tests compare all install file hashes and mtimes before and after, including the
+built CLI path. The 2026-11-07 live zero-example investigation remains an
+observation task until this diagnostic has run on the affected install.
+
 One install-wide model and rolling audit window are shared across the mounted
 ledgers. A stable install tier ledger at
 `<classification-ledger-path>.embedding-prefilter.tier-ledger.sqlite` owns the

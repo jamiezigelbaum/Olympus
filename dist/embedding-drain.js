@@ -16958,13 +16958,15 @@ function idParams(identity) {
 class TierLedger {
   dbPath;
   db;
+  readOnly;
   metaChanges = 0;
   now;
   constructor(options) {
     this.dbPath = options.dbPath;
+    this.readOnly = options.readOnly === true;
     this.now = options.now ?? (() => new Date);
     const onDisk = this.dbPath !== ":memory:";
-    if (onDisk) {
+    if (onDisk && !this.readOnly) {
       mkdirSync11(dirname20(this.dbPath), { recursive: true, mode: 448 });
       if (!existsSync14(this.dbPath))
         closeSync8(openSync8(this.dbPath, "a", 384));
@@ -16972,7 +16974,12 @@ class TierLedger {
     }
     let db;
     try {
-      db = new Database3(this.dbPath, { create: true });
+      db = new Database3(this.dbPath, this.readOnly ? { readonly: true, create: false } : { create: true });
+      if (this.readOnly) {
+        db.exec("PRAGMA query_only = ON;");
+        this.db = db;
+        return;
+      }
       db.exec("PRAGMA busy_timeout = 10000; PRAGMA journal_mode = WAL;");
       runSqliteMigrations(db, TIER_LEDGER_SQLITE_STORE_ID, tierLedgerMigrations());
       settleStaleEmbedHolds(db, this.now().toISOString());
@@ -16980,16 +16987,16 @@ class TierLedger {
         restrictLedgerFiles(this.dbPath);
     } catch (error) {
       if (db)
-        closeSqliteStore(db);
+        closeSqliteStore(db, { checkpoint: !this.readOnly });
       throw error;
     }
     this.db = db;
   }
   close() {
     try {
-      closeSqliteStore(this.db);
+      closeSqliteStore(this.db, { checkpoint: !this.readOnly });
     } finally {
-      if (this.dbPath !== ":memory:")
+      if (!this.readOnly && this.dbPath !== ":memory:")
         restrictLedgerFiles(this.dbPath);
     }
   }
@@ -26142,6 +26149,7 @@ var init_local_index = __esm(() => {
     trustDomain;
     storageProfile;
     db;
+    readOnly;
     now;
     trustReconciliationReadyCursors;
     exclusions;
@@ -26162,6 +26170,7 @@ var init_local_index = __esm(() => {
     embeddingFailureState;
     embeddingDeferral;
     constructor(options) {
+      this.readOnly = options.readOnly === true;
       this.corpusId = requireNonEmpty(options.corpusId, "Connector store corpus id");
       this.dbPath = requireNonEmpty(options.dbPath, "Connector store db path");
       this.mediaHolder = this.dbPath === ":memory:" ? `memory:${randomUUID9()}` : options.mediaHolder ?? this.dbPath;
@@ -26220,20 +26229,21 @@ var init_local_index = __esm(() => {
         const judgmentColumns = this.db.query("SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'media_judgments'").get() !== null ? tableColumns(this.db, "media_judgments", false) : [];
         this.mediaJudgmentsPresent = CONNECTOR_STORE_MEDIA_JUDGMENT_COLUMNS.every((column) => judgmentColumns.includes(column));
       } catch (error) {
-        closeSqliteStore(this.db);
+        closeSqliteStore(this.db, { checkpoint: !this.readOnly });
         throw error;
       }
     }
     close() {
       try {
-        this.releaseUnreferencedChunkMedia();
+        if (!this.readOnly)
+          this.releaseUnreferencedChunkMedia();
         if (this.tierLedgerOwned === true)
           this.tierLedgerHandle?.close();
         this.boundLedgerHandle?.close();
         this.boundLedgerHandle = undefined;
       } finally {
         this.tierLedgerHandle = undefined;
-        closeSqliteStore(this.db);
+        closeSqliteStore(this.db, { checkpoint: !this.readOnly });
       }
     }
     tierLedgerPathInUse() {
@@ -73070,23 +73080,33 @@ var FAILED_RETRY_MS = 3 * 60 * 60 * 1000;
 var NEW_VERDICTS = 1000;
 var TRAINING = `${PREFIX}training-v1`;
 var SCAN = `${PREFIX}training-scan-v1`;
-function prefilterVector(copy) {
-  if (!copy || copy.chunks.length === 0 || copy.chunks.some((chunk) => chunk.mediaSha256 || chunk.mediaPath) || snifferMaterialCarriesSecret(copy.chunks.map((chunk) => chunk.boundedText).join("")))
-    return;
+function prefilterVector(copy, reject = () => {
+  return;
+}) {
+  if (!copy)
+    return reject("copy_missing");
+  if (copy.chunks.length === 0)
+    return reject("chunks_empty");
+  if (copy.chunks.some((chunk) => chunk.mediaSha256 || chunk.mediaPath))
+    return reject("media_present");
+  if (snifferMaterialCarriesSecret(copy.chunks.map((chunk) => chunk.boundedText).join("")))
+    return reject("secret_material");
   const vectors = copy.vectors.filter((vector) => vector.modelId === EMBEDDING_PREFILTER_MODEL_ID);
   if (vectors.length !== copy.chunks.length)
-    return;
+    return reject("vector_count");
   const mean = new Array(EMBEDDING_PREFILTER_DIMENSIONS).fill(0);
   for (const chunk of copy.chunks) {
     const matching = vectors.filter((vector) => vector.chunkIndex === chunk.chunkIndex && vector.contentHash === chunk.embeddingInputHash);
-    if (matching.length !== 1 || matching[0].embedding.byteLength !== EMBEDDING_PREFILTER_DIMENSIONS * 4)
-      return;
+    if (matching.length !== 1)
+      return reject("vector_match");
+    if (matching[0].embedding.byteLength !== EMBEDDING_PREFILTER_DIMENSIONS * 4)
+      return reject("vector_bytes");
     const bytes = matching[0].embedding;
     const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
     for (let i2 = 0;i2 < mean.length; i2++) {
       const value = view.getFloat32(i2 * 4, true);
       if (!Number.isFinite(value))
-        return;
+        return reject("vector_nonfinite");
       mean[i2] = mean[i2] + value / vectors.length;
     }
   }
@@ -73110,6 +73130,93 @@ function subjectOf(row) {
 }
 function decisionOf(row) {
   return { ...row, state: row.metadataPending || row.contentPending ? "pending" : "current", decidedBy: row.decidedBy, snifferId: "embedding-prefilter" };
+}
+function prefilterTrainingCopy(subject, ledger, setCopyFor, legacyCopyFor) {
+  const serving = copyServingLayer(ledger.copies(subject), "content");
+  if (setCopyFor && serving)
+    return setCopyFor(serving.corpusId);
+  if (ledger.getCurrent(subject)?.routed)
+    return;
+  return legacyCopyFor();
+}
+function prefilterTrainingExample(row, judge2, options, reject = () => {
+  return;
+}) {
+  if (!row.routed)
+    return reject("not_routed");
+  if (row.state !== "current")
+    return reject("not_current");
+  if (row.metadataPending)
+    return reject("metadata_pending");
+  if (row.contentPending)
+    return reject("content_pending");
+  if (!row.contentRead)
+    return reject("content_unread");
+  if (row.metadataTier !== "private")
+    return reject("metadata_tier");
+  if (!["private", "secure"].includes(row.contentTier))
+    return reject("content_tier");
+  if (row.metadataForced)
+    return reject("metadata_forced");
+  if (!row.modelId)
+    return reject("model_missing");
+  if (row.decidedBy === "owner_rule")
+    return reject("owner_decision");
+  if (row.decidedBy === "override")
+    return reject("override_decision");
+  if (options.ledger.getOverride(subjectOf(row)))
+    return reject("item_override");
+  if (options.ledger.rejudgeQuestion(subjectOf(row)))
+    return reject("rejudge_open");
+  for (const [prefix2, reason] of [
+    ["metadata:owner_rule:", "metadata_owner_rule"],
+    ["metadata:floor:", "metadata_floor"],
+    ["metadata:secret:", "metadata_secret"],
+    ["override:", "override_reason"]
+  ])
+    if (row.reasons.some((value) => value.startsWith(prefix2)))
+      return reject(reason);
+  const prefix = `content:sniffer:${judge2}:`;
+  let judged;
+  for (const reason of row.reasons) {
+    if (!reason.startsWith("content:"))
+      continue;
+    if (reason.startsWith(prefix)) {
+      const code = reason.slice(prefix.length);
+      if (!code)
+        return reject("judge_code_empty");
+      if (code.startsWith(SNIFFER_RECORD_HELD_CODE_PREFIX))
+        return reject("judge_code_held");
+      if (/(?:^|:)(?:rule|unresolved|fail_safe|injection|undecided)(?::|$)/.test(code))
+        return reject("judge_code_unsafe");
+      if (judged)
+        return reject("judge_duplicate");
+      judged = reason;
+    } else if (!(reason.startsWith("content:judge_verdict:") || reason.startsWith("content:sha256:") || reason.startsWith("content:names:") || reason.startsWith("content:borderline:") || [
+      "content:text_only",
+      "content:provenance:model",
+      "content:no_raise",
+      HELD_UNTIL_JUDGED_REASON,
+      PERSONAL_FIRST_REASON
+    ].includes(reason)))
+      return reject("content_reason_unknown");
+  }
+  if (!judged)
+    return reject("judge_missing");
+  const copy = options.copyFor(subjectOf(row));
+  if (!copy)
+    return reject("copy_missing");
+  const digest = contentDigestReason(copy.chunks.map((chunk) => chunk.boundedText).join(""));
+  if (!row.reasons.includes(digest))
+    return reject("digest_missing");
+  if (!row.reasons.includes(contentJudgeVerdictReason(judged, row.contentTier, digest)))
+    return reject("verdict_missing");
+  const vector = prefilterVector(copy, reject);
+  if (!vector)
+    return;
+  if (Math.hypot(...vector) === 0)
+    return reject("vector_zero");
+  return { vector, copy, private: row.contentTier === "secure" };
 }
 
 class EmbeddingPrefilter {
@@ -73221,40 +73328,10 @@ class EmbeddingPrefilter {
     ])).digest("hex");
   }
   trainingExample(row, judge2) {
-    if (!row.routed || row.state !== "current" || row.metadataPending || row.contentPending || !row.contentRead || row.metadataTier !== "private" || !["private", "secure"].includes(row.contentTier) || row.metadataForced || !row.modelId || row.decidedBy === "owner_rule" || row.decidedBy === "override" || this.options.ledger.getOverride(subjectOf(row)) || this.options.ledger.rejudgeQuestion(subjectOf(row)) || row.reasons.some((reason) => reason.startsWith("metadata:owner_rule:") || reason.startsWith("metadata:floor:") || reason.startsWith("metadata:secret:") || reason.startsWith("override:")))
+    const eligible = prefilterTrainingExample(row, judge2, this.options);
+    if (!eligible)
       return;
-    const prefix = `content:sniffer:${judge2}:`;
-    let judged;
-    for (const reason of row.reasons) {
-      if (!reason.startsWith("content:"))
-        continue;
-      if (reason.startsWith(prefix)) {
-        const code = reason.slice(prefix.length);
-        if (!code || code.startsWith(SNIFFER_RECORD_HELD_CODE_PREFIX) || /(?:^|:)(?:rule|unresolved|fail_safe|injection|undecided)(?::|$)/.test(code))
-          return;
-        if (judged)
-          return;
-        judged = reason;
-      } else if (!(reason.startsWith("content:judge_verdict:") || reason.startsWith("content:sha256:") || reason.startsWith("content:names:") || reason.startsWith("content:borderline:") || [
-        "content:text_only",
-        "content:provenance:model",
-        "content:no_raise",
-        HELD_UNTIL_JUDGED_REASON,
-        PERSONAL_FIRST_REASON
-      ].includes(reason)))
-        return;
-    }
-    if (!judged)
-      return;
-    const copy = this.options.copyFor(subjectOf(row));
-    if (!copy)
-      return;
-    const digest = contentDigestReason(copy.chunks.map((chunk) => chunk.boundedText).join(""));
-    if (!row.reasons.includes(digest) || !row.reasons.includes(contentJudgeVerdictReason(judged, row.contentTier, digest)))
-      return;
-    const vector = prefilterVector(copy);
-    if (!vector || Math.hypot(...vector) === 0)
-      return;
+    const { vector, copy } = eligible;
     const fingerprint = this.trainingFingerprint(row);
     const copied = copyFingerprint2(copy);
     const subject = subjectOf(row);
@@ -74779,21 +74856,19 @@ class TierSnifferService {
           },
           copyFor: (subject) => {
             const set2 = tierSetForLedger(ledgerPath);
-            const serving = copyServingLayer(ledger.copies(subject), "content");
-            if (set2 && serving) {
-              const domain = set2.domainForCorpus(serving.corpusId);
+            return prefilterTrainingCopy(subject, ledger, set2 ? (corpusId) => {
+              const domain = set2.domainForCorpus(corpusId);
               return domain ? set2.store(domain)?.exportItemCopy(subject) : undefined;
-            }
-            if (ledger.getCurrent(subject)?.routed)
+            } : undefined, () => {
+              for (const store of this.options.stores()) {
+                if ((store.tierLedgerPathInUse?.() ?? tierLedgerPathForStore(store.dbPath)) !== ledgerPath)
+                  continue;
+                const copy = store.exportItemCopy?.(subject);
+                if (copy)
+                  return copy;
+              }
               return;
-            for (const store of this.options.stores()) {
-              if ((store.tierLedgerPathInUse?.() ?? tierLedgerPathForStore(store.dbPath)) !== ledgerPath)
-                continue;
-              const copy = store.exportItemCopy?.(subject);
-              if (copy)
-                return copy;
-            }
-            return;
+            });
           }
         });
         this.embeddingPrefilters.set(ledgerPath, embeddingPrefilter);

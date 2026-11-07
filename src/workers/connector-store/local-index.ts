@@ -2720,6 +2720,7 @@ export class LocalConnectorStore {
   readonly trustDomain: SourceTrustDomain;
   readonly storageProfile: SourceIndexStorageProfile;
   private db: Database;
+  private readonly readOnly: boolean;
   private readonly now: () => Date;
   /**
    * Completion latch for trust reconciliation lineages, keyed by connector id
@@ -2780,6 +2781,7 @@ export class LocalConnectorStore {
   private embeddingDeferral: string | undefined;
 
   constructor(options: LocalConnectorStoreOptions) {
+    this.readOnly = options.readOnly === true;
     this.corpusId = requireNonEmpty(options.corpusId, 'Connector store corpus id');
     this.dbPath = requireNonEmpty(options.dbPath, 'Connector store db path');
     this.mediaHolder = this.dbPath === ':memory:' ? `memory:${randomUUID()}` : options.mediaHolder ?? this.dbPath;
@@ -2856,20 +2858,20 @@ export class LocalConnectorStore {
       ).get() !== null ? tableColumns(this.db, 'media_judgments', false) : [];
       this.mediaJudgmentsPresent = CONNECTOR_STORE_MEDIA_JUDGMENT_COLUMNS.every((column) => judgmentColumns.includes(column));
     } catch (error) {
-      closeSqliteStore(this.db);
+      closeSqliteStore(this.db, { checkpoint: !this.readOnly });
       throw error;
     }
   }
 
   close(): void {
     try {
-      this.releaseUnreferencedChunkMedia();
+      if (!this.readOnly) this.releaseUnreferencedChunkMedia();
       if (this.tierLedgerOwned === true) this.tierLedgerHandle?.close();
       this.boundLedgerHandle?.close();
       this.boundLedgerHandle = undefined;
     } finally {
       this.tierLedgerHandle = undefined;
-      closeSqliteStore(this.db);
+      closeSqliteStore(this.db, { checkpoint: !this.readOnly });
     }
   }
 

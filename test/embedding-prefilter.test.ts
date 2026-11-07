@@ -3,14 +3,14 @@ import { afterEach, expect, test } from 'bun:test';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { EmbeddingPrefilter, embeddingPrefilterDirectory, prefilterVector } from '../src/workers/classification/embedding-prefilter.ts';
+import { EmbeddingPrefilter, embeddingPrefilterDirectory, prefilterVector, prefilterTrainingExample, PREFILTER_TRAINING_REJECTIONS } from '../src/workers/classification/embedding-prefilter.ts';
 import { EMBEDDING_PREFILTER_MODEL_ID as MODEL, EMBEDDING_PREFILTER_DIMENSIONS as D } from '../src/workers/classification/embedding-logistic.ts';
 import { TierLedger, type TierPlacementPlan } from '../src/workers/classification/tier-ledger.ts';
 import { TierSnifferStore } from '../src/workers/classification/sniffer-store.ts';
 import { CachedTierSniffer, SNIFFER_PROMPT_VERSION, snifferId, snifferCacheModelId } from '../src/workers/classification/sniffer.ts';
 import { withRecordedContent } from '../src/workers/connector-store/tiered-store-set.ts';
 import { runSnifferPass } from '../src/workers/classification/sniffer-resolver.ts';
-import { classifyItemTiers, contentDigestReason, normalizedContentHash, type TierDecision } from '../src/workers/classification/tier-classifier.ts';
+import { classifyItemTiers, contentDigestReason, contentJudgeVerdictReason, normalizedContentHash, type TierDecision } from '../src/workers/classification/tier-classifier.ts';
 import { TierSnifferService, tierSnifferServiceEnv } from '../src/workers/classification/sniffer-service.ts';
 import { InstalledTierClassification } from '../src/workers/classification/installed-tier-classification.ts';
 import { appendClassificationLedgerEntry } from '../src/workers/classification-ledger.ts';
@@ -1012,4 +1012,71 @@ test.each(['version', 'trainedAt'] as const)('invalid saved %s cannot clear befo
   });
   expect(calls).toBe(1);
   expect(f.ledger.getCurrent(subject(1))!.contentTier).toBe('secure');
+});
+
+test('each training drop check has a stable first-failure counter', () => {
+  const f = fixture({ trained: false, memory: true });
+  trainingRow(f, 0);
+  const row = f.ledger.getCurrent(subject(0))!;
+  const valid = copy(0);
+  const cases: Array<[typeof PREFILTER_TRAINING_REJECTIONS[number], Record<string, unknown>?, typeof valid?, string?]> = [
+    ['not_routed', { routed: false }], ['not_current', { state: 'pending' }],
+    ['metadata_pending', { metadataPending: true }], ['content_pending', { contentPending: true }],
+    ['content_unread', { contentRead: false }], ['metadata_tier', { metadataTier: 'secure' }],
+    ['content_tier', { contentTier: 'secrets' }], ['metadata_forced', { metadataForced: true }],
+    ['model_missing', { modelId: null }], ['owner_decision', { decidedBy: 'owner_rule' }],
+    ['override_decision', { decidedBy: 'override' }], ['item_override'], ['rejudge_open'],
+    ['metadata_owner_rule', {}, valid, 'metadata:owner_rule:test'], ['metadata_floor', {}, valid, 'metadata:floor:test'],
+    ['metadata_secret', {}, valid, 'metadata:secret:test'], ['override_reason', {}, valid, 'override:test'],
+    ['judge_code_empty', {}, valid, ''], ['judge_code_held', {}, valid, 'record_held:test'],
+    ['judge_code_unsafe', {}, valid, 'fail_safe:test'], ['judge_duplicate'],
+    ['content_reason_unknown', {}, valid, 'content:unknown:test'], ['judge_missing'], ['copy_missing'],
+    ['digest_missing'], ['verdict_missing'], ['chunks_empty'], ['media_present'], ['secret_material'],
+    ['vector_count'], ['vector_match'], ['vector_bytes'], ['vector_nonfinite'], ['vector_zero'],
+  ];
+  const verdict = row.reasons.find(reason => reason.startsWith('content:judge_verdict:'))!;
+  const judged = row.reasons.find(reason => reason.startsWith(`content:sniffer:${judge}:`))!;
+  expect(verdict).toBeDefined();
+  for (const [expected, patch = {}, , extra] of cases) {
+    let reasons = [...row.reasons];
+    let currentCopy: typeof valid | undefined = structuredClone(valid);
+    if (extra !== undefined) {
+      if (expected.startsWith('judge_code_')) reasons = reasons.map(reason => reason === judged ? `content:sniffer:${judge}:${extra}` : reason);
+      else reasons.push(extra);
+    }
+    if (expected === 'judge_duplicate') reasons.push(judged);
+    if (expected === 'judge_missing') reasons = reasons.filter(reason => reason !== judged);
+    if (expected === 'digest_missing') reasons = reasons.filter(reason => !reason.startsWith('content:sha256:'));
+    if (expected === 'verdict_missing') reasons = reasons.filter(reason => reason !== verdict);
+    if (expected === 'copy_missing') currentCopy = undefined;
+    if (expected === 'chunks_empty') {
+      currentCopy!.chunks = [];
+      const digest = contentDigestReason('');
+      reasons = reasons.filter(reason => !reason.startsWith('content:sha256:') && reason !== verdict);
+      reasons.push(digest, contentJudgeVerdictReason(judged, row.contentTier, digest));
+    }
+    if (expected === 'media_present') currentCopy!.chunks[0]!.mediaPath = '/synthetic/image';
+    if (expected === 'secret_material') {
+      const text = '-----BEGIN PRIVATE KEY-----\nsynthetic-private-key-fixture\n-----END PRIVATE KEY-----';
+      currentCopy!.chunks[0]!.boundedText = text;
+      const digest = contentDigestReason(text);
+      reasons = reasons.filter(reason => !reason.startsWith('content:sha256:') && reason !== verdict);
+      reasons.push(digest, contentJudgeVerdictReason(judged, row.contentTier, digest));
+    }
+    if (expected === 'vector_count') currentCopy!.vectors = [];
+    if (expected === 'vector_match') currentCopy!.vectors[0]!.contentHash = 'stale';
+    if (expected === 'vector_bytes') currentCopy!.vectors[0]!.embedding = new Uint8Array(1);
+    if (expected === 'vector_nonfinite') new DataView(currentCopy!.vectors[0]!.embedding.buffer).setFloat32(0, NaN, true);
+    if (expected === 'vector_zero') currentCopy!.vectors[0]!.embedding.fill(0);
+    const drops: string[] = [];
+    const result = prefilterTrainingExample({ ...row, ...patch, reasons }, judge, {
+      ledger: {
+        getOverride: () => expected === 'item_override' ? { kind: 'tier', tier: 'secure' } : undefined,
+        rejudgeQuestion: () => expected === 'rejudge_open' ? {} as ReturnType<TierLedger['rejudgeQuestion']> : undefined,
+      }, copyFor: () => currentCopy,
+    }, reason => { drops.push(reason); return undefined; });
+    expect(result, expected).toBeUndefined();
+    expect(drops, expected).toEqual([expected]);
+  }
+  expect(cases.map(([reason]) => reason)).toEqual([...PREFILTER_TRAINING_REJECTIONS]);
 });

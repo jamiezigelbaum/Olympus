@@ -1,4 +1,4 @@
-import { EmbeddingPrefilter } from './embedding-prefilter.ts';
+import { prefilterTrainingCopy, EmbeddingPrefilter } from './embedding-prefilter.ts';
 import { resumeVerifiedTierMove, flushTierMoveNotes } from '../connector-store/tier-move.ts';
 import { controlPathHeadroom, ingestionTurn } from '../control-path-headroom.ts';
 // The worker's background tick for the privacy-safe sniffer: a bounded
@@ -909,18 +909,17 @@ export class TierSnifferService {
           },
           copyFor: subject => {
             const set = tierSetForLedger(ledgerPath);
-            const serving = copyServingLayer(ledger.copies(subject), 'content');
-            if (set && serving) {
-              const domain = set.domainForCorpus(serving.corpusId);
+            return prefilterTrainingCopy(subject, ledger, set ? corpusId => {
+              const domain = set.domainForCorpus(corpusId);
               return domain ? set.store(domain)?.exportItemCopy(subject) : undefined;
-            }
-            if (ledger.getCurrent(subject)?.routed) return undefined;
-            for (const store of this.options.stores()) {
-              if ((store.tierLedgerPathInUse?.() ?? tierLedgerPathForStore(store.dbPath)) !== ledgerPath) continue;
-              const copy = store.exportItemCopy?.(subject);
-              if (copy) return copy;
-            }
-            return undefined;
+            } : undefined, () => {
+              for (const store of this.options.stores()) {
+                if ((store.tierLedgerPathInUse?.() ?? tierLedgerPathForStore(store.dbPath)) !== ledgerPath) continue;
+                const copy = store.exportItemCopy?.(subject);
+                if (copy) return copy;
+              }
+              return undefined;
+            });
           },
         });
         this.embeddingPrefilters.set(ledgerPath, embeddingPrefilter);

@@ -6,13 +6,13 @@ import { removeFileDurablySync, writePrivateFileAtomicSync } from '../../core/at
 import { ingestionTurn } from '../control-path-headroom.ts';
 import { SNIFFER_RECORD_HELD_CODE_PREFIX, snifferMaterialCarriesSecret } from './sniffer.ts';
 import type { SnifferQuestion, TierSnifferStore } from './sniffer-store.ts';
-import { tierLedgerIdentityKey, type TierLedger, type TierLedgerRecord, type TierPlacementPlan } from './tier-ledger.ts';
+import { copyServingLayer, tierLedgerIdentityKey, type TierLedger, type TierLedgerRecord, type TierPlacementPlan } from './tier-ledger.ts';
 import { TIER_CLASSIFIER_VERSION, PERSONAL_FIRST_REASON, HELD_UNTIL_JUDGED_REASON, contentDigestReason, contentJudgeVerdictReason, type TierDecision, type TierSnifferSubject } from './tier-classifier.ts';
 import { EMBEDDING_PREFILTER_MODEL_ID, EMBEDDING_PREFILTER_DIMENSIONS, EMBEDDING_PREFILTER_MIN_PER_CLASS,
   trainLogisticSteps, privateProbability, type LogisticModel, type LogisticExample } from './embedding-logistic.ts';
 
 /** The shared store's read-only projection; no source policy or retrieval access. */
-interface PrefilterCopy {
+export interface PrefilterCopy {
   chunks: ReadonlyArray<{ chunkIndex: number; boundedText: string; embeddingInputHash: string | null; mediaPath?: string | null; mediaSha256?: string | null }>;
   vectors: ReadonlyArray<{ chunkIndex: number; modelId: string; contentHash: string; embedding: Uint8Array }>;
 }
@@ -55,20 +55,35 @@ import { embeddingPrefilterDirectory } from './tier-ledger-path.ts';
 export { embeddingPrefilterDirectory } from './tier-ledger-path.ts';
 
 /** Complete, current own-text vectors only. A partial document never authorizes clearance. */
-export function prefilterVector(copy: PrefilterCopy | undefined): number[] | undefined {
-  if (!copy || copy.chunks.length === 0 || copy.chunks.some(chunk => chunk.mediaSha256 || chunk.mediaPath)
-    || snifferMaterialCarriesSecret(copy.chunks.map(chunk => chunk.boundedText).join(''))) return undefined;
+export const PREFILTER_TRAINING_REJECTIONS = [
+  'not_routed', 'not_current', 'metadata_pending', 'content_pending', 'content_unread',
+  'metadata_tier', 'content_tier', 'metadata_forced', 'model_missing', 'owner_decision',
+  'override_decision', 'item_override', 'rejudge_open', 'metadata_owner_rule', 'metadata_floor',
+  'metadata_secret', 'override_reason', 'judge_code_empty', 'judge_code_held', 'judge_code_unsafe',
+  'judge_duplicate', 'content_reason_unknown', 'judge_missing', 'copy_missing', 'digest_missing',
+  'verdict_missing', 'chunks_empty', 'media_present', 'secret_material', 'vector_count',
+  'vector_match', 'vector_bytes', 'vector_nonfinite', 'vector_zero',
+] as const;
+export type PrefilterTrainingRejection = typeof PREFILTER_TRAINING_REJECTIONS[number];
+type Reject = (reason: PrefilterTrainingRejection) => undefined;
+
+export function prefilterVector(copy: PrefilterCopy | undefined, reject: Reject = () => undefined): number[] | undefined {
+  if (!copy) return reject('copy_missing');
+  if (copy.chunks.length === 0) return reject('chunks_empty');
+  if (copy.chunks.some(chunk => chunk.mediaSha256 || chunk.mediaPath)) return reject('media_present');
+  if (snifferMaterialCarriesSecret(copy.chunks.map(chunk => chunk.boundedText).join(''))) return reject('secret_material');
   const vectors = copy.vectors.filter(vector => vector.modelId === EMBEDDING_PREFILTER_MODEL_ID);
-  if (vectors.length !== copy.chunks.length) return undefined;
+  if (vectors.length !== copy.chunks.length) return reject('vector_count');
   const mean = new Array<number>(EMBEDDING_PREFILTER_DIMENSIONS).fill(0);
   for (const chunk of copy.chunks) {
     const matching = vectors.filter(vector => vector.chunkIndex === chunk.chunkIndex && vector.contentHash === chunk.embeddingInputHash);
-    if (matching.length !== 1 || matching[0]!.embedding.byteLength !== EMBEDDING_PREFILTER_DIMENSIONS * 4) return undefined;
+    if (matching.length !== 1) return reject('vector_match');
+    if (matching[0]!.embedding.byteLength !== EMBEDDING_PREFILTER_DIMENSIONS * 4) return reject('vector_bytes');
     const bytes = matching[0]!.embedding;
     const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
     for (let i = 0; i < mean.length; i++) {
       const value = view.getFloat32(i * 4, true);
-      if (!Number.isFinite(value)) return undefined;
+      if (!Number.isFinite(value)) return reject('vector_nonfinite');
       mean[i] = mean[i]! + value / vectors.length;
     }
   }
@@ -88,6 +103,68 @@ function subjectOf(row: TierLedgerRecord): TierSnifferSubject {
 }
 function decisionOf(row: TierLedgerRecord): TierDecision {
   return { ...row, state: row.metadataPending || row.contentPending ? 'pending' : 'current', decidedBy: row.decidedBy as TierDecision['decidedBy'], snifferId: 'embedding-prefilter' };
+}
+
+/** Same serving-copy choice for training and offline inspection; never fall back for a routed row. */
+export function prefilterTrainingCopy(subject: TierSnifferSubject,
+  ledger: Pick<TierLedger, 'copies' | 'getCurrent'>,
+  setCopyFor: ((corpusId: string) => PrefilterCopy | undefined) | undefined,
+  legacyCopyFor: () => PrefilterCopy | undefined,
+): PrefilterCopy | undefined {
+  const serving = copyServingLayer(ledger.copies(subject), 'content');
+  if (setCopyFor && serving) return setCopyFor(serving.corpusId);
+  if (ledger.getCurrent(subject)?.routed) return undefined;
+  return legacyCopyFor();
+}
+
+/** Shared by live training and the counts-only diagnostic. First failure wins. */
+export function prefilterTrainingExample(row: TierLedgerRecord, judge: string, options: {
+  ledger: Pick<TierLedger, 'getOverride' | 'rejudgeQuestion'>;
+  copyFor: (subject: TierSnifferSubject) => PrefilterCopy | undefined;
+}, reject: Reject = () => undefined): { vector: number[]; copy: PrefilterCopy; private: boolean } | undefined {
+  if (!row.routed) return reject('not_routed');
+  if (row.state !== 'current') return reject('not_current');
+  if (row.metadataPending) return reject('metadata_pending');
+  if (row.contentPending) return reject('content_pending');
+  if (!row.contentRead) return reject('content_unread');
+  if (row.metadataTier !== 'private') return reject('metadata_tier');
+  if (!['private', 'secure'].includes(row.contentTier)) return reject('content_tier');
+  if (row.metadataForced) return reject('metadata_forced');
+  if (!row.modelId) return reject('model_missing');
+  if (row.decidedBy === 'owner_rule') return reject('owner_decision');
+  if (row.decidedBy === 'override') return reject('override_decision');
+  if (options.ledger.getOverride(subjectOf(row))) return reject('item_override');
+  if (options.ledger.rejudgeQuestion(subjectOf(row))) return reject('rejudge_open');
+  for (const [prefix, reason] of [
+    ['metadata:owner_rule:', 'metadata_owner_rule'], ['metadata:floor:', 'metadata_floor'],
+    ['metadata:secret:', 'metadata_secret'], ['override:', 'override_reason'],
+  ] as const) if (row.reasons.some(value => value.startsWith(prefix))) return reject(reason);
+  const prefix = `content:sniffer:${judge}:`;
+  let judged: string | undefined;
+  for (const reason of row.reasons) {
+    if (!reason.startsWith('content:')) continue;
+    if (reason.startsWith(prefix)) {
+      const code = reason.slice(prefix.length);
+      if (!code) return reject('judge_code_empty');
+      if (code.startsWith(SNIFFER_RECORD_HELD_CODE_PREFIX)) return reject('judge_code_held');
+      if (/(?:^|:)(?:rule|unresolved|fail_safe|injection|undecided)(?::|$)/.test(code)) return reject('judge_code_unsafe');
+      if (judged) return reject('judge_duplicate');
+      judged = reason;
+    // Known non-raising receipts only. Unknown content reasons are excluded too.
+    } else if (!(reason.startsWith('content:judge_verdict:') || reason.startsWith('content:sha256:') || reason.startsWith('content:names:')
+      || reason.startsWith('content:borderline:') || ['content:text_only', 'content:provenance:model',
+        'content:no_raise', HELD_UNTIL_JUDGED_REASON, PERSONAL_FIRST_REASON].includes(reason))) return reject('content_reason_unknown');
+  }
+  if (!judged) return reject('judge_missing');
+  const copy = options.copyFor(subjectOf(row));
+  if (!copy) return reject('copy_missing');
+  const digest = contentDigestReason(copy.chunks.map(chunk => chunk.boundedText).join(''));
+  if (!row.reasons.includes(digest)) return reject('digest_missing');
+  if (!row.reasons.includes(contentJudgeVerdictReason(judged, row.contentTier, digest))) return reject('verdict_missing');
+  const vector = prefilterVector(copy, reject);
+  if (!vector) return undefined;
+  if (Math.hypot(...vector) === 0) return reject('vector_zero');
+  return { vector, copy, private: row.contentTier === 'secure' };
 }
 
 export class EmbeddingPrefilter {
@@ -182,35 +259,9 @@ export class EmbeddingPrefilter {
   }
   /** A ledger label is usable only when this judge alone decided the content tier. */
   private trainingExample(row: TierLedgerRecord, judge: string): TrainingExample | undefined {
-    if (!row.routed || row.state !== 'current' || row.metadataPending || row.contentPending || !row.contentRead
-      || row.metadataTier !== 'private' || !['private', 'secure'].includes(row.contentTier) || row.metadataForced
-      || !row.modelId || row.decidedBy === 'owner_rule' || row.decidedBy === 'override'
-      || this.options.ledger.getOverride(subjectOf(row)) || this.options.ledger.rejudgeQuestion(subjectOf(row))
-      || row.reasons.some(reason => reason.startsWith('metadata:owner_rule:') || reason.startsWith('metadata:floor:')
-        || reason.startsWith('metadata:secret:') || reason.startsWith('override:'))) return undefined;
-    const prefix = `content:sniffer:${judge}:`;
-    let judged: string | undefined;
-    for (const reason of row.reasons) {
-      if (!reason.startsWith('content:')) continue;
-      if (reason.startsWith(prefix)) {
-        const code = reason.slice(prefix.length);
-        if (!code || code.startsWith(SNIFFER_RECORD_HELD_CODE_PREFIX)
-          || /(?:^|:)(?:rule|unresolved|fail_safe|injection|undecided)(?::|$)/.test(code)) return undefined;
-        if (judged) return undefined;
-        judged = reason;
-      // Known non-raising receipts only. Unknown content reasons are excluded too.
-      } else if (!(reason.startsWith('content:judge_verdict:') || reason.startsWith('content:sha256:') || reason.startsWith('content:names:')
-        || reason.startsWith('content:borderline:') || ['content:text_only', 'content:provenance:model',
-          'content:no_raise', HELD_UNTIL_JUDGED_REASON, PERSONAL_FIRST_REASON].includes(reason))) return undefined;
-    }
-    if (!judged) return undefined;
-    const copy = this.options.copyFor(subjectOf(row));
-    if (!copy) return undefined;
-    const digest = contentDigestReason(copy.chunks.map(chunk => chunk.boundedText).join(''));
-    if (!row.reasons.includes(digest)
-      || !row.reasons.includes(contentJudgeVerdictReason(judged, row.contentTier, digest))) return undefined;
-    const vector = prefilterVector(copy);
-    if (!vector || Math.hypot(...vector) === 0) return undefined;
+    const eligible = prefilterTrainingExample(row, judge, this.options);
+    if (!eligible) return undefined;
+    const { vector, copy } = eligible;
     const fingerprint = this.trainingFingerprint(row);
     const copied = copyFingerprint(copy);
     const subject = subjectOf(row);
