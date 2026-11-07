@@ -808,7 +808,7 @@ test('legacy names-only verdict cannot label a retained Personal body after rena
   expect(drops).toEqual(['legacy_verdict_content']);
 });
 
-test.each(['bound', 'missing', 'stale'] as const)('legacy content labels require exact cached content binding: %s', async binding => {
+test.each(['bound', 'missing', 'stale'] as const)('legacy Private cache evidence keeps exact content binding: %s', async binding => {
   const f = fixture({ trained: false, memory: true, log: () => {} });
   for (const n of [0, 1]) {
     trainingRow(f, n, [], 'other:1.00', binding === 'bound');
@@ -820,12 +820,12 @@ test.each(['bound', 'missing', 'stale'] as const)('legacy content labels require
     const drops: string[] = [];
     const example = prefilterTrainingExample(f.ledger.getCurrent(subject(n))!, judge,
       { ledger: f.ledger, sniffer: f.sniffer, copyFor: () => copy(n) }, reason => { drops.push(reason); return undefined; });
-    if (binding === 'bound') expect(example).toMatchObject({ private: n === 1, provenance: 'legacy_sniffer' });
+    if (binding === 'bound' || n === 0) expect(example).toMatchObject({ private: n === 1, provenance: 'legacy_sniffer' });
     else expect(example).toBeUndefined();
-    expect(drops).toEqual(binding === 'bound' ? [] : ['legacy_verdict_content']);
+    expect(drops).toEqual(binding === 'bound' || n === 0 ? [] : ['legacy_verdict_content']);
   }
   await f.filter.prepare(judge);
-  expect(trainingState(f)).toMatchObject({ outcome: 'too_few', counts: binding === 'bound' ? [1, 1] : [0, 0] });
+  expect(trainingState(f)).toMatchObject({ outcome: 'too_few', counts: binding === 'bound' ? [1, 1] : [1, 0] });
 });
 
 test('legacy metadata raises and differing subject verdict tiers never label', () => {
@@ -840,11 +840,11 @@ test('legacy metadata raises and differing subject verdict tiers never label', (
   expect(drops).toEqual(['legacy_verdict_tier']);
 });
 
-test('an old zero-example attempt restarts immediately instead of retaining its retry delay', async () => {
+test.each([undefined, 2])('an old zero-example attempt restarts immediately: label version %s', async version => {
   const f = fixture({ trained: false, memory: true, log: () => {} });
   await f.filter.prepare(judge);
   const old = trainingState(f);
-  delete old.labelVersion;
+  old.labelVersion = version;
   f.ledger.writeMeta('embedding-prefilter:training-v1', JSON.stringify(old));
   trainingRow(f, 0, [], 'other:1.00', true); trainingRow(f, 1, [], 'other:1.00', true);
   for (const n of [0, 1]) {
@@ -853,7 +853,7 @@ test('an old zero-example attempt restarts immediately instead of retaining its 
       reasons: row.reasons.filter(reason => !reason.startsWith('content:judge_verdict:')) });
   }
   await f.make().prepare(judge);
-  expect(trainingState(f)).toMatchObject({ labelVersion: 2, outcome: 'too_few', counts: [1, 1] });
+  expect(trainingState(f)).toMatchObject({ labelVersion: 3, outcome: 'too_few', counts: [1, 1] });
   expect(trainingState(f).id).not.toBe(old.id);
 });
 
@@ -1117,6 +1117,7 @@ test('each training drop check has a stable first-failure counter', () => {
     ['legacy_verdict_ambiguous'], ['legacy_verdict_time'], ['legacy_verdict_tier'], ['legacy_verdict_content'], ['legacy_verdict_unreadable'],
     ['chunks_empty'], ['media_present'], ['secret_material'],
     ['vector_count'], ['vector_match'], ['vector_bytes'], ['vector_nonfinite'], ['vector_zero'],
+    ['judge_id_invalid'], ['judge_model_mismatch'],
   ];
   const verdict = row.reasons.find(reason => reason.startsWith('content:judge_verdict:'))!;
   const judged = row.reasons.find(reason => reason.startsWith(`content:sniffer:${judge}:`))!;
@@ -1132,7 +1133,9 @@ test('each training drop check has a stable first-failure counter', () => {
     if (expected === 'judge_missing') reasons = reasons.filter(reason => reason !== judged);
     if (expected === 'digest_missing') reasons = reasons.filter(reason => !reason.startsWith('content:sha256:'));
     if (expected === 'verdict_missing') reasons = reasons.map(reason => reason === verdict ? `${verdict}wrong` : reason);
-    if (expected.startsWith('legacy_')) reasons = reasons.filter(reason => reason !== verdict);
+    if (expected.startsWith('legacy_')) reasons = [...reasons.filter(reason => reason !== verdict), `metadata:sniffer:${judge}:other:1.00`];
+    if (expected === 'judge_id_invalid') reasons = reasons.map(reason => reason === judged ? 'content:sniffer:invalid:other:1.00' : reason);
+    if (expected === 'judge_model_mismatch') reasons = reasons.map(reason => reason === judged ? `content:sniffer:${snifferId({ ...lane, modelId: 'other' })}:other:1.00` : reason);
     if (expected === 'copy_missing') currentCopy = undefined;
     if (expected === 'chunks_empty') {
       currentCopy!.chunks = [];

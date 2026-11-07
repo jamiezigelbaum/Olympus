@@ -124684,21 +124684,28 @@ function prefilterTrainingExample(row, judge3, options, reject = () => {
     return reject("item_override");
   if (options.ledger.rejudgeQuestion(subjectOf(row)))
     return reject("rejudge_open");
-  for (const [prefix2, reason] of [
+  for (const [prefix, reason] of [
     ["metadata:owner_rule:", "metadata_owner_rule"],
     ["metadata:floor:", "metadata_floor"],
     ["metadata:secret:", "metadata_secret"],
     ["override:", "override_reason"]
   ])
-    if (row.reasons.some((value2) => value2.startsWith(prefix2)))
+    if (row.reasons.some((value2) => value2.startsWith(prefix)))
       return reject(reason);
-  const prefix = `content:sniffer:${judge3}:`;
+  const model = /^[^:]+:[^:]+\.m([0-9a-f]{16})$/.exec(judge3)?.[1];
+  if (!model)
+    return reject("judge_id_invalid");
   let judged;
   for (const reason of row.reasons) {
     if (!reason.startsWith("content:"))
       continue;
-    if (reason.startsWith(prefix)) {
-      const code = reason.slice(prefix.length);
+    if (reason.startsWith("content:sniffer:")) {
+      const verdict = /^content:sniffer:[^:]+:[^:]+\.m([0-9a-f]{16}):(.*)$/.exec(reason);
+      if (!verdict)
+        return reject("judge_id_invalid");
+      if (verdict[1] !== model)
+        return reject("judge_model_mismatch");
+      const code = verdict[2];
       if (!code)
         return reject("judge_code_empty");
       if (code.startsWith(SNIFFER_RECORD_HELD_CODE_PREFIX))
@@ -124729,25 +124736,28 @@ function prefilterTrainingExample(row, judge3, options, reject = () => {
   if (!row.reasons.includes(contentJudgeVerdictReason(judged, row.contentTier, digest4))) {
     if (row.reasons.some((reason) => reason.startsWith("content:judge_verdict:")))
       return reject("verdict_missing");
-    if (!options.sniffer)
+    const metadataJudge = row.reasons.some((reason) => reason.startsWith("metadata:sniffer:"));
+    if (metadataJudge && !options.sniffer)
       return reject("legacy_store_missing");
     let verdict;
     try {
-      verdict = options.sniffer.trainingVerdict(subjectOf(row), row.modelId);
+      verdict = options.sniffer?.trainingVerdict(subjectOf(row), row.modelId);
     } catch {
       return reject("legacy_verdict_unreadable");
     }
-    if (!verdict)
-      return reject("legacy_verdict_missing");
-    if (verdict.ambiguous)
-      return reject("legacy_verdict_ambiguous");
-    const time = Date.parse(verdict.decidedAt), decisionTime = Date.parse(row.decidedAt);
-    if (!Number.isFinite(time) || !Number.isFinite(decisionTime) || time > decisionTime)
-      return reject("legacy_verdict_time");
-    if ((verdict.tier === "personal" ? "private" : verdict.tier === "private" ? "secure" : undefined) !== row.contentTier)
-      return reject("legacy_verdict_tier");
-    if (verdict.contentHash !== normalizedContentHash(copy.chunks.map((chunk) => chunk.boundedText).join("")))
-      return reject("legacy_verdict_content");
+    if (metadataJudge || verdict && row.contentTier === "secure") {
+      if (!verdict)
+        return reject("legacy_verdict_missing");
+      if (verdict.ambiguous)
+        return reject("legacy_verdict_ambiguous");
+      const time = Date.parse(verdict.decidedAt), decisionTime = Date.parse(row.decidedAt);
+      if (!Number.isFinite(time) || !Number.isFinite(decisionTime) || time > decisionTime)
+        return reject("legacy_verdict_time");
+      if ((verdict.tier === "personal" ? "private" : verdict.tier === "private" ? "secure" : undefined) !== row.contentTier)
+        return reject("legacy_verdict_tier");
+      if (verdict.contentHash !== normalizedContentHash(copy.chunks.map((chunk) => chunk.boundedText).join("")))
+        return reject("legacy_verdict_content");
+    }
     provenance = "legacy_sniffer";
   }
   const vector = prefilterVector(copy, reject);
@@ -124926,7 +124936,7 @@ class EmbeddingPrefilter {
     const started = clock2();
     const deadline = started + TRAINING_SLICE_MS;
     let attempt = this.attempt;
-    if (attempt && attempt.labelVersion !== 2) {
+    if (attempt && attempt.labelVersion !== 3) {
       attempt = this.attempt = undefined;
       this.training = undefined;
     }
@@ -124961,7 +124971,7 @@ class EmbeddingPrefilter {
       }
       if (!attempt) {
         attempt = this.attempt = {
-          labelVersion: 2,
+          labelVersion: 3,
           id: randomUUID29(),
           revisions,
           judge: judge3,
@@ -125147,7 +125157,7 @@ class EmbeddingPrefilter {
       }
     } catch {
       if (!attempt)
-        attempt = this.attempt = { labelVersion: 2, id: randomUUID29(), judge: judge3, revisions: "", startedAt: this.now(), elapsedMs: 0, rows: 0, counts: [0, 0], nextAt: this.now(), outcome: "scanning" };
+        attempt = this.attempt = { labelVersion: 3, id: randomUUID29(), judge: judge3, revisions: "", startedAt: this.now(), elapsedMs: 0, rows: 0, counts: [0, 0], nextAt: this.now(), outcome: "scanning" };
       if (attempt.outcome === "scanning" || attempt.outcome === "fitting")
         this.finishTraining(attempt, "failed", stage);
     }
@@ -125329,7 +125339,9 @@ var init_embedding_prefilter = __esm(() => {
     "vector_match",
     "vector_bytes",
     "vector_nonfinite",
-    "vector_zero"
+    "vector_zero",
+    "judge_id_invalid",
+    "judge_model_mismatch"
   ];
 });
 

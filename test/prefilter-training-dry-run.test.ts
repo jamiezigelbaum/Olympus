@@ -9,6 +9,7 @@ import type { SourceConnector } from '../src/core/contracts.ts';
 import { createStorageSnapshotReaders } from '../src/core/source-storage.ts';
 import { LocalConnectorStore } from '../src/workers/connector-store/local-index.ts';
 import { TierLedger } from '../src/workers/classification/tier-ledger.ts';
+import { snifferId } from '../src/workers/classification/sniffer.ts';
 import { TierSnifferStore } from '../src/workers/classification/sniffer-store.ts';
 import { tierSnifferPathForLedger } from '../src/workers/classification/tier-ledger-path.ts';
 import { classifyItemTiers, contentDigestReason, contentJudgeVerdictReason, normalizedContentHash } from '../src/workers/classification/tier-classifier.ts';
@@ -33,7 +34,7 @@ async function fixture(root: string, name: string) {
   const sniffer = new TierSnifferStore({ dbPath: tierSnifferPathForLedger(ledger.dbPath) });
   const store = new LocalConnectorStore({ dbPath, corpusId: `secure_local.${name}`, family: 'file', trustDomain: 'secure_local', tierLedger: null });
   const text = 'Synthetic picnic sandwiches for Sunday.';
-  const judge = 'synthetic-judge';
+  const judge = snifferId({ kind: 'local', modelId: 'fixture-model', profileId: 'fixture' });
   const items = Array.from({ length: 11 }, (_, n) => ({
     identity: { family: 'file' as const, provider: 'fixture', accountScope: 'fixture-account', providerItemId: String(n), localItemId: String(n) },
     mimeType: 'text/plain', content: { kind: 'text' as const, text }, metadata: { title: 'fixture-name' }, fetchedAt: new Date().toISOString(),
@@ -62,6 +63,7 @@ async function fixture(root: string, name: string) {
       { tier: n === 8 ? 'private' : 'personal', category: 'fixture', confidence: 1, failSafe: false }, subject);
     if (n === 7 || n === 10) sniffer.markFinalModelContent({ materialHash: `synthetic-${n}`,
       modelId: 'fixture-model', promptVersion: 'fixture', mapRevision: 'none' }, normalizedContentHash(n === 7 ? text : 'Different body'));
+    if (n === 8 || n === 9) reasons.push(`metadata:sniffer:${judge}:other:1.00`);
     if (n === 4) reasons.push('content:unknown:synthetic');
     const decision = { ...classifyItemTiers({ subject, signals: {}, text }), state: 'current' as const, decidedBy: 'sniffer' as const,
       modelId: 'fixture-model', metadataTier: 'private' as const, contentTier: (n === 8 || n === 9 ? 'secure' : tier) as 'private' | 'secure',
@@ -98,8 +100,8 @@ test('counts exact training decisions, includes live WAL rows, and changes no in
     expect(report.ledgers).toHaveLength(2);
     for (const ledger of report.ledgers) {
       expect(ledger.rows_read).toBe(11);
-      expect(ledger).toMatchObject({ examples: { personal: 2, private: 1 }, provenance: { judge_receipt: 2, legacy_sniffer: 1 } });
-      expect(ledger.rejections).toMatchObject({ digest_missing: 1, legacy_verdict_missing: 1, legacy_verdict_tier: 1, legacy_verdict_content: 2, content_reason_unknown: 1, vector_count: 1, copy_missing: 1 });
+      expect(ledger).toMatchObject({ examples: { personal: 4, private: 1 }, provenance: { judge_receipt: 2, legacy_sniffer: 3 } });
+      expect(ledger.rejections).toMatchObject({ digest_missing: 1, legacy_verdict_missing: 0, legacy_verdict_tier: 1, legacy_verdict_content: 1, content_reason_unknown: 1, vector_count: 1, copy_missing: 1 });
       expect(ledger.examples.personal + ledger.examples.private + Object.values(ledger.rejections).reduce((a, b) => a + b, 0)).toBe(ledger.rows_read);
     }
     const limited = runPrefilterTrainingDryRun({ dataDir: root, rowLimit: 1 });
