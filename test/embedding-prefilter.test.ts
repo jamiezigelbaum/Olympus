@@ -775,6 +775,37 @@ test.each(['legacy', 'receipt'] as const)('a historical metadata raise never rep
   expect(trainingState(f)).toMatchObject({ outcome: 'too_few', counts: [0, 1] });
 });
 
+test('legacy names-only verdict cannot label a retained Personal body after renaming', () => {
+  const f = fixture({ trained: false, memory: true });
+  trainingRow(f, 0, [], 'other:1.00', true);
+  const original = f.ledger.getCurrent(subject(0))!;
+  f.ledger.recordDecision(subject(0), { ...original, state: 'current', snifferId: judge, decidedBy: 'sniffer',
+    reasons: original.reasons.filter(reason => !reason.startsWith('content:judge_verdict:')) });
+  const names = (title: string) => classifyItemTiers({ signals: { title }, subject: subject(0) }, {
+    sniffer: new CachedTierSniffer(f.sniffer, lane),
+  });
+  const recordNames = (title: string) => f.ledger.recordRoutedPlacement(subject(0),
+    withRecordedContent(names(title), f.ledger.getCurrent(subject(0))), {
+      copies: [{ corpusId: 'private', trustDomain: 'secure_local', layers: 'both' }], embedHold: false,
+    });
+  const title = 'Bank GB82 WEST 1234 5698 7654 32';
+  names(title);
+  const question = f.sniffer.questionFor(subject(0), 'metadata')!;
+  expect(question).toBeDefined();
+  f.sniffer.putVerdict({ materialHash: question.materialHash, modelId: snifferCacheModelId(lane),
+    promptVersion: SNIFFER_PROMPT_VERSION, mapRevision: 'none' },
+    { tier: 'private', category: 'financial', confidence: 1, failSafe: false }, question);
+  recordNames(title);
+  f.sniffer.deleteQuestion(subject(0), 'metadata');
+  recordNames('Picnic plan');
+  const current = f.ledger.getCurrent(subject(0))!;
+  expect(current).toMatchObject({ metadataTier: 'private', contentTier: 'secure', contentPending: false });
+  const drops: string[] = [];
+  expect(prefilterTrainingExample(current, judge, { ledger: f.ledger, sniffer: f.sniffer, copyFor: () => copy(0) },
+    reason => { drops.push(reason); return undefined; })).toBeUndefined();
+  expect(drops).toEqual(['legacy_verdict_content']);
+});
+
 test('production legacy reasons and digest accept the subject model verdict without content_hash', async () => {
   const f = fixture({ trained: false, memory: true, log: () => {} });
   trainingRow(f, 0);
