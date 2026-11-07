@@ -114,7 +114,6 @@ test('unchanged Telegram replay keeps origin/main hashes, names reason and final
     .toBe('05eceebf5a124da31250078520d4824c2047c442eec9b809cef0eed495e3b609');
   unchangedReplay(item, telegramClassificationSignals(item), {
     title: 'Chat', sender: 'Alex', folderKeys: ['1'],
-    prior: { tier: 'private', strength: 'prior', basis: 'source_config:trust_domain:internal' },
   });
 });
 

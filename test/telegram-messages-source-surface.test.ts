@@ -9,6 +9,7 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, test } from 'bun:test';
+import { createLaneTieredStoreSet } from '../src/workers/connector-store/tiered-store-set.ts';
 import type { SourceConnector } from '../src/core/contracts.ts';
 import {
   LocalConnectorStore,
@@ -81,9 +82,7 @@ describe('Telegram connector-store operational surfaces', () => {
             indexed_items: 1,
             tombstoned_items: 0,
             chunks: 1,
-            // The lane's traversal run plus the reconciliation sweep's
-            // one-time completion marker.
-            sync_runs: 2,
+            sync_runs: 1,
           },
           item_metadata_returned: false,
           skipped_item_metadata_reason: 'connector_store_item_metadata_not_exposed_to_castor',
@@ -204,287 +203,79 @@ describe('Telegram connector-store operational surfaces', () => {
     }
   });
 
-  // A reclassified conversation puts the same message in the append-only spool
-  // under both trust domains. The spool cannot be edited to repair it, so a
-  // refusal wedges BOTH lanes forever. The disagreement resolves to the more
-  // restrictive domain instead: the message lands in exactly one lane, the
-  // restrictive one, and the receipt counts it.
   for (const [label, order] of [
     ['internal first', ['internal', 'secure_local']],
     ['secure-local first', ['secure_local', 'internal']],
   ] as const) {
-    test(`resolves a trust-domain disagreement to the restrictive lane (${label})`, async () => {
+    test(`mixed historical domains keep a Personal message searchable (${label})`, async () => {
       const fixture = createFixture([
         JSON.stringify(spoolRecord('ordinary', '1', 'internal', 'ordinary lane marker')),
-        JSON.stringify(spoolRecord('reclassified', '9', order[0], 'reclassified marker')),
-        JSON.stringify(spoolRecord('reclassified', '9', order[1], 'reclassified marker')),
+        ...order.map(domain => JSON.stringify(spoolRecord('reclassified', '9', domain, 'reclassified marker'))),
       ]);
       try {
         const receipt = await fixture.sync.pull();
-        expect(receipt).toMatchObject({
-          status: 'progress',
-          counts: { trust_conflict_items: 1, malformed_spool_records: 0 },
-          warnings: [TELEGRAM_TRUST_CONFLICT_WARNING],
-        });
-        expect(fixture.stores.internal.status().counts.items).toBe(1);
-        expect(fixture.stores.secureLocal.status().counts.items).toBe(1);
-
+        expect(receipt.counts).toMatchObject({ trust_conflict_items: 1, trust_conflict_evictions: 0 });
+        expect(receipt.warnings).toContain(TELEGRAM_TRUST_CONFLICT_WARNING);
+        expect(fixture.stores.internal.status().counts.items).toBe(2);
+        expect(fixture.stores.secureLocal.status().counts.items).toBe(0);
         const worker = createWorker(fixture.stores);
-        const internalQuery = await postJson(worker, '/v1/source/index/search', {
-          corpus_id: INTERNAL_TELEGRAM_MESSAGES_CORPUS_ID,
-          query: 'reclassified',
-          account: ACCOUNT,
+        const found = await postJson(worker, '/v1/source/index/search', {
+          corpus_id: INTERNAL_TELEGRAM_MESSAGES_CORPUS_ID, query: 'reclassified', account: ACCOUNT,
         });
-        const protectedQuery = await postJson(worker, '/v1/source/index/search', {
-          corpus_id: PROTECTED_TELEGRAM_MESSAGES_CORPUS_ID,
-          query: 'reclassified',
-          account: ACCOUNT,
-        });
-        expect(internalQuery.hits.map((hit: any) => hit.sourceItem.providerItemId)).not.toContain('9');
-        expect(protectedQuery.hits.map((hit: any) => hit.sourceItem.providerItemId)).toContain('9');
+        expect(found.hits.map((hit: any) => hit.sourceItem.providerItemId)).toContain('9');
+        expect(await fixture.sync.pull()).toMatchObject({ status: 'idle', counts: { items_seen: 0 } });
+      } finally { fixture.close(); }
+    });
 
-        // The lanes stay live: the wedge was the whole defect.
-        const idle = await fixture.sync.pull();
-        expect(idle).toMatchObject({ status: 'idle', counts: { items_seen: 0 } });
-      } finally {
-        fixture.close();
-      }
+    test(`a later historical domain cannot hide a Personal message (${label})`, async () => {
+      const fixture = createFixture([JSON.stringify(spoolRecord('reclassified', '9', order[0], 'reclassified marker'))]);
+      try {
+        await fixture.sync.pull();
+        appendFileSync(fixture.spoolPath, JSON.stringify(spoolRecord('reclassified', '9', order[1], 'reclassified marker')) + '\n');
+        const receipt = await fixture.sync.pull();
+        expect(receipt.counts.trust_conflict_evictions).toBe(0);
+        expect(fixture.stores.internal.localContent(`${ACCOUNT}:reclassified:9`)?.chunks.join(' ')).toBe('reclassified marker');
+        expect(fixture.stores.secureLocal.status().counts.items).toBe(0);
+      } finally { fixture.close(); }
+    });
+
+    test(`a record appended mid-pull waits for the next bounded window (${label})`, async () => {
+      const fixture = createFixture([JSON.stringify(spoolRecord('reclassified', '9', order[0], 'reclassified marker'))]);
+      try {
+        await fixture.sync.pull();
+        const lane = order[1] === 'internal' ? fixture.stores.internal : fixture.stores.secureLocal;
+        const sync = lane.syncFromConnector.bind(lane);
+        let appended = false;
+        lane.syncFromConnector = (connector: SourceConnector, options?: ConnectorStoreSyncOptions): Promise<ConnectorStoreSyncSummary> => {
+          if (!appended) {
+            appended = true;
+            appendFileSync(fixture.spoolPath, JSON.stringify(spoolRecord('reclassified', '10', order[1], 'later marker')) + '\n');
+          }
+          return sync(connector, options);
+        };
+        expect((await fixture.sync.pull()).counts.items_seen).toBe(0);
+        expect(fixture.stores.internal.localContent(`${ACCOUNT}:reclassified:10`)).toBeUndefined();
+        await fixture.sync.pull();
+        expect(fixture.stores.internal.localContent(`${ACCOUNT}:reclassified:10`)?.chunks.join(' ')).toBe('later marker');
+        expect(fixture.stores.secureLocal.status().counts.items).toBe(0);
+        expect(await fixture.sync.pull()).toMatchObject({ status: 'idle', counts: { items_seen: 0 } });
+      } finally { fixture.close(); }
     });
   }
 
-  // A scan window can never prove a negative. Once the internal lane has
-  // indexed a message, the reclassified record the helper appends later is
-  // BEHIND both lane cursors relative to that copy, so no future window ever
-  // holds both records. Resolution therefore has to happen at the store
-  // boundary: the identity is either in the internal lane or it is not.
-  test('evicts an already-indexed internal copy when a later window reclassifies the identity as secure_local', async () => {
+  test('a one-record budget consumes both domains without hiding the Personal item', async () => {
     const fixture = createFixture([
-      JSON.stringify(spoolRecord('ordinary', '1', 'internal', 'ordinary lane marker')),
       JSON.stringify(spoolRecord('reclassified', '9', 'internal', 'reclassified marker')),
-    ]);
-    try {
-      const first = await fixture.sync.pull();
-      expect(first.counts.trust_conflict_items).toBe(0);
-      expect(first.counts.trust_conflict_evictions).toBe(0);
-      expect(fixture.stores.internal.status().counts.items).toBe(2);
-
-      appendFileSync(
-        fixture.spoolPath,
-        JSON.stringify(spoolRecord('reclassified', '9', 'secure_local', 'reclassified marker')) + '\n',
-      );
-      const second = await fixture.sync.pull();
-      expect(second.counts.trust_conflict_items).toBe(1);
-      expect(second.counts.trust_conflict_evictions).toBe(1);
-      expect(second.warnings).toContain(TELEGRAM_TRUST_CONFLICT_WARNING);
-
-      expect(fixture.stores.internal.status().counts.items).toBe(1);
-      // The internal copy is moved up by the tier move (superseded, its text purged once the protected copy
-      // is verified), never deleted first: the searches below prove it is served from the protected lane only.
-      expect(fixture.stores.internal.localContent(`${ACCOUNT}:reclassified:9`)?.chunks.join(' ') ?? '').toBe('');
-      expect(fixture.stores.secureLocal.status().counts.items).toBe(1);
-
-      const worker = createWorker(fixture.stores);
-      const internalQuery = await postJson(worker, '/v1/source/index/search', {
-        corpus_id: INTERNAL_TELEGRAM_MESSAGES_CORPUS_ID,
-        query: 'reclassified',
-        account: ACCOUNT,
-      });
-      const protectedQuery = await postJson(worker, '/v1/source/index/search', {
-        corpus_id: PROTECTED_TELEGRAM_MESSAGES_CORPUS_ID,
-        query: 'reclassified',
-        account: ACCOUNT,
-      });
-      // The chat recency lane answers every query with recent items, so the
-      // proof is that the evicted identity is gone, not that nothing matched.
-      expect(internalQuery.hits.map((hit: any) => hit.sourceItem.providerItemId)).not.toContain('9');
-      expect(JSON.stringify(internalQuery)).not.toContain('reclassified');
-      expect(protectedQuery.hits.map((hit: any) => hit.sourceItem.providerItemId)).toContain('9');
-
-      // Both lanes stay live, and a repeat pull re-evicts nothing.
-      const idle = await fixture.sync.pull();
-      expect(idle).toMatchObject({
-        status: 'idle',
-        counts: { items_seen: 0, trust_conflict_items: 0, trust_conflict_evictions: 0 },
-      });
-      expect(idle).not.toHaveProperty('warnings');
-    } finally {
-      fixture.close();
-    }
-  });
-
-  // The mirror of the same defect: the stricter lane indexed the identity in an
-  // earlier window, and only the looser record falls inside this one. Without
-  // the store boundary the internal lane would index a second, readable copy.
-  test('keeps a later internal record out of the internal lane when the secure lane already holds the identity', async () => {
-    const fixture = createFixture([
+      JSON.stringify(spoolRecord('ordinary', '1', 'internal', 'ordinary marker')),
       JSON.stringify(spoolRecord('reclassified', '9', 'secure_local', 'reclassified marker')),
     ]);
     try {
-      await fixture.sync.pull();
-      expect(fixture.stores.secureLocal.status().counts.items).toBe(1);
-
-      appendFileSync(
-        fixture.spoolPath,
-        JSON.stringify(spoolRecord('reclassified', '9', 'internal', 'reclassified marker')) + '\n',
-      );
-      const second = await fixture.sync.pull();
-      expect(second.counts.trust_conflict_items).toBe(1);
-      expect(second.counts.trust_conflict_evictions).toBe(0);
-      expect(second.warnings).toContain(TELEGRAM_TRUST_CONFLICT_WARNING);
-
-      expect(fixture.stores.internal.status().counts.items).toBe(0);
-      expect(fixture.stores.secureLocal.status().counts.items).toBe(1);
-
-      const worker = createWorker(fixture.stores);
-      const internalQuery = await postJson(worker, '/v1/source/index/search', {
-        corpus_id: INTERNAL_TELEGRAM_MESSAGES_CORPUS_ID,
-        query: 'reclassified',
-        account: ACCOUNT,
-      });
-      expect(internalQuery.hits).toHaveLength(0);
-    } finally {
-      fixture.close();
-    }
-  });
-
-  // Trust is resolved against ONE spool read, and then each lane reads the
-  // spool again. A record appended between those two reads has been resolved
-  // against nothing: admitting it is exactly how both lanes end up holding the
-  // same identity, with no conflicting record left in any later window to say
-  // so. The lane read is bounded by the position the resolution covered, so a
-  // late record waits for the pull whose preflight can see it.
-  test('refuses a record appended after its window was resolved, and resolves it on the next pull', async () => {
-    const fixture = createFixture([
-      JSON.stringify(spoolRecord('reclassified', '9', 'secure_local', 'reclassified marker')),
-    ]);
-    try {
-      await fixture.sync.pull();
-      expect(fixture.stores.secureLocal.status().counts.items).toBe(1);
-
-      // The lane's own spool read happens inside this call, strictly after the
-      // preflight resolution the pull has already performed.
-      const laneSync = fixture.stores.internal.syncFromConnector.bind(fixture.stores.internal);
-      let appended = false;
-      fixture.stores.internal.syncFromConnector = (
-        connector: SourceConnector,
-        options?: ConnectorStoreSyncOptions,
-      ): Promise<ConnectorStoreSyncSummary> => {
-        if (!appended) {
-          appended = true;
-          appendFileSync(
-            fixture.spoolPath,
-            JSON.stringify(spoolRecord('reclassified', '9', 'internal', 'reclassified marker')) + '\n',
-          );
-        }
-        return laneSync(connector, options);
-      };
-
-      const raced = await fixture.sync.pull();
-      expect(appended).toBe(true);
-      expect(raced.counts.items_seen).toBe(0);
-      expect(fixture.stores.internal.status().counts.items).toBe(0);
-
-      const resolved = await fixture.sync.pull();
-      expect(resolved.counts.trust_conflict_items).toBe(1);
-      expect(resolved.warnings).toContain(TELEGRAM_TRUST_CONFLICT_WARNING);
-      expect(fixture.stores.internal.status().counts.items).toBe(0);
-      expect(fixture.stores.secureLocal.status().counts.items).toBe(1);
-
-      const worker = createWorker(fixture.stores);
-      const internalQuery = await postJson(worker, '/v1/source/index/search', {
-        corpus_id: INTERNAL_TELEGRAM_MESSAGES_CORPUS_ID,
-        query: 'reclassified',
-        account: ACCOUNT,
-      });
-      expect(internalQuery.hits).toHaveLength(0);
-
-      // The deferral is a deferral, not a hole: the lanes stay live and the
-      // late record's position is behind both cursors once it is resolved.
-      const idle = await fixture.sync.pull();
-      expect(idle).toMatchObject({ status: 'idle', counts: { items_seen: 0, trust_conflict_items: 0 } });
-    } finally {
-      fixture.close();
-    }
-  });
-
-  // The same bound on the stricter lane, where deferring is what preserves the
-  // eviction: an unresolved secure-local record admitted mid-pull would sit in
-  // the secure store beside the internal copy nothing had evicted.
-  test('defers a secure-local record appended mid-pull and evicts the internal copy on the next pull', async () => {
-    const fixture = createFixture([
-      JSON.stringify(spoolRecord('reclassified', '9', 'internal', 'reclassified marker')),
-    ]);
-    try {
-      await fixture.sync.pull();
-      expect(fixture.stores.internal.status().counts.items).toBe(1);
-
-      const laneSync = fixture.stores.secureLocal.syncFromConnector.bind(fixture.stores.secureLocal);
-      let appended = false;
-      fixture.stores.secureLocal.syncFromConnector = (
-        connector: SourceConnector,
-        options?: ConnectorStoreSyncOptions,
-      ): Promise<ConnectorStoreSyncSummary> => {
-        if (!appended) {
-          appended = true;
-          appendFileSync(
-            fixture.spoolPath,
-            JSON.stringify(spoolRecord('reclassified', '9', 'secure_local', 'reclassified marker')) + '\n',
-          );
-        }
-        return laneSync(connector, options);
-      };
-
-      const raced = await fixture.sync.pull();
-      expect(appended).toBe(true);
-      expect(raced.counts.trust_conflict_evictions).toBe(0);
-      expect(fixture.stores.secureLocal.status().counts.items).toBe(0);
-      expect(fixture.stores.internal.status().counts.items).toBe(1);
-
-      const resolved = await fixture.sync.pull();
-      expect(resolved.counts.trust_conflict_items).toBe(1);
-      expect(resolved.counts.trust_conflict_evictions).toBe(1);
-      expect(resolved.counts.items_tombstoned).toBe(1);
-      expect(fixture.stores.internal.status().counts.items).toBe(0);
-      expect(fixture.stores.secureLocal.status().counts.items).toBe(1);
-    } finally {
-      fixture.close();
-    }
-  });
-
-  test('resolves a conflicted message when its stricter claim reaches the bounded window', async () => {
-    const fixture = createFixture([
-      JSON.stringify(spoolRecord('reclassified', '9', 'internal', 'reclassified marker')),
-      JSON.stringify(spoolRecord('ordinary', '1', 'internal', 'ordinary lane marker')),
-      JSON.stringify(spoolRecord('reclassified', '9', 'secure_local', 'reclassified marker')),
-    ]);
-    try {
-      // The preflight and both lanes share the one-record budget. The first two
-      // pulls advance to the stricter claim without scanning the whole tail;
-      // the third resolves that claim against the stored internal copy before
-      // admitting it to the secure-local lane.
-      const first = await fixture.sync.pull({ max_items: 1 });
-      const second = await fixture.sync.pull({ max_items: 1 });
-      expect(first.counts.trust_conflict_items).toBe(0);
-      expect(second.counts.trust_conflict_items).toBe(0);
+      for (let pull = 0; pull < 3; pull++) {
+        expect((await fixture.sync.pull({ max_items: 1 })).counts.trust_conflict_evictions).toBe(0);
+      }
       expect(fixture.stores.internal.status().counts.items).toBe(2);
       expect(fixture.stores.secureLocal.status().counts.items).toBe(0);
-
-      const receipt = await fixture.sync.pull({ max_items: 1 });
-      expect(receipt.counts.trust_conflict_items).toBe(1);
-      expect(receipt.counts.trust_conflict_evictions).toBe(1);
-      expect(fixture.stores.internal.status().counts.items).toBe(1);
-      expect(fixture.stores.secureLocal.status().counts.items).toBe(1);
-
-      const worker = createWorker(fixture.stores);
-      const internalQuery = await postJson(worker, '/v1/source/index/search', {
-        corpus_id: INTERNAL_TELEGRAM_MESSAGES_CORPUS_ID,
-        query: 'reclassified',
-        account: ACCOUNT,
-      });
-      expect(internalQuery.hits.map((hit: any) => hit.sourceItem.providerItemId)).not.toContain('9');
-    } finally {
-      fixture.close();
-    }
+    } finally { fixture.close(); }
   });
 });
 
@@ -522,7 +313,12 @@ function createFixture(lines: string[]): {
   const stores = { internal, secureLocal };
   return {
     stores,
-    sync: createTelegramConnectorStoreSyncHandler({ stores, spoolDir }),
+    sync: createTelegramConnectorStoreSyncHandler({ stores, spoolDir, tierSet: createLaneTieredStoreSet({
+      setId: 'telegram.messages', internalStore: internal, secureStore: secureLocal, splitLayers: false,
+      tierClassification: { rules: ['lawyer', 'protected'].map(chat => ({
+        id: `owner.${chat}`, match: { kind: 'chat' as const, value: chat }, tier: 'secure' as const, strength: 'prior' as const,
+      })) },
+    }) }),
     spoolPath,
     close() {
       secureLocal.close();

@@ -17353,8 +17353,10 @@ class TierLedger {
           AND i.metadata_forced = 0 AND i.content_tier != 'secrets'
           AND i.decided_by IN ('default', 'sensitive_detector', 'sniffer', 'move', 'source_prior', 'content_rule')
           -- A held row's stamp names the exact decision it re-read, so it
-          -- never outlives that decision (rejudgeKeyForHeld).
-          AND (i.rejudged_key IS NULL OR i.rejudged_key != CASE WHEN i.state = 'pending'
+          -- never outlives that decision (rejudgeKeyForHeld). A retired prior
+          -- replayed after a completed re-judge invalidates the old stamp.
+          AND (instr(i.reasons_json, '"metadata:prior:source_') > 0
+            OR i.rejudged_key IS NULL OR i.rejudged_key != CASE WHEN i.state = 'pending'
             THEN ? || char(0) || 'held' || char(0) || i.generation || char(0) || i.decided_at
             ELSE ? END)
           -- Settled by a verdict under this classifier and sniffer (markJudged):
@@ -37626,13 +37628,6 @@ var init_capture_spool_connector = __esm(() => {
   ]);
 });
 
-// src/workers/telegram-messages/protection-claims.ts
-var init_protection_claims = __esm(() => {
-  init_tier_move();
-  init_capture_spool_connector();
-  init_record_builder();
-});
-
 // src/workers/archive-import/byte-source.ts
 import * as zlib from "node:zlib";
 function tableCrc32(data2, value) {
@@ -39574,8 +39569,6 @@ var init_store_sync2 = __esm(() => {
   init_spool_file_identity();
   init_source_storage();
   init_tiered_store_set();
-  init_record_builder();
-  init_protection_claims();
   init_capture_spool_secrets();
   init_capture_freshness();
   init_corpus_adapter4();

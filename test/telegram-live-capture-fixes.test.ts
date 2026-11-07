@@ -456,7 +456,7 @@ describe('review fixes, round 2 (Astra, #545)', () => {
   };
   const contentOf = (store: LocalConnectorStore) => store.localContent(`${ACCOUNT}:chat-1:A`)?.chunks.join(' ') ?? '';
 
-  test('a protected record older than the copy already captured moves the newest version into the protected lane', async () => {
+  test('an older secure-domain record cannot move the newer Personal copy', async () => {
     const dir = spool({ '2026-10-22.jsonl': versioned({ text: 'A as edited on the 22nd', at: '2026-10-22T09:00:00Z' }) });
     const s = stores(dir);
     try {
@@ -466,19 +466,17 @@ describe('review fixes, round 2 (Astra, #545)', () => {
       // The chat is protected now, and the backfill brings the 21st's version under that claim.
       writeFileSync(join(dir, '2026-10-23.jsonl'), versioned({ text: 'A as written on the 21st', at: '2026-10-21T09:00:00Z', trust: 'secure_local' }));
       const receipt = await sync.pull();
-      // One lane holds it, the protected one, with its newest version.
-      expect(contentOf(s.internal)).toBe('');
-      expect(contentOf(s.secureLocal)).toBe('A as edited on the 22nd');
-      // The ordinary copy is moved (never deleted first), then the spool's version, newer here, replaces it.
-      expect(receipt.counts.trust_claims_moved).toBe(1);
+      expect(contentOf(s.internal)).toBe('A as edited on the 22nd');
+      expect(contentOf(s.secureLocal)).toBe('');
+      expect(receipt.counts.trust_claims_moved).toBe(0);
       await sync.pull();
-      expect(contentOf(s.secureLocal)).toBe('A as edited on the 22nd');
+      expect(contentOf(s.internal)).toBe('A as edited on the 22nd');
     } finally {
       s.close();
     }
   });
 
-  test('when the spool no longer has the newer version, the stored copy moves into the protected lane and never comes back', async () => {
+  test('a pruned Personal record stays Personal when an older secure-domain record arrives', async () => {
     const dir = spool({ '2026-10-22.jsonl': versioned({ text: 'A as edited on the 22nd', at: '2026-10-22T09:00:00Z' }) });
     const s = stores(dir);
     try {
@@ -487,17 +485,15 @@ describe('review fixes, round 2 (Astra, #545)', () => {
       unlinkSync(join(dir, '2026-10-22.jsonl'));
       writeFileSync(join(dir, '2026-10-23.jsonl'), versioned({ text: 'A as written on the 21st', at: '2026-10-21T09:00:00Z', trust: 'secure_local' }));
       const receipt = await sync.pull();
-      // Nothing of it is readable in the ordinary lane; the protected lane holds the newer copy.
-      expect(contentOf(s.internal)).toBe('');
-      expect(s.internal.searchItems('edited', 5)).toHaveLength(0);
-      expect(contentOf(s.secureLocal)).toBe('A as edited on the 22nd');
-      expect(receipt.counts.trust_claims_moved).toBe(1);
-      // The claim is the item's: an ordinary record of it later does not bring it back.
+      expect(contentOf(s.internal)).toBe('A as edited on the 22nd');
+      expect(s.internal.searchItems('edited', 5)).toHaveLength(1);
+      expect(contentOf(s.secureLocal)).toBe('');
+      expect(receipt.counts.trust_claims_moved).toBe(0);
       writeFileSync(join(dir, '2026-10-24.jsonl'), versioned({ text: 'A edited again in the ordinary lane', at: '2026-10-24T09:00:00Z' }));
       await sync.pull();
       await sync.pull();
-      expect(contentOf(s.internal)).toBe('');
-      expect(s.internal.searchItems('ordinary', 5)).toHaveLength(0);
+      expect(contentOf(s.internal)).toBe('A edited again in the ordinary lane');
+      expect(s.internal.searchItems('ordinary', 5)).toHaveLength(1);
     } finally {
       s.close();
     }
@@ -556,7 +552,7 @@ describe('review fixes, round 2 (Astra, #545)', () => {
 });
 
 describe('review bot findings (#545)', () => {
-  test('a carried version spends the pass budget, so the spool behind it is still read', async () => {
+  test('a bounded pass reads both historical domain inputs without skipping later items', async () => {
     const internalA = record('A', { text: 'A ordinary' });
     const secure = (id: string, text: string) => {
       const line = JSON.parse(record(id, { text }));
@@ -570,9 +566,9 @@ describe('review bot findings (#545)', () => {
     try {
       const sync = createTelegramConnectorStoreSyncHandler({ stores: s, spoolDir: dir, maxItems: 2 });
       for (let pull = 0; pull < 6; pull += 1) await sync.pull();
-      expect(s.secureLocal.localContent(`${ACCOUNT}:chat-1:C`)?.chunks.join(' ')).toBe('C protected');
-      expect(s.secureLocal.localContent(`${ACCOUNT}:chat-1:A`)?.chunks.join(' ')).toBe('A protected');
-      expect(s.internal.localContent(`${ACCOUNT}:chat-1:A`)?.chunks.join(' ') ?? '').toBe('');
+      expect(s.internal.localContent(`${ACCOUNT}:chat-1:C`)?.chunks.join(' ')).toBe('C protected');
+      expect(s.internal.localContent(`${ACCOUNT}:chat-1:A`)?.chunks.join(' ')).toBe('A protected');
+      expect(s.secureLocal.localContent(`${ACCOUNT}:chat-1:A`)).toBeUndefined();
     } finally {
       s.close();
     }

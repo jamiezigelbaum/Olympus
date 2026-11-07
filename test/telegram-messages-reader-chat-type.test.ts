@@ -56,10 +56,10 @@ describe('Telethon capture-spool chat-type vocabulary', () => {
       expect(pages[0]!.items[0]!.metadata.chatType).toBe('dm');
       expect(pages[0]!.items[1]!.metadata.chatType).toBeUndefined();
       expect(connector.classificationSignals(pages[0]!.items[0]!)).toMatchObject({
-        prior: { tier: 'private', strength: 'prior', basis: 'source_config:trust_domain:internal' },
         conversationKind: 'direct',
       });
       expect(connector.classificationSignals(pages[0]!.items[1]!).conversationKind).toBeUndefined();
+      for (const item of pages[0]!.items) expect(connector.classificationSignals(item).prior).toBeUndefined();
     } finally {
       fixture.close();
     }

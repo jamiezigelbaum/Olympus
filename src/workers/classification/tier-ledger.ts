@@ -977,8 +977,10 @@ export class TierLedger {
           AND i.metadata_forced = 0 AND i.content_tier != 'secrets'
           AND i.decided_by IN ('default', 'sensitive_detector', 'sniffer', 'move', 'source_prior', 'content_rule')
           -- A held row's stamp names the exact decision it re-read, so it
-          -- never outlives that decision (rejudgeKeyForHeld).
-          AND (i.rejudged_key IS NULL OR i.rejudged_key != CASE WHEN i.state = 'pending'
+          -- never outlives that decision (rejudgeKeyForHeld). A retired prior
+          -- replayed after a completed re-judge invalidates the old stamp.
+          AND (instr(i.reasons_json, '"metadata:prior:source_') > 0
+            OR i.rejudged_key IS NULL OR i.rejudged_key != CASE WHEN i.state = 'pending'
             THEN ? || char(0) || 'held' || char(0) || i.generation || char(0) || i.decided_at
             ELSE ? END)
           -- Settled by a verdict under this classifier and sniffer (markJudged):

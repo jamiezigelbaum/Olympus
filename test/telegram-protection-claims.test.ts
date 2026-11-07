@@ -1,15 +1,4 @@
-/**
- * The protected lane's claim on a Telegram message (src/workers/telegram-messages/protection-claims.ts), review round 4 on #545:
- *
- * - fail-closed: a failure at any step stops the pull before either cursor passes the claim, and nothing claimed is left readable in
- *   the ordinary lane once a step has run;
- * - captures are ordered by when the helper captured them and its capture sequence, so a day file that was removed and written again
- *   cannot reverse them;
- * - a claimed record always reaches the protected lane when that lane holds nothing newer, whatever an ordinary copy holds;
- * - a seeded run over captures, claims, prunes, recreated files and injected failures keeps both rules.
- *
- * Synthetic spool records only.
- */
+// Historical capture claims never decide privacy. Content and explicit owner rules do.
 import { createHash } from 'node:crypto';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync, appendFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -110,106 +99,45 @@ function world() {
   };
 }
 
-describe('the claim is applied fail-closed', () => {
-  test('a claim that cannot be kept stops the pull after the copy is hidden, and the next pull keeps it', async () => {
+describe('retired capture claims', () => {
+  test('an old secure claim and a secure record cannot move Personal content', async () => {
     const w = world();
     try {
-      w.capture('2026-10-22.jsonl', { id: 'A', text: 'markerA the newer ordinary text', at: '2026-10-22T09:00:00Z', trust: 'internal' });
+      w.capture('2026-10-22.jsonl', { id: 'A', text: 'markerA ordinary text', at: '2026-10-22T09:00:00Z', trust: 'internal' });
       const sync = w.handler();
       await sync.pull();
-      expect(w.textIn(w.internal, 'A')).toContain('newer ordinary');
+      // Metadata persisted by old builds must have no authority after upgrade.
+      w.set.ledger.writeMeta(`telegram:secure_claim:${ACCOUNT}:chat-1:A`, '1');
+      // The old claim's record is older than the ordinary copy; pruning the
+      // newer record must not make its trust domain authoritative either.
       unlinkSync(join(w.spoolDir, '2026-10-22.jsonl'));
-      w.capture('2026-10-23.jsonl', { id: 'A', text: 'markerA the older protected text', at: '2026-10-21T09:00:00Z', trust: 'secure_local' });
-      // The ledger refuses the claim's write once.
+      w.capture('2026-10-23.jsonl', { id: 'A', text: 'markerA old text', at: '2026-10-21T09:00:00Z', trust: 'secure_local' });
+      // Boundary receipts still need writes; only forbid the retired claim.
       const writeMeta = w.set.ledger.writeMeta.bind(w.set.ledger);
-      let refused = false;
-      w.set.ledger.writeMeta = (key: string, value: string) => {
-        if (key.startsWith('telegram:secure_claim:') && !refused) { refused = true; throw new Error('read-only ledger'); }
+      w.set.ledger.writeMeta = (key, value) => {
+        if (key.startsWith('telegram:secure_claim:')) throw new Error('retired claim write');
         writeMeta(key, value);
       };
-      await expect(sync.pull()).rejects.toThrow('read-only ledger');
-      // Hidden before the failing step: nothing of it is readable in the ordinary lane.
-      expect(w.readableInInternal('A')).toBe(false);
-      // The next pull reads the claim again and finishes it.
+      const receipt = await sync.pull();
+      expect(receipt.counts.trust_claims_moved).toBe(0);
+      expect(w.textIn(w.internal, 'A')).toContain('ordinary text');
+      expect(w.textIn(w.secureLocal, 'A')).toBe('');
+      w.capture('2026-10-24.jsonl', { id: 'A', text: 'markerA a later ordinary edit', at: '2026-10-24T09:00:00Z', trust: 'secure_local' });
       await sync.pull();
-      expect(w.readableInInternal('A')).toBe(false);
-      expect(w.textIn(w.secureLocal, 'A')).toContain('newer ordinary');
-      // A later ordinary record of the item never comes back to the ordinary lane.
-      w.capture('2026-10-24.jsonl', { id: 'A', text: 'markerA ordinary again', at: '2026-10-24T09:00:00Z', trust: 'internal' });
-      await sync.pull();
-      expect(w.readableInInternal('A')).toBe(false);
-      expect(w.textIn(w.secureLocal, 'A')).toContain('ordinary again');
-    } finally {
-      w.close();
-    }
-  });
-
-  test('a move that fails after hiding the copy stops the pull with the copy hidden and kept, and the next pull finishes it', async () => {
-    const w = world();
-    try {
-      w.capture('2026-10-22.jsonl', { id: 'A', text: 'markerA the newer ordinary text', at: '2026-10-22T09:00:00Z', trust: 'internal' });
-      let fail = true;
-      const { moveTieredItem } = await import('../src/workers/connector-store/tier-move.ts');
-      const sync = w.handler({
-        moveClaimed: (options) => moveTieredItem({ ...options, beforeFlip: () => { if (fail) throw new Error('crash before the flip'); } }),
-      });
-      await sync.pull();
-      unlinkSync(join(w.spoolDir, '2026-10-22.jsonl'));
-      w.capture('2026-10-23.jsonl', { id: 'A', text: 'markerA the older protected text', at: '2026-10-21T09:00:00Z', trust: 'secure_local' });
-      await expect(sync.pull()).rejects.toThrow('crash before the flip');
-      // Hidden, never deleted: the ordinary row still holds its text for the move to finish from.
-      expect(w.readableInInternal('A')).toBe(false);
-      expect(w.internal.itemPresence(w.identity('A')).active).toBe(true);
-      // The move's write intent (#540) is still pending: the set reports the item owed at the version being moved.
-      expect(w.set.ledger.writeIntent(w.identity('A'))?.connectorId).toBe('telegram_protection_claim_move');
-      const owed = w.set.storedItem(w.identity('A'), compareTelegramVersions);
-      expect(owed?.incomplete).toBe(true);
-      expect(owed?.version).toContain('2026-10-22T09:00:00Z');
-      fail = false;
-      await sync.pull();
-      expect(w.set.ledger.writeIntent(w.identity('A'))).toBeUndefined();
-      expect(w.readableInInternal('A')).toBe(false);
-      // The newer copy moved up; the claim's older record did not replace it.
-      expect(w.textIn(w.secureLocal, 'A')).toContain('newer ordinary');
-      w.capture('2026-10-24.jsonl', { id: 'A', text: 'markerA a later protected edit', at: '2026-10-24T09:00:00Z', trust: 'secure_local' });
-      await sync.pull();
-      expect(w.textIn(w.secureLocal, 'A')).toContain('later protected edit');
-      expect(w.readableInInternal('A')).toBe(false);
-    } finally {
-      w.close();
-    }
-  });
-
-  test('a move that fails before it starts stops the pull and deletes nothing; the next pull moves it', async () => {
-    const w = world();
-    try {
-      w.capture('2026-10-22.jsonl', { id: 'A', text: 'markerA ordinary', at: '2026-10-22T09:00:00Z', trust: 'internal' });
-      let fail = true;
-      const { moveTieredItem } = await import('../src/workers/connector-store/tier-move.ts');
-      const sync = w.handler({ moveClaimed: (options) => (fail ? Promise.reject(new Error('move refused')) : moveTieredItem(options)) });
-      await sync.pull();
-      w.capture('2026-10-23.jsonl', { id: 'A', text: 'markerA protected', at: '2026-10-23T09:00:00Z', trust: 'secure_local' });
-      await expect(sync.pull()).rejects.toThrow('move refused');
-      // Nothing was given up: the copy and its text are where they were, for the next pull.
-      expect(w.textIn(w.internal, 'A')).toContain('markerA ordinary');
-      fail = false;
-      await sync.pull();
-      expect(w.readableInInternal('A')).toBe(false);
-      expect(w.textIn(w.secureLocal, 'A')).toContain('markerA protected');
-    } finally {
-      w.close();
-    }
+      expect(w.readableInInternal('A')).toBe(true);
+      expect(w.textIn(w.internal, 'A')).toContain('later ordinary edit');
+    } finally { w.close(); }
   });
 });
 
 describe('nothing is deleted before its replacement is stored', () => {
-  test('a claimed copy whose newer version waits in the spool is moved up first, so a failed write of that version loses nothing', async () => {
+  test('a failed pass keeps the stored Personal copy until the newer record can be judged', async () => {
     const w = world();
     try {
       w.capture('2026-10-22.jsonl', { id: 'A', text: 'markerA the stored ordinary text', at: '2026-10-22T09:00:00Z', trust: 'internal' });
       const sync = w.handler();
       await sync.pull();
-      // The protected claim brings a newer version, which the protected lane writes after the move.
+      // A historical secure domain is just another input record.
       w.capture('2026-10-23.jsonl', { id: 'A', text: 'markerA the newer protected text', at: '2026-10-23T09:00:00Z', trust: 'secure_local' });
       const syncLegs = w.set.syncLegs.bind(w.set);
       let fail = true;
@@ -218,12 +146,12 @@ describe('nothing is deleted before its replacement is stored', () => {
         return syncLegs(...args);
       };
       await expect(sync.pull()).rejects.toThrow('the lanes could not write');
-      // The newer version did not land, and the stored text was not deleted for it: it is in the protected store.
-      expect(w.readableInInternal('A')).toBe(false);
-      expect(w.textIn(w.secureLocal, 'A')).toContain('stored ordinary');
+      // The failed pass deletes nothing; retry judges the new text on its own.
+      expect(w.readableInInternal('A')).toBe(true);
+      expect(w.textIn(w.internal, 'A')).toContain('stored ordinary');
       await sync.pull();
-      expect(w.textIn(w.secureLocal, 'A')).toContain('newer protected');
-      expect(w.readableInInternal('A')).toBe(false);
+      expect(w.textIn(w.internal, 'A')).toContain('newer protected');
+      expect(w.readableInInternal('A')).toBe(true);
     } finally {
       w.close();
     }
@@ -258,7 +186,7 @@ describe('captures are ordered by when they were captured', () => {
     }
   });
 
-  test('a record rewritten in place under the cursor is caught: the file is read again, and a protected rewrite leaves the ordinary lane', async () => {
+  test('a record rewritten in place under the cursor is caught: the file is read again, and a domain rewrite does not change the tier', async () => {
     const w = world();
     try {
       const a = w.capture('2026-10-20.jsonl', { id: 'A', text: 'markerA first', at: '2026-10-20T09:00:00Z', trust: 'internal' });
@@ -271,8 +199,8 @@ describe('captures are ordered by when they were captured', () => {
       writeFileSync(join(w.spoolDir, '2026-10-20.jsonl'), line(a) + line(b) + line({ ...cRecord, trust: 'secure_local', text: 'markerC third, now protected and longer' }));
       const receipt = await sync.pull();
       expect(receipt.counts.spool_cursor_resets).toBeGreaterThan(0);
-      expect(w.readableInInternal('C')).toBe(false);
-      expect(w.textIn(w.secureLocal, 'C')).toContain('now protected');
+      expect(w.readableInInternal('C')).toBe(true);
+      expect(w.textIn(w.secureLocal, 'C')).toBe('');
       // The others were read again under the intake rule and stand as they were.
       expect(w.textIn(w.internal, 'A')).toContain('markerA first');
     } finally {
@@ -371,30 +299,18 @@ function prng(seed: number): () => number {
   };
 }
 
-describe('a seeded run over captures, claims, prunes, recreated files and failures', () => {
+describe('a seeded run over mixed-domain captures, prunes, recreated files and failures', () => {
   for (const seed of [1, 2, 3, 4, 5, 6]) {
-    test(`seed ${seed}: nothing claimed is readable in the ordinary lane, and the newest capture ends in the protected lane`, async () => {
+    test(`seed ${seed}: the newest Personal capture stays in the ordinary store`, async () => {
       const random = prng(seed);
       const w = world();
       const ids = ['A', 'B', 'C'];
       const written: Capture[] = [];
       const files = new Map<Capture, string>();
-      const claimed = new Set<string>();
-      let failMove = false;
-      let failMeta = false;
-      const writeMeta = w.set.ledger.writeMeta.bind(w.set.ledger);
-      w.set.ledger.writeMeta = (key: string, value: string) => {
-        if (failMeta && key.startsWith('telegram:secure_claim:')) throw new Error('injected ledger failure');
-        writeMeta(key, value);
-      };
-      const sync = w.handler({
-        maxItems: 1 + Math.floor(random() * 3),
-        moveClaimed: async (options) => {
-          if (failMove) throw new Error('injected move failure');
-          const { moveTieredItem } = await import('../src/workers/connector-store/tier-move.ts');
-          return moveTieredItem(options);
-        },
-      });
+      let failPass = false;
+      const syncLegs = w.set.syncLegs.bind(w.set);
+      w.set.syncLegs = (...args) => failPass ? Promise.reject(new Error('injected pass failure')) : syncLegs(...args);
+      const sync = w.handler({ maxItems: 1 + Math.floor(random() * 3) });
       try {
         let day = 10;
         for (let step = 0; step < 40; step += 1) {
@@ -407,7 +323,6 @@ describe('a seeded run over captures, claims, prunes, recreated files and failur
             const made = w.capture(file, { id, text: `marker${id} text ${step}`, at, trust });
             written.push(made);
             files.set(made, file);
-            if (trust === 'secure_local') claimed.add(id);
           } else if (roll < 0.65) {
             day += 1;
           } else if (roll < 0.72) {
@@ -415,29 +330,22 @@ describe('a seeded run over captures, claims, prunes, recreated files and failur
             const file = `2026-11-${String(day - 1).padStart(2, '0')}.jsonl`;
             if (existsSync(join(w.spoolDir, file))) unlinkSync(join(w.spoolDir, file));
           } else {
-            failMove = random() < 0.2;
-            failMeta = random() < 0.1;
+            failPass = random() < 0.2;
             await sync.pull().catch(() => undefined);
-            failMove = false;
-            failMeta = false;
+            failPass = false;
           }
-          for (const id of claimed) {
-            // A failed pull may stop between steps; what has run never leaves a claimed item readable once its claim was applied.
-            if (w.set.ledger.readMeta(`telegram:secure_claim:${ACCOUNT}:chat-1:${id}`) === '1') expect(w.readableInInternal(id)).toBe(false);
-          }
+          expect(w.secureLocal.status().counts.items).toBe(0);
         }
-        // Settled, with no failures: every claimed item is out of the ordinary lane, and the protected lane holds at least the
-        // newest capture of it the spool still has.
+        // Each surviving record is judged Personal, regardless of old domain.
         for (let pull = 0; pull < 8; pull += 1) await sync.pull();
-        for (const id of claimed) {
-          expect(w.readableInInternal(id)).toBe(false);
+        for (const id of ids) {
           const newestLeft = written
             .filter((entry) => entry.id === id && existsSync(join(w.spoolDir, files.get(entry)!)))
             .map((entry) => entry.at)
             .sort()
             .at(-1);
           if (newestLeft === undefined) continue;
-          const stored = w.secureLocal.storedItemState(w.identity(id));
+          const stored = w.internal.storedItemState(w.identity(id));
           expect(stored?.version).toBeDefined();
           expect(editTimeOf(stored!.version!) >= newestLeft).toBe(true);
         }

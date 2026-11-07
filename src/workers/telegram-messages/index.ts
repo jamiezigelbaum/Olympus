@@ -44,7 +44,6 @@ export {
   TELEGRAM_PERSONAL_ACCOUNT_SCOPE,
   createTelegramConnectorStores,
   createTelegramConnectorStoreSyncHandler,
-  reconcileTelegramTrustStores,
   sanitizeTelegramCaptureCursor,
   telegramCaptureLiveness,
   type TelegramConnectorStores,
