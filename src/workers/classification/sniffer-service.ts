@@ -620,7 +620,7 @@ export class TierSnifferService {
 
   /**
    * A running or continuing classification pass outranks automatic inbox work,
-   * unless the caller asks it to yield (an Inbox answer overdue or running).
+   * unless the caller asks it to yield (an Inbox answer ready or running).
    * The pass is marked running from its first step (approval, recovery,
    * re-judge, moves), long before it reaches a question where it can yield; on
    * a 1 s tick that kept an overdue answer from ever starting (release check

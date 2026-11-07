@@ -47,12 +47,6 @@ export function localInboxLabel(id: string): string | undefined {
 
 export const LOCAL_PRIVATE_ANSWERS_PATH = '/dashboard/private-answers';
 const TOKEN_TTL_MS = 30 * 60_000;
-/**
- * How long an automatic answer defers to privacy classification. Beyond it the
- * sniffer stops at its next question (overdue()): on a fresh install its
- * backlog outlasts any reasonable wait (release check 2026-10-29: queued past 10 min).
- */
-export const AUTO_ANSWER_DEFER_MS = 60_000;
 const MAX_TOKENS = 400;
 const MAX_QUESTION_CHARS = 2_000;
 const TOKEN_PATTERN = /^[A-Za-z0-9_-]{32,64}$/;
@@ -105,7 +99,7 @@ export interface LocalPrivateAnswersOptions {
   /** A live panel claim suppresses the fallback until that panel's job expires. */
   panelClaimed?: (ref: WaitingQuestionRef) => boolean;
   interactiveBusy?: () => boolean;
-  /** Privacy classification outranks automatic synthesis. */
+  /** Background activity, for the local queue status display only. */
   backgroundBusy?: () => boolean;
   backgroundAnswer?: (input: LocalAnswerRequest) => Promise<LocalAnswerResult>;
   isActive?: (connectionId: string) => boolean;
@@ -127,8 +121,8 @@ export interface LocalPrivateAnswers {
   start(): void;
   tick(): Promise<void>;
   /**
-   * An automatic answer has waited long enough that privacy classification
-   * should stop at its next question and let it run.
+   * An automatic answer is ready or running: privacy classification should
+   * yield at its next model boundary until the answer finishes.
    */
   overdue(): boolean;
   close(): void;
@@ -341,16 +335,17 @@ export function createLocalPrivateAnswers(options: LocalPrivateAnswersOptions): 
     },
     tick() {
       if (pass) return pass;
-      if (closed || running || options.interactiveBusy?.() || options.backgroundBusy?.()) return Promise.resolve();
+      if (closed || running || options.interactiveBusy?.()) return Promise.resolve();
       pass = (async () => {
         const currentStore = store();
         if (!currentStore) return;
         if (options.isActive) currentStore.reconcileConnections?.(options.isActive);
         // Oldest first avoids starving a retry behind a busy connection.
         for (const q of [...currentStore.list({ includeResults: false }).questions].reverse()) {
-          if (closed || running || options.interactiveBusy?.() || options.backgroundBusy?.()) break;
+          if (closed || running || options.interactiveBusy?.()) break;
           if (!autoAnswerable(q)) continue;
           // No allowance per connection (Jamie, 2026-10-29): every question an agent asks is answered.
+          // Ready answers queue immediately; classification yields at its next model boundary.
           autoAnswering = true;
           const result = await answerFor({ question: q.question, selectors: q.selectors, detail: q.detail, signal: abort.signal }, true)
             .finally(() => { autoAnswering = false; });
@@ -375,8 +370,7 @@ export function createLocalPrivateAnswers(options: LocalPrivateAnswersOptions): 
       if (autoAnswering) return true;
       try {
         const questions = store()?.list({ includeResults: false }).questions ?? [];
-        return questions.some(q => autoAnswerable(q)
-          && now() - Date.parse(q.askedAt) >= AUTO_ANSWER_DEFER_MS);
+        return questions.some(autoAnswerable);
       } catch { return false; }
     },
     close() {

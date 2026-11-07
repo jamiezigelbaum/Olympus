@@ -140,12 +140,12 @@ mkdirSync(stagingDir, { recursive: true });
 mkdirSync(artifactDir, { recursive: true });
 
 for (const path of V0_4_PUBLIC_PACKAGE_FILES) {
+  if (path === 'dist/index.js' || path === 'dist/cli.js' || path === 'dist/embedding-drain.js' || path === 'dist/litert-helper.js' || path === 'dist/secret-scan-worker.js' || path === 'dist/model-worker.js' || path === 'dist/control-ui/index.js') continue;
   const source = join(rootDir, path);
   const sourceStat = lstatSync(source);
   if (!sourceStat.isFile() || sourceStat.isSymbolicLink()) {
     throw new Error(`Public package entry must be a regular non-symlink file: ${path}.`);
   }
-  if (path === 'dist/index.js' || path === 'dist/cli.js' || path === 'dist/embedding-drain.js' || path === 'dist/litert-helper.js' || path === 'dist/secret-scan-worker.js' || path === 'dist/control-ui/index.js') continue;
   mkdirSync(dirname(join(stagingDir, path)), { recursive: true });
   copyFileSync(source, join(stagingDir, path));
 }
@@ -153,6 +153,7 @@ await buildPublicRuntime('src/native-plugin.ts', 'dist/index.js');
 await buildPublicRuntime('src/cli.ts', 'dist/cli.js');
 await buildPublicRuntime('scripts/source-embedding-drain.ts', 'dist/embedding-drain.js');
 await buildPublicRuntime('src/workers/source-index/built-in-embedding/litert-helper.ts', 'dist/litert-helper.js', 'bun');
+await buildPublicRuntime('src/workers/source-index/built-in-reasoning/model-worker.ts', 'dist/model-worker.js', 'node');
 await buildPublicRuntime('src/workers/classification/secret-scan-worker.ts', 'dist/secret-scan-worker.js', 'bun');
 await buildPublicRuntime('src/control-ui.ts', 'dist/control-ui/index.js', 'browser');
 run('bun', [
@@ -162,6 +163,7 @@ run('bun', [
   join(stagingDir, 'dist/embedding-drain.js'),
   join(stagingDir, 'dist/litert-helper.js'),
   join(stagingDir, 'dist/secret-scan-worker.js'),
+  join(stagingDir, 'dist/model-worker.js'),
   join(stagingDir, 'dist/control-ui/index.js'),
 ]);
 assertStagedEntrypointsAreSynchronouslyLoadable(stagingDir);

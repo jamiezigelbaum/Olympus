@@ -231,7 +231,8 @@ describe('ChatGPT\'s Private search, for the private answer panel, with the loca
   // The panel reads each match's passages from the store, as the computer's lanes do.
   const panelLanes = (request: unknown): AnalystAnswerLanes => ({
     ...lanes(request),
-    contentProviders: { [CORPUS_ID]: createConnectorStoreContentProvider({ store }) },
+    adapters: { [CORPUS_ID]: createConnectorStoreCorpusAdapter({ store, retrievalMode: 'hybrid', embeddingProvider: provider }) },
+    contentProviders: { [CORPUS_ID]: createConnectorStoreContentProvider({ store, embeddingProvider: provider }) },
   }) as unknown as AnalystAnswerLanes;
 
   test('a first-time wording whose words are in the Private item matches without waiting on the held translation', async () => {
@@ -242,6 +243,18 @@ describe('ChatGPT\'s Private search, for the private answer panel, with the loca
     ]);
     expect(found?.matched).toBeGreaterThan(0);
     expect(JSON.stringify(found?.candidates)).toContain('PRIVMARK-lantern-moth-4417');
+    expect(busy.translationCalls()).toBe(0);
+  });
+
+  test('a semantic-only match and its neighbours finish while analysis holds the local model', async () => {
+    busy.holdSlot();
+    const started = Date.now();
+    const found = await Promise.race([
+      searchPrivateEvidence({ lanes: panelLanes, question: 'When does my tenancy expire?' }),
+      Bun.sleep(1_000).then(() => undefined),
+    ]);
+    expect(found?.matched).toBeGreaterThan(0);
+    expect(Date.now() - started).toBeLessThan(1_000);
     expect(busy.translationCalls()).toBe(0);
   });
 

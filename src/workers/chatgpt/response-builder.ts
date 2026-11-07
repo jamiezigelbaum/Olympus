@@ -336,7 +336,7 @@ function copySource(source: DashboardSource): DashboardSource {
   return out;
 }
 
-const TRANSCRIPTION_STATES = new Set<TranscriptionModelView['state']>(['not_needed', 'not_downloaded', 'interrupted', 'downloading', 'verifying', 'ready', 'failed', 'load_failed']);
+const TRANSCRIPTION_STATES = new Set<TranscriptionModelView['state']>(['not_needed', 'not_downloaded', 'interrupted', 'downloading', 'verifying', 'loading', 'ready', 'failed', 'load_failed']);
 const LOAD_FAILED_REASONS = new Set<ModelLoadFailedReason>(['not_installed', 'stopped_while_starting', 'too_slow', 'port_taken', 'unknown']);
 
 /**

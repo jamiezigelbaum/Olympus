@@ -26,6 +26,7 @@ export const BUNDLED_OUTPUTS = [
   'dist/embedding-drain.js',
   'dist/litert-helper.js',
   'dist/secret-scan-worker.js',
+  'dist/model-worker.js',
   'dist/control-ui/index.js',
 ] as const;
 

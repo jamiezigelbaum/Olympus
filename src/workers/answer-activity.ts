@@ -14,7 +14,7 @@ export function runBackgroundInference<T>(work: () => Promise<T>): Promise<T> {
   return localInferencePriority.run('background', work);
 }
 
-/** Classification dispatches precede automatic inbox inference on a shared model. */
+/** Classification dispatches yield to waiting answers on a shared model. */
 export function runClassificationInference<T>(work: () => Promise<T>): Promise<T> {
   localInferencePriority ??= new AsyncLocalStorage();
   return localInferencePriority.run('maintenance', work);
@@ -190,7 +190,7 @@ export function createLocalModelActivity() {
       }
     };
     const kind = localInferencePriority?.getStore() ?? 'owner';
-    pending.tasks.push({ priority: localInferencePriority?.getStore() === 'background' ? 2 : localInferencePriority?.getStore() === 'maintenance' ? 1 : 0, limit: Math.max(1, Math.floor(limit)), run: async () => {
+    pending.tasks.push({ priority: localInferencePriority?.getStore() === 'background' ? 1 : localInferencePriority?.getStore() === 'maintenance' ? 2 : 0, limit: Math.max(1, Math.floor(limit)), run: async () => {
       try { resolve(await (localInferencePriority ? localInferencePriority.run(kind, () => get(key).run(work)) : get(key).run(work))); } catch (error) { reject(error); }
     } });
     // Gather simultaneous dispatches before choosing owner-first.

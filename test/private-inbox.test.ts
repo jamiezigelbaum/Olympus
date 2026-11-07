@@ -11,8 +11,8 @@ import {
   type WaitingQuestionInput,
   type WaitingQuestionStore,
 } from '../src/core/waiting-private-questions.ts';
-import { AUTO_ANSWER_DEFER_MS, createLocalPrivateAnswers, type LocalPrivateAnswersOptions } from '../src/workers/email-source/local-private-answers.ts';
-import { createLocalModelActivity, runBackgroundInference } from '../src/workers/answer-activity.ts';
+import { createLocalPrivateAnswers, type LocalPrivateAnswersOptions } from '../src/workers/email-source/local-private-answers.ts';
+import { createLocalModelActivity, runBackgroundInference, runClassificationInference } from '../src/workers/answer-activity.ts';
 import type { LocalAnswerResult } from '../src/workers/source-index/local-answer.ts';
 
 const ANSWER = 'SYNTHETIC_INBOX_ANSWER: the example renewal is in May.';
@@ -500,29 +500,24 @@ test('an unavailable open check hides the source but preserves answer, generatio
   expect(opened).toBe(1);
 });
 
-test('classification holds automatic answers visibly queued without spending their budget', async () => {
+test('classification cannot skip a ready automatic answer or spend its retry attempts', async () => {
   const f = fixture(); const ref = record(f.store);
-  let sorting = true; let calls = 0;
-  const api = service(f, { backgroundBusy: () => sorting, answer: async () => { calls++; return result(); } });
+  let calls = 0;
+  const api = service(f, { backgroundBusy: () => true, answer: async () => { calls++; return result(); } });
   await api.tick();
-  expect(api.waiting()?.questions[0]?.state).toBe('queued');
-  expect(calls).toBe(0);
-  sorting = false;
-  await api.tick();
+  expect(calls).toBe(1);
   expect(f.store.get(ref.id)?.result).toBeDefined();
+  expect(f.store.get(ref.id)?.attempts).toBe(0);
 });
 
-test('a question queued behind classification for a minute makes classification yield until its answer is done', async () => {
+test('a ready waiting question makes classification yield until its answer is done', async () => {
   const f = fixture(); const ref = record(f.store);
   const gate = deferred<ReturnType<typeof result>>();
   let sorting = true;
   const api = service(f, { backgroundBusy: () => sorting, answer: async () => gate.promise });
-  await api.tick();
-  expect(api.overdue()).toBe(false);
-  f.advance(AUTO_ANSWER_DEFER_MS);
   // The sniffer reads this between questions and stops its pass.
   expect(api.overdue()).toBe(true);
-  sorting = false;
+  // The background pass is still busy: the answer must queue anyway.
   const pass = api.tick();
   // Still yielding while the answer runs, so classification cannot cut in between its model calls.
   await until(() => api.overdue());
@@ -530,4 +525,29 @@ test('a question queued behind classification for a minute makes classification 
   await pass;
   expect(f.store.get(ref.id)?.result).toBeDefined();
   expect(api.overdue()).toBe(false);
+});
+
+
+test('a waiting automatic answer gets the next shared slot before more classification calls', async () => {
+  const activity = createLocalModelActivity();
+  const held = deferred<void>();
+  const order: string[] = [];
+  const model = activity.track('built_in', { complete: async (request: { prompt: string }) => {
+    order.push(request.prompt);
+    if (request.prompt === 'current classification') await held.promise;
+    return { text: '{}', modelId: 'fixture' };
+  } });
+  const first = runClassificationInference(() => model.complete({ prompt: 'current classification' }));
+  await until(() => order.length === 1);
+  const next = runClassificationInference(() => model.complete({ prompt: 'next classification' }));
+  const f = fixture(); const ref = record(f.store);
+  const api = service(f, { backgroundBusy: () => true, backgroundAnswer: async () => runBackgroundInference(async () => {
+    await model.complete({ prompt: 'waiting answer' }); return result();
+  }) });
+  const answering = api.tick();
+  expect(api.overdue()).toBe(true);
+  held.resolve();
+  await Promise.all([first, next, answering]);
+  expect(order).toEqual(['current classification', 'waiting answer', 'next classification']);
+  expect(f.store.get(ref.id)?.result).toBeDefined();
 });

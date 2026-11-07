@@ -198,10 +198,10 @@ export function audioDecoderPresent(
  * - `downloading` / `verifying`: this process is installing it now;
  * - `failed`: its download failed (with the reason);
  * - `load_failed`: it is downloaded but its server would not start;
- * - `ready`: downloaded (a server that is starting counts as ready).
+ * - `loading`: the server is starting; `ready`: downloaded and ready to use.
  */
 export interface BuiltInTranscriptionDashboardState {
-  state: 'not_needed' | 'not_downloaded' | 'interrupted' | 'downloading' | 'verifying' | 'ready' | 'failed' | 'load_failed';
+  state: 'not_needed' | 'not_downloaded' | 'interrupted' | 'downloading' | 'verifying' | 'loading' | 'ready' | 'failed' | 'load_failed';
   percent?: number;
   bytesDone?: number;
   bytesTotal?: number;
@@ -232,7 +232,7 @@ export function builtInTranscriptionDashboardState(
   if (read.file === 'unreadable') return { state: 'not_downloaded' };
   const status = read.status;
   if (status.state === 'not_started') return { state: 'not_downloaded' };
-  if (status.state === 'ready' || status.state === 'loading') return { state: 'ready' };
+  if (status.state === 'ready' || status.state === 'loading') return { state: status.state };
   if (status.state === 'failed') {
     return status.failure?.reason === 'runtime_load_failed'
       ? { state: 'load_failed', loadFailedReason: modelLoadFailedReason(status.failure.message) }
