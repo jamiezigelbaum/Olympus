@@ -1323,6 +1323,30 @@ export class TierLedger {
     })();
   }
 
+  /**
+   * Forget a queued raise whose item no store holds any more (#913). A raise
+   * hides its source copies and is never abandoned, so once every store has
+   * dropped the item (deleted at the source, or tombstoned) the move could
+   * only fail with "no current copy" on every pass. Nothing is served or
+   * hidden for it, so the row and its copy rows go, exactly as
+   * `retireAbsentPending` does for an unjudged item; if the item comes back
+   * it is routed and judged afresh. The caller has checked that no store
+   * holds an active copy. Refused for another generation, a row no longer
+   * mid-move, or one the owner pinned with a tier override.
+   */
+  retireAbsentMove(identity: TierLedgerIdentity, options: { expectedGeneration: number }): boolean {
+    return this.db.transaction(() => {
+      const existing = this.readRow(identity);
+      if (!existing || existing.state !== 'moving' || existing.generation !== options.expectedGeneration
+        || this.getOverride(identity)?.kind === 'tier') return false;
+      this.deleteCopies(identity);
+      this.writeMeta(`tier-move-verified:${tierLedgerIdentityKey(identity)}`, '');
+      this.db.query(`DELETE FROM tier_items
+        WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?`).run(...idParams(identity));
+      return true;
+    })();
+  }
+
   /** Content-free counts for status surfaces. */
   counts(): { items: number; byState: Record<TierLedgerState, number>; byContentTier: Record<TierKey, number> } {
     const byState: Record<TierLedgerState, number> = { pending: 0, current: 0, moving: 0 };

@@ -21219,6 +21219,18 @@ class TierLedger {
       return true;
     })();
   }
+  retireAbsentMove(identity2, options) {
+    return this.db.transaction(() => {
+      const existing = this.readRow(identity2);
+      if (!existing || existing.state !== "moving" || existing.generation !== options.expectedGeneration || this.getOverride(identity2)?.kind === "tier")
+        return false;
+      this.deleteCopies(identity2);
+      this.writeMeta(`tier-move-verified:${tierLedgerIdentityKey(identity2)}`, "");
+      this.db.query(`DELETE FROM tier_items
+        WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?`).run(...idParams(identity2));
+      return true;
+    })();
+  }
   counts() {
     const byState = { pending: 0, current: 0, moving: 0 };
     const byContentTier = { public: 0, private: 0, secure: 0, secrets: 0 };
@@ -193111,7 +193123,7 @@ class TierSnifferService {
       }
     }
     if (report.moved > 0 || report.failed > 0) {
-      this.options.log?.(`Olympus tier sniffer: ${report.moved} automatic tier move(s), ${report.failed} failed` + `${report.failedBy ? ` (${Object.entries(report.failedBy).map(([why, n]) => `${why} ×${n}`).join(", ")})` : ""}` + `${report.abandoned ? `, ${report.abandoned} stale move(s) given up (back where they were)` : ""}` + `${report.staleRaises ? `, ${report.staleRaises} stale raise(s) kept hidden and queued` : ""}.`);
+      this.options.log?.(`Olympus tier sniffer: ${report.moved} automatic tier move(s), ${report.failed} failed` + `${report.failedBy ? ` (${Object.entries(report.failedBy).map(([why, n]) => `${why} ×${n}`).join(", ")})` : ""}` + `${report.abandoned ? `, ${report.abandoned} stale move(s) given up (back where they were)` : ""}` + `${report.staleRaises ? `, ${report.staleRaises} stale raise(s) kept hidden and queued` : ""}` + `${report.retiredAbsent ? `, ${report.retiredAbsent} stale raise(s) of items no store holds forgotten` : ""}.`);
     }
     return report;
   }
@@ -193121,11 +193133,28 @@ class TierSnifferService {
       report.abandoned = (report.abandoned ?? 0) + 1;
       return true;
     } catch (error2) {
-      if (error2 instanceof TierLedgerRaiseAbandonRefusedError)
+      if (error2 instanceof TierLedgerRaiseAbandonRefusedError) {
+        if (itemAbsentFromEveryStore(set2, recordIdentity2(record8))) {
+          try {
+            if (set2.ledger.retireAbsentMove(recordIdentity2(record8), { expectedGeneration: record8.generation })) {
+              report.retiredAbsent = (report.retiredAbsent ?? 0) + 1;
+              return true;
+            }
+          } catch {}
+        }
         report.staleRaises = (report.staleRaises ?? 0) + 1;
+      }
       return false;
     }
   }
+}
+function itemAbsentFromEveryStore(set2, identity2) {
+  for (const copy of set2.ledger.copies(identity2)) {
+    if (!set2.legSpec(copy.trustDomain))
+      return false;
+  }
+  const stores = set2.openStores();
+  return stores.every((store) => typeof store.exportItemCopy === "function" && store.exportItemCopy(identity2) === undefined);
 }
 function recordIdentity2(record8) {
   return {
