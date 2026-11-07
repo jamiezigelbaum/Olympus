@@ -122,6 +122,23 @@ describe('web clients: capture and Inbox regressions (#987)', () => {
   });
 });
 
+describe('web clients: the owner-bridge agent', () => {
+  test('a Linux run puts this run\'s agent at ~/rc/agent.js before starting the browser', async () => {
+    const order: string[] = [];
+    const machine: Machine = { os: 'linux', handle: 'test', label: 'test', driver: 'fake',
+      upgrade: async () => {}, get: async () => {},
+      put: async (from: string, to: string) => { order.push(`put ${from} ${to}`); },
+      tunnel: async () => { throw new Error('no tunnel in this test'); },
+      exec: async (script: string) => { order.push(script.includes('mkdir -p "$HOME/rc"') ? 'mkdir' : script.includes('remote-debugging-port') ? 'browser' : 'other'); return { code: 0, stdout: '', stderr: '', timedOut: false, ms: 0 }; } };
+    const screensDir = mkdtempSync(join(tmpdir(), 'web-clients-agent-'));
+    try {
+      const result = await runWebClients(machine, { clients: ['claude'], questions: [], os: 'linux', screensDir, bridgeAgent: '/run/bundle/agent.js' });
+      expect(order).toEqual(['mkdir', 'put /run/bundle/agent.js ~/rc/agent.js', 'browser']);
+      expect(result.checks.find((c) => c.id === 'web.browser')?.detail).toContain('no tunnel in this test');
+    } finally { rmSync(screensDir, { recursive: true, force: true }); }
+  });
+});
+
 describe('web clients: what a turn is held to', () => {
   test('a cited answer with every fact passes; the turn starts after the question', () => {
     const page = `New chat\n${pickup.prompt}\nUsed Olympus\nMaya picks them up at 12:30 and Nina brings Leo home. [Conferences: early dismissal]`;

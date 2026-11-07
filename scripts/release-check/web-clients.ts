@@ -653,6 +653,8 @@ export interface WebClientsOptions {
   newChatUrls?: Partial<Record<WebClientId, string>>;
   /** The least time between questions, so each one's connection use shows (CONNECTION_USE_GAP_MS when left out). */
   useGapMs?: number;
+  /** Linux: the machine-agent bundle (run.ts bundleAgent) put at ~/rc/agent.js, which the owner-socket forward runs. */
+  bridgeAgent?: string;
 }
 
 const shellQuote = (value: string): string => `'${value.replace(/'/g, `'\\''`)}'`;
@@ -688,6 +690,13 @@ export async function runWebClients(machine: Machine, options: WebClientsOptions
     return { checks, screens };
   };
   if (!machine.tunnel) return stop('the driver has no tunnel verb, so the browser on the machine cannot be reached');
+  if (options.os === 'linux' && options.bridgeAgent) {
+    // The forward runs this run's agent, never whatever an earlier release check left on the machine.
+    try {
+      await machine.exec('mkdir -p "$HOME/rc"', { timeoutMs: 20_000 });
+      await machine.put(options.bridgeAgent, '~/rc/agent.js');
+    } catch (error) { return stop(`the owner-bridge agent could not be put on the machine: ${error instanceof Error ? error.message : String(error)}`); }
+  }
   const launched = await machine.exec(startBrowserScript(options.os, port), { timeoutMs: 90_000 });
   if (launched.code !== 0) return stop((launched.stdout + launched.stderr).trim().slice(-300) || `the browser did not start (exit ${launched.code})`);
   let tunnel;

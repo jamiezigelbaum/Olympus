@@ -75,6 +75,8 @@ export interface CanaryOptions {
   accounts?: CanaryAccounts;
   /** Leave out the update and the desktop checks: only the accounts and web clients. */
   accountsOnly?: boolean;
+  /** Linux web clients: the machine-agent bundle for the owner-socket forward (web-clients.ts). */
+  bridgeAgent?: string;
   /** Poll timing; tests shorten it. */
   pollMs?: number;
   windowTimeoutMs?: number;
@@ -193,7 +195,7 @@ export async function runCanary(machine: Machine, options: CanaryOptions): Promi
     }
   }
   if (accounts.clients.length > 0) {
-    const web = await runWebClients(machine, { clients: accounts.clients, questions: accounts.questions, os: options.os, screensDir: options.screensDir });
+    const web = await runWebClients(machine, { clients: accounts.clients, questions: accounts.questions, os: options.os, screensDir: options.screensDir, ...(options.bridgeAgent ? { bridgeAgent: options.bridgeAgent } : {}) });
     checks.push(...web.checks);
     screens.push(...web.screens);
   }
@@ -482,6 +484,7 @@ if (import.meta.main) {
     ...(accounts ? { accounts } : {}),
     accountsOnly: argv.includes('--accounts-only'),
     screensDir: join(runDir, 'screens'),
+    ...(os === 'linux' && accounts && accounts.clients.length > 0 ? { bridgeAgent: await bundleAgent(runDir) } : {}),
   });
   const counts: Record<CheckStatus, number> = { pass: 0, fail: 0, warn: 0, skip: 0 };
   for (const check of checks) counts[check.status] += 1;
