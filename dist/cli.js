@@ -161291,7 +161291,7 @@ function modelStateWord(card) {
     return "Ready";
   return "Not configured";
 }
-function renderModelSetupBlocker(view3) {
+function renderModelSetupBlocker(view3, options = {}) {
   if (!view3 || view3.ready || view3.privacy_choice_pending)
     return "";
   if (privateModelWords(view3))
@@ -161322,7 +161322,7 @@ function renderModelSetupBlocker(view3) {
     return blockerBanner({ sentence: card.detail });
   return blockerBanner({
     sentence: `Add your ${card.label} API key to start connecting sources.`,
-    controlHtml: `<button type="button" class="btn primary" data-focus-target="#${card.id === "venice" ? "model-venice-start" : modelKeyFieldId(card)}">Add ${escapeHtml2(card.label)} key</button>`
+    controlHtml: options.keysHref ? `<a class="btn primary" href="${escapeHtml2(`${options.keysHref}#${card.id === "venice" ? "venice-setup" : modelKeyFieldId(card)}`)}">Add ${escapeHtml2(card.label)} key</a>` : `<button type="button" class="btn primary" data-focus-target="#${card.id === "venice" ? "model-venice-start" : modelKeyFieldId(card)}">Add ${escapeHtml2(card.label)} key</button>`
   });
 }
 function modelKeyFieldId(card) {
@@ -161430,7 +161430,7 @@ function renderDashboardConnectPage(view3, options) {
   const sources = view3.sources.filter((source) => source.connection.action.kind !== "none" || source.source_id === "telegram.messages" || source.source_id === "whatsapp.personal.messages");
   const body = [
     dashboardControlGate({ connected: unlocked(options) }),
-    renderModelSetupBlocker(view3.model_setup),
+    renderModelSetupBlocker(view3.model_setup, { keysHref: dashboardLocalPageHref("keys", readToken2(options?.basePath)) }),
     sources.length === 0 ? `<p class="pnote">${escapeHtml2(W.connect.empty)}</p>` : `<div class="srows" id="sources">${sources.map((source) => renderSetupRow(source, view3, blocked, options?.basePath ?? "/dashboard", options?.messagingLocalSession === true) + sourceSupportBlock(source)).join(`
 `)}</div>`
   ].filter((block) => block !== "").join(`
@@ -161672,6 +161672,7 @@ var init_local = __esm(() => {
   init_components();
   init_vocabulary();
   init_private_answers();
+  init_host_page();
   init_model_setup2();
   init_vocabulary();
   CONNECTOR_SHEET_INTRO = "Copy this prompt, replace the source name, and paste it into your coding " + "agent. The connector playbook it names lives in an Olympus source checkout, not in the installed " + "package — CONTRIBUTING.md says how to get one. A finished connector appears in Olympus like any " + "built-in.";

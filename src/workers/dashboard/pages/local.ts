@@ -48,6 +48,7 @@ import {
 } from '../components.ts';
 import { DASHBOARD_PRIVACY_SETTINGS_COPY as S, DASHBOARD_PRIVATE_ANSWERS_COPY } from '../vocabulary.ts';
 import { dashboardPrivacyTabs, PRIVACY_TABS_CSS } from './private-answers.ts';
+import { dashboardLocalPageHref } from '../host-page.ts';
 import { renderModelSetup, renderModelSetupBlocker, dashboardModelsBlockedReason } from '../model-setup.ts';
 import type { DashboardOutsideHelpStatus } from '../outside-help.ts';
 import { AGENT_CONNECT_CSS, LOCAL_PAGE_CSS, MODEL_SETUP_CSS } from '../static-styles.ts';
@@ -198,7 +199,7 @@ export function renderDashboardConnectPage(view: SourceDashboardViewModel, optio
   const sources = view.sources.filter((source) => source.connection.action.kind !== 'none' || source.source_id === 'telegram.messages' || source.source_id === 'whatsapp.personal.messages');
   const body = [
     dashboardControlGate({ connected: unlocked(options) }),
-    renderModelSetupBlocker(view.model_setup),
+    renderModelSetupBlocker(view.model_setup, { keysHref: dashboardLocalPageHref('keys', readToken(options?.basePath)) }),
     sources.length === 0
       ? `<p class="pnote">${escapeHtml(W.connect.empty)}</p>`
       : `<div class="srows" id="sources">${sources.map((source) => renderSetupRow(source, view, blocked, options?.basePath ?? '/dashboard', options?.messagingLocalSession === true) + sourceSupportBlock(source)).join('\n')}</div>`,

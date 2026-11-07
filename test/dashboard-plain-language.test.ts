@@ -115,6 +115,14 @@ describe('the Keys blocker', () => {
     expect(template.content.querySelectorAll('form[data-model-check]').length).toBe(1);
   });
 
+  test('on Connect a source, a missing key links to its field on Privacy rules', () => {
+    const html = setup([{ id: 'venice', label: 'Venice', required: true, state: 'not_configured', detail: 'Venice detail.' }]);
+    expect(html).toContain('<a class="btn primary" href="/dashboard?keys#venice-setup">Add Venice key</a>');
+    expect(html).not.toContain('data-focus-target="#model-venice-start"');
+    const rules = setup([{ id: 'venice', label: 'Venice', required: true, state: 'not_configured', detail: 'Venice detail.' }], 'keys');
+    expect(rules).toContain('id="venice-setup"');
+  });
+
   test('blocked source controls are disabled, say why, and submit nothing', () => {
     const html = setup(local('applying'));
     expect(html).toContain('disabled aria-disabled="true">Connect</button><span class="hint">Locked until models are ready</span>');
