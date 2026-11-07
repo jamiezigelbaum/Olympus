@@ -127,3 +127,18 @@ test('standalone keeps an explicit Personal provider and refuses a pending priva
   config.privacyChoicePending = true;
   expect(resolve).toThrow('first-run privacy policy');
 });
+
+test('standalone keeps a mixed Personal pool\'s local member when the request selects local', () => {
+  // local-first's Personal route is [cloud-openclaw-infer, local-source-answer].
+  const config = loadSovereigntyPreset('local-first');
+  config.routes.secure_local = { pool: { members: ['venice-private'] } };
+  const analysts = new Map<string, SovereigntyAnalystRouteStep>([
+    ['local-source-answer', routeStep('local-source-answer', 'delphi')],
+    ['venice-private', routeStep('venice-private', 'venice')],
+    ['cloud-openclaw-infer', { profile: { id: 'cloud-openclaw-infer', profile: { provider: 'openclaw-infer', trust: 'standard_cloud' } }, backend: 'cloud', analyst: STUB_ANALYST }],
+  ]);
+  const route = (requestedProvider: 'default' | 'local') => workerSovereigntyAnalystRoutePlan({ engine: createSovereigntyEngine(config), env: { OLYMPUS_ENGINE_HOST: '1' }, trustDomain: 'internal', requestedProvider, analysts, defaultLocal: STUB_ANALYST });
+  expect(route('local').steps.map(step => step.profile.id)).toEqual(['local-source-answer']);
+  // A default request follows the owner's Private answer choice.
+  expect(route('default').steps.map(step => step.profile.id)).toEqual(['venice-private']);
+});

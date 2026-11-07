@@ -218819,6 +218819,21 @@ function workerSovereigntyAnalystRoutePlan(input) {
   const { engine, trustDomain, requestedProvider } = input;
   const configured = engine.resolveAnalystPool({ trustDomain });
   if (trustDomain !== "secure_local" && isStandaloneEngineProcess(input.env) && configured.members.some((member) => member.profile.provider === "openclaw-infer")) {
+    let requested;
+    if (requestedProvider !== "default") {
+      try {
+        requested = engine.resolveAnalystPool({ trustDomain, requestedProvider });
+      } catch {
+        requested = undefined;
+      }
+    }
+    const keep = (profile2) => profile2.profile.provider !== "openclaw-infer" && input.analysts.has(profile2.id);
+    if (requested && requested.members.some(keep)) {
+      return sovereigntyAnalystRoutePlan({ trustDomain, analysts: input.analysts, pool: {
+        members: requested.members.filter(keep),
+        ...requested.explicitOrder ? { explicitOrder: requested.explicitOrder.filter(keep) } : {}
+      } });
+    }
     if (engine.config.routes.secure_local?.mode !== "disabled") {
       return sovereigntyAnalystRoutePlan({
         trustDomain,

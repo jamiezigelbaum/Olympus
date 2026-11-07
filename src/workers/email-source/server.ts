@@ -1734,6 +1734,21 @@ export function workerSovereigntyAnalystRoutePlan(input: {
   const configured = engine.resolveAnalystPool({ trustDomain });
   if (trustDomain !== 'secure_local' && isStandaloneEngineProcess(input.env)
     && configured.members.some(member => member.profile.provider === 'openclaw-infer')) {
+    // A provider-specific request keeps the eligible, constructible
+    // non-OpenClaw members of the configured Personal route; only the
+    // unavailable OpenClaw lane is substituted. A default request follows the
+    // owner's Private answer choice, keeping its fallback order.
+    let requested: ReturnType<SovereigntyEngine['resolveAnalystPool']> | undefined;
+    if (requestedProvider !== 'default') {
+      try { requested = engine.resolveAnalystPool({ trustDomain, requestedProvider }); } catch { requested = undefined; }
+    }
+    const keep = (profile: SovereigntyResolvedProfile) => profile.profile.provider !== 'openclaw-infer' && input.analysts.has(profile.id);
+    if (requested && requested.members.some(keep)) {
+      return sovereigntyAnalystRoutePlan({ trustDomain, analysts: input.analysts, pool: {
+        members: requested.members.filter(keep),
+        ...(requested.explicitOrder ? { explicitOrder: requested.explicitOrder.filter(keep) } : {}),
+      } });
+    }
     if (engine.config.routes.secure_local?.mode !== 'disabled') {
       return sovereigntyAnalystRoutePlan({
         trustDomain,
