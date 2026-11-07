@@ -20283,6 +20283,16 @@ var init_secret_locations = __esm(() => {
   ]);
 });
 
+// src/core/sqlite-rows.ts
+function* iterateRows(db, sql, ...params) {
+  const statement = db.prepare(sql);
+  try {
+    yield* statement.iterate(...params);
+  } finally {
+    statement.finalize();
+  }
+}
+
 // src/workers/classification/sniffer-store.ts
 import { Database as Database2 } from "bun:sqlite";
 import { createHash as createHash12 } from "node:crypto";
@@ -20304,8 +20314,9 @@ class TierSnifferStore {
   db;
   now;
   readOnly;
-  trainingReads = new Map;
+  trainingReads;
   constructor(options) {
+    this.trainingReads = new Map;
     this.dbPath = options.dbPath;
     this.now = options.now ?? (() => new Date);
     if (options.readOnly === true) {
@@ -20393,8 +20404,8 @@ class TierSnifferStore {
       let labels = this.trainingReads.get(modelId);
       if (!labels) {
         labels = new Map;
-        const rows = this.db.query(`SELECT model_subject, tier, decided_at FROM sniffer_verdicts
-          WHERE model_id = ? AND fail_safe = 0 AND model_subject IS NOT NULL`).iterate(modelId);
+        const rows = iterateRows(this.db, `SELECT model_subject, tier, decided_at FROM sniffer_verdicts
+          WHERE model_id = ? AND fail_safe = 0 AND model_subject IS NOT NULL`, modelId);
         for (const row2 of rows) {
           const prior = labels.get(row2.model_subject);
           if (!prior || row2.decided_at > prior.decidedAt)
@@ -23834,16 +23845,6 @@ var init_tier_ledger = __esm(() => {
     secure_local: 2
   };
 });
-
-// src/core/sqlite-rows.ts
-function* iterateRows(db, sql, ...params) {
-  const statement = db.prepare(sql);
-  try {
-    yield* statement.iterate(...params);
-  } finally {
-    statement.finalize();
-  }
-}
 
 // src/core/sqlite-forget.ts
 function rowsKeyedBy(keys) {
@@ -40680,8 +40681,9 @@ var init_local_index = __esm(() => {
 
 // src/core/source-storage.ts
 import { Database as Database6 } from "bun:sqlite";
-import { existsSync as existsSync28, lstatSync as lstatSync17, readdirSync as readdirSync5, rmSync as rmSync9, rmdirSync as rmdirSync2, statSync as statSync15 } from "node:fs";
-import { basename as basename8, join as join34, resolve as resolve12 } from "node:path";
+import { existsSync as existsSync28, lstatSync as lstatSync17, mkdtempSync as mkdtempSync2, readdirSync as readdirSync5, rmSync as rmSync9, rmdirSync as rmdirSync2, statSync as statSync15 } from "node:fs";
+import { basename as basename8, join as join34, resolve as resolve12, sep as sep9 } from "node:path";
+import { tmpdir as tmpdir3 } from "node:os";
 function enableSourceRegistryAdoption() {
   adoptionEnabled = true;
 }
@@ -40710,6 +40712,45 @@ function openSecretLocations(account, options, env = process.env) {
 function openTierSniffer(account, options, env = process.env) {
   placeSidecar(env, account, options.dbPath, options.readOnly);
   return new TierSnifferStore(options);
+}
+function createStorageSnapshotReaders() {
+  const directory = mkdtempSync2(join34(tmpdir3(), "olympus-storage-snapshot-"));
+  const snapshotPath = (path) => {
+    const target = resolve12(directory, path);
+    if (!target.startsWith(`${directory}${sep9}`))
+      throw new Error("Not a storage snapshot");
+    let current2 = directory;
+    for (const part of target.slice(directory.length + 1).split(sep9)) {
+      current2 = join34(current2, part);
+      if (lstatSync17(current2).isSymbolicLink())
+        throw new Error("Not a storage snapshot");
+    }
+    if (!lstatSync17(target).isFile() || lstatSync17(target).nlink !== 1)
+      throw new Error("Not a storage snapshot");
+    return target;
+  };
+  return {
+    directory,
+    database(path) {
+      const db = new Database6(snapshotPath(path), { readonly: true, create: false });
+      try {
+        db.exec("PRAGMA busy_timeout = 10000; PRAGMA query_only = ON;");
+        return db;
+      } catch (error) {
+        db.close();
+        throw error;
+      }
+    },
+    ledger: (path) => new TierLedger({ dbPath: snapshotPath(path), readOnly: true }),
+    sniffer: (path) => new TierSnifferStore({ dbPath: snapshotPath(path), readOnly: true }),
+    store: (path, corpusId) => new LocalConnectorStore({
+      dbPath: snapshotPath(path),
+      corpusId,
+      family: "file",
+      trustDomain: "secure_local",
+      readOnly: true
+    })
+  };
 }
 function recordAccountPlacement(account, path, env = process.env) {
   if (!adoptionEnabled)
@@ -53945,7 +53986,7 @@ var init_continuation_cache = __esm(() => {
 
 // src/workers/archive-import/forget.ts
 import { existsSync as existsSync43, realpathSync as realpathSync11, rmSync as rmSync13 } from "node:fs";
-import { join as join48, relative as relative7, sep as sep9 } from "node:path";
+import { join as join48, relative as relative7, sep as sep10 } from "node:path";
 function forgetSourceArchiveImports(env, sourceIds, options = {}) {
   const path = defaultArchiveImportStatePath(env);
   if (!existsSync43(path))
@@ -53983,9 +54024,9 @@ function stagingCopiesOf(statePath, records) {
   }
   for (const record of records) {
     const inside = relative7(root, record.root_path);
-    if (inside === "" || inside.startsWith("..") || inside.startsWith(sep9))
+    if (inside === "" || inside.startsWith("..") || inside.startsWith(sep10))
       continue;
-    copies.add(join48(root, inside.split(sep9)[0]));
+    copies.add(join48(root, inside.split(sep10)[0]));
   }
   return copies;
 }
@@ -76117,7 +76158,7 @@ var init_command_runner = __esm(() => {
 
 // src/workers/file-extraction/extractors/pdf-render.ts
 import { mkdtemp, readFile as readFile3, readdir, rm as rm2, writeFile } from "node:fs/promises";
-import { tmpdir as tmpdir3 } from "node:os";
+import { tmpdir as tmpdir4 } from "node:os";
 import { join as join60 } from "node:path";
 function parsePdfInfoPageCount(stdout) {
   const match = /^Pages:\s*(\d+)\s*$/im.exec(stdout);
@@ -76139,7 +76180,7 @@ async function renderPdfPages(input) {
   const infoCommandRunner = input.infoCommandRunner ?? renderCommandRunner;
   const timeoutMs = input.timeoutMs ?? DEFAULT_PDF_RENDER_TIMEOUT_MS;
   const outputFormat = input.outputFormat ?? "jpeg";
-  const tempDir = await mkdtemp(join60(tmpdir3(), TEMP_DIR_PREFIX));
+  const tempDir = await mkdtemp(join60(tmpdir4(), TEMP_DIR_PREFIX));
   try {
     const inputPath = join60(tempDir, "input.pdf");
     const outputPrefix = join60(tempDir, "page");
@@ -76207,7 +76248,7 @@ async function renderPdfPages(input) {
   }
 }
 async function renderSinglePdfPageForVision(input) {
-  const tempDir = await mkdtemp(join60(tmpdir3(), TEMP_DIR_PREFIX));
+  const tempDir = await mkdtemp(join60(tmpdir4(), TEMP_DIR_PREFIX));
   try {
     const inputPath = join60(tempDir, "input.pdf");
     const outputPrefix = join60(tempDir, "page");
@@ -76242,7 +76283,7 @@ async function renderSinglePdfPageForVision(input) {
   }
 }
 async function renderPdfFirstPageForVision(input) {
-  const tempDir = await mkdtemp(join60(tmpdir3(), TEMP_DIR_PREFIX));
+  const tempDir = await mkdtemp(join60(tmpdir4(), TEMP_DIR_PREFIX));
   try {
     const inputPath = join60(tempDir, "input.pdf");
     const outputPrefix = join60(tempDir, "page");
@@ -77943,7 +77984,7 @@ var init_record_builder = __esm(() => {
 
 // src/workers/telegram-messages/media-child.ts
 import { lstatSync as lstatSync28, readdirSync as readdirSync9, readFileSync as readFileSync43, rmSync as rmSync15, statfsSync } from "node:fs";
-import { join as join63, resolve as resolve15, sep as sep10 } from "node:path";
+import { join as join63, resolve as resolve15, sep as sep11 } from "node:path";
 function telegramMediaChild(parent, media, deferredBytes, options = {}) {
   const providerItemId = childProviderItemId(parent.identity.providerItemId, TELEGRAM_CHILD_KEY);
   const version = options.version ?? parent.identity.sourceVersion;
@@ -77989,7 +78030,7 @@ function telegramLiveMediaPath(spoolDir, locator) {
     return;
   const root = resolve15(spoolDir, "media");
   const path = resolve15(spoolDir, relative8);
-  if (!path.startsWith(`${root}${sep10}`))
+  if (!path.startsWith(`${root}${sep11}`))
     return;
   try {
     const stat3 = lstatSync28(path);
@@ -80394,7 +80435,7 @@ function connectorStoreExtractionCandidateReader(store, filters) {
 // src/workers/file-extraction/spool.ts
 import { createHash as createHash57 } from "node:crypto";
 import { chmodSync as chmodSync20, existsSync as existsSync52, mkdirSync as mkdirSync34, readdirSync as readdirSync11, rmSync as rmSync17, rmdirSync as rmdirSync5, statSync as statSync23 } from "node:fs";
-import { dirname as dirname57, isAbsolute as isAbsolute22, join as join65, relative as relative8, sep as sep11 } from "node:path";
+import { dirname as dirname57, isAbsolute as isAbsolute22, join as join65, relative as relative8, sep as sep12 } from "node:path";
 function extractionSpoolOwnerDir(root, owner) {
   return join65(root, corpusFolder(owner.corpusId), accountFolder2(owner.accountScope));
 }
@@ -80578,7 +80619,7 @@ function makeExtractionSpoolOwnerDir(ownerDir, anchor) {
   if (!anchored)
     throw new Error("The extraction spool folder is gone.");
   let path = anchor;
-  for (const level of levels.split(sep11)) {
+  for (const level of levels.split(sep12)) {
     path = join65(path, level);
     try {
       mkdirSync34(path, { mode: 448 });
@@ -80595,7 +80636,7 @@ var init_spool = __esm(() => {
 
 // src/workers/dropbox-files/extraction-source.ts
 import { readFile as readFile4, realpath, stat as stat3 } from "node:fs/promises";
-import { relative as relative9, resolve as resolve16, sep as sep12 } from "node:path";
+import { relative as relative9, resolve as resolve16, sep as sep13 } from "node:path";
 
 class DropboxExtractionSource {
   id;
@@ -80739,7 +80780,7 @@ class DropboxExtractionSource {
       return;
     const candidatePath = resolve16(rootRealPath, relativePath);
     const relativeToRoot = relative9(rootRealPath, candidatePath);
-    if (relativeToRoot.startsWith("..") || relativeToRoot === "" || relativeToRoot.includes(`..${sep12}`)) {
+    if (relativeToRoot.startsWith("..") || relativeToRoot === "" || relativeToRoot.includes(`..${sep13}`)) {
       return;
     }
     return candidatePath;
@@ -81083,7 +81124,7 @@ var init_drive_extraction_source = __esm(() => {
 
 // src/workers/file-extraction/connector-source.ts
 import { rmSync as rmSync18, writeFileSync as writeFileSync11 } from "node:fs";
-import { basename as basename10, join as join66, resolve as resolve17, sep as sep13 } from "node:path";
+import { basename as basename10, join as join66, resolve as resolve17, sep as sep14 } from "node:path";
 function isBoundedFetchConnector(connector) {
   return typeof connector.fetchItemWithin === "function";
 }
@@ -81334,7 +81375,7 @@ function fileHandOver(path, spooled, spoolDir, tidy) {
     async dispose() {
       if (!spooled)
         return;
-      const root = resolve17(spoolDir) + sep13;
+      const root = resolve17(spoolDir) + sep14;
       const target = resolve17(path);
       if (!target.startsWith(root) || basename10(target) === "")
         return;
@@ -81480,7 +81521,7 @@ var init_child_media = __esm(() => {
 // src/workers/whatsapp/extraction-source.ts
 import { readFile as readFile5, realpath as realpath2, stat as stat4 } from "node:fs/promises";
 import { closeSync as closeSync21, constants as constants10, openSync as openSync21, readSync as readSync8, rmSync as rmSync20 } from "node:fs";
-import { basename as basename11, join as join67, relative as relative11, resolve as resolve19, sep as sep14 } from "node:path";
+import { basename as basename11, join as join67, relative as relative11, resolve as resolve19, sep as sep15 } from "node:path";
 
 class WhatsAppExtractionSource {
   id;
@@ -81645,7 +81686,7 @@ class WhatsAppExtractionSource {
         continue;
       }
       const fromRoot = relative11(root, path);
-      if (fromRoot === "" || !fromRoot.startsWith(`..${sep14}`) && fromRoot !== "..")
+      if (fromRoot === "" || !fromRoot.startsWith(`..${sep15}`) && fromRoot !== "..")
         return true;
     }
     return false;
@@ -87133,7 +87174,7 @@ var init_input_limits = __esm(() => {
 
 // src/workers/file-extraction/extractors/image-prepare.ts
 import { mkdtemp as mkdtemp2, rm as rm3, writeFile as writeFile2 } from "node:fs/promises";
-import { tmpdir as tmpdir4 } from "node:os";
+import { tmpdir as tmpdir5 } from "node:os";
 import { join as join74 } from "node:path";
 function imageDecoderUnavailableWarning(format) {
   return `image_decoder_unavailable_${format}`;
@@ -87173,7 +87214,7 @@ function createImagePreparation(options) {
     if (declared && Math.min(declared.width, declared.height) < IMAGE_PREPARE_MIN_PIXEL_EDGE) {
       return { kind: "too_small" };
     }
-    const tempDir = await mkdtemp2(join74(tmpdir4(), TEMP_DIR_PREFIX2));
+    const tempDir = await mkdtemp2(join74(tmpdir5(), TEMP_DIR_PREFIX2));
     try {
       const inputPath = join74(tempDir, `input${imageExtensionForMimeType(input.mimeType)}`);
       await writeFile2(inputPath, input.bytes, { mode: 384 });
@@ -87242,7 +87283,7 @@ var init_image_prepare = __esm(() => {
 
 // src/workers/file-extraction/extractors/text.ts
 import { mkdtemp as mkdtemp3, rm as rm4, writeFile as writeFile3 } from "node:fs/promises";
-import { tmpdir as tmpdir5 } from "node:os";
+import { tmpdir as tmpdir6 } from "node:os";
 import { dirname as dirname61, join as join75 } from "node:path";
 function createTextExtractor(options = {}) {
   const kind = options.kind ?? TEXT_EXTRACTOR_KIND;
@@ -87602,7 +87643,7 @@ function pdfTextLooksUndecoded(text3) {
   return total > 0 && unreadable / total > 0.1;
 }
 async function extractPdfTextWithCommand(input) {
-  const tempDir = await mkdtemp3(join75(tmpdir5(), TEMP_DIR_PREFIX3));
+  const tempDir = await mkdtemp3(join75(tmpdir6(), TEMP_DIR_PREFIX3));
   try {
     const inputPath = join75(tempDir, "input.pdf");
     await writeFile3(inputPath, input.context.bytes);
@@ -88190,7 +88231,7 @@ var init_ocr_probe_fixture = __esm(() => {
 
 // src/workers/file-extraction/extractors/ocr-capability.ts
 import { mkdtemp as mkdtemp4, readFile as readFile6, readdir as readdir2, rm as rm5, writeFile as writeFile4 } from "node:fs/promises";
-import { tmpdir as tmpdir6 } from "node:os";
+import { tmpdir as tmpdir7 } from "node:os";
 import { join as join77 } from "node:path";
 function ocrmypdfArguments(input) {
   return [
@@ -88342,7 +88383,7 @@ async function probeOcrCapability(options = {}) {
   let ocrmypdf = "failed";
   let directory;
   try {
-    directory = await mkdtemp4(join77(tmpdir6(), PROBE_TEMP_PREFIX));
+    directory = await mkdtemp4(join77(tmpdir7(), PROBE_TEMP_PREFIX));
     const imagePath = join77(directory, "probe.jpg");
     const pdfPath = join77(directory, "probe.pdf");
     await writeFile4(imagePath, ocrProbeJpeg());
@@ -88434,7 +88475,7 @@ var init_ocr_capability = __esm(() => {
 
 // src/workers/file-extraction/extractors/pdf-raster-ocr.ts
 import { mkdtemp as mkdtemp5, readdir as readdir3, rm as rm6 } from "node:fs/promises";
-import { tmpdir as tmpdir7 } from "node:os";
+import { tmpdir as tmpdir8 } from "node:os";
 import { join as join78 } from "node:path";
 function parseSizePoints(text3) {
   const [first, second] = text3.split("x");
@@ -88519,7 +88560,7 @@ async function rasterPdfOcr(input, options) {
   const now = options.now ?? Date.now;
   const deadline = now() + (options.fileDeadlineMs ?? DEFAULT_APPLE_VISION_FILE_DEADLINE_MS);
   const info = await readPdfInfo({ inputPath: input.inputPath, maxPages, options });
-  const tempDir = await mkdtemp5(join78(tmpdir7(), RASTER_TEMP_PREFIX));
+  const tempDir = await mkdtemp5(join78(tmpdir8(), RASTER_TEMP_PREFIX));
   const pages = [];
   let attempted = 0;
   let failed = 0;
@@ -88710,7 +88751,7 @@ var init_pdf_raster_ocr = __esm(() => {
 
 // src/workers/file-extraction/extractors/ocr.ts
 import { mkdtemp as mkdtemp6, readFile as readFile7, rm as rm7, writeFile as writeFile5 } from "node:fs/promises";
-import { tmpdir as tmpdir8 } from "node:os";
+import { tmpdir as tmpdir9 } from "node:os";
 import { join as join79 } from "node:path";
 function pdfOcrTimeoutMs(baseMs, sizeBytes) {
   const steps = Math.max(1, Math.ceil((Number.isFinite(sizeBytes) ? Math.max(0, sizeBytes) : 0) / OCR_PDF_TIMEOUT_BYTES_PER_STEP));
@@ -88968,7 +89009,7 @@ async function visionImage(input, vision) {
   }, vision));
 }
 async function withTempInput(bytes, extension, read) {
-  const tempDir = await mkdtemp6(join79(tmpdir8(), TEMP_DIR_PREFIX4));
+  const tempDir = await mkdtemp6(join79(tmpdir9(), TEMP_DIR_PREFIX4));
   try {
     const inputPath = join79(tempDir, `input${extension}`);
     await writeFile5(inputPath, bytes);
@@ -88990,7 +89031,7 @@ async function runOcrLane(run) {
   }
 }
 async function extractPdfOcr(input) {
-  const tempDir = await mkdtemp6(join79(tmpdir8(), TEMP_DIR_PREFIX4));
+  const tempDir = await mkdtemp6(join79(tmpdir9(), TEMP_DIR_PREFIX4));
   try {
     const inputPath = join79(tempDir, "input.pdf");
     const outputPath = join79(tempDir, "output.pdf");
@@ -89036,7 +89077,7 @@ async function extractPdfOcr(input) {
   }
 }
 async function extractImageOcr(input) {
-  const tempDir = await mkdtemp6(join79(tmpdir8(), TEMP_DIR_PREFIX4));
+  const tempDir = await mkdtemp6(join79(tmpdir9(), TEMP_DIR_PREFIX4));
   try {
     const inputPath = join79(tempDir, `input${imageExtensionForMimeType(input.mimeType)}`);
     await writeFile5(inputPath, input.bytes);
@@ -89959,9 +90000,9 @@ var init_install = __esm(() => {
 // src/workers/source-index/built-in-reasoning/server.ts
 import { spawn as spawn6 } from "node:child_process";
 import { randomBytes as randomBytes13 } from "node:crypto";
-import { mkdtempSync as mkdtempSync2, rmSync as rmSync24, writeFileSync as writeFileSync13 } from "node:fs";
+import { mkdtempSync as mkdtempSync3, rmSync as rmSync24, writeFileSync as writeFileSync13 } from "node:fs";
 import { createServer as createServer2 } from "node:net";
-import { availableParallelism as availableParallelism2, setPriority, tmpdir as tmpdir9 } from "node:os";
+import { availableParallelism as availableParallelism2, setPriority, tmpdir as tmpdir10 } from "node:os";
 import { join as join81 } from "node:path";
 function llamaServerEnvironment(parent, alias) {
   const env = {};
@@ -90117,7 +90158,7 @@ function createLlamaServerHandle(launch, options = {}) {
     superseded();
     const token = randomBytes13(24).toString("base64url");
     const alias = `olympus-${randomBytes13(12).toString("hex")}`;
-    const tokenDir = mkdtempSync2(join81(tmpdir9(), "olympus-built-in-model-"));
+    const tokenDir = mkdtempSync3(join81(tmpdir10(), "olympus-built-in-model-"));
     const tokenFile = join81(tokenDir, "token");
     let spawnedProcess;
     try {
@@ -90669,7 +90710,7 @@ var init_audio_wav = __esm(() => {
 // src/workers/file-extraction/extractors/built-in-transcriber.ts
 import { existsSync as existsSync57 } from "node:fs";
 import { mkdtemp as mkdtemp7, readFile as readFile8, rm as rm8 } from "node:fs/promises";
-import { tmpdir as tmpdir10, totalmem } from "node:os";
+import { tmpdir as tmpdir11, totalmem } from "node:os";
 import { join as join83 } from "node:path";
 function defaultAudioConverter(platform2, runner = runExtractionCommand, timeoutMs = DEFAULT_CONVERT_TIMEOUT_MS) {
   const darwin = platform2.startsWith("darwin-");
@@ -90854,7 +90895,7 @@ function createBuiltInTranscriber(options = {}) {
         throw new TranscriberPendingError("The built-in transcription model is still being set up.");
       }
       const paths = installed;
-      const tempDir = await mkdtemp7(join83(tmpdir10(), TEMP_DIR_PREFIX5));
+      const tempDir = await mkdtemp7(join83(tmpdir11(), TEMP_DIR_PREFIX5));
       try {
         const wavPath = join83(tempDir, "audio.wav");
         try {
@@ -91008,7 +91049,7 @@ var init_built_in_transcriber = __esm(() => {
 
 // src/workers/file-extraction/extractors/transcription.ts
 import { mkdtemp as mkdtemp8, readFile as readFile9, rm as rm9, writeFile as writeFile6 } from "node:fs/promises";
-import { tmpdir as tmpdir11 } from "node:os";
+import { tmpdir as tmpdir12 } from "node:os";
 import { extname as extname3, join as join84 } from "node:path";
 function parseTranscriberArgvTemplate(command) {
   const argv = command.trim().split(/\s+/).filter(Boolean);
@@ -91088,7 +91129,7 @@ function createTranscriptionExtractor(options = {}) {
       try {
         let inputPath = input.localPath;
         if (!inputPath) {
-          tempDir = await mkdtemp8(join84(tmpdir11(), tempDirPrefix));
+          tempDir = await mkdtemp8(join84(tmpdir12(), tempDirPrefix));
           inputPath = join84(tempDir, tempAudioFileName(input.job.jobId, input.ref.name));
           await writeFile6(inputPath, bytes);
         }
@@ -100469,7 +100510,7 @@ import {
   statSync as statSync29
 } from "node:fs";
 import { homedir as homedir27 } from "node:os";
-import { basename as basename13, dirname as dirname68, join as join91, relative as relative14, resolve as resolve20, sep as sep15 } from "node:path";
+import { basename as basename13, dirname as dirname68, join as join91, relative as relative14, resolve as resolve20, sep as sep16 } from "node:path";
 import { rm as rm10 } from "node:fs/promises";
 import { Database as Database22 } from "bun:sqlite";
 function lifecycleStoreFileOwner(env) {
@@ -101140,7 +101181,7 @@ function rmTargetKeepingOwnerLock(target, lockPath) {
     rmSync26(target.path, { recursive: target.allowRecursive, force: true });
     return;
   }
-  const keep = relative14(root, lock).split(sep15);
+  const keep = relative14(root, lock).split(sep16);
   const clear = (directory, depth) => {
     const inLockDirectory = depth === keep.length - 1;
     for (const name of readdirSync18(directory)) {
@@ -101686,7 +101727,7 @@ function canonicalPath(path) {
   }
 }
 function isStrictlyInside(path, root) {
-  return path !== root && path.startsWith(`${root}${sep15}`);
+  return path !== root && path.startsWith(`${root}${sep16}`);
 }
 function assertRawStateTargetsContained(targets, context2, selectedSource) {
   const stateTargets = targets.filter((target) => target.kind === "source_state_path" && target.allowRecursive);
@@ -101803,7 +101844,7 @@ function isInsideRawStateRoot(path, context2) {
 function isSameOrInsidePath(path, root) {
   const absolutePath = resolve20(path);
   const absoluteRoot = resolve20(root);
-  return absolutePath === absoluteRoot || absolutePath.startsWith(`${absoluteRoot}${sep15}`);
+  return absolutePath === absoluteRoot || absolutePath.startsWith(`${absoluteRoot}${sep16}`);
 }
 function defaultSovereigntyConfigPathForHome(homeDir) {
   if (!homeDir || process.platform === "linux")
@@ -104659,7 +104700,7 @@ import {
 } from "node:fs";
 import { open as open3 } from "node:fs/promises";
 import { homedir as homedir29 } from "node:os";
-import { dirname as dirname72, isAbsolute as isAbsolute29, join as join96, posix as posix2, sep as sep16 } from "node:path";
+import { dirname as dirname72, isAbsolute as isAbsolute29, join as join96, posix as posix2, sep as sep17 } from "node:path";
 import { gunzip } from "node:zlib";
 function zkapiAsset(url, sha2566, bytes, extra = {}) {
   return {
@@ -104727,7 +104768,7 @@ function privatelyOwned(path, uid, kind) {
   }
 }
 function within(parent, child2) {
-  return child2.startsWith(parent.endsWith(sep16) ? parent : `${parent}${sep16}`);
+  return child2.startsWith(parent.endsWith(sep17) ? parent : `${parent}${sep17}`);
 }
 function readManifest(path, uid) {
   try {
@@ -104781,7 +104822,7 @@ function managedToolExecutable(tool, host = {}) {
 }
 function trustedInside(realDir, path, uid, versionDir) {
   if (versionDir) {
-    const parts = path.slice(versionDir.length + 1).split(sep16);
+    const parts = path.slice(versionDir.length + 1).split(sep17);
     for (let index = 1;index <= parts.length; index += 1) {
       let stats;
       try {
@@ -104846,7 +104887,7 @@ function earlierManagedFolders(tool, host) {
   const found = [];
   for (const [version, hashes] of Object.entries(pin.replaces)) {
     const sha2566 = hashes[platformKey];
-    if (!sha2566 || version === pin.version || version.startsWith(".") || version.includes("/") || version.includes(sep16))
+    if (!sha2566 || version === pin.version || version.startsWith(".") || version.includes("/") || version.includes(sep17))
       continue;
     const dir = join96(toolDir, version);
     let stats;
@@ -107275,9 +107316,9 @@ __export(exports_consult_transport_zkapi, {
 });
 import { spawn as spawn7, execFileSync as execFileSync4 } from "node:child_process";
 import { createHash as createHash70, randomUUID as randomUUID25 } from "node:crypto";
-import { accessSync as accessSync10, chmodSync as chmodSync28, closeSync as closeSync27, constants as constants14, existsSync as existsSync68, mkdirSync as mkdirSync44, mkdtempSync as mkdtempSync3, readdirSync as readdirSync22, readFileSync as readFileSync57, readlinkSync as readlinkSync3, realpathSync as realpathSync18, rmSync as rmSync29, statSync as statSync32, writeFileSync as writeFileSync16 } from "node:fs";
+import { accessSync as accessSync10, chmodSync as chmodSync28, closeSync as closeSync27, constants as constants14, existsSync as existsSync68, mkdirSync as mkdirSync44, mkdtempSync as mkdtempSync4, readdirSync as readdirSync22, readFileSync as readFileSync57, readlinkSync as readlinkSync3, realpathSync as realpathSync18, rmSync as rmSync29, statSync as statSync32, writeFileSync as writeFileSync16 } from "node:fs";
 import { createConnection as createConnection4, createServer as createServer4 } from "node:net";
-import { homedir as homedir30, tmpdir as tmpdir12 } from "node:os";
+import { homedir as homedir30, tmpdir as tmpdir13 } from "node:os";
 import { delimiter as delimiter7, dirname as dirname74, isAbsolute as isAbsolute30, join as join99, resolve as resolvePath } from "node:path";
 function zkapiStageRows(timings) {
   if (!timings)
@@ -108625,7 +108666,7 @@ async function runSession(recovery, options, statePath, bridge, sent, clock2, st
   if (sessionSignal.aborted)
     return refuse2(abortCause);
   const sessionId = randomUUID25();
-  const workDir = mkdtempSync3(join99(tmpdir12(), "olympus-zkapi-"));
+  const workDir = mkdtempSync4(join99(tmpdir13(), "olympus-zkapi-"));
   chmodSync28(workDir, 448);
   const watchdog = join99(workDir, "watchdog.cjs");
   const childEnv = childEnvironment(env);
@@ -111057,7 +111098,7 @@ var init_engine_service = __esm(() => {
 import { spawnSync as spawnSync14 } from "node:child_process";
 import { chmodSync as chmodSync29, closeSync as closeSync28, constants as constants15, copyFileSync, existsSync as existsSync70, fstatSync as fstatSync6, fsyncSync as fsyncSync7, ftruncateSync, lstatSync as lstatSync37, linkSync as linkSync3, mkdirSync as mkdirSync45, openSync as openSync27, readFileSync as readFileSync59, readlinkSync as readlinkSync4, readdirSync as readdirSync24, realpathSync as realpathSync19, renameSync as renameSync15, rmSync as rmSync30, rmdirSync as rmdirSync7, statSync as statSync34, symlinkSync as symlinkSync2, writeFileSync as writeFileSync17 } from "node:fs";
 import { createRequire as createRequire7 } from "node:module";
-import { basename as basename16, dirname as dirname76, join as join101, relative as relative15, resolve as resolve21, sep as sep17 } from "node:path";
+import { basename as basename16, dirname as dirname76, join as join101, relative as relative15, resolve as resolve21, sep as sep18 } from "node:path";
 import { userInfo as userInfo2 } from "node:os";
 import { randomBytes as randomBytes18, createHash as createHash72, randomUUID as randomUUID26 } from "node:crypto";
 function linuxEngineExec(command, args) {
@@ -111423,7 +111464,7 @@ function linuxMachineArtifactDigest(path, kind) {
   const walk = (dir) => {
     for (const name of readdirSync24(dir).sort()) {
       const full = join101(dir, name);
-      const rel = relative15(root, full).split(sep17).join("/");
+      const rel = relative15(root, full).split(sep18).join("/");
       const info = lstatSync37(full);
       const entryKind = info.isDirectory() ? "directory" : info.isFile() ? "file" : info.isSymbolicLink() ? "symlink" : undefined;
       if (!entryKind || info.isFile() && info.nlink !== 1)
@@ -111822,7 +111863,7 @@ function assertLegacySettingOverrides(layout, env) {
     const selected = resolve21(value2.trim());
     const moved = files.find((name) => {
       const source = join101(layout.home, ".olympus", name);
-      return selected === source || source.startsWith(selected + sep17);
+      return selected === source || source.startsWith(selected + sep18);
     });
     if (!moved)
       continue;
@@ -125091,9 +125132,7 @@ __export(exports_prefilter_training_dry_run, {
   runPrefilterTrainingDryRun: () => runPrefilterTrainingDryRun,
   prefilterTrainingDryRunMain: () => prefilterTrainingDryRunMain
 });
-import { Database as Database24 } from "bun:sqlite";
-import { copyFileSync as copyFileSync2, existsSync as existsSync87, lstatSync as lstatSync44, mkdirSync as mkdirSync52, mkdtempSync as mkdtempSync6, readdirSync as readdirSync26, rmSync as rmSync33, statSync as statSync37 } from "node:fs";
-import { tmpdir as tmpdir14 } from "node:os";
+import { copyFileSync as copyFileSync2, existsSync as existsSync87, lstatSync as lstatSync44, mkdirSync as mkdirSync52, readdirSync as readdirSync26, rmSync as rmSync33, statSync as statSync37 } from "node:fs";
 import { join as join115, resolve as resolve23 } from "node:path";
 function emptyReport() {
   return { ledgers: [], errors: 0, error_reasons: Object.fromEntries(ERROR_REASONS.map((reason) => [reason, 0])), snapshot_retries: 0 };
@@ -125153,7 +125192,8 @@ function runPrefilterTrainingDryRun(options = {}) {
   const root = resolve23(options.dataDir ?? olympusDataRoot());
   if (!lstatSync44(root).isDirectory() || lstatSync44(root).isSymbolicLink())
     throw new Error("Invalid data directory");
-  const scratch = mkdtempSync6(join115(tmpdir14(), "olympus-prefilter-"));
+  const readers = createStorageSnapshotReaders();
+  const scratch = readers.directory;
   const opened = [];
   const report = emptyReport();
   try {
@@ -125167,8 +125207,7 @@ function runPrefilterTrainingDryRun(options = {}) {
         snapshotPrefilterDatabase(original, target, () => {
           report.snapshot_retries++;
         });
-        db = new Database24(target, { readonly: true, create: false });
-        db.exec("PRAGMA query_only = ON;");
+        db = readers.database(target);
         const tables = new Set(db.query("SELECT name FROM sqlite_master WHERE type = 'table'").all().map((row) => row.name));
         if (tables.has("tier_items") && tables.has("tier_ledger_meta")) {
           const id = db.query("SELECT value FROM tier_ledger_meta WHERE key = 'ledger_id'").get();
@@ -125190,7 +125229,7 @@ function runPrefilterTrainingDryRun(options = {}) {
     const ledgers = new Map;
     for (const file of inspected.filter((file2) => file2.kind === "ledger")) {
       try {
-        const ledger = new TierLedger({ dbPath: file.snapshot, readOnly: true });
+        const ledger = readers.ledger(file.snapshot);
         opened.push(ledger);
         ledgers.set(file.original, ledger);
       } catch {
@@ -125200,7 +125239,7 @@ function runPrefilterTrainingDryRun(options = {}) {
     const sniffers = new Map;
     for (const file of inspected.filter((file2) => file2.kind === "sniffer")) {
       try {
-        const store = new TierSnifferStore({ dbPath: file.snapshot, readOnly: true });
+        const store = readers.sniffer(file.snapshot);
         opened.push(store);
         sniffers.set(file.original, store);
       } catch {
@@ -125210,13 +125249,7 @@ function runPrefilterTrainingDryRun(options = {}) {
     const stores = [];
     for (const file of inspected.filter((file2) => file2.kind === "store")) {
       try {
-        const store = new LocalConnectorStore({
-          dbPath: file.snapshot,
-          corpusId: file.corpusId ?? "diagnostic",
-          family: "file",
-          trustDomain: "secure_local",
-          readOnly: true
-        });
+        const store = readers.store(file.snapshot, file.corpusId ?? "diagnostic");
         opened.push(store);
         const binding = store.tierSetBinding();
         const ledgerPath = binding ? tierSetLedgerCandidates(file.original, binding.ledgerPath).find((candidate) => inspected.some((entry) => entry.original === candidate && entry.ledgerId === binding.ledgerId)) : tierLedgerPathForStore(file.original);
@@ -125307,11 +125340,9 @@ function prefilterTrainingDryRunMain(args) {
 var ERROR_REASONS, SnapshotError;
 var init_prefilter_training_dry_run = __esm(() => {
   init_olympus_layout();
-  init_local_index();
+  init_source_storage();
   init_embedding_prefilter();
   init_prefilter_training_counts();
-  init_tier_ledger();
-  init_sniffer_store();
   init_tier_ledger_path();
   init_tier_set_binding();
   ERROR_REASONS = [
@@ -148262,7 +148293,7 @@ var DEFAULT_GOOGLE_PILOT_CLIENT_ID = "604346037984-oukrdn4ouh8n2fctggracadt0fdd2
 import { randomBytes as randomBytes27 } from "node:crypto";
 import { existsSync as existsSync91, mkdirSync as mkdirSync58, readdirSync as readdirSync27, realpathSync as realpathSync20, rmSync as rmSync36, statSync as statSync39, statfsSync as statfsSync4, utimesSync } from "node:fs";
 import { open as open5 } from "node:fs/promises";
-import { sep as sep18, join as join124, resolve as resolve25 } from "node:path";
+import { sep as sep19, join as join124, resolve as resolve25 } from "node:path";
 function sanitizeUploadPath(raw) {
   const bad = () => {
     throw new ArchiveUploadError("bad_path", ARCHIVE_UPLOAD_COPY.bad_path);
@@ -148315,7 +148346,7 @@ function createArchiveUploads(options) {
     rootPath = realpathSync20.native(options.root);
     return rootPath;
   };
-  const contained = (parent, child2) => child2 === parent || child2.startsWith(parent + sep18);
+  const contained = (parent, child2) => child2 === parent || child2.startsWith(parent + sep19);
   const session = (uploadId) => {
     const found = typeof uploadId === "string" && ID2.test(uploadId) ? sessions.get(uploadId) : undefined;
     if (!found)
@@ -179009,16 +179040,16 @@ class MimeNode {
     for (let parts of foldedLines) {
       let rawLine = parts.join(`
 `);
-      let sep19 = rawLine.indexOf(":");
-      let rawKey = sep19 < 0 ? rawLine : rawLine.slice(0, sep19);
+      let sep20 = rawLine.indexOf(":");
+      let rawKey = sep20 < 0 ? rawLine : rawLine.slice(0, sep20);
       this.rawHeaderLines.push({
         key: rawKey.toLowerCase(),
         line: rawLine
       });
       let unfoldedLine = parts.join("");
-      sep19 = unfoldedLine.indexOf(":");
-      let key2 = sep19 < 0 ? unfoldedLine : unfoldedLine.slice(0, sep19);
-      let value2 = sep19 < 0 ? "" : trimWsp(foldLineBreaks(unfoldedLine.slice(sep19 + 1)));
+      sep20 = unfoldedLine.indexOf(":");
+      let key2 = sep20 < 0 ? unfoldedLine : unfoldedLine.slice(0, sep20);
+      let value2 = sep20 < 0 ? "" : trimWsp(foldLineBreaks(unfoldedLine.slice(sep20 + 1)));
       this.headers.push({ key: key2.toLowerCase(), originalKey: key2, value: value2 });
       const lowerKey = key2.toLowerCase();
       if (CONTENT_HEADERS.has(lowerKey) && !seenContentHeaders.has(lowerKey)) {
@@ -191494,7 +191525,7 @@ var init_tier_visibility = __esm(() => {
 
 // src/core/source-account-migration.ts
 import { linkSync as linkSync5, lstatSync as lstatSync52, mkdirSync as mkdirSync62, readdirSync as readdirSync31, realpathSync as realpathSync28, renameSync as renameSync21, rmdirSync as rmdirSync8, statSync as statSync42, unlinkSync as unlinkSync4 } from "node:fs";
-import { basename as basename20, dirname as dirname98, isAbsolute as isAbsolute37, join as join135, relative as relative16, resolve as resolve28, sep as sep19 } from "node:path";
+import { basename as basename20, dirname as dirname98, isAbsolute as isAbsolute37, join as join135, relative as relative16, resolve as resolve28, sep as sep20 } from "node:path";
 function accountFolderMigrationEnabled(env = process.env) {
   const value2 = env[MIGRATE_ACCOUNT_FOLDERS_ENV]?.trim().toLowerCase() ?? "";
   return value2 === "" || MIGRATION_ON.includes(value2);
@@ -191567,7 +191598,7 @@ function lookAt(path) {
 function rootOf(ctx, path) {
   for (const { tag, root } of ctx.roots) {
     const below = relative16(root, path);
-    if (below === ".." || below.startsWith(`..${sep19}`) || isAbsolute37(below))
+    if (below === ".." || below.startsWith(`..${sep20}`) || isAbsolute37(below))
       continue;
     return { tag, root, below };
   }
@@ -191577,7 +191608,7 @@ function relPath(ctx, path) {
   const at = rootOf(ctx, path);
   if (!at)
     throw new TypeError("A migration path must sit in a folder the layout names.");
-  const below = at.below.split(sep19).join("/");
+  const below = at.below.split(sep20).join("/");
   return at.tag ? `@${at.tag}/${below}` : below;
 }
 function absPath(ctx, rel) {
@@ -191820,7 +191851,7 @@ function syncFolderChains(ctx, folders) {
       throw Object.assign(new Error("outside every root"), { code: "EINVAL" });
     let current2 = realpathSync28(at.root);
     chain.add(current2);
-    for (const part of at.below.split(sep19).filter(Boolean)) {
+    for (const part of at.below.split(sep20).filter(Boolean)) {
       current2 = join135(current2, part);
       chain.add(current2);
     }
@@ -191840,7 +191871,7 @@ function makeFolders(ctx, moves) {
         throw Object.assign(new Error("link"), { code: "ELOOP" });
       destinations.add(destination);
       let current2 = real;
-      for (const part of relative16(ctx.root, destination).split(sep19).filter(Boolean)) {
+      for (const part of relative16(ctx.root, destination).split(sep20).filter(Boolean)) {
         current2 = join135(current2, part);
         const found = lookAt(current2);
         if (found.kind === "dir")
@@ -191876,7 +191907,7 @@ function removeEmptyFolders(ctx, moves) {
   const stop = accountFoldersRoot(ctx.env);
   const folders = new Set;
   for (const move of moves) {
-    for (let folder = dirname98(absPath(ctx, move.to));folder === stop || folder.startsWith(`${stop}${sep19}`); folder = dirname98(folder)) {
+    for (let folder = dirname98(absPath(ctx, move.to));folder === stop || folder.startsWith(`${stop}${sep20}`); folder = dirname98(folder)) {
       folders.add(folder);
       if (folder === stop)
         break;
@@ -194643,7 +194674,7 @@ var init_sniffer_resolver = __esm(() => {
 });
 
 // src/workers/classification/sniffer-service.ts
-import { Database as Database25 } from "bun:sqlite";
+import { Database as Database24 } from "bun:sqlite";
 import { existsSync as existsSync102 } from "node:fs";
 function emptyBacklogCounts() {
   return { checkingItems: 0, remainingQuestions: 0, pendingItems: 0, pendingWithoutQuestion: 0, oldestPendingAgeMs: 0 };
@@ -194801,7 +194832,7 @@ class TierSnifferService {
   openBacklogLedger(ledgerPath) {
     let db;
     try {
-      db = new Database25(ledgerPath, { readonly: true, create: false });
+      db = new Database24(ledgerPath, { readonly: true, create: false });
       db.exec("PRAGMA busy_timeout = 10000; PRAGMA query_only = ON;");
       const expectedId = this.boundLedgerIds.get(ledgerPath);
       if (expectedId !== undefined) {
@@ -223978,7 +224009,7 @@ import {
   existsSync as existsSync75,
   fsyncSync as fsyncSync8,
   lstatSync as lstatSync38,
-  mkdtempSync as mkdtempSync4,
+  mkdtempSync as mkdtempSync5,
   openSync as openSync29,
   readFileSync as readFileSync64,
   readdirSync as readdirSync25,
@@ -223987,7 +224018,7 @@ import {
   statSync as statSync36,
   writeFileSync as writeFileSync18
 } from "node:fs";
-import { tmpdir as tmpdir13 } from "node:os";
+import { tmpdir as tmpdir14 } from "node:os";
 import { basename as basename18, isAbsolute as isAbsolute32, join as join106 } from "node:path";
 var MAX_UPGRADE_ARTIFACT_BYTES = 256 * 1024 * 1024;
 var MAX_UPGRADE_ARCHIVE_ENTRIES = 20000;
@@ -223999,7 +224030,7 @@ function prepareWorkerUpgradeArtifact(options) {
     throw new OperationError("invalid_params", `Upgrade artifact must be between 1 byte and ${MAX_UPGRADE_ARTIFACT_BYTES} bytes.`);
   }
   const artifactSha256 = createHash75("sha256").update(artifactBytes).digest("hex");
-  const snapshotDir = mkdtempSync4(join106(tmpdir13(), ".olympus-artifact-snapshot-"));
+  const snapshotDir = mkdtempSync5(join106(tmpdir14(), ".olympus-artifact-snapshot-"));
   const artifactPath = join106(snapshotDir, "artifact.tgz");
   const descriptor = openSync29(artifactPath, "wx", 384);
   try {
@@ -224014,10 +224045,10 @@ function prepareWorkerUpgradeArtifact(options) {
     const versionsDir = join106(options.homeDir, ".local", "share", "olympus", "versions");
     const workingDirectory = join106(versionsDir, artifactSha256);
     assertVersionParentSafety(options.homeDir, workingDirectory);
-    const stagingParent = options.dryRun ? tmpdir13() : versionsDir;
+    const stagingParent = options.dryRun ? tmpdir14() : versionsDir;
     if (!options.dryRun)
       ensurePrivateDirectoryTreeSync(options.homeDir, versionsDir);
-    const staging = mkdtempSync4(join106(stagingParent, ".olympus-upgrade-"));
+    const staging = mkdtempSync5(join106(stagingParent, ".olympus-upgrade-"));
     try {
       extractArchive(artifactPath, staging);
       assertRegularTree(staging);
@@ -225567,7 +225598,7 @@ init_engine_service();
 init_operation_error();
 init_package_root();
 import { spawnSync as spawnSync19 } from "node:child_process";
-import { existsSync as existsSync84, lstatSync as lstatSync42, mkdirSync as mkdirSync50, mkdtempSync as mkdtempSync5, renameSync as renameSync18, rmSync as rmSync32 } from "node:fs";
+import { existsSync as existsSync84, lstatSync as lstatSync42, mkdirSync as mkdirSync50, mkdtempSync as mkdtempSync6, renameSync as renameSync18, rmSync as rmSync32 } from "node:fs";
 import { homedir as homedir37 } from "node:os";
 import { join as join112, resolve as resolve22 } from "node:path";
 var MACOS_SIGNING_IDENTITY_ENV = "OLYMPUS_MACOS_SIGNING_IDENTITY";
@@ -225598,7 +225629,7 @@ function installEngineHelper(options = {}) {
   const paths = enginePaths(homeDir);
   const target = paths.helperAppPath;
   mkdirSync50(paths.appSupportDir, { recursive: true, mode: 448 });
-  const staging = mkdtempSync5(join112(paths.appSupportDir, ".helper-"));
+  const staging = mkdtempSync6(join112(paths.appSupportDir, ".helper-"));
   try {
     let built = false;
     let candidate;

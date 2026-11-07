@@ -17,10 +17,11 @@ import { chmodSync, existsSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { runSqliteMigrations, type SqliteMigration } from '../../core/sqlite-migrations.ts';
 import { closeSqliteStore } from '../../core/sqlite-store.ts';
+import { iterateRows } from '../../core/sqlite-rows.ts';
 import { HELD_UNTIL_JUDGED_PRIORITY, type TierSnifferSubject } from './tier-classifier.ts';
 import { TIER_SNIFFER_SQLITE_STORE_ID } from './tier-ledger-path.ts';
 
-export const TIER_SNIFFER_SCHEMA_VERSION = 6;
+export const TIER_SNIFFER_SCHEMA_VERSION = 7;
 
 export type SnifferPass = 'metadata' | 'content';
 export type SnifferTier = 'personal' | 'private';
@@ -88,9 +89,12 @@ export class TierSnifferStore {
   private readonly db: Database;
   private readonly now: () => Date;
   private readonly readOnly: boolean;
-  private readonly trainingReads = new Map<string, Map<string, TrainingSnifferVerdict>>();
+  // Keep construction inside the constructor so Bun can drop this SQLite class
+  // from the Node-loaded plugin bundle when only its pure helpers are used.
+  private readonly trainingReads: Map<string, Map<string, TrainingSnifferVerdict>>;
 
   constructor(options: { dbPath: string; now?: () => Date; readOnly?: boolean }) {
+    this.trainingReads = new Map();
     this.dbPath = options.dbPath;
     this.now = options.now ?? (() => new Date());
     if (options.readOnly === true) {
@@ -210,10 +214,9 @@ export class TierSnifferStore {
       let labels = this.trainingReads.get(modelId);
       if (!labels) {
         labels = new Map();
-        const rows = this.db.query(`SELECT model_subject, tier, decided_at FROM sniffer_verdicts
-          WHERE model_id = ? AND fail_safe = 0 AND model_subject IS NOT NULL`).iterate(modelId) as Iterable<{
-            model_subject: string; tier: SnifferTier; decided_at: string;
-          }>;
+        const rows = iterateRows<{ model_subject: string; tier: SnifferTier; decided_at: string }>(this.db,
+          `SELECT model_subject, tier, decided_at FROM sniffer_verdicts
+          WHERE model_id = ? AND fail_safe = 0 AND model_subject IS NOT NULL`, modelId);
         for (const row of rows) {
           const prior = labels.get(row.model_subject);
           if (!prior || row.decided_at > prior.decidedAt) labels.set(row.model_subject,

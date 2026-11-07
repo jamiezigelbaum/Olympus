@@ -672,6 +672,8 @@ No install SQLite file is opened by SQLite: a read-only open can still modify
 its shared-memory sidecar. Main database and WAL bytes are copied into private
 0700 temporary directories; snapshots alone are opened read-only, without SQL
 writes, checkpoint, migrations, metadata updates, permission repairs or lease.
+The storage service creates and owns the scratch reader root; these readers
+refuse paths outside it, symlink paths and hard-linked database files.
 SQLite's temporary shared-memory files stay there, and all scratch copies are
 removed on normal completion or error. Abrupt process termination can leave
 private scratch copies. Copying detects concurrent main/WAL changes and retries
@@ -681,8 +683,11 @@ for busy, unsafe or unreadable snapshot refusals and database-reader failures;
 any final error produces a nonzero exit. Snapshots
 of different files are not one install-wide transaction. Synthetic WAL-backed
 tests compare all install file hashes and mtimes before and after, including the
-built CLI path. The 2026-11-07 live zero-example investigation remains an
-observation task until this diagnostic has run on the affected install.
+built CLI path. The owner's 2026-11-07 read-only Sparta baseline found no
+examples among 28,982 rows in the first ledger (16,788 lacked tier receipts),
+and 15 Personal / 0 Private examples across four ledgers. Pre-#982 rows had
+judge reasons and digests but lacked the newer tier receipt. Acceptance counts
+after the legacy-provenance fix still require measurement on that install.
 
 One install-wide model and rolling audit window are shared across the mounted
 ledgers. A stable install tier ledger at

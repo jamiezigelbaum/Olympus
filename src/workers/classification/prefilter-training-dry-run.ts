@@ -1,14 +1,14 @@
 // Standalone diagnostic: never construct a worker, model, lease, or writable store.
-import { Database } from 'bun:sqlite';
-import { copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, rmSync, statSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import type { Database } from 'bun:sqlite';
+import { copyFileSync, existsSync, lstatSync, mkdirSync, readdirSync, rmSync, statSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { olympusDataRoot } from '../../core/olympus-layout.ts';
-import { LocalConnectorStore } from '../connector-store/local-index.ts';
+import { createStorageSnapshotReaders } from '../../core/source-storage.ts';
+import type { LocalConnectorStore } from '../connector-store/local-index.ts';
 import { prefilterTrainingCopy } from './embedding-prefilter.ts';
 import { countPrefilterTraining, type PrefilterTrainingCounts } from './prefilter-training-counts.ts';
-import { TierLedger } from './tier-ledger.ts';
-import { TierSnifferStore } from './sniffer-store.ts';
+import type { TierLedger } from './tier-ledger.ts';
+import type { TierSnifferStore } from './sniffer-store.ts';
 import { tierLedgerPathForStore, tierSnifferPathForLedger } from './tier-ledger-path.ts';
 import { tierSetLedgerCandidates } from './tier-set-binding.ts';
 
@@ -94,7 +94,8 @@ export function runPrefilterTrainingDryRun(options: { dataDir?: string; rowLimit
   if (options.rowLimit !== undefined && (!Number.isSafeInteger(options.rowLimit) || options.rowLimit < 1)) throw new Error('Invalid row limit');
   const root = resolve(options.dataDir ?? olympusDataRoot());
   if (!lstatSync(root).isDirectory() || lstatSync(root).isSymbolicLink()) throw new Error('Invalid data directory');
-  const scratch = mkdtempSync(join(tmpdir(), 'olympus-prefilter-'));
+  const readers = createStorageSnapshotReaders();
+  const scratch = readers.directory;
   const opened: Array<{ close(): void }> = [];
   const report = emptyReport();
   try {
@@ -106,8 +107,7 @@ export function runPrefilterTrainingDryRun(options: { dataDir?: string; rowLimit
       let db: Database | undefined;
       try {
         snapshotPrefilterDatabase(original, target, () => { report.snapshot_retries++; });
-        db = new Database(target, { readonly: true, create: false });
-        db.exec('PRAGMA query_only = ON;');
+        db = readers.database(target);
         const tables = new Set((db.query("SELECT name FROM sqlite_master WHERE type = 'table'").all() as { name: string }[]).map(row => row.name));
         if (tables.has('tier_items') && tables.has('tier_ledger_meta')) {
           const id = db.query("SELECT value FROM tier_ledger_meta WHERE key = 'ledger_id'").get() as { value: string } | null;
@@ -126,7 +126,7 @@ export function runPrefilterTrainingDryRun(options: { dataDir?: string; rowLimit
     const ledgers = new Map<string, TierLedger>();
     for (const file of inspected.filter(file => file.kind === 'ledger')) {
       try {
-        const ledger = new TierLedger({ dbPath: file.snapshot, readOnly: true });
+        const ledger = readers.ledger(file.snapshot);
         opened.push(ledger);
         ledgers.set(file.original, ledger);
       } catch { reportError(report, 'ledger_open'); }
@@ -134,7 +134,7 @@ export function runPrefilterTrainingDryRun(options: { dataDir?: string; rowLimit
     const sniffers = new Map<string, TierSnifferStore>();
     for (const file of inspected.filter(file => file.kind === 'sniffer')) {
       try {
-        const store = new TierSnifferStore({ dbPath: file.snapshot, readOnly: true });
+        const store = readers.sniffer(file.snapshot);
         opened.push(store);
         sniffers.set(file.original, store);
       } catch { reportError(report, 'sniffer_open'); }
@@ -142,8 +142,7 @@ export function runPrefilterTrainingDryRun(options: { dataDir?: string; rowLimit
     const stores: Array<{ store: LocalConnectorStore; ledgerPath: string | undefined; bound: boolean }> = [];
     for (const file of inspected.filter(file => file.kind === 'store')) {
       try {
-        const store = new LocalConnectorStore({ dbPath: file.snapshot, corpusId: file.corpusId ?? 'diagnostic',
-          family: 'file', trustDomain: 'secure_local', readOnly: true });
+        const store = readers.store(file.snapshot, file.corpusId ?? 'diagnostic');
         opened.push(store);
         const binding = store.tierSetBinding();
         const ledgerPath = binding

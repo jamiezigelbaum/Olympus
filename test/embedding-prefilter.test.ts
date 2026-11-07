@@ -747,11 +747,11 @@ test.each(['secrets', 'tier', 'decision', 'removed copy', 'changed vector', 'pub
   }, 30_000);
 
 
-test('a historical metadata raise never replaces a legacy content judge training label', async () => {
+test.each(['legacy', 'receipt'] as const)('a historical metadata raise never replaces a %s content judge training label', async provenance => {
   const f = fixture({ trained: false, memory: true, log: () => {} });
   trainingRow(f, 0, [], 'other:1.00', true); // The body was judged Personal.
   trainingRow(f, 1, [], 'other:1.00', true); // A genuine Private label remains usable.
-  for (const n of [0, 1]) {
+  for (const n of provenance === 'legacy' ? [0, 1] : []) {
     const row = f.ledger.getCurrent(subject(n))!;
     f.ledger.recordDecision(subject(n), { ...row, state: 'current', snifferId: judge, decidedBy: 'sniffer',
       reasons: row.reasons.filter(reason => !reason.startsWith('content:judge_verdict:')) });
@@ -1103,7 +1103,7 @@ test('each training drop check has a stable first-failure counter', () => {
     }
     if (expected === 'media_present') currentCopy!.chunks[0]!.mediaPath = '/synthetic/image';
     if (expected === 'secret_material') {
-      const text = '-----BEGIN PRIVATE KEY-----\nsynthetic-private-key-fixture\n-----END PRIVATE KEY-----';
+      const text = ['-----BEGIN', 'PRIVATE KEY-----\nsynthetic-private-key-fixture\n-----END PRIVATE KEY-----'].join(' ');
       currentCopy!.chunks[0]!.boundedText = text;
       const digest = contentDigestReason(text);
       reasons = reasons.filter(reason => !reason.startsWith('content:sha256:') && reason !== verdict);

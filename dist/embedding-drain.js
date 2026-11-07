@@ -9490,6 +9490,16 @@ function closeSqliteStore(db, options = {}) {
   db.close();
 }
 
+// src/core/sqlite-rows.ts
+function* iterateRows(db, sql, ...params) {
+  const statement = db.prepare(sql);
+  try {
+    yield* statement.iterate(...params);
+  } finally {
+    statement.finalize();
+  }
+}
+
 // src/core/sender-rules.ts
 function validDomain(raw) {
   let end = raw.length;
@@ -10425,8 +10435,9 @@ class TierSnifferStore {
   db;
   now;
   readOnly;
-  trainingReads = new Map;
+  trainingReads;
   constructor(options) {
+    this.trainingReads = new Map;
     this.dbPath = options.dbPath;
     this.now = options.now ?? (() => new Date);
     if (options.readOnly === true) {
@@ -10514,8 +10525,8 @@ class TierSnifferStore {
       let labels = this.trainingReads.get(modelId);
       if (!labels) {
         labels = new Map;
-        const rows = this.db.query(`SELECT model_subject, tier, decided_at FROM sniffer_verdicts
-          WHERE model_id = ? AND fail_safe = 0 AND model_subject IS NOT NULL`).iterate(modelId);
+        const rows = iterateRows(this.db, `SELECT model_subject, tier, decided_at FROM sniffer_verdicts
+          WHERE model_id = ? AND fail_safe = 0 AND model_subject IS NOT NULL`, modelId);
         for (const row2 of rows) {
           const prior = labels.get(row2.model_subject);
           if (!prior || row2.decided_at > prior.decidedAt)
@@ -20065,16 +20076,6 @@ var init_tier_ledger = __esm(() => {
     secure_local: 2
   };
 });
-
-// src/core/sqlite-rows.ts
-function* iterateRows(db, sql, ...params) {
-  const statement = db.prepare(sql);
-  try {
-    yield* statement.iterate(...params);
-  } finally {
-    statement.finalize();
-  }
-}
 // src/workers/file-extraction/job-names.ts
 import { existsSync as existsSync15 } from "node:fs";
 import { Database as Database4 } from "bun:sqlite";

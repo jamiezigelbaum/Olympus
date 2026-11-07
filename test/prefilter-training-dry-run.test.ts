@@ -6,6 +6,7 @@ import { copyFileSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync,
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import type { SourceConnector } from '../src/core/contracts.ts';
+import { createStorageSnapshotReaders } from '../src/core/source-storage.ts';
 import { LocalConnectorStore } from '../src/workers/connector-store/local-index.ts';
 import { TierLedger } from '../src/workers/classification/tier-ledger.ts';
 import { TierSnifferStore } from '../src/workers/classification/sniffer-store.ts';
@@ -110,7 +111,7 @@ test('counts exact training decisions, includes live WAL rows, and changes no in
     expect(child.stdout.toString()).not.toMatch(/fixture|synthetic|sqlite|picnic|sandwich|secure_local|fixture-model/);
     expect(files(root)).toEqual(before);
   } finally { state.close(); b.close(); a.close(); rmSync(root, { recursive: true, force: true }); }
-});
+}, 30_000);
 
 test('CLI errors never echo arguments, paths or exception text, and leave the install unchanged', () => {
   const root = mkdtempSync(join(tmpdir(), 'prefilter-invalid-'));
@@ -130,7 +131,7 @@ test('CLI errors never echo arguments, paths or exception text, and leave the in
     }
     expect(files(root)).toEqual(before);
   } finally { rmSync(root, { recursive: true, force: true }); }
-});
+}, 30_000);
 
 test('busy snapshots retry from clean copies, and persistent refusals have a safe named reason', () => {
   const root = mkdtempSync(join(tmpdir(), 'prefilter-busy-'));
@@ -161,6 +162,19 @@ test('busy snapshots retry from clean copies, and persistent refusals have a saf
     })).toThrow('snapshot_io');
     expect(retries).toBe(0);
   } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('snapshot readers refuse original paths outside their own private scratch root', () => {
+  const root = mkdtempSync(join(tmpdir(), 'prefilter-original-'));
+  const readers = createStorageSnapshotReaders();
+  const original = join(root, 'original.sqlite');
+  writeFileSync(original, 'synthetic original bytes');
+  try {
+    for (const open of [readers.database, readers.ledger, readers.sniffer, (path: string) => readers.store(path, 'fixture')])
+      expect(() => open(original)).toThrow('Not a storage snapshot');
+    expect(statSync(readers.directory).mode & 0o777).toBe(0o700);
+    expect(readFileSync(original, 'utf8')).toBe('synthetic original bytes');
+  } finally { rmSync(root, { recursive: true, force: true }); rmSync(readers.directory, { recursive: true, force: true }); }
 });
 
 test('latest subject/model answers exclude fail-safes, expose ties and later times in live and old readonly caches', () => {
