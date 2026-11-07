@@ -72,8 +72,12 @@ for (const stamped of [false, true]) test(`upgrade automatically re-judges and m
     'source_config:trust_domain:secure_local'), { fetchContent: true, placement: FIXTURE_PLACEMENT });
   expect(f.ledger.getCurrent(identity)).toMatchObject({ decidedBy: 'source_prior', contentTier: 'secure' });
   const key = { engineVersion: TIER_CLASSIFIER_VERSION, snifferId: personal.id };
-  // A prior replayed after #606 may have inherited its earlier re-judge stamp.
-  if (stamped) f.ledger.markRejudged(identity, key);
+  // A prior replayed after #606 may have inherited the plain stamp of an
+  // earlier re-judge that settled a different decision of the row.
+  if (stamped) {
+    (f.ledger as unknown as { db: { query(sql: string): { run(...args: unknown[]): void } } }).db
+      .query('UPDATE tier_items SET rejudged_key = ?').run(`${key.engineVersion}\u0000${key.snifferId}`);
+  }
   expect(f.ledger.rejudgeCandidatePage(key).records).toHaveLength(1);
   const { InstalledTierClassification } = await import('../src/workers/classification/installed-tier-classification.ts');
   const { BUILT_IN_SNIFFER_LANE } = await import('../src/workers/classification/built-in-sniffer.ts');
@@ -93,4 +97,21 @@ for (const stamped of [false, true]) test(`upgrade automatically re-judges and m
     expect(f.ledger.rejudgeCandidatePage(key).records).toEqual([]);
     expect(f.ledger.getCurrent(identity)!.reasons.some(reason => reason.startsWith('metadata:prior:'))).toBe(false);
   } finally { service.stop(); installed.close(); }
+});
+
+test('a retired source-prior item a re-judge could not re-read stays settled until its decision changes', async () => {
+  const f = lane();
+  const identity = identityOf('no-text');
+  await f.set.sync(restingPrivate(fixtureConnector(() => [{ id: 'no-text', name: 'Picnic notes', text: 'Bring bananas on Saturday.' }]),
+    'source_config:trust_domain:secure_local'), { fetchContent: true, placement: FIXTURE_PLACEMENT });
+  const key = { engineVersion: TIER_CLASSIFIER_VERSION, snifferId: personal.id };
+  expect(f.ledger.rejudgeCandidatePage(key).records).toHaveLength(1);
+  // The no-text branch stamps the row without changing its prior reason.
+  f.ledger.markRejudged(identity, key);
+  expect(f.ledger.getCurrent(identity)!.reasons.some(reason => reason.startsWith('metadata:prior:source_'))).toBe(true);
+  expect(f.ledger.rejudgeCandidatePage(key).records).toEqual([]);
+  // A replayed prior is a new decision of the row and is re-judged again.
+  (f.ledger as unknown as { db: { query(sql: string): { run(...args: unknown[]): void } } }).db
+    .query("UPDATE tier_items SET decided_at = decided_at || 'x'").run();
+  expect(f.ledger.rejudgeCandidatePage(key).records).toHaveLength(1);
 });
