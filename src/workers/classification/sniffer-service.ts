@@ -32,6 +32,7 @@ import {
   SNIFFER_MAX_CONCURRENT_CALLS,
   SnifferCallBudget,
   runSnifferPass,
+  DEFAULT_SNIFFER_PASS_TIME_MS,
   prepareSnifferModel,
   type SnifferPassReport,
   type SnifferTarget,
@@ -190,7 +191,7 @@ export interface TierSnifferServiceOptions {
     /** The embedding ledger each automatic move is recorded in. */
     embeddingLedgerPath: string;
     maxPerPass?: number;
-    /** Lowering drain budget, separate from the judge's pass. Default 1 s. */
+    /** Fixed lowering slice override; still capped at 25% of judge + moves. Default adapts to backlog. */
     lowerSliceMs?: number;
     /** Maximum synchronous copy batch. Default 25 items / 25 ms. */
     lowerBatchSize?: number;
@@ -211,6 +212,8 @@ export interface TierSnifferServiceOptions {
 export const MISSING_QUESTION_RECOVERY_PHASE_MS = 25;
 export const DEFAULT_AUTO_MOVES_PER_PASS = 1000;
 export const DEFAULT_LOWER_MOVE_SLICE_MS = 1000;
+/** Absolute ceiling, also limited to one third of the judge budget. */
+const MAX_LOWER_MOVE_SLICE_MS = 10_000;
 export const DEFAULT_LOWER_MOVE_BATCH_MS = 25;
 /** A pass running longer than this is aborted at the next tick. */
 export const DEFAULT_TIER_SNIFFER_MAX_PASS_MS = 15 * 60_000;
@@ -1312,7 +1315,26 @@ export class TierSnifferService {
     try {
       if (!this.options.autoMoves || this.stopped || !this.options.autoMoves.localEmbeddingsOnly()) return undefined;
       if (this.moving && this.movingDirection !== direction) {
-        if (direction === 'raise') this.lowerMovePreempted = true;
+        if (direction === 'raise') {
+          // The idle timer also asks for raises. Only real queued raises may
+          // interrupt a longer lowering slice; an unreadable queue fails safe.
+          const raisesQueued = this.ledgerPaths().some(path => {
+            try {
+              const set = tierSetForLedger(path);
+              if (!set || !setEmbedsWithBuiltInOnly(set)) return false;
+              const limit = Math.max(0, this.options.autoMoves!.maxPerPass ?? 25);
+              return limit > 0 && set.ledger.listMoving({ limit, direction: 'raise' })
+                .some(record => isAutoMoveCandidate(record)
+                  // Failed raises already get retries ahead of lowerings each
+                  // pass (and during judging). They remain hidden and queued,
+                  // but must not cut every lowering slice back to one second.
+                  && !this.moveFailures.has(`${path}\u0000${tierLedgerIdentityKey(recordIdentity(record))}\u0000${record.generation}`));
+            }
+            catch { return true; }
+          });
+          if (!raisesQueued) return undefined;
+          this.lowerMovePreempted = true;
+        }
         await this.moving;
       }
       if (!this.moving) {
@@ -1498,14 +1520,30 @@ export class TierSnifferService {
   ): Promise<TierAutoMoveReport> {
     const timings = emptyTierMoveTimings();
     const started = performance.now();
-    const deadline = started + Math.max(0, options.lowerSliceMs ?? DEFAULT_LOWER_MOVE_SLICE_MS);
+    const paths = this.ledgerPaths();
+    const backlog = direction === 'lower'
+      ? paths.reduce((n, path) => {
+        try { return n + (tierSetForLedger(path)?.ledger.countMoving('lower') ?? 0); }
+        catch { return n; } // A failed count must not prevent other sets draining.
+      }, 0) : 0;
+    // Keep the full judge budget. With a backlog, grow beyond the 1 s floor
+    // at 25 ms per queued item, up to 10 s / one third of judge time. Thus
+    // moves take at most 25% of the combined judge + moves allocation.
+    // A disabled/invalid judge budget must not disable move recovery or its cap.
+    const configuredJudgeMs = this.options.passTimeMs ?? DEFAULT_SNIFFER_PASS_TIME_MS;
+    const judgeBudgetMs = Number.isFinite(configuredJudgeMs) && configuredJudgeMs > 0
+      ? configuredJudgeMs : DEFAULT_SNIFFER_PASS_TIME_MS;
+    const capMs = Math.min(MAX_LOWER_MOVE_SLICE_MS, judgeBudgetMs / 3);
+    const adaptiveMs = Math.max(DEFAULT_LOWER_MOVE_SLICE_MS, backlog * DEFAULT_LOWER_MOVE_BATCH_MS);
+    const requestedMs = options.lowerSliceMs ?? adaptiveMs;
+    const sliceMs = Math.min(capMs, Math.max(0, Number.isFinite(requestedMs) ? requestedMs : adaptiveMs));
+    const deadline = started + sliceMs;
     const shouldStop = () => signal.aborted || (direction === 'lower'
       && (performance.now() >= deadline || this.lowerMovePreempted || this.yieldNow()));
     const report: TierAutoMoveReport = { moved: 0, failed: 0, notEligible: 0, timings };
     const staleAfterMs = Math.max(0, options.staleAfterMs ?? DEFAULT_STALE_MOVE_MS);
     const now = (this.options.now ?? (() => new Date()))().getTime();
     let budget = Math.max(0, options.maxPerPass ?? (direction === 'raise' ? 25 : DEFAULT_AUTO_MOVES_PER_PASS));
-    const paths = this.ledgerPaths();
     // Rotate the first set so a persistent large backlog cannot starve another.
     const offset = this.moveLedgerOffsets[direction]++ % Math.max(1, paths.length);
     for (const ledgerPath of [...paths.slice(offset), ...paths.slice(0, offset)]) {
@@ -1513,8 +1551,7 @@ export class TierSnifferService {
       const set = tierSetForLedger(ledgerPath);
       if (!set) continue;
       const queued = set.ledger.listMoving({ limit: budget, direction })
-        .filter(record => record.routed && record.targetMetadataTier !== null && record.targetContentTier !== null
-          && record.targetMetadataTier !== 'secrets' && record.targetContentTier !== 'secrets');
+        .filter(isAutoMoveCandidate);
       if (!setEmbedsWithBuiltInOnly(set)) { report.notEligible += queued.length; continue; }
       const failure = (record: TierLedgerRecord, error: unknown) => {
         const identity = recordIdentity(record);
@@ -1609,13 +1646,14 @@ export class TierSnifferService {
       await flushTierMoveNotes(set.ledger, { timings, shouldStop });
     }
     report.elapsedMs = performance.now() - started;
-    if (report.moved > 0 || report.failed > 0) {
+    if (direction === 'lower' || report.moved > 0 || report.failed > 0) {
       this.options.log?.(
         `Olympus tier sniffer: ${report.moved} automatic tier move(s), ${report.failed} failed`
         + `${report.failedBy ? ` (${Object.entries(report.failedBy).map(([why, n]) => `${why} ×${n}`).join(', ')})` : ''}`
         + `${report.abandoned ? `, ${report.abandoned} stale move(s) given up (back where they were)` : ''}`
         + `${report.staleRaises ? `, ${report.staleRaises} stale raise(s) kept hidden and queued` : ''}`
         + `${report.retiredAbsent ? `, ${report.retiredAbsent} stale raise(s) of items no store holds forgotten` : ''}; direction=${direction} elapsed_ms=${Math.round(report.elapsedMs!)} `
+        + (direction === 'lower' ? `backlog=${backlog} slice_ms=${Math.round(sliceMs)} ` : '')
         + Object.entries(timings).map(([step, ms]) => `${step.replace(/[A-Z]/g, letter => `_${letter.toLowerCase()}`)}=${Math.round(ms)}`).join(' ') + '.',
       );
     }
@@ -1749,6 +1787,12 @@ function matchingVectorIdentities(
     }
   }
   return identities;
+}
+
+/** Same candidate predicate for raise preemption and the actual drain. */
+function isAutoMoveCandidate(record: TierLedgerRecord): boolean {
+  return record.routed && record.targetMetadataTier !== null && record.targetContentTier !== null
+    && record.targetMetadataTier !== 'secrets' && record.targetContentTier !== 'secrets';
 }
 
 /** Every open store of the set embeds (if at all) with the built-in local model only. */

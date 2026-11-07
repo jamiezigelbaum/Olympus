@@ -18394,8 +18394,13 @@ class TierLedger {
     })();
     return flipped;
   }
-  listMoving(options = {}) {
-    const limit = Math.max(1, Math.min(options.limit ?? 100, 5000));
+  countMoving(direction) {
+    return this.db.query(`SELECT COUNT(*) AS n FROM tier_items WHERE state = 'moving'
+      ${this.movingDirectionClause(direction)}`).get().n;
+  }
+  movingDirectionClause(direction) {
+    if (!direction)
+      return "";
     const rank = (column) => `(CASE ${column} WHEN 'secrets' THEN 3 WHEN 'secure' THEN 2 WHEN 'private' THEN 1 ELSE 0 END)`;
     const raising = `(${rank("target_metadata_tier")} > ${rank("metadata_tier")}
       OR ${rank("target_content_tier")} > ${rank("content_tier")}
@@ -18403,9 +18408,13 @@ class TierLedger {
         AND c.account_scope = tier_items.account_scope AND c.provider_item_id = tier_items.provider_item_id
         AND c.conversation_key = tier_items.conversation_key AND c.copy_state = 'superseded'
         AND c.superseded_by_generation = tier_items.generation + 1))`;
+    return `AND ${direction === "lower" ? "NOT" : ""} ${raising}`;
+  }
+  listMoving(options = {}) {
+    const limit = Math.max(1, Math.min(options.limit ?? 100, 5000));
     const rows = this.db.query(`
       SELECT * FROM tier_items INDEXED BY tier_items_move_order WHERE state = 'moving'
-      ${options.direction ? `AND ${options.direction === "lower" ? "NOT" : ""} ${raising}` : ""}
+      ${this.movingDirectionClause(options.direction)}
       ORDER BY move_attempts, decided_at, provider, account_scope, provider_item_id, conversation_key
       LIMIT ?
     `).all(limit);
@@ -33318,8 +33327,11 @@ var init_tier_names_only_settle = __esm(() => {
 import { mkdir as mkdir4, open as open3, readFile as readFile3, stat as stat2 } from "node:fs/promises";
 import { dirname as dirname25 } from "node:path";
 async function appendEmbeddingLedgerEntry(path, entry) {
-  const line = `${JSON.stringify(entry)}
-`;
+  await appendEmbeddingLedgerEntries(path, [entry]);
+}
+async function appendEmbeddingLedgerEntries(path, entries) {
+  const line = entries.map((entry) => `${JSON.stringify(entry)}
+`).join("");
   await mkdir4(dirname25(path), { recursive: true, mode: 448 });
   const handle = await open3(path, "a", 384);
   try {
@@ -33330,17 +33342,23 @@ async function appendEmbeddingLedgerEntry(path, entry) {
     await handle.close();
   }
 }
-async function appendEmbeddingLedgerEntryOnce(path, entry) {
-  const id = entry.entry_id?.trim();
-  if (!id) {
-    await appendEmbeddingLedgerEntry(path, entry);
-    return true;
-  }
+async function appendEmbeddingLedgerEntriesOnce(path, entries) {
+  if (!entries.length)
+    return 0;
   const known = await recordedEntryIds(path);
-  if (known.has(id))
-    return false;
-  await appendEmbeddingLedgerEntry(path, entry);
-  return true;
+  const pendingIds = new Set;
+  const pending = entries.filter((entry) => {
+    const id = entry.entry_id?.trim();
+    if (!id)
+      return true;
+    if (known.has(id) || pendingIds.has(id))
+      return false;
+    pendingIds.add(id);
+    return true;
+  });
+  if (pending.length)
+    await appendEmbeddingLedgerEntries(path, pending);
+  return pending.length;
 }
 async function recordedEntryIds(path) {
   let size = 0;
@@ -33967,18 +33985,37 @@ async function flushTierMoveNotes(ledger, options = {}) {
   try {
     let logged = false;
     const written = [];
-    for (const { key: key2, value } of ledger.metaEntries(MOVE_NOTE_PREFIX, { limit: options.shouldStop ? 1000 : -1 })) {
-      if (options.shouldStop?.())
-        break;
-      try {
-        const note = JSON.parse(value);
-        await appendEmbeddingLedgerEntryOnce(note.path, note.entry);
-        written.push({ key: key2, value });
-      } catch (error) {
-        if (!logged) {
-          const code = error?.code;
-          console.warn(`[tier-move-note] kind=note code=${typeof code === "string" && /^[A-Z0-9_]{1,32}$/.test(code) ? code : "UNKNOWN"}`);
-          logged = true;
+    const warn = (error) => {
+      if (logged)
+        return;
+      const code = error?.code;
+      console.warn(`[tier-move-note] kind=note code=${typeof code === "string" && /^[A-Z0-9_]{1,32}$/.test(code) ? code : "UNKNOWN"}`);
+      logged = true;
+    };
+    const pending = ledger.metaEntries(MOVE_NOTE_PREFIX, { limit: options.shouldStop ? 1000 : -1 });
+    for (let offset = 0;offset < pending.length && !options.shouldStop?.(); offset += 25) {
+      const paths = new Map;
+      for (const { key: key2, value } of pending.slice(offset, offset + 25)) {
+        try {
+          const note = JSON.parse(value);
+          if (typeof note.path !== "string" || !note.entry || typeof note.entry !== "object" || note.entry.entry_id !== undefined && typeof note.entry.entry_id !== "string") {
+            throw new Error("Invalid move note");
+          }
+          const group = paths.get(note.path) ?? [];
+          group.push({ key: key2, value, entry: note.entry });
+          paths.set(note.path, group);
+        } catch (error) {
+          warn(error);
+        }
+      }
+      for (const [path, notes] of paths) {
+        if (options.shouldStop?.())
+          break;
+        try {
+          await appendEmbeddingLedgerEntriesOnce(path, notes.map((note) => note.entry));
+          written.push(...notes);
+        } catch (error) {
+          warn(error);
         }
       }
     }
@@ -76211,6 +76248,7 @@ var NOT_ANSWERING_MAX_BACKOFF_MS = 60000;
 var MISSING_QUESTION_RECOVERY_PHASE_MS = 25;
 var DEFAULT_AUTO_MOVES_PER_PASS = 1000;
 var DEFAULT_LOWER_MOVE_SLICE_MS = 1000;
+var MAX_LOWER_MOVE_SLICE_MS = 1e4;
 var DEFAULT_LOWER_MOVE_BATCH_MS = 25;
 var DEFAULT_TIER_SNIFFER_MAX_PASS_MS = 15 * 60000;
 var EXTRACTION_ENQUEUE_GRACE_MS = 15 * 60000;
@@ -77124,8 +77162,22 @@ class TierSnifferService {
       if (!this.options.autoMoves || this.stopped || !this.options.autoMoves.localEmbeddingsOnly())
         return;
       if (this.moving && this.movingDirection !== direction) {
-        if (direction === "raise")
+        if (direction === "raise") {
+          const raisesQueued = this.ledgerPaths().some((path) => {
+            try {
+              const set2 = tierSetForLedger(path);
+              if (!set2 || !setEmbedsWithBuiltInOnly(set2))
+                return false;
+              const limit = Math.max(0, this.options.autoMoves.maxPerPass ?? 25);
+              return limit > 0 && set2.ledger.listMoving({ limit, direction: "raise" }).some((record3) => isAutoMoveCandidate(record3) && !this.moveFailures.has(`${path}\x00${tierLedgerIdentityKey(recordIdentity(record3))}\x00${record3.generation}`));
+            } catch {
+              return true;
+            }
+          });
+          if (!raisesQueued)
+            return;
           this.lowerMovePreempted = true;
+        }
         await this.moving;
       }
       if (!this.moving) {
@@ -77259,13 +77311,26 @@ class TierSnifferService {
   async runAutoMoves(options, signal, direction) {
     const timings = emptyTierMoveTimings();
     const started = performance.now();
-    const deadline = started + Math.max(0, options.lowerSliceMs ?? DEFAULT_LOWER_MOVE_SLICE_MS);
+    const paths = this.ledgerPaths();
+    const backlog = direction === "lower" ? paths.reduce((n, path) => {
+      try {
+        return n + (tierSetForLedger(path)?.ledger.countMoving("lower") ?? 0);
+      } catch {
+        return n;
+      }
+    }, 0) : 0;
+    const configuredJudgeMs = this.options.passTimeMs ?? DEFAULT_SNIFFER_PASS_TIME_MS;
+    const judgeBudgetMs = Number.isFinite(configuredJudgeMs) && configuredJudgeMs > 0 ? configuredJudgeMs : DEFAULT_SNIFFER_PASS_TIME_MS;
+    const capMs = Math.min(MAX_LOWER_MOVE_SLICE_MS, judgeBudgetMs / 3);
+    const adaptiveMs = Math.max(DEFAULT_LOWER_MOVE_SLICE_MS, backlog * DEFAULT_LOWER_MOVE_BATCH_MS);
+    const requestedMs = options.lowerSliceMs ?? adaptiveMs;
+    const sliceMs = Math.min(capMs, Math.max(0, Number.isFinite(requestedMs) ? requestedMs : adaptiveMs));
+    const deadline = started + sliceMs;
     const shouldStop = () => signal.aborted || direction === "lower" && (performance.now() >= deadline || this.lowerMovePreempted || this.yieldNow());
     const report = { moved: 0, failed: 0, notEligible: 0, timings };
     const staleAfterMs = Math.max(0, options.staleAfterMs ?? DEFAULT_STALE_MOVE_MS);
     const now = (this.options.now ?? (() => new Date))().getTime();
     let budget = Math.max(0, options.maxPerPass ?? (direction === "raise" ? 25 : DEFAULT_AUTO_MOVES_PER_PASS));
-    const paths = this.ledgerPaths();
     const offset = this.moveLedgerOffsets[direction]++ % Math.max(1, paths.length);
     for (const ledgerPath of [...paths.slice(offset), ...paths.slice(0, offset)]) {
       if (budget === 0 || shouldStop())
@@ -77273,7 +77338,7 @@ class TierSnifferService {
       const set2 = tierSetForLedger(ledgerPath);
       if (!set2)
         continue;
-      const queued = set2.ledger.listMoving({ limit: budget, direction }).filter((record3) => record3.routed && record3.targetMetadataTier !== null && record3.targetContentTier !== null && record3.targetMetadataTier !== "secrets" && record3.targetContentTier !== "secrets");
+      const queued = set2.ledger.listMoving({ limit: budget, direction }).filter(isAutoMoveCandidate);
       if (!setEmbedsWithBuiltInOnly(set2)) {
         report.notEligible += queued.length;
         continue;
@@ -77372,8 +77437,8 @@ class TierSnifferService {
       await flushTierMoveNotes(set2.ledger, { timings, shouldStop });
     }
     report.elapsedMs = performance.now() - started;
-    if (report.moved > 0 || report.failed > 0) {
-      this.options.log?.(`Olympus tier sniffer: ${report.moved} automatic tier move(s), ${report.failed} failed` + `${report.failedBy ? ` (${Object.entries(report.failedBy).map(([why, n]) => `${why} ×${n}`).join(", ")})` : ""}` + `${report.abandoned ? `, ${report.abandoned} stale move(s) given up (back where they were)` : ""}` + `${report.staleRaises ? `, ${report.staleRaises} stale raise(s) kept hidden and queued` : ""}` + `${report.retiredAbsent ? `, ${report.retiredAbsent} stale raise(s) of items no store holds forgotten` : ""}; direction=${direction} elapsed_ms=${Math.round(report.elapsedMs)} ` + Object.entries(timings).map(([step, ms]) => `${step.replace(/[A-Z]/g, (letter) => `_${letter.toLowerCase()}`)}=${Math.round(ms)}`).join(" ") + ".");
+    if (direction === "lower" || report.moved > 0 || report.failed > 0) {
+      this.options.log?.(`Olympus tier sniffer: ${report.moved} automatic tier move(s), ${report.failed} failed` + `${report.failedBy ? ` (${Object.entries(report.failedBy).map(([why, n]) => `${why} ×${n}`).join(", ")})` : ""}` + `${report.abandoned ? `, ${report.abandoned} stale move(s) given up (back where they were)` : ""}` + `${report.staleRaises ? `, ${report.staleRaises} stale raise(s) kept hidden and queued` : ""}` + `${report.retiredAbsent ? `, ${report.retiredAbsent} stale raise(s) of items no store holds forgotten` : ""}; direction=${direction} elapsed_ms=${Math.round(report.elapsedMs)} ` + (direction === "lower" ? `backlog=${backlog} slice_ms=${Math.round(sliceMs)} ` : "") + Object.entries(timings).map(([step, ms]) => `${step.replace(/[A-Z]/g, (letter) => `_${letter.toLowerCase()}`)}=${Math.round(ms)}`).join(" ") + ".");
     }
     return report;
   }
@@ -77461,6 +77526,9 @@ function matchingVectorIdentities(set2, exported) {
     } catch {}
   }
   return identities;
+}
+function isAutoMoveCandidate(record3) {
+  return record3.routed && record3.targetMetadataTier !== null && record3.targetContentTier !== null && record3.targetMetadataTier !== "secrets" && record3.targetContentTier !== "secrets";
 }
 function setEmbedsWithBuiltInOnly(set2) {
   try {

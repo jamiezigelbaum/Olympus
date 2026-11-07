@@ -906,14 +906,14 @@ export class TierLedger {
     return flipped!;
   }
 
-  /**
-   * Items with a queued move (state `moving`): the fewest failed attempts
-   * first (`recordMoveFailure`), then the oldest decision. A move that keeps
-   * failing goes to the back of the queue, so it never holds the head of a
-   * bounded page while moves behind it could land.
-   */
-  listMoving(options: { limit?: number; direction?: 'raise' | 'lower' } = {}): TierLedgerRecord[] {
-    const limit = Math.max(1, Math.min(options.limit ?? 100, 5_000));
+  /** Counts only queued work; never materializes item content or a bounded page. */
+  countMoving(direction?: 'raise' | 'lower'): number {
+    return (this.db.query(`SELECT COUNT(*) AS n FROM tier_items WHERE state = 'moving'
+      ${this.movingDirectionClause(direction)}`).get() as { n: number }).n;
+  }
+
+  private movingDirectionClause(direction?: 'raise' | 'lower'): string {
+    if (!direction) return '';
     // A hide-first move also wins if it was retargeted at the same tiers.
     const rank = (column: string) => `(CASE ${column} WHEN 'secrets' THEN 3 WHEN 'secure' THEN 2 WHEN 'private' THEN 1 ELSE 0 END)`;
     const raising = `(${rank('target_metadata_tier')} > ${rank('metadata_tier')}
@@ -922,9 +922,20 @@ export class TierLedger {
         AND c.account_scope = tier_items.account_scope AND c.provider_item_id = tier_items.provider_item_id
         AND c.conversation_key = tier_items.conversation_key AND c.copy_state = 'superseded'
         AND c.superseded_by_generation = tier_items.generation + 1))`;
+    return `AND ${direction === 'lower' ? 'NOT' : ''} ${raising}`;
+  }
+
+  /**
+   * Items with a queued move (state `moving`): the fewest failed attempts
+   * first (`recordMoveFailure`), then the oldest decision. A move that keeps
+   * failing goes to the back of the queue, so it never holds the head of a
+   * bounded page while moves behind it could land.
+   */
+  listMoving(options: { limit?: number; direction?: 'raise' | 'lower' } = {}): TierLedgerRecord[] {
+    const limit = Math.max(1, Math.min(options.limit ?? 100, 5_000));
     const rows = this.db.query(`
       SELECT * FROM tier_items INDEXED BY tier_items_move_order WHERE state = 'moving'
-      ${options.direction ? `AND ${options.direction === 'lower' ? 'NOT' : ''} ${raising}` : ''}
+      ${this.movingDirectionClause(options.direction)}
       ORDER BY move_attempts, decided_at, provider, account_scope, provider_item_id, conversation_key
       LIMIT ?
     `).all(limit);

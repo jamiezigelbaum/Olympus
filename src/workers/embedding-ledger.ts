@@ -167,7 +167,12 @@ export async function appendEmbeddingLedgerEntry(
   path: string,
   entry: EmbeddingLedgerEntry,
 ): Promise<void> {
-  const line = `${JSON.stringify(entry)}\n`;
+  await appendEmbeddingLedgerEntries(path, [entry]);
+}
+
+/** One durable write for a bounded group; callers retain obligations until fsync succeeds. */
+async function appendEmbeddingLedgerEntries(path: string, entries: readonly EmbeddingLedgerEntry[]): Promise<void> {
+  const line = entries.map(entry => `${JSON.stringify(entry)}\n`).join('');
   await mkdir(dirname(path), { recursive: true, mode: 0o700 });
   const handle = await open(path, 'a', 0o600);
   try {
@@ -198,17 +203,26 @@ export async function appendEmbeddingLedgerEntryOnce(
   path: string,
   entry: EmbeddingLedgerEntry,
 ): Promise<boolean> {
-  const id = entry.entry_id?.trim();
-  if (!id) {
-    await appendEmbeddingLedgerEntry(path, entry);
-    return true;
-  }
+  return (await appendEmbeddingLedgerEntriesOnce(path, [entry])) > 0;
+}
+
+/** Deduplicate against the recorded tail and within this group, then fsync once. */
+export async function appendEmbeddingLedgerEntriesOnce(
+  path: string, entries: readonly EmbeddingLedgerEntry[],
+): Promise<number> {
+  if (!entries.length) return 0;
   const known = await recordedEntryIds(path);
-  if (known.has(id)) return false;
-  // Not added to `known`: the next call reads this line back from the file's
-  // tail, so a ledger deleted in between is not remembered as holding it.
-  await appendEmbeddingLedgerEntry(path, entry);
-  return true;
+  const pendingIds = new Set<string>();
+  const pending = entries.filter(entry => {
+    const id = entry.entry_id?.trim();
+    if (!id) return true;
+    if (known.has(id) || pendingIds.has(id)) return false;
+    pendingIds.add(id);
+    return true;
+  });
+  if (pending.length) await appendEmbeddingLedgerEntries(path, pending);
+  // Do not cache unconfirmed writes: retries read the durable file tail.
+  return pending.length;
 }
 
 /**
