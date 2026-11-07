@@ -42215,12 +42215,21 @@ function openTargetTokenPattern() {
   const tokens = allOpenTargets().map(openTargetToken).filter((token) => token !== undefined);
   return `^(?:page\\.private\\.[A-Za-z0-9_-]{22}|${tokens.map((token) => token.replace(".", "\\.")).join("|")})$`;
 }
+function isConnectOpenTarget(target) {
+  return target.kind === "connect";
+}
 function isKeysOpenTarget(target) {
-  return target.kind === "connect" || target.kind === "fix" && (target.section === "models" || target.section === "answers" || target.section === "search");
+  return target.kind === "fix" && (target.section === "models" || target.section === "answers" || target.section === "search");
+}
+function tokenPattern(filter) {
+  const tokens = allOpenTargets().filter(filter).map(openTargetToken).filter((token) => token !== undefined);
+  return `^(?:${tokens.map((token) => token.replace(".", "\\.")).join("|")})$`;
 }
 function keysOpenTargetTokenPattern() {
-  const tokens = allOpenTargets().filter(isKeysOpenTarget).map(openTargetToken).filter((token) => token !== undefined);
-  return `^(?:${tokens.map((token) => token.replace(".", "\\.")).join("|")})$`;
+  return tokenPattern(isKeysOpenTarget);
+}
+function connectOpenTargetTokenPattern() {
+  return tokenPattern(isConnectOpenTarget);
 }
 function privateAnswersOpenTargetTokenPattern() {
   return "^page\\.private(?:\\.[A-Za-z0-9_-]{22})?$";
@@ -42373,6 +42382,7 @@ var init_dashboard_launch = __esm(() => {
         var KEY = '${DASHBOARD_LAUNCH_TICKET_FRAGMENT_KEY}';
         var OPEN = /${openTargetTokenPattern()}/;
         var KEYS = /${keysOpenTargetTokenPattern()}/;
+        var CONNECT = /${connectOpenTargetTokenPattern()}/;
         var PANEL = /${panelOpenTargetTokenPattern()}/;
         var PRIVATE = /${privateAnswersOpenTargetTokenPattern()}/;
         var status = document.getElementById('status');
@@ -42404,13 +42414,15 @@ var init_dashboard_launch = __esm(() => {
           // lands on the dashboard: the session it opened is in its cookie,
           // and without one the dashboard itself offers the way back in.
           if (response.ok || response.status === 403) {
-            // A Keys target (Connect, a model fix) lands on Keys, where the computer's setup
-            // sheets and Models live; it only opens a panel there, never submits anything.
+            // Connect lands on Connect a source, where the computer's setup sheets live; a
+            // model fix lands on Privacy settings (?keys), where the models live. Each only
+            // opens something there, never submits anything.
             // A panel target (See why on one source) lands on the dashboard there.
             // Private answers lands on that page, carrying nothing.
             // Everything else (a reconnect, the dashboard itself) lands on the dashboard.
-            window.location.replace(KEYS.test(open)
-              ? '/dashboard?keys#${DASHBOARD_OPEN_FRAGMENT_KEY}=' + open
+            window.location.replace(CONNECT.test(open)
+              ? '/dashboard?connect#${DASHBOARD_OPEN_FRAGMENT_KEY}=' + open
+              : KEYS.test(open) ? '/dashboard?keys#${DASHBOARD_OPEN_FRAGMENT_KEY}=' + open
               : PANEL.test(open) ? '/dashboard#${DASHBOARD_OPEN_FRAGMENT_KEY}=' + open
               : PRIVATE.test(open) ? '/dashboard?private-answers' + (open.indexOf('page.private.') === 0 ? '#' + open.slice(13) : '') : '/dashboard');
             return;
@@ -54938,7 +54950,7 @@ function archiveFindingList(kind) {
 function privateAnswerFailure(reason, mapping = PRIVATE_ANSWER_FAILURES) {
   return typeof reason === "string" && Object.prototype.hasOwnProperty.call(mapping, reason) ? mapping[reason] : { message: "Olympus could not answer this.", action: "Try again." };
 }
-var DASHBOARD_UPDATE_COPY, DASHBOARD_MISSING_FOLDER = "A folder you chose is missing", DASHBOARD_FOLDER_NEEDS_PERMISSION = "Your Mac will not let Olympus open a folder you chose. In System Settings, choose Privacy & Security, then Files & Folders, and switch on Olympus Engine (or the app your Mac named when it asked).", DASHBOARD_FOLDER_NEEDS_HELPER = "Desktop, Documents, Downloads, iCloud Drive and other disks need the Olympus helper app. Update Olympus to add it, or choose a folder outside them.", DASHBOARD_FOLDER_UNREADABLE = "Your user account is not allowed to open a folder you chose. Change who may open that folder, or choose another one.", DASHBOARD_STATUS_PRESENTATION, DASHBOARD_CONNECTION_STATE_STATUS, DASHBOARD_ANSWER_READINESS_STATUS, DASHBOARD_QUEUE_HEALTH_STATUS, DASHBOARD_UNKNOWN_STATUS = "Waiting", DASHBOARD_UNCONNECTED_STATES, DASHBOARD_SIGNED_OUT = "signed out", DASHBOARD_DISCONNECTED_DATA_KEPT = "Disconnected · indexed data kept", DASHBOARD_RECONNECT_LABEL = "Reconnect", DASHBOARD_MANY_UNREADABLE_LABEL = "Many files cannot be read", DASHBOARD_STORAGE_NOTICE_COPY, DASHBOARD_MEDIA_STORAGE_COPY, READINESS_REASONS, GENERIC_READINESS_ATTENTION_LABEL = "Needs attention before answers", DASHBOARD_CAPTURE_STALE_LABEL = "Live capture is stale", DASHBOARD_CAPTURE_BLOCKED_LABEL = "Live capture cannot start", DASHBOARD_CAPTURE_COPY, CAPTURE_JUDGED_CONNECTION_STATES, CAPTURE_UNEXPECTED_STOP_REASONS, REDIRECT_REFUSAL_CODES, DASHBOARD_EVERNOTE_CONSENT_HELP = "On Evernote’s consent screen, leave only View ticked; untick Create, Edit and Delete.", DASHBOARD_MODELS_BLOCKED_REASON = "Locked until models are ready", SETUP_LEADS, DASHBOARD_INDEX_FASTER, DASHBOARD_NONE_READ_BY_POLICY = "none of these files are read by policy", DASHBOARD_NONE_READ_OLD_MAIL = "older mail is kept as names only", DASHBOARD_LIVE_PASS_ERROR_COPY, DASHBOARD_UNREADABLE_FILE_REASON_WORDS, DASHBOARD_UNREADABLE_NOTE = "Olympus does not retry these, and nothing is waiting on you.", DASHBOARD_UNREADABLE_MORE = "and {count} more", DASHBOARD_UNREADABLE_NOTE_MANY, DASHBOARD_UNREADABLE_REASON_CODES, DASHBOARD_UNREADABLE_REASON_WORDS, DASHBOARD_SOURCE_FAILURE_WORDS, DASHBOARD_FAILURE_REF = "Olympus's log on the computer has the details under reference {ref}.", DASHBOARD_FAILURE_LOG = "Olympus's log on the computer has the details.", DASHBOARD_CHATGPT_VOCABULARY, DASHBOARD_CHATGPT_REFUSAL_COPY, DASHBOARD_CHATGPT_CONNECTION_COPY, DASHBOARD_CHATGPT_PAGE_COPY, DASHBOARD_WORKER_TOKEN_AGENT_PROMPT, DASHBOARD_HOST_GATE_COPY, ARCHIVE_PICK_INTRO, DASHBOARD_ARCHIVE_NOUNS, DASHBOARD_ARCHIVE_COPY, DASHBOARD_COMPUTER_PANEL_COPY, DASHBOARD_CHATGPT_SETUP_LABELS, DASHBOARD_CHATGPT_PICKER_COPY, DASHBOARD_PRIVACY_QUESTIONS_COPY, DASHBOARD_CHATGPT_PRIVACY_COPY, DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY, DASHBOARD_CHATGPT_PRIVACY_CLASSIFIER_APPROVAL_COPY, DASHBOARD_CHATGPT_PRIVATE_ANSWER_COPY, DASHBOARD_CHATGPT_PRIVATE_QUESTION_COPY, DASHBOARD_LOCAL_COPY, DASHBOARD_PRIVATE_ANSWERS_COPY, OUTSIDE_HELP_CONFINEMENT_UNAVAILABLE = "Anonymous answers aren't available on this computer because its network isolation check hasn't passed. Nothing is sent without it.", DASHBOARD_OUTSIDE_HELP_COPY, PRIVATE_ANSWER_FAILURES;
+var DASHBOARD_UPDATE_COPY, DASHBOARD_MISSING_FOLDER = "A folder you chose is missing", DASHBOARD_FOLDER_NEEDS_PERMISSION = "Your Mac will not let Olympus open a folder you chose. In System Settings, choose Privacy & Security, then Files & Folders, and switch on Olympus Engine (or the app your Mac named when it asked).", DASHBOARD_FOLDER_NEEDS_HELPER = "Desktop, Documents, Downloads, iCloud Drive and other disks need the Olympus helper app. Update Olympus to add it, or choose a folder outside them.", DASHBOARD_FOLDER_UNREADABLE = "Your user account is not allowed to open a folder you chose. Change who may open that folder, or choose another one.", DASHBOARD_STATUS_PRESENTATION, DASHBOARD_CONNECTION_STATE_STATUS, DASHBOARD_ANSWER_READINESS_STATUS, DASHBOARD_QUEUE_HEALTH_STATUS, DASHBOARD_UNKNOWN_STATUS = "Waiting", DASHBOARD_UNCONNECTED_STATES, DASHBOARD_SIGNED_OUT = "signed out", DASHBOARD_DISCONNECTED_DATA_KEPT = "Disconnected · indexed data kept", DASHBOARD_RECONNECT_LABEL = "Reconnect", DASHBOARD_MANY_UNREADABLE_LABEL = "Many files cannot be read", DASHBOARD_STORAGE_NOTICE_COPY, DASHBOARD_MEDIA_STORAGE_COPY, READINESS_REASONS, GENERIC_READINESS_ATTENTION_LABEL = "Needs attention before answers", DASHBOARD_CAPTURE_STALE_LABEL = "Live capture is stale", DASHBOARD_CAPTURE_BLOCKED_LABEL = "Live capture cannot start", DASHBOARD_CAPTURE_COPY, CAPTURE_JUDGED_CONNECTION_STATES, CAPTURE_UNEXPECTED_STOP_REASONS, REDIRECT_REFUSAL_CODES, DASHBOARD_EVERNOTE_CONSENT_HELP = "On Evernote’s consent screen, leave only View ticked; untick Create, Edit and Delete.", DASHBOARD_MODELS_BLOCKED_REASON = "Locked until models are ready", SETUP_LEADS, DASHBOARD_INDEX_FASTER, DASHBOARD_NONE_READ_BY_POLICY = "none of these files are read by policy", DASHBOARD_NONE_READ_OLD_MAIL = "older mail is kept as names only", DASHBOARD_LIVE_PASS_ERROR_COPY, DASHBOARD_UNREADABLE_FILE_REASON_WORDS, DASHBOARD_UNREADABLE_NOTE = "Olympus does not retry these, and nothing is waiting on you.", DASHBOARD_UNREADABLE_MORE = "and {count} more", DASHBOARD_UNREADABLE_NOTE_MANY, DASHBOARD_UNREADABLE_REASON_CODES, DASHBOARD_UNREADABLE_REASON_WORDS, DASHBOARD_SOURCE_FAILURE_WORDS, DASHBOARD_FAILURE_REF = "Olympus's log on the computer has the details under reference {ref}.", DASHBOARD_FAILURE_LOG = "Olympus's log on the computer has the details.", DASHBOARD_CHATGPT_VOCABULARY, DASHBOARD_CHATGPT_REFUSAL_COPY, DASHBOARD_CHATGPT_CONNECTION_COPY, DASHBOARD_CHATGPT_PAGE_COPY, DASHBOARD_WORKER_TOKEN_AGENT_PROMPT, DASHBOARD_HOST_GATE_COPY, ARCHIVE_PICK_INTRO, DASHBOARD_ARCHIVE_NOUNS, DASHBOARD_ARCHIVE_COPY, DASHBOARD_PRIVACY_SETTINGS_COPY, DASHBOARD_COMPUTER_PANEL_COPY, DASHBOARD_CHATGPT_SETUP_LABELS, DASHBOARD_CHATGPT_PICKER_COPY, DASHBOARD_PRIVACY_QUESTIONS_COPY, DASHBOARD_CHATGPT_PRIVACY_COPY, DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY, DASHBOARD_CHATGPT_PRIVACY_CLASSIFIER_APPROVAL_COPY, DASHBOARD_CHATGPT_PRIVATE_ANSWER_COPY, DASHBOARD_CHATGPT_PRIVATE_QUESTION_COPY, DASHBOARD_LOCAL_COPY, DASHBOARD_PRIVATE_ANSWERS_COPY, OUTSIDE_HELP_CONFINEMENT_UNAVAILABLE = "Anonymous answers aren't available on this computer because its network isolation check hasn't passed. Nothing is sent without it.", DASHBOARD_OUTSIDE_HELP_COPY, PRIVATE_ANSWER_FAILURES;
 var init_vocabulary = __esm(() => {
   init_source_dashboard();
   init_archive_formats();
@@ -55655,15 +55667,49 @@ var init_vocabulary = __esm(() => {
       }
     }
   };
+  DASHBOARD_PRIVACY_SETTINGS_COPY = {
+    whatsPrivate: "What's private",
+    intro: "Olympus judges every item on its own as Personal, Private or Secret. Your AI apps and agents can read Personal items. Private items are read only by the private model you choose. Secrets never leave this computer.",
+    wordsTitle: "Your own words, follow-up questions and always-private rules",
+    wordsLine: "Edit them under Privacy on the main page.",
+    wordsOpen: "Open",
+    answeredTitle: "How Private items are answered",
+    answeredIntro: "This applies everywhere: when your agents ask about Private items, and when you ask privately.",
+    recommended: "Recommended",
+    change: "Change",
+    judgeTitle: "Sorting your archive by privacy",
+    judgeIntro: "Before any AI can read an item, Olympus sorts it into Personal, Private or Secret. Until it's sorted, it's treated as Private. Choose who does the sorting.",
+    judgeLegend: "Who sorts your items",
+    judgeNow: "Sorting now",
+    judgeLocal: "On this computer",
+    judgeLocalLead: "Nothing leaves this computer.",
+    judgeLocalWhen: "In the background while Olympus runs, using this computer",
+    judgeLocalFit: "Best if you can wait, or your archive is small.",
+    judgeVenice: "Venice",
+    judgeVeniceWhen: "In Venice's cloud, without slowing this computer",
+    judgeVeniceFit: "Best for a big archive you want sorted soon. You set a spending limit and Olympus never goes past it.",
+    judgeCost: "Cost",
+    judgeTime: "Time",
+    judgeWhen: "Where",
+    judgeModel: "Model",
+    judgeCap: "Venice spending limit, in total (US dollars)",
+    judgeToVenice: "Switch sorting to Venice?",
+    judgeToVeniceButton: "Switch to Venice",
+    judgeToLocal: "Switch sorting to this computer?",
+    judgeToLocalLine: "Nothing more is sent to Venice. Items not yet sorted stay Private until this computer sorts them.",
+    judgeToLocalButton: "Switch to this computer",
+    judgeSaveLimit: "Save limit",
+    judgeCancel: "Cancel"
+  };
   DASHBOARD_COMPUTER_PANEL_COPY = {
     section: "On this computer",
     onlyHere: "only here",
     open: "Open",
     rows: {
       help: { title: "Help", line: "Copy a system report or contact support" },
-      keys: { title: "Keys", line: "Venice, Readwise and X keys" },
       agents: { title: "Agents", line: "Remote access and connected agents" },
-      privateAnswers: { title: "Inbox", line: "Answers from every model, kept on this computer." },
+      connect: { title: "Connect a source", line: "Setup for sources that connect on this computer", empty: "Every source that connects on this computer is set up." },
+      privateAnswers: { title: "Privacy", line: "Ask privately, your private inbox, and how Private items are answered" },
       connector: { title: "Build a connector", line: "For a source Olympus does not have yet" }
     },
     waiting: { one: "1 unread private answer", many: "{count} unread private answers" },
@@ -56152,10 +56198,23 @@ var init_vocabulary = __esm(() => {
     }
   };
   DASHBOARD_PRIVATE_ANSWERS_COPY = {
-    crumb: "Inbox",
-    title: "Ask a question",
-    intro: "Pick which model answers. Answers land in your inbox on this computer.",
-    chooserLabel: "Which model should answer?",
+    crumb: "Privacy",
+    tabQuestions: "Private questions",
+    tabSettings: "Privacy rules",
+    tabsLabel: "Privacy",
+    title: "Ask privately",
+    intro: "When you ask your AI app about Private things, the app still sees the question. Asked here, it doesn't.",
+    chooserLabel: "Who answers this question",
+    answeredBy: "Answered by {name}",
+    noneReady: "No model is ready to answer yet.",
+    computerCard: "Local",
+    veniceCard: "Venice",
+    zkapiCard: "zkAPI",
+    computerLine: "Nothing leaves this computer.",
+    veniceLine: "A stronger model in Venice’s cloud, under your Venice account.",
+    zkapiLine: "A top cloud model that can’t tell who’s asking. You pay anonymously and the question travels over Tor, so it can’t be traced to you.",
+    zkapiSetupTitle: "zkAPI settings",
+    zkapiChangeModel: "change",
     readyStatus: "Ready",
     downloadingStatus: "Downloading",
     notSetUpStatus: "Not set up",
@@ -56170,7 +56229,7 @@ var init_vocabulary = __esm(() => {
     veniceTag: "In Venice’s cloud",
     zkapiOff: "Turned off. zkAPI is turned off.",
     zkapiPaused: "Paused. Accept the updated statements to continue.",
-    turnOnInModels: "Turn on in Models",
+    turnOnInModels: "Turn on below",
     afterAsk: "Sent. The answer will appear in your inbox.",
     computerName: "Local model",
     veniceName: "Venice model",
@@ -56186,11 +56245,11 @@ var init_vocabulary = __esm(() => {
     levelStrictHint: "Your own model rewrites it into general questions first, so nothing identifying can leave.",
     levelStandard: "Standard",
     levelStandardHint: "Your words, prepared the way you chose in {models}.",
-    levelModelsLink: "Models",
+    levelModelsLink: "zkAPI settings",
     askComputer: "Ask the local model",
     askVenice: "Ask a Venice model",
     askZkapi: "Ask a model through zkAPI",
-    setUpComputer: "Go to Models",
+    setUpComputer: "Open Privacy rules",
     setUpVenice: "Connect Venice",
     veniceKey: "Venice API key",
     connectVenice: "Connect Venice",
@@ -56200,7 +56259,7 @@ var init_vocabulary = __esm(() => {
     veniceNotAllowed: "Turned off. Private questions can’t go to Venice until you allow it.",
     privacySetting: "Privacy settings for Private answers",
     privacySettingHelp: "Your sovereignty privacy preset controls whether Private items may go to Venice. The default keeps them on this computer. Ask your agent to show your current preset and, if you choose, change it with Olympus setup. Connecting a Venice key alone does not allow Private items to leave.",
-    changePrivacy: "Allow in Models",
+    changePrivacy: "Allow in Privacy rules",
     zkapiNotSetUp: "Not connected. Connect zkAPI and add money to use it.",
     destinationBusy: "This destination is answering. Please wait.",
     sentItems: "What was sent to Venice",
@@ -56216,12 +56275,12 @@ var init_vocabulary = __esm(() => {
     inboxUnavailable: "The inbox cannot keep another answer right now. Try again later.",
     inboxBeforeSend: "The inbox cannot keep this answer right now. Nothing was sent.",
     anonymousFailed: "Olympus could not answer this question.",
-    goToModels: "Go to Models",
+    goToModels: "Review below",
     privatePath: "Local model",
     anonymousPath: "zkAPI model",
     sent: "What was sent to zkAPI",
     askLabel: "Your question",
-    askPlaceholder: "Type your question",
+    askPlaceholder: "Ask anything, including about your Private items…",
     ask: "Ask",
     waitingTitle: "Inbox",
     waitingIntro: "Answers from every model, kept on this computer.",
@@ -118035,7 +118094,7 @@ async function openRemote(ctx, params, deps = {}) {
   return {
     ok: true,
     target: openTargetPath(target),
-    lands_on: isKeysOpenTarget(target) ? "/dashboard?keys" : target.kind === "private_answers" ? "/dashboard?private-answers" : "/dashboard",
+    lands_on: isConnectOpenTarget(target) ? "/dashboard?connect" : isKeysOpenTarget(target) ? "/dashboard?keys" : target.kind === "private_answers" ? "/dashboard?private-answers" : "/dashboard",
     computer,
     engine_port: port,
     ssh_target: sshTarget,
@@ -148712,7 +148771,7 @@ function mountDashboardController(options) {
     });
   }
   function say(form, message2) {
-    const slot = form.querySelector("[data-action-message]");
+    const slot = form.querySelector("dialog[open] [data-action-message]") ?? Array.from(form.querySelectorAll("[data-action-message]")).find((node) => !node.closest("dialog"));
     if (slot)
       slot.textContent = message2;
   }
@@ -149141,6 +149200,10 @@ function mountDashboardController(options) {
       firstRunResult("Saved. Check readiness after Olympus applies the change.");
     }
     const statusMessage = result.body.status_message;
+    if (params.action === "save_judge") {
+      form.dataset.judgeCurrent = params.choice;
+      form.querySelectorAll("dialog[open]").forEach((dialog) => dialog.close());
+    }
     const released = releaseSubmittedForm(form, submittedValues);
     if (released && params.action === "connect_api_key") {
       form.dataset.keyAccepted = "true";
@@ -150381,8 +150444,53 @@ function mountDashboardController(options) {
       focus.scrollIntoView({ block: "center" });
     focus.focus();
   }
+  const judgeDialog = (form, pick2) => form.querySelector(`dialog[data-judge-dialog="${pick2}"]`);
+  const resetJudge = (dialog) => {
+    const form = dialog.closest("form[data-judge-choice]");
+    if (dialog.open)
+      dialog.close();
+    const current2 = form?.dataset.judgeCurrent;
+    const radio = current2 ? form?.querySelector(`input[name="choice"][value="${current2}"]`) : null;
+    if (radio)
+      radio.checked = true;
+  };
+  const onJudgePick = (event) => {
+    const input = event.target;
+    if (!(input instanceof HTMLInputElement) || input.name !== "choice")
+      return;
+    const form = input.closest("form[data-judge-choice]");
+    if (!form || !input.checked || input.value === form.dataset.judgeCurrent)
+      return;
+    const dialog = judgeDialog(form, input.value);
+    if (dialog && typeof dialog.showModal === "function" && !dialog.open)
+      dialog.showModal();
+  };
+  const onJudgeDialogClick = (event) => {
+    const target = event.target instanceof Element ? event.target : null;
+    const cancel = target?.closest("[data-judge-cancel]");
+    const outside = (dialog2) => {
+      const box = dialog2.getBoundingClientRect();
+      const at = event;
+      return box.width > 0 && (at.clientX < box.left || at.clientX > box.right || at.clientY < box.top || at.clientY > box.bottom);
+    };
+    const dialog = cancel?.closest("dialog") ?? (target instanceof HTMLDialogElement && target.matches("[data-judge-dialog]") && outside(target) ? target : null);
+    if (dialog instanceof HTMLDialogElement) {
+      event.preventDefault();
+      resetJudge(dialog);
+    }
+  };
+  const onJudgeDialogCancel = (event) => {
+    const dialog = event.target;
+    if (dialog instanceof HTMLDialogElement && dialog.matches("[data-judge-dialog]")) {
+      event.preventDefault();
+      resetJudge(dialog);
+    }
+  };
   root.addEventListener("submit", onSubmit);
   root.addEventListener("click", onClick);
+  root.addEventListener("change", onJudgePick);
+  root.addEventListener("click", onJudgeDialogClick);
+  root.addEventListener("cancel", onJudgeDialogCancel, true);
   root.addEventListener("change", onClientFileChange);
   root.addEventListener("keydown", onClientFileKeydown);
   root.addEventListener("dragover", onClientFileDrop);
@@ -150426,6 +150534,9 @@ function mountDashboardController(options) {
     root.ownerDocument.removeEventListener("visibilitychange", onVisibilityReturn);
     root.removeEventListener("submit", onSubmit);
     root.removeEventListener("click", onClick);
+    root.removeEventListener("change", onJudgePick);
+    root.removeEventListener("click", onJudgeDialogClick);
+    root.removeEventListener("cancel", onJudgeDialogCancel, true);
     root.removeEventListener("change", onClientFileChange);
     root.removeEventListener("keydown", onClientFileKeydown);
     root.removeEventListener("dragover", onClientFileDrop);
@@ -154453,7 +154564,7 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     if (!onComputer())
       return null;
     const W = H.copy;
-    const keys = ["keys", "agents", "privateAnswers", "connector", "help"].filter((key2) => !!state.hostLinks[key2]);
+    const keys = ["privateAnswers", "agents", "connector", "help"].filter((key2) => !!state.hostLinks[key2]);
     if (!keys.length)
       return null;
     const heading = add(el("h2"), doc2.createTextNode(W.section + " "), el("span", "tag", W.onlyHere));
@@ -158970,7 +159081,9 @@ function computerOpenTargets(origin, token) {
       out[path] = `${origin}${dashboardHomeHref(token)}`;
     else if (target.kind === "private_answers")
       out[path] = `${origin}${dashboardLocalPageHref("privateAnswers", token)}${target.answerId ? "#" + target.answerId : ""}`;
-    else if (isKeysOpenTarget(target)) {
+    else if (isConnectOpenTarget(target)) {
+      out[path] = `${origin}${dashboardLocalPageHref("connect", token)}#${DASHBOARD_OPEN_FRAGMENT_KEY}=${openTargetToken(target)}`;
+    } else if (isKeysOpenTarget(target)) {
       out[path] = `${origin}${dashboardLocalPageHref("keys", token)}#${DASHBOARD_OPEN_FRAGMENT_KEY}=${openTargetToken(target)}`;
     } else if (isPanelOpenTarget(target)) {
       out[path] = `${origin}${dashboardHomeHref(token)}#${DASHBOARD_OPEN_FRAGMENT_KEY}=${openTargetToken(target)}`;
@@ -159476,6 +159589,7 @@ var init_host_page = __esm(() => {
   init_open_targets();
   DASHBOARD_LOCAL_PAGES = {
     keys: "keys",
+    connect: "connect",
     agents: "agents",
     privateAnswers: "private-answers",
     connector: "connector",
@@ -160105,578 +160219,6 @@ var init_agents = __esm(() => {
   MONTHS4 = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 });
 
-// src/workers/dashboard/static-styles.ts
-var LOCAL_PAGE_CSS = `
-.srows { border-top: 1px solid var(--line); margin-bottom: 8px; }
-.srow { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: start; gap: 8px 12px; padding: 12px 0; border-bottom: 1px solid var(--line); }
-.srow .smain { grid-column: 1; grid-row: 1; min-width: 0; }
-.srow .sact { grid-column: 2; grid-row: 1; flex: none; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
-.srow .sact form { margin: 0; }
-.srow .sline { margin: 4px 0 0 20px; color: var(--t2); font-size: var(--fs-body); }
-.srow .sline.strong { margin-left: 0; color: var(--t1); font-size: var(--fs-row); }
-.srow.nodot .sline { margin-left: 0; }
-.privacy { max-width: 760px; }
-.privacy .sect { margin-top: 24px; }
-.ptitle { font-size: var(--fs-title); font-weight: 650; margin: 8px 0 6px; color: var(--t1); }
-.pintro { color: var(--t2); margin: 0 0 18px; max-width: 72ch; }
-.pnote { color: var(--t2); margin: 0 0 12px; }
-.plabel { display: block; font-weight: 600; font-size: var(--fs-body); color: var(--t1); margin: 0 0 6px; }
-.ptextline { flex: 1 1 240px; width: auto; }
-.ptextline:focus-visible { outline: 2px solid var(--link); outline-offset: 1px; }
-.pbuttons { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
-.pbuttons a.btn { text-decoration: none; }
-@media (max-width: 700px) {
-  .srow { grid-template-columns: minmax(0, 1fr); }
-  .srow .sact { grid-column: 1; grid-row: 2; justify-content: flex-start; }
-}
-`, AGENT_CONNECT_CSS = `.agentpick { display: grid; gap: 6px; margin: 4px 0 0; }
-.agentchoice { border: 1px solid var(--line); border-radius: 8px; background: var(--panel); }
-.agentchoice > summary { list-style: none; cursor: pointer; padding: 10px 14px; display: flex; gap: 8px; align-items: baseline; font-size: var(--fs-body); color: var(--t2); }
-.agentchoice > summary::-webkit-details-marker { display: none; }
-.agentchoice > summary::after { content: '\\25B8'; margin-left: auto; color: var(--t4); transition: transform .12s ease; }
-.agentchoice[open] > summary::after { transform: rotate(90deg); }
-.agentchoice > summary:hover .name, .agentchoice > summary:focus-visible .name { color: var(--link); }
-.agentchoice > summary:focus-visible { outline: 1px solid var(--link); outline-offset: 2px; border-radius: 8px; }
-.agentchoice > summary .name { font-weight: 600; }
-.agentchoice .agentbody { padding: 2px 14px 14px; }
-.agentchoice .agentbody > p { margin: 0 0 10px; }
-.agentchoice .steps li { margin-bottom: 14px; }
-.agentchoice .steps .rowform { margin-top: 8px; }
-.agentchoice .steps .hint { display: block; margin: 6px 0 0; }
-.agentsecret { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 8px; }
-.agentsecret[hidden] { display: none; }
-.agentsecret .keyfield { font-family: var(--mono); min-width: 18ch; flex: 1 1 18ch; max-width: 46ch; }
-.agentsecret [data-agent-secret-note] { flex-basis: 100%; margin: 0; }
-#agents { margin-top: 26px; }
-[data-remote-access] > .rowform { flex: 0 0 auto; }
-.remoteterms { border: 1px solid var(--line); border-radius: 8px; background: var(--panel); padding: 12px 14px; margin: 6px 0 10px; font-size: var(--fs-body); color: var(--t2); }
-.remoteterms[hidden] { display: none; }
-.remoteterms p { margin: 0 0 8px; max-width: 72ch; }
-.remoteterms .rowform { margin-top: 4px; }
-.promptbox.prose { word-break: normal; overflow-wrap: anywhere; }`, MODEL_SETUP_CSS = `
-[data-first-run-computer] fieldset,[data-computer-use] fieldset,[data-judge-choice] fieldset{border:0;padding:0;margin:0;min-width:0}[data-first-run-computer] [data-server-checklist]{display:none}[data-first-run-computer]:has(input[value="server"]:checked) [data-server-checklist]{display:block}
-[data-first-run-privacy]{display:grid;gap:12px;margin:16px 0}[data-first-run-privacy] .modelcard{display:block;cursor:pointer}
-[data-first-run-sheet] [hidden]{display:none!important}
-.modelcards{display:grid;gap:12px;margin:16px 0 20px}.modelcard{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:16px 18px;min-width:0}
-.modelcard header{display:flex;align-items:baseline;flex-wrap:wrap;gap:2px 10px;margin:0}.modelcard header [role=status]{color:var(--t3);font-size:var(--fs-caption)}
-.modelcard header b{font-size:var(--fs-row)}.modelcard p{margin:6px 0 0;color:var(--t2)}.modelintro{color:var(--t2);margin:0 0 4px;max-width:72ch}
-.modelaction{display:flex;flex-wrap:wrap;align-items:center;gap:8px 16px;margin-top:12px}
-.modelaction form{display:flex;flex:1 1 320px;flex-wrap:wrap;align-items:center;gap:8px;margin:0;min-width:0}
-.modelaction input[type=password]{flex:1 1 180px;min-width:0;width:auto}.modelaction a{white-space:nowrap}.modelaction .modelnote{color:var(--t3)}
-.modelcards .modelrow,.modelcards .sheet{margin:0}.modelcards .sheet .modelaction{margin:0}
-.modeltools{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin:0 0 16px}.modeltools p{margin:0;flex-basis:100%}
-.modeltools form,.modelextras form{display:inline-flex;align-items:center;gap:8px;margin:0}
-.modelextras{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:0 0 24px}
-`, DASHBOARD_OUTSIDE_HELP_CSS = `
-/* The status line: the state and today's count, the switch beside them. */
-.outside .ohpanel { margin: 0 0 12px; padding: 14px 18px; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; display: grid; gap: 6px; }
-.outside .ohhead { display: flex; align-items: center; justify-content: space-between; gap: 10px 16px; flex-wrap: wrap; }
-.outside .ohstatewrap { display: grid; gap: 2px; min-width: 0; flex: 1 1 320px; }
-.outside .ohhead > .pbuttons { flex: none; }
-.outside .ohstate { display: flex; align-items: center; gap: 10px; margin: 0; font-size: var(--fs-row); font-weight: 600; color: var(--t1); }
-.outside .dot.on { background: var(--good); }
-.outside .dot.off { background: transparent; border: 2px solid var(--off); }
-.outside .dot.attn { background: var(--warn-fill); }
-.outside .ohline { margin: 0 0 0 20px; color: var(--t2); font-size: var(--fs-body); }
-.outside .ohline.attn { color: var(--warn); font-weight: 600; }
-.outside .ohsmall { font-size: var(--fs-caption); color: var(--t3); max-width: 78ch; }
-.outside .ohwarn { color: var(--t1); padding: 10px 12px; background: var(--warn-bg); border: 1px solid var(--warn-line); border-radius: 8px; }
-/* Problems: one tinted list, a line each, its one button in the line. */
-.outside .ohfix { list-style: none; margin: 0 0 12px; padding: 0; display: grid; gap: 6px; }
-.outside .ohfix li { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px 12px; padding: 10px 14px; background: var(--warn-bg); border: 1px solid var(--warn-line); border-radius: 8px; color: var(--t1); }
-.outside .ohfix li > span { flex: 1 1 200px; min-width: 0; }
-.outside .ohfix li::before { content: '!'; flex: 0 0 20px; height: 20px; border-radius: 50%; background: var(--warn-fill); color: var(--bg); font-weight: 800; font-size: var(--fs-caption); line-height: 20px; text-align: center; }
-.outside .ohfix .ohform { margin: 0; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.outside .ohfix .ohactions { display: flex; align-items: center; gap: 12px; }
-@media (max-width: 480px) { .outside .ohfix .ohactions { flex-direction: column; align-items: stretch; } }
-.outside .ohfix .actmsg:empty, .outside .ohpanel .actmsg:empty { display: none; }
-/* The statements, in full only until accepted. */
-.outside .ohaccept { margin: 0 0 12px; padding: 14px 18px; border: 1px solid var(--warn-line); border-radius: 10px; }
-.outside .ohaccept .sect { margin-top: 0; }
-.outside .ohaccept .ohlist { margin-bottom: 4px; }
-.outside .ohshort { margin: 0 0 4px; padding-left: 20px; color: var(--t1); }
-.outside .ohshort li { margin: 0 0 4px; max-width: 78ch; }
-.outside .ohlist, .outside .ohsteps, .outside .ohfacts { margin: 6px 0 10px; padding-left: 20px; color: var(--t1); }
-.outside .ohlist li, .outside .ohsteps li { margin: 0 0 6px; max-width: 78ch; overflow-wrap: anywhere; }
-.outside .ohfacts { color: var(--t2); font-size: var(--fs-caption); }
-.outside .ohfacts li { margin: 0 0 4px; overflow-wrap: anywhere; }
-/* Secondary sections: one line each (title and a short summary), open only when they need attention. */
-.outside details.ohsect { border-top: 1px solid var(--line); }
-.outside .ohmore { margin: 20px 0 0; }
-.outside .ohmore > details.ohsect:last-child { border-bottom: 1px solid var(--line); }
-.outside details.ohsect > summary { display: flex; align-items: baseline; gap: 6px 14px; flex-wrap: wrap; padding: 12px 0; cursor: pointer; list-style: none; }
-.outside details.ohsect > summary::-webkit-details-marker { display: none; }
-.outside details.ohsect > summary::before { content: '\\25B8'; color: var(--t3); font-size: var(--fs-body); width: 12px; flex: none; }
-.outside details.ohsect[open] > summary::before { content: '\\25BE'; }
-.outside details.ohsect > summary:focus-visible { outline: 2px solid var(--link); outline-offset: 2px; border-radius: 4px; }
-.outside .ohsect-title { font-size: var(--fs-section); font-weight: 600; color: var(--t1); }
-.outside .ohsect-sum { color: var(--t3); font-size: var(--fs-body); }
-.outside .ohsect-sum:empty { display: none; }
-.outside details.ohsect > summary:hover .ohsect-title { color: var(--link); }
-.outside .ohsect-body { padding: 0 0 16px 18px; }
-.outside .ohgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(200px, 100%), 1fr)); gap: 0 16px; margin: 0 0 8px; }
-.outside .ohform { display: grid; gap: 8px; margin: 8px 0 0; }
-.outside .ohform.ohinline { margin: 0 0 12px; }
-.outside .ohform .keyfield { width: 100%; max-width: 220px; }
-.outside .ohack { display: flex; align-items: flex-start; gap: 10px; min-height: 32px; cursor: pointer; color: var(--t1); max-width: 78ch; }
-.outside .ohack input { width: 16px; height: 16px; margin: 3px 0 0; accent-color: var(--link); flex: none; }
-.outside .ohack input:focus-visible { outline: 2px solid var(--link); outline-offset: 2px; }
-.outside .ohoff { color: var(--t3); }
-.outside .actmsg[data-state="error"] { color: var(--bad); }
-.outside .ohunlock { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; margin: 0 0 12px; padding: 10px 14px; background: var(--warn-bg); border: 1px solid var(--warn-line); border-radius: 8px; }
-.outside .ohunlock .hint { color: var(--t2); }
-.outside .ohunlock .actmsg:empty { display: none; }
-@media (max-width: 700px) {
-  .outside .ohpanel { padding: 14px; }
-  .outside .ohhead .pbuttons, .outside .ohhead .blocked { width: 100%; }
-  .outside .ohline { margin-left: 0; }
-  .outside .btn { white-space: normal; text-align: left; }
-  .outside .ohsect-body { padding-left: 0; }
-}
-`;
-
-// src/workers/dashboard/model-setup.ts
-function renderModelSetup(view3, options = {}) {
-  if (!view3)
-    return "";
-  const status = `<span hidden data-model-setup-status="${escapeHtml2(JSON.stringify(view3))}"></span>`;
-  if (view3.computer_use_pending)
-    return status + renderComputerUseChoice(view3);
-  const engine = renderEngineServerMode(view3);
-  if (view3.privacy_choice_pending)
-    return status + engine + privateModelProgress(view3) + renderFirstRunPrivacyChoice();
-  const bannerOwnsToggle = blockerOwnsLocalToggle(view3);
-  const cards = view3.cards.map((card) => {
-    if (card.state === "ready")
-      return readyModelRow(card);
-    const state = modelStateWord(card);
-    let action = "";
-    let sheet = "";
-    if (card.id === "local") {
-      if (card.state === "not_configured" && !bannerOwnsToggle) {
-        action = `<button type="button" class="btn primary" ${LOCAL_MODELS_TOGGLE}`;
-        sheet = localModelsSheet();
-      }
-    } else {
-      action = modelKeyAction(card, card.state === "applying" ? '<span class="modelnote">Key saved. Olympus is applying the configuration or waiting for another required key.</span>' : modelKeyForm(card));
-    }
-    return `<section class="modelcard" data-model-card="${card.id}"><header><b>${escapeHtml2(card.label)}</b><span role="status">${escapeHtml2(state)}</span></header>` + `<p>${escapeHtml2(card.detail)}</p>${action}</section>${sheet}`;
-  }).join("");
-  const localCard = view3.cards.some((card) => card.id === "local");
-  const extras = view3.ready ? '<div class="modelextras">' + (localCard ? "" : `<button type="button" class="btn" ${LOCAL_MODELS_TOGGLE}`) + `${CHECK_FORM_OPEN}<button class="btn" type="submit">Check readiness</button>${CHECK_FORM_TAIL}` + "</div>" + (localCard ? "" : localModelsSheet()) : localCard ? "" : '<div class="modeltools">' + `<p>Optional: your agent can help connect models you already run and review the matching privacy choice.</p><button type="button" class="btn" ${LOCAL_MODELS_TOGGLE}` + `${CHECK_FORM_OPEN}<button class="btn" type="submit">Check readiness</button>${CHECK_FORM_TAIL}` + "</div>" + localModelsSheet();
-  return status + engine + (view3.ready ? privateModelProgress(view3) : "") + `<section aria-label="Models">${options.heading === false ? "" : '<div class="sect">Models</div>'}` + (view3.ready ? `<p class="quiet" role="status">${options.heading === false ? "Models are ready." : "Models are ready. You can connect sources below."}</p>` : '<p class="modelintro">Add the keys required by your privacy choice. Olympus checks them and updates this page when they are ready. Saved keys are not displayed.</p>') + (view3.migration_notes ?? []).map((note) => `<p role="status" data-embedding-migration>${escapeHtml2(note)} See "Legacy embedding migration" in docs/SOVEREIGNTY_CONFIG.md.</p>`).join("") + (view3.attention ? `<p role="status">${escapeHtml2(view3.attention)}</p>` : "") + `<div class="modelcards">${cards}</div>` + extras + "</section>";
-}
-function renderFirstRunPrivacyChoice() {
-  const choices = PRIVATE_ANSWER_OPTIONS.map((option) => `<label class="modelcard"><input type="radio" name="choice" value="${escapeHtml2(option.id)}"${option.recommended ? " checked" : ""}> <b>${escapeHtml2(option.label)}${option.recommended ? " — Recommended" : ""}</b><p>${escapeHtml2(option.description)}</p></label>`).join("");
-  const choice = `<form id="first-run-privacy-choice" data-first-run-privacy>${choices}<span data-action-message role="status"></span></form>`;
-  const connect = '<div data-first-run-venice hidden><h4>Add a Venice key</h4><p data-first-run-venice-help></p><button class="btn" type="button" data-focus-target="#venice-setup input[name=api_key]">Go to the Venice key field</button></div>' + `<div data-first-run-local hidden><h4>Connect my local models</h4><p>The built-in model is already included. Connect a model you run, or continue with the built-in model.</p><button type="button" class="btn" ${LOCAL_MODELS_TOGGLE}${localModelsSheet()}</div>`;
-  const verify2 = `<form id="first-run-privacy-form" method="post" action="/dashboard/models/check" data-model-check>${CHECK_FORM_TAIL}` + '<p data-first-run-result role="status">Run the readiness check to verify your setup.</p><button class="btn" type="button" data-first-run-redo hidden></button><button class="btn" type="button" data-first-run-keys hidden>Continue setup in Keys</button>';
-  return '<section aria-label="Private answers" data-first-run-sheet>' + setupStepsSheet({
-    id: "first-run-privacy",
-    provider: "Olympus",
-    steps: [
-      { title: "How should Olympus answer with Private items?", text: "Choose how Private answers may be made. You can change this later in Privacy settings." },
-      { title: "Connect your choice", text: "Your privacy choice is saved." },
-      { title: "Verify it works", text: "Check that Olympus is ready with your saved choice." }
-    ],
-    stepContent: [choice, connect],
-    finalForm: () => verify2,
-    stepActions: [{ formId: "first-run-privacy-choice", label: "Continue" }, undefined, { formId: "first-run-privacy-form", label: "Check readiness" }],
-    footerContent: '<button class="btn primary" type="button" data-first-run-done hidden>Done</button>'
-  }) + "</section>";
-}
-function localModelsSheet() {
-  const controls = '<form data-local-models-discover><label>OpenAI-compatible URL (optional)<input class="keyfield" name="base_url" type="url" placeholder="http://127.0.0.1:1234/v1"></label><p>Leave blank to detect Ollama and LM Studio on this computer. Only loopback URLs are accepted.</p><button class="btn primary" type="submit">Detect local models</button><span data-action-message role="status"></span></form>' + '<div data-local-models-results></div><form data-local-models-test hidden><input type="hidden" name="base_url"><label>Answer model<select name="answer_model" required></select></label><p>Olympus tests the answer model before saving it. Your existing search index stays unchanged.</p><button class="btn primary" type="submit">Connect answer model</button><span data-action-message role="status"></span></form>';
-  return connectorSheet({ id: "local-model-setup-sheet", heading: "Connect existing local models", intro: "Detect models you already run and test them with synthetic text. Olympus does not install, download, or maintain them. Local means the machine hosting Olympus.", promptText: LOCAL_MODELS_SETUP_PROMPT, copyButtonLabel: "Copy prompt" }).replace('<div class="promptbox"', controls + '<div class="promptbox"');
-}
-function blockingCard(view3) {
-  return view3.ready ? undefined : view3.cards.find((entry) => entry.required && entry.state !== "ready");
-}
-function blockerOwnsLocalToggle(view3) {
-  const card = blockingCard(view3);
-  return card?.id === "local" && card.state === "not_configured";
-}
-function readyModelRow(card) {
-  const label = escapeHtml2(card.label);
-  const state = card.id === "local" ? "Ready" : "Ready · key connected";
-  const head = `<div class="attncard plain modelrow" data-model-card="${card.id}">` + `<div class="grow"><span class="name">${label}</span><span class="why"> — ${state}</span></div>`;
-  if (card.id === "local") {
-    return `${head}${rowMenu(card.label, `<button type="button" class="btn" ${LOCAL_MODELS_TOGGLE}`)}</div>${localModelsSheet()}`;
-  }
-  const sheetId = `model-key-${card.id.replace(/[^A-Za-z0-9_-]+/g, "-")}`;
-  const toggle = `<button type="button" class="btn" data-sheet-toggle="#${sheetId}" aria-controls="${sheetId}" aria-expanded="false">Replace key</button>`;
-  return `${head}${rowMenu(card.label, toggle)}</div>` + `<div class="sheet" id="${sheetId}" aria-hidden="true"><h4>Replace the ${label} key</h4>` + `<p>${escapeHtml2(card.detail)} Saved keys are not displayed.</p>${modelKeyAction(card, modelKeyForm(card))}</div>`;
-}
-function modelStateWord(card) {
-  if (card.state === "applying")
-    return card.id === "local" ? "Checking…" : "Applying…";
-  if (card.state === "needs_attention")
-    return card.id === "local" ? "Not answering" : "Needs attention";
-  if (card.state === "ready")
-    return "Ready";
-  return "Not configured";
-}
-function renderModelSetupBlocker(view3) {
-  if (!view3 || view3.ready || view3.privacy_choice_pending)
-    return "";
-  if (privateModelWords(view3))
-    return `<div data-private-model-progress>${blockerBanner({ sentence: dashboardModelsBlockedReason(view3), ...view3.private_model?.state === "failed" ? { controlHtml: retryPrivateModel() } : {} })}</div>`;
-  const card = blockingCard(view3);
-  if (!card) {
-    return blockerBanner({ sentence: view3.attention ?? "Model setup is not finished, so sources stay locked." });
-  }
-  if (card.id === "local") {
-    if (card.state === "applying") {
-      return blockerBanner({ sentence: "Checking your local models… Sources unlock when the check passes." });
-    }
-    if (card.state === "needs_attention") {
-      return blockerBanner({
-        sentence: "Your local model server is not answering, so sources stay locked. Start it, then check again.",
-        controlHtml: `${CHECK_FORM_OPEN}<button class="btn primary" type="submit">Check again</button>${CHECK_FORM_TAIL}`
-      });
-    }
-    return blockerBanner({
-      sentence: "Connect your local models to start connecting sources.",
-      controlHtml: `<button type="button" class="btn primary" ${LOCAL_MODELS_TOGGLE}`
-    }) + localModelsSheet();
-  }
-  if (card.state === "applying") {
-    return blockerBanner({ sentence: `Applying your ${card.label} key… Sources unlock when it is ready.` });
-  }
-  if (card.state === "needs_attention")
-    return blockerBanner({ sentence: card.detail });
-  return blockerBanner({
-    sentence: `Add your ${card.label} API key to start connecting sources.`,
-    controlHtml: `<button type="button" class="btn primary" data-focus-target="#${card.id === "venice" ? "model-venice-start" : modelKeyFieldId(card)}">Add ${escapeHtml2(card.label)} key</button>`
-  });
-}
-function modelKeyFieldId(card) {
-  return `model-key-field-${card.id.replace(/[^A-Za-z0-9_-]+/g, "-")}`;
-}
-function modelKeyForm(card, formId) {
-  return `<form${formId ? ` id="${formId}" class="setupfields"` : ""} method="post" action="/dashboard/connect/api-key" data-connect-kind="api_key" data-model-provider="${card.id}">` + `<input type="hidden" name="source" value="${card.id}">` + `<input class="keyfield"${card.state === "ready" ? "" : ` id="${modelKeyFieldId(card)}"`} type="password" name="api_key" required autocomplete="new-password" placeholder="${card.label} API key" aria-label="${card.label} API key">` + (formId ? "" : '<button class="btn primary" type="submit">Connect</button>') + '<span data-action-message role="status"></span></form>';
-}
-function modelKeyAction(card, lead) {
-  if (card.id === "venice" && lead.includes("<form")) {
-    return `<span id="model-venice-start" tabindex="-1"></span>` + setupStepsSheet({ id: `model-venice-${card.state}`, provider: "Venice", steps: VENICE_SETUP_STEPS, shortcut: VENICE_SETUP_SHORTCUT, finalForm: (formId) => modelKeyForm(card, formId) });
-  }
-  if (card.id === "gemini")
-    return `<div class="modelaction">${lead}<span class="modelnote">Existing Gemini installations only. New embedding setup uses built-in local EmbeddingGemma or Venice. See the embedding migration guide above.</span></div>`;
-  const href = "https://venice.ai";
-  return `<div class="modelaction">${lead}<a href="${href}" target="_blank" rel="noopener noreferrer">Get a ${card.label} API key</a></div>`;
-}
-function renderComputerUseChoice(view3) {
-  const pending = view3.engine_server_mode?.pending === true;
-  return '<section aria-label="Computer setup" data-first-run-computer><h3>How will this computer run?</h3>' + "<form data-computer-use><fieldset" + (pending ? " disabled" : "") + "><legend>Choose how you use this Mac</legend>" + '<label class="modelcard"><input type="radio" name="choice" value="everyday" checked> My everyday computer <span>Recommended</span></label>' + '<label class="modelcard"><input type="radio" name="choice" value="server"> Always on, as a server</label>' + "<p>" + escapeHtml2(SERVER_MODE_HELP) + "</p>" + SERVER_CHECKLIST + '<button type="submit" class="btn primary">Continue</button></fieldset><span data-action-message role="status">' + escapeHtml2(view3.engine_server_mode?.notice ?? "") + "</span></form></section>";
-}
-function renderEngineServerMode(view3) {
-  const mode = view3.engine_server_mode;
-  if (!mode)
-    return "";
-  return '<section aria-label="Engine" id="engine-settings"><h3 class="sect">Engine</h3><form data-computer-use data-server-mode>' + '<label><input type="checkbox" role="switch" name="server"' + (mode.enabled ? " checked" : "") + (mode.pending ? " disabled" : "") + "> Keep Olympus running when no one is logged in</label><p>" + escapeHtml2(SERVER_MODE_HELP) + "</p>" + '<p role="status">' + (mode.enabled ? "On — starts once the disk is unlocked." : "Off — runs when this account is signed in.") + "</p>" + (mode.enabled ? SERVER_CHECKLIST : "") + '<button type="submit" class="btn"' + (mode.pending ? " disabled" : "") + '>Save</button><span data-action-message role="status">' + escapeHtml2(mode.notice ?? "") + "</span></form></section>";
-}
-function privateModelWords(view3) {
-  const model = view3?.private_model;
-  if (!model || model.state === "ready" || model.state === "not_started" || model.state === "disabled")
-    return "";
-  if (model.state === "failed")
-    return "The private answer model download failed. Check your connection and available space, then try again.";
-  if (model.state !== "downloading")
-    return "Getting the private answer model ready…";
-  const done = model.bytesDone;
-  const total = model.bytesTotal;
-  if (typeof done !== "number" || typeof total !== "number" || !Number.isFinite(done) || !Number.isFinite(total) || total <= 0 || done < 0)
-    return "Downloading the private answer model…";
-  const scale = total >= 1e9 ? 1e9 : 1e6;
-  return `Downloading the private answer model: ${(Math.min(done, total) / scale).toFixed(1)} of ${(total / scale).toFixed(1)} ${scale === 1e9 ? "GB" : "MB"}`;
-}
-function dashboardModelsBlockedReason(view3) {
-  const progress = privateModelWords(view3);
-  return DASHBOARD_MODELS_BLOCKED_REASON + (progress ? `. ${progress}` : "");
-}
-function retryPrivateModel() {
-  return '<form method="post" action="/dashboard/models/check" data-model-check data-model-retry><button class="btn primary" type="submit">Try again</button><span data-action-message role="status"></span></form>';
-}
-function privateModelProgress(view3) {
-  const words2 = privateModelWords(view3);
-  return words2 ? `<div data-private-model-progress role="status"><p>${escapeHtml2(words2)}</p>${view3.private_model?.state === "failed" ? retryPrivateModel() : ""}</div>` : "";
-}
-var LOCAL_MODELS_SETUP_PROMPT = "Connect my existing local models to Olympus. Read the installed docs/SOVEREIGNTY_CONFIG.md, inspect the current Olympus policy, and help identify the running answer endpoint and its exact model ID on the machine hosting Olympus. Do not install or maintain model software, download models, change network access, or replace existing vectors. Explain any needed configuration changes before applying them. After an approved policy change, use olympus worker restart to apply it. Use synthetic text to verify the configured answer model, run olympus doctor, then send me back to the Keys page of the Olympus dashboard and its Check readiness button. If the server is on another machine or needs unsupported settings, explain that specific limit rather than inventing a working configuration.", LOCAL_MODELS_TOGGLE = 'data-sheet-toggle="#local-model-setup-sheet" aria-expanded="false">Connect existing local models</button>', CHECK_FORM_OPEN = '<form method="post" action="/dashboard/models/check" data-model-check>', CHECK_FORM_TAIL = '<span data-action-message role="status"></span></form>', SERVER_MODE_HELP = "Olympus starts by itself after a restart, once the disk is unlocked. Your Mac asks for an administrator's password once.", SERVER_CHECKLIST = "<ul data-server-checklist><li>Use a wired network.</li><li>Give this Mac a fixed network address in System Settings.</li><li>After a restart, someone must unlock the disk in person, or use Screen Sharing or SSH unlock on a wired network. After that, Olympus starts by itself.</li></ul>";
-var init_model_setup2 = __esm(() => {
-  init_vocabulary();
-  init_privacy_language();
-  init_source_dashboard();
-  init_components();
-});
-
-// src/workers/dashboard/pages/local.ts
-function unlocked(options) {
-  return options?.controlSessionCsrfToken !== undefined;
-}
-function localShell(input) {
-  const csrf = input.options?.controlSessionCsrfToken;
-  return pageShell({
-    title: "Olympus",
-    crumb: input.crumb,
-    ...input.options?.basePath === undefined ? {} : { basePath: input.options.basePath },
-    meta: input.meta,
-    body: input.body,
-    controller: { ...csrf === undefined ? {} : { csrfToken: csrf } },
-    poll: {
-      unlocked: csrf !== undefined,
-      ...csrf === undefined ? {} : { controlSessionCsrfToken: csrf }
-    },
-    styles: [LOCAL_PAGE_CSS, ...input.styles]
-  });
-}
-function renderDashboardKeysPage(view3, options) {
-  const blocked = view3.model_setup !== undefined && !view3.model_setup.ready;
-  const sources = view3.sources.filter((source) => source.connection.action.kind !== "none" || source.source_id === "telegram.messages" || source.source_id === "whatsapp.personal.messages");
-  const body = [
-    dashboardControlGate({ connected: unlocked(options) }),
-    renderModelSetupBlocker(view3.model_setup),
-    renderJudgeChoice(view3, options),
-    `<div id="private-routing"><div${view3.model_setup?.cards.some((card) => card.id === "venice") ? ' id="venice-setup"' : ""}>${renderModelSetup(view3.model_setup)}</div></div>`,
-    view3.model_setup?.cards.some((card) => card.id === "venice") ? "" : `<section id="venice-setup"><h3 class="sect">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.setUpVenice)}</h3><p class="pnote">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.veniceSetupHelp)}</p><div class="modelaction"><form method="post" action="/dashboard/connect/api-key" data-connect-kind="api_key" data-model-provider="venice"><input type="hidden" name="source" value="venice"><input class="keyfield" type="password" name="api_key" required autocomplete="new-password" placeholder="${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.veniceKey)}" aria-label="${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.veniceKey)}"><button type="submit" class="btn primary">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.connectVenice)}</button><span data-action-message role="status"></span></form></div></section>`,
-    `<section id="anonymous"><h3 class="sect">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.anonymousTitle)}</h3>${options?.outsideHelp ? renderOutsideHelpCard(options.outsideHelp, { ...options.controlSessionCsrfToken !== undefined ? { csrfToken: options.controlSessionCsrfToken } : {}, localSession: options.outsideHelpLocalSession === true, untitled: true }) : `<p data-outside-unavailable>${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.anonymousNotSetUp)}</p>`}</section>`,
-    sources.length === 0 ? "" : '<div class="sect" id="sources">Sources</div>',
-    sources.length === 0 ? "" : `<div class="srows">${sources.map((source) => renderSetupRow(source, view3, blocked, options?.basePath ?? "/dashboard", options?.messagingLocalSession === true) + sourceSupportBlock(source)).join(`
-`)}</div>`
-  ].filter((block) => block !== "").join(`
-`);
-  return localShell({
-    crumb: W.keys.title,
-    meta: dashboardCheckedLabel(view3.generated_at, options?.now ?? new Date),
-    body,
-    styles: [MODEL_SETUP_CSS, DASHBOARD_OUTSIDE_HELP_CSS],
-    options
-  });
-}
-function renderDashboardAgentsPage(options) {
-  const now = options?.now ?? new Date;
-  const body = [
-    dashboardControlGate({ connected: unlocked(options) }),
-    options?.agents ? renderDashboardAgentsSection({ ...options.agentConnectHost, view: options.agents, now }) : '<p class="foot">Agent connections are not available on this install.</p>'
-  ].join(`
-`);
-  return localShell({ crumb: W.agents.title, meta: "", body, styles: [AGENT_CONNECT_CSS], options });
-}
-function renderDashboardConnectorPage(options) {
-  const body = [
-    `<div class="sect">${escapeHtml2(CONNECTOR_SHEET_HEADING)}</div>`,
-    connectorSheet({
-      id: CONNECTOR_SHEET_ID,
-      heading: W.connector.line,
-      intro: CONNECTOR_SHEET_INTRO,
-      promptText: CONNECTOR_PROMPT,
-      copyButtonLabel: "Copy prompt"
-    }).replace('class="sheet"', 'class="sheet on"').replace('aria-hidden="true"', 'aria-hidden="false"')
-  ].join(`
-`);
-  return localShell({ crumb: W.connector.title, meta: "", body, styles: [], options });
-}
-function refusalNotice(source) {
-  if (!source.connection.provider_refusal)
-    return {};
-  const detail = dashboardProviderRefusalDetail(source);
-  return {
-    notice: dashboardProviderRefusalSentence(source),
-    ...detail === undefined ? {} : { noticeDetail: detail }
-  };
-}
-function renderSetupRow(source, view3, blocked, basePath, messagingLocalSession = false) {
-  const action = source.connection.action;
-  if (source.source_id === "telegram.messages" || source.source_id === "whatsapp.personal.messages") {
-    return renderMessagingCard(source.source_id === "telegram.messages" ? "telegram" : "whatsapp", messagingLocalSession, { paired: ["connected", "syncing", "synced", "waiting_for_first_sync"].includes(source.connection.state) });
-  }
-  const gate = blocked ? { blockedReason: dashboardModelsBlockedReason(view3.model_setup) } : {};
-  const id = { sourceId: source.source_id };
-  if (action.kind === "archive_import") {
-    return setupRow({
-      ...id,
-      label: source.label,
-      blurb: setupBlurb(source),
-      action: { label: action.label, kind: "link", href: `${basePath}#${DASHBOARD_OPEN_FRAGMENT_KEY}=${dashboardImportLandingToken(source.source_id)}` }
-    });
-  }
-  if (action.kind === "guided_session" && (action.source === "telegram" || action.source === "whatsapp")) {
-    return renderMessagingCard(action.source, messagingLocalSession);
-  }
-  if (action.kind === "guided_session") {
-    const sheetId = `agent-${source.source_id.replace(/[^A-Za-z0-9_-]+/g, "-")}`;
-    const row = setupRow({
-      ...id,
-      label: source.label,
-      blurb: setupBlurb(source),
-      action: { label: "Ask your agent", kind: "none", sheet: sheetId }
-    });
-    const sheet = connectorSheet({
-      id: sheetId,
-      heading: `Pair ${source.label} with your agent`,
-      intro: "Copy this prompt into your agent. It uses the supported Olympus pairing flow and does not require code or configuration editing.",
-      promptText: dashboardGuidedSessionAgentPrompt(action.source),
-      copyButtonLabel: "Copy prompt"
-    });
-    return `${row}
-${sheet}`;
-  }
-  if (action.kind === "needs_setup") {
-    const { sheetId, sheet } = dashboardNeedsSetupSheet(source, action, providerNote(view3, action));
-    const link2 = keyLocationLink(action.instructions);
-    const row = setupRow({
-      ...id,
-      label: source.label,
-      blurb: action.instructions.plain_intro,
-      ...dashboardSetupLead(source.source_id, action.instructions.plain_intro),
-      action: { label: providerNote(view3, action).lead?.button ?? action.label, kind: "none", sheet: sheetId, ...gate },
-      ...link2 === undefined ? {} : { blurbLink: link2 }
-    });
-    return `${row}
-${sheet}`;
-  }
-  if (action.kind === "oauth") {
-    const connect = dashboardOAuthConnectSheet(source, action, { ...refusalNotice(source), ...providerNote(view3, action) });
-    if (connect) {
-      const row = setupRow({
-        ...id,
-        label: source.label,
-        blurb: providerNote(view3, action).lead?.title ?? setupBlurb(source),
-        action: { label: providerNote(view3, action).lead?.button ?? action.label, kind: "none", sheet: connect.sheetId, ...gate }
-      });
-      return `${row}
-${connect.sheet}`;
-    }
-  }
-  if (action.kind === "api_key" && action.source === "venice") {
-    const sheetId = "setup-venice-api";
-    const form = (formId) => `<form id="${formId}" class="setupfields" data-connect-kind="api_key"><input type="hidden" name="source" value="venice"><input class="keyfield" type="password" name="api_key" required autocomplete="new-password" placeholder="API key" aria-label="API key"><span class="actmsg" data-action-message role="status"></span></form>`;
-    const sheet = `<div class="sheet" id="${sheetId}" aria-hidden="true"><h4>Set up Venice</h4>${setupStepsSheet({ id: sheetId, provider: "Venice", steps: action.instructions.diy_steps, ...action.instructions.setup_shortcut ? { shortcut: action.instructions.setup_shortcut } : {}, finalForm: form })}</div>`;
-    return setupRow({ ...id, label: source.label, blurb: action.instructions.plain_intro, action: { label: action.label, kind: "none", sheet: sheetId, ...gate } }) + sheet;
-  }
-  const link = action.kind === "api_key" ? keyLocationLink(action.instructions) : undefined;
-  return setupRow({
-    ...id,
-    label: source.label,
-    blurb: setupBlurb(source),
-    ...action.kind === "api_key" ? dashboardSetupLead(source.source_id, action.instructions.plain_intro) : {},
-    action: { ...connectAction(source) ?? { label: actionStateLabel(source), kind: "none" }, ...gate },
-    ...link === undefined ? {} : { blurbLink: link }
-  });
-}
-function providerNote(view3, action) {
-  if ((action.source === "gmail" || action.source === "google-drive") && view3.google_pilot?.mode === "advanced_byo_required")
-    return { lead: {
-      title: "Olympus's Google sign-in is full",
-      body: "Until Google reviews Olympus, it lets 100 people use Olympus's Google app. You can still connect Gmail and Drive with a free app of your own. It takes about ten minutes.",
-      button: "Set up my own Google app",
-      notes: ["What changes: Google shows your own name on its warning, not Olympus's.", "What stays the same: Olympus reads your mail on this computer, and judges each message Personal, Private or Secret as before."]
-    } };
-  const note = dashboardGoogleProviderNote(view3, action);
-  return note === undefined ? {} : { providerNote: note };
-}
-function keyLocationLink(instructions) {
-  const url2 = safeExternalHref(instructions.provider_console_url);
-  if (url2 === undefined)
-    return;
-  const parsed = new URL(url2);
-  const path = parsed.pathname === "/" ? "" : parsed.pathname.replace(/\/$/, "");
-  return { label: `${parsed.host}${path} →`, url: url2 };
-}
-function actionStateLabel(source) {
-  const action = source.connection.action;
-  return action.kind === "none" ? source.connection.label : action.label;
-}
-function setupBlurb(source) {
-  const action = source.connection.action;
-  if (action.kind === "oauth" && action.source === "evernote")
-    return DASHBOARD_EVERNOTE_CONSENT_HELP;
-  if (action.kind === "guided_session")
-    return action.instructions[0] ?? source.connection.label;
-  if (action.kind === "api_key")
-    return action.instructions.plain_intro;
-  if (action.kind === "this_computer")
-    return "Choose the folders on this computer Olympus may read. Nothing is read until you choose.";
-  if (action.kind === "archive_import") {
-    const where2 = source.source_id === "archive.imports" ? "Import an export from another app under Other archives on the main page" : `Import your ${source.label} export from its card on the main page`;
-    return `${where2}. Olympus copies it into its own storage to read it, and never changes the original.`;
-  }
-  return "";
-}
-function connectAction(source) {
-  const action = source.connection.action;
-  if (action.kind === "oauth")
-    return { label: action.label, kind: "oauth", source: action.source, primary: false };
-  if (action.kind === "api_key")
-    return { label: action.label, kind: "api_key", source: action.source, primary: false };
-  if (action.kind === "this_computer")
-    return { label: action.label, kind: "this_computer", source: action.source, primary: false };
-  return;
-}
-function renderDashboardHelpPage(options) {
-  const report = options?.systemReport;
-  return localShell({
-    crumb: "Help",
-    meta: "",
-    options,
-    styles: [],
-    body: dashboardControlGate({ connected: unlocked(options) }) + "<h3>Help with Olympus</h3><p>If something is not working, copy the system report and send it to support.</p>" + (report ? `<pre id="system-report" class="promptbox">${escapeHtml2(report)}</pre><p>Only system states and error codes: no names, numbers, emails, chats, notebook or folder titles, or home folder paths.</p><button type="button" class="btn" data-copy-target="#system-report">Copy system report</button><span data-copy-status aria-live="polite"></span>` : unlocked(options) ? "<p>Olympus could not read the system report. Try again, or contact support.</p>" : "<p>Open dashboard controls on this computer to copy a system report.</p>") + '<p><a href="https://olympusplugin.ai/support" target="_blank" rel="noopener noreferrer">Contact support</a></p>'
-  });
-}
-function sourceSupportBlock(source) {
-  if (!(source.schedule?.consecutive_failures || source.connection.state === "reauth_required" || source.answer_readiness?.state === "needs_attention"))
-    return "";
-  const id = `source-support-${source.source_id.replace(/[^a-z0-9-]/gi, "-")}`;
-  const report = sourceSupportDetails({ sourceId: source.source_id, state: source.connection.state, failure: sourceFailureKind(source.schedule?.last_error_kind, source.schedule?.degraded_reason), ref: source.schedule?.last_error_hash });
-  return `<details><summary>Details for support</summary><pre class="promptbox" id="${id}">${escapeHtml2(report)}</pre><button type="button" class="btn" data-copy-target="#${id}">Copy details</button><span data-copy-status aria-live="polite"></span><p>No names, numbers, emails, chats or folder titles.</p></details>`;
-}
-function renderJudgeChoice(view3, options) {
-  const status = options?.judgeSetup;
-  if (!status)
-    return "";
-  const items = view3.sources.reduce((sum2, source) => sum2 + (source.coverage.stored_items ?? source.coverage.indexed_items), 0);
-  const estimate = judgeArchiveEstimate(items, status.cloudModel ?? "");
-  const money = (n) => n.toLocaleString("en-US", { style: "currency", currency: "USD", minimumFractionDigits: 2, maximumFractionDigits: 4 });
-  const hours = (n) => n.toLocaleString("en-US", { maximumFractionDigits: 1 });
-  const cloud = status.stop !== "storage" && status.cloudAvailable && estimate.cloudDollars !== null;
-  const stopped = status.stop === "storage" ? '<p role="alert">The saved spending record cannot be read. Cloud judging is off; local judging can continue. Restore the spending record from a backup or repair its access, then restart Olympus. <a href="/dashboard?help">Open Help</a></p>' : status.stop === "payment" ? '<p role="alert">Venice stopped because your account needs credit (HTTP 402). <a href="https://venice.ai/settings/api" target="_blank" rel="noopener noreferrer">Check your Venice credit or account</a>, then approve cloud judging again below. Your remaining items stay Private and use the free local judge when available.</p>' : status.stop === "cap" ? '<p role="status">Cloud judging reached your spending limit. Remaining items stay Private and use the free local judge when available. Raise the total limit below to continue with Venice.</p>' : "";
-  return `<section id="privacy-judge"><h3 class="sect">Sort your archive by privacy</h3>
-    <p>Estimates for ${items.toLocaleString("en-US")} items found so far in your connected sources. Counts grow as Olympus reads more. Long documents take longer and cost more.</p>
-    <p>Recommended: ${estimate.recommended === "venice" ? "Venice for this archive size, if you choose to send it to the cloud" : "the free judge on this computer"}. Cloud stays off until you choose and approve it.</p>
-    <form data-judge-choice><fieldset${unlocked(options) ? "" : " disabled"}><legend>Choose where privacy sorting happens</legend>
-    <label><input type="radio" name="choice" value="local"${status.choice === "local" ? " checked" : ""}> This computer — free ($0), about ${hours(estimate.shortHours)}–${hours(estimate.longHours)} hours, or ${hours(estimate.shortHours / 8)}–${hours(estimate.longHours / 8)} nights of 8 hours (estimate).</label>
-    <p>With this choice, nothing is sent to a cloud judge. Based on an ${LOCAL_JUDGE_MEASUREMENT.computer} with a ${LOCAL_JUDGE_MEASUREMENT.model}: ${LOCAL_JUDGE_MEASUREMENT.shortPerMinute} short or ${LOCAL_JUDGE_MEASUREMENT.longPerMinute} long items a minute, measured ${LOCAL_JUDGE_MEASUREMENT.date}. Your computer may differ. This estimate does not schedule overnight work.</p>
-    <label><input type="radio" name="choice" value="venice"${status.choice === "venice" ? " checked" : ""}${cloud ? "" : " disabled"}> Venice${status.cloudModel ? " (" + escapeHtml2(status.cloudModel) + ")" : ""} — ${estimate.cloudDollars === null ? "cost unavailable" : "about " + money(estimate.cloudDollars)}, about ${hours(estimate.cloudHours)} hours continuously (estimate).</label>
-    <p>The cloud judge reads every item before it is sorted, including items it marks Private. An end-to-end encrypted option is not available yet. You use your own Venice account and API key; you pay Venice. Olympus pays for nothing.</p>
-    <p>Cloud estimates assume 800 input and 80 output tokens per item, one call per item, and about ${VENICE_JUDGE_ESTIMATE.itemsPerMinute} items a minute (${VENICE_JUDGE_ESTIMATE.date}). Your account limits, document length and additional privacy checks can change the time and cost. Listed prices checked ${JUDGE_PRICE_DATE}.</p>
-    ${cloud || status.stop === "storage" ? "" : "<p>Set up an allowed Venice model in Private answers first. A listed price is required. Add your own key in the Venice section below.</p>"}
-    <label>Total cloud spending limit (US dollars) <input type="number" name="cap_dollars" min="0" step="0.01" value="${status.uncapped ? "" : status.capDollars}"></label>
-    <p>${status.uncapped ? "No spending limit is set, so Olympus isn't tracking cloud spending yet. Your Venice account shows what you've spent." : `${status.stop === "storage" ? "Spending amounts are unavailable." : `Spent or reserved: ${money(status.spentDollars)}. Remaining: ${money(status.remainingDollars)}.`} This total survives restarts. Olympus reserves an estimated maximum before each call; uncertain calls keep that reservation. A call that will not fit stops cloud judging. Newest items are checked first; remaining items stay Private and continue with the free local judge when available. Your Venice bill may differ from these estimates.`}</p>
-    ${status.upgradeNote ? '<p role="status">You can now set a spending limit for cloud judging. Venice keeps sorting your items as you approved, with no limit, until you set one.</p>' : ""}${stopped}<button class="btn primary" type="submit">Save and approve this choice</button><span data-action-message role="status"></span>
-    </fieldset></form></section>`;
-}
-var CONNECTOR_SHEET_ID = "connector-sheet", CONNECTOR_SHEET_HEADING = "Build a connector with your agent", CONNECTOR_SHEET_INTRO, CONNECTOR_PROMPT, W;
-var init_local = __esm(() => {
-  init_judge_spending();
-  init_source_failure();
-  init_source_dashboard();
-  init_messaging();
-  init_open_targets();
-  init_agents();
-  init_components();
-  init_vocabulary();
-  init_model_setup2();
-  init_outside_help();
-  init_vocabulary();
-  CONNECTOR_SHEET_INTRO = "Copy this prompt, replace the source name, and paste it into your coding " + "agent. The connector playbook it names lives in an Olympus source checkout, not in the installed " + "package — CONTRIBUTING.md says how to get one. A finished connector appears in Olympus like any " + "built-in.";
-  CONNECTOR_PROMPT = [
-    "I’m working in my Olympus checkout. I want to add a new source connector for <SOURCE>.",
-    "",
-    "Read docs/CREATE_CONNECTOR.md and follow it exactly. Start by asking me its Leg 0 " + "identity questions, then build leg by leg — connector contract, corpus registry, store mount, " + "scheduler tasks, request budget, tests, host enablement — using the Readwise and Drive " + "connectors as reference stampings. The one rule: SourceConnector is the only per-source code; " + "everything downstream is shared. Keep the required CI check green."
-  ].join(`
-`);
-  W = DASHBOARD_COMPUTER_PANEL_COPY.rows;
-});
-
 // src/workers/dashboard/chatgpt/markdown.ts
 function chatgptMarkdownRender(doc2, container, text4) {
   const lines = text4.replace(/\r\n?/g, `
@@ -160932,6 +160474,136 @@ var CHATGPT_MARKDOWN_CSS = `
 .answer.md a{color:inherit;text-decoration:underline}
 `;
 
+// src/workers/dashboard/static-styles.ts
+var LOCAL_PAGE_CSS = `
+.srows { border-top: 1px solid var(--line); margin-bottom: 8px; }
+.srow { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: start; gap: 8px 12px; padding: 12px 0; border-bottom: 1px solid var(--line); }
+.srow .smain { grid-column: 1; grid-row: 1; min-width: 0; }
+.srow .sact { grid-column: 2; grid-row: 1; flex: none; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+.srow .sact form { margin: 0; }
+.srow .sline { margin: 4px 0 0 20px; color: var(--t2); font-size: var(--fs-body); }
+.srow .sline.strong { margin-left: 0; color: var(--t1); font-size: var(--fs-row); }
+.srow.nodot .sline { margin-left: 0; }
+.privacy { max-width: 760px; }
+.privacy .sect { margin-top: 24px; }
+.ptitle { font-size: var(--fs-title); font-weight: 650; margin: 8px 0 6px; color: var(--t1); }
+.pintro { color: var(--t2); margin: 0 0 18px; max-width: 72ch; }
+.pnote { color: var(--t2); margin: 0 0 12px; }
+.plabel { display: block; font-weight: 600; font-size: var(--fs-body); color: var(--t1); margin: 0 0 6px; }
+.ptextline { flex: 1 1 240px; width: auto; }
+.ptextline:focus-visible { outline: 2px solid var(--link); outline-offset: 1px; }
+.pbuttons { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.pbuttons a.btn { text-decoration: none; }
+@media (max-width: 700px) {
+  .srow { grid-template-columns: minmax(0, 1fr); }
+  .srow .sact { grid-column: 1; grid-row: 2; justify-content: flex-start; }
+}
+`, AGENT_CONNECT_CSS = `.agentpick { display: grid; gap: 6px; margin: 4px 0 0; }
+.agentchoice { border: 1px solid var(--line); border-radius: 8px; background: var(--panel); }
+.agentchoice > summary { list-style: none; cursor: pointer; padding: 10px 14px; display: flex; gap: 8px; align-items: baseline; font-size: var(--fs-body); color: var(--t2); }
+.agentchoice > summary::-webkit-details-marker { display: none; }
+.agentchoice > summary::after { content: '\\25B8'; margin-left: auto; color: var(--t4); transition: transform .12s ease; }
+.agentchoice[open] > summary::after { transform: rotate(90deg); }
+.agentchoice > summary:hover .name, .agentchoice > summary:focus-visible .name { color: var(--link); }
+.agentchoice > summary:focus-visible { outline: 1px solid var(--link); outline-offset: 2px; border-radius: 8px; }
+.agentchoice > summary .name { font-weight: 600; }
+.agentchoice .agentbody { padding: 2px 14px 14px; }
+.agentchoice .agentbody > p { margin: 0 0 10px; }
+.agentchoice .steps li { margin-bottom: 14px; }
+.agentchoice .steps .rowform { margin-top: 8px; }
+.agentchoice .steps .hint { display: block; margin: 6px 0 0; }
+.agentsecret { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 8px; }
+.agentsecret[hidden] { display: none; }
+.agentsecret .keyfield { font-family: var(--mono); min-width: 18ch; flex: 1 1 18ch; max-width: 46ch; }
+.agentsecret [data-agent-secret-note] { flex-basis: 100%; margin: 0; }
+#agents { margin-top: 26px; }
+[data-remote-access] > .rowform { flex: 0 0 auto; }
+.remoteterms { border: 1px solid var(--line); border-radius: 8px; background: var(--panel); padding: 12px 14px; margin: 6px 0 10px; font-size: var(--fs-body); color: var(--t2); }
+.remoteterms[hidden] { display: none; }
+.remoteterms p { margin: 0 0 8px; max-width: 72ch; }
+.remoteterms .rowform { margin-top: 4px; }
+.promptbox.prose { word-break: normal; overflow-wrap: anywhere; }`, MODEL_SETUP_CSS = `
+[data-first-run-computer] fieldset,[data-computer-use] fieldset,[data-judge-choice] fieldset{border:0;padding:0;margin:0;min-width:0}[data-first-run-computer] [data-server-checklist]{display:none}[data-first-run-computer]:has(input[value="server"]:checked) [data-server-checklist]{display:block}
+[data-first-run-privacy]{display:grid;gap:12px;margin:16px 0}[data-first-run-privacy] .modelcard{display:block;cursor:pointer}
+[data-first-run-sheet] [hidden]{display:none!important}
+.modelcards{display:grid;gap:12px;margin:16px 0 20px}.modelcard{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:16px 18px;min-width:0}
+.modelcard header{display:flex;align-items:baseline;flex-wrap:wrap;gap:2px 10px;margin:0}.modelcard header [role=status]{color:var(--t3);font-size:var(--fs-caption)}
+.modelcard header b{font-size:var(--fs-row)}.modelcard p{margin:6px 0 0;color:var(--t2)}.modelintro{color:var(--t2);margin:0 0 4px;max-width:72ch}
+.modelaction{display:flex;flex-wrap:wrap;align-items:center;gap:8px 16px;margin-top:12px}
+.modelaction form{display:flex;flex:1 1 320px;flex-wrap:wrap;align-items:center;gap:8px;margin:0;min-width:0}
+.modelaction input[type=password]{flex:1 1 180px;min-width:0;width:auto}.modelaction a{white-space:nowrap}.modelaction .modelnote{color:var(--t3)}
+.modelcards .modelrow,.modelcards .sheet{margin:0}.modelcards .sheet .modelaction{margin:0}
+.modeltools{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin:0 0 16px}.modeltools p{margin:0;flex-basis:100%}
+.modeltools form,.modelextras form{display:inline-flex;align-items:center;gap:8px;margin:0}
+.modelextras{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:0 0 24px}
+`, DASHBOARD_OUTSIDE_HELP_CSS = `
+/* The status line: the state and today's count, the switch beside them. */
+.outside .ohpanel { margin: 0 0 12px; padding: 14px 18px; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; display: grid; gap: 6px; }
+.outside .ohhead { display: flex; align-items: center; justify-content: space-between; gap: 10px 16px; flex-wrap: wrap; }
+.outside .ohstatewrap { display: grid; gap: 2px; min-width: 0; flex: 1 1 320px; }
+.outside .ohhead > .pbuttons { flex: none; }
+.outside .ohstate { display: flex; align-items: center; gap: 10px; margin: 0; font-size: var(--fs-row); font-weight: 600; color: var(--t1); }
+.outside .dot.on { background: var(--good); }
+.outside .dot.off { background: transparent; border: 2px solid var(--off); }
+.outside .dot.attn { background: var(--warn-fill); }
+.outside .ohline { margin: 0 0 0 20px; color: var(--t2); font-size: var(--fs-body); }
+.outside .ohline.attn { color: var(--warn); font-weight: 600; }
+.outside .ohsmall { font-size: var(--fs-caption); color: var(--t3); max-width: 78ch; }
+.outside .ohwarn { color: var(--t1); padding: 10px 12px; background: var(--warn-bg); border: 1px solid var(--warn-line); border-radius: 8px; }
+/* Problems: one tinted list, a line each, its one button in the line. */
+.outside .ohfix { list-style: none; margin: 0 0 12px; padding: 0; display: grid; gap: 6px; }
+.outside .ohfix li { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px 12px; padding: 10px 14px; background: var(--warn-bg); border: 1px solid var(--warn-line); border-radius: 8px; color: var(--t1); }
+.outside .ohfix li > span { flex: 1 1 200px; min-width: 0; }
+.outside .ohfix li::before { content: '!'; flex: 0 0 20px; height: 20px; border-radius: 50%; background: var(--warn-fill); color: var(--bg); font-weight: 800; font-size: var(--fs-caption); line-height: 20px; text-align: center; }
+.outside .ohfix .ohform { margin: 0; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.outside .ohfix .ohactions { display: flex; align-items: center; gap: 12px; }
+@media (max-width: 480px) { .outside .ohfix .ohactions { flex-direction: column; align-items: stretch; } }
+.outside .ohfix .actmsg:empty, .outside .ohpanel .actmsg:empty { display: none; }
+/* The statements, in full only until accepted. */
+.outside .ohaccept { margin: 0 0 12px; padding: 14px 18px; border: 1px solid var(--warn-line); border-radius: 10px; }
+.outside .ohaccept .sect { margin-top: 0; }
+.outside .ohaccept .ohlist { margin-bottom: 4px; }
+.outside .ohshort { margin: 0 0 4px; padding-left: 20px; color: var(--t1); }
+.outside .ohshort li { margin: 0 0 4px; max-width: 78ch; }
+.outside .ohlist, .outside .ohsteps, .outside .ohfacts { margin: 6px 0 10px; padding-left: 20px; color: var(--t1); }
+.outside .ohlist li, .outside .ohsteps li { margin: 0 0 6px; max-width: 78ch; overflow-wrap: anywhere; }
+.outside .ohfacts { color: var(--t2); font-size: var(--fs-caption); }
+.outside .ohfacts li { margin: 0 0 4px; overflow-wrap: anywhere; }
+/* Secondary sections: one line each (title and a short summary), open only when they need attention. */
+.outside details.ohsect { border-top: 1px solid var(--line); }
+.outside .ohmore { margin: 20px 0 0; }
+.outside .ohmore > details.ohsect:last-child { border-bottom: 1px solid var(--line); }
+.outside details.ohsect > summary { display: flex; align-items: baseline; gap: 6px 14px; flex-wrap: wrap; padding: 12px 0; cursor: pointer; list-style: none; }
+.outside details.ohsect > summary::-webkit-details-marker { display: none; }
+.outside details.ohsect > summary::before { content: '\\25B8'; color: var(--t3); font-size: var(--fs-body); width: 12px; flex: none; }
+.outside details.ohsect[open] > summary::before { content: '\\25BE'; }
+.outside details.ohsect > summary:focus-visible { outline: 2px solid var(--link); outline-offset: 2px; border-radius: 4px; }
+.outside .ohsect-title { font-size: var(--fs-section); font-weight: 600; color: var(--t1); }
+.outside .ohsect-sum { color: var(--t3); font-size: var(--fs-body); }
+.outside .ohsect-sum:empty { display: none; }
+.outside details.ohsect > summary:hover .ohsect-title { color: var(--link); }
+.outside .ohsect-body { padding: 0 0 16px 18px; }
+.outside .ohgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(200px, 100%), 1fr)); gap: 0 16px; margin: 0 0 8px; }
+.outside .ohform { display: grid; gap: 8px; margin: 8px 0 0; }
+.outside .ohform.ohinline { margin: 0 0 12px; }
+.outside .ohform .keyfield { width: 100%; max-width: 220px; }
+.outside .ohack { display: flex; align-items: flex-start; gap: 10px; min-height: 32px; cursor: pointer; color: var(--t1); max-width: 78ch; }
+.outside .ohack input { width: 16px; height: 16px; margin: 3px 0 0; accent-color: var(--link); flex: none; }
+.outside .ohack input:focus-visible { outline: 2px solid var(--link); outline-offset: 2px; }
+.outside .ohoff { color: var(--t3); }
+.outside .actmsg[data-state="error"] { color: var(--bad); }
+.outside .ohunlock { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; margin: 0 0 12px; padding: 10px 14px; background: var(--warn-bg); border: 1px solid var(--warn-line); border-radius: 8px; }
+.outside .ohunlock .hint { color: var(--t2); }
+.outside .ohunlock .actmsg:empty { display: none; }
+@media (max-width: 700px) {
+  .outside .ohpanel { padding: 14px; }
+  .outside .ohhead .pbuttons, .outside .ohhead .blocked { width: 100%; }
+  .outside .ohline { margin-left: 0; }
+  .outside .btn { white-space: normal; text-align: left; }
+  .outside .ohsect-body { padding-left: 0; }
+}
+`;
+
 // src/workers/dashboard/pages/private-answers.ts
 function renderDashboardPrivateAnswersPage(options) {
   const basePath = options?.basePath;
@@ -160940,9 +160612,13 @@ function renderDashboardPrivateAnswersPage(options) {
     crumb: DASHBOARD_PRIVATE_ANSWERS_COPY.crumb,
     ...basePath === undefined ? {} : { basePath },
     meta: "",
-    body: renderPrivateAnswersBody(options),
-    styles: [CHATGPT_MARKDOWN_CSS, LOCAL_PAGE_CSS, DASHBOARD_OUTSIDE_HELP_CSS, PRIVATE_ANSWERS_CSS]
+    body: dashboardPrivacyTabs("questions", readToken(basePath)) + renderPrivateAnswersBody(options),
+    styles: [CHATGPT_MARKDOWN_CSS, LOCAL_PAGE_CSS, DASHBOARD_OUTSIDE_HELP_CSS, PRIVACY_TABS_CSS, PRIVATE_ANSWERS_CSS]
   });
+}
+function dashboardPrivacyTabs(active, token) {
+  const tab = (id, href, label) => id === active ? `<a class="ptab on" aria-current="page" href="${escapeHtml2(href)}">${escapeHtml2(label)}</a>` : `<a class="ptab" href="${escapeHtml2(href)}">${escapeHtml2(label)}</a>`;
+  return `<nav class="ptabs" aria-label="${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.tabsLabel)}">` + tab("questions", dashboardLocalPageHref("privateAnswers", token), DASHBOARD_PRIVATE_ANSWERS_COPY.tabQuestions) + tab("settings", dashboardLocalPageHref("keys", token), DASHBOARD_PRIVATE_ANSWERS_COPY.tabSettings) + "</nav>";
 }
 function readToken(basePath) {
   if (!basePath)
@@ -160953,52 +160629,59 @@ function readToken(basePath) {
   return new URLSearchParams(basePath.slice(query + 1)).get("token") ?? undefined;
 }
 function renderPrivateAnswersBody(options) {
-  const head = `<h2 class="ptitle">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.title)}</h2><p class="pintro">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.intro)}</p>`;
   const csrfToken = options?.controlSessionCsrfToken;
   const localSession = csrfToken !== undefined && options?.outsideHelpLocalSession === true;
-  const parts = [head];
+  const notes = [];
   let script2 = "";
+  let ready = false;
   if (csrfToken === undefined) {
     const gate = `${dashboardLocalPageHref("keys", readToken(options?.basePath))}#${DASHBOARD_CONTROL_GATE_ID}`;
-    parts.push(`<p class="pnote" data-pa-locked>${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.locked)} <a href="${escapeHtml2(gate)}">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.openControls)}</a></p>`);
+    notes.push(`<p class="pnote" data-pa-locked>${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.locked)} <a href="${escapeHtml2(gate)}">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.openControls)}</a></p>`);
   } else if (!localSession) {
-    parts.push(`<form class="paunlock" data-pa-unlock>` + `<button type="submit" class="btn primary">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.unlock)}</button><span class="hint">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.unlockIntro)}</span>` + `<span class="pamsg" data-pa-msg role="status"></span></form>`);
+    notes.push(`<form class="paunlock" data-pa-unlock>` + `<button type="submit" class="btn primary">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.unlock)}</button><span class="hint">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.unlockIntro)}</span>` + `<span class="pamsg" data-pa-msg role="status"></span></form>`);
     script2 = `<script>${privateAnswersClientScript({ csrfToken: "", unlockOnly: true })}</script>`;
   } else if (options?.privateAnswers?.available !== true) {
-    parts.push(`<p class="pnote" data-pa-unavailable>${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.unavailable)}</p>`);
+    notes.push(`<p class="pnote" data-pa-unavailable>${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.unavailable)}</p>`);
   } else {
-    parts.push(renderDestinations(options, true));
-    parts.push(renderWaiting(options.privateAnswers.waiting, options.now ?? new Date));
+    ready = true;
     script2 = `<script>${privateAnswersClientScript({ csrfToken, unlockOnly: false })}</script>`;
   }
-  if (!localSession || options?.privateAnswers?.available !== true)
-    parts.push(renderDestinations(options, false));
-  return `<div class="privacy pa" data-private-answers>${parts.join("")}</div>${script2}`;
+  const inbox = ready ? renderWaiting(options?.privateAnswers?.waiting, options?.now ?? new Date) : "";
+  const zkapiSetup = `<section class="pasection" id="${ANONYMOUS_SETUP_ID}"><h3 class="sect">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.zkapiSetupTitle)}</h3>${options?.outsideHelp ? renderOutsideHelpCard(options.outsideHelp, { ...csrfToken !== undefined ? { csrfToken } : {}, localSession: options.outsideHelpLocalSession === true, untitled: true }) : csrfToken === undefined ? `<p class="pnote">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.locked)}</p>` : `<p class="pnote" data-outside-unavailable>${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.anonymousNotSetUp)}</p>`}</section>`;
+  return `<div class="privacy pa" data-private-answers>${notes.join("")}${renderAsk(options, ready, inbox)}${zkapiSetup}</div>${script2}`;
 }
-function renderDestinations(options, enabled) {
+function renderAsk(options, enabled, inbox) {
   const models = dashboardLocalPageHref("keys", readToken(options?.basePath));
   const states = options?.privateAnswers?.destinations ?? { computer: "not_set_up", venice: "not_set_up" };
   const zk = options?.outsideHelp;
   const zkState = zk && summaryOf(zk).state;
+  const zkModel = zk?.route.state === "configured" ? zk.route.model : undefined;
+  const zkSetup = `#${ANONYMOUS_SETUP_ID}`;
   const destinations = [
-    { id: "computer", name: DASHBOARD_PRIVATE_ANSWERS_COPY.computerName, tag: DASHBOARD_PRIVATE_ANSWERS_COPY.computerTag, leaves: DASHBOARD_PRIVATE_ANSWERS_COPY.computerLeaves, knows: DASHBOARD_PRIVATE_ANSWERS_COPY.computerKnows, ask: DASHBOARD_PRIVATE_ANSWERS_COPY.askComputer, setup: DASHBOARD_PRIVATE_ANSWERS_COPY.setUpComputer, state: states.computer, reason: states.computerReason ?? DASHBOARD_PRIVATE_ANSWERS_COPY.noModel, href: models, action: "ask" },
-    { id: "anonymous", name: DASHBOARD_PRIVATE_ANSWERS_COPY.zkapiName, tag: DASHBOARD_PRIVATE_ANSWERS_COPY.zkapiTag, leaves: DASHBOARD_PRIVATE_ANSWERS_COPY.zkapiLeaves, knows: DASHBOARD_PRIVATE_ANSWERS_COPY.zkapiKnows, ask: DASHBOARD_PRIVATE_ANSWERS_COPY.askZkapi, setup: zkState === "off" ? DASHBOARD_PRIVATE_ANSWERS_COPY.turnOnInModels : zkState === "needs_acceptance" ? DASHBOARD_PRIVATE_ANSWERS_COPY.goToModels : DASHBOARD_PRIVATE_ANSWERS_COPY.setUpZkapi, state: zkState === "on" ? "ready" : "not_set_up", reason: zkState === "off" ? DASHBOARD_PRIVATE_ANSWERS_COPY.zkapiOff : zkState === "needs_acceptance" ? DASHBOARD_PRIVATE_ANSWERS_COPY.zkapiPaused : !zkState || zkState === "route_not_configured" ? DASHBOARD_PRIVATE_ANSWERS_COPY.zkapiNotSetUp : DASHBOARD_OUTSIDE_HELP_COPY.row[zkState], href: models + "#anonymous", action: "ask_anonymous" },
-    { id: "venice", name: DASHBOARD_PRIVATE_ANSWERS_COPY.veniceName, tag: DASHBOARD_PRIVATE_ANSWERS_COPY.veniceTag, leaves: DASHBOARD_PRIVATE_ANSWERS_COPY.veniceLeaves, knows: DASHBOARD_PRIVATE_ANSWERS_COPY.veniceKnows, ask: DASHBOARD_PRIVATE_ANSWERS_COPY.askVenice, setup: DASHBOARD_PRIVATE_ANSWERS_COPY.setUpVenice, state: states.venice, reason: DASHBOARD_PRIVATE_ANSWERS_COPY.veniceNotSetUp, href: models + "#venice-setup", action: "ask_venice" }
+    { id: "computer", name: DASHBOARD_PRIVATE_ANSWERS_COPY.computerCard, model: states.computerModel, line: DASHBOARD_PRIVATE_ANSWERS_COPY.computerLine, setup: DASHBOARD_PRIVATE_ANSWERS_COPY.setUpComputer, state: states.computer, reason: states.computerReason ?? DASHBOARD_PRIVATE_ANSWERS_COPY.noModel, href: models, action: "ask" },
+    { id: "venice", name: DASHBOARD_PRIVATE_ANSWERS_COPY.veniceCard, model: states.veniceModel, line: DASHBOARD_PRIVATE_ANSWERS_COPY.veniceLine, setup: DASHBOARD_PRIVATE_ANSWERS_COPY.setUpVenice, state: states.venice, reason: DASHBOARD_PRIVATE_ANSWERS_COPY.veniceNotSetUp, href: models + "#venice-setup", action: "ask_venice" },
+    { id: "anonymous", name: DASHBOARD_PRIVATE_ANSWERS_COPY.zkapiCard, model: zkModel, line: DASHBOARD_PRIVATE_ANSWERS_COPY.zkapiLine, setup: zkState === "off" ? DASHBOARD_PRIVATE_ANSWERS_COPY.turnOnInModels : zkState === "needs_acceptance" ? DASHBOARD_PRIVATE_ANSWERS_COPY.goToModels : DASHBOARD_PRIVATE_ANSWERS_COPY.setUpZkapi, state: zkState === "on" ? "ready" : "not_set_up", reason: zkState === "off" ? DASHBOARD_PRIVATE_ANSWERS_COPY.zkapiOff : zkState === "needs_acceptance" ? DASHBOARD_PRIVATE_ANSWERS_COPY.zkapiPaused : !zkState || zkState === "route_not_configured" ? DASHBOARD_PRIVATE_ANSWERS_COPY.zkapiNotSetUp : DASHBOARD_OUTSIDE_HELP_COPY.row[zkState], href: zkSetup, action: "ask_anonymous" }
   ];
-  return `<form class="paask" data-pa-ask><label class="sect" for="pa-question">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.askLabel)}</label>` + `<textarea id="pa-question" name="question" maxlength="2000" placeholder="${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.askPlaceholder)}"${enabled ? "" : " disabled"}></textarea>` + `<p class="pachooser" id="pa-chooser">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.chooserLabel)}</p><div class="paasks" role="group" aria-labelledby="pa-chooser"><div class="pazone"><b>${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.stays)}</b></div>${destinations.map((d) => {
+  const label = (d) => d.model ? `${d.name} · ${d.model}` : d.name;
+  const first = enabled ? destinations.find((d) => d.state === "ready") : undefined;
+  const cards = destinations.map((d) => {
     const actions = {
-      ready: `<button type="submit" class="btn primary" data-pa-destination="${d.id}" data-pa-action="${d.action}">${escapeHtml2(d.ask)}</button><span class="pareason" role="status"></span>`,
+      ready: "",
       not_set_up: `<a class="btn" href="${escapeHtml2(d.href)}">${escapeHtml2(d.setup)}</a><span class="pareason" role="status">${escapeHtml2(d.reason)}</span>`,
       not_allowed: `<a class="btn" href="${escapeHtml2(models + "#private-routing")}">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.changePrivacy)}</a><span class="pareason" role="status">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.veniceNotAllowed)}</span>`,
-      busy: `<button type="button" class="btn" disabled>${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.answering)}</button><span class="pareason" role="status">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.destinationBusy)}</span>`
+      busy: `<span class="pareason" role="status">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.destinationBusy)}</span>`
     };
     const state = d.state;
-    const action = enabled ? actions[state] : `<a class="btn" href="${escapeHtml2(models)}">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.openControls)}</a><span class="pareason">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.locked)}</span>`;
+    const action = enabled ? actions[state] : "";
     const notReadyLabel = d.id === "computer" ? d.reason === DASHBOARD_PRIVATE_ANSWERS_COPY.downloading ? DASHBOARD_PRIVATE_ANSWERS_COPY.downloadingStatus : DASHBOARD_PRIVATE_ANSWERS_COPY.notSetUpStatus : d.id === "anonymous" && zkState === "off" ? DASHBOARD_PRIVATE_ANSWERS_COPY.offStatus : d.id === "anonymous" && zkState === "needs_acceptance" ? DASHBOARD_PRIVATE_ANSWERS_COPY.pausedStatus : DASHBOARD_PRIVATE_ANSWERS_COPY.notConnectedStatus;
     const notReadyDot = notReadyLabel === DASHBOARD_PRIVATE_ANSWERS_COPY.downloadingStatus ? "run" : notReadyLabel === DASHBOARD_PRIVATE_ANSWERS_COPY.pausedStatus ? "pause" : "hollow";
-    const statuses = [["ready", DASHBOARD_PRIVATE_ANSWERS_COPY.readyStatus, "ok"], ["not_set_up", notReadyLabel, notReadyDot], ["not_allowed", DASHBOARD_PRIVATE_ANSWERS_COPY.offStatus, "hollow"], ["busy", DASHBOARD_PRIVATE_ANSWERS_COPY.answering, "run"]].map(([key2, label, dot2]) => `<span class="pastatus" data-pa-status="${key2}"><span class="dot ${dot2}" aria-hidden="true"></span>${escapeHtml2(label)}</span>`).join("");
-    return (d.id === "anonymous" ? `<div class="pazone paboundary"><span class="parail" aria-hidden="true"></span><b>${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.leaves)}</b><span>${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.order)}</span></div>` : "") + `<section class="padestination" id="${d.id}" data-pa-card="${d.id}" data-pa-state="${state}"><span class="parail" aria-hidden="true"></span><span class="panode" aria-hidden="true"></span><div class="paname"><h3 class="sect">${escapeHtml2(d.name)}</h3><p class="pnote patag">${escapeHtml2(d.tag)}</p>${statuses}</div><div class="pawhat"><p class="pnote paleaves">${escapeHtml2(d.leaves)}</p><p class="pnote paknows">${escapeHtml2(d.knows)}</p>${d.id === "anonymous" && enabled ? renderLevelChoice(zk?.settings.level === "general" ? "strict" : "standard", models + "#anonymous") : ""}</div><div class="paaction">${action}</div>${Object.entries(actions).map(([key2, html2]) => `<template data-pa-template="${key2}">${html2}</template>`).join("")}</section>`;
-  }).join("")}</div><div class="paout" data-pa-out aria-live="polite"></div></form>`;
+    const statuses = [["ready", DASHBOARD_PRIVATE_ANSWERS_COPY.readyStatus, "ok"], ["not_set_up", notReadyLabel, notReadyDot], ["not_allowed", DASHBOARD_PRIVATE_ANSWERS_COPY.offStatus, "hollow"], ["busy", DASHBOARD_PRIVATE_ANSWERS_COPY.answering, "run"]].map(([key2, text4, dot2]) => `<span class="pastatus" data-pa-status="${key2}"><span class="dot ${dot2}" aria-hidden="true"></span>${escapeHtml2(text4)}</span>`).join("");
+    const radio = `<input type="radio" name="pa-destination" value="${d.id}" data-pa-pick data-pa-action="${d.action}" data-pa-label="${escapeHtml2(label(d))}"${d === first ? " checked" : ""}${enabled && state === "ready" ? "" : " disabled"}>`;
+    return `<section class="padestination" id="${d.id}" data-pa-card="${d.id}" data-pa-state="${state}">` + `<label class="papick">${radio}<span class="paname"><b class="pacardname">${escapeHtml2(d.name)}</b>${d.model ? ` <span class="pamodel">· ${escapeHtml2(d.model)}</span>` : ""}${d.id === "anonymous" && d.model && enabled ? ` <a class="pamodelchange" href="${escapeHtml2(zkSetup)}">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.zkapiChangeModel)}</a>` : ""}<span class="pnote paline">${escapeHtml2(d.line)}</span></span></label>` + `<div class="pastate">${statuses}</div>` + (d.id === "anonymous" && enabled ? renderLevelChoice(zk?.settings.level === "general" ? "strict" : "standard", zkSetup) : "") + `<div class="paaction">${action}</div>${Object.entries(actions).map(([key2, html2]) => `<template data-pa-template="${key2}">${html2}</template>`).join("")}</section>`;
+  }).join("");
+  const answeredBy = first ? DASHBOARD_PRIVATE_ANSWERS_COPY.answeredBy.replace("{name}", label(first)) : DASHBOARD_PRIVATE_ANSWERS_COPY.noneReady;
+  const button = `<button type="submit" class="btn primary" data-pa-ask-button${first ? ` data-pa-destination="${first.id}" data-pa-action="${first.action}"` : " disabled"}>${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.ask)}</button>`;
+  return `<form class="paask pagrid" data-pa-ask data-pa-answered-template="${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.answeredBy)}">` + `<div class="pamain"><h3 class="sect pahead">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.title)}</h3><p class="pnote paintro">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.intro)}</p>` + `<textarea id="pa-question" name="question" maxlength="2000" aria-label="${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.askLabel)}" placeholder="${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.askPlaceholder)}"${enabled ? "" : " disabled"}></textarea>` + `<div class="pasend"><span class="pnote" data-pa-answered-by>${escapeHtml2(answeredBy)}</span><span class="pareason" role="status"></span>${enabled ? button : ""}</div>` + `<div class="paout" data-pa-out aria-live="polite"></div>${inbox}</div>` + `<aside class="paside"><p class="pachooser" id="pa-chooser">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.chooserLabel)}</p><div class="paasks" role="radiogroup" aria-labelledby="pa-chooser">${cards}</div></aside>` + "</form>";
 }
 function renderLevelChoice(level, settingsHref) {
   const option = (value2, label, hint) => `<label class="palevelopt"><input type="radio" name="level" value="${value2}"${value2 === level ? " checked" : ""}><span><b>${escapeHtml2(label)}</b><span class="palevelhint">${hint}</span></span></label>`;
@@ -161224,6 +160907,27 @@ function privateAnswersClientScript(input) {
     }
     if (leftOut.length > 0) card.appendChild(el('p', 'pamsg hint', config.copy.leftOut.replace('{sources}', leftOut.join(', '))));
   }
+  // The picked model card sets where the one Ask button sends; a card that
+  // stops being ready gives up the pick to the next ready one.
+  function syncPick() {
+    var ask = root.querySelector('form[data-pa-ask]');
+    if (!ask) return;
+    var picks = Array.from(ask.querySelectorAll('input[data-pa-pick]'));
+    picks.forEach(function (pick) {
+      var card = pick.closest('[data-pa-card]');
+      pick.disabled = !card || card.getAttribute('data-pa-state') !== 'ready';
+    });
+    var picked = picks.find(function (pick) { return pick.checked && !pick.disabled; }) || picks.find(function (pick) { return !pick.disabled; });
+    if (picked) picked.checked = true;
+    var button = ask.querySelector('[data-pa-ask-button]');
+    var line = ask.querySelector('[data-pa-answered-by]');
+    if (button && !button.hasAttribute('aria-busy')) {
+      if (picked) { button.setAttribute('data-pa-destination', picked.value); button.setAttribute('data-pa-action', picked.getAttribute('data-pa-action') || ''); button.disabled = false; }
+      else { button.removeAttribute('data-pa-action'); button.disabled = true; }
+    }
+    if (line && picked) line.textContent = String(ask.getAttribute('data-pa-answered-template') || '').replace('{name}', picked.getAttribute('data-pa-label') || '');
+  }
+  root.querySelectorAll('input[data-pa-pick]').forEach(function (pick) { pick.addEventListener('change', syncPick); });
   root.querySelectorAll('form[data-pa-ask]').forEach(function (ask) {
     ask.addEventListener('submit', async function (event) {
       event.preventDefault();
@@ -161249,6 +160953,7 @@ function privateAnswersClientScript(input) {
       var outcome = await send(body);
       if (button) { button.disabled = false; button.removeAttribute('aria-busy'); }
       if (reason) reason.textContent = '';
+      syncPick();
       if (!outcome.ok) { message(out, errorText(outcome), true, question); return; }
       render(out, outcome.result, question);
       await poll();
@@ -161375,6 +161080,7 @@ function privateAnswersClientScript(input) {
       var action = card.querySelector('.paaction');
       action.textContent = ''; action.appendChild(template.content.cloneNode(true)); card.setAttribute('data-pa-state', state);
     });
+    if (outcome.result.destinations) syncPick();
     var questions = outcome.result.questions.slice().sort(function (a, b) { return Date.parse(b.askedAt) - Date.parse(a.askedAt); });
     rows().forEach(function (row) {
       if (!questions.some(function (q) { return q.id === row.getAttribute('data-pa-question'); })) {
@@ -161420,7 +161126,7 @@ function privateAnswersClientScript(input) {
   schedule();
 })();`;
 }
-var DASHBOARD_PRIVATE_ANSWERS_ANONYMOUS_FRAGMENT = "anonymous", POST_PATH = "/dashboard/private-answers", PRIVATE_ANSWERS_CSS = `
+var DASHBOARD_PRIVATE_ANSWERS_ANONYMOUS_FRAGMENT = "anonymous-setup", POST_PATH = "/dashboard/private-answers", PRIVATE_ANSWERS_CSS = `
 .pa { width: 100%; min-width: 0; max-width: min(920px, 100%); }
 .pa .pasection, .pa .paask, .pa .palist, .pa .srow, .pa .paout, .pa .pacard { min-width: 0; max-width: 100%; }
 .pa .pintro, .pa .pnote, .pa .pafrom, .pa .paquestion { overflow-wrap: anywhere; white-space: normal; }
@@ -161463,31 +161169,38 @@ var DASHBOARD_PRIVATE_ANSWERS_ANONYMOUS_FRAGMENT = "anonymous", POST_PATH = "/da
 .pa .pamsg[data-state="error"] { color: var(--bad); }
 .pa .paunlock { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; margin: 0 0 16px; padding: 10px 14px; background: var(--warn-bg); border: 1px solid var(--warn-line); border-radius: 8px; }
 .pa .paunlock .hint { color: var(--t2); }
-.pa .paasks { --ladder-columns: 24px 164px minmax(0, 1fr) 210px; display: grid; grid-template-columns: var(--ladder-columns); column-gap: 16px; width: 100%; max-width: 920px; margin: 0 0 24px; }
-.pa .padestination { grid-column: 1 / -1; display: grid; grid-template-columns: var(--ladder-columns); column-gap: 16px; align-items: start; min-width: 0; padding: 16px 0; border-bottom: 1px solid var(--line); position: relative; }
-.pa .padestination:last-child { border-bottom: 0; }
-.pa .padestination > * { min-width: 0; }
-.pa .padestination .sect, .pa .padestination .pnote { margin: 0; }
-.pa .paname { grid-column: 2; }
-.pa .pastatus { display: none; align-items: center; gap: 6px; margin-top: 6px; color: var(--t3); font-size: var(--fs-body); }
+.pa { max-width: min(1040px, 100%); }
+.pa .pagrid { display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: 8px 28px; align-items: start; }
+.pa .pamain { min-width: 0; display: grid; gap: 8px; align-content: start; }
+.pa .pahead { margin: 0; }
+.pa .paintro { margin: 0 0 4px; color: var(--t2); }
+.pa .pasend { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.pa .pasend [data-pa-answered-by] { margin: 0; color: var(--t3); flex: 1; min-width: 0; }
+.pa .pasend .pareason { color: var(--t3); font-size: var(--fs-body); }
+.pa .pamain > .pasection { margin-top: 24px; padding-top: 0; border-top: 0; }
+.pa .paside { min-width: 0; }
+.pa .paasks { display: grid; gap: 10px; }
+.pa .padestination { display: grid; gap: 6px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); min-width: 0; }
+.pa .padestination:has(input[data-pa-pick]:checked) { border-color: var(--link); }
+.pa .papick { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 10px; align-items: start; cursor: pointer; }
+.pa .papick input { margin: 4px 0 0; accent-color: var(--link); }
+.pa .papick input:disabled + .paname { cursor: default; }
+.pa .paname { min-width: 0; }
+.pa .pacardname { color: var(--t1); }
+.pa .pamodel { color: var(--t3); }
+.pa .pamodelchange { color: var(--t3); font-size: var(--fs-body); }
+.pa .paline { display: block; margin: 2px 0 0; color: var(--t2); }
+.pa .pastate { padding-left: 26px; }
+.pa .pastatus { display: none; align-items: center; gap: 6px; color: var(--t3); font-size: var(--fs-body); }
 .pa [data-pa-state="ready"] [data-pa-status="ready"], .pa [data-pa-state="not_set_up"] [data-pa-status="not_set_up"], .pa [data-pa-state="not_allowed"] [data-pa-status="not_allowed"], .pa [data-pa-state="busy"] [data-pa-status="busy"] { display: flex; }
 .pa .pastatus .dot.ok { background: var(--good); }
 .pa .pastatus .dot.run { background: var(--run-fill); }
 .pa .pastatus .dot.pause { background: var(--warn-fill); }
-.pa .pawhat { grid-column: 3; }
-.pa .patag, .pa .paknows { color: var(--t3); font-size: var(--fs-body); }
-.pa .padestination .patag, .pa .padestination .paknows { margin-top: 4px; }
-.pa .padestination .paaction { grid-column: 4; display: flex; flex-direction: column; align-items: stretch; gap: 8px; }
+.pa .padestination .paaction { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; padding-left: 26px; }
+.pa .padestination .paaction:empty { display: none; }
 .pa .padestination .btn { white-space: normal; text-align: center; }
 .pa .padestination .pareason { color: var(--t3); font-size: var(--fs-body); overflow-wrap: anywhere; }
-.pa .panode { grid-column: 1; width: 12px; height: 12px; margin: 5px 0 0 6px; border-radius: 50%; background: var(--t3); position: relative; }
-.pa #computer .panode { background: var(--t1); }
-.pa .parail { position: absolute; left: 11px; width: 2px; background: var(--line); top: 0; bottom: -1px; }
-.pa #computer .parail { top: 27px; }
-.pa #venice .parail { bottom: auto; height: 27px; }
-.pa .pazone { grid-column: 1 / -1; position: relative; padding: 12px 0 6px 40px; border-top: 1px solid var(--line); display: flex; justify-content: space-between; gap: 12px; color: var(--t3); font-size: var(--fs-caption); }
-.pa .pazone b { color: var(--t2); font-weight: 600; }
-.pa .paboundary { border-top: 1px dashed var(--field); }
+.pa .padestination .palevel { padding-left: 26px; margin-top: 4px; }
 .pa .palevel { border: 0; margin: 12px 0 0; padding: 0; min-width: 0; display: grid; gap: 6px; }
 .pa .palevel legend { padding: 0; margin: 0 0 2px; color: var(--t2); font-size: var(--fs-body); font-weight: 600; }
 .pa .palevelopt { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 8px; align-items: start; font-size: var(--fs-body); color: var(--t1); cursor: pointer; }
@@ -161496,20 +161209,517 @@ var DASHBOARD_PRIVATE_ANSWERS_ANONYMOUS_FRAGMENT = "anonymous", POST_PATH = "/da
 .pa .palevelhint { display: block; color: var(--t3); }
 .pa [data-pa-card="anonymous"]:not([data-pa-state="ready"]) .palevel { display: none; }
 .pa .pachooser { margin: 12px 0 8px; color: var(--t2); font-size: var(--fs-body); }
-@media (max-width: 640px) {
-  .pa .paasks { grid-template-columns: minmax(0, 1fr); }
-  .pa .padestination { grid-template-columns: minmax(0, 1fr); gap: 8px; padding: 14px 0; }
-  .pa .panode, .pa .parail { display: none; }
-  .pa .paname, .pa .pawhat, .pa .padestination .paaction { grid-column: 1; }
-  .pa .pazone { padding-left: 0; }
+@media (max-width: 760px) {
+  .pa .pagrid { grid-template-columns: minmax(0, 1fr); }
+  .pa .paside { order: -1; }
 }
 
-`;
+`, PRIVACY_TABS_CSS = `
+.ptabs { display: flex; gap: 4px; margin: 0 0 20px; border-bottom: 1px solid var(--line); }
+.ptabs .ptab { padding: 8px 14px; color: var(--t2); text-decoration: none; border-bottom: 2px solid transparent; margin-bottom: -1px; }
+.ptabs .ptab.on { color: var(--t1); border-bottom-color: var(--link); font-weight: 600; }
+.ptabs .ptab:focus-visible { outline: 2px solid var(--link); outline-offset: 2px; }
+.judgeopts { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin: 10px 0; }
+.judgeopt { display: block; border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; cursor: pointer; }
+.judgeopt:has(input:checked) { border-color: var(--link); }
+.judgeopt:has(input:disabled) { cursor: default; opacity: .6; }
+.judgehead { display: flex; align-items: center; gap: 6px; }
+.judgenow { font-size: var(--fs-caption); padding: 0 8px; border-radius: 10px; border: 1px solid var(--link); color: var(--link); }
+.judgelead { display: block; margin: 4px 0 0; color: var(--t2); }
+.judgerows { display: grid; grid-template-columns: 64px 1fr; gap: 4px 10px; margin: 10px 0 0; }
+.judgeterm { color: var(--t2); }
+.judgefit { display: block; margin: 10px 0 0; padding-top: 8px; border-top: 1px solid var(--line); color: var(--t2); }
+.judgelegend { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+.judgedialog { max-width: 520px; width: calc(100% - 32px); padding: 20px 22px; border: 1px solid var(--line); border-radius: 14px; background: var(--panel); color: var(--t1); }
+.judgedialog::backdrop { background: rgba(0, 0, 0, .6); }
+.judgedialog h3 { margin: 0 0 8px; }
+.judgedialog p { margin: 0 0 12px; }
+.judgedialogbar { display: flex; justify-content: flex-end; gap: 10px; margin-top: 16px; }
+.judgecap { display: block; margin: 8px 0 4px; }
+.judgehow { margin: 10px 0 0; color: var(--t2); }
+@media (max-width: 640px) { .judgeopts { grid-template-columns: 1fr; } }
+`, ANONYMOUS_SETUP_ID;
 var init_private_answers = __esm(() => {
   init_components();
   init_host_page();
   init_outside_help();
   init_vocabulary();
+  ANONYMOUS_SETUP_ID = DASHBOARD_PRIVATE_ANSWERS_ANONYMOUS_FRAGMENT;
+});
+
+// src/workers/dashboard/model-setup.ts
+function renderModelSetup(view3, options = {}) {
+  if (!view3)
+    return "";
+  const status = `<span hidden data-model-setup-status="${escapeHtml2(JSON.stringify(view3))}"></span>`;
+  if (view3.computer_use_pending)
+    return status + renderComputerUseChoice(view3);
+  const engine = renderEngineServerMode(view3);
+  if (view3.privacy_choice_pending)
+    return status + engine + privateModelProgress(view3) + renderFirstRunPrivacyChoice();
+  const bannerOwnsToggle = blockerOwnsLocalToggle(view3);
+  const cards = view3.cards.map((card) => {
+    if (card.state === "ready")
+      return readyModelRow(card);
+    const state = modelStateWord(card);
+    let action = "";
+    let sheet = "";
+    if (card.id === "local") {
+      if (card.state === "not_configured" && !bannerOwnsToggle) {
+        action = `<button type="button" class="btn primary" ${LOCAL_MODELS_TOGGLE}`;
+        sheet = localModelsSheet();
+      }
+    } else {
+      action = modelKeyAction(card, card.state === "applying" ? '<span class="modelnote">Key saved. Olympus is applying the configuration or waiting for another required key.</span>' : modelKeyForm(card));
+    }
+    return `<section class="modelcard" data-model-card="${card.id}"><header><b>${escapeHtml2(card.label)}</b><span role="status">${escapeHtml2(state)}</span></header>` + `<p>${escapeHtml2(card.detail)}</p>${action}</section>${sheet}`;
+  }).join("");
+  const localCard = view3.cards.some((card) => card.id === "local");
+  const extras = view3.ready ? '<div class="modelextras">' + (localCard ? "" : `<button type="button" class="btn" ${LOCAL_MODELS_TOGGLE}`) + `${CHECK_FORM_OPEN}<button class="btn" type="submit">Check readiness</button>${CHECK_FORM_TAIL}` + "</div>" + (localCard ? "" : localModelsSheet()) : localCard ? "" : '<div class="modeltools">' + `<p>Optional: your agent can help connect models you already run and review the matching privacy choice.</p><button type="button" class="btn" ${LOCAL_MODELS_TOGGLE}` + `${CHECK_FORM_OPEN}<button class="btn" type="submit">Check readiness</button>${CHECK_FORM_TAIL}` + "</div>" + localModelsSheet();
+  return status + engine + (view3.ready ? privateModelProgress(view3) : "") + `<section aria-label="Models">${options.heading === false ? "" : '<div class="sect">Models</div>'}` + (view3.ready ? `<p class="quiet" role="status">${options.heading === false ? "Models are ready." : "Models are ready. You can connect sources below."}</p>` : '<p class="modelintro">Add the keys required by your privacy choice. Olympus checks them and updates this page when they are ready. Saved keys are not displayed.</p>') + (view3.migration_notes ?? []).map((note) => `<p role="status" data-embedding-migration>${escapeHtml2(note)} See "Legacy embedding migration" in docs/SOVEREIGNTY_CONFIG.md.</p>`).join("") + (view3.attention ? `<p role="status">${escapeHtml2(view3.attention)}</p>` : "") + `<div class="modelcards">${cards}</div>` + extras + "</section>";
+}
+function renderFirstRunPrivacyChoice() {
+  const choices = PRIVATE_ANSWER_OPTIONS.map((option) => `<label class="modelcard"><input type="radio" name="choice" value="${escapeHtml2(option.id)}"${option.recommended ? " checked" : ""}> <b>${escapeHtml2(option.label)}${option.recommended ? " — Recommended" : ""}</b><p>${escapeHtml2(option.description)}</p></label>`).join("");
+  const choice = `<form id="first-run-privacy-choice" data-first-run-privacy>${choices}<span data-action-message role="status"></span></form>`;
+  const connect = '<div data-first-run-venice hidden><h4>Add a Venice key</h4><p data-first-run-venice-help></p><button class="btn" type="button" data-focus-target="#venice-setup input[name=api_key]">Go to the Venice key field</button></div>' + `<div data-first-run-local hidden><h4>Connect my local models</h4><p>The built-in model is already included. Connect a model you run, or continue with the built-in model.</p><button type="button" class="btn" ${LOCAL_MODELS_TOGGLE}${localModelsSheet()}</div>`;
+  const verify2 = `<form id="first-run-privacy-form" method="post" action="/dashboard/models/check" data-model-check>${CHECK_FORM_TAIL}` + '<p data-first-run-result role="status">Run the readiness check to verify your setup.</p><button class="btn" type="button" data-first-run-redo hidden></button><button class="btn" type="button" data-first-run-keys hidden>Continue setup in Keys</button>';
+  return '<section aria-label="Private answers" data-first-run-sheet>' + setupStepsSheet({
+    id: "first-run-privacy",
+    provider: "Olympus",
+    steps: [
+      { title: "How should Olympus answer with Private items?", text: "Choose how Private answers may be made. You can change this later in Privacy settings." },
+      { title: "Connect your choice", text: "Your privacy choice is saved." },
+      { title: "Verify it works", text: "Check that Olympus is ready with your saved choice." }
+    ],
+    stepContent: [choice, connect],
+    finalForm: () => verify2,
+    stepActions: [{ formId: "first-run-privacy-choice", label: "Continue" }, undefined, { formId: "first-run-privacy-form", label: "Check readiness" }],
+    footerContent: '<button class="btn primary" type="button" data-first-run-done hidden>Done</button>'
+  }) + "</section>";
+}
+function localModelsSheet() {
+  const controls = '<form data-local-models-discover><label>OpenAI-compatible URL (optional)<input class="keyfield" name="base_url" type="url" placeholder="http://127.0.0.1:1234/v1"></label><p>Leave blank to detect Ollama and LM Studio on this computer. Only loopback URLs are accepted.</p><button class="btn primary" type="submit">Detect local models</button><span data-action-message role="status"></span></form>' + '<div data-local-models-results></div><form data-local-models-test hidden><input type="hidden" name="base_url"><label>Answer model<select name="answer_model" required></select></label><p>Olympus tests the answer model before saving it. Your existing search index stays unchanged.</p><button class="btn primary" type="submit">Connect answer model</button><span data-action-message role="status"></span></form>';
+  return connectorSheet({ id: "local-model-setup-sheet", heading: "Connect existing local models", intro: "Detect models you already run and test them with synthetic text. Olympus does not install, download, or maintain them. Local means the machine hosting Olympus.", promptText: LOCAL_MODELS_SETUP_PROMPT, copyButtonLabel: "Copy prompt" }).replace('<div class="promptbox"', controls + '<div class="promptbox"');
+}
+function blockingCard(view3) {
+  return view3.ready ? undefined : view3.cards.find((entry) => entry.required && entry.state !== "ready");
+}
+function blockerOwnsLocalToggle(view3) {
+  const card = blockingCard(view3);
+  return card?.id === "local" && card.state === "not_configured";
+}
+function readyModelRow(card) {
+  const label = escapeHtml2(card.label);
+  const state = card.id === "local" ? "Ready" : "Ready · key connected";
+  const head = `<div class="attncard plain modelrow" data-model-card="${card.id}">` + `<div class="grow"><span class="name">${label}</span><span class="why"> — ${state}</span></div>`;
+  if (card.id === "local") {
+    return `${head}${rowMenu(card.label, `<button type="button" class="btn" ${LOCAL_MODELS_TOGGLE}`)}</div>${localModelsSheet()}`;
+  }
+  const sheetId = `model-key-${card.id.replace(/[^A-Za-z0-9_-]+/g, "-")}`;
+  const toggle = `<button type="button" class="btn" data-sheet-toggle="#${sheetId}" aria-controls="${sheetId}" aria-expanded="false">Replace key</button>`;
+  return `${head}${rowMenu(card.label, toggle)}</div>` + `<div class="sheet" id="${sheetId}" aria-hidden="true"><h4>Replace the ${label} key</h4>` + `<p>${escapeHtml2(card.detail)} Saved keys are not displayed.</p>${modelKeyAction(card, modelKeyForm(card))}</div>`;
+}
+function modelStateWord(card) {
+  if (card.state === "applying")
+    return card.id === "local" ? "Checking…" : "Applying…";
+  if (card.state === "needs_attention")
+    return card.id === "local" ? "Not answering" : "Needs attention";
+  if (card.state === "ready")
+    return "Ready";
+  return "Not configured";
+}
+function renderModelSetupBlocker(view3, options = {}) {
+  if (!view3 || view3.ready || view3.privacy_choice_pending)
+    return "";
+  if (privateModelWords(view3))
+    return `<div data-private-model-progress>${blockerBanner({ sentence: dashboardModelsBlockedReason(view3), ...view3.private_model?.state === "failed" ? { controlHtml: retryPrivateModel() } : {} })}</div>`;
+  const card = blockingCard(view3);
+  if (!card) {
+    return blockerBanner({ sentence: view3.attention ?? "Model setup is not finished, so sources stay locked." });
+  }
+  if (card.id === "local") {
+    if (card.state === "applying") {
+      return blockerBanner({ sentence: "Checking your local models… Sources unlock when the check passes." });
+    }
+    if (card.state === "needs_attention") {
+      return blockerBanner({
+        sentence: "Your local model server is not answering, so sources stay locked. Start it, then check again.",
+        controlHtml: `${CHECK_FORM_OPEN}<button class="btn primary" type="submit">Check again</button>${CHECK_FORM_TAIL}`
+      });
+    }
+    return blockerBanner({
+      sentence: "Connect your local models to start connecting sources.",
+      controlHtml: `<button type="button" class="btn primary" ${LOCAL_MODELS_TOGGLE}`
+    }) + localModelsSheet();
+  }
+  if (card.state === "applying") {
+    return blockerBanner({ sentence: `Applying your ${card.label} key… Sources unlock when it is ready.` });
+  }
+  if (card.state === "needs_attention")
+    return blockerBanner({ sentence: card.detail });
+  return blockerBanner({
+    sentence: `Add your ${card.label} API key to start connecting sources.`,
+    controlHtml: options.keysHref ? `<a class="btn primary" href="${escapeHtml2(`${options.keysHref}#${card.id === "venice" ? "venice-setup" : modelKeyFieldId(card)}`)}">Add ${escapeHtml2(card.label)} key</a>` : `<button type="button" class="btn primary" data-focus-target="#${card.id === "venice" ? "model-venice-start" : modelKeyFieldId(card)}">Add ${escapeHtml2(card.label)} key</button>`
+  });
+}
+function modelKeyFieldId(card) {
+  return `model-key-field-${card.id.replace(/[^A-Za-z0-9_-]+/g, "-")}`;
+}
+function modelKeyForm(card, formId) {
+  return `<form${formId ? ` id="${formId}" class="setupfields"` : ""} method="post" action="/dashboard/connect/api-key" data-connect-kind="api_key" data-model-provider="${card.id}">` + `<input type="hidden" name="source" value="${card.id}">` + `<input class="keyfield"${card.state === "ready" ? "" : ` id="${modelKeyFieldId(card)}"`} type="password" name="api_key" required autocomplete="new-password" placeholder="${card.label} API key" aria-label="${card.label} API key">` + (formId ? "" : '<button class="btn primary" type="submit">Connect</button>') + '<span data-action-message role="status"></span></form>';
+}
+function modelKeyAction(card, lead) {
+  if (card.id === "venice" && lead.includes("<form")) {
+    return `<span id="model-venice-start" tabindex="-1"></span>` + setupStepsSheet({ id: `model-venice-${card.state}`, provider: "Venice", steps: VENICE_SETUP_STEPS, shortcut: VENICE_SETUP_SHORTCUT, finalForm: (formId) => modelKeyForm(card, formId) });
+  }
+  if (card.id === "gemini")
+    return `<div class="modelaction">${lead}<span class="modelnote">Existing Gemini installations only. New embedding setup uses built-in local EmbeddingGemma or Venice. See the embedding migration guide above.</span></div>`;
+  const href = "https://venice.ai";
+  return `<div class="modelaction">${lead}<a href="${href}" target="_blank" rel="noopener noreferrer">Get a ${card.label} API key</a></div>`;
+}
+function renderComputerUseChoice(view3) {
+  const pending = view3.engine_server_mode?.pending === true;
+  return '<section aria-label="Computer setup" data-first-run-computer><h3>How will this computer run?</h3>' + "<form data-computer-use><fieldset" + (pending ? " disabled" : "") + "><legend>Choose how you use this Mac</legend>" + '<label class="modelcard"><input type="radio" name="choice" value="everyday" checked> My everyday computer <span>Recommended</span></label>' + '<label class="modelcard"><input type="radio" name="choice" value="server"> Always on, as a server</label>' + "<p>" + escapeHtml2(SERVER_MODE_HELP) + "</p>" + SERVER_CHECKLIST + '<button type="submit" class="btn primary">Continue</button></fieldset><span data-action-message role="status">' + escapeHtml2(view3.engine_server_mode?.notice ?? "") + "</span></form></section>";
+}
+function renderEngineServerMode(view3) {
+  const mode = view3.engine_server_mode;
+  if (!mode)
+    return "";
+  return '<section aria-label="Engine" id="engine-settings"><h3 class="sect">Engine</h3><form data-computer-use data-server-mode>' + '<label><input type="checkbox" role="switch" name="server"' + (mode.enabled ? " checked" : "") + (mode.pending ? " disabled" : "") + "> Keep Olympus running when no one is logged in</label><p>" + escapeHtml2(SERVER_MODE_HELP) + "</p>" + '<p role="status">' + (mode.enabled ? "On — starts once the disk is unlocked." : "Off — runs when this account is signed in.") + "</p>" + (mode.enabled ? SERVER_CHECKLIST : "") + '<button type="submit" class="btn"' + (mode.pending ? " disabled" : "") + '>Save</button><span data-action-message role="status">' + escapeHtml2(mode.notice ?? "") + "</span></form></section>";
+}
+function privateModelWords(view3) {
+  const model = view3?.private_model;
+  if (!model || model.state === "ready" || model.state === "not_started" || model.state === "disabled")
+    return "";
+  if (model.state === "failed")
+    return "The private answer model download failed. Check your connection and available space, then try again.";
+  if (model.state !== "downloading")
+    return "Getting the private answer model ready…";
+  const done = model.bytesDone;
+  const total = model.bytesTotal;
+  if (typeof done !== "number" || typeof total !== "number" || !Number.isFinite(done) || !Number.isFinite(total) || total <= 0 || done < 0)
+    return "Downloading the private answer model…";
+  const scale = total >= 1e9 ? 1e9 : 1e6;
+  return `Downloading the private answer model: ${(Math.min(done, total) / scale).toFixed(1)} of ${(total / scale).toFixed(1)} ${scale === 1e9 ? "GB" : "MB"}`;
+}
+function dashboardModelsBlockedReason(view3) {
+  const progress = privateModelWords(view3);
+  return DASHBOARD_MODELS_BLOCKED_REASON + (progress ? `. ${progress}` : "");
+}
+function retryPrivateModel() {
+  return '<form method="post" action="/dashboard/models/check" data-model-check data-model-retry><button class="btn primary" type="submit">Try again</button><span data-action-message role="status"></span></form>';
+}
+function privateModelProgress(view3) {
+  const words2 = privateModelWords(view3);
+  return words2 ? `<div data-private-model-progress role="status"><p>${escapeHtml2(words2)}</p>${view3.private_model?.state === "failed" ? retryPrivateModel() : ""}</div>` : "";
+}
+var LOCAL_MODELS_SETUP_PROMPT = "Connect my existing local models to Olympus. Read the installed docs/SOVEREIGNTY_CONFIG.md, inspect the current Olympus policy, and help identify the running answer endpoint and its exact model ID on the machine hosting Olympus. Do not install or maintain model software, download models, change network access, or replace existing vectors. Explain any needed configuration changes before applying them. After an approved policy change, use olympus worker restart to apply it. Use synthetic text to verify the configured answer model, run olympus doctor, then send me back to the Keys page of the Olympus dashboard and its Check readiness button. If the server is on another machine or needs unsupported settings, explain that specific limit rather than inventing a working configuration.", LOCAL_MODELS_TOGGLE = 'data-sheet-toggle="#local-model-setup-sheet" aria-expanded="false">Connect existing local models</button>', CHECK_FORM_OPEN = '<form method="post" action="/dashboard/models/check" data-model-check>', CHECK_FORM_TAIL = '<span data-action-message role="status"></span></form>', SERVER_MODE_HELP = "Olympus starts by itself after a restart, once the disk is unlocked. Your Mac asks for an administrator's password once.", SERVER_CHECKLIST = "<ul data-server-checklist><li>Use a wired network.</li><li>Give this Mac a fixed network address in System Settings.</li><li>After a restart, someone must unlock the disk in person, or use Screen Sharing or SSH unlock on a wired network. After that, Olympus starts by itself.</li></ul>";
+var init_model_setup2 = __esm(() => {
+  init_vocabulary();
+  init_privacy_language();
+  init_source_dashboard();
+  init_components();
+});
+
+// src/workers/dashboard/pages/local.ts
+function unlocked(options) {
+  return options?.controlSessionCsrfToken !== undefined;
+}
+function localShell(input) {
+  const csrf = input.options?.controlSessionCsrfToken;
+  return pageShell({
+    title: "Olympus",
+    crumb: input.crumb,
+    ...input.options?.basePath === undefined ? {} : { basePath: input.options.basePath },
+    meta: input.meta,
+    body: input.body,
+    controller: { ...csrf === undefined ? {} : { csrfToken: csrf } },
+    poll: {
+      unlocked: csrf !== undefined,
+      ...csrf === undefined ? {} : { controlSessionCsrfToken: csrf }
+    },
+    styles: [LOCAL_PAGE_CSS, ...input.styles]
+  });
+}
+function renderDashboardKeysPage(view3, options) {
+  const home2 = options?.basePath ?? "/dashboard";
+  const token = readToken2(options?.basePath);
+  const mode = options?.answerMode;
+  const body = [
+    dashboardControlGate({ connected: unlocked(options) }),
+    dashboardPrivacyTabs("settings", token),
+    `<section id="whats-private"><h3 class="sect">${escapeHtml2(DASHBOARD_PRIVACY_SETTINGS_COPY.whatsPrivate)}</h3><p class="pnote">${escapeHtml2(DASHBOARD_PRIVACY_SETTINGS_COPY.intro)}</p>` + `<div class="srow nodot"><div class="smain"><b>${escapeHtml2(DASHBOARD_PRIVACY_SETTINGS_COPY.wordsTitle)}</b><p class="pnote">${escapeHtml2(DASHBOARD_PRIVACY_SETTINGS_COPY.wordsLine)}</p></div><div class="sact"><a class="btn" href="${escapeHtml2(home2)}">${escapeHtml2(DASHBOARD_PRIVACY_SETTINGS_COPY.wordsOpen)}</a></div></div></section>`,
+    `<section id="private-routing"><h3 class="sect">${escapeHtml2(DASHBOARD_PRIVACY_SETTINGS_COPY.answeredTitle)}</h3><p class="pnote">${escapeHtml2(DASHBOARD_PRIVACY_SETTINGS_COPY.answeredIntro)}</p>` + (mode ? `<div class="srow nodot" data-answer-mode="${escapeHtml2(mode.id)}"><div class="smain"><b>${escapeHtml2(mode.label)}</b>${mode.id === "local-first" ? ` <span class="pnote">· ${escapeHtml2(DASHBOARD_PRIVACY_SETTINGS_COPY.recommended)}</span>` : ""}</div><div class="sact"><a class="btn" href="${escapeHtml2(home2)}">${escapeHtml2(DASHBOARD_PRIVACY_SETTINGS_COPY.change)}</a></div></div>` : "") + renderModelSetupBlocker(view3.model_setup) + `<div${view3.model_setup?.cards.some((card) => card.id === "venice") ? ' id="venice-setup"' : ""}>${renderModelSetup(view3.model_setup, { heading: false })}</div></section>`,
+    view3.model_setup?.cards.some((card) => card.id === "venice") ? "" : `<section id="venice-setup"><h3 class="sect">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.setUpVenice)}</h3><p class="pnote">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.veniceSetupHelp)}</p><div class="modelaction"><form method="post" action="/dashboard/connect/api-key" data-connect-kind="api_key" data-model-provider="venice"><input type="hidden" name="source" value="venice"><input class="keyfield" type="password" name="api_key" required autocomplete="new-password" placeholder="${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.veniceKey)}" aria-label="${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.veniceKey)}"><button type="submit" class="btn primary">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.connectVenice)}</button><span data-action-message role="status"></span></form></div></section>`,
+    renderJudgeChoice(view3, options)
+  ].filter((block) => block !== "").join(`
+`);
+  return localShell({
+    crumb: DASHBOARD_PRIVATE_ANSWERS_COPY.crumb,
+    meta: dashboardCheckedLabel(view3.generated_at, options?.now ?? new Date),
+    body,
+    styles: [MODEL_SETUP_CSS, PRIVACY_TABS_CSS],
+    options
+  });
+}
+function renderDashboardConnectPage(view3, options) {
+  const blocked = view3.model_setup !== undefined && !view3.model_setup.ready;
+  const sources = view3.sources.filter((source) => source.connection.action.kind !== "none" || source.source_id === "telegram.messages" || source.source_id === "whatsapp.personal.messages");
+  const body = [
+    dashboardControlGate({ connected: unlocked(options) }),
+    renderModelSetupBlocker(view3.model_setup, { keysHref: dashboardLocalPageHref("keys", readToken2(options?.basePath)) }),
+    sources.length === 0 ? `<p class="pnote">${escapeHtml2(W.connect.empty)}</p>` : `<div class="srows" id="sources">${sources.map((source) => renderSetupRow(source, view3, blocked, options?.basePath ?? "/dashboard", options?.messagingLocalSession === true) + sourceSupportBlock(source)).join(`
+`)}</div>`
+  ].filter((block) => block !== "").join(`
+`);
+  return localShell({
+    crumb: W.connect.title,
+    meta: dashboardCheckedLabel(view3.generated_at, options?.now ?? new Date),
+    body,
+    styles: [MODEL_SETUP_CSS],
+    options
+  });
+}
+function readToken2(basePath) {
+  if (!basePath)
+    return;
+  const query = basePath.indexOf("?");
+  if (query < 0)
+    return;
+  return new URLSearchParams(basePath.slice(query + 1)).get("token") ?? undefined;
+}
+function renderDashboardAgentsPage(options) {
+  const now = options?.now ?? new Date;
+  const body = [
+    dashboardControlGate({ connected: unlocked(options) }),
+    options?.agents ? renderDashboardAgentsSection({ ...options.agentConnectHost, view: options.agents, now }) : '<p class="foot">Agent connections are not available on this install.</p>'
+  ].join(`
+`);
+  return localShell({ crumb: W.agents.title, meta: "", body, styles: [AGENT_CONNECT_CSS], options });
+}
+function renderDashboardConnectorPage(options) {
+  const body = [
+    `<div class="sect">${escapeHtml2(CONNECTOR_SHEET_HEADING)}</div>`,
+    connectorSheet({
+      id: CONNECTOR_SHEET_ID,
+      heading: W.connector.line,
+      intro: CONNECTOR_SHEET_INTRO,
+      promptText: CONNECTOR_PROMPT,
+      copyButtonLabel: "Copy prompt"
+    }).replace('class="sheet"', 'class="sheet on"').replace('aria-hidden="true"', 'aria-hidden="false"')
+  ].join(`
+`);
+  return localShell({ crumb: W.connector.title, meta: "", body, styles: [], options });
+}
+function refusalNotice(source) {
+  if (!source.connection.provider_refusal)
+    return {};
+  const detail = dashboardProviderRefusalDetail(source);
+  return {
+    notice: dashboardProviderRefusalSentence(source),
+    ...detail === undefined ? {} : { noticeDetail: detail }
+  };
+}
+function renderSetupRow(source, view3, blocked, basePath, messagingLocalSession = false) {
+  const action = source.connection.action;
+  if (source.source_id === "telegram.messages" || source.source_id === "whatsapp.personal.messages") {
+    return renderMessagingCard(source.source_id === "telegram.messages" ? "telegram" : "whatsapp", messagingLocalSession, { paired: ["connected", "syncing", "synced", "waiting_for_first_sync"].includes(source.connection.state) });
+  }
+  const gate = blocked ? { blockedReason: dashboardModelsBlockedReason(view3.model_setup) } : {};
+  const id = { sourceId: source.source_id };
+  if (action.kind === "archive_import") {
+    return setupRow({
+      ...id,
+      label: source.label,
+      blurb: setupBlurb(source),
+      action: { label: action.label, kind: "link", href: `${basePath}#${DASHBOARD_OPEN_FRAGMENT_KEY}=${dashboardImportLandingToken(source.source_id)}` }
+    });
+  }
+  if (action.kind === "guided_session" && (action.source === "telegram" || action.source === "whatsapp")) {
+    return renderMessagingCard(action.source, messagingLocalSession);
+  }
+  if (action.kind === "guided_session") {
+    const sheetId = `agent-${source.source_id.replace(/[^A-Za-z0-9_-]+/g, "-")}`;
+    const row = setupRow({
+      ...id,
+      label: source.label,
+      blurb: setupBlurb(source),
+      action: { label: "Ask your agent", kind: "none", sheet: sheetId }
+    });
+    const sheet = connectorSheet({
+      id: sheetId,
+      heading: `Pair ${source.label} with your agent`,
+      intro: "Copy this prompt into your agent. It uses the supported Olympus pairing flow and does not require code or configuration editing.",
+      promptText: dashboardGuidedSessionAgentPrompt(action.source),
+      copyButtonLabel: "Copy prompt"
+    });
+    return `${row}
+${sheet}`;
+  }
+  if (action.kind === "needs_setup") {
+    const { sheetId, sheet } = dashboardNeedsSetupSheet(source, action, providerNote(view3, action));
+    const link2 = keyLocationLink(action.instructions);
+    const row = setupRow({
+      ...id,
+      label: source.label,
+      blurb: action.instructions.plain_intro,
+      ...dashboardSetupLead(source.source_id, action.instructions.plain_intro),
+      action: { label: providerNote(view3, action).lead?.button ?? action.label, kind: "none", sheet: sheetId, ...gate },
+      ...link2 === undefined ? {} : { blurbLink: link2 }
+    });
+    return `${row}
+${sheet}`;
+  }
+  if (action.kind === "oauth") {
+    const connect = dashboardOAuthConnectSheet(source, action, { ...refusalNotice(source), ...providerNote(view3, action) });
+    if (connect) {
+      const row = setupRow({
+        ...id,
+        label: source.label,
+        blurb: providerNote(view3, action).lead?.title ?? setupBlurb(source),
+        action: { label: providerNote(view3, action).lead?.button ?? action.label, kind: "none", sheet: connect.sheetId, ...gate }
+      });
+      return `${row}
+${connect.sheet}`;
+    }
+  }
+  if (action.kind === "api_key" && action.source === "venice") {
+    const sheetId = "setup-venice-api";
+    const form = (formId) => `<form id="${formId}" class="setupfields" data-connect-kind="api_key"><input type="hidden" name="source" value="venice"><input class="keyfield" type="password" name="api_key" required autocomplete="new-password" placeholder="API key" aria-label="API key"><span class="actmsg" data-action-message role="status"></span></form>`;
+    const sheet = `<div class="sheet" id="${sheetId}" aria-hidden="true"><h4>Set up Venice</h4>${setupStepsSheet({ id: sheetId, provider: "Venice", steps: action.instructions.diy_steps, ...action.instructions.setup_shortcut ? { shortcut: action.instructions.setup_shortcut } : {}, finalForm: form })}</div>`;
+    return setupRow({ ...id, label: source.label, blurb: action.instructions.plain_intro, action: { label: action.label, kind: "none", sheet: sheetId, ...gate } }) + sheet;
+  }
+  const link = action.kind === "api_key" ? keyLocationLink(action.instructions) : undefined;
+  return setupRow({
+    ...id,
+    label: source.label,
+    blurb: setupBlurb(source),
+    ...action.kind === "api_key" ? dashboardSetupLead(source.source_id, action.instructions.plain_intro) : {},
+    action: { ...connectAction(source) ?? { label: actionStateLabel(source), kind: "none" }, ...gate },
+    ...link === undefined ? {} : { blurbLink: link }
+  });
+}
+function providerNote(view3, action) {
+  if ((action.source === "gmail" || action.source === "google-drive") && view3.google_pilot?.mode === "advanced_byo_required")
+    return { lead: {
+      title: "Olympus's Google sign-in is full",
+      body: "Until Google reviews Olympus, it lets 100 people use Olympus's Google app. You can still connect Gmail and Drive with a free app of your own. It takes about ten minutes.",
+      button: "Set up my own Google app",
+      notes: ["What changes: Google shows your own name on its warning, not Olympus's.", "What stays the same: Olympus reads your mail on this computer, and judges each message Personal, Private or Secret as before."]
+    } };
+  const note = dashboardGoogleProviderNote(view3, action);
+  return note === undefined ? {} : { providerNote: note };
+}
+function keyLocationLink(instructions) {
+  const url2 = safeExternalHref(instructions.provider_console_url);
+  if (url2 === undefined)
+    return;
+  const parsed = new URL(url2);
+  const path = parsed.pathname === "/" ? "" : parsed.pathname.replace(/\/$/, "");
+  return { label: `${parsed.host}${path} →`, url: url2 };
+}
+function actionStateLabel(source) {
+  const action = source.connection.action;
+  return action.kind === "none" ? source.connection.label : action.label;
+}
+function setupBlurb(source) {
+  const action = source.connection.action;
+  if (action.kind === "oauth" && action.source === "evernote")
+    return DASHBOARD_EVERNOTE_CONSENT_HELP;
+  if (action.kind === "guided_session")
+    return action.instructions[0] ?? source.connection.label;
+  if (action.kind === "api_key")
+    return action.instructions.plain_intro;
+  if (action.kind === "this_computer")
+    return "Choose the folders on this computer Olympus may read. Nothing is read until you choose.";
+  if (action.kind === "archive_import") {
+    const where2 = source.source_id === "archive.imports" ? "Import an export from another app under Other archives on the main page" : `Import your ${source.label} export from its card on the main page`;
+    return `${where2}. Olympus copies it into its own storage to read it, and never changes the original.`;
+  }
+  return "";
+}
+function connectAction(source) {
+  const action = source.connection.action;
+  if (action.kind === "oauth")
+    return { label: action.label, kind: "oauth", source: action.source, primary: false };
+  if (action.kind === "api_key")
+    return { label: action.label, kind: "api_key", source: action.source, primary: false };
+  if (action.kind === "this_computer")
+    return { label: action.label, kind: "this_computer", source: action.source, primary: false };
+  return;
+}
+function renderDashboardHelpPage(options) {
+  const report = options?.systemReport;
+  return localShell({
+    crumb: "Help",
+    meta: "",
+    options,
+    styles: [],
+    body: dashboardControlGate({ connected: unlocked(options) }) + "<h3>Help with Olympus</h3><p>If something is not working, copy the system report and send it to support.</p>" + (report ? `<pre id="system-report" class="promptbox">${escapeHtml2(report)}</pre><p>Only system states and error codes: no names, numbers, emails, chats, notebook or folder titles, or home folder paths.</p><button type="button" class="btn" data-copy-target="#system-report">Copy system report</button><span data-copy-status aria-live="polite"></span>` : unlocked(options) ? "<p>Olympus could not read the system report. Try again, or contact support.</p>" : "<p>Open dashboard controls on this computer to copy a system report.</p>") + '<p><a href="https://olympusplugin.ai/support" target="_blank" rel="noopener noreferrer">Contact support</a></p>'
+  });
+}
+function sourceSupportBlock(source) {
+  if (!(source.schedule?.consecutive_failures || source.connection.state === "reauth_required" || source.answer_readiness?.state === "needs_attention"))
+    return "";
+  const id = `source-support-${source.source_id.replace(/[^a-z0-9-]/gi, "-")}`;
+  const report = sourceSupportDetails({ sourceId: source.source_id, state: source.connection.state, failure: sourceFailureKind(source.schedule?.last_error_kind, source.schedule?.degraded_reason), ref: source.schedule?.last_error_hash });
+  return `<details><summary>Details for support</summary><pre class="promptbox" id="${id}">${escapeHtml2(report)}</pre><button type="button" class="btn" data-copy-target="#${id}">Copy details</button><span data-copy-status aria-live="polite"></span><p>No names, numbers, emails, chats or folder titles.</p></details>`;
+}
+function renderJudgeChoice(view3, options) {
+  const status = options?.judgeSetup;
+  if (!status)
+    return "";
+  const items = view3.sources.reduce((sum2, source) => sum2 + (source.coverage.stored_items ?? source.coverage.indexed_items), 0);
+  const estimate = judgeArchiveEstimate(items, status.cloudModel ?? "");
+  const money = (n) => n.toLocaleString("en-US", { style: "currency", currency: "USD", minimumFractionDigits: 2, maximumFractionDigits: 4 });
+  const hours = (n) => n.toLocaleString("en-US", { maximumFractionDigits: 1 });
+  const cloud = status.stop !== "storage" && status.cloudAvailable && estimate.cloudDollars !== null;
+  const stopped = status.stop === "storage" ? '<p role="alert">The saved spending record cannot be read. Cloud judging is off; local judging can continue. Restore the spending record from a backup or repair its access, then restart Olympus. <a href="/dashboard?help">Open Help</a></p>' : status.stop === "payment" ? '<p role="alert">Venice stopped because your account needs credit (HTTP 402). <a href="https://venice.ai/settings/api" target="_blank" rel="noopener noreferrer">Check your Venice credit or account</a>, then approve cloud judging again below. Your remaining items stay Private and use the free local judge when available.</p>' : status.stop === "cap" ? '<p role="status">Cloud judging reached your spending limit. Remaining items stay Private and use the free local judge when available. Raise the total limit below to continue with Venice.</p>' : "";
+  const nights = `${hours(estimate.shortHours / 8)} to ${hours(estimate.longHours / 8)} nights`;
+  const venicePrice = estimate.cloudDollars === null ? "Cost unavailable" : `About ${money(estimate.cloudDollars)}`;
+  const row = (term, value2) => `<span class="judgeterm">${escapeHtml2(term)}</span><span>${value2}</span>`;
+  const option = (id, title, lead, rows, fit, enabled) => `<label class="judgeopt"><span class="judgehead"><input type="radio" name="choice" value="${id}"${status.choice === id ? " checked" : ""}${enabled ? "" : " disabled"}> <b>${escapeHtml2(title)}</b>${status.choice === id ? ` <span class="judgenow">${escapeHtml2(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeNow)}</span>` : ""}</span>` + `<span class="judgelead">${lead}</span><span class="judgerows">${rows}</span><span class="judgefit">${fit}</span></label>`;
+  const local = option("local", DASHBOARD_PRIVACY_SETTINGS_COPY.judgeLocal, escapeHtml2(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeLocalLead), row(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeCost, "Free") + row(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeTime, `About ${nights} of 8 hours (${hours(estimate.shortHours)} to ${hours(estimate.longHours)} hours)`) + row(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeWhen, escapeHtml2(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeLocalWhen)), escapeHtml2(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeLocalFit), true);
+  const venice = option("venice", DASHBOARD_PRIVACY_SETTINGS_COPY.judgeVenice, "Venice reads every item to sort it, including items it marks Private.", row(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeCost, `${venicePrice}, on your own Venice account`) + row(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeTime, `About ${hours(estimate.cloudHours)} hours`) + row(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeWhen, escapeHtml2(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeVeniceWhen)) + (status.cloudModel ? row(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeModel, escapeHtml2(status.cloudModel)) : ""), escapeHtml2(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeVeniceFit), cloud);
+  const spent = status.uncapped ? "No spending limit is set, so Olympus isn't tracking cloud spending yet. Your Venice account shows what you've spent." : `${status.stop === "storage" ? "Spending amounts are unavailable." : `Spent or reserved: ${money(status.spentDollars)}. Remaining: ${money(status.remainingDollars)}.`} Olympus stops before going past this limit. Items not yet sorted then stay Private and wait for this computer.`;
+  const cap = `<label class="judgecap">${escapeHtml2(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeCap)} <input type="number" name="cap_dollars" min="0" step="0.01" value="${status.uncapped ? "" : status.capDollars}"></label><p class="pnote">${spent}</p>`;
+  const reply = '<span data-action-message role="status"></span>';
+  const dialog = (pick2, title, body, button) => `<dialog class="judgedialog" data-judge-dialog="${pick2}" aria-labelledby="judge-dialog-${pick2}"><h3 id="judge-dialog-${pick2}">${escapeHtml2(title)}</h3>${body}<p class="pnote" data-action-message role="status"></p>` + `<div class="judgedialogbar"><button class="btn" type="button" data-judge-cancel>${escapeHtml2(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeCancel)}</button><button class="btn primary" type="submit">${escapeHtml2(button)}</button></div></dialog>`;
+  const confirm = status.choice === "venice" ? dialog("local", DASHBOARD_PRIVACY_SETTINGS_COPY.judgeToLocal, `<p>${escapeHtml2(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeToLocalLine)}</p>`, DASHBOARD_PRIVACY_SETTINGS_COPY.judgeToLocalButton) + `<div class="judgekeep">${cap}<button class="btn" type="submit">${escapeHtml2(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeSaveLimit)}</button></div>` : dialog("venice", DASHBOARD_PRIVACY_SETTINGS_COPY.judgeToVenice, `<p>Venice will read each item it sorts, including items it marks Private, and charge your Venice account${estimate.cloudDollars === null ? "" : `: about ${money(estimate.cloudDollars)} for the ${items.toLocaleString("en-US")} items found so far`}.</p>${cap}`, DASHBOARD_PRIVACY_SETTINGS_COPY.judgeToVeniceButton);
+  return `<section id="privacy-judge"><h3 class="sect">${escapeHtml2(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeTitle)}</h3><p class="pnote">${escapeHtml2(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeIntro)}</p>
+    <form data-judge-choice data-judge-current="${status.choice}"><fieldset${unlocked(options) ? "" : " disabled"}><legend class="judgelegend">${escapeHtml2(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeLegend)}</legend>
+    ${status.upgradeNote ? '<p role="status">You can now set a spending limit for cloud judging. Venice keeps sorting your items as you approved, with no limit, until you set one.</p>' : ""}${stopped}
+    <div class="judgeopts">${local}${venice}</div>
+    ${cloud || status.stop === "storage" ? "" : '<p class="pnote">To use Venice, connect your Venice key under How Private items are answered. Venice needs a model with a listed price.</p>'}
+    ${confirm}${reply}
+    <p class="pnote">Estimates for the ${items.toLocaleString("en-US")} items found so far. Recommended: ${estimate.recommended === "venice" ? "Venice for this archive size, if you choose to send it to the cloud" : "the free judge on this computer"}. Cloud stays off until you choose and approve it.</p>
+    <details class="judgehow"><summary>How these estimates are made</summary>
+    <p>Counts grow as Olympus reads more, and long documents take longer and cost more. This computer: measured on an ${LOCAL_JUDGE_MEASUREMENT.computer} with a ${LOCAL_JUDGE_MEASUREMENT.model}, ${LOCAL_JUDGE_MEASUREMENT.shortPerMinute} short or ${LOCAL_JUDGE_MEASUREMENT.longPerMinute} long items a minute (${LOCAL_JUDGE_MEASUREMENT.date}); yours may differ. Venice: 800 input and 80 output tokens per item, one call per item, about ${VENICE_JUDGE_ESTIMATE.itemsPerMinute} items a minute (${VENICE_JUDGE_ESTIMATE.date}); listed prices checked ${JUDGE_PRICE_DATE}. Your account limits and extra privacy checks can change both. Olympus reserves an estimated maximum before each Venice call, and your Venice bill may differ from these estimates.</p>
+    <p>Venice uses your own account and API key, and you pay Venice; Olympus pays for nothing. An end-to-end encrypted option is not available yet.</p></details>
+    </fieldset></form></section>`;
+}
+var CONNECTOR_SHEET_ID = "connector-sheet", CONNECTOR_SHEET_HEADING = "Build a connector with your agent", CONNECTOR_SHEET_INTRO, CONNECTOR_PROMPT, W;
+var init_local = __esm(() => {
+  init_judge_spending();
+  init_source_failure();
+  init_source_dashboard();
+  init_messaging();
+  init_open_targets();
+  init_agents();
+  init_components();
+  init_vocabulary();
+  init_private_answers();
+  init_host_page();
+  init_model_setup2();
+  init_vocabulary();
+  CONNECTOR_SHEET_INTRO = "Copy this prompt, replace the source name, and paste it into your coding " + "agent. The connector playbook it names lives in an Olympus source checkout, not in the installed " + "package — CONTRIBUTING.md says how to get one. A finished connector appears in Olympus like any " + "built-in.";
+  CONNECTOR_PROMPT = [
+    "I’m working in my Olympus checkout. I want to add a new source connector for <SOURCE>.",
+    "",
+    "Read docs/CREATE_CONNECTOR.md and follow it exactly. Start by asking me its Leg 0 " + "identity questions, then build leg by leg — connector contract, corpus registry, store mount, " + "scheduler tasks, request budget, tests, host enablement — using the Readwise and Drive " + "connectors as reference stampings. The one rule: SourceConnector is the only per-source code; " + "everything downstream is shared. Keep the required CI check green."
+  ].join(`
+`);
+  W = DASHBOARD_COMPUTER_PANEL_COPY.rows;
 });
 
 // src/workers/dashboard/index.ts
@@ -161523,6 +161733,8 @@ function dashboardHtmlRoutePage(url2) {
     return "help";
   if (params.has(DASHBOARD_LOCAL_PAGES.keys))
     return "keys";
+  if (params.has(DASHBOARD_LOCAL_PAGES.connect))
+    return "connect";
   if (params.has(DASHBOARD_LOCAL_PAGES.agents))
     return "agents";
   if (params.has(DASHBOARD_LOCAL_PAGES.privateAnswers))
@@ -161552,6 +161764,10 @@ function renderDashboardLocalPage(page2, input) {
       if (!input.view)
         throw new Error("Keys needs the dashboard view.");
       return renderDashboardKeysPage(input.view, options);
+    case "connect":
+      if (!input.view)
+        throw new Error("Connect a source needs the dashboard view.");
+      return renderDashboardConnectPage(input.view, options);
     case "agents":
       return renderDashboardAgentsPage(options);
     case "private_answers":
@@ -167409,7 +167625,7 @@ function createEmailSourceWorker(options = {}) {
           }
           if (page2 === "help" && (!controlSessionCsrfToken || request.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER) !== "local"))
             return renderHelp(request, url2);
-          if (page2 === "json" || page2 === "keys" || page2 === "help") {
+          if (page2 === "json" || page2 === "keys" || page2 === "connect" || page2 === "help") {
             if (!sourceIndexStatus || !sourceDashboard) {
               throw new EmailSourceWorkerError(501, "source_dashboard_not_supported", "Private source worker does not have the source dashboard configured.");
             }
@@ -167483,10 +167699,22 @@ function createEmailSourceWorker(options = {}) {
                 failure: sourceFailureKind(source.schedule?.last_error_kind, source.schedule?.degraded_reason),
                 ref: source.schedule?.last_error_hash
               })));
+            if (page2 === "connect") {
+              return html2(renderDashboardLocalPage("connect", {
+                url: url2,
+                view: view3,
+                options: {
+                  ...controlSessionCsrfToken ? { controlSessionCsrfToken } : {},
+                  messagingLocalSession: Boolean(controlSessionCsrfToken) && request.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER) === "local"
+                }
+              }));
+            }
+            const answerModeId = privateAnswerMode(sourceDashboard.sovereigntyEngine.config);
             return html2(renderDashboardLocalPage("keys", {
               url: url2,
               view: view3,
               options: {
+                answerMode: { id: answerModeId, label: answerModeId === "custom" ? "Custom Private-answer mode" : PRIVACY_PRESET_LABELS[answerModeId] },
                 ...controlSessionCsrfToken ? { controlSessionCsrfToken } : {},
                 ...sourceDashboard.judgeSetup ? { judgeSetup: sourceDashboard.judgeSetup.pageStatus?.() ?? sourceDashboard.judgeSetup.status() } : {},
                 outsideHelpLocalSession: request.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER) === "local",
@@ -171539,6 +171767,8 @@ var init_email_source = __esm(() => {
   init_source_failure();
   init_google_own_app();
   init_sovereignty();
+  init_first_run_privacy();
+  init_privacy_language();
   init_dashboard_messaging_service();
   init_source_scope_approval();
   init_release_manifest();
@@ -215087,7 +215317,7 @@ function writeRefusal(reason, revision) {
       return { ok: false, httpStatus: 500, code: "write_uncertain", message: MESSAGES3.writeUncertain };
   }
 }
-var DASHBOARD_ZKAPI_PROFILE_ID = "zkapi-consult", DASHBOARD_ZKAPI_API_KEY_ENV = "OLYMPUS_ZKAPI_API_KEY", DASHBOARD_ZKAPI_DEFAULT_MODEL = "openai/gpt-5-mini", ALL_LANGUAGES, ACKNOWLEDGEMENT_IDS, MESSAGES3;
+var DASHBOARD_ZKAPI_PROFILE_ID = "zkapi-consult", DASHBOARD_ZKAPI_API_KEY_ENV = "OLYMPUS_ZKAPI_API_KEY", DASHBOARD_ZKAPI_DEFAULT_MODEL, ALL_LANGUAGES, ACKNOWLEDGEMENT_IDS, MESSAGES3;
 var init_dashboard_consult = __esm(() => {
   init_zkapi_recovery();
   init_consult_gate();
@@ -215098,6 +215328,7 @@ var init_dashboard_consult = __esm(() => {
   init_zkapi_consult_settings();
   init_operation_error();
   init_managed_tools();
+  DASHBOARD_ZKAPI_DEFAULT_MODEL = CONSULT_CHATGPT_FRONTIER_MODEL_DEFAULT;
   ALL_LANGUAGES = Object.keys(CONSULT_LANGUAGE_PACKS);
   ACKNOWLEDGEMENT_IDS = ZKAPI_RISK_ACKNOWLEDGEMENTS.map((entry) => entry.id);
   MESSAGES3 = {
@@ -219947,8 +220178,10 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     });
     const destinations = () => {
       let venice = "not_allowed";
+      let veniceModel;
       try {
         const members = privateVeniceMembers2(loadSourceWorkerSovereignty(olympusConfig, process.env));
+        veniceModel = members[0]?.profile.model;
         const bootMembers = privateVeniceMembers2(sovereigntyEngine);
         if (members.length) {
           venice = members.length === bootMembers.length && members.every((member) => bootMembers.some((boot) => boot.id === member.id && JSON.stringify(boot.profile) === JSON.stringify(member.profile)) && modelCredentialState(member.id, member.profile) === "ready") && sourceAnswer ? "ready" : "not_set_up";
@@ -219960,7 +220193,8 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
         venice = "not_allowed";
       }
       const modelState = answerBuiltInModel?.status().state;
-      return { computer: workerBuiltInModel?.available() ? "ready" : "not_set_up", venice, ...["downloading", "verifying", "loading"].includes(modelState ?? "") ? { computerReason: DASHBOARD_PRIVATE_ANSWERS_COPY.downloading } : {} };
+      const computerModel = workerBuiltInModel?.model.spec.displayName;
+      return { computer: workerBuiltInModel?.available() ? "ready" : "not_set_up", venice, ...computerModel ? { computerModel } : {}, ...veniceModel ? { veniceModel } : {}, ...["downloading", "verifying", "loading"].includes(modelState ?? "") ? { computerReason: DASHBOARD_PRIVATE_ANSWERS_COPY.downloading } : {} };
     };
     const veniceAnswer = sourceAnswer ? createVeniceInboxAnswer2({
       state: () => destinations().venice,

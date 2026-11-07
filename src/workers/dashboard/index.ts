@@ -28,6 +28,7 @@ import {
 import {
   renderDashboardAgentsPage,
   renderDashboardConnectorPage,
+  renderDashboardConnectPage,
   renderDashboardKeysPage,
   renderDashboardHelpPage,
   type DashboardPageOptions,
@@ -42,7 +43,7 @@ export { DASHBOARD_HTML_PATH };
  */
 export const DASHBOARD_LEGACY_QUERY_PARAMS = ['source', 'background', 'sensitivity', 'setup', 'privacy', 'embedding-ledger'] as const;
 
-export type DashboardHtmlRoutePage = 'host' | 'panel_read' | 'keys' | 'agents' | 'private_answers' | 'outside_help_moved' | 'connector' | 'help' | 'legacy';
+export type DashboardHtmlRoutePage = 'host' | 'panel_read' | 'keys' | 'connect' | 'agents' | 'private_answers' | 'outside_help_moved' | 'connector' | 'help' | 'legacy';
 
 export function isDashboardHtmlRoute(url: URL): boolean {
   return url.pathname === DASHBOARD_HTML_PATH;
@@ -55,6 +56,7 @@ export function dashboardHtmlRoutePage(url: URL): DashboardHtmlRoutePage {
   if (params.has(DASHBOARD_PANEL_READ_QUERY_PARAM)) return 'panel_read';
   if (params.has(DASHBOARD_LOCAL_PAGES.help)) return 'help';
   if (params.has(DASHBOARD_LOCAL_PAGES.keys)) return 'keys';
+  if (params.has(DASHBOARD_LOCAL_PAGES.connect)) return 'connect';
   if (params.has(DASHBOARD_LOCAL_PAGES.agents)) return 'agents';
   if (params.has(DASHBOARD_LOCAL_PAGES.privateAnswers)) return 'private_answers';
   if (params.has(DASHBOARD_OUTSIDE_HELP_QUERY_PARAM)) return 'outside_help_moved';
@@ -81,9 +83,9 @@ export function dashboardOutsideHelpRedirect(url: URL): string {
   return `${dashboardLocalPageHref('privateAnswers', dashboardReadToken(url))}#${DASHBOARD_PRIVATE_ANSWERS_ANONYMOUS_FRAGMENT}`;
 }
 
-/** The computer's local pages. `view` is needed by Keys only. */
+/** The computer's local pages. `view` is needed by Privacy settings (Keys), Connect a source and Private questions. */
 export function renderDashboardLocalPage(
-  page: 'keys' | 'agents' | 'private_answers' | 'connector' | 'help',
+  page: 'keys' | 'connect' | 'agents' | 'private_answers' | 'connector' | 'help',
   input: { url: URL; view?: SourceDashboardViewModel; options?: DashboardPageOptions },
 ): string {
   const options: DashboardPageOptions = { ...input.options, basePath: dashboardHomeHref(dashboardReadToken(input.url)) };
@@ -93,6 +95,9 @@ export function renderDashboardLocalPage(
     case 'keys':
       if (!input.view) throw new Error('Keys needs the dashboard view.');
       return renderDashboardKeysPage(input.view, options);
+    case 'connect':
+      if (!input.view) throw new Error('Connect a source needs the dashboard view.');
+      return renderDashboardConnectPage(input.view, options);
     case 'agents':
       return renderDashboardAgentsPage(options);
     case 'private_answers':

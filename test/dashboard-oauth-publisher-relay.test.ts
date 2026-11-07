@@ -1779,7 +1779,7 @@ describe('Google bring-your-own client secret on an https dashboard', () => {
       expect(driveAction.client_secret_on_file).toBeUndefined();
       // The rendered sheet asks for Drive's own secret rather than offering
       // Gmail's as a saved value.
-      const html = renderDashboardLocalPage('keys', { url: new URL(`${DASHBOARD_ORIGIN}/dashboard?keys`), view, options: {} });
+      const html = renderDashboardLocalPage('connect', { url: new URL(`${DASHBOARD_ORIGIN}/dashboard?connect`), view, options: {} });
       const driveSheet = html.slice(html.indexOf('id="connect-google_drive-docs"')).split('<div class="sheet"')[0]!;
       expect(driveSheet).toMatch(/name="client_secret" required/);
       expect(driveSheet).not.toContain(DASHBOARD_SAVED_SECRET_FIELD_VALUE);

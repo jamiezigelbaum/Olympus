@@ -257,7 +257,7 @@ test('saving the choice already shown still says it saved, and Local needs no sp
   const { Window } = await import('happy-dom');
   const { mountDashboardController } = await import('../src/control-ui/browser-controller.ts');
   const browser = new Window({ url: 'http://localhost/dashboard?keys' });
-  const keys = ['window', 'document', 'navigator', 'Element', 'HTMLElement', 'HTMLFormElement', 'HTMLInputElement', 'HTMLTextAreaElement', 'HTMLSelectElement', 'HTMLButtonElement', 'ShadowRoot', 'Event', 'MouseEvent', 'FormData', 'CSS'] as const;
+  const keys = ['window', 'document', 'navigator', 'Element', 'HTMLElement', 'HTMLFormElement', 'HTMLInputElement', 'HTMLTextAreaElement', 'HTMLSelectElement', 'HTMLButtonElement', 'ShadowRoot', 'Event', 'MouseEvent', 'FormData', 'CSS', 'HTMLDialogElement'] as const;
   const previous = new Map(keys.map(key => [key, Object.getOwnPropertyDescriptor(globalThis, key)]));
   for (const key of keys) Object.defineProperty(globalThis, key, { configurable: true, writable: true, value: browser[key] });
   let dispose = () => {};
@@ -279,13 +279,24 @@ test('saving the choice already shown still says it saved, and Local needs no sp
     await new Promise(resolve => setTimeout(resolve, 30));
     expect(calls).toEqual([{ action: 'save_judge', choice: 'local', cap_dollars: 0 }]);
     expect(redraws).toBeGreaterThan(0);
-    expect(root.querySelector('[data-action-message]')!.textContent).toBe('Cloud judging is off. Olympus is applying local judging.');
-    // Venice with no limit is explained on the page and sends nothing.
+    const pageLine = () => Array.from(root.querySelectorAll('[data-action-message]')).find(node => !node.closest('dialog'))!;
+    expect(pageLine().textContent).toBe('Cloud judging is off. Olympus is applying local judging.');
+    // Venice with no limit is explained inside its still-open confirmation and sends nothing.
     root.querySelector<HTMLInputElement>('input[value="venice"]')!.click();
+    const confirm = root.querySelector<HTMLDialogElement>('dialog[data-judge-dialog="venice"]')!;
+    expect(confirm.open).toBe(true);
     root.querySelector('form')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
     await browser.happyDOM.waitUntilComplete();
     expect(calls.length).toBe(1);
-    expect(root.querySelector('[data-action-message]')!.textContent).toBe('Enter a total cloud spending limit in dollars to use Venice.');
+    expect(confirm.open).toBe(true);
+    expect(confirm.querySelector('[data-action-message]')!.textContent).toBe('Enter a total cloud spending limit in dollars to use Venice.');
+    // With a limit the choice is accepted, and only then does the confirmation close.
+    confirm.querySelector<HTMLInputElement>('input[name="cap_dollars"]')!.value = '15';
+    root.querySelector('form')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    await browser.happyDOM.waitUntilComplete();
+    await new Promise(resolve => setTimeout(resolve, 30));
+    expect(calls.at(-1)).toEqual({ action: 'save_judge', choice: 'venice', cap_dollars: 15 });
+    expect(root.querySelector('dialog[open]')).toBeNull();
   } finally {
     dispose(); browser.close();
     for (const key of keys) { const descriptor = previous.get(key); if (descriptor) Object.defineProperty(globalThis, key, descriptor); else delete (globalThis as Record<string, unknown>)[key]; }
@@ -478,9 +489,9 @@ test('the Keys page renders through the real setup object and shows the upgrade 
     return reply.text();
   };
   const first = await keys();
-  expect(first).toContain('Sort your archive by privacy');
+  expect(first).toContain('Sorting your archive by privacy');
   expect(first).toContain('You can now set a spending limit');
   const second = await keys();
-  expect(second).toContain('Sort your archive by privacy');
+  expect(second).toContain('Sorting your archive by privacy');
   expect(second).not.toContain('You can now set a spending limit');
 });

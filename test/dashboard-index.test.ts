@@ -63,12 +63,12 @@ describe('which page a /dashboard address names', () => {
     expect(dashboardLocalPageHref('privateAnswers', 'dash_abc')).toBe('/dashboard?private-answers&token=dash_abc');
   });
 
-  test('olympusplugin.ai open links land on the computer: Connect and model fixes on Keys, the dashboard on itself', () => {
+  test('olympusplugin.ai open links land on the computer: Connect on Connect a source, the dashboard on itself', () => {
     const targets = computerOpenTargets('http://127.0.0.1:8787');
     expect(Object.values(targets)).toContain('http://127.0.0.1:8787/dashboard');
     const connects = Object.entries(targets).filter(([path]) => path.startsWith('connect/'));
     expect(connects.length).toBeGreaterThan(0);
-    for (const [, target] of connects) expect(target.startsWith('http://127.0.0.1:8787/dashboard?keys#')).toBe(true);
+    for (const [, target] of connects) expect(target.startsWith('http://127.0.0.1:8787/dashboard?connect#')).toBe(true);
     for (const target of Object.values(targets)) expect(target.startsWith('http://127.0.0.1:8787/dashboard')).toBe(true);
   });
 });

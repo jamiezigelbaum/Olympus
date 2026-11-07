@@ -25,7 +25,7 @@ import { roamJson, roamPages } from './support/archive-fixtures-roam.ts';
 import { enexExport, evernoteNotes } from './support/archive-fixtures-evernote.ts';
 import { previewDashboardToolResult } from '../scripts/dashboard-preview.ts';
 import { DASHBOARD_DISCONNECTED_DATA_KEPT } from '../src/workers/dashboard/vocabulary.ts';
-import { renderDashboardKeysPage } from '../src/workers/dashboard/pages/local.ts';
+import { renderDashboardConnectPage } from '../src/workers/dashboard/pages/local.ts';
 
 const cleanups: Array<() => void> = [];
 afterEach(() => { while (cleanups.length) cleanups.pop()!(); });
@@ -101,7 +101,7 @@ describe('the import-only sources the format registry names', () => {
   });
 });
 
-describe('Keys, for an import-only source (owner, 2026-10-29)', () => {
+describe('Connect a source, for an import-only source (owner, 2026-10-29)', () => {
   test('each row says the import is on the main page, from the card, and its button goes there and opens it', () => {
     const view = buildSourceDashboardViewModel({
       sourceIndexStatus: { generated_at: '2026-10-29T12:00:00.000Z', corpora: [] } as never,
@@ -111,7 +111,7 @@ describe('Keys, for an import-only source (owner, 2026-10-29)', () => {
     // The cards are on the main page before anything is imported.
     const main = buildChatGptDashboardViewModel(view, {}).sources.map((source) => source.id);
     expect(main).toEqual(expect.arrayContaining(['reflect.archive', 'roam.archive', 'archive.imports']));
-    const keys = renderDashboardKeysPage(view, { basePath: '/dashboard?token=dash_x' });
+    const keys = renderDashboardConnectPage(view, { basePath: '/dashboard?token=dash_x' });
     const row = (id: string) => {
       const at = keys.indexOf(`data-source-id="${id}"`);
       expect(at).toBeGreaterThan(0);

@@ -225,7 +225,7 @@ describe('olympus_open_remote', () => {
     expect(result).toMatchObject({
       ok: true,
       target: 'connect/x',
-      lands_on: '/dashboard?keys',
+      lands_on: '/dashboard?connect',
       computer: 'macos',
       tunnel: 'ssh -f -o ExitOnForwardFailure=yes -L 127.0.0.1:8123:127.0.0.1:8123 jamie@sparta sleep 1800',
       tunnel_in_background: false,

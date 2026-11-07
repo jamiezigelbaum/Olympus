@@ -733,8 +733,8 @@ function guidanceOf(view: SourceDashboardViewModel, sourceId: string): string | 
 
 /** The `connect-*` sheet for a source whose client key is on file. */
 function connectSheet(sourceId: string, clientIds: Record<string, string>, baseUrl = TAILNET): string {
-  const html = renderDashboardLocalPage('keys', {
-    url: new URL('http://worker.test/dashboard?keys'),
+  const html = renderDashboardLocalPage('connect', {
+    url: new URL('http://worker.test/dashboard?connect'),
     view: buildView({ oauthRedirectBaseUrl: baseUrl, oauthClientIds: clientIds }),
     options: { now: NOW },
   });
@@ -743,8 +743,8 @@ function connectSheet(sourceId: string, clientIds: Record<string, string>, baseU
 
 /** The `setup-*` sheet for a source with no client key registered yet. */
 function setupSheet(sourceId: string, clientIds: Record<string, string> = {}, baseUrl = TAILNET): string {
-  const html = renderDashboardLocalPage('keys', {
-    url: new URL('http://worker.test/dashboard?keys'),
+  const html = renderDashboardLocalPage('connect', {
+    url: new URL('http://worker.test/dashboard?connect'),
     view: buildView({ oauthRedirectBaseUrl: baseUrl, oauthClientIds: clientIds }),
     options: { now: NOW },
   });

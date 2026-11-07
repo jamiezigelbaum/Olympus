@@ -6473,8 +6473,10 @@ export async function main(): Promise<void> {
     });
     const destinations = (): import('./venice-inbox-answer.ts').AskDestinationStates => {
       let venice: import('./venice-inbox-answer.ts').AskDestinationState = 'not_allowed';
+      let veniceModel: string | undefined;
       try {
         const members = privateVeniceMembers(loadSourceWorkerSovereignty(olympusConfig, process.env));
+        veniceModel = members[0]?.profile.model;
         const bootMembers = privateVeniceMembers(sovereigntyEngine);
         if (members.length) {
           venice = members.length === bootMembers.length && members.every(member => bootMembers.some(boot => boot.id === member.id && JSON.stringify(boot.profile) === JSON.stringify(member.profile)) && modelCredentialState(member.id, member.profile) === 'ready') && sourceAnswer ? 'ready' : 'not_set_up';
@@ -6485,7 +6487,8 @@ export async function main(): Promise<void> {
         }
       } catch { venice = 'not_allowed'; }
       const modelState = answerBuiltInModel?.status().state;
-      return { computer: workerBuiltInModel?.available() ? 'ready' : 'not_set_up', venice, ...(['downloading', 'verifying', 'loading'].includes(modelState ?? '') ? { computerReason: PRIVATE_ANSWERS_COPY.downloading } : {}) };
+      const computerModel = workerBuiltInModel?.model.spec.displayName;
+      return { computer: workerBuiltInModel?.available() ? 'ready' : 'not_set_up', venice, ...(computerModel ? { computerModel } : {}), ...(veniceModel ? { veniceModel } : {}), ...(['downloading', 'verifying', 'loading'].includes(modelState ?? '') ? { computerReason: PRIVATE_ANSWERS_COPY.downloading } : {}) };
     };
     const veniceAnswer = sourceAnswer ? createVeniceInboxAnswer({
       state: () => destinations().venice, handler: sourceAnswer, sourceName,

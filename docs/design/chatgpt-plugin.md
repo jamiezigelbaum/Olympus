@@ -1068,7 +1068,7 @@ the writer's one caller), `src/workers/dashboard/outside-help.ts` and
 - **The route.** The one `zkapi` sovereignty profile. "Add the zkAPI route"
   writes a consult-only profile (`trust: standard_cloud`, `purpose:
   consult`, the daemon's default loopback base URL, model
-  `openai/gpt-5-mini`, `secretRef: env:OLYMPUS_ZKAPI_API_KEY`) through the
+  `anthropic/claude-sonnet-5.5` (`openai/gpt-5-mini` before 1.3.5), `secretRef: env:OLYMPUS_ZKAPI_API_KEY`) through the
   same validator `olympus sovereignty init` uses. The acknowledgements, the
   owner-confirmed funding date and the optional daily caps are recorded in
   that profile's `zkapi` block. Every policy write is one transaction

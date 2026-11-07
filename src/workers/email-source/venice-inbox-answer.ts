@@ -7,7 +7,14 @@ import { localAnswerRequest, type LocalAnswerRequest, type LocalAnswerResult } f
 import { inboxEvidenceIdentity } from './local-private-answers.ts';
 
 export type AskDestinationState = 'ready' | 'not_set_up' | 'not_allowed' | 'busy';
-export interface AskDestinationStates { computer: AskDestinationState; venice: AskDestinationState; computerReason?: string }
+export interface AskDestinationStates {
+  computer: AskDestinationState;
+  venice: AskDestinationState;
+  computerReason?: string;
+  /** Which model answers on each destination, for the page to name it (e.g. `Qwen3.5 4B`, `kimi-k3`). */
+  computerModel?: string;
+  veniceModel?: string;
+}
 
 /** Resolve only the pool's approved Venice members: provider preference can otherwise fall back to local. */
 export function privateVeniceMembers(engine: SovereigntyEngine) {

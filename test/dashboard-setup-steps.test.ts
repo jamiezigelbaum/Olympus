@@ -22,8 +22,8 @@ import { renderDashboardLocalPage } from '../src/workers/dashboard/index.ts';
 
 function preview(state: string) {
   const window = new Window();
-  window.document.body.innerHTML = renderDashboardLocalPage('keys', {
-    url: new URL('http://localhost/dashboard?keys'), view: buildDashboardPreviewView(state),
+  window.document.body.innerHTML = renderDashboardLocalPage('connect', {
+    url: new URL('http://localhost/dashboard?connect'), view: buildDashboardPreviewView(state),
     options: { controlSessionCsrfToken: 'fixture' },
   });
   return window.document;

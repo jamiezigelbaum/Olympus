@@ -24573,12 +24573,21 @@ function openTargetTokenPattern() {
   const tokens = allOpenTargets().map(openTargetToken).filter((token) => token !== undefined);
   return `^(?:page\\.private\\.[A-Za-z0-9_-]{22}|${tokens.map((token) => token.replace(".", "\\.")).join("|")})$`;
 }
+function isConnectOpenTarget(target) {
+  return target.kind === "connect";
+}
 function isKeysOpenTarget(target) {
-  return target.kind === "connect" || target.kind === "fix" && (target.section === "models" || target.section === "answers" || target.section === "search");
+  return target.kind === "fix" && (target.section === "models" || target.section === "answers" || target.section === "search");
+}
+function tokenPattern(filter) {
+  const tokens = allOpenTargets().filter(filter).map(openTargetToken).filter((token) => token !== undefined);
+  return `^(?:${tokens.map((token) => token.replace(".", "\\.")).join("|")})$`;
 }
 function keysOpenTargetTokenPattern() {
-  const tokens = allOpenTargets().filter(isKeysOpenTarget).map(openTargetToken).filter((token) => token !== undefined);
-  return `^(?:${tokens.map((token) => token.replace(".", "\\.")).join("|")})$`;
+  return tokenPattern(isKeysOpenTarget);
+}
+function connectOpenTargetTokenPattern() {
+  return tokenPattern(isConnectOpenTarget);
 }
 function privateAnswersOpenTargetTokenPattern() {
   return "^page\\.private(?:\\.[A-Za-z0-9_-]{22})?$";
@@ -24689,6 +24698,7 @@ var DASHBOARD_LAUNCH_PAGE_HTML = `<!doctype html>
         var KEY = '${DASHBOARD_LAUNCH_TICKET_FRAGMENT_KEY}';
         var OPEN = /${openTargetTokenPattern()}/;
         var KEYS = /${keysOpenTargetTokenPattern()}/;
+        var CONNECT = /${connectOpenTargetTokenPattern()}/;
         var PANEL = /${panelOpenTargetTokenPattern()}/;
         var PRIVATE = /${privateAnswersOpenTargetTokenPattern()}/;
         var status = document.getElementById('status');
@@ -24720,13 +24730,15 @@ var DASHBOARD_LAUNCH_PAGE_HTML = `<!doctype html>
           // lands on the dashboard: the session it opened is in its cookie,
           // and without one the dashboard itself offers the way back in.
           if (response.ok || response.status === 403) {
-            // A Keys target (Connect, a model fix) lands on Keys, where the computer's setup
-            // sheets and Models live; it only opens a panel there, never submits anything.
+            // Connect lands on Connect a source, where the computer's setup sheets live; a
+            // model fix lands on Privacy settings (?keys), where the models live. Each only
+            // opens something there, never submits anything.
             // A panel target (See why on one source) lands on the dashboard there.
             // Private answers lands on that page, carrying nothing.
             // Everything else (a reconnect, the dashboard itself) lands on the dashboard.
-            window.location.replace(KEYS.test(open)
-              ? '/dashboard?keys#${DASHBOARD_OPEN_FRAGMENT_KEY}=' + open
+            window.location.replace(CONNECT.test(open)
+              ? '/dashboard?connect#${DASHBOARD_OPEN_FRAGMENT_KEY}=' + open
+              : KEYS.test(open) ? '/dashboard?keys#${DASHBOARD_OPEN_FRAGMENT_KEY}=' + open
               : PANEL.test(open) ? '/dashboard#${DASHBOARD_OPEN_FRAGMENT_KEY}=' + open
               : PRIVATE.test(open) ? '/dashboard?private-answers' + (open.indexOf('page.private.') === 0 ? '#' + open.slice(13) : '') : '/dashboard');
             return;
@@ -25363,7 +25375,7 @@ async function openRemote(ctx, params, deps = {}) {
   return {
     ok: true,
     target: openTargetPath(target),
-    lands_on: isKeysOpenTarget(target) ? "/dashboard?keys" : target.kind === "private_answers" ? "/dashboard?private-answers" : "/dashboard",
+    lands_on: isConnectOpenTarget(target) ? "/dashboard?connect" : isKeysOpenTarget(target) ? "/dashboard?keys" : target.kind === "private_answers" ? "/dashboard?private-answers" : "/dashboard",
     computer,
     engine_port: port,
     ssh_target: sshTarget,

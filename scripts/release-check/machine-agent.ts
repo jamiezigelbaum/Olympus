@@ -1088,10 +1088,11 @@ async function inboxCheck(primary: string, otherIds: string[], waitS: number, ou
     const knownRows = new Set<string>((secondReady.rows ?? []).map((row: any) => String(row.id)));
     const ask: AskView = { pressed: false, answered: false, message: '', factsStated: [], citations: 0, citesExpected: false, ms: 0, entry: null };
     observation.ask = ask;
-    if ((await evalIn(FOCUS_QUESTION)) === true && secondReady.cards?.computer?.state === 'ready') await step('Ask the local model', 'type the question into the page and press "Ask the local model"', 'an answer with its sources appears and a new Inbox entry is kept', async () => {
+    if ((await evalIn(FOCUS_QUESTION)) === true && secondReady.cards?.computer?.state === 'ready') await step('Ask the local model', 'type the question into the page, pick Local and press Ask', 'an answer with its sources appears and a new Inbox entry is kept', async () => {
       await cdp.send('Input.insertText', { text: inbox.ask.text });
       const started = Date.now();
-      ask.pressed = await click('form[data-pa-ask] button[data-pa-destination="computer"]');
+      ask.pressed = await click('form[data-pa-ask] input[data-pa-pick][value="computer"]')
+        && await click('form[data-pa-ask] button[data-pa-ask-button][data-pa-destination="computer"]');
       if (ask.pressed) {
         await sleep(1_000);
         const until = started + waitS * 1000;
@@ -1130,7 +1131,7 @@ async function inboxCheck(primary: string, otherIds: string[], waitS: number, ou
       const refused = await api({ action: 'ask_venice', question: 'Release check: Venice is not set up, so this must be refused.' });
       observation.refusals.venice = refused.status;
     }
-    const followFix = (key: 'venice' | 'anonymous', anchor: string): Promise<FixView> => step(`Follow the way to fix ${key === 'venice' ? 'Venice' : 'the anonymous route'}`, `press the fix link on the ${key} card`, `the link lands on the ${anchor} section of Models`, () => followFixNow(key, anchor), (fix) => ({ text: fix.clicked ? `landed at ${fix.landedAt}; section ${fix.anchorShown ? 'shown' : 'NOT shown'}` : 'no fix link to press', ok: fix.clicked && fix.anchorShown }));
+    const followFix = (key: 'venice' | 'anonymous', anchor: string): Promise<FixView> => step(`Follow the way to fix ${key === 'venice' ? 'Venice' : 'the anonymous route'}`, `press the fix link on the ${key} card`, `the link lands on the ${anchor} section`, () => followFixNow(key, anchor), (fix) => ({ text: fix.clicked ? `landed at ${fix.landedAt}; section ${fix.anchorShown ? 'shown' : 'NOT shown'}` : 'no fix link to press', ok: fix.clicked && fix.anchorShown }));
     const followFixNow = async (key: 'venice' | 'anonymous', anchor: string): Promise<FixView> => {
       const clicked = await click(`[data-pa-card="${key}"] .paaction a`);
       if (!clicked) return { clicked: false, landedAt: '', anchorShown: false };
@@ -1141,7 +1142,7 @@ async function inboxCheck(primary: string, otherIds: string[], waitS: number, ou
       return { clicked: true, landedAt: where.replace(/token=[^&#]*/g, 'token=…'), anchorShown: shown };
     };
     if (secondReady.cards?.venice) observation.fixes.venice = await followFix('venice', 'venice-setup');
-    if (secondReady.cards?.anonymous) observation.fixes.anonymous = await followFix('anonymous', 'anonymous');
+    if (secondReady.cards?.anonymous) observation.fixes.anonymous = await followFix('anonymous', 'anonymous-setup');
 
     // 6. No link from an agent (this install issues none): the entry the Ask page just made is opened by its address instead, so the
     //    id-to-entry route is still exercised with a real id. The fault self-test changes the last character of the address.

@@ -22,7 +22,7 @@
  * machinery in `src/workers/http.ts`; this module only owns the ticket.
  */
 import { createHash, randomBytes } from 'node:crypto';
-import { DASHBOARD_LAUNCH_OPEN_KEY, DASHBOARD_OPEN_FRAGMENT_KEY, openTargetTokenPattern, keysOpenTargetTokenPattern, panelOpenTargetTokenPattern, privateAnswersOpenTargetTokenPattern } from './open-targets.ts';
+import { DASHBOARD_LAUNCH_OPEN_KEY, DASHBOARD_OPEN_FRAGMENT_KEY, openTargetTokenPattern, keysOpenTargetTokenPattern, connectOpenTargetTokenPattern, panelOpenTargetTokenPattern, privateAnswersOpenTargetTokenPattern } from './open-targets.ts';
 
 /** GET here renders the ticket-redeeming page. No private data; no token. */
 export const DASHBOARD_LAUNCH_PAGE_PATH = '/dashboard/launch';
@@ -218,6 +218,7 @@ export const DASHBOARD_LAUNCH_PAGE_HTML = `<!doctype html>
         var KEY = '${DASHBOARD_LAUNCH_TICKET_FRAGMENT_KEY}';
         var OPEN = /${openTargetTokenPattern()}/;
         var KEYS = /${keysOpenTargetTokenPattern()}/;
+        var CONNECT = /${connectOpenTargetTokenPattern()}/;
         var PANEL = /${panelOpenTargetTokenPattern()}/;
         var PRIVATE = /${privateAnswersOpenTargetTokenPattern()}/;
         var status = document.getElementById('status');
@@ -249,13 +250,15 @@ export const DASHBOARD_LAUNCH_PAGE_HTML = `<!doctype html>
           // lands on the dashboard: the session it opened is in its cookie,
           // and without one the dashboard itself offers the way back in.
           if (response.ok || response.status === 403) {
-            // A Keys target (Connect, a model fix) lands on Keys, where the computer's setup
-            // sheets and Models live; it only opens a panel there, never submits anything.
+            // Connect lands on Connect a source, where the computer's setup sheets live; a
+            // model fix lands on Privacy settings (?keys), where the models live. Each only
+            // opens something there, never submits anything.
             // A panel target (See why on one source) lands on the dashboard there.
             // Private answers lands on that page, carrying nothing.
             // Everything else (a reconnect, the dashboard itself) lands on the dashboard.
-            window.location.replace(KEYS.test(open)
-              ? '/dashboard?keys#${DASHBOARD_OPEN_FRAGMENT_KEY}=' + open
+            window.location.replace(CONNECT.test(open)
+              ? '/dashboard?connect#${DASHBOARD_OPEN_FRAGMENT_KEY}=' + open
+              : KEYS.test(open) ? '/dashboard?keys#${DASHBOARD_OPEN_FRAGMENT_KEY}=' + open
               : PANEL.test(open) ? '/dashboard#${DASHBOARD_OPEN_FRAGMENT_KEY}=' + open
               : PRIVATE.test(open) ? '/dashboard?private-answers' + (open.indexOf('page.private.') === 0 ? '#' + open.slice(13) : '') : '/dashboard');
             return;

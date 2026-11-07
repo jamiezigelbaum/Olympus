@@ -144,9 +144,9 @@ export const JOURNEYS: readonly Journey[] = [
     steps: [
       { name: 'Open the dashboard', do: { open: 'dashboard' }, expect: [{ text: COMPUTER.section, frame: 'panel' }] },
       {
-        name: 'Press Open on Keys',
-        do: { click: { role: 'button', name: `${COMPUTER.open} ${COMPUTER.rows.keys.title}` }, frame: 'panel' },
-        expect: [{ url: /\/dashboard\?keys/ }, { noNewWindow: true }, { text: ASK.connectVenice, frame: 'host' }],
+        name: 'Press Open on Privacy',
+        do: { click: { role: 'button', name: `${COMPUTER.open} ${COMPUTER.rows.privateAnswers.title}` }, frame: 'panel' },
+        expect: [{ url: /\/dashboard\?private-answers/ }, { noNewWindow: true }, { text: ASK.title, frame: 'host' }],
       },
       {
         name: 'Go back to the dashboard from the page\'s own Olympus link',

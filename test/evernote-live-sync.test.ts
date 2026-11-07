@@ -14,7 +14,7 @@ import { buildEnvBridgeSovereigntyConfig, createSovereigntyEngine } from '../src
 import { readConnectedHandleRegistry, type ConnectedCredentialHandle } from '../src/workers/credential-broker/connected-handles.ts';
 import { buildChatGptDashboardViewModel } from '../src/workers/chatgpt/dashboard-view-model.ts';
 import { computerOpenTargets } from '../src/workers/dashboard/host-page.ts';
-import { renderDashboardKeysPage } from '../src/workers/dashboard/pages/local.ts';
+import { renderDashboardConnectPage } from '../src/workers/dashboard/pages/local.ts';
 import { dashboardSubLine } from '../src/workers/dashboard/vocabulary.ts';
 import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
 import { EVERNOTE_HANDLE, startEvernoteSignIn } from '../src/workers/evernote/live-sync.ts';
@@ -445,9 +445,9 @@ describe('the dashboard', () => {
     });
     const row = buildChatGptDashboardViewModel(view, {}).sources.find((source) => source.id === 'evernote.notes')!;
     expect(row.primary).toMatchObject({ label: 'Connect', href: 'https://olympusplugin.ai/open/connect/evernote/', openHref: true });
-    // On the computer that link is the Keys page, landed on Evernote's row.
-    expect(computerOpenTargets('http://127.0.0.1:8787')['connect/evernote']).toBe('http://127.0.0.1:8787/dashboard?keys#olympus-open=connect.evernote');
-    const keys = renderDashboardKeysPage(view, {});
+    // On the computer that link is Connect a source, landed on Evernote's row.
+    expect(computerOpenTargets('http://127.0.0.1:8787')['connect/evernote']).toBe('http://127.0.0.1:8787/dashboard?connect#olympus-open=connect.evernote');
+    const keys = renderDashboardConnectPage(view, {});
     const at = keys.indexOf('data-source-id="evernote.notes"');
     expect(at).toBeGreaterThan(0);
     const evernoteRow = keys.slice(at, keys.indexOf('</div>', at));

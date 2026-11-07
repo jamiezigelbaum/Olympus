@@ -2,6 +2,8 @@ import { systemSupportReport, type SourceSupportState, type SystemSupportFacts }
 import { checkGoogleOwnApp, parseGoogleDesktopClient, readGoogleOwnAppRegistration } from '../../core/google-own-app.ts';
 import type { LocalModelDiscoveryResult, LocalModelSelection, LocalModelTestResult } from '../../core/local-model-discovery.ts';
 import { SOVEREIGNTY_PRESETS, type SovereigntyPresetName } from '../../core/sovereignty.ts';
+import { privateAnswerMode } from '../../core/first-run-privacy.ts';
+import { PRIVACY_PRESET_LABELS } from '../../core/privacy-language.ts';
 import { createDashboardMessagingService } from './dashboard-messaging-service.ts';
 import { isFileSourceScopeId } from '../../core/source-scope-approval.ts';
 import { createReleaseManifestSink, runWithReleaseManifestSink, recordReleaseManifest, answerReleaseWithheldReason, type ReleaseCheck, type ReleaseManifest } from '../../core/release-manifest.ts';
@@ -1500,7 +1502,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
             }));
           }
           if (page === 'help' && (!controlSessionCsrfToken || request.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER) !== 'local')) return renderHelp(request, url);
-          if (page === 'json' || page === 'keys' || page === 'help') {
+          if (page === 'json' || page === 'keys' || page === 'connect' || page === 'help') {
             if (!sourceIndexStatus || !sourceDashboard) {
               throw new EmailSourceWorkerError(
                 501,
@@ -1623,10 +1625,22 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
               sourceId: source.source_id, state: source.connection.state,
               failure: sourceFailureKind(source.schedule?.last_error_kind, source.schedule?.degraded_reason), ref: source.schedule?.last_error_hash,
             })));
+            if (page === 'connect') {
+              return html(renderDashboardLocalPage('connect', {
+                url,
+                view,
+                options: {
+                  ...(controlSessionCsrfToken ? { controlSessionCsrfToken } : {}),
+                  messagingLocalSession: Boolean(controlSessionCsrfToken) && request.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER) === 'local',
+                },
+              }));
+            }
+            const answerModeId = privateAnswerMode(sourceDashboard.sovereigntyEngine.config);
             return html(renderDashboardLocalPage('keys', {
               url,
               view,
               options: {
+                answerMode: { id: answerModeId, label: answerModeId === 'custom' ? 'Custom Private-answer mode' : PRIVACY_PRESET_LABELS[answerModeId] },
                 ...(controlSessionCsrfToken ? { controlSessionCsrfToken } : {}),
                 ...(sourceDashboard.judgeSetup ? { judgeSetup: sourceDashboard.judgeSetup.pageStatus?.() ?? sourceDashboard.judgeSetup.status() } : {}),
                 outsideHelpLocalSession: request.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER) === 'local',

@@ -20,7 +20,10 @@ export const PAGE_STATE = String.raw`(() => {
     const key = card.getAttribute('data-pa-card');
     const state = card.getAttribute('data-pa-state');
     const action = card.querySelector('.paaction');
-    const control = action ? action.querySelector('button, a') : null;
+    // A ready card has no button of its own: pick it, then press the one Ask button.
+    const pick = card.querySelector('input[data-pa-pick]');
+    const own = action ? action.querySelector('button, a') : null;
+    const control = own || (state === 'ready' && pick && !pick.disabled ? document.querySelector('form[data-pa-ask] button[data-pa-ask-button]') : null);
     cards[key] = {
       state,
       status: clean(card.querySelector('[data-pa-status="' + state + '"]')),
@@ -29,7 +32,7 @@ export const PAGE_STATE = String.raw`(() => {
         tag: control.tagName.toLowerCase(),
         text: clean(control),
         href: control.getAttribute('href'),
-        action: control.getAttribute('data-pa-action'),
+        action: own ? control.getAttribute('data-pa-action') : pick.getAttribute('data-pa-action'),
         submit: control.tagName === 'BUTTON' && (control.getAttribute('type') || 'submit') === 'submit',
         disabled: control.disabled === true,
       } : null,

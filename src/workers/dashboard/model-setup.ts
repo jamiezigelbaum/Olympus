@@ -139,7 +139,7 @@ function modelStateWord(card: ModelSetupCard): string {
  * first model in the way and the one control that clears it. Empty when
  * nothing blocks.
  */
-export function renderModelSetupBlocker(view: ModelSetupView | undefined): string {
+export function renderModelSetupBlocker(view: ModelSetupView | undefined, options: { keysHref?: string } = {}): string {
   if (!view || view.ready || view.privacy_choice_pending) return '';
   if (privateModelWords(view)) return `<div data-private-model-progress>${blockerBanner({ sentence: dashboardModelsBlockedReason(view), ...(view.private_model?.state === 'failed' ? { controlHtml: retryPrivateModel() } : {}) })}</div>`;
   const card = blockingCard(view);
@@ -167,7 +167,10 @@ export function renderModelSetupBlocker(view: ModelSetupView | undefined): strin
   if (card.state === 'needs_attention') return blockerBanner({ sentence: card.detail });
   return blockerBanner({
     sentence: `Add your ${card.label} API key to start connecting sources.`,
-    controlHtml: `<button type="button" class="btn primary" data-focus-target="#${card.id === 'venice' ? 'model-venice-start' : modelKeyFieldId(card)}">Add ${escapeHtml(card.label)} key</button>`,
+    // Key fields live on Privacy rules; another page links there instead of focusing a field it does not have.
+    controlHtml: options.keysHref
+      ? `<a class="btn primary" href="${escapeHtml(`${options.keysHref}#${card.id === 'venice' ? 'venice-setup' : modelKeyFieldId(card)}`)}">Add ${escapeHtml(card.label)} key</a>`
+      : `<button type="button" class="btn primary" data-focus-target="#${card.id === 'venice' ? 'model-venice-start' : modelKeyFieldId(card)}">Add ${escapeHtml(card.label)} key</button>`,
   });
 }
 

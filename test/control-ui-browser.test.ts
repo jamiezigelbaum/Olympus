@@ -1338,9 +1338,11 @@ for (const [state, provider, step] of [
 ] as const) {
   test(`preview deep link reaches ${state} step ${step} without starting a connection`, () => {
     const root = document.createElement('div');
-    const url = new URL(`http://localhost/dashboard?keys&controls&state=${state}&sheet=${provider}&step=${step}`);
-    expect(dashboardHtmlRoutePage(url)).toBe('keys');
-    root.innerHTML = renderDashboardLocalPage('keys', {
+    // The Venice key is set up on Privacy rules; sources on Connect a source.
+    const page = provider === 'venice' ? 'keys' : 'connect';
+    const url = new URL(`http://localhost/dashboard?${page}&controls&state=${state}&sheet=${provider}&step=${step}`);
+    expect(dashboardHtmlRoutePage(url)).toBe(page);
+    root.innerHTML = renderDashboardLocalPage(page, {
       url, view: buildDashboardPreviewView(state),
       options: { controlSessionCsrfToken: 'fixture' },
     });
@@ -1400,7 +1402,7 @@ test('shared footer submit respects write access, pending state and accepted key
 
 test('Google JSON stays out of visible text and is checked before any provider URL opens', async () => {
   const root = document.createElement('div');
-  root.innerHTML = renderDashboardLocalPage('keys', { url: new URL('http://localhost/dashboard?keys'), view: buildDashboardPreviewView('connect-google-loopback'), options: { controlSessionCsrfToken: 'fixture' } });
+  root.innerHTML = renderDashboardLocalPage('connect', { url: new URL('http://localhost/dashboard?connect'), view: buildDashboardPreviewView('connect-google-loopback'), options: { controlSessionCsrfToken: 'fixture' } });
   document.body.append(root);
   let submitted: Record<string, unknown> | undefined;
   const controller = mountDashboardController({ root, canWrite: true, signal: new AbortController().signal, navigate() {}, refresh: async () => undefined, returnUrl: 'http://localhost/dashboard?keys', pollIntervalMs: 0,
@@ -1460,7 +1462,7 @@ test('Telegram setup hands over to private prompts, shows Cancel only during pai
 
 test('Google paste inputs remain editable after refusal and clear after success', async () => {
   const root = document.createElement('div');
-  root.innerHTML = renderDashboardLocalPage('keys', { url: new URL('http://localhost/dashboard?keys'), view: buildDashboardPreviewView('connect-google-loopback'), options: { controlSessionCsrfToken: 'fixture' } }); document.body.append(root);
+  root.innerHTML = renderDashboardLocalPage('connect', { url: new URL('http://localhost/dashboard?connect'), view: buildDashboardPreviewView('connect-google-loopback'), options: { controlSessionCsrfToken: 'fixture' } }); document.body.append(root);
   let success = false;
   const controller = mountDashboardController({ root, canWrite: true, signal: new AbortController().signal, navigate() {}, refresh: async () => undefined, returnUrl: 'http://localhost/dashboard?keys', pollIntervalMs: 0,
     transport: { control: async () => success ? { status: 200, body: { ok: true, authorization_url: 'https://accounts.google.com/o/oauth2/v2/auth' } } : { status: 400, body: { ok: false, error: { message: 'Check the app key.' } } } },
@@ -1528,7 +1530,7 @@ test('Telegram preserves an open sheet and a deliberate close across dashboard r
 
 test('"I already have" skips to the step that still needs doing', () => {
   const root = document.createElement('div');
-  root.innerHTML = renderDashboardLocalPage('keys', { url: new URL('http://localhost/dashboard?keys'), view: buildDashboardPreviewView('connect-x'), options: { controlSessionCsrfToken: 'fixture' } });
+  root.innerHTML = renderDashboardLocalPage('connect', { url: new URL('http://localhost/dashboard?connect'), view: buildDashboardPreviewView('connect-x'), options: { controlSessionCsrfToken: 'fixture' } });
   document.body.append(root);
   const controller = mountDashboardController({ root, transport: { control: async () => { throw new Error('No consent should start'); } }, navigate() {}, async refresh() { return undefined; }, returnUrl: 'https://gateway.test/', canWrite: true, signal: new AbortController().signal, pollIntervalMs: 0 });
   try {
@@ -1546,7 +1548,7 @@ test('"I already have" skips to the step that still needs doing', () => {
 
 test('Google own-app hides the shared warning and reaches STEP 6 OF 6 with the file input', () => {
   const root = document.createElement('div');
-  root.innerHTML = renderDashboardLocalPage('keys', { url: new URL('http://localhost/dashboard?keys'), view: buildDashboardPreviewView('connect-google-publisher'), options: { controlSessionCsrfToken: 'fixture' } });
+  root.innerHTML = renderDashboardLocalPage('connect', { url: new URL('http://localhost/dashboard?connect'), view: buildDashboardPreviewView('connect-google-publisher'), options: { controlSessionCsrfToken: 'fixture' } });
   document.body.append(root);
   const controller = mountDashboardController({ root, transport: { control: async () => { throw new Error('No consent should start'); } }, navigate() {}, async refresh() { return undefined; }, returnUrl: 'https://gateway.test/', canWrite: true, signal: new AbortController().signal, pollIntervalMs: 0 });
   try {

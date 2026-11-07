@@ -83,10 +83,11 @@ describe('owner-facing dashboard pages carry no implementation jargon outside De
 });
 
 describe('the Keys blocker', () => {
-  function setup(cards: ModelSetupView['cards']): string {
+  // Sources and their blocker are on Connect a source; the model cards are on Privacy rules.
+  function setup(cards: ModelSetupView['cards'], page: 'connect' | 'keys' = 'connect'): string {
     const view = buildDashboardPreviewView('fresh');
     view.model_setup = { ready: false, checked_at: DASHBOARD_PREVIEW_NOW.toISOString(), cards };
-    return renderDashboardLocalPage('keys', { url: new URL('http://worker.test/dashboard?keys'), view, options: { now: DASHBOARD_PREVIEW_NOW } });
+    return renderDashboardLocalPage(page, { url: new URL(`http://worker.test/dashboard?${page}`), view, options: { now: DASHBOARD_PREVIEW_NOW } });
   }
   const local = (state: ModelSetupView['cards'][number]['state']) =>
     [{ id: 'local' as const, label: 'Local models', required: true, state, detail: 'Local detail.' }];
@@ -94,8 +95,10 @@ describe('the Keys blocker', () => {
   test('a local model under its automatic check reads Checking…, never Not configured', () => {
     const html = setup(local('applying'));
     expect(html).toContain('Checking your local models… Sources unlock when the check passes.');
-    expect(html).toContain('<span role="status">Checking…</span>');
     expect(html).not.toContain('Not configured');
+    const rules = setup(local('applying'), 'keys');
+    expect(rules).toContain('<span role="status">Checking…</span>');
+    expect(rules).not.toContain('Not configured');
     // Configured local models are checked on their own; nothing asks the
     // owner to connect them again.
     expect(html).not.toContain('data-sheet-toggle="#local-model-setup-sheet"');
@@ -110,6 +113,14 @@ describe('the Keys blocker', () => {
     const template = new Window().document.createElement('template');
     template.innerHTML = html;
     expect(template.content.querySelectorAll('form[data-model-check]').length).toBe(1);
+  });
+
+  test('on Connect a source, a missing key links to its field on Privacy rules', () => {
+    const html = setup([{ id: 'venice', label: 'Venice', required: true, state: 'not_configured', detail: 'Venice detail.' }]);
+    expect(html).toContain('<a class="btn primary" href="/dashboard?keys#venice-setup">Add Venice key</a>');
+    expect(html).not.toContain('data-focus-target="#model-venice-start"');
+    const rules = setup([{ id: 'venice', label: 'Venice', required: true, state: 'not_configured', detail: 'Venice detail.' }], 'keys');
+    expect(rules).toContain('id="venice-setup"');
   });
 
   test('blocked source controls are disabled, say why, and submit nothing', () => {
