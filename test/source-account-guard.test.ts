@@ -343,6 +343,7 @@ describe('the account guard', () => {
       embedChunks: () => embedChunks(),
       queuedEmbeddingItemIds: () => ['stuck'],
       embeddingFailedItemCount: () => 0,
+      embeddingSweepInventory: async () => ({ inventory_complete: 1 }),
     } as unknown as LocalConnectorStore;
     const [swept] = withEmbeddingSweep([lane(() => undefined)], () => () => [{ store: hanging, provider }], { storeDeadlineMs: 40 });
     const [guarded] = guardAccountBoundLanes([swept!], new Map([['dropbox.files', guard]]));
