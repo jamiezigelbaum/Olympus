@@ -233,7 +233,7 @@ describe('the opening page carries only an allowlisted target', () => {
     return navigated;
   }
 
-  test('a known target lands on Keys with the target in the fragment; anything else on the dashboard', async () => {
+  test('a known target lands on Connect a source with the target in the fragment; anything else on the dashboard', async () => {
     const ticket = 'A'.repeat(43);
     const landed = run(`#olympus_launch_ticket=${ticket}&olympus_open=connect.whatsapp`);
     const plain = run(`#olympus_launch_ticket=${ticket}`);
@@ -244,7 +244,7 @@ describe('the opening page carries only an allowlisted target', () => {
       run(`#olympus_launch_ticket=${ticket}&olympus_open=connectXx`),
     ];
     await new Promise((resolve) => setTimeout(resolve, 0));
-    expect(landed).toEqual(['/dashboard?keys#olympus-open=connect.whatsapp']);
+    expect(landed).toEqual(['/dashboard?connect#olympus-open=connect.whatsapp']);
     expect(plain).toEqual(['/dashboard']);
     for (const navigated of hostile) expect(navigated).toEqual(['/dashboard']);
   });
