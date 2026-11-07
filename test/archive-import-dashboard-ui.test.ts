@@ -908,8 +908,8 @@ describe('each archive under the Archives row', () => {
     expect(setUp).toBeDefined();
     setUp.click();
     await settle();
-    // It opens the page's own models section; no tool is called for it.
-    expect((page.doc.querySelector('details[data-open-key="models"]') as HTMLDetailsElement | null)?.open).toBe(true);
+    // On the computer it opens the private-model page (Home lists no Models); no tool is called for it.
+    expect(page.sent.filter((message) => message.method === 'ui/open-link').map((message) => message.params.url)).toEqual([LINKS.keys]);
     expect(page.calls().map((call) => call.name).every((name) => name === DASHBOARD_TOOL_NAME)).toBe(true);
   });
 
@@ -1338,13 +1338,13 @@ describe('Needs you for imports', () => {
     expect(page.calls(ARCHIVE_APPROVE_TOOL_NAME)).toEqual([]);
   });
 
-  test('held messages with no private model: a Needs you line that opens the private model in place', async () => {
+  test('held messages with no private model: a Needs you line that opens the private model page', async () => {
     const page = await mount({ [DASHBOARD_TOOL_NAME]: () => previewState('archives-waiting') });
     const line = needsYou(page).get(fill(A.needsYou.held.many, { n: '48,210' }));
     expect(line).toBeDefined();
     (Array.from(line!.querySelectorAll('button')).find((node) => node.textContent === A.needsYou.setUp) as HTMLButtonElement).click();
     await settle();
-    expect((page.doc.querySelector('details[data-open-key="models"]') as HTMLDetailsElement | null)?.open).toBe(true);
+    expect(page.sent.filter((message) => message.method === 'ui/open-link').map((message) => message.params.url)).toEqual([LINKS.keys]);
     expect(page.calls().map((call) => call.name).every((name) => name === DASHBOARD_TOOL_NAME)).toBe(true);
   });
 

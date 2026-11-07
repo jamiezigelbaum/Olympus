@@ -539,33 +539,27 @@ const UNPAIR_TELEGRAM = {
 const C = DASHBOARD_COMPUTER_PANEL_COPY;
 
 describe('the panel on the computer', () => {
-  test('asks for the dashboard itself and ends with On this computer: Privacy, Agents, Build a connector', async () => {
-    const page = await onHost(COMPUTER, model({ computerControls: { href: `${OPEN_BASE}dashboard/` } }), { indexFaster: { on: false } });
+  test('Home: one status line with totals, Needs you, and every source one click away; the top bar replaces On this computer', async () => {
+    const page = await onHost(COMPUTER, model({ computerControls: { href: `${OPEN_BASE}dashboard/` }, sources: [GMAIL_RECONNECT, TELEGRAM] }), { indexFaster: { on: false }, indexedItems: 48_210 });
     const asked = page.sent.filter((message) => message.method === 'tools/call').map((message) => message.params.name);
     expect(asked).toEqual([DASHBOARD_TOOL_NAME]);
-    const section = page.win.document.querySelector('section.on-computer')!;
-    expect(section).not.toBeNull();
-    expect(section.querySelector('h2')!.textContent).toBe(`${C.section} ${C.onlyHere}`);
-    const titles = Array.from(section.querySelectorAll('li.row .row-text p:first-child')).map((node) => node.textContent);
-    expect(titles).toEqual([C.rows.privateAnswers.title, C.rows.agents.title, C.rows.connector.title]);
-    // It is the last section on the page.
-    const sections = Array.from(page.win.document.querySelectorAll('#app section'));
-    expect(sections[sections.length - 1]).toBe(section);
-    // The section itself is here, so the line that points at it from ChatGPT is not.
+    const status = page.win.document.querySelector('[data-home-status]')!;
+    expect(status.textContent).toContain('2 sources · 48,210 items · checked');
+    expect(page.win.document.querySelector('section.on-computer')).toBeNull();
     expect(page.win.document.querySelector('.more-on-computer')).toBeNull();
-
-    const open = Array.from(section.querySelectorAll('button')).find((node) => node.getAttribute('aria-label') === `${C.open} ${C.rows.agents.title}`)!;
-    open.click();
-    expect(page.sent.filter((message) => message.method === 'ui/open-link').map((message) => message.params.url)).toEqual([LINKS.agents]);
+    // Models live on Settings now.
+    expect(page.win.document.querySelector('details[data-open-key="models"]')).toBeNull();
+    const all = page.win.document.querySelector('details[data-open-key="home-sources"]')!;
+    expect(all.querySelector('summary')!.textContent).toBe('All sources (2)');
+    expect(all.querySelectorAll('.row.source')).toHaveLength(2);
   });
 
-  test('Change models is enabled and opens the computer\'s models page', async () => {
-    const page = await onHost(COMPUTER, model());
-    const change = page.button('Change');
-    expect(change.disabled).toBe(false);
-    expect(page.text()).not.toContain('Change models in Olympus on your computer.');
-    change.click();
-    expect(page.sent.filter((message) => message.method === 'ui/open-link').map((message) => message.params.url)).toEqual([`${OPEN_BASE}fix/models/`]);
+  test('Home says it is up to date when nothing needs the owner and nothing runs', async () => {
+    const page = await onHost(COMPUTER, model({ sources: [TELEGRAM], progress: undefined }));
+    const status = page.win.document.querySelector('[data-home-status]')!;
+    expect(status.getAttribute('data-home-status')).toBe('ok');
+    expect(status.textContent).toContain('Olympus is up to date');
+    expect(status.textContent).toContain('1 source · checked');
   });
 
   test('Index faster sits under Progress details only while indexing runs, and calls its tool', async () => {
@@ -590,12 +584,10 @@ describe('the panel on the computer', () => {
     expect(unknown.win.document.querySelector('.index-faster')).toBeNull();
   });
 
-  test('locked: the controls are disabled with no reason of their own (the banner says it once), and the local pages stay one click away', async () => {
+  test('locked: the controls are disabled with no reason of their own (the banner says it once)', async () => {
     const page = await onHost({ ...COMPUTER, readOnly: true }, model({ sources: [GMAIL_RECONNECT] }), { indexFaster: { on: false } });
     expect(page.button('Reconnect').disabled).toBe(true);
     expect(page.text()).not.toContain(C.locked);
-    expect(page.win.document.querySelector('section.on-computer')).not.toBeNull();
-    expect(Array.from(page.win.document.querySelectorAll('section.on-computer button')).every((node: any) => !node.disabled)).toBe(true);
   });
 
   test('the OpenClaw tab read-only has no banner, so each control still says why', async () => {

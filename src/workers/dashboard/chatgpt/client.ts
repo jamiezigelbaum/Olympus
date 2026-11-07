@@ -940,10 +940,7 @@ export function chatgptDashboardClient(
       action = () => focusArchive(String(fix.archiveFocus));
     } else if (fix.archiveModels === true) {
       // Held items (computer only): the private model under Models, in place.
-      action = () => {
-        state.open.models = true;
-        render('summary:models');
-      };
+      action = () => openModels(() => render('summary:models'));
     } else if (picker && picker.handles(fix)) {
       // Connect, Choose folders and Choose mail open in place, never as a plain tool call.
       action = () => {
@@ -1915,10 +1912,7 @@ export function chatgptDashboardClient(
     const level = model === 'ready' || model === 'off' ? model : 'waiting';
     add(block, el('p', 'muted', (A.heldWhy as Any)[level]));
     if (level !== 'ready') {
-      add(block, add(el('div', 'archive-actions'), button(A.setUpPrivateModel, 'archive-models:' + archive.id, () => {
-        state.open.models = true;
-        render('summary:models');
-      }, 'plain')));
+      add(block, add(el('div', 'archive-actions'), button(A.setUpPrivateModel, 'archive-models:' + archive.id, () => openModels(() => render('summary:models')), 'plain')));
     }
     return block;
   }
@@ -2688,6 +2682,17 @@ export function chatgptDashboardClient(
     return card;
   }
 
+  /**
+   * The private model: on the computer its own page (Home no longer lists
+   * Models, owner 2026-11-07); elsewhere the Models section, opened in place.
+   */
+  function openModels(inPlace: () => void): void {
+    const href = onComputer() ? state.hostLinks.keys : '';
+    if (href) { openLink(href); return; }
+    state.open.models = true;
+    inPlace();
+  }
+
   function renderHome(page: HTMLElement, data: Any): HTMLElement {
     const all = Array.isArray(data.sources) ? data.sources : [];
     const needs = Array.isArray(data.needsYou) ? data.needsYou.filter((item: Any) => !!item) : [];
@@ -2848,10 +2853,7 @@ export function chatgptDashboardClient(
     fullscreen: goFullscreen,
     isDashboard,
     errorText: inlineError,
-    showModels: () => {
-      state.open.models = true;
-      closeScreen('', false, 'summary:models');
-    },
+    showModels: () => openModels(() => closeScreen('', false, 'summary:models')),
     // An Olympus host starts sign-in on the computer itself, so its link is
     // the provider's own page, not a one-time mcp.olympusplugin.ai link.
     directSignIn: () => state.hostKind !== '',
