@@ -31,6 +31,7 @@ import {
   renderDashboardConnectPage,
   renderDashboardKeysPage,
   renderDashboardHelpPage,
+  renderDashboardSettingsPage,
   type DashboardPageOptions,
 } from './pages/local.ts';
 import { DASHBOARD_PRIVATE_ANSWERS_ANONYMOUS_FRAGMENT, renderDashboardPrivateAnswersPage } from './pages/private-answers.ts';
@@ -43,7 +44,7 @@ export { DASHBOARD_HTML_PATH };
  */
 export const DASHBOARD_LEGACY_QUERY_PARAMS = ['source', 'background', 'sensitivity', 'setup', 'privacy', 'embedding-ledger'] as const;
 
-export type DashboardHtmlRoutePage = 'host' | 'panel_read' | 'keys' | 'connect' | 'agents' | 'private_answers' | 'outside_help_moved' | 'connector' | 'help' | 'legacy';
+export type DashboardHtmlRoutePage = 'host' | 'panel_read' | 'keys' | 'connect' | 'agents' | 'private_answers' | 'outside_help_moved' | 'connector' | 'help' | 'settings' | 'legacy';
 
 export function isDashboardHtmlRoute(url: URL): boolean {
   return url.pathname === DASHBOARD_HTML_PATH;
@@ -61,6 +62,7 @@ export function dashboardHtmlRoutePage(url: URL): DashboardHtmlRoutePage {
   if (params.has(DASHBOARD_LOCAL_PAGES.privateAnswers)) return 'private_answers';
   if (params.has(DASHBOARD_OUTSIDE_HELP_QUERY_PARAM)) return 'outside_help_moved';
   if (params.has(DASHBOARD_LOCAL_PAGES.connector)) return 'connector';
+  if (params.has(DASHBOARD_LOCAL_PAGES.settings)) return 'settings';
   return 'host';
 }
 
@@ -85,7 +87,7 @@ export function dashboardOutsideHelpRedirect(url: URL): string {
 
 /** The computer's local pages. `view` is needed by Privacy settings (Keys), Connect a source and Private questions. */
 export function renderDashboardLocalPage(
-  page: 'keys' | 'connect' | 'agents' | 'private_answers' | 'connector' | 'help',
+  page: 'keys' | 'connect' | 'agents' | 'private_answers' | 'connector' | 'help' | 'settings',
   input: { url: URL; view?: SourceDashboardViewModel; options?: DashboardPageOptions },
 ): string {
   const options: DashboardPageOptions = { ...input.options, basePath: dashboardHomeHref(dashboardReadToken(input.url)) };
@@ -104,6 +106,8 @@ export function renderDashboardLocalPage(
       return renderDashboardPrivateAnswersPage(options);
     case 'connector':
       return renderDashboardConnectorPage(options);
+    case 'settings':
+      return renderDashboardSettingsPage(options);
   }
 }
 

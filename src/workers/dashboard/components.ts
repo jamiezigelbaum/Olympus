@@ -125,6 +125,8 @@ export interface DashboardPageShellInput {
   basePath?: string;
   /** Header's right-hand meta line. */
   meta: string;
+  /** The top bar (top-nav.ts), already rendered; replaces the brand line. Its CSS comes in `styles`. */
+  nav?: string;
   /** Already-escaped page body markup. */
   body: string;
   /** Already-built inline scripts, in order. */
@@ -194,10 +196,11 @@ export function pageShell(input: DashboardPageShellInput): string {
   const styles = [DASHBOARD_THEME_CSS, ...(input.styles ?? [])].join('\n');
   const content = `<div class="frame">
       <div class="page">
-      <div class="top">
+      ${input.nav ? `${input.nav}
+      <div class="top subtop"><span class="meta" data-computer-identity>${escapeHtml(dashboardComputerIdentity())}</span>${input.meta ? `<span class="meta">${escapeHtml(input.meta)}</span>` : ''}</div>` : `<div class="top">
         <span class="brand">${brand}</span><span class="meta" data-computer-identity>${escapeHtml(dashboardComputerIdentity())}</span>${input.meta ? `
         <span class="meta">${escapeHtml(input.meta)}</span>` : ''}
-      </div>
+      </div>`}
       ${input.body}
       </div>
     </div>`;

@@ -70210,6 +70210,9 @@ init_vocabulary();
 // src/workers/dashboard/pages/private-answers.ts
 init_vocabulary();
 
+// src/workers/dashboard/pages/local.ts
+init_vocabulary();
+
 // src/workers/dashboard/model-setup.ts
 init_vocabulary();
 init_privacy_language();

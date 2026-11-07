@@ -35,6 +35,7 @@ import { dashboardHostBridge, type DashboardHostBridgeConfig } from './host-brid
 import { mountDashboardController } from '../../control-ui/browser-controller.ts';
 import { renderMessagingCard } from './messaging.ts';
 import { DASHBOARD_THEME_CSS } from './theme.ts';
+import { dashboardTopNav, TOP_NAV_CSS } from './top-nav.ts';
 import { ARCHIVE_UPLOAD_CHUNK_BYTES } from '../archive-import/staging.ts';
 import {
   DASHBOARD_HOST_GATE_COPY,
@@ -71,6 +72,7 @@ export const DASHBOARD_LOCAL_PAGES = {
   privateAnswers: 'private-answers',
   connector: 'connector',
   help: 'help',
+  settings: 'settings',
 } as const;
 
 export type DashboardLocalPage = keyof typeof DASHBOARD_LOCAL_PAGES;
@@ -706,12 +708,14 @@ export function renderComputerHostPage(input: ComputerHostPageInput): string {
     '<meta charset="utf-8">',
     '<meta name="viewport" content="width=device-width, initial-scale=1">',
     '<title>Olympus</title>',
-    `<style>${HOST_CSS}</style>`,
+    `<style>${HOST_CSS}${TOP_NAV_CSS}.topnav{flex:none;max-width:48rem;width:calc(100% - 2rem);margin:1rem auto 0}</style>`,
     '</head>',
     `<body data-olympus-host="computer" data-locked="${locked ? 'true' : 'false'}">`,
     // The page's one landmark and level-one heading. The heading is visually hidden: the framed panel carries the visible title.
     '<main>',
     '<h1 class="sr-only">Olympus dashboard</h1>',
+    // Home's script does not post controls, so the bar shows the lock state only.
+    dashboardTopNav({ active: 'home', unlocked: !locked, lockable: false, ...(token ? { token } : {}) }),
     `<header class="computer-identity" data-computer-identity>${text(input.computerIdentity ?? dashboardComputerIdentity())}</header>`,
     ...(installer ? [
       `<section class="update" data-update-notice${update ? '' : ' hidden'}><p data-update-text>${update ? text(DASHBOARD_UPDATE_COPY.notice(update.version)) : ''}</p>`

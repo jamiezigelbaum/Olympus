@@ -151156,10 +151156,11 @@ function pageShell(input) {
 `);
   const content = `<div class="frame">
       <div class="page">
-      <div class="top">
+      ${input.nav ? `${input.nav}
+      <div class="top subtop"><span class="meta" data-computer-identity>${escapeHtml2(dashboardComputerIdentity())}</span>${input.meta ? `<span class="meta">${escapeHtml2(input.meta)}</span>` : ""}</div>` : `<div class="top">
         <span class="brand">${brand}</span><span class="meta" data-computer-identity>${escapeHtml2(dashboardComputerIdentity())}</span>${input.meta ? `
         <span class="meta">${escapeHtml2(input.meta)}</span>` : ""}
-      </div>
+      </div>`}
       ${input.body}
       </div>
     </div>`;
@@ -159145,6 +159146,57 @@ var init_messaging = __esm(() => {
   init_components();
 });
 
+// src/workers/dashboard/top-nav.ts
+function dashboardTabHref(tab, token) {
+  switch (tab) {
+    case "home":
+      return dashboardHomeHref(token);
+    case "sources":
+      return dashboardLocalPageHref("connect", token);
+    case "privacy":
+      return dashboardLocalPageHref("privateAnswers", token);
+    case "settings":
+      return dashboardLocalPageHref("settings", token);
+  }
+}
+function dashboardTopNav(input) {
+  const tabs = DASHBOARD_TABS.map((tab) => {
+    const href = escapeHtml2(dashboardTabHref(tab.id, input.token));
+    return tab.id === input.active ? `<a class="navtab on" aria-current="page" href="${href}">${escapeHtml2(tab.label)}</a>` : `<a class="navtab" href="${href}">${escapeHtml2(tab.label)}</a>`;
+  }).join("");
+  const lock = !input.unlocked ? '<span class="navlock" data-state="locked"><span aria-hidden="true">\uD83D\uDD12</span> Locked</span>' : input.lockable === false ? '<span class="navlock" data-state="connected"><span aria-hidden="true">\uD83D\uDD13</span> Unlocked</span>' : `<div class="navlock" id="${DASHBOARD_CONTROL_GATE_ID}" data-dashboard-control-gate data-state="connected"><span aria-hidden="true">\uD83D\uDD13</span> Unlocked<span class="navsep" aria-hidden="true">·</span>` + '<form class="navlockform" data-control-session-kind="lock" method="post" action="/dashboard/control/session/lock">' + '<button class="navlockbtn" type="submit">Lock</button><span class="actmsg" data-action-message role="status"></span></form></div>';
+  return `<header class="topnav"><span class="navbrand">Olympus</span><nav class="navtabs" aria-label="Olympus">${tabs}</nav><span class="navgrow"></span>${lock}</header>`;
+}
+var DASHBOARD_TABS, TOP_NAV_CSS = `
+.topnav { display: flex; align-items: center; gap: 8px 20px; flex-wrap: wrap; padding: 0 0 14px; margin: 0 0 20px; border-bottom: 1px solid var(--line); }
+.navbrand { font-weight: 700; font-size: 1.35em; color: var(--t1, var(--text)); }
+.navtabs { display: flex; gap: 4px; flex-wrap: wrap; }
+.navtab { padding: 6px 12px; border-radius: 8px; color: var(--t2, var(--muted)); text-decoration: none; }
+.navtab:hover { color: var(--t1, var(--text)); }
+.navtab.on { color: var(--t1, var(--text)); background: color-mix(in srgb, var(--link, var(--accent)) 22%, transparent); font-weight: 600; }
+.navtab:focus-visible, .navlockbtn:focus-visible { outline: 2px solid var(--link, var(--focus)); outline-offset: 2px; }
+.navgrow { flex: 1; }
+.navlock { display: inline-flex; align-items: center; gap: 6px; padding: 4px 12px; border: 1px solid var(--line); border-radius: 999px; color: var(--t2, var(--muted)); font-size: 0.92em; }
+.navsep { opacity: .7; }
+.navlockform { display: inline-flex; align-items: center; gap: 6px; margin: 0; }
+.navlockbtn { font: inherit; background: none; border: 0; padding: 0; color: var(--t2, var(--muted)); cursor: pointer; }
+.navlockbtn:hover { color: var(--t1, var(--text)); text-decoration: underline; }
+.navlockform .actmsg:empty { display: none; }
+
+.top.subtop { margin: -10px 0 16px; font-size: .9em; }
+@media (max-width: 640px) { .navgrow { display: none; } .topnav { gap: 8px 12px; } }
+`;
+var init_top_nav = __esm(() => {
+  init_components();
+  init_host_page();
+  DASHBOARD_TABS = [
+    { id: "home", label: "Home" },
+    { id: "sources", label: "Sources" },
+    { id: "privacy", label: "Privacy" },
+    { id: "settings", label: "Settings" }
+  ];
+});
+
 // src/workers/dashboard/host-page.ts
 function dashboardLocalPageHref(page2, token) {
   const query = token ? `${DASHBOARD_LOCAL_PAGES[page2]}&token=${encodeURIComponent(token)}` : DASHBOARD_LOCAL_PAGES[page2];
@@ -159633,11 +159685,12 @@ function renderComputerHostPage(input) {
     '<meta charset="utf-8">',
     '<meta name="viewport" content="width=device-width, initial-scale=1">',
     "<title>Olympus</title>",
-    `<style>${HOST_CSS}</style>`,
+    `<style>${HOST_CSS}${TOP_NAV_CSS}.topnav{flex:none;max-width:48rem;width:calc(100% - 2rem);margin:1rem auto 0}</style>`,
     "</head>",
     `<body data-olympus-host="computer" data-locked="${locked2 ? "true" : "false"}">`,
     "<main>",
     '<h1 class="sr-only">Olympus dashboard</h1>',
+    dashboardTopNav({ active: "home", unlocked: !locked2, lockable: false, ...token ? { token } : {} }),
     `<header class="computer-identity" data-computer-identity>${text3(input.computerIdentity ?? dashboardComputerIdentity())}</header>`,
     ...installer ? [
       `<section class="update" data-update-notice${update ? "" : " hidden"}><p data-update-text>${update ? text3(DASHBOARD_UPDATE_COPY.notice(update.version)) : ""}</p>` + `<p><code id="update-command">${text3(installer.command)}</code> ` + `<button class="btn" type="button" data-update-copy>${text3(DASHBOARD_UPDATE_COPY.copy)}</button> ` + `<span class="status" data-update-copy-status aria-live="polite"></span></p></section>`
@@ -159664,6 +159717,7 @@ var init_host_page = __esm(() => {
   init_page();
   init_messaging();
   init_theme();
+  init_top_nav();
   init_staging();
   init_vocabulary();
   init_open_targets();
@@ -159673,7 +159727,8 @@ var init_host_page = __esm(() => {
     agents: "agents",
     privateAnswers: "private-answers",
     connector: "connector",
-    help: "help"
+    help: "help",
+    settings: "settings"
   };
   HOST_CSS = `
 :root{--bg:${CHATGPT_DASHBOARD_LIGHT.bg};--text:${CHATGPT_DASHBOARD_LIGHT.text};--muted:${CHATGPT_DASHBOARD_LIGHT.muted};--line:${CHATGPT_DASHBOARD_LIGHT.line};--warn-bg:${CHATGPT_DASHBOARD_LIGHT.warnBg};--warn:${CHATGPT_DASHBOARD_LIGHT.warn};--surface:${CHATGPT_DASHBOARD_LIGHT.surface};--focus:${CHATGPT_DASHBOARD_LIGHT.focus};--accent:${CHATGPT_DASHBOARD_LIGHT.accent};--on-accent:${CHATGPT_DASHBOARD_LIGHT.onAccent};color-scheme:light dark}
@@ -160691,9 +160746,10 @@ function renderDashboardPrivateAnswersPage(options) {
     title: "Olympus",
     crumb: DASHBOARD_PRIVATE_ANSWERS_COPY.crumb,
     ...basePath === undefined ? {} : { basePath },
+    nav: dashboardTopNav({ active: "privacy", unlocked: options?.controlSessionCsrfToken !== undefined, lockable: false, ...readToken(basePath) ? { token: readToken(basePath) } : {} }),
     meta: "",
     body: dashboardPrivacyTabs("questions", readToken(basePath)) + renderPrivateAnswersBody(options),
-    styles: [CHATGPT_MARKDOWN_CSS, LOCAL_PAGE_CSS, DASHBOARD_OUTSIDE_HELP_CSS, PRIVACY_TABS_CSS, PRIVATE_ANSWERS_CSS]
+    styles: [CHATGPT_MARKDOWN_CSS, LOCAL_PAGE_CSS, TOP_NAV_CSS, DASHBOARD_OUTSIDE_HELP_CSS, PRIVACY_TABS_CSS, PRIVATE_ANSWERS_CSS]
   });
 }
 function dashboardPrivacyTabs(active, token) {
@@ -161322,6 +161378,7 @@ var DASHBOARD_PRIVATE_ANSWERS_ANONYMOUS_FRAGMENT = "anonymous-setup", POST_PATH 
 var init_private_answers = __esm(() => {
   init_components();
   init_host_page();
+  init_top_nav();
   init_outside_help();
   init_vocabulary();
   ANONYMOUS_SETUP_ID = DASHBOARD_PRIVATE_ANSWERS_ANONYMOUS_FRAGMENT;
@@ -161585,12 +161642,17 @@ var init_model_setup2 = __esm(() => {
 function unlocked(options) {
   return options?.controlSessionCsrfToken !== undefined;
 }
+function lockedGate2(options) {
+  return unlocked(options) ? "" : dashboardControlGate({ connected: false });
+}
 function localShell(input) {
   const csrf = input.options?.controlSessionCsrfToken;
+  const token = readToken2(input.options?.basePath);
   return pageShell({
     title: "Olympus",
     crumb: input.crumb,
     ...input.options?.basePath === undefined ? {} : { basePath: input.options.basePath },
+    nav: dashboardTopNav({ active: input.tab, unlocked: csrf !== undefined, ...token ? { token } : {} }),
     meta: input.meta,
     body: input.body,
     controller: { ...csrf === undefined ? {} : { csrfToken: csrf } },
@@ -161598,7 +161660,7 @@ function localShell(input) {
       unlocked: csrf !== undefined,
       ...csrf === undefined ? {} : { controlSessionCsrfToken: csrf }
     },
-    styles: [LOCAL_PAGE_CSS, ...input.styles]
+    styles: [LOCAL_PAGE_CSS, TOP_NAV_CSS, ...input.styles]
   });
 }
 function renderDashboardKeysPage(view3, options) {
@@ -161606,7 +161668,7 @@ function renderDashboardKeysPage(view3, options) {
   const token = readToken2(options?.basePath);
   const mode = options?.answerMode;
   const body = [
-    dashboardControlGate({ connected: unlocked(options) }),
+    lockedGate2(options),
     dashboardPrivacyTabs("settings", token),
     `<section id="whats-private"><h3 class="sect">${escapeHtml2(DASHBOARD_PRIVACY_SETTINGS_COPY.whatsPrivate)}</h3><p class="pnote">${escapeHtml2(DASHBOARD_PRIVACY_SETTINGS_COPY.intro)}</p>` + `<div class="srow nodot"><div class="smain"><b>${escapeHtml2(DASHBOARD_PRIVACY_SETTINGS_COPY.wordsTitle)}</b><p class="pnote">${escapeHtml2(DASHBOARD_PRIVACY_SETTINGS_COPY.wordsLine)}</p></div><div class="sact"><a class="btn" href="${escapeHtml2(home2)}">${escapeHtml2(DASHBOARD_PRIVACY_SETTINGS_COPY.wordsOpen)}</a></div></div></section>`,
     `<section id="private-routing"><h3 class="sect">${escapeHtml2(DASHBOARD_PRIVACY_SETTINGS_COPY.answeredTitle)}</h3><p class="pnote">${escapeHtml2(DASHBOARD_PRIVACY_SETTINGS_COPY.answeredIntro)}</p>` + (mode ? `<div class="srow nodot" data-answer-mode="${escapeHtml2(mode.id)}"><div class="smain"><b>${escapeHtml2(mode.label)}</b>${mode.id === "local-first" ? ` <span class="pnote">· ${escapeHtml2(DASHBOARD_PRIVACY_SETTINGS_COPY.recommended)}</span>` : ""}</div><div class="sact"><a class="btn" href="${escapeHtml2(home2)}">${escapeHtml2(DASHBOARD_PRIVACY_SETTINGS_COPY.change)}</a></div></div>` : "") + renderModelSetupBlocker(view3.model_setup) + `<div${view3.model_setup?.cards.some((card) => card.id === "venice") ? ' id="venice-setup"' : ""}>${renderModelSetup(view3.model_setup, { heading: false })}</div>` + renderAnswerModelPickers(options?.modelChoices, unlocked(options)) + "</section>",
@@ -161617,6 +161679,7 @@ function renderDashboardKeysPage(view3, options) {
 `);
   return localShell({
     crumb: DASHBOARD_PRIVATE_ANSWERS_COPY.crumb,
+    tab: "privacy",
     meta: dashboardCheckedLabel(view3.generated_at, options?.now ?? new Date),
     body,
     styles: [MODEL_SETUP_CSS, PRIVACY_TABS_CSS, MODEL_PICKER_CSS],
@@ -161627,7 +161690,7 @@ function renderDashboardConnectPage(view3, options) {
   const blocked = view3.model_setup !== undefined && !view3.model_setup.ready;
   const sources = view3.sources.filter((source) => source.connection.action.kind !== "none" || source.source_id === "telegram.messages" || source.source_id === "whatsapp.personal.messages");
   const body = [
-    dashboardControlGate({ connected: unlocked(options) }),
+    lockedGate2(options),
     renderModelSetupBlocker(view3.model_setup, { keysHref: dashboardLocalPageHref("keys", readToken2(options?.basePath)) }),
     sources.length === 0 ? `<p class="pnote">${escapeHtml2(W.connect.empty)}</p>` : `<div class="srows" id="sources">${sources.map((source) => renderSetupRow(source, view3, blocked, options?.basePath ?? "/dashboard", options?.messagingLocalSession === true) + sourceSupportBlock(source)).join(`
 `)}</div>`
@@ -161635,6 +161698,7 @@ function renderDashboardConnectPage(view3, options) {
 `);
   return localShell({
     crumb: W.connect.title,
+    tab: "sources",
     meta: dashboardCheckedLabel(view3.generated_at, options?.now ?? new Date),
     body,
     styles: [MODEL_SETUP_CSS],
@@ -161652,11 +161716,11 @@ function readToken2(basePath) {
 function renderDashboardAgentsPage(options) {
   const now = options?.now ?? new Date;
   const body = [
-    dashboardControlGate({ connected: unlocked(options) }),
+    lockedGate2(options),
     options?.agents ? renderDashboardAgentsSection({ ...options.agentConnectHost, view: options.agents, now }) : '<p class="foot">Agent connections are not available on this install.</p>'
   ].join(`
 `);
-  return localShell({ crumb: W.agents.title, meta: "", body, styles: [AGENT_CONNECT_CSS], options });
+  return localShell({ crumb: W.agents.title, tab: "settings", meta: "", body, styles: [AGENT_CONNECT_CSS], options });
 }
 function renderDashboardConnectorPage(options) {
   const body = [
@@ -161670,7 +161734,7 @@ function renderDashboardConnectorPage(options) {
     }).replace('class="sheet"', 'class="sheet on"').replace('aria-hidden="true"', 'aria-hidden="false"')
   ].join(`
 `);
-  return localShell({ crumb: W.connector.title, meta: "", body, styles: [], options });
+  return localShell({ crumb: W.connector.title, tab: "sources", meta: "", body, styles: [], options });
 }
 function refusalNotice(source) {
   if (!source.connection.provider_refusal)
@@ -161809,14 +161873,28 @@ function connectAction(source) {
     return { label: action.label, kind: "this_computer", source: action.source, primary: false };
   return;
 }
+function renderDashboardSettingsPage(options) {
+  const now = options?.now ?? new Date;
+  const token = readToken2(options?.basePath);
+  const settings = options?.settings;
+  const side = `<nav class="setside" aria-label="Settings">${SETTINGS_SECTIONS.map((section) => `<a href="#${section.id}">${escapeHtml2(section.label)}</a>`).join("")}</nav>`;
+  const agents = `<section id="settings-agents">${options?.agents ? renderDashboardAgentsSection({ ...options.agentConnectHost, view: options.agents, now }).replace('<div class="sect" id="agents">Agents</div>', '<h3 class="sect" id="agents">Agents and access</h3>') : '<h3 class="sect" id="agents">Agents and access</h3><p class="pnote">Agent connections are not available on this install.</p>'}</section>`;
+  const models = '<section><h3 class="sect" id="models">Models on this computer</h3>' + (settings?.models?.length ? `<div class="srows">${settings.models.map((model) => `<div class="srow nodot"><div class="smain"><b>${escapeHtml2(model.name)}</b> <span class="pnote">· ${escapeHtml2(model.state)}</span><p class="pnote">${escapeHtml2(model.detail)} (${(model.downloadBytes / 1e9).toFixed(2)} GB download)</p></div></div>`).join("")}</div>` : '<p class="pnote">Olympus has no built-in models to show on this computer.</p>') + '<p class="pnote">The models that answer and sort Private items are on <a href="' + escapeHtml2(dashboardLocalPageHref("keys", token)) + '">Privacy rules</a>.</p></section>';
+  const update = settings?.update;
+  const updates = '<section><h3 class="sect" id="updates">Updates</h3>' + (update ? `<p>${escapeHtml2(DASHBOARD_UPDATE_COPY.notice(update.version))}</p><pre class="promptbox" id="settings-update-command">${escapeHtml2(update.command)}</pre><button type="button" class="btn" data-copy-target="#settings-update-command">${escapeHtml2(DASHBOARD_UPDATE_COPY.copy)}</button><span class="copystatus" data-copy-status aria-live="polite"></span>` : '<p class="pnote">Olympus is up to date.</p>') + "</section>";
+  const help = '<section><h3 class="sect" id="help">Help</h3><p class="pnote">If something is not working, copy the system report and send it to support. It holds only system states and error codes.</p>' + `<div class="pickbar"><a class="btn" href="${escapeHtml2(dashboardLocalPageHref("help", token))}">Copy a system report</a><a class="btn" href="https://olympusplugin.ai/support" target="_blank" rel="noopener noreferrer">Contact support</a></div></section>`;
+  const body = lockedGate2(options) + `<div class="setlayout">${side}<div class="setmain">${agents}${models}${updates}${help}</div></div>`;
+  return localShell({ crumb: "Settings", tab: "settings", meta: "", body, styles: [AGENT_CONNECT_CSS, SETTINGS_CSS], options });
+}
 function renderDashboardHelpPage(options) {
   const report = options?.systemReport;
   return localShell({
     crumb: "Help",
+    tab: "settings",
     meta: "",
     options,
     styles: [],
-    body: dashboardControlGate({ connected: unlocked(options) }) + "<h3>Help with Olympus</h3><p>If something is not working, copy the system report and send it to support.</p>" + (report ? `<pre id="system-report" class="promptbox">${escapeHtml2(report)}</pre><p>Only system states and error codes: no names, numbers, emails, chats, notebook or folder titles, or home folder paths.</p><button type="button" class="btn" data-copy-target="#system-report">Copy system report</button><span data-copy-status aria-live="polite"></span>` : unlocked(options) ? "<p>Olympus could not read the system report. Try again, or contact support.</p>" : "<p>Open dashboard controls on this computer to copy a system report.</p>") + '<p><a href="https://olympusplugin.ai/support" target="_blank" rel="noopener noreferrer">Contact support</a></p>'
+    body: lockedGate2(options) + "<h3>Help with Olympus</h3><p>If something is not working, copy the system report and send it to support.</p>" + (report ? `<pre id="system-report" class="promptbox">${escapeHtml2(report)}</pre><p>Only system states and error codes: no names, numbers, emails, chats, notebook or folder titles, or home folder paths.</p><button type="button" class="btn" data-copy-target="#system-report">Copy system report</button><span data-copy-status aria-live="polite"></span>` : unlocked(options) ? "<p>Olympus could not read the system report. Try again, or contact support.</p>" : "<p>Open dashboard controls on this computer to copy a system report.</p>") + '<p><a href="https://olympusplugin.ai/support" target="_blank" rel="noopener noreferrer">Contact support</a></p>'
   });
 }
 function sourceSupportBlock(source) {
@@ -161859,7 +161937,16 @@ function renderJudgeChoice(view3, options) {
     <p>Venice uses your own account and API key, and you pay Venice; Olympus pays for nothing. An end-to-end encrypted option is not available yet.</p></details>
     </fieldset></form></section>`;
 }
-var CONNECTOR_SHEET_ID = "connector-sheet", CONNECTOR_SHEET_HEADING = "Build a connector with your agent", CONNECTOR_SHEET_INTRO, CONNECTOR_PROMPT, W;
+var CONNECTOR_SHEET_ID = "connector-sheet", CONNECTOR_SHEET_HEADING = "Build a connector with your agent", CONNECTOR_SHEET_INTRO, CONNECTOR_PROMPT, W, SETTINGS_SECTIONS, SETTINGS_CSS = `
+.setlayout { display: grid; grid-template-columns: 220px 1fr; gap: 24px; align-items: start; }
+.setside { display: grid; gap: 8px; position: sticky; top: 12px; }
+.setside a { display: block; padding: 10px 14px; border: 1px solid var(--line); border-radius: 10px; color: var(--t1); text-decoration: none; }
+.setside a:hover, .setside a:focus-visible { border-color: var(--link); }
+.setmain section + section { margin-top: 24px; }
+.setmain > section:first-child .sect { margin-top: 0; }
+.setmain .pickbar { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 10px; }
+@media (max-width: 760px) { .setlayout { grid-template-columns: 1fr; } .setside { position: static; grid-template-columns: 1fr 1fr; } }
+`;
 var init_local = __esm(() => {
   init_judge_spending();
   init_source_failure();
@@ -161871,6 +161958,8 @@ var init_local = __esm(() => {
   init_vocabulary();
   init_private_answers();
   init_host_page();
+  init_top_nav();
+  init_vocabulary();
   init_model_pickers();
   init_model_setup2();
   init_vocabulary();
@@ -161882,6 +161971,12 @@ var init_local = __esm(() => {
   ].join(`
 `);
   W = DASHBOARD_COMPUTER_PANEL_COPY.rows;
+  SETTINGS_SECTIONS = [
+    { id: "agents", label: "Agents and access" },
+    { id: "models", label: "Models on this computer" },
+    { id: "updates", label: "Updates" },
+    { id: "help", label: "Help" }
+  ];
 });
 
 // src/workers/dashboard/index.ts
@@ -161905,6 +162000,8 @@ function dashboardHtmlRoutePage(url2) {
     return "outside_help_moved";
   if (params.has(DASHBOARD_LOCAL_PAGES.connector))
     return "connector";
+  if (params.has(DASHBOARD_LOCAL_PAGES.settings))
+    return "settings";
   return "host";
 }
 function dashboardReadToken(url2) {
@@ -161936,6 +162033,8 @@ function renderDashboardLocalPage(page2, input) {
       return renderDashboardPrivateAnswersPage(options);
     case "connector":
       return renderDashboardConnectorPage(options);
+    case "settings":
+      return renderDashboardSettingsPage(options);
   }
 }
 var DASHBOARD_LEGACY_QUERY_PARAMS;
@@ -167767,6 +167866,22 @@ function createEmailSourceWorker(options = {}) {
               }
             }));
           }
+          if (page2 === "settings") {
+            const installer = installerForPlatform(options.platform ?? process.platform);
+            const update = installer ? options.updateAvailable?.() : undefined;
+            return html2(renderDashboardLocalPage("settings", {
+              url: url2,
+              options: {
+                ...controlSessionCsrfToken ? { controlSessionCsrfToken } : {},
+                ...agentConnections ? { agents: dashboardAgentsView(agentConnections) } : {},
+                ...options.agentConnectHost ? { agentConnectHost: options.agentConnectHost() } : {},
+                settings: {
+                  ...options.localModelReadiness ? { models: options.localModelReadiness() } : {},
+                  ...update && installer ? { update: { version: update.version, command: installer.command } } : {}
+                }
+              }
+            }));
+          }
           if (page2 === "private_answers") {
             const localSession = request.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER) === "local";
             const outsideHelp = sourceDashboard?.consult && controlSessionCsrfToken !== undefined ? await sourceDashboard.consult.status().catch(() => {
@@ -171957,6 +172072,7 @@ var init_email_source = __esm(() => {
   init_dashboard_messaging_service();
   init_source_scope_approval();
   init_release_manifest();
+  init_update_check();
   init_google_handle_compatibility();
   init_source_account_binding();
   init_source_registry();
