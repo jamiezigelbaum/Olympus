@@ -175,7 +175,8 @@ export async function openFreshDashboard(machine: Machine, endpoint: string, tim
         for (const t of (await browser!.send('Target.getTargets')).targetInfos) baseline.add(t.targetId);
         windowOffered = false;
         await sourceAction(s, '^Connect$');
-        await until(async () => (await card(s))?.connection?.state === 'awaiting_consent', 'source card did not enter awaiting_consent');
+        // A remembered grant can redirect at once and finish between polls; the callback check verifies completion.
+        await until(async () => { const c = await card(s); return c?.connection?.state === 'awaiting_consent' || (!!c && connected(c)); }, 'source card did not enter awaiting_consent or connect');
       },
       consent: async s => {
         const deadline = Date.now() + 180_000;
