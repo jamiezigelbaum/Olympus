@@ -361,6 +361,10 @@ section consolidates and supersedes all other policy wording.
   decisions, Secrets and names questions retain precedence. A 5% direct-judge
   audit stops and requeues clearances above 2% Private in 200 checks. See
   `design/per-item-four-tier-classification.md`, "Embedding Personal pre-filter".
+  Prior correction (same date) stores the uncapped recent held-item judge
+  prior and the fitting sample prior beside the weights, then shifts only the
+  scoring logit. Old weights without that receipt fail closed until retraining.
+  Cutoff, audits, label checks and clearing eligibility are unchanged.
   This is Critical classification behavior; independent review precedes merge.
 
 - 2026-11-05 (no contract type version change; native sniffer cache

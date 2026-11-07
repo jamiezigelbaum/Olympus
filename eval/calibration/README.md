@@ -269,3 +269,52 @@ read-only tool. The production transport still enforces redirects and its
 zkAPI endpoint refusal. No live stores, owner calibration data or model server
 are needed by `test/sniffer-replay.test.ts`; it uses invented SQLite fixtures
 and a loopback fake server only.
+
+## Counts-only embedding pre-filter comparison
+
+From a source checkout with dependencies available, select a newly trained
+`weights.json` carrying `calibration` (older weights are refused):
+
+```sh
+bun --no-install eval/calibration/score-prefilter.ts --weights /absolute/path/to/weights.json \
+  --embedding-dir /absolute/path/to/installed/built-in-embedding
+```
+
+The default sample root is `~/.local/share/olympus-calibration`; override it with
+`--calibration-dir DIR`. Read rounds 1–4, using `round3/labels.final.json` and
+`labels.json` in the other rounds. Do not deduplicate across rounds or silently
+substitute a preliminary label file. Missing rounds fail with an error count.
+`--synthetic` replaces all sample/label reads with one in-memory synthetic item,
+for a safe runtime smoke check. It still needs installed model/runtime files.
+
+This tool never installs or downloads anything, never opens an Olympus store,
+and never uses provider configuration, a remote helper or a cloud model. It
+starts the local built-in LiteRT helper directly, pinned to production's
+`embeddinggemma-2-litert-24d962e` manifest, and releases it on exit. Its only
+writes are the native runtime's temporary compiled-program cache, removed on
+exit; it never writes text, vectors or per-item results. A malformed file or
+startup failure prints only `{"errors":1}`. Item-level failures increment
+`unscorable`, with no exception text.
+
+The vector recipe reuses production `chunkText` (trim, contiguous 4,000-character
+chunks, no three-chunk truncation), `buildConnectorStoreEmbeddingText`, the
+built-in document `promptText` prefix and normalization, Float32 storage rounding,
+and `prefilterVector`'s complete-chunk arithmetic mean. File titles use `name`;
+message titles use `signals.title`, never the sampler's synthetic `name`/id.
+MIME type and modification time come from the sample. Owner-only neighbouring
+messages and `judgeSees` are not added to the embedding input.
+
+**Historical sample limit:** the saved samples do not contain the original
+`search_text`, exact chunk boundaries or every embedding metadata column.
+Message sampling joined/truncated stored chunks; round 3's replay sampler put
+judge material in `text`. This is the exact production recipe applied to the
+saved representation, not byte-for-byte reconstruction of the original stored
+vectors or proof of live clearance recall. The old Python embedding scripts
+used different framing and a three-chunk cap; this scorer does not reuse those
+vectors or generate replacement files.
+
+Output is one JSON object: labelled Personal/Private/unsure counts, unscorable
+count, and uncorrected/corrected clearance and Private-miss counts. Each miss
+contains only `p` and `round`. Unsure items count as unsure and can contribute to
+clearance counts, never Private misses; skipped/unlabelled items are not scored.
+The owner runs the real calibration; synthetic checks alone establish wiring.
