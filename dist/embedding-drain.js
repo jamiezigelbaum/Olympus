@@ -73071,7 +73071,7 @@ class EmbeddingPrefilter {
       return false;
     const receipt = JSON.parse(raw);
     const row = this.options.ledger.getCurrent(question);
-    if (receipt.hash === question.materialHash && row?.reasons.includes(receipt.reason))
+    if (receipt.hash === question.materialHash && row?.reasons.includes(receipt.reason) && !this.options.ledger.rejudgeQuestion(question))
       return true;
     this.options.ledger.deleteMeta(RECEIPTS + tierLedgerIdentityKey(question));
     return false;
@@ -73159,7 +73159,9 @@ class EmbeddingPrefilter {
     for (const entry of this.options.ledger.metaEntries(RECEIPTS)) {
       const receipt = JSON.parse(entry.value);
       this.options.ledger.deleteMeta(entry.key);
-      this.options.sniffer.deleteQuestion(receipt.subject, "content", receipt.hash);
+      if (!this.options.ledger.rejudgeQuestion(receipt.subject)) {
+        this.options.sniffer.deleteQuestion(receipt.subject, "content", receipt.hash);
+      }
     }
   }
   rollback() {

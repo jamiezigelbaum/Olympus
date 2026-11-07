@@ -176,7 +176,9 @@ export class EmbeddingPrefilter {
     if (!raw) return false;
     const receipt = JSON.parse(raw) as Receipt;
     const row = this.options.ledger.getCurrent(question);
-    if (receipt.hash === question.materialHash && row?.reasons.includes(receipt.reason)) return true;
+    // Unchanged text can carry a new judge/prompt question; the old clearance cannot retain it.
+    if (receipt.hash === question.materialHash && row?.reasons.includes(receipt.reason)
+      && !this.options.ledger.rejudgeQuestion(question)) return true;
     this.options.ledger.deleteMeta(RECEIPTS + tierLedgerIdentityKey(question));
     return false;
   }
@@ -250,7 +252,10 @@ export class EmbeddingPrefilter {
       for (const entry of this.options.ledger.metaEntries(RECEIPTS)) {
         const receipt = JSON.parse(entry.value) as Receipt;
         this.options.ledger.deleteMeta(entry.key);
-        this.options.sniffer.deleteQuestion(receipt.subject, 'content', receipt.hash);
+        // A healthy audit accepts only the old clearance, never a newer rejudge of the same text.
+        if (!this.options.ledger.rejudgeQuestion(receipt.subject)) {
+          this.options.sniffer.deleteQuestion(receipt.subject, 'content', receipt.hash);
+        }
       }
   }
   private rollback(): void {

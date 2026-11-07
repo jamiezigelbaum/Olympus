@@ -146,6 +146,52 @@ test('exactly 2 percent is healthy and releases retained audit questions', async
   expect(f.filter.status()).not.toContain('stopped');
   expect(f.sniffer.questionFor(subject(1), 'content')).toBeUndefined();
 });
+for (const change of ['judge', 'prompt', 'model'] as const) {
+  for (const auditFirst of [false, true]) test(`retained clearance preserves a ${change} rejudge${auditFirst ? ' through healthy audit acceptance' : ''}`, async () => {
+    let sampling = false;
+    const f = fixture({ random: () => sampling ? 0 : 1 });
+    const original = f.add(1); await pass(f).run();
+    expect(f.filter.retained(original)).toBe(true);
+    const nextLane: SnifferLane = { ...lane,
+      ...(change === 'judge' ? { modelId: 'replacement-judge' } : {}),
+      ...(change === 'model' ? { cacheModelId: 'fixture-weights-v2' } : {}),
+    };
+    const promptVersion = change === 'prompt' ? 'synthetic-prompt-v2' : SNIFFER_PROMPT_VERSION;
+    const nextJudge = snifferId(nextLane, promptVersion);
+    expect(nextJudge).not.toBe(judge);
+    const decision = classifyItemTiers({ signals: {}, text: ownText, holdUntilJudged: true, subject: subject(1) }, {
+      sniffer: new CachedTierSniffer(f.sniffer, nextLane, promptVersion),
+    });
+    const question = f.sniffer.questionFor(subject(1), 'content')!;
+    expect(question.materialHash).toBe(original.materialHash);
+    expect(decision.contentPending).toBe(true);
+    expect(f.ledger.openRejudgeQuestion(subject(1), {
+      expectedGeneration: f.ledger.getCurrent(subject(1))!.generation, decision, keepVisible: false,
+    })).toBe(true);
+    if (auditFirst) {
+      sampling = true;
+      for (let i = 0; i < 200; i++) {
+        const q = f.add(i + 2); f.filter.tryClear(q, judge); f.filter.observe(q, false);
+      }
+      expect(f.filter.status()).not.toContain('stopped');
+      expect(f.sniffer.questionFor(subject(1), 'content')).toBeDefined();
+      expect(f.ledger.rejudgeQuestion(subject(1))).toBeDefined();
+      // The synthetic audit questions have already been observed; isolate the rejudge dispatch.
+      for (let i = 0; i < 200; i++) f.sniffer.deleteQuestion(subject(i + 2), 'content');
+    }
+    // Preparing for a replacement judge invalidates weights but keeps existing clearances.
+    await f.filter.prepare(nextJudge);
+    let calls = 0;
+    await runSnifferPass({ targets: [{ ledger: f.ledger, sniffer: f.sniffer, embeddingPrefilter: f.filter,
+      placementFor: f.placementFor }], lane: nextLane, promptVersion,
+      model: { async complete() { calls++; return { text: '', modelId: nextLane.modelId,
+        decisionVerdict: { tier: 'private', category: 'fixture', confidence: 1, failSafe: false } }; } },
+    });
+    expect(calls).toBe(1);
+    expect(f.ledger.getCurrent(subject(1))!.contentTier).toBe('secure');
+    expect(f.ledger.rejudgeQuestion(subject(1))).toBeUndefined();
+  });
+}
 test('rollback fences a queued lowering and supersedes its Personal destination', async () => {
   let sampling = false;
   const f = fixture({ routed: true, random: () => sampling ? 0 : 1 }); f.add(1); await pass(f).run();
