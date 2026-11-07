@@ -4,7 +4,7 @@
 // same way. The live lanes and an export input differ only in where their
 // records come from.
 
-import { compactClassificationSignals, signalText, trustDomainPrior } from '../../core/classification-signals.ts';
+import { compactClassificationSignals, signalText } from '../../core/classification-signals.ts';
 import type { RawItem, SourceClassificationSignals, SourceConnectorFetchOptions } from '../../core/contracts.ts';
 import type { SourceRecordBuilder } from '../../core/source-inputs.ts';
 import {
@@ -12,7 +12,6 @@ import {
   telegramConversationKind,
   type TelegramCaptureSpoolRecord,
 } from './capture-spool-connector.ts';
-import type { TelegramMessagesCorpusTrustDomain } from './corpus-adapter.ts';
 
 // The time a Telegram version ends with: the edit time, else the sent time,
 // then (optionally) a digest of the reactions it saw.
@@ -68,19 +67,15 @@ export function compareTelegramVersions(a: string, b: string): number {
 
 /**
  * The classification signals of a Telegram item, whichever input built it:
- * the chat's trust domain as a prior messages rest at, a Secret Chat floored
- * Private, a record whose text was cleared as a Secret floored Secrets, and
+ * a Secret Chat floored Private, a record whose text was cleared as a Secret floored Secrets, and
  * the chat id as the folder key owner chat rules match.
  */
 export function telegramClassificationSignals(
   item: RawItem,
-  fallbackTrust: TelegramMessagesCorpusTrustDomain = 'internal',
 ): SourceClassificationSignals {
-  const trust = item.metadata['trustDomain'] === 'secure_local' ? 'secure_local' : item.metadata['trustDomain'] === 'internal' ? 'internal' : fallbackTrust;
   const conversationKind = telegramConversationKind(signalText(item.metadata, 'chatType'));
   const redacted = item.metadata['secretRedacted'] === true;
   return compactClassificationSignals({
-    prior: trustDomainPrior(trust),
     ...(redacted
       ? { floor: { tier: 'secrets' as const, basis: TELEGRAM_SECRET_REDACTED_FLOOR_BASIS } }
       : conversationKind === 'secret_chat'
@@ -121,7 +116,6 @@ export interface TelegramRecordItems {
 }
 
 export function telegramRecordBuilder(options: {
-  trustDomain?: TelegramMessagesCorpusTrustDomain;
   fetchItem(localItemId: string, options?: SourceConnectorFetchOptions): Promise<RawItem>;
   authenticate?(): Promise<void>;
 }): SourceRecordBuilder<TelegramRecordItems> {
@@ -140,7 +134,7 @@ export function telegramRecordBuilder(options: {
     compareVersions: compareTelegramVersions,
     build: (entry, wanted) => itemsOf(entry).filter((item) => wanted.has(item.identity.localItemId)),
     fetchItem: options.fetchItem,
-    classificationSignals: (item) => telegramClassificationSignals(item, options.trustDomain),
+    classificationSignals: (item) => telegramClassificationSignals(item),
     ...(options.authenticate ? { authenticate: options.authenticate } : {}),
   };
 }

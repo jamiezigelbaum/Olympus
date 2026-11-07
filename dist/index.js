@@ -20799,13 +20799,6 @@ var init_capture_spool_connector = __esm(() => {
   ]);
 });
 
-// src/workers/telegram-messages/protection-claims.ts
-var init_protection_claims = __esm(() => {
-  init_tier_move();
-  init_capture_spool_connector();
-  init_record_builder();
-});
-
 // src/workers/archive-import/byte-source.ts
 import * as zlib from "node:zlib";
 function tableCrc32(data, value) {
@@ -22954,8 +22947,6 @@ var init_store_sync2 = __esm(() => {
   init_spool_file_identity();
   init_source_storage();
   init_tiered_store_set();
-  init_record_builder();
-  init_protection_claims();
   init_capture_spool_secrets();
   init_capture_freshness();
   init_corpus_adapter4();

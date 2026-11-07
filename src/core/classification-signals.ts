@@ -4,11 +4,9 @@
 
 import type {
   RawItem,
-  SourceClassificationPrior,
   SourceClassificationSignals,
   SourceConversationKind,
 } from './contracts.ts';
-import type { SourceTrustDomain } from './source-index/types.ts';
 
 /**
  * `RawItem.metadata` key a connector sets, to `CONTENT_SCOPE_NAMES_ONLY`, on an
@@ -87,20 +85,4 @@ export function compactClassificationSignals(signals: {
   if (signals.labels && signals.labels.length > 0) out.labels = [...signals.labels];
   if (signals.conversationKind) out.conversationKind = signals.conversationKind;
   return out;
-}
-
-/**
- * The resting tier a capture record's trust domain implies, as a `prior`:
- * item-level raises still apply and no automatic signal lowers it. Only
- * Telegram capture records written before 2026-10-28 carry anything but
- * `internal` (a deployment's protected-chat setting, now retired); nothing
- * new may use this. Never a whole source's default: every source's items are
- * tiered by their own content, and only the user's own rules rest a group.
- */
-export function trustDomainPrior(trustDomain: SourceTrustDomain): SourceClassificationPrior {
-  return {
-    tier: trustDomain === 'secure_local' ? 'secure' : trustDomain === 'public_safe' ? 'public' : 'private',
-    strength: 'prior',
-    basis: `source_config:trust_domain:${trustDomain}`,
-  };
 }

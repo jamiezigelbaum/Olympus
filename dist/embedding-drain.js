@@ -17353,9 +17353,14 @@ class TierLedger {
           AND i.metadata_forced = 0 AND i.content_tier != 'secrets'
           AND i.decided_by IN ('default', 'sensitive_detector', 'sniffer', 'move', 'source_prior', 'content_rule')
           -- A held row's stamp names the exact decision it re-read, so it
-          -- never outlives that decision (rejudgeKeyForHeld).
+          -- never outlives that decision (rejudgeKeyForHeld). So does a row
+          -- resting on a retired prior: a prior replayed after a completed
+          -- re-judge is a new decision and invalidates the old stamp, while a
+          -- re-read that changed nothing (no text) stays settled (markRejudged).
           AND (i.rejudged_key IS NULL OR i.rejudged_key != CASE WHEN i.state = 'pending'
             THEN ? || char(0) || 'held' || char(0) || i.generation || char(0) || i.decided_at
+            WHEN instr(i.reasons_json, '"metadata:prior:source_') > 0
+            THEN ? || char(0) || 'prior' || char(0) || i.generation || char(0) || i.decided_at
             ELSE ? END)
           -- Settled by a verdict under this classifier and sniffer (markJudged):
           -- not re-asked while its decision stays settled under this
@@ -17417,7 +17422,7 @@ class TierLedger {
         END AS rejudge_cause
       FROM win i
       ORDER BY i.provider, i.account_scope, i.conversation_key, i.provider_item_id
-    `).all(after ? 1 : null, ...after ?? [null, null, null, null], scanLimit, key, key, key, options.engineVersion, options.engineVersion, options.snifferId ?? null, JSON.stringify(`content:rule_sniffer:${options.snifferId}`), options.snifferId ?? null, JSON.stringify(`content:rule_sniffer:${options.snifferId}`), options.engineVersion, metadataMarker, metadataMarker ?? "", snifferMarker, snifferMarker ?? "", options.engineVersion, metadataMarker, metadataMarker ?? "");
+    `).all(after ? 1 : null, ...after ?? [null, null, null, null], scanLimit, key, key, key, key, options.engineVersion, options.engineVersion, options.snifferId ?? null, JSON.stringify(`content:rule_sniffer:${options.snifferId}`), options.snifferId ?? null, JSON.stringify(`content:rule_sniffer:${options.snifferId}`), options.engineVersion, metadataMarker, metadataMarker ?? "", snifferMarker, snifferMarker ?? "", options.engineVersion, metadataMarker, metadataMarker ?? "");
     const records = [];
     const causes = [];
     let last;
@@ -17450,8 +17455,9 @@ class TierLedger {
   }
   markRejudged(identity, key) {
     this.db.query(`
-      UPDATE tier_items SET rejudged_key = ?
-      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+      UPDATE tier_items SET rejudged_key = CASE WHEN instr(reasons_json, '"metadata:prior:source_') > 0
+        THEN ?1 || char(0) || 'prior' || char(0) || generation || char(0) || decided_at ELSE ?1 END
+      WHERE provider = ?2 AND account_scope = ?3 AND conversation_key = ?4 AND provider_item_id = ?5
     `).run(rejudgeKey(key.engineVersion, key.snifferId), ...idParams(identity));
   }
   markJudged(identity, key) {
@@ -37626,13 +37632,6 @@ var init_capture_spool_connector = __esm(() => {
   ]);
 });
 
-// src/workers/telegram-messages/protection-claims.ts
-var init_protection_claims = __esm(() => {
-  init_tier_move();
-  init_capture_spool_connector();
-  init_record_builder();
-});
-
 // src/workers/archive-import/byte-source.ts
 import * as zlib from "node:zlib";
 function tableCrc32(data2, value) {
@@ -39574,8 +39573,6 @@ var init_store_sync2 = __esm(() => {
   init_spool_file_identity();
   init_source_storage();
   init_tiered_store_set();
-  init_record_builder();
-  init_protection_claims();
   init_capture_spool_secrets();
   init_capture_freshness();
   init_corpus_adapter4();
