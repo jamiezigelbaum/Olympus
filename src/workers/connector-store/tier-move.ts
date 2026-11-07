@@ -39,7 +39,7 @@ import {
 } from '../classification/tier-ledger.ts';
 import {
   appendEmbeddingLedgerEntry,
-  appendEmbeddingLedgerEntryOnce,
+  appendEmbeddingLedgerEntriesOnce,
   type EmbeddingLedgerApprovedBy,
   type EmbeddingLedgerEntry,
 } from '../embedding-ledger.ts';
@@ -601,19 +601,37 @@ export async function flushTierMoveNotes(ledger: TierLedger, options: {
   try {
     let logged = false;
     const written: Array<{ key: string; value: string }> = [];
-    for (const { key, value } of ledger.metaEntries(MOVE_NOTE_PREFIX, { limit: options.shouldStop ? 1000 : -1 })) {
-      if (options.shouldStop?.()) break;
-      try {
-        const note = JSON.parse(value) as { path: string; entry: EmbeddingLedgerEntry };
-        await appendEmbeddingLedgerEntryOnce(note.path, note.entry);
-        written.push({ key, value });
-      } catch (error) {
-        // Notes never change the outcome of a landed move. Retain each failed
-        // obligation, try the others, and emit at most one content-free line.
-        if (!logged) {
-          const code = (error as { code?: unknown } | null)?.code;
-          console.warn(`[tier-move-note] kind=note code=${typeof code === 'string' && /^[A-Z0-9_]{1,32}$/.test(code) ? code : 'UNKNOWN'}`);
-          logged = true;
+    const warn = (error: unknown) => {
+      if (logged) return;
+      const code = (error as { code?: unknown } | null)?.code;
+      console.warn(`[tier-move-note] kind=note code=${typeof code === 'string' && /^[A-Z0-9_]{1,32}$/.test(code) ? code : 'UNKNOWN'}`);
+      logged = true;
+    };
+    const pending = ledger.metaEntries(MOVE_NOTE_PREFIX, { limit: options.shouldStop ? 1000 : -1 });
+    // Bound each I/O group so the deadline is checked between durable writes.
+    // Per-move obligations remain durable until the whole append has fsynced.
+    for (let offset = 0; offset < pending.length && !options.shouldStop?.(); offset += 25) {
+      const paths = new Map<string, Array<{ key: string; value: string; entry: EmbeddingLedgerEntry }>>();
+      for (const { key, value } of pending.slice(offset, offset + 25)) {
+        try {
+          const note = JSON.parse(value) as { path: string; entry: EmbeddingLedgerEntry };
+          if (typeof note.path !== 'string' || !note.entry || typeof note.entry !== 'object'
+            || (note.entry.entry_id !== undefined && typeof note.entry.entry_id !== 'string')) {
+            throw new Error('Invalid move note');
+          }
+          const group = paths.get(note.path) ?? [];
+          group.push({ key, value, entry: note.entry });
+          paths.set(note.path, group);
+        } catch (error) { warn(error); }
+      }
+      for (const [path, notes] of paths) {
+        if (options.shouldStop?.()) break;
+        try {
+          await appendEmbeddingLedgerEntriesOnce(path, notes.map(note => note.entry));
+          written.push(...notes);
+        } catch (error) {
+          // A partial append is deduplicated on retry; no obligation is lost.
+          warn(error);
         }
       }
     }

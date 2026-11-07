@@ -32,6 +32,7 @@ import {
   SNIFFER_MAX_CONCURRENT_CALLS,
   SnifferCallBudget,
   runSnifferPass,
+  DEFAULT_SNIFFER_PASS_TIME_MS,
   prepareSnifferModel,
   type SnifferPassReport,
   type SnifferTarget,
@@ -190,7 +191,7 @@ export interface TierSnifferServiceOptions {
     /** The embedding ledger each automatic move is recorded in. */
     embeddingLedgerPath: string;
     maxPerPass?: number;
-    /** Lowering drain budget, separate from the judge's pass. Default 1 s. */
+    /** Fixed lowering slice override; still capped at 25% of judge + moves. Default adapts to backlog. */
     lowerSliceMs?: number;
     /** Maximum synchronous copy batch. Default 25 items / 25 ms. */
     lowerBatchSize?: number;
@@ -211,6 +212,8 @@ export interface TierSnifferServiceOptions {
 export const MISSING_QUESTION_RECOVERY_PHASE_MS = 25;
 export const DEFAULT_AUTO_MOVES_PER_PASS = 1000;
 export const DEFAULT_LOWER_MOVE_SLICE_MS = 1000;
+/** Absolute ceiling, also limited to one third of the judge budget. */
+const MAX_LOWER_MOVE_SLICE_MS = 10_000;
 export const DEFAULT_LOWER_MOVE_BATCH_MS = 25;
 /** A pass running longer than this is aborted at the next tick. */
 export const DEFAULT_TIER_SNIFFER_MAX_PASS_MS = 15 * 60_000;
@@ -1498,14 +1501,23 @@ export class TierSnifferService {
   ): Promise<TierAutoMoveReport> {
     const timings = emptyTierMoveTimings();
     const started = performance.now();
-    const deadline = started + Math.max(0, options.lowerSliceMs ?? DEFAULT_LOWER_MOVE_SLICE_MS);
+    const paths = this.ledgerPaths();
+    const backlog = direction === 'lower'
+      ? paths.reduce((n, path) => n + (tierSetForLedger(path)?.ledger.countMoving('lower') ?? 0), 0) : 0;
+    // Keep the full judge budget. With a backlog, grow beyond the 1 s floor
+    // at 25 ms per queued item, up to 10 s / one third of judge time. Thus
+    // moves take at most 25% of the combined judge + moves allocation.
+    const capMs = Math.min(MAX_LOWER_MOVE_SLICE_MS,
+      Math.max(0, this.options.passTimeMs ?? DEFAULT_SNIFFER_PASS_TIME_MS) / 3);
+    const sliceMs = Math.min(capMs, Math.max(0, options.lowerSliceMs
+      ?? Math.max(DEFAULT_LOWER_MOVE_SLICE_MS, backlog * DEFAULT_LOWER_MOVE_BATCH_MS)));
+    const deadline = started + sliceMs;
     const shouldStop = () => signal.aborted || (direction === 'lower'
       && (performance.now() >= deadline || this.lowerMovePreempted || this.yieldNow()));
     const report: TierAutoMoveReport = { moved: 0, failed: 0, notEligible: 0, timings };
     const staleAfterMs = Math.max(0, options.staleAfterMs ?? DEFAULT_STALE_MOVE_MS);
     const now = (this.options.now ?? (() => new Date()))().getTime();
     let budget = Math.max(0, options.maxPerPass ?? (direction === 'raise' ? 25 : DEFAULT_AUTO_MOVES_PER_PASS));
-    const paths = this.ledgerPaths();
     // Rotate the first set so a persistent large backlog cannot starve another.
     const offset = this.moveLedgerOffsets[direction]++ % Math.max(1, paths.length);
     for (const ledgerPath of [...paths.slice(offset), ...paths.slice(0, offset)]) {
@@ -1609,13 +1621,14 @@ export class TierSnifferService {
       await flushTierMoveNotes(set.ledger, { timings, shouldStop });
     }
     report.elapsedMs = performance.now() - started;
-    if (report.moved > 0 || report.failed > 0) {
+    if (direction === 'lower' || report.moved > 0 || report.failed > 0) {
       this.options.log?.(
         `Olympus tier sniffer: ${report.moved} automatic tier move(s), ${report.failed} failed`
         + `${report.failedBy ? ` (${Object.entries(report.failedBy).map(([why, n]) => `${why} ×${n}`).join(', ')})` : ''}`
         + `${report.abandoned ? `, ${report.abandoned} stale move(s) given up (back where they were)` : ''}`
         + `${report.staleRaises ? `, ${report.staleRaises} stale raise(s) kept hidden and queued` : ''}`
         + `${report.retiredAbsent ? `, ${report.retiredAbsent} stale raise(s) of items no store holds forgotten` : ''}; direction=${direction} elapsed_ms=${Math.round(report.elapsedMs!)} `
+        + (direction === 'lower' ? `backlog=${backlog} slice_ms=${Math.round(sliceMs)} ` : '')
         + Object.entries(timings).map(([step, ms]) => `${step.replace(/[A-Z]/g, letter => `_${letter.toLowerCase()}`)}=${Math.round(ms)}`).join(' ') + '.',
       );
     }

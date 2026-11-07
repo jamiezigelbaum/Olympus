@@ -1,10 +1,12 @@
 import { afterEach, expect, spyOn, test } from 'bun:test';
+import * as fs from 'node:fs/promises';
 import { Database } from 'bun:sqlite';
 import { join } from 'node:path';
 import { classifyItemTiers } from '../src/workers/classification/tier-classifier.ts';
 import { InstalledTierClassification } from '../src/workers/classification/installed-tier-classification.ts';
 import { TierLedger } from '../src/workers/classification/tier-ledger.ts';
 import { BUILT_IN_SNIFFER_LANE } from '../src/workers/classification/built-in-sniffer.ts';
+import * as resolver from '../src/workers/classification/sniffer-resolver.ts';
 import { TierSnifferService } from '../src/workers/classification/sniffer-service.ts';
 import { flushTierMoveNotes, moveTieredItem, moveTieredItemsLowering, type TierMoveOptions } from '../src/workers/connector-store/tier-move.ts';
 import { readEmbeddingLedger } from '../src/workers/embedding-ledger.ts';
@@ -181,7 +183,7 @@ for (const retry of ['batch', 'single'] as const) {
   });
 }
 
-function serviceFor(f: TierFixture, autoMoves: Partial<NonNullable<ConstructorParameters<typeof TierSnifferService>[0]['autoMoves']>> = {}, otherSets: TierFixture[] = []) {
+function serviceFor(f: TierFixture, autoMoves: Partial<NonNullable<ConstructorParameters<typeof TierSnifferService>[0]['autoMoves']>> = {}, otherSets: TierFixture[] = [], serviceOptions: Partial<ConstructorParameters<typeof TierSnifferService>[0]> = {}) {
   const installed = new InstalledTierClassification({ env: {} });
   const lines: string[] = [];
   const service = new TierSnifferService({
@@ -189,6 +191,7 @@ function serviceFor(f: TierFixture, autoMoves: Partial<NonNullable<ConstructorPa
     modelAvailable: () => false, stores: () => [f, ...otherSets].flatMap(set => set.set.openStores()),
     classificationLedgerPath: join(f.dir, 'classification.jsonl'),
     log: line => lines.push(line),
+    ...serviceOptions,
     autoMoves: { localEmbeddingsOnly: () => true, embeddingLedgerPath: join(f.dir, 'notes.jsonl'), ...autoMoves },
   });
   cleanup.push(() => { service.stop(); installed.close(); });
@@ -354,4 +357,96 @@ test('raise and lower drains rotate stores independently under a one-item budget
   for (let pass = 0; pass < 4; pass++) await service.runOnce();
   expect(first.f.ledger.listMoving().length).toBe(2);
   expect(second.f.ledger.listMoving().length).toBe(2);
+});
+
+for (const [passMs, fail] of [[18_000, false], [18_000, true], [300_000, false]] as const) test(`large backlog gets a capped adaptive slice; judge=${passMs}, failed copy=${fail}`, async () => {
+  const f = await fixture(500, true);
+  const { service, lines } = serviceFor(f.f, {}, [], {
+    passTimeMs: passMs, modelAvailable: () => true, autoApproveBuiltIn: true, rejudgePerPass: 0,
+  });
+  let clock = 0;
+  let imports = 0;
+  const time = spyOn(performance, 'now').mockImplementation(() => clock);
+  const original = f.f.stores.internal!.importItemCopy.bind(f.f.stores.internal!);
+  const pass = spyOn(resolver, 'runSnifferPass').mockImplementation(async options => {
+    expect(options.passTimeMs).toBe(passMs);
+    expect(imports).toBe(0);
+    clock += passMs;
+    return { calls: 0, verdictsApplied: 0 } as Awaited<ReturnType<typeof resolver.runSnifferPass>>;
+  });
+  const copy = spyOn(f.f.stores.internal!, 'importItemCopy').mockImplementation((...args) => {
+    clock += 100;
+    if (++imports === 3 && fail) throw new Error('Synthetic copy failure');
+    return original(...args);
+  });
+  try { await service.runOnce(); expect(pass).toHaveBeenCalledTimes(1); }
+  finally { copy.mockRestore(); time.mockRestore(); pass.mockRestore(); }
+  // 6 s is one quarter of an 18 s judge + 6 s moves tick. The old 1 s
+  // slice only starts ten copies at this synthetic cost.
+  const expectedCopies = passMs === 18_000 ? 60 : 100;
+  const expectedSlice = expectedCopies * 100;
+  expect(imports).toBe(expectedCopies);
+  expect(clock).toBe(passMs + expectedSlice);
+  expect(f.f.ledger.listMoving({ limit: 1000 })).toHaveLength(500 - expectedCopies + Number(fail));
+  if (fail) {
+    expect(f.f.ledger.moveAttempts(identityOf('synthetic-2'))).toBe(1);
+    expect(f.f.stores.internal!.localContent(localId('synthetic-2'))?.chunks ?? []).toEqual([]);
+    expect(f.f.stores.secure_local!.localContent(localId('synthetic-2'))?.chunks.join('')).toBe(body);
+  }
+  expect(lines.some(line => line.includes(`direction=lower elapsed_ms=${expectedSlice} backlog=500 slice_ms=${expectedSlice}`))).toBe(true);
+  expect(lines.every(line => !line.includes('synthetic-') && !line.includes(body))).toBe(true);
+}, 15_000);
+
+for (const count of [0, 4]) test(`backlog ${count} preserves the judge's full budget`, async () => {
+  const f = await fixture(count, true);
+  const pass = spyOn(resolver, 'runSnifferPass').mockImplementation(async options => {
+    expect(options.passTimeMs).toBe(18_000);
+    return { calls: 0, verdictsApplied: 0 } as Awaited<ReturnType<typeof resolver.runSnifferPass>>;
+  });
+  const { service, lines } = serviceFor(f.f, {}, [], {
+    passTimeMs: 18_000, modelAvailable: () => true, autoApproveBuiltIn: true, rejudgePerPass: 0,
+  });
+  try { await service.runOnce(); expect(pass).toHaveBeenCalledTimes(1); }
+  finally { pass.mockRestore(); }
+  expect(f.f.ledger.listMoving()).toHaveLength(0);
+  expect(lines.some(line => line.includes(`backlog=${count} slice_ms=1000`))).toBe(true);
+});
+
+test('move note flush uses one durable append per path and retries without duplicates', async () => {
+  const f = await fixture();
+  moveTieredItemsLowering(f.moves());
+  const original = fs.open;
+  let appends = 0;
+  const opened = spyOn(fs, 'open').mockImplementation((...args: Parameters<typeof fs.open>) => {
+    if (args[1] === 'a') appends++;
+    return original(...args);
+  });
+  try { await flushTierMoveNotes(f.f.ledger); await flushTierMoveNotes(f.f.ledger); }
+  finally { opened.mockRestore(); }
+  expect(appends).toBe(1);
+  expect(f.f.ledger.metaEntries('tier-move-note:')).toHaveLength(0);
+  const notes = await readEmbeddingLedger(join(f.f.dir, 'notes.jsonl'));
+  expect(notes.entries.filter(note => note.entry_id?.startsWith('tier-move:'))).toHaveLength(4);
+});
+
+test('failed grouped note fsync keeps obligations, and malformed notes do not block neighbours', async () => {
+  const f = await fixture();
+  moveTieredItemsLowering(f.moves());
+  f.f.ledger.writeMeta('tier-move-note:bad', JSON.stringify({ path: join(f.f.dir, 'notes.jsonl'), entry: null }));
+  const original = fs.open;
+  const opened = spyOn(fs, 'open').mockImplementation(async (...args: Parameters<typeof fs.open>) => {
+    const handle = await original(...args);
+    if (args[1] === 'a') spyOn(handle, 'sync').mockImplementation(async () => { throw new Error('Synthetic fsync failure'); });
+    return handle;
+  });
+  const warn = spyOn(console, 'warn').mockImplementation(() => {});
+  try {
+    await flushTierMoveNotes(f.f.ledger);
+    expect(f.f.ledger.metaEntries('tier-move-note:')).toHaveLength(5);
+    opened.mockRestore();
+    await flushTierMoveNotes(f.f.ledger);
+    expect(f.f.ledger.metaEntries('tier-move-note:')).toHaveLength(1);
+    const notes = await readEmbeddingLedger(join(f.f.dir, 'notes.jsonl'));
+    expect(notes.entries.filter(note => note.entry_id?.startsWith('tier-move:'))).toHaveLength(4);
+  } finally { opened.mockRestore(); warn.mockRestore(); }
 });
