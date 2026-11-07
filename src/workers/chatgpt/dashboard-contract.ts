@@ -364,7 +364,7 @@ export interface DashboardRemoteMode {
  * failed, or Try again after `load_failed`.
  */
 export interface TranscriptionModelView {
-  state: 'not_needed' | 'not_downloaded' | 'interrupted' | 'downloading' | 'verifying' | 'ready' | 'failed' | 'load_failed';
+  state: 'not_needed' | 'not_downloaded' | 'interrupted' | 'downloading' | 'verifying' | 'loading' | 'ready' | 'failed' | 'load_failed';
   /** `downloading` and `verifying` only. */
   percent?: number;
   bytesDone?: number;

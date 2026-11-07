@@ -68,7 +68,7 @@ test('cloud-only search never aborts local sorting; only the same local model do
 });
 
 
-test('classification queues before automatic inference; background dispatch never preempts sorting', async () => {
+test('automatic inference queues before further classification; background dispatch never preempts running sorting', async () => {
   const activity = createLocalModelActivity();
   const order: string[] = [];
   let preempts = 0;
@@ -82,7 +82,7 @@ test('classification queues before automatic inference; background dispatch neve
     runClassificationInference(() => tracked.complete(request('classification'))),
     tracked.complete(request('owner')),
   ]);
-  expect(order).toEqual(['owner', 'classification', 'inbox']);
+  expect(order).toEqual(['owner', 'inbox', 'classification']);
   expect(preempts).toBe(1);
 });
 

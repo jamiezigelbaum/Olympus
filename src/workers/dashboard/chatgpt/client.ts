@@ -18,7 +18,6 @@ import type { ChatGptArchivePicked, ChatGptPicker, ChatGptPickerConfig, ChatGptP
 import type { ChatGptPrivacy, ChatGptPrivacyConfig, ChatGptPrivacyKit } from './privacy.ts';
 import type {
   DashboardViewModelV1,
-  ModelInstall,
   ModelInstallFailedReason,
   ModelInstallState,
 } from '../../chatgpt/dashboard-contract.ts';
@@ -123,7 +122,7 @@ const RELAY_FAILURE_TEXT_MAX = 300;
 /** One model's install line, read off the view model and validated (the values crossed the wire). */
 interface ModelInstallLine {
   which: 'search' | 'answers' | 'transcription';
-  state: Exclude<ModelInstallState, 'ready'>;
+  state: Exclude<ModelInstallState, 'ready'> | 'loading';
   /** -1 when unknown. */
   percent: number;
   done: number;
@@ -2501,10 +2500,10 @@ export function chatgptDashboardClient(
   function modelInstall(models: DashboardModels, which: 'search' | 'answers' | 'transcription'): ModelInstallLine | null {
     const source = which === 'search'
       ? models.embedding
-      : which === 'answers' ? (models.answers ? models.answers.install : undefined) : models.transcription as Partial<ModelInstall> | undefined;
+      : which === 'answers' ? (models.answers ? models.answers.install : undefined) : models.transcription;
     if (!source || typeof source !== 'object') return null;
     const stateName = source.state;
-    if (stateName !== 'downloading' && stateName !== 'verifying' && stateName !== 'failed') return null;
+    if (stateName !== 'downloading' && stateName !== 'verifying' && stateName !== 'loading' && stateName !== 'failed') return null;
     const number = (value: unknown) => (typeof value === 'number' && isFinite(value) && value >= 0 ? value : -1);
     const reason = source.failedReason;
     return {
@@ -2568,6 +2567,7 @@ export function chatgptDashboardClient(
       case 'load_failed': return couldNotStart(P.modelNames.transcription, entry.loadFailedReason);
       case 'ready': return P.modelBuiltIn + ' · ' + P.modelReady;
       case 'failed': return P.modelBuiltIn + ' · ' + notWorking(entry.failedReason);
+      case 'loading': return P.modelBuiltIn + ' · ' + P.modelGettingReady;
       case 'verifying': return P.modelBuiltIn + ' · ' + P.modelChecking;
       case 'downloading': return P.modelBuiltIn + ' · ' + P.modelGettingReady;
       default: return '';
@@ -2610,6 +2610,8 @@ export function chatgptDashboardClient(
     let text: string;
     if (entry.state === 'failed') {
       text = fill(P.modelInstallFailed, { model, reason: P.modelInstallReasons[entry.reason] });
+    } else if (entry.state === 'loading') {
+      text = fill(P.modelInstallLoading, { model });
     } else if (entry.state === 'verifying') {
       text = fill(P.modelInstallVerifying, { model });
     } else {

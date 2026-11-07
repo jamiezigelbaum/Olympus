@@ -11,6 +11,8 @@
 // carries that alias: a squatter cannot know it. The child's environment is a
 // short allow-list, never the worker's (which holds tokens and keys).
 
+import { isMainThread } from 'node:worker_threads';
+import { modelThread, modelThreadHandleId } from './off-thread.ts';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
@@ -178,8 +180,32 @@ export function createLlamaServerHandle(
      * a process that is killed cannot keep the GPU busy finishing a batch.
      */
     immediateKill?: boolean;
+    /** Internal lifecycle notification from the native handle to its parent thread. */
+    onPid?: (pid: number | undefined) => void;
   } = {},
 ): LlamaServerHandle {
+  if (isMainThread && !options.spawnImpl && !options.fetchImpl && !options.onPid) {
+    const thread = modelThread();
+    const handle = modelThreadHandleId();
+    const translateError = (error: unknown): never => {
+      const failure = error as Error;
+      if (failure.name === 'LlamaServerStillExitingError') throw new LlamaServerStillExitingError(failure.message);
+      if (failure.name === 'LlamaServerStopError') throw new LlamaServerStopError(failure.message);
+      if (failure.name === 'LlamaServerStartError') throw new LlamaServerStartError(failure.message);
+      throw error;
+    };
+    return {
+      ensureRunning: signal => thread.call<LlamaServerEndpoint>({ kind: 'start', handle, launch,
+        env: options.env, stopGraceMs: options.stopGraceMs, killWaitMs: options.killWaitMs, immediateKill: options.immediateKill,
+      }, { signal, timeoutMs: launch.startupTimeoutMs + 30_000 }).catch(error => {
+        if (signal?.aborted) throw callerCancelled(signal.reason);
+        return translateError(error);
+      }),
+      touch: () => { void thread.call({ kind: 'touch', handle }).catch(() => {}); },
+      stop: () => thread.call<void>({ kind: 'stop', handle }, { timeoutMs: (options.stopGraceMs ?? DEFAULT_STOP_GRACE_MS) + (options.killWaitMs ?? DEFAULT_KILL_WAIT_MS) + 5_000 }).catch(translateError),
+      get pid() { return thread.pids.get(handle); },
+    };
+  }
   const spawnImpl = options.spawnImpl ?? spawn;
   const fetchImpl = options.fetchImpl ?? fetch;
   const stopGraceMs = options.stopGraceMs ?? DEFAULT_STOP_GRACE_MS;
@@ -221,6 +247,7 @@ export function createLlamaServerHandle(
   const retireCurrent = () => {
     const server = current;
     current = undefined;
+    options.onPid?.(undefined);
     endpoint = undefined;
     if (!server) return;
     if (!server.exited) {
@@ -326,10 +353,12 @@ export function createLlamaServerHandle(
       retiring.delete(server);
       if (current === server) {
         current = undefined;
+        options.onPid?.(undefined);
         endpoint = undefined;
       }
     });
     current = spawned;
+    options.onPid?.(spawned.pid);
     let stderrTail = '';
     spawnedProcess.stderr?.on('data', (chunk: Buffer) => {
       stderrTail = `${stderrTail}${chunk.toString()}`.slice(-2_000);
