@@ -1,10 +1,11 @@
-// Re-judge routed items after the classifier or the sniffer's prompt changes
-// (owner ruling 2026-10-01). Source-agnostic: it reads only the tier ledger
+// Re-judge routed items after the classifier, owner words or judge model changes;
+// built-in wording alone leaves settled decisions in place (owner, 2026-11-07).
+// Source-agnostic: it reads only the tier ledger
 // and the stored copy of an item's text, never a source.
 //
 // A routed item's content decision is recorded once, when its text lands.
 // Nothing re-made it when the classifier (TIER_CLASSIFIER_VERSION) or the
-// sniffer's prompt changed, so an item judged Personal under older rules
+// owner's words or judge model changed, so an item judged Personal under older rules
 // stayed Personal. This pass finds those items (`rejudgeCandidatePage`),
 // reads the stored text back from the store that serves it, and runs the
 // shared content pass again with the item's names, exactly as a landing does.
@@ -101,15 +102,19 @@ export interface TierRejudgeReport {
   /**
    * Candidates by the rule that picked them (content-free, for the pass's
    * log line, #954): held for a text question, a retired whole-source prior,
-   * a question lost from the queue, another classifier version, names judged
-   * under another sniffer prompt, content without this sniffer's verdict.
+   * a question lost from the queue, another classifier version, owner words,
+   * judge model, or names/content without a compatible sniffer verdict.
    */
   causeHeld: number;
   causeRetiredPrior: number;
   causeMissingQuestion: number;
   causeClassifier: number;
+  causeOwnerWords: number;
+  causeJudgeModel: number;
   causeNamesPrompt: number;
   causeContentPrompt: number;
+  /** Settled items in the scanned window whose only stale input is built-in wording. */
+  builtinPromptSkipped: number;
 }
 
 const CAUSE_FIELD: Record<TierRejudgeCause, keyof TierRejudgeReport> = {
@@ -117,6 +122,8 @@ const CAUSE_FIELD: Record<TierRejudgeCause, keyof TierRejudgeReport> = {
   retired_prior: 'causeRetiredPrior',
   missing_question: 'causeMissingQuestion',
   classifier: 'causeClassifier',
+  owner_words: 'causeOwnerWords',
+  judge_model: 'causeJudgeModel',
   names_prompt: 'causeNamesPrompt',
   content_prompt: 'causeContentPrompt',
 };
@@ -138,7 +145,8 @@ export interface TierRejudgeOptions {
 export function emptyTierRejudgeReport(): TierRejudgeReport {
   return {
     heldLowering: 0, seen: 0, updated: 0, movesQueued: 0, asked: 0, secrets: 0, skipped: 0, failed: 0,
-    causeHeld: 0, causeRetiredPrior: 0, causeMissingQuestion: 0, causeClassifier: 0, causeNamesPrompt: 0, causeContentPrompt: 0,
+    causeHeld: 0, causeRetiredPrior: 0, causeMissingQuestion: 0, causeClassifier: 0, causeOwnerWords: 0, causeJudgeModel: 0,
+    causeNamesPrompt: 0, causeContentPrompt: 0, builtinPromptSkipped: 0,
   };
 }
 
@@ -200,6 +208,7 @@ function* rejudgeSteps(options: TierRejudgeOptions): Generator<TierLedgerRecord,
     ...(options.after ? { after: options.after } : {}),
     limit,
   });
+  report.builtinPromptSkipped = page.builtinPromptSkipped;
   for (const [index, record] of page.records.entries()) {
     yield record;
     report.seen += 1;
