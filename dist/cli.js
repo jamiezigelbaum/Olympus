@@ -150571,6 +150571,12 @@ a.card.cardlink:focus-visible { outline: 2px solid var(--link); outline-offset: 
 .bar { height: 8px; background: var(--line2); border: 1px solid var(--line); border-radius: 5px; overflow: hidden; margin-top: 9px; max-width: 420px; }
 .bar i { display: block; height: 100%; background: var(--run-fill); }
 .foot { color: var(--t3); font-size: var(--fs-caption); margin-top: 24px; }
+/* Unlocked dashboard controls: one quiet line at the top of the page, Lock at its end. */
+.lockline { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 10px; margin: 0 0 20px; color: var(--t3); font-size: var(--fs-caption); }
+.lockline .name { color: var(--t2); }
+.lockline .why { flex: 1 1 18rem; }
+.lockline .rowform { margin: 0; }
+.agentconnect { margin: 12px 0 0; }
 .kpis { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; margin: 16px 0 22px; }
 .kpi { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; }
 .kpi .u { font-size: var(--fs-caption); color: var(--t3); }
@@ -150867,7 +150873,7 @@ function actionButton(input) {
 }
 function dashboardControlGate(input) {
   if (input.connected) {
-    return `<div class="sect" id="${DASHBOARD_CONTROL_GATE_ID}">Dashboard controls</div>` + `<div class="attncard plain" data-dashboard-control-gate data-state="connected">` + `<div class="grow"><span class="name">Dashboard controls unlocked</span>` + `<span class="why"> — on this browser for 30 days from opening, or until the worker token is rotated</span></div>` + `<form class="rowform" data-control-session-kind="lock" method="post" action="/dashboard/control/session/lock">` + `<button class="btn" type="submit">Lock</button>` + `<span class="actmsg" data-action-message role="status"></span></form></div>`;
+    return `<div class="lockline" id="${DASHBOARD_CONTROL_GATE_ID}" data-dashboard-control-gate data-state="connected">` + `<span class="name">Dashboard controls unlocked</span>` + `<span class="why"> on this browser for 30 days from opening, or until the worker token is rotated</span>` + `<form class="rowform" data-control-session-kind="lock" method="post" action="/dashboard/control/session/lock">` + `<button class="btn" type="submit">Lock</button>` + `<span class="actmsg" data-action-message role="status"></span></form></div>`;
   }
   const sheetId = `${DASHBOARD_CONTROL_GATE_ID}-how`;
   const promptId = `${sheetId}-prompt`;
@@ -159633,14 +159639,10 @@ function renderDashboardAgentsSection(input) {
   };
   return [
     '<div class="sect" id="agents">Agents</div>',
+    `<p class="pnote">${escapeHtml2(platform3 === "linux" ? "ChatGPT, Claude, Grok or a coding agent can ask Olympus, under the same privacy rules on this computer." : "ChatGPT, Claude, Grok or a coding agent can ask Olympus, under the same privacy rules as your OpenClaw agent.")}</p>`,
     remoteAccessRow(view3.remoteAccess, view3.remoteAccessManual),
-    setupRow({
-      label: "Connect an agent",
-      blurb: platform3 === "linux" ? "Let ChatGPT, Claude, Grok or a coding agent ask Olympus, under the same privacy rules on this computer." : "Let ChatGPT, Claude, Grok or a coding agent ask Olympus, under the same privacy rules as your OpenClaw agent.",
-      action: { label: "Connect an agent", kind: "none", sheet: AGENT_CONNECT_SHEET_ID, primary: true }
-    }),
-    connectSheet(view3.remoteAccess, host, view3.privateAccess),
-    `<div data-agent-connections-list>${connectionList(view3, input.now)}</div>`
+    `<div data-agent-connections-list>${connectionList(view3, input.now)}</div>`,
+    connectSheet(view3.remoteAccess, host, view3.privateAccess)
   ].join(`
 `);
 }
@@ -159761,17 +159763,20 @@ function keyForm(agentId, name) {
 function secretSlot(id, label, setup = false) {
   return `<div class="agentsecret" data-agent-secret-slot hidden>` + `<input class="keyfield" id="${id}" data-agent-secret type="text" readonly autocomplete="off" spellcheck="false" aria-label="${escapeHtml2(label)}">` + `<button class="btn primary" type="button" data-copy-target="#${id}">Copy</button>` + `<button class="btn" type="button" data-agent-secret-done>Done</button>` + `<span class="copystatus" data-copy-status aria-live="polite"></span>` + (setup ? ["OpenClaw", "Hermes", "Other MCP client"].map((client, i2) => `<label>${client}<input class="keyfield" id="${id}-setup-${i2}" data-agent-setup="${client}" data-agent-secret type="text" readonly autocomplete="off" spellcheck="false" aria-label="${client} setup line"></label>` + `<button class="btn" type="button" data-copy-target="#${id}-setup-${i2}">Copy setup line</button>`).join("") : "") + `<span class="hint" data-agent-secret-note></span>` + `</div>`;
 }
+function connectAgentButton(label, primary) {
+  return `<p class="agentconnect"><button class="btn${primary ? " primary" : ""}" type="button" data-sheet-toggle="#${AGENT_CONNECT_SHEET_ID}" aria-controls="${AGENT_CONNECT_SHEET_ID}" aria-expanded="false">${escapeHtml2(label)}</button></p>`;
+}
 function connectionList(view3, now) {
   if (view3.unavailable) {
-    return `<div class="foot" data-agent-connections="unavailable">Olympus could not read its list of connected agents. Reload this page to try again.</div>`;
+    return `<div class="sect">Connected agents</div><div class="foot" data-agent-connections="unavailable">Olympus could not read its list of connected agents. Reload this page to try again.</div>${connectAgentButton("Connect an agent", false)}`;
   }
   if (view3.connections.length === 0) {
-    return `<div class="foot" data-agent-connections="none">No agents are connected yet.</div>`;
+    return `<div class="sect">Connected agents</div><div class="pnote" data-agent-connections="none">No agents are connected yet.</div>${connectAgentButton("Connect an agent", true)}`;
   }
   const rows = view3.connections.map((connection) => connectionRow(connection, now)).join(`
 `);
   return `<div class="sect">Connected agents — ${view3.connections.length}</div>
-${rows}`;
+${rows}${connectAgentButton("Connect another agent", false)}`;
 }
 function connectionRow(connection, now) {
   const used = connection.lastUsedAt ? `last used ${relativeDay(connection.lastUsedAt, now)}` : "not used yet";
