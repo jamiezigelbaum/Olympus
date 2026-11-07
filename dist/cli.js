@@ -111711,10 +111711,18 @@ function ensureEngineLinger(exec = linuxEngineExec, uid = process.getuid(), user
 function preflightSystemdEngine(l, exec = linuxEngineExec, uid = process.getuid()) {
   if (uid === 0)
     throw new Error("Olympus refuses root installs. Use an ordinary account and its systemd user manager.");
+  const unrunnable = (r) => {
+    if (r.status !== null)
+      return;
+    const reason = /\bEACCES\b|permission denied/i.test(r.stderr) ? "permission denied" : /\bENOENT\b|not found/i.test(r.stderr) ? "not found" : "it did not start";
+    throw new Error(`Olympus could not run systemctl (${reason}). Run the installer from a folder this account can read, such as your home folder, and retry. Nothing was changed.`);
+  };
   const v = exec("systemctl", ["--version"]);
+  unrunnable(v);
   if (v.status !== 0 || Number(/^systemd (\d+)/.exec(v.stdout)?.[1] ?? 0) < 254)
     throw new Error("Olympus requires systemd 254 or newer for bounded restart backoff. Upgrade systemd using your distribution package manager, then retry. Nothing was changed.");
   const manager = exec("systemctl", ["--user", "show", "--property=Version", "--value"]);
+  unrunnable(manager);
   if (manager.status !== 0 || Number(/^(\d+)/.exec(manager.stdout.trim())?.[1] ?? 0) < 254)
     throw new Error("A reachable systemd 254+ user manager is required. Log in as this user and retry; no fake bus or temporary runtime directory is supported.");
   const competing = exec("systemctl", ["--user", "show", "olympus-worker.service", "--property=LoadState,ActiveState,FragmentPath"]);
