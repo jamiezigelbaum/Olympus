@@ -62,6 +62,8 @@ export const md5Hex = (bytes: Uint8Array): string => createHash('md5').update(by
 
 const READ_TOOLS = ['search_notes', 'search_notebooks', 'get_note', 'get_attachment', 'search_spaces'];
 
+let notebookSequence = 0;
+
 export class FakeEvernoteServer {
   readonly notebooks: FakeNotebook[];
   readonly notes: FakeNote[];
@@ -122,7 +124,9 @@ export class FakeEvernoteServer {
   }
 
   addNotebook(label: string, primaryAccess?: string): FakeNotebook {
-    const notebook = { id: randomUUID(), label, ...(primaryAccess ? { primaryAccess } : {}) };
+    // Random UUID substrings can look like financial identifiers to the real
+    // privacy classifier. Ordinary fixture notebooks need ordinary stable keys.
+    const notebook = { id: `fixture-notebook-${++notebookSequence}`, label, ...(primaryAccess ? { primaryAccess } : {}) };
     this.notebooks.push(notebook);
     return notebook;
   }

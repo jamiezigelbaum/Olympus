@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
-import { sovereigntyAnalystRoutePlan } from '../src/workers/email-source/server.ts';
-import type { SovereigntyResolvedProfile } from '../src/core/sovereignty.ts';
+import { sovereigntyAnalystRoutePlan, workerSovereigntyAnalystRoutePlan } from '../src/workers/email-source/server.ts';
+import { createSovereigntyEngine, loadSovereigntyPreset, type SovereigntyResolvedProfile } from '../src/core/sovereignty.ts';
 import type { SovereigntyAnalystRouteStep } from '../src/workers/source-index/analyst-answer.ts';
 import { OperationError } from '../src/core/operation-error.ts';
 import type { Analyst } from '../src/core/contracts.ts';
@@ -91,4 +91,39 @@ describe('sovereignty analyst route plan', () => {
     expect(error.message).toMatch(/route for secure_local is disabled/i);
     expect(error.message).toContain('venice-private');
   });
+});
+
+// #725: these are the worker's installed presets, whose Personal route names
+// openclaw-infer even when only Olympus is installed. No CLI provider override.
+test.each(['local-first', 'private-cloud-only', 'no-sensitive'] as const)('standalone %s answers use the configured route without OpenClaw', preset => {
+  const engine = createSovereigntyEngine(loadSovereigntyPreset(preset));
+  const analysts = new Map<string, SovereigntyAnalystRouteStep>([
+    ['local-source-answer', routeStep('local-source-answer', 'delphi')],
+    ['venice-private', routeStep('venice-private', 'venice')],
+    ['cloud-openclaw-infer', { profile: { id: 'cloud-openclaw-infer', profile: { provider: 'openclaw-infer', trust: 'standard_cloud' } }, backend: 'cloud', analyst: { analyze: async () => { throw new Error('OpenClaw CLI not found on the worker PATH'); } } }],
+  ]);
+  const route = (env: Record<string, string>, requestedProvider: 'default' | 'local' | 'venice' = 'default') => workerSovereigntyAnalystRoutePlan({ engine, env, trustDomain: 'internal', requestedProvider, analysts, defaultLocal: STUB_ANALYST });
+  expect(route({}).steps[0]!.profile.profile.provider).toBe('openclaw-infer');
+  const standalone = route({ OLYMPUS_ENGINE_HOST: '1' });
+  expect(standalone.steps.map(step => step.profile.id)).toEqual(preset === 'local-first'
+    ? ['local-source-answer', 'venice-private'] : preset === 'private-cloud-only' ? ['venice-private'] : ['standalone-source-answer']);
+  expect(standalone.steps.every(step => step.profile.profile.provider !== 'openclaw-infer')).toBe(true);
+  if (preset === 'private-cloud-only') {
+    expect(route({ OLYMPUS_ENGINE_HOST: '1' }, 'venice').steps.map(step => step.backend)).toEqual(['venice']);
+    expect(() => route({ OLYMPUS_ENGINE_HOST: '1' }, 'local')).toThrow('no approved local');
+  }
+  if (preset === 'no-sensitive') expect(() => route({ OLYMPUS_ENGINE_HOST: '1' }, 'venice')).toThrow('Venice');
+  // A gateway worker inheriting engine markers is still an OpenClaw host.
+  expect(route({ OLYMPUS_ENGINE_HOST: '1', OLYMPUS_NATIVE_SERVICE_INSTANCE_ID: 'gateway', OLYMPUS_WORKER_SUPERVISOR: 'openclaw' }).steps[0]!.backend).toBe('cloud');
+});
+
+
+test('standalone keeps an explicit Personal provider and refuses a pending privacy choice', () => {
+  const config = loadSovereigntyPreset('private-cloud-only');
+  config.routes.internal = { analyst: ['venice-private'] };
+  const analysts = new Map([['venice-private', routeStep('venice-private', 'venice')]]);
+  const resolve = () => workerSovereigntyAnalystRoutePlan({ engine: createSovereigntyEngine(config), env: { OLYMPUS_ENGINE_HOST: '1' }, trustDomain: 'internal', requestedProvider: 'default', analysts, defaultLocal: STUB_ANALYST });
+  expect(resolve().steps.map(step => step.backend)).toEqual(['venice']);
+  config.privacyChoicePending = true;
+  expect(resolve).toThrow('first-run privacy policy');
 });

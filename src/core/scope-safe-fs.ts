@@ -245,8 +245,11 @@ function loadNative(): Native | null {
         how.writeBigUInt64LE(0n, 8);
         how.writeBigUInt64LE(BigInt(RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS | RESOLVE_NO_XDEV), 16);
         const pathBuffer = cstr(relPath);
-        const result = Number(s.syscall!(BigInt(SYS_OPENAT2), BigInt(dirfd), ptr(pathBuffer), ptr(how), 24n) as bigint | number);
-        const failure = result < 0 ? errno() : 0;
+        // Capture errno before converting the boxed i64: Number() and its JIT/GC
+        // work can run native code and overwrite the thread-local errno (#951).
+        const rawResult = s.syscall!(BigInt(SYS_OPENAT2), BigInt(dirfd), ptr(pathBuffer), ptr(how), 24n) as bigint | number;
+        const failure = rawResult < 0 ? errno() : 0;
+        const result = Number(rawResult);
         keepAlive(pathBuffer, how);
         return result < 0 ? -failure : result;
       },

@@ -1717,6 +1717,44 @@ export function sovereigntyAnalystRoutePlan(input: {
 }
 
 /**
+ * Standalone engines cannot run the presets' OpenClaw Personal analyst.
+ * Resolve that legacy host lane through the owner's Private answer choice,
+ * retaining its order and provider constraints. A keyword-only Private policy
+ * still permits Personal answers on this computer's default local analyst.
+ */
+export function workerSovereigntyAnalystRoutePlan(input: {
+  engine: SovereigntyEngine;
+  env: Record<string, string | undefined>;
+  trustDomain: SourceTrustDomain;
+  requestedProvider: 'default' | 'local' | 'cloud' | 'venice';
+  analysts: ReadonlyMap<string, SovereigntyAnalystRouteStep>;
+  defaultLocal: Analyst;
+}): SovereigntyAnalystRoutePlan {
+  const { engine, trustDomain, requestedProvider } = input;
+  const configured = engine.resolveAnalystPool({ trustDomain });
+  if (trustDomain !== 'secure_local' && isStandaloneEngineProcess(input.env)
+    && configured.members.some(member => member.profile.provider === 'openclaw-infer')) {
+    if (engine.config.routes.secure_local?.mode !== 'disabled') {
+      return sovereigntyAnalystRoutePlan({
+        trustDomain,
+        pool: engine.resolveAnalystPool({ trustDomain: 'secure_local', requestedProvider }),
+        analysts: input.analysts,
+      });
+    }
+    // Do not turn a provider-specific request into an unrequested local run.
+    if (requestedProvider === 'venice') throw new OperationError('config_error', 'No standalone Venice analyst route is configured.');
+    const profile: SovereigntyResolvedProfile = {
+      id: 'standalone-source-answer',
+      profile: { provider: 'built-in', trust: 'local', model: 'default', purpose: 'analyst' },
+    };
+    return { poolId: trustDomain, trustDomain, selection: 'explicit_order',
+      steps: [{ profile, backend: 'local', analyst: input.defaultLocal }] };
+  }
+  return sovereigntyAnalystRoutePlan({ trustDomain,
+    pool: engine.resolveAnalystPool({ trustDomain, requestedProvider }), analysts: input.analysts });
+}
+
+/**
  * Whether secure_local evidence has an approved, constructible private analyst
  * under the active sovereignty policy — the same resolution the answer path
  * dispatches through, asked before retrieval so the handler can decide whether
@@ -4727,14 +4765,15 @@ export async function main(): Promise<void> {
         },
         sovereigntyAnalystRoute: ({ pack, localOnly, requestedProvider }) => {
           const trustDomain = analystRouteTrustDomain(pack, localOnly);
-          const pool = sovereigntyEngine.resolveAnalystPool({
+          return workerSovereigntyAnalystRoutePlan({
+            engine: sovereigntyEngine,
+            env: process.env,
             trustDomain,
             requestedProvider,
-          });
-          return sovereigntyAnalystRoutePlan({
-            trustDomain,
-            pool,
             analysts: sovereigntyAnalysts,
+            defaultLocal: builtInAnalystModel
+              ? withBuiltInFallback(defaultLocalAnalyst, createAnalyst(builtInAnalystModel, { auditSuspiciousDrafts: true }))
+              : defaultLocalAnalyst,
           });
         },
         secureLocalAnalystRoute: ({ requestedProvider }) => secureLocalAnalystRouteStatus({
