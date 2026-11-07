@@ -61014,7 +61014,7 @@ function stageTieredMove(options, repairSource, loweringOnly = false) {
     const keptCopy = exportFrom(keptHere);
     if (!keptCopy || keptCopy.chunks.length === 0 || sameText(keptCopy, exportFrom(source)))
       continue;
-    if (options.replaceOwnSupersededCopy === true && keptHere.supersededByGeneration !== null) {
+    if (options.replaceOwnSupersededCopy === true) {
       replacedSuperseded[planned.corpusId] = keptCopy?.chunks.length ?? 0;
       continue;
     }

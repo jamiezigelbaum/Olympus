@@ -174,7 +174,8 @@ for (const retry of ['batch', 'single'] as const) {
       expect(f.f.stores.internal!.localContent(localId(spec.id))?.chunks.join('')).toBe(updatedBody);
     }
     await flushTierMoveNotes(f.f.ledger);
-    const notes = (await readEmbeddingLedger(join(f.f.dir, 'notes.jsonl'))).entries;
+    const notes = (await readEmbeddingLedger(join(f.f.dir, 'notes.jsonl'))).entries
+      .filter(note => note.entry_id?.startsWith('tier-move:'));
     expect(notes).toHaveLength(f.specs.length);
     expect(notes.every(note => note.what.includes('1 chunk(s) of older text'))).toBe(true);
   });

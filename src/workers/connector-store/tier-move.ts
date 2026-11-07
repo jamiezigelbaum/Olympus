@@ -128,8 +128,8 @@ export interface TierMoveOptions {
   };
   /**
    * A destination store keeping a SUPERSEDED copy of this item that an
-   * earlier move of the same item superseded (a round trip: Personal, held,
-   * Personal again) may be replaced by this move, even when its text differs
+   * earlier move of the same item superseded or abandoned (a round trip:
+   * Personal, held, Personal again) may be replaced, even when its text differs
    * (the item's text changed meanwhile). Only the automatic moves set this,
    * and only while every embedding involved is the built-in local model, so
    * the older text's vectors it replaces cost nothing to make again. The
@@ -395,9 +395,11 @@ function stageTieredMove(options: TierMoveOptions, repairSource?: TierCopy, lowe
   // very text the move would write loses nothing (the store keeps identical
   // chunks and their vectors in place), so a move back to the store an
   // earlier move left (a held item judged Personal, then held again) proceeds.
-  // A copy an earlier move of this very item superseded may be replaced
-  // when the caller says so (`replaceOwnSupersededCopy`): its chunks are
-  // counted for the ledger entry.
+  // A copy an earlier move of this very item superseded or abandoned may be
+  // replaced when the caller says so (`replaceOwnSupersededCopy`): its chunks
+  // are counted for the ledger entry. Abandoned destinations have no flip
+  // generation; that keeps them out of the sources and rollback restores,
+  // without preventing an authorized replacement of their hidden rows.
   const kept = ledger.copies(identity);
   const replacedSuperseded: Record<string, number> = {};
   for (const planned of placement.copies) {
@@ -407,7 +409,7 @@ function stageTieredMove(options: TierMoveOptions, repairSource?: TierCopy, lowe
     const source = copyServingLayer(sources, 'content') ?? sources[0]!;
     const keptCopy = exportFrom(keptHere);
     if (!keptCopy || keptCopy.chunks.length === 0 || sameText(keptCopy, exportFrom(source))) continue;
-    if (options.replaceOwnSupersededCopy === true && keptHere.supersededByGeneration !== null) {
+    if (options.replaceOwnSupersededCopy === true) {
       replacedSuperseded[planned.corpusId] = keptCopy?.chunks.length ?? 0;
       continue;
     }

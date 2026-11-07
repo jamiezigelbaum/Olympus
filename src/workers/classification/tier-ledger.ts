@@ -199,7 +199,10 @@ export interface TierCopy {
   embedHold: boolean;
   /** The tier generation that made this copy current (or staged it). */
   generation: number;
-  /** The generation whose flip superseded this copy; null unless superseded. */
+  /**
+   * The generation whose flip superseded this copy. Null on other states
+   * and on an abandoned destination: hidden, but never a rollback source.
+   */
   supersededByGeneration: number | null;
   /**
    * Set when the last flip kept this copy but changed which layers it serves
@@ -3058,9 +3061,9 @@ export class TierLedger {
   /**
    * Give up a move that never flipped (queued, or interrupted between stage
    * and flip) and leave the item exactly where it was: its current copies
-   * serve as before, any copy the move staged is forgotten (its store row,
-   * partial at best, is hidden by the item's other copy rows and rewritten by
-   * the next move there), and the row leaves `moving` at its unchanged tiers.
+   * serve as before, any copy the move staged stays hidden as an abandoned
+   * destination (superseded with no flip generation, replaceable by a later
+   * authorized move), and the row leaves `moving` at its unchanged tiers.
    * Its newest decision's flags stay recorded. No store is written.
    *
    * Refused unless the row is mid-move at the expected generation, for a move
