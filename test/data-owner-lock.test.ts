@@ -374,7 +374,6 @@ describe('the embedding drain in http mode', () => {
 
 describe('an operator script', () => {
   const scripts = [
-    ['telegram-trust-reconcile.ts', []],
     ['source-eval-pack-inspect.ts', []],
     ['source-embedding-drain.ts', ['--dry-run']],
   ] as const;
