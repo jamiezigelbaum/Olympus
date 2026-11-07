@@ -10,8 +10,10 @@ The banner and square mountain are the approved generated artwork. The plugin
 icon is the crowned mountain: `assets/icon.png` (what OpenClaw and ClawHub show)
 is a copy of `assets/app-icon.png` (the desktop app and ChatGPT listing icon),
 and `test/plugin-icon.test.ts` keeps them identical. The runtime assets remain at
-`assets/olympus-banner.png`, `assets/icon.png` and `assets/app-icon.png`; this
-folder collects the brand artwork for reuse.
+`assets/icon.png` and `assets/app-icon.png`. `assets/olympus-banner.png` stays in
+the repository for the README header, which loads it by URL, but is left out of
+the release package (3 MB that nothing at runtime reads). This folder collects
+the brand artwork for reuse.
 
 ## Banner
 
