@@ -471,7 +471,9 @@ describe('nits', () => {
     const afterPreview = new TierLedger({ dbPath: auditPath });
     expect(afterPreview.readMeta('embedding-prefilter:withdrawal')).toBe('before-deletion');
     afterPreview.close();
-    deleteOlympusData({ sourceId: 'readwise.library', homeDir, env });
+    const deleted = deleteOlympusData({ sourceId: 'readwise.library', homeDir, env });
+    expect(deleted.removed).toContain(weightsPath);
+    expect(deleted.missing).not.toContain(weightsPath);
     expect(existsSync(weightsPath)).toBe(false);
     const after = new TierLedger({ dbPath: auditPath });
     expect(after.readMeta('embedding-prefilter:state')).toBe('synthetic stopped audit');

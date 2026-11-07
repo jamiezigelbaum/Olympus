@@ -707,12 +707,13 @@ function removeAccount(
     if (target.kind === 'account_folder' && existsSync(target.path)) assertDeleteTargetSafe(target);
   }
   // Fence yielded training before any source byte disappears, even with no weights published yet.
-  invalidateInstallEmbeddingPrefilter(context);
-  const removed: string[] = [];
+  const removedWeights = invalidateInstallEmbeddingPrefilter(context);
+  const removed: string[] = removedWeights ? [removedWeights] : [];
   const missing: string[] = [];
   // A file inside the folder goes with the folder's rename, not on its own.
   const folders = plan.targets.filter((target) => target.kind === 'account_folder').map((target) => resolve(target.path));
   for (const target of plan.targets) {
+    if (target.path === removedWeights) continue;
     if (!existsSync(target.path)) {
       missing.push(target.path);
       continue;
@@ -1373,7 +1374,7 @@ function looksLikeSqlite(path: string): boolean {
 }
 
 /** Invalidate pooled training independently of source handles which can survive unlink. */
-function invalidateInstallEmbeddingPrefilter(context: LifecyclePathContext): void {
+function invalidateInstallEmbeddingPrefilter(context: LifecyclePathContext): string | undefined {
   const auditPath = embeddingPrefilterInstallLedgerPath(resolveClassificationLedgerPath(envForContext(context)));
   // Training opens the install audit before yielding; without it no model can be in flight.
   if (existsSync(auditPath)) {
@@ -1388,7 +1389,10 @@ function invalidateInstallEmbeddingPrefilter(context: LifecyclePathContext): voi
       closeSqliteStore(db);
     }
   }
-  removeFileDurablySync(installEmbeddingWeightsTarget(context).path);
+  const weightsPath = installEmbeddingWeightsTarget(context).path;
+  const existed = existsSync(weightsPath);
+  removeFileDurablySync(weightsPath);
+  return existed ? weightsPath : undefined;
 }
 
 function installEmbeddingWeightsTarget(context: LifecyclePathContext): DeleteTarget {

@@ -100602,11 +100602,13 @@ function removeAccount(account, plan, context2, options) {
     if (target.kind === "account_folder" && existsSync65(target.path))
       assertDeleteTargetSafe(target);
   }
-  invalidateInstallEmbeddingPrefilter(context2);
-  const removed = [];
+  const removedWeights = invalidateInstallEmbeddingPrefilter(context2);
+  const removed = removedWeights ? [removedWeights] : [];
   const missing = [];
   const folders = plan.targets.filter((target) => target.kind === "account_folder").map((target) => resolve20(target.path));
   for (const target of plan.targets) {
+    if (target.path === removedWeights)
+      continue;
     if (!existsSync65(target.path)) {
       missing.push(target.path);
       continue;
@@ -101044,7 +101046,10 @@ function invalidateInstallEmbeddingPrefilter(context2) {
       closeSqliteStore(db);
     }
   }
-  removeFileDurablySync(installEmbeddingWeightsTarget(context2).path);
+  const weightsPath = installEmbeddingWeightsTarget(context2).path;
+  const existed = existsSync65(weightsPath);
+  removeFileDurablySync(weightsPath);
+  return existed ? weightsPath : undefined;
 }
 function installEmbeddingWeightsTarget(context2) {
   return {
