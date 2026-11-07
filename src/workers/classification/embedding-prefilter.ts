@@ -7,7 +7,7 @@ import { ingestionTurn } from '../control-path-headroom.ts';
 import { SNIFFER_RECORD_HELD_CODE_PREFIX, snifferMaterialCarriesSecret } from './sniffer.ts';
 import type { SnifferQuestion, TierSnifferStore } from './sniffer-store.ts';
 import { tierLedgerIdentityKey, type TierLedger, type TierLedgerRecord, type TierPlacementPlan } from './tier-ledger.ts';
-import { TIER_CLASSIFIER_VERSION, PERSONAL_FIRST_REASON, HELD_UNTIL_JUDGED_REASON, contentDigestReason, type TierDecision, type TierSnifferSubject } from './tier-classifier.ts';
+import { TIER_CLASSIFIER_VERSION, PERSONAL_FIRST_REASON, HELD_UNTIL_JUDGED_REASON, contentDigestReason, contentJudgeVerdictReason, type TierDecision, type TierSnifferSubject } from './tier-classifier.ts';
 import { EMBEDDING_PREFILTER_MODEL_ID, EMBEDDING_PREFILTER_DIMENSIONS, EMBEDDING_PREFILTER_MIN_PER_CLASS,
   trainLogisticSteps, privateProbability, type LogisticModel, type LogisticExample } from './embedding-logistic.ts';
 
@@ -38,11 +38,12 @@ interface TrainingScan {
   attempt: string; after?: TierSnifferSubject; done: boolean; rows: number;
   samples: Array<{ subject: TierSnifferSubject; private: boolean }>;
 }
-interface TrainingExample extends LogisticExample { current: () => boolean }
+interface TrainingExample extends LogisticExample { current: (checkLedger: boolean) => boolean }
 interface TrainingRun {
   id: string; scans: Array<{ member: EmbeddingPrefilter; scan: TrainingScan; dirty: boolean; revision: string }>;
   examples: TrainingExample[]; memberIndex: number; sampleIndex: number;
   fit?: Generator<void, LogisticModel | undefined>;
+  markers?: string[];
 }
 interface SavedModel { revisions: string; version: string; trainedAt: number; judge: string; model: LogisticModel }
 interface Receipt { subject: TierSnifferSubject; hash: string; reason: string; original: TierDecision }
@@ -69,6 +70,14 @@ export function prefilterVector(copy: PrefilterCopy | undefined): number[] | und
     }
   }
   return mean;
+}
+function copyFingerprint(copy: PrefilterCopy): string {
+  const hash = createHash('sha256').update(JSON.stringify(copy.chunks));
+  for (const vector of copy.vectors) {
+    hash.update(JSON.stringify([vector.chunkIndex, vector.modelId, vector.contentHash, vector.embedding.byteLength]));
+    hash.update(vector.embedding);
+  }
+  return hash.digest('hex');
 }
 function subjectOf(row: TierLedgerRecord): TierSnifferSubject {
   return { provider: row.provider, accountScope: row.accountScope, providerItemId: row.providerItemId,
@@ -157,17 +166,12 @@ export class EmbeddingPrefilter {
   recover(): void {
     if (this.audit.stopped || !this.enabled()) for (const member of this.owner.members) member.rollback();
   }
-  /** A ledger label is usable only when this judge alone decided the content tier. */
-  private trainingFingerprint(row: TierLedgerRecord, copy: PrefilterCopy): string {
+  private trainingFingerprint(row: TierLedgerRecord): string {
     const subject = subjectOf(row);
-    const hash = createHash('sha256').update(JSON.stringify([row, this.options.ledger.copies(subject),
-      this.options.ledger.getOverride(subject), this.options.ledger.rejudgeQuestion(subject), copy.chunks]));
-    for (const vector of copy.vectors) {
-      hash.update(JSON.stringify([vector.chunkIndex, vector.modelId, vector.contentHash, vector.embedding.byteLength]));
-      hash.update(vector.embedding);
-    }
-    return hash.digest('hex');
+    return createHash('sha256').update(JSON.stringify([row, this.options.ledger.copies(subject),
+      this.options.ledger.getOverride(subject), this.options.ledger.rejudgeQuestion(subject)])).digest('hex');
   }
+  /** A ledger label is usable only when this judge alone decided the content tier. */
   private trainingExample(row: TierLedgerRecord, judge: string): TrainingExample | undefined {
     if (!row.routed || row.state !== 'current' || row.metadataPending || row.contentPending || !row.contentRead
       || row.metadataTier !== 'private' || !['private', 'secure'].includes(row.contentTier) || row.metadataForced
@@ -176,32 +180,38 @@ export class EmbeddingPrefilter {
       || row.reasons.some(reason => reason.startsWith('metadata:owner_rule:') || reason.startsWith('metadata:floor:')
         || reason.startsWith('metadata:secret:') || reason.startsWith('override:'))) return undefined;
     const prefix = `content:sniffer:${judge}:`;
-    let judged = false;
+    let judged: string | undefined;
     for (const reason of row.reasons) {
       if (!reason.startsWith('content:')) continue;
       if (reason.startsWith(prefix)) {
         const code = reason.slice(prefix.length);
         if (!code || code.startsWith(SNIFFER_RECORD_HELD_CODE_PREFIX)
           || /(?:^|:)(?:rule|unresolved|fail_safe|injection|undecided)(?::|$)/.test(code)) return undefined;
-        judged = true;
+        if (judged) return undefined;
+        judged = reason;
       // Known non-raising receipts only. Unknown content reasons are excluded too.
-      } else if (!(reason.startsWith('content:sha256:') || reason.startsWith('content:names:')
+      } else if (!(reason.startsWith('content:judge_verdict:') || reason.startsWith('content:sha256:') || reason.startsWith('content:names:')
         || reason.startsWith('content:borderline:') || ['content:text_only', 'content:provenance:model',
           'content:no_raise', HELD_UNTIL_JUDGED_REASON, PERSONAL_FIRST_REASON].includes(reason))) return undefined;
     }
     if (!judged) return undefined;
     const copy = this.options.copyFor(subjectOf(row));
-    if (!copy || !row.reasons.includes(contentDigestReason(copy.chunks.map(chunk => chunk.boundedText).join('')))) return undefined;
+    if (!copy) return undefined;
+    const digest = contentDigestReason(copy.chunks.map(chunk => chunk.boundedText).join(''));
+    if (!row.reasons.includes(digest)
+      || !row.reasons.includes(contentJudgeVerdictReason(judged, row.contentTier, digest))) return undefined;
     const vector = prefilterVector(copy);
     if (!vector || Math.hypot(...vector) === 0) return undefined;
-    const fingerprint = this.trainingFingerprint(row, copy);
+    const fingerprint = this.trainingFingerprint(row);
+    const copied = copyFingerprint(copy);
     const subject = subjectOf(row);
-    return { vector, private: row.contentTier === 'secure', current: () => {
-      const current = this.options.ledger.getCurrent(subject);
+    return { vector, private: row.contentTier === 'secure', current: checkLedger => {
       const currentCopy = this.options.copyFor(subject);
-      return !!current && !!currentCopy && this.trainingFingerprint(current, currentCopy) === fingerprint;
+      if (!currentCopy || copyFingerprint(currentCopy) !== copied) return false;
+      if (!checkLedger) return true;
+      const current = this.options.ledger.getCurrent(subject);
+      return !!current && this.trainingFingerprint(current) === fingerprint;
     } };
-
   }
   private verdictCount(): number {
     return [...this.members].reduce((count, member) => count + member.options.sniffer.verdictCount(), 0);
@@ -278,8 +288,11 @@ export class EmbeddingPrefilter {
         }
       }
       const run = this.training;
+      const markers = run.scans.map(({ member }) => member.options.ledger.changeMarker());
+      const ledgerChanged = !run.markers || markers.some((marker, index) => marker !== run.markers![index]);
+      run.markers = markers;
       // Retained vectors must still belong to the same decisions and copies on every tick.
-      if (run.examples.some(example => !example.current())) {
+      if (run.examples.some(example => !example.current(ledgerChanged))) {
         stage = 'ledger_or_judge_changed';
         throw new Error();
       }
@@ -338,7 +351,7 @@ export class EmbeddingPrefilter {
                 if (existsSync(directory) && (!lstatSync(directory).isDirectory() || lstatSync(directory).isSymbolicLink())) throw new Error();
                 // No yield between this final check and publication: a change during fitting
                 // (including a Secrets decision) discards all derived weights.
-                if (attempt.revisions !== this.revisions() || run.examples.some(example => !example.current())) {
+                if (attempt.revisions !== this.revisions() || run.examples.some(example => !example.current(true))) {
                   this.finishTraining(attempt, 'failed', 'ledger_or_judge_changed');
                   break;
                 }
@@ -360,6 +373,11 @@ export class EmbeddingPrefilter {
         this.saved = undefined;
         this.finishTraining(attempt, 'failed', 'ledger_or_judge_changed');
       }
+      // Yields may let a decision writer run inside this tick as well.
+      if (run.scans.some(({ member }, index) => member.options.ledger.changeMarker() !== markers[index])
+        && run.examples.some(example => !example.current(true))) {
+        this.finishTraining(attempt, 'failed', 'ledger_or_judge_changed');
+      }
       for (const entry of run.scans) {
         if (entry.dirty && attempt.revisions === this.revisions()) {
           if (!entry.member.options.ledger.writeEmbeddingTrainingScan(JSON.stringify(entry.scan), entry.revision)) {
@@ -376,6 +394,12 @@ export class EmbeddingPrefilter {
     if (attempt && attempt.id !== finishedAtStart) {
       attempt.elapsedMs += clock() - started;
       this.control.writeMeta(TRAINING, JSON.stringify(attempt));
+      // Our checkpoints change SQLite too; only subsequent changes require row reads.
+      if (this.training) this.training.markers = this.training.scans.map(({ member }, index) => {
+        const marker = member.options.ledger.changeMarker();
+        const previous = this.training!.markers?.[index];
+        return previous && previous.split(':')[0] !== marker.split(':')[0] ? previous : marker;
+      });
       if (['trained', 'too_few', 'failed'].includes(attempt.outcome)) this.logTraining(attempt);
     }
   }

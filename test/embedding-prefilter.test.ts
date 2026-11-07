@@ -8,8 +8,9 @@ import { EMBEDDING_PREFILTER_MODEL_ID as MODEL, EMBEDDING_PREFILTER_DIMENSIONS a
 import { TierLedger, type TierPlacementPlan } from '../src/workers/classification/tier-ledger.ts';
 import { TierSnifferStore } from '../src/workers/classification/sniffer-store.ts';
 import { CachedTierSniffer, SNIFFER_PROMPT_VERSION, snifferId, snifferCacheModelId } from '../src/workers/classification/sniffer.ts';
+import { withRecordedContent } from '../src/workers/connector-store/tiered-store-set.ts';
 import { runSnifferPass } from '../src/workers/classification/sniffer-resolver.ts';
-import { classifyItemTiers, normalizedContentHash, type TierDecision } from '../src/workers/classification/tier-classifier.ts';
+import { classifyItemTiers, contentDigestReason, normalizedContentHash, type TierDecision } from '../src/workers/classification/tier-classifier.ts';
 import { tierSnifferServiceEnv } from '../src/workers/classification/sniffer-service.ts';
 import type { SnifferLane } from '../src/workers/classification/sniffer-lane.ts';
 import type { ConnectorStoreItemCopy } from '../src/workers/connector-store/local-index.ts';
@@ -41,7 +42,7 @@ function fixture(options: { trained?: boolean; memory?: boolean; bias?: number; 
     copies: [{ corpusId: decision.contentPending ? 'private' : 'personal', trustDomain: decision.contentPending ? 'secure_local' : 'internal',
       layers: 'both' }], embedHold: decision.contentPending,
   });
-  let currentCopy = (n: number) => copy(n);
+  let currentCopy: (n: number) => ConnectorStoreItemCopy | undefined = n => copy(n);
   const make = () => new EmbeddingPrefilter({ ledger, sniffer, ...(options.stateLedger ? { stateLedger: options.stateLedger } : {}), copyFor: identity => currentCopy(Number(identity.providerItemId)),
     ...(options.routed ? { placementFor } : {}), random: options.random ?? (() => 1), ...(options.now ? { now: options.now } : {}), ...(options.monotonicNow ? { monotonicNow: options.monotonicNow } : {}), ...(options.log ? { log: options.log } : {}), ...(options.enabled ? { enabled: options.enabled } : {}) });
   const filter = make();
@@ -54,7 +55,7 @@ function fixture(options: { trained?: boolean; memory?: boolean; bias?: number; 
     return sniffer.questionFor(subject(n), 'content')!;
   };
   cleanups.push(() => { sniffer.close(); ledger.close(); rmSync(dir, { recursive: true, force: true }); });
-  return { ledger, sniffer, filter, add, make, modelDir, placementFor, setCopy: (fn: typeof currentCopy) => { currentCopy = fn; } };
+  return { ledger, stateLedger: options.stateLedger ?? ledger, sniffer, filter, add, make, modelDir, placementFor, setCopy: (fn: typeof currentCopy) => { currentCopy = fn; } };
 }
 function pass(f: ReturnType<typeof fixture>, tier: 'personal' | 'private' = 'personal') {
   let calls = 0;
@@ -259,7 +260,10 @@ test('rollback fences a queued lowering and supersedes its Personal destination'
 });
 test('sliced training uses judge ledger labels without content hashes and writes private weights', async () => {
   const logs: string[] = [];
-  const f = fixture({ trained: false, log: line => logs.push(line) });
+  const dir = mkdtempSync(join(tmpdir(), 'prefilter-fitting-'));
+  const control = new TierLedger({ dbPath: join(dir, 'control.sqlite') });
+  const f = fixture({ trained: false, memory: true, stateLedger: control, log: line => logs.push(line) });
+  cleanups.push(() => { control.close(); rmSync(dir, { recursive: true, force: true }); });
   f.setCopy(n => { const c = copy(n, n % 2 ? 1 : -1); return { ...c, chunks: [{ ...c.chunks[0]!, boundedText: `${ownText} ${n}` }] }; });
   for (let n = 0; n < 4000; n++) {
     const q = f.add(n, {}, `${ownText} ${n}`);
@@ -295,7 +299,7 @@ test('sliced training uses judge ledger labels without content hashes and writes
   f.ledger.writeMeta('embedding-prefilter:training-revision', 'before-training');
   let withdrawn = false;
   f.setCopy(n => {
-    if (!withdrawn) { f.ledger.writeMeta('embedding-prefilter:withdrawal', 'source-withdrawn-during-training'); withdrawn = true; }
+    if (!withdrawn) { f.stateLedger.writeMeta('embedding-prefilter:withdrawal', 'source-withdrawn-during-training'); withdrawn = true; }
     const c = copy(n, n % 2 ? 1 : -1);
     return { ...c, chunks: [{ ...c.chunks[0]!, boundedText: `${ownText} ${n}` }] };
   });
@@ -312,7 +316,7 @@ test('sliced training uses judge ledger labels without content hashes and writes
       const next = fit.next.bind(fit);
       fit.next = () => {
         const step = next();
-        if (step.done) { f.ledger.writeMeta('embedding-prefilter:withdrawal', 'synthetic-final-fit-withdrawal'); interruptedFinalStep = true; }
+        if (step.done) { f.stateLedger.writeMeta('embedding-prefilter:withdrawal', 'synthetic-final-fit-withdrawal'); interruptedFinalStep = true; }
         return step;
       };
       for (let fitTick = 0; fitTick < 200 && !interruptedFinalStep; fitTick++) await f.filter.prepare(judge);
@@ -496,7 +500,7 @@ function trainingRow(f: ReturnType<typeof fixture>, n: number, extra: string[] =
   });
 }
 function trainingState(f: ReturnType<typeof fixture>) {
-  return JSON.parse(f.ledger.readMeta('embedding-prefilter:training-v1')!);
+  return JSON.parse(f.stateLedger.readMeta('embedding-prefilter:training-v1')!);
 }
 test('only judge-only ledger labels qualify; competing tiers, record holds and stale digests never label', async () => {
   const logs: string[] = [];
@@ -704,10 +708,13 @@ test('a failed completion watermark stays a failed attempt with a three-hour ret
   expect(logs[0]).toContain('outcome=failed');
 });
 
-test.each(['secrets', 'tier', 'decision', 'removed copy', 'changed vector'] as const)(
+test.each(['secrets', 'tier', 'decision', 'removed copy', 'changed vector', 'publication secrets'] as const)(
   'fitting discards retained examples after a selected item changes: %s', async change => {
     let clock = 0;
-    const f = fixture({ trained: false, memory: true, monotonicNow: () => (clock += 0.01), log: () => {} });
+    const dir = mkdtempSync(join(tmpdir(), 'prefilter-publication-'));
+    const control = new TierLedger({ dbPath: join(dir, 'control.sqlite') });
+    const f = fixture({ trained: false, memory: true, stateLedger: control, monotonicNow: () => (clock += 0.01), log: () => {} });
+    cleanups.push(() => { control.close(); rmSync(dir, { recursive: true, force: true }); });
     for (let n = 0; n < 4000; n++) trainingRow(f, n);
     const runtime = () => (f.filter as unknown as { training?: { examples: unknown[]; fit?: Generator<void, unknown> } }).training;
     for (let tick = 0; tick < 100 && !runtime()?.fit; tick++) await f.filter.prepare(judge);
@@ -715,7 +722,12 @@ test.each(['secrets', 'tier', 'decision', 'removed copy', 'changed vector'] as c
     expect(runtime()?.examples).toHaveLength(4000);
     const revision = f.ledger.readMeta('embedding-prefilter:training-revision');
     const row = f.ledger.getCurrent(subject(0))!;
-    if (change === 'removed copy') f.setCopy(n => n === 0 ? undefined! : copy(n));
+    if (change === 'publication secrets') runtime()!.fit!.next = () => {
+      f.ledger.recordDecision(subject(0), { ...row, state: 'current', snifferId: judge,
+        decidedBy: 'secret_detector', contentTier: 'secrets' });
+      return { done: true, value: { weights: new Array(D).fill(0), bias: -5 } };
+    };
+    else if (change === 'removed copy') f.setCopy(n => n === 0 ? undefined : copy(n));
     else if (change === 'changed vector') f.setCopy(n => copy(n, n === 0 ? -1 : 1));
     else f.ledger.recordDecision(subject(0), { ...row, state: 'current', snifferId: judge,
       decidedBy: change === 'secrets' ? 'secret_detector' : 'sniffer',
@@ -727,3 +739,73 @@ test.each(['secrets', 'tier', 'decision', 'removed copy', 'changed vector'] as c
     expect(runtime()).toBeUndefined();
     expect(existsSync(join(f.modelDir, 'weights.json'))).toBe(false);
   }, 30_000);
+
+
+test('a historical metadata raise never replaces the content judge training label', async () => {
+  const f = fixture({ trained: false, memory: true, log: () => {} });
+  trainingRow(f, 0, [], 'other:1.00', true); // The body was judged Personal.
+  trainingRow(f, 1, [], 'other:1.00', true); // A genuine Private label remains usable.
+  const original = f.ledger.getCurrent(subject(0))!;
+  const recordNames = (title: string) => {
+    const decision = withRecordedContent(classifyItemTiers({ signals: { title }, subject: subject(0) }, {
+      sniffer: { id: judge, judge: () => ({ verdict: 'decided', tier: 'secure', code: 'fixture' }) },
+    }), f.ledger.getCurrent(subject(0)));
+    f.ledger.recordRoutedPlacement(subject(0), decision, {
+      copies: [{ corpusId: 'private', trustDomain: 'secure_local', trustTier: 'S4', layers: 'both' }], embedHold: false,
+    });
+  };
+  recordNames('Bank GB82 WEST 1234 5698 7654 32');
+  expect(f.ledger.getCurrent(subject(0))).toMatchObject({ metadataTier: 'secure', contentTier: 'secure' });
+  recordNames('Picnic plan');
+  const current = f.ledger.getCurrent(subject(0))!;
+  expect(current).toMatchObject({ metadataTier: 'private', contentTier: 'secure', contentPending: false });
+  expect(current.reasons.filter(reason => reason.startsWith('content:'))).toEqual(original.reasons.filter(reason => reason.startsWith('content:')));
+  await f.filter.prepare(judge);
+  expect(trainingState(f)).toMatchObject({ outcome: 'too_few', counts: [0, 1] });
+});
+
+test('training skips a row without provenance of the content judge verdict tier', async () => {
+  const f = fixture({ trained: false, memory: true, log: () => {} });
+  trainingRow(f, 0);
+  trainingRow(f, 1);
+  // Old rows have content reasons and a digest, but no tier-bearing receipt.
+  for (const n of [0, 1]) {
+    const row = f.ledger.getCurrent(subject(n))!;
+    f.ledger.recordDecision(subject(n), { ...row, state: 'current', snifferId: judge, decidedBy: 'sniffer',
+      reasons: row.reasons.filter(reason => !reason.startsWith('content:judge_verdict:')) });
+  }
+  await f.filter.prepare(judge);
+  expect(trainingState(f)).toMatchObject({ outcome: 'too_few', counts: [0, 0] });
+});
+
+
+test('content judge tier receipts bind both the verdict reason and complete-text digest', async () => {
+  const f = fixture({ trained: false, memory: true, log: () => {} });
+  for (let n = 0; n < 4; n++) trainingRow(f, n);
+  for (const n of [0, 1]) {
+    const row = f.ledger.getCurrent(subject(n))!;
+    f.ledger.recordDecision(subject(n), { ...row, state: 'current', snifferId: judge, decidedBy: 'sniffer',
+      reasons: row.reasons.map(reason => n === 0 && reason.startsWith('content:sniffer:') ? `${reason}:changed`
+        : n === 1 && reason.startsWith('content:sha256:') ? contentDigestReason('Updated picnic plan') : reason) });
+  }
+  f.setCopy(n => n === 1 ? { ...copy(n), chunks: [{ ...copy(n).chunks[0]!, boundedText: 'Updated picnic plan' }] } : copy(n));
+  await f.filter.prepare(judge);
+  expect(trainingState(f)).toMatchObject({ outcome: 'too_few', counts: [1, 1] });
+});
+
+
+test('a newer content verdict replaces the historical tier receipt even when its reason is unchanged', async () => {
+  const f = fixture({ trained: false, memory: true, log: () => {} });
+  trainingRow(f, 1); // An earlier Private judgment.
+  const row = f.ledger.getCurrent(subject(1))!;
+  const reason = row.reasons.find(value => value.startsWith('content:sniffer:'))!;
+  f.ledger.recordDecision(subject(1), { ...row, state: 'pending', snifferId: judge, decidedBy: 'sniffer', contentPending: true,
+    reasons: row.reasons.map(value => value === reason ? `content:sniffer:${judge}:undecided` : value) });
+  f.ledger.applySnifferVerdict(subject(1), { pass: 'content', tier: 'private', reason, modelId: 'fixture' }, {
+    placementFor: () => ({ copies: [{ corpusId: 'private', trustDomain: 'secure_local', trustTier: 'S4', layers: 'both' }], embedHold: false }),
+  });
+  // The raise-only ledger still holds Private, but today's content verdict is Personal.
+  expect(f.ledger.getCurrent(subject(1))).toMatchObject({ contentTier: 'secure', contentPending: false });
+  await f.filter.prepare(judge);
+  expect(trainingState(f)).toMatchObject({ outcome: 'too_few', counts: [0, 0] });
+});

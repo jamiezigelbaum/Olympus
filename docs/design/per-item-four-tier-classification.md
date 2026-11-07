@@ -590,7 +590,9 @@ branches. It requires **2,000 valid final judge labels in each class**, each
 bound to that item's complete own text and stored vector. Rules, overrides,
 fail-safes and pre-filter outputs are excluded. The ledger supplies the label:
 `private` is Personal and `secure` is Private, only when this judge alone
-decided it. Detectors, content rules, owner rules, overrides, metadata floors,
+decided it. A tier-bearing content-judge receipt binds that verdict's own tier
+and reason to the complete-text digest; a later metadata raise never changes
+the receipt. Rows without this provenance are skipped. Detectors, content rules, owner rules, overrides, metadata floors,
 own-record holds and small-lane `record_held:` answers exclude the row. The
 stored text must still match its complete-text digest; a verdict-cache
 `content_hash` is not required.
@@ -601,7 +603,10 @@ Scanning and fitting share a cooperative 200 ms budget per tick across the
 installation (one synchronous row/update may finish beyond the deadline).
 Source ledger meta stores the cursor and selected item references, never text
 or vectors. Restart resumes scanning, rechecks selected rows and copies, then
-refits in slices. Training starts after both classes reach the cap or all
+refits in slices. Retained examples are revalidated against their decisions,
+copy placement, text and vector bytes before each tick resumes fitting and
+synchronously before publishing weights. A changed or removed selected item,
+including a Secrets decision, discards the fit. Training starts after both classes reach the cap or all
 ledgers have been read. A completed fit waits 24 hours; a failed attempt retries
 after three hours. A complete read below 2,000 per class waits for 1,000 new
 cached verdicts or 24 hours, whichever comes first. Each finished attempt logs

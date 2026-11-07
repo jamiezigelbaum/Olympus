@@ -29,6 +29,7 @@ import { runSqliteMigrations, type SqliteMigration } from '../../core/sqlite-mig
 import { closeSqliteStore } from '../../core/sqlite-store.ts';
 import {
   TIER_KEYS,
+  contentJudgeVerdictReason,
   maxTier,
   tierRank,
   type ContentTierDecision,
@@ -554,8 +555,9 @@ export class TierLedger {
           decidedBy: contentTier !== existing.contentTier ? 'sniffer' : existing.decidedBy,
           reasons: [
             ...metadataReasons,
-            ...contentReasons.filter((reason) => !isOpenSnifferReason(reason, 'content')),
+            ...contentReasons.filter((reason) => !isOpenSnifferReason(reason, 'content') && !reason.startsWith('content:judge_verdict:')),
             verdict.reason,
+            ...contentVerdictReceipts(contentReasons, verdict.reason, verdict.tier),
           ],
           contentPending: false,
         };
@@ -666,6 +668,7 @@ export class TierLedger {
     const contentTier = maxTier(base.contentTier, verdict.tier);
     const metadataPending = verdict.pass === 'metadata' ? false : base.metadataPending;
     const kept = base.reasons.filter(reason => !isOpenSnifferReason(reason, verdict.pass)
+      && !(verdict.pass === 'content' && reason.startsWith('content:judge_verdict:'))
       && !(metadataTier === 'secure' && isOpenSnifferReason(reason, 'content')));
     const contentPending = verdict.pass === 'content' || metadataTier === 'secure' ? false : base.contentPending;
     const decision: TierDecision = {
@@ -673,7 +676,8 @@ export class TierLedger {
       metadataTier,
       contentTier,
       decidedBy: 'sniffer',
-      reasons: [...(verdict.pass === 'metadata' ? settleStoredNamesMark(kept, base.metadataTier, metadataTier) : kept), verdict.reason],
+      reasons: [...(verdict.pass === 'metadata' ? settleStoredNamesMark(kept, base.metadataTier, metadataTier) : kept), verdict.reason,
+        ...(verdict.pass === 'content' ? contentVerdictReceipts(kept, verdict.reason, verdict.tier) : [])],
       metadataPending,
       contentPending,
       state: metadataPending || contentPending ? 'pending' : 'current',
@@ -4325,6 +4329,11 @@ function settleStoredNamesMark(reasons: readonly string[], askedTier: TierKey, a
   if (!reasons.includes(STORED_NAMES_ASKED_REASON)) return [...reasons];
   const rest = reasons.filter((reason) => reason !== STORED_NAMES_ASKED_REASON);
   return answeredTier !== askedTier ? [...rest, STORED_NAMES_REASON] : rest;
+}
+
+function contentVerdictReceipts(reasons: readonly string[], reason: string, tier: TierKey): string[] {
+  const digests = reasons.filter(value => /^content:sha256:[0-9a-f]{64}$/.test(value));
+  return digests.length === 1 ? [contentJudgeVerdictReason(reason, tier, digests[0]!)] : [];
 }
 
 function isOpenSnifferReason(reason: string, pass: 'metadata' | 'content'): boolean {
