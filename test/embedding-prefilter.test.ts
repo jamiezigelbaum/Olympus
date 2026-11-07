@@ -68,6 +68,89 @@ function pass(f: ReturnType<typeof fixture>, tier: 'personal' | 'private' = 'per
   return { run: () => runSnifferPass({ targets: [{ ledger: f.ledger, sniffer: f.sniffer, embeddingPrefilter: f.filter,
     ...(f.placementFor ? { placementFor: f.placementFor } : {}) }], lane, model }), calls: () => calls };
 }
+// Counts are opt-in: the boolean and held/cleared decisions stay compatible.
+const clearingCounts = () => ({ tried: 0, cleared: 0, spotChecks: 0, skipped: {} as Record<string, number> });
+test('clearing counts one first skip per attempt without changing held decisions', () => {
+  const rowCases = [
+    ['row_missing', undefined], ['row_not_pending', { state: 'current' }],
+    ['metadata_pending', { metadataPending: true }], ['content_not_pending', { contentPending: false }],
+    ['content_unread', { contentRead: false }], ['metadata_tier', { metadataTier: 'secure' }],
+    ['content_tier', { contentTier: 'secure' }], ['metadata_forced', { metadataForced: true }],
+    ['override_decision', { decidedBy: 'override' }], ['owner_decision', { decidedBy: 'owner_rule' }],
+    ['metadata_owner_rule', { reasons: ['metadata:owner_rule:synthetic'] }],
+  ] as const;
+  for (const [reason, change] of rowCases) {
+    const f = fixture(); const q = f.add(1); const before = f.ledger.getCurrent(q)!;
+    const read = spyOn(f.ledger, 'getCurrent').mockReturnValue(change ? { ...before, ...change } as typeof before : undefined);
+    const counts = clearingCounts();
+    try {
+      expect(f.filter.tryClear(q, judge, counts)).toBe(false);
+      expect(f.filter.tryClear(q, judge)).toBe(false);
+      expect(counts).toEqual({ tried: 1, cleared: 0, spotChecks: 0, skipped: { [reason]: 1 } });
+    } finally { read.mockRestore(); }
+    expect(f.ledger.getCurrent(q)).toEqual(before);
+  }
+  for (const reason of ['disabled', 'audit_stopped', 'model_missing', 'model_invalid', 'weights_missing',
+    'revisions_changed', 'judge_changed', 'not_content', 'item_override', 'rejudge_open', 'metadata_question_open',
+    'copy_missing', 'digest_missing', 'no_vector', 'score_unavailable', 'probability_high', 'clear_rejected'] as const) {
+    const f = fixture({ enabled: () => reason !== 'disabled', bias: reason === 'probability_high' ? 5 : -5 });
+    const q = f.add(1); const before = f.ledger.getCurrent(q)!;
+    let filter = f.filter;
+    const path = join(f.modelDir, 'weights.json');
+    if (reason === 'model_missing') { rmSync(path); filter = f.make(); }
+    if (['model_invalid', 'revisions_changed', 'judge_changed', 'score_unavailable'].includes(reason)) {
+      const saved = JSON.parse(readFileSync(path, 'utf8'));
+      if (reason === 'model_invalid') saved.version = 'invalid';
+      if (reason === 'score_unavailable') saved.model.weights = [];
+      if (reason === 'revisions_changed') saved.revisions = 'changed';
+      if (reason === 'judge_changed') saved.judge = 'changed';
+      writeFileSync(path, JSON.stringify(saved)); filter = f.make();
+    }
+    if (reason === 'weights_missing') rmSync(path);
+    if (reason === 'audit_stopped') { f.ledger.writeMeta('embedding-prefilter:audit', JSON.stringify({ misses: [], stopped: true })); filter = f.make(); }
+    if (reason === 'not_content') q.pass = 'metadata';
+    const spies: Array<{ mockRestore(): void }> = [];
+    if (reason === 'item_override') spies.push(spyOn(f.ledger, 'getOverride').mockReturnValue({ kind: 'tier', tier: 'secure' } as ReturnType<TierLedger['getOverride']>));
+    if (reason === 'rejudge_open') spies.push(spyOn(f.ledger, 'rejudgeQuestion').mockReturnValue({} as NonNullable<ReturnType<TierLedger['rejudgeQuestion']>>));
+    if (reason === 'metadata_question_open') f.sniffer.enqueue({ subject: q, pass: 'metadata', material: 'synthetic', flags: [], mapRevision: 'none' });
+    if (reason === 'copy_missing') f.setCopy(() => undefined);
+    if (reason === 'digest_missing') f.setCopy(n => ({ ...copy(n), chunks: [{ ...copy(n).chunks[0]!, boundedText: 'changed' }] }));
+    if (reason === 'no_vector') f.setCopy(n => ({ ...copy(n), vectors: [] }));
+    if (reason === 'clear_rejected') spies.push(spyOn(f.ledger, 'clearEmbeddingQuestion').mockReturnValue(false));
+    const counts = clearingCounts();
+    try {
+      expect(filter.tryClear(q, judge, counts)).toBe(false);
+      expect(filter.tryClear(q, judge)).toBe(false);
+      expect(counts).toEqual({ tried: 1, cleared: 0, spotChecks: 0, skipped: { [reason]: 1 } });
+      expect(f.ledger.getCurrent(q)).toEqual(before);
+    } finally { for (const spy of spies) spy.mockRestore(); }
+  }
+});
+test('clearing counts only the first guard when multiple guards fail', () => {
+  const f = fixture({ enabled: () => false, trained: false }); const q = f.add(1);
+  q.pass = 'metadata'; const counts = clearingCounts();
+  expect(f.filter.tryClear(q, 'different-judge', counts)).toBe(false);
+  expect(counts).toEqual({ tried: 1, cleared: 0, spotChecks: 0, skipped: { disabled: 1 } });
+});
+test('clearing counts cleared and sampled or existing spot checks exactly once', async () => {
+  const f = fixture(); const q = f.add(1); const counts = clearingCounts();
+  expect(f.filter.tryClear(q, judge, counts)).toBe(true);
+  expect(counts).toEqual({ tried: 1, cleared: 1, spotChecks: 0, skipped: {} });
+  expect(f.ledger.getCurrent(q)).toMatchObject({ state: 'current', contentPending: false });
+  const uncounted = fixture(); const same = uncounted.add(1);
+  expect(uncounted.filter.tryClear(same, judge)).toBe(true);
+  expect(uncounted.ledger.getCurrent(same)!.contentPending).toBe(f.ledger.getCurrent(q)!.contentPending);
+  const sampled = fixture({ random: () => 0 }); const check = sampled.add(2); const checks = clearingCounts();
+  expect(sampled.filter.tryClear(check, judge, checks)).toBe(false);
+  expect(sampled.filter.tryClear(check, judge, checks)).toBe(false);
+  expect(checks).toEqual({ tried: 2, cleared: 0, spotChecks: 2, skipped: {} });
+  expect(sampled.ledger.getCurrent(check)).toMatchObject({ state: 'pending', contentPending: true });
+  const held = fixture({ bias: 5 }); held.add(3);
+  expect((await pass(held).run()).clearing).toEqual({ tried: 1, cleared: 0, spotChecks: 0, skipped: { probability_high: 1 } });
+  const clear = fixture(); clear.add(4);
+  expect((await pass(clear).run()).clearing).toEqual({ tried: 1, cleared: 1, spotChecks: 0, skipped: {} });
+  expect((await pass(clear).run()).clearing).toEqual(clearingCounts());
+});
 test('clears below 0.05 with a content-free reason, retains rollback question and never settles Private', async () => {
   const f = fixture(); f.add(1); const p = pass(f);
   await p.run();
@@ -1019,7 +1102,7 @@ test('a scanned attempt finishes between continuous judge passes and backlog-siz
     options.trainingReady!(judge);
     clearTimeout(scheduler.trainingTimer); scheduler.trainingTimer = undefined;
     for (let n = 0; n < 3; n++) { await busySlice(10_000); judgeMs += 10_000; }
-    return { calls: 1, failedCalls: 0, verdictsApplied: 1, stoppedBy: 'pass_budget' } as resolver.SnifferPassReport;
+    return { clearing: clearingCounts(), calls: 1, failedCalls: 0, verdictsApplied: 1, stoppedBy: 'pass_budget' } as resolver.SnifferPassReport;
   });
   const moves = spyOn(scheduler, 'drainMoves').mockImplementation(async direction => {
     if (direction === 'lower') {

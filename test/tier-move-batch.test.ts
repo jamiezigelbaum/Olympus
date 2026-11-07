@@ -423,7 +423,7 @@ for (const [passMs, fail] of [[18_000, false], [18_000, true], [300_000, false]]
     expect(options.passTimeMs).toBe(passMs);
     expect(imports).toBe(0);
     clock += passMs;
-    return { calls: 0, verdictsApplied: 0 } as Awaited<ReturnType<typeof resolver.runSnifferPass>>;
+    return { clearing: { tried: 3, cleared: 0, spotChecks: 0, skipped: { model_missing: 1, disabled: 2 } }, calls: 0, verdictsApplied: 0, heldLowering: 0 } as Awaited<ReturnType<typeof resolver.runSnifferPass>>;
   });
   const copy = spyOn(f.f.stores.internal!, 'importItemCopy').mockImplementation((...args) => {
     clock += 100;
@@ -445,6 +445,7 @@ for (const [passMs, fail] of [[18_000, false], [18_000, true], [300_000, false]]
     expect(f.f.stores.secure_local!.localContent(localId('synthetic-2'))?.chunks.join('')).toBe(body);
   }
   expect(lines.some(line => line.includes(`direction=lower elapsed_ms=${expectedSlice} backlog=500 slice_ms=${expectedSlice}`))).toBe(true);
+  expect(lines.some(line => line.includes('clearing: tried=3 cleared=0 spot_checks=0 skipped{disabled=2,model_missing=1}'))).toBe(true);
   expect(lines.every(line => !line.includes('synthetic-') && !line.includes(body))).toBe(true);
 }, 15_000);
 
@@ -452,7 +453,7 @@ for (const count of [0, 4]) test(`backlog ${count} preserves the judge's full bu
   const f = await fixture(count, true);
   const pass = spyOn(resolver, 'runSnifferPass').mockImplementation(async options => {
     expect(options.passTimeMs).toBe(18_000);
-    return { calls: 0, verdictsApplied: 0 } as Awaited<ReturnType<typeof resolver.runSnifferPass>>;
+    return { clearing: { tried: 0, cleared: 0, spotChecks: 0, skipped: {} }, calls: 0, verdictsApplied: 0 } as Awaited<ReturnType<typeof resolver.runSnifferPass>>;
   });
   const { service, lines } = serviceFor(f.f, {}, [], {
     passTimeMs: 18_000, modelAvailable: () => true, autoApproveBuiltIn: true, rejudgePerPass: 0,

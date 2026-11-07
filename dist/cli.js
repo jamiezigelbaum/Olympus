@@ -125510,25 +125510,83 @@ class EmbeddingPrefilter {
     this.options.ledger.deleteMeta(RECEIPTS + tierLedgerIdentityKey(question));
     return false;
   }
-  tryClear(question, judge3) {
-    if (!this.enabled() || this.audit.stopped || !this.saved || !/^[0-9a-f-]{36}$/.test(this.saved.version) || !Number.isFinite(this.saved.trainedAt) || !existsSync87(this.path) || this.saved.revisions !== this.revisions() || this.saved.judge !== judge3 || question.pass !== "content")
+  tryClear(question, judge3, counts) {
+    if (counts)
+      counts.tried++;
+    const skip = (reason2) => {
+      if (counts)
+        counts.skipped[reason2] = (counts.skipped[reason2] ?? 0) + 1;
       return false;
+    };
+    const spotCheck = () => {
+      if (counts)
+        counts.spotChecks++;
+      return false;
+    };
+    if (!this.enabled())
+      return skip("disabled");
+    if (this.audit.stopped)
+      return skip("audit_stopped");
+    if (!this.saved)
+      return skip("model_missing");
+    if (!/^[0-9a-f-]{36}$/.test(this.saved.version) || !Number.isFinite(this.saved.trainedAt))
+      return skip("model_invalid");
+    if (!existsSync87(this.path))
+      return skip("weights_missing");
+    if (this.saved.revisions !== this.revisions())
+      return skip("revisions_changed");
+    if (this.saved.judge !== judge3)
+      return skip("judge_changed");
+    if (question.pass !== "content")
+      return skip("not_content");
     const row = this.options.ledger.getCurrent(question);
-    if (!row || row.state !== "pending" || row.metadataPending || !row.contentPending || !row.contentRead || row.metadataTier !== "private" || row.contentTier !== "private" || row.metadataForced || row.decidedBy === "override" || row.decidedBy === "owner_rule" || this.options.ledger.getOverride(question) || row.reasons.some((reason2) => reason2.startsWith("metadata:owner_rule:")) || this.options.ledger.rejudgeQuestion(question) || this.options.sniffer.questionFor(question, "metadata"))
-      return false;
+    if (!row)
+      return skip("row_missing");
+    if (row.state !== "pending")
+      return skip("row_not_pending");
+    if (row.metadataPending)
+      return skip("metadata_pending");
+    if (!row.contentPending)
+      return skip("content_not_pending");
+    if (!row.contentRead)
+      return skip("content_unread");
+    if (row.metadataTier !== "private")
+      return skip("metadata_tier");
+    if (row.contentTier !== "private")
+      return skip("content_tier");
+    if (row.metadataForced)
+      return skip("metadata_forced");
+    if (row.decidedBy === "override")
+      return skip("override_decision");
+    if (row.decidedBy === "owner_rule")
+      return skip("owner_decision");
+    if (this.options.ledger.getOverride(question))
+      return skip("item_override");
+    if (row.reasons.some((reason2) => reason2.startsWith("metadata:owner_rule:")))
+      return skip("metadata_owner_rule");
+    if (this.options.ledger.rejudgeQuestion(question))
+      return skip("rejudge_open");
+    if (this.options.sniffer.questionFor(question, "metadata"))
+      return skip("metadata_question_open");
     const checkKey = this.checkKey(question);
     if (this.isSpotCheck(question))
-      return false;
+      return spotCheck();
     const copy = this.options.copyFor(question);
-    if (!copy || !row.reasons.includes(contentDigestReason(copy.chunks.map((chunk) => chunk.boundedText).join(""))))
-      return false;
+    if (!copy)
+      return skip("copy_missing");
+    if (!row.reasons.includes(contentDigestReason(copy.chunks.map((chunk) => chunk.boundedText).join(""))))
+      return skip("digest_missing");
     const vector = prefilterVector(copy);
-    const probability = vector ? privateProbability(this.saved.model, vector) : undefined;
-    if (probability === undefined || probability >= 0.05)
-      return false;
+    if (!vector)
+      return skip("no_vector");
+    const probability = privateProbability(this.saved.model, vector);
+    if (probability === undefined)
+      return skip("score_unavailable");
+    if (probability >= 0.05)
+      return skip("probability_high");
     if ((this.options.random?.() ?? Math.random()) < 0.05) {
       this.options.ledger.writeMeta(checkKey, JSON.stringify({ hash: question.materialHash, token: randomUUID29() }));
-      return false;
+      return spotCheck();
     }
     const reason = `content:embedding_prefilter:${this.saved.version}:${probability.toFixed(8)}`;
     const original = decisionOf(row);
@@ -125550,6 +125608,10 @@ class EmbeddingPrefilter {
     });
     if (cleared)
       this.options.ledger.markJudged(question, { engineVersion: TIER_CLASSIFIER_VERSION, snifferId: judge3 });
+    if (!cleared)
+      return skip("clear_rejected");
+    if (counts)
+      counts.cleared++;
     return cleared;
   }
   checkKey(question) {
@@ -194900,6 +194962,7 @@ async function runSnifferPass(options) {
   const monotonicNow = options.monotonicNow ?? (() => performance.now());
   const deadline = monotonicNow() + (options.passTimeMs ?? DEFAULT_SNIFFER_PASS_TIME_MS);
   const report = {
+    clearing: { tried: 0, cleared: 0, spotChecks: 0, skipped: {} },
     heldLowering: 0,
     callMs: 0,
     maxQueueWaitMs: 0,
@@ -195139,7 +195202,7 @@ async function runSnifferPass(options) {
         report.cacheHits += 1;
         return false;
       }
-      if (item.target.embeddingPrefilter?.tryClear(item.question, id)) {
+      if (item.target.embeddingPrefilter?.tryClear(item.question, id, report.clearing)) {
         report.verdictsApplied += 1;
         report.resolvedPersonal += 1;
         return false;
@@ -196121,9 +196184,9 @@ class TierSnifferService {
     phase("pass");
     const autoMoves = await this.drainMoves();
     phase("moves");
-    if (report.calls > 0 || report.verdictsApplied > 0 || report.heldLowering > 0) {
+    if (report.calls > 0 || report.verdictsApplied > 0 || report.heldLowering > 0 || report.clearing.tried > 0) {
       const phases = Object.entries(phaseMs).map(([name, ms]) => `${name}=${Math.round(ms)}`).join(" ");
-      this.options.log?.(`Olympus tier sniffer: ${report.calls} call(s), ${report.verdictsApplied} verdict(s) applied ` + `(${report.resolvedPersonal} Personal, ${report.resolvedPrivate} Private, ${report.failSafePrivate} fail-safe Private), ` + `${report.cacheHits} from cache; ${report.heldLowering} lowering(s) held${report.stoppedBy ? `, stopped: ${report.stoppedBy}` : ""}; ` + `call_ms=${Math.round(report.callMs)} mean_call_ms=${report.calls ? Math.round(report.callMs / report.calls) : 0} queue_wait_max_ms=${Math.round(report.maxQueueWaitMs)}; ` + `promptChars=${report.promptChars} mean_promptChars=${report.calls ? Math.round(report.promptChars / report.calls) : 0} estimatedInputTokens=${report.estimatedInputTokens} mean_estimatedInputTokens=${report.calls ? Math.round(report.estimatedInputTokens / report.calls) : 0}; ` + `tick_ms=${Math.round(performance.now() - phaseStarted)} ${phases}${idleMs === undefined ? "" : ` idle_before=${Math.round(idleMs)}`}.`);
+      this.options.log?.(`Olympus tier sniffer: ${report.calls} call(s), ${report.verdictsApplied} verdict(s) applied ` + `(${report.resolvedPersonal} Personal, ${report.resolvedPrivate} Private, ${report.failSafePrivate} fail-safe Private), ` + `${report.cacheHits} from cache; ${report.heldLowering} lowering(s) held${report.stoppedBy ? `, stopped: ${report.stoppedBy}` : ""}; ` + `clearing: tried=${report.clearing.tried} cleared=${report.clearing.cleared} spot_checks=${report.clearing.spotChecks} skipped{${Object.entries(report.clearing.skipped).sort(([a], [b]) => a.localeCompare(b)).map(([reason, count]) => `${reason}=${count}`).join(",")}}; ` + `call_ms=${Math.round(report.callMs)} mean_call_ms=${report.calls ? Math.round(report.callMs / report.calls) : 0} queue_wait_max_ms=${Math.round(report.maxQueueWaitMs)}; ` + `promptChars=${report.promptChars} mean_promptChars=${report.calls ? Math.round(report.promptChars / report.calls) : 0} estimatedInputTokens=${report.estimatedInputTokens} mean_estimatedInputTokens=${report.calls ? Math.round(report.estimatedInputTokens / report.calls) : 0}; ` + `tick_ms=${Math.round(performance.now() - phaseStarted)} ${phases}${idleMs === undefined ? "" : ` idle_before=${Math.round(idleMs)}`}.`);
     }
     if (autoMoves && autoMoves.moved > 0)
       this.applyOwnerOverrides();
