@@ -193134,14 +193134,12 @@ class TierSnifferService {
       return true;
     } catch (error2) {
       if (error2 instanceof TierLedgerRaiseAbandonRefusedError) {
-        if (itemAbsentFromEveryStore(set2, recordIdentity2(record8))) {
-          try {
-            if (set2.ledger.retireAbsentMove(recordIdentity2(record8), { expectedGeneration: record8.generation })) {
-              report.retiredAbsent = (report.retiredAbsent ?? 0) + 1;
-              return true;
-            }
-          } catch {}
-        }
+        try {
+          if (itemAbsentFromEveryStore(set2, recordIdentity2(record8)) && set2.ledger.retireAbsentMove(recordIdentity2(record8), { expectedGeneration: record8.generation })) {
+            report.retiredAbsent = (report.retiredAbsent ?? 0) + 1;
+            return true;
+          }
+        } catch {}
         report.staleRaises = (report.staleRaises ?? 0) + 1;
       }
       return false;

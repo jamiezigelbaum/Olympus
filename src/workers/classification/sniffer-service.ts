@@ -1496,15 +1496,16 @@ export class TierSnifferService {
       if (error instanceof TierLedgerRaiseAbandonRefusedError) {
         // A raise whose item every store has dropped can never complete, and
         // there is nothing hidden to protect: forget it (#913).
-        if (itemAbsentFromEveryStore(set, recordIdentity(record))) {
-          try {
-            if (set.ledger.retireAbsentMove(recordIdentity(record), { expectedGeneration: record.generation })) {
-              report.retiredAbsent = (report.retiredAbsent ?? 0) + 1;
-              return true;
-            }
-          } catch {
-            // Left queued; the next pass looks again.
+        // A store that can't be opened or read makes the answer unknown: the
+        // raise stays queued and the rest of the pass goes on.
+        try {
+          if (itemAbsentFromEveryStore(set, recordIdentity(record))
+            && set.ledger.retireAbsentMove(recordIdentity(record), { expectedGeneration: record.generation })) {
+            report.retiredAbsent = (report.retiredAbsent ?? 0) + 1;
+            return true;
           }
+        } catch {
+          // Left queued; the next pass looks again.
         }
         report.staleRaises = (report.staleRaises ?? 0) + 1;
       }
