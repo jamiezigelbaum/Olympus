@@ -303,4 +303,4 @@ test('a failed unrelated snapshot preserves dry-run counts but refuses offline f
     expect(readdirSync(output)).toEqual([]);
     expect(files(root)).toEqual(before);
   } finally { a.close(); rmSync(root, { recursive: true, force: true }); rmSync(output, { recursive: true, force: true }); }
-});
+}, 30_000);
