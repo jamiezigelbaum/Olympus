@@ -149611,7 +149611,7 @@ function mountDashboardController(options) {
     const ownerDocument = root.ownerDocument;
     if (!force && !requested && ownerDocument.visibilityState === "hidden")
       return;
-    if (!force && (query("[data-messaging-input] input,[data-messaging-chats] input") || messagingTimers.size > 0 || query('.sheet.on input:not([type="hidden"]),.sheet.on textarea,.sheet.on select')))
+    if (!force && (query("[data-messaging-input] input,[data-messaging-chats] input") || messagingTimers.size > 0 || queryAll('.sheet.on input:not([type="hidden"]),.sheet.on textarea,.sheet.on select').some((field) => !field.closest("dialog:not([open])"))))
       return;
     if (!force && query("[data-remote-terms]:not([hidden])"))
       return;
@@ -150430,9 +150430,10 @@ function mountDashboardController(options) {
     const sourceId = Object.prototype.hasOwnProperty.call(sources, wanted) ? sources[wanted] : undefined;
     if (sourceId) {
       const row = queryAll("[data-source-id]").find((candidate) => candidate.dataset.sourceId === sourceId);
-      const addSheet = row?.closest("dialog[data-add-source]");
+      const addSheet = row?.closest("dialog");
       if (row && addSheet && typeof addSheet.showModal === "function") {
-        showSourceSetup(addSheet, row.closest("[data-source-setup]")?.dataset.sourceSetup);
+        if (addSheet.matches("[data-add-source]"))
+          showSourceSetup(addSheet, row.closest("[data-source-setup]")?.dataset.sourceSetup);
         if (!addSheet.open)
           addSheet.showModal();
       }
@@ -161842,6 +161843,9 @@ function sourceFacts(source) {
 function sourceStatus(source) {
   return source.connection.state === "reauth_required" || source.schedule?.consecutive_failures || source.answer_readiness?.state === "needs_attention" ? "attention" : "ok";
 }
+function needsSetupAgain(source) {
+  return CONNECTED_STATES.has(source.connection.state) && source.connection.action.kind !== "none" && source.connection.action.kind !== "archive_import" && !MESSAGING_SOURCES.has(source.source_id);
+}
 function connectedSourceRow(source, messagingLocalSession, off, kept = false) {
   const id = sourceDomId(source.source_id);
   const label = escapeHtml2(source.label);
@@ -161864,7 +161868,8 @@ function connectedSourceRow(source, messagingLocalSession, off, kept = false) {
   }
   if (kept)
     items.push(confirm("delete_source_data", `Delete what Olympus indexed from ${source.label}?`, `Olympus deletes what it indexed from ${source.label}. Your ${source.label} account and files are not touched. This cannot be undone.`, "Delete indexed data", true, "Delete indexed data"));
-  const needs = source.connection.state === "reauth_required" || kept ? `<button class="btn${kept ? "" : " primary"}" type="button" data-dialog-open="add-source" data-source-open="${escapeHtml2(source.source_id)}"${off}>${kept ? "Reconnect" : "Sign in"}</button>` : "";
+  const fixLabel = kept ? "Reconnect" : source.connection.state === "reauth_required" ? "Sign in" : needsSetupAgain(source) && ("label" in source.connection.action) ? dashboardActionLabel(source.connection.action.label) : "";
+  const needs = fixLabel ? `<button class="btn${kept ? "" : " primary"}" type="button" data-dialog-open="add-source" data-source-open="${escapeHtml2(source.source_id)}"${off}>${escapeHtml2(fixLabel)}</button>` : "";
   const facts = kept ? `${DASHBOARD_DISCONNECTED_DATA_KEPT} · ${(source.coverage?.indexed_items ?? 0).toLocaleString("en-US")} items` : sourceFacts(source);
   const row = `<div class="srcrow${kept ? " kept" : ""}" data-source-row="${escapeHtml2(source.source_id)}"${kept ? " data-source-kept" : ""}>${sourceLogoTile(source.source_id, kept ? "off" : sourceStatus(source))}` + `<div class="srcmain"><b>${label}</b>${facts ? `<span class="pnote"> · ${escapeHtml2(facts)}</span>` : ""}</div>` + `<div class="srcact">${needs}${items.length ? rowMenu(source.label, items.join("")) : ""}</div></div>`;
   return { row, dialogs: dialogs.join("") };
@@ -161876,10 +161881,10 @@ function renderDashboardConnectPage(view3, options) {
   const off = unlocked(options) ? "" : " disabled";
   const sources = view3.sources.filter((source) => source.source_id !== "venice.api");
   const connected2 = sources.filter((source) => CONNECTED_STATES.has(source.connection.state));
-  const setupable = sources.filter((source) => source.connection.state === "reauth_required" || !CONNECTED_STATES.has(source.connection.state) && (source.connection.action.kind !== "none" || MESSAGING_SOURCES.has(source.source_id)));
+  const setupable = sources.filter((source) => source.connection.state === "reauth_required" || needsSetupAgain(source) || !CONNECTED_STATES.has(source.connection.state) && (source.connection.action.kind !== "none" || MESSAGING_SOURCES.has(source.source_id)));
   const kept = sources.filter((source) => !CONNECTED_STATES.has(source.connection.state) && (source.coverage?.indexed_items ?? 0) > 0 && source.connection.action.kind !== "archive_import");
   const rows = connected2.map((source) => connectedSourceRow(source, options?.messagingLocalSession === true, off)).concat(kept.map((source) => connectedSourceRow(source, false, off, true)));
-  const tiles = setupable.filter((source) => source.connection.state !== "reauth_required").map((source) => `<button class="srctile" type="button" data-source-pick="${escapeHtml2(source.source_id)}">${sourceLogoTile(source.source_id)}<span><b>${escapeHtml2(source.label)}</b><span class="pnote">${escapeHtml2(SOURCE_TILE_LINES[source.source_id] ?? "")}</span></span></button>`).join("");
+  const tiles = setupable.filter((source) => !CONNECTED_STATES.has(source.connection.state)).map((source) => `<button class="srctile" type="button" data-source-pick="${escapeHtml2(source.source_id)}">${sourceLogoTile(source.source_id)}<span><b>${escapeHtml2(source.label)}</b><span class="pnote">${escapeHtml2(SOURCE_TILE_LINES[source.source_id] ?? "")}</span></span></button>`).join("");
   const panels = setupable.map((source) => `<div class="srcsetup" data-source-setup="${escapeHtml2(source.source_id)}" hidden><button class="btn plainlink" type="button" data-source-back>← All sources</button>` + renderSetupRow(source, view3, blocked, basePath, options?.messagingLocalSession === true) + sourceSupportBlock(source) + "</div>").join("");
   const sheet = '<dialog class="srcsheet" id="add-source" data-add-source data-closable aria-labelledby="add-source-title">' + '<div class="adddialoghead"><h3 id="add-source-title">Add a source</h3><button class="btn iconbtn" type="button" data-dialog-close aria-label="Close">✕</button></div>' + `<div data-source-catalog><input class="keyfield srcsearch" type="search" data-source-search placeholder="Search sources…" aria-label="Search sources">` + (tiles ? `<div class="srctiles">${tiles}</div>` : `<p class="pnote">${escapeHtml2(W.connect.empty)}</p>`) + `<p class="pnote">Sources you've already connected aren't listed.</p></div>` + panels + "</dialog>";
   const body = [

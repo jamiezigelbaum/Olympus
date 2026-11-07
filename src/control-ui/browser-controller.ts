@@ -1095,7 +1095,7 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
     if (!force && !presented) return;
     const ownerDocument = root.ownerDocument;
     if (!force && !requested && ownerDocument.visibilityState === 'hidden') return;
-    if (!force && (query('[data-messaging-input] input,[data-messaging-chats] input') || messagingTimers.size > 0 || query('.sheet.on input:not([type="hidden"]),.sheet.on textarea,.sheet.on select'))) return;
+    if (!force && (query('[data-messaging-input] input,[data-messaging-chats] input') || messagingTimers.size > 0 || queryAll('.sheet.on input:not([type="hidden"]),.sheet.on textarea,.sheet.on select').some((field) => !field.closest('dialog:not([open])')))) return;
     // The owner is reading the agreement: a poll must not close it under them.
     if (!force && query('[data-remote-terms]:not([hidden])')) return;
     // Nor a confirmation or Add a source while it is open; closing it reads again.
@@ -1742,9 +1742,10 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
     if (sourceId) {
       const row = queryAll<HTMLElement>('[data-source-id]').find((candidate) => candidate.dataset.sourceId === sourceId);
       // On Sources a source's setup sits in Add a source: open it there first.
-      const addSheet = row?.closest<HTMLDialogElement>('dialog[data-add-source]');
+      // A connected Telegram or WhatsApp card sits in its pairing dialog instead.
+      const addSheet = row?.closest<HTMLDialogElement>('dialog');
       if (row && addSheet && typeof addSheet.showModal === 'function') {
-        showSourceSetup(addSheet, row.closest<HTMLElement>('[data-source-setup]')?.dataset.sourceSetup);
+        if (addSheet.matches('[data-add-source]')) showSourceSetup(addSheet, row.closest<HTMLElement>('[data-source-setup]')?.dataset.sourceSetup);
         if (!addSheet.open) addSheet.showModal();
       }
       if (row) {
