@@ -8196,6 +8196,9 @@ WorkingDirectory=${workingDirectory}
 EnvironmentFile=-${input.envPath}
 Environment=OLYMPUS_MANAGED_WORKER=1
 ExecStart=${command.map(systemdExecArg).join(" ")}
+# A stop's SIGTERM ends in exit 143 when a pass outlives the shutdown deadline
+# (src/core/worker-shutdown.ts): a clean stop, not a failure (#953).
+SuccessExitStatus=143
 Restart=on-failure
 RestartSec=5
 StandardOutput=append:${input.paths.logPath}
