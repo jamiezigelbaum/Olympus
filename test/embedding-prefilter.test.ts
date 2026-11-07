@@ -30,10 +30,10 @@ function copy(n: number, sign = 1): ConnectorStoreItemCopy {
     trustTier: 'S4', owners: [], chunks: [{ chunkIndex: 0, boundedText: ownText, contentHash: 'fixture', embeddingInputHash: 'fixture' }],
     vectors: [{ chunkIndex: 0, modelId: MODEL, contentHash: 'fixture', embedding: new Uint8Array(vector.buffer) }], vectorAuthorities: [] };
 }
-function fixture(options: { trained?: boolean; memory?: boolean; bias?: number; random?: () => number; enabled?: () => boolean; routed?: boolean; stateLedger?: TierLedger; now?: () => number; monotonicNow?: () => number; log?: (line: string) => void } = {}) {
+function fixture(options: { trained?: boolean; memory?: boolean; bias?: number; random?: () => number; enabled?: () => boolean; routed?: boolean; stateLedger?: TierLedger; now?: () => number; snifferNow?: () => Date; monotonicNow?: () => number; log?: (line: string) => void } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'prefilter-synthetic-'));
   const ledger = new TierLedger({ dbPath: options.memory ? ':memory:' : join(dir, 'tiers.sqlite') });
-  const sniffer = new TierSnifferStore({ dbPath: options.memory ? ':memory:' : join(dir, 'sniffer.sqlite') });
+  const sniffer = new TierSnifferStore({ dbPath: options.memory ? ':memory:' : join(dir, 'sniffer.sqlite'), ...(options.snifferNow ? { now: options.snifferNow } : {}) });
   const modelDir = embeddingPrefilterDirectory(options.stateLedger?.dbPath ?? ledger.dbPath);
   if (options.trained !== false) {
     mkdirSync(modelDir, { mode: 0o755 });
@@ -776,7 +776,8 @@ test.each(['legacy', 'receipt'] as const)('a historical metadata raise never rep
 });
 
 test('legacy names-only verdict cannot label a retained Personal body after renaming', () => {
-  const f = fixture({ trained: false, memory: true });
+  let now = new Date('2026-11-01T00:00:00.000Z');
+  const f = fixture({ trained: false, memory: true, snifferNow: () => now });
   trainingRow(f, 0, [], 'other:1.00', true);
   const original = f.ledger.getCurrent(subject(0))!;
   f.ledger.recordDecision(subject(0), { ...original, state: 'current', snifferId: judge, decidedBy: 'sniffer',
@@ -788,6 +789,7 @@ test('legacy names-only verdict cannot label a retained Personal body after rena
     withRecordedContent(names(title), f.ledger.getCurrent(subject(0))), {
       copies: [{ corpusId: 'private', trustDomain: 'secure_local', layers: 'both' }], embedHold: false,
     });
+  now = new Date('2026-11-02T00:00:00.000Z');
   const title = 'Bank GB82 WEST 1234 5698 7654 32';
   names(title);
   const question = f.sniffer.questionFor(subject(0), 'metadata')!;
@@ -806,18 +808,24 @@ test('legacy names-only verdict cannot label a retained Personal body after rena
   expect(drops).toEqual(['legacy_verdict_content']);
 });
 
-test('production legacy reasons and digest accept the subject model verdict without content_hash', async () => {
+test.each(['bound', 'missing', 'stale'] as const)('legacy content labels require exact cached content binding: %s', async binding => {
   const f = fixture({ trained: false, memory: true, log: () => {} });
-  trainingRow(f, 0);
-  trainingRow(f, 1);
-  // Pre-#982 rows have content:sniffer:<id>:<code> and a digest, no tier receipt.
   for (const n of [0, 1]) {
+    trainingRow(f, n, [], 'other:1.00', binding === 'bound');
+    if (binding === 'stale') f.sniffer.markFinalModelContent({ materialHash: `synthetic-material-${n}-${n}`,
+      modelId: 'fixture', promptVersion: SNIFFER_PROMPT_VERSION, mapRevision: 'none' }, normalizedContentHash('Different body'));
     const row = f.ledger.getCurrent(subject(n))!;
     f.ledger.recordDecision(subject(n), { ...row, state: 'current', snifferId: judge, decidedBy: 'sniffer',
       reasons: row.reasons.filter(reason => !reason.startsWith('content:judge_verdict:')) });
+    const drops: string[] = [];
+    const example = prefilterTrainingExample(f.ledger.getCurrent(subject(n))!, judge,
+      { ledger: f.ledger, sniffer: f.sniffer, copyFor: () => copy(n) }, reason => { drops.push(reason); return undefined; });
+    if (binding === 'bound') expect(example).toMatchObject({ private: n === 1, provenance: 'legacy_sniffer' });
+    else expect(example).toBeUndefined();
+    expect(drops).toEqual(binding === 'bound' ? [] : ['legacy_verdict_content']);
   }
   await f.filter.prepare(judge);
-  expect(trainingState(f)).toMatchObject({ outcome: 'too_few', counts: [1, 1] });
+  expect(trainingState(f)).toMatchObject({ outcome: 'too_few', counts: binding === 'bound' ? [1, 1] : [0, 0] });
 });
 
 test('legacy metadata raises and differing subject verdict tiers never label', () => {
@@ -838,7 +846,7 @@ test('an old zero-example attempt restarts immediately instead of retaining its 
   const old = trainingState(f);
   delete old.labelVersion;
   f.ledger.writeMeta('embedding-prefilter:training-v1', JSON.stringify(old));
-  trainingRow(f, 0); trainingRow(f, 1);
+  trainingRow(f, 0, [], 'other:1.00', true); trainingRow(f, 1, [], 'other:1.00', true);
   for (const n of [0, 1]) {
     const row = f.ledger.getCurrent(subject(n))!;
     f.ledger.recordDecision(subject(n), { ...row, state: 'current', snifferId: judge, decidedBy: 'sniffer',
@@ -912,7 +920,7 @@ test.each(['secrets', 'external secrets', 'copy', 'legacy verdict'] as const)(
       copyChangeMarker: () => String(copyRevision), monotonicNow: () => clock, log: () => {} });
     let currentCopy = (n: number) => copy(n);
     let copyRevision = 0;
-    for (let n = 0; n < 4000; n++) trainingRow(f, n);
+    for (let n = 0; n < 4000; n++) trainingRow(f, n, [], 'other:1.00', change === 'legacy verdict' && n === 0);
     if (change === 'legacy verdict') {
       const row = f.ledger.getCurrent(subject(0))!;
       f.ledger.recordDecision(subject(0), { ...row, state: 'current', snifferId: judge, decidedBy: 'sniffer',
@@ -1106,7 +1114,7 @@ test('each training drop check has a stable first-failure counter', () => {
     ['judge_code_unsafe', {}, valid, 'fail_safe:test'], ['judge_duplicate'],
     ['content_reason_unknown', {}, valid, 'content:unknown:test'], ['judge_missing'], ['copy_missing'],
     ['digest_missing'], ['verdict_missing'], ['legacy_store_missing'], ['legacy_verdict_missing'],
-    ['legacy_verdict_ambiguous'], ['legacy_verdict_time'], ['legacy_verdict_tier'], ['legacy_verdict_unreadable'],
+    ['legacy_verdict_ambiguous'], ['legacy_verdict_time'], ['legacy_verdict_tier'], ['legacy_verdict_content'], ['legacy_verdict_unreadable'],
     ['chunks_empty'], ['media_present'], ['secret_material'],
     ['vector_count'], ['vector_match'], ['vector_bytes'], ['vector_nonfinite'], ['vector_zero'],
   ];

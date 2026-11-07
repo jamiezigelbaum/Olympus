@@ -10525,23 +10525,39 @@ class TierSnifferStore {
       let labels = this.trainingReads.get(modelId);
       if (!labels) {
         labels = new Map;
-        const rows = iterateRows(this.db, `SELECT model_subject, tier, decided_at FROM sniffer_verdicts
+        const rows = iterateRows(this.db, `SELECT model_subject, tier, decided_at, content_hash FROM sniffer_verdicts
           WHERE model_id = ? AND fail_safe = 0 AND model_subject IS NOT NULL`, modelId);
         for (const row2 of rows) {
           const prior = labels.get(row2.model_subject);
           if (!prior || row2.decided_at > prior.decidedAt)
-            labels.set(row2.model_subject, { tier: row2.tier, decidedAt: row2.decided_at, ambiguous: false });
-          else if (row2.decided_at === prior.decidedAt && row2.tier !== prior.tier)
-            prior.ambiguous = true;
+            labels.set(row2.model_subject, {
+              tier: row2.tier,
+              decidedAt: row2.decided_at,
+              ambiguous: false,
+              ...row2.content_hash ? { contentHash: row2.content_hash } : {}
+            });
+          else if (row2.decided_at === prior.decidedAt) {
+            if (row2.tier !== prior.tier)
+              prior.ambiguous = true;
+            if (row2.content_hash !== prior.contentHash)
+              delete prior.contentHash;
+          }
         }
         this.trainingReads.set(modelId, labels);
       }
       return labels.get(key);
     }
-    const row = this.db.query(`SELECT MIN(tier) AS tier, decided_at, COUNT(DISTINCT tier) AS tiers
+    const row = this.db.query(`SELECT MIN(tier) AS tier, decided_at, COUNT(DISTINCT tier) AS tiers,
+        CASE WHEN COUNT(content_hash) = COUNT(*) AND COUNT(DISTINCT content_hash) = 1
+          THEN MIN(content_hash) END AS content_hash
       FROM sniffer_verdicts WHERE model_subject = ? AND model_id = ? AND fail_safe = 0
       GROUP BY decided_at ORDER BY decided_at DESC LIMIT 1`).get(key, modelId);
-    return row ? { tier: row.tier, decidedAt: row.decided_at, ambiguous: row.tiers !== 1 } : undefined;
+    return row ? {
+      tier: row.tier,
+      decidedAt: row.decided_at,
+      ambiguous: row.tiers !== 1,
+      ...row.content_hash ? { contentHash: row.content_hash } : {}
+    } : undefined;
   }
   changeMarker() {
     const own = this.db.query("SELECT total_changes() AS changes").get();
@@ -74631,6 +74647,8 @@ function prefilterTrainingExample(row, judge2, options, reject = () => {
       return reject("legacy_verdict_time");
     if ((verdict.tier === "personal" ? "private" : verdict.tier === "private" ? "secure" : undefined) !== row.contentTier)
       return reject("legacy_verdict_tier");
+    if (verdict.contentHash !== normalizedContentHash(copy.chunks.map((chunk) => chunk.boundedText).join("")))
+      return reject("legacy_verdict_content");
     provenance = "legacy_sniffer";
   }
   const vector = prefilterVector(copy, reject);

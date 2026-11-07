@@ -596,12 +596,17 @@ the receipt. For pre-#982 rows with no tier receipt (2026-11-07), equivalent
 provenance comes from the latest non-fail-safe `sniffer_verdicts` answer for
 that exact subject and the ledger row's model. Its own tier must equal the
 content tier and its timestamp must be no later than the row's decision.
+The latest answer must also carry the final-content hash matching the complete
+stored text. Missing hashes, metadata-only answers, stale hashes and equal-time
+answers with differing or missing bindings abstain as `legacy_verdict_content`;
+no older answer is substituted.
 Conflicting equal-time answers, absent subject/model evidence, unreadable old
 schemas, later answers and mismatched modern receipts all abstain under named
 rejection counters. A historical metadata raise retained in the content tier
 cannot replace the judge's own label. Live lookups use a subject/model/time
 index; read-only diagnostic snapshots of older caches scan once per model and
-retain only subject hashes, tiers and times, without migrating the cache.
+retain only subject hashes, tiers, times and final-content hashes, without
+migrating the cache.
 Old training attempts restart their scan immediately under the new label
 version, including attempts waiting after finding zero examples. Verdict-cache
 writes also invalidate a sliced final validation before weights are published.

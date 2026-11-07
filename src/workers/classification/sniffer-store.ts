@@ -48,6 +48,8 @@ export interface TrainingSnifferVerdict {
   tier: SnifferTier;
   decidedAt: string;
   ambiguous: boolean;
+  /** Present only when every latest answer is bound to the same final content. */
+  contentHash?: string;
 }
 
 export interface SnifferQuestion {
@@ -205,7 +207,9 @@ export class TierSnifferStore {
 
   /** Latest real answer on this subject and model, independent of content_hash.
    * Old offline snapshots lack the lookup index: scan once per model, never once per item.
-   * Equal-time conflicting answers cannot prove a label. Later answers are returned too:
+   * Equal-time conflicting answers cannot prove a label. Content binding survives
+   * only when every latest answer carries the same final-content hash. Later answers
+   * are returned too:
    * the caller must reject them rather than select an older, convenient answer.
    */
   trainingVerdict(subject: TierSnifferSubject, modelId: string): TrainingSnifferVerdict | undefined {
@@ -214,25 +218,32 @@ export class TierSnifferStore {
       let labels = this.trainingReads.get(modelId);
       if (!labels) {
         labels = new Map();
-        const rows = iterateRows<{ model_subject: string; tier: SnifferTier; decided_at: string }>(this.db,
-          `SELECT model_subject, tier, decided_at FROM sniffer_verdicts
+        const rows = iterateRows<{ model_subject: string; tier: SnifferTier; decided_at: string; content_hash: string | null }>(this.db,
+          `SELECT model_subject, tier, decided_at, content_hash FROM sniffer_verdicts
           WHERE model_id = ? AND fail_safe = 0 AND model_subject IS NOT NULL`, modelId);
         for (const row of rows) {
           const prior = labels.get(row.model_subject);
           if (!prior || row.decided_at > prior.decidedAt) labels.set(row.model_subject,
-            { tier: row.tier, decidedAt: row.decided_at, ambiguous: false });
-          else if (row.decided_at === prior.decidedAt && row.tier !== prior.tier) prior.ambiguous = true;
+            { tier: row.tier, decidedAt: row.decided_at, ambiguous: false,
+              ...(row.content_hash ? { contentHash: row.content_hash } : {}) });
+          else if (row.decided_at === prior.decidedAt) {
+            if (row.tier !== prior.tier) prior.ambiguous = true;
+            if (row.content_hash !== prior.contentHash) delete prior.contentHash;
+          }
         }
         this.trainingReads.set(modelId, labels);
       }
       return labels.get(key);
     }
-    const row = this.db.query(`SELECT MIN(tier) AS tier, decided_at, COUNT(DISTINCT tier) AS tiers
+    const row = this.db.query(`SELECT MIN(tier) AS tier, decided_at, COUNT(DISTINCT tier) AS tiers,
+        CASE WHEN COUNT(content_hash) = COUNT(*) AND COUNT(DISTINCT content_hash) = 1
+          THEN MIN(content_hash) END AS content_hash
       FROM sniffer_verdicts WHERE model_subject = ? AND model_id = ? AND fail_safe = 0
       GROUP BY decided_at ORDER BY decided_at DESC LIMIT 1`).get(key, modelId) as {
-        tier: SnifferTier; decided_at: string; tiers: number;
+        tier: SnifferTier; decided_at: string; tiers: number; content_hash: string | null;
       } | null;
-    return row ? { tier: row.tier, decidedAt: row.decided_at, ambiguous: row.tiers !== 1 } : undefined;
+    return row ? { tier: row.tier, decidedAt: row.decided_at, ambiguous: row.tiers !== 1,
+      ...(row.content_hash ? { contentHash: row.content_hash } : {}) } : undefined;
   }
 
   /** Fence sliced training against verdict writes on this or another connection. */

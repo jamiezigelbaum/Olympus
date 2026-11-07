@@ -7,7 +7,7 @@ import { ingestionTurn } from '../control-path-headroom.ts';
 import { SNIFFER_RECORD_HELD_CODE_PREFIX, snifferMaterialCarriesSecret } from './sniffer.ts';
 import type { SnifferQuestion, TierSnifferStore } from './sniffer-store.ts';
 import { copyServingLayer, tierLedgerIdentityKey, type TierLedger, type TierLedgerRecord, type TierPlacementPlan } from './tier-ledger.ts';
-import { TIER_CLASSIFIER_VERSION, PERSONAL_FIRST_REASON, HELD_UNTIL_JUDGED_REASON, contentDigestReason, contentJudgeVerdictReason, type TierDecision, type TierSnifferSubject } from './tier-classifier.ts';
+import { TIER_CLASSIFIER_VERSION, PERSONAL_FIRST_REASON, HELD_UNTIL_JUDGED_REASON, contentDigestReason, contentJudgeVerdictReason, normalizedContentHash, type TierDecision, type TierSnifferSubject } from './tier-classifier.ts';
 import { EMBEDDING_PREFILTER_MODEL_ID, EMBEDDING_PREFILTER_DIMENSIONS, EMBEDDING_PREFILTER_MIN_PER_CLASS,
   trainLogisticSteps, privateProbability, type LogisticModel, type LogisticExample } from './embedding-logistic.ts';
 
@@ -63,7 +63,7 @@ export const PREFILTER_TRAINING_REJECTIONS = [
   'metadata_secret', 'override_reason', 'judge_code_empty', 'judge_code_held', 'judge_code_unsafe',
   'judge_duplicate', 'content_reason_unknown', 'judge_missing', 'copy_missing', 'digest_missing',
   'verdict_missing', 'legacy_store_missing', 'legacy_verdict_missing', 'legacy_verdict_ambiguous',
-  'legacy_verdict_time', 'legacy_verdict_tier', 'legacy_verdict_unreadable',
+  'legacy_verdict_time', 'legacy_verdict_tier', 'legacy_verdict_content', 'legacy_verdict_unreadable',
   'chunks_empty', 'media_present', 'secret_material', 'vector_count',
   'vector_match', 'vector_bytes', 'vector_nonfinite', 'vector_zero',
 ] as const;
@@ -178,6 +178,8 @@ export function prefilterTrainingExample(row: TierLedgerRecord, judge: string, o
     if (!Number.isFinite(time) || !Number.isFinite(decisionTime) || time > decisionTime) return reject('legacy_verdict_time');
     if ((verdict.tier === 'personal' ? 'private' : verdict.tier === 'private' ? 'secure' : undefined) !== row.contentTier)
       return reject('legacy_verdict_tier');
+    if (verdict.contentHash !== normalizedContentHash(copy.chunks.map(chunk => chunk.boundedText).join('')))
+      return reject('legacy_verdict_content');
     provenance = 'legacy_sniffer';
   }
   const vector = prefilterVector(copy, reject);

@@ -11,7 +11,7 @@ import { LocalConnectorStore } from '../src/workers/connector-store/local-index.
 import { TierLedger } from '../src/workers/classification/tier-ledger.ts';
 import { TierSnifferStore } from '../src/workers/classification/sniffer-store.ts';
 import { tierSnifferPathForLedger } from '../src/workers/classification/tier-ledger-path.ts';
-import { classifyItemTiers, contentDigestReason, contentJudgeVerdictReason } from '../src/workers/classification/tier-classifier.ts';
+import { classifyItemTiers, contentDigestReason, contentJudgeVerdictReason, normalizedContentHash } from '../src/workers/classification/tier-classifier.ts';
 import { EMBEDDING_PREFILTER_DIMENSIONS as D, EMBEDDING_PREFILTER_MODEL_ID as MODEL } from '../src/workers/classification/embedding-logistic.ts';
 import { runPrefilterTrainingDryRun, snapshotPrefilterDatabase } from '../src/workers/classification/prefilter-training-dry-run.ts';
 
@@ -34,7 +34,7 @@ async function fixture(root: string, name: string) {
   const store = new LocalConnectorStore({ dbPath, corpusId: `secure_local.${name}`, family: 'file', trustDomain: 'secure_local', tierLedger: null });
   const text = 'Synthetic picnic sandwiches for Sunday.';
   const judge = 'synthetic-judge';
-  const items = Array.from({ length: 10 }, (_, n) => ({
+  const items = Array.from({ length: 11 }, (_, n) => ({
     identity: { family: 'file' as const, provider: 'fixture', accountScope: 'fixture-account', providerItemId: String(n), localItemId: String(n) },
     mimeType: 'text/plain', content: { kind: 'text' as const, text }, metadata: { title: 'fixture-name' }, fetchedAt: new Date().toISOString(),
   }));
@@ -60,9 +60,11 @@ async function fixture(root: string, name: string) {
     if (n === 3 || n >= 7) reasons.pop(); // production legacy reason shape
     if (n >= 7) sniffer.putVerdict({ materialHash: `synthetic-${n}`, modelId: 'fixture-model', promptVersion: 'fixture', mapRevision: 'none' },
       { tier: n === 8 ? 'private' : 'personal', category: 'fixture', confidence: 1, failSafe: false }, subject);
+    if (n === 7 || n === 10) sniffer.markFinalModelContent({ materialHash: `synthetic-${n}`,
+      modelId: 'fixture-model', promptVersion: 'fixture', mapRevision: 'none' }, normalizedContentHash(n === 7 ? text : 'Different body'));
     if (n === 4) reasons.push('content:unknown:synthetic');
     const decision = { ...classifyItemTiers({ subject, signals: {}, text }), state: 'current' as const, decidedBy: 'sniffer' as const,
-      modelId: 'fixture-model', metadataTier: 'private' as const, contentTier: (n === 9 ? 'secure' : tier) as 'private' | 'secure',
+      modelId: 'fixture-model', metadataTier: 'private' as const, contentTier: (n === 8 || n === 9 ? 'secure' : tier) as 'private' | 'secure',
       contentRead: true, contentPending: false, metadataPending: false, reasons };
     ledger.recordRoutedPlacement(subject, decision, { copies: [{ corpusId: store.corpusId, trustDomain: 'secure_local', layers: 'both' }], embedHold: false });
     ledger.markJudged(subject, { engineVersion: 'fixture', snifferId: judge });
@@ -95,9 +97,9 @@ test('counts exact training decisions, includes live WAL rows, and changes no in
     expect(report.errors).toBe(0);
     expect(report.ledgers).toHaveLength(2);
     for (const ledger of report.ledgers) {
-      expect(ledger.rows_read).toBe(10);
+      expect(ledger.rows_read).toBe(11);
       expect(ledger).toMatchObject({ examples: { personal: 2, private: 1 }, provenance: { judge_receipt: 2, legacy_sniffer: 1 } });
-      expect(ledger.rejections).toMatchObject({ digest_missing: 1, legacy_verdict_missing: 1, legacy_verdict_tier: 2, content_reason_unknown: 1, vector_count: 1, copy_missing: 1 });
+      expect(ledger.rejections).toMatchObject({ digest_missing: 1, legacy_verdict_missing: 1, legacy_verdict_tier: 1, legacy_verdict_content: 2, content_reason_unknown: 1, vector_count: 1, copy_missing: 1 });
       expect(ledger.examples.personal + ledger.examples.private + Object.values(ledger.rejections).reduce((a, b) => a + b, 0)).toBe(ledger.rows_read);
     }
     const limited = runPrefilterTrainingDryRun({ dataDir: root, rowLimit: 1 });
@@ -198,11 +200,33 @@ test('latest subject/model answers exclude fail-safes, expose ties and later tim
     now = new Date('2026-11-02T00:00:00.000Z');
     put('tied', 'private');
     expect(writer.trainingVerdict(subject, 'model')?.ambiguous).toBe(true);
+    const boundSubject = { ...subject, providerItemId: 'bound' };
+    put('bound', 'personal', false, 'model', boundSubject);
+    writer.markFinalModelContent({ ...key, materialHash: 'bound' }, 'body-hash');
+    expect(writer.trainingVerdict(boundSubject, 'model')?.contentHash).toBe('body-hash');
+    // Same-time, same-tier metadata answers cannot borrow a content binding.
+    put('metadata-tie', 'personal', false, 'model', boundSubject);
+    expect(writer.trainingVerdict(boundSubject, 'model')?.contentHash).toBeUndefined();
+    const conflictSubject = { ...subject, providerItemId: 'conflict' };
+    for (const [id, hash] of [['one', 'body-hash'], ['two', 'different-hash']] as const) {
+      put(id, 'personal', false, 'model', conflictSubject);
+      writer.markFinalModelContent({ ...key, materialHash: id }, hash);
+    }
+    expect(writer.trainingVerdict(conflictSubject, 'model')?.contentHash).toBeUndefined();
+    const stableSubject = { ...subject, providerItemId: 'stable' };
+    for (const id of ['stable-one', 'stable-two']) {
+      put(id, 'private', false, 'model', stableSubject);
+      writer.markFinalModelContent({ ...key, materialHash: id }, 'same-body-hash');
+    }
+    expect(writer.trainingVerdict(stableSubject, 'model')?.contentHash).toBe('same-body-hash');
     const sql = new Database(writer.dbPath);
     sql.exec('DROP INDEX sniffer_training_subject');
     sql.close();
     const reader = new TierSnifferStore({ dbPath: writer.dbPath, readOnly: true });
-    try { expect(reader.trainingVerdict(subject, 'model')).toEqual(writer.trainingVerdict(subject, 'model')); }
+    try {
+      for (const who of [subject, boundSubject, conflictSubject, stableSubject])
+        expect(reader.trainingVerdict(who, 'model')).toEqual(writer.trainingVerdict(who, 'model'));
+    }
     finally { reader.close(); }
   } finally { writer.close(); rmSync(root, { recursive: true, force: true }); }
 });
