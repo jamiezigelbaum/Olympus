@@ -11,7 +11,9 @@ import { renderModelSetup } from '../src/workers/dashboard/model-setup.ts';
 import { openFreshDashboard } from '../scripts/release-check/fresh-dashboard.ts';
 import type { Machine } from '../scripts/release-check/machine.ts';
 
-for (const losesSave of [false, true]) test(`first-run dashboard ${losesSave ? 'rejects a choice lost on reload' : 'saves the Recommended choice through its normal form before sources'}`, async () => {
+const REFUSAL = 'Choose this on the computer in an unlocked dashboard.';
+for (const mode of ['saves', 'loses', 'refused'] as const) test(`first-run dashboard ${mode === 'loses' ? 'rejects a choice lost on reload' : mode === 'refused' ? 'reports the dashboard\'s own refusal' : 'saves the Recommended choice through its normal form before sources'}`, async () => {
+  const losesSave = mode === 'loses';
   const dir = mkdtempSync(join(tmpdir(), 'fresh-dashboard-'));
   const path = join(dir, 'sovereignty.json');
   writeFileSync(path, JSON.stringify(createPendingPrivacyPolicy()));
@@ -24,6 +26,8 @@ for (const losesSave of [false, true]) test(`first-run dashboard ${losesSave ? '
     const names = ['window', 'document', 'navigator', 'Element', 'HTMLElement', 'HTMLFormElement', 'HTMLInputElement', 'HTMLTextAreaElement', 'HTMLSelectElement', 'HTMLButtonElement', 'ShadowRoot', 'Event', 'MouseEvent', 'FormData', 'CSS', 'getComputedStyle'] as const;
     return new Function(...names, `return ${expression}`)(...names.map(name => name === 'window' ? window : name === 'getComputedStyle' ? window!.getComputedStyle.bind(window) : window![name]));
   };
+  const host = new Window({ url: 'http://127.0.0.1:8010/' });
+  const hostEvaluate = (expression: string): unknown => new Function('window', 'document', `return ${expression}`)(host, host.document);
   let keysVisits = 0;
   let navigationFailures = 0;
   let loader = 0;
@@ -49,6 +53,7 @@ for (const losesSave of [false, true]) test(`first-run dashboard ${losesSave ? '
       transport: { control: async (params: { action: string; choice: string }) => {
         calls.push(params.action);
         if (params.action !== 'save_first_run_privacy') throw new Error('unexpected control');
+        if (mode === 'refused') return { status: 403, body: { ok: false, error: { code: 'mac_dashboard_only', message: REFUSAL } } };
         const saved = saveFirstRunPrivacyChoice(path, params.choice as SovereigntyPresetName);
         expect(saved.ok && saved.changed).toBe(true);
         return { status: 200, body: { ok: true } };
@@ -68,7 +73,8 @@ for (const losesSave of [false, true]) test(`first-run dashboard ${losesSave ? '
         if (method === 'Target.createTarget') result = { targetId: 'dash' };
         if (method === 'Target.attachToTarget') result = { sessionId: 's' };
         if (method === 'Target.closeTarget') events.push('tab.close');
-        if (method === 'Runtime.enable') event('Runtime.executionContextCreated', { context: { id: 1, auxData: { isDefault: true } } });
+        // Context 2 stands for the host page (listed first), which never holds the panel's forms.
+        if (method === 'Runtime.enable') for (const id of [2, 1]) event('Runtime.executionContextCreated', { context: { id, auxData: { isDefault: true } } });
         if (method === 'Page.navigate') {
           events.push('navigate');
           if (calls.length === 1 && keysVisits === 1 && navigationFailures === 0) {
@@ -78,12 +84,12 @@ for (const losesSave of [false, true]) test(`first-run dashboard ${losesSave ? '
           } else {
             documentAt(params.url);
             event('Runtime.executionContextsCleared', {});
-            event('Runtime.executionContextCreated', { context: { id: 1, auxData: { isDefault: true } } });
+            for (const id of [2, 1]) event('Runtime.executionContextCreated', { context: { id, auxData: { isDefault: true } } });
             event('Page.frameNavigated', { frame: { url: params.url, loaderId: String(++loader) } });
             result = { loaderId: String(loader) };
           }
         }
-        if (method === 'Runtime.evaluate') result = { result: { value: await evaluate(params.expression) } };
+        if (method === 'Runtime.evaluate') result = { result: { value: params.contextId === 2 ? hostEvaluate(params.expression) : await evaluate(params.expression) } };
         ws.send(JSON.stringify({ id, result }));
       } catch (error) { ws.send(JSON.stringify({ id, error: { message: String(error) } })); }
     } },
@@ -103,6 +109,13 @@ for (const losesSave of [false, true]) test(`first-run dashboard ${losesSave ? '
   try {
     dashboard = await openFreshDashboard(machine, '127.0.0.1:9333', { timeoutMs: 300, pollMs: 1 });
     expect(events.indexOf('bridge.start')).toBeLessThan(events.indexOf('navigate'));
+    if (mode === 'refused') {
+      await expect(dashboard.privacyChoice()).rejects.toThrow(/^first-run privacy choice was not saved: the dashboard said "[^"]+"$/);
+      expect(isPendingPrivacyPolicy(policy())).toBe(true);
+      expect(calls).toEqual(['save_first_run_privacy']);
+      await dashboard.close(); dashboard = undefined;
+      return;
+    }
     if (losesSave) await expect(dashboard.privacyChoice()).rejects.toThrow('did not persist after reload');
     else {
       expect(await dashboard.privacyChoice()).toBe('Local models with Venice fallback (local-first, Recommended) saved and verified after reload');
@@ -115,5 +128,5 @@ for (const losesSave of [false, true]) test(`first-run dashboard ${losesSave ? '
     expect(events).not.toContain('bridge.stop');
     await dashboard.close(); dashboard = undefined;
     expect(events.slice(-3)).toEqual(['tab.close', 'tunnel.close', 'bridge.stop']);
-  } finally { await dashboard?.close(); controller?.dispose(); window?.close(); server.stop(true); rmSync(dir, { recursive: true, force: true }); }
+  } finally { await dashboard?.close(); controller?.dispose(); window?.close(); host.close(); server.stop(true); rmSync(dir, { recursive: true, force: true }); }
 });
