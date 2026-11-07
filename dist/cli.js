@@ -22305,13 +22305,19 @@ class TierLedger {
     `).all(after ? 1 : null, ...after ?? [null, null, null, null], scanLimit, key2, key2, key2, key2, options.engineVersion, options.engineVersion, options.snifferId ?? null, JSON.stringify(`content:rule_sniffer:${options.snifferId}`), options.snifferId ?? null, JSON.stringify(`content:rule_sniffer:${options.snifferId}`), options.engineVersion, metadataMarker, metadataMarker ?? "", snifferMarker, snifferMarker ?? "", options.engineVersion, metadataMarker, metadataMarker ?? "");
     const records = [];
     const causes = [];
+    let builtinPromptSkipped = 0;
     let last;
     for (const row of rows) {
       last = row;
       if (row.rejudge_candidate !== 1)
         continue;
+      const cause = settledSnifferRejudgeCause(row, row.rejudge_cause, options.snifferId);
+      if (cause === "builtin_prompt_skipped") {
+        builtinPromptSkipped += 1;
+        continue;
+      }
       records.push(recordFromRow(row));
-      causes.push(row.rejudge_cause);
+      causes.push(cause);
       if (records.length >= limit)
         break;
     }
@@ -22319,6 +22325,7 @@ class TierLedger {
     return {
       records,
       causes,
+      builtinPromptSkipped,
       ...more && last ? { next: identityOfRow(last) } : {}
     };
   }
@@ -24339,6 +24346,48 @@ function recordFromRow(row) {
     decidedAt: row.decided_at,
     routed: row.routed === 1
   };
+}
+function snifferInputs(id) {
+  const match = id?.match(/^([^:]+):p-[a-f0-9]{12}(\.o[a-f0-9]{8})?\.m([a-f0-9]{16})$/);
+  return match ? { lane: match[1], owner: match[2] ?? "", model: match[3] } : undefined;
+}
+function settledSnifferRejudgeCause(row, cause, id) {
+  if (cause !== "names_prompt" && cause !== "content_prompt")
+    return cause;
+  const current2 = snifferInputs(id);
+  if (!current2)
+    return cause;
+  const reasons = JSON.parse(row.reasons_json);
+  const previous = [];
+  const stamp = row.rejudged_key?.split("\x00");
+  if (stamp?.[0] === row.engine_version && (stamp.length === 2 || stamp.length === 3 && stamp[2] === "judged" && !reasons.some((reason) => reason.includes(":fail_safe:")))) {
+    previous.push(stamp[1]);
+  } else {
+    const addMismatch = (prefix, required, exact = false) => {
+      const found = reasons.filter((reason) => reason.startsWith(prefix));
+      if (!required || found.some((reason) => exact ? reason === `${prefix}${id}` : reason.startsWith(`${prefix}${id}:`)))
+        return;
+      if (!found.length)
+        previous.push(undefined);
+      for (const reason of found) {
+        const rest = reason.slice(prefix.length);
+        previous.push(rest.match(/^([^:]+:p-[a-f0-9]{12}(?:\.o[a-f0-9]{8})?\.m[a-f0-9]{16})(?::|$)/)?.[1]);
+      }
+    };
+    addMismatch("metadata:sniffer:", reasons.some((reason) => reason.startsWith("metadata:sniffer:")));
+    if (row.decided_by === "content_rule")
+      addMismatch("content:rule_sniffer:", true, true);
+    else
+      addMismatch("content:sniffer:", !reasons.some((reason) => reason.startsWith("metadata:sensitivity_map:")) && (row.content_tier === "public" || row.content_tier === "private" || reasons.some((reason) => reason.startsWith("content:sniffer:"))));
+  }
+  const inputs = previous.map(snifferInputs);
+  if (inputs.some((input) => input && input.owner !== current2.owner))
+    return "owner_words";
+  if (inputs.some((input) => input && (input.lane !== current2.lane || input.model !== current2.model)))
+    return "judge_model";
+  if (!inputs.length || inputs.some((input) => !input))
+    return cause;
+  return "builtin_prompt_skipped";
 }
 function holdSnifferLowering(current2, next) {
   return process.env.OLYMPUS_TIER_SNIFFER_HOLD_LOWERING === "1" && current2.state === "current" && current2.contentTier === "secure" && next.contentTier !== "secrets" && (next.contentTier === "private" || current2.metadataTier === "secure" && next.metadataTier === "private");
@@ -63515,8 +63564,11 @@ function emptyTierRejudgeReport() {
     causeRetiredPrior: 0,
     causeMissingQuestion: 0,
     causeClassifier: 0,
+    causeOwnerWords: 0,
+    causeJudgeModel: 0,
     causeNamesPrompt: 0,
-    causeContentPrompt: 0
+    causeContentPrompt: 0,
+    builtinPromptSkipped: 0
   };
 }
 async function rejudgeRoutedItemsInTurns(options) {
@@ -63557,6 +63609,7 @@ function* rejudgeSteps(options) {
     ...options.after ? { after: options.after } : {},
     limit
   });
+  report.builtinPromptSkipped = page2.builtinPromptSkipped;
   for (const [index, record] of page2.records.entries()) {
     yield record;
     report.seen += 1;
@@ -63839,6 +63892,8 @@ var init_tier_rejudge = __esm(() => {
     retired_prior: "causeRetiredPrior",
     missing_question: "causeMissingQuestion",
     classifier: "causeClassifier",
+    owner_words: "causeOwnerWords",
+    judge_model: "causeJudgeModel",
     names_prompt: "causeNamesPrompt",
     content_prompt: "causeContentPrompt"
   };
@@ -195709,7 +195764,7 @@ class TierSnifferService {
     }
     if (autoMoves && autoMoves.moved > 0)
       this.applyOwnerOverrides();
-    return { state: "ran", report, ...rejudged.seen > 0 ? { rejudged } : {}, ...autoMoves ? { autoMoves } : {} };
+    return { state: "ran", report, ...rejudged.seen > 0 || rejudged.builtinPromptSkipped > 0 ? { rejudged } : {}, ...autoMoves ? { autoMoves } : {} };
   }
   async recoverMissingQuestions(signal, allowReask = false) {
     const deadline = performance.now() + MISSING_QUESTION_RECOVERY_PHASE_MS;
@@ -195941,8 +195996,8 @@ class TierSnifferService {
           total[key2] += report[key2];
       } catch {}
     }
-    if (total.updated > 0 || total.movesQueued > 0 || total.asked > 0 || total.secrets > 0 || total.heldLowering > 0) {
-      this.options.log?.(`Olympus tier sniffer: re-judged ${total.updated + total.movesQueued + total.asked + total.secrets} item(s) under the current classifier ` + `(${total.asked} asked about, still where they were; ${total.movesQueued} tier move(s) queued` + `; ${total.heldLowering} lowering(s) held${total.secrets ? `; ${total.secrets} Secret(s) found and hidden` : ""})` + `; picked for: held=${total.causeHeld} retired_prior=${total.causeRetiredPrior} missing_question=${total.causeMissingQuestion}` + ` classifier=${total.causeClassifier} names_prompt=${total.causeNamesPrompt} content_prompt=${total.causeContentPrompt}.`);
+    if (total.updated > 0 || total.movesQueued > 0 || total.asked > 0 || total.secrets > 0 || total.heldLowering > 0 || total.builtinPromptSkipped > 0) {
+      this.options.log?.(`Olympus tier sniffer: re-judged ${total.updated + total.movesQueued + total.asked + total.secrets} item(s) under the current classifier ` + `(${total.asked} asked about, still where they were; ${total.movesQueued} tier move(s) queued` + `; ${total.heldLowering} lowering(s) held${total.secrets ? `; ${total.secrets} Secret(s) found and hidden` : ""})` + `; picked for: held=${total.causeHeld} retired_prior=${total.causeRetiredPrior} missing_question=${total.causeMissingQuestion}` + ` classifier=${total.causeClassifier} owner_words=${total.causeOwnerWords} judge_model=${total.causeJudgeModel}` + ` names_prompt=${total.causeNamesPrompt} content_prompt=${total.causeContentPrompt}` + `; builtin_prompt_skipped=${total.builtinPromptSkipped}.`);
     }
     return total;
   }

@@ -169,7 +169,7 @@ export interface TierSnifferServiceOptions {
   autoApproveBuiltIn?: boolean;
   /**
    * Routed items re-judged per set per tick after the classifier or the
-   * sniffer's prompt changed (tier-rejudge.ts). 0 turns it off. Default
+   * owner's privacy words or judge model changed (tier-rejudge.ts). 0 turns it off. Default
    * DEFAULT_TIER_REJUDGE_PER_PASS. A set whose sniffer queue already holds
    * `rejudgeMaxOpenQuestions` questions is not re-judged that tick, so
    * re-judging never outruns the answers.
@@ -1125,7 +1125,7 @@ export class TierSnifferService {
     phase('approval');
     const preparationStopped = await prepareSnifferModel({ model: this.options.model, signal, shouldYield: () => this.yieldNow() });
     phase('prepare');
-    // Items decided under an older classifier or sniffer prompt are judged
+    // Items decided under another classifier, owner words or judge model are judged
     // again first (tier-rejudge.ts), a bounded page per set per tick: their
     // questions join the queue this pass answers.
     if (!preparationStopped) await this.recoverMissingQuestions(signal, true);
@@ -1163,7 +1163,7 @@ export class TierSnifferService {
     // A move that just landed may have carried an item whose owner override
     // came while it was queued: apply the override now, not a tick later.
     if (autoMoves && autoMoves.moved > 0) this.applyOwnerOverrides();
-    return { state: 'ran', report, ...(rejudged.seen > 0 ? { rejudged } : {}), ...(autoMoves ? { autoMoves } : {}) };
+    return { state: 'ran', report, ...(rejudged.seen > 0 || rejudged.builtinPromptSkipped > 0 ? { rejudged } : {}), ...(autoMoves ? { autoMoves } : {}) };
   }
 
   /**
@@ -1461,13 +1461,15 @@ export class TierSnifferService {
         // A set that cannot be read keeps its recorded decisions this tick.
       }
     }
-    if (total.updated > 0 || total.movesQueued > 0 || total.asked > 0 || total.secrets > 0 || total.heldLowering > 0) {
+    if (total.updated > 0 || total.movesQueued > 0 || total.asked > 0 || total.secrets > 0 || total.heldLowering > 0 || total.builtinPromptSkipped > 0) {
       this.options.log?.(
         `Olympus tier sniffer: re-judged ${total.updated + total.movesQueued + total.asked + total.secrets} item(s) under the current classifier `
         + `(${total.asked} asked about, still where they were; ${total.movesQueued} tier move(s) queued`
         + `; ${total.heldLowering} lowering(s) held${total.secrets ? `; ${total.secrets} Secret(s) found and hidden` : ''})`
         + `; picked for: held=${total.causeHeld} retired_prior=${total.causeRetiredPrior} missing_question=${total.causeMissingQuestion}`
-        + ` classifier=${total.causeClassifier} names_prompt=${total.causeNamesPrompt} content_prompt=${total.causeContentPrompt}.`,
+        + ` classifier=${total.causeClassifier} owner_words=${total.causeOwnerWords} judge_model=${total.causeJudgeModel}`
+        + ` names_prompt=${total.causeNamesPrompt} content_prompt=${total.causeContentPrompt}`
+        + `; builtin_prompt_skipped=${total.builtinPromptSkipped}.`,
       );
     }
     return total;

@@ -962,9 +962,11 @@ export class TierLedger {
    * carried one of those out). Of those, the ones decided under another
    * classifier version, and, when a sniffer is configured, the ones whose
    * text is below Private without that sniffer's own content verdict, or
-   * whose content verdict came from another sniffer prompt (an item whose
-   * names an owner map category matched is re-judged on a classifier change
-   * only: the owner's category may have settled it). A row a re-judge
+   * whose verdict used other owner words or another judge model. Built-in
+   * prompt wording alone does not invalidate a settled decision (owner,
+   * 2026-11-07). An item whose names matched an owner map category is
+   * re-judged on a classifier change only: the category may have settled it.
+   * A row a re-judge
    * already settled under this classifier and sniffer (`markRejudged`), or
    * whose re-judge question is still open (`openRejudgeQuestion`), is not a
    * candidate again.
@@ -982,7 +984,7 @@ export class TierLedger {
     limit?: number;
     /** Ledger rows read per call (default DEFAULT_REJUDGE_SCAN_ROWS). */
     scanLimit?: number;
-  }): { records: TierLedgerRecord[]; causes: TierRejudgeCause[]; next?: TierLedgerIdentity } {
+  }): { records: TierLedgerRecord[]; causes: TierRejudgeCause[]; builtinPromptSkipped: number; next?: TierLedgerIdentity } {
     const limit = Math.max(1, Math.min(options.limit ?? 100, 5_000));
     const scanLimit = Math.max(limit, Math.min(options.scanLimit ?? DEFAULT_REJUDGE_SCAN_ROWS, 50_000));
     const snifferMarker = options.snifferId ? `"content:sniffer:${options.snifferId}:` : null;
@@ -1097,18 +1099,25 @@ export class TierLedger {
     ) as Array<TierItemRow & { rejudge_candidate: number; rejudge_cause: TierRejudgeCause }>;
     const records: TierLedgerRecord[] = [];
     const causes: TierRejudgeCause[] = [];
+    let builtinPromptSkipped = 0;
     let last: TierItemRow | undefined;
     for (const row of rows) {
       last = row;
       if (row.rejudge_candidate !== 1) continue;
+      const cause = settledSnifferRejudgeCause(row, row.rejudge_cause, options.snifferId);
+      if (cause === 'builtin_prompt_skipped') {
+        builtinPromptSkipped += 1;
+        continue;
+      }
       records.push(recordFromRow(row));
-      causes.push(row.rejudge_cause);
+      causes.push(cause);
       if (records.length >= limit) break;
     }
     const more = records.length >= limit || rows.length >= scanLimit;
     return {
       records,
       causes,
+      builtinPromptSkipped,
       ...(more && last ? { next: identityOfRow(last) } : {}),
     };
   }
@@ -4023,6 +4032,7 @@ interface TierItemRow {
   metadata_flagged: number;
   decided_at: string;
   routed: number;
+  rejudged_key: string | null;
 }
 
 interface TierCopyRow {
@@ -4281,7 +4291,50 @@ interface EffectiveRow {
 
 /** What applying a sniffer verdict did: a P1a row update, a P1b routed outcome, or nothing yet. */
 /** The rule that made a row a re-judge candidate (`rejudgeCandidatePage`). */
-export type TierRejudgeCause = 'held' | 'retired_prior' | 'missing_question' | 'classifier' | 'names_prompt' | 'content_prompt';
+export type TierRejudgeCause = 'held' | 'retired_prior' | 'missing_question' | 'classifier' | 'owner_words' | 'judge_model' | 'names_prompt' | 'content_prompt';
+
+/** The ID format emitted by snifferId/snifferPromptVersions, not arbitrary custom sniffer IDs. */
+function snifferInputs(id: string | undefined): { lane: string; owner: string; model: string } | undefined {
+  const match = id?.match(/^([^:]+):p-[a-f0-9]{12}(\.o[a-f0-9]{8})?\.m([a-f0-9]{16})$/);
+  return match ? { lane: match[1]!, owner: match[2] ?? '', model: match[3]! } : undefined;
+}
+
+/** Refine only prompt candidates, within the same bounded scan and before spending its candidate budget. */
+function settledSnifferRejudgeCause(row: TierItemRow, cause: TierRejudgeCause, id: string | undefined): TierRejudgeCause | 'builtin_prompt_skipped' {
+  if (cause !== 'names_prompt' && cause !== 'content_prompt') return cause;
+  const current = snifferInputs(id);
+  if (!current) return cause;
+  const reasons = JSON.parse(row.reasons_json) as string[];
+  const previous: Array<string | undefined> = [];
+  const stamp = row.rejudged_key?.split('\u0000');
+  // Match the existing stamp semantics: a completed re-read, or a model
+  // settlement still free of fail-safe reasons, can cover older names too.
+  if (stamp?.[0] === row.engine_version && (stamp.length === 2
+    || (stamp.length === 3 && stamp[2] === 'judged' && !reasons.some(reason => reason.includes(':fail_safe:'))))) {
+    previous.push(stamp[1]);
+  } else {
+    const addMismatch = (prefix: string, required: boolean, exact = false) => {
+      const found = reasons.filter(reason => reason.startsWith(prefix));
+      if (!required || found.some(reason => exact ? reason === `${prefix}${id}` : reason.startsWith(`${prefix}${id}:`))) return;
+      if (!found.length) previous.push(undefined); // Never judged: still owed a verdict.
+      for (const reason of found) {
+        const rest = reason.slice(prefix.length);
+        // Lane and prompt/model identity end before the verdict's reason code.
+        previous.push(rest.match(/^([^:]+:p-[a-f0-9]{12}(?:\.o[a-f0-9]{8})?\.m[a-f0-9]{16})(?::|$)/)?.[1]);
+      }
+    };
+    addMismatch('metadata:sniffer:', reasons.some(reason => reason.startsWith('metadata:sniffer:')));
+    if (row.decided_by === 'content_rule') addMismatch('content:rule_sniffer:', true, true);
+    else addMismatch('content:sniffer:', !reasons.some(reason => reason.startsWith('metadata:sensitivity_map:'))
+      && (row.content_tier === 'public' || row.content_tier === 'private' || reasons.some(reason => reason.startsWith('content:sniffer:'))));
+  }
+  const inputs = previous.map(snifferInputs);
+  if (inputs.some(input => input && input.owner !== current.owner)) return 'owner_words';
+  if (inputs.some(input => input && (input.lane !== current.lane || input.model !== current.model))) return 'judge_model';
+  // Missing/legacy identities retain their original cause and eligibility.
+  if (!inputs.length || inputs.some(input => !input)) return cause;
+  return 'builtin_prompt_skipped';
+}
 
 export type SnifferVerdictOutcome = 'held_lowering' | 'stale_question' | TierLedgerRecordOutcome | TierRoutedOutcome | 'needs_placement' | 'stale_map';
 
