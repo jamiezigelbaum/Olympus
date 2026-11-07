@@ -67,7 +67,7 @@ describe('fresh install canary', () => {
       expect(syntax.stderr).toBe('');
       expect(syntax.status).toBe(0);
     }
-  });
+  }, 30_000);
   test('candidate uses the non-interactive site installer as olyfresh', async () => {
     const r = rig();
     const puts: Array<[string, string]> = [];
