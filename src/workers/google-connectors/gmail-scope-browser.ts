@@ -8,9 +8,8 @@
 // GMAIL_SCOPE_BROWSE_MAX_REQUESTS Gmail API requests:
 //   1   labels.list
 //   5   labels.get, one per inbox category (for its message count)
-//   1   messages.list on the full-content query (its resultSizeEstimate, and
-//       the sample's message ids)
-//   1   messages.list on the metadata-only query (its resultSizeEstimate;
+//   1   messages.list on the full-content query (the sample's message ids)
+//   1   messages.list on the metadata-only query (for a complete-page count;
 //       skipped when the window is Everything)
 //   100 messages.get, format=metadata, From header only (the sender sample)
 // Every request goes through a budgeted client charged to the picker's own
@@ -81,7 +80,8 @@ export interface GmailMailScopeSummary {
   categories: GmailMailScopeCategoryView[];
   sender_suggestions: GmailMailScopeSenderSuggestion[];
   sample_size: number;
-  estimate: MailScopeEstimate;
+  /** Omitted when either query needs pagination; Gmail's list estimates can be capped. */
+  estimate?: MailScopeEstimate;
   /** Requests this summary actually spent. Never above GMAIL_SCOPE_BROWSE_MAX_REQUESTS. */
   provider_requests: number;
 }
@@ -171,10 +171,15 @@ export function createGmailMailScopeBrowser(options: {
           .slice(0, MAX_SENDER_SUGGESTIONS)
           .map(([sender, messages]) => ({ sender, sample_messages: messages })),
         sample_size: sample.length,
-        estimate: estimateMailScope({
-          contentMessages: contentPage.resultSizeEstimate ?? contentPage.messages.length,
-          metadataMessages: metadataPage?.resultSizeEstimate ?? metadataPage?.messages.length ?? 0,
-        }),
+        // resultSizeEstimate can report ~201 for tens of thousands of matches.
+        // Only count results we have completely listed. Whole-mailbox category
+        // totals cannot tell us how many match a date window or exclusions.
+        ...(!contentPage.nextPageToken && !metadataPage?.nextPageToken ? {
+          estimate: estimateMailScope({
+            contentMessages: contentPage.messages.length,
+            metadataMessages: metadataPage?.messages.length ?? 0,
+          }),
+        } : {}),
         provider_requests: requests,
       };
     },
