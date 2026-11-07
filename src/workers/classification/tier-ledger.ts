@@ -284,6 +284,8 @@ type OwnerPriorDecision = Omit<QueuedMoveDecision, 'metadataTier' | 'contentTier
 
 export interface TierLedgerOptions {
   dbPath: string;
+  /** Inspection only: no migrations, repairs, permissions or checkpoint on close. */
+  readOnly?: boolean;
   now?: () => Date;
 }
 
@@ -349,14 +351,16 @@ export class TierLedgerSecretsRollbackRefusedError extends Error {
 export class TierLedger {
   readonly dbPath: string;
   private readonly db: Database;
+  private readonly readOnly: boolean;
   private metaChanges = 0;
   private readonly now: () => Date;
 
   constructor(options: TierLedgerOptions) {
     this.dbPath = options.dbPath;
+    this.readOnly = options.readOnly === true;
     this.now = options.now ?? (() => new Date());
     const onDisk = this.dbPath !== ':memory:';
-    if (onDisk) {
+    if (onDisk && !this.readOnly) {
       mkdirSync(dirname(this.dbPath), { recursive: true, mode: 0o700 });
       // Owner-only from the first byte, with an explicit file mode rather than
       // a process-wide umask (which would race every other file this process
@@ -368,13 +372,18 @@ export class TierLedger {
     }
     let db: Database | undefined;
     try {
-      db = new Database(this.dbPath, { create: true });
+      db = new Database(this.dbPath, this.readOnly ? { readonly: true, create: false } : { create: true });
+      if (this.readOnly) {
+        db.exec('PRAGMA query_only = ON;');
+        this.db = db;
+        return;
+      }
       db.exec('PRAGMA busy_timeout = 10000; PRAGMA journal_mode = WAL;');
       runSqliteMigrations(db, TIER_LEDGER_SQLITE_STORE_ID, tierLedgerMigrations());
       settleStaleEmbedHolds(db, this.now().toISOString());
       if (onDisk) restrictLedgerFiles(this.dbPath);
     } catch (error) {
-      if (db) closeSqliteStore(db);
+      if (db) closeSqliteStore(db, { checkpoint: !this.readOnly });
       throw error;
     }
     this.db = db;
@@ -384,9 +393,9 @@ export class TierLedger {
     try {
       // Checkpointed close, like every Olympus store: the ledger is safe to
       // hand to another process the moment this returns.
-      closeSqliteStore(this.db);
+      closeSqliteStore(this.db, { checkpoint: !this.readOnly });
     } finally {
-      if (this.dbPath !== ':memory:') restrictLedgerFiles(this.dbPath);
+      if (!this.readOnly && this.dbPath !== ':memory:') restrictLedgerFiles(this.dbPath);
     }
   }
 

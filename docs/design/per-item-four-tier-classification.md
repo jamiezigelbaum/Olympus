@@ -597,20 +597,45 @@ fail-safes and pre-filter outputs are excluded. The ledger supplies the label:
 `private` is Personal and `secure` is Private, only when this judge alone
 decided it. A tier-bearing content-judge receipt binds that verdict's own tier
 and reason to the complete-text digest; a later metadata raise never changes
-the receipt. Rows without this provenance are skipped. Detectors, content rules, owner rules, overrides, metadata floors,
+the receipt. For pre-#982 rows with no tier receipt (2026-11-07), equivalent
+provenance comes from the latest non-fail-safe `sniffer_verdicts` answer for
+that exact subject and the ledger row's model. Its own tier must equal the
+content tier and its timestamp must be no later than the row's decision.
+The latest answer must also carry the final-content hash matching the complete
+stored text. Missing hashes, metadata-only answers, stale hashes and equal-time
+answers with differing or missing bindings abstain as `legacy_verdict_content`;
+no older answer is substituted.
+Conflicting equal-time answers, absent subject/model evidence, unreadable old
+schemas, later answers and mismatched modern receipts all abstain under named
+rejection counters. A historical metadata raise retained in the content tier
+cannot replace the judge's own label. Live lookups use a subject/model/time
+index; read-only diagnostic snapshots of older caches scan once per model and
+retain only subject hashes, tiers, times and final-content hashes, without
+migrating the cache.
+Old training attempts restart their scan immediately under the new label
+version, including attempts waiting after finding zero examples. Verdict-cache
+writes also invalidate a sliced final validation before weights are published.
+Detectors, content rules, owner rules, overrides, metadata floors,
 own-record holds and small-lane `record_held:` answers exclude the row. The
 stored text must still match its complete-text digest; a verdict-cache
 `content_hash` is not required.
 
 Training takes at most 5,000 examples per class and runs bounded,
 L2-regularized logistic regression in TypeScript on normalized vectors.
-Scanning and fitting share a cooperative 200 ms budget per tick across the
+Scanning and fitting share a cooperative 200 ms budget per slice across the
 installation (one synchronous row/update, or the final atomic publication check, may finish beyond the deadline).
+The service schedules slices during inference waits and between ticks, yielding
+through the shared control-path scheduler and stopping between units when an
+answer needs the pool. No training slice is awaited before a judge dispatch.
+Ledger reads rotate in windows of 32 rows, and scanning stops on the row that
+fills both class caps. Shutdown stops scheduling and lets an in-flight slice
+checkpoint before closing ledgers. These scheduling changes (2026-11-07) target
+training within an hour; live Sparta training time remains to be measured.
 Source ledger meta stores the cursor and selected item references, never text
 or vectors. Restart resumes scanning, rechecks selected rows and copies, then
 refits in slices. Retained examples are revalidated against their decisions,
 copy placement, text and vector bytes in circular sweeps using at most half
-the tick, leaving time for fitting even during unrelated ledger writes. A
+the slice, leaving time for fitting even during unrelated ledger writes. A
 changed ledger requests another full ledger-check cycle without rewinding.
 Publication makes one final synchronous check before writing weights. A changed or removed selected item,
 including a Secrets decision, discards the fit. Training starts after both classes reach the cap or all
@@ -619,7 +644,12 @@ after three hours. A complete read below 2,000 per class waits for 1,000 new
 cached verdicts or 24 hours, whichever comes first. Each finished attempt logs
 one content-free line with rows read, examples per class, outcome/reason, model
 version when trained, active elapsed time and the next attempt; status also
-shows these counts and progress while scanning/fitting.
+shows these counts and progress while scanning/fitting. The sniffer pass line
+also reports `promptChars` and `estimatedInputTokens`, summed over dispatched
+calls, with `mean_promptChars` and `mean_estimatedInputTokens` per call. Input
+tokens are estimated per call as prompt characters divided by four, rounded
+up; these content-free counts cover the system and user prompt, excluding the
+transport's chat-template envelope.
 Checkpoints are written only when the scan changes. A changed ledger/judge
 discards the obsolete attempt and starts again immediately; its log reports
 that immediate restart rather than the three-hour failure backoff.
@@ -627,6 +657,47 @@ that immediate restart rather than the three-hour failure backoff.
 A changed judge identity or mounted-ledger
 membership invalidates the model. Account-scope withdrawal invalidates it too.
 No contract shapes, vector identities, embeddings or classifier version change.
+
+For a counts-only training diagnostic from an unpacked release, run
+`bun ./dist/cli.js prefilter-training-dry-run`. Optional `--data-dir <directory>`
+selects an install instead of the normal data root; `--row-limit <positive integer>`
+bounds rows examined separately for each ledger. This hidden command does not
+run `source index status`, start workers, fit a model, or acquire a lease.
+It calls the same training eligibility, serving-copy selection, digest/verdict
+receipt and vector checks as live training. It counts every eligible row rather
+than applying the fitting sample caps. Every rejection name is always present;
+only the first failing check counts, so examples plus rejections equal rows read.
+Accepted-label `provenance` counters distinguish `judge_receipt` from
+`legacy_sniffer`; their sum equals accepted examples.
+The JSON output contains numbers only as values. Ledger array positions replace
+paths, accounts and source names; no row content, item identity, reason text,
+model identity or vectors are printed, even on errors.
+
+The diagnostic uses the install-wide recorded training attempt's judge identity
+(including its prompt and decision mode), falling back to a unique source-ledger
+attempt for older installs. It refuses ambiguous or missing training identities
+rather than inferring one from accepted rows. Existing co-located and bound
+source ledgers are counted, including moved bindings resolved by ledger identity.
+No install SQLite file is opened by SQLite: a read-only open can still modify
+its shared-memory sidecar. Main database and WAL bytes are copied into private
+0700 temporary directories; snapshots alone are opened read-only, without SQL
+writes, checkpoint, migrations, metadata updates, permission repairs or lease.
+The storage service creates and owns the scratch reader root; these readers
+refuse paths outside it, symlink paths and hard-linked database files.
+SQLite's temporary shared-memory files stay there, and all scratch copies are
+removed on normal completion or error. Abrupt process termination can leave
+private scratch copies. Copying detects concurrent main/WAL changes and retries
+up to three times after 25, 50 and 75 ms, discarding stale scratch sidecars
+between attempts. Output includes `snapshot_retries` and numeric `error_reasons`
+for busy, unsafe or unreadable snapshot refusals and database-reader failures;
+any final error produces a nonzero exit. Snapshots
+of different files are not one install-wide transaction. Synthetic WAL-backed
+tests compare all install file hashes and mtimes before and after, including the
+built CLI path. The owner's 2026-11-07 read-only Sparta baseline found no
+examples among 28,982 rows in the first ledger (16,788 lacked tier receipts),
+and 15 Personal / 0 Private examples across four ledgers. Pre-#982 rows had
+judge reasons and digests but lacked the newer tier receipt. Acceptance counts
+after the legacy-provenance fix still require measurement on that install.
 
 One install-wide model and rolling audit window are shared across the mounted
 ledgers. A stable install tier ledger at

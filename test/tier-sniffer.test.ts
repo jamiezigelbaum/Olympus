@@ -589,6 +589,10 @@ describe('bounds and the owner-approval gate', () => {
       expect(lines).toContain('Olympus tier sniffer: asking again.');
       // The pass line says where the tick's wall time went, and the idle time before it.
       const passLine = lines.find((line) => line.includes('verdict(s) applied'));
+      const promptChars = model.requests.reduce((sum, request) => sum + (request.system?.length ?? 0) + request.prompt.length, 0);
+      const inputTokens = model.requests.reduce((sum, request) => sum + Math.ceil(((request.system?.length ?? 0) + request.prompt.length) / 4), 0);
+      expect(passLine).toContain(`promptChars=${promptChars} mean_promptChars=${Math.round(promptChars / model.requests.length)} estimatedInputTokens=${inputTokens} mean_estimatedInputTokens=${Math.round(inputTokens / model.requests.length)};`);
+      expect(passLine).toMatch(/promptChars=\d+ mean_promptChars=\d+ estimatedInputTokens=\d+ mean_estimatedInputTokens=\d+;/);
       expect(passLine).toMatch(/; tick_ms=\d+ settle=\d+ targets=\d+ recover=\d+ approval=\d+ prepare=\d+ rejudge=\d+ pass=\d+ moves=\d+ idle_before=\d+\.$/);
 
       // A pass whose model call never returns: the next tick past the bound aborts it.
@@ -1054,6 +1058,9 @@ describe('recent questions and bounded passes', () => {
       const model = spyModel((_, items) => { elapsed += 100; return verdictsFor(items, { tier: 'private', category: 'other', confidence: 1 }); });
       const report = await runSnifferPass({ targets: [{ ledger, sniffer: store }], lane: LOCAL_LANE, model, passTimeMs: 1200, monotonicNow: () => elapsed });
       expect(report.calls).toBe(12);
+      const sizes = model.requests.map(request => (request.system?.length ?? 0) + request.prompt.length);
+      expect(report.promptChars).toBe(sizes.reduce((sum, size) => sum + size, 0));
+      expect(report.estimatedInputTokens).toBe(sizes.reduce((sum, size) => sum + Math.ceil(size / 4), 0));
       expect(report.stoppedBy).toBe('pass_budget');
       expect(report.callMs).toBe(1200);
       expect(report.maxQueueWaitMs).toBeGreaterThanOrEqual(0);
