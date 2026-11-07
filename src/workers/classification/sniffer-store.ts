@@ -183,6 +183,14 @@ export class TierSnifferStore {
     return row ? this.getVerdict({ ...key, materialHash: row.material_hash }) : undefined;
   }
 
+  /** A real, final model label on this subject's complete own text; never a rule or fail-safe. */
+  judgedContentLabel(subject: TierSnifferSubject, modelId: string, contentHash: string): SnifferTier | undefined {
+    const row = this.db.query(`SELECT tier FROM sniffer_verdicts
+      WHERE model_subject = ? AND model_id = ? AND content_hash = ? AND fail_safe = 0
+      ORDER BY decided_at DESC LIMIT 1`).get(snifferSubjectKey(subject), modelId, contentHash) as { tier: SnifferTier } | null;
+    return row?.tier;
+  }
+
   /**
    * Queue (or refresh) the question for one item and pass. A changed material
    * replaces the old one and resets the attempt count; an identical one keeps

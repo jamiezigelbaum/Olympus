@@ -1,3 +1,4 @@
+import { embeddingPrefilterDirectory } from '../src/workers/classification/tier-ledger-path.ts';
 // Critical-review findings on PR #79, each pinned by its reproduction.
 //
 // 1. An invalid, half-written or loosely-permissioned map fails CLOSED: new
@@ -15,7 +16,7 @@
 // running pass; data deletion takes the sniffer's queue.
 
 import { resolvedStorePath } from '../src/core/source-placement.ts';
-import { chmodSync, existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, test } from 'bun:test';
@@ -461,10 +462,14 @@ describe('nits', () => {
     const store = new TierSnifferStore({ dbPath: snifferPath });
     store.enqueue({ subject: subject(1), pass: 'metadata', material: 'bank', mapRevision: 'r', flags: [] });
     store.close();
+    const weightsDir = embeddingPrefilterDirectory(tierLedgerPathForStore(storePath));
+    mkdirSync(weightsDir, { recursive: true, mode: 0o700 });
+    writeFileSync(join(weightsDir, 'weights.json'), 'synthetic fixture weights', { mode: 0o600 });
     expect(existsSync(snifferPath)).toBe(true);
     expect(snifferMaterialHash('metadata', 'bank')).toMatch(/^[0-9a-f]{64}$/);
     deleteOlympusData({ sourceId: 'readwise.library', homeDir, env });
     expect(existsSync(snifferPath)).toBe(false);
+    expect(existsSync(weightsDir)).toBe(false);
   });
 });
 
@@ -557,7 +562,7 @@ describe('pace, daily cap and the visible backlog', () => {
   test('defaults: 20,000 full-mode calls a day, prompt idle polling, optional explicit caps', () => {
     expect(DEFAULT_SNIFFER_MAX_CALLS_PER_DAY).toBe(20_000);
     expect(DEFAULT_SNIFFER_PASS_TIME_MS).toBe(30_000);
-    expect(tierSnifferServiceEnv({})).toEqual({ enabled: true, intervalMs: 1_000 });
+    expect(tierSnifferServiceEnv({})).toEqual({ enabled: true, embeddingPrefilterEnabled: true, intervalMs: 1_000 });
     expect(tierSnifferServiceEnv({ OLYMPUS_TIER_SNIFFER_MAX_CALLS_PER_PASS: '5' }).maxCallsPerPass).toBe(5);
     expect(tierSnifferServiceEnv({ OLYMPUS_TIER_SNIFFER_MAX_CALLS_PER_DAY: '20000' }).maxCallsPerDay).toBe(20_000);
   });

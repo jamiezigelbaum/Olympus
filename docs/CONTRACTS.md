@@ -355,6 +355,14 @@ section consolidates and supersedes all other policy wording.
 
 ### Change log
 
+- 2026-11-07 (no contract shape or version change): the shared queued-content
+  resolver can settle Personal from the item's complete own stored vector at
+  p(Private) < 0.05. Per-install training uses only final judge labels; owner
+  decisions, Secrets and names questions retain precedence. A 5% direct-judge
+  audit stops and requeues clearances above 2% Private in 200 checks. See
+  `design/per-item-four-tier-classification.md`, "Embedding Personal pre-filter".
+  This is Critical classification behavior; independent review precedes merge.
+
 - 2026-11-05 (no contract type version change; native sniffer cache
   `decision-v1`): **one token decides Personal or Private on a capable local
   llama.cpp server.** A local profile's `snifferMode` is `auto` (default),

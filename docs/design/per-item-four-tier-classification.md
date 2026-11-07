@@ -570,3 +570,59 @@ and persisting only examined rows; a synchronous row already started may overrun
 These are cooperative scheduling bounds, not a live throughput measurement. The
 #938 verdict-rate/gap targets and #929 recovery p90 still require a separate
 Sparta runtime measurement after authorized deployment.
+
+### Embedding Personal pre-filter (#939, 2026-11-07)
+
+Before dispatching a queued content question, the shared resolver may settle it
+Personal if its own complete stored EmbeddingGemma 2 vectors predict
+`p(Private) < 0.05`. It never settles Private. The existing deterministic
+Secrets checks, structured-identifier raises, owner overrides and rules, and
+names questions precede this step. Existing final verdicts and open re-judges
+are not lowered. Missing, stale, malformed or incomplete vectors, image chunks,
+and a mismatch with the ledger's complete-text digest all abstain. Multiple
+text chunks use their mean vector; all must have current vectors of exactly
+`embeddinggemma-2-litert-24d962e`, 768 dimensions. This is classification-only
+access to held vectors; retrieval visibility does not change.
+
+Training pools this installation's mounted ledgers, without source features or
+branches. It requires **2,000 valid final judge labels in each class**, each
+bound to that item's complete own text and stored vector. Rules, overrides,
+fail-safes and pre-filter outputs are excluded; a policy-held Personal judge
+answer remains a Personal training label. Daily training takes at most 5,000
+examples per class and runs bounded, L2-regularized logistic regression in
+TypeScript on normalized vectors. A changed judge identity or mounted-ledger
+membership invalidates the model. Account-scope withdrawal invalidates it too.
+No contract shapes, vector identities, embeddings or classifier version change.
+
+One install-wide model and rolling audit window are shared across the mounted
+ledgers. The first sorted tier ledger owns the model directory
+`<ledger>.embedding-prefilter/` (0700) and `weights.json` (0600, atomic write).
+Weights never enter logs, exports or release artifacts. Deleting a source
+removes its weight directory; account-folder migration moves it with the ledger.
+The engine environment setting `OLYMPUS_EMBEDDING_PREFILTER_ENABLED=off` disables
+new clearances; the default is on once trained. The ordinary classifier remains
+available throughout training and whenever the filter abstains.
+
+A random **5%** of qualifying candidates stay held and go directly to the
+judge, bypassing verdict reuse. Audit selection survives restart. A window
+of **200** model answers with **5 or more Private** answers durably stops
+clearing across the installation. There is no automatic restart after a stop.
+Status and the classification summary say that clearing stopped and items are
+returning to the privacy judge. The stop is not cleared by retraining or by
+toggling the setting.
+
+Until the first healthy 200-check window, and thereafter since the most recent
+healthy check, every clearance retains its existing queue question plus a
+content-free ledger receipt. A stop restores the original pending decision,
+hides any Personal copies before moving them back, and fences a lowering in
+flight. Owner decisions made since clearance are left authoritative. A healthy
+window releases the retained questions. The reason for a clearance is
+`content:embedding_prefilter:<modelVersion>:<p>`; it is never a model verdict
+cache entry or a training label.
+
+Build versus buy: a bounded logistic regressor is implemented here because the
+owner requires plain TypeScript and no heavy dependency; existing ledger,
+queue, atomic-file and move primitives handle persistence and routing. Synthetic
+proof verifies mechanics. The owner's supplied offline/batch results authorize
+this implementation; live throughput and observed miss rate remain live proof,
+not claims made by synthetic tests. Live activation is separate from this PR.

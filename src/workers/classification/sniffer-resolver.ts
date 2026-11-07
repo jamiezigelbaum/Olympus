@@ -1,3 +1,4 @@
+import type { EmbeddingPrefilter } from './embedding-prefilter.ts';
 import type { SnifferModel, SnifferModelRequest, SnifferModelCompletion } from './sniffer-decision.ts';
 // The sniffer's background pass (design section 2.2): resolve pending items.
 //
@@ -78,6 +79,7 @@ const OUTPUT_CHARS_PER_ITEM = 110;
 export interface SnifferTarget {
   ledger: TierLedger;
   sniffer: TierSnifferStore;
+  embeddingPrefilter?: EmbeddingPrefilter;
   /**
    * The tiered store set's placement planner, for a set ledger. A routed item
    * (P1b) is settled through it, so a verdict that needs other stores queues
@@ -480,6 +482,7 @@ export async function runSnifferPass(options: SnifferPassOptions): Promise<Sniff
   for (const target of options.targets) {
     const questions = target.sniffer.listQuestions({ limit: options.pendingPageSize ?? 500, eligible: question => {
       report.pendingSeen += 1;
+      if (target.embeddingPrefilter?.retained(question)) return false;
       if (finishContentDonor(target, question) || midMove(target, question)) return false;
       if (stillOpen(target, question)) return screenQuestion(target, question);
       target.sniffer.deleteQuestion(question, question.pass, question.materialHash);
@@ -520,8 +523,14 @@ export async function runSnifferPass(options: SnifferPassOptions): Promise<Sniff
     if (stopped) { report.stoppedBy = stopped; return finish(report); }
     id = snifferId(options.lane, promptVersion);
   }
+  for (const target of options.targets) await target.embeddingPrefilter?.prepare(id);
   for (const pass of ['metadata', 'content'] as const) {
     work[pass] = work[pass].filter(item => {
+      if (item.target.embeddingPrefilter?.tryClear(item.question, id)) {
+        report.verdictsApplied += 1; report.resolvedPersonal += 1;
+        return false;
+      }
+      if (item.target.embeddingPrefilter?.isSpotCheck(item.question)) return true;
       const cached = item.target.sniffer.getVerdict(keyOf(item.question));
       if (!cached || !cachedSnifferVerdictHolds(cached)
         || (item.question.contentHash && !contentVerdictReusable(cached, item.question.contentHash, item.question))) return true;
@@ -560,7 +569,7 @@ export async function runSnifferPass(options: SnifferPassOptions): Promise<Sniff
       continue;
     }
     if (!screenQuestion(next.target, next.question)) continue;
-    const duplicate = next.question.contentHash && next.question.pass === 'content'
+    const duplicate = !next.target.embeddingPrefilter?.isSpotCheck(next.question) && next.question.contentHash && next.question.pass === 'content'
       ? next.target.sniffer.getFinalModelContentVerdict({ ...keyOf(next.question), contentHash: next.question.contentHash })
       : undefined;
     if (duplicate && cachedSnifferVerdictHolds(duplicate)) {
@@ -571,7 +580,8 @@ export async function runSnifferPass(options: SnifferPassOptions): Promise<Sniff
     const group = [next];
     for (let i = pending.length - 1; i >= 0; i--) {
       const item = pending[i]!;
-      if (!next.question.contentHash && item.question.pass === pass && item.question.materialHash === next.question.materialHash
+      if (!next.target.embeddingPrefilter?.isSpotCheck(next.question) && !item.target.embeddingPrefilter?.isSpotCheck(item.question)
+        && !next.question.contentHash && item.question.pass === pass && item.question.materialHash === next.question.materialHash
         && item.question.mapRevision === next.question.mapRevision && stillOpen(item.target, item.question)
         && screenQuestion(item.target, item.question)) {
         group.push(item); pending.splice(i, 1);
@@ -642,6 +652,8 @@ export async function runSnifferPass(options: SnifferPassOptions): Promise<Sniff
         group[0]!.target.sniffer.putVerdict(key, stored, group[0]!.question);
         for (const item of group) {
           if (item.target !== group[0]!.target) item.target.sniffer.putVerdict(key, stored, group[0]!.question);
+          const audit = sameQuestion(item.target, item.question) && stillOpen(item.target, item.question, false);
+          if (audit) item.target.embeddingPrefilter?.observe(item.question, stored.tier === 'private');
           apply(item, stored);
         }
         continue;

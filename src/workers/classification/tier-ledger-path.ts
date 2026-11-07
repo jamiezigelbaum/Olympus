@@ -54,3 +54,8 @@ export function tierSnifferPathForStore(storeDbPath: string): string {
   const base = storeDbPath.endsWith('.sqlite') ? storeDbPath.slice(0, -'.sqlite'.length) : storeDbPath;
   return `${base}${TIER_SNIFFER_FILE_SUFFIX}`;
 }
+
+/** Install-local learned weights: never part of an export or release artifact. */
+export function embeddingPrefilterDirectory(ledgerPath: string): string {
+  return `${ledgerPath}.embedding-prefilter`;
+}

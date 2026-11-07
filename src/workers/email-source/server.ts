@@ -7201,6 +7201,7 @@ export async function main(): Promise<void> {
         ownerContext: privacyOwnerWords,
         budgetStatePath: join(dirname(resolveClassificationLedgerPath(process.env)), 'tier-sniffer-budget.json'),
         intervalMs: snifferEnv.intervalMs,
+        embeddingPrefilterEnabled: () => snifferEnv.embeddingPrefilterEnabled,
         ...(snifferEnv.maxCallsPerPass !== undefined ? { maxCallsPerPass: snifferEnv.maxCallsPerPass } : {}),
         ...(snifferEnv.concurrentCalls !== undefined ? { concurrentCalls: snifferEnv.concurrentCalls } : {}),
         ...(snifferEnv.maxCallsPerDay !== undefined ? { maxCallsPerDay: snifferEnv.maxCallsPerDay } : snifferLane.kind === 'venice' && !judgeSpending.status().uncapped ? { maxCallsPerDay: Number.MAX_SAFE_INTEGER } : {}),

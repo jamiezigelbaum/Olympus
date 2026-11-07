@@ -5,6 +5,19 @@ Status: active
 Owner: Olympus product owner
 Planning authority: this document defines release scope, sequence, and completion: Olympus 1.0 first, then the 0.4 record. It supersedes dated CTO planning handoffs and migration plans. [`CONTRACTS.md`](CONTRACTS.md) remains the architecture authority.
 
+## Embedding Personal pre-filter (#939; implementation, 2026-11-07)
+
+Implement a source-neutral Personal-only first pass over each item's own stored
+EmbeddingGemma 2 vector, below p(Private) 0.05. One install-local logistic model
+trains daily after 2,000 final judge labels per class; the 5% direct-judge audit
+stops all clearing and requeues provisional clearances above 2% Private in 200
+checks. Owner rules, Secrets and open names questions precede it. The engine
+setting defaults on once trained. Implementation details and recovery behavior
+live in `design/per-item-four-tier-classification.md`, "Embedding Personal
+pre-filter". No live rollout in this branch; synthetic checks do not establish
+queue throughput or a real-data miss rate. The owner's supplied offline and
+200-item held-queue results are inputs, with no real labels or weights committed.
+
 ## Private embedding choices and pending judgments (#937; owner, 2026-11-06)
 
 New embedding setup offers built-in local EmbeddingGemma or Venice; the laptop

@@ -71,6 +71,9 @@ function tierSnifferPathForStore(storeDbPath) {
   const base = storeDbPath.endsWith(".sqlite") ? storeDbPath.slice(0, -".sqlite".length) : storeDbPath;
   return `${base}${TIER_SNIFFER_FILE_SUFFIX}`;
 }
+function embeddingPrefilterDirectory(ledgerPath) {
+  return `${ledgerPath}.embedding-prefilter`;
+}
 var TIER_LEDGER_SQLITE_STORE_ID = "olympus_tier_ledger", TIER_LEDGER_FILE_SUFFIX = ".tier-ledger.sqlite", SECRET_LOCATIONS_SQLITE_STORE_ID = "olympus_secret_locations", SECRET_LOCATIONS_FILE_SUFFIX = ".secret-locations.sqlite", TIER_SNIFFER_SQLITE_STORE_ID = "olympus_tier_sniffer", TIER_SNIFFER_FILE_SUFFIX = ".tier-sniffer.sqlite";
 
 // src/core/archive-formats.ts
@@ -10472,6 +10475,12 @@ class TierSnifferStore {
       ORDER BY CASE tier WHEN 'private' THEN 1 ELSE 0 END DESC, decided_at DESC LIMIT 1`).get(key.contentHash, key.modelId, key.promptVersion, key.mapRevision, key.materialHash ?? null);
     return row ? this.getVerdict({ ...key, materialHash: row.material_hash }) : undefined;
   }
+  judgedContentLabel(subject, modelId, contentHash) {
+    const row = this.db.query(`SELECT tier FROM sniffer_verdicts
+      WHERE model_subject = ? AND model_id = ? AND content_hash = ? AND fail_safe = 0
+      ORDER BY decided_at DESC LIMIT 1`).get(snifferSubjectKey(subject), modelId, contentHash);
+    return row?.tier;
+  }
   enqueue(question) {
     const materialHash = question.materialHash ?? snifferMaterialHash(question.pass, question.material);
     const priority = Number.isFinite(question.priority) ? Math.max(HELD_UNTIL_JUDGED_PRIORITY, Math.min(100, Math.floor(question.priority))) : 0;
@@ -17055,6 +17064,54 @@ class TierLedger {
     })();
     return outcome === undefined ? undefined : { outcome, record: this.getCurrent(identity) };
   }
+  clearEmbeddingQuestion(identity, options) {
+    return this.db.transaction(() => {
+      const row = this.readRow(identity);
+      if (!row || row.state !== "pending" || row.metadataPending || !row.contentPending || !row.contentRead || row.metadataTier !== "private" || row.contentTier !== "private" || row.metadataForced || row.decidedBy === "override" || row.decidedBy === "owner_rule" || this.getOverride(identity) || row.reasons.some((reason) => reason.startsWith("metadata:owner_rule:")) || this.rejudgeQuestion(identity) || !options.questionStillCurrent())
+        return false;
+      this.writeMeta(options.receiptKey, options.receipt);
+      const result = this.applySnifferVerdict(identity, {
+        pass: "content",
+        tier: "private",
+        reason: options.reason,
+        modelId: options.modelId,
+        mapRevision: row.mapRevision
+      }, { questionStillCurrent: options.questionStillCurrent, ...options.placementFor ? { placementFor: options.placementFor } : {} });
+      if (!result || ["unchanged", "needs_placement", "stale_question", "stale_map", "held_moving"].includes(result.outcome)) {
+        this.writeMeta(options.receiptKey, "");
+        return false;
+      }
+      return true;
+    })();
+  }
+  revokeEmbeddingClearance(identity, reason, original, placementFor) {
+    return this.db.transaction(() => {
+      const row = this.readRow(identity);
+      if (!row || !row.reasons.includes(reason) || row.decidedBy === "override" || row.decidedBy === "owner_rule" || this.getOverride(identity) || row.contentTier !== original.contentTier || row.metadataTier !== original.metadataTier || row.metadataPending || row.contentPending || row.metadataForced || row.reasons.some((code) => code.startsWith("metadata:owner_rule:")) || original.reasons.filter((code) => code.startsWith("content:sha256:") || code.startsWith("content:names:")).some((code) => !row.reasons.includes(code)))
+        return true;
+      if (!row.routed) {
+        this.writeRow(identity, rowOf({ ...row, ...original }), undefined, row);
+        return true;
+      }
+      if (!placementFor)
+        return false;
+      if (row.state === "moving") {
+        const now = this.now().toISOString();
+        const staleFlip = row.generation + 1;
+        this.db.query(`UPDATE tier_copies SET superseded_by_generation = ?, updated_at = ?
+          WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+          AND copy_state = 'superseded' AND superseded_by_generation = ?`).run(staleFlip + 1, now, ...idParams(identity), staleFlip);
+        this.db.query(`UPDATE tier_copies SET copy_state = 'superseded', superseded_by_generation = ?, updated_at = ?
+          WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND copy_state = 'staged'`).run(staleFlip, now, ...idParams(identity));
+        this.db.query(`UPDATE tier_items SET generation = ?
+          WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?`).run(staleFlip, ...idParams(identity));
+        this.queueMoveRow(identity, { ...row, generation: staleFlip }, original, { hide: true, decidedAt: now });
+      } else {
+        this.recordRoutedPlacement(identity, original, placementFor(original));
+      }
+      return true;
+    })();
+  }
   answerRejudgeQuestion(identity, question, verdict, options) {
     const base = question.decision;
     if (this.getOverride(identity)?.kind === "tier") {
@@ -17886,6 +17943,12 @@ class TierLedger {
       INSERT INTO tier_ledger_meta (key, value) VALUES (?, ?)
       ON CONFLICT(key) DO UPDATE SET value = excluded.value
     `).run(key, value);
+  }
+  writeMetaBatch(entries) {
+    this.db.transaction(() => {
+      for (const [key, value] of entries)
+        this.writeMeta(key, value);
+    })();
   }
   metaEntries(prefix, options = {}) {
     return this.db.query("SELECT key, value FROM tier_ledger_meta WHERE key >= ? AND key < ? AND key > ? AND value <> ? ORDER BY key LIMIT ?").all(prefix, `${prefix}￿`, options.after ?? "", "", options.limit ?? -1);
@@ -19025,6 +19088,7 @@ class TierLedger {
   withdrawAccountScope(provider, accountScope) {
     return this.db.transaction(() => {
       const now = this.now().toISOString();
+      this.writeMeta("embedding-prefilter:training-revision", now);
       this.db.query(`
         UPDATE tier_copies
         SET copy_state = 'superseded',
@@ -67280,7 +67344,7 @@ init_data_owner_lock();
 init_worker_auth();
 init_worker_transport();
 import { createHash as createHash31 } from "node:crypto";
-import { existsSync as existsSync32, lstatSync as lstatSync15, mkdirSync as mkdirSync18, writeFileSync as writeFileSync7 } from "node:fs";
+import { existsSync as existsSync33, lstatSync as lstatSync16, mkdirSync as mkdirSync19, writeFileSync as writeFileSync7 } from "node:fs";
 import { dirname as dirname39, isAbsolute as isAbsolute14 } from "node:path";
 
 // src/workers/classification/judge-setup.ts
@@ -72342,7 +72406,6 @@ init_child_visibility();
 init_secret_locations();
 init_source_storage();
 init_provider_account_history();
-
 // src/core/source-account-migration.ts
 init_archive_formats();
 init_atomic_file();
@@ -72704,6 +72767,351 @@ init_built_in_sniffer();
 init_answer_activity();
 init_privacy_profile();
 
+// src/workers/classification/embedding-prefilter.ts
+init_atomic_file();
+init_control_path_headroom();
+init_sniffer();
+init_tier_ledger();
+init_tier_classifier();
+import { chmodSync as chmodSync7, existsSync as existsSync31, lstatSync as lstatSync15, mkdirSync as mkdirSync17, readFileSync as readFileSync28 } from "node:fs";
+import { join as join40 } from "node:path";
+import { randomUUID as randomUUID11 } from "node:crypto";
+
+// src/workers/classification/embedding-logistic.ts
+var EMBEDDING_PREFILTER_MODEL_ID = "embeddinggemma-2-litert-24d962e";
+var EMBEDDING_PREFILTER_DIMENSIONS = 768;
+var EMBEDDING_PREFILTER_MIN_PER_CLASS = 2000;
+function normalized(vector) {
+  if (!Array.isArray(vector) || vector.length !== EMBEDDING_PREFILTER_DIMENSIONS || !vector.every(Number.isFinite))
+    return;
+  const norm = Math.hypot(...vector);
+  if (!Number.isFinite(norm) || norm === 0)
+    return;
+  return vector.map((value) => value / norm);
+}
+function sigmoid(value) {
+  return value >= 0 ? 1 / (1 + Math.exp(-value)) : Math.exp(value) / (1 + Math.exp(value));
+}
+function privateProbability(model, vector) {
+  if (!model || !Array.isArray(model.weights) || model.weights.length !== EMBEDDING_PREFILTER_DIMENSIONS || !model.weights.every(Number.isFinite) || !Number.isFinite(model.bias))
+    return;
+  const input = normalized(vector);
+  if (!input)
+    return;
+  let score = model.bias;
+  for (let i2 = 0;i2 < input.length; i2++)
+    score += input[i2] * model.weights[i2];
+  return Number.isFinite(score) ? sigmoid(score) : undefined;
+}
+function trainLogistic(examples, minimumPerClass = EMBEDDING_PREFILTER_MIN_PER_CLASS) {
+  if (!Number.isSafeInteger(minimumPerClass) || minimumPerClass < 1)
+    return;
+  const counts = [0, 0];
+  const inputs = [];
+  for (const example of examples) {
+    const vector = normalized(example.vector);
+    if (!vector || typeof example.private !== "boolean")
+      continue;
+    const label = Number(example.private);
+    inputs.push({ vector, label });
+    counts[label]++;
+  }
+  if (counts.some((count) => count < minimumPerClass))
+    return;
+  const weights = new Array(EMBEDDING_PREFILTER_DIMENSIONS).fill(0);
+  let bias = Math.log(counts[1] / counts[0]);
+  let seed = 939;
+  const order = inputs.map((_, index) => index);
+  for (let epoch = 0;epoch < 20; epoch++) {
+    for (let i2 = order.length - 1;i2 > 0; i2--) {
+      seed = Math.imul(seed, 1664525) + 1013904223 >>> 0;
+      const j = seed % (i2 + 1);
+      [order[i2], order[j]] = [order[j], order[i2]];
+    }
+    const rate = 0.12 / (1 + epoch * 0.15);
+    const shrink = 1 - rate * 0.001;
+    for (const index of order) {
+      const input = inputs[index];
+      let score = bias;
+      for (let i2 = 0;i2 < weights.length; i2++)
+        score += weights[i2] * input.vector[i2];
+      const error2 = sigmoid(score) - input.label;
+      bias -= rate * error2;
+      for (let i2 = 0;i2 < weights.length; i2++)
+        weights[i2] = weights[i2] * shrink - rate * error2 * input.vector[i2];
+    }
+  }
+  return { weights, bias };
+}
+
+// src/workers/classification/embedding-prefilter.ts
+var PREFIX = "embedding-prefilter:";
+var RECEIPTS = `${PREFIX}clear:`;
+var CHECKS = `${PREFIX}check:`;
+var WINDOW = 200;
+var RETRAIN_MS = 24 * 60 * 60 * 1000;
+var MAX_PER_CLASS = 5000;
+function prefilterVector(copy) {
+  if (!copy || copy.chunks.length === 0 || copy.chunks.some((chunk) => chunk.mediaSha256 || chunk.mediaPath) || snifferMaterialCarriesSecret(copy.chunks.map((chunk) => chunk.boundedText).join("")))
+    return;
+  const vectors = copy.vectors.filter((vector) => vector.modelId === EMBEDDING_PREFILTER_MODEL_ID);
+  if (vectors.length !== copy.chunks.length)
+    return;
+  const mean = new Array(EMBEDDING_PREFILTER_DIMENSIONS).fill(0);
+  for (const chunk of copy.chunks) {
+    const matching = vectors.filter((vector) => vector.chunkIndex === chunk.chunkIndex && vector.contentHash === chunk.embeddingInputHash);
+    if (matching.length !== 1 || matching[0].embedding.byteLength !== EMBEDDING_PREFILTER_DIMENSIONS * 4)
+      return;
+    const bytes = matching[0].embedding;
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    for (let i2 = 0;i2 < mean.length; i2++) {
+      const value = view.getFloat32(i2 * 4, true);
+      if (!Number.isFinite(value))
+        return;
+      mean[i2] = mean[i2] + value / vectors.length;
+    }
+  }
+  return mean;
+}
+function subjectOf(row) {
+  return {
+    provider: row.provider,
+    accountScope: row.accountScope,
+    providerItemId: row.providerItemId,
+    ...row.conversationKey ? { providerConversationId: row.conversationKey } : {}
+  };
+}
+function decisionOf(row) {
+  return { ...row, state: row.metadataPending || row.contentPending ? "pending" : "current", decidedBy: row.decidedBy, snifferId: "embedding-prefilter" };
+}
+
+class EmbeddingPrefilter {
+  options;
+  owner;
+  members = new Set;
+  get control() {
+    return this.owner.options.ledger;
+  }
+  get audit() {
+    return this.owner.auditState;
+  }
+  get saved() {
+    return this.owner.savedModel;
+  }
+  set saved(value) {
+    this.owner.savedModel = value;
+  }
+  savedModel;
+  attemptedAt = -Infinity;
+  auditState;
+  path;
+  constructor(options) {
+    this.options = options;
+    this.owner = options.sharedWith?.owner ?? this;
+    this.owner.members.add(this);
+    this.path = join40(embeddingPrefilterDirectory(this.owner.options.ledger.dbPath), "weights.json");
+    try {
+      const audit = this.control.readMeta(`${PREFIX}audit`);
+      this.auditState = audit ? JSON.parse(audit) : { misses: [], stopped: false };
+      if (!Array.isArray(this.auditState.misses) || this.auditState.misses.length > WINDOW || this.auditState.misses.some((value) => typeof value !== "boolean") || typeof this.auditState.stopped !== "boolean")
+        throw new Error;
+    } catch {
+      this.auditState = { misses: [], stopped: true, reason: "audit_unreadable" };
+      this.control.writeMeta(`${PREFIX}audit`, JSON.stringify(this.auditState));
+    }
+    if (this.owner !== this)
+      return;
+    try {
+      if (existsSync31(this.path) && !lstatSync15(this.path).isSymbolicLink() && lstatSync15(embeddingPrefilterDirectory(options.ledger.dbPath)).isDirectory() && !lstatSync15(embeddingPrefilterDirectory(options.ledger.dbPath)).isSymbolicLink()) {
+        chmodSync7(embeddingPrefilterDirectory(options.ledger.dbPath), 448);
+        chmodSync7(this.path, 384);
+        this.saved = JSON.parse(readFileSync28(this.path, "utf8"));
+      }
+    } catch {
+      this.saved = undefined;
+    }
+  }
+  revisions() {
+    return JSON.stringify([...this.owner.members].map((member) => [member.options.ledger.ledgerId(), member.options.ledger.readMeta("embedding-prefilter:training-revision") ?? "0"]).sort());
+  }
+  now() {
+    return this.options.now?.() ?? Date.now();
+  }
+  enabled() {
+    return this.options.enabled?.() !== false;
+  }
+  status() {
+    if (this.audit.reason === "audit_unreadable")
+      return "Embedding clearing stopped: its audit state could not be read. Cleared items are returning to the privacy judge.";
+    if (this.audit.stopped)
+      return "Embedding clearing stopped: more than 2% of the last 200 checks were Private. Cleared items are returning to the privacy judge.";
+    if (!this.enabled())
+      return "Embedding clearing is off.";
+    if (!this.saved)
+      return `Embedding clearing waits for ${EMBEDDING_PREFILTER_MIN_PER_CLASS} judge verdicts per class with complete stored vectors.`;
+    return `Embedding clearing is on; ${this.audit.misses.length} of 200 spot checks collected.`;
+  }
+  recover() {
+    if (this.audit.stopped || !this.enabled())
+      for (const member of this.owner.members)
+        member.rollback();
+  }
+  async prepare(judge2) {
+    if (this.owner !== this)
+      return this.owner.prepare(judge2);
+    if (this.audit.stopped) {
+      for (const member of this.members)
+        member.rollback();
+      return;
+    }
+    if (!this.enabled()) {
+      for (const member of this.members)
+        member.rollback();
+      return;
+    }
+    if (this.saved && (this.saved.judge !== judge2 || !/^[0-9a-f-]{36}$/.test(this.saved.version) || !Number.isFinite(this.saved.trainedAt) || privateProbability(this.saved.model, [1, ...new Array(EMBEDDING_PREFILTER_DIMENSIONS - 1).fill(0)]) === undefined))
+      this.saved = undefined;
+    if (this.saved && this.saved.revisions !== this.revisions()) {
+      this.saved = undefined;
+      this.attemptedAt = -Infinity;
+    }
+    const now = this.now();
+    if (this.saved && now - this.saved.trainedAt < RETRAIN_MS || now - this.attemptedAt < RETRAIN_MS)
+      return;
+    this.attemptedAt = now;
+    const examples = [];
+    const counts = [0, 0];
+    for (const member of this.members) {
+      let after;
+      while (true) {
+        const rows = member.options.ledger.listRouted({ ...after ? { after } : {}, limit: 500 });
+        if (!rows.length)
+          break;
+        for (const row of rows) {
+          if (row.state !== "current" || row.metadataPending || row.contentPending || row.metadataTier !== "private" || !["private", "secure"].includes(row.contentTier) || row.metadataForced || !row.modelId || row.decidedBy === "owner_rule" || row.decidedBy === "override" || row.reasons.some((reason) => reason.startsWith("metadata:owner_rule:") || reason.startsWith("content:embedding_prefilter:")) || !row.reasons.some((reason) => reason.startsWith(`content:sniffer:${judge2}:`) && !/:rule:|:unresolved:|:fail_safe:|:injection:/.test(reason)))
+            continue;
+          const copy = member.options.copyFor(subjectOf(row));
+          if (!copy || !row.reasons.includes(contentDigestReason(copy.chunks.map((chunk) => chunk.boundedText).join(""))))
+            continue;
+          const label = member.options.sniffer.judgedContentLabel(subjectOf(row), row.modelId, normalizedContentHash(copy.chunks.map((chunk) => chunk.boundedText).join("")));
+          if (!label)
+            continue;
+          const isPrivate = label === "private";
+          const index = Number(isPrivate);
+          if (counts[index] >= MAX_PER_CLASS)
+            continue;
+          const vector = prefilterVector(copy);
+          if (!vector)
+            continue;
+          examples.push({ vector, private: isPrivate });
+          counts[index]++;
+        }
+        after = subjectOf(rows[rows.length - 1]);
+        if (counts.every((count) => count >= MAX_PER_CLASS))
+          break;
+        await ingestionTurn();
+      }
+    }
+    const model = trainLogistic(examples);
+    if (!model || this.options.ledger.dbPath === ":memory:")
+      return;
+    const directory = embeddingPrefilterDirectory(this.options.ledger.dbPath);
+    if (existsSync31(directory) && (!lstatSync15(directory).isDirectory() || lstatSync15(directory).isSymbolicLink()))
+      return;
+    mkdirSync17(directory, { recursive: true, mode: 448 });
+    chmodSync7(directory, 448);
+    const saved = { model, judge: judge2, revisions: this.revisions(), trainedAt: now, version: randomUUID11() };
+    writePrivateFileAtomicSync(this.path, JSON.stringify(saved));
+    this.saved = saved;
+  }
+  retained(question) {
+    const raw = this.options.ledger.readMeta(RECEIPTS + tierLedgerIdentityKey(question));
+    if (!raw)
+      return false;
+    const receipt = JSON.parse(raw);
+    const row = this.options.ledger.getCurrent(question);
+    if (receipt.hash === question.materialHash && row?.reasons.includes(receipt.reason))
+      return true;
+    this.options.ledger.writeMeta(RECEIPTS + tierLedgerIdentityKey(question), "");
+    return false;
+  }
+  tryClear(question, judge2) {
+    if (!this.enabled() || this.audit.stopped || !this.saved || this.saved.revisions !== this.revisions() || this.saved.judge !== judge2 || question.pass !== "content")
+      return false;
+    const row = this.options.ledger.getCurrent(question);
+    if (!row || row.state !== "pending" || row.metadataPending || !row.contentPending || !row.contentRead || row.metadataTier !== "private" || row.contentTier !== "private" || row.metadataForced || row.decidedBy === "override" || row.decidedBy === "owner_rule" || this.options.ledger.getOverride(question) || row.reasons.some((reason2) => reason2.startsWith("metadata:owner_rule:")) || this.options.ledger.rejudgeQuestion(question) || this.options.sniffer.questionFor(question, "metadata"))
+      return false;
+    const checkKey = this.checkKey(question);
+    if (this.control.readMeta(checkKey) === question.materialHash)
+      return false;
+    const copy = this.options.copyFor(question);
+    if (!copy || !row.reasons.includes(contentDigestReason(copy.chunks.map((chunk) => chunk.boundedText).join(""))))
+      return false;
+    const vector = prefilterVector(copy);
+    const probability = vector ? privateProbability(this.saved.model, vector) : undefined;
+    if (probability === undefined || probability >= 0.05)
+      return false;
+    if ((this.options.random?.() ?? Math.random()) < 0.05) {
+      this.control.writeMeta(checkKey, question.materialHash);
+      return false;
+    }
+    const reason = `content:embedding_prefilter:${this.saved.version}:${probability.toFixed(8)}`;
+    const receipt = { subject: question, hash: question.materialHash, reason, original: decisionOf(row) };
+    receipt.subject = {
+      provider: question.provider,
+      accountScope: question.accountScope,
+      providerItemId: question.providerItemId,
+      ...question.providerConversationId ? { providerConversationId: question.providerConversationId } : {}
+    };
+    const cleared = this.options.ledger.clearEmbeddingQuestion(question, {
+      reason,
+      receiptKey: RECEIPTS + tierLedgerIdentityKey(question),
+      receipt: JSON.stringify(receipt),
+      modelId: EMBEDDING_PREFILTER_MODEL_ID,
+      questionStillCurrent: () => this.options.sniffer.questionFor(question, "content")?.materialHash === question.materialHash,
+      ...this.options.placementFor ? { placementFor: this.options.placementFor } : {}
+    });
+    if (cleared)
+      this.options.ledger.markJudged(question, { engineVersion: TIER_CLASSIFIER_VERSION, snifferId: judge2 });
+    return cleared;
+  }
+  checkKey(question) {
+    return CHECKS + this.options.ledger.ledgerId() + ":" + tierLedgerIdentityKey(question);
+  }
+  isSpotCheck(question) {
+    return question.pass === "content" && this.control.readMeta(this.checkKey(question)) === question.materialHash;
+  }
+  observe(question, isPrivate) {
+    if (!this.isSpotCheck(question))
+      return;
+    this.audit.misses.push(isPrivate);
+    this.audit.misses = this.audit.misses.slice(-WINDOW);
+    this.audit.stopped ||= this.audit.misses.length === WINDOW && this.audit.misses.filter(Boolean).length > 4;
+    this.control.writeMetaBatch([[`${PREFIX}audit`, JSON.stringify(this.audit)], [this.checkKey(question), ""]]);
+    if (this.audit.stopped)
+      for (const member of this.owner.members)
+        member.rollback();
+    else if (this.audit.misses.length === WINDOW)
+      for (const member of this.owner.members)
+        member.acceptClearances();
+  }
+  acceptClearances() {
+    for (const entry of this.options.ledger.metaEntries(RECEIPTS)) {
+      const receipt = JSON.parse(entry.value);
+      this.options.ledger.writeMeta(entry.key, "");
+      this.options.sniffer.deleteQuestion(receipt.subject, "content", receipt.hash);
+    }
+  }
+  rollback() {
+    for (const entry of this.options.ledger.metaEntries(RECEIPTS)) {
+      const receipt = JSON.parse(entry.value);
+      if (this.options.ledger.revokeEmbeddingClearance(receipt.subject, receipt.reason, receipt.original, this.options.placementFor)) {
+        this.options.ledger.writeMeta(entry.key, "");
+      }
+    }
+  }
+}
+
 // src/workers/classification/sniffer-service.ts
 init_tier_move();
 init_control_path_headroom();
@@ -72725,7 +73133,7 @@ init_sniffer_store();
 init_tier_classifier();
 init_tier_ledger();
 import { createHash as createHash30 } from "node:crypto";
-import { mkdirSync as mkdirSync17, readFileSync as readFileSync28 } from "node:fs";
+import { mkdirSync as mkdirSync18, readFileSync as readFileSync29 } from "node:fs";
 import { dirname as dirname38 } from "node:path";
 var DEFAULT_SNIFFER_MAX_CALLS_PER_DAY = 20000;
 var DEFAULT_DECISION_SNIFFER_MAX_CALLS_PER_DAY = 250000;
@@ -72748,7 +73156,7 @@ class SnifferCallBudget {
     this.statePath = options.statePath;
     if (this.statePath) {
       try {
-        const saved = JSON.parse(readFileSync28(this.statePath, "utf8"));
+        const saved = JSON.parse(readFileSync29(this.statePath, "utf8"));
         if (typeof saved.day === "string" && typeof saved.used === "number" && Number.isFinite(saved.used)) {
           this.day = saved.day;
           this.used = Math.max(0, Math.floor(saved.used));
@@ -72769,7 +73177,7 @@ class SnifferCallBudget {
     if (!this.statePath)
       return;
     try {
-      mkdirSync17(dirname38(this.statePath), { recursive: true, mode: 448 });
+      mkdirSync18(dirname38(this.statePath), { recursive: true, mode: 448 });
       writePrivateFileAtomicSync(this.statePath, `${JSON.stringify({ day: this.day, used: this.used })}
 `);
     } catch {}
@@ -73011,6 +73419,8 @@ async function runSnifferPass(options) {
   for (const target of options.targets) {
     const questions = target.sniffer.listQuestions({ limit: options.pendingPageSize ?? 500, eligible: (question) => {
       report.pendingSeen += 1;
+      if (target.embeddingPrefilter?.retained(question))
+        return false;
       if (finishContentDonor(target, question) || midMove(target, question))
         return false;
       if (stillOpen(target, question))
@@ -73048,8 +73458,17 @@ async function runSnifferPass(options) {
     }
     id = snifferId(options.lane, promptVersion);
   }
+  for (const target of options.targets)
+    await target.embeddingPrefilter?.prepare(id);
   for (const pass of ["metadata", "content"]) {
     work[pass] = work[pass].filter((item) => {
+      if (item.target.embeddingPrefilter?.tryClear(item.question, id)) {
+        report.verdictsApplied += 1;
+        report.resolvedPersonal += 1;
+        return false;
+      }
+      if (item.target.embeddingPrefilter?.isSpotCheck(item.question))
+        return true;
       const cached3 = item.target.sniffer.getVerdict(keyOf(item.question));
       if (!cached3 || !cachedSnifferVerdictHolds(cached3) || item.question.contentHash && !contentVerdictReusable(cached3, item.question.contentHash, item.question))
         return true;
@@ -73079,7 +73498,7 @@ async function runSnifferPass(options) {
       }
       if (!screenQuestion(next.target, next.question))
         continue;
-      const duplicate = next.question.contentHash && next.question.pass === "content" ? next.target.sniffer.getFinalModelContentVerdict({ ...keyOf(next.question), contentHash: next.question.contentHash }) : undefined;
+      const duplicate = !next.target.embeddingPrefilter?.isSpotCheck(next.question) && next.question.contentHash && next.question.pass === "content" ? next.target.sniffer.getFinalModelContentVerdict({ ...keyOf(next.question), contentHash: next.question.contentHash }) : undefined;
       if (duplicate && cachedSnifferVerdictHolds(duplicate)) {
         apply(next, duplicate, true);
         report.cacheHits += 1;
@@ -73088,7 +73507,7 @@ async function runSnifferPass(options) {
       const group = [next];
       for (let i2 = pending.length - 1;i2 >= 0; i2--) {
         const item = pending[i2];
-        if (!next.question.contentHash && item.question.pass === pass && item.question.materialHash === next.question.materialHash && item.question.mapRevision === next.question.mapRevision && stillOpen(item.target, item.question) && screenQuestion(item.target, item.question)) {
+        if (!next.target.embeddingPrefilter?.isSpotCheck(next.question) && !item.target.embeddingPrefilter?.isSpotCheck(item.question) && !next.question.contentHash && item.question.pass === pass && item.question.materialHash === next.question.materialHash && item.question.mapRevision === next.question.mapRevision && stillOpen(item.target, item.question) && screenQuestion(item.target, item.question)) {
           group.push(item);
           pending.splice(i2, 1);
         }
@@ -73155,6 +73574,9 @@ async function runSnifferPass(options) {
           for (const item of group2) {
             if (item.target !== group2[0].target)
               item.target.sniffer.putVerdict(key2, stored, group2[0].question);
+            const audit = sameQuestion(item.target, item.question) && stillOpen(item.target, item.question, false);
+            if (audit)
+              item.target.embeddingPrefilter?.observe(item.question, stored.tier === "private");
             apply(item, stored);
           }
           continue;
@@ -73223,7 +73645,7 @@ init_secrets_disposition();
 init_tier_image_content_sweep();
 init_tier_media_judgment_sweep();
 init_tier_ledger();
-import { existsSync as existsSync31 } from "node:fs";
+import { existsSync as existsSync32 } from "node:fs";
 var DEFAULT_TIER_SNIFFER_INTERVAL_MS = 1000;
 var NOT_ANSWERING_FIRST_BACKOFF_MS = 30000;
 var NOT_ANSWERING_MAX_BACKOFF_MS = 60000;
@@ -73318,7 +73740,9 @@ class TierSnifferService {
     this.abort?.abort();
   }
   backlog() {
-    return this.backlogFrom(this.backlogCounts());
+    const backlog = this.backlogFrom(this.backlogCounts());
+    const messages = [...new Set([...this.embeddingPrefilters.values()].map((filter) => filter.status()))];
+    return { ...backlog, summary: [backlog.summary, ...messages].join(" ") };
   }
   backlogCounts() {
     if (this.backlogRows() <= (this.options.backlogExactRows ?? BACKLOG_EXACT_ROWS))
@@ -73360,7 +73784,7 @@ class TierSnifferService {
         }
       }
       const path = tierSnifferPathForLedger(ledgerPath);
-      const hasQueue = existsSync31(path);
+      const hasQueue = existsSync32(path);
       if (hasQueue)
         db.query("ATTACH DATABASE ? AS queue").run(path);
       return { db, hasQueue };
@@ -73498,11 +73922,13 @@ class TierSnifferService {
       return true;
     }
   }
+  embeddingPrefilters = new Map;
   status() {
     return {
       lane: this.options.lane.kind,
       modelId: this.options.lane.modelId,
       callsToday: this.budget.usedToday(),
+      embeddingPrefilter: [...this.embeddingPrefilters.values()].map((filter) => filter.status()),
       ...this.lastTick ? { lastTick: this.lastTick } : {},
       ...this.waiting ? { waiting: { ...this.waiting } } : {}
     };
@@ -73677,14 +74103,14 @@ class TierSnifferService {
       try {
         const binding = store.tierSetBinding?.();
         const bound = store.tierSetLedgerPath ? store.tierSetLedgerPath() : binding?.ledgerPath;
-        if (bound && bound !== ":memory:" && existsSync31(bound)) {
+        if (bound && bound !== ":memory:" && existsSync32(bound)) {
           paths.add(bound);
           if (binding?.ledgerId)
             this.boundLedgerIds.set(bound, binding.ledgerId);
         }
       } catch {}
       const own3 = tierLedgerPathForStore(store.dbPath);
-      if (existsSync31(own3))
+      if (existsSync32(own3))
         paths.add(own3);
     }
     return [...paths];
@@ -73710,6 +74136,150 @@ class TierSnifferService {
     }
     this.ledgers.clear();
   }
+  snifferTargets() {
+    const targets = [];
+    const filterLedgerPaths = this.ledgerPaths().sort();
+    if ([...this.embeddingPrefilters.keys()].some((path) => !filterLedgerPaths.includes(path)))
+      this.embeddingPrefilters.clear();
+    for (const ledgerPath of filterLedgerPaths) {
+      let ledger;
+      try {
+        ledger = this.ledgerAt(ledgerPath);
+      } catch {
+        continue;
+      }
+      const planner = tierSetPlannerForLedger(ledgerPath);
+      let embeddingPrefilter = this.embeddingPrefilters.get(ledgerPath);
+      if (!embeddingPrefilter) {
+        embeddingPrefilter = new EmbeddingPrefilter({
+          ledger,
+          ...this.embeddingPrefilters.size ? { sharedWith: this.embeddingPrefilters.values().next().value } : {},
+          sniffer: this.options.installed.snifferStoreForLedger(ledgerPath),
+          ...planner ? { placementFor: planner } : {},
+          enabled: () => this.options.embeddingPrefilterEnabled?.() !== false,
+          copyFor: (subject) => {
+            const set2 = tierSetForLedger(ledgerPath);
+            const serving = copyServingLayer(ledger.copies(subject), "content");
+            if (set2 && serving) {
+              const domain = set2.domainForCorpus(serving.corpusId);
+              return domain ? set2.store(domain)?.exportItemCopy(subject) : undefined;
+            }
+            if (ledger.getCurrent(subject)?.routed)
+              return;
+            for (const store of this.options.stores()) {
+              if ((store.tierLedgerPathInUse?.() ?? tierLedgerPathForStore(store.dbPath)) !== ledgerPath)
+                continue;
+              const copy = store.exportItemCopy?.(subject);
+              if (copy)
+                return copy;
+            }
+            return;
+          }
+        });
+        this.embeddingPrefilters.set(ledgerPath, embeddingPrefilter);
+      }
+      targets.push({
+        ledger,
+        embeddingPrefilter,
+        sniffer: this.options.installed.snifferStoreForLedger(ledgerPath),
+        ...planner ? { placementFor: planner } : {},
+        screenStoredQuestion: (question) => {
+          const row = ledger.getCurrent(question);
+          if (!row || row.routed || !row.contentRead)
+            return "clean";
+          const set2 = tierSetForLedger(ledgerPath);
+          const stores = set2?.openStores() ?? this.options.stores().filter((store) => (store.tierLedgerPathInUse?.() ?? tierLedgerPathForStore(store.dbPath)) === ledgerPath);
+          try {
+            const home = stores[0];
+            if (!home)
+              return "unreadable";
+            const shared = set2?.secrets();
+            const locations = shared ?? new SecretLocationsIndex({ dbPath: secretLocationsPathForStore(home.dbPath) });
+            try {
+              if (locations.get(question)?.findingKinds.includes("sniffer_secret_refusal"))
+                return "secrets";
+            } finally {
+              if (!shared)
+                locations.close();
+            }
+            let foundBody = false;
+            for (const store of stores) {
+              if (!store.exportItemCopy)
+                return "unreadable";
+              const copy = store.exportItemCopy(question);
+              if (!copy)
+                continue;
+              const body = copy.chunks.map((chunk) => chunk.boundedText).join("");
+              if (!body.trim())
+                continue;
+              foundBody = true;
+              if (snifferMaterialCarriesSecret(body))
+                return "secrets";
+            }
+            return foundBody ? "clean" : "unreadable";
+          } catch {
+            return "unreadable";
+          }
+        },
+        settleSecrets: (question, decision) => {
+          const set2 = tierSetForLedger(ledgerPath);
+          if (!ledger.getCurrent(question)?.routed) {
+            const stores = set2?.openStores() ?? this.options.stores().filter((store) => (store.tierLedgerPathInUse?.() ?? tierLedgerPathForStore(store.dbPath)) === ledgerPath && typeof store.exportItemCopy === "function" && typeof store.tombstoneCopy === "function");
+            const home = stores[0];
+            if (!home)
+              return false;
+            const shared = set2?.secrets();
+            const locations = shared ?? new SecretLocationsIndex({ dbPath: secretLocationsPathForStore(home.dbPath) });
+            try {
+              return settleLegacySecrets({ ledger, stores, locations, identity: question, decision });
+            } finally {
+              if (!shared)
+                locations.close();
+            }
+          }
+          if (!set2)
+            return false;
+          const row = ledger.getCurrent(question);
+          if (row.contentTier === "secrets" && row.reasons.includes("metadata:secret:sniffer_refused")) {
+            const locations = set2.secrets();
+            const copies = ledger.copies(question);
+            const stores = new Map(copies.map((copy) => {
+              const domain2 = set2.domainForCorpus(copy.corpusId);
+              return [copy.corpusId, domain2 ? set2.store(domain2) : undefined];
+            }));
+            if ([...stores.values()].some((store) => !store))
+              return false;
+            const ordered = [...copies].sort((a, b) => b.generation - a.generation);
+            const serving2 = copyServingLayer(ordered, question.pass) ?? copyServingLayer(ordered, "content");
+            const remaining = serving2 ? stores.get(serving2.corpusId)?.exportItemCopy(question) : undefined;
+            if (!locations?.get(question)?.findingKinds.includes("sniffer_secret_refusal")) {
+              if (!locations || !remaining)
+                return false;
+              return settleRoutedSecrets(set2, question, decision, remaining, { findingKinds: ["sniffer_secret_refusal"] });
+            }
+            if (remaining) {
+              settleSecretsCopies({
+                ledger,
+                identity: remaining.identity,
+                copies,
+                storeFor: (corpusId) => stores.get(corpusId),
+                connectorId: "tier-sniffer"
+              });
+            } else {
+              ledger.removeCopies(question);
+            }
+            return true;
+          }
+          const current2 = set2.ledger.copies(question).filter((copy) => copy.state === "current");
+          const serving = copyServingLayer(current2, question.pass);
+          const domain = serving ? set2.domainForCorpus(serving.corpusId) : undefined;
+          const exported = domain ? set2.store(domain)?.exportItemCopy(question) : undefined;
+          return exported ? settleRoutedSecrets(set2, question, decision, exported, { findingKinds: ["sniffer_secret_refusal"] }) : false;
+        }
+      });
+    }
+    return targets;
+  }
   async tick(signal) {
     const { lane } = this.options;
     const phaseStarted = performance.now();
@@ -73723,6 +74293,10 @@ class TierSnifferService {
     };
     await this.settleStoredItems();
     phase("settle");
+    const targets = this.snifferTargets();
+    for (const target of targets)
+      target.embeddingPrefilter?.recover();
+    phase("targets");
     await this.recoverMissingQuestions(signal);
     phase("recover");
     if (this.options.modelAvailable && !this.options.modelAvailable()) {
@@ -73777,115 +74351,6 @@ class TierSnifferService {
     phase("recover");
     const rejudged = preparationStopped ? emptyTierRejudgeReport() : await this.rejudge();
     phase("rejudge");
-    const targets = [];
-    for (const ledgerPath of this.ledgerPaths()) {
-      let ledger2;
-      try {
-        ledger2 = this.ledgerAt(ledgerPath);
-      } catch {
-        continue;
-      }
-      const planner = tierSetPlannerForLedger(ledgerPath);
-      targets.push({
-        ledger: ledger2,
-        sniffer: this.options.installed.snifferStoreForLedger(ledgerPath),
-        ...planner ? { placementFor: planner } : {},
-        screenStoredQuestion: (question) => {
-          const row = ledger2.getCurrent(question);
-          if (!row || row.routed || !row.contentRead)
-            return "clean";
-          const set2 = tierSetForLedger(ledgerPath);
-          const stores = set2?.openStores() ?? this.options.stores().filter((store) => (store.tierLedgerPathInUse?.() ?? tierLedgerPathForStore(store.dbPath)) === ledgerPath);
-          try {
-            const home = stores[0];
-            if (!home)
-              return "unreadable";
-            const shared = set2?.secrets();
-            const locations = shared ?? new SecretLocationsIndex({ dbPath: secretLocationsPathForStore(home.dbPath) });
-            try {
-              if (locations.get(question)?.findingKinds.includes("sniffer_secret_refusal"))
-                return "secrets";
-            } finally {
-              if (!shared)
-                locations.close();
-            }
-            let foundBody = false;
-            for (const store of stores) {
-              if (!store.exportItemCopy)
-                return "unreadable";
-              const copy = store.exportItemCopy(question);
-              if (!copy)
-                continue;
-              const body = copy.chunks.map((chunk) => chunk.boundedText).join("");
-              if (!body.trim())
-                continue;
-              foundBody = true;
-              if (snifferMaterialCarriesSecret(body))
-                return "secrets";
-            }
-            return foundBody ? "clean" : "unreadable";
-          } catch {
-            return "unreadable";
-          }
-        },
-        settleSecrets: (question, decision) => {
-          const set2 = tierSetForLedger(ledgerPath);
-          if (!ledger2.getCurrent(question)?.routed) {
-            const stores = set2?.openStores() ?? this.options.stores().filter((store) => (store.tierLedgerPathInUse?.() ?? tierLedgerPathForStore(store.dbPath)) === ledgerPath && typeof store.exportItemCopy === "function" && typeof store.tombstoneCopy === "function");
-            const home = stores[0];
-            if (!home)
-              return false;
-            const shared = set2?.secrets();
-            const locations = shared ?? new SecretLocationsIndex({ dbPath: secretLocationsPathForStore(home.dbPath) });
-            try {
-              return settleLegacySecrets({ ledger: ledger2, stores, locations, identity: question, decision });
-            } finally {
-              if (!shared)
-                locations.close();
-            }
-          }
-          if (!set2)
-            return false;
-          const row = ledger2.getCurrent(question);
-          if (row.contentTier === "secrets" && row.reasons.includes("metadata:secret:sniffer_refused")) {
-            const locations = set2.secrets();
-            const copies = ledger2.copies(question);
-            const stores = new Map(copies.map((copy) => {
-              const domain2 = set2.domainForCorpus(copy.corpusId);
-              return [copy.corpusId, domain2 ? set2.store(domain2) : undefined];
-            }));
-            if ([...stores.values()].some((store) => !store))
-              return false;
-            const ordered = [...copies].sort((a, b) => b.generation - a.generation);
-            const serving2 = copyServingLayer(ordered, question.pass) ?? copyServingLayer(ordered, "content");
-            const remaining = serving2 ? stores.get(serving2.corpusId)?.exportItemCopy(question) : undefined;
-            if (!locations?.get(question)?.findingKinds.includes("sniffer_secret_refusal")) {
-              if (!locations || !remaining)
-                return false;
-              return settleRoutedSecrets(set2, question, decision, remaining, { findingKinds: ["sniffer_secret_refusal"] });
-            }
-            if (remaining) {
-              settleSecretsCopies({
-                ledger: ledger2,
-                identity: remaining.identity,
-                copies,
-                storeFor: (corpusId) => stores.get(corpusId),
-                connectorId: "tier-sniffer"
-              });
-            } else {
-              ledger2.removeCopies(question);
-            }
-            return true;
-          }
-          const current2 = set2.ledger.copies(question).filter((copy) => copy.state === "current");
-          const serving = copyServingLayer(current2, question.pass);
-          const domain = serving ? set2.domainForCorpus(serving.corpusId) : undefined;
-          const exported = domain ? set2.store(domain)?.exportItemCopy(question) : undefined;
-          return exported ? settleRoutedSecrets(set2, question, decision, exported, { findingKinds: ["sniffer_secret_refusal"] }) : false;
-        }
-      });
-    }
-    phase("targets");
     const report = await runSnifferPass({
       targets,
       lane,
@@ -74777,7 +75242,7 @@ function secureLocalBackfillDryRunFromEnv(env = process.env) {
   ];
   const force = env.OLYMPUS_SOURCE_EMBEDDING_DRAIN_FORCE === "true";
   const corpora = configs.flatMap((config2) => {
-    if (!config2.dbPath || !existsSync32(config2.dbPath))
+    if (!config2.dbPath || !existsSync33(config2.dbPath))
       return [];
     const store = openConnectorStore(storageAccountForCorpus(config2), { ...config2, dbPath: config2.dbPath, readOnly: true }, env);
     try {
@@ -75075,8 +75540,8 @@ function nonNegativeIntOption(value, defaultValue, name) {
   return value;
 }
 function isUnboundedToken(value) {
-  const normalized = value.trim().toLowerCase();
-  return normalized === "unbounded" || normalized === "none" || normalized === "disabled" || normalized === "infinite" || normalized === "infinity" || normalized === "max";
+  const normalized2 = value.trim().toLowerCase();
+  return normalized2 === "unbounded" || normalized2 === "none" || normalized2 === "disabled" || normalized2 === "infinite" || normalized2 === "infinity" || normalized2 === "max";
 }
 function parseBoolean2(value, name) {
   if (value === "true")
@@ -75097,8 +75562,8 @@ function isEmbeddingLaneBusyError(error2, message2) {
   return /embedding_lane_busy|file_lease_busy|already holds the lease/i.test(message2);
 }
 function isSqliteBusyError(message2) {
-  const normalized = message2.toLowerCase();
-  return normalized.includes("database is locked") || normalized.includes("sqlite_busy");
+  const normalized2 = message2.toLowerCase();
+  return normalized2.includes("database is locked") || normalized2.includes("sqlite_busy");
 }
 function parseArgs(argv) {
   const options = {};
@@ -75130,8 +75595,8 @@ function publishNativeEmbeddingDrainReadiness(env = process.env, pid = process.p
     throw new Error(`${NATIVE_SERVICE_READINESS_PATH_ENV} must be an absolute path for native startup.`);
   }
   const directory = dirname39(readinessPath);
-  mkdirSync18(directory, { recursive: true, mode: 448 });
-  const parent = lstatSync15(directory);
+  mkdirSync19(directory, { recursive: true, mode: 448 });
+  const parent = lstatSync16(directory);
   if (!parent.isDirectory() || process.platform !== "win32" && (parent.uid !== process.getuid?.() || (parent.mode & 18) !== 0)) {
     throw new Error("Native embedding readiness requires an owner-controlled report directory.");
   }
@@ -75160,7 +75625,7 @@ if (__require.main == __require.module) {
     }
     const json = JSON.stringify(report, null, 2);
     if (args.reportPath) {
-      mkdirSync18(dirname39(args.reportPath), { recursive: true });
+      mkdirSync19(dirname39(args.reportPath), { recursive: true });
       writeFileSync7(args.reportPath, `${json}
 `);
     }
@@ -75170,7 +75635,7 @@ if (__require.main == __require.module) {
   const options = optionsFromEnv(process.env);
   try {
     if (args.reportPath) {
-      mkdirSync18(dirname39(args.reportPath), { recursive: true });
+      mkdirSync19(dirname39(args.reportPath), { recursive: true });
       options.onProgress = (report2) => {
         writeFileSync7(args.reportPath, `${JSON.stringify(report2, null, 2)}
 `);

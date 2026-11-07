@@ -1,3 +1,4 @@
+import { embeddingPrefilterDirectory } from './workers/classification/tier-ledger-path.ts';
 import { MAC_ENGINE_DAEMON_PLIST, authorizeMacServerMode, macEngineManager } from './core/mac-engine-daemon.ts';
 import { spawnSync } from 'node:child_process';
 import {
@@ -1366,6 +1367,8 @@ function sourceDeleteTargets(source: LifecycleAccount, context: LifecyclePathCon
     ...(files.preCutoverIndex ? sqliteTargets(files.preCutoverIndex.path, files.preCutoverIndex.storeId) : []),
     ...files.stores.flatMap((storePath) => [
       ...sqliteTargets(storePath, CONNECTOR_STORE_SQLITE_STORE_ID),
+      ...(storePath === ':memory:' ? [] : [{ path: embeddingPrefilterDirectory(tierLedgerPathForStore(storePath)),
+        kind: 'source_state_path' as const, allowRecursive: true, externalSourcePath: !isInsideRawStateRoot(embeddingPrefilterDirectory(tierLedgerPathForStore(storePath)), context) }]),
       // Each store's four-tier ledger is co-located with it (tier-ledger-path.ts),
       // so it is found wherever the store is — an account folder, XDG, a capture
       // state directory — and deleting a source takes its ledger rows.
@@ -2123,6 +2126,7 @@ function assertRawStateTargetsContained(
       tierLedgerPathForStore(mount.dbPath),
       secretLocationsPathForStore(mount.dbPath),
       tierSnifferPathForStore(mount.dbPath),
+      embeddingPrefilterDirectory(tierLedgerPathForStore(mount.dbPath)),
     ]) protectedPaths.add(path);
   }
   for (const path of [

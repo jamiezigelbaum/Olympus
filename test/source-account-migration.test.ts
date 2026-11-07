@@ -29,7 +29,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, relative, sep } from 'node:path';
-import { secretLocationsPathForStore, tierLedgerPathForStore, tierSnifferPathForStore } from '../src/workers/classification/tier-ledger-path.ts';
+import { embeddingPrefilterDirectory, secretLocationsPathForStore, tierLedgerPathForStore, tierSnifferPathForStore } from '../src/workers/classification/tier-ledger-path.ts';
 import { archiveCorpusId, archiveImportFamilies } from '../src/core/archive-formats.ts';
 import { publishLinuxEngineReceipt, resolveLinuxEngineLayout, standaloneLinuxDataDir } from '../src/core/linux-engine-layout.ts';
 import { mediaCacheDir, releaseMediaCacheFile, retainMediaCacheFile, sweepMediaCache, writeMediaCacheFile } from '../src/core/media-cache.ts';
@@ -384,6 +384,21 @@ describe('the move', () => {
 
     expectDatabasesOpen(env, 'dropbox.files', legacy, 'folder', 'moved');
     expect(rowsOf(resolvedStorePath('dropbox.files', 'secure_local', env))).toBe(3);
+  });
+
+  test('learned weights move privately with their owning ledger', () => {
+    const { env } = fixture();
+    install(env, 'dropbox.files');
+    const from = embeddingPrefilterDirectory(tierLedgerPathForStore(resolvedStorePath('dropbox.files', 'secure_local', env)));
+    mkdirSync(from, { recursive: true, mode: 0o700 });
+    writeFileSync(join(from, 'weights.json'), 'synthetic fixture weights', { mode: 0o600 });
+    migrateAccountFolders(env);
+    const to = embeddingPrefilterDirectory(tierLedgerPathForStore(resolvedStorePath('dropbox.files', 'secure_local', env)));
+    expect(to).not.toBe(from);
+    expect(existsSync(from)).toBe(false);
+    expect(readFileSync(join(to, 'weights.json'), 'utf8')).toBe('synthetic fixture weights');
+    expect(statSync(to).mode & 0o777).toBe(0o700);
+    expect(statSync(join(to, 'weights.json')).mode & 0o777).toBe(0o600);
   });
 
   test('the tier sidecars of every tier follow their store, named for it', () => {

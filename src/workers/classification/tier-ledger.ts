@@ -577,6 +577,64 @@ export class TierLedger {
     return outcome === undefined ? undefined : { outcome, record: this.getCurrent(identity)! };
   }
 
+  /** A pre-filter may only finish an open Personal content question, under the ledger lock. */
+  clearEmbeddingQuestion(identity: TierLedgerIdentity, options: {
+    reason: string; receiptKey: string; receipt: string; modelId: string;
+    questionStillCurrent: () => boolean; placementFor?: (decision: TierDecision) => TierPlacementPlan;
+  }): boolean {
+    return this.db.transaction(() => {
+      const row = this.readRow(identity);
+      if (!row || row.state !== 'pending' || row.metadataPending || !row.contentPending || !row.contentRead
+        || row.metadataTier !== 'private' || row.contentTier !== 'private' || row.metadataForced
+        || row.decidedBy === 'override' || row.decidedBy === 'owner_rule' || this.getOverride(identity)
+        || row.reasons.some(reason => reason.startsWith('metadata:owner_rule:'))
+        || this.rejudgeQuestion(identity) || !options.questionStillCurrent()) return false;
+      // Receipt and decision share a transaction. The queue question remains until a good audit window.
+      this.writeMeta(options.receiptKey, options.receipt);
+      const result = this.applySnifferVerdict(identity, {
+        pass: 'content', tier: 'private', reason: options.reason, modelId: options.modelId, mapRevision: row.mapRevision,
+      }, { questionStillCurrent: options.questionStillCurrent, ...(options.placementFor ? { placementFor: options.placementFor } : {}) });
+      if (!result || ['unchanged', 'needs_placement', 'stale_question', 'stale_map', 'held_moving'].includes(result.outcome)) {
+        this.writeMeta(options.receiptKey, '');
+        return false;
+      }
+      return true;
+    })();
+  }
+
+  /** Withdraw only this pre-filter's decision. Fence a lowering in flight and hide before re-queueing. */
+  revokeEmbeddingClearance(identity: TierLedgerIdentity, reason: string, original: TierDecision,
+    placementFor?: (decision: TierDecision) => TierPlacementPlan): boolean {
+    return this.db.transaction(() => {
+      const row = this.readRow(identity);
+      if (!row || !row.reasons.includes(reason) || row.decidedBy === 'override' || row.decidedBy === 'owner_rule'
+        || this.getOverride(identity) || row.contentTier !== original.contentTier || row.metadataTier !== original.metadataTier
+        || row.metadataPending || row.contentPending || row.metadataForced
+        || row.reasons.some(code => code.startsWith('metadata:owner_rule:'))
+        || original.reasons.filter(code => code.startsWith('content:sha256:') || code.startsWith('content:names:')).some(code => !row.reasons.includes(code))) return true;
+      if (!row.routed) { this.writeRow(identity, rowOf({ ...row, ...original }), undefined, row); return true; }
+      if (!placementFor) return false;
+      if (row.state === 'moving') {
+        const now = this.now().toISOString();
+        const staleFlip = row.generation + 1;
+        this.db.query(`UPDATE tier_copies SET superseded_by_generation = ?, updated_at = ?
+          WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+          AND copy_state = 'superseded' AND superseded_by_generation = ?`)
+          .run(staleFlip + 1, now, ...idParams(identity), staleFlip);
+        this.db.query(`UPDATE tier_copies SET copy_state = 'superseded', superseded_by_generation = ?, updated_at = ?
+          WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND copy_state = 'staged'`)
+          .run(staleFlip, now, ...idParams(identity));
+        this.db.query(`UPDATE tier_items SET generation = ?
+          WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?`)
+          .run(staleFlip, ...idParams(identity));
+        this.queueMoveRow(identity, { ...row, generation: staleFlip }, original, { hide: true, decidedAt: now });
+      } else {
+        this.recordRoutedPlacement(identity, original, placementFor(original));
+      }
+      return true;
+    })();
+  }
+
   /**
    * A re-judge question answered: the decision it kept is completed with the
    * verdict and recorded like any routed decision. The item was visible all
@@ -1855,6 +1913,11 @@ export class TierLedger {
       INSERT INTO tier_ledger_meta (key, value) VALUES (?, ?)
       ON CONFLICT(key) DO UPDATE SET value = excluded.value
     `).run(key, value);
+  }
+
+  /** Atomic publication of related content-free background receipts. */
+  writeMetaBatch(entries: readonly (readonly [string, string])[]): void {
+    this.db.transaction(() => { for (const [key, value] of entries) this.writeMeta(key, value); })();
   }
 
   /** Small durable work receipts, without exporting any store content. */
@@ -3591,6 +3654,7 @@ export class TierLedger {
   withdrawAccountScope(provider: string, accountScope: string): { items: number; copies: number } {
     return this.db.transaction(() => {
       const now = this.now().toISOString();
+      this.writeMeta('embedding-prefilter:training-revision', now);
       this.db.query(`
         UPDATE tier_copies
         SET copy_state = 'superseded',
