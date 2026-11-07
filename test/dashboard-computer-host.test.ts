@@ -564,6 +564,13 @@ describe('the panel on the computer', () => {
     expect(status.textContent).toContain('1 source · checked');
   });
 
+  test('Home is catching up, not up to date, while a model still downloads', async () => {
+    const busy = model({ sources: [TELEGRAM], models: { embedding: { kind: 'built_in', state: 'downloading', percent: 40 } } });
+    delete busy.progress;
+    const page = await onHost(COMPUTER, busy);
+    expect(page.win.document.querySelector('[data-home-status]')!.getAttribute('data-home-status')).toBe('running');
+  });
+
   test('Index faster sits under Progress details only while indexing runs, and calls its tool', async () => {
     const page = await onHost(COMPUTER, model(), { indexFaster: { on: false } });
     const control = page.win.document.querySelector('.index-faster')!;

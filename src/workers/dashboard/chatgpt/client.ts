@@ -2664,7 +2664,8 @@ export function chatgptDashboardClient(
    */
   function homeStatus(data: Any, needs: number, sources: Any[]): HTMLElement {
     const Hm = P.home;
-    const running = !!data.progress && !progressFinished(data.progress);
+    // Source indexing, a model download, or an archive being read or removed.
+    const running = moving();
     const title = needs > 0 ? (needs === 1 ? Hm.needsYouOne : fill(Hm.needsYouMany, { n: count(needs) }))
       : running ? Hm.catchingUp : Hm.upToDate;
     const connected = sources.filter((source: Any) => String(source && source.status) !== 'Off').length;
@@ -2706,6 +2707,8 @@ export function chatgptDashboardClient(
     if (data.models && installLines(data.models).some((entry) => entry.state !== 'failed')) add(page, modelsSection(data.models));
     // A landing or a highlighted row needs its source visible.
     if (state.landing || state.landed) state.open['home-sources'] = true;
+    // An archive at work shows its progress there, so it starts open (until the owner folds it).
+    if (state.open['home-sources'] === undefined && archivesMoving()) state.open['home-sources'] = true;
     const box = details('home-sources', doc.createTextNode(P.home.allSources + ' (' + count(all.filter((source: Any) => !isArchivesCard(source)).length) + ')'), 'section home-sources');
     add(box, sourcesSection(all.filter((source: Any) => !isArchivesCard(source))), otherArchivesSection(all.filter(isArchivesCard)[0]));
     return add(page, box);

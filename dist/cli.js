@@ -154769,7 +154769,7 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
   }
   function homeStatus(data2, needs, sources) {
     const Hm = P.home;
-    const running = !!data2.progress && !progressFinished(data2.progress);
+    const running = moving();
     const title = needs > 0 ? needs === 1 ? Hm.needsYouOne : fill2(Hm.needsYouMany, { n: count(needs) }) : running ? Hm.catchingUp : Hm.upToDate;
     const connected2 = sources.filter((source) => String(source && source.status) !== "Off").length;
     const items = state.computerMeta && typeof state.computerMeta.indexedItems === "number" && isFinite(state.computerMeta.indexedItems) ? Math.max(0, Math.round(state.computerMeta.indexedItems)) : 0;
@@ -154812,6 +154812,8 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     if (data2.models && installLines(data2.models).some((entry) => entry.state !== "failed"))
       add(page2, modelsSection(data2.models));
     if (state.landing || state.landed)
+      state.open["home-sources"] = true;
+    if (state.open["home-sources"] === undefined && archivesMoving())
       state.open["home-sources"] = true;
     const box = details("home-sources", doc2.createTextNode(P.home.allSources + " (" + count(all.filter((source) => !isArchivesCard(source)).length) + ")"), "section home-sources");
     add(box, sourcesSection(all.filter((source) => !isArchivesCard(source))), otherArchivesSection(all.filter(isArchivesCard)[0]));
