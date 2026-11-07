@@ -26,6 +26,8 @@ for (const mode of ['saves', 'loses', 'refused'] as const) test(`first-run dashb
     const names = ['window', 'document', 'navigator', 'Element', 'HTMLElement', 'HTMLFormElement', 'HTMLInputElement', 'HTMLTextAreaElement', 'HTMLSelectElement', 'HTMLButtonElement', 'ShadowRoot', 'Event', 'MouseEvent', 'FormData', 'CSS', 'getComputedStyle'] as const;
     return new Function(...names, `return ${expression}`)(...names.map(name => name === 'window' ? window : name === 'getComputedStyle' ? window!.getComputedStyle.bind(window) : window![name]));
   };
+  const host = new Window({ url: 'http://127.0.0.1:8010/' });
+  const hostEvaluate = (expression: string): unknown => new Function('window', 'document', `return ${expression}`)(host, host.document);
   let keysVisits = 0;
   let navigationFailures = 0;
   let loader = 0;
@@ -71,7 +73,8 @@ for (const mode of ['saves', 'loses', 'refused'] as const) test(`first-run dashb
         if (method === 'Target.createTarget') result = { targetId: 'dash' };
         if (method === 'Target.attachToTarget') result = { sessionId: 's' };
         if (method === 'Target.closeTarget') events.push('tab.close');
-        if (method === 'Runtime.enable') event('Runtime.executionContextCreated', { context: { id: 1, auxData: { isDefault: true } } });
+        // Context 2 stands for the host page (listed first), which never holds the panel's forms.
+        if (method === 'Runtime.enable') for (const id of [2, 1]) event('Runtime.executionContextCreated', { context: { id, auxData: { isDefault: true } } });
         if (method === 'Page.navigate') {
           events.push('navigate');
           if (calls.length === 1 && keysVisits === 1 && navigationFailures === 0) {
@@ -81,12 +84,12 @@ for (const mode of ['saves', 'loses', 'refused'] as const) test(`first-run dashb
           } else {
             documentAt(params.url);
             event('Runtime.executionContextsCleared', {});
-            event('Runtime.executionContextCreated', { context: { id: 1, auxData: { isDefault: true } } });
+            for (const id of [2, 1]) event('Runtime.executionContextCreated', { context: { id, auxData: { isDefault: true } } });
             event('Page.frameNavigated', { frame: { url: params.url, loaderId: String(++loader) } });
             result = { loaderId: String(loader) };
           }
         }
-        if (method === 'Runtime.evaluate') result = { result: { value: await evaluate(params.expression) } };
+        if (method === 'Runtime.evaluate') result = { result: { value: params.contextId === 2 ? hostEvaluate(params.expression) : await evaluate(params.expression) } };
         ws.send(JSON.stringify({ id, result }));
       } catch (error) { ws.send(JSON.stringify({ id, error: { message: String(error) } })); }
     } },
@@ -125,5 +128,5 @@ for (const mode of ['saves', 'loses', 'refused'] as const) test(`first-run dashb
     expect(events).not.toContain('bridge.stop');
     await dashboard.close(); dashboard = undefined;
     expect(events.slice(-3)).toEqual(['tab.close', 'tunnel.close', 'bridge.stop']);
-  } finally { await dashboard?.close(); controller?.dispose(); window?.close(); server.stop(true); rmSync(dir, { recursive: true, force: true }); }
+  } finally { await dashboard?.close(); controller?.dispose(); window?.close(); host.close(); server.stop(true); rmSync(dir, { recursive: true, force: true }); }
 });

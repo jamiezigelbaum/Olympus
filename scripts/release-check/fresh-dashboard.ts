@@ -165,7 +165,8 @@ export async function openFreshDashboard(machine: Machine, endpoint: string, tim
           await until(async () => !!await panel<boolean>(`!!document.querySelector('form[data-first-run-privacy] input:checked:disabled')`, Boolean), 'first-run privacy choice was not saved');
         } catch (error) {
           // The form's status line is the product's own copy, which is what a person would read.
-          const said = await panel<string>(`document.querySelector('form[data-first-run-privacy] [data-action-message]')?.textContent?.trim() ?? ''`, value => typeof value === 'string').catch(() => undefined);
+          // The form lives in the panel frame; the host document answers '' and must not end the search.
+          const said = await panel<string>(`document.querySelector('form[data-first-run-privacy] [data-action-message]')?.textContent?.trim() ?? ''`, value => typeof value === 'string' && value.length > 0).catch(() => undefined);
           throw new Error(said ? `first-run privacy choice was not saved: the dashboard said "${said}"` : `${(error as Error).message} (the dashboard showed no message)`);
         }
         // Saving restarts the worker. Retry fresh documents across that handoff;
