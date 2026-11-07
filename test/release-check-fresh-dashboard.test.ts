@@ -23,12 +23,15 @@ for (const mode of ['saves', 'loses', 'refused', 'unlock'] as const) test(`first
   let window: Window | undefined;
   let controller: { dispose(): void } | undefined;
   const evaluate = (expression: string): any => {
-    const names = ['window', 'document', 'navigator', 'Element', 'HTMLElement', 'HTMLFormElement', 'HTMLInputElement', 'HTMLTextAreaElement', 'HTMLSelectElement', 'HTMLButtonElement', 'ShadowRoot', 'Event', 'MouseEvent', 'FormData', 'CSS', 'getComputedStyle'] as const;
-    return new Function(...names, `return ${expression}`)(...names.map(name => name === 'window' ? window : name === 'getComputedStyle' ? window!.getComputedStyle.bind(window) : window![name]));
+    const names = ['window', 'document', 'navigator', 'Element', 'HTMLElement', 'HTMLFormElement', 'HTMLInputElement', 'HTMLTextAreaElement', 'HTMLSelectElement', 'HTMLButtonElement', 'ShadowRoot', 'Event', 'MouseEvent', 'FormData', 'CSS', 'getComputedStyle', 'fetch', 'location'] as const;
+    return new Function(...names, `return ${expression}`)(...names.map(name => name === 'window' ? window : name === 'getComputedStyle' ? window!.getComputedStyle.bind(window) : name === 'fetch' ? dashboardFetch : name === 'location' ? window!.location : window![name]));
   };
   const host = new Window({ url: 'http://127.0.0.1:8010/' });
   const hostEvaluate = (expression: string): unknown => new Function('window', 'document', `return ${expression}`)(host, host.document);
   let unlocked = false, unlocks = 0;
+  // The engine's /dashboard.json as the page fetches it.
+  let dashboardJson: { status: number; body: unknown } = { status: 200, body: { sources: [] } };
+  const dashboardFetch = async (url: URL) => { expect(url.pathname).toBe('/dashboard.json'); return new Response(JSON.stringify(dashboardJson.body), { status: dashboardJson.status }); };
   let keysVisits = 0;
   let navigationFailures = 0;
   let loader = 0;
@@ -124,6 +127,14 @@ for (const mode of ['saves', 'loses', 'refused', 'unlock'] as const) test(`first
       expect(await dashboard.privacyChoice()).toBe('Local models with Venice fallback (local-first, Recommended) saved and verified after reload');
       expect(policy()).toEqual(loadSovereigntyPreset('local-first'));
       expect(isPendingPrivacyPolicy(policy())).toBe(false);
+      // A connect that cannot start says which precondition failed, from the dashboard's JSON.
+      const gmail = { id: 'gmail', label: 'Gmail' } as never;
+      dashboardJson = { status: 401, body: {} };
+      await expect(dashboard.connect(gmail)).rejects.toThrow('fresh source card unreadable: /dashboard.json answered 401');
+      dashboardJson = { status: 200, body: { sources: [{ provider: 'dropbox', connection: { state: 'not_connected' } }] } };
+      await expect(dashboard.connect(gmail)).rejects.toThrow('no gmail source card; the dashboard lists: dropbox');
+      dashboardJson = { status: 200, body: { sources: [{ provider: 'gmail', connection: { state: 'synced' } }] } };
+      await expect(dashboard.connect(gmail)).rejects.toThrow('gmail is already connected (synced) on a fresh install');
     }
     expect(calls).toEqual(mode === 'unlock' ? ['save_first_run_privacy', 'save_first_run_privacy'] : ['save_first_run_privacy']);
     expect(unlocks).toBe(mode === 'unlock' ? 1 : 0);
