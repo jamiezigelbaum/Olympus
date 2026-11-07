@@ -1,6 +1,9 @@
 import { MAC_ENGINE_DAEMON_PLIST, authorizeMacServerMode, macEngineManager } from './core/mac-engine-daemon.ts';
 import { spawnSync } from 'node:child_process';
 import {
+  embeddingPrefilterDirectory,
+  embeddingPrefilterInstallLedgerPath,
+  resolveClassificationLedgerPath,
   SECRET_LOCATIONS_SQLITE_STORE_ID,
   TIER_LEDGER_SQLITE_STORE_ID,
   TIER_SNIFFER_SQLITE_STORE_ID,
@@ -53,7 +56,7 @@ import {
   type AccountFiles,
 } from './core/account-files.ts';
 import { sourceDeleteHolds, type SourceDeleteHold } from './core/source-delete-holds.ts';
-import { isUnsupportedDirectorySyncError, writePrivateFileAtomicSync } from './core/atomic-file.ts';
+import { isUnsupportedDirectorySyncError, removeFileDurablySync, writePrivateFileAtomicSync } from './core/atomic-file.ts';
 import { OperationError } from './core/operation-error.ts';
 import { readSqliteSchemaVersion } from './core/sqlite-migrations.ts';
 import {
@@ -200,6 +203,8 @@ interface DeleteTarget {
   sqliteStoreId?: string;
   sqlitePrimaryPath?: string;
   externalSourcePath?: boolean;
+  /** Shared learned weights are disposable after any contributing account is deleted. */
+  embeddingWeights?: boolean;
 }
 
 const DELETE_CONFIRMATION_1 = 'DELETE OLYMPUS DATA';
@@ -512,6 +517,7 @@ export function deleteOlympusData(options: {
     // next boot removes them before anything mounts. Marked even with nothing
     // on disk: the boot's repeat of the forget steps still runs for it.
     markAccountDeleting(account, env);
+    invalidateInstallEmbeddingPrefilter(options);
     return {
       ok: true,
       mode: 'source',
@@ -648,6 +654,8 @@ function planAccountRemoval(
   options: { atBoot?: boolean } = {},
 ): AccountRemovalPlan {
   const targets = uniqueTargets(sourceDeleteTargets(account, context));
+  const auditPath = embeddingPrefilterInstallLedgerPath(resolveClassificationLedgerPath(envForContext(context)));
+  if (existsSync(auditPath)) assertVerifiedExternalSqliteStore(auditPath, TIER_LEDGER_SQLITE_STORE_ID);
   // A recursive raw-state target must be provably Olympus's own and nobody
   // else's (see assertRawStateTargetsContained), and everything under the
   // account folders is reached through no link, so a store inside one
@@ -698,11 +706,14 @@ function removeAccount(
   for (const target of plan.targets) {
     if (target.kind === 'account_folder' && existsSync(target.path)) assertDeleteTargetSafe(target);
   }
-  const removed: string[] = [];
+  // Fence yielded training before any source byte disappears, even with no weights published yet.
+  const removedWeights = invalidateInstallEmbeddingPrefilter(context);
+  const removed: string[] = removedWeights ? [removedWeights] : [];
   const missing: string[] = [];
   // A file inside the folder goes with the folder's rename, not on its own.
   const folders = plan.targets.filter((target) => target.kind === 'account_folder').map((target) => resolve(target.path));
   for (const target of plan.targets) {
+    if (target.path === removedWeights) continue;
     if (!existsSync(target.path)) {
       missing.push(target.path);
       continue;
@@ -1180,6 +1191,9 @@ function allDeleteTargets(context: LifecyclePathContext): DeleteTarget[] {
     ...knownAccounts(context).flatMap((account) => sourceDeleteTargets(account, context)),
     // The registry: every account it lists is being deleted.
     ...registryDeleteTargets(context),
+    // Install-wide audit survives source deletion, but not delete-all (including custom paths).
+    installEmbeddingWeightsTarget(context),
+    ...sqliteDeleteTargets(embeddingPrefilterInstallLedgerPath(resolveClassificationLedgerPath(envForContext(context))), TIER_LEDGER_SQLITE_STORE_ID, context),
     // Approved remote-agent connections. Removing the database revokes every
     // connection token at once. Named on its own because XDG_DATA_HOME can put
     // it outside the known roots below.
@@ -1218,6 +1232,10 @@ function allDeleteTargets(context: LifecyclePathContext): DeleteTarget[] {
  * uninstall removes it, after everything else (docs/design/source-storage.md).
  */
 function rmTargetKeepingOwnerLock(target: DeleteTarget, lockPath: string): void {
+  if (target.embeddingWeights) {
+    removeFileDurablySync(target.path);
+    return;
+  }
   const lock = canonicalPath(lockPath);
   const root = canonicalPath(target.path);
   if (!target.allowRecursive || !isStrictlyInside(lock, root) || !existsSync(lockPath)) {
@@ -1355,6 +1373,37 @@ function looksLikeSqlite(path: string): boolean {
   }
 }
 
+/** Invalidate pooled training independently of source handles which can survive unlink. */
+function invalidateInstallEmbeddingPrefilter(context: LifecyclePathContext): string | undefined {
+  const auditPath = embeddingPrefilterInstallLedgerPath(resolveClassificationLedgerPath(envForContext(context)));
+  // Training opens the install audit before yielding; without it no model can be in flight.
+  if (existsSync(auditPath)) {
+    assertVerifiedExternalSqliteStore(auditPath, TIER_LEDGER_SQLITE_STORE_ID);
+    const db = new Database(auditPath, { readwrite: true, create: false });
+    try {
+      db.exec('PRAGMA busy_timeout = 10000;');
+      db.query(`INSERT INTO tier_ledger_meta (key, value) VALUES (?, ?)
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value`)
+        .run('embedding-prefilter:withdrawal', randomUUID());
+    } finally {
+      closeSqliteStore(db);
+    }
+  }
+  const weightsPath = installEmbeddingWeightsTarget(context).path;
+  const existed = existsSync(weightsPath);
+  removeFileDurablySync(weightsPath);
+  return existed ? weightsPath : undefined;
+}
+
+function installEmbeddingWeightsTarget(context: LifecyclePathContext): DeleteTarget {
+  return {
+    path: join(embeddingPrefilterDirectory(embeddingPrefilterInstallLedgerPath(resolveClassificationLedgerPath(envForContext(context)))), 'weights.json'),
+    kind: 'policy_file',
+    allowRecursive: false,
+    embeddingWeights: true,
+  };
+}
+
 function sourceDeleteTargets(source: LifecycleAccount, context: LifecyclePathContext): DeleteTarget[] {
   const { files } = source;
   const folder = files.folder;
@@ -1363,6 +1412,8 @@ function sourceDeleteTargets(source: LifecycleAccount, context: LifecyclePathCon
   const inFolder = (path: string): boolean => folder !== undefined && isStrictlyInside(resolve(path), resolve(folder));
   const sqliteTargets = (path: string, storeId: string): DeleteTarget[] => sqliteDeleteTargets(path, storeId, context, inFolder(path));
   return [
+    // Pooled weights can contain contributions from this account regardless of which store trained them.
+    installEmbeddingWeightsTarget(context),
     ...(files.preCutoverIndex ? sqliteTargets(files.preCutoverIndex.path, files.preCutoverIndex.storeId) : []),
     ...files.stores.flatMap((storePath) => [
       ...sqliteTargets(storePath, CONNECTOR_STORE_SQLITE_STORE_ID),
@@ -2086,7 +2137,7 @@ function assertRawStateTargetsContained(
   const protectedPaths = new Set<string>();
   for (const other of knownAccounts(context)) {
     if (own.has(other.sourceId)) continue;
-    for (const path of sourceDeleteTargets(other, context).map((target) => target.path)) protectedPaths.add(path);
+    for (const path of sourceDeleteTargets(other, context).filter((target) => !target.embeddingWeights).map((target) => target.path)) protectedPaths.add(path);
     for (const path of other.files.preserved) protectedPaths.add(path);
     for (const path of other.files.pairing ?? []) protectedPaths.add(path);
   }
@@ -2130,6 +2181,7 @@ function assertRawStateTargetsContained(
     defaultSovereigntyConfigPathForHome(context.homeDir),
     join(home, '.config', 'olympus', 'handles.json'),
     join(home, '.config', 'olympus', 'handles.json.unpaired'),
+    ...sqliteDeleteTargets(embeddingPrefilterInstallLedgerPath(resolveClassificationLedgerPath(envForContext(context))), TIER_LEDGER_SQLITE_STORE_ID, context).map((target) => target.path),
     ...remoteConnectionsDeleteTargets(context).map((target) => target.path),
     ...mediaCacheDeleteTargets(context).map((target) => target.path),
   ]) protectedPaths.add(path);

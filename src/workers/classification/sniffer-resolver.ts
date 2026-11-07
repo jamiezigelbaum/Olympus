@@ -1,3 +1,4 @@
+import type { EmbeddingPrefilter } from './embedding-prefilter.ts';
 import type { SnifferModel, SnifferModelRequest, SnifferModelCompletion } from './sniffer-decision.ts';
 // The sniffer's background pass (design section 2.2): resolve pending items.
 //
@@ -78,6 +79,7 @@ const OUTPUT_CHARS_PER_ITEM = 110;
 export interface SnifferTarget {
   ledger: TierLedger;
   sniffer: TierSnifferStore;
+  embeddingPrefilter?: EmbeddingPrefilter;
   /**
    * The tiered store set's placement planner, for a set ledger. A routed item
    * (P1b) is settled through it, so a verdict that needs other stores queues
@@ -480,6 +482,7 @@ export async function runSnifferPass(options: SnifferPassOptions): Promise<Sniff
   for (const target of options.targets) {
     const questions = target.sniffer.listQuestions({ limit: options.pendingPageSize ?? 500, eligible: question => {
       report.pendingSeen += 1;
+      if (target.embeddingPrefilter?.retained(question)) return false;
       if (finishContentDonor(target, question) || midMove(target, question)) return false;
       if (stillOpen(target, question)) return screenQuestion(target, question);
       target.sniffer.deleteQuestion(question, question.pass, question.materialHash);
@@ -520,14 +523,35 @@ export async function runSnifferPass(options: SnifferPassOptions): Promise<Sniff
     if (stopped) { report.stoppedBy = stopped; return finish(report); }
     id = snifferId(options.lane, promptVersion);
   }
+  for (const target of options.targets) await target.embeddingPrefilter?.prepare(id);
   for (const pass of ['metadata', 'content'] as const) {
     work[pass] = work[pass].filter(item => {
-      const cached = item.target.sniffer.getVerdict(keyOf(item.question));
-      if (!cached || !cachedSnifferVerdictHolds(cached)
-        || (item.question.contentHash && !contentVerdictReusable(cached, item.question.contentHash, item.question))) return true;
-      apply(item, cached, item.question.contentHash !== undefined && cached.modelSubject !== snifferSubjectKey(item.question));
-      report.cacheHits += 1;
-      return false;
+      const key = keyOf(item.question);
+      const spotCheck = item.target.embeddingPrefilter?.isSpotCheck(item.question) === true;
+      const cached = item.target.sniffer.getVerdict(key);
+      const usable = cached && cachedSnifferVerdictHolds(cached)
+        && (!item.question.contentHash || contentVerdictReusable(cached, item.question.contentHash, item.question));
+      // A known Private answer always wins, including one cached while placement was unavailable.
+      const knownPrivate = cached && cachedSnifferVerdictHolds(cached)
+        && snifferVerdictTier(cached, options.lane, item.question.flags).tier === 'secure';
+      if (knownPrivate || (usable && !spotCheck)) {
+        if (spotCheck && knownPrivate) item.target.embeddingPrefilter?.observe(item.question, true);
+        apply(item, cached, item.question.contentHash !== undefined && cached.modelSubject !== snifferSubjectKey(item.question));
+        report.cacheHits += 1;
+        return false;
+      }
+      const duplicate = item.question.pass === 'content' && item.question.contentHash
+        ? item.target.sniffer.getFinalModelContentVerdict({ ...key, contentHash: item.question.contentHash }) : undefined;
+      if (duplicate && cachedSnifferVerdictHolds(duplicate)
+        && (!spotCheck || snifferVerdictTier(duplicate, options.lane, item.question.flags).tier === 'secure')) {
+        if (spotCheck) item.target.embeddingPrefilter?.observe(item.question, true);
+        apply(item, duplicate, true); report.cacheHits += 1; return false;
+      }
+      if (item.target.embeddingPrefilter?.tryClear(item.question, id)) {
+        report.verdictsApplied += 1; report.resolvedPersonal += 1;
+        return false;
+      }
+      return true;
     });
   }
   const concurrency = options.lane.snifferMode === 'decision' ? 1 : Math.max(1, Math.min(SNIFFER_MAX_CONCURRENT_CALLS, Math.floor(options.concurrentCalls ?? 1)));
@@ -560,7 +584,7 @@ export async function runSnifferPass(options: SnifferPassOptions): Promise<Sniff
       continue;
     }
     if (!screenQuestion(next.target, next.question)) continue;
-    const duplicate = next.question.contentHash && next.question.pass === 'content'
+    const duplicate = !next.target.embeddingPrefilter?.isSpotCheck(next.question) && next.question.contentHash && next.question.pass === 'content'
       ? next.target.sniffer.getFinalModelContentVerdict({ ...keyOf(next.question), contentHash: next.question.contentHash })
       : undefined;
     if (duplicate && cachedSnifferVerdictHolds(duplicate)) {
@@ -571,7 +595,8 @@ export async function runSnifferPass(options: SnifferPassOptions): Promise<Sniff
     const group = [next];
     for (let i = pending.length - 1; i >= 0; i--) {
       const item = pending[i]!;
-      if (!next.question.contentHash && item.question.pass === pass && item.question.materialHash === next.question.materialHash
+      if (!next.target.embeddingPrefilter?.isSpotCheck(next.question) && !item.target.embeddingPrefilter?.isSpotCheck(item.question)
+        && !next.question.contentHash && item.question.pass === pass && item.question.materialHash === next.question.materialHash
         && item.question.mapRevision === next.question.mapRevision && stillOpen(item.target, item.question)
         && screenQuestion(item.target, item.question)) {
         group.push(item); pending.splice(i, 1);
@@ -642,6 +667,8 @@ export async function runSnifferPass(options: SnifferPassOptions): Promise<Sniff
         group[0]!.target.sniffer.putVerdict(key, stored, group[0]!.question);
         for (const item of group) {
           if (item.target !== group[0]!.target) item.target.sniffer.putVerdict(key, stored, group[0]!.question);
+          const audit = sameQuestion(item.target, item.question) && stillOpen(item.target, item.question, false);
+          if (audit) item.target.embeddingPrefilter?.observe(item.question, stored.tier === 'private');
           apply(item, stored);
         }
         continue;

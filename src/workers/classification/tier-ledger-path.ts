@@ -1,3 +1,4 @@
+import { sharedDataPath } from '../../core/olympus-layout.ts';
 // Where a store's tier ledger lives, kept dependency-free so the data
 // lifecycle (export / delete) can enumerate ledgers without loading the
 // classifier.
@@ -53,4 +54,21 @@ export function tierSnifferPathForStore(storeDbPath: string): string {
   if (storeDbPath === ':memory:') return ':memory:';
   const base = storeDbPath.endsWith('.sqlite') ? storeDbPath.slice(0, -'.sqlite'.length) : storeDbPath;
   return `${base}${TIER_SNIFFER_FILE_SUFFIX}`;
+}
+
+/** Install-local learned weights: never part of an export or release artifact. */
+export function embeddingPrefilterDirectory(ledgerPath: string): string {
+  return `${ledgerPath}.embedding-prefilter`;
+}
+
+/** Install-wide privacy audit and model ownership, independent of mounted sources. */
+export function embeddingPrefilterInstallLedgerPath(classificationLedgerPath: string): string {
+  return `${classificationLedgerPath}.embedding-prefilter.tier-ledger.sqlite`;
+}
+
+export const CLASSIFICATION_LEDGER_PATH_ENV = 'OLYMPUS_CLASSIFICATION_LEDGER_PATH';
+
+/** Shared install path used by the judge ledger, pre-filter state and deletion owner. */
+export function resolveClassificationLedgerPath(env: Record<string, string | undefined> = process.env): string {
+  return env[CLASSIFICATION_LEDGER_PATH_ENV]?.trim() || sharedDataPath('classification-ledger', env);
 }

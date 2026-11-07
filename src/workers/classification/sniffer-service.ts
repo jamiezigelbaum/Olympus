@@ -1,3 +1,4 @@
+import { EmbeddingPrefilter } from './embedding-prefilter.ts';
 import { resumeVerifiedTierMove, flushTierMoveNotes } from '../connector-store/tier-move.ts';
 import { controlPathHeadroom, ingestionTurn } from '../control-path-headroom.ts';
 // The worker's background tick for the privacy-safe sniffer: a bounded
@@ -36,7 +37,7 @@ import {
   type SnifferTarget,
 } from './sniffer-resolver.ts';
 import { existsSync } from 'node:fs';
-import { tierSnifferPathForLedger } from './tier-ledger-path.ts';
+import { embeddingPrefilterInstallLedgerPath, tierSnifferPathForLedger } from './tier-ledger-path.ts';
 import { tierSetPlannerForLedger } from './installed-tier-classification-registry.ts';
 import { tierSetForLedger } from '../connector-store/tier-set-registry.ts';
 import {
@@ -92,6 +93,7 @@ export interface TierSnifferServiceStore {
 }
 
 export interface TierSnifferServiceOptions {
+  embeddingPrefilterEnabled?: () => boolean;
   installed: InstalledTierClassification;
   lane: SnifferLane;
   model: AnalystModel;
@@ -384,7 +386,9 @@ export class TierSnifferService {
    * (Sparta CPU samples, 2026-11-05).
    */
   backlog(): TierClassificationBacklog {
-    return this.backlogFrom(this.backlogCounts());
+    const backlog = this.backlogFrom(this.backlogCounts());
+    const messages = [...new Set([...this.embeddingPrefilters.values()].map(filter => filter.status()))];
+    return { ...backlog, summary: [backlog.summary, ...messages].join(' ') };
   }
 
   private backlogCounts(): BacklogCounts {
@@ -579,11 +583,15 @@ export class TierSnifferService {
     }
   }
 
-  status(): { lane: string; modelId: string; callsToday: number; lastTick?: TierSnifferTick; waiting?: TierSnifferWaiting } {
+  private embeddingState: TierLedger | undefined;
+  private readonly embeddingPrefilters = new Map<string, EmbeddingPrefilter>();
+
+  status(): { lane: string; modelId: string; callsToday: number; embeddingPrefilter: string[]; lastTick?: TierSnifferTick; waiting?: TierSnifferWaiting } {
     return {
       lane: this.options.lane.kind,
       modelId: this.options.lane.modelId,
       callsToday: this.budget.usedToday(),
+      embeddingPrefilter: [...this.embeddingPrefilters.values()].map(filter => filter.status()),
       ...(this.lastTick ? { lastTick: this.lastTick } : {}),
       ...(this.waiting ? { waiting: { ...this.waiting } } : {}),
     };
@@ -825,95 +833,19 @@ export class TierSnifferService {
       }
     }
     this.ledgers.clear();
+    this.embeddingState?.close();
+    this.embeddingState = undefined;
+    this.embeddingPrefilters.clear();
   }
 
-  private async tick(signal: AbortSignal): Promise<TierSnifferTick> {
-    const { lane } = this.options;
-    // Wall time of each step around the pass, for its log line: on Sparta
-    // (2026-11-06) 30 s passes came 32-134 s apart, and nothing said where
-    // the rest of the time went.
-    const phaseStarted = performance.now();
-    const idleMs = this.lastTickEndedAt === undefined ? undefined : phaseStarted - this.lastTickEndedAt;
-    let phaseAt = phaseStarted;
-    const phaseMs: Record<string, number> = {};
-    const phase = (name: string): void => {
-      const now = performance.now();
-      phaseMs[name] = (phaseMs[name] ?? 0) + (now - phaseAt);
-      phaseAt = now;
-    };
-    // Owner rules that raise, and names-only folders, apply to stored items
-    // whatever the model's state: no model is asked.
-    await this.settleStoredItems();
-    phase('settle');
-    await this.recoverMissingQuestions(signal);
-    phase('recover');
-    if (this.options.modelAvailable && !this.options.modelAvailable()) {
-      // Nothing is asked and nothing is counted: flagged items wait, pending
-      // and held Private, until the model is there. A model whose download
-      // never started is started here, so they never wait forever.
-      try {
-        this.options.startModel?.();
-      } catch {
-        // Starting is best effort; the next tick tries again.
-      }
-      await this.drainMoves();
-      return { state: 'model_unavailable', modelId: lane.modelId };
-    }
-    const ownerContext = this.options.ownerContext?.();
-    const versions = snifferPromptVersions(ownerContext);
-    const ledger = await readClassificationLedger(this.options.classificationLedgerPath);
-    const key = { lane: lane.kind, profileId: lane.profileId, modelId: lane.modelId, promptVersion: versions.approval };
-    const builtInDefault = this.options.autoApproveBuiltIn === true && isBuiltInLane(lane);
-    if (builtInDefault && !isClassifierApproved(ledger.entries, key, { builtInDefault: true })
-      && !builtInDefaultRevoked(ledger.entries, key)) {
-      await appendClassificationLedgerEntryOnce(this.options.classificationLedgerPath, {
-        recorded_at: (this.options.now?.() ?? new Date()).toISOString(),
-        kind: 'classifier_model_decision',
-        what: `The built-in private model is approved for the privacy sniffer with prompt ${versions.approval} by the owner's default for built-in local models.`,
-        why: BUILT_IN_CLASSIFIER_DEFAULT_APPROVAL_REASON,
-        model_id: lane.modelId,
-        prompt_version: versions.approval,
-        lane: lane.kind,
-        profile_id: lane.profileId,
-        approved_by: CLASSIFICATION_LEDGER_BUILT_IN_DEFAULT_APPROVAL,
-        status: 'complete',
-        entry_id: `sniffer-default-approval:${lane.kind}:${lane.profileId}:${lane.modelId}:${versions.approval}`,
-      });
-    }
-    const approved = builtInDefault
-      ? isClassifierApproved((await readClassificationLedger(this.options.classificationLedgerPath)).entries, key, { builtInDefault: true })
-      : isClassifierApproved(ledger.entries, key);
-    if (!approved) {
-      // Until then no question is sent anywhere: flagged items wait, pending
-      // and held Private, and their questions stay queued for the approval.
-      // Make the open decision visible once, never as an approval.
-      await appendClassificationLedgerEntryOnce(this.options.classificationLedgerPath, {
-        recorded_at: (this.options.now?.() ?? new Date()).toISOString(),
-        kind: 'classifier_model_decision',
-        what: `The privacy sniffer is configured to use ${lane.kind} model ${lane.modelId} (profile ${lane.profileId}) with prompt ${versions.approval}; it waits for the owner's approval before classifying anything.`,
-        model_id: lane.modelId,
-        prompt_version: versions.approval,
-        lane: lane.kind,
-        profile_id: lane.profileId,
-        approved_by: 'system-automatic',
-        status: 'pending',
-        entry_id: `sniffer-approval-requested:${lane.kind}:${lane.profileId}:${lane.modelId}:${versions.approval}`,
-      });
-      await this.drainMoves();
-      return { state: 'awaiting_owner_approval', modelId: lane.modelId, promptVersion: versions.approval };
-    }
-    phase('approval');
-    const preparationStopped = await prepareSnifferModel({ model: this.options.model, signal, shouldYield: () => this.yieldNow() });
-    phase('prepare');
-    // Items decided under an older classifier or sniffer prompt are judged
-    // again first (tier-rejudge.ts), a bounded page per set per tick: their
-    // questions join the queue this pass answers.
-    if (!preparationStopped) await this.recoverMissingQuestions(signal, true);
-    phase('recover');
-    const rejudged = preparationStopped ? emptyTierRejudgeReport() : await this.rejudge();
-    phase('rejudge');
+  private snifferTargets(): SnifferTarget[] {
     const targets: SnifferTarget[] = [];
-    for (const ledgerPath of this.ledgerPaths()) {
+    const filterLedgerPaths = this.ledgerPaths().sort();
+    if (filterLedgerPaths.length && !this.embeddingState) this.embeddingState = new TierLedger({
+      dbPath: embeddingPrefilterInstallLedgerPath(this.options.classificationLedgerPath),
+    });
+    if ([...this.embeddingPrefilters.keys()].some(path => !filterLedgerPaths.includes(path))) this.embeddingPrefilters.clear();
+    for (const ledgerPath of filterLedgerPaths) {
       let ledger: TierLedger;
       try {
         ledger = this.ledgerAt(ledgerPath);
@@ -921,8 +853,33 @@ export class TierSnifferService {
         continue; // Not the ledger its store is bound to: left alone this pass.
       }
       const planner = tierSetPlannerForLedger(ledgerPath);
+      let embeddingPrefilter = this.embeddingPrefilters.get(ledgerPath);
+      if (!embeddingPrefilter) {
+        embeddingPrefilter = new EmbeddingPrefilter({ ledger, stateLedger: this.embeddingState!, ...(this.embeddingPrefilters.size ? { sharedWith: this.embeddingPrefilters.values().next().value! } : {}), sniffer: this.options.installed.snifferStoreForLedger(ledgerPath),
+          ...(planner ? { placementFor: planner } : {}),
+          enabled: () => this.options.embeddingPrefilterEnabled?.() !== false,
+          copyFor: subject => {
+            const set = tierSetForLedger(ledgerPath);
+            const serving = copyServingLayer(ledger.copies(subject), 'content');
+            if (set && serving) {
+              const domain = set.domainForCorpus(serving.corpusId);
+              return domain ? set.store(domain)?.exportItemCopy(subject) : undefined;
+            }
+            if (ledger.getCurrent(subject)?.routed) return undefined;
+            for (const store of this.options.stores()) {
+              if ((store.tierLedgerPathInUse?.() ?? tierLedgerPathForStore(store.dbPath)) !== ledgerPath) continue;
+              const copy = store.exportItemCopy?.(subject);
+              if (copy) return copy;
+            }
+            return undefined;
+          },
+        });
+        this.embeddingPrefilters.set(ledgerPath, embeddingPrefilter);
+      }
+      embeddingPrefilter.setPlacementFor(planner);
       targets.push({
         ledger,
+        embeddingPrefilter,
         sniffer: this.options.installed.snifferStoreForLedger(ledgerPath),
         ...(planner ? { placementFor: planner } : {}),
         screenStoredQuestion: question => {
@@ -1015,7 +972,97 @@ export class TierSnifferService {
         },
       });
     }
+    return targets;
+  }
+
+  private async tick(signal: AbortSignal): Promise<TierSnifferTick> {
+    const { lane } = this.options;
+    // Wall time of each step around the pass, for its log line: on Sparta
+    // (2026-11-06) 30 s passes came 32-134 s apart, and nothing said where
+    // the rest of the time went.
+    const phaseStarted = performance.now();
+    const idleMs = this.lastTickEndedAt === undefined ? undefined : phaseStarted - this.lastTickEndedAt;
+    let phaseAt = phaseStarted;
+    const phaseMs: Record<string, number> = {};
+    const phase = (name: string): void => {
+      const now = performance.now();
+      phaseMs[name] = (phaseMs[name] ?? 0) + (now - phaseAt);
+      phaseAt = now;
+    };
+    // Owner rules that raise, and names-only folders, apply to stored items
+    // whatever the model's state: no model is asked.
+    await this.settleStoredItems();
+    phase('settle');
+    const targets = this.snifferTargets();
+    for (const target of targets) target.embeddingPrefilter?.recover();
     phase('targets');
+    await this.recoverMissingQuestions(signal);
+    phase('recover');
+    if (this.options.modelAvailable && !this.options.modelAvailable()) {
+      // Nothing is asked and nothing is counted: flagged items wait, pending
+      // and held Private, until the model is there. A model whose download
+      // never started is started here, so they never wait forever.
+      try {
+        this.options.startModel?.();
+      } catch {
+        // Starting is best effort; the next tick tries again.
+      }
+      await this.drainMoves();
+      return { state: 'model_unavailable', modelId: lane.modelId };
+    }
+    const ownerContext = this.options.ownerContext?.();
+    const versions = snifferPromptVersions(ownerContext);
+    const ledger = await readClassificationLedger(this.options.classificationLedgerPath);
+    const key = { lane: lane.kind, profileId: lane.profileId, modelId: lane.modelId, promptVersion: versions.approval };
+    const builtInDefault = this.options.autoApproveBuiltIn === true && isBuiltInLane(lane);
+    if (builtInDefault && !isClassifierApproved(ledger.entries, key, { builtInDefault: true })
+      && !builtInDefaultRevoked(ledger.entries, key)) {
+      await appendClassificationLedgerEntryOnce(this.options.classificationLedgerPath, {
+        recorded_at: (this.options.now?.() ?? new Date()).toISOString(),
+        kind: 'classifier_model_decision',
+        what: `The built-in private model is approved for the privacy sniffer with prompt ${versions.approval} by the owner's default for built-in local models.`,
+        why: BUILT_IN_CLASSIFIER_DEFAULT_APPROVAL_REASON,
+        model_id: lane.modelId,
+        prompt_version: versions.approval,
+        lane: lane.kind,
+        profile_id: lane.profileId,
+        approved_by: CLASSIFICATION_LEDGER_BUILT_IN_DEFAULT_APPROVAL,
+        status: 'complete',
+        entry_id: `sniffer-default-approval:${lane.kind}:${lane.profileId}:${lane.modelId}:${versions.approval}`,
+      });
+    }
+    const approved = builtInDefault
+      ? isClassifierApproved((await readClassificationLedger(this.options.classificationLedgerPath)).entries, key, { builtInDefault: true })
+      : isClassifierApproved(ledger.entries, key);
+    if (!approved) {
+      // Until then no question is sent anywhere: flagged items wait, pending
+      // and held Private, and their questions stay queued for the approval.
+      // Make the open decision visible once, never as an approval.
+      await appendClassificationLedgerEntryOnce(this.options.classificationLedgerPath, {
+        recorded_at: (this.options.now?.() ?? new Date()).toISOString(),
+        kind: 'classifier_model_decision',
+        what: `The privacy sniffer is configured to use ${lane.kind} model ${lane.modelId} (profile ${lane.profileId}) with prompt ${versions.approval}; it waits for the owner's approval before classifying anything.`,
+        model_id: lane.modelId,
+        prompt_version: versions.approval,
+        lane: lane.kind,
+        profile_id: lane.profileId,
+        approved_by: 'system-automatic',
+        status: 'pending',
+        entry_id: `sniffer-approval-requested:${lane.kind}:${lane.profileId}:${lane.modelId}:${versions.approval}`,
+      });
+      await this.drainMoves();
+      return { state: 'awaiting_owner_approval', modelId: lane.modelId, promptVersion: versions.approval };
+    }
+    phase('approval');
+    const preparationStopped = await prepareSnifferModel({ model: this.options.model, signal, shouldYield: () => this.yieldNow() });
+    phase('prepare');
+    // Items decided under an older classifier or sniffer prompt are judged
+    // again first (tier-rejudge.ts), a bounded page per set per tick: their
+    // questions join the queue this pass answers.
+    if (!preparationStopped) await this.recoverMissingQuestions(signal, true);
+    phase('recover');
+    const rejudged = preparationStopped ? emptyTierRejudgeReport() : await this.rejudge();
+    phase('rejudge');
     const report = await runSnifferPass({
       targets,
       lane,
@@ -1600,6 +1647,7 @@ function setEmbedsWithBuiltInOnly(set: TieredStoreSet): boolean {
 /** Env knobs, all optional. Invalid values fall back to the defaults. */
 export function tierSnifferServiceEnv(env: Record<string, string | undefined>): {
   enabled: boolean;
+  embeddingPrefilterEnabled: boolean;
   intervalMs: number;
   /** Optional legacy override; absent means time-bounded passes. */
   maxCallsPerPass?: number;
@@ -1610,6 +1658,7 @@ export function tierSnifferServiceEnv(env: Record<string, string | undefined>): 
   const enabledRaw = env.OLYMPUS_TIER_SNIFFER_ENABLED?.trim().toLowerCase();
   return {
     enabled: !(enabledRaw === '0' || enabledRaw === 'false' || enabledRaw === 'no' || enabledRaw === 'off'),
+    embeddingPrefilterEnabled: !['0', 'false', 'no', 'off'].includes(env.OLYMPUS_EMBEDDING_PREFILTER_ENABLED?.trim().toLowerCase() ?? ''),
     intervalMs: positiveInteger(env.OLYMPUS_TIER_SNIFFER_INTERVAL_MS, DEFAULT_TIER_SNIFFER_INTERVAL_MS, 100),
     ...(env.OLYMPUS_TIER_SNIFFER_MAX_CALLS_PER_PASS?.trim()
       ? { maxCallsPerPass: positiveInteger(env.OLYMPUS_TIER_SNIFFER_MAX_CALLS_PER_PASS, 1, 1) }

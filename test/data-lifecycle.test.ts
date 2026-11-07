@@ -1,3 +1,5 @@
+import { embeddingPrefilterDirectory, embeddingPrefilterInstallLedgerPath, resolveClassificationLedgerPath } from '../src/workers/classification/tier-ledger-path.ts';
+import { TierLedger } from '../src/workers/classification/tier-ledger.ts';
 import { lifecycleViews } from './helpers/lifecycle-view.ts';
 import {
   existsSync,
@@ -274,6 +276,28 @@ describe('Olympus data lifecycle', () => {
       expect(exportedText).not.toContain('config-service-account@example.test');
       expect(exportedText).not.toContain('sovereignty-private-key');
       expect(exportedText).not.toContain('secret-store');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('delete --all removes install prefilter audit and weights at a custom classification path', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'olympus-prefilter-delete-all-'));
+    const homeDir = join(dir, 'home');
+    const env = { HOME: homeDir, OLYMPUS_CLASSIFICATION_LEDGER_PATH: join(dir, 'custom', 'classification.jsonl') };
+    try {
+      const auditPath = embeddingPrefilterInstallLedgerPath(resolveClassificationLedgerPath(env));
+      const audit = new TierLedger({ dbPath: auditPath });
+      audit.close();
+      const weightsDir = embeddingPrefilterDirectory(auditPath);
+      mkdirSync(weightsDir, { recursive: true, mode: 0o700 });
+      const weightsPath = join(weightsDir, 'weights.json');
+      writeFileSync(weightsPath, 'synthetic pooled weights', { mode: 0o600 });
+      writeFileSync(join(dir, 'custom', 'unrelated.txt'), 'keep');
+      deleteOlympusData({ all: true, homeDir, env });
+      expect(existsSync(auditPath)).toBe(false);
+      expect(existsSync(weightsPath)).toBe(false);
+      expect(existsSync(join(dir, 'custom', 'unrelated.txt'))).toBe(true);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

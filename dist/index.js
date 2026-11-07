@@ -5688,6 +5688,9 @@ function tierSnifferPathForStore(storeDbPath) {
   return `${base}${TIER_SNIFFER_FILE_SUFFIX}`;
 }
 var TIER_LEDGER_FILE_SUFFIX = ".tier-ledger.sqlite", SECRET_LOCATIONS_FILE_SUFFIX = ".secret-locations.sqlite", TIER_SNIFFER_FILE_SUFFIX = ".tier-sniffer.sqlite";
+var init_tier_ledger_path = __esm(() => {
+  init_olympus_layout();
+});
 
 // src/core/archive-formats.ts
 function startsWithFromLine(head) {
@@ -6351,6 +6354,7 @@ function withSqliteFiles(path) {
   return [path, `${path}-wal`, `${path}-shm`];
 }
 var init_source_placement = __esm(() => {
+  init_tier_ledger_path();
   init_archive_formats();
   init_olympus_layout();
   init_messaging_capture_grant_file();
@@ -17806,6 +17810,7 @@ var init_secret_locations = __esm(() => {
   init_sqlite_migrations();
   init_engine();
   init_tier_classifier();
+  init_tier_ledger_path();
   STOP_WORDS = new Set([
     "a",
     "an",
@@ -17847,12 +17852,14 @@ var init_secret_locations = __esm(() => {
 var init_sniffer_store = __esm(() => {
   init_sqlite_migrations();
   init_tier_classifier();
+  init_tier_ledger_path();
 });
 
 // src/workers/classification/tier-ledger.ts
 var init_tier_ledger = __esm(() => {
   init_sqlite_migrations();
   init_tier_classifier();
+  init_tier_ledger_path();
 });
 // src/workers/file-extraction/job-names.ts
 var openLedgerPaths;
@@ -18199,6 +18206,7 @@ var init_media_cache = __esm(() => {
 var init_tier_set_binding = __esm(() => {
   init_olympus_layout();
   init_tier_ledger();
+  init_tier_ledger_path();
 });
 // src/workers/connector-store/tier-placement.ts
 var init_tier_placement = __esm(() => {
@@ -18444,6 +18452,7 @@ var init_sniffer = __esm(() => {
 var init_secrets_disposition = __esm(() => {
   init_sniffer();
   init_sniffer_store();
+  init_tier_ledger_path();
   init_job_names();
 });
 
@@ -23675,6 +23684,7 @@ var init_source_forget_registry = __esm(() => {
 var backgroundTrashRemovals;
 var init_data_lifecycle = __esm(() => {
   init_mac_engine_daemon();
+  init_tier_ledger_path();
   init_olympus_layout();
   init_source_placement();
   init_data_owner_lock();
