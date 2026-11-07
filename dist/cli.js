@@ -2895,6 +2895,8 @@ var init_public_surface = __esm(() => {
     { method: "POST", path: "/dashboard/models/local/discover" },
     { method: "POST", path: "/dashboard/models/local/test" },
     { method: "POST", path: "/dashboard/models/local/save" },
+    { method: "POST", path: "/dashboard/models/choice" },
+    { method: "POST", path: "/dashboard/models/addable" },
     { method: "POST", path: "/dashboard/sync-now" },
     { method: "POST", path: "/dashboard/embedding-priority" },
     { method: "POST", path: "/dashboard/tools/call" },
@@ -162349,7 +162351,7 @@ function isDashboardArchiveImportLocalRoute(request) {
   return request.method === "POST" && DASHBOARD_ARCHIVE_IMPORT_LOCAL_PATHS.includes(new URL(request.url).pathname);
 }
 function isDashboardLocalGradeRoute(request) {
-  return isDashboardConsultControlRoute(request) || isDashboardPrivateAnswersRoute(request) || isDashboardArchiveImportLocalRoute(request) || isDashboardMessagingRoute(request) || request.method === "POST" && ["/dashboard/models/judge", "/dashboard/engine/computer-use", "/dashboard/models/first-run-privacy", "/dashboard/models/local/discover", "/dashboard/models/local/test", "/dashboard/models/local/save"].includes(new URL(request.url).pathname);
+  return isDashboardConsultControlRoute(request) || isDashboardPrivateAnswersRoute(request) || isDashboardArchiveImportLocalRoute(request) || isDashboardMessagingRoute(request) || request.method === "POST" && ["/dashboard/models/judge", "/dashboard/engine/computer-use", "/dashboard/models/first-run-privacy", "/dashboard/models/local/discover", "/dashboard/models/local/test", "/dashboard/models/local/save", "/dashboard/models/choice", "/dashboard/models/addable"].includes(new URL(request.url).pathname);
 }
 function dashboardLocalGradeRefusal(request) {
   if (!isDashboardPrivateAnswersRoute(request) && !isDashboardArchiveImportLocalRoute(request))
@@ -162396,6 +162398,8 @@ function isDashboardControlRoute(request) {
     "/dashboard/models/local/discover",
     "/dashboard/models/local/test",
     "/dashboard/models/local/save",
+    "/dashboard/models/choice",
+    "/dashboard/models/addable",
     "/dashboard/sync-now",
     "/dashboard/embedding-priority",
     "/dashboard/disconnect",
