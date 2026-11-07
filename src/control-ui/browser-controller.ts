@@ -220,7 +220,9 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
   }
 
   function say(form: ParentNode, message: string): void {
-    const slot = form.querySelector('[data-action-message]');
+    // An open confirmation dialog covers the form, so its answer goes inside it.
+    const slot = form.querySelector('dialog[open] [data-action-message]')
+      ?? Array.from(form.querySelectorAll('[data-action-message]')).find(node => !node.closest('dialog'));
     if (slot) slot.textContent = message;
   }
 
@@ -681,6 +683,11 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
       firstRunResult('Saved. Check readiness after Olympus applies the change.');
     }
     const statusMessage = result.body.status_message;
+    if (params.action === 'save_judge') {
+      // The choice is accepted: only now does its confirmation close (a refusal keeps it open, saying why).
+      form.dataset.judgeCurrent = params.choice;
+      form.querySelectorAll<HTMLDialogElement>('dialog[open]').forEach(dialog => dialog.close());
+    }
     const released = releaseSubmittedForm(form, submittedValues);
     if (released && params.action === 'connect_api_key') {
       form.dataset.keyAccepted = 'true';
@@ -1791,12 +1798,7 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
     const dialog = event.target;
     if (dialog instanceof HTMLDialogElement && dialog.matches('[data-judge-dialog]')) { event.preventDefault(); resetJudge(dialog); }
   };
-  const onJudgeSubmit = (event: Event): void => {
-    const form = event.target instanceof HTMLFormElement ? event.target : null;
-    if (form?.hasAttribute('data-judge-choice')) form.querySelectorAll<HTMLDialogElement>('dialog[open]').forEach(dialog => dialog.close());
-  };
 
-  root.addEventListener('submit', onJudgeSubmit, true);
   root.addEventListener('submit', onSubmit);
   root.addEventListener('click', onClick);
   root.addEventListener('change', onJudgePick);
@@ -1838,7 +1840,6 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
     if (interval) clearInterval(interval);
     view.removeEventListener('focus', refreshOnReturn);
     root.ownerDocument.removeEventListener('visibilitychange', onVisibilityReturn);
-    root.removeEventListener('submit', onJudgeSubmit, true);
     root.removeEventListener('submit', onSubmit);
     root.removeEventListener('click', onClick);
     root.removeEventListener('change', onJudgePick);

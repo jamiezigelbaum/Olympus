@@ -464,7 +464,7 @@ export function renderJudgeChoice(view: SourceDashboardViewModel, options?: Dash
   const cap = `<label class="judgecap">${escapeHtml(S.judgeCap)} <input type="number" name="cap_dollars" min="0" step="0.01" value="${status.uncapped ? '' : status.capDollars}"></label><p class="pnote">${spent}</p>`;
   const reply = '<span data-action-message role="status"></span>';
   const dialog = (pick: 'local' | 'venice', title: string, body: string, button: string) =>
-    `<dialog class="judgedialog" data-judge-dialog="${pick}" aria-labelledby="judge-dialog-${pick}"><h3 id="judge-dialog-${pick}">${escapeHtml(title)}</h3>${body}`
+    `<dialog class="judgedialog" data-judge-dialog="${pick}" aria-labelledby="judge-dialog-${pick}"><h3 id="judge-dialog-${pick}">${escapeHtml(title)}</h3>${body}<p class="pnote" data-action-message role="status"></p>`
     + `<div class="judgedialogbar"><button class="btn" type="button" data-judge-cancel>${escapeHtml(S.judgeCancel)}</button><button class="btn primary" type="submit">${escapeHtml(button)}</button></div></dialog>`;
   const confirm = status.choice === 'venice'
     ? dialog('local', S.judgeToLocal, `<p>${escapeHtml(S.judgeToLocalLine)}</p>`, S.judgeToLocalButton)

@@ -148734,7 +148734,7 @@ function mountDashboardController(options) {
     });
   }
   function say(form, message2) {
-    const slot = form.querySelector("[data-action-message]");
+    const slot = form.querySelector("dialog[open] [data-action-message]") ?? Array.from(form.querySelectorAll("[data-action-message]")).find((node) => !node.closest("dialog"));
     if (slot)
       slot.textContent = message2;
   }
@@ -149163,6 +149163,10 @@ function mountDashboardController(options) {
       firstRunResult("Saved. Check readiness after Olympus applies the change.");
     }
     const statusMessage = result.body.status_message;
+    if (params.action === "save_judge") {
+      form.dataset.judgeCurrent = params.choice;
+      form.querySelectorAll("dialog[open]").forEach((dialog) => dialog.close());
+    }
     const released = releaseSubmittedForm(form, submittedValues);
     if (released && params.action === "connect_api_key") {
       form.dataset.keyAccepted = "true";
@@ -150445,12 +150449,6 @@ function mountDashboardController(options) {
       resetJudge(dialog);
     }
   };
-  const onJudgeSubmit = (event) => {
-    const form = event.target instanceof HTMLFormElement ? event.target : null;
-    if (form?.hasAttribute("data-judge-choice"))
-      form.querySelectorAll("dialog[open]").forEach((dialog) => dialog.close());
-  };
-  root.addEventListener("submit", onJudgeSubmit, true);
   root.addEventListener("submit", onSubmit);
   root.addEventListener("click", onClick);
   root.addEventListener("change", onJudgePick);
@@ -150497,7 +150495,6 @@ function mountDashboardController(options) {
       clearInterval(interval);
     view3.removeEventListener("focus", refreshOnReturn);
     root.ownerDocument.removeEventListener("visibilitychange", onVisibilityReturn);
-    root.removeEventListener("submit", onJudgeSubmit, true);
     root.removeEventListener("submit", onSubmit);
     root.removeEventListener("click", onClick);
     root.removeEventListener("change", onJudgePick);
@@ -161650,7 +161647,7 @@ function renderJudgeChoice(view3, options) {
   const spent = status.uncapped ? "No spending limit is set, so Olympus isn't tracking cloud spending yet. Your Venice account shows what you've spent." : `${status.stop === "storage" ? "Spending amounts are unavailable." : `Spent or reserved: ${money(status.spentDollars)}. Remaining: ${money(status.remainingDollars)}.`} Olympus stops before going past this limit. Items not yet sorted then stay Private and wait for this computer.`;
   const cap = `<label class="judgecap">${escapeHtml2(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeCap)} <input type="number" name="cap_dollars" min="0" step="0.01" value="${status.uncapped ? "" : status.capDollars}"></label><p class="pnote">${spent}</p>`;
   const reply = '<span data-action-message role="status"></span>';
-  const dialog = (pick2, title, body, button) => `<dialog class="judgedialog" data-judge-dialog="${pick2}" aria-labelledby="judge-dialog-${pick2}"><h3 id="judge-dialog-${pick2}">${escapeHtml2(title)}</h3>${body}` + `<div class="judgedialogbar"><button class="btn" type="button" data-judge-cancel>${escapeHtml2(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeCancel)}</button><button class="btn primary" type="submit">${escapeHtml2(button)}</button></div></dialog>`;
+  const dialog = (pick2, title, body, button) => `<dialog class="judgedialog" data-judge-dialog="${pick2}" aria-labelledby="judge-dialog-${pick2}"><h3 id="judge-dialog-${pick2}">${escapeHtml2(title)}</h3>${body}<p class="pnote" data-action-message role="status"></p>` + `<div class="judgedialogbar"><button class="btn" type="button" data-judge-cancel>${escapeHtml2(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeCancel)}</button><button class="btn primary" type="submit">${escapeHtml2(button)}</button></div></dialog>`;
   const confirm = status.choice === "venice" ? dialog("local", DASHBOARD_PRIVACY_SETTINGS_COPY.judgeToLocal, `<p>${escapeHtml2(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeToLocalLine)}</p>`, DASHBOARD_PRIVACY_SETTINGS_COPY.judgeToLocalButton) + `<div class="judgekeep">${cap}<button class="btn" type="submit">${escapeHtml2(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeSaveLimit)}</button></div>` : dialog("venice", DASHBOARD_PRIVACY_SETTINGS_COPY.judgeToVenice, `<p>Venice will read each item it sorts, including items it marks Private, and charge your Venice account${estimate.cloudDollars === null ? "" : `: about ${money(estimate.cloudDollars)} for the ${items.toLocaleString("en-US")} items found so far`}.</p>${cap}`, DASHBOARD_PRIVACY_SETTINGS_COPY.judgeToVeniceButton);
   return `<section id="privacy-judge"><h3 class="sect">${escapeHtml2(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeTitle)}</h3><p class="pnote">${escapeHtml2(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeIntro)}</p>
     <form data-judge-choice data-judge-current="${status.choice}"><fieldset${unlocked(options) ? "" : " disabled"}><legend class="judgelegend">${escapeHtml2(DASHBOARD_PRIVACY_SETTINGS_COPY.judgeLegend)}</legend>
