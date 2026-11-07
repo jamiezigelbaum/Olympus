@@ -2719,8 +2719,8 @@ export function chatgptDashboardClient(
     add(page, privacySection(data));
     // A landing or a highlighted row needs its source visible.
     if (state.landing || state.landed) state.open['home-sources'] = true;
-    // An archive at work shows its progress there, so it starts open (until the owner folds it).
-    if (state.open['home-sources'] === undefined && archivesMoving()) state.open['home-sources'] = true;
+    // An archive at work shows its progress there, and one waiting on the owner its buttons, so it starts open (until the owner folds it).
+    if (state.open['home-sources'] === undefined && (archivesMoving() || archiveGroups().some(archiveNeeds))) state.open['home-sources'] = true;
     const box = details('home-sources', doc.createTextNode(P.home.allSources + ' (' + count(all.filter((source: Any) => !isArchivesCard(source)).length) + ')'), 'section home-sources');
     add(box, sourcesSection(all.filter((source: Any) => !isArchivesCard(source))), otherArchivesSection(all.filter(isArchivesCard)[0]));
     return add(page, box);

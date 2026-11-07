@@ -769,7 +769,7 @@ describe('the leg\'s journeys on the product\'s real panel', () => {
   test('the picker journey fails when an archive is already listed (its button has moved into a menu)', async () => {
     const { trace } = await runOn({ [DASHBOARD_TOOL_NAME]: () => dashboardAnswer([entryFor(agentFx)]) }, pickerImportJourney(pickerFx, '/unused', { openS: 1, startS: 1, settleS: 1 }));
     expect(trace.ok).toBe(false);
-    expect(trace.steps[0]!.ok).toBe(false);
+    expect(trace.steps.find((step) => !step.ok)!.name).toContain('Import an archive is offered');
   });
 
   test('Remove: it asks first in the archive\'s name, and the row goes once confirmed', async () => {

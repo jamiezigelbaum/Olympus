@@ -156497,7 +156497,7 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     add(page2, privacySection(data2));
     if (state.landing || state.landed)
       state.open["home-sources"] = true;
-    if (state.open["home-sources"] === undefined && archivesMoving())
+    if (state.open["home-sources"] === undefined && (archivesMoving() || archiveGroups().some(archiveNeeds)))
       state.open["home-sources"] = true;
     const box = details("home-sources", doc2.createTextNode(P.home.allSources + " (" + count(all.filter((source) => !isArchivesCard(source)).length) + ")"), "section home-sources");
     add(box, sourcesSection(all.filter((source) => !isArchivesCard(source))), otherArchivesSection(all.filter(isArchivesCard)[0]));

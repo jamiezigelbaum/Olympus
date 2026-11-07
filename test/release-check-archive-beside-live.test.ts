@@ -87,6 +87,8 @@ describe('an import beside a live input is judged', () => {
     const journey = unpairJourney('telegram.messages', 'Telegram');
     expect(journey.steps.map((step) => step.do)).toEqual([
       { go: '/dashboard' },
+      { click: { css: 'details.home-sources:not([open]) > summary' }, frame: 'panel', optional: true },
+      { observe: true },
       { click: { css: '[data-key="summary:menu:telegram.messages"]' }, frame: 'panel' },
       { click: { role: 'button', name: 'Unpair Telegram' }, frame: 'panel' },
       { click: { role: 'button', name: 'Yes, unpair telegram' }, frame: 'panel' },
