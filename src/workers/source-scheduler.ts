@@ -280,6 +280,14 @@ export interface SourceSchedulerTaskRunResult {
   status: 'progress' | 'idle';
   counts?: Record<string, number>;
   warnings?: string[];
+  /** Ephemeral counts-only sweep receipts. Logged once the actual next run is known, never persisted. */
+  embeddingSweep?: Array<{
+    source_index: number;
+    store_index: number;
+    trust_domain: LocalConnectorStore['trustDomain'];
+    family: LocalConnectorStore['family'];
+    counts: Record<string, number>;
+  }>;
   /** Omitted preserves the durable checkpoint; null clears it. */
   checkpoint?: string | null;
   /** A structured provider/cost guard deferral; never inferred from free-form text. */
@@ -1128,6 +1136,14 @@ export class SourceScheduler {
         }
       }
       state.nextRunAt = nextRunAt;
+      for (const { counts, ...store } of result.embeddingSweep ?? []) {
+        console.info(`[olympus:embedding-sweep] ${JSON.stringify({
+          ...store, ...counts,
+          attempted_at: attemptedAt,
+          backoff_ms: retryAt?.effectiveIntervalMs ?? 0,
+          next_run_at: new Date(nextRunAt).toISOString(),
+        })}`);
+      }
       if (continuing || wokenWhileRunning) this.scheduleContinueWake(nextRunAt);
       // A retry due before the next regular tick gets its own wake, or the tick
       // would round it up (an embedding backlog asking for 5 s waited 60 s).
@@ -1840,12 +1856,12 @@ export function withEmbeddingSweep(
   targetsFor: (source: SourceSchedulerSource) => (() => readonly ConnectorStoreEmbeddingTarget[]) | undefined,
   options: { storeDeadlineMs?: number } = {},
 ): SourceSchedulerSource[] {
-  return sources.map((source) => {
+  return sources.map((source, sourceIndex) => {
     const targets = targetsFor(source);
     if (!targets) return source;
     return {
       ...source,
-      tasks: [...source.tasks, embeddingSweepTask(source, targets, options.storeDeadlineMs)],
+      tasks: [...source.tasks, embeddingSweepTask(source, targets, options.storeDeadlineMs, sourceIndex)],
       embeddingDeferredReason: () => targets().some((target) => target.store.embeddingDeferredReason() !== undefined)
         ? EMBEDDING_PROVIDER_UNAVAILABLE_REASON
         : undefined,
@@ -1861,6 +1877,7 @@ function embeddingSweepTask(
   source: SourceSchedulerSource,
   targets: () => readonly ConnectorStoreEmbeddingTarget[],
   deadlineMs = EMBEDDING_SWEEP_STORE_DEADLINE_MS,
+  sourceIndex = 0,
 ): SourceSchedulerTask {
   const maxItems = embeddingSweepMaxItems();
   return {
@@ -1888,7 +1905,7 @@ function embeddingSweepTask(
         // Dropbox, whose Private store then embedded nothing for an hour).
         const stopAtMs = Date.now() + Math.floor(deadlineMs / 2);
         const result = await Promise.race([
-          embedPendingChunks([target], { maxItems, stopAtMs }),
+          embedPendingChunks([target], { maxItems, stopAtMs, diagnostics: true }),
           new Promise<typeof overran>((resolve) => { timer = setTimeout(() => resolve(overran), deadlineMs); }),
         ]).finally(() => clearTimeout(timer));
         if (result !== overran) {
@@ -1900,9 +1917,9 @@ function embeddingSweepTask(
             ? { ...run, deferredReason: outage } : run));
           continue;
         }
-        console.error(`[olympus:embedding-sweep] pass_overran source=${source.sourceId} corpus=${target.store.corpusId} after_ms=${deadlineMs}; the source's turn was given back`);
         target.store.setEmbeddingDeferral(EMBEDDING_PROVIDER_UNAVAILABLE_REASON);
         runs.push({ corpusId: target.store.corpusId, itemsAttempted: 0, chunksEmbedded: 0, itemsFailed: 0, itemsOutOfScope: 0,
+          inventory: { inventory_complete: 0, pass_overran: 1 },
           deferredReason: EMBEDDING_PROVIDER_UNAVAILABLE_REASON });
       }
       const deferred = runs.filter((run) => run.deferredReason !== undefined).length;
@@ -1915,18 +1932,36 @@ function embeddingSweepTask(
         stores_busy: runs.filter((run) => run.busy === true).length,
       };
       const status: SourceSchedulerTaskRunResult['status'] = counts.chunks_embedded > 0 ? 'progress' : 'idle';
+      const embeddingSweep: NonNullable<SourceSchedulerTaskRunResult['embeddingSweep']> = runs.map((run, index) => ({
+        source_index: sourceIndex,
+        store_index: index,
+        trust_domain: passTargets[index]!.store.trustDomain,
+        family: passTargets[index]!.store.family,
+        counts: {
+          ...run.inventory,
+          whole_store: passTargets[index]!.wholeStore ? 1 : 0,
+          queued_items: passTargets[index]!.store.queuedEmbeddingItemIds().length,
+          items_attempted: run.itemsAttempted, chunks_embedded: run.chunksEmbedded,
+          items_failed: run.itemsFailed, skipped_out_of_scope_items: run.itemsOutOfScope,
+          skipped_lease_busy_items: run.busy ? run.itemsAttempted : 0,
+          skipped_deferred_items: run.deferredReason ? run.itemsAttempted : 0,
+          stores_deferred: run.deferredReason ? 1 : 0, stores_lease_busy: run.busy ? 1 : 0,
+          stopped_at_deadline: run.stoppedAtDeadline ? 1 : 0,
+        },
+      }));
       const attemptedAt = Date.parse(context?.attemptedAt ?? '') || Date.now();
       if (deferred === 0) {
         // A store that filled its bound has more owed: a backlog drains pass after pass, not one bound a minute.
         const more = runs.some((run) => run.busy !== true && run.chunksEmbedded > 0
           && (run.itemsAttempted >= maxItems || run.stoppedAtDeadline === true));
-        if (counts.items_failed === 0) return { status, counts, ...(more ? { continueSoon: true } : {}) };
+        if (counts.items_failed === 0) return { status, counts, embeddingSweep, ...(more ? { continueSoon: true } : {}) };
         // Skipped items are surfaced, not retried. A backlog still drains pass
         // after pass: one failed item, ever, once held every later pass of the
         // store to one bound a minute (Sparta, 2026-11-03: 21k Dropbox items).
         return {
           status,
           counts,
+          embeddingSweep,
           retryAt: {
             at: new Date(attemptedAt + (more ? SOURCE_SCHEDULER_CONTINUE_AFTER_MS : EMBEDDING_SWEEP_INTERVAL_MS)).toISOString(),
             degradedReason: EMBEDDING_ITEMS_FAILED_REASON,
@@ -1941,6 +1976,7 @@ function embeddingSweepTask(
       return {
         status,
         counts,
+        embeddingSweep,
         retryAt: {
           at: new Date(attemptedAt + backoffMs).toISOString(),
           effectiveIntervalMs: backoffMs,

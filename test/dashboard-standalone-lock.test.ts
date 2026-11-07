@@ -5,6 +5,7 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import { Window } from 'happy-dom';
 import { pageShell } from '../src/workers/dashboard/components.ts';
+import { dashboardTopNav } from '../src/workers/dashboard/top-nav.ts';
 
 const windows: Window[] = [];
 afterEach(async () => {
@@ -14,7 +15,7 @@ afterEach(async () => {
 const BODY = '<div class="attncard" data-dashboard-control-gate data-state="connected">'
   + '<form data-control-session-kind="lock"><button type="submit">Lock</button><span data-action-message></span></form></div>';
 
-async function lockPage(url: string, answer: (url: string, method: string) => { status: number; body: string }) {
+async function lockPage(url: string, answer: (url: string, method: string) => { status: number; body: string }, nav?: string) {
   const w = new Window({ url });
   windows.push(w);
   const requests: string[] = [];
@@ -24,7 +25,7 @@ async function lockPage(url: string, answer: (url: string, method: string) => { 
     const { status, body } = answer(String(target), method);
     return new w.Response(body, { status, headers: { 'Content-Type': 'text/html' } });
   };
-  const html = pageShell({ title: 'Olympus', meta: '', body: BODY, controller: { csrfToken: 'csrf' }, poll: { intervalMs: 0, unlocked: true, controlSessionCsrfToken: 'csrf' } });
+  const html = pageShell({ title: 'Olympus', meta: '', ...(nav ? { nav } : {}), body: nav ? '' : BODY, controller: { csrfToken: 'csrf' }, poll: { intervalMs: 0, unlocked: true, controlSessionCsrfToken: 'csrf' } });
   // The page without its script, then the script itself run against this window (as chatgpt-dashboard-ui does).
   const start = html.indexOf('<script>') + '<script>'.length;
   const end = html.indexOf('</script>', start);
@@ -50,6 +51,16 @@ describe('Lock on a page opened by its session alone', () => {
     expect(w.document.querySelector('form[data-control-session-kind="lock"]')).toBeNull();
     // The page keeps its header.
     expect(w.document.querySelector('.top .brand')?.textContent).toBe('Olympus');
+  });
+
+  test('with the top bar, locking keeps every tab and the bar says Locked', async () => {
+    const { w } = await lockPage('https://olympus.test/dashboard?settings', (target) => (
+      target.includes('/lock') ? { status: 200, body: '{}' } : { status: 401, body: '{}' }
+    ), dashboardTopNav({ active: 'settings', unlocked: true }));
+    expect(Array.from(w.document.querySelectorAll('.topnav .navtab')).map((tab) => tab.textContent)).toEqual(['Home', 'Sources', 'Privacy', 'Settings']);
+    expect(w.document.querySelector('.topnav .navlock')!.getAttribute('data-state')).toBe('locked');
+    expect(w.document.querySelector('.topnav form[data-control-session-kind="lock"]')).toBeNull();
+    expect(w.document.querySelector('a[href="olympus://open/dashboard"]')).not.toBeNull();
   });
 
   test('a page opened with a reader\'s token reads its locked page from the worker instead', async () => {

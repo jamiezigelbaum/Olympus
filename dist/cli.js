@@ -31263,6 +31263,8 @@ async function embedPendingChunks(targets, options) {
       itemsOutOfScope: 0
     };
     runs.push(run);
+    if (options.diagnostics)
+      run.inventory = await store.embeddingSweepInventory(target.provider, target, options.stopAtMs);
     const groups = store.queuedEmbeddingGroups(options.maxItems).filter((group) => {
       if (target.wholeStore !== true || sameEmbeddingIdentity(group.provider, target.provider))
         return true;
@@ -38665,6 +38667,69 @@ var init_local_index = __esm(() => {
         return [];
       const tierHidden = await this.tierHiddenItemPksInTurns();
       return this.missingEmbeddingItemIds(embedder, limit, scope, tierHidden);
+    }
+    async embeddingSweepInventory(provider, scope = {}, stopAtMs) {
+      const started = Date.now();
+      const tier = await this.tierHiddenItemPksInTurns();
+      const hidden = new Set(tier.hidden);
+      const held = new Set(tier.held);
+      const heldForJudgment = this.canEmbedHeld(provider) ? new Set(tier.heldForJudgment) : new Set;
+      const namesOnly = new Set(tier.metadataLayer);
+      const moving = new Set;
+      let walked = 0;
+      for (const member of this.tierLedgerHiddenMemo?.members.values() ?? []) {
+        if (member.flags.moving)
+          for (const pk of member.pks)
+            moving.add(pk);
+        if (++walked % 2000 === 0)
+          await ingestionTurn();
+      }
+      const tiers = connectorStoreEmbeddableRowTiers(this.trustDomain, provider);
+      const account = normalizeOptionalAccountScope(scope.accountScope);
+      const scoped = connectorStoreFilterSql(scope.filters);
+      const counts = {
+        pending_chunks: 0,
+        eligible_chunks: 0,
+        skipped_held_chunks: 0,
+        skipped_moving_chunks: 0,
+        skipped_hidden_chunks: 0,
+        skipped_metadata_chunks: 0,
+        skipped_failed_chunks: 0,
+        skipped_out_of_scope_chunks: 0,
+        skipped_private_tier_chunks: 0,
+        skipped_retired_chunks: 0,
+        inventory_complete: 0
+      };
+      const page2 = this.db.query(`
+      SELECT c.chunk_pk, i.item_pk, i.local_item_id, i.tombstoned, i.trust_tier,
+        (e.chunk_pk IS NULL OR e.content_hash != c.embedding_input_hash) AS owed,
+        CASE WHEN 1 = 1 ${account ? "AND i.account_scope = ?" : ""} ${scoped.sql} THEN 1 ELSE 0 END AS in_scope
+      FROM chunks c JOIN items i ON i.item_pk = c.item_pk
+      LEFT JOIN chunk_embeddings e ON e.chunk_pk = c.chunk_pk AND e.model_id = ?
+      WHERE c.chunk_pk > ?
+      ORDER BY c.chunk_pk LIMIT 2048
+    `);
+      let after = 0;
+      while (stopAtMs === undefined || Date.now() < stopAtMs) {
+        const rows = page2.all(...account ? [account] : [], ...scoped.params, provider.modelId, after);
+        for (const row of rows) {
+          if (!row.owed)
+            continue;
+          counts.pending_chunks += 1;
+          const heldBack = held.has(row.item_pk) && !heldForJudgment.has(row.item_pk);
+          const visibilityExcluded = hidden.has(row.item_pk) || namesOnly.has(row.item_pk) || heldBack;
+          const reason = row.tombstoned || row.trust_tier === "S5" ? "skipped_retired_chunks" : moving.has(row.item_pk) && visibilityExcluded ? "skipped_moving_chunks" : hidden.has(row.item_pk) ? "skipped_hidden_chunks" : namesOnly.has(row.item_pk) ? "skipped_metadata_chunks" : heldBack ? "skipped_held_chunks" : tiers && !tiers.includes(row.trust_tier) ? "skipped_private_tier_chunks" : this.embeddingFailureState?.has(row.local_item_id) ? "skipped_failed_chunks" : !row.in_scope ? "skipped_out_of_scope_chunks" : "eligible_chunks";
+          counts[reason] += 1;
+        }
+        if (rows.length < 2048) {
+          counts.inventory_complete = 1;
+          break;
+        }
+        after = rows.at(-1).chunk_pk;
+        await ingestionTurn();
+      }
+      counts.inventory_ms = Date.now() - started;
+      return counts;
     }
     embeddingOwedItemIds(modelId, localItemIds) {
       if (localItemIds.length === 0)
@@ -149920,7 +149985,10 @@ function mountDashboardController(options) {
     });
   }
   function say(form, message2) {
-    const slot = form.querySelector("dialog[open] [data-action-message]") ?? Array.from(form.querySelectorAll("[data-action-message]")).find((node) => !node.closest("dialog"));
+    const slot = form.querySelector("dialog[open] [data-action-message]") ?? Array.from(form.querySelectorAll("[data-action-message]")).find((node) => {
+      const box = node.closest("dialog");
+      return !box || !form.contains(box);
+    });
     if (slot)
       slot.textContent = message2;
   }
@@ -149973,7 +150041,7 @@ function mountDashboardController(options) {
     return "Request failed.";
   }
   function applyWriteCapability() {
-    root.querySelectorAll("form[data-connect-kind],form[data-model-check],form[data-first-run-privacy],form[data-computer-use],form[data-judge-choice],form[data-model-choice],form[data-local-models-discover],form[data-local-models-test],form[data-agent-kind]").forEach((form) => {
+    root.querySelectorAll("form[data-connect-kind],form[data-model-check],form[data-first-run-privacy],form[data-computer-use],form[data-judge-choice],form[data-model-choice],form[data-source-action],form[data-local-models-discover],form[data-local-models-test],form[data-agent-kind]").forEach((form) => {
       const pending = pendingForms.has(form) || form.dataset.keyAccepted === "true";
       Array.from(form.elements).filter((control) => control.matches('button,input:not([type="hidden"])')).forEach((control) => {
         if (control.dataset.olympusOriginallyDisabled === undefined) {
@@ -150037,6 +150105,12 @@ function mountDashboardController(options) {
         return "Waiting for authorization. This card updates when the connection completes.";
       case "connect_this_computer":
         return "Connected. Choose the folders Olympus may read.";
+      case "sync_now":
+        return "Checking now. The row updates when it finishes.";
+      case "disconnect_source":
+        return "Disconnected.";
+      case "delete_source_data":
+        return "Deleted what Olympus indexed from this source.";
       default:
         return "Saved.";
     }
@@ -150162,6 +150236,14 @@ function mountDashboardController(options) {
         return;
       }
       return { action: "save_model_choice", provider, model };
+    }
+    if (form.hasAttribute("data-source-action")) {
+      const kind = form.dataset.sourceAction;
+      if (kind === "sync_now" && body.source)
+        return { action: "sync_now", source: body.source };
+      if ((kind === "disconnect_source" || kind === "delete_source_data") && body.source_id)
+        return { action: kind, source_id: body.source_id, acknowledge: true };
+      return;
     }
     if (form.hasAttribute("data-computer-use"))
       return { action: "set_computer_use", choice: (form.hasAttribute("data-server-mode") ? body.server === "on" : body.choice === "server") ? "server" : "everyday" };
@@ -150358,7 +150440,7 @@ function mountDashboardController(options) {
       firstRunResult("Saved. Check readiness after Olympus applies the change.");
     }
     const statusMessage = result.body.status_message;
-    if (params.action === "save_model_choice" || params.action === "save_local_answer_model") {
+    if (params.action === "save_model_choice" || params.action === "save_local_answer_model" || params.action === "disconnect_source" || params.action === "delete_source_data") {
       form.closest("dialog[open]")?.close();
     }
     if (params.action === "save_judge") {
@@ -150661,7 +150743,7 @@ function mountDashboardController(options) {
     return root.ownerDocument.activeElement;
   }
   function hasDirtyInput() {
-    return queryAll('input:not([type="hidden"]),textarea,select').some((field) => field instanceof HTMLSelectElement ? Array.from(field.options).some((option) => option.selected !== option.defaultSelected) : field.value !== field.defaultValue);
+    return queryAll('input:not([type="hidden"]):not([data-source-search]),textarea,select').some((field) => field instanceof HTMLSelectElement ? Array.from(field.options).some((option) => option.selected !== option.defaultSelected) : field.value !== field.defaultValue);
   }
   function hasFocusedControl() {
     const active = activeElement();
@@ -150741,6 +150823,8 @@ function mountDashboardController(options) {
     if (!force && (query("[data-messaging-input] input,[data-messaging-chats] input") || messagingTimers.size > 0 || query('.sheet.on input:not([type="hidden"]),.sheet.on textarea,.sheet.on select')))
       return;
     if (!force && query("[data-remote-terms]:not([hidden])"))
+      return;
+    if (!force && query("dialog[open]"))
       return;
     if (!force && hasDirtyInput())
       return;
@@ -151209,7 +151293,7 @@ function mountDashboardController(options) {
       submitAgentControl(form);
       return;
     }
-    if (!form.matches("[data-connect-kind],[data-model-check],[data-first-run-privacy],[data-computer-use],[data-judge-choice],[data-model-choice],[data-local-models-discover],[data-local-models-test]"))
+    if (!form.matches("[data-connect-kind],[data-model-check],[data-first-run-privacy],[data-computer-use],[data-judge-choice],[data-model-choice],[data-source-action],[data-local-models-discover],[data-local-models-test]"))
       return;
     event.preventDefault();
     const submittedValues = formRecord(form);
@@ -151555,6 +151639,12 @@ function mountDashboardController(options) {
     const sourceId = Object.prototype.hasOwnProperty.call(sources, wanted) ? sources[wanted] : undefined;
     if (sourceId) {
       const row = queryAll("[data-source-id]").find((candidate) => candidate.dataset.sourceId === sourceId);
+      const addSheet = row?.closest("dialog[data-add-source]");
+      if (row && addSheet && typeof addSheet.showModal === "function") {
+        showSourceSetup(addSheet, row.closest("[data-source-setup]")?.dataset.sourceSetup);
+        if (!addSheet.open)
+          addSheet.showModal();
+      }
       if (row) {
         const toggle = row.querySelector("[data-sheet-toggle]");
         const selector = toggle ? toggle.dataset.sheetToggle || "" : "";
@@ -151706,6 +151796,63 @@ function mountDashboardController(options) {
       slot.append(label);
     }
   };
+  function showSourceSetup(sheet, sourceId) {
+    const grid = sheet.querySelector("[data-source-catalog]");
+    sheet.querySelectorAll("[data-source-setup]").forEach((panel) => {
+      panel.hidden = panel.dataset.sourceSetup !== sourceId;
+    });
+    if (grid)
+      grid.hidden = sourceId !== undefined;
+  }
+  const onSourcesClick = (event) => {
+    const target = event.target instanceof Element ? event.target : null;
+    const opener = target?.closest("[data-dialog-open]");
+    if (opener) {
+      const id = opener.dataset.dialogOpen ?? "";
+      const dialog = /^[A-Za-z0-9_-]+$/.test(id) ? root.querySelector(`dialog[id="${id}"]`) : null;
+      if (!dialog || typeof dialog.showModal !== "function")
+        return;
+      if (dialog.matches("[data-add-source]"))
+        showSourceSetup(dialog, opener.dataset.sourceOpen);
+      if (!dialog.open)
+        dialog.showModal();
+      return;
+    }
+    const pick2 = target?.closest("[data-source-pick]");
+    const sheet = pick2?.closest("[data-add-source]");
+    if (pick2 && sheet) {
+      showSourceSetup(sheet, pick2.dataset.sourcePick);
+      return;
+    }
+    const back = target?.closest("[data-source-back]")?.closest("[data-add-source]");
+    if (back) {
+      showSourceSetup(back, undefined);
+      return;
+    }
+    if (target instanceof HTMLDialogElement && target.matches("[data-closable]")) {
+      const box = target.getBoundingClientRect();
+      const at = event;
+      if (box.width > 0 && (at.clientX < box.left || at.clientX > box.right || at.clientY < box.top || at.clientY > box.bottom))
+        target.close();
+    }
+  };
+  const onSourceSearch = (event) => {
+    const input = event.target instanceof HTMLInputElement && event.target.matches("[data-source-search]") ? event.target : null;
+    const sheet = input?.closest("[data-add-source]");
+    if (!input || !sheet)
+      return;
+    const words2 = input.value.trim().toLowerCase();
+    sheet.querySelectorAll("[data-source-pick]").forEach((tile) => {
+      tile.hidden = words2 !== "" && !(tile.textContent ?? "").toLowerCase().includes(words2);
+    });
+  };
+  const onDialogClose = (event) => {
+    if (event.target instanceof HTMLDialogElement && !query("dialog[open]"))
+      refreshNow(false);
+  };
+  root.addEventListener("close", onDialogClose, true);
+  root.addEventListener("click", onSourcesClick);
+  root.addEventListener("input", onSourceSearch);
   root.addEventListener("click", onAddModelClick);
   root.addEventListener("submit", onSubmit);
   root.addEventListener("click", onClick);
@@ -151754,6 +151901,9 @@ function mountDashboardController(options) {
     view3.removeEventListener("focus", refreshOnReturn);
     root.ownerDocument.removeEventListener("visibilitychange", onVisibilityReturn);
     root.removeEventListener("click", onAddModelClick);
+    root.removeEventListener("close", onDialogClose, true);
+    root.removeEventListener("click", onSourcesClick);
+    root.removeEventListener("input", onSourceSearch);
     root.removeEventListener("submit", onSubmit);
     root.removeEventListener("click", onClick);
     root.removeEventListener("change", onJudgePick);
@@ -152576,8 +152726,19 @@ function standaloneDashboardControllerScript(input) {
         abort.abort();
         var page = root.querySelector('.page') || root;
         var top = page.querySelector('.top');
+        // The top bar stays, so every tab is still one click away; its pill says Locked.
+        var nav = page.querySelector('.topnav');
+        var pill = nav && nav.querySelector('.navlock');
+        if (pill) {
+          var locked = document.createElement('span');
+          locked.className = 'navlock';
+          locked.setAttribute('data-state', 'locked');
+          locked.innerHTML = '<span aria-hidden="true">\uD83D\uDD12</span> Locked';
+          pill.replaceWith(locked);
+        }
         page.innerHTML = config.lockedHtml;
         if (top) page.insertBefore(top, page.firstChild);
+        if (nav) page.insertBefore(nav, page.firstChild);
       }
       function route(params) {
         var action = params.action;
@@ -152589,6 +152750,9 @@ function standaloneDashboardControllerScript(input) {
         if (action === 'save_judge') return ['/dashboard/models/judge', withoutAction(params)];
         if (action === 'save_model_choice') return ['/dashboard/models/choice', withoutAction(params)];
         if (action === 'list_addable_models') return ['/dashboard/models/addable', withoutAction(params)];
+        if (action === 'sync_now') return ['/dashboard/sync-now', withoutAction(params)];
+        if (action === 'disconnect_source') return ['/dashboard/disconnect', withoutAction(params)];
+        if (action === 'delete_source_data') return ['/dashboard/delete-source-data', withoutAction(params)];
         if (action === 'set_computer_use') return ['/dashboard/engine/computer-use', withoutAction(params)];
         if (action === 'save_first_run_privacy') return ['/dashboard/models/first-run-privacy', withoutAction(params)];
         if (action === 'connect_api_key') return ['/dashboard/connect/api-key', withoutAction(params)];
@@ -162528,6 +162692,46 @@ var init_private_answers = __esm(() => {
   ANONYMOUS_SETUP_ID = DASHBOARD_PRIVATE_ANSWERS_ANONYMOUS_FRAGMENT;
 });
 
+// src/workers/dashboard/source-logos.ts
+function sourceLogoTile(sourceId, status) {
+  const brand = BRANDS[sourceId];
+  const glyph = GLYPHS[sourceId];
+  const letter = LETTERS[sourceId];
+  const inner = brand ? `<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path fill="${brand.color}" d="${brand.path}"/></svg>` : glyph ? `<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path fill="currentColor" fill-rule="evenodd" d="${glyph}"/></svg>` : `<span class="logoletter" style="background:${letter?.color ?? "#5b5bd6"}">${escapeHtml2(letter?.letter ?? (sourceId[0] ?? "?").toUpperCase())}</span>`;
+  const kind = brand ? "brand" : glyph ? "glyph" : "letter";
+  return `<span class="logotile ${kind}" aria-hidden="true">${inner}${status ? `<span class="logodot ${status}"></span>` : ""}</span>`;
+}
+var BRANDS, GLYPHS, LETTERS, SOURCE_LOGO_CSS = `
+.logotile { position: relative; flex: none; display: inline-flex; align-items: center; justify-content: center; width: 36px; height: 36px; border-radius: 9px; background: #fff; }
+.logotile svg { width: 22px; height: 22px; }
+.logotile.glyph { background: color-mix(in srgb, var(--t2, #888) 22%, transparent); color: var(--t1, #eee); }
+.logotile.letter { background: transparent; }
+.logoletter { display: inline-flex; align-items: center; justify-content: center; width: 36px; height: 36px; border-radius: 9px; color: #fff; font-weight: 700; }
+.logodot { position: absolute; right: -3px; bottom: -3px; width: 11px; height: 11px; border-radius: 50%; border: 2px solid var(--bg, #111); }
+.logodot.ok { background: #3fb950; }
+.logodot.attention { background: #e3a03a; }
+.logodot.off { background: #8b8b8b; }
+`;
+var init_source_logos = __esm(() => {
+  init_components();
+  BRANDS = {
+    "gmail.email": { color: "#EA4335", path: "M24 5.457v13.909c0 .904-.732 1.636-1.636 1.636h-3.819V11.73L12 16.64l-6.545-4.91v9.273H1.636A1.636 1.636 0 0 1 0 19.366V5.457c0-2.023 2.309-3.178 3.927-1.964L5.455 4.64 12 9.548l6.545-4.91 1.528-1.145C21.69 2.28 24 3.434 24 5.457z" },
+    "google_drive.docs": { color: "#4285F4", path: "M12.01 1.485c-2.082 0-3.754.02-3.743.047.01.02 1.708 3.001 3.774 6.62l3.76 6.574h3.76c2.081 0 3.753-.02 3.742-.047-.005-.02-1.708-3.001-3.775-6.62l-3.76-6.574zm-4.76 1.73a789.828 789.861 0 0 0-3.63 6.319L0 15.868l1.89 3.298 1.885 3.297 3.62-6.335 3.618-6.33-1.88-3.287C8.1 4.704 7.255 3.22 7.25 3.214zm2.259 12.653-.203.348c-.114.198-.96 1.672-1.88 3.287a423.93 423.948 0 0 1-1.698 2.97c-.01.026 3.24.042 7.222.042h7.244l1.796-3.157c.992-1.734 1.85-3.23 1.906-3.323l.104-.167h-7.249z" },
+    "dropbox.files": { color: "#0061FF", path: "M6 1.807L0 5.629l6 3.822 6.001-3.822L6 1.807zM18 1.807l-6 3.822 6 3.822 6-3.822-6-3.822zM0 13.274l6 3.822 6.001-3.822L6 9.452l-6 3.822zM18 9.452l-6 3.822 6 3.822 6-3.822-6-3.822zM6 18.371l6.001 3.822 6-3.822-6-3.822L6 18.371z" },
+    "x.bookmarks": { color: "#000000", path: "M18.901 1.153h3.68l-8.04 9.19L24 22.846h-7.406l-5.8-7.584-6.638 7.584H.474l8.6-9.83L0 1.154h7.594l5.243 6.932ZM17.61 20.644h2.039L6.486 3.24H4.298Z" },
+    "telegram.messages": { color: "#26A5E4", path: "M11.944 0A12 12 0 0 0 0 12a12 12 0 0 0 12 12 12 12 0 0 0 12-12A12 12 0 0 0 12 0a12 12 0 0 0-.056 0zm4.962 7.224c.1-.002.321.023.465.14a.506.506 0 0 1 .171.325c.016.093.036.306.02.472-.18 1.898-.962 6.502-1.36 8.627-.168.9-.499 1.201-.82 1.23-.696.065-1.225-.46-1.9-.902-1.056-.693-1.653-1.124-2.678-1.8-1.185-.78-.417-1.21.258-1.91.177-.184 3.247-2.977 3.307-3.23.007-.032.014-.15-.056-.212s-.174-.041-.249-.024c-.106.024-1.793 1.14-5.061 3.345-.48.33-.913.49-1.302.48-.428-.008-1.252-.241-1.865-.44-.752-.245-1.349-.374-1.297-.789.027-.216.325-.437.893-.663 3.498-1.524 5.83-2.529 6.998-3.014 3.332-1.386 4.025-1.627 4.476-1.635z" },
+    "whatsapp.personal.messages": { color: "#25D366", path: "M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347m-5.421 7.403h-.004a9.87 9.87 0 01-5.031-1.378l-.361-.214-3.741.982.998-3.648-.235-.374a9.86 9.86 0 01-1.51-5.26c.001-5.45 4.436-9.884 9.888-9.884 2.64 0 5.122 1.03 6.988 2.898a9.825 9.825 0 012.893 6.994c-.003 5.45-4.437 9.884-9.885 9.884m8.413-18.297A11.815 11.815 0 0012.05 0C5.495 0 .16 5.335.157 11.892c0 2.096.547 4.142 1.588 5.945L.057 24l6.305-1.654a11.882 11.882 0 005.683 1.448h.005c6.554 0 11.89-5.335 11.893-11.893a11.821 11.821 0 00-3.48-8.413Z" },
+    "evernote.notes": { color: "#00A82D", path: "M8.222 5.393c0 .239-.02.637-.256.895-.257.24-.652.259-.888.259H4.552c-.73 0-1.165 0-1.46.04-.159.02-.356.1-.455.14-.04.019-.04 0-.02-.02L8.38.796c.02-.02.04-.02.02.02-.04.099-.118.298-.138.457-.04.298-.04.736-.04 1.472v2.647zm5.348 17.869c-.67-.438-1.026-1.015-1.164-1.373a2.924 2.924 0 01-.217-1.095 3.007 3.007 0 013-3.004c.493 0 .888.398.888.895a.88.88 0 01-.454.776c-.099.06-.237.1-.336.12-.098.02-.473.06-.65.218-.198.16-.356.418-.356.697 0 .298.118.577.316.776.355.358.829.557 1.342.557a2.436 2.436 0 002.427-2.447c0-1.214-.809-2.29-1.875-2.766-.158-.08-.414-.14-.651-.2a8.04 8.04 0 00-.592-.1c-.829-.1-2.901-.755-3.04-2.605 0 0-.611 2.785-1.835 3.54-.118.06-.276.12-.454.16-.177.04-.374.06-.434.06-1.993.12-4.105-.517-5.565-2.03 0 0-.987-.815-1.5-3.103-.118-.558-.355-1.553-.493-2.488-.06-.338-.08-.597-.099-.836 0-.975.592-1.631 1.342-1.73h4.026c.69 0 1.086-.18 1.342-.42.336-.317.415-.775.415-1.312V1.354C9.05.617 9.703 0 10.669 0h.474c.197 0 .434.02.651.04.158.02.296.06.533.12 1.204.298 1.46 1.532 1.46 1.532s2.27.398 3.415.597c1.085.199 3.77.378 4.282 3.104 1.204 6.487.474 12.775.415 12.775-.849 6.129-5.901 5.83-5.901 5.83a4.1 4.1 0 01-2.428-.736zm4.54-13.034c-.652-.06-1.204.2-1.402.697-.04.1-.079.219-.059.278.02.06.06.08.099.1.237.12.631.179 1.204.239.572.06.967.1 1.223.06.04 0 .08-.02.119-.08.04-.06.02-.18.02-.28-.06-.536-.553-.934-1.204-1.014z" }
+  };
+  GLYPHS = {
+    "local.files": "M3 6.5A1.5 1.5 0 0 1 4.5 5h5l2 2h8A1.5 1.5 0 0 1 21 8.5v9a1.5 1.5 0 0 1-1.5 1.5h-15A1.5 1.5 0 0 1 3 17.5z",
+    "archive.imports": "M3 7l9-4 9 4v10l-9 4-9-4zm9 2.2L5.4 6.6 12 9.4l6.6-2.8zM5 8.6v7.1l6 2.7v-7.1zm14 0-6 2.7v7.1l6-2.7z"
+  };
+  LETTERS = {
+    "readwise.library": { letter: "R", color: "#111111" }
+  };
+});
+
 // src/workers/dashboard/model-pickers.ts
 function currentLabel(list) {
   const option = list.options.find((entry) => entry.value === list.current);
@@ -162830,22 +163034,78 @@ function renderDashboardKeysPage(view3, options) {
     options
   });
 }
+function sourceDomId(sourceId) {
+  return sourceId.replace(/[^A-Za-z0-9_-]+/g, "-");
+}
+function sourceFacts(source) {
+  if (source.connection.state === "reauth_required")
+    return "needs sign-in";
+  const facts = [];
+  const items = source.coverage?.indexed_items ?? 0;
+  if (items > 0)
+    facts.push(`${items.toLocaleString("en-US")} ${MESSAGING_SOURCES.has(source.source_id) ? "messages" : "items"}`);
+  if (source.freshness?.label)
+    facts.push(source.freshness.label);
+  return facts.join(" · ");
+}
+function sourceStatus(source) {
+  return source.connection.state === "reauth_required" || source.schedule?.consecutive_failures || source.answer_readiness?.state === "needs_attention" ? "attention" : "ok";
+}
+function connectedSourceRow(source, messagingLocalSession, off, kept = false) {
+  const id = sourceDomId(source.source_id);
+  const label = escapeHtml2(source.label);
+  const items = [];
+  const dialogs = [];
+  const sync = kept ? undefined : SYNC_ROUTE_SOURCES[source.source_id];
+  if (sync)
+    items.push(`<form data-source-action="sync_now"><input type="hidden" name="source" value="${escapeHtml2(sync)}"><button class="menuitem" type="submit"${off}>Sync now</button><span data-action-message role="status"></span></form>`);
+  const confirm = (kind, title, line2, button, danger, menuLabel = title.endsWith("?") ? title.slice(0, -1) : title) => {
+    const dialogId = `${kind === "disconnect_source" ? "disconnect" : "delete"}-${id}`;
+    dialogs.push(`<dialog class="adddialog" id="${dialogId}" data-closable aria-labelledby="${dialogId}-title"><div class="adddialoghead"><h3 id="${dialogId}-title">${escapeHtml2(title)}</h3><button class="btn iconbtn" type="button" data-dialog-close aria-label="Close">✕</button></div>` + `<p class="pnote">${escapeHtml2(line2)}</p><form data-source-action="${kind}"><input type="hidden" name="source_id" value="${escapeHtml2(source.source_id)}"><div class="pickbar"><button class="btn${danger ? " danger" : " primary"}" type="submit"${off}>${escapeHtml2(button)}</button></div><span data-action-message role="status"></span></form></dialog>`);
+    return `<button class="menuitem${danger ? " danger" : ""}" type="button" data-dialog-open="${dialogId}"${off}>${escapeHtml2(menuLabel)}${danger ? "…" : ""}</button>`;
+  };
+  if (kept) {} else if (MESSAGING_SOURCES.has(source.source_id)) {
+    const dialogId = `pairing-${id}`;
+    dialogs.push(`<dialog class="adddialog" id="${dialogId}" data-closable aria-label="${label} pairing"><div class="adddialoghead"><h3>${label}</h3><button class="btn iconbtn" type="button" data-dialog-close aria-label="Close">✕</button></div>` + renderMessagingCard(source.source_id === "telegram.messages" ? "telegram" : "whatsapp", messagingLocalSession, { paired: true }) + "</dialog>");
+    items.push(`<button class="menuitem" type="button" data-dialog-open="${dialogId}"${off}>Pairing and chats</button>`);
+  } else if (source.connection.disconnect) {
+    items.push("<hr>" + confirm("disconnect_source", `Disconnect ${source.label}?`, source.connection.disconnect.confirmation, "Disconnect", false));
+  }
+  if (kept)
+    items.push(confirm("delete_source_data", `Delete what Olympus indexed from ${source.label}?`, `Olympus deletes what it indexed from ${source.label}. Your ${source.label} account and files are not touched. This cannot be undone.`, "Delete indexed data", true, "Delete indexed data"));
+  const needs = source.connection.state === "reauth_required" || kept ? `<button class="btn${kept ? "" : " primary"}" type="button" data-dialog-open="add-source" data-source-open="${escapeHtml2(source.source_id)}"${off}>${kept ? "Reconnect" : "Sign in"}</button>` : "";
+  const facts = kept ? `${DASHBOARD_DISCONNECTED_DATA_KEPT} · ${(source.coverage?.indexed_items ?? 0).toLocaleString("en-US")} items` : sourceFacts(source);
+  const row = `<div class="srcrow${kept ? " kept" : ""}" data-source-row="${escapeHtml2(source.source_id)}"${kept ? " data-source-kept" : ""}>${sourceLogoTile(source.source_id, kept ? "off" : sourceStatus(source))}` + `<div class="srcmain"><b>${label}</b>${facts ? `<span class="pnote"> · ${escapeHtml2(facts)}</span>` : ""}</div>` + `<div class="srcact">${needs}${items.length ? rowMenu(source.label, items.join("")) : ""}</div></div>`;
+  return { row, dialogs: dialogs.join("") };
+}
 function renderDashboardConnectPage(view3, options) {
   const blocked = view3.model_setup !== undefined && !view3.model_setup.ready;
-  const sources = view3.sources.filter((source) => source.connection.action.kind !== "none" || source.source_id === "telegram.messages" || source.source_id === "whatsapp.personal.messages");
+  const basePath = options?.basePath ?? "/dashboard";
+  const token = readToken2(options?.basePath);
+  const off = unlocked(options) ? "" : " disabled";
+  const sources = view3.sources.filter((source) => source.source_id !== "venice.api");
+  const connected2 = sources.filter((source) => CONNECTED_STATES.has(source.connection.state));
+  const setupable = sources.filter((source) => source.connection.state === "reauth_required" || !CONNECTED_STATES.has(source.connection.state) && (source.connection.action.kind !== "none" || MESSAGING_SOURCES.has(source.source_id)));
+  const kept = sources.filter((source) => !CONNECTED_STATES.has(source.connection.state) && (source.coverage?.indexed_items ?? 0) > 0 && source.connection.action.kind !== "archive_import");
+  const rows = connected2.map((source) => connectedSourceRow(source, options?.messagingLocalSession === true, off)).concat(kept.map((source) => connectedSourceRow(source, false, off, true)));
+  const tiles = setupable.filter((source) => source.connection.state !== "reauth_required").map((source) => `<button class="srctile" type="button" data-source-pick="${escapeHtml2(source.source_id)}">${sourceLogoTile(source.source_id)}<span><b>${escapeHtml2(source.label)}</b><span class="pnote">${escapeHtml2(SOURCE_TILE_LINES[source.source_id] ?? "")}</span></span></button>`).join("");
+  const panels = setupable.map((source) => `<div class="srcsetup" data-source-setup="${escapeHtml2(source.source_id)}" hidden><button class="btn plainlink" type="button" data-source-back>← All sources</button>` + renderSetupRow(source, view3, blocked, basePath, options?.messagingLocalSession === true) + sourceSupportBlock(source) + "</div>").join("");
+  const sheet = '<dialog class="srcsheet" id="add-source" data-add-source data-closable aria-labelledby="add-source-title">' + '<div class="adddialoghead"><h3 id="add-source-title">Add a source</h3><button class="btn iconbtn" type="button" data-dialog-close aria-label="Close">✕</button></div>' + `<div data-source-catalog><input class="keyfield srcsearch" type="search" data-source-search placeholder="Search sources…" aria-label="Search sources">` + (tiles ? `<div class="srctiles">${tiles}</div>` : `<p class="pnote">${escapeHtml2(W.connect.empty)}</p>`) + `<p class="pnote">Sources you've already connected aren't listed.</p></div>` + panels + "</dialog>";
   const body = [
     lockedGate2(options),
-    renderModelSetupBlocker(view3.model_setup, { keysHref: dashboardLocalPageHref("keys", readToken2(options?.basePath)) }),
-    sources.length === 0 ? `<p class="pnote">${escapeHtml2(W.connect.empty)}</p>` : `<div class="srows" id="sources">${sources.map((source) => renderSetupRow(source, view3, blocked, options?.basePath ?? "/dashboard", options?.messagingLocalSession === true) + sourceSupportBlock(source)).join(`
-`)}</div>`
+    renderModelSetupBlocker(view3.model_setup, { keysHref: dashboardLocalPageHref("keys", token) }),
+    `<div class="srcrows" id="sources">${rows.map((entry) => entry.row).join("") || '<p class="pnote">No sources connected yet.</p>'}</div>`,
+    `<div class="srcbar"><button class="btn primary" type="button" data-dialog-open="add-source">+ Add a source</button><span class="pnote">Not listed? <a href="${escapeHtml2(dashboardLocalPageHref("connector", token))}">Build a connector</a></span></div>`,
+    rows.map((entry) => entry.dialogs).join(""),
+    sheet
   ].filter((block) => block !== "").join(`
 `);
   return localShell({
-    crumb: W.connect.title,
+    crumb: "Sources",
     tab: "sources",
     meta: dashboardCheckedLabel(view3.generated_at, options?.now ?? new Date),
     body,
-    styles: [MODEL_SETUP_CSS],
+    styles: [MODEL_SETUP_CSS, MODEL_PICKER_CSS, SOURCE_LOGO_CSS, SOURCES_CSS],
     options
   });
 }
@@ -163081,7 +163341,33 @@ function renderJudgeChoice(view3, options) {
     <p>Venice uses your own account and API key, and you pay Venice; Olympus pays for nothing. An end-to-end encrypted option is not available yet.</p></details>
     </fieldset></form></section>`;
 }
-var CONNECTOR_SHEET_ID = "connector-sheet", CONNECTOR_SHEET_HEADING = "Build a connector with your agent", CONNECTOR_SHEET_INTRO, CONNECTOR_PROMPT, W, SETTINGS_SECTIONS, SETTINGS_CSS = `
+var CONNECTOR_SHEET_ID = "connector-sheet", CONNECTOR_SHEET_HEADING = "Build a connector with your agent", CONNECTOR_SHEET_INTRO, CONNECTOR_PROMPT, W, SYNC_ROUTE_SOURCES, SOURCE_TILE_LINES, CONNECTED_STATES, MESSAGING_SOURCES, SOURCES_CSS = `
+.srcrows { display: grid; gap: 10px; max-width: 760px; }
+.srcrow { display: flex; align-items: center; gap: 14px; border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; }
+.srcmain { flex: 1; min-width: 0; }
+.srcact { display: flex; align-items: center; gap: 10px; }
+.srcact .rowmenu { position: relative; }
+.srcact .rowmenu .menu { position: absolute; right: 0; top: calc(100% + 6px); z-index: 5; min-width: 220px; display: grid; padding: 6px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel, var(--bg)); box-shadow: 0 8px 24px rgba(0,0,0,.35); }
+.menuitem { font: inherit; text-align: left; background: none; border: 0; color: var(--t1); padding: 9px 12px; border-radius: 6px; cursor: pointer; width: 100%; }
+.menuitem:hover, .menuitem:focus-visible { background: color-mix(in srgb, var(--link) 14%, transparent); }
+.menuitem.danger { color: #f0776c; }
+.rowmenu .menu hr { border: 0; border-top: 1px solid var(--line); margin: 6px 0; }
+.rowmenu form { margin: 0; }
+.rowmenu [data-action-message]:empty { display: none; }
+.btn.danger { border-color: #f0776c; color: #f0776c; }
+.srcbar { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; margin: 16px 0; }
+.srcsheet { margin: 0 0 0 auto; height: 100vh; max-height: 100vh; width: min(480px, 100vw); border: 0; border-left: 1px solid var(--line); background: var(--bg); color: var(--t1); padding: 20px 22px; overflow-y: auto; }
+.srcsheet::backdrop { background: rgba(0, 0, 0, 0.45); }
+.srcsearch { width: 100%; margin: 12px 0; }
+.srctiles { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.srctile { display: flex; gap: 12px; align-items: center; text-align: left; font: inherit; color: var(--t1); background: none; border: 1px solid var(--line); border-radius: 10px; padding: 12px; cursor: pointer; }
+.srctile:hover, .srctile:focus-visible { border-color: var(--link); }
+.srctile .pnote { display: block; }
+.srctile[hidden] { display: none; }
+.srctiles + .pnote { margin-top: 14px; }
+.srcsetup .plainlink { margin: 8px 0 12px; }
+@media (max-width: 640px) { .srctiles { grid-template-columns: 1fr; } .srcrow { flex-wrap: wrap; } }
+`, SETTINGS_SECTIONS, SETTINGS_CSS = `
 .setlayout { display: grid; grid-template-columns: 220px 1fr; gap: 24px; align-items: start; }
 .setside { display: grid; gap: 8px; position: sticky; top: 12px; }
 .setside a { display: block; padding: 10px 14px; border: 1px solid var(--line); border-radius: 10px; color: var(--t1); text-decoration: none; }
@@ -163103,6 +163389,7 @@ var init_local = __esm(() => {
   init_private_answers();
   init_host_page();
   init_top_nav();
+  init_source_logos();
   init_vocabulary();
   init_model_pickers();
   init_model_setup2();
@@ -163115,6 +163402,29 @@ var init_local = __esm(() => {
   ].join(`
 `);
   W = DASHBOARD_COMPUTER_PANEL_COPY.rows;
+  SYNC_ROUTE_SOURCES = {
+    "gmail.email": "gmail",
+    "google_drive.docs": "google-drive",
+    "dropbox.files": "dropbox",
+    "x.bookmarks": "x",
+    "readwise.library": "readwise",
+    "evernote.notes": "evernote",
+    "local.files": "local.files"
+  };
+  SOURCE_TILE_LINES = {
+    "gmail.email": "Email",
+    "google_drive.docs": "Docs and files",
+    "dropbox.files": "Files",
+    "local.files": "Folders you pick",
+    "archive.imports": "An export from any app",
+    "x.bookmarks": "Posts you saved",
+    "telegram.messages": "Chats",
+    "whatsapp.personal.messages": "Chats",
+    "readwise.library": "Highlights",
+    "evernote.notes": "Notes"
+  };
+  CONNECTED_STATES = new Set(["connected", "waiting_for_first_sync", "syncing", "synced", "reauth_required"]);
+  MESSAGING_SOURCES = new Set(["telegram.messages", "whatsapp.personal.messages"]);
   SETTINGS_SECTIONS = [
     { id: "agents", label: "Agents and access" },
     { id: "models", label: "Models on this computer" },
@@ -175649,6 +175959,15 @@ class SourceScheduler {
         }
       }
       state.nextRunAt = nextRunAt;
+      for (const { counts, ...store } of result.embeddingSweep ?? []) {
+        console.info(`[olympus:embedding-sweep] ${JSON.stringify({
+          ...store,
+          ...counts,
+          attempted_at: attemptedAt,
+          backoff_ms: retryAt?.effectiveIntervalMs ?? 0,
+          next_run_at: new Date(nextRunAt).toISOString()
+        })}`);
+      }
       if (continuing || wokenWhileRunning)
         this.scheduleContinueWake(nextRunAt);
       else if (retryAt && nextRunAt - Date.parse(completedAt) < this.tickMs)
@@ -176153,13 +176472,13 @@ function embeddingSweepMaxItems(env = process.env) {
   return Number.isInteger(value2) && value2 > 0 ? Math.min(value2, EMBEDDING_SWEEP_MAX_ITEMS_CEILING) : EMBEDDING_SWEEP_MAX_ITEMS;
 }
 function withEmbeddingSweep(sources, targetsFor, options = {}) {
-  return sources.map((source) => {
+  return sources.map((source, sourceIndex) => {
     const targets = targetsFor(source);
     if (!targets)
       return source;
     return {
       ...source,
-      tasks: [...source.tasks, embeddingSweepTask(source, targets, options.storeDeadlineMs)],
+      tasks: [...source.tasks, embeddingSweepTask(source, targets, options.storeDeadlineMs, sourceIndex)],
       embeddingDeferredReason: () => targets().some((target) => target.store.embeddingDeferredReason() !== undefined) ? EMBEDDING_PROVIDER_UNAVAILABLE_REASON : undefined
     };
   });
@@ -176167,7 +176486,7 @@ function withEmbeddingSweep(sources, targetsFor, options = {}) {
 function embeddingSweepConcurrencyKey(source) {
   return `${source.corpusId}.embeddings`;
 }
-function embeddingSweepTask(source, targets, deadlineMs = EMBEDDING_SWEEP_STORE_DEADLINE_MS) {
+function embeddingSweepTask(source, targets, deadlineMs = EMBEDDING_SWEEP_STORE_DEADLINE_MS, sourceIndex = 0) {
   const maxItems = embeddingSweepMaxItems();
   return {
     id: `${source.sourceId}_embeddings`,
@@ -176184,7 +176503,7 @@ function embeddingSweepTask(source, targets, deadlineMs = EMBEDDING_SWEEP_STORE_
         let timer;
         const stopAtMs = Date.now() + Math.floor(deadlineMs / 2);
         const result = await Promise.race([
-          embedPendingChunks([target], { maxItems, stopAtMs }),
+          embedPendingChunks([target], { maxItems, stopAtMs, diagnostics: true }),
           new Promise((resolve28) => {
             timer = setTimeout(() => resolve28(overran), deadlineMs);
           })
@@ -176194,7 +176513,6 @@ function embeddingSweepTask(source, targets, deadlineMs = EMBEDDING_SWEEP_STORE_
           runs.push(...result.map((run2) => run2.busy === true && run2.deferredReason === undefined && outage !== undefined ? { ...run2, deferredReason: outage } : run2));
           continue;
         }
-        console.error(`[olympus:embedding-sweep] pass_overran source=${source.sourceId} corpus=${target.store.corpusId} after_ms=${deadlineMs}; the source's turn was given back`);
         target.store.setEmbeddingDeferral(EMBEDDING_PROVIDER_UNAVAILABLE_REASON);
         runs.push({
           corpusId: target.store.corpusId,
@@ -176202,6 +176520,7 @@ function embeddingSweepTask(source, targets, deadlineMs = EMBEDDING_SWEEP_STORE_
           chunksEmbedded: 0,
           itemsFailed: 0,
           itemsOutOfScope: 0,
+          inventory: { inventory_complete: 0, pass_overran: 1 },
           deferredReason: EMBEDDING_PROVIDER_UNAVAILABLE_REASON
         });
       }
@@ -176215,14 +176534,35 @@ function embeddingSweepTask(source, targets, deadlineMs = EMBEDDING_SWEEP_STORE_
         stores_busy: runs.filter((run2) => run2.busy === true).length
       };
       const status = counts.chunks_embedded > 0 ? "progress" : "idle";
+      const embeddingSweep = runs.map((run2, index) => ({
+        source_index: sourceIndex,
+        store_index: index,
+        trust_domain: passTargets[index].store.trustDomain,
+        family: passTargets[index].store.family,
+        counts: {
+          ...run2.inventory,
+          whole_store: passTargets[index].wholeStore ? 1 : 0,
+          queued_items: passTargets[index].store.queuedEmbeddingItemIds().length,
+          items_attempted: run2.itemsAttempted,
+          chunks_embedded: run2.chunksEmbedded,
+          items_failed: run2.itemsFailed,
+          skipped_out_of_scope_items: run2.itemsOutOfScope,
+          skipped_lease_busy_items: run2.busy ? run2.itemsAttempted : 0,
+          skipped_deferred_items: run2.deferredReason ? run2.itemsAttempted : 0,
+          stores_deferred: run2.deferredReason ? 1 : 0,
+          stores_lease_busy: run2.busy ? 1 : 0,
+          stopped_at_deadline: run2.stoppedAtDeadline ? 1 : 0
+        }
+      }));
       const attemptedAt = Date.parse(context2?.attemptedAt ?? "") || Date.now();
       if (deferred2 === 0) {
         const more = runs.some((run2) => run2.busy !== true && run2.chunksEmbedded > 0 && (run2.itemsAttempted >= maxItems || run2.stoppedAtDeadline === true));
         if (counts.items_failed === 0)
-          return { status, counts, ...more ? { continueSoon: true } : {} };
+          return { status, counts, embeddingSweep, ...more ? { continueSoon: true } : {} };
         return {
           status,
           counts,
+          embeddingSweep,
           retryAt: {
             at: new Date(attemptedAt + (more ? SOURCE_SCHEDULER_CONTINUE_AFTER_MS : EMBEDDING_SWEEP_INTERVAL_MS)).toISOString(),
             degradedReason: EMBEDDING_ITEMS_FAILED_REASON
@@ -176234,6 +176574,7 @@ function embeddingSweepTask(source, targets, deadlineMs = EMBEDDING_SWEEP_STORE_
       return {
         status,
         counts,
+        embeddingSweep,
         retryAt: {
           at: new Date(attemptedAt + backoffMs).toISOString(),
           effectiveIntervalMs: backoffMs,
@@ -191991,7 +192332,7 @@ function migrateAccountFolders(env = process.env, options = {}) {
   }
   return report;
 }
-var MIGRATE_ACCOUNT_FOLDERS_ENV = "OLYMPUS_MIGRATE_ACCOUNT_FOLDERS", ASSUMED_BYTES_PER_SECOND, MIGRATION_BUDGET_MS = 45000, QUICK_CHECK_BUDGET_MS = 15000, QUICK_CHECK_STORE_MAX_BYTES, QUICK_CHECK_TOTAL_MAX_BYTES, ACCOUNT_LOG_MAX_BYTES, LOCK_WAIT_CAP_MS = 2000, SKIP_REASONS, AccountMigrationKilled, __accountMigrationTestHooks, MIGRATION_ON, MESSAGING_SOURCES, isMessaging = (sourceId) => MESSAGING_SOURCES.includes(sourceId), COMPANION_SUFFIXES, isCompanion = (path) => COMPANION_SUFFIXES.some((suffix) => path.endsWith(suffix)), checkpoint = (at) => __accountMigrationTestHooks.checkpoint?.(at), waitMs = (ctx) => Math.max(0, Math.min(LOCK_WAIT_CAP_MS, ctx.deadline - ctx.now())), limit = (name, fallback) => __accountMigrationTestHooks.limits?.[name] ?? fallback, NO_HARD_LINKS, syncFolder = (path) => (__accountMigrationTestHooks.syncDirectory ?? syncDirectorySync)(path), moveFile = (from, to, kind) => (__accountMigrationTestHooks.rename ?? moveWithoutReplacing)(from, to, kind), MoveFault, EntryChanged, skip = (reason, detail) => ({ kind: "skip", reason, detail }), isDisposable = (move) => move.from.endsWith("-shm") || (move.from.endsWith("-wal") || move.from.endsWith("-journal")) && move.size === 0, isPlanned = (found, move) => (found.kind === "file" || found.kind === "dir") && found.kind === move.kind && String(found.dev) === move.dev && String(found.ino) === move.ino;
+var MIGRATE_ACCOUNT_FOLDERS_ENV = "OLYMPUS_MIGRATE_ACCOUNT_FOLDERS", ASSUMED_BYTES_PER_SECOND, MIGRATION_BUDGET_MS = 45000, QUICK_CHECK_BUDGET_MS = 15000, QUICK_CHECK_STORE_MAX_BYTES, QUICK_CHECK_TOTAL_MAX_BYTES, ACCOUNT_LOG_MAX_BYTES, LOCK_WAIT_CAP_MS = 2000, SKIP_REASONS, AccountMigrationKilled, __accountMigrationTestHooks, MIGRATION_ON, MESSAGING_SOURCES2, isMessaging = (sourceId) => MESSAGING_SOURCES2.includes(sourceId), COMPANION_SUFFIXES, isCompanion = (path) => COMPANION_SUFFIXES.some((suffix) => path.endsWith(suffix)), checkpoint = (at) => __accountMigrationTestHooks.checkpoint?.(at), waitMs = (ctx) => Math.max(0, Math.min(LOCK_WAIT_CAP_MS, ctx.deadline - ctx.now())), limit = (name, fallback) => __accountMigrationTestHooks.limits?.[name] ?? fallback, NO_HARD_LINKS, syncFolder = (path) => (__accountMigrationTestHooks.syncDirectory ?? syncDirectorySync)(path), moveFile = (from, to, kind) => (__accountMigrationTestHooks.rename ?? moveWithoutReplacing)(from, to, kind), MoveFault, EntryChanged, skip = (reason, detail) => ({ kind: "skip", reason, detail }), isDisposable = (move) => move.from.endsWith("-shm") || (move.from.endsWith("-wal") || move.from.endsWith("-journal")) && move.size === 0, isPlanned = (found, move) => (found.kind === "file" || found.kind === "dir") && found.kind === move.kind && String(found.dev) === move.dev && String(found.ino) === move.ino;
 var init_source_account_migration = __esm(() => {
   init_tier_ledger_path();
   init_archive_formats();
@@ -192041,7 +192382,7 @@ var init_source_account_migration = __esm(() => {
     }
   };
   MIGRATION_ON = ["1", "true", "on", "yes"];
-  MESSAGING_SOURCES = [TELEGRAM_SOURCE_ID, WHATSAPP_SOURCE_ID];
+  MESSAGING_SOURCES2 = [TELEGRAM_SOURCE_ID, WHATSAPP_SOURCE_ID];
   COMPANION_SUFFIXES = ["-wal", "-shm", "-journal"];
   NO_HARD_LINKS = new Set(["EPERM", "ENOTSUP", "EOPNOTSUPP", "ENOSYS", "EMLINK"]);
   MoveFault = class MoveFault extends Error {
@@ -196289,7 +196630,7 @@ function withProviderRejection(card) {
     return card;
   if (schedule.degraded_reason !== undefined && OPERATOR_PAUSED_SCHEDULER_MARKERS.has(schedule.degraded_reason))
     return card;
-  if (!CONNECTED_STATES.has(card.connection.state))
+  if (!CONNECTED_STATES2.has(card.connection.state))
     return card;
   return { ...card, connection: { ...card.connection, state: "reauth_required", label: "reauth required" } };
 }
@@ -197022,7 +197363,7 @@ function isoOrUndefined(value2) {
 function isoOrNow(value2, now) {
   return isoOrUndefined(value2) ?? now.toISOString();
 }
-var ANSWER_MODEL_LABELS, CONNECTING_DETAIL, CONNECTING_REASON, STAGE_DETAIL, CHATGPT_OAUTH_SOURCES, SCOPE_SOURCE_IDS, DISCONNECT_SOURCE_IDS, SYNC_SOURCE_IDS, KNOWN_CONNECTION_LABELS, SYNCED_RELATIVE, ARCHIVES_IMPORTED, KNOWN_READINESS_LABELS, KNOWN_REFUSAL_CODES, KNOWN_QUEUE_LABELS, CONNECTED_STATES, STAGE_FOR_PHASE, TRANSCRIPTION_DOWNLOADABLE, PRIVATE_MODEL_INSTALLING, IMPORT_UNREADABLE_REASONS, LIVE_PASS_ERROR_KINDS, CAPTURE_STATES, CAPTURE_SUPERVISOR_STATES, CAPTURE_SUPERVISOR_REASONS, MANUAL_SYNC_OUTCOMES;
+var ANSWER_MODEL_LABELS, CONNECTING_DETAIL, CONNECTING_REASON, STAGE_DETAIL, CHATGPT_OAUTH_SOURCES, SCOPE_SOURCE_IDS, DISCONNECT_SOURCE_IDS, SYNC_SOURCE_IDS, KNOWN_CONNECTION_LABELS, SYNCED_RELATIVE, ARCHIVES_IMPORTED, KNOWN_READINESS_LABELS, KNOWN_REFUSAL_CODES, KNOWN_QUEUE_LABELS, CONNECTED_STATES2, STAGE_FOR_PHASE, TRANSCRIPTION_DOWNLOADABLE, PRIVATE_MODEL_INSTALLING, IMPORT_UNREADABLE_REASONS, LIVE_PASS_ERROR_KINDS, CAPTURE_STATES, CAPTURE_SUPERVISOR_STATES, CAPTURE_SUPERVISOR_REASONS, MANUAL_SYNC_OUTCOMES;
 var init_dashboard_view_model = __esm(() => {
   init_source_failure();
   init_open_targets();
@@ -197082,7 +197423,7 @@ var init_dashboard_view_model = __esm(() => {
   ]);
   KNOWN_REFUSAL_CODES = new Set(["access_denied", "redirect_uri_mismatch", "invalid_redirect_uri", "redirect_uri_not_registered"]);
   KNOWN_QUEUE_LABELS = new Set(["Needs attention", "Working now", "Waiting to catch up", "Caught up"]);
-  CONNECTED_STATES = new Set(["connected", "syncing", "synced", "waiting_for_first_sync"]);
+  CONNECTED_STATES2 = new Set(["connected", "syncing", "synced", "waiting_for_first_sync"]);
   STAGE_FOR_PHASE = {
     metadata_sync: "listing",
     extraction: "reading",
@@ -215598,7 +215939,7 @@ function createChatGptSetupBackend(options) {
       return { restarting: result.worker_restarting === true };
     },
     async syncSource(sourceId) {
-      const result = await post2("/dashboard/sync-now", { source: SYNC_ROUTE_SOURCES[sourceId] });
+      const result = await post2("/dashboard/sync-now", { source: SYNC_ROUTE_SOURCES2[sourceId] });
       return result.status === "busy" || result.status === "too_soon" ? result.status : "checking";
     },
     async setModels(choice) {
@@ -215670,7 +216011,7 @@ function safeCount(count2) {
     return 0;
   }
 }
-var WORKER_ORIGIN = "http://olympus-worker.internal", DISCONNECT_OAUTH_SOURCES, SYNC_ROUTE_SOURCES;
+var WORKER_ORIGIN = "http://olympus-worker.internal", DISCONNECT_OAUTH_SOURCES, SYNC_ROUTE_SOURCES2;
 var init_setup_backend = __esm(() => {
   init_privacy_questions();
   init_first_run_privacy();
@@ -215688,7 +216029,7 @@ var init_setup_backend = __esm(() => {
     "google_drive.docs": "google-drive",
     "dropbox.files": "dropbox"
   };
-  SYNC_ROUTE_SOURCES = {
+  SYNC_ROUTE_SOURCES2 = {
     "gmail.email": "gmail",
     "google_drive.docs": "google-drive",
     "dropbox.files": "dropbox",

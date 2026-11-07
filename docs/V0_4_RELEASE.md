@@ -37,6 +37,24 @@ incremental visibility cache, without a full-corpus walk per verdict. No
 classifier version, embedding identity or source-contract change is involved.
 Implementation and synthetic proof only; live activation is separate.
 
+**Sweep diagnostics (2026-11-07).** Each scheduled pass emits one
+`[olympus:embedding-sweep]` JSON record per store, including idle passes.
+Stores are distinguished by roster-local source index, pass-local store index,
+trust domain and family; records
+contain no source, account, item, model or corpus identifiers. `pending_chunks`
+counts raw missing or stale vectors on the target model before the pass;
+`eligible_chunks` separates that inventory from retired, moving, hidden
+(including superseded), metadata-only, held, Private-policy-withheld, failed
+and out-of-scope chunks. Reasons are disjoint in that order. Pending judgments
+admitted by the shared local identity are eligible, not skipped as held.
+The inventory pages without reading text and yields between pages. If its
+time budget expires, `inventory_complete=0` marks counts as partial; zero then
+does not prove an empty backlog. `inventory_ms` reports the diagnostic cost.
+`whole_store` distinguishes catch-up from queue-only plans. Dispatch counts,
+lease contention, provider deferral, deadline stops, backoff and the scheduler's
+actual `attempted_at` and `next_run_at` accompany the inventory. Inventory is observational and
+does not authorize embedding or change privacy, scope, query reach or vectors.
+
 ## 1.3.2 Servers and second accounts (owner decision 2026-11-03)
 
 Why: Mark Alexander's 1.3.0 install on a headless Mac Studio took about 7
