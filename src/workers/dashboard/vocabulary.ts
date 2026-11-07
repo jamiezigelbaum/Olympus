@@ -2474,6 +2474,10 @@ export const DASHBOARD_ARCHIVE_COPY = {
   checking: 'Checking whether {name} is already imported…',
   already: '{name} is already imported as {archive}.',
   alreadyUnnamed: '{name} is already imported.',
+  /** After a start or check: what in the drop the browser could not read, left out (#783). */
+  skippedOne: 'This computer could not read {path}, so it was left out.',
+  skippedMany: 'This computer could not read {n} files, so they were left out: {paths}.',
+  skippedMore: 'This computer could not read {n} files, so they were left out: {paths} and {more} more.',
   removing: 'Removing {name}.',
   declined: 'Declined.',
   /**

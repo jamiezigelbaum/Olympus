@@ -179,6 +179,8 @@ export interface ChatGptArchivePicked {
   archiveName?: string;
   /** The source a started import joined (its name), when it joined one. */
   source?: { label: string };
+  /** Paths in the drop the browser could not read, left out of the upload. */
+  skipped?: string[];
 }
 
 /** The folder picked in pick mode: its opaque key and its name, for the caller's own view only. */
@@ -460,7 +462,7 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
       words, done, sourceId: sourceId || '', mine: dropSession, attempt: 0,
       // idle | reading | uploading | approving | confirm | error
       phase: 'idle', name: '', uploadId: '', total: 0, sent: 0, files: 0, filesDone: 0, paused: false,
-      error: '', access: null, confirm: null, poll: null, paint: null, input: null,
+      error: '', access: null, confirm: null, poll: null, paint: null, input: null, skipped: [],
     };
     kit.render('picker:back');
   }
@@ -529,36 +531,62 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
     kit.render('picker:drop:retry');
   }
 
-  /** Every file under a dropped entry (a folder's own files, any depth), as {file, path}. */
-  function entryFiles(entry: Any, prefix: string, found: Any[], gone: () => boolean): Promise<void> {
+  /**
+   * Every file under a dropped entry (a folder's own files, any depth), as {file, path}. A file or folder the
+   * browser cannot read is left out and its path kept in `skipped`, so the import goes on with the rest and
+   * names what it left out (#783: one unreadable entry in a full Telegram export failed the whole drop).
+   */
+  function entryFiles(entry: Any, prefix: string, found: Any[], gone: () => boolean, skipped: string[]): Promise<void> {
     if (gone() || !entry) return Promise.resolve();
     if (entry.isFile) {
-      // A file or folder the browser cannot read fails the drop: importing the rest would leave it out unsaid.
-      return new Promise<void>((resolve, reject) => {
-        entry.file((file: File) => {
-          found.push({ file, path: prefix + entry.name });
+      return new Promise<void>((resolve) => {
+        const path = prefix + entry.name;
+        const skip = () => {
+          skipped.push(path);
           resolve();
-        }, reject);
+        };
+        try {
+          entry.file((file: File) => {
+            found.push({ file, path });
+            resolve();
+          }, skip);
+        } catch {
+          skip();
+        }
       });
     }
     if (!entry.isDirectory) return Promise.resolve();
-    const reader = entry.createReader();
     const here = prefix + entry.name + '/';
+    let reader: Any;
+    try {
+      reader = entry.createReader();
+    } catch {
+      skipped.push(here);
+      return Promise.resolve();
+    }
     const next = (): Promise<void> => new Promise<void>((resolve, reject) => {
-      reader.readEntries((batch: Any[]) => {
-        if (!batch.length || gone()) {
-          resolve();
-          return;
-        }
-        // One at a time: a folder of thousands never opens them all at once.
-        batch.reduce((chain: Promise<void>, child: Any) => chain.then(() => entryFiles(child, here, found, gone)), Promise.resolve()).then(() => next()).then(resolve, reject);
-      }, reject);
+      const unread = () => {
+        skipped.push(here);
+        resolve();
+      };
+      try {
+        reader.readEntries((batch: Any[]) => {
+          if (!batch.length || gone()) {
+            resolve();
+            return;
+          }
+          // One at a time: a folder of thousands never opens them all at once.
+          batch.reduce((chain: Promise<void>, child: Any) => chain.then(() => entryFiles(child, here, found, gone, skipped)), Promise.resolve()).then(() => next()).then(resolve, reject);
+        }, unread);
+      } catch {
+        unread();
+      }
     });
     return next();
   }
 
   /** What a drop or a dialog handed over, as {file, path} items. A drop reads its entries now: they expire with the event. */
-  function dropped(event: DragEvent, gone: () => boolean): Promise<Any[]> | null {
+  function dropped(event: DragEvent, gone: () => boolean, skipped: string[]): Promise<Any[]> | null {
     const transfer = event.dataTransfer;
     if (!transfer) return null;
     const entries: Any[] = [];
@@ -578,7 +606,7 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
     }
     if (!entries.length && !plain.length) return null;
     const found: Any[] = plain.slice();
-    return entries.reduce((chain: Promise<void>, entry: Any) => chain.then(() => entryFiles(entry, '', found, gone)), Promise.resolve()).then(() => found);
+    return entries.reduce((chain: Promise<void>, entry: Any) => chain.then(() => entryFiles(entry, '', found, gone, skipped)), Promise.resolve()).then(() => found);
   }
 
   function chosen(input: HTMLInputElement): Any[] {
@@ -610,8 +638,8 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
     }, UPLOAD_PAINT_MS);
   }
 
-  /** Start from items already in hand, or a collector that is still reading a dropped folder. */
-  function beginUpload(collect: () => Promise<Any[]>): void {
+  /** Start from items already in hand, or a collector that is still reading a dropped folder (and filling `skipped`). */
+  function beginUpload(collect: () => Promise<Any[]>, skipped: string[] = []): void {
     if (!drop || (drop.phase !== 'idle' && drop.phase !== 'error')) return;
     const mine = drop.mine;
     drop.attempt++;
@@ -622,11 +650,12 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
     drop.name = '';
     drop.sent = 0;
     drop.filesDone = 0;
+    drop.skipped = skipped;
     kit.render('picker:drop:cancel');
     collect().then((items) => {
       if (!dropLive(mine, attempt)) return;
       if (!items.length) {
-        dropFail(drop.words.empty);
+        dropFail(skipped.length ? drop.words.unreadable : drop.words.empty);
         return;
       }
       let total = 0;
@@ -764,6 +793,7 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
       const picked: ChatGptArchivePicked = { name: typeof content.name === 'string' && content.name ? content.name : name, status };
       if (typeof content.archive_name === 'string' && content.archive_name) picked.archiveName = content.archive_name;
       if (status === 'started' && content.source && typeof content.source.label === 'string' && content.source.label) picked.source = { label: content.source.label };
+      if (status !== 'already_imported' && drop.skipped && drop.skipped.length) picked.skipped = drop.skipped.slice();
       // The engine keeps what an import still reads, and removes the rest.
       drop.uploadId = '';
       leaveDrop(picked);
@@ -856,8 +886,9 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
       depth = 0;
       over(false);
       // The entries expire with this event: they are all taken before anything waits.
-      const reading = dropped(event, () => !dropLive(mine));
-      if (reading) beginUpload(() => reading);
+      const skipped: string[] = [];
+      const reading = dropped(event, () => !dropLive(mine), skipped);
+      if (reading) beginUpload(() => reading, skipped);
       else dropFail(words.empty);
     });
     add(wrap, zone, add(el('p', 'drop-or'), kit.button(words.chooseFile, 'picker:drop:file', () => fileInput.click(), 'plain')), folderInput, fileInput);

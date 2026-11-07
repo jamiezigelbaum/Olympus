@@ -1490,12 +1490,25 @@ export function chatgptDashboardClient(
     const name = outcome && typeof outcome.name === 'string' ? outcome.name : '';
     if (!name) return '';
     const archive = typeof outcome.archiveName === 'string' ? outcome.archiveName : typeof outcome.archive_name === 'string' ? outcome.archive_name : '';
-    if (outcome.status === 'checking') return fill(A.checking, { name });
     if (outcome.status === 'already_imported') return archive ? fill(A.already, { name, archive }) : fill(A.alreadyUnnamed, { name });
+    const left = skippedLine(outcome.skipped);
+    if (outcome.status === 'checking') return fill(A.checking, { name }) + left;
     // A start says where the import shows: the card of the source it joined, or Other archives.
     const source = outcome.source && typeof outcome.source.label === 'string' ? outcome.source.label : '';
-    if (outcome.status === 'started') return source ? fill(A.startedIn, { name, source }) : fill(A.started, { name });
+    if (outcome.status === 'started') return (source ? fill(A.startedIn, { name, source }) : fill(A.started, { name })) + left;
     return '';
+  }
+
+  /** What a drop left out because the browser could not read it, named (the first few) after the outcome. */
+  function skippedLine(skipped: Any): string {
+    const A = H.copy.archives;
+    const paths = Array.isArray(skipped) ? skipped.filter((path: Any) => typeof path === 'string' && path) : [];
+    if (!paths.length) return '';
+    if (paths.length === 1) return ' ' + fill(A.skippedOne, { path: paths[0] });
+    const shown = paths.slice(0, 3).join(', ');
+    return ' ' + (paths.length > 3
+      ? fill(A.skippedMore, { n: String(paths.length), paths: shown, more: String(paths.length - 3) })
+      : fill(A.skippedMany, { n: String(paths.length), paths: shown }));
   }
 
   /** What an Archives row control did, from the list read before it (names are the computer's own). */
