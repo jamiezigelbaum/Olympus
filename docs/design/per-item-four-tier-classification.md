@@ -614,18 +614,20 @@ rules, overrides, metadata floors, Secrets and own-record holds still exclude
 the row. Mismatched modern receipts never fall back to legacy acceptance.
 
 A `metadata:sniffer` answer is never a content label, even when the ledger
-retains a body digest. Legacy rows with a metadata judge reason still require
-the latest subject/model cache answer's exact final-content hash, matching tier
+retains a body digest. Legacy rows with a metadata judge reason or a previous
+Private/Secret metadata tier still require the latest subject/model cache answer's exact final-content hash, matching tier
 and a timestamp no later than the ledger decision, with no equal-time
-ambiguity. An existing cache answer on a legacy Private row receives the same
-check: this preserves the names-only rename regression, where a historical
-metadata raise survives in the content tier after its metadata reason is gone.
-Missing/stale hashes in these ambiguous cases still abstain as
+ambiguity. This preserves the names-only rename regression even when the cache
+is gone: the previous metadata tier records the raise after the metadata reason
+disappears. For other rows, a cached hash is unnecessary in either class; an
+existing cache answer must still agree on tier, time and ambiguity. Missing/stale
+hashes in the metadata cases still abstain as
 `legacy_verdict_content`. Live lookups use the existing subject/model/time
 index; old read-only snapshots scan once per model without migrating the cache.
 
-Label version 3 restarts old training attempts immediately, including their
-cursors and retry delays. Verdict-cache writes still invalidate sliced final
+Label version 3 restarts old scans and insufficient/failed attempts immediately,
+including their cursors and retry delays. Valid saved weights retain their
+normal retraining interval. Verdict-cache writes still invalidate sliced final
 validation before publication. The minimum remains 2,000 examples per class.
 
 Training takes at most 5,000 examples per class and runs bounded,

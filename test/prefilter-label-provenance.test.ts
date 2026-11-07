@@ -71,15 +71,19 @@ test.each(['content:rule:fixture', 'content:detector:financial:iban', 'content:s
 test('unread content never trains', () => rejected({ ...row(), contentRead: false }, 'content_unread'));
 test('a names-only cached Private answer cannot explain a legacy Private content tier', () => {
   const drops: string[] = [];
-  expect(prefilterTrainingExample(row(older, 'other:1.00', 'secure'), current, {
+  expect(prefilterTrainingExample({ ...row(older, 'other:1.00', 'secure'), previousMetadataTier: 'secure' }, current, {
     ...options, sniffer: { trainingVerdict: () => ({ tier: 'private', decidedAt: '2026-11-06T00:00:00.000Z', ambiguous: false }) },
   }, reason => { drops.push(reason); return undefined; })).toBeUndefined();
   expect(drops).toEqual(['legacy_verdict_content']);
 });
-test('an unbound cache answer is unnecessary for a Personal content-pass label', () => {
-  expect(prefilterTrainingExample(row(), current, {
-    ...options, sniffer: { trainingVerdict: () => ({ tier: 'personal', decidedAt: '2026-11-06T00:00:00.000Z', ambiguous: false }) },
-  })).toMatchObject({ private: false, provenance: 'legacy_sniffer' });
+test.each(['private', 'secure'] as const)('content-pass labels do not require a cached hash in either class: %s', tier => {
+  expect(prefilterTrainingExample(row(older, 'other:1.00', tier), current, {
+    ...options, sniffer: { trainingVerdict: () => ({ tier: tier === 'private' ? 'personal' : 'private',
+      decidedAt: '2026-11-06T00:00:00.000Z', ambiguous: false }) },
+  })).toMatchObject({ private: tier === 'secure', provenance: 'legacy_sniffer' });
+});
+test('a retained metadata raise cannot train after its cache is removed', () => {
+  rejected({ ...row(older, 'other:1.00', 'secure'), previousMetadataTier: 'secure' }, 'legacy_store_missing');
 });
 test('counts share acceptance and report numeric model-mismatch rejections only', () => {
   let read = false;

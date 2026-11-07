@@ -775,7 +775,7 @@ test.each(['legacy', 'receipt'] as const)('a historical metadata raise never rep
   expect(trainingState(f)).toMatchObject({ outcome: 'too_few', counts: [0, 1] });
 });
 
-test('legacy names-only verdict cannot label a retained Personal body after renaming', () => {
+test.each(['metadata-cache', 'missing-cache', 'no-store'] as const)('legacy names-only verdict cannot label a retained Personal body after renaming: %s', cache => {
   let now = new Date('2026-11-01T00:00:00.000Z');
   const f = fixture({ trained: false, memory: true, snifferNow: () => now });
   trainingRow(f, 0, [], 'other:1.00', true);
@@ -801,14 +801,15 @@ test('legacy names-only verdict cannot label a retained Personal body after rena
   f.sniffer.deleteQuestion(subject(0), 'metadata');
   recordNames('Picnic plan');
   const current = f.ledger.getCurrent(subject(0))!;
-  expect(current).toMatchObject({ metadataTier: 'private', contentTier: 'secure', contentPending: false });
+  expect(current).toMatchObject({ metadataTier: 'private', previousMetadataTier: 'secure', contentTier: 'secure', contentPending: false });
   const drops: string[] = [];
-  expect(prefilterTrainingExample(current, judge, { ledger: f.ledger, sniffer: f.sniffer, copyFor: () => copy(0) },
-    reason => { drops.push(reason); return undefined; })).toBeUndefined();
-  expect(drops).toEqual(['legacy_verdict_content']);
+  expect(prefilterTrainingExample(current, judge, { ledger: f.ledger,
+    ...(cache === 'no-store' ? {} : { sniffer: cache === 'missing-cache' ? { trainingVerdict: () => undefined } : f.sniffer }),
+    copyFor: () => copy(0) }, reason => { drops.push(reason); return undefined; })).toBeUndefined();
+  expect(drops).toEqual([cache === 'no-store' ? 'legacy_store_missing' : cache === 'missing-cache' ? 'legacy_verdict_missing' : 'legacy_verdict_content']);
 });
 
-test.each(['bound', 'missing', 'stale'] as const)('legacy Private cache evidence keeps exact content binding: %s', async binding => {
+test.each(['bound', 'missing', 'stale'] as const)('content-pass labels use their ledger digest without cached content binding: %s', async binding => {
   const f = fixture({ trained: false, memory: true, log: () => {} });
   for (const n of [0, 1]) {
     trainingRow(f, n, [], 'other:1.00', binding === 'bound');
@@ -820,12 +821,11 @@ test.each(['bound', 'missing', 'stale'] as const)('legacy Private cache evidence
     const drops: string[] = [];
     const example = prefilterTrainingExample(f.ledger.getCurrent(subject(n))!, judge,
       { ledger: f.ledger, sniffer: f.sniffer, copyFor: () => copy(n) }, reason => { drops.push(reason); return undefined; });
-    if (binding === 'bound' || n === 0) expect(example).toMatchObject({ private: n === 1, provenance: 'legacy_sniffer' });
-    else expect(example).toBeUndefined();
-    expect(drops).toEqual(binding === 'bound' || n === 0 ? [] : ['legacy_verdict_content']);
+    expect(example).toMatchObject({ private: n === 1, provenance: 'legacy_sniffer' });
+    expect(drops).toEqual([]);
   }
   await f.filter.prepare(judge);
-  expect(trainingState(f)).toMatchObject({ outcome: 'too_few', counts: binding === 'bound' ? [1, 1] : [1, 0] });
+  expect(trainingState(f)).toMatchObject({ outcome: 'too_few', counts: [1, 1] });
 });
 
 test('legacy metadata raises and differing subject verdict tiers never label', () => {

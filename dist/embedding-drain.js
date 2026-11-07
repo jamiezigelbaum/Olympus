@@ -74859,8 +74859,8 @@ function prefilterTrainingExample(row, judge2, options, reject = () => {
   if (!row.reasons.includes(contentJudgeVerdictReason(judged, row.contentTier, digest))) {
     if (row.reasons.some((reason) => reason.startsWith("content:judge_verdict:")))
       return reject("verdict_missing");
-    const metadataJudge = row.reasons.some((reason) => reason.startsWith("metadata:sniffer:"));
-    if (metadataJudge && !options.sniffer)
+    const needsContentBinding = row.reasons.some((reason) => reason.startsWith("metadata:sniffer:")) || row.previousMetadataTier === "secure" || row.previousMetadataTier === "secrets";
+    if (needsContentBinding && !options.sniffer)
       return reject("legacy_store_missing");
     let verdict;
     try {
@@ -74868,7 +74868,7 @@ function prefilterTrainingExample(row, judge2, options, reject = () => {
     } catch {
       return reject("legacy_verdict_unreadable");
     }
-    if (metadataJudge || verdict && row.contentTier === "secure") {
+    if (needsContentBinding || verdict) {
       if (!verdict)
         return reject("legacy_verdict_missing");
       if (verdict.ambiguous)
@@ -74878,7 +74878,7 @@ function prefilterTrainingExample(row, judge2, options, reject = () => {
         return reject("legacy_verdict_time");
       if ((verdict.tier === "personal" ? "private" : verdict.tier === "private" ? "secure" : undefined) !== row.contentTier)
         return reject("legacy_verdict_tier");
-      if (verdict.contentHash !== normalizedContentHash(copy.chunks.map((chunk) => chunk.boundedText).join("")))
+      if (needsContentBinding && verdict.contentHash !== normalizedContentHash(copy.chunks.map((chunk) => chunk.boundedText).join("")))
         return reject("legacy_verdict_content");
     }
     provenance = "legacy_sniffer";

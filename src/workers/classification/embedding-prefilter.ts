@@ -177,21 +177,22 @@ export function prefilterTrainingExample(row: TierLedgerRecord, judge: string, o
     if (row.reasons.some(reason => reason.startsWith('content:judge_verdict:'))) return reject('verdict_missing');
     // The content-pass reason and matching ledger digest prove an old label
     // without requiring a surviving subject-cache entry. A metadata verdict
-    // cannot supply that proof. Keep the cache's exact content binding when
-    // it could explain a retained Private tier after a names-only raise.
-    const metadataJudge = row.reasons.some(reason => reason.startsWith('metadata:sniffer:'));
-    if (metadataJudge && !options.sniffer) return reject('legacy_store_missing');
+    // cannot supply that proof. A previous Private/Secret metadata tier can
+    // leave a retained raise after its current metadata reason disappears.
+    const needsContentBinding = row.reasons.some(reason => reason.startsWith('metadata:sniffer:'))
+      || row.previousMetadataTier === 'secure' || row.previousMetadataTier === 'secrets';
+    if (needsContentBinding && !options.sniffer) return reject('legacy_store_missing');
     let verdict;
     try { verdict = options.sniffer?.trainingVerdict(subjectOf(row), row.modelId); }
     catch { return reject('legacy_verdict_unreadable'); }
-    if (metadataJudge || (verdict && row.contentTier === 'secure')) {
+    if (needsContentBinding || verdict) {
       if (!verdict) return reject('legacy_verdict_missing');
       if (verdict.ambiguous) return reject('legacy_verdict_ambiguous');
       const time = Date.parse(verdict.decidedAt), decisionTime = Date.parse(row.decidedAt);
       if (!Number.isFinite(time) || !Number.isFinite(decisionTime) || time > decisionTime) return reject('legacy_verdict_time');
       if ((verdict.tier === 'personal' ? 'private' : verdict.tier === 'private' ? 'secure' : undefined) !== row.contentTier)
         return reject('legacy_verdict_tier');
-      if (verdict.contentHash !== normalizedContentHash(copy.chunks.map(chunk => chunk.boundedText).join('')))
+      if (needsContentBinding && verdict.contentHash !== normalizedContentHash(copy.chunks.map(chunk => chunk.boundedText).join('')))
         return reject('legacy_verdict_content');
     }
     provenance = 'legacy_sniffer';
