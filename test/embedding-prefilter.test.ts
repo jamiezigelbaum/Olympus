@@ -35,7 +35,7 @@ function fixture(options: { trained?: boolean; bias?: number; random?: () => num
   if (options.trained !== false) {
     mkdirSync(modelDir, { mode: 0o755 });
     writeFileSync(join(modelDir, 'weights.json'), JSON.stringify({ version: '00000000-0000-0000-0000-000000000939',
-      trainedAt: Date.now(), judge, revisions: JSON.stringify([[ledger.ledgerId(), '0']]), model: { weights: new Array(D).fill(0), bias: options.bias ?? -5 } }), { mode: 0o644 });
+      trainedAt: Date.now(), judge, revisions: JSON.stringify([[ledger.ledgerId(), '0']]) + ':0', model: { weights: new Array(D).fill(0), bias: options.bias ?? -5 } }), { mode: 0o644 });
   }
   const placementFor = (decision: TierDecision): TierPlacementPlan => ({
     copies: [{ corpusId: decision.contentPending ? 'private' : 'personal', trustDomain: decision.contentPending ? 'secure_local' : 'internal',
@@ -181,7 +181,7 @@ test('daily training uses only own judged synthetic vectors and writes private w
   f.ledger.writeMeta('embedding-prefilter:training-revision', 'before-training');
   let withdrawn = false;
   f.setCopy(n => {
-    if (!withdrawn) { f.ledger.writeMeta('embedding-prefilter:training-revision', 'withdrawn-during-training'); withdrawn = true; }
+    if (!withdrawn) { f.ledger.writeMeta('embedding-prefilter:withdrawal', 'source-withdrawn-during-training'); withdrawn = true; }
     const c = copy(n, n % 2 ? 1 : -1);
     return { ...c, chunks: [{ ...c.chunks[0]!, boundedText: `${ownText} ${n}` }] };
   });
@@ -192,7 +192,7 @@ test('the rolling audit is shared across ledgers and stops both clearers', async
   const a = fixture(); const b = fixture({ trained: false });
   const path = join(a.modelDir, 'weights.json');
   const saved = JSON.parse(readFileSync(path, 'utf8'));
-  saved.revisions = JSON.stringify([[a.ledger.ledgerId(), '0'], [b.ledger.ledgerId(), '0']].sort());
+  saved.revisions = JSON.stringify([[a.ledger.ledgerId(), '0'], [b.ledger.ledgerId(), '0']].sort()) + ':0';
   writeFileSync(path, JSON.stringify(saved));
   let sampling = false;
   const first = new EmbeddingPrefilter({ ledger: a.ledger, sniffer: a.sniffer, copyFor: s => copy(Number(s.providerItemId)), random: () => sampling ? 0 : 1 });
@@ -277,4 +277,69 @@ test('install audit and selections survive replacing the first source ledger', a
   const afterSourceChange = b.make(); await afterSourceChange.prepare(judge);
   expect(afterSourceChange.status()).toContain('stopped');
   cleanups.push(() => { control.close(); rmSync(dir, { recursive: true, force: true }); });
+});
+
+// A full-question cache key can precede the donor's final-content receipt.
+test('unfinalized donor and fail-safe Private cache cannot fall through into vector clearing', async () => {
+  for (const failSafe of [false, true]) {
+    const f = fixture({ routed: true }); const q = f.add(1);
+    f.sniffer.putVerdict({ materialHash: q.materialHash, modelId: snifferCacheModelId(lane), promptVersion: SNIFFER_PROMPT_VERSION, mapRevision: 'none' },
+      { tier: 'private', category: 'fixture', confidence: failSafe ? 0 : 1, failSafe }, failSafe ? q : subject(999));
+    const model = { complete: async () => { throw new Error('must not ask or clear'); } };
+    for (let i = 0; i < 2; i++) await runSnifferPass({ lane, model, targets: [{ ledger: f.ledger, sniffer: f.sniffer, embeddingPrefilter: f.filter }] });
+    expect(f.ledger.getCurrent(subject(1))!.contentPending).toBe(true);
+    expect(f.ledger.getCurrent(subject(1))!.reasons.some(r => r.startsWith('content:embedding_prefilter:'))).toBe(false);
+  }
+});
+test('selected cached and duplicate Private judgments count misses and physically retire selection', async () => {
+  for (const duplicate of [false, true]) {
+    const f = fixture({ random: () => 0 });
+    f.setCopy(n => ({ ...copy(n), chunks: [{ ...copy(n).chunks[0]!, boundedText: `${ownText} ${n}` }] }));
+    for (let n = 0; n < 5; n++) {
+      const q = f.add(n, {}, `${ownText} ${n}`); f.filter.tryClear(q, judge);
+      const key = { materialHash: duplicate ? 'synthetic-donor' : q.materialHash, modelId: snifferCacheModelId(lane), promptVersion: SNIFFER_PROMPT_VERSION, mapRevision: 'none' };
+      f.sniffer.putVerdict(key, { tier: 'private', category: 'fixture', confidence: 1, failSafe: false }, subject(999));
+      if (duplicate) f.sniffer.markFinalModelContent(key, normalizedContentHash(`${ownText} ${n}`));
+      await pass(f).run();
+      expect(f.filter.isSpotCheck(q)).toBe(false);
+      expect(f.ledger.metaEntries('embedding-prefilter:check:')).toHaveLength(0);
+    }
+    expect(f.filter.status()).toContain('stopped');
+  }
+});
+test('scope withdrawal removes source-owned sample identities and leaves only aggregate install audit', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'prefilter-audit-'));
+  const control = new TierLedger({ dbPath: join(dir, 'audit.sqlite') });
+  const f = fixture({ stateLedger: control, random: () => 0 }); const q = f.add(1);
+  f.filter.tryClear(q, judge);
+  expect(f.ledger.metaEntries('embedding-prefilter:check:')).toHaveLength(1);
+  expect(control.metaEntries('embedding-prefilter:check:')).toHaveLength(0);
+  control.writeMeta('embedding-prefilter:audit', JSON.stringify({ misses: [true], stopped: false }));
+  f.ledger.withdrawAccountScope('fixture', 'fixture');
+  expect(f.ledger.metaEntries('embedding-prefilter:check:')).toHaveLength(0);
+  expect(control.readMeta('embedding-prefilter:audit')).toContain('true');
+  cleanups.push(() => { control.close(); rmSync(dir, { recursive: true, force: true }); });
+});
+
+test('a crash between audit commit and selection deletion counts the same check only once', () => {
+  const f = fixture({ random: () => 0 }); const q = f.add(1); f.filter.tryClear(q, judge);
+  const remove = f.ledger.deleteMeta.bind(f.ledger);
+  f.ledger.deleteMeta = () => { throw new Error('synthetic crash'); };
+  expect(() => f.filter.observe(q, true)).toThrow('synthetic crash');
+  f.ledger.deleteMeta = remove;
+  f.make().observe(q, true);
+  expect(JSON.parse(f.ledger.readMeta('embedding-prefilter:audit')!).misses).toEqual([true]);
+  expect(f.ledger.metaEntries('embedding-prefilter:check:')).toHaveLength(0);
+  expect(f.ledger.metaEntries('embedding-prefilter:observed:')).toHaveLength(0);
+});
+test('audit rollback returns a Personal-first candidate to held judgment', () => {
+  const f = fixture(); const q = f.add(1); const row = f.ledger.getCurrent(q)!;
+  f.ledger.recordDecision(q, { ...row, state: 'pending', decidedBy: 'default', snifferId: judge,
+    reasons: [...row.reasons.filter(r => r !== 'content:held_until_judged'), 'content:personal_first'] });
+  expect(f.filter.tryClear(q, judge)).toBe(true);
+  f.ledger.writeMeta('embedding-prefilter:audit', JSON.stringify({ misses: [true,true,true,true,true], stopped: true }));
+  f.make().recover();
+  expect(f.ledger.getCurrent(q)!.contentPending).toBe(true);
+  expect(f.ledger.getCurrent(q)!.reasons).toContain('content:held_until_judged');
+  expect(f.ledger.getCurrent(q)!.reasons).not.toContain('content:personal_first');
 });

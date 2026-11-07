@@ -599,10 +599,10 @@ One install-wide model and rolling audit window are shared across the mounted
 ledgers. A stable install tier ledger at
 `<classification-ledger-path>.embedding-prefilter.tier-ledger.sqlite` owns the
 model directory `<ledger>.embedding-prefilter/` (0700) and `weights.json` (0600,
-atomic write). The audit and selected checks survive source changes and
-unavailable source ledgers. Weights never enter logs, exports or releases.
+atomic write). The aggregate audit survives source changes and unavailable source ledgers.
+Selections stay in their own source ledger. Weights never enter logs, exports or releases.
 Deleting any source or withdrawing an archive scope removes the shared weights,
-even below the retraining minimum; it preserves the audit. Delete-all removes
+even below the retraining minimum; it preserves the audit and advances an install-wide withdrawal fence before source bytes disappear, so yielded training cannot republish deleted examples. Archive scope withdrawal removes source-owned selection and clearance receipts. Completed checks physically remove their selection; install state holds only counters and temporary opaque deduplication tokens. Delete-all removes
 both. Empty private model directories may remain after file deletion.
 The engine environment setting `OLYMPUS_EMBEDDING_PREFILTER_ENABLED=off` disables
 new clearances; the default is on once trained. The ordinary classifier remains

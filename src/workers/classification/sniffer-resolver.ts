@@ -532,8 +532,10 @@ export async function runSnifferPass(options: SnifferPassOptions): Promise<Sniff
       const usable = cached && cachedSnifferVerdictHolds(cached)
         && (!item.question.contentHash || contentVerdictReusable(cached, item.question.contentHash, item.question));
       // A known Private answer always wins, including one cached while placement was unavailable.
-      if (usable && (!spotCheck || snifferVerdictTier(cached, options.lane, item.question.flags).tier === 'secure')) {
-        if (spotCheck && cached.modelSubject === snifferSubjectKey(item.question)) item.target.embeddingPrefilter?.observe(item.question, cached.tier === 'private');
+      const knownPrivate = cached && cachedSnifferVerdictHolds(cached)
+        && snifferVerdictTier(cached, options.lane, item.question.flags).tier === 'secure';
+      if (knownPrivate || (usable && !spotCheck)) {
+        if (spotCheck && knownPrivate) item.target.embeddingPrefilter?.observe(item.question, true);
         apply(item, cached, item.question.contentHash !== undefined && cached.modelSubject !== snifferSubjectKey(item.question));
         report.cacheHits += 1;
         return false;
@@ -542,6 +544,7 @@ export async function runSnifferPass(options: SnifferPassOptions): Promise<Sniff
         ? item.target.sniffer.getFinalModelContentVerdict({ ...key, contentHash: item.question.contentHash }) : undefined;
       if (duplicate && cachedSnifferVerdictHolds(duplicate)
         && (!spotCheck || snifferVerdictTier(duplicate, options.lane, item.question.flags).tier === 'secure')) {
+        if (spotCheck) item.target.embeddingPrefilter?.observe(item.question, true);
         apply(item, duplicate, true); report.cacheHits += 1; return false;
       }
       if (item.target.embeddingPrefilter?.tryClear(item.question, id)) {

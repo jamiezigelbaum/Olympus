@@ -21,6 +21,7 @@
 // sender, text or excerpt. The file is created owner-only (0600).
 
 import { Database } from 'bun:sqlite';
+import { randomUUID } from 'node:crypto';
 import { chmodSync, closeSync, existsSync, mkdirSync, openSync, statSync } from 'node:fs';
 import { dirname } from 'node:path';
 import type { SourceItemIdentity, SourceTrustDomain, SourceTrustTier } from '../../core/source-index/types.ts';
@@ -1915,6 +1916,11 @@ export class TierLedger {
     `).run(key, value);
   }
 
+  deleteMeta(key: string): void {
+    if (key === 'ledger_id') throw new Error('The ledger identity is never deleted.');
+    this.db.query('DELETE FROM tier_ledger_meta WHERE key = ?').run(key);
+  }
+
   /** Atomic publication of related content-free background receipts. */
   writeMetaBatch(entries: readonly (readonly [string, string])[]): void {
     this.db.transaction(() => { for (const [key, value] of entries) this.writeMeta(key, value); })();
@@ -3654,7 +3660,11 @@ export class TierLedger {
   withdrawAccountScope(provider: string, accountScope: string): { items: number; copies: number } {
     return this.db.transaction(() => {
       const now = this.now().toISOString();
-      this.writeMeta('embedding-prefilter:training-revision', now);
+      this.writeMeta('embedding-prefilter:training-revision', randomUUID());
+      for (const kind of ['check:', 'clear:']) {
+        const prefix = `embedding-prefilter:${kind}${provider}\0${accountScope}\0`;
+        this.db.query('DELETE FROM tier_ledger_meta WHERE key >= ? AND key < ?').run(prefix, `${prefix}\uffff`);
+      }
       this.db.query(`
         UPDATE tier_copies
         SET copy_state = 'superseded',

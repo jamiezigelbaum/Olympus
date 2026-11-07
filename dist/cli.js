@@ -20567,6 +20567,7 @@ var init_sniffer_store = __esm(() => {
 
 // src/workers/classification/tier-ledger.ts
 import { Database as Database3 } from "bun:sqlite";
+import { randomUUID as randomUUID5 } from "node:crypto";
 import { chmodSync as chmodSync6, closeSync as closeSync12, existsSync as existsSync20, mkdirSync as mkdirSync13, openSync as openSync12, statSync as statSync11 } from "node:fs";
 import { dirname as dirname25 } from "node:path";
 function isFailSafeMissingContentQuestion(reason) {
@@ -21644,6 +21645,11 @@ class TierLedger {
       INSERT INTO tier_ledger_meta (key, value) VALUES (?, ?)
       ON CONFLICT(key) DO UPDATE SET value = excluded.value
     `).run(key, value);
+  }
+  deleteMeta(key) {
+    if (key === "ledger_id")
+      throw new Error("The ledger identity is never deleted.");
+    this.db.query("DELETE FROM tier_ledger_meta WHERE key = ?").run(key);
   }
   writeMetaBatch(entries) {
     this.db.transaction(() => {
@@ -22789,7 +22795,11 @@ class TierLedger {
   withdrawAccountScope(provider, accountScope) {
     return this.db.transaction(() => {
       const now = this.now().toISOString();
-      this.writeMeta("embedding-prefilter:training-revision", now);
+      this.writeMeta("embedding-prefilter:training-revision", randomUUID5());
+      for (const kind of ["check:", "clear:"]) {
+        const prefix = `embedding-prefilter:${kind}${provider}\x00${accountScope}\x00`;
+        this.db.query("DELETE FROM tier_ledger_meta WHERE key >= ? AND key < ?").run(prefix, `${prefix}￿`);
+      }
       this.db.query(`
         UPDATE tier_copies
         SET copy_state = 'superseded',
@@ -24788,7 +24798,7 @@ import { chmodSync as chmodSync7, existsSync as existsSync22, mkdirSync as mkdir
 import { dirname as dirname26, join as join29, resolve as resolve9 } from "node:path";
 import { fileURLToPath as fileURLToPath2 } from "node:url";
 import { isDeepStrictEqual } from "node:util";
-import { randomUUID as randomUUID5 } from "node:crypto";
+import { randomUUID as randomUUID6 } from "node:crypto";
 function isStandaloneEngineProcess(env) {
   const supervised = !!env.OLYMPUS_NATIVE_SERVICE_INSTANCE_ID?.trim();
   return (env.OLYMPUS_ENGINE_HOST === "1" || env.OLYMPUS_STANDALONE === "1") && (!supervised || env.OLYMPUS_WORKER_SUPERVISOR === "engine");
@@ -25243,7 +25253,7 @@ function migratePrivateMeaningSearch(path) {
       }
     };
     validateSovereigntyConfig(next);
-    const backup = `${path}.backup-private-meaning-${new Date().toISOString().replace(/[:.]/g, "-")}-${randomUUID5()}`;
+    const backup = `${path}.backup-private-meaning-${new Date().toISOString().replace(/[:.]/g, "-")}-${randomUUID6()}`;
     lease.commit(() => {
       writePrivateFileAtomicSync(backup, original);
       writePrivateFileAtomicSync(path, `${JSON.stringify(next, null, 2)}
@@ -27618,7 +27628,7 @@ var init_store_identity = __esm(() => {
 });
 
 // src/core/media-cache.ts
-import { createHash as createHash13, randomUUID as randomUUID6 } from "node:crypto";
+import { createHash as createHash13, randomUUID as randomUUID7 } from "node:crypto";
 import {
   chmodSync as chmodSync8,
   closeSync as closeSync13,
@@ -27681,10 +27691,10 @@ function writeMediaCacheFile(dir, bytes, mimeType) {
   const sha256 = createHash13("sha256").update(bytes).digest("hex");
   const path = join31(dir, `${sha256}${EXTENSIONS[mimeType] ?? ".bin"}`);
   ensureOwnerOnlyDir(dir);
-  const stagingHolder = `staging:${randomUUID6()}`;
+  const stagingHolder = `staging:${randomUUID7()}`;
   addMarker(path, stagingHolder);
   if (!existsSync24(path)) {
-    const temporary = join31(dir, `.${sha256}.${randomUUID6()}.tmp`);
+    const temporary = join31(dir, `.${sha256}.${randomUUID7()}.tmp`);
     writeFileSync6(temporary, bytes, { mode: 384 });
     chmodSync8(temporary, 384);
     renameSync4(temporary, path);
@@ -30675,7 +30685,7 @@ var init_media_judge = __esm(() => {
 });
 
 // src/workers/connector-store/local-index.ts
-import { createHash as createHash16, randomUUID as randomUUID7 } from "node:crypto";
+import { createHash as createHash16, randomUUID as randomUUID8 } from "node:crypto";
 import { existsSync as existsSync27, lstatSync as lstatSync15, mkdirSync as mkdirSync16, statSync as statSync14 } from "node:fs";
 import { dirname as dirname30 } from "node:path";
 import { Database as Database5 } from "bun:sqlite";
@@ -33824,7 +33834,7 @@ var init_local_index = __esm(() => {
     constructor(options) {
       this.corpusId = requireNonEmpty(options.corpusId, "Connector store corpus id");
       this.dbPath = requireNonEmpty(options.dbPath, "Connector store db path");
-      this.mediaHolder = this.dbPath === ":memory:" ? `memory:${randomUUID7()}` : options.mediaHolder ?? this.dbPath;
+      this.mediaHolder = this.dbPath === ":memory:" ? `memory:${randomUUID8()}` : options.mediaHolder ?? this.dbPath;
       const configuredFormats = options.stillImagesRead === undefined ? undefined : resolveStillImageFormats(options.stillImagesRead);
       this.stillImageFormatsRead = configuredFormats ? () => configuredFormats : () => readyStillImageFormats();
       this.family = options.family;
@@ -34690,7 +34700,7 @@ var init_local_index = __esm(() => {
       this.rememberItemOwner(row.item_pk, connectorId, ownershipKind, syncRunId, nowIso(), "provider_listing");
     }
     tombstoneCopy(identity2, options) {
-      const syncRunId = `connector-tier-copy-${randomUUID7()}`;
+      const syncRunId = `connector-tier-copy-${randomUUID8()}`;
       const startedAt = nowIso();
       try {
         return this.db.transaction(() => {
@@ -34723,7 +34733,7 @@ var init_local_index = __esm(() => {
           return "held";
         if (!row && options.record !== true)
           return "none";
-        const syncRunId = `connector-secret-retired-${randomUUID7()}`;
+        const syncRunId = `connector-secret-retired-${randomUUID8()}`;
         const now = nowIso();
         this.db.query(`
         INSERT INTO sync_runs (
@@ -34810,7 +34820,7 @@ var init_local_index = __esm(() => {
           }
           if (writeClaim && !this.acceptItemWriteClaim(existing.item_pk, writeClaim))
             return "stale_claim";
-          const syncRunId = `connector-secrets-extraction-${randomUUID7()}`;
+          const syncRunId = `connector-secrets-extraction-${randomUUID8()}`;
           const startedAt = nowIso();
           this.db.query(`
           INSERT INTO sync_runs (
@@ -34913,7 +34923,7 @@ var init_local_index = __esm(() => {
       if (options.vectorProvider) {
         assertConnectorStoreEmbeddingBackend(this.trustDomain, options.vectorProvider);
       }
-      const syncRunId = `connector-tier-move-${randomUUID7()}`;
+      const syncRunId = `connector-tier-move-${randomUUID8()}`;
       const now = nowIso();
       const imported = this.db.transaction(() => {
         this.db.query(`
@@ -35294,7 +35304,7 @@ var init_local_index = __esm(() => {
           INSERT INTO sync_runs (
             sync_run_id, corpus_id, connector_id, status, cursor, items_seen, items_indexed, started_at, completed_at
           ) VALUES (?, ?, ?, 'completed', NULL, ?, 0, ?, ?)
-        `).run(`image-content-private-only-${randomUUID7()}`, this.corpusId, IMAGE_CONTENT_PRIVATE_ONLY_CONNECTOR_ID, stripped, at, at);
+        `).run(`image-content-private-only-${randomUUID8()}`, this.corpusId, IMAGE_CONTENT_PRIVATE_ONLY_CONNECTOR_ID, stripped, at, at);
         }
       } finally {
         this.releaseUnreferencedChunkMedia();
@@ -36383,7 +36393,7 @@ var init_local_index = __esm(() => {
       }
       const tierLedgerForWrite = this.visibilityLedger();
       const summary = this.db.transaction(() => {
-        const syncRunId = `connector-representation-restore-${randomUUID7()}`;
+        const syncRunId = `connector-representation-restore-${randomUUID8()}`;
         const startedAt = this.now().toISOString();
         this.db.query(`
         INSERT INTO sync_runs (
@@ -36727,7 +36737,7 @@ var init_local_index = __esm(() => {
           };
         }
         const now = this.now().toISOString();
-        const syncRunId = `connector-relinquish-${randomUUID7()}`;
+        const syncRunId = `connector-relinquish-${randomUUID8()}`;
         this.db.query(`
         INSERT INTO sync_runs (
           sync_run_id, corpus_id, connector_id, status, cursor,
@@ -36866,7 +36876,7 @@ var init_local_index = __esm(() => {
         sync_run_id, corpus_id, connector_id, status, cursor,
         items_seen, items_indexed, started_at, completed_at
       ) VALUES (?, ?, ?, 'completed', ?, ?, 0, ?, ?)
-    `).run(`trust-reconcile-${randomUUID7()}`, this.corpusId, reconcileConnectorId, `${complete ? "complete:" : ""}stricter-item-pk:${cursorItemPk}`, identitiesScanned, now, now);
+    `).run(`trust-reconcile-${randomUUID8()}`, this.corpusId, reconcileConnectorId, `${complete ? "complete:" : ""}stricter-item-pk:${cursorItemPk}`, identitiesScanned, now, now);
       if (complete)
         (this.trustReconciliationReadyCursors ??= new Map).set(reconcileConnectorId, cursorItemPk);
     }
@@ -37521,7 +37531,7 @@ var init_local_index = __esm(() => {
         windowRemovedLocalItemIds: reconcileWindowRemovedLocalItemIds
       });
       await connector.authenticate();
-      const syncRunId = `connector-sync-${randomUUID7()}`;
+      const syncRunId = `connector-sync-${randomUUID8()}`;
       const startedAt = nowIso();
       this.db.query(`
       INSERT INTO sync_runs (
@@ -42468,7 +42478,7 @@ var init_mac_engine_daemon = __esm(() => {
 // src/workers/archive-import/state.ts
 import { existsSync as existsSync33, mkdirSync as mkdirSync21, readFileSync as readFileSync31 } from "node:fs";
 import { dirname as dirname34 } from "node:path";
-import { randomUUID as randomUUID8 } from "node:crypto";
+import { randomUUID as randomUUID9 } from "node:crypto";
 function defaultArchiveImportStatePath(env = process.env) {
   return resolvedRawPath(ARCHIVE_IMPORTS_SOURCE_ID2, "archive-imports.json", env);
 }
@@ -42535,7 +42545,7 @@ class ArchiveImportStateStore {
     const at = this.now().toISOString();
     const { skipped, ...rest } = input;
     const record = {
-      archive_id: randomUUID8(),
+      archive_id: randomUUID9(),
       ...rest,
       status: "importing",
       created_at: at,
@@ -43841,7 +43851,7 @@ var init_connector = __esm(() => {
 });
 
 // src/workers/x-bookmarks/reconcile-state.ts
-import { createHash as createHash22, randomUUID as randomUUID9 } from "node:crypto";
+import { createHash as createHash22, randomUUID as randomUUID10 } from "node:crypto";
 import { chmodSync as chmodSync11, mkdirSync as mkdirSync23 } from "node:fs";
 import { dirname as dirname36 } from "node:path";
 import { Database as Database9 } from "bun:sqlite";
@@ -43901,7 +43911,7 @@ class LocalXBookmarksReconcileStateStore {
     const nowDate = validDate(input.now ?? new Date);
     const now = nowDate.toISOString();
     const leaseExpiresAt = new Date(nowDate.getTime() + FOLDER_FACET_REFRESH_LEASE_MS).toISOString();
-    const runToken = randomUUID9();
+    const runToken = randomUUID10();
     return this.db.transaction(() => {
       const existing = this.db.query(`
         SELECT *
@@ -44126,7 +44136,7 @@ class LocalXBookmarksReconcileStateStore {
           membership_pages, coverage_scope, window_boundary_algorithm_version,
           started_at, updated_at
         ) VALUES (?, ?, ?, ?, 'global', 0, 0, 0, 0, 0, ?, ?, ?, ?)
-      `).run(account, randomUUID9(), providerUserId, compatibilityHash, coverageScope, windowBoundaryAlgorithmVersion, now, now);
+      `).run(account, randomUUID10(), providerUserId, compatibilityHash, coverageScope, windowBoundaryAlgorithmVersion, now, now);
     }
     return { progress: this.progress(account), warnings };
   }
@@ -49847,7 +49857,7 @@ var init_manifest3 = __esm(() => {
 // src/workers/archive-import/requests.ts
 import { existsSync as existsSync36, mkdirSync as mkdirSync24, readFileSync as readFileSync32 } from "node:fs";
 import { dirname as dirname37, join as join42 } from "node:path";
-import { randomUUID as randomUUID10 } from "node:crypto";
+import { randomUUID as randomUUID11 } from "node:crypto";
 function archiveImportRequestsPath(statePath) {
   return archiveStateSiblingPath(statePath, "archive-import-requests.json");
 }
@@ -50000,7 +50010,7 @@ class ArchiveImportRequestStore {
   entry(kind, origin, path, status, removal) {
     const at = this.now().toISOString();
     return {
-      request_id: randomUUID10(),
+      request_id: randomUUID11(),
       kind,
       origin,
       path,
@@ -51439,7 +51449,7 @@ var init_remote_connections = __esm(() => {
 });
 
 // src/core/source-watch.ts
-import { createHash as createHash29, randomUUID as randomUUID11 } from "node:crypto";
+import { createHash as createHash29, randomUUID as randomUUID12 } from "node:crypto";
 import {
   chmodSync as chmodSync14,
   existsSync as existsSync39,
@@ -51536,7 +51546,7 @@ class LocalSourceWatchStore {
     requireOwnerContext(ownerContext);
     assertOnlyFields(input, CREATE_WATCH_FIELDS, "create watch");
     const now = this.now();
-    const watchId = input.watchId === undefined ? randomUUID11() : requireId(input.watchId, "watchId");
+    const watchId = input.watchId === undefined ? randomUUID12() : requireId(input.watchId, "watchId");
     const corpusId = requireId(input.corpusId, "corpusId");
     const queryText = requireQuery(input.queryText);
     const mode = requireMode(input.mode);
@@ -51831,7 +51841,7 @@ class LocalSourceWatchStore {
       `).all(now, limit);
       const leases = [];
       for (const candidate of candidates) {
-        const leaseToken = randomUUID11();
+        const leaseToken = randomUUID12();
         const result = this.db.query(`
           UPDATE source_watch_outbox
           SET status = 'leased', lease_owner = ?, lease_token = ?,
@@ -52856,7 +52866,7 @@ var init_file_scope_sources = __esm(() => {
 });
 
 // src/core/source-scope-approval.ts
-import { createHash as createHash30, randomUUID as randomUUID12 } from "node:crypto";
+import { createHash as createHash30, randomUUID as randomUUID13 } from "node:crypto";
 import { existsSync as existsSync41, readFileSync as readFileSync34 } from "node:fs";
 import { dirname as dirname42, join as join45 } from "node:path";
 function defaultFileSourceScopeStatePath(handleRegistryPath) {
@@ -52976,7 +52986,7 @@ function approveFileSourceScope(input) {
     }
     const existing = readState2(input.statePath);
     const approvals = existing.kind === "valid" ? existing.state.approvals.filter((candidate) => candidate.source_id !== input.sourceId) : [];
-    const revision = randomUUID12();
+    const revision = randomUUID13();
     approvals.push({
       source_id: input.sourceId,
       account_generation: input.accountGeneration,
@@ -53140,7 +53150,7 @@ var init_source_scope_approval = __esm(() => {
 });
 
 // src/core/mail-source-scope.ts
-import { createHash as createHash31, randomUUID as randomUUID13 } from "node:crypto";
+import { createHash as createHash31, randomUUID as randomUUID14 } from "node:crypto";
 import { existsSync as existsSync42, readFileSync as readFileSync35 } from "node:fs";
 import { dirname as dirname43, join as join46 } from "node:path";
 function defaultMailSourceScopeStatePath(handleRegistryPath) {
@@ -53225,7 +53235,7 @@ function approveMailSourceScope(input) {
     const scope = normalizeMailScope({ ...input.scope, ...keptCutoff ? { contentAfter: keptCutoff } : {} }, now);
     const existing = readState3(input.statePath);
     const approvals = existing.kind === "valid" ? existing.state.approvals.filter((candidate) => candidate.source_id !== MAIL_SOURCE_SCOPE_ID) : [];
-    const revision = randomUUID13();
+    const revision = randomUUID14();
     const ownerTierRules = mailScopeOwnerTierRules(scope);
     approvals.push({
       source_id: MAIL_SOURCE_SCOPE_ID,
@@ -53691,7 +53701,7 @@ var init_forget = __esm(() => {
 // src/core/this-computer.ts
 import { spawnSync as spawnSync10 } from "node:child_process";
 import { existsSync as existsSync44, readFileSync as readFileSync36 } from "node:fs";
-import { createHash as createHash32, randomUUID as randomUUID14 } from "node:crypto";
+import { createHash as createHash32, randomUUID as randomUUID15 } from "node:crypto";
 import { dirname as dirname44, join as join48 } from "node:path";
 function hostBinding(machineId, hostIdentity) {
   const identity2 = hostIdentity();
@@ -53771,7 +53781,7 @@ function connectThisComputerSource(handleRegistryPath, sourceId, now = new Date,
   const path = defaultThisComputerStatePath(handleRegistryPath);
   withFileLeaseSync(path, (lease) => {
     const current2 = readStateForHost(path, hostIdentity) ?? (() => {
-      const machineId = randomUUID14();
+      const machineId = randomUUID15();
       const binding = hostBinding(machineId, hostIdentity);
       return {
         version: 1,
@@ -67331,11 +67341,11 @@ var init_parent_label = __esm(() => {
 
 // src/workers/source-index/answer-latency-trace.ts
 import { AsyncLocalStorage as AsyncLocalStorage5 } from "node:async_hooks";
-import { randomUUID as randomUUID15 } from "node:crypto";
+import { randomUUID as randomUUID16 } from "node:crypto";
 function createSourceAnswerTrace(now = () => new Date) {
   const received = now();
   return {
-    correlationId: randomUUID15(),
+    correlationId: randomUUID16(),
     receivedAt: received.toISOString(),
     receivedAtMs: received.getTime(),
     sqliteRetryCount: 0,
@@ -71072,7 +71082,7 @@ var init_grant_fence = __esm(() => {
 });
 
 // src/workers/x-bookmarks/live-control.ts
-import { createHash as createHash43, randomUUID as randomUUID16 } from "node:crypto";
+import { createHash as createHash43, randomUUID as randomUUID17 } from "node:crypto";
 import { chmodSync as chmodSync16, existsSync as existsSync49, lstatSync as lstatSync25, mkdirSync as mkdirSync32 } from "node:fs";
 import { dirname as dirname52 } from "node:path";
 import { Database as Database14 } from "bun:sqlite";
@@ -71366,7 +71376,7 @@ class LocalXBookmarksApiUsageStore {
       }
       const maxResources = routine ? Math.min(requestedMaxResources, input.preserveHeadReserve ? backgroundRemainingReads : remainingReads, input.preserveHeadReserve ? backgroundRemainingCostUnits : remainingCostUnits) : requestedMaxResources;
       const reservation = {
-        reservationId: randomUUID16(),
+        reservationId: randomUUID17(),
         account,
         utcDay,
         maxResources,
@@ -72957,7 +72967,7 @@ var init_api_connector = __esm(() => {
 });
 
 // src/workers/x-bookmarks/window-diagnostic.ts
-import { createHash as createHash45, randomUUID as randomUUID17 } from "node:crypto";
+import { createHash as createHash45, randomUUID as randomUUID18 } from "node:crypto";
 import {
   chmodSync as chmodSync17,
   existsSync as existsSync50,
@@ -73208,7 +73218,7 @@ function writePrivateReport(pathValue, contents) {
     throw new TypeError("X bookmark diagnostic report path is required.");
   const parent = dirname53(reportPath);
   mkdirSync33(parent, { recursive: true, mode: 448 });
-  const temporaryPath = `${reportPath}.tmp-${randomUUID17()}`;
+  const temporaryPath = `${reportPath}.tmp-${randomUUID18()}`;
   try {
     writeFileSync9(temporaryPath, contents, { encoding: "utf8", mode: 384, flag: "wx" });
     chmodSync17(temporaryPath, 384);
@@ -73632,7 +73642,7 @@ var init_live_sync2 = __esm(() => {
 });
 
 // src/workers/x-bookmarks/content-recovery.ts
-import { createHash as createHash46, randomUUID as randomUUID18 } from "node:crypto";
+import { createHash as createHash46, randomUUID as randomUUID19 } from "node:crypto";
 import {
   chmodSync as chmodSync18,
   renameSync as renameSync9,
@@ -73942,7 +73952,7 @@ function buildReceipt(status, counts, retryAt) {
 }
 function writeReceipt(pathValue, receipt) {
   const path = resolve14(pathValue);
-  const temporary = `${path}.tmp-${randomUUID18()}`;
+  const temporary = `${path}.tmp-${randomUUID19()}`;
   try {
     writeFileSync10(temporary, `${JSON.stringify(receipt, null, 2)}
 `, {
@@ -84423,7 +84433,7 @@ var init_extraction_factory = __esm(() => {
 
 // src/workers/file-extraction/job-store.ts
 import { chmodSync as chmodSync23, mkdirSync as mkdirSync36 } from "node:fs";
-import { createHash as createHash61, randomUUID as randomUUID19 } from "node:crypto";
+import { createHash as createHash61, randomUUID as randomUUID20 } from "node:crypto";
 import { dirname as dirname59 } from "node:path";
 import { Database as Database18 } from "bun:sqlite";
 function settleUnreadable(candidates, classify2) {
@@ -84587,7 +84597,7 @@ class LocalFileExtractionJobStore {
     const leaseSeconds = clampInteger(request.leaseSeconds ?? DEFAULT_EXTRACTION_LEASE_SECONDS, 1, MAX_EXTRACTION_LEASE_SECONDS);
     const now = nowIso4();
     const leaseExpiresAt = new Date(Date.now() + leaseSeconds * 1000).toISOString();
-    const leaseToken = randomUUID19();
+    const leaseToken = randomUUID20();
     const workerHash = hashString6(workerId);
     const claimed = [];
     this.db.transaction(() => {
@@ -85576,7 +85586,7 @@ function fileExtractionJobMigrations() {
       db.query(`
         INSERT OR IGNORE INTO extraction_claim_grants (grant_id, authority_id, last_ordinal)
         VALUES (1, ?, 0)
-      `).run(randomUUID19());
+      `).run(randomUUID20());
     }
   }, {
     version: 4,
@@ -85818,7 +85828,7 @@ function clampInteger(value, min, max2) {
   return Math.min(max2, Math.max(min, value));
 }
 function makeJobId() {
-  return `fx_${randomUUID19()}`;
+  return `fx_${randomUUID20()}`;
 }
 function hashString6(value) {
   return createHash61("sha256").update(value).digest("hex");
@@ -89107,7 +89117,7 @@ var init_remote_vlm = __esm(() => {
 
 // src/workers/source-index/built-in-reasoning/install.ts
 import { spawn as spawn5 } from "node:child_process";
-import { createHash as createHash62, randomUUID as randomUUID20 } from "node:crypto";
+import { createHash as createHash62, randomUUID as randomUUID21 } from "node:crypto";
 import {
   closeSync as closeSync24,
   createReadStream as createReadStream3,
@@ -89371,7 +89381,7 @@ function runtimeInstalled2(runtimeDir, archive) {
   return marker !== undefined && marker.sha256 === archive.sha256 && existsSync56(join79(runtimeDir, marker.serverPath));
 }
 async function installRuntime2(fetchImpl, runtimeDir, archive, reporter, extract, stallMs, space) {
-  const staging = `${runtimeDir}.staging-${randomUUID20()}`;
+  const staging = `${runtimeDir}.staging-${randomUUID21()}`;
   ensureDirectory2(staging);
   try {
     const archivePath = join79(staging, archive.name);
@@ -89508,7 +89518,7 @@ async function sha256File2(path, timeoutMs, onProgress) {
 }
 async function withInstallLock2(lockPath, waitMs, refreshMs, noun, run) {
   const deadline = Date.now() + waitMs;
-  const token = randomUUID20();
+  const token = randomUUID21();
   for (;; ) {
     if (tryAcquireLock2(lockPath, token))
       break;
@@ -100240,7 +100250,7 @@ var init_source_forget_registry = __esm(() => {
 
 // src/data-lifecycle.ts
 import { spawnSync as spawnSync11 } from "node:child_process";
-import { createHash as createHash67, randomUUID as randomUUID21 } from "node:crypto";
+import { createHash as createHash67, randomUUID as randomUUID22 } from "node:crypto";
 import {
   closeSync as closeSync25,
   existsSync as existsSync65,
@@ -100471,6 +100481,7 @@ function deleteOlympusData(options) {
   const forgotten = forgetSharedRows(account, options);
   if (options.applyAtRestart === true) {
     markAccountDeleting(account, env);
+    invalidateInstallEmbeddingPrefilter(options);
     return {
       ok: true,
       mode: "source",
@@ -100564,6 +100575,9 @@ function deleteAllOlympusData(options) {
 }
 function planAccountRemoval(account, context2, options = {}) {
   const targets = uniqueTargets(sourceDeleteTargets(account, context2));
+  const auditPath = embeddingPrefilterInstallLedgerPath(resolveClassificationLedgerPath(envForContext(context2)));
+  if (existsSync65(auditPath))
+    assertVerifiedExternalSqliteStore(auditPath, TIER_LEDGER_SQLITE_STORE_ID);
   assertRawStateTargetsContained(targets, context2, account);
   assertSourcesFolderTargetsUnlinked(targets, context2);
   for (const target of targets) {
@@ -100588,6 +100602,7 @@ function removeAccount(account, plan, context2, options) {
     if (target.kind === "account_folder" && existsSync65(target.path))
       assertDeleteTargetSafe(target);
   }
+  invalidateInstallEmbeddingPrefilter(context2);
   const removed = [];
   const missing = [];
   const folders = plan.targets.filter((target) => target.kind === "account_folder").map((target) => resolve20(target.path));
@@ -100648,7 +100663,7 @@ function moveAccountFolderToTrash(folder, env, options) {
     mkdirSync41(trash, { recursive: true, mode: 448 });
     const dataRoot = olympusDataRoot(env);
     if (lstatSync31(trash).isDirectory() && canonicalPath(trash) === join90(canonicalPath(dataRoot), relative14(resolve20(dataRoot), resolve20(trash)))) {
-      renameSync12(folder, accountTrashEntry(randomUUID21(), env));
+      renameSync12(folder, accountTrashEntry(randomUUID22(), env));
       moved = true;
     }
   } catch {
@@ -101016,6 +101031,21 @@ function looksLikeSqlite(path) {
     return false;
   }
 }
+function invalidateInstallEmbeddingPrefilter(context2) {
+  const auditPath = embeddingPrefilterInstallLedgerPath(resolveClassificationLedgerPath(envForContext(context2)));
+  if (existsSync65(auditPath)) {
+    assertVerifiedExternalSqliteStore(auditPath, TIER_LEDGER_SQLITE_STORE_ID);
+    const db = new Database22(auditPath, { readwrite: true, create: false });
+    try {
+      db.exec("PRAGMA busy_timeout = 10000;");
+      db.query(`INSERT INTO tier_ledger_meta (key, value) VALUES (?, ?)
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value`).run("embedding-prefilter:withdrawal", randomUUID22());
+    } finally {
+      closeSqliteStore(db);
+    }
+  }
+  removeFileDurablySync(installEmbeddingWeightsTarget(context2).path);
+}
 function installEmbeddingWeightsTarget(context2) {
   return {
     path: join90(embeddingPrefilterDirectory(embeddingPrefilterInstallLedgerPath(resolveClassificationLedgerPath(envForContext(context2)))), "weights.json"),
@@ -101148,7 +101178,7 @@ function exportSqliteStore(options) {
     return;
   }
   const destination = join90(destinationRoot, basename13(sqlitePath));
-  const staging = `${destination}.${randomUUID21()}.partial`;
+  const staging = `${destination}.${randomUUID22()}.partial`;
   if (snapshotSqliteStore(sqlitePath, staging)) {
     let sqlite;
     try {
@@ -103723,7 +103753,7 @@ var init_native_process_service = __esm(() => {
 });
 
 // src/core/native-worker-service.ts
-import { randomUUID as randomUUID22 } from "node:crypto";
+import { randomUUID as randomUUID23 } from "node:crypto";
 import { statSync as statSync30 } from "node:fs";
 import { basename as basename14, delimiter as delimiter6, isAbsolute as isAbsolute27, join as join93 } from "node:path";
 import { fileURLToPath as fileURLToPath8 } from "node:url";
@@ -103889,7 +103919,7 @@ function workerLaunchSettings(config, moduleUrl, workerEnvPath) {
   if (!authToken) {
     throw new Error("Olympus worker service requires a configured worker auth token.");
   }
-  const instanceId = randomUUID22();
+  const instanceId = randomUUID23();
   env.OLYMPUS_NATIVE_SERVICE_INSTANCE_ID = instanceId;
   return {
     runtimePath: resolveBunRuntimePath(service.runtimePath, env),
@@ -104390,7 +104420,7 @@ __export(exports_managed_tools, {
   MANAGED_TOOL_ORDER: () => MANAGED_TOOL_ORDER
 });
 import { execFile as execFile2 } from "node:child_process";
-import { createHash as createHash68, randomUUID as randomUUID23 } from "node:crypto";
+import { createHash as createHash68, randomUUID as randomUUID24 } from "node:crypto";
 import {
   accessSync as accessSync9,
   constants as constants12,
@@ -104739,7 +104769,7 @@ async function installOne(tool, pin, platformKey, root, uid, options, lease) {
     return { tool, version: pin.version, outcome: "already_installed", executable: existing };
   const toolDir = join95(root, tool);
   const versionDir = join95(toolDir, pin.version);
-  const id = randomUUID23();
+  const id = randomUUID24();
   const download = join95(toolDir, `.download-${id}`);
   const staging = join95(toolDir, `.staging-${id}`);
   try {
@@ -107023,7 +107053,7 @@ __export(exports_consult_transport_zkapi, {
   DEFAULT_EXECUTABLE_TRUST: () => DEFAULT_EXECUTABLE_TRUST
 });
 import { spawn as spawn7, execFileSync as execFileSync4 } from "node:child_process";
-import { createHash as createHash70, randomUUID as randomUUID24 } from "node:crypto";
+import { createHash as createHash70, randomUUID as randomUUID25 } from "node:crypto";
 import { accessSync as accessSync10, chmodSync as chmodSync27, closeSync as closeSync26, constants as constants13, existsSync as existsSync68, mkdirSync as mkdirSync44, mkdtempSync as mkdtempSync3, readdirSync as readdirSync21, readFileSync as readFileSync56, readlinkSync as readlinkSync3, realpathSync as realpathSync18, rmSync as rmSync29, statSync as statSync32, writeFileSync as writeFileSync16 } from "node:fs";
 import { createConnection as createConnection4, createServer as createServer4 } from "node:net";
 import { homedir as homedir29, tmpdir as tmpdir12 } from "node:os";
@@ -108373,7 +108403,7 @@ async function runSession(recovery, options, statePath, bridge, sent, clock2, st
     return refuse2("tor_port_busy");
   if (sessionSignal.aborted)
     return refuse2(abortCause);
-  const sessionId = randomUUID24();
+  const sessionId = randomUUID25();
   const workDir = mkdtempSync3(join98(tmpdir12(), "olympus-zkapi-"));
   chmodSync27(workDir, 448);
   const watchdog = join98(workDir, "watchdog.cjs");
@@ -110808,7 +110838,7 @@ import { chmodSync as chmodSync28, closeSync as closeSync27, constants as consta
 import { createRequire as createRequire7 } from "node:module";
 import { basename as basename16, dirname as dirname75, join as join100, relative as relative15, resolve as resolve21, sep as sep17 } from "node:path";
 import { userInfo as userInfo2 } from "node:os";
-import { randomBytes as randomBytes18, createHash as createHash72, randomUUID as randomUUID25 } from "node:crypto";
+import { randomBytes as randomBytes18, createHash as createHash72, randomUUID as randomUUID26 } from "node:crypto";
 function linuxEngineExec(command, args) {
   const r = spawnSync14(command, args, { encoding: "utf8", timeout: 35000, env: { ...process.env, SYSTEMD_PAGER: "", SYSTEMD_COLORS: "0" } });
   return { status: r.status, stdout: r.stdout ?? "", stderr: r.stderr ?? r.error?.message ?? "" };
@@ -111342,7 +111372,7 @@ function writeSnapshot(backupDir, index, text3, mode = 384) {
   return { present: true, backupPath, sha256: hashFile(backupPath), mode };
 }
 function createInstallTransaction(input) {
-  const backupDir = join100(input.layout.stateDir, `.install-backup-${randomUUID25()}`);
+  const backupDir = join100(input.layout.stateDir, `.install-backup-${randomUUID26()}`);
   createLinuxPrivateDirectory(backupDir);
   const root = lstatSync36(backupDir);
   const files = {};
@@ -111359,7 +111389,7 @@ function createInstallTransaction(input) {
     priorUnitLinks,
     action: input.action,
     phase: input.phase,
-    stagingPath: join100(input.layout.packageDir, `.prepare-${process.pid}-${randomUUID25()}`),
+    stagingPath: join100(input.layout.packageDir, `.prepare-${process.pid}-${randomUUID26()}`),
     backupDir,
     backupDevice: root.dev,
     backupInode: root.ino,
@@ -140262,7 +140292,7 @@ var init_embedding_runtime = __esm(() => {
 });
 
 // src/core/native-embedding-drain-service.ts
-import { randomUUID as randomUUID28 } from "node:crypto";
+import { randomUUID as randomUUID29 } from "node:crypto";
 import { readFileSync as readFileSync73, statSync as statSync37 } from "node:fs";
 import { delimiter as delimiter8, dirname as dirname87, isAbsolute as isAbsolute33, join as join114 } from "node:path";
 import { fileURLToPath as fileURLToPath11 } from "node:url";
@@ -140313,7 +140343,7 @@ async function prepareEmbeddingDrainStart(input, options) {
     throw new NativeProcessConfigurationError("Olympus source embedding drain report path must be absolute.");
   }
   const readinessPath = join114(dirname87(reportPath), READINESS_FILE);
-  const instanceId = randomUUID28();
+  const instanceId = randomUUID29();
   env.OLYMPUS_SOURCE_EMBEDDING_DRAIN_INSTANCE_ID = instanceId;
   env.OLYMPUS_SOURCE_EMBEDDING_DRAIN_READINESS_PATH = readinessPath;
   return {
@@ -145292,7 +145322,7 @@ import {
   rmSync as rmSync34,
   writeFileSync as writeFileSync22
 } from "node:fs";
-import { randomUUID as randomUUID29 } from "node:crypto";
+import { randomUUID as randomUUID30 } from "node:crypto";
 import { homedir as homedir39 } from "node:os";
 import { dirname as dirname90, isAbsolute as isAbsolute34, join as join119 } from "node:path";
 function defaultVeniceModelCatalogCachePath(env = process.env, homeDir = homedir39(), type = "text") {
@@ -145502,7 +145532,7 @@ function readCatalogCache(path, type) {
   return { fetchedAtMs, type, models: Object.freeze(models) };
 }
 function writeCatalogCache(path, catalog) {
-  const tempPath = `${path}.${process.pid}.${randomUUID29()}.tmp`;
+  const tempPath = `${path}.${process.pid}.${randomUUID30()}.tmp`;
   try {
     mkdirSync55(dirname90(path), { recursive: true, mode: 448 });
     const models = Object.fromEntries(Object.entries(catalog.models).sort(([a], [b]) => a.localeCompare(b)));
@@ -171996,7 +172026,7 @@ var init_watch_hub = __esm(() => {
 });
 
 // src/workers/local-files/connector.ts
-import { createHash as createHash90, randomUUID as randomUUID30 } from "node:crypto";
+import { createHash as createHash90, randomUUID as randomUUID31 } from "node:crypto";
 import { realpathSync as realpathSync21, rmSync as rmSync36, readdirSync as readdirSync26 } from "node:fs";
 import { join as join126, posix as posix3 } from "node:path";
 function nameAsOnDisk(scopeRoot, rel) {
@@ -172385,7 +172415,7 @@ function createLocalFilesSourceConnector(options) {
           const deletedSeen = new Set;
           const priorGen = cursor?.startsWith(LOCAL_FILES_CURSOR_PREFIX) ? cursor.slice(LOCAL_FILES_CURSOR_PREFIX.length) : undefined;
           const replay = priorGen !== undefined && priorGen !== "poll";
-          const nextGen = randomUUID30();
+          const nextGen = randomUUID31();
           let wroteSnapshot = false;
           if (options.watch) {
             try {
@@ -191783,7 +191813,7 @@ var EMBEDDING_PREFILTER_MODEL_ID = "embeddinggemma-2-litert-24d962e", EMBEDDING_
 // src/workers/classification/embedding-prefilter.ts
 import { chmodSync as chmodSync35, existsSync as existsSync100, lstatSync as lstatSync50, mkdirSync as mkdirSync61, readFileSync as readFileSync87 } from "node:fs";
 import { join as join133 } from "node:path";
-import { randomUUID as randomUUID31 } from "node:crypto";
+import { randomUUID as randomUUID32 } from "node:crypto";
 function prefilterVector(copy) {
   if (!copy || copy.chunks.length === 0 || copy.chunks.some((chunk) => chunk.mediaSha256 || chunk.mediaPath) || snifferMaterialCarriesSecret(copy.chunks.map((chunk) => chunk.boundedText).join("")))
     return;
@@ -191865,7 +191895,7 @@ class EmbeddingPrefilter {
     }
   }
   revisions() {
-    return JSON.stringify([...this.owner.members].map((member) => [member.options.ledger.ledgerId(), member.options.ledger.readMeta("embedding-prefilter:training-revision") ?? "0"]).sort());
+    return JSON.stringify([...this.owner.members].map((member) => [member.options.ledger.ledgerId(), member.options.ledger.readMeta("embedding-prefilter:training-revision") ?? "0"]).sort()) + ":" + (this.control.readMeta(`${PREFIX3}withdrawal`) ?? "0");
   }
   now() {
     return this.options.now?.() ?? Date.now();
@@ -191962,7 +191992,7 @@ class EmbeddingPrefilter {
       return;
     mkdirSync61(directory, { recursive: true, mode: 448 });
     chmodSync35(directory, 448);
-    const saved = { model, judge: judge3, revisions, trainedAt: now, version: randomUUID31() };
+    const saved = { model, judge: judge3, revisions, trainedAt: now, version: randomUUID32() };
     writePrivateFileAtomicSync(this.path, JSON.stringify(saved));
     this.saved = saved;
   }
@@ -191974,7 +192004,7 @@ class EmbeddingPrefilter {
     const row = this.options.ledger.getCurrent(question);
     if (receipt.hash === question.materialHash && row?.reasons.includes(receipt.reason))
       return true;
-    this.options.ledger.writeMeta(RECEIPTS + tierLedgerIdentityKey(question), "");
+    this.options.ledger.deleteMeta(RECEIPTS + tierLedgerIdentityKey(question));
     return false;
   }
   tryClear(question, judge3) {
@@ -191984,7 +192014,7 @@ class EmbeddingPrefilter {
     if (!row || row.state !== "pending" || row.metadataPending || !row.contentPending || !row.contentRead || row.metadataTier !== "private" || row.contentTier !== "private" || row.metadataForced || row.decidedBy === "override" || row.decidedBy === "owner_rule" || this.options.ledger.getOverride(question) || row.reasons.some((reason2) => reason2.startsWith("metadata:owner_rule:")) || this.options.ledger.rejudgeQuestion(question) || this.options.sniffer.questionFor(question, "metadata"))
       return false;
     const checkKey = this.checkKey(question);
-    if (this.control.readMeta(checkKey) === question.materialHash)
+    if (this.isSpotCheck(question))
       return false;
     const copy = this.options.copyFor(question);
     if (!copy || !row.reasons.includes(contentDigestReason(copy.chunks.map((chunk) => chunk.boundedText).join(""))))
@@ -191994,11 +192024,13 @@ class EmbeddingPrefilter {
     if (probability === undefined || probability >= 0.05)
       return false;
     if ((this.options.random?.() ?? Math.random()) < 0.05) {
-      this.control.writeMeta(checkKey, question.materialHash);
+      this.options.ledger.writeMeta(checkKey, JSON.stringify({ hash: question.materialHash, token: randomUUID32() }));
       return false;
     }
     const reason = `content:embedding_prefilter:${this.saved.version}:${probability.toFixed(8)}`;
-    const receipt = { subject: question, hash: question.materialHash, reason, original: decisionOf(row) };
+    const original = decisionOf(row);
+    original.reasons = [...original.reasons.filter((code) => code !== PERSONAL_FIRST_REASON), HELD_UNTIL_JUDGED_REASON];
+    const receipt = { subject: question, hash: question.materialHash, reason, original };
     receipt.subject = {
       provider: question.provider,
       accountScope: question.accountScope,
@@ -192018,18 +192050,35 @@ class EmbeddingPrefilter {
     return cleared;
   }
   checkKey(question) {
-    return CHECKS + this.options.ledger.ledgerId() + ":" + tierLedgerIdentityKey(question);
+    return CHECKS + tierLedgerIdentityKey(question);
+  }
+  selection(question) {
+    const raw = this.options.ledger.readMeta(this.checkKey(question));
+    if (!raw)
+      return;
+    try {
+      const value2 = JSON.parse(raw);
+      return value2.hash === question.materialHash && /^[0-9a-f-]{36}$/.test(value2.token) ? value2 : undefined;
+    } catch {
+      return;
+    }
   }
   isSpotCheck(question) {
-    return question.pass === "content" && this.control.readMeta(this.checkKey(question)) === question.materialHash;
+    return question.pass === "content" && this.selection(question) !== undefined;
   }
   observe(question, isPrivate) {
-    if (!this.isSpotCheck(question))
+    const selection = question.pass === "content" ? this.selection(question) : undefined;
+    if (!selection)
       return;
-    this.audit.misses.push(isPrivate);
-    this.audit.misses = this.audit.misses.slice(-WINDOW);
-    this.audit.stopped ||= this.audit.misses.filter(Boolean).length > 4;
-    this.control.writeMetaBatch([[`${PREFIX3}audit`, JSON.stringify(this.audit)], [this.checkKey(question), ""]]);
+    const observedKey = `${PREFIX3}observed:${selection.token}`;
+    if (!this.control.readMeta(observedKey)) {
+      this.audit.misses.push(isPrivate);
+      this.audit.misses = this.audit.misses.slice(-WINDOW);
+      this.audit.stopped ||= this.audit.misses.filter(Boolean).length > 4;
+      this.control.writeMetaBatch([[`${PREFIX3}audit`, JSON.stringify(this.audit)], [observedKey, "1"]]);
+    }
+    this.options.ledger.deleteMeta(this.checkKey(question));
+    this.control.deleteMeta(observedKey);
     if (this.audit.stopped)
       for (const member of this.owner.members)
         member.rollback();
@@ -192040,7 +192089,7 @@ class EmbeddingPrefilter {
   acceptClearances() {
     for (const entry of this.options.ledger.metaEntries(RECEIPTS)) {
       const receipt = JSON.parse(entry.value);
-      this.options.ledger.writeMeta(entry.key, "");
+      this.options.ledger.deleteMeta(entry.key);
       this.options.sniffer.deleteQuestion(receipt.subject, "content", receipt.hash);
     }
   }
@@ -192048,7 +192097,7 @@ class EmbeddingPrefilter {
     for (const entry of this.options.ledger.metaEntries(RECEIPTS)) {
       const receipt = JSON.parse(entry.value);
       if (this.options.ledger.revokeEmbeddingClearance(receipt.subject, receipt.reason, receipt.original, this.options.placementFor)) {
-        this.options.ledger.writeMeta(entry.key, "");
+        this.options.ledger.deleteMeta(entry.key);
       }
     }
   }
@@ -192394,15 +192443,18 @@ async function runSnifferPass(options) {
       const spotCheck = item.target.embeddingPrefilter?.isSpotCheck(item.question) === true;
       const cached3 = item.target.sniffer.getVerdict(key2);
       const usable = cached3 && cachedSnifferVerdictHolds(cached3) && (!item.question.contentHash || contentVerdictReusable(cached3, item.question.contentHash, item.question));
-      if (usable && (!spotCheck || snifferVerdictTier(cached3, options.lane, item.question.flags).tier === "secure")) {
-        if (spotCheck && cached3.modelSubject === snifferSubjectKey(item.question))
-          item.target.embeddingPrefilter?.observe(item.question, cached3.tier === "private");
+      const knownPrivate = cached3 && cachedSnifferVerdictHolds(cached3) && snifferVerdictTier(cached3, options.lane, item.question.flags).tier === "secure";
+      if (knownPrivate || usable && !spotCheck) {
+        if (spotCheck && knownPrivate)
+          item.target.embeddingPrefilter?.observe(item.question, true);
         apply(item, cached3, item.question.contentHash !== undefined && cached3.modelSubject !== snifferSubjectKey(item.question));
         report.cacheHits += 1;
         return false;
       }
       const duplicate = item.question.pass === "content" && item.question.contentHash ? item.target.sniffer.getFinalModelContentVerdict({ ...key2, contentHash: item.question.contentHash }) : undefined;
       if (duplicate && cachedSnifferVerdictHolds(duplicate) && (!spotCheck || snifferVerdictTier(duplicate, options.lane, item.question.flags).tier === "secure")) {
+        if (spotCheck)
+          item.target.embeddingPrefilter?.observe(item.question, true);
         apply(item, duplicate, true);
         report.cacheHits += 1;
         return false;
@@ -219669,7 +219721,7 @@ import { dirname as dirname78, isAbsolute as isAbsolute32, join as join107 } fro
 // src/core/lifecycle-artifact.ts
 init_atomic_file();
 init_operation_error();
-import { createHash as createHash75, randomUUID as randomUUID26 } from "node:crypto";
+import { createHash as createHash75, randomUUID as randomUUID27 } from "node:crypto";
 import { spawnSync as spawnSync16 } from "node:child_process";
 import {
   chmodSync as chmodSync29,
@@ -219974,7 +220026,7 @@ function publishVersionTree(staging, workingDirectory, versionsDir, syncDirector
   let published = false;
   try {
     if (existsSync75(workingDirectory)) {
-      replacedPath = join105(versionsDir, `.olympus-replaced-${basename18(workingDirectory)}-${randomUUID26()}`);
+      replacedPath = join105(versionsDir, `.olympus-replaced-${basename18(workingDirectory)}-${randomUUID27()}`);
       renameSync16(workingDirectory, replacedPath);
       syncDirectory2(versionsDir);
     }
@@ -220016,7 +220068,7 @@ function removeStagingTree(root) {
 init_atomic_file();
 init_file_lease();
 init_operation_error();
-import { randomUUID as randomUUID27 } from "node:crypto";
+import { randomUUID as randomUUID28 } from "node:crypto";
 import { existsSync as existsSync76, linkSync as linkSync4, lstatSync as lstatSync38, readFileSync as readFileSync64 } from "node:fs";
 import { join as join106 } from "node:path";
 function acquireLifecycleMutationLock(homeDir, action, now = () => new Date) {
@@ -220032,7 +220084,7 @@ function acquireLifecycleMutationLock(homeDir, action, now = () => new Date) {
       schema_version: 1,
       pid: process.pid,
       process_instance: ownerProcessInstance,
-      nonce: randomUUID27(),
+      nonce: randomUUID28(),
       action,
       started_at: now().toISOString()
     };

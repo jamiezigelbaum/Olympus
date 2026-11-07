@@ -7,7 +7,7 @@ import { ingestionTurn } from '../control-path-headroom.ts';
 import { snifferMaterialCarriesSecret } from './sniffer.ts';
 import type { SnifferQuestion, TierSnifferStore } from './sniffer-store.ts';
 import { tierLedgerIdentityKey, type TierLedger, type TierLedgerRecord, type TierPlacementPlan } from './tier-ledger.ts';
-import { TIER_CLASSIFIER_VERSION, contentDigestReason, normalizedContentHash, type TierDecision, type TierSnifferSubject } from './tier-classifier.ts';
+import { TIER_CLASSIFIER_VERSION, PERSONAL_FIRST_REASON, HELD_UNTIL_JUDGED_REASON, contentDigestReason, normalizedContentHash, type TierDecision, type TierSnifferSubject } from './tier-classifier.ts';
 import { EMBEDDING_PREFILTER_MODEL_ID, EMBEDDING_PREFILTER_DIMENSIONS, EMBEDDING_PREFILTER_MIN_PER_CLASS,
   trainLogistic, privateProbability, type LogisticModel, type LogisticExample } from './embedding-logistic.ts';
 
@@ -97,7 +97,7 @@ export class EmbeddingPrefilter {
     } catch { this.saved = undefined; }
   }
   private revisions(): string {
-    return JSON.stringify([...this.owner.members].map(member => [member.options.ledger.ledgerId(), member.options.ledger.readMeta('embedding-prefilter:training-revision') ?? '0']).sort());
+    return JSON.stringify([...this.owner.members].map(member => [member.options.ledger.ledgerId(), member.options.ledger.readMeta('embedding-prefilter:training-revision') ?? '0']).sort()) + ':' + (this.control.readMeta(`${PREFIX}withdrawal`) ?? '0');
   }
   private now(): number { return this.options.now?.() ?? Date.now(); }
   private enabled(): boolean { return this.options.enabled?.() !== false; }
@@ -177,7 +177,7 @@ export class EmbeddingPrefilter {
     const receipt = JSON.parse(raw) as Receipt;
     const row = this.options.ledger.getCurrent(question);
     if (receipt.hash === question.materialHash && row?.reasons.includes(receipt.reason)) return true;
-    this.options.ledger.writeMeta(RECEIPTS + tierLedgerIdentityKey(question), '');
+    this.options.ledger.deleteMeta(RECEIPTS + tierLedgerIdentityKey(question));
     return false;
   }
   tryClear(question: SnifferQuestion, judge: string): boolean {
@@ -190,17 +190,20 @@ export class EmbeddingPrefilter {
       || this.options.ledger.rejudgeQuestion(question) || this.options.sniffer.questionFor(question, 'metadata')) return false;
     // An existing audit selection survives retry/restart and never takes a cache shortcut.
     const checkKey = this.checkKey(question);
-    if (this.control.readMeta(checkKey) === question.materialHash) return false;
+    if (this.isSpotCheck(question)) return false;
     const copy = this.options.copyFor(question);
     if (!copy || !row.reasons.includes(contentDigestReason(copy.chunks.map(chunk => chunk.boundedText).join('')))) return false;
     const vector = prefilterVector(copy);
     const probability = vector ? privateProbability(this.saved.model, vector) : undefined;
     if (probability === undefined || probability >= 0.05) return false;
     if ((this.options.random?.() ?? Math.random()) < 0.05) {
-      this.control.writeMeta(checkKey, question.materialHash); return false;
+      this.options.ledger.writeMeta(checkKey, JSON.stringify({ hash: question.materialHash, token: randomUUID() })); return false;
     }
     const reason = `content:embedding_prefilter:${this.saved.version}:${probability.toFixed(8)}`;
-    const receipt: Receipt = { subject: question, hash: question.materialHash, reason, original: decisionOf(row) };
+    const original = decisionOf(row);
+    // A failed audit must hold the item even if its original queue used Personal-first placement.
+    original.reasons = [...original.reasons.filter(code => code !== PERSONAL_FIRST_REASON), HELD_UNTIL_JUDGED_REASON];
+    const receipt: Receipt = { subject: question, hash: question.materialHash, reason, original };
     // Copy identity only; queued text remains in the existing owner-only sniffer queue.
     receipt.subject = { provider: question.provider, accountScope: question.accountScope, providerItemId: question.providerItemId,
       ...(question.providerConversationId ? { providerConversationId: question.providerConversationId } : {}) };
@@ -213,25 +216,40 @@ export class EmbeddingPrefilter {
     return cleared;
   }
   private checkKey(question: TierSnifferSubject): string {
-    return CHECKS + this.options.ledger.ledgerId() + ':' + tierLedgerIdentityKey(question);
+    return CHECKS + tierLedgerIdentityKey(question);
+  }
+  private selection(question: SnifferQuestion): { hash: string; token: string } | undefined {
+    const raw = this.options.ledger.readMeta(this.checkKey(question));
+    if (!raw) return undefined;
+    try {
+      const value = JSON.parse(raw) as { hash: string; token: string };
+      return value.hash === question.materialHash && /^[0-9a-f-]{36}$/.test(value.token) ? value : undefined;
+    } catch { return undefined; }
   }
   isSpotCheck(question: SnifferQuestion): boolean {
-    return question.pass === 'content' && this.control.readMeta(this.checkKey(question)) === question.materialHash;
+    return question.pass === 'content' && this.selection(question) !== undefined;
   }
   observe(question: SnifferQuestion, isPrivate: boolean): void {
-    if (!this.isSpotCheck(question)) return;
-    this.audit.misses.push(isPrivate);
-    this.audit.misses = this.audit.misses.slice(-WINDOW);
-    this.audit.stopped ||= this.audit.misses.filter(Boolean).length > 4;
-    // Persist the stop before any rollback, so a crash retries instead of clearing again.
-    this.control.writeMetaBatch([[`${PREFIX}audit`, JSON.stringify(this.audit)], [this.checkKey(question), '']]);
+    const selection = question.pass === 'content' ? this.selection(question) : undefined;
+    if (!selection) return;
+    // Only an opaque token crosses into install state. Source deletion removes the selection itself.
+    const observedKey = `${PREFIX}observed:${selection.token}`;
+    if (!this.control.readMeta(observedKey)) {
+      this.audit.misses.push(isPrivate);
+      this.audit.misses = this.audit.misses.slice(-WINDOW);
+      this.audit.stopped ||= this.audit.misses.filter(Boolean).length > 4;
+      // Commit audit and deduplication before deleting the source-owned selection.
+      this.control.writeMetaBatch([[`${PREFIX}audit`, JSON.stringify(this.audit)], [observedKey, '1']]);
+    }
+    this.options.ledger.deleteMeta(this.checkKey(question));
+    this.control.deleteMeta(observedKey);
     if (this.audit.stopped) for (const member of this.owner.members) member.rollback();
     else if (this.audit.misses.length === WINDOW) for (const member of this.owner.members) member.acceptClearances();
   }
   private acceptClearances(): void {
       for (const entry of this.options.ledger.metaEntries(RECEIPTS)) {
         const receipt = JSON.parse(entry.value) as Receipt;
-        this.options.ledger.writeMeta(entry.key, '');
+        this.options.ledger.deleteMeta(entry.key);
         this.options.sniffer.deleteQuestion(receipt.subject, 'content', receipt.hash);
       }
   }
@@ -239,7 +257,7 @@ export class EmbeddingPrefilter {
     for (const entry of this.options.ledger.metaEntries(RECEIPTS)) {
       const receipt = JSON.parse(entry.value) as Receipt;
       if (this.options.ledger.revokeEmbeddingClearance(receipt.subject, receipt.reason, receipt.original, this.options.placementFor)) {
-        this.options.ledger.writeMeta(entry.key, '');
+        this.options.ledger.deleteMeta(entry.key);
       }
     }
   }

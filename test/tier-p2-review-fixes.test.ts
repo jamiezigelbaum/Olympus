@@ -15,7 +15,7 @@
 // running pass; data deletion takes the sniffer's queue.
 
 import { resolvedStorePath } from '../src/core/source-placement.ts';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, test } from 'bun:test';
@@ -458,8 +458,9 @@ describe('nits', () => {
     const env = { HOME: homeDir, XDG_DATA_HOME: join(dir, 'xdg-data'), OLYMPUS_CLASSIFICATION_LEDGER_PATH: join(dir, 'custom', 'classification.jsonl') };
     const auditPath = embeddingPrefilterInstallLedgerPath(resolveClassificationLedgerPath(env));
     const audit = new TierLedger({ dbPath: auditPath });
+    audit.writeMeta('embedding-prefilter:state', 'synthetic stopped audit');
+    audit.writeMeta('embedding-prefilter:withdrawal', 'before-deletion');
     audit.close();
-    const before = readFileSync(auditPath);
     const weightsDir = embeddingPrefilterDirectory(auditPath);
     mkdirSync(weightsDir, { recursive: true, mode: 0o700 });
     const weightsPath = join(weightsDir, 'weights.json');
@@ -467,9 +468,62 @@ describe('nits', () => {
     const dryRun = deleteOlympusData({ sourceId: 'readwise.library', homeDir, env, dryRun: true });
     expect(dryRun.removed).toContain(weightsPath);
     expect(existsSync(weightsPath)).toBe(true);
+    const afterPreview = new TierLedger({ dbPath: auditPath });
+    expect(afterPreview.readMeta('embedding-prefilter:withdrawal')).toBe('before-deletion');
+    afterPreview.close();
     deleteOlympusData({ sourceId: 'readwise.library', homeDir, env });
     expect(existsSync(weightsPath)).toBe(false);
-    expect(readFileSync(auditPath).equals(before)).toBe(true);
+    const after = new TierLedger({ dbPath: auditPath });
+    expect(after.readMeta('embedding-prefilter:state')).toBe('synthetic stopped audit');
+    expect(after.readMeta('embedding-prefilter:withdrawal')).not.toBe('before-deletion');
+    expect(after.readMeta('embedding-prefilter:withdrawal')).toBeDefined();
+    after.close();
+  });
+
+  test('delete at restart fences in-flight training and removes weights immediately while source bytes stay', () => {
+    const dir = workspace();
+    const homeDir = join(dir, 'home');
+    const env = { HOME: homeDir, XDG_DATA_HOME: join(dir, 'xdg-data') };
+    const storePath = resolvedStorePath('readwise.library', 'internal', env);
+    const snifferPath = tierSnifferPathForStore(storePath);
+    const store = new TierSnifferStore({ dbPath: snifferPath });
+    store.close();
+    const auditPath = embeddingPrefilterInstallLedgerPath(resolveClassificationLedgerPath(env));
+    const audit = new TierLedger({ dbPath: auditPath });
+    audit.writeMeta('embedding-prefilter:state', 'synthetic stopped audit');
+    audit.writeMeta('embedding-prefilter:withdrawal', 'before-deletion');
+    const modelDir = embeddingPrefilterDirectory(auditPath);
+    mkdirSync(modelDir, { recursive: true, mode: 0o700 });
+    const weightsPath = join(modelDir, 'weights.json');
+    writeFileSync(weightsPath, 'synthetic weights', { mode: 0o600 });
+    const result = deleteOlympusData({ sourceId: 'readwise.library', homeDir, env, applyAtRestart: true });
+    expect(result.pending).toBe(true);
+    expect(existsSync(snifferPath)).toBe(true);
+    expect(existsSync(weightsPath)).toBe(false);
+    const firstWithdrawal = audit.readMeta('embedding-prefilter:withdrawal');
+    expect(firstWithdrawal).toBeDefined();
+    expect(firstWithdrawal).not.toBe('before-deletion');
+    expect(audit.readMeta('embedding-prefilter:state')).toBe('synthetic stopped audit');
+    // A first training run has no published weights, but still needs a new fence.
+    deleteOlympusData({ sourceId: 'readwise.library', homeDir, env, applyAtRestart: true });
+    expect(audit.readMeta('embedding-prefilter:withdrawal')).not.toBe(firstWithdrawal);
+    audit.close();
+  });
+
+  test('a refused source deletion does not bump the install withdrawal fence', () => {
+    const dir = workspace();
+    const homeDir = join(dir, 'home');
+    const env = { HOME: homeDir, XDG_DATA_HOME: join(dir, 'xdg-data') };
+    const auditPath = embeddingPrefilterInstallLedgerPath(resolveClassificationLedgerPath(env));
+    const audit = new TierLedger({ dbPath: auditPath });
+    audit.writeMeta('embedding-prefilter:withdrawal', 'before-refusal');
+    const weightsPath = join(embeddingPrefilterDirectory(auditPath), 'weights.json');
+    // A directory where a regular learned-model file belongs fails preflight.
+    mkdirSync(weightsPath, { recursive: true });
+    expect(() => deleteOlympusData({ sourceId: 'readwise.library', homeDir, env })).toThrow();
+    expect(audit.readMeta('embedding-prefilter:withdrawal')).toBe('before-refusal');
+    expect(existsSync(weightsPath)).toBe(true);
+    audit.close();
   });
 
   test('data deletion takes the sniffer queue beside a source store', () => {

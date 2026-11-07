@@ -517,6 +517,7 @@ export function deleteOlympusData(options: {
     // next boot removes them before anything mounts. Marked even with nothing
     // on disk: the boot's repeat of the forget steps still runs for it.
     markAccountDeleting(account, env);
+    invalidateInstallEmbeddingPrefilter(options);
     return {
       ok: true,
       mode: 'source',
@@ -653,6 +654,8 @@ function planAccountRemoval(
   options: { atBoot?: boolean } = {},
 ): AccountRemovalPlan {
   const targets = uniqueTargets(sourceDeleteTargets(account, context));
+  const auditPath = embeddingPrefilterInstallLedgerPath(resolveClassificationLedgerPath(envForContext(context)));
+  if (existsSync(auditPath)) assertVerifiedExternalSqliteStore(auditPath, TIER_LEDGER_SQLITE_STORE_ID);
   // A recursive raw-state target must be provably Olympus's own and nobody
   // else's (see assertRawStateTargetsContained), and everything under the
   // account folders is reached through no link, so a store inside one
@@ -703,6 +706,8 @@ function removeAccount(
   for (const target of plan.targets) {
     if (target.kind === 'account_folder' && existsSync(target.path)) assertDeleteTargetSafe(target);
   }
+  // Fence yielded training before any source byte disappears, even with no weights published yet.
+  invalidateInstallEmbeddingPrefilter(context);
   const removed: string[] = [];
   const missing: string[] = [];
   // A file inside the folder goes with the folder's rename, not on its own.
@@ -1365,6 +1370,25 @@ function looksLikeSqlite(path: string): boolean {
   } catch {
     return false;
   }
+}
+
+/** Invalidate pooled training independently of source handles which can survive unlink. */
+function invalidateInstallEmbeddingPrefilter(context: LifecyclePathContext): void {
+  const auditPath = embeddingPrefilterInstallLedgerPath(resolveClassificationLedgerPath(envForContext(context)));
+  // Training opens the install audit before yielding; without it no model can be in flight.
+  if (existsSync(auditPath)) {
+    assertVerifiedExternalSqliteStore(auditPath, TIER_LEDGER_SQLITE_STORE_ID);
+    const db = new Database(auditPath, { readwrite: true, create: false });
+    try {
+      db.exec('PRAGMA busy_timeout = 10000;');
+      db.query(`INSERT INTO tier_ledger_meta (key, value) VALUES (?, ?)
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value`)
+        .run('embedding-prefilter:withdrawal', randomUUID());
+    } finally {
+      closeSqliteStore(db);
+    }
+  }
+  removeFileDurablySync(installEmbeddingWeightsTarget(context).path);
 }
 
 function installEmbeddingWeightsTarget(context: LifecyclePathContext): DeleteTarget {
