@@ -344,10 +344,12 @@ export { DASHBOARD_WORKER_TOKEN_AGENT_PROMPT } from './vocabulary.ts';
  */
 export function dashboardControlGate(input: DashboardControlGateInput): string {
   if (input.connected) {
-    return `<div class="sect" id="${DASHBOARD_CONTROL_GATE_ID}">Dashboard controls</div>`
-      + `<div class="attncard plain" data-dashboard-control-gate data-state="connected">`
-      + `<div class="grow"><span class="name">Dashboard controls unlocked</span>`
-      + `<span class="why"> — on this browser for 30 days from opening, or until the worker token is rotated</span></div>`
+    // Unlocked is the normal state, so it is one quiet line with Lock, not a
+    // section (owner, 2026-11-03). Locked keeps the full card below: then it
+    // is the one thing to do.
+    return `<div class="lockline" id="${DASHBOARD_CONTROL_GATE_ID}" data-dashboard-control-gate data-state="connected">`
+      + `<span class="name">Dashboard controls unlocked</span>`
+      + `<span class="why"> on this browser for 30 days from opening, or until the worker token is rotated</span>`
       // Lock clears this browser's cookie. Same custody proof as any control
       // (cookie, same origin, CSRF); a scriptless submit posts nothing useful.
       + `<form class="rowform" data-control-session-kind="lock" method="post" action="/dashboard/control/session/lock">`
