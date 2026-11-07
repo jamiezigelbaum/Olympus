@@ -331,6 +331,12 @@ a.card.cardlink:focus-visible { outline: 2px solid var(--link); outline-offset: 
 .bar { height: 8px; background: var(--line2); border: 1px solid var(--line); border-radius: 5px; overflow: hidden; margin-top: 9px; max-width: 420px; }
 .bar i { display: block; height: 100%; background: var(--run-fill); }
 .foot { color: var(--t3); font-size: var(--fs-caption); margin-top: 24px; }
+/* Unlocked dashboard controls: one quiet line at the top of the page, Lock at its end. */
+.lockline { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 10px; margin: 0 0 20px; color: var(--t3); font-size: var(--fs-caption); }
+.lockline .name { color: var(--t2); }
+.lockline .why { flex: 1 1 18rem; }
+.lockline .rowform { margin: 0; }
+.agentconnect { margin: 12px 0 0; }
 .kpis { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; margin: 16px 0 22px; }
 .kpi { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; }
 .kpi .u { font-size: var(--fs-caption); color: var(--t3); }

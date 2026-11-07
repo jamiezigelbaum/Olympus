@@ -37,7 +37,7 @@ import {
 } from '../agent-connections.ts';
 import { AGENT_INSTRUCTION_TEXT, AGENT_SKILL_PATH } from '../../core/agent-instructions.ts';
 import { resolveServerMode } from '../../core/remote-open.ts';
-import { escapeHtml, setupRow } from './components.ts';
+import { escapeHtml } from './components.ts';
 
 export const AGENT_CONNECT_SHEET_ID = 'agent-connect';
 
@@ -169,18 +169,16 @@ export function renderDashboardAgentsSection(input: DashboardAgentsSectionInput)
 
   return [
     '<div class="sect" id="agents">Agents</div>',
+    `<p class="pnote">${escapeHtml(platform === 'linux'
+      ? 'ChatGPT, Claude, Grok or a coding agent can ask Olympus, under the same privacy rules on this computer.'
+      : 'ChatGPT, Claude, Grok or a coding agent can ask Olympus, under the same privacy rules as your OpenClaw agent.')}</p>`,
     remoteAccessRow(view.remoteAccess, view.remoteAccessManual),
-    setupRow({
-      label: 'Connect an agent',
-      blurb: platform === 'linux'
-        ? 'Let ChatGPT, Claude, Grok or a coding agent ask Olympus, under the same privacy rules on this computer.'
-        : 'Let ChatGPT, Claude, Grok or a coding agent ask Olympus, under the same privacy rules as your OpenClaw agent.',
-      action: { label: 'Connect an agent', kind: 'none', sheet: AGENT_CONNECT_SHEET_ID, primary: true },
-    }),
-    connectSheet(view.remoteAccess, host, view.privateAccess),
     // Its own region so the controller can re-read the list after a key,
-    // Done or Revoke without replacing an open sheet or a shown key.
+    // Done or Revoke without replacing an open sheet or a shown key. The one
+    // Connect an agent button lives with the list (owner, 2026-11-03: not a
+    // row and a button saying the same thing).
     `<div data-agent-connections-list>${connectionList(view, input.now)}</div>`,
+    connectSheet(view.remoteAccess, host, view.privateAccess),
   ].join('\n');
 }
 
@@ -450,15 +448,19 @@ function secretSlot(id: string, label: string, setup = false): string {
     + `</div>`;
 }
 
+function connectAgentButton(label: string, primary: boolean): string {
+  return `<p class="agentconnect"><button class="btn${primary ? ' primary' : ''}" type="button" data-sheet-toggle="#${AGENT_CONNECT_SHEET_ID}" aria-controls="${AGENT_CONNECT_SHEET_ID}" aria-expanded="false">${escapeHtml(label)}</button></p>`;
+}
+
 function connectionList(view: DashboardAgentsView, now: Date): string {
   if (view.unavailable) {
-    return `<div class="foot" data-agent-connections="unavailable">Olympus could not read its list of connected agents. Reload this page to try again.</div>`;
+    return `<div class="sect">Connected agents</div><div class="foot" data-agent-connections="unavailable">Olympus could not read its list of connected agents. Reload this page to try again.</div>${connectAgentButton('Connect an agent', false)}`;
   }
   if (view.connections.length === 0) {
-    return `<div class="foot" data-agent-connections="none">No agents are connected yet.</div>`;
+    return `<div class="sect">Connected agents</div><div class="pnote" data-agent-connections="none">No agents are connected yet.</div>${connectAgentButton('Connect an agent', true)}`;
   }
   const rows = view.connections.map((connection) => connectionRow(connection, now)).join('\n');
-  return `<div class="sect">Connected agents — ${view.connections.length}</div>\n${rows}`;
+  return `<div class="sect">Connected agents — ${view.connections.length}</div>\n${rows}${connectAgentButton('Connect another agent', false)}`;
 }
 
 function connectionRow(connection: DashboardAgentConnection, now: Date): string {
