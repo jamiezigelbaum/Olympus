@@ -249,6 +249,16 @@ describe('dashboard stylesheet', () => {
     expect(DASHBOARD_THEME_CSS).toContain('.attncard.banner .grow { flex: 1 1 320px; min-width: 0; }');
   });
 
+  test('a form fieldset adds no indent, so its submit button lines up with the page\'s other buttons', () => {
+    // release-check mac leg 2026-11-07: "Save and approve this choice" and
+    // "Continue" sat 13 px right of the buttons around them (layout rule
+    // misaligned-controls), from the browser's default fieldset padding.
+    for (const form of ['data-computer-use', 'data-judge-choice']) {
+      expect(MODEL_SETUP_CSS).toContain(`[${form}] fieldset`);
+    }
+    expect(MODEL_SETUP_CSS).toContain('fieldset{border:0;padding:0;margin:0;min-width:0}');
+  });
+
   test('leaves every other attention-card shape exactly as it was', () => {
     // The source page's one banner is a paragraph with controls; the home rows
     // and the whole-row links are neither, and the mobile block below owns what
