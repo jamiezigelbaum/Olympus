@@ -1319,7 +1319,17 @@ export class TierSnifferService {
           // The idle timer also asks for raises. Only real queued raises may
           // interrupt a longer lowering slice; an unreadable queue fails safe.
           const raisesQueued = this.ledgerPaths().some(path => {
-            try { return (tierSetForLedger(path)?.ledger.countMoving('raise') ?? 0) > 0; }
+            try {
+              const set = tierSetForLedger(path);
+              if (!set || !setEmbedsWithBuiltInOnly(set)) return false;
+              const limit = Math.max(0, this.options.autoMoves!.maxPerPass ?? 25);
+              return limit > 0 && set.ledger.listMoving({ limit, direction: 'raise' })
+                .some(record => isAutoMoveCandidate(record)
+                  // Failed raises already get retries ahead of lowerings each
+                  // pass (and during judging). They remain hidden and queued,
+                  // but must not cut every lowering slice back to one second.
+                  && !this.moveFailures.has(`${path}\u0000${tierLedgerIdentityKey(recordIdentity(record))}\u0000${record.generation}`));
+            }
             catch { return true; }
           });
           if (!raisesQueued) return undefined;
@@ -1541,8 +1551,7 @@ export class TierSnifferService {
       const set = tierSetForLedger(ledgerPath);
       if (!set) continue;
       const queued = set.ledger.listMoving({ limit: budget, direction })
-        .filter(record => record.routed && record.targetMetadataTier !== null && record.targetContentTier !== null
-          && record.targetMetadataTier !== 'secrets' && record.targetContentTier !== 'secrets');
+        .filter(isAutoMoveCandidate);
       if (!setEmbedsWithBuiltInOnly(set)) { report.notEligible += queued.length; continue; }
       const failure = (record: TierLedgerRecord, error: unknown) => {
         const identity = recordIdentity(record);
@@ -1778,6 +1787,12 @@ function matchingVectorIdentities(
     }
   }
   return identities;
+}
+
+/** Same candidate predicate for raise preemption and the actual drain. */
+function isAutoMoveCandidate(record: TierLedgerRecord): boolean {
+  return record.routed && record.targetMetadataTier !== null && record.targetContentTier !== null
+    && record.targetMetadataTier !== 'secrets' && record.targetContentTier !== 'secrets';
 }
 
 /** Every open store of the set embeds (if at all) with the built-in local model only. */

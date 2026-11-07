@@ -77091,7 +77091,11 @@ class TierSnifferService {
         if (direction === "raise") {
           const raisesQueued = this.ledgerPaths().some((path) => {
             try {
-              return (tierSetForLedger(path)?.ledger.countMoving("raise") ?? 0) > 0;
+              const set2 = tierSetForLedger(path);
+              if (!set2 || !setEmbedsWithBuiltInOnly(set2))
+                return false;
+              const limit = Math.max(0, this.options.autoMoves.maxPerPass ?? 25);
+              return limit > 0 && set2.ledger.listMoving({ limit, direction: "raise" }).some((record3) => isAutoMoveCandidate(record3) && !this.moveFailures.has(`${path}\x00${tierLedgerIdentityKey(recordIdentity(record3))}\x00${record3.generation}`));
             } catch {
               return true;
             }
@@ -77260,7 +77264,7 @@ class TierSnifferService {
       const set2 = tierSetForLedger(ledgerPath);
       if (!set2)
         continue;
-      const queued = set2.ledger.listMoving({ limit: budget, direction }).filter((record3) => record3.routed && record3.targetMetadataTier !== null && record3.targetContentTier !== null && record3.targetMetadataTier !== "secrets" && record3.targetContentTier !== "secrets");
+      const queued = set2.ledger.listMoving({ limit: budget, direction }).filter(isAutoMoveCandidate);
       if (!setEmbedsWithBuiltInOnly(set2)) {
         report.notEligible += queued.length;
         continue;
@@ -77448,6 +77452,9 @@ function matchingVectorIdentities(set2, exported) {
     } catch {}
   }
   return identities;
+}
+function isAutoMoveCandidate(record3) {
+  return record3.routed && record3.targetMetadataTier !== null && record3.targetContentTier !== null && record3.targetMetadataTier !== "secrets" && record3.targetContentTier !== "secrets";
 }
 function setEmbedsWithBuiltInOnly(set2) {
   try {

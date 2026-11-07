@@ -451,11 +451,16 @@ test('failed grouped note fsync keeps obligations, and malformed notes do not bl
   } finally { opened.mockRestore(); warn.mockRestore(); }
 });
 
-for (const raisesQueued of [false, true]) test(`timer preempts lowerings only for actual raises: ${raisesQueued}`, async () => {
+for (const state of ['none', 'new', 'ineligible'] as const) test(`timer preempts lowerings only for eligible new raises: ${state}`, async () => {
   const f = await fixture(100, true);
+  const raising = state === 'ineligible' ? await fixture(0) : f;
   const raised = { id: 'synthetic-timer-raise', name: 'Synthetic', text: body };
-  await f.f.set.sync(fixtureConnector(() => [raised], { id: 'synthetic-timer-new' }), { fetchContent: true, placement: FIXTURE_PLACEMENT });
-  const { service } = serviceFor(f.f, { lowerSliceMs: 6000 }, [], { passTimeMs: 18_000 });
+  await raising.f.set.sync(fixtureConnector(() => [raised], { id: 'synthetic-timer-new' }), { fetchContent: true, placement: FIXTURE_PLACEMENT });
+  const { service } = serviceFor(f.f, { lowerSliceMs: 6000 }, state === 'ineligible' ? [raising.f] : [], { passTimeMs: 18_000 });
+  const authority = state === 'ineligible'
+    ? spyOn(raising.f.stores.secure_local!, 'embeddingAuthorities').mockReturnValue([
+      { provider: 'synthetic-external', modelId: 'synthetic', backend: 'local', dimension: 1, epochId: 'synthetic' },
+    ]) : undefined;
   let pulse!: () => void;
   const originalInterval = globalThis.setInterval;
   const interval = spyOn(globalThis, 'setInterval').mockImplementation(((callback: () => void) => {
@@ -471,7 +476,7 @@ for (const raisesQueued of [false, true]) test(`timer preempts lowerings only fo
   const copy = spyOn(f.f.stores.internal!, 'importItemCopy').mockImplementation((...args) => {
     clock += 100;
     if (++imports === 1) setTimeout(() => {
-      if (raisesQueued) f.f.ledger.recordRoutedPlacement(identityOf(raised.id), high, f.f.set.placementFor(high));
+      if (state !== 'none') raising.f.ledger.recordRoutedPlacement(identityOf(raised.id), high, raising.f.set.placementFor(high));
       pulsed = true;
       pulse(); // Run the real start() timer callback while the slice yields.
     }, 0);
@@ -481,12 +486,15 @@ for (const raisesQueued of [false, true]) test(`timer preempts lowerings only fo
     await service.runOnce();
     // Wait for the timer's raise request too, if it preempted the lowering.
     await (service as unknown as { drainMoves(): Promise<unknown> }).drainMoves();
-  } finally { service.stop(); copy.mockRestore(); time.mockRestore(); }
+  } finally { service.stop(); copy.mockRestore(); time.mockRestore(); authority?.mockRestore(); }
   expect(pulsed).toBe(true);
-  if (raisesQueued) {
+  if (state === 'new') {
     expect(imports).toBeLessThan(60);
     expect(f.f.ledger.getCurrent(identityOf(raised.id))).toMatchObject({ state: 'current', contentTier: 'secure' });
-  } else expect(imports).toBe(60);
+  } else {
+    expect(imports).toBe(60);
+    if (state === 'ineligible') expect(raising.f.ledger.getCurrent(identityOf(raised.id))?.state).toBe('moving');
+  }
 }, 15_000);
 
 test('a failed backlog count does not block other ledgers', async () => {
@@ -514,3 +522,38 @@ for (const passTimeMs of [0, NaN]) test(`disabled or invalid judge budget keeps 
   expect(imports).toBe(25);
   expect(clock).toBe(2500);
 });
+
+test('a failed raise is retried ahead of lowerings without repeatedly cutting their slice', async () => {
+  const f = await fixture(100, true);
+  const raised = { id: 'synthetic-stuck-raise', name: 'Synthetic', text: body };
+  await f.f.set.sync(fixtureConnector(() => [raised], { id: 'synthetic-stuck-new' }), { fetchContent: true, placement: FIXTURE_PLACEMENT });
+  f.f.ledger.recordRoutedPlacement(identityOf(raised.id), high, f.f.set.placementFor(high));
+  const { service } = serviceFor(f.f, { lowerSliceMs: 6000 }, [], { passTimeMs: 18_000 });
+  let pulse!: () => void;
+  const originalInterval = globalThis.setInterval;
+  const interval = spyOn(globalThis, 'setInterval').mockImplementation(((callback: () => void) => {
+    pulse = callback;
+    return originalInterval(() => {}, 60_000);
+  }) as typeof setInterval);
+  try { service.start(); } finally { interval.mockRestore(); }
+  let clock = 0;
+  let imports = 0;
+  let raises = 0;
+  const time = spyOn(performance, 'now').mockImplementation(() => clock);
+  const original = f.f.stores.internal!.importItemCopy.bind(f.f.stores.internal!);
+  const copy = spyOn(f.f.stores.internal!, 'importItemCopy').mockImplementation((...args) => {
+    expect(raises).toBeGreaterThan(0);
+    clock += 100;
+    if (++imports === 1) setTimeout(pulse, 0);
+    return original(...args);
+  });
+  const raiseCopy = spyOn(f.f.stores.secure_local!, 'importItemCopy').mockImplementation(() => {
+    raises++;
+    throw new Error('Synthetic stuck raise');
+  });
+  try { await service.runOnce(); }
+  finally { service.stop(); copy.mockRestore(); raiseCopy.mockRestore(); time.mockRestore(); }
+  expect(imports).toBe(60);
+  expect(f.f.ledger.getCurrent(identityOf(raised.id))?.state).toBe('moving');
+  expect(f.f.stores.internal!.localContent(localId(raised.id))?.chunks ?? []).toEqual([]);
+}, 15_000);
