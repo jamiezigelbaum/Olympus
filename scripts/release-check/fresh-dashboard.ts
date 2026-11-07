@@ -161,7 +161,13 @@ export async function openFreshDashboard(machine: Machine, endpoint: string, tim
         await click(`(()=>{const e=document.querySelector('form[data-first-run-privacy] input[value="${recommended.id}"]');return e?.closest('label')?.textContent.includes('Recommended')?e:null;})()`);
         await click(`document.querySelector('button[form="first-run-privacy-choice"]')`);
         // The normal form handler disables the answered choice only after the engine saves it.
-        await until(async () => !!await panel<boolean>(`!!document.querySelector('form[data-first-run-privacy] input:checked:disabled')`, Boolean), 'first-run privacy choice was not saved');
+        try {
+          await until(async () => !!await panel<boolean>(`!!document.querySelector('form[data-first-run-privacy] input:checked:disabled')`, Boolean), 'first-run privacy choice was not saved');
+        } catch (error) {
+          // The form's status line is the product's own copy, which is what a person would read.
+          const said = await panel<string>(`document.querySelector('form[data-first-run-privacy] [data-action-message]')?.textContent?.trim() ?? ''`, value => typeof value === 'string').catch(() => undefined);
+          throw new Error(said ? `first-run privacy choice was not saved: the dashboard said "${said}"` : `${(error as Error).message} (the dashboard showed no message)`);
+        }
         // Saving restarts the worker. Retry fresh documents across that handoff;
         // only the applied policy, never the submitted radio's state, proves persistence.
         await until(async () => await navigate('/dashboard?keys') && !!await panel<boolean>(`!!document.querySelector('[data-model-setup-status]') && !!document.querySelector('[data-answer-mode="${recommended.id}"]') && !document.querySelector('form[data-first-run-privacy]')`, Boolean), 'first-run privacy choice did not persist after reload');

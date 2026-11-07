@@ -11,7 +11,9 @@ import { renderModelSetup } from '../src/workers/dashboard/model-setup.ts';
 import { openFreshDashboard } from '../scripts/release-check/fresh-dashboard.ts';
 import type { Machine } from '../scripts/release-check/machine.ts';
 
-for (const losesSave of [false, true]) test(`first-run dashboard ${losesSave ? 'rejects a choice lost on reload' : 'saves the Recommended choice through its normal form before sources'}`, async () => {
+const REFUSAL = 'Choose this on the computer in an unlocked dashboard.';
+for (const mode of ['saves', 'loses', 'refused'] as const) test(`first-run dashboard ${mode === 'loses' ? 'rejects a choice lost on reload' : mode === 'refused' ? 'reports the dashboard\'s own refusal' : 'saves the Recommended choice through its normal form before sources'}`, async () => {
+  const losesSave = mode === 'loses';
   const dir = mkdtempSync(join(tmpdir(), 'fresh-dashboard-'));
   const path = join(dir, 'sovereignty.json');
   writeFileSync(path, JSON.stringify(createPendingPrivacyPolicy()));
@@ -49,6 +51,7 @@ for (const losesSave of [false, true]) test(`first-run dashboard ${losesSave ? '
       transport: { control: async (params: { action: string; choice: string }) => {
         calls.push(params.action);
         if (params.action !== 'save_first_run_privacy') throw new Error('unexpected control');
+        if (mode === 'refused') return { status: 403, body: { ok: false, error: { code: 'mac_dashboard_only', message: REFUSAL } } };
         const saved = saveFirstRunPrivacyChoice(path, params.choice as SovereigntyPresetName);
         expect(saved.ok && saved.changed).toBe(true);
         return { status: 200, body: { ok: true } };
@@ -103,6 +106,13 @@ for (const losesSave of [false, true]) test(`first-run dashboard ${losesSave ? '
   try {
     dashboard = await openFreshDashboard(machine, '127.0.0.1:9333', { timeoutMs: 300, pollMs: 1 });
     expect(events.indexOf('bridge.start')).toBeLessThan(events.indexOf('navigate'));
+    if (mode === 'refused') {
+      await expect(dashboard.privacyChoice()).rejects.toThrow(/^first-run privacy choice was not saved: the dashboard said "[^"]+"$/);
+      expect(isPendingPrivacyPolicy(policy())).toBe(true);
+      expect(calls).toEqual(['save_first_run_privacy']);
+      await dashboard.close(); dashboard = undefined;
+      return;
+    }
     if (losesSave) await expect(dashboard.privacyChoice()).rejects.toThrow('did not persist after reload');
     else {
       expect(await dashboard.privacyChoice()).toBe('Local models with Venice fallback (local-first, Recommended) saved and verified after reload');
