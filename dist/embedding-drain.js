@@ -70228,6 +70228,8 @@ var CONNECTOR_PROMPT = [
 ].join(`
 `);
 var W = DASHBOARD_COMPUTER_PANEL_COPY.rows;
+var CONNECTED_STATES = new Set(["connected", "waiting_for_first_sync", "syncing", "synced", "reauth_required"]);
+var MESSAGING_SOURCES = new Set(["telegram.messages", "whatsapp.personal.messages"]);
 
 // src/workers/dashboard/index.ts
 init_vocabulary();

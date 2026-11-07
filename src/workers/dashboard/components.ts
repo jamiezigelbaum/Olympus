@@ -940,6 +940,9 @@ export function standaloneDashboardControllerScript(
         if (action === 'save_judge') return ['/dashboard/models/judge', withoutAction(params)];
         if (action === 'save_model_choice') return ['/dashboard/models/choice', withoutAction(params)];
         if (action === 'list_addable_models') return ['/dashboard/models/addable', withoutAction(params)];
+        if (action === 'sync_now') return ['/dashboard/sync-now', withoutAction(params)];
+        if (action === 'disconnect_source') return ['/dashboard/disconnect', withoutAction(params)];
+        if (action === 'delete_source_data') return ['/dashboard/delete-source-data', withoutAction(params)];
         if (action === 'set_computer_use') return ['/dashboard/engine/computer-use', withoutAction(params)];
         if (action === 'save_first_run_privacy') return ['/dashboard/models/first-run-privacy', withoutAction(params)];
         if (action === 'connect_api_key') return ['/dashboard/connect/api-key', withoutAction(params)];

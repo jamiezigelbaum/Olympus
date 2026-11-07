@@ -276,7 +276,7 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
 
   function applyWriteCapability(): void {
     root.querySelectorAll<HTMLFormElement>(
-      'form[data-connect-kind],form[data-model-check],form[data-first-run-privacy],form[data-computer-use],form[data-judge-choice],form[data-model-choice],form[data-local-models-discover],form[data-local-models-test],form[data-agent-kind]',
+      'form[data-connect-kind],form[data-model-check],form[data-first-run-privacy],form[data-computer-use],form[data-judge-choice],form[data-model-choice],form[data-source-action],form[data-local-models-discover],form[data-local-models-test],form[data-agent-kind]',
     ).forEach((form) => {
       // A form whose request is still outstanding keeps its submit controls
       // disabled, so a second click cannot issue a second transport call,
@@ -348,6 +348,9 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
       case 'connect_api_key': return 'Key accepted. This card updates when Olympus confirms the connection.';
       case 'start_oauth': return 'Waiting for authorization. This card updates when the connection completes.';
       case 'connect_this_computer': return 'Connected. Choose the folders Olympus may read.';
+      case 'sync_now': return 'Checking now. The row updates when it finishes.';
+      case 'disconnect_source': return 'Disconnected.';
+      case 'delete_source_data': return 'Deleted what Olympus indexed from this source.';
       default: return 'Saved.';
     }
   }
@@ -489,6 +492,12 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
       const model = (body.model ?? '').trim();
       if (!provider || model === '') { say(form, 'Choose a model.'); return undefined; }
       return { action: 'save_model_choice', provider, model };
+    }
+    if (form.hasAttribute('data-source-action')) {
+      const kind = form.dataset.sourceAction;
+      if (kind === 'sync_now' && body.source) return { action: 'sync_now', source: body.source };
+      if ((kind === 'disconnect_source' || kind === 'delete_source_data') && body.source_id) return { action: kind, source_id: body.source_id, acknowledge: true };
+      return undefined;
     }
     if (form.hasAttribute('data-computer-use')) return { action: 'set_computer_use', choice: (form.hasAttribute('data-server-mode') ? body.server === 'on' : body.choice === 'server') ? 'server' : 'everyday' };
     if (form.hasAttribute('data-first-run-privacy')) return { action: 'save_first_run_privacy', choice: body.choice ?? '' };
@@ -689,7 +698,7 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
       firstRunResult('Saved. Check readiness after Olympus applies the change.');
     }
     const statusMessage = result.body.status_message;
-    if (params.action === 'save_model_choice' || params.action === 'save_local_answer_model') {
+    if (params.action === 'save_model_choice' || params.action === 'save_local_answer_model' || params.action === 'disconnect_source' || params.action === 'delete_source_data') {
       form.closest<HTMLDialogElement>('dialog[open]')?.close();
     }
     if (params.action === 'save_judge') {
@@ -1412,7 +1421,7 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
       return;
     }
     if (!form.matches(
-      '[data-connect-kind],[data-model-check],[data-first-run-privacy],[data-computer-use],[data-judge-choice],[data-model-choice],[data-local-models-discover],[data-local-models-test]',
+      '[data-connect-kind],[data-model-check],[data-first-run-privacy],[data-computer-use],[data-judge-choice],[data-model-choice],[data-source-action],[data-local-models-discover],[data-local-models-test]',
     )) return;
     event.preventDefault();
     // Every control form records what it submitted: the answer may only
@@ -1729,6 +1738,12 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
     const sourceId = Object.prototype.hasOwnProperty.call(sources, wanted) ? sources[wanted] : undefined;
     if (sourceId) {
       const row = queryAll<HTMLElement>('[data-source-id]').find((candidate) => candidate.dataset.sourceId === sourceId);
+      // On Sources a source's setup sits in Add a source: open it there first.
+      const addSheet = row?.closest<HTMLDialogElement>('dialog[data-add-source]');
+      if (row && addSheet && typeof addSheet.showModal === 'function') {
+        showSourceSetup(addSheet, row.closest<HTMLElement>('[data-source-setup]')?.dataset.sourceSetup);
+        if (!addSheet.open) addSheet.showModal();
+      }
       if (row) {
         const toggle = row.querySelector<HTMLElement>('[data-sheet-toggle]');
         const selector = toggle ? toggle.dataset.sheetToggle || '' : '';
@@ -1848,6 +1863,44 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
       label.append(radio, ' ', name); slot.append(label);
     }
   };
+  // Sources: [data-dialog-open="id"] opens a dialog (confirmations, Add a
+  // source); in Add a source a tile shows that source's setup, Back the
+  // catalog again, and the search box filters the tiles.
+  function showSourceSetup(sheet: HTMLElement, sourceId: string | undefined): void {
+    const grid = sheet.querySelector<HTMLElement>('[data-source-catalog]');
+    sheet.querySelectorAll<HTMLElement>('[data-source-setup]').forEach((panel) => { panel.hidden = panel.dataset.sourceSetup !== sourceId; });
+    if (grid) grid.hidden = sourceId !== undefined;
+  }
+  const onSourcesClick = (event: Event): void => {
+    const target = event.target instanceof Element ? event.target : null;
+    const opener = target?.closest<HTMLElement>('[data-dialog-open]');
+    if (opener) {
+      const id = opener.dataset.dialogOpen ?? '';
+      const dialog = /^[A-Za-z0-9_-]+$/.test(id) ? root.querySelector<HTMLDialogElement>(`dialog[id="${id}"]`) : null;
+      if (!dialog || typeof dialog.showModal !== 'function') return;
+      if (dialog.matches('[data-add-source]')) showSourceSetup(dialog, opener.dataset.sourceOpen);
+      if (!dialog.open) dialog.showModal();
+      return;
+    }
+    const pick = target?.closest<HTMLElement>('[data-source-pick]');
+    const sheet = pick?.closest<HTMLElement>('[data-add-source]');
+    if (pick && sheet) { showSourceSetup(sheet, pick.dataset.sourcePick); return; }
+    const back = target?.closest<HTMLElement>('[data-source-back]')?.closest<HTMLElement>('[data-add-source]');
+    if (back) { showSourceSetup(back, undefined); return; }
+    if (target instanceof HTMLDialogElement && target.matches('[data-closable]')) {
+      const box = target.getBoundingClientRect(); const at = event as MouseEvent;
+      if (box.width > 0 && (at.clientX < box.left || at.clientX > box.right || at.clientY < box.top || at.clientY > box.bottom)) target.close();
+    }
+  };
+  const onSourceSearch = (event: Event): void => {
+    const input = event.target instanceof HTMLInputElement && event.target.matches('[data-source-search]') ? event.target : null;
+    const sheet = input?.closest<HTMLElement>('[data-add-source]');
+    if (!input || !sheet) return;
+    const words = input.value.trim().toLowerCase();
+    sheet.querySelectorAll<HTMLElement>('[data-source-pick]').forEach((tile) => { tile.hidden = words !== '' && !(tile.textContent ?? '').toLowerCase().includes(words); });
+  };
+  root.addEventListener('click', onSourcesClick);
+  root.addEventListener('input', onSourceSearch);
   root.addEventListener('click', onAddModelClick);
   root.addEventListener('submit', onSubmit);
   root.addEventListener('click', onClick);
@@ -1891,6 +1944,8 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
     view.removeEventListener('focus', refreshOnReturn);
     root.ownerDocument.removeEventListener('visibilitychange', onVisibilityReturn);
     root.removeEventListener('click', onAddModelClick);
+    root.removeEventListener('click', onSourcesClick);
+    root.removeEventListener('input', onSourceSearch);
     root.removeEventListener('submit', onSubmit);
     root.removeEventListener('click', onClick);
     root.removeEventListener('change', onJudgePick);
