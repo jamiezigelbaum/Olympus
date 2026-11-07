@@ -361,7 +361,7 @@ function evidenceOf(structured: unknown): Array<{ id: string; title: string; sou
   return evidence.filter((item) => item.title).map((item) => ({ id: item.id ?? '', title: item.title ?? '', source: item.source ?? '' }));
 }
 
-async function bundleAgent(workDir: string): Promise<string> {
+export async function bundleAgent(workDir: string): Promise<string> {
   const outdir = join(workDir, 'bundle');
   try {
     const built = await Bun.build({

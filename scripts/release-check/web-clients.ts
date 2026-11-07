@@ -92,6 +92,8 @@ export interface PageState {
   /** A Stop control is showing: the reply is still being written. */
   busy: boolean;
   text: string;
+  /** Grok only: an explicitly identified assistant message in the current conversation. */
+  assistantTurn?: string;
 }
 
 export type Inconclusive = { inconclusive: string };
@@ -116,7 +118,7 @@ export const turnContains = (turn: string, needle: string): boolean => fold(turn
 export function turnText(pageText: string, prompt: string): string {
   const head = prompt.trim().slice(0, 60);
   const at = pageText.indexOf(head);
-  if (at === -1) return pageText;
+  if (!head || at === -1) return '';
   const after = pageText.slice(at + head.length);
   const rest = prompt.trim().slice(60);
   return rest && after.startsWith(rest) ? after.slice(rest.length) : after;
@@ -190,8 +192,7 @@ export function evaluateTurn(client: WebClientId, q: ClientQuestion, obs: TurnOb
     checks.push({ id: `${prefix}.${id}`, title: `${label}: ${q.id}: ${title}`, status: ok ? 'pass' : 'fail', detail, ms: obs.ms });
   };
   if (turn.length === 0) {
-    add('answered', 'the app answered', false, 'no reply appeared after the question');
-    return checks;
+    return [{ id: prefix, title: `${label}: ${q.id}`, status: 'skip', detail: `Inconclusive: ${label}'s current assistant turn could not be captured` }];
   }
   // ChatGPT's private panel shows the Private answer on purpose (its model never receives it), so only the turn is searched.
   const leaked = forbid.map((value, index) => ({ index, hit: value !== '' && turnContains(turn, value) })).filter((row) => row.hit);
@@ -319,27 +320,66 @@ async function readConnectionUses(machine: Machine): Promise<Map<string, { name:
  * The machine's own Inbox, opened in the canary browser the way the owner opens it: a one-time link for the Private answers
  * page, then Unlock. Returns why not when it cannot be read.
  */
-async function openMacInbox(machine: Machine, browser: BrowserSession, t: AskTimings): Promise<Tab | string> {
+export async function openMacInbox(machine: Machine, browser: BrowserSession, t: AskTimings): Promise<Tab | string> {
   const minted = await machine.exec('"$HOME/.local/bin/olympus" dashboard --no-open --target private', { timeoutMs: 60_000 }).catch((error: unknown) => ({ code: 1, stdout: '', stderr: error instanceof Error ? error.message : String(error) }));
   const url = /https?:\/\/[^\s"]+/.exec(minted.stdout + minted.stderr)?.[0];
   if (!url) return `olympus dashboard --no-open --target private printed no opening link (exit ${minted.code})`;
   const tab = await openTab(browser);
-  const until = async (expression: string): Promise<boolean> => {
-    const deadline = Date.now() + t.loadMs;
-    for (;;) {
-      // The page reloads itself on Unlock: a read mid-reload is just not there yet.
-      if (await tab.evaluate<boolean>(expression).catch(() => false)) return true;
-      if (Date.now() >= deadline) return false;
-      await t.sleep(t.pollMs);
+  let stopBridge: (() => Promise<void>) | undefined;
+  const closeTab = tab.close;
+  tab.close = async () => {
+    try { await closeTab(); } finally {
+      const stop = stopBridge;
+      stopBridge = undefined;
+      await stop?.();
     }
   };
-  await tab.goto(url);
-  if (!await until(`!!document.querySelector('[data-private-answers]')`)) { await tab.close(); return 'the Private answers page did not open from its link'; }
-  if (await tab.evaluate<boolean>(PAGE_UNLOCK_OFFERED).catch(() => false)) {
-    await tab.evaluate<boolean>(`(() => { document.querySelector('[data-private-answers] form[data-pa-unlock] button').click(); return true; })()`).catch(() => false);
-  }
-  if (!await until(PAGE_UNLOCKED)) { await tab.close(); return 'the Private answers page did not unlock'; }
-  return tab;
+  try {
+    if (machine.os === 'linux') stopBridge = await startOwnerBridge(machine, Number(new URL(url).port || 80));
+    const until = async (expression: string): Promise<boolean> => {
+      const deadline = Date.now() + t.loadMs;
+      for (;;) {
+        // The page reloads itself on Unlock: a read mid-reload is just not there yet.
+        if (await tab.evaluate<boolean>(expression).catch(() => false)) return true;
+        if (Date.now() >= deadline) return false;
+        await t.sleep(t.pollMs);
+      }
+    };
+    await tab.goto(url);
+    if (!await until(`!!document.querySelector('[data-private-answers]')`)) { await tab.close(); return 'the Private answers page did not open from its link'; }
+    if (await tab.evaluate<boolean>(PAGE_UNLOCK_OFFERED).catch(() => false)) {
+      await tab.evaluate<boolean>(`(() => { document.querySelector('[data-private-answers] form[data-pa-unlock] button').click(); return true; })()`).catch(() => false);
+    }
+    if (!await until(PAGE_UNLOCKED)) { await tab.close(); return 'the Private answers page did not unlock'; }
+    return tab;
+  } catch (error) { await tab.close(); throw error; }
+}
+
+/** Reuse a desktop listener, or run machine-agent's owner-socket forward until the browser closes. */
+export async function startOwnerBridge(machine: Machine, port: number, pidFile?: string): Promise<() => Promise<void>> {
+  if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('invalid owner bridge port');
+  const result = await machine.exec(`set -euo pipefail
+if (echo > /dev/tcp/127.0.0.1/${port}) 2>/dev/null; then echo 'owner-bridge existing'; exit 0; fi
+BUN=$(command -v bun 2>/dev/null || ls -d ~/.local/share/olympus-engine/generations/*/runtime/bun 2>/dev/null | tail -1)
+[ -n "$BUN" ] || exit 90
+log=$(mktemp "$HOME/rc/web-bridge.XXXXXX") || exit 1
+nohup "$BUN" --no-env-file ~/rc/agent.js owner-bridge --port ${port} >"$log" 2>&1 < /dev/null &
+pid=$!
+${pidFile ? `printf '%s\\n' "$pid" > ${shellQuote(pidFile)}` : ''}
+for i in $(seq 1 100); do
+  if grep -q '^owner-bridge ready$' "$log"; then printf '%s\\n%s\\n' "$pid" "$log"; exit 0; fi
+  kill -0 "$pid" 2>/dev/null || break
+  sleep 0.1
+done
+kill "$pid" 2>/dev/null || true
+cat "$log" >&2
+rm -f "$log"
+${pidFile ? `rm -f ${shellQuote(pidFile)}` : ''}
+exit 1`, { timeoutMs: 20_000 });
+  if (result.code === 0 && result.stdout.trim() === 'owner-bridge existing') return async () => {};
+  const [pid, log] = result.stdout.trim().split('\n');
+  if (result.code !== 0 || !pid || !/^\d+$/.test(pid) || !log) throw new Error('the Private answers owner-socket bridge did not start');
+  return async () => { await machine.exec(`kill ${pid} 2>/dev/null || true\nrm -f ${shellQuote(log)}${pidFile ? ` ${shellQuote(pidFile)}` : ''}`, { timeoutMs: 10_000 }); };
 }
 
 async function macInboxRows(inbox: Tab | string): Promise<Record<string, string> | string> {
@@ -372,13 +412,13 @@ export const isInconclusive = (check: CheckResult): boolean => check.status === 
 // ---------------------------------------------------------------------------
 // The DevTools connection: one browser socket, sessions flattened onto it
 
-interface BrowserSession {
+export interface BrowserSession {
   send(method: string, params?: Record<string, unknown>, sessionId?: string): Promise<any>;
   on(method: string, handler: (params: any, sessionId?: string) => void): void;
   close(): void;
 }
 
-async function connectBrowser(wsUrl: string): Promise<BrowserSession> {
+export async function connectBrowser(wsUrl: string): Promise<BrowserSession> {
   const ws = new WebSocket(wsUrl);
   await new Promise<void>((resolve, reject) => { ws.onopen = () => resolve(); ws.onerror = () => reject(new Error('the canary browser refused the debugging connection')); });
   let nextId = 1;
@@ -408,12 +448,22 @@ async function connectBrowser(wsUrl: string): Promise<BrowserSession> {
 }
 
 /** What the page shows, read in the page. Visible elements only: apps keep hidden copies of their controls. */
-export const PAGE_STATE_SCRIPT = (composers: readonly string[]): string => `(() => {
+export const PAGE_STATE_SCRIPT = (composers: readonly string[], client?: WebClientId, prompt = ''): string => `(() => {
   const visible = (el) => { const r = el.getBoundingClientRect(); const s = getComputedStyle(el); return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none'; };
   const controls = [...document.querySelectorAll('button, a, [role="button"]')].filter(visible);
   const named = (el) => (el.getAttribute('aria-label') || el.innerText || '').trim();
   const composer = ${JSON.stringify(composers)}.map((sel) => [...document.querySelectorAll(sel)].find(visible)).find(Boolean);
-  const text = (document.querySelector('main') || document.body)?.innerText || '';
+  const grok = ${JSON.stringify(client === 'grok')};
+  const text = grok ? '' : (document.querySelector('main') || document.body)?.innerText || '';
+  // Fail closed when Grok changes its markup. Neither main nor body identifies a conversation.
+  const conversation = grok ? [...document.querySelectorAll('[role="log"], [aria-label="Conversation"], [data-testid="conversation"]')].find((el) => visible(el) && !el.closest('nav, aside, [role="navigation"]')) : null;
+  const messages = conversation ? [...conversation.querySelectorAll('[data-message-author-role], [data-testid="user-message"], [data-testid="assistant-message"]')].filter(visible) : [];
+  const isUser = (el) => el.getAttribute('data-message-author-role') === 'user' || el.getAttribute('data-testid') === 'user-message';
+  const isAssistant = (el) => el.getAttribute('data-message-author-role') === 'assistant' || el.getAttribute('data-testid') === 'assistant-message';
+  const userAt = messages.findLastIndex((el) => isUser(el));
+  const current = userAt >= 0 && (messages[userAt].innerText || '').trim() === ${JSON.stringify(prompt.trim())};
+  const assistant = current ? messages.slice(userAt + 1).filter(isAssistant).map((el) => el.innerText || '').join('\\n') : '';
+  const replyControls = grok ? (conversation ? [...conversation.querySelectorAll('button, a, [role="button"]')].filter(visible) : []) : controls;
   return {
     url: location.href,
     title: document.title,
@@ -421,8 +471,9 @@ export const PAGE_STATE_SCRIPT = (composers: readonly string[]): string => `(() 
     signedOut: /\\/(log-?in|sign-?in|auth)\\b/i.test(location.pathname) || controls.some((el) => /^(log ?in|sign ?in)$/i.test(named(el))),
     composer: !!composer,
     composerText: composer ? (composer.value ?? composer.innerText ?? '') : '',
-    busy: controls.some((el) => /^stop\\b/i.test(named(el)) || /stop-button/.test(el.getAttribute('data-testid') || '')),
-    text,
+    busy: replyControls.some((el) => /^stop\\b/i.test(named(el)) || /stop-button/.test(el.getAttribute('data-testid') || '')),
+    text: grok ? '' : text,
+    ...(grok ? { assistantTurn: assistant } : {}),
   };
 })()`;
 
@@ -527,7 +578,7 @@ export const DEFAULT_TIMINGS: AskTimings = {
 };
 
 async function waitForPage(tab: Tab, client: WebClientId, t: AskTimings): Promise<PageState> {
-  const script = PAGE_STATE_SCRIPT(CLIENT_ADAPTERS[client].composer);
+  const script = PAGE_STATE_SCRIPT(CLIENT_ADAPTERS[client].composer, client);
   const deadline = Date.now() + t.loadMs;
   let state: PageState;
   for (;;) {
@@ -549,7 +600,8 @@ export async function askQuestion(tab: Tab, client: WebClientId, q: ClientQuesti
   await tab.type(q.prompt);
   await tab.enter();
   const started = Date.now();
-  const script = PAGE_STATE_SCRIPT(adapter.composer);
+  const script = PAGE_STATE_SCRIPT(adapter.composer, client, q.prompt);
+  const capturedTurn = (state: PageState): string => client === 'grok' ? state.assistantTurn ?? '' : turnText(state.text, q.prompt);
   let last = '';
   let stableSince = Date.now();
   let sendRetried = false;
@@ -559,7 +611,7 @@ export async function askQuestion(tab: Tab, client: WebClientId, q: ClientQuesti
     await tab.evaluate<boolean>(ALLOW_SCRIPT).catch(() => false);
     const state = await tab.evaluate<PageState>(script);
     if (state.challenge || state.signedOut) return { inconclusive: blockedReason(client, state)! };
-    const turn = turnText(state.text, q.prompt);
+    const turn = capturedTurn(state);
     // Some apps keep the text in the box when Enter only adds a line; their send button sends it.
     if (!sendRetried && Date.now() - started >= 2 * t.pollMs && state.composerText.includes(q.prompt.trim().slice(0, 40))) {
       sendRetried = true;
@@ -585,8 +637,8 @@ export async function askQuestion(tab: Tab, client: WebClientId, q: ClientQuesti
   }
   // The turn is read again: a panel that arrived late can come with more reply text.
   const final = await tab.evaluate<PageState>(script);
-  const turn = turnText(final.text, q.prompt);
-  // A reply that was empty at the deadline is judged as no reply; one cut off mid-way is unfinished.
+  const turn = capturedTurn(final);
+  if (!turn.trim()) return { inconclusive: `${adapter.label}'s current assistant turn could not be captured; check the conversation selectors on the machine` };
   return { turn, frames, ms, ...(!settled && turn.trim().length > 0 ? { unfinished: true } : {}) };
 }
 
@@ -601,6 +653,8 @@ export interface WebClientsOptions {
   newChatUrls?: Partial<Record<WebClientId, string>>;
   /** The least time between questions, so each one's connection use shows (CONNECTION_USE_GAP_MS when left out). */
   useGapMs?: number;
+  /** Linux: the machine-agent bundle (run.ts bundleAgent) put at ~/rc/agent.js, which the owner-socket forward runs. */
+  bridgeAgent?: string;
 }
 
 const shellQuote = (value: string): string => `'${value.replace(/'/g, `'\\''`)}'`;
@@ -636,12 +690,19 @@ export async function runWebClients(machine: Machine, options: WebClientsOptions
     return { checks, screens };
   };
   if (!machine.tunnel) return stop('the driver has no tunnel verb, so the browser on the machine cannot be reached');
+  if (options.os === 'linux' && options.bridgeAgent) {
+    // The forward runs this run's agent, never whatever an earlier release check left on the machine.
+    try {
+      await machine.exec('mkdir -p "$HOME/rc"', { timeoutMs: 20_000 });
+      await machine.put(options.bridgeAgent, '~/rc/agent.js');
+    } catch (error) { return stop(`the owner-bridge agent could not be put on the machine: ${error instanceof Error ? error.message : String(error)}`); }
+  }
   const launched = await machine.exec(startBrowserScript(options.os, port), { timeoutMs: 90_000 });
   if (launched.code !== 0) return stop((launched.stdout + launched.stderr).trim().slice(-300) || `the browser did not start (exit ${launched.code})`);
   let tunnel;
   try { tunnel = await machine.tunnel(port); } catch (error) { return stop(error instanceof Error ? error.message : String(error)); }
   let browser: BrowserSession | undefined;
-  // The machine's Inbox, opened for the first Secret question.
+  // Keep a successfully opened Inbox (and its bridge) for the run.
   let macInbox: Tab | string | undefined;
   try {
     const version = await (await fetch(`http://127.0.0.1:${tunnel.port}/json/version`)).json() as { webSocketDebuggerUrl?: string };
@@ -657,6 +718,8 @@ export async function runWebClients(machine: Machine, options: WebClientsOptions
     // A use in the last minute before the first question would hide that question's own.
     let lastAsked = Date.now();
     for (const client of options.clients) {
+      // A failed opening belongs to this client; the next client gets its own attempt.
+      if (typeof macInbox === 'string') macInbox = undefined;
       const tab = await openTab(browser);
       try {
         for (const q of options.questions.filter((question) => !question.clients || question.clients.includes(client))) {
@@ -686,9 +749,10 @@ export async function runWebClients(machine: Machine, options: WebClientsOptions
   } catch (error) {
     checks.push({ id: 'web.driver', title: 'Driving the web clients', status: 'skip', detail: `Inconclusive: ${error instanceof Error ? error.message : String(error)}` });
   } finally {
-    if (macInbox && typeof macInbox !== 'string') await macInbox.close();
-    browser?.close();
-    tunnel.close();
+    try { if (macInbox && typeof macInbox !== 'string') await macInbox.close(); } finally {
+      browser?.close();
+      tunnel.close();
+    }
   }
   return { checks, screens };
 }

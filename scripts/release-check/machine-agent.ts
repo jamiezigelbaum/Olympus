@@ -17,6 +17,7 @@
  * worker listens on an owner-only Unix socket that a bridge forwards to the port
  * a browser expects; on macOS the engine itself listens on that loopback port.
  */
+import { sourceCard, sourceConnected } from './source-cards.ts';
 import { olympusDataRoot } from '../../src/core/olympus-layout.ts';
 import { resolvedStorePath } from '../../src/core/source-placement.ts';
 import { isPendingPrivacyPolicy } from '../../src/core/first-run-privacy.ts';
@@ -1267,7 +1268,7 @@ async function cardOf(provider: string): Promise<any> {
   for (let attempt = 0; attempt < 30; attempt += 1) {
     try {
       const dash = await dashboardJson();
-      return (dash.json?.sources ?? []).find((card: any) => card.provider === provider);
+      return sourceCard(dash.json, provider);
     } catch (error) { last = error; await sleep(3_000); }
   }
   throw last;
@@ -1313,7 +1314,7 @@ function exploreSeeds(config: AgentConfig): Seed[] {
 /** Readwise's seeded states: the stand-in API, with the stored key accepted, rejected, or the source disconnected or emptied. */
 function readwiseSeeds(config: AgentConfig): Seed[] {
   // The card's connection reads `synced` once the source has been read; not connected, needs setup, awaiting consent and reauth are the others.
-  const connected = (card: any): boolean => !!card && !['not_connected', 'needs_setup', 'awaiting_consent', 'reauth_required'].includes(String(card.connection?.state ?? 'not_connected'));
+  const connected = sourceConnected;
   const connect = async (): Promise<void> => {
     const session = await ownerSession();
     await startFakeWith(config, config.fakeToken);
@@ -1985,6 +1986,13 @@ async function main(): Promise<void> {
     return value;
   };
   switch (command) {
+    case 'owner-bridge': {
+      const stop = startBridge(Number(flag('--port')));
+      process.once('SIGTERM', () => { stop(); process.exit(0); });
+      console.log('owner-bridge ready');
+      await new Promise(() => undefined);
+      return;
+    }
     case 'fake-readwise': {
       const config = existsSync(CONFIG_PATH) ? readConfig() : undefined;
       startFakeReadwise({

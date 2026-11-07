@@ -24,9 +24,16 @@
  * desktop; `--accounts-only` leaves out the update and the desktop checks. `--web-sign-in` only opens the canary browser on
  * the machine at each web app, for a person to sign the test accounts in and connect Olympus (over Screen Sharing).
  *
+ * Fresh-user mode: --fresh-install --accounts <file> [--candidate <tgz>] [--cdp <host:port>].
+ * See fresh-install.md for scope fixtures and machine restoration.
+ *
  * Writes <out>/<run id>/report.json, report.html and screens/. Exit status: 0 pass, 1 fail, 2 could not start, 3 inconclusive
  * (nothing failed, but a sign-in to renew or a bot check kept a check from being made; the report lists what to renew).
  */
+import { prepareLinuxLocalBundle } from '../publish-release-to-site.ts';
+import { FRESH_LEG, runFreshInstall, validateFreshSources } from './fresh-install.ts';
+import { parseCdpEndpoint } from './fresh-dashboard.ts';
+import { bundleAgent } from './run.ts';
 import { randomBytes } from 'node:crypto';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
@@ -43,6 +50,7 @@ export interface CanaryScreen { label: string; path: string }
 
 export interface CanaryReport {
   schema: 'olympus.release-check.canary.v1';
+  leg?: string;
   runId: string;
   machine: { handle: string; os: CanaryOs };
   candidate: { label: string; sha?: string; version?: string; source: 'candidate' | 'published' | 'installed' };
@@ -67,6 +75,8 @@ export interface CanaryOptions {
   accounts?: CanaryAccounts;
   /** Leave out the update and the desktop checks: only the accounts and web clients. */
   accountsOnly?: boolean;
+  /** Linux web clients: the machine-agent bundle for the owner-socket forward (web-clients.ts). */
+  bridgeAgent?: string;
   /** Poll timing; tests shorten it. */
   pollMs?: number;
   windowTimeoutMs?: number;
@@ -185,7 +195,7 @@ export async function runCanary(machine: Machine, options: CanaryOptions): Promi
     }
   }
   if (accounts.clients.length > 0) {
-    const web = await runWebClients(machine, { clients: accounts.clients, questions: accounts.questions, os: options.os, screensDir: options.screensDir });
+    const web = await runWebClients(machine, { clients: accounts.clients, questions: accounts.questions, os: options.os, screensDir: options.screensDir, ...(options.bridgeAgent ? { bridgeAgent: options.bridgeAgent } : {}) });
     checks.push(...web.checks);
     screens.push(...web.screens);
   }
@@ -401,7 +411,12 @@ ${pictures}
 if (import.meta.main) {
   const argv = process.argv.slice(2);
   const option = (name: string): string | undefined => { const at = argv.indexOf(name); return at >= 0 ? argv[at + 1] : undefined; };
-  const usage = 'usage: bun scripts/release-check/canary.ts --config <file> --machine <handle> --os linux|macos --out <reports dir> [--candidate <bundle dir> | --published <site base URL>] [--accounts <file> [--accounts-only]] [--label <text>] [--sha <commit>] [--harness-commit <commit>]\n       bun scripts/release-check/canary.ts --config <file> --machine <handle> --os linux|macos --accounts <file> --web-sign-in';
+  const usage = 'usage: bun scripts/release-check/canary.ts --config <file> --machine <handle> --os linux|macos --out <reports dir> [--candidate <bundle dir> | --published <site base URL>] [--accounts <file> [--accounts-only | --fresh-install [--cdp <host:port>]]] [--label <text>] [--sha <commit>] [--harness-commit <commit>]\n       bun scripts/release-check/canary.ts --config <file> --machine <handle> --os linux|macos --accounts <file> --web-sign-in\n       fresh mode: --fresh-install --accounts <file> [--candidate <tgz>] [--cdp <host:port>] (same --config, --machine, --os and --out)';
+  const freshInstall = argv.includes('--fresh-install');
+  const cdp = option('--cdp') ?? '127.0.0.1:9333';
+  if (freshInstall) {
+    try { parseCdpEndpoint(cdp); } catch { console.error('--cdp must be host:port'); process.exit(2); }
+  }
   const configPath = option('--config');
   const handle = option('--machine');
   const os = option('--os');
@@ -432,6 +447,10 @@ if (import.meta.main) {
     console.error(usage);
     process.exit(2);
   }
+  if (freshInstall) {
+    if (!accounts || os !== 'linux' || published || argv.includes('--accounts-only') || argv.includes('--web-sign-in')) { console.error('--fresh-install requires Linux and --accounts, and cannot combine with other modes'); process.exit(2); }
+    try { validateFreshSources(accounts.sources); } catch (error) { console.error(error instanceof Error ? error.message : 'invalid fresh accounts'); process.exit(2); }
+  }
   if (argv.includes('--web-sign-in')) {
     // A person signs each app in and connects Olympus there, in the canary's own browser on the machine (Screen Sharing).
     const signInDriver = new CommandDriver({ argv: config.driver, onLog: (line) => console.error(`driver: ${line}`) });
@@ -441,7 +460,7 @@ if (import.meta.main) {
   }
   let expectVersion: string | undefined;
   // The bundle's installer has the site's name for the platform (publish-release-to-site.ts --linux-local / --mac-local).
-  if (candidate) expectVersion = pinnedVersion(readFileSync(join(candidate, SITE_INSTALLER[os]), 'utf8'));
+  if (candidate && !freshInstall) expectVersion = pinnedVersion(readFileSync(join(candidate, SITE_INSTALLER[os]), 'utf8'));
   if (published) {
     const response = await fetch(`${published.replace(/\/$/, '')}/${SITE_INSTALLER[os]}`);
     expectVersion = response.ok ? pinnedVersion(await response.text()) : undefined;
@@ -452,21 +471,28 @@ if (import.meta.main) {
   const driver = new CommandDriver({ argv: config.driver, onLog: (line) => console.error(`driver: ${line}`) });
   const machine = driver.machineFor({ handle, label: handle, os, driver: 'driver' });
   const startedAt = new Date().toISOString();
-  const { checks, screens } = await runCanary(machine, {
+  const bundle = freshInstall && candidate ? prepareLinuxLocalBundle({ root: resolve(import.meta.dir, '../..'), artifact: resolve(candidate), output: join(runDir, 'candidate') }) : undefined;
+  if (bundle) expectVersion = bundle.version;
+  const { checks, screens } = freshInstall ? await runFreshInstall(machine, {
+    sources: accounts!.sources, cdp,
+    bridgeAgent: await bundleAgent(runDir),
+    ...(bundle ? { bundle: { installer: join(bundle.directory, 'install-linux.sh'), tarball: join(bundle.directory, `olympus-${bundle.version}.tgz`) } } : {}),
+  }) : await runCanary(machine, {
     os,
     update: candidate ? { kind: 'candidate', dir: resolve(candidate) } : published ? { kind: 'published', site: published } : { kind: 'installed' },
     ...(expectVersion ? { expectVersion } : {}),
     ...(accounts ? { accounts } : {}),
     accountsOnly: argv.includes('--accounts-only'),
     screensDir: join(runDir, 'screens'),
+    ...(os === 'linux' && accounts && accounts.clients.length > 0 ? { bridgeAgent: await bundleAgent(runDir) } : {}),
   });
   const counts: Record<CheckStatus, number> = { pass: 0, fail: 0, warn: 0, skip: 0 };
   for (const check of checks) counts[check.status] += 1;
   const sha = option('--sha');
   const harnessCommit = option('--harness-commit');
   const report: CanaryReport = {
-    schema: 'olympus.release-check.canary.v1', runId, machine: { handle, os },
-    candidate: { label: option('--label') ?? (candidate ? 'local build' : published ? published : 'installed'), ...(sha ? { sha } : {}), ...(expectVersion ? { version: expectVersion } : {}), source: candidate ? 'candidate' : published ? 'published' : 'installed' },
+    schema: 'olympus.release-check.canary.v1', ...(freshInstall ? { leg: FRESH_LEG } : {}), runId, machine: { handle, os },
+    candidate: { label: option('--label') ?? (candidate ? 'local build' : published ? published : freshInstall ? 'published fresh install' : 'installed'), ...(sha ? { sha } : {}), ...(expectVersion ? { version: expectVersion } : {}), source: candidate ? 'candidate' : published || freshInstall ? 'published' : 'installed' },
     ...(harnessCommit ? { harnessCommit } : {}),
     startedAt, finishedAt: new Date().toISOString(), verdict: canaryVerdict(checks), counts, checks, screens,
   };

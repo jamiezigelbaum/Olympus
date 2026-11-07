@@ -1,0 +1,257 @@
+/** CDP UI driver for the real, already signed-in canary Chromium. Never fills authentication fields. */
+import { sourceCard, sourceConnected } from './source-cards.ts';
+import type { Machine, Tunnel } from './machine.ts';
+import { connectBrowser, startOwnerBridge, type BrowserSession } from './web-clients.ts';
+import type { LiveSourceSpec } from './live-accounts.ts';
+import { consentBlock, FRESH_BRIDGE_PID, FreshInconclusive, type ConsentSnapshot } from './fresh-install.ts';
+import { PRIVATE_ANSWER_OPTIONS } from '../../src/core/privacy-language.ts';
+
+export interface FreshDashboard {
+  privacyChoice(): Promise<string>;
+  connect(source: LiveSourceSpec): Promise<void>;
+  consent(source: LiveSourceSpec): Promise<void>;
+  callback(source: LiveSourceSpec): Promise<void>;
+  scope(source: LiveSourceSpec): Promise<void>;
+  indexed(source: LiveSourceSpec): Promise<number>;
+  close(): Promise<void>;
+}
+const sleep = (ms: number) => new Promise<void>(r => setTimeout(r, ms));
+const visible = `e => { const r=e.getBoundingClientRect(); return r.width>0 && r.height>0 && getComputedStyle(e).visibility!=='hidden'; }`;
+
+export function parseCdpEndpoint(endpoint: string): { host: string; port: number } {
+  const match = /^([a-zA-Z0-9.-]+):(\d+)$/.exec(endpoint);
+  if (!match || Number(match[2]) < 1 || Number(match[2]) > 65535) throw new Error('--cdp must be host:port');
+  return { host: match[1]!, port: Number(match[2]) };
+}
+
+export async function openFreshDashboard(machine: Machine, endpoint: string, timings: { timeoutMs?: number; pollMs?: number } = {}): Promise<FreshDashboard> {
+  const { host, port } = parseCdpEndpoint(endpoint);
+  let tunnel: Tunnel | undefined;
+  let browser: BrowserSession | undefined;
+  let stopBridge: (() => Promise<void>) | undefined;
+  const owned = new Set<string>();
+  const sessions = new Map<string, string>();
+  const contexts = new Map<string, Set<number>>();
+  let dash = '';
+  const frameSessions = new Set<string>();
+  const baseline = new Set<string>();
+  const callbacks = new Set<string>();
+  const navigated = new Map<string, string>();
+  let windowOffered = false;
+  const observeCallback = (url: string) => {
+    const m = /^http:\/\/(?:127\.0\.0\.1|localhost):8010\/oauth\/callback\/([a-z-]+)\/done(?:[?#]|$)/.exec(url);
+    if (m) callbacks.add(m[1]!);
+  };
+  const cleanup = async () => {
+    if (browser) for (const id of owned) await browser.send('Target.closeTarget', { targetId: id }).catch(() => {});
+    browser?.close(); tunnel?.close();
+    const stop = stopBridge; stopBridge = undefined;
+    await stop?.();
+  };
+  try {
+    // ssh-driver forwards remote loopback. A non-loopback endpoint is directly reachable from this runner.
+    if (host === '127.0.0.1' || host === 'localhost') {
+      if (!machine.tunnel) throw new Error('driver needs a CDP tunnel');
+      tunnel = await machine.tunnel(port);
+    }
+    const address = tunnel ? `127.0.0.1:${tunnel.port}` : `${host}:${port}`;
+    let version: { webSocketDebuggerUrl?: string };
+    try { version = await (await fetch(`http://${address}/json/version`, { signal: AbortSignal.timeout(10_000) })).json() as typeof version; }
+    catch { throw new FreshInconclusive('renew Google and Dropbox sign-in in zig’s canary Chromium (CDP unavailable)'); }
+    if (!version.webSocketDebuggerUrl) throw new Error('CDP returned no browser address');
+    browser = await connectBrowser(version.webSocketDebuggerUrl.replace(/^ws:\/\/[^/]+/, `ws://${address}`));
+    const send = browser.send;
+    browser.send = async (...args) => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        return await Promise.race([send(...args), new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error('CDP request timed out')), 30_000); })]);
+      } finally { if (timer) clearTimeout(timer); }
+    };
+    browser.on('Runtime.executionContextCreated', (p, session) => {
+      if (session && p.context.auxData?.isDefault) {
+        const list = contexts.get(session) ?? new Set<number>(); list.add(p.context.id); contexts.set(session, list);
+      }
+    });
+    browser.on('Runtime.executionContextDestroyed', (p, session) => { if (session) contexts.get(session)?.delete(p.executionContextId); });
+    browser.on('Runtime.executionContextsCleared', (_, session) => { if (session) contexts.set(session, new Set()); });
+    browser.on('Page.windowOpen', () => { windowOffered = true; });
+    browser.on('Page.frameNavigated', (p, sid) => { observeCallback(p.frame.url); if (sid && !p.frame.parentId) navigated.set(sid, p.frame.loaderId); });
+    browser.on('Target.attachedToTarget', (p, parent) => {
+      if (parent && (sessions.get(dash) === parent || frameSessions.has(parent))) {
+        frameSessions.add(p.sessionId);
+        void browser!.send('Runtime.enable', {}, p.sessionId).catch(() => {});
+        void browser!.send('Runtime.runIfWaitingForDebugger', {}, p.sessionId).catch(() => {});
+      }
+    });
+    const attach = async (id: string): Promise<string> => {
+      if (sessions.has(id)) return sessions.get(id)!;
+      const { sessionId } = await browser!.send('Target.attachToTarget', { targetId: id, flatten: true });
+      sessions.set(id, sessionId);
+      await browser!.send('Runtime.enable', {}, sessionId);
+      await browser!.send('Page.enable', {}, sessionId);
+      await browser!.send('Target.setAutoAttach', { autoAttach: true, waitForDebuggerOnStart: false, flatten: true }, sessionId);
+      return sessionId;
+    };
+    const evalIn = async <T>(session: string, expression: string, contextId?: number): Promise<T> => {
+      const out = await browser!.send('Runtime.evaluate', { expression, userGesture: true, returnByValue: true, awaitPromise: true, ...(contextId ? { contextId } : {}) }, session);
+      if (out.exceptionDetails) throw new Error('dashboard page evaluation failed');
+      return out.result?.value as T;
+    };
+    // Evaluate the visible panel's default world as well as the host. The product intentionally sandboxes its iframe.
+    const panel = async <T>(expression: string, accept: (value: T) => boolean): Promise<T | undefined> => {
+      const session = await attach(dash);
+      for (const sid of [session, ...frameSessions]) for (const id of contexts.get(sid) ?? []) {
+        const value = await evalIn<T>(sid, expression, id).catch(() => undefined);
+        if (value !== undefined && accept(value)) return value;
+      }
+      return undefined;
+    };
+    const until = async (read: () => Promise<boolean>, detail: string, ms = timings.timeoutMs ?? 90_000) => {
+      const deadline = Date.now() + ms;
+      for (;;) {
+        if (await read()) return;
+        if (Date.now() >= deadline) throw new Error(detail);
+        await sleep(timings.pollMs ?? 1000);
+      }
+    };
+    const click = async (expression: string) => {
+      await until(async () => !!await panel<boolean>(`(() => { const e=${expression}; if(!e || e.disabled || !(${visible})(e)) return false; e.click(); return true; })()`, Boolean), 'dashboard control did not appear');
+    };
+    const byKey = (key: string) => `[...document.querySelectorAll('[data-key]')].find(e=>e.getAttribute('data-key')===${JSON.stringify(key)})`;
+    const sourceAction = async (s: LiveSourceSpec, pattern: string) => {
+      const row = `[...document.querySelectorAll('.source')].find(e=>e.querySelector('.source-name')?.textContent?.trim()===${JSON.stringify(s.label)})`;
+      await click(`(()=>{const row=${row}; if(!row)return null; const e=[...row.querySelectorAll('button')].find(e=>/${pattern}/i.test(e.textContent.trim())); const menu=row.querySelector('details');if(e && menu && menu.contains(e) && !menu.open)menu.querySelector('summary').click();return e;})()`);
+    };
+    const folderRow = (name: string) => `(()=>{
+      const row=[...document.querySelectorAll('.frow')].find(e=>e.querySelector('.fname-text')?.textContent===${JSON.stringify(name)});
+      if(!row){ const more=[...document.querySelectorAll('[data-key^="picker:more:"]')].find(e=>!e.disabled&&(${visible})(e));if(more)more.click(); }
+      return row;
+    })()`;
+    const minted = await machine.exec('"$HOME/.local/bin/olympus" dashboard --no-open', { timeoutMs: 60_000 });
+    const url = /http:\/\/(?:127\.0\.0\.1|localhost):8010\/[^\s"<>]*/.exec(minted.stdout)?.[0];
+    if (minted.code !== 0 || !url) throw new Error('CLI dashboard link unavailable');
+    // The browser and OAuth callbacks run on the canary host. CDP alone only forwards browser control.
+    stopBridge = await startOwnerBridge(machine, Number(new URL(url).port), FRESH_BRIDGE_PID);
+    dash = (await browser.send('Target.createTarget', { url: 'about:blank' })).targetId;
+    owned.add(dash);
+    const session = await attach(dash);
+    await browser.send('Page.navigate', { url }, session);
+    await until(async () => !!await panel<boolean>(`!!document.querySelector('.source-name')`, Boolean), 'dashboard did not open from the CLI link');
+    // Persisted cards are the same /dashboard.json source cards machine-agent.ts reads.
+    const card = async (s: LiveSourceSpec): Promise<any> => sourceCard(await evalIn<any>(session, `(async()=>{
+      const u=new URL('/dashboard.json',location.href); const t=new URL(location.href).searchParams.get('token'); if(t)u.searchParams.set('token',t);
+      const r=await fetch(u); if(!r.ok)return null; const j=await r.json(); return j;
+    })()`), s.id);
+    const connected = sourceConnected;
+    const navigate = async (path: string): Promise<boolean> => {
+      frameSessions.clear();
+      const navigation = await browser!.send('Page.navigate', { url: new URL(path, url).href }, session);
+      if (navigation.errorText) return false;
+      await until(async () => navigated.get(session) === navigation.loaderId, 'dashboard navigation did not commit');
+      return true;
+    };
+    const reload = async (path = '/dashboard', ready = `!!document.querySelector('.source-name')`) => {
+      if (!await navigate(path)) throw new Error('dashboard navigation failed');
+      await until(async () => !!await panel<boolean>(ready, Boolean), 'dashboard reload failed');
+    };
+    return {
+      privacyChoice: async () => {
+        const recommended = PRIVATE_ANSWER_OPTIONS.find(option => option.recommended)!;
+        await reload('/dashboard?keys', `!!document.querySelector('form[data-first-run-privacy]')`);
+        await click(`(()=>{const e=document.querySelector('form[data-first-run-privacy] input[value="${recommended.id}"]');return e?.closest('label')?.textContent.includes('Recommended')?e:null;})()`);
+        await click(`document.querySelector('button[form="first-run-privacy-choice"]')`);
+        // The normal form handler disables the answered choice only after the engine saves it.
+        await until(async () => !!await panel<boolean>(`!!document.querySelector('form[data-first-run-privacy] input:checked:disabled')`, Boolean), 'first-run privacy choice was not saved');
+        // Saving restarts the worker. Retry fresh documents across that handoff;
+        // only the applied policy, never the submitted radio's state, proves persistence.
+        await until(async () => await navigate('/dashboard?keys') && !!await panel<boolean>(`!!document.querySelector('[data-model-setup-status]') && !!document.querySelector('[data-answer-mode="${recommended.id}"]') && !document.querySelector('form[data-first-run-privacy]')`, Boolean), 'first-run privacy choice did not persist after reload');
+        await reload();
+        return `${recommended.label} (${recommended.id}, Recommended) saved and verified after reload`;
+      },
+      connect: async s => {
+        const before = await card(s);
+        if (!before || connected(before)) throw new Error('fresh source card missing or already connected');
+        baseline.clear();
+        for (const t of (await browser!.send('Target.getTargets')).targetInfos) baseline.add(t.targetId);
+        windowOffered = false;
+        await sourceAction(s, '^Connect$');
+        // A remembered grant can redirect at once and finish between polls; the callback check verifies completion.
+        await until(async () => { const c = await card(s); return c?.connection?.state === 'awaiting_consent' || (!!c && connected(c)); }, 'source card did not enter awaiting_consent or connect');
+      },
+      consent: async s => {
+        const deadline = Date.now() + 180_000;
+        let providerSeen = false;
+        let openedOffer = false;
+        while (Date.now() < deadline) {
+          const { targetInfos } = await browser!.send('Target.getTargets');
+          // Only tabs descended from this run's dashboard belong to this consent flow.
+          for (const t of targetInfos) {
+            // Chromium strips openerId for the product's noopener OAuth window. Only new consent windows
+            // after this dashboard's windowOpen offer are eligible; existing account tabs are untouched.
+            if (t.openerId && owned.has(t.openerId) || windowOffered && !baseline.has(t.targetId) && /^https?:\/\/(accounts\.google\.com|(?:www\.)?dropbox\.com|auth\.olympusplugin\.ai|127\.0\.0\.1:8010|localhost:8010)\//.test(t.url)) owned.add(t.targetId);
+            if (owned.has(t.targetId)) observeCallback(t.url);
+          }
+          if (!openedOffer && !providerSeen && !targetInfos.some((t: any) => owned.has(t.targetId) && !baseline.has(t.targetId))) {
+            openedOffer = !!await panel<boolean>(`(()=>{const e=document.querySelector('a[data-open-offer-link]'); if(!e || !(${visible})(e))return false; e.click();return true;})()`, Boolean);
+          }
+          for (const t of targetInfos.filter((t: any) => owned.has(t.targetId) && t.type === 'page')) {
+            if (!/^https:\/\/(accounts\.google\.com|(?:www\.)?dropbox\.com)\//.test(t.url)) continue;
+            providerSeen = true;
+            const sid = await attach(t.targetId);
+            const snap = await evalIn<ConsentSnapshot>(sid, `(()=>{const v=${visible}; const text=document.body?.innerText||''; return {url:location.href,text,password:[...document.querySelectorAll('input[type=password]')].some(v),accounts:[...document.querySelectorAll('[data-identifier]')].filter(v).length,signedOut:[...document.querySelectorAll('input[type=email],input[name=login_email]')].some(v)};})()`).catch(() => undefined);
+            if (!snap) continue;
+            const blocked = consentBlock(snap);
+            if (blocked) throw new FreshInconclusive(`renew ${s.id === 'gmail' ? 'Google' : 'Dropbox'} sign-in in zig’s canary Chromium: ${blocked}`);
+            await evalIn(sid, `(()=>{const v=${visible};const controls=[...document.querySelectorAll('button,a,[role=button]')].filter(v);const e=controls.find(e=>/^(Advanced|Go to .+\\(unsafe\\)|Continue|Allow|Agree|Accept)$/i.test(e.textContent.trim())) || ( ${snap.accounts === 1} ? document.querySelector('[data-identifier]') : null); if(e&&!e.disabled)e.click();})()`).catch(() => {});
+          }
+          if (providerSeen && connected(await card(s).catch(() => null))) return;
+          // Some providers remember consent and immediately redirect. A connected persisted card proves that path too.
+          if (connected(await card(s).catch(() => null))) return;
+          await sleep(1000);
+        }
+        throw new Error('provider consent did not complete within the bound');
+      },
+      callback: async s => {
+        await until(async () => {
+          const { targetInfos } = await browser!.send('Target.getTargets');
+          for (const t of targetInfos) if (owned.has(t.targetId)) observeCallback(t.url);
+          return (callbacks.has(s.id) || s.id === 'gmail' && callbacks.has('google')) && connected(await card(s));
+        }, 'OAuth callback did not land and leave a connected source card');
+      },
+      scope: async s => {
+        await reload();
+        await sourceAction(s, 'Choose (mail|folders)|Scope|Edit scope');
+        if (s.id === 'gmail') {
+          // Gmail's mail picker uses exclusion labels: retain the named label and deselect all other listed labels.
+          const choose = `(()=>{const labels=[...document.querySelectorAll('input[data-key^="picker:label:"]')]; const chosen=labels.find(e=>e.closest('label')?.querySelector('.opt-text > span')?.textContent===${JSON.stringify(s.fresh!.scope)}); if(!chosen)return false; for(const e of labels){const want=e===chosen;if(e.checked!==want){e.click();return false;}} return true;})()`;
+          await until(async () => !!await panel<boolean>(choose, Boolean), 'Gmail scope label unavailable');
+        } else {
+          // Folder names may be paths: descend by the picker's own folder controls.
+          const parts = s.fresh!.scope.split('/').filter(Boolean);
+          for (let i = 0; i < parts.length; i++) {
+            const row = folderRow(parts[i]!);
+            await click(i === parts.length - 1 ? `${row}?.querySelector('[data-key$=":ingest"]')` : `${row}?.querySelector('[data-key^="picker:open:"]')`);
+          }
+        }
+        await click(byKey('picker:save'));
+        await until(async () => (await card(s))?.scope_selection?.status === 'approved', 'scope was not saved');
+        await reload();
+        await sourceAction(s, 'Choose (mail|folders)|Scope|Edit scope');
+        // Reopening the picker after a full reload reads saved scope from the engine.
+        if (s.id === 'gmail') {
+          await until(async () => !!await panel<boolean>(`(()=>{const a=[...document.querySelectorAll('input[data-key^="picker:label:"]')];return a.length>0&&a.filter(e=>e.checked).length===1&&a.some(e=>e.checked&&e.closest('label')?.querySelector('.opt-text > span')?.textContent===${JSON.stringify(s.fresh!.scope)});})()`, Boolean), 'Gmail scope changed after reload');
+        } else {
+          // Saved selections also appear in the picker's rule summary, including nested paths.
+          const parts = s.fresh!.scope.split('/').filter(Boolean);
+          await until(async () => !!await panel<boolean>(`!!document.querySelector('[data-key="picker:seg:@account:ingest"][aria-pressed=false]')`, Boolean), 'Dropbox scope unexpectedly includes the whole account');
+          for (const part of parts.slice(0, -1)) await click(`${folderRow(part)}?.querySelector('[data-key^="picker:open:"]')`);
+          const leaf = parts.at(-1)!;
+          await until(async () => !!await panel<boolean>(`!!${folderRow(leaf)}?.querySelector('[data-key$=":ingest"][aria-pressed=true]')`, Boolean), 'Dropbox scope changed after reload');
+        }
+        await click(byKey('picker:cancel'));
+      },
+      indexed: async s => { const c = await card(s); return connected(c) ? Number(c.coverage?.indexed_items ?? 0) : 0; },
+      close: cleanup,
+    };
+  } catch (error) { await cleanup(); throw error; }
+}
