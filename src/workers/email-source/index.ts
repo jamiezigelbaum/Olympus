@@ -7,7 +7,7 @@ import { PRIVACY_PRESET_LABELS } from '../../core/privacy-language.ts';
 import { createDashboardMessagingService } from './dashboard-messaging-service.ts';
 import { isFileSourceScopeId } from '../../core/source-scope-approval.ts';
 import { createReleaseManifestSink, runWithReleaseManifestSink, recordReleaseManifest, answerReleaseWithheldReason, type ReleaseCheck, type ReleaseManifest } from '../../core/release-manifest.ts';
-import type { UpdateAvailable } from '../../core/update-check.ts';
+import { installerForPlatform, type UpdateAvailable } from '../../core/update-check.ts';
 import { isRetiredGoogleHandle } from '../../core/google-handle-compatibility.ts';
 import { readSourceAccountBindings, sourceAccountBindingsPath, type SourceAccountBindings } from '../../core/source-account-binding.ts';
 import { sourceStorageNotices, type SourceStorageNoticeKind } from '../../core/source-registry.ts';
@@ -1476,6 +1476,22 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
                 ...(controlSessionCsrfToken ? { controlSessionCsrfToken } : {}),
                 ...(agentConnections ? { agents: dashboardAgentsView(agentConnections) } : {}),
                 ...(options.agentConnectHost ? { agentConnectHost: options.agentConnectHost() } : {}),
+              },
+            }));
+          }
+          if (page === 'settings') {
+            const installer = installerForPlatform(options.platform ?? process.platform);
+            const update = installer ? options.updateAvailable?.() : undefined;
+            return html(renderDashboardLocalPage('settings', {
+              url,
+              options: {
+                ...(controlSessionCsrfToken ? { controlSessionCsrfToken } : {}),
+                ...(agentConnections ? { agents: dashboardAgentsView(agentConnections) } : {}),
+                ...(options.agentConnectHost ? { agentConnectHost: options.agentConnectHost() } : {}),
+                settings: {
+                  ...(options.localModelReadiness ? { models: options.localModelReadiness() } : {}),
+                  ...(update && installer ? { update: { version: update.version, command: installer.command } } : {}),
+                },
               },
             }));
           }

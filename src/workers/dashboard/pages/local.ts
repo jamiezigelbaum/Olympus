@@ -49,6 +49,8 @@ import {
 import { DASHBOARD_PRIVACY_SETTINGS_COPY as S, DASHBOARD_PRIVATE_ANSWERS_COPY } from '../vocabulary.ts';
 import { dashboardPrivacyTabs, PRIVACY_TABS_CSS } from './private-answers.ts';
 import { dashboardLocalPageHref } from '../host-page.ts';
+import { dashboardTopNav, TOP_NAV_CSS, type DashboardTab } from '../top-nav.ts';
+import { DASHBOARD_UPDATE_COPY } from '../vocabulary.ts';
 import { MODEL_PICKER_CSS, renderAnswerModelPickers, renderZkapiModelPicker } from '../model-pickers.ts';
 import { renderModelSetup, renderModelSetupBlocker, dashboardModelsBlockedReason } from '../model-setup.ts';
 import type { DashboardOutsideHelpStatus } from '../outside-help.ts';
@@ -78,6 +80,11 @@ export interface DashboardPageOptions {
   /** Remote agent connections and remote access, for Agents. */
   agents?: DashboardAgentsView;
   systemReport?: string;
+  /** Settings: the built-in models on this computer, and an update when one is out. */
+  settings?: {
+    models?: readonly { name: string; state: string; detail: string; downloadBytes: number }[];
+    update?: { version: string; command: string };
+  };
   /** OPENER supplies the current desktop/headless approval handoff. */
   agentConnectHost?: AgentConnectHost;
   /** The saved Private-answer mode, for Privacy settings: its id and its label. */
@@ -140,19 +147,28 @@ function unlocked(options: DashboardPageOptions | undefined): boolean {
   return options?.controlSessionCsrfToken !== undefined;
 }
 
+/** The unlock card while locked. Unlocked, the top bar carries "Unlocked · Lock" instead. */
+function lockedGate(options: DashboardPageOptions | undefined): string {
+  return unlocked(options) ? '' : dashboardControlGate({ connected: false });
+}
+
 /** The shell every local page shares: "Olympus / <Page>", the lead back to the dashboard, the shared controller. */
 function localShell(input: {
   crumb: string;
+  /** The top-bar tab this page sits under. */
+  tab: DashboardTab;
   meta: string;
   body: string;
   styles: readonly string[];
   options: DashboardPageOptions | undefined;
 }): string {
   const csrf = input.options?.controlSessionCsrfToken;
+  const token = readToken(input.options?.basePath);
   return pageShell({
     title: 'Olympus',
     crumb: input.crumb,
     ...(input.options?.basePath === undefined ? {} : { basePath: input.options.basePath }),
+    nav: dashboardTopNav({ active: input.tab, unlocked: csrf !== undefined, ...(token ? { token } : {}) }),
     meta: input.meta,
     body: input.body,
     controller: { ...(csrf === undefined ? {} : { csrfToken: csrf }) },
@@ -160,7 +176,7 @@ function localShell(input: {
       unlocked: csrf !== undefined,
       ...(csrf === undefined ? {} : { controlSessionCsrfToken: csrf }),
     },
-    styles: [LOCAL_PAGE_CSS, ...input.styles],
+    styles: [LOCAL_PAGE_CSS, TOP_NAV_CSS, ...input.styles],
   });
 }
 
@@ -176,7 +192,7 @@ export function renderDashboardKeysPage(view: SourceDashboardViewModel, options?
   const token = readToken(options?.basePath);
   const mode = options?.answerMode;
   const body = [
-    dashboardControlGate({ connected: unlocked(options) }),
+    lockedGate(options),
     dashboardPrivacyTabs('settings', token),
     `<section id="whats-private"><h3 class="sect">${escapeHtml(S.whatsPrivate)}</h3><p class="pnote">${escapeHtml(S.intro)}</p>`
       + `<div class="srow nodot"><div class="smain"><b>${escapeHtml(S.wordsTitle)}</b><p class="pnote">${escapeHtml(S.wordsLine)}</p></div><div class="sact"><a class="btn" href="${escapeHtml(home)}">${escapeHtml(S.wordsOpen)}</a></div></div></section>`,
@@ -191,6 +207,7 @@ export function renderDashboardKeysPage(view: SourceDashboardViewModel, options?
   ].filter((block) => block !== '').join('\n');
   return localShell({
     crumb: DASHBOARD_PRIVATE_ANSWERS_COPY.crumb,
+    tab: 'privacy',
     meta: dashboardCheckedLabel(view.generated_at, options?.now ?? new Date()),
     body,
     styles: [MODEL_SETUP_CSS, PRIVACY_TABS_CSS, MODEL_PICKER_CSS],
@@ -203,7 +220,7 @@ export function renderDashboardConnectPage(view: SourceDashboardViewModel, optio
   const blocked = view.model_setup !== undefined && !view.model_setup.ready;
   const sources = view.sources.filter((source) => source.connection.action.kind !== 'none' || source.source_id === 'telegram.messages' || source.source_id === 'whatsapp.personal.messages');
   const body = [
-    dashboardControlGate({ connected: unlocked(options) }),
+    lockedGate(options),
     renderModelSetupBlocker(view.model_setup, { keysHref: dashboardLocalPageHref('keys', readToken(options?.basePath)) }),
     sources.length === 0
       ? `<p class="pnote">${escapeHtml(W.connect.empty)}</p>`
@@ -211,6 +228,7 @@ export function renderDashboardConnectPage(view: SourceDashboardViewModel, optio
   ].filter((block) => block !== '').join('\n');
   return localShell({
     crumb: W.connect.title,
+    tab: 'sources',
     meta: dashboardCheckedLabel(view.generated_at, options?.now ?? new Date()),
     body,
     styles: [MODEL_SETUP_CSS],
@@ -230,12 +248,12 @@ function readToken(basePath: string | undefined): string | undefined {
 export function renderDashboardAgentsPage(options?: DashboardPageOptions): string {
   const now = options?.now ?? new Date();
   const body = [
-    dashboardControlGate({ connected: unlocked(options) }),
+    lockedGate(options),
     options?.agents
       ? renderDashboardAgentsSection({ ...options.agentConnectHost, view: options.agents, now })
       : '<p class="foot">Agent connections are not available on this install.</p>',
   ].join('\n');
-  return localShell({ crumb: W.agents.title, meta: '', body, styles: [AGENT_CONNECT_CSS], options });
+  return localShell({ crumb: W.agents.title, tab: 'settings', meta: '', body, styles: [AGENT_CONNECT_CSS], options });
 }
 
 /** Build a connector: the prompt, open. Nothing on it calls a control route. */
@@ -250,7 +268,7 @@ export function renderDashboardConnectorPage(options?: DashboardPageOptions): st
       copyButtonLabel: 'Copy prompt',
     }).replace('class="sheet"', 'class="sheet on"').replace('aria-hidden="true"', 'aria-hidden="false"'),
   ].join('\n');
-  return localShell({ crumb: W.connector.title, meta: '', body, styles: [], options });
+  return localShell({ crumb: W.connector.title, tab: 'sources', meta: '', body, styles: [], options });
 }
 
 /**
@@ -412,11 +430,60 @@ function connectAction(source: DashboardSourceCard): DashboardActionInput | unde
   return undefined;
 }
 
+const SETTINGS_SECTIONS = [
+  { id: 'agents', label: 'Agents and access' },
+  { id: 'models', label: 'Models on this computer' },
+  { id: 'updates', label: 'Updates' },
+  { id: 'help', label: 'Help' },
+] as const;
+
+/**
+ * Settings (`?settings`, owner 2026-11-07, mockup final-8): the rarely used
+ * pieces in one place, with a side list. Agents and access, the built-in
+ * models (machinery, so not on Home), updates, and help. The models that
+ * answer and sort Private items stay on Privacy rules.
+ */
+export function renderDashboardSettingsPage(options?: DashboardPageOptions): string {
+  const now = options?.now ?? new Date();
+  const token = readToken(options?.basePath);
+  const settings = options?.settings;
+  const side = `<nav class="setside" aria-label="Settings">${SETTINGS_SECTIONS.map(section => `<a href="#${section.id}">${escapeHtml(section.label)}</a>`).join('')}</nav>`;
+  const agents = `<section id="settings-agents">${options?.agents
+    ? renderDashboardAgentsSection({ ...options.agentConnectHost, view: options.agents, now }).replace('<div class="sect" id="agents">Agents</div>', '<h3 class="sect" id="agents">Agents and access</h3>')
+    : '<h3 class="sect" id="agents">Agents and access</h3><p class="pnote">Agent connections are not available on this install.</p>'}</section>`;
+  const models = '<section><h3 class="sect" id="models">Models on this computer</h3>'
+    + (settings?.models?.length
+      ? `<div class="srows">${settings.models.map(model => `<div class="srow nodot"><div class="smain"><b>${escapeHtml(model.name)}</b> <span class="pnote">· ${escapeHtml(model.state)}</span><p class="pnote">${escapeHtml(model.detail)} (${(model.downloadBytes / 1_000_000_000).toFixed(2)} GB download)</p></div></div>`).join('')}</div>`
+      : '<p class="pnote">Olympus has no built-in models to show on this computer.</p>')
+    + '<p class="pnote">The models that answer and sort Private items are on <a href="' + escapeHtml(dashboardLocalPageHref('keys', token)) + '">Privacy rules</a>.</p></section>';
+  const update = settings?.update;
+  const updates = '<section><h3 class="sect" id="updates">Updates</h3>'
+    + (update
+      ? `<p>${escapeHtml(DASHBOARD_UPDATE_COPY.notice(update.version))}</p><pre class="promptbox" id="settings-update-command">${escapeHtml(update.command)}</pre><button type="button" class="btn" data-copy-target="#settings-update-command">${escapeHtml(DASHBOARD_UPDATE_COPY.copy)}</button><span class="copystatus" data-copy-status aria-live="polite"></span>`
+      : '<p class="pnote">Olympus is up to date.</p>')
+    + '</section>';
+  const help = '<section><h3 class="sect" id="help">Help</h3><p class="pnote">If something is not working, copy the system report and send it to support. It holds only system states and error codes.</p>'
+    + `<div class="pickbar"><a class="btn" href="${escapeHtml(dashboardLocalPageHref('help', token))}">Copy a system report</a><a class="btn" href="https://olympusplugin.ai/support" target="_blank" rel="noopener noreferrer">Contact support</a></div></section>`;
+  const body = lockedGate(options) + `<div class="setlayout">${side}<div class="setmain">${agents}${models}${updates}${help}</div></div>`;
+  return localShell({ crumb: 'Settings', tab: 'settings', meta: '', body, styles: [AGENT_CONNECT_CSS, SETTINGS_CSS], options });
+}
+
+const SETTINGS_CSS = `
+.setlayout { display: grid; grid-template-columns: 220px 1fr; gap: 24px; align-items: start; }
+.setside { display: grid; gap: 8px; position: sticky; top: 12px; }
+.setside a { display: block; padding: 10px 14px; border: 1px solid var(--line); border-radius: 10px; color: var(--t1); text-decoration: none; }
+.setside a:hover, .setside a:focus-visible { border-color: var(--link); }
+.setmain section + section { margin-top: 24px; }
+.setmain > section:first-child .sect { margin-top: 0; }
+.setmain .pickbar { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 10px; }
+@media (max-width: 760px) { .setlayout { grid-template-columns: 1fr; } .setside { position: static; grid-template-columns: 1fr 1fr; } }
+`;
+
 /** A local, content-free report using the same copy control as pairing errors. */
 export function renderDashboardHelpPage(options?: DashboardPageOptions): string {
   const report = options?.systemReport;
-  return localShell({ crumb: 'Help', meta: '', options, styles: [], body:
-    dashboardControlGate({ connected: unlocked(options) })
+  return localShell({ crumb: 'Help', tab: 'settings', meta: '', options, styles: [], body:
+    lockedGate(options)
     + '<h3>Help with Olympus</h3><p>If something is not working, copy the system report and send it to support.</p>'
     + (report ? `<pre id="system-report" class="promptbox">${escapeHtml(report)}</pre><p>Only system states and error codes: no names, numbers, emails, chats, notebook or folder titles, or home folder paths.</p><button type="button" class="btn" data-copy-target="#system-report">Copy system report</button><span data-copy-status aria-live="polite"></span>` : unlocked(options) ? '<p>Olympus could not read the system report. Try again, or contact support.</p>' : '<p>Open dashboard controls on this computer to copy a system report.</p>')
     + '<p><a href="https://olympusplugin.ai/support" target="_blank" rel="noopener noreferrer">Contact support</a></p>',
