@@ -161859,15 +161859,13 @@ function renderDashboardConnectPage(view3, options) {
   const sheet = '<dialog class="srcsheet" id="add-source" data-add-source data-closable aria-labelledby="add-source-title">' + '<div class="adddialoghead"><h3 id="add-source-title">Add a source</h3><button class="btn iconbtn" type="button" data-dialog-close aria-label="Close">✕</button></div>' + `<div data-source-catalog><input class="keyfield srcsearch" type="search" data-source-search placeholder="Search sources…" aria-label="Search sources">` + (tiles ? `<div class="srctiles">${tiles}</div>` : `<p class="pnote">${escapeHtml2(W.connect.empty)}</p>`) + `<p class="pnote">Sources you've already connected aren't listed.</p></div>` + panels + "</dialog>";
   const body = [
     lockedGate2(options),
-    renderModelSetupBlocker(view3.model_setup, { keysHref: dashboardLocalPageHref("keys", token) }),
-    `<div class="srcrows" id="sources">${rows.map((entry) => entry.row).join("") || '<p class="pnote">No sources connected yet.</p>'}</div>`,
-    `<div class="srcbar"><button class="btn primary" type="button" data-dialog-open="add-source">+ Add a source</button><span class="pnote">Not listed? <a href="${escapeHtml2(dashboardLocalPageHref("connector", token))}">Build a connector</a></span></div>`,
-    rows.map((entry) => entry.dialogs).join(""),
-    sheet
+    renderModelSetupBlocker(view3.model_setup, { keysHref: dashboardLocalPageHref("keys", readToken2(options?.basePath)) }),
+    sources.length === 0 ? `<p class="pnote">${escapeHtml2(W.connect.empty)}</p>` : `<div class="srows" id="sources">${sources.map((source) => renderSetupRow(source, view3, blocked, options?.basePath ?? "/dashboard", options?.messagingLocalSession === true) + sourceSupportBlock(source)).join(`
+`)}</div>`
   ].filter((block) => block !== "").join(`
 `);
   return localShell({
-    crumb: "Sources",
+    crumb: W.connect.title,
     tab: "sources",
     meta: dashboardCheckedLabel(view3.generated_at, options?.now ?? new Date),
     body,
@@ -162107,33 +162105,7 @@ function renderJudgeChoice(view3, options) {
     <p>Venice uses your own account and API key, and you pay Venice; Olympus pays for nothing. An end-to-end encrypted option is not available yet.</p></details>
     </fieldset></form></section>`;
 }
-var CONNECTOR_SHEET_ID = "connector-sheet", CONNECTOR_SHEET_HEADING = "Build a connector with your agent", CONNECTOR_SHEET_INTRO, CONNECTOR_PROMPT, W, SYNC_ROUTE_SOURCES, SOURCE_TILE_LINES, CONNECTED_STATES, MESSAGING_SOURCES, SOURCES_CSS = `
-.srcrows { display: grid; gap: 10px; max-width: 760px; }
-.srcrow { display: flex; align-items: center; gap: 14px; border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; }
-.srcmain { flex: 1; min-width: 0; }
-.srcact { display: flex; align-items: center; gap: 10px; }
-.srcact .rowmenu { position: relative; }
-.srcact .rowmenu .menu { position: absolute; right: 0; top: calc(100% + 6px); z-index: 5; min-width: 220px; display: grid; padding: 6px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel, var(--bg)); box-shadow: 0 8px 24px rgba(0,0,0,.35); }
-.menuitem { font: inherit; text-align: left; background: none; border: 0; color: var(--t1); padding: 9px 12px; border-radius: 6px; cursor: pointer; width: 100%; }
-.menuitem:hover, .menuitem:focus-visible { background: color-mix(in srgb, var(--link) 14%, transparent); }
-.menuitem.danger { color: #f0776c; }
-.rowmenu .menu hr { border: 0; border-top: 1px solid var(--line); margin: 6px 0; }
-.rowmenu form { margin: 0; }
-.rowmenu [data-action-message]:empty { display: none; }
-.btn.danger { border-color: #f0776c; color: #f0776c; }
-.srcbar { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; margin: 16px 0; }
-.srcsheet { margin: 0 0 0 auto; height: 100vh; max-height: 100vh; width: min(480px, 100vw); border: 0; border-left: 1px solid var(--line); background: var(--bg); color: var(--t1); padding: 20px 22px; overflow-y: auto; }
-.srcsheet::backdrop { background: rgba(0, 0, 0, 0.45); }
-.srcsearch { width: 100%; margin: 12px 0; }
-.srctiles { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
-.srctile { display: flex; gap: 12px; align-items: center; text-align: left; font: inherit; color: var(--t1); background: none; border: 1px solid var(--line); border-radius: 10px; padding: 12px; cursor: pointer; }
-.srctile:hover, .srctile:focus-visible { border-color: var(--link); }
-.srctile .pnote { display: block; }
-.srctile[hidden] { display: none; }
-.srctiles + .pnote { margin-top: 14px; }
-.srcsetup .plainlink { margin: 8px 0 12px; }
-@media (max-width: 640px) { .srctiles { grid-template-columns: 1fr; } .srcrow { flex-wrap: wrap; } }
-`, SETTINGS_SECTIONS, SETTINGS_CSS = `
+var CONNECTOR_SHEET_ID = "connector-sheet", CONNECTOR_SHEET_HEADING = "Build a connector with your agent", CONNECTOR_SHEET_INTRO, CONNECTOR_PROMPT, W, SETTINGS_SECTIONS, SETTINGS_CSS = `
 .setlayout { display: grid; grid-template-columns: 220px 1fr; gap: 24px; align-items: start; }
 .setside { display: grid; gap: 8px; position: sticky; top: 12px; }
 .setside a { display: block; padding: 10px 14px; border: 1px solid var(--line); border-radius: 10px; color: var(--t1); text-decoration: none; }
@@ -162155,7 +162127,6 @@ var init_local = __esm(() => {
   init_private_answers();
   init_host_page();
   init_top_nav();
-  init_source_logos();
   init_vocabulary();
   init_model_pickers();
   init_model_setup2();
@@ -162168,29 +162139,6 @@ var init_local = __esm(() => {
   ].join(`
 `);
   W = DASHBOARD_COMPUTER_PANEL_COPY.rows;
-  SYNC_ROUTE_SOURCES = {
-    "gmail.email": "gmail",
-    "google_drive.docs": "google-drive",
-    "dropbox.files": "dropbox",
-    "x.bookmarks": "x",
-    "readwise.library": "readwise",
-    "evernote.notes": "evernote",
-    "local.files": "local.files"
-  };
-  SOURCE_TILE_LINES = {
-    "gmail.email": "Email",
-    "google_drive.docs": "Docs and files",
-    "dropbox.files": "Files",
-    "local.files": "Folders you pick",
-    "archive.imports": "An export from any app",
-    "x.bookmarks": "Posts you saved",
-    "telegram.messages": "Chats",
-    "whatsapp.personal.messages": "Chats",
-    "readwise.library": "Highlights",
-    "evernote.notes": "Notes"
-  };
-  CONNECTED_STATES = new Set(["connected", "waiting_for_first_sync", "syncing", "synced", "reauth_required"]);
-  MESSAGING_SOURCES = new Set(["telegram.messages", "whatsapp.personal.messages"]);
   SETTINGS_SECTIONS = [
     { id: "agents", label: "Agents and access" },
     { id: "models", label: "Models on this computer" },
