@@ -517,6 +517,8 @@ export interface DashboardConnectSheetInput {
   /** The instructions' declared fields; the route reads them by name. */
   fields: readonly DashboardConnectField[];
   steps?: readonly DashboardSetupStep[];
+  /** The easy path's label, shown on the walkthrough's first step. */
+  shortcut?: string;
   setupHeading?: string;
   credentialFile?: 'google_desktop';
   lead?: { title: string; body: string; button: string; notes: string[] };
@@ -576,10 +578,17 @@ export interface DashboardConnectSheetInput {
 }
 
 /** A provider-neutral walkthrough. The last step contains the existing connect form. */
-export function setupStepsSheet(input: { id: string; provider: string; steps: readonly DashboardSetupStep[]; finalForm: (formId: string) => string; submitLabel?: string; redirect?: string; guided?: boolean; footer?: string; initialStep?: number; stepContent?: readonly string[]; stepActions?: readonly ({ formId: string; label: string } | undefined)[]; footerContent?: string }): string {
+export function setupStepsSheet(input: { id: string; provider: string; steps: readonly DashboardSetupStep[]; finalForm: (formId: string) => string; submitLabel?: string; redirect?: string; guided?: boolean; footer?: string; initialStep?: number; stepContent?: readonly string[]; stepActions?: readonly ({ formId: string; label: string } | undefined)[]; footerContent?: string; shortcut?: string }): string {
   const id = safeId(input.id);
   const count = input.steps.length;
   const current = input.initialStep ?? 0;
+  // The easy path (owner, 2026-11-03): someone who already has the key or app
+  // skips straight to pasting it. A step that registers a redirect URI is
+  // still shown, because an existing app may not have this computer's URI.
+  const redirectStep = input.steps.findIndex(step => step.redirect_uri && input.redirect);
+  const shortcutTarget = redirectStep >= 0 ? redirectStep : count - 1;
+  const shortcut = input.shortcut && shortcutTarget > 0
+    ? `<p class="setupshortcut"><button class="btn" type="button" data-setup-jump="${shortcutTarget}">${escapeHtml(input.shortcut)}</button></p>` : '';
   const formId = `${id}-form`;
   const initialAction = input.stepActions?.[0];
   const panels = input.steps.map((step, index) => {
@@ -593,7 +602,7 @@ export function setupStepsSheet(input: { id: string; provider: string; steps: re
       ? `<ol class="steps">${step.instructions.map(click => `<li>${escapeHtml(click).replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')}</li>`).join('')}</ol>`
       : step.text ? `<p>${escapeHtml(step.text)}</p>` : '';
     const heading = input.guided ? 'h2' : 'h4';
-    return `<div data-setup-panel${action ? ` data-setup-form="${escapeHtml(action.formId)}" data-setup-label="${escapeHtml(action.label)}"` : ''}${index !== current ? ' hidden' : ''}><${heading}>${escapeHtml(step.title ?? `Step ${index + 1}`)}</${heading}>${instructions}${link}${extraLinks}${redirect}${step.return_note ? `<p class="setupnote">${escapeHtml(step.return_note)}</p>` : ''}${input.stepContent?.[index] ?? ''}${index === count - 1 ? input.finalForm(formId) : ''}</div>`;
+    return `<div data-setup-panel${action ? ` data-setup-form="${escapeHtml(action.formId)}" data-setup-label="${escapeHtml(action.label)}"` : ''}${index !== current ? ' hidden' : ''}><${heading}>${escapeHtml(step.title ?? `Step ${index + 1}`)}</${heading}>${instructions}${link}${extraLinks}${redirect}${step.return_note ? `<p class="setupnote">${escapeHtml(step.return_note)}</p>` : ''}${index === 0 ? shortcut : ''}${input.stepContent?.[index] ?? ''}${index === count - 1 ? input.finalForm(formId) : ''}</div>`;
   }).join('');
   const progress = input.guided
     ? `<div class="setupsegments" role="progressbar" aria-label="Setup progress" aria-valuemin="1" aria-valuemax="${count}" aria-valuenow="${current + 1}">${input.steps.map((_, i) => `<span data-setup-segment${i <= current ? ' class="filled"' : ''}></span>`).join('')}</div>`
@@ -667,7 +676,7 @@ export function connectSetupSheet(input: DashboardConnectSheetInput): string {
     + `<span class="authfallback" data-authorization-fallback></span>`
     + `</form>`;
   const walkthroughBody = input.steps?.length && input.provider
-    ? setupStepsSheet({ id, provider: input.provider, steps: input.steps, finalForm: byoForm, submitLabel: input.submitLabel ?? 'Connect', ...(input.credentialFile ? { guided: true, initialStep: hasError ? input.steps!.length - 1 : 0, footer: 'Steps: project · turn on Gmail and Drive · sign-in screen · publish · make the key · paste it here' } : {}), ...(input.redirectUri ? { redirect: input.redirectUri.uri } : {}) })
+    ? setupStepsSheet({ id, provider: input.provider, steps: input.steps, finalForm: byoForm, submitLabel: input.submitLabel ?? 'Connect', ...(input.credentialFile ? { guided: true, initialStep: hasError ? input.steps!.length - 1 : 0, footer: 'Steps: project · turn on Gmail and Drive · sign-in screen · publish · make the key · paste it here' } : {}), ...(input.redirectUri ? { redirect: input.redirectUri.uri } : {}), ...(input.shortcut ? { shortcut: input.shortcut } : {}) })
     : `${registration}${redirect}${byoForm()}`;
   const walkthrough = input.credentialFile
     ? `<div class="setupheader"><h2>${escapeHtml(input.setupHeading ?? input.heading)}</h2><button class="btn setupclose" type="button" data-sheet-toggle="#${id}" aria-label="Close setup">×</button></div><p class="setupintro">${escapeHtml(input.intro)}</p>${walkthroughBody}`
@@ -757,6 +766,7 @@ export function dashboardNeedsSetupSheet(
     source: action.source,
     fields: action.instructions.fields,
     ...(action.instructions.setup_provider ? { steps: action.instructions.diy_steps, provider: action.instructions.setup_provider, setupHeading: action.instructions.setup_heading, credentialFile: action.instructions.credential_file } : {}),
+    ...(action.instructions.setup_shortcut ? { shortcut: action.instructions.setup_shortcut } : {}),
     ...(options.lead ? { lead: options.lead } : {}),
     ...(options.providerNote === undefined ? {} : { providerNote: options.providerNote }),
     ...redirectUriInput(action),
@@ -808,6 +818,7 @@ export function dashboardOAuthConnectSheet(
     source: action.source,
     fields,
     ...(byo.setup_provider ? { steps: byo.diy_steps, provider: byo.setup_provider, setupHeading: byo.setup_heading, credentialFile: byo.credential_file } : {}),
+    ...(byo.setup_shortcut ? { shortcut: byo.setup_shortcut } : {}),
     ...(options.lead ? { lead: options.lead } : {}),
     submitLabel: dashboardActionLabel(action.label),
     // Publisher mode: Olympus's own registered app does the asking, so the

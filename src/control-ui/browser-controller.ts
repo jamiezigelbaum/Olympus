@@ -1283,6 +1283,9 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
           const wrapper = document.createElement('label'); wrapper.textContent = label + ' ';
           const input = document.createElement('input'); input.name = 'value'; input.required = true; input.type = field === 'phone' || field === 'api_id' ? 'text' : 'password'; input.autocomplete = 'off'; input.setAttribute('autocapitalize', 'off'); input.spellcheck = false;
           wrapper.append(input); form.append(wrapper);
+          // Where to find what is asked for (owner, 2026-11-03: say the code is in a Telegram message).
+          const hints: Record<string, string> = { code: 'Telegram has just sent you a message in the Telegram app, from the account called Telegram. The login code is in that message.', password: 'The password you set under Two-Step Verification in Telegram\u2019s Privacy and Security settings.' };
+          if (hints[field]) { const hint = document.createElement('p'); hint.className = 'setupnote'; hint.dataset.messagingFieldHint = field; hint.textContent = hints[field]!; form.append(hint); }
           const button = document.createElement('button'); button.type = 'submit'; button.textContent = 'Continue'; button.className = 'btn'; form.append(button); inputSlot.append(form); input.focus();
         }
       }
@@ -1547,13 +1550,13 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
       if (url && !openAuthorizationExternally(url)) window.open(url, '_blank', 'noopener,noreferrer');
       return;
     }
-    const setupControl = target.closest<HTMLElement>('[data-setup-next], [data-setup-back], [data-setup-retry]');
+    const setupControl = target.closest<HTMLElement>('[data-setup-next], [data-setup-back], [data-setup-retry], [data-setup-jump]');
     if (setupControl) {
       const sheet = setupControl.closest<HTMLElement>('[data-setup-steps]');
       if (!sheet) return;
       const panels = Array.from(sheet.querySelectorAll<HTMLElement>(':scope > [data-setup-panel]'));
       const current = panels.findIndex(panel => !panel.hidden);
-      const next = Math.max(0, Math.min(panels.length - 1, setupControl.hasAttribute('data-setup-retry') ? Number(setupControl.dataset.setupRetry) : current + (setupControl.hasAttribute('data-setup-next') ? 1 : -1)));
+      const next = Math.max(0, Math.min(panels.length - 1, setupControl.hasAttribute('data-setup-retry') ? Number(setupControl.dataset.setupRetry) : setupControl.hasAttribute('data-setup-jump') ? Number(setupControl.dataset.setupJump) : current + (setupControl.hasAttribute('data-setup-next') ? 1 : -1)));
       showSetupStep(sheet, next);
       return;
     }

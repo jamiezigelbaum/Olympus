@@ -1270,7 +1270,11 @@ test.each(['telegram', 'whatsapp'])('mount restores %s pairing and continues pol
   try {
     await new Promise(resolve => setTimeout(resolve, 0));
     expect(operations).toEqual(['status']);
-    if (source === 'telegram') expect(root.querySelector('[data-messaging-input] input')).not.toBeNull();
+    if (source === 'telegram') {
+      expect(root.querySelector('[data-messaging-input] input')).not.toBeNull();
+      // The code arrives as a message from Telegram in the Telegram app; the field says so.
+      expect(root.querySelector('[data-messaging-field-hint="code"]')!.textContent).toContain('message in the Telegram app');
+    }
     else expect(root.querySelector('img')!.getAttribute('src')).toBe('data:image/png;base64,YQ==');
     await new Promise(resolve => setTimeout(resolve, 1250));
     expect(operations).toEqual(['status', 'status']);
@@ -1321,7 +1325,7 @@ test.each([{ source: 'telegram', wholeAccount: false }, { source: 'telegram', wh
 
 
 for (const [state, provider, step] of [
-  ['connect-dropbox', 'dropbox', '1'], ['connect-dropbox', 'dropbox', '5'],
+  ['connect-dropbox', 'dropbox', '1'], ['connect-dropbox', 'dropbox', '4'],
   ['connect-dropbox-refused', 'dropbox', '1'], ['connect-venice', 'venice', '3'],
 ] as const) {
   test(`preview deep link reaches ${state} step ${step} without starting a connection`, () => {
@@ -1512,6 +1516,24 @@ test('Telegram preserves an open sheet and a deliberate close across dashboard r
     expect(reads).toBe(2);
     expect(root.querySelector('#telegram-setup')!.getAttribute('aria-hidden')).toBe('true');
   } finally { controller.dispose(); }
+});
+
+test('"I already have" skips to the step that still needs doing', () => {
+  const root = document.createElement('div');
+  root.innerHTML = renderDashboardLocalPage('keys', { url: new URL('http://localhost/dashboard?keys'), view: buildDashboardPreviewView('connect-x'), options: { controlSessionCsrfToken: 'fixture' } });
+  document.body.append(root);
+  const controller = mountDashboardController({ root, transport: { control: async () => { throw new Error('No consent should start'); } }, navigate() {}, async refresh() { return undefined; }, returnUrl: 'https://gateway.test/', canWrite: true, signal: new AbortController().signal, pollIntervalMs: 0 });
+  try {
+    const sheet = root.querySelector('#connect-x-bookmarks')!;
+    const panels = Array.from(sheet.querySelectorAll<HTMLElement>('[data-setup-panel]'));
+    const jump = sheet.querySelector<HTMLButtonElement>('[data-setup-jump]')!;
+    expect(jump.textContent).toBe('I already have an X app');
+    expect(jump.closest<HTMLElement>('[data-setup-panel]')).toBe(panels[0]!);
+    jump.click();
+    // An existing X app may not know this computer's callback, so it lands on that step, not the paste step.
+    expect(panels.findIndex(panel => !panel.hidden)).toBe(3);
+    expect(panels[3]!.querySelector('[data-copy-target]')).not.toBeNull();
+  } finally { controller.dispose(); root.remove(); }
 });
 
 test('Google own-app hides the shared warning and reaches STEP 6 OF 6 with the file input', () => {
