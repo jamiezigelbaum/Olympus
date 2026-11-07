@@ -125,6 +125,8 @@ export type OlympusDashboardControlParams =
   | { action: 'save_local_answer_model'; base_url: string; answer_model: string }
   | { action: 'save_first_run_privacy'; choice: string }
   | { action: 'save_judge'; choice: 'local' | 'venice'; cap_dollars: number }
+  | { action: 'save_model_choice'; provider: 'local' | 'venice' | 'zkapi'; model: string }
+  | { action: 'list_addable_models'; provider: 'venice' }
   | { action: 'set_computer_use'; choice: 'everyday' | 'server' }
   | {
       action: 'start_oauth';

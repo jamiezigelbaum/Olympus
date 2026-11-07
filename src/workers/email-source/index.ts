@@ -573,6 +573,8 @@ export interface EmailSourceWorkerOptions {
       pageStatus?: () => import('../dashboard/pages/local.ts').DashboardJudgeSetup;
       save: (choice: 'local' | 'venice', capDollars: number) => Promise<{ ok: true; status_message: string }>;
     };
+    /** The model pickers on Privacy rules (model-choices-backend.ts). */
+    modelChoices?: import('./model-choices-backend.ts').ModelChoicesBackend;
     modelSetup?: () => ModelSetupView;
     checkModelSetup?: () => Promise<ModelSetupView>;
     discoverLocalModels?: (baseUrl?: string) => Promise<LocalModelDiscoveryResult[]>;
@@ -1643,6 +1645,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
                 answerMode: { id: answerModeId, label: answerModeId === 'custom' ? 'Custom Private-answer mode' : PRIVACY_PRESET_LABELS[answerModeId] },
                 ...(controlSessionCsrfToken ? { controlSessionCsrfToken } : {}),
                 ...(sourceDashboard.judgeSetup ? { judgeSetup: sourceDashboard.judgeSetup.pageStatus?.() ?? sourceDashboard.judgeSetup.status() } : {}),
+                ...(sourceDashboard.modelChoices ? { modelChoices: await sourceDashboard.modelChoices.status().catch(() => undefined) } : {}),
                 outsideHelpLocalSession: request.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER) === 'local',
                 messagingLocalSession: Boolean(controlSessionCsrfToken) && request.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER) === 'local',
                 ...(controlSessionCsrfToken && sourceDashboard.consult ? { outsideHelp: await sourceDashboard.consult.status().catch(() => undefined) } : {}),
@@ -2137,6 +2140,23 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
                 : 'No connection attempt was pending.',
             });
           });
+        }
+
+        if (request.method === 'POST' && (url.pathname === '/dashboard/models/choice' || url.pathname === '/dashboard/models/addable')) {
+          if (!request.headers.has(DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER) || request.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER) !== 'local') {
+            return json({ ok: false, error: { code: 'local_dashboard_only', message: 'Choose this in an unlocked dashboard on this computer.' } }, 403);
+          }
+          if (!sourceDashboard?.modelChoices) throw new EmailSourceWorkerError(501, 'not_available', 'Model choices are unavailable.');
+          const input = await parseObjectBody(request);
+          if (url.pathname.endsWith('/addable')) {
+            if (input.provider !== 'venice') throw new EmailSourceWorkerError(400, 'invalid_request', 'Choose a provider.');
+            return json({ ok: true, models: await sourceDashboard.modelChoices.addable('venice') });
+          }
+          if ((input.provider !== 'local' && input.provider !== 'venice' && input.provider !== 'zkapi') || typeof input.model !== 'string' || input.model.trim() === '') {
+            throw new EmailSourceWorkerError(400, 'invalid_request', 'Choose a model.');
+          }
+          const result = await sourceDashboard.modelChoices.save(input.provider, input.model.trim());
+          return json(result.ok ? result : { ok: false, error: { code: 'model_choice_failed', message: result.message } }, result.ok ? 200 : 409);
         }
 
         if (request.method === 'POST' && url.pathname === '/dashboard/models/judge') {

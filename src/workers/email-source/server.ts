@@ -2,7 +2,7 @@ import { adoptExistingCloudApproval, createJudgeSetup } from '../classification/
 import { JudgeSpending, withJudgeSpendingStop, judgeSpendingPath } from '../classification/judge-spending.ts';
 import { createDecisionSnifferModel, type SnifferModel } from '../classification/sniffer-decision.ts';
 import { macComputerSetupView, saveMacComputerUseChoice } from '../../core/engine-service.ts';
-import { release } from 'node:os';
+import { release, totalmem } from 'node:os';
 import { createPrivacyQuestionEngine } from '../classification/privacy-questions.ts';
 import { snifferPromptVersions } from '../classification/sniffer.ts';
 import { withFirstRunPrivacyGate } from '../first-run-privacy-gate.ts';
@@ -119,6 +119,7 @@ import {
   answerPrivately,
   builtInAnalystEnabled,
   builtInPrivateModelStatus,
+  BUILT_IN_ANALYST_MODEL_ENV,
   createBuiltInAnalystModel,
   resolveBuiltInReasoningModel,
   withBuiltInFallback,
@@ -134,8 +135,12 @@ import {
 } from '../../core/analyst-venice.ts';
 import {
   createVenicePrivacyCategoryResolver,
+  readVeniceTextCatalogModels,
   type VeniceModelCatalogOptions,
 } from '../../core/venice-model-catalog.ts';
+import { builtInModelEnvValue, readModelChoices, resolveVeniceStrongest } from '../../core/model-choices.ts';
+import { CONSULT_CHATGPT_FRONTIER_MODEL_DEFAULT } from '../../core/consult-settings.ts';
+import { createModelChoicesBackend, LOCAL_PROFILE_ID, VENICE_PROFILE_ID } from './model-choices-backend.ts';
 import {
   assertVeniceAnalystModelAllowed,
   assertVeniceEmbeddingModelAllowed,
@@ -2448,6 +2453,11 @@ export async function main(): Promise<void> {
   // panel, so at most one local model server runs. Registered for the
   // sniffer before its runtime is resolved below.
   const localModelActivity = createLocalModelActivity();
+  // The owner's built-in size from Privacy rules; an operator's env pin wins.
+  if (sovereigntyEngine.source === 'file' && sovereigntyEngine.path) {
+    const builtInChoice = builtInModelEnvValue(process.env, readModelChoices(sovereigntyEngine.path));
+    if (builtInChoice) process.env[BUILT_IN_ANALYST_MODEL_ENV] = builtInChoice;
+  }
   const workerBuiltInModel = createWorkerSharedBuiltInModel(process.env);
   const answerBuiltInModel = workerBuiltInModel
     ? localModelActivity.track('built_in', workerBuiltInModel.model) : undefined;
@@ -2691,6 +2701,36 @@ export async function main(): Promise<void> {
       ? { ...card, state: 'needs_attention' as const, detail: 'Key saved. Ask your agent to restart the managed Olympus worker to apply it; this foreground worker cannot restart itself.' }
       : card) };
   };
+  const modelChoices = createModelChoicesBackend({
+    ...(sovereigntyEngine.source === 'file' && sovereigntyEngine.path ? { policyPath: sovereigntyEngine.path } : {}),
+    config: () => sovereigntyEngine.config,
+    builtInAnswers: () => workerBuiltInModel !== undefined && modelSetup.getStatus().cards.some(card => card.id === 'local')
+      && (() => { try { const members = sovereigntyEngine.resolveAnalystPool({ trustDomain: 'secure_local' }).members; return builtInBacksPrivateAnalyst(LOCAL_PROFILE_ID, workerBuiltInModel?.model.status().state, members, new Set(members.map(member => member.id))); } catch { return false; } })(),
+    builtInSize: () => workerBuiltInModel?.model.spec.sizeClass,
+    totalMemoryBytes: totalmem(),
+    // dashboard-consult.ts loads lazily; its profile id and default model are these.
+    zkapi: { profileId: 'zkapi-consult', strongest: CONSULT_CHATGPT_FRONTIER_MODEL_DEFAULT },
+    venice: {
+      strongest: async () => {
+        const apiKey = bootModelCredentials.get(VENICE_PROFILE_ID);
+        const profile = sovereigntyEngine.config.modelProfiles[VENICE_PROFILE_ID];
+        if (!apiKey || !profile) return undefined;
+        const baseUrl = ('baseUrl' in profile && profile.baseUrl) || 'https://api.venice.ai/api/v1';
+        return resolveVeniceStrongest({ apiKey, baseUrl, category: createVenicePrivacyCategoryResolver({ apiKey, baseUrl }) });
+      },
+      catalog: async () => {
+        const apiKey = bootModelCredentials.get(VENICE_PROFILE_ID);
+        const profile = sovereigntyEngine.config.modelProfiles[VENICE_PROFILE_ID];
+        if (!apiKey || !profile) return {};
+        const baseUrl = ('baseUrl' in profile && profile.baseUrl) || 'https://api.venice.ai/api/v1';
+        // One resolve refreshes a stale cache; the list is then read from it.
+        await createVenicePrivacyCategoryResolver({ apiKey, baseUrl })('model' in profile && typeof profile.model === 'string' ? profile.model : 'kimi-k3').catch(() => undefined);
+        return readVeniceTextCatalogModels();
+      },
+    },
+    requestReload: () => requestModelReload(),
+  });
+  void modelChoices.refreshStrongest().catch(() => false);
   const connectModelKey = async (provider: 'gemini' | 'venice', apiKey: string): Promise<void> => {
     if (provider === 'gemini') await connectGeminiApiKey({ apiKey });
     else await connectPublicApiKeySource({ source: 'venice', apiKey });
@@ -6046,6 +6086,7 @@ export async function main(): Promise<void> {
               remote: dashboardRemoteAccess?.().state ?? 'off',
               logs: process.env.OLYMPUS_ENGINE_HOST === '1' ? (() => { const logs = readEngineLogs({ lines: 30 }); return [...logs.stdout, ...logs.stderr]; })() : [],
             }),
+            modelChoices,
             judgeSetup: createJudgeSetup({
               spending: judgeSpending, cloud: cloudJudgeRuntime,
               local: () => resolveJudgeChoiceRuntime(judgeRuntimeInput, { choice: 'local', stop: null, remainingDollars: 0 }),

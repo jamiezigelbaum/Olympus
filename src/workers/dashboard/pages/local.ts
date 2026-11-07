@@ -49,6 +49,7 @@ import {
 import { DASHBOARD_PRIVACY_SETTINGS_COPY as S, DASHBOARD_PRIVATE_ANSWERS_COPY } from '../vocabulary.ts';
 import { dashboardPrivacyTabs, PRIVACY_TABS_CSS } from './private-answers.ts';
 import { dashboardLocalPageHref } from '../host-page.ts';
+import { MODEL_PICKER_CSS, renderAnswerModelPickers, renderZkapiModelPicker } from '../model-pickers.ts';
 import { renderModelSetup, renderModelSetupBlocker, dashboardModelsBlockedReason } from '../model-setup.ts';
 import type { DashboardOutsideHelpStatus } from '../outside-help.ts';
 import { AGENT_CONNECT_CSS, LOCAL_PAGE_CSS, MODEL_SETUP_CSS } from '../static-styles.ts';
@@ -64,6 +65,8 @@ import {
 export interface DashboardJudgeSetup extends JudgeSpendingStatus { cloudModel: string | null; cloudAvailable: boolean }
 export interface DashboardPageOptions {
   judgeSetup?: DashboardJudgeSetup;
+  /** The model pickers on Privacy rules (model-choices-backend.ts). */
+  modelChoices?: import('../../../core/model-choices.ts').DashboardModelChoices | undefined;
   now?: Date;
   /** Pairing credentials and chat choices require locally minted controls. */
   messagingLocalSession?: boolean;
@@ -180,7 +183,9 @@ export function renderDashboardKeysPage(view: SourceDashboardViewModel, options?
     `<section id="private-routing"><h3 class="sect">${escapeHtml(S.answeredTitle)}</h3><p class="pnote">${escapeHtml(S.answeredIntro)}</p>`
       + (mode ? `<div class="srow nodot" data-answer-mode="${escapeHtml(mode.id)}"><div class="smain"><b>${escapeHtml(mode.label)}</b>${mode.id === 'local-first' ? ` <span class="pnote">· ${escapeHtml(S.recommended)}</span>` : ''}</div><div class="sact"><a class="btn" href="${escapeHtml(home)}">${escapeHtml(S.change)}</a></div></div>` : '')
       + renderModelSetupBlocker(view.model_setup)
-      + `<div${view.model_setup?.cards.some(card => card.id === 'venice') ? ' id="venice-setup"' : ''}>${renderModelSetup(view.model_setup, { heading: false })}</div></section>`,
+      + `<div${view.model_setup?.cards.some(card => card.id === 'venice') ? ' id="venice-setup"' : ''}>${renderModelSetup(view.model_setup, { heading: false })}</div>`
+      + renderAnswerModelPickers(options?.modelChoices, unlocked(options)) + '</section>',
+    renderZkapiModelPicker(options?.modelChoices, unlocked(options)),
     view.model_setup?.cards.some(card => card.id === 'venice') ? '' : `<section id="venice-setup"><h3 class="sect">${escapeHtml(DASHBOARD_PRIVATE_ANSWERS_COPY.setUpVenice)}</h3><p class="pnote">${escapeHtml(DASHBOARD_PRIVATE_ANSWERS_COPY.veniceSetupHelp)}</p><div class="modelaction"><form method="post" action="/dashboard/connect/api-key" data-connect-kind="api_key" data-model-provider="venice"><input type="hidden" name="source" value="venice"><input class="keyfield" type="password" name="api_key" required autocomplete="new-password" placeholder="${escapeHtml(DASHBOARD_PRIVATE_ANSWERS_COPY.veniceKey)}" aria-label="${escapeHtml(DASHBOARD_PRIVATE_ANSWERS_COPY.veniceKey)}"><button type="submit" class="btn primary">${escapeHtml(DASHBOARD_PRIVATE_ANSWERS_COPY.connectVenice)}</button><span data-action-message role="status"></span></form></div></section>`,
     renderJudgeChoice(view, options),
   ].filter((block) => block !== '').join('\n');
@@ -188,7 +193,7 @@ export function renderDashboardKeysPage(view: SourceDashboardViewModel, options?
     crumb: DASHBOARD_PRIVATE_ANSWERS_COPY.crumb,
     meta: dashboardCheckedLabel(view.generated_at, options?.now ?? new Date()),
     body,
-    styles: [MODEL_SETUP_CSS, PRIVACY_TABS_CSS],
+    styles: [MODEL_SETUP_CSS, PRIVACY_TABS_CSS, MODEL_PICKER_CSS],
     options,
   });
 }
