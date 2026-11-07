@@ -122,6 +122,64 @@ for (const step of ['beforeCopy', 'afterCopy', 'afterReceipt', 'afterCopiesCommi
   }
 }
 
+for (const retry of ['batch', 'single'] as const) {
+  test(`abandoned batch destinations can be replaced after a source update (${retry} retry)`, async () => {
+    const f = await fixture(3, true);
+    expect(() => moveTieredItemsLowering(f.moves(), {
+      afterCopiesCommitted() { throw new Error('Synthetic interruption'); },
+    })).toThrow('Synthetic interruption');
+    for (const move of f.moves()) {
+      expect(f.f.stores.internal!.exportItemCopy(move.identity)!.chunks.map(chunk => chunk.boundedText).join('')).toBe(body);
+      f.f.ledger.abandonMove(move.identity, { expectedGeneration: f.f.ledger.getCurrent(move.identity)!.generation });
+      expect(f.f.ledger.copies(move.identity).find(copy => copy.corpusId === f.f.stores.internal!.corpusId))
+        .toMatchObject({ state: 'superseded', supersededByGeneration: null });
+    }
+    personalHiddenCheck(f.f)();
+    f.reopen();
+    personalHiddenCheck(f.f)();
+
+    const updatedBody = 'Synthetic orchard inventory updated with pears.';
+    await f.f.stores.secure_local!.syncFromConnector(fixtureConnector(() => f.specs.map(spec => ({
+      ...spec, text: updatedBody, version: 'v2', legacyDomain: 'secure_local' as const,
+    }))), { fetchContent: true, placement: FIXTURE_PLACEMENT });
+    const fresh = classifyItemTiers({ signals: { title: 'Synthetic' }, text: updatedBody });
+    expect(fresh).toMatchObject({ metadataTier: 'private', contentTier: 'private', contentPending: false });
+    for (const spec of f.specs) {
+      expect(f.f.stores.secure_local!.localContent(localId(spec.id))?.chunks.join('')).toBe(updatedBody);
+      f.f.ledger.recordRoutedPlacement(identityOf(spec.id), fresh, f.f.set.placementFor(fresh));
+    }
+    // Without replacement authority the older hidden text is still protected.
+    for (const result of moveTieredItemsLowering(f.moves())) {
+      expect(result).toHaveProperty('error');
+      if ('error' in result) expect(String(result.error)).toContain('owner-approved');
+    }
+    personalHiddenCheck(f.f)();
+    const moves = f.moves().map(move => ({
+      ...move, replaceOwnSupersededCopy: true,
+      beforeFlip: () => {
+        expect(f.f.stores.internal!.localContent(localId(move.identity.providerItemId))?.chunks ?? []).toEqual([]);
+      },
+    }));
+    if (retry === 'batch') {
+      const results = moveTieredItemsLowering(moves);
+      expect(results).toHaveLength(f.specs.length);
+      for (const result of results) expect(result).toHaveProperty('result');
+    } else {
+      for (const move of moves) await moveTieredItem(move);
+    }
+    expect(f.f.ledger.listMoving()).toEqual([]);
+    expect(f.f.stores.internal!.searchItems('pears', 20)).toHaveLength(f.specs.length);
+    for (const spec of f.specs) {
+      expect(f.f.ledger.getCurrent(identityOf(spec.id))).toMatchObject({ state: 'current', contentTier: 'private' });
+      expect(f.f.stores.internal!.localContent(localId(spec.id))?.chunks.join('')).toBe(updatedBody);
+    }
+    await flushTierMoveNotes(f.f.ledger);
+    const notes = (await readEmbeddingLedger(join(f.f.dir, 'notes.jsonl'))).entries;
+    expect(notes).toHaveLength(f.specs.length);
+    expect(notes.every(note => note.what.includes('1 chunk(s) of older text'))).toBe(true);
+  });
+}
+
 function serviceFor(f: TierFixture, autoMoves: Partial<NonNullable<ConstructorParameters<typeof TierSnifferService>[0]['autoMoves']>> = {}, otherSets: TierFixture[] = []) {
   const installed = new InstalledTierClassification({ env: {} });
   const lines: string[] = [];
