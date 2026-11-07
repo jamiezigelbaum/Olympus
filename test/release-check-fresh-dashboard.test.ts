@@ -4,7 +4,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { mountDashboardController } from '../src/control-ui/browser-controller.ts';
-import { createPendingPrivacyPolicy, isPendingPrivacyPolicy, privateAnswerMode, saveFirstRunPrivacyChoice } from '../src/core/first-run-privacy.ts';
+import { createPendingPrivacyPolicy, isPendingPrivacyPolicy, saveFirstRunPrivacyChoice } from '../src/core/first-run-privacy.ts';
 import { ModelSetupService } from '../src/core/model-setup.ts';
 import { loadSovereigntyPreset, type SovereigntyPresetName } from '../src/core/sovereignty.ts';
 import { renderModelSetup } from '../src/workers/dashboard/model-setup.ts';
@@ -43,7 +43,8 @@ for (const mode of ['saves', 'loses', 'refused', 'unlock'] as const) test(`first
     if (losesSave && keysVisits === 2) writeFileSync(path, JSON.stringify(createPendingPrivacyPolicy()));
     const config = policy();
     const html = renderModelSetup(new ModelSetupService({ config, credentialState: () => 'ready', autoCheck: false }).getStatus());
-    window.document.body.innerHTML = `<div data-answer-mode="${privateAnswerMode(config)}"></div>${html}`;
+    // The Keys page as shipped: only the engine's setup status, no separate answer-mode row.
+    window.document.body.innerHTML = html;
     // Start on a different option so the driver must select Recommended explicitly.
     const other = window.document.querySelector<HTMLInputElement>('input[value="no-sensitive"]');
     if (other) other.checked = true;

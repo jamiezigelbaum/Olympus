@@ -176,8 +176,10 @@ export async function openFreshDashboard(machine: Machine, endpoint: string, tim
           throw new Error(said ? `first-run privacy choice was not saved: the dashboard said "${said}"` : `${(error as Error).message} (the dashboard showed no message)`);
         }
         // Saving restarts the worker. Retry fresh documents across that handoff;
-        // only the applied policy, never the submitted radio's state, proves persistence.
-        await until(async () => await navigate('/dashboard?keys') && !!await panel<boolean>(`!!document.querySelector('[data-model-setup-status]') && !!document.querySelector('[data-answer-mode="${recommended.id}"]') && !document.querySelector('form[data-first-run-privacy]')`, Boolean), 'first-run privacy choice did not persist after reload');
+        // only the applied policy, never the submitted radio's state, proves persistence:
+        // the engine's own setup status must no longer report the choice pending (every
+        // release renders it), and a build that shows the answer mode must show this one.
+        await until(async () => await navigate('/dashboard?keys') && !!await panel<boolean>(`(() => { const s=document.querySelector('[data-model-setup-status]'); if(!s || document.querySelector('form[data-first-run-privacy]')) return false; let view; try { view=JSON.parse(s.dataset.modelSetupStatus); } catch { return false; } if(view.privacy_choice_pending) return false; const shown=document.querySelector('[data-answer-mode]'); return !shown || shown.getAttribute('data-answer-mode')===${JSON.stringify(recommended.id)}; })()`, Boolean), 'first-run privacy choice did not persist after reload');
         await reload();
         return `${recommended.label} (${recommended.id}, Recommended) saved and verified after reload`;
       },
