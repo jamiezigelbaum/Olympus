@@ -185,7 +185,12 @@ olympus setup --preset private-cloud-only --cloud-lane subscription --yes
 Setup also registers the background sync worker (a launchd agent on macOS, a
 user systemd unit on Linux) and writes its environment file, so macOS shows a
 "Background Items Added" notification when you run it. Step 3 checks that
-worker rather than installing a second one.
+worker rather than installing a second one. Setup also creates an owner-only
+`~/.local/bin/olympus` launcher unless you already have a launcher owned by a
+standalone installer or by you. It follows worker upgrades and rollback.
+If `~/.local/bin` is absent from your login PATH, use the full command in
+setup's `worker.install.cli_command`, for example
+`"$HOME/.local/bin/olympus" dashboard`, on the machine running Olympus.
 
 If setup reports missing model keys, finish base activation and open the
 dashboard. Its **Keys** page (under **On this computer**, or through **Change**

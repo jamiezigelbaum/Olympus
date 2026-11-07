@@ -454,8 +454,13 @@ OLYMPUS_BIN="$OLYMPUS_ROOT/bin/olympus"
 
 Continue the quickstart to describe your data, choose a privacy posture,
 connect model credentials, and verify base activation before choosing your
-sources in the dashboard and checking the first cited answer. The CLI lives inside the
-managed plugin; use the resolved executable rather than assuming it is on PATH.
+sources in the dashboard and checking the first cited answer. Setup installs an
+owner-only `~/.local/bin/olympus` launcher on Linux and macOS and keeps it aligned
+with worker upgrades and rollback. Existing user or standalone launchers are
+preserved. If `~/.local/bin` is missing from your login PATH, run
+`"$HOME/.local/bin/olympus" dashboard` on the machine running Olympus (on a
+server, use that server). Setup reports the full command, including a fallback
+when an existing launcher belongs to another installer.
 
 This candidate artifact includes native Control UI support. On OpenClaw
 **2026.9.2**, use **Olympus** in the Control UI sidebar to connect

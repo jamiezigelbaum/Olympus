@@ -1,3 +1,5 @@
+import { homedir } from 'node:os';
+import { quoteCliArgument, readWorkerCliLauncher, renderWorkerCliLauncher, workerCliLauncherPath, writeWorkerCliLauncher } from './worker-cli-launcher.ts';
 import { WORKER_DATA_OWNER_BUSY_EXIT_CODE } from './data-owner-lock.ts';
 import { OWNER_BRIDGE_HOST_ENV } from './linux-owner-bridge-host.ts';
 import { removeReleasedWorkerSocket, validateWorkerSocket, workerSocketListenerStopped, workerFetch } from './worker-transport.ts';
@@ -66,6 +68,8 @@ export interface NativeWorkerServiceOptions {
   ownerBridgeHostSocket?: string;
   /** Set only by the engine host: this worker is the standalone engine's own, not a gateway's. */
   engineHosted?: boolean;
+  /** The home that holds ~/.local/bin/olympus; tests pass a temporary one. */
+  homeDir?: string;
 }
 
 /**
@@ -143,7 +147,23 @@ export function createNativeWorkerService(options: NativeWorkerServiceOptions): 
         ...settings,
         async readinessProbe(child) {
           const ready = await probe(child);
-          if (ready && generation === proofGeneration) readyChild = child;
+          if (ready && generation === proofGeneration) {
+            // A managed OpenClaw update may move the plugin package without
+            // rerunning setup. Publish only after this CLI has proved healthy;
+            // a failed start leaves the last healthy launcher's target intact.
+            if (!options.engineHosted && readyChild !== child && (process.platform === 'linux' || process.platform === 'darwin')) {
+              const home = options.homeDir ?? homedir();
+              let command = [settings.runtimePath, settings.executablePath].map(quoteCliArgument).join(' ');
+              try {
+                writeWorkerCliLauncher(home, renderWorkerCliLauncher(settings.runtimePath, settings.executablePath));
+                if (readWorkerCliLauncher(home) !== null) command = quoteCliArgument(workerCliLauncherPath(home));
+              } catch (error) {
+                input.context.logger?.warn?.(`Olympus CLI launcher could not be installed: ${error instanceof Error ? error.message : String(error)}`);
+              }
+              input.context.logger?.info?.(`On the machine running Olympus, run ${command} dashboard.`);
+            }
+            readyChild = child;
+          }
           return ready;
         },
       };

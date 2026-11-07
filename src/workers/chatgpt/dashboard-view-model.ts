@@ -339,7 +339,8 @@ export function buildChatGptDashboardViewModel(
   if (options.privacy?.classifierAwaitingApproval) {
     needsYou.push({
       id: 'privacy:classifier_approval',
-      sentence: DASHBOARD_CHATGPT_PRIVACY_CLASSIFIER_APPROVAL_COPY.sentence,
+      sentence: [DASHBOARD_CHATGPT_PRIVACY_CLASSIFIER_APPROVAL_COPY.sentence,
+        `${options.remote ? DASHBOARD_CHATGPT_PRIVACY_CLASSIFIER_APPROVAL_COPY.server : DASHBOARD_CHATGPT_PRIVACY_CLASSIFIER_APPROVAL_COPY.machine}, run ${DASHBOARD_CHATGPT_PRIVACY_CLASSIFIER_APPROVAL_COPY.command}, ${DASHBOARD_CHATGPT_PRIVACY_CLASSIFIER_APPROVAL_COPY.reason}`].join(' '),
       fix: checkAgainFix(openOnComputer(undefined, 'models')),
     });
   }

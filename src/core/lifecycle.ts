@@ -1,3 +1,4 @@
+import { readWorkerCliLauncher, restoreWorkerCliLauncher } from './worker-cli-launcher.ts';
 import { validateWorkerSocket } from './worker-transport.ts';
 import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
@@ -97,6 +98,9 @@ interface LifecycleTransactionV1 {
   previous_service_state: WorkerServiceState;
   previous_unit_sha256?: string;
   previous_env_sha256?: string;
+  /** Optional for recovery of transactions written before CLI launchers existed. */
+  previous_launcher_present?: boolean;
+  previous_launcher_sha256?: string;
   desired_unit_sha256: string;
   artifact_sha256?: string;
   package_version?: string;
@@ -301,7 +305,7 @@ function installOrUpgradeLifecycle(
         action,
         ok: true,
         platform: options.platform,
-        changed: false,
+        changed: install.wrote_launcher,
         recovered_interrupted_transaction: recovered,
         install,
         service: before,
@@ -512,6 +516,7 @@ function beginTransaction(
   assertTransactionParentSafety(options.homeDir, paths);
   const previousUnit = readManagedFileSnapshot(preview.unit_path);
   const previousEnv = readManagedFileSnapshot(preview.env_path);
+  const previousLauncher = readWorkerCliLauncher(options.homeDir);
   const transaction: LifecycleTransactionV1 = {
     schema_version: OLYMPUS_LIFECYCLE_SCHEMA_VERSION,
     action,
@@ -522,6 +527,8 @@ function beginTransaction(
     env_path: preview.env_path,
     previous_unit_present: previousUnit !== undefined,
     previous_env_present: previousEnv !== undefined,
+    ...(previousLauncher !== null ? { previous_launcher_present: previousLauncher !== undefined } : {}),
+    ...(previousLauncher != null ? { previous_launcher_sha256: sha256(previousLauncher) } : {}),
     previous_service_state: previousServiceState,
     ...(previousUnit !== undefined ? { previous_unit_sha256: sha256(previousUnit) } : {}),
     ...(previousEnv !== undefined ? { previous_env_sha256: sha256(previousEnv) } : {}),
@@ -535,6 +542,7 @@ function beginTransaction(
   writePrivateFileAtomicSync(paths.transaction, `${JSON.stringify(transaction, null, 2)}\n`);
   writeSnapshotBackup(paths.unitBackup, previousUnit);
   writeSnapshotBackup(paths.envBackup, previousEnv);
+  writeSnapshotBackup(paths.launcherBackup, previousLauncher ?? undefined);
   updateTransactionPhase(options, 'prepared');
 }
 
@@ -569,6 +577,16 @@ function rollbackTransaction(
   if (intent.touchServiceManager) quiesceAttemptedWorker(options);
   restoreManagedFile(options.homeDir, transaction.unit_path, paths.unitBackup, transaction.previous_unit_present, transaction.previous_unit_sha256);
   restoreManagedFile(options.homeDir, transaction.env_path, paths.envBackup, transaction.previous_env_present, transaction.previous_env_sha256);
+  if (transaction.previous_launcher_present !== undefined) {
+    let previousLauncher: string | undefined;
+    if (transaction.previous_launcher_present) {
+      previousLauncher = readManagedFileSnapshot(paths.launcherBackup);
+      if (previousLauncher === undefined || sha256(previousLauncher) !== transaction.previous_launcher_sha256) {
+        throw new OperationError('config_error', 'Lifecycle CLI launcher rollback backup integrity check failed.');
+      }
+    }
+    restoreWorkerCliLauncher(options.homeDir, previousLauncher);
+  }
   const reactivatePrevious = intent.activatePrevious
     && transaction.previous_unit_present
     && transaction.previous_service_state === 'active';
@@ -704,6 +722,8 @@ function readTransaction(options: { homeDir?: string }): LifecycleTransactionV1 
     || !['snapshotting', 'prepared', 'activating', 'qualifying', 'rollback_required', 'commit_ready'].includes(transaction.phase)
     || transaction.unit_path !== expectedPaths.unitPath
     || !isRecordedManagedPath(transaction.env_path)
+    || (transaction.previous_launcher_present !== undefined && typeof transaction.previous_launcher_present !== 'boolean')
+    || (transaction.previous_launcher_present === true && !/^[0-9a-f]{64}$/.test(transaction.previous_launcher_sha256 ?? ''))
   ) {
     throw new OperationError('config_error', 'The Olympus lifecycle transaction does not match this installation; refusing recovery.');
   }
@@ -725,7 +745,7 @@ function readTransaction(options: { homeDir?: string }): LifecycleTransactionV1 
 function clearTransaction(options: { homeDir?: string }): void {
   const paths = transactionPaths(validateHomeDir(options.homeDir ?? homedir()));
   assertTransactionParentSafety(validateHomeDir(options.homeDir ?? homedir()), paths);
-  for (const path of [paths.unitBackup, paths.envBackup, paths.transaction]) {
+  for (const path of [paths.unitBackup, paths.envBackup, paths.launcherBackup, paths.transaction]) {
     if (!existsSync(path)) continue;
     assertRegularFile(path, 'lifecycle transaction artifact');
     removeFileDurablySync(path);
@@ -789,6 +809,7 @@ function transactionPaths(homeDir: string): {
   transaction: string;
   unitBackup: string;
   envBackup: string;
+  launcherBackup: string;
 } {
   const dir = join(homeDir, '.local', 'state', 'olympus', 'lifecycle');
   return {
@@ -796,6 +817,7 @@ function transactionPaths(homeDir: string): {
     transaction: join(dir, 'transaction-v1.json'),
     unitBackup: join(dir, 'worker-unit.backup'),
     envBackup: join(dir, 'worker-env.backup'),
+    launcherBackup: join(dir, 'cli-launcher.backup'),
   };
 }
 
@@ -804,7 +826,7 @@ function assertTransactionParentSafety(
   paths: ReturnType<typeof transactionPaths>,
 ): void {
   try {
-    for (const path of [paths.transaction, paths.unitBackup, paths.envBackup]) {
+    for (const path of [paths.transaction, paths.unitBackup, paths.envBackup, paths.launcherBackup]) {
       assertManagedPathParentsSync(homeDir, path, 'lifecycle transaction');
     }
   } catch (error) {
