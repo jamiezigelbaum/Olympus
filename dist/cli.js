@@ -191148,10 +191148,12 @@ function createGmailMailScopeBrowser(options) {
         categories,
         sender_suggestions: [...tally2].filter(([, messages]) => messages >= 2).sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0])).slice(0, MAX_SENDER_SUGGESTIONS).map(([sender, messages]) => ({ sender, sample_messages: messages })),
         sample_size: sample.length,
-        estimate: estimateMailScope({
-          contentMessages: contentPage.resultSizeEstimate ?? contentPage.messages.length,
-          metadataMessages: metadataPage?.resultSizeEstimate ?? metadataPage?.messages.length ?? 0
-        }),
+        ...!contentPage.nextPageToken && !metadataPage?.nextPageToken ? {
+          estimate: estimateMailScope({
+            contentMessages: contentPage.messages.length,
+            metadataMessages: metadataPage?.messages.length ?? 0
+          })
+        } : {},
         provider_requests: requests
       };
     }

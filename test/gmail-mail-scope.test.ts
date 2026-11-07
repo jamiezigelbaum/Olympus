@@ -456,7 +456,7 @@ describe('no Gmail ingestion before approval', () => {
 });
 
 describe('mail picker summary', () => {
-  test('labels, category counts, sender sample and estimate within the stated request bound', async () => {
+  test('labels, category counts and sender sample within the stated request bound', async () => {
     const client = fakeClient(Array.from({ length: 120 }, (_, index) => ({
       ...message(`m-${index}`, NOW.getTime() - index * 3_600_000),
       payload: { headers: [{ name: 'From', value: index % 3 === 0 ? 'Bank <no-reply@bank.example>' : `person${index}@example.com` }] },
@@ -469,11 +469,37 @@ describe('mail picker summary', () => {
     expect(summary.categories.find((category) => category.category === 'promotions')?.messages_total).toBe(900);
     expect(summary.sample_size).toBe(100);
     expect(summary.sender_suggestions[0]).toEqual({ sender: 'no-reply@bank.example', sample_messages: 34 });
-    expect(summary.estimate).toMatchObject({ estimate: true, content_messages: 20_000, metadata_messages: 30_000 });
+    expect(summary.estimate).toBeUndefined();
     expect(summary.provider_requests).toBe(1 + 5 + 2 + 100);
     // The sample reads headers only.
     expect(new Set(client.formats)).toEqual(new Set(['metadata']));
     expect(senderAddress('"Doe, Jane" <Jane.Doe@Example.com>')).toBe('jane.doe@example.com');
+  });
+
+  test.each(['content', 'metadata'] as const)('large %s results with a capped estimate do not show a tiny count', async (leg) => {
+    const client = fakeClient(Array.from({ length: 202 }, (_, index) =>
+      message(`m-${index}`, NOW.getTime() - (leg === 'metadata' ? 3 * 365 * 86_400_000 : 0))),
+    { estimates: { content: 201, metadata: 201 } });
+    client.getLabel = async (id) => ({ id, name: id, messagesTotal: 33_057 });
+    const browser = createGmailMailScopeBrowser({ credentialHandle: 'gmail.personal', credentialBroker: OFFLINE_BROKER, apiClient: client, env: {} });
+    const summary = await browser.summarize({ scope: defaultMailScopeSelection(), now: NOW });
+    expect(summary.categories[0]?.messages_total).toBe(33_057);
+    expect(summary.estimate).toBeUndefined();
+    expect(summary.provider_requests).toBeLessThanOrEqual(108);
+  });
+
+  test.each(['2y', 'all'] as const)('complete first pages use observed counts instead of Gmail estimates: %s', async (window) => {
+    const client = fakeClient([
+      message('recent', NOW.getTime()),
+      message('old', NOW.getTime() - 3 * 365 * 86_400_000),
+    ], { estimates: { content: 201, metadata: 201 } });
+    const browser = createGmailMailScopeBrowser({ credentialHandle: 'gmail.personal', credentialBroker: OFFLINE_BROKER, apiClient: client, env: {} });
+    const summary = await browser.summarize({ scope: { ...defaultMailScopeSelection(), window }, now: NOW });
+    expect(summary.estimate).toMatchObject({
+      content_messages: window === 'all' ? 2 : 1,
+      metadata_messages: window === 'all' ? 0 : 1,
+      total_messages: 2,
+    });
   });
 });
 
