@@ -608,6 +608,9 @@ cached verdicts or 24 hours, whichever comes first. Each finished attempt logs
 one content-free line with rows read, examples per class, outcome/reason, model
 version when trained, active elapsed time and the next attempt; status also
 shows these counts and progress while scanning/fitting.
+Checkpoints are written only when the scan changes. A changed ledger/judge
+discards the obsolete attempt and starts again immediately; its log reports
+that immediate restart rather than the three-hour failure backoff.
 
 A changed judge identity or mounted-ledger
 membership invalidates the model. Account-scope withdrawal invalidates it too.

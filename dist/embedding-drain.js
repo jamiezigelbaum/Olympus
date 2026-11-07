@@ -18024,6 +18024,14 @@ class TierLedger {
         this.writeMeta(key, value);
     })();
   }
+  writeEmbeddingTrainingScan(value, revision) {
+    return this.db.transaction(() => {
+      if ((this.readMeta("embedding-prefilter:training-revision") ?? "0") !== revision)
+        return false;
+      this.writeMeta("embedding-prefilter:training-scan-v1", value);
+      return true;
+    }).immediate();
+  }
   metaEntries(prefix, options = {}) {
     return this.db.query("SELECT key, value FROM tier_ledger_meta WHERE key >= ? AND key < ? AND key > ? AND value <> ? ORDER BY key LIMIT ?").all(prefix, `${prefix}￿`, options.after ?? "", "", options.limit ?? -1);
   }
@@ -73179,7 +73187,7 @@ class EmbeddingPrefilter {
     attempt.outcome = outcome;
     if (reason)
       attempt.reason = reason;
-    attempt.nextAt = this.now() + (outcome === "failed" ? FAILED_RETRY_MS : RETRAIN_MS);
+    attempt.nextAt = this.now() + (reason === "ledger_or_judge_changed" ? 0 : outcome === "failed" ? FAILED_RETRY_MS : RETRAIN_MS);
     if (outcome === "too_few")
       attempt.verdicts = this.verdictCount();
     this.training = undefined;
@@ -73199,6 +73207,9 @@ class EmbeddingPrefilter {
     const started = clock2();
     const deadline = started + TRAINING_SLICE_MS;
     let attempt = this.attempt;
+    const finishedAtStart = attempt && ["trained", "too_few", "failed"].includes(attempt.outcome) ? attempt.id : undefined;
+    if (attempt?.outcome === "failed" && !attempt.revisions && this.now() < attempt.nextAt)
+      return;
     let stage = "scan_failed";
     try {
       const revisions = this.revisions();
@@ -73246,7 +73257,7 @@ class EmbeddingPrefilter {
           const scan = previous?.attempt === attempt.id ? previous : { attempt: attempt.id, done: false, rows: 0, samples: [] };
           if (!Array.isArray(scan.samples) || scan.samples.length > MAX_PER_CLASS * 2 || !Number.isSafeInteger(scan.rows))
             throw new Error;
-          return { member, scan };
+          return { member, scan, dirty: false, revision: member.options.ledger.readMeta(`${PREFIX}training-revision`) ?? "0" };
         });
         this.training = { id: attempt.id, scans, examples: [], memberIndex: 0, sampleIndex: 0 };
         attempt.counts = [0, 0];
@@ -73260,17 +73271,20 @@ class EmbeddingPrefilter {
       const run = this.training;
       let worked = false;
       const hasTime = () => !worked || clock2() < deadline;
-      for (const { member, scan } of run.scans) {
+      for (const entry of run.scans) {
+        const { member, scan } = entry;
         while (attempt.outcome !== "fitting" && !scan.done && !attempt.counts.every((count) => count >= MAX_PER_CLASS) && hasTime()) {
           const rows = member.options.ledger.listItemWindow({ ...scan.after ? { after: scan.after } : {}, limit: 32 });
           if (!rows.length) {
             scan.done = true;
+            entry.dirty = true;
             break;
           }
           for (const row of rows) {
             if (!hasTime())
               break;
             worked = true;
+            entry.dirty = true;
             scan.after = subjectOf(row);
             scan.rows++;
             attempt.rows++;
@@ -73352,16 +73366,22 @@ class EmbeddingPrefilter {
         this.saved = undefined;
         this.finishTraining(attempt, "failed", "ledger_or_judge_changed");
       }
-      for (const { member, scan } of run.scans) {
-        if (attempt.revisions === this.revisions())
-          member.options.ledger.writeMeta(SCAN, JSON.stringify(scan));
+      for (const entry of run.scans) {
+        if (entry.dirty && attempt.revisions === this.revisions()) {
+          if (!entry.member.options.ledger.writeEmbeddingTrainingScan(JSON.stringify(entry.scan), entry.revision)) {
+            this.finishTraining(attempt, "failed", "ledger_or_judge_changed");
+            break;
+          }
+          entry.dirty = false;
+        }
       }
     } catch {
       if (!attempt)
         attempt = this.attempt = { id: randomUUID12(), judge: judge2, revisions: "", startedAt: this.now(), elapsedMs: 0, rows: 0, counts: [0, 0], nextAt: this.now(), outcome: "scanning" };
-      this.finishTraining(attempt, "failed", stage);
+      if (attempt.outcome === "scanning" || attempt.outcome === "fitting")
+        this.finishTraining(attempt, "failed", stage);
     }
-    if (attempt) {
+    if (attempt && attempt.id !== finishedAtStart) {
       attempt.elapsedMs += clock2() - started;
       this.control.writeMeta(TRAINING, JSON.stringify(attempt));
       if (["trained", "too_few", "failed"].includes(attempt.outcome))

@@ -270,7 +270,16 @@ test('sliced training uses judge ledger labels without content hashes and writes
       placementFor: () => ({ copies: [{ corpusId: 'private', trustDomain: 'secure_local', trustTier: 'S4', layers: 'both' }], embedHold: false }),
     });
   }
-  for (let tick = 0; tick < 200 && !existsSync(join(f.modelDir, 'weights.json')); tick++) await f.filter.prepare(judge);
+  let checkpointWrites = 0;
+  const writeMeta = f.ledger.writeMeta.bind(f.ledger);
+  f.ledger.writeMeta = (key, value) => { if (key === 'embedding-prefilter:training-scan-v1') checkpointWrites++; writeMeta(key, value); };
+  let fittingWrites: number | undefined;
+  for (let tick = 0; tick < 200 && !existsSync(join(f.modelDir, 'weights.json')); tick++) {
+    await f.filter.prepare(judge);
+    if (fittingWrites !== undefined) expect(checkpointWrites).toBe(fittingWrites);
+    if (trainingState(f).outcome === 'fitting') fittingWrites = checkpointWrites;
+  }
+  expect(fittingWrites).toBeDefined();
   expect(f.filter.status()).toContain('is on');
   expect(statSync(f.modelDir).mode & 0o777).toBe(0o700);
   expect(statSync(join(f.modelDir, 'weights.json')).mode & 0o777).toBe(0o600);
@@ -556,7 +565,9 @@ test('failed scans log no error material and retry after three hours, not a day'
 });
 test('withdrawal deletes partial references and restarts without withdrawn labels', async () => {
   let monotonic = 0;
-  const f = fixture({ trained: false, monotonicNow: () => monotonic, log: () => {} });
+  const logs: string[] = [];
+  const now = Date.UTC(2026, 10, 7);
+  const f = fixture({ trained: false, now: () => now, monotonicNow: () => monotonic, log: line => logs.push(line) });
   for (let n = 0; n < 9; n++) trainingRow(f, n);
   f.setCopy(n => { monotonic += 50; return copy(n); });
   await f.filter.prepare(judge);
@@ -566,6 +577,9 @@ test('withdrawal deletes partial references and restarts without withdrawn label
   const restarted = f.make();
   await restarted.prepare(judge);
   expect(trainingState(f)).toMatchObject({ outcome: 'too_few', rows: 0, counts: [0, 0] });
+  expect(logs).toHaveLength(2);
+  expect(logs[0]).toContain('reason=ledger_or_judge_changed');
+  expect(logs[0]).toContain(`next_attempt=${new Date(now).toISOString()}`);
   expect(existsSync(join(f.modelDir, 'weights.json'))).toBe(false);
 });
 test('pooled sources share one 200 ms training slice per resolver tick', async () => {
@@ -582,7 +596,7 @@ test('pooled sources share one 200 ms training slice per resolver tick', async (
   expect(monotonic).toBe(200);
   expect(trainingState(a)).toMatchObject({ outcome: 'scanning', rows: 4, counts: [2, 2] });
 });
-test('training windows bound examined rows, including unrouted rows and conversation identities', () => {
+test('training windows bound examined rows, including unrouted rows', () => {
   const f = fixture({ trained: false });
   for (let n = 0; n < 8; n++) f.add(n);
   trainingRow(f, 8);
@@ -594,4 +608,60 @@ test('training windows bound examined rows, including unrouted rows and conversa
   const last = f.ledger.listItemWindow({ limit: 4, after: subject(7) });
   expect(last).toHaveLength(1);
   expect(last[0]!.routed).toBe(true);
+});
+
+test('completed attempts survive checkpoint and growth-count errors without duplicate outcomes', async () => {
+  const logs: string[] = [];
+  const f = fixture({ trained: false, log: line => logs.push(line) });
+  trainingRow(f, 0); trainingRow(f, 1);
+  const writeMeta = f.ledger.writeMeta.bind(f.ledger);
+  f.ledger.writeMeta = (key, value) => {
+    if (key === 'embedding-prefilter:training-scan-v1') throw new Error('Synthetic checkpoint error');
+    writeMeta(key, value);
+  };
+  await f.filter.prepare(judge);
+  expect(trainingState(f).outcome).toBe('too_few');
+  expect(logs).toHaveLength(1);
+  const verdictCount = f.sniffer.verdictCount.bind(f.sniffer);
+  f.sniffer.verdictCount = () => { throw new Error('Synthetic watermark error'); };
+  for (let tick = 0; tick < 2; tick++) await f.filter.prepare(judge);
+  expect(trainingState(f).outcome).toBe('too_few');
+  expect(logs).toHaveLength(1);
+  f.sniffer.verdictCount = verdictCount;
+});
+test('failure before reading ledger revisions still waits three hours across restart', async () => {
+  let now = Date.UTC(2026, 10, 7);
+  const logs: string[] = [];
+  const f = fixture({ trained: false, now: () => now, log: line => logs.push(line) });
+  const ledgerId = f.ledger.ledgerId.bind(f.ledger);
+  f.ledger.ledgerId = () => { throw new Error('Synthetic ledger error'); };
+  await f.filter.prepare(judge);
+  expect(trainingState(f)).toMatchObject({ outcome: 'failed', nextAt: now + 3 * 60 * 60 * 1000 });
+  f.ledger.ledgerId = ledgerId;
+  const restarted = f.make();
+  await restarted.prepare(judge);
+  expect(logs).toHaveLength(1);
+  now += 3 * 60 * 60 * 1000;
+  await restarted.prepare(judge);
+  expect(trainingState(f).outcome).toBe('too_few');
+  expect(logs).toHaveLength(2);
+});
+test('a withdrawal on another connection cannot race stale references back into meta', async () => {
+  const logs: string[] = [];
+  const f = fixture({ trained: false, log: line => logs.push(line) });
+  trainingRow(f, 0); trainingRow(f, 1);
+  const other = new TierLedger({ dbPath: f.ledger.dbPath });
+  const checkpoint = f.ledger.writeEmbeddingTrainingScan.bind(f.ledger);
+  f.ledger.writeEmbeddingTrainingScan = (value, revision) => {
+    // Interleave withdrawal after prepare's final revision read, before publication.
+    other.withdrawAccountScope('fixture', 'fixture');
+    return checkpoint(value, revision);
+  };
+  try {
+    await f.filter.prepare(judge);
+    expect(f.ledger.readMeta('embedding-prefilter:training-scan-v1')).toBeUndefined();
+    expect(f.ledger.getCurrent(subject(0))).toBeUndefined();
+    expect(trainingState(f)).toMatchObject({ outcome: 'failed', reason: 'ledger_or_judge_changed' });
+    expect(logs).toHaveLength(1);
+  } finally { other.close(); }
 });

@@ -1950,6 +1950,15 @@ export class TierLedger {
     this.db.transaction(() => { for (const [key, value] of entries) this.writeMeta(key, value); })();
   }
 
+  /** A withdrawal on another connection cannot be followed by stale scan references. */
+  writeEmbeddingTrainingScan(value: string, revision: string): boolean {
+    return this.db.transaction(() => {
+      if ((this.readMeta('embedding-prefilter:training-revision') ?? '0') !== revision) return false;
+      this.writeMeta('embedding-prefilter:training-scan-v1', value);
+      return true;
+    }).immediate();
+  }
+
   /** Small durable work receipts, without exporting any store content. */
   metaEntries(prefix: string, options: { after?: string; limit?: number } = {}): Array<{ key: string; value: string }> {
     return this.db.query('SELECT key, value FROM tier_ledger_meta WHERE key >= ? AND key < ? AND key > ? AND value <> ? ORDER BY key LIMIT ?')
