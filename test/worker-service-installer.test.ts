@@ -238,7 +238,7 @@ test('worker.env is written with owner-only permissions (token file)', async () 
     const mode = statSync(envPath).mode & 0o777;
     const env = readFileSync(envPath, 'utf8');
     expect(mode).toBe(0o600);
-    expect(env).toContain(`PATH=${dirname(process.execPath)}`);
+    expect(env).toContain(`PATH='${dirname(process.execPath)}`);
     expect(env).toContain('/usr/local/bin');
     expect(env).toContain('/usr/bin');
   } finally {
@@ -267,7 +267,7 @@ test('worker.env placeholder is upgraded when install receives a generated token
     expect(result.wrote_env).toBe(true);
     expect(env).toContain('OLYMPUS_WORKER_AUTH_TOKEN=generated-token');
     expect(env).not.toContain('replace-with-generated-token');
-    expect(env).toContain(`PATH=${dirname(process.execPath)}`);
+    expect(env).toContain(`PATH='${dirname(process.execPath)}`);
     expect(statSync(envPath).mode & 0o777).toBe(0o600);
   } finally {
     rmSync(home, { recursive: true, force: true });
@@ -320,7 +320,7 @@ test('worker.env PATH is repaired without dropping existing entries', async () =
       dryRun: false,
     });
     const env = readFileSync(envPath, 'utf8');
-    const pathLine = env.match(/^PATH=(.+)$/m)?.[1] ?? '';
+    const pathLine = env.match(/^PATH='(.+)'$/m)?.[1] ?? '';
 
     expect(result.wrote_env).toBe(true);
     expect(pathLine.split(':')).toContain(dirname(process.execPath));
@@ -384,6 +384,30 @@ test('worker.env permissions are repaired when an existing token is preserved', 
     expect(readFileSync(envPath, 'utf8')).toContain('OLYMPUS_WORKER_AUTH_TOKEN=old-token');
     expect(readFileSync(envPath, 'utf8')).not.toContain('new-token');
     expect(statSync(envPath).mode & 0o777).toBe(0o600);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('worker.env PATH is rewritten quoted on upgrade, keeps a directory with a space, and is never double-quoted (#711)', async () => {
+  const { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { installWorkerService } = await import('../src/core/worker-service.ts');
+  const { unquoteEnvValue } = await import('../src/core/worker-auth.ts');
+  const home = mkdtempSync(join(tmpdir(), 'olympus-worker-env-quoted-'));
+  const envPath = join(home, '.config', 'olympus', 'worker.env');
+  try {
+    mkdirSync(join(home, '.config', 'olympus'), { recursive: true });
+    writeFileSync(envPath, 'PATH=/Users/me/My Tools/bin:/usr/bin\nOLYMPUS_WORKER_AUTH_TOKEN=old-token\n', { mode: 0o600 });
+    installWorkerService({ platform: 'linux', homeDir: home, authToken: 'token', dryRun: false });
+    const first = readFileSync(envPath, 'utf8').match(/^PATH=(.*)$/m)?.[1] ?? '';
+    expect(first.startsWith("'") && first.endsWith("'")).toBe(true);
+    expect(unquoteEnvValue(first).split(':')).toContain('/Users/me/My Tools/bin');
+
+    // A second install reads the quoted line back and leaves it as it is.
+    installWorkerService({ platform: 'linux', homeDir: home, authToken: 'token', dryRun: false });
+    const second = readFileSync(envPath, 'utf8').match(/^PATH=(.*)$/m)?.[1] ?? '';
+    expect(second).toBe(first);
   } finally {
     rmSync(home, { recursive: true, force: true });
   }
