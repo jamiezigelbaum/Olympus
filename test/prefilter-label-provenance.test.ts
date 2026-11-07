@@ -49,6 +49,33 @@ test.each(['private', 'secure'] as const)('older-prompt content verdict bound to
       contentHash: normalizedContentHash(text), decidedAt: '2026-11-06T00:00:00.000Z', ambiguous: false }) },
   })).toMatchObject({ private: tier === 'secure', provenance: 'legacy_sniffer' });
 });
+test.each([false, true])('queued lowering trains the final Personal verdict, modern=%s', modern => {
+  const moving = { ...row(older, 'other:1.00', 'private', modern), state: 'moving' as const,
+    contentTier: 'secure' as const, targetMetadataTier: 'private' as const, targetContentTier: 'private' as const };
+  expect(prefilterTrainingExample(moving, current, { ...options,
+    sniffer: { trainingVerdict: () => ({ tier: 'personal', contentHash: normalizedContentHash(text),
+      decidedAt: '2026-11-06T00:00:00.000Z', ambiguous: false }) },
+  })).toMatchObject({ private: false });
+});
+test('pending judgment cannot supply a label even with old verdict receipts', () => {
+  rejected({ ...row(older, 'other:1.00', 'private', true), state: 'pending', contentPending: true }, 'not_current');
+  rejected({ ...row(older, 'other:1.00', 'private', true), state: 'moving', contentPending: true,
+    targetMetadataTier: 'private', targetContentTier: 'private' }, 'content_pending');
+});
+test('moving row with an extra raiser never trains', () => {
+  const value = { ...row(older, 'other:1.00', 'private', true), state: 'moving' as const,
+    contentTier: 'secure' as const, targetMetadataTier: 'private' as const, targetContentTier: 'private' as const };
+  value.reasons.push('content:own_record:health');
+  rejected(value, 'content_reason_unknown');
+});
+test('moving targets need a matching verdict and may not involve Secrets', () => {
+  rejected({ ...row(older, 'other:1.00', 'secure', true), state: 'moving',
+    targetMetadataTier: 'private', targetContentTier: 'private' }, 'verdict_missing');
+  rejected({ ...row(older, 'other:1.00', 'private', true), state: 'moving', contentTier: 'secrets',
+    targetMetadataTier: 'private', targetContentTier: 'private' }, 'content_tier');
+  rejected({ ...row(older, 'other:1.00', 'private', true), state: 'moving',
+    targetMetadataTier: null, targetContentTier: null }, 'metadata_tier');
+});
 test('different model is rejected, even with a matching modern receipt and digest', () => {
   for (const modern of [false, true]) rejected(row(different, 'other:1.00', 'private', modern), 'judge_model_mismatch');
 });
@@ -104,6 +131,7 @@ test('counts share acceptance and report numeric model-mismatch rejections only'
     listItemWindow: () => { if (read) return []; read = true; return [row(), { ...row(older, 'personal_record:1.00', 'secure'), providerItemId: 'private-label' }, row(different)]; },
   } });
   expect(counts).toMatchObject({ rows_read: 3, examples: { personal: 1, private: 1 },
+    per_source: { other: { personal: 1, private: 1 } },
     provenance: { judge_receipt: 0, legacy_sniffer: 2 }, rejections: { judge_model_mismatch: 1 } });
   expect(Object.values(counts.rejections).reduce((a, b) => a + b, 0)).toBe(1);
   expect(JSON.stringify(counts)).not.toMatch(/synthetic|fixture|p-older|p-current/);
@@ -118,4 +146,21 @@ test('missing legacy evidence is an explainable counts-only rejection', () => {
   expect(counts).toMatchObject({ rows_read: 1, examples: { personal: 0, private: 0 },
     rejections: { legacy_verdict_missing: 1 } });
   expect(JSON.stringify(counts)).not.toMatch(/synthetic|fixture|p-older|p-current/);
+});
+
+test('per-source class counts use final judge labels and do not expose arbitrary provider names', () => {
+  let read = false;
+  const counts = countPrefilterTraining({ ...options, judge: current, ledger: { ...options.ledger,
+    listItemWindow: () => {
+      if (read) return []; read = true;
+      return [{ ...row(older, 'other:1.00', 'private', true), provider: 'telegram', state: 'moving',
+        contentTier: 'secure', targetMetadataTier: 'private', targetContentTier: 'private' },
+        { ...row(older, 'other:1.00', 'secure', true), provider: 'telegram' },
+        { ...row(older, 'other:1.00', 'private', true), provider: 'whatsapp' },
+        { ...row(older, 'other:1.00', 'private', true), provider: 'owner-specific-provider' }];
+    },
+  } });
+  expect(counts.per_source).toEqual({ telegram: { personal: 1, private: 1 },
+    whatsapp: { personal: 1, private: 0 }, other: { personal: 1, private: 0 } });
+  expect(JSON.stringify(counts)).not.toContain('owner-specific-provider');
 });

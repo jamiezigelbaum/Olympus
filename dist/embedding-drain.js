@@ -74998,7 +74998,8 @@ var RECEIPTS = `${PREFIX}clear:`;
 var CHECKS = `${PREFIX}check:`;
 var WINDOW = 200;
 var RETRAIN_MS = 24 * 60 * 60 * 1000;
-var MAX_PER_CLASS = 5000;
+var PREFILTER_MAX_PER_CLASS = 5000;
+var MAX_PER_CLASS = PREFILTER_MAX_PER_CLASS;
 var TRAINING_SLICE_MS = 200;
 var FAILED_RETRY_MS = 3 * 60 * 60 * 1000;
 var NEW_VERDICTS = 1000;
@@ -75068,17 +75069,19 @@ function prefilterTrainingExample(row, judge2, options, reject = () => {
 }) {
   if (!row.routed)
     return reject("not_routed");
-  if (row.state !== "current")
+  if (row.state !== "current" && row.state !== "moving")
     return reject("not_current");
+  const metadataTier = row.state === "moving" ? row.targetMetadataTier : row.metadataTier;
+  const contentTier = row.state === "moving" ? row.targetContentTier : row.contentTier;
   if (row.metadataPending)
     return reject("metadata_pending");
   if (row.contentPending)
     return reject("content_pending");
   if (!row.contentRead)
     return reject("content_unread");
-  if (row.metadataTier !== "private")
+  if (metadataTier !== "private" || row.metadataTier === "secrets")
     return reject("metadata_tier");
-  if (!["private", "secure"].includes(row.contentTier))
+  if (contentTier !== "private" && contentTier !== "secure" || row.contentTier === "secrets")
     return reject("content_tier");
   if (row.metadataForced)
     return reject("metadata_forced");
@@ -75141,7 +75144,7 @@ function prefilterTrainingExample(row, judge2, options, reject = () => {
   if (!row.reasons.includes(digest))
     return reject("digest_missing");
   let provenance = "judge_receipt";
-  if (!row.reasons.includes(contentJudgeVerdictReason(judged, row.contentTier, digest))) {
+  if (!row.reasons.includes(contentJudgeVerdictReason(judged, contentTier, digest))) {
     if (row.reasons.some((reason) => reason.startsWith("content:judge_verdict:")))
       return reject("verdict_missing");
     if (!options.sniffer)
@@ -75159,7 +75162,7 @@ function prefilterTrainingExample(row, judge2, options, reject = () => {
     const time3 = Date.parse(verdict.decidedAt), decisionTime = Date.parse(row.decidedAt);
     if (!Number.isFinite(time3) || !Number.isFinite(decisionTime) || time3 > decisionTime)
       return reject("legacy_verdict_time");
-    if ((verdict.tier === "personal" ? "private" : verdict.tier === "private" ? "secure" : undefined) !== row.contentTier)
+    if ((verdict.tier === "personal" ? "private" : verdict.tier === "private" ? "secure" : undefined) !== contentTier)
       return reject("legacy_verdict_tier");
     if (verdict.contentHash !== normalizedContentHash(copy.chunks.map((chunk) => chunk.boundedText).join("")))
       return reject("legacy_verdict_content");
@@ -75170,7 +75173,13 @@ function prefilterTrainingExample(row, judge2, options, reject = () => {
     return;
   if (Math.hypot(...vector) === 0)
     return reject("vector_zero");
-  return { vector, copy, private: row.contentTier === "secure", provenance };
+  return { vector, copy, private: contentTier === "secure", provenance };
+}
+function prefilterTrainingWindow(ledger, after, limit) {
+  return ledger.listItemWindow({ ...after ? { after } : {}, limit });
+}
+function selectPrefilterTrainingExample(example, counts) {
+  return counts[Number(example.private)] < PREFILTER_MAX_PER_CLASS;
 }
 
 class EmbeddingPrefilter {
@@ -75293,7 +75302,7 @@ class EmbeddingPrefilter {
     const fingerprint = this.trainingFingerprint(row);
     const copied = copyFingerprint2(copy);
     const subject = subjectOf(row);
-    return { vector, private: row.contentTier === "secure", current: (checkLedger) => {
+    return { vector, private: eligible.private, current: (checkLedger) => {
       const currentCopy = this.options.copyFor(subject);
       if (!currentCopy || copyFingerprint2(currentCopy) !== copied)
         return false;
@@ -75356,7 +75365,7 @@ class EmbeddingPrefilter {
     const started = clock2();
     const deadline = started + TRAINING_SLICE_MS;
     let attempt = this.attempt;
-    if (attempt && attempt.labelVersion !== 3) {
+    if (attempt && attempt.labelVersion !== 5) {
       attempt = this.attempt = undefined;
       this.training = undefined;
     }
@@ -75391,7 +75400,7 @@ class EmbeddingPrefilter {
       }
       if (!attempt) {
         attempt = this.attempt = {
-          labelVersion: 3,
+          labelVersion: 5,
           id: randomUUID12(),
           revisions,
           judge: judge2,
@@ -75437,10 +75446,7 @@ class EmbeddingPrefilter {
         const { member, scan } = entry;
         if (scan.done)
           continue;
-        const rows = member.options.ledger.listItemWindow({
-          ...scan.after ? { after: scan.after } : {},
-          limit: Math.min(32, MAX_PER_CLASS * 2 - attempt.counts[0] - attempt.counts[1])
-        });
+        const rows = prefilterTrainingWindow(member.options.ledger, scan.after, Math.min(32, MAX_PER_CLASS * 2 - attempt.counts[0] - attempt.counts[1]));
         if (!rows.length) {
           scan.done = true;
           entry.dirty = true;
@@ -75454,13 +75460,10 @@ class EmbeddingPrefilter {
           scan.after = subjectOf(row);
           scan.rows++;
           attempt.rows++;
-          const index = Number(row.contentTier === "secure");
-          if (attempt.counts[index] < MAX_PER_CLASS) {
-            const example = member.trainingExample(row, judge2);
-            if (example) {
-              scan.samples.push({ subject: subjectOf(row), private: example.private });
-              attempt.counts[Number(example.private)]++;
-            }
+          const example = member.trainingExample(row, judge2);
+          if (example && selectPrefilterTrainingExample(example, attempt.counts)) {
+            scan.samples.push({ subject: subjectOf(row), private: example.private });
+            attempt.counts[Number(example.private)]++;
           }
           await ingestionTurn();
         }
@@ -75577,7 +75580,7 @@ class EmbeddingPrefilter {
       }
     } catch {
       if (!attempt)
-        attempt = this.attempt = { labelVersion: 3, id: randomUUID12(), judge: judge2, revisions: "", startedAt: this.now(), elapsedMs: 0, rows: 0, counts: [0, 0], nextAt: this.now(), outcome: "scanning" };
+        attempt = this.attempt = { labelVersion: 5, id: randomUUID12(), judge: judge2, revisions: "", startedAt: this.now(), elapsedMs: 0, rows: 0, counts: [0, 0], nextAt: this.now(), outcome: "scanning" };
       if (attempt.outcome === "scanning" || attempt.outcome === "fitting")
         this.finishTraining(attempt, "failed", stage);
     }

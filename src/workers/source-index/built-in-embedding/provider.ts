@@ -719,7 +719,7 @@ function loadTokenizer(path: string): WindowTokenizer {
 }
 
 /** The text a model reads for one input: its task prefix, then the title and text as the model was trained to see them. */
-function promptText(spec: BuiltInEmbeddingModelSpec, input: SourceEmbeddingInput, taskType: SourceEmbeddingTaskType): string {
+export function promptText(spec: BuiltInEmbeddingModelSpec, input: SourceEmbeddingInput, taskType: SourceEmbeddingTaskType): string {
   if (taskType === 'RETRIEVAL_QUERY') return `${spec.queryPrefix}${input.title ? `${input.title}\n` : ''}${input.text}`;
   if (spec.documentPrefix.includes('{title}')) {
     const title = input.title?.replace(/\s+/g, ' ').trim() || 'none';
@@ -798,7 +798,7 @@ function planBatches(windows: Window[]): Window[][] {
   return batches;
 }
 
-function normalize(vector: ArrayLike<number>): number[] {
+export function normalize(vector: ArrayLike<number>): number[] {
   let norm = 0;
   for (let index = 0; index < vector.length; index += 1) norm += vector[index]! * vector[index]!;
   norm = Math.sqrt(norm);

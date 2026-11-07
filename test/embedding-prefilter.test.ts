@@ -612,6 +612,18 @@ test('only judge-only ledger labels qualify; competing tiers, record holds and s
   expect(logs[0]).toContain('personal=1 private=1 outcome=too_few');
   expect(existsSync(join(f.modelDir, 'weights.json'))).toBe(false);
 });
+test('worker samples a queued lowering by the final Personal target instead of its old Private placement', async () => {
+  const f = fixture({ trained: false, memory: true, log: () => {} });
+  trainingRow(f, 0);
+  const settled = f.ledger.getCurrent(subject(0))!;
+  // Reproduce placement waiting at Private with the already-final Personal reasons.
+  f.ledger.recordRoutedPlacement(subject(0), { ...settled, state: 'current', contentTier: 'secure',
+    decidedBy: 'sniffer', snifferId: judge }, f.placementFor({ contentPending: true } as TierDecision));
+  f.ledger.beginMove(subject(0), { metadataTier: 'private', contentTier: 'private' }, f.ledger.getCurrent(subject(0))!.generation);
+  expect(f.ledger.getCurrent(subject(0))).toMatchObject({ state: 'moving', contentTier: 'secure', contentPending: false });
+  await f.filter.prepare(judge);
+  expect(trainingState(f)).toMatchObject({ outcome: 'too_few', counts: [1, 0] });
+});
 test('scan stops at its 200 ms deadline and resumes its durable cursor after restart', async () => {
   let monotonic = 0;
   const logs: string[] = [];
@@ -969,7 +981,7 @@ test('legacy metadata raises and differing subject verdict tiers never label', (
   expect(drops).toEqual(['legacy_verdict_tier']);
 });
 
-test.each([undefined, 2])('an old zero-example attempt restarts immediately: label version %s', async version => {
+test.each([undefined, 2, 3, 4])('an old zero-example attempt restarts immediately: label version %s', async version => {
   const f = fixture({ trained: false, memory: true, log: () => {} });
   await f.filter.prepare(judge);
   const old = trainingState(f);
@@ -982,7 +994,7 @@ test.each([undefined, 2])('an old zero-example attempt restarts immediately: lab
       reasons: row.reasons.filter(reason => !reason.startsWith('content:judge_verdict:')) });
   }
   await f.make().prepare(judge);
-  expect(trainingState(f)).toMatchObject({ labelVersion: 3, outcome: 'too_few', counts: [1, 1] });
+  expect(trainingState(f)).toMatchObject({ labelVersion: 5, outcome: 'too_few', counts: [1, 1] });
   expect(trainingState(f).id).not.toBe(old.id);
 });
 

@@ -21,14 +21,15 @@ const RECEIPTS = `${PREFIX}clear:`;
 const CHECKS = `${PREFIX}check:`;
 const WINDOW = 200;
 const RETRAIN_MS = 24 * 60 * 60 * 1000;
-const MAX_PER_CLASS = 5000;
+export const PREFILTER_MAX_PER_CLASS = 5000;
+const MAX_PER_CLASS = PREFILTER_MAX_PER_CLASS;
 const TRAINING_SLICE_MS = 200;
 const FAILED_RETRY_MS = 3 * 60 * 60 * 1000;
 const NEW_VERDICTS = 1000;
 const TRAINING = `${PREFIX}training-v1`;
 const SCAN = `${PREFIX}training-scan-v1`;
 interface TrainingAttempt {
-  labelVersion: 3;
+  labelVersion: 5;
   id: string; revisions: string; judge: string; startedAt: number; elapsedMs: number;
   rows: number; counts: [number, number]; nextAt: number;
   outcome: 'scanning' | 'fitting' | 'trained' | 'too_few' | 'failed';
@@ -49,7 +50,7 @@ interface TrainingRun {
   markers?: string[];
   validationIndex: number; validationRemaining: number;
 }
-interface SavedModel { revisions: string; version: string; trainedAt: number; judge: string; model: LogisticModel }
+export interface SavedModel { revisions: string; version: string; trainedAt: number; judge: string; model: LogisticModel }
 interface Receipt { subject: TierSnifferSubject; hash: string; reason: string; original: TierDecision }
 interface Audit { misses: boolean[]; stopped: boolean; reason?: 'audit_unreadable' }
 import { embeddingPrefilterDirectory } from './tier-ledger-path.ts';
@@ -128,12 +129,16 @@ export function prefilterTrainingExample(row: TierLedgerRecord, judge: string, o
   copyFor: (subject: TierSnifferSubject) => PrefilterCopy | undefined;
 }, reject: Reject = () => undefined): { vector: number[]; copy: PrefilterCopy; private: boolean; provenance: 'judge_receipt' | 'legacy_sniffer' } | undefined {
   if (!row.routed) return reject('not_routed');
-  if (row.state !== 'current') return reject('not_current');
+  if (row.state !== 'current' && row.state !== 'moving') return reject('not_current');
+  // queueMoveRow stores final decision flags/reasons with target tiers; the old
+  // tiers remain placement until flipMove. Pending questions still disqualify it.
+  const metadataTier = row.state === 'moving' ? row.targetMetadataTier : row.metadataTier;
+  const contentTier = row.state === 'moving' ? row.targetContentTier : row.contentTier;
   if (row.metadataPending) return reject('metadata_pending');
   if (row.contentPending) return reject('content_pending');
   if (!row.contentRead) return reject('content_unread');
-  if (row.metadataTier !== 'private') return reject('metadata_tier');
-  if (!['private', 'secure'].includes(row.contentTier)) return reject('content_tier');
+  if (metadataTier !== 'private' || row.metadataTier === 'secrets') return reject('metadata_tier');
+  if ((contentTier !== 'private' && contentTier !== 'secure') || row.contentTier === 'secrets') return reject('content_tier');
   if (row.metadataForced) return reject('metadata_forced');
   if (!row.modelId) return reject('model_missing');
   if (row.decidedBy === 'owner_rule') return reject('owner_decision');
@@ -172,7 +177,7 @@ export function prefilterTrainingExample(row: TierLedgerRecord, judge: string, o
   const digest = contentDigestReason(copy.chunks.map(chunk => chunk.boundedText).join(''));
   if (!row.reasons.includes(digest)) return reject('digest_missing');
   let provenance: 'judge_receipt' | 'legacy_sniffer' = 'judge_receipt';
-  if (!row.reasons.includes(contentJudgeVerdictReason(judged, row.contentTier, digest))) {
+  if (!row.reasons.includes(contentJudgeVerdictReason(judged, contentTier, digest))) {
     // A mismatched modern receipt is evidence against the label, never a legacy row.
     if (row.reasons.some(reason => reason.startsWith('content:judge_verdict:'))) return reject('verdict_missing');
     // A legacy reason records category/confidence, not the verdict's tier.
@@ -186,7 +191,7 @@ export function prefilterTrainingExample(row: TierLedgerRecord, judge: string, o
     if (verdict.ambiguous) return reject('legacy_verdict_ambiguous');
     const time = Date.parse(verdict.decidedAt), decisionTime = Date.parse(row.decidedAt);
     if (!Number.isFinite(time) || !Number.isFinite(decisionTime) || time > decisionTime) return reject('legacy_verdict_time');
-    if ((verdict.tier === 'personal' ? 'private' : verdict.tier === 'private' ? 'secure' : undefined) !== row.contentTier)
+    if ((verdict.tier === 'personal' ? 'private' : verdict.tier === 'private' ? 'secure' : undefined) !== contentTier)
       return reject('legacy_verdict_tier');
     if (verdict.contentHash !== normalizedContentHash(copy.chunks.map(chunk => chunk.boundedText).join('')))
       return reject('legacy_verdict_content');
@@ -195,7 +200,18 @@ export function prefilterTrainingExample(row: TierLedgerRecord, judge: string, o
   const vector = prefilterVector(copy, reject);
   if (!vector) return undefined;
   if (Math.hypot(...vector) === 0) return reject('vector_zero');
-  return { vector, copy, private: row.contentTier === 'secure', provenance };
+  return { vector, copy, private: contentTier === 'secure', provenance };
+}
+
+/** Same key order and bounded window as the resumable worker scan. */
+export function prefilterTrainingWindow(ledger: Pick<TierLedger, 'listItemWindow'>,
+  after: TierSnifferSubject | undefined, limit: number) {
+  return ledger.listItemWindow({ ...(after ? { after } : {}), limit });
+}
+
+/** Shared live/offline sample cap, applied to the proved judge label, never placement. */
+export function selectPrefilterTrainingExample(example: LogisticExample, counts: readonly number[]): boolean {
+  return counts[Number(example.private)]! < PREFILTER_MAX_PER_CLASS;
 }
 
 /** First failing guard wins; fixed codes only, never item-derived labels. */
@@ -315,7 +331,7 @@ export class EmbeddingPrefilter {
     const fingerprint = this.trainingFingerprint(row);
     const copied = copyFingerprint(copy);
     const subject = subjectOf(row);
-    return { vector, private: row.contentTier === 'secure', current: checkLedger => {
+    return { vector, private: eligible.private, current: checkLedger => {
       const currentCopy = this.options.copyFor(subject);
       if (!currentCopy || copyFingerprint(currentCopy) !== copied) return false;
       if (!checkLedger) return true;
@@ -368,8 +384,8 @@ export class EmbeddingPrefilter {
     const started = clock();
     const deadline = started + TRAINING_SLICE_MS;
     let attempt = this.attempt;
-    // Old scans excluded other prompts and required a surviving legacy cache.
-    if (attempt && attempt.labelVersion !== 3) { attempt = this.attempt = undefined; this.training = undefined; }
+    // Restart old scans so queued final verdicts enter the fitting sample.
+    if (attempt && attempt.labelVersion !== 5) { attempt = this.attempt = undefined; this.training = undefined; }
     const finishedAtStart = attempt && ['trained', 'too_few', 'failed'].includes(attempt.outcome) ? attempt.id : undefined;
     // A failure before revisions could be read must still honor its retry deadline.
     if (attempt?.outcome === 'failed' && !attempt.revisions && this.now() < attempt.nextAt) return;
@@ -399,7 +415,7 @@ export class EmbeddingPrefilter {
         attempt = undefined;
       }
       if (!attempt) {
-        attempt = this.attempt = { labelVersion: 3, id: randomUUID(), revisions, judge, startedAt: this.now(), elapsedMs: 0,
+        attempt = this.attempt = { labelVersion: 5, id: randomUUID(), revisions, judge, startedAt: this.now(), elapsedMs: 0,
           rows: 0, counts: [0, 0], nextAt: this.now(), outcome: 'scanning' };
         this.training = undefined;
       }
@@ -435,18 +451,18 @@ export class EmbeddingPrefilter {
         run.scanIndex = (run.scanIndex + 1) % run.scans.length;
         const { member, scan } = entry;
         if (scan.done) continue;
-        const rows = member.options.ledger.listItemWindow({ ...(scan.after ? { after: scan.after } : {}),
-          limit: Math.min(32, MAX_PER_CLASS * 2 - attempt.counts[0] - attempt.counts[1]) });
+        const rows = prefilterTrainingWindow(member.options.ledger, scan.after,
+          Math.min(32, MAX_PER_CLASS * 2 - attempt.counts[0] - attempt.counts[1]));
         if (!rows.length) { scan.done = true; entry.dirty = true; continue; }
         for (const row of rows) {
           if (!hasTime() || full()) break;
           worked = true;
           entry.dirty = true;
           scan.after = subjectOf(row); scan.rows++; attempt.rows++;
-          const index = Number(row.contentTier === 'secure');
-          if (attempt.counts[index]! < MAX_PER_CLASS) {
-            const example = member.trainingExample(row, judge);
-            if (example) { scan.samples.push({ subject: subjectOf(row), private: example.private }); attempt.counts[Number(example.private)]!++; }
+          const example = member.trainingExample(row, judge);
+          if (example && selectPrefilterTrainingExample(example, attempt.counts)) {
+            scan.samples.push({ subject: subjectOf(row), private: example.private });
+            attempt.counts[Number(example.private)]!++;
           }
           await ingestionTurn();
         }
@@ -553,7 +569,7 @@ export class EmbeddingPrefilter {
         }
       }
     } catch {
-      if (!attempt) attempt = this.attempt = { labelVersion: 3, id: randomUUID(), judge, revisions: '', startedAt: this.now(), elapsedMs: 0, rows: 0, counts: [0, 0], nextAt: this.now(), outcome: 'scanning' };
+      if (!attempt) attempt = this.attempt = { labelVersion: 5, id: randomUUID(), judge, revisions: '', startedAt: this.now(), elapsedMs: 0, rows: 0, counts: [0, 0], nextAt: this.now(), outcome: 'scanning' };
       if (attempt.outcome === 'scanning' || attempt.outcome === 'fitting') this.finishTraining(attempt, 'failed', stage);
     }
     if (attempt && attempt.id !== finishedAtStart) {

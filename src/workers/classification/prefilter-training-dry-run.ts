@@ -90,7 +90,9 @@ interface Inspected {
 }
 
 /** No exception or database field is sent to stdout/stderr by this entry point. */
-export function runPrefilterTrainingDryRun(options: { dataDir?: string; rowLimit?: number } = {}): PrefilterDryRunReport {
+export function runPrefilterTrainingDryRun(options: { dataDir?: string; rowLimit?: number;
+  inspect?: (context: { judge: string; revisions: string; members: Array<Parameters<typeof countPrefilterTraining>[0]> }) => void;
+} = {}): PrefilterDryRunReport {
   if (options.rowLimit !== undefined && (!Number.isSafeInteger(options.rowLimit) || options.rowLimit < 1)) throw new Error('Invalid row limit');
   const root = resolve(options.dataDir ?? olympusDataRoot());
   if (!lstatSync(root).isDirectory() || lstatSync(root).isSymbolicLink()) throw new Error('Invalid data directory');
@@ -168,6 +170,7 @@ export function runPrefilterTrainingDryRun(options: { dataDir?: string; rowLimit
     }
     if (judges.size !== 1) { reportError(report, 'training_judge'); return report; }
     const judge = [...judges][0]!;
+    const inputs: Array<Parameters<typeof countPrefilterTraining>[0]> = [];
     for (const [path, ledger] of ledgers) {
       // Match the service roster: existing co-located or bound source ledgers only.
       const members = stores.filter(member => member.ledgerPath === path);
@@ -175,7 +178,7 @@ export function runPrefilterTrainingDryRun(options: { dataDir?: string; rowLimit
       if (!members.length && !own) continue;
       const bound = members.some(member => member.bound);
       const sniffer = sniffers.get(tierSnifferPathForLedger(path));
-      report.ledgers.push(countPrefilterTraining({ ledger, judge, ...(sniffer ? { sniffer } : {}), ...(options.rowLimit ? { rowLimit: options.rowLimit } : {}),
+      inputs.push({ ledger, judge, ...(sniffer ? { sniffer } : {}), ...(options.rowLimit ? { rowLimit: options.rowLimit } : {}),
         copyFor: subject => prefilterTrainingCopy(subject, ledger, bound ? corpusId =>
           members.find(member => member.store.corpusId === corpusId)?.store.exportItemCopy(subject) : undefined,
         () => {
@@ -185,7 +188,15 @@ export function runPrefilterTrainingDryRun(options: { dataDir?: string; rowLimit
           }
           return undefined;
         }),
-      }));
+      });
+    }
+    if (!report.errors) {
+      if (options.inspect) options.inspect({ judge, members: inputs,
+        revisions: JSON.stringify(inputs.map(({ ledger }) => {
+          const member = ledger as TierLedger;
+          return [member.ledgerId(), member.readMeta('embedding-prefilter:training-revision') ?? '0'];
+        }).sort()) + ':' + (trainingOwners[0]?.readMeta('embedding-prefilter:withdrawal') ?? '0') });
+      else report.ledgers = inputs.map(input => countPrefilterTraining(input));
     }
     return report;
   } finally {

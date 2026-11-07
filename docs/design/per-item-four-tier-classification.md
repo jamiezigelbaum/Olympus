@@ -609,25 +609,32 @@ A tier-bearing content-judge receipt binds the verdict's own tier and reason
 to the complete-text digest; a later metadata raise never changes the receipt.
 For legacy rows without that receipt, an explicit safe
 `content:sniffer:<same-model-id>:<code>` reason, read content and a matching
-complete-copy digest supply the label. A surviving cache entry is not required.
-Rules, fail-safes, unresolved/injection answers and small-lane `record_held:`
-answers cannot label content. Unknown or competing content reasons, owner
-rules, overrides, metadata floors, Secrets and own-record holds still exclude
-the row. Mismatched modern receipts never fall back to legacy acceptance.
+complete-copy digest must also agree with the latest subject/model cache
+answer's exact final-content hash, tier and timestamp (no later than the ledger
+decision, with no equal-time ambiguity). This requirement applies to both
+classes and excludes names-only answers even after a rename or sharing change.
+Missing, stale or ambiguous cache evidence cannot supply a legacy label.
+Rules, fail-safes, unresolved/injection answers, small-lane `record_held:`
+answers, competing content reasons, owner rules, overrides, metadata floors,
+Secrets and own-record holds still exclude the row. Mismatched modern receipts
+never fall back to legacy acceptance. Live cache lookups use the existing
+subject/model/time index; old read-only snapshots do not migrate the cache.
 
-A `metadata:sniffer` answer is never a content label, even when the ledger
-retains a body digest. Legacy rows with a metadata judge reason or a previous
-Private/Secret metadata tier still require the latest subject/model cache answer's exact final-content hash, matching tier
-and a timestamp no later than the ledger decision, with no equal-time
-ambiguity. This preserves the names-only rename regression even when the cache
-is gone: the previous metadata tier records the raise after the metadata reason
-disappears. For other rows, a cached hash is unnecessary in either class; an
-existing cache answer must still agree on tier, time and ambiguity. Missing/stale
-hashes in the metadata cases still abstain as
-`legacy_verdict_content`. Live lookups use the existing subject/model/time
-index; old read-only snapshots scan once per model without migrating the cache.
+**Final labels before placement (2026-11-07; #1025).** Training accepts routed
+`current` rows and routed `moving` rows whose metadata and content questions
+are both settled. For `moving`, `targetMetadataTier` must be `private` and
+`targetContentTier` must be `private` (Personal) or `secure` (Private), proved
+by the same modern receipt or legacy final-content verdict as a current row.
+The pre-move tiers never supply the label; either pre-move layer being Secrets
+still excludes the row. `queueMoveRow` records the final decision's reasons and
+flags alongside the target, while retaining the old placement tiers until
+`flipMove`. Thus a queued lowering is usable without waiting for physical
+placement, but `pending` rows, pending questions and extra raisers stay excluded.
+Serving-copy/vector freshness, owner rules, overrides, rejudges and all other
+provenance checks remain in force. This fixes selection bias from queued moves;
+it does not establish safe calibration or owner-label recall.
 
-Label version 3 restarts old scans and insufficient/failed attempts immediately,
+Label version 5 restarts old scans and insufficient/failed attempts immediately,
 including their cursors and retry delays. Valid saved weights retain their
 normal retraining interval. Verdict-cache writes still invalidate sliced final
 validation before publication. The minimum remains 2,000 examples per class.
@@ -692,9 +699,11 @@ only the first failing check counts, so examples plus rejections equal rows read
 All existing counters remain; `judge_id_invalid` and `judge_model_mismatch`
 distinguish malformed identities from another model, including another decision mode.
 Accepted-label `provenance` counters distinguish `judge_receipt` from
-`legacy_sniffer`; their sum equals accepted examples.
+`legacy_sniffer`; their sum equals accepted examples. `per_source` adds uncapped eligible
+Personal/Private counts under fixed public provider names; unknown providers
+aggregate under `other` and are never echoed.
 The JSON output contains numbers only as values. Ledger array positions replace
-paths, accounts and source names; no row content, item identity, reason text,
+paths and accounts; no row content, item identity, reason text,
 model identity or vectors are printed, even on errors.
 
 The diagnostic uses the install-wide recorded training attempt's judge identity
@@ -723,6 +732,17 @@ examples among 28,982 rows in the first ledger (16,788 lacked tier receipts),
 and 15 Personal / 0 Private examples across four ledgers. Pre-#982 rows had
 judge reasons and digests but lacked the newer tier receipt. Acceptance counts
 after the legacy-provenance fix still require measurement on that install.
+
+The read-only `prefilter-train-offline --out PATH` command uses these same
+snapshots and eligibility checks, the worker's bounded round-robin scan windows
+and sample caps, and unchanged `trainLogisticSteps`. It writes only a new 0600
+SavedModel-format file outside the install data root, never ledger/meta state
+or active weights. Its counts-only report includes uncapped per-source classes,
+fitting counts and outcome. See [the calibration README](../../eval/calibration/README.md#read-only-offline-training)
+for commands and limitations. The restored counts-only scorer uses production
+`privateProbability` with no prior correction and reports p < 0.01, 0.02 and
+0.05. Any change to clearing requires zero owner-label Private misses before
+rollout; synthetic tests establish wiring only.
 
 One install-wide model and rolling audit window are shared across the mounted
 ledgers. A stable install tier ledger at
