@@ -2514,6 +2514,36 @@ describe('createConnectorStoreCorpusAdapter', () => {
     store.close();
   });
 
+  test.each([...SOURCE_FAMILIES])('one distinctive literal word retrieves a %s item without generic or Secret matches', async (family) => {
+    const store = new LocalConnectorStore({ dbPath: ':memory:', corpusId: `internal.single.${family}`, family, trustDomain: 'internal' });
+    const texts = [
+      "You're on at demo night on the 13th, right? What are you showing?",
+      'Yes! Olympus, the private search thing. My slot is 7:40',
+      "Drinks after at Duque? I'll book a table for 6 at 9",
+      ...Array.from({ length: 10 }, (_, i) => `My unrelated message ${i}`),
+      'slot drinks password: super-secret-value-710',
+    ];
+    const items: RawItem[] = texts.map((text, i) => ({
+      identity: { family, provider: 'fixture', accountScope: ACCOUNT, providerItemId: String(i), localItemId: `${ACCOUNT}:${i}`, sourceVersion: 'v1' },
+      mimeType: 'text/plain', content: { kind: 'text', text }, metadata: {}, fetchedAt: '2026-07-01T10:00:00Z',
+    }));
+    const connector: SourceConnector = { id: 'fixture', family, async authenticate() {}, async *listItems() { yield { items, done: true }; }, async fetchItem(id) { return items.find(item => item.identity.localItemId === id)!; }, classificationSignals() { return {}; } };
+    await store.syncFromConnector(connector, { fetchContent: true, placement: item => buildSourceSensitivity({ trustTier: item.identity.providerItemId === '13' ? 'S5' : 'S3', trustDomain: 'internal' }) });
+    const adapter = createConnectorStoreCorpusAdapter({ store, retrievalMode: 'keyword' });
+    const corpus = defineConnectorCorpus({ corpusId: store.corpusId, family, trustDomain: 'internal' });
+    for (const [query, answer] of [['What time is my demo night slot?', '1'], ['Where are we having drinks after demo night?', '2']]) {
+      const response = await adapter({ query: query!, maxResults: 9, corpus, context: { allowedTrustDomains: ['internal'] } });
+      expect(response.hits.map(hit => hit.sourceItem.providerItemId)).toContain(answer!);
+      expect(store.searchItems(query!, 9).every(hit => Number(hit.sourceItem.providerItemId) < 3)).toBe(true);
+      expect(response.matchCount?.matchedItems).toBe(2);
+      expect(response.laneAudits?.some(lane => lane.laneType === 'keyword')).toBe(true);
+    }
+    const noise = await adapter({ query: 'What is my missing absent topic?', maxResults: 9, corpus, context: { allowedTrustDomains: ['internal'] } });
+    expect(noise.matchCount?.matchedItems).toBe(0);
+    expect(store.searchItems('What is my missing absent topic?', 9)).toEqual([]);
+    store.close();
+  });
+
   test.each([...SOURCE_FAMILIES])('strict remote %s search finds two distinctive terms despite unmatched words', async (family) => {
     const store = new LocalConnectorStore({ dbPath: ':memory:', corpusId: `internal.fake.${family}`, family, trustDomain: 'internal' });
     const items: RawItem[] = Array.from({ length: 13 }, (_, index) => ({

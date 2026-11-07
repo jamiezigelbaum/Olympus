@@ -32054,8 +32054,16 @@ var init_local_index = __esm(() => {
         }
         const enough = (row) => (matchedGroups.get(row.item_pk) ?? 0) >= required;
         const weights = rows.every(enough) ? undefined : this.conceptWeights(groups, exact);
+        const literalTopics = new Set(sourceIndexTopicTokens(query).filter((term) => term.length >= 3));
+        const uniqueTerms = weights && weights.population >= 10 ? groups.flatMap((group, index) => weights.counts[index] === 1 ? group.filter((term) => literalTopics.has(term)) : []) : [];
+        const uniqueLiteralMatches = new Set(uniqueTerms.length === 0 ? [] : this.db.query(`
+        SELECT DISTINCT connector_store_fts.item_pk
+        FROM connector_store_fts JOIN items i ON i.item_pk = connector_store_fts.item_pk
+        WHERE connector_store_fts MATCH ? AND connector_store_fts.item_pk IN (${placeholders})
+          ${selectedFtsScope.sql}
+      `).all(sourceIndexFtsGroupQuery(uniqueTerms, exact), ...pks, ...selectedFtsScope.params).map((row) => row.item_pk));
         selected = rows.filter((row) => {
-          if (enough(row))
+          if (enough(row) || uniqueLiteralMatches.has(row.item_pk))
             return true;
           if (!weights)
             return false;

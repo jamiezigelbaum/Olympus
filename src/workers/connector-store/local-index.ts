@@ -11921,7 +11921,7 @@ export class LocalConnectorStore {
       fetchLimit,
     ) as ItemRow[];
     // Minimum signal: for a multi-concept query, a candidate matching a
-    // single concept is lexical noise, not evidence (live incident
+    // single common concept is lexical noise, not evidence (live incident
     // 2026-07-25: a bookmark was cited for a four-concept question on the
     // strength of the lone word "schedule"). Distinct concept groups —
     // raw token plus synonyms — must all match, or three of them for a
@@ -11956,14 +11956,30 @@ export class LocalConnectorStore {
       }
       const enough = (row: ItemRow) => (matchedGroups.get(row.item_pk) ?? 0) >= required;
       const weights = rows.every(enough) ? undefined : this.conceptWeights(groups, exact);
+      // One unique literal topic word can identify a record when a question
+      // combines neighbouring records (#710). The shared stopwords exclude
+      // scaffolding such as "my"; synonyms alone cannot earn this exception.
+      // Keep the population floor and all SQL scope/tier checks. A common
+      // term or a word shared by several items still needs the ordinary floor.
+      const literalTopics = new Set(sourceIndexTopicTokens(query).filter(term => term.length >= 3));
+      const uniqueTerms = weights && weights.population >= 10
+        ? groups.flatMap((group, index) => weights.counts[index] === 1 ? group.filter(term => literalTopics.has(term)) : [])
+        : [];
+      const uniqueLiteralMatches = new Set(uniqueTerms.length === 0 ? [] : (this.db.query(`
+        SELECT DISTINCT connector_store_fts.item_pk
+        FROM connector_store_fts JOIN items i ON i.item_pk = connector_store_fts.item_pk
+        WHERE connector_store_fts MATCH ? AND connector_store_fts.item_pk IN (${placeholders})
+          ${selectedFtsScope.sql}
+      `).all(sourceIndexFtsGroupQuery(uniqueTerms, exact), ...pks, ...selectedFtsScope.params) as Array<{ item_pk: number }>)
+        .map(row => row.item_pk));
       selected = rows.filter((row) => {
-        if (enough(row)) return true;
+        if (enough(row) || uniqueLiteralMatches.has(row.item_pk)) return true;
         if (!weights) return false;
         const indexes = matchedGroupIndexes.get(row.item_pk) ?? [];
         // Two rare topic concepts can identify an item even when the question
         // adds words it never used. Rarity is evidence in every source family.
-        // Keep the strict floor for common words, small corpora, and a lone
-        // rare word. This uses the same scoped FTS candidates and tier filter.
+        // Keep the strict floor for common words and small corpora. This uses
+        // the same scoped FTS candidates and tier filter.
         if (groups.length >= 3 && weights.population >= 10
           && indexes.length >= 2 && indexes.length * 2 >= groups.length
           && indexes.filter((index) => weights.counts[index]! <= Math.floor(weights.population / 10)).length >= 2) return true;

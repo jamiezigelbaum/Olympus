@@ -20,8 +20,8 @@
 import { sourceCard, sourceConnected } from './source-cards.ts';
 import { olympusDataRoot } from '../../src/core/olympus-layout.ts';
 import { resolvedStorePath } from '../../src/core/source-placement.ts';
-import { isPendingPrivacyPolicy } from '../../src/core/first-run-privacy.ts';
-import { updateSovereigntyConfigFile, validateSovereigntyConfig, type SovereigntyConfig } from '../../src/core/sovereignty.ts';
+import { isPendingPrivacyPolicy, readComputerUseState } from '../../src/core/first-run-privacy.ts';
+import { validateSovereigntyConfig, type SovereigntyConfig } from '../../src/core/sovereignty.ts';
 // Embedded: the bundled agent runs outside the product tree, so the preset file is not on disk beside it.
 import noSensitivePreset from '../../config/sovereignty/presets/no-sensitive.json' with { type: 'json' };
 import { spawn, spawnSync } from 'node:child_process';
@@ -282,6 +282,36 @@ async function waitForEngine(timeoutMs: number): Promise<number> {
   throw new Error(`the engine was not ready (models included) within ${Math.round(timeoutMs / 1000)} s`);
 }
 
+/** Fresh-install setup uses exactly the unlocked local dashboard request. */
+export async function saveFreshInstallPrivacyChoice(input: {
+  workerFetch: Platform['workerFetch'];
+  readPolicy: () => unknown;
+  computerChoicePending?: boolean;
+}): Promise<void> {
+  const mint = await input.workerFetch('/dashboard/control/session/local', {
+    method: 'POST', headers: { origin: WORKER_ORIGIN },
+  });
+  if (mint.status !== 200) throw new Error(`local dashboard control session answered ${mint.status}`);
+  const cookie = mint.headers.getSetCookie().map(line => line.split(';')[0]).join('; ');
+  const { csrf_token } = await mint.json() as { csrf_token?: string };
+  if (!cookie || !csrf_token) throw new Error('local dashboard control session returned no cookie or CSRF token');
+  const post = (path: string, choice: string) => input.workerFetch(path, {
+    method: 'POST', headers: { cookie, origin: WORKER_ORIGIN, 'x-olympus-csrf': csrf_token, 'content-type': 'application/json' },
+    body: JSON.stringify({ choice }),
+  });
+  if (input.computerChoicePending) {
+    const computer = await post('/dashboard/engine/computer-use', 'everyday');
+    if (computer.status !== 200) throw new Error(`dashboard computer choice answered ${computer.status}`);
+  }
+  const saved = await post('/dashboard/models/first-run-privacy', 'no-sensitive');
+  if (saved.status !== 200 || (await saved.json() as { ok?: boolean }).ok !== true) {
+    throw new Error(`dashboard first-run privacy choice answered ${saved.status}`);
+  }
+  const policy = validateSovereigntyConfig(input.readPolicy() as SovereigntyConfig);
+  const expected = validateSovereigntyConfig(structuredClone(noSensitivePreset) as unknown as SovereigntyConfig);
+  if (JSON.stringify(policy) !== JSON.stringify(expected)) throw new Error('dashboard saved policy does not match no-sensitive');
+}
+
 /** Restarts the engine the owner's way and waits for it (models included). */
 async function restartEngine(timeoutMs: number): Promise<{ ok: boolean; ms: number; detail?: string }> {
   const started = Date.now();
@@ -313,9 +343,11 @@ async function prepareSource(): Promise<never> {
       emit({ ok: false, step: 'privacy-choice', detail: `a fresh install did not ask for the privacy choice with local-first recommended: ${asked.stdout.slice(0, 200) || asked.stderr.slice(0, 200)}` });
     }
     say('fresh install asks for the privacy choice, local-first recommended');
-    // The same compare-and-save as saveFirstRunPrivacyChoice, with the preset embedded.
-    const saved = updateSovereigntyConfigFile({ path: p.sovereigntyPath, patch: current => isPendingPrivacyPolicy(current) ? validateSovereigntyConfig(structuredClone(noSensitivePreset) as unknown as SovereigntyConfig) : current });
-    if (!saved.ok || !saved.changed) emit({ ok: false, step: 'privacy-choice', detail: 'the first-run privacy choice could not be saved' });
+    await saveFreshInstallPrivacyChoice({
+      workerFetch: p.workerFetch,
+      readPolicy: () => readPolicy()?.json,
+      computerChoicePending: readComputerUseState(p.sovereigntyPath)?.choice === null,
+    });
     say('first-run privacy choice saved: no-sensitive');
   }
   await startFakeDetached(config);

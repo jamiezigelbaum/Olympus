@@ -366,10 +366,16 @@ describe('the scheduler source', () => {
 
   test('a note routed to the Personal store gets its vectors from the store-wide sweep, though no pass queued it', async () => {
     fake = new FakeEvernoteServer({ auth: true }).start();
-    fake.addNote({ title: 'Survey', created: day(2024), notebookId: fake.addNotebook('Field work').id, body: '<en-note>River survey</en-note>' });
+    const book = fake.addNotebook('Field work');
+    // A random UUID can contain an IBAN-shaped substring, leaving this note
+    // pending a metadata judgment and correctly withholding cloud embeddings
+    // (#791). This fixture needs an ordinary, unflagged notebook key.
+    const note = fake.addNote({ title: 'Survey', created: day(2024), notebookId: book.id, body: '<en-note>River survey</en-note>' });
     const { sync, runtime } = await connected(fake);
     await sync.pass();
-    const internal = runtime.existingLane()!.internal.open();
+    const lane = runtime.existingLane()!;
+    expect(lane.ledger.getCurrent({ provider: 'evernote', accountScope: 'personal', providerItemId: note.id })).toMatchObject({ state: 'current', metadataPending: false, contentPending: false });
+    const internal = lane.internal.open();
     // The pass stages in the Private store and routes per item: nothing queues the Personal copy.
     expect(internal.queuedEmbeddingItemIds()).toEqual([]);
     const provider = new RecordingProvider('google-gemini', 'gemini-embedding-2', 'cloud');
@@ -380,6 +386,22 @@ describe('the scheduler source', () => {
     // deferral, an out-of-scope or failed item, or nothing found at all).
     expect({ ...run, chunksEmbedded: undefined }).toEqual({ corpusId: run!.corpusId, itemsAttempted: 1, chunksEmbedded: undefined, itemsFailed: 0, itemsOutOfScope: 0 });
     expect(run!.chunksEmbedded).toBeGreaterThan(0);
+  });
+
+  test('an IBAN-shaped random notebook key holds its note until judged, so the sweep cannot send it to cloud', async () => {
+    fake = new FakeEvernoteServer({ auth: true }).start();
+    const book = fake.addNotebook('Field work');
+    book.id = '0d6a18ed-4763-4c0f-ae44-dfa56c1f8ac7'; // Reproduces #791 without randomness.
+    const note = fake.addNote({ title: 'Survey', created: day(2024), notebookId: book.id, body: '<en-note>River survey</en-note>' });
+    const { sync, runtime } = await connected(fake);
+    await sync.pass();
+    const lane = runtime.existingLane()!;
+    expect(lane.ledger.getCurrent({ provider: 'evernote', accountScope: 'personal', providerItemId: note.id })).toMatchObject({ state: 'pending', metadataPending: true });
+    const provider = new RecordingProvider('google-gemini', 'gemini-embedding-2', 'cloud');
+    const target = planStoreEmbedding({ store: lane.internal.open(), provider, servedByMeaning: true, scope: { allowed: true } })!;
+    const [run] = await embedPendingChunks([target], { maxItems: 32 });
+    expect(run).toMatchObject({ itemsAttempted: 0, chunksEmbedded: 0, itemsFailed: 0 });
+    expect(provider.inputs).toEqual([]);
   });
 
   test('a rate-limited pass retries later; a refused sign-in is a credential failure', () => {

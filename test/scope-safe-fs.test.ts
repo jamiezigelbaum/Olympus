@@ -360,3 +360,22 @@ describe('a refused folder says which refusal it was', () => {
     }
   });
 });
+
+// #951: converting syscall's boxed i64 return ran JS before errno was read.
+// Force another native failure at that conversion boundary, as allocation/JIT
+// work can do on a busy runner. The original syscall must retain ENOENT.
+test('a missing openat2 path retains its errno across JavaScript number conversion', () => {
+  if (process.platform !== 'linux') return;
+  const native = scopeSafeNativeForTests()!;
+  const originalNumber = globalThis.Number;
+  globalThis.Number = new Proxy(originalNumber, {
+    apply(target, receiver, args) {
+      native.openat(-1, 'other-file', 0); // EBADF overwrites libc errno.
+      return Reflect.apply(target, receiver, args);
+    },
+  });
+  let result: number;
+  try { result = native.openat2Beneath(-100, 'olympus-no-such-file-951', 0); }
+  finally { globalThis.Number = originalNumber; }
+  expect(result).toBe(-2);
+});

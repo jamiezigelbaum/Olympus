@@ -39894,8 +39894,16 @@ var init_local_index = __esm(() => {
         }
         const enough = (row) => (matchedGroups.get(row.item_pk) ?? 0) >= required;
         const weights = rows.every(enough) ? undefined : this.conceptWeights(groups, exact);
+        const literalTopics = new Set(sourceIndexTopicTokens(query).filter((term) => term.length >= 3));
+        const uniqueTerms = weights && weights.population >= 10 ? groups.flatMap((group, index) => weights.counts[index] === 1 ? group.filter((term) => literalTopics.has(term)) : []) : [];
+        const uniqueLiteralMatches = new Set(uniqueTerms.length === 0 ? [] : this.db.query(`
+        SELECT DISTINCT connector_store_fts.item_pk
+        FROM connector_store_fts JOIN items i ON i.item_pk = connector_store_fts.item_pk
+        WHERE connector_store_fts MATCH ? AND connector_store_fts.item_pk IN (${placeholders})
+          ${selectedFtsScope.sql}
+      `).all(sourceIndexFtsGroupQuery(uniqueTerms, exact), ...pks, ...selectedFtsScope.params).map((row) => row.item_pk));
         selected = rows.filter((row) => {
-          if (enough(row))
+          if (enough(row) || uniqueLiteralMatches.has(row.item_pk))
             return true;
           if (!weights)
             return false;
@@ -43374,8 +43382,9 @@ function loadNative() {
         how.writeBigUInt64LE(0n, 8);
         how.writeBigUInt64LE(BigInt(RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS | RESOLVE_NO_XDEV), 16);
         const pathBuffer = cstr(relPath);
-        const result = Number(s.syscall(BigInt(SYS_OPENAT2), BigInt(dirfd), ptr(pathBuffer), ptr(how), 24n));
-        const failure = result < 0 ? errno() : 0;
+        const rawResult = s.syscall(BigInt(SYS_OPENAT2), BigInt(dirfd), ptr(pathBuffer), ptr(how), 24n);
+        const failure = rawResult < 0 ? errno() : 0;
+        const result = Number(rawResult);
         keepAlive(pathBuffer, how);
         return result < 0 ? -failure : result;
       },
@@ -218028,6 +218037,7 @@ var init_private_agent_listeners = __esm(() => {
 // src/workers/email-source/server.ts
 var exports_server2 = {};
 __export(exports_server2, {
+  workerSovereigntyAnalystRoutePlan: () => workerSovereigntyAnalystRoutePlan,
   workerCaptureRuntime: () => workerCaptureRuntime,
   validateSecureVeniceAnalystProfileAtConstruction: () => validateSecureVeniceAnalystProfileAtConstruction,
   trustedAnalystAssistTimeoutMs: () => trustedAnalystAssistTimeoutMs,
@@ -218804,6 +218814,51 @@ function sovereigntyAnalystRoutePlan(input) {
     selection: input.pool.explicitOrder ? "explicit_order" : "health_latency",
     steps
   };
+}
+function workerSovereigntyAnalystRoutePlan(input) {
+  const { engine, trustDomain, requestedProvider } = input;
+  const configured = engine.resolveAnalystPool({ trustDomain });
+  if (trustDomain !== "secure_local" && isStandaloneEngineProcess(input.env) && configured.members.some((member) => member.profile.provider === "openclaw-infer")) {
+    let requested;
+    if (requestedProvider !== "default") {
+      try {
+        requested = engine.resolveAnalystPool({ trustDomain, requestedProvider });
+      } catch {
+        requested = undefined;
+      }
+    }
+    const keep = (profile2) => profile2.profile.provider !== "openclaw-infer" && input.analysts.has(profile2.id);
+    if (requested && requested.members.some(keep)) {
+      return sovereigntyAnalystRoutePlan({ trustDomain, analysts: input.analysts, pool: {
+        members: requested.members.filter(keep),
+        ...requested.explicitOrder ? { explicitOrder: requested.explicitOrder.filter(keep) } : {}
+      } });
+    }
+    if (engine.config.routes.secure_local?.mode !== "disabled") {
+      return sovereigntyAnalystRoutePlan({
+        trustDomain,
+        pool: engine.resolveAnalystPool({ trustDomain: "secure_local", requestedProvider }),
+        analysts: input.analysts
+      });
+    }
+    if (requestedProvider === "venice")
+      throw new OperationError("config_error", "No standalone Venice analyst route is configured.");
+    const profile = {
+      id: "standalone-source-answer",
+      profile: { provider: "built-in", trust: "local", model: "default", purpose: "analyst" }
+    };
+    return {
+      poolId: trustDomain,
+      trustDomain,
+      selection: "explicit_order",
+      steps: [{ profile, backend: "local", analyst: input.defaultLocal }]
+    };
+  }
+  return sovereigntyAnalystRoutePlan({
+    trustDomain,
+    pool: engine.resolveAnalystPool({ trustDomain, requestedProvider }),
+    analysts: input.analysts
+  });
 }
 function secureLocalAnalystRouteStatus(input) {
   if (input.engine.config.retrieval.trustDomains.secure_local?.secureHandling === "metadata_only_gap") {
@@ -220917,14 +220972,13 @@ ${key2}`;
       },
       sovereigntyAnalystRoute: ({ pack, localOnly, requestedProvider }) => {
         const trustDomain = analystRouteTrustDomain(pack, localOnly);
-        const pool = sovereigntyEngine.resolveAnalystPool({
+        return workerSovereigntyAnalystRoutePlan({
+          engine: sovereigntyEngine,
+          env: process.env,
           trustDomain,
-          requestedProvider
-        });
-        return sovereigntyAnalystRoutePlan({
-          trustDomain,
-          pool,
-          analysts: sovereigntyAnalysts
+          requestedProvider,
+          analysts: sovereigntyAnalysts,
+          defaultLocal: builtInAnalystModel ? withBuiltInFallback(defaultLocalAnalyst, createAnalyst(builtInAnalystModel, { auditSuspiciousDrafts: true })) : defaultLocalAnalyst
         });
       },
       secureLocalAnalystRoute: ({ requestedProvider }) => secureLocalAnalystRouteStatus({
