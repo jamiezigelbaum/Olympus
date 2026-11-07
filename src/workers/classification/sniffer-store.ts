@@ -432,6 +432,11 @@ export class TierSnifferStore {
       FROM sniffer_questions`).get(snifferId, snifferId) as { unanswered: number; heldLowering: number };
   }
 
+  /** Training's growth watermark; do not scan/group the question queue for it. */
+  verdictCount(): number {
+    return (this.db.query('SELECT COUNT(*) AS n FROM sniffer_verdicts').get() as { n: number }).n;
+  }
+
   /** Content-free counts for status surfaces and the CLI. */
   counts(): { questions: number; items: number; byPass: Record<SnifferPass, number>; verdicts: number } {
     const byPass: Record<SnifferPass, number> = { metadata: 0, content: 0 };

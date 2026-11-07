@@ -273,6 +273,12 @@ export function contentDigestReason(text: string): string {
   return `content:sha256:${createHash('sha256').update(text.trim()).digest('hex')}`;
 }
 
+/** The judge's own tier, bound to its verdict reason and the complete-text digest.
+ * Metadata can raise the stored tier later; it cannot rewrite this receipt. */
+export function contentJudgeVerdictReason(reason: string, tier: TierKey, digest: string): string {
+  return `content:judge_verdict:${tier}:${createHash('sha256').update(JSON.stringify([reason, digest])).digest('hex')}`;
+}
+
 /**
  * Recorded beside the content digest: a digest of the names a content verdict
  * was made with (title, path, sender) and the parent's context. A listing
@@ -1175,7 +1181,8 @@ function contentPass(args: {
     if (verdict.verdict === 'decided') {
       decided = withSnifferVerdict(decided, verdict.tier, `content:sniffer:${args.sniffer.id}:${verdict.code}`);
       reasons.splice(0, reasons.length, ...decided.reasons);
-      if (verdict.origin === 'model') reasons.push('content:provenance:model');
+      if (verdict.origin === 'model') reasons.push('content:provenance:model',
+        contentJudgeVerdictReason(`content:sniffer:${args.sniffer.id}:${verdict.code}`, verdict.tier, contentDigestReason(text)));
       if (verdict.origin === 'rule' && verdict.rule) reasons.push(`content:rule:${verdict.rule}`);
     } else {
       pending = true;

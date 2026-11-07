@@ -19330,6 +19330,9 @@ function heldUntilJudged(reasons) {
 function contentDigestReason(text2) {
   return `content:sha256:${createHash10("sha256").update(text2.trim()).digest("hex")}`;
 }
+function contentJudgeVerdictReason(reason, tier, digest2) {
+  return `content:judge_verdict:${tier}:${createHash10("sha256").update(JSON.stringify([reason, digest2])).digest("hex")}`;
+}
 function contentNamesReason(names, parentContext) {
   const parts = [names.title, names.path, names.sender, parentContext].map((part) => part?.trim() ?? "");
   return `content:names:${createHash10("sha256").update(JSON.stringify(parts)).digest("hex").slice(0, 16)}`;
@@ -19788,7 +19791,7 @@ function contentPass(args) {
       decided = withSnifferVerdict(decided, verdict.tier, `content:sniffer:${args.sniffer.id}:${verdict.code}`);
       reasons.splice(0, reasons.length, ...decided.reasons);
       if (verdict.origin === "model")
-        reasons.push("content:provenance:model");
+        reasons.push("content:provenance:model", contentJudgeVerdictReason(`content:sniffer:${args.sniffer.id}:${verdict.code}`, verdict.tier, contentDigestReason(text2)));
       if (verdict.origin === "rule" && verdict.rule)
         reasons.push(`content:rule:${verdict.rule}`);
     } else {
@@ -20541,6 +20544,9 @@ class TierSnifferStore {
       COUNT(CASE WHEN held_sniffer_id = ? THEN 1 END) AS heldLowering
       FROM sniffer_questions`).get(snifferId, snifferId);
   }
+  verdictCount() {
+    return this.db.query("SELECT COUNT(*) AS n FROM sniffer_verdicts").get().n;
+  }
   counts() {
     const byPass = { metadata: 0, content: 0 };
     let questions = 0;
@@ -20719,6 +20725,7 @@ function idParams(identity2) {
 class TierLedger {
   dbPath;
   db;
+  metaChanges = 0;
   now;
   constructor(options) {
     this.dbPath = options.dbPath;
@@ -20862,8 +20869,9 @@ class TierLedger {
           decidedBy: contentTier !== existing.contentTier ? "sniffer" : existing.decidedBy,
           reasons: [
             ...metadataReasons,
-            ...contentReasons.filter((reason) => !isOpenSnifferReason(reason, "content")),
-            verdict.reason
+            ...contentReasons.filter((reason) => !isOpenSnifferReason(reason, "content") && !reason.startsWith("content:judge_verdict:")),
+            verdict.reason,
+            ...contentVerdictReceipts(contentReasons, verdict.reason, verdict.tier)
           ],
           contentPending: false
         };
@@ -20951,14 +20959,18 @@ class TierLedger {
     const metadataTier = verdict.pass === "metadata" ? maxTier(base.metadataTier, verdict.tier) : base.metadataTier;
     const contentTier = maxTier(base.contentTier, verdict.tier);
     const metadataPending = verdict.pass === "metadata" ? false : base.metadataPending;
-    const kept = base.reasons.filter((reason) => !isOpenSnifferReason(reason, verdict.pass) && !(metadataTier === "secure" && isOpenSnifferReason(reason, "content")));
+    const kept = base.reasons.filter((reason) => !isOpenSnifferReason(reason, verdict.pass) && !(verdict.pass === "content" && reason.startsWith("content:judge_verdict:")) && !(metadataTier === "secure" && isOpenSnifferReason(reason, "content")));
     const contentPending = verdict.pass === "content" || metadataTier === "secure" ? false : base.contentPending;
     const decision = {
       ...base,
       metadataTier,
       contentTier,
       decidedBy: "sniffer",
-      reasons: [...verdict.pass === "metadata" ? settleStoredNamesMark(kept, base.metadataTier, metadataTier) : kept, verdict.reason],
+      reasons: [
+        ...verdict.pass === "metadata" ? settleStoredNamesMark(kept, base.metadataTier, metadataTier) : kept,
+        verdict.reason,
+        ...verdict.pass === "content" ? contentVerdictReceipts(kept, verdict.reason, verdict.tier) : []
+      ],
       metadataPending,
       contentPending,
       state: metadataPending || contentPending ? "pending" : "current"
@@ -21778,21 +21790,29 @@ class TierLedger {
   writeMeta(key, value) {
     if (key === "ledger_id")
       throw new Error("The ledger identity is never rewritten.");
-    this.db.query(`
+    this.metaChanges += this.db.query(`
       INSERT INTO tier_ledger_meta (key, value) VALUES (?, ?)
       ON CONFLICT(key) DO UPDATE SET value = excluded.value
-    `).run(key, value);
+    `).run(key, value).changes;
   }
   deleteMeta(key) {
     if (key === "ledger_id")
       throw new Error("The ledger identity is never deleted.");
-    this.db.query("DELETE FROM tier_ledger_meta WHERE key = ?").run(key);
+    this.metaChanges += this.db.query("DELETE FROM tier_ledger_meta WHERE key = ?").run(key).changes;
   }
   writeMetaBatch(entries) {
     this.db.transaction(() => {
       for (const [key, value] of entries)
         this.writeMeta(key, value);
     })();
+  }
+  writeEmbeddingTrainingScan(value, revision) {
+    return this.db.transaction(() => {
+      if ((this.readMeta("embedding-prefilter:training-revision") ?? "0") !== revision)
+        return false;
+      this.writeMeta("embedding-prefilter:training-scan-v1", value);
+      return true;
+    }).immediate();
   }
   metaEntries(prefix, options = {}) {
     return this.db.query("SELECT key, value FROM tier_ledger_meta WHERE key >= ? AND key < ? AND key > ? AND value <> ? ORDER BY key LIMIT ?").all(prefix, `${prefix}￿`, options.after ?? "", "", options.limit ?? -1);
@@ -21815,6 +21835,13 @@ class TierLedger {
       ORDER BY provider, account_scope, conversation_key, provider_item_id
       LIMIT ?
     `).all(after ? 1 : null, ...after ?? [null, null, null, null], limit);
+    return rows.map(recordFromRow);
+  }
+  listItemWindow(options) {
+    const after = options.after ? [options.after.provider, options.after.accountScope, tierLedgerConversationKey(options.after), options.after.providerItemId] : [];
+    const rows = this.db.query(`SELECT * FROM tier_items
+      ${after.length ? "WHERE (provider, account_scope, conversation_key, provider_item_id) > (?, ?, ?, ?)" : ""}
+      ORDER BY provider, account_scope, conversation_key, provider_item_id LIMIT ?`).all(...after, Math.max(1, Math.min(options.limit, 500)));
     return rows.map(recordFromRow);
   }
   listLowerContentLeftovers(options) {
@@ -22770,10 +22797,10 @@ class TierLedger {
   corpusHasCopies(corpusId) {
     return this.db.query("SELECT 1 FROM tier_copies WHERE corpus_id = ? LIMIT 1").get(corpusId) !== null;
   }
-  changeMarker() {
+  changeMarker(ignoreOwnMetaWrites = false) {
     const row = this.db.query("SELECT total_changes() AS changes").get();
     const version = this.db.query("PRAGMA data_version").get();
-    return `${version.data_version}:${row.changes}`;
+    return `${version.data_version}:${row.changes - (ignoreOwnMetaWrites ? this.metaChanges : 0)}`;
   }
   visibilityChangesSince(after) {
     return this.db.transaction(() => {
@@ -22933,6 +22960,7 @@ class TierLedger {
     return this.db.transaction(() => {
       const now = this.now().toISOString();
       this.writeMeta("embedding-prefilter:training-revision", randomUUID5());
+      this.deleteMeta("embedding-prefilter:training-scan-v1");
       for (const kind of ["check:", "clear:"]) {
         const prefix = `embedding-prefilter:${kind}${provider}\x00${accountScope}\x00`;
         this.db.query("DELETE FROM tier_ledger_meta WHERE key >= ? AND key < ?").run(prefix, `${prefix}￿`);
@@ -23258,6 +23286,10 @@ function settleStoredNamesMark(reasons, askedTier, answeredTier) {
     return [...reasons];
   const rest = reasons.filter((reason) => reason !== STORED_NAMES_ASKED_REASON);
   return answeredTier !== askedTier ? [...rest, STORED_NAMES_REASON] : rest;
+}
+function contentVerdictReceipts(reasons, reason, tier) {
+  const digests = reasons.filter((value) => /^content:sha256:[0-9a-f]{64}$/.test(value));
+  return digests.length === 1 ? [contentJudgeVerdictReason(reason, tier, digests[0])] : [];
 }
 function isOpenSnifferReason(reason, pass) {
   if (pass === "metadata") {
@@ -34975,6 +35007,11 @@ var init_local_index = __esm(() => {
         if (!this.db.inTransaction)
           this.releaseUnreferencedChunkMedia();
       }
+    }
+    changeMarker() {
+      const row = this.db.query("SELECT total_changes() AS changes").get();
+      const version = this.db.query("PRAGMA data_version").get();
+      return `${version.data_version}:${row.changes}`;
     }
     exportItemCopy(identity2) {
       const row = this.db.query(`
@@ -191848,7 +191885,7 @@ function privateProbability(model, vector) {
     score += input[i2] * model.weights[i2];
   return Number.isFinite(score) ? sigmoid(score) : undefined;
 }
-function trainLogistic(examples, minimumPerClass = EMBEDDING_PREFILTER_MIN_PER_CLASS) {
+function* trainLogisticSteps(examples, minimumPerClass = EMBEDDING_PREFILTER_MIN_PER_CLASS) {
   if (!Number.isSafeInteger(minimumPerClass) || minimumPerClass < 1)
     return;
   const counts = [0, 0];
@@ -191860,6 +191897,7 @@ function trainLogistic(examples, minimumPerClass = EMBEDDING_PREFILTER_MIN_PER_C
     const label = Number(example.private);
     inputs.push({ vector, label });
     counts[label]++;
+    yield;
   }
   if (counts.some((count) => count < minimumPerClass))
     return;
@@ -191872,6 +191910,7 @@ function trainLogistic(examples, minimumPerClass = EMBEDDING_PREFILTER_MIN_PER_C
       seed = Math.imul(seed, 1664525) + 1013904223 >>> 0;
       const j = seed % (i2 + 1);
       [order[i2], order[j]] = [order[j], order[i2]];
+      yield;
     }
     const rate = 0.12 / (1 + epoch * 0.15);
     const shrink = 1 - rate * 0.001;
@@ -191884,6 +191923,7 @@ function trainLogistic(examples, minimumPerClass = EMBEDDING_PREFILTER_MIN_PER_C
       bias -= rate * error2;
       for (let i2 = 0;i2 < weights.length; i2++)
         weights[i2] = weights[i2] * shrink - rate * error2 * input.vector[i2];
+      yield;
     }
   }
   return { weights, bias };
@@ -191893,7 +191933,7 @@ var EMBEDDING_PREFILTER_MODEL_ID = "embeddinggemma-2-litert-24d962e", EMBEDDING_
 // src/workers/classification/embedding-prefilter.ts
 import { chmodSync as chmodSync36, existsSync as existsSync100, lstatSync as lstatSync51, mkdirSync as mkdirSync61, readFileSync as readFileSync88 } from "node:fs";
 import { join as join134 } from "node:path";
-import { randomUUID as randomUUID32 } from "node:crypto";
+import { createHash as createHash100, randomUUID as randomUUID32 } from "node:crypto";
 function prefilterVector(copy) {
   if (!copy || copy.chunks.length === 0 || copy.chunks.some((chunk) => chunk.mediaSha256 || chunk.mediaPath) || snifferMaterialCarriesSecret(copy.chunks.map((chunk) => chunk.boundedText).join("")))
     return;
@@ -191915,6 +191955,14 @@ function prefilterVector(copy) {
     }
   }
   return mean;
+}
+function copyFingerprint2(copy) {
+  const hash3 = createHash100("sha256").update(JSON.stringify(copy.chunks));
+  for (const vector of copy.vectors) {
+    hash3.update(JSON.stringify([vector.chunkIndex, vector.modelId, vector.contentHash, vector.embedding.byteLength]));
+    hash3.update(vector.embedding);
+  }
+  return hash3.digest("hex");
 }
 function subjectOf(row) {
   return {
@@ -191945,7 +191993,11 @@ class EmbeddingPrefilter {
     this.owner.savedModel = value2;
   }
   savedModel;
-  attemptedAt = -Infinity;
+  attempt;
+  training;
+  get trainingOwner() {
+    return this.owner;
+  }
   auditState;
   path;
   constructor(options) {
@@ -191964,6 +192016,17 @@ class EmbeddingPrefilter {
     }
     if (this.owner !== this)
       return;
+    try {
+      const raw = this.control.readMeta(TRAINING);
+      if (raw) {
+        const attempt = JSON.parse(raw);
+        if (typeof attempt.id !== "string" || !Array.isArray(attempt.counts) || attempt.counts.length !== 2 || !Number.isFinite(attempt.nextAt) || !Number.isFinite(attempt.elapsedMs))
+          throw new Error;
+        this.attempt = attempt;
+      }
+    } catch {
+      this.control.deleteMeta(TRAINING);
+    }
     try {
       if (existsSync100(this.path) && !lstatSync51(this.path).isSymbolicLink() && lstatSync51(embeddingPrefilterDirectory(this.control.dbPath)).isDirectory() && !lstatSync51(embeddingPrefilterDirectory(this.control.dbPath)).isSymbolicLink()) {
         chmodSync36(embeddingPrefilterDirectory(this.control.dbPath), 448);
@@ -191990,9 +192053,12 @@ class EmbeddingPrefilter {
       return "Embedding clearing stopped: more than 2% of the last 200 checks were Private. Cleared items are returning to the privacy judge.";
     if (!this.enabled())
       return "Embedding clearing is off.";
+    const training = this.owner.attempt;
+    const failure2 = training?.reason === "scan_failed" ? "could not read training examples" : training?.reason === "training_failed" ? "could not fit the model" : training?.reason === "weights_write_failed" ? "could not save the model" : "the ledgers or judge changed";
+    const detail = training ? ` Training ${training.outcome === "too_few" ? `found too few examples (needs ${EMBEDDING_PREFILTER_MIN_PER_CLASS} per class)` : training.outcome === "trained" ? `completed with model ${training.version}` : training.outcome === "failed" ? `failed: ${failure2}` : training.outcome === "scanning" ? "is reading the ledger" : "is fitting the model"}; read ${training.rows} rows, ${training.counts[0]} Personal and ${training.counts[1]} Private examples in ${Math.round(training.elapsedMs)} ms. Next attempt: ${training.outcome === "scanning" || training.outcome === "fitting" ? "continue next tick" : new Date(training.nextAt).toISOString()}${training.outcome === "too_few" ? " or after 1,000 new verdicts, whichever comes first" : ""}.` : "";
     if (!this.saved)
-      return `Embedding clearing waits for ${EMBEDDING_PREFILTER_MIN_PER_CLASS} judge verdicts per class with complete stored vectors.`;
-    return `Embedding clearing is on; ${this.audit.misses.length} of 200 spot checks collected.`;
+      return detail ? `Embedding clearing waits.${detail}` : `Embedding clearing waits for ${EMBEDDING_PREFILTER_MIN_PER_CLASS} judge verdicts per class with complete stored vectors.`;
+    return `Embedding clearing is on; ${this.audit.misses.length} of 200 spot checks collected.${detail}`;
   }
   setPlacementFor(placementFor) {
     if (placementFor)
@@ -192005,76 +192071,318 @@ class EmbeddingPrefilter {
       for (const member of this.owner.members)
         member.rollback();
   }
+  trainingFingerprint(row) {
+    const subject = subjectOf(row);
+    return createHash100("sha256").update(JSON.stringify([
+      row,
+      this.options.ledger.copies(subject),
+      this.options.ledger.getOverride(subject),
+      this.options.ledger.rejudgeQuestion(subject)
+    ])).digest("hex");
+  }
+  trainingExample(row, judge3) {
+    if (!row.routed || row.state !== "current" || row.metadataPending || row.contentPending || !row.contentRead || row.metadataTier !== "private" || !["private", "secure"].includes(row.contentTier) || row.metadataForced || !row.modelId || row.decidedBy === "owner_rule" || row.decidedBy === "override" || this.options.ledger.getOverride(subjectOf(row)) || this.options.ledger.rejudgeQuestion(subjectOf(row)) || row.reasons.some((reason) => reason.startsWith("metadata:owner_rule:") || reason.startsWith("metadata:floor:") || reason.startsWith("metadata:secret:") || reason.startsWith("override:")))
+      return;
+    const prefix = `content:sniffer:${judge3}:`;
+    let judged;
+    for (const reason of row.reasons) {
+      if (!reason.startsWith("content:"))
+        continue;
+      if (reason.startsWith(prefix)) {
+        const code = reason.slice(prefix.length);
+        if (!code || code.startsWith(SNIFFER_RECORD_HELD_CODE_PREFIX) || /(?:^|:)(?:rule|unresolved|fail_safe|injection|undecided)(?::|$)/.test(code))
+          return;
+        if (judged)
+          return;
+        judged = reason;
+      } else if (!(reason.startsWith("content:judge_verdict:") || reason.startsWith("content:sha256:") || reason.startsWith("content:names:") || reason.startsWith("content:borderline:") || [
+        "content:text_only",
+        "content:provenance:model",
+        "content:no_raise",
+        HELD_UNTIL_JUDGED_REASON,
+        PERSONAL_FIRST_REASON
+      ].includes(reason)))
+        return;
+    }
+    if (!judged)
+      return;
+    const copy = this.options.copyFor(subjectOf(row));
+    if (!copy)
+      return;
+    const digest5 = contentDigestReason(copy.chunks.map((chunk) => chunk.boundedText).join(""));
+    if (!row.reasons.includes(digest5) || !row.reasons.includes(contentJudgeVerdictReason(judged, row.contentTier, digest5)))
+      return;
+    const vector = prefilterVector(copy);
+    if (!vector || Math.hypot(...vector) === 0)
+      return;
+    const fingerprint = this.trainingFingerprint(row);
+    const copied = copyFingerprint2(copy);
+    const subject = subjectOf(row);
+    return { vector, private: row.contentTier === "secure", current: (checkLedger) => {
+      const currentCopy = this.options.copyFor(subject);
+      if (!currentCopy || copyFingerprint2(currentCopy) !== copied)
+        return false;
+      if (!checkLedger)
+        return true;
+      const current2 = this.options.ledger.getCurrent(subject);
+      return !!current2 && this.trainingFingerprint(current2) === fingerprint;
+    } };
+  }
+  verdictCount() {
+    return [...this.members].reduce((count, member) => count + member.options.sniffer.verdictCount(), 0);
+  }
+  finishTraining(attempt, outcome, reason) {
+    const verdicts = outcome === "too_few" ? this.verdictCount() : undefined;
+    attempt.outcome = outcome;
+    if (reason)
+      attempt.reason = reason;
+    attempt.nextAt = this.now() + (reason === "ledger_or_judge_changed" ? 0 : outcome === "failed" ? FAILED_RETRY_MS : RETRAIN_MS);
+    if (verdicts !== undefined)
+      attempt.verdicts = verdicts;
+    this.training = undefined;
+  }
+  logTraining(attempt) {
+    (this.options.log ?? console.log)(`[olympus:embedding-prefilter] rows_read=${attempt.rows} personal=${attempt.counts[0]} private=${attempt.counts[1]} outcome=${attempt.outcome}${attempt.reason ? ` reason=${attempt.reason}` : ""}${attempt.version ? ` model_version=${attempt.version}` : ""} elapsed_ms=${Math.round(attempt.elapsedMs)} next_attempt=${new Date(attempt.nextAt).toISOString()}${attempt.outcome === "too_few" ? " or_1000_new_verdicts" : ""}`);
+  }
   async prepare(judge3) {
     if (this.owner !== this)
       return this.owner.prepare(judge3);
-    if (this.audit.stopped) {
+    if (this.audit.stopped || !this.enabled()) {
       for (const member of this.members)
         member.rollback();
       return;
     }
-    if (!this.enabled()) {
-      for (const member of this.members)
-        member.rollback();
+    const clock2 = this.options.monotonicNow ?? (() => performance.now());
+    const started = clock2();
+    const deadline = started + TRAINING_SLICE_MS;
+    let attempt = this.attempt;
+    const finishedAtStart = attempt && ["trained", "too_few", "failed"].includes(attempt.outcome) ? attempt.id : undefined;
+    if (attempt?.outcome === "failed" && !attempt.revisions && this.now() < attempt.nextAt)
       return;
-    }
-    if (this.saved && (this.saved.judge !== judge3 || !/^[0-9a-f-]{36}$/.test(this.saved.version) || !Number.isFinite(this.saved.trainedAt) || privateProbability(this.saved.model, [1, ...new Array(EMBEDDING_PREFILTER_DIMENSIONS - 1).fill(0)]) === undefined))
-      this.saved = undefined;
-    if (this.saved && (this.saved.revisions !== this.revisions() || !existsSync100(this.path))) {
-      if (existsSync100(this.path))
-        removeFileDurablySync(this.path);
-      this.saved = undefined;
-      this.attemptedAt = -Infinity;
-    }
-    const now = this.now();
-    if (this.saved && now - this.saved.trainedAt < RETRAIN_MS || now - this.attemptedAt < RETRAIN_MS)
-      return;
-    this.attemptedAt = now;
-    const revisions = this.revisions();
-    const examples = [];
-    const counts = [0, 0];
-    for (const member of this.members) {
-      let after;
-      while (true) {
-        const rows = member.options.ledger.listRouted({ ...after ? { after } : {}, limit: 500 });
-        if (!rows.length)
-          break;
-        for (const row of rows) {
-          if (row.state !== "current" || row.metadataPending || row.contentPending || row.metadataTier !== "private" || !["private", "secure"].includes(row.contentTier) || row.metadataForced || !row.modelId || row.decidedBy === "owner_rule" || row.decidedBy === "override" || row.reasons.some((reason) => reason.startsWith("metadata:owner_rule:") || reason.startsWith("content:embedding_prefilter:")) || !row.reasons.some((reason) => reason.startsWith(`content:sniffer:${judge3}:`) && !/:rule:|:unresolved:|:fail_safe:|:injection:/.test(reason)))
-            continue;
-          const copy = member.options.copyFor(subjectOf(row));
-          if (!copy || !row.reasons.includes(contentDigestReason(copy.chunks.map((chunk) => chunk.boundedText).join(""))))
-            continue;
-          const label = member.options.sniffer.judgedContentLabel(subjectOf(row), row.modelId, normalizedContentHash(copy.chunks.map((chunk) => chunk.boundedText).join("")));
-          if (!label)
-            continue;
-          const isPrivate = label === "private";
-          const index = Number(isPrivate);
-          if (counts[index] >= MAX_PER_CLASS)
-            continue;
-          const vector = prefilterVector(copy);
-          if (!vector)
-            continue;
-          examples.push({ vector, private: isPrivate });
-          counts[index]++;
-        }
-        after = subjectOf(rows[rows.length - 1]);
-        if (counts.every((count) => count >= MAX_PER_CLASS))
-          break;
-        await ingestionTurn();
+    let stage = "scan_failed";
+    try {
+      const revisions = this.revisions();
+      if (this.saved && (this.saved.judge !== judge3 || !/^[0-9a-f-]{36}$/.test(this.saved.version) || !Number.isFinite(this.saved.trainedAt) || this.saved.revisions !== revisions || !existsSync100(this.path) || privateProbability(this.saved.model, [1, ...new Array(EMBEDDING_PREFILTER_DIMENSIONS - 1).fill(0)]) === undefined)) {
+        if (existsSync100(this.path))
+          removeFileDurablySync(this.path);
+        this.saved = undefined;
+        if (attempt?.outcome === "trained")
+          attempt = this.attempt = undefined;
+        this.training = undefined;
       }
+      if (attempt && (attempt.revisions !== revisions || attempt.judge !== judge3)) {
+        if (attempt.outcome === "scanning" || attempt.outcome === "fitting") {
+          this.finishTraining(attempt, "failed", "ledger_or_judge_changed");
+          this.logTraining(attempt);
+        }
+        attempt = this.attempt = undefined;
+        this.training = undefined;
+      }
+      if (!attempt && this.saved && this.now() - this.saved.trainedAt < RETRAIN_MS)
+        return;
+      if (attempt && ["trained", "too_few", "failed"].includes(attempt.outcome)) {
+        if (this.now() < attempt.nextAt && !(attempt.outcome === "too_few" && this.verdictCount() >= (attempt.verdicts ?? 0) + NEW_VERDICTS))
+          return;
+        attempt = undefined;
+      }
+      if (!attempt) {
+        attempt = this.attempt = {
+          id: randomUUID32(),
+          revisions,
+          judge: judge3,
+          startedAt: this.now(),
+          elapsedMs: 0,
+          rows: 0,
+          counts: [0, 0],
+          nextAt: this.now(),
+          outcome: "scanning"
+        };
+        this.training = undefined;
+      }
+      if (!this.training || this.training.id !== attempt.id) {
+        const scans = [...this.members].map((member) => {
+          const raw = member.options.ledger.readMeta(SCAN);
+          const previous = raw ? JSON.parse(raw) : undefined;
+          const scan = previous?.attempt === attempt.id ? previous : { attempt: attempt.id, done: false, rows: 0, samples: [] };
+          if (!Array.isArray(scan.samples) || scan.samples.length > MAX_PER_CLASS * 2 || !Number.isSafeInteger(scan.rows))
+            throw new Error;
+          return { member, scan, dirty: false, revision: member.options.ledger.readMeta(`${PREFIX3}training-revision`) ?? "0" };
+        });
+        this.training = { id: attempt.id, scans, examples: [], memberIndex: 0, sampleIndex: 0, validationIndex: 0, validationRemaining: 0 };
+        attempt.counts = [0, 0];
+        attempt.rows = 0;
+        for (const { scan } of scans) {
+          attempt.rows += scan.rows;
+          for (const sample of scan.samples)
+            attempt.counts[Number(sample.private)]++;
+        }
+      }
+      const run2 = this.training;
+      const markers = run2.scans.map(({ member }) => member.options.ledger.changeMarker());
+      const ledgerChanged = !run2.markers || markers.some((marker, index) => marker !== run2.markers[index]);
+      run2.markers = markers;
+      if (ledgerChanged)
+        run2.validationRemaining = run2.examples.length;
+      let worked = false;
+      const hasTime = () => !worked || clock2() < deadline;
+      for (const entry of run2.scans) {
+        const { member, scan } = entry;
+        while (attempt.outcome !== "fitting" && !scan.done && !attempt.counts.every((count) => count >= MAX_PER_CLASS) && hasTime()) {
+          const rows = member.options.ledger.listItemWindow({ ...scan.after ? { after: scan.after } : {}, limit: 32 });
+          if (!rows.length) {
+            scan.done = true;
+            entry.dirty = true;
+            break;
+          }
+          for (const row of rows) {
+            if (!hasTime())
+              break;
+            worked = true;
+            entry.dirty = true;
+            scan.after = subjectOf(row);
+            scan.rows++;
+            attempt.rows++;
+            const index = Number(row.contentTier === "secure");
+            if (attempt.counts[index] < MAX_PER_CLASS) {
+              const example = member.trainingExample(row, judge3);
+              if (example) {
+                scan.samples.push({ subject: subjectOf(row), private: example.private });
+                attempt.counts[Number(example.private)]++;
+              }
+            }
+            await ingestionTurn();
+          }
+        }
+        if (!hasTime())
+          break;
+      }
+      if (attempt.outcome === "fitting" || run2.scans.every(({ scan }) => scan.done) || attempt.counts.every((count) => count >= MAX_PER_CLASS)) {
+        if (attempt.counts.some((count) => count < EMBEDDING_PREFILTER_MIN_PER_CLASS))
+          this.finishTraining(attempt, "too_few");
+        else {
+          stage = "training_failed";
+          attempt.outcome = "fitting";
+          while (run2.memberIndex < run2.scans.length && hasTime()) {
+            const { member, scan } = run2.scans[run2.memberIndex];
+            if (run2.sampleIndex >= scan.samples.length) {
+              run2.memberIndex++;
+              run2.sampleIndex = 0;
+              continue;
+            }
+            worked = true;
+            const sample = scan.samples[run2.sampleIndex++];
+            const row = member.options.ledger.getCurrent(sample.subject);
+            const example = row && member.trainingExample(row, judge3);
+            if (example)
+              run2.examples.push(example);
+            await ingestionTurn();
+          }
+          if (run2.memberIndex === run2.scans.length) {
+            if (!run2.fit) {
+              attempt.counts = [0, 0];
+              for (const example of run2.examples)
+                attempt.counts[Number(example.private)]++;
+              run2.fit = trainLogisticSteps(run2.examples);
+            }
+            const validationDeadline = started + TRAINING_SLICE_MS / 2;
+            let checked = 0;
+            while (!run2.model && checked < run2.examples.length && clock2() < validationDeadline) {
+              worked = true;
+              if (!run2.examples[run2.validationIndex].current(run2.validationRemaining > 0)) {
+                stage = "ledger_or_judge_changed";
+                throw new Error;
+              }
+              run2.validationIndex = (run2.validationIndex + 1) % run2.examples.length;
+              run2.validationRemaining = Math.max(0, run2.validationRemaining - 1);
+              checked++;
+              await ingestionTurn();
+            }
+            while (!run2.model && hasTime()) {
+              worked = true;
+              const step = run2.fit.next();
+              if (step.done) {
+                if (!step.value) {
+                  this.finishTraining(attempt, "too_few");
+                  break;
+                }
+                run2.model = step.value;
+                break;
+              }
+              await ingestionTurn();
+            }
+            if (run2.model) {
+              const changeMarkers = () => JSON.stringify(run2.scans.map(({ member }) => [
+                member.options.ledger.changeMarker(true),
+                member.options.copyChangeMarker()
+              ]));
+              const currentMarkers = changeMarkers();
+              if (!run2.finalValidation || run2.finalValidation.markers !== currentMarkers) {
+                run2.finalValidation = { index: 0, markers: currentMarkers };
+              }
+              const validation = run2.finalValidation;
+              while (validation.index < run2.examples.length && hasTime()) {
+                worked = true;
+                if (!run2.examples[validation.index++].current(true)) {
+                  stage = "ledger_or_judge_changed";
+                  throw new Error;
+                }
+                await ingestionTurn();
+              }
+              if (validation.index === run2.examples.length && hasTime() && validation.markers === changeMarkers() && attempt.revisions === this.revisions()) {
+                stage = "weights_write_failed";
+                if (this.control.dbPath === ":memory:")
+                  throw new Error;
+                const directory = embeddingPrefilterDirectory(this.control.dbPath);
+                if (existsSync100(directory) && (!lstatSync51(directory).isDirectory() || lstatSync51(directory).isSymbolicLink()))
+                  throw new Error;
+                mkdirSync61(directory, { recursive: true, mode: 448 });
+                chmodSync36(directory, 448);
+                const saved = { model: run2.model, judge: judge3, revisions, trainedAt: this.now(), version: randomUUID32() };
+                writePrivateFileAtomicSync(this.path, JSON.stringify(saved));
+                this.saved = saved;
+                attempt.version = saved.version;
+                this.finishTraining(attempt, "trained");
+              }
+            }
+          }
+        }
+      }
+      if (attempt.revisions !== this.revisions()) {
+        if (existsSync100(this.path))
+          removeFileDurablySync(this.path);
+        this.saved = undefined;
+        this.finishTraining(attempt, "failed", "ledger_or_judge_changed");
+      }
+      if (run2.scans.some(({ member }, index) => member.options.ledger.changeMarker() !== markers[index])) {
+        run2.validationRemaining = run2.examples.length;
+      }
+      for (const entry of run2.scans) {
+        if (entry.dirty && attempt.revisions === this.revisions()) {
+          if (!entry.member.options.ledger.writeEmbeddingTrainingScan(JSON.stringify(entry.scan), entry.revision)) {
+            this.finishTraining(attempt, "failed", "ledger_or_judge_changed");
+            break;
+          }
+          entry.dirty = false;
+        }
+      }
+    } catch {
+      if (!attempt)
+        attempt = this.attempt = { id: randomUUID32(), judge: judge3, revisions: "", startedAt: this.now(), elapsedMs: 0, rows: 0, counts: [0, 0], nextAt: this.now(), outcome: "scanning" };
+      if (attempt.outcome === "scanning" || attempt.outcome === "fitting")
+        this.finishTraining(attempt, "failed", stage);
     }
-    const model = trainLogistic(examples);
-    if (!model || revisions !== this.revisions() || this.control.dbPath === ":memory:")
-      return;
-    const directory = embeddingPrefilterDirectory(this.control.dbPath);
-    if (existsSync100(directory) && (!lstatSync51(directory).isDirectory() || lstatSync51(directory).isSymbolicLink()))
-      return;
-    mkdirSync61(directory, { recursive: true, mode: 448 });
-    chmodSync36(directory, 448);
-    const saved = { model, judge: judge3, revisions, trainedAt: now, version: randomUUID32() };
-    writePrivateFileAtomicSync(this.path, JSON.stringify(saved));
-    this.saved = saved;
+    if (attempt && attempt.id !== finishedAtStart) {
+      attempt.elapsedMs += clock2() - started;
+      this.control.writeMeta(TRAINING, JSON.stringify(attempt));
+      if (this.training)
+        this.training.markers = this.training.scans.map(({ member }, index) => {
+          const marker = member.options.ledger.changeMarker();
+          const previous = this.training.markers?.[index];
+          return previous && previous.split(":")[0] !== marker.split(":")[0] ? previous : marker;
+        });
+      if (["trained", "too_few", "failed"].includes(attempt.outcome))
+        this.logTraining(attempt);
+    }
   }
   retained(question) {
     const raw = this.options.ledger.readMeta(RECEIPTS + tierLedgerIdentityKey(question));
@@ -192185,7 +192493,7 @@ class EmbeddingPrefilter {
     }
   }
 }
-var PREFIX3 = "embedding-prefilter:", RECEIPTS, CHECKS, WINDOW = 200, RETRAIN_MS, MAX_PER_CLASS = 5000;
+var PREFIX3 = "embedding-prefilter:", RECEIPTS, CHECKS, WINDOW = 200, RETRAIN_MS, MAX_PER_CLASS = 5000, TRAINING_SLICE_MS = 200, FAILED_RETRY_MS, NEW_VERDICTS = 1000, TRAINING, SCAN;
 var init_embedding_prefilter = __esm(() => {
   init_atomic_file();
   init_control_path_headroom();
@@ -192197,10 +192505,13 @@ var init_embedding_prefilter = __esm(() => {
   RECEIPTS = `${PREFIX3}clear:`;
   CHECKS = `${PREFIX3}check:`;
   RETRAIN_MS = 24 * 60 * 60 * 1000;
+  FAILED_RETRY_MS = 3 * 60 * 60 * 1000;
+  TRAINING = `${PREFIX3}training-v1`;
+  SCAN = `${PREFIX3}training-scan-v1`;
 });
 
 // src/workers/classification/sniffer-resolver.ts
-import { createHash as createHash100 } from "node:crypto";
+import { createHash as createHash101 } from "node:crypto";
 import { mkdirSync as mkdirSync62, readFileSync as readFileSync89 } from "node:fs";
 import { dirname as dirname99 } from "node:path";
 
@@ -192258,7 +192569,7 @@ class SnifferCallBudget {
 }
 function materialCarriesSecret(question) {
   const own3 = snifferOwnMaterial(question.material);
-  const key2 = createHash100("sha256").update(own3).digest("base64");
+  const key2 = createHash101("sha256").update(own3).digest("base64");
   const known = secretScreenCache.get(key2);
   if (known !== undefined)
     return known;
@@ -192518,8 +192829,8 @@ async function runSnifferPass(options) {
     }
     id = snifferId(options.lane, promptVersion);
   }
-  for (const target of options.targets)
-    await target.embeddingPrefilter?.prepare(id);
+  for (const filter of new Set(options.targets.flatMap((target) => target.embeddingPrefilter ? [target.embeddingPrefilter.trainingOwner] : [])))
+    await filter.prepare(id);
   for (const pass of ["metadata", "content"]) {
     work[pass] = work[pass].filter((item) => {
       const key2 = keyOf2(item.question);
@@ -193230,6 +193541,15 @@ class TierSnifferService {
           sniffer: this.options.installed.snifferStoreForLedger(ledgerPath),
           ...planner ? { placementFor: planner } : {},
           enabled: () => this.options.embeddingPrefilterEnabled?.() !== false,
+          log: (line2) => this.options.log?.(line2),
+          copyChangeMarker: () => {
+            const stores = tierSetForLedger(ledgerPath)?.openStores() ?? this.options.stores().filter((store) => (store.tierLedgerPathInUse?.() ?? tierLedgerPathForStore(store.dbPath)) === ledgerPath);
+            return JSON.stringify(stores.map((store) => {
+              if (!store.changeMarker)
+                throw new Error("Copy change marker unavailable");
+              return [store.dbPath, store.changeMarker()];
+            }));
+          },
           copyFor: (subject) => {
             const set2 = tierSetForLedger(ledgerPath);
             const serving = copyServingLayer(ledger.copies(subject), "content");
@@ -210584,7 +210904,7 @@ __export(exports_handler, {
   REMOTE_OAUTH_PATHS: () => REMOTE_OAUTH_PATHS,
   CONNECT_BODY_DEADLINE_MS: () => CONNECT_BODY_DEADLINE_MS
 });
-import { createHash as createHash101, randomBytes as randomBytes30, timingSafeEqual as timingSafeEqual10 } from "node:crypto";
+import { createHash as createHash102, randomBytes as randomBytes30, timingSafeEqual as timingSafeEqual10 } from "node:crypto";
 function isRemoteOAuthRequest(request) {
   return ROUTED_PATHS.has(new URL(request.url).pathname);
 }
@@ -210952,7 +211272,7 @@ function createRemoteOAuthHandler(options) {
         codes.delete(hash3);
         return oauthError(400, "invalid_grant", "The authorization code was issued to another client or redirect.");
       }
-      if (!constantTimeEqual(createHash101("sha256").update(verifier).digest("base64url"), issued.codeChallenge)) {
+      if (!constantTimeEqual(createHash102("sha256").update(verifier).digest("base64url"), issued.codeChallenge)) {
         codes.delete(hash3);
         return oauthError(400, "invalid_grant", "The code verifier does not match the challenge.");
       }
@@ -211219,7 +211539,7 @@ function constantTimeEqual(left, right) {
   return a.length === b.length && a.length > 0 && timingSafeEqual10(a, b);
 }
 function sha25613(value2) {
-  return createHash101("sha256").update(value2).digest("hex");
+  return createHash102("sha256").update(value2).digest("hex");
 }
 function redirectWithParams(redirectUri, params) {
   const target = new URL(redirectUri);
@@ -213412,7 +213732,7 @@ __export(exports_remote_openapi, {
   REMOTE_OPENAPI_MAX_BODY_BYTES: () => REMOTE_OPENAPI_MAX_BODY_BYTES,
   REMOTE_OPENAPI_API_VERSION: () => REMOTE_OPENAPI_API_VERSION
 });
-import { createHash as createHash102 } from "node:crypto";
+import { createHash as createHash103 } from "node:crypto";
 function isRemoteOpenApiRequest(request) {
   const { pathname } = new URL(request.url);
   return pathname === REMOTE_OPENAPI_SPEC_PATH || TOOL_PATH_PATTERN.test(pathname);
@@ -213429,7 +213749,7 @@ function createRemoteOpenApiHandler(options) {
     const serverUrl = typeof configured === "function" ? livePublicServerUrl(configured()) : publicServerUrl(configured);
     if (spec?.serverUrl !== serverUrl) {
       const text6 = JSON.stringify(buildRemoteOpenApiSpec({ serverUrl }));
-      spec = { serverUrl, text: text6, etag: `"${createHash102("sha256").update(text6).digest("base64url").slice(0, 27)}"` };
+      spec = { serverUrl, text: text6, etag: `"${createHash103("sha256").update(text6).digest("base64url").slice(0, 27)}"` };
     }
     return spec;
   };
@@ -213806,7 +214126,7 @@ __export(exports_setup_backend, {
   createChatGptSetupBackend: () => createChatGptSetupBackend
 });
 import { readFileSync as readFileSync90 } from "node:fs";
-import { createHash as createHash103 } from "node:crypto";
+import { createHash as createHash104 } from "node:crypto";
 function privacyRuleView(rule) {
   if (rule.kind === "sender" && rule.value)
     return [{ kind: "sender", source_id: "gmail.email", value: rule.value }];
@@ -213830,7 +214150,7 @@ function readChatGptPrivacySettings(env, pendingCount) {
 function privacyRevision(profile) {
   if (!profile)
     return "prv1.unset";
-  const digest5 = createHash103("sha256").update(JSON.stringify({ d: profile.description, r: profile.rules })).digest("hex");
+  const digest5 = createHash104("sha256").update(JSON.stringify({ d: profile.description, r: profile.rules })).digest("hex");
   return `prv1.${digest5.slice(0, 32)}`;
 }
 function createChatGptSetupBackend(options) {
@@ -213838,7 +214158,7 @@ function createChatGptSetupBackend(options) {
   const privacySettings = () => {
     const current2 = options.sovereignty.source === "file" && options.sovereignty.path ? validateSovereigntyConfig(JSON.parse(readFileSync90(options.sovereignty.path, "utf8"))) : policy;
     policy = current2;
-    const policyRevision = createHash103("sha256").update(JSON.stringify(current2)).digest("hex").slice(0, 16);
+    const policyRevision = createHash104("sha256").update(JSON.stringify(current2)).digest("hex").slice(0, 16);
     if (isPendingPrivacyPolicy(current2))
       return {
         configured: false,

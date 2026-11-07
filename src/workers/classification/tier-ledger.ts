@@ -29,6 +29,7 @@ import { runSqliteMigrations, type SqliteMigration } from '../../core/sqlite-mig
 import { closeSqliteStore } from '../../core/sqlite-store.ts';
 import {
   TIER_KEYS,
+  contentJudgeVerdictReason,
   maxTier,
   tierRank,
   type ContentTierDecision,
@@ -345,6 +346,7 @@ export class TierLedgerSecretsRollbackRefusedError extends Error {
 export class TierLedger {
   readonly dbPath: string;
   private readonly db: Database;
+  private metaChanges = 0;
   private readonly now: () => Date;
 
   constructor(options: TierLedgerOptions) {
@@ -554,8 +556,9 @@ export class TierLedger {
           decidedBy: contentTier !== existing.contentTier ? 'sniffer' : existing.decidedBy,
           reasons: [
             ...metadataReasons,
-            ...contentReasons.filter((reason) => !isOpenSnifferReason(reason, 'content')),
+            ...contentReasons.filter((reason) => !isOpenSnifferReason(reason, 'content') && !reason.startsWith('content:judge_verdict:')),
             verdict.reason,
+            ...contentVerdictReceipts(contentReasons, verdict.reason, verdict.tier),
           ],
           contentPending: false,
         };
@@ -666,6 +669,7 @@ export class TierLedger {
     const contentTier = maxTier(base.contentTier, verdict.tier);
     const metadataPending = verdict.pass === 'metadata' ? false : base.metadataPending;
     const kept = base.reasons.filter(reason => !isOpenSnifferReason(reason, verdict.pass)
+      && !(verdict.pass === 'content' && reason.startsWith('content:judge_verdict:'))
       && !(metadataTier === 'secure' && isOpenSnifferReason(reason, 'content')));
     const contentPending = verdict.pass === 'content' || metadataTier === 'secure' ? false : base.contentPending;
     const decision: TierDecision = {
@@ -673,7 +677,8 @@ export class TierLedger {
       metadataTier,
       contentTier,
       decidedBy: 'sniffer',
-      reasons: [...(verdict.pass === 'metadata' ? settleStoredNamesMark(kept, base.metadataTier, metadataTier) : kept), verdict.reason],
+      reasons: [...(verdict.pass === 'metadata' ? settleStoredNamesMark(kept, base.metadataTier, metadataTier) : kept), verdict.reason,
+        ...(verdict.pass === 'content' ? contentVerdictReceipts(kept, verdict.reason, verdict.tier) : [])],
       metadataPending,
       contentPending,
       state: metadataPending || contentPending ? 'pending' : 'current',
@@ -1941,20 +1946,29 @@ export class TierLedger {
 
   writeMeta(key: string, value: string): void {
     if (key === 'ledger_id') throw new Error('The ledger identity is never rewritten.');
-    this.db.query(`
+    this.metaChanges += this.db.query(`
       INSERT INTO tier_ledger_meta (key, value) VALUES (?, ?)
       ON CONFLICT(key) DO UPDATE SET value = excluded.value
-    `).run(key, value);
+    `).run(key, value).changes;
   }
 
   deleteMeta(key: string): void {
     if (key === 'ledger_id') throw new Error('The ledger identity is never deleted.');
-    this.db.query('DELETE FROM tier_ledger_meta WHERE key = ?').run(key);
+    this.metaChanges += this.db.query('DELETE FROM tier_ledger_meta WHERE key = ?').run(key).changes;
   }
 
   /** Atomic publication of related content-free background receipts. */
   writeMetaBatch(entries: readonly (readonly [string, string])[]): void {
     this.db.transaction(() => { for (const [key, value] of entries) this.writeMeta(key, value); })();
+  }
+
+  /** A withdrawal on another connection cannot be followed by stale scan references. */
+  writeEmbeddingTrainingScan(value: string, revision: string): boolean {
+    return this.db.transaction(() => {
+      if ((this.readMeta('embedding-prefilter:training-revision') ?? '0') !== revision) return false;
+      this.writeMeta('embedding-prefilter:training-scan-v1', value);
+      return true;
+    }).immediate();
   }
 
   /** Small durable work receipts, without exporting any store content. */
@@ -1992,6 +2006,18 @@ export class TierLedger {
       LIMIT ?
     `).all(after ? 1 : null, ...(after ?? [null, null, null, null]), limit);
     return (rows as TierItemRow[]).map(recordFromRow);
+  }
+
+  /** Bound actual rows examined, even when almost none are routed/eligible. */
+  listItemWindow(options: { after?: TierLedgerIdentity; limit: number }): TierLedgerRecord[] {
+    const after = options.after
+      ? [options.after.provider, options.after.accountScope, tierLedgerConversationKey(options.after), options.after.providerItemId]
+      : [];
+    const rows = this.db.query(`SELECT * FROM tier_items
+      ${after.length ? 'WHERE (provider, account_scope, conversation_key, provider_item_id) > (?, ?, ?, ?)' : ''}
+      ORDER BY provider, account_scope, conversation_key, provider_item_id LIMIT ?`)
+      .all(...after, Math.max(1, Math.min(options.limit, 500))) as TierItemRow[];
+    return rows.map(recordFromRow);
   }
 
   /** Historical repair candidates only: indexed copy/identity/content probes. */
@@ -3465,10 +3491,12 @@ export class TierLedger {
    * Changes whenever this ledger's database changes, from this connection or
    * another: lets a reader reuse what it derived from the ledger until then.
    */
-  changeMarker(): string {
+  changeMarker(ignoreOwnMetaWrites = false): string {
     const row = this.db.query('SELECT total_changes() AS changes').get() as { changes: number };
     const version = this.db.query('PRAGMA data_version').get() as { data_version: number };
-    return `${version.data_version}:${row.changes}`;
+    // Background checkpoints cannot invalidate a sliced training validation.
+    // External commits still invalidate it; withdrawals are also revision-fenced.
+    return `${version.data_version}:${row.changes - (ignoreOwnMetaWrites ? this.metaChanges : 0)}`;
   }
 
   /**
@@ -3692,6 +3720,8 @@ export class TierLedger {
     return this.db.transaction(() => {
       const now = this.now().toISOString();
       this.writeMeta('embedding-prefilter:training-revision', randomUUID());
+      // Partial training contains source-owned references, never retained after withdrawal.
+      this.deleteMeta('embedding-prefilter:training-scan-v1');
       for (const kind of ['check:', 'clear:']) {
         const prefix = `embedding-prefilter:${kind}${provider}\0${accountScope}\0`;
         this.db.query('DELETE FROM tier_ledger_meta WHERE key >= ? AND key < ?').run(prefix, `${prefix}\uffff`);
@@ -4309,6 +4339,11 @@ function settleStoredNamesMark(reasons: readonly string[], askedTier: TierKey, a
   if (!reasons.includes(STORED_NAMES_ASKED_REASON)) return [...reasons];
   const rest = reasons.filter((reason) => reason !== STORED_NAMES_ASKED_REASON);
   return answeredTier !== askedTier ? [...rest, STORED_NAMES_REASON] : rest;
+}
+
+function contentVerdictReceipts(reasons: readonly string[], reason: string, tier: TierKey): string[] {
+  const digests = reasons.filter(value => /^content:sha256:[0-9a-f]{64}$/.test(value));
+  return digests.length === 1 ? [contentJudgeVerdictReason(reason, tier, digests[0]!)] : [];
 }
 
 function isOpenSnifferReason(reason: string, pass: 'metadata' | 'content'): boolean {

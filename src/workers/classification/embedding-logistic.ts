@@ -21,6 +21,13 @@ export function privateProbability(model: LogisticModel, vector: readonly number
   return Number.isFinite(score) ? sigmoid(score) : undefined;
 }
 export function trainLogistic(examples: readonly LogisticExample[], minimumPerClass = EMBEDDING_PREFILTER_MIN_PER_CLASS): LogisticModel | undefined {
+  const steps = trainLogisticSteps(examples, minimumPerClass);
+  let step = steps.next();
+  while (!step.done) step = steps.next();
+  return step.value;
+}
+/** Same deterministic fit, yielding after each input/update for the worker's tick budget. */
+export function* trainLogisticSteps(examples: readonly LogisticExample[], minimumPerClass = EMBEDDING_PREFILTER_MIN_PER_CLASS): Generator<void, LogisticModel | undefined> {
   if (!Number.isSafeInteger(minimumPerClass) || minimumPerClass < 1) return undefined;
   const counts = [0, 0];
   const inputs: Array<{ vector: number[]; label: number }> = [];
@@ -29,6 +36,7 @@ export function trainLogistic(examples: readonly LogisticExample[], minimumPerCl
     if (!vector || typeof example.private !== 'boolean') continue;
     const label = Number(example.private);
     inputs.push({ vector, label }); counts[label]!++;
+    yield;
   }
   if (counts.some(count => count < minimumPerClass)) return undefined;
   const weights = new Array<number>(EMBEDDING_PREFILTER_DIMENSIONS).fill(0);
@@ -41,6 +49,7 @@ export function trainLogistic(examples: readonly LogisticExample[], minimumPerCl
       seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
       const j = seed % (i + 1);
       [order[i], order[j]] = [order[j]!, order[i]!];
+      yield;
     }
     const rate = 0.12 / (1 + epoch * 0.15);
     const shrink = 1 - rate * 0.001;
@@ -51,6 +60,7 @@ export function trainLogistic(examples: readonly LogisticExample[], minimumPerCl
       const error = sigmoid(score) - input.label;
       bias -= rate * error;
       for (let i = 0; i < weights.length; i++) weights[i] = weights[i]! * shrink - rate * error * input.vector[i]!;
+      yield;
     }
   }
   return { weights, bias };

@@ -89,6 +89,7 @@ export interface TierSnifferServiceStore {
   tierSetLedgerPath?(): string | undefined;
   tierLedgerPathInUse?: LocalConnectorStore['tierLedgerPathInUse'];
   exportItemCopy?: LocalConnectorStore['exportItemCopy'];
+  changeMarker?: LocalConnectorStore['changeMarker'];
   tombstoneCopy?: LocalConnectorStore['tombstoneCopy'];
 }
 
@@ -858,6 +859,15 @@ export class TierSnifferService {
         embeddingPrefilter = new EmbeddingPrefilter({ ledger, stateLedger: this.embeddingState!, ...(this.embeddingPrefilters.size ? { sharedWith: this.embeddingPrefilters.values().next().value! } : {}), sniffer: this.options.installed.snifferStoreForLedger(ledgerPath),
           ...(planner ? { placementFor: planner } : {}),
           enabled: () => this.options.embeddingPrefilterEnabled?.() !== false,
+          log: line => this.options.log?.(line),
+          copyChangeMarker: () => {
+            const stores = tierSetForLedger(ledgerPath)?.openStores() ?? this.options.stores().filter(store =>
+              (store.tierLedgerPathInUse?.() ?? tierLedgerPathForStore(store.dbPath)) === ledgerPath);
+            return JSON.stringify(stores.map(store => {
+              if (!store.changeMarker) throw new Error('Copy change marker unavailable');
+              return [store.dbPath, store.changeMarker()];
+            }));
+          },
           copyFor: subject => {
             const set = tierSetForLedger(ledgerPath);
             const serving = copyServingLayer(ledger.copies(subject), 'content');

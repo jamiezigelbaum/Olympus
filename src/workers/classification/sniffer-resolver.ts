@@ -523,7 +523,8 @@ export async function runSnifferPass(options: SnifferPassOptions): Promise<Sniff
     if (stopped) { report.stoppedBy = stopped; return finish(report); }
     id = snifferId(options.lane, promptVersion);
   }
-  for (const target of options.targets) await target.embeddingPrefilter?.prepare(id);
+  // Pooled filters share one training budget, regardless of the number of sources.
+  for (const filter of new Set(options.targets.flatMap(target => target.embeddingPrefilter ? [target.embeddingPrefilter.trainingOwner] : []))) await filter.prepare(id);
   for (const pass of ['metadata', 'content'] as const) {
     work[pass] = work[pass].filter(item => {
       const key = keyOf(item.question);
