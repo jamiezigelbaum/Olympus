@@ -114,3 +114,16 @@ test('a higher-priority question from a large group still runs before an ordinar
     expect(store.listQuestions().map(question => question.providerItemId)).toEqual(['large-held', 'direct-ordinary']);
   } finally { store.close(); }
 });
+
+test('a re-enqueue with no size hint (a re-judge) keeps the order an earlier hint gave', () => {
+  const store = new TierSnifferStore({ dbPath: ':memory:' });
+  try {
+    const subject = item('rejudged').identity;
+    const question = { subject, pass: 'content' as const, material: 'same item text', mapRevision: 'none', flags: [] };
+    store.enqueue({ ...question, conversationOrder: -1 });
+    store.enqueue(question);
+    expect(store.questionFor(subject, 'content')?.conversationOrder).toBe(-1);
+    store.enqueue({ ...question, conversationOrder: 1 });
+    expect(store.questionFor(subject, 'content')?.conversationOrder).toBe(1);
+  } finally { store.close(); }
+});

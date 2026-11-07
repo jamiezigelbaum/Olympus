@@ -10485,7 +10485,8 @@ class TierSnifferStore {
   enqueue(question) {
     const materialHash = question.materialHash ?? snifferMaterialHash(question.pass, question.material);
     const priority = Number.isFinite(question.priority) ? Math.max(HELD_UNTIL_JUDGED_PRIORITY, Math.min(100, Math.floor(question.priority))) : 0;
-    const conversationOrder = question.conversationOrder === 1 ? 1 : question.conversationOrder === -1 ? -1 : 0;
+    const hinted = question.conversationOrder !== undefined;
+    const hint = question.conversationOrder === 1 ? 1 : question.conversationOrder === -1 ? -1 : 0;
     return this.db.transaction(() => {
       if (question.stillAsk && !question.stillAsk())
         return false;
@@ -10493,6 +10494,7 @@ class TierSnifferStore {
         SELECT priority, conversation_order FROM sniffer_questions
         WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND pass = ?
       `).get(...subjectParams(question.subject), question.pass);
+      const conversationOrder = hinted ? hint : before?.conversation_order ?? 0;
       this.db.query(`
       INSERT INTO sniffer_questions (
         provider, account_scope, conversation_key, provider_item_id, pass, material_hash, map_revision, material, flags_json, attempts, queued_at, priority, content_hash, conversation_order
@@ -11045,7 +11047,7 @@ class CachedTierSniffer {
           ...request.materialHash ? { materialHash: request.materialHash } : {},
           ...request.contentHash ? { contentHash: request.contentHash } : {},
           mapRevision,
-          conversationOrder: request.conversationOrder ?? 0,
+          ...request.conversationOrder !== undefined ? { conversationOrder: request.conversationOrder } : {},
           flags: request.flags,
           ...request.priority !== undefined ? { priority: request.priority } : {},
           ...request.stillAsk ? { stillAsk: request.stillAsk } : {}
