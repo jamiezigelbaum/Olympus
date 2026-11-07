@@ -614,6 +614,7 @@ export class CachedTierSniffer implements TierSniffer {
           ...(request.materialHash ? { materialHash: request.materialHash } : {}),
           ...(request.contentHash ? { contentHash: request.contentHash } : {}),
           mapRevision,
+          ...(request.conversationOrder !== undefined ? { conversationOrder: request.conversationOrder } : {}),
           flags: request.flags,
           ...(request.priority !== undefined ? { priority: request.priority } : {}),
           ...(request.stillAsk ? { stillAsk: request.stillAsk } : {}),

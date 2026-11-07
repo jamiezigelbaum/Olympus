@@ -66,6 +66,20 @@ def norm(message):
 `;
 
 describe('Telethon helper: richer records', () => {
+  pythonTest('queue size uses already-fetched entity counts and topology without a membership request', async () => {
+    const out = await python(`${STUBS}
+from types import SimpleNamespace as Entity
+entities = [None, Entity(), Entity(bot=True), Entity(title="Group", participants_count=20),
+            Entity(title="Group", participants_count=21), Entity(title="Small mega", megagroup=True, participants_count=3),
+            Entity(title="Mega", megagroup=True), Entity(title="Basic"), Entity(title="News", broadcast=True)]
+sizes = [reader.conversation_size_from_entity(entity) for entity in entities]
+message = reader.normalize_message(Msg(1, text="hello"), "owner", "chat", conversation_size=sizes[3])
+print(json.dumps({"sizes": sizes, "signal": message["conversationSize"]}))
+`);
+    expect(out.sizes).toEqual([null, 'direct', 'direct', 'small', 'large', 'small', 'large', 'small', 'large']);
+    expect(out.signal).toBe('small');
+  });
+
   pythonTest('a service message carries its event by the export\'s names', async () => {
     const out = await python(`${STUBS}
 print(json.dumps([norm(Msg(1, MessageActionPhoneCall())), norm(Msg(2, MessageActionChatEditTitle())), norm(Msg(3, MessageActionSuggestedPostApproval())), norm(Msg(4, text="hi"))]))

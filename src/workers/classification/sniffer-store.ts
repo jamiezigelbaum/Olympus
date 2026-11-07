@@ -20,7 +20,7 @@ import { closeSqliteStore } from '../../core/sqlite-store.ts';
 import { HELD_UNTIL_JUDGED_PRIORITY, type TierSnifferSubject } from './tier-classifier.ts';
 import { TIER_SNIFFER_SQLITE_STORE_ID } from './tier-ledger-path.ts';
 
-export const TIER_SNIFFER_SCHEMA_VERSION = 5;
+export const TIER_SNIFFER_SCHEMA_VERSION = 6;
 
 export type SnifferPass = 'metadata' | 'content';
 export type SnifferTier = 'personal' | 'private';
@@ -58,6 +58,7 @@ export interface SnifferQuestion {
   attempts: number;
   queuedAt: string;
   priority: number;
+  conversationOrder?: -1 | 0 | 1;
   /** Stable insertion order for items queued in the same millisecond. */
   sequence: number;
 }
@@ -209,6 +210,7 @@ export class TierSnifferStore {
     mapRevision: string;
     flags: readonly string[];
     priority?: number;
+    conversationOrder?: -1 | 0 | 1;
     stillAsk?: () => boolean;
   }): boolean {
     const materialHash = question.materialHash ?? snifferMaterialHash(question.pass, question.material);
@@ -217,16 +219,21 @@ export class TierSnifferStore {
     const priority = Number.isFinite(question.priority)
       ? Math.max(HELD_UNTIL_JUDGED_PRIORITY, Math.min(100, Math.floor(question.priority!)))
       : 0;
+    // A caller with no size hint (a re-judge of a stored item) keeps the
+    // order an earlier enqueue gave the question; a new one starts at 0.
+    const hinted = question.conversationOrder !== undefined;
+    const hint = question.conversationOrder === 1 ? 1 : question.conversationOrder === -1 ? -1 : 0;
     return this.db.transaction(() => {
       if (question.stillAsk && !question.stillAsk()) return false;
       const before = this.db.query(`
-        SELECT priority FROM sniffer_questions
+        SELECT priority, conversation_order FROM sniffer_questions
         WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND pass = ?
-      `).get(...subjectParams(question.subject), question.pass) as { priority: number } | null;
+      `).get(...subjectParams(question.subject), question.pass) as { priority: number; conversation_order: number } | null;
+      const conversationOrder = hinted ? hint : before?.conversation_order ?? 0;
       this.db.query(`
       INSERT INTO sniffer_questions (
-        provider, account_scope, conversation_key, provider_item_id, pass, material_hash, map_revision, material, flags_json, attempts, queued_at, priority, content_hash
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)
+        provider, account_scope, conversation_key, provider_item_id, pass, material_hash, map_revision, material, flags_json, attempts, queued_at, priority, content_hash, conversation_order
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?)
       ON CONFLICT (provider, account_scope, conversation_key, provider_item_id, pass) DO UPDATE SET
         held_sniffer_id = CASE WHEN sniffer_questions.material_hash = excluded.material_hash
           AND sniffer_questions.map_revision = excluded.map_revision AND sniffer_questions.flags_json = excluded.flags_json
@@ -239,6 +246,7 @@ export class TierSnifferStore {
         map_revision = excluded.map_revision,
         material = excluded.material,
         priority = excluded.priority,
+        conversation_order = excluded.conversation_order,
         flags_json = excluded.flags_json
     `).run(
       ...subjectParams(question.subject),
@@ -250,9 +258,11 @@ export class TierSnifferStore {
       this.now().toISOString(),
       priority,
       question.contentHash ?? null,
+      conversationOrder,
     );
-      // Recent order is priority, then queue time, which an update keeps.
-      if (priority > 0 && (!before || priority > before.priority)) {
+      // Recent order is priority, conversation size, then queue time, which an update keeps.
+      if ((!before && (priority > 0 || conversationOrder > 0))
+        || (before && (priority > before.priority || conversationOrder !== before.conversation_order))) {
         // A blocked scan may have moved below this new/promoted question.
         // Revisit the recent window next tick, atomically with enqueue; keep
         // the oldest cursors so priority arrivals cannot erase aging progress.
@@ -285,7 +295,7 @@ export class TierSnifferStore {
     const read = (oldest: boolean, count: number): SnifferQuestion[] => {
       const key = `${options.pass ?? 'all'}:${oldest ? 'oldest' : 'recent'}`;
       let cursor = options.eligible && !this.readOnly ? this.db.query(
-        'SELECT priority, queued_at, question_pk, candidate_pk FROM sniffer_scan WHERE scan_key = ?',
+        'SELECT conversation_order, priority, queued_at, question_pk, candidate_pk FROM sniffer_scan WHERE scan_key = ?',
       ).get(key) as QuestionCursor | null : null;
       if (oldest && cursor?.candidate_pk != null) {
         const pinned = this.db.query('SELECT * FROM sniffer_questions WHERE question_pk = ?')
@@ -303,13 +313,13 @@ export class TierSnifferStore {
       if (options.pass) { filters.push('pass = ?'); params.push(options.pass); }
       if (cursor) {
         filters.push(oldest ? '(queued_at, question_pk) > (?, ?)'
-          : '(priority, queued_at, question_pk) < (?, ?, ?)');
-        if (!oldest) params.push(cursor.priority);
+          : '(priority, conversation_order, queued_at, question_pk) < (?, ?, ?, ?)');
+        if (!oldest) params.push(cursor.priority, cursor.conversation_order);
         params.push(cursor.queued_at, cursor.question_pk);
       }
       const rows = this.db.query(`SELECT * FROM sniffer_questions
         ${filters.length ? `WHERE ${filters.join(' AND ')}` : ''}
-        ORDER BY ${oldest ? 'queued_at, question_pk' : 'priority DESC, queued_at DESC, question_pk DESC'} LIMIT ?`)
+        ORDER BY ${oldest ? 'queued_at, question_pk' : 'priority DESC, conversation_order DESC, queued_at DESC, question_pk DESC'} LIMIT ?`)
         .all(...params, scanLimit) as QuestionRow[];
       const found: SnifferQuestion[] = [];
       for (const row of rows) {
@@ -327,12 +337,12 @@ export class TierSnifferStore {
           // candidate across passes/restarts until it is consumed or blocked.
           const candidate = found[0];
           this.db.query(`INSERT OR REPLACE INTO sniffer_scan
-            (scan_key, priority, queued_at, question_pk, candidate_pk) VALUES (?, ?, ?, ?, ?)`)
-            .run(key, candidate.priority, candidate.queuedAt, candidate.sequence, candidate.sequence);
+            (scan_key, conversation_order, priority, queued_at, question_pk, candidate_pk) VALUES (?, ?, ?, ?, ?, ?)`)
+            .run(key, candidate.conversationOrder ?? 0, candidate.priority, candidate.queuedAt, candidate.sequence, candidate.sequence);
         } else if (found.length === 0 && rows.length === scanLimit && last) {
           this.db.query(`INSERT OR REPLACE INTO sniffer_scan
-            (scan_key, priority, queued_at, question_pk) VALUES (?, ?, ?, ?)`)
-            .run(key, last.priority, last.queued_at, last.question_pk);
+            (scan_key, conversation_order, priority, queued_at, question_pk) VALUES (?, ?, ?, ?, ?)`)
+            .run(key, last.conversation_order, last.priority, last.queued_at, last.question_pk);
         } else this.db.query('DELETE FROM sniffer_scan WHERE scan_key = ?').run(key);
       }
       return found;
@@ -440,10 +450,11 @@ export class TierSnifferStore {
   }
 }
 
-type QuestionCursor = Pick<QuestionRow, 'priority' | 'queued_at' | 'question_pk'> & { candidate_pk: number | null };
+type QuestionCursor = Pick<QuestionRow, 'conversation_order' | 'priority' | 'queued_at' | 'question_pk'> & { candidate_pk: number | null };
 
 interface QuestionRow {
   question_pk: number;
+  conversation_order: -1 | 0 | 1;
   priority: number;
   provider: string;
   account_scope: string;
@@ -474,6 +485,7 @@ function questionFromRow(row: QuestionRow): SnifferQuestion {
     attempts: row.attempts,
     queuedAt: row.queued_at,
     priority: row.priority ?? 0,
+    conversationOrder: row.conversation_order ?? 0,
     sequence: row.question_pk,
   };
 }
@@ -565,6 +577,19 @@ function snifferMigrations(): SqliteMigration[] {
           ALTER TABLE sniffer_verdicts ADD COLUMN model_subject TEXT;
           CREATE INDEX sniffer_final_content ON sniffer_verdicts(content_hash, model_id, prompt_version, map_revision)
             WHERE fail_safe = 0 AND content_hash IS NOT NULL;`);
+      },
+    },
+    {
+      version: 6,
+      name: 'conversation_queue_order',
+      up(db) {
+        db.exec(`ALTER TABLE sniffer_questions ADD COLUMN conversation_order INTEGER NOT NULL DEFAULT 0;
+          ALTER TABLE sniffer_scan ADD COLUMN conversation_order INTEGER NOT NULL DEFAULT 0;
+          DROP INDEX sniffer_recent;
+          DROP INDEX sniffer_pass_recent;
+          CREATE INDEX sniffer_recent ON sniffer_questions(priority DESC, conversation_order DESC, queued_at DESC, question_pk DESC);
+          CREATE INDEX sniffer_pass_recent ON sniffer_questions(pass, priority DESC, conversation_order DESC, queued_at DESC, question_pk DESC);
+          DELETE FROM sniffer_scan WHERE scan_key LIKE '%:recent';`);
       },
     },
   ];

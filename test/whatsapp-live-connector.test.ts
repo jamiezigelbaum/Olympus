@@ -563,6 +563,21 @@ describe('WhatsApp live SourceConnector (Contract 1)', () => {
     expect(first.map((item) => item.identity)).toEqual(second.map((item) => item.identity));
   });
 
+  test('publishes a direct-chat order hint without guessing a group member count or changing signals', async () => {
+    const dir = makeSpoolDir({ '2026-06-11.jsonl':
+      spoolLine({ id: 'direct', chat_jid: 'peer@s.whatsapp.net' })
+      + spoolLine({ id: 'lid', chat_jid: 'peer@lid' })
+      + spoolLine({ id: 'group', chat_jid: 'group@g.us' })
+      + spoolLine({ id: 'unknown', chat_jid: 'status@broadcast' }),
+    });
+    const connector = connectorFor(dir);
+    const items = await drainItems(connector);
+    expect(items.map(item => item.metadata.conversationSize)).toEqual(['direct', 'direct', undefined, undefined]);
+    // Order only: the hint never reaches the judge's signals.
+    expect(items.map(item => connector.classificationSignals(item).conversationKind))
+      .toEqual([undefined, undefined, undefined, undefined]);
+  });
+
   test('signals publish no source-level prior: each message is tiered by its content', async () => {
     const dir = makeSpoolDir({
       '2026-06-11.jsonl': spoolLine({ id: 'a1' }) + spoolLine({ id: 'media-1', text: '', media_type: 'image' }),

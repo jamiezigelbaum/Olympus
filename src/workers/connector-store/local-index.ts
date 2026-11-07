@@ -87,7 +87,7 @@ import {
   type TierLedgerIdentity,
   type TierSearchLayer,
 } from '../classification/tier-ledger.ts';
-import { itemHasNonTextContent, classifyContentTier, heldUntilJudged, isImageMediaType, namesDecidedByOwner, ownerRuleMatches, type OwnerTierRule } from '../classification/tier-classifier.ts';
+import { conversationOrderedSniffer, itemHasNonTextContent, classifyContentTier, heldUntilJudged, isImageMediaType, namesDecidedByOwner, ownerRuleMatches, type OwnerTierRule } from '../classification/tier-classifier.ts';
 import { screenedSecretLocator } from '../classification/secret-locations.ts';
 import { findTierSetLedger } from '../classification/tier-set-binding.ts';
 import {
@@ -2942,7 +2942,7 @@ export class LocalConnectorStore {
           subject: item.identity,
         },
         {
-          ...(inputs?.sniffer ? { sniffer: secretFencedSniffer(inputs.sniffer, ledger, item.identity, read) } : {}),
+          ...(inputs?.sniffer ? { sniffer: conversationOrderedSniffer(secretFencedSniffer(inputs.sniffer, ledger, item.identity, read), item.metadata) } : {}),
           ...(override ? { override } : {}),
           ...(inputs?.retirePublic ? { retirePublic: true } : {}),
         },

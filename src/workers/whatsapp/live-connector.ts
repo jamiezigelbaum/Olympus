@@ -1301,6 +1301,16 @@ function recordBringsContent(message: SpoolMessage): boolean {
   return !(message.mediaType !== undefined && message.text === '');
 }
 
+/**
+ * Judge-queue order hint only (#958): a person chat is direct. Group member
+ * counts are absent from these records, so a group's size stays unknown. Not
+ * a classification signal: what the judge sees is unchanged.
+ */
+function whatsAppConversationSignals(jid: string): Readonly<Record<string, unknown>> {
+  if (jid.endsWith('@s.whatsapp.net') || jid.endsWith('@lid')) return { conversationSize: 'direct' };
+  return {};
+}
+
 function rawItemFromSpoolMessage(
   message: SpoolMessage,
   account: string,
@@ -1325,6 +1335,7 @@ function rawItemFromSpoolMessage(
     metadata: Object.freeze({
       titleIsConversation: true,
       ...(message.mediaType === undefined && !redacted ? { textComplete: true } : {}),
+      ...whatsAppConversationSignals(message.chatJid),
       chat: status ? WHATSAPP_STATUS_CHAT_LABEL : message.chatName || message.chatJid,
       sender: senderName || message.senderJid,
       senderId: message.senderJid || undefined,
@@ -1359,6 +1370,7 @@ function rawItemFromChild(message: SpoolMessage, child: WhatsAppChildRecord, acc
     metadata: Object.freeze({
       name: child.name,
       title: child.name,
+      ...whatsAppConversationSignals(message.chatJid),
       chat: status ? WHATSAPP_STATUS_CHAT_LABEL : message.chatName || message.chatJid,
       sender: senderName || message.senderJid,
       senderLabel: senderName || message.senderJid || undefined,

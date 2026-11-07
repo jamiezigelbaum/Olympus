@@ -32,6 +32,15 @@ describe('Telethon capture-spool chat-type vocabulary', () => {
     }
   });
 
+  test('publishes generic queue hints and leaves ambiguous older group records unknown', () => {
+    const fixture = spoolFixture(['dm', 'bot', 'group', 'supergroup', 'channel', undefined]);
+    try {
+      const result = readTelegramCaptureSpool({ spoolDir: fixture.spoolDir, trustDomain: 'internal' });
+      expect(result.records.map(record => record.capturedItem.item.metadata.conversationSize))
+        .toEqual(['direct', 'direct', undefined, 'large', 'large', undefined]);
+    } finally { fixture.close(); }
+  });
+
   test('the SourceConnector carries the same vocabulary and omits a missing value', async () => {
     const fixture = spoolFixture(['dm', undefined]);
     try {
