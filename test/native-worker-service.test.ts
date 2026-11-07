@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, setDefaultTimeout, test } from 'bun:test';
 import { appendFileSync, chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
+import { workerCliLauncherPath } from '../src/core/worker-cli-launcher.ts';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { holdDataOwnerLock } from '../src/core/data-owner-lock.ts';
@@ -27,6 +28,52 @@ afterEach(async () => {
 });
 
 describe('native Olympus worker service', () => {
+  test('OpenClaw creates a CLI launcher and retargets it after a healthy plugin update', async () => {
+    const path = workerCliLauncherPath(homedir());
+    rmSync(path, { force: true });
+    const first = fakeWorkerFixture();
+    const second = fakeWorkerFixture();
+    for (const [fixture, version] of [[first, 'first'], [second, 'second']] as const) {
+      const cli = join(fixture.root, 'fake-worker.mjs');
+      writeFileSync(cli, `if (process.argv[2] === '--version') { console.log('${version}'); process.exit(0); }\n` + readFileSync(cli, 'utf8'));
+    }
+    const runCli = () => Bun.spawnSync([path, '--version'], { env: { HOME: homedir(), PATH: '/usr/bin:/bin' } }).stdout.toString().trim();
+    const notices: string[] = [];
+    const start = async (fixture: ReturnType<typeof fakeWorkerFixture>, engineHosted = false) => {
+      const service = track(createNativeWorkerService({
+        initialPluginConfig: fixture.pluginConfig(true), moduleUrl: import.meta.url,
+        workerEnvPath: fixture.envFilePath, startupTimeoutMs: 5_000, readinessPollMs: 20,
+        stopGraceMs: 100, engineHosted,
+      }));
+      await service.start({ logger: { info: line => notices.push(line) } });
+      expect(service.isReady()).toBe(true);
+      await service.stop();
+    };
+    await start(first, true);
+    expect(existsSync(path)).toBe(false); // The standalone installer owns its launcher.
+    await start(first);
+    expect(readFileSync(path, 'utf8')).toContain(join(first.root, 'fake-worker.mjs'));
+    expect(runCli()).toBe('first');
+    await start(second);
+    expect(readFileSync(path, 'utf8')).toContain(join(second.root, 'fake-worker.mjs'));
+    expect(runCli()).toBe('second');
+    const failed = fakeWorkerFixture({ exitBeforeServe: true });
+    const failedService = track(createNativeWorkerService({
+      initialPluginConfig: failed.pluginConfig(true), moduleUrl: import.meta.url, workerEnvPath: failed.envFilePath,
+      startupTimeoutMs: 100, readinessPollMs: 10, restartDelaysMs: [60_000], stopGraceMs: 100,
+    }));
+    await expect(failedService.start({})).rejects.toThrow('failed to become ready');
+    expect(failedService.isReady()).toBe(false);
+    expect(runCli()).toBe('second');
+    await failedService.stop();
+    expect(notices.join('\n')).toContain(path);
+    const owned = '#!/bin/sh\necho owner\n';
+    writeFileSync(path, owned);
+    await start(first);
+    expect(readFileSync(path, 'utf8')).toBe(owned);
+    rmSync(path);
+  });
+
   test('keeps retrying a data-owner conflict, reports it until its own worker is ready, and cancels on stop', async () => {
     const fixture = fakeWorkerFixture({ dataLock: true });
     const lock = holdDataOwnerLock({ HOME: fixture.root });

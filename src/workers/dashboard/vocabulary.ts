@@ -2958,7 +2958,13 @@ export const DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY = {
 
 /** needsYou while the privacy check waits for the owner to approve its model (approved on the computer only). */
 export const DASHBOARD_CHATGPT_PRIVACY_CLASSIFIER_APPROVAL_COPY = {
-  sentence: 'Approve the model that checks what\'s private. Until you do, new items it would check wait. On your computer, run olympus tier classifier approve --why, followed by your reason',
+  sentence: 'Approve the model that checks what\'s private. Until you do, new items it would check wait.',
+  machine: 'On the machine running Olympus',
+  server: 'On the server running Olympus',
+  // The worker PATH is set by its service manager, not the owner’s login shell.
+  // Always give the full launcher command; HOME expands on the named host.
+  command: '"$HOME/.local/bin/olympus" tier classifier approve --why',
+  reason: 'followed by your reason',
 } as const;
 
 /**

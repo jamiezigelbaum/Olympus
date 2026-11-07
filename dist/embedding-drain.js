@@ -11404,6 +11404,11 @@ var init_first_run_privacy = __esm(() => {
   init_sovereignty();
 });
 
+// src/core/worker-cli-launcher.ts
+var init_worker_cli_launcher = __esm(() => {
+  init_atomic_file();
+});
+
 // src/core/openclaw-executable.ts
 var init_openclaw_executable = () => {};
 
@@ -11412,6 +11417,7 @@ var WORKER_LOG_TAIL_BYTES;
 var init_worker_service = __esm(() => {
   init_linux_engine_layout();
   init_atomic_file();
+  init_worker_cli_launcher();
   init_openclaw_executable();
   init_operation_error();
   init_worker_auth();
@@ -43342,6 +43348,7 @@ var init_native_process_service = () => {};
 
 // src/core/native-worker-service.ts
 var init_native_worker_service = __esm(() => {
+  init_worker_cli_launcher();
   init_data_owner_lock();
   init_linux_owner_bridge_host();
   init_worker_transport();
