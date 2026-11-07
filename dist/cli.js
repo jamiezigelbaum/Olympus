@@ -192262,12 +192262,13 @@ class EmbeddingPrefilter {
     return [...this.members].reduce((count, member) => count + member.options.sniffer.verdictCount(), 0);
   }
   finishTraining(attempt, outcome, reason) {
+    const verdicts = outcome === "too_few" ? this.verdictCount() : undefined;
     attempt.outcome = outcome;
     if (reason)
       attempt.reason = reason;
     attempt.nextAt = this.now() + (reason === "ledger_or_judge_changed" ? 0 : outcome === "failed" ? FAILED_RETRY_MS : RETRAIN_MS);
-    if (outcome === "too_few")
-      attempt.verdicts = this.verdictCount();
+    if (verdicts !== undefined)
+      attempt.verdicts = verdicts;
     this.training = undefined;
   }
   logTraining(attempt) {
@@ -192423,7 +192424,7 @@ class EmbeddingPrefilter {
                 if (existsSync100(directory) && (!lstatSync51(directory).isDirectory() || lstatSync51(directory).isSymbolicLink()))
                   throw new Error;
                 if (attempt.revisions !== this.revisions())
-                  throw new Error;
+                  break;
                 mkdirSync61(directory, { recursive: true, mode: 448 });
                 chmodSync36(directory, 448);
                 const saved = { model: step.value, judge: judge3, revisions, trainedAt: this.now(), version: randomUUID32() };

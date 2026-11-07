@@ -188,10 +188,12 @@ export class EmbeddingPrefilter {
     return [...this.members].reduce((count, member) => count + member.options.sniffer.verdictCount(), 0);
   }
   private finishTraining(attempt: TrainingAttempt, outcome: 'trained' | 'too_few' | 'failed', reason?: string): void {
+    // Read the watermark before publishing a completed outcome; failure must remain retryable.
+    const verdicts = outcome === 'too_few' ? this.verdictCount() : undefined;
     attempt.outcome = outcome;
     if (reason) attempt.reason = reason;
     attempt.nextAt = this.now() + (reason === 'ledger_or_judge_changed' ? 0 : outcome === 'failed' ? FAILED_RETRY_MS : RETRAIN_MS);
-    if (outcome === 'too_few') attempt.verdicts = this.verdictCount();
+    if (verdicts !== undefined) attempt.verdicts = verdicts;
     this.training = undefined;
   }
   private logTraining(attempt: TrainingAttempt): void {
@@ -310,7 +312,7 @@ export class EmbeddingPrefilter {
                 if (this.control.dbPath === ':memory:') throw new Error();
                 const directory = embeddingPrefilterDirectory(this.control.dbPath);
                 if (existsSync(directory) && (!lstatSync(directory).isDirectory() || lstatSync(directory).isSymbolicLink())) throw new Error();
-                if (attempt.revisions !== this.revisions()) throw new Error();
+                if (attempt.revisions !== this.revisions()) break;
                 mkdirSync(directory, { recursive: true, mode: 0o700 }); chmodSync(directory, 0o700);
                 const saved: SavedModel = { model: step.value, judge, revisions, trainedAt: this.now(), version: randomUUID() };
                 writePrivateFileAtomicSync(this.path, JSON.stringify(saved));

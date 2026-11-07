@@ -301,6 +301,28 @@ test('sliced training uses judge ledger labels without content hashes and writes
   });
   await f.filter.prepare(judge);
   expect(existsSync(join(f.modelDir, 'weights.json'))).toBe(false);
+  f.setCopy(n => { const c = copy(n, n % 2 ? 1 : -1); return { ...c, chunks: [{ ...c.chunks[0]!, boundedText: `${ownText} ${n}` }] }; });
+  let interruptedFinalStep = false;
+  for (let tick = 0; tick < 200 && !interruptedFinalStep; tick++) {
+    await f.filter.prepare(judge);
+    // Fault-inject withdrawal exactly when the iterator returns its completed fit.
+    const runtime = (f.filter as unknown as { training?: { fit?: Generator<void, unknown> } }).training;
+    if (runtime?.fit) {
+      const fit = runtime.fit;
+      const next = fit.next.bind(fit);
+      fit.next = () => {
+        const step = next();
+        if (step.done) { f.ledger.writeMeta('embedding-prefilter:withdrawal', 'synthetic-final-fit-withdrawal'); interruptedFinalStep = true; }
+        return step;
+      };
+      for (let fitTick = 0; fitTick < 200 && !interruptedFinalStep; fitTick++) await f.filter.prepare(judge);
+    }
+  }
+  expect(interruptedFinalStep).toBe(true);
+  expect(existsSync(join(f.modelDir, 'weights.json'))).toBe(false);
+  expect(trainingState(f)).toMatchObject({ outcome: 'failed', reason: 'ledger_or_judge_changed' });
+  expect(trainingState(f).nextAt).toBeLessThanOrEqual(Date.now());
+  expect(logs.at(-1)).toContain('reason=ledger_or_judge_changed');
 }, 30_000);
 test('the rolling audit is shared across ledgers and stops both clearers', async () => {
   const a = fixture(); const b = fixture({ trained: false });
@@ -664,4 +686,20 @@ test('a withdrawal on another connection cannot race stale references back into 
     expect(trainingState(f)).toMatchObject({ outcome: 'failed', reason: 'ledger_or_judge_changed' });
     expect(logs).toHaveLength(1);
   } finally { other.close(); }
+});
+
+test('a failed completion watermark stays a failed attempt with a three-hour retry', async () => {
+  const now = Date.UTC(2026, 10, 7);
+  const logs: string[] = [];
+  const f = fixture({ trained: false, now: () => now, log: line => logs.push(line) });
+  for (let n = 0; n < 1000; n++) f.sniffer.putVerdict({ materialHash: `synthetic-watermark-${n}`, modelId: 'fixture', promptVersion: SNIFFER_PROMPT_VERSION, mapRevision: 'none' },
+    { tier: 'personal', confidence: 1, category: 'fixture', failSafe: false });
+  const count = f.sniffer.verdictCount.bind(f.sniffer);
+  let fail = true;
+  f.sniffer.verdictCount = () => { if (fail) { fail = false; throw new Error('Synthetic completion watermark error'); } return count(); };
+  await f.filter.prepare(judge);
+  expect(trainingState(f)).toMatchObject({ outcome: 'failed', nextAt: now + 3 * 60 * 60 * 1000 });
+  await f.filter.prepare(judge);
+  expect(logs).toHaveLength(1);
+  expect(logs[0]).toContain('outcome=failed');
 });
