@@ -100,6 +100,17 @@ test('old built-in names do not suppress a content judgment still owed', () => {
   expect(ledger.rejudgeCandidatePage(key)).toMatchObject({ causes: ['names_prompt'], builtinPromptSkipped: 0 });
 });
 
+test('a finalized fail-safe decision stays settled across a built-in-only change', () => {
+  const ledger = new TierLedger({ dbPath: ':memory:' });
+  cleanup.push(() => ledger.close());
+  const decision = classifyItemTiers({ signals: {}, text: 'Bring apples to the picnic.' });
+  ledger.recordRoutedPlacement(subject(), { ...decision, decidedBy: 'sniffer', contentTier: 'secure',
+    reasons: [`content:sniffer:${oldId}:unresolved:0.00`] }, placement);
+  expect(ledger.getCurrent(subject())).toMatchObject({ state: 'current', contentPending: false, metadataPending: false });
+  expect(ledger.rejudgeCandidatePage(key)).toMatchObject({ records: [], builtinPromptSkipped: 1 });
+  expect(ledger.rejudgeCandidatePage({ ...key, snifferId: snifferId(lane, `${currentPrompt}.o22222222`) }).causes).toEqual(['owner_words']);
+});
+
 test('a built-in content change cannot hide an owner-words change on the names', () => {
   const ledger = new TierLedger({ dbPath: ':memory:' });
   cleanup.push(() => ledger.close());
@@ -150,7 +161,9 @@ for (const ownerChanged of [false, true]) test(`service reports counts for owner
   const f = openTierFixture(tmp.dir, { embed: false });
   const installed = new InstalledTierClassification({ env: {}, lane: BUILT_IN_SNIFFER_LANE });
   const logs: string[] = [];
+  let nowMs = Date.now();
   const service = new TierSnifferService({ installed, lane: BUILT_IN_SNIFFER_LANE,
+    now: () => new Date(nowMs),
     classificationLedgerPath: join(tmp.dir, 'classification.jsonl'), stores: () => f.set.openStores(),
     autoApproveBuiltIn: true, log: line => logs.push(line), model: { async complete() {
       return { modelId: BUILT_IN_SNIFFER_LANE.modelId, text: JSON.stringify({ verdicts: [
@@ -176,4 +189,11 @@ for (const ownerChanged of [false, true]) test(`service reports counts for owner
   expect(picked[0]).toContain(`builtin_prompt_skipped=${ownerChanged ? 0 : 1}`);
   expect(picked[0]).not.toContain('Picnic');
   expect(picked[0]).not.toContain('apples');
+  if (!ownerChanged) {
+    expect(await service.runOnce()).toMatchObject({ state: 'ran', rejudged: { builtinPromptSkipped: 1 } });
+    expect(logs.filter(line => line.includes('; picked for:'))).toHaveLength(1);
+    nowMs += 60_000;
+    await service.runOnce();
+    expect(logs.filter(line => line.includes('; picked for:'))).toHaveLength(2);
+  }
 });

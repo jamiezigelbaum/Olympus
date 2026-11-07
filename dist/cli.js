@@ -195016,6 +195016,7 @@ class TierSnifferService {
   ledgers = new Map;
   boundLedgerIds = new Map;
   rejudgeCursors = new Map;
+  lastBuiltinPromptSkipLogMs = -Infinity;
   recoveryLedgerOffsets = new Map;
   constructor(options) {
     this.options = options;
@@ -195996,7 +195997,10 @@ class TierSnifferService {
           total[key2] += report[key2];
       } catch {}
     }
-    if (total.updated > 0 || total.movesQueued > 0 || total.asked > 0 || total.secrets > 0 || total.heldLowering > 0 || total.builtinPromptSkipped > 0) {
+    const logSkipped = total.builtinPromptSkipped > 0 && this.clockMs() - this.lastBuiltinPromptSkipLogMs >= 60000;
+    if (total.updated > 0 || total.movesQueued > 0 || total.asked > 0 || total.secrets > 0 || total.heldLowering > 0 || logSkipped) {
+      if (total.builtinPromptSkipped > 0)
+        this.lastBuiltinPromptSkipLogMs = this.clockMs();
       this.options.log?.(`Olympus tier sniffer: re-judged ${total.updated + total.movesQueued + total.asked + total.secrets} item(s) under the current classifier ` + `(${total.asked} asked about, still where they were; ${total.movesQueued} tier move(s) queued` + `; ${total.heldLowering} lowering(s) held${total.secrets ? `; ${total.secrets} Secret(s) found and hidden` : ""})` + `; picked for: held=${total.causeHeld} retired_prior=${total.causeRetiredPrior} missing_question=${total.causeMissingQuestion}` + ` classifier=${total.causeClassifier} owner_words=${total.causeOwnerWords} judge_model=${total.causeJudgeModel}` + ` names_prompt=${total.causeNamesPrompt} content_prompt=${total.causeContentPrompt}` + `; builtin_prompt_skipped=${total.builtinPromptSkipped}.`);
     }
     return total;

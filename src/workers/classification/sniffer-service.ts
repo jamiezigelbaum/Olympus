@@ -337,6 +337,8 @@ export class TierSnifferService {
   private readonly boundLedgerIds = new Map<string, string>();
   /** Where each set's re-judge page stopped (tier-rejudge.ts). */
   private readonly rejudgeCursors = new Map<string, TierLedgerIdentity>();
+  /** Skip-only diagnostics sample a scanned window at most once per minute. */
+  private lastBuiltinPromptSkipLogMs = -Infinity;
   /** Rotate each recovery phase independently so a large first ledger cannot starve others. */
   private readonly recoveryLedgerOffsets = new Map<string, number>();
 
@@ -1461,7 +1463,9 @@ export class TierSnifferService {
         // A set that cannot be read keeps its recorded decisions this tick.
       }
     }
-    if (total.updated > 0 || total.movesQueued > 0 || total.asked > 0 || total.secrets > 0 || total.heldLowering > 0 || total.builtinPromptSkipped > 0) {
+    const logSkipped = total.builtinPromptSkipped > 0 && this.clockMs() - this.lastBuiltinPromptSkipLogMs >= 60_000;
+    if (total.updated > 0 || total.movesQueued > 0 || total.asked > 0 || total.secrets > 0 || total.heldLowering > 0 || logSkipped) {
+      if (total.builtinPromptSkipped > 0) this.lastBuiltinPromptSkipLogMs = this.clockMs();
       this.options.log?.(
         `Olympus tier sniffer: re-judged ${total.updated + total.movesQueued + total.asked + total.secrets} item(s) under the current classifier `
         + `(${total.asked} asked about, still where they were; ${total.movesQueued} tier move(s) queued`
