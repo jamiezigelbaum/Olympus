@@ -82328,7 +82328,6 @@ function createWhatsAppLiveSourceConnector(options) {
 function whatsAppClassificationSignals(item) {
   return compactClassificationSignals({
     ...item.metadata["secretRedacted"] === true ? { floor: { tier: "secrets", basis: WHATSAPP_SECRET_REDACTED_FLOOR_BASIS } } : {},
-    ...item.metadata["conversationSize"] === "direct" ? { conversationKind: "direct" } : item.metadata["conversationKind"] === "group" ? { conversationKind: "group" } : {},
     title: signalText(item.metadata, "chat"),
     sender: signalText(item.metadata, "sender"),
     folderKeys: item.identity.providerConversationId ? [item.identity.providerConversationId] : []
@@ -82954,8 +82953,6 @@ function recordBringsContent(message2) {
   return !(message2.mediaType !== undefined && message2.text === "");
 }
 function whatsAppConversationSignals(jid) {
-  if (jid.endsWith("@g.us"))
-    return { conversationKind: "group" };
   if (jid.endsWith("@s.whatsapp.net") || jid.endsWith("@lid"))
     return { conversationSize: "direct" };
   return {};

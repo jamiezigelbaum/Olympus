@@ -404,8 +404,6 @@ export function whatsAppClassificationSignals(item: RawItem): SourceClassificati
     ...(item.metadata['secretRedacted'] === true
       ? { floor: { tier: 'secrets' as const, basis: WHATSAPP_SECRET_REDACTED_FLOOR_BASIS } }
       : {}),
-    ...(item.metadata['conversationSize'] === 'direct' ? { conversationKind: 'direct' as const }
-      : item.metadata['conversationKind'] === 'group' ? { conversationKind: 'group' as const } : {}),
     title: signalText(item.metadata, 'chat'),
     sender: signalText(item.metadata, 'sender'),
     folderKeys: item.identity.providerConversationId ? [item.identity.providerConversationId] : [],
@@ -1303,9 +1301,12 @@ function recordBringsContent(message: SpoolMessage): boolean {
   return !(message.mediaType !== undefined && message.text === '');
 }
 
-/** Provider topology only. Group membership counts are absent from these records. */
+/**
+ * Judge-queue order hint only (#958): a person chat is direct. Group member
+ * counts are absent from these records, so a group's size stays unknown. Not
+ * a classification signal: what the judge sees is unchanged.
+ */
 function whatsAppConversationSignals(jid: string): Readonly<Record<string, unknown>> {
-  if (jid.endsWith('@g.us')) return { conversationKind: 'group' };
   if (jid.endsWith('@s.whatsapp.net') || jid.endsWith('@lid')) return { conversationSize: 'direct' };
   return {};
 }

@@ -256,7 +256,7 @@ class Client:
         return [self.messages.get(i) for i in ids]
 appended = []
 reader.append_gateway_page = lambda config, scope, page, direction, request_id=None: appended.extend([(scope, m["id"], m["attachments"][0].get("mediaFile")) for m in page["messages"]]) or len(page["messages"])
-reader.normalize_message = lambda message, account, chat, title, kind: record(message.id, chat, size=getattr(message, "stated", None))
+reader.normalize_message = lambda message, account, chat, title, kind, **_: record(message.id, chat, size=getattr(message, "stated", None))
 async def ask(client):
     return await reader.retry_waiting_media(client, Config(), asyncio.Lock())
 `;
