@@ -593,11 +593,12 @@ export function createDashboardPanelTools(options: DashboardPanelToolsOptions): 
           ? [{ sourceId: source.source_id, url: FILES_AND_FOLDERS_URL }] : [])
         : [];
       const waiting = context.localSession === true ? waitingCount(options) : 0;
+      const indexedItems = (view?.sources ?? []).reduce((sum, source) => sum + (Number.isFinite(source.coverage?.indexed_items) ? Math.max(0, source.coverage.indexed_items) : 0), 0);
       const archives = archivesMeta(options);
       const sourceImports = sourceImportsMeta(options);
       const archiveSources = archiveSourcesMeta(options);
       const archiveCards = archiveCardsMeta(options);
-      if (on === undefined && unpair.length === 0 && unreadable.length === 0 && waiting === 0 && missingFolders.length === 0 && permissionSettings.length === 0 && !archives && !sourceImports && !archiveSources && !archiveCards) return result;
+      if (on === undefined && unpair.length === 0 && unreadable.length === 0 && waiting === 0 && indexedItems === 0 && missingFolders.length === 0 && permissionSettings.length === 0 && !archives && !sourceImports && !archiveSources && !archiveCards) return result;
       const meta: ComputerDashboardMeta = {
         ...(missingFolders.length ? { missingFolders } : {}),
         ...(permissionSettings.length ? { permissionSettings } : {}),
@@ -605,6 +606,7 @@ export function createDashboardPanelTools(options: DashboardPanelToolsOptions): 
         ...(unpair.length > 0 ? { unpair } : {}),
         ...(unreadable.length > 0 ? { unreadable } : {}),
         ...(waiting > 0 ? { waitingPrivateQuestions: waiting } : {}),
+        ...(indexedItems > 0 ? { indexedItems } : {}),
         ...(archives ? { archives } : {}),
         ...(sourceImports ? { sourceImports } : {}),
         ...(archiveSources ? { archiveSources } : {}),

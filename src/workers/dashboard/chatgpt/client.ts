@@ -2660,9 +2660,55 @@ export function chatgptDashboardClient(
     return card;
   }
 
+  /**
+   * Home on the computer (owner, 2026-11-07, mockup final-6): one line says
+   * whether everything is fine, with source totals in place of the long
+   * list; Needs you holds only what the owner must act on; In progress shows
+   * only while something runs. The full source list stays one click away
+   * under All sources, so every fix and landing keeps its row. The top bar's
+   * tabs replace the On this computer list.
+   */
+  function homeStatus(data: Any, needs: number, sources: Any[]): HTMLElement {
+    const Hm = P.home;
+    const running = !!data.progress && !progressFinished(data.progress);
+    const title = needs > 0 ? (needs === 1 ? Hm.needsYouOne : fill(Hm.needsYouMany, { n: count(needs) }))
+      : running ? Hm.catchingUp : Hm.upToDate;
+    const connected = sources.filter((source: Any) => String(source && source.status) !== 'Off').length;
+    const items = state.computerMeta && typeof state.computerMeta.indexedItems === 'number' && isFinite(state.computerMeta.indexedItems)
+      ? Math.max(0, Math.round(state.computerMeta.indexedItems)) : 0;
+    const facts = [connected === 1 ? Hm.sourcesOne : fill(Hm.sourcesMany, { n: count(connected) })];
+    if (items > 0) facts.push(items === 1 ? Hm.itemsOne : fill(Hm.itemsMany, { n: count(items) }));
+    const when = ago(data.generatedAt);
+    if (when) facts.push(fill(Hm.checked, { when }));
+    const dot = el('span', 'dot tone-' + (needs > 0 ? 'warn' : running ? 'run' : 'good'));
+    dot.setAttribute('aria-hidden', 'true');
+    const text = add(el('div', 'row-text'), el('p', 'home-title', title), el('p', 'muted', facts.join(' · ')));
+    const card = add(el('section', 'home-status'), dot, text);
+    card.setAttribute('data-home-status', needs > 0 ? 'needs' : running ? 'running' : 'ok');
+    return card;
+  }
+
+  function renderHome(page: HTMLElement, data: Any): HTMLElement {
+    const all = Array.isArray(data.sources) ? data.sources : [];
+    const needs = Array.isArray(data.needsYou) ? data.needsYou.filter((item: Any) => !!item) : [];
+    const waiting = waitingRow() ? 1 : 0;
+    add(page, homeStatus(data, needs.length + waiting + (data.blocker ? 1 : 0), all.filter((source: Any) => !isArchivesCard(source))));
+    add(page, staleLine());
+    add(page, needsYouSection(needs));
+    const progress = progressSection(data.progress, true);
+    if (progress) { const head = progress.querySelector('h2'); if (head) head.textContent = P.home.progress; }
+    add(page, progress);
+    if (data.models && installLines(data.models).some((entry) => entry.state !== 'failed')) add(page, modelsSection(data.models));
+    // A landing or a highlighted row needs its source visible.
+    if (state.landing || state.landed) state.open['home-sources'] = true;
+    const box = details('home-sources', doc.createTextNode(P.home.allSources + ' (' + count(all.filter((source: Any) => !isArchivesCard(source)).length) + ')'), 'section home-sources');
+    add(box, sourcesSection(all.filter((source: Any) => !isArchivesCard(source))), otherArchivesSection(all.filter(isArchivesCard)[0]));
+    return add(page, box);
+  }
+
   function renderFull(): HTMLElement {
     const page = el('main', 'page');
-    add(page, el('h1', '', P.title));
+    add(page, el('h1', onComputer() ? 'sr' : '', P.title));
     const data = state.data;
     add(page, connectionBanner());
     if (state.notice) {
@@ -2675,6 +2721,7 @@ export function chatgptDashboardClient(
       return page;
     }
     add(page, data.blocker ? itemBanner(data.blocker, 'blocker', true) : null);
+    if (onComputer()) return renderHome(page, data);
     add(page, staleLine());
     // Each fact once: an item about a listed source lives in that source's row, not here too.
     const listed = Array.isArray(data.sources) ? data.sources : [];
