@@ -2895,6 +2895,8 @@ var init_public_surface = __esm(() => {
     { method: "POST", path: "/dashboard/models/local/discover" },
     { method: "POST", path: "/dashboard/models/local/test" },
     { method: "POST", path: "/dashboard/models/local/save" },
+    { method: "POST", path: "/dashboard/models/choice" },
+    { method: "POST", path: "/dashboard/models/addable" },
     { method: "POST", path: "/dashboard/sync-now" },
     { method: "POST", path: "/dashboard/embedding-priority" },
     { method: "POST", path: "/dashboard/tools/call" },
@@ -146706,6 +146708,9 @@ async function awaitWithAbort(promise2, signal) {
       signal.removeEventListener("abort", abortListener);
   }
 }
+function readVeniceTextCatalogModels(cachePath = defaultVeniceModelCatalogCachePath()) {
+  return readCatalogCache(cachePath, "text")?.models ?? {};
+}
 var DEFAULT_VENICE_MODEL_CATALOG_TTL_MS, DEFAULT_VENICE_MODEL_CATALOG_REFRESH_MIN_INTERVAL_MS, DEFAULT_VENICE_MODEL_CATALOG_TIMEOUT_MS = 1e4, CACHE_SCHEMA_VERSION = 1, MAX_CATALOG_TIMEOUT_MS = 30000, MAX_FUTURE_CLOCK_SKEW_MS, REFRESH_GATES;
 var init_venice_model_catalog = __esm(() => {
   init_model_transport();
@@ -149820,7 +149825,7 @@ function mountDashboardController(options) {
     return "Request failed.";
   }
   function applyWriteCapability() {
-    root.querySelectorAll("form[data-connect-kind],form[data-model-check],form[data-first-run-privacy],form[data-computer-use],form[data-judge-choice],form[data-local-models-discover],form[data-local-models-test],form[data-agent-kind]").forEach((form) => {
+    root.querySelectorAll("form[data-connect-kind],form[data-model-check],form[data-first-run-privacy],form[data-computer-use],form[data-judge-choice],form[data-model-choice],form[data-local-models-discover],form[data-local-models-test],form[data-agent-kind]").forEach((form) => {
       const pending = pendingForms.has(form) || form.dataset.keyAccepted === "true";
       Array.from(form.elements).filter((control) => control.matches('button,input:not([type="hidden"])')).forEach((control) => {
         if (control.dataset.olympusOriginallyDisabled === undefined) {
@@ -150000,6 +150005,15 @@ function mountDashboardController(options) {
         return;
       }
       return { action: "save_judge", choice, cap_dollars: cap === "" ? 0 : Number(cap) };
+    }
+    if (form.hasAttribute("data-model-choice")) {
+      const provider = body.provider === "local" || body.provider === "venice" || body.provider === "zkapi" ? body.provider : undefined;
+      const model = (body.model ?? "").trim();
+      if (!provider || model === "") {
+        say(form, "Choose a model.");
+        return;
+      }
+      return { action: "save_model_choice", provider, model };
     }
     if (form.hasAttribute("data-computer-use"))
       return { action: "set_computer_use", choice: (form.hasAttribute("data-server-mode") ? body.server === "on" : body.choice === "server") ? "server" : "everyday" };
@@ -150196,6 +150210,9 @@ function mountDashboardController(options) {
       firstRunResult("Saved. Check readiness after Olympus applies the change.");
     }
     const statusMessage = result.body.status_message;
+    if (params.action === "save_model_choice" || params.action === "save_local_answer_model") {
+      form.closest("dialog[open]")?.close();
+    }
     if (params.action === "save_judge") {
       form.dataset.judgeCurrent = params.choice;
       form.querySelectorAll("dialog[open]").forEach((dialog) => dialog.close());
@@ -150226,7 +150243,7 @@ function mountDashboardController(options) {
     }
   }
   function renderDiscoveredModels(form, value2) {
-    const sheet = form.closest(".sheet");
+    const sheet = form.closest(".sheet, dialog");
     const output = sheet?.querySelector("[data-local-models-results]");
     const testForm = sheet?.querySelector("[data-local-models-test]");
     if (!output || !testForm)
@@ -151044,7 +151061,7 @@ function mountDashboardController(options) {
       submitAgentControl(form);
       return;
     }
-    if (!form.matches("[data-connect-kind],[data-model-check],[data-first-run-privacy],[data-computer-use],[data-judge-choice],[data-local-models-discover],[data-local-models-test]"))
+    if (!form.matches("[data-connect-kind],[data-model-check],[data-first-run-privacy],[data-computer-use],[data-judge-choice],[data-model-choice],[data-local-models-discover],[data-local-models-test]"))
       return;
     event.preventDefault();
     const submittedValues = formRecord(form);
@@ -151482,6 +151499,66 @@ function mountDashboardController(options) {
       resetJudge(dialog);
     }
   };
+  const onAddModelClick = (event) => {
+    const target = event.target instanceof Element ? event.target : null;
+    const open7 = target?.closest("[data-add-model-open]");
+    if (open7) {
+      const provider = open7.dataset.addModelOpen ?? "";
+      const dialog = open7.closest(".pickrow")?.querySelector(`dialog[data-add-model="${provider}"]`);
+      if (!dialog || typeof dialog.showModal !== "function" || dialog.open)
+        return;
+      dialog.showModal();
+      if (provider === "venice")
+        loadAddableModels(dialog);
+      return;
+    }
+    const close = target?.closest("[data-dialog-close]")?.closest("dialog");
+    if (close instanceof HTMLDialogElement) {
+      close.close();
+      return;
+    }
+    if (target instanceof HTMLDialogElement && target.matches("[data-add-model]")) {
+      const box = target.getBoundingClientRect();
+      const at = event;
+      if (box.width > 0 && (at.clientX < box.left || at.clientX > box.right || at.clientY < box.top || at.clientY > box.bottom))
+        target.close();
+    }
+  };
+  const loadAddableModels = async (dialog) => {
+    const slot = dialog.querySelector("[data-addable-models]");
+    if (!slot || slot.dataset.loaded === "true")
+      return;
+    let result;
+    try {
+      result = await options.transport.control({ action: "list_addable_models", provider: "venice" });
+    } catch {
+      result = { status: 0, body: {} };
+    }
+    const models = Array.isArray(result.body.models) ? result.body.models.filter((entry) => typeof entry === "string") : [];
+    slot.replaceChildren();
+    if (result.status < 200 || result.status >= 300 || models.length === 0) {
+      const line2 = document.createElement("p");
+      line2.className = "pnote";
+      line2.setAttribute("role", "status");
+      line2.textContent = models.length === 0 && result.status === 200 ? "Venice listed no private models just now. Try again later." : "Olympus could not reach Venice. Try again later.";
+      slot.append(line2);
+      return;
+    }
+    slot.dataset.loaded = "true";
+    for (const id of models) {
+      const label = document.createElement("label");
+      label.className = "pickopt";
+      const radio = document.createElement("input");
+      radio.type = "radio";
+      radio.name = "model";
+      radio.value = id;
+      const name = document.createElement("b");
+      name.textContent = id;
+      label.append(radio, " ", name);
+      slot.append(label);
+    }
+  };
+  root.addEventListener("click", onAddModelClick);
   root.addEventListener("submit", onSubmit);
   root.addEventListener("click", onClick);
   root.addEventListener("change", onJudgePick);
@@ -151528,6 +151605,7 @@ function mountDashboardController(options) {
       clearInterval(interval);
     view3.removeEventListener("focus", refreshOnReturn);
     root.ownerDocument.removeEventListener("visibilitychange", onVisibilityReturn);
+    root.removeEventListener("click", onAddModelClick);
     root.removeEventListener("submit", onSubmit);
     root.removeEventListener("click", onClick);
     root.removeEventListener("change", onJudgePick);
@@ -152074,10 +152152,11 @@ function pageShell(input) {
 `);
   const content = `<div class="frame">
       <div class="page">
-      <div class="top">
+      ${input.nav ? `${input.nav}
+      <div class="top subtop"><span class="meta" data-computer-identity>${escapeHtml2(dashboardComputerIdentity())}</span>${input.meta ? `<span class="meta">${escapeHtml2(input.meta)}</span>` : ""}</div>` : `<div class="top">
         <span class="brand">${brand}</span><span class="meta" data-computer-identity>${escapeHtml2(dashboardComputerIdentity())}</span>${input.meta ? `
         <span class="meta">${escapeHtml2(input.meta)}</span>` : ""}
-      </div>
+      </div>`}
       ${input.body}
       </div>
     </div>`;
@@ -152360,6 +152439,8 @@ function standaloneDashboardControllerScript(input) {
         if (action === 'save_local_answer_model') return ['/dashboard/models/local/save', withoutAction(params)];
         if (action === 'check_model_setup') return ['/dashboard/models/check', {}];
         if (action === 'save_judge') return ['/dashboard/models/judge', withoutAction(params)];
+        if (action === 'save_model_choice') return ['/dashboard/models/choice', withoutAction(params)];
+        if (action === 'list_addable_models') return ['/dashboard/models/addable', withoutAction(params)];
         if (action === 'set_computer_use') return ['/dashboard/engine/computer-use', withoutAction(params)];
         if (action === 'save_first_run_privacy') return ['/dashboard/models/first-run-privacy', withoutAction(params)];
         if (action === 'connect_api_key') return ['/dashboard/connect/api-key', withoutAction(params)];
@@ -160061,6 +160142,57 @@ var init_messaging = __esm(() => {
   init_components();
 });
 
+// src/workers/dashboard/top-nav.ts
+function dashboardTabHref(tab, token) {
+  switch (tab) {
+    case "home":
+      return dashboardHomeHref(token);
+    case "sources":
+      return dashboardLocalPageHref("connect", token);
+    case "privacy":
+      return dashboardLocalPageHref("privateAnswers", token);
+    case "settings":
+      return dashboardLocalPageHref("settings", token);
+  }
+}
+function dashboardTopNav(input) {
+  const tabs = DASHBOARD_TABS.map((tab) => {
+    const href = escapeHtml2(dashboardTabHref(tab.id, input.token));
+    return tab.id === input.active ? `<a class="navtab on" aria-current="page" href="${href}">${escapeHtml2(tab.label)}</a>` : `<a class="navtab" href="${href}">${escapeHtml2(tab.label)}</a>`;
+  }).join("");
+  const lock = !input.unlocked ? '<span class="navlock" data-state="locked"><span aria-hidden="true">\uD83D\uDD12</span> Locked</span>' : input.lockable === false ? '<span class="navlock" data-state="connected"><span aria-hidden="true">\uD83D\uDD13</span> Unlocked</span>' : `<div class="navlock" id="${DASHBOARD_CONTROL_GATE_ID}" data-dashboard-control-gate data-state="connected"><span aria-hidden="true">\uD83D\uDD13</span> Unlocked<span class="navsep" aria-hidden="true">·</span>` + '<form class="navlockform" data-control-session-kind="lock" method="post" action="/dashboard/control/session/lock">' + '<button class="navlockbtn" type="submit">Lock</button><span class="actmsg" data-action-message role="status"></span></form></div>';
+  return `<header class="topnav"><span class="navbrand">Olympus</span><nav class="navtabs" aria-label="Olympus">${tabs}</nav><span class="navgrow"></span>${lock}</header>`;
+}
+var DASHBOARD_TABS, TOP_NAV_CSS = `
+.topnav { display: flex; align-items: center; gap: 8px 20px; flex-wrap: wrap; padding: 0 0 14px; margin: 0 0 20px; border-bottom: 1px solid var(--line); }
+.navbrand { font-weight: 700; font-size: 1.35em; color: var(--t1, var(--text)); }
+.navtabs { display: flex; gap: 4px; flex-wrap: wrap; }
+.navtab { padding: 6px 12px; border-radius: 8px; color: var(--t2, var(--muted)); text-decoration: none; }
+.navtab:hover { color: var(--t1, var(--text)); }
+.navtab.on { color: var(--t1, var(--text)); background: color-mix(in srgb, var(--link, var(--accent)) 22%, transparent); font-weight: 600; }
+.navtab:focus-visible, .navlockbtn:focus-visible { outline: 2px solid var(--link, var(--focus)); outline-offset: 2px; }
+.navgrow { flex: 1; }
+.navlock { display: inline-flex; align-items: center; gap: 6px; padding: 4px 12px; border: 1px solid var(--line); border-radius: 999px; color: var(--t2, var(--muted)); font-size: 0.92em; }
+.navsep { opacity: .7; }
+.navlockform { display: inline-flex; align-items: center; gap: 6px; margin: 0; }
+.navlockbtn { font: inherit; background: none; border: 0; padding: 0; color: var(--t2, var(--muted)); cursor: pointer; }
+.navlockbtn:hover { color: var(--t1, var(--text)); text-decoration: underline; }
+.navlockform .actmsg:empty { display: none; }
+
+.top.subtop { margin: -10px 0 16px; font-size: .9em; }
+@media (max-width: 640px) { .navgrow { display: none; } .topnav { gap: 8px 12px; } }
+`;
+var init_top_nav = __esm(() => {
+  init_components();
+  init_host_page();
+  DASHBOARD_TABS = [
+    { id: "home", label: "Home" },
+    { id: "sources", label: "Sources" },
+    { id: "privacy", label: "Privacy" },
+    { id: "settings", label: "Settings" }
+  ];
+});
+
 // src/workers/dashboard/host-page.ts
 function dashboardLocalPageHref(page2, token) {
   const query = token ? `${DASHBOARD_LOCAL_PAGES[page2]}&token=${encodeURIComponent(token)}` : DASHBOARD_LOCAL_PAGES[page2];
@@ -160549,11 +160681,12 @@ function renderComputerHostPage(input) {
     '<meta charset="utf-8">',
     '<meta name="viewport" content="width=device-width, initial-scale=1">',
     "<title>Olympus</title>",
-    `<style>${HOST_CSS}</style>`,
+    `<style>${HOST_CSS}${TOP_NAV_CSS}.topnav{flex:none;max-width:48rem;width:calc(100% - 2rem);margin:1rem auto 0}</style>`,
     "</head>",
     `<body data-olympus-host="computer" data-locked="${locked2 ? "true" : "false"}">`,
     "<main>",
     '<h1 class="sr-only">Olympus dashboard</h1>',
+    dashboardTopNav({ active: "home", unlocked: !locked2, lockable: false, ...token ? { token } : {} }),
     `<header class="computer-identity" data-computer-identity>${text3(input.computerIdentity ?? dashboardComputerIdentity())}</header>`,
     ...installer ? [
       `<section class="update" data-update-notice${update ? "" : " hidden"}><p data-update-text>${update ? text3(DASHBOARD_UPDATE_COPY.notice(update.version)) : ""}</p>` + `<p><code id="update-command">${text3(installer.command)}</code> ` + `<button class="btn" type="button" data-update-copy>${text3(DASHBOARD_UPDATE_COPY.copy)}</button> ` + `<span class="status" data-update-copy-status aria-live="polite"></span></p></section>`
@@ -160580,6 +160713,7 @@ var init_host_page = __esm(() => {
   init_page();
   init_messaging();
   init_theme();
+  init_top_nav();
   init_staging();
   init_vocabulary();
   init_open_targets();
@@ -160589,7 +160723,8 @@ var init_host_page = __esm(() => {
     agents: "agents",
     privateAnswers: "private-answers",
     connector: "connector",
-    help: "help"
+    help: "help",
+    settings: "settings"
   };
   HOST_CSS = `
 :root{--bg:${CHATGPT_DASHBOARD_LIGHT.bg};--text:${CHATGPT_DASHBOARD_LIGHT.text};--muted:${CHATGPT_DASHBOARD_LIGHT.muted};--line:${CHATGPT_DASHBOARD_LIGHT.line};--warn-bg:${CHATGPT_DASHBOARD_LIGHT.warnBg};--warn:${CHATGPT_DASHBOARD_LIGHT.warn};--surface:${CHATGPT_DASHBOARD_LIGHT.surface};--focus:${CHATGPT_DASHBOARD_LIGHT.focus};--accent:${CHATGPT_DASHBOARD_LIGHT.accent};--on-accent:${CHATGPT_DASHBOARD_LIGHT.onAccent};color-scheme:light dark}
@@ -161607,9 +161742,10 @@ function renderDashboardPrivateAnswersPage(options) {
     title: "Olympus",
     crumb: DASHBOARD_PRIVATE_ANSWERS_COPY.crumb,
     ...basePath === undefined ? {} : { basePath },
+    nav: dashboardTopNav({ active: "privacy", unlocked: options?.controlSessionCsrfToken !== undefined, lockable: false, ...readToken(basePath) ? { token: readToken(basePath) } : {} }),
     meta: "",
     body: dashboardPrivacyTabs("questions", readToken(basePath)) + renderPrivateAnswersBody(options),
-    styles: [CHATGPT_MARKDOWN_CSS, LOCAL_PAGE_CSS, DASHBOARD_OUTSIDE_HELP_CSS, PRIVACY_TABS_CSS, PRIVATE_ANSWERS_CSS]
+    styles: [CHATGPT_MARKDOWN_CSS, LOCAL_PAGE_CSS, TOP_NAV_CSS, DASHBOARD_OUTSIDE_HELP_CSS, PRIVACY_TABS_CSS, PRIVATE_ANSWERS_CSS]
   });
 }
 function dashboardPrivacyTabs(active, token) {
@@ -162238,9 +162374,90 @@ var DASHBOARD_PRIVATE_ANSWERS_ANONYMOUS_FRAGMENT = "anonymous-setup", POST_PATH 
 var init_private_answers = __esm(() => {
   init_components();
   init_host_page();
+  init_top_nav();
   init_outside_help();
   init_vocabulary();
   ANONYMOUS_SETUP_ID = DASHBOARD_PRIVATE_ANSWERS_ANONYMOUS_FRAGMENT;
+});
+
+// src/workers/dashboard/model-pickers.ts
+function currentLabel(list) {
+  const option = list.options.find((entry) => entry.value === list.current);
+  if (list.current === "strongest")
+    return `Always the strongest${list.strongestNow ? ` (${list.strongestNow})` : ""}`;
+  return option?.label ?? list.current;
+}
+function picker(list, disabled2) {
+  const t = TITLES[list.provider];
+  const id = `model-pick-${list.provider}`;
+  const off = disabled2 ? " disabled" : "";
+  const radios = list.options.map((option) => {
+    const inUse = option.value === list.current;
+    const now = inUse && option.value === "strongest" && list.strongestNow ? ` · now ${list.strongestNow}` : "";
+    const note = option.value === "strongest" ? `${inUse ? " · in use" : ""}${now}</span><span class="picknote">${escapeHtml2(option.note ?? "")}` : `${inUse && option.note !== "in use" ? " · in use" : ""}${option.note ? ` · ${escapeHtml2(option.note)}` : ""}`;
+    return `<label class="pickopt${option.value === "strongest" ? " strong" : ""}"><input type="radio" name="model" value="${escapeHtml2(option.value)}"${inUse ? " checked" : ""}${off}> <span><b>${escapeHtml2(option.label)}</b><span class="pnote">${note}</span></span></label>`;
+  }).join("");
+  return `<div class="sheet pickpanel" id="${id}" aria-hidden="true"><h4>${escapeHtml2(t.pick)}</h4><p class="pnote">${escapeHtml2(t.intro)}</p>` + `<form data-model-choice><input type="hidden" name="provider" value="${list.provider}"><fieldset${off}><legend class="sr">${escapeHtml2(t.pick)}</legend>${radios}</fieldset>` + `<div class="pickbar"><button class="btn primary" type="submit"${off}>Use this model</button><button class="btn" type="button" data-sheet-toggle="#${id}">Cancel</button>` + `<button class="btn addmodel" type="button" data-add-model-open="${list.provider}"${off}>${escapeHtml2(t.add)}</button></div>` + '<span data-action-message role="status"></span></form></div>';
+}
+function addDialog(provider) {
+  const t = TITLES[provider];
+  const head = `<dialog class="adddialog" data-add-model="${provider}" aria-labelledby="add-model-${provider}"><div class="adddialoghead"><h3 id="add-model-${provider}">${escapeHtml2(t.addTitle)}</h3><button class="btn iconbtn" type="button" data-dialog-close aria-label="Close">✕</button></div>`;
+  if (provider === "local") {
+    return head + `<p class="pnote">Olympus doesn't install or download models itself.</p>` + '<section class="addbox"><h4>Find a model you already run</h4><p class="pnote">Olympus looks for Ollama and LM Studio on this computer. If your model server uses another port, enter its address.</p>' + '<form data-local-models-discover class="addrow"><button class="btn primary" type="submit">Look on this computer</button><input class="keyfield" name="base_url" type="url" placeholder="http://127.0.0.1:1234/v1 (optional)" aria-label="Model server address on this computer (optional)"><span data-action-message role="status"></span></form>' + '<div data-local-models-results></div><form data-local-models-test hidden><input type="hidden" name="base_url"><label>Answer model<select name="answer_model" required></select></label><button class="btn primary" type="submit">Test and add</button><span data-action-message role="status"></span></form>' + '<p class="pnote">Olympus tests each model it finds with made-up text before adding it.</p></section>' + `<section class="addbox"><h4>Get a new model with your agent's help</h4><p class="pnote">Your agent can pick a model that fits this computer, download it and connect it. Copy this request into your agent.</p>` + `<div class="promptbox" id="add-model-request" hidden>${escapeHtml2(LOCAL_MODEL_AGENT_REQUEST)}</div><button class="btn" type="button" data-copy-target="#add-model-request">Copy request</button><span class="copystatus" data-copy-status aria-live="polite"></span></section>` + "</dialog>";
+  }
+  if (provider === "venice") {
+    return head + '<p class="pnote">Every private model Venice offers you now. Olympus never sends Private items to a model Venice keeps data on.</p>' + `<form data-model-choice data-addable-list="venice"><input type="hidden" name="provider" value="venice"><div data-addable-models><p class="pnote" role="status">Loading Venice's models…</p></div>` + '<div class="pickbar"><button class="btn primary" type="submit">Use this model</button></div><span data-action-message role="status"></span></form></dialog>';
+  }
+  return head + '<p class="pnote">Name a model zkAPI offers, such as anthropic/claude-sonnet-5.5.</p>' + '<form data-model-choice><input type="hidden" name="provider" value="zkapi"><input class="keyfield" name="model" required autocomplete="off" placeholder="provider/model" aria-label="zkAPI model">' + '<div class="pickbar"><button class="btn primary" type="submit">Use this model</button></div><span data-action-message role="status"></span></form></dialog>';
+}
+function pickerRow(list, disabled2, extra = "") {
+  const t = TITLES[list.provider];
+  const id = `model-pick-${list.provider}`;
+  return `<div class="pickrow" data-model-pick="${list.provider}"><div class="pickhead"><span class="dot ok" aria-hidden="true"></span><b>${escapeHtml2(t.row)}</b><span class="pnote"> · ${escapeHtml2(currentLabel(list))}</span>` + `<span class="grow"></span><button class="btn" type="button" data-sheet-toggle="#${id}" aria-controls="${id}" aria-expanded="false"${disabled2 ? " disabled" : ""}>Change model</button>${extra}</div>` + picker(list, disabled2) + addDialog(list.provider) + "</div>";
+}
+function renderAnswerModelPickers(choices, unlocked) {
+  if (!choices)
+    return "";
+  const rows = [choices.local, choices.venice].filter((list) => list !== undefined).map((list) => pickerRow(list, !unlocked));
+  return rows.length ? `<div class="pickrows">${rows.join("")}</div>` : "";
+}
+function renderZkapiModelPicker(choices, unlocked) {
+  if (!choices?.zkapi)
+    return "";
+  return `<section id="zkapi-model"><h3 class="sect">On Private questions</h3><div class="pickrows">${pickerRow(choices.zkapi, !unlocked)}</div></section>`;
+}
+var TITLES, LOCAL_MODEL_AGENT_REQUEST = `Help me add a local model to Olympus. Pick a model that fits this computer's memory, download it with Ollama or LM Studio, start it, and tell me when it is running so I can press "Look on this computer" in Olympus Privacy rules. Do not change Olympus settings yourself.`, MODEL_PICKER_CSS = `
+.pickrows { display: grid; gap: 12px; margin: 12px 0; }
+.pickrow { border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; }
+.pickhead { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.pickhead .grow { flex: 1; }
+.pickhead .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--ok, #3fb950); }
+.pickpanel { margin-top: 12px; border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; }
+.pickopt { display: flex; gap: 10px; align-items: flex-start; padding: 10px 6px; border-top: 1px solid var(--line); cursor: pointer; }
+.pickopt:first-of-type { border-top: 0; }
+.pickopt.strong:has(input:checked) { background: color-mix(in srgb, var(--link) 14%, transparent); border-radius: 6px; }
+.pickopt .picknote { display: block; color: var(--t2); font-size: 0.92em; margin-top: 2px; }
+.pickbar { display: flex; gap: 10px; align-items: center; margin-top: 12px; flex-wrap: wrap; }
+.pickbar .addmodel { margin-left: auto; border-style: dashed; }
+.adddialog { max-width: 560px; width: calc(100% - 32px); border: 1px solid var(--line); border-radius: 12px; background: var(--bg); color: var(--t1); padding: 18px 20px; }
+.adddialog::backdrop { background: rgba(0, 0, 0, 0.55); }
+.adddialoghead { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.adddialoghead h3 { margin: 0; }
+.iconbtn { min-width: 36px; padding: 4px 8px; }
+.addbox { border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; margin-top: 12px; }
+.addbox h4 { margin: 0 0 4px; }
+.addrow { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+.addrow .keyfield { flex: 1; min-width: 200px; }
+.sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+@media (max-width: 640px) { .pickbar .addmodel { margin-left: 0; } }
+`;
+var init_model_pickers = __esm(() => {
+  init_components();
+  TITLES = {
+    local: { row: "Local", pick: "Choose your local model", intro: "Models on this computer that Olympus can use. Nothing leaves this computer.", add: "+ Add a model", addTitle: "Add a local model" },
+    venice: { row: "Venice", pick: "Choose your Venice model", intro: "Private models only: Venice doesn't keep what you send.", add: "+ Add a Venice model", addTitle: "Add a Venice model" },
+    zkapi: { row: "zkAPI", pick: "Choose your zkAPI model", intro: "zkAPI can't tell who's asking, whichever model you pick.", add: "+ Add", addTitle: "Add a zkAPI model" }
+  };
 });
 
 // src/workers/dashboard/model-setup.ts
@@ -162421,12 +162638,17 @@ var init_model_setup2 = __esm(() => {
 function unlocked(options) {
   return options?.controlSessionCsrfToken !== undefined;
 }
+function lockedGate2(options) {
+  return unlocked(options) ? "" : dashboardControlGate({ connected: false });
+}
 function localShell(input) {
   const csrf = input.options?.controlSessionCsrfToken;
+  const token = readToken2(input.options?.basePath);
   return pageShell({
     title: "Olympus",
     crumb: input.crumb,
     ...input.options?.basePath === undefined ? {} : { basePath: input.options.basePath },
+    nav: dashboardTopNav({ active: input.tab, unlocked: csrf !== undefined, ...token ? { token } : {} }),
     meta: input.meta,
     body: input.body,
     controller: { ...csrf === undefined ? {} : { csrfToken: csrf } },
@@ -162434,7 +162656,7 @@ function localShell(input) {
       unlocked: csrf !== undefined,
       ...csrf === undefined ? {} : { controlSessionCsrfToken: csrf }
     },
-    styles: [LOCAL_PAGE_CSS, ...input.styles]
+    styles: [LOCAL_PAGE_CSS, TOP_NAV_CSS, ...input.styles]
   });
 }
 function renderDashboardKeysPage(view3, options) {
@@ -162442,19 +162664,21 @@ function renderDashboardKeysPage(view3, options) {
   const token = readToken2(options?.basePath);
   const mode = options?.answerMode;
   const body = [
-    dashboardControlGate({ connected: unlocked(options) }),
+    lockedGate2(options),
     dashboardPrivacyTabs("settings", token),
     `<section id="whats-private"><h3 class="sect">${escapeHtml2(DASHBOARD_PRIVACY_SETTINGS_COPY.whatsPrivate)}</h3><p class="pnote">${escapeHtml2(DASHBOARD_PRIVACY_SETTINGS_COPY.intro)}</p>` + `<div class="srow nodot"><div class="smain"><b>${escapeHtml2(DASHBOARD_PRIVACY_SETTINGS_COPY.wordsTitle)}</b><p class="pnote">${escapeHtml2(DASHBOARD_PRIVACY_SETTINGS_COPY.wordsLine)}</p></div><div class="sact"><a class="btn" href="${escapeHtml2(home2)}">${escapeHtml2(DASHBOARD_PRIVACY_SETTINGS_COPY.wordsOpen)}</a></div></div></section>`,
-    `<section id="private-routing"><h3 class="sect">${escapeHtml2(DASHBOARD_PRIVACY_SETTINGS_COPY.answeredTitle)}</h3><p class="pnote">${escapeHtml2(DASHBOARD_PRIVACY_SETTINGS_COPY.answeredIntro)}</p>` + (mode ? `<div class="srow nodot" data-answer-mode="${escapeHtml2(mode.id)}"><div class="smain"><b>${escapeHtml2(mode.label)}</b>${mode.id === "local-first" ? ` <span class="pnote">· ${escapeHtml2(DASHBOARD_PRIVACY_SETTINGS_COPY.recommended)}</span>` : ""}</div><div class="sact"><a class="btn" href="${escapeHtml2(home2)}">${escapeHtml2(DASHBOARD_PRIVACY_SETTINGS_COPY.change)}</a></div></div>` : "") + renderModelSetupBlocker(view3.model_setup) + `<div${view3.model_setup?.cards.some((card) => card.id === "venice") ? ' id="venice-setup"' : ""}>${renderModelSetup(view3.model_setup, { heading: false })}</div></section>`,
+    `<section id="private-routing"><h3 class="sect">${escapeHtml2(DASHBOARD_PRIVACY_SETTINGS_COPY.answeredTitle)}</h3><p class="pnote">${escapeHtml2(DASHBOARD_PRIVACY_SETTINGS_COPY.answeredIntro)}</p>` + (mode ? `<div class="srow nodot" data-answer-mode="${escapeHtml2(mode.id)}"><div class="smain"><b>${escapeHtml2(mode.label)}</b>${mode.id === "local-first" ? ` <span class="pnote">· ${escapeHtml2(DASHBOARD_PRIVACY_SETTINGS_COPY.recommended)}</span>` : ""}</div><div class="sact"><a class="btn" href="${escapeHtml2(home2)}">${escapeHtml2(DASHBOARD_PRIVACY_SETTINGS_COPY.change)}</a></div></div>` : "") + renderModelSetupBlocker(view3.model_setup) + `<div${view3.model_setup?.cards.some((card) => card.id === "venice") ? ' id="venice-setup"' : ""}>${renderModelSetup(view3.model_setup, { heading: false })}</div>` + renderAnswerModelPickers(options?.modelChoices, unlocked(options)) + "</section>",
+    renderZkapiModelPicker(options?.modelChoices, unlocked(options)),
     view3.model_setup?.cards.some((card) => card.id === "venice") ? "" : `<section id="venice-setup"><h3 class="sect">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.setUpVenice)}</h3><p class="pnote">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.veniceSetupHelp)}</p><div class="modelaction"><form method="post" action="/dashboard/connect/api-key" data-connect-kind="api_key" data-model-provider="venice"><input type="hidden" name="source" value="venice"><input class="keyfield" type="password" name="api_key" required autocomplete="new-password" placeholder="${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.veniceKey)}" aria-label="${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.veniceKey)}"><button type="submit" class="btn primary">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.connectVenice)}</button><span data-action-message role="status"></span></form></div></section>`,
     renderJudgeChoice(view3, options)
   ].filter((block) => block !== "").join(`
 `);
   return localShell({
     crumb: DASHBOARD_PRIVATE_ANSWERS_COPY.crumb,
+    tab: "privacy",
     meta: dashboardCheckedLabel(view3.generated_at, options?.now ?? new Date),
     body,
-    styles: [MODEL_SETUP_CSS, PRIVACY_TABS_CSS],
+    styles: [MODEL_SETUP_CSS, PRIVACY_TABS_CSS, MODEL_PICKER_CSS],
     options
   });
 }
@@ -162462,7 +162686,7 @@ function renderDashboardConnectPage(view3, options) {
   const blocked = view3.model_setup !== undefined && !view3.model_setup.ready;
   const sources = view3.sources.filter((source) => source.connection.action.kind !== "none" || source.source_id === "telegram.messages" || source.source_id === "whatsapp.personal.messages");
   const body = [
-    dashboardControlGate({ connected: unlocked(options) }),
+    lockedGate2(options),
     renderModelSetupBlocker(view3.model_setup, { keysHref: dashboardLocalPageHref("keys", readToken2(options?.basePath)) }),
     sources.length === 0 ? `<p class="pnote">${escapeHtml2(W.connect.empty)}</p>` : `<div class="srows" id="sources">${sources.map((source) => renderSetupRow(source, view3, blocked, options?.basePath ?? "/dashboard", options?.messagingLocalSession === true) + sourceSupportBlock(source)).join(`
 `)}</div>`
@@ -162470,6 +162694,7 @@ function renderDashboardConnectPage(view3, options) {
 `);
   return localShell({
     crumb: W.connect.title,
+    tab: "sources",
     meta: dashboardCheckedLabel(view3.generated_at, options?.now ?? new Date),
     body,
     styles: [MODEL_SETUP_CSS],
@@ -162487,11 +162712,11 @@ function readToken2(basePath) {
 function renderDashboardAgentsPage(options) {
   const now = options?.now ?? new Date;
   const body = [
-    dashboardControlGate({ connected: unlocked(options) }),
+    lockedGate2(options),
     options?.agents ? renderDashboardAgentsSection({ ...options.agentConnectHost, view: options.agents, now }) : '<p class="foot">Agent connections are not available on this install.</p>'
   ].join(`
 `);
-  return localShell({ crumb: W.agents.title, meta: "", body, styles: [AGENT_CONNECT_CSS], options });
+  return localShell({ crumb: W.agents.title, tab: "settings", meta: "", body, styles: [AGENT_CONNECT_CSS], options });
 }
 function renderDashboardConnectorPage(options) {
   const body = [
@@ -162505,7 +162730,7 @@ function renderDashboardConnectorPage(options) {
     }).replace('class="sheet"', 'class="sheet on"').replace('aria-hidden="true"', 'aria-hidden="false"')
   ].join(`
 `);
-  return localShell({ crumb: W.connector.title, meta: "", body, styles: [], options });
+  return localShell({ crumb: W.connector.title, tab: "sources", meta: "", body, styles: [], options });
 }
 function refusalNotice(source) {
   if (!source.connection.provider_refusal)
@@ -162644,14 +162869,28 @@ function connectAction(source) {
     return { label: action.label, kind: "this_computer", source: action.source, primary: false };
   return;
 }
+function renderDashboardSettingsPage(options) {
+  const now = options?.now ?? new Date;
+  const token = readToken2(options?.basePath);
+  const settings = options?.settings;
+  const side = `<nav class="setside" aria-label="Settings">${SETTINGS_SECTIONS.map((section) => `<a href="#${section.id}">${escapeHtml2(section.label)}</a>`).join("")}</nav>`;
+  const agents = `<section id="settings-agents">${options?.agents ? renderDashboardAgentsSection({ ...options.agentConnectHost, view: options.agents, now }).replace('<div class="sect" id="agents">Agents</div>', '<h3 class="sect" id="agents">Agents and access</h3>') : '<h3 class="sect" id="agents">Agents and access</h3><p class="pnote">Agent connections are not available on this install.</p>'}</section>`;
+  const models = '<section><h3 class="sect" id="models">Models on this computer</h3>' + (settings?.models?.length ? `<div class="srows">${settings.models.map((model) => `<div class="srow nodot"><div class="smain"><b>${escapeHtml2(model.name)}</b> <span class="pnote">· ${escapeHtml2(model.state)}</span><p class="pnote">${escapeHtml2(model.detail)} (${(model.downloadBytes / 1e9).toFixed(2)} GB download)</p></div></div>`).join("")}</div>` : '<p class="pnote">Olympus has no built-in models to show on this computer.</p>') + '<p class="pnote">The models that answer and sort Private items are on <a href="' + escapeHtml2(dashboardLocalPageHref("keys", token)) + '">Privacy rules</a>.</p></section>';
+  const update = settings?.update;
+  const updates = '<section><h3 class="sect" id="updates">Updates</h3>' + (update ? `<p>${escapeHtml2(DASHBOARD_UPDATE_COPY.notice(update.version))}</p><pre class="promptbox" id="settings-update-command">${escapeHtml2(update.command)}</pre><button type="button" class="btn" data-copy-target="#settings-update-command">${escapeHtml2(DASHBOARD_UPDATE_COPY.copy)}</button><span class="copystatus" data-copy-status aria-live="polite"></span>` : '<p class="pnote">Olympus is up to date.</p>') + "</section>";
+  const help = '<section><h3 class="sect" id="help">Help</h3><p class="pnote">If something is not working, copy the system report and send it to support. It holds only system states and error codes.</p>' + `<div class="pickbar"><a class="btn" href="${escapeHtml2(dashboardLocalPageHref("help", token))}">Copy a system report</a><a class="btn" href="https://olympusplugin.ai/support" target="_blank" rel="noopener noreferrer">Contact support</a></div></section>`;
+  const body = lockedGate2(options) + `<div class="setlayout">${side}<div class="setmain">${agents}${models}${updates}${help}</div></div>`;
+  return localShell({ crumb: "Settings", tab: "settings", meta: "", body, styles: [AGENT_CONNECT_CSS, SETTINGS_CSS], options });
+}
 function renderDashboardHelpPage(options) {
   const report = options?.systemReport;
   return localShell({
     crumb: "Help",
+    tab: "settings",
     meta: "",
     options,
     styles: [],
-    body: dashboardControlGate({ connected: unlocked(options) }) + "<h3>Help with Olympus</h3><p>If something is not working, copy the system report and send it to support.</p>" + (report ? `<pre id="system-report" class="promptbox">${escapeHtml2(report)}</pre><p>Only system states and error codes: no names, numbers, emails, chats, notebook or folder titles, or home folder paths.</p><button type="button" class="btn" data-copy-target="#system-report">Copy system report</button><span data-copy-status aria-live="polite"></span>` : unlocked(options) ? "<p>Olympus could not read the system report. Try again, or contact support.</p>" : "<p>Open dashboard controls on this computer to copy a system report.</p>") + '<p><a href="https://olympusplugin.ai/support" target="_blank" rel="noopener noreferrer">Contact support</a></p>'
+    body: lockedGate2(options) + "<h3>Help with Olympus</h3><p>If something is not working, copy the system report and send it to support.</p>" + (report ? `<pre id="system-report" class="promptbox">${escapeHtml2(report)}</pre><p>Only system states and error codes: no names, numbers, emails, chats, notebook or folder titles, or home folder paths.</p><button type="button" class="btn" data-copy-target="#system-report">Copy system report</button><span data-copy-status aria-live="polite"></span>` : unlocked(options) ? "<p>Olympus could not read the system report. Try again, or contact support.</p>" : "<p>Open dashboard controls on this computer to copy a system report.</p>") + '<p><a href="https://olympusplugin.ai/support" target="_blank" rel="noopener noreferrer">Contact support</a></p>'
   });
 }
 function sourceSupportBlock(source) {
@@ -162694,7 +162933,16 @@ function renderJudgeChoice(view3, options) {
     <p>Venice uses your own account and API key, and you pay Venice; Olympus pays for nothing. An end-to-end encrypted option is not available yet.</p></details>
     </fieldset></form></section>`;
 }
-var CONNECTOR_SHEET_ID = "connector-sheet", CONNECTOR_SHEET_HEADING = "Build a connector with your agent", CONNECTOR_SHEET_INTRO, CONNECTOR_PROMPT, W;
+var CONNECTOR_SHEET_ID = "connector-sheet", CONNECTOR_SHEET_HEADING = "Build a connector with your agent", CONNECTOR_SHEET_INTRO, CONNECTOR_PROMPT, W, SETTINGS_SECTIONS, SETTINGS_CSS = `
+.setlayout { display: grid; grid-template-columns: 220px 1fr; gap: 24px; align-items: start; }
+.setside { display: grid; gap: 8px; position: sticky; top: 12px; }
+.setside a { display: block; padding: 10px 14px; border: 1px solid var(--line); border-radius: 10px; color: var(--t1); text-decoration: none; }
+.setside a:hover, .setside a:focus-visible { border-color: var(--link); }
+.setmain section + section { margin-top: 24px; }
+.setmain > section:first-child .sect { margin-top: 0; }
+.setmain .pickbar { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 10px; }
+@media (max-width: 760px) { .setlayout { grid-template-columns: 1fr; } .setside { position: static; grid-template-columns: 1fr 1fr; } }
+`;
 var init_local = __esm(() => {
   init_judge_spending();
   init_source_failure();
@@ -162706,6 +162954,9 @@ var init_local = __esm(() => {
   init_vocabulary();
   init_private_answers();
   init_host_page();
+  init_top_nav();
+  init_vocabulary();
+  init_model_pickers();
   init_model_setup2();
   init_vocabulary();
   CONNECTOR_SHEET_INTRO = "Copy this prompt, replace the source name, and paste it into your coding " + "agent. The connector playbook it names lives in an Olympus source checkout, not in the installed " + "package — CONTRIBUTING.md says how to get one. A finished connector appears in Olympus like any " + "built-in.";
@@ -162716,6 +162967,12 @@ var init_local = __esm(() => {
   ].join(`
 `);
   W = DASHBOARD_COMPUTER_PANEL_COPY.rows;
+  SETTINGS_SECTIONS = [
+    { id: "agents", label: "Agents and access" },
+    { id: "models", label: "Models on this computer" },
+    { id: "updates", label: "Updates" },
+    { id: "help", label: "Help" }
+  ];
 });
 
 // src/workers/dashboard/index.ts
@@ -162739,6 +162996,8 @@ function dashboardHtmlRoutePage(url2) {
     return "outside_help_moved";
   if (params.has(DASHBOARD_LOCAL_PAGES.connector))
     return "connector";
+  if (params.has(DASHBOARD_LOCAL_PAGES.settings))
+    return "settings";
   return "host";
 }
 function dashboardReadToken(url2) {
@@ -162770,6 +163029,8 @@ function renderDashboardLocalPage(page2, input) {
       return renderDashboardPrivateAnswersPage(options);
     case "connector":
       return renderDashboardConnectorPage(options);
+    case "settings":
+      return renderDashboardSettingsPage(options);
   }
 }
 var DASHBOARD_LEGACY_QUERY_PARAMS;
@@ -163185,7 +163446,7 @@ function isDashboardArchiveImportLocalRoute(request) {
   return request.method === "POST" && DASHBOARD_ARCHIVE_IMPORT_LOCAL_PATHS.includes(new URL(request.url).pathname);
 }
 function isDashboardLocalGradeRoute(request) {
-  return isDashboardConsultControlRoute(request) || isDashboardPrivateAnswersRoute(request) || isDashboardArchiveImportLocalRoute(request) || isDashboardMessagingRoute(request) || request.method === "POST" && ["/dashboard/models/judge", "/dashboard/engine/computer-use", "/dashboard/models/first-run-privacy", "/dashboard/models/local/discover", "/dashboard/models/local/test", "/dashboard/models/local/save"].includes(new URL(request.url).pathname);
+  return isDashboardConsultControlRoute(request) || isDashboardPrivateAnswersRoute(request) || isDashboardArchiveImportLocalRoute(request) || isDashboardMessagingRoute(request) || request.method === "POST" && ["/dashboard/models/judge", "/dashboard/engine/computer-use", "/dashboard/models/first-run-privacy", "/dashboard/models/local/discover", "/dashboard/models/local/test", "/dashboard/models/local/save", "/dashboard/models/choice", "/dashboard/models/addable"].includes(new URL(request.url).pathname);
 }
 function dashboardLocalGradeRefusal(request) {
   if (!isDashboardPrivateAnswersRoute(request) && !isDashboardArchiveImportLocalRoute(request))
@@ -163232,6 +163493,8 @@ function isDashboardControlRoute(request) {
     "/dashboard/models/local/discover",
     "/dashboard/models/local/test",
     "/dashboard/models/local/save",
+    "/dashboard/models/choice",
+    "/dashboard/models/addable",
     "/dashboard/sync-now",
     "/dashboard/embedding-priority",
     "/dashboard/disconnect",
@@ -168599,6 +168862,22 @@ function createEmailSourceWorker(options = {}) {
               }
             }));
           }
+          if (page2 === "settings") {
+            const installer = installerForPlatform(options.platform ?? process.platform);
+            const update = installer ? options.updateAvailable?.() : undefined;
+            return html2(renderDashboardLocalPage("settings", {
+              url: url2,
+              options: {
+                ...controlSessionCsrfToken ? { controlSessionCsrfToken } : {},
+                ...agentConnections ? { agents: dashboardAgentsView(agentConnections) } : {},
+                ...options.agentConnectHost ? { agentConnectHost: options.agentConnectHost() } : {},
+                settings: {
+                  ...options.localModelReadiness ? { models: options.localModelReadiness() } : {},
+                  ...update && installer ? { update: { version: update.version, command: installer.command } } : {}
+                }
+              }
+            }));
+          }
           if (page2 === "private_answers") {
             const localSession = request.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER) === "local";
             const outsideHelp = sourceDashboard?.consult && controlSessionCsrfToken !== undefined ? await sourceDashboard.consult.status().catch(() => {
@@ -168713,6 +168992,9 @@ function createEmailSourceWorker(options = {}) {
                 answerMode: { id: answerModeId, label: answerModeId === "custom" ? "Custom Private-answer mode" : PRIVACY_PRESET_LABELS[answerModeId] },
                 ...controlSessionCsrfToken ? { controlSessionCsrfToken } : {},
                 ...sourceDashboard.judgeSetup ? { judgeSetup: sourceDashboard.judgeSetup.pageStatus?.() ?? sourceDashboard.judgeSetup.status() } : {},
+                ...sourceDashboard.modelChoices ? { modelChoices: await sourceDashboard.modelChoices.status().catch(() => {
+                  return;
+                }) } : {},
                 outsideHelpLocalSession: request.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER) === "local",
                 messagingLocalSession: Boolean(controlSessionCsrfToken) && request.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER) === "local",
                 ...controlSessionCsrfToken && sourceDashboard.consult ? { outsideHelp: await sourceDashboard.consult.status().catch(() => {
@@ -169011,6 +169293,24 @@ function createEmailSourceWorker(options = {}) {
               status_message: cancelled ? "Connection attempt cancelled. Press Connect when you are ready to start a new one." : "No connection attempt was pending."
             });
           });
+        }
+        if (request.method === "POST" && (url2.pathname === "/dashboard/models/choice" || url2.pathname === "/dashboard/models/addable")) {
+          if (!request.headers.has(DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER) || request.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER) !== "local") {
+            return json({ ok: false, error: { code: "local_dashboard_only", message: "Choose this in an unlocked dashboard on this computer." } }, 403);
+          }
+          if (!sourceDashboard?.modelChoices)
+            throw new EmailSourceWorkerError(501, "not_available", "Model choices are unavailable.");
+          const input = await parseObjectBody(request);
+          if (url2.pathname.endsWith("/addable")) {
+            if (input.provider !== "venice")
+              throw new EmailSourceWorkerError(400, "invalid_request", "Choose a provider.");
+            return json({ ok: true, models: await sourceDashboard.modelChoices.addable("venice") });
+          }
+          if (input.provider !== "local" && input.provider !== "venice" && input.provider !== "zkapi" || typeof input.model !== "string" || input.model.trim() === "") {
+            throw new EmailSourceWorkerError(400, "invalid_request", "Choose a model.");
+          }
+          const result = await sourceDashboard.modelChoices.save(input.provider, input.model.trim());
+          return json(result.ok ? result : { ok: false, error: { code: "model_choice_failed", message: result.message } }, result.ok ? 200 : 409);
         }
         if (request.method === "POST" && url2.pathname === "/dashboard/models/judge") {
           if (!request.headers.has(DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER) || request.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER) !== "local") {
@@ -172768,6 +173068,7 @@ var init_email_source = __esm(() => {
   init_dashboard_messaging_service();
   init_source_scope_approval();
   init_release_manifest();
+  init_update_check();
   init_google_handle_compatibility();
   init_source_account_binding();
   init_source_registry();
@@ -173026,6 +173327,244 @@ var init_analyst_anthropic = __esm(() => {
   init_analyst();
 });
 
+// src/core/model-choices.ts
+import { readFileSync as readFileSync86 } from "node:fs";
+import { dirname as dirname95, join as join128 } from "node:path";
+function modelChoicesPath(policyPath) {
+  return join128(dirname95(policyPath), "model-choices.json");
+}
+function readModelChoices(policyPath) {
+  try {
+    const value2 = JSON.parse(readFileSync86(modelChoicesPath(policyPath), "utf8"));
+    if (value2?.schema !== "olympus.model-choices.v1")
+      return { schema: "olympus.model-choices.v1" };
+    return {
+      schema: "olympus.model-choices.v1",
+      ...BUILT_IN_SIZES.includes(value2.builtIn) ? { builtIn: value2.builtIn } : {},
+      ...value2.venice === "strongest" || value2.venice === "pinned" ? { venice: value2.venice } : {},
+      ...value2.zkapi === "strongest" || value2.zkapi === "pinned" ? { zkapi: value2.zkapi } : {}
+    };
+  } catch {
+    return { schema: "olympus.model-choices.v1" };
+  }
+}
+function writeModelChoices(policyPath, patch) {
+  const next = { ...readModelChoices(policyPath), ...patch, schema: "olympus.model-choices.v1" };
+  writePrivateFileAtomicSync(modelChoicesPath(policyPath), JSON.stringify(next) + `
+`);
+  return next;
+}
+function builtInModelEnvValue(env, state) {
+  return env.OLYMPUS_BUILT_IN_ANALYST_MODEL?.trim() || state.builtIn;
+}
+async function resolveVeniceStrongest(input) {
+  const fetchImpl = input.fetchImpl ?? ((url2, init) => fetch(url2, init));
+  let traits;
+  try {
+    const response = await fetchImpl(`${input.baseUrl.replace(/\/+$/, "")}/models/traits?type=text`, {
+      headers: { authorization: `Bearer ${input.apiKey}` },
+      signal: AbortSignal.timeout(input.timeoutMs ?? 1e4)
+    });
+    if (!response.ok)
+      return;
+    const body = await response.json();
+    if (!body || typeof body.data !== "object" || body.data === null || Array.isArray(body.data))
+      return;
+    traits = body.data;
+  } catch {
+    return;
+  }
+  for (const trait of VENICE_STRONGEST_TRAITS) {
+    const id = traits[trait];
+    if (typeof id !== "string" || !/^[A-Za-z0-9._:/-]{1,200}$/.test(id))
+      continue;
+    const category = await input.category(id).catch(() => {
+      return;
+    });
+    if (category && PRIVATE_CATEGORIES.includes(category))
+      return id;
+  }
+  return;
+}
+function addableVeniceModels(catalog) {
+  return Object.entries(catalog).filter(([, category]) => PRIVATE_CATEGORIES.includes(category)).map(([id]) => id).sort((a, b) => a.localeCompare(b));
+}
+function validModelId(value2) {
+  return typeof value2 === "string" && /^[A-Za-z0-9._:/@+-]{1,200}$/.test(value2);
+}
+var STRONGEST_MODEL = "strongest", BUILT_IN_SIZES, VENICE_STRONGEST_TRAITS, PRIVATE_CATEGORIES;
+var init_model_choices = __esm(() => {
+  init_atomic_file();
+  BUILT_IN_SIZES = ["small", "standard", "large"];
+  VENICE_STRONGEST_TRAITS = ["highest_quality", "default_reasoning"];
+  PRIVATE_CATEGORIES = ["private", "tee"];
+});
+
+// src/workers/email-source/model-choices-backend.ts
+function createModelChoicesBackend(options) {
+  const profileModel = (id) => {
+    const profile = options.config().modelProfiles[id];
+    return profile && "model" in profile && typeof profile.model === "string" ? profile.model : undefined;
+  };
+  const writeProfileModel = (id, model) => {
+    if (!options.policyPath)
+      return false;
+    if (profileModel(id) === model)
+      return true;
+    const result = updateSovereigntyConfigFile({ path: options.policyPath, expect: options.config(), patch: (current2) => {
+      const profile = current2.modelProfiles[id];
+      if (!profile || !("model" in profile))
+        return current2;
+      return { ...current2, modelProfiles: { ...current2.modelProfiles, [id]: { ...profile, model } } };
+    } });
+    return result.ok && result.changed;
+  };
+  const fittingSizes = () => BUILT_IN_SIZES.filter((size) => {
+    const spec = BUILT_IN_REASONING_MODELS.find((model) => model.sizeClass === size);
+    return spec !== undefined && options.totalMemoryBytes >= spec.minimumMemoryBytes;
+  });
+  const sizeName = (size) => BUILT_IN_REASONING_MODELS.find((model) => model.sizeClass === size)?.displayName ?? size;
+  const localList = async () => {
+    const external3 = profileModel(LOCAL_PROFILE_ID);
+    if (!await options.builtInAnswers()) {
+      return external3 ? { provider: "local", current: external3, options: [{ value: external3, label: external3, note: "on a model server you run" }] } : undefined;
+    }
+    const current2 = options.builtInSize();
+    const sizes = fittingSizes();
+    if (sizes.length === 0)
+      return;
+    return {
+      provider: "local",
+      current: current2 ? `builtin:${current2}` : "",
+      options: sizes.map((size) => ({ value: `builtin:${size}`, label: sizeName(size), note: SIZE_NOTES[size] }))
+    };
+  };
+  const veniceList = async () => {
+    const pinned = profileModel(VENICE_PROFILE_ID);
+    if (!pinned)
+      return;
+    const mode = options.policyPath ? readModelChoices(options.policyPath).venice : undefined;
+    const strongestNow = mode === "strongest" ? pinned : undefined;
+    return {
+      provider: "venice",
+      current: mode === "strongest" ? STRONGEST_MODEL : pinned,
+      ...strongestNow ? { strongestNow } : {},
+      options: [
+        { value: STRONGEST_MODEL, label: "Always the strongest", note: "Olympus moves to Venice's strongest private reasoning model when a new one arrives." },
+        { value: pinned, label: pinned, note: mode === "strongest" ? "stay on this one" : "in use" }
+      ]
+    };
+  };
+  const zkapiList = () => {
+    const zkapi = options.zkapi;
+    if (!zkapi?.available())
+      return;
+    const pinned = zkapi.read();
+    const choices = [{ value: STRONGEST_MODEL, label: "Always the strongest", note: "Olympus moves to the strongest zkAPI model with each release." }];
+    if (pinned)
+      choices.push({ value: pinned, label: pinned, note: "in use" });
+    if (zkapi.strongest !== pinned)
+      choices.push({ value: zkapi.strongest, label: zkapi.strongest, note: "the strongest now" });
+    return {
+      provider: "zkapi",
+      current: pinned ?? STRONGEST_MODEL,
+      ...pinned ? {} : { strongestNow: zkapi.strongest },
+      options: choices
+    };
+  };
+  const applied = (message2) => {
+    const reloaded = options.requestReload();
+    return { ok: true, status_message: reloaded ? message2 : `${message2} Restart Olympus to apply it.` };
+  };
+  return {
+    async status() {
+      const [venice, local] = await Promise.all([veniceList(), localList()]);
+      const zkapi = zkapiList();
+      return { ...local ? { local } : {}, ...venice ? { venice } : {}, ...zkapi ? { zkapi } : {} };
+    },
+    async save(provider, value2) {
+      if (provider === "zkapi") {
+        const zkapi = options.zkapi;
+        if (!zkapi?.available())
+          return { ok: false, message: "Set up zkAPI first." };
+        if (value2 !== STRONGEST_MODEL && !validModelId(value2))
+          return { ok: false, message: "Enter a zkAPI model name such as provider/model." };
+        const written = await zkapi.write(value2 === STRONGEST_MODEL ? undefined : value2);
+        if (!written.ok)
+          return written;
+        return { ok: true, status_message: value2 === STRONGEST_MODEL ? `Saved. zkAPI questions go to ${zkapi.strongest}, and Olympus follows the strongest from now on.` : `Saved. zkAPI questions go to ${value2}.` };
+      }
+      if (!options.policyPath)
+        return { ok: false, message: "Olympus cannot save model choices here: the policy is not a file it can write." };
+      if (provider === "local") {
+        const size = value2.startsWith("builtin:") ? value2.slice("builtin:".length) : undefined;
+        if (!size || !fittingSizes().includes(size))
+          return { ok: false, message: "Choose one of the models listed." };
+        if (!await options.builtInAnswers())
+          return { ok: false, message: "A model server you run answers now. Use Add a model to change it." };
+        if (options.builtInSize() === size)
+          return { ok: true, status_message: "That model is already in use." };
+        writeModelChoices(options.policyPath, { builtIn: size });
+        return applied(`Saved. Olympus is getting ${sizeName(size)} ready; it answers once it has downloaded and checked it.`);
+      }
+      if (provider === "venice") {
+        if (!profileModel(VENICE_PROFILE_ID))
+          return { ok: false, message: "Connect Venice first." };
+        if (value2 === STRONGEST_MODEL) {
+          const strongest = await options.venice?.strongest();
+          writeModelChoices(options.policyPath, { venice: "strongest" });
+          if (strongest && !writeProfileModel(VENICE_PROFILE_ID, strongest))
+            return { ok: false, message: "The policy changed while saving. Refresh and try again." };
+          return applied(strongest ? `Saved. Venice answers with ${strongest}, and Olympus follows the strongest from now on.` : "Saved. Olympus follows the strongest Venice model once it can reach Venice.");
+        }
+        if (!validModelId(value2))
+          return { ok: false, message: "Choose one of the models listed." };
+        const allowed = await this.addable("venice");
+        if (value2 !== profileModel(VENICE_PROFILE_ID) && !allowed.includes(value2))
+          return { ok: false, message: "Venice does not list that model as private. Choose another." };
+        writeModelChoices(options.policyPath, { venice: "pinned" });
+        if (!writeProfileModel(VENICE_PROFILE_ID, value2))
+          return { ok: false, message: "The policy changed while saving. Refresh and try again." };
+        return applied(`Saved. Venice answers with ${value2}.`);
+      }
+      return { ok: false, message: "Choose one of the models listed." };
+    },
+    async addable(provider) {
+      if (provider !== "venice" || !options.venice)
+        return [];
+      return addableVeniceModels(await options.venice.catalog().catch(() => ({})));
+    },
+    async refreshStrongest() {
+      if (!options.policyPath)
+        return false;
+      const state = readModelChoices(options.policyPath);
+      let changed = false;
+      if (state.venice === "strongest" && options.venice && profileModel(VENICE_PROFILE_ID)) {
+        const strongest = await options.venice.strongest().catch(() => {
+          return;
+        });
+        const still = readModelChoices(options.policyPath).venice === "strongest";
+        if (still && strongest && strongest !== profileModel(VENICE_PROFILE_ID))
+          changed = writeProfileModel(VENICE_PROFILE_ID, strongest) || changed;
+      }
+      if (changed)
+        options.requestReload();
+      return changed;
+    }
+  };
+}
+var VENICE_PROFILE_ID = "venice-private", LOCAL_PROFILE_ID = "local-source-answer", SIZE_NOTES;
+var init_model_choices_backend = __esm(() => {
+  init_model_choices();
+  init_sovereignty();
+  init_manifest2();
+  SIZE_NOTES = {
+    small: "built in · faster, simpler answers",
+    standard: "built in · recommended for most computers",
+    large: "built in · better answers, slower"
+  };
+});
+
 // src/core/query-planner.ts
 function createAnalystQueryPlanner(model) {
   return async (question) => {
@@ -173108,8 +173647,8 @@ var init_locations = __esm(() => {
 
 // src/workers/local-files/watch-hub.ts
 import { createRequire as createRequire8 } from "node:module";
-import { existsSync as existsSync94, readFileSync as readFileSync86 } from "node:fs";
-import { dirname as dirname95, join as join128 } from "node:path";
+import { existsSync as existsSync94, readFileSync as readFileSync87 } from "node:fs";
+import { dirname as dirname96, join as join129 } from "node:path";
 function watchIgnoreGlobs(context2, extra = []) {
   const home2 = context2.home;
   const globs = IGNORE_SEGMENTS.map((segment) => `**/${segment}`);
@@ -173308,7 +173847,7 @@ class WatchHub {
 }
 function readInotifyLimit() {
   try {
-    const value2 = Number.parseInt(readFileSync86("/proc/sys/fs/inotify/max_user_watches", "utf8").trim(), 10);
+    const value2 = Number.parseInt(readFileSync87("/proc/sys/fs/inotify/max_user_watches", "utf8").trim(), 10);
     return Number.isFinite(value2) && value2 > 0 ? value2 : undefined;
   } catch {
     return;
@@ -173324,11 +173863,11 @@ async function loadParcelWatcher(extraDirs = []) {
   }
   const dirs = [...extraDirs, ...process.env.OLYMPUS_NATIVE_MODULES_DIR ? [process.env.OLYMPUS_NATIVE_MODULES_DIR] : []];
   for (const dir of dirs) {
-    const candidate = join128(dir, "node_modules");
-    if (!existsSync94(join128(candidate, "@parcel", "watcher")))
+    const candidate = join129(dir, "node_modules");
+    if (!existsSync94(join129(candidate, "@parcel", "watcher")))
       continue;
     try {
-      const requireFrom = createRequire8(join128(dirname95(candidate), "package.json"));
+      const requireFrom = createRequire8(join129(dirname96(candidate), "package.json"));
       return unwrap(requireFrom(specifier));
     } catch (error2) {
       failures.push(error2 instanceof Error ? error2.message : String(error2));
@@ -173369,7 +173908,7 @@ var init_watch_hub = __esm(() => {
 // src/workers/local-files/connector.ts
 import { createHash as createHash91, randomUUID as randomUUID32 } from "node:crypto";
 import { realpathSync as realpathSync21, rmSync as rmSync37, readdirSync as readdirSync28 } from "node:fs";
-import { join as join129, posix as posix3 } from "node:path";
+import { join as join130, posix as posix3 } from "node:path";
 function nameAsOnDisk(scopeRoot, rel) {
   let dir = "";
   for (const part of rel.split("/")) {
@@ -173660,7 +174199,7 @@ function createLocalFilesSourceConnector(options) {
       }
     }
   }
-  const snapshotFile = (gen) => join129(options.watch.snapshotDir, `${options.connectorId}.${gen}.snap`);
+  const snapshotFile = (gen) => join130(options.watch.snapshotDir, `${options.connectorId}.${gen}.snap`);
   const pruneSnapshots = (keep) => {
     if (!options.watch)
       return;
@@ -173668,7 +174207,7 @@ function createLocalFilesSourceConnector(options) {
     try {
       for (const name of readdirSync28(options.watch.snapshotDir)) {
         if (name.startsWith(`${options.connectorId}.`) && name.endsWith(".snap") && !keepNames.has(name)) {
-          rmSync37(join129(options.watch.snapshotDir, name), { force: true });
+          rmSync37(join130(options.watch.snapshotDir, name), { force: true });
         }
       }
     } catch {}
@@ -176375,11 +176914,11 @@ var init_source_scheduler = __esm(() => {
 });
 
 // src/workers/local-files/mac-permissions.ts
-import { existsSync as existsSync95, mkdirSync as mkdirSync61, opendirSync, readFileSync as readFileSync87 } from "node:fs";
+import { existsSync as existsSync95, mkdirSync as mkdirSync61, opendirSync, readFileSync as readFileSync88 } from "node:fs";
 import { opendir } from "node:fs/promises";
-import { dirname as dirname96, join as join130 } from "node:path";
+import { dirname as dirname97, join as join131 } from "node:path";
 function folderAccessMemoryPath() {
-  return join130(olympusDataDir(), "local-files", "folder-access.json");
+  return join131(olympusDataDir(), "local-files", "folder-access.json");
 }
 function permissionHostKind(env) {
   if (env[ENGINE_HELPER_ENV])
@@ -176467,10 +177006,10 @@ class MacPermissions {
     if (!this.active)
       return;
     const tops = [
-      ["desktop", join130(this.home, "Desktop")],
-      ["documents", join130(this.home, "Documents")],
-      ["downloads", join130(this.home, "Downloads")],
-      ["icloud", join130(this.home, "Library", "Mobile Documents")]
+      ["desktop", join131(this.home, "Desktop")],
+      ["documents", join131(this.home, "Documents")],
+      ["downloads", join131(this.home, "Downloads")],
+      ["icloud", join131(this.home, "Library", "Mobile Documents")]
     ];
     for (const [kind, root] of tops) {
       if (isWithinScopePath(realPath, root))
@@ -176488,7 +177027,7 @@ class MacPermissions {
       return true;
     if (realPath === "/" || realPath === "/Volumes")
       return true;
-    return [join130(this.home, "Desktop"), join130(this.home, "Documents"), join130(this.home, "Downloads"), join130(this.home, "Library", "Mobile Documents")].some((top) => isWithinScopePath(top, realPath));
+    return [join131(this.home, "Desktop"), join131(this.home, "Documents"), join131(this.home, "Downloads"), join131(this.home, "Library", "Mobile Documents")].some((top) => isWithinScopePath(top, realPath));
   }
   nodeAccess(guard) {
     if (this.serverMode())
@@ -176539,7 +177078,7 @@ class MacPermissions {
     return { state: "needs_full_disk_access", message: MAC_ACCESS_COPY.fullDiskAccess(this.appName()), settings_url: FULL_DISK_ACCESS_URL };
   }
   hasFullDiskAccess() {
-    for (const path of [join130(this.home, "Library", "Safari"), join130(this.home, "Library", "Application Support", "com.apple.TCC")]) {
+    for (const path of [join131(this.home, "Library", "Safari"), join131(this.home, "Library", "Application Support", "com.apple.TCC")]) {
       try {
         this.listProtected(path);
         return true;
@@ -176593,7 +177132,7 @@ class MacPermissions {
     if (!this.memoryPath)
       return;
     try {
-      mkdirSync61(dirname96(this.memoryPath), { recursive: true, mode: 448 });
+      mkdirSync61(dirname97(this.memoryPath), { recursive: true, mode: 448 });
       writePrivateFileAtomicSync(this.memoryPath, `${JSON.stringify(memory, null, 2)}
 `);
     } catch {}
@@ -176604,7 +177143,7 @@ class MacPermissions {
     let loaded = {};
     if (this.memoryPath && existsSync95(this.memoryPath)) {
       try {
-        const parsed = JSON.parse(readFileSync87(this.memoryPath, "utf8"));
+        const parsed = JSON.parse(readFileSync88(this.memoryPath, "utf8"));
         if (parsed && typeof parsed === "object")
           loaded = parsed;
       } catch {
@@ -186427,7 +186966,7 @@ var init_agent = __esm(() => {
 
 // src/workers/archive-import/removal.ts
 import { existsSync as existsSync97 } from "node:fs";
-import { join as join131 } from "node:path";
+import { join as join132 } from "node:path";
 function requestArchiveRemoval(state, archiveId, now = () => new Date) {
   return state.update(archiveId, (record8) => {
     if (record8.status === "removing" || record8.target)
@@ -186486,7 +187025,7 @@ async function runArchiveRemoval(options) {
   counts.extraction_ledgers_cleared += runForgetAccountScopeSteps({ source_id: ARCHIVE_IMPORTS_SOURCE_ID2, slot: "1", corpus_ids: corpusIds }, [accountScope], { env: lane.env }, { dryRun: false }).length;
   counts.media_bindings_removed += options.media?.forgetArchive(accountScope) ?? 0;
   const withdrawn = lane.ledger.withdrawAccountScope(provider, accountScope);
-  removeFileDurablySync(join131(embeddingPrefilterDirectory(embeddingPrefilterInstallLedgerPath(resolveClassificationLedgerPath(lane.env))), "weights.json"));
+  removeFileDurablySync(join132(embeddingPrefilterDirectory(embeddingPrefilterInstallLedgerPath(resolveClassificationLedgerPath(lane.env))), "weights.json"));
   counts.decisions_removed += withdrawn.items;
   counts.copies_hidden += withdrawn.copies;
   counts.questions_removed += deleteJudgeQuestions(lane, provider, accountScope);
@@ -188291,7 +188830,7 @@ var init_open_target2 = __esm(() => {
 // src/workers/local-files/volume-identity.ts
 import { createHash as createHash98 } from "node:crypto";
 import { execFileSync as execFileSync6 } from "node:child_process";
-import { existsSync as existsSync98, lstatSync as lstatSync50, readFileSync as readFileSync88, readdirSync as readdirSync29, realpathSync as realpathSync26 } from "node:fs";
+import { existsSync as existsSync98, lstatSync as lstatSync50, readFileSync as readFileSync89, readdirSync as readdirSync29, realpathSync as realpathSync26 } from "node:fs";
 import { homedir as homedir46 } from "node:os";
 
 class VolumeResolver {
@@ -188461,7 +189000,7 @@ function normalizeNetworkSource(source) {
 function defaultReadMounts(platform3) {
   if (platform3 === "darwin")
     return execFileSync6("/sbin/mount", [], { encoding: "utf8", timeout: 5000 });
-  return readFileSync88("/proc/self/mountinfo", "utf8");
+  return readFileSync89("/proc/self/mountinfo", "utf8");
 }
 function defaultDiskutilPlist(mountPoint) {
   try {
@@ -188846,9 +189385,9 @@ var init_source_scope_browser = __esm(() => {
 import { spawn as spawn13 } from "node:child_process";
 import { existsSync as existsSync99 } from "node:fs";
 import { homedir as homedir47 } from "node:os";
-import { join as join132 } from "node:path";
+import { join as join133 } from "node:path";
 function helperAppPathForHome(home2 = homedir47()) {
-  return join132(home2, "Library", "Application Support", "Olympus", ENGINE_HELPER_APP_NAME);
+  return join133(home2, "Library", "Application Support", "Olympus", ENGINE_HELPER_APP_NAME);
 }
 function revealHelperAndOpenFullDiskAccess(deps = {}) {
   const run2 = deps.run ?? ((command, args) => {
@@ -188866,7 +189405,7 @@ var init_mac_settings = __esm(() => {
 // src/workers/local-files/scope-browser.ts
 import { lstatSync as lstatSync51, readdirSync as readdirSync30, realpathSync as realpathSync27 } from "node:fs";
 import { homedir as homedir48 } from "node:os";
-import { join as join133 } from "node:path";
+import { join as join134 } from "node:path";
 function safeRealpath(path) {
   try {
     return realpathSync27.native(path);
@@ -188933,7 +189472,7 @@ function localFilesListing(options) {
     }
     const offered = (entry) => !entry.isSymbolicLink() && entry.isDirectory();
     return entries.filter(offered).map((entry) => {
-      const childReal = join133(realPath, entry.name);
+      const childReal = join134(realPath, entry.name);
       const guard = permissions.guardOf(childReal, volumes.volumeOf(childReal));
       const access = guard && guard.root === childReal ? permissions.nodeAccess(guard) : undefined;
       return node(scopePathOfRealPath(volumes, childReal), entry.name, parentKey2, access);
@@ -190466,7 +191005,7 @@ var init_tier_visibility = __esm(() => {
 
 // src/core/source-account-migration.ts
 import { linkSync as linkSync5, lstatSync as lstatSync52, mkdirSync as mkdirSync62, readdirSync as readdirSync31, realpathSync as realpathSync28, renameSync as renameSync21, rmdirSync as rmdirSync8, statSync as statSync42, unlinkSync as unlinkSync4 } from "node:fs";
-import { basename as basename20, dirname as dirname97, isAbsolute as isAbsolute37, join as join134, relative as relative16, resolve as resolve28, sep as sep19 } from "node:path";
+import { basename as basename20, dirname as dirname98, isAbsolute as isAbsolute37, join as join135, relative as relative16, resolve as resolve28, sep as sep19 } from "node:path";
 function accountFolderMigrationEnabled(env = process.env) {
   const value2 = env[MIGRATE_ACCOUNT_FOLDERS_ENV]?.trim().toLowerCase() ?? "";
   return value2 === "" || MIGRATION_ON.includes(value2);
@@ -190493,8 +191032,8 @@ function candidates(sourceId, slot, env) {
     }
   }
   if (sourceId === TELEGRAM_SOURCE_ID) {
-    const legacyDir = dirname97(legacyTelegramSessionBase(env));
-    const folderDir = dirname97(accountSessionPath(account, env));
+    const legacyDir = dirname98(legacyTelegramSessionBase(env));
+    const folderDir = dirname98(accountSessionPath(account, env));
     const own3 = basename20(legacyTelegramSessionBase(env));
     const staged = new Set;
     for (const name of listNames2(legacyDir))
@@ -190506,7 +191045,7 @@ function candidates(sourceId, slot, env) {
         staged.add(legacyName);
     }
     for (const name of [...staged].sort()) {
-      found.push({ role: "raw", from: join134(legacyDir, name), to: join134(folderDir, folderNameOfStagedTelegramLogin(name, env)), kind: "file", db: false });
+      found.push({ role: "raw", from: join135(legacyDir, name), to: join135(folderDir, folderNameOfStagedTelegramLogin(name, env)), kind: "file", db: false });
     }
   }
   return found;
@@ -190554,23 +191093,23 @@ function relPath(ctx, path) {
 }
 function absPath(ctx, rel) {
   if (!rel.startsWith("@"))
-    return join134(ctx.root, ...rel.split("/"));
+    return join135(ctx.root, ...rel.split("/"));
   const slash = rel.indexOf("/");
   const tag = rel.slice(1, slash < 0 ? undefined : slash);
   const root = ctx.roots.find((candidate) => candidate.tag === tag && tag !== "")?.root;
   if (root === undefined || slash < 0)
     throw new TypeError(`A migration path names a folder this build does not know (${JSON.stringify(tag)}).`);
-  return join134(root, ...rel.slice(slash + 1).split("/"));
+  return join135(root, ...rel.slice(slash + 1).split("/"));
 }
 function moveWithoutReplacing(from, to, kind) {
   if (kind === "dir") {
     renameSync21(from, to);
-    syncFolder(dirname97(to));
-    syncFolder(dirname97(from));
+    syncFolder(dirname98(to));
+    syncFolder(dirname98(from));
     return;
   }
   (__accountMigrationTestHooks.link ?? linkSync5)(from, to);
-  syncFolder(dirname97(to));
+  syncFolder(dirname98(to));
   unlinkSync4(from);
 }
 function errorCode2(error2) {
@@ -190610,21 +191149,21 @@ function nearRealPath(path) {
   let near = resolve28(path);
   for (;; ) {
     rest.unshift(basename20(near));
-    const up = dirname97(near);
+    const up = dirname98(near);
     if (up === near)
       return resolve28(path);
     near = up;
     try {
-      return join134(realpathSync28(near), ...rest);
+      return join135(realpathSync28(near), ...rest);
     } catch {}
   }
 }
 function destinationIsOurs(ctx, destination) {
-  const parent = dirname97(destination);
+  const parent = dirname98(destination);
   const at = rootOf(ctx, parent);
   if (!at)
     return false;
-  return nearRealPath(parent) === join134(nearRealPath(at.root), at.below);
+  return nearRealPath(parent) === join135(nearRealPath(at.root), at.below);
 }
 function nearestExisting(path) {
   let near = resolve28(path);
@@ -190633,7 +191172,7 @@ function nearestExisting(path) {
       statSync42(near);
       return near;
     } catch {
-      const up = dirname97(near);
+      const up = dirname98(near);
       if (up === near)
         return near;
       near = up;
@@ -190793,7 +191332,7 @@ function syncFolderChains(ctx, folders) {
     let current2 = realpathSync28(at.root);
     chain.add(current2);
     for (const part of at.below.split(sep19).filter(Boolean)) {
-      current2 = join134(current2, part);
+      current2 = join135(current2, part);
       chain.add(current2);
     }
   }
@@ -190807,13 +191346,13 @@ function makeFolders(ctx, moves) {
     const real = realpathSync28(ctx.root);
     const destinations = new Set;
     for (const move of moves) {
-      const destination = dirname97(absPath(ctx, move.to));
+      const destination = dirname98(absPath(ctx, move.to));
       if (!destinationIsOurs(ctx, absPath(ctx, move.to)))
         throw Object.assign(new Error("link"), { code: "ELOOP" });
       destinations.add(destination);
       let current2 = real;
       for (const part of relative16(ctx.root, destination).split(sep19).filter(Boolean)) {
-        current2 = join134(current2, part);
+        current2 = join135(current2, part);
         const found = lookAt(current2);
         if (found.kind === "dir")
           continue;
@@ -190832,8 +191371,8 @@ function makeFolders(ctx, moves) {
 function syncMoveFolders(ctx, moves) {
   const folders = new Set;
   for (const move of moves) {
-    folders.add(dirname97(absPath(ctx, move.from)));
-    folders.add(dirname97(absPath(ctx, move.to)));
+    folders.add(dirname98(absPath(ctx, move.from)));
+    folders.add(dirname98(absPath(ctx, move.to)));
   }
   try {
     for (const folder of folders) {
@@ -190848,7 +191387,7 @@ function removeEmptyFolders(ctx, moves) {
   const stop = accountFoldersRoot(ctx.env);
   const folders = new Set;
   for (const move of moves) {
-    for (let folder = dirname97(absPath(ctx, move.to));folder === stop || folder.startsWith(`${stop}${sep19}`); folder = dirname97(folder)) {
+    for (let folder = dirname98(absPath(ctx, move.to));folder === stop || folder.startsWith(`${stop}${sep19}`); folder = dirname98(folder)) {
       folders.add(folder);
       if (folder === stop)
         break;
@@ -190875,7 +191414,7 @@ function moveOne(ctx, move, direction) {
       return "there";
     if (move.kind === "file" && source.kind === "file" && target.kind === "file" && source.dev === target.dev && source.ino === target.ino && (move.ino === "" || String(source.ino) === move.ino)) {
       try {
-        syncFolder(dirname97(to));
+        syncFolder(dirname98(to));
         unlinkSync4(from);
       } catch (error2) {
         throw new MoveFault("failed", "move_failed", `${name} could not be moved (${errorCode2(error2)}).`);
@@ -190985,7 +191524,7 @@ function revert(ctx, sourceId, slot, migration, fault) {
   }
   checkpoint("revert");
   try {
-    syncFolderChains(ctx, moves.map((move) => dirname97(absPath(ctx, move.from))));
+    syncFolderChains(ctx, moves.map((move) => dirname98(absPath(ctx, move.from))));
   } catch (error2) {
     if (error2 instanceof AccountMigrationKilled)
       throw error2;
@@ -191126,7 +191665,7 @@ function holdCaptureLocks(ctx, sourceId, slot) {
       continue;
     let lock;
     try {
-      lock = (__accountMigrationTestHooks.captureLock ?? tryHoldFileFlock)(join134(dir, name));
+      lock = (__accountMigrationTestHooks.captureLock ?? tryHoldFileFlock)(join135(dir, name));
     } catch {
       return giveBack(skip("unreadable", `Its capture lock (${name}) cannot be taken.`));
     }
@@ -191144,7 +191683,7 @@ function removeEmptiedLegacyFolders(ctx, sourceId, slot) {
   const folders = new Set;
   try {
     for (const candidate of candidates(sourceId, slot, ctx.env)) {
-      const folder = resolve28(dirname97(candidate.from));
+      const folder = resolve28(dirname98(candidate.from));
       if (!rootFolders.has(folder) && rootOf(ctx, folder))
         folders.add(folder);
     }
@@ -191156,7 +191695,7 @@ function removeEmptiedLegacyFolders(ctx, sourceId, slot) {
       continue;
     try {
       rmdirSync8(folder);
-      syncFolder(dirname97(folder));
+      syncFolder(dirname98(folder));
     } catch {}
   }
 }
@@ -192319,12 +192858,12 @@ var init_source_scope_runtime = __esm(() => {
 });
 
 // src/workers/google-connectors/gmail-scope-browser.ts
-import { dirname as dirname98, join as join135 } from "node:path";
+import { dirname as dirname99, join as join136 } from "node:path";
 function createGmailPickerRequestBudget(options) {
   return new GoogleDailyRequestBudget({
     provider: "Gmail mail picker",
     dailyRequestBudget: GMAIL_PICKER_DAILY_REQUEST_BUDGET,
-    statePath: join135(dirname98(options.laneStatePath), "gmail-picker-daily-request-budget.json"),
+    statePath: join136(dirname99(options.laneStatePath), "gmail-picker-daily-request-budget.json"),
     ...options.now ? { now: options.now } : {}
   });
 }
@@ -193090,8 +193629,8 @@ var init_installed_tier_classification = __esm(() => {
 
 // src/workers/classification/sniffer-resolver.ts
 import { createHash as createHash101 } from "node:crypto";
-import { mkdirSync as mkdirSync63, readFileSync as readFileSync89 } from "node:fs";
-import { dirname as dirname99 } from "node:path";
+import { mkdirSync as mkdirSync63, readFileSync as readFileSync90 } from "node:fs";
+import { dirname as dirname100 } from "node:path";
 
 class SnifferCallBudget {
   maxCallsPerDay;
@@ -193107,7 +193646,7 @@ class SnifferCallBudget {
     this.statePath = options.statePath;
     if (this.statePath) {
       try {
-        const saved = JSON.parse(readFileSync89(this.statePath, "utf8"));
+        const saved = JSON.parse(readFileSync90(this.statePath, "utf8"));
         if (typeof saved.day === "string" && typeof saved.used === "number" && Number.isFinite(saved.used)) {
           this.day = saved.day;
           this.used = Math.max(0, Math.floor(saved.used));
@@ -193128,7 +193667,7 @@ class SnifferCallBudget {
     if (!this.statePath)
       return;
     try {
-      mkdirSync63(dirname99(this.statePath), { recursive: true, mode: 448 });
+      mkdirSync63(dirname100(this.statePath), { recursive: true, mode: 448 });
       writePrivateFileAtomicSync(this.statePath, `${JSON.stringify({ day: this.day, used: this.used })}
 `);
     } catch {}
@@ -197614,7 +198153,7 @@ async function askAnonymously(input, deps) {
     return { ok: false, code: "invalid_params", message: CONSULT_ASK_MESSAGES.levelInvalid };
   if (input.cleanup !== undefined && !CONSULT_ASK_CLEANUPS.includes(input.cleanup))
     return { ok: false, code: "invalid_params", message: CONSULT_ASK_MESSAGES.cleanupInvalid };
-  if (input.model !== undefined && !validModelId(input.model))
+  if (input.model !== undefined && !validModelId2(input.model))
     return { ok: false, code: "invalid_params", message: CONSULT_ASK_MESSAGES.modelInvalid };
   if (input.model !== undefined && input.callerProvider !== undefined && consultModelProvider(input.model) === input.callerProvider) {
     return { ok: false, code: "model_same_provider", message: CONSULT_ASK_MESSAGES.modelSameProvider };
@@ -197817,7 +198356,7 @@ async function askAnonymously(input, deps) {
     ...input.callerProvider === "other" ? { providerNote: CONSULT_ASK_MESSAGES.providerUnknown } : {}
   };
 }
-function validModelId(value2) {
+function validModelId2(value2) {
   return typeof value2 === "string" && value2.trim() === value2 && value2.length > 0 && value2.length <= MAX_MODEL_ID_CHARS2 && !/[\u0000-\u001F\u007F\s]/.test(value2);
 }
 var CONSULT_ASK_MAX_CHARS = 4000, CONSULT_ASK_LEVELS, CONSULT_ASK_CLEANUPS, CONSULT_ASK_MESSAGES, CONSULT_GATE_CARRIED, CONSULT_GATE_RETRY_REASONS, MAX_MODEL_ID_CHARS2 = 128;
@@ -214753,7 +215292,7 @@ __export(exports_setup_backend, {
   privacyRevision: () => privacyRevision,
   createChatGptSetupBackend: () => createChatGptSetupBackend
 });
-import { readFileSync as readFileSync90 } from "node:fs";
+import { readFileSync as readFileSync91 } from "node:fs";
 import { createHash as createHash104 } from "node:crypto";
 function privacyRuleView(rule) {
   if (rule.kind === "sender" && rule.value)
@@ -214784,7 +215323,7 @@ function privacyRevision(profile) {
 function createChatGptSetupBackend(options) {
   let policy = options.sovereignty.config;
   const privacySettings = () => {
-    const current2 = options.sovereignty.source === "file" && options.sovereignty.path ? validateSovereigntyConfig(JSON.parse(readFileSync90(options.sovereignty.path, "utf8"))) : policy;
+    const current2 = options.sovereignty.source === "file" && options.sovereignty.path ? validateSovereigntyConfig(JSON.parse(readFileSync91(options.sovereignty.path, "utf8"))) : policy;
     policy = current2;
     const policyRevision = createHash104("sha256").update(JSON.stringify(current2)).digest("hex").slice(0, 16);
     if (isPendingPrivacyPolicy(current2))
@@ -215014,7 +215553,7 @@ var init_setup_backend = __esm(() => {
 
 // src/core/consult-settings-writer.ts
 import { chmodSync as chmodSync37, lstatSync as lstatSync54, mkdirSync as mkdirSync64, statSync as statSync44 } from "node:fs";
-import { dirname as dirname100, isAbsolute as isAbsolute38 } from "node:path";
+import { dirname as dirname101, isAbsolute as isAbsolute38 } from "node:path";
 function writeConsultSettings(input, location = {}) {
   let path;
   try {
@@ -215042,7 +215581,7 @@ function writeConsultSettings(input, location = {}) {
   });
   if (!candidate || !Number.isSafeInteger(input.expectedRevision) || input.expectedRevision < 0)
     return { ok: false, reason: "invalid_input" };
-  const custody = ensureSettingsDirectory(dirname100(path));
+  const custody = ensureSettingsDirectory(dirname101(path));
   if (custody !== "ok")
     return { ok: false, reason: custody };
   let published = false;
@@ -215099,7 +215638,7 @@ function ensureSettingsDirectory(directory) {
     if (error2?.code !== "ENOENT")
       return "directory_unavailable";
     try {
-      statSync44(dirname100(directory));
+      statSync44(dirname101(directory));
     } catch {
       return "home_missing";
     }
@@ -215142,7 +215681,7 @@ __export(exports_dashboard_consult, {
   DASHBOARD_ZKAPI_DEFAULT_MODEL: () => DASHBOARD_ZKAPI_DEFAULT_MODEL,
   DASHBOARD_ZKAPI_API_KEY_ENV: () => DASHBOARD_ZKAPI_API_KEY_ENV
 });
-import { delimiter as delimiter9, dirname as dirname101 } from "node:path";
+import { delimiter as delimiter9, dirname as dirname102 } from "node:path";
 function acknowledgementsCurrent(acknowledgements) {
   return acknowledgements?.version === ZKAPI_RISK_ACKNOWLEDGEMENTS_VERSION && ACKNOWLEDGEMENT_IDS.every((id) => acknowledgements.accepted.includes(id));
 }
@@ -215191,7 +215730,7 @@ function createDashboardConsultAdapter(options) {
         return { tool: entry.tool, label: entry.label, source: "outdated", installedVersion: entry.outdatedVersion, version: entry.version };
       }
       const system = entry.installed ? undefined : resolveExecutable(entry.tool, undefined, env);
-      const executable = entry.installed ? entry.executable : system && !(env.PATH ?? "").split(delimiter9).includes(dirname101(system)) ? system : undefined;
+      const executable = entry.installed ? entry.executable : system && !(env.PATH ?? "").split(delimiter9).includes(dirname102(system)) ? system : undefined;
       return {
         tool: entry.tool,
         label: entry.label,
@@ -216444,10 +216983,10 @@ __export(exports_server2, {
   accountFromDropboxCredentialHandle: () => accountFromDropboxCredentialHandle,
   accountCheckedXBookmarksRuntime: () => accountCheckedXBookmarksRuntime
 });
-import { release as release2 } from "node:os";
+import { release as release2, totalmem as totalmem4 } from "node:os";
 import { execFile as execFile4 } from "node:child_process";
 import { existsSync as existsSync104 } from "node:fs";
-import { dirname as dirname102, isAbsolute as isAbsolute39, join as join136 } from "node:path";
+import { dirname as dirname103, isAbsolute as isAbsolute39, join as join137 } from "node:path";
 function createWorkerMessagingCaptureOwnership(options) {
   const env = options.env ?? process.env;
   const nativeOwners = {
@@ -217616,6 +218155,11 @@ async function main() {
     resolveSecretRefValueSync: (secretRef, env) => resolveSecretRefValueSync(secretRef, { env })
   });
   const localModelActivity = createLocalModelActivity();
+  if (sovereigntyEngine.source === "file" && sovereigntyEngine.path) {
+    const builtInChoice = builtInModelEnvValue(process.env, readModelChoices(sovereigntyEngine.path));
+    if (builtInChoice)
+      process.env[BUILT_IN_ANALYST_MODEL_ENV] = builtInChoice;
+  }
   const workerBuiltInModel = createWorkerSharedBuiltInModel(process.env);
   const answerBuiltInModel = workerBuiltInModel ? localModelActivity.track("built_in", workerBuiltInModel.model) : undefined;
   registerBuiltInPrivateModel(workerBuiltInModel ? { cacheModelId: `${workerBuiltInModel.model.spec.modelId}:${workerBuiltInModel.model.spec.revision}:${workerBuiltInModel.model.spec.file.sha256}`, model: workerBuiltInModel.model, available: workerBuiltInModel.available, startIfIdle: workerBuiltInModel.startIfIdle } : undefined);
@@ -217788,6 +218332,56 @@ async function main() {
       return view3;
     return { ...view3, ready: false, cards: view3.cards.map((card) => card.state === "applying" ? { ...card, state: "needs_attention", detail: "Key saved. Ask your agent to restart the managed Olympus worker to apply it; this foreground worker cannot restart itself." } : card) };
   };
+  const modelChoices = createModelChoicesBackend({
+    ...sovereigntyEngine.source === "file" && sovereigntyEngine.path ? { policyPath: sovereigntyEngine.path } : {},
+    config: () => sovereigntyEngine.config,
+    builtInAnswers: async () => workerBuiltInModel !== undefined && modelSetup.getStatus().cards.some((card) => card.id === "local") && (() => {
+      try {
+        const members = sovereigntyEngine.resolveAnalystPool({ trustDomain: "secure_local" }).members;
+        return builtInBacksPrivateAnalyst(LOCAL_PROFILE_ID, workerBuiltInModel?.model.status().state, members, new Set(members.map((member) => member.id)));
+      } catch {
+        return false;
+      }
+    })() && !await probeLocalAnalystService(olympusConfig),
+    builtInSize: () => workerBuiltInModel?.model.spec.sizeClass,
+    totalMemoryBytes: totalmem4(),
+    zkapi: {
+      available: () => sovereigntyEngine.config.modelProfiles["zkapi-consult"] !== undefined,
+      strongest: CONSULT_CHATGPT_FRONTIER_MODEL_DEFAULT,
+      read: () => {
+        const read = readConsultSettings3();
+        return read.state === "valid" ? read.settings.chatgptFrontierModel : undefined;
+      },
+      write: async (model) => {
+        if (!saveZkapiModel)
+          return { ok: false, message: "Olympus is still starting. Try again in a moment." };
+        return saveZkapiModel(model);
+      }
+    },
+    venice: {
+      strongest: async () => {
+        const apiKey = bootModelCredentials.get(VENICE_PROFILE_ID);
+        const profile = sovereigntyEngine.config.modelProfiles[VENICE_PROFILE_ID];
+        if (!apiKey || !profile)
+          return;
+        const baseUrl = "baseUrl" in profile && profile.baseUrl || "https://api.venice.ai/api/v1";
+        return resolveVeniceStrongest({ apiKey, baseUrl, category: createVenicePrivacyCategoryResolver({ apiKey, baseUrl }) });
+      },
+      catalog: async () => {
+        const apiKey = bootModelCredentials.get(VENICE_PROFILE_ID);
+        const profile = sovereigntyEngine.config.modelProfiles[VENICE_PROFILE_ID];
+        if (!apiKey || !profile)
+          return {};
+        const baseUrl = "baseUrl" in profile && profile.baseUrl || "https://api.venice.ai/api/v1";
+        await createVenicePrivacyCategoryResolver({ apiKey, baseUrl })("model" in profile && typeof profile.model === "string" ? profile.model : "kimi-k3").catch(() => {
+          return;
+        });
+        return readVeniceTextCatalogModels();
+      }
+    },
+    requestReload: () => requestModelReload()
+  });
+  let saveZkapiModel;
   const connectModelKey = async (provider, apiKey) => {
     if (provider === "gemini")
       await connectGeminiApiKey({ apiKey });
@@ -220230,6 +220824,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
             return [...logs.stdout, ...logs.stderr];
           })() : []
         }),
+        modelChoices,
         judgeSetup: createJudgeSetup({
           spending: judgeSpending,
           cloud: cloudJudgeRuntime,
@@ -220484,7 +221079,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
   const sourceAnswerJobSweep = setInterval(() => sourceAnswerJobs.sweep(), 30000);
   sourceAnswerJobSweep.unref?.();
   const { PrivateAnswerJobs: PrivateAnswerJobs2, createPrivateAnswerHandler: createPrivateAnswerHandler2, withPrivateAnswerRoute: withPrivateAnswerRoute2 } = await Promise.resolve().then(() => (init_private_answer_jobs(), exports_private_answer_jobs));
-  const { readConsultSettings: readConsultSettings2, DEFAULT_CONSULT_SETTINGS: DEFAULT_CONSULT_SETTINGS2, consultStandardBinding: consultStandardBinding2 } = await Promise.resolve().then(() => (init_consult_settings(), exports_consult_settings));
+  const { readConsultSettings: readConsultSettings3, DEFAULT_CONSULT_SETTINGS: DEFAULT_CONSULT_SETTINGS2, consultStandardBinding: consultStandardBinding2 } = await Promise.resolve().then(() => (init_consult_settings(), exports_consult_settings));
   const { PrivateQuestionJobs: PrivateQuestionJobs2 } = await Promise.resolve().then(() => (init_private_question_jobs(), exports_private_question_jobs));
   const { consultAskLevelFromSettings: consultAskLevelFromSettings2, consultAskLevelOrSaved: consultAskLevelOrSaved2 } = await Promise.resolve().then(() => (init_consult_ask(), exports_consult_ask));
   const { createBuiltInPrivateAnswerModel: createBuiltInPrivateAnswerModel2, embeddingPanelRelevance: embeddingPanelRelevance2 } = await Promise.resolve().then(() => (init_private_answer_model(), exports_private_answer_model));
@@ -220514,7 +221109,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
   });
   let askAnonymouslyNow;
   const localAnonymousAsk = (input) => {
-    return askWithAnonymousInbox({ ...input, level: consultAskLevelOrSaved2(input.level, readConsultSettings2()) }, {
+    return askWithAnonymousInbox({ ...input, level: consultAskLevelOrSaved2(input.level, readConsultSettings3()) }, {
       store: waitingQuestionStore,
       connectionId: "@local:You",
       isActive: connectionActive,
@@ -220654,7 +221249,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
       stillAuthorized: input.stillAuthorized
     }, { deliveredToPanel: true, store: waitingQuestionStore, connectionId: "@local:ChatGPT", ask: askAnonymouslyNow }) : Promise.resolve({ ok: false, code: "transport_unavailable", message: "Anonymous answers are not set up on this computer." }),
     choice: () => {
-      const read = readConsultSettings2();
+      const read = readConsultSettings3();
       const settings = read.state === "valid" ? read.settings : DEFAULT_CONSULT_SETTINGS2;
       const standard = consultStandardBinding2(settings);
       return { level: consultAskLevelFromSettings2(settings.level), cleanup: standard.mode, customInstruction: standard.mode === "custom" };
@@ -220682,7 +221277,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     };
     const memory = defaultConsultMemoryProbe2();
     const { consultChatgptFrontierModel: consultChatgptFrontierModel2, consultChatgptModelUnavailableMessage: consultChatgptModelUnavailableMessage2 } = await Promise.resolve().then(() => (init_consult_settings(), exports_consult_settings));
-    const chatgptModel = () => consultChatgptFrontierModel2(readConsultSettings2().settings);
+    const chatgptModel = () => consultChatgptFrontierModel2(readConsultSettings3().settings);
     const transport = (model) => resolveZkapiConsultTransport2(sovereigntyEngine.config.modelProfiles, (secretRef) => resolveSecretRefValueSync(secretRef, { env: environmentWithWorkerSetupEnv() }), { env: process.env, model });
     zkapiDailyLimitNow = () => {
       const route = resolveZkapiConsultTransport2(sovereigntyEngine.config.modelProfiles, () => {
@@ -220721,7 +221316,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
       const { CONSULT_OWN_WRITER_DEFAULT_TIMEOUT_MS: CONSULT_OWN_WRITER_DEFAULT_TIMEOUT_MS2 } = await Promise.resolve().then(() => (init_consult_settings(), exports_consult_settings));
       const admittedAsk = async (input) => {
         const result = await askAnonymously2(input, {
-          settings: () => readConsultSettings2(),
+          settings: () => readConsultSettings3(),
           prepare: (writerInput, writer, level, signal) => runChosenWriter(writerInput, {
             kill: signal ?? new AbortController().signal,
             deadlineMs: writer ? writer.timeoutMs ?? CONSULT_OWN_WRITER_DEFAULT_TIMEOUT_MS2 : CONSULT_WRITER_LIMITS2.deadlineMs,
@@ -220890,9 +221485,9 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     env: process.env,
     chatgptModelProblem: () => chatgptModelProblem,
     writerCheck: async ({ onCase }) => {
-      const { readConsultSettings: readConsultSettings3, CONSULT_OWN_WRITER_DEFAULT_TIMEOUT_MS: CONSULT_OWN_WRITER_DEFAULT_TIMEOUT_MS2 } = await Promise.resolve().then(() => (init_consult_settings(), exports_consult_settings));
+      const { readConsultSettings: readConsultSettings4, CONSULT_OWN_WRITER_DEFAULT_TIMEOUT_MS: CONSULT_OWN_WRITER_DEFAULT_TIMEOUT_MS2 } = await Promise.resolve().then(() => (init_consult_settings(), exports_consult_settings));
       const { checkOwnConsultWriter: checkOwnConsultWriter2 } = await Promise.resolve().then(() => (init_consult_writer_check(), exports_consult_writer_check));
-      const read = readConsultSettings3();
+      const read = readConsultSettings4();
       const choice = read.state === "valid" ? read.settings.writer : undefined;
       if (read.state !== "valid" || !choice)
         throw new Error("Choose your model and save it first.");
@@ -220911,6 +221506,12 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
       });
     }
   });
+  saveZkapiModel = async (model) => {
+    const current2 = readConsultSettings3();
+    const revision = current2.state === "valid" ? current2.settings.revision : 0;
+    const result = await dashboardConsult.saveWriter({ revision, chatgpt_frontier_model: model ?? null });
+    return result.ok ? { ok: true } : { ok: false, message: "message" in result && typeof result.message === "string" ? result.message : "Olympus could not save the zkAPI model." };
+  };
   const engineHosted = process.env.OLYMPUS_ENGINE_HOST === "1";
   const chatgptAnswerModelAvailable = () => {
     if (!sourceAnswer || !getModelSetup().ready)
@@ -221030,7 +221631,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
   const sharedRemoteMcpOptions = {
     ...remoteAgentOptions,
     anonymousAnswersEnabled: () => {
-      const read = readConsultSettings2();
+      const read = readConsultSettings3();
       return read.state === "valid" && read.settings.enabled;
     },
     ...remoteEvidenceSearch ? { search: { evidenceSearch: remoteEvidenceSearch, answerModelAvailable: chatgptAnswerModelAvailable } } : {}
@@ -221196,7 +221797,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     } : {},
     ...fileExtractionRuntime ? { extractionState: (identity2) => fileExtractionRuntime.jobs.itemExtractionState(identity2) } : {},
     ownerContext: privacyOwnerWords,
-    budgetStatePath: join136(dirname102(resolveClassificationLedgerPath(process.env)), "tier-sniffer-budget.json"),
+    budgetStatePath: join137(dirname103(resolveClassificationLedgerPath(process.env)), "tier-sniffer-budget.json"),
     intervalMs: snifferEnv.intervalMs,
     embeddingPrefilterEnabled: () => snifferEnv.embeddingPrefilterEnabled,
     ...snifferEnv.maxCallsPerPass !== undefined ? { maxCallsPerPass: snifferEnv.maxCallsPerPass } : {},
@@ -221270,6 +221871,10 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     exit: (code) => process.exit(code)
   });
   modelReloadInstalled = true;
+  modelChoices.refreshStrongest().catch(() => false);
+  setInterval(() => {
+    modelChoices.refreshStrongest().catch(() => false);
+  }, 86400000).unref();
   console.log(socketPath ? `Olympus private email source worker listening on owner Unix socket` : `Olympus private email source worker listening on http://${hostname2}:${port}/v1`);
   console.log(sourceIndexLaneStartupLog("Dropbox connector-store storage", dropboxConnectorStoreLane));
   console.log(sourceIndexLaneStartupLog("WhatsApp connector-store storage", whatsappConnectorStoreLane));
@@ -221936,6 +222541,9 @@ var init_server5 = __esm(async () => {
   init_analyst_openclaw_infer();
   init_analyst_venice();
   init_venice_model_catalog();
+  init_model_choices();
+  init_consult_settings();
+  init_model_choices_backend();
   init_venice_models();
   init_analyst_openai();
   init_query_planner();
@@ -222534,7 +223142,7 @@ init_config();
 init_dashboard_opening();
 init_open_targets();
 import { randomBytes as randomBytes33 } from "node:crypto";
-import { existsSync as existsSync105, readFileSync as readFileSync91, openSync as openSync31, closeSync as closeSync32, writeSync as writeSync9 } from "node:fs";
+import { existsSync as existsSync105, readFileSync as readFileSync92, openSync as openSync31, closeSync as closeSync32, writeSync as writeSync9 } from "node:fs";
 import { createInterface as createInterface3 } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
 import { resolve as resolve29 } from "node:path";
@@ -225066,11 +225674,11 @@ async function runZkapiTestWriter(rest) {
     flags[name] = value2;
     index += 1;
   }
-  const { readConsultSettings: readConsultSettings2, parseConsultWriterChoice: parseConsultWriterChoice2, CONSULT_OWN_WRITER_DEFAULT_TIMEOUT_MS: CONSULT_OWN_WRITER_DEFAULT_TIMEOUT_MS2 } = await Promise.resolve().then(() => (init_consult_settings(), exports_consult_settings));
+  const { readConsultSettings: readConsultSettings3, parseConsultWriterChoice: parseConsultWriterChoice2, CONSULT_OWN_WRITER_DEFAULT_TIMEOUT_MS: CONSULT_OWN_WRITER_DEFAULT_TIMEOUT_MS2 } = await Promise.resolve().then(() => (init_consult_settings(), exports_consult_settings));
   const { checkOwnConsultWriter: checkOwnConsultWriter2 } = await Promise.resolve().then(() => (init_consult_writer_check(), exports_consult_writer_check));
   const { resolveSecretRefValueSync: resolveSecretRefValueSync2 } = await Promise.resolve().then(() => (init_secret_store(), exports_secret_store));
   const { environmentWithWorkerSetupEnv: environmentWithWorkerSetupEnv2 } = await Promise.resolve().then(() => (init_worker_auth(), exports_worker_auth));
-  const read = readConsultSettings2();
+  const read = readConsultSettings3();
   const saved = read.state === "valid" ? read.settings : undefined;
   const named = flags["base-url"] !== undefined || flags.model !== undefined;
   const choice = named ? parseConsultWriterChoice2({
@@ -225685,7 +226293,7 @@ function parseArgs(operation, args) {
     }
   }
   if (operation.cliHints.stdin && params[operation.cliHints.stdin] === undefined && !process.stdin.isTTY) {
-    params[operation.cliHints.stdin] = readFileSync91("/dev/stdin", "utf8");
+    params[operation.cliHints.stdin] = readFileSync92("/dev/stdin", "utf8");
   }
   return params;
 }
@@ -226040,7 +226648,7 @@ function parseOwnerTierOverrideArgs(args) {
     throw new OperationError("invalid_params", "Owner tier override requires --reason <string>.");
   let raw;
   try {
-    raw = readFileSync91(resolve29(input2), "utf8");
+    raw = readFileSync92(resolve29(input2), "utf8");
   } catch (error2) {
     throw new OperationError("invalid_params", `Owner tier override --input file could not be read: ${error2.message}`);
   }

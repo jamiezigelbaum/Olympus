@@ -5,6 +5,7 @@
 import { DASHBOARD_CONTROL_GATE_ID, escapeHtml, escapeScriptJson, pageShell } from '../components.ts';
 import { chatgptMarkdownRender, CHATGPT_MARKDOWN_CSS } from '../chatgpt/markdown.ts';
 import { dashboardLocalPageHref } from '../host-page.ts';
+import { dashboardTopNav, TOP_NAV_CSS } from '../top-nav.ts';
 import { DASHBOARD_OUTSIDE_HELP_PATHS, renderOutsideHelpCard, summaryOf } from '../outside-help.ts';
 import { DASHBOARD_OUTSIDE_HELP_CSS, LOCAL_PAGE_CSS } from '../static-styles.ts';
 import {
@@ -117,9 +118,11 @@ export function renderDashboardPrivateAnswersPage(options?: DashboardPageOptions
     title: 'Olympus',
     crumb: W.crumb,
     ...(basePath === undefined ? {} : { basePath }),
+    // This page's own small controller does not post the Lock form, so the bar shows the state only.
+    nav: dashboardTopNav({ active: 'privacy', unlocked: options?.controlSessionCsrfToken !== undefined, lockable: false, ...(readToken(basePath) ? { token: readToken(basePath)! } : {}) }),
     meta: '',
     body: dashboardPrivacyTabs('questions', readToken(basePath)) + renderPrivateAnswersBody(options),
-    styles: [CHATGPT_MARKDOWN_CSS, LOCAL_PAGE_CSS, DASHBOARD_OUTSIDE_HELP_CSS, PRIVACY_TABS_CSS, PRIVATE_ANSWERS_CSS],
+    styles: [CHATGPT_MARKDOWN_CSS, LOCAL_PAGE_CSS, TOP_NAV_CSS, DASHBOARD_OUTSIDE_HELP_CSS, PRIVACY_TABS_CSS, PRIVATE_ANSWERS_CSS],
     // The local inbox carries its own small controller and visible-page poll.
   });
 }

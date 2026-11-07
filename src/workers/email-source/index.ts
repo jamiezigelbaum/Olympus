@@ -7,7 +7,7 @@ import { PRIVACY_PRESET_LABELS } from '../../core/privacy-language.ts';
 import { createDashboardMessagingService } from './dashboard-messaging-service.ts';
 import { isFileSourceScopeId } from '../../core/source-scope-approval.ts';
 import { createReleaseManifestSink, runWithReleaseManifestSink, recordReleaseManifest, answerReleaseWithheldReason, type ReleaseCheck, type ReleaseManifest } from '../../core/release-manifest.ts';
-import type { UpdateAvailable } from '../../core/update-check.ts';
+import { installerForPlatform, type UpdateAvailable } from '../../core/update-check.ts';
 import { isRetiredGoogleHandle } from '../../core/google-handle-compatibility.ts';
 import { readSourceAccountBindings, sourceAccountBindingsPath, type SourceAccountBindings } from '../../core/source-account-binding.ts';
 import { sourceStorageNotices, type SourceStorageNoticeKind } from '../../core/source-registry.ts';
@@ -573,6 +573,8 @@ export interface EmailSourceWorkerOptions {
       pageStatus?: () => import('../dashboard/pages/local.ts').DashboardJudgeSetup;
       save: (choice: 'local' | 'venice', capDollars: number) => Promise<{ ok: true; status_message: string }>;
     };
+    /** The model pickers on Privacy rules (model-choices-backend.ts). */
+    modelChoices?: import('./model-choices-backend.ts').ModelChoicesBackend;
     modelSetup?: () => ModelSetupView;
     checkModelSetup?: () => Promise<ModelSetupView>;
     discoverLocalModels?: (baseUrl?: string) => Promise<LocalModelDiscoveryResult[]>;
@@ -1477,6 +1479,22 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
               },
             }));
           }
+          if (page === 'settings') {
+            const installer = installerForPlatform(options.platform ?? process.platform);
+            const update = installer ? options.updateAvailable?.() : undefined;
+            return html(renderDashboardLocalPage('settings', {
+              url,
+              options: {
+                ...(controlSessionCsrfToken ? { controlSessionCsrfToken } : {}),
+                ...(agentConnections ? { agents: dashboardAgentsView(agentConnections) } : {}),
+                ...(options.agentConnectHost ? { agentConnectHost: options.agentConnectHost() } : {}),
+                settings: {
+                  ...(options.localModelReadiness ? { models: options.localModelReadiness() } : {}),
+                  ...(update && installer ? { update: { version: update.version, command: installer.command } } : {}),
+                },
+              },
+            }));
+          }
           if (page === 'private_answers') {
             // Waiting questions and the outside help card's facts (a daemon
             // version call and two port probes) only with the control
@@ -1643,6 +1661,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
                 answerMode: { id: answerModeId, label: answerModeId === 'custom' ? 'Custom Private-answer mode' : PRIVACY_PRESET_LABELS[answerModeId] },
                 ...(controlSessionCsrfToken ? { controlSessionCsrfToken } : {}),
                 ...(sourceDashboard.judgeSetup ? { judgeSetup: sourceDashboard.judgeSetup.pageStatus?.() ?? sourceDashboard.judgeSetup.status() } : {}),
+                ...(sourceDashboard.modelChoices ? { modelChoices: await sourceDashboard.modelChoices.status().catch(() => undefined) } : {}),
                 outsideHelpLocalSession: request.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER) === 'local',
                 messagingLocalSession: Boolean(controlSessionCsrfToken) && request.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER) === 'local',
                 ...(controlSessionCsrfToken && sourceDashboard.consult ? { outsideHelp: await sourceDashboard.consult.status().catch(() => undefined) } : {}),
@@ -2137,6 +2156,23 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
                 : 'No connection attempt was pending.',
             });
           });
+        }
+
+        if (request.method === 'POST' && (url.pathname === '/dashboard/models/choice' || url.pathname === '/dashboard/models/addable')) {
+          if (!request.headers.has(DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER) || request.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER) !== 'local') {
+            return json({ ok: false, error: { code: 'local_dashboard_only', message: 'Choose this in an unlocked dashboard on this computer.' } }, 403);
+          }
+          if (!sourceDashboard?.modelChoices) throw new EmailSourceWorkerError(501, 'not_available', 'Model choices are unavailable.');
+          const input = await parseObjectBody(request);
+          if (url.pathname.endsWith('/addable')) {
+            if (input.provider !== 'venice') throw new EmailSourceWorkerError(400, 'invalid_request', 'Choose a provider.');
+            return json({ ok: true, models: await sourceDashboard.modelChoices.addable('venice') });
+          }
+          if ((input.provider !== 'local' && input.provider !== 'venice' && input.provider !== 'zkapi') || typeof input.model !== 'string' || input.model.trim() === '') {
+            throw new EmailSourceWorkerError(400, 'invalid_request', 'Choose a model.');
+          }
+          const result = await sourceDashboard.modelChoices.save(input.provider, input.model.trim());
+          return json(result.ok ? result : { ok: false, error: { code: 'model_choice_failed', message: result.message } }, result.ok ? 200 : 409);
         }
 
         if (request.method === 'POST' && url.pathname === '/dashboard/models/judge') {

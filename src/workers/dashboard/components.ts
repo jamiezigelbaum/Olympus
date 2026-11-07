@@ -125,6 +125,8 @@ export interface DashboardPageShellInput {
   basePath?: string;
   /** Header's right-hand meta line. */
   meta: string;
+  /** The top bar (top-nav.ts), already rendered; replaces the brand line. Its CSS comes in `styles`. */
+  nav?: string;
   /** Already-escaped page body markup. */
   body: string;
   /** Already-built inline scripts, in order. */
@@ -194,10 +196,11 @@ export function pageShell(input: DashboardPageShellInput): string {
   const styles = [DASHBOARD_THEME_CSS, ...(input.styles ?? [])].join('\n');
   const content = `<div class="frame">
       <div class="page">
-      <div class="top">
+      ${input.nav ? `${input.nav}
+      <div class="top subtop"><span class="meta" data-computer-identity>${escapeHtml(dashboardComputerIdentity())}</span>${input.meta ? `<span class="meta">${escapeHtml(input.meta)}</span>` : ''}</div>` : `<div class="top">
         <span class="brand">${brand}</span><span class="meta" data-computer-identity>${escapeHtml(dashboardComputerIdentity())}</span>${input.meta ? `
         <span class="meta">${escapeHtml(input.meta)}</span>` : ''}
-      </div>
+      </div>`}
       ${input.body}
       </div>
     </div>`;
@@ -935,6 +938,8 @@ export function standaloneDashboardControllerScript(
         if (action === 'save_local_answer_model') return ['/dashboard/models/local/save', withoutAction(params)];
         if (action === 'check_model_setup') return ['/dashboard/models/check', {}];
         if (action === 'save_judge') return ['/dashboard/models/judge', withoutAction(params)];
+        if (action === 'save_model_choice') return ['/dashboard/models/choice', withoutAction(params)];
+        if (action === 'list_addable_models') return ['/dashboard/models/addable', withoutAction(params)];
         if (action === 'set_computer_use') return ['/dashboard/engine/computer-use', withoutAction(params)];
         if (action === 'save_first_run_privacy') return ['/dashboard/models/first-run-privacy', withoutAction(params)];
         if (action === 'connect_api_key') return ['/dashboard/connect/api-key', withoutAction(params)];

@@ -276,7 +276,7 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
 
   function applyWriteCapability(): void {
     root.querySelectorAll<HTMLFormElement>(
-      'form[data-connect-kind],form[data-model-check],form[data-first-run-privacy],form[data-computer-use],form[data-judge-choice],form[data-local-models-discover],form[data-local-models-test],form[data-agent-kind]',
+      'form[data-connect-kind],form[data-model-check],form[data-first-run-privacy],form[data-computer-use],form[data-judge-choice],form[data-model-choice],form[data-local-models-discover],form[data-local-models-test],form[data-agent-kind]',
     ).forEach((form) => {
       // A form whose request is still outstanding keeps its submit controls
       // disabled, so a second click cannot issue a second transport call,
@@ -484,6 +484,12 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
       if (choice === 'venice' && cap === '') { say(form, 'Enter a total cloud spending limit in dollars to use Venice.'); return undefined; }
       return { action: 'save_judge', choice, cap_dollars: cap === '' ? 0 : Number(cap) };
     }
+    if (form.hasAttribute('data-model-choice')) {
+      const provider = body.provider === 'local' || body.provider === 'venice' || body.provider === 'zkapi' ? body.provider : undefined;
+      const model = (body.model ?? '').trim();
+      if (!provider || model === '') { say(form, 'Choose a model.'); return undefined; }
+      return { action: 'save_model_choice', provider, model };
+    }
     if (form.hasAttribute('data-computer-use')) return { action: 'set_computer_use', choice: (form.hasAttribute('data-server-mode') ? body.server === 'on' : body.choice === 'server') ? 'server' : 'everyday' };
     if (form.hasAttribute('data-first-run-privacy')) return { action: 'save_first_run_privacy', choice: body.choice ?? '' };
     const connect = form.dataset.connectKind;
@@ -683,6 +689,9 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
       firstRunResult('Saved. Check readiness after Olympus applies the change.');
     }
     const statusMessage = result.body.status_message;
+    if (params.action === 'save_model_choice' || params.action === 'save_local_answer_model') {
+      form.closest<HTMLDialogElement>('dialog[open]')?.close();
+    }
     if (params.action === 'save_judge') {
       // The choice is accepted: only now does its confirmation close (a refusal keeps it open, saying why).
       form.dataset.judgeCurrent = params.choice;
@@ -720,7 +729,7 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
   }
 
   function renderDiscoveredModels(form: HTMLFormElement, value: unknown): void {
-    const sheet = form.closest('.sheet');
+    const sheet = form.closest('.sheet, dialog');
     const output = sheet?.querySelector<HTMLElement>('[data-local-models-results]');
     const testForm = sheet?.querySelector<HTMLFormElement>('[data-local-models-test]');
     if (!output || !testForm) return;
@@ -1403,7 +1412,7 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
       return;
     }
     if (!form.matches(
-      '[data-connect-kind],[data-model-check],[data-first-run-privacy],[data-computer-use],[data-judge-choice],[data-local-models-discover],[data-local-models-test]',
+      '[data-connect-kind],[data-model-check],[data-first-run-privacy],[data-computer-use],[data-judge-choice],[data-model-choice],[data-local-models-discover],[data-local-models-test]',
     )) return;
     event.preventDefault();
     // Every control form records what it submitted: the answer may only
@@ -1799,6 +1808,47 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
     if (dialog instanceof HTMLDialogElement && dialog.matches('[data-judge-dialog]')) { event.preventDefault(); resetJudge(dialog); }
   };
 
+  // Add a model: a dialog over Privacy rules; ✕, Esc or a click outside closes it.
+  const onAddModelClick = (event: Event): void => {
+    const target = event.target instanceof Element ? event.target : null;
+    const open = target?.closest<HTMLElement>('[data-add-model-open]');
+    if (open) {
+      const provider = open.dataset.addModelOpen ?? '';
+      const dialog = open.closest('.pickrow')?.querySelector<HTMLDialogElement>(`dialog[data-add-model="${provider}"]`);
+      if (!dialog || typeof dialog.showModal !== 'function' || dialog.open) return;
+      dialog.showModal();
+      if (provider === 'venice') void loadAddableModels(dialog);
+      return;
+    }
+    const close = target?.closest('[data-dialog-close]')?.closest('dialog');
+    if (close instanceof HTMLDialogElement) { close.close(); return; }
+    if (target instanceof HTMLDialogElement && target.matches('[data-add-model]')) {
+      const box = target.getBoundingClientRect(); const at = event as MouseEvent;
+      if (box.width > 0 && (at.clientX < box.left || at.clientX > box.right || at.clientY < box.top || at.clientY > box.bottom)) target.close();
+    }
+  };
+  const loadAddableModels = async (dialog: HTMLDialogElement): Promise<void> => {
+    const slot = dialog.querySelector<HTMLElement>('[data-addable-models]');
+    if (!slot || slot.dataset.loaded === 'true') return;
+    let result: OlympusDashboardControlResult;
+    try { result = await options.transport.control({ action: 'list_addable_models', provider: 'venice' }); } catch { result = { status: 0, body: {} }; }
+    const models = Array.isArray(result.body.models) ? result.body.models.filter((entry): entry is string => typeof entry === 'string') : [];
+    slot.replaceChildren();
+    if (result.status < 200 || result.status >= 300 || models.length === 0) {
+      const line = document.createElement('p'); line.className = 'pnote'; line.setAttribute('role', 'status');
+      line.textContent = models.length === 0 && result.status === 200 ? 'Venice listed no private models just now. Try again later.' : 'Olympus could not reach Venice. Try again later.';
+      slot.append(line);
+      return;
+    }
+    slot.dataset.loaded = 'true';
+    for (const id of models) {
+      const label = document.createElement('label'); label.className = 'pickopt';
+      const radio = document.createElement('input'); radio.type = 'radio'; radio.name = 'model'; radio.value = id;
+      const name = document.createElement('b'); name.textContent = id;
+      label.append(radio, ' ', name); slot.append(label);
+    }
+  };
+  root.addEventListener('click', onAddModelClick);
   root.addEventListener('submit', onSubmit);
   root.addEventListener('click', onClick);
   root.addEventListener('change', onJudgePick);
@@ -1840,6 +1890,7 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
     if (interval) clearInterval(interval);
     view.removeEventListener('focus', refreshOnReturn);
     root.ownerDocument.removeEventListener('visibilitychange', onVisibilityReturn);
+    root.removeEventListener('click', onAddModelClick);
     root.removeEventListener('submit', onSubmit);
     root.removeEventListener('click', onClick);
     root.removeEventListener('change', onJudgePick);

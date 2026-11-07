@@ -264,6 +264,8 @@ export const V0_4_PUBLIC_DASHBOARD_ROUTES: readonly PublicDashboardRoute[] = [
   { method: 'POST', path: '/dashboard/models/local/discover' },
   { method: 'POST', path: '/dashboard/models/local/test' },
   { method: 'POST', path: '/dashboard/models/local/save' },
+  { method: 'POST', path: '/dashboard/models/choice' },
+  { method: 'POST', path: '/dashboard/models/addable' },
   { method: 'POST', path: '/dashboard/sync-now' },
   { method: 'POST', path: '/dashboard/embedding-priority' },
   { method: 'POST', path: '/dashboard/tools/call' },
