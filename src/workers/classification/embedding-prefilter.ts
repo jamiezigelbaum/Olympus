@@ -43,6 +43,8 @@ interface TrainingRun {
   id: string; scans: Array<{ member: EmbeddingPrefilter; scan: TrainingScan; dirty: boolean; revision: string }>;
   examples: TrainingExample[]; memberIndex: number; sampleIndex: number;
   fit?: Generator<void, LogisticModel | undefined>;
+  model?: LogisticModel;
+  finalValidation?: { index: number; markers: string };
   markers?: string[];
   validationIndex: number; validationRemaining: number;
 }
@@ -104,6 +106,7 @@ export class EmbeddingPrefilter {
   constructor(private readonly options: {
     ledger: TierLedger; sniffer: TierSnifferStore; stateLedger?: TierLedger; sharedWith?: EmbeddingPrefilter;
     copyFor: (subject: TierSnifferSubject) => PrefilterCopy | undefined;
+    copyChangeMarker: () => string;
     placementFor?: (decision: TierDecision) => TierPlacementPlan;
     enabled?: () => boolean; random?: () => number; now?: () => number;
     monotonicNow?: () => number; log?: (line: string) => void;
@@ -230,7 +233,7 @@ export class EmbeddingPrefilter {
     // Never log exceptions, subject ids, paths, content, vectors or judge category strings.
     (this.options.log ?? console.log)(`[olympus:embedding-prefilter] rows_read=${attempt.rows} personal=${attempt.counts[0]} private=${attempt.counts[1]} outcome=${attempt.outcome}${attempt.reason ? ` reason=${attempt.reason}` : ''}${attempt.version ? ` model_version=${attempt.version}` : ''} elapsed_ms=${Math.round(attempt.elapsedMs)} next_attempt=${new Date(attempt.nextAt).toISOString()}${attempt.outcome === 'too_few' ? ' or_1000_new_verdicts' : ''}`);
   }
-  /** Cooperative 200 ms per tick, including scan and fit; one synchronous unit may overrun. */
+  /** Cooperative 200 ms per tick, including scan, fit and validation; one synchronous unit may overrun. */
   async prepare(judge: string): Promise<void> {
     if (this.owner !== this) return this.owner.prepare(judge);
     if (this.audit.stopped || !this.enabled()) { for (const member of this.members) member.rollback(); return; }
@@ -341,7 +344,7 @@ export class EmbeddingPrefilter {
             // request another full ledger cycle without rewinding or starving fit.
             const validationDeadline = started + TRAINING_SLICE_MS / 2;
             let checked = 0;
-            while (checked < run.examples.length && clock() < validationDeadline) {
+            while (!run.model && checked < run.examples.length && clock() < validationDeadline) {
               worked = true;
               if (!run.examples[run.validationIndex]!.current(run.validationRemaining > 0)) {
                 stage = 'ledger_or_judge_changed';
@@ -352,29 +355,47 @@ export class EmbeddingPrefilter {
               checked++;
               await ingestionTurn();
             }
-            while (hasTime()) {
+            while (!run.model && hasTime()) {
               worked = true;
               const step = run.fit.next();
               if (step.done) {
                 if (!step.value) { this.finishTraining(attempt, 'too_few'); break; }
+                run.model = step.value;
+                break;
+              }
+              await ingestionTurn();
+            }
+            if (run.model) {
+              const changeMarkers = () => JSON.stringify(run.scans.map(({ member }) => [
+                member.options.ledger.changeMarker(true), member.options.copyChangeMarker(),
+              ]));
+              const currentMarkers = changeMarkers();
+              if (!run.finalValidation || run.finalValidation.markers !== currentMarkers) {
+                run.finalValidation = { index: 0, markers: currentMarkers };
+              }
+              const validation = run.finalValidation;
+              while (validation.index < run.examples.length && hasTime()) {
+                worked = true;
+                if (!run.examples[validation.index++]!.current(true)) {
+                  stage = 'ledger_or_judge_changed';
+                  throw new Error();
+                }
+                await ingestionTurn();
+              }
+              // No yield between the marker/revision fence and publication. A write
+              // during any validation slice requires a fresh pass, including copies.
+              if (validation.index === run.examples.length && hasTime()
+                && validation.markers === changeMarkers() && attempt.revisions === this.revisions()) {
                 stage = 'weights_write_failed';
                 if (this.control.dbPath === ':memory:') throw new Error();
                 const directory = embeddingPrefilterDirectory(this.control.dbPath);
                 if (existsSync(directory) && (!lstatSync(directory).isDirectory() || lstatSync(directory).isSymbolicLink())) throw new Error();
-                // No yield between this final check and publication: a change during fitting
-                // (including a Secrets decision) discards all derived weights.
-                if (attempt.revisions !== this.revisions() || run.examples.some(example => !example.current(true))) {
-                  this.finishTraining(attempt, 'failed', 'ledger_or_judge_changed');
-                  break;
-                }
                 mkdirSync(directory, { recursive: true, mode: 0o700 }); chmodSync(directory, 0o700);
-                const saved: SavedModel = { model: step.value, judge, revisions, trainedAt: this.now(), version: randomUUID() };
+                const saved: SavedModel = { model: run.model, judge, revisions, trainedAt: this.now(), version: randomUUID() };
                 writePrivateFileAtomicSync(this.path, JSON.stringify(saved));
                 this.saved = saved; attempt.version = saved.version;
                 this.finishTraining(attempt, 'trained');
-                break;
               }
-              await ingestionTurn();
             }
           }
         }

@@ -346,6 +346,7 @@ export class TierLedgerSecretsRollbackRefusedError extends Error {
 export class TierLedger {
   readonly dbPath: string;
   private readonly db: Database;
+  private metaChanges = 0;
   private readonly now: () => Date;
 
   constructor(options: TierLedgerOptions) {
@@ -1938,15 +1939,15 @@ export class TierLedger {
 
   writeMeta(key: string, value: string): void {
     if (key === 'ledger_id') throw new Error('The ledger identity is never rewritten.');
-    this.db.query(`
+    this.metaChanges += this.db.query(`
       INSERT INTO tier_ledger_meta (key, value) VALUES (?, ?)
       ON CONFLICT(key) DO UPDATE SET value = excluded.value
-    `).run(key, value);
+    `).run(key, value).changes;
   }
 
   deleteMeta(key: string): void {
     if (key === 'ledger_id') throw new Error('The ledger identity is never deleted.');
-    this.db.query('DELETE FROM tier_ledger_meta WHERE key = ?').run(key);
+    this.metaChanges += this.db.query('DELETE FROM tier_ledger_meta WHERE key = ?').run(key).changes;
   }
 
   /** Atomic publication of related content-free background receipts. */
@@ -3483,10 +3484,12 @@ export class TierLedger {
    * Changes whenever this ledger's database changes, from this connection or
    * another: lets a reader reuse what it derived from the ledger until then.
    */
-  changeMarker(): string {
+  changeMarker(ignoreOwnMetaWrites = false): string {
     const row = this.db.query('SELECT total_changes() AS changes').get() as { changes: number };
     const version = this.db.query('PRAGMA data_version').get() as { data_version: number };
-    return `${version.data_version}:${row.changes}`;
+    // Background checkpoints cannot invalidate a sliced training validation.
+    // External commits still invalidate it; withdrawals are also revision-fenced.
+    return `${version.data_version}:${row.changes - (ignoreOwnMetaWrites ? this.metaChanges : 0)}`;
   }
 
   /**

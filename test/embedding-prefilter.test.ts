@@ -43,7 +43,8 @@ function fixture(options: { trained?: boolean; memory?: boolean; bias?: number; 
       layers: 'both' }], embedHold: decision.contentPending,
   });
   let currentCopy: (n: number) => ConnectorStoreItemCopy | undefined = n => copy(n);
-  const make = () => new EmbeddingPrefilter({ ledger, sniffer, ...(options.stateLedger ? { stateLedger: options.stateLedger } : {}), copyFor: identity => currentCopy(Number(identity.providerItemId)),
+  let copyRevision = 0;
+  const make = () => new EmbeddingPrefilter({ ledger, sniffer, ...(options.stateLedger ? { stateLedger: options.stateLedger } : {}), copyFor: identity => currentCopy(Number(identity.providerItemId)), copyChangeMarker: () => String(copyRevision),
     ...(options.routed ? { placementFor } : {}), random: options.random ?? (() => 1), ...(options.now ? { now: options.now } : {}), ...(options.monotonicNow ? { monotonicNow: options.monotonicNow } : {}), ...(options.log ? { log: options.log } : {}), ...(options.enabled ? { enabled: options.enabled } : {}) });
   const filter = make();
   const add = (n: number, config: Parameters<typeof classifyItemTiers>[1] = {}, text = ownText) => {
@@ -55,7 +56,7 @@ function fixture(options: { trained?: boolean; memory?: boolean; bias?: number; 
     return sniffer.questionFor(subject(n), 'content')!;
   };
   cleanups.push(() => { sniffer.close(); ledger.close(); rmSync(dir, { recursive: true, force: true }); });
-  return { ledger, stateLedger: options.stateLedger ?? ledger, sniffer, filter, add, make, modelDir, placementFor, setCopy: (fn: typeof currentCopy) => { currentCopy = fn; } };
+  return { ledger, stateLedger: options.stateLedger ?? ledger, sniffer, filter, add, make, modelDir, placementFor, setCopy: (fn: typeof currentCopy) => { currentCopy = fn; copyRevision++; } };
 }
 function pass(f: ReturnType<typeof fixture>, tier: 'personal' | 'private' = 'personal') {
   let calls = 0;
@@ -335,8 +336,8 @@ test('the rolling audit is shared across ledgers and stops both clearers', async
   saved.revisions = JSON.stringify([[a.ledger.ledgerId(), '0'], [b.ledger.ledgerId(), '0']].sort()) + ':0';
   writeFileSync(path, JSON.stringify(saved));
   let sampling = false;
-  const first = new EmbeddingPrefilter({ ledger: a.ledger, sniffer: a.sniffer, copyFor: s => copy(Number(s.providerItemId)), random: () => sampling ? 0 : 1 });
-  const second = new EmbeddingPrefilter({ ledger: b.ledger, sniffer: b.sniffer, copyFor: s => copy(Number(s.providerItemId)), sharedWith: first, random: () => sampling ? 0 : 1 });
+  const first = new EmbeddingPrefilter({ ledger: a.ledger, sniffer: a.sniffer, copyFor: s => copy(Number(s.providerItemId)), copyChangeMarker: () => '0', random: () => sampling ? 0 : 1 });
+  const second = new EmbeddingPrefilter({ ledger: b.ledger, sniffer: b.sniffer, copyFor: s => copy(Number(s.providerItemId)), copyChangeMarker: () => '0', sharedWith: first, random: () => sampling ? 0 : 1 });
   await first.prepare(judge);
   expect(first.tryClear(a.add(1), judge)).toBe(true);
   expect(second.tryClear(b.add(1), judge)).toBe(true);
@@ -411,7 +412,7 @@ test('install audit and selections survive replacing the first source ledger', a
   expect(a.filter.tryClear(q, judge)).toBe(false);
   const b = fixture({ stateLedger: control, trained: false });
   const restoredA = new EmbeddingPrefilter({ ledger: a.ledger, sniffer: a.sniffer, stateLedger: control,
-    sharedWith: b.filter, copyFor: s => copy(Number(s.providerItemId)) });
+    sharedWith: b.filter, copyFor: s => copy(Number(s.providerItemId)), copyChangeMarker: () => '0' });
   expect(restoredA.isSpotCheck(q)).toBe(true);
   control.writeMeta('embedding-prefilter:audit', JSON.stringify({ misses: new Array(5).fill(true), stopped: true }));
   const afterSourceChange = b.make(); await afterSourceChange.prepare(judge);
@@ -615,6 +616,7 @@ test('pooled sources share one 200 ms training slice per resolver tick', async (
   for (let n = 0; n < 9; n++) { trainingRow(a, n); trainingRow(b, n); }
   a.setCopy(n => { monotonic += 50; return copy(n); });
   const second = new EmbeddingPrefilter({ ledger: b.ledger, sniffer: b.sniffer, sharedWith: a.filter,
+    copyChangeMarker: () => '0',
     copyFor: identity => { monotonic += 50; return copy(Number(identity.providerItemId)); } });
   await runSnifferPass({ targets: [{ ledger: a.ledger, sniffer: a.sniffer, embeddingPrefilter: a.filter },
     { ledger: b.ledger, sniffer: b.sniffer, embeddingPrefilter: second }], lane,
@@ -822,9 +824,47 @@ test('costly retained-copy validation yields and still lets fitting finish', asy
     const started = clock;
     f.ledger.writeMeta('fixture:unrelated-ingestion', String(tick));
     await f.filter.prepare(judge);
-    // Only the final atomic publication check may exceed the cooperative budget.
-    if (!existsSync(join(f.modelDir, 'weights.json'))) expect(clock - started).toBeLessThanOrEqual(200.11);
+    expect(clock - started).toBeLessThanOrEqual(200.11);
   }
   expect(trainingState(f)).toMatchObject({ outcome: 'trained', counts: [2000, 2000] });
   expect(existsSync(join(f.modelDir, 'weights.json'))).toBe(true);
 }, 30_000);
+
+test.each(['secrets', 'external secrets', 'copy'] as const)(
+  'final validation fences an already-checked example changed between ticks: %s', async change => {
+    let clock = 0;
+    const f = fixture({ trained: false, memory: change !== 'external secrets', monotonicNow: () => clock, log: () => {} });
+    // In-memory examples still publish to a separate durable control ledger.
+    const dir = mkdtempSync(join(tmpdir(), 'prefilter-final-validation-'));
+    const control = new TierLedger({ dbPath: join(dir, 'control.sqlite') });
+    cleanups.push(() => { control.close(); rmSync(dir, { recursive: true, force: true }); });
+    const filter = new EmbeddingPrefilter({ ledger: f.ledger, sniffer: f.sniffer, stateLedger: control,
+      copyFor: s => { clock += 0.1; return currentCopy(Number(s.providerItemId)); },
+      copyChangeMarker: () => String(copyRevision), monotonicNow: () => clock, log: () => {} });
+    let currentCopy = (n: number) => copy(n);
+    let copyRevision = 0;
+    for (let n = 0; n < 4000; n++) trainingRow(f, n);
+    const runtime = () => (filter as unknown as { training?: {
+      fit?: Generator<void, unknown>; finalValidation?: { index: number };
+    } }).training;
+    for (let tick = 0; tick < 50 && !runtime()?.finalValidation?.index; tick++) await filter.prepare(judge);
+    expect(runtime()?.finalValidation?.index).toBeGreaterThan(0);
+    expect(runtime()?.finalValidation?.index).toBeLessThan(4000);
+    const weights = join(embeddingPrefilterDirectory(control.dbPath), 'weights.json');
+    expect(existsSync(weights)).toBe(false);
+    // Subject 0 was validated in the first slice. A later change must force
+    // another pass rather than trusting that slice when publication resumes.
+    if (change === 'copy') {
+      currentCopy = n => n === 0 ? { ...copy(n), chunks: [{ ...copy(n).chunks[0]!, boundedText: 'Updated picnic plan.' }] } : copy(n);
+      copyRevision++;
+    } else {
+      const writer = change === 'external secrets' ? new TierLedger({ dbPath: f.ledger.dbPath }) : f.ledger;
+      try {
+        writer.recordDecision(subject(0), { ...writer.getCurrent(subject(0))!, state: 'current',
+          snifferId: judge, decidedBy: 'secret_detector', contentTier: 'secrets' });
+      } finally { if (writer !== f.ledger) writer.close(); }
+    }
+    await filter.prepare(judge);
+    expect(JSON.parse(control.readMeta('embedding-prefilter:training-v1')!)).toMatchObject({ outcome: 'failed', reason: 'ledger_or_judge_changed' });
+    expect(existsSync(weights)).toBe(false);
+  }, 30_000);

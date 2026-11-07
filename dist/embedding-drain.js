@@ -16958,6 +16958,7 @@ function idParams(identity) {
 class TierLedger {
   dbPath;
   db;
+  metaChanges = 0;
   now;
   constructor(options) {
     this.dbPath = options.dbPath;
@@ -18016,15 +18017,15 @@ class TierLedger {
   writeMeta(key, value) {
     if (key === "ledger_id")
       throw new Error("The ledger identity is never rewritten.");
-    this.db.query(`
+    this.metaChanges += this.db.query(`
       INSERT INTO tier_ledger_meta (key, value) VALUES (?, ?)
       ON CONFLICT(key) DO UPDATE SET value = excluded.value
-    `).run(key, value);
+    `).run(key, value).changes;
   }
   deleteMeta(key) {
     if (key === "ledger_id")
       throw new Error("The ledger identity is never deleted.");
-    this.db.query("DELETE FROM tier_ledger_meta WHERE key = ?").run(key);
+    this.metaChanges += this.db.query("DELETE FROM tier_ledger_meta WHERE key = ?").run(key).changes;
   }
   writeMetaBatch(entries) {
     this.db.transaction(() => {
@@ -19023,10 +19024,10 @@ class TierLedger {
   corpusHasCopies(corpusId) {
     return this.db.query("SELECT 1 FROM tier_copies WHERE corpus_id = ? LIMIT 1").get(corpusId) !== null;
   }
-  changeMarker() {
+  changeMarker(ignoreOwnMetaWrites = false) {
     const row = this.db.query("SELECT total_changes() AS changes").get();
     const version = this.db.query("PRAGMA data_version").get();
-    return `${version.data_version}:${row.changes}`;
+    return `${version.data_version}:${row.changes - (ignoreOwnMetaWrites ? this.metaChanges : 0)}`;
   }
   visibilityChangesSince(after) {
     return this.db.transaction(() => {
@@ -27164,6 +27165,11 @@ var init_local_index = __esm(() => {
         if (!this.db.inTransaction)
           this.releaseUnreferencedChunkMedia();
       }
+    }
+    changeMarker() {
+      const row = this.db.query("SELECT total_changes() AS changes").get();
+      const version = this.db.query("PRAGMA data_version").get();
+      return `${version.data_version}:${row.changes}`;
     }
     exportItemCopy(identity) {
       const row = this.db.query(`
@@ -73385,7 +73391,7 @@ class EmbeddingPrefilter {
             }
             const validationDeadline = started + TRAINING_SLICE_MS / 2;
             let checked = 0;
-            while (checked < run.examples.length && clock2() < validationDeadline) {
+            while (!run.model && checked < run.examples.length && clock2() < validationDeadline) {
               worked = true;
               if (!run.examples[run.validationIndex].current(run.validationRemaining > 0)) {
                 stage = "ledger_or_judge_changed";
@@ -73396,7 +73402,7 @@ class EmbeddingPrefilter {
               checked++;
               await ingestionTurn();
             }
-            while (hasTime()) {
+            while (!run.model && hasTime()) {
               worked = true;
               const step = run.fit.next();
               if (step.done) {
@@ -73404,26 +73410,44 @@ class EmbeddingPrefilter {
                   this.finishTraining(attempt, "too_few");
                   break;
                 }
+                run.model = step.value;
+                break;
+              }
+              await ingestionTurn();
+            }
+            if (run.model) {
+              const changeMarkers = () => JSON.stringify(run.scans.map(({ member }) => [
+                member.options.ledger.changeMarker(true),
+                member.options.copyChangeMarker()
+              ]));
+              const currentMarkers = changeMarkers();
+              if (!run.finalValidation || run.finalValidation.markers !== currentMarkers) {
+                run.finalValidation = { index: 0, markers: currentMarkers };
+              }
+              const validation = run.finalValidation;
+              while (validation.index < run.examples.length && hasTime()) {
+                worked = true;
+                if (!run.examples[validation.index++].current(true)) {
+                  stage = "ledger_or_judge_changed";
+                  throw new Error;
+                }
+                await ingestionTurn();
+              }
+              if (validation.index === run.examples.length && hasTime() && validation.markers === changeMarkers() && attempt.revisions === this.revisions()) {
                 stage = "weights_write_failed";
                 if (this.control.dbPath === ":memory:")
                   throw new Error;
                 const directory = embeddingPrefilterDirectory(this.control.dbPath);
                 if (existsSync31(directory) && (!lstatSync15(directory).isDirectory() || lstatSync15(directory).isSymbolicLink()))
                   throw new Error;
-                if (attempt.revisions !== this.revisions() || run.examples.some((example) => !example.current(true))) {
-                  this.finishTraining(attempt, "failed", "ledger_or_judge_changed");
-                  break;
-                }
                 mkdirSync17(directory, { recursive: true, mode: 448 });
                 chmodSync7(directory, 448);
-                const saved = { model: step.value, judge: judge2, revisions, trainedAt: this.now(), version: randomUUID12() };
+                const saved = { model: run.model, judge: judge2, revisions, trainedAt: this.now(), version: randomUUID12() };
                 writePrivateFileAtomicSync(this.path, JSON.stringify(saved));
                 this.saved = saved;
                 attempt.version = saved.version;
                 this.finishTraining(attempt, "trained");
-                break;
               }
-              await ingestionTurn();
             }
           }
         }
@@ -74644,6 +74668,14 @@ class TierSnifferService {
           ...planner ? { placementFor: planner } : {},
           enabled: () => this.options.embeddingPrefilterEnabled?.() !== false,
           log: (line) => this.options.log?.(line),
+          copyChangeMarker: () => {
+            const stores = tierSetForLedger(ledgerPath)?.openStores() ?? this.options.stores().filter((store) => (store.tierLedgerPathInUse?.() ?? tierLedgerPathForStore(store.dbPath)) === ledgerPath);
+            return JSON.stringify(stores.map((store) => {
+              if (!store.changeMarker)
+                throw new Error("Copy change marker unavailable");
+              return [store.dbPath, store.changeMarker()];
+            }));
+          },
           copyFor: (subject) => {
             const set2 = tierSetForLedger(ledgerPath);
             const serving = copyServingLayer(ledger.copies(subject), "content");

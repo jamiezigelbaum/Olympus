@@ -4269,6 +4269,13 @@ export class LocalConnectorStore {
     }
   }
 
+  /** Fence derived copies against writes on this connection or another one. */
+  changeMarker(): string {
+    const row = this.db.query('SELECT total_changes() AS changes').get() as { changes: number };
+    const version = this.db.query('PRAGMA data_version').get() as { data_version: number };
+    return `${version.data_version}:${row.changes}`;
+  }
+
   /**
    * Read an item's ACTIVE stored copy for a tier move: the row, its owners,
    * its chunks, and its current vectors with the authority they were minted
