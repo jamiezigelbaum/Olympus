@@ -219,6 +219,8 @@ export interface TierAutoMoveReport {
   abandoned?: number;
   /** Failed raises older than the stale bound: kept hidden and queued, never rolled back. */
   staleRaises?: number;
+  /** Stale raises whose item no store holds any more: forgotten, since nothing is left to move or hide (#913). */
+  retiredAbsent?: number;
   /** Why the failed moves failed, by error name (never an item's names or content): the log says what to look at. */
   failedBy?: Record<string, number>;
 }
@@ -1469,7 +1471,8 @@ export class TierSnifferService {
         `Olympus tier sniffer: ${report.moved} automatic tier move(s), ${report.failed} failed`
         + `${report.failedBy ? ` (${Object.entries(report.failedBy).map(([why, n]) => `${why} ×${n}`).join(', ')})` : ''}`
         + `${report.abandoned ? `, ${report.abandoned} stale move(s) given up (back where they were)` : ''}`
-        + `${report.staleRaises ? `, ${report.staleRaises} stale raise(s) kept hidden and queued` : ''}.`,
+        + `${report.staleRaises ? `, ${report.staleRaises} stale raise(s) kept hidden and queued` : ''}`
+        + `${report.retiredAbsent ? `, ${report.retiredAbsent} stale raise(s) of items no store holds forgotten` : ''}.`,
       );
     }
     return report;
@@ -1490,11 +1493,40 @@ export class TierSnifferService {
       report.abandoned = (report.abandoned ?? 0) + 1;
       return true;
     } catch (error) {
-      if (error instanceof TierLedgerRaiseAbandonRefusedError) report.staleRaises = (report.staleRaises ?? 0) + 1;
+      if (error instanceof TierLedgerRaiseAbandonRefusedError) {
+        // A raise whose item every store has dropped can never complete, and
+        // there is nothing hidden to protect: forget it (#913).
+        // A store that can't be opened or read makes the answer unknown: the
+        // raise stays queued and the rest of the pass goes on.
+        try {
+          if (itemAbsentFromEveryStore(set, recordIdentity(record))
+            && set.ledger.retireAbsentMove(recordIdentity(record), { expectedGeneration: record.generation })) {
+            report.retiredAbsent = (report.retiredAbsent ?? 0) + 1;
+            return true;
+          }
+        } catch {
+          // Left queued; the next pass looks again.
+        }
+        report.staleRaises = (report.staleRaises ?? 0) + 1;
+      }
       // Otherwise left queued; the next pass looks again.
       return false;
     }
   }
+}
+
+/**
+ * True only when every store this item could live in is known and none holds
+ * an active (untombstoned) copy. A configured leg whose store file does not
+ * exist holds nothing; a copy row naming a leg this set does not configure,
+ * or a store that cannot export, leaves the answer unknown (false).
+ */
+function itemAbsentFromEveryStore(set: TieredStoreSet, identity: TierLedgerIdentity): boolean {
+  for (const copy of set.ledger.copies(identity)) {
+    if (!set.legSpec(copy.trustDomain)) return false;
+  }
+  const stores = set.openStores();
+  return stores.every((store) => typeof store.exportItemCopy === 'function' && store.exportItemCopy(identity) === undefined);
 }
 
 function recordIdentity(record: TierLedgerRecord): TierLedgerIdentity {

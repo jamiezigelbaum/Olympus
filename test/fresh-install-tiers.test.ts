@@ -722,7 +722,7 @@ describe('owner defaults (2026-10-01): the registered built-in model is approved
       .toContain(SECURE_CORPUS);
   });
 
-  test('a move that keeps failing past the bound: a lateral one is given up, a raise stays hidden and queued', async () => {
+  test('a move that keeps failing past the bound: a lateral one is given up, a raise of an item no store holds is forgotten', async () => {
     const { builtIn, runtime } = registeredBuiltIn(PERSONAL_VERDICT);
     const install = await freshInstall(runtime.source === 'built_in' ? { lane: runtime.lane, bankStructuredName: false } : {});
     let clock = Date.now();
@@ -754,6 +754,10 @@ describe('owner defaults (2026-10-01): the registered built-in model is approved
         { connectorId: 'test' },
       );
     }
+    // The bank letter is also gone from the secure store: no store holds it.
+    const secureBank = install.secure.exportItemCopy(bank);
+    if (secureBank) install.secure.tombstoneCopy(secureBank.identity, { connectorId: 'test' });
+    expect(install.secure.exportItemCopy(bank)).toBeUndefined();
 
     // Queued long ago, but the bound counts from the first failed attempt:
     // retried, both left queued.
@@ -768,15 +772,52 @@ describe('owner defaults (2026-10-01): the registered built-in model is approved
     // Past the bound since the first failure.
     clock += 2 * 60 * 60_000;
     const settled = await service.runOnce();
-    expect(settled).toMatchObject({ autoMoves: { failed: 2, abandoned: 1, staleRaises: 1 } });
+    expect(settled).toMatchObject({ autoMoves: { failed: 2, abandoned: 1, retiredAbsent: 1 } });
+    expect(settled.state === 'ran' ? settled.autoMoves?.staleRaises : undefined).toBeUndefined();
     // The lateral move is given up: back at its tiers, its copy current.
     expect(ledger.getCurrent(garden)).toMatchObject({
       state: 'current', generation: gardenBefore.generation, targetContentTier: null, contentTier: 'private',
     });
     expect(ledger.copies(garden).some((copy) => copy.state === 'current')).toBe(true);
-    // The raise is never rolled back to the lower placement.
+    // The raise is never rolled back to the lower placement. Its item is in
+    // no store at all, so the queued move is forgotten instead of failing on
+    // every pass (#913); nothing of it is served.
+    expect(ledger.getCurrent(bank)).toBeUndefined();
+    expect(ledger.copies(bank)).toEqual([]);
+    expect(ledger.listMoving()).toEqual([]);
+    expect(JSON.stringify((await olympusSearch(install, 'lender')).result)).not.toContain('loan terms');
+    expect(await service.runOnce()).toMatchObject({ autoMoves: { failed: 0 } });
+  });
+
+  test('a stale raise whose item a store still holds stays hidden and queued', async () => {
+    const { builtIn, runtime } = registeredBuiltIn(PERSONAL_VERDICT);
+    const install = await freshInstall(runtime.source === 'built_in' ? { lane: runtime.lane, bankStructuredName: false } : {});
+    let clock = Date.now();
+    const service = snifferFor(install, builtIn, { now: () => new Date(clock), staleAfterMs: 60 * 60_000 });
+    await service.runOnce();
+    const ledger = install.lane.ledger;
+    const bank = identity('id:bank');
+    for (let pass = 0; pass < 3 && ledger.getCurrent(bank)!.state !== 'current'; pass += 1) await service.runOnce();
+    const bankBefore = ledger.getCurrent(bank)!;
+    ledger.stageMove(bank, {
+      expectedGeneration: bankBefore.generation,
+      target: { metadataTier: 'private', contentTier: 'secure' },
+      destination: [{ corpusId: SECURE_CORPUS, trustDomain: 'secure_local', layers: 'both' }],
+      hideSource: true,
+    });
+    // The Personal copy is gone, but the secure store still holds the item:
+    // the move fails, and the item is not absent, so it stays hidden and queued.
+    install.lane.internal.current()!.tombstoneCopy(
+      { ...bank, family: 'file', localItemId: 'personal:id:bank' },
+      { connectorId: 'test' },
+    );
+    expect(install.secure.exportItemCopy(bank)).toBeDefined();
+    clock += 10 * 60_000;
+    await service.runOnce();
+    clock += 2 * 60 * 60_000;
+    const settled = await service.runOnce();
+    expect(settled).toMatchObject({ autoMoves: { staleRaises: 1 } });
     expect(ledger.getCurrent(bank)).toMatchObject({ state: 'moving', targetContentTier: 'secure' });
-    expect(ledger.copies(bank).some((copy) => copy.state === 'current')).toBe(false);
   });
 });
 
