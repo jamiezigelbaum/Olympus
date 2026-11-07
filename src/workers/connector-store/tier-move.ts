@@ -81,9 +81,27 @@ export type TierMoveEmbeddingIdentity = Pick<
   'modelId' | 'provider' | 'backend' | 'dimension' | 'epochId' | 'configHash'
 >;
 
+/** Milliseconds only; never identities, names, hashes, or content. */
+export interface TierMoveTimings {
+  exportMs: number; stageMs: number; copyMs: number; vectorsMs: number;
+  verifyMs: number; flipMs: number; purgeMs: number; rereadMs: number; notesMs: number;
+  storeCommitMs: number; ledgerCommitMs: number;
+}
+
+export function emptyTierMoveTimings(): TierMoveTimings {
+  return { exportMs: 0, stageMs: 0, copyMs: 0, vectorsMs: 0, verifyMs: 0,
+    flipMs: 0, purgeMs: 0, rereadMs: 0, notesMs: 0, storeCommitMs: 0, ledgerCommitMs: 0 };
+}
+
+function timed<T>(timings: TierMoveTimings | undefined, step: keyof TierMoveTimings, work: () => T): T {
+  const started = performance.now();
+  try { return work(); } finally { if (timings) timings[step] += performance.now() - started; }
+}
+
 export interface TierMoveOptions {
+  timings?: TierMoveTimings;
   set: TieredStoreSet;
-  identity: Pick<SourceItemIdentity, 'provider' | 'accountScope' | 'providerItemId' | 'providerConversationId' | 'family' | 'localItemId'>;
+  identity: Pick<SourceItemIdentity, 'provider' | 'accountScope' | 'providerItemId' | 'providerConversationId'> & Partial<Pick<SourceItemIdentity, 'family' | 'localItemId'>>;
   /** The tiers to move to. Required unless `decision` is given. */
   target?: { metadataTier: TierKey; contentTier: TierKey };
   /**
@@ -98,6 +116,8 @@ export interface TierMoveOptions {
    * only into a store whose identity is given here and matches the vectors'.
    */
   vectorIdentities?: Partial<Record<SourceTrustDomain, TierMoveEmbeddingIdentity>>;
+  /** Resolve from the fenced export without a second, unfenced store export. */
+  vectorIdentitiesFor?: (copy: ConnectorStoreItemCopy) => Partial<Record<SourceTrustDomain, TierMoveEmbeddingIdentity>>;
   /** Overrides the Secrets policy (secrets-disposition.ts); tests only. */
   secretsDisposition?: SecretsDisposition;
   /** Where to record the move. Omitted: nothing is appended (tests only). */
@@ -171,8 +191,76 @@ export async function moveTieredItem(options: TierMoveOptions): Promise<TierMove
     return moveToSecrets(options, record.generation);
   }
   const result = moveTieredItemNow(options);
-  await flushTierMoveNotes(options.set.ledger);
+  await flushTierMoveNotes(options.set.ledger, options.timings ? { timings: options.timings } : {});
   return result;
+}
+
+/**
+ * Lowerings only. Commit order is stores -> verified receipts -> flips.
+ * A death before receipts commits leaves hidden destination rows and intact
+ * sources; a death after it resumes the normal verified move. No store write
+ * can roll back after its destination has become searchable.
+ */
+export function moveTieredItemsLowering(
+  moves: readonly TierMoveOptions[],
+  options: { shouldStop?: () => boolean; afterCopiesCommitted?: () => void } = {},
+): Array<{ result: TierMoveResult } | { error: unknown }> {
+  if (!moves.length) return [];
+  const set = moves[0]!.set;
+  if (moves.some(move => move.set !== set)) throw new TierMoveRefusedError('A lowering batch belongs to one set.');
+  const timings = moves[0]!.timings;
+  // Open destinations before taking any writer locks. Public is lazy.
+  for (const move of moves) {
+    const target = move.decision ?? move.target;
+    if (!target || target.metadataTier === 'secrets' || target.contentTier === 'secrets') {
+      throw new TierMoveRefusedError('Secrets cannot enter a lowering batch.');
+    }
+    for (const tier of [target.metadataTier, target.contentTier]) {
+      set.store(tier === 'public' ? 'public_safe' : tier === 'private' ? 'internal' : 'secure_local', { create: true });
+    }
+  }
+  const stores = set.openStores().sort((a, b) => a.corpusId.localeCompare(b.corpusId));
+  const inStores = <T>(index: number, work: () => T): T => {
+    const store = stores[index];
+    return store ? store.withItemCopyBatch(() => inStores(index + 1, work), ms => {
+      if (timings) timings.storeCommitMs += ms;
+    }) : work();
+  };
+  const prepared: Array<{ move: TierMoveOptions; receipt: VerifiedMove } | { error: unknown }> = [];
+  set.ledger.withMoveBatch(() => {
+    inStores(0, () => {
+      for (const move of moves) {
+        if (options.shouldStop?.()) break;
+        try {
+          // Savepoints across every database isolate a refused item from its
+          // neighbours. The outer transactions amortize durable commits.
+          const receipt = set.ledger.withMoveBatch(() => inStores(0, () => prepareTieredMove(move, undefined, true)));
+          prepared.push({ move, receipt });
+        } catch (error) { prepared.push({ error }); }
+      }
+    });
+    options.afterCopiesCommitted?.();
+  }, ms => { if (timings) timings.ledgerCommitMs += ms; });
+  const results: Array<{ result: TierMoveResult } | { error: unknown }> = [];
+  // Keep destination writer fences until the *batch* flip commits, just as
+  // the single-item path keeps its destination stable through its flip.
+  // These store transactions contain only no-op fences, never copied data.
+  inStores(0, () => set.ledger.withMoveBatch(() => {
+    for (const entry of prepared) {
+      if ('error' in entry) { results.push(entry); continue; }
+      // Hooks run only AFTER the copies and receipts are durable.
+      entry.move.beforeFlip?.();
+      entry.move.afterVerified?.();
+      try { results.push({ result: flipVerifiedMove(entry.move, entry.receipt) }); }
+      catch (error) { results.push({ error }); }
+    }
+  }, ms => { if (timings) timings.ledgerCommitMs += ms; }));
+  // Best-effort extraction rereads follow durable flips, outside all store
+  // and tier-ledger writer locks, as on the single-item path.
+  results.forEach((result, index) => {
+    if ('result' in result) timed(moves[index]!.timings, 'rereadMs', () => oweExtractionRereads(set.ledger, moves[index]!.identity));
+  });
+  return results;
 }
 
 /** Historical repair reuses the normal verified move, without writing any lower store. */
@@ -189,6 +277,13 @@ export function promoteLowerTierContent(
 }
 
 function moveTieredItemNow(options: TierMoveOptions, repairSource?: TierCopy): TierMoveResult {
+  const receipt = prepareTieredMove(options, repairSource);
+  options.beforeFlip?.();
+  options.afterVerified?.();
+  return finishVerifiedMove(options, receipt);
+}
+
+function prepareTieredMove(options: TierMoveOptions, repairSource?: TierCopy, loweringOnly = false): VerifiedMove {
   const { set, identity, decision } = options;
   const target = decision
     ? { metadataTier: decision.metadataTier, contentTier: decision.contentTier }
@@ -215,8 +310,8 @@ function moveTieredItemNow(options: TierMoveOptions, repairSource?: TierCopy): T
     const receipt = receiptToResume;
     if (receipt.generation !== record.generation || receipt.target.metadataTier !== target.metadataTier
       || receipt.target.contentTier !== target.contentTier) throw new TierLedgerGenerationConflictError();
-    const result = finishVerifiedMove(options, receipt);
-    return result;
+    if (loweringOnly && receipt.raise) throw new TierMoveRefusedError('Raises cannot enter a lowering batch.');
+    return receipt;
   }
 
   // Without a decision the move keeps what the ledger knows about the text:
@@ -247,11 +342,12 @@ function moveTieredItemNow(options: TierMoveOptions, repairSource?: TierCopy): T
     throw new TierMoveRefusedError('Repair cannot write a lower destination.');
   }
   const raise = !!repairSource || placementIsRaise(sources, placement.copies);
+  if (loweringOnly && raise) throw new TierMoveRefusedError('Raises cannot enter a lowering batch.');
   const exports = new Map<string, ConnectorStoreItemCopy | undefined>();
   const exportFrom = (copy: Pick<TierCopy, 'corpusId'>): ConnectorStoreItemCopy | undefined => {
     if (!exports.has(copy.corpusId)) {
       const domain = set.domainForCorpus(copy.corpusId);
-      exports.set(copy.corpusId, domain ? set.store(domain)?.exportItemCopy(identity) : undefined);
+      exports.set(copy.corpusId, timed(options.timings, 'exportMs', () => domain ? set.store(domain)?.exportItemCopy(identity) : undefined));
     }
     return exports.get(copy.corpusId);
   };
@@ -298,13 +394,13 @@ function moveTieredItemNow(options: TierMoveOptions, repairSource?: TierCopy): T
   }
 
   // 1. Stage (a raise hides the source first).
-  ledger.stageMove(identity, {
+  timed(options.timings, 'stageMs', () => ledger.stageMove(identity, {
     expectedGeneration: record.generation,
     target,
     destination: placement.copies,
     hideSource: raise,
     ...(placement.embedHold ? { embedHold: true } : {}),
-  });
+  }));
 
   // 2. Write what each destination lacks, from the source stores.
   let destinations: TierMoveDestination[] = [];
@@ -368,14 +464,15 @@ function moveTieredItemNow(options: TierMoveOptions, repairSource?: TierCopy): T
           : { ...exported, chunks: [], vectors: [], vectorAuthorities: [] };
         const store = set.store(planned.trustDomain, { create: true })!;
         store.bindTierSet(ledger);
-        const vectorIdentity = wantsContent ? options.vectorIdentities?.[planned.trustDomain] : undefined;
-        const written = store.importItemCopy(payload, {
+        const vectorIdentity = wantsContent ? (options.vectorIdentitiesFor?.(exported) ?? options.vectorIdentities)?.[planned.trustDomain] : undefined;
+        const written = timed(options.timings, 'copyMs', () => store.importItemCopy(payload, {
           trustTier: defaultStoreTrustTier(planned.trustDomain),
           syncConnectorId: TIER_MOVE_CONNECTOR_ID,
           layers: planned.layers,
           ...(repairSource && wantsContent ? { sourceTextCurrent: true } : {}),
           ...(vectorIdentity ? { vectorProvider: vectorIdentity } : {}),
-        });
+          vectorCopyMs: ms => { if (options.timings) options.timings.vectorsMs += ms; },
+        }));
         destinations.push({
           corpusId: planned.corpusId,
           trustDomain: planned.trustDomain,
@@ -402,24 +499,21 @@ function moveTieredItemNow(options: TierMoveOptions, repairSource?: TierCopy): T
         rehomeTagged, replacedSuperseded,
         placement: placement.copies, flipOptions,
         // Store hashes, not text: verification survives a source purge and restart.
-        fingerprints: Object.fromEntries(placement.copies.map(copy => {
+        fingerprints: timed(options.timings, 'verifyMs', () => Object.fromEntries(placement.copies.map(copy => {
           const exported = set.store(copy.trustDomain)?.exportItemCopy(identity);
           if (!exported) throw new Error('Destination verification failed.');
           const wanted = copy.layers === 'metadata' ? undefined : exportFrom(contentSource ?? sources[0]!);
           if (wanted && (exported.chunks.length !== wanted.chunks.length || !exported.chunks.every((chunk, index) =>
             chunk.chunkIndex === wanted.chunks[index]!.chunkIndex && chunk.boundedText === wanted.chunks[index]!.boundedText))) throw new Error('Destination content verification failed.');
           return [copy.corpusId, copyFingerprint(exported, copy.layers)];
-        })),
+        }))),
       };
       ledger.writeMeta(receiptKey, JSON.stringify(verified));
       return verified;
     };
     return copyWithLockedSources(0);
   });
-  options.beforeFlip?.();
-  options.afterVerified?.();
-  const result = finishVerifiedMove(options, receipt);
-  return result;
+  return receipt;
 }
 
 /** Resume only a durably verified move, without exporting its lower source. */
@@ -445,7 +539,7 @@ interface VerifiedMove {
   replacedSuperseded?: Record<string, number>;
 }
 
-type VerifiedMoveOptions = Pick<TierMoveOptions, 'set' | 'embeddingLedger' | 'afterPurge'> & { identity: TierLedgerIdentity };
+type VerifiedMoveOptions = Pick<TierMoveOptions, 'set' | 'embeddingLedger' | 'afterPurge' | 'timings'> & { identity: TierLedgerIdentity };
 
 const MOVE_NOTE_PREFIX = 'tier-move-note:';
 
@@ -475,23 +569,33 @@ function queueMoveNote(options: VerifiedMoveOptions, receipt: VerifiedMove, resu
 }
 
 /** Retry durable note writes even when the move receipt has already been cleared. */
-export async function flushTierMoveNotes(ledger: TierLedger): Promise<void> {
-  let logged = false;
-  for (const { key, value } of ledger.metaEntries(MOVE_NOTE_PREFIX)) {
-    try {
-      const note = JSON.parse(value) as { path: string; entry: EmbeddingLedgerEntry };
-      await appendEmbeddingLedgerEntryOnce(note.path, note.entry);
-      if (ledger.readMeta(key) === value) ledger.writeMeta(key, '');
-    } catch (error) {
-      // Notes never change the outcome of a landed move. Retain each failed
-      // obligation, try the others, and emit at most one content-free line.
-      if (!logged) {
-        const code = (error as { code?: unknown } | null)?.code;
-        console.warn(`[tier-move-note] kind=note code=${typeof code === 'string' && /^[A-Z0-9_]{1,32}$/.test(code) ? code : 'UNKNOWN'}`);
-        logged = true;
+export async function flushTierMoveNotes(ledger: TierLedger, options: {
+  timings?: TierMoveTimings; shouldStop?: () => boolean;
+} = {}): Promise<void> {
+  const started = performance.now();
+  try {
+    let logged = false;
+    const written: Array<{ key: string; value: string }> = [];
+    for (const { key, value } of ledger.metaEntries(MOVE_NOTE_PREFIX, { limit: options.shouldStop ? 1000 : -1 })) {
+      if (options.shouldStop?.()) break;
+      try {
+        const note = JSON.parse(value) as { path: string; entry: EmbeddingLedgerEntry };
+        await appendEmbeddingLedgerEntryOnce(note.path, note.entry);
+        written.push({ key, value });
+      } catch (error) {
+        // Notes never change the outcome of a landed move. Retain each failed
+        // obligation, try the others, and emit at most one content-free line.
+        if (!logged) {
+          const code = (error as { code?: unknown } | null)?.code;
+          console.warn(`[tier-move-note] kind=note code=${typeof code === 'string' && /^[A-Z0-9_]{1,32}$/.test(code) ? code : 'UNKNOWN'}`);
+          logged = true;
+        }
       }
     }
-  }
+    if (written.length) ledger.withMoveBatch(() => {
+      for (const { key, value } of written) if (ledger.readMeta(key) === value) ledger.writeMeta(key, '');
+    });
+  } finally { if (options.timings) options.timings.notesMs += performance.now() - started; }
 }
 
 function purgeReceiptKey(identity: TierLedgerIdentity): string {
@@ -534,7 +638,7 @@ function copyFingerprint(copy: ConnectorStoreItemCopy, layers: TierCopyLayers): 
 
 function finishVerifiedMove(options: VerifiedMoveOptions, receipt: VerifiedMove): TierMoveResult {
   const result = flipVerifiedMove(options, receipt);
-  oweExtractionRereads(options.set.ledger, options.identity);
+  timed(options.timings, 'rereadMs', () => oweExtractionRereads(options.set.ledger, options.identity));
   return result;
 }
 
@@ -570,13 +674,15 @@ function flipVerifiedMove(options: VerifiedMoveOptions, receipt: VerifiedMove): 
   return stableStore.withItemCopyWriteFence(identity, () => {
     // The content destination stays stable. Verification precedes the ledger
     // writer, so exporting large content never monopolizes routing writes.
-    for (const copy of receipt.placement) {
-      const stored = set.store(copy.trustDomain)?.exportItemCopy(identity);
-      if (!stored || copyFingerprint(stored, copy.layers) !== receipt.fingerprints[copy.corpusId]) {
-        throw new Error('Verified move destination changed; source remains held.');
+    timed(options.timings, 'verifyMs', () => {
+      for (const copy of receipt.placement) {
+        const stored = set.store(copy.trustDomain)?.exportItemCopy(identity);
+        if (!stored || copyFingerprint(stored, copy.layers) !== receipt.fingerprints[copy.corpusId]) {
+          throw new Error('Verified move destination changed; source remains held.');
+        }
       }
-    }
-    return ledger.withGenerationFence(identity, receipt.generation, () => {
+    });
+    return timed(options.timings, 'flipMs', () => ledger.withGenerationFence(identity, receipt.generation, () => {
       const record = ledger.getCurrent(identity)!;
       // An abandoned/replaced move can reuse the same generation and target.
       // Only the still-authoritative durable receipt may authorize this flip.
@@ -607,8 +713,8 @@ function flipVerifiedMove(options: VerifiedMoveOptions, receipt: VerifiedMove): 
           if (!store || store.tierSetBinding()?.ledgerId !== ledger.ledgerId()) {
             throw new Error('Lower store unavailable or ledger binding changed; move purge remains pending.');
           }
-          store.stripCopyContent(identity, { keepMetadata: !!metadata
-            && trustDomainRank(copy.trustDomain) >= trustDomainRank(metadata.trustDomain) });
+          timed(options.timings, 'purgeMs', () => store.stripCopyContent(identity, { keepMetadata: !!metadata
+            && trustDomainRank(copy.trustDomain) >= trustDomainRank(metadata.trustDomain) }));
         }
       }
       if (receipt.raise && content) ledger.writeMeta(`tier-content-purged:${tierLedgerIdentityKey(identity)}`, String(flipped.generation));
@@ -623,11 +729,12 @@ function flipVerifiedMove(options: VerifiedMoveOptions, receipt: VerifiedMove): 
       };
       queueMoveNote(options, receipt, result);
       return result;
-    });
+    }));
   });
 }
 
 async function moveToSecrets(options: TierMoveOptions, expectedGeneration: number): Promise<TierMoveResult> {
+  fullIdentity(options.identity); // Refuse incomplete Secrets identity before hiding or deleting.
   const { set, identity } = options;
   const ledger = set.ledger;
   // One write hides every copy; what happens to them next is the Secrets
@@ -717,6 +824,7 @@ function layersCover(held: TierCopyLayers, wanted: TierCopyLayers): boolean {
 }
 
 function fullIdentity(identity: TierMoveOptions['identity']): SourceItemIdentity {
+  if (!identity.family || !identity.localItemId) throw new TierMoveRefusedError('Secrets requires a full source identity.');
   return {
     family: identity.family,
     provider: identity.provider,

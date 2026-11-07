@@ -41,7 +41,7 @@ import {
 import { TIER_LEDGER_SQLITE_STORE_ID, tierLedgerPathForStore } from './tier-ledger-path.ts';
 
 export { TIER_LEDGER_SQLITE_STORE_ID, tierLedgerPathForStore };
-export const TIER_LEDGER_SCHEMA_VERSION = 11;
+export const TIER_LEDGER_SCHEMA_VERSION = 12;
 
 /** A scrub's start: the revision it took and the item's generation then. */
 export interface SecretScrubMark {
@@ -900,10 +900,19 @@ export class TierLedger {
    * failing goes to the back of the queue, so it never holds the head of a
    * bounded page while moves behind it could land.
    */
-  listMoving(options: { limit?: number } = {}): TierLedgerRecord[] {
+  listMoving(options: { limit?: number; direction?: 'raise' | 'lower' } = {}): TierLedgerRecord[] {
     const limit = Math.max(1, Math.min(options.limit ?? 100, 5_000));
+    // A hide-first move also wins if it was retargeted at the same tiers.
+    const rank = (column: string) => `(CASE ${column} WHEN 'secrets' THEN 3 WHEN 'secure' THEN 2 WHEN 'private' THEN 1 ELSE 0 END)`;
+    const raising = `(${rank('target_metadata_tier')} > ${rank('metadata_tier')}
+      OR ${rank('target_content_tier')} > ${rank('content_tier')}
+      OR EXISTS (SELECT 1 FROM tier_copies c WHERE c.provider = tier_items.provider
+        AND c.account_scope = tier_items.account_scope AND c.provider_item_id = tier_items.provider_item_id
+        AND c.conversation_key = tier_items.conversation_key AND c.copy_state = 'superseded'
+        AND c.superseded_by_generation = tier_items.generation + 1))`;
     const rows = this.db.query(`
       SELECT * FROM tier_items INDEXED BY tier_items_move_order WHERE state = 'moving'
+      ${options.direction ? `AND ${options.direction === 'lower' ? 'NOT' : ''} ${raising}` : ''}
       ORDER BY move_attempts, decided_at, provider, account_scope, provider_item_id, conversation_key
       LIMIT ?
     `).all(limit);
@@ -1973,8 +1982,9 @@ export class TierLedger {
 
   /** Small durable work receipts, without exporting any store content. */
   metaEntries(prefix: string, options: { after?: string; limit?: number } = {}): Array<{ key: string; value: string }> {
-    return this.db.query('SELECT key, value FROM tier_ledger_meta WHERE key >= ? AND key < ? AND key > ? AND value <> ? ORDER BY key LIMIT ?')
-      .all(prefix, `${prefix}\uffff`, options.after ?? '', '', options.limit ?? -1) as Array<{ key: string; value: string }>;
+    return this.db.query(`SELECT key, value FROM tier_ledger_meta INDEXED BY tier_ledger_pending_meta
+      WHERE key >= ? AND key < ? AND key > ? AND value <> '' ORDER BY key LIMIT ?`)
+      .all(prefix, `${prefix}\uffff`, options.after ?? '', options.limit ?? -1) as Array<{ key: string; value: string }>;
   }
 
   /** Hold the ledger write lock across a synchronous cross-store cleanup.
@@ -1987,6 +1997,18 @@ export class TierLedger {
       if (this.getCurrent(identity)?.generation !== generation) throw new TierLedgerGenerationConflictError();
       return work();
     })();
+  }
+
+  /** Lowering batches commit their store copies before publishing receipts. */
+  withMoveBatch<T>(work: () => T, committed?: (ms: number) => void): T {
+    let bodyMs = 0;
+    const started = performance.now();
+    const result = this.db.transaction(() => {
+      const bodyStarted = performance.now();
+      try { return work(); } finally { bodyMs = performance.now() - bodyStarted; }
+    }).immediate();
+    committed?.(performance.now() - started - bodyMs);
+    return result;
   }
 
   /**
@@ -4837,7 +4859,7 @@ function tierLedgerMigrations(): SqliteMigration[] {
       },
     },
     {
-      version: TIER_LEDGER_SCHEMA_VERSION,
+      version: 11,
       name: 'incremental_copy_visibility',
       up(db) {
         db.exec(`
@@ -4867,6 +4889,15 @@ function tierLedgerMigrations(): SqliteMigration[] {
               BEGIN ${note('OLD')} ${note('NEW')} END;
           `);
         }
+      },
+    },
+    {
+      version: TIER_LEDGER_SCHEMA_VERSION,
+      name: 'pending_move_metadata',
+      up(db) {
+        // Completed obligations remain recorded as empty acknowledgements.
+        // Never rescan that growing history to find the few pending notes.
+        db.exec(`CREATE INDEX IF NOT EXISTS tier_ledger_pending_meta ON tier_ledger_meta (key) WHERE value <> '';`);
       },
     },
   ];
