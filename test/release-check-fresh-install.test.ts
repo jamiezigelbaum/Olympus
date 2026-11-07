@@ -1,0 +1,161 @@
+import { sourceCard, sourceConnected } from '../scripts/release-check/source-cards.ts';
+import { spawnSync } from 'node:child_process';
+import { describe, expect, test } from 'bun:test';
+import { canaryVerdict } from '../scripts/release-check/canary.ts';
+import { consentBlock, FRESH_LEG, FreshInconclusive, GUARD, redactFreshDetail, runFreshInstall, scopeAbsent, validateFreshSources, type ConsentSnapshot } from '../scripts/release-check/fresh-install.ts';
+import { parseCdpEndpoint, type FreshDashboard } from '../scripts/release-check/fresh-dashboard.ts';
+import type { LiveSourceSpec, EngineMcp } from '../scripts/release-check/live-accounts.ts';
+import type { Machine } from '../scripts/release-check/machine.ts';
+
+const sources: LiveSourceSpec[] = ['gmail', 'dropbox'].map(id => ({ id, label: id === 'gmail' ? 'Gmail' : 'Dropbox', known: { question: `${id} inside?`, expect: ['inside fact'] }, fresh: { scope: 'Canary', outside: { question: `${id} outside?`, expect: ['outside-unique-fact', 'outside-unique-title'] } } }));
+const snapshot = (extra: Partial<ConsentSnapshot> = {}): ConsentSnapshot => ({ url: 'https://accounts.google.com/consent', text: 'Advanced Go to Olympus (unsafe) Continue', password: false, accounts: 0, signedOut: false, ...extra });
+const response = (structured: unknown, ok = true) => ({ ok, structured, text: '' });
+
+function rig(failAt?: string, inconclusive = false) {
+  const events: string[] = [];
+  const commands: string[] = [];
+  const step = async (name: string) => {
+    events.push(name);
+    if (name === failAt) throw inconclusive ? new FreshInconclusive('renew Google sign-in: password') : new Error('test failure https://example.com/?code=secret&state=secret');
+  };
+  const machine: Machine = {
+    handle: 'test-omarchy', label: 'test', os: 'linux', driver: 'fake',
+    exec: async script => {
+      commands.push(script);
+      if (script.includes('rm -f ') && script.includes('/lease')) await step('restore');
+      if (script.includes('sh "$HOME/.olympus-canary/install-linux.sh"')) await step('install');
+      return { code: 0, stdout: '', stderr: '', ms: 0, timedOut: false };
+    },
+    put: async () => {}, get: async () => {}, upgrade: async () => {},
+  };
+  const dashboard: FreshDashboard = {
+    connect: s => step(`${s.id}.connect`), consent: s => step(`${s.id}.consent`), callback: s => step(`${s.id}.callback`), scope: s => step(`${s.id}.scope`),
+    indexed: async s => { await step(`${s.id}.first-items`); return 2; },
+    close: () => step('dashboard.close'),
+  };
+  const engine: EngineMcp = {
+    call: async (tool, args) => {
+      if (tool === 'source_index_status') return response({ corpora: sources.map(s => ({ corpus_id: s.id, label: s.label, configured: true, last_refresh: { status: 'completed', completed_at: new Date().toISOString() }, counts: { indexed_items: 2 } })) });
+      const outside = String(args.question).includes('outside');
+      const source = sources.find(s => String(args.question).includes(s.id))!;
+      if (tool === 'olympus_search') return response({ evidence: outside ? [] : [{ source: source.label, title: 'inside', excerpt: 'inside fact' }] });
+      return response({ status: 'answered', answer: outside ? 'I could not find that information.' : 'inside fact', citations: outside ? [] : [{ label: source.label, title: 'inside' }] });
+    },
+    close: () => step('engine.close'),
+  };
+  return { events, commands, machine, options: { sources, dashboard: async () => dashboard, engine: async () => engine, sleep: async () => {} } };
+}
+
+describe('fresh install canary', () => {
+  test('named persisted checks run in order, reuse account searches, then restore', async () => {
+    const r = rig();
+    const { checks } = await runFreshInstall(r.machine, r.options);
+    expect(canaryVerdict(checks)).toBe('pass');
+    expect(FRESH_LEG).toBe('canary-test-omarchy-fresh');
+    expect(checks.map(c => c.id)).toEqual([
+      'fresh.install', 'fresh.engine-up', 'fresh.dashboard-opens',
+      ...sources.flatMap(s => ['connect', 'consent', 'callback', 'scope', 'first-items'].map(step => `fresh.${s.id}.${step}`)),
+      'live.gmail.status', 'live.dropbox.status', 'live.gmail.known', 'live.dropbox.known',
+      'fresh.gmail.answer', 'fresh.gmail.scope-absence', 'fresh.dropbox.answer', 'fresh.dropbox.scope-absence', 'fresh.restore-zig',
+    ]);
+    expect(r.events.slice(-3)).toEqual(['engine.close', 'dashboard.close', 'restore']);
+    expect(checks.find(c => c.id === 'fresh.gmail.first-items')?.detail).toBe('2 item(s) indexed');
+    expect(r.commands.some(c => c.includes('OLYMPUS_EMAIL_SOURCE_PORT'))).toBe(false);
+    expect(r.commands.some(c => c.includes('loginctl enable-linger olyfresh'))).toBe(true);
+    for (const script of [...r.commands, GUARD]) {
+      const syntax = spawnSync('bash', ['-n'], { input: script, encoding: 'utf8' });
+      expect(syntax.stderr).toBe('');
+      expect(syntax.status).toBe(0);
+    }
+  });
+  test('candidate uses the non-interactive site installer as olyfresh', async () => {
+    const r = rig();
+    const puts: Array<[string, string]> = [];
+    r.machine.put = async (from, to) => { puts.push([from, to]); };
+    const { checks } = await runFreshInstall(r.machine, { ...r.options, bundle: { installer: '/job/install-linux.sh', tarball: '/job/candidate.tgz' } });
+    expect(canaryVerdict(checks)).toBe('pass');
+    expect(puts).toEqual([
+      ['/job/install-linux.sh', '/home/zig/.olympus-canary/fresh-run/install-linux.sh'],
+      ['/job/candidate.tgz', '/home/zig/.olympus-canary/fresh-run/candidate.tgz'],
+    ]);
+    const install = r.commands.find(c => c.includes('sh "$HOME/.olympus-canary/install-linux.sh"'))!;
+    expect(install).toContain('sudo -n -u olyfresh');
+    expect(install).toContain('--tarball');
+    expect(install).toContain('< /dev/null');
+    expect(r.events.at(-1)).toBe('restore');
+  });
+  for (const failure of ['install', 'gmail.connect', 'gmail.consent', 'gmail.scope', 'dropbox.first-items']) {
+    test(`restores zig when ${failure} fails and stops dependent checks`, async () => {
+      const r = rig(failure);
+      const { checks } = await runFreshInstall(r.machine, r.options);
+      expect(canaryVerdict(checks)).toBe('fail');
+      expect(checks.filter(c => c.status === 'fail')).toHaveLength(1);
+      expect(r.events.at(-1)).toBe('restore');
+      expect(checks.at(-1)?.id).toBe('fresh.restore-zig');
+      expect(JSON.stringify(checks)).not.toContain('secret');
+    });
+  }
+  test('consent authentication is inconclusive and still restores', async () => {
+    const r = rig('gmail.consent', true);
+    const { checks } = await runFreshInstall(r.machine, r.options);
+    expect(canaryVerdict(checks)).toBe('inconclusive');
+    expect(checks.find(c => c.status === 'skip')?.detail).toContain('renew Google');
+    expect(r.events.at(-1)).toBe('restore');
+    expect(r.events).not.toContain('gmail.scope');
+  });
+  test('handled interrupt unwinds after installation and restores zig', async () => {
+    const r = rig();
+    const exec = r.machine.exec;
+    r.machine.exec = async (script, options) => {
+      const result = await exec(script, options);
+      if (script.includes('sh "$HOME/.olympus-canary/install-linux.sh"')) process.emit('SIGTERM', 'SIGTERM');
+      return result;
+    };
+    const { checks } = await runFreshInstall(r.machine, r.options);
+    expect(checks.find(c => c.status === 'fail')?.id).toBe('fresh.install');
+    expect(r.events.at(-1)).toBe('restore');
+    expect(r.events).not.toContain('gmail.connect');
+  });
+  test('shared source cards preserve every disconnected state', () => {
+    const view = { sources: [{ provider: 'gmail', connection: { state: 'synced' } }] };
+    expect(sourceConnected(sourceCard(view, 'gmail'))).toBe(true);
+    expect(sourceConnected(sourceCard(view, 'dropbox'))).toBe(false);
+    for (const state of ['not_connected', 'needs_setup', 'awaiting_consent', 'reauth_required']) expect(sourceConnected({ connection: { state } })).toBe(false);
+  });
+  test('restore failure overrides inconclusive', async () => {
+    const r = rig('restore');
+    const { checks } = await runFreshInstall(r.machine, r.options);
+    expect(checks.at(-1)?.status).toBe('fail');
+    expect(canaryVerdict(checks)).toBe('fail');
+  });
+  test('guard traps runner loss and expiry; installation cannot change the port', () => {
+    expect(GUARD).toContain('trap restore EXIT');
+    expect(GUARD).toContain("trap 'exit 1' HUP INT TERM");
+    expect(GUARD).toContain('systemctl --user start olympus-engine.service');
+    expect(GUARD).toContain('/dev/tcp/127.0.0.1/8010');
+  });
+  test('accepts consent and one signed-in account, blocks authentication and ambiguity', () => {
+    expect(consentBlock(snapshot())).toBeUndefined();
+    expect(consentBlock(snapshot({ text: 'Choose an account', accounts: 1 }))).toBeUndefined();
+    for (const s of [snapshot({ password: true }), snapshot({ text: '2-Step Verification' }), snapshot({ text: 'Two-step verification' }), snapshot({ text: 'Enter the code' }), snapshot({ text: 'Check your phone' }), snapshot({ signedOut: true }), snapshot({ text: 'Choose an account', accounts: 2 }), snapshot({ text: 'Choose an account', accounts: 0 })]) expect(consentBlock(s)).toBeDefined();
+    expect(consentBlock(snapshot({ url: 'https://www.dropbox.com/login' }))).toBe('signed out');
+  });
+  test('outside item must be absent from both answer and search; unreadable results fail', () => {
+    const good = response({ status: 'answered', answer: 'No information found', citations: [] });
+    const empty = response({ evidence: [] });
+    expect(scopeAbsent(sources[0]!, good, empty)).toBe(true);
+    expect(scopeAbsent(sources[0]!, response({ status: 'answered', answer: 'OUTSIDE-UNIQUE-FACT', citations: [] }), empty)).toBe(false);
+    expect(scopeAbsent(sources[0]!, good, response({ evidence: [{ title: 'outside-unique-title' }] }))).toBe(false);
+    expect(scopeAbsent(sources[0]!, response({ status: 'answered', answer: '', citations: [{ title: 'outside-unique-title' }] }), empty)).toBe(false);
+    expect(scopeAbsent(sources[0]!, response(null, false), empty)).toBe(false);
+    expect(scopeAbsent(sources[0]!, good, response(null))).toBe(false);
+  });
+  test('requires both sources with nonempty positive and outside fixtures', () => {
+    expect(validateFreshSources(sources)).toEqual(sources);
+    expect(() => validateFreshSources([])).toThrow('gmail');
+    expect(() => validateFreshSources([{ ...sources[0]!, fresh: { scope: 'x', outside: { question: 'x', expect: [] } } }])).toThrow();
+    expect(parseCdpEndpoint('127.0.0.1:9333')).toEqual({ host: '127.0.0.1', port: 9333 });
+    expect(() => parseCdpEndpoint('x:70000')).toThrow();
+    expect(redactFreshDetail('https://a/?code=SECRET&state=SECRET token=OTHER')).not.toMatch(/SECRET|OTHER/);
+  });
+});
