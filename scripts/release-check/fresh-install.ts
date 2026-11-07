@@ -6,7 +6,8 @@ import { openFreshDashboard, type FreshDashboard } from './fresh-dashboard.ts';
 
 export const FRESH_LEG = 'canary-test-omarchy-fresh';
 export const quote = (s: string): string => `'${s.replace(/'/g, `'\\''`)}'`;
-export const asFresh = (script: string): string => `sudo -n -u olyfresh env HOME=/home/olyfresh XDG_CONFIG_HOME=/home/olyfresh/.config XDG_DATA_HOME=/home/olyfresh/.local/share XDG_STATE_HOME=/home/olyfresh/.local/state XDG_RUNTIME_DIR=/run/user/$(id -u olyfresh) DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$(id -u olyfresh)/bus bash -c ${quote(script)}`;
+// sudo keeps the caller's cwd; zig's 0700 home makes every olyfresh child spawn fail with EACCES.
+export const asFresh = (script: string): string => `sudo -n -u olyfresh env HOME=/home/olyfresh XDG_CONFIG_HOME=/home/olyfresh/.config XDG_DATA_HOME=/home/olyfresh/.local/share XDG_STATE_HOME=/home/olyfresh/.local/state XDG_RUNTIME_DIR=/run/user/$(id -u olyfresh) DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$(id -u olyfresh)/bus bash -c ${quote(`cd "$HOME" || exit 1\n${script}`)}`;
 export const freshMachine = (machine: Machine): Machine => ({ ...machine, exec: (script, options) => machine.exec(asFresh(script), options) });
 
 export interface ConsentSnapshot { url: string; text: string; password: boolean; accounts: number; signedOut: boolean }
@@ -52,7 +53,7 @@ export function validateFreshSources(sources: LiveSourceSpec[]): LiveSourceSpec[
 
 const ROOT = '"$HOME/.olympus-canary/fresh-run"';
 export const FRESH_BRIDGE_PID = '/home/olyfresh/.olympus-canary/owner-bridge.pid';
-export const SOCKET_READY = 'curl -fsS --max-time 2 --unix-socket "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/olympus/worker.sock" http://127.0.0.1:8010/health > /dev/null';
+export const SOCKET_READY = 'curl -fsS --max-time 2 --unix-socket "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/olympus/worker.sock" http://127.0.0.1:8010/v1/health > /dev/null';
 /** A machine-side lease survives runner disconnects. EXIT/HUP/INT/TERM and expiry all restore zig. */
 export const GUARD = `set -euo pipefail
 restore() {

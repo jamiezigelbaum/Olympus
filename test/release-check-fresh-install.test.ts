@@ -1,8 +1,11 @@
 import { sourceCard, sourceConnected } from '../scripts/release-check/source-cards.ts';
 import { spawnSync } from 'node:child_process';
+import { mkdtempSync, realpathSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, test } from 'bun:test';
 import { canaryVerdict } from '../scripts/release-check/canary.ts';
-import { consentBlock, FRESH_LEG, FreshInconclusive, GUARD, SOCKET_READY, redactFreshDetail, runFreshInstall, scopeAbsent, validateFreshSources, type ConsentSnapshot } from '../scripts/release-check/fresh-install.ts';
+import { asFresh, consentBlock, FRESH_LEG, FreshInconclusive, GUARD, SOCKET_READY, redactFreshDetail, runFreshInstall, scopeAbsent, validateFreshSources, type ConsentSnapshot } from '../scripts/release-check/fresh-install.ts';
 import { parseCdpEndpoint, type FreshDashboard } from '../scripts/release-check/fresh-dashboard.ts';
 import type { LiveSourceSpec, EngineMcp } from '../scripts/release-check/live-accounts.ts';
 import type { Machine } from '../scripts/release-check/machine.ts';
@@ -123,6 +126,17 @@ describe('fresh install canary', () => {
     expect(r.events.at(-1)).toBe('restore');
     expect(r.events).not.toContain('gmail.connect');
   });
+  test('fresh-user commands start in the fresh home, not the caller\'s unreadable cwd', () => {
+    const home = mkdtempSync(join(tmpdir(), 'olyfresh-home-'));
+    const callerCwd = mkdtempSync(join(tmpdir(), 'zig-cwd-'));
+    const command = asFresh('pwd');
+    expect(command.startsWith('sudo -n -u olyfresh env HOME=/home/olyfresh ')).toBe(true);
+    const local = command.replace('sudo -n -u olyfresh env HOME=/home/olyfresh ', `env HOME=${home} `);
+    const run = spawnSync('bash', ['-c', local], { cwd: callerCwd, encoding: 'utf8' });
+    expect(run.status).toBe(0);
+    expect(realpathSync(run.stdout.trim())).toBe(realpathSync(home));
+  }, 30_000);
+
   test('shared source cards preserve every disconnected state', () => {
     const view = { sources: [{ provider: 'gmail', connection: { state: 'synced' } }] };
     expect(sourceConnected(sourceCard(view, 'gmail'))).toBe(true);
