@@ -35,11 +35,12 @@ describe('OpenClaw worker CLI launcher', () => {
       expect(lstatSync(path).mode & 0o777).toBe(0o700);
       expect(readFileSync(path, 'utf8').split('\n')[1]).toBe(WORKER_CLI_LAUNCHER_MARKER);
       writeFileSync(join(home, '.profile'), 'PATH="$HOME/.local/bin:/usr/bin:/bin"; export PATH\n');
-      const launched = run(['/bin/sh', '-lc', 'command -v olympus; olympus dashboard "two words"'], home);
+      // The caller's own directory is kept, so a relative argument (an export's --output) means what the caller meant.
+      const launched = run(['/bin/sh', '-lc', 'cd "$HOME" && command -v olympus && olympus dashboard "two words"'], home);
       expect(launched.exitCode, launched.stderr.toString()).toBe(0);
       const lines = launched.stdout.toString().trim().split('\n');
       expect(lines[0]).toBe(path);
-      expect(JSON.parse(lines[1]!)).toEqual({ version: 'installed', args: ['dashboard', 'two words'], cwd: root });
+      expect(JSON.parse(lines[1]!)).toEqual({ version: 'installed', args: ['dashboard', 'two words'], cwd: home });
 
       // Updating the plugin's location retargets only our launcher.
       const upgraded = cliFixture(home, 'upgraded');

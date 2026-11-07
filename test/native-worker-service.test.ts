@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, setDefaultTimeout, test } from 'bun:test';
 import { appendFileSync, chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { homedir, tmpdir } from 'node:os';
+import { tmpdir } from 'node:os';
 import { workerCliLauncherPath } from '../src/core/worker-cli-launcher.ts';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -29,21 +29,23 @@ afterEach(async () => {
 
 describe('native Olympus worker service', () => {
   test('OpenClaw creates a CLI launcher and retargets it after a healthy plugin update', async () => {
-    const path = workerCliLauncherPath(homedir());
-    rmSync(path, { force: true });
+    // A temporary home: this test never touches the developer's own ~/.local/bin/olympus.
+    const home = mkdtempSync(join(tmpdir(), 'olympus-launcher-home-'));
+    roots.push(home);
+    const path = workerCliLauncherPath(home);
     const first = fakeWorkerFixture();
     const second = fakeWorkerFixture();
     for (const [fixture, version] of [[first, 'first'], [second, 'second']] as const) {
       const cli = join(fixture.root, 'fake-worker.mjs');
       writeFileSync(cli, `if (process.argv[2] === '--version') { console.log('${version}'); process.exit(0); }\n` + readFileSync(cli, 'utf8'));
     }
-    const runCli = () => Bun.spawnSync([path, '--version'], { env: { HOME: homedir(), PATH: '/usr/bin:/bin' } }).stdout.toString().trim();
+    const runCli = () => Bun.spawnSync([path, '--version'], { env: { HOME: home, PATH: '/usr/bin:/bin' } }).stdout.toString().trim();
     const notices: string[] = [];
     const start = async (fixture: ReturnType<typeof fakeWorkerFixture>, engineHosted = false) => {
       const service = track(createNativeWorkerService({
         initialPluginConfig: fixture.pluginConfig(true), moduleUrl: import.meta.url,
         workerEnvPath: fixture.envFilePath, startupTimeoutMs: 5_000, readinessPollMs: 20,
-        stopGraceMs: 100, engineHosted,
+        stopGraceMs: 100, engineHosted, homeDir: home,
       }));
       await service.start({ logger: { info: line => notices.push(line) } });
       expect(service.isReady()).toBe(true);
@@ -60,7 +62,7 @@ describe('native Olympus worker service', () => {
     const failed = fakeWorkerFixture({ exitBeforeServe: true });
     const failedService = track(createNativeWorkerService({
       initialPluginConfig: failed.pluginConfig(true), moduleUrl: import.meta.url, workerEnvPath: failed.envFilePath,
-      startupTimeoutMs: 100, readinessPollMs: 10, restartDelaysMs: [60_000], stopGraceMs: 100,
+      startupTimeoutMs: 100, readinessPollMs: 10, restartDelaysMs: [60_000], stopGraceMs: 100, homeDir: home,
     }));
     await expect(failedService.start({})).rejects.toThrow('failed to become ready');
     expect(failedService.isReady()).toBe(false);

@@ -93,8 +93,7 @@ export function installWorkerService(options: WorkerServiceInstallOptions = {}):
   let wroteLauncher = false;
   const launcherPath = workerCliLauncherPath(homeDir);
   const [runtime, cli] = workerServiceExecCommand(options);
-  const workingDirectory = validatedAbsolutePath(options.workingDirectory ?? dirname(dirname(cli)), 'working directory');
-  const launcher = renderWorkerCliLauncher(runtime, cli, workingDirectory);
+  const launcher = renderWorkerCliLauncher(runtime, cli);
   let cliCommand = quoteCliArgument(launcherPath);
   const notices: string[] = [];
   if (!options.dryRun) {

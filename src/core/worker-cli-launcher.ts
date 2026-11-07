@@ -33,11 +33,12 @@ export function quoteCliArgument(value: string): string {
   return `'${value.replaceAll("'", "'\\''")}'`;
 }
 
-export function renderWorkerCliLauncher(runtime: string, cli: string, workingDirectory = dirname(dirname(cli))): string {
-  for (const path of [runtime, cli, workingDirectory]) {
+/** Both paths are absolute, so the launcher keeps the caller's directory: relative arguments mean what the caller meant. */
+export function renderWorkerCliLauncher(runtime: string, cli: string): string {
+  for (const path of [runtime, cli]) {
     if (!isAbsolute(path) || /[\0\r\n]/.test(path)) throw new Error('CLI launcher requires absolute paths without control characters.');
   }
-  return `#!/bin/sh\n${WORKER_CLI_LAUNCHER_MARKER}\ncd ${quoteCliArgument(workingDirectory)} || exit 78\nexec ${quoteCliArgument(runtime)} ${quoteCliArgument(cli)} "$@"\n`;
+  return `#!/bin/sh\n${WORKER_CLI_LAUNCHER_MARKER}\nexec ${quoteCliArgument(runtime)} ${quoteCliArgument(cli)} "$@"\n`;
 }
 
 export function writeWorkerCliLauncher(homeDir: string, text: string): boolean {

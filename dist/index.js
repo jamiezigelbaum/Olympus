@@ -5701,14 +5701,13 @@ function readWorkerCliLauncher(homeDir) {
 function quoteCliArgument(value) {
   return `'${value.replaceAll("'", "'\\''")}'`;
 }
-function renderWorkerCliLauncher(runtime, cli, workingDirectory = dirname13(dirname13(cli))) {
-  for (const path of [runtime, cli, workingDirectory]) {
+function renderWorkerCliLauncher(runtime, cli) {
+  for (const path of [runtime, cli]) {
     if (!isAbsolute11(path) || /[\0\r\n]/.test(path))
       throw new Error("CLI launcher requires absolute paths without control characters.");
   }
   return `#!/bin/sh
 ${WORKER_CLI_LAUNCHER_MARKER}
-cd ${quoteCliArgument(workingDirectory)} || exit 78
 exec ${quoteCliArgument(runtime)} ${quoteCliArgument(cli)} "$@"
 `;
 }
@@ -28766,7 +28765,7 @@ function createNativeWorkerService(options) {
           const ready = await probe(child);
           if (ready && generation === proofGeneration) {
             if (!options.engineHosted && readyChild !== child && (process.platform === "linux" || process.platform === "darwin")) {
-              const home = homedir7();
+              const home = options.homeDir ?? homedir7();
               let command = [settings.runtimePath, settings.executablePath].map(quoteCliArgument).join(" ");
               try {
                 writeWorkerCliLauncher(home, renderWorkerCliLauncher(settings.runtimePath, settings.executablePath));

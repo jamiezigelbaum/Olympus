@@ -68,6 +68,8 @@ export interface NativeWorkerServiceOptions {
   ownerBridgeHostSocket?: string;
   /** Set only by the engine host: this worker is the standalone engine's own, not a gateway's. */
   engineHosted?: boolean;
+  /** The home that holds ~/.local/bin/olympus; tests pass a temporary one. */
+  homeDir?: string;
 }
 
 /**
@@ -150,7 +152,7 @@ export function createNativeWorkerService(options: NativeWorkerServiceOptions): 
             // rerunning setup. Publish only after this CLI has proved healthy;
             // a failed start leaves the last healthy launcher's target intact.
             if (!options.engineHosted && readyChild !== child && (process.platform === 'linux' || process.platform === 'darwin')) {
-              const home = homedir();
+              const home = options.homeDir ?? homedir();
               let command = [settings.runtimePath, settings.executablePath].map(quoteCliArgument).join(' ');
               try {
                 writeWorkerCliLauncher(home, renderWorkerCliLauncher(settings.runtimePath, settings.executablePath));
