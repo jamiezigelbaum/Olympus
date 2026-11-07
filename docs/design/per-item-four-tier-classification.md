@@ -627,37 +627,10 @@ hashes in the metadata cases still abstain as
 `legacy_verdict_content`. Live lookups use the existing subject/model/time
 index; old read-only snapshots scan once per model without migrating the cache.
 
-Label version 4 restarts old scans and insufficient/failed attempts immediately,
-including their cursors and retry delays. Saved weights without the prior receipt cannot clear and are invalidated for
-retraining. Valid saved weights retain their normal retraining interval. Verdict-cache writes still invalidate sliced final
+Label version 3 restarts old scans and insufficient/failed attempts immediately,
+including their cursors and retry delays. Valid saved weights retain their
+normal retraining interval. Verdict-cache writes still invalidate sliced final
 validation before publication. The minimum remains 2,000 examples per class.
-
-Prior correction (2026-11-07): the fit retains the sampled class prior.
-Clearing adds `logit(pi) - logit(trainingPrivateRate)` to its logit, without
-changing the stored weights/bias, 0.05 cutoff, 1-in-20 audit or stop rule.
-`pi` is the Private fraction among recent, final content-judge labels whose
-rows retain `content:held_until_judged`, have private metadata, and pass the
-unchanged training eligibility and complete-vector checks. The window is the
-30 days ending at the training attempt's start, using the real judge cache's
-verdict timestamp, not the ledger's mutable decision timestamp. The latest
-same-model cache answer must be unambiguous, agree with the label and bind to
-the complete current content; absent/unbound cache entries can still label
-the fitting sample under the existing checks but cannot measure the prior.
-Count these rows before the
-per-class caps, across every mounted ledger, with durable aggregate counts
-alongside the existing scan cursor. This selects the judged counterpart of
-the held private/private content candidates rather than names verdicts,
-owner decisions or the deliberately capped fitting sample. These are latest
-surviving content-bound judge verdicts, not every historical inference call. Once clearing
-operates, ordinary judge selection can overrepresent harder items; this
-estimate is not a claim of population-wide calibration.
-
-Bound `pi` to [0.01, 0.99]. Save it, its Personal/Private counts and window,
-and the actual rehydrated fitting sample's Private fraction in the same atomic
-`weights.json` receipt as the model version. With no recent qualifying evidence,
-publication fails closed and retries after three hours. Older files missing
-the prior cannot clear before preparation either. Scanning remains cooperative;
-uncapped prior measurement can require more rows than filling both class caps.
 
 Training takes at most 5,000 examples per class and runs bounded,
 L2-regularized logistic regression in TypeScript on normalized vectors.
@@ -676,8 +649,8 @@ and another writer changing its markers returns control to the next tick.
 During that window the interval timer defers retries of already-failed raises
 (which remain hidden and queued); new raises still interrupt it. Failed raises
 resume their ordinary retries as soon as the window ends.
-Ledger reads rotate in windows of 32 rows. Scanning continues after both
-class caps to measure the uncapped prior, and stops after every ledger is read. Shutdown stops scheduling and lets an in-flight slice
+Ledger reads rotate in windows of 32 rows, and scanning stops on the row that
+fills both class caps. Shutdown stops scheduling and lets an in-flight slice
 checkpoint before closing ledgers. These scheduling changes (2026-11-07) target
 training within an hour; live Sparta training time remains to be measured.
 Source ledger meta stores the cursor and selected item references, never text
@@ -687,8 +660,8 @@ copy placement, text and vector bytes in circular sweeps using at most half
 the slice, leaving time for fitting even during unrelated ledger writes. A
 changed ledger requests another full ledger-check cycle without rewinding.
 Publication makes one final synchronous check before writing weights. A changed or removed selected item,
-including a Secrets decision, discards the fit. Training starts after all ledgers have been read; the fitting sample still
-contains at most 5,000 examples per class. A completed fit waits 24 hours; a failed attempt retries
+including a Secrets decision, discards the fit. Training starts after both classes reach the cap or all
+ledgers have been read. A completed fit waits 24 hours; a failed attempt retries
 after three hours. A complete read below 2,000 per class waits for 1,000 new
 cached verdicts or 24 hours, whichever comes first. Each finished attempt logs
 one content-free line with rows read, examples per class, outcome/reason, model
