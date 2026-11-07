@@ -98,9 +98,10 @@ for (const step of ['beforeCopy', 'afterCopy', 'afterReceipt', 'afterCopiesCommi
       }
       try {
         expect(() => moveTieredItemsLowering(moves, {
-          afterCopiesCommitted: step === 'afterCopiesCommitted' ? interrupt
-            : ['beforeCopy', 'afterCopy', 'afterReceipt'].includes(step)
-              ? () => { throw new Error('Synthetic interruption'); } : undefined,
+          afterCopiesCommitted() {
+            if (step === 'afterCopiesCommitted') interrupt();
+            if (['beforeCopy', 'afterCopy', 'afterReceipt'].includes(step)) throw new Error('Synthetic interruption');
+          },
         })).toThrow('Synthetic interruption');
       } finally { for (const spy of spies) spy.mockRestore(); }
       expect(reached).toBe(1);

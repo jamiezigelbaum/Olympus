@@ -3083,20 +3083,13 @@ export class TierLedger {
       if (copies.some((copy) => copy.state === 'superseded' && copy.supersededByGeneration === moveGeneration)) {
         throw new TierLedgerRaiseAbandonRefusedError();
       }
-      const staged = copies.filter((copy) => copy.state === 'staged');
-      if (staged.length < copies.length) {
-        this.db.query(`
-          DELETE FROM tier_copies
-          WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND copy_state = 'staged'
-        `).run(...idParams(identity));
-      } else {
-        // Nothing else marks the item routed in its stores: keep the staged
-        // rows, hidden, so the stores' rows never read as a legacy item.
-        this.db.query(`
-          UPDATE tier_copies SET copy_state = 'superseded', superseded_by_generation = NULL, updated_at = ?
-          WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND copy_state = 'staged'
-        `).run(now, ...idParams(identity));
-      }
+      // A destination may already hold committed rows. Keep its visibility
+      // marker even when the source still has a current copy: removing the
+      // last marker in that corpus would serve the abandoned rows as legacy.
+      this.db.query(`
+        UPDATE tier_copies SET copy_state = 'superseded', superseded_by_generation = NULL, updated_at = ?
+        WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND copy_state = 'staged'
+      `).run(now, ...idParams(identity));
       this.writeMeta(`tier-move-verified:${tierLedgerIdentityKey(identity)}`, '');
       const state: TierLedgerState = existing.metadataPending || existing.contentPending ? 'pending' : 'current';
       this.db.query(`

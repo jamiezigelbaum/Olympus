@@ -22561,18 +22561,10 @@ class TierLedger {
       if (copies.some((copy) => copy.state === "superseded" && copy.supersededByGeneration === moveGeneration)) {
         throw new TierLedgerRaiseAbandonRefusedError;
       }
-      const staged = copies.filter((copy) => copy.state === "staged");
-      if (staged.length < copies.length) {
-        this.db.query(`
-          DELETE FROM tier_copies
-          WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND copy_state = 'staged'
-        `).run(...idParams(identity2));
-      } else {
-        this.db.query(`
-          UPDATE tier_copies SET copy_state = 'superseded', superseded_by_generation = NULL, updated_at = ?
-          WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND copy_state = 'staged'
-        `).run(now, ...idParams(identity2));
-      }
+      this.db.query(`
+        UPDATE tier_copies SET copy_state = 'superseded', superseded_by_generation = NULL, updated_at = ?
+        WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND copy_state = 'staged'
+      `).run(now, ...idParams(identity2));
       this.writeMeta(`tier-move-verified:${tierLedgerIdentityKey(identity2)}`, "");
       const state = existing.metadataPending || existing.contentPending ? "pending" : "current";
       this.db.query(`
@@ -60860,15 +60852,35 @@ function moveTieredItemsLowering(moves, options = {}) {
         timings.storeCommitMs += ms;
     }) : work();
   };
+  const staged = [];
+  set.ledger.withMoveBatch(() => {
+    for (const move of moves) {
+      if (options.shouldStop?.())
+        break;
+      try {
+        const copy = set.ledger.withMoveBatch(() => stageTieredMove(move, undefined, true));
+        staged.push({ move, copy });
+      } catch (error) {
+        staged.push({ error });
+      }
+    }
+  }, (ms) => {
+    if (timings)
+      timings.ledgerCommitMs += ms;
+  });
   const prepared = [];
   set.ledger.withMoveBatch(() => {
     inStores(0, () => {
-      for (const move of moves) {
-        if (options.shouldStop?.())
+      for (const entry of staged) {
+        if (prepared.length > 0 && options.shouldStop?.())
           break;
+        if ("error" in entry) {
+          prepared.push(entry);
+          continue;
+        }
         try {
-          const receipt = set.ledger.withMoveBatch(() => inStores(0, () => prepareTieredMove(move, undefined, true)));
-          prepared.push({ move, receipt });
+          const receipt = set.ledger.withMoveBatch(() => inStores(0, entry.copy));
+          prepared.push({ move: entry.move, receipt });
         } catch (error) {
           prepared.push({ error });
         }
@@ -60918,6 +60930,9 @@ function moveTieredItemNow(options, repairSource) {
   return finishVerifiedMove(options, receipt);
 }
 function prepareTieredMove(options, repairSource, loweringOnly = false) {
+  return stageTieredMove(options, repairSource, loweringOnly)();
+}
+function stageTieredMove(options, repairSource, loweringOnly = false) {
   const { set, identity: identity2, decision } = options;
   const target = decision ? { metadataTier: decision.metadataTier, contentTier: decision.contentTier } : options.target;
   if (!target)
@@ -60936,12 +60951,12 @@ function prepareTieredMove(options, repairSource, loweringOnly = false) {
   const receiptKey = purgeReceiptKey(identity2);
   const receiptToResume = readVerifiedMove(ledger, identity2);
   if (receiptToResume) {
-    const receipt2 = receiptToResume;
-    if (receipt2.generation !== record.generation || receipt2.target.metadataTier !== target.metadataTier || receipt2.target.contentTier !== target.contentTier)
+    const receipt = receiptToResume;
+    if (receipt.generation !== record.generation || receipt.target.metadataTier !== target.metadataTier || receipt.target.contentTier !== target.contentTier)
       throw new TierLedgerGenerationConflictError;
-    if (loweringOnly && receipt2.raise)
+    if (loweringOnly && receipt.raise)
       throw new TierMoveRefusedError("Raises cannot enter a lowering batch.");
-    return receipt2;
+    return () => receipt;
   }
   const ownerOverride = !decision && record.decidedBy === "override";
   const placement = set.placementFor(decision ?? {
@@ -61012,120 +61027,122 @@ function prepareTieredMove(options, repairSource, loweringOnly = false) {
     hideSource: raise,
     ...placement.embedHold ? { embedHold: true } : {}
   }));
-  let destinations = [];
-  options.beforeCopy?.();
-  const receipt = ledger.withGenerationFence(identity2, record.generation, () => {
-    const alreadyVerified = readVerifiedMove(ledger, identity2);
-    if (alreadyVerified) {
-      if (alreadyVerified.target.metadataTier !== target.metadataTier || alreadyVerified.target.contentTier !== target.contentTier) {
+  return () => {
+    let destinations = [];
+    options.beforeCopy?.();
+    const receipt = ledger.withGenerationFence(identity2, record.generation, () => {
+      const alreadyVerified = readVerifiedMove(ledger, identity2);
+      if (alreadyVerified) {
+        if (alreadyVerified.target.metadataTier !== target.metadataTier || alreadyVerified.target.contentTier !== target.contentTier) {
+          throw new TierLedgerGenerationConflictError;
+        }
+        return alreadyVerified;
+      }
+      const now = ledger.getCurrent(identity2);
+      if (now.state !== "moving" || now.targetMetadataTier !== target.metadataTier || now.targetContentTier !== target.contentTier) {
         throw new TierLedgerGenerationConflictError;
       }
-      return alreadyVerified;
-    }
-    const now = ledger.getCurrent(identity2);
-    if (now.state !== "moving" || now.targetMetadataTier !== target.metadataTier || now.targetContentTier !== target.contentTier) {
-      throw new TierLedgerGenerationConflictError;
-    }
-    const copyWithLockedSources = (index) => {
-      const source = sources[index];
-      if (source) {
-        const domain = set.domainForCorpus(source.corpusId);
-        const store = domain ? set.store(domain) : undefined;
-        if (!store)
-          throw new Error("Source store unavailable.");
-        return store.withItemCopyWriteFence(identity2, () => copyWithLockedSources(index + 1));
-      }
-      exports.clear();
-      if (contentSource && contentDestination && trustDomainRank(contentDestination.trustDomain) < trustDomainRank(contentSource.trustDomain)) {
-        const exported = exportFrom(contentSource);
-        const evidence = decision ?? now;
-        const digest3 = exported && contentDigestReason(exported.chunks.map((chunk) => chunk.boundedText).join(""));
-        const receipts = evidence.reasons.filter((reason) => reason.startsWith("content:sha256:"));
-        if (!digest3 || receipts.length !== 1 || receipts[0] !== digest3 || evidence.contentPending) {
-          throw new TierMoveContentChangedError("Stored content changed before the fenced copy.");
+      const copyWithLockedSources = (index) => {
+        const source = sources[index];
+        if (source) {
+          const domain = set.domainForCorpus(source.corpusId);
+          const store = domain ? set.store(domain) : undefined;
+          if (!store)
+            throw new Error("Source store unavailable.");
+          return store.withItemCopyWriteFence(identity2, () => copyWithLockedSources(index + 1));
         }
-      }
-      for (const planned of placement.copies) {
-        const kept2 = sources.find((source2) => source2.corpusId === planned.corpusId);
-        if (kept2 && layersCover(kept2.layers, planned.layers) && !(repairSource && planned.layers !== "metadata")) {
-          const keptChunks = planned.layers === "metadata" ? 0 : exportFrom(kept2)?.chunks.length ?? 0;
+        exports.clear();
+        if (contentSource && contentDestination && trustDomainRank(contentDestination.trustDomain) < trustDomainRank(contentSource.trustDomain)) {
+          const exported = exportFrom(contentSource);
+          const evidence = decision ?? now;
+          const digest3 = exported && contentDigestReason(exported.chunks.map((chunk) => chunk.boundedText).join(""));
+          const receipts = evidence.reasons.filter((reason) => reason.startsWith("content:sha256:"));
+          if (!digest3 || receipts.length !== 1 || receipts[0] !== digest3 || evidence.contentPending) {
+            throw new TierMoveContentChangedError("Stored content changed before the fenced copy.");
+          }
+        }
+        for (const planned of placement.copies) {
+          const kept2 = sources.find((source2) => source2.corpusId === planned.corpusId);
+          if (kept2 && layersCover(kept2.layers, planned.layers) && !(repairSource && planned.layers !== "metadata")) {
+            const keptChunks = planned.layers === "metadata" ? 0 : exportFrom(kept2)?.chunks.length ?? 0;
+            destinations.push({
+              corpusId: planned.corpusId,
+              trustDomain: planned.trustDomain,
+              layers: planned.layers,
+              relayeredOnly: true,
+              chunksWritten: 0,
+              chunksKept: keptChunks,
+              vectorsCopied: 0,
+              chunksToEmbed: 0
+            });
+            continue;
+          }
+          const wantsContent = planned.layers !== "metadata";
+          const from = (wantsContent ? contentSource : copyServingLayer(sources, "metadata")) ?? sources[0];
+          const exported = exportFrom(from);
+          if (!exported)
+            throw new Error("The source store no longer holds an active copy of the item.");
+          const payload2 = wantsContent ? exported : { ...exported, chunks: [], vectors: [], vectorAuthorities: [] };
+          const store = set.store(planned.trustDomain, { create: true });
+          store.bindTierSet(ledger);
+          const vectorIdentity = wantsContent ? (options.vectorIdentitiesFor?.(exported) ?? options.vectorIdentities)?.[planned.trustDomain] : undefined;
+          const written = timed(options.timings, "copyMs", () => store.importItemCopy(payload2, {
+            trustTier: defaultStoreTrustTier(planned.trustDomain),
+            syncConnectorId: TIER_MOVE_CONNECTOR_ID,
+            layers: planned.layers,
+            ...repairSource && wantsContent ? { sourceTextCurrent: true } : {},
+            ...vectorIdentity ? { vectorProvider: vectorIdentity } : {},
+            vectorCopyMs: (ms) => {
+              if (options.timings)
+                options.timings.vectorsMs += ms;
+            }
+          }));
           destinations.push({
             corpusId: planned.corpusId,
             trustDomain: planned.trustDomain,
             layers: planned.layers,
-            relayeredOnly: true,
-            chunksWritten: 0,
-            chunksKept: keptChunks,
-            vectorsCopied: 0,
-            chunksToEmbed: 0
+            relayeredOnly: false,
+            chunksWritten: written.chunksWritten,
+            chunksKept: written.chunksKept,
+            vectorsCopied: written.vectorsCopied,
+            chunksToEmbed: wantsContent ? Math.max(0, payload2.chunks.length - written.vectorsCopied) : 0
           });
-          continue;
         }
-        const wantsContent = planned.layers !== "metadata";
-        const from = (wantsContent ? contentSource : copyServingLayer(sources, "metadata")) ?? sources[0];
-        const exported = exportFrom(from);
-        if (!exported)
-          throw new Error("The source store no longer holds an active copy of the item.");
-        const payload2 = wantsContent ? exported : { ...exported, chunks: [], vectors: [], vectorAuthorities: [] };
-        const store = set.store(planned.trustDomain, { create: true });
-        store.bindTierSet(ledger);
-        const vectorIdentity = wantsContent ? (options.vectorIdentitiesFor?.(exported) ?? options.vectorIdentities)?.[planned.trustDomain] : undefined;
-        const written = timed(options.timings, "copyMs", () => store.importItemCopy(payload2, {
-          trustTier: defaultStoreTrustTier(planned.trustDomain),
-          syncConnectorId: TIER_MOVE_CONNECTOR_ID,
-          layers: planned.layers,
-          ...repairSource && wantsContent ? { sourceTextCurrent: true } : {},
-          ...vectorIdentity ? { vectorProvider: vectorIdentity } : {},
-          vectorCopyMs: (ms) => {
-            if (options.timings)
-              options.timings.vectorsMs += ms;
-          }
-        }));
-        destinations.push({
-          corpusId: planned.corpusId,
-          trustDomain: planned.trustDomain,
-          layers: planned.layers,
-          relayeredOnly: false,
-          chunksWritten: written.chunksWritten,
-          chunksKept: written.chunksKept,
-          vectorsCopied: written.vectorsCopied,
-          chunksToEmbed: wantsContent ? Math.max(0, payload2.chunks.length - written.vectorsCopied) : 0
-        });
-      }
-      const flipOptions = {
-        expectedGeneration: record.generation,
-        destination: placement.copies,
-        embedHold: placement.embedHold === true,
-        ...decision ? { decidedBy: decision.decidedBy, reasons: decision.reasons, decision } : {},
-        ...ownerOverride ? { decidedBy: "override", reasons: record.reasons } : {}
+        const flipOptions = {
+          expectedGeneration: record.generation,
+          destination: placement.copies,
+          embedHold: placement.embedHold === true,
+          ...decision ? { decidedBy: decision.decidedBy, reasons: decision.reasons, decision } : {},
+          ...ownerOverride ? { decidedBy: "override", reasons: record.reasons } : {}
+        };
+        const verified = {
+          generation: record.generation,
+          target,
+          raise,
+          sources,
+          destinations,
+          ...options.embeddingLedger ? { embeddingLedger: options.embeddingLedger } : {},
+          rehomeTagged,
+          replacedSuperseded,
+          placement: placement.copies,
+          flipOptions,
+          fingerprints: timed(options.timings, "verifyMs", () => Object.fromEntries(placement.copies.map((copy) => {
+            const exported = set.store(copy.trustDomain)?.exportItemCopy(identity2);
+            if (!exported)
+              throw new Error("Destination verification failed.");
+            const wanted = copy.layers === "metadata" ? undefined : exportFrom(contentSource ?? sources[0]);
+            if (wanted && (exported.chunks.length !== wanted.chunks.length || !exported.chunks.every((chunk, index2) => chunk.chunkIndex === wanted.chunks[index2].chunkIndex && chunk.boundedText === wanted.chunks[index2].boundedText)))
+              throw new Error("Destination content verification failed.");
+            return [copy.corpusId, copyFingerprint(exported, copy.layers)];
+          })))
+        };
+        ledger.writeMeta(receiptKey, JSON.stringify(verified));
+        return verified;
       };
-      const verified = {
-        generation: record.generation,
-        target,
-        raise,
-        sources,
-        destinations,
-        ...options.embeddingLedger ? { embeddingLedger: options.embeddingLedger } : {},
-        rehomeTagged,
-        replacedSuperseded,
-        placement: placement.copies,
-        flipOptions,
-        fingerprints: timed(options.timings, "verifyMs", () => Object.fromEntries(placement.copies.map((copy) => {
-          const exported = set.store(copy.trustDomain)?.exportItemCopy(identity2);
-          if (!exported)
-            throw new Error("Destination verification failed.");
-          const wanted = copy.layers === "metadata" ? undefined : exportFrom(contentSource ?? sources[0]);
-          if (wanted && (exported.chunks.length !== wanted.chunks.length || !exported.chunks.every((chunk, index2) => chunk.chunkIndex === wanted.chunks[index2].chunkIndex && chunk.boundedText === wanted.chunks[index2].boundedText)))
-            throw new Error("Destination content verification failed.");
-          return [copy.corpusId, copyFingerprint(exported, copy.layers)];
-        })))
-      };
-      ledger.writeMeta(receiptKey, JSON.stringify(verified));
-      return verified;
-    };
-    return copyWithLockedSources(0);
-  });
-  return receipt;
+      return copyWithLockedSources(0);
+    });
+    return receipt;
+  };
 }
 function resumeVerifiedTierMove(set, identity2, embeddingLedger) {
   const receipt = readVerifiedMove(set.ledger, identity2);
