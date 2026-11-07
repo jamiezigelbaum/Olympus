@@ -449,19 +449,33 @@ const OPEN_S = 60;
 const BEFORE_NAME = (template: string): string => template.split('{name}')[0] ?? '';
 const rowTarget = (fileName: string) => ({ css: 'li.archive:not(.request)', text: fileName, contains: true });
 
+/**
+ * Home keeps every source and archive folded under All sources; the owner opens it to reach a row. Pressed only while it is folded,
+ * so a fold the page opened on its own (an archive at work, or one that needs the owner) is left open.
+ */
+const openAllSources: Journey['steps'][number] = {
+  name: 'Open All sources',
+  do: { click: { css: 'details.home-sources:not([open]) > summary' }, frame: 'panel', optional: true },
+  expect: [{ present: { css: 'details.home-sources[open]' }, frame: 'panel' }],
+};
+
+/** The dashboard opened, All sources unfolded, then what the step must find there (within the opening's bound). */
+function openDashboardSteps(name: string, expect: Journey['steps'][number]['expect'], timeoutMs: number): Journey['steps'] {
+  return [
+    { name: 'Open the dashboard', do: { go: '/dashboard' }, expect: [], timeoutMs },
+    openAllSources,
+    { name, do: { observe: true }, expect, timeoutMs },
+  ];
+}
+
 /** The request an agent left waiting, then the owner's press of its Import, until the archive's row is on the page. */
 export function approveRequestSteps(fx: LegFixture, fullPath: string, startS = 180, openS = OPEN_S): Journey['steps'] {
   return [
-    {
-      name: 'Open the dashboard: the agent\'s request is waiting for the owner',
-      do: { go: '/dashboard' },
-      expect: [
-        { present: { css: 'li.archive.request[data-request="pending"]' }, frame: 'panel' },
-        { text: new RegExp(`${escapeRe(BEFORE_NAME(A.requestLine))}${escapeRe(fx.fileName)}`), frame: 'panel' },
-        { text: fill(A.fullPath, { path: fullPath }), frame: 'panel' },
-      ],
-      timeoutMs: openS * 1_000,
-    },
+    ...openDashboardSteps('Open the dashboard: the agent\'s request is waiting for the owner', [
+      { present: { css: 'li.archive.request[data-request="pending"]' }, frame: 'panel' },
+      { text: new RegExp(`${escapeRe(BEFORE_NAME(A.requestLine))}${escapeRe(fx.fileName)}`), frame: 'panel' },
+      { text: fill(A.fullPath, { path: fullPath }), frame: 'panel' },
+    ], openS * 1_000),
     ...(fx.accountQuestion ? accountQuestionSteps(fx, startS) : [{
       name: 'Press Import on the agent\'s request',
       do: { click: { role: 'button', name: A.approve, within: { css: 'li.archive.request[data-request="pending"]' } }, frame: 'panel' as const },
@@ -543,12 +557,9 @@ export function pickerImportJourney(fx: LegFixture, path: string, bounds: { star
     source: 'archive import: the owner\'s drop zone (Import an archive, Upload folder, or choose a file)',
     mutates: true,
     steps: [
-      {
-        name: 'Open the dashboard: no archive is imported yet, and Import an archive is offered',
-        do: { go: '/dashboard' },
-        expect: [{ present: { role: 'button', name: A.importAction }, frame: 'panel' }, { absent: { css: 'li.archive' }, frame: 'panel' }],
-        timeoutMs: (bounds.openS ?? OPEN_S) * 1_000,
-      },
+      ...openDashboardSteps('Open the dashboard: no archive is imported yet, and Import an archive is offered',
+        [{ present: { role: 'button', name: A.importAction }, frame: 'panel' }, { absent: { css: 'li.archive' }, frame: 'panel' }],
+        (bounds.openS ?? OPEN_S) * 1_000),
       {
         name: 'Press Import an archive: the drop zone opens',
         do: { click: { role: 'button', name: A.importAction }, frame: 'panel' },
@@ -581,7 +592,7 @@ export function removeJourney(role: string, fileName: string, removeS: number = 
     source: 'archive import: Remove asks first, then deletes what Olympus made and leaves the file',
     mutates: true,
     steps: [
-      { name: 'Open the dashboard: the archive is listed', do: { go: '/dashboard' }, expect: [{ present: rowTarget(fileName), frame: 'panel' }], timeoutMs: openS * 1_000 },
+      ...openDashboardSteps('Open the dashboard: the archive is listed', [{ present: rowTarget(fileName), frame: 'panel' }], openS * 1_000),
       {
         name: 'Press Remove: the row asks first, and says the file itself stays',
         do: { click: { role: 'button', name: A.remove, within: rowTarget(fileName) }, frame: 'panel' },
@@ -610,7 +621,7 @@ export function unpairJourney(sourceId: string, label: string, bounds: { unpairS
     source: 'a paired chat source\'s Delete: the engine refuses it until the source is unpaired, so the owner unpairs it first',
     mutates: true,
     steps: [
-      { name: 'Open the dashboard: the source has its menu', do: { go: '/dashboard' }, expect: [{ present: { css: `[data-key="summary:menu:${sourceId}"]` }, frame: 'panel' }], timeoutMs: (bounds.openS ?? OPEN_S) * 1_000 },
+      ...openDashboardSteps('Open the dashboard: the source has its menu', [{ present: { css: `[data-key="summary:menu:${sourceId}"]` }, frame: 'panel' }], (bounds.openS ?? OPEN_S) * 1_000),
       {
         name: `Open the source's menu: it offers ${unpair}`,
         do: { click: { css: `[data-key="summary:menu:${sourceId}"]` }, frame: 'panel' },
@@ -678,18 +689,13 @@ export function stoppedJourney(role: string, fileName: string, stopS: number = A
     source: 'archive import: a file that changes after the import started stops the import',
     mutates: true,
     steps: [
-      {
-        name: 'Open the dashboard: the import is stopped, with why and what to do',
-        do: { go: '/dashboard' },
-        expect: [
-          { present: { css: 'li.archive.stopped[data-archive="stopped"]', text: fileName, contains: true }, frame: 'panel' },
-          { text: stoppedSentence('file_changed', fileName), frame: 'panel' },
-          { text: A.stopped.file_changed.fix, frame: 'panel' },
-          { text: fill(A.needsYou.stopped, { name: fileName }), frame: 'panel' },
-          { present: { role: 'button', name: A.remove, within: rowTarget(fileName) }, frame: 'panel' },
-        ],
-        timeoutMs: stopS * 1_000,
-      },
+      ...openDashboardSteps('Open the dashboard: the import is stopped, with why and what to do', [
+        { present: { css: 'li.archive.stopped[data-archive="stopped"]', text: fileName, contains: true }, frame: 'panel' },
+        { text: stoppedSentence('file_changed', fileName), frame: 'panel' },
+        { text: A.stopped.file_changed.fix, frame: 'panel' },
+        { text: fill(A.needsYou.stopped, { name: fileName }), frame: 'panel' },
+        { present: { role: 'button', name: A.remove, within: rowTarget(fileName) }, frame: 'panel' },
+      ], stopS * 1_000),
     ],
   };
 }

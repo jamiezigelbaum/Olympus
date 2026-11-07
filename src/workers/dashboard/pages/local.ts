@@ -52,7 +52,7 @@ import { dashboardPrivacyTabs, PRIVACY_TABS_CSS } from './private-answers.ts';
 import { dashboardLocalPageHref } from '../host-page.ts';
 import { dashboardTopNav, TOP_NAV_CSS, type DashboardTab } from '../top-nav.ts';
 import { sourceLogoTile, SOURCE_LOGO_CSS } from '../source-logos.ts';
-import { DASHBOARD_DISCONNECTED_DATA_KEPT, DASHBOARD_UPDATE_COPY } from '../vocabulary.ts';
+import { dashboardActionLabel, DASHBOARD_DISCONNECTED_DATA_KEPT, DASHBOARD_UPDATE_COPY } from '../vocabulary.ts';
 import { MODEL_PICKER_CSS, renderAnswerModelPickers, renderZkapiModelPicker } from '../model-pickers.ts';
 import { renderModelSetup, renderModelSetupBlocker, dashboardModelsBlockedReason } from '../model-setup.ts';
 import type { DashboardOutsideHelpStatus } from '../outside-help.ts';
@@ -262,6 +262,15 @@ function sourceStatus(source: DashboardSourceCard): 'ok' | 'attention' {
   return source.connection.state === 'reauth_required' || source.schedule?.consecutive_failures || source.answer_readiness?.state === 'needs_attention' ? 'attention' : 'ok';
 }
 
+/**
+ * A connected source whose provider refused it while its sign-in still looks
+ * healthy carries a Reauthenticate action: its setup stays reachable.
+ */
+function needsSetupAgain(source: DashboardSourceCard): boolean {
+  return CONNECTED_STATES.has(source.connection.state) && source.connection.action.kind !== 'none'
+    && source.connection.action.kind !== 'archive_import' && !MESSAGING_SOURCES.has(source.source_id);
+}
+
 /** One connected source: logo, name, facts, the one thing it needs, and the ⋯ menu. */
 function connectedSourceRow(source: DashboardSourceCard, messagingLocalSession: boolean, off: string, kept = false): { row: string; dialogs: string } {
   const id = sourceDomId(source.source_id);
@@ -288,8 +297,10 @@ function connectedSourceRow(source: DashboardSourceCard, messagingLocalSession: 
     items.push('<hr>' + confirm('disconnect_source', `Disconnect ${source.label}?`, source.connection.disconnect.confirmation, 'Disconnect', false));
   }
   if (kept) items.push(confirm('delete_source_data', `Delete what Olympus indexed from ${source.label}?`, `Olympus deletes what it indexed from ${source.label}. Your ${source.label} account and files are not touched. This cannot be undone.`, 'Delete indexed data', true, 'Delete indexed data'));
-  const needs = source.connection.state === 'reauth_required' || kept
-    ? `<button class="btn${kept ? '' : ' primary'}" type="button" data-dialog-open="add-source" data-source-open="${escapeHtml(source.source_id)}"${off}>${kept ? 'Reconnect' : 'Sign in'}</button>`
+  const fixLabel = kept ? 'Reconnect' : source.connection.state === 'reauth_required' ? 'Sign in'
+    : needsSetupAgain(source) && 'label' in source.connection.action ? dashboardActionLabel(source.connection.action.label) : '';
+  const needs = fixLabel
+    ? `<button class="btn${kept ? '' : ' primary'}" type="button" data-dialog-open="add-source" data-source-open="${escapeHtml(source.source_id)}"${off}>${escapeHtml(fixLabel)}</button>`
     : '';
   const facts = kept ? `${DASHBOARD_DISCONNECTED_DATA_KEPT} · ${(source.coverage?.indexed_items ?? 0).toLocaleString('en-US')} items` : sourceFacts(source);
   const row = `<div class="srcrow${kept ? ' kept' : ''}" data-source-row="${escapeHtml(source.source_id)}"${kept ? ' data-source-kept' : ''}>${sourceLogoTile(source.source_id, kept ? 'off' : sourceStatus(source))}`
@@ -311,14 +322,14 @@ export function renderDashboardConnectPage(view: SourceDashboardViewModel, optio
   const off = unlocked(options) ? '' : ' disabled';
   const sources = view.sources.filter((source) => source.source_id !== 'venice.api');
   const connected = sources.filter((source) => CONNECTED_STATES.has(source.connection.state));
-  const setupable = sources.filter((source) => source.connection.state === 'reauth_required'
+  const setupable = sources.filter((source) => source.connection.state === 'reauth_required' || needsSetupAgain(source)
     || (!CONNECTED_STATES.has(source.connection.state) && (source.connection.action.kind !== 'none' || MESSAGING_SOURCES.has(source.source_id))));
   // Disconnected with its indexed data kept: a quiet row with Reconnect and Delete.
   const kept = sources.filter((source) => !CONNECTED_STATES.has(source.connection.state) && (source.coverage?.indexed_items ?? 0) > 0
     && source.connection.action.kind !== 'archive_import');
   const rows = connected.map((source) => connectedSourceRow(source, options?.messagingLocalSession === true, off))
     .concat(kept.map((source) => connectedSourceRow(source, false, off, true)));
-  const tiles = setupable.filter((source) => source.connection.state !== 'reauth_required').map((source) =>
+  const tiles = setupable.filter((source) => !CONNECTED_STATES.has(source.connection.state)).map((source) =>
     `<button class="srctile" type="button" data-source-pick="${escapeHtml(source.source_id)}">${sourceLogoTile(source.source_id)}<span><b>${escapeHtml(source.label)}</b><span class="pnote">${escapeHtml(SOURCE_TILE_LINES[source.source_id] ?? '')}</span></span></button>`).join('');
   const panels = setupable.map((source) =>
     `<div class="srcsetup" data-source-setup="${escapeHtml(source.source_id)}" hidden><button class="btn plainlink" type="button" data-source-back>← All sources</button>`

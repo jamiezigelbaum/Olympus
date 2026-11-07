@@ -55527,6 +55527,19 @@ var init_vocabulary = __esm(() => {
     loading: "Checking your computer…",
     loadingSlow: "Loading. This can take a minute while Olympus is importing.",
     upToDate: "Olympus is up to date.",
+    home: {
+      upToDate: "Olympus is up to date",
+      catchingUp: "Olympus is catching up",
+      needsYouOne: "1 thing needs you",
+      needsYouMany: "{n} things need you",
+      sourcesOne: "1 source",
+      sourcesMany: "{n} sources",
+      itemsOne: "1 item",
+      itemsMany: "{n} items",
+      checked: "checked {when}",
+      allSources: "All sources",
+      progress: "In progress"
+    },
     needsYou: "Needs you",
     sources: "Sources",
     sourcesLocal: "On your computer",
@@ -151358,7 +151371,7 @@ function mountDashboardController(options) {
     const ownerDocument = root.ownerDocument;
     if (!force && !requested && ownerDocument.visibilityState === "hidden")
       return;
-    if (!force && (query("[data-messaging-input] input,[data-messaging-chats] input") || messagingTimers.size > 0 || query('.sheet.on input:not([type="hidden"]),.sheet.on textarea,.sheet.on select')))
+    if (!force && (query("[data-messaging-input] input,[data-messaging-chats] input") || messagingTimers.size > 0 || queryAll('.sheet.on input:not([type="hidden"]),.sheet.on textarea,.sheet.on select').some((field) => !field.closest("dialog:not([open])"))))
       return;
     if (!force && query("[data-remote-terms]:not([hidden])"))
       return;
@@ -152177,9 +152190,10 @@ function mountDashboardController(options) {
     const sourceId = Object.prototype.hasOwnProperty.call(sources, wanted) ? sources[wanted] : undefined;
     if (sourceId) {
       const row = queryAll("[data-source-id]").find((candidate) => candidate.dataset.sourceId === sourceId);
-      const addSheet = row?.closest("dialog[data-add-source]");
+      const addSheet = row?.closest("dialog");
       if (row && addSheet && typeof addSheet.showModal === "function") {
-        showSourceSetup(addSheet, row.closest("[data-source-setup]")?.dataset.sourceSetup);
+        if (addSheet.matches("[data-add-source]"))
+          showSourceSetup(addSheet, row.closest("[data-source-setup]")?.dataset.sourceSetup);
         if (!addSheet.open)
           addSheet.showModal();
       }
@@ -154980,10 +154994,7 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     } else if (typeof fix.archiveFocus === "string" && fix.archiveFocus) {
       action = () => focusArchive(String(fix.archiveFocus));
     } else if (fix.archiveModels === true) {
-      action = () => {
-        state.open.models = true;
-        render("summary:models");
-      };
+      action = () => openModels(() => render("summary:models"));
     } else if (picker && picker.handles(fix)) {
       action = () => {
         supersede();
@@ -155795,10 +155806,7 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     const level = model === "ready" || model === "off" ? model : "waiting";
     add(block, el("p", "muted", A.heldWhy[level]));
     if (level !== "ready") {
-      add(block, add(el("div", "archive-actions"), button(A.setUpPrivateModel, "archive-models:" + archive.id, () => {
-        state.open.models = true;
-        render("summary:models");
-      }, "plain")));
+      add(block, add(el("div", "archive-actions"), button(A.setUpPrivateModel, "archive-models:" + archive.id, () => openModels(() => render("summary:models")), "plain")));
     }
     return block;
   }
@@ -156445,9 +156453,68 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     }
     return card;
   }
+  function homeStatus(data2, needs, sources) {
+    const Hm = P.home;
+    const running = moving();
+    const title = needs > 0 ? needs === 1 ? Hm.needsYouOne : fill2(Hm.needsYouMany, { n: count(needs) }) : running ? Hm.catchingUp : Hm.upToDate;
+    const connected2 = sources.filter((source) => String(source && source.status) !== "Off").length;
+    const items = state.computerMeta && typeof state.computerMeta.indexedItems === "number" && isFinite(state.computerMeta.indexedItems) ? Math.max(0, Math.round(state.computerMeta.indexedItems)) : 0;
+    const facts = [connected2 === 1 ? Hm.sourcesOne : fill2(Hm.sourcesMany, { n: count(connected2) })];
+    if (items > 0)
+      facts.push(items === 1 ? Hm.itemsOne : fill2(Hm.itemsMany, { n: count(items) }));
+    const when = ago(data2.generatedAt);
+    if (when)
+      facts.push(fill2(Hm.checked, { when }));
+    const dot2 = el("span", "dot tone-" + (needs > 0 ? "warn" : running ? "run" : "good"));
+    dot2.setAttribute("aria-hidden", "true");
+    const text3 = add(el("div", "row-text"), el("p", "home-title", title), el("p", "muted", facts.join(" · ")));
+    const card = add(el("section", "home-status"), dot2, text3);
+    card.setAttribute("data-home-status", needs > 0 ? "needs" : running ? "running" : "ok");
+    return card;
+  }
+  function openModels(inPlace) {
+    const href = onComputer() ? state.hostLinks.keys : "";
+    if (href) {
+      openLink(href);
+      return;
+    }
+    state.open.models = true;
+    inPlace();
+  }
+  function transcriptionNeedsHand(models) {
+    const entry = models.transcription;
+    if (!entry || typeof entry !== "object")
+      return false;
+    return !!entry.download || entry.state === "failed" || entry.state === "load_failed" || entry.state === "interrupted";
+  }
+  function renderHome(page2, data2) {
+    const all = Array.isArray(data2.sources) ? data2.sources : [];
+    const needs = Array.isArray(data2.needsYou) ? data2.needsYou.filter((item) => !!item) : [];
+    const waiting = waitingRow() ? 1 : 0;
+    add(page2, homeStatus(data2, needs.length + waiting + (data2.blocker ? 1 : 0), all.filter((source) => !isArchivesCard(source))));
+    add(page2, staleLine());
+    add(page2, needsYouSection(needs));
+    const progress = progressSection(data2.progress, true);
+    if (progress) {
+      const head = progress.querySelector("h2");
+      if (head)
+        head.textContent = P.home.progress;
+    }
+    add(page2, progress);
+    if (data2.models && (installLines(data2.models).some((entry) => entry.state !== "failed") || transcriptionNeedsHand(data2.models)))
+      add(page2, modelsSection(data2.models));
+    add(page2, privacySection(data2));
+    if (state.landing || state.landed)
+      state.open["home-sources"] = true;
+    if (state.open["home-sources"] === undefined && (archivesMoving() || archiveGroups().some(archiveNeeds)))
+      state.open["home-sources"] = true;
+    const box = details("home-sources", doc2.createTextNode(P.home.allSources + " (" + count(all.filter((source) => !isArchivesCard(source)).length) + ")"), "section home-sources");
+    add(box, sourcesSection(all.filter((source) => !isArchivesCard(source))), otherArchivesSection(all.filter(isArchivesCard)[0]));
+    return add(page2, box);
+  }
   function renderFull() {
     const page2 = el("main", "page");
-    add(page2, el("h1", "", P.title));
+    add(page2, el("h1", onComputer() ? "sr" : "", P.title));
     const data2 = state.data;
     add(page2, connectionBanner());
     if (state.notice) {
@@ -156461,6 +156528,8 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
       return page2;
     }
     add(page2, data2.blocker ? itemBanner(data2.blocker, "blocker", true) : null);
+    if (onComputer())
+      return renderHome(page2, data2);
     add(page2, staleLine());
     const listed = Array.isArray(data2.sources) ? data2.sources : [];
     add(page2, needsYouSection((Array.isArray(data2.needsYou) ? data2.needsYou : []).filter((item) => item && !listed.some((source) => aboutSource(item, source)))));
@@ -156574,10 +156643,7 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     fullscreen: goFullscreen,
     isDashboard,
     errorText: inlineError,
-    showModels: () => {
-      state.open.models = true;
-      closeScreen("", false, "summary:models");
-    },
+    showModels: () => openModels(() => closeScreen("", false, "summary:models")),
     directSignIn: () => state.hostKind !== "",
     setDashboard: (value2) => {
       if (!isDashboard(value2))
@@ -160805,6 +160871,7 @@ textarea.text{resize:vertical;min-height:4.5rem}
 .reason.error{color:var(--danger)}
 .row.need{background:var(--warn-bg);border-left:4px solid var(--warn);border-radius:8px;padding:0.75rem 1rem;margin:0.5rem 0}.row.need .row-text{font-weight:600}.row.need{grid-template-columns:minmax(0,1fr)}.row.need .dot{display:none}.btn.warnfill{background:var(--warn);border-color:var(--warn);color:#1a1205;font-weight:600}
 .btn.warnfill:hover:not(:disabled){background:var(--warn);filter:brightness(1.08)}
+.home-status{display:flex;align-items:center;gap:1rem;border:1px solid var(--line);border-radius:12px;padding:1rem 1.25rem;margin:0 0 1.5rem;background:var(--surface)}.home-status .home-title{font-weight:600;margin:0}.home-status .muted{margin:0.15rem 0 0}.home-sources>summary{cursor:pointer;color:var(--muted);padding:0.5rem 0}
 .sr{overflow:hidden;position:absolute;width:1px;height:1px;margin:-1px;padding:0;clip:rect(0 0 0 0);clip-path:inset(50%);white-space:nowrap;border:0}
 [data-mode=inline] .banner{margin-bottom:0.5rem}
 @media (max-width:30rem){.page{padding:1rem 0.75rem 1.5rem}.row.source.has-import.has-actions:not(.has-menu){grid-template-columns:minmax(0,1fr)}.row.source.has-import.has-actions:not(.has-menu)>.source-actions{grid-row:2;justify-content:flex-start}.other-archives .row.source.has-actions:not(.has-menu){grid-template-columns:minmax(0,1fr)}.other-archives .row.source.has-actions:not(.has-menu)>.source-actions{grid-row:2}.row.source.has-actions.has-menu{grid-template-columns:minmax(0,1fr) 2.25rem}.row.source.has-actions.has-menu>.source-actions{grid-column:1/-1;grid-row:2}.menu{align-items:flex-start}.menu-panel{justify-content:flex-start}}
@@ -163593,6 +163660,9 @@ function sourceFacts(source) {
 function sourceStatus(source) {
   return source.connection.state === "reauth_required" || source.schedule?.consecutive_failures || source.answer_readiness?.state === "needs_attention" ? "attention" : "ok";
 }
+function needsSetupAgain(source) {
+  return CONNECTED_STATES.has(source.connection.state) && source.connection.action.kind !== "none" && source.connection.action.kind !== "archive_import" && !MESSAGING_SOURCES.has(source.source_id);
+}
 function connectedSourceRow(source, messagingLocalSession, off, kept = false) {
   const id = sourceDomId(source.source_id);
   const label = escapeHtml2(source.label);
@@ -163615,7 +163685,8 @@ function connectedSourceRow(source, messagingLocalSession, off, kept = false) {
   }
   if (kept)
     items.push(confirm("delete_source_data", `Delete what Olympus indexed from ${source.label}?`, `Olympus deletes what it indexed from ${source.label}. Your ${source.label} account and files are not touched. This cannot be undone.`, "Delete indexed data", true, "Delete indexed data"));
-  const needs = source.connection.state === "reauth_required" || kept ? `<button class="btn${kept ? "" : " primary"}" type="button" data-dialog-open="add-source" data-source-open="${escapeHtml2(source.source_id)}"${off}>${kept ? "Reconnect" : "Sign in"}</button>` : "";
+  const fixLabel = kept ? "Reconnect" : source.connection.state === "reauth_required" ? "Sign in" : needsSetupAgain(source) && ("label" in source.connection.action) ? dashboardActionLabel(source.connection.action.label) : "";
+  const needs = fixLabel ? `<button class="btn${kept ? "" : " primary"}" type="button" data-dialog-open="add-source" data-source-open="${escapeHtml2(source.source_id)}"${off}>${escapeHtml2(fixLabel)}</button>` : "";
   const facts = kept ? `${DASHBOARD_DISCONNECTED_DATA_KEPT} · ${(source.coverage?.indexed_items ?? 0).toLocaleString("en-US")} items` : sourceFacts(source);
   const row = `<div class="srcrow${kept ? " kept" : ""}" data-source-row="${escapeHtml2(source.source_id)}"${kept ? " data-source-kept" : ""}>${sourceLogoTile(source.source_id, kept ? "off" : sourceStatus(source))}` + `<div class="srcmain"><b>${label}</b>${facts ? `<span class="pnote"> · ${escapeHtml2(facts)}</span>` : ""}</div>` + `<div class="srcact">${needs}${items.length ? rowMenu(source.label, items.join("")) : ""}</div></div>`;
   return { row, dialogs: dialogs.join("") };
@@ -163627,10 +163698,10 @@ function renderDashboardConnectPage(view3, options) {
   const off = unlocked(options) ? "" : " disabled";
   const sources = view3.sources.filter((source) => source.source_id !== "venice.api");
   const connected2 = sources.filter((source) => CONNECTED_STATES.has(source.connection.state));
-  const setupable = sources.filter((source) => source.connection.state === "reauth_required" || !CONNECTED_STATES.has(source.connection.state) && (source.connection.action.kind !== "none" || MESSAGING_SOURCES.has(source.source_id)));
+  const setupable = sources.filter((source) => source.connection.state === "reauth_required" || needsSetupAgain(source) || !CONNECTED_STATES.has(source.connection.state) && (source.connection.action.kind !== "none" || MESSAGING_SOURCES.has(source.source_id)));
   const kept = sources.filter((source) => !CONNECTED_STATES.has(source.connection.state) && (source.coverage?.indexed_items ?? 0) > 0 && source.connection.action.kind !== "archive_import");
   const rows = connected2.map((source) => connectedSourceRow(source, options?.messagingLocalSession === true, off)).concat(kept.map((source) => connectedSourceRow(source, false, off, true)));
-  const tiles = setupable.filter((source) => source.connection.state !== "reauth_required").map((source) => `<button class="srctile" type="button" data-source-pick="${escapeHtml2(source.source_id)}">${sourceLogoTile(source.source_id)}<span><b>${escapeHtml2(source.label)}</b><span class="pnote">${escapeHtml2(SOURCE_TILE_LINES[source.source_id] ?? "")}</span></span></button>`).join("");
+  const tiles = setupable.filter((source) => !CONNECTED_STATES.has(source.connection.state)).map((source) => `<button class="srctile" type="button" data-source-pick="${escapeHtml2(source.source_id)}">${sourceLogoTile(source.source_id)}<span><b>${escapeHtml2(source.label)}</b><span class="pnote">${escapeHtml2(SOURCE_TILE_LINES[source.source_id] ?? "")}</span></span></button>`).join("");
   const panels = setupable.map((source) => `<div class="srcsetup" data-source-setup="${escapeHtml2(source.source_id)}" hidden><button class="btn plainlink" type="button" data-source-back>← All sources</button>` + renderSetupRow(source, view3, blocked, basePath, options?.messagingLocalSession === true) + sourceSupportBlock(source) + "</div>").join("");
   const sheet = '<dialog class="srcsheet" id="add-source" data-add-source data-closable aria-labelledby="add-source-title">' + '<div class="adddialoghead"><h3 id="add-source-title">Add a source</h3><button class="btn iconbtn" type="button" data-dialog-close aria-label="Close">✕</button></div>' + `<div data-source-catalog><input class="keyfield srcsearch" type="search" data-source-search placeholder="Search sources…" aria-label="Search sources">` + (tiles ? `<div class="srctiles">${tiles}</div>` : `<p class="pnote">${escapeHtml2(W.connect.empty)}</p>`) + `<p class="pnote">Sources you've already connected aren't listed.</p></div>` + panels + "</dialog>";
   const body = [
@@ -217849,11 +217920,12 @@ function createDashboardPanelTools(options) {
       const missingFolders = (view3?.sources ?? []).flatMap((source) => source.schedule?.missing_folders?.length ? [{ sourceId: source.source_id, paths: source.schedule.missing_folders }] : []);
       const permissionSettings = process.platform === "darwin" ? (view3?.sources ?? []).flatMap((source) => source.schedule?.degraded_reason === "scope_root_permission_needed" ? [{ sourceId: source.source_id, url: FILES_AND_FOLDERS_URL }] : []) : [];
       const waiting = context3.localSession === true ? waitingCount(options) : 0;
+      const indexedItems = (view3?.sources ?? []).reduce((sum2, source) => sum2 + (Number.isFinite(source.coverage?.indexed_items) ? Math.max(0, source.coverage.indexed_items) : 0), 0);
       const archives = archivesMeta(options);
       const sourceImports = sourceImportsMeta(options);
       const archiveSources = archiveSourcesMeta(options);
       const archiveCards = archiveCardsMeta(options);
-      if (on === undefined && unpair.length === 0 && unreadable.length === 0 && waiting === 0 && missingFolders.length === 0 && permissionSettings.length === 0 && !archives && !sourceImports && !archiveSources && !archiveCards)
+      if (on === undefined && unpair.length === 0 && unreadable.length === 0 && waiting === 0 && indexedItems === 0 && missingFolders.length === 0 && permissionSettings.length === 0 && !archives && !sourceImports && !archiveSources && !archiveCards)
         return result;
       const meta2 = {
         ...missingFolders.length ? { missingFolders } : {},
@@ -217862,6 +217934,7 @@ function createDashboardPanelTools(options) {
         ...unpair.length > 0 ? { unpair } : {},
         ...unreadable.length > 0 ? { unreadable } : {},
         ...waiting > 0 ? { waitingPrivateQuestions: waiting } : {},
+        ...indexedItems > 0 ? { indexedItems } : {},
         ...archives ? { archives } : {},
         ...sourceImports ? { sourceImports } : {},
         ...archiveSources ? { archiveSources } : {},

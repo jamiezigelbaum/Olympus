@@ -48,7 +48,8 @@ export type Vars = Record<string, string | number>;
 export type Action =
   /** The owner's way in: a one-time opening link signs the browser in, and Unlock opens the controls where the page offers it. */
   | { open: OpenPlace }
-  | { click: Target; frame?: FrameName }
+  /** `optional`: nothing to press is not a failure (a fold the page already opened on its own). */
+  | { click: Target; frame?: FrameName; optional?: true }
   | { type: { into: Target; text: string }; frame?: FrameName }
   /** Files chosen in a file input, as the system's file dialog would hand them (paths on the machine the browser runs on). */
   | { attach: { into: Target; paths: string[] }; frame?: FrameName }
@@ -380,7 +381,7 @@ async function perform(action: Action, driver: JourneyDriver, clock: { now: () =
         disabled = info;
         break;
       }
-      if (!disabled) return { ok: false, detail: `${describeTarget(action.click)} is not on the page` };
+      if (!disabled) return action.optional ? { ok: true, detail: `${describeTarget(action.click)} is not there; nothing to press` } : { ok: false, detail: `${describeTarget(action.click)} is not on the page` };
       if (clock.now() >= until) return { ok: false, detail: `${describeTarget(action.click)} is there but disabled` };
       await clock.sleep(1_000);
     }

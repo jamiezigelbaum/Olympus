@@ -522,6 +522,12 @@ export interface ComputerDashboardMeta {
    */
   waitingPrivateQuestions?: number;
   /**
+   * How many items Olympus has indexed across every source, for Home's
+   * status line (dashboard redesign, owner 2026-11-07, final-6). A count
+   * only; absent when nothing is indexed yet.
+   */
+  indexedItems?: number;
+  /**
    * Imported archives and the imports waiting on the person, for the
    * Archives row (archive-import/dashboard.ts). The list, with the folders
    * the person's files are in, is only ever in this meta; what needs the

@@ -147,6 +147,16 @@ describe('OAuth browser handoff', () => {
     try { expect(root.querySelector('#telegram-setup')?.getAttribute('aria-hidden')).toBe('false'); }
     finally { controller.dispose(); root.remove(); }
   });
+  test('a Telegram deep link opens the pairing dialog a connected card sits in', () => {
+    happyWindow.location.hash = '#olympus-open=connect.telegram';
+    const root = document.createElement('div');
+    root.innerHTML = `<dialog id="pairing-telegram">${renderMessagingCard('telegram', true, { paired: true })}</dialog>`;
+    document.body.append(root);
+    const controller = mountDashboardController({ root, transport: { control: noControl }, navigate() {}, async refresh() { return undefined; },
+      returnUrl: 'https://gateway.test/', canWrite: true, signal: new AbortController().signal, pollIntervalMs: 0 });
+    try { expect(root.querySelector<HTMLDialogElement>('dialog#pairing-telegram')!.open).toBe(true); }
+    finally { controller.dispose(); root.remove(); }
+  });
   test('Dropbox permissions recovery opens the walkthrough at its permissions step', () => {
     happyWindow.location.hash = '#olympus-open=dropbox.permissions';
     const root = document.createElement('div');

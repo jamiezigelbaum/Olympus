@@ -939,10 +939,7 @@ export function chatgptDashboardClient(
       action = () => focusArchive(String(fix.archiveFocus));
     } else if (fix.archiveModels === true) {
       // Held items (computer only): the private model under Models, in place.
-      action = () => {
-        state.open.models = true;
-        render('summary:models');
-      };
+      action = () => openModels(() => render('summary:models'));
     } else if (picker && picker.handles(fix)) {
       // Connect, Choose folders and Choose mail open in place, never as a plain tool call.
       action = () => {
@@ -1914,10 +1911,7 @@ export function chatgptDashboardClient(
     const level = model === 'ready' || model === 'off' ? model : 'waiting';
     add(block, el('p', 'muted', (A.heldWhy as Any)[level]));
     if (level !== 'ready') {
-      add(block, add(el('div', 'archive-actions'), button(A.setUpPrivateModel, 'archive-models:' + archive.id, () => {
-        state.open.models = true;
-        render('summary:models');
-      }, 'plain')));
+      add(block, add(el('div', 'archive-actions'), button(A.setUpPrivateModel, 'archive-models:' + archive.id, () => openModels(() => render('summary:models')), 'plain')));
     }
     return block;
   }
@@ -2662,9 +2656,79 @@ export function chatgptDashboardClient(
     return card;
   }
 
+  /**
+   * Home on the computer (owner, 2026-11-07, mockup final-6): one line says
+   * whether everything is fine, with source totals in place of the long
+   * list; Needs you holds only what the owner must act on; In progress shows
+   * only while something runs. The full source list stays one click away
+   * under All sources, so every fix and landing keeps its row. The top bar's
+   * tabs replace the On this computer list.
+   */
+  function homeStatus(data: Any, needs: number, sources: Any[]): HTMLElement {
+    const Hm = P.home;
+    // Source indexing, a model download, or an archive being read or removed.
+    const running = moving();
+    const title = needs > 0 ? (needs === 1 ? Hm.needsYouOne : fill(Hm.needsYouMany, { n: count(needs) }))
+      : running ? Hm.catchingUp : Hm.upToDate;
+    const connected = sources.filter((source: Any) => String(source && source.status) !== 'Off').length;
+    const items = state.computerMeta && typeof state.computerMeta.indexedItems === 'number' && isFinite(state.computerMeta.indexedItems)
+      ? Math.max(0, Math.round(state.computerMeta.indexedItems)) : 0;
+    const facts = [connected === 1 ? Hm.sourcesOne : fill(Hm.sourcesMany, { n: count(connected) })];
+    if (items > 0) facts.push(items === 1 ? Hm.itemsOne : fill(Hm.itemsMany, { n: count(items) }));
+    const when = ago(data.generatedAt);
+    if (when) facts.push(fill(Hm.checked, { when }));
+    const dot = el('span', 'dot tone-' + (needs > 0 ? 'warn' : running ? 'run' : 'good'));
+    dot.setAttribute('aria-hidden', 'true');
+    const text = add(el('div', 'row-text'), el('p', 'home-title', title), el('p', 'muted', facts.join(' · ')));
+    const card = add(el('section', 'home-status'), dot, text);
+    card.setAttribute('data-home-status', needs > 0 ? 'needs' : running ? 'running' : 'ok');
+    return card;
+  }
+
+  /**
+   * The private model: on the computer its own page (Home no longer lists
+   * Models, owner 2026-11-07); elsewhere the Models section, opened in place.
+   */
+  function openModels(inPlace: () => void): void {
+    const href = onComputer() ? state.hostLinks.keys : '';
+    if (href) { openLink(href); return; }
+    state.open.models = true;
+    inPlace();
+  }
+
+  function transcriptionNeedsHand(models: DashboardModels): boolean {
+    const entry = models.transcription;
+    if (!entry || typeof entry !== 'object') return false;
+    return !!entry.download || entry.state === 'failed' || entry.state === 'load_failed' || entry.state === 'interrupted';
+  }
+
+  function renderHome(page: HTMLElement, data: Any): HTMLElement {
+    const all = Array.isArray(data.sources) ? data.sources : [];
+    const needs = Array.isArray(data.needsYou) ? data.needsYou.filter((item: Any) => !!item) : [];
+    const waiting = waitingRow() ? 1 : 0;
+    add(page, homeStatus(data, needs.length + waiting + (data.blocker ? 1 : 0), all.filter((source: Any) => !isArchivesCard(source))));
+    add(page, staleLine());
+    add(page, needsYouSection(needs));
+    const progress = progressSection(data.progress, true);
+    if (progress) { const head = progress.querySelector('h2'); if (head) head.textContent = P.home.progress; }
+    add(page, progress);
+    // Models live on Settings; Home shows them only while one installs or
+    // transcription needs a hand (its recovery has no Needs you item).
+    if (data.models && (installLines(data.models).some((entry) => entry.state !== 'failed') || transcriptionNeedsHand(data.models))) add(page, modelsSection(data.models));
+    // The privacy rules editor opens from here once privacy is set up.
+    add(page, privacySection(data));
+    // A landing or a highlighted row needs its source visible.
+    if (state.landing || state.landed) state.open['home-sources'] = true;
+    // An archive at work shows its progress there, and one waiting on the owner its buttons, so it starts open (until the owner folds it).
+    if (state.open['home-sources'] === undefined && (archivesMoving() || archiveGroups().some(archiveNeeds))) state.open['home-sources'] = true;
+    const box = details('home-sources', doc.createTextNode(P.home.allSources + ' (' + count(all.filter((source: Any) => !isArchivesCard(source)).length) + ')'), 'section home-sources');
+    add(box, sourcesSection(all.filter((source: Any) => !isArchivesCard(source))), otherArchivesSection(all.filter(isArchivesCard)[0]));
+    return add(page, box);
+  }
+
   function renderFull(): HTMLElement {
     const page = el('main', 'page');
-    add(page, el('h1', '', P.title));
+    add(page, el('h1', onComputer() ? 'sr' : '', P.title));
     const data = state.data;
     add(page, connectionBanner());
     if (state.notice) {
@@ -2677,6 +2741,7 @@ export function chatgptDashboardClient(
       return page;
     }
     add(page, data.blocker ? itemBanner(data.blocker, 'blocker', true) : null);
+    if (onComputer()) return renderHome(page, data);
     add(page, staleLine());
     // Each fact once: an item about a listed source lives in that source's row, not here too.
     const listed = Array.isArray(data.sources) ? data.sources : [];
@@ -2803,10 +2868,7 @@ export function chatgptDashboardClient(
     fullscreen: goFullscreen,
     isDashboard,
     errorText: inlineError,
-    showModels: () => {
-      state.open.models = true;
-      closeScreen('', false, 'summary:models');
-    },
+    showModels: () => openModels(() => closeScreen('', false, 'summary:models')),
     // An Olympus host starts sign-in on the computer itself, so its link is
     // the provider's own page, not a one-time mcp.olympusplugin.ai link.
     directSignIn: () => state.hostKind !== '',

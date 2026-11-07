@@ -11,6 +11,7 @@ function view(): View {
     sources: [
       { source_id: 'gmail.email', label: 'Gmail', connection: { state: 'synced', action: { kind: 'none' }, disconnect: { confirmation: 'Olympus stops reading Gmail.' } }, coverage: { indexed_items: 12408 }, freshness: { label: 'updated 2 min ago' } },
       { source_id: 'dropbox.files', label: 'Dropbox', connection: { state: 'reauth_required', action: { kind: 'oauth', label: 'Connect' } }, coverage: { indexed_items: 50 }, freshness: {} },
+      { source_id: 'readwise.library', label: 'Readwise', connection: { state: 'synced', action: { kind: 'oauth', label: 'Reauthenticate' } }, coverage: { indexed_items: 9 }, freshness: {} },
       { source_id: 'evernote.notes', label: 'Evernote', connection: { state: 'not_connected', action: { kind: 'oauth', label: 'Connect' } }, coverage: { indexed_items: 0 }, freshness: {} },
       { source_id: 'google_drive.docs', label: 'Google Drive', connection: { state: 'not_connected', action: { kind: 'oauth', label: 'Connect' } }, coverage: { indexed_items: 310 }, freshness: {} },
       { source_id: 'x.bookmarks', label: 'X bookmarks', connection: { state: 'not_connected', action: { kind: 'oauth', label: 'Connect' } }, coverage: { indexed_items: 0 }, freshness: {} },
@@ -25,7 +26,7 @@ describe('Sources page', () => {
     const doc = new Window().document;
     doc.body.innerHTML = renderDashboardConnectPage(view(), unlockedOptions);
     const rows = [...doc.querySelectorAll('[data-source-row]')].map((row) => row.getAttribute('data-source-row'));
-    expect(rows).toEqual(['gmail.email', 'dropbox.files', 'google_drive.docs']);
+    expect(rows).toEqual(['gmail.email', 'dropbox.files', 'readwise.library', 'google_drive.docs']);
     const gmail = doc.querySelector('[data-source-row="gmail.email"]')!;
     expect(gmail.querySelector('svg path')).not.toBeNull();
     expect(gmail.textContent).toContain('12,408 items · updated 2 min ago');
@@ -58,12 +59,21 @@ describe('Sources page', () => {
     expect(doc.querySelector('[data-add-source] [data-source-setup="dropbox.files"]')).not.toBeNull();
   });
 
+  test('a connected source the provider refuses keeps its setup, behind Reconnect', () => {
+    const doc = new Window().document;
+    doc.body.innerHTML = renderDashboardConnectPage(view(), unlockedOptions);
+    const button = doc.querySelector('[data-source-row="readwise.library"] button[data-source-open="readwise.library"]')!;
+    expect(button.textContent).toBe('Reconnect');
+    expect(doc.querySelector('[data-add-source] [data-source-setup="readwise.library"]')).not.toBeNull();
+    expect(doc.querySelector('[data-source-pick="readwise.library"]')).toBeNull();
+  });
+
   test('Add a source lists only what is not connected, each with its own setup panel', () => {
     const doc = new Window().document;
     doc.body.innerHTML = renderDashboardConnectPage(view(), unlockedOptions);
     const sheet = doc.querySelector('dialog#add-source[data-closable]')!;
     expect([...sheet.querySelectorAll('[data-source-pick]')].map((tile) => tile.getAttribute('data-source-pick'))).toEqual(['evernote.notes', 'google_drive.docs', 'x.bookmarks']);
-    expect(sheet.querySelectorAll('[data-source-setup][hidden]')).toHaveLength(4);
+    expect(sheet.querySelectorAll('[data-source-setup][hidden]')).toHaveLength(5);
     expect(sheet.querySelector('[data-source-search]')).not.toBeNull();
     expect(doc.body.textContent).toContain('Build a connector');
   });
