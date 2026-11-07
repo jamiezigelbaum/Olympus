@@ -595,30 +595,40 @@ branches. It requires **2,000 valid final judge labels in each class**, each
 bound to that item's complete own text and stored vector. Rules, overrides,
 fail-safes and pre-filter outputs are excluded. The ledger supplies the label:
 `private` is Personal and `secure` is Private, only when this judge alone
-decided it. A tier-bearing content-judge receipt binds that verdict's own tier
-and reason to the complete-text digest; a later metadata raise never changes
-the receipt. For pre-#982 rows with no tier receipt (2026-11-07), equivalent
-provenance comes from the latest non-fail-safe `sniffer_verdicts` answer for
-that exact subject and the ledger row's model. Its own tier must equal the
-content tier and its timestamp must be no later than the row's decision.
-The latest answer must also carry the final-content hash matching the complete
-stored text. Missing hashes, metadata-only answers, stale hashes and equal-time
-answers with differing or missing bindings abstain as `legacy_verdict_content`;
-no older answer is substituted.
-Conflicting equal-time answers, absent subject/model evidence, unreadable old
-schemas, later answers and mismatched modern receipts all abstain under named
-rejection counters. A historical metadata raise retained in the content tier
-cannot replace the judge's own label. Live lookups use a subject/model/time
-index; read-only diagnostic snapshots of older caches scan once per model and
-retain only subject hashes, tiers, times and final-content hashes, without
-migrating the cache.
-Old training attempts restart their scan immediately under the new label
-version, including attempts waiting after finding zero examples. Verdict-cache
-writes also invalidate a sliced final validation before weights are published.
-Detectors, content rules, owner rules, overrides, metadata floors,
-own-record holds and small-lane `record_held:` answers exclude the row. The
-stored text must still match its complete-text digest; a verdict-cache
-`content_hash` is not required.
+decided it. Training accepts any prompt version of the same judge model.
+`snifferId` is `<lane>:<prompt-version>.m<model-hash>`; the model hash is the
+first 16 hex characters of SHA-256 over `snifferCacheModelId(lane)`. That cache
+identity uses `cacheModelId` (or `modelId`) and includes decision-mode version
+or pending-mode suffix where applicable. Prompt/template and owner-context
+changes do not change that model hash. Training compares the hash, while
+saved weights, current clearance and re-judge identities remain prompt-specific.
+
+A tier-bearing content-judge receipt binds the verdict's own tier and reason
+to the complete-text digest; a later metadata raise never changes the receipt.
+For legacy rows without that receipt, an explicit safe
+`content:sniffer:<same-model-id>:<code>` reason, read content and a matching
+complete-copy digest supply the label. A surviving cache entry is not required.
+Rules, fail-safes, unresolved/injection answers and small-lane `record_held:`
+answers cannot label content. Unknown or competing content reasons, owner
+rules, overrides, metadata floors, Secrets and own-record holds still exclude
+the row. Mismatched modern receipts never fall back to legacy acceptance.
+
+A `metadata:sniffer` answer is never a content label, even when the ledger
+retains a body digest. Legacy rows with a metadata judge reason or a previous
+Private/Secret metadata tier still require the latest subject/model cache answer's exact final-content hash, matching tier
+and a timestamp no later than the ledger decision, with no equal-time
+ambiguity. This preserves the names-only rename regression even when the cache
+is gone: the previous metadata tier records the raise after the metadata reason
+disappears. For other rows, a cached hash is unnecessary in either class; an
+existing cache answer must still agree on tier, time and ambiguity. Missing/stale
+hashes in the metadata cases still abstain as
+`legacy_verdict_content`. Live lookups use the existing subject/model/time
+index; old read-only snapshots scan once per model without migrating the cache.
+
+Label version 3 restarts old scans and insufficient/failed attempts immediately,
+including their cursors and retry delays. Valid saved weights retain their
+normal retraining interval. Verdict-cache writes still invalidate sliced final
+validation before publication. The minimum remains 2,000 examples per class.
 
 Training takes at most 5,000 examples per class and runs bounded,
 L2-regularized logistic regression in TypeScript on normalized vectors.
@@ -667,6 +677,8 @@ It calls the same training eligibility, serving-copy selection, digest/verdict
 receipt and vector checks as live training. It counts every eligible row rather
 than applying the fitting sample caps. Every rejection name is always present;
 only the first failing check counts, so examples plus rejections equal rows read.
+All existing counters remain; `judge_id_invalid` and `judge_model_mismatch`
+distinguish malformed identities from another model, including another decision mode.
 Accepted-label `provenance` counters distinguish `judge_receipt` from
 `legacy_sniffer`; their sum equals accepted examples.
 The JSON output contains numbers only as values. Ledger array positions replace
@@ -674,7 +686,8 @@ paths, accounts and source names; no row content, item identity, reason text,
 model identity or vectors are printed, even on errors.
 
 The diagnostic uses the install-wide recorded training attempt's judge identity
-(including its prompt and decision mode), falling back to a unique source-ledger
+(including its prompt and decision mode), compares training labels by the model
+hash above, and falls back to a unique source-ledger
 attempt for older installs. It refuses ambiguous or missing training identities
 rather than inferring one from accepted rows. Existing co-located and bound
 source ledgers are counted, including moved bindings resolved by ledger identity.

@@ -775,7 +775,7 @@ test.each(['legacy', 'receipt'] as const)('a historical metadata raise never rep
   expect(trainingState(f)).toMatchObject({ outcome: 'too_few', counts: [0, 1] });
 });
 
-test('legacy names-only verdict cannot label a retained Personal body after renaming', () => {
+test.each(['metadata-cache', 'missing-cache', 'no-store'] as const)('legacy names-only verdict cannot label a retained Personal body after renaming: %s', cache => {
   let now = new Date('2026-11-01T00:00:00.000Z');
   const f = fixture({ trained: false, memory: true, snifferNow: () => now });
   trainingRow(f, 0, [], 'other:1.00', true);
@@ -801,14 +801,59 @@ test('legacy names-only verdict cannot label a retained Personal body after rena
   f.sniffer.deleteQuestion(subject(0), 'metadata');
   recordNames('Picnic plan');
   const current = f.ledger.getCurrent(subject(0))!;
-  expect(current).toMatchObject({ metadataTier: 'private', contentTier: 'secure', contentPending: false });
+  expect(current).toMatchObject({ metadataTier: 'private', previousMetadataTier: 'secure', contentTier: 'secure', contentPending: false });
   const drops: string[] = [];
-  expect(prefilterTrainingExample(current, judge, { ledger: f.ledger, sniffer: f.sniffer, copyFor: () => copy(0) },
-    reason => { drops.push(reason); return undefined; })).toBeUndefined();
-  expect(drops).toEqual(['legacy_verdict_content']);
+  expect(prefilterTrainingExample(current, judge, { ledger: f.ledger,
+    ...(cache === 'no-store' ? {} : { sniffer: cache === 'missing-cache' ? { trainingVerdict: () => undefined } : f.sniffer }),
+    copyFor: () => copy(0) }, reason => { drops.push(reason); return undefined; })).toBeUndefined();
+  expect(drops).toEqual([cache === 'no-store' ? 'legacy_store_missing' : cache === 'missing-cache' ? 'legacy_verdict_missing' : 'legacy_verdict_content']);
 });
 
-test.each(['bound', 'missing', 'stale'] as const)('legacy content labels require exact cached content binding: %s', async binding => {
+test('legacy rename then public share/unshare rejects a retained metadata raise without cache evidence', () => {
+  let now = new Date('2026-11-01T00:00:00.000Z');
+  const f = fixture({ trained: false, memory: true, snifferNow: () => now });
+  trainingRow(f, 0, [], 'other:1.00', true);
+  const original = f.ledger.getCurrent(subject(0))!;
+  f.ledger.recordDecision(subject(0), { ...original, state: 'current', snifferId: judge, decidedBy: 'sniffer',
+    reasons: original.reasons.filter(reason => !reason.startsWith('content:judge_verdict:')) });
+  const names = (title: string) => classifyItemTiers({ signals: { title }, subject: subject(0) }, {
+    sniffer: new CachedTierSniffer(f.sniffer, lane),
+  });
+  const recordNames = (title: string) => f.ledger.recordRoutedPlacement(subject(0),
+    withRecordedContent(names(title), f.ledger.getCurrent(subject(0))), {
+      copies: [{ corpusId: 'private', trustDomain: 'secure_local', layers: 'both' }], embedHold: false,
+    });
+  now = new Date('2026-11-02T00:00:00.000Z');
+  const title = 'Bank GB82 WEST 1234 5698 7654 32';
+  names(title);
+  const question = f.sniffer.questionFor(subject(0), 'metadata')!;
+  expect(question).toBeDefined();
+  f.sniffer.putVerdict({ materialHash: question.materialHash, modelId: snifferCacheModelId(lane),
+    promptVersion: SNIFFER_PROMPT_VERSION, mapRevision: 'none' },
+    { tier: 'private', category: 'financial', confidence: 1, failSafe: false }, question);
+  recordNames(title);
+  f.sniffer.deleteQuestion(subject(0), 'metadata');
+  recordNames('Picnic plan');
+  const current = f.ledger.getCurrent(subject(0))!;
+  expect(current).toMatchObject({ metadataTier: 'private', previousMetadataTier: 'secure', contentTier: 'secure', contentPending: false });
+  for (const sharing of ['public_link', 'private'] as const) {
+    f.ledger.recordRoutedPlacement(subject(0), withRecordedContent(classifyItemTiers({
+      signals: { title: 'Picnic plan', sharing }, subject: subject(0),
+    }, { sniffer: new CachedTierSniffer(f.sniffer, lane) }), f.ledger.getCurrent(subject(0))), {
+      copies: [{ corpusId: 'private', trustDomain: 'secure_local', layers: 'both' }], embedHold: false,
+    });
+  }
+  const afterSharing = f.ledger.getCurrent(subject(0))!;
+  expect(afterSharing).toMatchObject({ metadataTier: 'private', previousMetadataTier: 'public', contentTier: 'secure' });
+  expect(afterSharing.reasons.some(reason => reason.startsWith('metadata:sniffer:'))).toBe(false);
+  const drops: string[] = [];
+  expect(prefilterTrainingExample(afterSharing, judge, { ledger: f.ledger,
+    sniffer: { trainingVerdict: () => undefined },
+    copyFor: () => copy(0) }, reason => { drops.push(reason); return undefined; })).toBeUndefined();
+  expect(drops).toEqual(['legacy_verdict_missing']);
+});
+
+test.each(['bound', 'missing', 'stale'] as const)('legacy content-pass labels require matching cached content binding: %s', async binding => {
   const f = fixture({ trained: false, memory: true, log: () => {} });
   for (const n of [0, 1]) {
     trainingRow(f, n, [], 'other:1.00', binding === 'bound');
@@ -840,11 +885,11 @@ test('legacy metadata raises and differing subject verdict tiers never label', (
   expect(drops).toEqual(['legacy_verdict_tier']);
 });
 
-test('an old zero-example attempt restarts immediately instead of retaining its retry delay', async () => {
+test.each([undefined, 2])('an old zero-example attempt restarts immediately: label version %s', async version => {
   const f = fixture({ trained: false, memory: true, log: () => {} });
   await f.filter.prepare(judge);
   const old = trainingState(f);
-  delete old.labelVersion;
+  old.labelVersion = version;
   f.ledger.writeMeta('embedding-prefilter:training-v1', JSON.stringify(old));
   trainingRow(f, 0, [], 'other:1.00', true); trainingRow(f, 1, [], 'other:1.00', true);
   for (const n of [0, 1]) {
@@ -853,7 +898,7 @@ test('an old zero-example attempt restarts immediately instead of retaining its 
       reasons: row.reasons.filter(reason => !reason.startsWith('content:judge_verdict:')) });
   }
   await f.make().prepare(judge);
-  expect(trainingState(f)).toMatchObject({ labelVersion: 2, outcome: 'too_few', counts: [1, 1] });
+  expect(trainingState(f)).toMatchObject({ labelVersion: 3, outcome: 'too_few', counts: [1, 1] });
   expect(trainingState(f).id).not.toBe(old.id);
 });
 
@@ -1117,6 +1162,7 @@ test('each training drop check has a stable first-failure counter', () => {
     ['legacy_verdict_ambiguous'], ['legacy_verdict_time'], ['legacy_verdict_tier'], ['legacy_verdict_content'], ['legacy_verdict_unreadable'],
     ['chunks_empty'], ['media_present'], ['secret_material'],
     ['vector_count'], ['vector_match'], ['vector_bytes'], ['vector_nonfinite'], ['vector_zero'],
+    ['judge_id_invalid'], ['judge_model_mismatch'],
   ];
   const verdict = row.reasons.find(reason => reason.startsWith('content:judge_verdict:'))!;
   const judged = row.reasons.find(reason => reason.startsWith(`content:sniffer:${judge}:`))!;
@@ -1132,7 +1178,9 @@ test('each training drop check has a stable first-failure counter', () => {
     if (expected === 'judge_missing') reasons = reasons.filter(reason => reason !== judged);
     if (expected === 'digest_missing') reasons = reasons.filter(reason => !reason.startsWith('content:sha256:'));
     if (expected === 'verdict_missing') reasons = reasons.map(reason => reason === verdict ? `${verdict}wrong` : reason);
-    if (expected.startsWith('legacy_')) reasons = reasons.filter(reason => reason !== verdict);
+    if (expected.startsWith('legacy_')) reasons = [...reasons.filter(reason => reason !== verdict), `metadata:sniffer:${judge}:other:1.00`];
+    if (expected === 'judge_id_invalid') reasons = reasons.map(reason => reason === judged ? 'content:sniffer:invalid:other:1.00' : reason);
+    if (expected === 'judge_model_mismatch') reasons = reasons.map(reason => reason === judged ? `content:sniffer:${snifferId({ ...lane, modelId: 'other' })}:other:1.00` : reason);
     if (expected === 'copy_missing') currentCopy = undefined;
     if (expected === 'chunks_empty') {
       currentCopy!.chunks = [];

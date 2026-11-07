@@ -74981,21 +74981,28 @@ function prefilterTrainingExample(row, judge2, options, reject = () => {
     return reject("item_override");
   if (options.ledger.rejudgeQuestion(subjectOf(row)))
     return reject("rejudge_open");
-  for (const [prefix2, reason] of [
+  for (const [prefix, reason] of [
     ["metadata:owner_rule:", "metadata_owner_rule"],
     ["metadata:floor:", "metadata_floor"],
     ["metadata:secret:", "metadata_secret"],
     ["override:", "override_reason"]
   ])
-    if (row.reasons.some((value) => value.startsWith(prefix2)))
+    if (row.reasons.some((value) => value.startsWith(prefix)))
       return reject(reason);
-  const prefix = `content:sniffer:${judge2}:`;
+  const model = /^[^:]+:[^:]+\.m([0-9a-f]{16})$/.exec(judge2)?.[1];
+  if (!model)
+    return reject("judge_id_invalid");
   let judged;
   for (const reason of row.reasons) {
     if (!reason.startsWith("content:"))
       continue;
-    if (reason.startsWith(prefix)) {
-      const code = reason.slice(prefix.length);
+    if (reason.startsWith("content:sniffer:")) {
+      const verdict = /^content:sniffer:[^:]+:[^:]+\.m([0-9a-f]{16}):(.*)$/.exec(reason);
+      if (!verdict)
+        return reject("judge_id_invalid");
+      if (verdict[1] !== model)
+        return reject("judge_model_mismatch");
+      const code = verdict[2];
       if (!code)
         return reject("judge_code_empty");
       if (code.startsWith(SNIFFER_RECORD_HELD_CODE_PREFIX))
@@ -75223,7 +75230,7 @@ class EmbeddingPrefilter {
     const started = clock2();
     const deadline = started + TRAINING_SLICE_MS;
     let attempt = this.attempt;
-    if (attempt && attempt.labelVersion !== 2) {
+    if (attempt && attempt.labelVersion !== 3) {
       attempt = this.attempt = undefined;
       this.training = undefined;
     }
@@ -75258,7 +75265,7 @@ class EmbeddingPrefilter {
       }
       if (!attempt) {
         attempt = this.attempt = {
-          labelVersion: 2,
+          labelVersion: 3,
           id: randomUUID12(),
           revisions,
           judge: judge2,
@@ -75444,7 +75451,7 @@ class EmbeddingPrefilter {
       }
     } catch {
       if (!attempt)
-        attempt = this.attempt = { labelVersion: 2, id: randomUUID12(), judge: judge2, revisions: "", startedAt: this.now(), elapsedMs: 0, rows: 0, counts: [0, 0], nextAt: this.now(), outcome: "scanning" };
+        attempt = this.attempt = { labelVersion: 3, id: randomUUID12(), judge: judge2, revisions: "", startedAt: this.now(), elapsedMs: 0, rows: 0, counts: [0, 0], nextAt: this.now(), outcome: "scanning" };
       if (attempt.outcome === "scanning" || attempt.outcome === "fitting")
         this.finishTraining(attempt, "failed", stage);
     }
