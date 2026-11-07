@@ -39,7 +39,7 @@ function fixture(options: { trained?: boolean; memory?: boolean; bias?: number; 
   if (options.trained !== false) {
     mkdirSync(modelDir, { mode: 0o755 });
     writeFileSync(join(modelDir, 'weights.json'), JSON.stringify({ version: '00000000-0000-0000-0000-000000000939',
-      trainedAt: Date.now(), judge, calibration: { privateRate: 0.5, trainingPrivateRate: 0.5, since: (options.now?.() ?? Date.now()) - 30 * 86400000, until: options.now?.() ?? Date.now() }, revisions: JSON.stringify([[ledger.ledgerId(), '0']]) + ':0', model: { weights: new Array(D).fill(0), bias: options.bias ?? -5 } }), { mode: 0o644 });
+      trainedAt: Date.now(), judge, revisions: JSON.stringify([[ledger.ledgerId(), '0']]) + ':0', model: { weights: new Array(D).fill(0), bias: options.bias ?? -5 } }), { mode: 0o644 });
   }
   const placementFor = (decision: TierDecision): TierPlacementPlan => ({
     copies: [{ corpusId: decision.contentPending ? 'private' : 'personal', trustDomain: decision.contentPending ? 'secure_local' : 'internal',
@@ -361,10 +361,6 @@ test('sliced training uses judge ledger labels without content hashes and writes
       placementFor: () => ({ copies: [{ corpusId: 'private', trustDomain: 'secure_local', trustTier: 'S4', layers: 'both' }], embedHold: false }),
     });
   }
-  for (const n of [0, 1]) {
-    const q = f.sniffer.questionFor(subject(n), 'content')!;
-    f.sniffer.markFinalModelContent({ materialHash: q.materialHash, modelId: 'fixture', promptVersion: SNIFFER_PROMPT_VERSION, mapRevision: 'none' }, normalizedContentHash(`${ownText} ${n}`));
-  }
   let checkpointWrites = 0;
   const writeMeta = f.ledger.writeMeta.bind(f.ledger);
   f.ledger.writeMeta = (key, value) => { if (key === 'embedding-prefilter:training-scan-v1') checkpointWrites++; writeMeta(key, value); };
@@ -383,7 +379,6 @@ test('sliced training uses judge ledger labels without content hashes and writes
   const persisted = readFileSync(join(f.modelDir, 'weights.json'), 'utf8');
   expect(persisted).not.toContain(ownText);
   expect(JSON.parse(persisted).model.weights).toHaveLength(D);
-  expect(JSON.parse(persisted).calibration).toMatchObject({ privateRate: 0.5, trainingPrivateRate: 0.5, personal: 1, private: 1 });
   expect(logs).toHaveLength(1);
   expect(logs[0]).toContain('rows_read=4000 personal=2000 private=2000 outcome=trained');
   expect(logs[0]).toContain(`model_version=${JSON.parse(persisted).version}`);
@@ -810,7 +805,7 @@ test.each(['secrets', 'tier', 'decision', 'removed copy', 'changed vector', 'pub
     const control = new TierLedger({ dbPath: join(dir, 'control.sqlite') });
     const f = fixture({ trained: false, memory: true, stateLedger: control, monotonicNow: () => (clock += 0.01), log: () => {} });
     cleanups.push(() => { control.close(); rmSync(dir, { recursive: true, force: true }); });
-    for (let n = 0; n < 4000; n++) trainingRow(f, n, [], 'other:1.00', true);
+    for (let n = 0; n < 4000; n++) trainingRow(f, n);
     const runtime = () => (f.filter as unknown as { training?: { examples: unknown[]; fit?: Generator<void, unknown> } }).training;
     for (let tick = 0; tick < 100 && !runtime()?.fit; tick++) await f.filter.prepare(judge);
     expect(runtime()?.fit).toBeDefined();
@@ -987,7 +982,7 @@ test.each([undefined, 2])('an old zero-example attempt restarts immediately: lab
       reasons: row.reasons.filter(reason => !reason.startsWith('content:judge_verdict:')) });
   }
   await f.make().prepare(judge);
-  expect(trainingState(f)).toMatchObject({ labelVersion: 4, outcome: 'too_few', counts: [1, 1] });
+  expect(trainingState(f)).toMatchObject({ labelVersion: 3, outcome: 'too_few', counts: [1, 1] });
   expect(trainingState(f).id).not.toBe(old.id);
 });
 
@@ -1029,7 +1024,7 @@ test('costly retained-copy validation yields and still lets fitting finish', asy
   const control = new TierLedger({ dbPath: join(dir, 'control.sqlite') });
   const f = fixture({ trained: false, memory: true, stateLedger: control, monotonicNow: () => clock, log: () => {} });
   cleanups.push(() => { control.close(); rmSync(dir, { recursive: true, force: true }); });
-  for (let n = 0; n < 4000; n++) trainingRow(f, n, [], 'other:1.00', true);
+  for (let n = 0; n < 4000; n++) trainingRow(f, n);
   f.setCopy(n => { clock += 0.1; return copy(n); }); // 400 ms for a complete retained-copy sweep.
   for (let tick = 0; tick < 50 && !existsSync(join(f.modelDir, 'weights.json')); tick++) {
     const started = clock;
@@ -1045,7 +1040,7 @@ test('a scanned attempt finishes between continuous judge passes and backlog-siz
   let clock = 0;
   const logs: string[] = [];
   const f = fixture({ trained: false, monotonicNow: () => clock, log: line => logs.push(line) });
-  for (let n = 0; n < 4000; n++) trainingRow(f, n, [], 'other:1.00', true);
+  for (let n = 0; n < 4000; n++) trainingRow(f, n);
   const readCopy = (n: number) => { clock += 0.1; return copy(n); };
   f.setCopy(readCopy); // The complete freshness sweep needs 400 ms, spanning slices.
   const runtime = () => (f.filter as unknown as { training?: { finalValidation?: { index: number } } }).training;
@@ -1218,22 +1213,17 @@ test('scan visits another ledger within a window instead of draining a sparse fi
   expect(trainingState(a).rows).toBeLessThan(102);
 });
 
-test('scan yields at the deadline after both class caps and continues measuring the prior', async () => {
+test('scan stops on the exact row filling both 5000-example caps', async () => {
   let clock = 0;
   const f = fixture({ trained: false, memory: true, monotonicNow: () => clock, log: () => {} });
-  for (let n = 0; n < 10010; n++) trainingRow(f, n, [], 'other:1.00', true);
+  for (let n = 0; n < 10010; n++) trainingRow(f, n);
   let copied = 0;
   f.setCopy(n => { if (++copied === 10000) clock = 200; return copy(n); });
   await f.filter.prepare(judge);
   expect(trainingState(f).rows).toBe(10000);
   expect(trainingState(f).counts).toEqual([5000, 5000]);
-  expect(trainingState(f).outcome).toBe('scanning');
+  expect(trainingState(f).outcome).toBe('fitting');
   expect(copied).toBe(10000);
-  clock = 0;
-  await f.filter.prepare(judge, () => copied >= 10010);
-  expect(trainingState(f).rows).toBe(10010);
-  expect(trainingState(f).counts).toEqual([5000, 5000]);
-  expect(JSON.parse(f.ledger.readMeta('embedding-prefilter:training-scan-v1')!).priorCounts).toEqual([5005, 5005]);
 }, 30_000);
 
 test('training yields to judge/control work before another row and serializes overlapping slices', async () => {
@@ -1403,88 +1393,4 @@ test('each training drop check has a stable first-failure counter', () => {
     expect(drops, expected).toEqual([expected]);
   }
   expect(cases.map(([reason]) => reason)).toEqual([...PREFILTER_TRAINING_REJECTIONS]);
-});
-
-test('older saved weights without prior fail closed and are invalidated for retraining', async () => {
-  const f = fixture();
-  const path = join(f.modelDir, 'weights.json');
-  const saved = JSON.parse(readFileSync(path, 'utf8')); delete saved.calibration;
-  writeFileSync(path, JSON.stringify(saved));
-  const filter = f.make(), question = f.add(1);
-  expect(filter.tryClear(question, judge)).toBe(false);
-  await filter.prepare(judge);
-  expect(existsSync(path)).toBe(false);
-  expect(f.ledger.getCurrent(question)?.contentPending).toBe(true);
-});
-
-
-test('prior scans beyond the class cap, counts only recent held judge labels, and resumes counts', async () => {
-  let judgeTime = new Date();
-  const f = fixture({ trained: false, memory: true, snifferNow: () => judgeTime, log: () => {} });
-  // There are not enough Private examples to fit; this isolates sampling from SGD.
-  for (let n = 0; n < 5002; n++) trainingRow(f, n * 2, [], 'other:1.00', true);
-  trainingRow(f, 1, [], 'other:1.00', true);
-  judgeTime = new Date('2020-01-01T00:00:00Z');
-  trainingRow(f, 10005, [], 'other:1.00', true);
-  judgeTime = new Date();
-  // Its ledger decision is fresh, but the real judge verdict is old.
-  trainingRow(f, 10007, [], 'other:1.00', true);
-  const unheld = f.ledger.getCurrent(subject(10007))!;
-  f.ledger.recordDecision(subject(10007), { ...unheld, state: 'current', decidedBy: 'sniffer', snifferId: judge,
-    reasons: unheld.reasons.filter(r => r !== 'content:held_until_judged') });
-  let filter = f.filter;
-  await filter.prepare(judge);
-  filter = f.make(); // Durable scan must keep its prior counts on restart.
-  for (let n = 0; n < 200 && filter.trainingPending; n++) await filter.prepare(judge);
-  expect(trainingState(f)).toMatchObject({ outcome: 'too_few', counts: [5000, 3] });
-  const scan = JSON.parse(f.ledger.readMeta('embedding-prefilter:training-scan-v1')!);
-  expect(scan.priorCounts).toEqual([5002, 1]);
-}, 30_000);
-
-
-test('a scan resumed 60 days later cannot publish its expired 1% prior', async () => {
-  let now = Date.now();
-  const startedAt = now;
-  const f = fixture({ trained: false, now: () => now, snifferNow: () => new Date(startedAt), log: () => {} });
-  for (let n = 0; n < 4000; n++) trainingRow(f, n, [], 'other:1.00', true);
-  // Synthetic checkpoint: balanced fit samples from an uncapped 1% Private population.
-  // The process paused after scanning, before fitting/publication.
-  const id = 'synthetic-paused-scan';
-  f.ledger.writeMeta('embedding-prefilter:training-v1', JSON.stringify({ labelVersion: 4, id,
-    revisions: JSON.stringify([[f.ledger.ledgerId(), '0']]) + ':0', judge, startedAt,
-    elapsedMs: 0, rows: 10000, counts: [2000, 2000], nextAt: startedAt, outcome: 'scanning' }));
-  f.ledger.writeMeta('embedding-prefilter:training-scan-v1', JSON.stringify({ attempt: id,
-    done: true, rows: 10000, priorCounts: [9900, 100],
-    samples: Array.from({ length: 4000 }, (_, n) => ({ subject: subject(n), private: !!(n % 2) })) }));
-  now += 60 * 86400000;
-  const resumed = f.make();
-  for (let tick = 0; tick < 200; tick++) {
-    await resumed.prepare(judge);
-    if (['trained', 'failed', 'too_few'].includes(trainingState(f).outcome)) break;
-  }
-  expect(existsSync(join(f.modelDir, 'weights.json'))).toBe(false);
-  expect(trainingState(f).id).not.toBe(id);
-  expect(trainingState(f).startedAt).toBe(now);
-}, 30_000);
-
-test.each(['too_few', 'failed'] as const)('a 60-day-old prior fails closed after a %s retrain', async outcome => {
-  let now = Date.now();
-  const f = fixture({ bias: 0, now: () => now, log: () => {} });
-  const path = join(f.modelDir, 'weights.json');
-  const saved = JSON.parse(readFileSync(path, 'utf8'));
-  saved.calibration.privateRate = 0.01;
-  writeFileSync(path, JSON.stringify(saved));
-  const filter = f.make();
-  // An uncorrected 50% score is corrected to 1% while the prior is fresh.
-  expect(filter.tryClear(f.add(9000), judge)).toBe(true);
-  const question = f.add(9001);
-  now += 60 * 86400000;
-  const read = outcome === 'failed' ? spyOn(f.ledger, 'listItemWindow').mockImplementation(() => { throw new Error('synthetic read failure'); }) : undefined;
-  try { await filter.prepare(judge); } finally { read?.mockRestore(); }
-  expect(trainingState(f).outcome).toBe(outcome);
-  const counts = clearingCounts();
-  expect(filter.tryClear(question, judge, counts)).toBe(false);
-  expect(counts.skipped).toEqual({ prior_stale: 1 });
-  expect(f.ledger.getCurrent(question)?.contentPending).toBe(true);
-  expect(JSON.parse(readFileSync(path, 'utf8')).calibration.until).toBe(saved.calibration.until);
 });

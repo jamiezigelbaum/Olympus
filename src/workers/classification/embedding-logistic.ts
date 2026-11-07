@@ -20,22 +20,6 @@ export function privateProbability(model: LogisticModel, vector: readonly number
   for (let i = 0; i < input.length; i++) score += input[i]! * model.weights[i]!;
   return Number.isFinite(score) ? sigmoid(score) : undefined;
 }
-/** Priors are saved beside the untouched sample-prior fit, never folded into its bias. */
-export interface PrefilterPrior { privateRate: number; trainingPrivateRate: number }
-export function measuredPrivatePrior(personal: number, privateCount: number): number | undefined {
-  if (![personal, privateCount].every(n => Number.isSafeInteger(n) && n >= 0) || personal + privateCount === 0) return undefined;
-  return Math.max(0.01, Math.min(0.99, privateCount / (personal + privateCount)));
-}
-export function validPrefilterPrior(calibration: PrefilterPrior | undefined): calibration is PrefilterPrior {
-  return !!calibration && Number.isFinite(calibration.privateRate) && calibration.privateRate >= 0.01 && calibration.privateRate <= 0.99
-    && Number.isFinite(calibration.trainingPrivateRate) && calibration.trainingPrivateRate > 0 && calibration.trainingPrivateRate < 1;
-}
-export function correctedPrivateProbability(model: LogisticModel, vector: readonly number[], calibration: PrefilterPrior | undefined): number | undefined {
-  if (!model || !validPrefilterPrior(calibration)) return undefined;
-  const shift = Math.log(calibration.privateRate / (1 - calibration.privateRate))
-    - Math.log(calibration.trainingPrivateRate / (1 - calibration.trainingPrivateRate));
-  return privateProbability({ ...model, bias: model.bias + shift }, vector);
-}
 export function trainLogistic(examples: readonly LogisticExample[], minimumPerClass = EMBEDDING_PREFILTER_MIN_PER_CLASS): LogisticModel | undefined {
   const steps = trainLogisticSteps(examples, minimumPerClass);
   let step = steps.next();

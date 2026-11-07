@@ -9,7 +9,7 @@ import type { SnifferQuestion, TierSnifferStore } from './sniffer-store.ts';
 import { copyServingLayer, tierLedgerIdentityKey, type TierLedger, type TierLedgerRecord, type TierPlacementPlan } from './tier-ledger.ts';
 import { TIER_CLASSIFIER_VERSION, PERSONAL_FIRST_REASON, HELD_UNTIL_JUDGED_REASON, contentDigestReason, contentJudgeVerdictReason, normalizedContentHash, type TierDecision, type TierSnifferSubject } from './tier-classifier.ts';
 import { EMBEDDING_PREFILTER_MODEL_ID, EMBEDDING_PREFILTER_DIMENSIONS, EMBEDDING_PREFILTER_MIN_PER_CLASS,
-  trainLogisticSteps, correctedPrivateProbability, measuredPrivatePrior, validPrefilterPrior, type PrefilterPrior, type LogisticModel, type LogisticExample } from './embedding-logistic.ts';
+  trainLogisticSteps, privateProbability, type LogisticModel, type LogisticExample } from './embedding-logistic.ts';
 
 /** The shared store's read-only projection; no source policy or retrieval access. */
 export interface PrefilterCopy {
@@ -22,20 +22,13 @@ const CHECKS = `${PREFIX}check:`;
 const WINDOW = 200;
 const RETRAIN_MS = 24 * 60 * 60 * 1000;
 const MAX_PER_CLASS = 5000;
-const PRIOR_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
-// Scan checkpoints expire after 48 hours; calibration windows authorize clearing for 7 days.
-const MAX_SCAN_AGE_MS = 48 * 60 * 60 * 1000;
-const MAX_PRIOR_AGE_MS = 7 * 24 * 60 * 60 * 1000;
-function freshTimestamp(timestamp: number, now: number, maxAge: number): boolean {
-  return Number.isFinite(timestamp) && timestamp <= now && now - timestamp <= maxAge;
-}
 const TRAINING_SLICE_MS = 200;
 const FAILED_RETRY_MS = 3 * 60 * 60 * 1000;
 const NEW_VERDICTS = 1000;
 const TRAINING = `${PREFIX}training-v1`;
 const SCAN = `${PREFIX}training-scan-v1`;
 interface TrainingAttempt {
-  labelVersion: 4;
+  labelVersion: 3;
   id: string; revisions: string; judge: string; startedAt: number; elapsedMs: number;
   rows: number; counts: [number, number]; nextAt: number;
   outcome: 'scanning' | 'fitting' | 'trained' | 'too_few' | 'failed';
@@ -44,10 +37,9 @@ interface TrainingAttempt {
 // Only references, beside the source's own ledger. No text or vectors are persisted.
 interface TrainingScan {
   attempt: string; after?: TierSnifferSubject; done: boolean; rows: number;
-  priorCounts: [number, number];
   samples: Array<{ subject: TierSnifferSubject; private: boolean }>;
 }
-interface TrainingExample extends LogisticExample { contentHash: string; current: (checkLedger: boolean) => boolean }
+interface TrainingExample extends LogisticExample { current: (checkLedger: boolean) => boolean }
 interface TrainingRun {
   id: string; scans: Array<{ member: EmbeddingPrefilter; scan: TrainingScan; dirty: boolean; revision: string }>;
   scanIndex: number; examples: TrainingExample[]; memberIndex: number; sampleIndex: number;
@@ -57,10 +49,7 @@ interface TrainingRun {
   markers?: string[];
   validationIndex: number; validationRemaining: number;
 }
-export interface SavedModel {
-  revisions: string; version: string; trainedAt: number; judge: string; model: LogisticModel;
-  calibration: PrefilterPrior & { personal: number; private: number; since: number; until: number };
-}
+interface SavedModel { revisions: string; version: string; trainedAt: number; judge: string; model: LogisticModel }
 interface Receipt { subject: TierSnifferSubject; hash: string; reason: string; original: TierDecision }
 interface Audit { misses: boolean[]; stopped: boolean; reason?: 'audit_unreadable' }
 import { embeddingPrefilterDirectory } from './tier-ledger-path.ts';
@@ -211,7 +200,7 @@ export function prefilterTrainingExample(row: TierLedgerRecord, judge: string, o
 
 /** First failing guard wins; fixed codes only, never item-derived labels. */
 export type ClearingSkipReason =
-  | 'disabled' | 'audit_stopped' | 'model_missing' | 'model_invalid' | 'prior_stale' | 'weights_missing'
+  | 'disabled' | 'audit_stopped' | 'model_missing' | 'model_invalid' | 'weights_missing'
   | 'revisions_changed' | 'judge_changed' | 'not_content' | 'row_missing' | 'row_not_pending'
   | 'metadata_pending' | 'content_not_pending' | 'content_unread' | 'metadata_tier' | 'content_tier'
   | 'metadata_forced' | 'override_decision' | 'owner_decision' | 'item_override' | 'metadata_owner_rule'
@@ -294,14 +283,13 @@ export class EmbeddingPrefilter {
     if (this.audit.stopped) return 'Embedding clearing stopped: more than 2% of the last 200 checks were Private. Cleared items are returning to the privacy judge.';
     if (!this.enabled()) return 'Embedding clearing is off.';
     const training = this.owner.attempt;
-    const failure = training?.reason === 'prior_missing' ? 'found no recent held content-judge verdicts'
-      : training?.reason === 'scan_failed' ? 'could not read training examples'
+    const failure = training?.reason === 'scan_failed' ? 'could not read training examples'
       : training?.reason === 'training_failed' ? 'could not fit the model'
       : training?.reason === 'weights_write_failed' ? 'could not save the model' : 'the ledgers or judge changed';
     const detail = training ? ` Training ${training.outcome === 'too_few' ? `found too few examples (needs ${EMBEDDING_PREFILTER_MIN_PER_CLASS} per class)`
       : training.outcome === 'trained' ? `completed with model ${training.version}` : training.outcome === 'failed' ? `failed: ${failure}`
       : training.outcome === 'scanning' ? 'is reading the ledger' : 'is fitting the model'}; read ${training.rows} rows, ${training.counts[0]} Personal and ${training.counts[1]} Private examples in ${Math.round(training.elapsedMs)} ms. Next attempt: ${training.outcome === 'scanning' || training.outcome === 'fitting' ? 'continue next tick' : new Date(training.nextAt).toISOString()}${training.outcome === 'too_few' ? ' or after 1,000 new verdicts, whichever comes first' : ''}.` : '';
-    if (!this.saved || !validPrefilterPrior(this.saved.calibration)) return detail ? `Embedding clearing waits.${detail}` : `Embedding clearing waits for ${EMBEDDING_PREFILTER_MIN_PER_CLASS} judge verdicts per class with complete stored vectors.`;
+    if (!this.saved) return detail ? `Embedding clearing waits.${detail}` : `Embedding clearing waits for ${EMBEDDING_PREFILTER_MIN_PER_CLASS} judge verdicts per class with complete stored vectors.`;
     return `Embedding clearing is on; ${this.audit.misses.length} of 200 spot checks collected.${detail}`;
   }
   setPlacementFor(placementFor: ((decision: TierDecision) => TierPlacementPlan) | undefined): void {
@@ -327,7 +315,7 @@ export class EmbeddingPrefilter {
     const fingerprint = this.trainingFingerprint(row);
     const copied = copyFingerprint(copy);
     const subject = subjectOf(row);
-    return { vector, private: row.contentTier === 'secure', contentHash: normalizedContentHash(copy.chunks.map(chunk => chunk.boundedText).join('')), current: checkLedger => {
+    return { vector, private: row.contentTier === 'secure', current: checkLedger => {
       const currentCopy = this.options.copyFor(subject);
       if (!currentCopy || copyFingerprint(currentCopy) !== copied) return false;
       if (!checkLedger) return true;
@@ -380,13 +368,8 @@ export class EmbeddingPrefilter {
     const started = clock();
     const deadline = started + TRAINING_SLICE_MS;
     let attempt = this.attempt;
-    // Older scans did not collect the uncapped, content-bound prior.
-    if (attempt && attempt.labelVersion !== 4) { attempt = this.attempt = undefined; this.training = undefined; }
-    if (attempt && (attempt.outcome === 'scanning' || attempt.outcome === 'fitting')
-      && !freshTimestamp(attempt.startedAt, this.now(), MAX_SCAN_AGE_MS)) {
-      attempt = this.attempt = undefined;
-      this.training = undefined;
-    }
+    // Old scans excluded other prompts and required a surviving legacy cache.
+    if (attempt && attempt.labelVersion !== 3) { attempt = this.attempt = undefined; this.training = undefined; }
     const finishedAtStart = attempt && ['trained', 'too_few', 'failed'].includes(attempt.outcome) ? attempt.id : undefined;
     // A failure before revisions could be read must still honor its retry deadline.
     if (attempt?.outcome === 'failed' && !attempt.revisions && this.now() < attempt.nextAt) return;
@@ -395,7 +378,7 @@ export class EmbeddingPrefilter {
       const revisions = this.revisions();
       if (this.saved && (this.saved.judge !== judge || !/^[0-9a-f-]{36}$/.test(this.saved.version) || !Number.isFinite(this.saved.trainedAt)
         || this.saved.revisions !== revisions || !existsSync(this.path)
-        || correctedPrivateProbability(this.saved.model, [1, ...new Array(EMBEDDING_PREFILTER_DIMENSIONS - 1).fill(0)], this.saved.calibration) === undefined)) {
+        || privateProbability(this.saved.model, [1, ...new Array(EMBEDDING_PREFILTER_DIMENSIONS - 1).fill(0)]) === undefined)) {
         if (existsSync(this.path)) removeFileDurablySync(this.path);
         this.saved = undefined;
         if (attempt?.outcome === 'trained') attempt = this.attempt = undefined;
@@ -416,7 +399,7 @@ export class EmbeddingPrefilter {
         attempt = undefined;
       }
       if (!attempt) {
-        attempt = this.attempt = { labelVersion: 4, id: randomUUID(), revisions, judge, startedAt: this.now(), elapsedMs: 0,
+        attempt = this.attempt = { labelVersion: 3, id: randomUUID(), revisions, judge, startedAt: this.now(), elapsedMs: 0,
           rows: 0, counts: [0, 0], nextAt: this.now(), outcome: 'scanning' };
         this.training = undefined;
       }
@@ -424,8 +407,7 @@ export class EmbeddingPrefilter {
         const scans = [...this.members].map(member => {
           const raw = member.options.ledger.readMeta(SCAN);
           const previous = raw ? JSON.parse(raw) as TrainingScan : undefined;
-          const scan = previous?.attempt === attempt!.id ? previous : { attempt: attempt!.id, done: false, rows: 0, samples: [], priorCounts: [0, 0] as [number, number] };
-          if (!Array.isArray(scan.priorCounts) || scan.priorCounts.length !== 2 || !scan.priorCounts.every(n => Number.isSafeInteger(n) && n >= 0)) throw new Error();
+          const scan = previous?.attempt === attempt!.id ? previous : { attempt: attempt!.id, done: false, rows: 0, samples: [] };
           if (!Array.isArray(scan.samples) || scan.samples.length > MAX_PER_CLASS * 2 || !Number.isSafeInteger(scan.rows)) throw new Error();
           return { member, scan, dirty: false, revision: member.options.ledger.readMeta(`${PREFIX}training-revision`) ?? '0' };
         });
@@ -445,46 +427,31 @@ export class EmbeddingPrefilter {
       if (ledgerChanged) run.validationRemaining = run.examples.length;
       let worked = false;
       const hasTime = () => !shouldYield() && (!worked || clock() < deadline);
+      const full = () => attempt!.counts.every(count => count >= MAX_PER_CLASS);
       // One bounded window per ledger, rotating even when a slice ends mid-window.
       // No source-specific ranking or extra full-ledger candidate count is needed.
-      while (attempt.outcome !== 'fitting' && run.scans.some(({ scan }) => !scan.done) && hasTime()) {
+      while (attempt.outcome !== 'fitting' && !full() && run.scans.some(({ scan }) => !scan.done) && hasTime()) {
         const entry = run.scans[run.scanIndex]!;
         run.scanIndex = (run.scanIndex + 1) % run.scans.length;
         const { member, scan } = entry;
         if (scan.done) continue;
         const rows = member.options.ledger.listItemWindow({ ...(scan.after ? { after: scan.after } : {}),
-          limit: 32 });
+          limit: Math.min(32, MAX_PER_CLASS * 2 - attempt.counts[0] - attempt.counts[1]) });
         if (!rows.length) { scan.done = true; entry.dirty = true; continue; }
         for (const row of rows) {
-          if (!hasTime()) break;
+          if (!hasTime() || full()) break;
           worked = true;
           entry.dirty = true;
           scan.after = subjectOf(row); scan.rows++; attempt.rows++;
           const index = Number(row.contentTier === 'secure');
-          const priorEligible = row.reasons.includes(HELD_UNTIL_JUDGED_REASON);
-          if (attempt.counts[index]! < MAX_PER_CLASS || priorEligible) {
+          if (attempt.counts[index]! < MAX_PER_CLASS) {
             const example = member.trainingExample(row, judge);
-            if (example) {
-              if (priorEligible) {
-                // Ledger timestamps also move on reclassification. Only the real
-                // judge cache's final-content-bound timestamp establishes recency.
-                const verdict = member.options.sniffer.trainingVerdict(subjectOf(row), row.modelId!);
-                const time = Date.parse(verdict?.decidedAt ?? '');
-                if (verdict && !verdict.ambiguous && verdict.contentHash === example.contentHash
-                  && verdict.tier === (example.private ? 'private' : 'personal')
-                  && time >= attempt.startedAt - PRIOR_WINDOW_MS && time <= attempt.startedAt) {
-                  scan.priorCounts[Number(example.private)]!++;
-                }
-              }
-              if (attempt.counts[index]! < MAX_PER_CLASS) {
-                scan.samples.push({ subject: subjectOf(row), private: example.private }); attempt.counts[Number(example.private)]!++;
-              }
-            }
+            if (example) { scan.samples.push({ subject: subjectOf(row), private: example.private }); attempt.counts[Number(example.private)]!++; }
           }
           await ingestionTurn();
         }
       }
-      if (attempt.outcome === 'fitting' || run.scans.every(({ scan }) => scan.done)) {
+      if (attempt.outcome === 'fitting' || run.scans.every(({ scan }) => scan.done) || attempt.counts.every(count => count >= MAX_PER_CLASS)) {
         if (attempt.counts.some(count => count < EMBEDDING_PREFILTER_MIN_PER_CLASS)) this.finishTraining(attempt, 'too_few');
         else {
           stage = 'training_failed';
@@ -552,23 +519,12 @@ export class EmbeddingPrefilter {
               // during any validation slice requires a fresh pass, including copies.
               if (validation.index === run.examples.length && hasTime()
                 && validation.markers === changeMarkers() && attempt.revisions === this.revisions()) {
-                stage = 'prior_stale';
-                if (!freshTimestamp(attempt.startedAt, this.now(), MAX_SCAN_AGE_MS)
-                  || !freshTimestamp(attempt.startedAt, this.now(), MAX_PRIOR_AGE_MS)) throw new Error();
                 stage = 'weights_write_failed';
                 if (this.control.dbPath === ':memory:') throw new Error();
                 const directory = embeddingPrefilterDirectory(this.control.dbPath);
                 if (existsSync(directory) && (!lstatSync(directory).isDirectory() || lstatSync(directory).isSymbolicLink())) throw new Error();
                 mkdirSync(directory, { recursive: true, mode: 0o700 }); chmodSync(directory, 0o700);
-                // Count the recent held population BEFORE per-class sampling. No item material
-                // or identities enter the prior receipt. No evidence means no clearing model.
-                const personal = run.scans.reduce((n, entry) => n + entry.scan.priorCounts[0], 0);
-                const privateCount = run.scans.reduce((n, entry) => n + entry.scan.priorCounts[1], 0);
-                const privateRate = measuredPrivatePrior(personal, privateCount);
-                if (privateRate === undefined) { stage = 'prior_missing'; throw new Error(); }
-                const saved: SavedModel = { model: run.model, judge, revisions, trainedAt: this.now(), version: randomUUID(),
-                  calibration: { privateRate, trainingPrivateRate: attempt.counts[1] / (attempt.counts[0] + attempt.counts[1]),
-                    personal, private: privateCount, since: attempt.startedAt - PRIOR_WINDOW_MS, until: attempt.startedAt } };
+                const saved: SavedModel = { model: run.model, judge, revisions, trainedAt: this.now(), version: randomUUID() };
                 writePrivateFileAtomicSync(this.path, JSON.stringify(saved));
                 this.saved = saved; attempt.version = saved.version;
                 this.finishTraining(attempt, 'trained');
@@ -597,7 +553,7 @@ export class EmbeddingPrefilter {
         }
       }
     } catch {
-      if (!attempt) attempt = this.attempt = { labelVersion: 4, id: randomUUID(), judge, revisions: '', startedAt: this.now(), elapsedMs: 0, rows: 0, counts: [0, 0], nextAt: this.now(), outcome: 'scanning' };
+      if (!attempt) attempt = this.attempt = { labelVersion: 3, id: randomUUID(), judge, revisions: '', startedAt: this.now(), elapsedMs: 0, rows: 0, counts: [0, 0], nextAt: this.now(), outcome: 'scanning' };
       if (attempt.outcome === 'scanning' || attempt.outcome === 'fitting') this.finishTraining(attempt, 'failed', stage);
     }
     if (attempt && attempt.id !== finishedAtStart) {
@@ -638,8 +594,7 @@ export class EmbeddingPrefilter {
     if (!this.enabled()) return skip('disabled');
     if (this.audit.stopped) return skip('audit_stopped');
     if (!this.saved) return skip('model_missing');
-    if (!/^[0-9a-f-]{36}$/.test(this.saved.version) || !Number.isFinite(this.saved.trainedAt) || !validPrefilterPrior(this.saved.calibration)) return skip('model_invalid');
-    if (!freshTimestamp(this.saved.calibration.until, this.now(), MAX_PRIOR_AGE_MS)) return skip('prior_stale');
+    if (!/^[0-9a-f-]{36}$/.test(this.saved.version) || !Number.isFinite(this.saved.trainedAt)) return skip('model_invalid');
     if (!existsSync(this.path)) return skip('weights_missing');
     if (this.saved.revisions !== this.revisions()) return skip('revisions_changed');
     if (this.saved.judge !== judge) return skip('judge_changed');
@@ -667,7 +622,7 @@ export class EmbeddingPrefilter {
     if (!row.reasons.includes(contentDigestReason(copy.chunks.map(chunk => chunk.boundedText).join('')))) return skip('digest_missing');
     const vector = prefilterVector(copy);
     if (!vector) return skip('no_vector');
-    const probability = correctedPrivateProbability(this.saved.model, vector, this.saved.calibration);
+    const probability = privateProbability(this.saved.model, vector);
     if (probability === undefined) return skip('score_unavailable');
     if (probability >= 0.05) return skip('probability_high');
     if ((this.options.random?.() ?? Math.random()) < 0.05) {
