@@ -8248,7 +8248,7 @@ function defaultWorkerEnv(options) {
   const bunBin = resolveBunBin(options);
   return [
     "# Olympus source worker environment.",
-    `PATH=${defaultWorkerPath(bunBin, undefined, workerToolDirectories(options, bunBin))}`,
+    workerEnvPathLine(defaultWorkerPath(bunBin, undefined, workerToolDirectories(options, bunBin))),
     `OLYMPUS_EMAIL_SOURCE_PORT=${options.port ?? 8010}`,
     `OLYMPUS_WORKER_SCHEDULER_ENABLED=${options.schedulerEnabled === true ? "true" : "false"}`,
     "OLYMPUS_SOURCE_INDEX_ANSWER_ENABLED=true",
@@ -8281,10 +8281,15 @@ function nextWorkerEnvAuthToken(text, authToken) {
 }
 function nextWorkerEnvPath(text, options) {
   const bunBin = resolveBunBin(options);
-  const desiredPath = defaultWorkerPath(bunBin, text.match(/^PATH=(.*)$/m)?.[1], workerToolDirectories(options, bunBin));
-  return /^PATH=.*$/m.test(text) ? text.replace(/^PATH=.*$/m, `PATH=${desiredPath}`) : `${text.replace(/\n?$/, `
-`)}PATH=${desiredPath}
+  const existing = text.match(/^PATH=(.*)$/m)?.[1];
+  const desiredPath = defaultWorkerPath(bunBin, existing === undefined ? undefined : unquoteEnvValue(existing), workerToolDirectories(options, bunBin));
+  const line = workerEnvPathLine(desiredPath);
+  return /^PATH=.*$/m.test(text) ? text.replace(/^PATH=.*$/m, () => line) : `${text.replace(/\n?$/, `
+`)}${line}
 `;
+}
+function workerEnvPathLine(path) {
+  return path.includes("'") ? `PATH=${path}` : `PATH='${path}'`;
 }
 function ensureManagedWorkerEnvironment(options = {}) {
   const homeDir = validatedAbsolutePath(options.homeDir ?? homedir11(), "home directory");

@@ -12,7 +12,7 @@ import {
 } from './atomic-file.ts';
 import { resolveOpenClawExecutable } from './openclaw-executable.ts';
 import { OperationError } from './operation-error.ts';
-import { isWorkerAuthTokenPlaceholder } from './worker-auth.ts';
+import { isWorkerAuthTokenPlaceholder, unquoteEnvValue } from './worker-auth.ts';
 
 export type WorkerServicePlatform = 'darwin' | 'linux';
 export type WorkerServiceAction = 'install' | 'status' | 'start' | 'stop' | 'restart' | 'uninstall';
@@ -628,7 +628,7 @@ function defaultWorkerEnv(options: WorkerServiceInstallOptions): string {
   const bunBin = resolveBunBin(options);
   return [
     '# Olympus source worker environment.',
-    `PATH=${defaultWorkerPath(bunBin, undefined, workerToolDirectories(options, bunBin))}`,
+    workerEnvPathLine(defaultWorkerPath(bunBin, undefined, workerToolDirectories(options, bunBin))),
     `OLYMPUS_EMAIL_SOURCE_PORT=${options.port ?? 8010}`,
     `OLYMPUS_WORKER_SCHEDULER_ENABLED=${options.schedulerEnabled === true ? 'true' : 'false'}`,
     'OLYMPUS_SOURCE_INDEX_ANSWER_ENABLED=true',
@@ -666,14 +666,28 @@ function nextWorkerEnvAuthToken(text: string, authToken: string | undefined): st
 
 function nextWorkerEnvPath(text: string, options: WorkerServiceInstallOptions): string {
   const bunBin = resolveBunBin(options);
+  const existing = text.match(/^PATH=(.*)$/m)?.[1];
   const desiredPath = defaultWorkerPath(
     bunBin,
-    text.match(/^PATH=(.*)$/m)?.[1],
+    existing === undefined ? undefined : unquoteEnvValue(existing),
     workerToolDirectories(options, bunBin),
   );
+  // An older install wrote the line unquoted: an upgrade rewrites it in the
+  // quoted form, so a directory with a space can't break the sourced file (#711).
+  const line = workerEnvPathLine(desiredPath);
   return /^PATH=.*$/m.test(text)
-    ? text.replace(/^PATH=.*$/m, `PATH=${desiredPath}`)
-    : `${text.replace(/\n?$/, '\n')}PATH=${desiredPath}\n`;
+    ? text.replace(/^PATH=.*$/m, () => line)
+    : `${text.replace(/\n?$/, '\n')}${line}\n`;
+}
+
+/**
+ * worker.env's PATH line, single-quoted: the one form systemd's
+ * EnvironmentFile parser and launchd's `set -a; .` sourcing read alike
+ * (`unquoteEnvValue`). A directory holding a single quote can't be quoted
+ * that way, so such a PATH stays unquoted as before.
+ */
+function workerEnvPathLine(path: string): string {
+  return path.includes("'") ? `PATH=${path}` : `PATH='${path}'`;
 }
 
 /**

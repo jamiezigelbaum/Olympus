@@ -22,7 +22,7 @@ test('worker.env PATH carries the directory of the resolvable openclaw executabl
   const userBin = dirname(openclawBin);
   try {
     installWorkerService({ platform: 'linux', homeDir: home, authToken: 'token', openclawBin, dryRun: false });
-    let pathLine = readFileSync(envPath, 'utf8').match(/^PATH=(.+)$/m)?.[1] ?? '';
+    let pathLine = readFileSync(envPath, 'utf8').match(/^PATH='(.+)'$/m)?.[1] ?? '';
     expect(pathLine.split(':')[0]).toBe(dirname(process.execPath));
     expect(pathLine.split(':')).toContain(userBin);
 
@@ -30,7 +30,7 @@ test('worker.env PATH carries the directory of the resolvable openclaw executabl
     // operator's own PATH order is kept: tool directories append after it.
     writeFileSync(envPath, 'PATH=/custom/b:/custom/a\nOLYMPUS_WORKER_AUTH_TOKEN=old-token\n', { mode: 0o600 });
     installWorkerService({ platform: 'linux', homeDir: home, authToken: 'token', openclawBin, dryRun: false });
-    pathLine = readFileSync(envPath, 'utf8').match(/^PATH=(.+)$/m)?.[1] ?? '';
+    pathLine = readFileSync(envPath, 'utf8').match(/^PATH='(.+)'$/m)?.[1] ?? '';
     const entries = pathLine.split(':');
     expect(entries.slice(0, 3)).toEqual([dirname(process.execPath), '/custom/b', '/custom/a']);
     expect(entries.indexOf(userBin)).toBeGreaterThan(entries.indexOf('/custom/a'));
