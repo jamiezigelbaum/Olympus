@@ -73307,7 +73307,7 @@ class EmbeddingPrefilter {
             throw new Error;
           return { member, scan, dirty: false, revision: member.options.ledger.readMeta(`${PREFIX}training-revision`) ?? "0" };
         });
-        this.training = { id: attempt.id, scans, examples: [], memberIndex: 0, sampleIndex: 0, validationIndex: 0, validationLedger: true, validated: false };
+        this.training = { id: attempt.id, scans, examples: [], memberIndex: 0, sampleIndex: 0, validationIndex: 0, validationRemaining: 0 };
         attempt.counts = [0, 0];
         attempt.rows = 0;
         for (const { scan } of scans) {
@@ -73320,11 +73320,8 @@ class EmbeddingPrefilter {
       const markers = run.scans.map(({ member }) => member.options.ledger.changeMarker());
       const ledgerChanged = !run.markers || markers.some((marker, index) => marker !== run.markers[index]);
       run.markers = markers;
-      if (ledgerChanged) {
-        run.validationIndex = 0;
-        run.validationLedger = true;
-        run.validated = false;
-      }
+      if (ledgerChanged)
+        run.validationRemaining = run.examples.length;
       let worked = false;
       const hasTime = () => !worked || clock2() < deadline;
       for (const entry of run.scans) {
@@ -73386,27 +73383,21 @@ class EmbeddingPrefilter {
                 attempt.counts[Number(example.private)]++;
               run.fit = trainLogisticSteps(run.examples);
             }
-            while (!run.validated && run.validationIndex < run.examples.length && hasTime()) {
+            const validationDeadline = started + TRAINING_SLICE_MS / 2;
+            let checked = 0;
+            while (checked < run.examples.length && clock2() < validationDeadline) {
               worked = true;
-              if (!run.examples[run.validationIndex++].current(run.validationLedger)) {
+              if (!run.examples[run.validationIndex].current(run.validationRemaining > 0)) {
                 stage = "ledger_or_judge_changed";
                 throw new Error;
               }
+              run.validationIndex = (run.validationIndex + 1) % run.examples.length;
+              run.validationRemaining = Math.max(0, run.validationRemaining - 1);
+              checked++;
               await ingestionTurn();
             }
-            if (run.validationIndex === run.examples.length) {
-              run.validated = true;
-              run.validationLedger = false;
-            }
-            if (run.scans.some(({ member }, index) => member.options.ledger.changeMarker() !== markers[index])) {
-              run.validationIndex = 0;
-              run.validationLedger = true;
-              run.validated = false;
-            }
-            let fitted = false;
-            while (run.validated && hasTime()) {
+            while (hasTime()) {
               worked = true;
-              fitted = true;
               const step = run.fit.next();
               if (step.done) {
                 if (!step.value) {
@@ -73434,10 +73425,6 @@ class EmbeddingPrefilter {
               }
               await ingestionTurn();
             }
-            if (fitted) {
-              run.validationIndex = 0;
-              run.validated = false;
-            }
           }
         }
       }
@@ -73448,9 +73435,7 @@ class EmbeddingPrefilter {
         this.finishTraining(attempt, "failed", "ledger_or_judge_changed");
       }
       if (run.scans.some(({ member }, index) => member.options.ledger.changeMarker() !== markers[index])) {
-        run.validationIndex = 0;
-        run.validationLedger = true;
-        run.validated = false;
+        run.validationRemaining = run.examples.length;
       }
       for (const entry of run.scans) {
         if (entry.dirty && attempt.revisions === this.revisions()) {

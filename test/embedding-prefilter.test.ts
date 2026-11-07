@@ -820,6 +820,7 @@ test('costly retained-copy validation yields and still lets fitting finish', asy
   f.setCopy(n => { clock += 0.1; return copy(n); }); // 400 ms for a complete retained-copy sweep.
   for (let tick = 0; tick < 50 && !existsSync(join(f.modelDir, 'weights.json')); tick++) {
     const started = clock;
+    f.ledger.writeMeta('fixture:unrelated-ingestion', String(tick));
     await f.filter.prepare(judge);
     // Only the final atomic publication check may exceed the cooperative budget.
     if (!existsSync(join(f.modelDir, 'weights.json'))) expect(clock - started).toBeLessThanOrEqual(200.11);
