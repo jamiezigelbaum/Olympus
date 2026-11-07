@@ -27,7 +27,7 @@ function copy(n: number, sign = 1): ConnectorStoreItemCopy {
     trustTier: 'S4', owners: [], chunks: [{ chunkIndex: 0, boundedText: ownText, contentHash: 'fixture', embeddingInputHash: 'fixture' }],
     vectors: [{ chunkIndex: 0, modelId: MODEL, contentHash: 'fixture', embedding: new Uint8Array(vector.buffer) }], vectorAuthorities: [] };
 }
-function fixture(options: { trained?: boolean; bias?: number; random?: () => number; enabled?: () => boolean; routed?: boolean; stateLedger?: TierLedger } = {}) {
+function fixture(options: { trained?: boolean; bias?: number; random?: () => number; enabled?: () => boolean; routed?: boolean; stateLedger?: TierLedger; now?: () => number; monotonicNow?: () => number; log?: (line: string) => void } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'prefilter-synthetic-'));
   const ledger = new TierLedger({ dbPath: join(dir, 'tiers.sqlite') });
   const sniffer = new TierSnifferStore({ dbPath: join(dir, 'sniffer.sqlite') });
@@ -43,7 +43,7 @@ function fixture(options: { trained?: boolean; bias?: number; random?: () => num
   });
   let currentCopy = (n: number) => copy(n);
   const make = () => new EmbeddingPrefilter({ ledger, sniffer, ...(options.stateLedger ? { stateLedger: options.stateLedger } : {}), copyFor: identity => currentCopy(Number(identity.providerItemId)),
-    ...(options.routed ? { placementFor } : {}), random: options.random ?? (() => 1), ...(options.enabled ? { enabled: options.enabled } : {}) });
+    ...(options.routed ? { placementFor } : {}), random: options.random ?? (() => 1), ...(options.now ? { now: options.now } : {}), ...(options.monotonicNow ? { monotonicNow: options.monotonicNow } : {}), ...(options.log ? { log: options.log } : {}), ...(options.enabled ? { enabled: options.enabled } : {}) });
   const filter = make();
   const add = (n: number, config: Parameters<typeof classifyItemTiers>[1] = {}, text = ownText) => {
     const decision = classifyItemTiers({ signals: {}, text, holdUntilJudged: true, subject: subject(n) }, {
@@ -257,26 +257,31 @@ test('rollback fences a queued lowering and supersedes its Personal destination'
   expect(f.ledger.getCurrent(subject(1))!.contentPending).toBe(true);
   expect(f.ledger.copies(subject(1)).every(c => c.state !== 'current')).toBe(true);
 });
-test('daily training uses only own judged synthetic vectors and writes private weights', async () => {
-  const f = fixture({ trained: false });
+test('sliced training uses judge ledger labels without content hashes and writes private weights', async () => {
+  const logs: string[] = [];
+  const f = fixture({ trained: false, log: line => logs.push(line) });
   f.setCopy(n => { const c = copy(n, n % 2 ? 1 : -1); return { ...c, chunks: [{ ...c.chunks[0]!, boundedText: `${ownText} ${n}` }] }; });
   for (let n = 0; n < 4000; n++) {
     const q = f.add(n, {}, `${ownText} ${n}`);
     f.ledger.recordRoutedPlacement(subject(n), { ...f.ledger.getCurrent(subject(n))!, state: 'pending', decidedBy: 'default', snifferId: judge }, f.placementFor({ contentPending: true } as TierDecision));
     const key = { materialHash: q.materialHash, modelId: 'fixture', promptVersion: SNIFFER_PROMPT_VERSION, mapRevision: 'none' };
     f.sniffer.putVerdict(key, { tier: n % 2 ? 'private' : 'personal', confidence: 1, category: 'fixture', failSafe: false }, q);
-    f.sniffer.markFinalModelContent(key, normalizedContentHash(`${ownText} ${n}`));
     f.ledger.applySnifferVerdict(q, { pass: 'content', tier: n % 2 ? 'secure' : 'private', reason: `content:sniffer:${judge}:fixture`, modelId: 'fixture' }, {
       placementFor: () => ({ copies: [{ corpusId: 'private', trustDomain: 'secure_local', trustTier: 'S4', layers: 'both' }], embedHold: false }),
     });
   }
-  await f.filter.prepare(judge);
+  for (let tick = 0; tick < 200 && !existsSync(join(f.modelDir, 'weights.json')); tick++) await f.filter.prepare(judge);
   expect(f.filter.status()).toContain('is on');
   expect(statSync(f.modelDir).mode & 0o777).toBe(0o700);
   expect(statSync(join(f.modelDir, 'weights.json')).mode & 0o777).toBe(0o600);
   const persisted = readFileSync(join(f.modelDir, 'weights.json'), 'utf8');
   expect(persisted).not.toContain(ownText);
   expect(JSON.parse(persisted).model.weights).toHaveLength(D);
+  expect(logs).toHaveLength(1);
+  expect(logs[0]).toContain('rows_read=4000 personal=2000 private=2000 outcome=trained');
+  expect(logs[0]).toContain(`model_version=${JSON.parse(persisted).version}`);
+  expect(logs[0]).toMatch(/elapsed_ms=\d+ next_attempt=/);
+  expect(logs.join('')).not.toContain(ownText);
   // An archive withdrawal during the asynchronous training scan cannot republish its old vectors.
   f.ledger.writeMeta('embedding-prefilter:training-revision', 'before-training');
   let withdrawn = false;
@@ -442,4 +447,151 @@ test('audit rollback returns a Personal-first candidate to held judgment', () =>
   expect(f.ledger.getCurrent(q)!.contentPending).toBe(true);
   expect(f.ledger.getCurrent(q)!.reasons).toContain('content:held_until_judged');
   expect(f.ledger.getCurrent(q)!.reasons).not.toContain('content:personal_first');
+});
+
+// These fixtures deliberately retain a real judge reason alongside competing reasons.
+// A competing reason must exclude the row even when it also has a cached content hash.
+function trainingRow(f: ReturnType<typeof fixture>, n: number, extra: string[] = [], code = 'other:1.00', hashed = false) {
+  f.add(n, { sniffer: { id: judge, judge: () => ({ verdict: 'undecided' }) } });
+  const q = { ...subject(n), materialHash: `synthetic-material-${n}` };
+  const row = f.ledger.getCurrent(subject(n))!;
+  f.ledger.recordRoutedPlacement(subject(n), { ...row, state: 'pending', decidedBy: 'default', snifferId: judge,
+    reasons: [...row.reasons, ...extra] }, f.placementFor({ contentPending: true } as TierDecision));
+  const key = { materialHash: `${q.materialHash}-${n}`, modelId: 'fixture', promptVersion: SNIFFER_PROMPT_VERSION, mapRevision: 'none' };
+  f.sniffer.putVerdict(key, { tier: n % 2 ? 'private' : 'personal', confidence: 1, category: 'fixture', failSafe: false }, q);
+  if (hashed) f.sniffer.markFinalModelContent(key, normalizedContentHash(ownText));
+  f.ledger.applySnifferVerdict(q, { pass: 'content', tier: n % 2 ? 'secure' : 'private', reason: `content:sniffer:${judge}:${code}`, modelId: 'fixture' }, {
+    placementFor: () => ({ copies: [{ corpusId: 'private', trustDomain: 'secure_local', trustTier: 'S4', layers: 'both' }], embedHold: false }),
+  });
+}
+function trainingState(f: ReturnType<typeof fixture>) {
+  return JSON.parse(f.ledger.readMeta('embedding-prefilter:training-v1')!);
+}
+test('only judge-only ledger labels qualify; competing tiers, record holds and stale digests never label', async () => {
+  const logs: string[] = [];
+  const f = fixture({ trained: false, log: line => logs.push(line) });
+  trainingRow(f, 0); trainingRow(f, 1);
+  const competing = ['content:detector:financial:iban', 'content:rule:fixture', 'content:secret:fixture',
+    'metadata:owner_rule:sender:fixture:prior', 'metadata:floor:fixture', 'override:tier:secure',
+    'content:own_record:health', 'content:embedding_prefilter:fixture:0.01', 'content:unknown:raise'];
+  competing.forEach((reason, index) => trainingRow(f, index + 2, [reason], 'other:1.00', true));
+  trainingRow(f, 20, [], 'record_held:other:1.00', true);
+  trainingRow(f, 21, [], 'rule:duplicate_model:other:1.00', true);
+  trainingRow(f, 22, [], 'unresolved:0.00', true);
+  trainingRow(f, 23, [], 'injection:fixture:0.00', true);
+  trainingRow(f, 24); f.ledger.setOverride(subject(24), { kind: 'tier', tier: 'secure' });
+  trainingRow(f, 25);
+  f.setCopy(n => n === 25 ? { ...copy(n), chunks: [{ ...copy(n).chunks[0]!, boundedText: 'Changed synthetic text' }] } : copy(n));
+  for (let tick = 0; tick < 100 && !logs.length; tick++) await f.filter.prepare(judge);
+  expect(trainingState(f)).toMatchObject({ outcome: 'too_few', rows: 17, counts: [1, 1] });
+  expect(logs).toHaveLength(1);
+  expect(logs[0]).toContain('personal=1 private=1 outcome=too_few');
+  expect(existsSync(join(f.modelDir, 'weights.json'))).toBe(false);
+});
+test('scan stops at its 200 ms deadline and resumes its durable cursor after restart', async () => {
+  let monotonic = 0;
+  const logs: string[] = [];
+  const f = fixture({ trained: false, monotonicNow: () => monotonic, log: line => logs.push(line) });
+  for (let n = 0; n < 9; n++) trainingRow(f, n);
+  const seen: number[] = [];
+  f.setCopy(n => { seen.push(n); monotonic += 50; return copy(n); });
+  await f.filter.prepare(judge);
+  expect(monotonic).toBe(200);
+  expect(seen).toEqual([0, 1, 2, 3]);
+  expect(trainingState(f)).toMatchObject({ outcome: 'scanning', rows: 4, counts: [2, 2] });
+  expect(logs).toHaveLength(0);
+  expect(f.filter.status()).toContain('continue next tick');
+  const restarted = f.make();
+  await restarted.prepare(judge);
+  expect(monotonic).toBe(400);
+  expect(seen).toEqual([0, 1, 2, 3, 4, 5, 6, 7]);
+  await restarted.prepare(judge);
+  expect(trainingState(f)).toMatchObject({ outcome: 'too_few', rows: 9, counts: [5, 4] });
+  expect(logs).toHaveLength(1);
+  expect(restarted.status()).toContain('read 9 rows, 5 Personal and 4 Private');
+});
+test('too few waits for 1000 new verdicts or 24 hours across restarts', async () => {
+  let now = Date.UTC(2026, 10, 7);
+  const logs: string[] = [];
+  const f = fixture({ trained: false, now: () => now, log: line => logs.push(line) });
+  trainingRow(f, 0); trainingRow(f, 1);
+  await f.filter.prepare(judge);
+  expect(trainingState(f).nextAt).toBe(now + 24 * 60 * 60 * 1000);
+  const restarted = f.make();
+  const addVerdicts = (from: number, to: number) => {
+    for (let n = from; n < to; n++) f.sniffer.putVerdict({ materialHash: `synthetic-${n}`, modelId: 'fixture', promptVersion: SNIFFER_PROMPT_VERSION, mapRevision: 'none' },
+      { tier: 'personal', confidence: 1, category: 'fixture', failSafe: false });
+  };
+  addVerdicts(0, 999);
+  await restarted.prepare(judge);
+  expect(logs).toHaveLength(1);
+  addVerdicts(999, 1000);
+  await restarted.prepare(judge);
+  expect(logs).toHaveLength(2);
+  now += 24 * 60 * 60 * 1000 - 1;
+  await restarted.prepare(judge);
+  expect(logs).toHaveLength(2);
+  now++;
+  await restarted.prepare(judge);
+  expect(logs).toHaveLength(3);
+});
+test('failed scans log no error material and retry after three hours, not a day', async () => {
+  let now = Date.UTC(2026, 10, 7);
+  const logs: string[] = [];
+  const f = fixture({ trained: false, now: () => now, log: line => logs.push(line) });
+  trainingRow(f, 0); trainingRow(f, 1);
+  f.setCopy(() => { throw new Error(ownText); });
+  await f.filter.prepare(judge);
+  expect(trainingState(f)).toMatchObject({ outcome: 'failed', reason: 'scan_failed', nextAt: now + 3 * 60 * 60 * 1000 });
+  expect(logs[0]).toContain('outcome=failed reason=scan_failed');
+  expect(logs.join('')).not.toContain(ownText);
+  const restarted = f.make();
+  await restarted.prepare(judge);
+  expect(logs).toHaveLength(1);
+  f.setCopy(n => copy(n));
+  now += 3 * 60 * 60 * 1000;
+  await restarted.prepare(judge);
+  expect(trainingState(f).outcome).toBe('too_few');
+  expect(logs).toHaveLength(2);
+});
+test('withdrawal deletes partial references and restarts without withdrawn labels', async () => {
+  let monotonic = 0;
+  const f = fixture({ trained: false, monotonicNow: () => monotonic, log: () => {} });
+  for (let n = 0; n < 9; n++) trainingRow(f, n);
+  f.setCopy(n => { monotonic += 50; return copy(n); });
+  await f.filter.prepare(judge);
+  expect(trainingState(f).rows).toBe(4);
+  f.ledger.withdrawAccountScope('fixture', 'fixture');
+  expect(f.ledger.readMeta('embedding-prefilter:training-scan-v1')).toBeUndefined();
+  const restarted = f.make();
+  await restarted.prepare(judge);
+  expect(trainingState(f)).toMatchObject({ outcome: 'too_few', rows: 0, counts: [0, 0] });
+  expect(existsSync(join(f.modelDir, 'weights.json'))).toBe(false);
+});
+test('pooled sources share one 200 ms training slice per resolver tick', async () => {
+  let monotonic = 0;
+  const a = fixture({ trained: false, monotonicNow: () => monotonic, log: () => {} });
+  const b = fixture({ trained: false });
+  for (let n = 0; n < 9; n++) { trainingRow(a, n); trainingRow(b, n); }
+  a.setCopy(n => { monotonic += 50; return copy(n); });
+  const second = new EmbeddingPrefilter({ ledger: b.ledger, sniffer: b.sniffer, sharedWith: a.filter,
+    copyFor: identity => { monotonic += 50; return copy(Number(identity.providerItemId)); } });
+  await runSnifferPass({ targets: [{ ledger: a.ledger, sniffer: a.sniffer, embeddingPrefilter: a.filter },
+    { ledger: b.ledger, sniffer: b.sniffer, embeddingPrefilter: second }], lane,
+    model: { async complete() { throw new Error('No model call expected'); } } });
+  expect(monotonic).toBe(200);
+  expect(trainingState(a)).toMatchObject({ outcome: 'scanning', rows: 4, counts: [2, 2] });
+});
+test('training windows bound examined rows, including unrouted rows and conversation identities', () => {
+  const f = fixture({ trained: false });
+  for (let n = 0; n < 8; n++) f.add(n);
+  trainingRow(f, 8);
+  const first = f.ledger.listItemWindow({ limit: 4 });
+  expect(first.map(row => row.providerItemId)).toEqual(['0', '1', '2', '3']);
+  expect(first.every(row => !row.routed)).toBe(true);
+  const second = f.ledger.listItemWindow({ limit: 4, after: subject(3) });
+  expect(second.map(row => row.providerItemId)).toEqual(['4', '5', '6', '7']);
+  const last = f.ledger.listItemWindow({ limit: 4, after: subject(7) });
+  expect(last).toHaveLength(1);
+  expect(last[0]!.routed).toBe(true);
 });

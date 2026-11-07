@@ -588,10 +588,28 @@ access to held vectors; retrieval visibility does not change.
 Training pools this installation's mounted ledgers, without source features or
 branches. It requires **2,000 valid final judge labels in each class**, each
 bound to that item's complete own text and stored vector. Rules, overrides,
-fail-safes and pre-filter outputs are excluded; a policy-held Personal judge
-answer remains a Personal training label. Daily training takes at most 5,000
-examples per class and runs bounded, L2-regularized logistic regression in
-TypeScript on normalized vectors. A changed judge identity or mounted-ledger
+fail-safes and pre-filter outputs are excluded. The ledger supplies the label:
+`private` is Personal and `secure` is Private, only when this judge alone
+decided it. Detectors, content rules, owner rules, overrides, metadata floors,
+own-record holds and small-lane `record_held:` answers exclude the row. The
+stored text must still match its complete-text digest; a verdict-cache
+`content_hash` is not required.
+
+Training takes at most 5,000 examples per class and runs bounded,
+L2-regularized logistic regression in TypeScript on normalized vectors.
+Scanning and fitting share a cooperative 200 ms budget per tick across the
+installation (one synchronous row/update may finish beyond the deadline).
+Source ledger meta stores the cursor and selected item references, never text
+or vectors. Restart resumes scanning, rechecks selected rows and copies, then
+refits in slices. Training starts after both classes reach the cap or all
+ledgers have been read. A completed fit waits 24 hours; a failed attempt retries
+after three hours. A complete read below 2,000 per class waits for 1,000 new
+cached verdicts or 24 hours, whichever comes first. Each finished attempt logs
+one content-free line with rows read, examples per class, outcome/reason, model
+version when trained, active elapsed time and the next attempt; status also
+shows these counts and progress while scanning/fitting.
+
+A changed judge identity or mounted-ledger
 membership invalidates the model. Account-scope withdrawal invalidates it too.
 No contract shapes, vector identities, embeddings or classifier version change.
 
@@ -606,7 +624,7 @@ even below the retraining minimum; it preserves the audit. Source deletion
 advances an install-wide withdrawal fence before source bytes disappear;
 archive withdrawal advances that ledger's training revision. Both prevent
 yielded training from republishing deleted examples. Archive scope withdrawal
-also removes source-owned selection and clearance receipts. Completed checks
+also removes the partial scan and source-owned selection and clearance receipts. Completed checks
 physically remove their selection; install state holds only counters and
 temporary opaque deduplication tokens. Delete-all removes both. Empty private model directories may remain after file deletion.
 The engine environment setting `OLYMPUS_EMBEDDING_PREFILTER_ENABLED=off` disables

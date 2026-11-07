@@ -858,6 +858,7 @@ export class TierSnifferService {
         embeddingPrefilter = new EmbeddingPrefilter({ ledger, stateLedger: this.embeddingState!, ...(this.embeddingPrefilters.size ? { sharedWith: this.embeddingPrefilters.values().next().value! } : {}), sniffer: this.options.installed.snifferStoreForLedger(ledgerPath),
           ...(planner ? { placementFor: planner } : {}),
           enabled: () => this.options.embeddingPrefilterEnabled?.() !== false,
+          log: line => this.options.log?.(line),
           copyFor: subject => {
             const set = tierSetForLedger(ledgerPath);
             const serving = copyServingLayer(ledger.copies(subject), 'content');

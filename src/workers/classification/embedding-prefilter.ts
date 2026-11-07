@@ -4,12 +4,12 @@ import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { removeFileDurablySync, writePrivateFileAtomicSync } from '../../core/atomic-file.ts';
 import { ingestionTurn } from '../control-path-headroom.ts';
-import { snifferMaterialCarriesSecret } from './sniffer.ts';
+import { SNIFFER_RECORD_HELD_CODE_PREFIX, snifferMaterialCarriesSecret } from './sniffer.ts';
 import type { SnifferQuestion, TierSnifferStore } from './sniffer-store.ts';
 import { tierLedgerIdentityKey, type TierLedger, type TierLedgerRecord, type TierPlacementPlan } from './tier-ledger.ts';
-import { TIER_CLASSIFIER_VERSION, PERSONAL_FIRST_REASON, HELD_UNTIL_JUDGED_REASON, contentDigestReason, normalizedContentHash, type TierDecision, type TierSnifferSubject } from './tier-classifier.ts';
+import { TIER_CLASSIFIER_VERSION, PERSONAL_FIRST_REASON, HELD_UNTIL_JUDGED_REASON, contentDigestReason, type TierDecision, type TierSnifferSubject } from './tier-classifier.ts';
 import { EMBEDDING_PREFILTER_MODEL_ID, EMBEDDING_PREFILTER_DIMENSIONS, EMBEDDING_PREFILTER_MIN_PER_CLASS,
-  trainLogistic, privateProbability, type LogisticModel, type LogisticExample } from './embedding-logistic.ts';
+  trainLogisticSteps, privateProbability, type LogisticModel, type LogisticExample } from './embedding-logistic.ts';
 
 /** The shared store's read-only projection; no source policy or retrieval access. */
 interface PrefilterCopy {
@@ -22,6 +22,27 @@ const CHECKS = `${PREFIX}check:`;
 const WINDOW = 200;
 const RETRAIN_MS = 24 * 60 * 60 * 1000;
 const MAX_PER_CLASS = 5000;
+const TRAINING_SLICE_MS = 200;
+const FAILED_RETRY_MS = 3 * 60 * 60 * 1000;
+const NEW_VERDICTS = 1000;
+const TRAINING = `${PREFIX}training-v1`;
+const SCAN = `${PREFIX}training-scan-v1`;
+interface TrainingAttempt {
+  id: string; revisions: string; judge: string; startedAt: number; elapsedMs: number;
+  rows: number; counts: [number, number]; nextAt: number;
+  outcome: 'scanning' | 'fitting' | 'trained' | 'too_few' | 'failed';
+  reason?: string; version?: string; verdicts?: number;
+}
+// Only references, beside the source's own ledger. No text or vectors are persisted.
+interface TrainingScan {
+  attempt: string; after?: TierSnifferSubject; done: boolean; rows: number;
+  samples: Array<{ subject: TierSnifferSubject; private: boolean }>;
+}
+interface TrainingRun {
+  id: string; scans: Array<{ member: EmbeddingPrefilter; scan: TrainingScan }>;
+  examples: LogisticExample[]; memberIndex: number; sampleIndex: number;
+  fit?: Generator<void, LogisticModel | undefined>;
+}
 interface SavedModel { revisions: string; version: string; trainedAt: number; judge: string; model: LogisticModel }
 interface Receipt { subject: TierSnifferSubject; hash: string; reason: string; original: TierDecision }
 interface Audit { misses: boolean[]; stopped: boolean; reason?: 'audit_unreadable' }
@@ -64,7 +85,9 @@ export class EmbeddingPrefilter {
   private get saved(): SavedModel | undefined { return this.owner.savedModel; }
   private set saved(value: SavedModel | undefined) { this.owner.savedModel = value; }
   private savedModel: SavedModel | undefined;
-  private attemptedAt = -Infinity;
+  private attempt: TrainingAttempt | undefined;
+  private training: TrainingRun | undefined;
+  get trainingOwner(): EmbeddingPrefilter { return this.owner; }
   private readonly auditState: Audit;
   private readonly path: string;
   constructor(private readonly options: {
@@ -72,6 +95,7 @@ export class EmbeddingPrefilter {
     copyFor: (subject: TierSnifferSubject) => PrefilterCopy | undefined;
     placementFor?: (decision: TierDecision) => TierPlacementPlan;
     enabled?: () => boolean; random?: () => number; now?: () => number;
+    monotonicNow?: () => number; log?: (line: string) => void;
   }) {
     this.owner = options.sharedWith?.owner ?? this;
     this.owner.members.add(this);
@@ -86,6 +110,15 @@ export class EmbeddingPrefilter {
       this.control.writeMeta(`${PREFIX}audit`, JSON.stringify(this.auditState));
     }
     if (this.owner !== this) return;
+    try {
+      const raw = this.control.readMeta(TRAINING);
+      if (raw) {
+        const attempt = JSON.parse(raw) as TrainingAttempt;
+        if (typeof attempt.id !== 'string' || !Array.isArray(attempt.counts) || attempt.counts.length !== 2
+          || !Number.isFinite(attempt.nextAt) || !Number.isFinite(attempt.elapsedMs)) throw new Error();
+        this.attempt = attempt;
+      }
+    } catch { this.control.deleteMeta(TRAINING); }
     try {
       if (existsSync(this.path) && !lstatSync(this.path).isSymbolicLink()
         && lstatSync(embeddingPrefilterDirectory(this.control.dbPath)).isDirectory()
@@ -105,8 +138,15 @@ export class EmbeddingPrefilter {
     if (this.audit.reason === 'audit_unreadable') return 'Embedding clearing stopped: its audit state could not be read. Cleared items are returning to the privacy judge.';
     if (this.audit.stopped) return 'Embedding clearing stopped: more than 2% of the last 200 checks were Private. Cleared items are returning to the privacy judge.';
     if (!this.enabled()) return 'Embedding clearing is off.';
-    if (!this.saved) return `Embedding clearing waits for ${EMBEDDING_PREFILTER_MIN_PER_CLASS} judge verdicts per class with complete stored vectors.`;
-    return `Embedding clearing is on; ${this.audit.misses.length} of 200 spot checks collected.`;
+    const training = this.owner.attempt;
+    const failure = training?.reason === 'scan_failed' ? 'could not read training examples'
+      : training?.reason === 'training_failed' ? 'could not fit the model'
+      : training?.reason === 'weights_write_failed' ? 'could not save the model' : 'the ledgers or judge changed';
+    const detail = training ? ` Training ${training.outcome === 'too_few' ? `found too few examples (needs ${EMBEDDING_PREFILTER_MIN_PER_CLASS} per class)`
+      : training.outcome === 'trained' ? `completed with model ${training.version}` : training.outcome === 'failed' ? `failed: ${failure}`
+      : training.outcome === 'scanning' ? 'is reading the ledger' : 'is fitting the model'}; read ${training.rows} rows, ${training.counts[0]} Personal and ${training.counts[1]} Private examples in ${Math.round(training.elapsedMs)} ms. Next attempt: ${training.outcome === 'scanning' || training.outcome === 'fitting' ? 'continue next tick' : new Date(training.nextAt).toISOString()}${training.outcome === 'too_few' ? ' or after 1,000 new verdicts, whichever comes first' : ''}.` : '';
+    if (!this.saved) return detail ? `Embedding clearing waits.${detail}` : `Embedding clearing waits for ${EMBEDDING_PREFILTER_MIN_PER_CLASS} judge verdicts per class with complete stored vectors.`;
+    return `Embedding clearing is on; ${this.audit.misses.length} of 200 spot checks collected.${detail}`;
   }
   setPlacementFor(placementFor: ((decision: TierDecision) => TierPlacementPlan) | undefined): void {
     if (placementFor) this.options.placementFor = placementFor;
@@ -116,59 +156,186 @@ export class EmbeddingPrefilter {
   recover(): void {
     if (this.audit.stopped || !this.enabled()) for (const member of this.owner.members) member.rollback();
   }
-  /** Scheduled daily; never learn from this filter's predictions, rules, overrides or fail-safes. */
+  /** A ledger label is usable only when this judge alone decided the content tier. */
+  private trainingExample(row: TierLedgerRecord, judge: string): LogisticExample | undefined {
+    if (!row.routed || row.state !== 'current' || row.metadataPending || row.contentPending || !row.contentRead
+      || row.metadataTier !== 'private' || !['private', 'secure'].includes(row.contentTier) || row.metadataForced
+      || !row.modelId || row.decidedBy === 'owner_rule' || row.decidedBy === 'override'
+      || this.options.ledger.getOverride(subjectOf(row)) || this.options.ledger.rejudgeQuestion(subjectOf(row))
+      || row.reasons.some(reason => reason.startsWith('metadata:owner_rule:') || reason.startsWith('metadata:floor:')
+        || reason.startsWith('metadata:secret:') || reason.startsWith('override:'))) return undefined;
+    const prefix = `content:sniffer:${judge}:`;
+    let judged = false;
+    for (const reason of row.reasons) {
+      if (!reason.startsWith('content:')) continue;
+      if (reason.startsWith(prefix)) {
+        const code = reason.slice(prefix.length);
+        if (!code || code.startsWith(SNIFFER_RECORD_HELD_CODE_PREFIX)
+          || /(?:^|:)(?:rule|unresolved|fail_safe|injection|undecided)(?::|$)/.test(code)) return undefined;
+        judged = true;
+      // Known non-raising receipts only. Unknown content reasons are excluded too.
+      } else if (!(reason.startsWith('content:sha256:') || reason.startsWith('content:names:')
+        || reason.startsWith('content:borderline:') || ['content:text_only', 'content:provenance:model',
+          'content:no_raise', HELD_UNTIL_JUDGED_REASON, PERSONAL_FIRST_REASON].includes(reason))) return undefined;
+    }
+    if (!judged) return undefined;
+    const copy = this.options.copyFor(subjectOf(row));
+    if (!copy || !row.reasons.includes(contentDigestReason(copy.chunks.map(chunk => chunk.boundedText).join('')))) return undefined;
+    const vector = prefilterVector(copy);
+    return vector && Math.hypot(...vector) > 0 ? { vector, private: row.contentTier === 'secure' } : undefined;
+  }
+  private verdictCount(): number {
+    return [...this.members].reduce((count, member) => count + member.options.sniffer.verdictCount(), 0);
+  }
+  private finishTraining(attempt: TrainingAttempt, outcome: 'trained' | 'too_few' | 'failed', reason?: string): void {
+    attempt.outcome = outcome;
+    if (reason) attempt.reason = reason;
+    attempt.nextAt = this.now() + (outcome === 'failed' ? FAILED_RETRY_MS : RETRAIN_MS);
+    if (outcome === 'too_few') attempt.verdicts = this.verdictCount();
+    this.training = undefined;
+  }
+  private logTraining(attempt: TrainingAttempt): void {
+    // Never log exceptions, subject ids, paths, content, vectors or judge category strings.
+    (this.options.log ?? console.log)(`[olympus:embedding-prefilter] rows_read=${attempt.rows} personal=${attempt.counts[0]} private=${attempt.counts[1]} outcome=${attempt.outcome}${attempt.reason ? ` reason=${attempt.reason}` : ''}${attempt.version ? ` model_version=${attempt.version}` : ''} elapsed_ms=${Math.round(attempt.elapsedMs)} next_attempt=${new Date(attempt.nextAt).toISOString()}${attempt.outcome === 'too_few' ? ' or_1000_new_verdicts' : ''}`);
+  }
+  /** Cooperative 200 ms per tick, including scan and fit; one synchronous unit may overrun. */
   async prepare(judge: string): Promise<void> {
     if (this.owner !== this) return this.owner.prepare(judge);
-    if (this.audit.stopped) { for (const member of this.members) member.rollback(); return; }
-    if (!this.enabled()) { for (const member of this.members) member.rollback(); return; }
-    if (this.saved && (this.saved.judge !== judge || !/^[0-9a-f-]{36}$/.test(this.saved.version) || !Number.isFinite(this.saved.trainedAt)
-      || privateProbability(this.saved.model, [1, ...new Array(EMBEDDING_PREFILTER_DIMENSIONS - 1).fill(0)]) === undefined)) this.saved = undefined;
-    if (this.saved && (this.saved.revisions !== this.revisions() || !existsSync(this.path))) {
-      if (existsSync(this.path)) removeFileDurablySync(this.path);
-      this.saved = undefined; this.attemptedAt = -Infinity;
-    }
-    const now = this.now();
-    if ((this.saved && now - this.saved.trainedAt < RETRAIN_MS) || now - this.attemptedAt < RETRAIN_MS) return;
-    this.attemptedAt = now;
-    const revisions = this.revisions();
-    const examples: LogisticExample[] = [];
-    const counts = [0, 0];
-    for (const member of this.members) {
-      let after: TierSnifferSubject | undefined;
-      while (true) {
-        const rows = member.options.ledger.listRouted({ ...(after ? { after } : {}), limit: 500 });
-        if (!rows.length) break;
-        for (const row of rows) {
-          if (row.state !== 'current' || row.metadataPending || row.contentPending
-            || row.metadataTier !== 'private' || !['private', 'secure'].includes(row.contentTier) || row.metadataForced
-            || !row.modelId || row.decidedBy === 'owner_rule' || row.decidedBy === 'override'
-            || row.reasons.some(reason => reason.startsWith('metadata:owner_rule:') || reason.startsWith('content:embedding_prefilter:'))
-            || !row.reasons.some(reason => reason.startsWith(`content:sniffer:${judge}:`)
-              && !/:rule:|:unresolved:|:fail_safe:|:injection:/.test(reason))) continue;
-          const copy = member.options.copyFor(subjectOf(row));
-          if (!copy || !row.reasons.includes(contentDigestReason(copy.chunks.map(chunk => chunk.boundedText).join('')))) continue;
-          const label = member.options.sniffer.judgedContentLabel(subjectOf(row), row.modelId, normalizedContentHash(copy.chunks.map(chunk => chunk.boundedText).join('')));
-          if (!label) continue;
-          const isPrivate = label === 'private';
-          const index = Number(isPrivate);
-          if (counts[index]! >= MAX_PER_CLASS) continue;
-          const vector = prefilterVector(copy);
-          if (!vector) continue;
-          examples.push({ vector, private: isPrivate }); counts[index]!++;
-        }
-        after = subjectOf(rows[rows.length - 1]!);
-        if (counts.every(count => count >= MAX_PER_CLASS)) break;
-        await ingestionTurn();
+    if (this.audit.stopped || !this.enabled()) { for (const member of this.members) member.rollback(); return; }
+    const clock = this.options.monotonicNow ?? (() => performance.now());
+    const started = clock();
+    const deadline = started + TRAINING_SLICE_MS;
+    let attempt = this.attempt;
+    let stage = 'scan_failed';
+    try {
+      const revisions = this.revisions();
+      if (this.saved && (this.saved.judge !== judge || !/^[0-9a-f-]{36}$/.test(this.saved.version) || !Number.isFinite(this.saved.trainedAt)
+        || this.saved.revisions !== revisions || !existsSync(this.path)
+        || privateProbability(this.saved.model, [1, ...new Array(EMBEDDING_PREFILTER_DIMENSIONS - 1).fill(0)]) === undefined)) {
+        if (existsSync(this.path)) removeFileDurablySync(this.path);
+        this.saved = undefined;
+        if (attempt?.outcome === 'trained') attempt = this.attempt = undefined;
+        this.training = undefined;
       }
+      if (attempt && (attempt.revisions !== revisions || attempt.judge !== judge)) {
+        if (attempt.outcome === 'scanning' || attempt.outcome === 'fitting') {
+          this.finishTraining(attempt, 'failed', 'ledger_or_judge_changed');
+          this.logTraining(attempt);
+        }
+        attempt = this.attempt = undefined;
+        this.training = undefined;
+      }
+      if (!attempt && this.saved && this.now() - this.saved.trainedAt < RETRAIN_MS) return;
+      if (attempt && ['trained', 'too_few', 'failed'].includes(attempt.outcome)) {
+        if (this.now() < attempt.nextAt
+          && !(attempt.outcome === 'too_few' && this.verdictCount() >= (attempt.verdicts ?? 0) + NEW_VERDICTS)) return;
+        attempt = undefined;
+      }
+      if (!attempt) {
+        attempt = this.attempt = { id: randomUUID(), revisions, judge, startedAt: this.now(), elapsedMs: 0,
+          rows: 0, counts: [0, 0], nextAt: this.now(), outcome: 'scanning' };
+        this.training = undefined;
+      }
+      if (!this.training || this.training.id !== attempt.id) {
+        const scans = [...this.members].map(member => {
+          const raw = member.options.ledger.readMeta(SCAN);
+          const previous = raw ? JSON.parse(raw) as TrainingScan : undefined;
+          const scan = previous?.attempt === attempt!.id ? previous : { attempt: attempt!.id, done: false, rows: 0, samples: [] };
+          if (!Array.isArray(scan.samples) || scan.samples.length > MAX_PER_CLASS * 2 || !Number.isSafeInteger(scan.rows)) throw new Error();
+          return { member, scan };
+        });
+        this.training = { id: attempt.id, scans, examples: [], memberIndex: 0, sampleIndex: 0 };
+        // A restart resumes the durable scan, then rehydrates references and refits in slices.
+        attempt.counts = [0, 0];
+        attempt.rows = 0;
+        for (const { scan } of scans) {
+          attempt.rows += scan.rows;
+          for (const sample of scan.samples) attempt.counts[Number(sample.private)]!++;
+        }
+      }
+      const run = this.training;
+      let worked = false;
+      const hasTime = () => !worked || clock() < deadline;
+      for (const { member, scan } of run.scans) {
+        while (attempt.outcome !== 'fitting' && !scan.done && !attempt.counts.every(count => count >= MAX_PER_CLASS) && hasTime()) {
+          const rows = member.options.ledger.listItemWindow({ ...(scan.after ? { after: scan.after } : {}), limit: 32 });
+          if (!rows.length) { scan.done = true; break; }
+          for (const row of rows) {
+            if (!hasTime()) break;
+            worked = true;
+            scan.after = subjectOf(row); scan.rows++; attempt.rows++;
+            const index = Number(row.contentTier === 'secure');
+            if (attempt.counts[index]! < MAX_PER_CLASS) {
+              const example = member.trainingExample(row, judge);
+              if (example) { scan.samples.push({ subject: subjectOf(row), private: example.private }); attempt.counts[Number(example.private)]!++; }
+            }
+            await ingestionTurn();
+          }
+        }
+        if (!hasTime()) break;
+      }
+      if (attempt.outcome === 'fitting' || run.scans.every(({ scan }) => scan.done) || attempt.counts.every(count => count >= MAX_PER_CLASS)) {
+        if (attempt.counts.some(count => count < EMBEDDING_PREFILTER_MIN_PER_CLASS)) this.finishTraining(attempt, 'too_few');
+        else {
+          stage = 'training_failed';
+          attempt.outcome = 'fitting';
+          // Recheck references against current decisions/copies; never persist training vectors.
+          while (run.memberIndex < run.scans.length && hasTime()) {
+            const { member, scan } = run.scans[run.memberIndex]!;
+            if (run.sampleIndex >= scan.samples.length) { run.memberIndex++; run.sampleIndex = 0; continue; }
+            worked = true;
+            const sample = scan.samples[run.sampleIndex++]!;
+            const row = member.options.ledger.getCurrent(sample.subject);
+            const example = row && member.trainingExample(row, judge);
+            if (example) run.examples.push(example);
+            await ingestionTurn();
+          }
+          if (run.memberIndex === run.scans.length) {
+            if (!run.fit) {
+              attempt.counts = [0, 0];
+              for (const example of run.examples) attempt.counts[Number(example.private)]!++;
+              run.fit = trainLogisticSteps(run.examples);
+            }
+            while (hasTime()) {
+              worked = true;
+              const step = run.fit.next();
+              if (step.done) {
+                if (!step.value) { this.finishTraining(attempt, 'too_few'); break; }
+                stage = 'weights_write_failed';
+                if (this.control.dbPath === ':memory:') throw new Error();
+                const directory = embeddingPrefilterDirectory(this.control.dbPath);
+                if (existsSync(directory) && (!lstatSync(directory).isDirectory() || lstatSync(directory).isSymbolicLink())) throw new Error();
+                if (attempt.revisions !== this.revisions()) throw new Error();
+                mkdirSync(directory, { recursive: true, mode: 0o700 }); chmodSync(directory, 0o700);
+                const saved: SavedModel = { model: step.value, judge, revisions, trainedAt: this.now(), version: randomUUID() };
+                writePrivateFileAtomicSync(this.path, JSON.stringify(saved));
+                this.saved = saved; attempt.version = saved.version;
+                this.finishTraining(attempt, 'trained');
+                break;
+              }
+              await ingestionTurn();
+            }
+          }
+        }
+      }
+      // Every asynchronous yield can let a withdrawal run. Discard the entire attempt.
+      if (attempt.revisions !== this.revisions()) {
+        if (existsSync(this.path)) removeFileDurablySync(this.path);
+        this.saved = undefined;
+        this.finishTraining(attempt, 'failed', 'ledger_or_judge_changed');
+      }
+      for (const { member, scan } of run.scans) {
+        if (attempt.revisions === this.revisions()) member.options.ledger.writeMeta(SCAN, JSON.stringify(scan));
+      }
+    } catch {
+      if (!attempt) attempt = this.attempt = { id: randomUUID(), judge, revisions: '', startedAt: this.now(), elapsedMs: 0, rows: 0, counts: [0, 0], nextAt: this.now(), outcome: 'scanning' };
+      this.finishTraining(attempt, 'failed', stage);
     }
-    const model = trainLogistic(examples);
-    if (!model || revisions !== this.revisions() || this.control.dbPath === ':memory:') return;
-    const directory = embeddingPrefilterDirectory(this.control.dbPath);
-    if (existsSync(directory) && (!lstatSync(directory).isDirectory() || lstatSync(directory).isSymbolicLink())) return;
-    mkdirSync(directory, { recursive: true, mode: 0o700 }); chmodSync(directory, 0o700);
-    const saved: SavedModel = { model, judge, revisions, trainedAt: now, version: randomUUID() };
-    writePrivateFileAtomicSync(this.path, JSON.stringify(saved));
-    this.saved = saved;
+    if (attempt) {
+      attempt.elapsedMs += clock() - started;
+      this.control.writeMeta(TRAINING, JSON.stringify(attempt));
+      if (['trained', 'too_few', 'failed'].includes(attempt.outcome)) this.logTraining(attempt);
+    }
   }
   /** Called even for settled queue entries: they carry the rollback material until a good check. */
   retained(question: SnifferQuestion): boolean {

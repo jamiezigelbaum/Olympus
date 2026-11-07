@@ -1987,6 +1987,18 @@ export class TierLedger {
     return (rows as TierItemRow[]).map(recordFromRow);
   }
 
+  /** Bound actual rows examined, even when almost none are routed/eligible. */
+  listItemWindow(options: { after?: TierLedgerIdentity; limit: number }): TierLedgerRecord[] {
+    const after = options.after
+      ? [options.after.provider, options.after.accountScope, tierLedgerConversationKey(options.after), options.after.providerItemId]
+      : [];
+    const rows = this.db.query(`SELECT * FROM tier_items
+      ${after.length ? 'WHERE (provider, account_scope, conversation_key, provider_item_id) > (?, ?, ?, ?)' : ''}
+      ORDER BY provider, account_scope, conversation_key, provider_item_id LIMIT ?`)
+      .all(...after, Math.max(1, Math.min(options.limit, 500))) as TierItemRow[];
+    return rows.map(recordFromRow);
+  }
+
   /** Historical repair candidates only: indexed copy/identity/content probes. */
   listLowerContentLeftovers(options: {
     stores: Array<{ corpusId: string; dbPath: string; trustDomain: SourceTrustDomain }>;
@@ -3685,6 +3697,8 @@ export class TierLedger {
     return this.db.transaction(() => {
       const now = this.now().toISOString();
       this.writeMeta('embedding-prefilter:training-revision', randomUUID());
+      // Partial training contains source-owned references, never retained after withdrawal.
+      this.deleteMeta('embedding-prefilter:training-scan-v1');
       for (const kind of ['check:', 'clear:']) {
         const prefix = `embedding-prefilter:${kind}${provider}\0${accountScope}\0`;
         this.db.query('DELETE FROM tier_ledger_meta WHERE key >= ? AND key < ?').run(prefix, `${prefix}\uffff`);
