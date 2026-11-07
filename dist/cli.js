@@ -124922,6 +124922,9 @@ var EMBEDDING_PREFILTER_MODEL_ID = "embeddinggemma-2-litert-24d962e", EMBEDDING_
 import { chmodSync as chmodSync33, existsSync as existsSync87, lstatSync as lstatSync43, mkdirSync as mkdirSync51, readFileSync as readFileSync73 } from "node:fs";
 import { join as join115 } from "node:path";
 import { createHash as createHash80, randomUUID as randomUUID29 } from "node:crypto";
+function freshTimestamp(timestamp2, now, maxAge) {
+  return Number.isFinite(timestamp2) && timestamp2 <= now && now - timestamp2 <= maxAge;
+}
 function prefilterVector(copy, reject = () => {
   return;
 }) {
@@ -125278,6 +125281,10 @@ class EmbeddingPrefilter {
       attempt = this.attempt = undefined;
       this.training = undefined;
     }
+    if (attempt && (attempt.outcome === "scanning" || attempt.outcome === "fitting") && !freshTimestamp(attempt.startedAt, this.now(), MAX_SCAN_AGE_MS)) {
+      attempt = this.attempt = undefined;
+      this.training = undefined;
+    }
     const finishedAtStart = attempt && ["trained", "too_few", "failed"].includes(attempt.outcome) ? attempt.id : undefined;
     if (attempt?.outcome === "failed" && !attempt.revisions && this.now() < attempt.nextAt)
       return;
@@ -125468,6 +125475,9 @@ class EmbeddingPrefilter {
                 await ingestionTurn();
               }
               if (validation.index === run2.examples.length && hasTime() && validation.markers === changeMarkers() && attempt.revisions === this.revisions()) {
+                stage = "prior_stale";
+                if (!freshTimestamp(attempt.startedAt, this.now(), MAX_SCAN_AGE_MS) || !freshTimestamp(attempt.startedAt, this.now(), MAX_PRIOR_AGE_MS))
+                  throw new Error;
                 stage = "weights_write_failed";
                 if (this.control.dbPath === ":memory:")
                   throw new Error;
@@ -125577,6 +125587,8 @@ class EmbeddingPrefilter {
       return skip("model_missing");
     if (!/^[0-9a-f-]{36}$/.test(this.saved.version) || !Number.isFinite(this.saved.trainedAt) || !validPrefilterPrior(this.saved.calibration))
       return skip("model_invalid");
+    if (!freshTimestamp(this.saved.calibration.until, this.now(), MAX_PRIOR_AGE_MS))
+      return skip("prior_stale");
     if (!existsSync87(this.path))
       return skip("weights_missing");
     if (this.saved.revisions !== this.revisions())
@@ -125715,7 +125727,7 @@ class EmbeddingPrefilter {
     }
   }
 }
-var PREFIX3 = "embedding-prefilter:", RECEIPTS, CHECKS, WINDOW = 200, RETRAIN_MS, MAX_PER_CLASS = 5000, PRIOR_WINDOW_MS, TRAINING_SLICE_MS = 200, FAILED_RETRY_MS, NEW_VERDICTS = 1000, TRAINING, SCAN, PREFILTER_TRAINING_REJECTIONS;
+var PREFIX3 = "embedding-prefilter:", RECEIPTS, CHECKS, WINDOW = 200, RETRAIN_MS, MAX_PER_CLASS = 5000, PRIOR_WINDOW_MS, MAX_SCAN_AGE_MS, MAX_PRIOR_AGE_MS, TRAINING_SLICE_MS = 200, FAILED_RETRY_MS, NEW_VERDICTS = 1000, TRAINING, SCAN, PREFILTER_TRAINING_REJECTIONS;
 var init_embedding_prefilter = __esm(() => {
   init_atomic_file();
   init_control_path_headroom();
@@ -125728,6 +125740,8 @@ var init_embedding_prefilter = __esm(() => {
   CHECKS = `${PREFIX3}check:`;
   RETRAIN_MS = 24 * 60 * 60 * 1000;
   PRIOR_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
+  MAX_SCAN_AGE_MS = 48 * 60 * 60 * 1000;
+  MAX_PRIOR_AGE_MS = 7 * 24 * 60 * 60 * 1000;
   FAILED_RETRY_MS = 3 * 60 * 60 * 1000;
   TRAINING = `${PREFIX3}training-v1`;
   SCAN = `${PREFIX3}training-scan-v1`;

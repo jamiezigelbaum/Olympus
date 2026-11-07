@@ -23,6 +23,12 @@ const WINDOW = 200;
 const RETRAIN_MS = 24 * 60 * 60 * 1000;
 const MAX_PER_CLASS = 5000;
 const PRIOR_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
+// Scan checkpoints expire after 48 hours; calibration windows authorize clearing for 7 days.
+const MAX_SCAN_AGE_MS = 48 * 60 * 60 * 1000;
+const MAX_PRIOR_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+function freshTimestamp(timestamp: number, now: number, maxAge: number): boolean {
+  return Number.isFinite(timestamp) && timestamp <= now && now - timestamp <= maxAge;
+}
 const TRAINING_SLICE_MS = 200;
 const FAILED_RETRY_MS = 3 * 60 * 60 * 1000;
 const NEW_VERDICTS = 1000;
@@ -205,7 +211,7 @@ export function prefilterTrainingExample(row: TierLedgerRecord, judge: string, o
 
 /** First failing guard wins; fixed codes only, never item-derived labels. */
 export type ClearingSkipReason =
-  | 'disabled' | 'audit_stopped' | 'model_missing' | 'model_invalid' | 'weights_missing'
+  | 'disabled' | 'audit_stopped' | 'model_missing' | 'model_invalid' | 'prior_stale' | 'weights_missing'
   | 'revisions_changed' | 'judge_changed' | 'not_content' | 'row_missing' | 'row_not_pending'
   | 'metadata_pending' | 'content_not_pending' | 'content_unread' | 'metadata_tier' | 'content_tier'
   | 'metadata_forced' | 'override_decision' | 'owner_decision' | 'item_override' | 'metadata_owner_rule'
@@ -376,6 +382,11 @@ export class EmbeddingPrefilter {
     let attempt = this.attempt;
     // Older scans did not collect the uncapped, content-bound prior.
     if (attempt && attempt.labelVersion !== 4) { attempt = this.attempt = undefined; this.training = undefined; }
+    if (attempt && (attempt.outcome === 'scanning' || attempt.outcome === 'fitting')
+      && !freshTimestamp(attempt.startedAt, this.now(), MAX_SCAN_AGE_MS)) {
+      attempt = this.attempt = undefined;
+      this.training = undefined;
+    }
     const finishedAtStart = attempt && ['trained', 'too_few', 'failed'].includes(attempt.outcome) ? attempt.id : undefined;
     // A failure before revisions could be read must still honor its retry deadline.
     if (attempt?.outcome === 'failed' && !attempt.revisions && this.now() < attempt.nextAt) return;
@@ -541,6 +552,9 @@ export class EmbeddingPrefilter {
               // during any validation slice requires a fresh pass, including copies.
               if (validation.index === run.examples.length && hasTime()
                 && validation.markers === changeMarkers() && attempt.revisions === this.revisions()) {
+                stage = 'prior_stale';
+                if (!freshTimestamp(attempt.startedAt, this.now(), MAX_SCAN_AGE_MS)
+                  || !freshTimestamp(attempt.startedAt, this.now(), MAX_PRIOR_AGE_MS)) throw new Error();
                 stage = 'weights_write_failed';
                 if (this.control.dbPath === ':memory:') throw new Error();
                 const directory = embeddingPrefilterDirectory(this.control.dbPath);
@@ -625,6 +639,7 @@ export class EmbeddingPrefilter {
     if (this.audit.stopped) return skip('audit_stopped');
     if (!this.saved) return skip('model_missing');
     if (!/^[0-9a-f-]{36}$/.test(this.saved.version) || !Number.isFinite(this.saved.trainedAt) || !validPrefilterPrior(this.saved.calibration)) return skip('model_invalid');
+    if (!freshTimestamp(this.saved.calibration.until, this.now(), MAX_PRIOR_AGE_MS)) return skip('prior_stale');
     if (!existsSync(this.path)) return skip('weights_missing');
     if (this.saved.revisions !== this.revisions()) return skip('revisions_changed');
     if (this.saved.judge !== judge) return skip('judge_changed');

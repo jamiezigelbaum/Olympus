@@ -75014,6 +75014,11 @@ var WINDOW = 200;
 var RETRAIN_MS = 24 * 60 * 60 * 1000;
 var MAX_PER_CLASS = 5000;
 var PRIOR_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
+var MAX_SCAN_AGE_MS = 48 * 60 * 60 * 1000;
+var MAX_PRIOR_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+function freshTimestamp(timestamp, now, maxAge) {
+  return Number.isFinite(timestamp) && timestamp <= now && now - timestamp <= maxAge;
+}
 var TRAINING_SLICE_MS = 200;
 var FAILED_RETRY_MS = 3 * 60 * 60 * 1000;
 var NEW_VERDICTS = 1000;
@@ -75375,6 +75380,10 @@ class EmbeddingPrefilter {
       attempt = this.attempt = undefined;
       this.training = undefined;
     }
+    if (attempt && (attempt.outcome === "scanning" || attempt.outcome === "fitting") && !freshTimestamp(attempt.startedAt, this.now(), MAX_SCAN_AGE_MS)) {
+      attempt = this.attempt = undefined;
+      this.training = undefined;
+    }
     const finishedAtStart = attempt && ["trained", "too_few", "failed"].includes(attempt.outcome) ? attempt.id : undefined;
     if (attempt?.outcome === "failed" && !attempt.revisions && this.now() < attempt.nextAt)
       return;
@@ -75565,6 +75574,9 @@ class EmbeddingPrefilter {
                 await ingestionTurn();
               }
               if (validation.index === run.examples.length && hasTime() && validation.markers === changeMarkers() && attempt.revisions === this.revisions()) {
+                stage = "prior_stale";
+                if (!freshTimestamp(attempt.startedAt, this.now(), MAX_SCAN_AGE_MS) || !freshTimestamp(attempt.startedAt, this.now(), MAX_PRIOR_AGE_MS))
+                  throw new Error;
                 stage = "weights_write_failed";
                 if (this.control.dbPath === ":memory:")
                   throw new Error;
@@ -75674,6 +75686,8 @@ class EmbeddingPrefilter {
       return skip("model_missing");
     if (!/^[0-9a-f-]{36}$/.test(this.saved.version) || !Number.isFinite(this.saved.trainedAt) || !validPrefilterPrior(this.saved.calibration))
       return skip("model_invalid");
+    if (!freshTimestamp(this.saved.calibration.until, this.now(), MAX_PRIOR_AGE_MS))
+      return skip("prior_stale");
     if (!existsSync32(this.path))
       return skip("weights_missing");
     if (this.saved.revisions !== this.revisions())
