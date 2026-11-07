@@ -27,6 +27,7 @@ import { DASHBOARD_ARCHIVE_COPY as A, DASHBOARD_CHATGPT_PAGE_COPY as PANEL, DASH
 import { FIXTURE_FOLDER, STRESS_FORMAT, type ArchiveExpectation, type BesideLiveExpectation, type LegFixture } from './archive-fixtures.ts';
 import { egressVerdict, type EgressView } from './inbox.ts';
 import { journeyChecks, type Journey, type JourneyTrace } from './journey.ts';
+import { OPEN_ALL_SOURCES } from './journeys.ts';
 import type { CheckResult } from './report.ts';
 
 // ---------------------------------------------------------------------------
@@ -449,21 +450,11 @@ const OPEN_S = 60;
 const BEFORE_NAME = (template: string): string => template.split('{name}')[0] ?? '';
 const rowTarget = (fileName: string) => ({ css: 'li.archive:not(.request)', text: fileName, contains: true });
 
-/**
- * Home keeps every source and archive folded under All sources; the owner opens it to reach a row. Pressed only while it is folded,
- * so a fold the page opened on its own (an archive at work, or one that needs the owner) is left open.
- */
-const openAllSources: Journey['steps'][number] = {
-  name: 'Open All sources',
-  do: { click: { css: 'details.home-sources:not([open]) > summary' }, frame: 'panel', optional: true },
-  expect: [{ present: { css: 'details.home-sources[open]' }, frame: 'panel' }],
-};
-
 /** The dashboard opened, All sources unfolded, then what the step must find there (within the opening's bound). */
 function openDashboardSteps(name: string, expect: Journey['steps'][number]['expect'], timeoutMs: number): Journey['steps'] {
   return [
     { name: 'Open the dashboard', do: { go: '/dashboard' }, expect: [], timeoutMs },
-    openAllSources,
+    OPEN_ALL_SOURCES,
     { name, do: { observe: true }, expect, timeoutMs },
   ];
 }

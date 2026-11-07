@@ -77,9 +77,10 @@ class DomDriver implements JourneyDriver {
 /** A clock that moves 7 s per read and never sleeps, so a step that never reaches its outcome gives up at once. */
 const options = () => ({ now: ((): (() => number) => { let t = 0; return () => (t += 7_000); })(), sleep: async () => {} });
 
-const GOOD_DASHBOARD = `<main><h1>Olympus</h1><section><h2>Sources</h2>
+// Home as 1.4.0 draws it: every source folded under All sources.
+const GOOD_DASHBOARD = `<main><h1>Olympus</h1><details class="home-sources"><summary data-key="summary:home-sources">All sources (2)</summary><section><h2>Sources</h2>
   <div class="row"><span>Readwise</span> <span>Working</span><button aria-label="${PANEL.moreActions.replace('{source}', 'Readwise')}">...</button></div>
-  <div class="row"><span>Files on this computer</span><button>Connect</button></div></section></main>`;
+  <div class="row"><span>Files on this computer</span><button>Connect</button></div></section></details></main>`;
 
 describe('journey runner', () => {
   const saveJourney: Journey = {
@@ -317,7 +318,7 @@ describe('the shipped journeys, on a DOM', () => {
 
   test('sources-healthy passes on a healthy Sources page and FAILS when the Files on this computer card is gone', async () => {
     const good = await runJourney(new DomDriver({ '/dashboard': GOOD_DASHBOARD }), find('sources-healthy'), options());
-    expect(good.steps[0]!.actual).toContain('Connect');
+    expect(good.steps.at(-1)!.actual).toContain('Connect');
     expect(good.ok).toBe(true);
     const without = GOOD_DASHBOARD.replace(/<div class="row"><span>Files on this computer.*?<\/div>/s, '');
     const bad = await runJourney(new DomDriver({ '/dashboard': without }), find('sources-healthy'), options());

@@ -425,6 +425,9 @@ export async function explore(options: ExploreOptions): Promise<ExploreResult> {
   const freshPage = async (): Promise<void> => {
     if (!opened) { await driver.open('dashboard'); opened = true; } else await driver.go('/dashboard');
     await settle();
+    // Home folds every source under All sources (1.4.0): open it, as the owner would, so each source's controls can be reached.
+    const folded = await driver.probe('panel', `!!document.querySelector('details.home-sources:not([open])')`).catch(() => false);
+    if (folded === true) { await driver.click('panel', keyed('summary:home-sources')); await settle(); }
   };
 
   const watch = async (): Promise<void> => {

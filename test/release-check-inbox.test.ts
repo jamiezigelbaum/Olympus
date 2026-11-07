@@ -151,7 +151,7 @@ function good(): InboxObservation {
     ok: true,
     ownerPath: { bearerStatus: 403, unlockOffered: true, unlocked: true },
     destinations: {
-      computer: { state: 'ready', status: 'Ready', reason: '', control: { tag: 'button', text: COPY.askComputer, href: null, action: 'ask', submit: true, disabled: false } },
+      computer: { state: 'ready', status: 'Ready', reason: '', control: { tag: 'button', text: COPY.ask, href: null, action: 'ask', submit: true, disabled: false } },
       venice: { state: 'not_set_up', status: 'Not connected', reason: COPY.veniceNotSetUp, control: link('/dashboard?keys#venice-setup', COPY.setUpVenice) },
       anonymous: { state: 'not_set_up', status: 'Not connected', reason: COPY.zkapiNotSetUp, control: link('#anonymous-setup', COPY.setUpZkapi) },
     },
@@ -245,7 +245,7 @@ describe('the Inbox checks', () => {
     ['no page opened for the link', (o) => { o.pages.length = 0; }, 'inbox.agent.page'],
     ['a model agent\'s link that is not in the Inbox', (o) => { o.entries[1] = entry(OTHER, { listed: false }); }, 'inbox.xai.entry'],
     ['a local model that is not ready on the Ask page', (o) => { o.destinations.computer!.state = 'not_set_up'; }, 'inbox.ask.page'],
-    ['an Ask button with other words', (o) => { o.destinations.computer!.control!.text = 'Ask'; }, 'inbox.ask.page'],
+    ['an Ask button with other words', (o) => { o.destinations.computer!.control!.text = 'Ask the local model'; }, 'inbox.ask.page'],
     ['a Venice row with a button that submits', (o) => { o.destinations.venice!.control = { tag: 'button', text: COPY.askVenice, href: null, action: 'ask_venice', submit: true, disabled: false }; }, 'inbox.venice.route'],
     ['a Venice link to the wrong section', (o) => { o.destinations.venice!.control = link('/dashboard?keys#anonymous', COPY.setUpVenice); }, 'inbox.venice.route'],
     ['a Venice row that says nothing about why', (o) => { o.destinations.venice!.reason = ''; }, 'inbox.venice.route'],
