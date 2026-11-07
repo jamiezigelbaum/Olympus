@@ -478,9 +478,9 @@ test('the Keys page renders through the real setup object and shows the upgrade 
     return reply.text();
   };
   const first = await keys();
-  expect(first).toContain('Sort your archive by privacy');
+  expect(first).toContain('Sorting your archive by privacy');
   expect(first).toContain('You can now set a spending limit');
   const second = await keys();
-  expect(second).toContain('Sort your archive by privacy');
+  expect(second).toContain('Sorting your archive by privacy');
   expect(second).not.toContain('You can now set a spending limit');
 });

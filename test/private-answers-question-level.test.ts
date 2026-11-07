@@ -110,8 +110,11 @@ describe('the Ask page offers the choice on the zkAPI row', () => {
     const ask = async (destination: 'anonymous' | 'computer') => {
       (document.querySelector('textarea') as unknown as { value: string }).value = TYPED;
       const form = document.querySelector('form[data-pa-ask]')!;
+      // Pick who answers on the side panel, then press the one Ask button.
+      const radio = document.querySelector(`input[data-pa-pick][value="${destination}"]`) as unknown as { click(): void };
+      radio.click();
       const event = new window.Event('submit', { bubbles: true, cancelable: true }) as unknown as { submitter: unknown };
-      event.submitter = document.querySelector(`[data-pa-destination="${destination}"]`);
+      event.submitter = document.querySelector('[data-pa-ask-button]');
       form.dispatchEvent(event as never);
       await new Promise((resolve) => setTimeout(resolve, 20));
     };

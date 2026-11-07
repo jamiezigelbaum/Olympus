@@ -19,7 +19,7 @@ import { loadSovereigntyPreset } from '../src/core/sovereignty.ts';
 //   /dashboard?state=<name>  that preview state, in one load
 //   /dashboard?state=inbox-failed&private-answers&controls  settled Inbox failure
 //   /dashboard?state=secret-notice  ChatGPT private panel and remote verdict
-//   /dashboard?keys | ?agents | ?private-answers | ?connector
+//   /dashboard?keys | ?connect | ?agents | ?private-answers | ?connector
 //                the computer's own pages, as the worker renders them.
 //   &sheet=first-run|first-run-local|first-run-no-sensitive&step=1..3 with state=first-run
 //   &sheet=dropbox|venice&step=1..4 opens a setup fixture without starting OAuth.
@@ -1756,8 +1756,8 @@ const PREVIEW_QR = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAALkAAAC5CAIAAA
 
 export function renderMessagingPreviewPage(state: string): string {
   const source = state.startsWith('telegram-') ? 'telegram' : 'whatsapp';
-  const page = renderDashboardLocalPage('keys', {
-    url: new URL('http://127.0.0.1:8930/dashboard?controls&keys'),
+  const page = renderDashboardLocalPage('connect', {
+    url: new URL('http://127.0.0.1:8930/dashboard?controls&connect'),
     view: view(state),
     options: { now: NOW, controlSessionCsrfToken: 'preview-csrf-token', messagingLocalSession: true },
   });
@@ -2203,7 +2203,7 @@ if (import.meta.main) {
         pageView.model_setup = { ready: true, checked_at: '', cards: [] };
       }
       if (pageState === 'first-run' && request.headers.get('sec-fetch-dest') === 'document') cookies.push('olympus_preview_first_run=; Path=/; Max-Age=0');
-      if (page === 'keys' && unlocked && previewMessagingFixture(pageState)) {
+      if (page === 'connect' && unlocked && previewMessagingFixture(pageState)) {
         return withCookies(html(renderMessagingPreviewPage(pageState) + setupPreviewScript(url.searchParams.get('sheet'), url.searchParams.get('step')), undefined, url.searchParams.get('theme')), cookies);
       }
       return withCookies(html(renderDashboardLocalPage(page, {
@@ -2232,5 +2232,5 @@ if (import.meta.main) {
   });
   console.log(`dashboard preview listening on http://127.0.0.1:${port}/dashboard`);
   console.log(`  states (open one, then /dashboard): ${DASHBOARD_PREVIEW_STATES.map((name) => `/${name}`).join(' ')}`);
-  console.log('  /dashboard?controls unlocks; ?keys ?agents ?private-answers ?connector are the computer\'s own pages; &waiting=N sets the waiting questions');
+  console.log('  /dashboard?controls unlocks; ?keys ?connect ?agents ?private-answers ?connector are the computer\'s own pages; &waiting=N sets the waiting questions');
 }

@@ -23,7 +23,7 @@ import { workerSocketPath } from './worker-transport.ts';
 import { mintDashboardOpeningUrl, workerRootBaseUrl, type DashboardFetch } from './dashboard-opening.ts';
 import { DASHBOARD_REMOTE_LAUNCH_TICKET_TTL_SECONDS } from './dashboard-launch.ts';
 import type { OlympusConfig } from './config.ts';
-import { allOpenTargets, isKeysOpenTarget, openTargetFromPath, openTargetPath } from './open-targets.ts';
+import { allOpenTargets, isConnectOpenTarget, isKeysOpenTarget, openTargetFromPath, openTargetPath } from './open-targets.ts';
 import { OperationError } from './operation-error.ts';
 import {
   REMOTE_TUNNEL_SECONDS,
@@ -178,7 +178,7 @@ export async function openRemote(
   return {
     ok: true,
     target: openTargetPath(target),
-    lands_on: isKeysOpenTarget(target) ? '/dashboard?keys' : target.kind === 'private_answers' ? '/dashboard?private-answers' : '/dashboard',
+    lands_on: isConnectOpenTarget(target) ? '/dashboard?connect' : isKeysOpenTarget(target) ? '/dashboard?keys' : target.kind === 'private_answers' ? '/dashboard?private-answers' : '/dashboard',
     computer,
     engine_port: port,
     ssh_target: sshTarget,

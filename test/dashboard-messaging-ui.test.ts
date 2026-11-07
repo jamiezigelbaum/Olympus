@@ -23,12 +23,12 @@ test('main Connect landing can focus the matching local messaging card', () => {
 });
 
 test('paired sources keep the chat picker when their connection action is none', async () => {
-  const { renderDashboardKeysPage } = await import('../src/workers/dashboard/pages/local.ts');
+  const { renderDashboardConnectPage } = await import('../src/workers/dashboard/pages/local.ts');
   const view = {
     generated_at: new Date().toISOString(),
     sources: ['telegram.messages', 'whatsapp.personal.messages'].map(source_id => ({ source_id, label: source_id, connection: { state: 'synced', action: { kind: 'none' } } })),
-  } as unknown as Parameters<typeof renderDashboardKeysPage>[0];
-  const page = renderDashboardKeysPage(view, { controlSessionCsrfToken: 'csrf-test', messagingLocalSession: true });
+  } as unknown as Parameters<typeof renderDashboardConnectPage>[0];
+  const page = renderDashboardConnectPage(view, { controlSessionCsrfToken: 'csrf-test', messagingLocalSession: true });
   const window = new Window();
   window.document.body.innerHTML = page;
   expect(window.document.querySelectorAll('form[data-messaging-kind="chats"]')).toHaveLength(2);

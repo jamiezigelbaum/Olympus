@@ -154,20 +154,35 @@ export function openTargetTokenPattern(): string {
 }
 
 /**
- * The targets the computer's Keys page opens something for: Connect for a
- * source set up on the computer, and the model fixes (Models). Every other
- * target (the dashboard, a ChatGPT connect or reconnect fix) lands on the
- * plain dashboard.
+ * The targets the computer's Connect a source page opens a setup sheet for:
+ * Connect for a source set up on the computer.
  */
-export function isKeysOpenTarget(target: OpenTarget): boolean {
-  return target.kind === 'connect'
-    || (target.kind === 'fix' && (target.section === 'models' || target.section === 'answers' || target.section === 'search'));
+export function isConnectOpenTarget(target: OpenTarget): boolean {
+  return target.kind === 'connect';
 }
 
-/** The Keys targets' tokens, as one anchored pattern source (see openTargetTokenPattern). */
-export function keysOpenTargetTokenPattern(): string {
-  const tokens = allOpenTargets().filter(isKeysOpenTarget).map(openTargetToken).filter((token): token is string => token !== undefined);
+/**
+ * The targets the Privacy settings page (`?keys`) lands on: the model fixes
+ * (How Private items are answered). Every other target (the dashboard, a
+ * ChatGPT connect or reconnect fix) lands on the plain dashboard.
+ */
+export function isKeysOpenTarget(target: OpenTarget): boolean {
+  return target.kind === 'fix' && (target.section === 'models' || target.section === 'answers' || target.section === 'search');
+}
+
+function tokenPattern(filter: (target: OpenTarget) => boolean): string {
+  const tokens = allOpenTargets().filter(filter).map(openTargetToken).filter((token): token is string => token !== undefined);
   return `^(?:${tokens.map((token) => token.replace('.', '\\.')).join('|')})$`;
+}
+
+/** The Privacy settings targets' tokens, as one anchored pattern source (see openTargetTokenPattern). */
+export function keysOpenTargetTokenPattern(): string {
+  return tokenPattern(isKeysOpenTarget);
+}
+
+/** The Connect a source targets' tokens, as one anchored pattern source. */
+export function connectOpenTargetTokenPattern(): string {
+  return tokenPattern(isConnectOpenTarget);
 }
 
 /** The Private answers page's token, as one anchored pattern source (see openTargetTokenPattern). */

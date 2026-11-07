@@ -1749,8 +1749,51 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
     focus.focus();
   }
 
+  // Sorting choice: picking the card not in use opens its confirmation
+  // dialog; Cancel, Esc or a backdrop close puts the choice back.
+  const judgeDialog = (form: HTMLFormElement, pick: string): HTMLDialogElement | null =>
+    form.querySelector<HTMLDialogElement>(`dialog[data-judge-dialog="${pick}"]`);
+  const resetJudge = (dialog: HTMLDialogElement): void => {
+    const form = dialog.closest<HTMLFormElement>('form[data-judge-choice]');
+    if (dialog.open) dialog.close();
+    const current = form?.dataset.judgeCurrent;
+    const radio = current ? form?.querySelector<HTMLInputElement>(`input[name="choice"][value="${current}"]`) : null;
+    if (radio) radio.checked = true;
+  };
+  const onJudgePick = (event: Event): void => {
+    const input = event.target;
+    if (!(input instanceof HTMLInputElement) || input.name !== 'choice') return;
+    const form = input.closest<HTMLFormElement>('form[data-judge-choice]');
+    if (!form || !input.checked || input.value === form.dataset.judgeCurrent) return;
+    const dialog = judgeDialog(form, input.value);
+    if (dialog && typeof dialog.showModal === 'function' && !dialog.open) dialog.showModal();
+  };
+  const onJudgeDialogClick = (event: Event): void => {
+    const target = event.target instanceof Element ? event.target : null;
+    const cancel = target?.closest('[data-judge-cancel]');
+    // A click on the backdrop lands on the dialog itself, outside its box.
+    const outside = (dialog: HTMLDialogElement): boolean => {
+      const box = dialog.getBoundingClientRect(); const at = event as MouseEvent;
+      return box.width > 0 && (at.clientX < box.left || at.clientX > box.right || at.clientY < box.top || at.clientY > box.bottom);
+    };
+    const dialog = cancel?.closest('dialog') ?? (target instanceof HTMLDialogElement && target.matches('[data-judge-dialog]') && outside(target) ? target : null);
+    if (dialog instanceof HTMLDialogElement) { event.preventDefault(); resetJudge(dialog); }
+  };
+  const onJudgeDialogCancel = (event: Event): void => {
+    const dialog = event.target;
+    if (dialog instanceof HTMLDialogElement && dialog.matches('[data-judge-dialog]')) { event.preventDefault(); resetJudge(dialog); }
+  };
+  const onJudgeSubmit = (event: Event): void => {
+    const form = event.target instanceof HTMLFormElement ? event.target : null;
+    if (form?.hasAttribute('data-judge-choice')) form.querySelectorAll<HTMLDialogElement>('dialog[open]').forEach(dialog => dialog.close());
+  };
+
+  root.addEventListener('submit', onJudgeSubmit, true);
   root.addEventListener('submit', onSubmit);
   root.addEventListener('click', onClick);
+  root.addEventListener('change', onJudgePick);
+  root.addEventListener('click', onJudgeDialogClick);
+  root.addEventListener('cancel', onJudgeDialogCancel, true);
   root.addEventListener('change', onClientFileChange);
   root.addEventListener('keydown', onClientFileKeydown);
   root.addEventListener('dragover', onClientFileDrop);
@@ -1787,8 +1830,12 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
     if (interval) clearInterval(interval);
     view.removeEventListener('focus', refreshOnReturn);
     root.ownerDocument.removeEventListener('visibilitychange', onVisibilityReturn);
+    root.removeEventListener('submit', onJudgeSubmit, true);
     root.removeEventListener('submit', onSubmit);
     root.removeEventListener('click', onClick);
+    root.removeEventListener('change', onJudgePick);
+    root.removeEventListener('click', onJudgeDialogClick);
+    root.removeEventListener('cancel', onJudgeDialogCancel, true);
     root.removeEventListener('change', onClientFileChange);
     root.removeEventListener('keydown', onClientFileKeydown);
     root.removeEventListener('dragover', onClientFileDrop);

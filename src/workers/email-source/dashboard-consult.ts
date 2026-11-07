@@ -57,6 +57,7 @@ import {
   CONSULT_LEVELS,
   CONSULT_LIGHT_CLEANUP_INSTRUCTION,
   CONSULT_STANDARD_INSTRUCTION_MAX_CHARS,
+  CONSULT_CHATGPT_FRONTIER_MODEL_DEFAULT,
   CONSULT_STANDARD_MODES,
   DEFAULT_CONSULT_SETTINGS,
   consultChatgptFrontierModel,
@@ -187,8 +188,13 @@ export interface DashboardConsultAdapterOptions {
 export const DASHBOARD_ZKAPI_PROFILE_ID = 'zkapi-consult';
 /** The worker-environment variable the added profile's key reference names. */
 export const DASHBOARD_ZKAPI_API_KEY_ENV = 'OLYMPUS_ZKAPI_API_KEY';
-/** The model the added profile names: the one M1 measured (docs/design/consult-m1-measurement.md). */
-export const DASHBOARD_ZKAPI_DEFAULT_MODEL = 'openai/gpt-5-mini';
+/**
+ * The model the added profile names. M1 was measured on openai/gpt-5-mini
+ * (docs/design/consult-m1-measurement.md); the owner asked for a stronger
+ * default (2026-11-07), so new routes start on the same model ChatGPT
+ * questions default to. Existing routes keep the model they saved.
+ */
+export const DASHBOARD_ZKAPI_DEFAULT_MODEL = CONSULT_CHATGPT_FRONTIER_MODEL_DEFAULT;
 
 const ALL_LANGUAGES = Object.keys(CONSULT_LANGUAGE_PACKS) as ConsultLanguage[];
 const ACKNOWLEDGEMENT_IDS: readonly string[] = ZKAPI_RISK_ACKNOWLEDGEMENTS.map((entry) => entry.id);

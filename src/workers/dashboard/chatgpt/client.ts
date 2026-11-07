@@ -2706,7 +2706,7 @@ export function chatgptDashboardClient(
   function computerSection(): HTMLElement | null {
     if (!onComputer()) return null;
     const W = H.copy;
-    const keys = ['keys', 'agents', 'privateAnswers', 'connector', 'help'].filter((key) => !!state.hostLinks[key]);
+    const keys = ['privateAnswers', 'agents', 'connector', 'help'].filter((key) => !!state.hostLinks[key]);
     if (!keys.length) return null;
     const heading = add(el('h2'), doc.createTextNode(W.section + ' '), el('span', 'tag', W.onlyHere));
     const section = add(el('section', 'section on-computer'), heading);

@@ -5,7 +5,7 @@
 import { DASHBOARD_CONTROL_GATE_ID, escapeHtml, escapeScriptJson, pageShell } from '../components.ts';
 import { chatgptMarkdownRender, CHATGPT_MARKDOWN_CSS } from '../chatgpt/markdown.ts';
 import { dashboardLocalPageHref } from '../host-page.ts';
-import { DASHBOARD_OUTSIDE_HELP_PATHS, summaryOf } from '../outside-help.ts';
+import { DASHBOARD_OUTSIDE_HELP_PATHS, renderOutsideHelpCard, summaryOf } from '../outside-help.ts';
 import { DASHBOARD_OUTSIDE_HELP_CSS, LOCAL_PAGE_CSS } from '../static-styles.ts';
 import {
   DASHBOARD_OUTSIDE_HELP_COPY as OH,
@@ -18,7 +18,7 @@ import type { AskDestinationStates } from '../../email-source/venice-inbox-answe
 import type { DashboardPageOptions, DashboardWaitingQuestion } from './local.ts';
 
 /** The fragment the old Anonymous answers address lands on: that section, opened. */
-export const DASHBOARD_PRIVATE_ANSWERS_ANONYMOUS_FRAGMENT = 'anonymous';
+export const DASHBOARD_PRIVATE_ANSWERS_ANONYMOUS_FRAGMENT = 'anonymous-setup';
 const POST_PATH = '/dashboard/private-answers';
 
 const PRIVATE_ANSWERS_CSS = `
@@ -64,31 +64,38 @@ const PRIVATE_ANSWERS_CSS = `
 .pa .pamsg[data-state="error"] { color: var(--bad); }
 .pa .paunlock { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; margin: 0 0 16px; padding: 10px 14px; background: var(--warn-bg); border: 1px solid var(--warn-line); border-radius: 8px; }
 .pa .paunlock .hint { color: var(--t2); }
-.pa .paasks { --ladder-columns: 24px 164px minmax(0, 1fr) 210px; display: grid; grid-template-columns: var(--ladder-columns); column-gap: 16px; width: 100%; max-width: 920px; margin: 0 0 24px; }
-.pa .padestination { grid-column: 1 / -1; display: grid; grid-template-columns: var(--ladder-columns); column-gap: 16px; align-items: start; min-width: 0; padding: 16px 0; border-bottom: 1px solid var(--line); position: relative; }
-.pa .padestination:last-child { border-bottom: 0; }
-.pa .padestination > * { min-width: 0; }
-.pa .padestination .sect, .pa .padestination .pnote { margin: 0; }
-.pa .paname { grid-column: 2; }
-.pa .pastatus { display: none; align-items: center; gap: 6px; margin-top: 6px; color: var(--t3); font-size: var(--fs-body); }
+.pa { max-width: min(1040px, 100%); }
+.pa .pagrid { display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: 8px 28px; align-items: start; }
+.pa .pamain { min-width: 0; display: grid; gap: 8px; align-content: start; }
+.pa .pahead { margin: 0; }
+.pa .paintro { margin: 0 0 4px; color: var(--t2); }
+.pa .pasend { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.pa .pasend [data-pa-answered-by] { margin: 0; color: var(--t3); flex: 1; min-width: 0; }
+.pa .pasend .pareason { color: var(--t3); font-size: var(--fs-body); }
+.pa .pamain > .pasection { margin-top: 24px; padding-top: 0; border-top: 0; }
+.pa .paside { min-width: 0; }
+.pa .paasks { display: grid; gap: 10px; }
+.pa .padestination { display: grid; gap: 6px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); min-width: 0; }
+.pa .padestination:has(input[data-pa-pick]:checked) { border-color: var(--link); }
+.pa .papick { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 10px; align-items: start; cursor: pointer; }
+.pa .papick input { margin: 4px 0 0; accent-color: var(--link); }
+.pa .papick input:disabled + .paname { cursor: default; }
+.pa .paname { min-width: 0; }
+.pa .pacardname { color: var(--t1); }
+.pa .pamodel { color: var(--t3); }
+.pa .pamodelchange { color: var(--t3); font-size: var(--fs-body); }
+.pa .paline { display: block; margin: 2px 0 0; color: var(--t2); }
+.pa .pastate { padding-left: 26px; }
+.pa .pastatus { display: none; align-items: center; gap: 6px; color: var(--t3); font-size: var(--fs-body); }
 .pa [data-pa-state="ready"] [data-pa-status="ready"], .pa [data-pa-state="not_set_up"] [data-pa-status="not_set_up"], .pa [data-pa-state="not_allowed"] [data-pa-status="not_allowed"], .pa [data-pa-state="busy"] [data-pa-status="busy"] { display: flex; }
 .pa .pastatus .dot.ok { background: var(--good); }
 .pa .pastatus .dot.run { background: var(--run-fill); }
 .pa .pastatus .dot.pause { background: var(--warn-fill); }
-.pa .pawhat { grid-column: 3; }
-.pa .patag, .pa .paknows { color: var(--t3); font-size: var(--fs-body); }
-.pa .padestination .patag, .pa .padestination .paknows { margin-top: 4px; }
-.pa .padestination .paaction { grid-column: 4; display: flex; flex-direction: column; align-items: stretch; gap: 8px; }
+.pa .padestination .paaction { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; padding-left: 26px; }
+.pa .padestination .paaction:empty { display: none; }
 .pa .padestination .btn { white-space: normal; text-align: center; }
 .pa .padestination .pareason { color: var(--t3); font-size: var(--fs-body); overflow-wrap: anywhere; }
-.pa .panode { grid-column: 1; width: 12px; height: 12px; margin: 5px 0 0 6px; border-radius: 50%; background: var(--t3); position: relative; }
-.pa #computer .panode { background: var(--t1); }
-.pa .parail { position: absolute; left: 11px; width: 2px; background: var(--line); top: 0; bottom: -1px; }
-.pa #computer .parail { top: 27px; }
-.pa #venice .parail { bottom: auto; height: 27px; }
-.pa .pazone { grid-column: 1 / -1; position: relative; padding: 12px 0 6px 40px; border-top: 1px solid var(--line); display: flex; justify-content: space-between; gap: 12px; color: var(--t3); font-size: var(--fs-caption); }
-.pa .pazone b { color: var(--t2); font-weight: 600; }
-.pa .paboundary { border-top: 1px dashed var(--field); }
+.pa .padestination .palevel { padding-left: 26px; margin-top: 4px; }
 .pa .palevel { border: 0; margin: 12px 0 0; padding: 0; min-width: 0; display: grid; gap: 6px; }
 .pa .palevel legend { padding: 0; margin: 0 0 2px; color: var(--t2); font-size: var(--fs-body); font-weight: 600; }
 .pa .palevelopt { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 8px; align-items: start; font-size: var(--fs-body); color: var(--t1); cursor: pointer; }
@@ -97,12 +104,9 @@ const PRIVATE_ANSWERS_CSS = `
 .pa .palevelhint { display: block; color: var(--t3); }
 .pa [data-pa-card="anonymous"]:not([data-pa-state="ready"]) .palevel { display: none; }
 .pa .pachooser { margin: 12px 0 8px; color: var(--t2); font-size: var(--fs-body); }
-@media (max-width: 640px) {
-  .pa .paasks { grid-template-columns: minmax(0, 1fr); }
-  .pa .padestination { grid-template-columns: minmax(0, 1fr); gap: 8px; padding: 14px 0; }
-  .pa .panode, .pa .parail { display: none; }
-  .pa .paname, .pa .pawhat, .pa .padestination .paaction { grid-column: 1; }
-  .pa .pazone { padding-left: 0; }
+@media (max-width: 760px) {
+  .pa .pagrid { grid-template-columns: minmax(0, 1fr); }
+  .pa .paside { order: -1; }
 }
 
 `;
@@ -114,11 +118,48 @@ export function renderDashboardPrivateAnswersPage(options?: DashboardPageOptions
     crumb: W.crumb,
     ...(basePath === undefined ? {} : { basePath }),
     meta: '',
-    body: renderPrivateAnswersBody(options),
-    styles: [CHATGPT_MARKDOWN_CSS, LOCAL_PAGE_CSS, DASHBOARD_OUTSIDE_HELP_CSS, PRIVATE_ANSWERS_CSS],
+    body: dashboardPrivacyTabs('questions', readToken(basePath)) + renderPrivateAnswersBody(options),
+    styles: [CHATGPT_MARKDOWN_CSS, LOCAL_PAGE_CSS, DASHBOARD_OUTSIDE_HELP_CSS, PRIVACY_TABS_CSS, PRIVATE_ANSWERS_CSS],
     // The local inbox carries its own small controller and visible-page poll.
   });
 }
+
+/** The tab bar the Privacy page's two halves share: Private questions first, then Privacy settings (?keys). */
+export function dashboardPrivacyTabs(active: 'questions' | 'settings', token?: string): string {
+  const tab = (id: 'questions' | 'settings', href: string, label: string) => id === active
+    ? `<a class="ptab on" aria-current="page" href="${escapeHtml(href)}">${escapeHtml(label)}</a>`
+    : `<a class="ptab" href="${escapeHtml(href)}">${escapeHtml(label)}</a>`;
+  return `<nav class="ptabs" aria-label="${escapeHtml(W.tabsLabel)}">`
+    + tab('questions', dashboardLocalPageHref('privateAnswers', token), W.tabQuestions)
+    + tab('settings', dashboardLocalPageHref('keys', token), W.tabSettings)
+    + '</nav>';
+}
+
+export const PRIVACY_TABS_CSS = `
+.ptabs { display: flex; gap: 4px; margin: 0 0 20px; border-bottom: 1px solid var(--line); }
+.ptabs .ptab { padding: 8px 14px; color: var(--t2); text-decoration: none; border-bottom: 2px solid transparent; margin-bottom: -1px; }
+.ptabs .ptab.on { color: var(--t1); border-bottom-color: var(--link); font-weight: 600; }
+.ptabs .ptab:focus-visible { outline: 2px solid var(--link); outline-offset: 2px; }
+.judgeopts { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin: 10px 0; }
+.judgeopt { display: block; border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; cursor: pointer; }
+.judgeopt:has(input:checked) { border-color: var(--link); }
+.judgeopt:has(input:disabled) { cursor: default; opacity: .6; }
+.judgehead { display: flex; align-items: center; gap: 6px; }
+.judgenow { font-size: var(--fs-caption); padding: 0 8px; border-radius: 10px; border: 1px solid var(--link); color: var(--link); }
+.judgelead { display: block; margin: 4px 0 0; color: var(--t2); }
+.judgerows { display: grid; grid-template-columns: 64px 1fr; gap: 4px 10px; margin: 10px 0 0; }
+.judgeterm { color: var(--t2); }
+.judgefit { display: block; margin: 10px 0 0; padding-top: 8px; border-top: 1px solid var(--line); color: var(--t2); }
+.judgelegend { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+.judgedialog { max-width: 520px; width: calc(100% - 32px); padding: 20px 22px; border: 1px solid var(--line); border-radius: 14px; background: var(--panel); color: var(--t1); }
+.judgedialog::backdrop { background: rgba(0, 0, 0, .6); }
+.judgedialog h3 { margin: 0 0 8px; }
+.judgedialog p { margin: 0 0 12px; }
+.judgedialogbar { display: flex; justify-content: flex-end; gap: 10px; margin-top: 16px; }
+.judgecap { display: block; margin: 8px 0 4px; }
+.judgehow { margin: 10px 0 0; color: var(--t2); }
+@media (max-width: 640px) { .judgeopts { grid-template-columns: 1fr; } }
+`;
 
 /** The read-only token a dash_ reader's basePath carries, for the link to the gate. */
 function readToken(basePath: string | undefined): string | undefined {
@@ -129,60 +170,86 @@ function readToken(basePath: string | undefined): string | undefined {
 }
 
 function renderPrivateAnswersBody(options: DashboardPageOptions | undefined): string {
-  const head = `<h2 class="ptitle">${escapeHtml(W.title)}</h2><p class="pintro">${escapeHtml(W.intro)}</p>`;
   const csrfToken = options?.controlSessionCsrfToken;
   const localSession = csrfToken !== undefined && options?.outsideHelpLocalSession === true;
-  const parts: string[] = [head];
+  const notes: string[] = [];
   let script = '';
+  let ready = false;
   if (csrfToken === undefined) {
     const gate = `${dashboardLocalPageHref('keys', readToken(options?.basePath))}#${DASHBOARD_CONTROL_GATE_ID}`;
-    parts.push(`<p class="pnote" data-pa-locked>${escapeHtml(W.locked)} <a href="${escapeHtml(gate)}">${escapeHtml(W.openControls)}</a></p>`);
+    notes.push(`<p class="pnote" data-pa-locked>${escapeHtml(W.locked)} <a href="${escapeHtml(gate)}">${escapeHtml(W.openControls)}</a></p>`);
   } else if (!localSession) {
     // A bearer-grade session (the launch flow) reads nothing here: the local
     // unlock comes first, as on the outside-help card.
-    parts.push(`<form class="paunlock" data-pa-unlock>`
+    notes.push(`<form class="paunlock" data-pa-unlock>`
       + `<button type="submit" class="btn primary">${escapeHtml(W.unlock)}</button><span class="hint">${escapeHtml(W.unlockIntro)}</span>`
       + `<span class="pamsg" data-pa-msg role="status"></span></form>`);
     script = `<script>${privateAnswersClientScript({ csrfToken: '', unlockOnly: true })}</script>`;
   } else if (options?.privateAnswers?.available !== true) {
-    parts.push(`<p class="pnote" data-pa-unavailable>${escapeHtml(W.unavailable)}</p>`);
+    notes.push(`<p class="pnote" data-pa-unavailable>${escapeHtml(W.unavailable)}</p>`);
   } else {
-    parts.push(renderDestinations(options, true));
-    parts.push(renderWaiting(options.privateAnswers.waiting, options.now ?? new Date()));
+    ready = true;
     script = `<script>${privateAnswersClientScript({ csrfToken, unlockOnly: false })}</script>`;
   }
-  if (!localSession || options?.privateAnswers?.available !== true) parts.push(renderDestinations(options, false));
-  return `<div class="privacy pa" data-private-answers>${parts.join('')}</div>${script}`;
+  const inbox = ready ? renderWaiting(options?.privateAnswers?.waiting, options?.now ?? new Date()) : '';
+  // The zkAPI card carries its own lock and unlock states, as it did on Keys.
+  const zkapiSetup = `<section class="pasection" id="${ANONYMOUS_SETUP_ID}"><h3 class="sect">${escapeHtml(W.zkapiSetupTitle)}</h3>${options?.outsideHelp
+      ? renderOutsideHelpCard(options.outsideHelp, { ...(csrfToken !== undefined ? { csrfToken } : {}), localSession: options.outsideHelpLocalSession === true, untitled: true })
+      : csrfToken === undefined ? `<p class="pnote">${escapeHtml(W.locked)}</p>` : `<p class="pnote" data-outside-unavailable>${escapeHtml(W.anonymousNotSetUp)}</p>`}</section>`;
+  return `<div class="privacy pa" data-private-answers>${notes.join('')}${renderAsk(options, ready, inbox)}${zkapiSetup}</div>${script}`;
 }
 
-function renderDestinations(options: DashboardPageOptions | undefined, enabled: boolean): string {
+const ANONYMOUS_SETUP_ID = DASHBOARD_PRIVATE_ANSWERS_ANONYMOUS_FRAGMENT;
+
+/**
+ * The question box, the models on the right (pick one for this question), and
+ * the Inbox under the box. One Ask button sends to the picked model; a model
+ * that is not ready keeps its own way to set it up in its card.
+ */
+function renderAsk(options: DashboardPageOptions | undefined, enabled: boolean, inbox: string): string {
   const models = dashboardLocalPageHref('keys', readToken(options?.basePath));
   const states: AskDestinationStates = options?.privateAnswers?.destinations ?? { computer: 'not_set_up', venice: 'not_set_up' };
   const zk = options?.outsideHelp;
   const zkState = zk && summaryOf(zk).state;
+  const zkModel = zk?.route.state === 'configured' ? zk.route.model : undefined;
+  const zkSetup = `#${ANONYMOUS_SETUP_ID}`;
   const destinations = [
-    { id: 'computer', name: W.computerName, tag: W.computerTag, leaves: W.computerLeaves, knows: W.computerKnows, ask: W.askComputer, setup: W.setUpComputer, state: states.computer, reason: states.computerReason ?? W.noModel, href: models, action: 'ask' },
-    { id: 'anonymous', name: W.zkapiName, tag: W.zkapiTag, leaves: W.zkapiLeaves, knows: W.zkapiKnows, ask: W.askZkapi, setup: zkState === 'off' ? W.turnOnInModels : zkState === 'needs_acceptance' ? W.goToModels : W.setUpZkapi, state: zkState === 'on' ? 'ready' : 'not_set_up', reason: zkState === 'off' ? W.zkapiOff : zkState === 'needs_acceptance' ? W.zkapiPaused : !zkState || zkState === 'route_not_configured' ? W.zkapiNotSetUp : OH.row[zkState], href: models + '#anonymous', action: 'ask_anonymous' },
-    { id: 'venice', name: W.veniceName, tag: W.veniceTag, leaves: W.veniceLeaves, knows: W.veniceKnows, ask: W.askVenice, setup: W.setUpVenice, state: states.venice, reason: W.veniceNotSetUp, href: models + '#venice-setup', action: 'ask_venice' },
+    { id: 'computer', name: W.computerCard, model: states.computerModel, line: W.computerLine, setup: W.setUpComputer, state: states.computer, reason: states.computerReason ?? W.noModel, href: models, action: 'ask' },
+    { id: 'venice', name: W.veniceCard, model: states.veniceModel, line: W.veniceLine, setup: W.setUpVenice, state: states.venice, reason: W.veniceNotSetUp, href: models + '#venice-setup', action: 'ask_venice' },
+    { id: 'anonymous', name: W.zkapiCard, model: zkModel, line: W.zkapiLine, setup: zkState === 'off' ? W.turnOnInModels : zkState === 'needs_acceptance' ? W.goToModels : W.setUpZkapi, state: zkState === 'on' ? 'ready' : 'not_set_up', reason: zkState === 'off' ? W.zkapiOff : zkState === 'needs_acceptance' ? W.zkapiPaused : !zkState || zkState === 'route_not_configured' ? W.zkapiNotSetUp : OH.row[zkState], href: zkSetup, action: 'ask_anonymous' },
   ];
-  return `<form class="paask" data-pa-ask><label class="sect" for="pa-question">${escapeHtml(W.askLabel)}</label>`
-    + `<textarea id="pa-question" name="question" maxlength="2000" placeholder="${escapeHtml(W.askPlaceholder)}"${enabled ? '' : ' disabled'}></textarea>`
-    + `<p class="pachooser" id="pa-chooser">${escapeHtml(W.chooserLabel)}</p><div class="paasks" role="group" aria-labelledby="pa-chooser"><div class="pazone"><b>${escapeHtml(W.stays)}</b></div>${destinations.map(d => {
-      const actions = {
-        ready: `<button type="submit" class="btn primary" data-pa-destination="${d.id}" data-pa-action="${d.action}">${escapeHtml(d.ask)}</button><span class="pareason" role="status"></span>`,
-        not_set_up: `<a class="btn" href="${escapeHtml(d.href)}">${escapeHtml(d.setup)}</a><span class="pareason" role="status">${escapeHtml(d.reason)}</span>`,
-        not_allowed: `<a class="btn" href="${escapeHtml(models + '#private-routing')}">${escapeHtml(W.changePrivacy)}</a><span class="pareason" role="status">${escapeHtml(W.veniceNotAllowed)}</span>`,
-        busy: `<button type="button" class="btn" disabled>${escapeHtml(W.answering)}</button><span class="pareason" role="status">${escapeHtml(W.destinationBusy)}</span>`,
-      };
-      const state = d.state as keyof typeof actions;
-      const action = enabled ? actions[state] : `<a class="btn" href="${escapeHtml(models)}">${escapeHtml(W.openControls)}</a><span class="pareason">${escapeHtml(W.locked)}</span>`;
-      const notReadyLabel = d.id === 'computer' ? d.reason === W.downloading ? W.downloadingStatus : W.notSetUpStatus
-        : d.id === 'anonymous' && zkState === 'off' ? W.offStatus : d.id === 'anonymous' && zkState === 'needs_acceptance' ? W.pausedStatus : W.notConnectedStatus;
-      const notReadyDot = notReadyLabel === W.downloadingStatus ? 'run' : notReadyLabel === W.pausedStatus ? 'pause' : 'hollow';
-      const statuses = [['ready', W.readyStatus, 'ok'], ['not_set_up', notReadyLabel, notReadyDot], ['not_allowed', W.offStatus, 'hollow'], ['busy', W.answering, 'run']]
-        .map(([key, label, dot]) => `<span class="pastatus" data-pa-status="${key}"><span class="dot ${dot}" aria-hidden="true"></span>${escapeHtml(label!)}</span>`).join('');
-      return (d.id === 'anonymous' ? `<div class="pazone paboundary"><span class="parail" aria-hidden="true"></span><b>${escapeHtml(W.leaves)}</b><span>${escapeHtml(W.order)}</span></div>` : '') + `<section class="padestination" id="${d.id}" data-pa-card="${d.id}" data-pa-state="${state}"><span class="parail" aria-hidden="true"></span><span class="panode" aria-hidden="true"></span><div class="paname"><h3 class="sect">${escapeHtml(d.name)}</h3><p class="pnote patag">${escapeHtml(d.tag)}</p>${statuses}</div><div class="pawhat"><p class="pnote paleaves">${escapeHtml(d.leaves)}</p><p class="pnote paknows">${escapeHtml(d.knows)}</p>${d.id === 'anonymous' && enabled ? renderLevelChoice(zk?.settings.level === 'general' ? 'strict' : 'standard', models + '#anonymous') : ''}</div><div class="paaction">${action}</div>${Object.entries(actions).map(([key, html]) => `<template data-pa-template="${key}">${html}</template>`).join('')}</section>`;
-    }).join('')}</div><div class="paout" data-pa-out aria-live="polite"></div></form>`;
+  const label = (d: typeof destinations[number]) => d.model ? `${d.name} · ${d.model}` : d.name;
+  const first = enabled ? destinations.find(d => d.state === 'ready') : undefined;
+  const cards = destinations.map(d => {
+    const actions = {
+      ready: '',
+      not_set_up: `<a class="btn" href="${escapeHtml(d.href)}">${escapeHtml(d.setup)}</a><span class="pareason" role="status">${escapeHtml(d.reason)}</span>`,
+      not_allowed: `<a class="btn" href="${escapeHtml(models + '#private-routing')}">${escapeHtml(W.changePrivacy)}</a><span class="pareason" role="status">${escapeHtml(W.veniceNotAllowed)}</span>`,
+      busy: `<span class="pareason" role="status">${escapeHtml(W.destinationBusy)}</span>`,
+    };
+    const state = d.state as keyof typeof actions;
+    const action = enabled ? actions[state] : '';
+    const notReadyLabel = d.id === 'computer' ? d.reason === W.downloading ? W.downloadingStatus : W.notSetUpStatus
+      : d.id === 'anonymous' && zkState === 'off' ? W.offStatus : d.id === 'anonymous' && zkState === 'needs_acceptance' ? W.pausedStatus : W.notConnectedStatus;
+    const notReadyDot = notReadyLabel === W.downloadingStatus ? 'run' : notReadyLabel === W.pausedStatus ? 'pause' : 'hollow';
+    const statuses = [['ready', W.readyStatus, 'ok'], ['not_set_up', notReadyLabel, notReadyDot], ['not_allowed', W.offStatus, 'hollow'], ['busy', W.answering, 'run']]
+      .map(([key, text, dot]) => `<span class="pastatus" data-pa-status="${key}"><span class="dot ${dot}" aria-hidden="true"></span>${escapeHtml(text!)}</span>`).join('');
+    const radio = `<input type="radio" name="pa-destination" value="${d.id}" data-pa-pick data-pa-action="${d.action}" data-pa-label="${escapeHtml(label(d))}"${d === first ? ' checked' : ''}${enabled && state === 'ready' ? '' : ' disabled'}>`;
+    return `<section class="padestination" id="${d.id}" data-pa-card="${d.id}" data-pa-state="${state}">`
+      + `<label class="papick">${radio}<span class="paname"><b class="pacardname">${escapeHtml(d.name)}</b>${d.model ? ` <span class="pamodel">· ${escapeHtml(d.model)}</span>` : ''}${d.id === 'anonymous' && d.model && enabled ? ` <a class="pamodelchange" href="${escapeHtml(zkSetup)}">${escapeHtml(W.zkapiChangeModel)}</a>` : ''}<span class="pnote paline">${escapeHtml(d.line)}</span></span></label>`
+      + `<div class="pastate">${statuses}</div>`
+      + (d.id === 'anonymous' && enabled ? renderLevelChoice(zk?.settings.level === 'general' ? 'strict' : 'standard', zkSetup) : '')
+      + `<div class="paaction">${action}</div>${Object.entries(actions).map(([key, html]) => `<template data-pa-template="${key}">${html}</template>`).join('')}</section>`;
+  }).join('');
+  const answeredBy = first ? W.answeredBy.replace('{name}', label(first)) : W.noneReady;
+  const button = `<button type="submit" class="btn primary" data-pa-ask-button${first ? ` data-pa-destination="${first.id}" data-pa-action="${first.action}"` : ' disabled'}>${escapeHtml(W.ask)}</button>`;
+  return `<form class="paask pagrid" data-pa-ask data-pa-answered-template="${escapeHtml(W.answeredBy)}">`
+    + `<div class="pamain"><h3 class="sect pahead">${escapeHtml(W.title)}</h3><p class="pnote paintro">${escapeHtml(W.intro)}</p>`
+    + `<textarea id="pa-question" name="question" maxlength="2000" aria-label="${escapeHtml(W.askLabel)}" placeholder="${escapeHtml(W.askPlaceholder)}"${enabled ? '' : ' disabled'}></textarea>`
+    + `<div class="pasend"><span class="pnote" data-pa-answered-by>${escapeHtml(answeredBy)}</span><span class="pareason" role="status"></span>${enabled ? button : ''}</div>`
+    + `<div class="paout" data-pa-out aria-live="polite"></div>${inbox}</div>`
+    + `<aside class="paside"><p class="pachooser" id="pa-chooser">${escapeHtml(W.chooserLabel)}</p><div class="paasks" role="radiogroup" aria-labelledby="pa-chooser">${cards}</div></aside>`
+    + '</form>';
 }
 
 // Strict or Standard for this question (owner, 2026-10-24): the saved
@@ -427,6 +494,27 @@ function privateAnswersClientScript(input: { csrfToken: string; unlockOnly: bool
     }
     if (leftOut.length > 0) card.appendChild(el('p', 'pamsg hint', config.copy.leftOut.replace('{sources}', leftOut.join(', '))));
   }
+  // The picked model card sets where the one Ask button sends; a card that
+  // stops being ready gives up the pick to the next ready one.
+  function syncPick() {
+    var ask = root.querySelector('form[data-pa-ask]');
+    if (!ask) return;
+    var picks = Array.from(ask.querySelectorAll('input[data-pa-pick]'));
+    picks.forEach(function (pick) {
+      var card = pick.closest('[data-pa-card]');
+      pick.disabled = !card || card.getAttribute('data-pa-state') !== 'ready';
+    });
+    var picked = picks.find(function (pick) { return pick.checked && !pick.disabled; }) || picks.find(function (pick) { return !pick.disabled; });
+    if (picked) picked.checked = true;
+    var button = ask.querySelector('[data-pa-ask-button]');
+    var line = ask.querySelector('[data-pa-answered-by]');
+    if (button && !button.hasAttribute('aria-busy')) {
+      if (picked) { button.setAttribute('data-pa-destination', picked.value); button.setAttribute('data-pa-action', picked.getAttribute('data-pa-action') || ''); button.disabled = false; }
+      else { button.removeAttribute('data-pa-action'); button.disabled = true; }
+    }
+    if (line && picked) line.textContent = String(ask.getAttribute('data-pa-answered-template') || '').replace('{name}', picked.getAttribute('data-pa-label') || '');
+  }
+  root.querySelectorAll('input[data-pa-pick]').forEach(function (pick) { pick.addEventListener('change', syncPick); });
   root.querySelectorAll('form[data-pa-ask]').forEach(function (ask) {
     ask.addEventListener('submit', async function (event) {
       event.preventDefault();
@@ -452,6 +540,7 @@ function privateAnswersClientScript(input: { csrfToken: string; unlockOnly: bool
       var outcome = await send(body);
       if (button) { button.disabled = false; button.removeAttribute('aria-busy'); }
       if (reason) reason.textContent = '';
+      syncPick();
       if (!outcome.ok) { message(out, errorText(outcome), true, question); return; }
       render(out, outcome.result, question);
       await poll();
@@ -578,6 +667,7 @@ function privateAnswersClientScript(input: { csrfToken: string; unlockOnly: bool
       var action = card.querySelector('.paaction');
       action.textContent = ''; action.appendChild(template.content.cloneNode(true)); card.setAttribute('data-pa-state', state);
     });
+    if (outcome.result.destinations) syncPick();
     var questions = outcome.result.questions.slice().sort(function (a, b) { return Date.parse(b.askedAt) - Date.parse(a.askedAt); });
     rows().forEach(function (row) {
       if (!questions.some(function (q) { return q.id === row.getAttribute('data-pa-question'); })) {

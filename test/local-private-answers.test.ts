@@ -1436,7 +1436,7 @@ describe('the Private answers page', () => {
       citations: [{ title: 'Lease', source: 'Dropbox' }], left_out: ['Gmail'],
     } }));
     expect([...page.document.querySelectorAll('.pa h3')].map((node) => node.textContent)).toEqual([
-      'Local model', 'zkAPI model', 'Venice model', 'Inbox',
+      'Ask privately', 'Inbox', 'zkAPI settings',
     ]);
     const field = page.document.querySelector('textarea')!;
     (field as unknown as { value: string }).value = 'When do I renew?';
@@ -1712,12 +1712,11 @@ describe('the Private answers page', () => {
     expect(missing.posts.length).toBe(0);
   });
 
-  test('the old fragment lands on the always-visible anonymous panel with a Models link', () => {
+  test('the old fragment lands on the always-visible zkAPI settings section', () => {
     const page = renderAndRun(() => ({ status: 500, body: {} }));
     const section = page.document.getElementById(DASHBOARD_PRIVATE_ANSWERS_ANONYMOUS_FRAGMENT)!;
     expect(section.tagName).toBe('SECTION');
     expect(section.textContent).toContain('zkAPI');
-    expect(section.querySelector('a')!.getAttribute('href')).toContain('?keys#anonymous');
     expect(page.document.querySelectorAll('.paask textarea').length).toBe(1);
     expect(page.document.querySelectorAll('.padestination').length).toBe(3);
   });

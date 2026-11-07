@@ -46,10 +46,10 @@ import {
   setupStepsSheet,
   type DashboardActionInput,
 } from '../components.ts';
-import { DASHBOARD_PRIVATE_ANSWERS_COPY } from '../vocabulary.ts';
-import { DASHBOARD_OUTSIDE_HELP_CSS } from '../static-styles.ts';
+import { DASHBOARD_PRIVACY_SETTINGS_COPY as S, DASHBOARD_PRIVATE_ANSWERS_COPY } from '../vocabulary.ts';
+import { dashboardPrivacyTabs, PRIVACY_TABS_CSS } from './private-answers.ts';
 import { renderModelSetup, renderModelSetupBlocker, dashboardModelsBlockedReason } from '../model-setup.ts';
-import { renderOutsideHelpCard, type DashboardOutsideHelpStatus } from '../outside-help.ts';
+import type { DashboardOutsideHelpStatus } from '../outside-help.ts';
 import { AGENT_CONNECT_CSS, LOCAL_PAGE_CSS, MODEL_SETUP_CSS } from '../static-styles.ts';
 import {
   DASHBOARD_COMPUTER_PANEL_COPY,
@@ -76,6 +76,8 @@ export interface DashboardPageOptions {
   systemReport?: string;
   /** OPENER supplies the current desktop/headless approval handoff. */
   agentConnectHost?: AgentConnectHost;
+  /** The saved Private-answer mode, for Privacy settings: its id and its label. */
+  answerMode?: { id: string; label: string };
   /** The Outside help card's facts, for that page only, with the control session. */
   outsideHelp?: DashboardOutsideHelpStatus | undefined;
   /** True when the live control session was minted locally (the only grade the consult routes take). */
@@ -158,29 +160,64 @@ function localShell(input: {
   });
 }
 
-/** Keys: the model keys, then the sources that connect on this computer. */
+/**
+ * Privacy settings (`?keys`), the Privacy page's second tab (owner, 2026-11-07):
+ * what's private, how Private items are answered (the default and the two
+ * models it can use), and who sorts the archive by privacy. zkAPI lives on
+ * Private questions, since it only answers questions asked there; sources
+ * set up on the computer live on Connect a source (`?connect`).
+ */
 export function renderDashboardKeysPage(view: SourceDashboardViewModel, options?: DashboardPageOptions): string {
+  const home = options?.basePath ?? '/dashboard';
+  const token = readToken(options?.basePath);
+  const mode = options?.answerMode;
+  const body = [
+    dashboardControlGate({ connected: unlocked(options) }),
+    dashboardPrivacyTabs('settings', token),
+    `<section id="whats-private"><h3 class="sect">${escapeHtml(S.whatsPrivate)}</h3><p class="pnote">${escapeHtml(S.intro)}</p>`
+      + `<div class="srow nodot"><div class="smain"><b>${escapeHtml(S.wordsTitle)}</b><p class="pnote">${escapeHtml(S.wordsLine)}</p></div><div class="sact"><a class="btn" href="${escapeHtml(home)}">${escapeHtml(S.wordsOpen)}</a></div></div></section>`,
+    `<section id="private-routing"><h3 class="sect">${escapeHtml(S.answeredTitle)}</h3><p class="pnote">${escapeHtml(S.answeredIntro)}</p>`
+      + (mode ? `<div class="srow nodot" data-answer-mode="${escapeHtml(mode.id)}"><div class="smain"><b>${escapeHtml(mode.label)}</b>${mode.id === 'local-first' ? ` <span class="pnote">· ${escapeHtml(S.recommended)}</span>` : ''}</div><div class="sact"><a class="btn" href="${escapeHtml(home)}">${escapeHtml(S.change)}</a></div></div>` : '')
+      + renderModelSetupBlocker(view.model_setup)
+      + `<div${view.model_setup?.cards.some(card => card.id === 'venice') ? ' id="venice-setup"' : ''}>${renderModelSetup(view.model_setup, { heading: false })}</div></section>`,
+    view.model_setup?.cards.some(card => card.id === 'venice') ? '' : `<section id="venice-setup"><h3 class="sect">${escapeHtml(DASHBOARD_PRIVATE_ANSWERS_COPY.setUpVenice)}</h3><p class="pnote">${escapeHtml(DASHBOARD_PRIVATE_ANSWERS_COPY.veniceSetupHelp)}</p><div class="modelaction"><form method="post" action="/dashboard/connect/api-key" data-connect-kind="api_key" data-model-provider="venice"><input type="hidden" name="source" value="venice"><input class="keyfield" type="password" name="api_key" required autocomplete="new-password" placeholder="${escapeHtml(DASHBOARD_PRIVATE_ANSWERS_COPY.veniceKey)}" aria-label="${escapeHtml(DASHBOARD_PRIVATE_ANSWERS_COPY.veniceKey)}"><button type="submit" class="btn primary">${escapeHtml(DASHBOARD_PRIVATE_ANSWERS_COPY.connectVenice)}</button><span data-action-message role="status"></span></form></div></section>`,
+    renderJudgeChoice(view, options),
+  ].filter((block) => block !== '').join('\n');
+  return localShell({
+    crumb: DASHBOARD_PRIVATE_ANSWERS_COPY.crumb,
+    meta: dashboardCheckedLabel(view.generated_at, options?.now ?? new Date()),
+    body,
+    styles: [MODEL_SETUP_CSS, PRIVACY_TABS_CSS],
+    options,
+  });
+}
+
+/** Connect a source (`?connect`): the setup sheets for the sources that connect on this computer, where Connect lands. */
+export function renderDashboardConnectPage(view: SourceDashboardViewModel, options?: DashboardPageOptions): string {
   const blocked = view.model_setup !== undefined && !view.model_setup.ready;
   const sources = view.sources.filter((source) => source.connection.action.kind !== 'none' || source.source_id === 'telegram.messages' || source.source_id === 'whatsapp.personal.messages');
   const body = [
     dashboardControlGate({ connected: unlocked(options) }),
     renderModelSetupBlocker(view.model_setup),
-    renderJudgeChoice(view, options),
-    `<div id="private-routing"><div${view.model_setup?.cards.some(card => card.id === 'venice') ? ' id="venice-setup"' : ''}>${renderModelSetup(view.model_setup)}</div></div>`,
-    view.model_setup?.cards.some(card => card.id === 'venice') ? '' : `<section id="venice-setup"><h3 class="sect">${escapeHtml(DASHBOARD_PRIVATE_ANSWERS_COPY.setUpVenice)}</h3><p class="pnote">${escapeHtml(DASHBOARD_PRIVATE_ANSWERS_COPY.veniceSetupHelp)}</p><div class="modelaction"><form method="post" action="/dashboard/connect/api-key" data-connect-kind="api_key" data-model-provider="venice"><input type="hidden" name="source" value="venice"><input class="keyfield" type="password" name="api_key" required autocomplete="new-password" placeholder="${escapeHtml(DASHBOARD_PRIVATE_ANSWERS_COPY.veniceKey)}" aria-label="${escapeHtml(DASHBOARD_PRIVATE_ANSWERS_COPY.veniceKey)}"><button type="submit" class="btn primary">${escapeHtml(DASHBOARD_PRIVATE_ANSWERS_COPY.connectVenice)}</button><span data-action-message role="status"></span></form></div></section>`,
-    `<section id="anonymous"><h3 class="sect">${escapeHtml(DASHBOARD_PRIVATE_ANSWERS_COPY.anonymousTitle)}</h3>${options?.outsideHelp ? renderOutsideHelpCard(options.outsideHelp, { ...(options.controlSessionCsrfToken !== undefined ? { csrfToken: options.controlSessionCsrfToken } : {}), localSession: options.outsideHelpLocalSession === true, untitled: true }) : `<p data-outside-unavailable>${escapeHtml(DASHBOARD_PRIVATE_ANSWERS_COPY.anonymousNotSetUp)}</p>`}</section>`,
-    sources.length === 0 ? '' : '<div class="sect" id="sources">Sources</div>',
     sources.length === 0
-      ? ''
-      : `<div class="srows">${sources.map((source) => renderSetupRow(source, view, blocked, options?.basePath ?? '/dashboard', options?.messagingLocalSession === true) + sourceSupportBlock(source)).join('\n')}</div>`,
+      ? `<p class="pnote">${escapeHtml(W.connect.empty)}</p>`
+      : `<div class="srows" id="sources">${sources.map((source) => renderSetupRow(source, view, blocked, options?.basePath ?? '/dashboard', options?.messagingLocalSession === true) + sourceSupportBlock(source)).join('\n')}</div>`,
   ].filter((block) => block !== '').join('\n');
   return localShell({
-    crumb: W.keys.title,
+    crumb: W.connect.title,
     meta: dashboardCheckedLabel(view.generated_at, options?.now ?? new Date()),
     body,
-    styles: [MODEL_SETUP_CSS, DASHBOARD_OUTSIDE_HELP_CSS],
+    styles: [MODEL_SETUP_CSS],
     options,
   });
+}
+
+/** The read-only token a dash_ reader's basePath carries, so the tabs keep it. */
+function readToken(basePath: string | undefined): string | undefined {
+  if (!basePath) return undefined;
+  const query = basePath.indexOf('?');
+  if (query < 0) return undefined;
+  return new URLSearchParams(basePath.slice(query + 1)).get('token') ?? undefined;
 }
 
 /** Agents: remote access and the agents connected to Olympus. */
@@ -401,18 +438,47 @@ export function renderJudgeChoice(view: SourceDashboardViewModel, options?: Dash
     : status.stop === 'payment'
     ? '<p role="alert">Venice stopped because your account needs credit (HTTP 402). <a href="https://venice.ai/settings/api" target="_blank" rel="noopener noreferrer">Check your Venice credit or account</a>, then approve cloud judging again below. Your remaining items stay Private and use the free local judge when available.</p>'
     : status.stop === 'cap' ? '<p role="status">Cloud judging reached your spending limit. Remaining items stay Private and use the free local judge when available. Raise the total limit below to continue with Venice.</p>' : '';
-  return `<section id="privacy-judge"><h3 class="sect">Sort your archive by privacy</h3>
-    <p>Estimates for ${items.toLocaleString('en-US')} items found so far in your connected sources. Counts grow as Olympus reads more. Long documents take longer and cost more.</p>
-    <p>Recommended: ${estimate.recommended === 'venice' ? 'Venice for this archive size, if you choose to send it to the cloud' : 'the free judge on this computer'}. Cloud stays off until you choose and approve it.</p>
-    <form data-judge-choice><fieldset${unlocked(options) ? '' : ' disabled'}><legend>Choose where privacy sorting happens</legend>
-    <label><input type="radio" name="choice" value="local"${status.choice === 'local' ? ' checked' : ''}> This computer — free ($0), about ${hours(estimate.shortHours)}–${hours(estimate.longHours)} hours, or ${hours(estimate.shortHours / 8)}–${hours(estimate.longHours / 8)} nights of 8 hours (estimate).</label>
-    <p>With this choice, nothing is sent to a cloud judge. Based on an ${LOCAL_JUDGE_MEASUREMENT.computer} with a ${LOCAL_JUDGE_MEASUREMENT.model}: ${LOCAL_JUDGE_MEASUREMENT.shortPerMinute} short or ${LOCAL_JUDGE_MEASUREMENT.longPerMinute} long items a minute, measured ${LOCAL_JUDGE_MEASUREMENT.date}. Your computer may differ. This estimate does not schedule overnight work.</p>
-    <label><input type="radio" name="choice" value="venice"${status.choice === 'venice' ? ' checked' : ''}${cloud ? '' : ' disabled'}> Venice${status.cloudModel ? ' (' + escapeHtml(status.cloudModel) + ')' : ''} — ${estimate.cloudDollars === null ? 'cost unavailable' : 'about ' + money(estimate.cloudDollars)}, about ${hours(estimate.cloudHours)} hours continuously (estimate).</label>
-    <p>The cloud judge reads every item before it is sorted, including items it marks Private. An end-to-end encrypted option is not available yet. You use your own Venice account and API key; you pay Venice. Olympus pays for nothing.</p>
-    <p>Cloud estimates assume 800 input and 80 output tokens per item, one call per item, and about ${VENICE_JUDGE_ESTIMATE.itemsPerMinute} items a minute (${VENICE_JUDGE_ESTIMATE.date}). Your account limits, document length and additional privacy checks can change the time and cost. Listed prices checked ${JUDGE_PRICE_DATE}.</p>
-    ${cloud || status.stop === 'storage' ? '' : '<p>Set up an allowed Venice model in Private answers first. A listed price is required. Add your own key in the Venice section below.</p>'}
-    <label>Total cloud spending limit (US dollars) <input type="number" name="cap_dollars" min="0" step="0.01" value="${status.uncapped ? '' : status.capDollars}"></label>
-    <p>${status.uncapped ? 'No spending limit is set, so Olympus isn\'t tracking cloud spending yet. Your Venice account shows what you\'ve spent.' : `${status.stop === 'storage' ? 'Spending amounts are unavailable.' : `Spent or reserved: ${money(status.spentDollars)}. Remaining: ${money(status.remainingDollars)}.`} This total survives restarts. Olympus reserves an estimated maximum before each call; uncertain calls keep that reservation. A call that will not fit stops cloud judging. Newest items are checked first; remaining items stay Private and continue with the free local judge when available. Your Venice bill may differ from these estimates.`}</p>
-    ${status.upgradeNote ? '<p role="status">You can now set a spending limit for cloud judging. Venice keeps sorting your items as you approved, with no limit, until you set one.</p>' : ''}${stopped}<button class="btn primary" type="submit">Save and approve this choice</button><span data-action-message role="status"></span>
+  const nights = `${hours(estimate.shortHours / 8)} to ${hours(estimate.longHours / 8)} nights`;
+  const venicePrice = estimate.cloudDollars === null ? 'Cost unavailable' : `About ${money(estimate.cloudDollars)}`;
+  const row = (term: string, value: string) => `<span class="judgeterm">${escapeHtml(term)}</span><span>${value}</span>`;
+  // Each way to sort is one card; clicking the other card opens a
+  // confirmation under the cards (pure CSS on the checked radio), and
+  // Cancel resets the form to the choice in use.
+  const option = (id: 'local' | 'venice', title: string, lead: string, rows: string, fit: string, enabled: boolean) =>
+    `<label class="judgeopt"><span class="judgehead"><input type="radio" name="choice" value="${id}"${status.choice === id ? ' checked' : ''}${enabled ? '' : ' disabled'}> <b>${escapeHtml(title)}</b>${status.choice === id ? ` <span class="judgenow">${escapeHtml(S.judgeNow)}</span>` : ''}</span>`
+    + `<span class="judgelead">${lead}</span><span class="judgerows">${rows}</span><span class="judgefit">${fit}</span></label>`;
+  const local = option('local', S.judgeLocal, escapeHtml(S.judgeLocalLead),
+    row(S.judgeCost, 'Free')
+    + row(S.judgeTime, `About ${nights} of 8 hours (${hours(estimate.shortHours)} to ${hours(estimate.longHours)} hours)`)
+    + row(S.judgeWhen, escapeHtml(S.judgeLocalWhen)),
+    escapeHtml(S.judgeLocalFit), true);
+  const venice = option('venice', S.judgeVenice, 'Venice reads every item to sort it, including items it marks Private.',
+    row(S.judgeCost, `${venicePrice}, on your own Venice account`)
+    + row(S.judgeTime, `About ${hours(estimate.cloudHours)} hours`)
+    + row(S.judgeWhen, escapeHtml(S.judgeVeniceWhen))
+    + (status.cloudModel ? row(S.judgeModel, escapeHtml(status.cloudModel)) : ''),
+    escapeHtml(S.judgeVeniceFit), cloud);
+  const spent = status.uncapped
+    ? 'No spending limit is set, so Olympus isn\'t tracking cloud spending yet. Your Venice account shows what you\'ve spent.'
+    : `${status.stop === 'storage' ? 'Spending amounts are unavailable.' : `Spent or reserved: ${money(status.spentDollars)}. Remaining: ${money(status.remainingDollars)}.`} Olympus stops before going past this limit. Items not yet sorted then stay Private and wait for this computer.`;
+  const cap = `<label class="judgecap">${escapeHtml(S.judgeCap)} <input type="number" name="cap_dollars" min="0" step="0.01" value="${status.uncapped ? '' : status.capDollars}"></label><p class="pnote">${spent}</p>`;
+  const reply = '<span data-action-message role="status"></span>';
+  const dialog = (pick: 'local' | 'venice', title: string, body: string, button: string) =>
+    `<dialog class="judgedialog" data-judge-dialog="${pick}" aria-labelledby="judge-dialog-${pick}"><h3 id="judge-dialog-${pick}">${escapeHtml(title)}</h3>${body}`
+    + `<div class="judgedialogbar"><button class="btn" type="button" data-judge-cancel>${escapeHtml(S.judgeCancel)}</button><button class="btn primary" type="submit">${escapeHtml(button)}</button></div></dialog>`;
+  const confirm = status.choice === 'venice'
+    ? dialog('local', S.judgeToLocal, `<p>${escapeHtml(S.judgeToLocalLine)}</p>`, S.judgeToLocalButton)
+      + `<div class="judgekeep">${cap}<button class="btn" type="submit">${escapeHtml(S.judgeSaveLimit)}</button></div>`
+    : dialog('venice', S.judgeToVenice, `<p>Venice will read each item it sorts, including items it marks Private, and charge your Venice account${estimate.cloudDollars === null ? '' : `: about ${money(estimate.cloudDollars)} for the ${items.toLocaleString('en-US')} items found so far`}.</p>${cap}`, S.judgeToVeniceButton);
+  return `<section id="privacy-judge"><h3 class="sect">${escapeHtml(S.judgeTitle)}</h3><p class="pnote">${escapeHtml(S.judgeIntro)}</p>
+    <form data-judge-choice data-judge-current="${status.choice}"><fieldset${unlocked(options) ? '' : ' disabled'}><legend class="judgelegend">${escapeHtml(S.judgeLegend)}</legend>
+    ${status.upgradeNote ? '<p role="status">You can now set a spending limit for cloud judging. Venice keeps sorting your items as you approved, with no limit, until you set one.</p>' : ''}${stopped}
+    <div class="judgeopts">${local}${venice}</div>
+    ${cloud || status.stop === 'storage' ? '' : '<p class="pnote">To use Venice, connect your Venice key under How Private items are answered. Venice needs a model with a listed price.</p>'}
+    ${confirm}${reply}
+    <p class="pnote">Estimates for the ${items.toLocaleString('en-US')} items found so far. Recommended: ${estimate.recommended === 'venice' ? 'Venice for this archive size, if you choose to send it to the cloud' : 'the free judge on this computer'}. Cloud stays off until you choose and approve it.</p>
+    <details class="judgehow"><summary>How these estimates are made</summary>
+    <p>Counts grow as Olympus reads more, and long documents take longer and cost more. This computer: measured on an ${LOCAL_JUDGE_MEASUREMENT.computer} with a ${LOCAL_JUDGE_MEASUREMENT.model}, ${LOCAL_JUDGE_MEASUREMENT.shortPerMinute} short or ${LOCAL_JUDGE_MEASUREMENT.longPerMinute} long items a minute (${LOCAL_JUDGE_MEASUREMENT.date}); yours may differ. Venice: 800 input and 80 output tokens per item, one call per item, about ${VENICE_JUDGE_ESTIMATE.itemsPerMinute} items a minute (${VENICE_JUDGE_ESTIMATE.date}); listed prices checked ${JUDGE_PRICE_DATE}. Your account limits and extra privacy checks can change both. Olympus reserves an estimated maximum before each Venice call, and your Venice bill may differ from these estimates.</p>
+    <p>Venice uses your own account and API key, and you pay Venice; Olympus pays for nothing. An end-to-end encrypted option is not available yet.</p></details>
     </fieldset></form></section>`;
 }

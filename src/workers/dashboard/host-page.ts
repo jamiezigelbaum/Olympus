@@ -46,6 +46,7 @@ import {
   DASHBOARD_OPEN_FRAGMENT_KEY,
   OPEN_PAGE_BASE_URL,
   allOpenTargets,
+  isConnectOpenTarget,
   isKeysOpenTarget,
   isPanelOpenTarget,
   olympusOpenUrl,
@@ -65,6 +66,7 @@ export const DASHBOARD_ARCHIVE_UPLOAD_FILE_PATH = '/dashboard/archive-import/upl
 /** The local pages the computer offers, each a query on /dashboard (the dash_ token is allowlisted by pathname). */
 export const DASHBOARD_LOCAL_PAGES = {
   keys: 'keys',
+  connect: 'connect',
   agents: 'agents',
   privateAnswers: 'private-answers',
   connector: 'connector',
@@ -87,7 +89,7 @@ export function dashboardHomeHref(token?: string): string {
 /**
  * What an olympusplugin.ai/open/<path>/ link means on the computer: Connect
  * for X, Readwise, Telegram, WhatsApp or Evernote opens that source's setup sheet on
- * Keys; a models fix opens Models there; See why on a source (unreadable/<id>)
+ * Connect a source; a models fix opens Privacy settings (?keys); See why on a source (unreadable/<id>)
  * opens this dashboard landed on it; the dashboard is the dashboard. The
  * ChatGPT-connection fixes (connect, reconnect) keep their help page.
  */
@@ -97,7 +99,9 @@ export function computerOpenTargets(origin: string, token?: string): Record<stri
     const path = openTargetPath(target);
     if (target.kind === 'dashboard') out[path] = `${origin}${dashboardHomeHref(token)}`;
     else if (target.kind === 'private_answers') out[path] = `${origin}${dashboardLocalPageHref('privateAnswers', token)}${target.answerId ? '#' + target.answerId : ''}`;
-    else if (isKeysOpenTarget(target)) {
+    else if (isConnectOpenTarget(target)) {
+      out[path] = `${origin}${dashboardLocalPageHref('connect', token)}#${DASHBOARD_OPEN_FRAGMENT_KEY}=${openTargetToken(target)}`;
+    } else if (isKeysOpenTarget(target)) {
       out[path] = `${origin}${dashboardLocalPageHref('keys', token)}#${DASHBOARD_OPEN_FRAGMENT_KEY}=${openTargetToken(target)}`;
     } else if (isPanelOpenTarget(target)) {
       out[path] = `${origin}${dashboardHomeHref(token)}#${DASHBOARD_OPEN_FRAGMENT_KEY}=${openTargetToken(target)}`;

@@ -40597,9 +40597,9 @@ var init_vocabulary = __esm(() => {
     open: "Open",
     rows: {
       help: { title: "Help", line: "Copy a system report or contact support" },
-      keys: { title: "Keys", line: "Venice, Readwise and X keys" },
       agents: { title: "Agents", line: "Remote access and connected agents" },
-      privateAnswers: { title: "Inbox", line: "Answers from every model, kept on this computer." },
+      connect: { title: "Connect a source", line: "Setup for sources that connect on this computer", empty: "Every source that connects on this computer is set up." },
+      privateAnswers: { title: "Privacy", line: "Ask privately, your private inbox, and how Private items are answered" },
       connector: { title: "Build a connector", line: "For a source Olympus does not have yet" }
     },
     waiting: { one: "1 unread private answer", many: "{count} unread private answers" },
@@ -42859,12 +42859,21 @@ function openTargetTokenPattern() {
   const tokens = allOpenTargets().map(openTargetToken).filter((token) => token !== undefined);
   return `^(?:page\\.private\\.[A-Za-z0-9_-]{22}|${tokens.map((token) => token.replace(".", "\\.")).join("|")})$`;
 }
+function isConnectOpenTarget(target) {
+  return target.kind === "connect";
+}
 function isKeysOpenTarget(target) {
-  return target.kind === "connect" || target.kind === "fix" && (target.section === "models" || target.section === "answers" || target.section === "search");
+  return target.kind === "fix" && (target.section === "models" || target.section === "answers" || target.section === "search");
+}
+function tokenPattern(filter) {
+  const tokens = allOpenTargets().filter(filter).map(openTargetToken).filter((token) => token !== undefined);
+  return `^(?:${tokens.map((token) => token.replace(".", "\\.")).join("|")})$`;
 }
 function keysOpenTargetTokenPattern() {
-  const tokens = allOpenTargets().filter(isKeysOpenTarget).map(openTargetToken).filter((token) => token !== undefined);
-  return `^(?:${tokens.map((token) => token.replace(".", "\\.")).join("|")})$`;
+  return tokenPattern(isKeysOpenTarget);
+}
+function connectOpenTargetTokenPattern() {
+  return tokenPattern(isConnectOpenTarget);
 }
 function privateAnswersOpenTargetTokenPattern() {
   return "^page\\.private(?:\\.[A-Za-z0-9_-]{22})?$";
@@ -42990,6 +42999,7 @@ var init_dashboard_launch = __esm(() => {
         var KEY = '${DASHBOARD_LAUNCH_TICKET_FRAGMENT_KEY}';
         var OPEN = /${openTargetTokenPattern()}/;
         var KEYS = /${keysOpenTargetTokenPattern()}/;
+        var CONNECT = /${connectOpenTargetTokenPattern()}/;
         var PANEL = /${panelOpenTargetTokenPattern()}/;
         var PRIVATE = /${privateAnswersOpenTargetTokenPattern()}/;
         var status = document.getElementById('status');
@@ -43021,13 +43031,15 @@ var init_dashboard_launch = __esm(() => {
           // lands on the dashboard: the session it opened is in its cookie,
           // and without one the dashboard itself offers the way back in.
           if (response.ok || response.status === 403) {
-            // A Keys target (Connect, a model fix) lands on Keys, where the computer's setup
-            // sheets and Models live; it only opens a panel there, never submits anything.
+            // Connect lands on Connect a source, where the computer's setup sheets live; a
+            // model fix lands on Privacy settings (?keys), where the models live. Each only
+            // opens something there, never submits anything.
             // A panel target (See why on one source) lands on the dashboard there.
             // Private answers lands on that page, carrying nothing.
             // Everything else (a reconnect, the dashboard itself) lands on the dashboard.
-            window.location.replace(KEYS.test(open)
-              ? '/dashboard?keys#${DASHBOARD_OPEN_FRAGMENT_KEY}=' + open
+            window.location.replace(CONNECT.test(open)
+              ? '/dashboard?connect#${DASHBOARD_OPEN_FRAGMENT_KEY}=' + open
+              : KEYS.test(open) ? '/dashboard?keys#${DASHBOARD_OPEN_FRAGMENT_KEY}=' + open
               : PANEL.test(open) ? '/dashboard#${DASHBOARD_OPEN_FRAGMENT_KEY}=' + open
               : PRIVATE.test(open) ? '/dashboard?private-answers' + (open.indexOf('page.private.') === 0 ? '#' + open.slice(13) : '') : '/dashboard');
             return;
@@ -45660,7 +45672,7 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     if (!onComputer())
       return null;
     const W = H.copy;
-    const keys = ["keys", "agents", "privateAnswers", "connector", "help"].filter((key2) => !!state.hostLinks[key2]);
+    const keys = ["privateAnswers", "agents", "connector", "help"].filter((key2) => !!state.hostLinks[key2]);
     if (!keys.length)
       return null;
     const heading = add(el("h2"), doc.createTextNode(W.section + " "), el("span", "tag", W.onlyHere));
@@ -68107,6 +68119,8 @@ init_apple_vision_ocr();
 init_source_failure();
 init_google_own_app();
 init_sovereignty();
+init_first_run_privacy();
+init_privacy_language();
 
 // src/workers/email-source/dashboard-messaging-service.ts
 init_atomic_file();
@@ -68805,6 +68819,8 @@ var CODEX_SNIPPET = [
 
 // src/workers/dashboard/pages/local.ts
 init_vocabulary();
+// src/workers/dashboard/pages/private-answers.ts
+init_vocabulary();
 
 // src/workers/dashboard/model-setup.ts
 init_vocabulary();
@@ -68821,8 +68837,6 @@ var CONNECTOR_PROMPT = [
 ].join(`
 `);
 var W = DASHBOARD_COMPUTER_PANEL_COPY.rows;
-// src/workers/dashboard/pages/private-answers.ts
-init_vocabulary();
 
 // src/workers/dashboard/index.ts
 init_vocabulary();

@@ -539,7 +539,7 @@ const UNPAIR_TELEGRAM = {
 const C = DASHBOARD_COMPUTER_PANEL_COPY;
 
 describe('the panel on the computer', () => {
-  test('asks for the dashboard itself and ends with On this computer: Keys, Agents, Outside help, Build a connector', async () => {
+  test('asks for the dashboard itself and ends with On this computer: Privacy, Agents, Build a connector', async () => {
     const page = await onHost(COMPUTER, model({ computerControls: { href: `${OPEN_BASE}dashboard/` } }), { indexFaster: { on: false } });
     const asked = page.sent.filter((message) => message.method === 'tools/call').map((message) => message.params.name);
     expect(asked).toEqual([DASHBOARD_TOOL_NAME]);
@@ -547,7 +547,7 @@ describe('the panel on the computer', () => {
     expect(section).not.toBeNull();
     expect(section.querySelector('h2')!.textContent).toBe(`${C.section} ${C.onlyHere}`);
     const titles = Array.from(section.querySelectorAll('li.row .row-text p:first-child')).map((node) => node.textContent);
-    expect(titles).toEqual([C.rows.keys.title, C.rows.agents.title, C.rows.privateAnswers.title, C.rows.connector.title]);
+    expect(titles).toEqual([C.rows.privateAnswers.title, C.rows.agents.title, C.rows.connector.title]);
     // It is the last section on the page.
     const sections = Array.from(page.win.document.querySelectorAll('#app section'));
     expect(sections[sections.length - 1]).toBe(section);
@@ -1023,7 +1023,7 @@ describe('Connect on a messaging card pairs in place', () => {
     expect(labels).toContain('Check connection');
   });
 
-  test('Telegram opens its own walkthrough in place; other Connect links still go to Keys', async () => {
+  test('Telegram opens its own walkthrough in place; other Connect links go to Connect a source', async () => {
     const page = pairingPage(true);
     page.send({ id: 1, method: 'ui/open-link', params: { url: `${OPEN_BASE}connect/telegram/` } });
     await settle();
@@ -1036,7 +1036,7 @@ describe('Connect on a messaging card pairs in place', () => {
     page.dialog.close();
     page.send({ id: 2, method: 'ui/open-link', params: { url: `${OPEN_BASE}connect/x/` } });
     await settle();
-    expect(page.assigned).toEqual(['/dashboard?keys#olympus-open=connect.x']);
+    expect(page.assigned).toEqual(['/dashboard?connect#olympus-open=connect.x']);
   });
 });
 
