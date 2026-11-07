@@ -87,6 +87,20 @@ describe('Venice: Always the strongest', () => {
   });
 });
 
+test('a pin made while the strongest lookup runs is kept', async () => {
+  const p = policy();
+  let release = (_: string) => {};
+  let slow = false;
+  const { made } = backend(p, { venice: { strongest: async () => slow ? new Promise<string>(resolve => { release = resolve; }) : 'kimi-k4', catalog: async () => ({ 'kimi-k3': 'private', 'kimi-k4': 'private' }) } });
+  await made.save('venice', 'strongest');
+  slow = true;
+  const pending = made.refreshStrongest();
+  await made.save('venice', 'kimi-k3');
+  release('kimi-k5');
+  expect(await pending).toBe(false);
+  expect(p.config().modelProfiles[VENICE_PROFILE_ID]).toMatchObject({ model: 'kimi-k3' });
+});
+
 describe('local models', () => {
   test('lists the built-in sizes this computer can run and saves the size', async () => {
     const p = policy();

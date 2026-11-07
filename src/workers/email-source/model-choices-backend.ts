@@ -199,7 +199,9 @@ export function createModelChoicesBackend(options: ModelChoicesBackendOptions): 
       let changed = false;
       if (state.venice === 'strongest' && options.venice && profileModel(VENICE_PROFILE_ID)) {
         const strongest = await options.venice.strongest().catch(() => undefined);
-        if (strongest && strongest !== profileModel(VENICE_PROFILE_ID)) changed = writeProfileModel(VENICE_PROFILE_ID, strongest) || changed;
+        // The owner may have pinned a model while the lookup ran: then it stays.
+        const still = readModelChoices(options.policyPath).venice === 'strongest';
+        if (still && strongest && strongest !== profileModel(VENICE_PROFILE_ID)) changed = writeProfileModel(VENICE_PROFILE_ID, strongest) || changed;
       }
       if (changed) options.requestReload();
       return changed;

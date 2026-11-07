@@ -172547,7 +172547,8 @@ function createModelChoicesBackend(options) {
         const strongest = await options.venice.strongest().catch(() => {
           return;
         });
-        if (strongest && strongest !== profileModel(VENICE_PROFILE_ID))
+        const still = readModelChoices(options.policyPath).venice === "strongest";
+        if (still && strongest && strongest !== profileModel(VENICE_PROFILE_ID))
           changed = writeProfileModel(VENICE_PROFILE_ID, strongest) || changed;
       }
       if (changed)
