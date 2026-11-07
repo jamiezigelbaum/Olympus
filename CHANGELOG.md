@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.3.5 - 2026-11-07
+
+- **Big imports no longer freeze Olympus.** Store status counts, large secret scans, backlog estimates, readiness snapshots and owner overrides now run in turns or on a second thread, so the dashboard and your apps keep answering while a large source imports (#874, #885, #889, #895, #899, #900, #901, #902, #903, #904, #905, #906, #909, #910, #941).
+- **Privacy judging keeps up and is fairer.** Store scans no longer starve the privacy judge (#941). Short ordinary text you wrote is settled before the judge (#931). A re-judge no longer re-asks an item a verdict just settled, which had flipped fresh Telegram messages Private (#956). Re-judging stored items runs in turns (#907). A link to a shared document with nothing else is filed Private (#947).
+- **Cloud privacy judging with a hard spending limit.** You can choose Venice to judge a large archive, with a cap you set (#933), and judge runs are paced (#882).
+- **Embedding stays private.** Embeddings run on your computer, or through Venice if you choose it, and items waiting for a privacy decision are embedded before they are judged (#945). Each embedding pass is bounded by time (#917, #918), and the built-in embedding helper can run on another of your computers under the same identity (#924).
+- You can mark which Private items matter most, and an importance pass can correct a Private label to Personal (#878, #879).
+- The dashboard's unreadable-files list stops at its first page (#910). Details for support no longer appear on a row that is just making progress (#949). Saving the privacy-judge choice on the Keys page says it saved (#952). An archive import keeps the read error behind an unreadable-file stop (#955). The label page stops at once when labels can't save (#912).
+- **ChatGPT store listing.** The directory endpoint now carries today's dashboard, Delete indexed data and the privacy follow-up questions, for the next listing update (#962).
+
 ## 1.3.4 - 2026-11-05
 
 - **The dashboard stays available on a busy, large install.** Building status, counting unreadable files and rebuilding a store's hidden copies no longer hold the engine for seconds at a time, so reads keep answering while big sources import (#797, #798, #804, #805, #808, #809, #811, #813, #817, #830, #834, #838, #839, #858, #859, #860). Long requests between Olympus's own parts no longer drop after 10 seconds (#857).
