@@ -2704,8 +2704,11 @@ export async function main(): Promise<void> {
   const modelChoices = createModelChoicesBackend({
     ...(sovereigntyEngine.source === 'file' && sovereigntyEngine.path ? { policyPath: sovereigntyEngine.path } : {}),
     config: () => sovereigntyEngine.config,
-    builtInAnswers: () => workerBuiltInModel !== undefined && modelSetup.getStatus().cards.some(card => card.id === 'local')
-      && (() => { try { const members = sovereigntyEngine.resolveAnalystPool({ trustDomain: 'secure_local' }).members; return builtInBacksPrivateAnalyst(LOCAL_PROFILE_ID, workerBuiltInModel?.model.status().state, members, new Set(members.map(member => member.id))); } catch { return false; } })(),
+    // The owner's model server is tried first and the built-in model only
+    // covers for it when it is down (withBuiltInFallback), so ask the server.
+    builtInAnswers: async () => workerBuiltInModel !== undefined && modelSetup.getStatus().cards.some(card => card.id === 'local')
+      && (() => { try { const members = sovereigntyEngine.resolveAnalystPool({ trustDomain: 'secure_local' }).members; return builtInBacksPrivateAnalyst(LOCAL_PROFILE_ID, workerBuiltInModel?.model.status().state, members, new Set(members.map(member => member.id))); } catch { return false; } })()
+      && !await probeLocalAnalystService(olympusConfig),
     builtInSize: () => workerBuiltInModel?.model.spec.sizeClass,
     totalMemoryBytes: totalmem(),
     // zkAPI questions use the consult settings' model (consult.json), which
@@ -7341,8 +7344,10 @@ export async function main(): Promise<void> {
     exit: (code) => process.exit(code),
   });
   modelReloadInstalled = true;
-  // After the reload handler, so a newer strongest model found at boot is applied.
+  // After the reload handler, so a newer strongest model found at boot is
+  // applied; then daily, so a long-running worker follows new releases too.
   void modelChoices.refreshStrongest().catch(() => false);
+  setInterval(() => { void modelChoices.refreshStrongest().catch(() => false); }, 24 * 60 * 60 * 1000).unref();
 
   console.log(socketPath ? `Olympus private email source worker listening on owner Unix socket` : `Olympus private email source worker listening on http://${hostname}:${port}/v1`);
   console.log(sourceIndexLaneStartupLog('Dropbox connector-store storage', dropboxConnectorStoreLane));

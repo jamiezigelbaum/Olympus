@@ -30,8 +30,11 @@ export interface ModelChoicesBackendOptions {
   /** The writable policy file; absent: nothing can be saved. */
   policyPath?: string;
   config: () => SovereigntyConfig;
-  /** Whether the built-in model answers (instead of a model server the owner runs). */
-  builtInAnswers: () => boolean;
+  /**
+   * Whether the built-in model answers now: it backs the local profile and
+   * the owner's model server, which is tried first, is not answering.
+   */
+  builtInAnswers: () => boolean | Promise<boolean>;
   /** The built-in model this worker runs now, by size; absent: none. */
   builtInSize: () => BuiltInSize | undefined;
   totalMemoryBytes: number;
@@ -89,9 +92,9 @@ export function createModelChoicesBackend(options: ModelChoicesBackendOptions): 
   });
   const sizeName = (size: BuiltInSize): string => BUILT_IN_REASONING_MODELS.find(model => model.sizeClass === size)?.displayName ?? size;
 
-  const localList = (): ModelChoiceList | undefined => {
+  const localList = async (): Promise<ModelChoiceList | undefined> => {
     const external = profileModel(LOCAL_PROFILE_ID);
-    if (!options.builtInAnswers()) {
+    if (!await options.builtInAnswers()) {
       // A model server the owner runs answers: it is the one option, and Add a model replaces it.
       return external ? { provider: 'local', current: external, options: [{ value: external, label: external, note: 'on a model server you run' }] } : undefined;
     }
@@ -143,8 +146,7 @@ export function createModelChoicesBackend(options: ModelChoicesBackendOptions): 
 
   return {
     async status() {
-      const [venice] = await Promise.all([veniceList()]);
-      const local = localList();
+      const [venice, local] = await Promise.all([veniceList(), localList()]);
       const zkapi = zkapiList();
       return { ...(local ? { local } : {}), ...(venice ? { venice } : {}), ...(zkapi ? { zkapi } : {}) };
     },
@@ -163,7 +165,7 @@ export function createModelChoicesBackend(options: ModelChoicesBackendOptions): 
       if (provider === 'local') {
         const size = value.startsWith('builtin:') ? value.slice('builtin:'.length) as BuiltInSize : undefined;
         if (!size || !fittingSizes().includes(size)) return { ok: false, message: 'Choose one of the models listed.' };
-        if (!options.builtInAnswers()) return { ok: false, message: 'A model server you run answers now. Use Add a model to change it.' };
+        if (!await options.builtInAnswers()) return { ok: false, message: 'A model server you run answers now. Use Add a model to change it.' };
         if (options.builtInSize() === size) return { ok: true, status_message: 'That model is already in use.' };
         writeModelChoices(options.policyPath, { builtIn: size });
         return applied(`Saved. Olympus is getting ${sizeName(size)} ready; it answers once it has downloaded and checked it.`);

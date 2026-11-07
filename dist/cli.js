@@ -172312,9 +172312,9 @@ function createModelChoicesBackend(options) {
     return spec !== undefined && options.totalMemoryBytes >= spec.minimumMemoryBytes;
   });
   const sizeName = (size) => BUILT_IN_REASONING_MODELS.find((model) => model.sizeClass === size)?.displayName ?? size;
-  const localList = () => {
+  const localList = async () => {
     const external3 = profileModel(LOCAL_PROFILE_ID);
-    if (!options.builtInAnswers()) {
+    if (!await options.builtInAnswers()) {
       return external3 ? { provider: "local", current: external3, options: [{ value: external3, label: external3, note: "on a model server you run" }] } : undefined;
     }
     const current2 = options.builtInSize();
@@ -172366,8 +172366,7 @@ function createModelChoicesBackend(options) {
   };
   return {
     async status() {
-      const [venice] = await Promise.all([veniceList()]);
-      const local = localList();
+      const [venice, local] = await Promise.all([veniceList(), localList()]);
       const zkapi = zkapiList();
       return { ...local ? { local } : {}, ...venice ? { venice } : {}, ...zkapi ? { zkapi } : {} };
     },
@@ -172389,7 +172388,7 @@ function createModelChoicesBackend(options) {
         const size = value2.startsWith("builtin:") ? value2.slice("builtin:".length) : undefined;
         if (!size || !fittingSizes().includes(size))
           return { ok: false, message: "Choose one of the models listed." };
-        if (!options.builtInAnswers())
+        if (!await options.builtInAnswers())
           return { ok: false, message: "A model server you run answers now. Use Add a model to change it." };
         if (options.builtInSize() === size)
           return { ok: true, status_message: "That model is already in use." };
@@ -217821,14 +217820,14 @@ async function main() {
   const modelChoices = createModelChoicesBackend({
     ...sovereigntyEngine.source === "file" && sovereigntyEngine.path ? { policyPath: sovereigntyEngine.path } : {},
     config: () => sovereigntyEngine.config,
-    builtInAnswers: () => workerBuiltInModel !== undefined && modelSetup.getStatus().cards.some((card) => card.id === "local") && (() => {
+    builtInAnswers: async () => workerBuiltInModel !== undefined && modelSetup.getStatus().cards.some((card) => card.id === "local") && (() => {
       try {
         const members = sovereigntyEngine.resolveAnalystPool({ trustDomain: "secure_local" }).members;
         return builtInBacksPrivateAnalyst(LOCAL_PROFILE_ID, workerBuiltInModel?.model.status().state, members, new Set(members.map((member) => member.id)));
       } catch {
         return false;
       }
-    })(),
+    })() && !await probeLocalAnalystService(olympusConfig),
     builtInSize: () => workerBuiltInModel?.model.spec.sizeClass,
     totalMemoryBytes: totalmem4(),
     zkapi: {
@@ -221358,6 +221357,9 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
   });
   modelReloadInstalled = true;
   modelChoices.refreshStrongest().catch(() => false);
+  setInterval(() => {
+    modelChoices.refreshStrongest().catch(() => false);
+  }, 86400000).unref();
   console.log(socketPath ? `Olympus private email source worker listening on owner Unix socket` : `Olympus private email source worker listening on http://${hostname2}:${port}/v1`);
   console.log(sourceIndexLaneStartupLog("Dropbox connector-store storage", dropboxConnectorStoreLane));
   console.log(sourceIndexLaneStartupLog("WhatsApp connector-store storage", whatsappConnectorStoreLane));
