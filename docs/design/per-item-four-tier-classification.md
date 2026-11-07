@@ -633,9 +633,10 @@ placement, but `pending` rows, pending questions and extra raisers stay excluded
 Serving-copy/vector freshness, owner rules, overrides, rejudges and all other
 provenance checks remain in force. This fixes selection bias from queued moves;
 it does not establish safe calibration or owner-label recall. If a selected move
-completes during fitting, exactly its one-generation placement flip may survive
-freshness validation: target tiers, reasons, model/classifier identity and the
-complete copy must agree, and the full provenance checks run again. Further
+stages or completes during fitting, same-generation staging or exactly its
+one-generation placement flip may survive freshness validation: target tiers, reasons, model/classifier identity and the
+complete copy must agree, and the full provenance checks run again. After the
+flip, further
 decision/copy changes still discard the fit.
 
 Label version 5 restarts old scans and insufficient/failed attempts immediately,

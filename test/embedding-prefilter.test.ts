@@ -1417,8 +1417,12 @@ test.each(['unchanged', 'raiser', 'secrets', 'override', 'vector'] as const)(
     const moving = f.ledger.beginMove(subject(0), { metadataTier: 'private', contentTier: 'private' }, f.ledger.getCurrent(subject(0))!.generation);
     const example = (f.filter as unknown as { trainingExample(row: typeof moving, judge: string): { current(check: boolean): boolean } }).trainingExample(moving, judge);
     expect(example.current(true)).toBe(true);
-    f.ledger.completeMove(subject(0), { expectedGeneration: moving.generation,
-      destination: [{ corpusId: 'private', trustDomain: 'secure_local', layers: 'both' }] });
+    const destination = [{ corpusId: 'personal', trustDomain: 'internal' as const, layers: 'both' as const }];
+    f.ledger.stageMove(subject(0), { expectedGeneration: moving.generation,
+      target: { metadataTier: 'private', contentTier: 'private' }, destination, hideSource: false });
+    expect(f.ledger.copies(subject(0)).some(copy => copy.state === 'staged')).toBe(true);
+    expect(example.current(true)).toBe(true);
+    f.ledger.completeMove(subject(0), { expectedGeneration: moving.generation, destination });
     if (change === 'vector') f.setCopy(n => copy(n, -1));
     if (change === 'override') f.ledger.setOverride(subject(0), { kind: 'tier', tier: 'secure' });
     if (change === 'raiser' || change === 'secrets') {

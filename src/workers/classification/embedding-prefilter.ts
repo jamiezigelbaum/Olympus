@@ -340,19 +340,22 @@ export class EmbeddingPrefilter {
       if (!current) return false;
       const nextFingerprint = this.trainingFingerprint(current);
       if (nextFingerprint === fingerprint) return true;
-      // Placement completion is expected for a sampled queued decision. Permit
-      // exactly that one flip, after re-proving the same label and copy. All
-      // later mutations retain the ordinary strict freshness check.
-      if (!awaitingMoveCompletion || current.state !== 'current' || current.generation !== row.generation + 1
-        || current.metadataTier !== row.targetMetadataTier || current.contentTier !== row.targetContentTier
-        || current.targetMetadataTier !== null || current.targetContentTier !== null
+      // Staging may persist between lowering batches; completion flips once.
+      // Both are placement progress only when the full label and copy re-prove.
+      const staged = current.state === 'moving' && current.generation === row.generation
+        && current.metadataTier === row.metadataTier && current.contentTier === row.contentTier
+        && current.targetMetadataTier === row.targetMetadataTier && current.targetContentTier === row.targetContentTier;
+      const flipped = current.state === 'current' && current.generation === row.generation + 1
+        && current.metadataTier === row.targetMetadataTier && current.contentTier === row.targetContentTier
+        && current.targetMetadataTier === null && current.targetContentTier === null;
+      if (!awaitingMoveCompletion || (!staged && !flipped)
         || current.modelId !== row.modelId || current.engineVersion !== row.engineVersion
         || current.mapRevision !== row.mapRevision || current.metadataFlagged !== row.metadataFlagged
         || JSON.stringify(current.reasons) !== JSON.stringify(row.reasons)) return false;
       const completed = prefilterTrainingExample(current, judge, this.options);
       if (!completed || completed.private !== eligible.private || copyFingerprint(completed.copy) !== copied) return false;
       fingerprint = nextFingerprint;
-      awaitingMoveCompletion = false;
+      if (flipped) awaitingMoveCompletion = false;
       return true;
     } };
   }

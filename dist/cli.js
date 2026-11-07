@@ -125218,13 +125218,16 @@ class EmbeddingPrefilter {
       const nextFingerprint = this.trainingFingerprint(current2);
       if (nextFingerprint === fingerprint)
         return true;
-      if (!awaitingMoveCompletion || current2.state !== "current" || current2.generation !== row.generation + 1 || current2.metadataTier !== row.targetMetadataTier || current2.contentTier !== row.targetContentTier || current2.targetMetadataTier !== null || current2.targetContentTier !== null || current2.modelId !== row.modelId || current2.engineVersion !== row.engineVersion || current2.mapRevision !== row.mapRevision || current2.metadataFlagged !== row.metadataFlagged || JSON.stringify(current2.reasons) !== JSON.stringify(row.reasons))
+      const staged = current2.state === "moving" && current2.generation === row.generation && current2.metadataTier === row.metadataTier && current2.contentTier === row.contentTier && current2.targetMetadataTier === row.targetMetadataTier && current2.targetContentTier === row.targetContentTier;
+      const flipped = current2.state === "current" && current2.generation === row.generation + 1 && current2.metadataTier === row.targetMetadataTier && current2.contentTier === row.targetContentTier && current2.targetMetadataTier === null && current2.targetContentTier === null;
+      if (!awaitingMoveCompletion || !staged && !flipped || current2.modelId !== row.modelId || current2.engineVersion !== row.engineVersion || current2.mapRevision !== row.mapRevision || current2.metadataFlagged !== row.metadataFlagged || JSON.stringify(current2.reasons) !== JSON.stringify(row.reasons))
         return false;
       const completed = prefilterTrainingExample(current2, judge3, this.options);
       if (!completed || completed.private !== eligible.private || copyFingerprint2(completed.copy) !== copied)
         return false;
       fingerprint = nextFingerprint;
-      awaitingMoveCompletion = false;
+      if (flipped)
+        awaitingMoveCompletion = false;
       return true;
     } };
   }
