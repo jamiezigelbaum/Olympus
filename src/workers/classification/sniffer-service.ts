@@ -1315,7 +1315,16 @@ export class TierSnifferService {
     try {
       if (!this.options.autoMoves || this.stopped || !this.options.autoMoves.localEmbeddingsOnly()) return undefined;
       if (this.moving && this.movingDirection !== direction) {
-        if (direction === 'raise') this.lowerMovePreempted = true;
+        if (direction === 'raise') {
+          // The idle timer also asks for raises. Only real queued raises may
+          // interrupt a longer lowering slice; an unreadable queue fails safe.
+          const raisesQueued = this.ledgerPaths().some(path => {
+            try { return (tierSetForLedger(path)?.ledger.countMoving('raise') ?? 0) > 0; }
+            catch { return true; }
+          });
+          if (!raisesQueued) return undefined;
+          this.lowerMovePreempted = true;
+        }
         await this.moving;
       }
       if (!this.moving) {
@@ -1503,14 +1512,21 @@ export class TierSnifferService {
     const started = performance.now();
     const paths = this.ledgerPaths();
     const backlog = direction === 'lower'
-      ? paths.reduce((n, path) => n + (tierSetForLedger(path)?.ledger.countMoving('lower') ?? 0), 0) : 0;
+      ? paths.reduce((n, path) => {
+        try { return n + (tierSetForLedger(path)?.ledger.countMoving('lower') ?? 0); }
+        catch { return n; } // A failed count must not prevent other sets draining.
+      }, 0) : 0;
     // Keep the full judge budget. With a backlog, grow beyond the 1 s floor
     // at 25 ms per queued item, up to 10 s / one third of judge time. Thus
     // moves take at most 25% of the combined judge + moves allocation.
-    const capMs = Math.min(MAX_LOWER_MOVE_SLICE_MS,
-      Math.max(0, this.options.passTimeMs ?? DEFAULT_SNIFFER_PASS_TIME_MS) / 3);
-    const sliceMs = Math.min(capMs, Math.max(0, options.lowerSliceMs
-      ?? Math.max(DEFAULT_LOWER_MOVE_SLICE_MS, backlog * DEFAULT_LOWER_MOVE_BATCH_MS)));
+    // A disabled/invalid judge budget must not disable move recovery or its cap.
+    const configuredJudgeMs = this.options.passTimeMs ?? DEFAULT_SNIFFER_PASS_TIME_MS;
+    const judgeBudgetMs = Number.isFinite(configuredJudgeMs) && configuredJudgeMs > 0
+      ? configuredJudgeMs : DEFAULT_SNIFFER_PASS_TIME_MS;
+    const capMs = Math.min(MAX_LOWER_MOVE_SLICE_MS, judgeBudgetMs / 3);
+    const adaptiveMs = Math.max(DEFAULT_LOWER_MOVE_SLICE_MS, backlog * DEFAULT_LOWER_MOVE_BATCH_MS);
+    const requestedMs = options.lowerSliceMs ?? adaptiveMs;
+    const sliceMs = Math.min(capMs, Math.max(0, Number.isFinite(requestedMs) ? requestedMs : adaptiveMs));
     const deadline = started + sliceMs;
     const shouldStop = () => signal.aborted || (direction === 'lower'
       && (performance.now() >= deadline || this.lowerMovePreempted || this.yieldNow()));

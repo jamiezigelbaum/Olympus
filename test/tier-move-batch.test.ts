@@ -450,3 +450,67 @@ test('failed grouped note fsync keeps obligations, and malformed notes do not bl
     expect(notes.entries.filter(note => note.entry_id?.startsWith('tier-move:'))).toHaveLength(4);
   } finally { opened.mockRestore(); warn.mockRestore(); }
 });
+
+for (const raisesQueued of [false, true]) test(`timer preempts lowerings only for actual raises: ${raisesQueued}`, async () => {
+  const f = await fixture(100, true);
+  const raised = { id: 'synthetic-timer-raise', name: 'Synthetic', text: body };
+  await f.f.set.sync(fixtureConnector(() => [raised], { id: 'synthetic-timer-new' }), { fetchContent: true, placement: FIXTURE_PLACEMENT });
+  const { service } = serviceFor(f.f, { lowerSliceMs: 6000 }, [], { passTimeMs: 18_000 });
+  let pulse!: () => void;
+  const originalInterval = globalThis.setInterval;
+  const interval = spyOn(globalThis, 'setInterval').mockImplementation(((callback: () => void) => {
+    pulse = callback;
+    return originalInterval(() => {}, 60_000);
+  }) as typeof setInterval);
+  try { service.start(); } finally { interval.mockRestore(); }
+  let clock = 0;
+  let imports = 0;
+  let pulsed = false;
+  const time = spyOn(performance, 'now').mockImplementation(() => clock);
+  const original = f.f.stores.internal!.importItemCopy.bind(f.f.stores.internal!);
+  const copy = spyOn(f.f.stores.internal!, 'importItemCopy').mockImplementation((...args) => {
+    clock += 100;
+    if (++imports === 1) setTimeout(() => {
+      if (raisesQueued) f.f.ledger.recordRoutedPlacement(identityOf(raised.id), high, f.f.set.placementFor(high));
+      pulsed = true;
+      pulse(); // Run the real start() timer callback while the slice yields.
+    }, 0);
+    return original(...args);
+  });
+  try {
+    await service.runOnce();
+    // Wait for the timer's raise request too, if it preempted the lowering.
+    await (service as unknown as { drainMoves(): Promise<unknown> }).drainMoves();
+  } finally { service.stop(); copy.mockRestore(); time.mockRestore(); }
+  expect(pulsed).toBe(true);
+  if (raisesQueued) {
+    expect(imports).toBeLessThan(60);
+    expect(f.f.ledger.getCurrent(identityOf(raised.id))).toMatchObject({ state: 'current', contentTier: 'secure' });
+  } else expect(imports).toBe(60);
+}, 15_000);
+
+test('a failed backlog count does not block other ledgers', async () => {
+  const first = await fixture();
+  const second = await fixture();
+  const { service } = serviceFor(first.f, {}, [second.f]);
+  const count = spyOn(first.f.ledger, 'countMoving').mockImplementation(() => { throw new Error('Synthetic unreadable count'); });
+  try { await service.runOnce(); } finally { count.mockRestore(); }
+  expect(second.f.ledger.listMoving()).toHaveLength(0);
+});
+
+for (const passTimeMs of [0, NaN]) test(`disabled or invalid judge budget keeps moves bounded: ${passTimeMs}`, async () => {
+  const f = await fixture(100, true);
+  const { service } = serviceFor(f.f, { lowerSliceMs: NaN }, [], { passTimeMs });
+  let clock = 0;
+  let imports = 0;
+  const time = spyOn(performance, 'now').mockImplementation(() => clock);
+  const original = f.f.stores.internal!.importItemCopy.bind(f.f.stores.internal!);
+  const copy = spyOn(f.f.stores.internal!, 'importItemCopy').mockImplementation((...args) => {
+    imports++;
+    clock += 100;
+    return original(...args);
+  });
+  try { await service.runOnce(); } finally { copy.mockRestore(); time.mockRestore(); }
+  expect(imports).toBe(25);
+  expect(clock).toBe(2500);
+});

@@ -77088,8 +77088,18 @@ class TierSnifferService {
       if (!this.options.autoMoves || this.stopped || !this.options.autoMoves.localEmbeddingsOnly())
         return;
       if (this.moving && this.movingDirection !== direction) {
-        if (direction === "raise")
+        if (direction === "raise") {
+          const raisesQueued = this.ledgerPaths().some((path) => {
+            try {
+              return (tierSetForLedger(path)?.ledger.countMoving("raise") ?? 0) > 0;
+            } catch {
+              return true;
+            }
+          });
+          if (!raisesQueued)
+            return;
           this.lowerMovePreempted = true;
+        }
         await this.moving;
       }
       if (!this.moving) {
@@ -77224,9 +77234,19 @@ class TierSnifferService {
     const timings = emptyTierMoveTimings();
     const started = performance.now();
     const paths = this.ledgerPaths();
-    const backlog = direction === "lower" ? paths.reduce((n, path) => n + (tierSetForLedger(path)?.ledger.countMoving("lower") ?? 0), 0) : 0;
-    const capMs = Math.min(MAX_LOWER_MOVE_SLICE_MS, Math.max(0, this.options.passTimeMs ?? DEFAULT_SNIFFER_PASS_TIME_MS) / 3);
-    const sliceMs = Math.min(capMs, Math.max(0, options.lowerSliceMs ?? Math.max(DEFAULT_LOWER_MOVE_SLICE_MS, backlog * DEFAULT_LOWER_MOVE_BATCH_MS)));
+    const backlog = direction === "lower" ? paths.reduce((n, path) => {
+      try {
+        return n + (tierSetForLedger(path)?.ledger.countMoving("lower") ?? 0);
+      } catch {
+        return n;
+      }
+    }, 0) : 0;
+    const configuredJudgeMs = this.options.passTimeMs ?? DEFAULT_SNIFFER_PASS_TIME_MS;
+    const judgeBudgetMs = Number.isFinite(configuredJudgeMs) && configuredJudgeMs > 0 ? configuredJudgeMs : DEFAULT_SNIFFER_PASS_TIME_MS;
+    const capMs = Math.min(MAX_LOWER_MOVE_SLICE_MS, judgeBudgetMs / 3);
+    const adaptiveMs = Math.max(DEFAULT_LOWER_MOVE_SLICE_MS, backlog * DEFAULT_LOWER_MOVE_BATCH_MS);
+    const requestedMs = options.lowerSliceMs ?? adaptiveMs;
+    const sliceMs = Math.min(capMs, Math.max(0, Number.isFinite(requestedMs) ? requestedMs : adaptiveMs));
     const deadline = started + sliceMs;
     const shouldStop = () => signal.aborted || direction === "lower" && (performance.now() >= deadline || this.lowerMovePreempted || this.yieldNow());
     const report = { moved: 0, failed: 0, notEligible: 0, timings };
