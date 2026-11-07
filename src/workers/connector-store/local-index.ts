@@ -1676,6 +1676,8 @@ export interface ConnectorStoreEmbedStoreRun {
   busy?: boolean;
   /** The pass reached its time budget with chunks still owed; they wait for the next pass. */
   stoppedAtDeadline?: boolean;
+  /** Counts-only pre-pass inventory; omitted outside scheduler diagnostics. */
+  inventory?: Record<string, number>;
 }
 
 /**
@@ -1701,7 +1703,7 @@ export async function embedPendingChunks(
   targets: readonly ConnectorStoreEmbeddingTarget[],
   // stopAtMs: no batch starts after it (the first always runs). Items count
   // badly as work: one long file can hold more chunks than a pass has time for.
-  options: { maxItems: number; stopAtMs?: number },
+  options: { maxItems: number; stopAtMs?: number; diagnostics?: boolean },
 ): Promise<ConnectorStoreEmbedStoreRun[]> {
   const runs: ConnectorStoreEmbedStoreRun[] = [];
   for (const target of targets) {
@@ -1714,6 +1716,7 @@ export async function embedPendingChunks(
       itemsOutOfScope: 0,
     };
     runs.push(run);
+    if (options.diagnostics) run.inventory = await store.embeddingSweepInventory(target.provider, target, options.stopAtMs);
     const groups = store.queuedEmbeddingGroups(options.maxItems).filter((group) => {
       // A store that catches up never replays a queue left under another
       // identity (the owner changed the tier's model): its items are missing
@@ -10093,6 +10096,78 @@ export class LocalConnectorStore {
     if (limit <= 0) return [];
     const tierHidden = await this.tierHiddenItemPksInTurns();
     return this.missingEmbeddingItemIds(embedder, limit, scope, tierHidden);
+  }
+
+  /**
+   * Missing vectors are not necessarily work: superseded copies deliberately
+   * retain chunks. Report the reasons without reading text or returning ids.
+   * Page by chunk key and yield between pages so diagnostics do not freeze the
+   * worker. Counts are a pre-pass snapshot, not an authorization for dispatch;
+   * embedChunks still owns every privacy/scope check. A spent budget reports
+   * partial counts explicitly rather than pretending the unseen tail is empty.
+   */
+  async embeddingSweepInventory(
+    provider: SourceEmbeddingProvider,
+    scope: Pick<ConnectorStoreEmbedOptions, 'accountScope' | 'filters'> = {},
+    stopAtMs?: number,
+  ): Promise<Record<string, number>> {
+    const started = Date.now();
+    const tier = await this.tierHiddenItemPksInTurns();
+    const hidden = new Set(tier.hidden);
+    const held = new Set(tier.held);
+    const heldForJudgment = this.canEmbedHeld(provider) ? new Set(tier.heldForJudgment) : new Set<number>();
+    const namesOnly = new Set(tier.metadataLayer);
+    const moving = new Set<number>();
+    let walked = 0;
+    for (const member of this.tierLedgerHiddenMemo?.members.values() ?? []) {
+      if (member.flags.moving) for (const pk of member.pks) moving.add(pk);
+      if (++walked % 2_000 === 0) await ingestionTurn();
+    }
+    const tiers = connectorStoreEmbeddableRowTiers(this.trustDomain, provider);
+    const account = normalizeOptionalAccountScope(scope.accountScope);
+    const scoped = connectorStoreFilterSql(scope.filters);
+    const counts: Record<string, number> = {
+      pending_chunks: 0, eligible_chunks: 0, skipped_held_chunks: 0,
+      skipped_moving_chunks: 0, skipped_hidden_chunks: 0, skipped_metadata_chunks: 0,
+      skipped_failed_chunks: 0, skipped_out_of_scope_chunks: 0,
+      skipped_private_tier_chunks: 0, skipped_retired_chunks: 0, inventory_complete: 0,
+    };
+    const page = this.db.query(`
+      SELECT c.chunk_pk, i.item_pk, i.local_item_id, i.tombstoned, i.trust_tier,
+        (e.chunk_pk IS NULL OR e.content_hash != c.embedding_input_hash) AS owed,
+        CASE WHEN 1 = 1 ${account ? 'AND i.account_scope = ?' : ''} ${scoped.sql} THEN 1 ELSE 0 END AS in_scope
+      FROM chunks c JOIN items i ON i.item_pk = c.item_pk
+      LEFT JOIN chunk_embeddings e ON e.chunk_pk = c.chunk_pk AND e.model_id = ?
+      WHERE c.chunk_pk > ?
+      ORDER BY c.chunk_pk LIMIT 2048
+    `);
+    let after = 0;
+    while (stopAtMs === undefined || Date.now() < stopAtMs) {
+      const rows = page.all(...(account ? [account] : []), ...scoped.params, provider.modelId, after) as Array<{
+        chunk_pk: number; item_pk: number; local_item_id: string; tombstoned: number; trust_tier: SourceTrustTier; in_scope: number; owed: number;
+      }>;
+      for (const row of rows) {
+        if (!row.owed) continue;
+        counts.pending_chunks! += 1;
+        const heldBack = held.has(row.item_pk) && !heldForJudgment.has(row.item_pk);
+        const visibilityExcluded = hidden.has(row.item_pk) || namesOnly.has(row.item_pk) || heldBack;
+        // Disjoint reasons, with retirement and visibility preceding policy.
+        const reason = row.tombstoned || row.trust_tier === 'S5' ? 'skipped_retired_chunks'
+          : moving.has(row.item_pk) && visibilityExcluded ? 'skipped_moving_chunks'
+          : hidden.has(row.item_pk) ? 'skipped_hidden_chunks'
+          : namesOnly.has(row.item_pk) ? 'skipped_metadata_chunks'
+          : heldBack ? 'skipped_held_chunks'
+          : tiers && !tiers.includes(row.trust_tier) ? 'skipped_private_tier_chunks'
+          : this.embeddingFailureState?.has(row.local_item_id) ? 'skipped_failed_chunks'
+          : !row.in_scope ? 'skipped_out_of_scope_chunks' : 'eligible_chunks';
+        counts[reason]! += 1;
+      }
+      if (rows.length < 2_048) { counts.inventory_complete = 1; break; }
+      after = rows.at(-1)!.chunk_pk;
+      await ingestionTurn();
+    }
+    counts.inventory_ms = Date.now() - started;
+    return counts;
   }
 
   /**
