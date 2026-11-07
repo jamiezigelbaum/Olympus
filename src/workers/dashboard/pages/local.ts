@@ -51,6 +51,7 @@ import { DASHBOARD_PRIVACY_SETTINGS_COPY as S, DASHBOARD_PRIVATE_ANSWERS_COPY } 
 import { dashboardPrivacyTabs, PRIVACY_TABS_CSS } from './private-answers.ts';
 import { dashboardLocalPageHref } from '../host-page.ts';
 import { dashboardTopNav, TOP_NAV_CSS, type DashboardTab } from '../top-nav.ts';
+import { sourceLogoTile, SOURCE_LOGO_CSS } from '../source-logos.ts';
 import { DASHBOARD_UPDATE_COPY } from '../vocabulary.ts';
 import { MODEL_PICKER_CSS, renderAnswerModelPickers, renderZkapiModelPicker } from '../model-pickers.ts';
 import { renderModelSetup, renderModelSetupBlocker, dashboardModelsBlockedReason } from '../model-setup.ts';
@@ -322,13 +323,14 @@ export function renderDashboardConnectPage(view: SourceDashboardViewModel, optio
     + panels + '</dialog>';
   const body = [
     lockedGate(options),
-    renderModelSetupBlocker(view.model_setup, { keysHref: dashboardLocalPageHref('keys', readToken(options?.basePath)) }),
-    sources.length === 0
-      ? `<p class="pnote">${escapeHtml(W.connect.empty)}</p>`
-      : `<div class="srows" id="sources">${sources.map((source) => renderSetupRow(source, view, blocked, options?.basePath ?? '/dashboard', options?.messagingLocalSession === true) + sourceSupportBlock(source)).join('\n')}</div>`,
+    renderModelSetupBlocker(view.model_setup, { keysHref: dashboardLocalPageHref('keys', token) }),
+    `<div class="srcrows" id="sources">${rows.map((entry) => entry.row).join('') || '<p class="pnote">No sources connected yet.</p>'}</div>`,
+    `<div class="srcbar"><button class="btn primary" type="button" data-dialog-open="add-source">+ Add a source</button><span class="pnote">Not listed? <a href="${escapeHtml(dashboardLocalPageHref('connector', token))}">Build a connector</a></span></div>`,
+    rows.map((entry) => entry.dialogs).join(''),
+    sheet,
   ].filter((block) => block !== '').join('\n');
   return localShell({
-    crumb: W.connect.title,
+    crumb: 'Sources',
     tab: 'sources',
     meta: dashboardCheckedLabel(view.generated_at, options?.now ?? new Date()),
     body,
