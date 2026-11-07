@@ -10,6 +10,7 @@ import {
   removeFileDurablySync,
   writePrivateFileAtomicSync,
 } from './atomic-file.ts';
+import { quoteCliArgument, readWorkerCliLauncher, renderWorkerCliLauncher, workerCliLauncherPath, writeWorkerCliLauncher } from './worker-cli-launcher.ts';
 import { resolveOpenClawExecutable } from './openclaw-executable.ts';
 import { OperationError } from './operation-error.ts';
 import { isWorkerAuthTokenPlaceholder, unquoteEnvValue } from './worker-auth.ts';
@@ -52,6 +53,10 @@ export interface WorkerServiceInstallResult {
   error_log_path: string;
   wrote_unit: boolean;
   wrote_env: boolean;
+  launcher_path: string;
+  wrote_launcher: boolean;
+  /** Absolute shell command; safe even when ~/.local/bin is absent from the login PATH. */
+  cli_command: string;
   notices: string[];
   unit: string;
   commands: {
@@ -85,6 +90,11 @@ export function installWorkerService(options: WorkerServiceInstallOptions = {}):
     : renderSystemdWorkerUnit({ ...options, envPath, paths });
   let wroteUnit = false;
   let wroteEnv = false;
+  let wroteLauncher = false;
+  const launcherPath = workerCliLauncherPath(homeDir);
+  const [runtime, cli] = workerServiceExecCommand(options);
+  const launcher = renderWorkerCliLauncher(runtime, cli);
+  let cliCommand = quoteCliArgument(launcherPath);
   const notices: string[] = [];
   if (!options.dryRun) {
     ensurePrivateRootDirectorySync(homeDir);
@@ -97,6 +107,14 @@ export function installWorkerService(options: WorkerServiceInstallOptions = {}):
     else mkdirSync(dirname(envPath), { recursive: true });
     wroteUnit = writeManagedFileAtomicIfChanged(paths.unitPath, unit, 'worker unit');
     wroteEnv = reconcileWorkerEnv(envPath, options, notices);
+    const previousLauncher = readWorkerCliLauncher(homeDir);
+    wroteLauncher = writeWorkerCliLauncher(homeDir, launcher);
+    if (previousLauncher === null) {
+      cliCommand = [runtime, cli].map(quoteCliArgument).join(' ');
+      notices.push(`Kept the existing ${launcherPath}; it belongs to another installer or the user.`);
+    }
+    notices.push(`On the machine running Olympus, run ${cliCommand} dashboard.`
+      + (previousLauncher === null ? '' : ' If ~/.local/bin is on your login PATH, you can also use olympus dashboard.'));
   }
   return {
     ok: true,
@@ -107,6 +125,9 @@ export function installWorkerService(options: WorkerServiceInstallOptions = {}):
     error_log_path: paths.errorLogPath,
     wrote_unit: wroteUnit,
     wrote_env: wroteEnv,
+    launcher_path: launcherPath,
+    wrote_launcher: wroteLauncher,
+    cli_command: cliCommand,
     notices,
     unit,
     commands: {
@@ -649,7 +670,7 @@ function shellQuote(value: string): string {
   return `'${value.replace(/'/g, "'\\''")}'`;
 }
 
-function workerServiceExecCommand(options: WorkerServiceInstallOptions): string[] {
+function workerServiceExecCommand(options: WorkerServiceInstallOptions): [string, string, string] {
   const bunBin = resolveBunBin(options);
   return [bunBin, defaultOlympusCliJs(options), '__worker-service-run'];
 }

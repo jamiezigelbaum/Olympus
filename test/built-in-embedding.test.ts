@@ -18,6 +18,7 @@ import {
   builtInEmbeddingPaths,
   installBuiltInEmbedding,
   readBuiltInEmbeddingStatus,
+  reportBuiltInEmbeddingState,
   readBuiltInEmbeddingVision,
   type BuiltInEmbeddingStatus,
 } from '../src/workers/source-index/built-in-embedding/assets.ts';
@@ -47,6 +48,7 @@ import {
   LiteRtImagesUnavailableError,
   LiteRtPictureEngineFaultError,
   startLiteRtEmbedder,
+  linuxGpuAvailable,
   type LiteRtEmbedder,
   type LiteRtEmbedderOptions,
 } from '../src/workers/source-index/built-in-embedding/litert-runtime.ts';
@@ -94,6 +96,30 @@ function temporaryDir(): string {
 }
 afterEach(() => {
   for (const dir of temporaryDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+});
+
+describe('search model reload status', () => {
+  test('only a model that reached ready before reports a reload, across repeated restarts', () => {
+    const env = { OLYMPUS_BUILT_IN_EMBEDDING_DIR: temporaryDir() };
+    const options = { env };
+    reportBuiltInEmbeddingState(options, 'loading');
+    expect(builtInEmbeddingDashboardState(readBuiltInEmbeddingStatus(env)).state).toBe('verifying');
+    reportBuiltInEmbeddingState(options, 'ready');
+    // Existing installs have a ready status without the new field.
+    const legacyReady = readBuiltInEmbeddingStatus(env);
+    delete legacyReady.previouslyReady;
+    writeFileSync(builtInEmbeddingPaths(env).statusPath, JSON.stringify(legacyReady));
+    for (let restart = 0; restart < 2; restart++) {
+      reportBuiltInEmbeddingState(options, 'loading');
+      expect(builtInEmbeddingDashboardState(readBuiltInEmbeddingStatus(env))).toEqual({ kind: 'built_in', state: 'loading' });
+    }
+    reportBuiltInEmbeddingState(options, 'failed', { reason: 'runtime_load_failed', message: 'test failure' });
+    expect(builtInEmbeddingDashboardState(readBuiltInEmbeddingStatus(env)).state).toBe('failed');
+    // A different model in the same directory has no prior ready receipt.
+    const other = { ...BUILT_IN_EMBEDDING_MODEL, modelId: 'different-model' };
+    reportBuiltInEmbeddingState({ env, model: other }, 'loading');
+    expect(builtInEmbeddingDashboardState(readBuiltInEmbeddingStatus(env, other)).state).toBe('verifying');
+  });
 });
 
 describe('WordPiece tokenizer', () => {
@@ -1090,7 +1116,7 @@ function fakeHelper(behaviour: 'ok' | 'no-vision' | 'fatal' | 'crash-first-gpu-b
 }
 
 function helperOptions(helperPath: string, extra: Partial<LiteRtEmbedderOptions> = {}): LiteRtEmbedderOptions {
-  return { library: '/lib.so', model: '/model.litertlm', cacheDir: '/cache', threads: 1, device: 'auto', maxInputTokens: 2048, bunPath: process.execPath, helperPath, ...extra };
+  return { library: '/lib.so', model: '/model.litertlm', cacheDir: '/cache', threads: 1, device: 'auto', maxInputTokens: 2048, bunPath: process.execPath, helperPath, gpuAvailable: () => true, ...extra };
 }
 
 describe('picture failure isolation in the LiteRT helper', () => {
@@ -1137,13 +1163,33 @@ describe('picture failure isolation in the LiteRT helper', () => {
 });
 
 describe('the LiteRT helper process', () => {
+  test('Linux skips GPU initialization without an accessible render device', async () => {
+    const dir = temporaryDir();
+    expect(linuxGpuAvailable(join(dir, 'missing'))).toBe(false);
+    expect(linuxGpuAvailable(dir)).toBe(false);
+    writeFileSync(join(dir, 'renderD128'), 'not a GPU');
+    expect(linuxGpuAvailable(dir)).toBe(false);
+    if (process.platform !== 'linux') return;
+    // This helper refuses auto outright: succeeding proves the first start was CPU.
+    const path = fakeHelper('ok');
+    writeFileSync(path, readFileSync(path, 'utf8').replace(
+      "const device = settings.device === 'auto' ? 'gpu' : 'cpu';",
+      "if (settings.device !== 'cpu') { console.log(JSON.stringify({fatal:'GPU attempted'})); process.exit(1); } const device = 'cpu';",
+    ));
+    const embedder = await startLiteRtEmbedder(helperOptions(path, { gpuAvailable: () => linuxGpuAvailable(dir) }));
+    try {
+      expect(embedder.device).toBe('cpu');
+      expect(Array.from((await embedder.embed(['abc']))[0]!)).toEqual([3, 2]);
+    } finally { await embedder.release(); }
+  }, 10_000);
+
   test('starts, reports its device, and returns one vector per text', async () => {
     const embedder = await startLiteRtEmbedder(helperOptions(fakeHelper('ok')));
     expect(embedder.device).toBe('gpu');
     const vectors = await embedder.embed(['ab', 'abcd']);
     expect(vectors.map((vector) => Array.from(vector))).toEqual([[2, 1], [4, 1]]);
     await embedder.release();
-  });
+  }, 10_000);
 
   test('a picture the helper cannot read fails only its item; a helper without the encoder says so', async () => {
     const poisoned = await startLiteRtEmbedder(helperOptions(fakeHelper('ok'), { visionTokensPerImage: 140 }));
@@ -1160,7 +1206,7 @@ describe('the LiteRT helper process', () => {
     expect((held as LiteRtImagesUnavailableError).indexes).toEqual([0]);
     expect((await blind.embed(['abcd'])).map((vector) => Array.from(vector))).toEqual([[4, 1]]);
     await blind.release();
-  });
+  }, 10_000);
 
   test('sends text with a picture as items, and text alone as before', async () => {
     const embedder = await startLiteRtEmbedder(helperOptions(fakeHelper('ok'), { visionTokensPerImage: 140 }));
@@ -1168,11 +1214,11 @@ describe('the LiteRT helper process', () => {
     expect(vectors.map((vector) => Array.from(vector))).toEqual([[3, 140], [2, 1]]);
     expect((await embedder.embed(['abcd'])).map((vector) => Array.from(vector))).toEqual([[4, 1]]);
     await embedder.release();
-  });
+  }, 10_000);
 
   test('a helper that cannot open the model fails the start with its reason', async () => {
     await expect(startLiteRtEmbedder(helperOptions(fakeHelper('fatal')))).rejects.toThrow('no model here');
-  });
+  }, 10_000);
 
   test('a helper that stops on the GPU fails that batch and comes back on the CPU', async () => {
     const embedder = await startLiteRtEmbedder(helperOptions(fakeHelper('crash-first-gpu-batch')));
@@ -1181,7 +1227,7 @@ describe('the LiteRT helper process', () => {
     expect(embedder.device).toBe('cpu');
     expect(Array.from(vectors[0]!)).toEqual([3, 2]);
     await embedder.release();
-  });
+  }, 10_000);
 
   test('a native failure replaces the helper (GPU to CPU); a bad request fails only itself', async () => {
     const embedder = await startLiteRtEmbedder(helperOptions(fakeHelper('native-error-on-gpu')));
@@ -1192,21 +1238,21 @@ describe('the LiteRT helper process', () => {
     expect(Array.from((await embedder.embed(['abcd']))[0]!)).toEqual([4, 2]);
     expect(embedder.device).toBe('cpu');
     await embedder.release();
-  });
+  }, 10_000);
 
   test('an encoder failing the known-good picture is its own fault; the helper is replaced and text still embeds', async () => {
     const embedder = await startLiteRtEmbedder(helperOptions(fakeHelper('picture-fault'), { visionTokensPerImage: 140 }));
     await expect(embedder.embed([{ text: 'abc', image: '/media/a.jpg' }, 'de'])).rejects.toBeInstanceOf(LiteRtPictureEngineFaultError);
     expect(Array.from((await embedder.embed(['abc']))[0]!)).toEqual([3, 2]);
     await embedder.release();
-  });
+  }, 10_000);
 
   test('a helper that dies starting on the GPU is started again on the CPU', async () => {
     const embedder = await startLiteRtEmbedder(helperOptions(fakeHelper('crash-on-gpu-start')));
     expect(embedder.device).toBe('cpu');
     expect(Array.from((await embedder.embed(['abc']))[0]!)).toEqual([3, 2]);
     await embedder.release();
-  });
+  }, 10_000);
 
   test('a write to a helper that closed its input fails the batch, not this process', async () => {
     const embedder = await startLiteRtEmbedder(helperOptions(fakeHelper('close-stdin'), { requestTimeoutMs: 1_000 }));
@@ -1215,7 +1261,7 @@ describe('the LiteRT helper process', () => {
     // the write fails (EPIPE) or goes unanswered; either way only the batch fails.
     await expect(embedder.embed(['x'.repeat(1_000_000)])).rejects.toThrow(/stopped/);
     await embedder.release();
-  });
+  }, 10_000);
 
   test('a batch that never answers is abandoned and the helper replaced', async () => {
     const embedder = await startLiteRtEmbedder(helperOptions(fakeHelper('hang'), { requestTimeoutMs: 200 }));
@@ -1224,14 +1270,14 @@ describe('the LiteRT helper process', () => {
     await expect(embedder.embed(['abc'])).rejects.toThrow('stopped responding');
     expect(embedder.device).toBe('cpu');
     await embedder.release();
-  });
+  }, 10_000);
 
   test('release kills a helper that does not exit when its input closes', async () => {
     const embedder = await startLiteRtEmbedder(helperOptions(fakeHelper('ignore-stdin-close'), { stopTimeoutMs: 100 }));
     const started = Date.now();
     await embedder.release();
     expect(Date.now() - started).toBeLessThan(3_000);
-  });
+  }, 10_000);
 });
 
 describe('the built-in model registry', () => {

@@ -1,6 +1,6 @@
 // Contract 1 adapter for the append-only Telegram capture spool. The Telethon
 // helper owns provider/session semantics and writes validated-scope records;
-// this connector owns only durable local listing, normalization and trust.
+// this connector owns durable local listing, normalization and provider facts.
 
 import { createHash } from 'node:crypto';
 import { closeSync, existsSync, lstatSync, openSync, readSync, readdirSync } from 'node:fs';
@@ -48,15 +48,9 @@ export const TELEGRAM_CAPTURE_CONNECTOR_IDS = {
   internal: `${TELEGRAM_CAPTURE_CONNECTOR_ID}_internal`,
   secure_local: `${TELEGRAM_CAPTURE_CONNECTOR_ID}_secure_local`,
 } as const;
-// Removing the internal lane's copy of a reclassified message is a local write,
-// not a traversal. It gets its own run lineage because a completed run under
-// the lane's own id carries no cursor, and the lane would resume from that
-// emptiness — a full spool rescan — on its very next pull.
+// Historical run ids remain readable by diagnostics and legacy store tooling.
+// Capture no longer evicts ordinary copies or claims a tier from store placement.
 export const TELEGRAM_TRUST_EVICTION_CONNECTOR_ID = `${TELEGRAM_CAPTURE_CONNECTOR_ID}_trust_eviction`;
-// The one-time sweep over duplication that predates the trust invariant keeps
-// its resume cursor in the internal store's run history. It cannot share the
-// eviction lineage: eviction runs carry no cursor, so one inline eviction
-// would erase the sweep's durable position.
 export const TELEGRAM_TRUST_RECONCILIATION_CONNECTOR_ID = `${TELEGRAM_CAPTURE_CONNECTOR_ID}_trust_reconciliation`;
 
 // A record whose item was judged Secrets keeps its place in the spool but not
@@ -95,8 +89,8 @@ export interface TelegramCaptureSpoolReadResult {
   records: TelegramCaptureSpoolRecord[];
   malformedRecords: number;
   /**
-   * localItemId -> the one trust domain this read resolved the item to, for
-   * items whose spool records disagreed. Only conflicted items appear here.
+   * Historical record domains that disagreed in this window, keyed by item.
+   * Diagnostic only: the value is the last observed domain, never a tier.
    */
   trustConflicts: ReadonlyMap<string, TelegramMessagesCorpusTrustDomain>;
   resumeCursor?: string;
@@ -115,16 +109,9 @@ export function createTelegramCaptureSpoolConnector(options: {
   spoolDir: string;
   trustDomain: TelegramMessagesCorpusTrustDomain;
   /**
-   * Trust resolutions computed over a wider window than one page of this lane
-   * can see — the pull preflight reads the whole unread spool window. Applying
-   * them here is what keeps a message whose classification changed in exactly
-   * one lane even when only its looser copy falls inside this lane's page.
-   */
-  resolvedTrustByItemId?: ReadonlyMap<string, TelegramMessagesCorpusTrustDomain>;
-  /**
-   * The last spool position those resolutions were computed over. The spool is
-   * appended to while a pull runs, so without this bound a lane would index a
-   * record that no resolution ever saw. `null` bounds the lane to nothing.
+   * The last spool position the pull preflight read. Both historical input
+   * cursors advance through this same bounded window; appends wait for the
+   * next pull. `null` bounds the input to nothing.
    */
   admitThroughCursor?: string | null;
   /**
@@ -141,9 +128,6 @@ export function createTelegramCaptureSpoolConnector(options: {
 }): SourceConnector {
   const spoolDir = requiredString(options.spoolDir, 'spool directory');
   const trustDomain = options.trustDomain;
-  const resolved = options.resolvedTrustByItemId
-    ? { resolvedTrustByItemId: options.resolvedTrustByItemId }
-    : {};
   const bound = options.admitThroughCursor === undefined
     ? {}
     : { admitThroughCursor: options.admitThroughCursor };
@@ -158,7 +142,6 @@ export function createTelegramCaptureSpoolConnector(options: {
         trustDomain,
         malformedPolicy: 'skip',
         ...(cursor ? { cursor } : {}),
-        ...resolved,
         ...bound,
       });
       for (const record of result.records) {
@@ -173,7 +156,6 @@ export function createTelegramCaptureSpoolConnector(options: {
     return found;
   };
   const builder = telegramRecordBuilder({
-    trustDomain,
     authenticate: async () => { assertTelegramCaptureSpoolDirectory(spoolDir); },
     async fetchItem(localItemId: string, fetchOptions?: SourceConnectorFetchOptions): Promise<RawItem> {
       // A media child is its message's child, read from the file the helper kept.
@@ -225,7 +207,6 @@ export function createTelegramCaptureSpoolConnector(options: {
             limit: remaining === undefined ? DEFAULT_PAGE_LIMIT : Math.min(remaining, MAX_PAGE_LIMIT),
             malformedPolicy: 'skip',
             ...(cursor ? { cursor } : {}),
-            ...resolved,
             ...bound,
           });
           // A message's photo or file is its child: readable when the helper kept the file beside the spool.
@@ -265,8 +246,6 @@ export function readTelegramCaptureSpool(options: {
   limit?: number;
   /** Product capture advances past damaged records; migration remains strict. */
   malformedPolicy?: 'reject' | 'skip';
-  /** Trust resolutions observed over a wider window than this read's own. */
-  resolvedTrustByItemId?: ReadonlyMap<string, TelegramMessagesCorpusTrustDomain>;
   /**
    * Highest spool position this read may admit, as a `<file>:<lines>` cursor.
    * Records past it are left for a later read; `null` admits none at all.
@@ -374,32 +353,14 @@ export function readTelegramCaptureSpool(options: {
         const identityKey = record.capturedItem.item.identity.localItemId;
         const observedTrust = record.capturedItem.trustDomain;
         const priorTrust = trustByIdentity.get(identityKey);
-        // A conversation reclassified between live capture and backfill writes
-        // the same message into the append-only spool under both trust domains.
-        // Refusing the window was fail-STOP: every later preflight re-read the
-        // same disagreement, neither lane ever wrote again, and the spool cannot
-        // be edited to repair it. Resolve it fail-safe instead — the more
-        // restrictive domain wins, so a message can only ever move INTO the
-        // stricter lane, never out of it — and count it so the disagreement
-        // stays visible in the pull receipt.
-        const resolvedTrust = mostRestrictiveTrust(
-          observedTrust,
-          priorTrust,
-          options.resolvedTrustByItemId?.get(identityKey),
-        );
-        if (resolvedTrust !== observedTrust || (priorTrust !== undefined && priorTrust !== observedTrust)) {
-          trustConflicts.set(identityKey, resolvedTrust);
+        // Historical domains select an input cursor only. They neither decide
+        // a tier nor discard another record of the item: the connector's
+        // version order and the shared per-item judge decide what is stored.
+        if (priorTrust !== undefined && priorTrust !== observedTrust) {
+          trustConflicts.set(identityKey, observedTrust);
         }
-        if (priorTrust !== undefined && priorTrust !== resolvedTrust) {
-          // Copies already collected under the looser domain belong to no lane.
-          for (let index = records.length - 1; index >= 0; index -= 1) {
-            if (records[index]!.capturedItem.item.identity.localItemId === identityKey) {
-              records.splice(index, 1);
-            }
-          }
-        }
-        trustByIdentity.set(identityKey, resolvedTrust);
-        if (resolvedTrust === observedTrust && (options.trustDomain === undefined || resolvedTrust === options.trustDomain)) {
+        trustByIdentity.set(identityKey, observedTrust);
+        if (options.trustDomain === undefined || observedTrust === options.trustDomain) {
           records.push(record);
           if (limit !== undefined && records.length >= limit) {
             exhausted = atEnd;
@@ -664,18 +625,6 @@ function telegramCaptureSpoolFiles(spoolDir: string): string[] {
     .sort();
 }
 
-/**
- * The safe reading of a disagreement: content may only be pulled toward the
- * stricter lane. `secure_local` therefore wins over `internal` no matter which
- * record was written first.
- */
-function mostRestrictiveTrust(
-  observed: TelegramMessagesCorpusTrustDomain,
-  ...others: readonly (TelegramMessagesCorpusTrustDomain | undefined)[]
-): TelegramMessagesCorpusTrustDomain {
-  return observed === 'secure_local' || others.includes('secure_local') ? 'secure_local' : 'internal';
-}
-
 function assertTelegramCaptureSpoolDirectory(spoolDir: string): void {
   if (!existsSync(spoolDir)) throw new Error('Telegram capture spool directory does not exist.');
   const dir = lstatSync(spoolDir);
@@ -694,7 +643,7 @@ function parseTelegramCaptureSpoolCursor(value: string | undefined): { file: str
   return { file: match[1]!, line };
 }
 
-function parseTelegramCaptureSpoolRecord(line: string, asTrust?: TelegramMessagesCorpusTrustDomain): TelegramCaptureSpoolRecord {
+function parseTelegramCaptureSpoolRecord(line: string): TelegramCaptureSpoolRecord {
   let value: unknown;
   try { value = JSON.parse(line); } catch { throw new Error('Telegram capture spool found invalid JSON.'); }
   const record = requireObject(value, 'record');
@@ -738,9 +687,8 @@ function parseTelegramCaptureSpoolRecord(line: string, asTrust?: TelegramMessage
     capturedItem: telegramMessageItem({
       account,
       conversationId,
-      // A record carried into the stricter lane is built as that lane's.
-      trustDomain: asTrust ?? trustDomain,
-      corpusId: asTrust === 'secure_local' ? PROTECTED_TELEGRAM_MESSAGES_CORPUS_ID : asTrust === 'internal' ? INTERNAL_TELEGRAM_MESSAGES_CORPUS_ID : corpusId,
+      trustDomain,
+      corpusId,
       message,
       fetchedAt: capturedAt,
     }),
@@ -760,53 +708,6 @@ function markCapture(record: TelegramCaptureSpoolRecord, file: string, line: num
       item: { ...item, identity: { ...item.identity, sourceVersion: telegramCaptureVersion(version, order) } },
     },
   };
-}
-
-/**
- * The newest record the spool holds of each item named, whatever lane its
- * chat was in when it was captured, built as `asTrust`'s: what moves an item
- * whole into the stricter lane when that lane's claim on it arrives in a
- * record older than the copy the looser lane holds. The whole spool is read,
- * a line at a time; damaged lines are passed.
- */
-export function readTelegramCaptureSpoolNewest(options: {
-  spoolDir: string;
-  localItemIds: ReadonlySet<string>;
-  compareVersions: (a: string, b: string) => number;
-  asTrust: TelegramMessagesCorpusTrustDomain;
-}): Map<string, TelegramCaptureSpoolRecord> {
-  const newest = new Map<string, TelegramCaptureSpoolRecord>();
-  if (options.localItemIds.size === 0) return newest;
-  assertTelegramCaptureSpoolDirectory(options.spoolDir);
-  for (const name of telegramCaptureSpoolFiles(options.spoolDir)) {
-    const path = join(options.spoolDir, name);
-    const stat = lstatSync(path);
-    if (!stat.isFile() || stat.isSymbolicLink()) continue;
-    const fd = openSync(path, 'r');
-    try {
-      let lineNumber = 0;
-      for (const line of spoolFileLines(fd, 0, stat.size, MAX_RECORD_BYTES)) {
-        lineNumber += 1;
-        if (line.text === undefined || !line.text.trim()) continue;
-        let record: TelegramCaptureSpoolRecord;
-        try {
-          record = markCapture(parseTelegramCaptureSpoolRecord(line.text, options.asTrust), name, lineNumber);
-        } catch {
-          continue;
-        }
-        const identity = record.capturedItem.item.identity;
-        if (!options.localItemIds.has(identity.localItemId)) continue;
-        const held = newest.get(identity.localItemId)?.capturedItem.item.identity.sourceVersion;
-        // A later line of the same version is the later capture (its reactions, say): it wins.
-        if (held === undefined || identity.sourceVersion === undefined || options.compareVersions(identity.sourceVersion, held) >= 0) {
-          newest.set(identity.localItemId, record);
-        }
-      }
-    } finally {
-      closeSync(fd);
-    }
-  }
-  return newest;
 }
 
 /**

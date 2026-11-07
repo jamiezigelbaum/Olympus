@@ -17,6 +17,10 @@ const SURFACES = ['src/**/*.ts', 'scripts/**/*.ts', 'scripts/**/*.py', 'scripts/
 // Names of the retired group-level privacy paths. None may come back.
 const RETIRED = [
   /\bstoredPlacementIsPrior\b/,
+  /\btrustDomainPrior\b/,
+  /\bapplyTelegramProtectionClaims\b/,
+  /\breconcileTelegramTrustStores\b/,
+  /telegram:secure_claim:/,
   /\blaneFloor\b/,
   /source_default/,
   /PROTECTED_CHAT_SCOPES/,
@@ -61,16 +65,6 @@ const PRIOR_OWNERS = new Set([
   'src/workers/classification/tier-classifier.ts',
 ]);
 
-// The one connector prior left, with why and when it goes. Counted, so a second
-// prior in the same file fails. It only shrinks.
-const PRIOR_LEFTOVERS: Record<string, { count: number; reason: string }> = {
-  'src/workers/telegram-messages/record-builder.ts': {
-    count: 1,
-    reason: 'Capture records written before 2026-10-28 by a deployment\'s protected-chat setting still say secure_local; '
-      + 'the helper writes every new record internal, so this rests nothing new. Retire when the capture lanes merge.',
-  },
-};
-
 // Every way code can set a prior: an object key, shorthand, assignment, or
 // bracket access. Local variables that happen to be named `prior` do not match.
 const PRIOR_WRITES = [
@@ -88,17 +82,9 @@ test('no connector publishes a prior: only the user\'s own rules rest a group of
   const offenders = sources()
     .filter(({ path }) => path.startsWith('src/') && !PRIOR_OWNERS.has(path))
     .map(({ path, text }) => ({ path, writes: priorWrites(text) }))
-    .filter(({ path, writes }) => writes > (PRIOR_LEFTOVERS[path]?.count ?? 0))
+    .filter(({ path, writes }) => writes > 0)
     .map(({ path, writes }) => `${path}: ${writes}`);
   expect(offenders).toEqual([]);
-});
-
-test('every leftover prior is still there, so the list only shrinks', () => {
-  const texts = new Map(sources().map(({ path, text }) => [path, text]));
-  const stale = Object.entries(PRIOR_LEFTOVERS)
-    .filter(([path, { count }]) => priorWrites(texts.get(path) ?? '') < count)
-    .map(([path]) => path);
-  expect(stale).toEqual([]);
 });
 
 test('every published floor is a fact about its own item', () => {

@@ -6,18 +6,14 @@ import { existsSync, readdirSync, rmSync } from 'node:fs';
 import { sweepTelegramMediaTemporaries, telegramMediaDiskLow, TELEGRAM_MEDIA_CHILD_SUFFIX, telegramLiveMediaFile, type DiskSpace } from './media-child.ts';
 import { join } from 'node:path';
 import { resolvedStorePath } from '../../core/source-placement.ts';
-import type { SourceItemIdentity } from '../../core/source-index/types.ts';
 import type { ArchiveSourceTarget } from '../archive-import/source-targets.ts';
 import { sameSpoolFile, spoolBoundaryDigest, spoolBoundaryHolds, spoolFileIdentity } from '../connector-store/spool-file-identity.ts';
 import { openConnectorStore } from '../../core/source-storage.ts';
 import type {
   LocalConnectorStore,
   ConnectorStoreSyncSummary,
-  ConnectorStoreTrustReconciliationSummary,
 } from '../connector-store/index.ts';
 import { createLaneTieredStoreSet, type TieredStoreSet } from '../connector-store/tiered-store-set.ts';
-import { compareTelegramVersions } from './record-builder.ts';
-import { applyTelegramProtectionClaims, telegramClaimKept, telegramProtectedLaneLookup } from './protection-claims.ts';
 import type { SecretLocationsIndex } from '../classification/secret-locations.ts';
 import type { TierLedger } from '../classification/tier-ledger.ts';
 import {
@@ -35,22 +31,17 @@ import {
 import {
   INTERNAL_TELEGRAM_MESSAGES_CORPUS_ID,
   PROTECTED_TELEGRAM_MESSAGES_CORPUS_ID,
-  type TelegramMessagesCorpusTrustDomain,
 } from './corpus-adapter.ts';
 import {
   TELEGRAM_CAPTURE_CONNECTOR_IDS,
-  TELEGRAM_TRUST_EVICTION_CONNECTOR_ID,
-  TELEGRAM_TRUST_RECONCILIATION_CONNECTOR_ID,
   createTelegramCaptureSpoolConnector,
   defaultTelegramCaptureSpoolDir,
   readTelegramCaptureSpool,
   readTelegramCaptureSpoolNewestCapturedAt,
-  readTelegramCaptureSpoolNewest,
   readTelegramCaptureHeartbeat,
   redactTelegramCaptureSpoolSecrets,
   telegramCaptureSpoolCursorState,
   telegramCaptureCursorOffset,
-  type TelegramCaptureSpoolRecord,
 } from './capture-spool-connector.ts';
 import { telegramArchiveTarget } from './archive-target.ts';
 import type { FileExtractionRuntime } from '../email-source/file-extraction-runtime.ts';
@@ -97,29 +88,16 @@ export interface TelegramConnectorStoreSyncReceipt {
     items_metadata_only: number;
     chunks_indexed: number;
     malformed_spool_records: number;
-    /**
-     * Identities whose trust readings disagreed and were resolved to the
-     * restrictive lane. Counts disagreements found inside one scan window AND
-     * disagreements only the stores can see, where the two readings are in
-     * different windows.
-     */
+    /** Historical domains that disagreed within this window; diagnostic only. */
     trust_conflict_items: number;
-    /**
-     * Copies the internal lane had already indexed and gave up because the
-     * secure-local lane claimed the same identity. A subset of
-     * `trust_conflict_items`: the ones that had already become readable in the
-     * looser lane before the disagreement surfaced.
-     */
+    /** Retired capture-claim evictions; always zero. */
     trust_conflict_evictions: number;
     /**
      * Spool records whose item was judged Secrets and that this pull
      * rewrote without their text (blanked ones included).
      */
     spool_records_redacted: number;
-    /**
-     * Items a protected claim reached whose newest version the spool no longer
-     * holds: the tier move took their stored copy into the protected lane.
-     */
+    /** Retired capture-claim moves; always zero. */
     trust_claims_moved: number;
     /** Lanes whose cursor named no place in the spool and were read again from its start. */
     spool_cursor_resets: number;
@@ -214,46 +192,13 @@ export function telegramSpoolPosition(cursor: string | undefined): string | unde
   return SPOOL_CURSOR.test(cursor) ? cursor : undefined;
 }
 
-/**
- * One bounded advance of the one-time sweep over duplication that PREDATES the
- * trust invariant: every identity the secure-local store actively holds gives
- * up its internal-lane copy. The running invariant in `pull` already keeps new
- * disagreements out, but it deliberately consults the stores only for records
- * in the current window — a pre-existing duplicate has both records behind
- * both cursors and no window will ever mention it again. Once the sweep's
- * durable marker reads complete, a call costs one run lookup and writes
- * nothing, so `pull` runs it unconditionally and the operator script can
- * drain it ahead of the schedule.
- */
-export function reconcileTelegramTrustStores(
-  stores: TelegramConnectorStores,
-  options: { maxItems?: number; maxWindows?: number } = {},
-): ConnectorStoreTrustReconciliationSummary {
-  return stores.internal.reconcileAgainstStricterStore({
-    stricter: stores.secureLocal,
-    reconcileConnectorId: TELEGRAM_TRUST_RECONCILIATION_CONNECTOR_ID,
-    evictionSyncConnectorId: TELEGRAM_TRUST_EVICTION_CONNECTOR_ID,
-    ownerConnectorId: TELEGRAM_CAPTURE_CONNECTOR_IDS.internal,
-    ownershipKind: 'observed',
-    // Same reasoning as the inline eviction: the removed row records the
-    // reading that won, not the lane it sat in.
-    trustTier: 'S4',
-    ...(options.maxItems !== undefined ? { maxItems: options.maxItems } : {}),
-    ...(options.maxWindows !== undefined ? { maxWindows: options.maxWindows } : {}),
-  });
-}
-
 export function createTelegramConnectorStoreSyncHandler(options: {
   stores: TelegramConnectorStores;
   spoolDir?: string;
   maxItems?: number;
   env?: Record<string, string | undefined>;
-  /** Per-pull window bounds for the one-time reconciliation sweep. */
-  reconciliation?: { maxItems?: number; maxWindows?: number };
   /** Test seam for proving the preflight receives the same bounded window. */
   preflightRead?: typeof readTelegramCaptureSpool;
-  /** Test seam: the tier move that takes a claimed item's stored copy into the protected lane. */
-  moveClaimed?: Parameters<typeof applyTelegramProtectionClaims>[0]['move'];
   /** Seconds of silence after which the feed reads stale. Defaults to the helper's own threshold. */
   spoolStaleThresholdSeconds?: number;
   now?: () => Date;
@@ -292,13 +237,9 @@ export function createTelegramConnectorStoreSyncHandler(options: {
   return {
     async pull(request = {}): Promise<TelegramConnectorStoreSyncReceipt> {
       const maxItems = telegramPullMaxItems(request.max_items ?? options.maxItems);
-      // Heal pre-invariant duplication first, bounded, so this pull's receipt
-      // carries the evictions and the stores it hands the window resolution
-      // are already one-lane wherever the sweep has reached.
-      const reconciliation = reconcileTelegramTrustStores(
-        options.stores,
-        options.reconciliation ?? {},
-      );
+      // Store placement and old capture domains are not privacy signals.
+      // Existing source-prior decisions are repaired by the shared automatic
+      // re-judge; never evict Personal content because a secure copy exists.
 
       // A cursor that names no place in the spool any more is dropped here,
       // so both the preflight and its lane read from the start instead of
@@ -369,58 +310,11 @@ export function createTelegramConnectorStoreSyncHandler(options: {
         ...(preflightCursor ? { cursor: preflightCursor } : {}),
       });
 
-      // The preflight sees the same bounded window the lane pages may consume.
-      // Handing both lanes the same resolution is what keeps a reclassified
-      // message in exactly one store once that claim reaches the window.
-      //
-      // A window is still not enough on its own. Once the internal lane has
-      // indexed a message, the reclassified record the helper appends later is
-      // in a window that no longer contains the internal one, so widening the
-      // scan can never prove the two readings disagree — the evidence is the
-      // stored copy, not the spool. Resolve against the stores as well, and
-      // the invariant becomes enforceable: an identity lives in exactly one
-      // lane, the most restrictive one ever claimed for it.
-      //
-      // The spool is appended to while this pull runs, and each lane reads it
-      // again after this resolution. What the resolution covered ends at the
-      // preflight's own position, so that position is also the furthest either
-      // lane may read: a record appended past it has been resolved against
-      // nothing, and admitting it is how both lanes come to hold one identity
-      // with no conflicting record left in any later window to say so.
-      // Deferring costs one pull — the next preflight starts exactly here,
-      // sees the record, and resolves it against both stores.
+      // Both historical input cursors remain resumable. Their domains only
+      // select records; every message is judged from its names and content,
+      // with owner rules applied by the shared classifier. No capture claim
+      // or store placement may override that verdict.
       const admitThroughCursor = preflight.resumeCursor ?? null;
-      const claims = resolveTelegramTrustClaims(preflight.records, preflight.trustConflicts, options.stores, tierSet);
-      const resolved = claims.resolvedTrustByItemId.size > 0
-        ? { resolvedTrustByItemId: claims.resolvedTrustByItemId }
-        : {};
-
-      // Before either lane writes, every claimed item leaves the ordinary
-      // lane, fail-closed (protection-claims.ts): its newest version goes
-      // into the protected lane (carried from the spool, or the stored copy
-      // moved by the tier move, hidden first), and the claim is kept. A step
-      // that fails throws, so neither lane's cursor passes the claim.
-      const protection = await applyTelegramProtectionClaims({
-        set: tierSet,
-        internal: options.stores.internal,
-        spoolDir,
-        claims: claims.secureClaims,
-        newestKnown: claims.moveWhole,
-        ...(options.moveClaimed ? { move: options.moveClaimed } : {}),
-      });
-      const eviction = { relinquishedLocalItemIds: protection.relinquished, counts: { itemsRelinquished: protection.relinquished.length } };
-      const conflictedItemIds = new Set(claims.resolvedTrustByItemId.keys());
-      for (const localItemId of eviction.relinquishedLocalItemIds) conflictedItemIds.add(localItemId);
-      // Sweep evictions are the same disagreement discovered later, so they
-      // land in the same receipt counts as the window's own.
-      for (const localItemId of reconciliation.relinquishedLocalItemIds) conflictedItemIds.add(localItemId);
-
-      // Both lanes run through the shared tier set, each with its own spool
-      // connector and cursor. A NEW message is routed by its recorded tiers
-      // (kept whole: a chat message is not split); one whose content is more
-      // private than its chat's lane is written to the secure lane inline,
-      // before the listing lane's page commits. Every existing message keeps
-      // the lane placement below.
       const run = await tierSet.syncLegs([
         {
           trustDomain: 'internal',
@@ -429,7 +323,6 @@ export function createTelegramConnectorStoreSyncHandler(options: {
             trustDomain: 'internal',
             admitThroughCursor,
             storedItem,
-            ...resolved,
           }),
           sync: {
             ...TELEGRAM_LANE_SYNC.internal,
@@ -443,10 +336,7 @@ export function createTelegramConnectorStoreSyncHandler(options: {
             spoolDir,
             trustDomain: 'secure_local',
             admitThroughCursor,
-            // A claimed record is judged against what the protected lane holds, never kept out by an ordinary copy.
-            storedItem: telegramProtectedLaneLookup(tierSet, new Set(claims.secureClaims.map((identity) => identity.localItemId))),
-            ...(protection.carried.length > 0 ? { carried: protection.carried } : {}),
-            ...resolved,
+            storedItem,
           }),
           sync: {
             ...TELEGRAM_LANE_SYNC.secure_local,
@@ -504,12 +394,12 @@ export function createTelegramConnectorStoreSyncHandler(options: {
         internal,
         secureLocal,
         preflight.malformedRecords,
-        conflictedItemIds.size,
-        eviction.counts.itemsRelinquished + reconciliation.itemsRelinquished,
+        preflight.trustConflicts.size,
+        0,
         redacted,
         redactionFailed,
         cursorResets,
-        protection.moved,
+        0,
         telegramCaptureLiveness(
           readTelegramCaptureSpoolNewestCapturedAt(spoolDir),
           readTelegramCaptureHeartbeat(spoolDir),
@@ -539,7 +429,6 @@ export function createTelegramConnectorStoreSyncHandler(options: {
         set: tierSet,
         connector,
         builder: telegramRecordBuilder({
-          trustDomain: 'internal',
           fetchItem: (localItemId) => connector.fetchItem(localItemId),
         }),
         account: TELEGRAM_PERSONAL_ACCOUNT_SCOPE,
@@ -640,89 +529,6 @@ export function telegramCaptureLiveness(
 export function telegramPullMaxItems(value: number | undefined): number {
   if (value === undefined || !Number.isFinite(value)) return DEFAULT_TELEGRAM_PULL_MAX_ITEMS;
   return Math.max(1, Math.min(MAX_TELEGRAM_PULL_MAX_ITEMS, Math.trunc(value)));
-}
-
-interface TelegramTrustClaims {
-  /**
-   * localItemId -> the one lane a disagreement resolved to. Passed to both
-   * lane connectors so neither writes a copy the other owns.
-   */
-  resolvedTrustByItemId: Map<string, TelegramMessagesCorpusTrustDomain>;
-  /** Identities the secure-local lane claims, whatever the internal lane holds. */
-  secureClaims: SourceItemIdentity[];
-  /**
-   * Claimed items with a version newer than the claim's own record somewhere
-   * (the internal copy, a looser record of this window): they move whole.
-   */
-  moveWhole: Map<string, string | undefined>;
-}
-
-/**
- * Fold what this window says about trust together with what the stores already
- * hold. The window alone decides only the disagreements whose two records both
- * fall inside it; the stores decide the rest, in both directions:
- *
- * - a secure-local record here for an identity the internal lane already
- *   indexed — the reclassification case, resolved by evicting that copy;
- * - an internal record here for an identity the secure lane already holds —
- *   the mirror, resolved by refusing to admit the looser copy at all.
- *
- * One indexed lookup per record in the window, which in steady state is a
- * handful and on a first backfill is one cheap probe per message.
- */
-function resolveTelegramTrustClaims(
-  records: readonly TelegramCaptureSpoolRecord[],
-  spoolConflicts: ReadonlyMap<string, TelegramMessagesCorpusTrustDomain>,
-  stores: TelegramConnectorStores,
-  set: TieredStoreSet,
-): TelegramTrustClaims {
-  const resolvedTrustByItemId = new Map(spoolConflicts);
-  // Deduplicated by identity: an edited message has several records in one
-  // window and must not be probed, evicted or counted more than once.
-  const secureClaims = new Map<string, SourceItemIdentity>();
-  // localItemId -> the newest version known to exist, which the move must carry.
-  const moveWhole = new Map<string, string | undefined>();
-  const newer = (a: string | undefined, b: string | undefined): boolean =>
-    a !== undefined && b !== undefined && compareTelegramVersions(a, b) > 0;
-  for (const record of records) {
-    const identity = record.capturedItem.item.identity;
-    // The spool read already collapsed each identity to its winning reading,
-    // so a record still carrying `secure_local` here IS the secure lane's claim.
-    if (record.capturedItem.trustDomain === 'secure_local') {
-      secureClaims.set(identity.localItemId, identity);
-      const internal = stores.internal.storedItemState(identity);
-      // A looser record of this window was set aside by the read; the spool says which is newest.
-      if (internal && !internal.tombstoned && newer(internal.version, identity.sourceVersion)) {
-        moveWhole.set(identity.localItemId, internal.version);
-      } else if (spoolConflicts.has(identity.localItemId)) {
-        moveWhole.set(identity.localItemId, identity.sourceVersion);
-      }
-      continue;
-    }
-    // The secure lane's own row, or a claim kept from a record already read past: the item is protected.
-    const claimed = telegramClaimKept(set, identity.localItemId);
-    if (!claimed && !secureLaneClaims(stores, set, identity)) continue;
-    resolvedTrustByItemId.set(identity.localItemId, 'secure_local');
-    secureClaims.set(identity.localItemId, identity);
-    // This looser record is newer than the claimed copy: it is the version that moves.
-    if (newer(identity.sourceVersion, stores.secureLocal.storedItemState(identity)?.version)) moveWhole.set(identity.localItemId, identity.sourceVersion);
-  }
-  return { resolvedTrustByItemId, secureClaims: [...secureClaims.values()], moveWhole };
-}
-
-/**
- * Whether the secure-local LANE claims an item: its row in the secure store
- * was written by that lane, or it predates tier routing (no ledger record), as
- * every pre-tier row the trust invariant was written for does. A row the tier
- * set placed there for its content, or one an imported export brought (held
- * Private until judged), is not the lane's claim: the item's chat is still an
- * ordinary chat, its later edits keep coming through the internal lane, and
- * the set places each version by its own tiers.
- */
-function secureLaneClaims(stores: TelegramConnectorStores, set: TieredStoreSet, identity: SourceItemIdentity): boolean {
-  if (!stores.secureLocal.itemPresence(identity).active) return false;
-  if (stores.secureLocal.itemOwnerPresent(identity, TELEGRAM_CAPTURE_CONNECTOR_IDS.secure_local, 'observed')) return true;
-  return set.ledger.getCurrent(identity) === undefined;
 }
 
 function cursorFile(cursor: string): string {

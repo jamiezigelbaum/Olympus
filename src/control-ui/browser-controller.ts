@@ -1226,11 +1226,18 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
       const setupSheet = card.querySelector<HTMLElement>('[data-messaging-setup]');
       if (setupSheet) {
         const intro = setupSheet.querySelector<HTMLElement>('[data-messaging-setup-intro]');
-        const active = !['idle', 'failed', 'cancelled', 'completed', 'complete', 'paired', 'not_paired'].includes(state);
+        const active = !['idle', 'failed', 'cancelled', 'completed', 'complete', 'paired', 'not_paired', 'scope_selection_required'].includes(state);
         if (intro) intro.hidden = active || state === 'failed';
-        const cancel = setupSheet.querySelector<HTMLElement>('[data-messaging-kind="cancel"]');
-        if (cancel) cancel.hidden = !active;
-        if (operation !== 'status' || (restoring && (active || state === 'failed'))) {
+        const cancel = card.querySelector<HTMLElement>('[data-messaging-kind="cancel"]');
+        if (cancel) {
+          const choosingScope = state === 'scope_selection_required';
+          cancel.hidden = !active && !choosingScope;
+          // A pending grant can still be cancelled after the sign-in sheet closes.
+          (choosingScope ? card : setupSheet).append(cancel);
+        }
+        const choosingChats = operation === 'chats' || operation === 'scope' || ['scope_selection_required', 'paired', 'complete', 'completed'].includes(state);
+        if (choosingChats) setSheetOpen(setupSheet, false);
+        else if (operation !== 'status' || (restoring && (active || state === 'failed'))) {
           queryAll<HTMLElement>('.sheet.on').forEach(other => { if (other !== setupSheet) setSheetOpen(other, false); });
           setSheetOpen(setupSheet, true);
         }
@@ -1305,8 +1312,9 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
           for (const entry of body.chats) {
             if (!entry || typeof entry !== 'object') continue;
             const chat = entry as Record<string, unknown>;
-            if (typeof chat.chatScope !== 'string' || typeof chat.title !== 'string') continue;
-            const line = document.createElement('label'); line.style.display = 'block'; const check = document.createElement('input'); check.type = 'checkbox'; check.name = 'chatScope'; check.value = chat.chatScope; check.checked = selected.includes(chat.chatScope); line.append(check, ' ' + chat.title); form.append(line);
+            if (typeof chat.chatScope !== 'string') continue;
+            const chatLabel = typeof chat.title === 'string' && chat.title.trim() ? chat.title : 'Chat ' + chat.chatScope.split(':').at(-1);
+            const line = document.createElement('label'); line.style.display = 'block'; const check = document.createElement('input'); check.type = 'checkbox'; check.name = 'chatScope'; check.value = chat.chatScope; check.checked = selected.includes(chat.chatScope); line.append(check, ' ' + chatLabel); form.append(line);
           }
           const button = document.createElement('button'); button.type = 'submit'; button.className = 'btn'; button.textContent = choosingScope ? 'Read selected chats' : 'Save chat choices'; form.append(button);
           if (choosingScope) {

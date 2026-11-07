@@ -4,7 +4,7 @@
 // provider already runs one forward pass at a time.
 
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
-import { existsSync, statSync } from 'node:fs';
+import { closeSync, constants, existsSync, fstatSync, openSync, readdirSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { delimiter, dirname, isAbsolute, join } from 'node:path';
 import { createInterface } from 'node:readline';
@@ -67,6 +67,8 @@ export interface LiteRtEmbedderOptions {
   threads: number;
   /** `cpu` keeps the model off the GPU. */
   device: 'auto' | 'cpu';
+  /** Test seam for the Linux render-device check; other platforms keep their native auto selection. */
+  gpuAvailable?: () => boolean;
   maxInputTokens: number;
   /**
    * Image tokens per picture for a model that reads images; absent keeps the
@@ -296,7 +298,8 @@ class HelperProcess {
  * back on the CPU, whose vectors match the GPU's (cosine 0.9996, M3).
  */
 export async function startLiteRtEmbedder(options: LiteRtEmbedderOptions): Promise<LiteRtEmbedder> {
-  let device: 'auto' | 'cpu' = options.device;
+  let device: 'auto' | 'cpu' = options.device === 'auto' && process.platform === 'linux'
+    && !(options.gpuAvailable ?? linuxGpuAvailable)() ? 'cpu' : options.device;
   let helper: HelperProcess;
   try {
     helper = await HelperProcess.start(options, device);
@@ -328,6 +331,24 @@ export async function startLiteRtEmbedder(options: LiteRtEmbedderOptions): Promi
       await helper.stop();
     },
   };
+}
+
+/** No native GPU initialization on headless Linux or when the service cannot
+ * open a render device. Merely having a driver library (including a software
+ * renderer) is not evidence of hardware access. A driver failure after this
+ * check still uses the isolated helper's existing CPU fallback. */
+export function linuxGpuAvailable(deviceDirectory = '/dev/dri'): boolean {
+  try {
+    return readdirSync(deviceDirectory).some(name => {
+      if (!/^renderD[0-9]+$/.test(name)) return false;
+      let fd: number | undefined;
+      try {
+        fd = openSync(join(deviceDirectory, name), constants.O_RDWR | constants.O_NONBLOCK);
+        return fstatSync(fd).isCharacterDevice();
+      } catch { return false; }
+      finally { if (fd !== undefined) closeSync(fd); }
+    });
+  } catch { return false; }
 }
 
 function helperPath(): string {

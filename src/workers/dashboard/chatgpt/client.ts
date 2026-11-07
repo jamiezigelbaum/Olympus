@@ -1018,10 +1018,11 @@ export function chatgptDashboardClient(
     const current = connectionState();
     if (!current || current === 'ready') return null;
     const copy = (C as Any)[current] || C.relay_unavailable;
-    const tone = current === 'installing' ? 'info' : 'warn';
+    const starting = current === 'installing' || current === 'restarting';
+    const tone = starting ? 'info' : 'warn';
     const banner = el('section', 'banner ' + tone);
-    banner.setAttribute('role', current === 'installing' ? 'status' : 'alert');
-    add(banner, icon(current === 'installing' ? '…' : '!'));
+    banner.setAttribute('role', starting ? 'status' : 'alert');
+    add(banner, icon(starting ? '…' : '!'));
     const body = add(el('div', 'banner-body'), el('p', 'banner-title', copy.title));
     const conn = state.data ? state.data.connection : {};
     if (current === 'installing' && conn.progress) {
@@ -1490,12 +1491,25 @@ export function chatgptDashboardClient(
     const name = outcome && typeof outcome.name === 'string' ? outcome.name : '';
     if (!name) return '';
     const archive = typeof outcome.archiveName === 'string' ? outcome.archiveName : typeof outcome.archive_name === 'string' ? outcome.archive_name : '';
-    if (outcome.status === 'checking') return fill(A.checking, { name });
     if (outcome.status === 'already_imported') return archive ? fill(A.already, { name, archive }) : fill(A.alreadyUnnamed, { name });
+    const left = skippedLine(outcome.skipped);
+    if (outcome.status === 'checking') return fill(A.checking, { name }) + left;
     // A start says where the import shows: the card of the source it joined, or Other archives.
     const source = outcome.source && typeof outcome.source.label === 'string' ? outcome.source.label : '';
-    if (outcome.status === 'started') return source ? fill(A.startedIn, { name, source }) : fill(A.started, { name });
+    if (outcome.status === 'started') return (source ? fill(A.startedIn, { name, source }) : fill(A.started, { name })) + left;
     return '';
+  }
+
+  /** What a drop left out because the browser could not read it, named (the first few) after the outcome. */
+  function skippedLine(skipped: Any): string {
+    const A = H.copy.archives;
+    const paths = Array.isArray(skipped) ? skipped.filter((path: Any) => typeof path === 'string' && path) : [];
+    if (!paths.length) return '';
+    if (paths.length === 1) return ' ' + fill(A.skippedOne, { path: paths[0] });
+    const shown = paths.slice(0, 3).join(', ');
+    return ' ' + (paths.length > 3
+      ? fill(A.skippedMore, { n: String(paths.length), paths: shown, more: String(paths.length - 3) })
+      : fill(A.skippedMany, { n: String(paths.length), paths: shown }));
   }
 
   /** What an Archives row control did, from the list read before it (names are the computer's own). */
@@ -2485,7 +2499,7 @@ export function chatgptDashboardClient(
    * failed.
    */
   function modelInstall(models: DashboardModels, which: 'search' | 'answers' | 'transcription'): ModelInstallLine | null {
-    const source: Partial<ModelInstall> | undefined = which === 'search'
+    const source = which === 'search'
       ? models.embedding
       : which === 'answers' ? (models.answers ? models.answers.install : undefined) : models.transcription as Partial<ModelInstall> | undefined;
     if (!source || typeof source !== 'object') return null;
@@ -2517,6 +2531,7 @@ export function chatgptDashboardClient(
     let ready: string = P.modelReady;
     if (embedding.state === 'downloading') ready = fill(P.modelDownloading, { percent: percent(embedding.percent ?? 0) });
     else if (embedding.state === 'verifying') ready = P.modelChecking;
+    else if (embedding.state === 'loading') ready = P.modelGettingReady;
     else if (embedding.state === 'failed') ready = notWorking(embedding.failedReason);
     const answers = models.answers;
     const answersWords = answers ? String(answers.label || '') + ' · ' + (answers.ready ? P.modelReady : P.modelNotReady) : '';

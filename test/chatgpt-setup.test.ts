@@ -1410,7 +1410,15 @@ describe('dashboard privacy field', () => {
       privacy: { configured: true, pendingCount: 4, ruleCount: 0, classifierAwaitingApproval: true },
     }));
     const item = waiting.needsYou.find((entry) => entry.id === 'privacy:classifier_approval');
-    expect(item?.sentence).toContain('olympus tier classifier approve --why');
+    expect(item?.sentence).toContain('On the machine running Olympus');
+    expect(item?.sentence).toContain('"$HOME/.local/bin/olympus" tier classifier approve --why');
+    expect(item?.sentence).not.toContain('On your computer');
+    const remote = copyDashboardViewModel(buildChatGptDashboardViewModel(emptyView(), {
+      privacy: { configured: true, pendingCount: 4, ruleCount: 0, classifierAwaitingApproval: true },
+      remote: { port: 8010, agent: true, sshTarget: 'owner@example.test' },
+    }));
+    expect(remote.needsYou.find((entry) => entry.id === 'privacy:classifier_approval')?.sentence)
+      .toContain('On the server running Olympus, run "$HOME/.local/bin/olympus" tier classifier approve --why');
     expect(item?.fix.tool).toBe('olympus_dashboard');
     expect(item?.fix.href).toContain('/open/fix/models/');
     // The view's privacy field is unchanged: the approval is an ask, not a count.

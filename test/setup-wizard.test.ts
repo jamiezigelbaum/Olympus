@@ -412,7 +412,8 @@ describe('olympus setup wizard', () => {
       // worker and a guide whose very next step was to verify it running.
       expect(manager.calls).toContain('systemctl --user enable --now olympus-worker.service');
       expect(result.worker.state).toBe('active');
-      expect(result.worker.next).toBe('The managed worker is running; open Olympus in OpenClaw. Use olympus dashboard for standalone access.');
+      expect(result.worker.next).toBe(`The managed worker is running; open Olympus in OpenClaw. Use ${result.worker.install.cli_command} dashboard for standalone access.`);
+      expect(result.dashboard.next).toContain(`${result.worker.install.cli_command} dashboard --no-open`);
       expect(result.worker).not.toHaveProperty('activation_detail');
 
       // olympus worker install stays the idempotent no-op on top of it: the

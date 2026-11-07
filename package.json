@@ -2,7 +2,7 @@
   "name": "olympus-source-checkout",
   "version": "1.3.4",
   "private": true,
-  "description": "Sovereignty-aware OpenClaw source answers across seven personal data providers.",
+  "description": "Olympus is a private second brain that lives on your computer and works with any AI. You decide what each model sees.",
   "license": "MIT",
   "type": "module",
   "bin": {

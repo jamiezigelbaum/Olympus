@@ -1030,9 +1030,13 @@ it. Setup's own output says so, under `worker`: `worker.state` is the state
 the service manager reported when setup returned, `worker.next` is the step
 that state calls for, and `worker.activation_detail` appears only when the
 start did not take. On the healthy path `worker.state` is `active` and
-`worker.next` reads `The managed worker is running; open Olympus in OpenClaw.
-Use olympus dashboard for standalone access.` Read those three fields before you run anything here —
-they usually make this step a confirmation.
+`worker.next` names the full command for standalone dashboard access.
+`worker.install.cli_command` works even when `~/.local/bin` is absent from the
+login PATH. Run it on the machine hosting Olympus (on a server, that server).
+Setup creates `~/.local/bin/olympus` on Linux and macOS, updates only launchers
+with its ownership marker, and preserves user and standalone launchers.
+Read those three fields before you run anything here — they usually make this
+step a confirmation.
 
 Also check setup's `ok` and `worker.activation`: a failed start or policy
 restart exits nonzero with `ok: false` and `activation: failed`. An old worker

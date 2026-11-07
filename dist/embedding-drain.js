@@ -4085,7 +4085,13 @@ class ProgressReporter {
     this.now = now ?? (() => new Date);
     this.listener = listener;
     this.lastWriteMs = 0;
+    let previouslyReady = false;
+    try {
+      const previous = JSON.parse(readFileSync8(statusPath, "utf8"));
+      previouslyReady = previous.modelId === modelId && (previous.state === "ready" || previous.previouslyReady === true);
+    } catch {}
     this.status = {
+      ...previouslyReady ? { previouslyReady: true } : {},
       state: "not_started",
       modelId,
       percent: 0,
@@ -4107,7 +4113,7 @@ class ProgressReporter {
   }
   set(state, label, percent = this.status.percent) {
     const { failure: _failure, ...rest } = this.status;
-    this.status = { ...rest, state, label, percent };
+    this.status = { ...rest, state, label, percent, ...state === "ready" ? { previouslyReady: true } : {} };
     this.emit(true);
   }
   touch() {
@@ -11404,6 +11410,11 @@ var init_first_run_privacy = __esm(() => {
   init_sovereignty();
 });
 
+// src/core/worker-cli-launcher.ts
+var init_worker_cli_launcher = __esm(() => {
+  init_atomic_file();
+});
+
 // src/core/openclaw-executable.ts
 var init_openclaw_executable = () => {};
 
@@ -11412,6 +11423,7 @@ var WORKER_LOG_TAIL_BYTES;
 var init_worker_service = __esm(() => {
   init_linux_engine_layout();
   init_atomic_file();
+  init_worker_cli_launcher();
   init_openclaw_executable();
   init_operation_error();
   init_worker_auth();
@@ -17341,9 +17353,14 @@ class TierLedger {
           AND i.metadata_forced = 0 AND i.content_tier != 'secrets'
           AND i.decided_by IN ('default', 'sensitive_detector', 'sniffer', 'move', 'source_prior', 'content_rule')
           -- A held row's stamp names the exact decision it re-read, so it
-          -- never outlives that decision (rejudgeKeyForHeld).
+          -- never outlives that decision (rejudgeKeyForHeld). So does a row
+          -- resting on a retired prior: a prior replayed after a completed
+          -- re-judge is a new decision and invalidates the old stamp, while a
+          -- re-read that changed nothing (no text) stays settled (markRejudged).
           AND (i.rejudged_key IS NULL OR i.rejudged_key != CASE WHEN i.state = 'pending'
             THEN ? || char(0) || 'held' || char(0) || i.generation || char(0) || i.decided_at
+            WHEN instr(i.reasons_json, '"metadata:prior:source_') > 0
+            THEN ? || char(0) || 'prior' || char(0) || i.generation || char(0) || i.decided_at
             ELSE ? END)
           -- Settled by a verdict under this classifier and sniffer (markJudged):
           -- not re-asked while its decision stays settled under this
@@ -17405,7 +17422,7 @@ class TierLedger {
         END AS rejudge_cause
       FROM win i
       ORDER BY i.provider, i.account_scope, i.conversation_key, i.provider_item_id
-    `).all(after ? 1 : null, ...after ?? [null, null, null, null], scanLimit, key, key, key, options.engineVersion, options.engineVersion, options.snifferId ?? null, JSON.stringify(`content:rule_sniffer:${options.snifferId}`), options.snifferId ?? null, JSON.stringify(`content:rule_sniffer:${options.snifferId}`), options.engineVersion, metadataMarker, metadataMarker ?? "", snifferMarker, snifferMarker ?? "", options.engineVersion, metadataMarker, metadataMarker ?? "");
+    `).all(after ? 1 : null, ...after ?? [null, null, null, null], scanLimit, key, key, key, key, options.engineVersion, options.engineVersion, options.snifferId ?? null, JSON.stringify(`content:rule_sniffer:${options.snifferId}`), options.snifferId ?? null, JSON.stringify(`content:rule_sniffer:${options.snifferId}`), options.engineVersion, metadataMarker, metadataMarker ?? "", snifferMarker, snifferMarker ?? "", options.engineVersion, metadataMarker, metadataMarker ?? "");
     const records = [];
     const causes = [];
     let last;
@@ -17438,8 +17455,9 @@ class TierLedger {
   }
   markRejudged(identity, key) {
     this.db.query(`
-      UPDATE tier_items SET rejudged_key = ?
-      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+      UPDATE tier_items SET rejudged_key = CASE WHEN instr(reasons_json, '"metadata:prior:source_') > 0
+        THEN ?1 || char(0) || 'prior' || char(0) || generation || char(0) || decided_at ELSE ?1 END
+      WHERE provider = ?2 AND account_scope = ?3 AND conversation_key = ?4 AND provider_item_id = ?5
     `).run(rejudgeKey(key.engineVersion, key.snifferId), ...idParams(identity));
   }
   markJudged(identity, key) {
@@ -33759,7 +33777,7 @@ var init_tier_content_purge = __esm(() => {
 });
 // src/workers/source-index/built-in-embedding/litert-runtime.ts
 import { spawn } from "node:child_process";
-import { existsSync as existsSync21, statSync as statSync12 } from "node:fs";
+import { closeSync as closeSync10, constants as constants4, existsSync as existsSync21, fstatSync as fstatSync2, openSync as openSync10, readdirSync as readdirSync3, statSync as statSync12 } from "node:fs";
 import { homedir as homedir10 } from "node:os";
 import { delimiter as delimiter2, dirname as dirname26, isAbsolute as isAbsolute11, join as join24 } from "node:path";
 import { createInterface } from "node:readline";
@@ -33935,7 +33953,7 @@ class HelperProcess {
   }
 }
 async function startLiteRtEmbedder(options) {
-  let device = options.device;
+  let device = options.device === "auto" && process.platform === "linux" && !(options.gpuAvailable ?? linuxGpuAvailable)() ? "cpu" : options.device;
   let helper;
   try {
     helper = await HelperProcess.start(options, device);
@@ -33973,6 +33991,26 @@ async function startLiteRtEmbedder(options) {
       await helper.stop();
     }
   };
+}
+function linuxGpuAvailable(deviceDirectory = "/dev/dri") {
+  try {
+    return readdirSync3(deviceDirectory).some((name) => {
+      if (!/^renderD[0-9]+$/.test(name))
+        return false;
+      let fd;
+      try {
+        fd = openSync10(join24(deviceDirectory, name), constants4.O_RDWR | constants4.O_NONBLOCK);
+        return fstatSync2(fd).isCharacterDevice();
+      } catch {
+        return false;
+      } finally {
+        if (fd !== undefined)
+          closeSync10(fd);
+      }
+    });
+  } catch {
+    return false;
+  }
 }
 function helperPath() {
   const here = dirname26(fileURLToPath(import.meta.url));
@@ -37614,13 +37652,6 @@ var init_capture_spool_connector = __esm(() => {
   ]);
 });
 
-// src/workers/telegram-messages/protection-claims.ts
-var init_protection_claims = __esm(() => {
-  init_tier_move();
-  init_capture_spool_connector();
-  init_record_builder();
-});
-
 // src/workers/archive-import/byte-source.ts
 import * as zlib from "node:zlib";
 function tableCrc32(data2, value) {
@@ -39562,8 +39593,6 @@ var init_store_sync2 = __esm(() => {
   init_spool_file_identity();
   init_source_storage();
   init_tiered_store_set();
-  init_record_builder();
-  init_protection_claims();
   init_capture_spool_secrets();
   init_capture_freshness();
   init_corpus_adapter4();
@@ -40131,6 +40160,9 @@ var init_vocabulary = __esm(() => {
       title: "Olympus is setting up on your computer…",
       disabledReason: "Available once Olympus is set up"
     },
+    restarting: {
+      title: "Olympus is restarting. Search is back in a moment."
+    },
     mac_offline: {
       title: "Your computer is offline or asleep, so answers are paused",
       lastSeen: "Last seen {when}",
@@ -40552,6 +40584,9 @@ var init_vocabulary = __esm(() => {
     checking: "Checking whether {name} is already imported…",
     already: "{name} is already imported as {archive}.",
     alreadyUnnamed: "{name} is already imported.",
+    skippedOne: "This computer could not read {path}, so it was left out.",
+    skippedMany: "This computer could not read {n} files, so they were left out: {paths}.",
+    skippedMore: "This computer could not read {n} files, so they were left out: {paths} and {more} more.",
     removing: "Removing {name}.",
     declined: "Declined.",
     needsYou: {
@@ -42203,7 +42238,7 @@ var init_linux_desktop_opener = __esm(() => {
 
 // src/core/linux-owner-bridge.ts
 import { createHmac, createHash as createHash23, randomBytes as randomBytes3, timingSafeEqual } from "node:crypto";
-import { closeSync as closeSync10, openSync as openSync10, writeFileSync as writeFileSync5, unlinkSync } from "node:fs";
+import { closeSync as closeSync11, openSync as openSync11, writeFileSync as writeFileSync5, unlinkSync } from "node:fs";
 import { dirname as dirname31, join as join31 } from "node:path";
 function randomOwnerHostname() {
   const bytes = randomBytes3(16);
@@ -42463,11 +42498,11 @@ class LinuxOwnerBridge {
  location.replace(${JSON.stringify(url)});
  }catch{message.textContent=${JSON.stringify("This browser cannot reach the private *.localhost session origin. The private ticket was not sent. " + DESKTOP_BRIDGE_REMEDY)};}
 })();</script>`;
-    const fd2 = openSync10(path, "wx", 384);
+    const fd2 = openSync11(path, "wx", 384);
     try {
       writeFileSync5(fd2, html2);
     } finally {
-      closeSync10(fd2);
+      closeSync11(fd2);
     }
     const ticket = { value, challenge, target, path, expires: this.now() + TICKET_MS };
     this.tickets.set(lane, ticket);
@@ -43133,7 +43168,7 @@ var init_messaging_runtime = __esm(() => {
 });
 
 // src/workers/credential-broker/unpaired-sources.ts
-import { closeSync as closeSync11, constants as constants4, fstatSync as fstatSync2, lstatSync as lstatSync12, openSync as openSync11, readFileSync as readFileSync22 } from "node:fs";
+import { closeSync as closeSync12, constants as constants5, fstatSync as fstatSync3, lstatSync as lstatSync12, openSync as openSync12, readFileSync as readFileSync22 } from "node:fs";
 function unpairedSourcesPath(registryPath) {
   return `${registryPath}.unpaired`;
 }
@@ -43157,10 +43192,10 @@ function readRecordText(path) {
   const node = inspectRecordNode(path);
   if (node.kind !== "file")
     return node;
-  const flags = constants4.O_RDONLY | (constants4.O_NOFOLLOW ?? 0) | (constants4.O_NONBLOCK ?? 0);
+  const flags = constants5.O_RDONLY | (constants5.O_NOFOLLOW ?? 0) | (constants5.O_NONBLOCK ?? 0);
   let fd2;
   try {
-    fd2 = openSync11(path, flags);
+    fd2 = openSync12(path, flags);
   } catch (error) {
     const code = error.code ?? "UNKNOWN";
     if (code === "ENOENT" || code === "ENOTDIR")
@@ -43168,7 +43203,7 @@ function readRecordText(path) {
     return { kind: "unreadable", reason: `${code}: ${error.message}` };
   }
   try {
-    const opened = fstatSync2(fd2);
+    const opened = fstatSync3(fd2);
     if (!opened.isFile() || opened.dev !== node.stat.dev || opened.ino !== node.stat.ino) {
       return { kind: "unreadable", reason: "record path changed between inspection and opening" };
     }
@@ -43178,7 +43213,7 @@ function readRecordText(path) {
     return { kind: "unreadable", reason: `${code}: ${error.message}` };
   } finally {
     try {
-      closeSync11(fd2);
+      closeSync12(fd2);
     } catch {}
   }
 }
@@ -43351,6 +43386,7 @@ var init_native_process_service = () => {};
 
 // src/core/native-worker-service.ts
 var init_native_worker_service = __esm(() => {
+  init_worker_cli_launcher();
   init_data_owner_lock();
   init_linux_owner_bridge_host();
   init_worker_transport();
@@ -44237,10 +44273,11 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     if (!current2 || current2 === "ready")
       return null;
     const copy = C[current2] || C.relay_unavailable;
-    const tone = current2 === "installing" ? "info" : "warn";
+    const starting = current2 === "installing" || current2 === "restarting";
+    const tone = starting ? "info" : "warn";
     const banner = el("section", "banner " + tone);
-    banner.setAttribute("role", current2 === "installing" ? "status" : "alert");
-    add(banner, icon(current2 === "installing" ? "…" : "!"));
+    banner.setAttribute("role", starting ? "status" : "alert");
+    add(banner, icon(starting ? "…" : "!"));
     const body = add(el("div", "banner-body"), el("p", "banner-title", copy.title));
     const conn = state.data ? state.data.connection : {};
     if (current2 === "installing" && conn.progress) {
@@ -44627,14 +44664,25 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     if (!name)
       return "";
     const archive = typeof outcome.archiveName === "string" ? outcome.archiveName : typeof outcome.archive_name === "string" ? outcome.archive_name : "";
-    if (outcome.status === "checking")
-      return fill2(A.checking, { name });
     if (outcome.status === "already_imported")
       return archive ? fill2(A.already, { name, archive }) : fill2(A.alreadyUnnamed, { name });
+    const left = skippedLine(outcome.skipped);
+    if (outcome.status === "checking")
+      return fill2(A.checking, { name }) + left;
     const source = outcome.source && typeof outcome.source.label === "string" ? outcome.source.label : "";
     if (outcome.status === "started")
-      return source ? fill2(A.startedIn, { name, source }) : fill2(A.started, { name });
+      return (source ? fill2(A.startedIn, { name, source }) : fill2(A.started, { name })) + left;
     return "";
+  }
+  function skippedLine(skipped) {
+    const A = H.copy.archives;
+    const paths = Array.isArray(skipped) ? skipped.filter((path) => typeof path === "string" && path) : [];
+    if (!paths.length)
+      return "";
+    if (paths.length === 1)
+      return " " + fill2(A.skippedOne, { path: paths[0] });
+    const shown = paths.slice(0, 3).join(", ");
+    return " " + (paths.length > 3 ? fill2(A.skippedMore, { n: String(paths.length), paths: shown, more: String(paths.length - 3) }) : fill2(A.skippedMany, { n: String(paths.length), paths: shown }));
   }
   function archiveNotice(name, args, result) {
     const A = H.copy.archives;
@@ -45490,6 +45538,8 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
       ready = fill2(P.modelDownloading, { percent: percent(embedding.percent ?? 0) });
     else if (embedding.state === "verifying")
       ready = P.modelChecking;
+    else if (embedding.state === "loading")
+      ready = P.modelGettingReady;
     else if (embedding.state === "failed")
       ready = notWorking(embedding.failedReason);
     const answers = models.answers;
@@ -46627,7 +46677,8 @@ function chatgptPickerProgram(kit) {
       confirm: null,
       poll: null,
       paint: null,
-      input: null
+      input: null,
+      skipped: []
     };
     kit.render("picker:back");
   }
@@ -46695,33 +46746,56 @@ function chatgptPickerProgram(kit) {
     drop.access = access && typeof access.message === "string" && access.message ? access : null;
     kit.render("picker:drop:retry");
   }
-  function entryFiles(entry, prefix, found, gone) {
+  function entryFiles(entry, prefix, found, gone, skipped) {
     if (gone() || !entry)
       return Promise.resolve();
     if (entry.isFile) {
-      return new Promise((resolve10, reject) => {
-        entry.file((file) => {
-          found.push({ file, path: prefix + entry.name });
+      return new Promise((resolve10) => {
+        const path = prefix + entry.name;
+        const skip = () => {
+          skipped.push(path);
           resolve10();
-        }, reject);
+        };
+        try {
+          entry.file((file) => {
+            found.push({ file, path });
+            resolve10();
+          }, skip);
+        } catch {
+          skip();
+        }
       });
     }
     if (!entry.isDirectory)
       return Promise.resolve();
-    const reader = entry.createReader();
     const here = prefix + entry.name + "/";
+    let reader;
+    try {
+      reader = entry.createReader();
+    } catch {
+      skipped.push(here);
+      return Promise.resolve();
+    }
     const next = () => new Promise((resolve10, reject) => {
-      reader.readEntries((batch) => {
-        if (!batch.length || gone()) {
-          resolve10();
-          return;
-        }
-        batch.reduce((chain, child) => chain.then(() => entryFiles(child, here, found, gone)), Promise.resolve()).then(() => next()).then(resolve10, reject);
-      }, reject);
+      const unread = () => {
+        skipped.push(here);
+        resolve10();
+      };
+      try {
+        reader.readEntries((batch) => {
+          if (!batch.length || gone()) {
+            resolve10();
+            return;
+          }
+          batch.reduce((chain, child) => chain.then(() => entryFiles(child, here, found, gone, skipped)), Promise.resolve()).then(() => next()).then(resolve10, reject);
+        }, unread);
+      } catch {
+        unread();
+      }
     });
     return next();
   }
-  function dropped(event, gone) {
+  function dropped(event, gone, skipped) {
     const transfer = event.dataTransfer;
     if (!transfer)
       return null;
@@ -46747,7 +46821,7 @@ function chatgptPickerProgram(kit) {
     if (!entries.length && !plain.length)
       return null;
     const found = plain.slice();
-    return entries.reduce((chain, entry) => chain.then(() => entryFiles(entry, "", found, gone)), Promise.resolve()).then(() => found);
+    return entries.reduce((chain, entry) => chain.then(() => entryFiles(entry, "", found, gone, skipped)), Promise.resolve()).then(() => found);
   }
   function chosen(input) {
     const items = Array.prototype.slice.call(input.files || []).map((file) => ({ file, path: file.webkitRelativePath || file.name }));
@@ -46775,7 +46849,7 @@ function chatgptPickerProgram(kit) {
         kit.render("picker:drop:cancel");
     }, UPLOAD_PAINT_MS);
   }
-  function beginUpload(collect) {
+  function beginUpload(collect, skipped = []) {
     if (!drop || drop.phase !== "idle" && drop.phase !== "error")
       return;
     const mine = drop.mine;
@@ -46787,12 +46861,13 @@ function chatgptPickerProgram(kit) {
     drop.name = "";
     drop.sent = 0;
     drop.filesDone = 0;
+    drop.skipped = skipped;
     kit.render("picker:drop:cancel");
     collect().then((items) => {
       if (!dropLive(mine, attempt))
         return;
       if (!items.length) {
-        dropFail(drop.words.empty);
+        dropFail(skipped.length ? drop.words.unreadable : drop.words.empty);
         return;
       }
       let total = 0;
@@ -46931,6 +47006,8 @@ function chatgptPickerProgram(kit) {
         picked.archiveName = content.archive_name;
       if (status === "started" && content.source && typeof content.source.label === "string" && content.source.label)
         picked.source = { label: content.source.label };
+      if (status !== "already_imported" && drop.skipped && drop.skipped.length)
+        picked.skipped = drop.skipped.slice();
       drop.uploadId = "";
       leaveDrop(picked);
     }, () => {
@@ -47026,9 +47103,10 @@ function chatgptPickerProgram(kit) {
       event.preventDefault();
       depth = 0;
       over(false);
-      const reading = dropped(event, () => !dropLive(mine));
+      const skipped = [];
+      const reading = dropped(event, () => !dropLive(mine), skipped);
       if (reading)
-        beginUpload(() => reading);
+        beginUpload(() => reading, skipped);
       else
         dropFail(words2.empty);
     });
@@ -59650,11 +59728,11 @@ var require_codegen = __commonJS((exports) => {
       const rhs = this.rhs === undefined ? "" : ` = ${this.rhs}`;
       return `${varKind} ${this.name}${rhs};` + _n;
     }
-    optimizeNames(names, constants5) {
+    optimizeNames(names, constants6) {
       if (!names[this.name.str])
         return;
       if (this.rhs)
-        this.rhs = optimizeExpr(this.rhs, names, constants5);
+        this.rhs = optimizeExpr(this.rhs, names, constants6);
       return this;
     }
     get names() {
@@ -59672,10 +59750,10 @@ var require_codegen = __commonJS((exports) => {
     render({ _n }) {
       return `${this.lhs} = ${this.rhs};` + _n;
     }
-    optimizeNames(names, constants5) {
+    optimizeNames(names, constants6) {
       if (this.lhs instanceof code_1.Name && !names[this.lhs.str] && !this.sideEffects)
         return;
-      this.rhs = optimizeExpr(this.rhs, names, constants5);
+      this.rhs = optimizeExpr(this.rhs, names, constants6);
       return this;
     }
     get names() {
@@ -59741,8 +59819,8 @@ var require_codegen = __commonJS((exports) => {
     optimizeNodes() {
       return `${this.code}` ? this : undefined;
     }
-    optimizeNames(names, constants5) {
-      this.code = optimizeExpr(this.code, names, constants5);
+    optimizeNames(names, constants6) {
+      this.code = optimizeExpr(this.code, names, constants6);
       return this;
     }
     get names() {
@@ -59772,12 +59850,12 @@ var require_codegen = __commonJS((exports) => {
       }
       return nodes.length > 0 ? this : undefined;
     }
-    optimizeNames(names, constants5) {
+    optimizeNames(names, constants6) {
       const { nodes } = this;
       let i2 = nodes.length;
       while (i2--) {
         const n = nodes[i2];
-        if (n.optimizeNames(names, constants5))
+        if (n.optimizeNames(names, constants6))
           continue;
         subtractNames(names, n.names);
         nodes.splice(i2, 1);
@@ -59834,12 +59912,12 @@ var require_codegen = __commonJS((exports) => {
         return;
       return this;
     }
-    optimizeNames(names, constants5) {
+    optimizeNames(names, constants6) {
       var _a5;
-      this.else = (_a5 = this.else) === null || _a5 === undefined ? undefined : _a5.optimizeNames(names, constants5);
-      if (!(super.optimizeNames(names, constants5) || this.else))
+      this.else = (_a5 = this.else) === null || _a5 === undefined ? undefined : _a5.optimizeNames(names, constants6);
+      if (!(super.optimizeNames(names, constants6) || this.else))
         return;
-      this.condition = optimizeExpr(this.condition, names, constants5);
+      this.condition = optimizeExpr(this.condition, names, constants6);
       return this;
     }
     get names() {
@@ -59864,10 +59942,10 @@ var require_codegen = __commonJS((exports) => {
     render(opts) {
       return `for(${this.iteration})` + super.render(opts);
     }
-    optimizeNames(names, constants5) {
-      if (!super.optimizeNames(names, constants5))
+    optimizeNames(names, constants6) {
+      if (!super.optimizeNames(names, constants6))
         return;
-      this.iteration = optimizeExpr(this.iteration, names, constants5);
+      this.iteration = optimizeExpr(this.iteration, names, constants6);
       return this;
     }
     get names() {
@@ -59905,10 +59983,10 @@ var require_codegen = __commonJS((exports) => {
     render(opts) {
       return `for(${this.varKind} ${this.name} ${this.loop} ${this.iterable})` + super.render(opts);
     }
-    optimizeNames(names, constants5) {
-      if (!super.optimizeNames(names, constants5))
+    optimizeNames(names, constants6) {
+      if (!super.optimizeNames(names, constants6))
         return;
-      this.iterable = optimizeExpr(this.iterable, names, constants5);
+      this.iterable = optimizeExpr(this.iterable, names, constants6);
       return this;
     }
     get names() {
@@ -59953,11 +60031,11 @@ var require_codegen = __commonJS((exports) => {
       (_b2 = this.finally) === null || _b2 === undefined || _b2.optimizeNodes();
       return this;
     }
-    optimizeNames(names, constants5) {
+    optimizeNames(names, constants6) {
       var _a5, _b2;
-      super.optimizeNames(names, constants5);
-      (_a5 = this.catch) === null || _a5 === undefined || _a5.optimizeNames(names, constants5);
-      (_b2 = this.finally) === null || _b2 === undefined || _b2.optimizeNames(names, constants5);
+      super.optimizeNames(names, constants6);
+      (_a5 = this.catch) === null || _a5 === undefined || _a5.optimizeNames(names, constants6);
+      (_b2 = this.finally) === null || _b2 === undefined || _b2.optimizeNames(names, constants6);
       return this;
     }
     get names() {
@@ -60231,7 +60309,7 @@ var require_codegen = __commonJS((exports) => {
   function addExprNames(names, from) {
     return from instanceof code_1._CodeOrName ? addNames(names, from.names) : names;
   }
-  function optimizeExpr(expr, names, constants5) {
+  function optimizeExpr(expr, names, constants6) {
     if (expr instanceof code_1.Name)
       return replaceName(expr);
     if (!canOptimize(expr))
@@ -60246,14 +60324,14 @@ var require_codegen = __commonJS((exports) => {
       return items;
     }, []));
     function replaceName(n) {
-      const c = constants5[n.str];
+      const c = constants6[n.str];
       if (c === undefined || names[n.str] !== 1)
         return n;
       delete names[n.str];
       return c;
     }
     function canOptimize(e) {
-      return e instanceof code_1._Code && e._items.some((c) => c instanceof code_1.Name && names[c.str] === 1 && constants5[c.str] !== undefined);
+      return e instanceof code_1._Code && e._items.some((c) => c instanceof code_1.Name && names[c.str] === 1 && constants6[c.str] !== undefined);
     }
   }
   function subtractNames(names, from) {
@@ -71665,7 +71743,7 @@ init_source_ingestion_policy();
 init_paths();
 import { createHash as createHash29 } from "node:crypto";
 import { execFileSync as execFileSync2 } from "node:child_process";
-import { existsSync as existsSync29, lstatSync as lstatSync13, readFileSync as readFileSync27, readdirSync as readdirSync3, realpathSync as realpathSync7 } from "node:fs";
+import { existsSync as existsSync29, lstatSync as lstatSync13, readFileSync as readFileSync27, readdirSync as readdirSync4, realpathSync as realpathSync7 } from "node:fs";
 import { homedir as homedir15 } from "node:os";
 var NETWORK_FS_TYPES = new Set([
   "nfs",
@@ -71843,7 +71921,7 @@ class VolumeResolver {
 function probeIgnoresCaseIn(dir) {
   let names;
   try {
-    names = readdirSync3(dir);
+    names = readdirSync4(dir);
   } catch {
     return;
   }
@@ -71900,7 +71978,7 @@ function defaultUuidsByDevice() {
   try {
     if (!existsSync29(dir))
       return result;
-    for (const name of readdirSync3(dir)) {
+    for (const name of readdirSync4(dir)) {
       try {
         result.set(realpathSync7(`${dir}/${name}`), name);
       } catch {}
@@ -71951,7 +72029,7 @@ init_local_open();
 init_connector_source();
 
 // src/workers/local-files/scope-browser.ts
-import { lstatSync as lstatSync14, readdirSync as readdirSync4, realpathSync as realpathSync8 } from "node:fs";
+import { lstatSync as lstatSync14, readdirSync as readdirSync5, realpathSync as realpathSync8 } from "node:fs";
 import { homedir as homedir17 } from "node:os";
 import { join as join39 } from "node:path";
 
@@ -72236,7 +72314,7 @@ function localFilesListing(options) {
     home,
     volumeIgnoresCase: (volumeId, path) => volumes.ignoresCase(volumeId, path)
   };
-  const readDirectory = options.readDirectory ?? ((realPath) => readdirSync4(realPath, { withFileTypes: true }));
+  const readDirectory = options.readDirectory ?? ((realPath) => readdirSync5(realPath, { withFileTypes: true }));
   const permissions = options.permissions ?? new MacPermissions({
     home,
     memoryPath: folderAccessMemoryPath()

@@ -1287,7 +1287,7 @@ test.each([{ source: 'telegram', wholeAccount: false }, { source: 'telegram', wh
   const controller = mountDashboardController({ root, canWrite: true, signal: new AbortController().signal, transport: { control: noControl,
     messaging: async (operation, params) => {
       if (operation === 'scope') { choices.push(structuredClone(params)); return { status: 200, body: { state: 'paired' } }; }
-      return { status: 200, body: { state: 'scope_selection_required', chats: [{ chatScope: 'telegram.personal:chat:101', title: 'One', kind: 'dm' }], wholeAccount: false, chatScopes: [] } };
+      return { status: 200, body: { state: 'scope_selection_required', chats: [{ chatScope: 'telegram.personal:chat:101', title: 'One', kind: 'dm' }, { chatScope: 'telegram.personal:chat:102', title: '', kind: 'dm' }], wholeAccount: false, chatScopes: [] } };
     },
   }, navigate() {}, refresh: async () => undefined, returnUrl: 'http://localhost/dashboard?keys' });
   try {
@@ -1297,6 +1297,14 @@ test.each([{ source: 'telegram', wholeAccount: false }, { source: 'telegram', wh
     expect(root.textContent).toContain('Pick chats (recommended)');
     expect(root.textContent).toContain('Everything in this account');
     const slot = root.querySelector('[data-messaging-chats]')!;
+    expect(slot.closest('[data-messaging-setup]')).toBeNull();
+    expect(root.querySelector('[data-messaging-setup].on')).toBeNull();
+    const cancel = root.querySelector<HTMLElement>('[data-messaging-kind="cancel"]')!;
+    expect(cancel.hidden).toBe(false);
+    expect(cancel.closest('.sheet')).toBeNull();
+    const labels = [...slot.querySelectorAll('label')];
+    expect(labels.map(label => label.textContent?.trim())).toEqual(['One', 'Chat 102']);
+    for (const label of labels) expect(label.querySelector('input[name="chatScope"]')).not.toBeNull();
     expect(slot.classList.contains('messagingchoices')).toBe(true);
     expect(slot.classList.contains('actionrow')).toBe(false);
     const explanation = slot.querySelector(':scope > p.hint');
@@ -1633,4 +1641,25 @@ describe('messaging card in a session that is not local-grade, and its idle cont
     expect(root.querySelector('[data-action-message]')!.textContent).toBe('Checked just now.');
     controller.dispose();
   });
+});
+
+test('Telegram chat choices after pairing stay outside the closed sign-in sheet', async () => {
+  const root = document.createElement('div'); root.innerHTML = renderMessagingCard('telegram', true, { paired: true }); document.body.append(root);
+  const calls: string[] = [];
+  const controller = mountDashboardController({ root, canWrite: true, signal: new AbortController().signal, transport: { control: noControl,
+    messaging: async operation => { calls.push(operation); return { status: 200, body: { state: 'paired', chats: [{ chatScope: 'telegram.personal:chat:101', title: '<Family & friends>', kind: 'group' }], wholeAccount: false, chatScopes: ['telegram.personal:chat:101'] } }; },
+  }, navigate() {}, refresh: async () => undefined, returnUrl: 'http://localhost/dashboard?keys' });
+  try {
+    await Bun.sleep(0);
+    root.querySelector('[data-messaging-kind="chats"]')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    await Bun.sleep(0);
+    expect(calls).toEqual(['status', 'chats']);
+    const slot = root.querySelector('[data-messaging-chats]')!;
+    expect(slot.closest('.sheet')).toBeNull();
+    expect(root.querySelector('#telegram-setup')!.getAttribute('aria-hidden')).toBe('true');
+    const check = slot.querySelector<HTMLInputElement>('[name="chatScope"]')!;
+    expect(check.checked).toBe(true);
+    expect(check.closest('label')!.textContent).toBe(' <Family & friends>');
+    expect(slot.querySelector('family')).toBeNull();
+  } finally { controller.dispose(); }
 });

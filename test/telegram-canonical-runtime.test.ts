@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { describe, expect, test } from 'bun:test';
 import type { OlympusConfig } from '../src/core/config.ts';
 import { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
+import { createLaneTieredStoreSet, type TieredStoreSet } from '../src/workers/connector-store/tiered-store-set.ts';
 import { createTelegramSchedulerSource } from '../src/workers/source-scheduler.ts';
 import {
   INTERNAL_TELEGRAM_MESSAGES_CORPUS_ID,
@@ -39,6 +40,7 @@ describe('Telegram canonical product runtime', () => {
 
       const sync = createTelegramConnectorStoreSyncHandler({
         stores: fixture.stores,
+        tierSet: fixture.set,
         spoolDir: fixture.spoolDir,
       });
       const source = createTelegramSchedulerSource({ config: schedulerConfig(), sync });
@@ -115,6 +117,7 @@ describe('Telegram canonical product runtime', () => {
       ].join('\n'));
       const sync = createTelegramConnectorStoreSyncHandler({
         stores: fixture.stores,
+        tierSet: fixture.set,
         spoolDir: fixture.spoolDir,
       });
 
@@ -137,7 +140,7 @@ describe('Telegram canonical product runtime', () => {
   });
 });
 
-function createFixture(): { spoolDir: string; stores: TelegramConnectorStores; close(): void } {
+function createFixture(): { spoolDir: string; stores: TelegramConnectorStores; set: TieredStoreSet; close(): void } {
   const root = mkdtempSync(join(tmpdir(), 'olympus-telegram-canonical-'));
   const spoolDir = join(root, 'spool');
   mkdirSync(spoolDir);
@@ -153,9 +156,16 @@ function createFixture(): { spoolDir: string; stores: TelegramConnectorStores; c
     family: 'chat',
     trustDomain: 'secure_local',
   });
+  const set = createLaneTieredStoreSet({
+    setId: 'telegram.messages', internalStore: internal, secureStore: secureLocal, splitLayers: false,
+    // This fixture tests two store destinations; only an explicit owner chat
+    // rule may keep the second chat Private, regardless of its record domain.
+    tierClassification: { rules: [{ id: 'owner.protected', match: { kind: 'chat', value: 'protected' }, tier: 'secure', strength: 'prior' }] },
+  });
   return {
     spoolDir,
     stores: { internal, secureLocal },
+    set,
     close() {
       secureLocal.close();
       internal.close();

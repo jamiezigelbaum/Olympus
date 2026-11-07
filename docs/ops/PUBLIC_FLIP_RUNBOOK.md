@@ -224,7 +224,7 @@ those proofs pass.
 
 ```sh
 gh repo create "$GH_OWNER/$REPO" --private \
-  --description "Sovereignty-aware OpenClaw source answers across seven personal data providers." \
+  --description "Olympus is a private second brain that lives on your computer and works with any AI. You decide what each model sees." \
   --disable-wiki
 gh repo edit "$GH_OWNER/$REPO" \
   --enable-issues --enable-squash-merge \

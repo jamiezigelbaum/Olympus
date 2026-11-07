@@ -321,7 +321,7 @@ export async function runSetupWizard(options: SetupWizardOptions): Promise<Setup
       next: managedWorker.activation === 'failed' && workerState === 'active'
         ? 'The previous worker is still running; the new security preset is not confirmed active. Run olympus worker restart, then olympus worker status.'
         : workerState === 'active'
-          ? 'The managed worker is running; open Olympus in OpenClaw. Use olympus dashboard for standalone access.'
+          ? `The managed worker is running; open Olympus in OpenClaw. Use ${managedWorker.install.cli_command} dashboard for standalone access.`
           : workerState === 'not_started'
             ? 'Dry run: rerun without --dry-run to write and start the managed worker.'
             : 'Run olympus worker install, then olympus worker status.',
@@ -332,7 +332,7 @@ export async function runSetupWizard(options: SetupWizardOptions): Promise<Setup
       url: 'http://127.0.0.1:8010/dashboard',
       url_scope: 'worker_local',
       handoff_required: true,
-      next: 'Before declaring installation complete, include a verified operator-reachable dashboard link in your final reply. For native OpenClaw, use /plugin?plugin=olympus&id=dashboard on the operator’s Gateway origin; for standalone access, run olympus dashboard --no-open and hand over the fresh opening link. Explain: Sources connects sources and sets their scope, Needs you and each source row show readiness and attention, Progress (with Details) shows reading and indexing, and model keys go on Keys (under On this computer, or through Change under Models). Invite the operator to return to this chat for help. The worker-local URL alone is not a verified operator link.',
+      next: `Before declaring installation complete, include a verified operator-reachable dashboard link in your final reply. For native OpenClaw, use /plugin?plugin=olympus&id=dashboard on the operator’s Gateway origin; for standalone access, run ${managedWorker.install.cli_command} dashboard --no-open and hand over the fresh opening link. Explain: Sources connects sources and sets their scope, Needs you and each source row show readiness and attention, Progress (with Details) shows reading and indexing, and model keys go on Keys (under On this computer, or through Change under Models). Invite the operator to return to this chat for help. The worker-local URL alone is not a verified operator link.`,
     },
   };
 }

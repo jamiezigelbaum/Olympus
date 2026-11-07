@@ -1,3 +1,4 @@
+import { Database } from 'bun:sqlite';
 import { lifecycleViews } from './helpers/lifecycle-view.ts';
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -101,6 +102,28 @@ describe('dashboard Delete indexed data route', () => {
       expect(f.boot().deleted.map((entry) => entry.sourceId)).toEqual(['dropbox.files']);
       expect(existsSync(f.store)).toBe(false);
     } finally {
+      rmSync(f.root, { recursive: true, force: true });
+    }
+  });
+
+  test('Delete defers unlinking an open SQLite store until the supervised restart closes it', async () => {
+    const f = fixture();
+    rmSync(f.store);
+    const db = new Database(f.store);
+    db.exec("CREATE TABLE items (value TEXT); INSERT INTO items VALUES ('kept until close')");
+    try {
+      const response = await post(f.worker, { source_id: 'dropbox.files', acknowledge: true });
+      expect(response.status).toBe(200);
+      expect(f.restarts.requested).toBe(1);
+      // Marking deletion does not invalidate SQLite handles already held by the worker.
+      expect(db.query('SELECT value FROM items').get()).toEqual({ value: 'kept until close' });
+      expect(existsSync(f.store)).toBe(true);
+      db.close();
+      f.boot();
+      expect(existsSync(f.store)).toBe(false);
+    } finally {
+      db.close();
+      f.worker.close();
       rmSync(f.root, { recursive: true, force: true });
     }
   });

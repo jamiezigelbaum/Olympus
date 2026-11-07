@@ -339,7 +339,8 @@ export function buildChatGptDashboardViewModel(
   if (options.privacy?.classifierAwaitingApproval) {
     needsYou.push({
       id: 'privacy:classifier_approval',
-      sentence: DASHBOARD_CHATGPT_PRIVACY_CLASSIFIER_APPROVAL_COPY.sentence,
+      sentence: [DASHBOARD_CHATGPT_PRIVACY_CLASSIFIER_APPROVAL_COPY.sentence,
+        `${options.remote ? DASHBOARD_CHATGPT_PRIVACY_CLASSIFIER_APPROVAL_COPY.server : DASHBOARD_CHATGPT_PRIVACY_CLASSIFIER_APPROVAL_COPY.machine}, run ${DASHBOARD_CHATGPT_PRIVACY_CLASSIFIER_APPROVAL_COPY.command}, ${DASHBOARD_CHATGPT_PRIVACY_CLASSIFIER_APPROVAL_COPY.reason}`].join(' '),
       fix: checkAgainFix(openOnComputer(undefined, 'models')),
     });
   }
@@ -1155,6 +1156,7 @@ function connectionFor(input: {
   // The built-in private model downloading alone never does: it joins the
   // percent only while the embedding model is downloading too, so the bar
   // reaches 100 when both are done.
+  if (input.embedding.state === 'loading') return { state: 'restarting' };
   if (input.embedding.state === 'downloading' || input.embedding.state === 'verifying') {
     const state: ConnectionState = 'installing';
     let percent = clampPercent(input.embedding.percent ?? 0);
