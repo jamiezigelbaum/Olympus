@@ -164,7 +164,7 @@ describe('the sniffer prompt asks one generic question', () => {
     expect(item.properties.tier.enum).toEqual(['personal', 'private']);
     expect(item.properties.category.enum).toEqual([...SNIFFER_CATEGORIES]);
     expect(item.properties.privateKind.enum).toEqual([...SNIFFER_PRIVATE_KINDS]);
-    expect(item.required).toEqual(['i', 'tier', 'category', 'ownRecord', 'privateKind', 'confidence']);
+    expect(item.required).toEqual(['i', 'category', 'ownRecord', 'privateKind', 'confidence', 'tier']);
     const reply = { verdicts: [{ i: 1, tier: 'private', category: 'health', ownRecord: true, privateKind: 'health', confidence: 0.9 }] };
     expect(parseSnifferBatchResponse(JSON.stringify(reply), new Set([1])).get(1)).toMatchObject({ tier: 'private', privateKind: 'health' });
   });

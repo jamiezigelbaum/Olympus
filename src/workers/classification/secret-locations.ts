@@ -26,6 +26,7 @@ import { Database } from 'bun:sqlite';
 import { createHash } from 'node:crypto';
 import { chmodSync, closeSync, existsSync, mkdirSync, openSync } from 'node:fs';
 import { dirname } from 'node:path';
+import { sourceIndexTopicTokens } from '../../core/source-index/fts.ts';
 import type { SourceItemIdentity } from '../../core/source-index/types.ts';
 import { runSqliteMigrations, type SqliteMigration } from '../../core/sqlite-migrations.ts';
 import { closeSqliteStore } from '../../core/sqlite-store.ts';
@@ -268,8 +269,9 @@ export class SecretLocationsIndex {
 
   /**
    * Keyword search over locator, title and finding kind, confined to `scope`.
-   * A row matches when any query term (stop words dropped) appears in one of
-   * them; rows matching more distinct terms rank first. Location only: never
+   * A row must match up to three distinct topic words as whole tokens; shared
+   * request words and substrings cannot announce an unrelated Secret. Rows
+   * matching more distinct terms rank first. Location only: never
    * text, and never the names of a Private-metadata item.
    */
   search(
@@ -304,8 +306,9 @@ export class SecretLocationsIndex {
         location.title ?? '',
         location.findingKinds.join(' ').replaceAll('_', ' '),
       ].join('\n').toLowerCase();
-      const score = terms.filter((term) => haystack.includes(term)).length;
-      if (score > 0) scored.push({ location, score });
+      const words = new Set(haystack.split(/[^\p{L}\p{N}]+/u));
+      const score = terms.filter((term) => words.has(term)).length;
+      if (score >= Math.min(3, terms.length)) scored.push({ location, score });
     }
     const identities = scored.map(({ location }): SecretLocationIdentity => ({
       provider: location.source,
@@ -387,17 +390,18 @@ function locatorWithin(locator: string | null, scopePath: string): boolean {
   return path === root || path.startsWith(`${root}/`);
 }
 
+// Product-wide request context and locator roots carry no Secret topic.
+// Keep these beside the location-specific verbs; the shared filter handles
+// ordinary request scaffolding for every retrieval capability.
 const STOP_WORDS = new Set([
   'a', 'an', 'and', 'are', 'did', 'do', 'does', 'find', 'for', 'have', 'i', 'in', 'is', 'it', 'kept',
-  'keep', 'me', 'my', 'of', 'on', 'or', 'put', 'saved', 'show', 'stored', 'the', 'there', 'to', 'what',
+  'keep', 'me', 'my', 'of', 'olympus', 'on', 'or', 'put', 'record', 'records', 'saved', 'show', 'stored', 'the', 'there', 'to', 'what',
   'where', 'which', 'who', 'with',
 ]);
 
 export function secretLocationQueryTerms(query: string): string[] {
   return [...new Set(
-    query
-      .toLowerCase()
-      .split(/[^\p{L}\p{N}]+/u)
+    sourceIndexTopicTokens(query.replaceAll('_', ' '))
       .filter((term) => term.length >= 2 && !STOP_WORDS.has(term)),
   )];
 }

@@ -390,7 +390,7 @@ describe('abandoning a move that never flipped', () => {
     store.close();
   });
 
-  test('a move interrupted after staging forgets its staged copy, which never blocks a later move', () => {
+  test('an abandoned move keeps its destination hidden without blocking a later move', () => {
     const store = ledger();
     store.recordRoutedPlacement(ITEM, decision({ contentTier: 'secure' }), whole(SECURE));
     store.stageMove(ITEM, {
@@ -401,8 +401,10 @@ describe('abandoning a move that never flipped', () => {
     });
     store.abandonMove(ITEM, { expectedGeneration: 1 });
     expect(visible(store)).toEqual([[SECURE.corpusId, 'both']]);
-    // Its store row stays hidden: the item's other copy rows say where it is served.
-    expect(store.copies(ITEM).map((copy) => copy.corpusId)).toEqual([SECURE.corpusId]);
+    // Keep the destination marker even if this was its corpus's first copy:
+    // committed store rows must never become legacy-visible on abandonment.
+    expect(store.copies(ITEM).find(copy => copy.corpusId === INTERNAL.corpusId))
+      .toMatchObject({ state: 'superseded', supersededByGeneration: null });
     // A staged copy no longer turns an unchanged placement into a move.
     expect(store.recordRoutedPlacement(ITEM, decision({ contentTier: 'secure' }), whole(SECURE)).outcome).not.toBe('queued_move');
 

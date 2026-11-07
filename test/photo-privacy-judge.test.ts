@@ -322,6 +322,23 @@ describe('a picture of a document is decided by the text read off it', () => {
     });
   }
 
+  test('#633: a strong medical-image cue still requires readable content and a settled text verdict', () => {
+    // Compose the image judge and content classifier: a medical-looking layout
+    // is a request to read the writing, never permission to release the photo.
+    const imageJudgment = imageJudgmentSignal(judgeMediaScores(scores(0.6, { medical_document: 0.9, intimate: 0.5 }), 'j'));
+    expect(imageJudgment).toEqual({ verdict: 'ordinary', category: 'medical_document', textDecides: true });
+    for (const text of [WHITEBOARD, LAB]) {
+      const pending = classifyContentTier({ ...base, text, imageJudgment }, { sniffer: model().sniffer });
+      expect(pending.contentPending).toBe(true);
+      expect(pending.reasons).toContain('content:own_record:image_document');
+      expect(pending.reasons).not.toContain(PERSONAL_FIRST_REASON);
+      const privateVerdict = classifyContentTier({ ...base, text, imageJudgment }, { sniffer: model('secure').sniffer });
+      expect(privateVerdict.contentTier).toBe('secure');
+    }
+    expect(classifyContentTier({ ...base, text: WHITEBOARD, imageJudgment }, { sniffer: model('private').sniffer }).contentTier).toBe('private');
+    expect(classifyContentTier({ ...base, text: 'Photo', imageJudgment }, { sniffer: model('private').sniffer }).contentTier).toBe('secure');
+  });
+
   test('a real record read off a picture stays Private on the model\'s verdict, and an account number at once', () => {
     expect(classifyContentTier({ ...base, text: LAB, imageJudgment: documentPicture('medical_document') }, { sniffer: model('secure').sniffer }).contentTier).toBe('secure');
     const statement = classifyContentTier(
