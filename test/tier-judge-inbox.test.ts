@@ -1,6 +1,6 @@
 import { expect, test } from 'bun:test';
 import { createInboxReplayModel, inboxFixture, runInboxEval } from '../eval/classification/inbox.ts';
-import { buildSnifferBatchPrompt, CachedTierSniffer, parseSnifferBatchResponse, snifferMaterialLooksLikeInjection, snifferTierKey } from '../src/workers/classification/sniffer.ts';
+import { buildSnifferBatchPrompt, CachedTierSniffer, parseSnifferBatchResponse, SNIFFER_RESPONSE_SCHEMA, SNIFFER_SYSTEM_PROMPT, snifferMaterialLooksLikeInjection, snifferTierKey } from '../src/workers/classification/sniffer.ts';
 import { TierSnifferStore } from '../src/workers/classification/sniffer-store.ts';
 
 test('48 complete synthetic emails; whole template families held out', () => {
@@ -65,4 +65,18 @@ test('ordinary personal possessions are not classifier instructions', () => {
 test('contradictory Personal plus owner-private conversation cannot release', () => {
   const parsed = parseSnifferBatchResponse(JSON.stringify({ verdicts: [{ i: 1, tier: 'personal', category: 'family', ownRecord: false, privateKind: 'family', confidence: 0.99 }] }), new Set([1]));
   expect(parsed.size).toBe(0);
+  const privateConversation = parseSnifferBatchResponse(JSON.stringify({ verdicts: [{ i: 1, tier: 'private', category: 'family', ownRecord: false, privateKind: 'family', confidence: 0.99 }] }), new Set([1])).get(1)!;
+  expect(snifferTierKey(privateConversation)).toBe('secure');
+});
+
+test('the judge assesses record content before choosing a tier, including under the JSON grammar', () => {
+  expect(SNIFFER_SYSTEM_PROMPT.indexOf('"ownRecord":')).toBeLessThan(SNIFFER_SYSTEM_PROMPT.indexOf('"tier":'));
+  const schema = SNIFFER_RESPONSE_SCHEMA as { properties: { verdicts: { items: { properties: Record<string, unknown> } } } };
+  const fields = Object.keys(schema.properties.verdicts.items.properties);
+  expect(fields.indexOf('ownRecord')).toBeLessThan(fields.indexOf('tier'));
+  expect(fields.indexOf('privateKind')).toBeLessThan(fields.indexOf('tier'));
+  // An uncertain Private decision remains Private even with no identified
+  // record. Field ordering never becomes permission to lower that decision.
+  const verdict = parseSnifferBatchResponse(JSON.stringify({ verdicts: [{ i: 1, category: 'legal', ownRecord: false, privateKind: 'none', confidence: 0.95, tier: 'private' }] }), new Set([1])).get(1)!;
+  expect(snifferTierKey(verdict)).toBe('secure');
 });
