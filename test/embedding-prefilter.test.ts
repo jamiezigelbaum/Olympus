@@ -751,7 +751,7 @@ test('a historical metadata raise never replaces the content judge training labe
       sniffer: { id: judge, judge: () => ({ verdict: 'decided', tier: 'secure', code: 'fixture' }) },
     }), f.ledger.getCurrent(subject(0)));
     f.ledger.recordRoutedPlacement(subject(0), decision, {
-      copies: [{ corpusId: 'private', trustDomain: 'secure_local', trustTier: 'S4', layers: 'both' }], embedHold: false,
+      copies: [{ corpusId: 'private', trustDomain: 'secure_local', layers: 'both' }], embedHold: false,
     });
   };
   recordNames('Bank GB82 WEST 1234 5698 7654 32');

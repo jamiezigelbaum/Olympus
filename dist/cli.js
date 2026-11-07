@@ -19330,6 +19330,9 @@ function heldUntilJudged(reasons) {
 function contentDigestReason(text2) {
   return `content:sha256:${createHash10("sha256").update(text2.trim()).digest("hex")}`;
 }
+function contentJudgeVerdictReason(reason, tier, digest2) {
+  return `content:judge_verdict:${tier}:${createHash10("sha256").update(JSON.stringify([reason, digest2])).digest("hex")}`;
+}
 function contentNamesReason(names, parentContext) {
   const parts = [names.title, names.path, names.sender, parentContext].map((part) => part?.trim() ?? "");
   return `content:names:${createHash10("sha256").update(JSON.stringify(parts)).digest("hex").slice(0, 16)}`;
@@ -19788,7 +19791,7 @@ function contentPass(args) {
       decided = withSnifferVerdict(decided, verdict.tier, `content:sniffer:${args.sniffer.id}:${verdict.code}`);
       reasons.splice(0, reasons.length, ...decided.reasons);
       if (verdict.origin === "model")
-        reasons.push("content:provenance:model");
+        reasons.push("content:provenance:model", contentJudgeVerdictReason(`content:sniffer:${args.sniffer.id}:${verdict.code}`, verdict.tier, contentDigestReason(text2)));
       if (verdict.origin === "rule" && verdict.rule)
         reasons.push(`content:rule:${verdict.rule}`);
     } else {
@@ -20865,8 +20868,9 @@ class TierLedger {
           decidedBy: contentTier !== existing.contentTier ? "sniffer" : existing.decidedBy,
           reasons: [
             ...metadataReasons,
-            ...contentReasons.filter((reason) => !isOpenSnifferReason(reason, "content")),
-            verdict.reason
+            ...contentReasons.filter((reason) => !isOpenSnifferReason(reason, "content") && !reason.startsWith("content:judge_verdict:")),
+            verdict.reason,
+            ...contentVerdictReceipts(contentReasons, verdict.reason, verdict.tier)
           ],
           contentPending: false
         };
@@ -20954,14 +20958,18 @@ class TierLedger {
     const metadataTier = verdict.pass === "metadata" ? maxTier(base.metadataTier, verdict.tier) : base.metadataTier;
     const contentTier = maxTier(base.contentTier, verdict.tier);
     const metadataPending = verdict.pass === "metadata" ? false : base.metadataPending;
-    const kept = base.reasons.filter((reason) => !isOpenSnifferReason(reason, verdict.pass) && !(metadataTier === "secure" && isOpenSnifferReason(reason, "content")));
+    const kept = base.reasons.filter((reason) => !isOpenSnifferReason(reason, verdict.pass) && !(verdict.pass === "content" && reason.startsWith("content:judge_verdict:")) && !(metadataTier === "secure" && isOpenSnifferReason(reason, "content")));
     const contentPending = verdict.pass === "content" || metadataTier === "secure" ? false : base.contentPending;
     const decision = {
       ...base,
       metadataTier,
       contentTier,
       decidedBy: "sniffer",
-      reasons: [...verdict.pass === "metadata" ? settleStoredNamesMark(kept, base.metadataTier, metadataTier) : kept, verdict.reason],
+      reasons: [
+        ...verdict.pass === "metadata" ? settleStoredNamesMark(kept, base.metadataTier, metadataTier) : kept,
+        verdict.reason,
+        ...verdict.pass === "content" ? contentVerdictReceipts(kept, verdict.reason, verdict.tier) : []
+      ],
       metadataPending,
       contentPending,
       state: metadataPending || contentPending ? "pending" : "current"
@@ -23271,6 +23279,10 @@ function settleStoredNamesMark(reasons, askedTier, answeredTier) {
     return [...reasons];
   const rest = reasons.filter((reason) => reason !== STORED_NAMES_ASKED_REASON);
   return answeredTier !== askedTier ? [...rest, STORED_NAMES_REASON] : rest;
+}
+function contentVerdictReceipts(reasons, reason, tier) {
+  const digests = reasons.filter((value) => /^content:sha256:[0-9a-f]{64}$/.test(value));
+  return digests.length === 1 ? [contentJudgeVerdictReason(reason, tier, digests[0])] : [];
 }
 function isOpenSnifferReason(reason, pass) {
   if (pass === "metadata") {
@@ -192098,7 +192110,7 @@ var EMBEDDING_PREFILTER_MODEL_ID = "embeddinggemma-2-litert-24d962e", EMBEDDING_
 // src/workers/classification/embedding-prefilter.ts
 import { chmodSync as chmodSync36, existsSync as existsSync100, lstatSync as lstatSync51, mkdirSync as mkdirSync61, readFileSync as readFileSync88 } from "node:fs";
 import { join as join134 } from "node:path";
-import { randomUUID as randomUUID32 } from "node:crypto";
+import { createHash as createHash100, randomUUID as randomUUID32 } from "node:crypto";
 function prefilterVector(copy) {
   if (!copy || copy.chunks.length === 0 || copy.chunks.some((chunk) => chunk.mediaSha256 || chunk.mediaPath) || snifferMaterialCarriesSecret(copy.chunks.map((chunk) => chunk.boundedText).join("")))
     return;
@@ -192120,6 +192132,14 @@ function prefilterVector(copy) {
     }
   }
   return mean;
+}
+function copyFingerprint2(copy) {
+  const hash3 = createHash100("sha256").update(JSON.stringify(copy.chunks));
+  for (const vector of copy.vectors) {
+    hash3.update(JSON.stringify([vector.chunkIndex, vector.modelId, vector.contentHash, vector.embedding.byteLength]));
+    hash3.update(vector.embedding);
+  }
+  return hash3.digest("hex");
 }
 function subjectOf(row) {
   return {
@@ -192228,11 +192248,20 @@ class EmbeddingPrefilter {
       for (const member of this.owner.members)
         member.rollback();
   }
+  trainingFingerprint(row) {
+    const subject = subjectOf(row);
+    return createHash100("sha256").update(JSON.stringify([
+      row,
+      this.options.ledger.copies(subject),
+      this.options.ledger.getOverride(subject),
+      this.options.ledger.rejudgeQuestion(subject)
+    ])).digest("hex");
+  }
   trainingExample(row, judge3) {
     if (!row.routed || row.state !== "current" || row.metadataPending || row.contentPending || !row.contentRead || row.metadataTier !== "private" || !["private", "secure"].includes(row.contentTier) || row.metadataForced || !row.modelId || row.decidedBy === "owner_rule" || row.decidedBy === "override" || this.options.ledger.getOverride(subjectOf(row)) || this.options.ledger.rejudgeQuestion(subjectOf(row)) || row.reasons.some((reason) => reason.startsWith("metadata:owner_rule:") || reason.startsWith("metadata:floor:") || reason.startsWith("metadata:secret:") || reason.startsWith("override:")))
       return;
     const prefix = `content:sniffer:${judge3}:`;
-    let judged = false;
+    let judged;
     for (const reason of row.reasons) {
       if (!reason.startsWith("content:"))
         continue;
@@ -192240,8 +192269,10 @@ class EmbeddingPrefilter {
         const code = reason.slice(prefix.length);
         if (!code || code.startsWith(SNIFFER_RECORD_HELD_CODE_PREFIX) || /(?:^|:)(?:rule|unresolved|fail_safe|injection|undecided)(?::|$)/.test(code))
           return;
-        judged = true;
-      } else if (!(reason.startsWith("content:sha256:") || reason.startsWith("content:names:") || reason.startsWith("content:borderline:") || [
+        if (judged)
+          return;
+        judged = reason;
+      } else if (!(reason.startsWith("content:judge_verdict:") || reason.startsWith("content:sha256:") || reason.startsWith("content:names:") || reason.startsWith("content:borderline:") || [
         "content:text_only",
         "content:provenance:model",
         "content:no_raise",
@@ -192253,10 +192284,26 @@ class EmbeddingPrefilter {
     if (!judged)
       return;
     const copy = this.options.copyFor(subjectOf(row));
-    if (!copy || !row.reasons.includes(contentDigestReason(copy.chunks.map((chunk) => chunk.boundedText).join(""))))
+    if (!copy)
+      return;
+    const digest5 = contentDigestReason(copy.chunks.map((chunk) => chunk.boundedText).join(""));
+    if (!row.reasons.includes(digest5) || !row.reasons.includes(contentJudgeVerdictReason(judged, row.contentTier, digest5)))
       return;
     const vector = prefilterVector(copy);
-    return vector && Math.hypot(...vector) > 0 ? { vector, private: row.contentTier === "secure" } : undefined;
+    if (!vector || Math.hypot(...vector) === 0)
+      return;
+    const fingerprint = this.trainingFingerprint(row);
+    const copied = copyFingerprint2(copy);
+    const subject = subjectOf(row);
+    return { vector, private: row.contentTier === "secure", current: (checkLedger) => {
+      const currentCopy = this.options.copyFor(subject);
+      if (!currentCopy || copyFingerprint2(currentCopy) !== copied)
+        return false;
+      if (!checkLedger)
+        return true;
+      const current2 = this.options.ledger.getCurrent(subject);
+      return !!current2 && this.trainingFingerprint(current2) === fingerprint;
+    } };
   }
   verdictCount() {
     return [...this.members].reduce((count, member) => count + member.options.sniffer.verdictCount(), 0);
@@ -192348,6 +192395,13 @@ class EmbeddingPrefilter {
         }
       }
       const run2 = this.training;
+      const markers = run2.scans.map(({ member }) => member.options.ledger.changeMarker());
+      const ledgerChanged = !run2.markers || markers.some((marker, index) => marker !== run2.markers[index]);
+      run2.markers = markers;
+      if (run2.examples.some((example) => !example.current(ledgerChanged))) {
+        stage = "ledger_or_judge_changed";
+        throw new Error;
+      }
       let worked = false;
       const hasTime = () => !worked || clock2() < deadline;
       for (const entry of run2.scans) {
@@ -192423,8 +192477,10 @@ class EmbeddingPrefilter {
                 const directory = embeddingPrefilterDirectory(this.control.dbPath);
                 if (existsSync100(directory) && (!lstatSync51(directory).isDirectory() || lstatSync51(directory).isSymbolicLink()))
                   throw new Error;
-                if (attempt.revisions !== this.revisions())
+                if (attempt.revisions !== this.revisions() || run2.examples.some((example) => !example.current(true))) {
+                  this.finishTraining(attempt, "failed", "ledger_or_judge_changed");
                   break;
+                }
                 mkdirSync61(directory, { recursive: true, mode: 448 });
                 chmodSync36(directory, 448);
                 const saved = { model: step.value, judge: judge3, revisions, trainedAt: this.now(), version: randomUUID32() };
@@ -192445,6 +192501,9 @@ class EmbeddingPrefilter {
         this.saved = undefined;
         this.finishTraining(attempt, "failed", "ledger_or_judge_changed");
       }
+      if (run2.scans.some(({ member }, index) => member.options.ledger.changeMarker() !== markers[index]) && run2.examples.some((example) => !example.current(true))) {
+        this.finishTraining(attempt, "failed", "ledger_or_judge_changed");
+      }
       for (const entry of run2.scans) {
         if (entry.dirty && attempt.revisions === this.revisions()) {
           if (!entry.member.options.ledger.writeEmbeddingTrainingScan(JSON.stringify(entry.scan), entry.revision)) {
@@ -192463,6 +192522,12 @@ class EmbeddingPrefilter {
     if (attempt && attempt.id !== finishedAtStart) {
       attempt.elapsedMs += clock2() - started;
       this.control.writeMeta(TRAINING, JSON.stringify(attempt));
+      if (this.training)
+        this.training.markers = this.training.scans.map(({ member }, index) => {
+          const marker = member.options.ledger.changeMarker();
+          const previous = this.training.markers?.[index];
+          return previous && previous.split(":")[0] !== marker.split(":")[0] ? previous : marker;
+        });
       if (["trained", "too_few", "failed"].includes(attempt.outcome))
         this.logTraining(attempt);
     }
@@ -192594,7 +192659,7 @@ var init_embedding_prefilter = __esm(() => {
 });
 
 // src/workers/classification/sniffer-resolver.ts
-import { createHash as createHash100 } from "node:crypto";
+import { createHash as createHash101 } from "node:crypto";
 import { mkdirSync as mkdirSync62, readFileSync as readFileSync89 } from "node:fs";
 import { dirname as dirname99 } from "node:path";
 
@@ -192652,7 +192717,7 @@ class SnifferCallBudget {
 }
 function materialCarriesSecret(question) {
   const own3 = snifferOwnMaterial(question.material);
-  const key2 = createHash100("sha256").update(own3).digest("base64");
+  const key2 = createHash101("sha256").update(own3).digest("base64");
   const known = secretScreenCache.get(key2);
   if (known !== undefined)
     return known;
@@ -210979,7 +211044,7 @@ __export(exports_handler, {
   REMOTE_OAUTH_PATHS: () => REMOTE_OAUTH_PATHS,
   CONNECT_BODY_DEADLINE_MS: () => CONNECT_BODY_DEADLINE_MS
 });
-import { createHash as createHash101, randomBytes as randomBytes30, timingSafeEqual as timingSafeEqual10 } from "node:crypto";
+import { createHash as createHash102, randomBytes as randomBytes30, timingSafeEqual as timingSafeEqual10 } from "node:crypto";
 function isRemoteOAuthRequest(request) {
   return ROUTED_PATHS.has(new URL(request.url).pathname);
 }
@@ -211347,7 +211412,7 @@ function createRemoteOAuthHandler(options) {
         codes.delete(hash3);
         return oauthError(400, "invalid_grant", "The authorization code was issued to another client or redirect.");
       }
-      if (!constantTimeEqual(createHash101("sha256").update(verifier).digest("base64url"), issued.codeChallenge)) {
+      if (!constantTimeEqual(createHash102("sha256").update(verifier).digest("base64url"), issued.codeChallenge)) {
         codes.delete(hash3);
         return oauthError(400, "invalid_grant", "The code verifier does not match the challenge.");
       }
@@ -211614,7 +211679,7 @@ function constantTimeEqual(left, right) {
   return a.length === b.length && a.length > 0 && timingSafeEqual10(a, b);
 }
 function sha25613(value2) {
-  return createHash101("sha256").update(value2).digest("hex");
+  return createHash102("sha256").update(value2).digest("hex");
 }
 function redirectWithParams(redirectUri, params) {
   const target = new URL(redirectUri);
@@ -213807,7 +213872,7 @@ __export(exports_remote_openapi, {
   REMOTE_OPENAPI_MAX_BODY_BYTES: () => REMOTE_OPENAPI_MAX_BODY_BYTES,
   REMOTE_OPENAPI_API_VERSION: () => REMOTE_OPENAPI_API_VERSION
 });
-import { createHash as createHash102 } from "node:crypto";
+import { createHash as createHash103 } from "node:crypto";
 function isRemoteOpenApiRequest(request) {
   const { pathname } = new URL(request.url);
   return pathname === REMOTE_OPENAPI_SPEC_PATH || TOOL_PATH_PATTERN.test(pathname);
@@ -213824,7 +213889,7 @@ function createRemoteOpenApiHandler(options) {
     const serverUrl = typeof configured === "function" ? livePublicServerUrl(configured()) : publicServerUrl(configured);
     if (spec?.serverUrl !== serverUrl) {
       const text6 = JSON.stringify(buildRemoteOpenApiSpec({ serverUrl }));
-      spec = { serverUrl, text: text6, etag: `"${createHash102("sha256").update(text6).digest("base64url").slice(0, 27)}"` };
+      spec = { serverUrl, text: text6, etag: `"${createHash103("sha256").update(text6).digest("base64url").slice(0, 27)}"` };
     }
     return spec;
   };
@@ -214201,7 +214266,7 @@ __export(exports_setup_backend, {
   createChatGptSetupBackend: () => createChatGptSetupBackend
 });
 import { readFileSync as readFileSync90 } from "node:fs";
-import { createHash as createHash103 } from "node:crypto";
+import { createHash as createHash104 } from "node:crypto";
 function privacyRuleView(rule) {
   if (rule.kind === "sender" && rule.value)
     return [{ kind: "sender", source_id: "gmail.email", value: rule.value }];
@@ -214225,7 +214290,7 @@ function readChatGptPrivacySettings(env, pendingCount) {
 function privacyRevision(profile) {
   if (!profile)
     return "prv1.unset";
-  const digest5 = createHash103("sha256").update(JSON.stringify({ d: profile.description, r: profile.rules })).digest("hex");
+  const digest5 = createHash104("sha256").update(JSON.stringify({ d: profile.description, r: profile.rules })).digest("hex");
   return `prv1.${digest5.slice(0, 32)}`;
 }
 function createChatGptSetupBackend(options) {
@@ -214233,7 +214298,7 @@ function createChatGptSetupBackend(options) {
   const privacySettings = () => {
     const current2 = options.sovereignty.source === "file" && options.sovereignty.path ? validateSovereigntyConfig(JSON.parse(readFileSync90(options.sovereignty.path, "utf8"))) : policy;
     policy = current2;
-    const policyRevision = createHash103("sha256").update(JSON.stringify(current2)).digest("hex").slice(0, 16);
+    const policyRevision = createHash104("sha256").update(JSON.stringify(current2)).digest("hex").slice(0, 16);
     if (isPendingPrivacyPolicy(current2))
       return {
         configured: false,

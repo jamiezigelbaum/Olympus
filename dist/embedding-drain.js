@@ -9745,6 +9745,9 @@ function heldUntilJudged(reasons) {
 function contentDigestReason(text2) {
   return `content:sha256:${createHash5("sha256").update(text2.trim()).digest("hex")}`;
 }
+function contentJudgeVerdictReason(reason, tier, digest) {
+  return `content:judge_verdict:${tier}:${createHash5("sha256").update(JSON.stringify([reason, digest])).digest("hex")}`;
+}
 function contentNamesReason(names, parentContext) {
   const parts = [names.title, names.path, names.sender, parentContext].map((part) => part?.trim() ?? "");
   return `content:names:${createHash5("sha256").update(JSON.stringify(parts)).digest("hex").slice(0, 16)}`;
@@ -10203,7 +10206,7 @@ function contentPass(args) {
       decided = withSnifferVerdict(decided, verdict.tier, `content:sniffer:${args.sniffer.id}:${verdict.code}`);
       reasons.splice(0, reasons.length, ...decided.reasons);
       if (verdict.origin === "model")
-        reasons.push("content:provenance:model");
+        reasons.push("content:provenance:model", contentJudgeVerdictReason(`content:sniffer:${args.sniffer.id}:${verdict.code}`, verdict.tier, contentDigestReason(text2)));
       if (verdict.origin === "rule" && verdict.rule)
         reasons.push(`content:rule:${verdict.rule}`);
     } else {
@@ -17098,8 +17101,9 @@ class TierLedger {
           decidedBy: contentTier !== existing.contentTier ? "sniffer" : existing.decidedBy,
           reasons: [
             ...metadataReasons,
-            ...contentReasons.filter((reason) => !isOpenSnifferReason(reason, "content")),
-            verdict.reason
+            ...contentReasons.filter((reason) => !isOpenSnifferReason(reason, "content") && !reason.startsWith("content:judge_verdict:")),
+            verdict.reason,
+            ...contentVerdictReceipts(contentReasons, verdict.reason, verdict.tier)
           ],
           contentPending: false
         };
@@ -17187,14 +17191,18 @@ class TierLedger {
     const metadataTier = verdict.pass === "metadata" ? maxTier(base.metadataTier, verdict.tier) : base.metadataTier;
     const contentTier = maxTier(base.contentTier, verdict.tier);
     const metadataPending = verdict.pass === "metadata" ? false : base.metadataPending;
-    const kept = base.reasons.filter((reason) => !isOpenSnifferReason(reason, verdict.pass) && !(metadataTier === "secure" && isOpenSnifferReason(reason, "content")));
+    const kept = base.reasons.filter((reason) => !isOpenSnifferReason(reason, verdict.pass) && !(verdict.pass === "content" && reason.startsWith("content:judge_verdict:")) && !(metadataTier === "secure" && isOpenSnifferReason(reason, "content")));
     const contentPending = verdict.pass === "content" || metadataTier === "secure" ? false : base.contentPending;
     const decision = {
       ...base,
       metadataTier,
       contentTier,
       decidedBy: "sniffer",
-      reasons: [...verdict.pass === "metadata" ? settleStoredNamesMark(kept, base.metadataTier, metadataTier) : kept, verdict.reason],
+      reasons: [
+        ...verdict.pass === "metadata" ? settleStoredNamesMark(kept, base.metadataTier, metadataTier) : kept,
+        verdict.reason,
+        ...verdict.pass === "content" ? contentVerdictReceipts(kept, verdict.reason, verdict.tier) : []
+      ],
       metadataPending,
       contentPending,
       state: metadataPending || contentPending ? "pending" : "current"
@@ -19504,6 +19512,10 @@ function settleStoredNamesMark(reasons, askedTier, answeredTier) {
     return [...reasons];
   const rest = reasons.filter((reason) => reason !== STORED_NAMES_ASKED_REASON);
   return answeredTier !== askedTier ? [...rest, STORED_NAMES_REASON] : rest;
+}
+function contentVerdictReceipts(reasons, reason, tier) {
+  const digests = reasons.filter((value) => /^content:sha256:[0-9a-f]{64}$/.test(value));
+  return digests.length === 1 ? [contentJudgeVerdictReason(reason, tier, digests[0])] : [];
 }
 function isOpenSnifferReason(reason, pass) {
   if (pass === "metadata") {
@@ -67490,7 +67502,7 @@ init_config();
 init_data_owner_lock();
 init_worker_auth();
 init_worker_transport();
-import { createHash as createHash31 } from "node:crypto";
+import { createHash as createHash32 } from "node:crypto";
 import { existsSync as existsSync33, lstatSync as lstatSync16, mkdirSync as mkdirSync19, writeFileSync as writeFileSync7 } from "node:fs";
 import { dirname as dirname39, isAbsolute as isAbsolute14 } from "node:path";
 
@@ -72935,7 +72947,7 @@ init_tier_ledger();
 init_tier_classifier();
 import { chmodSync as chmodSync7, existsSync as existsSync31, lstatSync as lstatSync15, mkdirSync as mkdirSync17, readFileSync as readFileSync28 } from "node:fs";
 import { join as join40 } from "node:path";
-import { randomUUID as randomUUID12 } from "node:crypto";
+import { createHash as createHash30, randomUUID as randomUUID12 } from "node:crypto";
 
 // src/workers/classification/embedding-logistic.ts
 var EMBEDDING_PREFILTER_MODEL_ID = "embeddinggemma-2-litert-24d962e";
@@ -73042,6 +73054,14 @@ function prefilterVector(copy) {
     }
   }
   return mean;
+}
+function copyFingerprint2(copy) {
+  const hash2 = createHash30("sha256").update(JSON.stringify(copy.chunks));
+  for (const vector of copy.vectors) {
+    hash2.update(JSON.stringify([vector.chunkIndex, vector.modelId, vector.contentHash, vector.embedding.byteLength]));
+    hash2.update(vector.embedding);
+  }
+  return hash2.digest("hex");
 }
 function subjectOf(row) {
   return {
@@ -73150,11 +73170,20 @@ class EmbeddingPrefilter {
       for (const member of this.owner.members)
         member.rollback();
   }
+  trainingFingerprint(row) {
+    const subject = subjectOf(row);
+    return createHash30("sha256").update(JSON.stringify([
+      row,
+      this.options.ledger.copies(subject),
+      this.options.ledger.getOverride(subject),
+      this.options.ledger.rejudgeQuestion(subject)
+    ])).digest("hex");
+  }
   trainingExample(row, judge2) {
     if (!row.routed || row.state !== "current" || row.metadataPending || row.contentPending || !row.contentRead || row.metadataTier !== "private" || !["private", "secure"].includes(row.contentTier) || row.metadataForced || !row.modelId || row.decidedBy === "owner_rule" || row.decidedBy === "override" || this.options.ledger.getOverride(subjectOf(row)) || this.options.ledger.rejudgeQuestion(subjectOf(row)) || row.reasons.some((reason) => reason.startsWith("metadata:owner_rule:") || reason.startsWith("metadata:floor:") || reason.startsWith("metadata:secret:") || reason.startsWith("override:")))
       return;
     const prefix = `content:sniffer:${judge2}:`;
-    let judged = false;
+    let judged;
     for (const reason of row.reasons) {
       if (!reason.startsWith("content:"))
         continue;
@@ -73162,8 +73191,10 @@ class EmbeddingPrefilter {
         const code = reason.slice(prefix.length);
         if (!code || code.startsWith(SNIFFER_RECORD_HELD_CODE_PREFIX) || /(?:^|:)(?:rule|unresolved|fail_safe|injection|undecided)(?::|$)/.test(code))
           return;
-        judged = true;
-      } else if (!(reason.startsWith("content:sha256:") || reason.startsWith("content:names:") || reason.startsWith("content:borderline:") || [
+        if (judged)
+          return;
+        judged = reason;
+      } else if (!(reason.startsWith("content:judge_verdict:") || reason.startsWith("content:sha256:") || reason.startsWith("content:names:") || reason.startsWith("content:borderline:") || [
         "content:text_only",
         "content:provenance:model",
         "content:no_raise",
@@ -73175,10 +73206,26 @@ class EmbeddingPrefilter {
     if (!judged)
       return;
     const copy = this.options.copyFor(subjectOf(row));
-    if (!copy || !row.reasons.includes(contentDigestReason(copy.chunks.map((chunk) => chunk.boundedText).join(""))))
+    if (!copy)
+      return;
+    const digest = contentDigestReason(copy.chunks.map((chunk) => chunk.boundedText).join(""));
+    if (!row.reasons.includes(digest) || !row.reasons.includes(contentJudgeVerdictReason(judged, row.contentTier, digest)))
       return;
     const vector = prefilterVector(copy);
-    return vector && Math.hypot(...vector) > 0 ? { vector, private: row.contentTier === "secure" } : undefined;
+    if (!vector || Math.hypot(...vector) === 0)
+      return;
+    const fingerprint = this.trainingFingerprint(row);
+    const copied = copyFingerprint2(copy);
+    const subject = subjectOf(row);
+    return { vector, private: row.contentTier === "secure", current: (checkLedger) => {
+      const currentCopy = this.options.copyFor(subject);
+      if (!currentCopy || copyFingerprint2(currentCopy) !== copied)
+        return false;
+      if (!checkLedger)
+        return true;
+      const current2 = this.options.ledger.getCurrent(subject);
+      return !!current2 && this.trainingFingerprint(current2) === fingerprint;
+    } };
   }
   verdictCount() {
     return [...this.members].reduce((count, member) => count + member.options.sniffer.verdictCount(), 0);
@@ -73270,6 +73317,13 @@ class EmbeddingPrefilter {
         }
       }
       const run = this.training;
+      const markers = run.scans.map(({ member }) => member.options.ledger.changeMarker());
+      const ledgerChanged = !run.markers || markers.some((marker, index) => marker !== run.markers[index]);
+      run.markers = markers;
+      if (run.examples.some((example) => !example.current(ledgerChanged))) {
+        stage = "ledger_or_judge_changed";
+        throw new Error;
+      }
       let worked = false;
       const hasTime = () => !worked || clock2() < deadline;
       for (const entry of run.scans) {
@@ -73345,8 +73399,10 @@ class EmbeddingPrefilter {
                 const directory = embeddingPrefilterDirectory(this.control.dbPath);
                 if (existsSync31(directory) && (!lstatSync15(directory).isDirectory() || lstatSync15(directory).isSymbolicLink()))
                   throw new Error;
-                if (attempt.revisions !== this.revisions())
+                if (attempt.revisions !== this.revisions() || run.examples.some((example) => !example.current(true))) {
+                  this.finishTraining(attempt, "failed", "ledger_or_judge_changed");
                   break;
+                }
                 mkdirSync17(directory, { recursive: true, mode: 448 });
                 chmodSync7(directory, 448);
                 const saved = { model: step.value, judge: judge2, revisions, trainedAt: this.now(), version: randomUUID12() };
@@ -73367,6 +73423,9 @@ class EmbeddingPrefilter {
         this.saved = undefined;
         this.finishTraining(attempt, "failed", "ledger_or_judge_changed");
       }
+      if (run.scans.some(({ member }, index) => member.options.ledger.changeMarker() !== markers[index]) && run.examples.some((example) => !example.current(true))) {
+        this.finishTraining(attempt, "failed", "ledger_or_judge_changed");
+      }
       for (const entry of run.scans) {
         if (entry.dirty && attempt.revisions === this.revisions()) {
           if (!entry.member.options.ledger.writeEmbeddingTrainingScan(JSON.stringify(entry.scan), entry.revision)) {
@@ -73385,6 +73444,12 @@ class EmbeddingPrefilter {
     if (attempt && attempt.id !== finishedAtStart) {
       attempt.elapsedMs += clock2() - started;
       this.control.writeMeta(TRAINING, JSON.stringify(attempt));
+      if (this.training)
+        this.training.markers = this.training.scans.map(({ member }, index) => {
+          const marker = member.options.ledger.changeMarker();
+          const previous = this.training.markers?.[index];
+          return previous && previous.split(":")[0] !== marker.split(":")[0] ? previous : marker;
+        });
       if (["trained", "too_few", "failed"].includes(attempt.outcome))
         this.logTraining(attempt);
     }
@@ -73519,7 +73584,7 @@ init_sniffer_lane();
 init_sniffer_store();
 init_tier_classifier();
 init_tier_ledger();
-import { createHash as createHash30 } from "node:crypto";
+import { createHash as createHash31 } from "node:crypto";
 import { mkdirSync as mkdirSync18, readFileSync as readFileSync29 } from "node:fs";
 import { dirname as dirname38 } from "node:path";
 var DEFAULT_SNIFFER_MAX_CALLS_PER_DAY = 20000;
@@ -73585,7 +73650,7 @@ var SECRET_SCREEN_CACHE_LIMIT = 20000;
 var secretScreenCache = new Map;
 function materialCarriesSecret(question) {
   const own3 = snifferOwnMaterial(question.material);
-  const key2 = createHash30("sha256").update(own3).digest("base64");
+  const key2 = createHash31("sha256").update(own3).digest("base64");
   const known = secretScreenCache.get(key2);
   if (known !== undefined)
     return known;
@@ -75582,7 +75647,7 @@ async function runSourceEmbeddingDrain(options) {
         }
       }
       consecutiveFailures = Math.max(...laneConsecutiveFailures);
-      scopeReport.errors.push(createHash31("sha256").update(message2).digest("hex"));
+      scopeReport.errors.push(createHash32("sha256").update(message2).digest("hex"));
       consecutiveIdleScopeChecks = 0;
       emitProgress();
       if (!isolatedLanes[item.laneIndex] && errorBackoffMs > 0) {
@@ -75912,7 +75977,7 @@ function normalizeOptionalList(values) {
   return [...new Set((values ?? []).map((value) => value.trim()).filter(Boolean))];
 }
 function hashScope(scope) {
-  return createHash31("sha256").update(scope).digest("hex").slice(0, 16);
+  return createHash32("sha256").update(scope).digest("hex").slice(0, 16);
 }
 function sum(items, value) {
   return items.reduce((total, item) => total + value(item), 0);
