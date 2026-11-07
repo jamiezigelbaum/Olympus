@@ -8,7 +8,7 @@ import { BUILT_IN_SNIFFER_LANE } from '../src/workers/classification/built-in-sn
 import { TierSnifferService } from '../src/workers/classification/sniffer-service.ts';
 import { flushTierMoveNotes, moveTieredItem, moveTieredItemsLowering, type TierMoveOptions } from '../src/workers/connector-store/tier-move.ts';
 import { readEmbeddingLedger } from '../src/workers/embedding-ledger.ts';
-import { FIXTURE_PLACEMENT, fixtureConnector, identityOf, localId, openTierFixture, tempDir, type TierFixture } from './helpers/tier-fixtures.ts';
+import { FIXTURE_PLACEMENT, fixtureConnector, identityOf, localId, openLegStore, openTierFixture, tempDir, type TierFixture } from './helpers/tier-fixtures.ts';
 
 const cleanup: Array<() => void> = [];
 afterEach(() => { for (const close of cleanup.splice(0).reverse()) close(); });
@@ -16,14 +16,22 @@ const body = 'Synthetic orchard inventory.';
 const lower = classifyItemTiers({ signals: { title: 'Synthetic' }, text: body });
 const high = { ...lower, metadataTier: 'secure' as const, contentTier: 'secure' as const };
 
-async function fixture(count = 4) {
+async function fixture(count = 4, privateOnly = false) {
   const tmp = tempDir('synthetic-move-batch-');
   let f = openTierFixture(tmp.dir, { embed: false });
   cleanup.push(() => { f.close(); tmp.cleanup(); });
   const specs = Array.from({ length: count }, (_, n) => ({ id: `synthetic-${n}`, name: 'Synthetic', text: body }));
-  await f.set.sync(fixtureConnector(() => specs), { fetchContent: true, placement: FIXTURE_PLACEMENT });
+  if (privateOnly) {
+    // No Personal rows or copy markers from an earlier round trip may mask
+    // the first batch's visibility behaviour.
+    await f.stores.secure_local!.syncFromConnector(fixtureConnector(() => specs.map(spec => ({ ...spec, legacyDomain: 'secure_local' as const }))),
+      { fetchContent: true, placement: FIXTURE_PLACEMENT });
+  } else {
+    await f.set.sync(fixtureConnector(() => specs), { fetchContent: true, placement: FIXTURE_PLACEMENT });
+  }
   for (const spec of specs) {
-    await moveTieredItem({ set: f.set, identity: identityOf(spec.id), target: high });
+    if (privateOnly) f.ledger.recordRoutedPlacement(identityOf(spec.id), high, f.set.placementFor(high));
+    else await moveTieredItem({ set: f.set, identity: identityOf(spec.id), target: high });
     f.ledger.recordRoutedPlacement(identityOf(spec.id), lower, f.set.placementFor(lower));
   }
   const moves = (): TierMoveOptions[] => specs.map(spec => ({
@@ -33,6 +41,84 @@ async function fixture(count = 4) {
   return { get f() { return f; }, specs, moves,
     reopen() { f.close(); f = openTierFixture(tmp.dir, { embed: false }); },
   };
+}
+
+// Open just the ledger and Personal leg: opening a whole set can replay
+// verified moves, which would hide an unsafe crash state from this check.
+function personalHiddenCheck(f: TierFixture) {
+  const ledger = new TierLedger({ dbPath: f.ledger.dbPath });
+  const personal = openLegStore(f.paths, 'internal', ledger);
+  cleanup.push(() => { personal.close(); ledger.close(); });
+  return () => {
+    expect(personal.searchItems('orchard', 20)).toEqual([]);
+    for (let n = 0; n < 3; n++) {
+      expect(personal.localContent(localId(`synthetic-${n}`))?.chunks ?? []).toEqual([]);
+    }
+  };
+}
+
+for (const step of ['beforeCopy', 'afterCopy', 'afterReceipt', 'afterCopiesCommitted', 'beforeFlip', 'afterVerified', 'afterFlip'] as const) {
+  for (const recovery of ['abandon', 'resume'] as const) {
+    test(`first Private lowering batch stays hidden at ${step}, then ${recovery}`, async () => {
+      const f = await fixture(3, true);
+      expect(f.f.ledger.corpusHasCopies(f.f.stores.internal!.corpusId)).toBe(false);
+      expect(f.f.stores.secure_local!.searchItems('orchard', 20).length).toBe(3);
+      const moves = f.moves();
+      const expectHidden = personalHiddenCheck(f.f);
+      let reached = 0;
+      const interrupt = () => { reached++; throw new Error('Synthetic interruption'); };
+      const spies: Array<{ mockRestore(): void }> = [];
+      if (step === 'beforeCopy' || step === 'beforeFlip' || step === 'afterVerified') {
+        moves[2]![step] = interrupt;
+      } else if (step === 'afterCopy') {
+        const store = f.f.stores.internal!;
+        const original = store.importItemCopy.bind(store);
+        spies.push(spyOn(store, 'importItemCopy').mockImplementation((...args) => {
+          const result = original(...args);
+          if (args[0].identity.providerItemId === f.specs[2]!.id) interrupt();
+          return result;
+        }));
+      } else if (step === 'afterReceipt') {
+        const original = f.f.ledger.writeMeta.bind(f.f.ledger);
+        let receipts = 0;
+        spies.push(spyOn(f.f.ledger, 'writeMeta').mockImplementation((...args) => {
+          original(...args);
+          if (args[0].startsWith('tier-move-verified:') && ++receipts === 3) interrupt();
+        }));
+      } else if (step === 'afterFlip') {
+        const original = f.f.ledger.completeMove.bind(f.f.ledger);
+        let flips = 0;
+        spies.push(spyOn(f.f.ledger, 'completeMove').mockImplementation((...args) => {
+          const result = original(...args);
+          if (++flips === 2) interrupt();
+          return result;
+        }));
+        // Roll back the whole flip transaction after the per-item failure.
+        moves[2]!.beforeFlip = () => { throw new Error('Synthetic interruption'); };
+      }
+      try {
+        expect(() => moveTieredItemsLowering(moves, {
+          afterCopiesCommitted: step === 'afterCopiesCommitted' ? interrupt
+            : ['beforeCopy', 'afterCopy', 'afterReceipt'].includes(step)
+              ? () => { throw new Error('Synthetic interruption'); } : undefined,
+        })).toThrow('Synthetic interruption');
+      } finally { for (const spy of spies) spy.mockRestore(); }
+      expect(reached).toBe(1);
+      for (const spec of f.specs) expect(f.f.ledger.getCurrent(identityOf(spec.id))).toMatchObject({ state: 'moving', contentTier: 'secure' });
+      expectHidden();
+      personalHiddenCheck(f.f)();
+      if (recovery === 'abandon') {
+        for (const move of f.moves()) f.f.ledger.abandonMove(move.identity, { expectedGeneration: f.f.ledger.getCurrent(move.identity)!.generation });
+        expectHidden();
+        personalHiddenCheck(f.f)();
+      } else {
+        const retry = f.moves();
+        for (const move of retry) move.beforeFlip = expectHidden;
+        expect(moveTieredItemsLowering(retry).every(result => 'result' in result)).toBe(true);
+        expect(f.f.stores.internal!.searchItems('orchard', 20).length).toBe(3);
+      }
+    });
+  }
 }
 
 function serviceFor(f: TierFixture, autoMoves: Partial<NonNullable<ConstructorParameters<typeof TierSnifferService>[0]['autoMoves']>> = {}, otherSets: TierFixture[] = []) {
