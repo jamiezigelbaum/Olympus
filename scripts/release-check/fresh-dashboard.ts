@@ -138,10 +138,11 @@ export async function openFreshDashboard(machine: Machine, endpoint: string, tim
     await browser.send('Page.navigate', { url }, session);
     await until(async () => !!await panel<boolean>(`!!document.querySelector('.source-name')`, Boolean), 'dashboard did not open from the CLI link');
     // Persisted cards are the same /dashboard.json source cards machine-agent.ts reads.
-    const card = async (s: LiveSourceSpec): Promise<any> => sourceCard(await evalIn<any>(session, `(async()=>{
+    const dashboardView = async (): Promise<{ status: number; view: any }> => await evalIn<{ status: number; view: any }>(session, `(async()=>{
       const u=new URL('/dashboard.json',location.href); const t=new URL(location.href).searchParams.get('token'); if(t)u.searchParams.set('token',t);
-      const r=await fetch(u); if(!r.ok)return null; const j=await r.json(); return j;
-    })()`), s.id);
+      const r=await fetch(u); if(!r.ok)return { status: r.status, view: null }; return { status: r.status, view: await r.json() };
+    })()`);
+    const card = async (s: LiveSourceSpec): Promise<any> => sourceCard((await dashboardView()).view, s.id);
     const connected = sourceConnected;
     const navigate = async (path: string): Promise<boolean> => {
       frameSessions.clear();
@@ -184,8 +185,12 @@ export async function openFreshDashboard(machine: Machine, endpoint: string, tim
         return `${recommended.label} (${recommended.id}, Recommended) saved and verified after reload`;
       },
       connect: async s => {
-        const before = await card(s);
-        if (!before || connected(before)) throw new Error('fresh source card missing or already connected');
+        // Say which precondition failed, from the dashboard's own JSON: provider names and states only.
+        const { status, view } = await dashboardView();
+        const before = sourceCard(view, s.id);
+        if (!view) throw new Error(`fresh source card unreadable: /dashboard.json answered ${status}`);
+        if (!before) throw new Error(`no ${s.id} source card; the dashboard lists: ${(view.sources ?? []).map((c: any) => String(c.provider)).join(', ') || 'none'}`);
+        if (connected(before)) throw new Error(`${s.id} is already connected (${String(before.connection?.state)}) on a fresh install`);
         baseline.clear();
         for (const t of (await browser!.send('Target.getTargets')).targetInfos) baseline.add(t.targetId);
         windowOffered = false;
