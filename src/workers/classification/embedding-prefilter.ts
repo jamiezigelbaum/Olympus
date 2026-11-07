@@ -1,7 +1,7 @@
 // Local, source-neutral Personal-only clearance. No vectors, labels or weights leave this process.
 import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { removeFileDurablySync, writePrivateFileAtomicSync } from '../../core/atomic-file.ts';
 import { ingestionTurn } from '../control-path-headroom.ts';
 import { SNIFFER_RECORD_HELD_CODE_PREFIX, snifferMaterialCarriesSecret } from './sniffer.ts';
@@ -38,9 +38,10 @@ interface TrainingScan {
   attempt: string; after?: TierSnifferSubject; done: boolean; rows: number;
   samples: Array<{ subject: TierSnifferSubject; private: boolean }>;
 }
+interface TrainingExample extends LogisticExample { current: () => boolean }
 interface TrainingRun {
   id: string; scans: Array<{ member: EmbeddingPrefilter; scan: TrainingScan; dirty: boolean; revision: string }>;
-  examples: LogisticExample[]; memberIndex: number; sampleIndex: number;
+  examples: TrainingExample[]; memberIndex: number; sampleIndex: number;
   fit?: Generator<void, LogisticModel | undefined>;
 }
 interface SavedModel { revisions: string; version: string; trainedAt: number; judge: string; model: LogisticModel }
@@ -157,7 +158,17 @@ export class EmbeddingPrefilter {
     if (this.audit.stopped || !this.enabled()) for (const member of this.owner.members) member.rollback();
   }
   /** A ledger label is usable only when this judge alone decided the content tier. */
-  private trainingExample(row: TierLedgerRecord, judge: string): LogisticExample | undefined {
+  private trainingFingerprint(row: TierLedgerRecord, copy: PrefilterCopy): string {
+    const subject = subjectOf(row);
+    const hash = createHash('sha256').update(JSON.stringify([row, this.options.ledger.copies(subject),
+      this.options.ledger.getOverride(subject), this.options.ledger.rejudgeQuestion(subject), copy.chunks]));
+    for (const vector of copy.vectors) {
+      hash.update(JSON.stringify([vector.chunkIndex, vector.modelId, vector.contentHash, vector.embedding.byteLength]));
+      hash.update(vector.embedding);
+    }
+    return hash.digest('hex');
+  }
+  private trainingExample(row: TierLedgerRecord, judge: string): TrainingExample | undefined {
     if (!row.routed || row.state !== 'current' || row.metadataPending || row.contentPending || !row.contentRead
       || row.metadataTier !== 'private' || !['private', 'secure'].includes(row.contentTier) || row.metadataForced
       || !row.modelId || row.decidedBy === 'owner_rule' || row.decidedBy === 'override'
@@ -182,7 +193,15 @@ export class EmbeddingPrefilter {
     const copy = this.options.copyFor(subjectOf(row));
     if (!copy || !row.reasons.includes(contentDigestReason(copy.chunks.map(chunk => chunk.boundedText).join('')))) return undefined;
     const vector = prefilterVector(copy);
-    return vector && Math.hypot(...vector) > 0 ? { vector, private: row.contentTier === 'secure' } : undefined;
+    if (!vector || Math.hypot(...vector) === 0) return undefined;
+    const fingerprint = this.trainingFingerprint(row, copy);
+    const subject = subjectOf(row);
+    return { vector, private: row.contentTier === 'secure', current: () => {
+      const current = this.options.ledger.getCurrent(subject);
+      const currentCopy = this.options.copyFor(subject);
+      return !!current && !!currentCopy && this.trainingFingerprint(current, currentCopy) === fingerprint;
+    } };
+
   }
   private verdictCount(): number {
     return [...this.members].reduce((count, member) => count + member.options.sniffer.verdictCount(), 0);
@@ -259,6 +278,11 @@ export class EmbeddingPrefilter {
         }
       }
       const run = this.training;
+      // Retained vectors must still belong to the same decisions and copies on every tick.
+      if (run.examples.some(example => !example.current())) {
+        stage = 'ledger_or_judge_changed';
+        throw new Error();
+      }
       let worked = false;
       const hasTime = () => !worked || clock() < deadline;
       for (const entry of run.scans) {
@@ -312,7 +336,12 @@ export class EmbeddingPrefilter {
                 if (this.control.dbPath === ':memory:') throw new Error();
                 const directory = embeddingPrefilterDirectory(this.control.dbPath);
                 if (existsSync(directory) && (!lstatSync(directory).isDirectory() || lstatSync(directory).isSymbolicLink())) throw new Error();
-                if (attempt.revisions !== this.revisions()) break;
+                // No yield between this final check and publication: a change during fitting
+                // (including a Secrets decision) discards all derived weights.
+                if (attempt.revisions !== this.revisions() || run.examples.some(example => !example.current())) {
+                  this.finishTraining(attempt, 'failed', 'ledger_or_judge_changed');
+                  break;
+                }
                 mkdirSync(directory, { recursive: true, mode: 0o700 }); chmodSync(directory, 0o700);
                 const saved: SavedModel = { model: step.value, judge, revisions, trainedAt: this.now(), version: randomUUID() };
                 writePrivateFileAtomicSync(this.path, JSON.stringify(saved));

@@ -27,10 +27,10 @@ function copy(n: number, sign = 1): ConnectorStoreItemCopy {
     trustTier: 'S4', owners: [], chunks: [{ chunkIndex: 0, boundedText: ownText, contentHash: 'fixture', embeddingInputHash: 'fixture' }],
     vectors: [{ chunkIndex: 0, modelId: MODEL, contentHash: 'fixture', embedding: new Uint8Array(vector.buffer) }], vectorAuthorities: [] };
 }
-function fixture(options: { trained?: boolean; bias?: number; random?: () => number; enabled?: () => boolean; routed?: boolean; stateLedger?: TierLedger; now?: () => number; monotonicNow?: () => number; log?: (line: string) => void } = {}) {
+function fixture(options: { trained?: boolean; memory?: boolean; bias?: number; random?: () => number; enabled?: () => boolean; routed?: boolean; stateLedger?: TierLedger; now?: () => number; monotonicNow?: () => number; log?: (line: string) => void } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'prefilter-synthetic-'));
-  const ledger = new TierLedger({ dbPath: join(dir, 'tiers.sqlite') });
-  const sniffer = new TierSnifferStore({ dbPath: join(dir, 'sniffer.sqlite') });
+  const ledger = new TierLedger({ dbPath: options.memory ? ':memory:' : join(dir, 'tiers.sqlite') });
+  const sniffer = new TierSnifferStore({ dbPath: options.memory ? ':memory:' : join(dir, 'sniffer.sqlite') });
   const modelDir = embeddingPrefilterDirectory(options.stateLedger?.dbPath ?? ledger.dbPath);
   if (options.trained !== false) {
     mkdirSync(modelDir, { mode: 0o755 });
@@ -703,3 +703,27 @@ test('a failed completion watermark stays a failed attempt with a three-hour ret
   expect(logs).toHaveLength(1);
   expect(logs[0]).toContain('outcome=failed');
 });
+
+test.each(['secrets', 'tier', 'decision', 'removed copy', 'changed vector'] as const)(
+  'fitting discards retained examples after a selected item changes: %s', async change => {
+    let clock = 0;
+    const f = fixture({ trained: false, memory: true, monotonicNow: () => (clock += 0.01), log: () => {} });
+    for (let n = 0; n < 4000; n++) trainingRow(f, n);
+    const runtime = () => (f.filter as unknown as { training?: { examples: unknown[]; fit?: Generator<void, unknown> } }).training;
+    for (let tick = 0; tick < 100 && !runtime()?.fit; tick++) await f.filter.prepare(judge);
+    expect(runtime()?.fit).toBeDefined();
+    expect(runtime()?.examples).toHaveLength(4000);
+    const revision = f.ledger.readMeta('embedding-prefilter:training-revision');
+    const row = f.ledger.getCurrent(subject(0))!;
+    if (change === 'removed copy') f.setCopy(n => n === 0 ? undefined! : copy(n));
+    else if (change === 'changed vector') f.setCopy(n => copy(n, n === 0 ? -1 : 1));
+    else f.ledger.recordDecision(subject(0), { ...row, state: 'current', snifferId: judge,
+      decidedBy: change === 'secrets' ? 'secret_detector' : 'sniffer',
+      contentTier: change === 'secrets' ? 'secrets' : change === 'tier' ? 'secure' : row.contentTier,
+      reasons: change === 'decision' ? [...row.reasons, 'content:borderline:financial'] : row.reasons });
+    expect(f.ledger.readMeta('embedding-prefilter:training-revision')).toBe(revision);
+    await f.filter.prepare(judge);
+    expect(trainingState(f)).toMatchObject({ outcome: 'failed', reason: 'ledger_or_judge_changed' });
+    expect(runtime()).toBeUndefined();
+    expect(existsSync(join(f.modelDir, 'weights.json'))).toBe(false);
+  }, 30_000);
