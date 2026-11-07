@@ -1418,7 +1418,7 @@ test.each(['unchanged', 'raiser', 'secrets', 'override', 'vector'] as const)(
     const example = (f.filter as unknown as { trainingExample(row: typeof moving, judge: string): { current(check: boolean): boolean } }).trainingExample(moving, judge);
     expect(example.current(true)).toBe(true);
     f.ledger.completeMove(subject(0), { expectedGeneration: moving.generation,
-      destination: [{ corpusId: 'private', trustDomain: 'secure_local', trustTier: 'S4', layers: 'both' }] });
+      destination: [{ corpusId: 'private', trustDomain: 'secure_local', layers: 'both' }] });
     if (change === 'vector') f.setCopy(n => copy(n, -1));
     if (change === 'override') f.ledger.setOverride(subject(0), { kind: 'tier', tier: 'secure' });
     if (change === 'raiser' || change === 'secrets') {
