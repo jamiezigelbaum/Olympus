@@ -379,10 +379,10 @@ qualification use the same candidate; a product fix needs a newly qualified
 candidate before an affected tester retries; the agent retrieves its identity
 automatically through the designated release metadata.
 
-`clawhub:olympus` becomes the one-line public install **after the pilot**,
-using the byte-identical qualified package. Until publication,
-`openclaw plugins install clawhub:olympus` fails with `Package not found on
-ClawHub.` Do not substitute it during the pilot.
+`clawhub:olympus` is also published on ClawHub (from 1.3.4) with the
+byte-identical release package, but it can trail the newest GitHub release.
+Follow this guide's `npm-pack:` install; do not substitute `clawhub:olympus`
+for the designated candidate.
 
 Success looks like `Installed plugin: olympus`. **Do NOT restart the
 gateway YOURSELF now, and do not restart it to "verify" the plugin

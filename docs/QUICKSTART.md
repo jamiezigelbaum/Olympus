@@ -140,10 +140,10 @@ If `jq` is unavailable, read `plugin.rootDir` from the JSON and set
 `OLYMPUS_BIN` to that directory's `bin/olympus`. No PATH installation is assumed.
 
 The `npm-pack:` prefix creates OpenClaw's managed npm project and proves the
-installed dependency shape; a raw archive path is not equivalent. After the
-pilot, ClawHub receives those same bytes without rebuilding the package and
-`openclaw plugins install clawhub:olympus --accept-capabilities` becomes the
-public install path.
+installed dependency shape; a raw archive path is not equivalent. ClawHub
+also carries those same release bytes (from 1.3.4), so
+`openclaw plugins install clawhub:olympus --accept-capabilities` works too,
+though it can trail the newest GitHub release.
 
 ## 2. Run setup
 
