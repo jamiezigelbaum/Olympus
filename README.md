@@ -417,9 +417,10 @@ and guides you through setup. You do not need to download files, find a
 checksum receipt, or have a GitHub account. The agent checks the SHA-256 and
 byte count against the designated candidate and GitHub's release metadata.
 
-`openclaw plugins install clawhub:olympus` becomes the one-line public path
-once Olympus is published to ClawHub, which happens **after** the pilot. The
-pilot and release qualification both use the managed `npm-pack:` path — see
+Olympus is also published on ClawHub (https://clawhub.ai/plugins/olympus,
+from 1.3.4), so `openclaw plugins install clawhub:olympus` installs the same
+release bytes. ClawHub can trail the newest GitHub release by a little. The
+agent install above and release qualification use the managed `npm-pack:` path — see
 [docs/V0_4_RELEASE.md](docs/V0_4_RELEASE.md). A Git checkout or rebuilt package
 does not qualify the supplied candidate.
 

@@ -1475,7 +1475,7 @@ exact-main verify run `35658364460`, GitHub tag `v0.4.0-beta.2`, asset
 968,934 bytes. Anonymous download and checksum/size verification passed. The exact
 archive passed isolated managed install/uninstall and live activation; its dated
 packaged plan is the pre-activation snapshot, while this register records closeout.
-ClawHub publication was on owner hold from September 21 until the owner reopened it on 2026-11-03. The Hermes skill is published there as `olympus-hermes`; the OpenClaw plugin (`clawhub:olympus`) waits on a ClawHub publish failure (out of memory on ClawHub's side), tracked in #794.
+ClawHub publication was on owner hold from September 21 until the owner reopened it on 2026-11-03. The Hermes skill is published there as `olympus-hermes`; the OpenClaw plugin was published as `clawhub:olympus` on 2026-11-07 (1.3.4, byte-identical to the GitHub release, security scan clean) after ClawHub fixed its out-of-memory publish failure (#794).
 The owner accepted the existing tester feedback instead of another broad source
 and platform qualification campaign. Unperformed qualification is not claimed.
 
