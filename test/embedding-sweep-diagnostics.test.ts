@@ -93,6 +93,17 @@ test('a scope exclusion is counted without widening the embedding scope', async 
   expect(f.provider.inputs).toHaveLength(0);
 });
 
+test('a moving item whose current copy remains eligible is not reported as skipped', async () => {
+  const f = await fixture();
+  for (const pass of ['metadata', 'content'] as const) f.ledger.applySnifferVerdict(identityOf('synthetic-id'), {
+    pass, tier: 'secure', reason: 'synthetic', modelId: 'synthetic',
+  }, { placementFor: decision => f.set.placementFor(decision) });
+  const record = f.ledger.getCurrent(identityOf('synthetic-id'))!;
+  f.ledger.beginMove(identityOf('synthetic-id'), { metadataTier: 'private', contentTier: 'private' }, record.generation);
+  expect(f.ledger.copies(identityOf('synthetic-id')).some(copy => copy.state === 'current' && !copy.embedHold)).toBe(true);
+  expect(await f.pass()).toMatchObject({ skipped_moving_chunks: 0, eligible_chunks: 1, chunks_embedded: 1 });
+});
+
 test('a spent diagnostic budget explicitly reports an incomplete inventory', async () => {
   const f = await fixture();
   expect(await f.store.embeddingSweepInventory(f.provider, {}, Date.now() - 1)).toMatchObject({ inventory_complete: 0, pending_chunks: 0 });
