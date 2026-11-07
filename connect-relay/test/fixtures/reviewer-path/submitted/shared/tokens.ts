@@ -28,7 +28,7 @@
  * validates the secret; the engine does, against its own database, so a token
  * minted by install B and presented to install A opens nothing at A.
  */
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 
 /**
  * Set by the engine on a response to a request whose credential it verified.
@@ -37,6 +37,36 @@ import { randomBytes } from 'node:crypto';
  * leaves the relay. An install that forges it changes only its own lane.
  */
 export const AUTHENTICATED_RESPONSE_HEADER = 'x-olympus-authenticated';
+
+/**
+ * Set by the engine beside the authenticated marker on an MCP answer: which
+ * tool surface that credential gets, `chatgpt` (a pinned ChatGPT grant) or
+ * `remote` (Claude, Grok and every other connection). The relay keeps it with
+ * the confirmed credential only to choose its own answers while the Mac is
+ * offline (server/relay-mcp.ts); it grants nothing and never leaves the relay.
+ */
+export const SURFACE_RESPONSE_HEADER = 'x-olympus-surface';
+export type CredentialSurface = 'chatgpt' | 'remote';
+
+const SURFACE_FINGERPRINT_DOMAIN = 'olympus-relay/surface-fingerprint/v1\n';
+
+/** SHA-256 of a credential: what the engine stores for every OAuth token (core/remote-oauth-store.ts). */
+export function credentialDigest(token: string): Buffer {
+  return createHash('sha256').update(token, 'utf8').digest();
+}
+
+/**
+ * A credential's surface fingerprint: a domain-separated hash of its SHA-256
+ * digest, base64url (43 characters). The engine computes it from the digest
+ * it already stores (it keeps no token), the relay from the token a request
+ * presents; neither the token nor the engine's digest can be recovered from
+ * it. The relay keys its offline tool lists by it (server/surface-map.ts).
+ */
+export function surfaceFingerprint(digest: Uint8Array): string {
+  return createHash('sha256').update(SURFACE_FINGERPRINT_DOMAIN, 'utf8').update(digest).digest('base64url');
+}
+
+export const SURFACE_FINGERPRINT_PATTERN = /^[A-Za-z0-9_-]{43}$/;
 
 export type CredentialKind = 'access' | 'refresh' | 'code' | 'handoff' | 'private';
 
@@ -53,6 +83,12 @@ const PATTERN: Record<CredentialKind, RegExp> = {
 
 /** The relay path prefix of a hand-off link. */
 export const HANDOFF_PATH_PREFIX = '/go/';
+
+/**
+ * The relay's own page that takes a Google sign-in hand-off to the engine on
+ * the owner's computer (connect-relay/server/signin-bridge.ts).
+ */
+export const SIGNIN_BRIDGE_PATH = '/connect/signin';
 
 /**
  * The install a provider sign-in's bounced callback belongs to, when the

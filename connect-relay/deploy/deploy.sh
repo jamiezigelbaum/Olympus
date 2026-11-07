@@ -9,7 +9,13 @@
 #            RELAY_PUBLIC_HOST (default mcp.olympusplugin.ai),
 #            RELAY_REVIEWER_CHECK (default `demo`; `no-demo` when no reviewer
 #              demo engine is meant to be running; `off` only for a host that
-#              does not serve the ChatGPT directory plugin).
+#              does not serve the ChatGPT directory plugin),
+#            RELAY_REVIEWER_PREVIOUS (only for the deploy that changes the
+#              pinned directory listing: the commit of the listing the live
+#              relay serves now. The checks before deploying and after a
+#              rollback then run that commit's reviewer-check.ts, without the
+#              demo sign-in, since the demo engine already moved to the new
+#              build; the check on the new build runs this checkout's).
 #
 # What it does:
 #   1. bun build --compile for linux-x64, named by commit SHA;
@@ -42,6 +48,19 @@ reviewer_check() {
   [ "$REVIEWER_CHECK" = off ] && return 0
   bun "$DEPLOY_DIR/reviewer-check.ts" "${CHECK_ARGS[@]}" "$@"
 }
+# The live relay's listing: this checkout's, or RELAY_REVIEWER_PREVIOUS's
+# for the deploy that re-pins it.
+PREVIOUS_LISTING="${RELAY_REVIEWER_PREVIOUS:-}"
+PREVIOUS_CHECKOUT=""
+if [ -n "$PREVIOUS_LISTING" ]; then
+  [ "$REVIEWER_CHECK" = off ] && { echo "RELAY_REVIEWER_PREVIOUS needs the reviewer check" >&2; exit 1; }
+  git -C "$ROOT" rev-parse --verify --quiet "${PREVIOUS_LISTING}^{commit}" >/dev/null \
+    || { echo "RELAY_REVIEWER_PREVIOUS ${PREVIOUS_LISTING} is not a commit in this repository" >&2; exit 1; }
+fi
+live_reviewer_check() {
+  [ -z "$PREVIOUS_LISTING" ] && { reviewer_check "$@"; return; }
+  bun "$PREVIOUS_CHECKOUT/connect-relay/deploy/reviewer-check.ts" --host "$PUBLIC_HOST" --no-demo "$@"
+}
 
 if [ -n "$(git -C "$ROOT" status --porcelain -- connect-relay)" ]; then
   echo "connect-relay/ has uncommitted changes; deploy builds an exact commit only." >&2
@@ -50,7 +69,11 @@ fi
 SHA="$(git -C "$ROOT" rev-parse HEAD)"
 SHORT="${SHA:0:12}"
 BUILD_DIR="$(mktemp -d)"
-trap 'rm -rf "$BUILD_DIR"' EXIT
+trap 'rm -rf "$BUILD_DIR"; [ -z "$PREVIOUS_CHECKOUT" ] || git -C "$ROOT" worktree remove --force "$PREVIOUS_CHECKOUT"' EXIT
+if [ -n "$PREVIOUS_LISTING" ]; then
+  PREVIOUS_CHECKOUT="$BUILD_DIR-previous-listing"
+  git -C "$ROOT" worktree add --detach --quiet "$PREVIOUS_CHECKOUT" "$PREVIOUS_LISTING"
+fi
 
 echo "Building olympus-relay ${SHORT} for linux-x64"
 bun build --compile --target=bun-linux-x64 "$ROOT/connect-relay/server/main.ts" --outfile "$BUILD_DIR/olympus-relay-${SHORT}"
@@ -62,7 +85,7 @@ SSH_OPTS=(-i "$KEY" -o IdentitiesOnly=yes -o BatchMode=yes)
 REMOTE_DIR="olympus-relay-deploy-${SHORT}"
 
 echo "Checking the reviewer path before deploying"
-if ! reviewer_check; then
+if ! live_reviewer_check; then
   echo "The reviewer path is already failing on ${PUBLIC_HOST}; fix that first (nothing was deployed)." >&2
   exit 1
 fi
@@ -77,7 +100,7 @@ echo "Installing"
 roll_back() {
   echo "$1; rolling back to ${PREVIOUS}" >&2
   if ssh "${SSH_OPTS[@]}" "$TARGET" "sudo ln -sfn '${PREVIOUS}' /usr/local/bin/olympus-relay && sudo systemctl restart olympus-relay.service && for i in 1 2 3 4 5 6 7 8 9 10; do curl -fsS http://127.0.0.1:8787/healthz >/dev/null && exit 0; sleep 1; done; exit 1" \
-    && reviewer_check --wait 90; then
+    && live_reviewer_check --wait 90; then
     echo "Rolled back to ${PREVIOUS}; the reviewer path passes again." >&2
   else
     echo "Rolled back to ${PREVIOUS}, but the relay or the reviewer path still fails: look now." >&2

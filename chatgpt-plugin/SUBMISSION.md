@@ -1,6 +1,13 @@
 # Olympus: ChatGPT directory submission kit
 
-Status: 1.3.0 approved with no findings and published 2026-11-02, listed
+Status: 1.3.5 listing update in preparation (2026-11-07, owner request): the
+directory's tools and pages are re-pinned to main 2b0291fc (#732), adding
+Delete indexed data and the privacy follow-up questions to `/openai/mcp`, and
+the directory dashboard moves from the rc.3 page to the current one. Order:
+release 1.3.5, move the demo engine to it, deploy the relay from the release
+commit with `RELAY_REVIEWER_PREVIOUS=<live relay's commit>` (the checks before
+the deploy and after a rollback walk the old listing; the check on the new
+build walks the new one), then upload the package. Earlier: 1.3.0 approved with no findings and published 2026-11-02, listed
 publicly by OCU Inc. (1.0.0-rc.3 was published 2026-10-27). The 1.3.0
 listing update was prepared 2026-11-01: crowned-mountain icon and clay brand colours, the
 tagline "A private second brain" (#628, from the site and README), the softer Secrets wording,

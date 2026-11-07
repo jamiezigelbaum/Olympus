@@ -445,6 +445,8 @@ const FIXED_ARGUMENTS: Record<string, Record<string, unknown>> = {
       { kind: 'folder', source_id: 'google_drive.docs', key: 'folder-id-1', display: 'Taxes' },
       { kind: 'label', source_id: 'gmail.email', key: 'Label_7', value: 'Lawyer' },
       { kind: 'sender', source_id: 'gmail.email', value: 'doctor@example.com' },
+      { kind: 'folder', source_id: 'local.files', key: '/Users/robin/Medical', display: 'Medical' },
+      { kind: 'folder', source_id: 'evernote.notes', key: 'notebook-1', display: 'Health' },
     ],
   },
 };
@@ -459,7 +461,17 @@ const SOURCE_ROUTED = new Set(['olympus_scope_list', 'olympus_scope_set']);
 const MAIL_FIELDS = ['draft', 'mail'];
 const FOLDER_FIELDS = ['parent_key', 'ancestor_keys', 'cursor', 'selections', 'whole_account_selected', 'confirm_whole_account'];
 
+/**
+ * privacy_set's first-run choice is its own save: the panel sends
+ * private_answer_mode with only the revision and confirmation, and the handler
+ * refuses it beside any other field.
+ */
+const PRIVACY_CHOICE_FIELDS = ['private_answer_mode', 'confirmation', 'revision'];
+
 function routed(tool: Tool, args: Record<string, unknown>): Record<string, unknown> {
+  if (tool.name === 'olympus_privacy_set' && args.private_answer_mode !== undefined) {
+    return Object.fromEntries(Object.entries(args).filter(([key]) => PRIVACY_CHOICE_FIELDS.includes(key)));
+  }
   if (!SOURCE_ROUTED.has(tool.name)) return args;
   const mail = args.source_id === 'gmail.email';
   const out = Object.fromEntries(Object.entries(args).filter(([key]) => !(mail ? FOLDER_FIELDS : MAIL_FIELDS).includes(key)));
@@ -475,7 +487,7 @@ const SETUP_OPERATION: Record<string, RegExp> = {
   olympus_disconnect_source: /^disconnect$/,
   olympus_model_set: /^setModels$/,
   olympus_model_retry: /^retryModel$/,
-  olympus_privacy_set: /^savePrivacy$/,
+  olympus_privacy_set: /^(savePrivacy|choosePrivateAnswers)$/,
   olympus_sync_source: /^syncSource$/,
 };
 

@@ -289,10 +289,13 @@ describe('the directory allowlist', () => {
       'olympus_scope_list',
       'olympus_scope_set',
       'olympus_disconnect_source',
+      'olympus_delete_source_data',
       'olympus_model_set',
       'olympus_model_retry',
       'olympus_privacy_get',
       'olympus_privacy_set',
+      'olympus_privacy_questions',
+      'olympus_privacy_check',
       'olympus_sync_source',
     ]);
     expect(Object.isFrozen(DIRECTORY_TOOL_NAMES)).toBe(true);
@@ -325,9 +328,9 @@ describe('/openai/mcp serves the same surface, narrowed, as submitted', () => {
       const onMcp = (await result(await rpc('/mcp', def.access_token, 'tools/list'))).tools as Array<{ name: string }>;
       const onDirectory = (await result(await rpc(DIRECTORY_MCP_PATH, directory.access_token, 'tools/list'))).tools as Array<{ name: string }>;
       expect(names(onDirectory)).toEqual(names(toolsForSurface(onMcp, 'directory')));
-      // New tools ship on /mcp only: Delete indexed data is listed there and not here.
+      // Delete indexed data joined the directory with the 1.3.5 listing (#732).
       expect(names(onMcp)).toContain('olympus_delete_source_data');
-      expect(names(onDirectory)).not.toContain('olympus_delete_source_data');
+      expect(names(onDirectory)).toContain('olympus_delete_source_data');
       expect(names(onDirectory)).toEqual(names(onMcp).filter(isDirectoryTool));
       expect(onDirectory).toEqual(approved(names(onDirectory)));
       expect(names(onMcp).includes('source_answer')).toBe(withModel);
