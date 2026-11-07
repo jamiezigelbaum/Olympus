@@ -100,8 +100,8 @@ test('counts exact training decisions, includes live WAL rows, and changes no in
     expect(report.ledgers).toHaveLength(2);
     for (const ledger of report.ledgers) {
       expect(ledger.rows_read).toBe(11);
-      expect(ledger).toMatchObject({ examples: { personal: 4, private: 1 }, provenance: { judge_receipt: 2, legacy_sniffer: 3 } });
-      expect(ledger.rejections).toMatchObject({ digest_missing: 1, legacy_verdict_missing: 0, legacy_verdict_tier: 1, legacy_verdict_content: 1, content_reason_unknown: 1, vector_count: 1, copy_missing: 1 });
+      expect(ledger).toMatchObject({ examples: { personal: 2, private: 1 }, provenance: { judge_receipt: 2, legacy_sniffer: 1 } });
+      expect(ledger.rejections).toMatchObject({ digest_missing: 1, legacy_verdict_missing: 1, legacy_verdict_tier: 1, legacy_verdict_content: 2, content_reason_unknown: 1, vector_count: 1, copy_missing: 1 });
       expect(ledger.examples.personal + ledger.examples.private + Object.values(ledger.rejections).reduce((a, b) => a + b, 0)).toBe(ledger.rows_read);
     }
     const limited = runPrefilterTrainingDryRun({ dataDir: root, rowLimit: 1 });

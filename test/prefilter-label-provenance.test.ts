@@ -4,7 +4,7 @@ import { prefilterTrainingExample, type PrefilterCopy } from '../src/workers/cla
 import { countPrefilterTraining } from '../src/workers/classification/prefilter-training-counts.ts';
 import { EMBEDDING_PREFILTER_DIMENSIONS, EMBEDDING_PREFILTER_MODEL_ID } from '../src/workers/classification/embedding-logistic.ts';
 import { snifferId } from '../src/workers/classification/sniffer.ts';
-import { contentDigestReason, contentJudgeVerdictReason } from '../src/workers/classification/tier-classifier.ts';
+import { contentDigestReason, contentJudgeVerdictReason, normalizedContentHash } from '../src/workers/classification/tier-classifier.ts';
 import type { TierLedgerRecord } from '../src/workers/classification/tier-ledger.ts';
 
 const lane = { kind: 'local' as const, modelId: 'synthetic-model', profileId: 'fixture' };
@@ -37,9 +37,18 @@ function rejected(value: TierLedgerRecord, reason: string) {
 
 for (const modern of [false, true]) for (const tier of ['private', 'secure'] as const)
   test(`older prompt same model accepts ${tier}, modern receipt=${modern}`, () => {
-    expect(prefilterTrainingExample(row(older, 'other:1.00', tier, modern), current, options))
+    expect(prefilterTrainingExample(row(older, 'other:1.00', tier, modern), current, { ...options,
+      sniffer: { trainingVerdict: () => ({ tier: tier === 'private' ? 'personal' : 'private',
+        contentHash: normalizedContentHash(text), decidedAt: '2026-11-06T00:00:00.000Z', ambiguous: false }) },
+    }))
       .toMatchObject({ private: tier === 'secure', provenance: modern ? 'judge_receipt' : 'legacy_sniffer' });
   });
+test.each(['private', 'secure'] as const)('older-prompt content verdict bound to this copy still accepts %s', tier => {
+  expect(prefilterTrainingExample(row(older, 'other:1.00', tier), current, {
+    ...options, sniffer: { trainingVerdict: () => ({ tier: tier === 'private' ? 'personal' : 'private',
+      contentHash: normalizedContentHash(text), decidedAt: '2026-11-06T00:00:00.000Z', ambiguous: false }) },
+  })).toMatchObject({ private: tier === 'secure', provenance: 'legacy_sniffer' });
+});
 test('different model is rejected, even with a matching modern receipt and digest', () => {
   for (const modern of [false, true]) rejected(row(different, 'other:1.00', 'private', modern), 'judge_model_mismatch');
 });
@@ -76,22 +85,37 @@ test('a names-only cached Private answer cannot explain a legacy Private content
   }, reason => { drops.push(reason); return undefined; })).toBeUndefined();
   expect(drops).toEqual(['legacy_verdict_content']);
 });
-test.each(['private', 'secure'] as const)('content-pass labels do not require a cached hash in either class: %s', tier => {
+test.each(['private', 'secure'] as const)('legacy content-pass labels without a cached hash are rejected in either class: %s', tier => {
+  const drops: string[] = [];
   expect(prefilterTrainingExample(row(older, 'other:1.00', tier), current, {
     ...options, sniffer: { trainingVerdict: () => ({ tier: tier === 'private' ? 'personal' : 'private',
       decidedAt: '2026-11-06T00:00:00.000Z', ambiguous: false }) },
-  })).toMatchObject({ private: tier === 'secure', provenance: 'legacy_sniffer' });
+  }, reason => { drops.push(reason); return undefined; })).toBeUndefined();
+  expect(drops).toEqual(['legacy_verdict_content']);
 });
 test('a retained metadata raise cannot train after its cache is removed', () => {
   rejected({ ...row(older, 'other:1.00', 'secure'), previousMetadataTier: 'secure' }, 'legacy_store_missing');
 });
 test('counts share acceptance and report numeric model-mismatch rejections only', () => {
   let read = false;
-  const counts = countPrefilterTraining({ ...options, judge: current, ledger: { ...options.ledger,
-    listItemWindow: () => { if (read) return []; read = true; return [row(), row(older, 'personal_record:1.00', 'secure'), row(different)]; },
+  const counts = countPrefilterTraining({ ...options, judge: current,
+    sniffer: { trainingVerdict: subject => ({ tier: subject.providerItemId === 'private-label' ? 'private' : 'personal',
+      contentHash: normalizedContentHash(text), decidedAt: '2026-11-06T00:00:00.000Z', ambiguous: false }) }, ledger: { ...options.ledger,
+    listItemWindow: () => { if (read) return []; read = true; return [row(), { ...row(older, 'personal_record:1.00', 'secure'), providerItemId: 'private-label' }, row(different)]; },
   } });
   expect(counts).toMatchObject({ rows_read: 3, examples: { personal: 1, private: 1 },
     provenance: { judge_receipt: 0, legacy_sniffer: 2 }, rejections: { judge_model_mismatch: 1 } });
   expect(Object.values(counts.rejections).reduce((a, b) => a + b, 0)).toBe(1);
+  expect(JSON.stringify(counts)).not.toMatch(/synthetic|fixture|p-older|p-current/);
+});
+
+test('missing legacy evidence is an explainable counts-only rejection', () => {
+  let read = false;
+  const counts = countPrefilterTraining({ ...options, judge: current,
+    sniffer: { trainingVerdict: () => undefined }, ledger: { ...options.ledger,
+      listItemWindow: () => { if (read) return []; read = true; return [row()]; },
+    } });
+  expect(counts).toMatchObject({ rows_read: 1, examples: { personal: 0, private: 0 },
+    rejections: { legacy_verdict_missing: 1 } });
   expect(JSON.stringify(counts)).not.toMatch(/synthetic|fixture|p-older|p-current/);
 });

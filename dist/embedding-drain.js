@@ -74859,28 +74859,25 @@ function prefilterTrainingExample(row, judge2, options, reject = () => {
   if (!row.reasons.includes(contentJudgeVerdictReason(judged, row.contentTier, digest))) {
     if (row.reasons.some((reason) => reason.startsWith("content:judge_verdict:")))
       return reject("verdict_missing");
-    const needsContentBinding = row.reasons.some((reason) => reason.startsWith("metadata:sniffer:")) || row.previousMetadataTier === "secure" || row.previousMetadataTier === "secrets";
-    if (needsContentBinding && !options.sniffer)
+    if (!options.sniffer)
       return reject("legacy_store_missing");
     let verdict;
     try {
-      verdict = options.sniffer?.trainingVerdict(subjectOf(row), row.modelId);
+      verdict = options.sniffer.trainingVerdict(subjectOf(row), row.modelId);
     } catch {
       return reject("legacy_verdict_unreadable");
     }
-    if (needsContentBinding || verdict) {
-      if (!verdict)
-        return reject("legacy_verdict_missing");
-      if (verdict.ambiguous)
-        return reject("legacy_verdict_ambiguous");
-      const time3 = Date.parse(verdict.decidedAt), decisionTime = Date.parse(row.decidedAt);
-      if (!Number.isFinite(time3) || !Number.isFinite(decisionTime) || time3 > decisionTime)
-        return reject("legacy_verdict_time");
-      if ((verdict.tier === "personal" ? "private" : verdict.tier === "private" ? "secure" : undefined) !== row.contentTier)
-        return reject("legacy_verdict_tier");
-      if (needsContentBinding && verdict.contentHash !== normalizedContentHash(copy.chunks.map((chunk) => chunk.boundedText).join("")))
-        return reject("legacy_verdict_content");
-    }
+    if (!verdict)
+      return reject("legacy_verdict_missing");
+    if (verdict.ambiguous)
+      return reject("legacy_verdict_ambiguous");
+    const time3 = Date.parse(verdict.decidedAt), decisionTime = Date.parse(row.decidedAt);
+    if (!Number.isFinite(time3) || !Number.isFinite(decisionTime) || time3 > decisionTime)
+      return reject("legacy_verdict_time");
+    if ((verdict.tier === "personal" ? "private" : verdict.tier === "private" ? "secure" : undefined) !== row.contentTier)
+      return reject("legacy_verdict_tier");
+    if (verdict.contentHash !== normalizedContentHash(copy.chunks.map((chunk) => chunk.boundedText).join("")))
+      return reject("legacy_verdict_content");
     provenance = "legacy_sniffer";
   }
   const vector = prefilterVector(copy, reject);

@@ -175,26 +175,21 @@ export function prefilterTrainingExample(row: TierLedgerRecord, judge: string, o
   if (!row.reasons.includes(contentJudgeVerdictReason(judged, row.contentTier, digest))) {
     // A mismatched modern receipt is evidence against the label, never a legacy row.
     if (row.reasons.some(reason => reason.startsWith('content:judge_verdict:'))) return reject('verdict_missing');
-    // The content-pass reason and matching ledger digest prove an old label
-    // without requiring a surviving subject-cache entry. A metadata verdict
-    // cannot supply that proof. A previous Private/Secret metadata tier can
-    // leave a retained raise after its current metadata reason disappears.
-    const needsContentBinding = row.reasons.some(reason => reason.startsWith('metadata:sniffer:'))
-      || row.previousMetadataTier === 'secure' || row.previousMetadataTier === 'secrets';
-    if (needsContentBinding && !options.sniffer) return reject('legacy_store_missing');
+    // A legacy reason records category/confidence, not the verdict's tier.
+    // Metadata raises can survive renames and sharing changes, so only a
+    // same-model verdict bound to this content can prove the retained label.
+    if (!options.sniffer) return reject('legacy_store_missing');
     let verdict;
-    try { verdict = options.sniffer?.trainingVerdict(subjectOf(row), row.modelId); }
+    try { verdict = options.sniffer.trainingVerdict(subjectOf(row), row.modelId); }
     catch { return reject('legacy_verdict_unreadable'); }
-    if (needsContentBinding || verdict) {
-      if (!verdict) return reject('legacy_verdict_missing');
-      if (verdict.ambiguous) return reject('legacy_verdict_ambiguous');
-      const time = Date.parse(verdict.decidedAt), decisionTime = Date.parse(row.decidedAt);
-      if (!Number.isFinite(time) || !Number.isFinite(decisionTime) || time > decisionTime) return reject('legacy_verdict_time');
-      if ((verdict.tier === 'personal' ? 'private' : verdict.tier === 'private' ? 'secure' : undefined) !== row.contentTier)
-        return reject('legacy_verdict_tier');
-      if (needsContentBinding && verdict.contentHash !== normalizedContentHash(copy.chunks.map(chunk => chunk.boundedText).join('')))
-        return reject('legacy_verdict_content');
-    }
+    if (!verdict) return reject('legacy_verdict_missing');
+    if (verdict.ambiguous) return reject('legacy_verdict_ambiguous');
+    const time = Date.parse(verdict.decidedAt), decisionTime = Date.parse(row.decidedAt);
+    if (!Number.isFinite(time) || !Number.isFinite(decisionTime) || time > decisionTime) return reject('legacy_verdict_time');
+    if ((verdict.tier === 'personal' ? 'private' : verdict.tier === 'private' ? 'secure' : undefined) !== row.contentTier)
+      return reject('legacy_verdict_tier');
+    if (verdict.contentHash !== normalizedContentHash(copy.chunks.map(chunk => chunk.boundedText).join('')))
+      return reject('legacy_verdict_content');
     provenance = 'legacy_sniffer';
   }
   const vector = prefilterVector(copy, reject);
