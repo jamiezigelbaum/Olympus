@@ -34,7 +34,7 @@ async function fixture(root: string, name: string) {
   const sniffer = new TierSnifferStore({ dbPath: tierSnifferPathForLedger(ledger.dbPath) });
   const store = new LocalConnectorStore({ dbPath, corpusId: `secure_local.${name}`, family: 'file', trustDomain: 'secure_local', tierLedger: null });
   const text = 'Synthetic picnic sandwiches for Sunday.';
-  const judge = snifferId({ kind: 'local', modelId: 'fixture-model', profileId: 'fixture' });
+  const judge = snifferId({ kind: 'local', modelId: 'fixture-model' });
   const items = Array.from({ length: 11 }, (_, n) => ({
     identity: { family: 'file' as const, provider: 'fixture', accountScope: 'fixture-account', providerItemId: String(n), localItemId: String(n) },
     mimeType: 'text/plain', content: { kind: 'text' as const, text }, metadata: { title: 'fixture-name' }, fetchedAt: new Date().toISOString(),
