@@ -879,6 +879,8 @@ export function telegramMessageItem(input: {
     ...(service ? { serviceMessage: true, serviceAction: service.action } : {}),
     ...(optionalString(input.message.recordKind) ? { recordKind: optionalString(input.message.recordKind)! } : {}),
     chatType: optionalString(input.message.chatType),
+    // Scheduling metadata only; live entities/export topology supply this without a lookup.
+    ...(telegramConversationSize(input.message) ? { conversationSize: telegramConversationSize(input.message) } : {}),
     attachments: Array.isArray(input.message.attachments) ? input.message.attachments : [],
     reactions: input.message.reactions,
     corpusId: input.corpusId,
@@ -1046,10 +1048,20 @@ function sha256(value: string): string {
   return createHash('sha256').update(value).digest('hex');
 }
 
-/**
- * The capture's chat-type vocabulary mapped to the contract's conversation
- * kinds. An unknown or missing value claims nothing.
- */
+/** Scheduling metadata; never a tier, floor, prior, or model input. */
+function telegramConversationSize(message: Record<string, unknown>): 'direct' | 'small' | 'large' | undefined {
+  const size = message.conversationSize;
+  if (size === 'direct' || size === 'small' || size === 'large') return size;
+  switch (optionalString(message.chatType)?.toLowerCase()) {
+    case 'dm': case 'bot': case 'private': case 'direct': case 'secret': case 'secret_chat': return 'direct';
+    case 'supergroup': case 'channel': return 'large';
+    // Older live records collapsed basic groups and megagroups to "group".
+    // Without the new hint their size remains unknown.
+    default: return undefined;
+  }
+}
+
+/** The capture's chat-type vocabulary mapped to the contract's conversation kinds. */
 export function telegramConversationKind(chatType: string | undefined): SourceConversationKind | undefined {
   switch (chatType?.toLowerCase()) {
     case 'dm':

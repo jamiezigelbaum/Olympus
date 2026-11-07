@@ -683,7 +683,10 @@ function nextInTurn(pending: readonly WorkItem[], targets: readonly SnifferTarge
 }
 
 function compareRecent(a: WorkItem, b: WorkItem): number {
+  // Priority first (held records), then direct chats and small groups before
+  // large ones (#958). Order only: it never changes a verdict.
   return b.question.priority - a.question.priority
+    || (b.question.conversationOrder ?? 0) - (a.question.conversationOrder ?? 0)
     || b.question.queuedAt.localeCompare(a.question.queuedAt)
     || b.question.sequence - a.question.sequence;
 }

@@ -404,6 +404,8 @@ export function whatsAppClassificationSignals(item: RawItem): SourceClassificati
     ...(item.metadata['secretRedacted'] === true
       ? { floor: { tier: 'secrets' as const, basis: WHATSAPP_SECRET_REDACTED_FLOOR_BASIS } }
       : {}),
+    ...(item.metadata['conversationSize'] === 'direct' ? { conversationKind: 'direct' as const }
+      : item.metadata['conversationKind'] === 'group' ? { conversationKind: 'group' as const } : {}),
     title: signalText(item.metadata, 'chat'),
     sender: signalText(item.metadata, 'sender'),
     folderKeys: item.identity.providerConversationId ? [item.identity.providerConversationId] : [],
@@ -1301,6 +1303,13 @@ function recordBringsContent(message: SpoolMessage): boolean {
   return !(message.mediaType !== undefined && message.text === '');
 }
 
+/** Provider topology only. Group membership counts are absent from these records. */
+function whatsAppConversationSignals(jid: string): Readonly<Record<string, unknown>> {
+  if (jid.endsWith('@g.us')) return { conversationKind: 'group' };
+  if (jid.endsWith('@s.whatsapp.net') || jid.endsWith('@lid')) return { conversationSize: 'direct' };
+  return {};
+}
+
 function rawItemFromSpoolMessage(
   message: SpoolMessage,
   account: string,
@@ -1325,6 +1334,7 @@ function rawItemFromSpoolMessage(
     metadata: Object.freeze({
       titleIsConversation: true,
       ...(message.mediaType === undefined && !redacted ? { textComplete: true } : {}),
+      ...whatsAppConversationSignals(message.chatJid),
       chat: status ? WHATSAPP_STATUS_CHAT_LABEL : message.chatName || message.chatJid,
       sender: senderName || message.senderJid,
       senderId: message.senderJid || undefined,
@@ -1359,6 +1369,7 @@ function rawItemFromChild(message: SpoolMessage, child: WhatsAppChildRecord, acc
     metadata: Object.freeze({
       name: child.name,
       title: child.name,
+      ...whatsAppConversationSignals(message.chatJid),
       chat: status ? WHATSAPP_STATUS_CHAT_LABEL : message.chatName || message.chatJid,
       sender: senderName || message.senderJid,
       senderLabel: senderName || message.senderJid || undefined,

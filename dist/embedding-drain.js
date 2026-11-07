@@ -9713,6 +9713,16 @@ function tierRank(tier) {
 function maxTier(a, b) {
   return TIER_RANK[a] >= TIER_RANK[b] ? a : b;
 }
+function conversationOrderedSniffer(sniffer, metadata) {
+  const size = metadata.conversationSize;
+  const conversationOrder = size === "direct" || size === "small" ? 1 : size === "large" ? -1 : 0;
+  return {
+    id: sniffer.id,
+    ...sniffer.rejudgeReady === undefined ? {} : { rejudgeReady: sniffer.rejudgeReady },
+    ...sniffer.recordedContentVerdict ? { recordedContentVerdict: sniffer.recordedContentVerdict } : {},
+    judge: (request) => sniffer.judge({ ...request, conversationOrder })
+  };
+}
 function heldUntilJudged(reasons) {
   return reasons?.includes(HELD_UNTIL_JUDGED_REASON) === true;
 }
@@ -10475,17 +10485,18 @@ class TierSnifferStore {
   enqueue(question) {
     const materialHash = question.materialHash ?? snifferMaterialHash(question.pass, question.material);
     const priority = Number.isFinite(question.priority) ? Math.max(HELD_UNTIL_JUDGED_PRIORITY, Math.min(100, Math.floor(question.priority))) : 0;
+    const conversationOrder = question.conversationOrder === 1 ? 1 : question.conversationOrder === -1 ? -1 : 0;
     return this.db.transaction(() => {
       if (question.stillAsk && !question.stillAsk())
         return false;
       const before = this.db.query(`
-        SELECT priority FROM sniffer_questions
+        SELECT priority, conversation_order FROM sniffer_questions
         WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND pass = ?
       `).get(...subjectParams(question.subject), question.pass);
       this.db.query(`
       INSERT INTO sniffer_questions (
-        provider, account_scope, conversation_key, provider_item_id, pass, material_hash, map_revision, material, flags_json, attempts, queued_at, priority, content_hash
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)
+        provider, account_scope, conversation_key, provider_item_id, pass, material_hash, map_revision, material, flags_json, attempts, queued_at, priority, content_hash, conversation_order
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?)
       ON CONFLICT (provider, account_scope, conversation_key, provider_item_id, pass) DO UPDATE SET
         held_sniffer_id = CASE WHEN sniffer_questions.material_hash = excluded.material_hash
           AND sniffer_questions.map_revision = excluded.map_revision AND sniffer_questions.flags_json = excluded.flags_json
@@ -10498,9 +10509,10 @@ class TierSnifferStore {
         map_revision = excluded.map_revision,
         material = excluded.material,
         priority = excluded.priority,
+        conversation_order = excluded.conversation_order,
         flags_json = excluded.flags_json
-    `).run(...subjectParams(question.subject), question.pass, materialHash, question.mapRevision, question.material, JSON.stringify([...question.flags]), this.now().toISOString(), priority, question.contentHash ?? null);
-      if (priority > 0 && (!before || priority > before.priority)) {
+    `).run(...subjectParams(question.subject), question.pass, materialHash, question.mapRevision, question.material, JSON.stringify([...question.flags]), this.now().toISOString(), priority, question.contentHash ?? null, conversationOrder);
+      if (!before && (priority > 0 || conversationOrder > 0) || before && (priority > before.priority || conversationOrder !== before.conversation_order)) {
         this.db.query("DELETE FROM sniffer_scan WHERE scan_key IN (?, ?)").run("all:recent", `${question.pass}:recent`);
       }
       return true;
@@ -10524,7 +10536,7 @@ class TierSnifferStore {
     };
     const read = (oldest2, count) => {
       const key = `${options.pass ?? "all"}:${oldest2 ? "oldest" : "recent"}`;
-      let cursor = options.eligible && !this.readOnly ? this.db.query("SELECT priority, queued_at, question_pk, candidate_pk FROM sniffer_scan WHERE scan_key = ?").get(key) : null;
+      let cursor = options.eligible && !this.readOnly ? this.db.query("SELECT conversation_order, priority, queued_at, question_pk, candidate_pk FROM sniffer_scan WHERE scan_key = ?").get(key) : null;
       if (oldest2 && cursor?.candidate_pk != null) {
         const pinned = this.db.query("SELECT * FROM sniffer_questions WHERE question_pk = ?").get(cursor.candidate_pk);
         if (pinned) {
@@ -10542,14 +10554,14 @@ class TierSnifferStore {
         params.push(options.pass);
       }
       if (cursor) {
-        filters.push(oldest2 ? "(queued_at, question_pk) > (?, ?)" : "(priority, queued_at, question_pk) < (?, ?, ?)");
+        filters.push(oldest2 ? "(queued_at, question_pk) > (?, ?)" : "(priority, conversation_order, queued_at, question_pk) < (?, ?, ?, ?)");
         if (!oldest2)
-          params.push(cursor.priority);
+          params.push(cursor.priority, cursor.conversation_order);
         params.push(cursor.queued_at, cursor.question_pk);
       }
       const rows = this.db.query(`SELECT * FROM sniffer_questions
         ${filters.length ? `WHERE ${filters.join(" AND ")}` : ""}
-        ORDER BY ${oldest2 ? "queued_at, question_pk" : "priority DESC, queued_at DESC, question_pk DESC"} LIMIT ?`).all(...params, scanLimit);
+        ORDER BY ${oldest2 ? "queued_at, question_pk" : "priority DESC, conversation_order DESC, queued_at DESC, question_pk DESC"} LIMIT ?`).all(...params, scanLimit);
       const found = [];
       for (const row of rows) {
         const question = questionFromRow(row);
@@ -10563,10 +10575,10 @@ class TierSnifferStore {
         if (oldest2 && found[0]) {
           const candidate = found[0];
           this.db.query(`INSERT OR REPLACE INTO sniffer_scan
-            (scan_key, priority, queued_at, question_pk, candidate_pk) VALUES (?, ?, ?, ?, ?)`).run(key, candidate.priority, candidate.queuedAt, candidate.sequence, candidate.sequence);
+            (scan_key, conversation_order, priority, queued_at, question_pk, candidate_pk) VALUES (?, ?, ?, ?, ?, ?)`).run(key, candidate.conversationOrder ?? 0, candidate.priority, candidate.queuedAt, candidate.sequence, candidate.sequence);
         } else if (found.length === 0 && rows.length === scanLimit && last) {
           this.db.query(`INSERT OR REPLACE INTO sniffer_scan
-            (scan_key, priority, queued_at, question_pk) VALUES (?, ?, ?, ?)`).run(key, last.priority, last.queued_at, last.question_pk);
+            (scan_key, conversation_order, priority, queued_at, question_pk) VALUES (?, ?, ?, ?, ?)`).run(key, last.conversation_order, last.priority, last.queued_at, last.question_pk);
         } else
           this.db.query("DELETE FROM sniffer_scan WHERE scan_key = ?").run(key);
       }
@@ -10659,6 +10671,7 @@ function questionFromRow(row) {
     attempts: row.attempts,
     queuedAt: row.queued_at,
     priority: row.priority ?? 0,
+    conversationOrder: row.conversation_order ?? 0,
     sequence: row.question_pk
   };
 }
@@ -10747,6 +10760,19 @@ function snifferMigrations() {
           ALTER TABLE sniffer_verdicts ADD COLUMN model_subject TEXT;
           CREATE INDEX sniffer_final_content ON sniffer_verdicts(content_hash, model_id, prompt_version, map_revision)
             WHERE fail_safe = 0 AND content_hash IS NOT NULL;`);
+      }
+    },
+    {
+      version: 6,
+      name: "conversation_queue_order",
+      up(db) {
+        db.exec(`ALTER TABLE sniffer_questions ADD COLUMN conversation_order INTEGER NOT NULL DEFAULT 0;
+          ALTER TABLE sniffer_scan ADD COLUMN conversation_order INTEGER NOT NULL DEFAULT 0;
+          DROP INDEX sniffer_recent;
+          DROP INDEX sniffer_pass_recent;
+          CREATE INDEX sniffer_recent ON sniffer_questions(priority DESC, conversation_order DESC, queued_at DESC, question_pk DESC);
+          CREATE INDEX sniffer_pass_recent ON sniffer_questions(pass, priority DESC, conversation_order DESC, queued_at DESC, question_pk DESC);
+          DELETE FROM sniffer_scan WHERE scan_key LIKE '%:recent';`);
       }
     }
   ];
@@ -11019,6 +11045,7 @@ class CachedTierSniffer {
           ...request.materialHash ? { materialHash: request.materialHash } : {},
           ...request.contentHash ? { contentHash: request.contentHash } : {},
           mapRevision,
+          conversationOrder: request.conversationOrder ?? 0,
           flags: request.flags,
           ...request.priority !== undefined ? { priority: request.priority } : {},
           ...request.stillAsk ? { stillAsk: request.stillAsk } : {}
@@ -21866,7 +21893,7 @@ function decideItemTiers(connector, item, text2, options, ledger, extra = {}) {
   const fenced = options?.sniffer && ledger && read ? secretFencedSniffer(options.sniffer, ledger, item.identity, read, { mayAskSecret: fresh }) : options?.sniffer;
   const signals = connector.classificationSignals(item);
   const parentContext = item.identity.parent ? options?.parentNamesContext?.(item.identity, item.identity.parent.localItemId) : undefined;
-  const sniffer = fenced && recordedContentVerdictSniffer(fenced, recorded, text2, contentNamesReason(signals, parentContext));
+  const sniffer = fenced && conversationOrderedSniffer(recordedContentVerdictSniffer(fenced, recorded, text2, contentNamesReason(signals, parentContext)), item.metadata);
   const holdUntilJudged = options?.holdContentUntilJudged === true || item.holdContentUntilJudged === true || heldUntilJudged(recorded?.reasons);
   return classifyItemTiers({
     signals,
@@ -26121,7 +26148,7 @@ var init_local_index = __esm(() => {
           ...inputs?.holdContentUntilJudged === true || heldUntilJudged(existing.reasons) ? { holdUntilJudged: true } : {},
           subject: item.identity
         }, {
-          ...inputs?.sniffer ? { sniffer: secretFencedSniffer(inputs.sniffer, ledger, item.identity, read) } : {},
+          ...inputs?.sniffer ? { sniffer: conversationOrderedSniffer(secretFencedSniffer(inputs.sniffer, ledger, item.identity, read), item.metadata) } : {},
           ...override ? { override } : {},
           ...inputs?.retirePublic ? { retirePublic: true } : {}
         });
@@ -73208,7 +73235,7 @@ function nextInTurn(pending, targets, dispatches) {
   return pending.find((item) => item.target === target) ?? pending[0];
 }
 function compareRecent(a, b) {
-  return b.question.priority - a.question.priority || b.question.queuedAt.localeCompare(a.question.queuedAt) || b.question.sequence - a.question.sequence;
+  return b.question.priority - a.question.priority || (b.question.conversationOrder ?? 0) - (a.question.conversationOrder ?? 0) || b.question.queuedAt.localeCompare(a.question.queuedAt) || b.question.sequence - a.question.sequence;
 }
 function openPasses(row) {
   const passes = [];

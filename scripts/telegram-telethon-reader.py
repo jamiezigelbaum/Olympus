@@ -185,7 +185,8 @@ async def read_messages_with_client(
         min_id=min_id,
         reverse=reverse,
     ):
-        normalized = normalize_message(message, account, str(chat_id), chat_title, chat_type)
+        normalized = normalize_message(message, account, str(chat_id), chat_title, chat_type,
+                                       conversation_size=conversation_size_from_entity(entity))
         await capture_message_media(message, normalized)
         sender_id = normalized.get("senderId")
         if isinstance(sender_id, str):
@@ -442,6 +443,7 @@ async def capture_gateway_event(
             str(chat_ref),
             chat_title_from_entity(entity),
             chat_type_from_entity(entity) if entity is not None else None,
+            conversation_size=conversation_size_from_entity(entity),
         )
         await capture_message_media(message, normalized)
         sender_id = normalized.get("senderId")
@@ -548,6 +550,7 @@ async def capture_gateway_reaction(
             str(chat_ref),
             chat_title_from_entity(entity),
             chat_type_from_entity(entity) if entity is not None else None,
+            conversation_size=conversation_size_from_entity(entity),
             reactions_known=True,
         )
         sender_id = normalized.get("senderId")
@@ -1225,6 +1228,7 @@ def normalize_message(
     chat_title: str | None = None,
     chat_type: str | None = None,
     reactions_known: bool = False,
+    conversation_size: str | None = None,
 ) -> dict[str, Any]:
     """Normalize one Telegram message into a spool record's `message` object.
 
@@ -1244,6 +1248,8 @@ def normalize_message(
         item["chatTitle"] = chat_title
     if chat_type:
         item["chatType"] = chat_type
+    if conversation_size:
+        item["conversationSize"] = conversation_size
     edit_date = iso_or_none(getattr(message, "edit_date", None))
     if edit_date:
         item["editedAt"] = edit_date
@@ -1823,6 +1829,7 @@ async def retry_waiting_media(client: Any, config: GatewayConfig, state_lock: as
                     chat,
                     chat_title_from_entity(entity),
                     chat_type_from_entity(entity) if entity is not None else None,
+                    conversation_size=conversation_size_from_entity(entity),
                 )
                 await capture_message_media(message, normalized)
                 attachment = (normalized.get("attachments") or [{}])[0]
@@ -1964,6 +1971,25 @@ def service_action_fields(action: Any) -> dict[str, Any] | None:
     if name == "boost_apply":
         int_field("boosts", "boosts")
     return fields
+
+
+def conversation_size_from_entity(entity: Any) -> str | None:
+    """Queue hint only, from an entity already in hand; no membership lookup.
+
+    Counts override topology. Without a count, a basic group is the smaller
+    kind; a megagroup or broadcast is the large kind. Unknown stays unknown.
+    """
+    if entity is None:
+        return None
+    kind = chat_type_from_entity(entity)
+    if kind in ("dm", "bot"):
+        return "direct"
+    count = getattr(entity, "participants_count", None)
+    if isinstance(count, int) and not isinstance(count, bool) and count > 0:
+        return "small" if count <= 20 else "large"
+    if kind == "channel" or bool(getattr(entity, "megagroup", False)):
+        return "large"
+    return "small" if kind == "group" else None
 
 
 def chat_type_from_entity(entity: Any) -> str:

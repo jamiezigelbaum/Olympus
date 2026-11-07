@@ -70,6 +70,7 @@ export function telegramMediaChild(
       ...(typeof meta['senderId'] === 'string' ? { senderId: meta['senderId'] } : {}),
       ...(typeof meta['senderDisplayName'] === 'string' ? { senderDisplayName: meta['senderDisplayName'], senderLabel: meta['senderDisplayName'] } : {}),
       ...(typeof meta['chatType'] === 'string' ? { chatType: meta['chatType'] } : {}),
+      ...(typeof meta['conversationSize'] === 'string' ? { conversationSize: meta['conversationSize'] } : {}),
       trustDomain: meta['trustDomain'],
       corpusId: meta['corpusId'],
       mediaKind: media.kind,

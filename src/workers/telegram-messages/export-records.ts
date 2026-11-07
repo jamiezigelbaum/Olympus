@@ -273,6 +273,8 @@ export function telegramExportMessageRecord(
     ...(editedAt ? { editedAt } : {}),
     chatTitle: chat.name ?? (chat.type ? CHAT_TYPE_TITLES[chat.type] : undefined) ?? undefined,
     ...(chat.type && LIVE_CHAT_TYPES[chat.type] ? { chatType: LIVE_CHAT_TYPES[chat.type] } : {}),
+    ...(chat.type === 'private_group' ? { conversationSize: 'small' }
+      : chat.type?.includes('supergroup') || chat.type?.includes('channel') ? { conversationSize: 'large' } : {}),
     ...(senderId ? { senderId } : {}),
     ...(senderName ? { senderDisplayName: senderName } : {}),
     ...(senderId && context.ownUserId ? { senderIsOwner: senderId === context.ownUserId } : {}),

@@ -27,6 +27,7 @@ import {
   itemHasNonTextContent,
   contentDigestReason,
   contentNamesReason,
+  conversationOrderedSniffer,
   heldUntilJudged,
   type OwnerTierRule,
   type TierDecision,
@@ -209,7 +210,9 @@ export function decideItemTiers(
   const parentContext = item.identity.parent
     ? options?.parentNamesContext?.(item.identity, item.identity.parent.localItemId)
     : undefined;
-  const sniffer = fenced && recordedContentVerdictSniffer(fenced, recorded, text, contentNamesReason(signals, parentContext));
+  const sniffer = fenced && conversationOrderedSniffer(
+    recordedContentVerdictSniffer(fenced, recorded, text, contentNamesReason(signals, parentContext)), item.metadata,
+  );
   // The lane's hold, the item's own (an item built from an archive record
   // carries it: contracts.ts, 2.2.0), or the one its stored decision carries
   // (a store whose recording did not bring the lane's option still holds the

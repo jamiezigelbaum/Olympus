@@ -82,6 +82,15 @@ describe('the export carries the live item\'s exact key', () => {
     expect(telegramExportSenderId('someone')).toBeUndefined();
   });
 
+  test('export group topology publishes a queue hint without changing the live chat type', () => {
+    for (const [type, expected] of [['private_group', 'small'], ['private_supergroup', 'large'], ['public_supergroup', 'large']] as const) {
+      const outcome = telegramExportMessageRecord({ account: ACCOUNT, fetchedAt: '2026-11-07T00:00:00Z' },
+        { name: 'Chat', type, id: String(GROUP_ID) }, telegramText(1, 'hello'));
+      if (outcome.kind !== 'record') throw new Error(outcome.kind);
+      expect(outcome.record.capturedItem.item.metadata).toMatchObject({ chatType: 'group', conversationSize: expected });
+    }
+  });
+
   test('a message becomes the spool\'s message, with the live version form and edits and reactions', () => {
     const message = telegramText(3, 'see you at the quay', {
       extra: {
@@ -98,7 +107,7 @@ describe('the export carries the live item\'s exact key', () => {
     const item = outcome.record.capturedItem.item;
     expect(item.identity).toMatchObject({ provider: 'telegram', accountScope: ACCOUNT, providerConversationId: GROUP, providerItemId: '1003', localItemId: `${ACCOUNT}:${GROUP}:1003` });
     expect(item.identity.sourceVersion).toMatch(new RegExp(`^${ACCOUNT}:${GROUP}:1003:2015-01-05T15:00:00Z:r[0-9a-f]{8}$`));
-    expect(item.metadata).toMatchObject({ senderId: '1001', senderDisplayName: 'Sam Example', senderIsOwner: true, editedAt: '2015-01-05T15:00:00.000Z', chatType: 'group', title: 'Harbour' });
+    expect(item.metadata).toMatchObject({ senderId: '1001', senderDisplayName: 'Sam Example', senderIsOwner: true, editedAt: '2015-01-05T15:00:00.000Z', chatType: 'group', conversationSize: 'small', title: 'Harbour' });
     expect(item.metadata.reactions).toEqual([
       { key: '👍', count: 2, actors: [{ providerActorId: '2002' }] },
       { key: 'custom:5368324170671202286', count: 1 },

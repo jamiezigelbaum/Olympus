@@ -158,6 +158,8 @@ export const HELD_RECORD_PRIORITY = 10;
 export const HELD_UNTIL_JUDGED_PRIORITY = -1;
 
 export interface TierSnifferRequest {
+  /** Scheduling only; excluded from verdict inputs and cache keys. */
+  conversationOrder?: -1 | 0 | 1;
   pass: 'metadata' | 'content';
   /** Higher values run first (held records use HELD_RECORD_PRIORITY); aging still reserves progress for old questions. */
   priority?: number;
@@ -202,6 +204,19 @@ export interface TierSniffer {
   /** An eligible final verdict for this item's unchanged content and names. */
   readonly recordedContentVerdict?: { readonly tier: 'private' | 'secure'; readonly code: string; readonly mapRevision: string };
   judge(request: TierSnifferRequest): TierSnifferVerdict;
+}
+
+/** Read only the connector's generic scheduling metadata, never its source identity.
+ * Unknown sizes keep the existing priority/newest order; aging remains independent. */
+export function conversationOrderedSniffer(sniffer: TierSniffer, metadata: Readonly<Record<string, unknown>>): TierSniffer {
+  const size = metadata.conversationSize;
+  const conversationOrder = size === 'direct' || size === 'small' ? 1 : size === 'large' ? -1 : 0;
+  return {
+    id: sniffer.id,
+    ...(sniffer.rejudgeReady === undefined ? {} : { rejudgeReady: sniffer.rejudgeReady }),
+    ...(sniffer.recordedContentVerdict ? { recordedContentVerdict: sniffer.recordedContentVerdict } : {}),
+    judge: request => sniffer.judge({ ...request, conversationOrder }),
+  };
 }
 
 /** A sniffer that never decides, so flagged items stay pending (no private lane configured). */

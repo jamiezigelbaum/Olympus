@@ -237,6 +237,7 @@ describe('WhatsApp live SourceConnector (Contract 1)', () => {
     expect(item?.content).toEqual({ kind: 'text', text: 'hello there' });
     expect(item?.metadata).toEqual({
       chat: 'Family',
+      conversationKind: 'group',
       sender: 'Grace',
       senderId: 'sender-7@s.whatsapp.net',
       senderLabel: 'Grace',
@@ -266,6 +267,7 @@ describe('WhatsApp live SourceConnector (Contract 1)', () => {
     expect(item?.content).toEqual({ kind: 'text', text: '@you pick Sam up' });
     expect(item?.metadata).toEqual({
       chat: 'Family',
+      conversationKind: 'group',
       sender: 'Jane',
       senderId: '98765430001111@lid',
       senderLabel: 'Jane',
@@ -561,6 +563,20 @@ describe('WhatsApp live SourceConnector (Contract 1)', () => {
     const first = await drainItems(connectorFor(dir));
     const second = await drainItems(connectorFor(dir));
     expect(first.map((item) => item.identity)).toEqual(second.map((item) => item.identity));
+  });
+
+  test('publishes direct/group topology without guessing a group member count', async () => {
+    const dir = makeSpoolDir({ '2026-06-11.jsonl':
+      spoolLine({ id: 'direct', chat_jid: 'peer@s.whatsapp.net' })
+      + spoolLine({ id: 'lid', chat_jid: 'peer@lid' })
+      + spoolLine({ id: 'group', chat_jid: 'group@g.us' })
+      + spoolLine({ id: 'unknown', chat_jid: 'status@broadcast' }),
+    });
+    const connector = connectorFor(dir);
+    const items = await drainItems(connector);
+    expect(items.map(item => item.metadata.conversationSize)).toEqual(['direct', 'direct', undefined, undefined]);
+    expect(items.map(item => connector.classificationSignals(item).conversationKind))
+      .toEqual(['direct', 'direct', 'group', undefined]);
   });
 
   test('signals publish no source-level prior: each message is tiered by its content', async () => {
