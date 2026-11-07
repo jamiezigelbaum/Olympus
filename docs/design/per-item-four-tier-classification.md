@@ -163,7 +163,7 @@ The owner's rule (2026-09-23): **the default tier is Personal.** Things are rais
 
 Duplicate text uses the existing per-store sniffer verdict table, not a separate cache. The original full-input hash still covers names, labels, folder keys, complete text and parent context. A schema-5 indexed content hash adds NFC, line-ending and outer-whitespace normalization only (case and internal whitespace stay significant). Only a non-fail-safe model answer applied to a final, current item without pending passes publishes that content hash. Answered donor questions remain queued as receipts while placement or names are unfinished; after settlement the resolver publishes their content hash and removes the receipt. Before settlement the full-input cache answer can retry only the original item; no other item borrows it. A final Private model verdict can be reused across names because it only raises the recipient; a Personal verdict requires an identical full-input hash too, including names (even normalized body variants with changed full input go to the judge). Reuse retains model/weights, prompt and map-revision keys and reruns the receiving item's metadata, detectors and floors. Context and non-text content prohibit this shortcut. `content:rule:duplicate_model` identifies reuse, while ordinary model answers retain `content:sniffer:<judge>:<verdict>` provenance. Rule, owner and fail-safe outcomes are never duplicate donors. Old cache rows have no eligibility receipt and are not backfilled by guessing.
 
-Classifier p8 is retained, so this change does not trigger an archive-wide version sweep. A future classifier-version change selects already-final automatic model decisions too. `content_rule` decisions qualify only after a classifier version or their recorded `content:rule_sniffer:<identity>` changes; an absent model-sniffer marker alone never selects them. Rejudging without the conversation-title fact safely uses the model for titled items. The pass excludes owner decisions, Secrets, unread content and moving items, then rereads eligible stored text and runs the shared classifier. Unchanged model/prompt/map/full-input cache keys can answer without a call; the classifier version alone does not invalidate that cache. Missing cache entries can cause a fresh content call per eligible item. A newer sniffer identity can also require a names call. Thus a 1.25-million-item archive can require up to 1.25 million content calls, or 2.5 million names-plus-content calls when both passes need new answers, before retries; its actual cost cannot be inferred from item count alone. Text rereads, secret screening and ledger writes still run on cache hits. Default preparation is 100 candidates per set per tick, scanning up to 2,000 ledger rows, with preparation paused at 200 unanswered questions per set. The model lane defaults to one in-flight call (maximum eight), 30-second passes and a one-second scheduler interval; daily caps are 20,000 calls for the full lane or 250,000 for decision mode. These are configured limits, not a throughput measurement of the live archive (source inspection, 2026-11-06).
+Classifier p8 is retained, so this change does not trigger an archive-wide version sweep. A future classifier-version change selects already-final automatic model decisions too. `content_rule` decisions qualify only after a classifier version or the owner-words/model part of their recorded `content:rule_sniffer:<identity>` changes; an absent model-sniffer marker alone never selects them. Rejudging without the conversation-title fact safely uses the model for titled items. The pass excludes owner decisions, Secrets, unread content and moving items, then rereads eligible stored text and runs the shared classifier. Unchanged model/prompt/map/full-input cache keys can answer without a call; the classifier version alone does not invalidate that cache. Missing cache entries can cause a fresh content call per eligible item. A changed owner-words or model identity can also require a names call. Thus a 1.25-million-item archive can require up to 1.25 million content calls, or 2.5 million names-plus-content calls when both passes need new answers, before retries; its actual cost cannot be inferred from item count alone. Text rereads, secret screening and ledger writes still run on cache hits. Default preparation is 100 candidates per set per tick, scanning up to 2,000 ledger rows, with preparation paused at 200 unanswered questions per set. The model lane defaults to one in-flight call (maximum eight), 30-second passes and a one-second scheduler interval; daily caps are 20,000 calls for the full lane or 250,000 for decision mode. These are configured limits, not a throughput measurement of the live archive (source inspection, 2026-11-06).
 
 #### Bare document share links (#940, 6 November 2026)
 
@@ -200,13 +200,13 @@ explicit reclassification to pick it up.
 
 **Vocabulary is a question, not a verdict (owner ruling 2026-10-01).** "It shouldn't give me a private answer if there's nothing actually private in the thing I've asked about." A book chapter that says "treatment" and "symptoms" went straight to Private on two weak health words. Since classifier version `2026-10-01.p2`, vocabulary-only detector hits make their family borderline and the privacy-safe model judges the item: a hard category (health, therapy, financial, legal, identity) is Private whatever tier the model pairs it with, anything else confidently Personal is Personal. For a vocabulary question the excerpt is the document's opening plus the passages around the first matched words, still bounded by `SNIFFER_EXCERPT_MAX_CHARS`, so the model reads what the detector saw. Until it answers, the item is pending (held Private, with local embedding allowed only under §4.1). With no private model at all, vocabulary still raises to Private, so nothing words flagged reaches Personal without a model's judgment. Structured identifiers and secrets stay deterministic and immediate, and owner rules and overrides still win.
 
-**Re-judging what is already stored (classifier p3, review fixes 2026-10-02).** Content is classified when its text arrives, and the classifier or the sniffer's prompt (new owner words) can change afterwards. With a sniffer approved, its background tick re-judges routed items decided under another classifier version or sniffer prompt (`tier-rejudge.ts`), a bounded page per set per tick: it reads the stored text back and runs the same content pass. Owner overrides, force rules, owner rules on the names, Secrets, pending and mid-move items are never re-judged.
+**Re-judging what is already stored (owner decision, 2026-11-07).** Content is classified when its text arrives. With a sniffer approved, its background tick re-judges routed items after a classifier version, judge model or owner privacy-words change (`tier-rejudge.ts`), a bounded page per set per tick. A built-in prompt-template change alone leaves settled items in place, including finalized fail-safe Private decisions (`current`, with neither pass pending); new, pending and held judgments still use the current prompt. The full prompt version remains in verdict cache keys, so this does not reuse an older prompt's cached answer for a new question. The prompt version is a 12-hex SHA-256 digest of the system prompt and both batch templates. With owner words, `snifferPromptVersions` uses the owner-context template digest and appends `.o` plus an 8-hex SHA-256 digest of the normalized, bounded words; `snifferId` also includes the lane and `.m` plus a 16-hex model/cache-identity digest. Only the template digest is ignored for settled-item selection. Counts in the pass log distinguish `owner_words`, `judge_model` and `builtin_prompt_skipped` (skips within the scanned window, separate from picked candidates); they contain no item content. Skip-only log lines sample a window at most once per minute; reports continue counting each scanned window. Held items, retired source priors and missing questions retain their recovery causes. Owner overrides, force rules, owner rules on the names, Secrets, items pending on their names and mid-move items are excluded.
 
 - The item was visible under its previous decision, so a re-judge **never hides it pending an answer**. A decision that needs the model opens a re-judge question beside the ledger row (`TierLedger.openRejudgeQuestion`); the item stays exactly where it is (tiers, copies, embedding) until the sniffer answers. Only a Private verdict raises it (hidden first, then moved); a Personal verdict on a Personal item changes only its reasons; an item recorded Private by vocabulary that the model now judges Personal moves down. A newer decision of the row (a sync, a landing, an override) makes the question stale.
 - A decision made at once (a cached verdict, a structured detector) is recorded at once; a raise hides first.
 - On an install whose embeddings are not all the built-in local model (automatic moves off), nothing is hidden at all: a raise is queued with the item still visible, which is exactly the owner-approved migration's proposal for it (`olympus tier migrate plan` lists queued moves).
 - A secret found in stored text is settled at once like any Secrets decision: every copy hidden in the same ledger write, the location recorded, the copies handed to `SECRETS_DISPOSITION`.
-- Pacing: a set whose sniffer queue already holds twice a page of questions is not re-judged that tick, so re-judging never outruns the answers; a page reads a bounded window of the ledger (`DEFAULT_REJUDGE_SCAN_ROWS`); a row the pass leaves as it was (no change, no stored text) is stamped and not re-read until the classifier or prompt changes again.
+- Pacing: a set whose sniffer queue already holds twice a page of questions is not re-judged that tick, so re-judging never outruns the answers; a page reads a bounded window of the ledger (`DEFAULT_REJUDGE_SCAN_ROWS`); a row the pass leaves as it was (no change, no stored text) is stamped and not re-read until the classifier, owner words or judge model changes again (held-item recovery still keys the full prompt).
 
 An owner `olympus tier set` override still settles one item at once.
 
@@ -543,7 +543,12 @@ Scope: new, clean installs only. Existing installs keep their policy and stores 
 - **Names while content waits.** A pending content question does not hide independently cleared subject/sender or filenames. Shared Gmail/Drive placement uses Personal metadata and sealed content copies, with no body, snippet or chunk available through the metadata copy. A metadata question, owner floor, Secret or credential-bearing metadata still blocks that release. Waiting is a processing state, to be labelled **Waiting to be checked**, not a verdict of Private. The existing dashboard waiting-to-be-checked copy is reused; the placement code retains pending state and separate tiers.
 
 - **Sniffer model.** A configured private lane wins; otherwise the built-in private model (`built_in`, an AnalystModel the worker registers with `registerBuiltInPrivateModel`). While it is not downloaded the sniffer asks nothing, and its tick starts the first-time download itself when none has started (`BuiltInPrivateModel.startIfIdle`, sniffer service `startModel`), so a fresh install's held items never wait for something else to start it. It is approved by the owner's standing default for the built-in local model: the sniffer service writes that approval to the classification ledger as `approved_by: built_in_default` (never `owner`), again for each new prompt version; an owner revocation of the built-in model under any prompt version stops the default until the owner approves it again. Any other lane waits for the owner's own approval.
-- **Automatic moves.** While every embedding is the built-in local model, the sniffer tick carries out queued moves at once (`autoMoves`); a move back into a store that keeps an older superseded copy of the same item's earlier move replaces it (the ledger entry names the replaced chunks), and a move that keeps failing goes to the back of the queue. Otherwise moves wait for the owner-approved migration.
+- **Automatic moves.** While every embedding is the built-in local model, raises run hide-first on the existing immediate path and are selected ahead of lowering backlogs. Lowerings drain after the judge pass in their own one-second slice (at most 1,000 candidates), without consuming its 30-second judgment budget. Copy batches stop starting items after 25 ms or 25 items; the already-started batch finishes its verification and flips before yielding through the shared control-path headroom. A slice can therefore overrun by one indivisible batch and an in-flight note write; SQLite lock waits and a single large item are not preemptible. A timer requesting raises preempts the lowering drain at the next boundary. Sets rotate to avoid starvation. A move back into a store keeping an older superseded copy of the same item's earlier move replaces it (the ledger entry names the replaced chunks); a failing move goes to the back of the queue. Otherwise moves wait for the owner-approved migration.
+
+  Lowering batches reuse the normal digest, generation, owner, vector-authority and fingerprint checks. Commit order is staged-copy visibility markers, then store copies, then verified receipts, then the batch of visibility flips and durable note obligations. Abandoning a move retains its destination markers as superseded copies, so committed rows never become legacy-visible when a destination corpus would otherwise have no markers. Every destination stays write-fenced until the flip transaction commits. A crash before receipt commit leaves hidden destination rows and intact sources; a crash afterward replays the verified receipt. Failed items use savepoints so neighbours can finish. Notes are appended afterward, with acknowledgements batched and failed or deadline-deferred obligations retained for retry. A partial SQLite index over nonempty metadata entries keeps completed empty acknowledgements out of every pending-note scan; schema 12 adds the index without deleting history. Media cache retention/release happens only after its store transaction commits. The existing content-free automatic-moves line reports direction, elapsed time, export, stage, copy, vector, verification, flip, purge, extraction reread, notes, and store/ledger commit milliseconds. Vector time is inside copy time; verification includes its own exports, and purge is inside flip time. Commit timings measure SQLite transaction overhead (including synchronization), not syscall-isolated fsync latency.
+
+  Synthetic Sparta measurement before separating staged-marker commits, 2026-11-07: 31,200 queued one-chunk items with 768-dimensional local vectors and 63,000 completed-note acknowledgements. Before batching, the vector-populated baseline without old note rows took 5.44 ms/move and six outer SQLite transactions per move. With historical note rows, the unbatched control spent 13.27 ms/move on notes and ran at 53.6/s. The final service drain moved the entire 31,200 backlog in 138.743 seconds of active drain time (224.9/s), across 138 slices; the longest slice was 1.021 s. Outer SQLite transactions averaged 0.674/move and transaction overhead 0.129 ms/move. Notes fell to 0.383 ms/move. Interleaved with a 30-second judge pass, 224.9 × 60 / 31 = 435 moves/min; after 200 new moves/min, 31,200 / (435 - 200) = 133 minutes. This is a synthetic capacity projection; it does not reproduce the reported live slowdown, model throughput, host contention, large files or real extraction-job ledgers. Production step timings identify those costs without recording content or item identifiers. Reproduce through remote-build with `HOME="$(mktemp -d)" MOVE_BENCH_MODE=service MOVE_BENCH_SAMPLE=31200 bun scripts/tier-move-benchmark.ts`; `MOVE_BENCH_MODE=single MOVE_BENCH_LEGACY_META=1` reproduces the unbatched control with the previous metadata lookup.
+
 - **Privacy profile.** Set once in ChatGPT (`olympus_privacy_set`), editable from the dashboard: the owner's own words (quoted into the sniffer prompt as data; the approved prompt version is `SNIFFER_OWNER_CONTEXT_PROMPT_VERSION`) and always-Private folder, label and sender rules, written as `privacy-*` owner tier rules. Stored owner-only in `~/.olympus/privacy.json`. A new raising rule (always Private, or Secrets) also applies to items already stored: the sniffer tick and each set sync sweep routed items once per new rule (`tier-rules-sweep.ts`, a bounded page per call, matched on what the store keeps: title, path, scope and chat keys, sender) and raise every match at once, hidden first. Label rules, which a store does not keep, are applied by the provider's own lane (`sweepLabelRuleRaises`): the Gmail lane asks Gmail which messages carry the label (by label id, Spam and Trash included) at the start of each pull and reconcile, raises the stored ones the same way, and records the rule as applied only after Gmail answered every page, so a failure leaves it pending and the next run retries (the receipt carries `gmail_label_rules_pending` meanwhile); the daily reconcile also re-asks, for mail labelled later. A rule that would lower an item never acts on stored items.
 - **Names-only folders.** Since classifier p4 an item in a folder the owner keeps Names only is decided on its names at listing (`content:names_only`) and never waits for text. Items recorded before p4 were left pending on text that never comes; the same tick and each set sync settle them without a re-list (`tier-names-only-settle.ts`: a routed row held only for unread text whose store's names-only rule covers its path is recorded exactly as a p4 listing would; its names copy stays where it is). Items with no readable content for other reasons (folders, unsupported types, terminal extraction failures) still wait for a later change; telling the ledger about them belongs to the extraction runner and is not done yet.
 - **Diagnosis that led here.** On the owner's fresh install the two PDFs were routed correctly (Personal, content in `internal.dropbox.files`; `secure_local.dropbox.files` was only the extraction job's lane id). Their text was control-character noise: the launchd agent's PATH hid Homebrew's `pdftotext`, and the inline decoder cannot read composite-font PDFs. Extraction commands now resolve from package-manager directories, and undecodable inline text counts as no text layer.
@@ -590,22 +595,57 @@ branches. It requires **2,000 valid final judge labels in each class**, each
 bound to that item's complete own text and stored vector. Rules, overrides,
 fail-safes and pre-filter outputs are excluded. The ledger supplies the label:
 `private` is Personal and `secure` is Private, only when this judge alone
-decided it. A tier-bearing content-judge receipt binds that verdict's own tier
-and reason to the complete-text digest; a later metadata raise never changes
-the receipt. Rows without this provenance are skipped. Detectors, content rules, owner rules, overrides, metadata floors,
-own-record holds and small-lane `record_held:` answers exclude the row. The
-stored text must still match its complete-text digest; a verdict-cache
-`content_hash` is not required.
+decided it. Training accepts any prompt version of the same judge model.
+`snifferId` is `<lane>:<prompt-version>.m<model-hash>`; the model hash is the
+first 16 hex characters of SHA-256 over `snifferCacheModelId(lane)`. That cache
+identity uses `cacheModelId` (or `modelId`) and includes decision-mode version
+or pending-mode suffix where applicable. Prompt/template and owner-context
+changes do not change that model hash. Training compares the hash, while
+saved weights, current clearance and re-judge identities remain prompt-specific.
+
+A tier-bearing content-judge receipt binds the verdict's own tier and reason
+to the complete-text digest; a later metadata raise never changes the receipt.
+For legacy rows without that receipt, an explicit safe
+`content:sniffer:<same-model-id>:<code>` reason, read content and a matching
+complete-copy digest supply the label. A surviving cache entry is not required.
+Rules, fail-safes, unresolved/injection answers and small-lane `record_held:`
+answers cannot label content. Unknown or competing content reasons, owner
+rules, overrides, metadata floors, Secrets and own-record holds still exclude
+the row. Mismatched modern receipts never fall back to legacy acceptance.
+
+A `metadata:sniffer` answer is never a content label, even when the ledger
+retains a body digest. Legacy rows with a metadata judge reason or a previous
+Private/Secret metadata tier still require the latest subject/model cache answer's exact final-content hash, matching tier
+and a timestamp no later than the ledger decision, with no equal-time
+ambiguity. This preserves the names-only rename regression even when the cache
+is gone: the previous metadata tier records the raise after the metadata reason
+disappears. For other rows, a cached hash is unnecessary in either class; an
+existing cache answer must still agree on tier, time and ambiguity. Missing/stale
+hashes in the metadata cases still abstain as
+`legacy_verdict_content`. Live lookups use the existing subject/model/time
+index; old read-only snapshots scan once per model without migrating the cache.
+
+Label version 3 restarts old scans and insufficient/failed attempts immediately,
+including their cursors and retry delays. Valid saved weights retain their
+normal retraining interval. Verdict-cache writes still invalidate sliced final
+validation before publication. The minimum remains 2,000 examples per class.
 
 Training takes at most 5,000 examples per class and runs bounded,
 L2-regularized logistic regression in TypeScript on normalized vectors.
-Scanning and fitting share a cooperative 200 ms budget per tick across the
+Scanning and fitting share a cooperative 200 ms budget per slice across the
 installation (one synchronous row/update, or the final atomic publication check, may finish beyond the deadline).
+The service schedules slices during inference waits and between ticks, yielding
+through the shared control-path scheduler and stopping between units when an
+answer needs the pool. No training slice is awaited before a judge dispatch.
+Ledger reads rotate in windows of 32 rows, and scanning stops on the row that
+fills both class caps. Shutdown stops scheduling and lets an in-flight slice
+checkpoint before closing ledgers. These scheduling changes (2026-11-07) target
+training within an hour; live Sparta training time remains to be measured.
 Source ledger meta stores the cursor and selected item references, never text
 or vectors. Restart resumes scanning, rechecks selected rows and copies, then
 refits in slices. Retained examples are revalidated against their decisions,
 copy placement, text and vector bytes in circular sweeps using at most half
-the tick, leaving time for fitting even during unrelated ledger writes. A
+the slice, leaving time for fitting even during unrelated ledger writes. A
 changed ledger requests another full ledger-check cycle without rewinding.
 Publication makes one final synchronous check before writing weights. A changed or removed selected item,
 including a Secrets decision, discards the fit. Training starts after both classes reach the cap or all
@@ -614,7 +654,12 @@ after three hours. A complete read below 2,000 per class waits for 1,000 new
 cached verdicts or 24 hours, whichever comes first. Each finished attempt logs
 one content-free line with rows read, examples per class, outcome/reason, model
 version when trained, active elapsed time and the next attempt; status also
-shows these counts and progress while scanning/fitting.
+shows these counts and progress while scanning/fitting. The sniffer pass line
+also reports `promptChars` and `estimatedInputTokens`, summed over dispatched
+calls, with `mean_promptChars` and `mean_estimatedInputTokens` per call. Input
+tokens are estimated per call as prompt characters divided by four, rounded
+up; these content-free counts cover the system and user prompt, excluding the
+transport's chat-template envelope.
 Checkpoints are written only when the scan changes. A changed ledger/judge
 discards the obsolete attempt and starts again immediately; its log reports
 that immediate restart rather than the three-hour failure backoff.
@@ -622,6 +667,50 @@ that immediate restart rather than the three-hour failure backoff.
 A changed judge identity or mounted-ledger
 membership invalidates the model. Account-scope withdrawal invalidates it too.
 No contract shapes, vector identities, embeddings or classifier version change.
+
+For a counts-only training diagnostic from an unpacked release, run
+`bun ./dist/cli.js prefilter-training-dry-run`. Optional `--data-dir <directory>`
+selects an install instead of the normal data root; `--row-limit <positive integer>`
+bounds rows examined separately for each ledger. This hidden command does not
+run `source index status`, start workers, fit a model, or acquire a lease.
+It calls the same training eligibility, serving-copy selection, digest/verdict
+receipt and vector checks as live training. It counts every eligible row rather
+than applying the fitting sample caps. Every rejection name is always present;
+only the first failing check counts, so examples plus rejections equal rows read.
+All existing counters remain; `judge_id_invalid` and `judge_model_mismatch`
+distinguish malformed identities from another model, including another decision mode.
+Accepted-label `provenance` counters distinguish `judge_receipt` from
+`legacy_sniffer`; their sum equals accepted examples.
+The JSON output contains numbers only as values. Ledger array positions replace
+paths, accounts and source names; no row content, item identity, reason text,
+model identity or vectors are printed, even on errors.
+
+The diagnostic uses the install-wide recorded training attempt's judge identity
+(including its prompt and decision mode), compares training labels by the model
+hash above, and falls back to a unique source-ledger
+attempt for older installs. It refuses ambiguous or missing training identities
+rather than inferring one from accepted rows. Existing co-located and bound
+source ledgers are counted, including moved bindings resolved by ledger identity.
+No install SQLite file is opened by SQLite: a read-only open can still modify
+its shared-memory sidecar. Main database and WAL bytes are copied into private
+0700 temporary directories; snapshots alone are opened read-only, without SQL
+writes, checkpoint, migrations, metadata updates, permission repairs or lease.
+The storage service creates and owns the scratch reader root; these readers
+refuse paths outside it, symlink paths and hard-linked database files.
+SQLite's temporary shared-memory files stay there, and all scratch copies are
+removed on normal completion or error. Abrupt process termination can leave
+private scratch copies. Copying detects concurrent main/WAL changes and retries
+up to three times after 25, 50 and 75 ms, discarding stale scratch sidecars
+between attempts. Output includes `snapshot_retries` and numeric `error_reasons`
+for busy, unsafe or unreadable snapshot refusals and database-reader failures;
+any final error produces a nonzero exit. Snapshots
+of different files are not one install-wide transaction. Synthetic WAL-backed
+tests compare all install file hashes and mtimes before and after, including the
+built CLI path. The owner's 2026-11-07 read-only Sparta baseline found no
+examples among 28,982 rows in the first ledger (16,788 lacked tier receipts),
+and 15 Personal / 0 Private examples across four ledgers. Pre-#982 rows had
+judge reasons and digests but lacked the newer tier receipt. Acceptance counts
+after the legacy-provenance fix still require measurement on that install.
 
 One install-wide model and rolling audit window are shared across the mounted
 ledgers. A stable install tier ledger at

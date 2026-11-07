@@ -30,8 +30,9 @@
  * No instance cache: callers share the objects they open, as before.
  */
 import { Database } from 'bun:sqlite';
-import { existsSync, lstatSync, readdirSync, rmSync, rmdirSync, statSync } from 'node:fs';
-import { basename, join, resolve } from 'node:path';
+import { existsSync, lstatSync, mkdtempSync, readdirSync, rmSync, rmdirSync, statSync } from 'node:fs';
+import { basename, join, resolve, sep } from 'node:path';
+import { tmpdir } from 'node:os';
 import { closeSqliteStore } from './sqlite-store.ts';
 import { SecretLocationsIndex } from '../workers/classification/secret-locations.ts';
 import { TierSnifferStore } from '../workers/classification/sniffer-store.ts';
@@ -142,6 +143,40 @@ export function openTierSniffer(
 ): TierSnifferStore {
   placeSidecar(env, account, options.dbPath, options.readOnly);
   return new TierSnifferStore(options);
+}
+
+/** Offline readers own a fresh private scratch root, never an account's files.
+ * The caller copies database/WAL bytes here and closes readers before removing
+ * the directory. No registry, adoption, migration, checkpoint or lease runs.
+ */
+export function createStorageSnapshotReaders() {
+  const directory = mkdtempSync(join(tmpdir(), 'olympus-storage-snapshot-'));
+  const snapshotPath = (path: string): string => {
+    const target = resolve(directory, path);
+    if (!target.startsWith(`${directory}${sep}`)) throw new Error('Not a storage snapshot');
+    // Reject links, including an intermediate directory escaping the scratch root.
+    let current = directory;
+    for (const part of target.slice(directory.length + 1).split(sep)) {
+      current = join(current, part);
+      if (lstatSync(current).isSymbolicLink()) throw new Error('Not a storage snapshot');
+    }
+    if (!lstatSync(target).isFile() || lstatSync(target).nlink !== 1) throw new Error('Not a storage snapshot');
+    return target;
+  };
+  return {
+    directory,
+    database(path: string): Database {
+      const db = new Database(snapshotPath(path), { readonly: true, create: false });
+      try {
+        db.exec('PRAGMA busy_timeout = 10000; PRAGMA query_only = ON;');
+        return db;
+      } catch (error) { db.close(); throw error; }
+    },
+    ledger: (path: string) => new TierLedger({ dbPath: snapshotPath(path), readOnly: true }),
+    sniffer: (path: string) => new TierSnifferStore({ dbPath: snapshotPath(path), readOnly: true }),
+    store: (path: string, corpusId: string) => new LocalConnectorStore({ dbPath: snapshotPath(path), corpusId,
+      family: 'file', trustDomain: 'secure_local', readOnly: true }),
+  };
 }
 
 /**

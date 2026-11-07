@@ -1,5 +1,5 @@
-import { EmbeddingPrefilter } from './embedding-prefilter.ts';
-import { resumeVerifiedTierMove, flushTierMoveNotes } from '../connector-store/tier-move.ts';
+import { prefilterTrainingCopy, EmbeddingPrefilter } from './embedding-prefilter.ts';
+import { emptyTierMoveTimings, moveTieredItemsLowering, flushTierMoveNotes, type TierMoveOptions } from '../connector-store/tier-move.ts';
 import { controlPathHeadroom, ingestionTurn } from '../control-path-headroom.ts';
 // The worker's background tick for the privacy-safe sniffer: a bounded
 // `runSnifferPass` over every connector store, continuously while work remains.
@@ -169,7 +169,7 @@ export interface TierSnifferServiceOptions {
   autoApproveBuiltIn?: boolean;
   /**
    * Routed items re-judged per set per tick after the classifier or the
-   * sniffer's prompt changed (tier-rejudge.ts). 0 turns it off. Default
+   * owner's privacy words or judge model changed (tier-rejudge.ts). 0 turns it off. Default
    * DEFAULT_TIER_REJUDGE_PER_PASS. A set whose sniffer queue already holds
    * `rejudgeMaxOpenQuestions` questions is not re-judged that tick, so
    * re-judging never outruns the answers.
@@ -179,7 +179,8 @@ export interface TierSnifferServiceOptions {
   /**
    * Automatic tier moves (owner approval 2026-10-01): queued moves (a held
    * item the sniffer judged Personal after all queues one) are carried out
-   * right after the pass, at most `maxPerPass` items, ONLY while `localEmbeddingsOnly()` says
+   * raises immediately and lowerings in a separate bounded slice after the
+   * pass, at most `maxPerPass` items, ONLY while `localEmbeddingsOnly()` says
    * every configured embedding is the built-in local model AND every store of
    * the item's set embeds with it (free, nothing leaves the Mac). Otherwise
    * the move stays queued for the owner-approved `olympus tier migrate` path.
@@ -189,6 +190,11 @@ export interface TierSnifferServiceOptions {
     /** The embedding ledger each automatic move is recorded in. */
     embeddingLedgerPath: string;
     maxPerPass?: number;
+    /** Lowering drain budget, separate from the judge's pass. Default 1 s. */
+    lowerSliceMs?: number;
+    /** Maximum synchronous copy batch. Default 25 items / 25 ms. */
+    lowerBatchSize?: number;
+    lowerBatchMs?: number;
     /**
      * How long a queued move may keep failing (from its first failed
      * attempt in this process) before it is given up
@@ -203,7 +209,9 @@ export interface TierSnifferServiceOptions {
 
 /** Each tick has at most two recovery phases; each yields after this much work. */
 export const MISSING_QUESTION_RECOVERY_PHASE_MS = 25;
-export const DEFAULT_AUTO_MOVES_PER_PASS = 25;
+export const DEFAULT_AUTO_MOVES_PER_PASS = 1000;
+export const DEFAULT_LOWER_MOVE_SLICE_MS = 1000;
+export const DEFAULT_LOWER_MOVE_BATCH_MS = 25;
 /** A pass running longer than this is aborted at the next tick. */
 export const DEFAULT_TIER_SNIFFER_MAX_PASS_MS = 15 * 60_000;
 /** How long a listed file with no extraction job yet waits to be queued before recovery settles it. */
@@ -218,6 +226,8 @@ export interface TierAutoMoveReport {
   failed: number;
   /** Queued moves left for the owner-approved migration (a store not on the built-in embedding model). */
   notEligible: number;
+  timings?: ReturnType<typeof emptyTierMoveTimings>;
+  elapsedMs?: number;
   /** Failed moves older than the stale bound that were given up: the item is back where it was. */
   abandoned?: number;
   /** Failed raises older than the stale bound: kept hidden and queued, never rolled back. */
@@ -291,10 +301,16 @@ export class TierSnifferService {
   private readonly budget: SnifferCallBudget;
   private timer: ReturnType<typeof setInterval> | undefined;
   private continuation: ReturnType<typeof setTimeout> | undefined;
+  private trainingTimer: ReturnType<typeof setTimeout> | undefined;
+  private trainingJob: Promise<void> | undefined;
+  private trainingJudge: string | undefined;
   /** When the last tick ended (performance.now()), for the idle time before the next one. */
   private lastTickEndedAt: number | undefined;
   private readonly moveAbort = new AbortController();
   private moving: Promise<TierAutoMoveReport> | undefined;
+  private readonly moveLedgerOffsets = { raise: 0, lower: 0 };
+  private movingDirection: 'raise' | 'lower' | undefined;
+  private lowerMovePreempted = false;
   private running = false;
   private runningSinceMs = 0;
   /** Scheduled passes wait until this time while the model is not answering (0: no wait). */
@@ -321,6 +337,8 @@ export class TierSnifferService {
   private readonly boundLedgerIds = new Map<string, string>();
   /** Where each set's re-judge page stopped (tier-rejudge.ts). */
   private readonly rejudgeCursors = new Map<string, TierLedgerIdentity>();
+  /** Skip-only diagnostics sample a scanned window at most once per minute. */
+  private lastBuiltinPromptSkipLogMs = -Infinity;
   /** Rotate each recovery phase independently so a large first ledger cannot starve others. */
   private readonly recoveryLedgerOffsets = new Map<string, number>();
 
@@ -353,9 +371,44 @@ export class TierSnifferService {
     return this.runOnce();
   }
 
+  /** Use idle time and inference waits, without putting a training slice ahead of a call. */
+  private scheduleTraining(judge: string, delay = 0): void {
+    this.trainingJudge = judge;
+    if (this.stopped || !this.timer || this.trainingTimer || this.trainingJob) return;
+    const filters = [...new Set([...this.embeddingPrefilters.values()].map(filter => filter.trainingOwner))];
+    if (!filters.length) return;
+    this.trainingTimer = setTimeout(() => {
+      this.trainingTimer = undefined;
+      const shouldYield = () => this.stopped || this.trainingJudge !== judge || this.yieldNow();
+      const job = (async () => {
+        for (const filter of filters) {
+          if (shouldYield()) break;
+          await filter.prepare(judge, shouldYield);
+        }
+      })();
+      this.trainingJob = job;
+      void job.catch(() => { /* Preparation retains its content-free failure/retry record. */ }).finally(() => {
+        this.trainingJob = undefined;
+        if (this.stopped) { if (!this.running) this.closeLedgers(); return; }
+        if (this.trainingJudge !== judge) return;
+        // Active slices get the next event-loop turn; finished attempts only poll
+        // for the existing retry deadline/new-verdict trigger once per second.
+        this.scheduleTraining(judge, !this.yieldNow() && filters.some(filter => filter.trainingPending) ? 0 : 1000);
+      });
+    }, delay);
+    this.trainingTimer.unref?.();
+  }
+
+  private pauseTraining(): void {
+    this.trainingJudge = undefined;
+    if (this.trainingTimer) clearTimeout(this.trainingTimer);
+    this.trainingTimer = undefined;
+  }
+
   /** Stop the tick. A pass in flight is aborted; its ledgers close when it ends. */
   stop(): void {
     this.stopped = true;
+    this.pauseTraining();
     this.moveAbort.abort();
     if (this.continuation) clearTimeout(this.continuation);
     this.continuation = undefined;
@@ -569,7 +622,7 @@ export class TierSnifferService {
 
   /**
    * A running or continuing classification pass outranks automatic inbox work,
-   * unless the caller asks it to yield (an Inbox answer overdue or running).
+   * unless the caller asks it to yield (an Inbox answer ready or running).
    * The pass is marked running from its first step (approval, recovery,
    * re-judge, moves), long before it reaches a question where it can yield; on
    * a 1 s tick that kept an overdue answer from ever starting (release check
@@ -635,6 +688,12 @@ export class TierSnifferService {
     const leave = controlPathHeadroom.enter('tier-sniffer');
     try {
       tick = await this.tick(abort.signal);
+      // The judge's deadline and tick timing have ended. Lowerings get their
+      // own bounded slice before another pass starts, never its call budget.
+      const lowerMoves = await this.drainMoves('lower');
+      if (tick.state === 'ran' && lowerMoves) {
+        tick.autoMoves = mergeAutoMoveReports(tick.autoMoves, lowerMoves);
+      }
     } catch (error) {
       // Content-free: the class of failure only. Items stay pending.
       tick = { state: 'failed', error: error instanceof Error ? error.name : 'unknown' };
@@ -826,6 +885,7 @@ export class TierSnifferService {
   }
 
   private closeLedgers(): void {
+    if (this.trainingJob) return; // The yielding slice closes these after it checkpoints.
     for (const ledger of this.ledgers.values()) {
       try {
         ledger.close();
@@ -870,18 +930,17 @@ export class TierSnifferService {
           },
           copyFor: subject => {
             const set = tierSetForLedger(ledgerPath);
-            const serving = copyServingLayer(ledger.copies(subject), 'content');
-            if (set && serving) {
-              const domain = set.domainForCorpus(serving.corpusId);
+            return prefilterTrainingCopy(subject, ledger, set ? corpusId => {
+              const domain = set.domainForCorpus(corpusId);
               return domain ? set.store(domain)?.exportItemCopy(subject) : undefined;
-            }
-            if (ledger.getCurrent(subject)?.routed) return undefined;
-            for (const store of this.options.stores()) {
-              if ((store.tierLedgerPathInUse?.() ?? tierLedgerPathForStore(store.dbPath)) !== ledgerPath) continue;
-              const copy = store.exportItemCopy?.(subject);
-              if (copy) return copy;
-            }
-            return undefined;
+            } : undefined, () => {
+              for (const store of this.options.stores()) {
+                if ((store.tierLedgerPathInUse?.() ?? tierLedgerPathForStore(store.dbPath)) !== ledgerPath) continue;
+                const copy = store.exportItemCopy?.(subject);
+                if (copy) return copy;
+              }
+              return undefined;
+            });
           },
         });
         this.embeddingPrefilters.set(ledgerPath, embeddingPrefilter);
@@ -986,6 +1045,8 @@ export class TierSnifferService {
   }
 
   private async tick(signal: AbortSignal): Promise<TierSnifferTick> {
+    this.pauseTraining();
+    await this.trainingJob; // Rebind members only after the prior slice has stopped.
     const { lane } = this.options;
     // Wall time of each step around the pass, for its log line: on Sparta
     // (2026-11-06) 30 s passes came 32-134 s apart, and nothing said where
@@ -1066,7 +1127,7 @@ export class TierSnifferService {
     phase('approval');
     const preparationStopped = await prepareSnifferModel({ model: this.options.model, signal, shouldYield: () => this.yieldNow() });
     phase('prepare');
-    // Items decided under an older classifier or sniffer prompt are judged
+    // Items decided under another classifier, owner words or judge model are judged
     // again first (tier-rejudge.ts), a bounded page per set per tick: their
     // questions join the queue this pass answers.
     if (!preparationStopped) await this.recoverMissingQuestions(signal, true);
@@ -1079,6 +1140,7 @@ export class TierSnifferService {
       model: this.options.model,
       promptVersion: versions.cache,
       ...(ownerContext ? { ownerContext } : {}),
+      ...(this.timer ? { trainingReady: (judge: string) => this.scheduleTraining(judge) } : {}),
       budget: this.budget,
       maxCallsPerPass: this.options.maxCallsPerPass,
       concurrentCalls: this.options.concurrentCalls,
@@ -1096,13 +1158,14 @@ export class TierSnifferService {
         + `(${report.resolvedPersonal} Personal, ${report.resolvedPrivate} Private, ${report.failSafePrivate} fail-safe Private), `
         + `${report.cacheHits} from cache; ${report.heldLowering} lowering(s) held${report.stoppedBy ? `, stopped: ${report.stoppedBy}` : ''}; `
         + `call_ms=${Math.round(report.callMs)} mean_call_ms=${report.calls ? Math.round(report.callMs / report.calls) : 0} queue_wait_max_ms=${Math.round(report.maxQueueWaitMs)}; `
+        + `promptChars=${report.promptChars} mean_promptChars=${report.calls ? Math.round(report.promptChars / report.calls) : 0} estimatedInputTokens=${report.estimatedInputTokens} mean_estimatedInputTokens=${report.calls ? Math.round(report.estimatedInputTokens / report.calls) : 0}; `
         + `tick_ms=${Math.round(performance.now() - phaseStarted)} ${phases}${idleMs === undefined ? '' : ` idle_before=${Math.round(idleMs)}`}.`,
       );
     }
     // A move that just landed may have carried an item whose owner override
     // came while it was queued: apply the override now, not a tick later.
     if (autoMoves && autoMoves.moved > 0) this.applyOwnerOverrides();
-    return { state: 'ran', report, ...(rejudged.seen > 0 ? { rejudged } : {}), ...(autoMoves ? { autoMoves } : {}) };
+    return { state: 'ran', report, ...(rejudged.seen > 0 || rejudged.builtinPromptSkipped > 0 ? { rejudged } : {}), ...(autoMoves ? { autoMoves } : {}) };
   }
 
   /**
@@ -1245,11 +1308,20 @@ export class TierSnifferService {
     }
   }
 
-  private async drainMoves(): Promise<TierAutoMoveReport | undefined> {
+  private async drainMoves(direction: 'raise' | 'lower' = 'raise'): Promise<TierAutoMoveReport | undefined> {
     try {
       if (!this.options.autoMoves || this.stopped || !this.options.autoMoves.localEmbeddingsOnly()) return undefined;
-      if (!this.moving) this.moving = this.runAutoMoves(this.options.autoMoves, this.moveAbort.signal)
-        .finally(() => { this.moving = undefined; });
+      if (this.moving && this.movingDirection !== direction) {
+        if (direction === 'raise') this.lowerMovePreempted = true;
+        await this.moving;
+      }
+      if (!this.moving) {
+        if (this.stopped) return undefined;
+        this.movingDirection = direction;
+        if (direction === 'lower') this.lowerMovePreempted = false;
+        this.moving = this.runAutoMoves(this.options.autoMoves, this.moveAbort.signal, direction)
+          .finally(() => { this.moving = undefined; this.movingDirection = undefined; });
+      }
       return await this.moving;
     } catch (error) {
       this.options.log?.(`Olympus tier sniffer: move drain failed (${error instanceof Error ? error.name : 'unknown'}); queued moves will retry.`);
@@ -1391,13 +1463,17 @@ export class TierSnifferService {
         // A set that cannot be read keeps its recorded decisions this tick.
       }
     }
-    if (total.updated > 0 || total.movesQueued > 0 || total.asked > 0 || total.secrets > 0 || total.heldLowering > 0) {
+    const logSkipped = total.builtinPromptSkipped > 0 && this.clockMs() - this.lastBuiltinPromptSkipLogMs >= 60_000;
+    if (total.updated > 0 || total.movesQueued > 0 || total.asked > 0 || total.secrets > 0 || total.heldLowering > 0 || logSkipped) {
+      if (total.builtinPromptSkipped > 0) this.lastBuiltinPromptSkipLogMs = this.clockMs();
       this.options.log?.(
         `Olympus tier sniffer: re-judged ${total.updated + total.movesQueued + total.asked + total.secrets} item(s) under the current classifier `
         + `(${total.asked} asked about, still where they were; ${total.movesQueued} tier move(s) queued`
         + `; ${total.heldLowering} lowering(s) held${total.secrets ? `; ${total.secrets} Secret(s) found and hidden` : ''})`
         + `; picked for: held=${total.causeHeld} retired_prior=${total.causeRetiredPrior} missing_question=${total.causeMissingQuestion}`
-        + ` classifier=${total.causeClassifier} names_prompt=${total.causeNamesPrompt} content_prompt=${total.causeContentPrompt}.`,
+        + ` classifier=${total.causeClassifier} owner_words=${total.causeOwnerWords} judge_model=${total.causeJudgeModel}`
+        + ` names_prompt=${total.causeNamesPrompt} content_prompt=${total.causeContentPrompt}`
+        + `; builtin_prompt_skipped=${total.builtinPromptSkipped}.`,
       );
     }
     return total;
@@ -1414,122 +1490,133 @@ export class TierSnifferService {
     }
   }
 
-  /** Carries out queued moves the sniffer's verdicts made, bounded per pass. */
+  /** Raises run first; lowerings use store batches outside the judge pass. */
   private async runAutoMoves(
     options: NonNullable<TierSnifferServiceOptions['autoMoves']>,
     signal: AbortSignal,
+    direction: 'raise' | 'lower',
   ): Promise<TierAutoMoveReport> {
-    const report: TierAutoMoveReport = { moved: 0, failed: 0, notEligible: 0 };
+    const timings = emptyTierMoveTimings();
+    const started = performance.now();
+    const deadline = started + Math.max(0, options.lowerSliceMs ?? DEFAULT_LOWER_MOVE_SLICE_MS);
+    const shouldStop = () => signal.aborted || (direction === 'lower'
+      && (performance.now() >= deadline || this.lowerMovePreempted || this.yieldNow()));
+    const report: TierAutoMoveReport = { moved: 0, failed: 0, notEligible: 0, timings };
     const staleAfterMs = Math.max(0, options.staleAfterMs ?? DEFAULT_STALE_MOVE_MS);
     const now = (this.options.now ?? (() => new Date()))().getTime();
-    let budget = Math.max(0, options.maxPerPass ?? DEFAULT_AUTO_MOVES_PER_PASS);
-    for (const ledgerPath of this.ledgerPaths()) {
-      if (budget === 0 || signal.aborted) break;
+    let budget = Math.max(0, options.maxPerPass ?? (direction === 'raise' ? 25 : DEFAULT_AUTO_MOVES_PER_PASS));
+    const paths = this.ledgerPaths();
+    // Rotate the first set so a persistent large backlog cannot starve another.
+    const offset = this.moveLedgerOffsets[direction]++ % Math.max(1, paths.length);
+    for (const ledgerPath of [...paths.slice(offset), ...paths.slice(0, offset)]) {
+      if (budget === 0 || shouldStop()) break;
       const set = tierSetForLedger(ledgerPath);
       if (!set) continue;
-      const queued = set.ledger.listMoving({ limit: budget })
-        .filter((record) => record.routed
-          && record.targetMetadataTier !== null && record.targetContentTier !== null
+      const queued = set.ledger.listMoving({ limit: budget, direction })
+        .filter(record => record.routed && record.targetMetadataTier !== null && record.targetContentTier !== null
           && record.targetMetadataTier !== 'secrets' && record.targetContentTier !== 'secrets');
-      if (queued.length === 0) continue;
-      if (!setEmbedsWithBuiltInOnly(set)) {
-        report.notEligible += queued.length;
-        continue;
-      }
-      for (const record of queued) {
-        if (budget === 0 || signal.aborted) break;
-        budget -= 1;
+      if (!setEmbedsWithBuiltInOnly(set)) { report.notEligible += queued.length; continue; }
+      const failure = (record: TierLedgerRecord, error: unknown) => {
         const identity = recordIdentity(record);
         const failureKey = `${ledgerPath}\u0000${tierLedgerIdentityKey(identity)}\u0000${record.generation}`;
-        try {
-          if (resumeVerifiedTierMove(set, identity, {
-            path: options.embeddingLedgerPath, approvedBy: 'system-automatic', why: AUTO_MOVE_WHY,
-          })) {
-            await flushTierMoveNotes(set.ledger);
-            report.moved += 1;
-            this.moveFailures.delete(failureKey);
-            continue;
+        // The move stays queued (held, never shown twice); the next pass or
+        // the owner-approved migration picks it up.
+        report.failed += 1;
+        const why = moveFailureName(error);
+        report.failedBy = { ...report.failedBy, [why]: (report.failedBy?.[why] ?? 0) + 1 };
+        if (error instanceof TierMoveContentChangedError) {
+          // A stale lowering was refused before import and taken out of
+          // moving. Re-read the actual stored body, even when this model
+          // already judged the discarded edit. Its old verdict cannot
+          // authorize the stored copy; a cache miss opens a new question.
+          if (set.ledger.getCurrent(identity)?.state === 'moving') {
+            try { set.ledger.abandonMove(identity, { expectedGeneration: record.generation }); } catch { /* raises never abandon */ }
           }
-          // A raise (a re-judged item now held) hid its copies first: they
-          // are the move's sources all the same.
-          const sources = set.ledger.copies(identity).filter((copy) => copy.state === 'current'
-            || (copy.state === 'superseded' && copy.supersededByGeneration === record.generation + 1));
-          const source = sources[0];
-          const exported = source ? set.store(source.trustDomain)?.exportItemCopy(identity) : undefined;
-          if (!exported) throw new Error('no current copy');
-          // The vectors are on the copy that holds the content, not on a
-          // names-only copy (a photo's names rest Personal, its content Private).
-          const contentSource = sources.find((copy) => copy.layers !== 'metadata');
-          const contentCopy = contentSource && contentSource !== source
-            ? set.store(contentSource.trustDomain)?.exportItemCopy(identity)
-            : exported;
-          await moveTieredItem({
-            set,
-            identity: { ...identity, family: exported.identity.family, localItemId: exported.identity.localItemId },
-            target: { metadataTier: record.targetMetadataTier!, contentTier: record.targetContentTier! },
-            // Vectors made by the very model a destination embeds
-            // with are copied, not made again (a judged-ordinary photo keeps
-            // its picture vector when it leaves the Private store).
-            vectorIdentities: contentCopy ? matchingVectorIdentities(set, contentCopy) : {},
-            embeddingLedger: { path: options.embeddingLedgerPath, approvedBy: 'system-automatic', why: AUTO_MOVE_WHY },
-            // Every embedding here is the built-in local model: an older
-            // superseded copy this item's own earlier move left in the
-            // destination costs nothing to replace, and keeping it would
-            // strand the item mid-move (hidden, on a raise).
-            replaceOwnSupersededCopy: true,
-            // Only the move listed here: one cancelled or replanned meanwhile
-            // (an owner override cleared) is never started again from this read.
-            expectedGeneration: record.generation,
-          });
-          report.moved += 1;
+          const current = set.ledger.getCurrent(identity);
+          if (current && current.state !== 'moving') {
+            try {
+              const classification = set.classification();
+              if (!classification?.unavailableReason) {
+                rejudgeStoredContent(set, current, {
+                  ...classification, report: emptyTierRejudgeReport(), autoMoves: true,
+                });
+              }
+            } catch { /* A later sync can re-fetch; nothing was released. */ }
+          }
           this.moveFailures.delete(failureKey);
-        } catch (error) {
-          // The move stays queued (held, never shown twice); the next pass or
-          // the owner-approved migration picks it up.
-          report.failed += 1;
-          const why = moveFailureName(error);
-          report.failedBy = { ...report.failedBy, [why]: (report.failedBy?.[why] ?? 0) + 1 };
-          if (error instanceof TierMoveContentChangedError) {
-            // A stale lowering was refused before import and taken out of
-            // moving. Re-read the actual stored body, even when this model
-            // already judged the discarded edit. Its old verdict cannot
-            // authorize the stored copy; a cache miss opens a new question.
-            const current = set.ledger.getCurrent(identity);
-            if (current && current.state !== 'moving') {
-              try {
-                const classification = set.classification();
-                if (!classification?.unavailableReason) {
-                  rejudgeStoredContent(set, current, {
-                    ...classification, report: emptyTierRejudgeReport(), autoMoves: true,
-                  });
-                }
-              } catch { /* A later sync can re-fetch; nothing was released. */ }
-            }
-            this.moveFailures.delete(failureKey);
-            continue;
-          }
-          // To the back of the queue: a move that keeps failing never holds
-          // the head of a page while moves behind it could land.
-          try {
-            set.ledger.recordMoveFailure(identity, { expectedGeneration: record.generation });
-          } catch {
-            // Counting is best effort.
-          }
-          const firstFailedAt = this.moveFailures.get(failureKey) ?? now;
-          this.moveFailures.set(failureKey, firstFailedAt);
-          if (now - firstFailedAt >= staleAfterMs && this.settleStaleMove(set, record, report)) {
-            this.moveFailures.delete(failureKey);
-          }
+          return;
         }
+        // To the back of the queue: a move that keeps failing never holds
+        // the head of a page while moves behind it could land.
+        try {
+          set.ledger.recordMoveFailure(identity, { expectedGeneration: record.generation });
+        } catch {
+          // Counting is best effort.
+        }
+        const firstFailedAt = this.moveFailures.get(failureKey) ?? now;
+        this.moveFailures.set(failureKey, firstFailedAt);
+        if (now - firstFailedAt >= staleAfterMs && this.settleStaleMove(set, record, report)) {
+          this.moveFailures.delete(failureKey);
+        }
+      };
+      const succeeded = (record: TierLedgerRecord) => {
+        report.moved++;
+        this.moveFailures.delete(`${ledgerPath}\u0000${tierLedgerIdentityKey(recordIdentity(record))}\u0000${record.generation}`);
+      };
+      const batchSize = Math.max(1, Math.min(100, options.lowerBatchSize ?? 25));
+      for (let offset = 0; offset < queued.length && budget > 0 && !shouldStop();) {
+        const pending: Array<{ record: TierLedgerRecord; move: TierMoveOptions }> = [];
+        const batchDeadline = Math.min(deadline, performance.now() + Math.max(0, options.lowerBatchMs ?? DEFAULT_LOWER_MOVE_BATCH_MS));
+        for (let n = 0; n < (direction === 'raise' ? 1 : batchSize) && offset < queued.length && !shouldStop(); n++) {
+          const record = queued[offset++]!;
+          budget--;
+          const identity = recordIdentity(record);
+          pending.push({ record, move: {
+            set, identity,
+            target: { metadataTier: record.targetMetadataTier!, contentTier: record.targetContentTier! },
+            vectorIdentitiesFor: exported => matchingVectorIdentities(set, exported), timings,
+            embeddingLedger: { path: options.embeddingLedgerPath, approvedBy: 'system-automatic', why: AUTO_MOVE_WHY },
+            replaceOwnSupersededCopy: true, expectedGeneration: record.generation,
+          } });
+        }
+        if (direction === 'raise') {
+          for (const { record, move } of pending) {
+            try { await moveTieredItem(move); succeeded(record); }
+            catch (error) { failure(record, error); }
+          }
+        } else if (pending.length) {
+          try {
+            let copied = 0;
+            const results = moveTieredItemsLowering(pending.map(entry => entry.move), {
+              // One item is indivisible; do not start another after its bound.
+              shouldStop: () => shouldStop() || (copied++ > 0 && performance.now() >= batchDeadline),
+            });
+            results.forEach((result, index) => {
+              if ('error' in result) failure(pending[index]!.record, result.error);
+              else succeeded(pending[index]!.record);
+            });
+            // Unstarted candidates still belong to the queue; use the rest of
+            // this slice rather than accidentally capping it at one small page.
+            offset -= pending.length - results.length;
+            budget += pending.length - results.length;
+          } catch (error) { for (const { record } of pending) failure(record, error); }
+        }
+        await flushTierMoveNotes(set.ledger, { timings, shouldStop });
+        await ingestionTurn();
       }
+      // Retry note obligations even when a previous process already flipped
+      // every move, leaving no queued row to trigger a write.
+      await flushTierMoveNotes(set.ledger, { timings, shouldStop });
     }
+    report.elapsedMs = performance.now() - started;
     if (report.moved > 0 || report.failed > 0) {
       this.options.log?.(
         `Olympus tier sniffer: ${report.moved} automatic tier move(s), ${report.failed} failed`
         + `${report.failedBy ? ` (${Object.entries(report.failedBy).map(([why, n]) => `${why} ×${n}`).join(', ')})` : ''}`
         + `${report.abandoned ? `, ${report.abandoned} stale move(s) given up (back where they were)` : ''}`
         + `${report.staleRaises ? `, ${report.staleRaises} stale raise(s) kept hidden and queued` : ''}`
-        + `${report.retiredAbsent ? `, ${report.retiredAbsent} stale raise(s) of items no store holds forgotten` : ''}.`,
+        + `${report.retiredAbsent ? `, ${report.retiredAbsent} stale raise(s) of items no store holds forgotten` : ''}; direction=${direction} elapsed_ms=${Math.round(report.elapsedMs!)} `
+        + Object.entries(timings).map(([step, ms]) => `${step.replace(/[A-Z]/g, letter => `_${letter.toLowerCase()}`)}=${Math.round(ms)}`).join(' ') + '.',
       );
     }
     return report;
@@ -1570,6 +1657,26 @@ export class TierSnifferService {
       return false;
     }
   }
+}
+
+function mergeAutoMoveReports(raised: TierAutoMoveReport | undefined, lower: TierAutoMoveReport): TierAutoMoveReport {
+  if (!raised) return lower;
+  const merged: TierAutoMoveReport = { ...lower };
+  for (const key of ['moved', 'failed', 'notEligible', 'abandoned', 'staleRaises', 'retiredAbsent'] as const) {
+    const total = (raised[key] ?? 0) + (lower[key] ?? 0);
+    if (total || key === 'moved' || key === 'failed' || key === 'notEligible') merged[key] = total;
+  }
+  const timings = emptyTierMoveTimings();
+  for (const key of Object.keys(timings) as Array<keyof typeof timings>) {
+    timings[key] = (raised.timings?.[key] ?? 0) + (lower.timings?.[key] ?? 0);
+  }
+  merged.timings = timings;
+  merged.elapsedMs = (raised.elapsedMs ?? 0) + (lower.elapsedMs ?? 0);
+  if (raised.failedBy || lower.failedBy) {
+    merged.failedBy = { ...raised.failedBy };
+    for (const [key, n] of Object.entries(lower.failedBy ?? {})) merged.failedBy[key] = (merged.failedBy[key] ?? 0) + n;
+  }
+  return merged;
 }
 
 /**

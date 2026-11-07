@@ -1915,6 +1915,7 @@ export const DASHBOARD_CHATGPT_PAGE_COPY = {
   modelNotWorkingBecause: 'Not working: {reason}',
   modelInstallDownloading: 'Downloading {model}',
   modelInstallVerifying: 'Checking {model}…',
+  modelInstallLoading: 'Starting {model}…',
   modelInstallFailed: 'Couldn\'t download {model}: {reason}',
   modelInstallBytes: '{done} of {total}',
   modelInstallReasons: {

@@ -2723,6 +2723,7 @@ export class LocalConnectorStore {
   readonly trustDomain: SourceTrustDomain;
   readonly storageProfile: SourceIndexStorageProfile;
   private db: Database;
+  private readonly readOnly: boolean;
   private readonly now: () => Date;
   /**
    * Completion latch for trust reconciliation lineages, keyed by connector id
@@ -2783,6 +2784,7 @@ export class LocalConnectorStore {
   private embeddingDeferral: string | undefined;
 
   constructor(options: LocalConnectorStoreOptions) {
+    this.readOnly = options.readOnly === true;
     this.corpusId = requireNonEmpty(options.corpusId, 'Connector store corpus id');
     this.dbPath = requireNonEmpty(options.dbPath, 'Connector store db path');
     this.mediaHolder = this.dbPath === ':memory:' ? `memory:${randomUUID()}` : options.mediaHolder ?? this.dbPath;
@@ -2859,20 +2861,20 @@ export class LocalConnectorStore {
       ).get() !== null ? tableColumns(this.db, 'media_judgments', false) : [];
       this.mediaJudgmentsPresent = CONNECTOR_STORE_MEDIA_JUDGMENT_COLUMNS.every((column) => judgmentColumns.includes(column));
     } catch (error) {
-      closeSqliteStore(this.db);
+      closeSqliteStore(this.db, { checkpoint: !this.readOnly });
       throw error;
     }
   }
 
   close(): void {
     try {
-      this.releaseUnreferencedChunkMedia();
+      if (!this.readOnly) this.releaseUnreferencedChunkMedia();
       if (this.tierLedgerOwned === true) this.tierLedgerHandle?.close();
       this.boundLedgerHandle?.close();
       this.boundLedgerHandle = undefined;
     } finally {
       this.tierLedgerHandle = undefined;
-      closeSqliteStore(this.db);
+      closeSqliteStore(this.db, { checkpoint: !this.readOnly });
     }
   }
 
@@ -4413,6 +4415,8 @@ export class LocalConnectorStore {
       layers?: 'metadata' | 'content' | 'both';
       /** The caller verified the copied chunks match the source row under its write fence. */
       sourceTextCurrent?: boolean;
+      /** Content-free move telemetry; vector work is a subset of copy time. */
+      vectorCopyMs?: (ms: number) => void;
     },
   ): ConnectorStoreItemCopyImportSummary {
     const sensitivity = buildSourceSensitivity({ trustTier: options.trustTier, trustDomain: this.trustDomain });
@@ -4531,67 +4535,99 @@ export class LocalConnectorStore {
       this.refreshFtsForItem(itemPk);
       const chunksKept = namesOnly ? 0 : unchanged ? copy.chunks.length : 0;
 
-      const provider = namesOnly ? undefined : options.vectorProvider;
-      if (!provider) return { chunksWritten, chunksKept, vectorsCopied: 0, vectorsNotCopiedReason: 'no_provider' };
-      const minted = copy.vectorAuthorities.find((authority) => authority.modelId === provider.modelId);
-      if (!minted
-        || minted.provider !== provider.provider
-        || minted.backend !== provider.backend
-        || minted.dimension !== provider.dimension
-        || minted.epochId !== provider.epochId) {
+      const vectorStarted = performance.now();
+      try {
+        const provider = namesOnly ? undefined : options.vectorProvider;
+        if (!provider) return { chunksWritten, chunksKept, vectorsCopied: 0, vectorsNotCopiedReason: 'no_provider' };
+        const minted = copy.vectorAuthorities.find((authority) => authority.modelId === provider.modelId);
+        if (!minted
+          || minted.provider !== provider.provider
+          || minted.backend !== provider.backend
+          || minted.dimension !== provider.dimension
+          || minted.epochId !== provider.epochId) {
+          return {
+            chunksWritten,
+            chunksKept,
+            vectorsCopied: 0,
+            vectorsNotCopiedReason: copy.vectors.some((vector) => vector.modelId === provider.modelId)
+              ? 'identity_mismatch'
+              : 'no_current_vectors',
+          };
+        }
+        const providerEpoch = this.matchOrMintEmbeddingWriteAuthority(provider);
+        this.assertEmbeddingWriteAuthority(provider, providerEpoch);
+        const chunkPks = new Map((this.db.query(`
+          SELECT chunk_index, chunk_pk, embedding_input_hash FROM chunks WHERE item_pk = ?
+        `).all(itemPk) as Array<{ chunk_index: number; chunk_pk: number; embedding_input_hash: string | null }>)
+          .map((chunk) => [chunk.chunk_index, chunk] as const));
+        let vectorsCopied = 0;
+        let hashMismatch = false;
+        const write = this.db.query(`
+          INSERT INTO chunk_embeddings (chunk_pk, model_id, item_pk, content_hash, embedding, embedded_at)
+          VALUES (?, ?, ?, ?, ?, ?)
+          ON CONFLICT(chunk_pk, model_id) DO UPDATE SET
+            item_pk = excluded.item_pk, content_hash = excluded.content_hash,
+            embedding = excluded.embedding, embedded_at = excluded.embedded_at
+        `);
+        for (const vector of copy.vectors) {
+          if (vector.modelId !== provider.modelId) continue;
+          const target = chunkPks.get(vector.chunkIndex);
+          if (!target || target.embedding_input_hash !== vector.contentHash) {
+            hashMismatch = true;
+            continue;
+          }
+          write.run(target.chunk_pk, provider.modelId, itemPk, vector.contentHash, vector.embedding, now);
+          vectorsCopied += 1;
+        }
+        if (vectorsCopied > 0) this.recordEmbeddingModel(provider, now);
         return {
           chunksWritten,
           chunksKept,
-          vectorsCopied: 0,
-          vectorsNotCopiedReason: copy.vectors.some((vector) => vector.modelId === provider.modelId)
-            ? 'identity_mismatch'
-            : 'no_current_vectors',
+          vectorsCopied,
+          ...(vectorsCopied === 0
+            ? { vectorsNotCopiedReason: hashMismatch ? 'input_hash_mismatch' as const : 'no_current_vectors' as const }
+            : {}),
         };
-      }
-      const providerEpoch = this.matchOrMintEmbeddingWriteAuthority(provider);
-      this.assertEmbeddingWriteAuthority(provider, providerEpoch);
-      const chunkPks = new Map((this.db.query(`
-        SELECT chunk_index, chunk_pk, embedding_input_hash FROM chunks WHERE item_pk = ?
-      `).all(itemPk) as Array<{ chunk_index: number; chunk_pk: number; embedding_input_hash: string | null }>)
-        .map((chunk) => [chunk.chunk_index, chunk] as const));
-      let vectorsCopied = 0;
-      let hashMismatch = false;
-      const write = this.db.query(`
-        INSERT INTO chunk_embeddings (chunk_pk, model_id, item_pk, content_hash, embedding, embedded_at)
-        VALUES (?, ?, ?, ?, ?, ?)
-        ON CONFLICT(chunk_pk, model_id) DO UPDATE SET
-          item_pk = excluded.item_pk, content_hash = excluded.content_hash,
-          embedding = excluded.embedding, embedded_at = excluded.embedded_at
-      `);
-      for (const vector of copy.vectors) {
-        if (vector.modelId !== provider.modelId) continue;
-        const target = chunkPks.get(vector.chunkIndex);
-        if (!target || target.embedding_input_hash !== vector.contentHash) {
-          hashMismatch = true;
-          continue;
-        }
-        write.run(target.chunk_pk, provider.modelId, itemPk, vector.contentHash, vector.embedding, now);
-        vectorsCopied += 1;
-      }
-      if (vectorsCopied > 0) this.recordEmbeddingModel(provider, now);
-      return {
-        chunksWritten,
-        chunksKept,
-        vectorsCopied,
-        ...(vectorsCopied === 0
-          ? { vectorsNotCopiedReason: hashMismatch ? 'input_hash_mismatch' as const : 'no_current_vectors' as const }
-          : {}),
-      };
+      } finally { options.vectorCopyMs?.(performance.now() - vectorStarted); }
     })();
-    if (options.layers !== 'metadata' && this.chunkMediaColumnsPresent) {
-      for (const chunk of copy.chunks) {
-        if (!chunk.mediaPath || !chunk.mediaSha256) continue;
-        if (this.trustDomain !== 'secure_local' && chunk.mediaJudgment?.verdict !== 'ordinary') continue;
-        retainMediaCacheFile(chunk.mediaPath, chunk.mediaSha256, this.mediaHolder);
+    const settleMedia = () => {
+      if (options.layers !== 'metadata' && this.chunkMediaColumnsPresent) {
+        for (const chunk of copy.chunks) {
+          if (!chunk.mediaPath || !chunk.mediaSha256) continue;
+          if (this.trustDomain !== 'secure_local' && chunk.mediaJudgment?.verdict !== 'ordinary') continue;
+          retainMediaCacheFile(chunk.mediaPath, chunk.mediaSha256, this.mediaHolder);
+        }
       }
-    }
-    this.releaseUnreferencedChunkMedia();
+    };
+    if (this.itemCopyBatchMedia) this.itemCopyBatchMedia.push(settleMedia);
+    else { settleMedia(); this.releaseUnreferencedChunkMedia(); }
     return imported;
+  }
+
+  private itemCopyBatchMedia: Array<() => void> | undefined;
+
+  /** One durable store commit for a bounded group of lowering copies. */
+  withItemCopyBatch<T>(work: () => T, committed?: (ms: number) => void): T {
+    if (this.itemCopyBatchMedia) {
+      const length = this.itemCopyBatchMedia.length;
+      try { return this.db.transaction(work)(); }
+      catch (error) { this.itemCopyBatchMedia.length = length; throw error; }
+    }
+    const media: Array<() => void> = [];
+    this.itemCopyBatchMedia = media;
+    let bodyMs = 0;
+    const started = performance.now();
+    let result: T;
+    try {
+      result = this.db.transaction(() => {
+        const bodyStarted = performance.now();
+        try { return work(); } finally { bodyMs = performance.now() - bodyStarted; }
+      }).immediate();
+    } finally { this.itemCopyBatchMedia = undefined; }
+    committed?.(performance.now() - started - bodyMs);
+    for (const settle of media) settle();
+    this.releaseUnreferencedChunkMedia();
+    return result;
   }
 
   /**

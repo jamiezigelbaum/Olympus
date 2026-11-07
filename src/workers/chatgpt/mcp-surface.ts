@@ -563,7 +563,7 @@ async function runChatGptTool(
         if (isAskAnonymouslyResult(raw)) return askAnonymouslyToolResult(raw);
         const done = pendingJobId(raw) === undefined;
         // Only this connection's own handed-off question, and only once it is answered.
-        const pending = privateMatchForJob(privateCaller(ctx), jobId, done);
+        const pending = privateMatchForJob(privateCaller(ctx), jobId, done && isAnswered(raw));
         const privateMatch = done && isAnswered(raw) && pending?.match ? beginPrivateAnswer(pending.match, options) : undefined;
         return answerToolResult(raw, privateMatch ? { privateMatch } : done && pending?.timedOut ? { privateCheckPending: true } : {});
       }
@@ -830,8 +830,14 @@ function rememberPrivateMatch(caller: string | undefined, jobId: string, match: 
 function privateMatchForJob(caller: string | undefined, jobId: string, done: boolean): { match: PendingPrivateMatch | undefined; timedOut: boolean } | undefined {
   const key = privateMatchKey(caller, jobId);
   const entry = privateMatchByJob.get(key);
-  if (done) privateMatchByJob.delete(key);
-  return entry !== undefined && entry.expiresAt > Date.now() ? entry : undefined;
+  if (!entry || entry.expiresAt <= Date.now()) { privateMatchByJob.delete(key); return undefined; }
+  // A completed job can be collected again. Consume its panel match only
+  // once, but retain the pending-check fact for every collection of this job.
+  if (done) {
+    if (entry.timedOut) privateMatchByJob.set(key, { ...entry, match: undefined });
+    else privateMatchByJob.delete(key);
+  }
+  return entry;
 }
 
 async function runOperation(name: string, ctx: OperationContext, params: Record<string, unknown>): Promise<unknown> {

@@ -2926,7 +2926,10 @@ export async function searchPrivateEvidence(input: {
   // Only a question that matched gets neighbours: the count (what leaves this
   // computer) and whether there is a panel at all stay the matches' alone.
   if (matches.length === 0) return { matched: secretMatch ? 1 : 0, candidates: [], ...(secretMatch ? { secretMatch: true } : {}) };
-  return { matched: matches.length, candidates: [...matches, ...await privateNeighbours(lanes.adapters, build, matches)], ...(secretMatch ? { secretMatch: true as const } : {}) };
+  // Neighbour hydration selects passages too. Keep it in the same cached-only
+  // scope, so a match never queues a translation behind a running analysis.
+  const neighbours = await withCachedKeywordExpansion(translation, () => privateNeighbours(lanes.adapters, build, matches));
+  return { matched: matches.length, candidates: [...matches, ...neighbours], ...(secretMatch ? { secretMatch: true as const } : {}) };
   });
 }
 

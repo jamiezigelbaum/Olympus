@@ -750,6 +750,21 @@ describe('ready page', () => {
       expectNoJargon(host);
     });
 
+    test('speech progress stays visible through download, verification and first start', () => {
+      const host = mount();
+      const progress = { percent: 37, bytesDone: 370_000_000, bytesTotal: 1_000_000_000 };
+      host.push({ structuredContent: copyDashboardViewModel(withModels({ embedding: { kind: 'built_in', state: 'ready' }, transcription: { state: 'downloading', ...progress } })) });
+      expect(lines(host)).toEqual(['Downloading the transcription model · 37% · 0.4 of 1.0 GB']);
+      expect(host.win.document.querySelector('.model-install [role="progressbar"]')!.getAttribute('aria-valuenow')).toBe('37');
+      host.push({ structuredContent: copyDashboardViewModel(withModels({ embedding: { kind: 'built_in', state: 'ready' }, transcription: { state: 'verifying', ...progress } })) });
+      expect(lines(host)).toEqual(['Checking the transcription model…']);
+      host.push({ structuredContent: copyDashboardViewModel(withModels({ embedding: { kind: 'built_in', state: 'ready' }, transcription: { state: 'loading' } })) });
+      expect(lines(host)).toEqual(['Starting the transcription model…']);
+      expect(summary(host)).toContain('Getting ready');
+      host.push({ structuredContent: copyDashboardViewModel(withModels({ embedding: { kind: 'built_in', state: 'ready' }, transcription: { state: 'ready' } })) });
+      expect(lines(host)).toEqual([]);
+    });
+
     test('verifying reads Checking, with a bar only when the percent is known', () => {
       const host = mount();
       host.push({ structuredContent: withModels({

@@ -3,15 +3,17 @@ import { afterEach, expect, test } from 'bun:test';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { EmbeddingPrefilter, embeddingPrefilterDirectory, prefilterVector } from '../src/workers/classification/embedding-prefilter.ts';
+import { EmbeddingPrefilter, embeddingPrefilterDirectory, prefilterVector, prefilterTrainingExample, PREFILTER_TRAINING_REJECTIONS } from '../src/workers/classification/embedding-prefilter.ts';
 import { EMBEDDING_PREFILTER_MODEL_ID as MODEL, EMBEDDING_PREFILTER_DIMENSIONS as D } from '../src/workers/classification/embedding-logistic.ts';
 import { TierLedger, type TierPlacementPlan } from '../src/workers/classification/tier-ledger.ts';
 import { TierSnifferStore } from '../src/workers/classification/sniffer-store.ts';
 import { CachedTierSniffer, SNIFFER_PROMPT_VERSION, snifferId, snifferCacheModelId } from '../src/workers/classification/sniffer.ts';
 import { withRecordedContent } from '../src/workers/connector-store/tiered-store-set.ts';
 import { runSnifferPass } from '../src/workers/classification/sniffer-resolver.ts';
-import { classifyItemTiers, contentDigestReason, normalizedContentHash, type TierDecision } from '../src/workers/classification/tier-classifier.ts';
-import { tierSnifferServiceEnv } from '../src/workers/classification/sniffer-service.ts';
+import { classifyItemTiers, contentDigestReason, contentJudgeVerdictReason, normalizedContentHash, type TierDecision } from '../src/workers/classification/tier-classifier.ts';
+import { TierSnifferService, tierSnifferServiceEnv } from '../src/workers/classification/sniffer-service.ts';
+import { InstalledTierClassification } from '../src/workers/classification/installed-tier-classification.ts';
+import { appendClassificationLedgerEntry } from '../src/workers/classification-ledger.ts';
 import type { SnifferLane } from '../src/workers/classification/sniffer-lane.ts';
 import type { ConnectorStoreItemCopy } from '../src/workers/connector-store/local-index.ts';
 const lane: SnifferLane = { kind: 'local', modelId: 'fixture', profileId: 'fixture', profile: {
@@ -28,10 +30,10 @@ function copy(n: number, sign = 1): ConnectorStoreItemCopy {
     trustTier: 'S4', owners: [], chunks: [{ chunkIndex: 0, boundedText: ownText, contentHash: 'fixture', embeddingInputHash: 'fixture' }],
     vectors: [{ chunkIndex: 0, modelId: MODEL, contentHash: 'fixture', embedding: new Uint8Array(vector.buffer) }], vectorAuthorities: [] };
 }
-function fixture(options: { trained?: boolean; memory?: boolean; bias?: number; random?: () => number; enabled?: () => boolean; routed?: boolean; stateLedger?: TierLedger; now?: () => number; monotonicNow?: () => number; log?: (line: string) => void } = {}) {
+function fixture(options: { trained?: boolean; memory?: boolean; bias?: number; random?: () => number; enabled?: () => boolean; routed?: boolean; stateLedger?: TierLedger; now?: () => number; snifferNow?: () => Date; monotonicNow?: () => number; log?: (line: string) => void } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'prefilter-synthetic-'));
   const ledger = new TierLedger({ dbPath: options.memory ? ':memory:' : join(dir, 'tiers.sqlite') });
-  const sniffer = new TierSnifferStore({ dbPath: options.memory ? ':memory:' : join(dir, 'sniffer.sqlite') });
+  const sniffer = new TierSnifferStore({ dbPath: options.memory ? ':memory:' : join(dir, 'sniffer.sqlite'), ...(options.snifferNow ? { now: options.snifferNow } : {}) });
   const modelDir = embeddingPrefilterDirectory(options.stateLedger?.dbPath ?? ledger.dbPath);
   if (options.trained !== false) {
     mkdirSync(modelDir, { mode: 0o755 });
@@ -279,12 +281,14 @@ test('sliced training uses judge ledger labels without content hashes and writes
   const writeMeta = f.ledger.writeMeta.bind(f.ledger);
   f.ledger.writeMeta = (key, value) => { if (key === 'embedding-prefilter:training-scan-v1') checkpointWrites++; writeMeta(key, value); };
   let fittingWrites: number | undefined;
+  const trainingStarted = performance.now();
   for (let tick = 0; tick < 200 && !existsSync(join(f.modelDir, 'weights.json')); tick++) {
     await f.filter.prepare(judge);
     if (fittingWrites !== undefined) expect(checkpointWrites).toBe(fittingWrites);
     if (trainingState(f).outcome === 'fitting') fittingWrites = checkpointWrites;
   }
   expect(fittingWrites).toBeDefined();
+  console.info(`[embedding-prefilter synthetic] rows=4000 personal=2000 private=2000 wall_ms=${Math.round(performance.now() - trainingStarted)} active_ms=${Math.round(trainingState(f).elapsedMs)}`);
   expect(f.filter.status()).toContain('is on');
   expect(statSync(f.modelDir).mode & 0o777).toBe(0o700);
   expect(statSync(join(f.modelDir, 'weights.json')).mode & 0o777).toBe(0o600);
@@ -743,10 +747,15 @@ test.each(['secrets', 'tier', 'decision', 'removed copy', 'changed vector', 'pub
   }, 30_000);
 
 
-test('a historical metadata raise never replaces the content judge training label', async () => {
+test.each(['legacy', 'receipt'] as const)('a historical metadata raise never replaces a %s content judge training label', async provenance => {
   const f = fixture({ trained: false, memory: true, log: () => {} });
   trainingRow(f, 0, [], 'other:1.00', true); // The body was judged Personal.
   trainingRow(f, 1, [], 'other:1.00', true); // A genuine Private label remains usable.
+  for (const n of provenance === 'legacy' ? [0, 1] : []) {
+    const row = f.ledger.getCurrent(subject(n))!;
+    f.ledger.recordDecision(subject(n), { ...row, state: 'current', snifferId: judge, decidedBy: 'sniffer',
+      reasons: row.reasons.filter(reason => !reason.startsWith('content:judge_verdict:')) });
+  }
   const original = f.ledger.getCurrent(subject(0))!;
   const recordNames = (title: string) => {
     const decision = withRecordedContent(classifyItemTiers({ signals: { title }, subject: subject(0) }, {
@@ -766,18 +775,131 @@ test('a historical metadata raise never replaces the content judge training labe
   expect(trainingState(f)).toMatchObject({ outcome: 'too_few', counts: [0, 1] });
 });
 
-test('training skips a row without provenance of the content judge verdict tier', async () => {
+test.each(['metadata-cache', 'missing-cache', 'no-store'] as const)('legacy names-only verdict cannot label a retained Personal body after renaming: %s', cache => {
+  let now = new Date('2026-11-01T00:00:00.000Z');
+  const f = fixture({ trained: false, memory: true, snifferNow: () => now });
+  trainingRow(f, 0, [], 'other:1.00', true);
+  const original = f.ledger.getCurrent(subject(0))!;
+  f.ledger.recordDecision(subject(0), { ...original, state: 'current', snifferId: judge, decidedBy: 'sniffer',
+    reasons: original.reasons.filter(reason => !reason.startsWith('content:judge_verdict:')) });
+  const names = (title: string) => classifyItemTiers({ signals: { title }, subject: subject(0) }, {
+    sniffer: new CachedTierSniffer(f.sniffer, lane),
+  });
+  const recordNames = (title: string) => f.ledger.recordRoutedPlacement(subject(0),
+    withRecordedContent(names(title), f.ledger.getCurrent(subject(0))), {
+      copies: [{ corpusId: 'private', trustDomain: 'secure_local', layers: 'both' }], embedHold: false,
+    });
+  now = new Date('2026-11-02T00:00:00.000Z');
+  const title = 'Bank GB82 WEST 1234 5698 7654 32';
+  names(title);
+  const question = f.sniffer.questionFor(subject(0), 'metadata')!;
+  expect(question).toBeDefined();
+  f.sniffer.putVerdict({ materialHash: question.materialHash, modelId: snifferCacheModelId(lane),
+    promptVersion: SNIFFER_PROMPT_VERSION, mapRevision: 'none' },
+    { tier: 'private', category: 'financial', confidence: 1, failSafe: false }, question);
+  recordNames(title);
+  f.sniffer.deleteQuestion(subject(0), 'metadata');
+  recordNames('Picnic plan');
+  const current = f.ledger.getCurrent(subject(0))!;
+  expect(current).toMatchObject({ metadataTier: 'private', previousMetadataTier: 'secure', contentTier: 'secure', contentPending: false });
+  const drops: string[] = [];
+  expect(prefilterTrainingExample(current, judge, { ledger: f.ledger,
+    ...(cache === 'no-store' ? {} : { sniffer: cache === 'missing-cache' ? { trainingVerdict: () => undefined } : f.sniffer }),
+    copyFor: () => copy(0) }, reason => { drops.push(reason); return undefined; })).toBeUndefined();
+  expect(drops).toEqual([cache === 'no-store' ? 'legacy_store_missing' : cache === 'missing-cache' ? 'legacy_verdict_missing' : 'legacy_verdict_content']);
+});
+
+test('legacy rename then public share/unshare rejects a retained metadata raise without cache evidence', () => {
+  let now = new Date('2026-11-01T00:00:00.000Z');
+  const f = fixture({ trained: false, memory: true, snifferNow: () => now });
+  trainingRow(f, 0, [], 'other:1.00', true);
+  const original = f.ledger.getCurrent(subject(0))!;
+  f.ledger.recordDecision(subject(0), { ...original, state: 'current', snifferId: judge, decidedBy: 'sniffer',
+    reasons: original.reasons.filter(reason => !reason.startsWith('content:judge_verdict:')) });
+  const names = (title: string) => classifyItemTiers({ signals: { title }, subject: subject(0) }, {
+    sniffer: new CachedTierSniffer(f.sniffer, lane),
+  });
+  const recordNames = (title: string) => f.ledger.recordRoutedPlacement(subject(0),
+    withRecordedContent(names(title), f.ledger.getCurrent(subject(0))), {
+      copies: [{ corpusId: 'private', trustDomain: 'secure_local', layers: 'both' }], embedHold: false,
+    });
+  now = new Date('2026-11-02T00:00:00.000Z');
+  const title = 'Bank GB82 WEST 1234 5698 7654 32';
+  names(title);
+  const question = f.sniffer.questionFor(subject(0), 'metadata')!;
+  expect(question).toBeDefined();
+  f.sniffer.putVerdict({ materialHash: question.materialHash, modelId: snifferCacheModelId(lane),
+    promptVersion: SNIFFER_PROMPT_VERSION, mapRevision: 'none' },
+    { tier: 'private', category: 'financial', confidence: 1, failSafe: false }, question);
+  recordNames(title);
+  f.sniffer.deleteQuestion(subject(0), 'metadata');
+  recordNames('Picnic plan');
+  const current = f.ledger.getCurrent(subject(0))!;
+  expect(current).toMatchObject({ metadataTier: 'private', previousMetadataTier: 'secure', contentTier: 'secure', contentPending: false });
+  for (const sharing of ['public_link', 'private'] as const) {
+    f.ledger.recordRoutedPlacement(subject(0), withRecordedContent(classifyItemTiers({
+      signals: { title: 'Picnic plan', sharing }, subject: subject(0),
+    }, { sniffer: new CachedTierSniffer(f.sniffer, lane) }), f.ledger.getCurrent(subject(0))), {
+      copies: [{ corpusId: 'private', trustDomain: 'secure_local', layers: 'both' }], embedHold: false,
+    });
+  }
+  const afterSharing = f.ledger.getCurrent(subject(0))!;
+  expect(afterSharing).toMatchObject({ metadataTier: 'private', previousMetadataTier: 'public', contentTier: 'secure' });
+  expect(afterSharing.reasons.some(reason => reason.startsWith('metadata:sniffer:'))).toBe(false);
+  const drops: string[] = [];
+  expect(prefilterTrainingExample(afterSharing, judge, { ledger: f.ledger,
+    sniffer: { trainingVerdict: () => undefined },
+    copyFor: () => copy(0) }, reason => { drops.push(reason); return undefined; })).toBeUndefined();
+  expect(drops).toEqual(['legacy_verdict_missing']);
+});
+
+test.each(['bound', 'missing', 'stale'] as const)('legacy content-pass labels require matching cached content binding: %s', async binding => {
   const f = fixture({ trained: false, memory: true, log: () => {} });
+  for (const n of [0, 1]) {
+    trainingRow(f, n, [], 'other:1.00', binding === 'bound');
+    if (binding === 'stale') f.sniffer.markFinalModelContent({ materialHash: `synthetic-material-${n}-${n}`,
+      modelId: 'fixture', promptVersion: SNIFFER_PROMPT_VERSION, mapRevision: 'none' }, normalizedContentHash('Different body'));
+    const row = f.ledger.getCurrent(subject(n))!;
+    f.ledger.recordDecision(subject(n), { ...row, state: 'current', snifferId: judge, decidedBy: 'sniffer',
+      reasons: row.reasons.filter(reason => !reason.startsWith('content:judge_verdict:')) });
+    const drops: string[] = [];
+    const example = prefilterTrainingExample(f.ledger.getCurrent(subject(n))!, judge,
+      { ledger: f.ledger, sniffer: f.sniffer, copyFor: () => copy(n) }, reason => { drops.push(reason); return undefined; });
+    if (binding === 'bound') expect(example).toMatchObject({ private: n === 1, provenance: 'legacy_sniffer' });
+    else expect(example).toBeUndefined();
+    expect(drops).toEqual(binding === 'bound' ? [] : ['legacy_verdict_content']);
+  }
+  await f.filter.prepare(judge);
+  expect(trainingState(f)).toMatchObject({ outcome: 'too_few', counts: binding === 'bound' ? [1, 1] : [0, 0] });
+});
+
+test('legacy metadata raises and differing subject verdict tiers never label', () => {
+  const f = fixture({ trained: false, memory: true });
   trainingRow(f, 0);
-  trainingRow(f, 1);
-  // Old rows have content reasons and a digest, but no tier-bearing receipt.
+  const row = f.ledger.getCurrent(subject(0))!;
+  const reasons = row.reasons.filter(reason => !reason.startsWith('content:judge_verdict:'));
+  const options = { ledger: f.ledger, sniffer: f.sniffer, copyFor: () => copy(0) };
+  const drops: string[] = [];
+  expect(prefilterTrainingExample({ ...row, reasons, contentTier: 'secure' }, judge, options,
+    reason => { drops.push(reason); return undefined; })).toBeUndefined();
+  expect(drops).toEqual(['legacy_verdict_tier']);
+});
+
+test.each([undefined, 2])('an old zero-example attempt restarts immediately: label version %s', async version => {
+  const f = fixture({ trained: false, memory: true, log: () => {} });
+  await f.filter.prepare(judge);
+  const old = trainingState(f);
+  old.labelVersion = version;
+  f.ledger.writeMeta('embedding-prefilter:training-v1', JSON.stringify(old));
+  trainingRow(f, 0, [], 'other:1.00', true); trainingRow(f, 1, [], 'other:1.00', true);
   for (const n of [0, 1]) {
     const row = f.ledger.getCurrent(subject(n))!;
     f.ledger.recordDecision(subject(n), { ...row, state: 'current', snifferId: judge, decidedBy: 'sniffer',
       reasons: row.reasons.filter(reason => !reason.startsWith('content:judge_verdict:')) });
   }
-  await f.filter.prepare(judge);
-  expect(trainingState(f)).toMatchObject({ outcome: 'too_few', counts: [0, 0] });
+  await f.make().prepare(judge);
+  expect(trainingState(f)).toMatchObject({ labelVersion: 3, outcome: 'too_few', counts: [1, 1] });
+  expect(trainingState(f).id).not.toBe(old.id);
 });
 
 
@@ -830,7 +952,7 @@ test('costly retained-copy validation yields and still lets fitting finish', asy
   expect(existsSync(join(f.modelDir, 'weights.json'))).toBe(true);
 }, 30_000);
 
-test.each(['secrets', 'external secrets', 'copy'] as const)(
+test.each(['secrets', 'external secrets', 'copy', 'legacy verdict'] as const)(
   'final validation fences an already-checked example changed between ticks: %s', async change => {
     let clock = 0;
     const f = fixture({ trained: false, memory: change !== 'external secrets', monotonicNow: () => clock, log: () => {} });
@@ -843,7 +965,12 @@ test.each(['secrets', 'external secrets', 'copy'] as const)(
       copyChangeMarker: () => String(copyRevision), monotonicNow: () => clock, log: () => {} });
     let currentCopy = (n: number) => copy(n);
     let copyRevision = 0;
-    for (let n = 0; n < 4000; n++) trainingRow(f, n);
+    for (let n = 0; n < 4000; n++) trainingRow(f, n, [], 'other:1.00', change === 'legacy verdict' && n === 0);
+    if (change === 'legacy verdict') {
+      const row = f.ledger.getCurrent(subject(0))!;
+      f.ledger.recordDecision(subject(0), { ...row, state: 'current', snifferId: judge, decidedBy: 'sniffer',
+        reasons: row.reasons.filter(reason => !reason.startsWith('content:judge_verdict:')) });
+    }
     const runtime = () => (filter as unknown as { training?: {
       fit?: Generator<void, unknown>; finalValidation?: { index: number };
     } }).training;
@@ -857,6 +984,10 @@ test.each(['secrets', 'external secrets', 'copy'] as const)(
     if (change === 'copy') {
       currentCopy = n => n === 0 ? { ...copy(n), chunks: [{ ...copy(n).chunks[0]!, boundedText: 'Updated picnic plan.' }] } : copy(n);
       copyRevision++;
+    } else if (change === 'legacy verdict') {
+      // Only the cache changes; neither the ledger nor serving-copy marker moves.
+      f.sniffer.putVerdict({ materialHash: 'new-answer', modelId: 'fixture', promptVersion: SNIFFER_PROMPT_VERSION, mapRevision: 'none' },
+        { tier: 'private', category: 'fixture', confidence: 1, failSafe: false }, subject(0));
     } else {
       const writer = change === 'external secrets' ? new TierLedger({ dbPath: f.ledger.dbPath }) : f.ledger;
       try {
@@ -868,3 +999,224 @@ test.each(['secrets', 'external secrets', 'copy'] as const)(
     expect(JSON.parse(control.readMeta('embedding-prefilter:training-v1')!)).toMatchObject({ outcome: 'failed', reason: 'ledger_or_judge_changed' });
     expect(existsSync(weights)).toBe(false);
   }, 30_000);
+
+test('production-shaped held and judged rows retain usable judge provenance and digest', async () => {
+  const f = fixture({ trained: false, memory: true, log: () => {} });
+  for (let n = 0; n < 4; n++) {
+    // Real classify -> routed held copy -> applySnifferVerdict writers, synthetic text/vectors.
+    const q = f.add(n, {}, ownText);
+    const row = f.ledger.getCurrent(subject(n))!;
+    f.ledger.recordRoutedPlacement(subject(n), { ...row, state: 'pending', decidedBy: 'default', snifferId: judge },
+      f.placementFor({ contentPending: true } as TierDecision));
+    expect(row.reasons).toContain('content:held_until_judged');
+    f.ledger.applySnifferVerdict(q, { pass: 'content', tier: n % 2 ? 'secure' : 'private',
+      reason: `content:sniffer:${judge}:${n % 2 ? 'personal_record' : 'other'}:1.00`, modelId: 'fixture' },
+    { placementFor: () => ({ copies: [{ corpusId: 'private', trustDomain: 'secure_local', trustTier: 'S4', layers: 'both' }], embedHold: false }) });
+    f.ledger.markJudged(subject(n), { engineVersion: 'fixture', snifferId: judge });
+    expect(f.ledger.getCurrent(subject(n))!.state).toBe('current');
+  }
+  await f.filter.prepare(judge);
+  expect(trainingState(f).counts).toEqual([2, 2]);
+  expect(trainingState(f).rows).toBe(4);
+  expect(trainingState(f).outcome).toBe('too_few');
+});
+
+test('scan visits another ledger within a window instead of draining a sparse first ledger', async () => {
+  let clock = 0;
+  const a = fixture({ trained: false, memory: true, monotonicNow: () => clock, log: () => {} });
+  const b = fixture({ trained: false, memory: true });
+  for (let n = 0; n < 100; n++) a.add(n);
+  trainingRow(b, 0); trainingRow(b, 1);
+  new EmbeddingPrefilter({ ledger: b.ledger, sniffer: b.sniffer, sharedWith: a.filter,
+    copyChangeMarker: () => '0', copyFor: identity => copy(Number(identity.providerItemId)) });
+  for (const ledger of [a.ledger, b.ledger]) {
+    const list = ledger.listItemWindow.bind(ledger);
+    ledger.listItemWindow = options => { clock += 50; return list(options); };
+  }
+  await a.filter.prepare(judge);
+  expect(clock).toBeLessThanOrEqual(200);
+  expect(trainingState(a).counts).toEqual([1, 1]);
+  expect(trainingState(a).rows).toBeLessThan(102);
+});
+
+test('scan stops on the exact row filling both 5000-example caps', async () => {
+  let clock = 0;
+  const f = fixture({ trained: false, memory: true, monotonicNow: () => clock, log: () => {} });
+  for (let n = 0; n < 10010; n++) trainingRow(f, n);
+  let copied = 0;
+  f.setCopy(n => { if (++copied === 10000) clock = 200; return copy(n); });
+  await f.filter.prepare(judge);
+  expect(trainingState(f).rows).toBe(10000);
+  expect(trainingState(f).counts).toEqual([5000, 5000]);
+  expect(trainingState(f).outcome).toBe('fitting');
+  expect(copied).toBe(10000);
+}, 30_000);
+
+test('training yields to judge/control work before another row and serializes overlapping slices', async () => {
+  const f = fixture({ trained: false, memory: true, log: () => {} });
+  for (let n = 0; n < 8; n++) trainingRow(f, n);
+  let pause = false;
+  f.setCopy(n => { pause = true; return copy(n); });
+  await Promise.all([f.filter.prepare(judge, () => pause), f.filter.prepare(judge, () => pause)]);
+  expect(trainingState(f).rows).toBe(1);
+  expect(trainingState(f).outcome).toBe('scanning');
+  await f.filter.prepare(judge, () => pause);
+  expect(trainingState(f).rows).toBe(1);
+  pause = false;
+  await f.filter.prepare(judge, () => pause);
+  expect(trainingState(f).rows).toBe(2);
+});
+
+test('service trains during inference waits and idle time without delaying a judge dispatch', async () => {
+  let clock = 0;
+  const f = fixture({ trained: false, monotonicNow: () => clock, log: () => {} });
+  for (let n = 0; n < 40; n++) trainingRow(f, n);
+  let copies = 0;
+  f.setCopy(n => { copies++; clock += 100; return copy(n); });
+  f.add(100);
+  const installed = new InstalledTierClassification({ env: {}, lane });
+  installed.snifferStoreForLedger = () => f.sniffer;
+  const classificationLedgerPath = join(f.modelDir, '..', 'classification.jsonl');
+  await appendClassificationLedgerEntry(classificationLedgerPath, {
+    recorded_at: new Date().toISOString(), kind: 'classifier_model_decision', what: 'Synthetic fixture approval',
+    approved_by: 'owner', status: 'complete', model_id: lane.modelId, lane: lane.kind,
+    profile_id: lane.profileId, prompt_version: SNIFFER_PROMPT_VERSION,
+  });
+  let release!: () => void;
+  const held = new Promise<void>(resolve => { release = resolve; });
+  let called = false;
+  const service = new TierSnifferService({ installed, lane,
+    stores: () => [{ dbPath: join(f.modelDir, '..', 'store.sqlite'), tierSetBinding: () => ({ ledgerPath: f.ledger.dbPath }),
+      tierLedgerPathInUse: () => f.ledger.dbPath, exportItemCopy: identity => copy(Number(identity.providerItemId)) }],
+    classificationLedgerPath, intervalMs: 60_000, maxCallsPerPass: 1, rejudgePerPass: 0,
+    model: { async complete() {
+      expect(copies).toBe(0); // Dispatch happens before any training row is read.
+      called = true;
+      await held;
+      return { text: '', modelId: lane.modelId, decisionVerdict: { tier: 'private', category: 'fixture', confidence: 1, failSafe: false } };
+    } },
+  });
+  // Use the same synthetic prefilter in the real service's scheduler and resolver.
+  (service as unknown as { embeddingPrefilters: Map<string, EmbeddingPrefilter> }).embeddingPrefilters.set(f.ledger.dbPath, f.filter);
+  const waitFor = async (ready: () => boolean) => {
+    const until = performance.now() + 3000;
+    while (!ready() && performance.now() < until) await new Promise(resolve => setTimeout(resolve, 5));
+    expect(ready()).toBe(true);
+  };
+  try {
+    service.start();
+    await waitFor(() => called && !!f.ledger.readMeta('embedding-prefilter:training-v1') && trainingState(f).rows >= 6);
+    // Several slices completed inside the one still-pending model call.
+    expect(trainingState(f).outcome).toBe('scanning');
+    release();
+    await waitFor(() => trainingState(f).outcome === 'too_few');
+    expect(trainingState(f).rows).toBe(41);
+    expect(trainingState(f).counts).toEqual([20, 20]);
+    service.stop();
+    const stoppedAt = copies;
+    await new Promise(resolve => setTimeout(resolve, 30));
+    expect(copies).toBe(stoppedAt);
+  } finally {
+    release(); service.stop();
+    await new Promise(resolve => setTimeout(resolve, 10));
+    installed.close();
+  }
+});
+
+test.each(['version', 'trainedAt'] as const)('invalid saved %s cannot clear before background preparation', async field => {
+  const f = fixture();
+  const path = join(f.modelDir, 'weights.json');
+  const saved = JSON.parse(readFileSync(path, 'utf8'));
+  saved[field] = field === 'version' ? 'invalid' : null;
+  writeFileSync(path, JSON.stringify(saved));
+  const filter = f.make();
+  f.add(1);
+  let calls = 0;
+  await runSnifferPass({ targets: [{ ledger: f.ledger, sniffer: f.sniffer, embeddingPrefilter: filter }], lane,
+    trainingReady: () => {}, // The idle callback has not run yet.
+    model: { async complete() { calls++; return { text: '', modelId: lane.modelId,
+      decisionVerdict: { tier: 'private', category: 'fixture', confidence: 1, failSafe: false } }; } },
+  });
+  expect(calls).toBe(1);
+  expect(f.ledger.getCurrent(subject(1))!.contentTier).toBe('secure');
+});
+
+test('each training drop check has a stable first-failure counter', () => {
+  const f = fixture({ trained: false, memory: true });
+  trainingRow(f, 0);
+  const row = f.ledger.getCurrent(subject(0))!;
+  const valid = copy(0);
+  const cases: Array<[typeof PREFILTER_TRAINING_REJECTIONS[number], Record<string, unknown>?, typeof valid?, string?]> = [
+    ['not_routed', { routed: false }], ['not_current', { state: 'pending' }],
+    ['metadata_pending', { metadataPending: true }], ['content_pending', { contentPending: true }],
+    ['content_unread', { contentRead: false }], ['metadata_tier', { metadataTier: 'secure' }],
+    ['content_tier', { contentTier: 'secrets' }], ['metadata_forced', { metadataForced: true }],
+    ['model_missing', { modelId: null }], ['owner_decision', { decidedBy: 'owner_rule' }],
+    ['override_decision', { decidedBy: 'override' }], ['item_override'], ['rejudge_open'],
+    ['metadata_owner_rule', {}, valid, 'metadata:owner_rule:test'], ['metadata_floor', {}, valid, 'metadata:floor:test'],
+    ['metadata_secret', {}, valid, 'metadata:secret:test'], ['override_reason', {}, valid, 'override:test'],
+    ['judge_code_empty', {}, valid, ''], ['judge_code_held', {}, valid, 'record_held:test'],
+    ['judge_code_unsafe', {}, valid, 'fail_safe:test'], ['judge_duplicate'],
+    ['content_reason_unknown', {}, valid, 'content:unknown:test'], ['judge_missing'], ['copy_missing'],
+    ['digest_missing'], ['verdict_missing'], ['legacy_store_missing'], ['legacy_verdict_missing'],
+    ['legacy_verdict_ambiguous'], ['legacy_verdict_time'], ['legacy_verdict_tier'], ['legacy_verdict_content'], ['legacy_verdict_unreadable'],
+    ['chunks_empty'], ['media_present'], ['secret_material'],
+    ['vector_count'], ['vector_match'], ['vector_bytes'], ['vector_nonfinite'], ['vector_zero'],
+    ['judge_id_invalid'], ['judge_model_mismatch'],
+  ];
+  const verdict = row.reasons.find(reason => reason.startsWith('content:judge_verdict:'))!;
+  const judged = row.reasons.find(reason => reason.startsWith(`content:sniffer:${judge}:`))!;
+  expect(verdict).toBeDefined();
+  for (const [expected, patch = {}, , extra] of cases) {
+    let reasons = [...row.reasons];
+    let currentCopy: typeof valid | undefined = structuredClone(valid);
+    if (extra !== undefined) {
+      if (expected.startsWith('judge_code_')) reasons = reasons.map(reason => reason === judged ? `content:sniffer:${judge}:${extra}` : reason);
+      else reasons.push(extra);
+    }
+    if (expected === 'judge_duplicate') reasons.push(judged);
+    if (expected === 'judge_missing') reasons = reasons.filter(reason => reason !== judged);
+    if (expected === 'digest_missing') reasons = reasons.filter(reason => !reason.startsWith('content:sha256:'));
+    if (expected === 'verdict_missing') reasons = reasons.map(reason => reason === verdict ? `${verdict}wrong` : reason);
+    if (expected.startsWith('legacy_')) reasons = [...reasons.filter(reason => reason !== verdict), `metadata:sniffer:${judge}:other:1.00`];
+    if (expected === 'judge_id_invalid') reasons = reasons.map(reason => reason === judged ? 'content:sniffer:invalid:other:1.00' : reason);
+    if (expected === 'judge_model_mismatch') reasons = reasons.map(reason => reason === judged ? `content:sniffer:${snifferId({ ...lane, modelId: 'other' })}:other:1.00` : reason);
+    if (expected === 'copy_missing') currentCopy = undefined;
+    if (expected === 'chunks_empty') {
+      currentCopy!.chunks = [];
+      const digest = contentDigestReason('');
+      reasons = reasons.filter(reason => !reason.startsWith('content:sha256:') && reason !== verdict);
+      reasons.push(digest, contentJudgeVerdictReason(judged, row.contentTier, digest));
+    }
+    if (expected === 'media_present') currentCopy!.chunks[0]!.mediaPath = '/synthetic/image';
+    if (expected === 'secret_material') {
+      const text = ['-----BEGIN', 'PRIVATE KEY-----\nsynthetic-private-key-fixture\n-----END PRIVATE KEY-----'].join(' ');
+      currentCopy!.chunks[0]!.boundedText = text;
+      const digest = contentDigestReason(text);
+      reasons = reasons.filter(reason => !reason.startsWith('content:sha256:') && reason !== verdict);
+      reasons.push(digest, contentJudgeVerdictReason(judged, row.contentTier, digest));
+    }
+    if (expected === 'vector_count') currentCopy!.vectors = [];
+    if (expected === 'vector_match') currentCopy!.vectors[0]!.contentHash = 'stale';
+    if (expected === 'vector_bytes') currentCopy!.vectors[0]!.embedding = new Uint8Array(1);
+    if (expected === 'vector_nonfinite') new DataView(currentCopy!.vectors[0]!.embedding.buffer).setFloat32(0, NaN, true);
+    if (expected === 'vector_zero') currentCopy!.vectors[0]!.embedding.fill(0);
+    const drops: string[] = [];
+    const result = prefilterTrainingExample({ ...row, ...patch, reasons }, judge, {
+      ledger: {
+        getOverride: () => expected === 'item_override' ? { kind: 'tier', tier: 'secure' } : undefined,
+        rejudgeQuestion: () => expected === 'rejudge_open' ? {} as ReturnType<TierLedger['rejudgeQuestion']> : undefined,
+      }, copyFor: () => currentCopy,
+      ...(expected.startsWith('legacy_') && expected !== 'legacy_store_missing' ? { sniffer: { trainingVerdict: () => {
+        if (expected === 'legacy_verdict_unreadable') throw new Error('synthetic old schema');
+        if (expected === 'legacy_verdict_missing') return undefined;
+        return { tier: expected === 'legacy_verdict_tier' ? 'private' as const : 'personal' as const,
+          decidedAt: expected === 'legacy_verdict_time' ? '2099-01-01T00:00:00.000Z' : row.decidedAt,
+          ambiguous: expected === 'legacy_verdict_ambiguous' };
+      } } } : {}),
+    }, reason => { drops.push(reason); return undefined; });
+    expect(result, expected).toBeUndefined();
+    expect(drops, expected).toEqual([expected]);
+  }
+  expect(cases.map(([reason]) => reason)).toEqual([...PREFILTER_TRAINING_REJECTIONS]);
+});

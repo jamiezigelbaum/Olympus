@@ -7,6 +7,8 @@ import { sharedDataPath } from '../../../core/olympus-layout.ts';
 // file (the same shape the built-in embedding lane writes) so the dashboard
 // engine can show "installing" with a percent and a label.
 
+import { isMainThread } from 'node:worker_threads';
+import { modelThread } from './off-thread.ts';
 import { spawn } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import {
@@ -283,6 +285,24 @@ export async function installBuiltInReasoning(
  * transcription models both go through here.
  */
 export async function installPinnedModel(options: PinnedModelInstallerOptions): Promise<InstalledPinnedModel> {
+  // Test/embedding applications may supply in-process I/O seams. The shipped
+  // install has only data plus progress listeners and always runs off-thread.
+  const { onProgress, log: installLog, ...serializable } = options;
+  if (isMainThread && !Object.values(serializable).some(value => typeof value === 'function')) {
+    try {
+      return await modelThread().call<InstalledPinnedModel>({ kind: 'install', options: serializable }, {
+        progress: onProgress, log: installLog ?? (line => console.log(line)),
+      });
+    } catch (error) {
+      const failure = error as Error & { reason?: BuiltInReasoningFailureReason; shortfall?: BuiltInReasoningSpaceShortfall };
+      const reason = failure.reason ?? 'disk_write_failed';
+      if (!failure.reason) {
+        reportPinnedModelState({ statusPath: options.layout.statusPath, modelId: options.bundle.modelId, noun: options.layout.noun },
+          'failed', { reason, message: failure.message });
+      }
+      throw new BuiltInReasoningInstallError(reason, failure.message, failure.shortfall);
+    }
+  }
   const { bundle, layout: paths } = options;
   const noun = paths.noun;
   const runtime = options.runtime ?? LLAMA_SERVER_RUNTIME;

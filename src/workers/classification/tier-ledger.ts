@@ -41,7 +41,7 @@ import {
 import { TIER_LEDGER_SQLITE_STORE_ID, tierLedgerPathForStore } from './tier-ledger-path.ts';
 
 export { TIER_LEDGER_SQLITE_STORE_ID, tierLedgerPathForStore };
-export const TIER_LEDGER_SCHEMA_VERSION = 11;
+export const TIER_LEDGER_SCHEMA_VERSION = 12;
 
 /** A scrub's start: the revision it took and the item's generation then. */
 export interface SecretScrubMark {
@@ -199,7 +199,10 @@ export interface TierCopy {
   embedHold: boolean;
   /** The tier generation that made this copy current (or staged it). */
   generation: number;
-  /** The generation whose flip superseded this copy; null unless superseded. */
+  /**
+   * The generation whose flip superseded this copy. Null on other states
+   * and on an abandoned destination: hidden, but never a rollback source.
+   */
   supersededByGeneration: number | null;
   /**
    * Set when the last flip kept this copy but changed which layers it serves
@@ -281,6 +284,8 @@ type OwnerPriorDecision = Omit<QueuedMoveDecision, 'metadataTier' | 'contentTier
 
 export interface TierLedgerOptions {
   dbPath: string;
+  /** Inspection only: no migrations, repairs, permissions or checkpoint on close. */
+  readOnly?: boolean;
   now?: () => Date;
 }
 
@@ -346,14 +351,16 @@ export class TierLedgerSecretsRollbackRefusedError extends Error {
 export class TierLedger {
   readonly dbPath: string;
   private readonly db: Database;
+  private readonly readOnly: boolean;
   private metaChanges = 0;
   private readonly now: () => Date;
 
   constructor(options: TierLedgerOptions) {
     this.dbPath = options.dbPath;
+    this.readOnly = options.readOnly === true;
     this.now = options.now ?? (() => new Date());
     const onDisk = this.dbPath !== ':memory:';
-    if (onDisk) {
+    if (onDisk && !this.readOnly) {
       mkdirSync(dirname(this.dbPath), { recursive: true, mode: 0o700 });
       // Owner-only from the first byte, with an explicit file mode rather than
       // a process-wide umask (which would race every other file this process
@@ -365,13 +372,18 @@ export class TierLedger {
     }
     let db: Database | undefined;
     try {
-      db = new Database(this.dbPath, { create: true });
+      db = new Database(this.dbPath, this.readOnly ? { readonly: true, create: false } : { create: true });
+      if (this.readOnly) {
+        db.exec('PRAGMA query_only = ON;');
+        this.db = db;
+        return;
+      }
       db.exec('PRAGMA busy_timeout = 10000; PRAGMA journal_mode = WAL;');
       runSqliteMigrations(db, TIER_LEDGER_SQLITE_STORE_ID, tierLedgerMigrations());
       settleStaleEmbedHolds(db, this.now().toISOString());
       if (onDisk) restrictLedgerFiles(this.dbPath);
     } catch (error) {
-      if (db) closeSqliteStore(db);
+      if (db) closeSqliteStore(db, { checkpoint: !this.readOnly });
       throw error;
     }
     this.db = db;
@@ -381,9 +393,9 @@ export class TierLedger {
     try {
       // Checkpointed close, like every Olympus store: the ledger is safe to
       // hand to another process the moment this returns.
-      closeSqliteStore(this.db);
+      closeSqliteStore(this.db, { checkpoint: !this.readOnly });
     } finally {
-      if (this.dbPath !== ':memory:') restrictLedgerFiles(this.dbPath);
+      if (!this.readOnly && this.dbPath !== ':memory:') restrictLedgerFiles(this.dbPath);
     }
   }
 
@@ -900,10 +912,19 @@ export class TierLedger {
    * failing goes to the back of the queue, so it never holds the head of a
    * bounded page while moves behind it could land.
    */
-  listMoving(options: { limit?: number } = {}): TierLedgerRecord[] {
+  listMoving(options: { limit?: number; direction?: 'raise' | 'lower' } = {}): TierLedgerRecord[] {
     const limit = Math.max(1, Math.min(options.limit ?? 100, 5_000));
+    // A hide-first move also wins if it was retargeted at the same tiers.
+    const rank = (column: string) => `(CASE ${column} WHEN 'secrets' THEN 3 WHEN 'secure' THEN 2 WHEN 'private' THEN 1 ELSE 0 END)`;
+    const raising = `(${rank('target_metadata_tier')} > ${rank('metadata_tier')}
+      OR ${rank('target_content_tier')} > ${rank('content_tier')}
+      OR EXISTS (SELECT 1 FROM tier_copies c WHERE c.provider = tier_items.provider
+        AND c.account_scope = tier_items.account_scope AND c.provider_item_id = tier_items.provider_item_id
+        AND c.conversation_key = tier_items.conversation_key AND c.copy_state = 'superseded'
+        AND c.superseded_by_generation = tier_items.generation + 1))`;
     const rows = this.db.query(`
       SELECT * FROM tier_items INDEXED BY tier_items_move_order WHERE state = 'moving'
+      ${options.direction ? `AND ${options.direction === 'lower' ? 'NOT' : ''} ${raising}` : ''}
       ORDER BY move_attempts, decided_at, provider, account_scope, provider_item_id, conversation_key
       LIMIT ?
     `).all(limit);
@@ -941,9 +962,11 @@ export class TierLedger {
    * carried one of those out). Of those, the ones decided under another
    * classifier version, and, when a sniffer is configured, the ones whose
    * text is below Private without that sniffer's own content verdict, or
-   * whose content verdict came from another sniffer prompt (an item whose
-   * names an owner map category matched is re-judged on a classifier change
-   * only: the owner's category may have settled it). A row a re-judge
+   * whose verdict used other owner words or another judge model. Built-in
+   * prompt wording alone does not invalidate a settled decision (owner,
+   * 2026-11-07). An item whose names matched an owner map category is
+   * re-judged on a classifier change only: the category may have settled it.
+   * A row a re-judge
    * already settled under this classifier and sniffer (`markRejudged`), or
    * whose re-judge question is still open (`openRejudgeQuestion`), is not a
    * candidate again.
@@ -961,7 +984,7 @@ export class TierLedger {
     limit?: number;
     /** Ledger rows read per call (default DEFAULT_REJUDGE_SCAN_ROWS). */
     scanLimit?: number;
-  }): { records: TierLedgerRecord[]; causes: TierRejudgeCause[]; next?: TierLedgerIdentity } {
+  }): { records: TierLedgerRecord[]; causes: TierRejudgeCause[]; builtinPromptSkipped: number; next?: TierLedgerIdentity } {
     const limit = Math.max(1, Math.min(options.limit ?? 100, 5_000));
     const scanLimit = Math.max(limit, Math.min(options.scanLimit ?? DEFAULT_REJUDGE_SCAN_ROWS, 50_000));
     const snifferMarker = options.snifferId ? `"content:sniffer:${options.snifferId}:` : null;
@@ -1076,18 +1099,25 @@ export class TierLedger {
     ) as Array<TierItemRow & { rejudge_candidate: number; rejudge_cause: TierRejudgeCause }>;
     const records: TierLedgerRecord[] = [];
     const causes: TierRejudgeCause[] = [];
+    let builtinPromptSkipped = 0;
     let last: TierItemRow | undefined;
     for (const row of rows) {
       last = row;
       if (row.rejudge_candidate !== 1) continue;
+      const cause = settledSnifferRejudgeCause(row, row.rejudge_cause, options.snifferId);
+      if (cause === 'builtin_prompt_skipped') {
+        builtinPromptSkipped += 1;
+        continue;
+      }
       records.push(recordFromRow(row));
-      causes.push(row.rejudge_cause);
+      causes.push(cause);
       if (records.length >= limit) break;
     }
     const more = records.length >= limit || rows.length >= scanLimit;
     return {
       records,
       causes,
+      builtinPromptSkipped,
       ...(more && last ? { next: identityOfRow(last) } : {}),
     };
   }
@@ -1973,8 +2003,9 @@ export class TierLedger {
 
   /** Small durable work receipts, without exporting any store content. */
   metaEntries(prefix: string, options: { after?: string; limit?: number } = {}): Array<{ key: string; value: string }> {
-    return this.db.query('SELECT key, value FROM tier_ledger_meta WHERE key >= ? AND key < ? AND key > ? AND value <> ? ORDER BY key LIMIT ?')
-      .all(prefix, `${prefix}\uffff`, options.after ?? '', '', options.limit ?? -1) as Array<{ key: string; value: string }>;
+    return this.db.query(`SELECT key, value FROM tier_ledger_meta INDEXED BY tier_ledger_pending_meta
+      WHERE key >= ? AND key < ? AND key > ? AND value <> '' ORDER BY key LIMIT ?`)
+      .all(prefix, `${prefix}\uffff`, options.after ?? '', options.limit ?? -1) as Array<{ key: string; value: string }>;
   }
 
   /** Hold the ledger write lock across a synchronous cross-store cleanup.
@@ -1987,6 +2018,18 @@ export class TierLedger {
       if (this.getCurrent(identity)?.generation !== generation) throw new TierLedgerGenerationConflictError();
       return work();
     })();
+  }
+
+  /** Lowering batches commit their store copies before publishing receipts. */
+  withMoveBatch<T>(work: () => T, committed?: (ms: number) => void): T {
+    let bodyMs = 0;
+    const started = performance.now();
+    const result = this.db.transaction(() => {
+      const bodyStarted = performance.now();
+      try { return work(); } finally { bodyMs = performance.now() - bodyStarted; }
+    }).immediate();
+    committed?.(performance.now() - started - bodyMs);
+    return result;
   }
 
   /**
@@ -3036,9 +3079,9 @@ export class TierLedger {
   /**
    * Give up a move that never flipped (queued, or interrupted between stage
    * and flip) and leave the item exactly where it was: its current copies
-   * serve as before, any copy the move staged is forgotten (its store row,
-   * partial at best, is hidden by the item's other copy rows and rewritten by
-   * the next move there), and the row leaves `moving` at its unchanged tiers.
+   * serve as before, any copy the move staged stays hidden as an abandoned
+   * destination (superseded with no flip generation, replaceable by a later
+   * authorized move), and the row leaves `moving` at its unchanged tiers.
    * Its newest decision's flags stay recorded. No store is written.
    *
    * Refused unless the row is mid-move at the expected generation, for a move
@@ -3061,20 +3104,13 @@ export class TierLedger {
       if (copies.some((copy) => copy.state === 'superseded' && copy.supersededByGeneration === moveGeneration)) {
         throw new TierLedgerRaiseAbandonRefusedError();
       }
-      const staged = copies.filter((copy) => copy.state === 'staged');
-      if (staged.length < copies.length) {
-        this.db.query(`
-          DELETE FROM tier_copies
-          WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND copy_state = 'staged'
-        `).run(...idParams(identity));
-      } else {
-        // Nothing else marks the item routed in its stores: keep the staged
-        // rows, hidden, so the stores' rows never read as a legacy item.
-        this.db.query(`
-          UPDATE tier_copies SET copy_state = 'superseded', superseded_by_generation = NULL, updated_at = ?
-          WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND copy_state = 'staged'
-        `).run(now, ...idParams(identity));
-      }
+      // A destination may already hold committed rows. Keep its visibility
+      // marker even when the source still has a current copy: removing the
+      // last marker in that corpus would serve the abandoned rows as legacy.
+      this.db.query(`
+        UPDATE tier_copies SET copy_state = 'superseded', superseded_by_generation = NULL, updated_at = ?
+        WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND copy_state = 'staged'
+      `).run(now, ...idParams(identity));
       this.writeMeta(`tier-move-verified:${tierLedgerIdentityKey(identity)}`, '');
       const state: TierLedgerState = existing.metadataPending || existing.contentPending ? 'pending' : 'current';
       this.db.query(`
@@ -3996,6 +4032,7 @@ interface TierItemRow {
   metadata_flagged: number;
   decided_at: string;
   routed: number;
+  rejudged_key: string | null;
 }
 
 interface TierCopyRow {
@@ -4254,7 +4291,50 @@ interface EffectiveRow {
 
 /** What applying a sniffer verdict did: a P1a row update, a P1b routed outcome, or nothing yet. */
 /** The rule that made a row a re-judge candidate (`rejudgeCandidatePage`). */
-export type TierRejudgeCause = 'held' | 'retired_prior' | 'missing_question' | 'classifier' | 'names_prompt' | 'content_prompt';
+export type TierRejudgeCause = 'held' | 'retired_prior' | 'missing_question' | 'classifier' | 'owner_words' | 'judge_model' | 'names_prompt' | 'content_prompt';
+
+/** The ID format emitted by snifferId/snifferPromptVersions, not arbitrary custom sniffer IDs. */
+function snifferInputs(id: string | undefined): { lane: string; owner: string; model: string } | undefined {
+  const match = id?.match(/^([^:]+):p-[a-f0-9]{12}(\.o[a-f0-9]{8})?\.m([a-f0-9]{16})$/);
+  return match ? { lane: match[1]!, owner: match[2] ?? '', model: match[3]! } : undefined;
+}
+
+/** Refine only prompt candidates, within the same bounded scan and before spending its candidate budget. */
+function settledSnifferRejudgeCause(row: TierItemRow, cause: TierRejudgeCause, id: string | undefined): TierRejudgeCause | 'builtin_prompt_skipped' {
+  if (cause !== 'names_prompt' && cause !== 'content_prompt') return cause;
+  const current = snifferInputs(id);
+  if (!current) return cause;
+  const reasons = JSON.parse(row.reasons_json) as string[];
+  const previous: Array<string | undefined> = [];
+  const stamp = row.rejudged_key?.split('\u0000');
+  // Match the existing stamp semantics: a completed re-read, or a model
+  // settlement still free of fail-safe reasons, can cover older names too.
+  if (stamp?.[0] === row.engine_version && (stamp.length === 2
+    || (stamp.length === 3 && stamp[2] === 'judged' && !reasons.some(reason => reason.includes(':fail_safe:'))))) {
+    previous.push(stamp[1]);
+  } else {
+    const addMismatch = (prefix: string, required: boolean, exact = false) => {
+      const found = reasons.filter(reason => reason.startsWith(prefix));
+      if (!required || found.some(reason => exact ? reason === `${prefix}${id}` : reason.startsWith(`${prefix}${id}:`))) return;
+      if (!found.length) previous.push(undefined); // Never judged: still owed a verdict.
+      for (const reason of found) {
+        const rest = reason.slice(prefix.length);
+        // Lane and prompt/model identity end before the verdict's reason code.
+        previous.push(rest.match(/^([^:]+:p-[a-f0-9]{12}(?:\.o[a-f0-9]{8})?\.m[a-f0-9]{16})(?::|$)/)?.[1]);
+      }
+    };
+    addMismatch('metadata:sniffer:', reasons.some(reason => reason.startsWith('metadata:sniffer:')));
+    if (row.decided_by === 'content_rule') addMismatch('content:rule_sniffer:', true, true);
+    else addMismatch('content:sniffer:', !reasons.some(reason => reason.startsWith('metadata:sensitivity_map:'))
+      && (row.content_tier === 'public' || row.content_tier === 'private' || reasons.some(reason => reason.startsWith('content:sniffer:'))));
+  }
+  const inputs = previous.map(snifferInputs);
+  if (inputs.some(input => input && input.owner !== current.owner)) return 'owner_words';
+  if (inputs.some(input => input && (input.lane !== current.lane || input.model !== current.model))) return 'judge_model';
+  // Missing/legacy identities retain their original cause and eligibility.
+  if (!inputs.length || inputs.some(input => !input)) return cause;
+  return 'builtin_prompt_skipped';
+}
 
 export type SnifferVerdictOutcome = 'held_lowering' | 'stale_question' | TierLedgerRecordOutcome | TierRoutedOutcome | 'needs_placement' | 'stale_map';
 
@@ -4837,7 +4917,7 @@ function tierLedgerMigrations(): SqliteMigration[] {
       },
     },
     {
-      version: TIER_LEDGER_SCHEMA_VERSION,
+      version: 11,
       name: 'incremental_copy_visibility',
       up(db) {
         db.exec(`
@@ -4867,6 +4947,15 @@ function tierLedgerMigrations(): SqliteMigration[] {
               BEGIN ${note('OLD')} ${note('NEW')} END;
           `);
         }
+      },
+    },
+    {
+      version: TIER_LEDGER_SCHEMA_VERSION,
+      name: 'pending_move_metadata',
+      up(db) {
+        // Completed obligations remain recorded as empty acknowledgements.
+        // Never rescan that growing history to find the few pending notes.
+        db.exec(`CREATE INDEX IF NOT EXISTS tier_ledger_pending_meta ON tier_ledger_meta (key) WHERE value <> '';`);
       },
     },
   ];

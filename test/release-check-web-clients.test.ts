@@ -4,12 +4,13 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { Window } from 'happy-dom';
 import { secretLocationAnswer } from '../src/core/secret-location-note.ts';
 import { findBrowser } from '../scripts/release-check/browser.ts';
 import type { ExecResult, Machine } from '../scripts/release-check/machine.ts';
 import {
   askQuestion, blockedReason, connectionUses, evaluateTurn, forbiddenFor, olympusUse, parseClientQuestions, redactForbidden, runWebClients, SECRET_ANSWER_LEAD, startBrowserScript, turnText,
-  type ClientQuestion, type PageState,
+  PAGE_STATE_SCRIPT, openMacInbox, type ClientQuestion, type PageState,
 } from '../scripts/release-check/web-clients.ts';
 
 const statusOf = (checks: Array<{ id: string; status: string }>) => Object.fromEntries(checks.map((check) => [check.id, check.status]));
@@ -19,6 +20,124 @@ const doctor: ClientQuestion = { id: 'doctor', prompt: 'Ask Olympus what my doct
 const vault: ClientQuestion = { id: 'vault', prompt: 'Ask Olympus for the code to the garage door keypad.', kind: 'secret', forbid: ['4471'] };
 // A connection used while the question was asked: the evidence that Olympus was called.
 const used = { used: true, detail: 'the connection "ChatGPT" was used while it was asked' } as const;
+
+const instant = { pollMs: 0, loadMs: 0, answerMs: 0, settleMs: 0, panelMs: 0, macAnswerMs: 0, sleep: async () => {} };
+
+describe('web clients: capture and Inbox regressions (#987)', () => {
+  const snapshot = (conversation: string): PageState => {
+    const window = new Window({ url: 'https://grok.com/c/current' });
+    window.document.body.innerHTML = `<aside><div data-testid="conversation"><div data-message-author-role="assistant">Old chat: 162 Conferences Nina 12:30</div></div><button aria-label="Stop streaming">Stop</button></aside><main>${conversation}<textarea></textarea></main>`;
+    for (const el of window.document.querySelectorAll('*')) el.getBoundingClientRect = () => new window.DOMRect(0, 0, 100, 20);
+    try { return new Function('document', 'location', 'getComputedStyle', `return ${PAGE_STATE_SCRIPT(['textarea'], 'grok', pickup.prompt)}`)(window.document, window.location, window.getComputedStyle.bind(window)); }
+    finally { window.happyDOM.abort(); }
+  };
+
+  test('sidebar titles, a missing prompt, or a missing assistant turn are inconclusive and never judged or leaked', async () => {
+    for (const html of ['', '<div role="log"><div data-message-author-role="assistant">Unrelated old answer 162</div></div>', `<div role="log"><div data-message-author-role="user">${pickup.prompt}</div></div>`]) {
+      const state = snapshot(html);
+      expect(state).toMatchObject({ text: '', assistantTurn: '', busy: false });
+      const tab = { evaluate: async () => state as never, framesText: async () => '', goto: async () => {}, type: async () => {}, enter: async () => {}, screenshot: async () => {}, close: async () => {} };
+      const obs = await askQuestion(tab, 'grok', pickup, instant);
+      expect(obs).toHaveProperty('inconclusive');
+      const checks = evaluateTurn('grok', pickup, obs);
+      expect(checks.map((c) => c.status)).toEqual(['skip']);
+      expect(JSON.stringify(checks)).not.toMatch(/162|Conferences|Nina|12:30/);
+    }
+    expect(turnText('Sidebar: 162 Conferences', pickup.prompt)).toBe('');
+    expect(evaluateTurn('grok', pickup, { turn: '', frames: '', ms: 0 }).map((c) => c.status)).toEqual(['skip']);
+  });
+
+  test('only assistant messages after the current user message count; only conversation Stop controls count', () => {
+    const html = `<div aria-label="Conversation"><div data-testid="user-message">Older prompt</div><div data-testid="assistant-message">Old answer 162</div><div data-testid="user-message">${pickup.prompt}</div><div data-testid="assistant-message">Current reply</div></div>`;
+    expect(snapshot(html)).toMatchObject({ assistantTurn: 'Current reply', text: '', busy: false });
+    expect(snapshot(html.replace('</div>', '<button data-testid="stop-button">Stop</button></div>')).busy).toBe(true);
+    expect(snapshot(html + '<div data-testid="assistant-message">Outside 162</div>').assistantTurn).toBe('Current reply');
+    expect(snapshot(html.replace(pickup.prompt, 'Another prompt')).assistantTurn).toBe('');
+  });
+
+  test.each(['linux', 'macos'] as const)('%s Inbox keeps the bridge until close and cleans up navigation errors', async (os) => {
+    for (const fail of [false, true]) {
+      const events: string[] = [];
+      const machine: Machine = { os, handle: 'test', label: 'test', driver: 'fake',
+        upgrade: async () => {}, put: async () => {}, get: async () => {}, exec: async (script: string) => {
+        events.push(script.includes('owner-bridge --port') ? 'bridge' : script.startsWith('kill ') ? 'stop' : 'mint');
+        return { code: 0, stdout: script.includes('owner-bridge --port') ? '123\n/home/test/rc/web-bridge.test\n' : 'http://127.0.0.1:8010/private', stderr: '', timedOut: false, ms: 0 };
+      } };
+      const browser = { on: () => {}, close: () => {}, send: async (method: string) => {
+        if (method === 'Target.createTarget') return { targetId: 't' };
+        if (method === 'Target.attachToTarget') return { sessionId: 's' };
+        if (method === 'Page.navigate') { events.push('navigate'); if (fail) throw new Error('navigation failed'); }
+        if (method === 'Target.closeTarget') events.push('close');
+        return { result: { value: true } };
+      } };
+      if (fail) await expect(openMacInbox(machine, browser, instant)).rejects.toThrow('navigation failed');
+      else {
+        const tab = await openMacInbox(machine, browser, instant);
+        expect(typeof tab).toBe('object');
+        expect(events).not.toContain('stop');
+        if (typeof tab !== 'string') await tab.close();
+      }
+      expect(events).toEqual(os === 'linux' ? ['mint', 'bridge', 'navigate', 'close', 'stop'] : ['mint', 'navigate', 'close']);
+    }
+  });
+
+  test('a failed Linux Inbox opening is retried for each client, with its bridge stopped each time', async () => {
+    let nextTab = 0;
+    let opens = 0;
+    const events: string[] = [];
+    const server = Bun.serve({ port: 0, fetch(request, server) {
+      if (server.upgrade(request)) return;
+      return Response.json({ webSocketDebuggerUrl: `ws://127.0.0.1:${server.port}/devtools` });
+    }, websocket: { message(ws, raw) {
+      const { id, method, params } = JSON.parse(String(raw));
+      let result: unknown = {};
+      if (method === 'Target.createTarget') result = { targetId: String(++nextTab) };
+      if (method === 'Target.attachToTarget') result = { sessionId: params.targetId };
+      if (method === 'Page.navigate' && params.url.includes('/private')) events.push('navigate');
+      if (method === 'Runtime.evaluate') {
+        const value = params.expression.includes('composerText:')
+          ? { url: 'https://test/chat', title: 'test', composer: true, composerText: '', busy: false, challenge: false, signedOut: false, text: `${vault.prompt}\n${REMOTE_SECRET_NOTE}`, assistantTurn: REMOTE_SECRET_NOTE }
+          : params.expression.includes('frames') || params.expression.includes('document.body ?') ? '' : false;
+        // Focus succeeds; the Inbox never appears.
+        result = { result: { value: params.expression.includes('el.focus()') ? true : value } };
+      }
+      ws.send(JSON.stringify({ id, result }));
+    } } });
+    const machine: Machine = { os: 'linux', handle: 'test', label: 'test', driver: 'fake',
+      upgrade: async () => {}, put: async () => {}, get: async () => {},
+      tunnel: async () => ({ port: server.port!, close: () => {} }), exec: async (script: string) => {
+      let stdout = '{}';
+      if (script.includes('dashboard --no-open')) { opens++; stdout = 'http://127.0.0.1:8010/private'; }
+      if (script.includes('owner-bridge --port 8010')) { events.push('bridge'); stdout = '123\n/home/test/rc/web-bridge.test\n'; }
+      if (script.startsWith('kill 123')) events.push('stop');
+      return { code: 0, stdout, stderr: '', timedOut: false, ms: 0 };
+    } };
+    const screensDir = mkdtempSync(join(tmpdir(), 'web-clients-retry-'));
+    try {
+      const result = await runWebClients(machine, { clients: ['claude', 'grok'], questions: [vault], os: 'linux', screensDir, timings: instant, useGapMs: 0 });
+      expect(result.checks.some((c) => c.id === 'web.driver')).toBe(false);
+      expect(opens).toBe(2);
+      expect(events).toEqual(['bridge', 'navigate', 'stop', 'bridge', 'navigate', 'stop']);
+    } finally { server.stop(true); rmSync(screensDir, { recursive: true, force: true }); }
+  });
+});
+
+describe('web clients: the owner-bridge agent', () => {
+  test('a Linux run puts this run\'s agent at ~/rc/agent.js before starting the browser', async () => {
+    const order: string[] = [];
+    const machine: Machine = { os: 'linux', handle: 'test', label: 'test', driver: 'fake',
+      upgrade: async () => {}, get: async () => {},
+      put: async (from: string, to: string) => { order.push(`put ${from} ${to}`); },
+      tunnel: async () => { throw new Error('no tunnel in this test'); },
+      exec: async (script: string) => { order.push(script.includes('mkdir -p "$HOME/rc"') ? 'mkdir' : script.includes('remote-debugging-port') ? 'browser' : 'other'); return { code: 0, stdout: '', stderr: '', timedOut: false, ms: 0 }; } };
+    const screensDir = mkdtempSync(join(tmpdir(), 'web-clients-agent-'));
+    try {
+      const result = await runWebClients(machine, { clients: ['claude'], questions: [], os: 'linux', screensDir, bridgeAgent: '/run/bundle/agent.js' });
+      expect(order).toEqual(['mkdir', 'put /run/bundle/agent.js ~/rc/agent.js', 'browser']);
+      expect(result.checks.find((c) => c.id === 'web.browser')?.detail).toContain('no tunnel in this test');
+    } finally { rmSync(screensDir, { recursive: true, force: true }); }
+  });
+});
 
 describe('web clients: what a turn is held to', () => {
   test('a cited answer with every fact passes; the turn starts after the question', () => {
@@ -312,6 +431,7 @@ describe.skipIf(!browserPath)('web clients: a real browser on a stand-in app', (
       upgrade: async () => {}, put: async () => {}, get: async () => {},
       exec: async (script) => {
         scripts.push(script);
+        if (/owner-bridge --port/.test(script)) return { ...ok, stdout: '123\n/home/test/rc/web-bridge.test\n' };
         // The app's connection shows a newer use at each reading, as if each question called Olympus.
         if (/dashboard --no-open --target private/.test(script)) return { ...ok, stdout: `Open: http://127.0.0.1:${server.port}/inbox?token=one-time\n` };
         if (/connections list/.test(script)) return { ...ok, stdout: JSON.stringify({ kind: 'remote_connections', connections: [{ id: 'a1', name: 'ChatGPT', status: 'active', last_used_at: new Date(Date.UTC(2026, 9, 28, 10, ++reads)).toISOString() }] }) };

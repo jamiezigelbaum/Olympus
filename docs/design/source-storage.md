@@ -344,6 +344,13 @@ Storage's part (step 4e):
 
 ## Storage service
 
+Offline diagnostics (2026-11-07) use `createStorageSnapshotReaders()` to create
+a private temporary root and open only database copies placed there, read-only.
+These copies have no account registry lifecycle; the diagnostic closes the
+readers and removes the root. The service refuses outside paths, symbolic links
+and hard-linked database files; it never opens the installation originals for
+this path or migrates the copies.
+
 One module in the worker, `src/core/source-storage.ts`, is the only code
 that opens files inside an account folder:
 

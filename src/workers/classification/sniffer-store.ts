@@ -17,10 +17,11 @@ import { chmodSync, existsSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { runSqliteMigrations, type SqliteMigration } from '../../core/sqlite-migrations.ts';
 import { closeSqliteStore } from '../../core/sqlite-store.ts';
+import { iterateRows } from '../../core/sqlite-rows.ts';
 import { HELD_UNTIL_JUDGED_PRIORITY, type TierSnifferSubject } from './tier-classifier.ts';
 import { TIER_SNIFFER_SQLITE_STORE_ID } from './tier-ledger-path.ts';
 
-export const TIER_SNIFFER_SCHEMA_VERSION = 6;
+export const TIER_SNIFFER_SCHEMA_VERSION = 7;
 
 export type SnifferPass = 'metadata' | 'content';
 export type SnifferTier = 'personal' | 'private';
@@ -41,6 +42,14 @@ export interface StoredSnifferVerdict {
   decidedAt: string;
   contentHash?: string;
   modelSubject?: string;
+}
+
+export interface TrainingSnifferVerdict {
+  tier: SnifferTier;
+  decidedAt: string;
+  ambiguous: boolean;
+  /** Present only when every latest answer is bound to the same final content. */
+  contentHash?: string;
 }
 
 export interface SnifferQuestion {
@@ -82,8 +91,12 @@ export class TierSnifferStore {
   private readonly db: Database;
   private readonly now: () => Date;
   private readonly readOnly: boolean;
+  // Keep construction inside the constructor so Bun can drop this SQLite class
+  // from the Node-loaded plugin bundle when only its pure helpers are used.
+  private readonly trainingReads: Map<string, Map<string, TrainingSnifferVerdict>>;
 
   constructor(options: { dbPath: string; now?: () => Date; readOnly?: boolean }) {
+    this.trainingReads = new Map();
     this.dbPath = options.dbPath;
     this.now = options.now ?? (() => new Date());
     if (options.readOnly === true) {
@@ -190,6 +203,54 @@ export class TierSnifferStore {
       WHERE model_subject = ? AND model_id = ? AND content_hash = ? AND fail_safe = 0
       ORDER BY decided_at DESC LIMIT 1`).get(snifferSubjectKey(subject), modelId, contentHash) as { tier: SnifferTier } | null;
     return row?.tier;
+  }
+
+  /** Latest real answer on this subject and model, independent of content_hash.
+   * Old offline snapshots lack the lookup index: scan once per model, never once per item.
+   * Equal-time conflicting answers cannot prove a label. Content binding survives
+   * only when every latest answer carries the same final-content hash. Later answers
+   * are returned too:
+   * the caller must reject them rather than select an older, convenient answer.
+   */
+  trainingVerdict(subject: TierSnifferSubject, modelId: string): TrainingSnifferVerdict | undefined {
+    const key = snifferSubjectKey(subject);
+    if (this.readOnly) {
+      let labels = this.trainingReads.get(modelId);
+      if (!labels) {
+        labels = new Map();
+        const rows = iterateRows<{ model_subject: string; tier: SnifferTier; decided_at: string; content_hash: string | null }>(this.db,
+          `SELECT model_subject, tier, decided_at, content_hash FROM sniffer_verdicts
+          WHERE model_id = ? AND fail_safe = 0 AND model_subject IS NOT NULL`, modelId);
+        for (const row of rows) {
+          const prior = labels.get(row.model_subject);
+          if (!prior || row.decided_at > prior.decidedAt) labels.set(row.model_subject,
+            { tier: row.tier, decidedAt: row.decided_at, ambiguous: false,
+              ...(row.content_hash ? { contentHash: row.content_hash } : {}) });
+          else if (row.decided_at === prior.decidedAt) {
+            if (row.tier !== prior.tier) prior.ambiguous = true;
+            if (row.content_hash !== prior.contentHash) delete prior.contentHash;
+          }
+        }
+        this.trainingReads.set(modelId, labels);
+      }
+      return labels.get(key);
+    }
+    const row = this.db.query(`SELECT MIN(tier) AS tier, decided_at, COUNT(DISTINCT tier) AS tiers,
+        CASE WHEN COUNT(content_hash) = COUNT(*) AND COUNT(DISTINCT content_hash) = 1
+          THEN MIN(content_hash) END AS content_hash
+      FROM sniffer_verdicts WHERE model_subject = ? AND model_id = ? AND fail_safe = 0
+      GROUP BY decided_at ORDER BY decided_at DESC LIMIT 1`).get(key, modelId) as {
+        tier: SnifferTier; decided_at: string; tiers: number; content_hash: string | null;
+      } | null;
+    return row ? { tier: row.tier, decidedAt: row.decided_at, ambiguous: row.tiers !== 1,
+      ...(row.content_hash ? { contentHash: row.content_hash } : {}) } : undefined;
+  }
+
+  /** Fence sliced training against verdict writes on this or another connection. */
+  changeMarker(): string {
+    const own = this.db.query('SELECT total_changes() AS changes').get() as { changes: number };
+    const external = this.db.query('PRAGMA data_version').get() as { data_version: number };
+    return `${external.data_version}:${own.changes}`;
   }
 
   /**
@@ -595,6 +656,14 @@ function snifferMigrations(): SqliteMigration[] {
           CREATE INDEX sniffer_recent ON sniffer_questions(priority DESC, conversation_order DESC, queued_at DESC, question_pk DESC);
           CREATE INDEX sniffer_pass_recent ON sniffer_questions(pass, priority DESC, conversation_order DESC, queued_at DESC, question_pk DESC);
           DELETE FROM sniffer_scan WHERE scan_key LIKE '%:recent';`);
+      },
+    },
+    {
+      version: 7,
+      name: 'subject_training_verdict_lookup',
+      up(db) {
+        db.exec(`CREATE INDEX sniffer_training_subject ON sniffer_verdicts(model_subject, model_id, decided_at DESC)
+          WHERE fail_safe = 0 AND model_subject IS NOT NULL;`);
       },
     },
   ];

@@ -25,6 +25,8 @@ export interface LiveSourceSpec {
   /** How old the last sync may be (hours); 24 when left out. */
   maxSyncAgeH?: number;
   known?: { question: string; expect: string[] };
+  /** Fresh-install dashboard scope and an item outside it; see fresh-install.md. */
+  fresh?: { scope: string; outside: { question: string; expect: string[] }; withinS?: number };
   plant?: {
     /** Run on this computer with OLYMPUS_CANARY_WORD, OLYMPUS_CANARY_SUBJECT and OLYMPUS_CANARY_BODY set; exit 0 when planted. */
     argv: string[];
