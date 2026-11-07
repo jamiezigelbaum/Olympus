@@ -75196,6 +75196,9 @@ class EmbeddingPrefilter {
   get trainingPending() {
     return this.owner.enabled() && !this.owner.audit.stopped && (this.owner.attempt?.outcome === "scanning" || this.owner.attempt?.outcome === "fitting");
   }
+  get trainingFinalizing() {
+    return this.trainingPending && this.owner.training?.model !== undefined;
+  }
   get trainingOwner() {
     return this.owner;
   }
@@ -75329,6 +75332,18 @@ class EmbeddingPrefilter {
       await pending;
     } finally {
       this.preparing = undefined;
+    }
+  }
+  async finishValidation(judge2, shouldYield) {
+    if (this.owner !== this)
+      return this.owner.finishValidation(judge2, shouldYield);
+    let markers;
+    while (this.trainingFinalizing && !shouldYield()) {
+      await this.prepare(judge2, shouldYield);
+      const next = this.training?.finalValidation?.markers;
+      if (markers !== undefined && next !== markers)
+        break;
+      markers = next;
     }
   }
   async prepareSlice(judge2, shouldYield) {
@@ -76270,6 +76285,7 @@ class TierSnifferService {
   trainingTimer;
   trainingJob;
   trainingJudge;
+  finalizingTraining = false;
   lastTickEndedAt;
   moveAbort = new AbortController;
   moving;
@@ -76366,6 +76382,24 @@ class TierSnifferService {
     if (this.trainingTimer)
       clearTimeout(this.trainingTimer);
     this.trainingTimer = undefined;
+  }
+  async finishTrainingValidation(signal) {
+    const judge2 = this.trainingJudge;
+    const filters = [...new Set([...this.embeddingPrefilters.values()].map((filter) => filter.trainingOwner))];
+    if (!judge2 || !filters.some((filter) => filter.trainingFinalizing))
+      return;
+    this.pauseTraining();
+    await this.trainingJob;
+    this.finalizingTraining = true;
+    try {
+      await this.moving;
+      for (const filter of filters) {
+        await filter.finishValidation(judge2, () => signal.aborted || this.stopped || this.yieldNow());
+      }
+    } finally {
+      this.finalizingTraining = false;
+      this.scheduleTraining(judge2);
+    }
   }
   stop() {
     this.stopped = true;
@@ -76616,6 +76650,7 @@ class TierSnifferService {
       if (tick.state === "ran" && lowerMoves) {
         tick.autoMoves = mergeAutoMoveReports(tick.autoMoves, lowerMoves);
       }
+      await this.finishTrainingValidation(abort.signal);
     } catch (error2) {
       tick = { state: "failed", error: error2 instanceof Error ? error2.name : "unknown" };
     } finally {
@@ -77157,24 +77192,28 @@ class TierSnifferService {
       return false;
     }
   }
+  newRaisesQueued() {
+    return this.ledgerPaths().some((path) => {
+      try {
+        const set2 = tierSetForLedger(path);
+        if (!set2 || !setEmbedsWithBuiltInOnly(set2))
+          return false;
+        const limit = Math.max(0, this.options.autoMoves.maxPerPass ?? 25);
+        return limit > 0 && set2.ledger.listMoving({ limit, direction: "raise" }).some((record3) => isAutoMoveCandidate(record3) && !this.moveFailures.has(`${path}\x00${tierLedgerIdentityKey(recordIdentity(record3))}\x00${record3.generation}`));
+      } catch {
+        return true;
+      }
+    });
+  }
   async drainMoves(direction = "raise") {
     try {
       if (!this.options.autoMoves || this.stopped || !this.options.autoMoves.localEmbeddingsOnly())
         return;
+      if (direction === "raise" && this.finalizingTraining && !this.newRaisesQueued())
+        return;
       if (this.moving && this.movingDirection !== direction) {
         if (direction === "raise") {
-          const raisesQueued = this.ledgerPaths().some((path) => {
-            try {
-              const set2 = tierSetForLedger(path);
-              if (!set2 || !setEmbedsWithBuiltInOnly(set2))
-                return false;
-              const limit = Math.max(0, this.options.autoMoves.maxPerPass ?? 25);
-              return limit > 0 && set2.ledger.listMoving({ limit, direction: "raise" }).some((record3) => isAutoMoveCandidate(record3) && !this.moveFailures.has(`${path}\x00${tierLedgerIdentityKey(recordIdentity(record3))}\x00${record3.generation}`));
-            } catch {
-              return true;
-            }
-          });
-          if (!raisesQueued)
+          if (!this.newRaisesQueued())
             return;
           this.lowerMovePreempted = true;
         }
