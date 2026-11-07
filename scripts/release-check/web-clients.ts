@@ -335,7 +335,7 @@ export async function openMacInbox(machine: Machine, browser: BrowserSession, t:
     }
   };
   try {
-    if (machine.os === 'linux') stopBridge = await startInboxBridge(machine, Number(new URL(url).port || 80));
+    if (machine.os === 'linux') stopBridge = await startOwnerBridge(machine, Number(new URL(url).port || 80));
     const until = async (expression: string): Promise<boolean> => {
       const deadline = Date.now() + t.loadMs;
       for (;;) {
@@ -355,13 +355,17 @@ export async function openMacInbox(machine: Machine, browser: BrowserSession, t:
   } catch (error) { await tab.close(); throw error; }
 }
 
-/** Runs the existing owner-socket forward on the machine, for the lifetime of the Inbox tab. */
-async function startInboxBridge(machine: Machine, port: number): Promise<() => Promise<void>> {
-  const result = await machine.exec(`BUN=$(command -v bun 2>/dev/null || ls -d ~/.local/share/olympus-engine/generations/*/runtime/bun 2>/dev/null | tail -1)
+/** Reuse a desktop listener, or run machine-agent's owner-socket forward until the browser closes. */
+export async function startOwnerBridge(machine: Machine, port: number, pidFile?: string): Promise<() => Promise<void>> {
+  if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('invalid owner bridge port');
+  const result = await machine.exec(`set -euo pipefail
+if (echo > /dev/tcp/127.0.0.1/${port}) 2>/dev/null; then echo 'owner-bridge existing'; exit 0; fi
+BUN=$(command -v bun 2>/dev/null || ls -d ~/.local/share/olympus-engine/generations/*/runtime/bun 2>/dev/null | tail -1)
 [ -n "$BUN" ] || exit 90
 log=$(mktemp "$HOME/rc/web-bridge.XXXXXX") || exit 1
 nohup "$BUN" --no-env-file ~/rc/agent.js owner-bridge --port ${port} >"$log" 2>&1 < /dev/null &
 pid=$!
+${pidFile ? `printf '%s\\n' "$pid" > ${shellQuote(pidFile)}` : ''}
 for i in $(seq 1 100); do
   if grep -q '^owner-bridge ready$' "$log"; then printf '%s\\n%s\\n' "$pid" "$log"; exit 0; fi
   kill -0 "$pid" 2>/dev/null || break
@@ -370,10 +374,12 @@ done
 kill "$pid" 2>/dev/null || true
 cat "$log" >&2
 rm -f "$log"
+${pidFile ? `rm -f ${shellQuote(pidFile)}` : ''}
 exit 1`, { timeoutMs: 20_000 });
+  if (result.code === 0 && result.stdout.trim() === 'owner-bridge existing') return async () => {};
   const [pid, log] = result.stdout.trim().split('\n');
   if (result.code !== 0 || !pid || !/^\d+$/.test(pid) || !log) throw new Error('the Private answers owner-socket bridge did not start');
-  return async () => { await machine.exec(`kill ${pid} 2>/dev/null || true\nrm -f ${shellQuote(log)}`, { timeoutMs: 10_000 }); };
+  return async () => { await machine.exec(`kill ${pid} 2>/dev/null || true\nrm -f ${shellQuote(log)}${pidFile ? ` ${shellQuote(pidFile)}` : ''}`, { timeoutMs: 10_000 }); };
 }
 
 async function macInboxRows(inbox: Tab | string): Promise<Record<string, string> | string> {

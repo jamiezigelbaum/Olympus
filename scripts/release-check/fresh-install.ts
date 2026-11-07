@@ -51,15 +51,23 @@ export function validateFreshSources(sources: LiveSourceSpec[]): LiveSourceSpec[
 }
 
 const ROOT = '"$HOME/.olympus-canary/fresh-run"';
+export const FRESH_BRIDGE_PID = '/home/olyfresh/.olympus-canary/owner-bridge.pid';
+export const SOCKET_READY = 'curl -fsS --max-time 2 --unix-socket "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/olympus/worker.sock" http://127.0.0.1:8010/health > /dev/null';
 /** A machine-side lease survives runner disconnects. EXIT/HUP/INT/TERM and expiry all restore zig. */
 export const GUARD = `set -euo pipefail
 restore() {
   trap '' HUP INT TERM
   ${asFresh('systemctl --user stop olympus-engine.service')} >/dev/null 2>&1 || true
+  ${asFresh(`if [ -f ${FRESH_BRIDGE_PID} ]; then
+    pid=$(cat ${FRESH_BRIDGE_PID})
+    case "$pid" in ''|*[!0-9]*) exit 1;; esac
+    kill "$pid" 2>/dev/null || true
+    rm -f ${FRESH_BRIDGE_PID}
+  fi`)} >/dev/null 2>&1 || true
   rc=0
   systemctl --user start olympus-engine.service || rc=1
   for i in $(seq 1 90); do
-    if systemctl --user is-active --quiet olympus-engine.service && (echo > /dev/tcp/127.0.0.1/8010) 2>/dev/null; then echo "$rc" > ${ROOT}/restored.tmp; mv ${ROOT}/restored.tmp ${ROOT}/restored; exit "$rc"; fi
+    if systemctl --user is-active --quiet olympus-engine.service && ${SOCKET_READY}; then echo "$rc" > ${ROOT}/restored.tmp; mv ${ROOT}/restored.tmp ${ROOT}/restored; exit "$rc"; fi
     sleep 1
   done
   echo 1 > ${ROOT}/restored.tmp
@@ -77,6 +85,8 @@ export interface FreshOptions {
   /** Local installer/tarball prepared by the site's Linux bundle builder; absent uses the published installer. */
   bundle?: { installer: string; tarball: string };
   cdp?: string;
+  /** Current harness bundle, copied to the fresh user's home for the existing owner-bridge command. */
+  bridgeAgent?: string;
   /** Test seam: real implementation uses only dashboard controls and persisted reads. */
   dashboard?: (machine: Machine, cdp: string) => Promise<FreshDashboard>;
   engine?: (machine: Machine) => Promise<EngineMcp>;
@@ -86,6 +96,7 @@ export interface FreshOptions {
 export async function runFreshInstall(machine: Machine, options: FreshOptions): Promise<{ checks: CheckResult[]; screens: [] }> {
   const sources = validateFreshSources(options.sources);
   if (machine.os !== 'linux') throw new Error('fresh install requires Linux');
+  if (!options.dashboard && !options.bridgeAgent) throw new Error('fresh install needs the machine-agent bundle');
   const checks: CheckResult[] = [];
   const sleep = options.sleep ?? ((ms: number) => new Promise<void>(r => setTimeout(r, ms)));
   let current = 'install';
@@ -143,17 +154,23 @@ ${asFresh('sh "$HOME/.olympus-canary/install-linux.sh" --tarball "$HOME/.olympus
 curl -fsSL --proto '=https' --tlsv1.2 https://olympusplugin.ai/install-linux.sh -o "$HOME/.olympus-canary/install-linux.sh"
 sh "$HOME/.olympus-canary/install-linux.sh" < /dev/null > "$HOME/.olympus-canary/install.log" 2>&1`), 25 * 60_000);
       }
+      if (options.bridgeAgent) {
+        await machine.put(options.bridgeAgent, '/home/zig/.olympus-canary/fresh-run/agent.js');
+        await exec(`sudo -n install -d -o olyfresh -g "$(id -gn olyfresh)" -m 700 /home/olyfresh/rc
+sudo -n install -o olyfresh -g "$(id -gn olyfresh)" -m 600 ${ROOT}/agent.js /home/olyfresh/rc/agent.js`);
+      }
     });
     const fresh = freshMachine(machine);
     await checked('engine-up', async () => {
       await exec(asFresh(`systemctl --user start olympus-engine.service
 for i in $(seq 1 180); do
- if systemctl --user is-active --quiet olympus-engine.service && (echo > /dev/tcp/127.0.0.1/8010) 2>/dev/null; then exit 0; fi
+ if systemctl --user is-active --quiet olympus-engine.service && ${SOCKET_READY}; then exit 0; fi
  sleep 1
 done; exit 1`), 200_000);
       try { engine = await (options.engine ?? openEngineMcp)(fresh); } catch { throw new Error('engine MCP connection failed'); }
     });
     await checked('dashboard-opens', async () => { dashboard = await (options.dashboard ?? openFreshDashboard)(fresh, options.cdp ?? '127.0.0.1:9333'); });
+    await checked('privacy-choice', () => dashboard!.privacyChoice());
     for (const source of sources) {
       await checked(`${source.id}.connect`, () => dashboard!.connect(source));
       await checked(`${source.id}.consent`, () => dashboard!.consent(source));
@@ -197,7 +214,7 @@ done; exit 1`), 200_000);
         await checked('restore-zig', async () => {
           await exec(`rm -f ${ROOT}/lease
 for i in $(seq 1 120); do
- if [ -e ${ROOT}/restored ]; then [ "$(cat ${ROOT}/restored)" = 0 ] && systemctl --user is-active --quiet olympus-engine.service && (echo > /dev/tcp/127.0.0.1/8010) 2>/dev/null; exit $?; fi
+ if [ -e ${ROOT}/restored ]; then [ "$(cat ${ROOT}/restored)" = 0 ] && systemctl --user is-active --quiet olympus-engine.service && ${SOCKET_READY}; exit $?; fi
  sleep 1
 done; exit 1`, 130_000);
           await exec(`rm -rf ${ROOT}`);

@@ -68,6 +68,7 @@ All fields in `fresh` are optional for other canary modes, required here except
 
 The report uses the existing canary v1 JSON/HTML layout under `<out>/<run-id>`,
 with leg `canary-test-omarchy-fresh`. Checks name install, engine, dashboard,
+the first-run privacy choice (Local models with Venice fallback, Recommended),
 each source's connect/consent/callback/scope/first items, known answers and scope
 absence, and restoration. Exit codes remain 0 pass, 1 product failure, 2 invalid
 invocation, 3 inconclusive. Password, verification, signed-out and ambiguous
@@ -75,11 +76,22 @@ account pages identify which browser sign-in to renew. No consent screenshots,
 OAuth URLs, answers, cookies or tokens are included in the fresh report.
 
 The dedicated `olyfresh` account gets linger and a clean home each run. Zig's
-engine is stopped before installation; olyfresh uses the real default 8010.
+engine is stopped before installation. Engine readiness uses olyfresh's worker
+socket, since this user has no graphical session. The harness bundles its current
+machine-agent and runs that agent's existing owner-socket forward as olyfresh on
+loopback port 8010 for zig's browser; the CDP tunnel carries browser control only.
+The forward lives until the dashboard closes; the restore guard also stops it
+if the runner disappears. An already-listening desktop bridge is reused.
+Google's desktop OAuth redirect is `http://127.0.0.1:8010/oauth/callback/gmail`.
+Dropbox registers the HTTPS publisher relay, which bounces the browser back to
+the dashboard origin on 8010. Both reach olyfresh through the same forward.
+Before connecting sources, the harness answers the Keys page's first-run form
+with its Recommended choice, then reloads and verifies the persisted mode.
 The machine-side lease guard traps exit and termination and restores zig when
 the runner releases the lease, or after two hours if the runner disappears.
 Handled runner interrupts finish the active mutation before cleanup. Restoration
-stops olyfresh, starts zig and verifies both the user service and port 8010.
+stops olyfresh, starts zig and verifies both the user service and worker socket,
+even if zig's desktop TCP bridge is down.
 The fresh install and its private install log remain for post-mortem. Provider
 grants are retained. A failed restore leaves
 `~zig/.olympus-canary/fresh-run/guard.log` and blocks another run until inspected;

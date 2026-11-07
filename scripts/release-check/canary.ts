@@ -33,6 +33,7 @@
 import { prepareLinuxLocalBundle } from '../publish-release-to-site.ts';
 import { FRESH_LEG, runFreshInstall, validateFreshSources } from './fresh-install.ts';
 import { parseCdpEndpoint } from './fresh-dashboard.ts';
+import { bundleAgent } from './run.ts';
 import { randomBytes } from 'node:crypto';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
@@ -472,6 +473,7 @@ if (import.meta.main) {
   if (bundle) expectVersion = bundle.version;
   const { checks, screens } = freshInstall ? await runFreshInstall(machine, {
     sources: accounts!.sources, cdp,
+    bridgeAgent: await bundleAgent(runDir),
     ...(bundle ? { bundle: { installer: join(bundle.directory, 'install-linux.sh'), tarball: join(bundle.directory, `olympus-${bundle.version}.tgz`) } } : {}),
   }) : await runCanary(machine, {
     os,

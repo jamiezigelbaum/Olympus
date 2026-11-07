@@ -1,11 +1,13 @@
 /** CDP UI driver for the real, already signed-in canary Chromium. Never fills authentication fields. */
 import { sourceCard, sourceConnected } from './source-cards.ts';
 import type { Machine, Tunnel } from './machine.ts';
-import { connectBrowser, type BrowserSession } from './web-clients.ts';
+import { connectBrowser, startOwnerBridge, type BrowserSession } from './web-clients.ts';
 import type { LiveSourceSpec } from './live-accounts.ts';
-import { consentBlock, FreshInconclusive, type ConsentSnapshot } from './fresh-install.ts';
+import { consentBlock, FRESH_BRIDGE_PID, FreshInconclusive, type ConsentSnapshot } from './fresh-install.ts';
+import { PRIVATE_ANSWER_OPTIONS } from '../../src/core/privacy-language.ts';
 
 export interface FreshDashboard {
+  privacyChoice(): Promise<string>;
   connect(source: LiveSourceSpec): Promise<void>;
   consent(source: LiveSourceSpec): Promise<void>;
   callback(source: LiveSourceSpec): Promise<void>;
@@ -22,10 +24,11 @@ export function parseCdpEndpoint(endpoint: string): { host: string; port: number
   return { host: match[1]!, port: Number(match[2]) };
 }
 
-export async function openFreshDashboard(machine: Machine, endpoint: string): Promise<FreshDashboard> {
+export async function openFreshDashboard(machine: Machine, endpoint: string, timings: { timeoutMs?: number; pollMs?: number } = {}): Promise<FreshDashboard> {
   const { host, port } = parseCdpEndpoint(endpoint);
   let tunnel: Tunnel | undefined;
   let browser: BrowserSession | undefined;
+  let stopBridge: (() => Promise<void>) | undefined;
   const owned = new Set<string>();
   const sessions = new Map<string, string>();
   const contexts = new Map<string, Set<number>>();
@@ -42,6 +45,8 @@ export async function openFreshDashboard(machine: Machine, endpoint: string): Pr
   const cleanup = async () => {
     if (browser) for (const id of owned) await browser.send('Target.closeTarget', { targetId: id }).catch(() => {});
     browser?.close(); tunnel?.close();
+    const stop = stopBridge; stopBridge = undefined;
+    await stop?.();
   };
   try {
     // ssh-driver forwards remote loopback. A non-loopback endpoint is directly reachable from this runner.
@@ -101,12 +106,12 @@ export async function openFreshDashboard(machine: Machine, endpoint: string): Pr
       }
       return undefined;
     };
-    const until = async (read: () => Promise<boolean>, detail: string, ms = 90_000) => {
+    const until = async (read: () => Promise<boolean>, detail: string, ms = timings.timeoutMs ?? 90_000) => {
       const deadline = Date.now() + ms;
       for (;;) {
         if (await read()) return;
         if (Date.now() >= deadline) throw new Error(detail);
-        await sleep(1000);
+        await sleep(timings.pollMs ?? 1000);
       }
     };
     const click = async (expression: string) => {
@@ -125,6 +130,8 @@ export async function openFreshDashboard(machine: Machine, endpoint: string): Pr
     const minted = await machine.exec('"$HOME/.local/bin/olympus" dashboard --no-open', { timeoutMs: 60_000 });
     const url = /http:\/\/(?:127\.0\.0\.1|localhost):8010\/[^\s"<>]*/.exec(minted.stdout)?.[0];
     if (minted.code !== 0 || !url) throw new Error('CLI dashboard link unavailable');
+    // The browser and OAuth callbacks run on the canary host. CDP alone only forwards browser control.
+    stopBridge = await startOwnerBridge(machine, Number(new URL(url).port), FRESH_BRIDGE_PID);
     dash = (await browser.send('Target.createTarget', { url: 'about:blank' })).targetId;
     owned.add(dash);
     const session = await attach(dash);
@@ -136,13 +143,31 @@ export async function openFreshDashboard(machine: Machine, endpoint: string): Pr
       const r=await fetch(u); if(!r.ok)return null; const j=await r.json(); return j;
     })()`), s.id);
     const connected = sourceConnected;
-    const reload = async () => {
+    const navigate = async (path: string): Promise<boolean> => {
       frameSessions.clear();
-      const navigation = await browser!.send('Page.navigate', { url: new URL('/dashboard', url).href }, session);
+      const navigation = await browser!.send('Page.navigate', { url: new URL(path, url).href }, session);
+      if (navigation.errorText) return false;
       await until(async () => navigated.get(session) === navigation.loaderId, 'dashboard navigation did not commit');
-      await until(async () => !!await panel<boolean>(`!!document.querySelector('.source-name')`, Boolean), 'dashboard reload failed');
+      return true;
+    };
+    const reload = async (path = '/dashboard', ready = `!!document.querySelector('.source-name')`) => {
+      if (!await navigate(path)) throw new Error('dashboard navigation failed');
+      await until(async () => !!await panel<boolean>(ready, Boolean), 'dashboard reload failed');
     };
     return {
+      privacyChoice: async () => {
+        const recommended = PRIVATE_ANSWER_OPTIONS.find(option => option.recommended)!;
+        await reload('/dashboard?keys', `!!document.querySelector('form[data-first-run-privacy]')`);
+        await click(`(()=>{const e=document.querySelector('form[data-first-run-privacy] input[value="${recommended.id}"]');return e?.closest('label')?.textContent.includes('Recommended')?e:null;})()`);
+        await click(`document.querySelector('button[form="first-run-privacy-choice"]')`);
+        // The normal form handler disables the answered choice only after the engine saves it.
+        await until(async () => !!await panel<boolean>(`!!document.querySelector('form[data-first-run-privacy] input:checked:disabled')`, Boolean), 'first-run privacy choice was not saved');
+        // Saving restarts the worker. Retry fresh documents across that handoff;
+        // only the applied policy, never the submitted radio's state, proves persistence.
+        await until(async () => await navigate('/dashboard?keys') && !!await panel<boolean>(`!!document.querySelector('[data-model-setup-status]') && !!document.querySelector('[data-answer-mode="${recommended.id}"]') && !document.querySelector('form[data-first-run-privacy]')`, Boolean), 'first-run privacy choice did not persist after reload');
+        await reload();
+        return `${recommended.label} (${recommended.id}, Recommended) saved and verified after reload`;
+      },
       connect: async s => {
         const before = await card(s);
         if (!before || connected(before)) throw new Error('fresh source card missing or already connected');
