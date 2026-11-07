@@ -74,6 +74,8 @@ describe('generic Olympus worker installer', () => {
     expect(result.unit).not.toContain('ExecStart=olympus worker run');
     expect(result.unit).not.toContain('bin/olympus worker run');
     expect(result.unit).toContain('Restart=on-failure');
+    // A stop that outlives the shutdown deadline exits 143: a clean stop, not a failure (#953).
+    expect(result.unit).toContain('SuccessExitStatus=143');
     expect(result.unit).toContain('WantedBy=default.target');
     expect(result.unit).toContain('StandardOutput=append:/home/friend/.local/state/olympus/worker/worker.log');
     expect(result.commands.install).toEqual(['systemctl', '--user', 'enable', '--now', 'olympus-worker.service']);
