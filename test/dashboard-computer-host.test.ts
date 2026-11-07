@@ -564,6 +564,17 @@ describe('the panel on the computer', () => {
     expect(status.textContent).toContain('1 source · checked');
   });
 
+  test('Home keeps the privacy rules editor and a transcription that needs a hand', async () => {
+    const data = model({
+      sources: [TELEGRAM],
+      privacy: { configured: true, ruleCount: 2 },
+      models: { embedding: { kind: 'built_in', state: 'ready' }, transcription: { state: 'load_failed', download: { label: 'Try again', tool: 'olympus_model_retry', args: { model: 'transcription' } } } },
+    } as unknown as Partial<DashboardViewModelV1>);
+    const page = await onHost(COMPUTER, data);
+    expect(page.win.document.querySelector('section.privacy-row button')).not.toBeNull();
+    expect(page.win.document.querySelector('details[data-open-key="models"]')).not.toBeNull();
+  });
+
   test('Home is catching up, not up to date, while a model still downloads', async () => {
     const busy = model({ sources: [TELEGRAM], models: { embedding: { kind: 'built_in', state: 'downloading', percent: 40 } } });
     delete busy.progress;

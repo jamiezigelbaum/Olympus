@@ -154795,6 +154795,12 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     state.open.models = true;
     inPlace();
   }
+  function transcriptionNeedsHand(models) {
+    const entry = models.transcription;
+    if (!entry || typeof entry !== "object")
+      return false;
+    return !!entry.download || entry.state === "failed" || entry.state === "load_failed" || entry.state === "interrupted";
+  }
   function renderHome(page2, data2) {
     const all = Array.isArray(data2.sources) ? data2.sources : [];
     const needs = Array.isArray(data2.needsYou) ? data2.needsYou.filter((item) => !!item) : [];
@@ -154809,8 +154815,9 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
         head.textContent = P.home.progress;
     }
     add(page2, progress);
-    if (data2.models && installLines(data2.models).some((entry) => entry.state !== "failed"))
+    if (data2.models && (installLines(data2.models).some((entry) => entry.state !== "failed") || transcriptionNeedsHand(data2.models)))
       add(page2, modelsSection(data2.models));
+    add(page2, privacySection(data2));
     if (state.landing || state.landed)
       state.open["home-sources"] = true;
     if (state.open["home-sources"] === undefined && archivesMoving())

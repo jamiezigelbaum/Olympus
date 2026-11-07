@@ -2694,6 +2694,12 @@ export function chatgptDashboardClient(
     inPlace();
   }
 
+  function transcriptionNeedsHand(models: DashboardModels): boolean {
+    const entry = models.transcription;
+    if (!entry || typeof entry !== 'object') return false;
+    return !!entry.download || entry.state === 'failed' || entry.state === 'load_failed' || entry.state === 'interrupted';
+  }
+
   function renderHome(page: HTMLElement, data: Any): HTMLElement {
     const all = Array.isArray(data.sources) ? data.sources : [];
     const needs = Array.isArray(data.needsYou) ? data.needsYou.filter((item: Any) => !!item) : [];
@@ -2704,7 +2710,11 @@ export function chatgptDashboardClient(
     const progress = progressSection(data.progress, true);
     if (progress) { const head = progress.querySelector('h2'); if (head) head.textContent = P.home.progress; }
     add(page, progress);
-    if (data.models && installLines(data.models).some((entry) => entry.state !== 'failed')) add(page, modelsSection(data.models));
+    // Models live on Settings; Home shows them only while one installs or
+    // transcription needs a hand (its recovery has no Needs you item).
+    if (data.models && (installLines(data.models).some((entry) => entry.state !== 'failed') || transcriptionNeedsHand(data.models))) add(page, modelsSection(data.models));
+    // The privacy rules editor opens from here once privacy is set up.
+    add(page, privacySection(data));
     // A landing or a highlighted row needs its source visible.
     if (state.landing || state.landed) state.open['home-sources'] = true;
     // An archive at work shows its progress there, so it starts open (until the owner folds it).
