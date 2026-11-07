@@ -5,6 +5,24 @@ Status: active
 Owner: Olympus product owner
 Planning authority: this document defines release scope, sequence, and completion: Olympus 1.0 first, then the 0.4 record. It supersedes dated CTO planning handoffs and migration plans. [`CONTRACTS.md`](CONTRACTS.md) remains the architecture authority.
 
+## 1.4.0 The new dashboard (owner decision 2026-11-07)
+
+Planned as 1.3.5; the owner renamed it 1.4 on 2026-11-07. Scope: every fix
+merged since 1.3.4, the dashboard redesign signed off on 2026-11-07 (four tabs:
+Home, Sources, Privacy, Settings; #981, #988, #990, #993, #996), the Telegram
+source-prior retirement (#599), and the 1.4 backlog the owner pulled in on
+2026-11-07 (#636, #633, #715, #620, #603, #784, #710, #719, #631, #725, #712,
+#723, #791, #951), plus the installer message fix #1006 found by the
+fresh-install canary. #638 moves to 1.5. No question or answer caps (owner
+ruling 2026-10-29): the automatic-answer queue answers every question.
+
+The full release check runs once, on the final candidate: every install leg,
+upgrade from 1.3.4, the canaries (including `live.telegram.known` on test-mac),
+the Linux leg three times (#954), `verify:full`, and every dashboard page in
+light and dark at 390 and 1280. After the tag: site publish, the relay deploy,
+the ChatGPT listing re-pin and resubmission (#732), and the Grok reviewer
+engine upgrade.
+
 ## Embedding Personal pre-filter (#939; implementation, 2026-11-07)
 
 Implement a source-neutral Personal-only first pass over each item's own stored
