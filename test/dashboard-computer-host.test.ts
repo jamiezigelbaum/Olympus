@@ -555,7 +555,9 @@ describe('the panel on the computer', () => {
   });
 
   test('Home says it is up to date when nothing needs the owner and nothing runs', async () => {
-    const page = await onHost(COMPUTER, model({ sources: [TELEGRAM], progress: undefined }));
+    const calm = model({ sources: [TELEGRAM] });
+    delete calm.progress;
+    const page = await onHost(COMPUTER, calm);
     const status = page.win.document.querySelector('[data-home-status]')!;
     expect(status.getAttribute('data-home-status')).toBe('ok');
     expect(status.textContent).toContain('Olympus is up to date');

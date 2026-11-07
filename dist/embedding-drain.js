@@ -40294,6 +40294,19 @@ var init_vocabulary = __esm(() => {
     loading: "Checking your computer…",
     loadingSlow: "Loading. This can take a minute while Olympus is importing.",
     upToDate: "Olympus is up to date.",
+    home: {
+      upToDate: "Olympus is up to date",
+      catchingUp: "Olympus is catching up",
+      needsYouOne: "1 thing needs you",
+      needsYouMany: "{n} things need you",
+      sourcesOne: "1 source",
+      sourcesMany: "{n} sources",
+      itemsOne: "1 item",
+      itemsMany: "{n} items",
+      checked: "checked {when}",
+      allSources: "All sources",
+      progress: "In progress"
+    },
     needsYou: "Needs you",
     sources: "Sources",
     sourcesLocal: "On your computer",
@@ -44311,10 +44324,7 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     } else if (typeof fix.archiveFocus === "string" && fix.archiveFocus) {
       action = () => focusArchive(String(fix.archiveFocus));
     } else if (fix.archiveModels === true) {
-      action = () => {
-        state.open.models = true;
-        render("summary:models");
-      };
+      action = () => openModels(() => render("summary:models"));
     } else if (picker && picker.handles(fix)) {
       action = () => {
         supersede();
@@ -45126,10 +45136,7 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     const level = model === "ready" || model === "off" ? model : "waiting";
     add(block, el("p", "muted", A.heldWhy[level]));
     if (level !== "ready") {
-      add(block, add(el("div", "archive-actions"), button(A.setUpPrivateModel, "archive-models:" + archive.id, () => {
-        state.open.models = true;
-        render("summary:models");
-      }, "plain")));
+      add(block, add(el("div", "archive-actions"), button(A.setUpPrivateModel, "archive-models:" + archive.id, () => openModels(() => render("summary:models")), "plain")));
     }
     return block;
   }
@@ -45772,9 +45779,59 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     }
     return card;
   }
+  function homeStatus(data2, needs, sources) {
+    const Hm = P.home;
+    const running = !!data2.progress && !progressFinished(data2.progress);
+    const title = needs > 0 ? needs === 1 ? Hm.needsYouOne : fill2(Hm.needsYouMany, { n: count(needs) }) : running ? Hm.catchingUp : Hm.upToDate;
+    const connected = sources.filter((source) => String(source && source.status) !== "Off").length;
+    const items = state.computerMeta && typeof state.computerMeta.indexedItems === "number" && isFinite(state.computerMeta.indexedItems) ? Math.max(0, Math.round(state.computerMeta.indexedItems)) : 0;
+    const facts = [connected === 1 ? Hm.sourcesOne : fill2(Hm.sourcesMany, { n: count(connected) })];
+    if (items > 0)
+      facts.push(items === 1 ? Hm.itemsOne : fill2(Hm.itemsMany, { n: count(items) }));
+    const when = ago(data2.generatedAt);
+    if (when)
+      facts.push(fill2(Hm.checked, { when }));
+    const dot2 = el("span", "dot tone-" + (needs > 0 ? "warn" : running ? "run" : "good"));
+    dot2.setAttribute("aria-hidden", "true");
+    const text3 = add(el("div", "row-text"), el("p", "home-title", title), el("p", "muted", facts.join(" · ")));
+    const card = add(el("section", "home-status"), dot2, text3);
+    card.setAttribute("data-home-status", needs > 0 ? "needs" : running ? "running" : "ok");
+    return card;
+  }
+  function openModels(inPlace) {
+    const href = onComputer() ? state.hostLinks.keys : "";
+    if (href) {
+      openLink(href);
+      return;
+    }
+    state.open.models = true;
+    inPlace();
+  }
+  function renderHome(page2, data2) {
+    const all = Array.isArray(data2.sources) ? data2.sources : [];
+    const needs = Array.isArray(data2.needsYou) ? data2.needsYou.filter((item) => !!item) : [];
+    const waiting = waitingRow() ? 1 : 0;
+    add(page2, homeStatus(data2, needs.length + waiting + (data2.blocker ? 1 : 0), all.filter((source) => !isArchivesCard(source))));
+    add(page2, staleLine());
+    add(page2, needsYouSection(needs));
+    const progress = progressSection(data2.progress, true);
+    if (progress) {
+      const head = progress.querySelector("h2");
+      if (head)
+        head.textContent = P.home.progress;
+    }
+    add(page2, progress);
+    if (data2.models && installLines(data2.models).some((entry) => entry.state !== "failed"))
+      add(page2, modelsSection(data2.models));
+    if (state.landing || state.landed)
+      state.open["home-sources"] = true;
+    const box = details("home-sources", doc.createTextNode(P.home.allSources + " (" + count(all.filter((source) => !isArchivesCard(source)).length) + ")"), "section home-sources");
+    add(box, sourcesSection(all.filter((source) => !isArchivesCard(source))), otherArchivesSection(all.filter(isArchivesCard)[0]));
+    return add(page2, box);
+  }
   function renderFull() {
     const page2 = el("main", "page");
-    add(page2, el("h1", "", P.title));
+    add(page2, el("h1", onComputer() ? "sr" : "", P.title));
     const data2 = state.data;
     add(page2, connectionBanner());
     if (state.notice) {
@@ -45788,6 +45845,8 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
       return page2;
     }
     add(page2, data2.blocker ? itemBanner(data2.blocker, "blocker", true) : null);
+    if (onComputer())
+      return renderHome(page2, data2);
     add(page2, staleLine());
     const listed = Array.isArray(data2.sources) ? data2.sources : [];
     add(page2, needsYouSection((Array.isArray(data2.needsYou) ? data2.needsYou : []).filter((item) => item && !listed.some((source) => aboutSource(item, source)))));
@@ -45901,10 +45960,7 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     fullscreen: goFullscreen,
     isDashboard,
     errorText: inlineError,
-    showModels: () => {
-      state.open.models = true;
-      closeScreen("", false, "summary:models");
-    },
+    showModels: () => openModels(() => closeScreen("", false, "summary:models")),
     directSignIn: () => state.hostKind !== "",
     setDashboard: (value) => {
       if (!isDashboard(value))
@@ -50132,6 +50188,7 @@ textarea.text{resize:vertical;min-height:4.5rem}
 .reason.error{color:var(--danger)}
 .row.need{background:var(--warn-bg);border-left:4px solid var(--warn);border-radius:8px;padding:0.75rem 1rem;margin:0.5rem 0}.row.need .row-text{font-weight:600}.row.need{grid-template-columns:minmax(0,1fr)}.row.need .dot{display:none}.btn.warnfill{background:var(--warn);border-color:var(--warn);color:#1a1205;font-weight:600}
 .btn.warnfill:hover:not(:disabled){background:var(--warn);filter:brightness(1.08)}
+.home-status{display:flex;align-items:center;gap:1rem;border:1px solid var(--line);border-radius:12px;padding:1rem 1.25rem;margin:0 0 1.5rem;background:var(--surface)}.home-status .home-title{font-weight:600;margin:0}.home-status .muted{margin:0.15rem 0 0}.home-sources>summary{cursor:pointer;color:var(--muted);padding:0.5rem 0}
 .sr{overflow:hidden;position:absolute;width:1px;height:1px;margin:-1px;padding:0;clip:rect(0 0 0 0);clip-path:inset(50%);white-space:nowrap;border:0}
 [data-mode=inline] .banner{margin-bottom:0.5rem}
 @media (max-width:30rem){.page{padding:1rem 0.75rem 1.5rem}.row.source.has-import.has-actions:not(.has-menu){grid-template-columns:minmax(0,1fr)}.row.source.has-import.has-actions:not(.has-menu)>.source-actions{grid-row:2;justify-content:flex-start}.other-archives .row.source.has-actions:not(.has-menu){grid-template-columns:minmax(0,1fr)}.other-archives .row.source.has-actions:not(.has-menu)>.source-actions{grid-row:2}.row.source.has-actions.has-menu{grid-template-columns:minmax(0,1fr) 2.25rem}.row.source.has-actions.has-menu>.source-actions{grid-column:1/-1;grid-row:2}.menu{align-items:flex-start}.menu-panel{justify-content:flex-start}}
