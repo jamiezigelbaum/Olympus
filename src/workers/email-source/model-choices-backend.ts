@@ -35,8 +35,17 @@ export interface ModelChoicesBackendOptions {
   /** The built-in model this worker runs now, by size; absent: none. */
   builtInSize: () => BuiltInSize | undefined;
   totalMemoryBytes: number;
-  /** The zkAPI profile id, and the model "Always the strongest" follows there. */
-  zkapi: { profileId: string; strongest: string };
+  /**
+   * zkAPI: questions go to the consult settings' model (consult.json, the same
+   * setting Outside help edits), never the sovereignty profile. Unset means
+   * the release's default, which is what "Always the strongest" follows.
+   */
+  zkapi?: {
+    available: () => boolean;
+    strongest: string;
+    read: () => string | undefined;
+    write: (model: string | undefined) => Promise<{ ok: true } | { ok: false; message: string }>;
+  };
   /** Venice: the model "Always the strongest" resolves to now, and the catalog of addable models. */
   venice?: {
     strongest: () => Promise<string | undefined>;
@@ -113,16 +122,16 @@ export function createModelChoicesBackend(options: ModelChoicesBackendOptions): 
   };
 
   const zkapiList = (): ModelChoiceList | undefined => {
-    const pinned = profileModel(options.zkapi.profileId);
-    if (pinned === undefined) return undefined;
-    const mode = options.policyPath ? readModelChoices(options.policyPath).zkapi : undefined;
+    const zkapi = options.zkapi;
+    if (!zkapi?.available()) return undefined;
+    const pinned = zkapi.read();
     const choices = [{ value: STRONGEST_MODEL, label: 'Always the strongest', note: 'Olympus moves to the strongest zkAPI model with each release.' }];
-    if (pinned) choices.push({ value: pinned, label: pinned, note: mode === 'strongest' ? 'stay on this one' : 'in use' });
-    if (options.zkapi.strongest !== pinned) choices.push({ value: options.zkapi.strongest, label: options.zkapi.strongest, note: 'the strongest now' });
+    if (pinned) choices.push({ value: pinned, label: pinned, note: 'in use' });
+    if (zkapi.strongest !== pinned) choices.push({ value: zkapi.strongest, label: zkapi.strongest, note: 'the strongest now' });
     return {
       provider: 'zkapi',
-      current: mode === 'strongest' ? STRONGEST_MODEL : pinned,
-      ...(mode === 'strongest' ? { strongestNow: pinned } : {}),
+      current: pinned ?? STRONGEST_MODEL,
+      ...(pinned ? {} : { strongestNow: zkapi.strongest }),
       options: choices,
     };
   };
@@ -141,6 +150,15 @@ export function createModelChoicesBackend(options: ModelChoicesBackendOptions): 
     },
 
     async save(provider, value) {
+      if (provider === 'zkapi') {
+        const zkapi = options.zkapi;
+        if (!zkapi?.available()) return { ok: false, message: 'Set up zkAPI first.' };
+        if (value !== STRONGEST_MODEL && !validModelId(value)) return { ok: false, message: 'Enter a zkAPI model name such as provider/model.' };
+        // The consult settings are read at each question, so no reload is needed.
+        const written = await zkapi.write(value === STRONGEST_MODEL ? undefined : value);
+        if (!written.ok) return written;
+        return { ok: true, status_message: value === STRONGEST_MODEL ? `Saved. zkAPI questions go to ${zkapi.strongest}, and Olympus follows the strongest from now on.` : `Saved. zkAPI questions go to ${value}.` };
+      }
       if (!options.policyPath) return { ok: false, message: 'Olympus cannot save model choices here: the policy is not a file it can write.' };
       if (provider === 'local') {
         const size = value.startsWith('builtin:') ? value.slice('builtin:'.length) as BuiltInSize : undefined;
@@ -165,12 +183,7 @@ export function createModelChoicesBackend(options: ModelChoicesBackendOptions): 
         if (!writeProfileModel(VENICE_PROFILE_ID, value)) return { ok: false, message: 'The policy changed while saving. Refresh and try again.' };
         return applied(`Saved. Venice answers with ${value}.`);
       }
-      if (profileModel(options.zkapi.profileId) === undefined) return { ok: false, message: 'Set up zkAPI first.' };
-      const model = value === STRONGEST_MODEL ? options.zkapi.strongest : value;
-      if (!validModelId(model)) return { ok: false, message: 'Enter a zkAPI model name such as provider/model.' };
-      writeModelChoices(options.policyPath, { zkapi: value === STRONGEST_MODEL ? 'strongest' : 'pinned' });
-      if (!writeProfileModel(options.zkapi.profileId, model)) return { ok: false, message: 'The policy changed while saving. Refresh and try again.' };
-      return applied(`Saved. zkAPI questions go to ${model}.`);
+      return { ok: false, message: 'Choose one of the models listed.' };
     },
 
     async addable(provider) {
@@ -182,9 +195,6 @@ export function createModelChoicesBackend(options: ModelChoicesBackendOptions): 
       if (!options.policyPath) return false;
       const state = readModelChoices(options.policyPath);
       let changed = false;
-      if (state.zkapi === 'strongest' && profileModel(options.zkapi.profileId) !== undefined && profileModel(options.zkapi.profileId) !== options.zkapi.strongest) {
-        changed = writeProfileModel(options.zkapi.profileId, options.zkapi.strongest) || changed;
-      }
       if (state.venice === 'strongest' && options.venice && profileModel(VENICE_PROFILE_ID)) {
         const strongest = await options.venice.strongest().catch(() => undefined);
         if (strongest && strongest !== profileModel(VENICE_PROFILE_ID)) changed = writeProfileModel(VENICE_PROFILE_ID, strongest) || changed;

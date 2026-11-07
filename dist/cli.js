@@ -172344,19 +172344,19 @@ function createModelChoicesBackend(options) {
     };
   };
   const zkapiList = () => {
-    const pinned = profileModel(options.zkapi.profileId);
-    if (pinned === undefined)
+    const zkapi = options.zkapi;
+    if (!zkapi?.available())
       return;
-    const mode = options.policyPath ? readModelChoices(options.policyPath).zkapi : undefined;
+    const pinned = zkapi.read();
     const choices = [{ value: STRONGEST_MODEL, label: "Always the strongest", note: "Olympus moves to the strongest zkAPI model with each release." }];
     if (pinned)
-      choices.push({ value: pinned, label: pinned, note: mode === "strongest" ? "stay on this one" : "in use" });
-    if (options.zkapi.strongest !== pinned)
-      choices.push({ value: options.zkapi.strongest, label: options.zkapi.strongest, note: "the strongest now" });
+      choices.push({ value: pinned, label: pinned, note: "in use" });
+    if (zkapi.strongest !== pinned)
+      choices.push({ value: zkapi.strongest, label: zkapi.strongest, note: "the strongest now" });
     return {
       provider: "zkapi",
-      current: mode === "strongest" ? STRONGEST_MODEL : pinned,
-      ...mode === "strongest" ? { strongestNow: pinned } : {},
+      current: pinned ?? STRONGEST_MODEL,
+      ...pinned ? {} : { strongestNow: zkapi.strongest },
       options: choices
     };
   };
@@ -172372,6 +172372,17 @@ function createModelChoicesBackend(options) {
       return { ...local ? { local } : {}, ...venice ? { venice } : {}, ...zkapi ? { zkapi } : {} };
     },
     async save(provider, value2) {
+      if (provider === "zkapi") {
+        const zkapi = options.zkapi;
+        if (!zkapi?.available())
+          return { ok: false, message: "Set up zkAPI first." };
+        if (value2 !== STRONGEST_MODEL && !validModelId(value2))
+          return { ok: false, message: "Enter a zkAPI model name such as provider/model." };
+        const written = await zkapi.write(value2 === STRONGEST_MODEL ? undefined : value2);
+        if (!written.ok)
+          return written;
+        return { ok: true, status_message: value2 === STRONGEST_MODEL ? `Saved. zkAPI questions go to ${zkapi.strongest}, and Olympus follows the strongest from now on.` : `Saved. zkAPI questions go to ${value2}.` };
+      }
       if (!options.policyPath)
         return { ok: false, message: "Olympus cannot save model choices here: the policy is not a file it can write." };
       if (provider === "local") {
@@ -172405,15 +172416,7 @@ function createModelChoicesBackend(options) {
           return { ok: false, message: "The policy changed while saving. Refresh and try again." };
         return applied(`Saved. Venice answers with ${value2}.`);
       }
-      if (profileModel(options.zkapi.profileId) === undefined)
-        return { ok: false, message: "Set up zkAPI first." };
-      const model = value2 === STRONGEST_MODEL ? options.zkapi.strongest : value2;
-      if (!validModelId(model))
-        return { ok: false, message: "Enter a zkAPI model name such as provider/model." };
-      writeModelChoices(options.policyPath, { zkapi: value2 === STRONGEST_MODEL ? "strongest" : "pinned" });
-      if (!writeProfileModel(options.zkapi.profileId, model))
-        return { ok: false, message: "The policy changed while saving. Refresh and try again." };
-      return applied(`Saved. zkAPI questions go to ${model}.`);
+      return { ok: false, message: "Choose one of the models listed." };
     },
     async addable(provider) {
       if (provider !== "venice" || !options.venice)
@@ -172425,9 +172428,6 @@ function createModelChoicesBackend(options) {
         return false;
       const state = readModelChoices(options.policyPath);
       let changed = false;
-      if (state.zkapi === "strongest" && profileModel(options.zkapi.profileId) !== undefined && profileModel(options.zkapi.profileId) !== options.zkapi.strongest) {
-        changed = writeProfileModel(options.zkapi.profileId, options.zkapi.strongest) || changed;
-      }
       if (state.venice === "strongest" && options.venice && profileModel(VENICE_PROFILE_ID)) {
         const strongest = await options.venice.strongest().catch(() => {
           return;
@@ -217831,7 +217831,19 @@ async function main() {
     })(),
     builtInSize: () => workerBuiltInModel?.model.spec.sizeClass,
     totalMemoryBytes: totalmem4(),
-    zkapi: { profileId: "zkapi-consult", strongest: CONSULT_CHATGPT_FRONTIER_MODEL_DEFAULT },
+    zkapi: {
+      available: () => sovereigntyEngine.config.modelProfiles["zkapi-consult"] !== undefined,
+      strongest: CONSULT_CHATGPT_FRONTIER_MODEL_DEFAULT,
+      read: () => {
+        const read = readConsultSettings3();
+        return read.state === "valid" ? read.settings.chatgptFrontierModel : undefined;
+      },
+      write: async (model) => {
+        if (!saveZkapiModel)
+          return { ok: false, message: "Olympus is still starting. Try again in a moment." };
+        return saveZkapiModel(model);
+      }
+    },
     venice: {
       strongest: async () => {
         const apiKey = bootModelCredentials.get(VENICE_PROFILE_ID);
@@ -217855,7 +217867,7 @@ async function main() {
     },
     requestReload: () => requestModelReload()
   });
-  modelChoices.refreshStrongest().catch(() => false);
+  let saveZkapiModel;
   const connectModelKey = async (provider, apiKey) => {
     if (provider === "gemini")
       await connectGeminiApiKey({ apiKey });
@@ -220553,7 +220565,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
   const sourceAnswerJobSweep = setInterval(() => sourceAnswerJobs.sweep(), 30000);
   sourceAnswerJobSweep.unref?.();
   const { PrivateAnswerJobs: PrivateAnswerJobs2, createPrivateAnswerHandler: createPrivateAnswerHandler2, withPrivateAnswerRoute: withPrivateAnswerRoute2 } = await Promise.resolve().then(() => (init_private_answer_jobs(), exports_private_answer_jobs));
-  const { readConsultSettings: readConsultSettings2, DEFAULT_CONSULT_SETTINGS: DEFAULT_CONSULT_SETTINGS2, consultStandardBinding: consultStandardBinding2 } = await Promise.resolve().then(() => (init_consult_settings(), exports_consult_settings));
+  const { readConsultSettings: readConsultSettings3, DEFAULT_CONSULT_SETTINGS: DEFAULT_CONSULT_SETTINGS2, consultStandardBinding: consultStandardBinding2 } = await Promise.resolve().then(() => (init_consult_settings(), exports_consult_settings));
   const { PrivateQuestionJobs: PrivateQuestionJobs2 } = await Promise.resolve().then(() => (init_private_question_jobs(), exports_private_question_jobs));
   const { consultAskLevelFromSettings: consultAskLevelFromSettings2, consultAskLevelOrSaved: consultAskLevelOrSaved2 } = await Promise.resolve().then(() => (init_consult_ask(), exports_consult_ask));
   const { createBuiltInPrivateAnswerModel: createBuiltInPrivateAnswerModel2, embeddingPanelRelevance: embeddingPanelRelevance2 } = await Promise.resolve().then(() => (init_private_answer_model(), exports_private_answer_model));
@@ -220583,7 +220595,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
   });
   let askAnonymouslyNow;
   const localAnonymousAsk = (input) => {
-    return askWithAnonymousInbox({ ...input, level: consultAskLevelOrSaved2(input.level, readConsultSettings2()) }, {
+    return askWithAnonymousInbox({ ...input, level: consultAskLevelOrSaved2(input.level, readConsultSettings3()) }, {
       store: waitingQuestionStore,
       connectionId: "@local:You",
       isActive: connectionActive,
@@ -220723,7 +220735,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
       stillAuthorized: input.stillAuthorized
     }, { deliveredToPanel: true, store: waitingQuestionStore, connectionId: "@local:ChatGPT", ask: askAnonymouslyNow }) : Promise.resolve({ ok: false, code: "transport_unavailable", message: "Anonymous answers are not set up on this computer." }),
     choice: () => {
-      const read = readConsultSettings2();
+      const read = readConsultSettings3();
       const settings = read.state === "valid" ? read.settings : DEFAULT_CONSULT_SETTINGS2;
       const standard = consultStandardBinding2(settings);
       return { level: consultAskLevelFromSettings2(settings.level), cleanup: standard.mode, customInstruction: standard.mode === "custom" };
@@ -220751,7 +220763,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     };
     const memory = defaultConsultMemoryProbe2();
     const { consultChatgptFrontierModel: consultChatgptFrontierModel2, consultChatgptModelUnavailableMessage: consultChatgptModelUnavailableMessage2 } = await Promise.resolve().then(() => (init_consult_settings(), exports_consult_settings));
-    const chatgptModel = () => consultChatgptFrontierModel2(readConsultSettings2().settings);
+    const chatgptModel = () => consultChatgptFrontierModel2(readConsultSettings3().settings);
     const transport = (model) => resolveZkapiConsultTransport2(sovereigntyEngine.config.modelProfiles, (secretRef) => resolveSecretRefValueSync(secretRef, { env: environmentWithWorkerSetupEnv() }), { env: process.env, model });
     zkapiDailyLimitNow = () => {
       const route = resolveZkapiConsultTransport2(sovereigntyEngine.config.modelProfiles, () => {
@@ -220790,7 +220802,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
       const { CONSULT_OWN_WRITER_DEFAULT_TIMEOUT_MS: CONSULT_OWN_WRITER_DEFAULT_TIMEOUT_MS2 } = await Promise.resolve().then(() => (init_consult_settings(), exports_consult_settings));
       const admittedAsk = async (input) => {
         const result = await askAnonymously2(input, {
-          settings: () => readConsultSettings2(),
+          settings: () => readConsultSettings3(),
           prepare: (writerInput, writer, level, signal) => runChosenWriter(writerInput, {
             kill: signal ?? new AbortController().signal,
             deadlineMs: writer ? writer.timeoutMs ?? CONSULT_OWN_WRITER_DEFAULT_TIMEOUT_MS2 : CONSULT_WRITER_LIMITS2.deadlineMs,
@@ -220959,9 +220971,9 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     env: process.env,
     chatgptModelProblem: () => chatgptModelProblem,
     writerCheck: async ({ onCase }) => {
-      const { readConsultSettings: readConsultSettings3, CONSULT_OWN_WRITER_DEFAULT_TIMEOUT_MS: CONSULT_OWN_WRITER_DEFAULT_TIMEOUT_MS2 } = await Promise.resolve().then(() => (init_consult_settings(), exports_consult_settings));
+      const { readConsultSettings: readConsultSettings4, CONSULT_OWN_WRITER_DEFAULT_TIMEOUT_MS: CONSULT_OWN_WRITER_DEFAULT_TIMEOUT_MS2 } = await Promise.resolve().then(() => (init_consult_settings(), exports_consult_settings));
       const { checkOwnConsultWriter: checkOwnConsultWriter2 } = await Promise.resolve().then(() => (init_consult_writer_check(), exports_consult_writer_check));
-      const read = readConsultSettings3();
+      const read = readConsultSettings4();
       const choice = read.state === "valid" ? read.settings.writer : undefined;
       if (read.state !== "valid" || !choice)
         throw new Error("Choose your model and save it first.");
@@ -220980,6 +220992,12 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
       });
     }
   });
+  saveZkapiModel = async (model) => {
+    const current2 = readConsultSettings3();
+    const revision = current2.state === "valid" ? current2.settings.revision : 0;
+    const result = await dashboardConsult.saveWriter({ revision, chatgpt_frontier_model: model ?? null });
+    return result.ok ? { ok: true } : { ok: false, message: "message" in result && typeof result.message === "string" ? result.message : "Olympus could not save the zkAPI model." };
+  };
   const engineHosted = process.env.OLYMPUS_ENGINE_HOST === "1";
   const chatgptAnswerModelAvailable = () => {
     if (!sourceAnswer || !getModelSetup().ready)
@@ -221099,7 +221117,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
   const sharedRemoteMcpOptions = {
     ...remoteAgentOptions,
     anonymousAnswersEnabled: () => {
-      const read = readConsultSettings2();
+      const read = readConsultSettings3();
       return read.state === "valid" && read.settings.enabled;
     },
     ...remoteEvidenceSearch ? { search: { evidenceSearch: remoteEvidenceSearch, answerModelAvailable: chatgptAnswerModelAvailable } } : {}
@@ -221339,6 +221357,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     exit: (code) => process.exit(code)
   });
   modelReloadInstalled = true;
+  modelChoices.refreshStrongest().catch(() => false);
   console.log(socketPath ? `Olympus private email source worker listening on owner Unix socket` : `Olympus private email source worker listening on http://${hostname2}:${port}/v1`);
   console.log(sourceIndexLaneStartupLog("Dropbox connector-store storage", dropboxConnectorStoreLane));
   console.log(sourceIndexLaneStartupLog("WhatsApp connector-store storage", whatsappConnectorStoreLane));
@@ -225138,11 +225157,11 @@ async function runZkapiTestWriter(rest) {
     flags[name] = value2;
     index += 1;
   }
-  const { readConsultSettings: readConsultSettings2, parseConsultWriterChoice: parseConsultWriterChoice2, CONSULT_OWN_WRITER_DEFAULT_TIMEOUT_MS: CONSULT_OWN_WRITER_DEFAULT_TIMEOUT_MS2 } = await Promise.resolve().then(() => (init_consult_settings(), exports_consult_settings));
+  const { readConsultSettings: readConsultSettings3, parseConsultWriterChoice: parseConsultWriterChoice2, CONSULT_OWN_WRITER_DEFAULT_TIMEOUT_MS: CONSULT_OWN_WRITER_DEFAULT_TIMEOUT_MS2 } = await Promise.resolve().then(() => (init_consult_settings(), exports_consult_settings));
   const { checkOwnConsultWriter: checkOwnConsultWriter2 } = await Promise.resolve().then(() => (init_consult_writer_check(), exports_consult_writer_check));
   const { resolveSecretRefValueSync: resolveSecretRefValueSync2 } = await Promise.resolve().then(() => (init_secret_store(), exports_secret_store));
   const { environmentWithWorkerSetupEnv: environmentWithWorkerSetupEnv2 } = await Promise.resolve().then(() => (init_worker_auth(), exports_worker_auth));
-  const read = readConsultSettings2();
+  const read = readConsultSettings3();
   const saved = read.state === "valid" ? read.settings : undefined;
   const named = flags["base-url"] !== undefined || flags.model !== undefined;
   const choice = named ? parseConsultWriterChoice2({

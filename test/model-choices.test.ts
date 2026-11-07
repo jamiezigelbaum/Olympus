@@ -20,6 +20,9 @@ function policy(preset: 'local-first' | 'private-cloud-only' = 'local-first') {
   return { path, config };
 }
 
+let zkapiSaved: string | undefined;
+afterEach(() => { zkapiSaved = undefined; });
+
 function backend(input: { path: string; config: () => SovereigntyConfig }, over: Partial<Parameters<typeof createModelChoicesBackend>[0]> = {}) {
   let reloads = 0;
   const made = createModelChoicesBackend({
@@ -28,7 +31,7 @@ function backend(input: { path: string; config: () => SovereigntyConfig }, over:
     builtInAnswers: () => true,
     builtInSize: () => 'standard',
     totalMemoryBytes: 16 * GIB,
-    zkapi: { profileId: 'zkapi-consult', strongest: 'anthropic/claude-sonnet-5.5' },
+    zkapi: { available: () => true, strongest: 'anthropic/claude-sonnet-5.5', read: () => zkapiSaved, write: async model => { zkapiSaved = model; return { ok: true }; } },
     venice: { strongest: async () => 'kimi-k4', catalog: async () => ({ 'kimi-k3': 'private', 'kimi-k4': 'private', 'glm-5': 'tee', 'grok-x': 'anonymized' }) },
     requestReload: () => { reloads += 1; return true; },
     ...over,
@@ -108,6 +111,20 @@ describe('local models', () => {
   });
 });
 
+describe('zkAPI', () => {
+  test('saves to the consult settings questions use; Always the strongest clears the pin', async () => {
+    const { made } = backend(policy());
+    expect((await made.status()).zkapi).toMatchObject({ current: 'strongest', strongestNow: 'anthropic/claude-sonnet-5.5' });
+    expect(await made.save('zkapi', 'openai/gpt-5.5')).toMatchObject({ ok: true });
+    expect(zkapiSaved).toBe('openai/gpt-5.5');
+    expect((await made.status()).zkapi!.current).toBe('openai/gpt-5.5');
+    expect(await made.save('zkapi', 'not a model')).toMatchObject({ ok: false });
+    expect(await made.save('zkapi', 'strongest')).toMatchObject({ ok: true });
+    expect(zkapiSaved).toBeUndefined();
+    expect(await backend(policy(), { zkapi: { available: () => false, strongest: 'x/y', read: () => undefined, write: async () => ({ ok: true }) } }).made.status()).not.toHaveProperty('zkapi');
+  });
+});
+
 describe('the pickers on Privacy rules', () => {
   test('list only usable models, strongest first, with Add a model in a closable dialog', async () => {
     const p = policy();
@@ -125,7 +142,7 @@ describe('the pickers on Privacy rules', () => {
     expect(local.querySelector('dialog[data-add-model="local"]')!.textContent).toContain('Look on this computer');
     expect(local.querySelector('dialog[data-add-model="local"]')!.textContent).toContain('Copy request');
     expect(renderAnswerModelPickers(await made.status(), false)).toContain('disabled');
-    expect(renderZkapiModelPicker(await made.status(), true)).toBe('');
+    expect(renderZkapiModelPicker(await made.status(), true)).toContain('Always the strongest');
   });
 
   test('the browser submits the pick, and Add a Venice model loads the private list', async () => {

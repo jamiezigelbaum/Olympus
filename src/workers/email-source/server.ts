@@ -139,7 +139,7 @@ import {
   type VeniceModelCatalogOptions,
 } from '../../core/venice-model-catalog.ts';
 import { builtInModelEnvValue, readModelChoices, resolveVeniceStrongest } from '../../core/model-choices.ts';
-import { CONSULT_CHATGPT_FRONTIER_MODEL_DEFAULT } from '../../core/consult-settings.ts';
+import { CONSULT_CHATGPT_FRONTIER_MODEL_DEFAULT, readConsultSettings } from '../../core/consult-settings.ts';
 import { createModelChoicesBackend, LOCAL_PROFILE_ID, VENICE_PROFILE_ID } from './model-choices-backend.ts';
 import {
   assertVeniceAnalystModelAllowed,
@@ -2708,8 +2708,17 @@ export async function main(): Promise<void> {
       && (() => { try { const members = sovereigntyEngine.resolveAnalystPool({ trustDomain: 'secure_local' }).members; return builtInBacksPrivateAnalyst(LOCAL_PROFILE_ID, workerBuiltInModel?.model.status().state, members, new Set(members.map(member => member.id))); } catch { return false; } })(),
     builtInSize: () => workerBuiltInModel?.model.spec.sizeClass,
     totalMemoryBytes: totalmem(),
-    // dashboard-consult.ts loads lazily; its profile id and default model are these.
-    zkapi: { profileId: 'zkapi-consult', strongest: CONSULT_CHATGPT_FRONTIER_MODEL_DEFAULT },
+    // zkAPI questions use the consult settings' model (consult.json), which
+    // Outside help also edits; the write goes through its adapter, bound late.
+    zkapi: {
+      available: () => sovereigntyEngine.config.modelProfiles['zkapi-consult'] !== undefined,
+      strongest: CONSULT_CHATGPT_FRONTIER_MODEL_DEFAULT,
+      read: () => { const read = readConsultSettings(); return read.state === 'valid' ? read.settings.chatgptFrontierModel : undefined; },
+      write: async (model) => {
+        if (!saveZkapiModel) return { ok: false as const, message: 'Olympus is still starting. Try again in a moment.' };
+        return saveZkapiModel(model);
+      },
+    },
     venice: {
       strongest: async () => {
         const apiKey = bootModelCredentials.get(VENICE_PROFILE_ID);
@@ -2730,7 +2739,8 @@ export async function main(): Promise<void> {
     },
     requestReload: () => requestModelReload(),
   });
-  void modelChoices.refreshStrongest().catch(() => false);
+  // Set once Outside help's adapter exists: the one writer of consult.json.
+  let saveZkapiModel: ((model: string | undefined) => Promise<{ ok: true } | { ok: false; message: string }>) | undefined;
   const connectModelKey = async (provider: 'gemini' | 'venice', apiKey: string): Promise<void> => {
     if (provider === 'gemini') await connectGeminiApiKey({ apiKey });
     else await connectPublicApiKeySource({ source: 'venice', apiKey });
@@ -6908,6 +6918,12 @@ export async function main(): Promise<void> {
       });
     },
   });
+  saveZkapiModel = async (model) => {
+    const current = readConsultSettings();
+    const revision = current.state === 'valid' ? current.settings.revision : 0;
+    const result = await dashboardConsult.saveWriter({ revision, chatgpt_frontier_model: model ?? null });
+    return result.ok ? { ok: true as const } : { ok: false as const, message: 'message' in result && typeof result.message === 'string' ? result.message : 'Olympus could not save the zkAPI model.' };
+  };
   const engineHosted = process.env.OLYMPUS_ENGINE_HOST === '1';
   // source_answer needs an Analyst the Mac can actually run; without one,
   // ChatGPT answers from olympus_search alone.
@@ -7325,6 +7341,8 @@ export async function main(): Promise<void> {
     exit: (code) => process.exit(code),
   });
   modelReloadInstalled = true;
+  // After the reload handler, so a newer strongest model found at boot is applied.
+  void modelChoices.refreshStrongest().catch(() => false);
 
   console.log(socketPath ? `Olympus private email source worker listening on owner Unix socket` : `Olympus private email source worker listening on http://${hostname}:${port}/v1`);
   console.log(sourceIndexLaneStartupLog('Dropbox connector-store storage', dropboxConnectorStoreLane));
