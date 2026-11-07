@@ -12,7 +12,7 @@ import { openFreshDashboard } from '../scripts/release-check/fresh-dashboard.ts'
 import type { Machine } from '../scripts/release-check/machine.ts';
 
 const REFUSAL = 'Choose this on the computer in an unlocked dashboard.';
-for (const mode of ['saves', 'loses', 'refused'] as const) test(`first-run dashboard ${mode === 'loses' ? 'rejects a choice lost on reload' : mode === 'refused' ? 'reports the dashboard\'s own refusal' : 'saves the Recommended choice through its normal form before sources'}`, async () => {
+for (const mode of ['saves', 'loses', 'refused', 'unlock'] as const) test(`first-run dashboard ${mode === 'loses' ? 'rejects a choice lost on reload' : mode === 'refused' ? 'reports the dashboard\'s own refusal' : mode === 'unlock' ? 'unlocks on this computer when asked, then saves' : 'saves the Recommended choice through its normal form before sources'}`, async () => {
   const losesSave = mode === 'loses';
   const dir = mkdtempSync(join(tmpdir(), 'fresh-dashboard-'));
   const path = join(dir, 'sovereignty.json');
@@ -28,6 +28,7 @@ for (const mode of ['saves', 'loses', 'refused'] as const) test(`first-run dashb
   };
   const host = new Window({ url: 'http://127.0.0.1:8010/' });
   const hostEvaluate = (expression: string): unknown => new Function('window', 'document', `return ${expression}`)(host, host.document);
+  let unlocked = false, unlocks = 0;
   let keysVisits = 0;
   let navigationFailures = 0;
   let loader = 0;
@@ -46,14 +47,15 @@ for (const mode of ['saves', 'loses', 'refused'] as const) test(`first-run dashb
     // Start on a different option so the driver must select Recommended explicitly.
     const other = window.document.querySelector<HTMLInputElement>('input[value="no-sensitive"]');
     if (other) other.checked = true;
-    for (const el of window.document.querySelectorAll('*')) el.getBoundingClientRect = () => new window!.DOMRect(0, 0, 100, 20);
+    // Every element lays out, including ones the controller adds later (the unlock button).
+    window.HTMLElement.prototype.getBoundingClientRect = function () { return new window!.DOMRect(0, 0, 100, 20); };
     const mount = evaluate(`(${mountDashboardController.toString()})`);
     controller = mount({ root: window.document.body, canWrite: true, signal: new window.AbortController().signal, pollIntervalMs: -1,
       navigate() {}, returnUrl: url, refresh: async () => undefined,
-      transport: { control: async (params: { action: string; choice: string }) => {
+      transport: { ...(mode === 'unlock' ? { openLocalControls: async () => { unlocks++; unlocked = true; return true; } } : {}), control: async (params: { action: string; choice: string }) => {
         calls.push(params.action);
         if (params.action !== 'save_first_run_privacy') throw new Error('unexpected control');
-        if (mode === 'refused') return { status: 403, body: { ok: false, error: { code: 'mac_dashboard_only', message: REFUSAL } } };
+        if (mode === 'refused' || (mode === 'unlock' && !unlocked)) return { status: 403, body: { ok: false, error: { code: 'mac_dashboard_only', message: REFUSAL } } };
         const saved = saveFirstRunPrivacyChoice(path, params.choice as SovereigntyPresetName);
         expect(saved.ok && saved.changed).toBe(true);
         return { status: 200, body: { ok: true } };
@@ -77,7 +79,7 @@ for (const mode of ['saves', 'loses', 'refused'] as const) test(`first-run dashb
         if (method === 'Runtime.enable') for (const id of [2, 1]) event('Runtime.executionContextCreated', { context: { id, auxData: { isDefault: true } } });
         if (method === 'Page.navigate') {
           events.push('navigate');
-          if (calls.length === 1 && keysVisits === 1 && navigationFailures === 0) {
+          if (calls.length >= 1 && keysVisits === 1 && navigationFailures === 0) {
             // The privacy save restarts the real worker; its first navigation may hit that gap.
             navigationFailures++;
             result = { errorText: 'net::ERR_CONNECTION_REFUSED' };
@@ -122,7 +124,8 @@ for (const mode of ['saves', 'loses', 'refused'] as const) test(`first-run dashb
       expect(policy()).toEqual(loadSovereigntyPreset('local-first'));
       expect(isPendingPrivacyPolicy(policy())).toBe(false);
     }
-    expect(calls).toEqual(['save_first_run_privacy']);
+    expect(calls).toEqual(mode === 'unlock' ? ['save_first_run_privacy', 'save_first_run_privacy'] : ['save_first_run_privacy']);
+    expect(unlocks).toBe(mode === 'unlock' ? 1 : 0);
     expect(keysVisits).toBeGreaterThanOrEqual(2);
     expect(navigationFailures).toBe(1);
     expect(events).not.toContain('bridge.stop');

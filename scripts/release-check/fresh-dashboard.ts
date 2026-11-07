@@ -162,7 +162,13 @@ export async function openFreshDashboard(machine: Machine, endpoint: string, tim
         await click(`document.querySelector('button[form="first-run-privacy-choice"]')`);
         // The normal form handler disables the answered choice only after the engine saves it.
         try {
-          await until(async () => !!await panel<boolean>(`!!document.querySelector('form[data-first-run-privacy] input:checked:disabled')`, Boolean), 'first-run privacy choice was not saved');
+          // A dashboard opened from the CLI link is not yet a local session: the product offers
+          // "Unlock on this computer" and resends the form after it, as a person would press it.
+          await until(async () => {
+            if (await panel<boolean>(`!!document.querySelector('form[data-first-run-privacy] input:checked:disabled')`, Boolean)) return true;
+            await panel<boolean>(`(() => { const e=document.querySelector('form[data-first-run-privacy] [data-unlock-here], [data-first-run-sheet] [data-unlock-here]'); if(!e || e.disabled || !(${visible})(e)) return false; e.click(); return true; })()`, Boolean);
+            return false;
+          }, 'first-run privacy choice was not saved');
         } catch (error) {
           // The form's status line is the product's own copy, which is what a person would read.
           // The form lives in the panel frame; the host document answers '' and must not end the search.
