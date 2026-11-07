@@ -11,7 +11,9 @@ import { CachedTierSniffer, SNIFFER_PROMPT_VERSION, snifferId, snifferCacheModel
 import { withRecordedContent } from '../src/workers/connector-store/tiered-store-set.ts';
 import { runSnifferPass } from '../src/workers/classification/sniffer-resolver.ts';
 import { classifyItemTiers, contentDigestReason, normalizedContentHash, type TierDecision } from '../src/workers/classification/tier-classifier.ts';
-import { tierSnifferServiceEnv } from '../src/workers/classification/sniffer-service.ts';
+import { TierSnifferService, tierSnifferServiceEnv } from '../src/workers/classification/sniffer-service.ts';
+import { InstalledTierClassification } from '../src/workers/classification/installed-tier-classification.ts';
+import { appendClassificationLedgerEntry } from '../src/workers/classification-ledger.ts';
 import type { SnifferLane } from '../src/workers/classification/sniffer-lane.ts';
 import type { ConnectorStoreItemCopy } from '../src/workers/connector-store/local-index.ts';
 const lane: SnifferLane = { kind: 'local', modelId: 'fixture', profileId: 'fixture', profile: {
@@ -279,12 +281,14 @@ test('sliced training uses judge ledger labels without content hashes and writes
   const writeMeta = f.ledger.writeMeta.bind(f.ledger);
   f.ledger.writeMeta = (key, value) => { if (key === 'embedding-prefilter:training-scan-v1') checkpointWrites++; writeMeta(key, value); };
   let fittingWrites: number | undefined;
+  const trainingStarted = performance.now();
   for (let tick = 0; tick < 200 && !existsSync(join(f.modelDir, 'weights.json')); tick++) {
     await f.filter.prepare(judge);
     if (fittingWrites !== undefined) expect(checkpointWrites).toBe(fittingWrites);
     if (trainingState(f).outcome === 'fitting') fittingWrites = checkpointWrites;
   }
   expect(fittingWrites).toBeDefined();
+  console.info(`[embedding-prefilter synthetic] rows=4000 personal=2000 private=2000 wall_ms=${Math.round(performance.now() - trainingStarted)} active_ms=${Math.round(trainingState(f).elapsedMs)}`);
   expect(f.filter.status()).toContain('is on');
   expect(statSync(f.modelDir).mode & 0o777).toBe(0o700);
   expect(statSync(join(f.modelDir, 'weights.json')).mode & 0o777).toBe(0o600);
@@ -868,3 +872,144 @@ test.each(['secrets', 'external secrets', 'copy'] as const)(
     expect(JSON.parse(control.readMeta('embedding-prefilter:training-v1')!)).toMatchObject({ outcome: 'failed', reason: 'ledger_or_judge_changed' });
     expect(existsSync(weights)).toBe(false);
   }, 30_000);
+
+test('production-shaped held and judged rows retain usable judge provenance and digest', async () => {
+  const f = fixture({ trained: false, memory: true, log: () => {} });
+  for (let n = 0; n < 4; n++) {
+    // Real classify -> routed held copy -> applySnifferVerdict writers, synthetic text/vectors.
+    const q = f.add(n, {}, ownText);
+    const row = f.ledger.getCurrent(subject(n))!;
+    f.ledger.recordRoutedPlacement(subject(n), { ...row, state: 'pending', decidedBy: 'default', snifferId: judge },
+      f.placementFor({ contentPending: true } as TierDecision));
+    expect(row.reasons).toContain('content:held_until_judged');
+    f.ledger.applySnifferVerdict(q, { pass: 'content', tier: n % 2 ? 'secure' : 'private',
+      reason: `content:sniffer:${judge}:${n % 2 ? 'personal_record' : 'other'}:1.00`, modelId: 'fixture' },
+    { placementFor: () => ({ copies: [{ corpusId: 'private', trustDomain: 'secure_local', trustTier: 'S4', layers: 'both' }], embedHold: false }) });
+    f.ledger.markJudged(subject(n), { engineVersion: 'fixture', snifferId: judge });
+    expect(f.ledger.getCurrent(subject(n))!.state).toBe('current');
+  }
+  await f.filter.prepare(judge);
+  expect(trainingState(f).counts).toEqual([2, 2]);
+  expect(trainingState(f).rows).toBe(4);
+  expect(trainingState(f).outcome).toBe('too_few');
+});
+
+test('scan visits another ledger within a window instead of draining a sparse first ledger', async () => {
+  let clock = 0;
+  const a = fixture({ trained: false, memory: true, monotonicNow: () => clock, log: () => {} });
+  const b = fixture({ trained: false, memory: true });
+  for (let n = 0; n < 100; n++) a.add(n);
+  trainingRow(b, 0); trainingRow(b, 1);
+  new EmbeddingPrefilter({ ledger: b.ledger, sniffer: b.sniffer, sharedWith: a.filter,
+    copyChangeMarker: () => '0', copyFor: identity => copy(Number(identity.providerItemId)) });
+  for (const ledger of [a.ledger, b.ledger]) {
+    const list = ledger.listItemWindow.bind(ledger);
+    ledger.listItemWindow = options => { clock += 50; return list(options); };
+  }
+  await a.filter.prepare(judge);
+  expect(clock).toBeLessThanOrEqual(200);
+  expect(trainingState(a).counts).toEqual([1, 1]);
+  expect(trainingState(a).rows).toBeLessThan(102);
+});
+
+test('scan stops on the exact row filling both 5000-example caps', async () => {
+  let clock = 0;
+  const f = fixture({ trained: false, memory: true, monotonicNow: () => clock, log: () => {} });
+  for (let n = 0; n < 10010; n++) trainingRow(f, n);
+  let copied = 0;
+  f.setCopy(n => { if (++copied === 10000) clock = 200; return copy(n); });
+  await f.filter.prepare(judge);
+  expect(trainingState(f).rows).toBe(10000);
+  expect(trainingState(f).counts).toEqual([5000, 5000]);
+  expect(trainingState(f).outcome).toBe('fitting');
+  expect(copied).toBe(10000);
+}, 30_000);
+
+test('training yields to judge/control work before another row and serializes overlapping slices', async () => {
+  const f = fixture({ trained: false, memory: true, log: () => {} });
+  for (let n = 0; n < 8; n++) trainingRow(f, n);
+  let pause = false;
+  f.setCopy(n => { pause = true; return copy(n); });
+  await Promise.all([f.filter.prepare(judge, () => pause), f.filter.prepare(judge, () => pause)]);
+  expect(trainingState(f).rows).toBe(1);
+  expect(trainingState(f).outcome).toBe('scanning');
+  await f.filter.prepare(judge, () => pause);
+  expect(trainingState(f).rows).toBe(1);
+  pause = false;
+  await f.filter.prepare(judge, () => pause);
+  expect(trainingState(f).rows).toBe(2);
+});
+
+test('service trains during inference waits and idle time without delaying a judge dispatch', async () => {
+  let clock = 0;
+  const f = fixture({ trained: false, monotonicNow: () => clock, log: () => {} });
+  for (let n = 0; n < 40; n++) trainingRow(f, n);
+  let copies = 0;
+  f.setCopy(n => { copies++; clock += 100; return copy(n); });
+  f.add(100);
+  const installed = new InstalledTierClassification({ env: {}, lane });
+  installed.snifferStoreForLedger = () => f.sniffer;
+  const classificationLedgerPath = join(f.modelDir, '..', 'classification.jsonl');
+  await appendClassificationLedgerEntry(classificationLedgerPath, {
+    recorded_at: new Date().toISOString(), kind: 'classifier_model_decision', what: 'Synthetic fixture approval',
+    approved_by: 'owner', status: 'complete', model_id: lane.modelId, lane: lane.kind,
+    profile_id: lane.profileId, prompt_version: SNIFFER_PROMPT_VERSION,
+  });
+  let release!: () => void;
+  const held = new Promise<void>(resolve => { release = resolve; });
+  let called = false;
+  const service = new TierSnifferService({ installed, lane,
+    stores: () => [{ dbPath: join(f.modelDir, '..', 'store.sqlite'), tierSetBinding: () => ({ ledgerPath: f.ledger.dbPath }),
+      tierLedgerPathInUse: () => f.ledger.dbPath, exportItemCopy: identity => copy(Number(identity.providerItemId)) }],
+    classificationLedgerPath, intervalMs: 60_000, maxCallsPerPass: 1, rejudgePerPass: 0,
+    model: { async complete() {
+      expect(copies).toBe(0); // Dispatch happens before any training row is read.
+      called = true;
+      await held;
+      return { text: '', modelId: lane.modelId, decisionVerdict: { tier: 'private', category: 'fixture', confidence: 1, failSafe: false } };
+    } },
+  });
+  // Use the same synthetic prefilter in the real service's scheduler and resolver.
+  (service as unknown as { embeddingPrefilters: Map<string, EmbeddingPrefilter> }).embeddingPrefilters.set(f.ledger.dbPath, f.filter);
+  const waitFor = async (ready: () => boolean) => {
+    const until = performance.now() + 3000;
+    while (!ready() && performance.now() < until) await new Promise(resolve => setTimeout(resolve, 5));
+    expect(ready()).toBe(true);
+  };
+  try {
+    service.start();
+    await waitFor(() => called && !!f.ledger.readMeta('embedding-prefilter:training-v1') && trainingState(f).rows >= 6);
+    // Several slices completed inside the one still-pending model call.
+    expect(trainingState(f).outcome).toBe('scanning');
+    release();
+    await waitFor(() => trainingState(f).outcome === 'too_few');
+    expect(trainingState(f).rows).toBe(41);
+    expect(trainingState(f).counts).toEqual([20, 20]);
+    service.stop();
+    const stoppedAt = copies;
+    await new Promise(resolve => setTimeout(resolve, 30));
+    expect(copies).toBe(stoppedAt);
+  } finally {
+    release(); service.stop();
+    await new Promise(resolve => setTimeout(resolve, 10));
+    installed.close();
+  }
+});
+
+test.each(['version', 'trainedAt'] as const)('invalid saved %s cannot clear before background preparation', async field => {
+  const f = fixture();
+  const path = join(f.modelDir, 'weights.json');
+  const saved = JSON.parse(readFileSync(path, 'utf8'));
+  saved[field] = field === 'version' ? 'invalid' : null;
+  writeFileSync(path, JSON.stringify(saved));
+  const filter = f.make();
+  f.add(1);
+  let calls = 0;
+  await runSnifferPass({ targets: [{ ledger: f.ledger, sniffer: f.sniffer, embeddingPrefilter: filter }], lane,
+    trainingReady: () => {}, // The idle callback has not run yet.
+    model: { async complete() { calls++; return { text: '', modelId: lane.modelId,
+      decisionVerdict: { tier: 'private', category: 'fixture', confidence: 1, failSafe: false } }; } },
+  });
+  expect(calls).toBe(1);
+  expect(f.ledger.getCurrent(subject(1))!.contentTier).toBe('secure');
+});

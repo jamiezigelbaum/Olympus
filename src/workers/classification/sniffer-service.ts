@@ -291,6 +291,9 @@ export class TierSnifferService {
   private readonly budget: SnifferCallBudget;
   private timer: ReturnType<typeof setInterval> | undefined;
   private continuation: ReturnType<typeof setTimeout> | undefined;
+  private trainingTimer: ReturnType<typeof setTimeout> | undefined;
+  private trainingJob: Promise<void> | undefined;
+  private trainingJudge: string | undefined;
   /** When the last tick ended (performance.now()), for the idle time before the next one. */
   private lastTickEndedAt: number | undefined;
   private readonly moveAbort = new AbortController();
@@ -353,9 +356,44 @@ export class TierSnifferService {
     return this.runOnce();
   }
 
+  /** Use idle time and inference waits, without putting a training slice ahead of a call. */
+  private scheduleTraining(judge: string, delay = 0): void {
+    this.trainingJudge = judge;
+    if (this.stopped || !this.timer || this.trainingTimer || this.trainingJob) return;
+    const filters = [...new Set([...this.embeddingPrefilters.values()].map(filter => filter.trainingOwner))];
+    if (!filters.length) return;
+    this.trainingTimer = setTimeout(() => {
+      this.trainingTimer = undefined;
+      const shouldYield = () => this.stopped || this.trainingJudge !== judge || this.yieldNow();
+      const job = (async () => {
+        for (const filter of filters) {
+          if (shouldYield()) break;
+          await filter.prepare(judge, shouldYield);
+        }
+      })();
+      this.trainingJob = job;
+      void job.catch(() => { /* Preparation retains its content-free failure/retry record. */ }).finally(() => {
+        this.trainingJob = undefined;
+        if (this.stopped) { if (!this.running) this.closeLedgers(); return; }
+        if (this.trainingJudge !== judge) return;
+        // Active slices get the next event-loop turn; finished attempts only poll
+        // for the existing retry deadline/new-verdict trigger once per second.
+        this.scheduleTraining(judge, !this.yieldNow() && filters.some(filter => filter.trainingPending) ? 0 : 1000);
+      });
+    }, delay);
+    this.trainingTimer.unref?.();
+  }
+
+  private pauseTraining(): void {
+    this.trainingJudge = undefined;
+    if (this.trainingTimer) clearTimeout(this.trainingTimer);
+    this.trainingTimer = undefined;
+  }
+
   /** Stop the tick. A pass in flight is aborted; its ledgers close when it ends. */
   stop(): void {
     this.stopped = true;
+    this.pauseTraining();
     this.moveAbort.abort();
     if (this.continuation) clearTimeout(this.continuation);
     this.continuation = undefined;
@@ -826,6 +864,7 @@ export class TierSnifferService {
   }
 
   private closeLedgers(): void {
+    if (this.trainingJob) return; // The yielding slice closes these after it checkpoints.
     for (const ledger of this.ledgers.values()) {
       try {
         ledger.close();
@@ -986,6 +1025,8 @@ export class TierSnifferService {
   }
 
   private async tick(signal: AbortSignal): Promise<TierSnifferTick> {
+    this.pauseTraining();
+    await this.trainingJob; // Rebind members only after the prior slice has stopped.
     const { lane } = this.options;
     // Wall time of each step around the pass, for its log line: on Sparta
     // (2026-11-06) 30 s passes came 32-134 s apart, and nothing said where
@@ -1079,6 +1120,7 @@ export class TierSnifferService {
       model: this.options.model,
       promptVersion: versions.cache,
       ...(ownerContext ? { ownerContext } : {}),
+      ...(this.timer ? { trainingReady: (judge: string) => this.scheduleTraining(judge) } : {}),
       budget: this.budget,
       maxCallsPerPass: this.options.maxCallsPerPass,
       concurrentCalls: this.options.concurrentCalls,
@@ -1096,6 +1138,7 @@ export class TierSnifferService {
         + `(${report.resolvedPersonal} Personal, ${report.resolvedPrivate} Private, ${report.failSafePrivate} fail-safe Private), `
         + `${report.cacheHits} from cache; ${report.heldLowering} lowering(s) held${report.stoppedBy ? `, stopped: ${report.stoppedBy}` : ''}; `
         + `call_ms=${Math.round(report.callMs)} mean_call_ms=${report.calls ? Math.round(report.callMs / report.calls) : 0} queue_wait_max_ms=${Math.round(report.maxQueueWaitMs)}; `
+        + `promptChars=${report.promptChars} mean_promptChars=${report.calls ? Math.round(report.promptChars / report.calls) : 0} estimatedInputTokens=${report.estimatedInputTokens} mean_estimatedInputTokens=${report.calls ? Math.round(report.estimatedInputTokens / report.calls) : 0}; `
         + `tick_ms=${Math.round(performance.now() - phaseStarted)} ${phases}${idleMs === undefined ? '' : ` idle_before=${Math.round(idleMs)}`}.`,
       );
     }

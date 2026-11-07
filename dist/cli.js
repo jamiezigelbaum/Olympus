@@ -192225,6 +192225,10 @@ class EmbeddingPrefilter {
   savedModel;
   attempt;
   training;
+  preparing;
+  get trainingPending() {
+    return this.owner.enabled() && !this.owner.audit.stopped && (this.owner.attempt?.outcome === "scanning" || this.owner.attempt?.outcome === "fitting");
+  }
   get trainingOwner() {
     return this.owner;
   }
@@ -192374,9 +192378,22 @@ class EmbeddingPrefilter {
   logTraining(attempt) {
     (this.options.log ?? console.log)(`[olympus:embedding-prefilter] rows_read=${attempt.rows} personal=${attempt.counts[0]} private=${attempt.counts[1]} outcome=${attempt.outcome}${attempt.reason ? ` reason=${attempt.reason}` : ""}${attempt.version ? ` model_version=${attempt.version}` : ""} elapsed_ms=${Math.round(attempt.elapsedMs)} next_attempt=${new Date(attempt.nextAt).toISOString()}${attempt.outcome === "too_few" ? " or_1000_new_verdicts" : ""}`);
   }
-  async prepare(judge3) {
+  async prepare(judge3, shouldYield = () => false) {
     if (this.owner !== this)
-      return this.owner.prepare(judge3);
+      return this.owner.prepare(judge3, shouldYield);
+    if (this.preparing)
+      return this.preparing;
+    if (shouldYield())
+      return;
+    const pending = this.prepareSlice(judge3, shouldYield);
+    this.preparing = pending;
+    try {
+      await pending;
+    } finally {
+      this.preparing = undefined;
+    }
+  }
+  async prepareSlice(judge3, shouldYield) {
     if (this.audit.stopped || !this.enabled()) {
       for (const member of this.members)
         member.rollback();
@@ -192438,7 +192455,7 @@ class EmbeddingPrefilter {
             throw new Error;
           return { member, scan, dirty: false, revision: member.options.ledger.readMeta(`${PREFIX3}training-revision`) ?? "0" };
         });
-        this.training = { id: attempt.id, scans, examples: [], memberIndex: 0, sampleIndex: 0, validationIndex: 0, validationRemaining: 0 };
+        this.training = { id: attempt.id, scans, scanIndex: 0, examples: [], memberIndex: 0, sampleIndex: 0, validationIndex: 0, validationRemaining: 0 };
         attempt.counts = [0, 0];
         attempt.rows = 0;
         for (const { scan } of scans) {
@@ -192454,37 +192471,41 @@ class EmbeddingPrefilter {
       if (ledgerChanged)
         run2.validationRemaining = run2.examples.length;
       let worked = false;
-      const hasTime = () => !worked || clock2() < deadline;
-      for (const entry of run2.scans) {
+      const hasTime = () => !shouldYield() && (!worked || clock2() < deadline);
+      const full = () => attempt.counts.every((count) => count >= MAX_PER_CLASS);
+      while (attempt.outcome !== "fitting" && !full() && run2.scans.some(({ scan }) => !scan.done) && hasTime()) {
+        const entry = run2.scans[run2.scanIndex];
+        run2.scanIndex = (run2.scanIndex + 1) % run2.scans.length;
         const { member, scan } = entry;
-        while (attempt.outcome !== "fitting" && !scan.done && !attempt.counts.every((count) => count >= MAX_PER_CLASS) && hasTime()) {
-          const rows = member.options.ledger.listItemWindow({ ...scan.after ? { after: scan.after } : {}, limit: 32 });
-          if (!rows.length) {
-            scan.done = true;
-            entry.dirty = true;
-            break;
-          }
-          for (const row of rows) {
-            if (!hasTime())
-              break;
-            worked = true;
-            entry.dirty = true;
-            scan.after = subjectOf(row);
-            scan.rows++;
-            attempt.rows++;
-            const index = Number(row.contentTier === "secure");
-            if (attempt.counts[index] < MAX_PER_CLASS) {
-              const example = member.trainingExample(row, judge3);
-              if (example) {
-                scan.samples.push({ subject: subjectOf(row), private: example.private });
-                attempt.counts[Number(example.private)]++;
-              }
-            }
-            await ingestionTurn();
-          }
+        if (scan.done)
+          continue;
+        const rows = member.options.ledger.listItemWindow({
+          ...scan.after ? { after: scan.after } : {},
+          limit: Math.min(32, MAX_PER_CLASS * 2 - attempt.counts[0] - attempt.counts[1])
+        });
+        if (!rows.length) {
+          scan.done = true;
+          entry.dirty = true;
+          continue;
         }
-        if (!hasTime())
-          break;
+        for (const row of rows) {
+          if (!hasTime() || full())
+            break;
+          worked = true;
+          entry.dirty = true;
+          scan.after = subjectOf(row);
+          scan.rows++;
+          attempt.rows++;
+          const index = Number(row.contentTier === "secure");
+          if (attempt.counts[index] < MAX_PER_CLASS) {
+            const example = member.trainingExample(row, judge3);
+            if (example) {
+              scan.samples.push({ subject: subjectOf(row), private: example.private });
+              attempt.counts[Number(example.private)]++;
+            }
+          }
+          await ingestionTurn();
+        }
       }
       if (attempt.outcome === "fitting" || run2.scans.every(({ scan }) => scan.done) || attempt.counts.every((count) => count >= MAX_PER_CLASS)) {
         if (attempt.counts.some((count) => count < EMBEDDING_PREFILTER_MIN_PER_CLASS))
@@ -192516,7 +192537,7 @@ class EmbeddingPrefilter {
             }
             const validationDeadline = started + TRAINING_SLICE_MS / 2;
             let checked = 0;
-            while (!run2.model && checked < run2.examples.length && clock2() < validationDeadline) {
+            while (!run2.model && checked < run2.examples.length && !shouldYield() && clock2() < validationDeadline) {
               worked = true;
               if (!run2.examples[run2.validationIndex].current(run2.validationRemaining > 0)) {
                 stage = "ledger_or_judge_changed";
@@ -192627,7 +192648,7 @@ class EmbeddingPrefilter {
     return false;
   }
   tryClear(question, judge3) {
-    if (!this.enabled() || this.audit.stopped || !this.saved || !existsSync100(this.path) || this.saved.revisions !== this.revisions() || this.saved.judge !== judge3 || question.pass !== "content")
+    if (!this.enabled() || this.audit.stopped || !this.saved || !/^[0-9a-f-]{36}$/.test(this.saved.version) || !Number.isFinite(this.saved.trainedAt) || !existsSync100(this.path) || this.saved.revisions !== this.revisions() || this.saved.judge !== judge3 || question.pass !== "content")
       return false;
     const row = this.options.ledger.getCurrent(question);
     if (!row || row.state !== "pending" || row.metadataPending || !row.contentPending || !row.contentRead || row.metadataTier !== "private" || row.contentTier !== "private" || row.metadataForced || row.decidedBy === "override" || row.decidedBy === "owner_rule" || this.options.ledger.getOverride(question) || row.reasons.some((reason2) => reason2.startsWith("metadata:owner_rule:")) || this.options.ledger.rejudgeQuestion(question) || this.options.sniffer.questionFor(question, "metadata"))
@@ -193059,8 +193080,12 @@ async function runSnifferPass(options) {
     }
     id = snifferId(options.lane, promptVersion);
   }
-  for (const filter of new Set(options.targets.flatMap((target) => target.embeddingPrefilter ? [target.embeddingPrefilter.trainingOwner] : [])))
-    await filter.prepare(id);
+  if (options.trainingReady)
+    options.trainingReady(id);
+  else
+    for (const filter of new Set(options.targets.flatMap((target) => target.embeddingPrefilter ? [target.embeddingPrefilter.trainingOwner] : []))) {
+      await filter.prepare(id, () => options.signal?.aborted === true || options.shouldYield?.() === true);
+    }
   for (const pass of ["metadata", "content"]) {
     work[pass] = work[pass].filter((item) => {
       const key2 = keyOf2(item.question);
@@ -193141,7 +193166,9 @@ async function runSnifferPass(options) {
       const callStarted = monotonicNow();
       report.calls += 1;
       report.itemsAsked += batch.length;
-      report.promptChars += SNIFFER_SYSTEM_PROMPT.length + prompt.length;
+      const promptChars = SNIFFER_SYSTEM_PROMPT.length + prompt.length;
+      report.promptChars += promptChars;
+      report.estimatedInputTokens += Math.ceil(promptChars / 4);
       let text4;
       let decisionVerdict;
       try {
@@ -193245,7 +193272,6 @@ function stopReason(options, report, maxCallsPerPass, timeUp) {
   return;
 }
 function finish(report) {
-  report.estimatedInputTokens = Math.ceil(report.promptChars / 4);
   report.estimatedOutputTokens = Math.ceil(report.responseChars / 4);
   return report;
 }
@@ -193273,6 +193299,9 @@ class TierSnifferService {
   budget;
   timer;
   continuation;
+  trainingTimer;
+  trainingJob;
+  trainingJudge;
   lastTickEndedAt;
   moveAbort = new AbortController;
   moving;
@@ -193328,8 +193357,47 @@ class TierSnifferService {
       return { state: "skipped_running" };
     return this.runOnce();
   }
+  scheduleTraining(judge3, delay2 = 0) {
+    this.trainingJudge = judge3;
+    if (this.stopped || !this.timer || this.trainingTimer || this.trainingJob)
+      return;
+    const filters = [...new Set([...this.embeddingPrefilters.values()].map((filter) => filter.trainingOwner))];
+    if (!filters.length)
+      return;
+    this.trainingTimer = setTimeout(() => {
+      this.trainingTimer = undefined;
+      const shouldYield = () => this.stopped || this.trainingJudge !== judge3 || this.yieldNow();
+      const job = (async () => {
+        for (const filter of filters) {
+          if (shouldYield())
+            break;
+          await filter.prepare(judge3, shouldYield);
+        }
+      })();
+      this.trainingJob = job;
+      job.catch(() => {}).finally(() => {
+        this.trainingJob = undefined;
+        if (this.stopped) {
+          if (!this.running)
+            this.closeLedgers();
+          return;
+        }
+        if (this.trainingJudge !== judge3)
+          return;
+        this.scheduleTraining(judge3, !this.yieldNow() && filters.some((filter) => filter.trainingPending) ? 0 : 1000);
+      });
+    }, delay2);
+    this.trainingTimer.unref?.();
+  }
+  pauseTraining() {
+    this.trainingJudge = undefined;
+    if (this.trainingTimer)
+      clearTimeout(this.trainingTimer);
+    this.trainingTimer = undefined;
+  }
   stop() {
     this.stopped = true;
+    this.pauseTraining();
     this.moveAbort.abort();
     if (this.continuation)
       clearTimeout(this.continuation);
@@ -193735,6 +193803,8 @@ class TierSnifferService {
     return ledger;
   }
   closeLedgers() {
+    if (this.trainingJob)
+      return;
     for (const ledger of this.ledgers.values()) {
       try {
         ledger.close();
@@ -193905,6 +193975,8 @@ class TierSnifferService {
     return targets;
   }
   async tick(signal) {
+    this.pauseTraining();
+    await this.trainingJob;
     const { lane } = this.options;
     const phaseStarted = performance.now();
     const idleMs = this.lastTickEndedAt === undefined ? undefined : phaseStarted - this.lastTickEndedAt;
@@ -193981,6 +194053,7 @@ class TierSnifferService {
       model: this.options.model,
       promptVersion: versions2.cache,
       ...ownerContext ? { ownerContext } : {},
+      ...this.timer ? { trainingReady: (judge3) => this.scheduleTraining(judge3) } : {},
       budget: this.budget,
       maxCallsPerPass: this.options.maxCallsPerPass,
       concurrentCalls: this.options.concurrentCalls,
@@ -193993,7 +194066,7 @@ class TierSnifferService {
     phase("moves");
     if (report.calls > 0 || report.verdictsApplied > 0 || report.heldLowering > 0) {
       const phases = Object.entries(phaseMs).map(([name, ms]) => `${name}=${Math.round(ms)}`).join(" ");
-      this.options.log?.(`Olympus tier sniffer: ${report.calls} call(s), ${report.verdictsApplied} verdict(s) applied ` + `(${report.resolvedPersonal} Personal, ${report.resolvedPrivate} Private, ${report.failSafePrivate} fail-safe Private), ` + `${report.cacheHits} from cache; ${report.heldLowering} lowering(s) held${report.stoppedBy ? `, stopped: ${report.stoppedBy}` : ""}; ` + `call_ms=${Math.round(report.callMs)} mean_call_ms=${report.calls ? Math.round(report.callMs / report.calls) : 0} queue_wait_max_ms=${Math.round(report.maxQueueWaitMs)}; ` + `tick_ms=${Math.round(performance.now() - phaseStarted)} ${phases}${idleMs === undefined ? "" : ` idle_before=${Math.round(idleMs)}`}.`);
+      this.options.log?.(`Olympus tier sniffer: ${report.calls} call(s), ${report.verdictsApplied} verdict(s) applied ` + `(${report.resolvedPersonal} Personal, ${report.resolvedPrivate} Private, ${report.failSafePrivate} fail-safe Private), ` + `${report.cacheHits} from cache; ${report.heldLowering} lowering(s) held${report.stoppedBy ? `, stopped: ${report.stoppedBy}` : ""}; ` + `call_ms=${Math.round(report.callMs)} mean_call_ms=${report.calls ? Math.round(report.callMs / report.calls) : 0} queue_wait_max_ms=${Math.round(report.maxQueueWaitMs)}; ` + `promptChars=${report.promptChars} mean_promptChars=${report.calls ? Math.round(report.promptChars / report.calls) : 0} estimatedInputTokens=${report.estimatedInputTokens} mean_estimatedInputTokens=${report.calls ? Math.round(report.estimatedInputTokens / report.calls) : 0}; ` + `tick_ms=${Math.round(performance.now() - phaseStarted)} ${phases}${idleMs === undefined ? "" : ` idle_before=${Math.round(idleMs)}`}.`);
     }
     if (autoMoves && autoMoves.moved > 0)
       this.applyOwnerOverrides();

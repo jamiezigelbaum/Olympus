@@ -183,6 +183,8 @@ export interface SnifferPassOptions {
   /** True when an answer needs the private pool (or its breaker is open): stop before the next call. */
   shouldYield?: () => boolean;
   signal?: AbortSignal;
+  /** Service-owned idle scheduler; receives the identity after capability preparation. */
+  trainingReady?: (judge: string) => void;
 }
 
 export type SnifferPassStop = 'pass_budget' | 'daily_budget' | 'yield' | 'preempted' | 'transport_failures' | 'aborted' | 'cloud_stopped';
@@ -524,7 +526,10 @@ export async function runSnifferPass(options: SnifferPassOptions): Promise<Sniff
     id = snifferId(options.lane, promptVersion);
   }
   // Pooled filters share one training budget, regardless of the number of sources.
-  for (const filter of new Set(options.targets.flatMap(target => target.embeddingPrefilter ? [target.embeddingPrefilter.trainingOwner] : []))) await filter.prepare(id);
+  if (options.trainingReady) options.trainingReady(id);
+  else for (const filter of new Set(options.targets.flatMap(target => target.embeddingPrefilter ? [target.embeddingPrefilter.trainingOwner] : []))) {
+    await filter.prepare(id, () => options.signal?.aborted === true || options.shouldYield?.() === true);
+  }
   for (const pass of ['metadata', 'content'] as const) {
     work[pass] = work[pass].filter(item => {
       const key = keyOf(item.question);
@@ -624,7 +629,9 @@ export async function runSnifferPass(options: SnifferPassOptions): Promise<Sniff
     const callStarted = monotonicNow();
     report.calls += 1;
     report.itemsAsked += batch.length;
-    report.promptChars += SNIFFER_SYSTEM_PROMPT.length + prompt.length;
+    const promptChars = SNIFFER_SYSTEM_PROMPT.length + prompt.length;
+    report.promptChars += promptChars;
+    report.estimatedInputTokens += Math.ceil(promptChars / 4);
     let text: string;
     let decisionVerdict: SnifferModelCompletion['decisionVerdict'];
     try {
@@ -737,7 +744,6 @@ function stopReason(options: SnifferPassOptions, report: SnifferPassReport, maxC
 }
 
 function finish(report: SnifferPassReport): SnifferPassReport {
-  report.estimatedInputTokens = Math.ceil(report.promptChars / 4);
   report.estimatedOutputTokens = Math.ceil(report.responseChars / 4);
   return report;
 }

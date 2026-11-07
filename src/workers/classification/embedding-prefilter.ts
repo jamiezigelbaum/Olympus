@@ -41,7 +41,7 @@ interface TrainingScan {
 interface TrainingExample extends LogisticExample { current: (checkLedger: boolean) => boolean }
 interface TrainingRun {
   id: string; scans: Array<{ member: EmbeddingPrefilter; scan: TrainingScan; dirty: boolean; revision: string }>;
-  examples: TrainingExample[]; memberIndex: number; sampleIndex: number;
+  scanIndex: number; examples: TrainingExample[]; memberIndex: number; sampleIndex: number;
   fit?: Generator<void, LogisticModel | undefined>;
   model?: LogisticModel;
   finalValidation?: { index: number; markers: string };
@@ -100,6 +100,11 @@ export class EmbeddingPrefilter {
   private savedModel: SavedModel | undefined;
   private attempt: TrainingAttempt | undefined;
   private training: TrainingRun | undefined;
+  private preparing: Promise<void> | undefined;
+  get trainingPending(): boolean {
+    return this.owner.enabled() && !this.owner.audit.stopped
+      && (this.owner.attempt?.outcome === 'scanning' || this.owner.attempt?.outcome === 'fitting');
+  }
   get trainingOwner(): EmbeddingPrefilter { return this.owner; }
   private readonly auditState: Audit;
   private readonly path: string;
@@ -233,9 +238,17 @@ export class EmbeddingPrefilter {
     // Never log exceptions, subject ids, paths, content, vectors or judge category strings.
     (this.options.log ?? console.log)(`[olympus:embedding-prefilter] rows_read=${attempt.rows} personal=${attempt.counts[0]} private=${attempt.counts[1]} outcome=${attempt.outcome}${attempt.reason ? ` reason=${attempt.reason}` : ''}${attempt.version ? ` model_version=${attempt.version}` : ''} elapsed_ms=${Math.round(attempt.elapsedMs)} next_attempt=${new Date(attempt.nextAt).toISOString()}${attempt.outcome === 'too_few' ? ' or_1000_new_verdicts' : ''}`);
   }
-  /** Cooperative 200 ms per tick, including scan, fit and validation; one synchronous unit may overrun. */
-  async prepare(judge: string): Promise<void> {
-    if (this.owner !== this) return this.owner.prepare(judge);
+  /** Serialize tick and idle work; each slice yields and can be interrupted between units. */
+  async prepare(judge: string, shouldYield: () => boolean = () => false): Promise<void> {
+    if (this.owner !== this) return this.owner.prepare(judge, shouldYield);
+    if (this.preparing) return this.preparing;
+    if (shouldYield()) return;
+    const pending = this.prepareSlice(judge, shouldYield);
+    this.preparing = pending;
+    try { await pending; } finally { this.preparing = undefined; }
+  }
+  /** Cooperative 200 ms including scan, fit and validation; one synchronous unit may overrun. */
+  private async prepareSlice(judge: string, shouldYield: () => boolean): Promise<void> {
     if (this.audit.stopped || !this.enabled()) { for (const member of this.members) member.rollback(); return; }
     const clock = this.options.monotonicNow ?? (() => performance.now());
     const started = clock();
@@ -282,7 +295,7 @@ export class EmbeddingPrefilter {
           if (!Array.isArray(scan.samples) || scan.samples.length > MAX_PER_CLASS * 2 || !Number.isSafeInteger(scan.rows)) throw new Error();
           return { member, scan, dirty: false, revision: member.options.ledger.readMeta(`${PREFIX}training-revision`) ?? '0' };
         });
-        this.training = { id: attempt.id, scans, examples: [], memberIndex: 0, sampleIndex: 0, validationIndex: 0, validationRemaining: 0 };
+        this.training = { id: attempt.id, scans, scanIndex: 0, examples: [], memberIndex: 0, sampleIndex: 0, validationIndex: 0, validationRemaining: 0 };
         // A restart resumes the durable scan, then rehydrates references and refits in slices.
         attempt.counts = [0, 0];
         attempt.rows = 0;
@@ -297,26 +310,30 @@ export class EmbeddingPrefilter {
       run.markers = markers;
       if (ledgerChanged) run.validationRemaining = run.examples.length;
       let worked = false;
-      const hasTime = () => !worked || clock() < deadline;
-      for (const entry of run.scans) {
+      const hasTime = () => !shouldYield() && (!worked || clock() < deadline);
+      const full = () => attempt!.counts.every(count => count >= MAX_PER_CLASS);
+      // One bounded window per ledger, rotating even when a slice ends mid-window.
+      // No source-specific ranking or extra full-ledger candidate count is needed.
+      while (attempt.outcome !== 'fitting' && !full() && run.scans.some(({ scan }) => !scan.done) && hasTime()) {
+        const entry = run.scans[run.scanIndex]!;
+        run.scanIndex = (run.scanIndex + 1) % run.scans.length;
         const { member, scan } = entry;
-        while (attempt.outcome !== 'fitting' && !scan.done && !attempt.counts.every(count => count >= MAX_PER_CLASS) && hasTime()) {
-          const rows = member.options.ledger.listItemWindow({ ...(scan.after ? { after: scan.after } : {}), limit: 32 });
-          if (!rows.length) { scan.done = true; entry.dirty = true; break; }
-          for (const row of rows) {
-            if (!hasTime()) break;
-            worked = true;
-            entry.dirty = true;
-            scan.after = subjectOf(row); scan.rows++; attempt.rows++;
-            const index = Number(row.contentTier === 'secure');
-            if (attempt.counts[index]! < MAX_PER_CLASS) {
-              const example = member.trainingExample(row, judge);
-              if (example) { scan.samples.push({ subject: subjectOf(row), private: example.private }); attempt.counts[Number(example.private)]!++; }
-            }
-            await ingestionTurn();
+        if (scan.done) continue;
+        const rows = member.options.ledger.listItemWindow({ ...(scan.after ? { after: scan.after } : {}),
+          limit: Math.min(32, MAX_PER_CLASS * 2 - attempt.counts[0] - attempt.counts[1]) });
+        if (!rows.length) { scan.done = true; entry.dirty = true; continue; }
+        for (const row of rows) {
+          if (!hasTime() || full()) break;
+          worked = true;
+          entry.dirty = true;
+          scan.after = subjectOf(row); scan.rows++; attempt.rows++;
+          const index = Number(row.contentTier === 'secure');
+          if (attempt.counts[index]! < MAX_PER_CLASS) {
+            const example = member.trainingExample(row, judge);
+            if (example) { scan.samples.push({ subject: subjectOf(row), private: example.private }); attempt.counts[Number(example.private)]!++; }
           }
+          await ingestionTurn();
         }
-        if (!hasTime()) break;
       }
       if (attempt.outcome === 'fitting' || run.scans.every(({ scan }) => scan.done) || attempt.counts.every(count => count >= MAX_PER_CLASS)) {
         if (attempt.counts.some(count => count < EMBEDDING_PREFILTER_MIN_PER_CLASS)) this.finishTraining(attempt, 'too_few');
@@ -344,7 +361,7 @@ export class EmbeddingPrefilter {
             // request another full ledger cycle without rewinding or starving fit.
             const validationDeadline = started + TRAINING_SLICE_MS / 2;
             let checked = 0;
-            while (!run.model && checked < run.examples.length && clock() < validationDeadline) {
+            while (!run.model && checked < run.examples.length && !shouldYield() && clock() < validationDeadline) {
               worked = true;
               if (!run.examples[run.validationIndex]!.current(run.validationRemaining > 0)) {
                 stage = 'ledger_or_judge_changed';
@@ -449,7 +466,8 @@ export class EmbeddingPrefilter {
     return false;
   }
   tryClear(question: SnifferQuestion, judge: string): boolean {
-    if (!this.enabled() || this.audit.stopped || !this.saved || !existsSync(this.path) || this.saved.revisions !== this.revisions() || this.saved.judge !== judge || question.pass !== 'content') return false;
+    if (!this.enabled() || this.audit.stopped || !this.saved || !/^[0-9a-f-]{36}$/.test(this.saved.version)
+      || !Number.isFinite(this.saved.trainedAt) || !existsSync(this.path) || this.saved.revisions !== this.revisions() || this.saved.judge !== judge || question.pass !== 'content') return false;
     const row = this.options.ledger.getCurrent(question);
     if (!row || row.state !== 'pending' || row.metadataPending || !row.contentPending || !row.contentRead
       || row.metadataTier !== 'private' || row.contentTier !== 'private' || row.metadataForced
