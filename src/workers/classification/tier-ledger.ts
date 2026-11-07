@@ -41,7 +41,7 @@ import {
 import { TIER_LEDGER_SQLITE_STORE_ID, tierLedgerPathForStore } from './tier-ledger-path.ts';
 
 export { TIER_LEDGER_SQLITE_STORE_ID, tierLedgerPathForStore };
-export const TIER_LEDGER_SCHEMA_VERSION = 11;
+export const TIER_LEDGER_SCHEMA_VERSION = 12;
 
 /** A scrub's start: the revision it took and the item's generation then. */
 export interface SecretScrubMark {
@@ -199,7 +199,10 @@ export interface TierCopy {
   embedHold: boolean;
   /** The tier generation that made this copy current (or staged it). */
   generation: number;
-  /** The generation whose flip superseded this copy; null unless superseded. */
+  /**
+   * The generation whose flip superseded this copy. Null on other states
+   * and on an abandoned destination: hidden, but never a rollback source.
+   */
   supersededByGeneration: number | null;
   /**
    * Set when the last flip kept this copy but changed which layers it serves
@@ -900,10 +903,19 @@ export class TierLedger {
    * failing goes to the back of the queue, so it never holds the head of a
    * bounded page while moves behind it could land.
    */
-  listMoving(options: { limit?: number } = {}): TierLedgerRecord[] {
+  listMoving(options: { limit?: number; direction?: 'raise' | 'lower' } = {}): TierLedgerRecord[] {
     const limit = Math.max(1, Math.min(options.limit ?? 100, 5_000));
+    // A hide-first move also wins if it was retargeted at the same tiers.
+    const rank = (column: string) => `(CASE ${column} WHEN 'secrets' THEN 3 WHEN 'secure' THEN 2 WHEN 'private' THEN 1 ELSE 0 END)`;
+    const raising = `(${rank('target_metadata_tier')} > ${rank('metadata_tier')}
+      OR ${rank('target_content_tier')} > ${rank('content_tier')}
+      OR EXISTS (SELECT 1 FROM tier_copies c WHERE c.provider = tier_items.provider
+        AND c.account_scope = tier_items.account_scope AND c.provider_item_id = tier_items.provider_item_id
+        AND c.conversation_key = tier_items.conversation_key AND c.copy_state = 'superseded'
+        AND c.superseded_by_generation = tier_items.generation + 1))`;
     const rows = this.db.query(`
       SELECT * FROM tier_items INDEXED BY tier_items_move_order WHERE state = 'moving'
+      ${options.direction ? `AND ${options.direction === 'lower' ? 'NOT' : ''} ${raising}` : ''}
       ORDER BY move_attempts, decided_at, provider, account_scope, provider_item_id, conversation_key
       LIMIT ?
     `).all(limit);
@@ -1973,8 +1985,9 @@ export class TierLedger {
 
   /** Small durable work receipts, without exporting any store content. */
   metaEntries(prefix: string, options: { after?: string; limit?: number } = {}): Array<{ key: string; value: string }> {
-    return this.db.query('SELECT key, value FROM tier_ledger_meta WHERE key >= ? AND key < ? AND key > ? AND value <> ? ORDER BY key LIMIT ?')
-      .all(prefix, `${prefix}\uffff`, options.after ?? '', '', options.limit ?? -1) as Array<{ key: string; value: string }>;
+    return this.db.query(`SELECT key, value FROM tier_ledger_meta INDEXED BY tier_ledger_pending_meta
+      WHERE key >= ? AND key < ? AND key > ? AND value <> '' ORDER BY key LIMIT ?`)
+      .all(prefix, `${prefix}\uffff`, options.after ?? '', options.limit ?? -1) as Array<{ key: string; value: string }>;
   }
 
   /** Hold the ledger write lock across a synchronous cross-store cleanup.
@@ -1987,6 +2000,18 @@ export class TierLedger {
       if (this.getCurrent(identity)?.generation !== generation) throw new TierLedgerGenerationConflictError();
       return work();
     })();
+  }
+
+  /** Lowering batches commit their store copies before publishing receipts. */
+  withMoveBatch<T>(work: () => T, committed?: (ms: number) => void): T {
+    let bodyMs = 0;
+    const started = performance.now();
+    const result = this.db.transaction(() => {
+      const bodyStarted = performance.now();
+      try { return work(); } finally { bodyMs = performance.now() - bodyStarted; }
+    }).immediate();
+    committed?.(performance.now() - started - bodyMs);
+    return result;
   }
 
   /**
@@ -3036,9 +3061,9 @@ export class TierLedger {
   /**
    * Give up a move that never flipped (queued, or interrupted between stage
    * and flip) and leave the item exactly where it was: its current copies
-   * serve as before, any copy the move staged is forgotten (its store row,
-   * partial at best, is hidden by the item's other copy rows and rewritten by
-   * the next move there), and the row leaves `moving` at its unchanged tiers.
+   * serve as before, any copy the move staged stays hidden as an abandoned
+   * destination (superseded with no flip generation, replaceable by a later
+   * authorized move), and the row leaves `moving` at its unchanged tiers.
    * Its newest decision's flags stay recorded. No store is written.
    *
    * Refused unless the row is mid-move at the expected generation, for a move
@@ -3061,20 +3086,13 @@ export class TierLedger {
       if (copies.some((copy) => copy.state === 'superseded' && copy.supersededByGeneration === moveGeneration)) {
         throw new TierLedgerRaiseAbandonRefusedError();
       }
-      const staged = copies.filter((copy) => copy.state === 'staged');
-      if (staged.length < copies.length) {
-        this.db.query(`
-          DELETE FROM tier_copies
-          WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND copy_state = 'staged'
-        `).run(...idParams(identity));
-      } else {
-        // Nothing else marks the item routed in its stores: keep the staged
-        // rows, hidden, so the stores' rows never read as a legacy item.
-        this.db.query(`
-          UPDATE tier_copies SET copy_state = 'superseded', superseded_by_generation = NULL, updated_at = ?
-          WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND copy_state = 'staged'
-        `).run(now, ...idParams(identity));
-      }
+      // A destination may already hold committed rows. Keep its visibility
+      // marker even when the source still has a current copy: removing the
+      // last marker in that corpus would serve the abandoned rows as legacy.
+      this.db.query(`
+        UPDATE tier_copies SET copy_state = 'superseded', superseded_by_generation = NULL, updated_at = ?
+        WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND copy_state = 'staged'
+      `).run(now, ...idParams(identity));
       this.writeMeta(`tier-move-verified:${tierLedgerIdentityKey(identity)}`, '');
       const state: TierLedgerState = existing.metadataPending || existing.contentPending ? 'pending' : 'current';
       this.db.query(`
@@ -4837,7 +4855,7 @@ function tierLedgerMigrations(): SqliteMigration[] {
       },
     },
     {
-      version: TIER_LEDGER_SCHEMA_VERSION,
+      version: 11,
       name: 'incremental_copy_visibility',
       up(db) {
         db.exec(`
@@ -4867,6 +4885,15 @@ function tierLedgerMigrations(): SqliteMigration[] {
               BEGIN ${note('OLD')} ${note('NEW')} END;
           `);
         }
+      },
+    },
+    {
+      version: TIER_LEDGER_SCHEMA_VERSION,
+      name: 'pending_move_metadata',
+      up(db) {
+        // Completed obligations remain recorded as empty acknowledgements.
+        // Never rescan that growing history to find the few pending notes.
+        db.exec(`CREATE INDEX IF NOT EXISTS tier_ledger_pending_meta ON tier_ledger_meta (key) WHERE value <> '';`);
       },
     },
   ];

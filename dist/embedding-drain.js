@@ -18324,8 +18324,16 @@ class TierLedger {
   }
   listMoving(options = {}) {
     const limit = Math.max(1, Math.min(options.limit ?? 100, 5000));
+    const rank = (column) => `(CASE ${column} WHEN 'secrets' THEN 3 WHEN 'secure' THEN 2 WHEN 'private' THEN 1 ELSE 0 END)`;
+    const raising = `(${rank("target_metadata_tier")} > ${rank("metadata_tier")}
+      OR ${rank("target_content_tier")} > ${rank("content_tier")}
+      OR EXISTS (SELECT 1 FROM tier_copies c WHERE c.provider = tier_items.provider
+        AND c.account_scope = tier_items.account_scope AND c.provider_item_id = tier_items.provider_item_id
+        AND c.conversation_key = tier_items.conversation_key AND c.copy_state = 'superseded'
+        AND c.superseded_by_generation = tier_items.generation + 1))`;
     const rows = this.db.query(`
       SELECT * FROM tier_items INDEXED BY tier_items_move_order WHERE state = 'moving'
+      ${options.direction ? `AND ${options.direction === "lower" ? "NOT" : ""} ${raising}` : ""}
       ORDER BY move_attempts, decided_at, provider, account_scope, provider_item_id, conversation_key
       LIMIT ?
     `).all(limit);
@@ -19048,7 +19056,8 @@ class TierLedger {
     }).immediate();
   }
   metaEntries(prefix, options = {}) {
-    return this.db.query("SELECT key, value FROM tier_ledger_meta WHERE key >= ? AND key < ? AND key > ? AND value <> ? ORDER BY key LIMIT ?").all(prefix, `${prefix}￿`, options.after ?? "", "", options.limit ?? -1);
+    return this.db.query(`SELECT key, value FROM tier_ledger_meta INDEXED BY tier_ledger_pending_meta
+      WHERE key >= ? AND key < ? AND key > ? AND value <> '' ORDER BY key LIMIT ?`).all(prefix, `${prefix}￿`, options.after ?? "", options.limit ?? -1);
   }
   withGenerationFence(identity, generation, work) {
     return this.db.transaction(() => {
@@ -19057,6 +19066,20 @@ class TierLedger {
         throw new TierLedgerGenerationConflictError;
       return work();
     })();
+  }
+  withMoveBatch(work, committed) {
+    let bodyMs = 0;
+    const started = performance.now();
+    const result = this.db.transaction(() => {
+      const bodyStarted = performance.now();
+      try {
+        return work();
+      } finally {
+        bodyMs = performance.now() - bodyStarted;
+      }
+    }).immediate();
+    committed?.(performance.now() - started - bodyMs);
+    return result;
   }
   listRouted(options = {}) {
     const limit = Math.max(1, Math.min(options.limit ?? 500, 50000));
@@ -19771,18 +19794,10 @@ class TierLedger {
       if (copies.some((copy) => copy.state === "superseded" && copy.supersededByGeneration === moveGeneration)) {
         throw new TierLedgerRaiseAbandonRefusedError;
       }
-      const staged = copies.filter((copy) => copy.state === "staged");
-      if (staged.length < copies.length) {
-        this.db.query(`
-          DELETE FROM tier_copies
-          WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND copy_state = 'staged'
-        `).run(...idParams(identity));
-      } else {
-        this.db.query(`
-          UPDATE tier_copies SET copy_state = 'superseded', superseded_by_generation = NULL, updated_at = ?
-          WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND copy_state = 'staged'
-        `).run(now, ...idParams(identity));
-      }
+      this.db.query(`
+        UPDATE tier_copies SET copy_state = 'superseded', superseded_by_generation = NULL, updated_at = ?
+        WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND copy_state = 'staged'
+      `).run(now, ...idParams(identity));
       this.writeMeta(`tier-move-verified:${tierLedgerIdentityKey(identity)}`, "");
       const state = existing.metadataPending || existing.contentPending ? "pending" : "current";
       this.db.query(`
@@ -20953,7 +20968,7 @@ function tierLedgerMigrations() {
       }
     },
     {
-      version: TIER_LEDGER_SCHEMA_VERSION,
+      version: 11,
       name: "incremental_copy_visibility",
       up(db) {
         db.exec(`
@@ -20981,10 +20996,17 @@ function tierLedgerMigrations() {
           `);
         }
       }
+    },
+    {
+      version: TIER_LEDGER_SCHEMA_VERSION,
+      name: "pending_move_metadata",
+      up(db) {
+        db.exec(`CREATE INDEX IF NOT EXISTS tier_ledger_pending_meta ON tier_ledger_meta (key) WHERE value <> '';`);
+      }
     }
   ];
 }
-var TIER_LEDGER_SCHEMA_VERSION = 11, TIER_LEDGER_UNREAD_RELABEL_DONE = "fail_safe_unread_relabel_v1", DEFAULT_REJUDGE_SCAN_ROWS = 2000, TierLedgerGenerationConflictError, TierLedgerRaiseAbandonRefusedError, TierLedgerPurgedRollbackRefusedError, TierLedgerSecretsRollbackRefusedError, TIER_LEDGER_IDENTITY_FIELDS, TRUST_DOMAIN_RANK, STORED_NAMES_REASON = "metadata:names_from_store", STORED_NAMES_ASKED_REASON = "metadata:names_from_store:asked", TIER_CHECK = `IN ('public', 'private', 'secure', 'secrets')`;
+var TIER_LEDGER_SCHEMA_VERSION = 12, TIER_LEDGER_UNREAD_RELABEL_DONE = "fail_safe_unread_relabel_v1", DEFAULT_REJUDGE_SCAN_ROWS = 2000, TierLedgerGenerationConflictError, TierLedgerRaiseAbandonRefusedError, TierLedgerPurgedRollbackRefusedError, TierLedgerSecretsRollbackRefusedError, TIER_LEDGER_IDENTITY_FIELDS, TRUST_DOMAIN_RANK, STORED_NAMES_REASON = "metadata:names_from_store", STORED_NAMES_ASKED_REASON = "metadata:names_from_store:asked", TIER_CHECK = `IN ('public', 'private', 'secure', 'secrets')`;
 var init_tier_ledger = __esm(() => {
   init_sqlite_migrations();
   init_tier_classifier();
@@ -27351,63 +27373,109 @@ var init_local_index = __esm(() => {
           this.clearItemTextVersion(itemPk);
         this.refreshFtsForItem(itemPk);
         const chunksKept = namesOnly ? 0 : unchanged ? copy.chunks.length : 0;
-        const provider = namesOnly ? undefined : options.vectorProvider;
-        if (!provider)
-          return { chunksWritten, chunksKept, vectorsCopied: 0, vectorsNotCopiedReason: "no_provider" };
-        const minted = copy.vectorAuthorities.find((authority) => authority.modelId === provider.modelId);
-        if (!minted || minted.provider !== provider.provider || minted.backend !== provider.backend || minted.dimension !== provider.dimension || minted.epochId !== provider.epochId) {
+        const vectorStarted = performance.now();
+        try {
+          const provider = namesOnly ? undefined : options.vectorProvider;
+          if (!provider)
+            return { chunksWritten, chunksKept, vectorsCopied: 0, vectorsNotCopiedReason: "no_provider" };
+          const minted = copy.vectorAuthorities.find((authority) => authority.modelId === provider.modelId);
+          if (!minted || minted.provider !== provider.provider || minted.backend !== provider.backend || minted.dimension !== provider.dimension || minted.epochId !== provider.epochId) {
+            return {
+              chunksWritten,
+              chunksKept,
+              vectorsCopied: 0,
+              vectorsNotCopiedReason: copy.vectors.some((vector) => vector.modelId === provider.modelId) ? "identity_mismatch" : "no_current_vectors"
+            };
+          }
+          const providerEpoch = this.matchOrMintEmbeddingWriteAuthority(provider);
+          this.assertEmbeddingWriteAuthority(provider, providerEpoch);
+          const chunkPks = new Map(this.db.query(`
+          SELECT chunk_index, chunk_pk, embedding_input_hash FROM chunks WHERE item_pk = ?
+        `).all(itemPk).map((chunk) => [chunk.chunk_index, chunk]));
+          let vectorsCopied = 0;
+          let hashMismatch = false;
+          const write = this.db.query(`
+          INSERT INTO chunk_embeddings (chunk_pk, model_id, item_pk, content_hash, embedding, embedded_at)
+          VALUES (?, ?, ?, ?, ?, ?)
+          ON CONFLICT(chunk_pk, model_id) DO UPDATE SET
+            item_pk = excluded.item_pk, content_hash = excluded.content_hash,
+            embedding = excluded.embedding, embedded_at = excluded.embedded_at
+        `);
+          for (const vector of copy.vectors) {
+            if (vector.modelId !== provider.modelId)
+              continue;
+            const target = chunkPks.get(vector.chunkIndex);
+            if (!target || target.embedding_input_hash !== vector.contentHash) {
+              hashMismatch = true;
+              continue;
+            }
+            write.run(target.chunk_pk, provider.modelId, itemPk, vector.contentHash, vector.embedding, now);
+            vectorsCopied += 1;
+          }
+          if (vectorsCopied > 0)
+            this.recordEmbeddingModel(provider, now);
           return {
             chunksWritten,
             chunksKept,
-            vectorsCopied: 0,
-            vectorsNotCopiedReason: copy.vectors.some((vector) => vector.modelId === provider.modelId) ? "identity_mismatch" : "no_current_vectors"
+            vectorsCopied,
+            ...vectorsCopied === 0 ? { vectorsNotCopiedReason: hashMismatch ? "input_hash_mismatch" : "no_current_vectors" } : {}
           };
+        } finally {
+          options.vectorCopyMs?.(performance.now() - vectorStarted);
         }
-        const providerEpoch = this.matchOrMintEmbeddingWriteAuthority(provider);
-        this.assertEmbeddingWriteAuthority(provider, providerEpoch);
-        const chunkPks = new Map(this.db.query(`
-        SELECT chunk_index, chunk_pk, embedding_input_hash FROM chunks WHERE item_pk = ?
-      `).all(itemPk).map((chunk) => [chunk.chunk_index, chunk]));
-        let vectorsCopied = 0;
-        let hashMismatch = false;
-        const write = this.db.query(`
-        INSERT INTO chunk_embeddings (chunk_pk, model_id, item_pk, content_hash, embedding, embedded_at)
-        VALUES (?, ?, ?, ?, ?, ?)
-        ON CONFLICT(chunk_pk, model_id) DO UPDATE SET
-          item_pk = excluded.item_pk, content_hash = excluded.content_hash,
-          embedding = excluded.embedding, embedded_at = excluded.embedded_at
-      `);
-        for (const vector of copy.vectors) {
-          if (vector.modelId !== provider.modelId)
-            continue;
-          const target = chunkPks.get(vector.chunkIndex);
-          if (!target || target.embedding_input_hash !== vector.contentHash) {
-            hashMismatch = true;
-            continue;
-          }
-          write.run(target.chunk_pk, provider.modelId, itemPk, vector.contentHash, vector.embedding, now);
-          vectorsCopied += 1;
-        }
-        if (vectorsCopied > 0)
-          this.recordEmbeddingModel(provider, now);
-        return {
-          chunksWritten,
-          chunksKept,
-          vectorsCopied,
-          ...vectorsCopied === 0 ? { vectorsNotCopiedReason: hashMismatch ? "input_hash_mismatch" : "no_current_vectors" } : {}
-        };
       })();
-      if (options.layers !== "metadata" && this.chunkMediaColumnsPresent) {
-        for (const chunk of copy.chunks) {
-          if (!chunk.mediaPath || !chunk.mediaSha256)
-            continue;
-          if (this.trustDomain !== "secure_local" && chunk.mediaJudgment?.verdict !== "ordinary")
-            continue;
-          retainMediaCacheFile(chunk.mediaPath, chunk.mediaSha256, this.mediaHolder);
+      const settleMedia = () => {
+        if (options.layers !== "metadata" && this.chunkMediaColumnsPresent) {
+          for (const chunk of copy.chunks) {
+            if (!chunk.mediaPath || !chunk.mediaSha256)
+              continue;
+            if (this.trustDomain !== "secure_local" && chunk.mediaJudgment?.verdict !== "ordinary")
+              continue;
+            retainMediaCacheFile(chunk.mediaPath, chunk.mediaSha256, this.mediaHolder);
+          }
+        }
+      };
+      if (this.itemCopyBatchMedia)
+        this.itemCopyBatchMedia.push(settleMedia);
+      else {
+        settleMedia();
+        this.releaseUnreferencedChunkMedia();
+      }
+      return imported;
+    }
+    itemCopyBatchMedia;
+    withItemCopyBatch(work, committed) {
+      if (this.itemCopyBatchMedia) {
+        const length = this.itemCopyBatchMedia.length;
+        try {
+          return this.db.transaction(work)();
+        } catch (error) {
+          this.itemCopyBatchMedia.length = length;
+          throw error;
         }
       }
+      const media = [];
+      this.itemCopyBatchMedia = media;
+      let bodyMs = 0;
+      const started = performance.now();
+      let result;
+      try {
+        result = this.db.transaction(() => {
+          const bodyStarted = performance.now();
+          try {
+            return work();
+          } finally {
+            bodyMs = performance.now() - bodyStarted;
+          }
+        }).immediate();
+      } finally {
+        this.itemCopyBatchMedia = undefined;
+      }
+      committed?.(performance.now() - started - bodyMs);
+      for (const settle of media)
+        settle();
       this.releaseUnreferencedChunkMedia();
-      return imported;
+      return result;
     }
     async judgeUnjudgedMedia(provider, rows, assertAuthorized) {
       const judgeId = mediaJudgeId(provider);
@@ -33403,6 +33471,30 @@ import { createHash as createHash19 } from "node:crypto";
 function rowRehomeReceiptId(ledger, identity, generation) {
   return `row-rehome:${ledger.ledgerId()}:${tierLedgerIdentityKey(identity)}:${generation}`;
 }
+function emptyTierMoveTimings() {
+  return {
+    exportMs: 0,
+    stageMs: 0,
+    copyMs: 0,
+    vectorsMs: 0,
+    verifyMs: 0,
+    flipMs: 0,
+    purgeMs: 0,
+    rereadMs: 0,
+    notesMs: 0,
+    storeCommitMs: 0,
+    ledgerCommitMs: 0
+  };
+}
+function timed(timings, step, work) {
+  const started = performance.now();
+  try {
+    return work();
+  } finally {
+    if (timings)
+      timings[step] += performance.now() - started;
+  }
+}
 async function moveTieredItem(options) {
   const target = options.decision ?? options.target;
   if (target?.contentTier === "secrets" || target?.metadataTier === "secrets") {
@@ -33414,10 +33506,107 @@ async function moveTieredItem(options) {
     return moveToSecrets(options, record.generation);
   }
   const result = moveTieredItemNow(options);
-  await flushTierMoveNotes(options.set.ledger);
+  await flushTierMoveNotes(options.set.ledger, options.timings ? { timings: options.timings } : {});
   return result;
 }
+function moveTieredItemsLowering(moves, options = {}) {
+  if (!moves.length)
+    return [];
+  const set = moves[0].set;
+  if (moves.some((move) => move.set !== set))
+    throw new TierMoveRefusedError("A lowering batch belongs to one set.");
+  const timings = moves[0].timings;
+  for (const move of moves) {
+    const target = move.decision ?? move.target;
+    if (!target || target.metadataTier === "secrets" || target.contentTier === "secrets") {
+      throw new TierMoveRefusedError("Secrets cannot enter a lowering batch.");
+    }
+    for (const tier of [target.metadataTier, target.contentTier]) {
+      set.store(tier === "public" ? "public_safe" : tier === "private" ? "internal" : "secure_local", { create: true });
+    }
+  }
+  const stores = set.openStores().sort((a, b) => a.corpusId.localeCompare(b.corpusId));
+  const inStores = (index, work) => {
+    const store = stores[index];
+    return store ? store.withItemCopyBatch(() => inStores(index + 1, work), (ms) => {
+      if (timings)
+        timings.storeCommitMs += ms;
+    }) : work();
+  };
+  const staged = [];
+  set.ledger.withMoveBatch(() => {
+    for (const move of moves) {
+      if (options.shouldStop?.())
+        break;
+      try {
+        const copy = set.ledger.withMoveBatch(() => stageTieredMove(move, undefined, true));
+        staged.push({ move, copy });
+      } catch (error) {
+        staged.push({ error });
+      }
+    }
+  }, (ms) => {
+    if (timings)
+      timings.ledgerCommitMs += ms;
+  });
+  const prepared = [];
+  set.ledger.withMoveBatch(() => {
+    inStores(0, () => {
+      for (const entry of staged) {
+        if (prepared.length > 0 && options.shouldStop?.())
+          break;
+        if ("error" in entry) {
+          prepared.push(entry);
+          continue;
+        }
+        try {
+          const receipt = set.ledger.withMoveBatch(() => inStores(0, entry.copy));
+          prepared.push({ move: entry.move, receipt });
+        } catch (error) {
+          prepared.push({ error });
+        }
+      }
+    });
+    options.afterCopiesCommitted?.();
+  }, (ms) => {
+    if (timings)
+      timings.ledgerCommitMs += ms;
+  });
+  const results = [];
+  inStores(0, () => set.ledger.withMoveBatch(() => {
+    for (const entry of prepared) {
+      if ("error" in entry) {
+        results.push(entry);
+        continue;
+      }
+      entry.move.beforeFlip?.();
+      entry.move.afterVerified?.();
+      try {
+        results.push({ result: flipVerifiedMove(entry.move, entry.receipt) });
+      } catch (error) {
+        results.push({ error });
+      }
+    }
+  }, (ms) => {
+    if (timings)
+      timings.ledgerCommitMs += ms;
+  }));
+  results.forEach((result, index) => {
+    if ("result" in result)
+      timed(moves[index].timings, "rereadMs", () => oweExtractionRereads(set.ledger, moves[index].identity));
+  });
+  return results;
+}
 function moveTieredItemNow(options, repairSource) {
+  const receipt = prepareTieredMove(options, repairSource);
+  options.beforeFlip?.();
+  options.afterVerified?.();
+  return finishVerifiedMove(options, receipt);
+}
+function prepareTieredMove(options, repairSource, loweringOnly = false) {
+  return stageTieredMove(options, repairSource, loweringOnly)();
+}
+function stageTieredMove(options, repairSource, loweringOnly = false) {
   const { set, identity, decision } = options;
   const target = decision ? { metadataTier: decision.metadataTier, contentTier: decision.contentTier } : options.target;
   if (!target)
@@ -33436,11 +33625,12 @@ function moveTieredItemNow(options, repairSource) {
   const receiptKey = purgeReceiptKey(identity);
   const receiptToResume = readVerifiedMove(ledger, identity);
   if (receiptToResume) {
-    const receipt2 = receiptToResume;
-    if (receipt2.generation !== record.generation || receipt2.target.metadataTier !== target.metadataTier || receipt2.target.contentTier !== target.contentTier)
+    const receipt = receiptToResume;
+    if (receipt.generation !== record.generation || receipt.target.metadataTier !== target.metadataTier || receipt.target.contentTier !== target.contentTier)
       throw new TierLedgerGenerationConflictError;
-    const result2 = finishVerifiedMove(options, receipt2);
-    return result2;
+    if (loweringOnly && receipt.raise)
+      throw new TierMoveRefusedError("Raises cannot enter a lowering batch.");
+    return () => receipt;
   }
   const ownerOverride = !decision && record.decidedBy === "override";
   const placement = set.placementFor(decision ?? {
@@ -33462,11 +33652,13 @@ function moveTieredItemNow(options, repairSource) {
     throw new TierMoveRefusedError("Repair cannot write a lower destination.");
   }
   const raise = !!repairSource || placementIsRaise(sources, placement.copies);
+  if (loweringOnly && raise)
+    throw new TierMoveRefusedError("Raises cannot enter a lowering batch.");
   const exports = new Map;
   const exportFrom = (copy) => {
     if (!exports.has(copy.corpusId)) {
       const domain = set.domainForCorpus(copy.corpusId);
-      exports.set(copy.corpusId, domain ? set.store(domain)?.exportItemCopy(identity) : undefined);
+      exports.set(copy.corpusId, timed(options.timings, "exportMs", () => domain ? set.store(domain)?.exportItemCopy(identity) : undefined));
     }
     return exports.get(copy.corpusId);
   };
@@ -33496,139 +33688,135 @@ function moveTieredItemNow(options, repairSource) {
     const keptCopy = exportFrom(keptHere);
     if (!keptCopy || keptCopy.chunks.length === 0 || sameText(keptCopy, exportFrom(source)))
       continue;
-    if (options.replaceOwnSupersededCopy === true && keptHere.supersededByGeneration !== null) {
+    if (options.replaceOwnSupersededCopy === true) {
       replacedSuperseded[planned.corpusId] = keptCopy?.chunks.length ?? 0;
       continue;
     }
     throw new TierMoveRefusedError("The destination store keeps a superseded copy of this item; purge it (owner-approved) before moving there.");
   }
-  ledger.stageMove(identity, {
+  timed(options.timings, "stageMs", () => ledger.stageMove(identity, {
     expectedGeneration: record.generation,
     target,
     destination: placement.copies,
     hideSource: raise,
     ...placement.embedHold ? { embedHold: true } : {}
-  });
-  let destinations = [];
-  options.beforeCopy?.();
-  const receipt = ledger.withGenerationFence(identity, record.generation, () => {
-    const alreadyVerified = readVerifiedMove(ledger, identity);
-    if (alreadyVerified) {
-      if (alreadyVerified.target.metadataTier !== target.metadataTier || alreadyVerified.target.contentTier !== target.contentTier) {
+  }));
+  return () => {
+    let destinations = [];
+    options.beforeCopy?.();
+    const receipt = ledger.withGenerationFence(identity, record.generation, () => {
+      const alreadyVerified = readVerifiedMove(ledger, identity);
+      if (alreadyVerified) {
+        if (alreadyVerified.target.metadataTier !== target.metadataTier || alreadyVerified.target.contentTier !== target.contentTier) {
+          throw new TierLedgerGenerationConflictError;
+        }
+        return alreadyVerified;
+      }
+      const now = ledger.getCurrent(identity);
+      if (now.state !== "moving" || now.targetMetadataTier !== target.metadataTier || now.targetContentTier !== target.contentTier) {
         throw new TierLedgerGenerationConflictError;
       }
-      return alreadyVerified;
-    }
-    const now = ledger.getCurrent(identity);
-    if (now.state !== "moving" || now.targetMetadataTier !== target.metadataTier || now.targetContentTier !== target.contentTier) {
-      throw new TierLedgerGenerationConflictError;
-    }
-    const copyWithLockedSources = (index) => {
-      const source = sources[index];
-      if (source) {
-        const domain = set.domainForCorpus(source.corpusId);
-        const store = domain ? set.store(domain) : undefined;
-        if (!store)
-          throw new Error("Source store unavailable.");
-        return store.withItemCopyWriteFence(identity, () => copyWithLockedSources(index + 1));
-      }
-      exports.clear();
-      if (contentSource && contentDestination && trustDomainRank(contentDestination.trustDomain) < trustDomainRank(contentSource.trustDomain)) {
-        const exported = exportFrom(contentSource);
-        const evidence = decision ?? now;
-        const digest = exported && contentDigestReason(exported.chunks.map((chunk) => chunk.boundedText).join(""));
-        const receipts = evidence.reasons.filter((reason) => reason.startsWith("content:sha256:"));
-        if (!digest || receipts.length !== 1 || receipts[0] !== digest || evidence.contentPending) {
-          throw new TierMoveContentChangedError("Stored content changed before the fenced copy.");
+      const copyWithLockedSources = (index) => {
+        const source = sources[index];
+        if (source) {
+          const domain = set.domainForCorpus(source.corpusId);
+          const store = domain ? set.store(domain) : undefined;
+          if (!store)
+            throw new Error("Source store unavailable.");
+          return store.withItemCopyWriteFence(identity, () => copyWithLockedSources(index + 1));
         }
-      }
-      for (const planned of placement.copies) {
-        const kept2 = sources.find((source2) => source2.corpusId === planned.corpusId);
-        if (kept2 && layersCover(kept2.layers, planned.layers) && !(repairSource && planned.layers !== "metadata")) {
-          const keptChunks = planned.layers === "metadata" ? 0 : exportFrom(kept2)?.chunks.length ?? 0;
+        exports.clear();
+        if (contentSource && contentDestination && trustDomainRank(contentDestination.trustDomain) < trustDomainRank(contentSource.trustDomain)) {
+          const exported = exportFrom(contentSource);
+          const evidence = decision ?? now;
+          const digest = exported && contentDigestReason(exported.chunks.map((chunk) => chunk.boundedText).join(""));
+          const receipts = evidence.reasons.filter((reason) => reason.startsWith("content:sha256:"));
+          if (!digest || receipts.length !== 1 || receipts[0] !== digest || evidence.contentPending) {
+            throw new TierMoveContentChangedError("Stored content changed before the fenced copy.");
+          }
+        }
+        for (const planned of placement.copies) {
+          const kept2 = sources.find((source2) => source2.corpusId === planned.corpusId);
+          if (kept2 && layersCover(kept2.layers, planned.layers) && !(repairSource && planned.layers !== "metadata")) {
+            const keptChunks = planned.layers === "metadata" ? 0 : exportFrom(kept2)?.chunks.length ?? 0;
+            destinations.push({
+              corpusId: planned.corpusId,
+              trustDomain: planned.trustDomain,
+              layers: planned.layers,
+              relayeredOnly: true,
+              chunksWritten: 0,
+              chunksKept: keptChunks,
+              vectorsCopied: 0,
+              chunksToEmbed: 0
+            });
+            continue;
+          }
+          const wantsContent = planned.layers !== "metadata";
+          const from = (wantsContent ? contentSource : copyServingLayer(sources, "metadata")) ?? sources[0];
+          const exported = exportFrom(from);
+          if (!exported)
+            throw new Error("The source store no longer holds an active copy of the item.");
+          const payload2 = wantsContent ? exported : { ...exported, chunks: [], vectors: [], vectorAuthorities: [] };
+          const store = set.store(planned.trustDomain, { create: true });
+          store.bindTierSet(ledger);
+          const vectorIdentity = wantsContent ? (options.vectorIdentitiesFor?.(exported) ?? options.vectorIdentities)?.[planned.trustDomain] : undefined;
+          const written = timed(options.timings, "copyMs", () => store.importItemCopy(payload2, {
+            trustTier: defaultStoreTrustTier(planned.trustDomain),
+            syncConnectorId: TIER_MOVE_CONNECTOR_ID,
+            layers: planned.layers,
+            ...repairSource && wantsContent ? { sourceTextCurrent: true } : {},
+            ...vectorIdentity ? { vectorProvider: vectorIdentity } : {},
+            vectorCopyMs: (ms) => {
+              if (options.timings)
+                options.timings.vectorsMs += ms;
+            }
+          }));
           destinations.push({
             corpusId: planned.corpusId,
             trustDomain: planned.trustDomain,
             layers: planned.layers,
-            relayeredOnly: true,
-            chunksWritten: 0,
-            chunksKept: keptChunks,
-            vectorsCopied: 0,
-            chunksToEmbed: 0
+            relayeredOnly: false,
+            chunksWritten: written.chunksWritten,
+            chunksKept: written.chunksKept,
+            vectorsCopied: written.vectorsCopied,
+            chunksToEmbed: wantsContent ? Math.max(0, payload2.chunks.length - written.vectorsCopied) : 0
           });
-          continue;
         }
-        const wantsContent = planned.layers !== "metadata";
-        const from = (wantsContent ? contentSource : copyServingLayer(sources, "metadata")) ?? sources[0];
-        const exported = exportFrom(from);
-        if (!exported)
-          throw new Error("The source store no longer holds an active copy of the item.");
-        const payload2 = wantsContent ? exported : { ...exported, chunks: [], vectors: [], vectorAuthorities: [] };
-        const store = set.store(planned.trustDomain, { create: true });
-        store.bindTierSet(ledger);
-        const vectorIdentity = wantsContent ? options.vectorIdentities?.[planned.trustDomain] : undefined;
-        const written = store.importItemCopy(payload2, {
-          trustTier: defaultStoreTrustTier(planned.trustDomain),
-          syncConnectorId: TIER_MOVE_CONNECTOR_ID,
-          layers: planned.layers,
-          ...repairSource && wantsContent ? { sourceTextCurrent: true } : {},
-          ...vectorIdentity ? { vectorProvider: vectorIdentity } : {}
-        });
-        destinations.push({
-          corpusId: planned.corpusId,
-          trustDomain: planned.trustDomain,
-          layers: planned.layers,
-          relayeredOnly: false,
-          chunksWritten: written.chunksWritten,
-          chunksKept: written.chunksKept,
-          vectorsCopied: written.vectorsCopied,
-          chunksToEmbed: wantsContent ? Math.max(0, payload2.chunks.length - written.vectorsCopied) : 0
-        });
-      }
-      const flipOptions = {
-        expectedGeneration: record.generation,
-        destination: placement.copies,
-        embedHold: placement.embedHold === true,
-        ...decision ? { decidedBy: decision.decidedBy, reasons: decision.reasons, decision } : {},
-        ...ownerOverride ? { decidedBy: "override", reasons: record.reasons } : {}
+        const flipOptions = {
+          expectedGeneration: record.generation,
+          destination: placement.copies,
+          embedHold: placement.embedHold === true,
+          ...decision ? { decidedBy: decision.decidedBy, reasons: decision.reasons, decision } : {},
+          ...ownerOverride ? { decidedBy: "override", reasons: record.reasons } : {}
+        };
+        const verified = {
+          generation: record.generation,
+          target,
+          raise,
+          sources,
+          destinations,
+          ...options.embeddingLedger ? { embeddingLedger: options.embeddingLedger } : {},
+          rehomeTagged,
+          replacedSuperseded,
+          placement: placement.copies,
+          flipOptions,
+          fingerprints: timed(options.timings, "verifyMs", () => Object.fromEntries(placement.copies.map((copy) => {
+            const exported = set.store(copy.trustDomain)?.exportItemCopy(identity);
+            if (!exported)
+              throw new Error("Destination verification failed.");
+            const wanted = copy.layers === "metadata" ? undefined : exportFrom(contentSource ?? sources[0]);
+            if (wanted && (exported.chunks.length !== wanted.chunks.length || !exported.chunks.every((chunk, index2) => chunk.chunkIndex === wanted.chunks[index2].chunkIndex && chunk.boundedText === wanted.chunks[index2].boundedText)))
+              throw new Error("Destination content verification failed.");
+            return [copy.corpusId, copyFingerprint(exported, copy.layers)];
+          })))
+        };
+        ledger.writeMeta(receiptKey, JSON.stringify(verified));
+        return verified;
       };
-      const verified = {
-        generation: record.generation,
-        target,
-        raise,
-        sources,
-        destinations,
-        ...options.embeddingLedger ? { embeddingLedger: options.embeddingLedger } : {},
-        rehomeTagged,
-        replacedSuperseded,
-        placement: placement.copies,
-        flipOptions,
-        fingerprints: Object.fromEntries(placement.copies.map((copy) => {
-          const exported = set.store(copy.trustDomain)?.exportItemCopy(identity);
-          if (!exported)
-            throw new Error("Destination verification failed.");
-          const wanted = copy.layers === "metadata" ? undefined : exportFrom(contentSource ?? sources[0]);
-          if (wanted && (exported.chunks.length !== wanted.chunks.length || !exported.chunks.every((chunk, index2) => chunk.chunkIndex === wanted.chunks[index2].chunkIndex && chunk.boundedText === wanted.chunks[index2].boundedText)))
-            throw new Error("Destination content verification failed.");
-          return [copy.corpusId, copyFingerprint(exported, copy.layers)];
-        }))
-      };
-      ledger.writeMeta(receiptKey, JSON.stringify(verified));
-      return verified;
-    };
-    return copyWithLockedSources(0);
-  });
-  options.beforeFlip?.();
-  options.afterVerified?.();
-  const result = finishVerifiedMove(options, receipt);
-  return result;
-}
-function resumeVerifiedTierMove(set, identity, embeddingLedger) {
-  const receipt = readVerifiedMove(set.ledger, identity);
-  if (!receipt)
-    return false;
-  finishVerifiedMove({ set, identity, ...embeddingLedger ? { embeddingLedger } : {} }, receipt);
-  return true;
+      return copyWithLockedSources(0);
+    });
+    return receipt;
+  };
 }
 function queueMoveNote(options, receipt, result) {
   const config = receipt.embeddingLedger ?? options.embeddingLedger;
@@ -33652,21 +33840,35 @@ function queueMoveNote(options, receipt, result) {
   };
   options.set.ledger.writeMeta(`${MOVE_NOTE_PREFIX}${entryId}`, JSON.stringify({ path: config.path, entry }));
 }
-async function flushTierMoveNotes(ledger) {
-  let logged = false;
-  for (const { key: key2, value } of ledger.metaEntries(MOVE_NOTE_PREFIX)) {
-    try {
-      const note = JSON.parse(value);
-      await appendEmbeddingLedgerEntryOnce(note.path, note.entry);
-      if (ledger.readMeta(key2) === value)
-        ledger.writeMeta(key2, "");
-    } catch (error) {
-      if (!logged) {
-        const code = error?.code;
-        console.warn(`[tier-move-note] kind=note code=${typeof code === "string" && /^[A-Z0-9_]{1,32}$/.test(code) ? code : "UNKNOWN"}`);
-        logged = true;
+async function flushTierMoveNotes(ledger, options = {}) {
+  const started = performance.now();
+  try {
+    let logged = false;
+    const written = [];
+    for (const { key: key2, value } of ledger.metaEntries(MOVE_NOTE_PREFIX, { limit: options.shouldStop ? 1000 : -1 })) {
+      if (options.shouldStop?.())
+        break;
+      try {
+        const note = JSON.parse(value);
+        await appendEmbeddingLedgerEntryOnce(note.path, note.entry);
+        written.push({ key: key2, value });
+      } catch (error) {
+        if (!logged) {
+          const code = error?.code;
+          console.warn(`[tier-move-note] kind=note code=${typeof code === "string" && /^[A-Z0-9_]{1,32}$/.test(code) ? code : "UNKNOWN"}`);
+          logged = true;
+        }
       }
     }
+    if (written.length)
+      ledger.withMoveBatch(() => {
+        for (const { key: key2, value } of written)
+          if (ledger.readMeta(key2) === value)
+            ledger.writeMeta(key2, "");
+      });
+  } finally {
+    if (options.timings)
+      options.timings.notesMs += performance.now() - started;
   }
 }
 function purgeReceiptKey(identity) {
@@ -33701,7 +33903,7 @@ function copyFingerprint(copy, layers) {
 }
 function finishVerifiedMove(options, receipt) {
   const result = flipVerifiedMove(options, receipt);
-  oweExtractionRereads(options.set.ledger, options.identity);
+  timed(options.timings, "rereadMs", () => oweExtractionRereads(options.set.ledger, options.identity));
   return result;
 }
 function oweExtractionRereads(ledger, identity) {
@@ -33724,13 +33926,15 @@ function flipVerifiedMove(options, receipt) {
   if (!stableStore)
     throw new Error("Verified destination unavailable.");
   return stableStore.withItemCopyWriteFence(identity, () => {
-    for (const copy of receipt.placement) {
-      const stored = set.store(copy.trustDomain)?.exportItemCopy(identity);
-      if (!stored || copyFingerprint(stored, copy.layers) !== receipt.fingerprints[copy.corpusId]) {
-        throw new Error("Verified move destination changed; source remains held.");
+    timed(options.timings, "verifyMs", () => {
+      for (const copy of receipt.placement) {
+        const stored = set.store(copy.trustDomain)?.exportItemCopy(identity);
+        if (!stored || copyFingerprint(stored, copy.layers) !== receipt.fingerprints[copy.corpusId]) {
+          throw new Error("Verified move destination changed; source remains held.");
+        }
       }
-    }
-    return ledger.withGenerationFence(identity, receipt.generation, () => {
+    });
+    return timed(options.timings, "flipMs", () => ledger.withGenerationFence(identity, receipt.generation, () => {
       const record = ledger.getCurrent(identity);
       if (ledger.readMeta(purgeReceiptKey(identity)) !== JSON.stringify(receipt))
         throw new TierLedgerGenerationConflictError;
@@ -33758,7 +33962,7 @@ function flipVerifiedMove(options, receipt) {
           if (!store || store.tierSetBinding()?.ledgerId !== ledger.ledgerId()) {
             throw new Error("Lower store unavailable or ledger binding changed; move purge remains pending.");
           }
-          store.stripCopyContent(identity, { keepMetadata: !!metadata && trustDomainRank(copy.trustDomain) >= trustDomainRank(metadata.trustDomain) });
+          timed(options.timings, "purgeMs", () => store.stripCopyContent(identity, { keepMetadata: !!metadata && trustDomainRank(copy.trustDomain) >= trustDomainRank(metadata.trustDomain) }));
         }
       }
       if (receipt.raise && content)
@@ -33775,10 +33979,11 @@ function flipVerifiedMove(options, receipt) {
       };
       queueMoveNote(options, receipt, result);
       return result;
-    });
+    }));
   });
 }
 async function moveToSecrets(options, expectedGeneration) {
+  fullIdentity(options.identity);
   const { set, identity } = options;
   const ledger = set.ledger;
   const { record, copies } = ledger.flipToSecrets(identity, { expectedGeneration });
@@ -33855,6 +34060,8 @@ function layersCover(held, wanted) {
   return held === "both" || held === wanted;
 }
 function fullIdentity(identity) {
+  if (!identity.family || !identity.localItemId)
+    throw new TierMoveRefusedError("Secrets requires a full source identity.");
   return {
     family: identity.family,
     provider: identity.provider,
@@ -75559,7 +75766,9 @@ var DEFAULT_TIER_SNIFFER_INTERVAL_MS = 1000;
 var NOT_ANSWERING_FIRST_BACKOFF_MS = 30000;
 var NOT_ANSWERING_MAX_BACKOFF_MS = 60000;
 var MISSING_QUESTION_RECOVERY_PHASE_MS = 25;
-var DEFAULT_AUTO_MOVES_PER_PASS = 25;
+var DEFAULT_AUTO_MOVES_PER_PASS = 1000;
+var DEFAULT_LOWER_MOVE_SLICE_MS = 1000;
+var DEFAULT_LOWER_MOVE_BATCH_MS = 25;
 var DEFAULT_TIER_SNIFFER_MAX_PASS_MS = 15 * 60000;
 var EXTRACTION_ENQUEUE_GRACE_MS = 15 * 60000;
 var DEFAULT_TIER_SNIFFER_ABANDON_MS = 2 * 60000;
@@ -75580,6 +75789,9 @@ class TierSnifferService {
   lastTickEndedAt;
   moveAbort = new AbortController;
   moving;
+  moveLedgerOffsets = { raise: 0, lower: 0 };
+  movingDirection;
+  lowerMovePreempted = false;
   running = false;
   runningSinceMs = 0;
   notAnsweringUntilMs = 0;
@@ -75876,6 +76088,10 @@ class TierSnifferService {
     const leave = controlPathHeadroom.enter("tier-sniffer");
     try {
       tick = await this.tick(abort.signal);
+      const lowerMoves = await this.drainMoves("lower");
+      if (tick.state === "ran" && lowerMoves) {
+        tick.autoMoves = mergeAutoMoveReports(tick.autoMoves, lowerMoves);
+      }
     } catch (error2) {
       tick = { state: "failed", error: error2 instanceof Error ? error2.name : "unknown" };
     } finally {
@@ -76414,14 +76630,26 @@ class TierSnifferService {
       return false;
     }
   }
-  async drainMoves() {
+  async drainMoves(direction = "raise") {
     try {
       if (!this.options.autoMoves || this.stopped || !this.options.autoMoves.localEmbeddingsOnly())
         return;
-      if (!this.moving)
-        this.moving = this.runAutoMoves(this.options.autoMoves, this.moveAbort.signal).finally(() => {
+      if (this.moving && this.movingDirection !== direction) {
+        if (direction === "raise")
+          this.lowerMovePreempted = true;
+        await this.moving;
+      }
+      if (!this.moving) {
+        if (this.stopped)
+          return;
+        this.movingDirection = direction;
+        if (direction === "lower")
+          this.lowerMovePreempted = false;
+        this.moving = this.runAutoMoves(this.options.autoMoves, this.moveAbort.signal, direction).finally(() => {
           this.moving = undefined;
+          this.movingDirection = undefined;
         });
+      }
       return await this.moving;
     } catch (error2) {
       this.options.log?.(`Olympus tier sniffer: move drain failed (${error2 instanceof Error ? error2.name : "unknown"}); queued moves will retry.`);
@@ -76536,93 +76764,124 @@ class TierSnifferService {
       return false;
     }
   }
-  async runAutoMoves(options, signal) {
-    const report = { moved: 0, failed: 0, notEligible: 0 };
+  async runAutoMoves(options, signal, direction) {
+    const timings = emptyTierMoveTimings();
+    const started = performance.now();
+    const deadline = started + Math.max(0, options.lowerSliceMs ?? DEFAULT_LOWER_MOVE_SLICE_MS);
+    const shouldStop = () => signal.aborted || direction === "lower" && (performance.now() >= deadline || this.lowerMovePreempted || this.yieldNow());
+    const report = { moved: 0, failed: 0, notEligible: 0, timings };
     const staleAfterMs = Math.max(0, options.staleAfterMs ?? DEFAULT_STALE_MOVE_MS);
     const now = (this.options.now ?? (() => new Date))().getTime();
-    let budget = Math.max(0, options.maxPerPass ?? DEFAULT_AUTO_MOVES_PER_PASS);
-    for (const ledgerPath of this.ledgerPaths()) {
-      if (budget === 0 || signal.aborted)
+    let budget = Math.max(0, options.maxPerPass ?? (direction === "raise" ? 25 : DEFAULT_AUTO_MOVES_PER_PASS));
+    const paths = this.ledgerPaths();
+    const offset = this.moveLedgerOffsets[direction]++ % Math.max(1, paths.length);
+    for (const ledgerPath of [...paths.slice(offset), ...paths.slice(0, offset)]) {
+      if (budget === 0 || shouldStop())
         break;
       const set2 = tierSetForLedger(ledgerPath);
       if (!set2)
         continue;
-      const queued = set2.ledger.listMoving({ limit: budget }).filter((record3) => record3.routed && record3.targetMetadataTier !== null && record3.targetContentTier !== null && record3.targetMetadataTier !== "secrets" && record3.targetContentTier !== "secrets");
-      if (queued.length === 0)
-        continue;
+      const queued = set2.ledger.listMoving({ limit: budget, direction }).filter((record3) => record3.routed && record3.targetMetadataTier !== null && record3.targetContentTier !== null && record3.targetMetadataTier !== "secrets" && record3.targetContentTier !== "secrets");
       if (!setEmbedsWithBuiltInOnly(set2)) {
         report.notEligible += queued.length;
         continue;
       }
-      for (const record3 of queued) {
-        if (budget === 0 || signal.aborted)
-          break;
-        budget -= 1;
+      const failure = (record3, error2) => {
         const identity = recordIdentity(record3);
         const failureKey = `${ledgerPath}\x00${tierLedgerIdentityKey(identity)}\x00${record3.generation}`;
-        try {
-          if (resumeVerifiedTierMove(set2, identity, {
-            path: options.embeddingLedgerPath,
-            approvedBy: "system-automatic",
-            why: AUTO_MOVE_WHY
-          })) {
-            await flushTierMoveNotes(set2.ledger);
-            report.moved += 1;
-            this.moveFailures.delete(failureKey);
-            continue;
+        report.failed += 1;
+        const why = moveFailureName(error2);
+        report.failedBy = { ...report.failedBy, [why]: (report.failedBy?.[why] ?? 0) + 1 };
+        if (error2 instanceof TierMoveContentChangedError) {
+          if (set2.ledger.getCurrent(identity)?.state === "moving") {
+            try {
+              set2.ledger.abandonMove(identity, { expectedGeneration: record3.generation });
+            } catch {}
           }
-          const sources = set2.ledger.copies(identity).filter((copy) => copy.state === "current" || copy.state === "superseded" && copy.supersededByGeneration === record3.generation + 1);
-          const source = sources[0];
-          const exported = source ? set2.store(source.trustDomain)?.exportItemCopy(identity) : undefined;
-          if (!exported)
-            throw new Error("no current copy");
-          const contentSource = sources.find((copy) => copy.layers !== "metadata");
-          const contentCopy = contentSource && contentSource !== source ? set2.store(contentSource.trustDomain)?.exportItemCopy(identity) : exported;
-          await moveTieredItem({
+          const current2 = set2.ledger.getCurrent(identity);
+          if (current2 && current2.state !== "moving") {
+            try {
+              const classification = set2.classification();
+              if (!classification?.unavailableReason) {
+                rejudgeStoredContent(set2, current2, {
+                  ...classification,
+                  report: emptyTierRejudgeReport(),
+                  autoMoves: true
+                });
+              }
+            } catch {}
+          }
+          this.moveFailures.delete(failureKey);
+          return;
+        }
+        try {
+          set2.ledger.recordMoveFailure(identity, { expectedGeneration: record3.generation });
+        } catch {}
+        const firstFailedAt = this.moveFailures.get(failureKey) ?? now;
+        this.moveFailures.set(failureKey, firstFailedAt);
+        if (now - firstFailedAt >= staleAfterMs && this.settleStaleMove(set2, record3, report)) {
+          this.moveFailures.delete(failureKey);
+        }
+      };
+      const succeeded = (record3) => {
+        report.moved++;
+        this.moveFailures.delete(`${ledgerPath}\x00${tierLedgerIdentityKey(recordIdentity(record3))}\x00${record3.generation}`);
+      };
+      const batchSize = Math.max(1, Math.min(100, options.lowerBatchSize ?? 25));
+      for (let offset2 = 0;offset2 < queued.length && budget > 0 && !shouldStop(); ) {
+        const pending = [];
+        const batchDeadline = Math.min(deadline, performance.now() + Math.max(0, options.lowerBatchMs ?? DEFAULT_LOWER_MOVE_BATCH_MS));
+        for (let n = 0;n < (direction === "raise" ? 1 : batchSize) && offset2 < queued.length && !shouldStop(); n++) {
+          const record3 = queued[offset2++];
+          budget--;
+          const identity = recordIdentity(record3);
+          pending.push({ record: record3, move: {
             set: set2,
-            identity: { ...identity, family: exported.identity.family, localItemId: exported.identity.localItemId },
+            identity,
             target: { metadataTier: record3.targetMetadataTier, contentTier: record3.targetContentTier },
-            vectorIdentities: contentCopy ? matchingVectorIdentities(set2, contentCopy) : {},
+            vectorIdentitiesFor: (exported) => matchingVectorIdentities(set2, exported),
+            timings,
             embeddingLedger: { path: options.embeddingLedgerPath, approvedBy: "system-automatic", why: AUTO_MOVE_WHY },
             replaceOwnSupersededCopy: true,
             expectedGeneration: record3.generation
-          });
-          report.moved += 1;
-          this.moveFailures.delete(failureKey);
-        } catch (error2) {
-          report.failed += 1;
-          const why = moveFailureName(error2);
-          report.failedBy = { ...report.failedBy, [why]: (report.failedBy?.[why] ?? 0) + 1 };
-          if (error2 instanceof TierMoveContentChangedError) {
-            const current2 = set2.ledger.getCurrent(identity);
-            if (current2 && current2.state !== "moving") {
-              try {
-                const classification = set2.classification();
-                if (!classification?.unavailableReason) {
-                  rejudgeStoredContent(set2, current2, {
-                    ...classification,
-                    report: emptyTierRejudgeReport(),
-                    autoMoves: true
-                  });
-                }
-              } catch {}
+          } });
+        }
+        if (direction === "raise") {
+          for (const { record: record3, move } of pending) {
+            try {
+              await moveTieredItem(move);
+              succeeded(record3);
+            } catch (error2) {
+              failure(record3, error2);
             }
-            this.moveFailures.delete(failureKey);
-            continue;
           }
+        } else if (pending.length) {
           try {
-            set2.ledger.recordMoveFailure(identity, { expectedGeneration: record3.generation });
-          } catch {}
-          const firstFailedAt = this.moveFailures.get(failureKey) ?? now;
-          this.moveFailures.set(failureKey, firstFailedAt);
-          if (now - firstFailedAt >= staleAfterMs && this.settleStaleMove(set2, record3, report)) {
-            this.moveFailures.delete(failureKey);
+            let copied = 0;
+            const results = moveTieredItemsLowering(pending.map((entry) => entry.move), {
+              shouldStop: () => shouldStop() || copied++ > 0 && performance.now() >= batchDeadline
+            });
+            results.forEach((result, index) => {
+              if ("error" in result)
+                failure(pending[index].record, result.error);
+              else
+                succeeded(pending[index].record);
+            });
+            offset2 -= pending.length - results.length;
+            budget += pending.length - results.length;
+          } catch (error2) {
+            for (const { record: record3 } of pending)
+              failure(record3, error2);
           }
         }
+        await flushTierMoveNotes(set2.ledger, { timings, shouldStop });
+        await ingestionTurn();
       }
+      await flushTierMoveNotes(set2.ledger, { timings, shouldStop });
     }
+    report.elapsedMs = performance.now() - started;
     if (report.moved > 0 || report.failed > 0) {
-      this.options.log?.(`Olympus tier sniffer: ${report.moved} automatic tier move(s), ${report.failed} failed` + `${report.failedBy ? ` (${Object.entries(report.failedBy).map(([why, n]) => `${why} ×${n}`).join(", ")})` : ""}` + `${report.abandoned ? `, ${report.abandoned} stale move(s) given up (back where they were)` : ""}` + `${report.staleRaises ? `, ${report.staleRaises} stale raise(s) kept hidden and queued` : ""}` + `${report.retiredAbsent ? `, ${report.retiredAbsent} stale raise(s) of items no store holds forgotten` : ""}.`);
+      this.options.log?.(`Olympus tier sniffer: ${report.moved} automatic tier move(s), ${report.failed} failed` + `${report.failedBy ? ` (${Object.entries(report.failedBy).map(([why, n]) => `${why} ×${n}`).join(", ")})` : ""}` + `${report.abandoned ? `, ${report.abandoned} stale move(s) given up (back where they were)` : ""}` + `${report.staleRaises ? `, ${report.staleRaises} stale raise(s) kept hidden and queued` : ""}` + `${report.retiredAbsent ? `, ${report.retiredAbsent} stale raise(s) of items no store holds forgotten` : ""}; direction=${direction} elapsed_ms=${Math.round(report.elapsedMs)} ` + Object.entries(timings).map(([step, ms]) => `${step.replace(/[A-Z]/g, (letter) => `_${letter.toLowerCase()}`)}=${Math.round(ms)}`).join(" ") + ".");
     }
     return report;
   }
@@ -76644,6 +76903,28 @@ class TierSnifferService {
       return false;
     }
   }
+}
+function mergeAutoMoveReports(raised, lower) {
+  if (!raised)
+    return lower;
+  const merged = { ...lower };
+  for (const key2 of ["moved", "failed", "notEligible", "abandoned", "staleRaises", "retiredAbsent"]) {
+    const total = (raised[key2] ?? 0) + (lower[key2] ?? 0);
+    if (total || key2 === "moved" || key2 === "failed" || key2 === "notEligible")
+      merged[key2] = total;
+  }
+  const timings = emptyTierMoveTimings();
+  for (const key2 of Object.keys(timings)) {
+    timings[key2] = (raised.timings?.[key2] ?? 0) + (lower.timings?.[key2] ?? 0);
+  }
+  merged.timings = timings;
+  merged.elapsedMs = (raised.elapsedMs ?? 0) + (lower.elapsedMs ?? 0);
+  if (raised.failedBy || lower.failedBy) {
+    merged.failedBy = { ...raised.failedBy };
+    for (const [key2, n] of Object.entries(lower.failedBy ?? {}))
+      merged.failedBy[key2] = (merged.failedBy[key2] ?? 0) + n;
+  }
+  return merged;
 }
 function itemAbsentFromEveryStore(set2, identity) {
   for (const copy of set2.ledger.copies(identity)) {
