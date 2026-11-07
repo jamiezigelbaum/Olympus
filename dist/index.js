@@ -19098,7 +19098,7 @@ var init_tier_content_purge = __esm(() => {
 });
 // src/workers/source-index/built-in-embedding/litert-runtime.ts
 import { spawn as spawn4 } from "node:child_process";
-import { existsSync as existsSync17, statSync as statSync17 } from "node:fs";
+import { closeSync as closeSync8, constants as constants7, existsSync as existsSync17, fstatSync as fstatSync3, openSync as openSync7, readdirSync as readdirSync8, statSync as statSync17 } from "node:fs";
 import { homedir as homedir16 } from "node:os";
 import { delimiter as delimiter6, dirname as dirname30, isAbsolute as isAbsolute21, join as join37 } from "node:path";
 import { createInterface } from "node:readline";
@@ -32335,7 +32335,7 @@ init_still_image_readiness();
 // src/core/consult-settings.ts
 init_owner_config_read();
 init_secret_store();
-import { closeSync as closeSync8, constants as constants7, fstatSync as fstatSync3, openSync as openSync7, readSync } from "node:fs";
+import { closeSync as closeSync9, constants as constants8, fstatSync as fstatSync4, openSync as openSync8, readSync } from "node:fs";
 import { join as join43 } from "node:path";
 var CONSULT_SETTINGS_VERSION = 1;
 var CONSULT_SETTINGS_MAX_BYTES = 16 * 1024;
@@ -32510,7 +32510,7 @@ function readConsultSettings(location = {}) {
       return { state: "absent", settings: DEFAULT_CONSULT_SETTINGS };
     let descriptor;
     try {
-      descriptor = openSync7(path, constants7.O_RDONLY | constants7.O_NOFOLLOW | constants7.O_NONBLOCK);
+      descriptor = openSync8(path, constants8.O_RDONLY | constants8.O_NOFOLLOW | constants8.O_NONBLOCK);
     } catch (error) {
       const code = errorCode(error);
       if (code === "ENOENT" || code === "ENOTDIR")
@@ -32521,7 +32521,7 @@ function readConsultSettings(location = {}) {
     }
     try {
       __consultSettingsTestHooks.afterOpen?.(path);
-      const stats = fstatSync3(descriptor);
+      const stats = fstatSync4(descriptor);
       if (!stats.isFile())
         return invalid("not_a_regular_file");
       if ((stats.mode & 18) !== 0)
@@ -32550,7 +32550,7 @@ function readConsultSettings(location = {}) {
       }
       return parseConsultSettingsText(text3);
     } finally {
-      closeSync8(descriptor);
+      closeSync9(descriptor);
     }
   } catch {
     return invalid("unreadable");
