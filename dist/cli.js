@@ -15040,7 +15040,13 @@ class ProgressReporter {
     this.now = now ?? (() => new Date);
     this.listener = listener;
     this.lastWriteMs = 0;
+    let previouslyReady = false;
+    try {
+      const previous = JSON.parse(readFileSync21(statusPath, "utf8"));
+      previouslyReady = previous.modelId === modelId && (previous.state === "ready" || previous.previouslyReady === true);
+    } catch {}
     this.status = {
+      ...previouslyReady ? { previouslyReady: true } : {},
       state: "not_started",
       modelId,
       percent: 0,
@@ -15062,7 +15068,7 @@ class ProgressReporter {
   }
   set(state, label, percent = this.status.percent) {
     const { failure: _failure, ...rest } = this.status;
-    this.status = { ...rest, state, label, percent };
+    this.status = { ...rest, state, label, percent, ...state === "ready" ? { previouslyReady: true } : {} };
     this.emit(true);
   }
   touch() {
@@ -55126,6 +55132,9 @@ var init_vocabulary = __esm(() => {
       title: "Olympus is setting up on your computer…",
       disabledReason: "Available once Olympus is set up"
     },
+    restarting: {
+      title: "Olympus is restarting. Search is back in a moment."
+    },
     mac_offline: {
       title: "Your computer is offline or asleep, so answers are paused",
       lastSeen: "Last seen {when}",
@@ -62482,6 +62491,8 @@ function builtInEmbeddingDashboardState(status) {
     const bytes = failedReason === "disk_full" && status.bytesTotal > 0 ? { bytesDone: status.bytesDone, bytesTotal: status.bytesTotal } : {};
     return { kind: "built_in", state: "failed", failedReason, ...bytes };
   }
+  if (status.state === "loading" && status.previouslyReady)
+    return { kind: "built_in", state: "loading" };
   const state = status.state === "verifying" || status.state === "loading" ? "verifying" : "downloading";
   return {
     kind: "built_in",
@@ -153139,10 +153150,11 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     if (!current2 || current2 === "ready")
       return null;
     const copy = C2[current2] || C2.relay_unavailable;
-    const tone = current2 === "installing" ? "info" : "warn";
+    const starting = current2 === "installing" || current2 === "restarting";
+    const tone = starting ? "info" : "warn";
     const banner = el("section", "banner " + tone);
-    banner.setAttribute("role", current2 === "installing" ? "status" : "alert");
-    add(banner, icon(current2 === "installing" ? "…" : "!"));
+    banner.setAttribute("role", starting ? "status" : "alert");
+    add(banner, icon(starting ? "…" : "!"));
     const body = add(el("div", "banner-body"), el("p", "banner-title", copy.title));
     const conn = state.data ? state.data.connection : {};
     if (current2 === "installing" && conn.progress) {
@@ -154403,6 +154415,8 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
       ready = fill2(P.modelDownloading, { percent: percent(embedding.percent ?? 0) });
     else if (embedding.state === "verifying")
       ready = P.modelChecking;
+    else if (embedding.state === "loading")
+      ready = P.modelGettingReady;
     else if (embedding.state === "failed")
       ready = notWorking(embedding.failedReason);
     const answers = models.answers;
@@ -195234,6 +195248,8 @@ function scopeFix(definition, card) {
   };
 }
 function connectionFor(input) {
+  if (input.embedding.state === "loading")
+    return { state: "restarting" };
   if (input.embedding.state === "downloading" || input.embedding.state === "verifying") {
     const state = "installing";
     let percent = clampPercent2(input.embedding.percent ?? 0);
@@ -198176,7 +198192,7 @@ function copyDashboardViewModel(view3) {
     models: {
       embedding: {
         kind: view3.models?.embedding?.kind === "built_in" ? "built_in" : "custom",
-        ...copyInstall(view3.models?.embedding, "failed")
+        ...view3.models?.embedding?.state === "loading" ? { state: "loading" } : copyInstall(view3.models?.embedding, "failed")
       }
     },
     generatedAt: iso3(view3.generatedAt) ?? new Date().toISOString()
@@ -199059,7 +199075,7 @@ function identifier(value2) {
   return typeof value2 === "string" && /^[A-Za-z0-9._:-]{1,128}$/.test(value2) ? value2 : "";
 }
 function copyInstall(install, fallback) {
-  const state = install?.state !== undefined && INSTALL_STATES.has(install.state) ? install.state : fallback;
+  const state = install?.state !== undefined && install.state !== "loading" && INSTALL_STATES.has(install.state) ? install.state : fallback;
   const out = { state };
   if ((state === "downloading" || state === "verifying") && install) {
     if (finite2(install.percent))
@@ -199153,7 +199169,7 @@ var init_response_builder = __esm(() => {
     [PRIVACY_GET_TOOL_NAME]: {}
   };
   HANDOFF_URL = /^https:\/\/mcp\.olympusplugin\.ai\/go\/oly2g\.[a-z2-7]{32}\.[A-Za-z0-9_-]{43}$/;
-  CONNECTION_STATES = new Set(["not_connected", "not_installed", "installing", "ready", "mac_offline", "relay_unavailable"]);
+  CONNECTION_STATES = new Set(["not_connected", "not_installed", "installing", "restarting", "ready", "mac_offline", "relay_unavailable"]);
   CONNECTION_ACTIONS = new Set(["connect", "install", "open_olympus", "wake_mac", "retry"]);
   STATUSES2 = new Set(["Fresh", "Working", "Waiting", "Needs you", "Failing", "Off"]);
   UNITS2 = new Set(["files", "messages", "items"]);

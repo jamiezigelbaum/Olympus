@@ -154,7 +154,7 @@ const FIX_HREF_HOST = 'olympusplugin.ai';
 /** Every hand-off link: the relay's own host, the plugin's one redirect domain. */
 const HANDOFF_URL = /^https:\/\/mcp\.olympusplugin\.ai\/go\/oly2g\.[a-z2-7]{32}\.[A-Za-z0-9_-]{43}$/;
 
-const CONNECTION_STATES = new Set<ConnectionState>(['not_connected', 'not_installed', 'installing', 'ready', 'mac_offline', 'relay_unavailable']);
+const CONNECTION_STATES = new Set<ConnectionState>(['not_connected', 'not_installed', 'installing', 'restarting', 'ready', 'mac_offline', 'relay_unavailable']);
 const CONNECTION_ACTIONS = new Set(['connect', 'install', 'open_olympus', 'wake_mac', 'retry']);
 const STATUSES = new Set(['Fresh', 'Working', 'Waiting', 'Needs you', 'Failing', 'Off']);
 const UNITS = new Set(['files', 'messages', 'items']);
@@ -225,7 +225,9 @@ export function copyDashboardViewModel(view: DashboardViewModelV1): DashboardVie
     models: {
       embedding: {
         kind: view.models?.embedding?.kind === 'built_in' ? 'built_in' : 'custom',
-        ...copyInstall(view.models?.embedding, 'failed'),
+        ...(view.models?.embedding?.state === 'loading'
+          ? { state: 'loading' as const }
+          : copyInstall(view.models?.embedding, 'failed')),
       },
     },
     generatedAt: iso(view.generatedAt) ?? new Date().toISOString(),
@@ -1567,8 +1569,8 @@ function identifier(value: unknown): string {
 }
 
 /** A model install's fields, each only in the states that carry it; fixed failure codes only. */
-function copyInstall(install: Partial<ModelInstall> | undefined, fallback: ModelInstall['state']): ModelInstall {
-  const state = install?.state !== undefined && INSTALL_STATES.has(install.state) ? install.state : fallback;
+function copyInstall(install: Partial<ModelInstall | DashboardViewModelV1['models']['embedding']> | undefined, fallback: ModelInstall['state']): ModelInstall {
+  const state = install?.state !== undefined && install.state !== 'loading' && INSTALL_STATES.has(install.state) ? install.state : fallback;
   const out: ModelInstall = { state };
   if ((state === 'downloading' || state === 'verifying') && install) {
     if (finite(install.percent)) out.percent = percent(install.percent);

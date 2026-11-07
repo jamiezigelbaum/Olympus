@@ -4085,7 +4085,13 @@ class ProgressReporter {
     this.now = now ?? (() => new Date);
     this.listener = listener;
     this.lastWriteMs = 0;
+    let previouslyReady = false;
+    try {
+      const previous = JSON.parse(readFileSync8(statusPath, "utf8"));
+      previouslyReady = previous.modelId === modelId && (previous.state === "ready" || previous.previouslyReady === true);
+    } catch {}
     this.status = {
+      ...previouslyReady ? { previouslyReady: true } : {},
       state: "not_started",
       modelId,
       percent: 0,
@@ -4107,7 +4113,7 @@ class ProgressReporter {
   }
   set(state, label, percent = this.status.percent) {
     const { failure: _failure, ...rest } = this.status;
-    this.status = { ...rest, state, label, percent };
+    this.status = { ...rest, state, label, percent, ...state === "ready" ? { previouslyReady: true } : {} };
     this.emit(true);
   }
   touch() {
@@ -40137,6 +40143,9 @@ var init_vocabulary = __esm(() => {
       title: "Olympus is setting up on your computer…",
       disabledReason: "Available once Olympus is set up"
     },
+    restarting: {
+      title: "Olympus is restarting. Search is back in a moment."
+    },
     mac_offline: {
       title: "Your computer is offline or asleep, so answers are paused",
       lastSeen: "Last seen {when}",
@@ -44235,10 +44244,11 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     if (!current2 || current2 === "ready")
       return null;
     const copy = C[current2] || C.relay_unavailable;
-    const tone = current2 === "installing" ? "info" : "warn";
+    const starting = current2 === "installing" || current2 === "restarting";
+    const tone = starting ? "info" : "warn";
     const banner = el("section", "banner " + tone);
-    banner.setAttribute("role", current2 === "installing" ? "status" : "alert");
-    add(banner, icon(current2 === "installing" ? "…" : "!"));
+    banner.setAttribute("role", starting ? "status" : "alert");
+    add(banner, icon(starting ? "…" : "!"));
     const body = add(el("div", "banner-body"), el("p", "banner-title", copy.title));
     const conn = state.data ? state.data.connection : {};
     if (current2 === "installing" && conn.progress) {
@@ -45499,6 +45509,8 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
       ready = fill2(P.modelDownloading, { percent: percent(embedding.percent ?? 0) });
     else if (embedding.state === "verifying")
       ready = P.modelChecking;
+    else if (embedding.state === "loading")
+      ready = P.modelGettingReady;
     else if (embedding.state === "failed")
       ready = notWorking(embedding.failedReason);
     const answers = models.answers;

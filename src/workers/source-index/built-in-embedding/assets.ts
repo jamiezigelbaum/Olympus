@@ -47,6 +47,8 @@ export type BuiltInEmbeddingFailureReason =
 export interface BuiltInEmbeddingStatus {
   /** Process-local routing state; present only when a remote helper is configured. */
   remoteDocuments?: boolean;
+  /** This model has reached ready before; survives worker restarts. */
+  previouslyReady?: boolean;
   state: BuiltInEmbeddingState;
   modelId: string;
   /** 0-100, whole numbers. */
@@ -704,7 +706,14 @@ class ProgressReporter {
     this.now = now ?? (() => new Date());
     this.listener = listener;
     this.lastWriteMs = 0;
+    let previouslyReady = false;
+    try {
+      const previous = JSON.parse(readFileSync(statusPath, 'utf8')) as BuiltInEmbeddingStatus;
+      previouslyReady = previous.modelId === modelId
+        && (previous.state === 'ready' || previous.previouslyReady === true);
+    } catch { /* No previous setup receipt. */ }
     this.status = {
+      ...(previouslyReady ? { previouslyReady: true } : {}),
       state: 'not_started',
       modelId,
       percent: 0,
@@ -731,7 +740,7 @@ class ProgressReporter {
 
   set(state: BuiltInEmbeddingState, label: string, percent = this.status.percent): void {
     const { failure: _failure, ...rest } = this.status;
-    this.status = { ...rest, state, label, percent };
+    this.status = { ...rest, state, label, percent, ...(state === 'ready' ? { previouslyReady: true } : {}) };
     this.emit(true);
   }
 
