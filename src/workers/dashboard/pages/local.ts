@@ -41,6 +41,7 @@ import {
   dashboardOAuthConnectSheet,
   escapeHtml,
   pageShell,
+  rowMenu,
   safeExternalHref,
   setupRow,
   setupStepsSheet,
@@ -50,7 +51,8 @@ import { DASHBOARD_PRIVACY_SETTINGS_COPY as S, DASHBOARD_PRIVATE_ANSWERS_COPY } 
 import { dashboardPrivacyTabs, PRIVACY_TABS_CSS } from './private-answers.ts';
 import { dashboardLocalPageHref } from '../host-page.ts';
 import { dashboardTopNav, TOP_NAV_CSS, type DashboardTab } from '../top-nav.ts';
-import { DASHBOARD_UPDATE_COPY } from '../vocabulary.ts';
+import { sourceLogoTile, SOURCE_LOGO_CSS } from '../source-logos.ts';
+import { DASHBOARD_DISCONNECTED_DATA_KEPT, DASHBOARD_UPDATE_COPY } from '../vocabulary.ts';
 import { MODEL_PICKER_CSS, renderAnswerModelPickers, renderZkapiModelPicker } from '../model-pickers.ts';
 import { renderModelSetup, renderModelSetupBlocker, dashboardModelsBlockedReason } from '../model-setup.ts';
 import type { DashboardOutsideHelpStatus } from '../outside-help.ts';
@@ -215,26 +217,163 @@ export function renderDashboardKeysPage(view: SourceDashboardViewModel, options?
   });
 }
 
-/** Connect a source (`?connect`): the setup sheets for the sources that connect on this computer, where Connect lands. */
+/** The sync route's own name for each source it checks (setup-backend.ts uses the same). */
+const SYNC_ROUTE_SOURCES: Readonly<Record<string, string>> = {
+  'gmail.email': 'gmail',
+  'google_drive.docs': 'google-drive',
+  'dropbox.files': 'dropbox',
+  'x.bookmarks': 'x',
+  'readwise.library': 'readwise',
+  'evernote.notes': 'evernote',
+  'local.files': 'local.files',
+};
+
+/** What each source holds, for its tile in Add a source. */
+const SOURCE_TILE_LINES: Readonly<Record<string, string>> = {
+  'gmail.email': 'Email',
+  'google_drive.docs': 'Docs and files',
+  'dropbox.files': 'Files',
+  'local.files': 'Folders you pick',
+  'archive.imports': 'An export from any app',
+  'x.bookmarks': 'Posts you saved',
+  'telegram.messages': 'Chats',
+  'whatsapp.personal.messages': 'Chats',
+  'readwise.library': 'Highlights',
+  'evernote.notes': 'Notes',
+};
+
+const CONNECTED_STATES = new Set(['connected', 'waiting_for_first_sync', 'syncing', 'synced', 'reauth_required']);
+const MESSAGING_SOURCES = new Set(['telegram.messages', 'whatsapp.personal.messages']);
+
+function sourceDomId(sourceId: string): string {
+  return sourceId.replace(/[^A-Za-z0-9_-]+/g, '-');
+}
+
+function sourceFacts(source: DashboardSourceCard): string {
+  if (source.connection.state === 'reauth_required') return 'needs sign-in';
+  const facts: string[] = [];
+  const items = source.coverage?.indexed_items ?? 0;
+  if (items > 0) facts.push(`${items.toLocaleString('en-US')} ${MESSAGING_SOURCES.has(source.source_id) ? 'messages' : 'items'}`);
+  if (source.freshness?.label) facts.push(source.freshness.label);
+  return facts.join(' · ');
+}
+
+function sourceStatus(source: DashboardSourceCard): 'ok' | 'attention' {
+  return source.connection.state === 'reauth_required' || source.schedule?.consecutive_failures || source.answer_readiness?.state === 'needs_attention' ? 'attention' : 'ok';
+}
+
+/** One connected source: logo, name, facts, the one thing it needs, and the ⋯ menu. */
+function connectedSourceRow(source: DashboardSourceCard, messagingLocalSession: boolean, off: string, kept = false): { row: string; dialogs: string } {
+  const id = sourceDomId(source.source_id);
+  const label = escapeHtml(source.label);
+  const items: string[] = [];
+  const dialogs: string[] = [];
+  const sync = kept ? undefined : SYNC_ROUTE_SOURCES[source.source_id];
+  if (sync) items.push(`<form data-source-action="sync_now"><input type="hidden" name="source" value="${escapeHtml(sync)}"><button class="menuitem" type="submit"${off}>Sync now</button><span data-action-message role="status"></span></form>`);
+  const confirm = (kind: 'disconnect_source' | 'delete_source_data', title: string, line: string, button: string, danger: boolean, menuLabel = title.endsWith('?') ? title.slice(0, -1) : title): string => {
+    const dialogId = `${kind === 'disconnect_source' ? 'disconnect' : 'delete'}-${id}`;
+    dialogs.push(`<dialog class="adddialog" id="${dialogId}" data-closable aria-labelledby="${dialogId}-title"><div class="adddialoghead"><h3 id="${dialogId}-title">${escapeHtml(title)}</h3><button class="btn iconbtn" type="button" data-dialog-close aria-label="Close">✕</button></div>`
+      + `<p class="pnote">${escapeHtml(line)}</p><form data-source-action="${kind}"><input type="hidden" name="source_id" value="${escapeHtml(source.source_id)}"><div class="pickbar"><button class="btn${danger ? ' danger' : ' primary'}" type="submit"${off}>${escapeHtml(button)}</button></div><span data-action-message role="status"></span></form></dialog>`);
+    return `<button class="menuitem${danger ? ' danger' : ''}" type="button" data-dialog-open="${dialogId}"${off}>${escapeHtml(menuLabel)}${danger ? '…' : ''}</button>`;
+  };
+  if (kept) {
+    // Olympus deletes a source's data only once it is disconnected, so Delete
+    // lives on the row a disconnect leaves behind.
+  } else if (MESSAGING_SOURCES.has(source.source_id)) {
+    const dialogId = `pairing-${id}`;
+    dialogs.push(`<dialog class="adddialog" id="${dialogId}" data-closable aria-label="${label} pairing"><div class="adddialoghead"><h3>${label}</h3><button class="btn iconbtn" type="button" data-dialog-close aria-label="Close">✕</button></div>`
+      + renderMessagingCard(source.source_id === 'telegram.messages' ? 'telegram' : 'whatsapp', messagingLocalSession, { paired: true }) + '</dialog>');
+    items.push(`<button class="menuitem" type="button" data-dialog-open="${dialogId}"${off}>Pairing and chats</button>`);
+  } else if (source.connection.disconnect) {
+    items.push('<hr>' + confirm('disconnect_source', `Disconnect ${source.label}?`, source.connection.disconnect.confirmation, 'Disconnect', false));
+  }
+  if (kept) items.push(confirm('delete_source_data', `Delete what Olympus indexed from ${source.label}?`, `Olympus deletes what it indexed from ${source.label}. Your ${source.label} account and files are not touched. This cannot be undone.`, 'Delete indexed data', true, 'Delete indexed data'));
+  const needs = source.connection.state === 'reauth_required' || kept
+    ? `<button class="btn${kept ? '' : ' primary'}" type="button" data-dialog-open="add-source" data-source-open="${escapeHtml(source.source_id)}"${off}>${kept ? 'Reconnect' : 'Sign in'}</button>`
+    : '';
+  const facts = kept ? `${DASHBOARD_DISCONNECTED_DATA_KEPT} · ${(source.coverage?.indexed_items ?? 0).toLocaleString('en-US')} items` : sourceFacts(source);
+  const row = `<div class="srcrow${kept ? ' kept' : ''}" data-source-row="${escapeHtml(source.source_id)}"${kept ? ' data-source-kept' : ''}>${sourceLogoTile(source.source_id, kept ? 'off' : sourceStatus(source))}`
+    + `<div class="srcmain"><b>${label}</b>${facts ? `<span class="pnote"> · ${escapeHtml(facts)}</span>` : ''}</div>`
+    + `<div class="srcact">${needs}${items.length ? rowMenu(source.label, items.join('')) : ''}</div></div>`;
+  return { row, dialogs: dialogs.join('') };
+}
+
+/**
+ * Sources (`?connect`, owner 2026-11-07, mockups final-7, 7a, 7b and
+ * sources-logos): the connected sources, each with its logo, facts and a ⋯
+ * menu, then + Add a source, which opens the catalog in a side sheet. A tile
+ * opens that source's own setup there. ✕, Esc or a click outside closes it.
+ */
 export function renderDashboardConnectPage(view: SourceDashboardViewModel, options?: DashboardPageOptions): string {
   const blocked = view.model_setup !== undefined && !view.model_setup.ready;
-  const sources = view.sources.filter((source) => source.connection.action.kind !== 'none' || source.source_id === 'telegram.messages' || source.source_id === 'whatsapp.personal.messages');
+  const basePath = options?.basePath ?? '/dashboard';
+  const token = readToken(options?.basePath);
+  const off = unlocked(options) ? '' : ' disabled';
+  const sources = view.sources.filter((source) => source.source_id !== 'venice.api');
+  const connected = sources.filter((source) => CONNECTED_STATES.has(source.connection.state));
+  const setupable = sources.filter((source) => source.connection.state === 'reauth_required'
+    || (!CONNECTED_STATES.has(source.connection.state) && (source.connection.action.kind !== 'none' || MESSAGING_SOURCES.has(source.source_id))));
+  // Disconnected with its indexed data kept: a quiet row with Reconnect and Delete.
+  const kept = sources.filter((source) => !CONNECTED_STATES.has(source.connection.state) && (source.coverage?.indexed_items ?? 0) > 0
+    && source.connection.action.kind !== 'archive_import');
+  const rows = connected.map((source) => connectedSourceRow(source, options?.messagingLocalSession === true, off))
+    .concat(kept.map((source) => connectedSourceRow(source, false, off, true)));
+  const tiles = setupable.filter((source) => source.connection.state !== 'reauth_required').map((source) =>
+    `<button class="srctile" type="button" data-source-pick="${escapeHtml(source.source_id)}">${sourceLogoTile(source.source_id)}<span><b>${escapeHtml(source.label)}</b><span class="pnote">${escapeHtml(SOURCE_TILE_LINES[source.source_id] ?? '')}</span></span></button>`).join('');
+  const panels = setupable.map((source) =>
+    `<div class="srcsetup" data-source-setup="${escapeHtml(source.source_id)}" hidden><button class="btn plainlink" type="button" data-source-back>← All sources</button>`
+    + renderSetupRow(source, view, blocked, basePath, options?.messagingLocalSession === true) + sourceSupportBlock(source) + '</div>').join('');
+  const sheet = '<dialog class="srcsheet" id="add-source" data-add-source data-closable aria-labelledby="add-source-title">'
+    + '<div class="adddialoghead"><h3 id="add-source-title">Add a source</h3><button class="btn iconbtn" type="button" data-dialog-close aria-label="Close">✕</button></div>'
+    + `<div data-source-catalog><input class="keyfield srcsearch" type="search" data-source-search placeholder="Search sources…" aria-label="Search sources">`
+    + (tiles ? `<div class="srctiles">${tiles}</div>` : `<p class="pnote">${escapeHtml(W.connect.empty)}</p>`)
+    + '<p class="pnote">Sources you\'ve already connected aren\'t listed.</p></div>'
+    + panels + '</dialog>';
   const body = [
     lockedGate(options),
-    renderModelSetupBlocker(view.model_setup, { keysHref: dashboardLocalPageHref('keys', readToken(options?.basePath)) }),
-    sources.length === 0
-      ? `<p class="pnote">${escapeHtml(W.connect.empty)}</p>`
-      : `<div class="srows" id="sources">${sources.map((source) => renderSetupRow(source, view, blocked, options?.basePath ?? '/dashboard', options?.messagingLocalSession === true) + sourceSupportBlock(source)).join('\n')}</div>`,
+    renderModelSetupBlocker(view.model_setup, { keysHref: dashboardLocalPageHref('keys', token) }),
+    `<div class="srcrows" id="sources">${rows.map((entry) => entry.row).join('') || '<p class="pnote">No sources connected yet.</p>'}</div>`,
+    `<div class="srcbar"><button class="btn primary" type="button" data-dialog-open="add-source">+ Add a source</button><span class="pnote">Not listed? <a href="${escapeHtml(dashboardLocalPageHref('connector', token))}">Build a connector</a></span></div>`,
+    rows.map((entry) => entry.dialogs).join(''),
+    sheet,
   ].filter((block) => block !== '').join('\n');
   return localShell({
-    crumb: W.connect.title,
+    crumb: 'Sources',
     tab: 'sources',
     meta: dashboardCheckedLabel(view.generated_at, options?.now ?? new Date()),
     body,
-    styles: [MODEL_SETUP_CSS],
+    styles: [MODEL_SETUP_CSS, MODEL_PICKER_CSS, SOURCE_LOGO_CSS, SOURCES_CSS],
     options,
   });
 }
+
+const SOURCES_CSS = `
+.srcrows { display: grid; gap: 10px; max-width: 760px; }
+.srcrow { display: flex; align-items: center; gap: 14px; border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; }
+.srcmain { flex: 1; min-width: 0; }
+.srcact { display: flex; align-items: center; gap: 10px; }
+.srcact .rowmenu { position: relative; }
+.srcact .rowmenu .menu { position: absolute; right: 0; top: calc(100% + 6px); z-index: 5; min-width: 220px; display: grid; padding: 6px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel, var(--bg)); box-shadow: 0 8px 24px rgba(0,0,0,.35); }
+.menuitem { font: inherit; text-align: left; background: none; border: 0; color: var(--t1); padding: 9px 12px; border-radius: 6px; cursor: pointer; width: 100%; }
+.menuitem:hover, .menuitem:focus-visible { background: color-mix(in srgb, var(--link) 14%, transparent); }
+.menuitem.danger { color: #f0776c; }
+.rowmenu .menu hr { border: 0; border-top: 1px solid var(--line); margin: 6px 0; }
+.rowmenu form { margin: 0; }
+.rowmenu [data-action-message]:empty { display: none; }
+.btn.danger { border-color: #f0776c; color: #f0776c; }
+.srcbar { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; margin: 16px 0; }
+.srcsheet { margin: 0 0 0 auto; height: 100vh; max-height: 100vh; width: min(480px, 100vw); border: 0; border-left: 1px solid var(--line); background: var(--bg); color: var(--t1); padding: 20px 22px; overflow-y: auto; }
+.srcsheet::backdrop { background: rgba(0, 0, 0, 0.45); }
+.srcsearch { width: 100%; margin: 12px 0; }
+.srctiles { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.srctile { display: flex; gap: 12px; align-items: center; text-align: left; font: inherit; color: var(--t1); background: none; border: 1px solid var(--line); border-radius: 10px; padding: 12px; cursor: pointer; }
+.srctile:hover, .srctile:focus-visible { border-color: var(--link); }
+.srctile .pnote { display: block; }
+.srctile[hidden] { display: none; }
+.srctiles + .pnote { margin-top: 14px; }
+.srcsetup .plainlink { margin: 8px 0 12px; }
+@media (max-width: 640px) { .srctiles { grid-template-columns: 1fr; } .srcrow { flex-wrap: wrap; } }
+`;
 
 /** The read-only token a dash_ reader's basePath carries, so the tabs keep it. */
 function readToken(basePath: string | undefined): string | undefined {

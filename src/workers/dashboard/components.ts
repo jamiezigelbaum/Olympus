@@ -927,8 +927,19 @@ export function standaloneDashboardControllerScript(
         abort.abort();
         var page = root.querySelector('.page') || root;
         var top = page.querySelector('.top');
+        // The top bar stays, so every tab is still one click away; its pill says Locked.
+        var nav = page.querySelector('.topnav');
+        var pill = nav && nav.querySelector('.navlock');
+        if (pill) {
+          var locked = document.createElement('span');
+          locked.className = 'navlock';
+          locked.setAttribute('data-state', 'locked');
+          locked.innerHTML = '<span aria-hidden="true">\u{1F512}</span> Locked';
+          pill.replaceWith(locked);
+        }
         page.innerHTML = config.lockedHtml;
         if (top) page.insertBefore(top, page.firstChild);
+        if (nav) page.insertBefore(nav, page.firstChild);
       }
       function route(params) {
         var action = params.action;
@@ -940,6 +951,9 @@ export function standaloneDashboardControllerScript(
         if (action === 'save_judge') return ['/dashboard/models/judge', withoutAction(params)];
         if (action === 'save_model_choice') return ['/dashboard/models/choice', withoutAction(params)];
         if (action === 'list_addable_models') return ['/dashboard/models/addable', withoutAction(params)];
+        if (action === 'sync_now') return ['/dashboard/sync-now', withoutAction(params)];
+        if (action === 'disconnect_source') return ['/dashboard/disconnect', withoutAction(params)];
+        if (action === 'delete_source_data') return ['/dashboard/delete-source-data', withoutAction(params)];
         if (action === 'set_computer_use') return ['/dashboard/engine/computer-use', withoutAction(params)];
         if (action === 'save_first_run_privacy') return ['/dashboard/models/first-run-privacy', withoutAction(params)];
         if (action === 'connect_api_key') return ['/dashboard/connect/api-key', withoutAction(params)];

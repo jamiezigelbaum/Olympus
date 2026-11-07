@@ -127,6 +127,11 @@ export type OlympusDashboardControlParams =
   | { action: 'save_judge'; choice: 'local' | 'venice'; cap_dollars: number }
   | { action: 'save_model_choice'; provider: 'local' | 'venice' | 'zkapi'; model: string }
   | { action: 'list_addable_models'; provider: 'venice' }
+  /** Sources (?connect): check a connected source now, by the sync route's own name for it. */
+  | { action: 'sync_now'; source: string }
+  /** Sources: disconnect, or delete what Olympus indexed; each confirmed in its dialog first. */
+  | { action: 'disconnect_source'; source_id: string; acknowledge: true }
+  | { action: 'delete_source_data'; source_id: string; acknowledge: true }
   | { action: 'set_computer_use'; choice: 'everyday' | 'server' }
   | {
       action: 'start_oauth';
