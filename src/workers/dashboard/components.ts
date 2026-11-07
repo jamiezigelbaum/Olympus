@@ -927,8 +927,19 @@ export function standaloneDashboardControllerScript(
         abort.abort();
         var page = root.querySelector('.page') || root;
         var top = page.querySelector('.top');
+        // The top bar stays, so every tab is still one click away; its pill says Locked.
+        var nav = page.querySelector('.topnav');
+        var pill = nav && nav.querySelector('.navlock');
+        if (pill) {
+          var locked = document.createElement('span');
+          locked.className = 'navlock';
+          locked.setAttribute('data-state', 'locked');
+          locked.innerHTML = '<span aria-hidden="true">\u{1F512}</span> Locked';
+          pill.replaceWith(locked);
+        }
         page.innerHTML = config.lockedHtml;
         if (top) page.insertBefore(top, page.firstChild);
+        if (nav) page.insertBefore(nav, page.firstChild);
       }
       function route(params) {
         var action = params.action;

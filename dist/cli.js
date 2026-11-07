@@ -148776,7 +148776,10 @@ function mountDashboardController(options) {
     });
   }
   function say(form, message2) {
-    const slot = form.querySelector("dialog[open] [data-action-message]") ?? Array.from(form.querySelectorAll("[data-action-message]")).find((node) => !node.closest("dialog"));
+    const slot = form.querySelector("dialog[open] [data-action-message]") ?? Array.from(form.querySelectorAll("[data-action-message]")).find((node) => {
+      const box = node.closest("dialog");
+      return !box || !form.contains(box);
+    });
     if (slot)
       slot.textContent = message2;
   }
@@ -151506,8 +151509,19 @@ function standaloneDashboardControllerScript(input) {
         abort.abort();
         var page = root.querySelector('.page') || root;
         var top = page.querySelector('.top');
+        // The top bar stays, so every tab is still one click away; its pill says Locked.
+        var nav = page.querySelector('.topnav');
+        var pill = nav && nav.querySelector('.navlock');
+        if (pill) {
+          var locked = document.createElement('span');
+          locked.className = 'navlock';
+          locked.setAttribute('data-state', 'locked');
+          locked.innerHTML = '<span aria-hidden="true">\uD83D\uDD12</span> Locked';
+          pill.replaceWith(locked);
+        }
         page.innerHTML = config.lockedHtml;
         if (top) page.insertBefore(top, page.firstChild);
+        if (nav) page.insertBefore(nav, page.firstChild);
       }
       function route(params) {
         var action = params.action;
@@ -161820,12 +161834,12 @@ function sourceFacts(source) {
 function sourceStatus(source) {
   return source.connection.state === "reauth_required" || source.schedule?.consecutive_failures || source.answer_readiness?.state === "needs_attention" ? "attention" : "ok";
 }
-function connectedSourceRow(source, messagingLocalSession, off) {
+function connectedSourceRow(source, messagingLocalSession, off, kept = false) {
   const id = sourceDomId(source.source_id);
   const label = escapeHtml2(source.label);
   const items = [];
   const dialogs = [];
-  const sync = SYNC_ROUTE_SOURCES[source.source_id];
+  const sync = kept ? undefined : SYNC_ROUTE_SOURCES[source.source_id];
   if (sync)
     items.push(`<form data-source-action="sync_now"><input type="hidden" name="source" value="${escapeHtml2(sync)}"><button class="menuitem" type="submit"${off}>Sync now</button><span data-action-message role="status"></span></form>`);
   const confirm = (kind, title, line2, button, danger, menuLabel = title.endsWith("?") ? title.slice(0, -1) : title) => {
@@ -161833,16 +161847,18 @@ function connectedSourceRow(source, messagingLocalSession, off) {
     dialogs.push(`<dialog class="adddialog" id="${dialogId}" data-closable aria-labelledby="${dialogId}-title"><div class="adddialoghead"><h3 id="${dialogId}-title">${escapeHtml2(title)}</h3><button class="btn iconbtn" type="button" data-dialog-close aria-label="Close">✕</button></div>` + `<p class="pnote">${escapeHtml2(line2)}</p><form data-source-action="${kind}"><input type="hidden" name="source_id" value="${escapeHtml2(source.source_id)}"><div class="pickbar"><button class="btn${danger ? " danger" : " primary"}" type="submit"${off}>${escapeHtml2(button)}</button></div><span data-action-message role="status"></span></form></dialog>`);
     return `<button class="menuitem${danger ? " danger" : ""}" type="button" data-dialog-open="${dialogId}"${off}>${escapeHtml2(menuLabel)}${danger ? "…" : ""}</button>`;
   };
-  if (MESSAGING_SOURCES.has(source.source_id)) {
+  if (kept) {} else if (MESSAGING_SOURCES.has(source.source_id)) {
     const dialogId = `pairing-${id}`;
     dialogs.push(`<dialog class="adddialog" id="${dialogId}" data-closable aria-label="${label} pairing"><div class="adddialoghead"><h3>${label}</h3><button class="btn iconbtn" type="button" data-dialog-close aria-label="Close">✕</button></div>` + renderMessagingCard(source.source_id === "telegram.messages" ? "telegram" : "whatsapp", messagingLocalSession, { paired: true }) + "</dialog>");
     items.push(`<button class="menuitem" type="button" data-dialog-open="${dialogId}"${off}>Pairing and chats</button>`);
   } else if (source.connection.disconnect) {
     items.push("<hr>" + confirm("disconnect_source", `Disconnect ${source.label}?`, source.connection.disconnect.confirmation, "Disconnect", false));
   }
-  items.push(confirm("delete_source_data", `Delete what Olympus indexed from ${source.label}?`, `Olympus deletes what it indexed from ${source.label}. Your ${source.label} account and files are not touched. This cannot be undone.`, "Delete indexed data", true, "Delete indexed data"));
-  const needs = source.connection.state === "reauth_required" ? `<button class="btn primary" type="button" data-dialog-open="add-source" data-source-open="${escapeHtml2(source.source_id)}"${off}>Sign in</button>` : "";
-  const row = `<div class="srcrow" data-source-row="${escapeHtml2(source.source_id)}">${sourceLogoTile(source.source_id, sourceStatus(source))}` + `<div class="srcmain"><b>${label}</b>${sourceFacts(source) ? `<span class="pnote"> · ${escapeHtml2(sourceFacts(source))}</span>` : ""}</div>` + `<div class="srcact">${needs}${rowMenu(source.label, items.join(""))}</div></div>`;
+  if (kept)
+    items.push(confirm("delete_source_data", `Delete what Olympus indexed from ${source.label}?`, `Olympus deletes what it indexed from ${source.label}. Your ${source.label} account and files are not touched. This cannot be undone.`, "Delete indexed data", true, "Delete indexed data"));
+  const needs = source.connection.state === "reauth_required" || kept ? `<button class="btn${kept ? "" : " primary"}" type="button" data-dialog-open="add-source" data-source-open="${escapeHtml2(source.source_id)}"${off}>${kept ? "Reconnect" : "Sign in"}</button>` : "";
+  const facts = kept ? `${DASHBOARD_DISCONNECTED_DATA_KEPT} · ${(source.coverage?.indexed_items ?? 0).toLocaleString("en-US")} items` : sourceFacts(source);
+  const row = `<div class="srcrow${kept ? " kept" : ""}" data-source-row="${escapeHtml2(source.source_id)}"${kept ? " data-source-kept" : ""}>${sourceLogoTile(source.source_id, kept ? "off" : sourceStatus(source))}` + `<div class="srcmain"><b>${label}</b>${facts ? `<span class="pnote"> · ${escapeHtml2(facts)}</span>` : ""}</div>` + `<div class="srcact">${needs}${items.length ? rowMenu(source.label, items.join("")) : ""}</div></div>`;
   return { row, dialogs: dialogs.join("") };
 }
 function renderDashboardConnectPage(view3, options) {
@@ -161853,7 +161869,8 @@ function renderDashboardConnectPage(view3, options) {
   const sources = view3.sources.filter((source) => source.source_id !== "venice.api");
   const connected2 = sources.filter((source) => CONNECTED_STATES.has(source.connection.state));
   const setupable = sources.filter((source) => source.connection.state === "reauth_required" || !CONNECTED_STATES.has(source.connection.state) && (source.connection.action.kind !== "none" || MESSAGING_SOURCES.has(source.source_id)));
-  const rows = connected2.map((source) => connectedSourceRow(source, options?.messagingLocalSession === true, off));
+  const kept = sources.filter((source) => !CONNECTED_STATES.has(source.connection.state) && (source.coverage?.indexed_items ?? 0) > 0 && source.connection.action.kind !== "archive_import");
+  const rows = connected2.map((source) => connectedSourceRow(source, options?.messagingLocalSession === true, off)).concat(kept.map((source) => connectedSourceRow(source, false, off, true)));
   const tiles = setupable.filter((source) => source.connection.state !== "reauth_required").map((source) => `<button class="srctile" type="button" data-source-pick="${escapeHtml2(source.source_id)}">${sourceLogoTile(source.source_id)}<span><b>${escapeHtml2(source.label)}</b><span class="pnote">${escapeHtml2(SOURCE_TILE_LINES[source.source_id] ?? "")}</span></span></button>`).join("");
   const panels = setupable.map((source) => `<div class="srcsetup" data-source-setup="${escapeHtml2(source.source_id)}" hidden><button class="btn plainlink" type="button" data-source-back>← All sources</button>` + renderSetupRow(source, view3, blocked, basePath, options?.messagingLocalSession === true) + sourceSupportBlock(source) + "</div>").join("");
   const sheet = '<dialog class="srcsheet" id="add-source" data-add-source data-closable aria-labelledby="add-source-title">' + '<div class="adddialoghead"><h3 id="add-source-title">Add a source</h3><button class="btn iconbtn" type="button" data-dialog-close aria-label="Close">✕</button></div>' + `<div data-source-catalog><input class="keyfield srcsearch" type="search" data-source-search placeholder="Search sources…" aria-label="Search sources">` + (tiles ? `<div class="srctiles">${tiles}</div>` : `<p class="pnote">${escapeHtml2(W.connect.empty)}</p>`) + `<p class="pnote">Sources you've already connected aren't listed.</p></div>` + panels + "</dialog>";

@@ -220,9 +220,10 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
   }
 
   function say(form: ParentNode, message: string): void {
-    // An open confirmation dialog covers the form, so its answer goes inside it.
+    // An open confirmation dialog inside the form covers it, so its answer goes
+    // there; a form that itself sits in a dialog answers in its own slot.
     const slot = form.querySelector('dialog[open] [data-action-message]')
-      ?? Array.from(form.querySelectorAll('[data-action-message]')).find(node => !node.closest('dialog'));
+      ?? Array.from(form.querySelectorAll('[data-action-message]')).find(node => { const box = node.closest('dialog'); return !box || !(form as Node).contains(box); });
     if (slot) slot.textContent = message;
   }
 
