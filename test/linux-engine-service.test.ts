@@ -58,6 +58,15 @@ test('preflight refuses root and unsupported systemd before service mutation', (
  expect(() => preflightSystemdEngine(l, exec, 1000)).toThrow('254');
  expect(calls.some(c => c.includes('start') || c.includes('enable'))).toBe(false);
 });
+test('preflight says systemctl could not run instead of blaming an old systemd (#1006)', () => {
+ const l = layout();
+ const denied: EngineExec = () => ({ status: null, stdout: '', stderr: "EACCES: permission denied, posix_spawn 'systemctl'" });
+ expect(() => preflightSystemdEngine(l, denied, 1000)).toThrow('Olympus could not run systemctl (permission denied). Run the installer from a folder this account can read');
+ expect(() => preflightSystemdEngine(l, denied, 1000)).not.toThrow('254');
+ // The user-manager check that follows gets the same treatment.
+ const managerDenied: EngineExec = (_c, a) => a[0] === '--version' ? good('systemd 262\n') : { status: null, stdout: '', stderr: 'spawnSync systemctl ENOENT' };
+ expect(() => preflightSystemdEngine(l, managerDenied, 1000)).toThrow('could not run systemctl (not found)');
+});
 test('copytruncate retains inode and bounded private backups; open append descriptor continues writing', () => {
  const l = layout(); mkdirSync(l.stateDir, { recursive: true, mode: 0o700 }); const log = join(l.stateDir, 'engine.log');
  writeFileSync(log, '0123456789', { mode: 0o600 }); const inode = statSync(log).ino; const fd = openSync(log, 'a');
