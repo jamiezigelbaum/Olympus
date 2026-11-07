@@ -646,6 +646,9 @@ move writes would otherwise restart its global freshness fence indefinitely
 (synthetic reproduction, 2026-11-07). This adds validation time between ticks;
 it does not reduce the judge budget or lowering cap. Answers still preempt it,
 and another writer changing its markers returns control to the next tick.
+During that window the interval timer defers retries of already-failed raises
+(which remain hidden and queued); new raises still interrupt it. Failed raises
+resume their ordinary retries as soon as the window ends.
 Ledger reads rotate in windows of 32 rows, and scanning stops on the row that
 fills both class caps. Shutdown stops scheduling and lets an in-flight slice
 checkpoint before closing ledgers. These scheduling changes (2026-11-07) target

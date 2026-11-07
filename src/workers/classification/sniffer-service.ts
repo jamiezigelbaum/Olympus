@@ -307,6 +307,7 @@ export class TierSnifferService {
   private trainingTimer: ReturnType<typeof setTimeout> | undefined;
   private trainingJob: Promise<void> | undefined;
   private trainingJudge: string | undefined;
+  private finalizingTraining = false;
   /** When the last tick ended (performance.now()), for the idle time before the next one. */
   private lastTickEndedAt: number | undefined;
   private readonly moveAbort = new AbortController();
@@ -414,11 +415,14 @@ export class TierSnifferService {
     if (!judge || !filters.some(filter => filter.trainingFinalizing)) return;
     this.pauseTraining();
     await this.trainingJob;
+    this.finalizingTraining = true;
     try {
+      await this.moving;
       for (const filter of filters) {
         await filter.finishValidation(judge, () => signal.aborted || this.stopped || this.yieldNow());
       }
     } finally {
+      this.finalizingTraining = false;
       this.scheduleTraining(judge);
     }
   }
@@ -1330,28 +1334,32 @@ export class TierSnifferService {
     }
   }
 
+  /** New raises interrupt background work; known failures already retry each judge pass. */
+  private newRaisesQueued(): boolean {
+    return this.ledgerPaths().some(path => {
+      try {
+        const set = tierSetForLedger(path);
+        if (!set || !setEmbedsWithBuiltInOnly(set)) return false;
+        const limit = Math.max(0, this.options.autoMoves!.maxPerPass ?? 25);
+        return limit > 0 && set.ledger.listMoving({ limit, direction: 'raise' })
+          .some(record => isAutoMoveCandidate(record)
+            && !this.moveFailures.has(`${path}\u0000${tierLedgerIdentityKey(recordIdentity(record))}\u0000${record.generation}`));
+      }
+      catch { return true; } // An unreadable queue fails safe.
+    });
+  }
+
   private async drainMoves(direction: 'raise' | 'lower' = 'raise'): Promise<TierAutoMoveReport | undefined> {
     try {
       if (!this.options.autoMoves || this.stopped || !this.options.autoMoves.localEmbeddingsOnly()) return undefined;
+      // Failed-raise bookkeeping is a ledger write too. Timer retries must
+      // not restart every validation sweep; new raises still run immediately.
+      if (direction === 'raise' && this.finalizingTraining && !this.newRaisesQueued()) return undefined;
       if (this.moving && this.movingDirection !== direction) {
         if (direction === 'raise') {
           // The idle timer also asks for raises. Only real queued raises may
           // interrupt a longer lowering slice; an unreadable queue fails safe.
-          const raisesQueued = this.ledgerPaths().some(path => {
-            try {
-              const set = tierSetForLedger(path);
-              if (!set || !setEmbedsWithBuiltInOnly(set)) return false;
-              const limit = Math.max(0, this.options.autoMoves!.maxPerPass ?? 25);
-              return limit > 0 && set.ledger.listMoving({ limit, direction: 'raise' })
-                .some(record => isAutoMoveCandidate(record)
-                  // Failed raises already get retries ahead of lowerings each
-                  // pass (and during judging). They remain hidden and queued,
-                  // but must not cut every lowering slice back to one second.
-                  && !this.moveFailures.has(`${path}\u0000${tierLedgerIdentityKey(recordIdentity(record))}\u0000${record.generation}`));
-            }
-            catch { return true; }
-          });
-          if (!raisesQueued) return undefined;
+          if (!this.newRaisesQueued()) return undefined;
           this.lowerMovePreempted = true;
         }
         await this.moving;

@@ -195333,6 +195333,7 @@ class TierSnifferService {
   trainingTimer;
   trainingJob;
   trainingJudge;
+  finalizingTraining = false;
   lastTickEndedAt;
   moveAbort = new AbortController;
   moving;
@@ -195437,11 +195438,14 @@ class TierSnifferService {
       return;
     this.pauseTraining();
     await this.trainingJob;
+    this.finalizingTraining = true;
     try {
+      await this.moving;
       for (const filter of filters) {
         await filter.finishValidation(judge3, () => signal.aborted || this.stopped || this.yieldNow());
       }
     } finally {
+      this.finalizingTraining = false;
       this.scheduleTraining(judge3);
     }
   }
@@ -196236,24 +196240,28 @@ class TierSnifferService {
       return false;
     }
   }
+  newRaisesQueued() {
+    return this.ledgerPaths().some((path) => {
+      try {
+        const set2 = tierSetForLedger(path);
+        if (!set2 || !setEmbedsWithBuiltInOnly2(set2))
+          return false;
+        const limit2 = Math.max(0, this.options.autoMoves.maxPerPass ?? 25);
+        return limit2 > 0 && set2.ledger.listMoving({ limit: limit2, direction: "raise" }).some((record8) => isAutoMoveCandidate(record8) && !this.moveFailures.has(`${path}\x00${tierLedgerIdentityKey(recordIdentity2(record8))}\x00${record8.generation}`));
+      } catch {
+        return true;
+      }
+    });
+  }
   async drainMoves(direction = "raise") {
     try {
       if (!this.options.autoMoves || this.stopped || !this.options.autoMoves.localEmbeddingsOnly())
         return;
+      if (direction === "raise" && this.finalizingTraining && !this.newRaisesQueued())
+        return;
       if (this.moving && this.movingDirection !== direction) {
         if (direction === "raise") {
-          const raisesQueued = this.ledgerPaths().some((path) => {
-            try {
-              const set2 = tierSetForLedger(path);
-              if (!set2 || !setEmbedsWithBuiltInOnly2(set2))
-                return false;
-              const limit2 = Math.max(0, this.options.autoMoves.maxPerPass ?? 25);
-              return limit2 > 0 && set2.ledger.listMoving({ limit: limit2, direction: "raise" }).some((record8) => isAutoMoveCandidate(record8) && !this.moveFailures.has(`${path}\x00${tierLedgerIdentityKey(recordIdentity2(record8))}\x00${record8.generation}`));
-            } catch {
-              return true;
-            }
-          });
-          if (!raisesQueued)
+          if (!this.newRaisesQueued())
             return;
           this.lowerMovePreempted = true;
         }
