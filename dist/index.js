@@ -15093,6 +15093,9 @@ var init_vocabulary = __esm(() => {
     checking: "Checking whether {name} is already imported…",
     already: "{name} is already imported as {archive}.",
     alreadyUnnamed: "{name} is already imported.",
+    skippedOne: "This computer could not read {path}, so it was left out.",
+    skippedMany: "This computer could not read {n} files, so they were left out: {paths}.",
+    skippedMore: "This computer could not read {n} files, so they were left out: {paths} and {more} more.",
     removing: "Removing {name}.",
     declined: "Declined.",
     needsYou: {

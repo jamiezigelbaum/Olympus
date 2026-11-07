@@ -40552,6 +40552,9 @@ var init_vocabulary = __esm(() => {
     checking: "Checking whether {name} is already imported…",
     already: "{name} is already imported as {archive}.",
     alreadyUnnamed: "{name} is already imported.",
+    skippedOne: "This computer could not read {path}, so it was left out.",
+    skippedMany: "This computer could not read {n} files, so they were left out: {paths}.",
+    skippedMore: "This computer could not read {n} files, so they were left out: {paths} and {more} more.",
     removing: "Removing {name}.",
     declined: "Declined.",
     needsYou: {
@@ -44615,14 +44618,25 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     if (!name)
       return "";
     const archive = typeof outcome.archiveName === "string" ? outcome.archiveName : typeof outcome.archive_name === "string" ? outcome.archive_name : "";
-    if (outcome.status === "checking")
-      return fill2(A.checking, { name });
     if (outcome.status === "already_imported")
       return archive ? fill2(A.already, { name, archive }) : fill2(A.alreadyUnnamed, { name });
+    const left = skippedLine(outcome.skipped);
+    if (outcome.status === "checking")
+      return fill2(A.checking, { name }) + left;
     const source = outcome.source && typeof outcome.source.label === "string" ? outcome.source.label : "";
     if (outcome.status === "started")
-      return source ? fill2(A.startedIn, { name, source }) : fill2(A.started, { name });
+      return (source ? fill2(A.startedIn, { name, source }) : fill2(A.started, { name })) + left;
     return "";
+  }
+  function skippedLine(skipped) {
+    const A = H.copy.archives;
+    const paths = Array.isArray(skipped) ? skipped.filter((path) => typeof path === "string" && path) : [];
+    if (!paths.length)
+      return "";
+    if (paths.length === 1)
+      return " " + fill2(A.skippedOne, { path: paths[0] });
+    const shown = paths.slice(0, 3).join(", ");
+    return " " + (paths.length > 3 ? fill2(A.skippedMore, { n: String(paths.length), paths: shown, more: String(paths.length - 3) }) : fill2(A.skippedMany, { n: String(paths.length), paths: shown }));
   }
   function archiveNotice(name, args, result) {
     const A = H.copy.archives;
@@ -46615,7 +46629,8 @@ function chatgptPickerProgram(kit) {
       confirm: null,
       poll: null,
       paint: null,
-      input: null
+      input: null,
+      skipped: []
     };
     kit.render("picker:back");
   }
@@ -46683,33 +46698,56 @@ function chatgptPickerProgram(kit) {
     drop.access = access && typeof access.message === "string" && access.message ? access : null;
     kit.render("picker:drop:retry");
   }
-  function entryFiles(entry, prefix, found, gone) {
+  function entryFiles(entry, prefix, found, gone, skipped) {
     if (gone() || !entry)
       return Promise.resolve();
     if (entry.isFile) {
-      return new Promise((resolve10, reject) => {
-        entry.file((file) => {
-          found.push({ file, path: prefix + entry.name });
+      return new Promise((resolve10) => {
+        const path = prefix + entry.name;
+        const skip = () => {
+          skipped.push(path);
           resolve10();
-        }, reject);
+        };
+        try {
+          entry.file((file) => {
+            found.push({ file, path });
+            resolve10();
+          }, skip);
+        } catch {
+          skip();
+        }
       });
     }
     if (!entry.isDirectory)
       return Promise.resolve();
-    const reader = entry.createReader();
     const here = prefix + entry.name + "/";
+    let reader;
+    try {
+      reader = entry.createReader();
+    } catch {
+      skipped.push(here);
+      return Promise.resolve();
+    }
     const next = () => new Promise((resolve10, reject) => {
-      reader.readEntries((batch) => {
-        if (!batch.length || gone()) {
-          resolve10();
-          return;
-        }
-        batch.reduce((chain, child) => chain.then(() => entryFiles(child, here, found, gone)), Promise.resolve()).then(() => next()).then(resolve10, reject);
-      }, reject);
+      const unread = () => {
+        skipped.push(here);
+        resolve10();
+      };
+      try {
+        reader.readEntries((batch) => {
+          if (!batch.length || gone()) {
+            resolve10();
+            return;
+          }
+          batch.reduce((chain, child) => chain.then(() => entryFiles(child, here, found, gone, skipped)), Promise.resolve()).then(() => next()).then(resolve10, reject);
+        }, unread);
+      } catch {
+        unread();
+      }
     });
     return next();
   }
-  function dropped(event, gone) {
+  function dropped(event, gone, skipped) {
     const transfer = event.dataTransfer;
     if (!transfer)
       return null;
@@ -46735,7 +46773,7 @@ function chatgptPickerProgram(kit) {
     if (!entries.length && !plain.length)
       return null;
     const found = plain.slice();
-    return entries.reduce((chain, entry) => chain.then(() => entryFiles(entry, "", found, gone)), Promise.resolve()).then(() => found);
+    return entries.reduce((chain, entry) => chain.then(() => entryFiles(entry, "", found, gone, skipped)), Promise.resolve()).then(() => found);
   }
   function chosen(input) {
     const items = Array.prototype.slice.call(input.files || []).map((file) => ({ file, path: file.webkitRelativePath || file.name }));
@@ -46763,7 +46801,7 @@ function chatgptPickerProgram(kit) {
         kit.render("picker:drop:cancel");
     }, UPLOAD_PAINT_MS);
   }
-  function beginUpload(collect) {
+  function beginUpload(collect, skipped = []) {
     if (!drop || drop.phase !== "idle" && drop.phase !== "error")
       return;
     const mine = drop.mine;
@@ -46775,12 +46813,13 @@ function chatgptPickerProgram(kit) {
     drop.name = "";
     drop.sent = 0;
     drop.filesDone = 0;
+    drop.skipped = skipped;
     kit.render("picker:drop:cancel");
     collect().then((items) => {
       if (!dropLive(mine, attempt))
         return;
       if (!items.length) {
-        dropFail(drop.words.empty);
+        dropFail(skipped.length ? drop.words.unreadable : drop.words.empty);
         return;
       }
       let total = 0;
@@ -46919,6 +46958,8 @@ function chatgptPickerProgram(kit) {
         picked.archiveName = content.archive_name;
       if (status === "started" && content.source && typeof content.source.label === "string" && content.source.label)
         picked.source = { label: content.source.label };
+      if (status !== "already_imported" && drop.skipped && drop.skipped.length)
+        picked.skipped = drop.skipped.slice();
       drop.uploadId = "";
       leaveDrop(picked);
     }, () => {
@@ -47014,9 +47055,10 @@ function chatgptPickerProgram(kit) {
       event.preventDefault();
       depth = 0;
       over(false);
-      const reading = dropped(event, () => !dropLive(mine));
+      const skipped = [];
+      const reading = dropped(event, () => !dropLive(mine), skipped);
       if (reading)
-        beginUpload(() => reading);
+        beginUpload(() => reading, skipped);
       else
         dropFail(words2.empty);
     });

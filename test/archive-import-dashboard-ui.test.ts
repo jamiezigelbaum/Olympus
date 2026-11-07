@@ -396,14 +396,29 @@ describe('Import an archive on the computer', () => {
     expect(page.uploads()[0]!.file.size).toBe('From mail'.length);
   });
 
-  test('a folder with a file the browser cannot read fails the drop rather than importing the rest', async () => {
+  test('a folder with a file or folder the browser cannot read imports the rest and names what it left out (#783)', async () => {
+    const page = await mount({
+      [DASHBOARD_TOOL_NAME]: () => dashboard('archives-none', meta([])),
+      ...uploadServe(),
+      [ARCHIVE_APPROVE_TOOL_NAME]: (args) => previewArchiveApprove(args),
+    }, { upload: noteUploads });
+    page.button(A.importAction).click();
+    await settle();
+    dropOnZone(page, [{ name: 'DataExport_2026-10-20', children: [{ name: 'result.json', text: '{}' }, { name: 'chats', children: [{ name: 'voice.ogg', unreadable: true }, { name: 'photo.jpg' }] }] }]);
+    await until(() => page.calls(ARCHIVE_APPROVE_TOOL_NAME).length > 0);
+    expect(page.uploads().map((entry) => entry.path).sort()).toEqual(['DataExport_2026-10-20/chats/photo.jpg', 'DataExport_2026-10-20/result.json']);
+    await until(() => page.text().includes(fill(A.skippedOne, { path: 'DataExport_2026-10-20/chats/voice.ogg' })));
+    expect(page.doc.querySelector('[role="alert"]')).toBeNull();
+  });
+
+  test('a drop the browser could read nothing of says it could not read it and starts nothing', async () => {
     const page = await mount({
       [DASHBOARD_TOOL_NAME]: () => dashboard('archives-none', meta([])),
       ...uploadServe(),
     });
     page.button(A.importAction).click();
     await settle();
-    dropOnZone(page, [{ name: 'Inbox.mbox', children: [{ name: 'mbox', text: 'From x' }, { name: 'Info.plist', unreadable: true }] }]);
+    dropOnZone(page, [{ name: 'Inbox.mbox', children: [{ name: 'Info.plist', unreadable: true }] }]);
     await until(() => page.doc.querySelector('[role="alert"]') !== null);
     expect(page.doc.querySelector('[role="alert"]')!.textContent).toBe(A.pick.unreadable);
     expect(page.calls(ARCHIVE_UPLOAD_START_TOOL_NAME)).toEqual([]);
