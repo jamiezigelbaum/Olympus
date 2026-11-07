@@ -24,6 +24,14 @@ export function parseCdpEndpoint(endpoint: string): { host: string; port: number
   return { host: match[1]!, port: Number(match[2]) };
 }
 
+// The persisted source cards, as machine-agent.ts reads them. /dashboard.json takes only the worker
+// bearer or the dash_ query token, never the page's session cookie (src/workers/http.ts), and the
+// page URL carries no token once the harness has navigated, so the fetch from the page answered 401.
+// The bearer goes in on stdin so it never shows in the process list.
+export const DASHBOARD_JSON = `curl -sS --max-time 10 -w '\\n%{http_code}' --unix-socket "\${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/olympus/worker.sock" -H @- http://127.0.0.1:8010/dashboard.json <<EOF
+Authorization: Bearer $("$HOME/.local/bin/olympus" dashboard token)
+EOF`;
+
 export async function openFreshDashboard(machine: Machine, endpoint: string, timings: { timeoutMs?: number; pollMs?: number } = {}): Promise<FreshDashboard> {
   const { host, port } = parseCdpEndpoint(endpoint);
   let tunnel: Tunnel | undefined;
@@ -137,11 +145,13 @@ export async function openFreshDashboard(machine: Machine, endpoint: string, tim
     const session = await attach(dash);
     await browser.send('Page.navigate', { url }, session);
     await until(async () => !!await panel<boolean>(`!!document.querySelector('.source-name')`, Boolean), 'dashboard did not open from the CLI link');
-    // Persisted cards are the same /dashboard.json source cards machine-agent.ts reads.
-    const dashboardView = async (): Promise<{ status: number; view: any }> => await evalIn<{ status: number; view: any }>(session, `(async()=>{
-      const u=new URL('/dashboard.json',location.href); const t=new URL(location.href).searchParams.get('token'); if(t)u.searchParams.set('token',t);
-      const r=await fetch(u); if(!r.ok)return { status: r.status, view: null }; return { status: r.status, view: await r.json() };
-    })()`);
+    const dashboardView = async (): Promise<{ status: number; view: any }> => {
+      const read = await machine.exec(DASHBOARD_JSON, { timeoutMs: 30_000 });
+      const lines = read.stdout.trimEnd().split('\n');
+      const status = Number(lines.pop()) || 0;
+      if (read.code !== 0 || status !== 200) return { status, view: null };
+      try { return { status, view: JSON.parse(lines.join('\n')) }; } catch { return { status, view: null }; }
+    };
     const card = async (s: LiveSourceSpec): Promise<any> => sourceCard((await dashboardView()).view, s.id);
     const connected = sourceConnected;
     const navigate = async (path: string): Promise<boolean> => {
@@ -188,7 +198,7 @@ export async function openFreshDashboard(machine: Machine, endpoint: string, tim
         // Say which precondition failed, from the dashboard's own JSON: provider names and states only.
         const { status, view } = await dashboardView();
         const before = sourceCard(view, s.id);
-        if (!view) throw new Error(`fresh source card unreadable: /dashboard.json answered ${status}`);
+        if (!view) throw new Error(`fresh source card unreadable: /dashboard.json answered ${status || 'nothing'}`);
         if (!before) throw new Error(`no ${s.id} source card; the dashboard lists: ${(view.sources ?? []).map((c: any) => String(c.provider)).join(', ') || 'none'}`);
         if (connected(before)) throw new Error(`${s.id} is already connected (${String(before.connection?.state)}) on a fresh install`);
         baseline.clear();

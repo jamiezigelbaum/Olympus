@@ -23,15 +23,14 @@ for (const mode of ['saves', 'loses', 'refused', 'unlock'] as const) test(`first
   let window: Window | undefined;
   let controller: { dispose(): void } | undefined;
   const evaluate = (expression: string): any => {
-    const names = ['window', 'document', 'navigator', 'Element', 'HTMLElement', 'HTMLFormElement', 'HTMLInputElement', 'HTMLTextAreaElement', 'HTMLSelectElement', 'HTMLButtonElement', 'ShadowRoot', 'Event', 'MouseEvent', 'FormData', 'CSS', 'getComputedStyle', 'fetch', 'location'] as const;
-    return new Function(...names, `return ${expression}`)(...names.map(name => name === 'window' ? window : name === 'getComputedStyle' ? window!.getComputedStyle.bind(window) : name === 'fetch' ? dashboardFetch : name === 'location' ? window!.location : window![name]));
+    const names = ['window', 'document', 'navigator', 'Element', 'HTMLElement', 'HTMLFormElement', 'HTMLInputElement', 'HTMLTextAreaElement', 'HTMLSelectElement', 'HTMLButtonElement', 'ShadowRoot', 'Event', 'MouseEvent', 'FormData', 'CSS', 'getComputedStyle', 'location'] as const;
+    return new Function(...names, `return ${expression}`)(...names.map(name => name === 'window' ? window : name === 'getComputedStyle' ? window!.getComputedStyle.bind(window) : name === 'location' ? window!.location : window![name]));
   };
   const host = new Window({ url: 'http://127.0.0.1:8010/' });
   const hostEvaluate = (expression: string): unknown => new Function('window', 'document', `return ${expression}`)(host, host.document);
   let unlocked = false, unlocks = 0;
   // The engine's /dashboard.json as the page fetches it.
   let dashboardJson: { status: number; body: unknown } = { status: 200, body: { sources: [] } };
-  const dashboardFetch = async (url: URL) => { expect(url.pathname).toBe('/dashboard.json'); return new Response(JSON.stringify(dashboardJson.body), { status: dashboardJson.status }); };
   let keysVisits = 0;
   let navigationFailures = 0;
   let loader = 0;
@@ -105,6 +104,10 @@ for (const mode of ['saves', 'loses', 'refused', 'unlock'] as const) test(`first
     put: async () => {}, get: async () => {}, upgrade: async () => {},
     tunnel: async port => { expect(port).toBe(9333); return { port: server.port!, close: () => { events.push('tunnel.close'); } }; },
     exec: async script => {
+      if (script.includes('/dashboard.json')) {
+        expect(script).toContain('Authorization: Bearer $("$HOME/.local/bin/olympus" dashboard token)');
+        return { code: 0, stdout: `${JSON.stringify(dashboardJson.body)}\n${dashboardJson.status}`, stderr: '', timedOut: false, ms: 0 };
+      }
       const bridge = script.includes('owner-bridge --port');
       events.push(bridge ? 'bridge.start' : script.startsWith('kill ') ? 'bridge.stop' : 'mint');
       if (bridge) expect(script).toContain('/home/olyfresh/.olympus-canary/owner-bridge.pid');
