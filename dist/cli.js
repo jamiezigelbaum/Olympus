@@ -160148,7 +160148,7 @@ var LOCAL_PAGE_CSS = `
 .remoteterms p { margin: 0 0 8px; max-width: 72ch; }
 .remoteterms .rowform { margin-top: 4px; }
 .promptbox.prose { word-break: normal; overflow-wrap: anywhere; }`, MODEL_SETUP_CSS = `
-[data-first-run-computer] fieldset{border:0;padding:0}[data-first-run-computer] [data-server-checklist]{display:none}[data-first-run-computer]:has(input[value="server"]:checked) [data-server-checklist]{display:block}
+[data-first-run-computer] fieldset,[data-computer-use] fieldset,[data-judge-choice] fieldset{border:0;padding:0;margin:0;min-width:0}[data-first-run-computer] [data-server-checklist]{display:none}[data-first-run-computer]:has(input[value="server"]:checked) [data-server-checklist]{display:block}
 [data-first-run-privacy]{display:grid;gap:12px;margin:16px 0}[data-first-run-privacy] .modelcard{display:block;cursor:pointer}
 [data-first-run-sheet] [hidden]{display:none!important}
 .modelcards{display:grid;gap:12px;margin:16px 0 20px}.modelcard{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:16px 18px;min-width:0}
