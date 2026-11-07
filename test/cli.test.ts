@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { prepareWorkerSocket, bindWorkerSocket } from '../src/core/worker-transport.ts';
 import {
   chmodSync,
   existsSync,
@@ -2062,3 +2063,38 @@ test('Linux desktop dashboard asks the socket to open a private file, and refuse
     await expect(runDashboardCommand({ platform: 'linux', fetchImpl: async () => Response.json({ state: 'port_in_use', remedy: 'Free the port or use SSH socket forward.' }, { status: 503 }) })).rejects.toThrow('Free the port');
   } finally { env.restore(); rmSync(home, { recursive: true, force: true }); }
 });
+
+test('source answer uses the local analyst without OpenClaw and preserves explicit provider/model choices', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'cli-answer-'));
+  const env = { HOME: home, XDG_RUNTIME_DIR: home, PATH: '', OLYMPUS_WORKER_AUTH_TOKEN: 'fixture-token',
+    OLYMPUS_CONFIG: join(home, 'config.json') };
+  writeFileSync(env.OLYMPUS_CONFIG, JSON.stringify({ sourceIndex: { enabled: true }, email: { enabled: true } }));
+  const requests: Record<string, unknown>[] = [];
+  const handler = async (request: Request) => {
+    expect(request.headers.get('Authorization')).toBe('Bearer fixture-token');
+    if (new URL(request.url).pathname.endsWith('/release')) return Response.json({ allowed: true });
+    requests.push(await request.json() as Record<string, unknown>);
+    return Response.json({
+      _release_ticket: 'a'.repeat(43), answer: 'Safe local answer.', evidence: [],
+      audit: { searched_corpora: [], skipped_corpora: [], lane_audits: [], latency_ms: 1, raw_source_exposed: false },
+      policy: { raw_source_exposed: false, source_packets_exposed: false, internal_content_exposed: false,
+        secure_local_content_exposed: false, castor_safe_bridge: true },
+    });
+  };
+  const socket = prepareWorkerSocket({ env });
+  const server = socket
+    ? bindWorkerSocket(socket, () => Bun.serve({ unix: socket, fetch: handler }))
+    : Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: handler });
+  try {
+    const workerEnv = { ...env, OLYMPUS_EMAIL_BASE_URL: socket ? 'http://127.0.0.1:8010/v1' : `http://127.0.0.1:${server.port}/v1` };
+    // The absolute Bun executable runs the CLI; an empty PATH contains no OpenClaw.
+    const answer = await runSourceCli(['source', 'answer', 'What did I save?'], workerEnv);
+    expect(JSON.parse(answer.stdout).answer).toBe('Safe local answer.');
+    expect(requests[0]).toMatchObject({ question: 'What did I save?', analyst_provider: 'local', caller: { surface: 'cli' } });
+    await runSourceCli(['source', 'answer', 'Another question', '--analyst-provider', 'cloud'], workerEnv);
+    expect(requests[1]!.analyst_provider).toBe('cloud');
+    await runSourceCli(['source', 'answer', 'Another question', '--analyst-model', 'kimi-k3'], workerEnv);
+    expect(requests[2]!.analyst_model).toBe('kimi-k3');
+    expect(requests[2]!.analyst_provider).toBeUndefined();
+  } finally { server.stop(true); rmSync(home, { recursive: true, force: true }); }
+}, 30_000);

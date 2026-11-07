@@ -837,6 +837,14 @@ async function main(): Promise<void> {
 
   try {
     const params = parseArgs(operation, rest);
+    // The default answer lane reaches cloud inference through OpenClaw. A
+    // standalone install has no OpenClaw, so the CLI asks the local analyst
+    // there instead. An explicit provider or model still selects the owner's
+    // requested lane, and an OpenClaw install keeps its default.
+    if (operation.name === 'source_answer' && params.analyst_provider === undefined && params.analyst_model === undefined
+      && !Bun.which('openclaw')) {
+      params.analyst_provider = 'local';
+    }
     validateRequired(operation, params);
     const ctx = makeContext();
     if (!shouldExposeOperation(operation, { config: ctx.config, surface: 'cli' })) {

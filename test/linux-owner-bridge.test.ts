@@ -3,6 +3,7 @@ import { mkdtempSync, readFileSync, rmSync, statSync, existsSync, chmodSync, wri
 import * as fs from 'node:fs';
 import { tmpdir } from 'node:os';
 import { runInNewContext } from 'node:vm';
+import { Window } from 'happy-dom';
 import { join } from 'node:path';
 import { LinuxOwnerBridge, manageLinuxOwnerBridge, randomOwnerHostname } from '../src/core/linux-owner-bridge.ts';
 import { prepareWorkerSocket, bindWorkerSocket } from '../src/core/worker-transport.ts';
@@ -823,3 +824,62 @@ for (const phase of ['body', 'session']) test(`approved owner claim mints no coo
   expect(refused.headers.has('Set-Cookie')).toBe(false);
   if (phase === 'body') expect(calls).toBe(0);
 });
+
+test('non-default browser confirmation reaches authorization using independent owner-window storage', async () => {
+  const path = '/connect/authorize?state=original%2Bstate&client_id=fixture';
+  const seen: string[] = [];
+  const f = fixture(async request => {
+    seen.push(new URL(request.url).pathname + new URL(request.url).search);
+    return new Response('<!doctype html><h1>Authorize fixture</h1>', { headers: { 'Content-Type': 'text/html' } });
+  });
+  const waiting = new Window({ url: f.bridge.origin + path });
+  const owner = new Window({ url: f.bridge.origin + '/owner-proof' });
+  cleanup.push(() => { waiting.close(); owner.close(); });
+  // Each browser has its own cookie jar AND localStorage. No storage event or
+  // shared profile transfers the proof; only the server-side claim can do it.
+  function browser(window: Window) {
+    let cookie = '';
+    window.fetch = (async (input: string, init: RequestInit = {}) => {
+      const headers = new Headers(init.headers);
+      if (cookie) headers.set('Cookie', cookie);
+      if (init.method === 'POST') { headers.set('Origin', f.bridge.origin); headers.set('Sec-Fetch-Site', 'same-origin'); }
+      const url = new URL(input, window.location.href);
+      const response = await f.bridge.handle(f.request(url.pathname + url.search, { ...init, headers }));
+      const set = response.headers.get('Set-Cookie');
+      if (set) cookie = set.split(';')[0]!;
+      return response;
+    }) as unknown as typeof window.fetch;
+    return async (html: string) => {
+      window.document.body.innerHTML = html;
+      runInNewContext([...window.document.querySelectorAll('script')].map(script => script.textContent).join('\n'), {
+        window, document: window.document, location: window.location, history: window.history, localStorage: window.localStorage,
+        fetch: (...args: Parameters<typeof window.fetch>) => window.fetch(...args), Headers, Request, URL,
+        XMLHttpRequest: window.XMLHttpRequest, HTMLFormElement: window.HTMLFormElement,
+        addEventListener: window.addEventListener.bind(window), removeEventListener: window.removeEventListener.bind(window),
+        setTimeout: window.setTimeout.bind(window), clearTimeout: window.clearTimeout.bind(window),
+        setInterval: window.setInterval.bind(window), clearInterval: window.clearInterval.bind(window),
+      });
+    };
+  }
+  const showWaiting = browser(waiting), showOwner = browser(owner);
+  await showWaiting(await (await f.bridge.handle(f.request(path, { headers: { Accept: 'text/html' } }))).text());
+  // Bun's DOM shim does not dispatch callbacks created in a VM context.
+  await (waiting.document.getElementById('confirm') as unknown as { onclick(): Promise<void> }).onclick();
+  for (let i = 0; i < 20 && !f.opened(); i++) await Bun.sleep(5);
+  expect(waiting.document.getElementById('message')!.textContent).toContain('Approve in the Olympus window');
+  expect(f.opened()).not.toBe('');
+  const ticket = readFileSync(f.opened(), 'utf8').match(/owner-proof#([A-Za-z0-9_-]{43})/)![1]!;
+  owner.location.hash = ticket;
+  await showOwner(await (await f.bridge.handle(f.request('/owner-proof'))).text());
+  for (let i = 0; i < 20 && !owner.document.getElementById('approve'); i++) await Bun.sleep(5);
+  expect(owner.document.getElementById('approval-code')!.textContent).not.toBe('');
+  expect(waiting.document.getElementById('code')!.textContent).toContain(owner.document.getElementById('approval-code')!.textContent!);
+  expect(owner.localStorage.getItem('olympus-desktop-owner-v1')).not.toBeNull();
+  expect(waiting.localStorage.getItem('olympus-desktop-owner-v1')).toBeNull();
+  expect(seen).not.toContain(path);
+  await (owner.document.getElementById('approve') as unknown as { onclick(): Promise<void> }).onclick();
+  for (let i = 0; i < 60 && !seen.includes(path); i++) await Bun.sleep(25);
+  expect(seen).toContain(path);
+  expect(waiting.document.querySelector('h1')!.textContent).toBe('Authorize fixture');
+  expect(waiting.localStorage.getItem('olympus-desktop-owner-v1')).not.toBe(owner.localStorage.getItem('olympus-desktop-owner-v1'));
+}, 10_000);
