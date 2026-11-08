@@ -2833,6 +2833,7 @@ var init_public_surface = __esm(() => {
     "server-mode on",
     "server-mode off",
     "server-mode auto",
+    "settings show",
     "source answer",
     "source index status",
     "source index search",
@@ -17305,7 +17306,7 @@ var init_cli_via_worker = __esm(() => {
   init_operation_error();
   init_worker_auth();
   init_worker_transport();
-  WORKER_CLI_OPERATIONS = ["ingestion-status", "data-export", "data-delete", "tier", "pairing-placement", "pairing-account"];
+  WORKER_CLI_OPERATIONS = ["ingestion-status", "data-export", "data-delete", "tier", "pairing-placement", "pairing-account", "settings"];
   WorkerUnreachableError = class WorkerUnreachableError extends Error {
     constructor(detail) {
       super(`No Olympus worker answered (${detail}).`);
@@ -165861,6 +165862,42 @@ async function tierForCli(body) {
   }
   return runTierCommand(args);
 }
+async function settingsForCli(sources) {
+  const computer = sources.computerSetup?.();
+  const judge3 = sources.judge?.();
+  const choices = await sources.modelChoices?.().catch(() => {
+    return;
+  });
+  const outside = await sources.outsideHelp?.().catch(() => {
+    return;
+  });
+  return {
+    kind: "olympus_settings",
+    private_answer_mode: sources.answerMode(),
+    computer_use: computer ? computer.engine_server_mode ? {
+      choice: computer.computer_use_pending === true ? null : computer.engine_server_mode.enabled ? "server" : "everyday",
+      change_pending: computer.engine_server_mode.pending
+    } : { choice: null, available: false } : null,
+    privacy_judge: judge3 ? {
+      choice: judge3.choice,
+      spending_limit_dollars: judge3.uncapped ? null : judge3.capDollars,
+      spent_dollars: judge3.spentDollars,
+      stopped: judge3.stop,
+      cloud_model: judge3.cloudModel
+    } : null,
+    models: choices ? Object.fromEntries(Object.entries(choices).filter(([, list]) => list).map(([provider, list]) => [provider, {
+      current: list.current,
+      ...list.strongestNow ? { strongest_now: list.strongestNow } : {},
+      options: list.options.map((option) => option.value)
+    }])) : null,
+    outside_help: outside ? {
+      state: outside.unavailable ? "unavailable" : outside.settings.state,
+      level: outside.settings.level,
+      strict: outside.settings.strict,
+      restart_pending: outside.restartPending
+    } : null
+  };
+}
 var TIER_ARGS_MAX = 64, TIER_ARG_MAX_LENGTH = 4096;
 var init_cli_operations = __esm(() => {
   init_cli_via_worker();
@@ -170039,6 +170076,21 @@ function createEmailSourceWorker(options = {}) {
                 return json(pairingPlacementForCli(body));
               case "pairing-account":
                 return json(pairingAccountForCli(body));
+              case "settings": {
+                if (!sourceDashboard)
+                  throw new EmailSourceWorkerError(501, "source_dashboard_not_supported", "This Olympus has no dashboard settings to show.");
+                const dashboard = sourceDashboard;
+                return json(await settingsForCli({
+                  answerMode: () => {
+                    const id = privateAnswerMode(dashboard.sovereigntyEngine.config);
+                    return { id, label: id === "custom" ? "Custom Private-answer mode" : PRIVACY_PRESET_LABELS[id] };
+                  },
+                  ...dashboard.computerSetup ? { computerSetup: dashboard.computerSetup } : {},
+                  ...dashboard.judgeSetup ? { judge: dashboard.judgeSetup.status } : {},
+                  ...dashboard.modelChoices ? { modelChoices: () => dashboard.modelChoices.status() } : {},
+                  ...dashboard.consult ? { outsideHelp: () => dashboard.consult.status() } : {}
+                }));
+              }
             }
           }
         }
@@ -227658,6 +227710,20 @@ Run: ${ocr.repairHint}`);
     }
     return;
   }
+  if (args[0] === "settings") {
+    try {
+      console.log(JSON.stringify(await runSettingsCommand(args.slice(1)), null, 2));
+    } catch (error2) {
+      if (error2 instanceof OperationError) {
+        console.error(`Error [${error2.code}]: ${error2.message}`);
+        if (error2.suggestion)
+          console.error(`Fix: ${error2.suggestion}`);
+        process.exit(1);
+      }
+      throw error2;
+    }
+    return;
+  }
   if (args[0] === "server-mode") {
     try {
       console.log(JSON.stringify(runServerModeCommand(args.slice(1)), null, 2));
@@ -228008,7 +228074,7 @@ function v04PublicCliCommandName(args) {
     return group;
   if (group === "source" && command === "extract-pdfs")
     return "source extract-pdfs";
-  if (group === "sovereignty" || group === "worker" || group === "engine" || group === "connect" || group === "connections" || group === "data" || group === "tier" || group === "zkapi" || group === "open-handler" || group === "server-mode") {
+  if (group === "sovereignty" || group === "worker" || group === "engine" || group === "connect" || group === "connections" || group === "data" || group === "tier" || group === "zkapi" || group === "open-handler" || group === "server-mode" || group === "settings") {
     return command ? `${group} ${command}` : undefined;
   }
   return;
@@ -228395,6 +228461,7 @@ function printHelp() {
   console.log("  olympus open olympus://open/<target>");
   console.log("  olympus open-handler install|uninstall|status");
   console.log("  olympus server-mode status|on|off|auto [--ssh-target <user@host>] [--agent-route on|off]");
+  console.log("  olympus settings show");
   console.log("  olympus doctor");
   console.log("  olympus connect google|gmail|google-drive --client-id <id> [--client-secret-stdin] [--redirect-port <port>] [--oauth-timeout-ms <ms>]");
   console.log("  olympus connect dropbox --client-id <id> [--redirect-port <port>] [--oauth-timeout-ms <ms>]");
@@ -228455,6 +228522,7 @@ var PUBLIC_LEAF_USAGE = {
   "open-handler install": "olympus open-handler install",
   "open-handler uninstall": "olympus open-handler uninstall",
   "open-handler status": "olympus open-handler status",
+  "settings show": "olympus settings show",
   "server-mode status": "olympus server-mode status",
   "server-mode on": "olympus server-mode on [--ssh-target <user@host>] [--agent-route on|off]",
   "server-mode off": "olympus server-mode off",
@@ -228567,6 +228635,11 @@ var COMMAND_GROUP_HELP = {
     "  olympus zkapi test-writer     Test your own local model as the anonymous-answer writer on invented cases (sends nothing to zkAPI)",
     "  olympus zkapi recover         Finish paying for a held anonymous question (asks for confirmation)",
     "  olympus zkapi abandon <scope> Stop a held question from blocking new ones (asks for confirmation)"
+  ],
+  settings: [
+    "Usage: olympus settings <command>",
+    "Commands:",
+    "  olympus settings show   Every dashboard setting, as JSON, read from the running Olympus (changes nothing)"
   ],
   "server-mode": [
     "Usage: olympus server-mode <command>",
@@ -229787,6 +229860,19 @@ function remoteUrlFields(urls) {
     public_base_url: urls.public_base_url
   };
 }
+async function runSettingsCommand(args, env = process.env, options = {}) {
+  if (args.length !== 1 || args[0] !== "show")
+    throw new OperationError("invalid_params", "Usage: olympus settings show");
+  let settings;
+  try {
+    settings = await callWorkerCli("settings", {}, { env, ...options.fetchImpl ? { fetchImpl: options.fetchImpl } : {} });
+  } catch (error2) {
+    if (!(error2 instanceof WorkerUnreachableError))
+      throw error2;
+    throw new OperationError("config_error", "Olympus is not running, so its settings cannot be read.", "Start Olympus (olympus engine start), then run olympus settings show again.");
+  }
+  return { ...settings, remote_access: runConnectionsStatus(env) };
+}
 function runConnectionsStatus(env) {
   const dir = remoteAccessDirForCli(env);
   const status = readRemoteAccessStatus(dir);
@@ -230057,6 +230143,7 @@ export {
   runWorkerForeground,
   runSourceSchedulerUnparkCancel,
   runSourceSchedulerUnpark,
+  runSettingsCommand,
   runServerModeCommand,
   runOpenCommand,
   runGoogleRequestBudgetFutureRecovery,

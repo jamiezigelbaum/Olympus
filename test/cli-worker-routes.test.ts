@@ -60,6 +60,7 @@ const WORK: Record<string, Record<string, unknown>> = {
   tier: { args: ['migrate', 'status'] },
   'pairing-placement': { source_id: 'telegram.messages' },
   'pairing-account': { source_id: 'telegram.messages', account_id: 'telegram:0123456789abcdef' },
+  settings: {},
 };
 
 describe('who can reach the CLI routes', () => {

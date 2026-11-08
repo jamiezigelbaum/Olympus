@@ -145,7 +145,7 @@ import {
 } from './core/sovereignty.ts';
 import { TIER_CLI_USAGE, runTierCommand, tierCommandOpensStores, tierCommandRewritesStores } from './workers/classification/tier-cli.ts';
 import { DataOwnerBusyError } from './core/data-owner-lock.ts';
-import { callWorkerCli, runLocallyOrThroughWorker } from './core/cli-via-worker.ts';
+import { callWorkerCli, runLocallyOrThroughWorker, WorkerUnreachableError } from './core/cli-via-worker.ts';
 import { olympusDataRoot } from './core/olympus-layout.ts';
 import {
   runSetupWizard,
@@ -565,6 +565,20 @@ async function main(): Promise<void> {
       const result = await runOpenCommand(args.slice(1));
       console.log(JSON.stringify(result, null, 2));
       if (!result.opened) process.exitCode = 1;
+    } catch (error) {
+      if (error instanceof OperationError) {
+        console.error(`Error [${error.code}]: ${error.message}`);
+        if (error.suggestion) console.error(`Fix: ${error.suggestion}`);
+        process.exit(1);
+      }
+      throw error;
+    }
+    return;
+  }
+
+  if (args[0] === 'settings') {
+    try {
+      console.log(JSON.stringify(await runSettingsCommand(args.slice(1)), null, 2));
     } catch (error) {
       if (error instanceof OperationError) {
         console.error(`Error [${error.code}]: ${error.message}`);
@@ -998,6 +1012,7 @@ export function v04PublicCliCommandName(args: readonly string[]): string | undef
     || group === 'zkapi'
     || group === 'open-handler'
     || group === 'server-mode'
+    || group === 'settings'
   ) {
     return command ? `${group} ${command}` : undefined;
   }
@@ -1446,6 +1461,7 @@ function printHelp(): void {
   console.log('  olympus open olympus://open/<target>');
   console.log('  olympus open-handler install|uninstall|status');
   console.log('  olympus server-mode status|on|off|auto [--ssh-target <user@host>] [--agent-route on|off]');
+  console.log('  olympus settings show');
   console.log('  olympus doctor');
   console.log('  olympus connect google|gmail|google-drive --client-id <id> [--client-secret-stdin] [--redirect-port <port>] [--oauth-timeout-ms <ms>]');
   console.log('  olympus connect dropbox --client-id <id> [--redirect-port <port>] [--oauth-timeout-ms <ms>]');
@@ -1506,6 +1522,7 @@ const PUBLIC_LEAF_USAGE: Readonly<Record<string, string>> = {
   'open-handler install': 'olympus open-handler install',
   'open-handler uninstall': 'olympus open-handler uninstall',
   'open-handler status': 'olympus open-handler status',
+  'settings show': 'olympus settings show',
   'server-mode status': 'olympus server-mode status',
   'server-mode on': 'olympus server-mode on [--ssh-target <user@host>] [--agent-route on|off]',
   'server-mode off': 'olympus server-mode off',
@@ -1621,6 +1638,11 @@ const COMMAND_GROUP_HELP: Record<string, string[]> = {
     '  olympus zkapi test-writer     Test your own local model as the anonymous-answer writer on invented cases (sends nothing to zkAPI)',
     '  olympus zkapi recover         Finish paying for a held anonymous question (asks for confirmation)',
     '  olympus zkapi abandon <scope> Stop a held question from blocking new ones (asks for confirmation)',
+  ],
+  settings: [
+    'Usage: olympus settings <command>',
+    'Commands:',
+    '  olympus settings show   Every dashboard setting, as JSON, read from the running Olympus (changes nothing)',
   ],
   'server-mode': [
     'Usage: olympus server-mode <command>',
@@ -3120,6 +3142,30 @@ function remoteUrlFields(urls: RemoteAccessUrls): Record<string, unknown> {
  * URLs to hand an agent. The same JSON is what the
  * dashboard's "Connect an agent" panel consumes.
  */
+/**
+ * `olympus settings show`: what the dashboard's Settings and Privacy tabs
+ * show, as JSON, so an agent helping the owner can check them without asking
+ * the owner to read the screen. Read-only. Changing a setting stays a click in
+ * the dashboard on this computer: the worker takes those writes only from a
+ * local control session, so an agent's choices never stand in for the
+ * owner's (#598, #1050).
+ */
+export async function runSettingsCommand(
+  args: readonly string[],
+  env: Record<string, string | undefined> = process.env,
+  options: { fetchImpl?: typeof fetch } = {},
+): Promise<Record<string, unknown>> {
+  if (args.length !== 1 || args[0] !== 'show') throw new OperationError('invalid_params', 'Usage: olympus settings show');
+  let settings: Record<string, unknown>;
+  try {
+    settings = await callWorkerCli<Record<string, unknown>>('settings', {}, { env, ...(options.fetchImpl ? { fetchImpl: options.fetchImpl } : {}) });
+  } catch (error) {
+    if (!(error instanceof WorkerUnreachableError)) throw error;
+    throw new OperationError('config_error', 'Olympus is not running, so its settings cannot be read.', 'Start Olympus (olympus engine start), then run olympus settings show again.');
+  }
+  return { ...settings, remote_access: runConnectionsStatus(env) };
+}
+
 function runConnectionsStatus(env: Record<string, string | undefined>): Record<string, unknown> {
   const dir = remoteAccessDirForCli(env);
   const status = readRemoteAccessStatus(dir);
