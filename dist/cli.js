@@ -140706,6 +140706,13 @@ var init_stdio2 = __esm(() => {
   init_stdio();
 });
 
+// src/core/privacy-backlog-coverage.ts
+function privacyBacklogCoverageNote(pendingItems) {
+  if (pendingItems === undefined || !Number.isSafeInteger(pendingItems) || pendingItems <= 0)
+    return;
+  return `Olympus is still checking ${pendingItems} new item${pendingItems === 1 ? "" : "s"} for privacy before ${pendingItems === 1 ? "it" : "they"} can be searched. ` + "This can take a while on this computer.";
+}
+
 // src/core/remote-result.ts
 function providerSourceLabel(provider) {
   return Object.prototype.hasOwnProperty.call(PROVIDER_LABELS, provider) ? PROVIDER_LABELS[provider] : undefined;
@@ -140804,10 +140811,15 @@ function sourceAnswerOutput(raw, options) {
       return;
     citations.push(citationOutput(entry));
   });
+  const privacyCoverage = privacyBacklogCoverageNote(options.pendingPrivacyItems);
+  const coverageSuffix = privacyCoverage ? `
+
+Coverage notes:
+- ${privacyCoverage}` : "";
   return {
     kind: "source_answer",
     status: "answered",
-    answer: answer.text ?? "",
+    answer: (answer.text ?? "").slice(0, MAX_ANSWER - coverageSuffix.length) + coverageSuffix,
     citations
   };
 }
@@ -142108,6 +142120,7 @@ async function handleRemoteCallTool(request, makeOperationContext) {
   try {
     const result = await runWithReleaseManifestSink(manifests, () => operation.handler(ctx, args));
     const release = () => remoteOperationOutput(operation.name, result, {
+      pendingPrivacyItems: ctx.pendingPrivacyItems?.(),
       ...ctx.releaseCheck ? { releaseCheck: ctx.releaseCheck } : {},
       releaseManifests: manifests.manifests
     });
@@ -201442,6 +201455,9 @@ function answerToolResult(raw, options = {}) {
   const shownCitations = usedPrivate ? [] : citations;
   const privateNote = privateMatchNote(options.privateMatch, 0, !usedPrivate && shownCitations.length > 0);
   const notes = privateNote ? [privateNote] : privateMatched ? [DASHBOARD_CHATGPT_VOCABULARY.privateMatches] : [];
+  const privacyCoverage = privacyBacklogCoverageNote(options.pendingPrivacyItems);
+  if (privacyCoverage)
+    notes.push(privacyCoverage);
   if (!privateNote && options.privateCheckPending)
     notes.push(PRIVATE_CHECK_PENDING_NOTE);
   const textParts = [answer];
@@ -201519,6 +201535,9 @@ function searchToolResult(raw, options = {}) {
   const panelActive = copyPrivateMatch(options.privateMatch) !== undefined;
   const nothingRead = evidence.every((entry) => entry.excerpt === undefined);
   const notes = [];
+  const privacyCoverage = privacyBacklogCoverageNote(options.pendingPrivacyItems);
+  if (privacyCoverage)
+    notes.push(privacyCoverage);
   if (!panelActive && nothingRead && coverage.namesOnlyItems > 0)
     notes.push(namesOnlyCoverageNote(coverage.namesOnlyItems));
   if (!panelActive && whole(record8.withheld) > 0)
@@ -203030,12 +203049,12 @@ async function callChatGptTool(name, args, ctx, options, signal, detachedContext
   if (name === SEARCH_TOOL_NAME && Array.isArray(result.structuredContent?.evidence) && result.structuredContent.evidence.length > 0) {
     const reason = ctx.releaseCheck ? answerReleaseWithheldReason(manifests.manifests, ctx.releaseCheck, "personal") : ANSWER_RELEASE_UNVERIFIED;
     if (reason)
-      return searchToolResult({ evidence: [], withheld: result.structuredContent.evidence.length, notes: [reason] });
+      return searchToolResult({ evidence: [], withheld: result.structuredContent.evidence.length, notes: [reason] }, { pendingPrivacyItems: ctx.pendingPrivacyItems?.() });
   }
   if ((name === "source_answer" || name === "source_answer_result") && result.structuredContent?.status === "answered" && !(result.structuredContent && ("anonymous" in result.structuredContent))) {
     const reason = ctx.releaseCheck ? answerReleaseWithheldReason(manifests.manifests, ctx.releaseCheck, "personal") : ANSWER_RELEASE_UNVERIFIED;
     if (reason)
-      return withPrivateAnswerOutcome(answerToolResult(withheldSourceAnswer(reason)));
+      return withPrivateAnswerOutcome(answerToolResult(withheldSourceAnswer(reason), { pendingPrivacyItems: ctx.pendingPrivacyItems?.() }));
   }
   return PANEL_TOOL_NAMES2.has(name) ? withPrivateAnswerOutcome(result) : result;
 }
@@ -203072,13 +203091,14 @@ async function runChatGptTool(name, args, ctx, options, signal, detachedContext)
         const match = normalizeProbe(probed);
         const waiting = match.count > 0 ? recordWaiting(ticket, question, detail, options) : undefined;
         const privateMatch = match.count > 0 ? beginPrivateAnswer({ question, match, refresh: privateRefresh(question, probe, later, options), caller: privateCaller(ctx), detail, waiting }, options) : undefined;
-        const result = searchToolResult(raw, privateMatch ? { privateMatch } : late.timedOut ? { privateCheckPending: true } : {});
+        const resultOptions = { pendingPrivacyItems: ctx.pendingPrivacyItems?.(), ...privateMatch ? { privateMatch } : late.timedOut ? { privateCheckPending: true } : {} };
+        const result = searchToolResult(raw, resultOptions);
         if (!privateMatch && result.structuredContent?.status === "none") {
           const sources = await dashboardViewModel(options, signal).then((view3) => view3.sources, () => {
             return;
           });
           if (sources && sources.every((source) => source.status === "Off"))
-            return searchToolResult(raw, { noSourcesConnected: true });
+            return searchToolResult(raw, { ...resultOptions, noSourcesConnected: true });
         }
         return result;
       }
@@ -203112,7 +203132,7 @@ async function runChatGptTool(name, args, ctx, options, signal, detachedContext)
           return answerToolResult(raw);
         }
         const privateMatch = pending ? beginPrivateAnswer(pending, options) : undefined;
-        return answerToolResult(raw, privateMatch ? { privateMatch } : late.timedOut ? { privateCheckPending: true } : {});
+        return answerToolResult(raw, { pendingPrivacyItems: ctx.pendingPrivacyItems?.(), ...privateMatch ? { privateMatch } : late.timedOut ? { privateCheckPending: true } : {} });
       }
       case SOURCE_ANSWER_RESULT_TOOL.name: {
         if (!answerToolsListed(ctx, options) && !askToolListed(ctx))
@@ -203126,7 +203146,7 @@ async function runChatGptTool(name, args, ctx, options, signal, detachedContext)
         const done = pendingJobId(raw) === undefined;
         const pending = privateMatchForJob(privateCaller(ctx), jobId, done && isAnswered(raw));
         const privateMatch = done && isAnswered(raw) && pending?.match ? beginPrivateAnswer(pending.match, options) : undefined;
-        return answerToolResult(raw, privateMatch ? { privateMatch } : done && pending?.timedOut ? { privateCheckPending: true } : {});
+        return answerToolResult(raw, { pendingPrivacyItems: ctx.pendingPrivacyItems?.(), ...privateMatch ? { privateMatch } : done && pending?.timedOut ? { privateCheckPending: true } : {} });
       }
       case ASK_ANONYMOUSLY_TOOL.name: {
         if (!askToolListed(ctx))
@@ -213112,7 +213132,7 @@ async function runSearch(args, options, authorized, context3, signal) {
   if (!Array.isArray(raw?.evidence)) {
     return errorResult(remoteErrorOutput(new OperationError("source_index_error", "unexpected search shape")));
   }
-  let result = searchToolResult(raw);
+  let result = searchToolResult(raw, { pendingPrivacyItems: context3.pendingPrivacyItems?.() });
   let note;
   if (privateCall) {
     const recorded = await privateCall.settle(raw, undefined);
@@ -213123,7 +213143,7 @@ async function runSearch(args, options, authorized, context3, signal) {
     if (context3.releaseCheck && Array.isArray(evidence) && evidence.length > 0 && answerReleaseWithheldReason(manifests.manifests, context3.releaseCheck, "personal") !== undefined) {
       const rawRecord = raw;
       const withheldBefore = typeof rawRecord.withheld === "number" && Number.isFinite(rawRecord.withheld) && rawRecord.withheld > 0 ? rawRecord.withheld : 0;
-      result = searchToolResult({ ...rawRecord, evidence: [], withheld: withheldBefore + evidence.length });
+      result = searchToolResult({ ...rawRecord, evidence: [], withheld: withheldBefore + evidence.length }, { pendingPrivacyItems: context3.pendingPrivacyItems?.() });
     }
     if (recorded)
       note = remotePrivateNote(privateCall.answerId, privateCall.secretMatch);
@@ -213268,6 +213288,7 @@ function createRemoteMcpHandler(options) {
     const detached = () => options.makeOperationContext(caller, new AbortController().signal);
     const demo = options.demoGrant?.(verification.connection) === true;
     const server = chatgpt ? surface === "directory" ? (options.directoryServer ?? createChatGptDirectoryMcpServer)(() => ctx, chatgpt, detached) : createChatGptMcpServer(() => ctx, chatgpt, detached) : createOlympusMcpServer("remote", () => ctx, anonymousListing(options.anonymousAnswersEnabled, demoGrantLimit(demo, options.search ? remoteSearchExtension(options.search, () => stillAuthorized(request, verification.connection, options, surface), {
+      ...ctx.pendingPrivacyItems ? { pendingPrivacyItems: ctx.pendingPrivacyItems } : {},
       ...!demo && ctx.remotePrivatePart ? { privatePart: ctx.remotePrivatePart } : {},
       ...ctx.releaseCheck ? { releaseCheck: ctx.releaseCheck } : {},
       signal: request.signal
@@ -216588,6 +216609,7 @@ async function callTool(request, name, options) {
   try {
     const result = await runWithReleaseManifestSink(manifests, () => operation.handler(ctx, params.value));
     const release2 = () => remoteOperationOutput(operation.name, result, {
+      pendingPrivacyItems: ctx.pendingPrivacyItems?.(),
       ...ctx.releaseCheck ? { releaseCheck: ctx.releaseCheck } : {},
       releaseManifests: manifests.manifests
     });
@@ -223030,6 +223052,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
         sourceAnswerJobs
       }),
       releaseCheck: remoteReleaseCheck,
+      pendingPrivacyItems: () => tierSnifferBacklog?.().pendingItems,
       ...caller.connectionId ? { remotePrivatePart: remotePrivateParts.forConnection(caller.connectionId) } : {}
     })
   };

@@ -29,6 +29,7 @@ import { isValidPort, isValidSshTarget, isSshWorkerSocketPath } from '../../core
 import { OperationError, type OperationErrorCode } from '../../core/operation-error.ts';
 import { boundedLogErrorMessage } from '../../core/log-redaction.ts';
 import { namesOnlyCoverageNote } from '../../core/names-only-coverage.ts';
+import { privacyBacklogCoverageNote } from '../../core/privacy-backlog-coverage.ts';
 import { citationTitleWithParent } from '../../core/parent-label.ts';
 import { DASHBOARD_SUPPORTED_SOURCES } from '../source-dashboard.ts';
 import { archiveFormatForProvider } from '../../core/archive-formats.ts';
@@ -486,6 +487,8 @@ export interface ChatGptCitation {
 }
 
 export interface AnswerResultOptions {
+  /** Global count of new items still waiting for privacy judgment, never matching-item metadata. */
+  pendingPrivacyItems?: number | undefined;
   /**
    * The private answer panel's summary and job, when Private items matched.
    * The summary (count, state, job id) reaches the panel only, in `_meta`.
@@ -762,6 +765,8 @@ export function answerToolResult(raw: unknown, options: AnswerResultOptions = {}
   // A released answer with citations is evidence the model answers from.
   const privateNote = privateMatchNote(options.privateMatch, 0, !usedPrivate && shownCitations.length > 0);
   const notes = privateNote ? [privateNote] : privateMatched ? [DASHBOARD_CHATGPT_VOCABULARY.privateMatches] : [];
+  const privacyCoverage = privacyBacklogCoverageNote(options.pendingPrivacyItems);
+  if (privacyCoverage) notes.push(privacyCoverage);
   if (!privateNote && options.privateCheckPending) notes.push(PRIVATE_CHECK_PENDING_NOTE);
   const textParts = [answer];
   if (shownCitations.length > 0) {
@@ -874,6 +879,8 @@ export function searchToolResult(raw: unknown, options: AnswerResultOptions = {}
   const panelActive = copyPrivateMatch(options.privateMatch) !== undefined;
   const nothingRead = evidence.every((entry) => entry.excerpt === undefined);
   const notes: string[] = [];
+  const privacyCoverage = privacyBacklogCoverageNote(options.pendingPrivacyItems);
+  if (privacyCoverage) notes.push(privacyCoverage);
   // Matches whose contents are tiered Private are counted apart (never as
   // names only or unreadable), so no note sends the user to change folder
   // settings for them; the model learns only the one Private bit below.

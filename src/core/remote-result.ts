@@ -36,11 +36,14 @@ import { secretLabelsInText } from './opsec.ts';
 import { citationTitleWithParent, PARENT_LABEL_MAX_CHARS } from './parent-label.ts';
 import { privateInputReleaseAllowed, type ReleaseCheck, type ReleaseInput, type ReleaseInputVerdict, type ReleaseManifest } from './release-manifest.ts';
 import { withoutSecretLocationCoverageNotes } from './secret-location-note.ts';
+import { privacyBacklogCoverageNote } from './privacy-backlog-coverage.ts';
 
 /** The operations the remote surface serves (core/public-surface.ts V0_4_PUBLIC_REMOTE_MCP_TOOLS). */
 export type RemoteOperationName = 'source_answer' | 'source_answer_result' | 'source_index_status' | 'ask_anonymously';
 
 export interface RemoteOutputOptions {
+  /** Global count of items awaiting privacy judgment; never item metadata. */
+  pendingPrivacyItems?: number | undefined;
   /**
    * The worker's current tiers and release rules. Set (by the worker) for
    * every remote call; without it (a test context with no tiered stores)
@@ -329,10 +332,12 @@ function sourceAnswerOutput(raw: unknown, options: RemoteOutputOptions): Record<
     if (dropped.has(index) || citations.length >= MAX_CITATIONS) return;
     citations.push(citationOutput(entry));
   });
+  const privacyCoverage = privacyBacklogCoverageNote(options.pendingPrivacyItems);
+  const coverageSuffix = privacyCoverage ? `\n\nCoverage notes:\n- ${privacyCoverage}` : '';
   return {
     kind: 'source_answer',
     status: 'answered',
-    answer: answer.text ?? '',
+    answer: (answer.text ?? '').slice(0, MAX_ANSWER - coverageSuffix.length) + coverageSuffix,
     citations,
   };
 }

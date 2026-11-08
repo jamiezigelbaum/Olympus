@@ -6828,6 +6828,7 @@ export async function main(): Promise<void> {
       // manifest against the tier ledgers and release rules as they are now
       // (core/remote-result.ts).
       releaseCheck: remoteReleaseCheck,
+      pendingPrivacyItems: () => tierSnifferBacklog?.().pendingItems,
       // Summary-rule agents only: the ChatGPT surface records through its own path (chatgpt/mcp-surface.ts).
       ...(caller.connectionId ? { remotePrivatePart: remotePrivateParts.forConnection(caller.connectionId) } : {}),
     }),

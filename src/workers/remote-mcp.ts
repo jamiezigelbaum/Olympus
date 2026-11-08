@@ -202,6 +202,7 @@ export function createRemoteMcpHandler(options: RemoteMcpHandlerOptions): (reque
         : createChatGptMcpServer(() => ctx, chatgpt, detached)
       : createOlympusMcpServer('remote', () => ctx, anonymousListing(options.anonymousAnswersEnabled, demoGrantLimit(demo, options.search
         ? remoteSearchExtension(options.search, () => stillAuthorized(request, verification.connection, options, surface), {
+          ...(ctx.pendingPrivacyItems ? { pendingPrivacyItems: ctx.pendingPrivacyItems } : {}),
           // A demo sign-in grant is a shared password: its searches never write to the owner's Inbox.
           ...(!demo && ctx.remotePrivatePart ? { privatePart: ctx.remotePrivatePart } : {}),
           ...(ctx.releaseCheck ? { releaseCheck: ctx.releaseCheck } : {}),
