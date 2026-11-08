@@ -39,7 +39,7 @@ function fixture(options: { trained?: boolean; memory?: boolean; bias?: number; 
   if (options.trained !== false) {
     mkdirSync(modelDir, { mode: 0o755 });
     writeFileSync(join(modelDir, 'weights.json'), JSON.stringify({ version: '00000000-0000-0000-0000-000000000939',
-      trainedAt: Date.now(), judge, revisions: JSON.stringify([[ledger.ledgerId(), '0']]) + ':0', model: { weights: new Array(D).fill(0), bias: options.bias ?? -5 } }), { mode: 0o644 });
+      trainedAt: Date.now(), judge, revisions: JSON.stringify([[ledger.ledgerId(), '0']]) + ':0', model: { weights: new Array(D).fill(0), bias: options.bias ?? -7 } }), { mode: 0o644 });
   }
   const placementFor = (decision: TierDecision): TierPlacementPlan => ({
     copies: [{ corpusId: decision.contentPending ? 'private' : 'personal', trustDomain: decision.contentPending ? 'secure_local' : 'internal',
@@ -93,7 +93,7 @@ test('clearing counts one first skip per attempt without changing held decisions
   for (const reason of ['disabled', 'audit_stopped', 'model_missing', 'model_invalid', 'weights_missing',
     'revisions_changed', 'judge_changed', 'not_content', 'item_override', 'rejudge_open', 'metadata_question_open',
     'copy_missing', 'digest_missing', 'no_vector', 'score_unavailable', 'probability_high', 'clear_rejected'] as const) {
-    const f = fixture({ enabled: () => reason !== 'disabled', bias: reason === 'probability_high' ? 5 : -5 });
+    const f = fixture({ enabled: () => reason !== 'disabled', bias: reason === 'probability_high' ? 5 : -7 });
     const q = f.add(1); const before = f.ledger.getCurrent(q)!;
     let filter = f.filter;
     const path = join(f.modelDir, 'weights.json');
@@ -151,7 +151,7 @@ test('clearing counts cleared and sampled or existing spot checks exactly once',
   expect((await pass(clear).run()).clearing).toEqual({ tried: 1, cleared: 1, spotChecks: 0, skipped: {} });
   expect((await pass(clear).run()).clearing).toEqual(clearingCounts());
 });
-test('clears below 0.05 with a content-free reason, retains rollback question and never settles Private', async () => {
+test('clears below the 0.002 cutoff with a content-free reason, retains rollback question and never settles Private', async () => {
   const f = fixture(); f.add(1); const p = pass(f);
   await p.run();
   expect(p.calls()).toBe(0);
@@ -212,10 +212,10 @@ test('5 percent selection asks the judge directly and survives restart', async (
   expect(f.ledger.getCurrent(subject(1))!.contentTier).toBe('secure');
 });
 test('clearing and spot-check selection share the probability cutoff, with independent 1-in-20 sampling', () => {
-  for (const p of [0.049, 0.051]) for (const random of [0, 0.049, 0.05]) {
+  for (const p of [0.0019, 0.0021]) for (const random of [0, 0.049, 0.05]) {
     const f = fixture({ bias: Math.log(p / (1 - p)), random: () => random });
     const q = f.add(1);
-    const eligible = p < 0.05, sampled = random < 1 / 20;
+    const eligible = p < 0.002, sampled = random < 1 / 20;
     expect(f.filter.tryClear(q, judge)).toBe(eligible && !sampled);
     expect(f.filter.isSpotCheck(q)).toBe(eligible && sampled);
     expect(f.ledger.getCurrent(q)!.contentPending).toBe(!eligible || sampled);
@@ -841,7 +841,7 @@ test.each(['secrets', 'tier', 'decision', 'removed copy', 'changed vector', 'pub
     else if (change === 'publication secrets') runtime()!.fit!.next = () => {
       f.ledger.recordDecision(subject(0), { ...row, state: 'current', snifferId: judge,
         decidedBy: 'secret_detector', contentTier: 'secrets' });
-      return { done: true, value: { weights: new Array(D).fill(0), bias: -5 } };
+      return { done: true, value: { weights: new Array(D).fill(0), bias: -7 } };
     };
     else if (change === 'removed copy') f.setCopy(n => n === 0 ? undefined : copy(n));
     else if (change === 'changed vector') f.setCopy(n => copy(n, n === 0 ? -1 : 1));

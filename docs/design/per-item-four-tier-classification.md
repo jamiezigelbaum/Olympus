@@ -582,7 +582,9 @@ Sparta runtime measurement after authorized deployment.
 
 Before dispatching a queued content question, the shared resolver may settle it
 Personal if its own complete stored EmbeddingGemma 2 vectors predict
-`p(Private) < 0.05`. It never settles Private. The existing deterministic
+`p(Private) < 0.002` (lowered from 0.05 on 2026-11-08: the owner-label gate in
+`eval/calibration/README.md` found Private misses at every cutoff from 0.0028
+up). It never settles Private. The existing deterministic
 Secrets checks, structured-identifier raises, owner overrides and rules, and
 names questions precede this step. Existing cached or duplicate judge verdicts take precedence over the pre-filter;
 known Private answers awaiting placement are retried. Existing final verdicts

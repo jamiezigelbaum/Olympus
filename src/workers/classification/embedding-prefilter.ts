@@ -20,7 +20,8 @@ const PREFIX = 'embedding-prefilter:';
 const RECEIPTS = `${PREFIX}clear:`;
 const CHECKS = `${PREFIX}check:`;
 const WINDOW = 200;
-const PREFILTER_CLEARING_CUTOFF = 0.05;
+// Owner-label gate (#1025, 2026-11-08): 0 Private misses only below p 0.0028; never above 0.05.
+const PREFILTER_CLEARING_CUTOFF = 0.002;
 const SPOT_CHECK_RATE = 1 / 20;
 const RETRAIN_MS = 24 * 60 * 60 * 1000;
 export const PREFILTER_MAX_PER_CLASS = 5000;

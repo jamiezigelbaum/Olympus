@@ -30,7 +30,9 @@ export function calibrationEmbeddingInputs(item: CalibrationSampleItem): SourceE
 export async function scorePrefilter(saved: SavedModel, rounds: readonly Round[],
   embed: (inputs: SourceEmbeddingInput[]) => Promise<number[][]>) {
   const report = { labelled: { personal: 0, private: 0, unsure: 0 },
-    cutoffs: { '0.01': { cleared: 0, privateMisses: 0, misses: [] } as Scores,
+    cutoffs: { '0.001': { cleared: 0, privateMisses: 0, misses: [] } as Scores,
+      '0.002': { cleared: 0, privateMisses: 0, misses: [] } as Scores,
+      '0.01': { cleared: 0, privateMisses: 0, misses: [] } as Scores,
       '0.02': { cleared: 0, privateMisses: 0, misses: [] } as Scores,
       '0.05': { cleared: 0, privateMisses: 0, misses: [] } as Scores }, unscorable: 0 };
   for (const { round, sample, labels } of rounds) for (const item of sample.items) {

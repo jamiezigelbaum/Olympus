@@ -313,7 +313,7 @@ used different framing and a three-chunk cap; this scorer does not reuse those
 vectors or generate replacement files.
 
 Output is one JSON object: labelled Personal/Private/unsure counts, unscorable
-count, and clearance and Private-miss counts at p < 0.01, 0.02 and 0.05.
+count, and clearance and Private-miss counts at p < 0.001, 0.002 (production), 0.01, 0.02 and 0.05.
 Scoring calls production `privateProbability` directly, without a prior correction. Each miss
 contains only `p` and `round`. Unsure items count as unsure and can contribute to
 clearance counts, never Private misses; skipped/unlabelled items are not scored.
@@ -325,6 +325,13 @@ owner-label Private misses before rollout**, at the intended clearing cutoff.
 Check all rounds and the unscorable count; synthetic checks do not establish
 owner-label safety or useful coverage. Restoring the scorer and correcting label
 selection do not establish that the present fitter meets that gate.
+
+Gate result, 2026-11-08 (#1025, L-BFGS fit trained offline on Sparta from 5,000
+Personal and 2,824 Private judge labels): of 486 owner-Personal and 127
+owner-Private items, p < 0.002 clears 77 with 0 Private misses; 0.001 clears 52
+(0); 0.01 clears 184 (1 miss, p 0.0028); 0.02 clears 245 (4); 0.05 clears 333
+(10). Production clears below 0.002. The worker retrains daily, so a later
+model is not covered by this result.
 
 ## Read-only offline training
 

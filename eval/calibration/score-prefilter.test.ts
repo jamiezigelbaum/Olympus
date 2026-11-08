@@ -17,7 +17,7 @@ test('counts-only report contains no sample fields even on misses or embedding f
   const rounds = [{ round: 3, sample: { items: [item, { ...item, id: 'p' }, { ...item, id: 'u' }] }, labels: { [marker]: { label: 'private' }, p: { label: 'personal' }, u: { label: 'unsure' } } }] as const;
   const vector = [1, ...new Array(D - 1).fill(0)];
   const report = await scorePrefilter(saved, rounds, async inputs => inputs.map(() => vector));
-  expect(report).toEqual({ labelled: { personal: 1, private: 1, unsure: 1 }, cutoffs: { '0.01': { cleared: 0, privateMisses: 0, misses: [] }, '0.02': { cleared: 0, privateMisses: 0, misses: [] }, '0.05': { cleared: 3, privateMisses: 1, misses: [{ p: expect.any(Number), round: 3 }] } }, unscorable: 0 });
+  expect(report).toEqual({ labelled: { personal: 1, private: 1, unsure: 1 }, cutoffs: { '0.001': { cleared: 0, privateMisses: 0, misses: [] }, '0.002': { cleared: 0, privateMisses: 0, misses: [] }, '0.01': { cleared: 0, privateMisses: 0, misses: [] }, '0.02': { cleared: 0, privateMisses: 0, misses: [] }, '0.05': { cleared: 3, privateMisses: 1, misses: [{ p: expect.any(Number), round: 3 }] } }, unscorable: 0 });
   expect(report.cutoffs['0.05'].misses[0]!.p).toBeCloseTo(0.03, 12);
   expect(JSON.stringify(report)).not.toContain(marker);
   const failed = await scorePrefilter(saved, rounds, async () => { throw new Error(marker); });
@@ -42,7 +42,7 @@ test('CLI failure prints only a fixed error count, never the missing input path'
 test('production probabilities are compared strictly at each cutoff without prior correction', async () => {
   const rounds = [{ round: 4, sample: { items: [{ ...item, text: 'Picnic.' }] }, labels: { [marker]: { label: 'private' as const } } }];
   const vector = [1, ...new Array(D - 1).fill(0)];
-  for (const [p, clears] of [[0.005, [1, 1, 1]], [0.015, [0, 1, 1]], [0.03, [0, 0, 1]], [0.1, [0, 0, 0]]] as const) {
+  for (const [p, clears] of [[0.0005, [1, 1, 1, 1, 1]], [0.0015, [0, 1, 1, 1, 1]], [0.005, [0, 0, 1, 1, 1]], [0.015, [0, 0, 0, 1, 1]], [0.03, [0, 0, 0, 0, 1]], [0.1, [0, 0, 0, 0, 0]]] as const) {
     const report = await scorePrefilter({ ...saved, model: { ...saved.model, bias: Math.log(p / (1 - p)) } }, rounds, async () => [vector]);
     expect(Object.values(report.cutoffs).map(result => result.cleared)).toEqual([...clears]);
     expect(Object.values(report.cutoffs).map(result => result.privateMisses)).toEqual([...clears]);
