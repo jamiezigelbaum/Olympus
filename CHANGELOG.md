@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.4.2 - 2026-11-08
+
+- **`olympus settings show`**: your agent can read every dashboard setting as JSON, so it no longer has to ask you what's on screen (#1051).
+
 ## 1.4.1 - 2026-11-08
 
 - **Upgrading a large install no longer rolls back.** `olympus worker upgrade` waited only 15 seconds for the new worker to answer. On a big archive the worker takes longer to open its stores, so the upgrade gave up and rolled back to the previous version, which can't open the newer stores and kept restarting. The upgrade now waits up to 3 minutes while the new worker's service stays active (#1040, #1041).
