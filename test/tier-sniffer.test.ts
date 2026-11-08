@@ -763,6 +763,53 @@ describe('bounds and the owner-approval gate', () => {
     }
   });
 
+  test('answers that never pause still leave classification a turn each minute', async () => {
+    // 1.4.0 release check (2026-11-08): an agent searching every ten seconds
+    // kept the private model busy, every pass yielded, and imported messages
+    // stayed Private and unsearchable. Answers still lead; they never starve it.
+    const dir = mkdtempSync(join(tmpdir(), 'olympus-tier-sniffer-fair-turn-'));
+    const installed = new InstalledTierClassification({ env: {}, lane: LOCAL_LANE });
+    const ledger = new TierLedger({ dbPath: join(dir, 'store.tier-ledger.sqlite') });
+    try {
+      for (let n = 1; n <= 3; n += 1) recordFlagged(ledger, installed.snifferStoreForLedger(ledger.dbPath), n, `boat trip plan ${n}`);
+      const ledgerPath = join(dir, 'classification-ledger.jsonl');
+      await appendClassificationLedgerEntry(ledgerPath, {
+        recorded_at: new Date().toISOString(), kind: 'classifier_model_decision', what: 'Owner approved the fixture sniffer.',
+        model_id: LOCAL_LANE.modelId, prompt_version: SNIFFER_PROMPT_VERSION, lane: LOCAL_LANE.kind, profile_id: LOCAL_LANE.profileId,
+        approved_by: 'owner', status: 'complete',
+      });
+      const lines: string[] = [];
+      let clock = 0;
+      const model = spyModel((_, items) => verdictsFor(items, { tier: 'personal', category: 'everyday', confidence: 0.9 }));
+      const service = new TierSnifferService({
+        installed,
+        lane: LOCAL_LANE,
+        model,
+        stores: () => [{ dbPath: join(dir, 'store.sqlite') }],
+        classificationLedgerPath: ledgerPath,
+        answersInFlight: () => true,
+        maxCallsPerPass: 1,
+        now: () => new Date(clock),
+        log: (line) => lines.push(line),
+      });
+      expect(await service.runOnce()).toMatchObject({ state: 'ran', report: { calls: 0 } });
+      clock += 30_000;
+      expect(await service.runOnce()).toMatchObject({ state: 'ran', report: { calls: 0 } });
+      expect(service.status().waiting?.reason).toBe('yielding_to_answers');
+      clock += 31_000;
+      expect(await service.runOnce()).toMatchObject({ state: 'ran', report: { calls: 1 } });
+      expect(lines).toContain('Olympus tier sniffer: answers kept the private model busy; this pass takes its turn.');
+      // The turn is used: answers lead again until the next minute.
+      clock += 1_000;
+      expect(await service.runOnce()).toMatchObject({ state: 'ran', report: { calls: 0 } });
+      service.stop();
+    } finally {
+      installed.close();
+      ledger.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   test('a model that stops answering is named as such, though every failed dispatch counted as a call; answering again clears it', async () => {
     // Source-neutral: any store's queue (an imported archive's held mail, a
     // Dropbox folder's files) reads the same reason off the same service.
