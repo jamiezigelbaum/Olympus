@@ -211,6 +211,16 @@ test('5 percent selection asks the judge directly and survives restart', async (
   expect(p.calls()).toBe(1);
   expect(f.ledger.getCurrent(subject(1))!.contentTier).toBe('secure');
 });
+test('clearing and spot-check selection share the probability cutoff, with independent 1-in-20 sampling', () => {
+  for (const p of [0.049, 0.051]) for (const random of [0, 0.049, 0.05]) {
+    const f = fixture({ bias: Math.log(p / (1 - p)), random: () => random });
+    const q = f.add(1);
+    const eligible = p < 0.05, sampled = random < 1 / 20;
+    expect(f.filter.tryClear(q, judge)).toBe(eligible && !sampled);
+    expect(f.filter.isSpotCheck(q)).toBe(eligible && sampled);
+    expect(f.ledger.getCurrent(q)!.contentPending).toBe(!eligible || sampled);
+  }
+});
 test('five Private checks in 200 stop clearing durably and return cleared items to the queue', async () => {
   let sampling = false;
   const f = fixture({ random: () => sampling ? 0 : 1 });
@@ -815,13 +825,16 @@ test.each(['secrets', 'tier', 'decision', 'removed copy', 'changed vector', 'pub
     let clock = 0;
     const dir = mkdtempSync(join(tmpdir(), 'prefilter-publication-'));
     const control = new TierLedger({ dbPath: join(dir, 'control.sqlite') });
-    const f = fixture({ trained: false, memory: true, stateLedger: control, monotonicNow: () => (clock += 0.01), log: () => {} });
+    // Bound each slice below one normalization pass, so even a fast optimizer
+    // is still suspended inside the fit when the mutation is injected.
+    const f = fixture({ trained: false, memory: true, stateLedger: control, monotonicNow: () => (clock += 0.1), log: () => {} });
     cleanups.push(() => { control.close(); rmSync(dir, { recursive: true, force: true }); });
     for (let n = 0; n < 4000; n++) trainingRow(f, n);
-    const runtime = () => (f.filter as unknown as { training?: { examples: unknown[]; fit?: Generator<void, unknown> } }).training;
+    const runtime = () => (f.filter as unknown as { training?: { examples: unknown[]; fit?: Generator<void, unknown>; model?: unknown } }).training;
     for (let tick = 0; tick < 100 && !runtime()?.fit; tick++) await f.filter.prepare(judge);
     expect(runtime()?.fit).toBeDefined();
     expect(runtime()?.examples).toHaveLength(4000);
+    expect(runtime()?.model).toBeUndefined();
     const revision = f.ledger.readMeta('embedding-prefilter:training-revision');
     const row = f.ledger.getCurrent(subject(0))!;
     if (change === 'publication secrets') runtime()!.fit!.next = () => {
@@ -836,7 +849,7 @@ test.each(['secrets', 'tier', 'decision', 'removed copy', 'changed vector', 'pub
       contentTier: change === 'secrets' ? 'secrets' : change === 'tier' ? 'secure' : row.contentTier,
       reasons: change === 'decision' ? [...row.reasons, 'content:borderline:financial'] : row.reasons });
     expect(f.ledger.readMeta('embedding-prefilter:training-revision')).toBe(revision);
-    await f.filter.prepare(judge);
+    for (let tick = 0; tick < 20 && trainingState(f).outcome === 'fitting'; tick++) await f.filter.prepare(judge);
     expect(trainingState(f)).toMatchObject({ outcome: 'failed', reason: 'ledger_or_judge_changed' });
     expect(runtime()).toBeUndefined();
     expect(existsSync(join(f.modelDir, 'weights.json'))).toBe(false);

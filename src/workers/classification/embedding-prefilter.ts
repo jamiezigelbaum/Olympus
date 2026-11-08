@@ -20,6 +20,8 @@ const PREFIX = 'embedding-prefilter:';
 const RECEIPTS = `${PREFIX}clear:`;
 const CHECKS = `${PREFIX}check:`;
 const WINDOW = 200;
+const PREFILTER_CLEARING_CUTOFF = 0.05;
+const SPOT_CHECK_RATE = 1 / 20;
 const RETRAIN_MS = 24 * 60 * 60 * 1000;
 export const PREFILTER_MAX_PER_CLASS = 5000;
 const MAX_PER_CLASS = PREFILTER_MAX_PER_CLASS;
@@ -660,8 +662,9 @@ export class EmbeddingPrefilter {
     if (!vector) return skip('no_vector');
     const probability = privateProbability(this.saved.model, vector);
     if (probability === undefined) return skip('score_unavailable');
-    if (probability >= 0.05) return skip('probability_high');
-    if ((this.options.random?.() ?? Math.random()) < 0.05) {
+    // One probability gate defines eligibility for both clearing and spot checks.
+    if (probability >= PREFILTER_CLEARING_CUTOFF) return skip('probability_high');
+    if ((this.options.random?.() ?? Math.random()) < SPOT_CHECK_RATE) {
       this.options.ledger.writeMeta(checkKey, JSON.stringify({ hash: question.materialHash, token: randomUUID() })); return spotCheck();
     }
     const reason = `content:embedding_prefilter:${this.saved.version}:${probability.toFixed(8)}`;

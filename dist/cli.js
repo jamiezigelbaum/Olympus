@@ -124859,6 +124859,12 @@ function privateProbability(model, vector) {
     score += input[i2] * model.weights[i2];
   return Number.isFinite(score) ? sigmoid(score) : undefined;
 }
+function dot2(a, b) {
+  let result = 0;
+  for (let i2 = 0;i2 < a.length; i2++)
+    result += a[i2] * b[i2];
+  return result;
+}
 function* trainLogisticSteps(examples, minimumPerClass = EMBEDDING_PREFILTER_MIN_PER_CLASS) {
   if (!Number.isSafeInteger(minimumPerClass) || minimumPerClass < 1)
     return;
@@ -124875,34 +124881,93 @@ function* trainLogisticSteps(examples, minimumPerClass = EMBEDDING_PREFILTER_MIN
   }
   if (counts.some((count) => count < minimumPerClass))
     return;
-  const weights = new Array(EMBEDDING_PREFILTER_DIMENSIONS).fill(0);
-  let bias = Math.log(counts[1] / counts[0]);
-  let seed = 939;
-  const order = inputs.map((_, index) => index);
-  for (let epoch = 0;epoch < 20; epoch++) {
-    for (let i2 = order.length - 1;i2 > 0; i2--) {
-      seed = Math.imul(seed, 1664525) + 1013904223 >>> 0;
-      const j = seed % (i2 + 1);
-      [order[i2], order[j]] = [order[j], order[i2]];
+  const dimensions = EMBEDDING_PREFILTER_DIMENSIONS;
+  const penalty = 1 / (FIT_C * inputs.length);
+  function* evaluate(parameters2) {
+    const gradient = parameters2.map((value2, i2) => i2 < dimensions ? penalty * value2 : 0);
+    let loss = 0;
+    for (let i2 = 0;i2 < dimensions; i2++)
+      loss += 0.5 * penalty * parameters2[i2] ** 2;
+    for (const { vector, label } of inputs) {
+      let score = parameters2[dimensions];
+      for (let i2 = 0;i2 < dimensions; i2++)
+        score += parameters2[i2] * vector[i2];
+      const scale = 1 / (2 * counts[label]);
+      const margin = (2 * label - 1) * score;
+      loss += scale * (Math.max(0, -margin) + Math.log1p(Math.exp(-Math.abs(margin))));
+      const error = scale * (label ? -sigmoid(-score) : sigmoid(score));
+      gradient[dimensions] += error;
+      for (let i2 = 0;i2 < dimensions; i2++)
+        gradient[i2] += error * vector[i2];
       yield;
     }
-    const rate = 0.12 / (1 + epoch * 0.15);
-    const shrink = 1 - rate * 0.001;
-    for (const index of order) {
-      const input = inputs[index];
-      let score = bias;
-      for (let i2 = 0;i2 < weights.length; i2++)
-        score += weights[i2] * input.vector[i2];
-      const error = sigmoid(score) - input.label;
-      bias -= rate * error;
-      for (let i2 = 0;i2 < weights.length; i2++)
-        weights[i2] = weights[i2] * shrink - rate * error * input.vector[i2];
-      yield;
-    }
+    return { loss, gradient };
   }
-  return { weights, bias };
+  let parameters = new Array(dimensions + 1).fill(0);
+  let current2 = yield* evaluate(parameters);
+  const history = [];
+  for (let iteration = 0;iteration <= MAX_ITERATIONS; iteration++) {
+    if (!Number.isFinite(current2.loss) || !current2.gradient.every(Number.isFinite))
+      throw new Error("Logistic fit is nonfinite");
+    if (Math.max(...current2.gradient.map(Math.abs)) <= GRADIENT_TOLERANCE) {
+      return { weights: parameters.slice(0, dimensions), bias: parameters[dimensions] };
+    }
+    if (iteration === MAX_ITERATIONS)
+      break;
+    const direction = current2.gradient.slice();
+    const alpha = new Array(history.length);
+    for (let j = history.length - 1;j >= 0; j--) {
+      const h = history[j];
+      alpha[j] = dot2(h.s, direction) / h.sy;
+      for (let i2 = 0;i2 < direction.length; i2++)
+        direction[i2] -= alpha[j] * h.y[i2];
+      yield;
+    }
+    const last = history.at(-1);
+    const scaling = last ? last.sy / last.yy : 1;
+    for (let i2 = 0;i2 < direction.length; i2++)
+      direction[i2] *= scaling;
+    for (let j = 0;j < history.length; j++) {
+      const h = history[j], beta = dot2(h.y, direction) / h.sy;
+      for (let i2 = 0;i2 < direction.length; i2++)
+        direction[i2] += h.s[i2] * (alpha[j] - beta);
+      yield;
+    }
+    for (let i2 = 0;i2 < direction.length; i2++)
+      direction[i2] = -direction[i2];
+    let slope = dot2(current2.gradient, direction);
+    if (!Number.isFinite(slope) || slope >= 0) {
+      history.length = 0;
+      for (let i2 = 0;i2 < direction.length; i2++)
+        direction[i2] = -current2.gradient[i2];
+      slope = -dot2(current2.gradient, current2.gradient);
+    }
+    let stepSize = 1, accepted = false;
+    for (let trial = 0;trial < MAX_LINE_SEARCH; trial++, stepSize *= 0.5) {
+      const candidate = parameters.map((value2, i2) => value2 + stepSize * direction[i2]);
+      const next = yield* evaluate(candidate);
+      if (!Number.isFinite(next.loss) || next.loss > current2.loss + ARMIJO * stepSize * slope)
+        continue;
+      const s = candidate.map((value2, i2) => value2 - parameters[i2]);
+      const y = next.gradient.map((value2, i2) => value2 - current2.gradient[i2]);
+      const sy = dot2(s, y), yy = dot2(y, y);
+      if (sy > 0 && yy > 0) {
+        if (history.length === HISTORY_SIZE)
+          history.shift();
+        history.push({ s, y, sy, yy });
+      }
+      parameters = candidate;
+      current2 = next;
+      accepted = true;
+      yield;
+      break;
+    }
+    if (!accepted)
+      throw new Error("Logistic line search did not converge");
+  }
+  throw new Error("Logistic fit did not converge");
 }
-var EMBEDDING_PREFILTER_MODEL_ID = "embeddinggemma-2-litert-24d962e", EMBEDDING_PREFILTER_DIMENSIONS = 768, EMBEDDING_PREFILTER_MIN_PER_CLASS = 2000;
+var EMBEDDING_PREFILTER_MODEL_ID = "embeddinggemma-2-litert-24d962e", EMBEDDING_PREFILTER_DIMENSIONS = 768, EMBEDDING_PREFILTER_MIN_PER_CLASS = 2000, FIT_C = 10, MAX_ITERATIONS = 500, GRADIENT_TOLERANCE = 0.00000001, HISTORY_SIZE = 10, MAX_LINE_SEARCH = 40, ARMIJO = 0.0001;
 
 // src/workers/classification/embedding-prefilter.ts
 import { chmodSync as chmodSync33, existsSync as existsSync87, lstatSync as lstatSync43, mkdirSync as mkdirSync51, readFileSync as readFileSync73 } from "node:fs";
@@ -125600,9 +125665,9 @@ class EmbeddingPrefilter {
     const probability = privateProbability(this.saved.model, vector);
     if (probability === undefined)
       return skip("score_unavailable");
-    if (probability >= 0.05)
+    if (probability >= PREFILTER_CLEARING_CUTOFF)
       return skip("probability_high");
-    if ((this.options.random?.() ?? Math.random()) < 0.05) {
+    if ((this.options.random?.() ?? Math.random()) < SPOT_CHECK_RATE) {
       this.options.ledger.writeMeta(checkKey, JSON.stringify({ hash: question.materialHash, token: randomUUID29() }));
       return spotCheck();
     }
@@ -125687,7 +125752,7 @@ class EmbeddingPrefilter {
     }
   }
 }
-var PREFIX3 = "embedding-prefilter:", RECEIPTS, CHECKS, WINDOW = 200, RETRAIN_MS, PREFILTER_MAX_PER_CLASS = 5000, MAX_PER_CLASS, TRAINING_SLICE_MS = 200, FAILED_RETRY_MS, NEW_VERDICTS = 1000, TRAINING, SCAN, PREFILTER_TRAINING_REJECTIONS;
+var PREFIX3 = "embedding-prefilter:", RECEIPTS, CHECKS, WINDOW = 200, PREFILTER_CLEARING_CUTOFF = 0.05, SPOT_CHECK_RATE, RETRAIN_MS, PREFILTER_MAX_PER_CLASS = 5000, MAX_PER_CLASS, TRAINING_SLICE_MS = 200, FAILED_RETRY_MS, NEW_VERDICTS = 1000, TRAINING, SCAN, PREFILTER_TRAINING_REJECTIONS;
 var init_embedding_prefilter = __esm(() => {
   init_atomic_file();
   init_control_path_headroom();
@@ -125698,6 +125763,7 @@ var init_embedding_prefilter = __esm(() => {
   init_tier_ledger_path();
   RECEIPTS = `${PREFIX3}clear:`;
   CHECKS = `${PREFIX3}check:`;
+  SPOT_CHECK_RATE = 1 / 20;
   RETRAIN_MS = 24 * 60 * 60 * 1000;
   MAX_PER_CLASS = PREFILTER_MAX_PER_CLASS;
   FAILED_RETRY_MS = 3 * 60 * 60 * 1000;
@@ -145286,15 +145352,15 @@ ${head}` : head };
 function cosine(a, b) {
   if (a.length === 0 || a.length !== b.length)
     return Number.NaN;
-  let dot2 = 0;
+  let dot3 = 0;
   let left = 0;
   let right = 0;
   for (let index = 0;index < a.length; index += 1) {
-    dot2 += a[index] * b[index];
+    dot3 += a[index] * b[index];
     left += a[index] * a[index];
     right += b[index] * b[index];
   }
-  return left > 0 && right > 0 ? dot2 / Math.sqrt(left * right) : Number.NaN;
+  return left > 0 && right > 0 ? dot3 / Math.sqrt(left * right) : Number.NaN;
 }
 function privateEvidenceItems(hits) {
   return privateEvidence(hits).items;
@@ -155476,9 +155542,9 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     const tone = item ? "warn" : config2.statusTone[status] || "off";
     const row = el("li", item ? "row source need-row" : "row source");
     const main = el("div", "source-main");
-    const dot2 = el("span", "dot tone-" + tone);
-    dot2.setAttribute("aria-hidden", "true");
-    const head = add(el("p", "source-head"), dot2, other ? add(el("span", "source-name source-for", P.otherArchives.line), el("span", "sr", " — " + String(source.label || ""))) : el("span", "source-name", String(source.label || "")));
+    const dot3 = el("span", "dot tone-" + tone);
+    dot3.setAttribute("aria-hidden", "true");
+    const head = add(el("p", "source-head"), dot3, other ? add(el("span", "source-name source-for", P.otherArchives.line), el("span", "sr", " — " + String(source.label || ""))) : el("span", "source-name", String(source.label || "")));
     const off = status === "Off" && !item;
     if (!off)
       add(head, el("span", "sr", " — " + (item ? P.needsYou : status)));
@@ -156731,10 +156797,10 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     const when = ago(data2.generatedAt);
     if (when)
       facts.push(fill2(Hm.checked, { when }));
-    const dot2 = el("span", "dot tone-" + (needs > 0 ? "warn" : running ? "run" : "good"));
-    dot2.setAttribute("aria-hidden", "true");
+    const dot3 = el("span", "dot tone-" + (needs > 0 ? "warn" : running ? "run" : "good"));
+    dot3.setAttribute("aria-hidden", "true");
     const text3 = add(el("div", "row-text"), el("p", "home-title", title), el("p", "muted", facts.join(" · ")));
-    const card = add(el("section", "home-status"), dot2, text3);
+    const card = add(el("section", "home-status"), dot3, text3);
     card.setAttribute("data-home-status", needs > 0 ? "needs" : running ? "running" : "ok");
     return card;
   }
@@ -162994,7 +163060,7 @@ function renderAsk(options, enabled, inbox) {
     const action = enabled ? actions[state] : "";
     const notReadyLabel = d.id === "computer" ? d.reason === DASHBOARD_PRIVATE_ANSWERS_COPY.downloading ? DASHBOARD_PRIVATE_ANSWERS_COPY.downloadingStatus : DASHBOARD_PRIVATE_ANSWERS_COPY.notSetUpStatus : d.id === "anonymous" && zkState === "off" ? DASHBOARD_PRIVATE_ANSWERS_COPY.offStatus : d.id === "anonymous" && zkState === "needs_acceptance" ? DASHBOARD_PRIVATE_ANSWERS_COPY.pausedStatus : DASHBOARD_PRIVATE_ANSWERS_COPY.notConnectedStatus;
     const notReadyDot = notReadyLabel === DASHBOARD_PRIVATE_ANSWERS_COPY.downloadingStatus ? "run" : notReadyLabel === DASHBOARD_PRIVATE_ANSWERS_COPY.pausedStatus ? "pause" : "hollow";
-    const statuses = [["ready", DASHBOARD_PRIVATE_ANSWERS_COPY.readyStatus, "ok"], ["not_set_up", notReadyLabel, notReadyDot], ["not_allowed", DASHBOARD_PRIVATE_ANSWERS_COPY.offStatus, "hollow"], ["busy", DASHBOARD_PRIVATE_ANSWERS_COPY.answering, "run"]].map(([key2, text4, dot2]) => `<span class="pastatus" data-pa-status="${key2}"><span class="dot ${dot2}" aria-hidden="true"></span>${escapeHtml2(text4)}</span>`).join("");
+    const statuses = [["ready", DASHBOARD_PRIVATE_ANSWERS_COPY.readyStatus, "ok"], ["not_set_up", notReadyLabel, notReadyDot], ["not_allowed", DASHBOARD_PRIVATE_ANSWERS_COPY.offStatus, "hollow"], ["busy", DASHBOARD_PRIVATE_ANSWERS_COPY.answering, "run"]].map(([key2, text4, dot3]) => `<span class="pastatus" data-pa-status="${key2}"><span class="dot ${dot3}" aria-hidden="true"></span>${escapeHtml2(text4)}</span>`).join("");
     const radio = `<input type="radio" name="pa-destination" value="${d.id}" data-pa-pick data-pa-action="${d.action}" data-pa-label="${escapeHtml2(label(d))}"${d === first ? " checked" : ""}${enabled && state === "ready" ? "" : " disabled"}>`;
     return `<section class="padestination" id="${d.id}" data-pa-card="${d.id}" data-pa-state="${state}">` + `<label class="papick">${radio}<span class="paname"><b class="pacardname">${escapeHtml2(d.name)}</b>${d.model ? ` <span class="pamodel">· ${escapeHtml2(d.model)}</span>` : ""}${d.id === "anonymous" && d.model && enabled ? ` <a class="pamodelchange" href="${escapeHtml2(zkSetup)}">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.zkapiChangeModel)}</a>` : ""}<span class="pnote paline">${escapeHtml2(d.line)}</span></span></label>` + `<div class="pastate">${statuses}</div>` + (d.id === "anonymous" && enabled ? renderLevelChoice(zk?.settings.level === "general" ? "strict" : "standard", zkSetup) : "") + `<div class="paaction">${action}</div>${Object.entries(actions).map(([key2, html2]) => `<template data-pa-template="${key2}">${html2}</template>`).join("")}</section>`;
   }).join("");
@@ -168350,10 +168416,10 @@ var init_session = __esm(() => {
 
 // src/core/file-mime.ts
 function fileMimeTypeFromName(name) {
-  const dot2 = name.lastIndexOf(".");
-  if (dot2 <= 0 || dot2 === name.length - 1)
+  const dot3 = name.lastIndexOf(".");
+  if (dot3 <= 0 || dot3 === name.length - 1)
     return "application/octet-stream";
-  const extension = name.slice(dot2 + 1).toLowerCase();
+  const extension = name.slice(dot3 + 1).toLowerCase();
   return MIME_BY_EXTENSION[extension] ?? (SOURCE_CODE_EXTENSIONS.has(extension) ? "text/plain" : "application/octet-stream");
 }
 function fileMimeTypeFromBytes(bytes) {

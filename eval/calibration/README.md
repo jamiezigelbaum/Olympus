@@ -336,7 +336,11 @@ bun ./dist/cli.js prefilter-train-offline --out /absolute/path/to/prefilter-weig
 
 Optional `--data-dir DIR` selects an install. The command reuses the worker's
 key-ordered 32-row scan windows, round-robin ledger order, judge-label/vector
-eligibility, 5,000-per-class fitting cap and unchanged `trainLogisticSteps`.
+eligibility, 5,000-per-class fitting cap and the same `trainLogisticSteps` as the worker.
+The fit uses class-balanced C=10 L-BFGS with an unpenalized, zero-initialized
+intercept: at most 500 iterations, 10 history pairs, 40 Armijo backtracking
+trials per iteration and a scaled-gradient infinity-norm tolerance of 1e-8.
+It yields per example/evaluation and rejects a fit that does not converge.
 It continues counting all eligible rows after the caps fill. It needs the same
 2,000 examples per class as the worker and reads the recorded install training
 judge identity rather than inferring one from row labels.

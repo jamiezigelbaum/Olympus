@@ -74946,6 +74946,18 @@ function privateProbability(model, vector) {
     score += input[i2] * model.weights[i2];
   return Number.isFinite(score) ? sigmoid(score) : undefined;
 }
+var FIT_C = 10;
+var MAX_ITERATIONS = 500;
+var GRADIENT_TOLERANCE = 0.00000001;
+var HISTORY_SIZE = 10;
+var MAX_LINE_SEARCH = 40;
+var ARMIJO = 0.0001;
+function dot2(a, b) {
+  let result = 0;
+  for (let i2 = 0;i2 < a.length; i2++)
+    result += a[i2] * b[i2];
+  return result;
+}
 function* trainLogisticSteps(examples, minimumPerClass = EMBEDDING_PREFILTER_MIN_PER_CLASS) {
   if (!Number.isSafeInteger(minimumPerClass) || minimumPerClass < 1)
     return;
@@ -74962,32 +74974,91 @@ function* trainLogisticSteps(examples, minimumPerClass = EMBEDDING_PREFILTER_MIN
   }
   if (counts.some((count) => count < minimumPerClass))
     return;
-  const weights = new Array(EMBEDDING_PREFILTER_DIMENSIONS).fill(0);
-  let bias = Math.log(counts[1] / counts[0]);
-  let seed = 939;
-  const order = inputs.map((_, index) => index);
-  for (let epoch = 0;epoch < 20; epoch++) {
-    for (let i2 = order.length - 1;i2 > 0; i2--) {
-      seed = Math.imul(seed, 1664525) + 1013904223 >>> 0;
-      const j = seed % (i2 + 1);
-      [order[i2], order[j]] = [order[j], order[i2]];
+  const dimensions = EMBEDDING_PREFILTER_DIMENSIONS;
+  const penalty = 1 / (FIT_C * inputs.length);
+  function* evaluate(parameters2) {
+    const gradient = parameters2.map((value, i2) => i2 < dimensions ? penalty * value : 0);
+    let loss = 0;
+    for (let i2 = 0;i2 < dimensions; i2++)
+      loss += 0.5 * penalty * parameters2[i2] ** 2;
+    for (const { vector, label } of inputs) {
+      let score = parameters2[dimensions];
+      for (let i2 = 0;i2 < dimensions; i2++)
+        score += parameters2[i2] * vector[i2];
+      const scale = 1 / (2 * counts[label]);
+      const margin = (2 * label - 1) * score;
+      loss += scale * (Math.max(0, -margin) + Math.log1p(Math.exp(-Math.abs(margin))));
+      const error2 = scale * (label ? -sigmoid(-score) : sigmoid(score));
+      gradient[dimensions] += error2;
+      for (let i2 = 0;i2 < dimensions; i2++)
+        gradient[i2] += error2 * vector[i2];
       yield;
     }
-    const rate = 0.12 / (1 + epoch * 0.15);
-    const shrink = 1 - rate * 0.001;
-    for (const index of order) {
-      const input = inputs[index];
-      let score = bias;
-      for (let i2 = 0;i2 < weights.length; i2++)
-        score += weights[i2] * input.vector[i2];
-      const error2 = sigmoid(score) - input.label;
-      bias -= rate * error2;
-      for (let i2 = 0;i2 < weights.length; i2++)
-        weights[i2] = weights[i2] * shrink - rate * error2 * input.vector[i2];
-      yield;
-    }
+    return { loss, gradient };
   }
-  return { weights, bias };
+  let parameters = new Array(dimensions + 1).fill(0);
+  let current2 = yield* evaluate(parameters);
+  const history = [];
+  for (let iteration = 0;iteration <= MAX_ITERATIONS; iteration++) {
+    if (!Number.isFinite(current2.loss) || !current2.gradient.every(Number.isFinite))
+      throw new Error("Logistic fit is nonfinite");
+    if (Math.max(...current2.gradient.map(Math.abs)) <= GRADIENT_TOLERANCE) {
+      return { weights: parameters.slice(0, dimensions), bias: parameters[dimensions] };
+    }
+    if (iteration === MAX_ITERATIONS)
+      break;
+    const direction = current2.gradient.slice();
+    const alpha = new Array(history.length);
+    for (let j = history.length - 1;j >= 0; j--) {
+      const h = history[j];
+      alpha[j] = dot2(h.s, direction) / h.sy;
+      for (let i2 = 0;i2 < direction.length; i2++)
+        direction[i2] -= alpha[j] * h.y[i2];
+      yield;
+    }
+    const last = history.at(-1);
+    const scaling = last ? last.sy / last.yy : 1;
+    for (let i2 = 0;i2 < direction.length; i2++)
+      direction[i2] *= scaling;
+    for (let j = 0;j < history.length; j++) {
+      const h = history[j], beta = dot2(h.y, direction) / h.sy;
+      for (let i2 = 0;i2 < direction.length; i2++)
+        direction[i2] += h.s[i2] * (alpha[j] - beta);
+      yield;
+    }
+    for (let i2 = 0;i2 < direction.length; i2++)
+      direction[i2] = -direction[i2];
+    let slope = dot2(current2.gradient, direction);
+    if (!Number.isFinite(slope) || slope >= 0) {
+      history.length = 0;
+      for (let i2 = 0;i2 < direction.length; i2++)
+        direction[i2] = -current2.gradient[i2];
+      slope = -dot2(current2.gradient, current2.gradient);
+    }
+    let stepSize = 1, accepted = false;
+    for (let trial = 0;trial < MAX_LINE_SEARCH; trial++, stepSize *= 0.5) {
+      const candidate = parameters.map((value, i2) => value + stepSize * direction[i2]);
+      const next = yield* evaluate(candidate);
+      if (!Number.isFinite(next.loss) || next.loss > current2.loss + ARMIJO * stepSize * slope)
+        continue;
+      const s = candidate.map((value, i2) => value - parameters[i2]);
+      const y = next.gradient.map((value, i2) => value - current2.gradient[i2]);
+      const sy = dot2(s, y), yy = dot2(y, y);
+      if (sy > 0 && yy > 0) {
+        if (history.length === HISTORY_SIZE)
+          history.shift();
+        history.push({ s, y, sy, yy });
+      }
+      parameters = candidate;
+      current2 = next;
+      accepted = true;
+      yield;
+      break;
+    }
+    if (!accepted)
+      throw new Error("Logistic line search did not converge");
+  }
+  throw new Error("Logistic fit did not converge");
 }
 
 // src/workers/classification/embedding-prefilter.ts
@@ -74997,6 +75068,8 @@ var PREFIX = "embedding-prefilter:";
 var RECEIPTS = `${PREFIX}clear:`;
 var CHECKS = `${PREFIX}check:`;
 var WINDOW = 200;
+var PREFILTER_CLEARING_CUTOFF = 0.05;
+var SPOT_CHECK_RATE = 1 / 20;
 var RETRAIN_MS = 24 * 60 * 60 * 1000;
 var PREFILTER_MAX_PER_CLASS = 5000;
 var MAX_PER_CLASS = PREFILTER_MAX_PER_CLASS;
@@ -75697,9 +75770,9 @@ class EmbeddingPrefilter {
     const probability = privateProbability(this.saved.model, vector);
     if (probability === undefined)
       return skip("score_unavailable");
-    if (probability >= 0.05)
+    if (probability >= PREFILTER_CLEARING_CUTOFF)
       return skip("probability_high");
-    if ((this.options.random?.() ?? Math.random()) < 0.05) {
+    if ((this.options.random?.() ?? Math.random()) < SPOT_CHECK_RATE) {
       this.options.ledger.writeMeta(checkKey, JSON.stringify({ hash: question.materialHash, token: randomUUID12() }));
       return spotCheck();
     }
