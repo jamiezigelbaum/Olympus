@@ -195,9 +195,9 @@ const PUBLIC_INSTALL_URLS = new Set([
   'https://api.github.com/repos/jamiezigelbaum/Olympus/releases/tags/v1.0.1',
   'https://github.com/jamiezigelbaum/Olympus/releases/download/v1.0.1/olympus-1.0.1.tgz',
   'https://github.com/jamiezigelbaum/Olympus/releases/tag/v1.0.1',
-  'https://api.github.com/repos/jamiezigelbaum/Olympus/releases/tags/v1.3.4',
-  'https://github.com/jamiezigelbaum/Olympus/releases/download/v1.3.4/olympus-1.3.4.tgz',
-  'https://github.com/jamiezigelbaum/Olympus/releases/tag/v1.3.4',
+  'https://api.github.com/repos/jamiezigelbaum/Olympus/releases/tags/v1.4.0',
+  'https://github.com/jamiezigelbaum/Olympus/releases/download/v1.4.0/olympus-1.4.0.tgz',
+  'https://github.com/jamiezigelbaum/Olympus/releases/tag/v1.4.0',
 ]);
 
 /**

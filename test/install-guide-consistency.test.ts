@@ -22,8 +22,8 @@ describe('pilot installation entry points', () => {
     const install = readFileSync(join(ROOT, 'INSTALL_FOR_AGENTS.md'), 'utf8');
     const download = install.slice(install.indexOf('### Pilot download'), install.indexOf('Success looks like'))
       .replace(/\s+/g, ' ');
-    expect(download).toContain('https://api.github.com/repos/jamiezigelbaum/Olympus/releases/tags/v1.3.4');
-    expect(download).toContain('https://github.com/jamiezigelbaum/Olympus/releases/download/v1.3.4/olympus-1.3.4.tgz');
+    expect(download).toContain('https://api.github.com/repos/jamiezigelbaum/Olympus/releases/tags/v1.4.0');
+    expect(download).toContain('https://github.com/jamiezigelbaum/Olympus/releases/download/v1.4.0/olympus-1.4.0.tgz');
     expect(download).toContain('without authentication');
     expect(download).toContain('Select exactly one uploaded asset');
     const selectedAsset = /Select exactly one uploaded asset named `([^`]+)`/.exec(install)?.[1];
