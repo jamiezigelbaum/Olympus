@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { readPin, repin } from '../scripts/pin-install-guide';
 
 const ROOT = join(import.meta.dir, '..');
 
@@ -22,8 +23,9 @@ describe('pilot installation entry points', () => {
     const install = readFileSync(join(ROOT, 'INSTALL_FOR_AGENTS.md'), 'utf8');
     const download = install.slice(install.indexOf('### Pilot download'), install.indexOf('Success looks like'))
       .replace(/\s+/g, ' ');
-    expect(download).toContain('https://api.github.com/repos/jamiezigelbaum/Olympus/releases/tags/v1.4.0');
-    expect(download).toContain('https://github.com/jamiezigelbaum/Olympus/releases/download/v1.4.0/olympus-1.4.0.tgz');
+    const pin = readPin(ROOT);
+    expect(download).toContain(`https://api.github.com/repos/jamiezigelbaum/Olympus/releases/tags/v${pin.version}`);
+    expect(download).toContain(`https://github.com/jamiezigelbaum/Olympus/releases/download/v${pin.version}/olympus-${pin.version}.tgz`);
     expect(download).toContain('without authentication');
     expect(download).toContain('Select exactly one uploaded asset');
     const selectedAsset = /Select exactly one uploaded asset named `([^`]+)`/.exec(install)?.[1];
@@ -31,8 +33,12 @@ describe('pilot installation entry points', () => {
     const manualAsset = /choose `([^`]+)` under Assets/.exec(readFileSync(join(ROOT, 'docs/QUICKSTART.md'), 'utf8'))?.[1];
     expect(manualAsset).toBe(selectedAsset);
     expect(download).toContain('Do not use `/releases/latest`');
-    expect(download).toContain('0768e371cd171b1420bac9b577de731b4c901e52929923a663f9eedd1b8d67a1');
-    expect(download).toContain('Byte count: `16878818`');
+    // The digest and size come from config/install-guide-pin.json, which
+    // scripts/pin-install-guide.ts writes from the release asset itself.
+    expect(download).toContain(`SHA-256: \`${pin.sha256}\``);
+    expect(download).toContain(`Byte count: \`${pin.bytes}\``);
+    expect([...download.matchAll(/SHA-256: `([0-9a-f]{64})`/g)].map((m) => m[1])).toEqual([pin.sha256]);
+    expect(download).toContain(`\`tag_name\` equal to \`v${pin.version}\``);
     expect(download).toContain("metadata's digest and size to match the pinned values");
     expect(download).toContain('Do not extract, execute, or install an archive unless both match');
     expect(download).toContain('missing digest, ambiguous asset, or checksum/size mismatch stops installation');
@@ -242,5 +248,25 @@ describe('pilot installation entry points', () => {
       expect(document).not.toContain('24.15.0');
       expect(document).not.toContain('22.22.3');
     }
+  });
+
+  test('repinning moves the version, digest and size together', () => {
+    const from = { version: '1.0.0', sha256: 'a'.repeat(64), bytes: 10 };
+    const to = { version: '1.0.1', sha256: 'b'.repeat(64), bytes: 20 };
+    const before = [
+      '`https://api.github.com/repos/jamiezigelbaum/Olympus/releases/tags/v1.0.0`',
+      `- SHA-256: \`${from.sha256}\``, '- Byte count: `10`', '`tag_name` equal to `v1.0.0`',
+      'https://github.com/jamiezigelbaum/Olympus/releases/download/v1.0.0/olympus-1.0.0.tgz',
+      'https://github.com/jamiezigelbaum/Olympus/releases/tag/v1.0.0', 'published on ClawHub (from 1.0.0)',
+    ].join('\n');
+    const after = repin(before, from, to);
+    expect(after).toContain('releases/tags/v1.0.1');
+    expect(after).toContain(`SHA-256: \`${to.sha256}\``);
+    expect(after).toContain('Byte count: `20`');
+    expect(after).toContain('`tag_name` equal to `v1.0.1`');
+    expect(after).toContain('releases/download/v1.0.1/olympus-1.0.1.tgz');
+    expect(after).toContain('releases/tag/v1.0.1');
+    expect(after).toContain('(from 1.0.0)');
+    expect(after).not.toContain(from.sha256);
   });
 });
