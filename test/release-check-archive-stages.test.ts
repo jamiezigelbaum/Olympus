@@ -573,22 +573,26 @@ describe('Remove', () => {
 
   test('cleaning up when the page cannot be read is not ok and removes nothing: an unreadable page is not an empty one', async () => {
     const { fake } = await importedThree();
+    // What it must not touch is what the setup imported (on a loaded runner a 5 s import can still be settling).
+    const before = fake.archives.map((archive) => archive.id);
     fake.world.panelUnreadable = true;
     const cleaned = await removeAllStage(fake, { removeS: 2, openS: 2, verifyS: 6 });
     expect(cleaned.ok).toBe(false);
     expect(cleaned.removed).toEqual([]);
     expect(cleaned.detail).toContain('the dashboard could not be read');
-    expect(fake.archives).toHaveLength(3);
+    expect(fake.archives.map((archive) => archive.id)).toEqual(before);
   });
 
   test('cleaning up when the agent\'s status cannot be read is not ok either', async () => {
     const { fake } = await importedThree();
+    // What it must not touch is what the setup imported (on a loaded runner a 5 s import can still be settling).
+    const before = fake.archives.map((archive) => archive.id);
     fake.cli = () => ({ code: 1, json: undefined, stderr: 'engine down' });
     const cleaned = await removeAllStage(fake, { removeS: 2, openS: 2, verifyS: 6 });
     expect(cleaned.ok).toBe(false);
     expect(cleaned.removed).toEqual([]);
     expect(cleaned.detail).toContain('status of the archives could not be read');
-    expect(fake.archives).toHaveLength(3);
+    expect(fake.archives.map((archive) => archive.id)).toEqual(before);
   });
 });
 

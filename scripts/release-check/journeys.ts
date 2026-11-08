@@ -60,6 +60,8 @@ export const OPEN_ALL_SOURCES: Journey['steps'][number] = {
   do: { click: { css: 'details.home-sources:not([open]) > summary' }, frame: 'panel', optional: true },
   expect: [{ present: { css: 'details.home-sources[open]' }, frame: 'panel' }],
 };
+/** "Connect an agent", or "Connect another agent" once one is connected (the suite's own connection). */
+const CONNECT_AGENT: Target = { role: 'button', name: /^Connect (an|another) agent$/ };
 /** The top bar's tabs (Home, Sources, Privacy, Settings): links on the page around the panel. */
 const tab = (name: string): Target => ({ role: 'link', name });
 const DISCARDED_SENDER = 'release-check@example.com';
@@ -221,11 +223,11 @@ export const JOURNEYS: readonly Journey[] = [
       {
         name: 'Press Settings: Agents and access offers Connect an agent',
         do: { click: tab('Settings'), frame: 'host' },
-        expect: [{ url: /\/dashboard\?settings/ }, { present: { role: 'button', name: 'Connect an agent' }, frame: 'host' }],
+        expect: [{ url: /\/dashboard\?settings/ }, { present: CONNECT_AGENT, frame: 'host' }],
       },
       {
         name: 'Press Connect an agent',
-        do: { click: { role: 'button', name: 'Connect an agent' }, frame: 'host' },
+        do: { click: CONNECT_AGENT, frame: 'host' },
         expect: [
           { text: 'Pick the agent you use', frame: 'host' },
           { present: { role: 'button', name: 'Claude', contains: true }, frame: 'host' },
