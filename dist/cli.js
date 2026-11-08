@@ -226122,7 +226122,7 @@ function waitForActivationSettle(value2) {
 function qualifyWorkerReadiness(options, port) {
   const url = `http://127.0.0.1:${port}/v1/health`;
   const probe = () => options.readinessProbe ? options.readinessProbe(url) : defaultWorkerReadinessProbe(url, options.bunBin);
-  const timeoutMs = validateSettleWindow(options.actionSettleTimeoutMs ?? DEFAULT_ACTION_SETTLE_TIMEOUT_MS, "Lifecycle readiness timeout", 120000);
+  const timeoutMs = validateSettleWindow(options.readinessTimeoutMs ?? options.actionSettleTimeoutMs ?? DEFAULT_READINESS_TIMEOUT_MS, "Lifecycle readiness timeout", MAX_READINESS_TIMEOUT_MS);
   const pollMs = validateSettleWindow(options.actionSettlePollMs ?? DEFAULT_ACTION_SETTLE_POLL_MS, "Lifecycle readiness poll interval", 1e4);
   const deadline = Date.now() + timeoutMs;
   let ready = probe();
@@ -226196,6 +226196,8 @@ function serviceInstallOptions(options, dryRun) {
 }
 var DEFAULT_ACTION_SETTLE_TIMEOUT_MS = 15000;
 var DEFAULT_ACTION_SETTLE_POLL_MS = 500;
+var DEFAULT_READINESS_TIMEOUT_MS = 180000;
+var MAX_READINESS_TIMEOUT_MS = 600000;
 function settleWorkerServiceState(options, expected) {
   const timeoutMs = validateSettleWindow(options.actionSettleTimeoutMs ?? DEFAULT_ACTION_SETTLE_TIMEOUT_MS, "Lifecycle action settle timeout", 120000);
   const pollMs = validateSettleWindow(options.actionSettlePollMs ?? DEFAULT_ACTION_SETTLE_POLL_MS, "Lifecycle action settle poll interval", 1e4);
