@@ -27,6 +27,10 @@ import { screenshotWithin, type ElementInfo, type JourneyDriver, type JourneyTra
 import type { CheckResult } from './report.ts';
 import { pagesChecks, type PagesOptions, type PagesResult } from './explore-pages.ts';
 import { BLANK_WINDOW } from './probe.ts';
+import { DASHBOARD_CHATGPT_PAGE_COPY as PANEL } from '../../src/workers/dashboard/vocabulary.ts';
+
+/** Sections that are on the page only while work runs: one that has gone by the fresh page finished, it did not break. */
+const WHILE_WORKING = new Set<string>([PANEL.progress, PANEL.home.progress]);
 
 export interface PanelControl {
   key: string;
@@ -576,6 +580,11 @@ export async function explore(options: ExploreOptions): Promise<ExploreResult> {
         // A control on its way that could not be pressed is looked for once more too: the row may have been between two states.
       }
       if (!reachable || !control) {
+        const section = item.row.startsWith('section:') ? item.row.slice('section:'.length) : '';
+        if (reachable && WHILE_WORKING.has(section) && !controlsNow.some((candidate) => candidate.section === section)) {
+          steps.push({ n: steps.length + 1, name: `${finalKey} (not pressed)`, action: `look for ${finalKey} in ${section}`, expected: `a control in ${section} is pressed while the work runs`, actual: `${section} has left the page: the work finished between the seed and this fresh page`, ok: true, ms: now() - started, at: '/dashboard', consoleErrors: [], failedRequests: [], findings: [] });
+          continue;
+        }
         const rows = [...new Set([...base, ...controlsNow].map((candidate) => candidate.rowName).filter(Boolean))];
         const seen = item.row.startsWith('section:') ? '' : `; as seeded the row read "${rowWords(baseText, item.row, rows)}", now it reads "${rowWords(await panelText(driver), item.row, rows)}"`;
         steps.push(failureStep(steps.length + 1, item.path, `${!reachable ? 'a control on its way could not be pressed' : 'it was on the page as seeded but is not there on a fresh page'}${seen}`));
