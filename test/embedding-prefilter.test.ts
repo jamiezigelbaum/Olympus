@@ -820,7 +820,7 @@ test('a failed completion watermark stays a failed attempt with a three-hour ret
   expect(logs[0]).toContain('outcome=failed');
 });
 
-test.each(['secrets', 'tier', 'decision', 'removed copy', 'changed vector', 'publication secrets'] as const)(
+test.each(['secrets', 'tier', 'decision', 'removed copy', 'changed vector', 'publication secrets', 'fit error'] as const)(
   'fitting discards retained examples after a selected item changes: %s', async change => {
     let clock = 0;
     const dir = mkdtempSync(join(tmpdir(), 'prefilter-publication-'));
@@ -837,7 +837,8 @@ test.each(['secrets', 'tier', 'decision', 'removed copy', 'changed vector', 'pub
     expect(runtime()?.model).toBeUndefined();
     const revision = f.ledger.readMeta('embedding-prefilter:training-revision');
     const row = f.ledger.getCurrent(subject(0))!;
-    if (change === 'publication secrets') runtime()!.fit!.next = () => {
+    if (change === 'fit error') runtime()!.fit!.next = () => { throw new Error('Synthetic fit did not converge'); };
+    else if (change === 'publication secrets') runtime()!.fit!.next = () => {
       f.ledger.recordDecision(subject(0), { ...row, state: 'current', snifferId: judge,
         decidedBy: 'secret_detector', contentTier: 'secrets' });
       return { done: true, value: { weights: new Array(D).fill(0), bias: -5 } };
@@ -850,7 +851,7 @@ test.each(['secrets', 'tier', 'decision', 'removed copy', 'changed vector', 'pub
       reasons: change === 'decision' ? [...row.reasons, 'content:borderline:financial'] : row.reasons });
     expect(f.ledger.readMeta('embedding-prefilter:training-revision')).toBe(revision);
     for (let tick = 0; tick < 20 && trainingState(f).outcome === 'fitting'; tick++) await f.filter.prepare(judge);
-    expect(trainingState(f)).toMatchObject({ outcome: 'failed', reason: 'ledger_or_judge_changed' });
+    expect(trainingState(f)).toMatchObject({ outcome: 'failed', reason: change === 'fit error' ? 'training_failed' : 'ledger_or_judge_changed' });
     expect(runtime()).toBeUndefined();
     expect(existsSync(join(f.modelDir, 'weights.json'))).toBe(false);
   }, 30_000);

@@ -257,6 +257,25 @@ test('offline CLI writes only --out, leaves all live WAL files and meta unchange
     expect(saved.model.weights).toHaveLength(D);
     expect(Number.isFinite(saved.model.bias)).toBe(true);
     expect(saved.judge).toBe(a.judge);
+    // A fit may yield before discovering non-convergence. Inject that error in
+    // a separate source-module process (the bundled CLI above is checked as-is).
+    const outside = files(output);
+    const failed = Bun.spawnSync([process.execPath, '--eval', `
+      const { mock } = await import('bun:test');
+      const fitPath = ${JSON.stringify(resolve('src/workers/classification/embedding-logistic.ts'))};
+      const actual = await import(fitPath);
+      mock.module(fitPath, () => ({ ...actual,
+        *trainLogisticSteps() { yield; throw new Error('Synthetic fit did not converge'); }
+      }));
+      const { prefilterTrainOfflineMain } = await import(${JSON.stringify(resolve('src/workers/classification/prefilter-train-offline.ts'))});
+      process.exit(prefilterTrainOfflineMain(${JSON.stringify(['--data-dir', root, '--out', join(output, 'failed.json')])}));
+    `], { stdout: 'pipe', stderr: 'pipe' });
+    expect(failed.exitCode).toBe(1);
+    expect(failed.stderr.toString()).toBe('');
+    expect(JSON.parse(failed.stdout.toString())).toMatchObject({ outcome: 'failed', examples: { personal: 2002, private: 2001 } });
+    expect(failed.stdout.toString()).not.toMatch(/Synthetic|converge|sqlite|picnic|sandwich/);
+    expect(files(root)).toEqual(before);
+    expect(files(output)).toEqual(outside);
   } finally { a.close(); rmSync(root, { recursive: true, force: true }); rmSync(output, { recursive: true, force: true }); }
 }, 120_000);
 
