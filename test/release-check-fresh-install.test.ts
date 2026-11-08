@@ -76,6 +76,24 @@ describe('fresh install canary', () => {
       expect(syntax.status).toBe(0);
     }
   }, 30_000);
+  test('a failing live check and a failed answer say why, without the answer text', async () => {
+    const r = rig();
+    const engine = await r.options.engine();
+    const { checks } = await runFreshInstall(r.machine, { ...r.options, engine: async () => ({
+      call: async (tool, args) => {
+        if (tool === 'source_index_status') return response({ corpora: sources.map(s => ({ corpus_id: s.id, label: s.label, configured: true, counts: { indexed_items: 0 } })) });
+        if (tool === 'source_answer') return response({ status: 'needs_setup', answer: 'private words', citations: [{ label: 'Dropbox' }] });
+        return await engine.call(tool, args);
+      },
+      close: engine.close,
+    }) });
+    expect(checks.find(c => c.id === 'live.gmail.status')?.detail).toBe('1 corpus(es), 0 item(s) indexed: nothing indexed yet');
+    const answer = checks.find(c => c.id === 'fresh.gmail.answer')?.detail ?? '';
+    expect(answer).toContain('status needs_setup, 1 of 1 expected fact(s) missing, cited Dropbox');
+    expect(answer).not.toContain('private words');
+    expect(checks.find(c => c.id === 'fresh.restore-zig')?.status).toBe('pass');
+  }, 30_000);
+
   test('candidate uses the non-interactive site installer as olyfresh', async () => {
     const r = rig();
     const puts: Array<[string, string]> = [];
