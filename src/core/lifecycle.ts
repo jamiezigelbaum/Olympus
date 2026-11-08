@@ -83,6 +83,12 @@ export interface WorkerLifecycleOptions extends WorkerServiceInstallOptions {
   actionSettleTimeoutMs?: number;
   /** Gap between state polls inside that window, in milliseconds. Defaults to 500. */
   actionSettlePollMs?: number;
+  /**
+   * How long an upgraded worker may take to answer `/v1/health` while its unit
+   * stays active, in milliseconds. Defaults to `actionSettleTimeoutMs` when that
+   * is set, otherwise 180000.
+   */
+  readinessTimeoutMs?: number;
 }
 
 interface LifecycleTransactionV1 {
@@ -889,9 +895,9 @@ function qualifyWorkerReadiness(
     ? options.readinessProbe(url)
     : defaultWorkerReadinessProbe(url, options.bunBin);
   const timeoutMs = validateSettleWindow(
-    options.actionSettleTimeoutMs ?? DEFAULT_ACTION_SETTLE_TIMEOUT_MS,
+    options.readinessTimeoutMs ?? options.actionSettleTimeoutMs ?? DEFAULT_READINESS_TIMEOUT_MS,
     'Lifecycle readiness timeout',
-    120_000,
+    MAX_READINESS_TIMEOUT_MS,
   );
   const pollMs = validateSettleWindow(
     options.actionSettlePollMs ?? DEFAULT_ACTION_SETTLE_POLL_MS,
@@ -975,6 +981,15 @@ function serviceInstallOptions(options: WorkerLifecycleOptions, dryRun: boolean)
 
 const DEFAULT_ACTION_SETTLE_TIMEOUT_MS = 15_000;
 const DEFAULT_ACTION_SETTLE_POLL_MS = 500;
+/**
+ * A worker opening a large archive can take well over the 15 s state window
+ * before `/v1/health` answers, and an upgrade that gave up at 15 s rolled a
+ * healthy 1.4.0 back onto a build that could not open its newer stores (#1040).
+ * The wait only continues while the unit stays active, so a worker that exits
+ * on boot still fails at once.
+ */
+const DEFAULT_READINESS_TIMEOUT_MS = 180_000;
+const MAX_READINESS_TIMEOUT_MS = 600_000;
 
 /**
  * Wait, bounded, for the service manager to report one of `expected`.
