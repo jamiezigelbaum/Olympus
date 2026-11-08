@@ -39,7 +39,7 @@ function fixture(options: { trained?: boolean; memory?: boolean; bias?: number; 
   if (options.trained !== false) {
     mkdirSync(modelDir, { mode: 0o755 });
     writeFileSync(join(modelDir, 'weights.json'), JSON.stringify({ version: '00000000-0000-0000-0000-000000000939',
-      trainedAt: Date.now(), judge, revisions: JSON.stringify([[ledger.ledgerId(), '0']]) + ':0', model: { weights: new Array(D).fill(0), bias: options.bias ?? -5 } }), { mode: 0o644 });
+      trainedAt: Date.now(), judge, revisions: JSON.stringify([[ledger.ledgerId(), '0']]) + ':0', model: { weights: new Array(D).fill(0), bias: options.bias ?? -7 } }), { mode: 0o644 });
   }
   const placementFor = (decision: TierDecision): TierPlacementPlan => ({
     copies: [{ corpusId: decision.contentPending ? 'private' : 'personal', trustDomain: decision.contentPending ? 'secure_local' : 'internal',
@@ -93,7 +93,7 @@ test('clearing counts one first skip per attempt without changing held decisions
   for (const reason of ['disabled', 'audit_stopped', 'model_missing', 'model_invalid', 'weights_missing',
     'revisions_changed', 'judge_changed', 'not_content', 'item_override', 'rejudge_open', 'metadata_question_open',
     'copy_missing', 'digest_missing', 'no_vector', 'score_unavailable', 'probability_high', 'clear_rejected'] as const) {
-    const f = fixture({ enabled: () => reason !== 'disabled', bias: reason === 'probability_high' ? 5 : -5 });
+    const f = fixture({ enabled: () => reason !== 'disabled', bias: reason === 'probability_high' ? 5 : -7 });
     const q = f.add(1); const before = f.ledger.getCurrent(q)!;
     let filter = f.filter;
     const path = join(f.modelDir, 'weights.json');
@@ -151,7 +151,7 @@ test('clearing counts cleared and sampled or existing spot checks exactly once',
   expect((await pass(clear).run()).clearing).toEqual({ tried: 1, cleared: 1, spotChecks: 0, skipped: {} });
   expect((await pass(clear).run()).clearing).toEqual(clearingCounts());
 });
-test('clears below 0.05 with a content-free reason, retains rollback question and never settles Private', async () => {
+test('clears below the 0.002 cutoff with a content-free reason, retains rollback question and never settles Private', async () => {
   const f = fixture(); f.add(1); const p = pass(f);
   await p.run();
   expect(p.calls()).toBe(0);
@@ -210,6 +210,16 @@ test('5 percent selection asks the judge directly and survives restart', async (
   const p = pass(f, 'private'); await p.run();
   expect(p.calls()).toBe(1);
   expect(f.ledger.getCurrent(subject(1))!.contentTier).toBe('secure');
+});
+test('clearing and spot-check selection share the probability cutoff, with independent 1-in-20 sampling', () => {
+  for (const p of [0.0019, 0.0021]) for (const random of [0, 0.049, 0.05]) {
+    const f = fixture({ bias: Math.log(p / (1 - p)), random: () => random });
+    const q = f.add(1);
+    const eligible = p < 0.002, sampled = random < 1 / 20;
+    expect(f.filter.tryClear(q, judge)).toBe(eligible && !sampled);
+    expect(f.filter.isSpotCheck(q)).toBe(eligible && sampled);
+    expect(f.ledger.getCurrent(q)!.contentPending).toBe(!eligible || sampled);
+  }
 });
 test('five Private checks in 200 stop clearing durably and return cleared items to the queue', async () => {
   let sampling = false;
@@ -612,6 +622,18 @@ test('only judge-only ledger labels qualify; competing tiers, record holds and s
   expect(logs[0]).toContain('personal=1 private=1 outcome=too_few');
   expect(existsSync(join(f.modelDir, 'weights.json'))).toBe(false);
 });
+test('worker samples a queued lowering by the final Personal target instead of its old Private placement', async () => {
+  const f = fixture({ trained: false, memory: true, log: () => {} });
+  trainingRow(f, 0);
+  const settled = f.ledger.getCurrent(subject(0))!;
+  // Reproduce placement waiting at Private with the already-final Personal reasons.
+  f.ledger.recordRoutedPlacement(subject(0), { ...settled, state: 'current', contentTier: 'secure',
+    decidedBy: 'sniffer', snifferId: judge }, f.placementFor({ contentPending: true } as TierDecision));
+  f.ledger.beginMove(subject(0), { metadataTier: 'private', contentTier: 'private' }, f.ledger.getCurrent(subject(0))!.generation);
+  expect(f.ledger.getCurrent(subject(0))).toMatchObject({ state: 'moving', contentTier: 'secure', contentPending: false });
+  await f.filter.prepare(judge);
+  expect(trainingState(f)).toMatchObject({ outcome: 'too_few', counts: [1, 0] });
+});
 test('scan stops at its 200 ms deadline and resumes its durable cursor after restart', async () => {
   let monotonic = 0;
   const logs: string[] = [];
@@ -798,24 +820,28 @@ test('a failed completion watermark stays a failed attempt with a three-hour ret
   expect(logs[0]).toContain('outcome=failed');
 });
 
-test.each(['secrets', 'tier', 'decision', 'removed copy', 'changed vector', 'publication secrets'] as const)(
+test.each(['secrets', 'tier', 'decision', 'removed copy', 'changed vector', 'publication secrets', 'fit error'] as const)(
   'fitting discards retained examples after a selected item changes: %s', async change => {
     let clock = 0;
     const dir = mkdtempSync(join(tmpdir(), 'prefilter-publication-'));
     const control = new TierLedger({ dbPath: join(dir, 'control.sqlite') });
-    const f = fixture({ trained: false, memory: true, stateLedger: control, monotonicNow: () => (clock += 0.01), log: () => {} });
+    // Bound each slice below one normalization pass, so even a fast optimizer
+    // is still suspended inside the fit when the mutation is injected.
+    const f = fixture({ trained: false, memory: true, stateLedger: control, monotonicNow: () => (clock += 0.1), log: () => {} });
     cleanups.push(() => { control.close(); rmSync(dir, { recursive: true, force: true }); });
     for (let n = 0; n < 4000; n++) trainingRow(f, n);
-    const runtime = () => (f.filter as unknown as { training?: { examples: unknown[]; fit?: Generator<void, unknown> } }).training;
+    const runtime = () => (f.filter as unknown as { training?: { examples: unknown[]; fit?: Generator<void, unknown>; model?: unknown } }).training;
     for (let tick = 0; tick < 100 && !runtime()?.fit; tick++) await f.filter.prepare(judge);
     expect(runtime()?.fit).toBeDefined();
     expect(runtime()?.examples).toHaveLength(4000);
+    expect(runtime()?.model).toBeUndefined();
     const revision = f.ledger.readMeta('embedding-prefilter:training-revision');
     const row = f.ledger.getCurrent(subject(0))!;
-    if (change === 'publication secrets') runtime()!.fit!.next = () => {
+    if (change === 'fit error') runtime()!.fit!.next = () => { throw new Error('Synthetic fit did not converge'); };
+    else if (change === 'publication secrets') runtime()!.fit!.next = () => {
       f.ledger.recordDecision(subject(0), { ...row, state: 'current', snifferId: judge,
         decidedBy: 'secret_detector', contentTier: 'secrets' });
-      return { done: true, value: { weights: new Array(D).fill(0), bias: -5 } };
+      return { done: true, value: { weights: new Array(D).fill(0), bias: -7 } };
     };
     else if (change === 'removed copy') f.setCopy(n => n === 0 ? undefined : copy(n));
     else if (change === 'changed vector') f.setCopy(n => copy(n, n === 0 ? -1 : 1));
@@ -824,8 +850,8 @@ test.each(['secrets', 'tier', 'decision', 'removed copy', 'changed vector', 'pub
       contentTier: change === 'secrets' ? 'secrets' : change === 'tier' ? 'secure' : row.contentTier,
       reasons: change === 'decision' ? [...row.reasons, 'content:borderline:financial'] : row.reasons });
     expect(f.ledger.readMeta('embedding-prefilter:training-revision')).toBe(revision);
-    await f.filter.prepare(judge);
-    expect(trainingState(f)).toMatchObject({ outcome: 'failed', reason: 'ledger_or_judge_changed' });
+    for (let tick = 0; tick < 20 && trainingState(f).outcome === 'fitting'; tick++) await f.filter.prepare(judge);
+    expect(trainingState(f)).toMatchObject({ outcome: 'failed', reason: change === 'fit error' ? 'training_failed' : 'ledger_or_judge_changed' });
     expect(runtime()).toBeUndefined();
     expect(existsSync(join(f.modelDir, 'weights.json'))).toBe(false);
   }, 30_000);
@@ -969,7 +995,7 @@ test('legacy metadata raises and differing subject verdict tiers never label', (
   expect(drops).toEqual(['legacy_verdict_tier']);
 });
 
-test.each([undefined, 2])('an old zero-example attempt restarts immediately: label version %s', async version => {
+test.each([undefined, 2, 3, 4])('an old zero-example attempt restarts immediately: label version %s', async version => {
   const f = fixture({ trained: false, memory: true, log: () => {} });
   await f.filter.prepare(judge);
   const old = trainingState(f);
@@ -982,7 +1008,7 @@ test.each([undefined, 2])('an old zero-example attempt restarts immediately: lab
       reasons: row.reasons.filter(reason => !reason.startsWith('content:judge_verdict:')) });
   }
   await f.make().prepare(judge);
-  expect(trainingState(f)).toMatchObject({ labelVersion: 3, outcome: 'too_few', counts: [1, 1] });
+  expect(trainingState(f)).toMatchObject({ labelVersion: 5, outcome: 'too_few', counts: [1, 1] });
   expect(trainingState(f).id).not.toBe(old.id);
 });
 
@@ -1394,3 +1420,38 @@ test('each training drop check has a stable first-failure counter', () => {
   }
   expect(cases.map(([reason]) => reason)).toEqual([...PREFILTER_TRAINING_REJECTIONS]);
 });
+
+test.each(['unchanged', 'raiser', 'secrets', 'override', 'vector'] as const)(
+  'a sampled queued lowering may complete only with unchanged label and vectors: %s', async change => {
+    const f = fixture({ trained: false, memory: true, log: () => {} });
+    trainingRow(f, 0);
+    const settled = f.ledger.getCurrent(subject(0))!;
+    f.ledger.recordRoutedPlacement(subject(0), { ...settled, state: 'current', contentTier: 'secure',
+      decidedBy: 'sniffer', snifferId: judge }, f.placementFor({ contentPending: true } as TierDecision));
+    const moving = f.ledger.beginMove(subject(0), { metadataTier: 'private', contentTier: 'private' }, f.ledger.getCurrent(subject(0))!.generation);
+    const example = (f.filter as unknown as { trainingExample(row: typeof moving, judge: string): { current(check: boolean): boolean } }).trainingExample(moving, judge);
+    expect(example.current(true)).toBe(true);
+    const destination = [{ corpusId: 'personal', trustDomain: 'internal' as const, layers: 'both' as const }];
+    f.ledger.stageMove(subject(0), { expectedGeneration: moving.generation,
+      target: { metadataTier: 'private', contentTier: 'private' }, destination, hideSource: false });
+    expect(f.ledger.copies(subject(0)).some(copy => copy.state === 'staged')).toBe(true);
+    expect(example.current(true)).toBe(true);
+    f.ledger.completeMove(subject(0), { expectedGeneration: moving.generation, destination });
+    if (change === 'vector') f.setCopy(n => copy(n, -1));
+    if (change === 'override') f.ledger.setOverride(subject(0), { kind: 'tier', tier: 'secure' });
+    if (change === 'raiser' || change === 'secrets') {
+      const row = f.ledger.getCurrent(subject(0))!;
+      f.ledger.recordDecision(subject(0), { ...row, state: 'current', snifferId: judge,
+        decidedBy: change === 'secrets' ? 'secret_detector' : 'sniffer',
+        contentTier: change === 'secrets' ? 'secrets' : row.contentTier,
+        reasons: change === 'raiser' ? [...row.reasons, 'content:own_record:health'] : row.reasons });
+    }
+    expect(example.current(true)).toBe(change === 'unchanged');
+    if (change === 'unchanged') {
+      // Accepting placement completion must not waive later decision changes.
+      const row = f.ledger.getCurrent(subject(0))!;
+      f.ledger.recordDecision(subject(0), { ...row, state: 'current', snifferId: judge,
+        decidedBy: 'sniffer', reasons: [...row.reasons, 'content:borderline:financial'] });
+      expect(example.current(true)).toBe(false);
+    }
+  });

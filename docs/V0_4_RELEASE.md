@@ -26,7 +26,8 @@ engine upgrade.
 ## Embedding Personal pre-filter (#939; implementation, 2026-11-07)
 
 Implement a source-neutral Personal-only first pass over each item's own stored
-EmbeddingGemma 2 vector, below p(Private) 0.05. One install-local logistic model
+EmbeddingGemma 2 vector, below p(Private) 0.002 (0.05 until the 2026-11-08
+owner-label gate). One install-local logistic model
 trains daily after 2,000 final judge labels per class; the 5% direct-judge audit
 stops all clearing and requeues provisional clearances above 2% Private in 200
 checks. Owner rules, Secrets and open names questions precede it. The engine

@@ -28,14 +28,14 @@ function files(root: string): Record<string, { hash: string; mtime: string; mode
   return result;
 }
 
-async function fixture(root: string, name: string) {
+async function fixture(root: string, name: string, extra = 0) {
   const dbPath = join(root, `${name}.sqlite`);
   const ledger = new TierLedger({ dbPath: join(root, `${name}.tier-ledger.sqlite`) });
   const sniffer = new TierSnifferStore({ dbPath: tierSnifferPathForLedger(ledger.dbPath) });
   const store = new LocalConnectorStore({ dbPath, corpusId: `secure_local.${name}`, family: 'file', trustDomain: 'secure_local', tierLedger: null });
   const text = 'Synthetic picnic sandwiches for Sunday.';
   const judge = snifferId({ kind: 'local', modelId: 'fixture-model' });
-  const items = Array.from({ length: 11 }, (_, n) => ({
+  const items = Array.from({ length: 11 + extra }, (_, n) => ({
     identity: { family: 'file' as const, provider: 'fixture', accountScope: 'fixture-account', providerItemId: String(n), localItemId: String(n) },
     mimeType: 'text/plain', content: { kind: 'text' as const, text }, metadata: { title: 'fixture-name' }, fetchedAt: new Date().toISOString(),
   }));
@@ -55,11 +55,11 @@ async function fixture(root: string, name: string) {
     const copy = store.exportItemCopy(subject)!;
     const digest = contentDigestReason(copy.chunks.map(chunk => chunk.boundedText).join(''));
     const reason = `content:sniffer:${judge}:other:1.00`;
-    const tier = n === 1 ? 'secure' : 'private';
+    const tier = n === 1 || (n >= 11 && n % 2 === 0) ? 'secure' : 'private';
     const reasons = [reason, digest, contentJudgeVerdictReason(reason, tier, digest)];
     if (n === 2) reasons.splice(1, 1); // real label, missing digest receipt
-    if (n === 3 || n >= 7) reasons.pop(); // production legacy reason shape
-    if (n >= 7) sniffer.putVerdict({ materialHash: `synthetic-${n}`, modelId: 'fixture-model', promptVersion: 'fixture', mapRevision: 'none' },
+    if (n === 3 || (n >= 7 && n <= 10)) reasons.pop(); // production legacy reason shape
+    if (n >= 7 && n <= 10) sniffer.putVerdict({ materialHash: `synthetic-${n}`, modelId: 'fixture-model', promptVersion: 'fixture', mapRevision: 'none' },
       { tier: n === 8 ? 'private' : 'personal', category: 'fixture', confidence: 1, failSafe: false }, subject);
     if (n === 7 || n === 10) sniffer.markFinalModelContent({ materialHash: `synthetic-${n}`,
       modelId: 'fixture-model', promptVersion: 'fixture', mapRevision: 'none' }, normalizedContentHash(n === 7 ? text : 'Different body'));
@@ -232,3 +232,94 @@ test('latest subject/model answers exclude fail-safes, expose ties and later tim
     finally { reader.close(); }
   } finally { writer.close(); rmSync(root, { recursive: true, force: true }); }
 });
+
+
+test('offline CLI writes only --out, leaves all live WAL files and meta unchanged, and never enables clearing', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'prefilter-offline-'));
+  const output = mkdtempSync(join(tmpdir(), 'prefilter-weights-'));
+  const a = await fixture(root, 'a', 4000);
+  a.ledger.writeMeta('embedding-prefilter:training-v1', JSON.stringify({ judge: a.judge }));
+  const before = files(root);
+  const out = join(output, 'offline.json');
+  try {
+    const child = Bun.spawnSync([process.execPath, resolve(process.env.OLYMPUS_PREFILTER_TEST_ENTRY ?? 'src/cli.ts'),
+      'prefilter-train-offline', '--data-dir', root, '--out', out], { stdout: 'pipe', stderr: 'pipe' });
+    expect(child.exitCode).toBe(0);
+    expect(child.stderr.toString()).toBe('');
+    expect(JSON.parse(child.stdout.toString())).toMatchObject({ outcome: 'trained',
+      per_source: { other: { personal: 2002, private: 2001 } } });
+    expect(child.stdout.toString()).not.toMatch(/fixture|synthetic|sqlite|picnic|sandwich|secure_local|fixture-model/);
+    expect(files(root)).toEqual(before);
+    expect(readdirSync(output)).toEqual(['offline.json']);
+    expect(statSync(out).mode & 0o777).toBe(0o600);
+    const saved = JSON.parse(readFileSync(out, 'utf8'));
+    expect(Object.keys(saved).sort()).toEqual(['judge', 'model', 'revisions', 'trainedAt', 'version']);
+    expect(saved.model.weights).toHaveLength(D);
+    expect(Number.isFinite(saved.model.bias)).toBe(true);
+    expect(saved.judge).toBe(a.judge);
+    // A fit may yield before discovering non-convergence. Inject that error in
+    // a separate source-module process (the bundled CLI above is checked as-is).
+    const outside = files(output);
+    const failed = Bun.spawnSync([process.execPath, '--eval', `
+      const { mock } = await import('bun:test');
+      const fitPath = ${JSON.stringify(resolve('src/workers/classification/embedding-logistic.ts'))};
+      const actual = await import(fitPath);
+      mock.module(fitPath, () => ({ ...actual,
+        *trainLogisticSteps() { yield; throw new Error('Synthetic fit did not converge'); }
+      }));
+      const { prefilterTrainOfflineMain } = await import(${JSON.stringify(resolve('src/workers/classification/prefilter-train-offline.ts'))});
+      process.exit(prefilterTrainOfflineMain(${JSON.stringify(['--data-dir', root, '--out', join(output, 'failed.json')])}));
+    `], { stdout: 'pipe', stderr: 'pipe' });
+    expect(failed.exitCode).toBe(1);
+    expect(failed.stderr.toString()).toBe('');
+    expect(JSON.parse(failed.stdout.toString())).toMatchObject({ outcome: 'failed', examples: { personal: 2002, private: 2001 } });
+    expect(failed.stdout.toString()).not.toMatch(/Synthetic|converge|sqlite|picnic|sandwich/);
+    expect(files(root)).toEqual(before);
+    expect(files(output)).toEqual(outside);
+  } finally { a.close(); rmSync(root, { recursive: true, force: true }); rmSync(output, { recursive: true, force: true }); }
+}, 120_000);
+
+test('offline CLI refuses install outputs, existing outputs and invalid arguments without writes', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'prefilter-offline-refuse-'));
+  const output = mkdtempSync(join(tmpdir(), 'prefilter-existing-'));
+  const a = await fixture(root, 'a');
+  a.ledger.writeMeta('embedding-prefilter:training-v1', JSON.stringify({ judge: a.judge }));
+  const existing = join(output, 'existing.json');
+  writeFileSync(existing, 'synthetic sentinel');
+  const before = files(root), outside = files(output);
+  try {
+    for (const args of [[], ['--out', join(root, 'weights.json')], ['--out', existing],
+      ['--out', join(output, 'too-few.json')], ['--out', existing, '--unknown', 'sensitive-name']]) {
+      const child = Bun.spawnSync([process.execPath, resolve(process.env.OLYMPUS_PREFILTER_TEST_ENTRY ?? 'src/cli.ts'),
+        'prefilter-train-offline', '--data-dir', root, ...args], { stdout: 'pipe', stderr: 'pipe' });
+      expect(child.exitCode).toBe(1);
+      expect(child.stderr.toString()).toBe('');
+      expect(JSON.parse(child.stdout.toString()).outcome).toMatch(/^(failed|too_few)$/);
+      expect(child.stdout.toString()).not.toMatch(/fixture|synthetic|sensitive-name|sqlite/);
+      expect(files(root)).toEqual(before);
+      expect(files(output)).toEqual(outside);
+    }
+  } finally { a.close(); rmSync(root, { recursive: true, force: true }); rmSync(output, { recursive: true, force: true }); }
+}, 30_000);
+
+test('a failed unrelated snapshot preserves dry-run counts but refuses offline fitting', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'prefilter-partial-'));
+  const output = mkdtempSync(join(tmpdir(), 'prefilter-partial-output-'));
+  const a = await fixture(root, 'a');
+  a.ledger.writeMeta('embedding-prefilter:training-v1', JSON.stringify({ judge: a.judge }));
+  writeFileSync(join(root, 'broken.sqlite'), 'not a database');
+  const before = files(root);
+  try {
+    const report = runPrefilterTrainingDryRun({ dataDir: root });
+    expect(report.errors).toBe(1);
+    expect(report.ledgers).toHaveLength(1);
+    expect(report.ledgers[0]!.examples).toEqual({ personal: 2, private: 1 });
+    const child = Bun.spawnSync([process.execPath, resolve(process.env.OLYMPUS_PREFILTER_TEST_ENTRY ?? 'src/cli.ts'),
+      'prefilter-train-offline', '--data-dir', root, '--out', join(output, 'weights.json')]);
+    expect(child.exitCode).toBe(1);
+    expect(child.stderr.toString()).toBe('');
+    expect(JSON.parse(child.stdout.toString())).toMatchObject({ outcome: 'failed', per_source: {} });
+    expect(readdirSync(output)).toEqual([]);
+    expect(files(root)).toEqual(before);
+  } finally { a.close(); rmSync(root, { recursive: true, force: true }); rmSync(output, { recursive: true, force: true }); }
+}, 30_000);

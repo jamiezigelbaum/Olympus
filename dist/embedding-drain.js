@@ -74946,6 +74946,18 @@ function privateProbability(model, vector) {
     score += input[i2] * model.weights[i2];
   return Number.isFinite(score) ? sigmoid(score) : undefined;
 }
+var FIT_C = 10;
+var MAX_ITERATIONS = 500;
+var GRADIENT_TOLERANCE = 0.00000001;
+var HISTORY_SIZE = 10;
+var MAX_LINE_SEARCH = 40;
+var ARMIJO = 0.0001;
+function dot2(a, b) {
+  let result = 0;
+  for (let i2 = 0;i2 < a.length; i2++)
+    result += a[i2] * b[i2];
+  return result;
+}
 function* trainLogisticSteps(examples, minimumPerClass = EMBEDDING_PREFILTER_MIN_PER_CLASS) {
   if (!Number.isSafeInteger(minimumPerClass) || minimumPerClass < 1)
     return;
@@ -74962,32 +74974,91 @@ function* trainLogisticSteps(examples, minimumPerClass = EMBEDDING_PREFILTER_MIN
   }
   if (counts.some((count) => count < minimumPerClass))
     return;
-  const weights = new Array(EMBEDDING_PREFILTER_DIMENSIONS).fill(0);
-  let bias = Math.log(counts[1] / counts[0]);
-  let seed = 939;
-  const order = inputs.map((_, index) => index);
-  for (let epoch = 0;epoch < 20; epoch++) {
-    for (let i2 = order.length - 1;i2 > 0; i2--) {
-      seed = Math.imul(seed, 1664525) + 1013904223 >>> 0;
-      const j = seed % (i2 + 1);
-      [order[i2], order[j]] = [order[j], order[i2]];
+  const dimensions = EMBEDDING_PREFILTER_DIMENSIONS;
+  const penalty = 1 / (FIT_C * inputs.length);
+  function* evaluate(parameters2) {
+    const gradient = parameters2.map((value, i2) => i2 < dimensions ? penalty * value : 0);
+    let loss = 0;
+    for (let i2 = 0;i2 < dimensions; i2++)
+      loss += 0.5 * penalty * parameters2[i2] ** 2;
+    for (const { vector, label } of inputs) {
+      let score = parameters2[dimensions];
+      for (let i2 = 0;i2 < dimensions; i2++)
+        score += parameters2[i2] * vector[i2];
+      const scale = 1 / (2 * counts[label]);
+      const margin = (2 * label - 1) * score;
+      loss += scale * (Math.max(0, -margin) + Math.log1p(Math.exp(-Math.abs(margin))));
+      const error2 = scale * (label ? -sigmoid(-score) : sigmoid(score));
+      gradient[dimensions] += error2;
+      for (let i2 = 0;i2 < dimensions; i2++)
+        gradient[i2] += error2 * vector[i2];
       yield;
     }
-    const rate = 0.12 / (1 + epoch * 0.15);
-    const shrink = 1 - rate * 0.001;
-    for (const index of order) {
-      const input = inputs[index];
-      let score = bias;
-      for (let i2 = 0;i2 < weights.length; i2++)
-        score += weights[i2] * input.vector[i2];
-      const error2 = sigmoid(score) - input.label;
-      bias -= rate * error2;
-      for (let i2 = 0;i2 < weights.length; i2++)
-        weights[i2] = weights[i2] * shrink - rate * error2 * input.vector[i2];
-      yield;
-    }
+    return { loss, gradient };
   }
-  return { weights, bias };
+  let parameters = new Array(dimensions + 1).fill(0);
+  let current2 = yield* evaluate(parameters);
+  const history = [];
+  for (let iteration = 0;iteration <= MAX_ITERATIONS; iteration++) {
+    if (!Number.isFinite(current2.loss) || !current2.gradient.every(Number.isFinite))
+      throw new Error("Logistic fit is nonfinite");
+    if (Math.max(...current2.gradient.map(Math.abs)) <= GRADIENT_TOLERANCE) {
+      return { weights: parameters.slice(0, dimensions), bias: parameters[dimensions] };
+    }
+    if (iteration === MAX_ITERATIONS)
+      break;
+    const direction = current2.gradient.slice();
+    const alpha = new Array(history.length);
+    for (let j = history.length - 1;j >= 0; j--) {
+      const h = history[j];
+      alpha[j] = dot2(h.s, direction) / h.sy;
+      for (let i2 = 0;i2 < direction.length; i2++)
+        direction[i2] -= alpha[j] * h.y[i2];
+      yield;
+    }
+    const last = history.at(-1);
+    const scaling = last ? last.sy / last.yy : 1;
+    for (let i2 = 0;i2 < direction.length; i2++)
+      direction[i2] *= scaling;
+    for (let j = 0;j < history.length; j++) {
+      const h = history[j], beta = dot2(h.y, direction) / h.sy;
+      for (let i2 = 0;i2 < direction.length; i2++)
+        direction[i2] += h.s[i2] * (alpha[j] - beta);
+      yield;
+    }
+    for (let i2 = 0;i2 < direction.length; i2++)
+      direction[i2] = -direction[i2];
+    let slope = dot2(current2.gradient, direction);
+    if (!Number.isFinite(slope) || slope >= 0) {
+      history.length = 0;
+      for (let i2 = 0;i2 < direction.length; i2++)
+        direction[i2] = -current2.gradient[i2];
+      slope = -dot2(current2.gradient, current2.gradient);
+    }
+    let stepSize = 1, accepted = false;
+    for (let trial = 0;trial < MAX_LINE_SEARCH; trial++, stepSize *= 0.5) {
+      const candidate = parameters.map((value, i2) => value + stepSize * direction[i2]);
+      const next = yield* evaluate(candidate);
+      if (!Number.isFinite(next.loss) || next.loss > current2.loss + ARMIJO * stepSize * slope)
+        continue;
+      const s = candidate.map((value, i2) => value - parameters[i2]);
+      const y = next.gradient.map((value, i2) => value - current2.gradient[i2]);
+      const sy = dot2(s, y), yy = dot2(y, y);
+      if (sy > 0 && yy > 0) {
+        if (history.length === HISTORY_SIZE)
+          history.shift();
+        history.push({ s, y, sy, yy });
+      }
+      parameters = candidate;
+      current2 = next;
+      accepted = true;
+      yield;
+      break;
+    }
+    if (!accepted)
+      throw new Error("Logistic line search did not converge");
+  }
+  throw new Error("Logistic fit did not converge");
 }
 
 // src/workers/classification/embedding-prefilter.ts
@@ -74997,8 +75068,11 @@ var PREFIX = "embedding-prefilter:";
 var RECEIPTS = `${PREFIX}clear:`;
 var CHECKS = `${PREFIX}check:`;
 var WINDOW = 200;
+var PREFILTER_CLEARING_CUTOFF = 0.002;
+var SPOT_CHECK_RATE = 1 / 20;
 var RETRAIN_MS = 24 * 60 * 60 * 1000;
-var MAX_PER_CLASS = 5000;
+var PREFILTER_MAX_PER_CLASS = 5000;
+var MAX_PER_CLASS = PREFILTER_MAX_PER_CLASS;
 var TRAINING_SLICE_MS = 200;
 var FAILED_RETRY_MS = 3 * 60 * 60 * 1000;
 var NEW_VERDICTS = 1000;
@@ -75068,17 +75142,19 @@ function prefilterTrainingExample(row, judge2, options, reject = () => {
 }) {
   if (!row.routed)
     return reject("not_routed");
-  if (row.state !== "current")
+  if (row.state !== "current" && row.state !== "moving")
     return reject("not_current");
+  const metadataTier = row.state === "moving" ? row.targetMetadataTier : row.metadataTier;
+  const contentTier = row.state === "moving" ? row.targetContentTier : row.contentTier;
   if (row.metadataPending)
     return reject("metadata_pending");
   if (row.contentPending)
     return reject("content_pending");
   if (!row.contentRead)
     return reject("content_unread");
-  if (row.metadataTier !== "private")
+  if (metadataTier !== "private" || row.metadataTier === "secrets")
     return reject("metadata_tier");
-  if (!["private", "secure"].includes(row.contentTier))
+  if (contentTier !== "private" && contentTier !== "secure" || row.contentTier === "secrets")
     return reject("content_tier");
   if (row.metadataForced)
     return reject("metadata_forced");
@@ -75141,7 +75217,7 @@ function prefilterTrainingExample(row, judge2, options, reject = () => {
   if (!row.reasons.includes(digest))
     return reject("digest_missing");
   let provenance = "judge_receipt";
-  if (!row.reasons.includes(contentJudgeVerdictReason(judged, row.contentTier, digest))) {
+  if (!row.reasons.includes(contentJudgeVerdictReason(judged, contentTier, digest))) {
     if (row.reasons.some((reason) => reason.startsWith("content:judge_verdict:")))
       return reject("verdict_missing");
     if (!options.sniffer)
@@ -75159,7 +75235,7 @@ function prefilterTrainingExample(row, judge2, options, reject = () => {
     const time3 = Date.parse(verdict.decidedAt), decisionTime = Date.parse(row.decidedAt);
     if (!Number.isFinite(time3) || !Number.isFinite(decisionTime) || time3 > decisionTime)
       return reject("legacy_verdict_time");
-    if ((verdict.tier === "personal" ? "private" : verdict.tier === "private" ? "secure" : undefined) !== row.contentTier)
+    if ((verdict.tier === "personal" ? "private" : verdict.tier === "private" ? "secure" : undefined) !== contentTier)
       return reject("legacy_verdict_tier");
     if (verdict.contentHash !== normalizedContentHash(copy.chunks.map((chunk) => chunk.boundedText).join("")))
       return reject("legacy_verdict_content");
@@ -75170,7 +75246,13 @@ function prefilterTrainingExample(row, judge2, options, reject = () => {
     return;
   if (Math.hypot(...vector) === 0)
     return reject("vector_zero");
-  return { vector, copy, private: row.contentTier === "secure", provenance };
+  return { vector, copy, private: contentTier === "secure", provenance };
+}
+function prefilterTrainingWindow(ledger, after, limit) {
+  return ledger.listItemWindow({ ...after ? { after } : {}, limit });
+}
+function selectPrefilterTrainingExample(example, counts) {
+  return counts[Number(example.private)] < PREFILTER_MAX_PER_CLASS;
 }
 
 class EmbeddingPrefilter {
@@ -75289,18 +75371,34 @@ class EmbeddingPrefilter {
     const eligible = prefilterTrainingExample(row, judge2, this.options);
     if (!eligible)
       return;
-    const { vector, copy } = eligible;
-    const fingerprint = this.trainingFingerprint(row);
+    const { vector, copy, private: isPrivate } = eligible;
+    let fingerprint = this.trainingFingerprint(row);
+    let awaitingMoveCompletion = row.state === "moving";
     const copied = copyFingerprint2(copy);
     const subject = subjectOf(row);
-    return { vector, private: row.contentTier === "secure", current: (checkLedger) => {
+    return { vector, private: isPrivate, current: (checkLedger) => {
       const currentCopy = this.options.copyFor(subject);
       if (!currentCopy || copyFingerprint2(currentCopy) !== copied)
         return false;
       if (!checkLedger)
         return true;
       const current2 = this.options.ledger.getCurrent(subject);
-      return !!current2 && this.trainingFingerprint(current2) === fingerprint;
+      if (!current2)
+        return false;
+      const nextFingerprint = this.trainingFingerprint(current2);
+      if (nextFingerprint === fingerprint)
+        return true;
+      const staged = current2.state === "moving" && current2.generation === row.generation && current2.metadataTier === row.metadataTier && current2.contentTier === row.contentTier && current2.targetMetadataTier === row.targetMetadataTier && current2.targetContentTier === row.targetContentTier;
+      const flipped = current2.state === "current" && current2.generation === row.generation + 1 && current2.metadataTier === row.targetMetadataTier && current2.contentTier === row.targetContentTier && current2.targetMetadataTier === null && current2.targetContentTier === null;
+      if (!awaitingMoveCompletion || !staged && !flipped || current2.modelId !== row.modelId || current2.engineVersion !== row.engineVersion || current2.mapRevision !== row.mapRevision || current2.metadataFlagged !== row.metadataFlagged || JSON.stringify(current2.reasons) !== JSON.stringify(row.reasons))
+        return false;
+      const completed = prefilterTrainingExample(current2, judge2, this.options);
+      if (!completed || completed.private !== isPrivate || copyFingerprint2(completed.copy) !== copied)
+        return false;
+      fingerprint = nextFingerprint;
+      if (flipped)
+        awaitingMoveCompletion = false;
+      return true;
     } };
   }
   verdictCount() {
@@ -75356,7 +75454,7 @@ class EmbeddingPrefilter {
     const started = clock2();
     const deadline = started + TRAINING_SLICE_MS;
     let attempt = this.attempt;
-    if (attempt && attempt.labelVersion !== 3) {
+    if (attempt && attempt.labelVersion !== 5) {
       attempt = this.attempt = undefined;
       this.training = undefined;
     }
@@ -75391,7 +75489,7 @@ class EmbeddingPrefilter {
       }
       if (!attempt) {
         attempt = this.attempt = {
-          labelVersion: 3,
+          labelVersion: 5,
           id: randomUUID12(),
           revisions,
           judge: judge2,
@@ -75437,10 +75535,7 @@ class EmbeddingPrefilter {
         const { member, scan } = entry;
         if (scan.done)
           continue;
-        const rows = member.options.ledger.listItemWindow({
-          ...scan.after ? { after: scan.after } : {},
-          limit: Math.min(32, MAX_PER_CLASS * 2 - attempt.counts[0] - attempt.counts[1])
-        });
+        const rows = prefilterTrainingWindow(member.options.ledger, scan.after, Math.min(32, MAX_PER_CLASS * 2 - attempt.counts[0] - attempt.counts[1]));
         if (!rows.length) {
           scan.done = true;
           entry.dirty = true;
@@ -75454,13 +75549,10 @@ class EmbeddingPrefilter {
           scan.after = subjectOf(row);
           scan.rows++;
           attempt.rows++;
-          const index = Number(row.contentTier === "secure");
-          if (attempt.counts[index] < MAX_PER_CLASS) {
-            const example = member.trainingExample(row, judge2);
-            if (example) {
-              scan.samples.push({ subject: subjectOf(row), private: example.private });
-              attempt.counts[Number(example.private)]++;
-            }
+          const example = member.trainingExample(row, judge2);
+          if (example && selectPrefilterTrainingExample(example, attempt.counts)) {
+            scan.samples.push({ subject: subjectOf(row), private: example.private });
+            attempt.counts[Number(example.private)]++;
           }
           await ingestionTurn();
         }
@@ -75577,7 +75669,7 @@ class EmbeddingPrefilter {
       }
     } catch {
       if (!attempt)
-        attempt = this.attempt = { labelVersion: 3, id: randomUUID12(), judge: judge2, revisions: "", startedAt: this.now(), elapsedMs: 0, rows: 0, counts: [0, 0], nextAt: this.now(), outcome: "scanning" };
+        attempt = this.attempt = { labelVersion: 5, id: randomUUID12(), judge: judge2, revisions: "", startedAt: this.now(), elapsedMs: 0, rows: 0, counts: [0, 0], nextAt: this.now(), outcome: "scanning" };
       if (attempt.outcome === "scanning" || attempt.outcome === "fitting")
         this.finishTraining(attempt, "failed", stage);
     }
@@ -75678,9 +75770,9 @@ class EmbeddingPrefilter {
     const probability = privateProbability(this.saved.model, vector);
     if (probability === undefined)
       return skip("score_unavailable");
-    if (probability >= 0.05)
+    if (probability >= PREFILTER_CLEARING_CUTOFF)
       return skip("probability_high");
-    if ((this.options.random?.() ?? Math.random()) < 0.05) {
+    if ((this.options.random?.() ?? Math.random()) < SPOT_CHECK_RATE) {
       this.options.ledger.writeMeta(checkKey, JSON.stringify({ hash: question.materialHash, token: randomUUID12() }));
       return spotCheck();
     }

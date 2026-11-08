@@ -15406,7 +15406,7 @@ export function connectorStoreChunkEmbeddingInputHash(embeddingText: string, med
 
 // Embedding text mirrors the Dropbox lane: citation-safe metadata header plus
 // the bounded chunk text.
-function buildConnectorStoreEmbeddingText(row: {
+export function buildConnectorStoreEmbeddingText(row: {
   title: string | null;
   search_text?: string | null;
   mime_type: string | null;
