@@ -13,7 +13,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { describe, expect, test } from 'bun:test';
+import { describe, expect, setSystemTime, test } from 'bun:test';
 import {
   installManagedWorkerFiles,
   lifecycleRecoveryPlan,
@@ -645,6 +645,34 @@ describe('versioned Olympus worker lifecycle', () => {
     }
   }, 30_000);
 
+  test('upgrade keeps waiting past the state window for a slow-starting worker whose unit stays active (#1040)', () => {
+    const home = mkdtempSync(join(tmpdir(), 'olympus-lifecycle-slow-readiness-'));
+    const manager = linuxManager('active');
+    try {
+      const artifact = createUpgradeArtifact(home, '0.4.3');
+      installWorkerService({ platform: 'linux', homeDir: home, workingDirectory: '/opt/olympus-old', bunBin: process.execPath, authToken: 'old-token' });
+      let probes = 0;
+      // Each probe moves the clock 20 s: the worker first answers 60 s after
+      // the upgrade started, past the 15 s window that rolled 1.4.0 back.
+      const result = runWorkerLifecycle('upgrade', {
+        platform: 'linux', homeDir: home, artifactPath: artifact.path,
+        bunBin: process.execPath, exec: manager.exec, activationSettleMs: 0,
+        actionSettlePollMs: 1,
+        readinessProbe: () => {
+          setSystemTime(new Date(Date.now() + 20_000));
+          return ++probes >= 4;
+        },
+      });
+      expect(probes).toBe(4);
+      expect(result).toMatchObject({ ok: true, readiness: { status: 'ready' } });
+      expect(existsSync(transactionPath(home))).toBe(false);
+    } finally {
+      setSystemTime();
+      makeTreeWritable(home);
+      rmSync(home, { recursive: true, force: true });
+    }
+  }, 30_000);
+
   test('upgrade reads a quoted readiness port the way both service managers source it', () => {
     const home = mkdtempSync(join(tmpdir(), 'olympus-lifecycle-quoted-port-'));
     const paths = workerServicePaths('linux', home);
@@ -886,6 +914,7 @@ describe('versioned Olympus worker lifecycle', () => {
         bunBin: process.execPath,
         exec,
         activationSettleMs: 0,
+        readinessTimeoutMs: 0,
         readinessProbe: () => false,
       })).toThrow('did not answer its loopback readiness probe');
 
@@ -929,6 +958,7 @@ describe('versioned Olympus worker lifecycle', () => {
         bunBin: process.execPath,
         exec: manager.exec,
         activationSettleMs: 0,
+        readinessTimeoutMs: 0,
         readinessProbe: () => false,
       })).toThrow('did not answer its loopback readiness probe');
 
