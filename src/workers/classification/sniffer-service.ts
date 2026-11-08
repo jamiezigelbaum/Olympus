@@ -141,6 +141,11 @@ export interface TierSnifferServiceOptions {
    * DEFAULT_TIER_SNIFFER_ABANDON_MS.
    */
   abandonAfterMs?: number;
+  /**
+   * How long a pass keeps yielding to other answers on the private model before it takes one turn anyway.
+   * Default DEFAULT_CLASSIFICATION_FAIR_TURN_MS.
+   */
+  fairTurnAfterMs?: number;
   maxCallsPerPass?: number;
   /** Sniffer calls in flight at once, each one item alone (runSnifferPass `concurrentCalls`). */
   concurrentCalls?: number;
@@ -221,6 +226,13 @@ export const DEFAULT_TIER_SNIFFER_MAX_PASS_MS = 15 * 60_000;
 const EXTRACTION_ENQUEUE_GRACE_MS = 15 * 60_000;
 /** An overrun pass still unsettled this long after its abort is abandoned. */
 export const DEFAULT_TIER_SNIFFER_ABANDON_MS = 2 * 60_000;
+/**
+ * Answers go first, but they never hold classification off for good. An agent
+ * asking without pause kept every pass yielding, so new items stayed Private
+ * and unsearchable (1.4.0 release check, 2026-11-08). After this long of
+ * yielding, one pass runs to its normal end, then answers lead again.
+ */
+export const DEFAULT_CLASSIFICATION_FAIR_TURN_MS = 60_000;
 export const DEFAULT_STALE_MOVE_MS = 60 * 60_000;
 export const BUILT_IN_CLASSIFIER_DEFAULT_APPROVAL_REASON = 'built-in local model, nothing leaves the Mac (owner default 2026-10-01)';
 
@@ -317,6 +329,10 @@ export class TierSnifferService {
   private lowerMovePreempted = false;
   private running = false;
   private runningSinceMs = 0;
+  /** When passes started yielding to other answers without a break (clock ms). */
+  private yieldingSinceMs: number | undefined;
+  /** This pass is taking its turn: it does not yield to other answers. */
+  private fairTurn = false;
   /** Scheduled passes wait until this time while the model is not answering (0: no wait). */
   private notAnsweringUntilMs = 0;
   private notAnsweringPasses = 0;
@@ -447,6 +463,10 @@ export class TierSnifferService {
    * sniffer never records anything in the answer pool's breakers.
    */
   preempt(): void {
+    // The owner's own answer ends a fair turn too, lowering slice included:
+    // only other answers are outlasted, never the owner (#1030 review).
+    this.fairTurn = false;
+    this.yieldingSinceMs = undefined;
     this.abort?.abort();
   }
 
@@ -726,6 +746,11 @@ export class TierSnifferService {
     } finally {
       leave();
       this.lastTickEndedAt = performance.now();
+      // The turn is used: answers lead again, and a new wait starts from now.
+      if (this.fairTurn) {
+        this.fairTurn = false;
+        this.yieldingSinceMs = undefined;
+      }
     }
     // An abandoned pass that ends late changes nothing: a newer pass owns the state.
     if (generation !== this.passGeneration) {
@@ -863,12 +888,28 @@ export class TierSnifferService {
 
   /** The pass yields while an answer is in flight, the breaker is open, or the caller says so. */
   private yieldNow(): boolean {
-    if (this.answering() || this.breakerOpen()) return true;
-    try {
-      return this.options.shouldYield?.() ?? false;
-    } catch {
+    if (this.breakerOpen()) return true;
+    let busy = this.answering();
+    if (!busy) {
+      try {
+        busy = this.options.shouldYield?.() ?? false;
+      } catch {
+        busy = false;
+      }
+    }
+    // Only a pass takes a turn; training and the timer's move drain still yield.
+    if (!this.running) return busy;
+    if (!busy) {
+      if (!this.fairTurn) this.yieldingSinceMs = undefined;
       return false;
     }
+    if (this.fairTurn) return false;
+    const now = this.clockMs();
+    this.yieldingSinceMs ??= now;
+    if (now - this.yieldingSinceMs < (this.options.fairTurnAfterMs ?? DEFAULT_CLASSIFICATION_FAIR_TURN_MS)) return true;
+    this.fairTurn = true;
+    this.options.log?.('Olympus tier sniffer: answers kept the private model busy; this pass takes its turn.');
+    return false;
   }
 
   /** Every existing ledger behind the stores, each once: bound set ledgers and stores' own. */

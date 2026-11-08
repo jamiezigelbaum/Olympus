@@ -76331,6 +76331,7 @@ var DEFAULT_LOWER_MOVE_BATCH_MS = 25;
 var DEFAULT_TIER_SNIFFER_MAX_PASS_MS = 15 * 60000;
 var EXTRACTION_ENQUEUE_GRACE_MS = 15 * 60000;
 var DEFAULT_TIER_SNIFFER_ABANDON_MS = 2 * 60000;
+var DEFAULT_CLASSIFICATION_FAIR_TURN_MS = 60000;
 var DEFAULT_STALE_MOVE_MS = 60 * 60000;
 var BUILT_IN_CLASSIFIER_DEFAULT_APPROVAL_REASON = "built-in local model, nothing leaves the Mac (owner default 2026-10-01)";
 function emptyBacklogCounts() {
@@ -76357,6 +76358,8 @@ class TierSnifferService {
   lowerMovePreempted = false;
   running = false;
   runningSinceMs = 0;
+  yieldingSinceMs;
+  fairTurn = false;
   notAnsweringUntilMs = 0;
   notAnsweringPasses = 0;
   overrunReported = false;
@@ -76479,6 +76482,8 @@ class TierSnifferService {
       this.closeLedgers();
   }
   preempt() {
+    this.fairTurn = false;
+    this.yieldingSinceMs = undefined;
     this.abort?.abort();
   }
   backlog() {
@@ -76719,6 +76724,10 @@ class TierSnifferService {
     } finally {
       leave();
       this.lastTickEndedAt = performance.now();
+      if (this.fairTurn) {
+        this.fairTurn = false;
+        this.yieldingSinceMs = undefined;
+      }
     }
     if (generation !== this.passGeneration) {
       abort.abort();
@@ -76835,13 +76844,32 @@ class TierSnifferService {
     }
   }
   yieldNow() {
-    if (this.answering() || this.breakerOpen())
+    if (this.breakerOpen())
       return true;
-    try {
-      return this.options.shouldYield?.() ?? false;
-    } catch {
+    let busy = this.answering();
+    if (!busy) {
+      try {
+        busy = this.options.shouldYield?.() ?? false;
+      } catch {
+        busy = false;
+      }
+    }
+    if (!this.running)
+      return busy;
+    if (!busy) {
+      if (!this.fairTurn)
+        this.yieldingSinceMs = undefined;
       return false;
     }
+    if (this.fairTurn)
+      return false;
+    const now = this.clockMs();
+    this.yieldingSinceMs ??= now;
+    if (now - this.yieldingSinceMs < (this.options.fairTurnAfterMs ?? DEFAULT_CLASSIFICATION_FAIR_TURN_MS))
+      return true;
+    this.fairTurn = true;
+    this.options.log?.("Olympus tier sniffer: answers kept the private model busy; this pass takes its turn.");
+    return false;
   }
   ledgerPaths() {
     const paths = new Set;

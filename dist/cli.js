@@ -66386,7 +66386,9 @@ function createLocalModelActivity() {
     const pending = queue;
     const pump = () => {
       while (pending.tasks.length > 0) {
-        const first = pending.tasks.reduce((best, task, index) => task.priority < pending.tasks[best].priority ? index : best, 0);
+        const now = Date.now();
+        const rank = (task) => task.priority === 2 && now - task.queuedAt >= MAINTENANCE_AGING_MS ? 1 : task.priority;
+        const first = pending.tasks.reduce((best, task, index) => rank(task) < rank(pending.tasks[best]) ? index : best, 0);
         if (pending.running.length >= Math.min(pending.tasks[first].limit, ...pending.running))
           return;
         const next = pending.tasks.splice(first, 1)[0];
@@ -66398,7 +66400,7 @@ function createLocalModelActivity() {
       }
     };
     const kind = localInferencePriority?.getStore() ?? "owner";
-    pending.tasks.push({ priority: localInferencePriority?.getStore() === "background" ? 1 : localInferencePriority?.getStore() === "maintenance" ? 2 : 0, limit: Math.max(1, Math.floor(limit)), run: async () => {
+    pending.tasks.push({ priority: localInferencePriority?.getStore() === "background" ? 1 : localInferencePriority?.getStore() === "maintenance" ? 2 : 0, limit: Math.max(1, Math.floor(limit)), queuedAt: Date.now(), run: async () => {
       try {
         resolve14(await (localInferencePriority ? localInferencePriority.run(kind, () => get(key2).run(work)) : get(key2).run(work)));
       } catch (error) {
@@ -66470,7 +66472,7 @@ function createLocalModelActivity() {
     }
   };
 }
-var localInferencePriority, localInferenceGuards, DEFAULT_ANSWER_LEASE_MS;
+var localInferencePriority, localInferenceGuards, DEFAULT_ANSWER_LEASE_MS, MAINTENANCE_AGING_MS = 60000;
 var init_answer_activity = __esm(() => {
   DEFAULT_ANSWER_LEASE_MS = 20 * 60000;
 });
@@ -195405,6 +195407,8 @@ class TierSnifferService {
   lowerMovePreempted = false;
   running = false;
   runningSinceMs = 0;
+  yieldingSinceMs;
+  fairTurn = false;
   notAnsweringUntilMs = 0;
   notAnsweringPasses = 0;
   overrunReported = false;
@@ -195527,6 +195531,8 @@ class TierSnifferService {
       this.closeLedgers();
   }
   preempt() {
+    this.fairTurn = false;
+    this.yieldingSinceMs = undefined;
     this.abort?.abort();
   }
   backlog() {
@@ -195767,6 +195773,10 @@ class TierSnifferService {
     } finally {
       leave();
       this.lastTickEndedAt = performance.now();
+      if (this.fairTurn) {
+        this.fairTurn = false;
+        this.yieldingSinceMs = undefined;
+      }
     }
     if (generation !== this.passGeneration) {
       abort.abort();
@@ -195883,13 +195893,32 @@ class TierSnifferService {
     }
   }
   yieldNow() {
-    if (this.answering() || this.breakerOpen())
+    if (this.breakerOpen())
       return true;
-    try {
-      return this.options.shouldYield?.() ?? false;
-    } catch {
+    let busy = this.answering();
+    if (!busy) {
+      try {
+        busy = this.options.shouldYield?.() ?? false;
+      } catch {
+        busy = false;
+      }
+    }
+    if (!this.running)
+      return busy;
+    if (!busy) {
+      if (!this.fairTurn)
+        this.yieldingSinceMs = undefined;
       return false;
     }
+    if (this.fairTurn)
+      return false;
+    const now = this.clockMs();
+    this.yieldingSinceMs ??= now;
+    if (now - this.yieldingSinceMs < (this.options.fairTurnAfterMs ?? DEFAULT_CLASSIFICATION_FAIR_TURN_MS))
+      return true;
+    this.fairTurn = true;
+    this.options.log?.("Olympus tier sniffer: answers kept the private model busy; this pass takes its turn.");
+    return false;
   }
   ledgerPaths() {
     const paths = new Set;
@@ -196710,7 +196739,7 @@ function moveFailureName(error2) {
     return error2.name || error2.constructor.name || "Error";
   return /^[a-z][a-z ]{0,39}$/.test(error2.message) ? error2.message : "Error";
 }
-var DEFAULT_TIER_SNIFFER_INTERVAL_MS = 1000, NOT_ANSWERING_FIRST_BACKOFF_MS = 30000, NOT_ANSWERING_MAX_BACKOFF_MS = 60000, MISSING_QUESTION_RECOVERY_PHASE_MS = 25, DEFAULT_AUTO_MOVES_PER_PASS = 1000, DEFAULT_LOWER_MOVE_SLICE_MS = 1000, MAX_LOWER_MOVE_SLICE_MS = 1e4, DEFAULT_LOWER_MOVE_BATCH_MS = 25, DEFAULT_TIER_SNIFFER_MAX_PASS_MS, EXTRACTION_ENQUEUE_GRACE_MS, DEFAULT_TIER_SNIFFER_ABANDON_MS, DEFAULT_STALE_MOVE_MS, BUILT_IN_CLASSIFIER_DEFAULT_APPROVAL_REASON = "built-in local model, nothing leaves the Mac (owner default 2026-10-01)", BACKLOG_EXACT_ROWS = 20000, BACKLOG_REFRESH_MS = 60000, BACKLOG_SLICE_ROWS = 5000, AUTO_MOVE_WHY = "Automatic tier move after the privacy check: every embedding involved is the built-in local model (owner approval 2026-10-01).";
+var DEFAULT_TIER_SNIFFER_INTERVAL_MS = 1000, NOT_ANSWERING_FIRST_BACKOFF_MS = 30000, NOT_ANSWERING_MAX_BACKOFF_MS = 60000, MISSING_QUESTION_RECOVERY_PHASE_MS = 25, DEFAULT_AUTO_MOVES_PER_PASS = 1000, DEFAULT_LOWER_MOVE_SLICE_MS = 1000, MAX_LOWER_MOVE_SLICE_MS = 1e4, DEFAULT_LOWER_MOVE_BATCH_MS = 25, DEFAULT_TIER_SNIFFER_MAX_PASS_MS, EXTRACTION_ENQUEUE_GRACE_MS, DEFAULT_TIER_SNIFFER_ABANDON_MS, DEFAULT_CLASSIFICATION_FAIR_TURN_MS = 60000, DEFAULT_STALE_MOVE_MS, BUILT_IN_CLASSIFIER_DEFAULT_APPROVAL_REASON = "built-in local model, nothing leaves the Mac (owner default 2026-10-01)", BACKLOG_EXACT_ROWS = 20000, BACKLOG_REFRESH_MS = 60000, BACKLOG_SLICE_ROWS = 5000, AUTO_MOVE_WHY = "Automatic tier move after the privacy check: every embedding involved is the built-in local model (owner approval 2026-10-01).";
 var init_sniffer_service = __esm(() => {
   init_embedding_prefilter();
   init_tier_move();

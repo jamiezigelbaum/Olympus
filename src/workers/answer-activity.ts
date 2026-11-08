@@ -165,13 +165,16 @@ export function createAnswerActivity(onBusy: () => void, options: AnswerActivity
   return activity;
 }
 
+/** How long a queued classification call waits behind background answers before it ranks with them. */
+export const MAINTENANCE_AGING_MS = 60_000;
+
 /** Actual local inference leases, separate from search/answer UI activity. */
 export function localModelResourceKey(profile: { baseUrl?: string; model?: string }): string {
   return `${profile.baseUrl?.replace(/\/+$/, '') ?? ''}\u0000${profile.model ?? ''}`;
 }
 
 export function createLocalModelActivity() {
-  const queues = new Map<string, { running: number[]; tasks: Array<{ priority: number; limit: number; run: () => Promise<void> }> }>();
+  const queues = new Map<string, { running: number[]; tasks: Array<{ priority: number; limit: number; queuedAt: number; run: () => Promise<void> }> }>();
   // `limit` is how many calls on this resource may run alongside this one. The
   // next task in owner-first order starts only while fewer run than its own
   // limit and the limit of every call already running, so an owner call
@@ -182,7 +185,12 @@ export function createLocalModelActivity() {
     const pending = queue;
     const pump = () => {
       while (pending.tasks.length > 0) {
-        const first = pending.tasks.reduce((best, task, index) => task.priority < pending.tasks[best]!.priority ? index : best, 0);
+        const now = Date.now();
+        // A classification call that has waited a minute ranks with background
+        // answers, oldest first, so a steady stream of them cannot starve it.
+        // The owner's own calls still go first.
+        const rank = (task: { priority: number; queuedAt: number }) => task.priority === 2 && now - task.queuedAt >= MAINTENANCE_AGING_MS ? 1 : task.priority;
+        const first = pending.tasks.reduce((best, task, index) => rank(task) < rank(pending.tasks[best]!) ? index : best, 0);
         if (pending.running.length >= Math.min(pending.tasks[first]!.limit, ...pending.running)) return;
         const next = pending.tasks.splice(first, 1)[0]!;
         pending.running.push(next.limit);
@@ -190,7 +198,7 @@ export function createLocalModelActivity() {
       }
     };
     const kind = localInferencePriority?.getStore() ?? 'owner';
-    pending.tasks.push({ priority: localInferencePriority?.getStore() === 'background' ? 1 : localInferencePriority?.getStore() === 'maintenance' ? 2 : 0, limit: Math.max(1, Math.floor(limit)), run: async () => {
+    pending.tasks.push({ priority: localInferencePriority?.getStore() === 'background' ? 1 : localInferencePriority?.getStore() === 'maintenance' ? 2 : 0, limit: Math.max(1, Math.floor(limit)), queuedAt: Date.now(), run: async () => {
       try { resolve(await (localInferencePriority ? localInferencePriority.run(kind, () => get(key).run(work)) : get(key).run(work))); } catch (error) { reject(error); }
     } });
     // Gather simultaneous dispatches before choosing owner-first.
