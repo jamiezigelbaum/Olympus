@@ -76482,6 +76482,8 @@ class TierSnifferService {
       this.closeLedgers();
   }
   preempt() {
+    this.fairTurn = false;
+    this.yieldingSinceMs = undefined;
     this.abort?.abort();
   }
   backlog() {

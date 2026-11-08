@@ -463,6 +463,10 @@ export class TierSnifferService {
    * sniffer never records anything in the answer pool's breakers.
    */
   preempt(): void {
+    // The owner's own answer ends a fair turn too, lowering slice included:
+    // only other answers are outlasted, never the owner (#1030 review).
+    this.fairTurn = false;
+    this.yieldingSinceMs = undefined;
     this.abort?.abort();
   }
 

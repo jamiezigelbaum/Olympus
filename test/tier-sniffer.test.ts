@@ -802,6 +802,10 @@ describe('bounds and the owner-approval gate', () => {
       // The turn is used: answers lead again until the next minute.
       clock += 1_000;
       expect(await service.runOnce()).toMatchObject({ state: 'ran', report: { calls: 0 } });
+      // The owner's own answer ends a turn and starts the minute over.
+      clock += 60_000;
+      service.preempt();
+      expect(await service.runOnce()).toMatchObject({ state: 'ran', report: { calls: 0 } });
       service.stop();
     } finally {
       installed.close();
