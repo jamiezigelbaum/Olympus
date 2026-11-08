@@ -120,6 +120,7 @@ async function handleRemoteCallTool(
   try {
     const result = await runWithReleaseManifestSink(manifests, () => operation.handler(ctx, args));
     const release = () => remoteOperationOutput(operation.name, result, {
+      pendingPrivacyItems: ctx.pendingPrivacyItems?.(),
       ...(ctx.releaseCheck ? { releaseCheck: ctx.releaseCheck } : {}),
       releaseManifests: manifests.manifests,
     });

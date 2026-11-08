@@ -49,6 +49,8 @@ export interface RemoteSearchOptions {
 
 /** What one request adds to the search: its connection's Private part and the tiers to read again. */
 export interface RemoteSearchRequestContext {
+  /** Global pending privacy-judgment count, read when building the response. */
+  pendingPrivacyItems?: () => number | undefined;
   /**
    * This connection's Private part (core/remote-private-part.ts). Absent: the
    * search records nothing and the result never carries a note (a demo grant).
@@ -166,7 +168,7 @@ async function runSearch(
     return errorResult(remoteErrorOutput(new OperationError('source_index_error', 'unexpected search shape')));
   }
   // The same allowlisted, field-by-field result ChatGPT gets, with no panel.
-  let result = searchToolResult(raw);
+  let result = searchToolResult(raw, { pendingPrivacyItems: context.pendingPrivacyItems?.() });
   let note: string | undefined;
   if (privateCall) {
     // The probe may still be running: wait for its verdict (it is bounded) and record, then check
@@ -180,7 +182,7 @@ async function runSearch(
       // Only the evidence goes: the coverage the search reported and what it already withheld stand.
       const rawRecord = raw as Record<string, unknown>;
       const withheldBefore = typeof rawRecord.withheld === 'number' && Number.isFinite(rawRecord.withheld) && rawRecord.withheld > 0 ? rawRecord.withheld : 0;
-      result = searchToolResult({ ...rawRecord, evidence: [], withheld: withheldBefore + evidence.length });
+      result = searchToolResult({ ...rawRecord, evidence: [], withheld: withheldBefore + evidence.length }, { pendingPrivacyItems: context.pendingPrivacyItems?.() });
     }
     if (recorded) note = remotePrivateNote(privateCall.answerId, privateCall.secretMatch);
   }

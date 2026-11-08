@@ -445,7 +445,7 @@ export async function callChatGptTool(
     const reason = ctx.releaseCheck
       ? answerReleaseWithheldReason(manifests.manifests, ctx.releaseCheck, 'personal')
       : ANSWER_RELEASE_UNVERIFIED;
-    if (reason) return searchToolResult({ evidence: [], withheld: result.structuredContent.evidence.length, notes: [reason] });
+    if (reason) return searchToolResult({ evidence: [], withheld: result.structuredContent.evidence.length, notes: [reason] }, { pendingPrivacyItems: ctx.pendingPrivacyItems?.() });
   }
   if ((name === 'source_answer' || name === 'source_answer_result')
       && (result.structuredContent as { status?: string } | undefined)?.status === 'answered'
@@ -453,7 +453,7 @@ export async function callChatGptTool(
     const reason = ctx.releaseCheck
       ? answerReleaseWithheldReason(manifests.manifests, ctx.releaseCheck, 'personal')
       : ANSWER_RELEASE_UNVERIFIED;
-    if (reason) return withPrivateAnswerOutcome(answerToolResult(withheldSourceAnswer(reason)));
+    if (reason) return withPrivateAnswerOutcome(answerToolResult(withheldSourceAnswer(reason), { pendingPrivacyItems: ctx.pendingPrivacyItems?.() }));
   }
   return PANEL_TOOL_NAMES.has(name) ? withPrivateAnswerOutcome(result) : result;
 }
@@ -506,13 +506,14 @@ async function runChatGptTool(
         const privateMatch = match.count > 0
           ? beginPrivateAnswer({ question, match, refresh: privateRefresh(question, probe, later, options), caller: privateCaller(ctx), detail, waiting }, options)
           : undefined;
-        const result = searchToolResult(raw, privateMatch ? { privateMatch } : late.timedOut ? { privateCheckPending: true } : {});
+        const resultOptions = { pendingPrivacyItems: ctx.pendingPrivacyItems?.(), ...(privateMatch ? { privateMatch } : late.timedOut ? { privateCheckPending: true } : {}) };
+        const result = searchToolResult(raw, resultOptions);
         // A new install's first question: say nothing is connected rather
         // than "no evidence in N searched sources" (zigelbot fresh install,
         // 2026-10-04). Best effort: an unreadable dashboard keeps the result.
         if (!privateMatch && (result.structuredContent as { status?: string } | undefined)?.status === 'none') {
           const sources = await dashboardViewModel(options, signal).then((view) => view.sources, () => undefined);
-          if (sources && sources.every((source) => source.status === 'Off')) return searchToolResult(raw, { noSourcesConnected: true });
+          if (sources && sources.every((source) => source.status === 'Off')) return searchToolResult(raw, { ...resultOptions, noSourcesConnected: true });
         }
         return result;
       }
@@ -552,7 +553,7 @@ async function runChatGptTool(
           return answerToolResult(raw);
         }
         const privateMatch = pending ? beginPrivateAnswer(pending, options) : undefined;
-        return answerToolResult(raw, privateMatch ? { privateMatch } : late.timedOut ? { privateCheckPending: true } : {});
+        return answerToolResult(raw, { pendingPrivacyItems: ctx.pendingPrivacyItems?.(), ...(privateMatch ? { privateMatch } : late.timedOut ? { privateCheckPending: true } : {}) });
       }
       case SOURCE_ANSWER_RESULT_TOOL.name: {
         if (!answerToolsListed(ctx, options) && !askToolListed(ctx)) throw new ChatGptSurfaceError('unknown_tool');
@@ -565,7 +566,7 @@ async function runChatGptTool(
         // Only this connection's own handed-off question, and only once it is answered.
         const pending = privateMatchForJob(privateCaller(ctx), jobId, done && isAnswered(raw));
         const privateMatch = done && isAnswered(raw) && pending?.match ? beginPrivateAnswer(pending.match, options) : undefined;
-        return answerToolResult(raw, privateMatch ? { privateMatch } : done && pending?.timedOut ? { privateCheckPending: true } : {});
+        return answerToolResult(raw, { pendingPrivacyItems: ctx.pendingPrivacyItems?.(), ...(privateMatch ? { privateMatch } : done && pending?.timedOut ? { privateCheckPending: true } : {}) });
       }
       case ASK_ANONYMOUSLY_TOOL.name: {
         if (!askToolListed(ctx)) throw new ChatGptSurfaceError('unknown_tool');

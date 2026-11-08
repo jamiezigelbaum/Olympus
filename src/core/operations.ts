@@ -74,6 +74,8 @@ export interface OperationContext {
    * with it when the answer is collected; no operation handler reads it.
    */
   releaseCheck?: ReleaseCheck;
+  /** TierSnifferService.backlog().pendingItems, read at response time. Counts only. */
+  pendingPrivacyItems?: () => number | undefined;
   /**
    * The Private part of a remote agent's source answer
    * (core/remote-private-part.ts), set by the worker for its remote surface
