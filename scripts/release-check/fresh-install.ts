@@ -191,12 +191,21 @@ done; exit 1`), 200_000);
     }
     // Reuse existing status, known-search and optional fresh-item plant checks.
     current = 'live-accounts';
-    checks.push(...(await runLiveAccounts(engine!, { sources, ...(options.sleep ? { sleep, pollMs: 1 } : {}) })).map(c => ({ ...c, detail: c.status === 'pass' ? 'engine status/search verified' : c.status === 'skip' ? 'Inconclusive: fresh item plant needs attention' : 'engine status/search or fresh item check did not pass' })));
+    // A pass keeps the matched item's title out of the report; a failure or skip keeps its reason (counts, refresh
+    // times, source labels), which run 6 needed and the old one-line summary threw away.
+    checks.push(...(await runLiveAccounts(engine!, { sources, ...(options.sleep ? { sleep, pollMs: 1 } : {}) })).map(c => ({ ...c, detail: c.status === 'pass' ? 'engine status/search verified' : redactFreshDetail(c.detail ?? 'no detail') })));
     for (const source of sources) {
       await checked(`${source.id}.answer`, async () => {
         const answer = await ask(engine!, source.known!.question, sleep);
         const a = answer.structured as any;
-        if (!answer.ok || a?.status !== 'answered' || typeof a.answer !== 'string' || !source.known!.expect.every(n => a.answer.toLowerCase().includes(n.toLowerCase())) || !Array.isArray(a.citations) || !a.citations.some((c: any) => String(c.label ?? c.source).toLowerCase() === source.label.toLowerCase())) throw new Error('known question was not answered with expected facts and a source citation');
+        const text = typeof a?.answer === 'string' ? a.answer.toLowerCase() : '';
+        const missing = source.known!.expect.filter(n => !text.includes(n.toLowerCase())).length;
+        const cited = Array.isArray(a?.citations) ? [...new Set<string>(a.citations.map((c: any) => String(c.label ?? c.source)))] : [];
+        if (!answer.ok || a?.status !== 'answered' || typeof a.answer !== 'string' || missing > 0 || !cited.some(label => label.toLowerCase() === source.label.toLowerCase())) {
+          // Never the answer text: only its status, how many expected facts it lacked and which sources it cited.
+          const why = !answer.ok ? `the call failed: ${(answer as { error?: string }).error ?? 'no answer'}` : `status ${String(a?.status ?? 'none')}, ${missing} of ${source.known!.expect.length} expected fact(s) missing, cited ${cited.join(', ') || 'nothing'}`;
+          throw new Error(`known question was not answered with expected facts and a source citation (${why})`);
+        }
       });
       await checked(`${source.id}.scope-absence`, async () => {
         const answer = await ask(engine!, source.fresh!.outside.question, sleep);
