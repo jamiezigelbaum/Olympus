@@ -187,6 +187,7 @@ export const V0_4_PUBLIC_CLI_COMMANDS = [
   'server-mode on',
   'server-mode off',
   'server-mode auto',
+  'settings show',
   'source answer',
   'source index status',
   'source index search',

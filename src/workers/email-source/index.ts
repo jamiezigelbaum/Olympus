@@ -291,7 +291,7 @@ import { dataDeleteCustody, deleteOlympusDataWithCustody, requireSource, type Da
 import type { ModelKeyReloadRequest } from '../../core/model-key-reload.ts';
 import { WORKER_CLI_OPERATIONS, WORKER_CLI_ROUTE_PREFIX, type WorkerCliOperation } from '../../core/cli-via-worker.ts';
 import { carriesRelayMarker } from '../../core/remote-access.ts';
-import { cliDataRootMismatch, exportForCli, ingestionStatusForCli, pairingAccountForCli, pairingPlacementForCli, tierForCli } from '../cli-operations.ts';
+import { cliDataRootMismatch, exportForCli, ingestionStatusForCli, pairingAccountForCli, pairingPlacementForCli, settingsForCli, tierForCli } from '../cli-operations.ts';
 import type {
   WorkerCredentialDegradation,
   WorkerCredentialReadiness,
@@ -1189,6 +1189,20 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
               case 'tier': return json(await tierForCli(body));
               case 'pairing-placement': return json(pairingPlacementForCli(body));
               case 'pairing-account': return json(pairingAccountForCli(body));
+              case 'settings': {
+                if (!sourceDashboard) throw new EmailSourceWorkerError(501, 'source_dashboard_not_supported', 'This Olympus has no dashboard settings to show.');
+                const dashboard = sourceDashboard;
+                return json(await settingsForCli({
+                  answerMode: () => {
+                    const id = privateAnswerMode(dashboard.sovereigntyEngine.config);
+                    return { id, label: id === 'custom' ? 'Custom Private-answer mode' : PRIVACY_PRESET_LABELS[id] };
+                  },
+                  ...(dashboard.computerSetup ? { computerSetup: dashboard.computerSetup } : {}),
+                  ...(dashboard.judgeSetup ? { judge: dashboard.judgeSetup.status } : {}),
+                  ...(dashboard.modelChoices ? { modelChoices: () => dashboard.modelChoices!.status() } : {}),
+                  ...(dashboard.consult ? { outsideHelp: () => dashboard.consult!.status() } : {}),
+                }));
+              }
             }
           }
         }

@@ -12,6 +12,9 @@
 import { isAbsolute } from 'node:path';
 import { canonicalDataRoot } from '../core/cli-via-worker.ts';
 import { loadConfig } from '../core/config.ts';
+import type { DashboardModelChoices } from '../core/model-choices.ts';
+import type { DashboardOutsideHelpStatus } from './dashboard/outside-help.ts';
+import type { DashboardJudgeSetup } from './dashboard/pages/local.ts';
 import { STOP_OLYMPUS_HINT } from '../core/data-owner-lock.ts';
 import { TELEGRAM_SOURCE_ID, WHATSAPP_SOURCE_ID } from '../core/olympus-layout.ts';
 import { OperationError } from '../core/operation-error.ts';
@@ -157,4 +160,61 @@ export async function tierForCli(body: Record<string, unknown>): Promise<Record<
     );
   }
   return runTierCommand(args);
+}
+
+/** What `olympus settings show` reads from the running worker: the dashboard's own status sources. */
+export interface SettingsSnapshotSources {
+  answerMode: () => { id: string; label: string };
+  computerSetup?: () => { computer_use_pending?: boolean | undefined; engine_server_mode?: { enabled: boolean; pending: boolean } | undefined };
+  judge?: () => DashboardJudgeSetup;
+  modelChoices?: () => Promise<DashboardModelChoices>;
+  outsideHelp?: () => Promise<DashboardOutsideHelpStatus>;
+}
+
+/**
+ * `olympus settings show` while Olympus runs: every setting the dashboard
+ * shows, read from the same status sources its pages use. Read-only: it
+ * changes nothing and returns no secrets (model ids, modes and limits only).
+ */
+export async function settingsForCli(sources: SettingsSnapshotSources): Promise<Record<string, unknown>> {
+  const computer = sources.computerSetup?.();
+  const judge = sources.judge?.();
+  const choices = await sources.modelChoices?.().catch(() => undefined);
+  const outside = await sources.outsideHelp?.().catch(() => undefined);
+  return {
+    kind: 'olympus_settings',
+    private_answer_mode: sources.answerMode(),
+    computer_use: computer
+      ? (computer.engine_server_mode
+        ? {
+            choice: computer.computer_use_pending === true ? null : (computer.engine_server_mode.enabled ? 'server' : 'everyday'),
+            change_pending: computer.engine_server_mode.pending,
+          }
+        : { choice: null, available: false })
+      : null,
+    privacy_judge: judge
+      ? {
+          choice: judge.choice,
+          spending_limit_dollars: judge.uncapped ? null : judge.capDollars,
+          spent_dollars: judge.spentDollars,
+          stopped: judge.stop,
+          cloud_model: judge.cloudModel,
+        }
+      : null,
+    models: choices
+      ? Object.fromEntries(Object.entries(choices).filter(([, list]) => list).map(([provider, list]) => [provider, {
+          current: list!.current,
+          ...(list!.strongestNow ? { strongest_now: list!.strongestNow } : {}),
+          options: list!.options.map((option: { value: string }) => option.value),
+        }]))
+      : null,
+    outside_help: outside
+      ? {
+          state: outside.unavailable ? 'unavailable' : outside.settings.state,
+          level: outside.settings.level,
+          strict: outside.settings.strict,
+          restart_pending: outside.restartPending,
+        }
+      : null,
+  };
 }
