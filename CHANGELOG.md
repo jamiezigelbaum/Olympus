@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.4.1 - 2026-11-08
+
+- **Upgrading a large install no longer rolls back.** `olympus worker upgrade` waited only 15 seconds for the new worker to answer. On a big archive the worker takes longer to open its stores, so the upgrade gave up and rolled back to the previous version, which can't open the newer stores and kept restarting. The upgrade now waits up to 3 minutes while the new worker's service stays active (#1040, #1041).
+
 ## 1.4.0 - 2026-11-08
 
 - **A new dashboard.** Four tabs across the top: Home, Sources, Privacy and Settings. Home shows one status line, what needs you and what is in progress (#996). Sources shows each source with its logo, a ··· menu per source and an Add a source sheet (#993). Privacy splits into Private questions and Privacy rules, and Privacy rules has model pickers: the models you can use as choices, plus Add a model (#981, #988). Settings holds the rest (#990). Dialogs close with X, Esc or a click outside.
