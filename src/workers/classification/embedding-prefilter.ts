@@ -329,12 +329,13 @@ export class EmbeddingPrefilter {
   private trainingExample(row: TierLedgerRecord, judge: string): TrainingExample | undefined {
     const eligible = prefilterTrainingExample(row, judge, this.options);
     if (!eligible) return undefined;
-    const { vector, copy } = eligible;
+    // Keep only the label for the closure: capturing `eligible` would retain the full copy.
+    const { vector, copy, private: isPrivate } = eligible;
     let fingerprint = this.trainingFingerprint(row);
     let awaitingMoveCompletion = row.state === 'moving';
     const copied = copyFingerprint(copy);
     const subject = subjectOf(row);
-    return { vector, private: eligible.private, current: checkLedger => {
+    return { vector, private: isPrivate, current: checkLedger => {
       const currentCopy = this.options.copyFor(subject);
       if (!currentCopy || copyFingerprint(currentCopy) !== copied) return false;
       if (!checkLedger) return true;
@@ -355,7 +356,7 @@ export class EmbeddingPrefilter {
         || current.mapRevision !== row.mapRevision || current.metadataFlagged !== row.metadataFlagged
         || JSON.stringify(current.reasons) !== JSON.stringify(row.reasons)) return false;
       const completed = prefilterTrainingExample(current, judge, this.options);
-      if (!completed || completed.private !== eligible.private || copyFingerprint(completed.copy) !== copied) return false;
+      if (!completed || completed.private !== isPrivate || copyFingerprint(completed.copy) !== copied) return false;
       fingerprint = nextFingerprint;
       if (flipped) awaitingMoveCompletion = false;
       return true;

@@ -125266,12 +125266,12 @@ class EmbeddingPrefilter {
     const eligible = prefilterTrainingExample(row, judge3, this.options);
     if (!eligible)
       return;
-    const { vector, copy } = eligible;
+    const { vector, copy, private: isPrivate } = eligible;
     let fingerprint = this.trainingFingerprint(row);
     let awaitingMoveCompletion = row.state === "moving";
     const copied = copyFingerprint2(copy);
     const subject = subjectOf(row);
-    return { vector, private: eligible.private, current: (checkLedger) => {
+    return { vector, private: isPrivate, current: (checkLedger) => {
       const currentCopy = this.options.copyFor(subject);
       if (!currentCopy || copyFingerprint2(currentCopy) !== copied)
         return false;
@@ -125288,7 +125288,7 @@ class EmbeddingPrefilter {
       if (!awaitingMoveCompletion || !staged && !flipped || current2.modelId !== row.modelId || current2.engineVersion !== row.engineVersion || current2.mapRevision !== row.mapRevision || current2.metadataFlagged !== row.metadataFlagged || JSON.stringify(current2.reasons) !== JSON.stringify(row.reasons))
         return false;
       const completed = prefilterTrainingExample(current2, judge3, this.options);
-      if (!completed || completed.private !== eligible.private || copyFingerprint2(completed.copy) !== copied)
+      if (!completed || completed.private !== isPrivate || copyFingerprint2(completed.copy) !== copied)
         return false;
       fingerprint = nextFingerprint;
       if (flipped)
