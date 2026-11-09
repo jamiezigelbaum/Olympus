@@ -39582,10 +39582,10 @@ var init_local_index = __esm(() => {
         cloud_embedding_eligible = excluded.cloud_embedding_eligible
     `).run(model.modelId, model.provider, model.dimension, model.backend, model.epochId, Number(model.backend === "cloud" && (this.trustDomain !== "secure_local" || model.provider === "venice")), recordedAt);
     }
-    hasEmbeddings(modelId) {
+    hasEmbeddings(modelId, options = {}) {
       if (this.embeddingCurrencyRebuildPending(modelId))
         return false;
-      const exclusion = this.embeddingWorkListExclusionFilter();
+      const exclusion = this.embeddingWorkListExclusionFilter(options.countsMaxAgeMs ?? 0);
       const row = this.db.query(`
       SELECT 1 AS present
       FROM chunk_embeddings emb
@@ -97019,7 +97019,7 @@ function createSourceIndexStatusHandler(options = {}) {
         const store = storesByCorpusId.get(corpus.corpusId);
         const statusScope = store ? options.connectorStoreStatusScope?.(store) : undefined;
         const maxAgeMs = normalizedStatusCacheMaxAge(request.readiness_ledger_max_age_ms);
-        const availability = resolveStatusRetrievalAvailability(options.retrievalAvailability?.[corpus.corpusId], request);
+        const availability = resolveStatusRetrievalAvailability(options.retrievalAvailability?.[corpus.corpusId], request, snapshot);
         const cacheKey = JSON.stringify([
           corpus.corpusId,
           corpus.embeddingPolicy,
@@ -97147,11 +97147,11 @@ function assertSupportedStatusRequest(request) {
     throw new OperationError("invalid_params", `source_index_status does not support these filters on the connector-store status surface: ${[...new Set(unsupported)].sort().join(", ")}.`, "Use source_index_search for item filtering, or request unfiltered corpus status.");
   }
 }
-function resolveStatusRetrievalAvailability(availability, request) {
+function resolveStatusRetrievalAvailability(availability, request, snapshot = {}) {
   if (typeof availability !== "function")
     return availability;
   try {
-    return availability(request);
+    return availability(request, snapshot);
   } catch {
     return { servable: false, reason: "hybrid_capability_unreported" };
   }
@@ -218792,8 +218792,8 @@ function registerConnectorStoreEmbeddingLane(options) {
   }
   options.store.usePersonalEmbeddingProvider(() => options.personalProvider);
   options.providers.set(options.store.corpusId, options.provider);
-  options.retrievalAvailability[options.store.corpusId] = () => {
-    const servable = options.store.hasEmbeddings(options.provider.modelId);
+  options.retrievalAvailability[options.store.corpusId] = (_request, snapshot2) => {
+    const servable = options.store.hasEmbeddings(options.provider.modelId, { countsMaxAgeMs: snapshot2?.countsMaxAgeMs ?? 0 });
     return {
       servable,
       ...!servable ? { reason: "no_current_embedding_artifacts" } : {},
