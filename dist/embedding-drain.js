@@ -31741,10 +31741,10 @@ var init_local_index = __esm(() => {
         cloud_embedding_eligible = excluded.cloud_embedding_eligible
     `).run(model.modelId, model.provider, model.dimension, model.backend, model.epochId, Number(model.backend === "cloud" && (this.trustDomain !== "secure_local" || model.provider === "venice")), recordedAt);
     }
-    hasEmbeddings(modelId) {
+    hasEmbeddings(modelId, options = {}) {
       if (this.embeddingCurrencyRebuildPending(modelId))
         return false;
-      const exclusion = this.embeddingWorkListExclusionFilter();
+      const exclusion = this.embeddingWorkListExclusionFilter(options.countsMaxAgeMs ?? 0);
       const row = this.db.query(`
       SELECT 1 AS present
       FROM chunk_embeddings emb

@@ -558,6 +558,48 @@ describe('connector-store status readiness', () => {
     }
   });
 
+  test('a status snapshot hands its counts age to dynamic availability; a live read hands none', async () => {
+    const store = new LocalConnectorStore({ dbPath: ':memory:', corpusId: CORPUS_ID, family: 'file', trustDomain: 'secure_local' });
+    const seen: Array<number | undefined> = [];
+    const handler = createSourceIndexStatusHandler({
+      corpusDefinitions: [defineDropboxFilesCorpus()],
+      connectorStores: [store],
+      retrievalAvailability: {
+        [CORPUS_ID]: (_request, snapshot) => {
+          seen.push(snapshot?.countsMaxAgeMs);
+          return { servable: false, modelId: 'fake-embed-v1', reason: 'no_current_embedding_artifacts' };
+        },
+      },
+    });
+    try {
+      await handler.status({ corpus_id: CORPUS_ID }, { countsMaxAgeMs: 300_000 });
+      await handler.status({ corpus_id: CORPUS_ID });
+      expect(seen).toEqual([300_000, undefined]);
+    } finally {
+      store.close();
+    }
+  });
+
+  test('hasEmbeddings answers a status snapshot from the counts\' hidden-copy set, and a live caller from the current one', async () => {
+    const store = new LocalConnectorStore({ dbPath: ':memory:', corpusId: CORPUS_ID, family: 'file', trustDomain: 'secure_local' });
+    try {
+      await store.syncFromConnector(connector([file('one.txt', 'one')]), { fetchContent: true });
+      const internals = store as unknown as { tierLedgerHiddenItemPks: () => unknown };
+      const original = internals.tierLedgerHiddenItemPks.bind(store);
+      let rebuilds = 0;
+      internals.tierLedgerHiddenItemPks = () => { rebuilds += 1; return original(); };
+      store.hasEmbeddings('fake-embed-v1', { countsMaxAgeMs: 300_000 });
+      const afterFirst = rebuilds;
+      store.hasEmbeddings('fake-embed-v1', { countsMaxAgeMs: 300_000 });
+      store.hasEmbeddings('fake-embed-v1', { countsMaxAgeMs: 300_000 });
+      expect(rebuilds).toBe(afterFirst);
+      store.hasEmbeddings('fake-embed-v1');
+      expect(rebuilds).toBe(afterFirst + 1);
+    } finally {
+      store.close();
+    }
+  });
+
   test('fails closed when dynamic retrieval capability throws', () => {
     expect(resolveStatusRetrievalAvailability(() => {
       throw new Error('synthetic capability failure');

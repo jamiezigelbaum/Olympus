@@ -11382,14 +11382,17 @@ export class LocalConnectorStore {
 
   // True when the store has at least one current, visible embedding for the
   // model: stale or held vectors never activate the vector lane.
-  hasEmbeddings(modelId: string): boolean {
+  // `countsMaxAgeMs` only for a status snapshot's display (see
+  // STATUS_COUNTS_MAX_AGE_MS); search and embedding pass none and see the
+  // current hidden-copy set.
+  hasEmbeddings(modelId: string, options: { countsMaxAgeMs?: number } = {}): boolean {
     // A rebind deletes this model's vectors across the WHOLE corpus while the
     // call that triggered it re-embeds only its own selection. Until a
     // corpus-wide pass has rebuilt them, one fresh vector is not evidence that
     // the lane can serve the corpus — so the lane stays off and callers fall
     // back to keyword instead of silently fusing a fraction of it.
     if (this.embeddingCurrencyRebuildPending(modelId)) return false;
-    const exclusion = this.embeddingWorkListExclusionFilter();
+    const exclusion = this.embeddingWorkListExclusionFilter(options.countsMaxAgeMs ?? 0);
     // The question is "is there at least one", so the query stops at the first
     // row. It used to be an unbounded COUNT(*) over the whole three-table join,
     // which walked every current embedding in the corpus to answer a boolean —
