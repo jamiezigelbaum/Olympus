@@ -315,7 +315,7 @@ export interface SourceIndexReadinessLedger {
 
 export type SourceIndexStatusRetrievalAvailability =
   | SourceIndexHybridAvailability
-  | ((request: SourceIndexStatusRequest) => SourceIndexHybridAvailability);
+  | ((request: SourceIndexStatusRequest, snapshot?: { countsMaxAgeMs?: number }) => SourceIndexHybridAvailability);
 
 /**
  * Kept as the dashboard polling contract: how stale a readiness ledger that
@@ -438,6 +438,7 @@ export function createSourceIndexStatusHandler(
         const availability = resolveStatusRetrievalAvailability(
           options.retrievalAvailability?.[corpus.corpusId],
           request,
+          snapshot,
         );
         // Encoded structurally: model ids and epochs are free-form strings, so
         // a delimiter-joined key could collide ("m:a"+"b" vs "m"+"a:b").
@@ -589,10 +590,11 @@ function assertSupportedStatusRequest(request: SourceIndexStatusRequest): void {
 export function resolveStatusRetrievalAvailability(
   availability: SourceIndexStatusRetrievalAvailability | undefined,
   request: SourceIndexStatusRequest,
+  snapshot: { countsMaxAgeMs?: number } = {},
 ): SourceIndexHybridAvailability | undefined {
   if (typeof availability !== 'function') return availability;
   try {
-    return availability(request);
+    return availability(request, snapshot);
   } catch {
     return { servable: false, reason: 'hybrid_capability_unreported' };
   }

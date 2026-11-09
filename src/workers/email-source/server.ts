@@ -750,8 +750,12 @@ export function registerConnectorStoreEmbeddingLane(options: {
   }
   options.store.usePersonalEmbeddingProvider(() => options.personalProvider);
   options.providers.set(options.store.corpusId, options.provider);
-  options.retrievalAvailability[options.store.corpusId] = () => {
-    const servable = options.store.hasEmbeddings(options.provider.modelId);
+  options.retrievalAvailability[options.store.corpusId] = (_request, snapshot) => {
+    // A status snapshot may judge "is there a visible vector" against a
+    // hidden-copy set up to its counts age old; rebuilding that set on every
+    // dashboard poll held the worker 2-3 s per refresh on Sparta (2026-11-09).
+    // Search decides servability on its own path and never passes an age.
+    const servable = options.store.hasEmbeddings(options.provider.modelId, { countsMaxAgeMs: snapshot?.countsMaxAgeMs ?? 0 });
     return {
       servable,
       ...(!servable ? { reason: 'no_current_embedding_artifacts' as const } : {}),
