@@ -2792,6 +2792,7 @@ var init_olympus_layout = __esm(() => {
     "google-drive-request-budget": "google-drive-daily-request-budget.json",
     "credential-broker-state": "credential-broker-state.json",
     "waiting-private-questions": "waiting-private-questions.sqlite",
+    "app-release-log": "app-release-log.sqlite",
     "tier-migration": "tier-migration",
     models: "models",
     "built-in-embedding": "models/built-in-embedding",
@@ -5608,6 +5609,12 @@ function sanitizeCallerDisplayName(value) {
     return;
   return cleaned.slice(0, OPERATION_CALLER_DISPLAY_NAME_MAX);
 }
+function callerProviderFromLabel(label) {
+  if (!label)
+    return;
+  const named = HOST_NAME_PATTERNS.filter(([, pattern]) => pattern.test(label));
+  return named.length === 1 ? named[0][0] : undefined;
+}
 function operationCallerToWire(caller) {
   const displayName = sanitizeCallerDisplayName(caller.displayName);
   return {
@@ -5617,16 +5624,133 @@ function operationCallerToWire(caller) {
     ...caller.provider ? { provider: caller.provider } : {}
   };
 }
-var OPERATION_CALLER_DISPLAY_NAME_MAX = 80, UNSAFE_LABEL_CHARS, inProcessRemoteRequests;
+var OPERATION_CALLER_PROVIDERS, OPERATION_CALLER_DISPLAY_NAME_MAX = 80, UNSAFE_LABEL_CHARS, HOST_NAME_PATTERNS, inProcessRemoteRequests;
 var init_operation_caller = __esm(() => {
+  OPERATION_CALLER_PROVIDERS = ["openai", "xai", "meta", "anthropic", "other"];
   UNSAFE_LABEL_CHARS = /[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2066-\u2069]/g;
+  HOST_NAME_PATTERNS = [
+    ["anthropic", /claude|anthropic/i],
+    ["openai", /chatgpt|openai|codex/i],
+    ["xai", /grok|xai|x\.ai/i],
+    ["meta", /\b(?:meta|muse)\b/i]
+  ];
   inProcessRemoteRequests = new WeakSet;
 });
 
 // src/core/sqlite-migrations.ts
+function currentStoreMigrations() {
+  return [
+    {
+      version: CURRENT_OLYMPUS_SQLITE_SCHEMA_VERSION,
+      name: "record_existing_v1_schema",
+      up() {}
+    }
+  ];
+}
+function assertSqliteSchemaCanOpen(db, storeId, knownVersion = CURRENT_OLYMPUS_SQLITE_SCHEMA_VERSION) {
+  const currentVersion = readSqliteSchemaVersion(db, storeId);
+  if (currentVersion > knownVersion) {
+    throw new OperationError("config_error", `SQLite store "${storeId}" is at schema_version ${currentVersion}, but this Olympus build only knows schema_version ${knownVersion}.`, "Upgrade Olympus before opening this store. Refusing to open it prevents an older build from corrupting newer data.");
+  }
+}
+function runSqliteMigrations(db, storeId, migrations = currentStoreMigrations(), options = {}) {
+  const ordered = validateMigrations(migrations);
+  const targetVersion = options.knownVersion ?? ordered.at(-1)?.version ?? CURRENT_OLYMPUS_SQLITE_SCHEMA_VERSION;
+  const currentVersion = readSqliteSchemaVersion(db, storeId);
+  if (currentVersion > targetVersion) {
+    throw new OperationError("config_error", `SQLite store "${storeId}" is at schema_version ${currentVersion}, but this Olympus build only knows schema_version ${targetVersion}.`, "Upgrade Olympus before opening this store. Refusing to open it prevents an older build from corrupting newer data.");
+  }
+  const pending = ordered.filter((migration) => migration.version > currentVersion).map(({ version, name }) => ({ version, name }));
+  if (options.dryRun === true) {
+    return {
+      storeId,
+      currentVersion,
+      targetVersion,
+      dryRun: true,
+      applied: [],
+      pending
+    };
+  }
+  ensureSchemaVersionTable(db);
+  const applied = [];
+  if (pending.length > 0) {
+    db.transaction(() => {
+      const lockedVersion = readSqliteSchemaVersion(db, storeId);
+      if (lockedVersion > targetVersion) {
+        throw new OperationError("config_error", `SQLite store "${storeId}" is at schema_version ${lockedVersion}, but this Olympus build only knows schema_version ${targetVersion}.`, "Upgrade Olympus before opening this store. Refusing to open it prevents an older build from corrupting newer data.");
+      }
+      for (const migration of ordered.filter((entry) => entry.version > lockedVersion)) {
+        migration.up(db);
+        writeSqliteSchemaVersion(db, storeId, migration.version);
+        applied.push({ version: migration.version, name: migration.name });
+      }
+    }).immediate();
+  }
+  return {
+    storeId,
+    currentVersion,
+    targetVersion,
+    dryRun: false,
+    applied,
+    pending: applied
+  };
+}
+function readSqliteSchemaVersion(db, storeId) {
+  if (!schemaVersionTableExists(db))
+    return 0;
+  const row = db.query(`SELECT version FROM ${SQLITE_SCHEMA_VERSION_TABLE} WHERE store_id = ?`).get(storeId);
+  return typeof row?.version === "number" && Number.isInteger(row.version) ? row.version : 0;
+}
+function ensureSchemaVersionTable(db) {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS ${SQLITE_SCHEMA_VERSION_TABLE} (
+      store_id TEXT PRIMARY KEY,
+      version INTEGER NOT NULL,
+      applied_at TEXT NOT NULL
+    );
+  `);
+}
+function writeSqliteSchemaVersion(db, storeId, version) {
+  db.query(`
+    INSERT INTO ${SQLITE_SCHEMA_VERSION_TABLE} (store_id, version, applied_at)
+    VALUES (?, ?, ?)
+    ON CONFLICT(store_id) DO UPDATE SET
+      version = excluded.version,
+      applied_at = excluded.applied_at
+  `).run(storeId, version, new Date().toISOString());
+}
+function schemaVersionTableExists(db) {
+  const row = db.query("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?").get(SQLITE_SCHEMA_VERSION_TABLE);
+  return row?.name === SQLITE_SCHEMA_VERSION_TABLE;
+}
+function validateMigrations(migrations) {
+  const ordered = [...migrations].sort((left, right) => left.version - right.version);
+  let previous = 0;
+  for (const migration of ordered) {
+    if (!Number.isInteger(migration.version) || migration.version <= 0) {
+      throw new OperationError("config_error", `SQLite migration "${migration.name}" must use a positive integer version.`);
+    }
+    if (migration.version === previous) {
+      throw new OperationError("config_error", `Duplicate SQLite migration version ${migration.version}.`);
+    }
+    previous = migration.version;
+  }
+  return ordered;
+}
+var SQLITE_SCHEMA_VERSION_TABLE = "schema_version", CURRENT_OLYMPUS_SQLITE_SCHEMA_VERSION = 1;
 var init_sqlite_migrations = __esm(() => {
   init_operation_error();
 });
+
+// src/core/sqlite-store.ts
+function closeSqliteStore(db, options = {}) {
+  if (options.checkpoint !== false) {
+    try {
+      db.exec("PRAGMA wal_checkpoint(TRUNCATE);");
+    } catch {}
+  }
+  db.close();
+}
 // src/core/source-watch.ts
 function sourceWatchAuthenticatedRouteHeaders(route) {
   const headers = new Headers({
@@ -6769,6 +6893,1677 @@ var init_router = __esm(() => {
   NORMALIZED_FORBIDDEN_ROUTER_RESULT_KEYS = new Set([...FORBIDDEN_ROUTER_RESULT_KEYS].map(normalizeRouterResultKey));
 });
 
+// src/core/app-release-capture.ts
+import { AsyncLocalStorage as AsyncLocalStorage4 } from "node:async_hooks";
+function boundedString(value, max) {
+  if (typeof value !== "string")
+    return;
+  const trimmed = value.trim();
+  return trimmed ? trimmed.slice(0, max) : undefined;
+}
+function releasedTierOf(trustDomain) {
+  if (trustDomain === "public_safe")
+    return "public";
+  if (trustDomain === "internal")
+    return "personal";
+  return "private";
+}
+function releasedItemFromEvidence(evidence, source, title) {
+  const shownTitle = boundedString(title, TITLE_MAX);
+  const corpusId = boundedString(evidence.corpus_id, ID_MAX);
+  const provider = boundedString(evidence.provider, ID_MAX);
+  const providerItemId = boundedString(evidence.provider_item_id, ID_MAX);
+  const providerConversationId = boundedString(evidence.provider_conversation_id, ID_MAX);
+  const locator = boundedString(evidence.uri, ID_MAX);
+  return {
+    source: boundedString(source, 80) ?? "Other source",
+    ...shownTitle ? { title: shownTitle } : {},
+    tier: releasedTierOf(evidence.trust_domain),
+    ...corpusId ? { corpusId } : {},
+    ...provider ? { provider } : {},
+    ...providerItemId ? { providerItemId } : {},
+    ...providerConversationId ? { providerConversationId } : {},
+    ...locator ? { locator } : {}
+  };
+}
+function appConnectionOf(caller) {
+  if (!caller || caller.surface === "cli")
+    return;
+  const display = boundedString(caller.displayName, 80);
+  const id = boundedString(caller.connectionId, 128);
+  if (caller.surface === "remote") {
+    const known = caller.provider ? PROVIDER_APP_NAMES[caller.provider] : undefined;
+    return { ...id ? { id } : {}, name: known ?? display ?? "An AI app", kind: "app" };
+  }
+  return { ...id ? { id } : {}, name: display ?? "An agent", kind: "agent" };
+}
+function notePrivateAnswerCompleted(privateQuestionId) {
+  try {
+    if (typeof privateQuestionId !== "string" || !privateQuestionId)
+      return;
+    completedPrivateAnswers.add(privateQuestionId);
+    while (completedPrivateAnswers.size > COMPLETED_MAX)
+      completedPrivateAnswers.delete(completedPrivateAnswers.values().next().value);
+    completionHook?.(privateQuestionId);
+  } catch {}
+}
+function recordAppRequest(input) {
+  try {
+    const write = recorder ?? input.fallback;
+    if (!write)
+      return;
+    const connection = appConnectionOf(input.caller);
+    const question = boundedString(input.question, 2000);
+    if (!connection || !question || input.capture.items === undefined)
+      return;
+    const withheld = input.withheldAfter === true || input.capture.withheld === true;
+    const privateQuestionId = boundedString(input.privateQuestionId ?? input.capture.privateQuestionId, 128);
+    write({
+      at: (input.now ?? Date.now)(),
+      connection,
+      question,
+      items: withheld ? [] : input.capture.items,
+      heldBack: input.capture.heldBack + (withheld ? input.capture.items.length : 0),
+      answeredPrivately: privateQuestionId !== undefined && completedPrivateAnswers.has(privateQuestionId),
+      withheld,
+      ...privateQuestionId ? { privateQuestionId } : {}
+    });
+  } catch {}
+}
+function rememberJobQuestion(jobId, question, now = Date.now()) {
+  if (typeof jobId !== "string" || typeof question !== "string" || !jobId || !question.trim())
+    return;
+  for (const [key, entry] of jobQuestions)
+    if (entry.expires <= now)
+      jobQuestions.delete(key);
+  jobQuestions.set(jobId, { question: question.trim().slice(0, 2000), expires: now + JOB_QUESTION_TTL_MS });
+  while (jobQuestions.size > JOB_QUESTIONS_MAX)
+    jobQuestions.delete(jobQuestions.keys().next().value);
+}
+function jobQuestion(jobId, now = Date.now()) {
+  if (typeof jobId !== "string")
+    return;
+  const entry = jobQuestions.get(jobId);
+  if (!entry || entry.expires <= now)
+    return;
+  return entry.question;
+}
+function sourceAnswerQuestion(name, args, status, jobId) {
+  if (name === "source_answer") {
+    const question = typeof args.question === "string" ? args.question : undefined;
+    if (status === "working")
+      rememberJobQuestion(jobId, question);
+    return question;
+  }
+  if (name === "source_answer_result")
+    return jobQuestion(args.job_id);
+  return;
+}
+var storage3, TITLE_MAX = 300, ID_MAX = 512, PROVIDER_APP_NAMES, recorder, completionHook, COMPLETED_MAX = 512, completedPrivateAnswers, JOB_QUESTIONS_MAX = 256, JOB_QUESTION_TTL_MS, jobQuestions;
+var init_app_release_capture = __esm(() => {
+  storage3 = new AsyncLocalStorage4;
+  PROVIDER_APP_NAMES = {
+    openai: "ChatGPT",
+    anthropic: "Claude",
+    xai: "Grok",
+    meta: "Meta AI"
+  };
+  completedPrivateAnswers = new Set;
+  JOB_QUESTION_TTL_MS = 30 * 60000;
+  jobQuestions = new Map;
+});
+// src/core/secret-patterns.ts
+var PROSE_WORDS, CREDENTIAL_KEYS, CREDENTIAL_KEY_WORDS, LEGACY_KEY_WORDS, CREDENTIAL_QUERY_KEY, PLACEHOLDER_WORDS, BARE_LITERALS, COMMON_OBJECTS, STRONG_QUALIFIERS, ENV_KEY_WORDS, ENV_CREDENTIAL_KEY, KEYWORD, SEPARATOR, VALUE, CREDENTIAL_ASSIGNMENT, ENV_ASSIGNMENT, BLOCK_SCALAR, LABELLED_PASSPHRASE, RECOVERY_CODE_LABEL, LEGACY_CREDENTIAL_ASSIGNMENT;
+var init_secret_patterns = __esm(() => {
+  PROSE_WORDS = new Set([
+    "above",
+    "again",
+    "below",
+    "cannot",
+    "change",
+    "changed",
+    "characters",
+    "choose",
+    "click",
+    "contact",
+    "enter",
+    "expired",
+    "expires",
+    "forgot",
+    "forgotten",
+    "guideline",
+    "guidelines",
+    "hidden",
+    "incorrect",
+    "information",
+    "instruction",
+    "instructions",
+    "invalid",
+    "least",
+    "letters",
+    "link",
+    "manager",
+    "maximum",
+    "min",
+    "minimum",
+    "must",
+    "need",
+    "needed",
+    "needs",
+    "number",
+    "numbers",
+    "optional",
+    "please",
+    "policies",
+    "policy",
+    "protected",
+    "provide",
+    "provided",
+    "required",
+    "requirements",
+    "reset",
+    "retry",
+    "see",
+    "send",
+    "sent",
+    "setting",
+    "settings",
+    "shared",
+    "should",
+    "shown",
+    "sign",
+    "strength",
+    "symbols",
+    "unchanged",
+    "use",
+    "used",
+    "using",
+    "via"
+  ]);
+  CREDENTIAL_KEYS = [
+    { pattern: String.raw`api[_ -]?key`, legacy: true },
+    { pattern: String.raw`access[_ -]?token`, legacy: true },
+    { pattern: String.raw`refresh[_ -]?token`, legacy: true },
+    { pattern: String.raw`client[_ -]?secret`, legacy: true },
+    { pattern: "password", legacy: true },
+    { pattern: String.raw`pass(?:wd|phrase|code)|(?<![a-z])pass|pwd` },
+    { pattern: String.raw`secret[_ -]?(?:access[_ -]?)?key(?:[_-]?base)?` },
+    { pattern: String.raw`private[_ -]?key` },
+    { pattern: "secret" },
+    { pattern: String.raw`token(?!s)` },
+    { pattern: "sig", urlOnly: true }
+  ];
+  CREDENTIAL_KEY_WORDS = CREDENTIAL_KEYS.filter((key) => !key.urlOnly).map((key) => key.pattern).join("|");
+  LEGACY_KEY_WORDS = CREDENTIAL_KEYS.filter((key) => key.legacy).map((key) => key.pattern).join("|");
+  CREDENTIAL_QUERY_KEY = new RegExp(`^(?:${CREDENTIAL_KEYS.map((key) => key.pattern).join("|")})$`, "i");
+  PLACEHOLDER_WORDS = new RegExp([
+    String.raw`(?:^|[^a-z])your[_ .-]?[a-z_ -]{0,16}(?:api|secret|token|key|pass|password|client|value|here)`,
+    String.raw`(?:^|[^a-z])my[_ .-](?:api|secret|token|key|pass|password|client)`,
+    String.raw`(?:^|[^a-z])(?:example|dummy|todo|fixme)(?:[^a-z]|$)`,
+    "placeholder",
+    "redacted",
+    "changeme",
+    "change[_-]me",
+    "replace[_-]?me",
+    "insert[_-]?(?:your|here|key|token)",
+    "[_-]here$",
+    "^n/a$",
+    "not[_ -]?set",
+    "^unset$"
+  ].join("|"), "i");
+  BARE_LITERALS = new Set([
+    "password",
+    "passwd",
+    "passphrase",
+    "secret",
+    "token",
+    "apikey",
+    "api_key",
+    "api-key",
+    "string",
+    "null",
+    "none",
+    "nil",
+    "undefined",
+    "true",
+    "false",
+    "empty",
+    "hidden",
+    "masked",
+    "required",
+    "optional",
+    "changeme",
+    "enabled",
+    "disabled",
+    "encrypted",
+    "hashed",
+    "unknown",
+    "tbd",
+    "pending",
+    "missing"
+  ]);
+  COMMON_OBJECTS = new Set([
+    "user",
+    "users",
+    "body",
+    "data",
+    "form",
+    "state",
+    "props",
+    "creds",
+    "credentials",
+    "account",
+    "profile",
+    "session",
+    "auth",
+    "db",
+    "app",
+    "json",
+    "response",
+    "res",
+    "row",
+    "record",
+    "item",
+    "model"
+  ]);
+  STRONG_QUALIFIERS = new Set([
+    "client",
+    "app",
+    "api",
+    "access",
+    "refresh",
+    "auth",
+    "bearer",
+    "id",
+    "session",
+    "bot",
+    "oauth",
+    "webhook",
+    "signing",
+    "jwt",
+    "service",
+    "personal",
+    "consumer",
+    "shared",
+    "encryption",
+    "master",
+    "admin",
+    "root",
+    "user",
+    "db",
+    "database",
+    "wifi",
+    "email",
+    "login"
+  ]);
+  ENV_KEY_WORDS = CREDENTIAL_KEY_WORDS;
+  ENV_CREDENTIAL_KEY = new RegExp(ENV_KEY_WORDS, "i");
+  KEYWORD = `(?<kw>${CREDENTIAL_KEY_WORDS})`;
+  SEPARATOR = String.raw`["'\x60*_]{0,3}[ \t]*(?::=|=>|[:=])[*_]{0,2}[ \t]*(?<nl>\r?\n[ \t]*)?`;
+  VALUE = String.raw`(?:"(?<dq>(?:[^"\\\n\r]|\\.)*)"|'(?<sq>(?:[^'\\\n\r]|\\.)*)'|\x60(?<bq>[^\x60\n\r]*)\x60|(?<uv>[^\s"'\x60]+))`;
+  CREDENTIAL_ASSIGNMENT = new RegExp(`${KEYWORD}${SEPARATOR}${VALUE}`, "gi");
+  ENV_ASSIGNMENT = new RegExp(String.raw`(?<![A-Za-z0-9_.?&/%+=-])(?=(?:--)?[A-Za-z0-9_.-]*?(?:${ENV_KEY_WORDS}))(?<ek>(?:--)?[A-Za-z_][A-Za-z0-9_.-]*)[ \t]*=(?![=~>])[ \t]*${VALUE}`, "gi");
+  BLOCK_SCALAR = new RegExp(String.raw`${KEYWORD}["'\x60]{0,2}[ \t]*:[ \t]*[|>](?:[+-][1-9]?|[1-9][+-]?)?[ \t]*(?:#[^\r\n]*)?\r?\n(?:[ \t]*\r?\n)*(?<ind>[ \t]+)(?<bv>[^ \t\r\n][^\r\n]*)`, "gi");
+  LABELLED_PASSPHRASE = new RegExp(String.raw`^[ \t>*•-]*(?:[A-Za-z0-9 _.-]{0,30}?)pass(?:word|phrase|code)["'\x60*_]{0,3}[ \t]*(?::=|[:=])[*_]{0,2}[ \t]*(?<mv>[^\s][^\n\r]{5,159})$`, "gim");
+  RECOVERY_CODE_LABEL = new RegExp(String.raw`(?<![A-Za-z0-9])(?:recovery|backup)(?:[ \t_-]+(?:verification|security|login|sign[ -]?in|2fa|mfa|two[ -]factor|account))?[ \t_-]+(?:codes?|keys?)["'\x60*_]{0,3}[ \t]*(?:[:=]|(?<![A-Za-z])(?:is|are)(?![A-Za-z])[ \t]*:?)[*_]{0,2}[ \t]*(?<rest>[^\r\n]{0,200})`, "gi");
+  LEGACY_CREDENTIAL_ASSIGNMENT = new RegExp(String.raw`\b(${LEGACY_KEY_WORDS})\b\s*[:=]\s*['"]?[^'"\s]{12,}`, "gi");
+});
+
+// src/core/opsec.ts
+var init_opsec = __esm(() => {
+  init_secret_patterns();
+  init_types();
+});
+
+// src/core/parent-label.ts
+var init_parent_label = __esm(() => {
+  init_types();
+});
+
+// src/core/secret-location-note.ts
+var init_secret_location_note = () => {};
+
+// src/core/app-release-log.ts
+var exports_app_release_log = {};
+__export(exports_app_release_log, {
+  openAppReleaseLog: () => openAppReleaseLog,
+  isAppReleaseRetentionDays: () => isAppReleaseRetentionDays,
+  forgetAppReleaseItems: () => forgetAppReleaseItems,
+  appReleaseLogDbPath: () => appReleaseLogDbPath,
+  APP_RELEASE_RETENTION_DAYS: () => APP_RELEASE_RETENTION_DAYS,
+  APP_RELEASE_LOG_STORE_ID: () => APP_RELEASE_LOG_STORE_ID,
+  APP_RELEASE_LOG_SCHEMA_VERSION: () => APP_RELEASE_LOG_SCHEMA_VERSION,
+  APP_RELEASE_DEFAULT_RETENTION_DAYS: () => APP_RELEASE_DEFAULT_RETENTION_DAYS
+});
+import { Database } from "bun:sqlite";
+import { randomBytes as randomBytes6 } from "node:crypto";
+import { chmodSync as chmodSync4, existsSync as existsSync8, lstatSync as lstatSync10, mkdirSync as mkdirSync9 } from "node:fs";
+import { homedir as homedir10 } from "node:os";
+import { dirname as dirname18, isAbsolute as isAbsolute17, join as join25 } from "node:path";
+function appReleaseLogDbPath(remoteConnectionsDbPath) {
+  return join25(dirname18(remoteConnectionsDbPath), SHARED_DATA_FILES["app-release-log"]);
+}
+function isAppReleaseRetentionDays(value) {
+  return typeof value === "number" && APP_RELEASE_RETENTION_DAYS.includes(value);
+}
+function openAppReleaseLog(dbPath, options = {}) {
+  const now = options.now ?? Date.now;
+  hardenPrivatePath(dbPath);
+  const db = new Database(dbPath, { create: true });
+  try {
+    chmodSync4(dbPath, 384);
+    db.exec("PRAGMA busy_timeout = 5000; PRAGMA secure_delete = ON; PRAGMA journal_mode = DELETE; PRAGMA foreign_keys = ON;");
+    db.transaction(() => {
+      assertSqliteSchemaCanOpen(db, APP_RELEASE_LOG_STORE_ID, APP_RELEASE_LOG_SCHEMA_VERSION);
+      runSqliteMigrations(db, APP_RELEASE_LOG_STORE_ID, migrations());
+    }).immediate();
+  } catch (error) {
+    closeSqliteStore(db);
+    throw error;
+  }
+  const retentionDays = () => {
+    const row = db.query("SELECT value FROM app_release_meta WHERE key = ?").get(RETENTION_KEY);
+    const days = row ? Number(row.value) : APP_RELEASE_DEFAULT_RETENTION_DAYS;
+    return isAppReleaseRetentionDays(days) ? days : APP_RELEASE_DEFAULT_RETENTION_DAYS;
+  };
+  const clear = () => db.transaction(() => {
+    db.query("DELETE FROM app_release_items").run();
+    return db.query("DELETE FROM app_release_requests").run().changes;
+  })();
+  const expire = () => {
+    const days = retentionDays();
+    if (days === 0) {
+      clear();
+      return;
+    }
+    const before = now() - days * DAY_MS;
+    db.transaction(() => {
+      db.query("DELETE FROM app_release_items WHERE request_id IN (SELECT id FROM app_release_requests WHERE at < ?)").run(before);
+      db.query("DELETE FROM app_release_requests WHERE at < ?").run(before);
+    })();
+  };
+  return {
+    record(record) {
+      if (retentionDays() === 0)
+        return;
+      const id = `apr_${randomBytes6(12).toString("base64url")}`;
+      db.transaction(() => {
+        db.query(`INSERT INTO app_release_requests (id, at, connection_id, connection_name, connection_kind, question, held_back, answered_privately, withheld, private_question_id)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(id, record.at, record.connection.id ?? null, record.connection.name.slice(0, 80), record.connection.kind, record.question.slice(0, 2000), Math.max(0, Math.floor(record.heldBack)), record.answeredPrivately ? 1 : 0, record.withheld ? 1 : 0, record.privateQuestionId ?? null);
+        const insert = db.query(`INSERT INTO app_release_items (request_id, position, source, title, tier, corpus_id, provider, provider_item_id, provider_conversation_id, locator)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+        record.items.slice(0, MAX_ITEMS_PER_REQUEST).forEach((item, position) => {
+          insert.run(id, position, item.source, item.title ?? null, item.tier, item.corpusId ?? null, item.provider ?? null, item.providerItemId ?? null, item.providerConversationId ?? null, item.locator ?? null);
+        });
+      })();
+      expire();
+      return id;
+    },
+    list() {
+      expire();
+      const requests = db.query(`SELECT id, at, connection_name, connection_kind, question, held_back, answered_privately, withheld
+        FROM app_release_requests ORDER BY at DESC, rowid DESC LIMIT ?`).all(LIST_LIMIT);
+      const items = db.query("SELECT position, source, title, tier, made_private FROM app_release_items WHERE request_id = ? ORDER BY position");
+      return requests.map((row) => ({
+        id: row.id,
+        at: row.at,
+        connection: { name: row.connection_name, kind: row.connection_kind === "agent" ? "agent" : "app" },
+        question: row.question,
+        heldBack: row.held_back,
+        answeredPrivately: row.answered_privately === 1,
+        withheld: row.withheld === 1,
+        items: items.all(row.id).map((item) => ({
+          position: item.position,
+          source: item.source,
+          ...item.title ? { title: item.title } : {},
+          tier: item.tier === "public" || item.tier === "personal" ? item.tier : "private",
+          madePrivate: item.made_private === 1
+        }))
+      }));
+    },
+    retentionDays,
+    setRetentionDays(days) {
+      if (!isAppReleaseRetentionDays(days))
+        throw new TypeError("Retention must be 7, 30, 90 or 0 days.");
+      db.query("INSERT INTO app_release_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(RETENTION_KEY, String(days));
+      expire();
+    },
+    clear,
+    item(requestId, position) {
+      const row = db.query(`SELECT source, title, tier, corpus_id, provider, provider_item_id, provider_conversation_id, locator, made_private
+        FROM app_release_items WHERE request_id = ? AND position = ?`).get(requestId, position);
+      if (!row)
+        return;
+      return {
+        source: row.source,
+        ...row.title ? { title: row.title } : {},
+        tier: row.tier === "public" || row.tier === "personal" ? row.tier : "private",
+        ...row.corpus_id ? { corpusId: row.corpus_id } : {},
+        ...row.provider ? { provider: row.provider } : {},
+        ...row.provider_item_id ? { providerItemId: row.provider_item_id } : {},
+        ...row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {},
+        ...row.locator ? { locator: row.locator } : {},
+        madePrivate: row.made_private === 1
+      };
+    },
+    markMadePrivate(requestId, position) {
+      db.query("UPDATE app_release_items SET made_private = 1 WHERE request_id = ? AND position = ?").run(requestId, position);
+    },
+    markAnsweredPrivately(privateQuestionId) {
+      return db.query("UPDATE app_release_requests SET answered_privately = 1 WHERE private_question_id = ? AND answered_privately = 0").run(privateQuestionId).changes;
+    },
+    forgetCorpora(corpusIds, dryRun) {
+      if (corpusIds.length === 0)
+        return 0;
+      const marks = corpusIds.map(() => "?").join(", ");
+      if (dryRun)
+        return db.query(`SELECT COUNT(*) AS n FROM app_release_items WHERE corpus_id IN (${marks})`).get(...corpusIds).n;
+      return db.query(`DELETE FROM app_release_items WHERE corpus_id IN (${marks})`).run(...corpusIds).changes;
+    },
+    close() {
+      closeSqliteStore(db);
+    }
+  };
+}
+function forgetAppReleaseItems(dbPath, selector, options = {}) {
+  if (!existsSync8(dbPath) || selector.corpusIds.length === 0)
+    return 0;
+  const store = openAppReleaseLog(dbPath);
+  try {
+    return store.forgetCorpora(selector.corpusIds, options.dryRun === true);
+  } finally {
+    store.close();
+  }
+}
+function migrations() {
+  return [{
+    version: 1,
+    name: "app_release_log",
+    up(db) {
+      db.exec(`
+        CREATE TABLE app_release_requests (
+          id TEXT PRIMARY KEY,
+          at INTEGER NOT NULL,
+          connection_id TEXT,
+          connection_name TEXT NOT NULL,
+          connection_kind TEXT NOT NULL,
+          question TEXT NOT NULL,
+          held_back INTEGER NOT NULL DEFAULT 0,
+          answered_privately INTEGER NOT NULL DEFAULT 0,
+          withheld INTEGER NOT NULL DEFAULT 0,
+          private_question_id TEXT
+        );
+        CREATE INDEX app_release_requests_private_question ON app_release_requests (private_question_id);
+        CREATE INDEX app_release_requests_at ON app_release_requests (at);
+        CREATE TABLE app_release_items (
+          request_id TEXT NOT NULL,
+          position INTEGER NOT NULL,
+          source TEXT NOT NULL,
+          title TEXT,
+          tier TEXT NOT NULL,
+          corpus_id TEXT,
+          provider TEXT,
+          provider_item_id TEXT,
+          provider_conversation_id TEXT,
+          locator TEXT,
+          made_private INTEGER NOT NULL DEFAULT 0,
+          PRIMARY KEY (request_id, position)
+        );
+        CREATE INDEX app_release_items_corpus ON app_release_items (corpus_id);
+        CREATE TABLE app_release_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+      `);
+    }
+  }];
+}
+function hardenPrivatePath(dbPath) {
+  if (!isAbsolute17(dbPath))
+    throw new TypeError("The AI apps log path must be absolute.");
+  const leafDir = dirname18(dbPath);
+  if (new Set(["/", "/tmp", "/private/tmp", "/var/tmp", "/private/var/tmp", homedir10()]).has(leafDir)) {
+    throw new Error("The AI apps log must live inside a dedicated private directory.");
+  }
+  mkdirSync9(leafDir, { recursive: true, mode: 448 });
+  const dirStat = lstatSync10(leafDir);
+  if (dirStat.isSymbolicLink() || !dirStat.isDirectory())
+    throw new Error("The AI apps log must live in a real private directory.");
+  chmodSync4(leafDir, 448);
+  if (existsSync8(dbPath)) {
+    const fileStat = lstatSync10(dbPath);
+    if (fileStat.isSymbolicLink() || !fileStat.isFile())
+      throw new Error("The AI apps log must be a regular file, not a symlink.");
+  }
+}
+var APP_RELEASE_LOG_STORE_ID = "app-release-log", APP_RELEASE_LOG_SCHEMA_VERSION = 1, APP_RELEASE_RETENTION_DAYS, APP_RELEASE_DEFAULT_RETENTION_DAYS = 30, MAX_ITEMS_PER_REQUEST = 48, LIST_LIMIT = 200, DAY_MS, RETENTION_KEY = "retention_days";
+var init_app_release_log = __esm(() => {
+  init_olympus_layout();
+  init_sqlite_migrations();
+  APP_RELEASE_RETENTION_DAYS = [7, 30, 90, 0];
+  DAY_MS = 24 * 60 * 60000;
+});
+
+// connect-relay/shared/tokens.ts
+import { createHash as createHash3, randomBytes as randomBytes7 } from "node:crypto";
+function mintCredential(kind, installId) {
+  return `${PREFIX[kind]}.${installId}.${randomBytes7(32).toString("base64url")}`;
+}
+function credentialInstallId(kind, value) {
+  if (typeof value !== "string" || value.length > 128)
+    return;
+  return PATTERN[kind].exec(value)?.[1];
+}
+var PREFIX, SECRET = "[A-Za-z0-9_-]{43}", INSTALL = "[a-z2-7]{32}", PATTERN;
+var init_tokens = __esm(() => {
+  PREFIX = { access: "oly2", refresh: "oly2r", code: "oly2c", handoff: "oly2g", private: "oly2p" };
+  PATTERN = {
+    access: new RegExp(`^oly2\\.(${INSTALL})\\.${SECRET}$`),
+    refresh: new RegExp(`^oly2r\\.(${INSTALL})\\.${SECRET}$`),
+    code: new RegExp(`^oly2c\\.(${INSTALL})\\.${SECRET}$`),
+    handoff: new RegExp(`^oly2g\\.(${INSTALL})\\.${SECRET}$`),
+    private: new RegExp(`^oly2p\\.(${INSTALL})\\.${SECRET}$`)
+  };
+});
+
+// src/workers/remote-oauth/pinned-clients.ts
+function pinnedClient(clientId) {
+  if (clientId === CHATGPT_CODEX_CLIENT_ID) {
+    return { clientId, clientName: "ChatGPT (desktop)", redirectUris: CHATGPT_CODEX_REDIRECT_URIS, verifiedHost: "chatgpt.com", host: "chatgpt" };
+  }
+  if (clientId === CHATGPT_CLIENT_ID) {
+    return { clientId, clientName: "ChatGPT", redirectUris: [CHATGPT_REDIRECT_URI], verifiedHost: "chatgpt.com", host: "chatgpt" };
+  }
+  if (clientId === CLAUDE_CLIENT_ID) {
+    return { clientId, clientName: "Claude", redirectUris: [CLAUDE_REDIRECT_URI], verifiedHost: "claude.ai", host: "claude" };
+  }
+  if (clientId === GROK_CLIENT_ID) {
+    return { clientId, clientName: "Grok", redirectUris: GROK_REDIRECT_URIS, verifiedHost: "grok.com", host: "grok" };
+  }
+  if (clientId === CURSOR_CLIENT_ID) {
+    return { clientId, clientName: "Grok Bot or Cursor", redirectUris: CURSOR_REDIRECT_URIS, verifiedHost: "cursor.com", host: "cursor" };
+  }
+  const callback = CHATGPT_CALLBACK_CLIENT_ID.exec(clientId)?.[1];
+  if (callback) {
+    return {
+      clientId,
+      clientName: "ChatGPT",
+      redirectUris: [`https://chatgpt.com/connector/oauth/${callback}`],
+      verifiedHost: "chatgpt.com",
+      host: "chatgpt"
+    };
+  }
+  return;
+}
+function pinnedGrantProvider(connection) {
+  const host = typeof connection.clientId === "string" ? pinnedClient(connection.clientId)?.host : undefined;
+  return host === "chatgpt" ? "openai" : host === "claude" ? "anthropic" : host === "grok" || host === "cursor" ? "xai" : undefined;
+}
+var CHATGPT_CLIENT_ID = "https://chatgpt.com/oauth/client.json", CHATGPT_REDIRECT_URI = "https://chatgpt.com/connector_platform_oauth_redirect", CHATGPT_CODEX_CLIENT_ID = "https://chatgpt.com/oauth/codex/client.json", CHATGPT_CODEX_REDIRECT_URIS, CHATGPT_CALLBACK_CLIENT_ID, CLAUDE_CLIENT_ID = "https://claude.ai/oauth/mcp-oauth-client-metadata", CLAUDE_REDIRECT_URI = "https://claude.ai/api/mcp/auth_callback", GROK_CLIENT_ID = "https://grok.com/oauth/mcp-client.json", GROK_REDIRECT_URIS, CURSOR_CLIENT_ID = "https://cursor.com/oauth/mcp-client.json", CURSOR_REDIRECT_URI = "https://www.cursor.com/agents/mcp/oauth/callback", CURSOR_REDIRECT_URIS;
+var init_pinned_clients = __esm(() => {
+  CHATGPT_CODEX_REDIRECT_URIS = ["http://127.0.0.1/callback", "http://localhost/callback"];
+  CHATGPT_CALLBACK_CLIENT_ID = /^https:\/\/chatgpt\.com\/oauth\/([A-Za-z0-9_-]{1,128})\/client\.json$/;
+  GROK_REDIRECT_URIS = Object.freeze([
+    "https://grok.com/connectors-oauth-exchange-code/",
+    "https://console.x.ai/connectors-oauth-exchange-code/"
+  ]);
+  CURSOR_REDIRECT_URIS = Object.freeze([
+    CURSOR_REDIRECT_URI,
+    "https://www.cursor.com/bot/mcp/oauth/callback",
+    "https://grok.com/connectors-oauth-exchange-code/"
+  ]);
+});
+
+// src/core/remote-oauth-store.ts
+import { createHash as createHash4, randomBytes as randomBytes8, timingSafeEqual as timingSafeEqual3 } from "node:crypto";
+function isRemoteConnectionProvider(value) {
+  return typeof value === "string" && OPERATION_CALLER_PROVIDERS.includes(value);
+}
+function remoteConnectionProvider(connection) {
+  return pinnedGrantProvider(connection) ?? (isRemoteConnectionProvider(connection.chosen) ? connection.chosen : undefined) ?? callerProviderFromLabel(connection.displayName) ?? "other";
+}
+function isWellFormedOAuthAccessToken(token) {
+  return ACCESS_TOKEN_PATTERN.test(token) || credentialInstallId("access", token) !== undefined;
+}
+function isWellFormedOAuthRefreshToken(token) {
+  return REFRESH_TOKEN_PATTERN.test(token) || credentialInstallId("refresh", token) !== undefined;
+}
+function isRegisteredOAuthClientId(value) {
+  return REGISTERED_CLIENT_ID_PATTERN.test(value);
+}
+function normalizePairingCode(input) {
+  if (typeof input !== "string" || input.length > 64)
+    return;
+  const compact = input.toUpperCase().replace(/[\s-]/g, "");
+  if (compact.length !== PAIRING_CODE_LENGTH)
+    return;
+  for (const char of compact)
+    if (!PAIRING_ALPHABET.includes(char))
+      return;
+  return compact;
+}
+function digest(value) {
+  return createHash4("sha256").update(value, "utf8").digest();
+}
+function randomPairingSymbols(length) {
+  const limit = 256 - 256 % PAIRING_ALPHABET.length;
+  let out = "";
+  while (out.length < length) {
+    for (const byte of randomBytes8(length * 2)) {
+      if (byte >= limit)
+        continue;
+      out += PAIRING_ALPHABET[byte % PAIRING_ALPHABET.length];
+      if (out.length === length)
+        break;
+    }
+  }
+  return out;
+}
+function createRemoteOAuthStore(db, now, recordLastUse) {
+  const refreshGrace = new Map;
+  const readToken = (token, kind) => db.query(`
+      SELECT t.token_hash, t.connection_id, t.kind, t.resource, t.client_id, t.expires_at, t.used_at,
+             c.display_name, c.revoked_at, c.provider
+      FROM remote_oauth_tokens t JOIN remote_connections c ON c.id = t.connection_id
+      WHERE t.token_hash = ? AND t.kind = ?
+    `).get(digest(token), kind);
+  const tokenConnection = (row) => ({
+    id: row.connection_id,
+    displayName: row.display_name,
+    clientId: row.client_id,
+    provider: remoteConnectionProvider({ clientId: row.client_id, displayName: row.display_name, chosen: row.provider })
+  });
+  const issueTokens = (connectionId, clientId, resource, at, installId) => {
+    const accessToken = installId ? mintCredential("access", installId) : `${REMOTE_OAUTH_ACCESS_TOKEN_PREFIX}${randomBytes8(32).toString("base64url")}`;
+    const refreshToken = installId ? mintCredential("refresh", installId) : `${REMOTE_OAUTH_REFRESH_TOKEN_PREFIX}${randomBytes8(32).toString("base64url")}`;
+    const insert = db.query(`
+      INSERT INTO remote_oauth_tokens (token_hash, connection_id, kind, resource, client_id, created_at, expires_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `);
+    const createdAt = at.toISOString();
+    insert.run(digest(accessToken), connectionId, "access", resource, clientId, createdAt, new Date(at.getTime() + REMOTE_OAUTH_ACCESS_TOKEN_TTL_SECONDS * 1000).toISOString());
+    insert.run(digest(refreshToken), connectionId, "refresh", resource, clientId, createdAt, new Date(at.getTime() + REMOTE_OAUTH_REFRESH_TOKEN_TTL_SECONDS * 1000).toISOString());
+    db.query("DELETE FROM remote_oauth_tokens WHERE expires_at <= ?").run(createdAt);
+    return { accessToken, refreshToken, expiresIn: REMOTE_OAUTH_ACCESS_TOKEN_TTL_SECONDS };
+  };
+  const revokeGrant = (connectionId) => {
+    for (const [key, entry] of refreshGrace)
+      if (entry.connectionId === connectionId)
+        refreshGrace.delete(key);
+    db.transaction(() => {
+      db.query("UPDATE remote_connections SET revoked_at = ? WHERE id = ? AND kind = 'oauth' AND revoked_at IS NULL").run(now().toISOString(), connectionId);
+      db.query("DELETE FROM remote_oauth_tokens WHERE connection_id = ?").run(connectionId);
+    })();
+  };
+  const toClient = (row) => ({
+    clientId: row.client_id,
+    clientName: row.client_name,
+    redirectUris: JSON.parse(row.redirect_uris),
+    createdAt: row.created_at
+  });
+  return {
+    mintPairingCode() {
+      const at = now();
+      const expiresAt = new Date(at.getTime() + REMOTE_PAIRING_CODE_TTL_MS).toISOString();
+      return db.transaction(() => {
+        db.query("DELETE FROM remote_pairing_codes WHERE expires_at <= ? OR used_at IS NOT NULL").run(at.toISOString());
+        for (let attempt = 0;attempt < 16; attempt += 1) {
+          const selector = randomPairingSymbols(PAIRING_SELECTOR_LENGTH);
+          const secret2 = randomPairingSymbols(PAIRING_SECRET_LENGTH);
+          const inserted = db.query(`
+            INSERT OR IGNORE INTO remote_pairing_codes (selector, secret_hash, created_at, expires_at)
+            VALUES (?, ?, ?, ?)
+          `).run(selector, digest(secret2), at.toISOString(), expiresAt);
+          if (inserted.changes === 1) {
+            return { code: `${selector}-${secret2.slice(0, 4)}-${secret2.slice(4)}`, expiresAt };
+          }
+        }
+        throw new Error("Could not mint a unique pairing code.");
+      })();
+    },
+    checkPairingCode(input) {
+      const normalized = normalizePairingCode(input);
+      if (!normalized)
+        return { ok: false, reason: "malformed" };
+      const selector = normalized.slice(0, PAIRING_SELECTOR_LENGTH);
+      const presented = digest(normalized.slice(PAIRING_SELECTOR_LENGTH));
+      const atIso = now().toISOString();
+      return db.transaction(() => {
+        const row = db.query(`
+          SELECT secret_hash FROM remote_pairing_codes
+          WHERE selector = ? AND used_at IS NULL AND expires_at > ? AND failed_attempts < ?
+        `).get(selector, atIso, REMOTE_PAIRING_CODE_MAX_FAILURES);
+        if (!row)
+          return { ok: false, reason: "unknown" };
+        const stored = Buffer.from(row.secret_hash);
+        if (stored.length !== presented.length || !timingSafeEqual3(stored, presented)) {
+          db.query("UPDATE remote_pairing_codes SET failed_attempts = failed_attempts + 1 WHERE selector = ?").run(selector);
+          return { ok: false, reason: "wrong_secret" };
+        }
+        const consumed = db.query("UPDATE remote_pairing_codes SET used_at = ? WHERE selector = ? AND used_at IS NULL").run(atIso, selector);
+        return consumed.changes === 1 ? { ok: true } : { ok: false, reason: "unknown" };
+      })();
+    },
+    registerClient(input) {
+      const at = now();
+      return db.transaction(() => {
+        const count = db.query("SELECT COUNT(*) AS n FROM remote_oauth_clients").get().n;
+        if (count >= REMOTE_OAUTH_MAX_REGISTERED_CLIENTS) {
+          db.query(`
+            DELETE FROM remote_oauth_clients
+            WHERE created_at <= ?
+              AND client_id NOT IN (SELECT client_id FROM remote_connections WHERE client_id IS NOT NULL)
+          `).run(new Date(at.getTime() - UNUSED_CLIENT_PRUNE_AGE_MS).toISOString());
+          const after = db.query("SELECT COUNT(*) AS n FROM remote_oauth_clients").get().n;
+          if (after >= REMOTE_OAUTH_MAX_REGISTERED_CLIENTS)
+            return "capacity";
+        }
+        const clientId = `olympus_client_${randomBytes8(12).toString("hex")}`;
+        const createdAt = at.toISOString();
+        db.query("INSERT INTO remote_oauth_clients (client_id, client_name, redirect_uris, created_at) VALUES (?, ?, ?, ?)").run(clientId, input.clientName, JSON.stringify(input.redirectUris), createdAt);
+        return { clientId, clientName: input.clientName, redirectUris: [...input.redirectUris], createdAt };
+      })();
+    },
+    getRegisteredClient(clientId) {
+      if (!isRegisteredOAuthClientId(clientId))
+        return;
+      const row = db.query("SELECT * FROM remote_oauth_clients WHERE client_id = ?").get(clientId);
+      return row ? toClient(row) : undefined;
+    },
+    createGrant(input) {
+      const at = now();
+      return db.transaction(() => {
+        const id = randomBytes8(9).toString("hex");
+        const provider = remoteConnectionProvider({ clientId: input.clientId, displayName: input.displayName, chosen: input.provider ?? null });
+        db.query(`
+          INSERT INTO remote_connections (id, display_name, kind, token_hash, client_id, created_at, provider)
+          VALUES (?, ?, 'oauth', NULL, ?, ?, ?)
+        `).run(id, input.displayName, input.clientId, at.toISOString(), provider);
+        const tokens = issueTokens(id, input.clientId, input.resource, at, input.installId);
+        return { connection: { id, displayName: input.displayName, clientId: input.clientId, provider }, tokens };
+      })();
+    },
+    verifyAccessToken(token, resource) {
+      if (!isWellFormedOAuthAccessToken(token))
+        return { ok: false, reason: "unknown" };
+      const row = readToken(token, "access");
+      if (!row)
+        return { ok: false, reason: "unknown" };
+      const at = now();
+      if (row.revoked_at !== null)
+        return { ok: false, reason: "revoked" };
+      if (Date.parse(row.expires_at) <= at.getTime())
+        return { ok: false, reason: "expired" };
+      if (row.resource !== resource)
+        return { ok: false, reason: "wrong_audience" };
+      recordLastUse(row.connection_id, at);
+      return { ok: true, connection: tokenConnection(row) };
+    },
+    refresh(input) {
+      if (!isWellFormedOAuthRefreshToken(input.refreshToken))
+        return { ok: false, reason: "unknown" };
+      const at = now();
+      return db.transaction(() => {
+        const row = readToken(input.refreshToken, "refresh");
+        if (!row)
+          return { ok: false, reason: "unknown" };
+        if (row.revoked_at !== null)
+          return { ok: false, reason: "revoked" };
+        const audiences = typeof input.resource === "string" ? [input.resource] : input.resource;
+        if (row.used_at !== null) {
+          if (!audiences.includes(row.resource))
+            return { ok: false, reason: "wrong_audience" };
+          const key = Buffer.from(row.token_hash).toString("hex");
+          const grace = refreshGrace.get(key);
+          if (grace && grace.expiresAt > at.getTime() && grace.clientId === input.clientId) {
+            const successor = db.query("SELECT used_at FROM remote_oauth_tokens WHERE token_hash = ? AND kind = 'refresh'").get(grace.successorRefreshHash);
+            if (successor && successor.used_at === null) {
+              return {
+                ok: true,
+                connection: tokenConnection(row),
+                tokens: grace.tokens
+              };
+            }
+          }
+          refreshGrace.delete(key);
+          revokeGrant(row.connection_id);
+          return { ok: false, reason: "reused" };
+        }
+        if (Date.parse(row.expires_at) <= at.getTime())
+          return { ok: false, reason: "expired" };
+        if (row.client_id !== input.clientId)
+          return { ok: false, reason: "client_mismatch" };
+        if (!audiences.includes(row.resource))
+          return { ok: false, reason: "wrong_audience" };
+        db.query("UPDATE remote_oauth_tokens SET used_at = ? WHERE token_hash = ?").run(at.toISOString(), row.token_hash);
+        db.query("DELETE FROM remote_oauth_tokens WHERE connection_id = ? AND kind = 'access'").run(row.connection_id);
+        const tokens = issueTokens(row.connection_id, row.client_id, row.resource, at, credentialInstallId("refresh", input.refreshToken));
+        for (const [key, entry] of refreshGrace)
+          if (entry.expiresAt <= at.getTime())
+            refreshGrace.delete(key);
+        refreshGrace.set(Buffer.from(row.token_hash).toString("hex"), {
+          tokens,
+          successorRefreshHash: digest(tokens.refreshToken),
+          connectionId: row.connection_id,
+          clientId: row.client_id,
+          expiresAt: at.getTime() + REMOTE_OAUTH_REFRESH_GRACE_MS
+        });
+        return {
+          ok: true,
+          connection: tokenConnection(row),
+          tokens
+        };
+      }).immediate();
+    },
+    revokeToken(token) {
+      if (isWellFormedOAuthRefreshToken(token)) {
+        const row = readToken(token, "refresh");
+        if (row)
+          revokeGrant(row.connection_id);
+        return;
+      }
+      if (isWellFormedOAuthAccessToken(token)) {
+        db.query("DELETE FROM remote_oauth_tokens WHERE token_hash = ? AND kind = 'access'").run(digest(token));
+      }
+    },
+    revokeGrant,
+    liveAccessTokens(resource, limit) {
+      const rows = db.query(`
+        SELECT t.token_hash, t.client_id, t.expires_at
+        FROM remote_oauth_tokens t JOIN remote_connections c ON c.id = t.connection_id
+        WHERE t.kind = 'access' AND t.resource = ? AND t.expires_at > ? AND c.revoked_at IS NULL
+        ORDER BY t.expires_at DESC
+        LIMIT ?
+      `).all(resource, now().toISOString(), Math.max(0, Math.floor(limit)));
+      return rows.map((row) => ({ tokenHash: Buffer.from(row.token_hash), clientId: row.client_id, expiresAt: row.expires_at }));
+    }
+  };
+}
+function remoteOAuthSchemaMigration(version) {
+  return {
+    version,
+    name: "add_oauth_grants",
+    up(db) {
+      db.exec(`
+        CREATE TABLE remote_connections_v2 (
+          id TEXT PRIMARY KEY,
+          display_name TEXT NOT NULL,
+          kind TEXT NOT NULL CHECK(kind IN ('bearer', 'oauth')),
+          token_hash BLOB UNIQUE,
+          client_id TEXT,
+          created_at TEXT NOT NULL,
+          last_used_at TEXT,
+          revoked_at TEXT,
+          CHECK ((kind = 'bearer' AND token_hash IS NOT NULL)
+              OR (kind = 'oauth' AND token_hash IS NULL AND client_id IS NOT NULL))
+        );
+        INSERT INTO remote_connections_v2 (id, display_name, kind, token_hash, created_at, last_used_at, revoked_at)
+          SELECT id, display_name, kind, token_hash, created_at, last_used_at, revoked_at FROM remote_connections;
+        DROP TABLE remote_connections;
+        ALTER TABLE remote_connections_v2 RENAME TO remote_connections;
+
+        CREATE TABLE remote_oauth_tokens (
+          token_hash BLOB PRIMARY KEY,
+          connection_id TEXT NOT NULL,
+          kind TEXT NOT NULL CHECK(kind IN ('access', 'refresh')),
+          resource TEXT NOT NULL,
+          client_id TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          expires_at TEXT NOT NULL,
+          used_at TEXT
+        );
+        CREATE INDEX remote_oauth_tokens_connection ON remote_oauth_tokens(connection_id);
+
+        CREATE TABLE remote_oauth_clients (
+          client_id TEXT PRIMARY KEY,
+          client_name TEXT NOT NULL,
+          redirect_uris TEXT NOT NULL,
+          created_at TEXT NOT NULL
+        );
+
+        CREATE TABLE remote_pairing_codes (
+          selector TEXT PRIMARY KEY,
+          secret_hash BLOB NOT NULL,
+          created_at TEXT NOT NULL,
+          expires_at TEXT NOT NULL,
+          used_at TEXT,
+          failed_attempts INTEGER NOT NULL DEFAULT 0
+        );
+      `);
+    }
+  };
+}
+var REMOTE_OAUTH_ACCESS_TOKEN_TTL_SECONDS = 3600, REMOTE_OAUTH_REFRESH_TOKEN_TTL_SECONDS, REMOTE_PAIRING_CODE_TTL_MS, REMOTE_PAIRING_CODE_MAX_FAILURES = 5, REMOTE_OAUTH_REFRESH_GRACE_MS = 45000, REMOTE_OAUTH_MAX_REGISTERED_CLIENTS = 500, REMOTE_OAUTH_ACCESS_TOKEN_PREFIX = "olympus_at_", REMOTE_OAUTH_REFRESH_TOKEN_PREFIX = "olympus_rt_", ACCESS_TOKEN_PATTERN, REFRESH_TOKEN_PATTERN, REGISTERED_CLIENT_ID_PATTERN, PAIRING_ALPHABET = "ABCDEFGHJKMNPQRSTVWXYZ23456789", PAIRING_SELECTOR_LENGTH = 4, PAIRING_SECRET_LENGTH = 8, PAIRING_CODE_LENGTH, UNUSED_CLIENT_PRUNE_AGE_MS;
+var init_remote_oauth_store = __esm(() => {
+  init_tokens();
+  init_pinned_clients();
+  init_operation_caller();
+  REMOTE_OAUTH_REFRESH_TOKEN_TTL_SECONDS = 90 * 24 * 3600;
+  REMOTE_PAIRING_CODE_TTL_MS = 10 * 60000;
+  ACCESS_TOKEN_PATTERN = /^olympus_at_[A-Za-z0-9_-]{43}$/;
+  REFRESH_TOKEN_PATTERN = /^olympus_rt_[A-Za-z0-9_-]{43}$/;
+  REGISTERED_CLIENT_ID_PATTERN = /^olympus_client_[a-f0-9]{24}$/;
+  PAIRING_CODE_LENGTH = PAIRING_SELECTOR_LENGTH + PAIRING_SECRET_LENGTH;
+  UNUSED_CLIENT_PRUNE_AGE_MS = 24 * 3600000;
+});
+
+// src/core/waiting-private-questions.ts
+import { Database as Database2 } from "bun:sqlite";
+import { createHash as createHash5, randomBytes as randomBytes9 } from "node:crypto";
+import { chmodSync as chmodSync5, existsSync as existsSync9, lstatSync as lstatSync11, mkdirSync as mkdirSync10 } from "node:fs";
+import { homedir as homedir11 } from "node:os";
+import { dirname as dirname19, isAbsolute as isAbsolute18, join as join26 } from "node:path";
+function waitingPrivateQuestionsDbPath(remoteConnectionsDbPath) {
+  return join26(dirname19(remoteConnectionsDbPath), SHARED_DATA_FILES["waiting-private-questions"]);
+}
+function normalizeWaitingQuestion(question) {
+  return question.normalize("NFKC").toLowerCase().split(/\s+/).filter(Boolean).join(" ");
+}
+function canonicalSelectors(selectors) {
+  return JSON.stringify(sortKeys(selectors ?? {}));
+}
+function sortKeys(value) {
+  if (Array.isArray(value))
+    return value.map(sortKeys);
+  if (typeof value === "object" && value !== null) {
+    return Object.fromEntries(Object.keys(value).sort().map((key) => [key, sortKeys(value[key])]));
+  }
+  return value;
+}
+function utf8Length(text2) {
+  return Buffer.byteLength(text2, "utf8");
+}
+function openWaitingPrivateQuestionStore(dbPath, options = {}) {
+  const now = options.now ?? Date.now;
+  const listeners = new Set;
+  const notify = () => queueMicrotask(() => {
+    for (const listener of listeners)
+      listener();
+  });
+  hardenPrivatePath2(dbPath);
+  const db = new Database2(dbPath, { create: true });
+  try {
+    chmodSync5(dbPath, 384);
+    const busyTimeoutMs = Math.max(0, Math.floor(options.busyTimeoutMs ?? STORE_BUSY_TIMEOUT_MS));
+    db.exec(`PRAGMA busy_timeout = ${busyTimeoutMs}; PRAGMA secure_delete = ON; PRAGMA journal_mode = DELETE;`);
+    const mode = db.query("PRAGMA journal_mode").get()?.journal_mode;
+    if (mode !== "delete")
+      throw new Error("The waiting private questions store could not use its rollback journal yet.");
+    db.transaction(() => {
+      assertSqliteSchemaCanOpen(db, WAITING_PRIVATE_QUESTIONS_STORE_ID, WAITING_PRIVATE_QUESTIONS_SCHEMA_VERSION);
+      runSqliteMigrations(db, WAITING_PRIVATE_QUESTIONS_STORE_ID, migrations2());
+    }).immediate();
+  } catch (error) {
+    closeSqliteStore(db);
+    throw error;
+  }
+  const revocationOf = (connectionId) => {
+    const row = db.query("SELECT generation FROM connection_revocations WHERE connection_id = ?").get(connectionId);
+    return row?.generation ?? 0;
+  };
+  const expire = (at) => {
+    db.query("DELETE FROM waiting_questions WHERE answered_at IS NULL AND asked_at <= ?").run(at - WAITING_QUESTION_LIMITS.ttlMs);
+  };
+  const revokeInTransaction = (connectionId) => {
+    const removed = db.query("DELETE FROM waiting_questions WHERE connection_id = ?").run(connectionId).changes;
+    db.query(`
+      INSERT INTO connection_revocations (connection_id, generation) VALUES (?, 1)
+      ON CONFLICT(connection_id) DO UPDATE SET generation = generation + 1
+    `).run(connectionId);
+    return removed;
+  };
+  return {
+    dbPath,
+    ticket(connectionId) {
+      return { connectionId, revocation: revocationOf(connectionId) };
+    },
+    record(ticket, input) {
+      const question = typeof input.question === "string" ? input.question.trim() : "";
+      if (!question || utf8Length(question) > (input.retainEachAsk ? WAITING_QUESTION_LIMITS.localQuestionBytes : WAITING_QUESTION_LIMITS.questionBytes))
+        return;
+      if (typeof ticket.connectionId !== "string" || !ticket.connectionId)
+        return;
+      if (input.surface !== "chatgpt" && input.surface !== "remote")
+        return;
+      if (input.state !== "waiting" && input.state !== "unchecked")
+        return;
+      const selectors = canonicalSelectors(input.selectors);
+      if (utf8Length(selectors) > WAITING_QUESTION_LIMITS.selectorBytes)
+        return;
+      const detail = input.detail === "full" ? "full" : "summary";
+      const dedupeKey = createHash5("sha256").update(JSON.stringify([ticket.connectionId, ...input.path === "anonymous" || input.retainEachAsk ? [input.path ?? "private", randomBytes9(16).toString("hex")] : [], selectors, normalizeWaitingQuestion(question)])).digest("hex");
+      const at = now();
+      let active = false;
+      try {
+        active = options.isActive ? options.isActive(ticket.connectionId) === true : true;
+      } catch {
+        return;
+      }
+      if (!active) {
+        db.transaction(() => revokeInTransaction(ticket.connectionId)).immediate();
+        return;
+      }
+      return db.transaction(() => {
+        if (revocationOf(ticket.connectionId) !== ticket.revocation)
+          return;
+        expire(at);
+        const existing = db.query("SELECT * FROM waiting_questions WHERE dedupe_key = ?").get(dedupeKey);
+        let ref;
+        if (existing?.result && JSON.parse(existing.result).status === "answered" && at - (existing.answered_at ?? at) < WAITING_QUESTION_LIMITS.reanswerAfterMs) {
+          db.query("UPDATE waiting_questions SET asked_at = ? WHERE id = ?").run(at, existing.id);
+          return { id: existing.id, generation: existing.generation, connectionId: ticket.connectionId };
+        }
+        if (existing) {
+          const generation = existing.generation + 1;
+          db.query(`
+            UPDATE waiting_questions
+            SET question = ?, detail = ?, state = ?, seen = 0, generation = ?, asked_at = ?, result = NULL, answered_at = NULL, attempts = 0, next_attempt_at = 0, retry_reasons = '[]', failed = 0
+            WHERE id = ?
+          `).run(question, existing.detail === "full" || detail === "full" ? "full" : "summary", existing.state === "waiting" || input.state === "waiting" ? "waiting" : "unchecked", generation, at, existing.id);
+          ref = { id: existing.id, generation, connectionId: ticket.connectionId };
+        } else {
+          const id = randomBytes9(16).toString("base64url");
+          db.query(`
+            INSERT INTO waiting_questions
+              (id, dedupe_key, connection_id, surface, question, detail, selectors, state, seen, generation, asked_at, answer_path, destination)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 1, ?, ?, ?)
+          `).run(id, dedupeKey, ticket.connectionId, input.surface, question, detail, selectors, input.state, at, input.path === "anonymous" ? "anonymous" : "private", input.path === "venice" ? "venice" : null);
+          ref = { id, generation: 1, connectionId: ticket.connectionId };
+        }
+        notify();
+        return ref;
+      }).immediate();
+    },
+    list(options2) {
+      const at = now();
+      if (db.query("SELECT 1 FROM waiting_questions WHERE answered_at IS NULL AND asked_at <= ? LIMIT 1").get(at - WAITING_QUESTION_LIMITS.ttlMs))
+        expire(at);
+      const columns = options2?.includeResults === false ? "id, connection_id, surface, answer_path, destination, question, detail, selectors, state, seen, generation, asked_at, answered_at, attempts, next_attempt_at, retry_reasons, NULL AS result, result IS NOT NULL AS has_result, failed" : "*";
+      const rows = db.query(`SELECT ${columns} FROM waiting_questions WHERE answered_at IS NOT NULL OR asked_at > ? ORDER BY asked_at DESC, rowid DESC`).all(now() - WAITING_QUESTION_LIMITS.ttlMs);
+      const marker = db.query("SELECT value FROM waiting_meta WHERE key = ?").get(OLDER_REMOVED_KEY);
+      return { questions: rows.map(toQuestion), olderRemoved: marker !== null };
+    },
+    get(id) {
+      if (typeof id !== "string")
+        return;
+      const row = db.query("SELECT * FROM waiting_questions WHERE id = ? AND (answered_at IS NOT NULL OR asked_at > ?)").get(id, now() - WAITING_QUESTION_LIMITS.ttlMs);
+      return row ? toQuestion(row) : undefined;
+    },
+    dismiss(id) {
+      if (typeof id !== "string")
+        return false;
+      return db.query("DELETE FROM waiting_questions WHERE id = ?").run(id).changes > 0;
+    },
+    dismissAll() {
+      return db.transaction(() => {
+        const removed = db.query("DELETE FROM waiting_questions").run().changes;
+        db.query("DELETE FROM waiting_meta WHERE key = ?").run(OLDER_REMOVED_KEY);
+        return removed;
+      }).immediate();
+    },
+    markSeen(ids) {
+      let changed = 0;
+      db.transaction(() => {
+        for (const id of ids) {
+          if (typeof id === "string")
+            changed += db.query("UPDATE waiting_questions SET seen = 1 WHERE id = ? AND seen = 0").run(id).changes;
+        }
+      }).immediate();
+      return changed;
+    },
+    acknowledge(ref) {
+      return db.query("DELETE FROM waiting_questions WHERE id = ? AND generation = ? AND connection_id = ?").run(ref.id, ref.generation, ref.connectionId).changes > 0;
+    },
+    settleUnchecked(ref, verdict) {
+      const where = "id = ? AND generation = ? AND connection_id = ? AND state = 'unchecked'";
+      notify();
+      return verdict === "match" ? db.query(`UPDATE waiting_questions SET state = 'waiting' WHERE ${where}`).run(ref.id, ref.generation, ref.connectionId).changes > 0 : db.query(`DELETE FROM waiting_questions WHERE ${where}`).run(ref.id, ref.generation, ref.connectionId).changes > 0;
+    },
+    unchecked() {
+      const rows = db.query("SELECT * FROM waiting_questions WHERE state = 'unchecked' AND asked_at > ? ORDER BY asked_at ASC, rowid ASC").all(now() - WAITING_QUESTION_LIMITS.ttlMs);
+      return rows.map(toQuestion);
+    },
+    revokeConnection(connectionId) {
+      if (typeof connectionId !== "string" || !connectionId)
+        return 0;
+      return db.transaction(() => revokeInTransaction(connectionId)).immediate();
+    },
+    reconcileConnections(isActive) {
+      const ids = db.query("SELECT DISTINCT connection_id FROM waiting_questions").all().map((row) => row.connection_id).filter((id) => !isActive(id));
+      if (ids.length === 0)
+        return 0;
+      return db.transaction(() => ids.reduce((sum, id) => sum + revokeInTransaction(id), 0)).immediate();
+    },
+    subscribe(listener) {
+      listeners.add(listener);
+      return () => {
+        listeners.delete(listener);
+      };
+    },
+    markRead(ref) {
+      return db.query("UPDATE waiting_questions SET seen = 1 WHERE id = ? AND generation = ? AND connection_id = ? AND result IS NOT NULL").run(ref.id, ref.generation, ref.connectionId).changes > 0;
+    },
+    saveAnswer(ref, result, sent) {
+      const serialized = JSON.stringify(result);
+      if (utf8Length(serialized) + utf8Length(sent ?? "") > WAITING_QUESTION_LIMITS.answerBytes)
+        return false;
+      if (sent !== undefined && options.isActive) {
+        try {
+          if (!options.isActive(ref.connectionId))
+            return false;
+        } catch {
+          return false;
+        }
+      }
+      const saved = db.transaction(() => {
+        const changed = db.query("UPDATE waiting_questions SET result = ?, answered_at = ?, question = COALESCE(?, question), failed = ?, seen = 0, attempts = 0, next_attempt_at = 0 WHERE id = ? AND generation = ? AND connection_id = ?").run(serialized, now(), sent ?? null, result.status === "failed" ? 1 : 0, ref.id, ref.generation, ref.connectionId).changes > 0;
+        return changed;
+      }).immediate();
+      if (saved && result.status === "answered")
+        notePrivateAnswerCompleted(ref.id);
+      return saved;
+    },
+    retry(ref, reason = "answer_failed") {
+      const safeReason = WAITING_QUESTION_RETRY_REASONS.includes(reason) ? reason : "answer_failed";
+      return db.transaction(() => {
+        const row = db.query("SELECT attempts, retry_reasons FROM waiting_questions WHERE id = ? AND generation = ? AND connection_id = ? AND result IS NULL").get(ref.id, ref.generation, ref.connectionId);
+        if (!row)
+          return false;
+        const attempts = row.attempts + 1;
+        const reasons = [...JSON.parse(row.retry_reasons), safeReason].slice(-WAITING_QUESTION_RETRY_LIMIT);
+        const exhausted = attempts >= WAITING_QUESTION_RETRY_LIMIT;
+        const result = exhausted ? { status: "failed", citations: [], unanswered: [], leftOut: [], read: [] } : null;
+        const delay2 = Math.min(30 * 60000, 5000 * 2 ** Math.min(row.attempts, 9));
+        return db.query("UPDATE waiting_questions SET attempts = ?, retry_reasons = ?, next_attempt_at = ?, result = ?, answered_at = ?, failed = ?, seen = 0 WHERE id = ? AND generation = ? AND connection_id = ? AND result IS NULL").run(attempts, JSON.stringify(reasons), exhausted ? 0 : now() + delay2, result ? JSON.stringify(result) : null, exhausted ? now() : null, exhausted ? 1 : 0, ref.id, ref.generation, ref.connectionId).changes > 0;
+      }).immediate();
+    },
+    invalidate(ref) {
+      return db.transaction(() => {
+        const row = db.query("SELECT destination, result FROM waiting_questions WHERE id = ? AND generation = ? AND connection_id = ?").get(ref.id, ref.generation, ref.connectionId);
+        const old = row?.result ? JSON.parse(row.result) : undefined;
+        const disclosure = row?.destination === "venice" && old?.sentItems ? JSON.stringify({ status: "withdrawn", reason: "Sent to Venice, but the sources changed. The answer was withdrawn.", sentItems: old.sentItems, citations: [], read: [], unanswered: [], leftOut: [] }) : null;
+        return db.query("UPDATE waiting_questions SET result = ?, seen = 0, generation = generation + 1, attempts = 0, next_attempt_at = 0, retry_reasons = '[]', failed = 0 WHERE id = ? AND generation = ? AND connection_id = ?").run(disclosure, ref.id, ref.generation, ref.connectionId).changes > 0;
+      }).immediate();
+    },
+    deleteForCorpora(corpusIds, knownCorpusIds, options2 = {}) {
+      const ids = new Set(corpusIds);
+      const known = knownCorpusIds ? new Set(knownCorpusIds) : undefined;
+      return db.transaction(() => {
+        const rows = db.query("SELECT * FROM waiting_questions").all();
+        let removed = 0;
+        for (const row of rows) {
+          if (questionTakenWithCorpora(row, ids, known, options2.answeredOnly === true)) {
+            removed += db.query("DELETE FROM waiting_questions WHERE id = ?").run(row.id).changes;
+          }
+        }
+        return removed;
+      }).immediate();
+    },
+    deleteForAccountScope(input) {
+      const ids = new Set(input.corpusIds);
+      const readsScope = (item) => {
+        if (typeof item.corpusId !== "string" || !ids.has(item.corpusId))
+          return false;
+        const source = item.provenance?.sourceItem;
+        return source?.provider === input.provider && source?.accountScope === input.accountScope;
+      };
+      return db.transaction(() => {
+        const rows = db.query("SELECT * FROM waiting_questions WHERE result IS NOT NULL").all();
+        let removed = 0;
+        for (const row of rows) {
+          const result = toQuestion(row).result;
+          if (result?.read.some(readsScope)) {
+            removed += db.query("DELETE FROM waiting_questions WHERE id = ?").run(row.id).changes;
+          }
+        }
+        return removed;
+      }).immediate();
+    },
+    close() {
+      closeSqliteStore(db);
+    }
+  };
+}
+function questionTakenWithCorpora(row, ids, known, answeredOnly = false) {
+  const result = toQuestion(row).result;
+  if (!result)
+    return !answeredOnly;
+  return result.read.some((item) => typeof item.corpusId !== "string" || ids.has(item.corpusId) || known !== undefined && !known.has(item.corpusId));
+}
+function revokeWaitingPrivateQuestions(remoteConnectionsDbPath, connectionId, options = {}) {
+  const store = openWaitingPrivateQuestionStore(waitingPrivateQuestionsDbPath(remoteConnectionsDbPath), {
+    busyTimeoutMs: options.busyTimeoutMs ?? REVOKE_BUSY_TIMEOUT_MS
+  });
+  try {
+    store.revokeConnection(connectionId);
+  } finally {
+    store.close();
+  }
+}
+function toQuestion(row) {
+  let selectors = {};
+  try {
+    const parsed = JSON.parse(row.selectors);
+    if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed))
+      selectors = parsed;
+  } catch {
+    selectors = {};
+  }
+  return {
+    id: row.id,
+    path: row.destination === "venice" ? "venice" : row.answer_path === "anonymous" ? "anonymous" : "private",
+    connectionId: row.connection_id,
+    surface: row.surface === "chatgpt" ? "chatgpt" : "remote",
+    question: row.question,
+    detail: row.detail === "full" ? "full" : "summary",
+    selectors,
+    state: row.state === "waiting" ? "waiting" : "unchecked",
+    seen: row.seen === 1,
+    generation: row.generation,
+    askedAt: new Date(row.asked_at).toISOString(),
+    ...row.has_result !== undefined ? { hasResult: row.has_result === 1 } : {},
+    ...row.result ? { result: JSON.parse(row.result) } : {},
+    ...row.answered_at !== null ? { answeredAt: new Date(row.answered_at).toISOString() } : {},
+    ...row.failed === 1 ? { failed: true } : {},
+    ...row.retry_reasons && row.retry_reasons !== "[]" ? { retryReasons: JSON.parse(row.retry_reasons) } : {},
+    attempts: row.attempts,
+    nextAttemptAt: row.next_attempt_at
+  };
+}
+function migrations2() {
+  return [{
+    version: 1,
+    name: "create_waiting_private_questions",
+    up(db) {
+      db.exec(`
+        CREATE TABLE waiting_questions (
+          id TEXT PRIMARY KEY,
+          dedupe_key TEXT NOT NULL UNIQUE,
+          connection_id TEXT NOT NULL,
+          surface TEXT NOT NULL CHECK(surface IN ('chatgpt', 'remote')),
+          question TEXT NOT NULL,
+          detail TEXT NOT NULL CHECK(detail IN ('summary', 'full')),
+          selectors TEXT NOT NULL,
+          state TEXT NOT NULL CHECK(state IN ('waiting', 'unchecked')),
+          seen INTEGER NOT NULL DEFAULT 0,
+          generation INTEGER NOT NULL,
+          asked_at INTEGER NOT NULL
+        );
+        CREATE INDEX waiting_questions_connection ON waiting_questions (connection_id, asked_at);
+        CREATE TABLE connection_revocations (
+          connection_id TEXT PRIMARY KEY,
+          generation INTEGER NOT NULL
+        );
+        CREATE TABLE waiting_meta (
+          key TEXT PRIMARY KEY,
+          value TEXT NOT NULL
+        );
+      `);
+    }
+  }, {
+    version: 2,
+    name: "private_answers_inbox",
+    up(db) {
+      db.exec(`ALTER TABLE waiting_questions ADD COLUMN result TEXT;
+        ALTER TABLE waiting_questions ADD COLUMN answered_at INTEGER;
+        ALTER TABLE waiting_questions ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE waiting_questions ADD COLUMN next_attempt_at INTEGER NOT NULL DEFAULT 0;`);
+    }
+  }, {
+    version: 3,
+    name: "private_answer_auto_budgets",
+    up(db) {
+      db.exec("CREATE TABLE auto_answer_budgets (connection_id TEXT PRIMARY KEY, started_at INTEGER NOT NULL, attempts INTEGER NOT NULL)");
+    }
+  }, {
+    version: 4,
+    name: "anonymous_answers_inbox",
+    up(db) {
+      db.exec("ALTER TABLE waiting_questions ADD COLUMN answer_path TEXT NOT NULL DEFAULT 'private' CHECK(answer_path IN ('private', 'anonymous'))");
+    }
+  }, {
+    version: 5,
+    name: "ask_destination",
+    up(db) {
+      db.exec("ALTER TABLE waiting_questions ADD COLUMN destination TEXT CHECK(destination IS NULL OR destination = 'venice')");
+    }
+  }, {
+    version: 6,
+    name: "bounded_retry_reasons",
+    up(db) {
+      db.exec("ALTER TABLE waiting_questions ADD COLUMN retry_reasons TEXT NOT NULL DEFAULT '[]'");
+    }
+  }, {
+    version: 7,
+    name: "failure_listing_metadata",
+    up(db) {
+      db.exec(`ALTER TABLE waiting_questions ADD COLUMN failed INTEGER NOT NULL DEFAULT 0;
+        UPDATE waiting_questions SET failed = CASE WHEN json_valid(result)
+          THEN COALESCE(json_extract(result, '$.status') = 'failed', 0) ELSE 0 END;`);
+    }
+  }];
+}
+function hardenPrivatePath2(dbPath) {
+  if (!isAbsolute18(dbPath))
+    throw new TypeError("The waiting private questions database path must be absolute.");
+  const leafDir = dirname19(dbPath);
+  if (new Set(["/", "/tmp", "/private/tmp", "/var/tmp", "/private/var/tmp", homedir11()]).has(leafDir)) {
+    throw new Error("The waiting private questions database must live inside a dedicated private directory.");
+  }
+  mkdirSync10(leafDir, { recursive: true, mode: 448 });
+  const dirStat = lstatSync11(leafDir);
+  if (dirStat.isSymbolicLink() || !dirStat.isDirectory()) {
+    throw new Error("The waiting private questions database must live in a real private directory.");
+  }
+  chmodSync5(leafDir, 448);
+  if (existsSync9(dbPath)) {
+    const fileStat = lstatSync11(dbPath);
+    if (fileStat.isSymbolicLink() || !fileStat.isFile()) {
+      throw new Error("The waiting private questions database must be a regular file, not a symlink.");
+    }
+  }
+}
+var WAITING_PRIVATE_QUESTIONS_STORE_ID = "waiting-private-questions", WAITING_PRIVATE_QUESTIONS_SCHEMA_VERSION = 7, WAITING_QUESTION_LIMITS, STORE_BUSY_TIMEOUT_MS = 5000, REVOKE_BUSY_TIMEOUT_MS = 1000, OLDER_REMOVED_KEY = "older_removed_at", WAITING_QUESTION_RETRY_LIMIT = 8, WAITING_QUESTION_RETRY_REASONS;
+var init_waiting_private_questions = __esm(() => {
+  init_app_release_capture();
+  init_sqlite_migrations();
+  init_olympus_layout();
+  WAITING_QUESTION_LIMITS = Object.freeze({
+    questionBytes: 2048,
+    localQuestionBytes: 8 * 1024,
+    selectorBytes: 4096,
+    answerBytes: 128 * 1024,
+    ttlMs: 7 * 24 * 60 * 60000,
+    reanswerAfterMs: 10 * 60000
+  });
+  WAITING_QUESTION_RETRY_REASONS = [
+    "answer_failed",
+    "no_model",
+    "model_downloading",
+    "evidence_changed",
+    "eligibility_unavailable",
+    "save_refused"
+  ];
+});
+
+// src/core/remote-connections.ts
+var exports_remote_connections = {};
+__export(exports_remote_connections, {
+  resolveRemoteConnectionsDbPathForCli: () => resolveRemoteConnectionsDbPathForCli,
+  resolveRemoteConnectionsDbPath: () => resolveRemoteConnectionsDbPath,
+  remoteConnectionsPreV2BackupPath: () => remoteConnectionsPreV2BackupPath,
+  openRemoteConnectionStore: () => openRemoteConnectionStore,
+  isWellFormedRemoteConnectionToken: () => isWellFormedRemoteConnectionToken,
+  hashRemoteConnectionToken: () => hashRemoteConnectionToken,
+  defaultRemoteConnectionsDbPath: () => defaultRemoteConnectionsDbPath,
+  connectionProviderMigration: () => connectionProviderMigration,
+  REMOTE_CONNECTION_TOKEN_PREFIX: () => REMOTE_CONNECTION_TOKEN_PREFIX,
+  REMOTE_CONNECTION_LAST_USED_RESOLUTION_MS: () => REMOTE_CONNECTION_LAST_USED_RESOLUTION_MS,
+  REMOTE_CONNECTIONS_STORE_ID: () => REMOTE_CONNECTIONS_STORE_ID,
+  REMOTE_CONNECTIONS_SCHEMA_VERSION: () => REMOTE_CONNECTIONS_SCHEMA_VERSION
+});
+import { Database as Database3 } from "bun:sqlite";
+import { createHash as createHash6, randomBytes as randomBytes10, timingSafeEqual as timingSafeEqual4 } from "node:crypto";
+import { chmodSync as chmodSync6, existsSync as existsSync10, lstatSync as lstatSync12, mkdirSync as mkdirSync11 } from "node:fs";
+import { homedir as homedir12 } from "node:os";
+import { dirname as dirname20, isAbsolute as isAbsolute19 } from "node:path";
+function remoteConnectionsPreV2BackupPath(dbPath) {
+  return `${dbPath}.pre-v2.bak`;
+}
+function resolveRemoteConnectionsDbPath(env = process.env) {
+  return defaultRemoteConnectionsDbPath(env);
+}
+function resolveRemoteConnectionsDbPathForCli(env = process.env) {
+  if (standaloneLinuxDataDir(env))
+    return resolveRemoteConnectionsDbPath(env);
+  const workerEnv = env.HOME?.trim() ? readWorkerSetupEnv({ env }) : undefined;
+  if (!workerEnv)
+    return resolveRemoteConnectionsDbPath(env);
+  return resolveRemoteConnectionsDbPath({
+    ...env.HOME !== undefined ? { HOME: env.HOME } : {},
+    ...workerEnv.XDG_DATA_HOME ? { XDG_DATA_HOME: workerEnv.XDG_DATA_HOME } : {}
+  });
+}
+function defaultRemoteConnectionsDbPath(env = process.env) {
+  const path = sharedDataPath("remote-connections", env);
+  if (!isAbsolute19(path)) {
+    throw new TypeError("Remote connections XDG_DATA_HOME must be an absolute private data root.");
+  }
+  return path;
+}
+function isWellFormedRemoteConnectionToken(token) {
+  return TOKEN_PATTERN.test(token);
+}
+function hashRemoteConnectionToken(token) {
+  return createHash6("sha256").update(token, "utf8").digest();
+}
+function openRemoteConnectionStore(dbPath = defaultRemoteConnectionsDbPath(), options = {}) {
+  const now = options.now ?? (() => new Date);
+  hardenPrivateDatabasePath(dbPath);
+  const db = new Database3(dbPath, { create: true });
+  try {
+    chmodSync6(dbPath, 384);
+    db.exec(`PRAGMA busy_timeout = ${STORE_BUSY_TIMEOUT_MS2}; PRAGMA secure_delete = ON; PRAGMA journal_mode = WAL;`);
+    assertSqliteSchemaCanOpen(db, REMOTE_CONNECTIONS_STORE_ID, REMOTE_CONNECTIONS_SCHEMA_VERSION);
+    backupBeforeOAuthMigration(db, dbPath);
+    runSqliteMigrations(db, REMOTE_CONNECTIONS_STORE_ID, remoteConnectionMigrations());
+  } catch (error) {
+    closeSqliteStore(db);
+    throw error;
+  }
+  let closed = false;
+  const recordLastUse = (id, at) => {
+    if (closed)
+      return;
+    try {
+      db.exec(`PRAGMA busy_timeout = ${LAST_USED_BUSY_TIMEOUT_MS};`);
+      try {
+        db.query("UPDATE remote_connections SET last_used_at = ? WHERE id = ? AND revoked_at IS NULL").run(at, id);
+      } finally {
+        db.exec(`PRAGMA busy_timeout = ${STORE_BUSY_TIMEOUT_MS2};`);
+      }
+    } catch {}
+  };
+  const readRow = (id) => db.query("SELECT * FROM remote_connections WHERE id = ?").get(id);
+  const oauth = createRemoteOAuthStore(db, now, (id, at) => {
+    const row = readRow(id);
+    const lastUsedMs = row?.last_used_at ? Date.parse(row.last_used_at) : Number.NaN;
+    if (!Number.isFinite(lastUsedMs) || at.getTime() - lastUsedMs >= REMOTE_CONNECTION_LAST_USED_RESOLUTION_MS) {
+      recordLastUse(id, at.toISOString());
+    }
+  });
+  return {
+    dbPath,
+    oauth,
+    create(displayName, options2 = {}) {
+      const name = requireDisplayName(displayName);
+      if (options2.provider !== undefined && !isRemoteConnectionProvider(options2.provider)) {
+        throw new OperationError("invalid_params", "A connection's host must be openai, xai, meta, anthropic or other.");
+      }
+      const route = options2.route ?? "remote";
+      if (!["remote", "loopback", "tailnet"].includes(route) || route !== "remote" && options2.installId) {
+        throw new OperationError("invalid_params", "Choose a supported connection route.");
+      }
+      const provider = remoteConnectionProvider({ displayName: name, chosen: options2.provider ?? null });
+      const id = randomBytes10(CONNECTION_ID_BYTES).toString("hex");
+      const secret2 = randomBytes10(CONNECTION_SECRET_BYTES).toString("base64url");
+      const token = options2.installId ? mintCredential("access", options2.installId) : `${REMOTE_CONNECTION_TOKEN_PREFIX}${id}_${secret2}`;
+      const createdAt = now().toISOString();
+      db.query(`
+        INSERT INTO remote_connections (id, display_name, kind, token_hash, created_at, provider, route)
+        VALUES (?, ?, 'bearer', ?, ?, ?, ?)
+      `).run(id, name, hashRemoteConnectionToken(token), createdAt, provider, route);
+      const row = readRow(id);
+      if (!row)
+        throw new Error("Remote connection could not be read after creation.");
+      return { connection: toRecord(row), token };
+    },
+    list() {
+      return db.query("SELECT * FROM remote_connections ORDER BY created_at, id").all().map(toRecord);
+    },
+    revoke(id) {
+      if (typeof id !== "string" || !CONNECTION_ID_PATTERN.test(id)) {
+        throw new OperationError("invalid_params", "Connection id must be the id shown by olympus connections list.");
+      }
+      db.transaction(() => {
+        db.query("UPDATE remote_connections SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL").run(now().toISOString(), id);
+        db.query("DELETE FROM remote_oauth_tokens WHERE connection_id = ?").run(id);
+      })();
+      const row = readRow(id);
+      if (!row) {
+        throw new OperationError("invalid_params", `No remote connection has id ${id}.`, "Run olympus connections list.");
+      }
+      if (row.kind === "oauth")
+        oauth.revokeGrant(id);
+      try {
+        revokeWaitingPrivateQuestions(dbPath, id);
+      } catch {
+        console.warn("[olympus] waiting private questions: could not remove a revoked connection's questions now; they are removed before the list is next shown");
+      }
+      return toRecord(row);
+    },
+    verifyToken(token, route = "remote") {
+      const match = typeof token === "string" ? TOKEN_PATTERN.exec(token) : null;
+      const routed = typeof token === "string" ? credentialInstallId("access", token) : undefined;
+      if (!match && !routed)
+        return { ok: false, reason: "malformed" };
+      const presented = hashRemoteConnectionToken(token);
+      const row = match ? readRow(match[1]) : db.query("SELECT * FROM remote_connections WHERE kind = 'bearer' AND token_hash = ?").get(presented);
+      const bearer = row && row.kind === "bearer" && row.token_hash ? row : null;
+      const stored = bearer ? Buffer.from(bearer.token_hash) : Buffer.alloc(presented.length);
+      const equal2 = stored.length === presented.length && timingSafeEqual4(stored, presented);
+      if (!bearer || !equal2 || bearer.route !== route)
+        return { ok: false, reason: "unknown" };
+      if (bearer.revoked_at !== null)
+        return { ok: false, reason: "revoked" };
+      const at = now();
+      const lastUsedMs = bearer.last_used_at ? Date.parse(bearer.last_used_at) : Number.NaN;
+      if (!Number.isFinite(lastUsedMs) || at.getTime() - lastUsedMs >= REMOTE_CONNECTION_LAST_USED_RESOLUTION_MS) {
+        recordLastUse(bearer.id, at.toISOString());
+      }
+      return { ok: true, connection: toRecord(bearer) };
+    },
+    close() {
+      closed = true;
+      closeSqliteStore(db);
+    }
+  };
+}
+function toRecord(row) {
+  return {
+    id: row.id,
+    displayName: row.display_name,
+    kind: row.kind === "oauth" ? "oauth" : "bearer",
+    clientId: row.client_id ?? null,
+    route: row.route,
+    provider: remoteConnectionProvider({
+      clientId: row.client_id,
+      displayName: row.display_name,
+      chosen: isRemoteConnectionProvider(row.provider) ? row.provider : null
+    }),
+    createdAt: row.created_at,
+    lastUsedAt: row.last_used_at,
+    revokedAt: row.revoked_at
+  };
+}
+function requireDisplayName(value) {
+  const name = sanitizeCallerDisplayName(value);
+  if (!name) {
+    throw new OperationError("invalid_params", "A connection needs a name, for example: olympus connections add muse.");
+  }
+  return name;
+}
+function remoteConnectionMigrations() {
+  return [{
+    version: 1,
+    name: "create_remote_connections",
+    up(db) {
+      db.exec(`
+        CREATE TABLE remote_connections (
+          id TEXT PRIMARY KEY,
+          display_name TEXT NOT NULL,
+          kind TEXT NOT NULL CHECK(kind IN ('bearer')),
+          token_hash BLOB NOT NULL UNIQUE,
+          created_at TEXT NOT NULL,
+          last_used_at TEXT,
+          revoked_at TEXT
+        );
+      `);
+    }
+  }, remoteOAuthSchemaMigration(2), connectionProviderMigration(3), {
+    version: 4,
+    name: "bind_connection_route",
+    up(db) {
+      const columns = db.query("PRAGMA table_info(remote_connections)").all();
+      if (columns.some((column) => column.name === "route"))
+        return;
+      db.exec("ALTER TABLE remote_connections ADD COLUMN route TEXT NOT NULL DEFAULT 'remote' CHECK(route IN ('remote', 'loopback', 'tailnet'));");
+    }
+  }];
+}
+function connectionProviderMigration(version) {
+  return {
+    version,
+    name: "add_connection_provider",
+    up(db) {
+      const columns = db.query("PRAGMA table_info(remote_connections)").all();
+      if (!columns.some((column) => column.name === "provider")) {
+        db.exec(`
+          ALTER TABLE remote_connections ADD COLUMN provider TEXT
+            CHECK(provider IS NULL OR provider IN ('openai', 'xai', 'meta', 'anthropic', 'other'));
+        `);
+      }
+      const unset = db.query("SELECT id, display_name, client_id FROM remote_connections WHERE provider IS NULL").all();
+      const fill = db.query("UPDATE remote_connections SET provider = ? WHERE id = ? AND provider IS NULL");
+      for (const row of unset) {
+        fill.run(remoteConnectionProvider({ clientId: row.client_id, displayName: row.display_name }), row.id);
+      }
+    }
+  };
+}
+function backupBeforeOAuthMigration(db, dbPath) {
+  if (readSqliteSchemaVersion(db, REMOTE_CONNECTIONS_STORE_ID) !== 1)
+    return;
+  const backupPath = remoteConnectionsPreV2BackupPath(dbPath);
+  if (existsSync10(backupPath))
+    return;
+  db.query("VACUUM INTO ?").run(backupPath);
+  chmodSync6(backupPath, 384);
+}
+function hardenPrivateDatabasePath(dbPath) {
+  if (!isAbsolute19(dbPath)) {
+    throw new TypeError("Remote connections database path must be absolute.");
+  }
+  const leafDir = dirname20(dbPath);
+  const forbiddenLeafDirs = new Set(["/", "/tmp", "/private/tmp", "/var/tmp", "/private/var/tmp", homedir12()]);
+  if (forbiddenLeafDirs.has(leafDir)) {
+    throw new Error("Remote connections database must live inside a dedicated private leaf directory.");
+  }
+  mkdirSync11(leafDir, { recursive: true, mode: 448 });
+  const dirStat = lstatSync12(leafDir);
+  if (dirStat.isSymbolicLink() || !dirStat.isDirectory()) {
+    throw new Error("Remote connections database leaf must be a real private directory.");
+  }
+  chmodSync6(leafDir, 448);
+  if (existsSync10(dbPath)) {
+    const dbStat = lstatSync12(dbPath);
+    if (dbStat.isSymbolicLink() || !dbStat.isFile()) {
+      throw new Error("Remote connections database must be a regular file, not a symlink.");
+    }
+  }
+}
+var REMOTE_CONNECTIONS_STORE_ID = "remote-connections", REMOTE_CONNECTIONS_SCHEMA_VERSION = 4, REMOTE_CONNECTION_TOKEN_PREFIX = "olympus_conn_", REMOTE_CONNECTION_LAST_USED_RESOLUTION_MS = 60000, STORE_BUSY_TIMEOUT_MS2 = 1e4, LAST_USED_BUSY_TIMEOUT_MS = 50, CONNECTION_ID_BYTES = 9, CONNECTION_SECRET_BYTES = 32, CONNECTION_ID_PATTERN, TOKEN_PATTERN;
+var init_remote_connections = __esm(() => {
+  init_operation_error();
+  init_worker_auth();
+  init_operation_caller();
+  init_sqlite_migrations();
+  init_remote_oauth_store();
+  init_waiting_private_questions();
+  init_tokens();
+  init_linux_engine_layout();
+  init_olympus_layout();
+  CONNECTION_ID_PATTERN = /^[a-f0-9]{18}$/;
+  TOKEN_PATTERN = /^olympus_conn_([a-f0-9]{18})_([A-Za-z0-9_-]{43})$/;
+});
+
 // src/core/source-model-policy.ts
 function assertModelTrustTierAllowed(trustTier) {
   if (trustTier === "S5") {
@@ -6894,8 +8689,8 @@ var init_venice_models = __esm(() => {
 });
 
 // src/core/sovereignty.ts
-import { chmodSync as chmodSync4, existsSync as existsSync8, mkdirSync as mkdirSync9, readFileSync as readFileSync20 } from "node:fs";
-import { dirname as dirname18, join as join25, resolve as resolve8 } from "node:path";
+import { chmodSync as chmodSync7, existsSync as existsSync11, mkdirSync as mkdirSync12, readFileSync as readFileSync20 } from "node:fs";
+import { dirname as dirname21, join as join27, resolve as resolve8 } from "node:path";
 import { fileURLToPath as fileURLToPath5 } from "node:url";
 import { isDeepStrictEqual } from "node:util";
 import { randomUUID as randomUUID7 } from "node:crypto";
@@ -6912,7 +8707,7 @@ function loadSovereigntyEngine(options = {}) {
   }
   const requestedConfigPath = options.configPath?.trim() || env.OLYMPUS_SOVEREIGNTY_CONFIG?.trim() || env.OLYMPUS_SOVEREIGNTY_CONFIG_PATH?.trim();
   const configPath = requestedConfigPath || defaultSovereigntyConfigPath(env);
-  if (existsSync8(configPath)) {
+  if (existsSync11(configPath)) {
     const isDefaultPath = (path) => {
       try {
         return resolve8(path) === resolve8(defaultSovereigntyConfigPath(env));
@@ -7203,7 +8998,7 @@ function migratePrivateMeaningSearch(path) {
       }
     } }
   };
-  if (!existsSync8(path))
+  if (!existsSync11(path))
     return;
   const eligible = (current2) => {
     const config = current2;
@@ -7239,9 +9034,9 @@ function migratePrivateMeaningSearch(path) {
   }, { acquireTimeoutMs: 5000 });
 }
 function loadSovereigntyPreset(name) {
-  const sourceLayoutPath = join25(dirname18(fileURLToPath5(import.meta.url)), "..", "..", "config", "sovereignty", "presets", `${name}.json`);
-  const bundledLayoutPath = join25(dirname18(fileURLToPath5(import.meta.url)), "..", "config", "sovereignty", "presets", `${name}.json`);
-  const path = existsSync8(sourceLayoutPath) ? sourceLayoutPath : bundledLayoutPath;
+  const sourceLayoutPath = join27(dirname21(fileURLToPath5(import.meta.url)), "..", "..", "config", "sovereignty", "presets", `${name}.json`);
+  const bundledLayoutPath = join27(dirname21(fileURLToPath5(import.meta.url)), "..", "config", "sovereignty", "presets", `${name}.json`);
+  const path = existsSync11(sourceLayoutPath) ? sourceLayoutPath : bundledLayoutPath;
   const parsed = JSON.parse(readFileSync20(path, "utf8"));
   return validateSovereigntyConfig(parsed);
 }
@@ -7679,11 +9474,11 @@ var init_sovereignty = __esm(() => {
 });
 
 // src/core/mac-engine-daemon.ts
-import { lstatSync as lstatSync10, readFileSync as readFileSync21 } from "node:fs";
+import { lstatSync as lstatSync13, readFileSync as readFileSync21 } from "node:fs";
 function macEngineManager(home, daemonPath = MAC_ENGINE_DAEMON_PLIST) {
   let stat2;
   try {
-    stat2 = lstatSync10(daemonPath);
+    stat2 = lstatSync13(daemonPath);
   } catch (error) {
     if (error.code === "ENOENT")
       return "agent";
@@ -7755,33 +9550,34 @@ var init_engine_maintenance = __esm(() => {
     staleAfterMs: Number.MAX_SAFE_INTEGER
   };
 });
+
 // src/core/worker-service.ts
-import { basename as basename4, dirname as dirname21, isAbsolute as isAbsolute17, join as join28, relative as relative3, sep as sep3 } from "node:path";
+import { basename as basename4, dirname as dirname24, isAbsolute as isAbsolute20, join as join30, relative as relative3, sep as sep3 } from "node:path";
 function workerServicePaths(platform2, homeDir, env = {}) {
   homeDir = validatedAbsolutePath(homeDir, "home directory");
   if (platform2 === "darwin") {
-    const logDir = join28(homeDir, "Library", "Logs", "Olympus");
+    const logDir = join30(homeDir, "Library", "Logs", "Olympus");
     return {
       label: "com.openclaw.olympus.worker",
-      unitPath: join28(homeDir, "Library", "LaunchAgents", "com.openclaw.olympus.worker.plist"),
-      envPath: join28(homeDir, ".config", "olympus", "worker.env"),
-      logPath: join28(logDir, "worker.log"),
-      errorLogPath: join28(logDir, "worker.err")
+      unitPath: join30(homeDir, "Library", "LaunchAgents", "com.openclaw.olympus.worker.plist"),
+      envPath: join30(homeDir, ".config", "olympus", "worker.env"),
+      logPath: join30(logDir, "worker.log"),
+      errorLogPath: join30(logDir, "worker.err")
     };
   }
   const layout = resolveLinuxEngineLayout({ ...env, HOME: homeDir });
-  const stateDir = join28(layout.stateHome, "olympus", "worker");
+  const stateDir = join30(layout.stateHome, "olympus", "worker");
   return {
     label: "olympus-worker",
-    unitPath: join28(layout.configHome, "systemd", "user", "olympus-worker.service"),
+    unitPath: join30(layout.configHome, "systemd", "user", "olympus-worker.service"),
     envPath: layout.workerEnvPath,
-    logPath: join28(stateDir, "worker.log"),
-    errorLogPath: join28(stateDir, "worker.err")
+    logPath: join30(stateDir, "worker.log"),
+    errorLogPath: join30(stateDir, "worker.err")
   };
 }
 function validatedAbsolutePath(value, label) {
   const trimmed = value.trim();
-  if (trimmed && isAbsolute17(trimmed) && !/[\0\r\n]/.test(trimmed))
+  if (trimmed && isAbsolute20(trimmed) && !/[\0\r\n]/.test(trimmed))
     return trimmed;
   throw new OperationError("config_error", `Could not resolve an absolute ${label} path for the worker service.`);
 }
@@ -7797,12 +9593,12 @@ var init_worker_service = __esm(() => {
 });
 
 // src/core/managed-tools.ts
-import { createHash as createHash3, randomUUID as randomUUID8 } from "node:crypto";
+import { createHash as createHash7, randomUUID as randomUUID8 } from "node:crypto";
 import {
   accessSync as accessSync7,
   constants as constants4,
-  lstatSync as lstatSync11,
-  mkdirSync as mkdirSync11,
+  lstatSync as lstatSync14,
+  mkdirSync as mkdirSync14,
   readFileSync as readFileSync23,
   readdirSync as readdirSync2,
   realpathSync as realpathSync4,
@@ -7811,10 +9607,10 @@ import {
   statSync as statSync13,
   symlinkSync,
   writeFileSync as writeFileSync5,
-  chmodSync as chmodSync5
+  chmodSync as chmodSync8
 } from "node:fs";
-import { homedir as homedir11 } from "node:os";
-import { dirname as dirname22, isAbsolute as isAbsolute18, join as join29, posix, sep as sep4 } from "node:path";
+import { homedir as homedir14 } from "node:os";
+import { dirname as dirname25, isAbsolute as isAbsolute21, join as join31, posix, sep as sep4 } from "node:path";
 function zkapiAsset(url, sha256, bytes, extra = {}) {
   return {
     url,
@@ -7850,20 +9646,20 @@ function managedToolsPlatform(platform2 = process.platform, arch = process.arch)
 function managedToolsBase(host = {}) {
   const env = host.env ?? process.env;
   const platform2 = host.platform ?? process.platform;
-  const home = env.HOME?.trim() || (host.env ? undefined : homedir11());
+  const home = env.HOME?.trim() || (host.env ? undefined : homedir14());
   if (platform2 === "darwin")
-    return home && isAbsolute18(home) ? join29(home, "Library", "Application Support", "Olympus") : undefined;
+    return home && isAbsolute21(home) ? join31(home, "Library", "Application Support", "Olympus") : undefined;
   if (platform2 === "linux") {
     const xdg = env.XDG_DATA_HOME?.trim();
-    if (xdg && isAbsolute18(xdg))
-      return join29(xdg, "olympus");
-    return home && isAbsolute18(home) ? join29(home, ".local", "share", "olympus") : undefined;
+    if (xdg && isAbsolute21(xdg))
+      return join31(xdg, "olympus");
+    return home && isAbsolute21(home) ? join31(home, ".local", "share", "olympus") : undefined;
   }
   return;
 }
 function managedToolsRoot(host = {}) {
   const base = managedToolsBase(host);
-  return base ? join29(base, "tools") : undefined;
+  return base ? join31(base, "tools") : undefined;
 }
 function currentUid(host) {
   return host.uid ?? (typeof process.getuid === "function" ? process.getuid() : undefined);
@@ -7885,7 +9681,7 @@ function within(parent, child) {
 }
 function readManifest(path, uid) {
   try {
-    const stats = lstatSync11(path);
+    const stats = lstatSync14(path);
     if (!stats.isFile() || uid !== undefined && stats.uid !== uid || (stats.mode & 18) !== 0)
       return;
     const parsed = JSON.parse(readFileSync23(path, "utf8"));
@@ -7904,11 +9700,11 @@ function managedToolExecutable(tool, host = {}) {
   if (!pin || !asset || !base)
     return;
   const uid = currentUid(host);
-  const root = join29(base, "tools");
-  const versionDir = join29(root, tool, pin.version);
-  for (const dir of [base, root, join29(root, tool), versionDir]) {
+  const root = join31(base, "tools");
+  const versionDir = join31(root, tool, pin.version);
+  for (const dir of [base, root, join31(root, tool), versionDir]) {
     try {
-      if (lstatSync11(dir).isSymbolicLink())
+      if (lstatSync14(dir).isSymbolicLink())
         return;
     } catch {
       return;
@@ -7916,17 +9712,17 @@ function managedToolExecutable(tool, host = {}) {
     if (!privatelyOwned(dir, uid, "dir"))
       return;
   }
-  const manifest = readManifest(join29(versionDir, MANIFEST_FILE), uid);
+  const manifest = readManifest(join31(versionDir, MANIFEST_FILE), uid);
   if (!manifest || manifest.tool !== tool || manifest.version !== pin.version || manifest.platform !== platformKey || manifest.sha256 !== asset.sha256)
     return;
   try {
     const realDir = realpathSync4(versionDir);
     for (const required of new Set([...asset.required, asset.executable])) {
-      if (!trustedInside(realDir, join29(versionDir, required), uid, versionDir))
+      if (!trustedInside(realDir, join31(versionDir, required), uid, versionDir))
         return;
     }
     verifyPinnedFiles(versionDir, asset, uid, pin.label, tool);
-    const real = realpathSync4(join29(versionDir, asset.executable));
+    const real = realpathSync4(join31(versionDir, asset.executable));
     accessSync7(real, constants4.X_OK);
     return real;
   } catch {
@@ -7939,7 +9735,7 @@ function trustedInside(realDir, path, uid, versionDir) {
     for (let index = 1;index <= parts.length; index += 1) {
       let stats;
       try {
-        stats = lstatSync11(join29(versionDir, ...parts.slice(0, index)));
+        stats = lstatSync14(join31(versionDir, ...parts.slice(0, index)));
       } catch {
         return false;
       }
@@ -7957,18 +9753,18 @@ function trustedInside(realDir, path, uid, versionDir) {
   }
   if (!within(realDir, real) || !privatelyOwned(real, uid, "file"))
     return false;
-  for (let dir = dirname22(real);dir !== realDir; dir = dirname22(dir)) {
+  for (let dir = dirname25(real);dir !== realDir; dir = dirname25(dir)) {
     if (!within(realDir, dir) || !privatelyOwned(dir, uid, "dir"))
       return false;
   }
   return true;
 }
 function fileSha256(path) {
-  return createHash3("sha256").update(readFileSync23(path)).digest("hex");
+  return createHash7("sha256").update(readFileSync23(path)).digest("hex");
 }
 function verifyPinnedFiles(staging, asset, uid, label, tool) {
   for (const pinned of asset.pinnedFiles ?? []) {
-    const file = join29(staging, pinned.path);
+    const file = join31(staging, pinned.path);
     if (!privatelyOwned(file, uid, "file")) {
       throw new ManagedToolsError("archive_incomplete", `The ${label} download is missing ${pinned.path}, so nothing was installed.`, tool);
     }
@@ -7981,7 +9777,7 @@ function verifyPinnedFiles(staging, asset, uid, label, tool) {
     if (actual !== pinned.sha256) {
       throw new ManagedToolsError("launcher_mismatch", `The ${label} download carries a launcher (${pinned.path}) that does not match its pinned fingerprint, so nothing was installed.`, tool);
     }
-    const record = join29(staging, pinned.record);
+    const record = join31(staging, pinned.record);
     if (!privatelyOwned(record, uid, "file")) {
       throw new ManagedToolsError("launcher_mismatch", `The ${label} download does not carry its build record (${pinned.record}), so nothing was installed.`, tool);
     }
@@ -8075,7 +9871,7 @@ var exports_zkapi_confine_fetch = {};
 __export(exports_zkapi_confine_fetch, {
   linuxConfinementFetch: () => linuxConfinementFetch
 });
-import { createHmac as createHmac3, randomBytes as randomBytes6, timingSafeEqual as timingSafeEqual3 } from "node:crypto";
+import { createHmac as createHmac3, randomBytes as randomBytes11, timingSafeEqual as timingSafeEqual5 } from "node:crypto";
 import { createConnection } from "node:net";
 function abortError() {
   return new DOMException("This operation was aborted", "AbortError");
@@ -8093,7 +9889,7 @@ function bridgeMac(token, role, name, ...parts) {
 function authenticate(socketPath, token, name, signal) {
   return new Promise((resolve9, reject) => {
     const socket = createConnection({ path: socketPath });
-    const clientNonce = randomBytes6(16);
+    const clientNonce = randomBytes11(16);
     let buffered = Buffer.alloc(0);
     let settled = false;
     const cleanup = () => {
@@ -8126,7 +9922,7 @@ function authenticate(socketPath, token, name, signal) {
       const serverNonce = buffered.subarray(0, 16);
       const proof = buffered.subarray(16);
       const expected = bridgeMac(token, "srv", name, clientNonce, serverNonce);
-      if (!timingSafeEqual3(proof, expected)) {
+      if (!timingSafeEqual5(proof, expected)) {
         fail(authError("bad server proof"));
         return;
       }
@@ -8626,12 +10422,12 @@ var init_zkapi_confine_fetch = __esm(() => {
 });
 
 // src/core/zkapi-confine-selftest.ts
-import { randomBytes as randomBytes7 } from "node:crypto";
-import { chmodSync as chmodSync6, readFileSync as readFileSync24, readlinkSync, readdirSync as readdirSync3, rmSync as rmSync6, writeFileSync as writeFileSync6 } from "node:fs";
+import { randomBytes as randomBytes12 } from "node:crypto";
+import { chmodSync as chmodSync9, readFileSync as readFileSync24, readlinkSync, readdirSync as readdirSync3, rmSync as rmSync6, writeFileSync as writeFileSync6 } from "node:fs";
 import { createServer, createConnection as createConnection2 } from "node:net";
 import { createSocket } from "node:dgram";
 import { networkInterfaces } from "node:os";
-import { join as join30 } from "node:path";
+import { join as join32 } from "node:path";
 function hasEvery(row, keys) {
   return Boolean(row) && keys.every((key) => Object.hasOwn(row, key));
 }
@@ -8909,9 +10705,9 @@ async function createFixture(script, workDir, launcher, ports, env, watchdogPath
     });
     let controlStreams = 0;
     let confinedStreams = 0;
-    const controlUnix = join30(workDir, "selftest-control.sock");
-    const confinedUnix = join30(workDir, "selftest-confined.sock");
-    const inheritedUnix = join30(workDir, "selftest-inherited.sock");
+    const controlUnix = join32(workDir, "selftest-control.sock");
+    const confinedUnix = join32(workDir, "selftest-confined.sock");
+    const inheritedUnix = join32(workDir, "selftest-inherited.sock");
     cleanupPaths.push(controlUnix, confinedUnix, inheritedUnix);
     const keepUnixSocket = (socket) => {
       acceptedSockets.push(socket);
@@ -8930,13 +10726,13 @@ async function createFixture(script, workDir, launcher, ports, env, watchdogPath
     await listenPath(controlUnixServer(), controlUnix);
     await listenPath(confinedUnixServer(), confinedUnix);
     await listenPath(track(createServer(keepUnixSocket)), inheritedUnix);
-    const suffix = `${process.pid}-${randomBytes7(5).toString("hex")}`;
+    const suffix = `${process.pid}-${randomBytes12(5).toString("hex")}`;
     const controlAbstract = `olympus-zkc-control-${suffix}`;
     const confinedAbstract = `olympus-zkc-confined-${suffix}`;
     await listenPath(controlUnixServer(), `\x00${controlAbstract}`);
     await listenPath(confinedUnixServer(), `\x00${confinedAbstract}`);
-    const controlDgramPath = join30(workDir, "selftest-control-dgram.sock");
-    const confinedDgramPath = join30(workDir, "selftest-confined-dgram.sock");
+    const controlDgramPath = join32(workDir, "selftest-control-dgram.sock");
+    const confinedDgramPath = join32(workDir, "selftest-confined-dgram.sock");
     cleanupPaths.push(controlDgramPath, confinedDgramPath);
     const controlDgram = startDgramDecoy(script, controlDgramPath, env, watchdogPath, supervise);
     decoys.push(controlDgram);
@@ -9294,16 +11090,16 @@ main().catch(() => process.exit(1));
       if (process.getuid?.() === 0)
         throw new Error("the unconfined syscall control must not run as root");
       const ports = partialPorts;
-      const probePath = join30(workDir, `zkapi-confine-selftest-${process.pid}-${randomBytes7(4).toString("hex")}.cjs`);
-      const watchdogPath = join30(workDir, `zkapi-confine-selftest-watchdog-${process.pid}-${randomBytes7(4).toString("hex")}.cjs`);
+      const probePath = join32(workDir, `zkapi-confine-selftest-${process.pid}-${randomBytes12(4).toString("hex")}.cjs`);
+      const watchdogPath = join32(workDir, `zkapi-confine-selftest-watchdog-${process.pid}-${randomBytes12(4).toString("hex")}.cjs`);
       try {
         writeFileSync6(probePath, LINUX_CONFINEMENT_SELF_TEST_PROBE_SOURCE, { mode: 448 });
-        chmodSync6(probePath, 448);
+        chmodSync9(probePath, 448);
         const transport = await Promise.resolve().then(() => (init_consult_transport_zkapi(), exports_consult_transport_zkapi));
         const linux = await Promise.resolve().then(() => (init_zkapi_confinement_linux(), exports_zkapi_confinement_linux));
         const bridge = await Promise.resolve().then(() => (init_zkapi_confine_fetch(), exports_zkapi_confine_fetch));
         writeFileSync6(watchdogPath, transport.WATCHDOG_SCRIPT, { mode: 448 });
-        chmodSync6(watchdogPath, 448);
+        chmodSync9(watchdogPath, 448);
         let fixture;
         let control;
         let supervised;
@@ -9369,7 +11165,7 @@ main().catch(() => process.exit(1));
               instanceBound = linux.verifyLinuxInstance(ready, watchdog) && JSON.stringify(ready.bridgesExpose) === '["api"]' && JSON.stringify(ready.bridgesReach) === JSON.stringify([String(ports.tor)]);
               listenerSetBound = linux.inspectLinuxNamespace(ready, watchdog, ports);
               const payload2 = Buffer.alloc(4194304, 90);
-              const response = await bridge.linuxConfinementFetch(join30(workDir, "api.sock"), ready.apiToken)(`http://127.0.0.1:${ports.daemon}/echo`, { method: "POST", body: payload2 });
+              const response = await bridge.linuxConfinementFetch(join32(workDir, "api.sock"), ready.apiToken)(`http://127.0.0.1:${ports.daemon}/echo`, { method: "POST", body: payload2 });
               const echoed = Buffer.from(await response.arrayBuffer());
               parsed.apiBridgeBulk = response.status === 200 && echoed.equals(payload2) ? "intact" : "corrupt";
               resolveConfined();
@@ -9442,9 +11238,9 @@ __export(exports_zkapi_confinement_linux, {
 import { execFile as execFile2 } from "node:child_process";
 import { promisify } from "node:util";
 import { readFile, stat as fileStat } from "node:fs/promises";
-import { createHash as createHash4 } from "node:crypto";
-import { lstatSync as lstatSync12, readFileSync as readFileSync25, readlinkSync as readlinkSync2, readdirSync as readdirSync4, realpathSync as realpathSync5 } from "node:fs";
-import { dirname as dirname23, join as join31 } from "node:path";
+import { createHash as createHash8 } from "node:crypto";
+import { lstatSync as lstatSync15, readFileSync as readFileSync25, readlinkSync as readlinkSync2, readdirSync as readdirSync4, realpathSync as realpathSync5 } from "node:fs";
+import { dirname as dirname26, join as join33 } from "node:path";
 function record(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : undefined;
 }
@@ -9602,7 +11398,7 @@ Then ask Olympus again. To undo: sudo apparmor_parser -R /etc/apparmor.d/olympus
 }
 async function launcherPath(env) {
   const daemon = managedToolExecutable("zkapi-clientd", { env, platform: "linux", arch: "x64" });
-  const managed = daemon ? join31(dirname23(daemon), "zkapi-confine") : undefined;
+  const managed = daemon ? join33(dirname26(daemon), "zkapi-confine") : undefined;
   const system = "/usr/local/libexec/olympus/zkapi-confine";
   for (const path of [system, managed]) {
     if (!path)
@@ -9612,14 +11408,14 @@ async function launcherPath(env) {
         continue;
       let current2 = path;
       while (true) {
-        const s = lstatSync12(current2);
+        const s = lstatSync15(current2);
         if (s.isSymbolicLink() || (s.mode & 18) !== 0 || (path === system ? s.uid !== 0 : s.uid !== 0 && s.uid !== process.getuid?.()))
           throw new Error("untrusted path");
         if (current2 === "/")
           break;
-        current2 = dirname23(current2);
+        current2 = dirname26(current2);
       }
-      if (!lstatSync12(path).isFile() || createHash4("sha256").update(await readFile(path)).digest("hex") !== ZKAPI_CONFINE_SHA256)
+      if (!lstatSync15(path).isFile() || createHash8("sha256").update(await readFile(path)).digest("hex") !== ZKAPI_CONFINE_SHA256)
         continue;
       return path;
     } catch {}
@@ -9630,7 +11426,7 @@ async function launcherIdentity(path) {
   const info = await fileStat(path);
   if (!info.isFile())
     throw new Error("not a launcher");
-  const hash = createHash4("sha256").update(await readFile(path)).digest("hex");
+  const hash = createHash8("sha256").update(await readFile(path)).digest("hex");
   return [info.dev, info.ino, info.size, info.mtimeMs, info.ctimeMs, info.mode, hash].join(":");
 }
 function linuxZkapiConfinement(deps = {}) {
@@ -9712,7 +11508,7 @@ function linuxZkapiConfinement(deps = {}) {
         try {
           sysctls[p] = proc.read(p);
         } catch {}
-      const line = result.ok ? `network confinement: ready (user, network and PID namespace, Landlock ABI ${result.landlockAbi}, seccomp)` : `network confinement: unavailable: ${result.code}; ${linuxConfinementRemedy(result.code, sysctls, launcher ?? join31(managedToolsRoot({ env, platform: "linux", arch: "x64" }) ?? "/unavailable/olympus/tools", "zkapi-clientd", MANAGED_TOOL_PINS["zkapi-clientd"].version, "bin", "zkapi-confine"))}`;
+      const line = result.ok ? `network confinement: ready (user, network and PID namespace, Landlock ABI ${result.landlockAbi}, seccomp)` : `network confinement: unavailable: ${result.code}; ${linuxConfinementRemedy(result.code, sysctls, launcher ?? join33(managedToolsRoot({ env, platform: "linux", arch: "x64" }) ?? "/unavailable/olympus/tools", "zkapi-clientd", MANAGED_TOOL_PINS["zkapi-clientd"].version, "bin", "zkapi-confine"))}`;
       return { ok: result.ok, line, ...!result.ok && result.code === "launcher_missing_or_untrusted" ? { installRequired: true } : {} };
     },
     selfTest: async (dir, childEnv, ports) => Boolean((await refresh()).ok && launcher && await (deps.selfTest ?? runLinuxConfinementSelfTest)(launcher, dir, childEnv, ports)),
@@ -9764,7 +11560,7 @@ function linuxZkapiConfinement(deps = {}) {
           const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
           if (url.origin !== `http://127.0.0.1:${ports.daemon}`)
             throw new Error("wrong daemon origin");
-          return linuxConfinementFetch(join31(dir, "api.sock"), event.apiToken)(input, init);
+          return linuxConfinementFetch(join33(dir, "api.sock"), event.apiToken)(input, init);
         },
         verifyInstance: verify,
         inspect: () => verify() && inspectLinuxNamespace(event, wd, ports, proc),
@@ -9836,11 +11632,11 @@ __export(exports_consult_transport_zkapi, {
   DEFAULT_EXECUTABLE_TRUST: () => DEFAULT_EXECUTABLE_TRUST
 });
 import { spawn as spawn2, execFileSync as execFileSync2 } from "node:child_process";
-import { createHash as createHash5, randomUUID as randomUUID9 } from "node:crypto";
-import { accessSync as accessSync8, chmodSync as chmodSync7, closeSync as closeSync6, constants as constants5, existsSync as existsSync11, mkdirSync as mkdirSync12, mkdtempSync as mkdtempSync2, readdirSync as readdirSync5, readFileSync as readFileSync26, readlinkSync as readlinkSync3, realpathSync as realpathSync6, rmSync as rmSync7, statSync as statSync14, writeFileSync as writeFileSync7 } from "node:fs";
+import { createHash as createHash9, randomUUID as randomUUID9 } from "node:crypto";
+import { accessSync as accessSync8, chmodSync as chmodSync10, closeSync as closeSync6, constants as constants5, existsSync as existsSync14, mkdirSync as mkdirSync15, mkdtempSync as mkdtempSync2, readdirSync as readdirSync5, readFileSync as readFileSync26, readlinkSync as readlinkSync3, realpathSync as realpathSync6, rmSync as rmSync7, statSync as statSync14, writeFileSync as writeFileSync7 } from "node:fs";
 import { createConnection as createConnection3, createServer as createServer2 } from "node:net";
-import { homedir as homedir12, tmpdir as tmpdir3 } from "node:os";
-import { delimiter as delimiter5, dirname as dirname24, isAbsolute as isAbsolute19, join as join32, resolve as resolvePath } from "node:path";
+import { homedir as homedir15, tmpdir as tmpdir3 } from "node:os";
+import { delimiter as delimiter5, dirname as dirname27, isAbsolute as isAbsolute22, join as join34, resolve as resolvePath } from "node:path";
 function zkapiStageRows(timings) {
   if (!timings)
     return [];
@@ -9917,8 +11713,8 @@ function expiryEstimate(fundingDate, now) {
   if (!funded || !today || funded.getTime() > today.getTime()) {
     return { state: "invalid", fundingDate, notice: "unknown" };
   }
-  const expiry = new Date(funded.getTime() + ZKAPI_NOTE_TTL_DAYS * DAY_MS);
-  const daysLeft = Math.round((expiry.getTime() - today.getTime()) / DAY_MS);
+  const expiry = new Date(funded.getTime() + ZKAPI_NOTE_TTL_DAYS * DAY_MS2);
+  const daysLeft = Math.round((expiry.getTime() - today.getTime()) / DAY_MS2);
   const expiryDate = expiry.toISOString().slice(0, 10);
   if (daysLeft <= 0)
     return { state: "expired", fundingDate, expiryDate, daysLeft: 0, notice: "expired" };
@@ -10045,7 +11841,7 @@ function defaultZkapiConfinement(host = {}) {
   const platform2 = host.platform ?? process.platform;
   if (platform2 === "linux")
     return linuxZkapiConfinement(host);
-  if (platform2 === "darwin" && (host.sandboxAvailable ?? existsSync11("/usr/bin/sandbox-exec"))) {
+  if (platform2 === "darwin" && (host.sandboxAvailable ?? existsSync14("/usr/bin/sandbox-exec"))) {
     const level = confinementLevel(DARWIN_POLICY);
     return {
       level,
@@ -10061,7 +11857,7 @@ function defaultZkapiConfinement(host = {}) {
           const other = await listenProbe();
           servers.push(other);
           const targets = JSON.stringify({ allowed, other: other.address().port });
-          const script = join32(workDir, "confinement-self-test.cjs");
+          const script = join34(workDir, "confinement-self-test.cjs");
           writeFileSync7(script, SELF_TEST_SCRIPT, { mode: 384 });
           const outside = runSelfTestProbe([process.execPath, script, targets], env);
           const inside = runSelfTestProbe(["/usr/bin/sandbox-exec", "-p", darwinSandboxProfile(DARWIN_POLICY, ports), process.execPath, script, targets], env);
@@ -10083,16 +11879,16 @@ function defaultZkapiConfinement(host = {}) {
     selfTest: async () => false
   };
 }
-function defaultZkapiStatePath(home = homedir12()) {
+function defaultZkapiStatePath(home = homedir15()) {
   if (process.platform === "linux")
-    return join32(resolveLinuxEngineLayout({ ...process.env, HOME: home }).configDir, "zkapi-consult-state.json");
-  return join32(home, ".olympus", "zkapi-consult-state.json");
+    return join34(resolveLinuxEngineLayout({ ...process.env, HOME: home }).configDir, "zkapi-consult-state.json");
+  return join34(home, ".olympus", "zkapi-consult-state.json");
 }
 function utcDay(now) {
   return now.toISOString().slice(0, 10);
 }
 function readState(path) {
-  if (!existsSync11(path))
+  if (!existsSync14(path))
     return;
   const parsed = JSON.parse(readFileSync26(path, "utf8"));
   if (parsed.version !== 1 || typeof parsed.day !== "string" || !Number.isInteger(parsed.count) || parsed.count < 0 || !Number.isInteger(parsed.reservedMicroUsd) || parsed.reservedMicroUsd < 0) {
@@ -10115,8 +11911,8 @@ function zkapiUnresolvedSession(path, scope) {
   return scope === undefined ? Object.keys(fences).length > 0 : Boolean(fences[scope]);
 }
 function zkapiWalletDirectory(env) {
-  const home = env.HOME?.trim() || homedir12();
-  const configured = env.ZKAPI_CLIENTD_CONFIG_DIR?.trim() || env.OA_CHAT_CONFIG_DIR?.trim() || (process.platform === "darwin" ? join32(home, "Library", "Application Support", "zkapi-clientd") : join32(env.XDG_CONFIG_HOME?.trim() || join32(home, ".config"), "zkapi-clientd"));
+  const home = env.HOME?.trim() || homedir15();
+  const configured = env.ZKAPI_CLIENTD_CONFIG_DIR?.trim() || env.OA_CHAT_CONFIG_DIR?.trim() || (process.platform === "darwin" ? join34(home, "Library", "Application Support", "zkapi-clientd") : join34(env.XDG_CONFIG_HOME?.trim() || join34(home, ".config"), "zkapi-clientd"));
   const absolute2 = resolvePath(configured);
   try {
     return realpathSync6(absolute2);
@@ -10125,7 +11921,7 @@ function zkapiWalletDirectory(env) {
   }
 }
 function zkapiFenceScope(input) {
-  return createHash5("sha256").update(zkapiWalletDirectory(input.env)).digest("hex").slice(0, 32);
+  return createHash9("sha256").update(zkapiWalletDirectory(input.env)).digest("hex").slice(0, 32);
 }
 function abandonZkapiFence(path, scope, now) {
   let found = false;
@@ -10145,7 +11941,7 @@ function abandonZkapiFence(path, scope, now) {
   return found;
 }
 function updateState(path, now, mutate) {
-  mkdirSync12(dirname24(path), { recursive: true, mode: 448 });
+  mkdirSync15(dirname27(path), { recursive: true, mode: 448 });
   return withFileLeaseSync(path, (lease) => {
     const day = utcDay(now);
     const current2 = readState(path);
@@ -10532,13 +12328,13 @@ function daemonEnvironment(base, daemonExecutable) {
   try {
     real = realpathSync6(daemonExecutable);
   } catch {}
-  const installBin = dirname24(real);
+  const installBin = dirname27(real);
   const rest = (base.PATH ?? "").split(delimiter5).filter((entry) => entry && entry !== installBin);
   return { ...base, PATH: [installBin, ...rest].join(delimiter5) };
 }
 function standardExecutableDirectories(env, platform2 = process.platform) {
   const home = env.HOME?.trim();
-  const local = home && isAbsolute19(home) ? [join32(home, ".local", "bin")] : [];
+  const local = home && isAbsolute22(home) ? [join34(home, ".local", "bin")] : [];
   if (platform2 === "darwin")
     return [...local, "/opt/homebrew/bin", "/usr/local/bin"];
   if (platform2 === "linux")
@@ -10546,7 +12342,7 @@ function standardExecutableDirectories(env, platform2 = process.platform) {
   return local;
 }
 function trustedChain(path, probe, uid) {
-  for (let current2 = path;; current2 = dirname24(current2)) {
+  for (let current2 = path;; current2 = dirname27(current2)) {
     const stats = probe.stat(current2);
     if (current2 !== path && !stats.isDirectory())
       return false;
@@ -10554,7 +12350,7 @@ function trustedChain(path, probe, uid) {
       return false;
     if ((stats.mode & 18) !== 0)
       return false;
-    if (dirname24(current2) === current2)
+    if (dirname27(current2) === current2)
       return true;
   }
 }
@@ -10569,7 +12365,7 @@ function trustedFallbackExecutable(candidate, probe = DEFAULT_EXECUTABLE_TRUST) 
       return;
     if (!trustedChain(real, probe, uid))
       return;
-    if (!trustedChain(probe.realpath(dirname24(candidate)), probe, uid))
+    if (!trustedChain(probe.realpath(dirname27(candidate)), probe, uid))
       return;
     return real;
   } catch {
@@ -10578,7 +12374,7 @@ function trustedFallbackExecutable(candidate, probe = DEFAULT_EXECUTABLE_TRUST) 
 }
 function resolveExecutable(name, explicit, env, platform2 = process.platform, trust = DEFAULT_EXECUTABLE_TRUST) {
   const pathDirectories = (env.PATH ?? "").split(delimiter5).filter(Boolean);
-  const candidates = explicit ? [explicit] : pathDirectories.map((dir) => join32(dir, name));
+  const candidates = explicit ? [explicit] : pathDirectories.map((dir) => join34(dir, name));
   for (const candidate of candidates) {
     try {
       accessSync8(candidate, constants5.X_OK);
@@ -10591,7 +12387,7 @@ function resolveExecutable(name, explicit, env, platform2 = process.platform, tr
   for (const dir of standardExecutableDirectories(env, platform2)) {
     if (pathDirectories.includes(dir))
       continue;
-    const found = trustedFallbackExecutable(join32(dir, name), trust);
+    const found = trustedFallbackExecutable(join34(dir, name), trust);
     if (found)
       return found;
   }
@@ -10974,7 +12770,7 @@ async function openSession(options, control, recovery) {
   let admissionHeld = false;
   const finished = (async () => {
     try {
-      mkdirSync12(dirname24(statePath), { recursive: true, mode: 448 });
+      mkdirSync15(dirname27(statePath), { recursive: true, mode: 448 });
       const result2 = await withEngineConsultAdmission(statePath, () => {
         leaseHeld = true;
         if (zkapiConsultInFlight)
@@ -11187,9 +12983,9 @@ async function runSession(recovery, options, statePath, bridge, sent, clock2, st
   if (sessionSignal.aborted)
     return refuse(abortCause);
   const sessionId = randomUUID9();
-  const workDir = mkdtempSync2(join32(tmpdir3(), "olympus-zkapi-"));
-  chmodSync7(workDir, 448);
-  const watchdog = join32(workDir, "watchdog.cjs");
+  const workDir = mkdtempSync2(join34(tmpdir3(), "olympus-zkapi-"));
+  chmodSync10(workDir, 448);
+  const watchdog = join34(workDir, "watchdog.cjs");
   const childEnv = childEnvironment(env);
   const groups = [];
   let tor;
@@ -11255,8 +13051,8 @@ async function runSession(recovery, options, statePath, bridge, sent, clock2, st
             return result = fail("confinement_unavailable");
           }
         }
-        const torDataDir = join32(workDir, "tor");
-        mkdirSync12(torDataDir, { mode: 448 });
+        const torDataDir = join34(workDir, "tor");
+        mkdirSync15(torDataDir, { mode: 448 });
         let bootstrapped = false;
         stage("torBootstrapMs");
         tor = supervise("tor", watchdog, [
@@ -11854,7 +13650,7 @@ async function readBounded(response, maxBytes) {
   }
   return { ok: true, text: new TextDecoder().decode(joined) };
 }
-var DAY_MS, PROBE_TIMEOUT_MS = 1e4, MODELS_PROBE_TIMEOUT_MS = 190000, PROBE_MAX_BYTES, MAX_QUESTION_BYTES, POLL_MS = 100, POLICY_POLL_MS = 5000, STOP_GRACE_MS = 1e4, KILL_GRACE_MS = 3000, ZKAPI_SUPPORTED_DAEMON_VERSIONS, ZKAPI_MAX_ALLOWANCE_MICRO_USD = 6000000, RECOVERY_QUESTION = "Reply with the single word OK.", CHILD_ENV_KEYS, KNOWN_DAEMON_ERROR_CODES, ZKAPI_STAGE_LABELS, ZKAPI_CONSULT_ERROR_MESSAGES, MESSAGES, DARWIN_POLICY, SELF_TEST_SCRIPT = `
+var DAY_MS2, PROBE_TIMEOUT_MS = 1e4, MODELS_PROBE_TIMEOUT_MS = 190000, PROBE_MAX_BYTES, MAX_QUESTION_BYTES, POLL_MS = 100, POLICY_POLL_MS = 5000, STOP_GRACE_MS = 1e4, KILL_GRACE_MS = 3000, ZKAPI_SUPPORTED_DAEMON_VERSIONS, ZKAPI_MAX_ALLOWANCE_MICRO_USD = 6000000, RECOVERY_QUESTION = "Reply with the single word OK.", CHILD_ENV_KEYS, KNOWN_DAEMON_ERROR_CODES, ZKAPI_STAGE_LABELS, ZKAPI_CONSULT_ERROR_MESSAGES, MESSAGES, DARWIN_POLICY, SELF_TEST_SCRIPT = `
 const net = require('node:net');
 const dgram = require('node:dgram');
 const { execFileSync } = require('node:child_process');
@@ -11895,7 +13691,7 @@ var init_consult_transport_zkapi = __esm(() => {
   init_engine_maintenance();
   init_managed_tools();
   init_zkapi_consult_settings();
-  DAY_MS = 24 * 60 * 60 * 1000;
+  DAY_MS2 = 24 * 60 * 60 * 1000;
   PROBE_MAX_BYTES = 64 * 1024;
   MAX_QUESTION_BYTES = 8 * 1024;
   ZKAPI_SUPPORTED_DAEMON_VERSIONS = ["0.1.5", "0.1.6", "0.1.6-olympus2", "0.1.6-olympus3", "0.1.6-olympus4"];
@@ -12248,9 +14044,9 @@ var init_publisher_oauth_client = __esm(() => {
 });
 
 // src/workers/credential-broker/index.ts
-import { createHash as createHash7 } from "node:crypto";
+import { createHash as createHash11 } from "node:crypto";
 import { mkdir as mkdir2, readFile as readFile2 } from "node:fs/promises";
-import { dirname as dirname27 } from "node:path";
+import { dirname as dirname30 } from "node:path";
 function isCredentialProvider(value) {
   return typeof value === "string" && CREDENTIAL_PROVIDERS.includes(value);
 }
@@ -12290,8 +14086,8 @@ class JsonCredentialOAuth2StateStore {
     return store.handles[handle];
   }
   leaseTargetPath(handle) {
-    const digest = createHash7("sha256").update(handle).digest("hex");
-    return `${this.path}.refresh-${digest}`;
+    const digest2 = createHash11("sha256").update(handle).digest("hex");
+    return `${this.path}.refresh-${digest2}`;
   }
   async save(handle, state) {
     const queued = this.writes.then(() => this.saveExclusively(handle, state), () => this.saveExclusively(handle, state));
@@ -12319,7 +14115,7 @@ class JsonCredentialOAuth2StateStore {
         merged.pendingRefreshGrantGeneration = undefined;
       store.handles[handle] = pruneUndefined(merged);
       await lease.commit(async () => {
-        await mkdir2(dirname27(this.path), { recursive: true, mode: 448 });
+        await mkdir2(dirname30(this.path), { recursive: true, mode: 448 });
         await writePrivateFileAtomic(this.path, JSON.stringify(store, null, 2));
       });
     });
@@ -12331,7 +14127,7 @@ class JsonCredentialOAuth2StateStore {
         return;
       delete store.handles[handle];
       await lease.commit(async () => {
-        await mkdir2(dirname27(this.path), { recursive: true, mode: 448 });
+        await mkdir2(dirname30(this.path), { recursive: true, mode: 448 });
         await writePrivateFileAtomic(this.path, JSON.stringify(store, null, 2));
       });
     });
@@ -12989,7 +14785,7 @@ function bearerSessionFromMintedToken(options) {
 }
 function mintedSessionCacheKey(namespace, definition, capability, env) {
   const envRefreshToken = firstNonEmptyEnv2(env, definition.oauth2Refresh?.refreshTokenEnvNames ?? []);
-  const envGrant = envRefreshToken ? createHash7("sha256").update(envRefreshToken).digest("hex").slice(0, 32) : "";
+  const envGrant = envRefreshToken ? createHash11("sha256").update(envRefreshToken).digest("hex").slice(0, 32) : "";
   return `${mintedSessionCachePrefix(namespace, definition.handle, capability)}${definition.grantGeneration ?? ""}
 ${envGrant}`;
 }
@@ -14070,15 +15866,15 @@ var init_credential_broker = __esm(() => {
 
 // src/workers/credential-broker/connected-handles.ts
 import { randomUUID as randomUUID10 } from "node:crypto";
-import { existsSync as existsSync15, mkdirSync as mkdirSync14, readFileSync as readFileSync29 } from "node:fs";
-import { homedir as homedir14 } from "node:os";
-import { dirname as dirname28, join as join35 } from "node:path";
+import { existsSync as existsSync18, mkdirSync as mkdirSync17, readFileSync as readFileSync29 } from "node:fs";
+import { homedir as homedir17 } from "node:os";
+import { dirname as dirname31, join as join37 } from "node:path";
 function defaultHandleRegistryPath() {
-  return join35(homedir14(), ".config", "olympus", "handles.json");
+  return join37(homedir17(), ".config", "olympus", "handles.json");
 }
 function readConnectedHandleGrantEpoch(registryPath = defaultHandleRegistryPath()) {
   const path = connectedHandleGrantEpochPath(registryPath);
-  if (!existsSync15(path))
+  if (!existsSync18(path))
     return INITIAL_CONNECTED_HANDLE_GRANT_EPOCH;
   let parsed;
   try {
@@ -14119,7 +15915,7 @@ function readConnectedHandleRegistry(path = defaultHandleRegistryPath()) {
   return readConnectedHandleRegistryForWrite(path).registry;
 }
 function readConnectedHandleRegistryForWrite(path = defaultHandleRegistryPath()) {
-  if (!existsSync15(path)) {
+  if (!existsSync18(path)) {
     return { registry: { version: 1, handles: [] }, preservedUnknownHandles: [] };
   }
   const parsed = JSON.parse(readFileSync29(path, "utf8"));
@@ -14150,7 +15946,7 @@ function readConnectedHandleRegistryForWrite(path = defaultHandleRegistryPath())
   return { registry, preservedUnknownHandles };
 }
 function writeConnectedHandleRegistryWithPreservedUnknowns(registry, path, preservedUnknownHandles) {
-  mkdirSync14(dirname28(path), { recursive: true, mode: 448 });
+  mkdirSync17(dirname31(path), { recursive: true, mode: 448 });
   writePrivateFileAtomicSync(path, JSON.stringify({
     version: 1,
     handles: [
@@ -14160,7 +15956,7 @@ function writeConnectedHandleRegistryWithPreservedUnknowns(registry, path, prese
   }, null, 2));
 }
 function markConnectedHandleReauthRequired(handleId, path = defaultHandleRegistryPath(), now = new Date) {
-  if (!existsSync15(path))
+  if (!existsSync18(path))
     return false;
   return withFileLeaseSync(path, (lease) => {
     const { registry, preservedUnknownHandles } = readConnectedHandleRegistryForWrite(path);
@@ -14190,7 +15986,7 @@ function markConnectedHandleReauthRequired(handleId, path = defaultHandleRegistr
   });
 }
 function markConnectedHandleExchangeVia(handleId, exchangeVia, path = defaultHandleRegistryPath()) {
-  if (!existsSync15(path))
+  if (!existsSync18(path))
     return false;
   return withFileLeaseSync(path, (lease) => {
     const { registry, preservedUnknownHandles } = readConnectedHandleRegistryForWrite(path);
@@ -15889,7 +17685,7 @@ var init_sender_rules = __esm(() => {
 });
 
 // src/core/file-extraction-source.ts
-import { createHash as createHash8 } from "node:crypto";
+import { createHash as createHash12 } from "node:crypto";
 function splitScopedLocalItemId(localItemId) {
   const separator = localItemId.indexOf(":");
   if (separator <= 0 || separator === localItemId.length - 1)
@@ -15927,7 +17723,7 @@ var init_file_extraction_source = __esm(() => {
       this.errorKind = errorKind;
       this.settleAs = FILE_EXTRACTION_SOURCE_ERROR_SETTLEMENTS[errorKind];
       this.retryable = this.settleAs === "failed_retryable";
-      const errorHash = options.detailForHash === undefined ? undefined : createHash8("sha256").update(options.detailForHash).digest("hex").slice(0, ERROR_HASH_CHARS);
+      const errorHash = options.detailForHash === undefined ? undefined : createHash12("sha256").update(options.detailForHash).digest("hex").slice(0, ERROR_HASH_CHARS);
       if (errorHash)
         this.errorHash = errorHash;
       if (options.retryAt !== undefined && Number.isFinite(Date.parse(options.retryAt)))
@@ -16024,7 +17820,7 @@ function childProviderItemId(parentProviderItemId, key) {
 var CHILD_ITEM_ID_SEPARATOR = "#child:";
 
 // src/workers/google-connectors/gmail-mail-record.ts
-import { createHash as createHash9 } from "node:crypto";
+import { createHash as createHash13 } from "node:crypto";
 function isGmailAttachmentPart(part) {
   const type = (part.mimeType ?? "").trim().toLowerCase();
   if (type.startsWith("multipart/"))
@@ -16053,7 +17849,7 @@ function childrenOf(record2, build) {
   return record2.metadataOnly || build.children !== true ? [] : record2.attachments.filter((attachment) => attachment.filename.trim() !== "" && (attachment.partId === "" ? 0 : attachment.partId.split(".").length) <= GMAIL_CHILD_MAX_DEPTH);
 }
 function hashString(value) {
-  return createHash9("sha256").update(value).digest("hex");
+  return createHash13("sha256").update(value).digest("hex");
 }
 function parsedDate(value) {
   if (!value)
@@ -16225,7 +18021,7 @@ var init_request_budget = __esm(() => {
 });
 
 // src/workers/google-connectors/gmail.ts
-import { createHash as createHash10 } from "node:crypto";
+import { createHash as createHash14 } from "node:crypto";
 
 class GoogleGmailSourceConnector {
   id = GMAIL_PROVIDER;
@@ -17039,7 +18835,7 @@ function metadataCount(metadata, key) {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : 0;
 }
 function hashString2(value) {
-  return createHash10("sha256").update(value).digest("hex");
+  return createHash14("sha256").update(value).digest("hex");
 }
 var GMAIL_PROVIDER = "gmail", DEFAULT_GMAIL_SYNC_MAX_MESSAGES = 200, DEFAULT_GMAIL_PAGE_SIZE = 100, MAX_GMAIL_SYNC_MESSAGES = 1000, MAX_GMAIL_LIST_PAGES_PER_RUN = 50, TRAVERSAL_START_MARGIN_MS = 86400000, GMAIL_API_BASE_URL = "https://gmail.googleapis.com/gmail/v1", GMAIL_CURSOR_PREFIX = "gm1:", MAX_GMAIL_CURSOR_LENGTH = 4096, DEFAULT_GMAIL_MAX_RETRIES = 3, MAX_GMAIL_RETRY_DELAY_MS = 30000, GMAIL_PRIVATE_SCOPE_CONFIRMATION_MAX_ITEMS = 32, GMAIL_METADATA_HEADERS, GMAIL_PART_LOCATOR_PREFIX = "gmail-part1:";
 var init_gmail = __esm(() => {
@@ -17055,7 +18851,7 @@ var init_gmail = __esm(() => {
 });
 
 // src/workers/google-connectors/drive.ts
-import { createHash as createHash11 } from "node:crypto";
+import { createHash as createHash15 } from "node:crypto";
 
 class GoogleDriveSourceConnector {
   id = GOOGLE_DRIVE_PROVIDER;
@@ -17621,7 +19417,7 @@ function safeProviderDetail2(value) {
   return value.replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, "[email]").slice(0, 500);
 }
 function hashString3(value) {
-  return createHash11("sha256").update(value).digest("hex");
+  return createHash15("sha256").update(value).digest("hex");
 }
 var GOOGLE_DRIVE_PROVIDER = "google_drive", DEFAULT_GOOGLE_DRIVE_SYNC_MAX_FILES = 200, DEFAULT_GOOGLE_DRIVE_CONTENT_MAX_FILES = 50, DEFAULT_GOOGLE_DRIVE_PAGE_SIZE = 100, DEFAULT_GOOGLE_DRIVE_MAX_TEXT_BYTES = 128000, MAX_GOOGLE_DRIVE_SYNC_FILES = 1000, GOOGLE_DRIVE_API_BASE_URL = "https://www.googleapis.com/drive/v3", GOOGLE_DOC_MIME_TYPE = "application/vnd.google-apps.document", GOOGLE_DRIVE_CURSOR_PREFIX = "gd1:", MAX_GOOGLE_DRIVE_CURSOR_LENGTH = 4096, DEFAULT_GOOGLE_DRIVE_MAX_RETRIES = 3, MAX_GOOGLE_DRIVE_RETRY_DELAY_MS = 30000, GoogleDriveContentTooLargeError, GoogleDriveApiError, GOOGLE_DRIVE_MAX_ANCESTRY_LOOKUPS = 64, FOLDER_LOOKUP_FAILED;
 var init_drive = __esm(() => {
@@ -17843,203 +19639,6 @@ var init_fts = __esm(() => {
     retainer: ["engagement", "agreement", "deposit"]
   });
   INITIALISM_CONNECTORS = new Set(["of", "and", "for", "the", "to", "on", "in", "de", "del", "la", "le", "du", "des", "y"]);
-});
-
-// src/core/secret-patterns.ts
-var PROSE_WORDS, CREDENTIAL_KEYS, CREDENTIAL_KEY_WORDS, LEGACY_KEY_WORDS, CREDENTIAL_QUERY_KEY, PLACEHOLDER_WORDS, BARE_LITERALS, COMMON_OBJECTS, STRONG_QUALIFIERS, ENV_KEY_WORDS, ENV_CREDENTIAL_KEY, KEYWORD, SEPARATOR, VALUE, CREDENTIAL_ASSIGNMENT, ENV_ASSIGNMENT, BLOCK_SCALAR, LABELLED_PASSPHRASE, RECOVERY_CODE_LABEL, LEGACY_CREDENTIAL_ASSIGNMENT;
-var init_secret_patterns = __esm(() => {
-  PROSE_WORDS = new Set([
-    "above",
-    "again",
-    "below",
-    "cannot",
-    "change",
-    "changed",
-    "characters",
-    "choose",
-    "click",
-    "contact",
-    "enter",
-    "expired",
-    "expires",
-    "forgot",
-    "forgotten",
-    "guideline",
-    "guidelines",
-    "hidden",
-    "incorrect",
-    "information",
-    "instruction",
-    "instructions",
-    "invalid",
-    "least",
-    "letters",
-    "link",
-    "manager",
-    "maximum",
-    "min",
-    "minimum",
-    "must",
-    "need",
-    "needed",
-    "needs",
-    "number",
-    "numbers",
-    "optional",
-    "please",
-    "policies",
-    "policy",
-    "protected",
-    "provide",
-    "provided",
-    "required",
-    "requirements",
-    "reset",
-    "retry",
-    "see",
-    "send",
-    "sent",
-    "setting",
-    "settings",
-    "shared",
-    "should",
-    "shown",
-    "sign",
-    "strength",
-    "symbols",
-    "unchanged",
-    "use",
-    "used",
-    "using",
-    "via"
-  ]);
-  CREDENTIAL_KEYS = [
-    { pattern: String.raw`api[_ -]?key`, legacy: true },
-    { pattern: String.raw`access[_ -]?token`, legacy: true },
-    { pattern: String.raw`refresh[_ -]?token`, legacy: true },
-    { pattern: String.raw`client[_ -]?secret`, legacy: true },
-    { pattern: "password", legacy: true },
-    { pattern: String.raw`pass(?:wd|phrase|code)|(?<![a-z])pass|pwd` },
-    { pattern: String.raw`secret[_ -]?(?:access[_ -]?)?key(?:[_-]?base)?` },
-    { pattern: String.raw`private[_ -]?key` },
-    { pattern: "secret" },
-    { pattern: String.raw`token(?!s)` },
-    { pattern: "sig", urlOnly: true }
-  ];
-  CREDENTIAL_KEY_WORDS = CREDENTIAL_KEYS.filter((key) => !key.urlOnly).map((key) => key.pattern).join("|");
-  LEGACY_KEY_WORDS = CREDENTIAL_KEYS.filter((key) => key.legacy).map((key) => key.pattern).join("|");
-  CREDENTIAL_QUERY_KEY = new RegExp(`^(?:${CREDENTIAL_KEYS.map((key) => key.pattern).join("|")})$`, "i");
-  PLACEHOLDER_WORDS = new RegExp([
-    String.raw`(?:^|[^a-z])your[_ .-]?[a-z_ -]{0,16}(?:api|secret|token|key|pass|password|client|value|here)`,
-    String.raw`(?:^|[^a-z])my[_ .-](?:api|secret|token|key|pass|password|client)`,
-    String.raw`(?:^|[^a-z])(?:example|dummy|todo|fixme)(?:[^a-z]|$)`,
-    "placeholder",
-    "redacted",
-    "changeme",
-    "change[_-]me",
-    "replace[_-]?me",
-    "insert[_-]?(?:your|here|key|token)",
-    "[_-]here$",
-    "^n/a$",
-    "not[_ -]?set",
-    "^unset$"
-  ].join("|"), "i");
-  BARE_LITERALS = new Set([
-    "password",
-    "passwd",
-    "passphrase",
-    "secret",
-    "token",
-    "apikey",
-    "api_key",
-    "api-key",
-    "string",
-    "null",
-    "none",
-    "nil",
-    "undefined",
-    "true",
-    "false",
-    "empty",
-    "hidden",
-    "masked",
-    "required",
-    "optional",
-    "changeme",
-    "enabled",
-    "disabled",
-    "encrypted",
-    "hashed",
-    "unknown",
-    "tbd",
-    "pending",
-    "missing"
-  ]);
-  COMMON_OBJECTS = new Set([
-    "user",
-    "users",
-    "body",
-    "data",
-    "form",
-    "state",
-    "props",
-    "creds",
-    "credentials",
-    "account",
-    "profile",
-    "session",
-    "auth",
-    "db",
-    "app",
-    "json",
-    "response",
-    "res",
-    "row",
-    "record",
-    "item",
-    "model"
-  ]);
-  STRONG_QUALIFIERS = new Set([
-    "client",
-    "app",
-    "api",
-    "access",
-    "refresh",
-    "auth",
-    "bearer",
-    "id",
-    "session",
-    "bot",
-    "oauth",
-    "webhook",
-    "signing",
-    "jwt",
-    "service",
-    "personal",
-    "consumer",
-    "shared",
-    "encryption",
-    "master",
-    "admin",
-    "root",
-    "user",
-    "db",
-    "database",
-    "wifi",
-    "email",
-    "login"
-  ]);
-  ENV_KEY_WORDS = CREDENTIAL_KEY_WORDS;
-  ENV_CREDENTIAL_KEY = new RegExp(ENV_KEY_WORDS, "i");
-  KEYWORD = `(?<kw>${CREDENTIAL_KEY_WORDS})`;
-  SEPARATOR = String.raw`["'\x60*_]{0,3}[ \t]*(?::=|=>|[:=])[*_]{0,2}[ \t]*(?<nl>\r?\n[ \t]*)?`;
-  VALUE = String.raw`(?:"(?<dq>(?:[^"\\\n\r]|\\.)*)"|'(?<sq>(?:[^'\\\n\r]|\\.)*)'|\x60(?<bq>[^\x60\n\r]*)\x60|(?<uv>[^\s"'\x60]+))`;
-  CREDENTIAL_ASSIGNMENT = new RegExp(`${KEYWORD}${SEPARATOR}${VALUE}`, "gi");
-  ENV_ASSIGNMENT = new RegExp(String.raw`(?<![A-Za-z0-9_.?&/%+=-])(?=(?:--)?[A-Za-z0-9_.-]*?(?:${ENV_KEY_WORDS}))(?<ek>(?:--)?[A-Za-z_][A-Za-z0-9_.-]*)[ \t]*=(?![=~>])[ \t]*${VALUE}`, "gi");
-  BLOCK_SCALAR = new RegExp(String.raw`${KEYWORD}["'\x60]{0,2}[ \t]*:[ \t]*[|>](?:[+-][1-9]?|[1-9][+-]?)?[ \t]*(?:#[^\r\n]*)?\r?\n(?:[ \t]*\r?\n)*(?<ind>[ \t]+)(?<bv>[^ \t\r\n][^\r\n]*)`, "gi");
-  LABELLED_PASSPHRASE = new RegExp(String.raw`^[ \t>*•-]*(?:[A-Za-z0-9 _.-]{0,30}?)pass(?:word|phrase|code)["'\x60*_]{0,3}[ \t]*(?::=|[:=])[*_]{0,2}[ \t]*(?<mv>[^\s][^\n\r]{5,159})$`, "gim");
-  RECOVERY_CODE_LABEL = new RegExp(String.raw`(?<![A-Za-z0-9])(?:recovery|backup)(?:[ \t_-]+(?:verification|security|login|sign[ -]?in|2fa|mfa|two[ -]factor|account))?[ \t_-]+(?:codes?|keys?)["'\x60*_]{0,3}[ \t]*(?:[:=]|(?<![A-Za-z])(?:is|are)(?![A-Za-z])[ \t]*:?)[*_]{0,2}[ \t]*(?<rest>[^\r\n]{0,200})`, "gi");
-  LEGACY_CREDENTIAL_ASSIGNMENT = new RegExp(String.raw`\b(${LEGACY_KEY_WORDS})\b\s*[:=]\s*['"]?[^'"\s]{12,}`, "gi");
 });
 
 // src/workers/dropbox-files/content-policy.ts
@@ -18443,7 +20042,7 @@ var init_delphi_scorer = __esm(() => {
 });
 
 // src/workers/classification/sniffer.ts
-import { createHash as createHash12 } from "node:crypto";
+import { createHash as createHash16 } from "node:crypto";
 function buildSnifferBatchPrompt(pass, items, ownerContext) {
   const intro = pass === "metadata" ? "Each item below is the NAMES of one file, message or note: its title, folder path, labels and sender." : "Each item below is one document or message: its NAMES (title, folder path, sender) when known, then a short EXCERPT of its text.";
   const lines = items.map((item) => JSON.stringify(pass === "metadata" ? { i: item.i, names: item.material } : { i: item.i, document: item.material }));
@@ -18560,8 +20159,8 @@ var init_sniffer = __esm(() => {
     required: ["verdicts"],
     additionalProperties: false
   };
-  SNIFFER_PROMPT_VERSION = `p-${createHash12("sha256").update(SNIFFER_SYSTEM_PROMPT).update("\x00").update(buildSnifferBatchPrompt("metadata", [{ i: 1, material: "template" }])).update("\x00").update(buildSnifferBatchPrompt("content", [{ i: 1, material: "template" }])).digest("hex").slice(0, 12)}`;
-  SNIFFER_OWNER_CONTEXT_PROMPT_VERSION = `p-${createHash12("sha256").update(SNIFFER_SYSTEM_PROMPT).update("\x00").update(buildSnifferBatchPrompt("metadata", [{ i: 1, material: "template" }], "template")).update("\x00").update(buildSnifferBatchPrompt("content", [{ i: 1, material: "template" }], "template")).digest("hex").slice(0, 12)}`;
+  SNIFFER_PROMPT_VERSION = `p-${createHash16("sha256").update(SNIFFER_SYSTEM_PROMPT).update("\x00").update(buildSnifferBatchPrompt("metadata", [{ i: 1, material: "template" }])).update("\x00").update(buildSnifferBatchPrompt("content", [{ i: 1, material: "template" }])).digest("hex").slice(0, 12)}`;
+  SNIFFER_OWNER_CONTEXT_PROMPT_VERSION = `p-${createHash16("sha256").update(SNIFFER_SYSTEM_PROMPT).update("\x00").update(buildSnifferBatchPrompt("metadata", [{ i: 1, material: "template" }], "template")).update("\x00").update(buildSnifferBatchPrompt("content", [{ i: 1, material: "template" }], "template")).digest("hex").slice(0, 12)}`;
 });
 
 // src/workers/connector-store/secrets-disposition.ts
@@ -18705,7 +20304,7 @@ var init_embedding_identity = __esm(() => {
 });
 
 // src/workers/source-index/embeddings.ts
-import { AsyncLocalStorage as AsyncLocalStorage4 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage5 } from "node:async_hooks";
 var priorityQueryEmbedding, SUPPORTED_IMAGE_MIME_TYPES, TRANSIENT_EMBEDDING_STATUSES;
 var init_embeddings = __esm(() => {
   init_operation_error();
@@ -18713,7 +20312,7 @@ var init_embeddings = __esm(() => {
   init_model_transport();
   init_zkapi_consult_settings();
   init_embedding_identity();
-  priorityQueryEmbedding = new AsyncLocalStorage4;
+  priorityQueryEmbedding = new AsyncLocalStorage5;
   SUPPORTED_IMAGE_MIME_TYPES = new Set(["image/jpeg", "image/png"]);
   TRANSIENT_EMBEDDING_STATUSES = new Set([429, 500, 502, 503, 504]);
 });
@@ -19141,9 +20740,9 @@ var init_tier_content_purge = __esm(() => {
 });
 // src/workers/source-index/built-in-embedding/litert-runtime.ts
 import { spawn as spawn4 } from "node:child_process";
-import { closeSync as closeSync8, constants as constants7, existsSync as existsSync17, fstatSync as fstatSync3, openSync as openSync7, readdirSync as readdirSync8, statSync as statSync17 } from "node:fs";
-import { homedir as homedir16 } from "node:os";
-import { delimiter as delimiter6, dirname as dirname30, isAbsolute as isAbsolute21, join as join37 } from "node:path";
+import { closeSync as closeSync8, constants as constants7, existsSync as existsSync20, fstatSync as fstatSync3, openSync as openSync7, readdirSync as readdirSync8, statSync as statSync17 } from "node:fs";
+import { homedir as homedir19 } from "node:os";
+import { delimiter as delimiter6, dirname as dirname33, isAbsolute as isAbsolute24, join as join39 } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath as fileURLToPath7 } from "node:url";
 function helperEnvironment() {
@@ -19155,7 +20754,7 @@ function helperEnvironment() {
       env[name] = value;
     }
   }
-  env.HOME ??= homedir16();
+  env.HOME ??= homedir19();
   return env;
 }
 
@@ -19317,10 +20916,10 @@ class HelperProcess {
   }
 }
 function helperPath() {
-  const here = dirname30(fileURLToPath7(import.meta.url));
+  const here = dirname33(fileURLToPath7(import.meta.url));
   for (const name of ["litert-helper.js", "litert-helper.ts"]) {
-    const candidate = join37(here, name);
-    if (existsSync17(candidate))
+    const candidate = join39(here, name);
+    if (existsSync20(candidate))
       return candidate;
   }
   throw new Error("The built-in search model helper is missing from this install.");
@@ -19329,12 +20928,12 @@ function resolveBun() {
   const bunName = process.platform === "win32" ? "bun.exe" : "bun";
   const candidates = [
     process.versions.bun ? process.execPath : undefined,
-    process.env.BUN_INSTALL ? join37(process.env.BUN_INSTALL, "bin", bunName) : undefined,
-    ...(process.env.PATH ?? "").split(delimiter6).filter(Boolean).map((directory) => join37(directory, bunName)),
-    join37(homedir16(), ".bun", "bin", bunName)
+    process.env.BUN_INSTALL ? join39(process.env.BUN_INSTALL, "bin", bunName) : undefined,
+    ...(process.env.PATH ?? "").split(delimiter6).filter(Boolean).map((directory) => join39(directory, bunName)),
+    join39(homedir19(), ".bun", "bin", bunName)
   ];
   for (const candidate of candidates) {
-    if (!candidate || !isAbsolute21(candidate))
+    if (!candidate || !isAbsolute24(candidate))
       continue;
     try {
       if (statSync17(candidate).isFile())
@@ -19661,12 +21260,6 @@ var init_answer_activity = __esm(() => {
   DEFAULT_ANSWER_LEASE_MS = 20 * 60000;
 });
 
-// src/core/opsec.ts
-var init_opsec = __esm(() => {
-  init_secret_patterns();
-  init_types();
-});
-
 // src/core/evidence-versions.ts
 var DOCUMENT_FAMILIES;
 var init_evidence_versions = __esm(() => {
@@ -19674,7 +21267,7 @@ var init_evidence_versions = __esm(() => {
 });
 
 // src/core/analyst.ts
-import { AsyncLocalStorage as AsyncLocalStorage5 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage6 } from "node:async_hooks";
 var analystAbortSignalStorage, CONFLICT_RULE = "- If items give different values for the same thing, give each value with its item's name and date; never pick one silently.", ANALYST_SYSTEM, ANALYST_COMPACT_SYSTEM, ANALYST_AUDIT_SYSTEM, DEFAULT_ANALYST_MAX_OUTPUT_CHARS = 1600, AUDIT_OUTPUT_HEADROOM_CHARS = 800, DEFAULT_AUDIT_MAX_OUTPUT_CHARS, promptEncoder, STOP_WORDS2, MEANING_BEARING_MODIFIERS, TOKEN_EDGE_PUNCTUATION;
 var init_analyst = __esm(() => {
   init_opsec();
@@ -19683,7 +21276,7 @@ var init_analyst = __esm(() => {
   init_types();
   init_operation_error();
   init_evidence_versions();
-  analystAbortSignalStorage = new AsyncLocalStorage5;
+  analystAbortSignalStorage = new AsyncLocalStorage6;
   ANALYST_SYSTEM = [
     "You are an evidence analyst. Answer the question USING ONLY the numbered evidence provided.",
     "Rules:",
@@ -19937,11 +21530,6 @@ var init_analyst_openclaw_infer = __esm(() => {
   OPENCLAW_INFER_MAX_PROMPT_BYTES = MAX_PROMPT_BYTES;
 });
 
-// src/core/parent-label.ts
-var init_parent_label = __esm(() => {
-  init_types();
-});
-
 // src/core/evidence-pack.ts
 var utf8;
 var init_evidence_pack = __esm(() => {
@@ -19953,9 +21541,6 @@ var init_evidence_pack = __esm(() => {
   init_answer_latency_trace();
   utf8 = new TextEncoder;
 });
-
-// src/core/secret-location-note.ts
-var init_secret_location_note = () => {};
 
 // src/workers/source-index/analyst-pool.ts
 class SecureAnalystPoolState {
@@ -20343,7 +21928,7 @@ var init_approved_scope_filter = __esm(() => {
 });
 
 // src/workers/dropbox-files/locator-result-projector.ts
-import { join as join38 } from "node:path";
+import { join as join40 } from "node:path";
 import { pathToFileURL as pathToFileURL2 } from "node:url";
 function locatorFromRootedDropboxPath(value, localMapping) {
   const displayPath = normalizeRootedDropboxDisplayPath(value);
@@ -20389,7 +21974,7 @@ function finderUrlForDropboxPath(mapping, displayPath) {
   const relativeSegments = localRelativeDropboxPathSegments(displayPath, mapping.dropboxPathPrefix);
   if (!relativeSegments)
     return;
-  return pathToFileURL2(join38(mapping.rootPath, ...relativeSegments)).href;
+  return pathToFileURL2(join40(mapping.rootPath, ...relativeSegments)).href;
 }
 function localRelativeDropboxPathSegments(displayPath, dropboxPathPrefix) {
   const normalizedPrefix = normalizeOptionalDropboxPrefix(dropboxPathPrefix);
@@ -20450,14 +22035,14 @@ var init_locator_result_projector = __esm(() => {
 });
 
 // src/workers/dropbox-files/dropbox-content-hash.ts
-import { createHash as createHash13 } from "node:crypto";
+import { createHash as createHash17 } from "node:crypto";
 function computeDropboxContentHash(bytes) {
   const blockDigests = [];
   for (let offset = 0;offset < bytes.byteLength; offset += DROPBOX_CONTENT_HASH_BLOCK_SIZE) {
     const block = bytes.subarray(offset, Math.min(offset + DROPBOX_CONTENT_HASH_BLOCK_SIZE, bytes.byteLength));
-    blockDigests.push(createHash13("sha256").update(block).digest());
+    blockDigests.push(createHash17("sha256").update(block).digest());
   }
-  return createHash13("sha256").update(Buffer.concat(blockDigests)).digest("hex");
+  return createHash17("sha256").update(Buffer.concat(blockDigests)).digest("hex");
 }
 var DROPBOX_CONTENT_HASH_BLOCK_SIZE;
 var init_dropbox_content_hash = __esm(() => {
@@ -20474,7 +22059,7 @@ var init_dropbox = __esm(() => {
 import { Buffer as Buffer2 } from "node:buffer";
 import { spawn as spawn5 } from "node:child_process";
 import { accessSync as accessSync9, constants as fsConstants5, statSync as statSync18 } from "node:fs";
-import { delimiter as delimiter7, join as join39 } from "node:path";
+import { delimiter as delimiter7, join as join41 } from "node:path";
 function errnoCode(error) {
   const code = error?.code;
   return typeof code === "string" && code.length > 0 ? code : "UNKNOWN";
@@ -20521,7 +22106,7 @@ function resolveExtractionCommand(command, options = {}) {
   const isExecutable = options.isExecutable ?? executableFile;
   const directories = [...path.split(delimiter7).filter(Boolean), ...fallbackDirs];
   for (const directory of directories) {
-    const candidate = join39(directory, command);
+    const candidate = join41(directory, command);
     if (isExecutable(candidate)) {
       if (cacheable)
         resolvedCommands.set(cacheKey, candidate);
@@ -22448,16 +24033,16 @@ var init_text = __esm(() => {
 });
 
 // src/workers/file-extraction/extractors/apple-vision-ocr.ts
-import { existsSync as existsSync18 } from "node:fs";
-import { dirname as dirname31, join as join40 } from "node:path";
+import { existsSync as existsSync21 } from "node:fs";
+import { dirname as dirname34, join as join42 } from "node:path";
 import { fileURLToPath as fileURLToPath8 } from "node:url";
-function resolveAppleVisionOcrScript(moduleUrl = import.meta.url, exists = existsSync18) {
-  let directory = dirname31(fileURLToPath8(moduleUrl));
+function resolveAppleVisionOcrScript(moduleUrl = import.meta.url, exists = existsSync21) {
+  let directory = dirname34(fileURLToPath8(moduleUrl));
   for (let depth2 = 0;depth2 < 6; depth2 += 1) {
-    const candidate = join40(directory, APPLE_VISION_OCR_SCRIPT);
+    const candidate = join42(directory, APPLE_VISION_OCR_SCRIPT);
     if (exists(candidate))
       return candidate;
-    const parent = dirname31(directory);
+    const parent = dirname34(directory);
     if (parent === directory)
       break;
     directory = parent;
@@ -22563,7 +24148,7 @@ var init_ocr_probe_fixture = __esm(() => {
 // src/workers/file-extraction/extractors/ocr-capability.ts
 import { mkdtemp, readFile as readFile4, readdir, rm as rm2, writeFile } from "node:fs/promises";
 import { tmpdir as tmpdir4 } from "node:os";
-import { join as join41 } from "node:path";
+import { join as join43 } from "node:path";
 function ocrmypdfArguments(input) {
   return [
     "--force-ocr",
@@ -22664,7 +24249,7 @@ async function probeTesseract(input) {
   }
 }
 async function probePdftoppm(input) {
-  const prefix = join41(input.directory, "render");
+  const prefix = join43(input.directory, "render");
   try {
     await input.runner({
       command: PDFTOPPM_COMMAND,
@@ -22679,20 +24264,20 @@ async function probePdftoppm(input) {
   if (!first)
     return "failed";
   if (input.tesseract === "ok") {
-    const read = await probeTesseract({ runner: input.runner, imagePath: join41(input.directory, first) });
+    const read = await probeTesseract({ runner: input.runner, imagePath: join43(input.directory, first) });
     if (read !== "ok")
       return "failed";
   }
   return "ok";
 }
 async function probeOcrmypdf(input) {
-  const sidecarPath = join41(input.directory, "probe-sidecar.txt");
+  const sidecarPath = join43(input.directory, "probe-sidecar.txt");
   try {
     await input.runner({
       command: OCRMYPDF_COMMAND,
       args: ocrmypdfArguments({
         inputPath: input.pdfPath,
-        outputPath: join41(input.directory, "probe-output.pdf"),
+        outputPath: join43(input.directory, "probe-output.pdf"),
         sidecarPath
       }),
       timeoutMs: PROBE_OCRMYPDF_TIMEOUT_MS
@@ -22714,9 +24299,9 @@ async function probeOcrCapability(options = {}) {
   let ocrmypdf = "failed";
   let directory;
   try {
-    directory = await mkdtemp(join41(tmpdir4(), PROBE_TEMP_PREFIX));
-    const imagePath = join41(directory, "probe.jpg");
-    const pdfPath = join41(directory, "probe.pdf");
+    directory = await mkdtemp(join43(tmpdir4(), PROBE_TEMP_PREFIX));
+    const imagePath = join43(directory, "probe.jpg");
+    const pdfPath = join43(directory, "probe.pdf");
     await writeFile(imagePath, ocrProbeJpeg());
     await writeFile(pdfPath, buildOcrProbePdf());
     tesseract = await probeTesseract({ runner, imagePath });
@@ -22786,8 +24371,8 @@ var init_remote_vlm = __esm(() => {
 
 // src/workers/source-index/built-in-reasoning/off-thread.ts
 import { Worker as Worker2 } from "node:worker_threads";
-import { existsSync as existsSync19 } from "node:fs";
-import { dirname as dirname32, join as join42 } from "node:path";
+import { existsSync as existsSync22 } from "node:fs";
+import { dirname as dirname35, join as join44 } from "node:path";
 import { fileURLToPath as fileURLToPath9 } from "node:url";
 
 class ModelThread {
@@ -22885,10 +24470,10 @@ function cancelled() {
   return Object.assign(new Error("The request was cancelled."), { name: "AbortError" });
 }
 function modelWorkerPath() {
-  const here = dirname32(fileURLToPath9(import.meta.url));
+  const here = dirname35(fileURLToPath9(import.meta.url));
   for (const name of ["model-worker.js", "model-worker.ts"]) {
-    const path = join42(here, name);
-    if (existsSync19(path))
+    const path = join44(here, name);
+    if (existsSync22(path))
       return path;
   }
   throw new Error("The built-in model worker is not installed.");
@@ -23685,81 +25270,15 @@ var init_source_delete_holds = __esm(() => {
   init_requests();
 });
 
-// connect-relay/shared/tokens.ts
-var SECRET = "[A-Za-z0-9_-]{43}", INSTALL = "[a-z2-7]{32}", PATTERN;
-var init_tokens = __esm(() => {
-  PATTERN = {
-    access: new RegExp(`^oly2\\.(${INSTALL})\\.${SECRET}$`),
-    refresh: new RegExp(`^oly2r\\.(${INSTALL})\\.${SECRET}$`),
-    code: new RegExp(`^oly2c\\.(${INSTALL})\\.${SECRET}$`),
-    handoff: new RegExp(`^oly2g\\.(${INSTALL})\\.${SECRET}$`),
-    private: new RegExp(`^oly2p\\.(${INSTALL})\\.${SECRET}$`)
-  };
-});
-
-// src/workers/remote-oauth/pinned-clients.ts
-var GROK_REDIRECT_URIS, CURSOR_REDIRECT_URI = "https://www.cursor.com/agents/mcp/oauth/callback", CURSOR_REDIRECT_URIS;
-var init_pinned_clients = __esm(() => {
-  GROK_REDIRECT_URIS = Object.freeze([
-    "https://grok.com/connectors-oauth-exchange-code/",
-    "https://console.x.ai/connectors-oauth-exchange-code/"
-  ]);
-  CURSOR_REDIRECT_URIS = Object.freeze([
-    CURSOR_REDIRECT_URI,
-    "https://www.cursor.com/bot/mcp/oauth/callback",
-    "https://grok.com/connectors-oauth-exchange-code/"
-  ]);
-});
-
-// src/core/remote-oauth-store.ts
-var REMOTE_OAUTH_REFRESH_TOKEN_TTL_SECONDS, REMOTE_PAIRING_CODE_TTL_MS, PAIRING_SELECTOR_LENGTH = 4, PAIRING_SECRET_LENGTH = 8, PAIRING_CODE_LENGTH, UNUSED_CLIENT_PRUNE_AGE_MS;
-var init_remote_oauth_store = __esm(() => {
-  init_tokens();
-  init_pinned_clients();
-  init_operation_caller();
-  REMOTE_OAUTH_REFRESH_TOKEN_TTL_SECONDS = 90 * 24 * 3600;
-  REMOTE_PAIRING_CODE_TTL_MS = 10 * 60000;
-  PAIRING_CODE_LENGTH = PAIRING_SELECTOR_LENGTH + PAIRING_SECRET_LENGTH;
-  UNUSED_CLIENT_PRUNE_AGE_MS = 24 * 3600000;
-});
-
-// src/core/waiting-private-questions.ts
-var WAITING_QUESTION_LIMITS;
-var init_waiting_private_questions = __esm(() => {
-  init_sqlite_migrations();
-  init_olympus_layout();
-  WAITING_QUESTION_LIMITS = Object.freeze({
-    questionBytes: 2048,
-    localQuestionBytes: 8 * 1024,
-    selectorBytes: 4096,
-    answerBytes: 128 * 1024,
-    ttlMs: 7 * 24 * 60 * 60000,
-    reanswerAfterMs: 10 * 60000
-  });
-});
-
-// src/core/remote-connections.ts
-var init_remote_connections = __esm(() => {
-  init_operation_error();
-  init_worker_auth();
-  init_operation_caller();
-  init_sqlite_migrations();
-  init_remote_oauth_store();
-  init_waiting_private_questions();
-  init_tokens();
-  init_linux_engine_layout();
-  init_olympus_layout();
-});
-
 // src/core/ingestion-health-state.ts
-import { existsSync as existsSync20, mkdirSync as mkdirSync16, readFileSync as readFileSync32, writeFileSync as writeFileSync10 } from "node:fs";
-import { dirname as dirname33 } from "node:path";
+import { existsSync as existsSync23, mkdirSync as mkdirSync19, readFileSync as readFileSync32, writeFileSync as writeFileSync10 } from "node:fs";
+import { dirname as dirname36 } from "node:path";
 function defaultIngestionHealthStatePath(env = process.env) {
   return sharedDataPath("ingestion-doctor-state", env);
 }
 function readIngestionHealthState(path) {
   try {
-    if (!existsSync20(path))
+    if (!existsSync23(path))
       return;
     const parsed = JSON.parse(readFileSync32(path, "utf8"));
     const record2 = asRecord16(parsed);
@@ -23782,7 +25301,7 @@ function readIngestionHealthState(path) {
   }
 }
 function writeIngestionHealthState(path, state) {
-  mkdirSync16(dirname33(path), { recursive: true, mode: 448 });
+  mkdirSync19(dirname36(path), { recursive: true, mode: 448 });
   writeFileSync10(path, `${JSON.stringify(state, null, 2)}
 `);
 }
@@ -23891,6 +25410,7 @@ var init_tier_migration_reports = __esm(() => {
 
 // src/core/source-forget-registry.ts
 var init_source_forget_registry = __esm(() => {
+  init_app_release_log();
   init_operation_error();
   init_remote_connections();
   init_waiting_private_questions();
@@ -23917,6 +25437,7 @@ var init_source_forget_registry = __esm(() => {
 var backgroundTrashRemovals;
 var init_data_lifecycle = __esm(() => {
   init_mac_engine_daemon();
+  init_app_release_log();
   init_tier_ledger_path();
   init_olympus_layout();
   init_source_placement();
@@ -26823,7 +28344,7 @@ function asRecord7(value) {
 
 // src/native-plugin.ts
 init_config();
-import { createHash as createHash15 } from "node:crypto";
+import { createHash as createHash19 } from "node:crypto";
 
 // src/core/delphi.ts
 init_operation_error();
@@ -30068,6 +31589,391 @@ function constantTimeStringEqual(actual, expected) {
 // src/core/operations.ts
 init_release_manifest();
 
+// src/core/app-release-agent.ts
+init_app_release_capture();
+init_release_manifest();
+
+// src/core/remote-result.ts
+init_app_release_capture();
+init_operation_error();
+init_opsec();
+init_parent_label();
+init_release_manifest();
+init_secret_location_note();
+var MAX_ANSWER = 64 * 1024;
+var MAX_SENT = 16 * 1024;
+var MAX_TITLE = 400;
+var MAX_ROUTE = 300;
+var MAX_MESSAGE = 2000;
+var MAX_CORPORA = 200;
+var JOB_ID = /^saj_[A-Za-z0-9_-]{43}$/;
+var PARAM_NAME = /^[a-z][a-z0-9_]{0,63}$/;
+var CORPUS_ID = /^[a-z0-9_]+(\.[a-z0-9_-]+)+$/i;
+var MODEL_ID = /^[A-Za-z0-9._:/-]{1,128}$/;
+var REMOTE_PENDING_MESSAGE = "Olympus is still working on this and it keeps running. " + "Call source_answer_result with this job_id to get the result; repeat while it says working. Do not ask again.";
+var REMOTE_PROVIDER_UNKNOWN_NOTE = "Olympus does not know which company runs this agent, so it could not make sure the answer came from another company's model.";
+var PROVIDER_LABELS = {
+  gmail: "Gmail",
+  google_drive: "Google Drive",
+  "google-drive": "Google Drive",
+  google_calendar: "Google Calendar",
+  dropbox: "Dropbox",
+  x: "X bookmarks",
+  readwise: "Readwise",
+  telegram: "Telegram",
+  whatsapp: "WhatsApp",
+  whatsapp_personal: "WhatsApp",
+  whatsapp_business: "WhatsApp",
+  apple_messages: "Apple Messages",
+  signal: "Signal",
+  reflect: "Reflect",
+  roam: "Roam",
+  evernote: "Evernote",
+  local_files: "Files on this computer"
+};
+var FAMILY_LABELS = {
+  email: "Mail",
+  file: "Files",
+  chat: "Messages",
+  note: "Notes",
+  x: "X bookmarks",
+  readwise: "Readwise"
+};
+var OTHER_SOURCE_LABEL = "Other source";
+function providerSourceLabel(provider) {
+  return Object.prototype.hasOwnProperty.call(PROVIDER_LABELS, provider) ? PROVIDER_LABELS[provider] : undefined;
+}
+var REMOTE_SOURCE_LABELS = Object.freeze([...new Set([
+  ...Object.values(PROVIDER_LABELS),
+  ...Object.values(FAMILY_LABELS),
+  OTHER_SOURCE_LABEL
+])].sort());
+var REMOTE_REFUSAL_CODES = Object.freeze([
+  "refused",
+  "anonymous_answers_off",
+  "cancelled",
+  "gate_refused",
+  "internal_error",
+  "invalid_params",
+  "model_same_provider",
+  "question_empty",
+  "question_too_long",
+  "route_not_configured",
+  "secret_detected",
+  "settings_invalid",
+  "settings_stale",
+  "writer_declined",
+  "writer_failed",
+  "invalid_question",
+  "busy",
+  "acknowledgements_incomplete",
+  "funding_date_missing",
+  "funding_date_invalid",
+  "note_expired",
+  "daemon_api_key_missing",
+  "daemon_not_found",
+  "tor_not_found",
+  "unresolved_session",
+  "unresolved_session_other_wallet",
+  "no_unresolved_session",
+  "stranded_processes",
+  "daemon_already_running",
+  "tor_port_busy",
+  "tor_bootstrap_failed",
+  "daemon_start_failed",
+  "daemon_version_unsupported",
+  "daemon_supervisor_unsupported",
+  "relay_mismatch",
+  "key_reuse_on",
+  "key_reuse_unverified",
+  "daemon_keyless",
+  "daemon_identity_failed",
+  "daemon_api_key_rejected",
+  "session_process_exited",
+  "confinement_self_test_failed",
+  "confinement_unavailable",
+  "policy_unavailable",
+  "model_unavailable",
+  "daily_cap_reached",
+  "spend_cap_reached",
+  "state_unavailable",
+  "timeout",
+  "aborted",
+  "redirect_refused",
+  "response_too_large",
+  "invalid_response",
+  "daemon_error",
+  "transport_failed",
+  "teardown_incomplete",
+  "authorization_refused",
+  "session_spent"
+].filter((code, index, all) => all.indexOf(code) === index));
+var REMOTE_DAEMON_CODES = Object.freeze([
+  "busy",
+  "request_cancelled",
+  "funding_required",
+  "model_budget_unavailable",
+  "model_policy_unavailable",
+  "invalid_model",
+  "anonymous_access_failed",
+  "upstream_error",
+  "invalid_upstream_response",
+  "withdrawal_pending",
+  "wallet_conflict",
+  "invalid_request_error",
+  "invalid_body",
+  "testnet_password_required",
+  "invalid_api_key",
+  "local_connection_required",
+  "browser_origin_denied",
+  "unrecognized"
+]);
+var REFRESH_STATUSES = Object.freeze(["running", "completed", "failed"]);
+var TRUST_DOMAINS = Object.freeze(["public_safe", "internal", "secure_local"]);
+var RETRIEVAL_MODES = Object.freeze(["keyword", "hybrid"]);
+var RETRIEVAL_STATES = Object.freeze(["ready", "degraded"]);
+var NETWORK_IDENTITIES = Object.freeze(["hidden", "visible", "not_verified"]);
+var CLEANUPS = Object.freeze(["as_written", "light_cleanup", "custom"]);
+var OUTCOMES = Object.freeze(["not_sent", "sent_failed", "unknown"]);
+var REMOTE_DESCRIPTIONS = {
+  source_index_status: [
+    "Inspect source-index corpus status: each corpus's refresh status and aggregate counts.",
+    "Read-only: it never returns item metadata, sender counts, ledgers, source text, vectors or credentials.",
+    "Legacy extraction filter fields are refused on the connector-store status surface rather than silently returning whole-corpus counts."
+  ].join(" ")
+};
+var REMOTE_ERROR_TEXT = {
+  invalid_params: "The request was not valid. Check the arguments against the tool's schema and try again.",
+  invalid_request: "The request was not valid. Check the arguments against the tool's schema and try again.",
+  unsupported_filter: "That filter is not supported here.",
+  config_error: "Olympus on the computer needs setup before it can answer.",
+  argus_unreachable: "Olympus could not reach its private analyst. Try again later.",
+  argus_error: "Olympus's private analyst could not answer. Try again later.",
+  email_not_configured: "Olympus on the computer needs setup before it can answer.",
+  email_unreachable: "Olympus could not reach its source worker in time. Try again later.",
+  email_error: "Olympus could not complete this request.",
+  email_policy_violation: "Olympus withheld this result under the owner's privacy rules.",
+  source_index_not_enabled: "Searching sources is not turned on in Olympus on the computer.",
+  source_index_policy_violation: "Olympus withheld this result under the owner's privacy rules.",
+  source_index_error: "Olympus could not complete this request.",
+  source_answer_busy: "Olympus is already answering as many questions as it can at once. Wait for the answers in progress (call source_answer_result with their job ids), then ask again.",
+  source_answer_job_not_found: "No Olympus answer with that job_id is available to this connection. It may have expired or Olympus may have restarted. Ask the question again with source_answer.",
+  source_answer_deadline: "The answer did not finish within Olympus's time limit and was stopped. Ask a narrower question, or try again later.",
+  source_answer_too_large: "The finished answer was too large for Olympus to return. Ask a narrower question.",
+  internal_error: "Olympus could not complete this request.",
+  unknown_operation: "Olympus has no operation with that name here.",
+  operation_unavailable: "That operation is not enabled on this Olympus install.",
+  unauthorized: "A connection token is required.",
+  invalid_token: "The connection token is not valid or has been revoked.",
+  remote_connections_unavailable: "Olympus could not check the connection token. Try again later.",
+  not_found: "There is nothing at this path.",
+  method_not_allowed: "That HTTP method is not allowed here.",
+  unsupported_media_type: "The request body must be JSON (Content-Type: application/json).",
+  payload_too_large: "The request body is too large.",
+  olympus_offline: "Olympus is off; try again later."
+};
+var REMOTE_ERROR_CODES = Object.freeze(Object.keys(REMOTE_ERROR_TEXT));
+var REFERENCED_ERROR_CODES = new Set([
+  "internal_error",
+  "email_error",
+  "source_index_error",
+  "argus_error",
+  "config_error"
+]);
+var PENDING_SCHEMA = {
+  type: "object",
+  description: "Still working: call source_answer_result with job_id, again while it says working.",
+  additionalProperties: false,
+  required: ["status", "job_id", "elapsed_ms", "next_tool", "message"],
+  properties: {
+    status: { const: "working" },
+    job_id: { type: "string", pattern: JOB_ID.source },
+    elapsed_ms: { type: "integer", minimum: 0 },
+    next_tool: { const: "source_answer_result" },
+    message: { type: "string" }
+  }
+};
+var CITATION_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: ["label"],
+  properties: {
+    label: { type: "string", enum: [...REMOTE_SOURCE_LABELS] },
+    title: { type: "string", maxLength: MAX_TITLE },
+    date: { type: "string", format: "date" }
+  }
+};
+var ANONYMOUS_ANSWERED_SCHEMA = {
+  type: "object",
+  description: 'The anonymous reply. When rewritten is true, say the question was rewritten first and offer to show "sent". When provider_note is present, pass it on as written.',
+  additionalProperties: false,
+  required: ["kind", "status", "reply", "level", "rewritten", "remembered", "network_identity"],
+  properties: {
+    kind: { const: "anonymous_answer" },
+    status: { const: "answered" },
+    reply: { type: "string", maxLength: MAX_ANSWER },
+    level: { enum: ["strict", "standard"] },
+    rewritten: { type: "boolean" },
+    remembered: { type: "boolean" },
+    network_identity: { enum: [...NETWORK_IDENTITIES] },
+    cleanup: { enum: [...CLEANUPS] },
+    model: { type: "string", pattern: MODEL_ID.source },
+    route: { type: "string", maxLength: MAX_ROUTE },
+    sent: { type: "string", maxLength: MAX_SENT },
+    note: { type: "string", maxLength: MAX_MESSAGE },
+    provider_note: { const: REMOTE_PROVIDER_UNKNOWN_NOTE }
+  }
+};
+var ANONYMOUS_NEEDS_CHOICE_SCHEMA = {
+  type: "object",
+  description: "Nothing was sent: ask the user once, Strict or Standard, then call again with level (and remember=true to keep it).",
+  additionalProperties: false,
+  required: ["kind", "status", "message", "options"],
+  properties: {
+    kind: { const: "anonymous_answer" },
+    status: { const: "needs_choice" },
+    message: { type: "string" },
+    options: {
+      type: "object",
+      additionalProperties: false,
+      required: ["suggested_level", "suggested_cleanup", "custom_instruction"],
+      properties: {
+        suggested_level: { enum: ["strict", "standard"] },
+        suggested_cleanup: { enum: [...CLEANUPS] },
+        custom_instruction: { type: "boolean" }
+      }
+    }
+  }
+};
+var ANONYMOUS_REFUSED_SCHEMA = {
+  type: "object",
+  description: "Not answered: tell the user the message in those words. outcome says whether the question left (absent: never handed to the transport).",
+  additionalProperties: false,
+  required: ["kind", "status", "code", "message"],
+  properties: {
+    kind: { const: "anonymous_answer" },
+    status: { const: "refused" },
+    code: { enum: [...REMOTE_REFUSAL_CODES] },
+    message: { type: "string", maxLength: MAX_MESSAGE },
+    outcome: { enum: [...OUTCOMES] },
+    daemon_code: { enum: [...REMOTE_DAEMON_CODES] },
+    sent: { type: "string", maxLength: MAX_SENT }
+  }
+};
+var SOURCE_INDEX_STATUS_SCHEMA = {
+  type: "object",
+  description: "Per-corpus status and counts.",
+  additionalProperties: false,
+  required: ["kind", "corpora"],
+  properties: {
+    kind: { const: "source_index_status" },
+    generated_at: { type: "string", format: "date-time" },
+    corpora: {
+      type: "array",
+      maxItems: MAX_CORPORA,
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["corpus_id", "label", "configured"],
+        properties: {
+          corpus_id: { type: "string", pattern: CORPUS_ID.source, maxLength: 128 },
+          label: { type: "string", enum: [...REMOTE_SOURCE_LABELS] },
+          trust_domain: { enum: [...TRUST_DOMAINS] },
+          configured: { type: "boolean" },
+          retrieval: {
+            type: "object",
+            additionalProperties: false,
+            required: ["mode", "state"],
+            properties: {
+              mode: { enum: [...RETRIEVAL_MODES] },
+              state: { enum: [...RETRIEVAL_STATES] }
+            }
+          },
+          last_refresh: {
+            type: "object",
+            additionalProperties: false,
+            required: ["status"],
+            properties: {
+              status: { enum: [...REFRESH_STATUSES] },
+              completed_at: { type: "string", format: "date-time" }
+            }
+          },
+          counts: {
+            type: "object",
+            additionalProperties: false,
+            required: ["indexed_items", "chunks", "embedded_chunks"],
+            properties: {
+              indexed_items: { type: "integer", minimum: 0 },
+              chunks: { type: "integer", minimum: 0 },
+              embedded_chunks: { type: "integer", minimum: 0 }
+            }
+          }
+        }
+      }
+    }
+  }
+};
+var REMOTE_ERROR_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: ["error", "message"],
+  properties: {
+    error: { enum: [...REMOTE_ERROR_CODES], description: "A stable error code." },
+    message: { type: "string", description: "A fixed sentence for this code." },
+    ref: { type: "string", pattern: "^[0-9a-f]{16}$", description: "Where the owner finds this failure in Olympus's log on the computer." },
+    param: { type: "string", pattern: PARAM_NAME.source, description: "The argument at fault, when it is one the operation declares." },
+    retry_after_seconds: {
+      type: "integer",
+      minimum: 1,
+      maximum: 86400,
+      description: "Seconds to wait before trying again, when Olympus is busy or offline; also sent as the HTTP Retry-After header."
+    }
+  }
+};
+
+// src/core/app-release-agent.ts
+var FAMILY_SOURCE = { email: "Mail", file: "Files", chat: "Messages", note: "Notes" };
+function releasedItemsOfAnswer(result) {
+  return (Array.isArray(result.evidence) ? result.evidence : []).filter((entry) => entry !== null && typeof entry === "object").slice(0, 48).map((entry) => releasedItemFromEvidence(entry, (typeof entry.provider === "string" ? providerSourceLabel(entry.provider) : undefined) ?? (typeof entry.family === "string" ? FAMILY_SOURCE[entry.family] : undefined) ?? "Other source", typeof entry.title === "string" ? entry.title : undefined));
+}
+async function recordLocalAgentAnswer(input) {
+  try {
+    const { caller } = input;
+    if (caller?.surface !== "mcp" && caller?.surface !== "native")
+      return;
+    if (!input.result || typeof input.result !== "object")
+      return;
+    const result = input.result;
+    const question = sourceAnswerQuestion(input.operation, input.args, result.status, result.job_id);
+    if (typeof result.answer !== "string")
+      return;
+    const withheld = isWithheldSourceAnswer(result);
+    const records = [];
+    recordAppRequest({
+      caller,
+      question,
+      capture: { items: withheld ? [] : releasedItemsOfAnswer(result), heldBack: 0, withheld },
+      fallback: (record) => records.push(record)
+    });
+    if (records.length === 0)
+      return;
+    if (input.write) {
+      for (const record of records)
+        input.write(record);
+      return;
+    }
+    const { openAppReleaseLog: openAppReleaseLog2, appReleaseLogDbPath: appReleaseLogDbPath2 } = await Promise.resolve().then(() => (init_app_release_log(), exports_app_release_log));
+    const { resolveRemoteConnectionsDbPath: resolveRemoteConnectionsDbPath2 } = await Promise.resolve().then(() => (init_remote_connections(), exports_remote_connections));
+    const log = openAppReleaseLog2(appReleaseLogDbPath2(resolveRemoteConnectionsDbPath2(process.env)));
+    try {
+      for (const record of records)
+        log.record(record);
+    } finally {
+      log.close();
+    }
+  } catch {}
+}
+
 // src/core/first-run-privacy.ts
 init_atomic_file();
 init_sovereignty();
@@ -30078,20 +31984,20 @@ function isPendingPrivacyPolicy(config) {
 // src/core/messaging-runtime.ts
 init_atomic_file();
 import { spawnSync as spawnSync5 } from "node:child_process";
-import { existsSync as existsSync9, rmSync as rmSync4 } from "node:fs";
-import { homedir as homedir10 } from "node:os";
-import { dirname as dirname19, join as join26 } from "node:path";
+import { existsSync as existsSync12, rmSync as rmSync4 } from "node:fs";
+import { homedir as homedir13 } from "node:os";
+import { dirname as dirname22, join as join28 } from "node:path";
 import { fileURLToPath as fileURLToPath6 } from "node:url";
 function telegramPythonVenvDir(options = {}) {
   const env = options.env ?? process.env;
-  const home = options.homeDir ?? env.HOME ?? homedir10();
-  return join26(env.XDG_CACHE_HOME ?? join26(home, ".cache"), "olympus", "telegram-python");
+  const home = options.homeDir ?? env.HOME ?? homedir13();
+  return join28(env.XDG_CACHE_HOME ?? join28(home, ".cache"), "olympus", "telegram-python");
 }
 function telegramPythonExecutable(options = {}) {
   if (options.pythonExecutable)
     return options.pythonExecutable;
-  const isolated = join26(telegramPythonVenvDir(options), "bin", "python");
-  if (existsSync9(isolated))
+  const isolated = join28(telegramPythonVenvDir(options), "bin", "python");
+  if (existsSync12(isolated))
     return isolated;
   if (typeof Bun !== "undefined")
     return Bun.which("python3") ?? undefined;
@@ -30108,12 +32014,12 @@ var TELEGRAM_TELETHON_VERSION = "1.45.0";
 var TELEGRAM_TELETHON_REQUIREMENT = `Telethon==${TELEGRAM_TELETHON_VERSION}`;
 var TELEGRAM_REQUIREMENTS_FILE = "scripts/telegram-requirements.txt";
 var TELEGRAM_BUILD_REQUIREMENTS_FILE = "scripts/telegram-build-requirements.txt";
-function telegramRequirementsRoot(moduleUrl = import.meta.url, exists = existsSync9) {
-  let directory = dirname19(fileURLToPath6(moduleUrl));
+function telegramRequirementsRoot(moduleUrl = import.meta.url, exists = existsSync12) {
+  let directory = dirname22(fileURLToPath6(moduleUrl));
   for (let depth = 0;depth < 6; depth += 1) {
-    if (exists(join26(directory, TELEGRAM_REQUIREMENTS_FILE)))
+    if (exists(join28(directory, TELEGRAM_REQUIREMENTS_FILE)))
       return directory;
-    const parent = dirname19(directory);
+    const parent = dirname22(directory);
     if (parent === directory)
       break;
     directory = parent;
@@ -30121,11 +32027,11 @@ function telegramRequirementsRoot(moduleUrl = import.meta.url, exists = existsSy
   return;
 }
 function telegramInstallCommands(input) {
-  const python = join26(input.venvDir, "bin", "python");
+  const python = join28(input.venvDir, "bin", "python");
   const pip = [python, "-m", "pip", "install", "--quiet", "--require-hashes", "--no-deps"];
   return [
-    [...pip, "-r", join26(input.packageRoot, TELEGRAM_BUILD_REQUIREMENTS_FILE)],
-    [...pip, "--no-build-isolation", "-r", join26(input.packageRoot, TELEGRAM_REQUIREMENTS_FILE)]
+    [...pip, "-r", join28(input.packageRoot, TELEGRAM_BUILD_REQUIREMENTS_FILE)],
+    [...pip, "--no-build-isolation", "-r", join28(input.packageRoot, TELEGRAM_REQUIREMENTS_FILE)]
   ];
 }
 function telegramDependencyHint(packageRoot = telegramRequirementsRoot()) {
@@ -30142,9 +32048,9 @@ init_file_lease();
 init_worker_auth();
 init_linux_desktop_entry();
 import { spawnSync as spawnSync7 } from "node:child_process";
-import { chmodSync as chmodSync8, closeSync as closeSync7, constants as constants6, copyFileSync, existsSync as existsSync13, fstatSync as fstatSync2, fsyncSync as fsyncSync2, ftruncateSync, lstatSync as lstatSync14, linkSync as linkSync2, mkdirSync as mkdirSync13, openSync as openSync6, readFileSync as readFileSync28, readlinkSync as readlinkSync4, readdirSync as readdirSync7, realpathSync as realpathSync7, renameSync as renameSync5, rmSync as rmSync8, rmdirSync, statSync as statSync16, symlinkSync as symlinkSync2, writeFileSync as writeFileSync8 } from "node:fs";
+import { chmodSync as chmodSync11, closeSync as closeSync7, constants as constants6, copyFileSync, existsSync as existsSync16, fstatSync as fstatSync2, fsyncSync as fsyncSync2, ftruncateSync, lstatSync as lstatSync17, linkSync as linkSync2, mkdirSync as mkdirSync16, openSync as openSync6, readFileSync as readFileSync28, readlinkSync as readlinkSync4, readdirSync as readdirSync7, realpathSync as realpathSync7, renameSync as renameSync5, rmSync as rmSync8, rmdirSync, statSync as statSync16, symlinkSync as symlinkSync2, writeFileSync as writeFileSync8 } from "node:fs";
 import { createRequire as createRequire4 } from "node:module";
-import { basename as basename6, dirname as dirname26, join as join34, relative as relative4, resolve as resolve9, sep as sep5 } from "node:path";
+import { basename as basename6, dirname as dirname29, join as join36, relative as relative4, resolve as resolve9, sep as sep5 } from "node:path";
 init_linux_engine_layout();
 init_atomic_file();
 init_linux_engine_layout();
@@ -30169,19 +32075,19 @@ var UPDATE_MAX_BYTES = 512 * 1024;
 // src/core/engine-service.ts
 import { spawn as spawn3, spawnSync as spawnSync6 } from "node:child_process";
 init_atomic_file();
-import { existsSync as existsSync12, lstatSync as lstatSync13, readdirSync as readdirSync6, readFileSync as readFileSync27, renameSync as renameSync4, statSync as statSync15 } from "node:fs";
-import { homedir as homedir13, platform as osPlatform } from "node:os";
-import { basename as basename5, dirname as dirname25, isAbsolute as isAbsolute20, join as join33, resolve as resolvePath2 } from "node:path";
+import { existsSync as existsSync15, lstatSync as lstatSync16, readdirSync as readdirSync6, readFileSync as readFileSync27, renameSync as renameSync4, statSync as statSync15 } from "node:fs";
+import { homedir as homedir16, platform as osPlatform } from "node:os";
+import { basename as basename5, dirname as dirname28, isAbsolute as isAbsolute23, join as join35, resolve as resolvePath2 } from "node:path";
 
 // src/core/engine-children.ts
 init_atomic_file();
 init_remote_access();
-import { existsSync as existsSync10, mkdirSync as mkdirSync10, readFileSync as readFileSync22 } from "node:fs";
-import { dirname as dirname20, join as join27 } from "node:path";
+import { existsSync as existsSync13, mkdirSync as mkdirSync13, readFileSync as readFileSync22 } from "node:fs";
+import { dirname as dirname23, join as join29 } from "node:path";
 var ENGINE_CHILDREN_SCHEMA = "olympus.engine.children.v2";
 var ENGINE_CHILDREN_SCHEMA_V1 = "olympus.engine.children.v1";
 function engineChildrenPath(env = process.env) {
-  return join27(olympusDataDir(env), "engine", "children.json");
+  return join29(olympusDataDir(env), "engine", "children.json");
 }
 function readEngineChildren(path) {
   try {
@@ -30229,32 +32135,32 @@ var ENGINE_LABEL = "ai.olympusplugin.engine";
 var PACKAGE_NAMES = new Set(["olympus", "olympus-source-checkout"]);
 function enginePaths(homeDir) {
   const home = absolute2(homeDir, "home directory");
-  const logDir = join33(home, "Library", "Logs", "Olympus");
-  const appSupportDir = join33(home, "Library", "Application Support", "Olympus");
+  const logDir = join35(home, "Library", "Logs", "Olympus");
+  const appSupportDir = join35(home, "Library", "Application Support", "Olympus");
   const dataEnv = { HOME: home };
   return {
     label: ENGINE_LABEL,
-    plistPath: join33(home, "Library", "LaunchAgents", `${ENGINE_LABEL}.plist`),
+    plistPath: join35(home, "Library", "LaunchAgents", `${ENGINE_LABEL}.plist`),
     logDir,
-    logPath: join33(logDir, "engine.log"),
-    errorLogPath: join33(logDir, "engine.err"),
-    configPath: join33(home, ".olympus", "engine.json"),
-    sovereigntyPath: join33(home, ".olympus", "sovereignty.json"),
+    logPath: join35(logDir, "engine.log"),
+    errorLogPath: join35(logDir, "engine.err"),
+    configPath: join35(home, ".olympus", "engine.json"),
+    sovereigntyPath: join35(home, ".olympus", "sovereignty.json"),
     appSupportDir,
-    helperAppPath: join33(appSupportDir, ENGINE_HELPER_APP_NAME),
-    helperExecutablePath: join33(appSupportDir, ENGINE_HELPER_APP_NAME, "Contents", "MacOS", ENGINE_HELPER_EXECUTABLE),
-    appDir: join33(appSupportDir, "app"),
-    previousAppDir: join33(appSupportDir, "app.previous"),
-    runtimeDir: join33(appSupportDir, "runtime"),
-    workerEnvPath: join33(home, ".config", "olympus", "worker.env"),
+    helperAppPath: join35(appSupportDir, ENGINE_HELPER_APP_NAME),
+    helperExecutablePath: join35(appSupportDir, ENGINE_HELPER_APP_NAME, "Contents", "MacOS", ENGINE_HELPER_EXECUTABLE),
+    appDir: join35(appSupportDir, "app"),
+    previousAppDir: join35(appSupportDir, "app.previous"),
+    runtimeDir: join35(appSupportDir, "runtime"),
+    workerEnvPath: join35(home, ".config", "olympus", "worker.env"),
     statusPath: engineStatusPath(dataEnv),
     childrenPath: engineChildrenPath(dataEnv),
-    modelsDir: join33(olympusDataDir(dataEnv), "models"),
+    modelsDir: join35(olympusDataDir(dataEnv), "models"),
     remoteAccessDir: remoteAccessDir(dataEnv)
   };
 }
 function engineServicePaths(options = {}) {
-  const env = { ...options.env ?? process.env, HOME: options.homeDir ?? options.env?.HOME ?? homedir13() };
+  const env = { ...options.env ?? process.env, HOME: options.homeDir ?? options.env?.HOME ?? homedir16() };
   if ((options.platform ?? process.platform) !== "linux") {
     const paths = enginePaths(env.HOME);
     const daemonPlistPath = options.daemonPlistPath ?? MAC_ENGINE_DAEMON_PLIST;
@@ -30267,23 +32173,23 @@ function engineServicePaths(options = {}) {
     label: "olympus-engine.service",
     plistPath: l.unitPath,
     logDir: l.stateDir,
-    logPath: join33(l.stateDir, "engine.log"),
-    errorLogPath: join33(l.stateDir, "engine.err"),
+    logPath: join35(l.stateDir, "engine.log"),
+    errorLogPath: join35(l.stateDir, "engine.err"),
     configPath: l.configPath,
     sovereigntyPath: l.sovereigntyPath,
     appSupportDir: l.packageDir,
-    appDir: join33(l.packageDir, "app"),
-    previousAppDir: join33(l.packageDir, "app.previous"),
-    runtimeDir: join33(l.packageDir, "runtime"),
+    appDir: join35(l.packageDir, "app"),
+    previousAppDir: join35(l.packageDir, "app.previous"),
+    runtimeDir: join35(l.packageDir, "runtime"),
     workerEnvPath: l.workerEnvPath,
-    statusPath: join33(l.dataDir, "engine/status.json"),
-    childrenPath: join33(l.dataDir, "engine/children.json"),
-    modelsDir: join33(l.dataDir, "models"),
-    remoteAccessDir: join33(l.dataDir, "connect-relay")
+    statusPath: join35(l.dataDir, "engine/status.json"),
+    childrenPath: join35(l.dataDir, "engine/children.json"),
+    modelsDir: join35(l.dataDir, "models"),
+    remoteAccessDir: join35(l.dataDir, "connect-relay")
   };
 }
 function engineStatusPath(env = process.env) {
-  return join33(olympusDataDir(env), "engine", "status.json");
+  return join35(olympusDataDir(env), "engine", "status.json");
 }
 function readEngineWorkerHealth(statusPath) {
   try {
@@ -30304,7 +32210,7 @@ function readEngineWorkerProblem(statusPath) {
   return worker?.state === "failing" ? worker.message ?? "The engine worker failed to become ready." : undefined;
 }
 function readEngineConfig(path) {
-  if (!existsSync12(path))
+  if (!existsSync15(path))
     return;
   let parsed;
   try {
@@ -30424,16 +32330,16 @@ function defaultPidAlive(pid) {
   }
 }
 function inspectEngine(options = {}) {
-  const homeDir = absolute2(options.homeDir ?? homedir13(), "home directory");
+  const homeDir = absolute2(options.homeDir ?? homedir16(), "home directory");
   const paths = engineServicePaths(options);
-  const installed = existsSync12(paths.plistPath);
+  const installed = existsSync15(paths.plistPath);
   const base = {
     ...paths.engineManager ? { manager: paths.engineManager } : {},
     label: paths.label,
     installed,
     plist_path: paths.plistPath,
     config_path: paths.configPath,
-    config_present: existsSync12(paths.configPath),
+    config_present: existsSync15(paths.configPath),
     log_path: paths.logPath,
     error_log_path: paths.errorLogPath
   };
@@ -30503,7 +32409,7 @@ function normalizedPlatform(platform2) {
 }
 function absolute2(value, label) {
   const trimmed = value.trim();
-  if (trimmed && isAbsolute20(trimmed) && !/[\0\r\n]/.test(trimmed))
+  if (trimmed && isAbsolute23(trimmed) && !/[\0\r\n]/.test(trimmed))
     return trimmed;
   throw new OperationError("config_error", `Could not resolve an absolute ${label} path.`);
 }
@@ -30563,7 +32469,7 @@ function systemdCgroupEmpty(group, root = "/sys/fs/cgroup") {
   if (!group.startsWith("/user.slice/") || group.split("/").includes(".."))
     return;
   try {
-    return /^populated 0$/m.test(readFileSync28(join34(root, group, "cgroup.events"), "utf8"));
+    return /^populated 0$/m.test(readFileSync28(join36(root, group, "cgroup.events"), "utf8"));
   } catch (e) {
     if (e.code !== "ENOENT")
       return;
@@ -30571,13 +32477,13 @@ function systemdCgroupEmpty(group, root = "/sys/fs/cgroup") {
     if (uid === undefined || !group.startsWith(`/user.slice/user-${uid}.slice/user@${uid}.service/`))
       return;
     try {
-      readFileSync28(join34(root, "cgroup.controllers"));
-      statSync16(dirname26(join34(root, group)));
+      readFileSync28(join36(root, "cgroup.controllers"));
+      statSync16(dirname29(join36(root, group)));
     } catch {
       return;
     }
     try {
-      statSync16(join34(root, group));
+      statSync16(join36(root, group));
       return;
     } catch (error) {
       return error.code === "ENOENT" ? true : undefined;
@@ -30613,7 +32519,7 @@ function linuxLayoutFor(options) {
 }
 function currentProgram(l) {
   try {
-    return JSON.parse(readFileSync28(join34(l.stateDir, "service-current.json"), "utf8")).program;
+    return JSON.parse(readFileSync28(join36(l.stateDir, "service-current.json"), "utf8")).program;
   } catch (e) {
     if (e.code === "ENOENT")
       return;
@@ -30630,11 +32536,11 @@ function linuxEngineCustody(l, facts, options = {}) {
     return "unknown";
   if (facts.control_group && !waitForEmptyCgroup(facts.control_group, options))
     return "unknown";
-  const childrenPath = join34(l.dataDir, "engine/children.json");
+  const childrenPath = join36(l.dataDir, "engine/children.json");
   const record2 = readEngineChildren(childrenPath);
-  if (existsSync13(childrenPath) && (!record2 || record2.children.length > 0))
+  if (existsSync16(childrenPath) && (!record2 || record2.children.length > 0))
     return "unknown";
-  if (!existsSync13(l.receiptPath) && !existsSync13(l.unitPath))
+  if (!existsSync16(l.receiptPath) && !existsSync16(l.unitPath))
     return "none";
   return (options.workerStopped ?? workerSocketListenerStopped)(l.workerSocketPath) === true ? "none" : "unknown";
 }
@@ -30644,9 +32550,9 @@ init_linux_engine_layout();
 init_model_transport();
 init_config();
 import { spawnSync as spawnSync8 } from "node:child_process";
-import { existsSync as existsSync22, readFileSync as readFileSync34 } from "node:fs";
-import { join as join45 } from "node:path";
-import { homedir as homedir18 } from "node:os";
+import { existsSync as existsSync25, readFileSync as readFileSync34 } from "node:fs";
+import { join as join47 } from "node:path";
+import { homedir as homedir21 } from "node:os";
 init_openclaw_executable();
 init_worker_service();
 init_worker_auth();
@@ -30655,7 +32561,7 @@ init_sovereignty();
 // src/core/setup-preflight.ts
 init_secret_store();
 init_worker_auth();
-import { existsSync as existsSync14 } from "node:fs";
+import { existsSync as existsSync17 } from "node:fs";
 async function setupPreflight(options) {
   const inputEnv = options.env ?? (options.homeDir ? { HOME: options.homeDir } : process.env);
   const env = environmentWithWorkerSetupEnv({
@@ -30663,7 +32569,7 @@ async function setupPreflight(options) {
     ...options.homeDir ? { homeDir: options.homeDir } : {},
     ...options.workerEnvPath ? { workerEnvPath: options.workerEnvPath } : {}
   });
-  const managedInstall = options.workerEnvPath || options.homeDir || inputEnv.HOME?.trim() && existsSync14(workerSetupEnvPath(options));
+  const managedInstall = options.workerEnvPath || options.homeDir || inputEnv.HOME?.trim() && existsSync17(workerSetupEnvPath(options));
   const credentialEnv = managedInstall ? readWorkerSetupEnv(options) ?? {} : env;
   let secretStore = options.secretStore;
   const getSecretStore = () => secretStore ??= createDefaultSecretStore({
@@ -30757,7 +32663,7 @@ function storeSecretRemedy(key) {
 }
 
 // src/workers/credential-degradation.ts
-import { createHash as createHash6 } from "node:crypto";
+import { createHash as createHash10 } from "node:crypto";
 function credentialConfigFingerprint(profileId, profile) {
   const material = JSON.stringify({
     version: 1,
@@ -30769,7 +32675,7 @@ function credentialConfigFingerprint(profileId, profile) {
     secret_ref: profile.secretRef ?? null,
     purpose: profile.purpose ?? null
   });
-  return createHash6("sha256").update(material, "utf8").digest("hex");
+  return createHash10("sha256").update(material, "utf8").digest("hex");
 }
 var DEFAULT_MAX_ATTEMPTS = 3;
 var DEFAULT_RETRY_DELAYS_MS = [30000, 60000];
@@ -30979,9 +32885,9 @@ init_linux_engine_layout();
 init_google_handle_compatibility();
 init_model_transport();
 init_zkapi_consult_settings();
-import { mkdirSync as mkdirSync15, readFileSync as readFileSync30, rmSync as rmSync9, writeFileSync as writeFileSync9 } from "node:fs";
-import { homedir as homedir15 } from "node:os";
-import { dirname as dirname29, join as join36 } from "node:path";
+import { mkdirSync as mkdirSync18, readFileSync as readFileSync30, rmSync as rmSync9, writeFileSync as writeFileSync9 } from "node:fs";
+import { homedir as homedir18 } from "node:os";
+import { dirname as dirname32, join as join38 } from "node:path";
 init_secret_store();
 init_worker_service();
 init_http_timeout();
@@ -31020,18 +32926,18 @@ function defaultDetachedOAuthStateDir(env = process.env) {
   const linuxPath = linuxOwnerConfigPath("pending-oauth", env);
   if (linuxPath)
     return linuxPath;
-  return join36(homedir15(), ".olympus", "pending-oauth");
+  return join38(homedir18(), ".olympus", "pending-oauth");
 }
 function readDetachedOAuthState(path) {
   try {
     const state = sanitizeDetachedOAuthState(JSON.parse(readFileSync30(path, "utf8")));
     if (process.platform === "linux" && state.logPath) {
       const layout = resolveLinuxEngineLayout();
-      const legacyLogs = join36(layout.home, ".olympus/logs") + "/";
-      if (readLinuxEngineReceipt(layout.receiptPath) && dirname29(path) === join36(layout.configDir, "pending-oauth") && state.logPath.startsWith(legacyLogs)) {
+      const legacyLogs = join38(layout.home, ".olympus/logs") + "/";
+      if (readLinuxEngineReceipt(layout.receiptPath) && dirname32(path) === join38(layout.configDir, "pending-oauth") && state.logPath.startsWith(legacyLogs)) {
         const name = state.logPath.slice(legacyLogs.length);
         if (isLegacyLinuxSetting(`logs/${name}`))
-          state.logPath = join36(layout.configDir, "logs", name);
+          state.logPath = join38(layout.configDir, "logs", name);
       }
     }
     return state;
@@ -31108,10 +33014,10 @@ init_consult_transport_zkapi();
 
 // src/core/consult-gate.ts
 init_owner_config_read();
-import { createHash as createHash14 } from "node:crypto";
-import { existsSync as existsSync21, readFileSync as readFileSync33, statSync as statSync19 } from "node:fs";
-import { homedir as homedir17 } from "node:os";
-import { basename as basename7, dirname as dirname34, join as join43 } from "node:path";
+import { createHash as createHash18 } from "node:crypto";
+import { existsSync as existsSync24, readFileSync as readFileSync33, statSync as statSync19 } from "node:fs";
+import { homedir as homedir20 } from "node:os";
+import { basename as basename7, dirname as dirname37, join as join45 } from "node:path";
 import { fileURLToPath as fileURLToPath10 } from "node:url";
 init_opsec();
 init_types();
@@ -31349,31 +33255,31 @@ var VOCABULARY_DIR = ["assets", "consult", "vocabulary"];
 var CONSULT_VOCABULARY_MAX_COMPRESSED_BYTES = 16 * 1024 * 1024;
 var CONSULT_VOCABULARY_MAX_EXPANDED_BYTES = 64 * 1024 * 1024;
 function consultUserVocabularyDir(env = process.env) {
-  return env.OLYMPUS_CONSULT_VOCABULARY_DIR?.trim() || (linuxOwnerConfigPath("consult/vocabulary", env) ?? join43(env.HOME?.trim() || homedir17(), ".olympus", "consult", "vocabulary"));
+  return env.OLYMPUS_CONSULT_VOCABULARY_DIR?.trim() || (linuxOwnerConfigPath("consult/vocabulary", env) ?? join45(env.HOME?.trim() || homedir20(), ".olympus", "consult", "vocabulary"));
 }
 var vocabularyCache = new Map;
 function verifiedPackFile(path, sha256) {
   try {
-    if (!existsSync21(path))
+    if (!existsSync24(path))
       return "missing";
     if (statSync19(path).size > CONSULT_VOCABULARY_MAX_COMPRESSED_BYTES)
       return "too_large";
     const gz = readFileSync33(path);
-    return createHash14("sha256").update(gz).digest("hex") === sha256 ? gz : "hash_mismatch";
+    return createHash18("sha256").update(gz).digest("hex") === sha256 ? gz : "hash_mismatch";
   } catch {
     return "unreadable";
   }
 }
 function consultVocabularyRoot(moduleUrl = import.meta.url) {
-  const here = dirname34(fileURLToPath10(moduleUrl));
-  const root = basename7(here) === "core" && basename7(dirname34(here)) === "src" ? dirname34(dirname34(here)) : basename7(here) === "dist" ? dirname34(here) : undefined;
-  return root !== undefined && existsSync21(join43(root, ...VOCABULARY_DIR)) ? root : undefined;
+  const here = dirname37(fileURLToPath10(moduleUrl));
+  const root = basename7(here) === "core" && basename7(dirname37(here)) === "src" ? dirname37(dirname37(here)) : basename7(here) === "dist" ? dirname37(here) : undefined;
+  return root !== undefined && existsSync24(join45(root, ...VOCABULARY_DIR)) ? root : undefined;
 }
 function consultVocabularyFileStatus(options = {}, env = process.env) {
   const selection = consultVocabularySelection(options);
   const root = consultVocabularyRoot();
   const status = selection.shipped.map((id) => {
-    const result = root ? verifiedPackFile(join43(root, ...VOCABULARY_DIR, `${id}.txt.gz`), CONSULT_VOCABULARY_PACKS[id]) : "missing";
+    const result = root ? verifiedPackFile(join45(root, ...VOCABULARY_DIR, `${id}.txt.gz`), CONSULT_VOCABULARY_PACKS[id]) : "missing";
     return { id, origin: "shipped", state: typeof result === "string" ? result : "verified" };
   });
   if (selection.user.length > 0) {
@@ -31381,7 +33287,7 @@ function consultVocabularyFileStatus(options = {}, env = process.env) {
     const manifest = new Map(userManifestEntries(userDir));
     for (const id of selection.user) {
       const sha256 = manifest.get(id);
-      const result = !manifest.has(id) ? "missing" : sha256 === undefined ? "hash_mismatch" : verifiedPackFile(join43(userDir, `${id}.txt.gz`), sha256);
+      const result = !manifest.has(id) ? "missing" : sha256 === undefined ? "hash_mismatch" : verifiedPackFile(join45(userDir, `${id}.txt.gz`), sha256);
       status.push({ id, origin: "user", state: typeof result === "string" ? result : "verified" });
     }
   }
@@ -31391,8 +33297,8 @@ function userManifestEntries(userDir) {
   if (!userDir)
     return [];
   try {
-    const path = join43(userDir, "manifest.json");
-    if (!existsSync21(path) || statSync19(path).size > 1024 * 1024)
+    const path = join45(userDir, "manifest.json");
+    if (!existsSync24(path) || statSync19(path).size > 1024 * 1024)
       return [];
     const manifest = JSON.parse(readFileSync33(path, "utf8"));
     if (!manifest || typeof manifest !== "object" || Array.isArray(manifest))
@@ -32552,7 +34458,7 @@ init_still_image_readiness();
 init_owner_config_read();
 init_secret_store();
 import { closeSync as closeSync9, constants as constants8, fstatSync as fstatSync4, openSync as openSync8, readSync } from "node:fs";
-import { join as join44 } from "node:path";
+import { join as join46 } from "node:path";
 var CONSULT_SETTINGS_VERSION = 1;
 var CONSULT_SETTINGS_MAX_BYTES = 16 * 1024;
 var CONSULT_LEVELS = Object.freeze(["unnamed", "general"]);
@@ -32588,7 +34494,7 @@ function consultSettingsPath(env = process.env) {
   const home = env.HOME?.trim();
   if (process.platform === "linux" && home && !home.startsWith("/"))
     return;
-  return home ? linuxOwnerConfigPath("consult.json", env) ?? join44(home, ".olympus", "consult.json") : undefined;
+  return home ? linuxOwnerConfigPath("consult.json", env) ?? join46(home, ".olympus", "consult.json") : undefined;
 }
 var __consultSettingsTestHooks = { afterOpen: undefined, afterStat: undefined, afterRead: undefined };
 function parseConsultSettings(value) {
@@ -32824,11 +34730,11 @@ function errorCode(error) {
 
 // src/core/doctor.ts
 async function defaultDoctorHostProbe(env = process.env, options = {}) {
-  const home = env.HOME?.trim() || homedir18();
+  const home = env.HOME?.trim() || homedir21();
   const paths = engineServicePaths({ homeDir: home, env });
   const openclawPath = resolveOpenClawExecutable({ env, homeDir: home });
   const engine = process.platform === "darwin" || process.platform === "linux" ? inspectEngine({ homeDir: home, env }) : { installed: false, state: "not_loaded" };
-  const legacyWorkerUnit = process.platform === "darwin" || process.platform === "linux" ? existsSync22(workerServicePaths(process.platform, home).unitPath) : false;
+  const legacyWorkerUnit = process.platform === "darwin" || process.platform === "linux" ? existsSync25(workerServicePaths(process.platform, home).unitPath) : false;
   const health = process.platform === "linux" && engine.installed ? await waitForEngineHealthy({ paths, expectedBuild: linuxInstalledBuild({ homeDir: home, env }) }, { timeoutMs: 0 }) : undefined;
   return {
     ...openclawPath ? { openclawPath } : {},
@@ -32945,7 +34851,7 @@ function doctorSovereigntyEngine(deps) {
   if (inline !== undefined)
     return loadSovereigntyEngine({ inlineConfig: inline });
   const configPath = doctorSovereigntyConfigPath(deps);
-  if (configPath === undefined || !existsSync22(configPath))
+  if (configPath === undefined || !existsSync25(configPath))
     return;
   return loadSovereigntyEngine({ configPath, ...deps.env ? { env: deps.env } : {} });
 }
@@ -32957,7 +34863,7 @@ function doctorSovereigntyConfigPath(deps) {
   if (deps.env === undefined)
     return defaultSovereigntyConfigPath();
   const home = deps.env.HOME?.trim();
-  return home ? (deps.platform ?? process.platform) === "linux" ? resolveLinuxEngineLayout(deps.env).sovereigntyPath : join45(home, ".olympus", "sovereignty.json") : undefined;
+  return home ? (deps.platform ?? process.platform) === "linux" ? resolveLinuxEngineLayout(deps.env).sovereigntyPath : join47(home, ".olympus", "sovereignty.json") : undefined;
 }
 async function safeCheck(name, run) {
   try {
@@ -33547,7 +35453,7 @@ function tierMigrationStoppedGraceDays(env) {
   const value = Number(raw);
   return Number.isFinite(value) && value >= 0 ? value : DEFAULT_TIER_MIGRATION_STOPPED_GRACE_DAYS;
 }
-var DAY_MS2 = 24 * 60 * 60 * 1000;
+var DAY_MS3 = 24 * 60 * 60 * 1000;
 function approvedTierMigrationInProgress(value, now, graceDays) {
   const migration = asRecord17(value);
   if (migration.in_progress !== true)
@@ -33567,8 +35473,8 @@ function approvedTierMigrationInProgress(value, now, graceDays) {
   if (state === "stopped") {
     const stoppedAt = typeof migration.stopped_at === "string" ? Date.parse(migration.stopped_at) : Number.NaN;
     const ageMs = Number.isFinite(stoppedAt) ? Math.max(0, now.getTime() - stoppedAt) : Number.POSITIVE_INFINITY;
-    if (ageMs > graceDays * DAY_MS2) {
-      const when = Number.isFinite(ageMs) ? `migration stopped ${Math.floor(ageMs / DAY_MS2)} days ago` : "migration stopped at an unknown time";
+    if (ageMs > graceDays * DAY_MS3) {
+      const when = Number.isFinite(ageMs) ? `migration stopped ${Math.floor(ageMs / DAY_MS3)} days ago` : "migration stopped at an unknown time";
       return {
         state,
         approvalEntryId,
@@ -34227,7 +36133,7 @@ function readRegistrySafely(deps) {
 }
 function defaultCommandExists(command) {
   const path = process.env.PATH ?? "";
-  return path.split(":").some((dir) => Boolean(dir) && existsSync22(join45(dir, command)));
+  return path.split(":").some((dir) => Boolean(dir) && existsSync25(join47(dir, command)));
 }
 function defaultPythonModuleExists(pythonCommand, moduleName) {
   const proc = spawnSync8(pythonCommand, ["-c", `import ${moduleName}`], { stdio: "ignore" });
@@ -34246,7 +36152,7 @@ function errorDetail(error) {
 // src/core/ocr-readiness.ts
 init_apple_vision_ocr();
 init_ocr_capability();
-import { existsSync as existsSync23, readFileSync as readFileSync35 } from "node:fs";
+import { existsSync as existsSync26, readFileSync as readFileSync35 } from "node:fs";
 var ARCH_IDS2 = ["arch", "archlinux", "omarchy", "manjaro", "endeavouros", "cachyos", "arcolinux", "garuda"];
 var DEBIAN_IDS2 = ["debian", "ubuntu", "linuxmint", "pop", "raspbian", "neon", "elementary", "zorin"];
 var FEDORA_IDS2 = ["fedora", "rhel", "centos", "rocky", "almalinux", "ol", "nobara"];
@@ -34302,7 +36208,7 @@ function ocrInstallRemedy(input) {
   return "Install the packages that provide tesseract (with its English language data) and pdftoppm (poppler-utils) with your package manager.";
 }
 function visionReady(platform2, preference) {
-  return appleVisionOcrSelected(preference, platform2) && resolveAppleVisionOcrScript() !== undefined && existsSync23(APPLE_VISION_OSASCRIPT);
+  return appleVisionOcrSelected(preference, platform2) && resolveAppleVisionOcrScript() !== undefined && existsSync26(APPLE_VISION_OSASCRIPT);
 }
 function describeOcrReadiness(input) {
   if (input.preference === "tesseract")
@@ -34666,7 +36572,9 @@ var operations = [
       });
       const jobs = ctx.sourceAnswerJobs;
       const result = await (jobs ? runUnderCaller(jobs, ctx.signal, answer) : answer(ctx.signal));
-      return revalidateStdioSourceAnswer(ctx, result);
+      const released = await revalidateStdioSourceAnswer(ctx, result);
+      await recordLocalAgentAnswer({ caller: ctx.caller, operation: "source_answer", args: params, result: released });
+      return released;
     }
   },
   {
@@ -34687,7 +36595,9 @@ var operations = [
       if (!jobs)
         throw sourceAnswerJobNotFound();
       const result = await jobs.registry.result(jobs.owner, jobId, jobs.clientSignal);
-      return revalidateStdioSourceAnswer(ctx, result);
+      const released = await revalidateStdioSourceAnswer(ctx, result);
+      await recordLocalAgentAnswer({ caller: ctx.caller, operation: "source_answer_result", args: params, result: released });
+      return released;
     }
   },
   {
@@ -36333,18 +38243,18 @@ function parseSourceWatchDeliveryRequest(value) {
   const kind = route.kind;
   if (kind !== "openclaw_channel" && kind !== "openclaw_task")
     throw new TypeError("Invalid route kind.");
-  const targetId = boundedString(route.targetId, 256);
+  const targetId = boundedString2(route.targetId, 256);
   if (kind === "openclaw_channel")
     splitChannelTarget(targetId);
   const payload2 = parseEvidencePointerPayload(record2.payload);
-  const downstreamIdempotencyKey = boundedString(record2.downstream_idempotency_key, 64);
+  const downstreamIdempotencyKey = boundedString2(record2.downstream_idempotency_key, 64);
   if (!/^[a-f0-9]{64}$/.test(downstreamIdempotencyKey))
     throw new TypeError("Invalid idempotency key.");
   return {
     route: {
       kind,
       targetId,
-      ...route.accountId === undefined ? {} : { accountId: boundedString(route.accountId, 256) }
+      ...route.accountId === undefined ? {} : { accountId: boundedString2(route.accountId, 256) }
     },
     downstreamIdempotencyKey,
     payload: payload2
@@ -36370,20 +38280,20 @@ function parseEvidencePointerPayload(value) {
   if (!Array.isArray(record2.items) || record2.items.length !== 1)
     throw new TypeError("Invalid watch delivery items.");
   const item = exactRecord2(record2.items[0], ["local_item_id", "source_version", "matched_at"]);
-  const sourceVersion = boundedString(item.source_version, 64);
-  const matchedAt = boundedString(item.matched_at, 64);
+  const sourceVersion = boundedString2(item.source_version, 64);
+  const matchedAt = boundedString2(item.matched_at, 64);
   if (!Number.isFinite(Date.parse(sourceVersion)) || !Number.isFinite(Date.parse(matchedAt))) {
     throw new TypeError("Invalid watch delivery timestamp.");
   }
   return {
     headline: SOURCE_WATCH_DELIVERY_HEADLINE,
-    watch_id: boundedString(record2.watch_id, 256),
-    corpus_id: boundedString(record2.corpus_id, 256),
-    query_text: boundedString(record2.query_text, SOURCE_WATCH_MAX_QUERY_LENGTH),
+    watch_id: boundedString2(record2.watch_id, 256),
+    corpus_id: boundedString2(record2.corpus_id, 256),
+    query_text: boundedString2(record2.query_text, SOURCE_WATCH_MAX_QUERY_LENGTH),
     watch_mode: watchMode,
     match_count: 1,
     items: [{
-      local_item_id: boundedString(item.local_item_id, 4096),
+      local_item_id: boundedString2(item.local_item_id, 4096),
       source_version: sourceVersion,
       matched_at: matchedAt
     }]
@@ -36402,7 +38312,7 @@ function exactRecord2(value, allowed) {
   }
   return record2;
 }
-function boundedString(value, maximum) {
+function boundedString2(value, maximum) {
   if (typeof value !== "string" || value.length < 1 || value.length > maximum || /[\u0000-\u001f\u007f]/u.test(value)) {
     throw new TypeError("Invalid watch delivery string.");
   }
@@ -36432,7 +38342,7 @@ function sourceWatchRouteFromToolContext(context2) {
   const ownerSeed = context2.requesterSenderId?.trim() || context2.agentId?.trim();
   if (!ownerSeed)
     return;
-  const ownerId2 = `owner:${createHash15("sha256").update(ownerSeed, "utf8").digest("hex")}`;
+  const ownerId2 = `owner:${createHash19("sha256").update(ownerSeed, "utf8").digest("hex")}`;
   const channel = (context2.deliveryContext?.channel || context2.messageChannel)?.trim().toLowerCase();
   const target = context2.deliveryContext?.to?.trim();
   if (channel && target && ["telegram", "whatsapp", "signal", "discord", "slack"].includes(channel)) {
