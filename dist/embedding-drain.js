@@ -45667,6 +45667,9 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
   function sourceImportsNeed(group) {
     return group.imports.filter(validArchive).some(sourceImportNeedsPerson);
   }
+  function sourceImportsMoving(group) {
+    return !archiveSetting(group) && group.imports.filter(validArchive).some((entry) => entry.status === "importing");
+  }
   function sourceImportList(group) {
     const S = H.copy.archives.inSource;
     const box = el("div", "archive-source");
@@ -46775,7 +46778,7 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
         return true;
       const archives2 = archivesMeta(id);
       const joined = sourceImportsMeta(id);
-      if (!!archives2 && archiveNeeds(archives2) || !!joined && sourceImportsNeed(joined))
+      if (!!archives2 && archiveNeeds(archives2) || !!joined && (sourceImportsNeed(joined) || sourceImportsMoving(joined)))
         state.open["home-focus:" + id] = true;
       return !!state.open["home-focus:" + id];
     });
