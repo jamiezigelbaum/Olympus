@@ -577,7 +577,7 @@ flowchart LR
 | `olympus source answer "…"` | ask across your sources from the terminal |
 | `olympus ask "…" [--level strict\|standard]` | one question to a frontier model anonymously through zkAPI (paid from your zkAPI balance; the question only) |
 | `olympus archive start --path <path>\|status\|remove --archive-id <id>` | asks to import an old export (such as a mail `.mbox`) or to remove an imported one; you approve on the dashboard, and `status` shows progress without any message text |
-| `olympus tier explain\|set\|rules\|classifier …` | why an item has its tier, owner overrides and rules, and the private classifier's approval |
+| `olympus tier explain\|set\|recheck\|rules\|classifier …` | why an item has its tier, owner overrides, checking one chat's or source's privacy again, rules, and the private classifier's approval |
 | `olympus tier migrate plan\|approve\|run\|rollback\|purge\|status` | moves an existing install's items into per-item tiers, each step owner-approved after a dry-run plan |
 | `olympus doctor` | diagnoses problems, each with a fix-it hint |
 | `olympus data export\|delete` | your data, out — or gone |
