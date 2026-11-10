@@ -78,13 +78,13 @@ exists to prevent. Rules of the road:
 - **"Small increment" never means extending a per-source monolith or adding a
   per-question template/regex.** When shipped code conflicts with these
   contracts, the increment moves toward the contract, not around it.
-- **Architecture target is not migration status.** The shared answer spine is
-  complete, but six pre-contract source indexes remain grandfathered while
-  their live data planes are cut over one family at a time. The mechanical
-  guard prevents a seventh. The current release sequence and deletion exit
-  live in [docs/V0_4_RELEASE.md](docs/V0_4_RELEASE.md) (the 1.0 and 0.4 release plan); do not
-  describe the thin-harness migration as complete until those exits pass and
-  the corresponding legacy indexes are deleted.
+- **One spine, no legacy indexes.** Every source runs through the shared
+  connector-store runtime. Slice 2 deleted the code that read the six
+  pre-contract per-family indexes (recorded in `docs/V0_4_RELEASE.md`);
+  installs upgraded across that cut may still hold the old files on disk, and
+  `test/data-lifecycle.test.ts` keeps them in the delete inventory so
+  `delete --all` removes them. Do not add a per-family index or a reader for
+  the old ones; the mechanical guard below keeps the deleted paths out.
 - **No question-specific logic anywhere in the `Analyst`.** One generic prompt:
   answer from this evidence only, cite each claim, state what you could not
   find. No answer templates, no query regex classifiers, no per-question
@@ -202,3 +202,7 @@ remain outside the repo's ownership.
   AI `Co-authored-by` trailer, whatever a harness's attribution guidance says.
   The static checks job rejects a PR whose commits break this, because
   GitHub's squash merge would credit the AI as a co-author on `main`.
+  Reviewers (including the Codex GitHub reviewer): judge authorship only from
+  the PR's own commits on GitHub, never from a commit your sandbox made while
+  replaying the diff. The static checks job already enforces the rule, so do
+  not raise it as a finding when that job passed.

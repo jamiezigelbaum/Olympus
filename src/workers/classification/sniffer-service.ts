@@ -1411,19 +1411,29 @@ export class TierSnifferService {
     }
   }
 
-  /** New raises interrupt background work; known failures already retry each judge pass. */
+  /**
+   * New raises interrupt background work; known failures already retry each
+   * judge pass. Walks the sets in the next raise drain's rotated order with
+   * its one shared budget, so the timer preempts only for a new raise that
+   * drain will actually take (#1013).
+   */
   private newRaisesQueued(): boolean {
-    return this.ledgerPaths().some(path => {
+    const paths = this.ledgerPaths();
+    let budget = Math.max(0, this.options.autoMoves!.maxPerPass ?? 25);
+    const offset = this.moveLedgerOffsets.raise % Math.max(1, paths.length);
+    for (const path of [...paths.slice(offset), ...paths.slice(0, offset)]) {
+      if (budget === 0) return false;
       try {
         const set = tierSetForLedger(path);
-        if (!set || !setEmbedsWithBuiltInOnly(set)) return false;
-        const limit = Math.max(0, this.options.autoMoves!.maxPerPass ?? 25);
-        return limit > 0 && set.ledger.listMoving({ limit, direction: 'raise' })
-          .some(record => isAutoMoveCandidate(record)
-            && !this.moveFailures.has(`${path}\u0000${tierLedgerIdentityKey(recordIdentity(record))}\u0000${record.generation}`));
+        if (!set || !setEmbedsWithBuiltInOnly(set)) continue;
+        for (const record of set.ledger.listMoving({ limit: budget, direction: 'raise' }).filter(isAutoMoveCandidate)) {
+          budget--;
+          if (!this.moveFailures.has(`${path}\u0000${tierLedgerIdentityKey(recordIdentity(record))}\u0000${record.generation}`)) return true;
+        }
       }
       catch { return true; } // An unreadable queue fails safe.
-    });
+    }
+    return false;
   }
 
   private async drainMoves(direction: 'raise' | 'lower' = 'raise'): Promise<TierAutoMoveReport | undefined> {
