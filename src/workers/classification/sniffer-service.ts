@@ -25,7 +25,7 @@ import type { TieredStoreSet } from '../connector-store/tiered-store-set.ts';
 import { BUILT_IN_EMBEDDING_PROVIDER } from '../source-index/built-in-embedding/provider.ts';
 import { BUILT_IN_SNIFFER_LANE } from './built-in-sniffer.ts';
 import type { InstalledTierClassification } from './installed-tier-classification.ts';
-import { snifferId, snifferMaterialCarriesSecret, snifferPromptVersions } from './sniffer.ts';
+import { snifferId, snifferMaterialCarriesSecret, snifferPromptVersions, type SnifferLaneKind } from './sniffer.ts';
 import type { SnifferLane } from './sniffer-lane.ts';
 import {
   DEFAULT_SNIFFER_MAX_CALLS_PER_DAY,
@@ -336,8 +336,21 @@ export interface TierClassificationBacklog {
   summary: string;
   /** The sniffer is waiting for the owner to approve its model and prompt. */
   awaitingOwnerApproval: boolean;
+  /**
+   * Exactly what waits for that approval (no item content): the dashboard's
+   * Approve button approves this key and nothing else.
+   */
+  awaitingApproval?: ClassifierApprovalKey;
   /** Why the last tick asked nothing while questions wait (absent while asking or idle). */
   waiting?: TierSnifferWaiting;
+}
+
+/** One exact classifier the owner approves: lane, profile, model and prompt version. */
+export interface ClassifierApprovalKey {
+  lane: SnifferLaneKind;
+  profileId: string;
+  modelId: string;
+  promptVersion: string;
 }
 
 /**
@@ -404,7 +417,7 @@ function emptyThroughput(): TierSnifferThroughput {
 
 export type TierSnifferTick =
   | { state: 'skipped_running' }
-  | { state: 'awaiting_owner_approval'; modelId: string; promptVersion: string }
+  | { state: 'awaiting_owner_approval'; lane: SnifferLaneKind; profileId: string; modelId: string; promptVersion: string }
   | { state: 'model_unavailable'; modelId: string }
   | { state: 'ran'; report: SnifferPassReport; rejudged?: TierRejudgeReport; autoMoves?: TierAutoMoveReport }
   | { state: 'failed'; error: string };
@@ -693,6 +706,9 @@ export class TierSnifferService {
           + (oldestPendingAgeMs >= 3_600_000 ? ` Oldest pending item: ${Math.floor(oldestPendingAgeMs / 60_000)} minutes.` : '')
           + (this.waiting ? ` Nothing asked now: ${this.waiting.label}.` : ''),
       awaitingOwnerApproval: this.lastTick?.state === 'awaiting_owner_approval',
+      ...(this.lastTick?.state === 'awaiting_owner_approval' ? { awaitingApproval: {
+        lane: this.lastTick.lane, profileId: this.lastTick.profileId, modelId: this.lastTick.modelId, promptVersion: this.lastTick.promptVersion,
+      } } : {}),
       ...(checkingItems > 0 && this.waiting ? { waiting: { ...this.waiting } } : {}),
     };
   }
@@ -1431,7 +1447,7 @@ export class TierSnifferService {
         entry_id: `sniffer-approval-requested:${lane.kind}:${lane.profileId}:${lane.modelId}:${versions.approval}`,
       });
       await this.drainMoves();
-      return { state: 'awaiting_owner_approval', modelId: lane.modelId, promptVersion: versions.approval };
+      return { state: 'awaiting_owner_approval', lane: lane.kind, profileId: lane.profileId, modelId: lane.modelId, promptVersion: versions.approval };
     }
     phase('approval');
     const preparationStopped = await prepareSnifferModel({ model: this.options.model, signal, shouldYield: () => this.yieldNow() });

@@ -61618,7 +61618,10 @@ var init_vocabulary = __esm(() => {
     machine: "On the machine running Olympus",
     server: "On the server running Olympus",
     command: '"$HOME/.local/bin/olympus" tier classifier approve --why',
-    reason: "followed by your reason"
+    reason: "followed by your reason",
+    here: "Approve {model} to check what's private on this computer. Until you do, new items it would check wait.",
+    approve: "Approve",
+    elsewhere: "Open Olympus on your computer to approve it."
   };
   DASHBOARD_CHATGPT_PRIVATE_ANSWER_COPY = {
     secretOpen: "Open it in Olympus on your computer",
@@ -162143,7 +162146,7 @@ function unreadableNames(input) {
     return [chars.length > UNREADABLE_NAME_MAX_CHARS ? `${chars.slice(0, UNREADABLE_NAME_MAX_CHARS - 1).join("")}…` : line2];
   });
 }
-var UNREADABLE_NAMES_IN_RESULT = 5, UNREADABLE_NAME_MAX_CHARS = 120, COMPUTER_UNREADABLE_FILES_LIMIT = 200, DASHBOARD_TOOL_NAME = "olympus_dashboard", SEARCH_TOOL_NAME = "olympus_search", DASHBOARD_RESOURCE_URI = "ui://olympus/dashboard", CONNECT_SOURCE_TOOL_NAME = "olympus_connect_source", SCOPE_LIST_TOOL_NAME = "olympus_scope_list", SCOPE_SET_TOOL_NAME = "olympus_scope_set", DISCONNECT_SOURCE_TOOL_NAME = "olympus_disconnect_source", DELETE_SOURCE_DATA_TOOL_NAME = "olympus_delete_source_data", MODEL_SET_TOOL_NAME = "olympus_model_set", MODEL_RETRY_TOOL_NAME = "olympus_model_retry", SYNC_SOURCE_TOOL_NAME = "olympus_sync_source", OLYMPUS_HOST_CONTEXT_KEY = "olympus/host", COMPUTER_META_KEY = "olympus/computer", INDEX_FASTER_TOOL_NAME = "olympus_index_faster", UNPAIR_SOURCE_TOOL_NAME = "olympus_unpair_source", OPEN_UNREADABLE_FILE_TOOL_NAME = "olympus_open_unreadable_file", UNREADABLE_FILES_PAGE_TOOL_NAME = "olympus_unreadable_files", ARCHIVE_UPLOAD_START_TOOL_NAME = "olympus_archive_upload_start", ARCHIVE_UPLOAD_STATUS_TOOL_NAME = "olympus_archive_upload_status", ARCHIVE_UPLOAD_CANCEL_TOOL_NAME = "olympus_archive_upload_cancel", ARCHIVE_APPROVE_TOOL_NAME = "olympus_archive_approve", ARCHIVE_DECLINE_TOOL_NAME = "olympus_archive_decline", ARCHIVE_REMOVE_TOOL_NAME = "olympus_archive_remove", ARCHIVE_STOP_TOOL_NAME = "olympus_archive_stop", COMPUTER_LOCAL_SESSION_TOOL_NAMES, PANEL_TOOL_NAMES, COMPUTER_HOST_TOOL_NAMES, SCOPE_UI_META_KEY = "olympus/scope", PRIVACY_GET_TOOL_NAME = "olympus_privacy_get", PRIVACY_SET_TOOL_NAME = "olympus_privacy_set", PRIVACY_QUESTIONS_TOOL_NAME = "olympus_privacy_questions", PRIVACY_CHECK_TOOL_NAME = "olympus_privacy_check", PRIVACY_META_KEY = "olympus/privacy";
+var UNREADABLE_NAMES_IN_RESULT = 5, UNREADABLE_NAME_MAX_CHARS = 120, COMPUTER_UNREADABLE_FILES_LIMIT = 200, DASHBOARD_TOOL_NAME = "olympus_dashboard", SEARCH_TOOL_NAME = "olympus_search", DASHBOARD_RESOURCE_URI = "ui://olympus/dashboard", CONNECT_SOURCE_TOOL_NAME = "olympus_connect_source", SCOPE_LIST_TOOL_NAME = "olympus_scope_list", SCOPE_SET_TOOL_NAME = "olympus_scope_set", DISCONNECT_SOURCE_TOOL_NAME = "olympus_disconnect_source", DELETE_SOURCE_DATA_TOOL_NAME = "olympus_delete_source_data", MODEL_SET_TOOL_NAME = "olympus_model_set", MODEL_RETRY_TOOL_NAME = "olympus_model_retry", SYNC_SOURCE_TOOL_NAME = "olympus_sync_source", OLYMPUS_HOST_CONTEXT_KEY = "olympus/host", COMPUTER_META_KEY = "olympus/computer", INDEX_FASTER_TOOL_NAME = "olympus_index_faster", UNPAIR_SOURCE_TOOL_NAME = "olympus_unpair_source", OPEN_UNREADABLE_FILE_TOOL_NAME = "olympus_open_unreadable_file", UNREADABLE_FILES_PAGE_TOOL_NAME = "olympus_unreadable_files", ARCHIVE_UPLOAD_START_TOOL_NAME = "olympus_archive_upload_start", ARCHIVE_UPLOAD_STATUS_TOOL_NAME = "olympus_archive_upload_status", ARCHIVE_UPLOAD_CANCEL_TOOL_NAME = "olympus_archive_upload_cancel", ARCHIVE_APPROVE_TOOL_NAME = "olympus_archive_approve", ARCHIVE_DECLINE_TOOL_NAME = "olympus_archive_decline", ARCHIVE_REMOVE_TOOL_NAME = "olympus_archive_remove", ARCHIVE_STOP_TOOL_NAME = "olympus_archive_stop", CLASSIFIER_APPROVE_TOOL_NAME = "olympus_privacy_classifier_approve", COMPUTER_LOCAL_SESSION_TOOL_NAMES, PANEL_TOOL_NAMES, COMPUTER_HOST_TOOL_NAMES, SCOPE_UI_META_KEY = "olympus/scope", PRIVACY_GET_TOOL_NAME = "olympus_privacy_get", PRIVACY_SET_TOOL_NAME = "olympus_privacy_set", PRIVACY_QUESTIONS_TOOL_NAME = "olympus_privacy_questions", PRIVACY_CHECK_TOOL_NAME = "olympus_privacy_check", PRIVACY_META_KEY = "olympus/privacy";
 var init_dashboard_contract = __esm(() => {
   COMPUTER_LOCAL_SESSION_TOOL_NAMES = [
     ARCHIVE_UPLOAD_START_TOOL_NAME,
@@ -162152,7 +162155,8 @@ var init_dashboard_contract = __esm(() => {
     ARCHIVE_APPROVE_TOOL_NAME,
     ARCHIVE_DECLINE_TOOL_NAME,
     ARCHIVE_REMOVE_TOOL_NAME,
-    ARCHIVE_STOP_TOOL_NAME
+    ARCHIVE_STOP_TOOL_NAME,
+    CLASSIFIER_APPROVE_TOOL_NAME
   ];
   PANEL_TOOL_NAMES = [
     DASHBOARD_TOOL_NAME,
@@ -162181,7 +162185,8 @@ var init_dashboard_contract = __esm(() => {
     ARCHIVE_APPROVE_TOOL_NAME,
     ARCHIVE_DECLINE_TOOL_NAME,
     ARCHIVE_REMOVE_TOOL_NAME,
-    ARCHIVE_STOP_TOOL_NAME
+    ARCHIVE_STOP_TOOL_NAME,
+    CLASSIFIER_APPROVE_TOOL_NAME
   ];
 });
 
@@ -162463,7 +162468,7 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     if (!result || !result.isError)
       return "";
     const code = result.structuredContent && typeof result.structuredContent.error === "string" ? result.structuredContent.error : "";
-    if (config2.inlineErrorCodes.indexOf(code) < 0 && !(name && (name === H.unpairTool || name === H.unreadableOpenTool || name === H.unreadablePageTool || name === H.archiveApproveTool || name === H.archiveDeclineTool || name === H.archiveRemoveTool || name === H.archiveStopTool)))
+    if (config2.inlineErrorCodes.indexOf(code) < 0 && !(name && (name === H.unpairTool || name === H.unreadableOpenTool || name === H.unreadablePageTool || name === H.archiveApproveTool || name === H.archiveDeclineTool || name === H.archiveRemoveTool || name === H.archiveStopTool || name === H.classifierApproveTool)))
       return "";
     const parts = Array.isArray(result.content) ? result.content : [];
     const text3 = parts.filter((part) => part && part.type === "text" && typeof part.text === "string")[0];
@@ -162531,7 +162536,7 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
         redraw();
         return;
       }
-      if (name === H.unpairTool) {
+      if (name === H.unpairTool || name === H.classifierApproveTool) {
         const parts = result && Array.isArray(result.content) ? result.content : [];
         const said = parts.filter((part) => part && part.type === "text" && typeof part.text === "string")[0];
         refresh();
@@ -168698,6 +168703,7 @@ function chatgptDashboardPageHtml(options = {}) {
       archiveDeclineTool: ARCHIVE_DECLINE_TOOL_NAME,
       archiveRemoveTool: ARCHIVE_REMOVE_TOOL_NAME,
       archiveStopTool: ARCHIVE_STOP_TOOL_NAME,
+      classifierApproveTool: CLASSIFIER_APPROVE_TOOL_NAME,
       landedMs: CHATGPT_DASHBOARD_LANDED_MS,
       copy: DASHBOARD_COMPUTER_PANEL_COPY
     }
@@ -209267,6 +209273,12 @@ class TierSnifferService {
       ...counts,
       summary: checkingItems === 0 ? "No items waiting for classification." : `Checking ${checkingItems} item${checkingItems === 1 ? "" : "s"}, about ${remainingQuestions} question${remainingQuestions === 1 ? "" : "s"} remaining.` + (pendingWithoutQuestion > 0 ? ` ${pendingWithoutQuestion} pending item(s) have no question.` : "") + (oldestPendingAgeMs >= 3600000 ? ` Oldest pending item: ${Math.floor(oldestPendingAgeMs / 60000)} minutes.` : "") + (this.waiting ? ` Nothing asked now: ${this.waiting.label}.` : ""),
       awaitingOwnerApproval: this.lastTick?.state === "awaiting_owner_approval",
+      ...this.lastTick?.state === "awaiting_owner_approval" ? { awaitingApproval: {
+        lane: this.lastTick.lane,
+        profileId: this.lastTick.profileId,
+        modelId: this.lastTick.modelId,
+        promptVersion: this.lastTick.promptVersion
+      } } : {},
       ...checkingItems > 0 && this.waiting ? { waiting: { ...this.waiting } } : {}
     };
   }
@@ -209944,7 +209956,7 @@ class TierSnifferService {
         entry_id: `sniffer-approval-requested:${lane.kind}:${lane.profileId}:${lane.modelId}:${versions2.approval}`
       });
       await this.drainMoves();
-      return { state: "awaiting_owner_approval", modelId: lane.modelId, promptVersion: versions2.approval };
+      return { state: "awaiting_owner_approval", lane: lane.kind, profileId: lane.profileId, modelId: lane.modelId, promptVersion: versions2.approval };
     }
     phase("approval");
     const preparationStopped = await prepareSnifferModel({ model: this.options.model, signal, shouldYield: () => this.yieldNow() });
@@ -212488,16 +212500,8 @@ function buildChatGptDashboardViewModel(view4, options = {}) {
       fix: { label: DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY.label, tool: PRIVACY_GET_TOOL_NAME, args: {} }
     });
   }
-  if (options.privacy?.classifierAwaitingApproval) {
-    needsYou.push({
-      id: "privacy:classifier_approval",
-      sentence: [
-        DASHBOARD_CHATGPT_PRIVACY_CLASSIFIER_APPROVAL_COPY.sentence,
-        `${options.remote ? DASHBOARD_CHATGPT_PRIVACY_CLASSIFIER_APPROVAL_COPY.server : DASHBOARD_CHATGPT_PRIVACY_CLASSIFIER_APPROVAL_COPY.machine}, run ${DASHBOARD_CHATGPT_PRIVACY_CLASSIFIER_APPROVAL_COPY.command}, ${DASHBOARD_CHATGPT_PRIVACY_CLASSIFIER_APPROVAL_COPY.reason}`
-      ].join(" "),
-      fix: checkAgainFix(openOnComputer(undefined, "models"))
-    });
-  }
+  if (options.privacy?.classifierAwaitingApproval)
+    needsYou.push(classifierApprovalItem(options.privacy, options.remote !== undefined));
   const transcription = transcriptionModel(options.transcription);
   const progress = overallProgress(rows);
   const connected2 = rows.some(({ card }) => dashboardIsConnectedSource(card));
@@ -212907,6 +212911,22 @@ function withDiskFreeUp(sentence, reason, bytes) {
     return sentence;
   const next = bytes !== undefined && bytes > 0 ? DASHBOARD_CHATGPT_VOCABULARY.diskFreeUp.replace("{size}", formatSpaceToFree(bytes)) : DASHBOARD_CHATGPT_VOCABULARY.diskFreeUpUnknown;
   return `${sentence} ${next}`;
+}
+function classifierApprovalItem(privacy, remote) {
+  const copy = DASHBOARD_CHATGPT_PRIVACY_CLASSIFIER_APPROVAL_COPY;
+  const local = privacy.classifierWaiting?.lane === "local" ? privacy.classifierWaiting : undefined;
+  if (local && privacy.approveHere === true) {
+    return {
+      id: "privacy:classifier_approval",
+      sentence: copy.here.replace("{model}", local.modelId),
+      fix: { label: copy.approve, tool: CLASSIFIER_APPROVE_TOOL_NAME, args: {} }
+    };
+  }
+  return {
+    id: "privacy:classifier_approval",
+    sentence: local && !remote ? [copy.sentence, copy.elsewhere].join(" ") : [copy.sentence, `${remote ? copy.server : copy.machine}, run ${copy.command}, ${copy.reason}`].join(" "),
+    fix: checkAgainFix(openOnComputer(undefined, "models"))
+  };
 }
 function retryFix(model) {
   return { label: DASHBOARD_CHATGPT_PICKER_COPY.tryAgain, tool: MODEL_RETRY_TOOL_NAME, args: { model } };
@@ -216946,7 +216966,8 @@ var init_response_builder = __esm(() => {
     [MODEL_SET_TOOL_NAME]: { embedding: new Set(["built_in"]), answers: new Set(["local", "venice"]) },
     [MODEL_RETRY_TOOL_NAME]: { model: new Set(["embedding", "answers", "transcription"]) },
     [SYNC_SOURCE_TOOL_NAME]: { source_id: SYNC_SOURCE_IDS2 },
-    [PRIVACY_GET_TOOL_NAME]: {}
+    [PRIVACY_GET_TOOL_NAME]: {},
+    [CLASSIFIER_APPROVE_TOOL_NAME]: {}
   };
   HANDOFF_URL = /^https:\/\/mcp\.olympusplugin\.ai\/go\/oly2g\.[a-z2-7]{32}\.[A-Za-z0-9_-]{43}$/;
   CONNECTION_STATES = new Set(["not_connected", "not_installed", "installing", "restarting", "ready", "mac_offline", "relay_unavailable"]);
@@ -233036,6 +233057,25 @@ __export(exports_dashboard_panel_tools, {
 function refused3(text7, code) {
   return { content: [{ type: "text", text: text7 }], structuredContent: { error: code }, isError: true };
 }
+async function approveClassifier2(options, args, context3) {
+  if (Object.keys(args).length > 0)
+    return refused3("Approve takes no arguments.", "invalid_params");
+  if (context3.localSession !== true)
+    return refused3(CLASSIFIER_APPROVE_LOCAL_SESSION_REFUSAL, "mac_dashboard_only");
+  if (!options.approveWaitingClassifier)
+    return refused3("Olympus cannot approve the model here.", "unavailable");
+  const status = await options.approveWaitingClassifier().catch(() => "failed");
+  switch (status) {
+    case "approved":
+      return { content: [{ type: "text", text: "Approved. The privacy check starts on its next pass." }], structuredContent: { status: "saved" } };
+    case "nothing_waiting":
+      return { content: [{ type: "text", text: "Nothing is waiting for approval." }], structuredContent: { status: "nothing_waiting" } };
+    case "not_local":
+      return refused3("A Venice model is chosen in Settings, with its spending limit.", "not_local");
+    default:
+      return refused3("The approval could not be saved. Try again.", "internal");
+  }
+}
 function computerSetup(options, context3, privacyConfirmationScope) {
   return {
     ...options.setup,
@@ -233407,13 +233447,19 @@ function createDashboardPanelTools(options) {
         return await archiveRemove(options, args, context3);
       if (name === ARCHIVE_STOP_TOOL_NAME)
         return await archiveStop(options, args, context3);
+      if (name === CLASSIFIER_APPROVE_TOOL_NAME)
+        return await approveClassifier2(options, args, context3);
       const signal = context3.signal ?? new AbortController().signal;
       const base = options.surface();
       let view4;
       const surface = {
         ...base,
         setup: computerSetup(options, context3, privacyConfirmationScope),
-        dashboardView: async (viewSignal) => view4 = await base.dashboardView(viewSignal)
+        dashboardView: async (viewSignal) => view4 = await base.dashboardView(viewSignal),
+        ...base.privacy ? { privacy: () => {
+          const privacy = base.privacy();
+          return privacy && context3.localSession === true && options.approveWaitingClassifier ? { ...privacy, approveHere: true } : privacy;
+        } } : {}
       };
       const result = await callChatGptTool(name, args, options.makeContext(signal), surface, signal);
       if (name !== DASHBOARD_TOOL_NAME || result.isError)
@@ -233453,7 +233499,7 @@ function createDashboardPanelTools(options) {
     }
   };
 }
-var ARCHIVE_LOCAL_SESSION_REFUSAL = "Archives are chosen, imported, declined and removed only in the dashboard on this computer, in an unlocked browser.", UNPAIR_SOURCE_IDS, ARCHIVE_ARG_MAX = 4096;
+var ARCHIVE_LOCAL_SESSION_REFUSAL = "Archives are chosen, imported, declined and removed only in the dashboard on this computer, in an unlocked browser.", CLASSIFIER_APPROVE_LOCAL_SESSION_REFUSAL = "The privacy check's model is approved only in the dashboard on this computer, in an unlocked browser.", UNPAIR_SOURCE_IDS, ARCHIVE_ARG_MAX = 4096;
 var init_dashboard_panel_tools = __esm(() => {
   init_dashboard_contract();
   init_archive_formats();
@@ -238683,11 +238729,13 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     },
     privacy: () => {
       const settings = readChatGptPrivacySettings2(process.env, pendingClassificationCount());
+      const backlog = tierSnifferBacklog?.();
       return {
         configured: settings.configured,
         pendingCount: settings.pendingCount,
         ruleCount: settings.rules.length,
-        classifierAwaitingApproval: tierSnifferBacklog?.().awaitingOwnerApproval === true
+        classifierAwaitingApproval: backlog?.awaitingOwnerApproval === true,
+        ...backlog?.awaitingApproval ? { classifierWaiting: { lane: backlog.awaitingApproval.lane, modelId: backlog.awaitingApproval.modelId } } : {}
       };
     }
   };
@@ -238722,7 +238770,17 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     archives: () => archiveViews.view(),
     sourceImports: () => archiveViews.sourceImports(),
     archiveSources: () => archiveViews.archiveSources(),
-    archiveCards: () => archiveViews.cardViews()
+    archiveCards: () => archiveViews.cardViews(),
+    approveWaitingClassifier: async () => {
+      const waiting = tierSnifferBacklog?.()?.awaitingApproval;
+      if (!waiting)
+        return "nothing_waiting";
+      if (waiting.lane !== "local")
+        return "not_local";
+      await approveClassifier(resolveClassificationLedgerPath(process.env), { kind: waiting.lane, profileId: waiting.profileId, modelId: waiting.modelId }, waiting.promptVersion, "Owner approved this local model in the dashboard on this computer.");
+      tierSniffer?.wake();
+      return "approved";
+    }
   });
   const sharedRemoteMcpOptions = {
     ...remoteAgentOptions,

@@ -92,6 +92,7 @@ import {
   SYNC_SOURCE_TOOL_NAME,
   type ChatGptDeleteSourceId,
   type ChatGptDisconnectSourceId,
+  CLASSIFIER_APPROVE_TOOL_NAME,
   type ChatGptOAuthSource,
   type ChatGptScopeSourceId,
   type ChatGptSyncSourceId,
@@ -201,6 +202,10 @@ export interface ChatGptDashboardOptions {
     configured: boolean; pendingCount: number; ruleCount: number;
     /** The privacy check waits for the owner to approve its model (sniffer-service `awaiting_owner_approval`). */
     classifierAwaitingApproval?: boolean;
+    /** What waits: its lane and model name (sniffer-service backlog `awaitingApproval`), no item content. */
+    classifierWaiting?: { lane: 'local' | 'venice'; modelId: string };
+    /** The computer's own unlocked dashboard, which may approve a local model in place (dashboard-panel-tools.ts). */
+    approveHere?: boolean;
   };
   /**
    * The built-in private model (analyst-built-in.ts builtInPrivateModelStatus),
@@ -348,14 +353,7 @@ export function buildChatGptDashboardViewModel(
 
   // Approving the model that checks what is private is the owner's step on
   // the computer; until then flagged items wait unseen, so it is never silent.
-  if (options.privacy?.classifierAwaitingApproval) {
-    needsYou.push({
-      id: 'privacy:classifier_approval',
-      sentence: [DASHBOARD_CHATGPT_PRIVACY_CLASSIFIER_APPROVAL_COPY.sentence,
-        `${options.remote ? DASHBOARD_CHATGPT_PRIVACY_CLASSIFIER_APPROVAL_COPY.server : DASHBOARD_CHATGPT_PRIVACY_CLASSIFIER_APPROVAL_COPY.machine}, run ${DASHBOARD_CHATGPT_PRIVACY_CLASSIFIER_APPROVAL_COPY.command}, ${DASHBOARD_CHATGPT_PRIVACY_CLASSIFIER_APPROVAL_COPY.reason}`].join(' '),
-      fix: checkAgainFix(openOnComputer(undefined, 'models')),
-    });
-  }
+  if (options.privacy?.classifierAwaitingApproval) needsYou.push(classifierApprovalItem(options.privacy, options.remote !== undefined));
 
   const transcription = transcriptionModel(options.transcription);
 
@@ -1102,6 +1100,32 @@ function withDiskFreeUp(sentence: string, reason: ModelInstallFailedReason | und
 }
 
 /** Starts a failed built-in install again. */
+/**
+ * Needs you while the privacy check waits for its model's approval. A local
+ * model gets one Approve button in the computer's own unlocked dashboard
+ * (`approveHere`), and a pointer to the computer anywhere else (ChatGPT, the
+ * OpenClaw tab). A Venice model is chosen with its spending limit, and a
+ * server without a desktop keeps the command, so both keep the command line.
+ */
+function classifierApprovalItem(privacy: NonNullable<ChatGptDashboardOptions['privacy']>, remote: boolean): DashboardItem {
+  const copy = DASHBOARD_CHATGPT_PRIVACY_CLASSIFIER_APPROVAL_COPY;
+  const local = privacy.classifierWaiting?.lane === 'local' ? privacy.classifierWaiting : undefined;
+  if (local && privacy.approveHere === true) {
+    return {
+      id: 'privacy:classifier_approval',
+      sentence: copy.here.replace('{model}', local.modelId),
+      fix: { label: copy.approve, tool: CLASSIFIER_APPROVE_TOOL_NAME, args: {} },
+    };
+  }
+  return {
+    id: 'privacy:classifier_approval',
+    sentence: local && !remote
+      ? [copy.sentence, copy.elsewhere].join(' ')
+      : [copy.sentence, `${remote ? copy.server : copy.machine}, run ${copy.command}, ${copy.reason}`].join(' '),
+    fix: checkAgainFix(openOnComputer(undefined, 'models')),
+  };
+}
+
 function retryFix(model: 'embedding' | 'answers'): DashboardFix {
   return { label: DASHBOARD_CHATGPT_PICKER_COPY.tryAgain, tool: MODEL_RETRY_TOOL_NAME, args: { model } };
 }

@@ -22,6 +22,7 @@ import {
   ARCHIVE_UPLOAD_CANCEL_TOOL_NAME,
   ARCHIVE_UPLOAD_START_TOOL_NAME,
   ARCHIVE_UPLOAD_STATUS_TOOL_NAME,
+  CLASSIFIER_APPROVE_TOOL_NAME,
   COMPUTER_LOCAL_SESSION_TOOL_NAMES,
   DASHBOARD_TOOL_NAME,
 } from '../src/workers/chatgpt/dashboard-contract.ts';
@@ -250,11 +251,13 @@ describe('the panel\'s archive tools', () => {
     [ARCHIVE_REMOVE_TOOL_NAME, { archive_id: ARCHIVE_ID }],
     [ARCHIVE_STOP_TOOL_NAME, { archive_id: ARCHIVE_ID }],
   ];
+  // Approve (the privacy check's local model) is refused the same way; it reaches no archive route.
+  const refusedCalls: Array<[string, Record<string, unknown>]> = [...calls, [CLASSIFIER_APPROVE_TOOL_NAME, {}]];
 
   test('through /dashboard/tools/call with the bearer (the OpenClaw tab) or a bearer\'s session: refused, nothing sent', async () => {
     const { tools, seen } = panel();
-    expect([...COMPUTER_LOCAL_SESSION_TOOL_NAMES].sort()).toEqual(calls.map(([name]) => name).sort());
-    for (const [name, args] of calls) {
+    expect([...COMPUTER_LOCAL_SESSION_TOOL_NAMES].sort()).toEqual(refusedCalls.map(([name]) => name).sort());
+    for (const [name, args] of refusedCalls) {
       const result = await tools.call(name, args, { origin: ORIGIN });
       expect(result.isError).toBe(true);
       expect(result.structuredContent).toEqual({ error: 'mac_dashboard_only' });

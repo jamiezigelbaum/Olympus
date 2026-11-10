@@ -553,7 +553,7 @@ import { createAnswerActivity, createLocalModelActivity, runBackgroundInference,
 import { privacyOwnerContext } from '../classification/privacy-profile.ts';
 import { TierSnifferService, tierSnifferServiceEnv } from '../classification/sniffer-service.ts';
 import { SNIFFER_MAX_CONCURRENT_CALLS, completeAfterSlot } from '../classification/sniffer-resolver.ts';
-import { resolveClassificationLedgerPath, readClassificationLedger, isClassifierApproved } from '../classification-ledger.ts';
+import { approveClassifier, resolveClassificationLedgerPath, readClassificationLedger, isClassifierApproved } from '../classification-ledger.ts';
 import type { AnalystModel } from '../../core/analyst.ts';
 import { resolveTierMigrationPaths, tierMigrationStatusSummary } from '../classification/tier-migration.ts';
 import { resolveEmbeddingLedgerPath } from '../embedding-ledger.ts';
@@ -7473,9 +7473,11 @@ export async function main(): Promise<void> {
     },
     privacy: () => {
       const settings = readChatGptPrivacySettings(process.env, pendingClassificationCount());
+      const backlog = tierSnifferBacklog?.();
       return {
         configured: settings.configured, pendingCount: settings.pendingCount, ruleCount: settings.rules.length,
-        classifierAwaitingApproval: tierSnifferBacklog?.().awaitingOwnerApproval === true,
+        classifierAwaitingApproval: backlog?.awaitingOwnerApproval === true,
+        ...(backlog?.awaitingApproval ? { classifierWaiting: { lane: backlog.awaitingApproval.lane, modelId: backlog.awaitingApproval.modelId } } : {}),
       };
     },
   };
@@ -7514,6 +7516,18 @@ export async function main(): Promise<void> {
     sourceImports: () => archiveViews.sourceImports(),
     archiveSources: () => archiveViews.archiveSources(),
     archiveCards: () => archiveViews.cardViews(),
+    // Exactly the local model the check reports waiting, as the CLI's approve
+    // records it. In the split the background reads the ledger on its next tick.
+    approveWaitingClassifier: async () => {
+      const waiting = tierSnifferBacklog?.()?.awaitingApproval;
+      if (!waiting) return 'nothing_waiting';
+      if (waiting.lane !== 'local') return 'not_local';
+      await approveClassifier(resolveClassificationLedgerPath(process.env),
+        { kind: waiting.lane, profileId: waiting.profileId, modelId: waiting.modelId }, waiting.promptVersion,
+        'Owner approved this local model in the dashboard on this computer.');
+      tierSniffer?.wake();
+      return 'approved';
+    },
   });
 
   const sharedRemoteMcpOptions = {

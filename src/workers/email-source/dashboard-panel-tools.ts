@@ -51,6 +51,7 @@ import {
   ARCHIVE_UPLOAD_CANCEL_TOOL_NAME,
   ARCHIVE_UPLOAD_START_TOOL_NAME,
   ARCHIVE_UPLOAD_STATUS_TOOL_NAME,
+  CLASSIFIER_APPROVE_TOOL_NAME,
   COMPUTER_HOST_TOOL_NAMES,
   COMPUTER_META_KEY,
   COMPUTER_UNREADABLE_FILES_LIMIT,
@@ -146,6 +147,11 @@ export interface DashboardPanelToolsOptions {
   archiveSources?: () => ComputerArchiveSourceMeta[] | undefined;
   /** Each import-only source's card and its imports (archive-import/dashboard.ts cardViews). */
   archiveCards?: () => ComputerArchivesMeta[] | undefined;
+  /**
+   * Approve exactly the local model the privacy check reports waiting
+   * (server.ts). Absent: the computer shows the command line instead.
+   */
+  approveWaitingClassifier?: () => Promise<'approved' | 'nothing_waiting' | 'not_local'>;
 }
 
 /** Why an archive control did nothing for a session that is not this computer's own. */
@@ -153,6 +159,33 @@ const ARCHIVE_LOCAL_SESSION_REFUSAL = 'Archives are chosen, imported, declined a
 
 function refused(text: string, code: string): ChatGptToolResult {
   return { content: [{ type: 'text', text }], structuredContent: { error: code }, isError: true };
+}
+
+/** Why Approve did nothing for a session that is not this computer's own unlocked dashboard. */
+const CLASSIFIER_APPROVE_LOCAL_SESSION_REFUSAL = 'The privacy check\'s model is approved only in the dashboard on this computer, in an unlocked browser.';
+
+/**
+ * Approve, on Needs you: the owner at this computer's own unlocked
+ * dashboard approves the local model the privacy check waits on. The
+ * OpenClaw tab's bearer, a session the bearer minted, a launch ticket, an
+ * agent and ChatGPT are refused, as for archives. A Venice model is chosen
+ * with its spending limit instead, so it is refused here too.
+ */
+async function approveClassifier(options: DashboardPanelToolsOptions, args: Record<string, unknown>, context: DashboardPanelCallContext): Promise<ChatGptToolResult> {
+  if (Object.keys(args).length > 0) return refused('Approve takes no arguments.', 'invalid_params');
+  if (context.localSession !== true) return refused(CLASSIFIER_APPROVE_LOCAL_SESSION_REFUSAL, 'mac_dashboard_only');
+  if (!options.approveWaitingClassifier) return refused('Olympus cannot approve the model here.', 'unavailable');
+  const status = await options.approveWaitingClassifier().catch(() => 'failed' as const);
+  switch (status) {
+    case 'approved':
+      return { content: [{ type: 'text', text: 'Approved. The privacy check starts on its next pass.' }], structuredContent: { status: 'saved' } };
+    case 'nothing_waiting':
+      return { content: [{ type: 'text', text: 'Nothing is waiting for approval.' }], structuredContent: { status: 'nothing_waiting' } };
+    case 'not_local':
+      return refused('A Venice model is chosen in Settings, with its spending limit.', 'not_local');
+    default:
+      return refused('The approval could not be saved. Try again.', 'internal');
+  }
 }
 
 /** A Connect that starts and finishes on this computer. */
@@ -588,6 +621,7 @@ export function createDashboardPanelTools(options: DashboardPanelToolsOptions): 
       if (name === ARCHIVE_DECLINE_TOOL_NAME) return await archiveDecline(options, args, context);
       if (name === ARCHIVE_REMOVE_TOOL_NAME) return await archiveRemove(options, args, context);
       if (name === ARCHIVE_STOP_TOOL_NAME) return await archiveStop(options, args, context);
+      if (name === CLASSIFIER_APPROVE_TOOL_NAME) return await approveClassifier(options, args, context);
       const signal = context.signal ?? new AbortController().signal;
       const base = options.surface();
       // Keep the view the dashboard result is built from, for Unpair's entries.
@@ -596,6 +630,11 @@ export function createDashboardPanelTools(options: DashboardPanelToolsOptions): 
         ...base,
         setup: computerSetup(options, context, privacyConfirmationScope),
         dashboardView: async (viewSignal?: AbortSignal) => (view = await base.dashboardView(viewSignal)),
+        // Only this computer's own unlocked dashboard gets Approve in place of the command.
+        ...(base.privacy ? { privacy: () => {
+          const privacy = base.privacy!();
+          return privacy && context.localSession === true && options.approveWaitingClassifier ? { ...privacy, approveHere: true } : privacy;
+        } } : {}),
       };
       const result = await callChatGptTool(name, args, options.makeContext(signal), surface, signal);
       if (name !== DASHBOARD_TOOL_NAME || result.isError) return result;

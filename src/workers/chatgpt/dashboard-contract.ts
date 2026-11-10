@@ -846,8 +846,17 @@ export const ARCHIVE_REMOVE_TOOL_NAME = 'olympus_archive_remove';
  * What it imported so far stays in the source; nothing is deleted.
  */
 export const ARCHIVE_STOP_TOOL_NAME = 'olympus_archive_stop';
+
 /**
- * The archive tools only the person at this computer's dashboard may use: a
+ * Computer only, unlocked local session only: approve the local model the
+ * privacy check is waiting on (Needs you, `privacy:classifier_approval`).
+ * Takes no arguments: it approves exactly the lane, profile, model and prompt
+ * the check reports waiting, as `olympus tier classifier approve` does.
+ */
+export const CLASSIFIER_APPROVE_TOOL_NAME = 'olympus_privacy_classifier_approve';
+/**
+ * The archive tools and Approve (the privacy check's local model), which only
+ * the person at this computer's dashboard may use: a
  * local-grade control session (workers/http.ts), never the worker bearer nor
  * a session a bearer or its launch ticket minted. The computer's host page
  * opens that session (the local unlock) before the first of them.
@@ -860,6 +869,7 @@ export const COMPUTER_LOCAL_SESSION_TOOL_NAMES: readonly string[] = [
   ARCHIVE_DECLINE_TOOL_NAME,
   ARCHIVE_REMOVE_TOOL_NAME,
   ARCHIVE_STOP_TOOL_NAME,
+  CLASSIFIER_APPROVE_TOOL_NAME,
 ];
 
 /**
@@ -885,7 +895,8 @@ export const PANEL_TOOL_NAMES = [
 
 /**
  * The computer adds Index faster, Unpair, listing and opening unreadable
- * files, and importing archives to the panel's tools.
+ * files, importing archives and approving the privacy check's local model
+ * to the panel's tools.
  */
 export const COMPUTER_HOST_TOOL_NAMES: readonly string[] = [
   ...PANEL_TOOL_NAMES,
@@ -900,6 +911,7 @@ export const COMPUTER_HOST_TOOL_NAMES: readonly string[] = [
   ARCHIVE_DECLINE_TOOL_NAME,
   ARCHIVE_REMOVE_TOOL_NAME,
   ARCHIVE_STOP_TOOL_NAME,
+  CLASSIFIER_APPROVE_TOOL_NAME,
 ];
 
 /** The `_meta` key carrying the picker's names to the widget only. */

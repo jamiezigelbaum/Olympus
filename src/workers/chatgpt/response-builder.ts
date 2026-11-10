@@ -77,6 +77,7 @@ import type {
 } from './dashboard-contract.ts';
 import { isSourceFailureKind, sourceFailureRef } from '../dashboard/source-failure.ts';
 import {
+  CLASSIFIER_APPROVE_TOOL_NAME,
   CONNECT_SOURCE_TOOL_NAME,
   DASHBOARD_TOOL_NAME,
   DISCONNECT_SOURCE_TOOL_NAME,
@@ -155,6 +156,8 @@ const FIX_TOOL_ARGS: Record<string, Record<string, ReadonlySet<string>>> = {
   [MODEL_RETRY_TOOL_NAME]: { model: new Set(['embedding', 'answers', 'transcription']) },
   [SYNC_SOURCE_TOOL_NAME]: { source_id: SYNC_SOURCE_IDS },
   [PRIVACY_GET_TOOL_NAME]: {},
+  // Only in a view built for the computer's own unlocked dashboard; ChatGPT's /mcp never runs it.
+  [CLASSIFIER_APPROVE_TOOL_NAME]: {},
 };
 const FIX_HREF_HOST = 'olympusplugin.ai';
 /** Every hand-off link: the relay's own host, the plugin's one redirect domain. */
