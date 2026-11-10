@@ -30,7 +30,7 @@ import {
 } from '../src/workers/engine-split/commands.ts';
 import { BackgroundSyncFailedError, createFrontScheduler } from '../src/workers/engine-split/front-scheduler.ts';
 import { frontArchiveViews, frontJudgeState, frontUnreadableFiles } from '../src/workers/engine-split/front-state.ts';
-import { createFrontDashboardHistory } from '../src/workers/engine-split/front-history.ts';
+import { createFrontDashboardHistory, openReadOnlyDashboardHistory, openWritableDashboardHistory } from '../src/workers/engine-split/front-history.ts';
 import { SqliteSourceDashboardHistory } from '../src/workers/source-dashboard.ts';
 import { SqliteSourceIngestionLedgerStore } from '../src/workers/source-ingestion-ledger.ts';
 import { LocalSourceWatchStore } from '../src/core/source-watch.ts';
@@ -562,11 +562,11 @@ describe('the front writes nothing the background owns', () => {
     new LocalSourceWatchStore(watches).close();
     new LocalFileExtractionJobStore(jobs).close();
     forbidWritableStoreOpens();
-    expect(() => new SqliteSourceDashboardHistory(dashboard)).toThrow(FrontStoreWriteError);
+    expect(() => openWritableDashboardHistory(dashboard)).toThrow(FrontStoreWriteError);
     expect(() => new SqliteSourceIngestionLedgerStore(dashboard)).toThrow(FrontStoreWriteError);
     expect(() => new LocalSourceWatchStore(watches)).toThrow(FrontStoreWriteError);
     expect(() => new LocalFileExtractionJobStore(jobs)).toThrow(FrontStoreWriteError);
-    new SqliteSourceDashboardHistory(dashboard, { readOnly: true }).close();
+    openReadOnlyDashboardHistory(dashboard).close();
     new LocalSourceWatchStore(watches, { readOnly: true }).close();
     new LocalFileExtractionJobStore(jobs, { readonly: true }).close();
   });

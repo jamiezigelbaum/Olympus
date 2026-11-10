@@ -99729,13 +99729,7 @@ function phaseAtParity(sample, counter, value) {
 
 class SqliteSourceDashboardHistory {
   db;
-  constructor(dbPath = defaultSourceDashboardHistoryDbPath(), options = {}) {
-    if (options.readOnly === true) {
-      this.db = new Database21(dbPath, { readonly: true, create: false });
-      this.db.exec("PRAGMA busy_timeout = 10000; PRAGMA query_only = ON;");
-      return;
-    }
-    assertWritableStoreOpenAllowed("dashboard history", dbPath);
+  constructor(dbPath = defaultSourceDashboardHistoryDbPath()) {
     if (dbPath !== ":memory:")
       mkdirSync40(dirname68(dbPath), { recursive: true, mode: 448 });
     this.db = new Database21(dbPath);
@@ -101843,7 +101837,6 @@ var init_source_dashboard = __esm(() => {
   init_phases();
   init_credential_health();
   init_status();
-  init_store_write_guard();
   init_public_source_capabilities();
   DASHBOARD_UNSETTLED_CUSTODY_LABELS = new Set([
     DASHBOARD_CONNECTION_REGISTRY_UNREADABLE_LABEL,
@@ -201474,7 +201467,29 @@ var init_front_scheduler = __esm(() => {
 });
 
 // src/workers/engine-split/front-history.ts
+import { Database as Database26 } from "bun:sqlite";
 import { existsSync as existsSync106 } from "node:fs";
+function openWritableDashboardHistory(path = defaultSourceDashboardHistoryDbPath()) {
+  assertWritableStoreOpenAllowed("dashboard history", path);
+  return new SqliteSourceDashboardHistory(path);
+}
+function openReadOnlyDashboardHistory(path) {
+  const db = new Database26(path, { readonly: true, create: false });
+  try {
+    db.exec("PRAGMA busy_timeout = 10000; PRAGMA query_only = ON;");
+  } catch (error2) {
+    closeSqliteStore(db, { checkpoint: false });
+    throw error2;
+  }
+  const methods = SqliteSourceDashboardHistory.prototype;
+  const self = { db };
+  return {
+    progressFor: (sample, now) => methods.progressFor.call(self, sample, now),
+    movementFor: (sample, now) => methods.movementFor.call(self, sample, now),
+    sampleCount: () => methods.sampleCount.call(self),
+    close: () => closeSqliteStore(db, { checkpoint: false })
+  };
+}
 function createFrontDashboardHistory(input) {
   const now = input.now ?? (() => Date.now());
   const minIntervalMs = input.minIntervalMs ?? 30000;
@@ -201483,7 +201498,7 @@ function createFrontDashboardHistory(input) {
   const read = () => {
     if (!reader && existsSync106(input.path)) {
       try {
-        reader = new SqliteSourceDashboardHistory(input.path, { readOnly: true });
+        reader = openReadOnlyDashboardHistory(input.path);
       } catch {
         reader = undefined;
       }
@@ -201505,6 +201520,7 @@ function createFrontDashboardHistory(input) {
   };
 }
 var init_front_history = __esm(() => {
+  init_store_write_guard();
   init_source_dashboard();
 });
 
@@ -226323,7 +226339,7 @@ ${key2}`;
     tierMigration: () => tierMigrationStatusSummary(resolveTierMigrationPaths(process.env, resolveEmbeddingLedgerPath(process.env)).statePath),
     ...extractionReadinessLedger ? { readinessLedger: extractionReadinessLedger } : {}
   }) : undefined;
-  const sourceDashboardHistory = !sourceIndexReadEnabled ? undefined : engineFront ? createFrontDashboardHistory({ path: defaultSourceDashboardHistoryDbPath(), client: engineFront.client }) : new SqliteSourceDashboardHistory;
+  const sourceDashboardHistory = !sourceIndexReadEnabled ? undefined : engineFront ? createFrontDashboardHistory({ path: defaultSourceDashboardHistoryDbPath(), client: engineFront.client }) : openWritableDashboardHistory();
   const sourceIngestionLedger = sourceIndexReadEnabled && !engineFront ? new SqliteSourceIngestionLedgerStore : undefined;
   const currentXBookmarksRuntime = () => {
     const handle = connectorStoreLaneHandle({

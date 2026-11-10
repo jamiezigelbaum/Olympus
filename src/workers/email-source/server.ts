@@ -446,7 +446,7 @@ import {
   telegramMediaLanes,
 } from '../telegram-messages/media-extraction.ts';
 import { readArchiveInputMedia } from '../archive-import/input-media.ts';
-import { defaultSourceDashboardHistoryDbPath, SqliteSourceDashboardHistory, type DashboardCaptureRuntime, type SourceDashboardViewModel } from '../source-dashboard.ts';
+import { defaultSourceDashboardHistoryDbPath, type DashboardCaptureRuntime, type SourceDashboardViewModel } from '../source-dashboard.ts';
 import type { DashboardPanelTools } from './dashboard-panel-tools.ts';
 import { readEmbeddingRuntime } from '../dashboard/embedding-runtime.ts';
 import {
@@ -555,7 +555,7 @@ import { forwardedRequestToRequest, responseToForwarded, type EngineForwardedReq
 import { frontArchiveViews, frontJudgeState, frontUnreadableFiles } from '../engine-split/front-state.ts';
 import type { EngineManualSyncRun } from '../engine-split/snapshot.ts';
 import { createFrontScheduler } from '../engine-split/front-scheduler.ts';
-import { createFrontDashboardHistory } from '../engine-split/front-history.ts';
+import { createFrontDashboardHistory, openWritableDashboardHistory } from '../engine-split/front-history.ts';
 
 /**
  * The least time between two scheduler status snapshots for the ingestion
@@ -5219,7 +5219,7 @@ export async function main(): Promise<void> {
   // progress read-only and sends its samples to be recorded.
   const sourceDashboardHistory = !sourceIndexReadEnabled ? undefined
     : engineFront ? createFrontDashboardHistory({ path: defaultSourceDashboardHistoryDbPath(), client: engineFront.client })
-    : new SqliteSourceDashboardHistory();
+    : openWritableDashboardHistory();
   // Written by the scheduler's ticks, which run in the background only.
   const sourceIngestionLedger = sourceIndexReadEnabled && !engineFront
     ? new SqliteSourceIngestionLedgerStore()

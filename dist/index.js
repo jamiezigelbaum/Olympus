@@ -23429,7 +23429,6 @@ var init_source_dashboard = __esm(() => {
   init_phases();
   init_credential_health();
   init_status();
-  init_store_write_guard();
   init_public_source_capabilities();
   DASHBOARD_UNSETTLED_CUSTODY_LABELS = new Set([
     DASHBOARD_CONNECTION_REGISTRY_UNREADABLE_LABEL,
