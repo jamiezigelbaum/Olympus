@@ -194,6 +194,8 @@ export const V0_4_PUBLIC_CLI_COMMANDS = [
   'source extract-pdfs',
   'data export',
   'data verify',
+  'data backup',
+  'data restore',
   'data delete',
   'tier set',
   'tier explain',
