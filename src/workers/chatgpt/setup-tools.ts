@@ -362,12 +362,15 @@ export const SYNC_SOURCE_TOOL: ToolDefinition = {
   _meta: WIDGET_ONLY,
 };
 
-/** folder {key, display?}; label {key: id, value: name}; sender {value: address or @domain}. */
+/** Chat sources an always-Private chat rule may name (privacy-profile.ts RULE_SOURCES.chat). */
+const PRIVACY_CHAT_SOURCE_IDS = ['telegram.messages', 'whatsapp.personal.messages'] as const;
+
+/** folder {key, display?}; label {key: id, value: name}; sender {value: address or @domain}; chat {key: conversation id, display?}. */
 const PRIVACY_RULE_SCHEMA = {
   type: 'object',
   properties: {
-    kind: { type: 'string', enum: ['folder', 'label', 'sender'] },
-    source_id: { type: 'string', enum: [...SCOPE_SOURCE_IDS] },
+    kind: { type: 'string', enum: ['folder', 'label', 'sender', 'chat'] },
+    source_id: { type: 'string', enum: [...SCOPE_SOURCE_IDS, ...PRIVACY_CHAT_SOURCE_IDS] },
     key: { type: 'string', maxLength: 1024 },
     value: { type: 'string', maxLength: 240 },
     display: { type: 'string', maxLength: 200 },

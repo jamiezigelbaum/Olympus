@@ -86,7 +86,10 @@ export interface ChatGptSetupBackendOptions {
 function privacyRuleView(rule: PrivacyRule): PrivacyRuleView[] {
   if (rule.kind === 'sender' && rule.value) return [{ kind: 'sender', source_id: 'gmail.email', value: rule.value }];
   if (rule.kind === 'label' && rule.key && rule.value) return [{ kind: 'label', source_id: 'gmail.email', key: rule.key, value: rule.value }];
-  if (rule.kind === 'folder' && rule.key && rule.source_id !== 'gmail.email') {
+  if (rule.kind === 'chat' && rule.key && (rule.source_id === 'telegram.messages' || rule.source_id === 'whatsapp.personal.messages')) {
+    return [{ kind: 'chat', source_id: rule.source_id, key: rule.key, ...(rule.display ? { display: rule.display } : {}) }];
+  }
+  if (rule.kind === 'folder' && rule.key && rule.source_id !== 'gmail.email' && rule.source_id !== 'telegram.messages' && rule.source_id !== 'whatsapp.personal.messages') {
     return [{ kind: 'folder', source_id: rule.source_id, key: rule.key, ...(rule.display ? { display: rule.display } : {}) }];
   }
   return [];
