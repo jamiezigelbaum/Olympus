@@ -914,6 +914,9 @@ function withWorkerAuthHeader(init, authToken) {
     headers
   };
 }
+function resolveWorkerAuthToken(env, config) {
+  return normalizeWorkerAuthToken(env.OLYMPUS_WORKER_AUTH_TOKEN) ?? workerAuthTokenFromSetupEnv({ env }) ?? normalizeWorkerAuthToken(config.worker.authToken);
+}
 function workerAuthTokenFromSetupEnv(options = {}) {
   return optionalToken(readWorkerSetupEnv(options)?.OLYMPUS_WORKER_AUTH_TOKEN);
 }
@@ -1229,6 +1232,7 @@ var init_public_surface = __esm(() => {
     "source_watches",
     "source_watch_cancel",
     "olympus_doctor",
+    "olympus_setup_status",
     "ask_anonymously",
     "archive_import",
     "privacy_item_find",
@@ -1244,6 +1248,7 @@ var init_public_surface = __esm(() => {
     "source_index_status",
     "source_index_search",
     "olympus_doctor",
+    "olympus_setup_status",
     "ask_anonymously",
     "archive_import",
     "privacy_item_find",
@@ -1257,6 +1262,7 @@ var init_public_surface = __esm(() => {
     "source_index_status",
     "source_index_search",
     "olympus_doctor",
+    "olympus_setup_status",
     "ask_anonymously",
     "archive_import",
     "privacy_item_find",
@@ -2798,6 +2804,7 @@ var init_olympus_layout = __esm(() => {
     "google-drive-request-budget": "google-drive-daily-request-budget.json",
     "credential-broker-state": "credential-broker-state.json",
     "waiting-private-questions": "waiting-private-questions.sqlite",
+    "app-release-log": "app-release-log.sqlite",
     "tier-migration": "tier-migration",
     "people-index": "people-index.sqlite",
     models: "models",
@@ -4191,9 +4198,53 @@ var init_secret_store = __esm(() => {
 
 // src/core/config.ts
 import { existsSync as existsSync6, readFileSync as readFileSync11 } from "node:fs";
+import { homedir as homedir7 } from "node:os";
 import { isAbsolute as isAbsolutePath2, join as join15, resolve as resolve5 } from "node:path";
 function defaultConfig() {
   return structuredClone(DEFAULT_CONFIG);
+}
+function loadConfig(env = process.env, options = {}) {
+  const engineConfig = env.OLYMPUS_CONFIG ? undefined : installedEngineConfig(env);
+  if (engineConfig) {
+    const config2 = configFromPluginConfig(engineConfig, { requireResolvedWorkerSecrets: false });
+    applyEnvironmentOverrides(config2, env);
+    applyRemoteSource(config2, env, options);
+    validateConfig(config2);
+    return config2;
+  }
+  const config = defaultConfig();
+  const configPath = env.OLYMPUS_CONFIG ?? join15(env.HOME?.trim() || homedir7(), ".olympus", "config.json");
+  if (existsSync6(configPath)) {
+    const raw = JSON.parse(readFileSync11(configPath, "utf8"));
+    mergeConfig(config, raw);
+  }
+  applyEnvironmentOverrides(config, env);
+  applyRemoteSource(config, env, options);
+  validateConfig(config);
+  return config;
+}
+function installedEngineConfig(env) {
+  const home = env.HOME?.trim() || homedir7();
+  const layout = process.platform === "linux" ? resolveLinuxEngineLayout(env) : undefined;
+  const receipt = layout ? readLinuxEngineReceipt(layout.receiptPath) : undefined;
+  if (receipt && receipt.installationState !== "installed")
+    return;
+  const enginePath = receipt ? layout.configPath : join15(home, ".olympus", "engine.json");
+  const agentPath = receipt ? layout.unitPath : join15(home, "Library", "LaunchAgents", "ai.olympusplugin.engine.plist");
+  if (env.OLYMPUS_ENGINE_HOST !== "1" && !existsSync6(agentPath))
+    return;
+  if (!existsSync6(enginePath))
+    return;
+  let parsed;
+  try {
+    parsed = JSON.parse(readFileSync11(enginePath, "utf8"));
+  } catch {
+    throw new OperationError("config_error", `${enginePath} is not valid JSON.`, "Fix or remove it, then run olympus engine install again.");
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new OperationError("config_error", `${enginePath} must hold a JSON object.`);
+  }
+  return parsed;
 }
 function configWithEnvironmentOverrides(config, env) {
   const next = structuredClone(config);
@@ -4304,6 +4355,39 @@ function applyEnvironmentOverrides(config, env) {
       policyPath: env.OLYMPUS_DROPBOX_INGESTION_POLICY_PATH.trim()
     };
   }
+}
+function applyNativeRemoteHandoff(config, env) {
+  const handoff = env[NATIVE_REMOTE_CONFIG_ENV]?.trim();
+  if (!handoff) {
+    delete config.remote;
+    return;
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(handoff);
+  } catch {
+    throw new OperationError("config_error", `${NATIVE_REMOTE_CONFIG_ENV} is not valid JSON.`);
+  }
+  const remote = asRecord5(parsed);
+  if (!remote)
+    throw new OperationError("config_error", `${NATIVE_REMOTE_CONFIG_ENV} must hold a JSON object.`);
+  config.remote = parseRemoteConfig(remote);
+}
+function applyRemoteSource(config, env, options) {
+  if (options.nativeRemoteHandoff === true)
+    applyNativeRemoteHandoff(config, env);
+  else if (options.openClawPluginRemote === true)
+    applyOpenClawPluginRemote(config, env);
+}
+function applyOpenClawPluginRemote(config, env) {
+  const section = readOpenClawPluginRemote(env);
+  if (!section.hosted)
+    return;
+  if ("unreadable" in section || !section.remote) {
+    delete config.remote;
+    return;
+  }
+  config.remote = parseRemoteConfig(section.remote);
 }
 function parseRemoteConfig(remote) {
   const parsed = { enabled: remote.enabled === true };
@@ -4625,6 +4709,97 @@ function parseTransport(value) {
   if (value === "direct")
     return value;
   throw new OperationError("invalid_params", `Unsupported Argus transport: ${value}`, 'Use transport "direct" with a local or runtime-managed Argus endpoint.');
+}
+function mergeConfig(target, source) {
+  if (source.sovereignty) {
+    target.sovereignty = { ...target.sovereignty ?? {}, ...source.sovereignty };
+  }
+  if (source.worker) {
+    target.worker = {
+      ...target.worker,
+      ...source.worker,
+      service: {
+        ...target.worker.service,
+        ...source.worker.service ?? {},
+        credentials: source.worker.service?.credentials ?? target.worker.service.credentials
+      },
+      creditMonitor: {
+        ...target.worker.creditMonitor,
+        ...source.worker.creditMonitor ?? {},
+        credentials: source.worker.creditMonitor?.credentials ?? target.worker.creditMonitor.credentials
+      },
+      telegramCapture: {
+        ...target.worker.telegramCapture,
+        ...source.worker.telegramCapture ?? {},
+        credentials: source.worker.telegramCapture?.credentials ?? target.worker.telegramCapture.credentials
+      },
+      whatsappCapture: {
+        ...target.worker.whatsappCapture,
+        ...source.worker.whatsappCapture ?? {}
+      },
+      embeddingDrain: {
+        ...target.worker.embeddingDrain,
+        ...source.worker.embeddingDrain ?? {},
+        credentials: source.worker.embeddingDrain?.credentials ?? target.worker.embeddingDrain.credentials
+      },
+      transcriptionCleanup: { ...target.worker.transcriptionCleanup, ...source.worker.transcriptionCleanup ?? {} },
+      scheduler: {
+        ...target.worker.scheduler,
+        ...source.worker.scheduler ?? {}
+      }
+    };
+  }
+  if (source.identity) {
+    target.identity = { ...target.identity, ...source.identity };
+  }
+  if (source.argus) {
+    if (source.argus.defaultLane)
+      target.argus.defaultLane = source.argus.defaultLane;
+    if (source.argus.defaultProfile)
+      target.argus.defaultProfile = source.argus.defaultProfile;
+    if (source.argus.transport)
+      target.argus.transport = source.argus.transport;
+    if (source.argus.requestTimeoutSeconds) {
+      target.argus.requestTimeoutSeconds = source.argus.requestTimeoutSeconds;
+    }
+    if (source.argus.lanes?.fast) {
+      target.argus.lanes.fast = { ...target.argus.lanes.fast, ...source.argus.lanes.fast };
+      mirrorFastLaneToProfiles(target, ["default_chat", "source_answer"]);
+    }
+    if (source.argus.lanes?.deep) {
+      target.argus.lanes.deep = { ...target.argus.lanes.deep, ...source.argus.lanes.deep };
+    }
+    if (source.argus.modelProfiles) {
+      for (const profile of ARGUS_MODEL_PROFILES) {
+        const sourceProfile = source.argus.modelProfiles[profile];
+        if (sourceProfile) {
+          target.argus.modelProfiles[profile] = {
+            ...target.argus.modelProfiles[profile],
+            ...sourceProfile
+          };
+        }
+      }
+    }
+  }
+  if (source.email) {
+    target.email = { ...target.email, ...source.email };
+    if (typeof target.email.baseUrl === "string") {
+      target.email.baseUrl = normalizeSourceWorkerBaseUrl(target.email.baseUrl);
+    }
+  }
+  if (source.sourceIndex) {
+    target.sourceIndex = {
+      ...target.sourceIndex,
+      ...source.sourceIndex,
+      corpusRegistry: source.sourceIndex.corpusRegistry ?? target.sourceIndex.corpusRegistry,
+      ...source.sourceIndex.ingestionExclusions ? { ingestionExclusions: source.sourceIndex.ingestionExclusions } : {},
+      ...source.sourceIndex.ingestionExclusionsPath ? { ingestionExclusionsPath: source.sourceIndex.ingestionExclusionsPath } : {},
+      ingestionPolicies: {
+        ...target.sourceIndex.ingestionPolicies,
+        ...source.sourceIndex.ingestionPolicies ?? {}
+      }
+    };
+  }
 }
 function mirrorFastLaneToProfiles(config, profiles) {
   for (const profile of profiles) {
@@ -5737,7 +5912,7 @@ var init_worker_cli_launcher = __esm(() => {
 
 // src/core/data-owner-lock.ts
 import { createRequire as createRequire3 } from "node:module";
-var runtimeRequire2, O_CLOEXEC, WORKER_DATA_OWNER_BUSY_EXIT_CODE = 73;
+var runtimeRequire2, O_CLOEXEC, STOP_OLYMPUS_HINT = "olympus engine stop, or olympus worker stop if it runs as a worker service, or stop the OpenClaw Gateway that hosts it", WORKER_DATA_OWNER_BUSY_EXIT_CODE = 73;
 var init_data_owner_lock = __esm(() => {
   init_olympus_layout();
   runtimeRequire2 = createRequire3(import.meta.url);
@@ -6162,14 +6337,14 @@ var init_archive_formats = __esm(() => {
 
 // src/core/messaging-capture-grant-file.ts
 import { closeSync as closeSync5, constants, fstatSync, lstatSync as lstatSync8, openSync as openSync5, readFileSync as readFileSync15 } from "node:fs";
-import { homedir as homedir8 } from "node:os";
+import { homedir as homedir9 } from "node:os";
 import { dirname as dirname15, join as join19 } from "node:path";
 function captureGrantPathBeside(source, handleRegistryPath) {
   return join19(dirname15(handleRegistryPath), `messaging-capture.${source}.json`);
 }
 function captureGrantPathFromEnv(source, env) {
   const configured = env.OLYMPUS_CREDENTIAL_HANDLE_REGISTRY_PATH?.trim();
-  return captureGrantPathBeside(source, configured || join19(env.HOME?.trim() || homedir8(), ".config", "olympus", "handles.json"));
+  return captureGrantPathBeside(source, configured || join19(env.HOME?.trim() || homedir9(), ".config", "olympus", "handles.json"));
 }
 function readCaptureGrantFile(path) {
   try {
@@ -6653,7 +6828,7 @@ var init_remote_access = __esm(() => {
 
 // src/core/openclaw-executable.ts
 import { accessSync as accessSync6, constants as fsConstants4, statSync as statSync12 } from "node:fs";
-import { homedir as homedir9 } from "node:os";
+import { homedir as homedir10 } from "node:os";
 import { delimiter as delimiter4, isAbsolute as isAbsolute16, join as join24 } from "node:path";
 function resolveOpenClawExecutable(options = {}) {
   const env = options.env ?? process.env;
@@ -6672,7 +6847,7 @@ function resolveOpenClawExecutable(options = {}) {
   const found = which("openclaw");
   if (found && isAbsolute16(found))
     return found;
-  const home = options.homeDir?.trim() || env.HOME?.trim() || homedir9();
+  const home = options.homeDir?.trim() || env.HOME?.trim() || homedir10();
   for (const candidate of openClawWellKnownPaths(home)) {
     if (isExecutableFile(candidate))
       return candidate;
@@ -6774,6 +6949,226 @@ var init_router = __esm(() => {
   ]);
   NORMALIZED_FORBIDDEN_ROUTER_RESULT_KEYS = new Set([...FORBIDDEN_ROUTER_RESULT_KEYS].map(normalizeRouterResultKey));
 });
+
+// src/core/app-release-capture.ts
+import { AsyncLocalStorage as AsyncLocalStorage4 } from "node:async_hooks";
+var storage3, completedPrivateAnswers, JOB_QUESTION_TTL_MS, jobQuestions;
+var init_app_release_capture = __esm(() => {
+  storage3 = new AsyncLocalStorage4;
+  completedPrivateAnswers = new Set;
+  JOB_QUESTION_TTL_MS = 30 * 60000;
+  jobQuestions = new Map;
+});
+// src/core/secret-patterns.ts
+var PROSE_WORDS, CREDENTIAL_KEYS, CREDENTIAL_KEY_WORDS, LEGACY_KEY_WORDS, CREDENTIAL_QUERY_KEY, PLACEHOLDER_WORDS, BARE_LITERALS, COMMON_OBJECTS, STRONG_QUALIFIERS, ENV_KEY_WORDS, ENV_CREDENTIAL_KEY, KEYWORD, SEPARATOR, VALUE, CREDENTIAL_ASSIGNMENT, ENV_ASSIGNMENT, BLOCK_SCALAR, LABELLED_PASSPHRASE, RECOVERY_CODE_LABEL, LEGACY_CREDENTIAL_ASSIGNMENT;
+var init_secret_patterns = __esm(() => {
+  PROSE_WORDS = new Set([
+    "above",
+    "again",
+    "below",
+    "cannot",
+    "change",
+    "changed",
+    "characters",
+    "choose",
+    "click",
+    "contact",
+    "enter",
+    "expired",
+    "expires",
+    "forgot",
+    "forgotten",
+    "guideline",
+    "guidelines",
+    "hidden",
+    "incorrect",
+    "information",
+    "instruction",
+    "instructions",
+    "invalid",
+    "least",
+    "letters",
+    "link",
+    "manager",
+    "maximum",
+    "min",
+    "minimum",
+    "must",
+    "need",
+    "needed",
+    "needs",
+    "number",
+    "numbers",
+    "optional",
+    "please",
+    "policies",
+    "policy",
+    "protected",
+    "provide",
+    "provided",
+    "required",
+    "requirements",
+    "reset",
+    "retry",
+    "see",
+    "send",
+    "sent",
+    "setting",
+    "settings",
+    "shared",
+    "should",
+    "shown",
+    "sign",
+    "strength",
+    "symbols",
+    "unchanged",
+    "use",
+    "used",
+    "using",
+    "via"
+  ]);
+  CREDENTIAL_KEYS = [
+    { pattern: String.raw`api[_ -]?key`, legacy: true },
+    { pattern: String.raw`access[_ -]?token`, legacy: true },
+    { pattern: String.raw`refresh[_ -]?token`, legacy: true },
+    { pattern: String.raw`client[_ -]?secret`, legacy: true },
+    { pattern: "password", legacy: true },
+    { pattern: String.raw`pass(?:wd|phrase|code)|(?<![a-z])pass|pwd` },
+    { pattern: String.raw`secret[_ -]?(?:access[_ -]?)?key(?:[_-]?base)?` },
+    { pattern: String.raw`private[_ -]?key` },
+    { pattern: "secret" },
+    { pattern: String.raw`token(?!s)` },
+    { pattern: "sig", urlOnly: true }
+  ];
+  CREDENTIAL_KEY_WORDS = CREDENTIAL_KEYS.filter((key) => !key.urlOnly).map((key) => key.pattern).join("|");
+  LEGACY_KEY_WORDS = CREDENTIAL_KEYS.filter((key) => key.legacy).map((key) => key.pattern).join("|");
+  CREDENTIAL_QUERY_KEY = new RegExp(`^(?:${CREDENTIAL_KEYS.map((key) => key.pattern).join("|")})$`, "i");
+  PLACEHOLDER_WORDS = new RegExp([
+    String.raw`(?:^|[^a-z])your[_ .-]?[a-z_ -]{0,16}(?:api|secret|token|key|pass|password|client|value|here)`,
+    String.raw`(?:^|[^a-z])my[_ .-](?:api|secret|token|key|pass|password|client)`,
+    String.raw`(?:^|[^a-z])(?:example|dummy|todo|fixme)(?:[^a-z]|$)`,
+    "placeholder",
+    "redacted",
+    "changeme",
+    "change[_-]me",
+    "replace[_-]?me",
+    "insert[_-]?(?:your|here|key|token)",
+    "[_-]here$",
+    "^n/a$",
+    "not[_ -]?set",
+    "^unset$"
+  ].join("|"), "i");
+  BARE_LITERALS = new Set([
+    "password",
+    "passwd",
+    "passphrase",
+    "secret",
+    "token",
+    "apikey",
+    "api_key",
+    "api-key",
+    "string",
+    "null",
+    "none",
+    "nil",
+    "undefined",
+    "true",
+    "false",
+    "empty",
+    "hidden",
+    "masked",
+    "required",
+    "optional",
+    "changeme",
+    "enabled",
+    "disabled",
+    "encrypted",
+    "hashed",
+    "unknown",
+    "tbd",
+    "pending",
+    "missing"
+  ]);
+  COMMON_OBJECTS = new Set([
+    "user",
+    "users",
+    "body",
+    "data",
+    "form",
+    "state",
+    "props",
+    "creds",
+    "credentials",
+    "account",
+    "profile",
+    "session",
+    "auth",
+    "db",
+    "app",
+    "json",
+    "response",
+    "res",
+    "row",
+    "record",
+    "item",
+    "model"
+  ]);
+  STRONG_QUALIFIERS = new Set([
+    "client",
+    "app",
+    "api",
+    "access",
+    "refresh",
+    "auth",
+    "bearer",
+    "id",
+    "session",
+    "bot",
+    "oauth",
+    "webhook",
+    "signing",
+    "jwt",
+    "service",
+    "personal",
+    "consumer",
+    "shared",
+    "encryption",
+    "master",
+    "admin",
+    "root",
+    "user",
+    "db",
+    "database",
+    "wifi",
+    "email",
+    "login"
+  ]);
+  ENV_KEY_WORDS = CREDENTIAL_KEY_WORDS;
+  ENV_CREDENTIAL_KEY = new RegExp(ENV_KEY_WORDS, "i");
+  KEYWORD = `(?<kw>${CREDENTIAL_KEY_WORDS})`;
+  SEPARATOR = String.raw`["'\x60*_]{0,3}[ \t]*(?::=|=>|[:=])[*_]{0,2}[ \t]*(?<nl>\r?\n[ \t]*)?`;
+  VALUE = String.raw`(?:"(?<dq>(?:[^"\\\n\r]|\\.)*)"|'(?<sq>(?:[^'\\\n\r]|\\.)*)'|\x60(?<bq>[^\x60\n\r]*)\x60|(?<uv>[^\s"'\x60]+))`;
+  CREDENTIAL_ASSIGNMENT = new RegExp(`${KEYWORD}${SEPARATOR}${VALUE}`, "gi");
+  ENV_ASSIGNMENT = new RegExp(String.raw`(?<![A-Za-z0-9_.?&/%+=-])(?=(?:--)?[A-Za-z0-9_.-]*?(?:${ENV_KEY_WORDS}))(?<ek>(?:--)?[A-Za-z_][A-Za-z0-9_.-]*)[ \t]*=(?![=~>])[ \t]*${VALUE}`, "gi");
+  BLOCK_SCALAR = new RegExp(String.raw`${KEYWORD}["'\x60]{0,2}[ \t]*:[ \t]*[|>](?:[+-][1-9]?|[1-9][+-]?)?[ \t]*(?:#[^\r\n]*)?\r?\n(?:[ \t]*\r?\n)*(?<ind>[ \t]+)(?<bv>[^ \t\r\n][^\r\n]*)`, "gi");
+  LABELLED_PASSPHRASE = new RegExp(String.raw`^[ \t>*•-]*(?:[A-Za-z0-9 _.-]{0,30}?)pass(?:word|phrase|code)["'\x60*_]{0,3}[ \t]*(?::=|[:=])[*_]{0,2}[ \t]*(?<mv>[^\s][^\n\r]{5,159})$`, "gim");
+  RECOVERY_CODE_LABEL = new RegExp(String.raw`(?<![A-Za-z0-9])(?:recovery|backup)(?:[ \t_-]+(?:verification|security|login|sign[ -]?in|2fa|mfa|two[ -]factor|account))?[ \t_-]+(?:codes?|keys?)["'\x60*_]{0,3}[ \t]*(?:[:=]|(?<![A-Za-z])(?:is|are)(?![A-Za-z])[ \t]*:?)[*_]{0,2}[ \t]*(?<rest>[^\r\n]{0,200})`, "gi");
+  LEGACY_CREDENTIAL_ASSIGNMENT = new RegExp(String.raw`\b(${LEGACY_KEY_WORDS})\b\s*[:=]\s*['"]?[^'"\s]{12,}`, "gi");
+});
+
+// src/core/opsec.ts
+var init_opsec = __esm(() => {
+  init_secret_patterns();
+  init_types();
+});
+
+// src/core/parent-label.ts
+var init_parent_label = __esm(() => {
+  init_types();
+});
+
+// src/core/secret-location-note.ts
+var init_secret_location_note = () => {};
 
 // src/core/source-model-policy.ts
 function assertModelTrustTierAllowed(trustTier) {
@@ -7761,28 +8156,29 @@ var init_engine_maintenance = __esm(() => {
     staleAfterMs: Number.MAX_SAFE_INTEGER
   };
 });
+
 // src/core/worker-service.ts
-import { basename as basename4, dirname as dirname22, isAbsolute as isAbsolute17, join as join29, relative as relative3, sep as sep3 } from "node:path";
+import { basename as basename4, dirname as dirname22, isAbsolute as isAbsolute17, join as join30, relative as relative3, sep as sep3 } from "node:path";
 function workerServicePaths(platform2, homeDir, env = {}) {
   homeDir = validatedAbsolutePath(homeDir, "home directory");
   if (platform2 === "darwin") {
-    const logDir = join29(homeDir, "Library", "Logs", "Olympus");
+    const logDir = join30(homeDir, "Library", "Logs", "Olympus");
     return {
       label: "com.openclaw.olympus.worker",
-      unitPath: join29(homeDir, "Library", "LaunchAgents", "com.openclaw.olympus.worker.plist"),
-      envPath: join29(homeDir, ".config", "olympus", "worker.env"),
-      logPath: join29(logDir, "worker.log"),
-      errorLogPath: join29(logDir, "worker.err")
+      unitPath: join30(homeDir, "Library", "LaunchAgents", "com.openclaw.olympus.worker.plist"),
+      envPath: join30(homeDir, ".config", "olympus", "worker.env"),
+      logPath: join30(logDir, "worker.log"),
+      errorLogPath: join30(logDir, "worker.err")
     };
   }
   const layout = resolveLinuxEngineLayout({ ...env, HOME: homeDir });
-  const stateDir = join29(layout.stateHome, "olympus", "worker");
+  const stateDir = join30(layout.stateHome, "olympus", "worker");
   return {
     label: "olympus-worker",
-    unitPath: join29(layout.configHome, "systemd", "user", "olympus-worker.service"),
+    unitPath: join30(layout.configHome, "systemd", "user", "olympus-worker.service"),
     envPath: layout.workerEnvPath,
-    logPath: join29(stateDir, "worker.log"),
-    errorLogPath: join29(stateDir, "worker.err")
+    logPath: join30(stateDir, "worker.log"),
+    errorLogPath: join30(stateDir, "worker.err")
   };
 }
 function validatedAbsolutePath(value, label) {
@@ -7809,7 +8205,7 @@ import {
   constants as constants4,
   lstatSync as lstatSync11,
   mkdirSync as mkdirSync11,
-  readFileSync as readFileSync24,
+  readFileSync as readFileSync25,
   readdirSync as readdirSync2,
   realpathSync as realpathSync4,
   renameSync as renameSync3,
@@ -7819,8 +8215,8 @@ import {
   writeFileSync as writeFileSync5,
   chmodSync as chmodSync5
 } from "node:fs";
-import { homedir as homedir11 } from "node:os";
-import { dirname as dirname23, isAbsolute as isAbsolute18, join as join30, posix, sep as sep4 } from "node:path";
+import { homedir as homedir12 } from "node:os";
+import { dirname as dirname23, isAbsolute as isAbsolute18, join as join31, posix, sep as sep4 } from "node:path";
 function zkapiAsset(url, sha256, bytes, extra = {}) {
   return {
     url,
@@ -7856,20 +8252,20 @@ function managedToolsPlatform(platform2 = process.platform, arch = process.arch)
 function managedToolsBase(host = {}) {
   const env = host.env ?? process.env;
   const platform2 = host.platform ?? process.platform;
-  const home = env.HOME?.trim() || (host.env ? undefined : homedir11());
+  const home = env.HOME?.trim() || (host.env ? undefined : homedir12());
   if (platform2 === "darwin")
-    return home && isAbsolute18(home) ? join30(home, "Library", "Application Support", "Olympus") : undefined;
+    return home && isAbsolute18(home) ? join31(home, "Library", "Application Support", "Olympus") : undefined;
   if (platform2 === "linux") {
     const xdg = env.XDG_DATA_HOME?.trim();
     if (xdg && isAbsolute18(xdg))
-      return join30(xdg, "olympus");
-    return home && isAbsolute18(home) ? join30(home, ".local", "share", "olympus") : undefined;
+      return join31(xdg, "olympus");
+    return home && isAbsolute18(home) ? join31(home, ".local", "share", "olympus") : undefined;
   }
   return;
 }
 function managedToolsRoot(host = {}) {
   const base = managedToolsBase(host);
-  return base ? join30(base, "tools") : undefined;
+  return base ? join31(base, "tools") : undefined;
 }
 function currentUid(host) {
   return host.uid ?? (typeof process.getuid === "function" ? process.getuid() : undefined);
@@ -7894,7 +8290,7 @@ function readManifest(path, uid) {
     const stats = lstatSync11(path);
     if (!stats.isFile() || uid !== undefined && stats.uid !== uid || (stats.mode & 18) !== 0)
       return;
-    const parsed = JSON.parse(readFileSync24(path, "utf8"));
+    const parsed = JSON.parse(readFileSync25(path, "utf8"));
     if (parsed.schema !== 1 || typeof parsed.tool !== "string" || typeof parsed.version !== "string" || typeof parsed.sha256 !== "string")
       return;
     return parsed;
@@ -7910,9 +8306,9 @@ function managedToolExecutable(tool, host = {}) {
   if (!pin || !asset || !base)
     return;
   const uid = currentUid(host);
-  const root = join30(base, "tools");
-  const versionDir = join30(root, tool, pin.version);
-  for (const dir of [base, root, join30(root, tool), versionDir]) {
+  const root = join31(base, "tools");
+  const versionDir = join31(root, tool, pin.version);
+  for (const dir of [base, root, join31(root, tool), versionDir]) {
     try {
       if (lstatSync11(dir).isSymbolicLink())
         return;
@@ -7922,17 +8318,17 @@ function managedToolExecutable(tool, host = {}) {
     if (!privatelyOwned(dir, uid, "dir"))
       return;
   }
-  const manifest = readManifest(join30(versionDir, MANIFEST_FILE), uid);
+  const manifest = readManifest(join31(versionDir, MANIFEST_FILE), uid);
   if (!manifest || manifest.tool !== tool || manifest.version !== pin.version || manifest.platform !== platformKey || manifest.sha256 !== asset.sha256)
     return;
   try {
     const realDir = realpathSync4(versionDir);
     for (const required of new Set([...asset.required, asset.executable])) {
-      if (!trustedInside(realDir, join30(versionDir, required), uid, versionDir))
+      if (!trustedInside(realDir, join31(versionDir, required), uid, versionDir))
         return;
     }
     verifyPinnedFiles(versionDir, asset, uid, pin.label, tool);
-    const real = realpathSync4(join30(versionDir, asset.executable));
+    const real = realpathSync4(join31(versionDir, asset.executable));
     accessSync7(real, constants4.X_OK);
     return real;
   } catch {
@@ -7945,7 +8341,7 @@ function trustedInside(realDir, path, uid, versionDir) {
     for (let index = 1;index <= parts.length; index += 1) {
       let stats;
       try {
-        stats = lstatSync11(join30(versionDir, ...parts.slice(0, index)));
+        stats = lstatSync11(join31(versionDir, ...parts.slice(0, index)));
       } catch {
         return false;
       }
@@ -7970,11 +8366,11 @@ function trustedInside(realDir, path, uid, versionDir) {
   return true;
 }
 function fileSha256(path) {
-  return createHash3("sha256").update(readFileSync24(path)).digest("hex");
+  return createHash3("sha256").update(readFileSync25(path)).digest("hex");
 }
 function verifyPinnedFiles(staging, asset, uid, label, tool) {
   for (const pinned of asset.pinnedFiles ?? []) {
-    const file = join30(staging, pinned.path);
+    const file = join31(staging, pinned.path);
     if (!privatelyOwned(file, uid, "file")) {
       throw new ManagedToolsError("archive_incomplete", `The ${label} download is missing ${pinned.path}, so nothing was installed.`, tool);
     }
@@ -7987,13 +8383,13 @@ function verifyPinnedFiles(staging, asset, uid, label, tool) {
     if (actual !== pinned.sha256) {
       throw new ManagedToolsError("launcher_mismatch", `The ${label} download carries a launcher (${pinned.path}) that does not match its pinned fingerprint, so nothing was installed.`, tool);
     }
-    const record = join30(staging, pinned.record);
+    const record = join31(staging, pinned.record);
     if (!privatelyOwned(record, uid, "file")) {
       throw new ManagedToolsError("launcher_mismatch", `The ${label} download does not carry its build record (${pinned.record}), so nothing was installed.`, tool);
     }
     let recorded;
     try {
-      recorded = JSON.parse(readFileSync24(record, "utf8")).zkapi_confine_sha256;
+      recorded = JSON.parse(readFileSync25(record, "utf8")).zkapi_confine_sha256;
     } catch {
       throw new ManagedToolsError("launcher_mismatch", `The ${label} download's build record (${pinned.record}) cannot be read, so nothing was installed.`, tool);
     }
@@ -8639,11 +9035,11 @@ var init_zkapi_confine_fetch = __esm(() => {
 
 // src/core/zkapi-confine-selftest.ts
 import { randomBytes as randomBytes7 } from "node:crypto";
-import { chmodSync as chmodSync6, readFileSync as readFileSync25, readlinkSync, readdirSync as readdirSync3, rmSync as rmSync6, writeFileSync as writeFileSync6 } from "node:fs";
+import { chmodSync as chmodSync6, readFileSync as readFileSync26, readlinkSync, readdirSync as readdirSync3, rmSync as rmSync6, writeFileSync as writeFileSync6 } from "node:fs";
 import { createServer, createConnection as createConnection2 } from "node:net";
 import { createSocket } from "node:dgram";
 import { networkInterfaces } from "node:os";
-import { join as join31 } from "node:path";
+import { join as join32 } from "node:path";
 function hasEvery(row, keys) {
   return Boolean(row) && keys.every((key) => Object.hasOwn(row, key));
 }
@@ -8741,7 +9137,7 @@ function processGone(pgid) {
         if (!/^\d+$/.test(name))
           continue;
         try {
-          const raw = readFileSync25(`/proc/${name}/stat`, "utf8");
+          const raw = readFileSync26(`/proc/${name}/stat`, "utf8");
           const fields = raw.slice(raw.lastIndexOf(")") + 1).trim().split(/\s+/);
           if (Number(fields[2]) === pgid && fields[0] !== "Z" && fields[0] !== "X")
             return false;
@@ -8921,9 +9317,9 @@ async function createFixture(script, workDir, launcher, ports, env, watchdogPath
     });
     let controlStreams = 0;
     let confinedStreams = 0;
-    const controlUnix = join31(workDir, "selftest-control.sock");
-    const confinedUnix = join31(workDir, "selftest-confined.sock");
-    const inheritedUnix = join31(workDir, "selftest-inherited.sock");
+    const controlUnix = join32(workDir, "selftest-control.sock");
+    const confinedUnix = join32(workDir, "selftest-confined.sock");
+    const inheritedUnix = join32(workDir, "selftest-inherited.sock");
     cleanupPaths.push(controlUnix, confinedUnix, inheritedUnix);
     const keepUnixSocket = (socket) => {
       acceptedSockets.push(socket);
@@ -8947,8 +9343,8 @@ async function createFixture(script, workDir, launcher, ports, env, watchdogPath
     const confinedAbstract = `olympus-zkc-confined-${suffix}`;
     await listenPath(controlUnixServer(), `\x00${controlAbstract}`);
     await listenPath(confinedUnixServer(), `\x00${confinedAbstract}`);
-    const controlDgramPath = join31(workDir, "selftest-control-dgram.sock");
-    const confinedDgramPath = join31(workDir, "selftest-confined-dgram.sock");
+    const controlDgramPath = join32(workDir, "selftest-control-dgram.sock");
+    const confinedDgramPath = join32(workDir, "selftest-confined-dgram.sock");
     cleanupPaths.push(controlDgramPath, confinedDgramPath);
     const controlDgram = startDgramDecoy(script, controlDgramPath, env, watchdogPath, supervise);
     decoys.push(controlDgram);
@@ -9306,8 +9702,8 @@ main().catch(() => process.exit(1));
       if (process.getuid?.() === 0)
         throw new Error("the unconfined syscall control must not run as root");
       const ports = partialPorts;
-      const probePath = join31(workDir, `zkapi-confine-selftest-${process.pid}-${randomBytes7(4).toString("hex")}.cjs`);
-      const watchdogPath = join31(workDir, `zkapi-confine-selftest-watchdog-${process.pid}-${randomBytes7(4).toString("hex")}.cjs`);
+      const probePath = join32(workDir, `zkapi-confine-selftest-${process.pid}-${randomBytes7(4).toString("hex")}.cjs`);
+      const watchdogPath = join32(workDir, `zkapi-confine-selftest-watchdog-${process.pid}-${randomBytes7(4).toString("hex")}.cjs`);
       try {
         writeFileSync6(probePath, LINUX_CONFINEMENT_SELF_TEST_PROBE_SOURCE, { mode: 448 });
         chmodSync6(probePath, 448);
@@ -9381,7 +9777,7 @@ main().catch(() => process.exit(1));
               instanceBound = linux.verifyLinuxInstance(ready, watchdog) && JSON.stringify(ready.bridgesExpose) === '["api"]' && JSON.stringify(ready.bridgesReach) === JSON.stringify([String(ports.tor)]);
               listenerSetBound = linux.inspectLinuxNamespace(ready, watchdog, ports);
               const payload2 = Buffer.alloc(4194304, 90);
-              const response = await bridge.linuxConfinementFetch(join31(workDir, "api.sock"), ready.apiToken)(`http://127.0.0.1:${ports.daemon}/echo`, { method: "POST", body: payload2 });
+              const response = await bridge.linuxConfinementFetch(join32(workDir, "api.sock"), ready.apiToken)(`http://127.0.0.1:${ports.daemon}/echo`, { method: "POST", body: payload2 });
               const echoed = Buffer.from(await response.arrayBuffer());
               parsed.apiBridgeBulk = response.status === 200 && echoed.equals(payload2) ? "intact" : "corrupt";
               resolveConfined();
@@ -9455,8 +9851,8 @@ import { execFile as execFile2 } from "node:child_process";
 import { promisify } from "node:util";
 import { readFile, stat as fileStat } from "node:fs/promises";
 import { createHash as createHash4 } from "node:crypto";
-import { lstatSync as lstatSync12, readFileSync as readFileSync26, readlinkSync as readlinkSync2, readdirSync as readdirSync4, realpathSync as realpathSync5 } from "node:fs";
-import { dirname as dirname24, join as join32 } from "node:path";
+import { lstatSync as lstatSync12, readFileSync as readFileSync27, readlinkSync as readlinkSync2, readdirSync as readdirSync4, realpathSync as realpathSync5 } from "node:fs";
+import { dirname as dirname24, join as join33 } from "node:path";
 function record(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : undefined;
 }
@@ -9614,7 +10010,7 @@ Then ask Olympus again. To undo: sudo apparmor_parser -R /etc/apparmor.d/olympus
 }
 async function launcherPath(env) {
   const daemon = managedToolExecutable("zkapi-clientd", { env, platform: "linux", arch: "x64" });
-  const managed = daemon ? join32(dirname24(daemon), "zkapi-confine") : undefined;
+  const managed = daemon ? join33(dirname24(daemon), "zkapi-confine") : undefined;
   const system = "/usr/local/libexec/olympus/zkapi-confine";
   for (const path of [system, managed]) {
     if (!path)
@@ -9724,7 +10120,7 @@ function linuxZkapiConfinement(deps = {}) {
         try {
           sysctls[p] = proc.read(p);
         } catch {}
-      const line = result.ok ? `network confinement: ready (user, network and PID namespace, Landlock ABI ${result.landlockAbi}, seccomp)` : `network confinement: unavailable: ${result.code}; ${linuxConfinementRemedy(result.code, sysctls, launcher ?? join32(managedToolsRoot({ env, platform: "linux", arch: "x64" }) ?? "/unavailable/olympus/tools", "zkapi-clientd", MANAGED_TOOL_PINS["zkapi-clientd"].version, "bin", "zkapi-confine"))}`;
+      const line = result.ok ? `network confinement: ready (user, network and PID namespace, Landlock ABI ${result.landlockAbi}, seccomp)` : `network confinement: unavailable: ${result.code}; ${linuxConfinementRemedy(result.code, sysctls, launcher ?? join33(managedToolsRoot({ env, platform: "linux", arch: "x64" }) ?? "/unavailable/olympus/tools", "zkapi-clientd", MANAGED_TOOL_PINS["zkapi-clientd"].version, "bin", "zkapi-confine"))}`;
       return { ok: result.ok, line, ...!result.ok && result.code === "launcher_missing_or_untrusted" ? { installRequired: true } : {} };
     },
     selfTest: async (dir, childEnv, ports) => Boolean((await refresh()).ok && launcher && await (deps.selfTest ?? runLinuxConfinementSelfTest)(launcher, dir, childEnv, ports)),
@@ -9776,7 +10172,7 @@ function linuxZkapiConfinement(deps = {}) {
           const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
           if (url.origin !== `http://127.0.0.1:${ports.daemon}`)
             throw new Error("wrong daemon origin");
-          return linuxConfinementFetch(join32(dir, "api.sock"), event.apiToken)(input, init);
+          return linuxConfinementFetch(join33(dir, "api.sock"), event.apiToken)(input, init);
         },
         verifyInstance: verify,
         inspect: () => verify() && inspectLinuxNamespace(event, wd, ports, proc),
@@ -9795,7 +10191,7 @@ var init_zkapi_confinement_linux = __esm(() => {
   init_managed_tools();
   init_zkapi_confine_fetch();
   init_zkapi_confine_selftest();
-  realProc = { read: (p) => readFileSync26(p, "utf8"), link: readlinkSync2, list: (p) => readdirSync4(p) };
+  realProc = { read: (p) => readFileSync27(p, "utf8"), link: readlinkSync2, list: (p) => readdirSync4(p) };
   execFileAsync = promisify(execFile2);
   hostChecks = new Map;
   injectedChecks = new WeakMap;
@@ -9849,10 +10245,10 @@ __export(exports_consult_transport_zkapi, {
 });
 import { spawn as spawn2, execFileSync as execFileSync2 } from "node:child_process";
 import { createHash as createHash5, randomUUID as randomUUID9 } from "node:crypto";
-import { accessSync as accessSync8, chmodSync as chmodSync7, closeSync as closeSync6, constants as constants5, existsSync as existsSync11, mkdirSync as mkdirSync12, mkdtempSync as mkdtempSync2, readdirSync as readdirSync5, readFileSync as readFileSync27, readlinkSync as readlinkSync3, realpathSync as realpathSync6, rmSync as rmSync7, statSync as statSync14, writeFileSync as writeFileSync7 } from "node:fs";
+import { accessSync as accessSync8, chmodSync as chmodSync7, closeSync as closeSync6, constants as constants5, existsSync as existsSync11, mkdirSync as mkdirSync12, mkdtempSync as mkdtempSync2, readdirSync as readdirSync5, readFileSync as readFileSync28, readlinkSync as readlinkSync3, realpathSync as realpathSync6, rmSync as rmSync7, statSync as statSync14, writeFileSync as writeFileSync7 } from "node:fs";
 import { createConnection as createConnection3, createServer as createServer2 } from "node:net";
-import { homedir as homedir12, tmpdir as tmpdir3 } from "node:os";
-import { delimiter as delimiter5, dirname as dirname25, isAbsolute as isAbsolute19, join as join33, resolve as resolvePath } from "node:path";
+import { homedir as homedir13, tmpdir as tmpdir3 } from "node:os";
+import { delimiter as delimiter5, dirname as dirname25, isAbsolute as isAbsolute19, join as join34, resolve as resolvePath } from "node:path";
 function zkapiStageRows(timings) {
   if (!timings)
     return [];
@@ -10073,7 +10469,7 @@ function defaultZkapiConfinement(host = {}) {
           const other = await listenProbe();
           servers.push(other);
           const targets = JSON.stringify({ allowed, other: other.address().port });
-          const script = join33(workDir, "confinement-self-test.cjs");
+          const script = join34(workDir, "confinement-self-test.cjs");
           writeFileSync7(script, SELF_TEST_SCRIPT, { mode: 384 });
           const outside = runSelfTestProbe([process.execPath, script, targets], env);
           const inside = runSelfTestProbe(["/usr/bin/sandbox-exec", "-p", darwinSandboxProfile(DARWIN_POLICY, ports), process.execPath, script, targets], env);
@@ -10095,10 +10491,10 @@ function defaultZkapiConfinement(host = {}) {
     selfTest: async () => false
   };
 }
-function defaultZkapiStatePath(home = homedir12()) {
+function defaultZkapiStatePath(home = homedir13()) {
   if (process.platform === "linux")
-    return join33(resolveLinuxEngineLayout({ ...process.env, HOME: home }).configDir, "zkapi-consult-state.json");
-  return join33(home, ".olympus", "zkapi-consult-state.json");
+    return join34(resolveLinuxEngineLayout({ ...process.env, HOME: home }).configDir, "zkapi-consult-state.json");
+  return join34(home, ".olympus", "zkapi-consult-state.json");
 }
 function utcDay(now) {
   return now.toISOString().slice(0, 10);
@@ -10106,7 +10502,7 @@ function utcDay(now) {
 function readState(path) {
   if (!existsSync11(path))
     return;
-  const parsed = JSON.parse(readFileSync27(path, "utf8"));
+  const parsed = JSON.parse(readFileSync28(path, "utf8"));
   if (parsed.version !== 1 || typeof parsed.day !== "string" || !Number.isInteger(parsed.count) || parsed.count < 0 || !Number.isInteger(parsed.reservedMicroUsd) || parsed.reservedMicroUsd < 0) {
     throw new Error("zkAPI state record is malformed");
   }
@@ -10127,8 +10523,8 @@ function zkapiUnresolvedSession(path, scope) {
   return scope === undefined ? Object.keys(fences).length > 0 : Boolean(fences[scope]);
 }
 function zkapiWalletDirectory(env) {
-  const home = env.HOME?.trim() || homedir12();
-  const configured = env.ZKAPI_CLIENTD_CONFIG_DIR?.trim() || env.OA_CHAT_CONFIG_DIR?.trim() || (process.platform === "darwin" ? join33(home, "Library", "Application Support", "zkapi-clientd") : join33(env.XDG_CONFIG_HOME?.trim() || join33(home, ".config"), "zkapi-clientd"));
+  const home = env.HOME?.trim() || homedir13();
+  const configured = env.ZKAPI_CLIENTD_CONFIG_DIR?.trim() || env.OA_CHAT_CONFIG_DIR?.trim() || (process.platform === "darwin" ? join34(home, "Library", "Application Support", "zkapi-clientd") : join34(env.XDG_CONFIG_HOME?.trim() || join34(home, ".config"), "zkapi-clientd"));
   const absolute2 = resolvePath(configured);
   try {
     return realpathSync6(absolute2);
@@ -10515,7 +10911,7 @@ async function recoverStrandedGroups(statePath, now) {
 function processGroupOf(pid) {
   try {
     if (process.platform === "linux") {
-      const stat3 = readFileSync27(`/proc/${pid}/stat`, "utf8");
+      const stat3 = readFileSync28(`/proc/${pid}/stat`, "utf8");
       const fields = stat3.slice(stat3.lastIndexOf(")") + 1).trim().split(/\s+/);
       const pgrp = Number(fields[2]);
       return Number.isInteger(pgrp) ? pgrp : undefined;
@@ -10550,7 +10946,7 @@ function daemonEnvironment(base, daemonExecutable) {
 }
 function standardExecutableDirectories(env, platform2 = process.platform) {
   const home = env.HOME?.trim();
-  const local = home && isAbsolute19(home) ? [join33(home, ".local", "bin")] : [];
+  const local = home && isAbsolute19(home) ? [join34(home, ".local", "bin")] : [];
   if (platform2 === "darwin")
     return [...local, "/opt/homebrew/bin", "/usr/local/bin"];
   if (platform2 === "linux")
@@ -10590,7 +10986,7 @@ function trustedFallbackExecutable(candidate, probe = DEFAULT_EXECUTABLE_TRUST) 
 }
 function resolveExecutable(name, explicit, env, platform2 = process.platform, trust = DEFAULT_EXECUTABLE_TRUST) {
   const pathDirectories = (env.PATH ?? "").split(delimiter5).filter(Boolean);
-  const candidates = explicit ? [explicit] : pathDirectories.map((dir) => join33(dir, name));
+  const candidates = explicit ? [explicit] : pathDirectories.map((dir) => join34(dir, name));
   for (const candidate of candidates) {
     try {
       accessSync8(candidate, constants5.X_OK);
@@ -10603,7 +10999,7 @@ function resolveExecutable(name, explicit, env, platform2 = process.platform, tr
   for (const dir of standardExecutableDirectories(env, platform2)) {
     if (pathDirectories.includes(dir))
       continue;
-    const found = trustedFallbackExecutable(join33(dir, name), trust);
+    const found = trustedFallbackExecutable(join34(dir, name), trust);
     if (found)
       return found;
   }
@@ -10757,7 +11153,7 @@ function linuxListenerPids(port) {
   for (const table of ["/proc/net/tcp", "/proc/net/tcp6"]) {
     let text2;
     try {
-      text2 = readFileSync27(table, "utf8");
+      text2 = readFileSync28(table, "utf8");
     } catch {
       continue;
     }
@@ -11199,9 +11595,9 @@ async function runSession(recovery, options, statePath, bridge, sent, clock2, st
   if (sessionSignal.aborted)
     return refuse(abortCause);
   const sessionId = randomUUID9();
-  const workDir = mkdtempSync2(join33(tmpdir3(), "olympus-zkapi-"));
+  const workDir = mkdtempSync2(join34(tmpdir3(), "olympus-zkapi-"));
   chmodSync7(workDir, 448);
-  const watchdog = join33(workDir, "watchdog.cjs");
+  const watchdog = join34(workDir, "watchdog.cjs");
   const childEnv = childEnvironment(env);
   const groups = [];
   let tor;
@@ -11267,7 +11663,7 @@ async function runSession(recovery, options, statePath, bridge, sent, clock2, st
             return result = fail("confinement_unavailable");
           }
         }
-        const torDataDir = join33(workDir, "tor");
+        const torDataDir = join34(workDir, "tor");
         mkdirSync12(torDataDir, { mode: 448 });
         let bootstrapped = false;
         stage("torBootstrapMs");
@@ -14082,11 +14478,11 @@ var init_credential_broker = __esm(() => {
 
 // src/workers/credential-broker/connected-handles.ts
 import { randomUUID as randomUUID10 } from "node:crypto";
-import { existsSync as existsSync15, mkdirSync as mkdirSync14, readFileSync as readFileSync31 } from "node:fs";
-import { homedir as homedir14 } from "node:os";
-import { dirname as dirname30, join as join37 } from "node:path";
+import { existsSync as existsSync15, mkdirSync as mkdirSync14, readFileSync as readFileSync32 } from "node:fs";
+import { homedir as homedir15 } from "node:os";
+import { dirname as dirname30, join as join38 } from "node:path";
 function defaultHandleRegistryPath() {
-  return join37(homedir14(), ".config", "olympus", "handles.json");
+  return join38(homedir15(), ".config", "olympus", "handles.json");
 }
 function readConnectedHandleGrantEpoch(registryPath = defaultHandleRegistryPath()) {
   const path = connectedHandleGrantEpochPath(registryPath);
@@ -14094,7 +14490,7 @@ function readConnectedHandleGrantEpoch(registryPath = defaultHandleRegistryPath(
     return INITIAL_CONNECTED_HANDLE_GRANT_EPOCH;
   let parsed;
   try {
-    parsed = JSON.parse(readFileSync31(path, "utf8"));
+    parsed = JSON.parse(readFileSync32(path, "utf8"));
   } catch {
     throw new Error("Olympus credential-grant generation is unreadable. Refusing connection changes.");
   }
@@ -14134,7 +14530,7 @@ function readConnectedHandleRegistryForWrite(path = defaultHandleRegistryPath())
   if (!existsSync15(path)) {
     return { registry: { version: 1, handles: [] }, preservedUnknownHandles: [] };
   }
-  const parsed = JSON.parse(readFileSync31(path, "utf8"));
+  const parsed = JSON.parse(readFileSync32(path, "utf8"));
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
     throw new Error("Olympus handle registry must be a JSON object.");
   }
@@ -14671,7 +15067,7 @@ function syncMid(name) {
 function archivePickIntro(formats = ARCHIVE_FORMATS) {
   return `Drop a file or folder from this computer: ${formats.map((format) => format.chooseHint ?? format.label).join("; or ")}. Olympus keeps a copy in its own storage to read it until you remove the import, and never changes the original.`;
 }
-var DASHBOARD_MISSING_FOLDER = "A folder you chose is missing", DASHBOARD_FOLDER_NEEDS_PERMISSION = "Your Mac will not let Olympus open a folder you chose. In System Settings, choose Privacy & Security, then Files & Folders, and switch on Olympus Engine (or the app your Mac named when it asked).", DASHBOARD_FOLDER_NEEDS_HELPER = "Desktop, Documents, Downloads, iCloud Drive and other disks need the Olympus helper app. Update Olympus to add it, or choose a folder outside them.", DASHBOARD_FOLDER_UNREADABLE = "Your user account is not allowed to open a folder you chose. Change who may open that folder, or choose another one.", DASHBOARD_UNCONNECTED_STATES, DASHBOARD_SIGNED_OUT = "signed out", DASHBOARD_MANY_UNREADABLE_LABEL = "Many files cannot be read", READINESS_REASONS, CAPTURE_JUDGED_CONNECTION_STATES, CAPTURE_UNEXPECTED_STOP_REASONS, REDIRECT_REFUSAL_CODES, DASHBOARD_LIVE_PASS_ERROR_COPY, DASHBOARD_UNREADABLE_FILE_REASON_WORDS, DASHBOARD_UNREADABLE_NOTE = "Olympus does not retry these, and nothing is waiting on you.", DASHBOARD_UNREADABLE_MORE = "and {count} more", DASHBOARD_UNREADABLE_NOTE_MANY, DASHBOARD_UNREADABLE_REASON_WORDS, DASHBOARD_SOURCE_FAILURE_WORDS, DASHBOARD_FAILURE_REF = "Olympus's log on the computer has the details under reference {ref}.", DASHBOARD_FAILURE_LOG = "Olympus's log on the computer has the details.", DASHBOARD_CHATGPT_VOCABULARY, DASHBOARD_CHATGPT_PAGE_COPY, DASHBOARD_WORKER_TOKEN_AGENT_PROMPT, ARCHIVE_PICK_INTRO, DASHBOARD_ARCHIVE_NOUNS, DASHBOARD_ARCHIVE_COPY, DASHBOARD_CHATGPT_SETUP_LABELS, DASHBOARD_CHATGPT_PICKER_COPY, DASHBOARD_PRIVACY_QUESTIONS_COPY, DASHBOARD_CHATGPT_PRIVACY_COPY, DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY, DASHBOARD_LOCAL_COPY;
+var DASHBOARD_MISSING_FOLDER = "A folder you chose is missing", DASHBOARD_FOLDER_NEEDS_PERMISSION = "Your Mac will not let Olympus open a folder you chose. In System Settings, choose Privacy & Security, then Files & Folders, and switch on Olympus Engine (or the app your Mac named when it asked).", DASHBOARD_FOLDER_NEEDS_HELPER = "Desktop, Documents, Downloads, iCloud Drive and other disks need the Olympus helper app. Update Olympus to add it, or choose a folder outside them.", DASHBOARD_FOLDER_UNREADABLE = "Your user account is not allowed to open a folder you chose. Change who may open that folder, or choose another one.", DASHBOARD_UNCONNECTED_STATES, DASHBOARD_SIGNED_OUT = "signed out", DASHBOARD_MANY_UNREADABLE_LABEL = "Many files cannot be read", READINESS_REASONS, CAPTURE_JUDGED_CONNECTION_STATES, CAPTURE_UNEXPECTED_STOP_REASONS, REDIRECT_REFUSAL_CODES, DASHBOARD_LIVE_PASS_ERROR_COPY, DASHBOARD_UNREADABLE_FILE_REASON_WORDS, DASHBOARD_UNREADABLE_NOTE = "Olympus does not retry these, and nothing is waiting on you.", DASHBOARD_UNREADABLE_MORE = "and {count} more", DASHBOARD_UNREADABLE_NOTE_MANY, DASHBOARD_UNREADABLE_REASON_WORDS, DASHBOARD_SOURCE_FAILURE_WORDS, DASHBOARD_FAILURE_REF = "Olympus's log on the computer has the details under reference {ref}.", DASHBOARD_FAILURE_LOG = "Olympus's log on the computer has the details.", DASHBOARD_CHATGPT_VOCABULARY, DASHBOARD_CHATGPT_PAGE_COPY, DASHBOARD_WORKER_TOKEN_AGENT_PROMPT, DASHBOARD_SETUP_AGENT_COPY, ARCHIVE_PICK_INTRO, DASHBOARD_ARCHIVE_NOUNS, DASHBOARD_ARCHIVE_COPY, DASHBOARD_CHATGPT_SETUP_LABELS, DASHBOARD_CHATGPT_PICKER_COPY, DASHBOARD_PRIVACY_QUESTIONS_COPY, DASHBOARD_CHATGPT_PRIVACY_COPY, DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY, DASHBOARD_LOCAL_COPY;
 var init_vocabulary = __esm(() => {
   init_source_dashboard();
   init_archive_formats();
@@ -14953,6 +15349,27 @@ var init_vocabulary = __esm(() => {
     unreadableNoteMany: DASHBOARD_UNREADABLE_NOTE_MANY
   };
   DASHBOARD_WORKER_TOKEN_AGENT_PROMPT = "Open the Olympus dashboard for me with its controls ready. On the machine hosting Olympus, " + "resolve the installed plugin rootDir yourself with `openclaw plugins inspect olympus --json`, " + "run `<rootDir>/bin/olympus dashboard --no-open`, and give me the new opening link. " + "Do not read or print the worker token. Do not change configuration or connect sources.";
+  DASHBOARD_SETUP_AGENT_COPY = {
+    open: "Set up with my agent",
+    title: "Set up with my agent",
+    intro: "Copy this to the agent you already use (Claude, ChatGPT, Codex, OpenClaw). It will check what's done, run the steps it's allowed to, and send you a link here for anything that needs your click.",
+    brief: [
+      "Help me finish setting up Olympus on this computer.",
+      "",
+      "1. Run: olympus setup status",
+      "   It lists every setup step, what's done, and the one way forward for each.",
+      '2. Do the steps marked "you can run this" yourself.',
+      `3. For steps marked "needs the owner", give me the link it shows, wait for me, then run setup status again. Don't ask me what's on screen.`,
+      "4. To change several settings at once, use olympus settings propose. I'll apply them with one click.",
+      "",
+      "You can't change what's Private, who has access, or what Olympus spends. Those always need my click in the dashboard."
+    ].join(`
+`),
+    copy: "Copy for my agent",
+    copied: "Copied",
+    copyFailed: "Select the text and copy it.",
+    close: "Close"
+  };
   ARCHIVE_PICK_INTRO = archivePickIntro();
   DASHBOARD_ARCHIVE_NOUNS = {
     email: { one: "1 message", many: "{n} messages", none: "no messages", plural: "messages", snapshot: "" },
@@ -17915,203 +18332,6 @@ var init_fts = __esm(() => {
   INITIALISM_CONNECTORS = new Set(["of", "and", "for", "the", "to", "on", "in", "de", "del", "la", "le", "du", "des", "y"]);
 });
 
-// src/core/secret-patterns.ts
-var PROSE_WORDS, CREDENTIAL_KEYS, CREDENTIAL_KEY_WORDS, LEGACY_KEY_WORDS, CREDENTIAL_QUERY_KEY, PLACEHOLDER_WORDS, BARE_LITERALS, COMMON_OBJECTS, STRONG_QUALIFIERS, ENV_KEY_WORDS, ENV_CREDENTIAL_KEY, KEYWORD, SEPARATOR, VALUE, CREDENTIAL_ASSIGNMENT, ENV_ASSIGNMENT, BLOCK_SCALAR, LABELLED_PASSPHRASE, RECOVERY_CODE_LABEL, LEGACY_CREDENTIAL_ASSIGNMENT;
-var init_secret_patterns = __esm(() => {
-  PROSE_WORDS = new Set([
-    "above",
-    "again",
-    "below",
-    "cannot",
-    "change",
-    "changed",
-    "characters",
-    "choose",
-    "click",
-    "contact",
-    "enter",
-    "expired",
-    "expires",
-    "forgot",
-    "forgotten",
-    "guideline",
-    "guidelines",
-    "hidden",
-    "incorrect",
-    "information",
-    "instruction",
-    "instructions",
-    "invalid",
-    "least",
-    "letters",
-    "link",
-    "manager",
-    "maximum",
-    "min",
-    "minimum",
-    "must",
-    "need",
-    "needed",
-    "needs",
-    "number",
-    "numbers",
-    "optional",
-    "please",
-    "policies",
-    "policy",
-    "protected",
-    "provide",
-    "provided",
-    "required",
-    "requirements",
-    "reset",
-    "retry",
-    "see",
-    "send",
-    "sent",
-    "setting",
-    "settings",
-    "shared",
-    "should",
-    "shown",
-    "sign",
-    "strength",
-    "symbols",
-    "unchanged",
-    "use",
-    "used",
-    "using",
-    "via"
-  ]);
-  CREDENTIAL_KEYS = [
-    { pattern: String.raw`api[_ -]?key`, legacy: true },
-    { pattern: String.raw`access[_ -]?token`, legacy: true },
-    { pattern: String.raw`refresh[_ -]?token`, legacy: true },
-    { pattern: String.raw`client[_ -]?secret`, legacy: true },
-    { pattern: "password", legacy: true },
-    { pattern: String.raw`pass(?:wd|phrase|code)|(?<![a-z])pass|pwd` },
-    { pattern: String.raw`secret[_ -]?(?:access[_ -]?)?key(?:[_-]?base)?` },
-    { pattern: String.raw`private[_ -]?key` },
-    { pattern: "secret" },
-    { pattern: String.raw`token(?!s)` },
-    { pattern: "sig", urlOnly: true }
-  ];
-  CREDENTIAL_KEY_WORDS = CREDENTIAL_KEYS.filter((key) => !key.urlOnly).map((key) => key.pattern).join("|");
-  LEGACY_KEY_WORDS = CREDENTIAL_KEYS.filter((key) => key.legacy).map((key) => key.pattern).join("|");
-  CREDENTIAL_QUERY_KEY = new RegExp(`^(?:${CREDENTIAL_KEYS.map((key) => key.pattern).join("|")})$`, "i");
-  PLACEHOLDER_WORDS = new RegExp([
-    String.raw`(?:^|[^a-z])your[_ .-]?[a-z_ -]{0,16}(?:api|secret|token|key|pass|password|client|value|here)`,
-    String.raw`(?:^|[^a-z])my[_ .-](?:api|secret|token|key|pass|password|client)`,
-    String.raw`(?:^|[^a-z])(?:example|dummy|todo|fixme)(?:[^a-z]|$)`,
-    "placeholder",
-    "redacted",
-    "changeme",
-    "change[_-]me",
-    "replace[_-]?me",
-    "insert[_-]?(?:your|here|key|token)",
-    "[_-]here$",
-    "^n/a$",
-    "not[_ -]?set",
-    "^unset$"
-  ].join("|"), "i");
-  BARE_LITERALS = new Set([
-    "password",
-    "passwd",
-    "passphrase",
-    "secret",
-    "token",
-    "apikey",
-    "api_key",
-    "api-key",
-    "string",
-    "null",
-    "none",
-    "nil",
-    "undefined",
-    "true",
-    "false",
-    "empty",
-    "hidden",
-    "masked",
-    "required",
-    "optional",
-    "changeme",
-    "enabled",
-    "disabled",
-    "encrypted",
-    "hashed",
-    "unknown",
-    "tbd",
-    "pending",
-    "missing"
-  ]);
-  COMMON_OBJECTS = new Set([
-    "user",
-    "users",
-    "body",
-    "data",
-    "form",
-    "state",
-    "props",
-    "creds",
-    "credentials",
-    "account",
-    "profile",
-    "session",
-    "auth",
-    "db",
-    "app",
-    "json",
-    "response",
-    "res",
-    "row",
-    "record",
-    "item",
-    "model"
-  ]);
-  STRONG_QUALIFIERS = new Set([
-    "client",
-    "app",
-    "api",
-    "access",
-    "refresh",
-    "auth",
-    "bearer",
-    "id",
-    "session",
-    "bot",
-    "oauth",
-    "webhook",
-    "signing",
-    "jwt",
-    "service",
-    "personal",
-    "consumer",
-    "shared",
-    "encryption",
-    "master",
-    "admin",
-    "root",
-    "user",
-    "db",
-    "database",
-    "wifi",
-    "email",
-    "login"
-  ]);
-  ENV_KEY_WORDS = CREDENTIAL_KEY_WORDS;
-  ENV_CREDENTIAL_KEY = new RegExp(ENV_KEY_WORDS, "i");
-  KEYWORD = `(?<kw>${CREDENTIAL_KEY_WORDS})`;
-  SEPARATOR = String.raw`["'\x60*_]{0,3}[ \t]*(?::=|=>|[:=])[*_]{0,2}[ \t]*(?<nl>\r?\n[ \t]*)?`;
-  VALUE = String.raw`(?:"(?<dq>(?:[^"\\\n\r]|\\.)*)"|'(?<sq>(?:[^'\\\n\r]|\\.)*)'|\x60(?<bq>[^\x60\n\r]*)\x60|(?<uv>[^\s"'\x60]+))`;
-  CREDENTIAL_ASSIGNMENT = new RegExp(`${KEYWORD}${SEPARATOR}${VALUE}`, "gi");
-  ENV_ASSIGNMENT = new RegExp(String.raw`(?<![A-Za-z0-9_.?&/%+=-])(?=(?:--)?[A-Za-z0-9_.-]*?(?:${ENV_KEY_WORDS}))(?<ek>(?:--)?[A-Za-z_][A-Za-z0-9_.-]*)[ \t]*=(?![=~>])[ \t]*${VALUE}`, "gi");
-  BLOCK_SCALAR = new RegExp(String.raw`${KEYWORD}["'\x60]{0,2}[ \t]*:[ \t]*[|>](?:[+-][1-9]?|[1-9][+-]?)?[ \t]*(?:#[^\r\n]*)?\r?\n(?:[ \t]*\r?\n)*(?<ind>[ \t]+)(?<bv>[^ \t\r\n][^\r\n]*)`, "gi");
-  LABELLED_PASSPHRASE = new RegExp(String.raw`^[ \t>*•-]*(?:[A-Za-z0-9 _.-]{0,30}?)pass(?:word|phrase|code)["'\x60*_]{0,3}[ \t]*(?::=|[:=])[*_]{0,2}[ \t]*(?<mv>[^\s][^\n\r]{5,159})$`, "gim");
-  RECOVERY_CODE_LABEL = new RegExp(String.raw`(?<![A-Za-z0-9])(?:recovery|backup)(?:[ \t_-]+(?:verification|security|login|sign[ -]?in|2fa|mfa|two[ -]factor|account))?[ \t_-]+(?:codes?|keys?)["'\x60*_]{0,3}[ \t]*(?:[:=]|(?<![A-Za-z])(?:is|are)(?![A-Za-z])[ \t]*:?)[*_]{0,2}[ \t]*(?<rest>[^\r\n]{0,200})`, "gi");
-  LEGACY_CREDENTIAL_ASSIGNMENT = new RegExp(String.raw`\b(${LEGACY_KEY_WORDS})\b\s*[:=]\s*['"]?[^'"\s]{12,}`, "gi");
-});
-
 // src/workers/dropbox-files/content-policy.ts
 var init_content_policy = __esm(() => {
   init_secret_patterns();
@@ -18389,6 +18609,83 @@ var init_tier_placement = __esm(() => {
   init_tier_ledger();
 });
 
+// connect-relay/shared/tokens.ts
+var SECRET = "[A-Za-z0-9_-]{43}", INSTALL = "[a-z2-7]{32}", PATTERN;
+var init_tokens = __esm(() => {
+  PATTERN = {
+    access: new RegExp(`^oly2\\.(${INSTALL})\\.${SECRET}$`),
+    refresh: new RegExp(`^oly2r\\.(${INSTALL})\\.${SECRET}$`),
+    code: new RegExp(`^oly2c\\.(${INSTALL})\\.${SECRET}$`),
+    handoff: new RegExp(`^oly2g\\.(${INSTALL})\\.${SECRET}$`),
+    private: new RegExp(`^oly2p\\.(${INSTALL})\\.${SECRET}$`)
+  };
+});
+
+// src/workers/remote-oauth/pinned-clients.ts
+var GROK_REDIRECT_URIS, CURSOR_REDIRECT_URI = "https://www.cursor.com/agents/mcp/oauth/callback", CURSOR_REDIRECT_URIS;
+var init_pinned_clients = __esm(() => {
+  GROK_REDIRECT_URIS = Object.freeze([
+    "https://grok.com/connectors-oauth-exchange-code/",
+    "https://console.x.ai/connectors-oauth-exchange-code/"
+  ]);
+  CURSOR_REDIRECT_URIS = Object.freeze([
+    CURSOR_REDIRECT_URI,
+    "https://www.cursor.com/bot/mcp/oauth/callback",
+    "https://grok.com/connectors-oauth-exchange-code/"
+  ]);
+});
+
+// src/core/remote-oauth-store.ts
+var REMOTE_OAUTH_REFRESH_TOKEN_TTL_SECONDS, REMOTE_PAIRING_CODE_TTL_MS, PAIRING_SELECTOR_LENGTH = 4, PAIRING_SECRET_LENGTH = 8, PAIRING_CODE_LENGTH, UNUSED_CLIENT_PRUNE_AGE_MS;
+var init_remote_oauth_store = __esm(() => {
+  init_tokens();
+  init_pinned_clients();
+  init_operation_caller();
+  REMOTE_OAUTH_REFRESH_TOKEN_TTL_SECONDS = 90 * 24 * 3600;
+  REMOTE_PAIRING_CODE_TTL_MS = 10 * 60000;
+  PAIRING_CODE_LENGTH = PAIRING_SELECTOR_LENGTH + PAIRING_SECRET_LENGTH;
+  UNUSED_CLIENT_PRUNE_AGE_MS = 24 * 3600000;
+});
+
+// src/core/waiting-private-questions.ts
+var WAITING_QUESTION_LIMITS;
+var init_waiting_private_questions = __esm(() => {
+  init_app_release_capture();
+  init_sqlite_migrations();
+  init_olympus_layout();
+  WAITING_QUESTION_LIMITS = Object.freeze({
+    questionBytes: 2048,
+    localQuestionBytes: 8 * 1024,
+    selectorBytes: 4096,
+    answerBytes: 128 * 1024,
+    ttlMs: 7 * 24 * 60 * 60000,
+    reanswerAfterMs: 10 * 60000
+  });
+});
+
+// src/core/remote-connections.ts
+var init_remote_connections = __esm(() => {
+  init_operation_error();
+  init_worker_auth();
+  init_operation_caller();
+  init_sqlite_migrations();
+  init_remote_oauth_store();
+  init_waiting_private_questions();
+  init_tokens();
+  init_linux_engine_layout();
+  init_olympus_layout();
+});
+
+// src/core/app-release-log.ts
+var DAY_MS2, openLogPaths;
+var init_app_release_log = __esm(() => {
+  init_olympus_layout();
+  init_remote_connections();
+  init_sqlite_migrations();
+  DAY_MS2 = 24 * 60 * 60000;
+  openLogPaths = new Map;
+});
+
 // src/workers/source-index/built-in-reasoning/manifest.ts
 function unslothQwen(size, revision, bytes, sha256) {
   const name = `Qwen3.5-${size}-Q4_K_M.gguf`;
@@ -18644,6 +18941,7 @@ var init_sniffer = __esm(() => {
 
 // src/workers/connector-store/secrets-disposition.ts
 var init_secrets_disposition = __esm(() => {
+  init_app_release_log();
   init_sniffer();
   init_sniffer_store();
   init_tier_ledger_path();
@@ -18783,7 +19081,7 @@ var init_embedding_identity = __esm(() => {
 });
 
 // src/workers/source-index/embeddings.ts
-import { AsyncLocalStorage as AsyncLocalStorage4 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage5 } from "node:async_hooks";
 var priorityQueryEmbedding, SUPPORTED_IMAGE_MIME_TYPES, TRANSIENT_EMBEDDING_STATUSES;
 var init_embeddings = __esm(() => {
   init_operation_error();
@@ -18791,7 +19089,7 @@ var init_embeddings = __esm(() => {
   init_model_transport();
   init_zkapi_consult_settings();
   init_embedding_identity();
-  priorityQueryEmbedding = new AsyncLocalStorage4;
+  priorityQueryEmbedding = new AsyncLocalStorage5;
   SUPPORTED_IMAGE_MIME_TYPES = new Set(["image/jpeg", "image/png"]);
   TRANSIENT_EMBEDDING_STATUSES = new Set([429, 500, 502, 503, 504]);
 });
@@ -19221,8 +19519,8 @@ var init_tier_content_purge = __esm(() => {
 // src/workers/source-index/built-in-embedding/litert-runtime.ts
 import { spawn as spawn4 } from "node:child_process";
 import { closeSync as closeSync8, constants as constants7, existsSync as existsSync17, fstatSync as fstatSync3, openSync as openSync7, readdirSync as readdirSync8, statSync as statSync17 } from "node:fs";
-import { homedir as homedir16 } from "node:os";
-import { delimiter as delimiter6, dirname as dirname32, isAbsolute as isAbsolute21, join as join39 } from "node:path";
+import { homedir as homedir17 } from "node:os";
+import { delimiter as delimiter6, dirname as dirname32, isAbsolute as isAbsolute21, join as join40 } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath as fileURLToPath9 } from "node:url";
 function helperEnvironment() {
@@ -19234,7 +19532,7 @@ function helperEnvironment() {
       env[name] = value;
     }
   }
-  env.HOME ??= homedir16();
+  env.HOME ??= homedir17();
   return env;
 }
 
@@ -19398,7 +19696,7 @@ class HelperProcess {
 function helperPath() {
   const here = dirname32(fileURLToPath9(import.meta.url));
   for (const name of ["litert-helper.js", "litert-helper.ts"]) {
-    const candidate = join39(here, name);
+    const candidate = join40(here, name);
     if (existsSync17(candidate))
       return candidate;
   }
@@ -19408,9 +19706,9 @@ function resolveBun() {
   const bunName = process.platform === "win32" ? "bun.exe" : "bun";
   const candidates = [
     process.versions.bun ? process.execPath : undefined,
-    process.env.BUN_INSTALL ? join39(process.env.BUN_INSTALL, "bin", bunName) : undefined,
-    ...(process.env.PATH ?? "").split(delimiter6).filter(Boolean).map((directory) => join39(directory, bunName)),
-    join39(homedir16(), ".bun", "bin", bunName)
+    process.env.BUN_INSTALL ? join40(process.env.BUN_INSTALL, "bin", bunName) : undefined,
+    ...(process.env.PATH ?? "").split(delimiter6).filter(Boolean).map((directory) => join40(directory, bunName)),
+    join40(homedir17(), ".bun", "bin", bunName)
   ];
   for (const candidate of candidates) {
     if (!candidate || !isAbsolute21(candidate))
@@ -19442,7 +19740,7 @@ var init_litert_runtime = __esm(() => {
 });
 
 // src/workers/source-index/built-in-embedding/remote-litert-runtime.ts
-import { readFileSync as readFileSync33 } from "node:fs";
+import { readFileSync as readFileSync34 } from "node:fs";
 
 class RemoteLiteRtEmbedder {
   options;
@@ -19532,7 +19830,7 @@ class RemoteLiteRtEmbedder {
   async request(path, texts) {
     const headers = {};
     if (this.options.tokenFile) {
-      const token = readFileSync33(this.options.tokenFile, "utf8").trim();
+      const token = readFileSync34(this.options.tokenFile, "utf8").trim();
       if (!token)
         throw new Error("Empty remote token file.");
       headers.Authorization = `Bearer ${token}`;
@@ -19743,12 +20041,6 @@ var init_answer_activity = __esm(() => {
   DEFAULT_ANSWER_LEASE_MS = 20 * 60000;
 });
 
-// src/core/opsec.ts
-var init_opsec = __esm(() => {
-  init_secret_patterns();
-  init_types();
-});
-
 // src/core/evidence-versions.ts
 var DOCUMENT_FAMILIES;
 var init_evidence_versions = __esm(() => {
@@ -19756,7 +20048,7 @@ var init_evidence_versions = __esm(() => {
 });
 
 // src/core/analyst.ts
-import { AsyncLocalStorage as AsyncLocalStorage5 } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage6 } from "node:async_hooks";
 var analystAbortSignalStorage, CONFLICT_RULE = "- If items give different values for the same thing, give each value with its item's name and date; never pick one silently.", ANALYST_SYSTEM, ANALYST_COMPACT_SYSTEM, ANALYST_AUDIT_SYSTEM, DEFAULT_ANALYST_MAX_OUTPUT_CHARS = 1600, AUDIT_OUTPUT_HEADROOM_CHARS = 800, DEFAULT_AUDIT_MAX_OUTPUT_CHARS, promptEncoder, STOP_WORDS2, MEANING_BEARING_MODIFIERS, TOKEN_EDGE_PUNCTUATION;
 var init_analyst = __esm(() => {
   init_opsec();
@@ -19765,7 +20057,7 @@ var init_analyst = __esm(() => {
   init_types();
   init_operation_error();
   init_evidence_versions();
-  analystAbortSignalStorage = new AsyncLocalStorage5;
+  analystAbortSignalStorage = new AsyncLocalStorage6;
   ANALYST_SYSTEM = [
     "You are an evidence analyst. Answer the question USING ONLY the numbered evidence provided.",
     "Rules:",
@@ -20022,11 +20314,6 @@ var init_analyst_openclaw_infer = __esm(() => {
 // src/core/evidence-reranker.ts
 var init_evidence_reranker = () => {};
 
-// src/core/parent-label.ts
-var init_parent_label = __esm(() => {
-  init_types();
-});
-
 // src/core/evidence-pack.ts
 var utf8;
 var init_evidence_pack = __esm(() => {
@@ -20039,9 +20326,6 @@ var init_evidence_pack = __esm(() => {
   init_answer_latency_trace();
   utf8 = new TextEncoder;
 });
-
-// src/core/secret-location-note.ts
-var init_secret_location_note = () => {};
 
 // src/workers/source-index/analyst-pool.ts
 class SecureAnalystPoolState {
@@ -20429,7 +20713,7 @@ var init_approved_scope_filter = __esm(() => {
 });
 
 // src/workers/dropbox-files/locator-result-projector.ts
-import { join as join40 } from "node:path";
+import { join as join41 } from "node:path";
 import { pathToFileURL as pathToFileURL2 } from "node:url";
 function locatorFromRootedDropboxPath(value, localMapping) {
   const displayPath = normalizeRootedDropboxDisplayPath(value);
@@ -20475,7 +20759,7 @@ function finderUrlForDropboxPath(mapping, displayPath) {
   const relativeSegments = localRelativeDropboxPathSegments(displayPath, mapping.dropboxPathPrefix);
   if (!relativeSegments)
     return;
-  return pathToFileURL2(join40(mapping.rootPath, ...relativeSegments)).href;
+  return pathToFileURL2(join41(mapping.rootPath, ...relativeSegments)).href;
 }
 function localRelativeDropboxPathSegments(displayPath, dropboxPathPrefix) {
   const normalizedPrefix = normalizeOptionalDropboxPrefix(dropboxPathPrefix);
@@ -20560,7 +20844,7 @@ var init_dropbox = __esm(() => {
 import { Buffer as Buffer2 } from "node:buffer";
 import { spawn as spawn5 } from "node:child_process";
 import { accessSync as accessSync9, constants as fsConstants5, statSync as statSync18 } from "node:fs";
-import { delimiter as delimiter7, join as join41 } from "node:path";
+import { delimiter as delimiter7, join as join42 } from "node:path";
 function errnoCode(error) {
   const code = error?.code;
   return typeof code === "string" && code.length > 0 ? code : "UNKNOWN";
@@ -20607,7 +20891,7 @@ function resolveExtractionCommand(command, options = {}) {
   const isExecutable = options.isExecutable ?? executableFile;
   const directories = [...path.split(delimiter7).filter(Boolean), ...fallbackDirs];
   for (const directory of directories) {
-    const candidate = join41(directory, command);
+    const candidate = join42(directory, command);
     if (isExecutable(candidate)) {
       if (cacheable)
         resolvedCommands.set(cacheKey, candidate);
@@ -22535,12 +22819,12 @@ var init_text = __esm(() => {
 
 // src/workers/file-extraction/extractors/apple-vision-ocr.ts
 import { existsSync as existsSync18 } from "node:fs";
-import { dirname as dirname33, join as join42 } from "node:path";
+import { dirname as dirname33, join as join43 } from "node:path";
 import { fileURLToPath as fileURLToPath10 } from "node:url";
 function resolveAppleVisionOcrScript(moduleUrl = import.meta.url, exists = existsSync18) {
   let directory = dirname33(fileURLToPath10(moduleUrl));
   for (let depth2 = 0;depth2 < 6; depth2 += 1) {
-    const candidate = join42(directory, APPLE_VISION_OCR_SCRIPT);
+    const candidate = join43(directory, APPLE_VISION_OCR_SCRIPT);
     if (exists(candidate))
       return candidate;
     const parent = dirname33(directory);
@@ -22649,7 +22933,7 @@ var init_ocr_probe_fixture = __esm(() => {
 // src/workers/file-extraction/extractors/ocr-capability.ts
 import { mkdtemp, readFile as readFile4, readdir, rm as rm2, writeFile } from "node:fs/promises";
 import { tmpdir as tmpdir4 } from "node:os";
-import { join as join43 } from "node:path";
+import { join as join44 } from "node:path";
 function ocrmypdfArguments(input) {
   return [
     "--force-ocr",
@@ -22750,7 +23034,7 @@ async function probeTesseract(input) {
   }
 }
 async function probePdftoppm(input) {
-  const prefix = join43(input.directory, "render");
+  const prefix = join44(input.directory, "render");
   try {
     await input.runner({
       command: PDFTOPPM_COMMAND,
@@ -22765,20 +23049,20 @@ async function probePdftoppm(input) {
   if (!first)
     return "failed";
   if (input.tesseract === "ok") {
-    const read = await probeTesseract({ runner: input.runner, imagePath: join43(input.directory, first) });
+    const read = await probeTesseract({ runner: input.runner, imagePath: join44(input.directory, first) });
     if (read !== "ok")
       return "failed";
   }
   return "ok";
 }
 async function probeOcrmypdf(input) {
-  const sidecarPath = join43(input.directory, "probe-sidecar.txt");
+  const sidecarPath = join44(input.directory, "probe-sidecar.txt");
   try {
     await input.runner({
       command: OCRMYPDF_COMMAND,
       args: ocrmypdfArguments({
         inputPath: input.pdfPath,
-        outputPath: join43(input.directory, "probe-output.pdf"),
+        outputPath: join44(input.directory, "probe-output.pdf"),
         sidecarPath
       }),
       timeoutMs: PROBE_OCRMYPDF_TIMEOUT_MS
@@ -22800,9 +23084,9 @@ async function probeOcrCapability(options = {}) {
   let ocrmypdf = "failed";
   let directory;
   try {
-    directory = await mkdtemp(join43(tmpdir4(), PROBE_TEMP_PREFIX));
-    const imagePath = join43(directory, "probe.jpg");
-    const pdfPath = join43(directory, "probe.pdf");
+    directory = await mkdtemp(join44(tmpdir4(), PROBE_TEMP_PREFIX));
+    const imagePath = join44(directory, "probe.jpg");
+    const pdfPath = join44(directory, "probe.pdf");
     await writeFile(imagePath, ocrProbeJpeg());
     await writeFile(pdfPath, buildOcrProbePdf());
     tesseract = await probeTesseract({ runner, imagePath });
@@ -22873,7 +23157,7 @@ var init_remote_vlm = __esm(() => {
 // src/workers/source-index/built-in-reasoning/off-thread.ts
 import { Worker as Worker2 } from "node:worker_threads";
 import { existsSync as existsSync19 } from "node:fs";
-import { dirname as dirname34, join as join44 } from "node:path";
+import { dirname as dirname34, join as join45 } from "node:path";
 import { fileURLToPath as fileURLToPath11 } from "node:url";
 
 class ModelThread {
@@ -22973,7 +23257,7 @@ function cancelled() {
 function modelWorkerPath() {
   const here = dirname34(fileURLToPath11(import.meta.url));
   for (const name of ["model-worker.js", "model-worker.ts"]) {
-    const path = join44(here, name);
+    const path = join45(here, name);
     if (existsSync19(path))
       return path;
   }
@@ -23772,74 +24056,8 @@ var init_source_delete_holds = __esm(() => {
   init_requests();
 });
 
-// connect-relay/shared/tokens.ts
-var SECRET = "[A-Za-z0-9_-]{43}", INSTALL = "[a-z2-7]{32}", PATTERN;
-var init_tokens = __esm(() => {
-  PATTERN = {
-    access: new RegExp(`^oly2\\.(${INSTALL})\\.${SECRET}$`),
-    refresh: new RegExp(`^oly2r\\.(${INSTALL})\\.${SECRET}$`),
-    code: new RegExp(`^oly2c\\.(${INSTALL})\\.${SECRET}$`),
-    handoff: new RegExp(`^oly2g\\.(${INSTALL})\\.${SECRET}$`),
-    private: new RegExp(`^oly2p\\.(${INSTALL})\\.${SECRET}$`)
-  };
-});
-
-// src/workers/remote-oauth/pinned-clients.ts
-var GROK_REDIRECT_URIS, CURSOR_REDIRECT_URI = "https://www.cursor.com/agents/mcp/oauth/callback", CURSOR_REDIRECT_URIS;
-var init_pinned_clients = __esm(() => {
-  GROK_REDIRECT_URIS = Object.freeze([
-    "https://grok.com/connectors-oauth-exchange-code/",
-    "https://console.x.ai/connectors-oauth-exchange-code/"
-  ]);
-  CURSOR_REDIRECT_URIS = Object.freeze([
-    CURSOR_REDIRECT_URI,
-    "https://www.cursor.com/bot/mcp/oauth/callback",
-    "https://grok.com/connectors-oauth-exchange-code/"
-  ]);
-});
-
-// src/core/remote-oauth-store.ts
-var REMOTE_OAUTH_REFRESH_TOKEN_TTL_SECONDS, REMOTE_PAIRING_CODE_TTL_MS, PAIRING_SELECTOR_LENGTH = 4, PAIRING_SECRET_LENGTH = 8, PAIRING_CODE_LENGTH, UNUSED_CLIENT_PRUNE_AGE_MS;
-var init_remote_oauth_store = __esm(() => {
-  init_tokens();
-  init_pinned_clients();
-  init_operation_caller();
-  REMOTE_OAUTH_REFRESH_TOKEN_TTL_SECONDS = 90 * 24 * 3600;
-  REMOTE_PAIRING_CODE_TTL_MS = 10 * 60000;
-  PAIRING_CODE_LENGTH = PAIRING_SELECTOR_LENGTH + PAIRING_SECRET_LENGTH;
-  UNUSED_CLIENT_PRUNE_AGE_MS = 24 * 3600000;
-});
-
-// src/core/waiting-private-questions.ts
-var WAITING_QUESTION_LIMITS;
-var init_waiting_private_questions = __esm(() => {
-  init_sqlite_migrations();
-  init_olympus_layout();
-  WAITING_QUESTION_LIMITS = Object.freeze({
-    questionBytes: 2048,
-    localQuestionBytes: 8 * 1024,
-    selectorBytes: 4096,
-    answerBytes: 128 * 1024,
-    ttlMs: 7 * 24 * 60 * 60000,
-    reanswerAfterMs: 10 * 60000
-  });
-});
-
-// src/core/remote-connections.ts
-var init_remote_connections = __esm(() => {
-  init_operation_error();
-  init_worker_auth();
-  init_operation_caller();
-  init_sqlite_migrations();
-  init_remote_oauth_store();
-  init_waiting_private_questions();
-  init_tokens();
-  init_linux_engine_layout();
-  init_olympus_layout();
-});
-
 // src/core/ingestion-health-state.ts
-import { existsSync as existsSync20, mkdirSync as mkdirSync16, readFileSync as readFileSync34, writeFileSync as writeFileSync10 } from "node:fs";
+import { existsSync as existsSync20, mkdirSync as mkdirSync16, readFileSync as readFileSync35, writeFileSync as writeFileSync10 } from "node:fs";
 import { dirname as dirname35 } from "node:path";
 function defaultIngestionHealthStatePath(env = process.env) {
   return sharedDataPath("ingestion-doctor-state", env);
@@ -23848,7 +24066,7 @@ function readIngestionHealthState(path) {
   try {
     if (!existsSync20(path))
       return;
-    const parsed = JSON.parse(readFileSync34(path, "utf8"));
+    const parsed = JSON.parse(readFileSync35(path, "utf8"));
     const record2 = asRecord16(parsed);
     const sources = asRecord16(record2.sources);
     const normalized = {};
@@ -23978,6 +24196,7 @@ var init_tier_migration_reports = __esm(() => {
 
 // src/core/source-forget-registry.ts
 var init_source_forget_registry = __esm(() => {
+  init_app_release_log();
   init_operation_error();
   init_remote_connections();
   init_waiting_private_questions();
@@ -24006,6 +24225,7 @@ var backgroundTrashRemovals;
 var init_data_lifecycle = __esm(() => {
   init_people_index();
   init_mac_engine_daemon();
+  init_app_release_log();
   init_tier_ledger_path();
   init_olympus_layout();
   init_source_placement();
@@ -27338,7 +27558,23 @@ class EmailClient {
       return result;
     if (typeof ticket === "string" && /^[A-Za-z0-9_-]{43}$/.test(ticket))
       sourceAnswerTickets.set(result, ticket);
-    return await this.revalidateSourceAnswer(result);
+    const released = await this.revalidateSourceAnswer(result);
+    if (released !== result && released && typeof released === "object" && typeof ticket === "string" && sourceAnswerTickets.has(result)) {
+      sourceAnswerTickets.set(released, ticket);
+    }
+    return released;
+  }
+  async noteSourceAnswerReceived(original, withheld) {
+    const ticket = original && typeof original === "object" ? sourceAnswerTickets.get(original) : undefined;
+    if (!ticket)
+      return;
+    try {
+      await this.transport.requestJson(`${this.config.email.baseUrl}/source/answer/received`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ticket, withheld })
+      });
+    } catch {}
   }
   async revalidateSourceAnswer(result) {
     if (!result || typeof result !== "object" || typeof result.answer !== "string")
@@ -28287,7 +28523,7 @@ init_worker_auth();
 // src/core/native-worker-service.ts
 init_worker_cli_launcher();
 init_data_owner_lock();
-import { homedir as homedir7 } from "node:os";
+import { homedir as homedir8 } from "node:os";
 
 // src/core/linux-owner-bridge.ts
 import { createHmac, createHash as createHash2, randomBytes as randomBytes4, timingSafeEqual } from "node:crypto";
@@ -29060,7 +29296,7 @@ function createNativeWorkerService(options) {
           const ready = await probe(child);
           if (ready && generation === proofGeneration) {
             if (!options.engineHosted && readyChild !== child && (process.platform === "linux" || process.platform === "darwin")) {
-              const home = options.homeDir ?? homedir7();
+              const home = options.homeDir ?? homedir8();
               let command = [settings.runtimePath, settings.executablePath].map(quoteCliArgument).join(" ");
               try {
                 writeWorkerCliLauncher(home, renderWorkerCliLauncher(settings.runtimePath, settings.executablePath));
@@ -30191,6 +30427,362 @@ function constantTimeStringEqual(actual, expected) {
 // src/core/operations.ts
 init_release_manifest();
 
+// src/core/app-release-agent.ts
+init_app_release_capture();
+init_release_manifest();
+
+// src/core/remote-result.ts
+init_app_release_capture();
+init_operation_error();
+init_opsec();
+init_parent_label();
+init_release_manifest();
+init_secret_location_note();
+var MAX_ANSWER = 64 * 1024;
+var MAX_SENT = 16 * 1024;
+var MAX_TITLE = 400;
+var MAX_ROUTE = 300;
+var MAX_MESSAGE = 2000;
+var MAX_CORPORA = 200;
+var JOB_ID = /^saj_[A-Za-z0-9_-]{43}$/;
+var PARAM_NAME = /^[a-z][a-z0-9_]{0,63}$/;
+var CORPUS_ID = /^[a-z0-9_]+(\.[a-z0-9_-]+)+$/i;
+var MODEL_ID = /^[A-Za-z0-9._:/-]{1,128}$/;
+var REMOTE_PENDING_MESSAGE = "Olympus is still working on this and it keeps running. " + "Call source_answer_result with this job_id to get the result; repeat while it says working. Do not ask again.";
+var REMOTE_PROVIDER_UNKNOWN_NOTE = "Olympus does not know which company runs this agent, so it could not make sure the answer came from another company's model.";
+var PROVIDER_LABELS = {
+  gmail: "Gmail",
+  google_drive: "Google Drive",
+  "google-drive": "Google Drive",
+  google_calendar: "Google Calendar",
+  dropbox: "Dropbox",
+  x: "X bookmarks",
+  readwise: "Readwise",
+  telegram: "Telegram",
+  whatsapp: "WhatsApp",
+  whatsapp_personal: "WhatsApp",
+  whatsapp_business: "WhatsApp",
+  apple_messages: "Apple Messages",
+  signal: "Signal",
+  reflect: "Reflect",
+  roam: "Roam",
+  evernote: "Evernote",
+  local_files: "Files on this computer"
+};
+var FAMILY_LABELS = {
+  email: "Mail",
+  file: "Files",
+  chat: "Messages",
+  note: "Notes",
+  x: "X bookmarks",
+  readwise: "Readwise"
+};
+var OTHER_SOURCE_LABEL = "Other source";
+var REMOTE_SOURCE_LABELS = Object.freeze([...new Set([
+  ...Object.values(PROVIDER_LABELS),
+  ...Object.values(FAMILY_LABELS),
+  OTHER_SOURCE_LABEL
+])].sort());
+var REMOTE_REFUSAL_CODES = Object.freeze([
+  "refused",
+  "anonymous_answers_off",
+  "cancelled",
+  "gate_refused",
+  "internal_error",
+  "invalid_params",
+  "model_same_provider",
+  "question_empty",
+  "question_too_long",
+  "route_not_configured",
+  "secret_detected",
+  "settings_invalid",
+  "settings_stale",
+  "writer_declined",
+  "writer_failed",
+  "invalid_question",
+  "busy",
+  "acknowledgements_incomplete",
+  "funding_date_missing",
+  "funding_date_invalid",
+  "note_expired",
+  "daemon_api_key_missing",
+  "daemon_not_found",
+  "tor_not_found",
+  "unresolved_session",
+  "unresolved_session_other_wallet",
+  "no_unresolved_session",
+  "stranded_processes",
+  "daemon_already_running",
+  "tor_port_busy",
+  "tor_bootstrap_failed",
+  "daemon_start_failed",
+  "daemon_version_unsupported",
+  "daemon_supervisor_unsupported",
+  "relay_mismatch",
+  "key_reuse_on",
+  "key_reuse_unverified",
+  "daemon_keyless",
+  "daemon_identity_failed",
+  "daemon_api_key_rejected",
+  "session_process_exited",
+  "confinement_self_test_failed",
+  "confinement_unavailable",
+  "policy_unavailable",
+  "model_unavailable",
+  "daily_cap_reached",
+  "spend_cap_reached",
+  "state_unavailable",
+  "timeout",
+  "aborted",
+  "redirect_refused",
+  "response_too_large",
+  "invalid_response",
+  "daemon_error",
+  "transport_failed",
+  "teardown_incomplete",
+  "authorization_refused",
+  "session_spent"
+].filter((code, index, all) => all.indexOf(code) === index));
+var REMOTE_DAEMON_CODES = Object.freeze([
+  "busy",
+  "request_cancelled",
+  "funding_required",
+  "model_budget_unavailable",
+  "model_policy_unavailable",
+  "invalid_model",
+  "anonymous_access_failed",
+  "upstream_error",
+  "invalid_upstream_response",
+  "withdrawal_pending",
+  "wallet_conflict",
+  "invalid_request_error",
+  "invalid_body",
+  "testnet_password_required",
+  "invalid_api_key",
+  "local_connection_required",
+  "browser_origin_denied",
+  "unrecognized"
+]);
+var REFRESH_STATUSES = Object.freeze(["running", "completed", "failed"]);
+var TRUST_DOMAINS = Object.freeze(["public_safe", "internal", "secure_local"]);
+var RETRIEVAL_MODES = Object.freeze(["keyword", "hybrid"]);
+var RETRIEVAL_STATES = Object.freeze(["ready", "degraded"]);
+var NETWORK_IDENTITIES = Object.freeze(["hidden", "visible", "not_verified"]);
+var CLEANUPS = Object.freeze(["as_written", "light_cleanup", "custom"]);
+var OUTCOMES = Object.freeze(["not_sent", "sent_failed", "unknown"]);
+var REMOTE_DESCRIPTIONS = {
+  source_index_status: [
+    "Inspect source-index corpus status: each corpus's refresh status and aggregate counts.",
+    "Read-only: it never returns item metadata, sender counts, ledgers, source text, vectors or credentials.",
+    "Legacy extraction filter fields are refused on the connector-store status surface rather than silently returning whole-corpus counts."
+  ].join(" ")
+};
+var REMOTE_ERROR_TEXT = {
+  invalid_params: "The request was not valid. Check the arguments against the tool's schema and try again.",
+  invalid_request: "The request was not valid. Check the arguments against the tool's schema and try again.",
+  unsupported_filter: "That filter is not supported here.",
+  config_error: "Olympus on the computer needs setup before it can answer.",
+  argus_unreachable: "Olympus could not reach its private analyst. Try again later.",
+  argus_error: "Olympus's private analyst could not answer. Try again later.",
+  email_not_configured: "Olympus on the computer needs setup before it can answer.",
+  email_unreachable: "Olympus could not reach its source worker in time. Try again later.",
+  email_error: "Olympus could not complete this request.",
+  email_policy_violation: "Olympus withheld this result under the owner's privacy rules.",
+  source_index_not_enabled: "Searching sources is not turned on in Olympus on the computer.",
+  source_index_policy_violation: "Olympus withheld this result under the owner's privacy rules.",
+  source_index_error: "Olympus could not complete this request.",
+  source_answer_busy: "Olympus is already answering as many questions as it can at once. Wait for the answers in progress (call source_answer_result with their job ids), then ask again.",
+  source_answer_job_not_found: "No Olympus answer with that job_id is available to this connection. It may have expired or Olympus may have restarted. Ask the question again with source_answer.",
+  source_answer_deadline: "The answer did not finish within Olympus's time limit and was stopped. Ask a narrower question, or try again later.",
+  source_answer_too_large: "The finished answer was too large for Olympus to return. Ask a narrower question.",
+  internal_error: "Olympus could not complete this request.",
+  unknown_operation: "Olympus has no operation with that name here.",
+  operation_unavailable: "That operation is not enabled on this Olympus install.",
+  unauthorized: "A connection token is required.",
+  invalid_token: "The connection token is not valid or has been revoked.",
+  remote_connections_unavailable: "Olympus could not check the connection token. Try again later.",
+  not_found: "There is nothing at this path.",
+  method_not_allowed: "That HTTP method is not allowed here.",
+  unsupported_media_type: "The request body must be JSON (Content-Type: application/json).",
+  payload_too_large: "The request body is too large.",
+  olympus_offline: "Olympus is off; try again later."
+};
+var REMOTE_ERROR_CODES = Object.freeze(Object.keys(REMOTE_ERROR_TEXT));
+var REFERENCED_ERROR_CODES = new Set([
+  "internal_error",
+  "email_error",
+  "source_index_error",
+  "argus_error",
+  "config_error"
+]);
+var PENDING_SCHEMA = {
+  type: "object",
+  description: "Still working: call source_answer_result with job_id, again while it says working.",
+  additionalProperties: false,
+  required: ["status", "job_id", "elapsed_ms", "next_tool", "message"],
+  properties: {
+    status: { const: "working" },
+    job_id: { type: "string", pattern: JOB_ID.source },
+    elapsed_ms: { type: "integer", minimum: 0 },
+    next_tool: { const: "source_answer_result" },
+    message: { type: "string" }
+  }
+};
+var CITATION_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: ["label"],
+  properties: {
+    label: { type: "string", enum: [...REMOTE_SOURCE_LABELS] },
+    title: { type: "string", maxLength: MAX_TITLE },
+    date: { type: "string", format: "date" }
+  }
+};
+var ANONYMOUS_ANSWERED_SCHEMA = {
+  type: "object",
+  description: 'The anonymous reply. When rewritten is true, say the question was rewritten first and offer to show "sent". When provider_note is present, pass it on as written.',
+  additionalProperties: false,
+  required: ["kind", "status", "reply", "level", "rewritten", "remembered", "network_identity"],
+  properties: {
+    kind: { const: "anonymous_answer" },
+    status: { const: "answered" },
+    reply: { type: "string", maxLength: MAX_ANSWER },
+    level: { enum: ["strict", "standard"] },
+    rewritten: { type: "boolean" },
+    remembered: { type: "boolean" },
+    network_identity: { enum: [...NETWORK_IDENTITIES] },
+    cleanup: { enum: [...CLEANUPS] },
+    model: { type: "string", pattern: MODEL_ID.source },
+    route: { type: "string", maxLength: MAX_ROUTE },
+    sent: { type: "string", maxLength: MAX_SENT },
+    note: { type: "string", maxLength: MAX_MESSAGE },
+    provider_note: { const: REMOTE_PROVIDER_UNKNOWN_NOTE }
+  }
+};
+var ANONYMOUS_NEEDS_CHOICE_SCHEMA = {
+  type: "object",
+  description: "Nothing was sent: ask the user once, Strict or Standard, then call again with level (and remember=true to keep it).",
+  additionalProperties: false,
+  required: ["kind", "status", "message", "options"],
+  properties: {
+    kind: { const: "anonymous_answer" },
+    status: { const: "needs_choice" },
+    message: { type: "string" },
+    options: {
+      type: "object",
+      additionalProperties: false,
+      required: ["suggested_level", "suggested_cleanup", "custom_instruction"],
+      properties: {
+        suggested_level: { enum: ["strict", "standard"] },
+        suggested_cleanup: { enum: [...CLEANUPS] },
+        custom_instruction: { type: "boolean" }
+      }
+    }
+  }
+};
+var ANONYMOUS_REFUSED_SCHEMA = {
+  type: "object",
+  description: "Not answered: tell the user the message in those words. outcome says whether the question left (absent: never handed to the transport).",
+  additionalProperties: false,
+  required: ["kind", "status", "code", "message"],
+  properties: {
+    kind: { const: "anonymous_answer" },
+    status: { const: "refused" },
+    code: { enum: [...REMOTE_REFUSAL_CODES] },
+    message: { type: "string", maxLength: MAX_MESSAGE },
+    outcome: { enum: [...OUTCOMES] },
+    daemon_code: { enum: [...REMOTE_DAEMON_CODES] },
+    sent: { type: "string", maxLength: MAX_SENT }
+  }
+};
+var SOURCE_INDEX_STATUS_SCHEMA = {
+  type: "object",
+  description: "Per-corpus status and counts.",
+  additionalProperties: false,
+  required: ["kind", "corpora"],
+  properties: {
+    kind: { const: "source_index_status" },
+    generated_at: { type: "string", format: "date-time" },
+    corpora: {
+      type: "array",
+      maxItems: MAX_CORPORA,
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["corpus_id", "label", "configured"],
+        properties: {
+          corpus_id: { type: "string", pattern: CORPUS_ID.source, maxLength: 128 },
+          label: { type: "string", enum: [...REMOTE_SOURCE_LABELS] },
+          trust_domain: { enum: [...TRUST_DOMAINS] },
+          configured: { type: "boolean" },
+          retrieval: {
+            type: "object",
+            additionalProperties: false,
+            required: ["mode", "state"],
+            properties: {
+              mode: { enum: [...RETRIEVAL_MODES] },
+              state: { enum: [...RETRIEVAL_STATES] }
+            }
+          },
+          last_refresh: {
+            type: "object",
+            additionalProperties: false,
+            required: ["status"],
+            properties: {
+              status: { enum: [...REFRESH_STATUSES] },
+              completed_at: { type: "string", format: "date-time" }
+            }
+          },
+          counts: {
+            type: "object",
+            additionalProperties: false,
+            required: ["indexed_items", "chunks", "embedded_chunks"],
+            properties: {
+              indexed_items: { type: "integer", minimum: 0 },
+              chunks: { type: "integer", minimum: 0 },
+              embedded_chunks: { type: "integer", minimum: 0 }
+            }
+          }
+        }
+      }
+    }
+  }
+};
+var REMOTE_ERROR_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: ["error", "message"],
+  properties: {
+    error: { enum: [...REMOTE_ERROR_CODES], description: "A stable error code." },
+    message: { type: "string", description: "A fixed sentence for this code." },
+    ref: { type: "string", pattern: "^[0-9a-f]{16}$", description: "Where the owner finds this failure in Olympus's log on the computer." },
+    param: { type: "string", pattern: PARAM_NAME.source, description: "The argument at fault, when it is one the operation declares." },
+    retry_after_seconds: {
+      type: "integer",
+      minimum: 1,
+      maximum: 86400,
+      description: "Seconds to wait before trying again, when Olympus is busy or offline; also sent as the HTTP Retry-After header."
+    }
+  }
+};
+
+// src/core/app-release-agent.ts
+function isLocalAgent(surface) {
+  return surface === "mcp" || surface === "native";
+}
+async function noteLocalAgentAnswer(input) {
+  try {
+    if (!isLocalAgent(input.caller?.surface))
+      return;
+    const released = input.released;
+    if (!released || typeof released !== "object" || typeof released.answer !== "string")
+      return;
+    if (typeof input.email.noteSourceAnswerReceived !== "function")
+      return;
+    await input.email.noteSourceAnswerReceived(input.original, isWithheldSourceAnswer(released));
+  } catch {}
+}
+
 // src/core/first-run-privacy.ts
 init_atomic_file();
 init_sovereignty();
@@ -30202,12 +30794,12 @@ function isPendingPrivacyPolicy(config) {
 init_atomic_file();
 import { spawnSync as spawnSync5 } from "node:child_process";
 import { existsSync as existsSync9, rmSync as rmSync4 } from "node:fs";
-import { homedir as homedir10 } from "node:os";
+import { homedir as homedir11 } from "node:os";
 import { dirname as dirname19, join as join26 } from "node:path";
 import { fileURLToPath as fileURLToPath6 } from "node:url";
 function telegramPythonVenvDir(options = {}) {
   const env = options.env ?? process.env;
-  const home = options.homeDir ?? env.HOME ?? homedir10();
+  const home = options.homeDir ?? env.HOME ?? homedir11();
   return join26(env.XDG_CACHE_HOME ?? join26(home, ".cache"), "olympus", "telegram-python");
 }
 function telegramPythonExecutable(options = {}) {
@@ -30265,9 +30857,9 @@ init_file_lease();
 init_worker_auth();
 init_linux_desktop_entry();
 import { spawnSync as spawnSync7 } from "node:child_process";
-import { chmodSync as chmodSync8, closeSync as closeSync7, constants as constants6, copyFileSync, existsSync as existsSync13, fstatSync as fstatSync2, fsyncSync as fsyncSync2, ftruncateSync, lstatSync as lstatSync14, linkSync as linkSync2, mkdirSync as mkdirSync13, openSync as openSync6, readFileSync as readFileSync29, readlinkSync as readlinkSync4, readdirSync as readdirSync7, realpathSync as realpathSync7, renameSync as renameSync5, rmSync as rmSync9, rmdirSync, statSync as statSync16, symlinkSync as symlinkSync2, writeFileSync as writeFileSync8 } from "node:fs";
+import { chmodSync as chmodSync8, closeSync as closeSync7, constants as constants6, copyFileSync, existsSync as existsSync13, fstatSync as fstatSync2, fsyncSync as fsyncSync2, ftruncateSync, lstatSync as lstatSync14, linkSync as linkSync2, mkdirSync as mkdirSync13, openSync as openSync6, readFileSync as readFileSync30, readlinkSync as readlinkSync4, readdirSync as readdirSync7, realpathSync as realpathSync7, renameSync as renameSync5, rmSync as rmSync9, rmdirSync, statSync as statSync16, symlinkSync as symlinkSync2, writeFileSync as writeFileSync8 } from "node:fs";
 import { createRequire as createRequire4 } from "node:module";
-import { basename as basename6, dirname as dirname27, join as join35, relative as relative4, resolve as resolve9, sep as sep5 } from "node:path";
+import { basename as basename6, dirname as dirname27, join as join36, relative as relative4, resolve as resolve9, sep as sep5 } from "node:path";
 init_linux_engine_layout();
 init_atomic_file();
 init_linux_engine_layout();
@@ -30285,6 +30877,10 @@ init_linux_desktop_entry();
 init_engine_maintenance();
 init_file_lease();
 init_linux_engine_layout();
+
+// src/core/update-check.ts
+import { readFileSync as readFileSync23 } from "node:fs";
+import { join as join28 } from "node:path";
 
 // src/core/package-root.ts
 import { readFileSync as readFileSync22 } from "node:fs";
@@ -30308,27 +30904,35 @@ function olympusPackageRoot() {
 
 // src/core/update-check.ts
 var UPDATE_MAX_BYTES = 512 * 1024;
+function runningOlympusVersion() {
+  try {
+    const value = JSON.parse(readFileSync23(join28(olympusPackageRoot(), "package.json"), "utf8")).version;
+    return typeof value === "string" ? value : "unknown";
+  } catch {
+    return "unknown";
+  }
+}
 
 // src/core/engine-service.ts
 import { spawn as spawn3, spawnSync as spawnSync6 } from "node:child_process";
 init_atomic_file();
-import { existsSync as existsSync12, lstatSync as lstatSync13, readdirSync as readdirSync6, readFileSync as readFileSync28, renameSync as renameSync4, rmSync as rmSync8, statSync as statSync15 } from "node:fs";
-import { homedir as homedir13, platform as osPlatform } from "node:os";
-import { basename as basename5, dirname as dirname26, isAbsolute as isAbsolute20, join as join34, resolve as resolvePath2 } from "node:path";
+import { existsSync as existsSync12, lstatSync as lstatSync13, readdirSync as readdirSync6, readFileSync as readFileSync29, renameSync as renameSync4, rmSync as rmSync8, statSync as statSync15 } from "node:fs";
+import { homedir as homedir14, platform as osPlatform } from "node:os";
+import { basename as basename5, dirname as dirname26, isAbsolute as isAbsolute20, join as join35, resolve as resolvePath2 } from "node:path";
 
 // src/core/engine-children.ts
 init_atomic_file();
 init_remote_access();
-import { existsSync as existsSync10, mkdirSync as mkdirSync10, readFileSync as readFileSync23 } from "node:fs";
-import { dirname as dirname21, join as join28 } from "node:path";
+import { existsSync as existsSync10, mkdirSync as mkdirSync10, readFileSync as readFileSync24 } from "node:fs";
+import { dirname as dirname21, join as join29 } from "node:path";
 var ENGINE_CHILDREN_SCHEMA = "olympus.engine.children.v2";
 var ENGINE_CHILDREN_SCHEMA_V1 = "olympus.engine.children.v1";
 function engineChildrenPath(env = process.env) {
-  return join28(olympusDataDir(env), "engine", "children.json");
+  return join29(olympusDataDir(env), "engine", "children.json");
 }
 function readEngineChildren(path) {
   try {
-    const parsed = JSON.parse(readFileSync23(path, "utf8"));
+    const parsed = JSON.parse(readFileSync24(path, "utf8"));
     if (!Array.isArray(parsed?.children))
       return;
     if (parsed.schema !== ENGINE_CHILDREN_SCHEMA && parsed.schema !== ENGINE_CHILDREN_SCHEMA_V1)
@@ -30372,32 +30976,32 @@ var ENGINE_LABEL = "ai.olympusplugin.engine";
 var PACKAGE_NAMES = new Set(["olympus", "olympus-source-checkout"]);
 function enginePaths(homeDir) {
   const home = absolute2(homeDir, "home directory");
-  const logDir = join34(home, "Library", "Logs", "Olympus");
-  const appSupportDir = join34(home, "Library", "Application Support", "Olympus");
+  const logDir = join35(home, "Library", "Logs", "Olympus");
+  const appSupportDir = join35(home, "Library", "Application Support", "Olympus");
   const dataEnv = { HOME: home };
   return {
     label: ENGINE_LABEL,
-    plistPath: join34(home, "Library", "LaunchAgents", `${ENGINE_LABEL}.plist`),
+    plistPath: join35(home, "Library", "LaunchAgents", `${ENGINE_LABEL}.plist`),
     logDir,
-    logPath: join34(logDir, "engine.log"),
-    errorLogPath: join34(logDir, "engine.err"),
-    configPath: join34(home, ".olympus", "engine.json"),
-    sovereigntyPath: join34(home, ".olympus", "sovereignty.json"),
+    logPath: join35(logDir, "engine.log"),
+    errorLogPath: join35(logDir, "engine.err"),
+    configPath: join35(home, ".olympus", "engine.json"),
+    sovereigntyPath: join35(home, ".olympus", "sovereignty.json"),
     appSupportDir,
-    helperAppPath: join34(appSupportDir, ENGINE_HELPER_APP_NAME),
-    helperExecutablePath: join34(appSupportDir, ENGINE_HELPER_APP_NAME, "Contents", "MacOS", ENGINE_HELPER_EXECUTABLE),
-    appDir: join34(appSupportDir, "app"),
-    previousAppDir: join34(appSupportDir, "app.previous"),
-    runtimeDir: join34(appSupportDir, "runtime"),
-    workerEnvPath: join34(home, ".config", "olympus", "worker.env"),
+    helperAppPath: join35(appSupportDir, ENGINE_HELPER_APP_NAME),
+    helperExecutablePath: join35(appSupportDir, ENGINE_HELPER_APP_NAME, "Contents", "MacOS", ENGINE_HELPER_EXECUTABLE),
+    appDir: join35(appSupportDir, "app"),
+    previousAppDir: join35(appSupportDir, "app.previous"),
+    runtimeDir: join35(appSupportDir, "runtime"),
+    workerEnvPath: join35(home, ".config", "olympus", "worker.env"),
     statusPath: engineStatusPath(dataEnv),
     childrenPath: engineChildrenPath(dataEnv),
-    modelsDir: join34(olympusDataDir(dataEnv), "models"),
+    modelsDir: join35(olympusDataDir(dataEnv), "models"),
     remoteAccessDir: remoteAccessDir(dataEnv)
   };
 }
 function engineServicePaths(options = {}) {
-  const env = { ...options.env ?? process.env, HOME: options.homeDir ?? options.env?.HOME ?? homedir13() };
+  const env = { ...options.env ?? process.env, HOME: options.homeDir ?? options.env?.HOME ?? homedir14() };
   if ((options.platform ?? process.platform) !== "linux") {
     const paths = enginePaths(env.HOME);
     const daemonPlistPath = options.daemonPlistPath ?? MAC_ENGINE_DAEMON_PLIST;
@@ -30410,27 +31014,27 @@ function engineServicePaths(options = {}) {
     label: "olympus-engine.service",
     plistPath: l.unitPath,
     logDir: l.stateDir,
-    logPath: join34(l.stateDir, "engine.log"),
-    errorLogPath: join34(l.stateDir, "engine.err"),
+    logPath: join35(l.stateDir, "engine.log"),
+    errorLogPath: join35(l.stateDir, "engine.err"),
     configPath: l.configPath,
     sovereigntyPath: l.sovereigntyPath,
     appSupportDir: l.packageDir,
-    appDir: join34(l.packageDir, "app"),
-    previousAppDir: join34(l.packageDir, "app.previous"),
-    runtimeDir: join34(l.packageDir, "runtime"),
+    appDir: join35(l.packageDir, "app"),
+    previousAppDir: join35(l.packageDir, "app.previous"),
+    runtimeDir: join35(l.packageDir, "runtime"),
     workerEnvPath: l.workerEnvPath,
-    statusPath: join34(l.dataDir, "engine/status.json"),
-    childrenPath: join34(l.dataDir, "engine/children.json"),
-    modelsDir: join34(l.dataDir, "models"),
-    remoteAccessDir: join34(l.dataDir, "connect-relay")
+    statusPath: join35(l.dataDir, "engine/status.json"),
+    childrenPath: join35(l.dataDir, "engine/children.json"),
+    modelsDir: join35(l.dataDir, "models"),
+    remoteAccessDir: join35(l.dataDir, "connect-relay")
   };
 }
 function engineStatusPath(env = process.env) {
-  return join34(olympusDataDir(env), "engine", "status.json");
+  return join35(olympusDataDir(env), "engine", "status.json");
 }
 function readEngineWorkerHealth(statusPath) {
   try {
-    const status = JSON.parse(readFileSync28(statusPath, "utf8"));
+    const status = JSON.parse(readFileSync29(statusPath, "utf8"));
     if (status?.schema !== "olympus.engine.status.v1" || status.state !== "running" || !Number.isSafeInteger(status.pid) || status.pid <= 0)
       return;
     process.kill(status.pid, 0);
@@ -30451,7 +31055,7 @@ function readEngineConfig(path) {
     return;
   let parsed;
   try {
-    parsed = JSON.parse(readFileSync28(path, "utf8"));
+    parsed = JSON.parse(readFileSync29(path, "utf8"));
   } catch {
     throw new OperationError("config_error", `${path} is not valid JSON.`, "Fix or remove it, then run olympus engine install again.");
   }
@@ -30492,7 +31096,7 @@ async function checkEngineHealthOnce(input, pidAlive, fetchImpl, deps) {
   const base = { ok: false, expected_build: input.expectedBuild, running_build: null, pid: null, worker: "not_ready" };
   let status;
   try {
-    status = JSON.parse(readFileSync28(input.paths.statusPath, "utf8"));
+    status = JSON.parse(readFileSync29(input.paths.statusPath, "utf8"));
   } catch {
     return { ...base, reason: "the engine has not written its status yet" };
   }
@@ -30567,7 +31171,7 @@ function defaultPidAlive(pid) {
   }
 }
 function inspectEngine(options = {}) {
-  const homeDir = absolute2(options.homeDir ?? homedir13(), "home directory");
+  const homeDir = absolute2(options.homeDir ?? homedir14(), "home directory");
   const paths = engineServicePaths(options);
   const installed = existsSync12(paths.plistPath);
   const base = {
@@ -30706,7 +31310,7 @@ function systemdCgroupEmpty(group, root = "/sys/fs/cgroup") {
   if (!group.startsWith("/user.slice/") || group.split("/").includes(".."))
     return;
   try {
-    return /^populated 0$/m.test(readFileSync29(join35(root, group, "cgroup.events"), "utf8"));
+    return /^populated 0$/m.test(readFileSync30(join36(root, group, "cgroup.events"), "utf8"));
   } catch (e) {
     if (e.code !== "ENOENT")
       return;
@@ -30714,13 +31318,13 @@ function systemdCgroupEmpty(group, root = "/sys/fs/cgroup") {
     if (uid === undefined || !group.startsWith(`/user.slice/user-${uid}.slice/user@${uid}.service/`))
       return;
     try {
-      readFileSync29(join35(root, "cgroup.controllers"));
-      statSync16(dirname27(join35(root, group)));
+      readFileSync30(join36(root, "cgroup.controllers"));
+      statSync16(dirname27(join36(root, group)));
     } catch {
       return;
     }
     try {
-      statSync16(join35(root, group));
+      statSync16(join36(root, group));
       return;
     } catch (error) {
       return error.code === "ENOENT" ? true : undefined;
@@ -30743,7 +31347,7 @@ function waitForEmptyCgroup(group, options) {
 }
 function systemdPidInCgroup(pid, group) {
   try {
-    return readFileSync29(`/proc/${pid}/cgroup`, "utf8").split(`
+    return readFileSync30(`/proc/${pid}/cgroup`, "utf8").split(`
 `).some((line) => line === `0::${group}`);
   } catch {
     return false;
@@ -30756,7 +31360,7 @@ function linuxLayoutFor(options) {
 }
 function currentProgram(l) {
   try {
-    return JSON.parse(readFileSync29(join35(l.stateDir, "service-current.json"), "utf8")).program;
+    return JSON.parse(readFileSync30(join36(l.stateDir, "service-current.json"), "utf8")).program;
   } catch (e) {
     if (e.code === "ENOENT")
       return;
@@ -30773,7 +31377,7 @@ function linuxEngineCustody(l, facts, options = {}) {
     return "unknown";
   if (facts.control_group && !waitForEmptyCgroup(facts.control_group, options))
     return "unknown";
-  const childrenPath = join35(l.dataDir, "engine/children.json");
+  const childrenPath = join36(l.dataDir, "engine/children.json");
   const record2 = readEngineChildren(childrenPath);
   if (existsSync13(childrenPath) && (!record2 || record2.children.length > 0))
     return "unknown";
@@ -30787,19 +31391,19 @@ init_linux_engine_layout();
 init_model_transport();
 init_config();
 import { spawnSync as spawnSync8 } from "node:child_process";
-import { existsSync as existsSync22, readFileSync as readFileSync36 } from "node:fs";
-import { join as join47 } from "node:path";
+import { existsSync as existsSync22, readFileSync as readFileSync37 } from "node:fs";
+import { join as join48 } from "node:path";
 
 // src/version.ts
-import { readFileSync as readFileSync30 } from "node:fs";
-import { dirname as dirname28, join as join36 } from "node:path";
+import { readFileSync as readFileSync31 } from "node:fs";
+import { dirname as dirname28, join as join37 } from "node:path";
 import { fileURLToPath as fileURLToPath8 } from "node:url";
 var repoRoot = dirname28(dirname28(fileURLToPath8(import.meta.url)));
-var manifest = JSON.parse(readFileSync30(join36(repoRoot, "openclaw.plugin.json"), "utf8"));
+var manifest = JSON.parse(readFileSync31(join37(repoRoot, "openclaw.plugin.json"), "utf8"));
 var VERSION = manifest.version;
 
 // src/core/doctor.ts
-import { homedir as homedir18 } from "node:os";
+import { homedir as homedir19 } from "node:os";
 init_openclaw_executable();
 init_worker_service();
 init_worker_auth();
@@ -31132,9 +31736,9 @@ init_linux_engine_layout();
 init_google_handle_compatibility();
 init_model_transport();
 init_zkapi_consult_settings();
-import { mkdirSync as mkdirSync15, readFileSync as readFileSync32, rmSync as rmSync10, writeFileSync as writeFileSync9 } from "node:fs";
-import { homedir as homedir15 } from "node:os";
-import { dirname as dirname31, join as join38 } from "node:path";
+import { mkdirSync as mkdirSync15, readFileSync as readFileSync33, rmSync as rmSync10, writeFileSync as writeFileSync9 } from "node:fs";
+import { homedir as homedir16 } from "node:os";
+import { dirname as dirname31, join as join39 } from "node:path";
 init_secret_store();
 init_worker_service();
 init_http_timeout();
@@ -31173,18 +31777,18 @@ function defaultDetachedOAuthStateDir(env = process.env) {
   const linuxPath = linuxOwnerConfigPath("pending-oauth", env);
   if (linuxPath)
     return linuxPath;
-  return join38(homedir15(), ".olympus", "pending-oauth");
+  return join39(homedir16(), ".olympus", "pending-oauth");
 }
 function readDetachedOAuthState(path) {
   try {
-    const state = sanitizeDetachedOAuthState(JSON.parse(readFileSync32(path, "utf8")));
+    const state = sanitizeDetachedOAuthState(JSON.parse(readFileSync33(path, "utf8")));
     if (process.platform === "linux" && state.logPath) {
       const layout = resolveLinuxEngineLayout();
-      const legacyLogs = join38(layout.home, ".olympus/logs") + "/";
-      if (readLinuxEngineReceipt(layout.receiptPath) && dirname31(path) === join38(layout.configDir, "pending-oauth") && state.logPath.startsWith(legacyLogs)) {
+      const legacyLogs = join39(layout.home, ".olympus/logs") + "/";
+      if (readLinuxEngineReceipt(layout.receiptPath) && dirname31(path) === join39(layout.configDir, "pending-oauth") && state.logPath.startsWith(legacyLogs)) {
         const name = state.logPath.slice(legacyLogs.length);
         if (isLegacyLinuxSetting(`logs/${name}`))
-          state.logPath = join38(layout.configDir, "logs", name);
+          state.logPath = join39(layout.configDir, "logs", name);
       }
     }
     return state;
@@ -31262,9 +31866,9 @@ init_consult_transport_zkapi();
 // src/core/consult-gate.ts
 init_owner_config_read();
 import { createHash as createHash14 } from "node:crypto";
-import { existsSync as existsSync21, readFileSync as readFileSync35, statSync as statSync19 } from "node:fs";
-import { homedir as homedir17 } from "node:os";
-import { basename as basename7, dirname as dirname36, join as join45 } from "node:path";
+import { existsSync as existsSync21, readFileSync as readFileSync36, statSync as statSync19 } from "node:fs";
+import { homedir as homedir18 } from "node:os";
+import { basename as basename7, dirname as dirname36, join as join46 } from "node:path";
 import { fileURLToPath as fileURLToPath12 } from "node:url";
 init_opsec();
 init_types();
@@ -31502,7 +32106,7 @@ var VOCABULARY_DIR = ["assets", "consult", "vocabulary"];
 var CONSULT_VOCABULARY_MAX_COMPRESSED_BYTES = 16 * 1024 * 1024;
 var CONSULT_VOCABULARY_MAX_EXPANDED_BYTES = 64 * 1024 * 1024;
 function consultUserVocabularyDir(env = process.env) {
-  return env.OLYMPUS_CONSULT_VOCABULARY_DIR?.trim() || (linuxOwnerConfigPath("consult/vocabulary", env) ?? join45(env.HOME?.trim() || homedir17(), ".olympus", "consult", "vocabulary"));
+  return env.OLYMPUS_CONSULT_VOCABULARY_DIR?.trim() || (linuxOwnerConfigPath("consult/vocabulary", env) ?? join46(env.HOME?.trim() || homedir18(), ".olympus", "consult", "vocabulary"));
 }
 var vocabularyCache = new Map;
 function verifiedPackFile(path, sha256) {
@@ -31511,7 +32115,7 @@ function verifiedPackFile(path, sha256) {
       return "missing";
     if (statSync19(path).size > CONSULT_VOCABULARY_MAX_COMPRESSED_BYTES)
       return "too_large";
-    const gz = readFileSync35(path);
+    const gz = readFileSync36(path);
     return createHash14("sha256").update(gz).digest("hex") === sha256 ? gz : "hash_mismatch";
   } catch {
     return "unreadable";
@@ -31520,13 +32124,13 @@ function verifiedPackFile(path, sha256) {
 function consultVocabularyRoot(moduleUrl = import.meta.url) {
   const here = dirname36(fileURLToPath12(moduleUrl));
   const root = basename7(here) === "core" && basename7(dirname36(here)) === "src" ? dirname36(dirname36(here)) : basename7(here) === "dist" ? dirname36(here) : undefined;
-  return root !== undefined && existsSync21(join45(root, ...VOCABULARY_DIR)) ? root : undefined;
+  return root !== undefined && existsSync21(join46(root, ...VOCABULARY_DIR)) ? root : undefined;
 }
 function consultVocabularyFileStatus(options = {}, env = process.env) {
   const selection = consultVocabularySelection(options);
   const root = consultVocabularyRoot();
   const status = selection.shipped.map((id) => {
-    const result = root ? verifiedPackFile(join45(root, ...VOCABULARY_DIR, `${id}.txt.gz`), CONSULT_VOCABULARY_PACKS[id]) : "missing";
+    const result = root ? verifiedPackFile(join46(root, ...VOCABULARY_DIR, `${id}.txt.gz`), CONSULT_VOCABULARY_PACKS[id]) : "missing";
     return { id, origin: "shipped", state: typeof result === "string" ? result : "verified" };
   });
   if (selection.user.length > 0) {
@@ -31534,7 +32138,7 @@ function consultVocabularyFileStatus(options = {}, env = process.env) {
     const manifest2 = new Map(userManifestEntries(userDir));
     for (const id of selection.user) {
       const sha256 = manifest2.get(id);
-      const result = !manifest2.has(id) ? "missing" : sha256 === undefined ? "hash_mismatch" : verifiedPackFile(join45(userDir, `${id}.txt.gz`), sha256);
+      const result = !manifest2.has(id) ? "missing" : sha256 === undefined ? "hash_mismatch" : verifiedPackFile(join46(userDir, `${id}.txt.gz`), sha256);
       status.push({ id, origin: "user", state: typeof result === "string" ? result : "verified" });
     }
   }
@@ -31544,10 +32148,10 @@ function userManifestEntries(userDir) {
   if (!userDir)
     return [];
   try {
-    const path = join45(userDir, "manifest.json");
+    const path = join46(userDir, "manifest.json");
     if (!existsSync21(path) || statSync19(path).size > 1024 * 1024)
       return [];
-    const manifest2 = JSON.parse(readFileSync35(path, "utf8"));
+    const manifest2 = JSON.parse(readFileSync36(path, "utf8"));
     if (!manifest2 || typeof manifest2 !== "object" || Array.isArray(manifest2))
       return [];
     const packs = manifest2.packs;
@@ -32705,7 +33309,7 @@ init_still_image_readiness();
 init_owner_config_read();
 init_secret_store();
 import { closeSync as closeSync9, constants as constants8, fstatSync as fstatSync4, openSync as openSync8, readSync } from "node:fs";
-import { join as join46 } from "node:path";
+import { join as join47 } from "node:path";
 var CONSULT_SETTINGS_VERSION = 1;
 var CONSULT_SETTINGS_MAX_BYTES = 16 * 1024;
 var CONSULT_LEVELS = Object.freeze(["unnamed", "general"]);
@@ -32741,7 +33345,7 @@ function consultSettingsPath(env = process.env) {
   const home = env.HOME?.trim();
   if (process.platform === "linux" && home && !home.startsWith("/"))
     return;
-  return home ? linuxOwnerConfigPath("consult.json", env) ?? join46(home, ".olympus", "consult.json") : undefined;
+  return home ? linuxOwnerConfigPath("consult.json", env) ?? join47(home, ".olympus", "consult.json") : undefined;
 }
 var __consultSettingsTestHooks = { afterOpen: undefined, afterStat: undefined, afterRead: undefined };
 function parseConsultSettings(value) {
@@ -32978,14 +33582,14 @@ function errorCode(error) {
 // src/core/doctor.ts
 function installedPluginVersion() {
   try {
-    const value = JSON.parse(readFileSync36(join47(olympusPackageRoot(), "openclaw.plugin.json"), "utf8")).version;
+    const value = JSON.parse(readFileSync37(join48(olympusPackageRoot(), "openclaw.plugin.json"), "utf8")).version;
     return typeof value === "string" ? value : undefined;
   } catch {
     return;
   }
 }
 async function defaultDoctorHostProbe(env = process.env, options = {}) {
-  const home = env.HOME?.trim() || homedir18();
+  const home = env.HOME?.trim() || homedir19();
   const paths = engineServicePaths({ homeDir: home, env });
   const openclawPath = resolveOpenClawExecutable({ env, homeDir: home });
   const engine = process.platform === "darwin" || process.platform === "linux" ? inspectEngine({ homeDir: home, env }) : { installed: false, state: "not_loaded" };
@@ -33070,7 +33674,7 @@ async function photoSearchCheck(deps) {
 }
 function defaultOsRelease() {
   try {
-    return readFileSync36("/etc/os-release", "utf8");
+    return readFileSync37("/etc/os-release", "utf8");
   } catch {
     return;
   }
@@ -33118,7 +33722,7 @@ function doctorSovereigntyConfigPath(deps) {
   if (deps.env === undefined)
     return defaultSovereigntyConfigPath();
   const home = deps.env.HOME?.trim();
-  return home ? (deps.platform ?? process.platform) === "linux" ? resolveLinuxEngineLayout(deps.env).sovereigntyPath : join47(home, ".olympus", "sovereignty.json") : undefined;
+  return home ? (deps.platform ?? process.platform) === "linux" ? resolveLinuxEngineLayout(deps.env).sovereigntyPath : join48(home, ".olympus", "sovereignty.json") : undefined;
 }
 async function safeCheck(name, run) {
   try {
@@ -33715,7 +34319,7 @@ function tierMigrationStoppedGraceDays(env) {
   const value = Number(raw);
   return Number.isFinite(value) && value >= 0 ? value : DEFAULT_TIER_MIGRATION_STOPPED_GRACE_DAYS;
 }
-var DAY_MS2 = 24 * 60 * 60 * 1000;
+var DAY_MS3 = 24 * 60 * 60 * 1000;
 function approvedTierMigrationInProgress(value, now, graceDays) {
   const migration = asRecord17(value);
   if (migration.in_progress !== true)
@@ -33735,8 +34339,8 @@ function approvedTierMigrationInProgress(value, now, graceDays) {
   if (state === "stopped") {
     const stoppedAt = typeof migration.stopped_at === "string" ? Date.parse(migration.stopped_at) : Number.NaN;
     const ageMs = Number.isFinite(stoppedAt) ? Math.max(0, now.getTime() - stoppedAt) : Number.POSITIVE_INFINITY;
-    if (ageMs > graceDays * DAY_MS2) {
-      const when = Number.isFinite(ageMs) ? `migration stopped ${Math.floor(ageMs / DAY_MS2)} days ago` : "migration stopped at an unknown time";
+    if (ageMs > graceDays * DAY_MS3) {
+      const when = Number.isFinite(ageMs) ? `migration stopped ${Math.floor(ageMs / DAY_MS3)} days ago` : "migration stopped at an unknown time";
       return {
         state,
         approvalEntryId,
@@ -34395,7 +34999,7 @@ function readRegistrySafely(deps) {
 }
 function defaultCommandExists(command) {
   const path = process.env.PATH ?? "";
-  return path.split(":").some((dir) => Boolean(dir) && existsSync22(join47(dir, command)));
+  return path.split(":").some((dir) => Boolean(dir) && existsSync22(join48(dir, command)));
 }
 function defaultPythonModuleExists(pythonCommand, moduleName) {
   const proc = spawnSync8(pythonCommand, ["-c", `import ${moduleName}`], { stdio: "ignore" });
@@ -34414,7 +35018,7 @@ function errorDetail(error) {
 // src/core/ocr-readiness.ts
 init_apple_vision_ocr();
 init_ocr_capability();
-import { existsSync as existsSync23, readFileSync as readFileSync37 } from "node:fs";
+import { existsSync as existsSync23, readFileSync as readFileSync38 } from "node:fs";
 var ARCH_IDS2 = ["arch", "archlinux", "omarchy", "manjaro", "endeavouros", "cachyos", "arcolinux", "garuda"];
 var DEBIAN_IDS2 = ["debian", "ubuntu", "linuxmint", "pop", "raspbian", "neon", "elementary", "zorin"];
 var FEDORA_IDS2 = ["fedora", "rhel", "centos", "rocky", "almalinux", "ol", "nobara"];
@@ -34450,7 +35054,7 @@ function linuxFamilyFromOsRelease2(text3) {
 function readOsRelease() {
   for (const path of ["/etc/os-release", "/usr/lib/os-release"]) {
     try {
-      return readFileSync37(path, "utf8");
+      return readFileSync38(path, "utf8");
     } catch {}
   }
   return;
@@ -34608,6 +35212,343 @@ function normalizeSelectedItemField(key) {
 init_source_corpus_registry();
 init_venice_models();
 init_public_surface();
+
+// src/core/cli-via-worker.ts
+init_config();
+init_data_owner_lock();
+init_olympus_layout();
+init_operation_error();
+init_worker_auth();
+import { realpathSync as realpathSync8 } from "node:fs";
+import { resolve as resolve11 } from "node:path";
+var WORKER_CLI_ROUTE_PREFIX = "/cli/";
+var WORKER_CONNECT_TIMEOUT_MS = 5000;
+
+class WorkerUnreachableError extends Error {
+  constructor(detail) {
+    super(`No Olympus worker answered (${detail}).`);
+    this.name = "WorkerUnreachableError";
+  }
+}
+function canonicalDataRoot(root) {
+  try {
+    return realpathSync8(root);
+  } catch {
+    return resolve11(root);
+  }
+}
+async function callWorkerCli(operation, body, options = {}) {
+  const env = options.env ?? process.env;
+  const config = options.config ?? loadConfig(env);
+  const authToken = resolveWorkerAuthToken(env, config);
+  if (!authToken)
+    throw new WorkerUnreachableError("this command has no worker token to present");
+  const baseUrl = normalizeSourceWorkerBaseUrl(config.email.baseUrl);
+  const fetchImpl = options.fetchImpl ?? createWorkerFetch({ env });
+  try {
+    const probe = await fetchImpl(`${baseUrl}/health`, {
+      signal: AbortSignal.timeout(options.connectTimeoutMs ?? WORKER_CONNECT_TIMEOUT_MS)
+    });
+    await probe.body?.cancel().catch(() => {});
+  } catch (error) {
+    throw new WorkerUnreachableError(error instanceof Error ? error.message : String(error));
+  }
+  let response;
+  try {
+    response = await fetchImpl(`${baseUrl}${WORKER_CLI_ROUTE_PREFIX}${operation}`, withWorkerAuthHeader({
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ...body, data_root: canonicalDataRoot(olympusDataRoot(env)) })
+    }, authToken));
+  } catch (error) {
+    throw new OperationError("source_index_error", `The running Olympus stopped answering while it ran this command (${error instanceof Error ? error.message : String(error)}).`, "Check olympus engine status, then look at the result before running the command again.");
+  }
+  const text3 = await response.text();
+  let parsed;
+  try {
+    parsed = text3 ? JSON.parse(text3) : undefined;
+  } catch {
+    parsed = undefined;
+  }
+  if (response.ok) {
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed))
+      return parsed;
+    throw new OperationError("source_index_error", "The running Olympus answered this command with something unreadable.");
+  }
+  const failure2 = parsed?.error;
+  if (response.status === 401) {
+    throw new OperationError("config_error", "The running Olympus did not accept this command's worker token.", `Run it with the configuration the running Olympus uses, or stop Olympus first (${STOP_OLYMPUS_HINT}).`);
+  }
+  if (response.status === 404) {
+    throw new OperationError("config_error", "The running Olympus is older than this command and cannot run it.", `Update and restart Olympus, or stop it first (${STOP_OLYMPUS_HINT}).`);
+  }
+  if (typeof failure2?.code === "string" && typeof failure2.message === "string") {
+    throw new OperationError(failure2.code, failure2.message, typeof failure2.suggestion === "string" ? failure2.suggestion : undefined);
+  }
+  throw new OperationError("source_index_error", `The running Olympus could not run this command (HTTP ${response.status}).`);
+}
+
+// src/core/setup-status.ts
+init_operation_error();
+
+// src/core/setup-checklist.ts
+var SETUP_STEP_IDS = [
+  "installed",
+  "private_answers",
+  "privacy_judge",
+  "sources",
+  "messaging_chats",
+  "ai_app",
+  "first_items"
+];
+var SETUP_OWNER_WHY = {
+  privacy: "Needs your click because it changes what is private.",
+  access: "Needs your click because it changes who has access.",
+  spending: "Needs your click because it changes what Olympus spends."
+};
+var SETUP_DASHBOARD_LINKS = {
+  privateAnswers: "/dashboard?keys#private-routing",
+  privacyJudge: "/dashboard?keys#privacy-judge",
+  addSource: "/dashboard?connect#add-source",
+  sources: "/dashboard?connect#sources",
+  agents: "/dashboard?settings#agents"
+};
+var NOT_RUNNING = "Start Olympus to check this.";
+var CREDENTIAL_SHAPES = [
+  /dash_[A-Za-z0-9_-]{6,}/,
+  /olympus_conn_[A-Za-z0-9_-]*/i,
+  /\bbearer\s+\S+/i,
+  /\bsk-[A-Za-z0-9_-]{8,}/,
+  /\b[A-Za-z0-9_-]{32,}\b/
+];
+function looksLikeCredential(value) {
+  return CREDENTIAL_SHAPES.some((pattern) => pattern.test(value));
+}
+function setupSafeName(value, fallback) {
+  const oneLine = value.replace(/[\u0000-\u001f\u007f]+/g, " ").replace(/\s+/g, " ").trim().slice(0, 80);
+  if (!oneLine || looksLikeCredential(oneLine))
+    return fallback;
+  return oneLine;
+}
+function owner(link, reason) {
+  return { kind: "owner", link, reason, why: SETUP_OWNER_WHY[reason] };
+}
+function command(text3) {
+  return { kind: "command", command: text3 };
+}
+function listNames(names) {
+  if (names.length <= 1)
+    return names[0] ?? "";
+  return `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}`;
+}
+function dollars(value) {
+  return Number.isInteger(value) ? `$${value}` : `$${value.toFixed(2)}`;
+}
+function installedStep(facts) {
+  return facts.running ? { id: "installed", title: "Olympus installed", status: "done", detail: `Version ${facts.version}`, forward: command("olympus doctor") } : {
+    id: "installed",
+    title: "Start Olympus",
+    status: "open",
+    detail: `Version ${facts.version} is installed, but Olympus is not running.`,
+    forward: command("olympus doctor")
+  };
+}
+function privateAnswersStep(facts) {
+  const fact = facts.privateAnswers;
+  const forward = owner(SETUP_DASHBOARD_LINKS.privateAnswers, "privacy");
+  if (!fact)
+    return { id: "private_answers", title: "Private answers", status: "open", detail: NOT_RUNNING, forward };
+  if (fact.chosen)
+    return { id: "private_answers", title: "Private answers", status: "done", detail: fact.label ?? "Chosen", forward };
+  return { id: "private_answers", title: "Choose how Private items are answered", status: "open", detail: "Not chosen yet.", forward };
+}
+function judgeStep(facts) {
+  const fact = facts.judge;
+  const forward = owner(SETUP_DASHBOARD_LINKS.privacyJudge, "spending");
+  if (!fact)
+    return { id: "privacy_judge", title: "Privacy judge", status: "open", detail: NOT_RUNNING, forward };
+  if (!fact.chosen) {
+    return { id: "privacy_judge", title: "Choose your privacy judge", status: "open", detail: "Not chosen yet: on this computer for free, or Venice.", forward };
+  }
+  const detail = fact.choice === "venice" ? typeof fact.limitDollars === "number" ? `Venice, up to ${dollars(fact.limitDollars)}` : "Venice, no spending limit set" : "On this computer, free";
+  return { id: "privacy_judge", title: "Privacy judge", status: "done", detail, forward };
+}
+function sourcesStep(facts) {
+  const sources = facts.sources?.map((source) => ({ ...source, name: setupSafeName(source.name, source.id) }));
+  if (!sources)
+    return { id: "sources", title: "Connect a source", status: "open", detail: NOT_RUNNING, forward: owner(SETUP_DASHBOARD_LINKS.addSource, "access") };
+  const connected2 = sources.filter((source) => source.state === "connected").map((source) => source.name);
+  const needsYou = sources.filter((source) => source.state === "needs_you").map((source) => source.name);
+  if (connected2.length > 0) {
+    return {
+      id: "sources",
+      title: `${listNames(connected2)} connected`,
+      status: "done",
+      detail: needsYou.length > 0 ? `${listNames(needsYou)} needs you.` : `${connected2.length} ${connected2.length === 1 ? "source" : "sources"} connected.`,
+      forward: owner(needsYou.length > 0 ? SETUP_DASHBOARD_LINKS.sources : SETUP_DASHBOARD_LINKS.addSource, "access"),
+      sources
+    };
+  }
+  return {
+    id: "sources",
+    title: "Connect a source",
+    status: "open",
+    detail: needsYou.length > 0 ? `${listNames(needsYou)} needs you to finish connecting.` : "Nothing connected yet.",
+    forward: owner(needsYou.length > 0 ? SETUP_DASHBOARD_LINKS.sources : SETUP_DASHBOARD_LINKS.addSource, "access"),
+    sources
+  };
+}
+function messagingStep(facts) {
+  const forward = owner(SETUP_DASHBOARD_LINKS.sources, "access");
+  if (!facts.messaging)
+    return { id: "messaging_chats", title: "Choose your chats", status: "open", detail: NOT_RUNNING, forward };
+  const paired = facts.messaging.filter((fact) => fact.paired).map((fact) => ({ ...fact, name: setupSafeName(fact.name, "Chat app") }));
+  if (paired.length === 0) {
+    return { id: "messaging_chats", title: "Choose your chats", status: "skipped", detail: "No chat app is paired.", forward: owner(SETUP_DASHBOARD_LINKS.addSource, "access") };
+  }
+  const waiting = paired.filter((fact) => !fact.chatsChosen).map((fact) => fact.name);
+  if (waiting.length === 0) {
+    return { id: "messaging_chats", title: `${listNames(paired.map((fact) => fact.name))} chats chosen`, status: "done", detail: "Olympus keeps the chats you chose.", forward };
+  }
+  return { id: "messaging_chats", title: `Choose your ${listNames(waiting)} chats`, status: "open", detail: "Paired. Pick which chats Olympus keeps.", forward };
+}
+function aiAppStep(facts) {
+  const forward = owner(SETUP_DASHBOARD_LINKS.agents, "access");
+  if (!facts.aiApps)
+    return { id: "ai_app", title: "Connect an AI app", status: "open", detail: NOT_RUNNING, forward };
+  const names = [...new Set(facts.aiApps.map((name) => setupSafeName(name, "An agent")))];
+  if (names.length === 0)
+    return { id: "ai_app", title: "Connect an AI app", status: "open", detail: "ChatGPT, Claude, Grok or your own agent", forward };
+  return { id: "ai_app", title: "AI app connected", status: "done", detail: listNames(names), forward };
+}
+function firstItemsStep(facts) {
+  const forward = command("olympus source index status");
+  if (facts.findableItems === undefined)
+    return { id: "first_items", title: "First items findable", status: "open", detail: NOT_RUNNING, forward };
+  if (facts.findableItems > 0) {
+    const count = Math.floor(facts.findableItems).toLocaleString("en-US");
+    return { id: "first_items", title: "First items findable", status: "done", detail: `${count} ${facts.findableItems === 1 ? "item" : "items"} findable`, forward };
+  }
+  return { id: "first_items", title: "First items findable", status: "open", detail: "Starts by itself after your first source is read.", forward };
+}
+function buildSetupChecklist(facts) {
+  const drafts = [
+    installedStep(facts),
+    privateAnswersStep(facts),
+    judgeStep(facts),
+    sourcesStep(facts),
+    messagingStep(facts),
+    aiAppStep(facts),
+    firstItemsStep(facts)
+  ];
+  let nextTaken = false;
+  const steps = drafts.map(({ status, id, title, detail, forward, sources }) => {
+    let state;
+    if (status === "done")
+      state = "done";
+    else if (status === "skipped")
+      state = "skipped";
+    else if (!nextTaken) {
+      state = "next";
+      nextTaken = true;
+    } else
+      state = "todo";
+    return { id, title, state, detail, forward, ...sources ? { sources } : {} };
+  });
+  const applicable = steps.filter((step) => step.state !== "skipped");
+  const done = applicable.filter((step) => step.state === "done").length;
+  const next = steps.find((step) => step.state === "next");
+  return {
+    kind: "olympus_setup_status",
+    done,
+    total: applicable.length,
+    complete: next === undefined,
+    ...next ? { next: { id: next.id, title: next.title } } : {},
+    steps
+  };
+}
+function parseSetupChecklist(value) {
+  if (!value || typeof value !== "object")
+    return;
+  const record2 = value;
+  if (record2.kind !== "olympus_setup_status" || !Array.isArray(record2.steps))
+    return;
+  const steps = [];
+  for (const raw of record2.steps) {
+    if (!raw || typeof raw !== "object")
+      return;
+    const step = raw;
+    if (!SETUP_STEP_IDS.includes(step.id))
+      return;
+    if (!["done", "next", "todo", "skipped"].includes(step.state))
+      return;
+    if (typeof step.title !== "string" || typeof step.detail !== "string")
+      return;
+    const forward = parseForward(step.forward);
+    if (!forward)
+      return;
+    const sources = Array.isArray(step.sources) ? step.sources.flatMap((entry) => {
+      if (!entry || typeof entry !== "object")
+        return [];
+      const source = entry;
+      if (typeof source.id !== "string" || typeof source.name !== "string")
+        return [];
+      if (!["connected", "needs_you", "skipped"].includes(source.state))
+        return [];
+      return [{ id: setupSafeName(source.id, "source"), name: setupSafeName(source.name, "A source"), state: source.state }];
+    }) : undefined;
+    steps.push({
+      id: step.id,
+      title: setupSafeName(step.title, "Setup step"),
+      state: step.state,
+      detail: setupSafeName(step.detail, ""),
+      forward,
+      ...sources ? { sources } : {}
+    });
+  }
+  const applicable = steps.filter((step) => step.state !== "skipped");
+  const next = steps.find((step) => step.state === "next");
+  return {
+    kind: "olympus_setup_status",
+    done: applicable.filter((step) => step.state === "done").length,
+    total: applicable.length,
+    complete: next === undefined,
+    ...next ? { next: { id: next.id, title: next.title } } : {},
+    steps
+  };
+}
+function parseForward(value) {
+  if (!value || typeof value !== "object")
+    return;
+  const forward = value;
+  if (forward.kind === "command" && typeof forward.command === "string" && /^olympus [a-z][a-z -]*$/.test(forward.command)) {
+    return command(forward.command);
+  }
+  if (forward.kind === "owner" && typeof forward.link === "string" && Object.values(SETUP_DASHBOARD_LINKS).includes(forward.link) && (forward.reason === "privacy" || forward.reason === "access" || forward.reason === "spending")) {
+    return owner(forward.link, forward.reason);
+  }
+  return;
+}
+
+// src/core/setup-status.ts
+async function readSetupStatus(options = {}) {
+  const env = options.env ?? process.env;
+  let answer;
+  try {
+    answer = await callWorkerCli("setup-status", {}, { env, ...options.config ? { config: options.config } : {}, ...options.fetchImpl ? { fetchImpl: options.fetchImpl } : {} });
+  } catch (error) {
+    if (!(error instanceof WorkerUnreachableError))
+      throw error;
+    return buildSetupChecklist({ version: options.version ?? runningOlympusVersion(), running: false });
+  }
+  const checklist = parseSetupChecklist(answer);
+  if (!checklist) {
+    throw new OperationError("source_index_error", "The running Olympus answered setup status in a form this command does not read.", "Update Olympus so the command and the running engine match, then run olympus setup status again.");
+  }
+  return checklist;
+}
+
+// src/core/operations.ts
 var ARGUS_PROFILE_ENUM = [
   "default_chat",
   "source_answer",
@@ -34843,7 +35784,9 @@ var operations = [
       });
       const jobs = ctx.sourceAnswerJobs;
       const result = await (jobs ? runUnderCaller(jobs, ctx.signal, answer) : answer(ctx.signal));
-      return revalidateStdioSourceAnswer(ctx, result);
+      const released = await revalidateStdioSourceAnswer(ctx, result);
+      await noteLocalAgentAnswer({ caller: ctx.caller, email: ctx.email, original: result, released });
+      return released;
     }
   },
   {
@@ -34864,7 +35807,9 @@ var operations = [
       if (!jobs)
         throw sourceAnswerJobNotFound();
       const result = await jobs.registry.result(jobs.owner, jobId, jobs.clientSignal);
-      return revalidateStdioSourceAnswer(ctx, result);
+      const released = await revalidateStdioSourceAnswer(ctx, result);
+      await noteLocalAgentAnswer({ caller: ctx.caller, email: ctx.email, original: result, released });
+      return released;
     }
   },
   {
@@ -35089,6 +36034,19 @@ var operations = [
     nativeExposure: "always",
     cliHints: { name: "doctor" },
     handler: async (ctx) => runDoctor({ config: ctx.config, delphi: ctx.delphi, env: process.env, ocrProbe: ctx.doctorOcrProbe ?? (() => checkOcrReadiness()), hostProbe: ctx.doctorHostProbe ?? (() => defaultDoctorHostProbe(process.env, { insideOpenClaw: ctx.caller?.surface === "native" })) })
+  },
+  {
+    name: "olympus_setup_status",
+    description: [
+      "Read Olympus's setup checklist: each step (installed, Private answers, privacy judge, sources, chat choices, an AI app, first items findable) with its state (done, next, todo, skipped) and exactly one way forward.",
+      'A forward of kind "command" is an olympus command you may run yourself. A forward of kind "owner" is a dashboard link to give the owner: it needs their click because it changes what is private, who has access or what Olympus spends. After they click, call this again and carry on; do not ask what is on screen.',
+      "Read-only. Output contains names and states only, never item content, keys or tokens."
+    ].join(" "),
+    params: {},
+    mutating: false,
+    nativeExposure: "always",
+    cliHints: { name: "setup status" },
+    handler: async (ctx) => readSetupStatus({ config: ctx.config })
   },
   {
     name: "ask_anonymously",

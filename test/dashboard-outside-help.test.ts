@@ -294,6 +294,22 @@ describe('the card split between Settings › zkAPI and Privacy rules (#1047)', 
     await settle();
     expect(JSON.parse(posts[0]!.init.body!)).toEqual({ enabled: true, revision: 3, languages: ['en', 'pt-BR'], save_languages: true });
   });
+
+  test('after Save languages the redrawn card says it was saved, in the open Languages section', async () => {
+    const browser: Record<string, unknown> = {};
+    const first = runCardScript(render('privacy'), () => ({ status: 200, body: { ok: true, status_message: 'Languages saved.', revision: 4 } }), browser);
+    first.document.addEventListener(DASHBOARD_REDRAW_EVENT, (event) => { event.preventDefault(); });
+    const form = first.document.querySelector('[data-outside-section="languages"] form[data-outside-form="enable"]')!;
+    form.dispatchEvent(Object.assign(new first.window.Event('submit', { cancelable: true }), { submitter: form.querySelector('button') }));
+    await first.settle();
+    first.timers.shift()!();
+    await first.settle();
+    // The dashboard swaps in the fresh card: without the confirmation it would look exactly as before the press.
+    const second = runCardScript(render('privacy'), () => ({ status: 500, body: {} }), browser);
+    const again = second.document.querySelector('[data-outside-section="languages"] form[data-outside-form="enable"]')!;
+    expect(again.querySelector('[data-action-message]')!.textContent).toBe('Languages saved.');
+    expect((again.closest('details') as unknown as { open: boolean }).open).toBe(true);
+  });
 });
 
 describe('the Outside help page: states and copy', () => {

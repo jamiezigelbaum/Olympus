@@ -96,10 +96,10 @@ async function page(items: Item[], options: { narrow?: boolean; refuse?: boolean
 }
 
 describe('the Privacy tabs', () => {
-  test('Your items is the third tab, after Private questions and Privacy rules', () => {
+  test('Your items is the third tab, after Private questions and Privacy rules and before What AI apps received', () => {
     const html = render({});
     const tabs = [...html.matchAll(/<a class="ptab[^"]*"[^>]*>([^<]+)<\/a>/g)].map((match) => match[1]);
-    expect(tabs).toEqual(['Private questions', 'Privacy rules', C.tab]);
+    expect(tabs).toEqual(['Private questions', 'Privacy rules', C.tab, 'What AI apps received']);
     expect(html).toContain('class="ptab on" aria-current="page" href="/dashboard?privacy-items"');
   });
 

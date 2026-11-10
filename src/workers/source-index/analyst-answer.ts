@@ -2454,6 +2454,7 @@ function evidenceFromCitations(
       trust_domain: candidate.trustDomain,
       family: item.family,
       provider: item.provider,
+      ...(item.accountScope ? { account_scope: item.accountScope } : {}),
       provider_item_id: item.providerItemId,
       ...(item.providerThreadId ? { provider_thread_id: item.providerThreadId } : {}),
       ...(item.providerConversationId ? { provider_conversation_id: item.providerConversationId } : {}),
@@ -2554,6 +2555,7 @@ function appendUnreadableMatchedEvidence(
       trust_domain: candidate.trustDomain,
       family: item.family,
       provider: item.provider,
+      ...(item.accountScope ? { account_scope: item.accountScope } : {}),
       provider_item_id: item.providerItemId,
       ...(item.providerThreadId ? { provider_thread_id: item.providerThreadId } : {}),
       ...(item.providerConversationId ? { provider_conversation_id: item.providerConversationId } : {}),
@@ -2826,7 +2828,12 @@ export async function searchReleasedEvidence(input: {
       trust_domain: candidate.trustDomain,
       family: item.family,
       provider: item.provider,
+      ...(item.accountScope ? { account_scope: item.accountScope } : {}),
       provider_item_id: item.providerItemId,
+      // The same identity the release manifest names (a chat message's
+      // conversation included), so the owner's list of what each AI app
+      // received can point at exactly this item (core/app-release-capture.ts).
+      ...(item.providerConversationId ? { provider_conversation_id: item.providerConversationId } : {}),
       ...(cite?.title ? { title: cite.title } : {}),
       ...(cite?.sourceLabel ? { source_label: cite.sourceLabel } : {}),
       ...(cite?.uri ? { uri: cite.uri } : {}),
