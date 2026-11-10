@@ -100534,6 +100534,22 @@ class LocalSourceSchedulerStateStore {
       `).run(key2.sourceId, key2.corpusId, key2.taskId, SOURCE_SCHEDULER_TASK_STATE_VERSION, completedAt, notBeforeAt, errorKind, errorHash, countsJson, warningsJson, effectiveIntervalMs, degradedReason, completedAt, effectiveIntervalSupplied ? 1 : 0, degradedReasonSupplied ? 1 : 0);
     });
   }
+  recordInterruption(input) {
+    const key2 = requireStateKey(input);
+    const interruptedAt = requireTimestamp2(input.interruptedAt, "interruptedAt");
+    return this.writeCurrentVersion(key2, () => {
+      this.db.query(`
+        INSERT INTO source_scheduler_task_state (
+          source_id, corpus_id, task_id, state_version,
+          not_before_at, attempt_in_progress, consecutive_failures, updated_at
+        ) VALUES (?, ?, ?, ?, ?, 0, 0, ?)
+        ON CONFLICT(source_id, corpus_id, task_id) DO UPDATE SET
+          not_before_at = excluded.not_before_at,
+          attempt_in_progress = 0,
+          updated_at = excluded.updated_at
+      `).run(key2.sourceId, key2.corpusId, key2.taskId, SOURCE_SCHEDULER_TASK_STATE_VERSION, interruptedAt, interruptedAt);
+    });
+  }
   writeCurrentVersion(key2, write) {
     return this.db.transaction(() => {
       const existing = this.db.query(`
@@ -177013,6 +177029,7 @@ class SourceScheduler {
   lastAfterTickAt;
   afterTickTimer;
   timer;
+  stops = 0;
   fastWakeTimers = new Map;
   continueAfterMs;
   setTimeoutImpl;
@@ -177083,6 +177100,7 @@ class SourceScheduler {
     this.runDueTasks();
   }
   stop() {
+    this.stops += 1;
     this.closeChangeSubscriptions(() => true);
     if (this.timer) {
       this.clearIntervalImpl(this.timer);
@@ -177409,6 +177427,7 @@ class SourceScheduler {
     const cadenceAnchor = state.nextRunAt;
     const attemptedAt = this.now().toISOString();
     state.lastAttemptAt = attemptedAt;
+    const stopsAtStart = this.stops;
     try {
       if (this.stateStore) {
         if (state.pendingUnpark && this.stateStore.claimUnparkAttempt) {
@@ -177439,7 +177458,7 @@ class SourceScheduler {
           }));
         }
       }
-      const result = await this.runWithTransientRetries(state, runningTask, attemptedAt, provenance);
+      const result = await this.runWithTransientRetries(state, runningTask, attemptedAt, provenance, stopsAtStart);
       const completedAt = this.now().toISOString();
       const zeroChangeRuns = nextZeroChangeRuns(state.lastResult?.counts, result.counts);
       const normalizedResult = normalizeTaskResult(zeroChangeRuns === undefined ? result : { ...result, counts: { ...result.counts, zero_change_runs: zeroChangeRuns } });
@@ -177508,6 +177527,10 @@ class SourceScheduler {
         this.wakeDownstream(state, continueAt);
     } catch (error2) {
       delete state.wakeAfterRun;
+      if (this.stops !== stopsAtStart) {
+        this.recordShutdownInterruption(state);
+        return;
+      }
       const message2 = error2 instanceof Error ? error2.message : String(error2);
       const errorKind2 = safeSchedulerErrorKind(error2);
       const errorHash = hash(message2);
@@ -177540,6 +177563,21 @@ class SourceScheduler {
       console.error(`[olympus:source-scheduler] task_failed source_id=${state.source.sourceId} task_id=${state.task.id} error_kind=${errorKind2} retry_at=${notBeforeAt} degraded_reason=${retryAt?.degradedReason ?? "none"} error_hash=${errorHash}${untypedFailureMessage(errorKind2, error2)}`);
     }
   }
+  recordShutdownInterruption(state) {
+    const interruptedAt = this.now().toISOString();
+    if (this.stateStore?.recordInterruption) {
+      try {
+        this.applyPersistedState(state, this.stateStore.recordInterruption({
+          ...schedulerTaskStateKey(state.source, state.task),
+          interruptedAt
+        }));
+      } catch (stateError) {
+        console.error(`[olympus:source-scheduler] state_persist_failed source_id=${state.source.sourceId} task_id=${state.task.id} error_kind=${safeSchedulerErrorKind(stateError)}`);
+      }
+    }
+    state.nextRunAt = Date.parse(interruptedAt);
+    console.info(`[olympus:source-scheduler] task_interrupted_by_shutdown source_id=${state.source.sourceId} task_id=${state.task.id}`);
+  }
   applyPendingUnparks(dueAt) {
     if (!this.stateStore?.pendingUnparks)
       return;
@@ -177557,7 +177595,7 @@ ${request.taskId}`);
       state.nextRunAt = Math.min(state.nextRunAt, dueAt);
     }
   }
-  async runWithTransientRetries(state, task, attemptedAt, provenance) {
+  async runWithTransientRetries(state, task, attemptedAt, provenance, stopsAtStart) {
     let lastError;
     for (let attempt = 1;attempt <= this.maxTransientRetries; attempt += 1) {
       try {
@@ -177575,7 +177613,11 @@ ${request.taskId}`);
         lastError = error2;
         if (safeSchedulerRetryAt(error2) || !isTransientError(error2) || attempt >= this.maxTransientRetries)
           break;
+        if (this.stops !== stopsAtStart)
+          break;
         await this.sleep(this.errorBackoffMs);
+        if (this.stops !== stopsAtStart)
+          break;
       }
     }
     throw lastError;
