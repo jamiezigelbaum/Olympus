@@ -71665,6 +71665,7 @@ init_source_registry();
 init_source_storage();
 init_mail_source_scope();
 init_local_index();
+init_file_scope_sources();
 init_tier_ledger();
 init_tier_ledger_path();
 
