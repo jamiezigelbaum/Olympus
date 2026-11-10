@@ -456,7 +456,20 @@ export interface EvalRetrievalAudit {
    * whose item id the seat holds, in whichever store, so a copy left in
    * another store is told apart from the copy the question expects.
    */
-  packCandidateSources: Array<{ corpusId: string; trustDomain: string; expectedItem?: number }>;
+  packCandidateSources: Array<{
+    corpusId: string;
+    trustDomain: string;
+    expectedItem?: number;
+    /**
+     * On a seat holding an expected item: the 0-based chunk of the item the
+     * winning lane matched, when it names one. Passage selection starts from
+     * it, so a summary question can seat the right item with a chunk that
+     * lacks the asked-for value.
+     */
+    anchorChunkIndex?: number;
+    /** On a seat holding an expected item: characters of the item the pack carries. */
+    packChars?: number;
+  }>;
   lanes: Array<{
     laneName: string;
     laneType: string;
@@ -492,7 +505,11 @@ export function evalRetrievalAudit(
       return {
         corpusId: detail.candidateCorpusIds[index] ?? 'unknown',
         trustDomain: candidate.trustDomain,
-        ...(expectedIndex >= 0 ? { expectedItem: expectedIndex + 1 } : {}),
+        ...(expectedIndex >= 0 ? {
+          expectedItem: expectedIndex + 1,
+          ...(candidate.provenance.chunk?.chunkIndex !== undefined ? { anchorChunkIndex: candidate.provenance.chunk.chunkIndex } : {}),
+          packChars: candidate.chunks.reduce((sum, chunk) => sum + chunk.length, 0),
+        } : {}),
       };
     }),
     lanes: detail.laneAudits.map((lane) => ({

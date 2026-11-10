@@ -94,7 +94,13 @@ describe('the real eval report says why a pack is empty (#1233)', () => {
     const marked = evalRetrievalAudit(detail, {
       expectedEvidence: [{ corpusId: DROPBOX_TIER_CORPUS_IDS.secure_local!, providerItemId: 'k1', hint: 'the invoice' }],
     });
-    expect(marked.packCandidateSources[0]).toEqual({ corpusId: DROPBOX_TIER_CORPUS_IDS.internal!, trustDomain: 'internal', expectedItem: 1 });
+    // A seat holding an expected item also says which of the item's chunks
+    // the lane matched (0-based) and how many characters of it the pack
+    // carries, so a seat with the right item but the wrong passage shows.
+    expect(marked.packCandidateSources[0]).toEqual({
+      corpusId: DROPBOX_TIER_CORPUS_IDS.internal!, trustDomain: 'internal', expectedItem: 1,
+      anchorChunkIndex: 0, packChars: 'The Kestrel boatyard invoice total is 4182 dollars, due in March.'.length,
+    });
     expect(marked.packCandidateSources.slice(1).every((seat) => seat.expectedItem === undefined)).toBe(true);
 
     const empty = evalRetrievalAudit(await buildEvalPack({
