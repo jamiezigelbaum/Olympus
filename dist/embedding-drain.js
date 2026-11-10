@@ -45711,12 +45711,312 @@ var init_linux_desktop_opener = __esm(() => {
   }
 });
 
+// src/core/open-targets.ts
+function allOpenTargets() {
+  return [
+    { kind: "dashboard" },
+    { kind: "private_answers" },
+    ...Object.keys(OPEN_CONNECT_SOURCES).map((source) => ({ kind: "connect", source })),
+    ...OPEN_FIX_SECTIONS.map((section) => ({ kind: "fix", section })),
+    ...Object.keys(OPEN_UNREADABLE_SOURCES).map((source) => ({ kind: "unreadable", source })),
+    { kind: "archives" }
+  ];
+}
+function openTargetToken(target) {
+  if (target.kind === "private_answers")
+    return target.answerId ? `page.private.${target.answerId}` : "page.private";
+  if (target.kind === "connect")
+    return `connect.${target.source}`;
+  if (target.kind === "fix")
+    return `fix.${target.section}`;
+  if (target.kind === "unreadable")
+    return `unreadable.${target.source}`;
+  if (target.kind === "archives")
+    return "archives";
+  return;
+}
+function openTargetTokenPattern() {
+  const tokens = allOpenTargets().map(openTargetToken).filter((token) => token !== undefined);
+  return `^(?:page\\.private\\.[A-Za-z0-9_-]{22}|${tokens.map((token) => token.replace(".", "\\.")).join("|")})$`;
+}
+function isConnectOpenTarget(target) {
+  return target.kind === "connect";
+}
+function isKeysOpenTarget(target) {
+  return target.kind === "fix" && (target.section === "models" || target.section === "answers" || target.section === "search");
+}
+function tokenPattern(filter) {
+  const tokens = allOpenTargets().filter(filter).map(openTargetToken).filter((token) => token !== undefined);
+  return `^(?:${tokens.map((token) => token.replace(".", "\\.")).join("|")})$`;
+}
+function keysOpenTargetTokenPattern() {
+  return tokenPattern(isKeysOpenTarget);
+}
+function connectOpenTargetTokenPattern() {
+  return tokenPattern(isConnectOpenTarget);
+}
+function privateAnswersOpenTargetTokenPattern() {
+  return "^page\\.private(?:\\.[A-Za-z0-9_-]{22})?$";
+}
+function isPanelOpenTarget(target) {
+  return target.kind === "unreadable" || target.kind === "archives";
+}
+function panelOpenTargetTokenPattern() {
+  const tokens = allOpenTargets().filter(isPanelOpenTarget).map(openTargetToken).filter((token) => token !== undefined);
+  return `^(?:${tokens.map((token) => token.replace(".", "\\.")).join("|")})$`;
+}
+var OPEN_CONNECT_SOURCES, OPEN_FIX_SECTIONS, OPEN_UNREADABLE_SOURCES, DASHBOARD_OPEN_FRAGMENT_KEY = "olympus-open", DASHBOARD_ALL_SOURCES_ID = "all.sources", DASHBOARD_PRIVACY_LANDING_ID = "privacy.settings", DASHBOARD_LAUNCH_OPEN_KEY = "olympus_open";
+var init_open_targets = __esm(() => {
+  OPEN_CONNECT_SOURCES = {
+    x: { sourceId: "x.bookmarks", label: "X bookmarks" },
+    readwise: { sourceId: "readwise.library", label: "Readwise" },
+    telegram: { sourceId: "telegram.messages", label: "Telegram" },
+    whatsapp: { sourceId: "whatsapp.personal.messages", label: "WhatsApp" },
+    evernote: { sourceId: "evernote.notes", label: "Evernote" }
+  };
+  OPEN_FIX_SECTIONS = ["connect", "reconnect", "answers", "search", "models"];
+  OPEN_UNREADABLE_SOURCES = {
+    dropbox: { sourceId: "dropbox.files", label: "Dropbox" },
+    drive: { sourceId: "google_drive.docs", label: "Google Drive" },
+    whatsapp: { sourceId: "whatsapp.personal.messages", label: "WhatsApp" }
+  };
+});
+
+// src/core/dashboard-launch.ts
+import { createHash as createHash25, randomBytes as randomBytes4 } from "node:crypto";
+
+class DashboardLaunchTickets {
+  tickets = new Map;
+  now;
+  maxTickets;
+  constructor(options = {}) {
+    this.now = options.now ?? Date.now;
+    this.maxTickets = options.maxTickets ?? DASHBOARD_LAUNCH_MAX_TICKETS;
+    if (!Number.isInteger(this.maxTickets) || this.maxTickets < 1 || this.maxTickets > 1024) {
+      throw new Error("Dashboard launch capacity must be an integer from 1 to 1024.");
+    }
+  }
+  mint(origin, options = {}) {
+    const nowMs = this.now();
+    this.prune(nowMs);
+    if (options.remote === true) {
+      for (const [ticket2, record] of this.tickets) {
+        if (record.remote)
+          this.tickets.delete(ticket2);
+      }
+    }
+    const ttlSeconds = options.remote === true ? DASHBOARD_REMOTE_LAUNCH_TICKET_TTL_SECONDS : DASHBOARD_LAUNCH_TICKET_TTL_SECONDS;
+    const expiresAtMs = nowMs + ttlSeconds * 1000;
+    const ticket = randomBytes4(32).toString("base64url");
+    this.tickets.set(ticket, {
+      expiresAtMs,
+      originTag: dashboardLaunchOriginTag(origin),
+      ...options.remote === true ? { remote: true } : {}
+    });
+    while (this.tickets.size > this.maxTickets) {
+      const oldest = this.tickets.keys().next();
+      if (oldest.done)
+        break;
+      this.tickets.delete(oldest.value);
+    }
+    return ticket;
+  }
+  consume(ticket, origin) {
+    if (!isWellFormedDashboardLaunchTicket(ticket))
+      return { status: "unknown" };
+    const record = this.tickets.get(ticket);
+    if (!record)
+      return { status: "unknown" };
+    if (typeof origin !== "string" || dashboardLaunchOriginTag(origin) !== record.originTag) {
+      return { status: "origin_mismatch" };
+    }
+    this.tickets.delete(ticket);
+    if (record.expiresAtMs <= this.now())
+      return { status: "expired" };
+    return { status: "ok", ticket };
+  }
+  get size() {
+    return this.tickets.size;
+  }
+  prune(nowMs) {
+    for (const [ticket, record] of this.tickets) {
+      if (record.expiresAtMs <= nowMs)
+        this.tickets.delete(ticket);
+    }
+  }
+}
+function dashboardLaunchOriginTag(origin) {
+  return createHash25("sha256").update("olympus-dashboard-launch-origin-v1\x00").update(origin).digest("base64url").slice(0, 43);
+}
+function isWellFormedDashboardLaunchTicket(value) {
+  return typeof value === "string" && /^[A-Za-z0-9_-]{43}$/.test(value);
+}
+var DASHBOARD_LAUNCH_TICKET_FRAGMENT_KEY = "olympus_launch_ticket", DASHBOARD_LAUNCH_TICKET_TTL_SECONDS = 900, DASHBOARD_LAUNCH_MAX_TICKETS = 32, DASHBOARD_REMOTE_LAUNCH_TICKET_TTL_SECONDS = 120, DASHBOARD_UNLOCK_STORAGE_KEY = "olympus-dashboard-unlock-v1", DASHBOARD_UNLOCK_HEADER = "X-Olympus-Dashboard-Unlock", DASHBOARD_UNLOCK_SHELL_HEADER = "X-Olympus-Dashboard-Shell", DASHBOARD_LAUNCH_PAGE_HTML, DASHBOARD_UNLOCK_SHELL_HTML;
+var init_dashboard_launch = __esm(() => {
+  init_open_targets();
+  DASHBOARD_LAUNCH_PAGE_HTML = `<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="referrer" content="no-referrer">
+    <title>Olympus</title>
+    <style>
+      body { margin: 0; padding: 3rem 1.5rem; font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Noto Sans", Ubuntu, Cantarell, "Liberation Sans", "DejaVu Sans", "Helvetica Neue", Arial, system-ui, sans-serif; color: #e8e6e3; background: #16151a; }
+      main { max-width: 32rem; margin: 0 auto; }
+      h1 { font-size: 1.05rem; font-weight: 600; margin: 0 0 .5rem; }
+      p { margin: 0; color: #a9a4ae; }
+      a { color: #cfc7ff; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1 id="status">Opening Olympus…</h1>
+      <p id="detail">If this does not continue, <a href="/dashboard">open the dashboard</a>.</p>
+    </main>
+    <script>
+      (function () {
+        var KEY = '${DASHBOARD_LAUNCH_TICKET_FRAGMENT_KEY}';
+        var OPEN = /${openTargetTokenPattern()}/;
+        var KEYS = /${keysOpenTargetTokenPattern()}/;
+        var CONNECT = /${connectOpenTargetTokenPattern()}/;
+        var PANEL = /${panelOpenTargetTokenPattern()}/;
+        var PRIVATE = /${privateAnswersOpenTargetTokenPattern()}/;
+        var status = document.getElementById('status');
+        var open = '';
+        function take() {
+          var hash = window.location.hash.slice(1);
+          // Clear even malformed fragments before parsing or making a request.
+          try { window.history.replaceState(null, '', window.location.pathname + window.location.search); }
+          catch (e) { return ''; }
+          var params = new URLSearchParams(hash);
+          // Where to land: one of a closed list, or the plain dashboard.
+          var wanted = params.get('${DASHBOARD_LAUNCH_OPEN_KEY}') || '';
+          if (OPEN.test(wanted)) open = wanted;
+          return params.get(KEY) || '';
+        }
+        var ticket = take();
+        if (!ticket) {
+          // A reload of this page after its ticket was taken: the dashboard has the session, or the way back in.
+          window.location.replace('/dashboard');
+          return;
+        }
+        fetch('/dashboard/control/launch/redeem', {
+          method: 'POST',
+          credentials: 'same-origin',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ticket: ticket })
+        }).then(function (response) {
+          if (!response.ok) return response;
+          // This browser's key for later plain navigations (#1187): kept per origin, so per port.
+          return response.json().then(function (body) {
+            try {
+              if (body && typeof body.unlock_key === 'string') window.localStorage.setItem('${DASHBOARD_UNLOCK_STORAGE_KEY}', body.unlock_key);
+            } catch (e) {}
+            return response;
+          }, function () { return response; });
+        }).then(function (response) {
+          // A link already used or expired (a reload, a second open) still
+          // lands on the dashboard: the session it opened is in its cookie,
+          // and without one the dashboard itself offers the way back in.
+          if (response.ok || response.status === 403) {
+            // Connect lands on Connect a source, where the computer's setup sheets live; a
+            // model fix lands on Privacy settings (?keys), where the models live. Each only
+            // opens something there, never submits anything.
+            // A panel target (See why on one source) lands on the dashboard there.
+            // Private answers lands on that page, carrying nothing.
+            // Everything else (a reconnect, the dashboard itself) lands on the dashboard.
+            window.location.replace(CONNECT.test(open)
+              ? '/dashboard?connect#${DASHBOARD_OPEN_FRAGMENT_KEY}=' + open
+              : KEYS.test(open) ? '/dashboard?keys#${DASHBOARD_OPEN_FRAGMENT_KEY}=' + open
+              : PANEL.test(open) ? '/dashboard#${DASHBOARD_OPEN_FRAGMENT_KEY}=' + open
+              : PRIVATE.test(open) ? '/dashboard?private-answers' + (open.indexOf('page.private.') === 0 ? '#' + open.slice(13) : '') : '/dashboard');
+            return;
+          }
+          // Anything else: the dashboard is the way in (its session, or how to get one).
+          window.location.replace('/dashboard');
+        }).catch(function () {
+          status.textContent = 'Opening failed.';
+        });
+      }());
+    </script>
+  </body>
+</html>
+`;
+  DASHBOARD_UNLOCK_SHELL_HTML = `<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="referrer" content="no-referrer">
+    <title>Olympus</title>
+    <style>
+      body { margin: 0; padding: 3rem 1.5rem; font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Noto Sans", Ubuntu, Cantarell, "Liberation Sans", "DejaVu Sans", "Helvetica Neue", Arial, system-ui, sans-serif; color: #e8e6e3; background: #16151a; }
+      main { max-width: 32rem; margin: 0 auto; }
+      h1 { font-size: 1.05rem; font-weight: 600; margin: 0 0 .5rem; }
+      p { margin: 0; color: #a9a4ae; }
+      code { color: #e8e6e3; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1 id="status">Opening Olympus…</h1>
+      <p id="detail"></p>
+    </main>
+    <script>
+      (function () {
+        var KEY = '${DASHBOARD_UNLOCK_STORAGE_KEY}';
+        var SHELL = '${DASHBOARD_UNLOCK_SHELL_HEADER}';
+        var HEADER = '${DASHBOARD_UNLOCK_HEADER}';
+        var status = document.getElementById('status');
+        var detail = document.getElementById('detail');
+        function locked() {
+          try { window.localStorage.removeItem(KEY); } catch (e) {}
+          status.textContent = 'Dashboard controls are locked';
+          detail.textContent = 'Run ';
+          var command = document.createElement('code');
+          command.textContent = 'olympus dashboard';
+          detail.appendChild(command);
+          detail.appendChild(document.createTextNode(' in a terminal on this computer to open it again.'));
+        }
+        function failed() {
+          status.textContent = 'Opening failed.';
+          detail.textContent = 'Reload this page to try again.';
+        }
+        var key = '';
+        try { key = window.localStorage.getItem(KEY) || ''; } catch (e) {}
+        if (!key) { locked(); return; }
+        var headers = {};
+        headers[HEADER] = key;
+        fetch(window.location.href, {
+          cache: 'no-store',
+          credentials: 'same-origin',
+          headers: headers
+        }).then(function (response) {
+          // A page that moved: go there, and its own navigation proves itself the same way.
+          if (response.redirected) { window.location.replace(response.url); return; }
+          if (response.headers.get(SHELL) || response.status === 401 || response.status === 403) { locked(); return; }
+          var type = response.headers.get('Content-Type') || '';
+          if (!response.ok || type.indexOf('text/html') !== 0) { failed(); return; }
+          return response.text().then(function (html) {
+            document.open();
+            document.write(html);
+            document.close();
+          });
+        }).catch(failed);
+      }());
+    </script>
+  </body>
+</html>
+`;
+});
+
 // src/core/linux-owner-bridge.ts
-import { createHmac, createHash as createHash25, randomBytes as randomBytes4, timingSafeEqual } from "node:crypto";
+import { createHmac, createHash as createHash26, randomBytes as randomBytes5, timingSafeEqual } from "node:crypto";
 import { closeSync as closeSync12, openSync as openSync12, writeFileSync as writeFileSync5, unlinkSync } from "node:fs";
 import { dirname as dirname35, join as join34 } from "node:path";
 function randomOwnerHostname() {
-  const bytes = randomBytes4(16);
+  const bytes = randomBytes5(16);
   const alphabet = "abcdefghijklmnopqrstuvwxyz234567";
   let bits2 = 0, value = 0, text3 = "";
   for (const byte of bytes) {
@@ -45733,7 +46033,7 @@ function randomOwnerHostname() {
 }
 function matchCode() {
   const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
-  const [a, b, c, d, e, f] = [...randomBytes4(6)].map((byte) => alphabet[byte & 31]);
+  const [a, b, c, d, e, f] = [...randomBytes5(6)].map((byte) => alphabet[byte & 31]);
   return `${a}${b}${c}-${d}${e}${f}`;
 }
 function equal(a, b) {
@@ -45772,7 +46072,7 @@ function safeTarget(value) {
   return typeof value === "string" && value.length <= 16384 && value.startsWith("/") && !value.startsWith("//") && !/[\\\x00-\x20\x7f]/.test(value) && !value.startsWith("/owner-") && !value.startsWith(DESKTOP_OWNER_OPEN_PATH);
 }
 function documentPolicy(policy) {
-  const hash = "'sha256-" + createHash25("sha256").update(BOOTSTRAP.slice(8, -9)).digest("base64") + "'";
+  const hash = "'sha256-" + createHash26("sha256").update(BOOTSTRAP.slice(8, -9)).digest("base64") + "'";
   const directives = (policy ?? CSP).split(";").map((s) => s.trim()).filter(Boolean);
   const needsHash = (list) => !list.includes("'unsafe-inline'") || /'(sha256|sha384|sha512|nonce)-/.test(list);
   const withHash = (list) => ["script-src", ...list.split(/\s+/).filter((s) => s && s !== "'none'"), hash].join(" ");
@@ -45814,7 +46114,7 @@ function confirmation() {
   claiming=true;
   try{const r=await fetch('/owner-claim',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({claim})});
    if(r.status===202||r.status===503)return;
-   if(r.ok){const result=await r.json();localStorage.setItem(key,result.proof);await resume();return;}
+   if(r.ok){const result=await r.json();localStorage.setItem(key,result.proof);if(result.unlock)localStorage.setItem(${JSON.stringify(DASHBOARD_UNLOCK_STORAGE_KEY)},result.unlock);await resume();return;}
    const declined=r.headers.has(${JSON.stringify(DECLINED_HEADER)});stopWaiting();
    message.textContent=declined?"The Olympus window said this wasn't you. Press Confirm it's you to try again.":"This confirmation expired or was replaced. Press Confirm it's you to try again.";
   }catch{}finally{claiming=false;}
@@ -45871,7 +46171,7 @@ function approve(request,proof){return new Promise(function(done){
  const ticket=location.hash.slice(1);history.replaceState(null,'',location.pathname);
  if(!ticket){document.getElementById('message').textContent='Open Olympus from the desktop command, or confirm from the requesting page.';return;}
  try{let r;do{r=await fetch('/owner-proof',{method:'POST',redirect:'error',headers:{'Content-Type':'application/json'},body:JSON.stringify({ticket})});if(r.status===503&&r.headers.has('Retry-After')){document.getElementById('message').textContent=${restartWordsScript("r")};await new Promise(resolve=>setTimeout(resolve,1000));}else break;}while(true);
- if(!r.ok)throw new Error();const result=await r.json();localStorage.setItem(${JSON.stringify(STORAGE)},result.proof);
+ if(!r.ok)throw new Error();const result=await r.json();localStorage.setItem(${JSON.stringify(STORAGE)},result.proof);if(result.unlock)localStorage.setItem(${JSON.stringify(DASHBOARD_UNLOCK_STORAGE_KEY)},result.unlock);
  if(result.approval)await approve(result.approval,result.proof);
  // Render the requested document in this window. The proof stays at this
  // origin. The bridge header policy and worker meta policy constrain this view;
@@ -45886,6 +46186,9 @@ function approve(request,proof){return new Promise(function(done){
 })();</script>`);
   response.headers.set("Access-Control-Allow-Origin", "*");
   return response;
+}
+function established(result) {
+  return Array.isArray(result) ? { cookies: result } : result;
 }
 function equalHash(value, hash) {
   return typeof value === "string" && /^[A-Za-z0-9_-]{43}$/.test(value) && timingSafeEqual(Buffer.from(hashSecret(value), "hex"), Buffer.from(hash, "hex"));
@@ -45963,7 +46266,7 @@ class LinuxOwnerBridge {
       this.clearTicket(previous);
     const value = secret(), challenge = secret();
     const answer = createHmac("sha256", value).update(challenge).digest("base64url");
-    const path = join34(dirname35(this.options.socketPath), `owner-ticket-${randomBytes4(16).toString("hex")}.html`);
+    const path = join34(dirname35(this.options.socketPath), `owner-ticket-${randomBytes5(16).toString("hex")}.html`);
     const url = `${this.origin}/owner-proof#${value}`;
     const html2 = `<!doctype html><meta charset="utf-8"><meta name="referrer" content="no-referrer"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src ${this.origin}; worker-src 'none'; base-uri 'none'"><title>Olympus</title>${openingView()}<script>
 (async function(){
@@ -46008,17 +46311,17 @@ class LinuxOwnerBridge {
     const session = this.cookieSession(request);
     return !!session && equalHash(request.headers.get(PROOF_HEADER), session.proofHash);
   }
-  grantSession(dashboardCookies, extra) {
+  grantSession(dashboard, extra) {
     const cookie = secret(), proof = secret();
     const session = { cookieHash: hashSecret(cookie), proofHash: hashSecret(proof), expires: this.now() + SESSION_MS };
     this.sessions = [...this.sessions.filter((s) => s.expires > this.now()).slice(-14), session];
-    const response = Response.json({ proof, ...extra }, { headers: {
+    const response = Response.json({ proof, ...dashboard.unlockKey ? { unlock: dashboard.unlockKey } : {}, ...extra }, { headers: {
       "Set-Cookie": `${COOKIE}=${cookie}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${SESSION_MS / 1000}`,
       "Cache-Control": "no-store",
       "Clear-Site-Data": '"cache"',
       "Content-Security-Policy": CSP
     } });
-    for (const cookie2 of dashboardCookies)
+    for (const cookie2 of dashboard.cookies)
       response.headers.append("Set-Cookie", cookie2);
     return response;
   }
@@ -46077,18 +46380,18 @@ class LinuxOwnerBridge {
         unlinkSync(ticket.path);
       } catch {}
       const current2 = () => [...this.tickets.values()].includes(ticket) && ticket.expires > this.now();
-      let dashboardCookies;
+      let dashboard;
       try {
         if (this.options.workerReady?.() === false)
           throw new Error("Worker ownership changed.");
-        const result = this.options.establishDashboard ? await this.options.establishDashboard() : [];
+        const result = this.options.establishDashboard ? await this.options.establishDashboard() : { cookies: [] };
         if (this.options.workerReady?.() === false)
           throw new Error("Worker ownership changed.");
         if (result === null) {
           this.clearTicket(ticket);
           return refusal();
         }
-        dashboardCookies = result;
+        dashboard = established(result);
       } catch {
         if (this.live() && current2()) {
           ticket.claimed = false;
@@ -46106,7 +46409,7 @@ class LinuxOwnerBridge {
       const asking = claim?.ticket === ticket && claim.state === "waiting" && claim.expires > this.now();
       if (asking)
         claim.state = "asked";
-      return this.grantSession(dashboardCookies, { target: ticket.target, ...asking ? { approval: { id: claim.approvalId, code: claim.code } } : {} });
+      return this.grantSession(dashboard, { target: ticket.target, ...asking ? { approval: { id: claim.approvalId, code: claim.code } } : {} });
     }
     if (url.pathname === "/owner-claim" && request.method === "POST") {
       let body2;
@@ -46130,11 +46433,11 @@ class LinuxOwnerBridge {
         return restarting(this.options.workerConflict?.());
       claim.collecting = true;
       const current2 = () => this.claim?.record === claim && claim.expires > this.now();
-      let dashboardCookies;
+      let dashboard;
       try {
         if (this.options.workerReady?.() === false)
           throw new Error("Worker ownership changed.");
-        const result = this.options.establishDashboard ? await this.options.establishDashboard() : [];
+        const result = this.options.establishDashboard ? await this.options.establishDashboard() : { cookies: [] };
         if (this.options.workerReady?.() === false)
           throw new Error("Worker ownership changed.");
         if (result === null) {
@@ -46142,7 +46445,7 @@ class LinuxOwnerBridge {
             this.claim = undefined;
           return refusal();
         }
-        dashboardCookies = result;
+        dashboard = established(result);
       } catch {
         if (this.live() && current2()) {
           claim.collecting = false;
@@ -46153,7 +46456,7 @@ class LinuxOwnerBridge {
       if (!this.live() || !current2())
         return refusal(503);
       this.claim = undefined;
-      return this.grantSession(dashboardCookies, {});
+      return this.grantSession(dashboard, {});
     }
     if (url.pathname === "/owner-approve" && request.method === "POST") {
       let body2;
@@ -46284,11 +46587,12 @@ class LinuxOwnerBridge {
     return new Response(response.body, { status: location ? 303 : response.status, headers: outgoing });
   }
 }
-var COOKIE = "olympus_desktop_owner", PROOF_HEADER = "X-Olympus-Owner-Proof", FORM_PROOF = "_olympus_owner_proof", STORAGE = "olympus-desktop-owner-v1", TICKET_MS = 60000, CLAIM_HEADER = "X-Olympus-Owner-Claim", CODE_HEADER = "X-Olympus-Owner-Code", APPROVAL_HEADER = "X-Olympus-Owner-Approval", DECLINED_HEADER = "X-Olympus-Owner-Declined", WAIT_STORAGE = "olympus-desktop-owner-wait-v1", CLAIM_MS, SESSION_MS, DESKTOP_OWNER_OPEN_PATH = "/desktop-owner/open", DESKTOP_BRIDGE_REMEDY = "Use the owner-authenticated SSH socket forward on a trusted browser computer. Never substitute the fixed entry origin for the session origin.", CSP = "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; frame-src 'self'; frame-ancestors 'none'; object-src 'none'; base-uri 'none'; worker-src 'none'", secret = () => randomBytes4(32).toString("base64url"), WORKER_CONFLICT_HEADER = "X-Olympus-Worker-Conflict", restartWords = (conflict) => conflict === "retained_socket" ? "A stopped Olympus worker left its socket behind. Run olympus worker uninstall, then olympus engine restart to safely clear the retained socket." : conflict === "data" || conflict === "endpoint" ? `Olympus cannot start because another process owns its ${conflict}. Run olympus worker uninstall to remove an older worker service; otherwise stop the competing process. Retrying automatically.` : "Olympus is restarting…", restartWordsScript = (response) => `(${restartWords.toString()})(${response}.headers.get(${JSON.stringify(WORKER_CONFLICT_HEADER)}))`, BOOTSTRAP, BROWSER_OPEN_LIMIT_MESSAGE = "Too many windows were opened from the browser. Run olympus dashboard in a terminal on this computer.", OWNER_LIMIT_HEADER = "X-Olympus-Owner-Limit", BROWSER_OPEN_RECENT_MESSAGE = "A window was just opened. Look for it, or try again in a few seconds.", BROWSER_OPEN_FAILED_MESSAGE = "Unable to open the private ticket. Run olympus dashboard in a terminal on this computer.", OwnerOpenLimited, hashSecret = (value) => createHash25("sha256").update(value).digest("hex");
+var COOKIE = "olympus_desktop_owner", PROOF_HEADER = "X-Olympus-Owner-Proof", FORM_PROOF = "_olympus_owner_proof", STORAGE = "olympus-desktop-owner-v1", TICKET_MS = 60000, CLAIM_HEADER = "X-Olympus-Owner-Claim", CODE_HEADER = "X-Olympus-Owner-Code", APPROVAL_HEADER = "X-Olympus-Owner-Approval", DECLINED_HEADER = "X-Olympus-Owner-Declined", WAIT_STORAGE = "olympus-desktop-owner-wait-v1", CLAIM_MS, SESSION_MS, DESKTOP_OWNER_OPEN_PATH = "/desktop-owner/open", DESKTOP_BRIDGE_REMEDY = "Use the owner-authenticated SSH socket forward on a trusted browser computer. Never substitute the fixed entry origin for the session origin.", CSP = "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; frame-src 'self'; frame-ancestors 'none'; object-src 'none'; base-uri 'none'; worker-src 'none'", secret = () => randomBytes5(32).toString("base64url"), WORKER_CONFLICT_HEADER = "X-Olympus-Worker-Conflict", restartWords = (conflict) => conflict === "retained_socket" ? "A stopped Olympus worker left its socket behind. Run olympus worker uninstall, then olympus engine restart to safely clear the retained socket." : conflict === "data" || conflict === "endpoint" ? `Olympus cannot start because another process owns its ${conflict}. Run olympus worker uninstall to remove an older worker service; otherwise stop the competing process. Retrying automatically.` : "Olympus is restarting…", restartWordsScript = (response) => `(${restartWords.toString()})(${response}.headers.get(${JSON.stringify(WORKER_CONFLICT_HEADER)}))`, BOOTSTRAP, BROWSER_OPEN_LIMIT_MESSAGE = "Too many windows were opened from the browser. Run olympus dashboard in a terminal on this computer.", OWNER_LIMIT_HEADER = "X-Olympus-Owner-Limit", BROWSER_OPEN_RECENT_MESSAGE = "A window was just opened. Look for it, or try again in a few seconds.", BROWSER_OPEN_FAILED_MESSAGE = "Unable to open the private ticket. Run olympus dashboard in a terminal on this computer.", OwnerOpenLimited, hashSecret = (value) => createHash26("sha256").update(value).digest("hex");
 var init_linux_owner_bridge = __esm(() => {
   init_worker_transport();
   init_linux_desktop_opener();
   init_remote_request_body();
+  init_dashboard_launch();
   CLAIM_MS = 3 * 60000;
   SESSION_MS = 12 * 60 * 60 * 1000;
   BOOTSTRAP = `<script>(function(){
@@ -46339,231 +46643,6 @@ var init_linux_owner_bridge_host = __esm(() => {
   init_linux_desktop_opener();
   init_linux_owner_bridge();
   init_worker_transport();
-});
-
-// src/core/open-targets.ts
-function allOpenTargets() {
-  return [
-    { kind: "dashboard" },
-    { kind: "private_answers" },
-    ...Object.keys(OPEN_CONNECT_SOURCES).map((source) => ({ kind: "connect", source })),
-    ...OPEN_FIX_SECTIONS.map((section) => ({ kind: "fix", section })),
-    ...Object.keys(OPEN_UNREADABLE_SOURCES).map((source) => ({ kind: "unreadable", source })),
-    { kind: "archives" }
-  ];
-}
-function openTargetToken(target) {
-  if (target.kind === "private_answers")
-    return target.answerId ? `page.private.${target.answerId}` : "page.private";
-  if (target.kind === "connect")
-    return `connect.${target.source}`;
-  if (target.kind === "fix")
-    return `fix.${target.section}`;
-  if (target.kind === "unreadable")
-    return `unreadable.${target.source}`;
-  if (target.kind === "archives")
-    return "archives";
-  return;
-}
-function openTargetTokenPattern() {
-  const tokens = allOpenTargets().map(openTargetToken).filter((token) => token !== undefined);
-  return `^(?:page\\.private\\.[A-Za-z0-9_-]{22}|${tokens.map((token) => token.replace(".", "\\.")).join("|")})$`;
-}
-function isConnectOpenTarget(target) {
-  return target.kind === "connect";
-}
-function isKeysOpenTarget(target) {
-  return target.kind === "fix" && (target.section === "models" || target.section === "answers" || target.section === "search");
-}
-function tokenPattern(filter) {
-  const tokens = allOpenTargets().filter(filter).map(openTargetToken).filter((token) => token !== undefined);
-  return `^(?:${tokens.map((token) => token.replace(".", "\\.")).join("|")})$`;
-}
-function keysOpenTargetTokenPattern() {
-  return tokenPattern(isKeysOpenTarget);
-}
-function connectOpenTargetTokenPattern() {
-  return tokenPattern(isConnectOpenTarget);
-}
-function privateAnswersOpenTargetTokenPattern() {
-  return "^page\\.private(?:\\.[A-Za-z0-9_-]{22})?$";
-}
-function isPanelOpenTarget(target) {
-  return target.kind === "unreadable" || target.kind === "archives";
-}
-function panelOpenTargetTokenPattern() {
-  const tokens = allOpenTargets().filter(isPanelOpenTarget).map(openTargetToken).filter((token) => token !== undefined);
-  return `^(?:${tokens.map((token) => token.replace(".", "\\.")).join("|")})$`;
-}
-var OPEN_CONNECT_SOURCES, OPEN_FIX_SECTIONS, OPEN_UNREADABLE_SOURCES, DASHBOARD_OPEN_FRAGMENT_KEY = "olympus-open", DASHBOARD_ALL_SOURCES_ID = "all.sources", DASHBOARD_PRIVACY_LANDING_ID = "privacy.settings", DASHBOARD_LAUNCH_OPEN_KEY = "olympus_open";
-var init_open_targets = __esm(() => {
-  OPEN_CONNECT_SOURCES = {
-    x: { sourceId: "x.bookmarks", label: "X bookmarks" },
-    readwise: { sourceId: "readwise.library", label: "Readwise" },
-    telegram: { sourceId: "telegram.messages", label: "Telegram" },
-    whatsapp: { sourceId: "whatsapp.personal.messages", label: "WhatsApp" },
-    evernote: { sourceId: "evernote.notes", label: "Evernote" }
-  };
-  OPEN_FIX_SECTIONS = ["connect", "reconnect", "answers", "search", "models"];
-  OPEN_UNREADABLE_SOURCES = {
-    dropbox: { sourceId: "dropbox.files", label: "Dropbox" },
-    drive: { sourceId: "google_drive.docs", label: "Google Drive" },
-    whatsapp: { sourceId: "whatsapp.personal.messages", label: "WhatsApp" }
-  };
-});
-
-// src/core/dashboard-launch.ts
-import { createHash as createHash26, randomBytes as randomBytes5 } from "node:crypto";
-
-class DashboardLaunchTickets {
-  tickets = new Map;
-  now;
-  maxTickets;
-  constructor(options = {}) {
-    this.now = options.now ?? Date.now;
-    this.maxTickets = options.maxTickets ?? DASHBOARD_LAUNCH_MAX_TICKETS;
-    if (!Number.isInteger(this.maxTickets) || this.maxTickets < 1 || this.maxTickets > 1024) {
-      throw new Error("Dashboard launch capacity must be an integer from 1 to 1024.");
-    }
-  }
-  mint(origin, options = {}) {
-    const nowMs = this.now();
-    this.prune(nowMs);
-    if (options.remote === true) {
-      for (const [ticket2, record] of this.tickets) {
-        if (record.remote)
-          this.tickets.delete(ticket2);
-      }
-    }
-    const ttlSeconds = options.remote === true ? DASHBOARD_REMOTE_LAUNCH_TICKET_TTL_SECONDS : DASHBOARD_LAUNCH_TICKET_TTL_SECONDS;
-    const expiresAtMs = nowMs + ttlSeconds * 1000;
-    const ticket = randomBytes5(32).toString("base64url");
-    this.tickets.set(ticket, {
-      expiresAtMs,
-      originTag: dashboardLaunchOriginTag(origin),
-      ...options.remote === true ? { remote: true } : {}
-    });
-    while (this.tickets.size > this.maxTickets) {
-      const oldest = this.tickets.keys().next();
-      if (oldest.done)
-        break;
-      this.tickets.delete(oldest.value);
-    }
-    return ticket;
-  }
-  consume(ticket, origin) {
-    if (!isWellFormedDashboardLaunchTicket(ticket))
-      return { status: "unknown" };
-    const record = this.tickets.get(ticket);
-    if (!record)
-      return { status: "unknown" };
-    if (typeof origin !== "string" || dashboardLaunchOriginTag(origin) !== record.originTag) {
-      return { status: "origin_mismatch" };
-    }
-    this.tickets.delete(ticket);
-    if (record.expiresAtMs <= this.now())
-      return { status: "expired" };
-    return { status: "ok", ticket };
-  }
-  get size() {
-    return this.tickets.size;
-  }
-  prune(nowMs) {
-    for (const [ticket, record] of this.tickets) {
-      if (record.expiresAtMs <= nowMs)
-        this.tickets.delete(ticket);
-    }
-  }
-}
-function dashboardLaunchOriginTag(origin) {
-  return createHash26("sha256").update("olympus-dashboard-launch-origin-v1\x00").update(origin).digest("base64url").slice(0, 43);
-}
-function isWellFormedDashboardLaunchTicket(value) {
-  return typeof value === "string" && /^[A-Za-z0-9_-]{43}$/.test(value);
-}
-var DASHBOARD_LAUNCH_TICKET_FRAGMENT_KEY = "olympus_launch_ticket", DASHBOARD_LAUNCH_TICKET_TTL_SECONDS = 900, DASHBOARD_LAUNCH_MAX_TICKETS = 32, DASHBOARD_REMOTE_LAUNCH_TICKET_TTL_SECONDS = 120, DASHBOARD_LAUNCH_PAGE_HTML;
-var init_dashboard_launch = __esm(() => {
-  init_open_targets();
-  DASHBOARD_LAUNCH_PAGE_HTML = `<!doctype html>
-<html lang="en">
-  <head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <meta name="referrer" content="no-referrer">
-    <title>Olympus</title>
-    <style>
-      body { margin: 0; padding: 3rem 1.5rem; font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Noto Sans", Ubuntu, Cantarell, "Liberation Sans", "DejaVu Sans", "Helvetica Neue", Arial, system-ui, sans-serif; color: #e8e6e3; background: #16151a; }
-      main { max-width: 32rem; margin: 0 auto; }
-      h1 { font-size: 1.05rem; font-weight: 600; margin: 0 0 .5rem; }
-      p { margin: 0; color: #a9a4ae; }
-      a { color: #cfc7ff; }
-    </style>
-  </head>
-  <body>
-    <main>
-      <h1 id="status">Opening Olympus…</h1>
-      <p id="detail">If this does not continue, <a href="/dashboard">open the dashboard</a>.</p>
-    </main>
-    <script>
-      (function () {
-        var KEY = '${DASHBOARD_LAUNCH_TICKET_FRAGMENT_KEY}';
-        var OPEN = /${openTargetTokenPattern()}/;
-        var KEYS = /${keysOpenTargetTokenPattern()}/;
-        var CONNECT = /${connectOpenTargetTokenPattern()}/;
-        var PANEL = /${panelOpenTargetTokenPattern()}/;
-        var PRIVATE = /${privateAnswersOpenTargetTokenPattern()}/;
-        var status = document.getElementById('status');
-        var open = '';
-        function take() {
-          var hash = window.location.hash.slice(1);
-          // Clear even malformed fragments before parsing or making a request.
-          try { window.history.replaceState(null, '', window.location.pathname + window.location.search); }
-          catch (e) { return ''; }
-          var params = new URLSearchParams(hash);
-          // Where to land: one of a closed list, or the plain dashboard.
-          var wanted = params.get('${DASHBOARD_LAUNCH_OPEN_KEY}') || '';
-          if (OPEN.test(wanted)) open = wanted;
-          return params.get(KEY) || '';
-        }
-        var ticket = take();
-        if (!ticket) {
-          // A reload of this page after its ticket was taken: the dashboard has the session, or the way back in.
-          window.location.replace('/dashboard');
-          return;
-        }
-        fetch('/dashboard/control/launch/redeem', {
-          method: 'POST',
-          credentials: 'same-origin',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ ticket: ticket })
-        }).then(function (response) {
-          // A link already used or expired (a reload, a second open) still
-          // lands on the dashboard: the session it opened is in its cookie,
-          // and without one the dashboard itself offers the way back in.
-          if (response.ok || response.status === 403) {
-            // Connect lands on Connect a source, where the computer's setup sheets live; a
-            // model fix lands on Privacy settings (?keys), where the models live. Each only
-            // opens something there, never submits anything.
-            // A panel target (See why on one source) lands on the dashboard there.
-            // Private answers lands on that page, carrying nothing.
-            // Everything else (a reconnect, the dashboard itself) lands on the dashboard.
-            window.location.replace(CONNECT.test(open)
-              ? '/dashboard?connect#${DASHBOARD_OPEN_FRAGMENT_KEY}=' + open
-              : KEYS.test(open) ? '/dashboard?keys#${DASHBOARD_OPEN_FRAGMENT_KEY}=' + open
-              : PANEL.test(open) ? '/dashboard#${DASHBOARD_OPEN_FRAGMENT_KEY}=' + open
-              : PRIVATE.test(open) ? '/dashboard?private-answers' + (open.indexOf('page.private.') === 0 ? '#' + open.slice(13) : '') : '/dashboard');
-            return;
-          }
-          // Anything else: the dashboard is the way in (its session, or how to get one).
-          window.location.replace('/dashboard');
-        }).catch(function () {
-          status.textContent = 'Opening failed.';
-        });
-      }());
-    </script>
-  </body>
-</html>
-`;
 });
 
 // src/core/dashboard-opening.ts
@@ -72973,6 +73052,7 @@ init_apple_vision_ocr();
 init_judge_spending();
 
 // src/workers/dashboard/components.ts
+init_dashboard_launch();
 init_session_marker();
 init_open_targets();
 init_source_dashboard();
@@ -73435,6 +73515,7 @@ init_vocabulary();
 init_vocabulary();
 
 // src/workers/dashboard/host-page.ts
+init_dashboard_launch();
 init_update_check();
 
 // src/workers/dashboard/update-now.ts
@@ -73447,6 +73528,7 @@ init_vocabulary();
 init_vocabulary();
 
 // src/workers/dashboard/outside-help-tools.ts
+init_dashboard_launch();
 init_vocabulary();
 
 // src/workers/dashboard/outside-help.ts
@@ -73911,6 +73993,7 @@ init_vocabulary();
 init_source_failure();
 init_mail_source_scope();
 init_http();
+init_dashboard_launch();
 
 // src/workers/dashboard/embedding-runtime.ts
 init_model_transport();

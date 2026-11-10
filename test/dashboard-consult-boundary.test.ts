@@ -9,13 +9,13 @@
  * Full sequences, against the real HTTP boundary with a recording handler.
  */
 import { createHmac } from 'node:crypto';
-import { ownerLocalMint } from './helpers/owner-local-mint.ts';
+import { ownerLocalMint, ownerUnlockKey } from './helpers/owner-local-mint.ts';
 import { describe, expect, test } from 'bun:test';
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync, lstatSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { dashboardSessionSecretPath, loadOrCreateDashboardSessionSecret, newDashboardSessionSecret } from '../src/core/dashboard-session-secret.ts';
-import { DASHBOARD_LAUNCH_MINT_PATH, DASHBOARD_LAUNCH_REDEEM_PATH, DashboardLaunchTickets } from '../src/core/dashboard-launch.ts';
+import { DASHBOARD_LAUNCH_MINT_PATH, DASHBOARD_LAUNCH_REDEEM_PATH, DashboardLaunchTickets, DASHBOARD_UNLOCK_HEADER } from '../src/core/dashboard-launch.ts';
 import {
   DASHBOARD_CONSULT_CONTROL_PATHS,
   DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER,
@@ -195,7 +195,7 @@ describe('the local-only mint', () => {
     }
     // A local cookie is an ordinary control session elsewhere, and the dashboard read learns its grade.
     expect((await f.fetch(post('/dashboard/sync-now', { Cookie: cookie, Origin: ORIGIN, 'X-Olympus-CSRF': csrf }, { description: 'x' }))).status).toBe(200);
-    const read = await f.fetch(new Request(`${ORIGIN}/dashboard?private-answers`, { headers: { Cookie: cookie, Referer: `${ORIGIN}/dashboard` } }));
+    const read = await f.fetch(new Request(`${ORIGIN}/dashboard?private-answers`, { headers: { [DASHBOARD_UNLOCK_HEADER]: await ownerUnlockKey(f.fetch, ORIGIN, TOKEN), Cookie: cookie, Referer: `${ORIGIN}/dashboard` } }));
     expect(read.status).toBe(200);
     expect(f.seen.at(-1)!.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER)).toBe('local');
     // The IPv6 and localhost spellings are loopback too; a cookie is bound to the origin that minted it.
@@ -206,7 +206,7 @@ describe('the local-only mint', () => {
   test('a bearer-grade read is told its grade, so the card can offer the local unlock', async () => {
     const f = fixture();
     const { cookie } = await bearerSession(f);
-    const read = await f.fetch(new Request(`${ORIGIN}/dashboard?private-answers`, { headers: { Cookie: cookie, Referer: `${ORIGIN}/dashboard` } }));
+    const read = await f.fetch(new Request(`${ORIGIN}/dashboard?private-answers`, { headers: { [DASHBOARD_UNLOCK_HEADER]: await ownerUnlockKey(f.fetch, ORIGIN, TOKEN), Cookie: cookie, Referer: `${ORIGIN}/dashboard` } }));
     expect(read.status).toBe(200);
     expect(f.seen.at(-1)!.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER)).toBe('bearer');
     // Incoming grade headers are stripped before the handler sees anything.

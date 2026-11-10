@@ -7,6 +7,7 @@ import {
   DASHBOARD_LAUNCH_MINT_PATH,
   DASHBOARD_LAUNCH_REMOTE_PURPOSE,
   DASHBOARD_LAUNCH_PAGE_HTML,
+  DASHBOARD_UNLOCK_HEADER,
   DASHBOARD_LAUNCH_PAGE_PATH,
   DASHBOARD_LAUNCH_REDEEM_PATH,
   DASHBOARD_LAUNCH_TICKET_TTL_SECONDS,
@@ -59,6 +60,13 @@ export const DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER = 'X-Olympus-Control-Session-
  * which controls this session reaches. Stripped from every incoming request.
  */
 export const DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER = 'X-Olympus-Control-Session-Grade';
+/**
+ * Internal: a navigation to a dashboard page that proved the cookie but not
+ * this browser's stored CSRF token (#1187). The worker answers it with the
+ * content-free unlock shell for that page, never the page. Stripped from
+ * every incoming request.
+ */
+export const DASHBOARD_UNLOCK_SHELL_CONTEXT_HEADER = 'X-Olympus-Control-Session-Shell';
 /** Update now (core/self-update.ts): a local-grade session only, never the bearer. */
 export const DASHBOARD_SELF_UPDATE_PATHS = { start: '/dashboard/engine/update', status: '/dashboard/engine/update/status' } as const;
 export const DASHBOARD_SELF_UPDATE_LOCAL_ONLY = 'Olympus updates itself only from the dashboard on this computer, in an unlocked browser.';
@@ -76,6 +84,7 @@ const DASHBOARD_GATEWAY_CALLBACK_PEER_CONTEXT = 'olympus-dashboard-callback-peer
 const DASHBOARD_CONTROL_COOKIE = 'olympus_dashboard_control';
 const DASHBOARD_CONTROL_SIGNATURE_CONTEXT = 'olympus-dashboard-control-session-v3';
 const DASHBOARD_CONTROL_CSRF_CONTEXT = 'olympus-dashboard-control-csrf-v2';
+const DASHBOARD_UNLOCK_KEY_CONTEXT = 'olympus-dashboard-unlock-v1';
 const DASHBOARD_CONTROL_ORIGIN_CONTEXT = 'olympus-dashboard-control-origin-v2';
 
 export function resolveWorkerBindHost(
@@ -176,7 +185,7 @@ export function withWorkerBearerAuth(
         // The existing control session, minted the same way the manual unlock
         // mints it: HttpOnly, SameSite=Strict, origin-tagged, 30 days.
         const minted = mintDashboardControlSession(sessionSecret, origin, now());
-        return dashboardLaunchRedeemedResponse(minted, now());
+        return dashboardLaunchRedeemedResponse(minted, dashboardUnlockKey(sessionSecret, origin), now());
       }
       return dashboardLaunchRefusedResponse(consumed.status);
     }
@@ -225,7 +234,7 @@ export function withWorkerBearerAuth(
       if (owner.status === 'origin_mismatch' || owner.status === 'csrf_mismatch') return dashboardControlForbiddenResponse(owner.status);
       if (owner.status !== 'allowed') return unauthorizedWorkerResponse();
       const minted = mintDashboardControlSession(sessionSecret, origin, now(), 'local');
-      return dashboardControlSessionResponse(minted.sessionId, minted.csrfToken, minted.expiresAtMs, now());
+      return dashboardControlSessionResponse(minted.sessionId, minted.csrfToken, dashboardUnlockKey(sessionSecret, origin), minted.expiresAtMs, now());
     }
     if (isDashboardControlSessionRequest(request)) {
       if (!hasValidWorkerBearerToken(request.headers.get('Authorization'), authToken)) {
@@ -235,7 +244,7 @@ export function withWorkerBearerAuth(
         // picker never has to handle the worker bearer to stay alive.
         const renewal = authorizeDashboardControlSession(request, sessionSecret, now(), true);
         if (renewal.status === 'allowed') {
-          return dashboardControlSessionResponse(renewal.sessionId, renewal.csrfToken, renewal.expiresAtMs, now());
+          return dashboardControlSessionResponse(renewal.sessionId, renewal.csrfToken, dashboardUnlockKey(sessionSecret, requestTargetOrigin(request)), renewal.expiresAtMs, now());
         }
         if (renewal.status === 'origin_mismatch' || renewal.status === 'csrf_mismatch') {
           return dashboardControlForbiddenResponse(renewal.status);
@@ -245,7 +254,7 @@ export function withWorkerBearerAuth(
       const origin = sameRequestOrigin(request);
       if (!origin) return dashboardControlForbiddenResponse('origin_mismatch');
       const minted = mintDashboardControlSession(sessionSecret, origin, now());
-      return dashboardControlSessionResponse(minted.sessionId, minted.csrfToken, minted.expiresAtMs, now());
+      return dashboardControlSessionResponse(minted.sessionId, minted.csrfToken, dashboardUnlockKey(sessionSecret, origin), minted.expiresAtMs, now());
     }
     if (isOAuthCallbackRequest(request)) {
       return fetchHandler(withAuthenticatedGatewayPublicOrigin(
@@ -292,8 +301,21 @@ export function withWorkerBearerAuth(
       //
       // Only the HTML page, never `/dashboard.json`: the page is the surface a
       // human navigates to, and the JSON keeps its existing two proofs.
+      //
+      // The cookie alone is not the owner (#1187): browsers send it to every
+      // port on this host, so a server on another loopback port can be handed
+      // it. The page also needs this origin's unlock key, which the owner's
+      // browser keeps in storage that is separate per origin, port included.
+      // A navigation cannot carry a header, so it gets the content-free shell,
+      // whose script fetches this same address with the stored key; that
+      // fetch is what renders the page.
       const authorization = authorizeDashboardControlSession(request, sessionSecret, now(), false, true);
       if (authorization.status === 'allowed') {
+        const presented = request.headers.get(DASHBOARD_UNLOCK_HEADER);
+        if (!presented || !constantTimeStringEqual(presented, dashboardUnlockKey(sessionSecret, requestTargetOrigin(request)))) {
+          request.headers.set(DASHBOARD_UNLOCK_SHELL_CONTEXT_HEADER, '1');
+          return fetchHandler(request);
+        }
         const response = await fetchHandler(withDashboardControlContextHeader(request, authorization.csrfToken, authorization.grade));
         return withRenewedDashboardControlCookie(response, authorization, now());
       }
@@ -429,10 +451,11 @@ function dashboardLaunchMintedResponse(ticket: string): Response {
   });
 }
 
-function dashboardLaunchRedeemedResponse(session: AuthorizedDashboardControlSession, nowMs: number): Response {
+function dashboardLaunchRedeemedResponse(session: AuthorizedDashboardControlSession, unlockKey: string, nowMs: number): Response {
   return new Response(JSON.stringify({
     ok: true,
     csrf_token: session.csrfToken,
+    unlock_key: unlockKey,
     next: '/dashboard',
     policy: {
       http_only_cookie: true,
@@ -830,6 +853,18 @@ function dashboardControlSignature(sessionSecret: string, parts: Omit<DashboardC
   );
 }
 
+/**
+ * This engine origin's dashboard unlock key (#1187): what the owner's browser
+ * keeps in per-origin storage and presents to render a page that its cookie
+ * alone no longer renders. One per origin rather than per session, so a renewed
+ * or local-upgraded session needs nothing new stored; it is worthless without
+ * a live session cookie for the same origin, and rotating the worker token
+ * changes it with every session.
+ */
+function dashboardUnlockKey(sessionSecret: string, origin: string): string {
+  return hmacTag(sessionSecret, DASHBOARD_UNLOCK_KEY_CONTEXT, origin);
+}
+
 function dashboardControlCsrfToken(sessionSecret: string, nonce: string): string {
   return hmacTag(sessionSecret, DASHBOARD_CONTROL_CSRF_CONTEXT, nonce);
 }
@@ -1003,12 +1038,14 @@ function withRenewedDashboardControlCookie(
 function dashboardControlSessionResponse(
   sessionId: string,
   csrfToken: string,
+  unlockKey: string,
   expiresAtMs: number,
   nowMs: number,
 ): Response {
   return new Response(JSON.stringify({
     ok: true,
     csrf_token: csrfToken,
+    unlock_key: unlockKey,
     session_marker: dashboardSessionMarker(csrfToken),
     expires_at: new Date(expiresAtMs).toISOString(),
     policy: {
@@ -1071,6 +1108,7 @@ function withoutDashboardInternalContextHeaders(request: Request): Request {
     && !request.headers.has(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER)
     && !request.headers.has(DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER)
     && !request.headers.has(DASHBOARD_GATEWAY_CALLBACK_PEER_HEADER)
+    && !request.headers.has(DASHBOARD_UNLOCK_SHELL_CONTEXT_HEADER)
   ) return request;
   // Mutate the request Headers directly. Bun 1.3 keeps the original headers
   // when `new Request(existing, { headers })` is used, so a copy-and-delete
@@ -1079,6 +1117,7 @@ function withoutDashboardInternalContextHeaders(request: Request): Request {
   request.headers.delete(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER);
   request.headers.delete(DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER);
   request.headers.delete(DASHBOARD_GATEWAY_CALLBACK_PEER_HEADER);
+  request.headers.delete(DASHBOARD_UNLOCK_SHELL_CONTEXT_HEADER);
   return request;
 }
 

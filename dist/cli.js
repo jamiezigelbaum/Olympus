@@ -5281,13 +5281,400 @@ var init_remote_request_body = __esm(() => {
   REMOTE_REQUEST_MAX_BODY_BYTES = 256 * 1024;
 });
 
+// src/core/open-targets.ts
+function allOpenTargets() {
+  return [
+    { kind: "dashboard" },
+    { kind: "private_answers" },
+    ...Object.keys(OPEN_CONNECT_SOURCES).map((source) => ({ kind: "connect", source })),
+    ...OPEN_FIX_SECTIONS.map((section) => ({ kind: "fix", section })),
+    ...Object.keys(OPEN_UNREADABLE_SOURCES).map((source) => ({ kind: "unreadable", source })),
+    { kind: "archives" }
+  ];
+}
+function openTargetPath(target) {
+  if (target.kind === "private_answers")
+    return target.answerId ? `private/${target.answerId}` : "private";
+  if (target.kind === "connect")
+    return `connect/${target.source}`;
+  if (target.kind === "fix")
+    return `fix/${target.section}`;
+  if (target.kind === "unreadable")
+    return `unreadable/${target.source}`;
+  if (target.kind === "archives")
+    return "archives";
+  return "dashboard";
+}
+function openTargetFromPath(path) {
+  if (typeof path !== "string")
+    return;
+  const answer = /^private\/([A-Za-z0-9_-]{22})$/.exec(path);
+  if (answer)
+    return { kind: "private_answers", answerId: answer[1] };
+  return allOpenTargets().find((target) => openTargetPath(target) === path);
+}
+function olympusOpenUrl(target) {
+  return `${OLYMPUS_URL_SCHEME}://open/${openTargetPath(target)}`;
+}
+function openPageUrl(target) {
+  return `${OPEN_PAGE_BASE_URL}${openTargetPath(target)}/`;
+}
+function parseOlympusOpenUrl(raw) {
+  if (typeof raw !== "string" || raw.length === 0 || raw.length > OPEN_URL_MAX_LENGTH)
+    return;
+  if (!/^[\x21-\x7e]+$/.test(raw) || /["'`\\<>]/.test(raw))
+    return;
+  if (!raw.toLowerCase().startsWith(`${OLYMPUS_URL_SCHEME}:`))
+    return;
+  const answer = /^olympus:\/\/open\/private\/([A-Za-z0-9_-]{22})\/?$/.exec(raw);
+  if (answer)
+    return { kind: "private_answers", answerId: answer[1] };
+  const match = /^olympus:\/\/open\/([a-z]+(?:\/[a-z]+)?)\/?$/.exec(raw);
+  const path = match?.[1];
+  if (path !== undefined) {
+    for (const target of allOpenTargets()) {
+      if (openTargetPath(target) === path)
+        return target;
+    }
+  }
+  return { kind: "dashboard", fallback: true };
+}
+function openTargetToken(target) {
+  if (target.kind === "private_answers")
+    return target.answerId ? `page.private.${target.answerId}` : "page.private";
+  if (target.kind === "connect")
+    return `connect.${target.source}`;
+  if (target.kind === "fix")
+    return `fix.${target.section}`;
+  if (target.kind === "unreadable")
+    return `unreadable.${target.source}`;
+  if (target.kind === "archives")
+    return "archives";
+  return;
+}
+function openTargetTokenPattern() {
+  const tokens = allOpenTargets().map(openTargetToken).filter((token) => token !== undefined);
+  return `^(?:page\\.private\\.[A-Za-z0-9_-]{22}|${tokens.map((token) => token.replace(".", "\\.")).join("|")})$`;
+}
+function isConnectOpenTarget(target) {
+  return target.kind === "connect";
+}
+function isKeysOpenTarget(target) {
+  return target.kind === "fix" && (target.section === "models" || target.section === "answers" || target.section === "search");
+}
+function tokenPattern(filter) {
+  const tokens = allOpenTargets().filter(filter).map(openTargetToken).filter((token) => token !== undefined);
+  return `^(?:${tokens.map((token) => token.replace(".", "\\.")).join("|")})$`;
+}
+function keysOpenTargetTokenPattern() {
+  return tokenPattern(isKeysOpenTarget);
+}
+function connectOpenTargetTokenPattern() {
+  return tokenPattern(isConnectOpenTarget);
+}
+function privateAnswersOpenTargetTokenPattern() {
+  return "^page\\.private(?:\\.[A-Za-z0-9_-]{22})?$";
+}
+function isPanelOpenTarget(target) {
+  return target.kind === "unreadable" || target.kind === "archives";
+}
+function panelOpenTargetTokenPattern() {
+  const tokens = allOpenTargets().filter(isPanelOpenTarget).map(openTargetToken).filter((token) => token !== undefined);
+  return `^(?:${tokens.map((token) => token.replace(".", "\\.")).join("|")})$`;
+}
+function panelOpenTargetSources() {
+  const out = {};
+  for (const target of allOpenTargets()) {
+    if (target.kind === "unreadable")
+      out[openTargetToken(target)] = OPEN_UNREADABLE_SOURCES[target.source].sourceId;
+    if (target.kind === "archives")
+      out[openTargetToken(target)] = OPEN_ARCHIVES_SOURCE_ID;
+  }
+  return out;
+}
+function openUnreadableSourceFor(sourceId) {
+  return Object.keys(OPEN_UNREADABLE_SOURCES).find((source) => OPEN_UNREADABLE_SOURCES[source].sourceId === sourceId);
+}
+function dashboardImportLandingToken(sourceId) {
+  return `${DASHBOARD_IMPORT_LANDING_PREFIX}${sourceId}`;
+}
+function dashboardSourceLandingToken(sourceId) {
+  return `${DASHBOARD_SOURCE_LANDING_PREFIX}${sourceId}`;
+}
+var OLYMPUS_URL_SCHEME = "olympus", OPEN_CONNECT_SOURCES, OPEN_FIX_SECTIONS, OPEN_UNREADABLE_SOURCES, OPEN_ARCHIVES_SOURCE_ID = "archive.imports", OPEN_URL_MAX_LENGTH = 128, OPEN_PAGE_BASE_URL = "https://olympusplugin.ai/open/", DASHBOARD_OPEN_FRAGMENT_KEY = "olympus-open", DASHBOARD_IMPORT_LANDING_PREFIX = "import.", DASHBOARD_SOURCE_LANDING_PREFIX = "source.", DASHBOARD_ALL_SOURCES_LANDING = "sources", DASHBOARD_ALL_SOURCES_ID = "all.sources", DASHBOARD_PRIVACY_LANDING = "privacy", DASHBOARD_PRIVACY_LANDING_ID = "privacy.settings", DASHBOARD_LAUNCH_OPEN_KEY = "olympus_open";
+var init_open_targets = __esm(() => {
+  OPEN_CONNECT_SOURCES = {
+    x: { sourceId: "x.bookmarks", label: "X bookmarks" },
+    readwise: { sourceId: "readwise.library", label: "Readwise" },
+    telegram: { sourceId: "telegram.messages", label: "Telegram" },
+    whatsapp: { sourceId: "whatsapp.personal.messages", label: "WhatsApp" },
+    evernote: { sourceId: "evernote.notes", label: "Evernote" }
+  };
+  OPEN_FIX_SECTIONS = ["connect", "reconnect", "answers", "search", "models"];
+  OPEN_UNREADABLE_SOURCES = {
+    dropbox: { sourceId: "dropbox.files", label: "Dropbox" },
+    drive: { sourceId: "google_drive.docs", label: "Google Drive" },
+    whatsapp: { sourceId: "whatsapp.personal.messages", label: "WhatsApp" }
+  };
+});
+
+// src/core/dashboard-launch.ts
+import { createHash as createHash2, randomBytes as randomBytes2 } from "node:crypto";
+
+class DashboardLaunchTickets {
+  tickets = new Map;
+  now;
+  maxTickets;
+  constructor(options = {}) {
+    this.now = options.now ?? Date.now;
+    this.maxTickets = options.maxTickets ?? DASHBOARD_LAUNCH_MAX_TICKETS;
+    if (!Number.isInteger(this.maxTickets) || this.maxTickets < 1 || this.maxTickets > 1024) {
+      throw new Error("Dashboard launch capacity must be an integer from 1 to 1024.");
+    }
+  }
+  mint(origin, options = {}) {
+    const nowMs = this.now();
+    this.prune(nowMs);
+    if (options.remote === true) {
+      for (const [ticket2, record] of this.tickets) {
+        if (record.remote)
+          this.tickets.delete(ticket2);
+      }
+    }
+    const ttlSeconds = options.remote === true ? DASHBOARD_REMOTE_LAUNCH_TICKET_TTL_SECONDS : DASHBOARD_LAUNCH_TICKET_TTL_SECONDS;
+    const expiresAtMs = nowMs + ttlSeconds * 1000;
+    const ticket = randomBytes2(32).toString("base64url");
+    this.tickets.set(ticket, {
+      expiresAtMs,
+      originTag: dashboardLaunchOriginTag(origin),
+      ...options.remote === true ? { remote: true } : {}
+    });
+    while (this.tickets.size > this.maxTickets) {
+      const oldest = this.tickets.keys().next();
+      if (oldest.done)
+        break;
+      this.tickets.delete(oldest.value);
+    }
+    return ticket;
+  }
+  consume(ticket, origin) {
+    if (!isWellFormedDashboardLaunchTicket(ticket))
+      return { status: "unknown" };
+    const record = this.tickets.get(ticket);
+    if (!record)
+      return { status: "unknown" };
+    if (typeof origin !== "string" || dashboardLaunchOriginTag(origin) !== record.originTag) {
+      return { status: "origin_mismatch" };
+    }
+    this.tickets.delete(ticket);
+    if (record.expiresAtMs <= this.now())
+      return { status: "expired" };
+    return { status: "ok", ticket };
+  }
+  get size() {
+    return this.tickets.size;
+  }
+  prune(nowMs) {
+    for (const [ticket, record] of this.tickets) {
+      if (record.expiresAtMs <= nowMs)
+        this.tickets.delete(ticket);
+    }
+  }
+}
+function dashboardLaunchOriginTag(origin) {
+  return createHash2("sha256").update("olympus-dashboard-launch-origin-v1\x00").update(origin).digest("base64url").slice(0, 43);
+}
+function isWellFormedDashboardLaunchTicket(value) {
+  return typeof value === "string" && /^[A-Za-z0-9_-]{43}$/.test(value);
+}
+function dashboardLaunchPageHeaders() {
+  const script = DASHBOARD_LAUNCH_PAGE_HTML.split("<script>")[1].split("</script>")[0];
+  const scriptHash = createHash2("sha256").update(script).digest("base64");
+  return {
+    "Content-Type": "text/html; charset=utf-8",
+    "Cache-Control": "no-store",
+    "Referrer-Policy": "no-referrer",
+    "X-Frame-Options": "DENY",
+    "Content-Security-Policy": `default-src 'none'; script-src 'sha256-${scriptHash}'; style-src 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'`
+  };
+}
+function dashboardUnlockShellHeaders(contentSecurityPolicy) {
+  return {
+    "Content-Type": "text/html; charset=utf-8",
+    "Cache-Control": "no-store",
+    "Referrer-Policy": "no-referrer",
+    "X-Frame-Options": "DENY",
+    "Content-Security-Policy": contentSecurityPolicy,
+    [DASHBOARD_UNLOCK_SHELL_HEADER]: "1"
+  };
+}
+var DASHBOARD_LAUNCH_PAGE_PATH = "/dashboard/launch", DASHBOARD_LAUNCH_MINT_PATH = "/dashboard/control/launch", DASHBOARD_LAUNCH_REDEEM_PATH = "/dashboard/control/launch/redeem", DASHBOARD_LAUNCH_TICKET_FRAGMENT_KEY = "olympus_launch_ticket", DASHBOARD_LAUNCH_TICKET_TTL_SECONDS = 900, DASHBOARD_LAUNCH_MAX_TICKETS = 32, DASHBOARD_REMOTE_LAUNCH_TICKET_TTL_SECONDS = 120, DASHBOARD_LAUNCH_REMOTE_PURPOSE = "remote", DASHBOARD_UNLOCK_STORAGE_KEY = "olympus-dashboard-unlock-v1", DASHBOARD_UNLOCK_HEADER = "X-Olympus-Dashboard-Unlock", DASHBOARD_UNLOCK_SHELL_HEADER = "X-Olympus-Dashboard-Shell", DASHBOARD_LAUNCH_PAGE_HTML, DASHBOARD_UNLOCK_SHELL_HTML;
+var init_dashboard_launch = __esm(() => {
+  init_open_targets();
+  DASHBOARD_LAUNCH_PAGE_HTML = `<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="referrer" content="no-referrer">
+    <title>Olympus</title>
+    <style>
+      body { margin: 0; padding: 3rem 1.5rem; font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Noto Sans", Ubuntu, Cantarell, "Liberation Sans", "DejaVu Sans", "Helvetica Neue", Arial, system-ui, sans-serif; color: #e8e6e3; background: #16151a; }
+      main { max-width: 32rem; margin: 0 auto; }
+      h1 { font-size: 1.05rem; font-weight: 600; margin: 0 0 .5rem; }
+      p { margin: 0; color: #a9a4ae; }
+      a { color: #cfc7ff; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1 id="status">Opening Olympus…</h1>
+      <p id="detail">If this does not continue, <a href="/dashboard">open the dashboard</a>.</p>
+    </main>
+    <script>
+      (function () {
+        var KEY = '${DASHBOARD_LAUNCH_TICKET_FRAGMENT_KEY}';
+        var OPEN = /${openTargetTokenPattern()}/;
+        var KEYS = /${keysOpenTargetTokenPattern()}/;
+        var CONNECT = /${connectOpenTargetTokenPattern()}/;
+        var PANEL = /${panelOpenTargetTokenPattern()}/;
+        var PRIVATE = /${privateAnswersOpenTargetTokenPattern()}/;
+        var status = document.getElementById('status');
+        var open = '';
+        function take() {
+          var hash = window.location.hash.slice(1);
+          // Clear even malformed fragments before parsing or making a request.
+          try { window.history.replaceState(null, '', window.location.pathname + window.location.search); }
+          catch (e) { return ''; }
+          var params = new URLSearchParams(hash);
+          // Where to land: one of a closed list, or the plain dashboard.
+          var wanted = params.get('${DASHBOARD_LAUNCH_OPEN_KEY}') || '';
+          if (OPEN.test(wanted)) open = wanted;
+          return params.get(KEY) || '';
+        }
+        var ticket = take();
+        if (!ticket) {
+          // A reload of this page after its ticket was taken: the dashboard has the session, or the way back in.
+          window.location.replace('/dashboard');
+          return;
+        }
+        fetch('/dashboard/control/launch/redeem', {
+          method: 'POST',
+          credentials: 'same-origin',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ticket: ticket })
+        }).then(function (response) {
+          if (!response.ok) return response;
+          // This browser's key for later plain navigations (#1187): kept per origin, so per port.
+          return response.json().then(function (body) {
+            try {
+              if (body && typeof body.unlock_key === 'string') window.localStorage.setItem('${DASHBOARD_UNLOCK_STORAGE_KEY}', body.unlock_key);
+            } catch (e) {}
+            return response;
+          }, function () { return response; });
+        }).then(function (response) {
+          // A link already used or expired (a reload, a second open) still
+          // lands on the dashboard: the session it opened is in its cookie,
+          // and without one the dashboard itself offers the way back in.
+          if (response.ok || response.status === 403) {
+            // Connect lands on Connect a source, where the computer's setup sheets live; a
+            // model fix lands on Privacy settings (?keys), where the models live. Each only
+            // opens something there, never submits anything.
+            // A panel target (See why on one source) lands on the dashboard there.
+            // Private answers lands on that page, carrying nothing.
+            // Everything else (a reconnect, the dashboard itself) lands on the dashboard.
+            window.location.replace(CONNECT.test(open)
+              ? '/dashboard?connect#${DASHBOARD_OPEN_FRAGMENT_KEY}=' + open
+              : KEYS.test(open) ? '/dashboard?keys#${DASHBOARD_OPEN_FRAGMENT_KEY}=' + open
+              : PANEL.test(open) ? '/dashboard#${DASHBOARD_OPEN_FRAGMENT_KEY}=' + open
+              : PRIVATE.test(open) ? '/dashboard?private-answers' + (open.indexOf('page.private.') === 0 ? '#' + open.slice(13) : '') : '/dashboard');
+            return;
+          }
+          // Anything else: the dashboard is the way in (its session, or how to get one).
+          window.location.replace('/dashboard');
+        }).catch(function () {
+          status.textContent = 'Opening failed.';
+        });
+      }());
+    </script>
+  </body>
+</html>
+`;
+  DASHBOARD_UNLOCK_SHELL_HTML = `<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="referrer" content="no-referrer">
+    <title>Olympus</title>
+    <style>
+      body { margin: 0; padding: 3rem 1.5rem; font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Noto Sans", Ubuntu, Cantarell, "Liberation Sans", "DejaVu Sans", "Helvetica Neue", Arial, system-ui, sans-serif; color: #e8e6e3; background: #16151a; }
+      main { max-width: 32rem; margin: 0 auto; }
+      h1 { font-size: 1.05rem; font-weight: 600; margin: 0 0 .5rem; }
+      p { margin: 0; color: #a9a4ae; }
+      code { color: #e8e6e3; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1 id="status">Opening Olympus…</h1>
+      <p id="detail"></p>
+    </main>
+    <script>
+      (function () {
+        var KEY = '${DASHBOARD_UNLOCK_STORAGE_KEY}';
+        var SHELL = '${DASHBOARD_UNLOCK_SHELL_HEADER}';
+        var HEADER = '${DASHBOARD_UNLOCK_HEADER}';
+        var status = document.getElementById('status');
+        var detail = document.getElementById('detail');
+        function locked() {
+          try { window.localStorage.removeItem(KEY); } catch (e) {}
+          status.textContent = 'Dashboard controls are locked';
+          detail.textContent = 'Run ';
+          var command = document.createElement('code');
+          command.textContent = 'olympus dashboard';
+          detail.appendChild(command);
+          detail.appendChild(document.createTextNode(' in a terminal on this computer to open it again.'));
+        }
+        function failed() {
+          status.textContent = 'Opening failed.';
+          detail.textContent = 'Reload this page to try again.';
+        }
+        var key = '';
+        try { key = window.localStorage.getItem(KEY) || ''; } catch (e) {}
+        if (!key) { locked(); return; }
+        var headers = {};
+        headers[HEADER] = key;
+        fetch(window.location.href, {
+          cache: 'no-store',
+          credentials: 'same-origin',
+          headers: headers
+        }).then(function (response) {
+          // A page that moved: go there, and its own navigation proves itself the same way.
+          if (response.redirected) { window.location.replace(response.url); return; }
+          if (response.headers.get(SHELL) || response.status === 401 || response.status === 403) { locked(); return; }
+          var type = response.headers.get('Content-Type') || '';
+          if (!response.ok || type.indexOf('text/html') !== 0) { failed(); return; }
+          return response.text().then(function (html) {
+            document.open();
+            document.write(html);
+            document.close();
+          });
+        }).catch(failed);
+      }());
+    </script>
+  </body>
+</html>
+`;
+});
+
 // src/core/linux-owner-bridge.ts
-import { createHmac, createHash as createHash2, randomBytes as randomBytes2, timingSafeEqual } from "node:crypto";
+import { createHmac, createHash as createHash3, randomBytes as randomBytes3, timingSafeEqual } from "node:crypto";
 import { closeSync as closeSync4, openSync as openSync4, writeFileSync as writeFileSync2, unlinkSync } from "node:fs";
 import { dirname as dirname9, join as join10 } from "node:path";
 import { networkInterfaces } from "node:os";
 function randomOwnerHostname() {
-  const bytes = randomBytes2(16);
+  const bytes = randomBytes3(16);
   const alphabet = "abcdefghijklmnopqrstuvwxyz234567";
   let bits = 0, value = 0, text = "";
   for (const byte of bytes) {
@@ -5304,7 +5691,7 @@ function randomOwnerHostname() {
 }
 function matchCode() {
   const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
-  const [a, b, c, d, e, f] = [...randomBytes2(6)].map((byte) => alphabet[byte & 31]);
+  const [a, b, c, d, e, f] = [...randomBytes3(6)].map((byte) => alphabet[byte & 31]);
   return `${a}${b}${c}-${d}${e}${f}`;
 }
 function equal(a, b) {
@@ -5343,7 +5730,7 @@ function safeTarget(value) {
   return typeof value === "string" && value.length <= 16384 && value.startsWith("/") && !value.startsWith("//") && !/[\\\x00-\x20\x7f]/.test(value) && !value.startsWith("/owner-") && !value.startsWith(DESKTOP_OWNER_OPEN_PATH);
 }
 function documentPolicy(policy) {
-  const hash = "'sha256-" + createHash2("sha256").update(BOOTSTRAP.slice(8, -9)).digest("base64") + "'";
+  const hash = "'sha256-" + createHash3("sha256").update(BOOTSTRAP.slice(8, -9)).digest("base64") + "'";
   const directives = (policy ?? CSP).split(";").map((s) => s.trim()).filter(Boolean);
   const needsHash = (list) => !list.includes("'unsafe-inline'") || /'(sha256|sha384|sha512|nonce)-/.test(list);
   const withHash = (list) => ["script-src", ...list.split(/\s+/).filter((s) => s && s !== "'none'"), hash].join(" ");
@@ -5385,7 +5772,7 @@ function confirmation() {
   claiming=true;
   try{const r=await fetch('/owner-claim',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({claim})});
    if(r.status===202||r.status===503)return;
-   if(r.ok){const result=await r.json();localStorage.setItem(key,result.proof);await resume();return;}
+   if(r.ok){const result=await r.json();localStorage.setItem(key,result.proof);if(result.unlock)localStorage.setItem(${JSON.stringify(DASHBOARD_UNLOCK_STORAGE_KEY)},result.unlock);await resume();return;}
    const declined=r.headers.has(${JSON.stringify(DECLINED_HEADER)});stopWaiting();
    message.textContent=declined?"The Olympus window said this wasn't you. Press Confirm it's you to try again.":"This confirmation expired or was replaced. Press Confirm it's you to try again.";
   }catch{}finally{claiming=false;}
@@ -5442,7 +5829,7 @@ function approve(request,proof){return new Promise(function(done){
  const ticket=location.hash.slice(1);history.replaceState(null,'',location.pathname);
  if(!ticket){document.getElementById('message').textContent='Open Olympus from the desktop command, or confirm from the requesting page.';return;}
  try{let r;do{r=await fetch('/owner-proof',{method:'POST',redirect:'error',headers:{'Content-Type':'application/json'},body:JSON.stringify({ticket})});if(r.status===503&&r.headers.has('Retry-After')){document.getElementById('message').textContent=${restartWordsScript("r")};await new Promise(resolve=>setTimeout(resolve,1000));}else break;}while(true);
- if(!r.ok)throw new Error();const result=await r.json();localStorage.setItem(${JSON.stringify(STORAGE)},result.proof);
+ if(!r.ok)throw new Error();const result=await r.json();localStorage.setItem(${JSON.stringify(STORAGE)},result.proof);if(result.unlock)localStorage.setItem(${JSON.stringify(DASHBOARD_UNLOCK_STORAGE_KEY)},result.unlock);
  if(result.approval)await approve(result.approval,result.proof);
  // Render the requested document in this window. The proof stays at this
  // origin. The bridge header policy and worker meta policy constrain this view;
@@ -5457,6 +5844,9 @@ function approve(request,proof){return new Promise(function(done){
 })();</script>`);
   response.headers.set("Access-Control-Allow-Origin", "*");
   return response;
+}
+function established(result) {
+  return Array.isArray(result) ? { cookies: result } : result;
 }
 function equalHash(value, hash) {
   return typeof value === "string" && /^[A-Za-z0-9_-]{43}$/.test(value) && timingSafeEqual(Buffer.from(hashSecret(value), "hex"), Buffer.from(hash, "hex"));
@@ -5534,7 +5924,7 @@ class LinuxOwnerBridge {
       this.clearTicket(previous);
     const value = secret(), challenge = secret();
     const answer = createHmac("sha256", value).update(challenge).digest("base64url");
-    const path = join10(dirname9(this.options.socketPath), `owner-ticket-${randomBytes2(16).toString("hex")}.html`);
+    const path = join10(dirname9(this.options.socketPath), `owner-ticket-${randomBytes3(16).toString("hex")}.html`);
     const url = `${this.origin}/owner-proof#${value}`;
     const html = `<!doctype html><meta charset="utf-8"><meta name="referrer" content="no-referrer"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src ${this.origin}; worker-src 'none'; base-uri 'none'"><title>Olympus</title>${openingView()}<script>
 (async function(){
@@ -5579,17 +5969,17 @@ class LinuxOwnerBridge {
     const session = this.cookieSession(request);
     return !!session && equalHash(request.headers.get(PROOF_HEADER), session.proofHash);
   }
-  grantSession(dashboardCookies, extra) {
+  grantSession(dashboard, extra) {
     const cookie = secret(), proof = secret();
     const session = { cookieHash: hashSecret(cookie), proofHash: hashSecret(proof), expires: this.now() + SESSION_MS };
     this.sessions = [...this.sessions.filter((s) => s.expires > this.now()).slice(-14), session];
-    const response = Response.json({ proof, ...extra }, { headers: {
+    const response = Response.json({ proof, ...dashboard.unlockKey ? { unlock: dashboard.unlockKey } : {}, ...extra }, { headers: {
       "Set-Cookie": `${COOKIE}=${cookie}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${SESSION_MS / 1000}`,
       "Cache-Control": "no-store",
       "Clear-Site-Data": '"cache"',
       "Content-Security-Policy": CSP
     } });
-    for (const cookie2 of dashboardCookies)
+    for (const cookie2 of dashboard.cookies)
       response.headers.append("Set-Cookie", cookie2);
     return response;
   }
@@ -5648,18 +6038,18 @@ class LinuxOwnerBridge {
         unlinkSync(ticket.path);
       } catch {}
       const current = () => [...this.tickets.values()].includes(ticket) && ticket.expires > this.now();
-      let dashboardCookies;
+      let dashboard;
       try {
         if (this.options.workerReady?.() === false)
           throw new Error("Worker ownership changed.");
-        const result = this.options.establishDashboard ? await this.options.establishDashboard() : [];
+        const result = this.options.establishDashboard ? await this.options.establishDashboard() : { cookies: [] };
         if (this.options.workerReady?.() === false)
           throw new Error("Worker ownership changed.");
         if (result === null) {
           this.clearTicket(ticket);
           return refusal();
         }
-        dashboardCookies = result;
+        dashboard = established(result);
       } catch {
         if (this.live() && current()) {
           ticket.claimed = false;
@@ -5677,7 +6067,7 @@ class LinuxOwnerBridge {
       const asking = claim?.ticket === ticket && claim.state === "waiting" && claim.expires > this.now();
       if (asking)
         claim.state = "asked";
-      return this.grantSession(dashboardCookies, { target: ticket.target, ...asking ? { approval: { id: claim.approvalId, code: claim.code } } : {} });
+      return this.grantSession(dashboard, { target: ticket.target, ...asking ? { approval: { id: claim.approvalId, code: claim.code } } : {} });
     }
     if (url.pathname === "/owner-claim" && request.method === "POST") {
       let body2;
@@ -5701,11 +6091,11 @@ class LinuxOwnerBridge {
         return restarting(this.options.workerConflict?.());
       claim.collecting = true;
       const current = () => this.claim?.record === claim && claim.expires > this.now();
-      let dashboardCookies;
+      let dashboard;
       try {
         if (this.options.workerReady?.() === false)
           throw new Error("Worker ownership changed.");
-        const result = this.options.establishDashboard ? await this.options.establishDashboard() : [];
+        const result = this.options.establishDashboard ? await this.options.establishDashboard() : { cookies: [] };
         if (this.options.workerReady?.() === false)
           throw new Error("Worker ownership changed.");
         if (result === null) {
@@ -5713,7 +6103,7 @@ class LinuxOwnerBridge {
             this.claim = undefined;
           return refusal();
         }
-        dashboardCookies = result;
+        dashboard = established(result);
       } catch {
         if (this.live() && current()) {
           claim.collecting = false;
@@ -5724,7 +6114,7 @@ class LinuxOwnerBridge {
       if (!this.live() || !current())
         return refusal(503);
       this.claim = undefined;
-      return this.grantSession(dashboardCookies, {});
+      return this.grantSession(dashboard, {});
     }
     if (url.pathname === "/owner-approve" && request.method === "POST") {
       let body2;
@@ -5952,11 +6342,12 @@ function manageLinuxOwnerBridge(options) {
     }
   };
 }
-var COOKIE = "olympus_desktop_owner", PROOF_HEADER = "X-Olympus-Owner-Proof", FORM_PROOF = "_olympus_owner_proof", STORAGE = "olympus-desktop-owner-v1", TICKET_MS = 60000, CLAIM_HEADER = "X-Olympus-Owner-Claim", CODE_HEADER = "X-Olympus-Owner-Code", APPROVAL_HEADER = "X-Olympus-Owner-Approval", DECLINED_HEADER = "X-Olympus-Owner-Declined", WAIT_STORAGE = "olympus-desktop-owner-wait-v1", CLAIM_MS, SESSION_MS, DESKTOP_OWNER_OPEN_PATH = "/desktop-owner/open", DESKTOP_BRIDGE_REMEDY = "Use the owner-authenticated SSH socket forward on a trusted browser computer. Never substitute the fixed entry origin for the session origin.", CSP = "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; frame-src 'self'; frame-ancestors 'none'; object-src 'none'; base-uri 'none'; worker-src 'none'", secret = () => randomBytes2(32).toString("base64url"), WORKER_CONFLICT_HEADER = "X-Olympus-Worker-Conflict", restartWords = (conflict) => conflict === "retained_socket" ? "A stopped Olympus worker left its socket behind. Run olympus worker uninstall, then olympus engine restart to safely clear the retained socket." : conflict === "data" || conflict === "endpoint" ? `Olympus cannot start because another process owns its ${conflict}. Run olympus worker uninstall to remove an older worker service; otherwise stop the competing process. Retrying automatically.` : "Olympus is restarting…", restartWordsScript = (response) => `(${restartWords.toString()})(${response}.headers.get(${JSON.stringify(WORKER_CONFLICT_HEADER)}))`, BOOTSTRAP, BROWSER_OPEN_LIMIT_MESSAGE = "Too many windows were opened from the browser. Run olympus dashboard in a terminal on this computer.", OWNER_LIMIT_HEADER = "X-Olympus-Owner-Limit", BROWSER_OPEN_RECENT_MESSAGE = "A window was just opened. Look for it, or try again in a few seconds.", BROWSER_OPEN_FAILED_MESSAGE = "Unable to open the private ticket. Run olympus dashboard in a terminal on this computer.", OwnerOpenLimited, hashSecret = (value) => createHash2("sha256").update(value).digest("hex");
+var COOKIE = "olympus_desktop_owner", PROOF_HEADER = "X-Olympus-Owner-Proof", FORM_PROOF = "_olympus_owner_proof", STORAGE = "olympus-desktop-owner-v1", TICKET_MS = 60000, CLAIM_HEADER = "X-Olympus-Owner-Claim", CODE_HEADER = "X-Olympus-Owner-Code", APPROVAL_HEADER = "X-Olympus-Owner-Approval", DECLINED_HEADER = "X-Olympus-Owner-Declined", WAIT_STORAGE = "olympus-desktop-owner-wait-v1", CLAIM_MS, SESSION_MS, DESKTOP_OWNER_OPEN_PATH = "/desktop-owner/open", DESKTOP_BRIDGE_REMEDY = "Use the owner-authenticated SSH socket forward on a trusted browser computer. Never substitute the fixed entry origin for the session origin.", CSP = "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; frame-src 'self'; frame-ancestors 'none'; object-src 'none'; base-uri 'none'; worker-src 'none'", secret = () => randomBytes3(32).toString("base64url"), WORKER_CONFLICT_HEADER = "X-Olympus-Worker-Conflict", restartWords = (conflict) => conflict === "retained_socket" ? "A stopped Olympus worker left its socket behind. Run olympus worker uninstall, then olympus engine restart to safely clear the retained socket." : conflict === "data" || conflict === "endpoint" ? `Olympus cannot start because another process owns its ${conflict}. Run olympus worker uninstall to remove an older worker service; otherwise stop the competing process. Retrying automatically.` : "Olympus is restarting…", restartWordsScript = (response) => `(${restartWords.toString()})(${response}.headers.get(${JSON.stringify(WORKER_CONFLICT_HEADER)}))`, BOOTSTRAP, BROWSER_OPEN_LIMIT_MESSAGE = "Too many windows were opened from the browser. Run olympus dashboard in a terminal on this computer.", OWNER_LIMIT_HEADER = "X-Olympus-Owner-Limit", BROWSER_OPEN_RECENT_MESSAGE = "A window was just opened. Look for it, or try again in a few seconds.", BROWSER_OPEN_FAILED_MESSAGE = "Unable to open the private ticket. Run olympus dashboard in a terminal on this computer.", OwnerOpenLimited, hashSecret = (value) => createHash3("sha256").update(value).digest("hex");
 var init_linux_owner_bridge = __esm(() => {
   init_worker_transport();
   init_linux_desktop_opener();
   init_remote_request_body();
+  init_dashboard_launch();
   CLAIM_MS = 3 * 60000;
   SESSION_MS = 12 * 60 * 60 * 1000;
   BOOTSTRAP = `<script>(function(){
@@ -6392,7 +6783,7 @@ __export(exports_secret_store, {
   EncryptedFileSecretStore: () => EncryptedFileSecretStore
 });
 import { spawnSync as spawnSync6 } from "node:child_process";
-import { createCipheriv, createDecipheriv, randomBytes as randomBytes3, scryptSync } from "node:crypto";
+import { createCipheriv, createDecipheriv, randomBytes as randomBytes4, scryptSync } from "node:crypto";
 import { existsSync as existsSync6, mkdirSync as mkdirSync5, readFileSync as readFileSync10 } from "node:fs";
 import { homedir as homedir7, platform } from "node:os";
 import { dirname as dirname13, join as join14 } from "node:path";
@@ -6554,9 +6945,9 @@ class EncryptedFileSecretStore {
       version: STORE_VERSION,
       secrets: Object.fromEntries(Object.entries(store.secrets).sort(([a], [b]) => a.localeCompare(b)))
     };
-    const salt = this.passphrase ? randomBytes3(16) : undefined;
+    const salt = this.passphrase ? randomBytes4(16) : undefined;
     const key = this.keyForSalt(salt);
-    const iv = randomBytes3(12);
+    const iv = randomBytes4(12);
     try {
       const cipher = createCipheriv("aes-256-gcm", key, iv);
       const ciphertext = Buffer.concat([
@@ -6608,7 +6999,7 @@ class EncryptedFileSecretStore {
     }
     mkdirSync5(dirname13(this.keyFilePath), { recursive: true, mode: 448 });
     if (!existsSync6(this.keyFilePath)) {
-      writePrivateFileAtomicSync(this.keyFilePath, randomBytes3(32).toString("base64"));
+      writePrivateFileAtomicSync(this.keyFilePath, randomBytes4(32).toString("base64"));
     }
     const key = Buffer.from(readFileSync10(this.keyFilePath, "utf8").trim(), "base64");
     if (key.length !== 32) {
@@ -6761,8 +7152,8 @@ class LinuxLibsecretSecretStore {
     return [...new Set(keys)].sort();
   }
   async probe() {
-    const key = `probe.${randomBytes3(16).toString("hex")}`;
-    const value = randomBytes3(32).toString("base64");
+    const key = `probe.${randomBytes4(16).toString("hex")}`;
+    const value = randomBytes4(32).toString("base64");
     try {
       await this.set(key, value);
       if (await this.get(key) !== value)
@@ -6881,7 +7272,7 @@ var init_secret_store = __esm(() => {
 });
 
 // src/core/provider-account-identity.ts
-import { createHash as createHash3 } from "node:crypto";
+import { createHash as createHash4 } from "node:crypto";
 function isAccountBoundProvider(provider) {
   return ACCOUNT_BOUND_PROVIDERS.includes(provider);
 }
@@ -6890,14 +7281,14 @@ function dropboxAccountIdFromTokenPayload(payload) {
   return DROPBOX_ACCOUNT_ID.test(value) ? value : undefined;
 }
 function googleAccountIdFromAddress(address) {
-  return `google:${createHash3("sha256").update(address.trim().toLowerCase()).digest("hex").slice(0, 40)}`;
+  return `google:${createHash4("sha256").update(address.trim().toLowerCase()).digest("hex").slice(0, 40)}`;
 }
 function googleSubjectLabel(subject) {
-  return `google-sub:${createHash3("sha256").update(`sub
+  return `google-sub:${createHash4("sha256").update(`sub
 ${subject.trim()}`).digest("hex").slice(0, 32)}`;
 }
 function googlePermissionLabel(permissionId) {
-  return `google-perm:${createHash3("sha256").update(`perm
+  return `google-perm:${createHash4("sha256").update(`perm
 ${permissionId.trim()}`).digest("hex").slice(0, 32)}`;
 }
 function composeProviderAccountId(labels) {
@@ -8850,7 +9241,7 @@ var init_worker_service = __esm(() => {
 });
 
 // src/core/oauth-relay.ts
-import { createHmac as createHmac3, randomBytes as randomBytes4, timingSafeEqual as timingSafeEqual2 } from "node:crypto";
+import { createHmac as createHmac3, randomBytes as randomBytes5, timingSafeEqual as timingSafeEqual2 } from "node:crypto";
 function oauthRelayUrl(env = process.env) {
   const override = env.OLYMPUS_OAUTH_RELAY_URL?.trim();
   if (!override)
@@ -8885,10 +9276,10 @@ function googlePublisherExchangeRefreshUrl(env = process.env) {
   return `${googlePublisherExchangeUrl(env)}/refresh`;
 }
 function createOAuthRelayNonce() {
-  return randomBytes4(32).toString("base64url");
+  return randomBytes5(32).toString("base64url");
 }
 function createOAuthRelayStateKey() {
-  return randomBytes4(32).toString("base64url");
+  return randomBytes5(32).toString("base64url");
 }
 function createOAuthRelayStateKeys() {
   return { current: createOAuthRelayStateKey() };
@@ -9171,7 +9562,7 @@ var GOOGLE_OAUTH_TOKEN_URL = "https://oauth2.googleapis.com/token", GOOGLE_JWT_B
 var init_google_service_account = () => {};
 
 // src/workers/credential-broker/index.ts
-import { createHash as createHash4 } from "node:crypto";
+import { createHash as createHash5 } from "node:crypto";
 import { mkdir as mkdir2, readFile } from "node:fs/promises";
 import { dirname as dirname17 } from "node:path";
 function isCredentialProvider(value) {
@@ -9219,7 +9610,7 @@ class JsonCredentialOAuth2StateStore {
     return store.handles[handle];
   }
   leaseTargetPath(handle) {
-    const digest2 = createHash4("sha256").update(handle).digest("hex");
+    const digest2 = createHash5("sha256").update(handle).digest("hex");
     return `${this.path}.refresh-${digest2}`;
   }
   async save(handle, state) {
@@ -9918,7 +10309,7 @@ function bearerSessionFromMintedToken(options) {
 }
 function mintedSessionCacheKey(namespace, definition, capability, env) {
   const envRefreshToken = firstNonEmptyEnv(env, definition.oauth2Refresh?.refreshTokenEnvNames ?? []);
-  const envGrant = envRefreshToken ? createHash4("sha256").update(envRefreshToken).digest("hex").slice(0, 32) : "";
+  const envGrant = envRefreshToken ? createHash5("sha256").update(envRefreshToken).digest("hex").slice(0, 32) : "";
   return `${mintedSessionCachePrefix(namespace, definition.handle, capability)}${definition.grantGeneration ?? ""}
 ${envGrant}`;
 }
@@ -11919,7 +12310,7 @@ var init_provider_account_history = __esm(() => {
 // src/core/connect.ts
 import { Buffer as Buffer2 } from "node:buffer";
 import { spawn as spawn2 } from "node:child_process";
-import { createHash as createHash5, randomBytes as randomBytes5 } from "node:crypto";
+import { createHash as createHash6, randomBytes as randomBytes6 } from "node:crypto";
 import { mkdirSync as mkdirSync8, readFileSync as readFileSync19, rmSync as rmSync3, writeFileSync as writeFileSync3 } from "node:fs";
 import { createServer } from "node:http";
 import { homedir as homedir13 } from "node:os";
@@ -12156,11 +12547,11 @@ async function finishOAuthSourceConnection(options) {
   }
 }
 function createOAuthPkceState() {
-  const verifier = base64Url2(randomBytes5(32));
+  const verifier = base64Url2(randomBytes6(32));
   return {
     verifier,
-    challenge: base64Url2(createHash5("sha256").update(verifier).digest()),
-    state: base64Url2(randomBytes5(24))
+    challenge: base64Url2(createHash6("sha256").update(verifier).digest()),
+    state: base64Url2(randomBytes6(24))
   };
 }
 function prepareOAuthSourceConnection(options, redirectUri, pkce = createOAuthPkceState()) {
@@ -14406,11 +14797,11 @@ var init_still_image_formats = __esm(() => {
 });
 
 // src/workers/source-index/pinned-download.ts
-import { createHash as createHash6 } from "node:crypto";
+import { createHash as createHash7 } from "node:crypto";
 import { closeSync as closeSync9, createReadStream, existsSync as existsSync13, openSync as openSync9, renameSync as renameSync2, rmSync as rmSync5, statSync as statSync9, writeSync as writeSync2 } from "node:fs";
 async function downloadPinnedFile(options) {
   const { fetchImpl, url, target, partial, expectedBytes, algorithm, encoding, noun, stallMs, error } = options;
-  let hash = createHash6(algorithm);
+  let hash = createHash7(algorithm);
   let received = 0;
   let fd;
   let discard = false;
@@ -14482,7 +14873,7 @@ async function downloadPinnedFile(options) {
           } catch (cause) {
             throw disk(cause);
           }
-          hash = createHash6(algorithm);
+          hash = createHash7(algorithm);
           options.onProgress(-received);
           received = 0;
         }
@@ -14812,7 +15203,7 @@ var END_OF_CENTRAL_DIRECTORY = 101010256, CENTRAL_DIRECTORY_ENTRY = 33639248, LO
 var init_zip = () => {};
 
 // src/workers/source-index/built-in-embedding/assets.ts
-import { createHash as createHash7, randomUUID as randomUUID4 } from "node:crypto";
+import { createHash as createHash8, randomUUID as randomUUID4 } from "node:crypto";
 import {
   closeSync as closeSync10,
   createReadStream as createReadStream2,
@@ -15034,7 +15425,7 @@ async function installLiteRtRuntime(fetchImpl, runtimeDir, wheel, reporter, stal
     const marker = {
       wheel: wheel.name,
       sha256: wheel.sha256,
-      librarySha256: createHash7("sha256").update(library2).digest("hex")
+      librarySha256: createHash8("sha256").update(library2).digest("hex")
     };
     writeFileSync4(join25(staging, RUNTIME_MARKER), `${JSON.stringify(marker, null, 2)}
 `);
@@ -15159,7 +15550,7 @@ function integrityAlgorithm(integrity) {
 }
 function sha256File(path, timeoutMs = 10 * 60000) {
   return new Promise((resolve7, reject) => {
-    const hash = createHash7("sha256");
+    const hash = createHash8("sha256");
     let settled = false;
     const stream = createReadStream2(path);
     const finish = (error) => {
@@ -19809,7 +20200,7 @@ var init_secret_patterns = __esm(() => {
 });
 
 // src/workers/dropbox-files/content-policy.ts
-import { createHash as createHash8 } from "node:crypto";
+import { createHash as createHash9 } from "node:crypto";
 function scanDropboxContentPolicyText(input) {
   const text2 = input.text?.trim() ?? "";
   if (!text2) {
@@ -19878,7 +20269,7 @@ function dedupeFindings(findings) {
   return unique;
 }
 function hashFinding(type, matchedText) {
-  return createHash8("sha256").update(type).update("\x00").update(matchedText).digest("hex");
+  return createHash9("sha256").update(type).update("\x00").update(matchedText).digest("hex");
 }
 var DROPBOX_CONTENT_POLICY_CLASSIFIER_KIND = "dropbox_deterministic_content_policy", DROPBOX_CONTENT_POLICY_CLASSIFIER_VERSION = "2026-10-13", REVIEW_PATTERNS;
 var init_content_policy = __esm(() => {
@@ -19912,7 +20303,7 @@ var init_content_policy = __esm(() => {
 });
 
 // src/workers/classification/engine.ts
-import { createHash as createHash9 } from "node:crypto";
+import { createHash as createHash10 } from "node:crypto";
 function classifyItemTier(input, options = {}) {
   const haystack = buildHaystack(input);
   const sensitive = detectSensitiveSignals(input, haystack);
@@ -20029,7 +20420,7 @@ function rememberSecretFindingKinds(text2, kinds) {
     rememberScan(key2, [...new Set(kinds)].filter((kind) => SECRET_FINDING_TYPES.has(kind)).sort());
 }
 function secretScanMemoKey(text2) {
-  return secretScanReusable(text2) ? createHash9("sha256").update(text2).digest("hex") : undefined;
+  return secretScanReusable(text2) ? createHash10("sha256").update(text2).digest("hex") : undefined;
 }
 function rememberScan(key2, kinds) {
   secretScanMemo ??= new Map;
@@ -20601,7 +20992,7 @@ function isBareShareLink(text2) {
 }
 
 // src/workers/classification/tier-classifier.ts
-import { createHash as createHash10 } from "node:crypto";
+import { createHash as createHash11 } from "node:crypto";
 function tierRank(tier) {
   return TIER_RANK[tier];
 }
@@ -20625,14 +21016,14 @@ function heldUntilJudged(reasons) {
   return reasons?.includes(HELD_UNTIL_JUDGED_REASON) === true;
 }
 function contentDigestReason(text2) {
-  return `content:sha256:${createHash10("sha256").update(text2.trim()).digest("hex")}`;
+  return `content:sha256:${createHash11("sha256").update(text2.trim()).digest("hex")}`;
 }
 function contentJudgeVerdictReason(reason, tier, digest2) {
-  return `content:judge_verdict:${tier}:${createHash10("sha256").update(JSON.stringify([reason, digest2])).digest("hex")}`;
+  return `content:judge_verdict:${tier}:${createHash11("sha256").update(JSON.stringify([reason, digest2])).digest("hex")}`;
 }
 function contentNamesReason(names, parentContext) {
   const parts = [names.title, names.path, names.sender, parentContext].map((part) => part?.trim() ?? "");
-  return `content:names:${createHash10("sha256").update(JSON.stringify(parts)).digest("hex").slice(0, 16)}`;
+  return `content:names:${createHash11("sha256").update(JSON.stringify(parts)).digest("hex").slice(0, 16)}`;
 }
 function snifferContentMaterial(names, excerpt, parentContext) {
   const trimmed = names.trim();
@@ -20664,7 +21055,7 @@ function splitParentContext(material) {
 }
 function tierSnifferInputHash(pass, signals, text2, parentContext) {
   const context2 = parentContext?.replace(/\s+/g, " ").trim().slice(0, PARENT_CONTEXT_MAX_CHARS);
-  return createHash10("sha256").update(JSON.stringify([
+  return createHash11("sha256").update(JSON.stringify([
     pass,
     signals.title ?? null,
     signals.path ?? null,
@@ -20684,7 +21075,7 @@ function textOnlyMime(mimeType) {
   return mimeType === undefined || ["text/plain", "text/markdown", "message/rfc822"].includes(mimeType.split(";")[0].trim().toLowerCase());
 }
 function normalizedContentHash(text2) {
-  return createHash10("sha256").update(text2.normalize("NFC").replace(/\r\n?/g, `
+  return createHash11("sha256").update(text2.normalize("NFC").replace(/\r\n?/g, `
 `).trim()).digest("hex");
 }
 function trivialContentRule(text2, parentContext) {
@@ -21288,7 +21679,7 @@ var init_tier_classifier = __esm(() => {
 
 // src/workers/classification/secret-locations.ts
 import { Database } from "bun:sqlite";
-import { createHash as createHash11 } from "node:crypto";
+import { createHash as createHash12 } from "node:crypto";
 import { chmodSync as chmodSync5, closeSync as closeSync11, existsSync as existsSync18, mkdirSync as mkdirSync11, openSync as openSync11 } from "node:fs";
 import { dirname as dirname24 } from "node:path";
 function screenedSecretLocator(locator) {
@@ -21335,7 +21726,7 @@ class SecretLocationsIndex {
     const title = namesReleasable && input.title?.trim() && detectSecretFindingKinds(input.title).length === 0 ? input.title.trim().slice(0, 300) : null;
     const locator = screenedSecretLocator(input.locator);
     const folderKeys = [...new Set((input.folderKeys ?? []).map((key2) => key2.trim()).filter(Boolean))].sort();
-    const contentHash = input.text !== undefined ? createHash11("sha256").update(input.text, "utf8").digest("hex") : null;
+    const contentHash = input.text !== undefined ? createHash12("sha256").update(input.text, "utf8").digest("hex") : null;
     const existing = this.get(input.identity);
     if (existing && existing.locator === locator && existing.title === title && existing.namesReleasable === namesReleasable && JSON.stringify(existing.folderKeys) === JSON.stringify(folderKeys) && existing.scopeGeneration === (input.scopeGeneration ?? null) && existing.scopeRevision === (input.scopeRevision ?? null) && JSON.stringify(existing.findingKinds) === JSON.stringify(kinds) && existing.contentHash === contentHash) {
       return false;
@@ -21456,10 +21847,10 @@ class SecretLocationsIndex {
   }
 }
 function secretLocationFingerprint(location) {
-  return createHash11("sha256").update(JSON.stringify([location.locator, location.title])).digest("hex");
+  return createHash12("sha256").update(JSON.stringify([location.locator, location.title])).digest("hex");
 }
 function secretLocationRef(location) {
-  return `secret:${createHash11("sha256").update(`${location.source}\x00${location.accountScope}\x00${location.conversationKey}\x00${location.providerItemId}`).digest("hex").slice(0, 16)}`;
+  return `secret:${createHash12("sha256").update(`${location.source}\x00${location.accountScope}\x00${location.conversationKey}\x00${location.providerItemId}`).digest("hex").slice(0, 16)}`;
 }
 function secretLocationWithinScope(location, scope) {
   if (scope.accountScope && location.accountScope !== scope.accountScope)
@@ -21608,15 +21999,15 @@ function* iterateRows(db, sql, ...params) {
 
 // src/workers/classification/sniffer-store.ts
 import { Database as Database2 } from "bun:sqlite";
-import { createHash as createHash12 } from "node:crypto";
+import { createHash as createHash13 } from "node:crypto";
 import { chmodSync as chmodSync6, existsSync as existsSync19, mkdirSync as mkdirSync12 } from "node:fs";
 import { dirname as dirname25 } from "node:path";
 function snifferMaterialHash(pass, material) {
-  return createHash12("sha256").update(`${pass}
+  return createHash13("sha256").update(`${pass}
 ${material}`).digest("hex");
 }
 function snifferSubjectKey(subject) {
-  return createHash12("sha256").update(JSON.stringify([subject.provider, subject.accountScope, subject.providerConversationId ?? "", subject.providerItemId])).digest("hex");
+  return createHash13("sha256").update(JSON.stringify([subject.provider, subject.accountScope, subject.providerConversationId ?? "", subject.providerItemId])).digest("hex");
 }
 function contentVerdictReusable(verdict, contentHash, subject) {
   return !verdict.failSafe && (verdict.contentHash === contentHash || subject !== undefined && verdict.modelSubject === snifferSubjectKey(subject));
@@ -28659,7 +29050,7 @@ var init_store_identity = __esm(() => {
 });
 
 // src/core/media-cache.ts
-import { createHash as createHash13, randomUUID as randomUUID7 } from "node:crypto";
+import { createHash as createHash14, randomUUID as randomUUID7 } from "node:crypto";
 import {
   chmodSync as chmodSync9,
   closeSync as closeSync13,
@@ -28719,7 +29110,7 @@ function mediaHolderName(holder) {
   }
 }
 function writeMediaCacheFile(dir, bytes, mimeType) {
-  const sha256 = createHash13("sha256").update(bytes).digest("hex");
+  const sha256 = createHash14("sha256").update(bytes).digest("hex");
   const path = join32(dir, `${sha256}${EXTENSIONS[mimeType] ?? ".bin"}`);
   ensureOwnerOnlyDir(dir);
   const stagingHolder = `staging:${randomUUID7()}`;
@@ -28905,7 +29296,7 @@ function refsDir(path) {
   return join32(dirname29(path), `${basename6(path)}.refs`);
 }
 function holderDigest(name) {
-  return createHash13("sha256").update(name).digest("hex").slice(0, 32);
+  return createHash14("sha256").update(name).digest("hex").slice(0, 32);
 }
 function holderName(holder) {
   const digest2 = holderDigest(mediaHolderName(holder));
@@ -29198,12 +29589,12 @@ var init_operation_caller = __esm(() => {
 });
 
 // connect-relay/shared/tokens.ts
-import { createHash as createHash14, randomBytes as randomBytes6 } from "node:crypto";
+import { createHash as createHash15, randomBytes as randomBytes7 } from "node:crypto";
 function surfaceFingerprint(digest2) {
-  return createHash14("sha256").update(SURFACE_FINGERPRINT_DOMAIN, "utf8").update(digest2).digest("base64url");
+  return createHash15("sha256").update(SURFACE_FINGERPRINT_DOMAIN, "utf8").update(digest2).digest("base64url");
 }
 function mintCredential(kind, installId) {
-  return `${PREFIX[kind]}.${installId}.${randomBytes6(32).toString("base64url")}`;
+  return `${PREFIX[kind]}.${installId}.${randomBytes7(32).toString("base64url")}`;
 }
 function credentialInstallId(kind, value) {
   if (typeof value !== "string" || value.length > 128)
@@ -29295,7 +29686,7 @@ var init_pinned_clients = __esm(() => {
 });
 
 // src/core/remote-oauth-store.ts
-import { createHash as createHash15, randomBytes as randomBytes7, timingSafeEqual as timingSafeEqual3 } from "node:crypto";
+import { createHash as createHash16, randomBytes as randomBytes8, timingSafeEqual as timingSafeEqual3 } from "node:crypto";
 function isRemoteConnectionProvider(value) {
   return typeof value === "string" && OPERATION_CALLER_PROVIDERS.includes(value);
 }
@@ -29323,13 +29714,13 @@ function normalizePairingCode(input) {
   return compact;
 }
 function digest2(value) {
-  return createHash15("sha256").update(value, "utf8").digest();
+  return createHash16("sha256").update(value, "utf8").digest();
 }
 function randomPairingSymbols(length) {
   const limit = 256 - 256 % PAIRING_ALPHABET.length;
   let out = "";
   while (out.length < length) {
-    for (const byte of randomBytes7(length * 2)) {
+    for (const byte of randomBytes8(length * 2)) {
       if (byte >= limit)
         continue;
       out += PAIRING_ALPHABET[byte % PAIRING_ALPHABET.length];
@@ -29354,8 +29745,8 @@ function createRemoteOAuthStore(db, now, recordLastUse) {
     provider: remoteConnectionProvider({ clientId: row.client_id, displayName: row.display_name, chosen: row.provider })
   });
   const issueTokens = (connectionId, clientId, resource, at, installId) => {
-    const accessToken = installId ? mintCredential("access", installId) : `${REMOTE_OAUTH_ACCESS_TOKEN_PREFIX}${randomBytes7(32).toString("base64url")}`;
-    const refreshToken = installId ? mintCredential("refresh", installId) : `${REMOTE_OAUTH_REFRESH_TOKEN_PREFIX}${randomBytes7(32).toString("base64url")}`;
+    const accessToken = installId ? mintCredential("access", installId) : `${REMOTE_OAUTH_ACCESS_TOKEN_PREFIX}${randomBytes8(32).toString("base64url")}`;
+    const refreshToken = installId ? mintCredential("refresh", installId) : `${REMOTE_OAUTH_REFRESH_TOKEN_PREFIX}${randomBytes8(32).toString("base64url")}`;
     const insert = db.query(`
       INSERT INTO remote_oauth_tokens (token_hash, connection_id, kind, resource, client_id, created_at, expires_at)
       VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -29438,7 +29829,7 @@ function createRemoteOAuthStore(db, now, recordLastUse) {
           if (after >= REMOTE_OAUTH_MAX_REGISTERED_CLIENTS)
             return "capacity";
         }
-        const clientId = `olympus_client_${randomBytes7(12).toString("hex")}`;
+        const clientId = `olympus_client_${randomBytes8(12).toString("hex")}`;
         const createdAt = at.toISOString();
         db.query("INSERT INTO remote_oauth_clients (client_id, client_name, redirect_uris, created_at) VALUES (?, ?, ?, ?)").run(clientId, input.clientName, JSON.stringify(input.redirectUris), createdAt);
         return { clientId, clientName: input.clientName, redirectUris: [...input.redirectUris], createdAt };
@@ -29453,7 +29844,7 @@ function createRemoteOAuthStore(db, now, recordLastUse) {
     createGrant(input) {
       const at = now();
       return db.transaction(() => {
-        const id = randomBytes7(9).toString("hex");
+        const id = randomBytes8(9).toString("hex");
         const provider = remoteConnectionProvider({ clientId: input.clientId, displayName: input.displayName, chosen: input.provider ?? null });
         db.query(`
           INSERT INTO remote_connections (id, display_name, kind, token_hash, client_id, created_at, provider)
@@ -29820,7 +30211,7 @@ __export(exports_waiting_private_questions, {
   CHATGPT_INBOX_GRACE_MS: () => CHATGPT_INBOX_GRACE_MS
 });
 import { Database as Database5 } from "bun:sqlite";
-import { createHash as createHash16, randomBytes as randomBytes8 } from "node:crypto";
+import { createHash as createHash17, randomBytes as randomBytes9 } from "node:crypto";
 import { chmodSync as chmodSync10, existsSync as existsSync26, lstatSync as lstatSync16, mkdirSync as mkdirSync16 } from "node:fs";
 import { homedir as homedir18 } from "node:os";
 import { dirname as dirname31, isAbsolute as isAbsolute16, join as join34 } from "node:path";
@@ -29957,7 +30348,7 @@ function openWaitingPrivateQuestionStore(dbPath, options = {}) {
       if (utf8Length(selectors) > WAITING_QUESTION_LIMITS.selectorBytes)
         return;
       const detail = input.detail === "full" ? "full" : "summary";
-      const dedupeKey = createHash16("sha256").update(JSON.stringify([ticket.connectionId, ...input.path === "anonymous" || input.retainEachAsk ? [input.path ?? "private", randomBytes8(16).toString("hex")] : [], selectors, normalizeWaitingQuestion(question)])).digest("hex");
+      const dedupeKey = createHash17("sha256").update(JSON.stringify([ticket.connectionId, ...input.path === "anonymous" || input.retainEachAsk ? [input.path ?? "private", randomBytes9(16).toString("hex")] : [], selectors, normalizeWaitingQuestion(question)])).digest("hex");
       const at = now();
       let active = false;
       try {
@@ -29988,7 +30379,7 @@ function openWaitingPrivateQuestionStore(dbPath, options = {}) {
           `).run(question, existing.detail === "full" || detail === "full" ? "full" : "summary", existing.state === "waiting" || input.state === "waiting" ? "waiting" : "unchecked", generation, at, existing.id);
           ref = { id: existing.id, generation, connectionId: ticket.connectionId };
         } else {
-          const id = randomBytes8(16).toString("base64url");
+          const id = randomBytes9(16).toString("base64url");
           db.query(`
             INSERT INTO waiting_questions
               (id, dedupe_key, connection_id, surface, question, detail, selectors, state, seen, generation, asked_at, answer_path, destination)
@@ -30383,7 +30774,7 @@ __export(exports_remote_connections, {
   REMOTE_CONNECTIONS_SCHEMA_VERSION: () => REMOTE_CONNECTIONS_SCHEMA_VERSION
 });
 import { Database as Database6 } from "bun:sqlite";
-import { createHash as createHash17, randomBytes as randomBytes9, timingSafeEqual as timingSafeEqual4 } from "node:crypto";
+import { createHash as createHash18, randomBytes as randomBytes10, timingSafeEqual as timingSafeEqual4 } from "node:crypto";
 import { chmodSync as chmodSync11, existsSync as existsSync27, lstatSync as lstatSync17, mkdirSync as mkdirSync17 } from "node:fs";
 import { homedir as homedir19 } from "node:os";
 import { dirname as dirname32, isAbsolute as isAbsolute17 } from "node:path";
@@ -30415,7 +30806,7 @@ function isWellFormedRemoteConnectionToken(token) {
   return TOKEN_PATTERN2.test(token);
 }
 function hashRemoteConnectionToken(token) {
-  return createHash17("sha256").update(token, "utf8").digest();
+  return createHash18("sha256").update(token, "utf8").digest();
 }
 function openRemoteConnectionStore(dbPath = defaultRemoteConnectionsDbPath(), options = {}) {
   const now = options.now ?? (() => new Date);
@@ -30465,8 +30856,8 @@ function openRemoteConnectionStore(dbPath = defaultRemoteConnectionsDbPath(), op
         throw new OperationError("invalid_params", "Choose a supported connection route.");
       }
       const provider = remoteConnectionProvider({ displayName: name, chosen: options2.provider ?? null });
-      const id = randomBytes9(CONNECTION_ID_BYTES).toString("hex");
-      const secret2 = randomBytes9(CONNECTION_SECRET_BYTES).toString("base64url");
+      const id = randomBytes10(CONNECTION_ID_BYTES).toString("hex");
+      const secret2 = randomBytes10(CONNECTION_SECRET_BYTES).toString("base64url");
       const token = options2.installId ? mintCredential("access", options2.installId) : `${REMOTE_CONNECTION_TOKEN_PREFIX}${id}_${secret2}`;
       const createdAt = now().toISOString();
       db.query(`
@@ -30663,7 +31054,7 @@ __export(exports_app_release_log, {
   APP_RELEASE_DEFAULT_RETENTION_DAYS: () => APP_RELEASE_DEFAULT_RETENTION_DAYS
 });
 import { Database as Database7 } from "bun:sqlite";
-import { randomBytes as randomBytes10 } from "node:crypto";
+import { randomBytes as randomBytes11 } from "node:crypto";
 import { chmodSync as chmodSync12, existsSync as existsSync28, lstatSync as lstatSync18, mkdirSync as mkdirSync18 } from "node:fs";
 import { homedir as homedir20 } from "node:os";
 import { dirname as dirname33, isAbsolute as isAbsolute18, join as join35 } from "node:path";
@@ -30718,7 +31109,7 @@ function openAppReleaseLog(dbPath, options = {}) {
     record(record) {
       if (retentionDays() === 0)
         return;
-      const id = `apr_${randomBytes10(12).toString("base64url")}`;
+      const id = `apr_${randomBytes11(12).toString("base64url")}`;
       db.transaction(() => {
         db.query(`INSERT INTO app_release_requests (id, at, connection_id, connection_name, connection_kind, question, held_back, answered_privately, withheld, private_question_id)
           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(id, record.at, record.connection.id ?? null, record.connection.name.slice(0, 80), record.connection.kind, record.question.slice(0, 2000), Math.max(0, Math.floor(record.heldBack)), record.answeredPrivately ? 1 : 0, record.withheld ? 1 : 0, record.privateQuestionKey ?? null);
@@ -31158,7 +31549,7 @@ var init_delphi_scorer = __esm(() => {
 });
 
 // src/workers/classification/sniffer.ts
-import { createHash as createHash18 } from "node:crypto";
+import { createHash as createHash19 } from "node:crypto";
 function validDecisionBar(bar) {
   return typeof bar === "number" && Number.isFinite(bar) && bar > 0 && bar <= SNIFFER_DECISION_PRIVATE_BAR;
 }
@@ -31288,7 +31679,7 @@ function snifferCacheModelId(lane) {
 function snifferId(lane, promptVersion = SNIFFER_PROMPT_VERSION) {
   const bar = lane.snifferMode === "decision" ? snifferDecisionBar(lane) : SNIFFER_DECISION_PRIVATE_BAR;
   const judge = bar === SNIFFER_DECISION_PRIVATE_BAR ? snifferCacheModelId(lane) : `${snifferCacheModelId(lane)}:bar-${bar}`;
-  const model = createHash18("sha256").update(judge).digest("hex").slice(0, 16);
+  const model = createHash19("sha256").update(judge).digest("hex").slice(0, 16);
   return `${lane.kind}:${promptVersion}.m${model}`;
 }
 function buildSnifferBatchPrompt(pass, items, ownerContext) {
@@ -31311,7 +31702,7 @@ function snifferPromptVersions(ownerContext) {
   const context2 = boundedOwnerContext(ownerContext);
   if (!context2)
     return { approval: SNIFFER_PROMPT_VERSION, cache: SNIFFER_PROMPT_VERSION };
-  const digest3 = createHash18("sha256").update(context2).digest("hex").slice(0, 8);
+  const digest3 = createHash19("sha256").update(context2).digest("hex").slice(0, 8);
   return { approval: SNIFFER_OWNER_CONTEXT_PROMPT_VERSION, cache: `${SNIFFER_OWNER_CONTEXT_PROMPT_VERSION}.o${digest3}` };
 }
 function parseSnifferBatchResponse(text2, expected) {
@@ -31586,8 +31977,8 @@ var init_sniffer = __esm(() => {
     required: ["verdicts"],
     additionalProperties: false
   };
-  SNIFFER_PROMPT_VERSION = `p-${createHash18("sha256").update(SNIFFER_SYSTEM_PROMPT).update("\x00").update(buildSnifferBatchPrompt("metadata", [{ i: 1, material: "template" }])).update("\x00").update(buildSnifferBatchPrompt("content", [{ i: 1, material: "template" }])).digest("hex").slice(0, 12)}`;
-  SNIFFER_OWNER_CONTEXT_PROMPT_VERSION = `p-${createHash18("sha256").update(SNIFFER_SYSTEM_PROMPT).update("\x00").update(buildSnifferBatchPrompt("metadata", [{ i: 1, material: "template" }], "template")).update("\x00").update(buildSnifferBatchPrompt("content", [{ i: 1, material: "template" }], "template")).digest("hex").slice(0, 12)}`;
+  SNIFFER_PROMPT_VERSION = `p-${createHash19("sha256").update(SNIFFER_SYSTEM_PROMPT).update("\x00").update(buildSnifferBatchPrompt("metadata", [{ i: 1, material: "template" }])).update("\x00").update(buildSnifferBatchPrompt("content", [{ i: 1, material: "template" }])).digest("hex").slice(0, 12)}`;
+  SNIFFER_OWNER_CONTEXT_PROMPT_VERSION = `p-${createHash19("sha256").update(SNIFFER_SYSTEM_PROMPT).update("\x00").update(buildSnifferBatchPrompt("metadata", [{ i: 1, material: "template" }], "template")).update("\x00").update(buildSnifferBatchPrompt("content", [{ i: 1, material: "template" }], "template")).digest("hex").slice(0, 12)}`;
   SNIFFER_CATEGORY_SYNONYMS = {
     insurance: "financial",
     money: "financial",
@@ -32701,7 +33092,7 @@ var init_embedding_identity = __esm(() => {
 // src/workers/source-index/embeddings.ts
 import { Buffer as Buffer3 } from "node:buffer";
 import { AsyncLocalStorage as AsyncLocalStorage3 } from "node:async_hooks";
-import { createHash as createHash19 } from "node:crypto";
+import { createHash as createHash20 } from "node:crypto";
 import { lookup as lookup2 } from "node:dns/promises";
 import { request as httpsRequest } from "node:https";
 import { isIP as isIP2 } from "node:net";
@@ -33507,7 +33898,7 @@ function normalizeOutputDimensionality(value) {
   return value;
 }
 function hashString(value) {
-  return createHash19("sha256").update(value).digest("hex");
+  return createHash20("sha256").update(value).digest("hex");
 }
 function memoizeQueryEmbeddings(provider) {
   const queries = new Map;
@@ -33716,7 +34107,7 @@ var init_media_judge = __esm(() => {
 });
 
 // src/workers/connector-store/local-index.ts
-import { createHash as createHash20, randomUUID as randomUUID8 } from "node:crypto";
+import { createHash as createHash21, randomUUID as randomUUID8 } from "node:crypto";
 import { existsSync as existsSync30, lstatSync as lstatSync19, mkdirSync as mkdirSync19, statSync as statSync14 } from "node:fs";
 import { dirname as dirname34 } from "node:path";
 import { Database as Database8 } from "bun:sqlite";
@@ -35324,7 +35715,7 @@ function connectorStoreEmbeddingSelectionSha256(localItemIds) {
   return hashString2(JSON.stringify(normalized ? [...normalized].sort() : null));
 }
 function connectorStoreEmbeddingInputSha256(rows) {
-  const digest3 = createHash20("sha256");
+  const digest3 = createHash21("sha256");
   for (const row of rows)
     digest3.update(`${row.chunk_pk}\x00${row.content_hash}
 `);
@@ -35418,7 +35809,7 @@ function namesOnlyKeptCount(n) {
   return n > 0 ? { namesOnlyKeptChunks: n } : {};
 }
 function migrationFingerprint(contentHash, chunkHashes) {
-  return createHash20("sha256").update(contentHash ?? "").update("\x00").update(String(chunkHashes.length)).update("\x00").update(chunkHashes.join("\x00")).digest("hex");
+  return createHash21("sha256").update(contentHash ?? "").update("\x00").update(String(chunkHashes.length)).update("\x00").update(chunkHashes.join("\x00")).digest("hex");
 }
 function carryHold(listed, fetched) {
   return listed.holdContentUntilJudged === true && fetched.holdContentUntilJudged !== true ? { ...fetched, holdContentUntilJudged: true } : fetched;
@@ -36889,7 +37280,7 @@ function requireNonEmpty(value, label) {
   return text2;
 }
 function hashString2(value) {
-  return createHash20("sha256").update(value).digest("hex");
+  return createHash21("sha256").update(value).digest("hex");
 }
 function errorMessage2(error) {
   return error instanceof Error ? error.message : String(error);
@@ -40030,7 +40421,7 @@ var init_local_index = __esm(() => {
           embeddingsComplete: false
         };
       }
-      const chunkTextCoherent = chunkRows.every((chunk) => createHash20("sha256").update(chunk.bounded_text).digest("hex") === chunk.content_hash);
+      const chunkTextCoherent = chunkRows.every((chunk) => createHash21("sha256").update(chunk.bounded_text).digest("hex") === chunk.content_hash);
       if (!chunkTextCoherent) {
         return {
           chunksIndexed: 0,
@@ -40926,8 +41317,8 @@ var init_local_index = __esm(() => {
         itemsUnchanged: 0,
         itemsMissing: 0
       };
-      const inputDigest = createHash20("sha256");
-      const outputDigest = createHash20("sha256");
+      const inputDigest = createHash21("sha256");
+      const outputDigest = createHash21("sha256");
       const select = this.db.query(`
       SELECT item_pk, sender_id, sender_label, sender_is_owner
       FROM items
@@ -40997,8 +41388,8 @@ var init_local_index = __esm(() => {
         ftsRowsRefreshed: 0,
         chunkEmbeddingInputsInvalidated: 0
       };
-      const inputDigest = createHash20("sha256");
-      const outputDigest = createHash20("sha256");
+      const inputDigest = createHash21("sha256");
+      const outputDigest = createHash21("sha256");
       let lastItemPk = startAfter;
       let hasMore = false;
       while (maxItems === undefined || counts.itemsScanned < maxItems) {
@@ -44938,11 +45329,11 @@ var init_pairing_placement = __esm(() => {
 });
 
 // src/core/whatsapp-bridge-name.ts
-import { createHash as createHash21 } from "node:crypto";
+import { createHash as createHash22 } from "node:crypto";
 import { existsSync as existsSync32, readdirSync as readdirSync6, readFileSync as readFileSync28 } from "node:fs";
 import { join as join37 } from "node:path";
 function whatsappBridgeFileName(sourceDir) {
-  const hash = createHash21("sha256");
+  const hash = createHash22("sha256");
   for (const name of ["main.go", "go.mod", "go.sum"]) {
     const path = join37(sourceDir, name);
     if (!existsSync32(path))
@@ -45025,7 +45416,7 @@ var init_messaging_chat_kinds = __esm(() => {
 import { Database as Database10 } from "bun:sqlite";
 import { chmodSync as chmodSync13, existsSync as existsSync33, linkSync as linkSync2, lstatSync as lstatSync21, mkdirSync as mkdirSync21, renameSync as renameSync5, rmSync as rmSync10, rmdirSync as rmdirSync4, statSync as statSync16 } from "node:fs";
 import { spawn as spawnChild } from "node:child_process";
-import { randomBytes as randomBytes11 } from "node:crypto";
+import { randomBytes as randomBytes12 } from "node:crypto";
 import { homedir as homedir21 } from "node:os";
 import { dirname as dirname35, join as join38, resolve as resolve13 } from "node:path";
 import { fileURLToPath as fileURLToPath4 } from "node:url";
@@ -45482,7 +45873,7 @@ function prepareLoginAside(base) {
     if (left.pid !== process.pid && !processAlive(left.pid))
       rmSync10(left.path, { force: true });
   }
-  const aside = telegramStagedSessionBase(base, { pid: process.pid, tag: randomBytes11(4).toString("hex") });
+  const aside = telegramStagedSessionBase(base, { pid: process.pid, tag: randomBytes12(4).toString("hex") });
   const admitted = loginIdentity(`${base}.session`);
   if (admitted !== undefined)
     copyLogin(`${base}.session`, `${aside}.session`);
@@ -46087,308 +46478,6 @@ var init_messaging_capture = __esm(() => {
   };
   UNEXPECTED_EXIT_WINDOW_MS = 10 * 60000;
   readGrant = readCaptureGrantFile;
-});
-
-// src/core/open-targets.ts
-function allOpenTargets() {
-  return [
-    { kind: "dashboard" },
-    { kind: "private_answers" },
-    ...Object.keys(OPEN_CONNECT_SOURCES).map((source) => ({ kind: "connect", source })),
-    ...OPEN_FIX_SECTIONS.map((section) => ({ kind: "fix", section })),
-    ...Object.keys(OPEN_UNREADABLE_SOURCES).map((source) => ({ kind: "unreadable", source })),
-    { kind: "archives" }
-  ];
-}
-function openTargetPath(target) {
-  if (target.kind === "private_answers")
-    return target.answerId ? `private/${target.answerId}` : "private";
-  if (target.kind === "connect")
-    return `connect/${target.source}`;
-  if (target.kind === "fix")
-    return `fix/${target.section}`;
-  if (target.kind === "unreadable")
-    return `unreadable/${target.source}`;
-  if (target.kind === "archives")
-    return "archives";
-  return "dashboard";
-}
-function openTargetFromPath(path) {
-  if (typeof path !== "string")
-    return;
-  const answer = /^private\/([A-Za-z0-9_-]{22})$/.exec(path);
-  if (answer)
-    return { kind: "private_answers", answerId: answer[1] };
-  return allOpenTargets().find((target) => openTargetPath(target) === path);
-}
-function olympusOpenUrl(target) {
-  return `${OLYMPUS_URL_SCHEME}://open/${openTargetPath(target)}`;
-}
-function openPageUrl(target) {
-  return `${OPEN_PAGE_BASE_URL}${openTargetPath(target)}/`;
-}
-function parseOlympusOpenUrl(raw) {
-  if (typeof raw !== "string" || raw.length === 0 || raw.length > OPEN_URL_MAX_LENGTH)
-    return;
-  if (!/^[\x21-\x7e]+$/.test(raw) || /["'`\\<>]/.test(raw))
-    return;
-  if (!raw.toLowerCase().startsWith(`${OLYMPUS_URL_SCHEME}:`))
-    return;
-  const answer = /^olympus:\/\/open\/private\/([A-Za-z0-9_-]{22})\/?$/.exec(raw);
-  if (answer)
-    return { kind: "private_answers", answerId: answer[1] };
-  const match = /^olympus:\/\/open\/([a-z]+(?:\/[a-z]+)?)\/?$/.exec(raw);
-  const path = match?.[1];
-  if (path !== undefined) {
-    for (const target of allOpenTargets()) {
-      if (openTargetPath(target) === path)
-        return target;
-    }
-  }
-  return { kind: "dashboard", fallback: true };
-}
-function openTargetToken(target) {
-  if (target.kind === "private_answers")
-    return target.answerId ? `page.private.${target.answerId}` : "page.private";
-  if (target.kind === "connect")
-    return `connect.${target.source}`;
-  if (target.kind === "fix")
-    return `fix.${target.section}`;
-  if (target.kind === "unreadable")
-    return `unreadable.${target.source}`;
-  if (target.kind === "archives")
-    return "archives";
-  return;
-}
-function openTargetTokenPattern() {
-  const tokens = allOpenTargets().map(openTargetToken).filter((token) => token !== undefined);
-  return `^(?:page\\.private\\.[A-Za-z0-9_-]{22}|${tokens.map((token) => token.replace(".", "\\.")).join("|")})$`;
-}
-function isConnectOpenTarget(target) {
-  return target.kind === "connect";
-}
-function isKeysOpenTarget(target) {
-  return target.kind === "fix" && (target.section === "models" || target.section === "answers" || target.section === "search");
-}
-function tokenPattern(filter) {
-  const tokens = allOpenTargets().filter(filter).map(openTargetToken).filter((token) => token !== undefined);
-  return `^(?:${tokens.map((token) => token.replace(".", "\\.")).join("|")})$`;
-}
-function keysOpenTargetTokenPattern() {
-  return tokenPattern(isKeysOpenTarget);
-}
-function connectOpenTargetTokenPattern() {
-  return tokenPattern(isConnectOpenTarget);
-}
-function privateAnswersOpenTargetTokenPattern() {
-  return "^page\\.private(?:\\.[A-Za-z0-9_-]{22})?$";
-}
-function isPanelOpenTarget(target) {
-  return target.kind === "unreadable" || target.kind === "archives";
-}
-function panelOpenTargetTokenPattern() {
-  const tokens = allOpenTargets().filter(isPanelOpenTarget).map(openTargetToken).filter((token) => token !== undefined);
-  return `^(?:${tokens.map((token) => token.replace(".", "\\.")).join("|")})$`;
-}
-function panelOpenTargetSources() {
-  const out = {};
-  for (const target of allOpenTargets()) {
-    if (target.kind === "unreadable")
-      out[openTargetToken(target)] = OPEN_UNREADABLE_SOURCES[target.source].sourceId;
-    if (target.kind === "archives")
-      out[openTargetToken(target)] = OPEN_ARCHIVES_SOURCE_ID;
-  }
-  return out;
-}
-function openUnreadableSourceFor(sourceId) {
-  return Object.keys(OPEN_UNREADABLE_SOURCES).find((source) => OPEN_UNREADABLE_SOURCES[source].sourceId === sourceId);
-}
-function dashboardImportLandingToken(sourceId) {
-  return `${DASHBOARD_IMPORT_LANDING_PREFIX}${sourceId}`;
-}
-function dashboardSourceLandingToken(sourceId) {
-  return `${DASHBOARD_SOURCE_LANDING_PREFIX}${sourceId}`;
-}
-var OLYMPUS_URL_SCHEME = "olympus", OPEN_CONNECT_SOURCES, OPEN_FIX_SECTIONS, OPEN_UNREADABLE_SOURCES, OPEN_ARCHIVES_SOURCE_ID = "archive.imports", OPEN_URL_MAX_LENGTH = 128, OPEN_PAGE_BASE_URL = "https://olympusplugin.ai/open/", DASHBOARD_OPEN_FRAGMENT_KEY = "olympus-open", DASHBOARD_IMPORT_LANDING_PREFIX = "import.", DASHBOARD_SOURCE_LANDING_PREFIX = "source.", DASHBOARD_ALL_SOURCES_LANDING = "sources", DASHBOARD_ALL_SOURCES_ID = "all.sources", DASHBOARD_PRIVACY_LANDING = "privacy", DASHBOARD_PRIVACY_LANDING_ID = "privacy.settings", DASHBOARD_LAUNCH_OPEN_KEY = "olympus_open";
-var init_open_targets = __esm(() => {
-  OPEN_CONNECT_SOURCES = {
-    x: { sourceId: "x.bookmarks", label: "X bookmarks" },
-    readwise: { sourceId: "readwise.library", label: "Readwise" },
-    telegram: { sourceId: "telegram.messages", label: "Telegram" },
-    whatsapp: { sourceId: "whatsapp.personal.messages", label: "WhatsApp" },
-    evernote: { sourceId: "evernote.notes", label: "Evernote" }
-  };
-  OPEN_FIX_SECTIONS = ["connect", "reconnect", "answers", "search", "models"];
-  OPEN_UNREADABLE_SOURCES = {
-    dropbox: { sourceId: "dropbox.files", label: "Dropbox" },
-    drive: { sourceId: "google_drive.docs", label: "Google Drive" },
-    whatsapp: { sourceId: "whatsapp.personal.messages", label: "WhatsApp" }
-  };
-});
-
-// src/core/dashboard-launch.ts
-import { createHash as createHash23, randomBytes as randomBytes12 } from "node:crypto";
-
-class DashboardLaunchTickets {
-  tickets = new Map;
-  now;
-  maxTickets;
-  constructor(options = {}) {
-    this.now = options.now ?? Date.now;
-    this.maxTickets = options.maxTickets ?? DASHBOARD_LAUNCH_MAX_TICKETS;
-    if (!Number.isInteger(this.maxTickets) || this.maxTickets < 1 || this.maxTickets > 1024) {
-      throw new Error("Dashboard launch capacity must be an integer from 1 to 1024.");
-    }
-  }
-  mint(origin, options = {}) {
-    const nowMs = this.now();
-    this.prune(nowMs);
-    if (options.remote === true) {
-      for (const [ticket2, record] of this.tickets) {
-        if (record.remote)
-          this.tickets.delete(ticket2);
-      }
-    }
-    const ttlSeconds = options.remote === true ? DASHBOARD_REMOTE_LAUNCH_TICKET_TTL_SECONDS : DASHBOARD_LAUNCH_TICKET_TTL_SECONDS;
-    const expiresAtMs = nowMs + ttlSeconds * 1000;
-    const ticket = randomBytes12(32).toString("base64url");
-    this.tickets.set(ticket, {
-      expiresAtMs,
-      originTag: dashboardLaunchOriginTag(origin),
-      ...options.remote === true ? { remote: true } : {}
-    });
-    while (this.tickets.size > this.maxTickets) {
-      const oldest = this.tickets.keys().next();
-      if (oldest.done)
-        break;
-      this.tickets.delete(oldest.value);
-    }
-    return ticket;
-  }
-  consume(ticket, origin) {
-    if (!isWellFormedDashboardLaunchTicket(ticket))
-      return { status: "unknown" };
-    const record = this.tickets.get(ticket);
-    if (!record)
-      return { status: "unknown" };
-    if (typeof origin !== "string" || dashboardLaunchOriginTag(origin) !== record.originTag) {
-      return { status: "origin_mismatch" };
-    }
-    this.tickets.delete(ticket);
-    if (record.expiresAtMs <= this.now())
-      return { status: "expired" };
-    return { status: "ok", ticket };
-  }
-  get size() {
-    return this.tickets.size;
-  }
-  prune(nowMs) {
-    for (const [ticket, record] of this.tickets) {
-      if (record.expiresAtMs <= nowMs)
-        this.tickets.delete(ticket);
-    }
-  }
-}
-function dashboardLaunchOriginTag(origin) {
-  return createHash23("sha256").update("olympus-dashboard-launch-origin-v1\x00").update(origin).digest("base64url").slice(0, 43);
-}
-function isWellFormedDashboardLaunchTicket(value) {
-  return typeof value === "string" && /^[A-Za-z0-9_-]{43}$/.test(value);
-}
-function dashboardLaunchPageHeaders() {
-  const script2 = DASHBOARD_LAUNCH_PAGE_HTML.split("<script>")[1].split("</script>")[0];
-  const scriptHash = createHash23("sha256").update(script2).digest("base64");
-  return {
-    "Content-Type": "text/html; charset=utf-8",
-    "Cache-Control": "no-store",
-    "Referrer-Policy": "no-referrer",
-    "X-Frame-Options": "DENY",
-    "Content-Security-Policy": `default-src 'none'; script-src 'sha256-${scriptHash}'; style-src 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'`
-  };
-}
-var DASHBOARD_LAUNCH_PAGE_PATH = "/dashboard/launch", DASHBOARD_LAUNCH_MINT_PATH = "/dashboard/control/launch", DASHBOARD_LAUNCH_REDEEM_PATH = "/dashboard/control/launch/redeem", DASHBOARD_LAUNCH_TICKET_FRAGMENT_KEY = "olympus_launch_ticket", DASHBOARD_LAUNCH_TICKET_TTL_SECONDS = 900, DASHBOARD_LAUNCH_MAX_TICKETS = 32, DASHBOARD_REMOTE_LAUNCH_TICKET_TTL_SECONDS = 120, DASHBOARD_LAUNCH_REMOTE_PURPOSE = "remote", DASHBOARD_LAUNCH_PAGE_HTML;
-var init_dashboard_launch = __esm(() => {
-  init_open_targets();
-  DASHBOARD_LAUNCH_PAGE_HTML = `<!doctype html>
-<html lang="en">
-  <head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <meta name="referrer" content="no-referrer">
-    <title>Olympus</title>
-    <style>
-      body { margin: 0; padding: 3rem 1.5rem; font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Noto Sans", Ubuntu, Cantarell, "Liberation Sans", "DejaVu Sans", "Helvetica Neue", Arial, system-ui, sans-serif; color: #e8e6e3; background: #16151a; }
-      main { max-width: 32rem; margin: 0 auto; }
-      h1 { font-size: 1.05rem; font-weight: 600; margin: 0 0 .5rem; }
-      p { margin: 0; color: #a9a4ae; }
-      a { color: #cfc7ff; }
-    </style>
-  </head>
-  <body>
-    <main>
-      <h1 id="status">Opening Olympus…</h1>
-      <p id="detail">If this does not continue, <a href="/dashboard">open the dashboard</a>.</p>
-    </main>
-    <script>
-      (function () {
-        var KEY = '${DASHBOARD_LAUNCH_TICKET_FRAGMENT_KEY}';
-        var OPEN = /${openTargetTokenPattern()}/;
-        var KEYS = /${keysOpenTargetTokenPattern()}/;
-        var CONNECT = /${connectOpenTargetTokenPattern()}/;
-        var PANEL = /${panelOpenTargetTokenPattern()}/;
-        var PRIVATE = /${privateAnswersOpenTargetTokenPattern()}/;
-        var status = document.getElementById('status');
-        var open = '';
-        function take() {
-          var hash = window.location.hash.slice(1);
-          // Clear even malformed fragments before parsing or making a request.
-          try { window.history.replaceState(null, '', window.location.pathname + window.location.search); }
-          catch (e) { return ''; }
-          var params = new URLSearchParams(hash);
-          // Where to land: one of a closed list, or the plain dashboard.
-          var wanted = params.get('${DASHBOARD_LAUNCH_OPEN_KEY}') || '';
-          if (OPEN.test(wanted)) open = wanted;
-          return params.get(KEY) || '';
-        }
-        var ticket = take();
-        if (!ticket) {
-          // A reload of this page after its ticket was taken: the dashboard has the session, or the way back in.
-          window.location.replace('/dashboard');
-          return;
-        }
-        fetch('/dashboard/control/launch/redeem', {
-          method: 'POST',
-          credentials: 'same-origin',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ ticket: ticket })
-        }).then(function (response) {
-          // A link already used or expired (a reload, a second open) still
-          // lands on the dashboard: the session it opened is in its cookie,
-          // and without one the dashboard itself offers the way back in.
-          if (response.ok || response.status === 403) {
-            // Connect lands on Connect a source, where the computer's setup sheets live; a
-            // model fix lands on Privacy settings (?keys), where the models live. Each only
-            // opens something there, never submits anything.
-            // A panel target (See why on one source) lands on the dashboard there.
-            // Private answers lands on that page, carrying nothing.
-            // Everything else (a reconnect, the dashboard itself) lands on the dashboard.
-            window.location.replace(CONNECT.test(open)
-              ? '/dashboard?connect#${DASHBOARD_OPEN_FRAGMENT_KEY}=' + open
-              : KEYS.test(open) ? '/dashboard?keys#${DASHBOARD_OPEN_FRAGMENT_KEY}=' + open
-              : PANEL.test(open) ? '/dashboard#${DASHBOARD_OPEN_FRAGMENT_KEY}=' + open
-              : PRIVATE.test(open) ? '/dashboard?private-answers' + (open.indexOf('page.private.') === 0 ? '#' + open.slice(13) : '') : '/dashboard');
-            return;
-          }
-          // Anything else: the dashboard is the way in (its session, or how to get one).
-          window.location.replace('/dashboard');
-        }).catch(function () {
-          status.textContent = 'Opening failed.';
-        });
-      }());
-    </script>
-  </body>
-</html>
-`;
 });
 
 // src/core/dashboard-opening.ts
@@ -150691,10 +150780,12 @@ async function startEngineHost(options) {
             throw new Error("Owner dashboard session is restarting.");
           return null;
         }
-        await response.body?.cancel();
+        const body = await response.json().catch(() => {
+          return;
+        }) ?? {};
         if (status.services["olympus-worker"]?.state !== "ok")
           throw new Error("Worker ownership changed.");
-        return response.headers.getSetCookie();
+        return { cookies: response.headers.getSetCookie(), ...typeof body.unlock_key === "string" ? { unlockKey: body.unlock_key } : {} };
       }
     });
   }
@@ -160318,7 +160409,9 @@ function pageShell(input) {
     signature: dashboardPageSignature(input.body),
     session: sessionMarker,
     intervalMs: input.poll?.intervalMs ?? 15000,
-    lockedHtml: standaloneLockedNotice()
+    lockedHtml: standaloneLockedNotice(),
+    unlockStorageKey: DASHBOARD_UNLOCK_STORAGE_KEY,
+    unlockHeader: DASHBOARD_UNLOCK_HEADER
   })];
   const scripts = !useController ? [...input.scripts ?? []].join(`
     `) : controller.join(`
@@ -160694,6 +160787,10 @@ function standaloneDashboardControllerScript(input) {
             });
             var body = await json(response);
             if (response.ok && typeof body.csrf_token === 'string') csrfToken = body.csrf_token;
+            // The key a plain visit proves this browser with (#1187), in this origin's storage.
+            if (response.ok && typeof body.unlock_key === 'string') {
+              try { window.localStorage.setItem(config.unlockStorageKey, body.unlock_key); } catch (error) {}
+            }
             return { ok: response.ok, csrf_token: body.csrf_token };
           },
           async lock() {
@@ -160708,7 +160805,10 @@ function standaloneDashboardControllerScript(input) {
         },
         navigate: function (href) { window.location.assign(href); },
         refresh: async function () {
-          var response = await fetch(window.location.href, { cache: 'no-store' });
+          // The page itself renders only for this browser's stored key (#1187); the cookie alone gets the shell.
+          var headers = {};
+          try { var key = window.localStorage.getItem(config.unlockStorageKey); if (key) headers[config.unlockHeader] = key; } catch (error) {}
+          var response = await fetch(window.location.href, { cache: 'no-store', headers: headers });
           // Locked (here or in another tab): show the locked gate, not stale controls.
           if (response.status === 401) { if (readable) window.location.reload(); else showLocked(); return undefined; }
           if (!response.ok) return undefined;
@@ -160741,6 +160841,7 @@ function standaloneDashboardControllerScript(input) {
 }
 var DONUT_CIRCUMFERENCE = 12.566, SAFE_COLOR, DASHBOARD_CONTROL_GATE_ID = "dashboard-controls";
 var init_components = __esm(() => {
+  init_dashboard_launch();
   init_computer_identity();
   init_session_marker();
   init_open_targets();
@@ -160827,7 +160928,7 @@ function withWorkerBearerAuth(fetchHandler, options) {
       const consumed = launchTickets.consume(await dashboardLaunchTicketFromBody(request), origin);
       if (consumed.status === "ok") {
         const minted = mintDashboardControlSession(sessionSecret, origin, now());
-        return dashboardLaunchRedeemedResponse(minted, now());
+        return dashboardLaunchRedeemedResponse(minted, dashboardUnlockKey(sessionSecret, origin), now());
       }
       return dashboardLaunchRefusedResponse(consumed.status);
     }
@@ -160857,13 +160958,13 @@ function withWorkerBearerAuth(fetchHandler, options) {
       if (owner2.status !== "allowed")
         return unauthorizedWorkerResponse();
       const minted = mintDashboardControlSession(sessionSecret, origin, now(), "local");
-      return dashboardControlSessionResponse(minted.sessionId, minted.csrfToken, minted.expiresAtMs, now());
+      return dashboardControlSessionResponse(minted.sessionId, minted.csrfToken, dashboardUnlockKey(sessionSecret, origin), minted.expiresAtMs, now());
     }
     if (isDashboardControlSessionRequest(request)) {
       if (!hasValidWorkerBearerToken(request.headers.get("Authorization"), authToken)) {
         const renewal = authorizeDashboardControlSession(request, sessionSecret, now(), true);
         if (renewal.status === "allowed") {
-          return dashboardControlSessionResponse(renewal.sessionId, renewal.csrfToken, renewal.expiresAtMs, now());
+          return dashboardControlSessionResponse(renewal.sessionId, renewal.csrfToken, dashboardUnlockKey(sessionSecret, requestTargetOrigin(request)), renewal.expiresAtMs, now());
         }
         if (renewal.status === "origin_mismatch" || renewal.status === "csrf_mismatch") {
           return dashboardControlForbiddenResponse(renewal.status);
@@ -160874,7 +160975,7 @@ function withWorkerBearerAuth(fetchHandler, options) {
       if (!origin)
         return dashboardControlForbiddenResponse("origin_mismatch");
       const minted = mintDashboardControlSession(sessionSecret, origin, now());
-      return dashboardControlSessionResponse(minted.sessionId, minted.csrfToken, minted.expiresAtMs, now());
+      return dashboardControlSessionResponse(minted.sessionId, minted.csrfToken, dashboardUnlockKey(sessionSecret, origin), minted.expiresAtMs, now());
     }
     if (isOAuthCallbackRequest(request)) {
       return fetchHandler(withAuthenticatedGatewayPublicOrigin(request, presentedAuthorization, authToken, presentedGatewayPublicOrigin, presentedGatewayCallbackPeer));
@@ -160899,6 +161000,11 @@ function withWorkerBearerAuth(fetchHandler, options) {
     if (isDashboardHtmlNavigationRoute(request)) {
       const authorization = authorizeDashboardControlSession(request, sessionSecret, now(), false, true);
       if (authorization.status === "allowed") {
+        const presented = request.headers.get(DASHBOARD_UNLOCK_HEADER);
+        if (!presented || !constantTimeStringEqual(presented, dashboardUnlockKey(sessionSecret, requestTargetOrigin(request)))) {
+          request.headers.set(DASHBOARD_UNLOCK_SHELL_CONTEXT_HEADER, "1");
+          return fetchHandler(request);
+        }
         const response = await fetchHandler(withDashboardControlContextHeader(request, authorization.csrfToken, authorization.grade));
         return withRenewedDashboardControlCookie(response, authorization, now());
       }
@@ -161011,10 +161117,11 @@ function dashboardLaunchMintedResponse(ticket) {
     headers: { "Content-Type": "application/json", "Cache-Control": "no-store" }
   });
 }
-function dashboardLaunchRedeemedResponse(session, nowMs) {
+function dashboardLaunchRedeemedResponse(session, unlockKey, nowMs) {
   return new Response(JSON.stringify({
     ok: true,
     csrf_token: session.csrfToken,
+    unlock_key: unlockKey,
     next: "/dashboard",
     policy: {
       http_only_cookie: true,
@@ -161227,6 +161334,9 @@ function dashboardControlOriginTag(sessionSecret, origin) {
 function dashboardControlSignature(sessionSecret, parts) {
   return hmacTag(sessionSecret, DASHBOARD_CONTROL_SIGNATURE_CONTEXT, parts.nonce, String(parts.issuedSeconds), parts.originTag, parts.grade);
 }
+function dashboardUnlockKey(sessionSecret, origin) {
+  return hmacTag(sessionSecret, DASHBOARD_UNLOCK_KEY_CONTEXT, origin);
+}
 function dashboardControlCsrfToken(sessionSecret, nonce) {
   return hmacTag(sessionSecret, DASHBOARD_CONTROL_CSRF_CONTEXT, nonce);
 }
@@ -161330,10 +161440,11 @@ function withRenewedDashboardControlCookie(response, session, nowMs) {
   headers.append("Set-Cookie", dashboardControlSessionCookie(session.sessionId, remainingSessionSeconds(session.expiresAtMs, nowMs)));
   return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
 }
-function dashboardControlSessionResponse(sessionId, csrfToken, expiresAtMs, nowMs) {
+function dashboardControlSessionResponse(sessionId, csrfToken, unlockKey, expiresAtMs, nowMs) {
   return new Response(JSON.stringify({
     ok: true,
     csrf_token: csrfToken,
+    unlock_key: unlockKey,
     session_marker: dashboardSessionMarker(csrfToken),
     expires_at: new Date(expiresAtMs).toISOString(),
     policy: {
@@ -161378,12 +161489,13 @@ function requestTargetOrigin(request) {
   return forwardedProto === "http" || forwardedProto === "https" ? `${forwardedProto}://${url2.host}` : url2.origin;
 }
 function withoutDashboardInternalContextHeaders(request) {
-  if (!request.headers.has(DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER) && !request.headers.has(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER) && !request.headers.has(DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER) && !request.headers.has(DASHBOARD_GATEWAY_CALLBACK_PEER_HEADER))
+  if (!request.headers.has(DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER) && !request.headers.has(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER) && !request.headers.has(DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER) && !request.headers.has(DASHBOARD_GATEWAY_CALLBACK_PEER_HEADER) && !request.headers.has(DASHBOARD_UNLOCK_SHELL_CONTEXT_HEADER))
     return request;
   request.headers.delete(DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER);
   request.headers.delete(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER);
   request.headers.delete(DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER);
   request.headers.delete(DASHBOARD_GATEWAY_CALLBACK_PEER_HEADER);
+  request.headers.delete(DASHBOARD_UNLOCK_SHELL_CONTEXT_HEADER);
   return request;
 }
 function withAuthenticatedGatewayPublicOrigin(request, authorization, authToken, origin, callbackPeer) {
@@ -161575,7 +161687,7 @@ function optionalEnv(value2) {
   const trimmed2 = value2?.trim();
   return trimmed2 ? trimmed2 : undefined;
 }
-var DEFAULT_WORKER_BIND_HOST = "127.0.0.1", DASHBOARD_CONTROL_SESSION_TTL_SECONDS, DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER = "X-Olympus-Control-Session-CSRF", DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER = "X-Olympus-Control-Session-Grade", DASHBOARD_SELF_UPDATE_PATHS, DASHBOARD_SELF_UPDATE_LOCAL_ONLY = "Olympus updates itself only from the dashboard on this computer, in an unlocked browser.", DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER = "X-Olympus-Gateway-Public-Origin", DASHBOARD_GATEWAY_CALLBACK_PEER_HEADER = "X-Olympus-Gateway-Callback-Peer", DASHBOARD_GATEWAY_CALLBACK_PEER_CONTEXT = "olympus-dashboard-callback-peer-v1", DASHBOARD_CONTROL_COOKIE = "olympus_dashboard_control", DASHBOARD_CONTROL_SIGNATURE_CONTEXT = "olympus-dashboard-control-session-v3", DASHBOARD_CONTROL_CSRF_CONTEXT = "olympus-dashboard-control-csrf-v2", DASHBOARD_CONTROL_ORIGIN_CONTEXT = "olympus-dashboard-control-origin-v2", DASHBOARD_LOCAL_CONTROL_SESSION_PATH = "/dashboard/control/session/local", AGENT_MINT_PATHS, AGENT_MINT_LIMIT = 10, AGENT_MINT_WINDOW_MS, AGENT_MINT_MAX_KEYS = 256, REMOTE_ACCESS_TOGGLE_PATH = "/dashboard/agents/remote-access", REMOTE_ACCESS_TOGGLE_LIMIT = 6, REMOTE_ACCESS_TOGGLE_WINDOW_MS, DASHBOARD_CONSULT_CONTROL_PATHS, DASHBOARD_PRIVATE_ANSWERS_PATH = "/dashboard/private-answers", DASHBOARD_APPS_RECEIVED_ROUTE = "/dashboard/apps-received", DASHBOARD_ARCHIVE_IMPORT_LOCAL_PATHS, DASHBOARD_PRIVACY_ITEM_PATHS, DASHBOARD_MESSAGING_PATHS, DASHBOARD_PEOPLE_PATH = "/dashboard/people", GRADE_CODES;
+var DEFAULT_WORKER_BIND_HOST = "127.0.0.1", DASHBOARD_CONTROL_SESSION_TTL_SECONDS, DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER = "X-Olympus-Control-Session-CSRF", DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER = "X-Olympus-Control-Session-Grade", DASHBOARD_UNLOCK_SHELL_CONTEXT_HEADER = "X-Olympus-Control-Session-Shell", DASHBOARD_SELF_UPDATE_PATHS, DASHBOARD_SELF_UPDATE_LOCAL_ONLY = "Olympus updates itself only from the dashboard on this computer, in an unlocked browser.", DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER = "X-Olympus-Gateway-Public-Origin", DASHBOARD_GATEWAY_CALLBACK_PEER_HEADER = "X-Olympus-Gateway-Callback-Peer", DASHBOARD_GATEWAY_CALLBACK_PEER_CONTEXT = "olympus-dashboard-callback-peer-v1", DASHBOARD_CONTROL_COOKIE = "olympus_dashboard_control", DASHBOARD_CONTROL_SIGNATURE_CONTEXT = "olympus-dashboard-control-session-v3", DASHBOARD_CONTROL_CSRF_CONTEXT = "olympus-dashboard-control-csrf-v2", DASHBOARD_UNLOCK_KEY_CONTEXT = "olympus-dashboard-unlock-v1", DASHBOARD_CONTROL_ORIGIN_CONTEXT = "olympus-dashboard-control-origin-v2", DASHBOARD_LOCAL_CONTROL_SESSION_PATH = "/dashboard/control/session/local", AGENT_MINT_PATHS, AGENT_MINT_LIMIT = 10, AGENT_MINT_WINDOW_MS, AGENT_MINT_MAX_KEYS = 256, REMOTE_ACCESS_TOGGLE_PATH = "/dashboard/agents/remote-access", REMOTE_ACCESS_TOGGLE_LIMIT = 6, REMOTE_ACCESS_TOGGLE_WINDOW_MS, DASHBOARD_CONSULT_CONTROL_PATHS, DASHBOARD_PRIVATE_ANSWERS_PATH = "/dashboard/private-answers", DASHBOARD_APPS_RECEIVED_ROUTE = "/dashboard/apps-received", DASHBOARD_ARCHIVE_IMPORT_LOCAL_PATHS, DASHBOARD_PRIVACY_ITEM_PATHS, DASHBOARD_MESSAGING_PATHS, DASHBOARD_PEOPLE_PATH = "/dashboard/people", GRADE_CODES;
 var init_http = __esm(() => {
   init_backup_paths();
   init_session_marker();
@@ -168637,7 +168749,7 @@ function renderOutsideHelpToolsReplace(tools, tool, input) {
 function renderOutsideHelpToolsScript(tools, input) {
   if (!tools || !input.canEdit || input.csrfToken === undefined)
     return "";
-  return `<script data-dashboard-rerun>${outsideHelpToolsClientScript({ csrfToken: input.csrfToken, path: DASHBOARD_OUTSIDE_HELP_INSTALL_TOOLS_PATH, pollMs: DASHBOARD_OUTSIDE_HELP_TOOLS_POLL_MS, copy: { starting: C.starting, failed: C.failed } })}</script>`;
+  return `<script data-dashboard-rerun>${outsideHelpToolsClientScript({ csrfToken: input.csrfToken, path: DASHBOARD_OUTSIDE_HELP_INSTALL_TOOLS_PATH, pollMs: DASHBOARD_OUTSIDE_HELP_TOOLS_POLL_MS, unlockStorageKey: DASHBOARD_UNLOCK_STORAGE_KEY, unlockHeader: DASHBOARD_UNLOCK_HEADER, copy: { starting: C.starting, failed: C.failed } })}</script>`;
 }
 function outsideHelpToolsClientScript(config2) {
   return `(function () {
@@ -168657,7 +168769,10 @@ function outsideHelpToolsClientScript(config2) {
     timer = null;
     var running = sections().some(function (node) { return node.getAttribute('data-install-state') === 'running'; });
     try {
-      var response = await fetch(window.location.href, { credentials: 'same-origin', cache: 'no-store' });
+      // The page renders only for this browser's stored key (#1187); the cookie alone gets the shell.
+      var headers = {};
+      try { var key = window.localStorage.getItem(config.unlockStorageKey); if (key) headers[config.unlockHeader] = key; } catch (error) {}
+      var response = await fetch(window.location.href, { credentials: 'same-origin', cache: 'no-store', headers: headers });
       var doc = new DOMParser().parseFromString(await response.text(), 'text/html');
       var fresh = doc.querySelectorAll('[data-outside-tools]');
       var states = Array.prototype.map.call(fresh, function (node) { return node.getAttribute('data-install-state'); });
@@ -168714,6 +168829,7 @@ function outsideHelpToolsClientScript(config2) {
 }
 var DASHBOARD_OUTSIDE_HELP_INSTALL_TOOLS_PATH = "/dashboard/consult/tools/install", DASHBOARD_OUTSIDE_HELP_TOOLS_COPY, C, DASHBOARD_OUTSIDE_HELP_TOOLS_POLL_MS = 1500;
 var init_outside_help_tools = __esm(() => {
+  init_dashboard_launch();
   init_components();
   init_vocabulary();
   DASHBOARD_OUTSIDE_HELP_TOOLS_COPY = {
@@ -170943,7 +171059,14 @@ function hostProgram(input, bridge, mount) {
           say(input.words.refused);
           return;
         }
-        window.location.assign("/dashboard");
+        return response.json().then((body) => {
+          try {
+            if (typeof body.unlock_key === "string")
+              window.localStorage.setItem(input.unlockStorageKey, body.unlock_key);
+          } catch {}
+        }, () => {
+          return;
+        }).then(() => window.location.assign("/dashboard"));
       }, () => say(input.words.refused));
     });
   }
@@ -170994,6 +171117,7 @@ function renderComputerHostPage(input) {
   const program = `(${hostProgram.toString()})(${scriptJson2({
     bridge,
     csrfToken: input.csrfToken ?? "",
+    unlockStorageKey: DASHBOARD_UNLOCK_STORAGE_KEY,
     localSession: input.localSession === true,
     localTools: COMPUTER_LOCAL_SESSION_TOOL_NAMES,
     localSessionPath: DASHBOARD_OUTSIDE_HELP_PATHS.unlock,
@@ -171051,6 +171175,7 @@ function setupAgentDialog() {
 }
 var DASHBOARD_HTML_PATH = "/dashboard", DASHBOARD_TOOLS_CALL_PATH = "/dashboard/tools/call", DASHBOARD_PANEL_READ_QUERY_PARAM = "panel-read", DASHBOARD_ARCHIVE_UPLOAD_FILE_PATH = "/dashboard/archive-import/upload-file", DASHBOARD_LOCAL_PAGES, HOST_CSS, DASHBOARD_PAIRING_DIALOG_LABEL = "Pair a messaging account", DASHBOARD_SETUP_AGENT_ID = "setup-with-agent", COMPUTER_HOST_PAGE_CSP;
 var init_host_page = __esm(() => {
+  init_dashboard_launch();
   init_computer_identity();
   init_update_check();
   init_update_now();
@@ -183104,6 +183229,12 @@ function createEmailSourceWorker(options = {}) {
           if (page2 === "outside_help_moved") {
             return new Response(null, { status: 302, headers: { Location: dashboardOutsideHelpRedirect(url2), "Cache-Control": "no-store" } });
           }
+          if (request.headers.has(DASHBOARD_UNLOCK_SHELL_CONTEXT_HEADER)) {
+            return new Response(DASHBOARD_UNLOCK_SHELL_HTML, {
+              status: 200,
+              headers: dashboardUnlockShellHeaders(page2 === "host" ? COMPUTER_HOST_PAGE_CSP : "frame-ancestors 'none'")
+            });
+          }
           const controlSessionCsrfToken = request.headers.get(DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER) ?? undefined;
           if (page2 === "host") {
             return new Response(renderComputerHostPage({
@@ -187609,6 +187740,7 @@ var init_email_source = __esm(() => {
   init_source_failure();
   init_mail_source_scope();
   init_http();
+  init_dashboard_launch();
   init_embedding_runtime();
   init_agent_connections();
   init_source_dashboard();
@@ -238128,8 +238260,10 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
             throw new Error("Owner dashboard session is restarting.");
           return null;
         }
-        await response.body?.cancel();
-        return response.headers.getSetCookie();
+        const body = await response.json().catch(() => {
+          return;
+        }) ?? {};
+        return { cookies: response.headers.getSetCookie(), ...typeof body.unlock_key === "string" ? { unlockKey: body.unlock_key } : {} };
       }
     });
     desktopPoll = setInterval(() => {

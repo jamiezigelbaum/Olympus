@@ -1,3 +1,4 @@
+import { DASHBOARD_UNLOCK_STORAGE_KEY } from '../../core/dashboard-launch.ts';
 import { dashboardComputerIdentity } from '../../core/computer-identity.ts';
 import { installerForPlatform, type UpdateAvailable } from '../../core/update-check.ts';
 import type { SelfUpdateStatus } from '../../core/self-update.ts';
@@ -236,6 +237,8 @@ function lockedGate(hidden: boolean): string {
 function hostProgram(input: {
   bridge: DashboardHostBridgeConfig;
   csrfToken: string;
+  /** Where this browser keeps the engine's unlock key (#1187, core/dashboard-launch.ts). */
+  unlockStorageKey: string;
   /** The session is already local-grade. */
   localSession: boolean;
   /** Tools only a local-grade session may use, and the local unlock that opens one. */
@@ -714,8 +717,13 @@ function hostProgram(input: {
           say(input.words.refused);
           return;
         }
-        // The session cookie is set: the plain dashboard opens unlocked.
-        window.location.assign('/dashboard');
+        // The session cookie is set, and the key a plain visit proves this browser with (#1187) is kept
+        // in this origin's storage: the plain dashboard opens unlocked.
+        return response.json().then((body: { unlock_key?: unknown }) => {
+          try {
+            if (typeof body.unlock_key === 'string') window.localStorage.setItem(input.unlockStorageKey, body.unlock_key);
+          } catch { /* Storage refused: the next plain visit asks to open Olympus again. */ }
+        }, () => undefined).then(() => window.location.assign('/dashboard'));
       }, () => say(input.words.refused));
     });
   }
@@ -772,6 +780,7 @@ export function renderComputerHostPage(input: ComputerHostPageInput): string {
   const program = `(${hostProgram.toString()})(${scriptJson({
     bridge,
     csrfToken: input.csrfToken ?? '',
+    unlockStorageKey: DASHBOARD_UNLOCK_STORAGE_KEY,
     localSession: input.localSession === true,
     localTools: COMPUTER_LOCAL_SESSION_TOOL_NAMES,
     localSessionPath: DASHBOARD_OUTSIDE_HELP_PATHS.unlock,

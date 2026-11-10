@@ -218,6 +218,7 @@ import { parseMailScopeDraft } from '../../core/mail-source-scope.ts';
 import {
   DASHBOARD_CONSULT_CONTROL_PATHS,
   DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER,
+  DASHBOARD_UNLOCK_SHELL_CONTEXT_HEADER,
   DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER,
   DASHBOARD_GATEWAY_CALLBACK_PEER_HEADER,
   DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER,
@@ -226,6 +227,7 @@ import {
   DASHBOARD_SELF_UPDATE_LOCAL_ONLY,
   DASHBOARD_SELF_UPDATE_PATHS,
 } from '../http.ts';
+import { DASHBOARD_UNLOCK_SHELL_HTML, dashboardUnlockShellHeaders } from '../../core/dashboard-launch.ts';
 import {
   readEmbeddingRuntime,
   resolveEmbeddingOverridePath,
@@ -1659,6 +1661,14 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           }
           if (page === 'outside_help_moved') {
             return new Response(null, { status: 302, headers: { Location: dashboardOutsideHelpRedirect(url), 'Cache-Control': 'no-store' } });
+          }
+          // The cookie without this browser's stored proof (#1187, workers/http.ts): the
+          // content-free shell, under the policy of the page it will write into its window.
+          if (request.headers.has(DASHBOARD_UNLOCK_SHELL_CONTEXT_HEADER)) {
+            return new Response(DASHBOARD_UNLOCK_SHELL_HTML, {
+              status: 200,
+              headers: dashboardUnlockShellHeaders(page === 'host' ? COMPUTER_HOST_PAGE_CSP : "frame-ancestors 'none'"),
+            });
           }
           const controlSessionCsrfToken = request.headers.get(DASHBOARD_CONTROL_CSRF_CONTEXT_HEADER) ?? undefined;
           if (page === 'host') {

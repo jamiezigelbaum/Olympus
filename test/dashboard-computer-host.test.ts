@@ -1,3 +1,5 @@
+import { DASHBOARD_UNLOCK_HEADER } from '../src/core/dashboard-launch.ts';
+import { ownerUnlockKey } from './helpers/owner-local-mint.ts';
 /**
  * Unified dashboard phase 4 (owner decision 2026-10-09): the ChatGPT panel is
  * the only dashboard. These tests pin the three pieces that make that true on
@@ -346,7 +348,7 @@ describe('the computer\'s /dashboard', () => {
     const f = fixture();
     try {
       const session = await controlSession(f.fetch);
-      const response = await f.fetch(new Request('http://worker.test/dashboard', { headers: { Cookie: session.cookie } }));
+      const response = await f.fetch(new Request('http://worker.test/dashboard', { headers: { [DASHBOARD_UNLOCK_HEADER]: await ownerUnlockKey(f.fetch, 'http://worker.test', AUTH), Cookie: session.cookie } }));
       expect(response.status).toBe(200);
       const html = await response.text();
       // The banner is there but hidden, for a session that expires while the page is open.

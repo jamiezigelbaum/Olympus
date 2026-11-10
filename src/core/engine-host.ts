@@ -333,9 +333,10 @@ export async function startEngineHost(options: EngineHostOptions): Promise<Engin
           if (response.status === 503) throw new Error('Owner dashboard session is restarting.');
           return null;
         }
-        await response.body?.cancel();
+        // The cookies, and the unlock key the browser's storage keeps (#1187).
+        const body = (await response.json().catch(() => undefined) ?? {}) as { unlock_key?: unknown };
         if (status.services['olympus-worker']?.state !== 'ok') throw new Error('Worker ownership changed.');
-        return response.headers.getSetCookie();
+        return { cookies: response.headers.getSetCookie(), ...(typeof body.unlock_key === 'string' ? { unlockKey: body.unlock_key } : {}) };
       },
     });
   }

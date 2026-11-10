@@ -99,6 +99,17 @@ but a user may click through. So:
   sends `frame-ancestors 'none'`. A rebinding host name gets no cookie. A
   link opens the dashboard in the user's own browser on 127.0.0.1 and hands
   the website nothing back.
+- **The cookie alone opens no page (#1187).** Browsers send a cookie to every
+  port on its host, so a server on another loopback port can be handed the
+  control session cookie. Every dashboard page therefore also needs this
+  engine origin's unlock key, which the opening link, a worker token or the
+  Linux desktop bridge hands the browser with its session, and which the
+  browser keeps in `localStorage`, kept separate per origin, port included
+  (owner decision 2026-11-10). A navigation with the cookie alone gets a
+  content-free page whose script fetches the same address with the stored
+  key and writes the answer into its window. Without the key (another port,
+  another browser, cleared storage) it says to run `olympus dashboard`. The
+  key is the only value the dashboard keeps in browser storage.
 - **Nothing from the caller's folder is read.** See the `--no-env-file` and
   fixed-folder note above; `test/open-on-computer.test.ts` launches the
   desktop entry from a folder holding a hostile `.env` and `bunfig.toml`
