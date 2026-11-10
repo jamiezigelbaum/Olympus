@@ -113,7 +113,7 @@ async def list_dialogs(request: dict[str, Any]) -> dict[str, Any]:
             else:
                 kind = "group"
             chat_scope = f"{account}:chat:{dialog.id}"
-            if "*" not in approved_scopes and chat_scope not in approved_scopes:
+            if "*" not in approved_scopes and chat_scope not in approved_scopes and f"{KIND_PREFIX}{kind}" not in approved_scopes:
                 continue
             dialogs.append({
                 "chat_id": dialog.id,
@@ -141,7 +141,7 @@ async def read_messages(request: dict[str, Any]) -> dict[str, Any]:
     provider_cursor = optional_text(request.get("provider_cursor"))
     sync_direction = sync_direction_from_request(request.get("sync_direction"), provider_cursor)
     chat_id = chat_id_from_scope(chat_scope)
-    assert_chat_scope_allowed(chat_scope)
+    kinds = assert_chat_scope_allowed(chat_scope)
 
     api_id = require_int_env("OLYMPUS_TELEGRAM_API_ID")
     api_hash = require_env("OLYMPUS_TELEGRAM_API_HASH")
@@ -153,6 +153,8 @@ async def read_messages(request: dict[str, Any]) -> dict[str, Any]:
         raise SafeConfigError("telethon_not_installed") from error
 
     async with TelegramClient(session_path, api_id, api_hash) as client:
+        if kinds and chat_type_from_entity(await client.get_entity(chat_id)) not in kinds:
+            raise SafeConfigError("chat_scope_not_allowed")
         return await read_messages_with_client(
             client, account, chat_id, provider_cursor, sync_direction, max_messages
         )
@@ -238,6 +240,8 @@ class GatewayConfig:
     max_messages: int
     interval_seconds: int
     stale_threshold_seconds: int
+    # Every chat of these kinds, including chats started later (#1075).
+    approved_kinds: tuple[str, ...] = ()
 
     @property
     def whole_account(self) -> bool:
@@ -427,6 +431,11 @@ async def capture_gateway_event(
         chat_scope = event_scopes.get(str(getattr(event, "chat_id", "")))
         if not chat_scope and config.whole_account:
             chat_scope = numeric_account_scope(config.account, getattr(event, "chat_id", None))
+        if not chat_scope and config.approved_kinds:
+            async def event_chat() -> Any:
+                chat = getattr(event, "chat", None)
+                return chat if chat is not None else await event.get_chat()
+            chat_scope = await kind_scope(config, getattr(event, "chat_id", None), event_chat)
         if not chat_scope:
             async with state_lock:
                 gateway_event_lane(state)["events_dropped_unapproved"] += 1
@@ -520,6 +529,8 @@ async def capture_gateway_reaction(
         chat_scope = await reaction_chat_scope(client, update, event_scopes)
         if not chat_scope and config.whole_account:
             chat_scope = numeric_account_scope(config.account, await client.get_peer_id(update.peer))
+        if not chat_scope and config.approved_kinds:
+            chat_scope = await kind_scope(config, await client.get_peer_id(update.peer), lambda: client.get_entity(update.peer))
         if not chat_scope:
             async with state_lock:
                 gateway_event_lane(state)["reactions_dropped_unapproved"] += 1
@@ -741,7 +752,9 @@ def gateway_config() -> GatewayConfig:
         "OLYMPUS_SOURCE_INDEX_TELEGRAM_APPROVED_CHAT_SCOPES",
         "OLYMPUS_TELEGRAM_ALLOWED_CHAT_SCOPES",
     )
-    approved_scopes = capture_chat_scopes(approved_raw, account)
+    approved = capture_chat_scopes(approved_raw, account)
+    approved_kinds = tuple(scope[len(KIND_PREFIX):] for scope in approved if scope.startswith(KIND_PREFIX))
+    approved_scopes = [scope for scope in approved if not scope.startswith(KIND_PREFIX)]
     # Every approved chat is captured alike: each message is judged by its own
     # content downstream. No chat is routed Private as a whole (a user's own
     # rule for a chat is an owner rule, applied where every source's are).
@@ -761,6 +774,7 @@ def gateway_config() -> GatewayConfig:
     return GatewayConfig(
         account=account,
         approved_scopes=tuple(approved_scopes),
+        approved_kinds=approved_kinds,
         state_dir=state_dir,
         spool_dir=spool_dir,
         state_path=state_dir / "state.json",
@@ -1115,10 +1129,56 @@ def gateway_process_lock(path: Path):
         yield
 
 
+KIND_PREFIX = "kind:"
+CHAT_KINDS = ("dm", "bot", "group", "channel")
+# The kind each chat was last seen as, by numeric chat id: a kind grant reads
+# a chat when its kind is on, including chats started after pairing.
+CHAT_KIND_CACHE: dict[str, str] = {}
+
+
 def capture_chat_scopes(value: str | None, account: str) -> list[str]:
+    """The approved list: ["*"], or kind tokens (kind:dm) followed by exact chat scopes."""
     if (value or "").strip() == "*":
         return ["*"]
-    return exact_chat_scopes(value, account, "approved_chat_scopes_required")
+    kinds: list[str] = []
+    exact: list[str] = []
+    for part in (value or "").split(","):
+        token = part.strip()
+        if token.startswith("kind"):
+            match = re.fullmatch(r"kind:([a-z]+)", token)
+            if not match or match.group(1) not in CHAT_KINDS:
+                raise SafeConfigError("invalid_chat_kind")
+            if token not in kinds:
+                kinds.append(token)
+        elif token:
+            exact.append(token)
+    scopes = exact_chat_scopes(",".join(exact), account, None if kinds else "approved_chat_scopes_required")
+    return kinds + scopes
+
+
+def remember_chat_kind(chat_id: Any, entity: Any) -> str | None:
+    if entity is None:
+        return CHAT_KIND_CACHE.get(str(chat_id))
+    kind = chat_type_from_entity(entity)
+    CHAT_KIND_CACHE[str(chat_id)] = kind
+    return kind
+
+
+async def kind_scope(config: GatewayConfig, chat_id: Any, fetch_entity: Any = None) -> str | None:
+    """The scope of a chat whose kind is approved, or None. The kind comes from the chat's entity, fetched once."""
+    if not config.approved_kinds:
+        return None
+    scope = numeric_account_scope(config.account, chat_id)
+    if not scope:
+        return None
+    kind = CHAT_KIND_CACHE.get(str(chat_id))
+    if kind is None and fetch_entity is not None:
+        try:
+            kind = remember_chat_kind(chat_id, await fetch_entity())
+        except Exception:
+            # Unknown kind: fail closed; the next sweep or message asks again.
+            return None
+    return scope if kind in config.approved_kinds else None
 
 
 def numeric_account_scope(account: str, chat_id: Any) -> str | None:
@@ -1131,17 +1191,23 @@ def numeric_account_scope(account: str, chat_id: Any) -> str | None:
 def gateway_scope_allowed(config: GatewayConfig, scope: str) -> bool:
     if config.whole_account:
         return scope.startswith(f"{config.account}:chat:") and numeric_account_scope(config.account, scope.rsplit(":", 1)[-1]) == scope
-    return scope in config.approved_scopes
+    if scope in config.approved_scopes:
+        return True
+    chat_id = scope.rsplit(":", 1)[-1]
+    return bool(config.approved_kinds) and numeric_account_scope(config.account, chat_id) == scope \
+        and CHAT_KIND_CACHE.get(chat_id) in config.approved_kinds
 
 
 async def gateway_sweep_scopes(client: Any, config: GatewayConfig) -> tuple[str, ...]:
-    if not config.whole_account:
+    if not config.whole_account and not config.approved_kinds:
         return config.approved_scopes
-    # Refresh every sweep: whole-account approval includes dialogs created later.
-    scopes: list[str] = []
+    # Refresh every sweep: whole-account and kind approvals include dialogs created later.
+    scopes: list[str] = [] if config.whole_account else list(config.approved_scopes)
     async for dialog in client.iter_dialogs(limit=None):
         scope = numeric_account_scope(config.account, dialog.id)
-        if scope and scope not in scopes:
+        if not scope or scope in scopes:
+            continue
+        if config.whole_account or remember_chat_kind(dialog.id, getattr(dialog, "entity", None)) in config.approved_kinds:
             scopes.append(scope)
     return tuple(scopes)
 
@@ -1808,6 +1874,8 @@ async def retry_waiting_media(client: Any, config: GatewayConfig, state_lock: as
         scope = scopes.get(chat)
         if not scope and config.whole_account:
             scope = numeric_account_scope(config.account, chat)
+        if not scope and config.approved_kinds:
+            scope = await kind_scope(config, chat, lambda chat=chat: client.get_entity(int(chat)))
         if not scope:
             done.update((chat, message_id) for message_id in ids)
             continue
@@ -2058,15 +2126,21 @@ def chat_id_from_scope(chat_scope: str) -> str | int:
     return int(chat_ref) if chat_ref.lstrip("-").isdigit() else chat_ref
 
 
-def assert_chat_scope_allowed(chat_scope: str) -> None:
+def assert_chat_scope_allowed(chat_scope: str) -> tuple[str, ...]:
+    """Refuses a chat outside the grant. Returns the approved kinds the chat must be one of when only a kind
+    can allow it (the caller checks its entity), else an empty tuple."""
     account = os.environ.get("OLYMPUS_SOURCE_INDEX_TELEGRAM_ACCOUNT", "telegram.personal").strip()
     exact_chat_scopes(chat_scope, account, "invalid_chat_scope")
     configured_raw = os.environ.get("OLYMPUS_TELEGRAM_ALLOWED_CHAT_SCOPES", "").strip()
     if not configured_raw:
-        return
+        return ()
     configured = capture_chat_scopes(configured_raw, account)
-    if configured != ["*"] and chat_scope not in configured:
+    if configured == ["*"] or chat_scope in configured:
+        return ()
+    kinds = tuple(scope[len(KIND_PREFIX):] for scope in configured if scope.startswith(KIND_PREFIX))
+    if not kinds:
         raise SafeConfigError("chat_scope_not_allowed")
+    return kinds
 
 
 def approved_dialog_scopes(request: dict[str, Any], account: str) -> set[str]:
