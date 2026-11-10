@@ -216,6 +216,17 @@ const ARCHIVE_IMPORT_PARAMS = {
   archive_id: { type: 'string', description: 'remove: the archive_id status returned. status: show only this archive.' },
 } satisfies Record<string, ParamDef>;
 
+const PRIVACY_ITEM_FIND_PARAMS = {
+  query: { type: 'string', description: 'Words from the item\'s title, sender or file name, as the user named it. Omit with recent.' },
+  recent: { type: 'boolean', description: 'true lists the items Olympus sorted most recently instead of searching.' },
+  limit: { type: 'number', description: 'Max items (default 20, at most 50).' },
+} satisfies Record<string, ParamDef>;
+
+const PRIVACY_ITEM_SET_PARAMS = {
+  item_id: { type: 'string', required: true, description: 'The item_id privacy_item_find returned.' },
+  tier: { type: 'string', required: true, enum: ['private'], description: 'Always "private": an AI app can only make an item Private.' },
+} satisfies Record<string, ParamDef>;
+
 export const operations: Operation[] = [
   {
     name: 'argus_ping',
@@ -715,6 +726,62 @@ export const operations: Operation[] = [
         ...(archiveId !== undefined ? { archiveId } : {}),
         ...(ctx.signal ? { signal: ctx.signal } : {}),
       });
+    },
+  },
+  {
+    name: 'privacy_item_find',
+    description: [
+      'Find one of the user\'s items (an email, file or message) to check its privacy label, by words from its title, sender or file name, or list the items Olympus sorted most recently (recent: true).',
+      'Each item has item_id, source, title, sender, location, tier (Personal or Private: its label), decided_by (override = the user set it by hand; sniffer or move = the privacy judge), owner_set, and judge_reason (the judge\'s category and confidence) where the judge decided it.',
+      'Items whose names are Private, and Secret items, are never listed here.',
+      'Use it when the user says an item should be private, then call privacy_item_set.',
+    ].join(' '),
+    params: PRIVACY_ITEM_FIND_PARAMS,
+    mutating: false,
+    nativeExposure: 'sourceIndexEnabledOnly',
+    cliHints: { name: 'privacy item find', positional: ['query'] },
+    handler: async (ctx, params) => {
+      assertNoUndeclaredParams(PRIVACY_ITEM_FIND_PARAMS, params, 'Privacy item find');
+      const query = optionalString(params.query);
+      const recent = optionalBoolean(params.recent, 'recent');
+      const limit = optionalNumber(params.limit, 'limit');
+      if ((query === undefined) === (recent !== true)) {
+        throw new OperationError('invalid_params', 'Give query, or recent: true, not both.');
+      }
+      return ctx.email.privacyItem({
+        action: 'find',
+        ...(query !== undefined ? { query } : {}),
+        ...(recent !== undefined ? { recent } : {}),
+        ...(limit !== undefined ? { limit } : {}),
+        ...(ctx.signal ? { signal: ctx.signal } : {}),
+      });
+    },
+  },
+  {
+    name: 'privacy_item_set',
+    description: [
+      'Make one item Private when the user says it should be ("that email should be private"). Only raising is possible here: it adds protection, and the item is hidden from Personal search at once.',
+      'It is the user\'s decision on that one item, never a rule for its sender, chat or folder.',
+      'Making an item Personal, or putting it back to the judge\'s label, is done only by the user on the Olympus dashboard on their computer (Privacy): tell them so, and never retry another way.',
+      'Returns {ok: true, item, applies} or {ok: false, code, message}: tell the user the message in those words.',
+    ].join(' '),
+    params: PRIVACY_ITEM_SET_PARAMS,
+    mutating: true,
+    nativeExposure: 'sourceIndexEnabledOnly',
+    cliHints: { name: 'privacy item set', positional: ['item_id', 'tier'] },
+    handler: async (ctx, params) => {
+      assertNoUndeclaredParams(PRIVACY_ITEM_SET_PARAMS, params, 'Privacy item set');
+      const itemId = asString(params.item_id, 'item_id');
+      const tier = asString(params.tier, 'tier');
+      // Enforced here, before anything is sent: an agent can only raise.
+      if (tier !== 'private') {
+        throw new OperationError(
+          'invalid_params',
+          'An AI app can only make an item Private.',
+          'To make it Personal, or put it back to the judge\'s label, use Privacy on the Olympus dashboard on this computer.',
+        );
+      }
+      return ctx.email.privacyItem({ action: 'raise', itemId, ...(ctx.signal ? { signal: ctx.signal } : {}) });
     },
   },
   {

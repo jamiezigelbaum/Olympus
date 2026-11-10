@@ -51,6 +51,8 @@ export interface TierOverrideSettleReport {
   secrets: number;
   /** Mid-move items whose move does not carry the override yet: applied once it lands. */
   heldMoving: number;
+  /** Items whose override the owner cleared ("undo"), put back to the decision it took over from. */
+  restored: number;
 }
 
 export function applyOwnerOverrides(options: {
@@ -58,7 +60,7 @@ export function applyOwnerOverrides(options: {
   /** @internal Test hook: runs after the overrides are read, before any is applied (another process's write). */
   afterRead?: () => void;
 }): TierOverrideSettleReport {
-  const report: TierOverrideSettleReport = { checked: 0, updated: 0, raised: 0, lowered: 0, secrets: 0, heldMoving: 0 };
+  const report: TierOverrideSettleReport = { checked: 0, updated: 0, raised: 0, lowered: 0, secrets: 0, heldMoving: 0, restored: 0 };
   const { set } = options;
   const ledger = set.ledger;
   let retirePublic = false;
@@ -84,10 +86,57 @@ export function applyOwnerOverrides(options: {
       // Left as it was; the next pass (or the item's next listing) applies it.
     }
   }
+  // Overrides the owner cleared ("undo", tier-owner-items.ts): the item goes
+  // back to the decision the override took it over from, through the same
+  // router write a listing makes.
+  for (const record of ledger.listClearedOverrideRows()) {
+    try {
+      if (restoreClearedOverride(set, record)) report.restored += 1;
+    } catch {
+      // Left as it was; the next pass tries again.
+    }
+  }
   // Items that left Secrets since the last tick (here, in a listing, a move
   // landing or another process): their job names come back.
   retireSecretRedactions(ledger);
   return report;
+}
+
+/**
+ * Put an item whose override was cleared back to the decision recorded before
+ * the owner changed it (`TierLedger.settledDecisionBeforeOverride`). A raise hides
+ * first and a lowering stays where it is until its move lands, as for any
+ * decision a listing records. The write re-checks, in its own transaction,
+ * that no override was set again and the generation is still the one read.
+ * An item the owner set before anything else decided it stays as it is: its
+ * next listing decides it.
+ */
+function restoreClearedOverride(set: TieredStoreSet, record: TierLedgerRecord): boolean {
+  const ledger = set.ledger;
+  const identity = identityOf(record);
+  const before = ledger.settledDecisionBeforeOverride(identity);
+  if (!before || before.metadataTier === 'secrets' || before.contentTier === 'secrets') return false;
+  const decision: TierDecision = {
+    metadataTier: before.metadataTier,
+    contentTier: before.contentTier,
+    // A stored decider outside the classifier's own list (a landed move) is kept as recorded.
+    decidedBy: before.decidedBy as TierDecision['decidedBy'],
+    reasons: [...before.reasons],
+    state: 'current',
+    contentRead: before.reasons.some((reason) => reason.startsWith('content:')),
+    metadataPending: false,
+    contentPending: false,
+    metadataForced: before.reasons.some((reason) => reason.startsWith('metadata:') && reason.endsWith(':force')),
+    metadataFlagged: before.reasons.some((reason) => reason.startsWith('metadata:possibly_private:')),
+    engineVersion: record.engineVersion,
+    mapRevision: record.mapRevision,
+    snifferId: '',
+  };
+  const recorded = ledger.recordRoutedPlacement(identity, decision, set.placementFor(decision), {
+    guard: { generation: record.generation, override: undefined },
+    staleCopiesGone: set.routedWithoutAnyCopy(identity),
+  });
+  return recorded.outcome !== 'unchanged';
 }
 
 function applyOne(
