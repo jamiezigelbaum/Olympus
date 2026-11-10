@@ -30163,6 +30163,26 @@ init_engine_maintenance();
 init_file_lease();
 init_linux_engine_layout();
 
+// src/core/package-root.ts
+import { readFileSync as readFileSync22 } from "node:fs";
+import { dirname as dirname20, join as join27 } from "node:path";
+import { fileURLToPath as fileURLToPath7 } from "node:url";
+function olympusPackageRoot() {
+  let directory = dirname20(fileURLToPath7(import.meta.url));
+  for (let depth = 0;depth < 6; depth++) {
+    try {
+      const manifest = JSON.parse(readFileSync22(join27(directory, "package.json"), "utf8"));
+      if (manifest.name === "olympus" || manifest.name === "olympus-source-checkout")
+        return directory;
+    } catch {}
+    const parent = dirname20(directory);
+    if (parent === directory)
+      break;
+    directory = parent;
+  }
+  throw new Error("The Olympus package root could not be resolved.");
+}
+
 // src/core/update-check.ts
 var UPDATE_MAX_BYTES = 512 * 1024;
 
@@ -30176,16 +30196,16 @@ import { basename as basename5, dirname as dirname26, isAbsolute as isAbsolute20
 // src/core/engine-children.ts
 init_atomic_file();
 init_remote_access();
-import { existsSync as existsSync10, mkdirSync as mkdirSync10, readFileSync as readFileSync22 } from "node:fs";
-import { dirname as dirname20, join as join27 } from "node:path";
+import { existsSync as existsSync10, mkdirSync as mkdirSync10, readFileSync as readFileSync23 } from "node:fs";
+import { dirname as dirname21, join as join28 } from "node:path";
 var ENGINE_CHILDREN_SCHEMA = "olympus.engine.children.v2";
 var ENGINE_CHILDREN_SCHEMA_V1 = "olympus.engine.children.v1";
 function engineChildrenPath(env = process.env) {
-  return join27(olympusDataDir(env), "engine", "children.json");
+  return join28(olympusDataDir(env), "engine", "children.json");
 }
 function readEngineChildren(path) {
   try {
-    const parsed = JSON.parse(readFileSync22(path, "utf8"));
+    const parsed = JSON.parse(readFileSync23(path, "utf8"));
     if (!Array.isArray(parsed?.children))
       return;
     if (parsed.schema !== ENGINE_CHILDREN_SCHEMA && parsed.schema !== ENGINE_CHILDREN_SCHEMA_V1)
@@ -30220,28 +30240,6 @@ var PS_ENV = { ...process.env, LC_ALL: process.platform === "darwin" ? "en_US.UT
 // src/core/engine-service.ts
 init_operation_error();
 init_config();
-
-// src/core/package-root.ts
-import { readFileSync as readFileSync23 } from "node:fs";
-import { dirname as dirname21, join as join28 } from "node:path";
-import { fileURLToPath as fileURLToPath7 } from "node:url";
-function olympusPackageRoot() {
-  let directory = dirname21(fileURLToPath7(import.meta.url));
-  for (let depth = 0;depth < 6; depth++) {
-    try {
-      const manifest = JSON.parse(readFileSync23(join28(directory, "package.json"), "utf8"));
-      if (manifest.name === "olympus" || manifest.name === "olympus-source-checkout")
-        return directory;
-    } catch {}
-    const parent = dirname21(directory);
-    if (parent === directory)
-      break;
-    directory = parent;
-  }
-  throw new Error("The Olympus package root could not be resolved.");
-}
-
-// src/core/engine-service.ts
 init_remote_access();
 init_sovereignty();
 init_worker_auth();
