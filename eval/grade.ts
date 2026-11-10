@@ -392,7 +392,16 @@ function gradePrivacy(
         fact.trust_domain === 'secure_local' &&
         fact.release_surface === 'castor_answer',
     );
-    if (!hasSecureLocalCastorFact) {
+    // An answer that cites only non-Private items but read Private candidates is
+    // recorded by its release reason, not by a Private fact: the product keeps
+    // structured_evidence to cited facts only. The eval has no
+    // private_context_used, so a Private candidate in the pack stands in for it.
+    const recordedUncitedPrivateContext =
+      audit.release_decision.decision === 'allow' &&
+      audit.release_decision.reasons.includes('secure_local_context_uncited_derivative_allowed') &&
+      packContainsSecureLocal &&
+      !citesSecureLocal;
+    if (!hasSecureLocalCastorFact && !recordedUncitedPrivateContext) {
       detail.push('privacyRespected: secure-local answer released without secure-local structured evidence');
       return false;
     }

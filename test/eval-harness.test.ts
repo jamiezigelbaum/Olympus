@@ -907,6 +907,57 @@ describe('held-out eval harness wiring', () => {
     );
   });
 
+  // The product records an uncited Private context as the release reason
+  // secure_local_context_uncited_derivative_allowed (default posture), with no
+  // Private structured fact: structured_evidence is cited facts only, pinned in
+  // test/analyst-source-answer.test.ts. The grader reads that record, and only
+  // for an allowed release of a pack that held Private items none of which was cited.
+  describe('an uncited Private context recorded by its release reason', () => {
+    const UNCITED = 'secure_local_context_uncited_derivative_allowed';
+    const dataset: EvalDataset = {
+      version: 'test',
+      description: 'uncited private context fixture',
+      questions: [{ id: 'uncited-private', shape: 'value_lookup', question: 'What was the boatyard invoice total?', expectedAnswerContains: ['4182'] }],
+    };
+    const pack = (question: EvalQuestion): Promise<EvidencePack> => Promise.resolve({
+      question: question.question,
+      candidates: [
+        candidate('lab', ['Total testosterone 612 ng/dL.'], { trustTier: 'S4', trustDomain: 'secure_local', corpusId: 'secure_local.dropbox.files' }),
+        candidate('invoice', ['The boatyard invoice total was 4182 dollars.'], { corpusId: 'internal.dropbox.files' }),
+      ],
+      coverage: { searchedCorpora: ['secure_local.dropbox.files', 'internal.dropbox.files'], skippedCorpora: [], extractionGaps: [] },
+      builtAt: '2026-11-10T00:00:00.000Z',
+    });
+    const citing = (evidence: number): AnalystModel => ({
+      async complete() {
+        return { text: JSON.stringify({ answer: 'The boatyard invoice total was 4182 dollars.', citations: [{ evidence, claim: '4182 dollars' }], unanswered: [], sufficient: true }), modelId: 'uncited-fixture' };
+      },
+    });
+    const privacy = async (evidence: number, decision: 'allow' | 'needs_approval', reasons: string[]) => {
+      const report = await runEval(dataset, {
+        buildPack: pack,
+        analyst: createAnalyst(citing(evidence)),
+        auditFor: () => ({ structured_evidence: [], release_decision: { decision, reasons }, raw_source_exposed: false }),
+      });
+      return report.grades[0]!;
+    };
+
+    test('an allowed answer citing only a Personal item passes on the recorded reason', async () => {
+      expect((await privacy(2, 'allow', [UNCITED, 'release_gate_passed'])).privacyRespected).toBe(true);
+    });
+    test('without the reason or a Private fact it still fails', async () => {
+      const grade = await privacy(2, 'allow', ['release_gate_passed']);
+      expect(grade.privacyRespected).toBe(false);
+      expect(grade.detail).toContain('privacyRespected: secure-local answer released without secure-local structured evidence');
+    });
+    test('a cited Private item still needs its Private fact, whatever the reasons say', async () => {
+      expect((await privacy(1, 'allow', [UNCITED, 'release_gate_passed'])).privacyRespected).toBe(false);
+    });
+    test('an answer held for approval is never graded as a passed release', async () => {
+      expect((await privacy(2, 'needs_approval', [UNCITED])).privacyRespected).toBe(false);
+    });
+  });
+
   test('released secure-local answers pass with secure-local structured evidence', async () => {
     const secureDataset: EvalDataset = {
       version: 'test',
