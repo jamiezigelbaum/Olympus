@@ -4,6 +4,7 @@ import { approveClassifier, revokeClassifier } from '../classification-ledger.ts
 //
 //   olympus tier set <locator> public|personal|private|secrets|not-secret|clear
 //   olympus tier explain <locator>
+//   olympus tier recheck chat:<chat id> [--source <provider>] | source:<provider> [--account <scope>]
 //   olympus tier rules list | add --id <id> --match <kind>=<value> --tier <tier> [--source <provider>] [--strength prior|force] | remove <id>
 //   olympus tier classifier status | approve --why <reason> | decline [--why <reason>]
 //
@@ -35,7 +36,7 @@ import { privacyOwnerContext } from './privacy-profile.ts';
 import { installedSnifferRuntime } from './installed-sniffer-runtime.ts';
 import { TierSnifferStore } from './sniffer-store.ts';
 import { classifyItemTiers, type ItemTierOverride, type OwnerTierRule } from './tier-classifier.ts';
-import { TierLedger, tierLedgerIdentityKey, type TierLedgerIdentity } from './tier-ledger.ts';
+import { TierLedger, tierLedgerIdentityKey, type TierLedgerIdentity, type TierRecheckScope } from './tier-ledger.ts';
 import { tierLedgerPathForStore, tierSnifferPathForLedger } from './tier-ledger-path.ts';
 import { findTierSetLedger } from './tier-set-binding.ts';
 import { TIER_SET_BINDING_CONNECTOR_ID, TIER_SET_BINDING_RUN_ID } from '../connector-store/local-index.ts';
@@ -62,6 +63,7 @@ export interface TierCliContext extends LifecyclePathContext {
 export const TIER_CLI_USAGE: Readonly<Record<string, string>> = {
   'tier set': 'olympus tier set <locator> public|personal|private|secrets|not-secret|clear',
   'tier explain': 'olympus tier explain <locator>',
+  'tier recheck': 'olympus tier recheck chat:<chat id> [--source <provider>] | source:<provider> [--account <account>]',
   'tier rules': 'olympus tier rules list | add --id <id> --match <kind>=<value> --tier <tier> [--source <provider>] [--strength prior|force] | remove <id>',
   'tier classifier': 'olympus tier classifier status | approve --why <reason> | decline [--why <reason>]',
   'tier migrate': 'olympus tier migrate plan [--with-sniffer] [--top <n>] | approve --plan <id> [--why <reason>] | '
@@ -77,7 +79,7 @@ export const TIER_CLI_USAGE: Readonly<Record<string, string>> = {
  * hands it to the running worker (core/cli-via-worker.ts).
  */
 export function tierCommandOpensStores(args: readonly string[]): boolean {
-  return args[0] === 'set' || args[0] === 'explain' || args[0] === 'migrate';
+  return args[0] === 'set' || args[0] === 'explain' || args[0] === 'recheck' || args[0] === 'migrate';
 }
 
 /**
@@ -101,6 +103,8 @@ export async function runTierCommand(args: readonly string[], context: TierCliCo
       return runTierSet(rest, context);
     case 'explain':
       return runTierExplain(rest, context);
+    case 'recheck':
+      return runTierRecheck(rest, context);
     case 'rules':
       return runTierRules(rest, context);
     case 'classifier':
@@ -452,12 +456,102 @@ export function runTierExplain(args: readonly string[], context: TierCliContext 
   return { locator, item: publicIdentity(items[0]!.identity), stores: records };
 }
 
+// --- recheck ------------------------------------------------------------------------
+
+/**
+ * "Check privacy again" for one chat or one source (#638): every item in it
+ * is judged again, on its own, from its stored names and text, and may come
+ * out lower as well as higher. Nothing here sets a tier: the request is
+ * recorded beside each ledger that holds the scope, and the engine's re-judge
+ * pass works through it (connector-store/tier-rejudge.ts) whenever the
+ * privacy judge is on. Owner overrides, owner rules and Secrets stay as they are.
+ */
+export function runTierRecheck(args: readonly string[], context: TierCliContext = {}): Record<string, unknown> {
+  const usage = () => new OperationError('invalid_params', `Usage: ${TIER_CLI_USAGE['tier recheck']}`);
+  const [target, ...flags] = args;
+  if (!target) throw usage();
+  const options = new Map<string, string>();
+  for (let index = 0; index < flags.length; index += 2) {
+    const flag = flags[index]!;
+    const value = flags[index + 1];
+    if ((flag !== '--source' && flag !== '--account') || !value?.trim() || options.has(flag)) throw usage();
+    options.set(flag, value.trim());
+  }
+  const scope: TierRecheckScope = {};
+  if (target.startsWith('chat:') && target.slice(5).trim()) {
+    if (options.has('--account')) throw usage();
+    scope.conversationKey = target.slice(5).trim();
+    if (options.has('--source')) scope.provider = options.get('--source')!;
+  } else if (target.startsWith('source:') && target.slice(7).trim()) {
+    if (options.has('--source')) throw usage();
+    scope.provider = target.slice(7).trim();
+    if (options.has('--account')) scope.accountScope = options.get('--account')!;
+  } else {
+    throw usage();
+  }
+  let items = 0;
+  let ledgers = 0;
+  for (const ledgerPath of knownLedgerPaths(context)) {
+    const requested = withLedgerAt(ledgerPath.path, context.now, (ledger) => ledger.requestRecheck(scope), ledgerPath.id);
+    if (requested.items === 0) continue;
+    items += requested.items;
+    ledgers += 1;
+  }
+  if (items === 0) {
+    throw new OperationError(
+      'invalid_params',
+      'No stored items match that chat or source.',
+      'Use the chat id or source name olympus tier explain shows for one of its items.',
+    );
+  }
+  return {
+    scope: target,
+    items,
+    ledgers,
+    outcome: 'recheck_requested',
+    note: 'Each item is judged again on its own, in the background, while the privacy judge is on. Items you set yourself, your rules and Secrets stay as they are.',
+  };
+}
+
+/** Every tier ledger behind the known stores: each store's own, and the set ledger it is bound to. */
+function knownLedgerPaths(context: TierCliContext): Array<{ path: string; id?: string }> {
+  const found = new Map<string, string | undefined>();
+  for (const dbPath of knownStorePaths(context)) {
+    const own = tierLedgerPathForStore(dbPath);
+    if (existsSync(own) && !found.has(own)) found.set(own, undefined);
+    const bound = boundLedgerOf(dbPath);
+    if (bound && existsSync(bound.path)) found.set(bound.path, bound.id);
+  }
+  return [...found].map(([path, id]) => ({ path, ...(id ? { id } : {}) }));
+}
+
+function boundLedgerOf(dbPath: string): { path: string; id: string } | undefined {
+  const db = new Database(dbPath, { readonly: true });
+  try {
+    db.exec('PRAGMA busy_timeout = 10000;');
+    const cursor = (db.query('SELECT cursor FROM sync_runs WHERE sync_run_id = ? AND connector_id = ?')
+      .get(TIER_SET_BINDING_RUN_ID, TIER_SET_BINDING_CONNECTOR_ID) as { cursor: string | null } | null)?.cursor;
+    if (!cursor) return undefined;
+    const record = JSON.parse(cursor) as { ledgerId?: unknown; ledgerPath?: unknown };
+    if (typeof record.ledgerId !== 'string' || typeof record.ledgerPath !== 'string') return undefined;
+    const path = findTierSetLedger(dbPath, { ledgerId: record.ledgerId, ledgerPath: record.ledgerPath });
+    return path ? { path, id: record.ledgerId } : undefined;
+  } catch {
+    // A store never bound (or unreadable) has only its own ledger.
+    return undefined;
+  } finally {
+    closeSqliteStore(db, { checkpoint: false });
+  }
+}
+
 function publicIdentity(identity: TierLedgerIdentity & { family: SourceFamily }): Record<string, string> {
   return {
     provider: identity.provider,
     family: identity.family,
     accountScope: identity.accountScope,
     providerItemId: identity.providerItemId,
+    // The chat it is in, for olympus tier recheck chat:<chat id>.
+    ...(identity.providerConversationId ? { chat: identity.providerConversationId } : {}),
   };
 }
 
