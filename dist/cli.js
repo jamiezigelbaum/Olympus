@@ -123363,7 +123363,7 @@ var init_remote_open = __esm(() => {
   init_worker_transport();
   init_open_targets();
   SERVER_MODE_SETTINGS = ["on", "off", "auto"];
-  OPENING_LINK_PATTERN = /^http:\/\/(?:127\.0\.0\.1|localhost):\d{1,5}\/dashboard\/launch#olympus_launch_ticket=[A-Za-z0-9_-]{43}(?:&olympus_open=[a-z]+\.[a-z]+)?$/;
+  OPENING_LINK_PATTERN = /^http:\/\/127\.0\.0\.1(?::\d{1,5})?\/dashboard\/launch#olympus_launch_ticket=[A-Za-z0-9_-]{43}(?:&olympus_open=[a-z]+\.[a-z]+)?$/;
 });
 
 // src/core/remote-open-tool.ts
@@ -123398,13 +123398,22 @@ async function openRemote(ctx, params, deps = {}) {
   if (baseUrl.protocol !== "http:" || !["127.0.0.1", "localhost"].includes(baseUrl.hostname) || !isValidPort(port)) {
     throw new OperationError("config_error", "The Olympus engine is not on this server's own loopback address, so a tunnel cannot reach it.", "Set OLYMPUS_EMAIL_BASE_URL to http://127.0.0.1:<port>/v1.");
   }
+  const socketPath = workerSocketPath({ env, ...deps.platform ? { platform: deps.platform } : {} });
+  const tunnelOrigin = new URL(`http://127.0.0.1:${port}`).origin;
+  let mintOrigin;
+  if (socketPath) {
+    mintOrigin = tunnelOrigin;
+  } else if (base === tunnelOrigin) {
+    mintOrigin = base;
+  } else {
+    throw new OperationError("config_error", "The Olympus engine address is a name, not 127.0.0.1, so the opening link would not be tied to the tunnel.", "Set OLYMPUS_EMAIL_BASE_URL to http://127.0.0.1:<port>/v1.");
+  }
   const token = (deps.token ?? workerAuthTokenProvider(ctx.config))();
-  const link = await mintDashboardOpeningUrl(base, token, { target, remote: true, ...deps.fetchImpl ? { fetchImpl: deps.fetchImpl } : {} });
-  if (!isOpeningLinkForCommandLine(link)) {
+  const link = await mintDashboardOpeningUrl(mintOrigin, token, { target, remote: true, ...deps.fetchImpl ? { fetchImpl: deps.fetchImpl } : {} });
+  if (!isOpeningLinkForCommandLine(link) || new URL(link).origin !== tunnelOrigin) {
     throw new OperationError("email_error", "The Olympus engine returned an opening link in an unexpected shape.", "Update Olympus, then try again.");
   }
   const sshTarget = mode.sshTarget ?? null;
-  const socketPath = workerSocketPath({ env, ...deps.platform ? { platform: deps.platform } : {} });
   const byHand = remoteOpenInstructions({ port, ...socketPath ? { socketPath } : {}, ...mode.sshTarget ? { sshTarget: mode.sshTarget } : {}, target });
   const commands = remoteOpenNodeCommands({ port, ...socketPath ? { socketPath } : {}, sshTarget: sshTarget ?? SSH_TARGET_PLACEHOLDER, link })[computer];
   return {
