@@ -504,6 +504,8 @@ const ITEM_VISIBILITY_FEED_RETENTION = 65_536;
  *   cursors that set covers. A reader applies only the feed entries past
  *   them; when either feed no longer holds them it never serves the saved set
  *   and rebuilds from the ledger instead.
+ * - `tier_visibility_lease`: which writable connection may publish now, so
+ *   two writers on one store never interleave their writes.
  *
  * Created idempotently on every writable open, without a schema version: the
  * tables and triggers are additive, so the previous build (which checks
@@ -531,6 +533,11 @@ function createConnectorStoreVisibilityTables(db: Database): void {
       item_pks_json TEXT NOT NULL,
       PRIMARY KEY (generation, provider, account_scope, conversation_key, provider_item_id)
     ) WITHOUT ROWID;
+    CREATE TABLE IF NOT EXISTS tier_visibility_lease (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      owner TEXT NOT NULL,
+      expires_at INTEGER NOT NULL
+    );
     CREATE TABLE IF NOT EXISTS tier_visibility_state (
       id INTEGER PRIMARY KEY CHECK (id = 1),
       corpus_id TEXT NOT NULL,
@@ -1123,6 +1130,16 @@ interface VisibilityTimers {
 const VISIBILITY_PUBLISH_CHUNK = 4_096;
 /** How often a writer checks, with no import running, that its saved set is within both feeds. */
 const VISIBILITY_BACKSTOP_MS = 5_000;
+/** How long a publisher's lease lasts without a step renewing it. */
+const VISIBILITY_LEASE_MS = 30_000;
+
+/** Another connection is publishing this store's visibility set: this one retries later. */
+class VisibilityPublishLeaseError extends Error {
+  constructor() {
+    super('Another connection is saving this store\'s visibility set.');
+    this.name = 'VisibilityPublishLeaseError';
+  }
+}
 /** A failed save is retried after 1 s, doubling to at most a minute. */
 const VISIBILITY_RETRY_MIN_MS = 1_000;
 const VISIBILITY_RETRY_MAX_MS = 60_000;
@@ -3493,6 +3510,10 @@ export class LocalConnectorStore {
   private visibilityRefreshing: Promise<void> | undefined;
   private visibilityRegisteredLedger: TierLedger | undefined;
   private visibilityClosed = false;
+  /** This connection's name on the publish lease. */
+  private readonly visibilityOwner = randomUUID();
+  /** The publish lease's clock (tests pass a test clock). */
+  private visibilityNow: () => number = () => Date.now();
   /** Members written per publish step (tests make it small). */
   private visibilityPublishChunk = VISIBILITY_PUBLISH_CHUNK;
   /** The timers the publisher uses (tests pass a test clock). */
@@ -3761,7 +3782,10 @@ export class LocalConnectorStore {
       this.visibilityTimers.clearTimeout(this.visibilityPublishTimer);
       this.visibilityPublishTimer = undefined;
     }
-    this.visibilityPublishing ??= (async () => {
+    if (this.visibilityPublishing) return this.visibilityPublishing;
+    if (!this.visibilityPending || this.visibilityClosed) return Promise.resolve();
+    let publishing: Promise<void> | undefined;
+    publishing = (async () => {
       try {
         while (this.visibilityPending && !this.visibilityClosed) await runStepsInTurns(this.visibilityPublishSteps());
         this.visibilityRetryDelay = 0;
@@ -3771,18 +3795,54 @@ export class LocalConnectorStore {
           this.scheduleVisibilityPublish(this.visibilityRetryDelay);
         }
       } finally {
-        this.visibilityPublishing = undefined;
+        // Only this run's own promise: one that settled before it was stored
+        // must not be kept, or every later call would return it and do nothing.
+        if (this.visibilityPublishing === publishing) this.visibilityPublishing = undefined;
       }
     })();
-    return this.visibilityPublishing;
+    this.visibilityPublishing = publishing;
+    return publishing;
   }
 
-  /** One small write transaction that never waits on another writer's lock. */
-  private visibilityWrite<T>(write: () => T): T {
+  /**
+   * One small write transaction under this connection's publish lease
+   * (`tier_visibility_lease`), never waiting on another writer's lock. It
+   * takes the write lock first (BEGIN IMMEDIATE), then checks the lease in
+   * the same transaction, so nothing another connection commits can land
+   * between the check and the write. `take` acquires a free or expired lease
+   * (the start of a publish); every later step needs the lease still to be
+   * this connection's, so a publisher whose lease another connection took,
+   * or took and released, can never write again.
+   */
+  private visibilityWrite<T>(write: () => T, options: { take?: boolean } = {}): T {
     if (this.db.inTransaction) throw new Error('The store is in another transaction; the visibility save waits.');
     this.db.exec('PRAGMA busy_timeout = 0');
-    try { return this.db.transaction(write)(); }
-    finally { this.db.exec('PRAGMA busy_timeout = 10000'); }
+    try {
+      return this.db.transaction(() => {
+        const now = this.visibilityNow();
+        const lease = this.db.query('SELECT owner, expires_at FROM main.tier_visibility_lease WHERE id = 1')
+          .get() as { owner: string; expires_at: number } | null;
+        const mine = lease?.owner === this.visibilityOwner;
+        if (options.take === true ? (lease !== null && !mine && lease.expires_at > now) : !mine) {
+          throw new VisibilityPublishLeaseError();
+        }
+        this.db.query('INSERT OR REPLACE INTO main.tier_visibility_lease (id, owner, expires_at) VALUES (1, ?, ?)')
+          .run(this.visibilityOwner, now + VISIBILITY_LEASE_MS);
+        return write();
+      }).immediate();
+    } finally { this.db.exec('PRAGMA busy_timeout = 10000'); }
+  }
+
+  /** Lets the next publisher (here or on another connection) start at once. */
+  private releaseVisibilityLease(): void {
+    try {
+      this.db.exec('PRAGMA busy_timeout = 0');
+      this.db.query('DELETE FROM main.tier_visibility_lease WHERE id = 1 AND owner = ?').run(this.visibilityOwner);
+    } catch {
+      // Busy or closed: the lease runs out on its own.
+    } finally {
+      try { this.db.exec('PRAGMA busy_timeout = 10000'); } catch { /* closed */ }
+    }
   }
 
   /**
@@ -3794,6 +3854,13 @@ export class LocalConnectorStore {
    * small transaction that first checks nobody else moved it, and only to
    * the cursors the set had when this publish started: rows written later
    * reflect later states, which the feed past the stamp covers.
+   *
+   * One publisher at a time per store: every step is a lease-checked write
+   * (visibilityWrite), and an in-place step also checks the saved state is
+   * still the one this publish started from, so an older publisher that
+   * resumes after a newer one can write nothing. Cleanup deletes only
+   * generations older than the one the state points at, read in the same
+   * transaction.
    */
   private *visibilityPublishSteps(): Generator<void, void> {
     const pending = this.visibilityPending;
@@ -3817,16 +3884,25 @@ export class LocalConnectorStore {
           WHERE generation = ? AND provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?`).run(...key);
       }
     };
+    let leased = false;
     try {
-      const state = this.readVisibilityState();
+      // Take the lease and read where the saved set stands in one transaction.
+      const { state, top } = this.visibilityWrite(() => ({
+        state: this.readVisibilityState(),
+        top: (this.db.query('SELECT MAX(generation) AS generation FROM main.tier_visibility_members').get() as { generation: number | null }).generation ?? 0,
+      }), { take: true });
+      leased = true;
       const sameAuthority = state !== null && state.corpus_id === this.corpusId && state.ledger_id === ledgerId;
       if (sameAuthority && state.ledger_cursor >= stamp.ledger && state.store_cursor >= stamp.store) return;
-      const moveStamp = (generation: number) => this.visibilityWrite(() => {
+      const unchanged = () => {
         const now = this.readVisibilityState();
         if (now?.generation !== state?.generation || now?.ledger_cursor !== state?.ledger_cursor
           || now?.store_cursor !== state?.store_cursor || now?.corpus_id !== state?.corpus_id || now?.ledger_id !== state?.ledger_id) {
           throw new Error('Another connection saved this store\'s visibility set first.');
         }
+      };
+      const moveStamp = (generation: number) => this.visibilityWrite(() => {
+        unchanged();
         this.db.query(`INSERT OR REPLACE INTO main.tier_visibility_state (id, corpus_id, ledger_id, generation, ledger_cursor, store_cursor)
           VALUES (1, ?, ?, ?, ?, ?)`).run(this.corpusId, ledgerId, generation, stamp.ledger, stamp.store);
       });
@@ -3838,15 +3914,19 @@ export class LocalConnectorStore {
         for (let start = 0; start < ids.length; start += chunk) {
           yield;
           if (!current()) return;
-          this.visibilityWrite(() => { for (const identity of ids.slice(start, start + chunk)) put(state.generation, identity); });
+          this.visibilityWrite(() => {
+            unchanged();
+            for (const identity of ids.slice(start, start + chunk)) put(state.generation, identity);
+          });
         }
         yield;
         if (!current()) return;
         moveStamp(state.generation);
         return;
       }
-      const generation = Math.max(state?.generation ?? 0,
-        (this.db.query('SELECT MAX(generation) AS generation FROM main.tier_visibility_members').get() as { generation: number | null }).generation ?? 0) + 1;
+      // Unique while the lease is held: above every generation any earlier
+      // publisher wrote, live or left behind.
+      const generation = Math.max(state?.generation ?? 0, top) + 1;
       // The live members: one changed after this publish started is written
       // as it is now (a later state the feed covers), or not at all when it
       // left the set (also in the feed).
@@ -3871,14 +3951,16 @@ export class LocalConnectorStore {
       yield;
       if (!current()) return;
       moveStamp(generation);
-      // Older generations (and any a failed publish left) go a chunk at a time.
+      // Generations older than the live one (and any a failed publish left
+      // below it) go a chunk at a time; a newer one is never touched.
       for (;;) {
         yield;
         if (this.visibilityClosed) return;
         const removed = this.visibilityWrite(() => this.db.query(`DELETE FROM main.tier_visibility_members
           WHERE (generation, provider, account_scope, conversation_key, provider_item_id) IN (
             SELECT generation, provider, account_scope, conversation_key, provider_item_id
-            FROM main.tier_visibility_members WHERE generation <> ? LIMIT ?)`).run(generation, chunk).changes);
+            FROM main.tier_visibility_members
+            WHERE generation < (SELECT generation FROM main.tier_visibility_state WHERE id = 1) LIMIT ?)`).run(chunk).changes);
         if (removed < chunk) return;
       }
     } catch (error) {
@@ -3895,6 +3977,8 @@ export class LocalConnectorStore {
         }
       }
       throw error;
+    } finally {
+      if (leased) this.releaseVisibilityLease();
     }
   }
 
@@ -3917,16 +4001,18 @@ export class LocalConnectorStore {
     } catch {
       return; // a closed or busy store: the backstop asks again
     }
-    this.visibilityRefreshing = (async () => {
+    let refreshing: Promise<void> | undefined;
+    refreshing = (async () => {
       try {
         await runStepsInTurns(this.tierLedgerHiddenSteps());
         await this.publishVisibility();
       } catch {
         // The next movement or the backstop asks again.
       } finally {
-        this.visibilityRefreshing = undefined;
+        if (this.visibilityRefreshing === refreshing) this.visibilityRefreshing = undefined;
       }
     })();
+    this.visibilityRefreshing = refreshing;
   }
 
   /**
@@ -3966,6 +4052,7 @@ export class LocalConnectorStore {
   private stopVisibilityPublisher(): void {
     this.visibilityClosed = true;
     this.unregisterVisibilityWriter();
+    if (!this.readOnly && this.visibilityFeedPresent) this.releaseVisibilityLease();
     if (this.visibilityPublishTimer !== undefined) this.visibilityTimers.clearTimeout(this.visibilityPublishTimer);
     if (this.visibilityBackstop !== undefined) this.visibilityTimers.clearInterval(this.visibilityBackstop);
     this.visibilityPublishTimer = undefined;
@@ -17526,6 +17613,7 @@ function validateConnectorStoreVisibilitySchema(db: Database, versionLabel: stri
     ['generation', 'provider', 'account_scope', 'conversation_key', 'provider_item_id', 'flags', 'item_pks_json'], false, versionLabel);
   assertExactTableColumns(db, 'tier_visibility_state',
     ['id', 'corpus_id', 'ledger_id', 'generation', 'ledger_cursor', 'store_cursor'], false, versionLabel);
+  assertExactTableColumns(db, 'tier_visibility_lease', ['id', 'owner', 'expires_at'], false, versionLabel);
   for (const trigger of CONNECTOR_STORE_VISIBILITY_TRIGGERS) assertTriggerExists(db, trigger, versionLabel);
 }
 

@@ -51,6 +51,10 @@ interface Probe {
   visibilityTimers: Pick<TestClock, 'setTimeout' | 'clearTimeout' | 'setInterval' | 'clearInterval'>;
   visibilityPublishSteps(): Generator<void, void>;
   publishVisibility(): Promise<void>;
+  visibilityNow: () => number;
+  tierLedgerHiddenMemo: unknown;
+  visibilityPublishing: Promise<void> | undefined;
+  visibilityPending: unknown;
 }
 
 const probe = (store: LocalConnectorStore) => store as unknown as Probe;
@@ -292,8 +296,8 @@ test('the writer publishes its set in bounded steps and switches the saved set i
     if (step.done) break;
   }
   expect(switchedAt).toBeGreaterThan(1);
-  // No step writes more than one chunk of members, or the stamp alone.
-  expect(largest).toBeLessThanOrEqual(2);
+  // No step writes more than one chunk of members (or the stamp), plus its lease row.
+  expect(largest).toBeLessThanOrEqual(3);
   // The old generation is cleared, in chunks too.
   expect((probe(writer).db.query('SELECT COUNT(DISTINCT generation) AS n FROM tier_visibility_members').get() as { n: number }).n).toBe(1);
 });
@@ -371,6 +375,152 @@ test('a read-only reader stays served from the saved set while another store\'s 
   expect(reader.hasEmbeddings(MODEL)).toBe(truth.hasEmbeddings(MODEL));
   expect(rebuilds.count).toBe(0);
 }, 120_000);
+
+/** A from-scratch build on a new read-only connection: the truth a saved set must match. */
+function truthOf(openReader: () => LocalConnectorStore): HiddenSet {
+  const truth = openReader();
+  spyOn(truth as unknown as { savedVisibilitySteps(): Generator<void, undefined> }, 'savedVisibilitySteps')
+    .mockImplementation(function* () { return undefined; });
+  return sorted(probe(truth).tierHiddenItemPks());
+}
+
+/** A second writable connection on the internal store, on a test clock. */
+function secondWriter(f: TierFixture, clock: TestClock): LocalConnectorStore {
+  const other = new LocalConnectorStore({ dbPath: f.paths.internal, corpusId: CORPORA.internal, family: 'file', trustDomain: 'internal', tierLedger: f.ledger });
+  cleanups.push(() => other.close());
+  probe(other).visibilityTimers = clock;
+  probe(other).visibilityNow = () => clock.now();
+  return other;
+}
+
+test('an older publisher that resumes after a newer one saved never writes its older flags', async () => {
+  const { f, writer, ledgerDb, openReader } = await fixtureWithEveryState();
+  const clock = createTestClock();
+  await writer.saveVisibilityInTurns();
+  probe(writer).visibilityTimers = clock;
+  probe(writer).visibilityNow = () => clock.now();
+  const supersede = (state: string) => ledgerDb.query('UPDATE tier_copies SET copy_state = ? WHERE provider_item_id = ? AND corpus_id = ?')
+    .run(state, 'plain', CORPORA.internal);
+  // The first writer builds with `plain` hidden, then stalls mid-publish.
+  supersede('superseded');
+  probe(writer).tierHiddenItemPks();
+  const older = probe(writer).visibilityPublishSteps();
+  older.next();
+  // `plain` is served again, and a second writer saves that newer set, after
+  // the first writer's lease (if any) has run out.
+  supersede('current');
+  await clock.advance(10 * 60_000);
+  const newer = secondWriter(f, clock);
+  probe(newer).tierHiddenItemPks();
+  await probe(newer).publishVisibility();
+  // The first writer resumes.
+  try { for (let step = older.next(); !step.done; step = older.next()) { /* run on */ } } catch { /* refused */ }
+  expect(sorted(probe(openReader()).tierHiddenItemPks())).toEqual(truthOf(openReader));
+});
+
+test('a publisher cleaning up after its switch never deletes a generation another connection switched to', async () => {
+  const { f, writer, storeDb, ledgerDb, openReader } = await fixtureWithEveryState();
+  const clock = createTestClock();
+  await writer.saveVisibilityInTurns();
+  probe(writer).visibilityTimers = clock;
+  probe(writer).visibilityNow = () => clock.now();
+  probe(writer).visibilityPublishChunk = 1;
+  // Nothing saved: the first writer publishes a whole new generation.
+  storeDb.exec('DELETE FROM tier_visibility_state; DELETE FROM tier_visibility_members;');
+  probe(writer).tierLedgerHiddenMemo = undefined;
+  probe(writer).tierHiddenItemPks();
+  const first = probe(writer).visibilityPublishSteps();
+  const generation = () => (storeDb.query('SELECT generation FROM tier_visibility_state').get() as { generation: number } | null)?.generation;
+  while (generation() === undefined) first.next();
+  // Switched, about to clear older generations. A second writer publishes a
+  // whole newer generation, with `plain` hidden since, in the meantime.
+  ledgerDb.query("UPDATE tier_copies SET copy_state = 'superseded' WHERE provider_item_id = 'plain' AND corpus_id = ?").run(CORPORA.internal);
+  await clock.advance(10 * 60_000);
+  const newer = secondWriter(f, clock);
+  spyOn(newer as unknown as { savedVisibilitySteps(): Generator<void, undefined> }, 'savedVisibilitySteps')
+    .mockImplementation(function* () { return undefined; });
+  probe(newer).tierHiddenItemPks();
+  await probe(newer).publishVisibility();
+  expect(generation()).toBeGreaterThan(1);
+  try { for (let step = first.next(); !step.done; step = first.next()) { /* run on */ } } catch { /* refused */ }
+  expect(sorted(probe(openReader()).tierHiddenItemPks())).toEqual(truthOf(openReader));
+  expect(ledgerStamp(storeDb)!.members).toBe(5);
+});
+
+test('one publisher at a time: a second connection waits while the first holds the lease', async () => {
+  const { f, writer, ledgerDb, openReader } = await fixtureWithEveryState();
+  const clock = createTestClock();
+  await writer.saveVisibilityInTurns();
+  probe(writer).visibilityTimers = clock;
+  probe(writer).visibilityNow = () => clock.now();
+  ledgerDb.query("UPDATE tier_copies SET copy_state = 'superseded' WHERE provider_item_id = 'plain' AND corpus_id = ?").run(CORPORA.internal);
+  probe(writer).tierHiddenItemPks();
+  const first = probe(writer).visibilityPublishSteps();
+  first.next();
+  const newer = secondWriter(f, clock);
+  probe(newer).tierHiddenItemPks();
+  const before = ledgerStamp(probe(newer).db);
+  await probe(newer).publishVisibility();
+  expect(ledgerStamp(probe(newer).db)).toEqual(before);
+  for (let step = first.next(); !step.done; step = first.next()) { /* run on */ }
+  expect(sorted(probe(openReader()).tierHiddenItemPks())).toEqual(truthOf(openReader));
+  // The second writer's retry, once the lease is free, saves its set too.
+  await clock.advance(1_000);
+  await waitFor(() => probe(newer).visibilityPublishing === undefined && probe(newer).visibilityPending === undefined,
+    { description: 'the second writer\'s retried save' });
+  expect(sorted(probe(openReader()).tierHiddenItemPks())).toEqual(truthOf(openReader));
+});
+
+test('two full publishers never share a generation', async () => {
+  const { f, writer, storeDb, ledgerDb, openReader } = await fixtureWithEveryState();
+  const clock = createTestClock();
+  await writer.saveVisibilityInTurns();
+  probe(writer).visibilityTimers = clock;
+  probe(writer).visibilityNow = () => clock.now();
+  probe(writer).visibilityPublishChunk = 1;
+  // Both writers rebuild from scratch, so both publish a whole new generation.
+  const fromScratch = (store: LocalConnectorStore) => spyOn(store as unknown as { savedVisibilitySteps(): Generator<void, undefined> },
+    'savedVisibilitySteps').mockImplementation(function* () { return undefined; });
+  const writerScratch = fromScratch(writer);
+  cleanups.push(() => writerScratch.mockRestore());
+  ledgerDb.query("UPDATE tier_copies SET copy_state = 'superseded' WHERE provider_item_id = 'plain' AND corpus_id = ?").run(CORPORA.internal);
+  probe(writer).tierLedgerHiddenMemo = undefined;
+  probe(writer).tierHiddenItemPks();
+  const first = probe(writer).visibilityPublishSteps();
+  first.next(); // picked its generation, nothing written yet
+  ledgerDb.query("UPDATE tier_copies SET copy_state = 'current' WHERE provider_item_id = 'plain' AND corpus_id = ?").run(CORPORA.internal);
+  const newer = secondWriter(f, clock);
+  probe(newer).visibilityPublishChunk = 1;
+  fromScratch(newer);
+  probe(newer).tierHiddenItemPks();
+  const second = probe(newer).visibilityPublishSteps();
+  // Interleave the two step by step, the second after the first's lease ran out.
+  await clock.advance(10 * 60_000);
+  let firstDone = false;
+  let secondDone = false;
+  while (!firstDone || !secondDone) {
+    if (!secondDone) { try { secondDone = second.next().done === true; } catch { secondDone = true; } }
+    if (!firstDone) { try { firstDone = first.next().done === true; } catch { firstDone = true; } }
+  }
+  expect(sorted(probe(openReader()).tierHiddenItemPks())).toEqual(truthOf(openReader));
+  expect(ledgerStamp(storeDb)!.members).toBe(4);
+});
+
+test('a publish with nothing queued does not swallow the next one', async () => {
+  const { writer, ledgerDb } = await fixtureWithEveryState();
+  const clock = createTestClock();
+  await writer.saveVisibilityInTurns();
+  probe(writer).visibilityTimers = clock;
+  await probe(writer).publishVisibility();
+  ledgerDb.query("UPDATE tier_copies SET copy_state = 'superseded' WHERE provider_item_id = 'plain' AND corpus_id = ?").run(CORPORA.internal);
+  const before = ledgerStamp(probe(writer).db)!;
+  probe(writer).tierHiddenItemPks();
+  const steps = spyOn(writer as unknown as Probe, 'visibilityPublishSteps');
+  cleanups.push(() => steps.mockRestore());
+  await probe(writer).publishVisibility();
+  expect(steps).toHaveBeenCalled();
+  expect(ledgerStamp(probe(writer).db)!.ledger_cursor).toBeGreaterThan(before.ledger_cursor);
+});
 
 test('a reopened writer starts from the saved set instead of rebuilding', async () => {
   const { f, writer, ledgerDb, pk } = await fixtureWithEveryState();
