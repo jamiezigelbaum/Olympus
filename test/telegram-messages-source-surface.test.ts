@@ -27,6 +27,7 @@ import {
   type TelegramConnectorStoreSyncHandler,
   type TelegramConnectorStores,
 } from '../src/workers/telegram-messages/index.ts';
+import { AMPLE_DISK_SPACE } from './helpers/disk-space.ts';
 
 const ACCOUNT = 'telegram.personal';
 const SECRET_TEXT = 'TELEGRAM_SOURCE_SURFACE_SECRET_DO_NOT_LEAK';
@@ -313,7 +314,7 @@ function createFixture(lines: string[]): {
   const stores = { internal, secureLocal };
   return {
     stores,
-    sync: createTelegramConnectorStoreSyncHandler({ stores, spoolDir, tierSet: createLaneTieredStoreSet({
+    sync: createTelegramConnectorStoreSyncHandler({ stores, spoolDir, diskSpace: AMPLE_DISK_SPACE, tierSet: createLaneTieredStoreSet({
       setId: 'telegram.messages', internalStore: internal, secureStore: secureLocal, splitLayers: false,
       tierClassification: { rules: ['lawyer', 'protected'].map(chat => ({
         id: `owner.${chat}`, match: { kind: 'chat' as const, value: chat }, tier: 'secure' as const, strength: 'prior' as const,

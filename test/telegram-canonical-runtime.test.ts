@@ -15,6 +15,7 @@ import {
   createTelegramConnectorStoreSyncHandler,
   type TelegramConnectorStores,
 } from '../src/workers/telegram-messages/index.ts';
+import { AMPLE_DISK_SPACE } from './helpers/disk-space.ts';
 
 const ACCOUNT = 'telegram.personal';
 
@@ -42,6 +43,7 @@ describe('Telegram canonical product runtime', () => {
         stores: fixture.stores,
         tierSet: fixture.set,
         spoolDir: fixture.spoolDir,
+        diskSpace: AMPLE_DISK_SPACE,
       });
       const source = createTelegramSchedulerSource({ config: schedulerConfig(), sync });
       expect(source).toMatchObject({
@@ -119,6 +121,7 @@ describe('Telegram canonical product runtime', () => {
         stores: fixture.stores,
         tierSet: fixture.set,
         spoolDir: fixture.spoolDir,
+        diskSpace: AMPLE_DISK_SPACE,
       });
 
       const receipt = await sync.pull();
