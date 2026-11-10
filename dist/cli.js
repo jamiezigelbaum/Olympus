@@ -172004,13 +172004,13 @@ function workerRouteAllowed(method, pathname, basePath) {
   }
   if (READ_METHODS.has(method))
     return true;
-  return pathname.startsWith(`${basePath}/`) && WRITE_PATHS.has(pathname.slice(basePath.length));
+  return pathname.startsWith(`${basePath}/`) && WRITE_ROUTES.has(`${method} ${pathname.slice(basePath.length)}`);
 }
-var WORKER_WRITE_PATHS, READ_METHODS, WRITE_PATHS;
+var WORKER_POST_PATHS, WORKER_WRITE_ROUTES, READ_METHODS, WRITE_ROUTES;
 var init_write_routes = __esm(() => {
   init_cli_via_worker();
   init_public_surface();
-  WORKER_WRITE_PATHS = [
+  WORKER_POST_PATHS = [
     "/consult/ask",
     "/archive-import/start",
     "/archive-import/status",
@@ -172046,8 +172046,9 @@ var init_write_routes = __esm(() => {
     "/source/index/dropbox/transcribe",
     ...WORKER_CLI_OPERATIONS.map((operation) => `${WORKER_CLI_ROUTE_PREFIX}${operation}`)
   ];
+  WORKER_WRITE_ROUTES = WORKER_POST_PATHS.map((path) => ({ method: "POST", path }));
   READ_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
-  WRITE_PATHS = new Set(WORKER_WRITE_PATHS);
+  WRITE_ROUTES = new Set(WORKER_WRITE_ROUTES.map((route) => `${route.method} ${route.path}`));
 });
 
 // src/core/messaging-account-move.ts

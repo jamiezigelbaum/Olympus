@@ -6,13 +6,15 @@
 // worker's basePath, that a handler serves to a method other than GET, HEAD
 // or OPTIONS, prefix routes' actions included.
 
+import { WORKER_CLI_OPERATIONS, WORKER_CLI_ROUTE_PREFIX } from '../../src/core/cli-via-worker.ts';
+
 const READ_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
 
 /** Uses of `request.method` that dispatch nothing: what precedes them. */
 const NON_DISPATCH = [/\bmethod: $/, /\bisV04PublicDashboardRoute\($/, /\bworkerRouteAllowed\($/];
 
 export interface WorkerRouteScan {
-  /** Paths beneath basePath served to a writing method, e.g. `/source/answer`. */
+  /** Methods and paths beneath basePath a handler serves to a writing method, e.g. `POST /source/answer`. */
   writes: Set<string>;
   /** Dispatch the scan does not recognise, as `line N: text`. */
   unrecognized: string[];
@@ -59,20 +61,22 @@ export function scanWorkerWriteRoutes(source: string): WorkerRouteScan {
       if (rest !== '') report(at, 'a writer path that is not a dashboard route the scan can read');
       continue;
     }
-    for (const path of exact) writes.add(path);
+    const method = compared[2]!;
+    for (const path of exact) writes.add(`${method} ${path}`);
     if (prefixes.length === 0 && !cli) continue;
     const body = blockAfter(source, condition.close);
     if (!body) { report(at, 'a prefix route without a block'); continue; }
     const block = source.slice(body.open + 1, body.close);
     if (cli) {
-      if (!/WORKER_CLI_OPERATIONS\s*\n?\s*\.find\(/.test(block)) report(at, 'a CLI prefix route that does not dispatch through WORKER_CLI_OPERATIONS');
+      if (!/WORKER_CLI_OPERATIONS\s*\n?\s*\.find\(/.test(block)) { report(at, 'a CLI prefix route that does not dispatch through WORKER_CLI_OPERATIONS'); continue; }
+      for (const operation of WORKER_CLI_OPERATIONS) writes.add(`${method} ${WORKER_CLI_ROUTE_PREFIX}${operation}`);
       continue;
     }
     const actions = [...block.matchAll(/\baction === (['"`])([\w-]+)\1/g)].map((m) => m[2]!);
     const otherActionUses = (block.match(/\baction\b/g) ?? []).length - actions.length;
     const declared = /const action = url\.pathname\.slice\(/.test(block) ? 1 : 0;
     if (actions.length === 0 || otherActionUses !== declared) { report(at, 'a prefix route whose actions are not each an action === \'name\' test'); continue; }
-    for (const prefix of prefixes) for (const action of actions) writes.add(`${prefix}${action}`);
+    for (const prefix of prefixes) for (const action of actions) writes.add(`${method} ${prefix}${action}`);
   }
   return { writes, unrecognized };
 }

@@ -73657,7 +73657,7 @@ init_venice_models();
 // src/workers/email-source/write-routes.ts
 init_cli_via_worker();
 init_public_surface();
-var WORKER_WRITE_PATHS = [
+var WORKER_POST_PATHS = [
   "/consult/ask",
   "/archive-import/start",
   "/archive-import/status",
@@ -73693,8 +73693,9 @@ var WORKER_WRITE_PATHS = [
   "/source/index/dropbox/transcribe",
   ...WORKER_CLI_OPERATIONS.map((operation) => `${WORKER_CLI_ROUTE_PREFIX}${operation}`)
 ];
+var WORKER_WRITE_ROUTES = WORKER_POST_PATHS.map((path) => ({ method: "POST", path }));
 var READ_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
-var WRITE_PATHS = new Set(WORKER_WRITE_PATHS);
+var WRITE_ROUTES = new Set(WORKER_WRITE_ROUTES.map((route) => `${route.method} ${route.path}`));
 
 // src/workers/email-source/index.ts
 init_judge_check();

@@ -7,16 +7,15 @@
 // The list of writing routes is exhaustive by construction, not by a scan:
 // the worker answers 404 to a writing method on any path its registries do
 // not name (workerRouteAllowed), the dashboard's V0_4_PUBLIC_DASHBOARD_ROUTES
-// and the worker's WORKER_WRITE_PATHS, one entry per prefix action. A scan of
+// and the worker's WORKER_WRITE_ROUTES, one method and path per prefix action. A scan of
 // the worker's dispatch then holds the registry to the handlers, and fails on
 // any dispatch form it does not know, so the registry cannot drift either.
 import { describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { WORKER_CLI_OPERATIONS, WORKER_CLI_ROUTE_PREFIX } from '../src/core/cli-via-worker.ts';
 import { V0_4_PUBLIC_DASHBOARD_ROUTES } from '../src/core/public-surface.ts';
 import { ENGINE_FORWARDED_ROUTES, ENGINE_FRONT_ONLY_ROUTES } from '../src/workers/engine-split/commands.ts';
-import { WORKER_WRITE_PATHS, workerRouteAllowed } from '../src/workers/email-source/write-routes.ts';
+import { WORKER_WRITE_ROUTES, workerRouteAllowed } from '../src/workers/email-source/write-routes.ts';
 import { scanFileExtractionAliases, scanWorkerWriteRoutes } from './helpers/worker-route-scan.ts';
 
 const WORKER = readFileSync(join(import.meta.dir, '../src/workers/email-source/index.ts'), 'utf8');
@@ -26,7 +25,7 @@ const READ_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
 function workerWriteRoutes(): Set<string> {
   const routes = new Set<string>();
   for (const route of V0_4_PUBLIC_DASHBOARD_ROUTES) if (!READ_METHODS.has(route.method)) routes.add(route.path);
-  for (const path of WORKER_WRITE_PATHS) routes.add(`/v1${path}`);
+  for (const route of WORKER_WRITE_ROUTES) routes.add(`/v1${route.path}`);
   return routes;
 }
 
@@ -35,10 +34,9 @@ function registryDrift(source: string): { unregistered: string[]; unserved: stri
   const scan = scanWorkerWriteRoutes(source);
   const served = new Set([
     ...scan.writes,
-    ...scanFileExtractionAliases(source),
-    ...WORKER_CLI_OPERATIONS.map((operation) => `${WORKER_CLI_ROUTE_PREFIX}${operation}`),
+    ...scanFileExtractionAliases(source).map((path) => `POST ${path}`),
   ]);
-  const registered = new Set(WORKER_WRITE_PATHS);
+  const registered = new Set(WORKER_WRITE_ROUTES.map((route) => `${route.method} ${route.path}`));
   return {
     unregistered: [...served].filter((path) => !registered.has(path)).sort(),
     unserved: [...registered].filter((path) => !served.has(path)).sort(),
@@ -71,7 +69,9 @@ describe('the worker serves a writing method only on a registered route', () => 
   test('anything else is refused before any handler runs', () => {
     expect(workerRouteAllowed('POST', '/v1/privacy-item/raise', '/v1')).toBe(true);
     expect(workerRouteAllowed('POST', '/v1/privacy-item/lower', '/v1')).toBe(false);
-    expect(workerRouteAllowed('PUT', '/v1/source/answer', '/v1')).toBe(true);
+    expect(workerRouteAllowed('POST', '/v1/source/answer', '/v1')).toBe(true);
+    expect(workerRouteAllowed('PUT', '/v1/source/answer', '/v1')).toBe(false);
+    expect(workerRouteAllowed('DELETE', '/v1/source/index/embed', '/v1')).toBe(false);
     expect(workerRouteAllowed('PUT', '/v1/brand/new', '/v1')).toBe(false);
     expect(workerRouteAllowed('DELETE', '/elsewhere', '/v1')).toBe(false);
     expect(workerRouteAllowed('GET', '/v1/health', '/v1')).toBe(true);
@@ -102,20 +102,39 @@ describe('the scan catches the writers a narrower one missed', () => {
   };
 
   test('a double-quoted "POST"', () => {
-    expect(registryDrift(insert('if (request.method === "POST" && url.pathname === `${basePath}/brand/new`) { return json({}); }')).unregistered).toEqual(['/brand/new']);
+    expect(registryDrift(insert('if (request.method === "POST" && url.pathname === `${basePath}/brand/new`) { return json({}); }')).unregistered).toEqual(['POST /brand/new']);
   });
 
   test('a PUT, PATCH or DELETE writer', () => {
     for (const method of ['PUT', 'PATCH', 'DELETE']) {
-      expect(registryDrift(insert(`if (request.method === '${method}' && url.pathname === \`\${basePath}/brand/new\`) { return json({}); }`)).unregistered).toEqual(['/brand/new']);
+      expect(registryDrift(insert(`if (request.method === '${method}' && url.pathname === \`\${basePath}/brand/new\`) { return json({}); }`)).unregistered).toEqual([`${method} /brand/new`]);
     }
+  });
+
+  test('a new method on a path that is already registered', () => {
+    for (const method of ['PUT', 'PATCH', 'DELETE']) {
+      expect(registryDrift(insert(`if (request.method === '${method}' && url.pathname === \`\${basePath}/source/index/embed\`) { return json({}); }`)).unregistered).toEqual([`${method} /source/index/embed`]);
+    }
+  });
+
+  test('a new method on the CLI prefix', () => {
+    const cli = "if (request.method === 'POST' && url.pathname.startsWith(`${basePath}${WORKER_CLI_ROUTE_PREFIX}`)) {";
+    expect(WORKER).toContain(cli);
+    const drift = registryDrift(WORKER.replace(cli, cli.replace("'POST'", "'PUT'")));
+    expect(drift.unregistered).toContain('PUT /cli/data-export');
+    expect(drift.unserved).toContain('POST /cli/data-export');
+  });
+
+  test('every writer the split router must route is a POST, the one method it forwards', () => {
+    expect(WORKER_WRITE_ROUTES.filter((route) => route.method !== 'POST')).toEqual([]);
+    expect(V0_4_PUBLIC_DASHBOARD_ROUTES.filter((route) => !READ_METHODS.has(route.method) && route.method !== 'POST')).toEqual([]);
   });
 
   test('a new action beneath a prefix route', () => {
     const raise = "          if (action === 'raise') {";
     expect(WORKER).toContain(raise);
     const mutated = WORKER.replace(raise, `          if (action === "lower") { return json({}); }\n${raise}`);
-    expect(registryDrift(mutated).unregistered).toEqual(['/privacy-item/lower']);
+    expect(registryDrift(mutated).unregistered).toEqual(['POST /privacy-item/lower']);
   });
 
   test('a dispatch form it does not know', () => {
