@@ -1,5 +1,6 @@
 import { LocalPeopleIndex, peopleIndexPath, refreshPeopleIndex, type PeopleSenderIdentity } from '../../core/people-index.ts';
 import { adoptExistingCloudApproval, createJudgeSetup } from '../classification/judge-setup.ts';
+import { createOwnerTierItems } from '../classification/tier-owner-items.ts';
 import { builtInRerankerFromEnv } from '../source-index/built-in-reranker.ts';
 import { JudgeSpending, withJudgeSpendingStop, judgeSpendingPath } from '../classification/judge-spending.ts';
 import { DEFAULT_VENICE_JUDGE_CONCURRENT_CALLS, JUDGE_PROMPT_CACHE_KEY, JudgeRateLimitPacer } from '../classification/judge-pacing.ts';
@@ -106,6 +107,7 @@ import {
   type SourceIndexStatusRetrievalAvailability,
 } from '../source-index/status.ts';
 import {
+  dashboardOwnerSessionCheck,
   resolveWorkerBindHost,
   warnIfWorkerAuthDisabled,
   withWorkerBearerAuth,
@@ -6211,6 +6213,9 @@ export async function main(): Promise<void> {
     pendingPrivacyItems: () => tierSnifferBacklog?.().pendingItems,
     // Asking for an import or a removal, and reading the list: nothing else (archive-import/agent.ts).
     archiveImportAgent: archiveImportDashboard.agent,
+    // One item's privacy label (issue #1060): the same stores and ledgers
+    // `olympus tier set` reaches in this worker (cli-operations.ts tierForCli).
+    ownerTierItems: createOwnerTierItems(),
     // Bound late: the consult block below sets askAnonymouslyNow.
     consultAsk: async ({ caller, ...input }, signal) => (askAnonymouslyNow
       ? askWithAnonymousInbox({ ...input, ...(caller?.provider ? { callerProvider: caller.provider } : {}), signal }, {
@@ -7364,6 +7369,9 @@ export async function main(): Promise<void> {
         requireOwnerSocket: !!socketPath,
         // Any marker, verified or not, refuses approval (fails closed).
         isRelayed: carriesRelayMarker,
+        // Approving from a browser off the owner socket needs the owner's
+        // dashboard session, checked with the same keys that sign it (#1186).
+        ownerSession: dashboardOwnerSessionCheck({ authToken, sessionSecret: dashboardSessionSecret.secret }),
         // Demo installs only: inert without remote.demoConsent AND the demo marker.
         demoConsent: () => resolveDemoConsent(olympusConfig.remote, () => demoInstallMarked(remoteAccessDir(process.env))),
         connections: () => remoteConnections({ create: true })!,

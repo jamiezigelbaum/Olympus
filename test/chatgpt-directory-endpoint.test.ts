@@ -164,7 +164,12 @@ beforeEach(async () => {
     directoryServer: (makeContext, options, detached) => createChatGptDirectoryMcpServer(makeContext, options, detached, (name) => directoryAllows!(name)),
   });
   const handler = withRemoteOAuthRoutes(
-    createRemoteOAuthHandler({ publicUrls: urls, connections: () => store, demoConsent: () => demoSettings }),
+    createRemoteOAuthHandler({
+      publicUrls: urls, connections: () => store, demoConsent: () => demoSettings,
+      // Stands in for the owner's dashboard session in this browser (#1186;
+      // its checks: test/remote-oauth-owner-approval.test.ts).
+      ownerSession: () => true,
+    }),
     withRemoteMcpRoute((request) => (directoryAllows ? narrowed(request) : mcp(request)), async () => new Response('not found', { status: 404 })),
   );
   server = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: withRequestPeer(handler) });

@@ -1656,6 +1656,19 @@ const COMMAND_GROUP_HELP: Record<string, string[]> = {
     '  olympus source index status',
     '  olympus source index search <query> --corpus-id <corpus>',
   ],
+  privacy: [
+    'Usage: olympus privacy item <command>',
+    'Commands:',
+    '  olympus privacy item find <words> | --recent',
+    '  olympus privacy item set <item_id> private',
+    'Making an item Personal, or putting it back to the judge, is on the dashboard (Privacy) or olympus tier set.',
+  ],
+  'privacy item': [
+    'Usage: olympus privacy item <command>',
+    'Commands:',
+    '  olympus privacy item find <words> | --recent',
+    '  olympus privacy item set <item_id> private',
+  ],
   sovereignty: [
     'Usage: olympus sovereignty <command>',
     'Commands:',

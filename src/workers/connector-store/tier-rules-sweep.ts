@@ -472,6 +472,21 @@ function readLabelState(raw: string | undefined): LabelSweepState {
   }
 }
 
+/**
+ * Makes the provider account's raising label rules pending again, so the next
+ * label sweep asks the provider which stored items carry each label and raises
+ * those. Used when an item's owner override is cleared: whether the item
+ * carries a label is not known from the store, so the provider answers it
+ * instead of a rule being assumed to match. Walks in progress are kept.
+ */
+export function reopenLabelRuleSweep(ledger: TieredStoreSet['ledger'], provider: string, accountScope: string): void {
+  const metaKey = `${LABEL_SWEEP_META_KEY}:${provider}:${accountScope}`;
+  const written = ledger.readMeta(metaKey);
+  const state = readLabelState(written);
+  if (state.done.length === 0) return;
+  ledger.writeMeta(metaKey, JSON.stringify({ ...state, done: [] }));
+}
+
 /** A label rule: matched against the provider's labels for an item, which no store keeps. */
 function isLabelRule(rule: OwnerTierRule): boolean {
   return rule.match.kind === 'label';

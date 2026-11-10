@@ -10,8 +10,14 @@
  *   a request that came through the relay carries `x-olympus-relay` (the relay
  *   child sets it on everything it forwards and strips inbound copies) and is
  *   refused, the Host must be a loopback name, the peer a loopback address,
- *   and the approve POST the browser's own navigation. Being at the Mac is the
- *   proof of ownership, so approval is one click, with no pairing code. Codes
+ *   and the approve POST the browser's own navigation. A loopback peer is any
+ *   account on this computer, so the approval also needs an owner proof
+ *   (#1186): the owner socket on Linux, else this browser's live dashboard
+ *   control session, which only the owner's opening link or the worker token
+ *   opens. The page's form posts to `/dashboard/connect/authorize` so that
+ *   cookie (Path=/dashboard) comes with it. Approval stays one click, with no
+ *   pairing code; without the session the page asks the owner to open the
+ *   dashboard first. Codes
  *   and tokens name this install (`oly2c.<id>.…`, connect-relay/shared/tokens.ts)
  *   so the relay can route them. The relay answers `/connect/register` itself,
  *   naming a pinned ChatGPT client (connect-relay/server/client-registration.ts);
@@ -39,6 +45,7 @@
  *   tokens open only that one.
  * - `GET /.well-known/oauth-authorization-server`      RFC 8414 metadata
  * - `GET|POST /connect/authorize`  approval page; code + PKCE S256 + RFC 9207 `iss`
+ * - `POST /dashboard/connect/authorize`  relay mode's approval from a browser (owner session)
  * - `POST /connect/token`          authorization_code and rotating refresh_token
  * - `POST /connect/register`       RFC 7591 registration (fallback to CIMD), rate-limited
  * - `POST /connect/revoke`         RFC 7009
@@ -86,6 +93,13 @@ export const REMOTE_OAUTH_PATHS = {
   protectedResourceDirectoryMcp: `/.well-known/oauth-protected-resource${REMOTE_DIRECTORY_MCP_RESOURCE_PATH}`,
   authorizationServer: '/.well-known/oauth-authorization-server',
   authorize: '/connect/authorize',
+  /**
+   * Relay mode's approval POST from a browser on this computer (#1186). It
+   * sits under `/dashboard` so the browser sends the owner's dashboard
+   * control cookie (Path=/dashboard) with it: that session is the owner
+   * proof where there is no owner socket.
+   */
+  ownerAuthorize: '/dashboard/connect/authorize',
   demoAuthorize: '/connect/demo/authorize',
   token: '/connect/token',
   register: '/connect/register',
@@ -135,6 +149,13 @@ export interface RemoteOAuthHandlerOptions {
   /** The request's network peer (default: what the server recorded, core/request-peer.ts). */
   requireOwnerSocket?: boolean;
   peerAddress?: (request: Request) => string | undefined;
+  /**
+   * Relay mode's owner proof for an approval that did not come over the
+   * owner socket: this browser holds a live dashboard control session for
+   * `origin` (workers/http.ts dashboardOwnerSessionCheck). Absent, no such
+   * approval completes.
+   */
+  ownerSession?: (request: Request, origin: string) => boolean;
   /** Active demo sign-in settings, asked per request; undefined on every real install. */
   demoConsent?: () => DemoConsentSettings | undefined;
   /** The connection store; OAuth may create the database (registration precedes pairing). */
@@ -294,11 +315,23 @@ export function createRemoteOAuthHandler(options: RemoteOAuthHandlerOptions): (r
    * Relay mode accepts approval only from a direct visit on this Mac: not
    * through the relay, with a loopback Host, from a loopback peer (review
    * 2026-10-02: the Host alone let a LAN caller approve when the worker was
-   * bound to a non-loopback address). A process on this Mac still can; see
-   * docs/design/chatgpt-plugin.md, "Open decision: an owner-held approval".
+   * bound to a non-loopback address). That alone admits any account on this
+   * computer; approving also needs ownerProof.
    */
   const directLoopback = (request: Request): boolean =>
     !isRelayed(request) && loopbackHost(request) && (requestFromOwnerSocket(request) || (!options.requireOwnerSocket && isLoopbackAddress(peerAddress(request))));
+  /**
+   * The owner's own approval (#1186): the owner socket, or this browser's live
+   * dashboard control session for this page's origin (`http://` + its
+   * loopback Host, which directLoopback has checked; the page's form is sent
+   * with `Origin: null` under its `no-referrer` policy).
+   */
+  const ownerProof = (request: Request): boolean =>
+    requestFromOwnerSocket(request) || (options.ownerSession?.(request, new URL(request.url).origin) ?? false);
+  /** Where this browser's approval form posts: the dashboard path carries the session cookie, the socket needs none. */
+  // Relay mode only: a tunnel's page (pairing code) always posts to /connect/authorize.
+  const approvalAction = (request: Request, u: RemotePublicUrls): string =>
+    u.installId && !requestFromOwnerSocket(request) ? REMOTE_OAUTH_PATHS.ownerAuthorize : REMOTE_OAUTH_PATHS.authorize;
   const linux = (options.platform ?? process.platform) === 'linux';
   const notOnThisComputer = (): Response =>
     errorPage(403, linux
@@ -359,7 +392,7 @@ export function createRemoteOAuthHandler(options: RemoteOAuthHandlerOptions): (r
         if (entry.demo || entry.transaction !== transaction) continue;
         // The form is served again with a fresh cookie, so it is valid as long.
         entry.expiresAt = now() + CONSENT_REQUEST_TTL_MS;
-        return consentPage(id, entry, u);
+        return consentPage(id, entry, u, undefined, true, approvalAction(request, u));
       }
     }
     admitPending();
@@ -380,7 +413,7 @@ export function createRemoteOAuthHandler(options: RemoteOAuthHandlerOptions): (r
       demo,
     };
     pending.set(requestId, entry);
-    return demo ? demoPage(requestId, entry) : consentPage(requestId, entry, u);
+    return demo ? demoPage(requestId, entry) : consentPage(requestId, entry, u, undefined, true, approvalAction(request, u));
   };
 
   const demoPage = (requestId: string, entry: PendingConsent, error?: string): Response => {
@@ -486,10 +519,16 @@ export function createRemoteOAuthHandler(options: RemoteOAuthHandlerOptions): (r
     u: RemotePublicUrls,
     error?: string,
     showAttempts = true,
+    /** Relay mode: where the form posts (approvalAction). */
+    action: string = REMOTE_OAUTH_PATHS.authorize,
+    /** Relay mode: why the last click did not approve. */
+    ownerNeeded = false,
   ): Response => {
     const page = u.installId
       ? renderLoopbackConsentPage({
         platform: options.platform ?? process.platform,
+        action,
+        ownerNeeded,
         requestId,
         csrf: entry.csrf,
         clientName: entry.client.clientName,
@@ -511,8 +550,8 @@ export function createRemoteOAuthHandler(options: RemoteOAuthHandlerOptions): (r
       ...(error && showAttempts ? { attemptsLeft: CONSENT_MAX_ATTEMPTS - entry.attempts } : {}),
     });
     const headers = new Headers(page.headers);
-    headers.append('Set-Cookie', consentCookie(requestId, entry.csrf, cookieSecure(u), CONSENT_REQUEST_TTL_MS / 1000));
-    return new Response(page.body, { status: error ? 400 : 200, headers });
+    headers.append('Set-Cookie', consentCookie(requestId, entry.csrf, cookieSecure(u), CONSENT_REQUEST_TTL_MS / 1000, consentCookiePath(action)));
+    return new Response(page.body, { status: ownerNeeded ? 403 : error ? 400 : 200, headers });
   };
 
   const authorizePost = async (request: Request, u: RemotePublicUrls): Promise<Response> => {
@@ -535,22 +574,26 @@ export function createRemoteOAuthHandler(options: RemoteOAuthHandlerOptions): (r
     if (!constantTimeEqual(csrf, entry.csrf) || !constantTimeEqual(cookie, entry.csrf)) {
       return errorPage(403, 'This approval did not come from the Olympus page.');
     }
+    const path = new URL(request.url).pathname;
+    const clearCookie = (response: Response): Response => {
+      response.headers.append('Set-Cookie', consentCookie(requestId, '', cookieSecure(u), 0, consentCookiePath(path)));
+      return response;
+    };
     const finish = (params: Record<string, string | undefined>): Response => {
       pending.delete(requestId);
-      const response = redirectWithParams(entry.redirectUri, { ...params, state: entry.state, iss: u.issuer });
-      response.headers.append('Set-Cookie', consentCookie(requestId, '', cookieSecure(u), 0));
-      return response;
+      return clearCookie(redirectWithParams(entry.redirectUri, { ...params, state: entry.state, iss: u.issuer }));
     };
     const action = form.get('action');
     if (action === 'deny') return finish({ error: 'access_denied', error_description: 'The owner denied the request.' });
     if (action !== 'approve') return errorPage(400, 'The approval form was malformed.');
-    const approve = (): Response => {
-      const response = issueCode(requestId, entry, u);
-      response.headers.append('Set-Cookie', consentCookie(requestId, '', cookieSecure(u), 0));
-      return response;
-    };
-    // Relay mode: a direct loopback visit is the proof of ownership.
-    if (u.installId) return approve();
+    const approve = (): Response => clearCookie(issueCode(requestId, entry, u));
+    // Relay mode: a direct loopback visit plus the owner's proof (#1186).
+    // Without it the page stays, saying how to open the dashboard; nothing
+    // is spent, so the owner's next click, with the session, approves.
+    if (u.installId) {
+      if (ownerProof(request)) return approve();
+      return consentPage(requestId, entry, u, undefined, true, approvalAction(request, u), true);
+    }
     const wait = pacer.delay();
     if (wait > PAIRING_MAX_HELD_MS) {
       return consentPage(requestId, entry, u,
@@ -731,6 +774,11 @@ export function createRemoteOAuthHandler(options: RemoteOAuthHandlerOptions): (r
           if (method === 'GET') return await authorizeGet(request, urls);
           if (method === 'POST') return await authorizePost(request, urls);
           return methodNotAllowed('GET, POST');
+        case REMOTE_OAUTH_PATHS.ownerAuthorize:
+          // Relay mode only, and only the approval POST: the page itself is at /connect/authorize.
+          if (!urls.installId) return jsonResponse(404, { error: 'not_found' });
+          if (method === 'POST') return await authorizePost(request, urls);
+          return methodNotAllowed('POST');
         case REMOTE_OAUTH_PATHS.demoAuthorize:
           if (method === 'GET') return await authorizeGet(request, urls, true);
           if (method === 'POST') return await demoPost(request, urls);
@@ -897,8 +945,13 @@ function consentCookieName(requestId: string): string {
   return `olympus_consent_${requestId}`;
 }
 
-function consentCookie(requestId: string, value: string, secure: boolean, maxAgeSeconds: number): string {
-  return `${consentCookieName(requestId)}=${value}; Path=/connect; Max-Age=${maxAgeSeconds}; HttpOnly; SameSite=Strict${secure ? '; Secure' : ''}`;
+/** The consent cookie goes only where its form posts: `/connect`, or relay mode's `/dashboard/connect`. */
+function consentCookiePath(action: string): string {
+  return action === REMOTE_OAUTH_PATHS.ownerAuthorize ? '/dashboard/connect' : '/connect';
+}
+
+function consentCookie(requestId: string, value: string, secure: boolean, maxAgeSeconds: number, path = '/connect'): string {
+  return `${consentCookieName(requestId)}=${value}; Path=${path}; Max-Age=${maxAgeSeconds}; HttpOnly; SameSite=Strict${secure ? '; Secure' : ''}`;
 }
 
 function constantTimeEqual(left: string, right: string): boolean {
