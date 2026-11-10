@@ -154,7 +154,54 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
     if (keys) keys.hidden = working || !firstRunCheckRequested;
   }
 
-  async function readFirstRunReadiness(): Promise<void> {
+  /**
+   * A requested read while the walkthrough is open (a connection finished, a
+   * dialog closed) also brings the rest of the page up to date (#705): every
+   * outermost region with an id outside the walkthrough is swapped for the
+   * fresh one, unless the owner is working in it (typed input, focus, an open
+   * confirmation) or it runs its own pairing poll. The walkthrough, its typed
+   * fields and its saved choice stay exactly as they are.
+   */
+  function refreshAroundWalkthrough(template: HTMLTemplateElement): void {
+    const walkthrough = query<HTMLElement>('[data-first-run-sheet]');
+    if (!walkthrough) return;
+    const active = activeElement();
+    const dirty = (region: HTMLElement) => Array.from(region.querySelectorAll<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>(
+      'input:not([type="hidden"]):not([data-source-search]),textarea,select',
+    )).some((field) => field instanceof HTMLSelectElement
+      ? Array.from(field.options).some((option) => option.selected !== option.defaultSelected)
+      : field.value !== field.defaultValue);
+    for (const region of queryAll<HTMLElement>('[id]')) {
+      // A region inside one already replaced went with it.
+      if (!region.isConnected || !root.contains(region)) continue;
+      if (region.contains(walkthrough) || walkthrough.contains(region)) continue;
+      if (region.matches('[data-messaging-source]') || region.querySelector('[data-messaging-source]')) continue;
+      if ((active && region.contains(active)) || region.querySelector('dialog[open]') || dirty(region)) continue;
+      const next = Array.from(template.content.querySelectorAll<HTMLElement>('[id]')).find((candidate) => candidate.id === region.id);
+      if (!next || next.querySelector('[data-first-run-sheet]')) continue;
+      const openSheets = new Set(Array.from(region.querySelectorAll<HTMLElement>('.sheet.on')).map((sheet) => sheet.id).concat(region.matches('.sheet.on') ? [region.id] : []));
+      const open = new Set(Array.from(region.querySelectorAll<HTMLDetailsElement>('details[open]')).map((node) =>
+        node.dataset.pollKey || node.querySelector('summary')?.textContent?.trim() || ''));
+      const fresh = document.importNode(next, true);
+      region.replaceWith(fresh);
+      fresh.querySelectorAll<HTMLDetailsElement>('details').forEach((node) => {
+        if (open.has(node.dataset.pollKey || node.querySelector('summary')?.textContent?.trim() || '')) node.open = true;
+      });
+      [fresh, ...Array.from(fresh.querySelectorAll<HTMLElement>('.sheet'))].filter((sheet) => sheet.classList.contains('sheet') && openSheets.has(sheet.id)).forEach((sheet) => setSheetOpen(sheet, true));
+      const wait = authorizationWait;
+      const waitingSheet = wait && [fresh, ...Array.from(fresh.querySelectorAll<HTMLElement>('.sheet'))].find((candidate) => candidate.id === wait.sheetId);
+      if (wait && waitingSheet) say(waitingSheet.querySelector('form[data-connect-kind="oauth"]') ?? waitingSheet, wait.message);
+      fresh.querySelectorAll<HTMLScriptElement>('script[data-dashboard-rerun]').forEach((inert) => {
+        const script = root.ownerDocument.createElement('script');
+        for (const attribute of Array.from(inert.attributes)) script.setAttribute(attribute.name, attribute.value);
+        script.text = inert.text;
+        inert.replaceWith(script);
+      });
+    }
+    applyWriteCapability();
+  }
+
+  async function readFirstRunReadiness(refreshAround = false): Promise<void> {
     try {
       const page = await options.refresh();
       if (disposed || options.signal.aborted || !firstRunChoice) return;
@@ -163,6 +210,7 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
       applyWriteCapability();
       const template = document.createElement('template');
       template.innerHTML = page.body;
+      if (refreshAround) refreshAroundWalkthrough(template);
       // The walkthrough keeps its inputs. Only the independent download line
       // is replaced from this read, even before the readiness check is pressed.
       const previousProgress = query<HTMLElement>('[data-private-model-progress]');
@@ -1087,8 +1135,11 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
     if (firstRunChoice) {
       // Read authoritative readiness while leaving the active walkthrough and
       // any typed key/model fields in place, even during worker activation.
+      // A requested or forced read also redraws the rest of the page around it (#705).
+      const around = force || requested || redrawOwed;
+      redrawOwed = false;
       inFlight = true;
-      try { await readFirstRunReadiness(); } finally { inFlight = false; }
+      try { await readFirstRunReadiness(around); } finally { inFlight = false; }
       return;
     }
     if (redrawOwed) { redrawOwed = false; force = true; }
@@ -1299,11 +1350,15 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
       // Cancel pairing is offered only while a pairing is running, including while it waits for the chat choice; at any other time it would do nothing.
       const cardCancel = card.querySelector<HTMLElement>('.actionrow [data-messaging-kind="cancel"]');
       if (cardCancel) cardCancel.hidden = ['idle', 'failed', 'cancelled', 'completed', 'complete', 'paired', 'not_paired'].includes(state);
-      if (status) status.textContent = label ? `Enter ${label.toLowerCase()} to continue.` : state === 'failed' ? (body.registrationMayBeSaved === true ? 'Pairing could not finish. The connection may already be saved; check connection and capture status before retrying.' : 'Pairing failed. Start pairing again to retry.') + (typeof body.reason === 'string' && /^[a-z0-9_]{1,64}$/.test(body.reason) ? ` (${body.reason})` : '') : state === 'not_paired' ? 'Not paired yet. Pair this account first, then choose the chats Olympus may read.' : state === 'idle' ? 'Pair this account to choose the chats Olympus may read.' : state === 'scope_selection_required' ? 'Paired. Nothing is being captured. Choose what Olympus may read.' : state === 'committing' ? 'Saving the connection and chat permission…' : state === 'paired' || state === 'complete' || state === 'completed' ? 'Pairing completed. Manage chat choices below; check current connection and sync status on the main dashboard.' : state === 'cancelled' ? (source === 'whatsapp'
-        ? (body.unlinked === 'removed' ? 'Setup cancelled. Capture permission was not changed, and Olympus removed itself from your phone\'s linked devices.'
-          : body.unlinked === 'offline' || body.unlinked === 'failed' ? 'Setup cancelled. Capture permission was not changed. Olympus could not remove itself from your phone: remove Olympus in WhatsApp linked devices.'
-            : 'Setup cancelled. Capture permission was not changed. If your phone linked Olympus, Olympus removes it from WhatsApp linked devices.')
-        : 'Setup cancelled. Capture permission was not changed. If you linked a new device, remove Olympus in Telegram active sessions to unlink it.') : operation === 'scope' ? 'Chat choices saved. Capture will use this selection.' : operation === 'chats' ? 'Choose the chats Olympus may read.' : source === 'whatsapp' ? (body.linked === true ? 'Linked. Reading your chat list from WhatsApp; this can take a minute…' : typeof body.qr === 'string' && body.qr ? 'Open WhatsApp → Settings → Linked devices and scan the QR code.' : 'Preparing WhatsApp. The first time can take about a minute.') : 'Pairing is running on this computer…';
+      // A cancelled re-pair leaves the earlier grant suspended: say so, never that capture carries on (#706).
+      const cancelledLead = body.capturePaused === true
+        ? 'Setup cancelled. Your chat choices were not changed, but capture of this account stays paused until pairing again succeeds'
+        : 'Setup cancelled. Capture permission was not changed';
+      if (status) status.textContent = label ? `Enter ${label.toLowerCase()} to continue.` : state === 'failed' ? (body.registrationMayBeSaved === true ? 'Pairing could not finish. The connection may already be saved; check connection and capture status before retrying.' : (body.capturePaused === true ? 'Pairing failed. Capture of this account stays paused until pairing again succeeds. Start pairing again to retry.' : 'Pairing failed. Start pairing again to retry.')) + (typeof body.reason === 'string' && /^[a-z0-9_]{1,64}$/.test(body.reason) ? ` (${body.reason})` : '') : state === 'not_paired' ? 'Not paired yet. Pair this account first, then choose the chats Olympus may read.' : state === 'idle' ? 'Pair this account to choose the chats Olympus may read.' : state === 'scope_selection_required' ? 'Paired. Nothing is being captured. Choose what Olympus may read.' : state === 'committing' ? 'Saving the connection and chat permission…' : state === 'paired' || state === 'complete' || state === 'completed' ? 'Pairing completed. Manage chat choices below; check current connection and sync status on the main dashboard.' : state === 'cancelled' ? (source === 'whatsapp'
+        ? (body.unlinked === 'removed' ? cancelledLead + ', and Olympus removed itself from your phone\'s linked devices.'
+          : body.unlinked === 'offline' || body.unlinked === 'failed' ? cancelledLead + '. Olympus could not remove itself from your phone: remove Olympus in WhatsApp linked devices.'
+            : cancelledLead + '. If your phone linked Olympus, Olympus removes it from WhatsApp linked devices.')
+        : cancelledLead + '. If you linked a new device, remove Olympus in Telegram active sessions to unlink it.') : operation === 'scope' ? 'Chat choices saved. Capture will use this selection.' : operation === 'chats' ? 'Choose the chats Olympus may read.' : source === 'whatsapp' ? (body.linked === true ? 'Linked. Reading your chat list from WhatsApp; this can take a minute…' : typeof body.qr === 'string' && body.qr ? 'Open WhatsApp → Settings → Linked devices and scan the QR code.' : 'Preparing WhatsApp. The first time can take about a minute.') : 'Pairing is running on this computer…';
       if (qr) {
         const value = typeof body.qr === 'string' ? body.qr : '';
         // Only the local helper's raster QR image is displayed; no external requests or SVG markup.
@@ -1711,6 +1766,26 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
   }
 
   /**
+   * A dialog that an address can open (`dialog[data-open-hash]`): Sources'
+   * Build a connector, which the old `?connector` page redirects to as
+   * `?connect#build-connector` (#1087). The fragment is cleared at once, so a
+   * reload or a close does not open it again.
+   */
+  function applyOpenHash(): void {
+    const view = root.ownerDocument.defaultView;
+    const id = view ? view.location.hash.slice(1) : '';
+    if (!view || !/^[A-Za-z0-9_-]+$/.test(id)) return;
+    const dialog = root.querySelector<HTMLDialogElement>(`dialog[data-open-hash][id="${id}"]`);
+    if (!dialog || typeof dialog.showModal !== 'function') return;
+    try {
+      view.history.replaceState(null, '', view.location.pathname + view.location.search);
+    } catch {
+      // An unchangeable history keeps the fragment; the dialog still opens.
+    }
+    if (!dialog.open) dialog.showModal();
+  }
+
+  /**
    * Where an open link asked Keys to open (core/open-targets.ts, by way of
    * the panel's Connect or Change models, or an `olympus://` link):
    * `#olympus-open=connect.x` opens that source's Connect panel, and
@@ -1958,6 +2033,7 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
   root.addEventListener(redrawEvent, onRedrawRequest);
   applyWriteCapability();
   applyOpenTarget();
+  applyOpenHash();
   restartPoll();
   resumeMessaging();
 

@@ -85,3 +85,19 @@ test('a resume failure is reported without hiding an operation that already succ
   expect(await ownership.withMessagingCapturePaused('telegram', async () => 'saved')).toBe('saved');
   expect(failures).toEqual(['telegram']);
 });
+
+test('a resume that works after a failed one clears the recorded failure (#687)', async () => {
+  const failures: Partial<Record<string, true>> = {};
+  let working = false;
+  const ownership = createWorkerMessagingCaptureOwnership({
+    env: {}, registryPath: '/fixture/handles.json', packageRoot: '/fixture',
+    onResumeFailure: (source) => { failures[source] = true; },
+    onResumeSuccess: (source) => { delete failures[source]; },
+    createSupervisor: (source) => ({ reconcile: async () => { if (!working) throw new Error('cannot start'); return { source, state: 'running' as const }; }, stop: async () => {} }),
+  });
+  await ownership.withMessagingCapturePaused('telegram', async () => 'first');
+  expect(failures).toEqual({ telegram: true });
+  working = true;
+  await ownership.withMessagingCapturePaused('telegram', async () => 'retry');
+  expect(failures).toEqual({});
+});

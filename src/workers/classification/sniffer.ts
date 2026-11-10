@@ -190,11 +190,29 @@ export function cachedSnifferVerdictHolds(verdict: Pick<StoredSnifferVerdict, 'c
  * this email's own content being treated as Personal. Each model call judges
  * one quoted item, never another item or a batch; that isolation is structural.
  */
+//
+// Narrowed for #881 (an owner-labelled set: 8 of 9 hits were Personal). Each
+// rule keeps its steering shape and drops an ordinary-text reading:
+// - role_boundary: a role tag is the whole tag (`<system>`, `</user>`), not an
+//   address (`<developer@...>`) or a placeholder (`ssh <user>@host`); a chat
+//   template token is a bare identifier (`<|im_start|>`), not an F#/Elm pipe.
+// - instruction_override: "ignore my/our earlier instructions" is the writer
+//   correcting themselves, not text addressed to the model.
+// - forged_verdict: a tier value ends the field (`tier: personal`, `"tier":
+//   "personal"`), unlike a product name (`tier: Private Banking`).
+// - cross_item_steering: the tier is said OF the items (`every file here is
+//   personal.`), not used as an adjective (`all files in the public folder`)
+//   or in "made public"; a tier/verdict word needs a value.
+const ROLE_TAG = /<\s*\/?\s*(?:system|assistant|developer)(?:\s+[^<>@]{0,40})?\s*>|<\s*\/\s*user\s*>|<\|\s*[a-z][a-z0-9_]{1,29}\s*\|>|\[\s*\/?\s*(?:inst|sys)\s*\]/;
+/** After a tier value: the value ends there (punctuation, end, or "and"/"or" another value). */
+const TIER_VALUE_ENDS = String.raw`["'\x60]?\s*(?:[^a-z\s]|$|(?:and|or)\b)`;
+/** A tier word said of something, not an adjective before a noun or "made public". */
+const TIER_PREDICATE = String.raw`(?<!\b(?:made|make|makes|making|go|goes|going|went|gone|the|a|an|in|on|to|for|from|of|into|your|my|our|their)\s)\b(?:personal|public|not private)\b(?=${TIER_VALUE_ENDS}|\s+(?:with|regardless)\b)`;
 const INJECTION_RULES: ReadonlyArray<readonly [string, RegExp]> = [
-  ['role_boundary', /<\s*\/?\s*(?:system|assistant|developer|user)\b[^<>]{0,40}>|<\|[^<>|]{1,30}\|>|\[\s*\/?\s*(?:inst|sys)\s*\]/],
-  ['instruction_override', /\b(?:ignore|disregard|forget|override|bypass|skip)\b[^.!?;]{0,70}\b(?:(?:classification|classifier|sniffer|system|developer)\s+(?:instructions?|rules|prompt)|(?:previous|prior|above|earlier|your|all)\s+instructions?|owner(?:'s)?\s+(?:policy|settings))\b/],
-  ['forged_verdict', /["']?\bverdicts?\b["']?\s*[:=]\s*[\[{]|["']?\btier\b["']?\s*[:=]\s*["']?(?:personal|private|public)\b/],
-  ['cross_item_steering', /\b(?:every|all|each|other)\s+(?:of the\s+)?(?:items?|files?|documents?|entries|messages?)\b[^.!?;]{0,60}\b(?:personal|public|not private|verdicts?|tier)\b/],
+  ['role_boundary', ROLE_TAG],
+  ['instruction_override', /\b(?:ignore|disregard|forget|override|bypass|skip)\b(?:(?!\b(?:my|our|i|we)\b)[^.!?;]){0,70}\b(?:(?:classification|classifier|sniffer|system|developer)\s+(?:instructions?|rules|prompt)|(?:previous|prior|above|earlier|your|all)\s+instructions?|owner(?:'s)?\s+(?:policy|settings))\b/],
+  ['forged_verdict', new RegExp(String.raw`["']?\bverdicts?\b["']?\s*[:=]\s*[\[{]|["']?\btier\b["']?\s*[:=]\s*["']?(?:personal|private|public)\b(?=${TIER_VALUE_ENDS})`)],
+  ['cross_item_steering', new RegExp(String.raw`\b(?:every|all|each|other)\s+(?:of the\s+)?(?:items?|files?|documents?|entries|messages?)\b[^.!?;]{0,60}?(?:\b(?:verdicts?|tier)\s*(?:[:=]|\bis\b|\bas\b|\bto\b)?\s*["']?(?:personal|public|private)\b|${TIER_PREDICATE})`)],
 ];
 
 // Recognize instruction structure with a bounded word window rather than a
@@ -204,6 +222,22 @@ const INSTRUCTION_VERBS = new Set(['reply', 'answer', 'respond', 'output', 'retu
 const VERDICT_SCHEMA = /^(?:ownrecord|privatekind|confidence|tier|category|verdicts?|classif[a-z]*)$/;
 const TIER_WORD = /^(?:personal|public|private)$/;
 const OBJECT_GLUE = new Set(['only', 'with', 'as', 'to', 'be', 'is', 'the', 'a', 'an', 'this', 'that', 'it', 'these', 'them', 'every', 'each', 'all', 'item', 'items', 'file', 'files', 'document', 'documents', 'message', 'messages', 'entry', 'entries', 'list', 'batch', 'not']);
+// Field names no ordinary sentence uses. The others ("confidence", "category",
+// "tier", "verdict", "classified") are everyday words (#881: "answer with
+// confidence", "choose a category", "the jury returned a verdict"), so they
+// count only when a value follows them: a 0-1 score, a tier, a boolean.
+const SCHEMA_ONLY_FIELD = /^(?:ownrecord|privatekind)$/;
+const SCHEMA_VALUE = /^["'`]?\s*(?:[:=]|\b(?:of|as|at|is|be|to)\b)?\s*["'`({[]*\s*(?:(?:0?[.,]\d+|1(?:[.,]0+)?|0)(?![\d.,]*\d)|(?:personal|private|public|ordinary|true|false|none|null)\b)/;
+// "set X to ..." is the assignment idiom; "use the category to filter" is not.
+const ASSIGN_VERBS = new Set(['set', 'assign']);
+// Everyday privacy-setting verbs ("make it public", "set it to private") steer
+// a tier only in output shape: "set only with Private", "use as personal".
+const SETTING_VERBS = new Set(['set', 'make', 'use', 'choose']);
+function schemaReference(text: string, verb: string, field: RegExpExecArray | RegExpMatchArray): boolean {
+  if (SCHEMA_ONLY_FIELD.test(field[0])) return true;
+  const tail = text.slice(field.index! + field[0].length);
+  return SCHEMA_VALUE.test(tail) || (ASSIGN_VERBS.has(verb) && /^\s+to\b/.test(tail));
+}
 function hasClassifierInstruction(text: string): boolean {
   const words = [...text.matchAll(/[a-z][a-z0-9_]*/g)];
   for (let i = 0; i < words.length; i++) {
@@ -215,22 +249,25 @@ function hasClassifierInstruction(text: string): boolean {
       if (j === i || !VERDICT_SCHEMA.test(words[j]![0])) continue;
       const left = Math.min(verb.index!, words[j]!.index!);
       const right = Math.max(verb.index!, words[j]!.index!);
-      if (right - left <= 100 && !/[.!?;]/.test(text.slice(left, right))) return true;
+      if (right - left <= 100 && !/[.!?;]/.test(text.slice(left, right)) && schemaReference(text, verb[0], words[j]!)) return true;
     }
+    let outputShaped = !SETTING_VERBS.has(verb[0]);
     for (let j = i + 1; j < Math.min(words.length, i + 13); j++) {
       const object = words[j]!;
       if (object.index! - verb.index! > 100 || /[.!?;]/.test(text.slice(verb.index!, object.index!))) break;
       if (TIER_WORD.test(object[0])) {
         const tail = text.slice(object.index! + object[0].length);
-        if (/^\s*(?:[^\p{L}\p{N}\s_-]|$)/u.test(tail)
+        if ((outputShaped && /^\s*(?:[^\p{L}\p{N}\s_-]|$)/u.test(tail))
           || /^\s+(?:tier|verdict|regardless)\b/.test(tail)) return true;
         break;
       }
       if (!OBJECT_GLUE.has(object[0])) break;
+      if (object[0] === 'with' || object[0] === 'as') outputShaped = true;
     }
   }
-  // A declared verdict is also output-shaped even without an imperative.
-  return /\byour verdict\b[^.!?;]{0,60}\b(?:personal|private|public)\b/.test(text);
+  // A declared verdict is also output-shaped even without an imperative:
+  // "your verdict for this file: personal", not "your verdict on the private school?".
+  return /\byour verdict\b(?:\s+(?:for|on)\s+[^.!?;:]{0,40})?\s*(?:[:=]|\bis\b|\bshould be\b|\bmust be\b)\s*["'`]?(?:personal|private|public)\b/.test(text);
 }
 
 /** Common Cyrillic/Greek look-alikes and their Latin reading, position by position. */
