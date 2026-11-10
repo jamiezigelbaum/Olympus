@@ -313,6 +313,7 @@ import {
   DEFAULT_SEMANTIC_RELEVANCE_BAR,
   type LocalConnectorStore,
   connectorStoreFilterCapabilityRegistry,
+  connectorStoreReadableNow,
   defineConnectorCorpus,
   type ConnectorStoreConversationTitleCandidates,
   type ConnectorStoreFilterCapabilityRegistry,
@@ -3889,18 +3890,39 @@ export async function main(): Promise<void> {
     process.env.OLYMPUS_TELEGRAM_SPOOL_DRAIN_MAX_ITEMS,
     'OLYMPUS_TELEGRAM_SPOOL_DRAIN_MAX_ITEMS',
   );
+  // The engine split's front opens every store read-only and never creates one
+  // (core/store-write-guard.ts). A source connected before the background has
+  // created its stores, or while it is still writing their schema, waits here
+  // unmounted and reads as connected with nothing synced yet; frontMountRetry
+  // mounts it once every store the lane opens is readable.
+  let frontLanesWaiting = false;
+  const storeAt = (sourceId: string, domain: 'internal' | 'secure_local'): string =>
+    resolvedStorePath(sourceId, domain, process.env);
+  const frontCanMount = (paths: readonly string[]): boolean => {
+    if (paths.every(connectorStoreReadableNow)) return true;
+    frontLanesWaiting = true;
+    return false;
+  };
   const mountSourceLanes = (handles: readonly ConnectedCredentialHandle[]): void => {
     if (sourceRuntimeClosed) return;
     const connected = (provider: ConnectedCredentialHandle['provider'], capability: string): boolean =>
       activeCredentialHandle(handles, { provider, capability }) !== undefined;
-    if (!gmailInternalConnectorStore && gmailConnectorStoreLane.enabled && (sourceHasStores(GMAIL_SOURCE_ID) || connected('gmail', 'gmail.email.sync'))) mountGmail();
-    if (!googleDriveInternalConnectorStore && googleDriveConnectorStoreLane.enabled && (sourceHasStores(GOOGLE_DRIVE_SOURCE_ID) || connected('google_drive', 'google_drive.docs.sync'))) mountGoogleDrive();
-    if (!dropboxConnectorStore && dropboxConnectorStoreLane.enabled && (sourceHasStores(DROPBOX_FILES_SOURCE_ID) || connected('dropbox', 'dropbox.files.sync'))) mountDropbox();
-    if (!localFilesConnectorStore && localFilesConnectorStoreLane.enabled && (sourceHasStores(LOCAL_FILES_SOURCE_ID) || fileSourceScopeAuthority?.policyRef(LOCAL_FILES_SOURCE_ID))) mountLocalFiles();
-    if (!whatsappConnectorStore && whatsappConnectorStoreLane.enabled && (sourceHasStores(WHATSAPP_PERSONAL_SOURCE_ID) || connected('whatsapp_personal', 'whatsapp.personal.messages.sync'))) mountWhatsApp();
-    if (!telegramConnectorStores && telegramConnectorStoreLane.enabled && (sourceHasStores(TELEGRAM_MESSAGES_SOURCE_ID) || connected('telegram', 'telegram.messages.sync'))) mountTelegram();
-    if (!readwiseConnectorStore && readwiseConnectorStoreLane.enabled && (sourceHasStores(READWISE_SOURCE_ID) || connected('readwise', 'readwise.sync'))) mountReadwise();
-    if (!xBookmarksConnectorStore && xBookmarksConnectorStoreLane.enabled && (sourceHasStores(X_BOOKMARKS_SOURCE_ID) || connected('x', 'x.bookmarks.sync'))) mountXBookmarks();
+    frontLanesWaiting = false;
+    // `paths`: the stores the lane's mount opens. The background (or a worker
+    // without the split) creates them; the front mounts only readable ones.
+    const wanted = (sourceId: string, connectedNow: boolean, paths: readonly string[]): boolean => {
+      if (!sourceHasStores(sourceId) && !connectedNow) return false;
+      return !engineFront || frontCanMount(paths);
+    };
+    const both = (sourceId: string): string[] => [storeAt(sourceId, 'internal'), storeAt(sourceId, 'secure_local')];
+    if (!gmailInternalConnectorStore && gmailConnectorStoreLane.enabled && wanted(GMAIL_SOURCE_ID, connected('gmail', 'gmail.email.sync'), both(GMAIL_SOURCE_ID))) mountGmail();
+    if (!googleDriveInternalConnectorStore && googleDriveConnectorStoreLane.enabled && wanted(GOOGLE_DRIVE_SOURCE_ID, connected('google_drive', 'google_drive.docs.sync'), both(GOOGLE_DRIVE_SOURCE_ID))) mountGoogleDrive();
+    if (!dropboxConnectorStore && dropboxConnectorStoreLane.enabled && wanted(DROPBOX_FILES_SOURCE_ID, connected('dropbox', 'dropbox.files.sync'), [storeAt(DROPBOX_FILES_SOURCE_ID, 'secure_local')])) mountDropbox();
+    if (!localFilesConnectorStore && localFilesConnectorStoreLane.enabled && wanted(LOCAL_FILES_SOURCE_ID, fileSourceScopeAuthority?.policyRef(LOCAL_FILES_SOURCE_ID) !== undefined, [storeAt(LOCAL_FILES_SOURCE_ID, 'secure_local')])) mountLocalFiles();
+    if (!whatsappConnectorStore && whatsappConnectorStoreLane.enabled && wanted(WHATSAPP_PERSONAL_SOURCE_ID, connected('whatsapp_personal', 'whatsapp.personal.messages.sync'), [storeAt(WHATSAPP_PERSONAL_SOURCE_ID, 'secure_local')])) mountWhatsApp();
+    if (!telegramConnectorStores && telegramConnectorStoreLane.enabled && wanted(TELEGRAM_MESSAGES_SOURCE_ID, connected('telegram', 'telegram.messages.sync'), both(TELEGRAM_MESSAGES_SOURCE_ID))) mountTelegram();
+    if (!readwiseConnectorStore && readwiseConnectorStoreLane.enabled && wanted(READWISE_SOURCE_ID, connected('readwise', 'readwise.sync'), [storeAt(READWISE_SOURCE_ID, 'internal')])) mountReadwise();
+    if (!xBookmarksConnectorStore && xBookmarksConnectorStoreLane.enabled && wanted(X_BOOKMARKS_SOURCE_ID, connected('x', 'x.bookmarks.sync'), [storeAt(X_BOOKMARKS_SOURCE_ID, 'internal')])) mountXBookmarks();
     mountConfiguredSourceStores();
   };
   mountSourceLanes(connectedHandles);
@@ -4716,12 +4738,18 @@ export async function main(): Promise<void> {
     );
   }
   // A Public store that already exists from an earlier run is served from
-  // boot; one that does not is created by its tier set on first need.
-  for (const lane of tierLanes) {
-    for (const store of lane.onDemand) {
-      if (store.exists()) store.open();
+  // boot; one that does not is created by its tier set on first need. The
+  // front never creates one: it opens each store once the background has
+  // (frontMountRetry), and until then reads the tier as empty.
+  const openTierStoresThatExist = (): void => {
+    for (const lane of tierLanes) {
+      for (const store of lane.onDemand) {
+        if (store.current()) continue;
+        if (engineFront ? connectorStoreReadableNow(store.dbPath) : store.exists()) store.open();
+      }
     }
-  }
+  };
+  openTierStoresThatExist();
   // No handle, no handler. The stores and the budget exist at boot whatever the
   // registry says, so without this guard an enabled lane would build a sync
   // handler that falls back to the connector's default credential handle and
@@ -5315,7 +5343,8 @@ export async function main(): Promise<void> {
       capability: 'x.bookmarks.sync',
       handles: readActiveConnectedHandles(process.env),
     });
-    if (handle) mountXBookmarks();
+    // The front mounts only stores the background has created (mountSourceLanes).
+    if (handle && (!engineFront || frontCanMount([storeAt(X_BOOKMARKS_SOURCE_ID, 'internal')]))) mountXBookmarks();
     const runtime = refreshableXBookmarksRuntime?.runtimeForHandle(handle);
     if (!runtime) return undefined;
     connectorStoreAccountScopes.set(
@@ -5328,7 +5357,8 @@ export async function main(): Promise<void> {
     return guard ? accountCheckedXBookmarksRuntime(runtime, guard) : runtime;
   };
   const readwiseSyncForHandle = (handle: ConnectedCredentialHandle | undefined) => {
-    if (handle) mountReadwise();
+    // The front mounts only stores the background has created (mountSourceLanes).
+    if (handle && (!engineFront || frontCanMount([storeAt(READWISE_SOURCE_ID, 'internal')]))) mountReadwise();
     const sync = refreshableReadwiseRuntime?.syncForHandle(handle);
     if (sync && readwiseConnectorStore) {
       connectorStoreAccountScopes.set(
@@ -7840,6 +7870,19 @@ export async function main(): Promise<void> {
     localModelActivity.onBusy(snifferResource, () => relay.busy(snifferResource));
     localModelActivity.onIdle(snifferResource, () => relay.idle(snifferResource));
   }
+  // A source connected before the background created its stores: mounted here
+  // as soon as they exist (mountSourceLanes, frontLanesWaiting).
+  // A tier store the background creates later (a lane's Private or Public
+  // store, on its first item) is opened here too.
+  const frontMountRetry = engineFront ? setInterval(() => {
+    try {
+      if (frontLanesWaiting) mountSourceLanes(activeLaneHandles(readActiveConnectedHandles(process.env), process.env));
+      openTierStoresThatExist();
+    } catch (error) {
+      console.warn(`[olympus] the front could not open a source's stores yet: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }, 2_000) : undefined;
+  frontMountRetry?.unref?.();
   if (engineFront) {
     // The judge runs in the background: the front shows what it last published.
     const judge = frontJudgeState(() => engineFront!.status());
@@ -8074,6 +8117,7 @@ export async function main(): Promise<void> {
     waitingStore = undefined;
     fileExtractionRuntime?.close();
     engineBackground?.stop();
+    if (frontMountRetry) clearInterval(frontMountRetry);
     engineFront?.stop();
     void server?.stop();
     // The data owner lock stays held: the teardown above is still running, and
