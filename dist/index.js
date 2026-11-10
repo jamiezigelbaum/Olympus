@@ -5625,106 +5625,6 @@ var init_operation_caller = __esm(() => {
 });
 
 // src/core/sqlite-migrations.ts
-function currentStoreMigrations() {
-  return [
-    {
-      version: CURRENT_OLYMPUS_SQLITE_SCHEMA_VERSION,
-      name: "record_existing_v1_schema",
-      up() {}
-    }
-  ];
-}
-function assertSqliteSchemaCanOpen(db, storeId, knownVersion = CURRENT_OLYMPUS_SQLITE_SCHEMA_VERSION) {
-  const currentVersion = readSqliteSchemaVersion(db, storeId);
-  if (currentVersion > knownVersion) {
-    throw new OperationError("config_error", `SQLite store "${storeId}" is at schema_version ${currentVersion}, but this Olympus build only knows schema_version ${knownVersion}.`, "Upgrade Olympus before opening this store. Refusing to open it prevents an older build from corrupting newer data.");
-  }
-}
-function runSqliteMigrations(db, storeId, migrations = currentStoreMigrations(), options = {}) {
-  const ordered = validateMigrations(migrations);
-  const targetVersion = options.knownVersion ?? ordered.at(-1)?.version ?? CURRENT_OLYMPUS_SQLITE_SCHEMA_VERSION;
-  const currentVersion = readSqliteSchemaVersion(db, storeId);
-  if (currentVersion > targetVersion) {
-    throw new OperationError("config_error", `SQLite store "${storeId}" is at schema_version ${currentVersion}, but this Olympus build only knows schema_version ${targetVersion}.`, "Upgrade Olympus before opening this store. Refusing to open it prevents an older build from corrupting newer data.");
-  }
-  const pending = ordered.filter((migration) => migration.version > currentVersion).map(({ version, name }) => ({ version, name }));
-  if (options.dryRun === true) {
-    return {
-      storeId,
-      currentVersion,
-      targetVersion,
-      dryRun: true,
-      applied: [],
-      pending
-    };
-  }
-  ensureSchemaVersionTable(db);
-  const applied = [];
-  if (pending.length > 0) {
-    db.transaction(() => {
-      const lockedVersion = readSqliteSchemaVersion(db, storeId);
-      if (lockedVersion > targetVersion) {
-        throw new OperationError("config_error", `SQLite store "${storeId}" is at schema_version ${lockedVersion}, but this Olympus build only knows schema_version ${targetVersion}.`, "Upgrade Olympus before opening this store. Refusing to open it prevents an older build from corrupting newer data.");
-      }
-      for (const migration of ordered.filter((entry) => entry.version > lockedVersion)) {
-        migration.up(db);
-        writeSqliteSchemaVersion(db, storeId, migration.version);
-        applied.push({ version: migration.version, name: migration.name });
-      }
-    }).immediate();
-  }
-  return {
-    storeId,
-    currentVersion,
-    targetVersion,
-    dryRun: false,
-    applied,
-    pending: applied
-  };
-}
-function readSqliteSchemaVersion(db, storeId) {
-  if (!schemaVersionTableExists(db))
-    return 0;
-  const row = db.query(`SELECT version FROM ${SQLITE_SCHEMA_VERSION_TABLE} WHERE store_id = ?`).get(storeId);
-  return typeof row?.version === "number" && Number.isInteger(row.version) ? row.version : 0;
-}
-function ensureSchemaVersionTable(db) {
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS ${SQLITE_SCHEMA_VERSION_TABLE} (
-      store_id TEXT PRIMARY KEY,
-      version INTEGER NOT NULL,
-      applied_at TEXT NOT NULL
-    );
-  `);
-}
-function writeSqliteSchemaVersion(db, storeId, version) {
-  db.query(`
-    INSERT INTO ${SQLITE_SCHEMA_VERSION_TABLE} (store_id, version, applied_at)
-    VALUES (?, ?, ?)
-    ON CONFLICT(store_id) DO UPDATE SET
-      version = excluded.version,
-      applied_at = excluded.applied_at
-  `).run(storeId, version, new Date().toISOString());
-}
-function schemaVersionTableExists(db) {
-  const row = db.query("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?").get(SQLITE_SCHEMA_VERSION_TABLE);
-  return row?.name === SQLITE_SCHEMA_VERSION_TABLE;
-}
-function validateMigrations(migrations) {
-  const ordered = [...migrations].sort((left, right) => left.version - right.version);
-  let previous = 0;
-  for (const migration of ordered) {
-    if (!Number.isInteger(migration.version) || migration.version <= 0) {
-      throw new OperationError("config_error", `SQLite migration "${migration.name}" must use a positive integer version.`);
-    }
-    if (migration.version === previous) {
-      throw new OperationError("config_error", `Duplicate SQLite migration version ${migration.version}.`);
-    }
-    previous = migration.version;
-  }
-  return ordered;
-}
-var SQLITE_SCHEMA_VERSION_TABLE = "schema_version", CURRENT_OLYMPUS_SQLITE_SCHEMA_VERSION = 1;
 var init_sqlite_migrations = __esm(() => {
   init_operation_error();
 });
@@ -16109,64 +16009,6 @@ function metadataStringArray(metadata, key) {
 }
 
 // src/core/people-index.ts
-import { Database } from "bun:sqlite";
-import { createHash as createHash9 } from "node:crypto";
-import { chmodSync as chmodSync9, existsSync as existsSync17, mkdirSync as mkdirSync16 } from "node:fs";
-import { dirname as dirname30 } from "node:path";
-function peopleIndexMigrations() {
-  return [{
-    version: 1,
-    name: "people_index_v1",
-    up(db) {
-      db.exec(`
-        CREATE TABLE IF NOT EXISTS people_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-        CREATE TABLE IF NOT EXISTS people_identities (
-          identity_key TEXT PRIMARY KEY,
-          provider TEXT NOT NULL,
-          sender_id TEXT,
-          sender_label TEXT,
-          keys_json TEXT NOT NULL,
-          names_json TEXT NOT NULL,
-          is_owner INTEGER NOT NULL CHECK(is_owner IN (0, 1)),
-          item_count INTEGER NOT NULL,
-          person_id TEXT NOT NULL,
-          corpus_ids_json TEXT NOT NULL DEFAULT '[]',
-          link_reason TEXT
-        );
-        CREATE INDEX IF NOT EXISTS idx_people_identities_person ON people_identities(person_id);
-        CREATE TABLE IF NOT EXISTS people_persons (
-          person_id TEXT PRIMARY KEY,
-          display_name TEXT NOT NULL,
-          is_owner INTEGER NOT NULL CHECK(is_owner IN (0, 1)),
-          name_shareable INTEGER NOT NULL CHECK(name_shareable IN (0, 1)),
-          item_count INTEGER NOT NULL,
-          linked_by_json TEXT NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS people_corrections (
-          correction_id INTEGER PRIMARY KEY AUTOINCREMENT,
-          kind TEXT NOT NULL CHECK(kind IN ('not_same', 'merge', 'split', 'rename')),
-          identity_a TEXT NOT NULL,
-          identity_b TEXT,
-          name TEXT,
-          created_at TEXT NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS people_contact_cards (
-          card_id TEXT PRIMARY KEY,
-          name TEXT,
-          keys_json TEXT NOT NULL,
-          updated_at TEXT NOT NULL
-        );
-      `);
-    }
-  }];
-}
-function peopleIdentityKey(provider, senderId, senderLabel) {
-  const id = senderId?.trim();
-  if (id)
-    return `sender:${provider}:${id}`;
-  const label = senderLabel?.trim();
-  return label ? `label:${provider}:${label}` : undefined;
-}
 function normalizePhone(value) {
   const trimmed = value.trim();
   if (!trimmed.startsWith("+") && !trimmed.startsWith("00"))
@@ -16194,515 +16036,7 @@ function strongKeysFromText(value) {
   }
   return [...keys];
 }
-function displayNameFromLabel(label) {
-  if (!label)
-    return;
-  const withoutAddress = label.replace(/<[^>]*>/g, " ").replace(ADDRESS, " ").replace(/["']/g, " ");
-  const name = withoutAddress.replace(/\s+/g, " ").trim();
-  if (!name || normalizePhone(name))
-    return;
-  if (!/\p{L}/u.test(name))
-    return;
-  return name.slice(0, 160);
-}
-function normalizePersonName(name) {
-  return name.normalize("NFKD").replace(/\p{M}/gu, "").toLowerCase().replace(/[^\p{L}\p{N}\s]/gu, " ").replace(/\s+/g, " ").trim();
-}
-
-class UnionFind {
-  parent = new Map;
-  members = new Map;
-  add(key) {
-    if (this.parent.has(key))
-      return;
-    this.parent.set(key, key);
-    this.members.set(key, new Set([key]));
-  }
-  find(key) {
-    let root = key;
-    while (this.parent.get(root) !== root)
-      root = this.parent.get(root);
-    let node = key;
-    while (node !== root) {
-      const next = this.parent.get(node);
-      this.parent.set(node, root);
-      node = next;
-    }
-    return root;
-  }
-  union(a, b) {
-    const ra = this.find(a);
-    const rb = this.find(b);
-    if (ra === rb)
-      return;
-    const [big, small] = this.members.get(ra).size >= this.members.get(rb).size ? [ra, rb] : [rb, ra];
-    this.parent.set(small, big);
-    for (const member of this.members.get(small))
-      this.members.get(big).add(member);
-    this.members.delete(small);
-  }
-}
-function linkPeople(input) {
-  const identities = new Map;
-  for (const observation of input.observations) {
-    const key = peopleIdentityKey(observation.provider, observation.senderId, observation.senderLabel);
-    if (!key)
-      continue;
-    let identity = identities.get(key);
-    if (!identity) {
-      identity = {
-        identityKey: key,
-        provider: observation.provider,
-        ...observation.senderId?.trim() ? { senderId: observation.senderId.trim() } : {},
-        keys: [],
-        names: [],
-        isOwner: false,
-        itemCount: 0,
-        personId: "",
-        corpusIds: [],
-        nameKeys: new Set,
-        publicNames: new Map,
-        conversations: new Set
-      };
-      identities.set(key, identity);
-    }
-    const label = observation.senderLabel?.trim();
-    if (label && (!identity.senderLabel || !observation.privateOnly))
-      identity.senderLabel = label;
-    identity.isOwner ||= observation.isOwner;
-    identity.itemCount += observation.itemCount;
-    if (observation.corpusId && !identity.corpusIds.includes(observation.corpusId))
-      identity.corpusIds.push(observation.corpusId);
-    for (const strong of [...strongKeysFromText(observation.senderId), ...strongKeysFromText(label)]) {
-      if (!identity.keys.includes(strong))
-        identity.keys.push(strong);
-    }
-    const name = displayNameFromLabel(label);
-    if (name) {
-      const normalized = normalizePersonName(name);
-      if (normalized)
-        identity.nameKeys.add(normalized);
-      if (!identity.names.includes(name) && identity.names.length < MAX_NAMES_PER_IDENTITY)
-        identity.names.push(name);
-      if (!observation.privateOnly)
-        identity.publicNames.set(name, (identity.publicNames.get(name) ?? 0) + observation.itemCount);
-    }
-    for (const conversation of observation.conversationIds ?? []) {
-      if (conversation)
-        identity.conversations.add(`${observation.provider}\x00${conversation}`);
-    }
-  }
-  const corrections = input.corrections ?? [];
-  const rejected = new Set;
-  const pairKey = (a, b) => a < b ? `${a}\x00${b}` : `${b}\x00${a}`;
-  const merges = [];
-  const renames = new Map;
-  for (const correction of corrections) {
-    if (correction.kind === "not_same")
-      rejected.add(pairKey(correction.identityA, correction.identityB));
-    else if (correction.kind === "merge")
-      merges.push([correction.identityA, correction.identityB]);
-    else if (correction.kind === "rename")
-      renames.set(correction.identity, correction.name);
-  }
-  const splits = new Set(corrections.flatMap((c) => c.kind === "split" ? [c.identity] : []));
-  for (const [a, b] of merges)
-    rejected.delete(pairKey(a, b));
-  const uf = new UnionFind;
-  for (const key of identities.keys())
-    uf.add(key);
-  const reason = new Map;
-  const blocked = (ra, rb) => {
-    const left = uf.members.get(ra);
-    const right = uf.members.get(rb);
-    for (const a of left) {
-      for (const b of right) {
-        if (rejected.has(pairKey(a, b)))
-          return true;
-        if (splits.has(a) || splits.has(b))
-          return true;
-      }
-    }
-    return false;
-  };
-  const link = (a, b, why) => {
-    if (!identities.has(a) || !identities.has(b))
-      return;
-    const ra = uf.find(a);
-    const rb = uf.find(b);
-    if (ra === rb || blocked(ra, rb))
-      return;
-    uf.union(a, b);
-    if (!reason.has(b))
-      reason.set(b, why);
-    else if (!reason.has(a))
-      reason.set(a, why);
-  };
-  for (const [a, b] of merges) {
-    const ra = identities.has(a) ? uf.find(a) : undefined;
-    const rb = identities.has(b) ? uf.find(b) : undefined;
-    if (ra && rb && ra !== rb) {
-      uf.union(a, b);
-      reason.set(b, "merged_by_owner");
-    }
-  }
-  const owners = [...identities.values()].filter((identity) => identity.isOwner).map((identity) => identity.identityKey).sort();
-  for (const owner of owners.slice(1))
-    link(owners[0], owner, "owner");
-  const byKey = new Map;
-  for (const identity of identities.values()) {
-    for (const key of identity.keys)
-      byKey.set(key, [...byKey.get(key) ?? [], identity.identityKey]);
-  }
-  for (const [key, members] of [...byKey].sort(([a], [b]) => a.localeCompare(b))) {
-    const why = key.startsWith("phone:") ? "phone" : "email";
-    const sorted = [...members].sort();
-    for (const member of sorted.slice(1))
-      link(sorted[0], member, why);
-  }
-  for (const card of [...input.contacts ?? []].sort((a, b) => a.cardId.localeCompare(b.cardId))) {
-    const members = new Set;
-    for (const raw of card.keys) {
-      const key = raw.trim();
-      if (key.startsWith("sender:")) {
-        if (identities.has(key))
-          members.add(key);
-        continue;
-      }
-      for (const member of byKey.get(normalizeCardKey(key) ?? "") ?? [])
-        members.add(member);
-    }
-    const sorted = [...members].sort();
-    for (const member of sorted.slice(1))
-      link(sorted[0], member, "contacts");
-  }
-  const byName = new Map;
-  for (const identity of identities.values()) {
-    for (const name of identity.nameKeys)
-      byName.set(name, [...byName.get(name) ?? [], identity.identityKey]);
-  }
-  const conversationMembers = new Map;
-  for (const identity of identities.values()) {
-    for (const conversation of identity.conversations) {
-      conversationMembers.set(conversation, [...conversationMembers.get(conversation) ?? [], identity.identityKey]);
-    }
-  }
-  const groupPeers = (identity) => {
-    const peers2 = new Set;
-    for (const conversation of identity.conversations) {
-      const members = conversationMembers.get(conversation) ?? [];
-      if (members.length > MAX_GROUP_SIGNAL_MEMBERS)
-        continue;
-      for (const member of members) {
-        if (member === identity.identityKey)
-          continue;
-        const peer = identities.get(member);
-        if (peer.isOwner)
-          continue;
-        peers2.add(uf.find(member));
-      }
-    }
-    return peers2;
-  };
-  for (const [, members] of [...byName].sort(([a], [b]) => a.localeCompare(b))) {
-    if (members.length < 2)
-      continue;
-    const sorted = [...members].sort();
-    for (let i = 0;i < sorted.length; i += 1) {
-      for (let j = i + 1;j < sorted.length; j += 1) {
-        const a = identities.get(sorted[i]);
-        const b = identities.get(sorted[j]);
-        if (uf.find(a.identityKey) === uf.find(b.identityKey))
-          continue;
-        if ([...a.conversations].some((conversation) => b.conversations.has(conversation))) {
-          link(a.identityKey, b.identityKey, "name_and_shared_conversation");
-          continue;
-        }
-        const rootA = uf.find(a.identityKey);
-        const rootB = uf.find(b.identityKey);
-        const peersB = groupPeers(b);
-        const shared = [...groupPeers(a)].some((peer) => peer !== rootA && peer !== rootB && peersB.has(peer));
-        if (shared)
-          link(a.identityKey, b.identityKey, "name_and_shared_group");
-      }
-    }
-  }
-  const people = [];
-  for (const [root, memberSet] of uf.members) {
-    const members = [...memberSet].sort().map((key) => identities.get(key));
-    const isOwner = members.some((member) => member.isOwner);
-    const personId = isOwner ? OWNER_PERSON_ID : `p_${createHash9("sha256").update(members[0].identityKey).digest("hex").slice(0, 16)}`;
-    const renamed = [...renames].filter(([identity]) => memberSet.has(identity)).map(([, name]) => name).at(-1);
-    const displayName = isOwner ? OWNER_DISPLAY_NAME : renamed ?? bestName(members);
-    const nameShareable = isOwner || renamed !== undefined || members.some((member) => member.publicNames.size > 0);
-    const linkedBy = new Set;
-    const out = members.map((member) => {
-      const why = memberSet.size > 1 ? reason.get(member.identityKey) : undefined;
-      if (why)
-        linkedBy.add(PEOPLE_LINK_REASON_TEXT[why]);
-      return {
-        identityKey: member.identityKey,
-        provider: member.provider,
-        ...member.senderId ? { senderId: member.senderId } : {},
-        ...member.senderLabel ? { senderLabel: member.senderLabel } : {},
-        keys: [...member.keys].sort(),
-        names: member.names,
-        isOwner: member.isOwner,
-        itemCount: member.itemCount,
-        personId,
-        corpusIds: [...member.corpusIds].sort(),
-        ...why ? { linkReason: why } : {}
-      };
-    });
-    people.push({
-      personId,
-      displayName,
-      isOwner,
-      nameShareable,
-      itemCount: members.reduce((total, member) => total + member.itemCount, 0),
-      identities: out,
-      linkedBy: [...linkedBy].sort()
-    });
-  }
-  return people.sort((a, b) => Number(b.isOwner) - Number(a.isOwner) || b.itemCount - a.itemCount || a.personId.localeCompare(b.personId));
-}
-function bestName(members) {
-  const counts = new Map;
-  for (const member of members) {
-    for (const [name, count] of member.publicNames)
-      counts.set(name, (counts.get(name) ?? 0) + count);
-  }
-  const handle = (name) => Number(name.startsWith("@"));
-  const named = [...counts].sort(([a, ca], [b, cb]) => handle(a) - handle(b) || cb - ca || b.length - a.length || a.localeCompare(b))[0]?.[0];
-  if (named)
-    return named;
-  const key = members.flatMap((member) => member.keys).sort()[0];
-  if (key)
-    return key.slice(key.indexOf(":") + 1);
-  return members[0].senderLabel ?? members[0].senderId ?? "Unknown sender";
-}
-function normalizeCardKey(key) {
-  if (key.startsWith("phone:")) {
-    const phone = normalizePhone(key.slice("phone:".length));
-    return phone ? `phone:${phone}` : undefined;
-  }
-  if (key.startsWith("email:"))
-    return `email:${key.slice("email:".length).trim().toLowerCase()}`;
-  return;
-}
-
-class LocalPeopleIndex {
-  db;
-  people = [];
-  bySender = new Map;
-  now;
-  constructor(options) {
-    if (options.dbPath !== ":memory:")
-      mkdirSync16(dirname30(options.dbPath), { recursive: true, mode: 448 });
-    this.db = new Database(options.dbPath, { create: true, strict: true });
-    this.now = options.now ?? (() => new Date);
-    try {
-      if (options.dbPath !== ":memory:")
-        chmodSync9(options.dbPath, 384);
-      this.db.exec("PRAGMA busy_timeout = 5000; PRAGMA secure_delete = ON;");
-      this.db.transaction(() => {
-        assertSqliteSchemaCanOpen(this.db, PEOPLE_INDEX_STORE_ID, PEOPLE_SCHEMA_VERSION);
-        runSqliteMigrations(this.db, PEOPLE_INDEX_STORE_ID, peopleIndexMigrations());
-      }).immediate();
-    } catch (error) {
-      this.db.close();
-      throw error;
-    }
-    this.loadPeople();
-  }
-  close() {
-    this.db.close();
-  }
-  rebuild(observations) {
-    const people = linkPeople({ observations, contacts: this.contactCards(), corrections: this.corrections() });
-    const insertIdentity = this.db.query(`
-      INSERT INTO people_identities (identity_key, provider, sender_id, sender_label, keys_json, names_json, is_owner, item_count, person_id, corpus_ids_json, link_reason)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `);
-    const insertPerson = this.db.query(`
-      INSERT INTO people_persons (person_id, display_name, is_owner, name_shareable, item_count, linked_by_json) VALUES (?, ?, ?, ?, ?, ?)
-    `);
-    this.db.transaction(() => {
-      this.db.exec("DELETE FROM people_identities; DELETE FROM people_persons;");
-      for (const person of people) {
-        insertPerson.run(person.personId, person.displayName, Number(person.isOwner), Number(person.nameShareable), person.itemCount, JSON.stringify(person.linkedBy));
-        for (const identity of person.identities) {
-          insertIdentity.run(identity.identityKey, identity.provider, identity.senderId ?? null, identity.senderLabel ?? null, JSON.stringify(identity.keys), JSON.stringify(identity.names), Number(identity.isOwner), identity.itemCount, person.personId, JSON.stringify(identity.corpusIds), identity.linkReason ?? null);
-        }
-      }
-      this.db.query(`INSERT OR REPLACE INTO people_meta (key, value) VALUES ('rebuilt_at', ?)`).run(this.now().toISOString());
-    })();
-    this.setPeople(people);
-    return people;
-  }
-  list() {
-    return this.people;
-  }
-  person(personId) {
-    return this.people.find((person) => person.personId === personId);
-  }
-  personForSender(provider, senderId, senderLabel) {
-    const key = peopleIdentityKey(provider, senderId, senderLabel);
-    return key ? this.bySender.get(key) : undefined;
-  }
-  citationName(provider, senderId, senderLabel) {
-    const person = this.personForSender(provider, senderId, senderLabel);
-    if (!person || person.isOwner)
-      return;
-    if (!person.nameShareable)
-      return;
-    return { personId: person.personId, displayName: person.displayName, isOwner: false };
-  }
-  findPeople(query) {
-    const keys = strongKeysFromText(query);
-    const wanted = normalizePersonName(query);
-    if (!wanted && keys.length === 0)
-      return [];
-    return this.people.filter((person) => {
-      if (keys.some((key) => person.identities.some((identity) => identity.keys.includes(key))))
-        return true;
-      if (!wanted)
-        return false;
-      const names = [person.displayName, ...person.identities.flatMap((identity) => identity.names)].map(normalizePersonName);
-      return names.some((name) => name === wanted || ` ${name} `.includes(` ${wanted} `));
-    });
-  }
-  senderIdentitiesFor(query) {
-    return this.findPeople(query).flatMap((person) => person.identities.map((identity) => ({
-      provider: identity.provider,
-      ...identity.senderId ? { senderId: identity.senderId } : {},
-      ...!identity.senderId && identity.senderLabel ? { senderLabel: identity.senderLabel } : {}
-    })));
-  }
-  suggestions() {
-    const rejected = new Set(this.corrections().flatMap((c) => c.kind === "not_same" ? [`${c.identityA}\x00${c.identityB}`, `${c.identityB}\x00${c.identityA}`] : []));
-    const byName = new Map;
-    for (const person of this.people) {
-      if (person.isOwner)
-        continue;
-      for (const name of new Set(person.identities.flatMap((identity) => identity.names.map(normalizePersonName)))) {
-        if (name)
-          byName.set(name, [...byName.get(name) ?? [], person]);
-      }
-    }
-    const out = [];
-    const seen = new Set;
-    for (const [name, people] of byName) {
-      for (let i = 0;i < people.length; i += 1) {
-        for (let j = i + 1;j < people.length; j += 1) {
-          const a = people[i];
-          const b = people[j];
-          const pair = [a.personId, b.personId].sort().join("\x00");
-          if (seen.has(pair))
-            continue;
-          const crossRejected = a.identities.some((x) => b.identities.some((y) => rejected.has(`${x.identityKey}\x00${y.identityKey}`)));
-          if (crossRejected)
-            continue;
-          seen.add(pair);
-          out.push({ identityA: a.identities[0].identityKey, identityB: b.identities[0].identityKey, personA: a.personId, personB: b.personId, name });
-        }
-      }
-    }
-    return out;
-  }
-  correct(correction) {
-    const at = this.now().toISOString();
-    const insert = this.db.query(`
-      INSERT INTO people_corrections (kind, identity_a, identity_b, name, created_at) VALUES (?, ?, ?, ?, ?)
-    `);
-    this.db.transaction(() => {
-      if (correction.kind === "not_same" || correction.kind === "merge") {
-        this.db.query(`
-          DELETE FROM people_corrections WHERE kind IN ('not_same', 'merge')
-            AND ((identity_a = ? AND identity_b = ?) OR (identity_a = ? AND identity_b = ?))
-        `).run(correction.identityA, correction.identityB, correction.identityB, correction.identityA);
-        if (correction.kind === "merge") {
-          this.db.query(`DELETE FROM people_corrections WHERE kind = 'split' AND identity_a IN (?, ?)`).run(correction.identityA, correction.identityB);
-        }
-        insert.run(correction.kind, correction.identityA, correction.identityB, null, at);
-      } else if (correction.kind === "split") {
-        this.db.query(`DELETE FROM people_corrections WHERE kind = 'merge' AND (identity_a = ? OR identity_b = ?)`).run(correction.identity, correction.identity);
-        insert.run("split", correction.identity, null, null, at);
-      } else {
-        const name = correction.name.trim().slice(0, 160);
-        if (!name)
-          throw new Error("A person needs a name.");
-        insert.run("rename", correction.identity, null, name, at);
-      }
-    })();
-  }
-  corrections() {
-    const rows = this.db.query(`
-      SELECT kind, identity_a, identity_b, name FROM people_corrections ORDER BY correction_id
-    `).all();
-    return rows.map((row) => {
-      if (row.kind === "split")
-        return { kind: "split", identity: row.identity_a };
-      if (row.kind === "rename")
-        return { kind: "rename", identity: row.identity_a, name: row.name ?? "" };
-      return { kind: row.kind, identityA: row.identity_a, identityB: row.identity_b ?? "" };
-    });
-  }
-  putContactCard(card) {
-    this.db.query(`
-      INSERT OR REPLACE INTO people_contact_cards (card_id, name, keys_json, updated_at) VALUES (?, ?, ?, ?)
-    `).run(card.cardId, card.name ?? null, JSON.stringify([...card.keys]), this.now().toISOString());
-  }
-  contactCards() {
-    return this.db.query(`SELECT card_id, name, keys_json FROM people_contact_cards ORDER BY card_id`).all().map((row) => ({ cardId: row.card_id, ...row.name ? { name: row.name } : {}, keys: JSON.parse(row.keys_json) }));
-  }
-  loadPeople() {
-    const persons = this.db.query(`SELECT person_id, display_name, is_owner, name_shareable, item_count, linked_by_json FROM people_persons`).all();
-    const identities = this.db.query(`
-      SELECT identity_key, provider, sender_id, sender_label, keys_json, names_json, is_owner, item_count, person_id, corpus_ids_json, link_reason
-      FROM people_identities ORDER BY identity_key
-    `).all();
-    const byPerson = new Map;
-    for (const row of identities) {
-      byPerson.set(row.person_id, [...byPerson.get(row.person_id) ?? [], {
-        identityKey: row.identity_key,
-        provider: row.provider,
-        ...row.sender_id ? { senderId: row.sender_id } : {},
-        ...row.sender_label ? { senderLabel: row.sender_label } : {},
-        keys: JSON.parse(row.keys_json),
-        names: JSON.parse(row.names_json),
-        isOwner: row.is_owner === 1,
-        itemCount: row.item_count,
-        personId: row.person_id,
-        corpusIds: JSON.parse(row.corpus_ids_json),
-        ...row.link_reason ? { linkReason: row.link_reason } : {}
-      }]);
-    }
-    const people = persons.map((row) => ({
-      personId: row.person_id,
-      displayName: row.display_name,
-      isOwner: row.is_owner === 1,
-      nameShareable: row.name_shareable === 1,
-      itemCount: row.item_count,
-      identities: byPerson.get(row.person_id) ?? [],
-      linkedBy: JSON.parse(row.linked_by_json)
-    }));
-    this.setPeople(people);
-  }
-  setPeople(people) {
-    this.people = people;
-    this.bySender.clear();
-    for (const person of people) {
-      for (const identity of person.identities) {
-        if (identity.senderId)
-          this.bySender.set(`sender:${identity.provider}:${identity.senderId}`, person);
-        else if (identity.senderLabel)
-          this.bySender.set(`label:${identity.provider}:${identity.senderLabel}`, person);
-      }
-    }
-  }
-}
-var PEOPLE_LINK_REASON_TEXT, OWNER_PERSON_ID = "you", OWNER_DISPLAY_NAME = "You", MAX_GROUP_SIGNAL_MEMBERS = 50, MAX_NAMES_PER_IDENTITY = 8, PEOPLE_SCHEMA_VERSION = 1, PEOPLE_INDEX_STORE_ID = "people-index", ADDRESS, PEOPLE_AUTHORED_FAMILIES;
+var PEOPLE_LINK_REASON_TEXT, ADDRESS, PEOPLE_AUTHORED_FAMILIES;
 var init_people_index = __esm(() => {
   init_olympus_layout();
   init_sqlite_migrations();
@@ -16736,7 +16070,7 @@ function childProviderItemId(parentProviderItemId, key) {
 var CHILD_ITEM_ID_SEPARATOR = "#child:";
 
 // src/workers/google-connectors/gmail-mail-record.ts
-import { createHash as createHash10 } from "node:crypto";
+import { createHash as createHash9 } from "node:crypto";
 function isGmailAttachmentPart(part) {
   const type = (part.mimeType ?? "").trim().toLowerCase();
   if (type.startsWith("multipart/"))
@@ -16765,7 +16099,7 @@ function childrenOf(record2, build) {
   return record2.metadataOnly || build.children !== true ? [] : record2.attachments.filter((attachment) => attachment.filename.trim() !== "" && (attachment.partId === "" ? 0 : attachment.partId.split(".").length) <= GMAIL_CHILD_MAX_DEPTH);
 }
 function hashString(value) {
-  return createHash10("sha256").update(value).digest("hex");
+  return createHash9("sha256").update(value).digest("hex");
 }
 function parsedDate(value) {
   if (!value)
@@ -16946,7 +16280,7 @@ var init_request_budget = __esm(() => {
 });
 
 // src/workers/google-connectors/gmail.ts
-import { createHash as createHash11 } from "node:crypto";
+import { createHash as createHash10 } from "node:crypto";
 
 class GoogleGmailSourceConnector {
   id = GMAIL_PROVIDER;
@@ -17760,7 +17094,7 @@ function metadataCount(metadata, key) {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : 0;
 }
 function hashString2(value) {
-  return createHash11("sha256").update(value).digest("hex");
+  return createHash10("sha256").update(value).digest("hex");
 }
 var GMAIL_PROVIDER = "gmail", DEFAULT_GMAIL_SYNC_MAX_MESSAGES = 200, DEFAULT_GMAIL_PAGE_SIZE = 100, MAX_GMAIL_SYNC_MESSAGES = 1000, MAX_GMAIL_LIST_PAGES_PER_RUN = 50, TRAVERSAL_START_MARGIN_MS = 86400000, GMAIL_API_BASE_URL = "https://gmail.googleapis.com/gmail/v1", GMAIL_CURSOR_PREFIX = "gm1:", MAX_GMAIL_CURSOR_LENGTH = 4096, DEFAULT_GMAIL_MAX_RETRIES = 3, MAX_GMAIL_RETRY_DELAY_MS = 30000, GMAIL_PRIVATE_SCOPE_CONFIRMATION_MAX_ITEMS = 32, GMAIL_METADATA_HEADERS, GMAIL_PART_LOCATOR_PREFIX = "gmail-part1:";
 var init_gmail = __esm(() => {
@@ -17776,7 +17110,7 @@ var init_gmail = __esm(() => {
 });
 
 // src/workers/google-connectors/drive.ts
-import { createHash as createHash12 } from "node:crypto";
+import { createHash as createHash11 } from "node:crypto";
 
 class GoogleDriveSourceConnector {
   id = GOOGLE_DRIVE_PROVIDER;
@@ -18342,7 +17676,7 @@ function safeProviderDetail2(value) {
   return value.replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, "[email]").slice(0, 500);
 }
 function hashString3(value) {
-  return createHash12("sha256").update(value).digest("hex");
+  return createHash11("sha256").update(value).digest("hex");
 }
 var GOOGLE_DRIVE_PROVIDER = "google_drive", DEFAULT_GOOGLE_DRIVE_SYNC_MAX_FILES = 200, DEFAULT_GOOGLE_DRIVE_CONTENT_MAX_FILES = 50, DEFAULT_GOOGLE_DRIVE_PAGE_SIZE = 100, DEFAULT_GOOGLE_DRIVE_MAX_TEXT_BYTES = 128000, MAX_GOOGLE_DRIVE_SYNC_FILES = 1000, GOOGLE_DRIVE_API_BASE_URL = "https://www.googleapis.com/drive/v3", GOOGLE_DOC_MIME_TYPE = "application/vnd.google-apps.document", GOOGLE_DRIVE_CURSOR_PREFIX = "gd1:", MAX_GOOGLE_DRIVE_CURSOR_LENGTH = 4096, DEFAULT_GOOGLE_DRIVE_MAX_RETRIES = 3, MAX_GOOGLE_DRIVE_RETRY_DELAY_MS = 30000, GoogleDriveContentTooLargeError, GoogleDriveApiError, GOOGLE_DRIVE_MAX_ANCESTRY_LOOKUPS = 64, FOLDER_LOOKUP_FAILED;
 var init_drive = __esm(() => {
@@ -19164,7 +18498,7 @@ var init_delphi_scorer = __esm(() => {
 });
 
 // src/workers/classification/sniffer.ts
-import { createHash as createHash13 } from "node:crypto";
+import { createHash as createHash12 } from "node:crypto";
 function buildSnifferBatchPrompt(pass, items, ownerContext) {
   const intro = pass === "metadata" ? "Each item below is the NAMES of one file, message or note: its title, folder path, labels and sender." : "Each item below is one document or message: its NAMES (title, folder path, sender) when known, then a short EXCERPT of its text.";
   const lines = items.map((item) => JSON.stringify(pass === "metadata" ? { i: item.i, names: item.material } : { i: item.i, document: item.material }));
@@ -19281,8 +18615,8 @@ var init_sniffer = __esm(() => {
     required: ["verdicts"],
     additionalProperties: false
   };
-  SNIFFER_PROMPT_VERSION = `p-${createHash13("sha256").update(SNIFFER_SYSTEM_PROMPT).update("\x00").update(buildSnifferBatchPrompt("metadata", [{ i: 1, material: "template" }])).update("\x00").update(buildSnifferBatchPrompt("content", [{ i: 1, material: "template" }])).digest("hex").slice(0, 12)}`;
-  SNIFFER_OWNER_CONTEXT_PROMPT_VERSION = `p-${createHash13("sha256").update(SNIFFER_SYSTEM_PROMPT).update("\x00").update(buildSnifferBatchPrompt("metadata", [{ i: 1, material: "template" }], "template")).update("\x00").update(buildSnifferBatchPrompt("content", [{ i: 1, material: "template" }], "template")).digest("hex").slice(0, 12)}`;
+  SNIFFER_PROMPT_VERSION = `p-${createHash12("sha256").update(SNIFFER_SYSTEM_PROMPT).update("\x00").update(buildSnifferBatchPrompt("metadata", [{ i: 1, material: "template" }])).update("\x00").update(buildSnifferBatchPrompt("content", [{ i: 1, material: "template" }])).digest("hex").slice(0, 12)}`;
+  SNIFFER_OWNER_CONTEXT_PROMPT_VERSION = `p-${createHash12("sha256").update(SNIFFER_SYSTEM_PROMPT).update("\x00").update(buildSnifferBatchPrompt("metadata", [{ i: 1, material: "template" }], "template")).update("\x00").update(buildSnifferBatchPrompt("content", [{ i: 1, material: "template" }], "template")).digest("hex").slice(0, 12)}`;
 });
 
 // src/workers/connector-store/secrets-disposition.ts
@@ -19862,9 +19196,9 @@ var init_tier_content_purge = __esm(() => {
 });
 // src/workers/source-index/built-in-embedding/litert-runtime.ts
 import { spawn as spawn4 } from "node:child_process";
-import { closeSync as closeSync8, constants as constants7, existsSync as existsSync18, fstatSync as fstatSync3, openSync as openSync7, readdirSync as readdirSync8, statSync as statSync17 } from "node:fs";
+import { closeSync as closeSync8, constants as constants7, existsSync as existsSync17, fstatSync as fstatSync3, openSync as openSync7, readdirSync as readdirSync8, statSync as statSync17 } from "node:fs";
 import { homedir as homedir16 } from "node:os";
-import { delimiter as delimiter6, dirname as dirname31, isAbsolute as isAbsolute21, join as join37 } from "node:path";
+import { delimiter as delimiter6, dirname as dirname30, isAbsolute as isAbsolute21, join as join37 } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath as fileURLToPath7 } from "node:url";
 function helperEnvironment() {
@@ -20038,10 +19372,10 @@ class HelperProcess {
   }
 }
 function helperPath() {
-  const here = dirname31(fileURLToPath7(import.meta.url));
+  const here = dirname30(fileURLToPath7(import.meta.url));
   for (const name of ["litert-helper.js", "litert-helper.ts"]) {
     const candidate = join37(here, name);
-    if (existsSync18(candidate))
+    if (existsSync17(candidate))
       return candidate;
   }
   throw new Error("The built-in search model helper is missing from this install.");
@@ -21171,14 +20505,14 @@ var init_locator_result_projector = __esm(() => {
 });
 
 // src/workers/dropbox-files/dropbox-content-hash.ts
-import { createHash as createHash14 } from "node:crypto";
+import { createHash as createHash13 } from "node:crypto";
 function computeDropboxContentHash(bytes) {
   const blockDigests = [];
   for (let offset = 0;offset < bytes.byteLength; offset += DROPBOX_CONTENT_HASH_BLOCK_SIZE) {
     const block = bytes.subarray(offset, Math.min(offset + DROPBOX_CONTENT_HASH_BLOCK_SIZE, bytes.byteLength));
-    blockDigests.push(createHash14("sha256").update(block).digest());
+    blockDigests.push(createHash13("sha256").update(block).digest());
   }
-  return createHash14("sha256").update(Buffer.concat(blockDigests)).digest("hex");
+  return createHash13("sha256").update(Buffer.concat(blockDigests)).digest("hex");
 }
 var DROPBOX_CONTENT_HASH_BLOCK_SIZE;
 var init_dropbox_content_hash = __esm(() => {
@@ -23169,16 +22503,16 @@ var init_text = __esm(() => {
 });
 
 // src/workers/file-extraction/extractors/apple-vision-ocr.ts
-import { existsSync as existsSync19 } from "node:fs";
-import { dirname as dirname32, join as join40 } from "node:path";
+import { existsSync as existsSync18 } from "node:fs";
+import { dirname as dirname31, join as join40 } from "node:path";
 import { fileURLToPath as fileURLToPath8 } from "node:url";
-function resolveAppleVisionOcrScript(moduleUrl = import.meta.url, exists = existsSync19) {
-  let directory = dirname32(fileURLToPath8(moduleUrl));
+function resolveAppleVisionOcrScript(moduleUrl = import.meta.url, exists = existsSync18) {
+  let directory = dirname31(fileURLToPath8(moduleUrl));
   for (let depth2 = 0;depth2 < 6; depth2 += 1) {
     const candidate = join40(directory, APPLE_VISION_OCR_SCRIPT);
     if (exists(candidate))
       return candidate;
-    const parent = dirname32(directory);
+    const parent = dirname31(directory);
     if (parent === directory)
       break;
     directory = parent;
@@ -23507,8 +22841,8 @@ var init_remote_vlm = __esm(() => {
 
 // src/workers/source-index/built-in-reasoning/off-thread.ts
 import { Worker as Worker2 } from "node:worker_threads";
-import { existsSync as existsSync20 } from "node:fs";
-import { dirname as dirname33, join as join42 } from "node:path";
+import { existsSync as existsSync19 } from "node:fs";
+import { dirname as dirname32, join as join42 } from "node:path";
 import { fileURLToPath as fileURLToPath9 } from "node:url";
 
 class ModelThread {
@@ -23606,10 +22940,10 @@ function cancelled() {
   return Object.assign(new Error("The request was cancelled."), { name: "AbortError" });
 }
 function modelWorkerPath() {
-  const here = dirname33(fileURLToPath9(import.meta.url));
+  const here = dirname32(fileURLToPath9(import.meta.url));
   for (const name of ["model-worker.js", "model-worker.ts"]) {
     const path = join42(here, name);
-    if (existsSync20(path))
+    if (existsSync19(path))
       return path;
   }
   throw new Error("The built-in model worker is not installed.");
@@ -24474,14 +23808,14 @@ var init_remote_connections = __esm(() => {
 });
 
 // src/core/ingestion-health-state.ts
-import { existsSync as existsSync21, mkdirSync as mkdirSync17, readFileSync as readFileSync32, writeFileSync as writeFileSync10 } from "node:fs";
-import { dirname as dirname34 } from "node:path";
+import { existsSync as existsSync20, mkdirSync as mkdirSync16, readFileSync as readFileSync32, writeFileSync as writeFileSync10 } from "node:fs";
+import { dirname as dirname33 } from "node:path";
 function defaultIngestionHealthStatePath(env = process.env) {
   return sharedDataPath("ingestion-doctor-state", env);
 }
 function readIngestionHealthState(path) {
   try {
-    if (!existsSync21(path))
+    if (!existsSync20(path))
       return;
     const parsed = JSON.parse(readFileSync32(path, "utf8"));
     const record2 = asRecord16(parsed);
@@ -24504,7 +23838,7 @@ function readIngestionHealthState(path) {
   }
 }
 function writeIngestionHealthState(path, state) {
-  mkdirSync17(dirname34(path), { recursive: true, mode: 448 });
+  mkdirSync16(dirname33(path), { recursive: true, mode: 448 });
   writeFileSync10(path, `${JSON.stringify(state, null, 2)}
 `);
 }
@@ -27547,7 +26881,7 @@ function asRecord7(value) {
 
 // src/native-plugin.ts
 init_config();
-import { createHash as createHash16 } from "node:crypto";
+import { createHash as createHash15 } from "node:crypto";
 
 // src/core/delphi.ts
 init_operation_error();
@@ -31368,7 +30702,7 @@ init_linux_engine_layout();
 init_model_transport();
 init_config();
 import { spawnSync as spawnSync8 } from "node:child_process";
-import { existsSync as existsSync23, readFileSync as readFileSync34 } from "node:fs";
+import { existsSync as existsSync22, readFileSync as readFileSync34 } from "node:fs";
 import { join as join45 } from "node:path";
 import { homedir as homedir18 } from "node:os";
 init_openclaw_executable();
@@ -31832,10 +31166,10 @@ init_consult_transport_zkapi();
 
 // src/core/consult-gate.ts
 init_owner_config_read();
-import { createHash as createHash15 } from "node:crypto";
-import { existsSync as existsSync22, readFileSync as readFileSync33, statSync as statSync19 } from "node:fs";
+import { createHash as createHash14 } from "node:crypto";
+import { existsSync as existsSync21, readFileSync as readFileSync33, statSync as statSync19 } from "node:fs";
 import { homedir as homedir17 } from "node:os";
-import { basename as basename7, dirname as dirname35, join as join43 } from "node:path";
+import { basename as basename7, dirname as dirname34, join as join43 } from "node:path";
 import { fileURLToPath as fileURLToPath10 } from "node:url";
 init_opsec();
 init_types();
@@ -32078,20 +31412,20 @@ function consultUserVocabularyDir(env = process.env) {
 var vocabularyCache = new Map;
 function verifiedPackFile(path, sha256) {
   try {
-    if (!existsSync22(path))
+    if (!existsSync21(path))
       return "missing";
     if (statSync19(path).size > CONSULT_VOCABULARY_MAX_COMPRESSED_BYTES)
       return "too_large";
     const gz = readFileSync33(path);
-    return createHash15("sha256").update(gz).digest("hex") === sha256 ? gz : "hash_mismatch";
+    return createHash14("sha256").update(gz).digest("hex") === sha256 ? gz : "hash_mismatch";
   } catch {
     return "unreadable";
   }
 }
 function consultVocabularyRoot(moduleUrl = import.meta.url) {
-  const here = dirname35(fileURLToPath10(moduleUrl));
-  const root = basename7(here) === "core" && basename7(dirname35(here)) === "src" ? dirname35(dirname35(here)) : basename7(here) === "dist" ? dirname35(here) : undefined;
-  return root !== undefined && existsSync22(join43(root, ...VOCABULARY_DIR)) ? root : undefined;
+  const here = dirname34(fileURLToPath10(moduleUrl));
+  const root = basename7(here) === "core" && basename7(dirname34(here)) === "src" ? dirname34(dirname34(here)) : basename7(here) === "dist" ? dirname34(here) : undefined;
+  return root !== undefined && existsSync21(join43(root, ...VOCABULARY_DIR)) ? root : undefined;
 }
 function consultVocabularyFileStatus(options = {}, env = process.env) {
   const selection = consultVocabularySelection(options);
@@ -32116,7 +31450,7 @@ function userManifestEntries(userDir) {
     return [];
   try {
     const path = join43(userDir, "manifest.json");
-    if (!existsSync22(path) || statSync19(path).size > 1024 * 1024)
+    if (!existsSync21(path) || statSync19(path).size > 1024 * 1024)
       return [];
     const manifest = JSON.parse(readFileSync33(path, "utf8"));
     if (!manifest || typeof manifest !== "object" || Array.isArray(manifest))
@@ -33552,7 +32886,7 @@ async function defaultDoctorHostProbe(env = process.env, options = {}) {
   const paths = engineServicePaths({ homeDir: home, env });
   const openclawPath = resolveOpenClawExecutable({ env, homeDir: home });
   const engine = process.platform === "darwin" || process.platform === "linux" ? inspectEngine({ homeDir: home, env }) : { installed: false, state: "not_loaded" };
-  const legacyWorkerUnit = process.platform === "darwin" || process.platform === "linux" ? existsSync23(workerServicePaths(process.platform, home).unitPath) : false;
+  const legacyWorkerUnit = process.platform === "darwin" || process.platform === "linux" ? existsSync22(workerServicePaths(process.platform, home).unitPath) : false;
   const health = process.platform === "linux" && engine.installed ? await waitForEngineHealthy({ paths, expectedBuild: linuxInstalledBuild({ homeDir: home, env }) }, { timeoutMs: 0 }) : undefined;
   return {
     ...openclawPath ? { openclawPath } : {},
@@ -33669,7 +33003,7 @@ function doctorSovereigntyEngine(deps) {
   if (inline !== undefined)
     return loadSovereigntyEngine({ inlineConfig: inline });
   const configPath = doctorSovereigntyConfigPath(deps);
-  if (configPath === undefined || !existsSync23(configPath))
+  if (configPath === undefined || !existsSync22(configPath))
     return;
   return loadSovereigntyEngine({ configPath, ...deps.env ? { env: deps.env } : {} });
 }
@@ -34951,7 +34285,7 @@ function readRegistrySafely(deps) {
 }
 function defaultCommandExists(command) {
   const path = process.env.PATH ?? "";
-  return path.split(":").some((dir) => Boolean(dir) && existsSync23(join45(dir, command)));
+  return path.split(":").some((dir) => Boolean(dir) && existsSync22(join45(dir, command)));
 }
 function defaultPythonModuleExists(pythonCommand, moduleName) {
   const proc = spawnSync8(pythonCommand, ["-c", `import ${moduleName}`], { stdio: "ignore" });
@@ -34970,7 +34304,7 @@ function errorDetail(error) {
 // src/core/ocr-readiness.ts
 init_apple_vision_ocr();
 init_ocr_capability();
-import { existsSync as existsSync24, readFileSync as readFileSync35 } from "node:fs";
+import { existsSync as existsSync23, readFileSync as readFileSync35 } from "node:fs";
 var ARCH_IDS2 = ["arch", "archlinux", "omarchy", "manjaro", "endeavouros", "cachyos", "arcolinux", "garuda"];
 var DEBIAN_IDS2 = ["debian", "ubuntu", "linuxmint", "pop", "raspbian", "neon", "elementary", "zorin"];
 var FEDORA_IDS2 = ["fedora", "rhel", "centos", "rocky", "almalinux", "ol", "nobara"];
@@ -35026,7 +34360,7 @@ function ocrInstallRemedy(input) {
   return "Install the packages that provide tesseract (with its English language data) and pdftoppm (poppler-utils) with your package manager.";
 }
 function visionReady(platform2, preference) {
-  return appleVisionOcrSelected(preference, platform2) && resolveAppleVisionOcrScript() !== undefined && existsSync24(APPLE_VISION_OSASCRIPT);
+  return appleVisionOcrSelected(preference, platform2) && resolveAppleVisionOcrScript() !== undefined && existsSync23(APPLE_VISION_OSASCRIPT);
 }
 function describeOcrReadiness(input) {
   if (input.preference === "tesseract")
@@ -37156,7 +36490,7 @@ function sourceWatchRouteFromToolContext(context2) {
   const ownerSeed = context2.requesterSenderId?.trim() || context2.agentId?.trim();
   if (!ownerSeed)
     return;
-  const ownerId2 = `owner:${createHash16("sha256").update(ownerSeed, "utf8").digest("hex")}`;
+  const ownerId2 = `owner:${createHash15("sha256").update(ownerSeed, "utf8").digest("hex")}`;
   const channel = (context2.deliveryContext?.channel || context2.messageChannel)?.trim().toLowerCase();
   const target = context2.deliveryContext?.to?.trim();
   if (channel && target && ["telegram", "whatsapp", "signal", "discord", "slack"].includes(channel)) {

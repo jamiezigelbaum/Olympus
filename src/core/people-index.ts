@@ -250,9 +250,17 @@ interface WorkingIdentity extends PeopleIdentity {
   conversations: Set<string>;
 }
 
+// Fields are set in constructors, never as class-field initializers: an
+// initializer is a load-time side effect that keeps this module, and
+// bun:sqlite with it, in the Node-loaded plugin bundle
+// (test/plugin-bundle-no-bun-sqlite.test.ts).
 class UnionFind {
-  private readonly parent = new Map<string, string>();
-  readonly members = new Map<string, Set<string>>();
+  private readonly parent: Map<string, string>;
+  readonly members: Map<string, Set<string>>;
+  constructor() {
+    this.parent = new Map();
+    this.members = new Map();
+  }
   add(key: string): void {
     if (this.parent.has(key)) return;
     this.parent.set(key, key);
@@ -538,11 +546,13 @@ export interface PeopleSenderIdentity {
  */
 export class LocalPeopleIndex {
   private readonly db: Database;
-  private people: PeoplePerson[] = [];
-  private readonly bySender = new Map<string, PeoplePerson>();
+  private people: PeoplePerson[];
+  private readonly bySender: Map<string, PeoplePerson>;
   private readonly now: () => Date;
 
   constructor(options: { dbPath: string; now?: () => Date }) {
+    this.people = [];
+    this.bySender = new Map();
     if (options.dbPath !== ':memory:') mkdirSync(dirname(options.dbPath), { recursive: true, mode: 0o700 });
     this.db = new Database(options.dbPath, { create: true, strict: true });
     this.now = options.now ?? (() => new Date());

@@ -43203,8 +43203,12 @@ function normalizePersonName(name) {
 }
 
 class UnionFind {
-  parent = new Map;
-  members = new Map;
+  parent;
+  members;
+  constructor() {
+    this.parent = new Map;
+    this.members = new Map;
+  }
   add(key2) {
     if (this.parent.has(key2))
       return;
@@ -43486,10 +43490,12 @@ function normalizeCardKey(key2) {
 
 class LocalPeopleIndex {
   db;
-  people = [];
-  bySender = new Map;
+  people;
+  bySender;
   now;
   constructor(options) {
+    this.people = [];
+    this.bySender = new Map;
     if (options.dbPath !== ":memory:")
       mkdirSync21(dirname35(options.dbPath), { recursive: true, mode: 448 });
     this.db = new Database8(options.dbPath, { create: true, strict: true });
