@@ -161,9 +161,9 @@ bun eval/calibration/label.ts --dir ~/.local/share/olympus-calibration/whole
 - **Whole items:** each item is stored with all of its text, up to 400,000
   characters. Attachments come with their own text and how each was read. The
   item also records its extraction outcome (read, OCR, transcript, failed or
-  pending), whether the judge reads all of it, whether the injection screen
-  holds it, and where Olympus placed its names, its content and the item
-  with its attachments.
+  pending), whether the judge reads all of it, and whether the injection
+  screen holds it. Text comes from the ledger's current copy, not a
+  superseded one left after a tier move.
 - **Frozen:** `manifest.json` holds the sample's SHA-256 and the acceptance
   criteria (`whole-item-criteria.json`: weighted Private precision of at least
   95% and recall of at least 99%, and no Important or Secret item let through,
@@ -188,9 +188,7 @@ bun eval/calibration/score-whole.ts --dir ~/.local/share/olympus-calibration/who
   --judge builtin-4b=FILE --judge delphi-35b=FILE [--judge venice=FILE]
 ```
 
-For each judge and for Olympus's own placement (`olympus-final`,
-`olympus-content`, and `olympus-names` for the metadata judgment), the scorer
-reports:
+For each judge, the scorer reports:
 
 - the whole matrix of owner label by verdict;
 - Private→Personal and Personal→Private, as counts, unweighted rates, and
@@ -200,7 +198,8 @@ reports:
 - the frozen criteria, read on their half;
 - scores broken down by extraction outcome and by attachments, by whether the
   judge read the whole text, and by where the owner said the sensitive part
-  was. These measure extraction, excerpt selection and placement separately.
+  was. These measure extraction and excerpt selection separately from the
+  judge. Scoring production's own placement, per component, is #1159.
 
 It also reports paired disagreements between every two judges, with an exact
 McNemar test. Output is counts and rates only, with no text, names or item

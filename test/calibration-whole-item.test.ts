@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { scoredTier, type CalibrationLabels, type CalibrationSample } from '../eval/calibration/files.ts';
 import { readJudgeFile, scoreWhole } from '../eval/calibration/score-whole.ts';
-import { areaOf, buildPopulation, buildWholeItems, groupsOf, installEnv, placementOf, snapshotInstall, storeDirs } from '../eval/calibration/whole-item-stores.ts';
+import { areaOf, buildPopulation, buildWholeItems, groupsOf, installEnv, snapshotInstall, storeDirs } from '../eval/calibration/whole-item-stores.ts';
 import {
   allocate,
   cellKey,
@@ -203,21 +203,7 @@ function storesFixture(root: string) {
   jobs.close();
 }
 
-describe('placement and current copies', () => {
-  const row = (extra: Record<string, unknown>) => ({ metadata_tier: 'private', content_tier: 'private', content_read: 1, reasons_json: '[]', metadata_pending: 0, content_pending: 0, ...extra });
-
-  test('placement counts production holds as Private, through the shared placement rule', () => {
-    expect(placementOf(row({}))).toEqual({ metadata: 'personal', content: 'personal' });
-    // An open name question holds the whole item in Private.
-    expect(placementOf(row({ metadata_pending: 1 }))).toEqual({ metadata: 'private', content: 'private' });
-    // An own-record content question holds the content in Private; names stay findable.
-    expect(placementOf(row({ content_pending: 1 }))).toEqual({ metadata: 'personal', content: 'private' });
-    // Personal-first content is not held.
-    expect(placementOf(row({ content_pending: 1, reasons_json: JSON.stringify(['content:personal_first']) }))).toEqual({ metadata: 'personal', content: 'personal' });
-    expect(placementOf(row({ content_tier: 'secure' }))).toEqual({ metadata: 'personal', content: 'private' });
-    expect(placementOf(row({ content_tier: 'secrets' }))).toEqual({ metadata: 'secret', content: 'secret' });
-  });
-
+describe('current copies', () => {
   test('text comes from the current copy, not a longer superseded one; legacy items fall back to the fullest copy', () => {
     const root = mkdtempSync(join(tmpdir(), 'whole-copies-'));
     try {
@@ -304,7 +290,7 @@ describe('copying an install', () => {
 });
 
 describe('whole items from store copies', () => {
-  test('population after the same filters, whole text, attachments, OCR failures, placement, frozen sample, counts-only score', async () => {
+  test('population after the same filters, whole text, attachments, OCR failures, frozen sample, counts-only score', async () => {
     const root = mkdtempSync(join(tmpdir(), 'whole-item-'));
     try {
       const stores = join(root, 'stores');
@@ -327,7 +313,6 @@ describe('whole items from store copies', () => {
       const report = byName.get('Report.txt')!;
       expect(report.whole!.children).toHaveLength(1);
       expect(report.whole!.children[0]!.text).toContain('otter allergy panel');
-      expect(report.whole!.placement).toEqual({ metadata: 'personal', content: 'private', final: 'private' });
       // The shared injection screen marks a message that tries to steer the judge, whatever judge runs later.
       const chats = population.units.filter((unit) => unit.area === 'fixture.chat').map((unit) => ({ ...unit, inclusionProbability: 1 }));
       const messages = buildWholeItems(stores, chats, chats.map((_, i) => `c${i}`));
@@ -411,7 +396,6 @@ describe('whole items from store copies', () => {
       expect(lax.all.privateToPersonal.rate).toBe(1);
       expect(cautious.all.personalToPrivate.rate).toBe(1);
       expect(cautious.all.privateToPersonal.count).toBe(0);
-      expect(result.judges['olympus-final']).toBeDefined();
       expect((result.paired['cautious vs lax'] as { verdictsDiffer: number }).verdictsDiffer).toBe(lax.all.items);
       expect(result.labels.notSure).toBe(sample.items.filter((_, i) => i % 4 === 3).length);
       // A result run on another sample, or a sample edited after freezing, is refused.

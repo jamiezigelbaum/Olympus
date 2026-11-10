@@ -4,9 +4,7 @@
 //
 // Each FILE is a saved result of score.ts (the built-in model through the
 // production classifier) or judge-run.ts (a llama.cpp server, or Venice).
-// Olympus's own placement when the sample was drawn is scored beside them, as
-// `olympus-final` (the item with its attachments), `olympus-content` and
-// `olympus-names` (the metadata judgment).
+// Only judge verdicts are scored; production placement per component is #1159.
 //
 // It refuses to score unless manifest.json still matches the sample and its own
 // hash, so the sample and the acceptance criteria were fixed before scoring.
@@ -66,20 +64,6 @@ export function readJudgeFile(raw: unknown): { verdicts: Map<string, JudgeVerdic
   return { verdicts, ...(typeof file.sampleSha256 === 'string' ? { sampleSha256: file.sampleSha256 } : {}) };
 }
 
-const asVerdict = (tier: string): Verdict => (tier === 'personal' ? 'personal' : 'private');
-
-/** Olympus's own placement when the sample was drawn, as three more judges. */
-export function placementJudges(sample: CalibrationSample): Record<string, Map<string, JudgeVerdict>> {
-  const of = (pick: (item: CalibrationSampleItem) => string) => new Map(sample.items.flatMap((item) => (item.whole
-    ? [[item.id, { judge: asVerdict(pick(item)), injection: false }] as const]
-    : [])));
-  return {
-    'olympus-final': of((item) => item.whole!.placement.final),
-    'olympus-content': of((item) => item.whole!.placement.content),
-    'olympus-names': of((item) => item.whole!.placement.metadata),
-  };
-}
-
 /** Acceptance needs a verdict on every labeled item: a subset never passes. */
 function withCoverage(result: CriteriaResult, coverage: { labeled: number; withVerdict: number; missing: number }): CriteriaResult {
   const complete = coverage.missing === 0;
@@ -137,7 +121,7 @@ export function scoreWhole(input: {
     };
   }
 
-  const all = { ...placementJudges(sample), ...Object.fromEntries(Object.entries(input.judges).map(([name, file]) => {
+  const all = { ...Object.fromEntries(Object.entries(input.judges).map(([name, file]) => {
     // A result that does not name its sample cannot be shown to be from this one.
     if (file.sampleSha256 === undefined) throw new Error(`${name} does not record the sample it was run on: rerun it with this version of score.ts or judge-run.ts.`);
     if (file.sampleSha256 !== manifest.sampleSha256) throw new Error(`${name} was run on a different sample.`);

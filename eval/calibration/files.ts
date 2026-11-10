@@ -64,16 +64,12 @@ export interface ExtractionNote {
   warnings: string[];
 }
 
-/** Where Olympus placed an item when it was sampled: Personal, Private or Secret. */
-export type PlacedTier = 'personal' | 'private' | 'secret';
-
 export interface WholeItemChild {
   name: string;
   mimeType: string;
   text: string;
   truncatedChars: number;
   extraction?: ExtractionNote;
-  placement?: PlacedTier;
 }
 
 export interface WholeItemDetail {
@@ -88,8 +84,6 @@ export interface WholeItemDetail {
   judgeReadsAll: boolean;
   /** The shared injection screen holds this item's judge input: no model reads it. */
   injection: boolean;
-  /** Production's placement at sampling time: names, content, and the item with its children. */
-  placement: { metadata: PlacedTier; content: PlacedTier; final: PlacedTier };
 }
 
 export interface CalibrationSample {

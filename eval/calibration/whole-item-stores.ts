@@ -1,7 +1,7 @@
 // Whole-item calibration: the store side. Reads COPIES of an install's
 // connector stores (never a live file), defines the eligible population, and
-// builds each sampled item whole: its own text, every child attachment, how
-// the text was read (OCR, failures) and where Olympus placed it.
+// builds each sampled item whole: its own text, every child attachment, and
+// how the text was read (OCR, failures).
 //
 // Copy layout, one folder per account (`<source_id>@<slot>`, or `<source_id>`):
 //   <stores>/<account>/secure_local.sqlite, internal.sqlite,
@@ -19,9 +19,7 @@ import { snapshotPrefilterDatabase } from '../../src/workers/classification/pref
 import { snifferInjectionRule, snifferMaterialForModel, snifferOwnMaterial } from '../../src/workers/classification/sniffer.ts';
 import { tierLedgerPathForStore, tierSnifferPathForStore } from '../../src/workers/classification/tier-ledger-path.ts';
 import { SNIFFER_EXCERPT_MAX_CHARS } from '../../src/workers/classification/tier-classifier.ts';
-import type { TierKey } from '../../src/workers/classification/tier-classifier.ts';
-import { tierPlacementFloors } from '../../src/workers/connector-store/tiered-store-set.ts';
-import type { CalibrationSampleItem, ExtractionNote, PlacedTier, WholeItemChild } from './files.ts';
+import type { CalibrationSampleItem, ExtractionNote, WholeItemChild } from './files.ts';
 import { storedJudgeInput, type Row } from './stored-input.ts';
 import type { PopulationUnit, WholeStratum } from './whole-item.ts';
 
@@ -71,8 +69,6 @@ interface LedgerRow extends LedgerIdentity {
   state: string;
   content_read: number;
   reasons_json: string;
-  metadata_pending?: number;
-  content_pending?: number;
 }
 
 const hasTable = (db: Database, name: string) => Boolean(db.query("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(name));
@@ -85,43 +81,6 @@ export function judgeCalledPrivate(row: Pick<LedgerRow, 'reasons_json' | 'conten
   if (!code || code === 'undecided' || code.startsWith('fail') || code.startsWith('unresolved') || code.startsWith('injection')) return false;
   return row.content_tier === 'secure';
 }
-
-const reasonsOf = (json: string) => {
-  try {
-    const parsed = JSON.parse(json) as unknown;
-    return Array.isArray(parsed) ? parsed.filter((reason): reason is string => typeof reason === 'string') : [];
-  } catch {
-    return [];
-  }
-};
-
-/**
- * Where production places a ledger row's names and content, holds included,
- * by the same rule a store set uses (`tierPlacementFloors`, behind
- * `placementFor`). Content not read yet stays with the names, as in a lane
- * whose text arrives later.
- */
-export function placementOf(row: Pick<LedgerRow, 'metadata_tier' | 'content_tier' | 'content_read' | 'reasons_json' | 'metadata_pending' | 'content_pending'>): { metadata: PlacedTier; content: PlacedTier } {
-  const contentRead = row.content_read === 1;
-  const floors = tierPlacementFloors({
-    metadataTier: row.metadata_tier as TierKey,
-    contentTier: row.content_tier as TierKey,
-    metadataPending: row.metadata_pending === 1,
-    contentPending: row.content_pending === 1,
-    contentRead,
-    reasons: reasonsOf(row.reasons_json),
-  }, !contentRead);
-  const tier = (domain: string): PlacedTier => (domain === 'secure_local' ? 'private' : 'personal');
-  switch (floors.kind) {
-    case 'secrets': return { metadata: 'secret', content: 'secret' };
-    case 'whole': return { metadata: tier(floors.domain), content: tier(floors.domain) };
-    case 'metadata': return { metadata: tier(floors.metadata), content: tier(floors.metadata) };
-    default: return { metadata: tier(floors.metadata), content: tier(floors.content) };
-  }
-}
-
-const rank = { personal: 0, private: 1, secret: 2 } as const;
-const highest = (tiers: readonly PlacedTier[]): PlacedTier => tiers.reduce<PlacedTier>((top, tier) => (rank[tier] > rank[top] ? tier : top), 'personal');
 
 /** The account folders under a copy root: those with a tier ledger. */
 export function storeDirs(root: string): string[] {
@@ -196,7 +155,6 @@ class AccountStores {
   readonly ledger: Database;
   private readonly sniffer: Database | undefined;
   private readonly stores: Array<{ domain: string; db: Database; item: ReturnType<Database['query']>; chunks: ReturnType<Database['query']>; children: ReturnType<Database['query']> | undefined; textChars: Map<number, number> }>;
-  private readonly ledgerRow;
   private readonly queued;
   private readonly copies: ReturnType<Database['query']> | undefined;
 
@@ -220,7 +178,6 @@ class AccountStores {
         textChars,
       }];
     });
-    this.ledgerRow = this.ledger.query('SELECT * FROM tier_items WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?');
     this.copies = hasTable(this.ledger, 'tier_copies')
       ? this.ledger.query(`SELECT trust_domain, layers FROM tier_copies WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ? AND copy_state = 'current'`)
       : undefined;
@@ -231,10 +188,6 @@ class AccountStores {
 
   ledgerRows(): LedgerRow[] {
     return this.ledger.query('SELECT * FROM tier_items ORDER BY provider, account_scope, conversation_key, provider_item_id').all() as LedgerRow[];
-  }
-
-  ledgerOf(identity: LedgerIdentity): LedgerRow | undefined {
-    return (this.ledgerRow.get(identity.provider, identity.account_scope, identity.conversation_key, identity.provider_item_id) as LedgerRow | null) ?? undefined;
   }
 
   /**
@@ -384,7 +337,6 @@ export function buildWholeItems(root: string, picked: ReadonlyArray<WholeUnit & 
     return picked.map((unit, index): CalibrationSampleItem => {
       const stores = storesFor(unit.dir);
       const found = stores.find(unit.identity)!;
-      const ledger = stores.ledgerOf(unit.identity)!;
       const own = stores.textOf(found);
       const provider = String(found.row['provider']);
       const input = storedJudgeInput(found.row, own.slice(0, JUDGE_TEXT_CHARS), provider);
@@ -392,24 +344,16 @@ export function buildWholeItems(root: string, picked: ReadonlyArray<WholeUnit & 
       const judgeSees = queued ?? input.material;
       const injection = judgeSees !== undefined && snifferInjectionRule(snifferOwnMaterial(snifferMaterialForModel(judgeSees))) !== undefined;
       const children: WholeItemChild[] = stores.children(String(found.row['local_item_id'])).map((child) => {
-        const childLedger = stores.ledgerOf({
-          provider: String(child.row['provider']),
-          account_scope: String(child.row['account_scope']),
-          conversation_key: String(child.row['normalized_conversation'] ?? ''),
-          provider_item_id: String(child.row['provider_item_id']),
-        });
         const note = extraction.note(String(child.row['provider']), String(child.row['local_item_id']));
         return {
           name: text(child.row['title']) ?? '(no name)',
           mimeType: String(child.row['mime_type'] ?? ''),
           ...cut(stores.textOf(child)),
           ...(note ? { extraction: note } : {}),
-          ...(childLedger ? { placement: highest(Object.values(placementOf(childLedger))) } : {}),
         };
       });
       const note = extraction.note(provider, String(found.row['local_item_id']));
       const whole = cut(own);
-      const { content, metadata } = placementOf(ledger);
       const locator = text(found.row['locator_uri']);
       return {
         id: ids[index]!,
@@ -434,7 +378,6 @@ export function buildWholeItems(root: string, picked: ReadonlyArray<WholeUnit & 
           ...(note ? { extraction: note } : {}),
           judgeReadsAll: own.replace(/\s+/g, ' ').trim().length <= SNIFFER_EXCERPT_MAX_CHARS,
           injection,
-          placement: { metadata, content, final: highest([content, metadata, ...children.flatMap((child) => (child.placement ? [child.placement] : []))]) },
         },
       };
     });
