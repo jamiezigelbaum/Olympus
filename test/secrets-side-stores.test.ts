@@ -30,6 +30,8 @@ import { applyOwnerOverrides } from '../src/workers/connector-store/tier-overrid
 import { secretFencedSniffer } from '../src/workers/connector-store/tier-placement.ts';
 import { forgetSecretInSideStores, retireSecretRedactions, retrySecretSideStoreDebts, settleUntrackedSecretsCopy } from '../src/workers/connector-store/secrets-disposition.ts';
 import type { AppRequestRecord, ReleasedItem } from '../src/core/app-release-capture.ts';
+import { createReleaseCapture, noteReleasedItems, recordAppRequest, runWithReleaseCapture } from '../src/core/app-release-capture.ts';
+import { createAppsReceived } from '../src/workers/apps-received.ts';
 import { appReleaseLogDbPath, openAppReleaseLog } from '../src/core/app-release-log.ts';
 import { resolveRemoteConnectionsDbPath } from '../src/core/remote-connections.ts';
 import { createTestClock } from './helpers/test-clock.ts';
@@ -1068,6 +1070,33 @@ describe('the list of what AI apps received keeps no name of an item that become
     await clock.advance(1_000);
     log.record(request(clock.now(), [KEYS]));
     expect(log.list()[0]!.items.map((item) => item.title)).toEqual([KEYS.name]);
+  });
+
+  test('on a fresh install, an item made Secret before anything was recorded keeps no name from a receipt written later', async () => {
+    const dir = workspace('olympus-secret-side-apps-fresh-');
+    const fx = fixture(dir);
+    pointJobsDefaultInto(dir);
+    const clock = createTestClock();
+    const logPath = join(dir, 'apps', 'app-release-log.sqlite');
+    // The worker's list, as it starts on a computer that has recorded nothing yet.
+    const apps = createAppsReceived({ dbPath: logPath, setItemPrivate: async () => undefined, now: () => clock.now() });
+    cleanups.push(() => apps.close());
+    fx.ledger.setOverride(identityOf('keys'), { kind: 'not_secret' });
+    await fx.set.sync(fixtureConnector(() => [KEYS, GARDEN]), { fetchContent: true, placement: FIXTURE_PLACEMENT });
+
+    // The owner marks it Secret before the first receipt is written.
+    fx.ledger.setOverride(identityOf('keys'), { kind: 'tier', tier: 'secrets' });
+    expect(applyOwnerOverrides({ set: fx.set })).toMatchObject({ secrets: 1 });
+
+    // A receipt built before the change arrives late, through the worker's recorder.
+    await clock.advance(1_000);
+    const capture = createReleaseCapture();
+    runWithReleaseCapture(capture, () => noteReleasedItems([released(KEYS), released(GARDEN)]));
+    recordAppRequest({ caller: { surface: 'remote', provider: 'openai' }, question: 'What is in my deploy notes?', capture, now: () => clock.now() - 2_000 });
+    const listed = (await apps.handle({ action: 'list' })).body.requests as Array<{ items: Array<{ title?: string }> }>;
+    expect(listed[0]!.items.map((item) => item.title)).toEqual([undefined, GARDEN.name]);
+    expect(rawNames(logPath)).not.toContain(FAKE_AWS_KEY);
+    expect(rawNames(logPath)).not.toContain(`fixture:/Files/${KEYS.name}`);
   });
 
   test('a list that cannot be reached is left as a ledger debt and cleared at the next tier tick', async () => {

@@ -219258,6 +219258,11 @@ function createAppsReceived(options) {
     store ??= openAppReleaseLog(options.dbPath, options.now ? { now: options.now } : {});
     return store;
   };
+  try {
+    open7();
+  } catch (error2) {
+    console.error(`[olympus:apps-received] open_failed ${error2 instanceof Error ? error2.name : "error"}`);
+  }
   setAppReleaseRecorder((record8) => {
     try {
       open7().record(record8);

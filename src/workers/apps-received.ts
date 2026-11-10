@@ -54,6 +54,16 @@ export function createAppsReceived(options: {
     store ??= openAppReleaseLog(options.dbPath, options.now ? { now: options.now } : {});
     return store;
   };
+  // Opened now, not on the first receipt: an item that becomes Secret before
+  // anything is recorded must leave its marker here (forgetSecretAppReleaseItem
+  // skips a log that does not exist), or a receipt built before the change and
+  // written after it would record its title and locator. A failed open is
+  // retried on first use.
+  try {
+    open();
+  } catch (error) {
+    console.error(`[olympus:apps-received] open_failed ${error instanceof Error ? error.name : 'error'}`);
+  }
   setAppReleaseRecorder((record) => {
     try {
       open().record(record);

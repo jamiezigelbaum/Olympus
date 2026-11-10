@@ -20,13 +20,13 @@ import {
 } from '../src/core/app-release-capture.ts';
 import { appReleaseLogDbPath, forgetAppReleaseItems, openAppReleaseLog } from '../src/core/app-release-log.ts';
 import { createTestClock, flushMicrotasks, waitFor } from './helpers/test-clock.ts';
+import { ownerLocalMint } from './helpers/owner-local-mint.ts';
 import { defaultConfig } from '../src/core/config.ts';
 import { findOperationByName } from '../src/core/operations.ts';
 import { SourceAnswerJobRegistry, type SourceAnswerPending } from '../src/core/source-answer-jobs.ts';
 import type { OperationContext } from '../src/core/operations.ts';
 import { remoteOperationOutput } from '../src/core/remote-result.ts';
 import { DashboardLaunchTickets } from '../src/core/dashboard-launch.ts';
-import { recordRequestPeer } from '../src/core/request-peer.ts';
 import { createSovereigntyEngine, loadSovereigntyPreset } from '../src/core/sovereignty.ts';
 import { deleteOlympusData, exportOlympusData } from '../src/data-lifecycle.ts';
 import { APPS_RECEIVED_ITEM_GONE, createAppsReceived } from '../src/workers/apps-received.ts';
@@ -41,7 +41,7 @@ import { SEARCH_TOOL, callChatGptTool, type ChatGptSurfaceOptions } from '../src
 import { answerToolResult, searchToolResult } from '../src/workers/chatgpt/response-builder.ts';
 import { renderDashboardAppsReceivedPage } from '../src/workers/dashboard/pages/apps-received.ts';
 import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
-import { DASHBOARD_LOCAL_CONTROL_SESSION_PATH, withWorkerBearerAuth } from '../src/workers/http.ts';
+import { withWorkerBearerAuth } from '../src/workers/http.ts';
 import type { SourceIndexStatusResult } from '../src/workers/source-index/status.ts';
 import { searchReleasedEvidence } from '../src/workers/source-index/analyst-answer.ts';
 import { buildSourceIndexCorpusRegistry } from '../src/core/source-index/corpus.ts';
@@ -566,9 +566,8 @@ describe('the worker serves the list only inside a local control session', () =>
     expect((await post({ Authorization: `Bearer ${TOKEN}`, Origin: ORIGIN, 'X-Olympus-Control-Session-Grade': 'local', 'X-Olympus-Control-Session-CSRF': 'x' })).status).toBe(403);
     expect(calls).toEqual([]);
 
-    const request = new Request(`${ORIGIN}${DASHBOARD_LOCAL_CONTROL_SESSION_PATH}`, { method: 'POST', headers: { Origin: ORIGIN } });
-    recordRequestPeer(request, '127.0.0.1');
-    const local = await fetcher(request);
+    // The local session is minted as the owner's browser does it: from the control session its launch opened (#1153).
+    const local = await ownerLocalMint(fetcher, ORIGIN, TOKEN);
     const session = { cookie: local.headers.get('Set-Cookie')!.split(';')[0]!, csrf: ((await local.json()) as { csrf_token: string }).csrf_token };
     const ok = await post({ Cookie: session.cookie, Origin: ORIGIN, 'X-Olympus-CSRF': session.csrf });
     expect(ok.status).toBe(200);
