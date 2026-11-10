@@ -63,7 +63,7 @@ test('the panel reads a saved chat rule back, so a save that drops it counts as 
   writePrivacyProfile({ rules: [doctor] }, { env });
   const settings = readChatGptPrivacySettings(env, 0);
   expect(settings.rules).toEqual([doctor]);
-  const meta = privacyToolResult(settings, 'current')._meta!['olympus/privacy'] as { rules: unknown[] };
+  const meta = (privacyToolResult(settings, 'current')._meta as Record<string, unknown>)['olympus/privacy'] as { rules: unknown[] };
   expect(meta.rules).toEqual([doctor]);
   expect(lowersPrivacy({ rules: [] }, settings)).toBe(true);
   expect(lowersPrivacy({ rules: [doctor] }, settings)).toBe(false);
