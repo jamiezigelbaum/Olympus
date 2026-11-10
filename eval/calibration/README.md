@@ -278,6 +278,20 @@ VENICE_API_KEY=... bun eval/calibration/judge-run.ts \
   calls, and the key's request and token limits. Cost follows from the tokens
   and Venice's price list.
 
+## Measuring a new judge model and adding its bar
+
+Follow this for any new judge model (local or Venice), or when the judge prompt changes. The owner's rule (2026-11-10) is that a default judge must reach **over 75% agreement and 0 important Private items missed on the test half**. When it's unsure, it holds the item Private. Missed minor Private items are reported but don't block a judge (#883, #1184).
+
+1. **Labels.** Use the owner's labelled sets with importance tags: round 1, round 2 and the whole-item sample. Tune on the dev half only, and report on the test half and on all items. Labels and item text never leave the owner's machine, and reports give counts only.
+2. **Repeatability first.** Run the same set twice. Local judges should agree exactly (temperature 0; decision mode is one token). On Venice, production sends temperature 0 and a fixed seed (`JUDGE_SAMPLING`, #1237), but a hosted model can still change a few verdicts. Count the flips, and never certify a hosted judge from one run (#1236).
+3. **Decision mode, on a llama.cpp server.** Save P(Private) for every item, then sweep the bar on the dev half. The bar is the highest one that misses 0 important dev items. Check it on test against the rule above.
+4. **Full mode (Venice, and the built-in model today).** The tier comes from the model's own answer, plus the floor (`SNIFFER_PERSONAL_MIN_CONFIDENCE`): a Personal answer with confidence under 0.9 is held Private. Venice states its confidence in coarse steps, mostly 0.9 and 0.95, so a floor rarely separates misses from Personal items. Look at the important misses in both passes before tuning a floor. A stable, confident miss means the model or the prompt has to change. A floor won't fix it.
+5. **Ship the result in the package, never as one machine's setting.**
+   - A measured decision bar goes in `SNIFFER_DECISION_BARS` (`src/workers/classification/sniffer.ts`), keyed by the model's identity. Add a test in `test/sniffer-decision-bar.test.ts`, and a `docs/CONTRACTS.md` change-log line that says what it does to stored verdicts. The bar is applied when a verdict is read, so a new bar needs no new judge calls.
+   - Key the bar to the weights, never to one server's alias (#1253). `snifferDecisionBar` on a profile is only for an install whose server hides the weights.
+   - A new Venice judge model needs a listed price in `JUDGE_PRICES` before it can judge (#1252).
+6. **Record it.** Put the full matrix per judge (important missed, minor missed, Personal held, agreement, flips) on the issue that asked for the measurement, and in the PR body.
+
 ## Venice embedding content preference (2026-10-10)
 
 Owner-approved on 2026-10-10, using only committed synthetic eval fixtures:
