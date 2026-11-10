@@ -93,6 +93,28 @@ test('with 300 chats, two switches read every one-to-one chat and group, and one
   } finally { controller.dispose(); }
 });
 
+test('after Save, the chooser closes and Choose chats is back, so the choice can be changed again', async () => {
+  let chatsCalls = 0;
+  const { root, controller } = mount(renderMessagingCard('telegram', true, { paired: true }), async (operation) => {
+    if (operation === 'chats') { chatsCalls += 1; return { status: 200, body: { ok: true, state: 'paired', chats: [{ chatScope: 'telegram.personal:chat:1', title: 'Ana', kind: 'dm' }], wholeAccount: false, chatKinds: [], chatScopes: [] } }; }
+    return { status: 200, body: { ok: true, state: 'paired' } };
+  });
+  try {
+    await flushMicrotasks();
+    submit(root.querySelector('form[data-messaging-kind="chats"]')!);
+    const picker = await waitFor(() => root.querySelector<HTMLFormElement>('[data-kind-picker]'));
+    picker.querySelector<HTMLInputElement>('[name="chatKind"][value="dm"]')!.click();
+    submit(picker);
+    await waitFor(() => !root.querySelector('[data-kind-picker]'));
+    const chooseChats = root.querySelector<HTMLFormElement>('form[data-messaging-kind="chats"]')!;
+    expect(chooseChats.hidden).toBe(false);
+    expect(root.querySelector('[data-messaging-status]')!.textContent).toBe('Chat choices saved. Capture will use this selection.');
+    submit(chooseChats);
+    await waitFor(() => root.querySelector('[data-kind-picker]'));
+    expect(chatsCalls).toBe(2);
+  } finally { controller.dispose(); }
+});
+
 test('Read all chats switches every kind on, and turning a kind off leaves it', async () => {
   const { root, controller } = mount(renderMessagingCard('whatsapp', true, { paired: true }), async (operation) => operation === 'chats'
     ? { status: 200, body: { ok: true, state: 'paired', chats: [{ chatScope: 'whatsapp.personal:chat:1@s.whatsapp.net', title: 'Ana', kind: 'dm' }, { chatScope: 'whatsapp.personal:chat:2@g.us', title: 'Street', kind: 'community' }], wholeAccount: false, chatKinds: ['group'], chatScopes: [] } }

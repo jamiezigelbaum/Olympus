@@ -153518,6 +153518,12 @@ function mountDashboardController(options) {
             chooseChats.hidden = true;
         }
       }
+      if (operation === "scope" && ["paired", "complete", "completed"].includes(state)) {
+        card.querySelector("[data-messaging-chats]")?.replaceChildren();
+        const chooseChats = card.querySelector('form[data-messaging-kind="chats"]');
+        if (chooseChats)
+          chooseChats.hidden = false;
+      }
       if (state === "cancelled" && body.cleaning === true || operation !== "chats" && (operation !== "cancel" || state === "committing") && !["paired", "complete", "completed", "failed", "cancelled", "idle", "not_paired", "scope_selection_required"].includes(state)) {
         messagingTimers.set(card, setTimeout(() => {
           messagingTimers.delete(card);

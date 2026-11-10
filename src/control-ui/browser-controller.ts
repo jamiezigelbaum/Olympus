@@ -1419,6 +1419,13 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
           if (chooseChats) chooseChats.hidden = true;
         }
       }
+      // A saved choice closes the chooser, whose chat list the save used up, and
+      // brings Choose chats back so the choice can be changed again.
+      if (operation === 'scope' && ['paired', 'complete', 'completed'].includes(state)) {
+        card.querySelector<HTMLElement>('[data-messaging-chats]')?.replaceChildren();
+        const chooseChats = card.querySelector<HTMLElement>('form[data-messaging-kind="chats"]');
+        if (chooseChats) chooseChats.hidden = false;
+      }
       if ((state === 'cancelled' && body.cleaning === true) || (operation !== 'chats' && (operation !== 'cancel' || state === 'committing') && !['paired', 'complete', 'completed', 'failed', 'cancelled', 'idle', 'not_paired', 'scope_selection_required'].includes(state))) {
         messagingTimers.set(card, setTimeout(() => { messagingTimers.delete(card); void messagingRequest(card, 'status'); }, 1200));
       }
