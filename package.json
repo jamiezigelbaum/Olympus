@@ -69,7 +69,7 @@
     "worktree:audit": "bun scripts/worktree-integration-audit.ts",
     "local-vlm:promotion-gate": "bun scripts/local-vlm-promotion-gate.ts",
     "email-source:serve": "bun src/workers/email-source/server.ts",
-    "test": "bun run build && HOME=\"$(mktemp -d)\" bun test",
+    "test": "bun run build && bun scripts/test-suite.ts",
     "test:focus": "HOME=\"$(mktemp -d)\" bun test",
     "test:fast": "bun run build && bun scripts/test-lane.ts fast && bun run test:connect-relay",
     "test:exchange": "HOME=\"$(mktemp -d)\" bun test ./exchange/test",

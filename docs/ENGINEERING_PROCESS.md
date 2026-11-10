@@ -38,7 +38,13 @@ the scoped work in any harness. An issue is an inbox item, not authorization.
    build, lint, render, or smoke check. `bun test <files>` and
    `bun run test:focus -- <files>` are the normal loop. `bun run verify` and
    `bun run verify:full` remain available for uncertainty and release work;
-   neither is a push prerequisite.
+   neither is a push prerequisite. `verify:full` runs `bun run test`, which
+   builds once and runs every CI lane the way CI does
+   (`scripts/test-suite.ts`): fast with one process per file, connect-relay,
+   exchange, the four deploy shards and Go, one after another, exiting
+   non-zero if any lane fails. `--lanes=` picks lanes and `--dry-run` prints
+   the plan. Never run the whole tree as one `bun test`: files then share a
+   process, which CI never does, and leaked state fails or hangs the run.
 4. **Commit and push.** Stage only task files. Olympus owns no local Git hook:
    mutable clone/worktree configuration is not a trustworthy merge boundary,
    and no push should pay for a bypassable duplicate quality gate. Protected

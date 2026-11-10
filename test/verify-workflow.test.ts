@@ -15,6 +15,8 @@ describe('verification contract', () => {
     expect(pkg.scripts['test:go']).toBe('bun scripts/test-lane.ts go');
     expect(pkg.scripts.verify).toBe('bun run typecheck && bun run test:fast && bun run dist:check');
     expect(pkg.scripts['verify:full']).toBe('bun run typecheck && bun run test && bun run dist:check');
+    // `test` runs CI's lanes in their own processes, never one `bun test` over the tree (#1018).
+    expect(pkg.scripts.test).toBe('bun run build && bun scripts/test-suite.ts');
 
     expect(pkg.scripts['hooks:install']).toBeUndefined();
     expect(existsSync(join(ROOT, '.githooks'))).toBe(false);
