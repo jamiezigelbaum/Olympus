@@ -662,13 +662,13 @@ export const JOURNEYS: readonly Journey[] = [
     machine: 'restore-to',
     mutates: true,
     steps: [
-      { name: 'Stop Olympus', do: { run: { argv: ['worker', 'stop'] } }, expect: [{ exit: 0 }] },
+      { name: 'Stop Olympus', do: { run: { argv: ['engine', 'stop'], timeoutMs: 300_000 } }, expect: [{ exit: 0 }] },
       {
         name: 'Restore the backup',
         do: { run: { argv: ['data', 'restore', '--input', RESTORE_BACKUP_PATH, '--passphrase-stdin'], stdin: `${RESTORE_PASSPHRASE}\n`, timeoutMs: 600_000 } },
         expect: [{ exit: 0 }, { output: /readwise/i }],
       },
-      { name: 'Start Olympus', do: { run: { argv: ['worker', 'start'], timeoutMs: 300_000 } }, expect: [{ exit: 0 }] },
+      { name: 'Start Olympus', do: { run: { argv: ['engine', 'start'], timeoutMs: 300_000 } }, expect: [{ exit: 0 }] },
       { name: 'Open the dashboard', do: { open: 'dashboard' }, timeoutMs: 120_000, expect: [{ present: tab('Sources'), frame: 'host' }] },
       // The source is back; its sign-in never travels, so it asks for one again rather than syncing.
       { name: 'Press Sources: Readwise is back', do: { click: tab('Sources'), frame: 'host' }, expect: [{ url: /\/dashboard\?connect/ }, { text: 'Readwise', frame: 'host' }] },

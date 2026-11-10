@@ -253,6 +253,9 @@ describe('Terminal steps and the restore leg\'s journeys', () => {
     // The clean machine looks for the item fix-one-item changed on the first one, and the backup carries the passphrase in, never a flag.
     const restore = find('restore-clean-machine');
     expect(restore.steps.at(-1)!.name).toContain('the owner\'s decision came back');
+    // The engine owns the stores; the worker service commands are refused beside it.
+    const commands = restore.steps.flatMap((step) => ('run' in step.do ? [step.do.run.argv.slice(0, 2).join(' ')] : []));
+    expect(commands).toEqual(['engine stop', 'data restore', 'engine start']);
     for (const step of [...find('backup-for-restore').steps, ...restore.steps]) {
       if ('run' in step.do) expect(step.do.run.argv.join(' ')).not.toContain('passphrase for');
     }
