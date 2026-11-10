@@ -208,6 +208,8 @@ export function createRemoteMcpHandler(options: RemoteMcpHandlerOptions): (reque
           ...(ctx.releaseCheck ? { releaseCheck: ctx.releaseCheck } : {}),
           // The agent hanging up cancels its search, Private part included.
           signal: request.signal,
+          // The owner's list of what each AI app received (a demo grant's too: it is what left).
+          caller,
         })
         : undefined)));
     // No sessionIdGenerator: stateless mode.

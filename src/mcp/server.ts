@@ -1,4 +1,5 @@
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
+import { createReleaseCapture, recordRemoteOperation, runWithReleaseCapture } from '../core/app-release-capture.ts';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
 import {
@@ -119,11 +120,13 @@ async function handleRemoteCallTool(
   });
   try {
     const result = await runWithReleaseManifestSink(manifests, () => operation.handler(ctx, args));
-    const release = () => remoteOperationOutput(operation.name, result, {
+    // The output builders note what the agent receives (core/app-release-capture.ts).
+    const capture = createReleaseCapture();
+    const release = () => runWithReleaseCapture(capture, () => remoteOperationOutput(operation.name, result, {
       pendingPrivacyItems: ctx.pendingPrivacyItems?.(),
       ...(ctx.releaseCheck ? { releaseCheck: ctx.releaseCheck } : {}),
       releaseManifests: manifests.manifests,
-    });
+    }));
     const approved = release();
     // Settled against the release the agent would get (slice 2's recheck included).
     const privateMayAnswer = privatePart ? await privatePart.settle(result, approved) : false;
@@ -131,6 +134,7 @@ async function handleRemoteCallTool(
     // (to Secret, say) is caught by checking the release again right before
     // it leaves. The note follows the output that actually leaves.
     const output = privatePart ? release() : approved;
+    recordRemoteOperation({ operation: operation.name, args, caller: ctx.caller, output, capture, privateQuestion: privateMayAnswer ? privatePart?.answerRef : undefined });
     return { content: text(privateMayAnswer ? withRemotePrivateNote(output, privatePart?.answerId, privatePart?.secretMatch) : output) };
   } catch (error) {
     return { content: text(remoteErrorOutput(error, { declaredParams })), isError: true };

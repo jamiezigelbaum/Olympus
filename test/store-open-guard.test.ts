@@ -83,6 +83,7 @@ const ALLOWED: Record<string, string> = {
 const SHARED_FILES: Record<string, string> = {
   'src/core/source-watch.ts': 'the shared source-watches database',
   'src/core/waiting-private-questions.ts': 'the shared waiting private questions database',
+  'src/core/app-release-log.ts': 'the shared list of what each AI app received',
   'src/core/remote-connections.ts': 'the shared remote-connections database',
   'src/core/people-index.ts': 'the shared people index (#1076): who is who across sources, and the owner\'s corrections',
   'src/workers/source-dashboard.ts': 'the shared dashboard history database',

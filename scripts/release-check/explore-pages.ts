@@ -338,7 +338,8 @@ export async function explorePages(options: PagesOptions): Promise<PagesResult> 
   const pageList = options.pages ?? PAGES;
   const lastPageId = pageList[pageList.length - 1]?.id;
   // Lock ends the browser's session, so it is pressed once, after every other press: on the last page if that page offers it, or else
-  // in a final pass back on the first page that did (the last page, Build a connector, has no Lock).
+  // in a final pass back on the first page that did (the last page, Build a connector, holds the top bar's Lock only behind its open
+  // modal dialog, where a press cannot reach it).
   const passes: Array<{ page: PageDef; lockOnly: boolean }> = pageList.map((page) => ({ page, lockOnly: false }));
   let lockPage: PageDef | undefined;
   let lockPressed = false;
