@@ -246,6 +246,13 @@ describe('v0.4 positive public surface', () => {
     )?.[1];
     expect(rendered).toBe(renderPublicSourceCapabilitiesMarkdown());
 
+    // The README's source table names every public source (#1069).
+    const readme = readFileSync(join(ROOT, 'README.md'), 'utf8');
+    const readmeSources = readme.slice(readme.indexOf('## Supported sources'));
+    for (const source of V0_4_PUBLIC_SOURCE_CAPABILITIES) {
+      expect(readmeSources).toContain(`| ${source.label} |`);
+    }
+
     const dashboardSource = readFileSync(join(ROOT, 'src/workers/source-dashboard.ts'), 'utf8');
     expect(dashboardSource).toContain('renderPublicSourceCapabilityForDashboard');
     const doctorSource = readFileSync(join(ROOT, 'src/core/doctor.ts'), 'utf8');
