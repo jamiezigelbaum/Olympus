@@ -19548,6 +19548,7 @@ var init_tier_override_settle = __esm(() => {
   init_secrets_disposition();
   init_stored_names();
   init_tier_rejudge();
+  init_tier_rules_sweep();
 });
 
 // src/workers/connector-store/tier-rules-sweep.ts

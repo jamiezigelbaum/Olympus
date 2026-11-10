@@ -64316,17 +64316,14 @@ function restoreClearedOverride(set, record) {
   const stored = exported ? storedSignals(exported) : {};
   const matched = raising.filter((rule) => rule.match.kind !== "label" && ownerRuleMatches(rule, stored, record.provider));
   const labelRules = raising.filter((rule) => rule.match.kind === "label" && ownerRuleMatches(rule, { labels: [rule.match.value] }, record.provider));
-  const heldNow = maxTier(record.metadataTier, record.contentTier);
-  let ruleTier = matched.reduce((tier, rule) => maxTier(tier, rule.tier), "public");
-  for (const rule of labelRules)
-    ruleTier = maxTier(ruleTier, minTier(rule.tier, heldNow));
+  const ruleTier = matched.reduce((tier, rule) => maxTier(tier, rule.tier), "public");
   const metadataTier = maxTier(before.metadataTier, ruleTier);
   const contentTier = maxTier(before.contentTier, metadataTier);
   const byRule = tierRank(metadataTier) > tierRank(before.metadataTier);
   let ruleReasons = [];
   if (byRule) {
     const classified = classifyItemTiers({
-      signals: { ...stored, ...labelRules.length > 0 ? { labels: labelRules.map((rule) => rule.match.value) } : {} },
+      signals: stored,
       provider: record.provider,
       subject: identity2
     }, { rules: [...rules], ...classification.retirePublic ? { retirePublic: true } : {} });
@@ -64348,17 +64345,23 @@ function restoreClearedOverride(set, record) {
     snifferId: ""
   };
   const guard = { generation: record.generation, override: undefined };
+  const askProvider = () => {
+    if (labelRules.length > 0)
+      reopenLabelRuleSweep(ledger, record.provider, record.accountScope);
+  };
   if (metadataTier === "secrets") {
-    return exported !== undefined && settleRoutedSecrets(set, identity2, decision, exported, { findingKinds: ["owner_marked_secret"] }, { guard });
+    const settled = exported !== undefined && settleRoutedSecrets(set, identity2, decision, exported, { findingKinds: ["owner_marked_secret"] }, { guard });
+    if (settled)
+      askProvider();
+    return settled;
   }
   const recorded = ledger.recordRoutedPlacement(identity2, decision, set.placementFor(decision), {
     guard,
     staleCopiesGone: set.routedWithoutAnyCopy(identity2)
   });
+  if (recorded.outcome !== "unchanged")
+    askProvider();
   return recorded.outcome !== "unchanged";
-}
-function minTier(a, b) {
-  return tierRank(a) <= tierRank(b) ? a : b;
 }
 function applyOne(set, record, tier, retirePublic, report, guard) {
   const ledger = set.ledger;
@@ -64458,6 +64461,7 @@ var init_tier_override_settle = __esm(() => {
   init_secrets_disposition();
   init_stored_names();
   init_tier_rejudge();
+  init_tier_rules_sweep();
 });
 
 // src/workers/connector-store/tier-rules-sweep.ts
@@ -64720,6 +64724,14 @@ function readLabelState(raw) {
   } catch {
     return { done: [] };
   }
+}
+function reopenLabelRuleSweep(ledger, provider, accountScope) {
+  const metaKey = `${LABEL_SWEEP_META_KEY}:${provider}:${accountScope}`;
+  const written = ledger.readMeta(metaKey);
+  const state = readLabelState(written);
+  if (state.done.length === 0)
+    return;
+  ledger.writeMeta(metaKey, JSON.stringify({ ...state, done: [] }));
 }
 function isLabelRule(rule) {
   return rule.match.kind === "label";

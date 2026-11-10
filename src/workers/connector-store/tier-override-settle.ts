@@ -46,6 +46,7 @@ import type { SourceTrustDomain } from '../../core/source-index/types.ts';
 import { forgetSecretInSideStores, retireSecretRedactions, retrySecretSideStoreDebts, secretsDisposition } from './secrets-disposition.ts';
 import { storedCopyOf, storedSignals } from './stored-names.ts';
 import { settleRoutedSecrets } from './tier-rejudge.ts';
+import { reopenLabelRuleSweep } from './tier-rules-sweep.ts';
 import type { TieredStoreSet } from './tiered-store-set.ts';
 
 export interface TierOverrideSettleReport {
@@ -118,9 +119,10 @@ export function applyOwnerOverrides(options: {
  * what the owner's current rules ask for. A rule added while the override
  * stood skipped the item (tier-rules-sweep.ts leaves overridden items alone
  * and still counts itself done), so it is applied here, in the same write;
- * rules only raise. A label rule cannot be checked from what a store keeps:
- * wherever a raising label rule could apply to the item, it keeps the
- * protection it has now, up to that rule's tier. A raise hides first and a
+ * rules only raise. A label rule cannot be checked from what a store keeps, so
+ * none is assumed to match: the provider account's label rules are made
+ * pending again, and the next label sweep asks the provider whether the item
+ * carries the label and raises it if so. A raise hides first and a
  * lowering stays where it is until its move lands, as for any decision a
  * listing records. The write re-checks, in its own transaction, that no
  * override was set again and the generation is still the one read. An item
@@ -143,12 +145,11 @@ function restoreClearedOverride(set: TieredStoreSet, record: TierLedgerRecord): 
   if (!exported && copies.length > 0 && raising.length > 0) return false;
   const stored = exported ? storedSignals(exported) : {};
   const matched = raising.filter((rule) => rule.match.kind !== 'label' && ownerRuleMatches(rule, stored, record.provider));
-  // Label rules for this item's source: whether the item carries the label is not known here.
+  // Label rules for this item's source: whether the item carries the label is not known here,
+  // so the provider is asked again (below) rather than a match assumed.
   const labelRules = raising.filter((rule) => rule.match.kind === 'label'
     && ownerRuleMatches(rule, { labels: [rule.match.value] }, record.provider));
-  const heldNow = maxTier(record.metadataTier, record.contentTier);
-  let ruleTier: TierKey = matched.reduce<TierKey>((tier, rule) => maxTier(tier, rule.tier), 'public');
-  for (const rule of labelRules) ruleTier = maxTier(ruleTier, minTier(rule.tier, heldNow));
+  const ruleTier: TierKey = matched.reduce<TierKey>((tier, rule) => maxTier(tier, rule.tier), 'public');
   const metadataTier = maxTier(before.metadataTier, ruleTier);
   const contentTier = maxTier(before.contentTier, metadataTier);
   const byRule = tierRank(metadataTier) > tierRank(before.metadataTier);
@@ -157,7 +158,7 @@ function restoreClearedOverride(set: TieredStoreSet, record: TierLedgerRecord): 
     // The rules' reason codes exactly as a listing states them.
     const classified = classifyItemTiers(
       {
-        signals: { ...stored, ...(labelRules.length > 0 ? { labels: labelRules.map((rule) => rule.match.value) } : {}) },
+        signals: stored,
         provider: record.provider,
         subject: identity,
       },
@@ -185,19 +186,22 @@ function restoreClearedOverride(set: TieredStoreSet, record: TierLedgerRecord): 
     snifferId: '',
   };
   const guard = { generation: record.generation, override: undefined };
+  // The provider answers whether the item carries a label rule's label: the next label sweep asks it.
+  const askProvider = () => {
+    if (labelRules.length > 0) reopenLabelRuleSweep(ledger, record.provider, record.accountScope);
+  };
   if (metadataTier === 'secrets') {
-    return exported !== undefined
+    const settled = exported !== undefined
       && settleRoutedSecrets(set, identity, decision, exported, { findingKinds: ['owner_marked_secret'] }, { guard });
+    if (settled) askProvider();
+    return settled;
   }
   const recorded = ledger.recordRoutedPlacement(identity, decision, set.placementFor(decision), {
     guard,
     staleCopiesGone: set.routedWithoutAnyCopy(identity),
   });
+  if (recorded.outcome !== 'unchanged') askProvider();
   return recorded.outcome !== 'unchanged';
-}
-
-function minTier(a: TierKey, b: TierKey): TierKey {
-  return tierRank(a) <= tierRank(b) ? a : b;
 }
 
 function applyOne(
