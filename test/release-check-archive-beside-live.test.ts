@@ -12,7 +12,7 @@ import {
 } from '../scripts/release-check/archive-leg.ts';
 import { liveSeedHook, registerLiveSeedHook } from '../scripts/release-check/archive-live-seeds.ts';
 import '../scripts/release-check/archive-live-seed-hooks.ts';
-import { afterSourceDelete, searchWhenJudged, type ArchiveHost } from '../scripts/release-check/archive-stages.ts';
+import { afterSourceDelete, searchAfterDrain, searchWhenJudged, type ArchiveHost } from '../scripts/release-check/archive-stages.ts';
 
 const fx: LegFixture = {
   role: 'beside',
@@ -188,6 +188,51 @@ describe('the search beside a live input waits for the private model', () => {
     expect(world.calls()).toBe(7);
     expect(world.lines.at(-1)).toContain('NOT cited');
     expect(failing(good({ search }))).toEqual(['archive.beside.fixture_chat.search']);
+  });
+});
+
+// #1054: after the drain, a judged item can still be on its way out of Private; the engine then says it is still checking.
+describe('the search after an archive drains waits only while the engine says it is still checking', () => {
+  const NOTE = 'Olympus is still checking 3 new items for privacy before they can be searched. This can take a while on this computer.';
+  const host = (citedFrom: number, notes: boolean) => {
+    let clock = 0;
+    let calls = 0;
+    return {
+      calls: () => calls,
+      host: {
+        now: () => clock,
+        sleep: async (ms: number) => { clock += ms; },
+        say: () => {},
+        search: async () => {
+          calls += 1;
+          const cited = calls >= citedFrom;
+          return { ok: true, isError: false, structured: { evidence: cited ? [{ source: 'Fixture', excerpt: `the word ${fx.token}` }] : [], ...(notes && !cited ? { notes: [NOTE] } : {}) } };
+        },
+      } as unknown as Parameters<typeof searchAfterDrain>[0],
+    };
+  };
+  const cite = { ...fx, expect: { ...fx.expect, citationLabel: 'Fixture' } };
+
+  test('asked again while the result says items are still being checked, until cited', async () => {
+    const world = host(3, true);
+    const search = await searchAfterDrain(world.host, cite);
+    expect(world.calls()).toBe(3);
+    expect(failing(good({ search }))).toEqual([]);
+  });
+
+  test('an empty result that does not say so is judged at once', async () => {
+    const world = host(3, false);
+    const search = await searchAfterDrain(world.host, cite);
+    expect(world.calls()).toBe(1);
+    expect(failing(good({ search }))).toEqual(['archive.beside.fixture_chat.search']);
+  });
+
+  test('still checking past the bound fails, and the detail says what the engine said', async () => {
+    const world = host(Number.POSITIVE_INFINITY, true);
+    const search = await searchAfterDrain(world.host, cite);
+    expect(world.calls()).toBe(13);
+    const detail = besideLiveChecks(good({ search }), fx).find((check) => check.id === 'archive.beside.fixture_chat.search')?.detail;
+    expect(detail).toContain('still being checked for privacy');
   });
 });
 
