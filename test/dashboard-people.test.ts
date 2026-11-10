@@ -33,6 +33,20 @@ describe('People page (#1076)', () => {
     }
   });
 
+  test('a chat id shows as its phone number, a numeric mailbox as its address', () => {
+    const index = new LocalPeopleIndex({ dbPath: ':memory:' });
+    try {
+      index.rebuild([
+        { provider: 'whatsapp', senderId: '14155550123@s.whatsapp.net', senderLabel: 'Brianna Reyes', isOwner: false, itemCount: 3 },
+        { provider: 'gmail', senderId: '123456789@qq.com', senderLabel: 'Wei Zhang <123456789@qq.com>', isOwner: false, itemCount: 3 },
+      ]);
+      const chips = dashboardPeopleView(index).people.flatMap((person) => person.identities.map((chip) => [chip.source, chip.detail]));
+      expect(chips.sort()).toEqual([['Gmail', '123456789@qq.com'], ['WhatsApp', '+14155550123']]);
+    } finally {
+      index.close();
+    }
+  });
+
   test('without a local control session the page shows no one', () => {
     const index = new LocalPeopleIndex({ dbPath: ':memory:' });
     try {

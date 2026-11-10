@@ -113,7 +113,11 @@ function identityChip(identity: PeoplePerson['identities'][number]): DashboardPe
   const email = identity.keys.find((key) => key.startsWith('email:'))?.slice('email:'.length);
   const phone = identity.keys.find((key) => key.startsWith('phone:'))?.slice('phone:'.length);
   const handle = identity.senderLabel?.startsWith('@') ? identity.senderLabel : undefined;
-  const detail = handle ?? email ?? phone ?? identity.names[0] ?? identity.senderLabel ?? identity.senderId ?? '';
+  // An all-digit address is a phone number's chat id (14155550123@s.whatsapp.net)
+  // unless the sender showed it as their address (Wei <123456789@qq.com>).
+  const shownAddress = email !== undefined
+    && (!/^\d+@/.test(email) || (identity.senderLabel ?? '').toLowerCase().includes(email));
+  const detail = handle ?? (shownAddress ? email : phone ?? email) ?? identity.names[0] ?? identity.senderLabel ?? identity.senderId ?? '';
   return {
     identityKey: identity.identityKey,
     provider: identity.provider,
