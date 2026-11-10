@@ -31,7 +31,7 @@ function item(n: number, overrides: Partial<OwnerTierItem> = {}): OwnerTierItem 
   };
 }
 
-function fixture(items: OwnerTierItem[]) {
+function fixture(items: OwnerTierItem[], pick?: () => number) {
   const sets: OwnerTierItemSetInput[] = [];
   const engine: OwnerTierItems = {
     find: () => ({ items }),
@@ -45,7 +45,7 @@ function fixture(items: OwnerTierItem[]) {
   const check = createJudgeCheck({
     items: engine,
     get: (id) => ({ ...items.find((candidate) => candidate.item_id === id)!, preview: `Text of ${id}` }),
-    path, now: () => clock.date(), random,
+    path, now: () => clock.date(), random: pick ?? random,
   });
   return { check, sets, path };
 }
@@ -190,6 +190,40 @@ describe('a round', () => {
     // Counted as agreeing with the judge, and the item is set back to the owner's answer.
     expect(after.agreed).toBe(1);
     expect(sets).toEqual([{ itemId: id, choice: judge === 'Personal' ? 'personal' : 'private', allowLower: true }]);
+  });
+
+  test('an answer is applied when the owner\'s choice or a move is still waiting for its pass', () => {
+    for (const pending of [{ owner_choice: 'Personal' }, { moving_to: 'Personal' }]) {
+      const items = pool();
+      const { check, sets } = fixture(items);
+      const view = check.start();
+      const id = view.current!.item_id;
+      // Recorded Private, but becoming Personal at the next pass; the owner answers Private.
+      Object.assign(items.find((candidate) => candidate.item_id === id)!, { tier: 'Private' }, pending);
+      check.answer(id, 'Private');
+      expect(sets).toEqual([{ itemId: id, choice: 'private', allowLower: true }]);
+    }
+  });
+
+  test('a judge\'s label that moved the item is asked about once the move has landed', () => {
+    const items = [item(1, { decided_by: 'move' }), item(2, { decided_by: 'move', moving_to: 'Private' })];
+    const { check } = fixture(items);
+    const view = check.start();
+    expect(view.total).toBe(1);
+    expect(view.current!.item_id).toBe('oti_1');
+  });
+
+  test('the random picks come from the whole pool, the least sure included', () => {
+    // Always the first remaining item: the random picks are the least sure ones.
+    const { check, path } = fixture(pool(), () => 0);
+    check.start();
+    const stored = JSON.parse(readFileSync(path, 'utf8')) as { round: { items: Array<{ item_id: string; random?: boolean }> } };
+    const randomIds = stored.round.items.filter((entry) => entry.random).map((entry) => entry.item_id).sort();
+    expect(randomIds).toEqual(['oti_1', 'oti_2', 'oti_3']);
+    expect(stored.round.items).toHaveLength(JUDGE_CHECK_ROUND_SIZE);
+    // The rest of the round is the least sure after them.
+    expect(stored.round.items.filter((entry) => !entry.random).map((entry) => entry.item_id).sort())
+      .toEqual(['oti_10', 'oti_4', 'oti_5', 'oti_6', 'oti_7', 'oti_8', 'oti_9']);
   });
 
   test('putting it away keeps the answers, and it picks up where it stopped', () => {

@@ -167,10 +167,11 @@ export function judgeConfidence(reason: string | null): number {
 /**
  * Items the judge itself labelled, with its verdict recorded: not a default
  * still waiting for the judge, not the owner, not an owner rule, and not moving.
+ * A judge's label that moved the item counts once the move has landed.
  */
 function judged(item: OwnerTierItem): item is OwnerTierItem & { tier: JudgeLabel } {
   return (item.tier === 'Personal' || item.tier === 'Private')
-    && item.decided_by === 'sniffer'
+    && (item.decided_by === 'sniffer' || item.decided_by === 'move')
     && item.judge_reason !== null
     && !item.owner_set
     && item.moving_to === undefined;
@@ -274,13 +275,15 @@ export function createJudgeCheck(options: JudgeCheckOptions): JudgeCheck {
       const again = askedBefore.get(id);
       if (again) pool.push(again);
     }
-    const byDoubt = [...pool].sort((left, right) => judgeConfidence(left.judge_reason) - judgeConfidence(right.judge_reason));
-    const doubtful = byDoubt.slice(0, Math.max(0, JUDGE_CHECK_ROUND_SIZE - JUDGE_CHECK_RANDOM_PICKS));
-    const rest = byDoubt.slice(doubtful.length);
-    const picked: Array<{ item: OwnerTierItem & { tier: JudgeLabel }; random: boolean }> = doubtful.map((item) => ({ item, random: false }));
-    while (picked.length < JUDGE_CHECK_ROUND_SIZE && rest.length > 0) {
+    // The random picks first, from the whole pool, so the least sure items can be
+    // among them and the accuracy estimate is a fair sample; then the least sure.
+    const rest = [...pool];
+    const picked: Array<{ item: OwnerTierItem & { tier: JudgeLabel }; random: boolean }> = [];
+    while (picked.length < JUDGE_CHECK_RANDOM_PICKS && rest.length > 0) {
       picked.push({ item: rest.splice(Math.floor(random() * rest.length), 1)[0]!, random: true });
     }
+    const byDoubt = rest.sort((left, right) => judgeConfidence(left.judge_reason) - judgeConfidence(right.judge_reason));
+    for (const item of byDoubt.slice(0, JUDGE_CHECK_ROUND_SIZE - picked.length)) picked.push({ item, random: false });
     // Shuffled, so the least sure do not all come first.
     for (let index = picked.length - 1; index > 0; index -= 1) {
       const other = Math.floor(random() * (index + 1));
@@ -328,7 +331,9 @@ export function createJudgeCheck(options: JudgeCheckOptions): JudgeCheck {
       current.answer = answer;
       // Agreement is measured against the judge's label at the start; whether the answer needs
       // applying is decided by the item's label now, which the owner may have changed since.
-      const now = answer === 'not_sure' ? undefined : options.get(itemId)?.tier ?? current.judge;
+      // A choice or move still waiting for its pass counts as the label it is becoming.
+      const item = answer === 'not_sure' ? undefined : options.get(itemId);
+      const now = answer === 'not_sure' ? undefined : item?.owner_choice ?? item?.moving_to ?? item?.tier ?? current.judge;
       if (answer !== 'not_sure' && answer !== now) {
         const choice: OwnerItemChoice = answer === 'Personal' ? 'personal' : 'private';
         // The owner's answer settles this one item, on this computer.

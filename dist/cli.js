@@ -147662,7 +147662,7 @@ function judgeConfidence(reason) {
   return Number.isFinite(value2) && last.trim() !== "" ? value2 : 1;
 }
 function judged(item) {
-  return (item.tier === "Personal" || item.tier === "Private") && item.decided_by === "sniffer" && item.judge_reason !== null && !item.owner_set && item.moving_to === undefined;
+  return (item.tier === "Personal" || item.tier === "Private") && (item.decided_by === "sniffer" || item.decided_by === "move") && item.judge_reason !== null && !item.owner_set && item.moving_to === undefined;
 }
 function randomTally(items) {
   const compared = items.filter((item) => item.random && item.answer !== undefined && item.answer !== "not_sure");
@@ -147763,13 +147763,14 @@ function createJudgeCheck(options) {
       if (again)
         pool.push(again);
     }
-    const byDoubt = [...pool].sort((left, right) => judgeConfidence(left.judge_reason) - judgeConfidence(right.judge_reason));
-    const doubtful = byDoubt.slice(0, Math.max(0, JUDGE_CHECK_ROUND_SIZE - JUDGE_CHECK_RANDOM_PICKS));
-    const rest = byDoubt.slice(doubtful.length);
-    const picked = doubtful.map((item) => ({ item, random: false }));
-    while (picked.length < JUDGE_CHECK_ROUND_SIZE && rest.length > 0) {
+    const rest = [...pool];
+    const picked = [];
+    while (picked.length < JUDGE_CHECK_RANDOM_PICKS && rest.length > 0) {
       picked.push({ item: rest.splice(Math.floor(random() * rest.length), 1)[0], random: true });
     }
+    const byDoubt = rest.sort((left, right) => judgeConfidence(left.judge_reason) - judgeConfidence(right.judge_reason));
+    for (const item of byDoubt.slice(0, JUDGE_CHECK_ROUND_SIZE - picked.length))
+      picked.push({ item, random: false });
     for (let index = picked.length - 1;index > 0; index -= 1) {
       const other = Math.floor(random() * (index + 1));
       [picked[index], picked[other]] = [picked[other], picked[index]];
@@ -147808,12 +147809,13 @@ function createJudgeCheck(options) {
       const round = state.round;
       if (!round)
         throw new JudgeCheckError("no_round", "There is no round to answer. Start one first.");
-      const current2 = round.items.find((item) => item.answer === undefined);
+      const current2 = round.items.find((item2) => item2.answer === undefined);
       if (!current2 || current2.item_id !== itemId) {
         throw new JudgeCheckError("not_current", "That is not the item waiting for an answer.");
       }
       current2.answer = answer;
-      const now = answer === "not_sure" ? undefined : options.get(itemId)?.tier ?? current2.judge;
+      const item = answer === "not_sure" ? undefined : options.get(itemId);
+      const now = answer === "not_sure" ? undefined : item?.owner_choice ?? item?.moving_to ?? item?.tier ?? current2.judge;
       if (answer !== "not_sure" && answer !== now) {
         const choice = answer === "Personal" ? "personal" : "private";
         const result = options.items.set({ itemId, choice, allowLower: true });
