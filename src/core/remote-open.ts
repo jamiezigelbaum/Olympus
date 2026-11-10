@@ -165,8 +165,13 @@ export function resolveAgentApprovalHost(input: {
 /** How long the agent's tunnel stays up when nothing is using it (the link itself lasts 15 minutes). */
 export const REMOTE_TUNNEL_SECONDS = 1800;
 
-/** A minted opening link: loopback, a 43-character ticket, at most one target token. Nothing else is ever put on a command line. */
-const OPENING_LINK_PATTERN = /^http:\/\/(?:127\.0\.0\.1|localhost):\d{1,5}\/dashboard\/launch#olympus_launch_ticket=[A-Za-z0-9_-]{43}(?:&olympus_open=[a-z]+\.[a-z]+)?$/;
+/**
+ * A minted opening link: the tunnel's literal 127.0.0.1 origin (its port
+ * omitted only when it is HTTP's default, as URL origins write it), a
+ * 43-character ticket, at most one target token. Nothing else is ever put on
+ * a command line.
+ */
+const OPENING_LINK_PATTERN = /^http:\/\/127\.0\.0\.1(?::\d{1,5})?\/dashboard\/launch#olympus_launch_ticket=[A-Za-z0-9_-]{43}(?:&olympus_open=[a-z]+\.[a-z]+)?$/;
 
 export function isOpeningLinkForCommandLine(value: unknown): value is string {
   return typeof value === 'string' && OPENING_LINK_PATTERN.test(value);
