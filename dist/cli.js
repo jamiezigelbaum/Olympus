@@ -158877,8 +158877,10 @@ function standaloneDashboardControllerScript(input) {
         root: root,
         transport: {
           async openLocalControls() {
+            // The live session's CSRF token is the owner proof with the cookie (#1187).
             var response = await fetch('/dashboard/control/session/local', {
               method: 'POST', credentials: 'same-origin', cache: 'no-store',
+              headers: { 'X-Olympus-CSRF': csrfToken },
             });
             // The local session is a new one: later requests carry its CSRF token, not the launch session's,
             // and the poll expects the server's marker for it, so it does not reload the page.
@@ -159058,7 +159060,10 @@ function withWorkerBearerAuth(fetchHandler, options) {
         return dashboardControlForbiddenResponse("origin_mismatch");
       if (!requestFromOwnerSocket(request) && (options.requireOwnerSocket || !isLoopbackAddress(requestPeerAddress(request))))
         return dashboardControlForbiddenResponse("origin_mismatch");
-      if (!hasOwnerControlSession(request, sessionSecret, now()))
+      const owner2 = authorizeDashboardControlSession(request, sessionSecret, now(), true);
+      if (owner2.status === "origin_mismatch" || owner2.status === "csrf_mismatch")
+        return dashboardControlForbiddenResponse(owner2.status);
+      if (owner2.status !== "allowed")
         return unauthorizedWorkerResponse();
       const minted = mintDashboardControlSession(sessionSecret, origin, now(), "local");
       return dashboardControlSessionResponse(minted.sessionId, minted.csrfToken, minted.expiresAtMs, now());
@@ -159249,9 +159254,6 @@ function dashboardLaunchRefusedResponse(status) {
 }
 function isDashboardLocalControlSessionRequest(request) {
   return request.method === "POST" && new URL(request.url).pathname === DASHBOARD_LOCAL_CONTROL_SESSION_PATH;
-}
-function hasOwnerControlSession(request, sessionSecret, nowMs) {
-  return authorizeDashboardControlSession(request, sessionSecret, nowMs, false).status === "allowed";
 }
 function isLoopbackOrigin(origin) {
   try {
@@ -167537,7 +167539,7 @@ function outsideHelpClientScript(config2) {
     var response;
     try {
       response = await fetch(path, body === null
-        ? { method: 'POST', credentials: 'same-origin', cache: 'no-store' }
+        ? { method: 'POST', credentials: 'same-origin', cache: 'no-store', headers: { 'X-Olympus-CSRF': config.csrfToken } }
         : {
           method: 'POST', credentials: 'same-origin', cache: 'no-store',
           headers: { 'X-Olympus-CSRF': config.csrfToken, 'Content-Type': 'application/json' },
@@ -167565,8 +167567,8 @@ function outsideHelpClientScript(config2) {
       }
       message(form, config.copy.saving, false);
       try {
-        // The local unlock presents no credential at all: the boundary wants a
-        // loopback browser and nothing else. Every other form carries the CSRF token.
+        // The local unlock sends no body and no bearer, only the live session's
+        // CSRF token (#1187). Every other form carries the CSRF token and a body.
         var body = kind === 'unlock' ? null : bodyFor(form, kind, event.submitter);
         var outcome = await send(paths[kind], body);
         if (!outcome.ok) return fail(outcome.text);
@@ -167767,7 +167769,7 @@ function updateNoticeProgram(config2) {
     if (local && csrf)
       return false;
     try {
-      const response = await fetch(config2.localSessionPath, { method: "POST", cache: "no-store", credentials: "same-origin" });
+      const response = await fetch(config2.localSessionPath, { method: "POST", cache: "no-store", credentials: "same-origin", headers: { "X-Olympus-CSRF": csrf } });
       const body = response.ok ? await response.json() : undefined;
       if (body && typeof body.csrf_token === "string" && body.csrf_token) {
         csrf = body.csrf_token;
@@ -168770,7 +168772,7 @@ function hostProgram(input, bridge, mount) {
   function localUnlock(name) {
     if (localSession || input.localTools.indexOf(name) < 0)
       return Promise.resolve();
-    return fetch(input.localSessionPath, { method: "POST", cache: "no-store", credentials: "same-origin" }).then((response) => response.ok ? response.json() : undefined).then((body) => {
+    return fetch(input.localSessionPath, { method: "POST", cache: "no-store", credentials: "same-origin", headers: { "X-Olympus-CSRF": csrfToken } }).then((response) => response.ok ? response.json() : undefined).then((body) => {
       if (body && typeof body.csrf_token === "string" && body.csrf_token) {
         csrfToken = body.csrf_token;
         localSession = true;
@@ -168899,7 +168901,7 @@ function hostProgram(input, bridge, mount) {
       landing = { sourceId: input.allSourcesLanding.id };
   }
   function openLocalSession() {
-    return fetch(input.localSessionPath, { method: "POST", cache: "no-store", credentials: "same-origin" }).then((response) => response.ok ? response.json() : undefined).then((body) => {
+    return fetch(input.localSessionPath, { method: "POST", cache: "no-store", credentials: "same-origin", headers: { "X-Olympus-CSRF": csrfToken } }).then((response) => response.ok ? response.json() : undefined).then((body) => {
       if (body && typeof body.csrf_token === "string" && body.csrf_token) {
         csrfToken = body.csrf_token;
         localSession = true;
@@ -172217,7 +172219,7 @@ function renderPrivateAnswersBody(options) {
     notes.push(`<p class="pnote" data-pa-locked>${escapeHtml(DASHBOARD_PRIVATE_ANSWERS_COPY.locked)} <a href="${escapeHtml(gate)}">${escapeHtml(DASHBOARD_PRIVATE_ANSWERS_COPY.openControls)}</a></p>`);
   } else if (!localSession) {
     notes.push(`<form class="paunlock" data-pa-unlock>` + `<button type="submit" class="btn primary">${escapeHtml(DASHBOARD_PRIVATE_ANSWERS_COPY.unlock)}</button><span class="hint">${escapeHtml(DASHBOARD_PRIVATE_ANSWERS_COPY.unlockIntro)}</span>` + `<span class="pamsg" data-pa-msg role="status"></span></form>`);
-    script2 = `<script>${privateAnswersClientScript({ csrfToken: "", unlockOnly: true })}</script>`;
+    script2 = `<script>${privateAnswersClientScript({ csrfToken, unlockOnly: true })}</script>`;
   } else if (options?.privateAnswers?.available !== true) {
     notes.push(`<p class="pnote" data-pa-unavailable>${escapeHtml(DASHBOARD_PRIVATE_ANSWERS_COPY.unavailable)}</p>`);
   } else {
@@ -172352,7 +172354,7 @@ function privateAnswersClientScript(input) {
       event.preventDefault();
       var button = unlock.querySelector('button');
       if (button) button.disabled = true;
-      fetch(config.unlockPath, { method: 'POST', credentials: 'same-origin', cache: 'no-store' }).then(function (response) {
+      fetch(config.unlockPath, { method: 'POST', credentials: 'same-origin', cache: 'no-store', headers: { 'X-Olympus-CSRF': config.csrfToken } }).then(function (response) {
         if (response.ok) { window.location.reload(); return; }
         var msg = unlock.querySelector('[data-pa-msg]');
         if (msg) { msg.textContent = config.copy.failed; msg.setAttribute('data-state', 'error'); }
@@ -173705,7 +173707,7 @@ function renderBody(options) {
     return `<div class="privacy ar" data-apps-received>${head}<p class="pnote" data-ar-locked>${escapeHtml(DASHBOARD_APPS_RECEIVED_COPY.locked)} <a href="${escapeHtml(gate)}">${escapeHtml(DASHBOARD_APPS_RECEIVED_COPY.openControls)}</a></p></div>`;
   }
   if (!local) {
-    return `<div class="privacy ar" data-apps-received>${head}<form class="arunlock" data-ar-unlock>` + `<button type="submit" class="btn primary">${escapeHtml(DASHBOARD_APPS_RECEIVED_COPY.unlock)}</button><span class="hint">${escapeHtml(DASHBOARD_APPS_RECEIVED_COPY.unlockIntro)}</span>` + `<span class="armsg" data-ar-msg role="status"></span></form></div>` + `<script>${clientScript("", true)}</script>`;
+    return `<div class="privacy ar" data-apps-received>${head}<form class="arunlock" data-ar-unlock>` + `<button type="submit" class="btn primary">${escapeHtml(DASHBOARD_APPS_RECEIVED_COPY.unlock)}</button><span class="hint">${escapeHtml(DASHBOARD_APPS_RECEIVED_COPY.unlockIntro)}</span>` + `<span class="armsg" data-ar-msg role="status"></span></form></div>` + `<script>${clientScript(csrfToken, true)}</script>`;
   }
   if (options?.appsReceivedAvailable !== true) {
     return `<div class="privacy ar" data-apps-received>${head}<p class="pnote" data-ar-unavailable>${escapeHtml(DASHBOARD_APPS_RECEIVED_COPY.unavailable)}</p></div>`;
@@ -173727,7 +173729,7 @@ function clientScript(csrfToken, unlockOnly) {
     event.preventDefault();
     var button = unlock.querySelector('button');
     if (button) button.disabled = true;
-    fetch(config.unlockPath, { method: 'POST', credentials: 'same-origin', cache: 'no-store' }).then(function (response) {
+    fetch(config.unlockPath, { method: 'POST', credentials: 'same-origin', cache: 'no-store', headers: { 'X-Olympus-CSRF': config.csrfToken } }).then(function (response) {
       if (response.ok) { window.location.reload(); return; }
       say(copy.failed, true); if (button) button.disabled = false;
     }, function () { say(copy.unreachable, true); if (button) button.disabled = false; });

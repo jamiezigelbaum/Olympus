@@ -1061,7 +1061,7 @@ export function outsideHelpClientScript(config: { csrfToken: string; paths: type
     var response;
     try {
       response = await fetch(path, body === null
-        ? { method: 'POST', credentials: 'same-origin', cache: 'no-store' }
+        ? { method: 'POST', credentials: 'same-origin', cache: 'no-store', headers: { 'X-Olympus-CSRF': config.csrfToken } }
         : {
           method: 'POST', credentials: 'same-origin', cache: 'no-store',
           headers: { 'X-Olympus-CSRF': config.csrfToken, 'Content-Type': 'application/json' },
@@ -1089,8 +1089,8 @@ export function outsideHelpClientScript(config: { csrfToken: string; paths: type
       }
       message(form, config.copy.saving, false);
       try {
-        // The local unlock presents no credential at all: the boundary wants a
-        // loopback browser and nothing else. Every other form carries the CSRF token.
+        // The local unlock sends no body and no bearer, only the live session's
+        // CSRF token (#1187). Every other form carries the CSRF token and a body.
         var body = kind === 'unlock' ? null : bodyFor(form, kind, event.submitter);
         var outcome = await send(paths[kind], body);
         if (!outcome.ok) return fail(outcome.text);

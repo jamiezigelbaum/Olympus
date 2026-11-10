@@ -980,8 +980,10 @@ export function standaloneDashboardControllerScript(
         root: root,
         transport: {
           async openLocalControls() {
+            // The live session's CSRF token is the owner proof with the cookie (#1187).
             var response = await fetch('/dashboard/control/session/local', {
               method: 'POST', credentials: 'same-origin', cache: 'no-store',
+              headers: { 'X-Olympus-CSRF': csrfToken },
             });
             // The local session is a new one: later requests carry its CSRF token, not the launch session's,
             // and the poll expects the server's marker for it, so it does not reload the page.

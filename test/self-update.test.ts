@@ -438,7 +438,7 @@ describe('the notice on Home and Settings', () => {
     try {
       (before.window.document.querySelector('[data-update-now]') as unknown as HTMLButtonElement).click();
       await waitFor(() => before.reloads() === 1, { description: 'reload after the new session' });
-      expect(calls).toEqual([{ url: DASHBOARD_LOCAL_CONTROL_SESSION_PATH, csrf: null }]);
+      expect(calls).toEqual([{ url: DASHBOARD_LOCAL_CONTROL_SESSION_PATH, csrf: 'bearer-c' }]);
       // The one-shot mark rides on the address's fragment, never in browser storage.
       expect(before.window.location.hash).toBe('#olympus-update-now');
       // A launch token in the address is dropped, so the reload takes the new local session.
