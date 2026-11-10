@@ -267,6 +267,8 @@ function legacyWhatsAppCaptureState(account: AccountFilesAccount, env: LayoutEnv
     env.OLYMPUS_WHATSAPP_LIVE_DRAIN_SPOOL_DIR?.trim() || join(stateDir, 'spool'),
     ...pairing,
     join(stateDir, 'media'),
+    // Pairing history kept for capture (tools/whatsapp-bridge/history_sync.go).
+    join(stateDir, 'history-pending'),
     ...(transcribeMediaDir ? [transcribeMediaDir] : []),
   ];
 }

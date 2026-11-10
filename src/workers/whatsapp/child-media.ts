@@ -2,12 +2,18 @@
 // video the bridge saved (`whatsapp-media-file:v1:<path>`, read only from the
 // account's media folders), or a file an imported export carries
 // (archive-import/input-media.ts). One reader for both, so the connector's
-// `fetchItem` and the extraction source read children the same way.
+// `fetchItem` and extraction read children the same way. Extraction reads
+// them through the shared connector adapter (file-extraction/connector-source.ts)
+// over `whatsAppChildConnector`, as Gmail's attachments are read.
 
 import { closeSync, constants, fstatSync, openSync, readSync, realpathSync, rmSync, statSync } from 'node:fs';
-import { isAbsolute, relative, resolve } from 'node:path';
+import { isAbsolute, join, relative, resolve } from 'node:path';
+import type { RawItem, SourceConnectorFetchOptions, SourceConnectorListPage } from '../../core/contracts.ts';
+import { CHILD_ITEM_ID_SEPARATOR } from '../../core/child-item-id.ts';
 import { FileExtractionSourceError } from '../../core/file-extraction-source.ts';
 import { copyArchiveInputMediaToFile, parseArchiveInputMedia, readArchiveInputMedia, writeFully, type ArchiveInputMediaDeps } from '../archive-import/input-media.ts';
+import type { BoundedFetchConnector, FileFetchConnector } from '../file-extraction/connector-source.ts';
+import { discardExtractionSpoolFile, extractionSpoolFileName, makeExtractionSpoolOwnerDir } from '../file-extraction/spool.ts';
 
 export const WHATSAPP_MEDIA_FILE_LOCATOR_PREFIX = 'whatsapp-media-file:v1:';
 /** The most one read returns when the caller names no limit. */
@@ -160,4 +166,65 @@ function readBounded(fd: number, maxBytes: number): Uint8Array {
     chunks.push(Buffer.from(chunk.subarray(0, read)));
   }
   return Buffer.concat(chunks, total);
+}
+
+/** The id of the connector extraction reads WhatsApp's children through. */
+export const WHATSAPP_CHILD_CONNECTOR_ID = 'whatsapp.children';
+
+/**
+ * The connector extraction reads an account's children through, over its one
+ * child reader: a child only, by the locator the store keeps for it (handed in
+ * as `deferredBytes`), within the caller's bound, in memory or streamed to a
+ * file. It never lists (the inputs did), and a message or a voice note is
+ * never read here.
+ */
+export function whatsAppChildConnector(input: { account: string; readChild: WhatsAppChildReader }): BoundedFetchConnector & FileFetchConnector {
+  const childLocator = (localItemId: string, deferred: { locator: string } | undefined): string => {
+    if (!deferred?.locator || !localItemId.includes(CHILD_ITEM_ID_SEPARATOR)) throw new FileExtractionSourceError('source_content_unavailable');
+    return deferred.locator;
+  };
+  const item = (localItemId: string, bytes: Uint8Array): RawItem => {
+    // The bytes' own type is not known here: the child's row says what it is.
+    const mimeType = 'application/octet-stream';
+    const providerItemId = localItemId.startsWith(`${input.account}:`) ? localItemId.slice(input.account.length + 1) : localItemId;
+    return {
+      identity: { family: 'chat', provider: 'whatsapp', accountScope: input.account, providerItemId, localItemId },
+      mimeType,
+      content: { kind: 'bytes', mimeType, bytes },
+      metadata: {},
+      fetchedAt: new Date().toISOString(),
+    };
+  };
+  const within = async (localItemId: string, options: { maxBytes?: number; deferredBytes?: { locator: string } }): Promise<RawItem> => {
+    const locator = childLocator(localItemId, options.deferredBytes);
+    return item(localItemId, input.readChild(locator, options.maxBytes !== undefined ? { maxBytes: options.maxBytes } : {}));
+  };
+  return {
+    id: WHATSAPP_CHILD_CONNECTOR_ID,
+    family: 'chat',
+    async authenticate(): Promise<void> {},
+    // Extraction never lists: the inputs did.
+    async *listItems(): AsyncIterable<SourceConnectorListPage> {},
+    fetchItem: (localItemId: string, options?: SourceConnectorFetchOptions) => within(localItemId, options?.deferredBytes ? { deferredBytes: options.deferredBytes } : {}),
+    fetchItemWithin: within,
+    // A long video is copied a chunk at a time into the runner's spool, never held whole in memory.
+    async fetchItemToFile(localItemId, options) {
+      const locator = childLocator(localItemId, options.deferredBytes);
+      makeExtractionSpoolOwnerDir(options.spoolDir, options.spoolAnchor);
+      const path = join(options.spoolDir, extractionSpoolFileName());
+      let sizeBytes: number;
+      try {
+        sizeBytes = input.readChild.toFile(locator, options.maxBytes !== undefined ? { maxBytes: options.maxBytes } : {}, path);
+      } catch (error) {
+        discardExtractionSpoolFile(path, options.spoolDir);
+        throw error;
+      }
+      if (options.stillServed && !options.stillServed()) {
+        discardExtractionSpoolFile(path, options.spoolDir);
+        throw new FileExtractionSourceError('source_item_not_found');
+      }
+      return { item: item(localItemId, new Uint8Array(0)), path, spooled: true, sizeBytes };
+    },
+    classificationSignals: () => ({}),
+  };
 }

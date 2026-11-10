@@ -678,13 +678,20 @@ function isDashboardMessagingRoute(request: Request): boolean {
   return request.method === 'POST' && DASHBOARD_MESSAGING_PATHS.includes(new URL(request.url).pathname);
 }
 
+/** People (#1076): the people list is Private, so only a local-grade control session changes it. */
+export const DASHBOARD_PEOPLE_PATH = '/dashboard/people';
+
+function isDashboardPeopleRoute(request: Request): boolean {
+  return request.method === 'POST' && new URL(request.url).pathname === DASHBOARD_PEOPLE_PATH;
+}
+
 function isDashboardArchiveImportLocalRoute(request: Request): boolean {
   return request.method === 'POST' && DASHBOARD_ARCHIVE_IMPORT_LOCAL_PATHS.includes(new URL(request.url).pathname);
 }
 
 /** Routes only a local-grade control session reaches: Outside help, Private answers, and archive approvals. */
 function isDashboardLocalGradeRoute(request: Request): boolean {
-  return isDashboardConsultControlRoute(request) || isDashboardPrivateAnswersRoute(request) || isDashboardAppsReceivedRoute(request) || isDashboardArchiveImportLocalRoute(request) || isDashboardMessagingRoute(request)
+  return isDashboardConsultControlRoute(request) || isDashboardPrivateAnswersRoute(request) || isDashboardAppsReceivedRoute(request) || isDashboardArchiveImportLocalRoute(request) || isDashboardMessagingRoute(request) || isDashboardPeopleRoute(request)
     || (request.method === 'POST' && (DASHBOARD_BACKUP_PATHS as readonly string[]).includes(new URL(request.url).pathname))
     || isDashboardSelfUpdateRoute(request)
     || isDashboardPrivacyItemRoute(request)
@@ -704,7 +711,7 @@ function dashboardLocalGradeRefusal(request: Request): Response {
     });
   }
   if (!isDashboardPrivateAnswersRoute(request) && !isDashboardArchiveImportLocalRoute(request) && !isDashboardAppsReceivedRoute(request)
-    && !isDashboardPrivacyItemRoute(request)) return dashboardConsultMacOnlyResponse();
+    && !isDashboardPrivacyItemRoute(request) && !isDashboardPeopleRoute(request)) return dashboardConsultMacOnlyResponse();
   return new Response(JSON.stringify({
     ok: false,
     error: {
@@ -715,6 +722,8 @@ function dashboardLocalGradeRefusal(request: Request): Response {
           ? 'One item\'s privacy label is changed only in the dashboard on this computer, in an unlocked browser.'
           : isDashboardAppsReceivedRoute(request)
             ? 'What AI apps received opens only in the dashboard on this computer, in an unlocked browser.'
+            : isDashboardPeopleRoute(request)
+              ? 'People opens only in the dashboard on this computer, in an unlocked browser.'
           : 'Private answers open only in the dashboard on this computer, in an unlocked browser.',
     },
   }), {

@@ -127,8 +127,16 @@ export function senderAddress(from: string | undefined): Address | undefined {
  */
 function everyAddressIn(from: string | undefined): Address[] {
   if (!from) return [];
-  const text = from.slice(0, MAX_FROM_HEADER_CHARS);
-  const found: Address[] = [];
+  return addressSpansIn(from.slice(0, MAX_FROM_HEADER_CHARS)).map(({ address, domain }) => ({ address, domain }));
+}
+
+/**
+ * Every plain `local@domain` in `text` with where it sits: the same linear
+ * tokenizer as the From-header rules, so the whole local part counts
+ * (`o'brien@example.com`, not `brien@example.com`). The caller bounds `text`.
+ */
+export function addressSpansIn(text: string): Array<Address & { local: string; start: number; end: number }> {
+  const found: Array<Address & { local: string; start: number; end: number }> = [];
   for (let at = text.indexOf('@'); at >= 0; at = text.indexOf('@', at + 1)) {
     let start = at;
     while (start > 0 && LOCAL_CHAR.test(text[start - 1]!)) start -= 1;
@@ -136,7 +144,9 @@ function everyAddressIn(from: string | undefined): Address[] {
     while (end < text.length && DOMAIN_CHAR.test(text[end]!)) end += 1;
     if (start === at) continue;
     const domain = validDomain(text.slice(at + 1, end));
-    if (domain) found.push({ address: `${text.slice(start, at).toLowerCase()}@${domain}`, domain });
+    if (!domain) continue;
+    const local = text.slice(start, at).toLowerCase();
+    found.push({ address: `${local}@${domain}`, domain, local, start, end: at + 1 + domain.length });
   }
   return found;
 }

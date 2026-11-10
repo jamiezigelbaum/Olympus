@@ -2076,3 +2076,29 @@ test('dashboard --port: parsed strictly, and refused where the worker is not rea
     expect((error as Error).message).toContain('not reached through an SSH socket');
   } finally { env.restore(); rmSync(home, { recursive: true, force: true }); }
 });
+
+test('behind the owner socket, a manual link names the 127.0.0.1 tunnel origin even when the engine is configured as localhost (#1211)', async () => {
+  if (process.platform !== 'linux') return;
+  const dir = mkdtempSync(join(tmpdir(), 'manual-origin-'));
+  const server = createServer(() => undefined);
+  const socket = join(dir, 'olympus', 'worker.sock');
+  mkdirSync(join(dir, 'olympus'), { mode: 0o700 });
+  await new Promise<void>((resolve) => server.listen(socket, resolve));
+  chmodSync(socket, 0o600);
+  const env = withTemporaryEnv({ HOME: dir, XDG_RUNTIME_DIR: dir, OLYMPUS_CONFIG: join(dir, 'missing.json'), OLYMPUS_EMAIL_BASE_URL: 'http://localhost:8010/v1', OLYMPUS_WORKER_AUTH_TOKEN: 'fixture-worker-token' });
+  try {
+    const sent: Array<{ url: string; origin: string | null }> = [];
+    const result = await runDashboardCommand({ platform: 'linux', noOpen: true, openImpl: () => { throw new Error('must not open'); },
+      fetchImpl: async (input, init) => {
+        sent.push({ url: String(input), origin: new Headers(init?.headers).get('Origin') });
+        return Response.json({ ticket: 'A'.repeat(43) });
+      } });
+    expect(sent).toEqual([{ url: 'http://127.0.0.1:8010/dashboard/control/launch', origin: 'http://127.0.0.1:8010' }]);
+    expect(new URL(result.url).origin).toBe('http://127.0.0.1:8010');
+    expect(result.hint).toContain(`-L 127.0.0.1:8010:${socket}`);
+  } finally {
+    env.restore();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

@@ -51,6 +51,14 @@ from Reflect as JSON or Markdown, or from Roam as JSON. Each note is judged on
 its own, like mail, and a note or page with nothing written in it is left out
 and counted. For a notes archive the counts are notes.
 
+AI conversation exports work too: a ChatGPT data export (the `.zip` from
+Settings, Data controls, Export data) or a Claude data export (the `.zip` from
+Settings, Privacy, Export data), or the `conversations.json` inside either.
+Each conversation becomes one item with its title, dates and the turns as they
+were shown (the user's prompts and the assistant's replies); pictures and
+attached files are not imported. Each conversation is judged on its own, like
+mail.
+
 ## The rule
 
 `archive_import` only asks. The user approves every import and every removal on
