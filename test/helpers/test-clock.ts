@@ -28,6 +28,10 @@ export interface TestClock {
   setTimeout(callback: () => void, ms?: number): TestTimer;
   /** Cancels a timer from `setTimeout`. Pass as a `clearTimeout` seam. */
   clearTimeout(timer: TestTimer | undefined): void;
+  /** Calls `callback` every `ms` of fake time until cleared. Pass as a `setInterval` seam. */
+  setInterval(callback: () => void, ms?: number): TestTimer;
+  /** Cancels a timer from `setInterval`. Pass as a `clearInterval` seam. */
+  clearInterval(timer: TestTimer | undefined): void;
   /**
    * Moves time forward by `ms`, firing every timer that falls due in order of
    * its due time. Promise callbacks queued by each timer run before the next
@@ -56,6 +60,8 @@ interface Scheduled {
   timer: TestTimer;
   callback: () => void;
   order: number;
+  /** Set for an interval: the gap before it fires again. */
+  every?: number;
 }
 
 export const DEFAULT_TEST_CLOCK_START = Date.UTC(2026, 0, 1, 12, 0, 0);
@@ -71,9 +77,7 @@ export function createTestClock(startMs: number = DEFAULT_TEST_CLOCK_START): Tes
   let order = 0;
   const scheduled = new Map<number, Scheduled>();
 
-  const makeTimer = (dueAt: number): TestTimer => {
-    const id = nextId;
-    nextId += 1;
+  const makeTimer = (dueAt: number, id = nextId++): TestTimer => {
     let referenced = true;
     const timer: TestTimer = {
       id,
@@ -101,6 +105,13 @@ export function createTestClock(startMs: number = DEFAULT_TEST_CLOCK_START): Tes
   const fire = async (entry: Scheduled): Promise<void> => {
     scheduled.delete(entry.timer.id);
     current = Math.max(current, entry.timer.dueAt);
+    if (entry.every !== undefined) {
+      // Same id, so clearInterval from inside the callback still cancels it.
+      order += 1;
+      const next = makeTimer(current + entry.every, entry.timer.id);
+      if (!entry.timer.hasRef()) next.unref();
+      scheduled.set(next.id, { ...entry, timer: next, order });
+    }
     entry.callback();
     await flushMicrotasks();
   };
@@ -119,6 +130,17 @@ export function createTestClock(startMs: number = DEFAULT_TEST_CLOCK_START): Tes
       return timer;
     },
     clearTimeout: (timer) => {
+      if (timer) scheduled.delete(timer.id);
+    },
+    setInterval: (callback, ms = 0) => {
+      // A zero interval would never let time move; real timers clamp it too.
+      const every = Number.isFinite(ms) && ms >= 1 ? ms : 1;
+      const timer = makeTimer(current + every);
+      order += 1;
+      scheduled.set(timer.id, { timer, callback, order, every });
+      return timer;
+    },
+    clearInterval: (timer) => {
       if (timer) scheduled.delete(timer.id);
     },
     advance: async (ms) => {
@@ -154,6 +176,7 @@ export interface WaitForOptions {
 export const WAIT_FOR_DEFAULT_TIMEOUT_MS = 20_000;
 
 const realSetTimeout = globalThis.setTimeout.bind(globalThis);
+const EXPIRED: unique symbol = Symbol('waitFor expired');
 
 function pause(ms: number): Promise<void> {
   return new Promise<void>((resolvePause) => { realSetTimeout(resolvePause, ms); });
@@ -170,24 +193,41 @@ export async function waitFor<T>(
 ): Promise<NonNullable<T>> {
   const timeoutMs = options.timeoutMs ?? WAIT_FOR_DEFAULT_TIMEOUT_MS;
   const intervalMs = options.intervalMs ?? 10;
-  const started = performance.now();
+  const deadline = performance.now() + timeoutMs;
   let lastError: unknown;
   let lastValue: unknown;
+  let expired = false;
   for (;;) {
+    // A check that never settles (a reply that never comes) must not outlast
+    // the ceiling, and a value that arrives after it does not count.
+    const remaining = Math.max(0, deadline - performance.now());
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const ceiling = new Promise<typeof EXPIRED>((resolveCeiling) => {
+      timer = realSetTimeout(() => resolveCeiling(EXPIRED), remaining);
+    });
     try {
-      const value = await condition();
-      if (value) return value as NonNullable<T>;
-      lastValue = value;
-      lastError = undefined;
+      const value = await Promise.race([Promise.resolve().then(condition), ceiling]);
+      if (value === EXPIRED) {
+        expired = true;
+      } else if (value) {
+        return value as NonNullable<T>;
+      } else {
+        lastValue = value;
+        lastError = undefined;
+      }
     } catch (error) {
       lastError = error;
+    } finally {
+      clearTimeout(timer);
     }
-    if (performance.now() - started >= timeoutMs) break;
-    await pause(intervalMs);
+    if (expired || performance.now() >= deadline) break;
+    await pause(Math.min(intervalMs, Math.max(0, deadline - performance.now())));
   }
   const what = options.description ?? 'condition';
-  const detail = lastError instanceof Error
-    ? `last error: ${lastError.message}`
-    : `last value: ${String(lastValue)}`;
+  const detail = expired
+    ? 'the last check was still running'
+    : lastError instanceof Error
+      ? `last error: ${lastError.message}`
+      : `last value: ${String(lastValue)}`;
   throw new Error(`waitFor: ${what} did not hold within ${timeoutMs} ms (${detail})`);
 }

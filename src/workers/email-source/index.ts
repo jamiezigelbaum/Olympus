@@ -1009,6 +1009,16 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
     withMessagingCapturePaused: sourceDashboard.withMessagingCapturePaused,
     withGrantMutation: withDashboardGrantMutation,
   }) : undefined;
+  /**
+   * A confirmed Disconnect, Unpair or Delete indexed data of a chat source stops its pairing before taking the grant lock (the
+   * pairing may itself wait for that lock), and no new pairing can start until the operation is done (#689).
+   */
+  const withMessagingPairingHeld = <T>(record: Record<string, unknown>, operation: () => Promise<T>): Promise<T> => {
+    const source = record.acknowledge !== true ? undefined
+      : record.source_id === 'telegram.messages' ? 'telegram' as const
+        : record.source_id === 'whatsapp.personal.messages' ? 'whatsapp' as const : undefined;
+    return source && dashboardMessaging ? dashboardMessaging.withPairingHeld(source, operation) : operation();
+  };
   const basePath = normalizeBasePath(options.basePath ?? '/v1');
 
   return {
@@ -2546,11 +2556,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
 
         if (request.method === 'POST' && url.pathname === '/dashboard/disconnect') {
           const disconnectRecord = await parseObjectBody(request);
-          if (disconnectRecord.acknowledge === true) {
-            if (disconnectRecord.source_id === 'telegram.messages') await dashboardMessaging?.cancelAndWait('telegram');
-            if (disconnectRecord.source_id === 'whatsapp.personal.messages') await dashboardMessaging?.cancelAndWait('whatsapp');
-          }
-          return await withDashboardGrantMutation(async () => {
+          return await withMessagingPairingHeld(disconnectRecord, () => withDashboardGrantMutation(async () => {
           if (!sourceDashboard) {
             throw new EmailSourceWorkerError(
               501,
@@ -2719,7 +2725,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
               });
             },
           );
-          });
+          }));
         }
 
         // Delete indexed data: removes what Olympus indexed from a source that
@@ -2735,11 +2741,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
         if (request.method === 'POST' && url.pathname === '/dashboard/delete-source-data') {
           const mutationRecord = await parseObjectBody(request);
           // A pairing attempt may itself be waiting for the grant lock. Stop it before taking that lock.
-          if (mutationRecord.acknowledge === true) {
-            if (mutationRecord.source_id === 'telegram.messages') await dashboardMessaging?.cancelAndWait('telegram');
-            if (mutationRecord.source_id === 'whatsapp.personal.messages') await dashboardMessaging?.cancelAndWait('whatsapp');
-          }
-          return await withDashboardGrantMutation(async () => {
+          return await withMessagingPairingHeld(mutationRecord, () => withDashboardGrantMutation(async () => {
           if (!sourceDashboard) {
             throw new EmailSourceWorkerError(
               501,
@@ -2778,7 +2780,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
               raw_runtime_secrets_exposed: false,
             },
           });
-          });
+          }));
         }
 
         // Unpair: Disconnect's twin for a source paired as a session.
@@ -2801,11 +2803,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
         if (request.method === 'POST' && url.pathname === '/dashboard/unpair') {
           const mutationRecord = await parseObjectBody(request);
           // A pairing attempt may itself be waiting for the grant lock. Stop it before taking that lock.
-          if (mutationRecord.acknowledge === true) {
-            if (mutationRecord.source_id === 'telegram.messages') await dashboardMessaging?.cancelAndWait('telegram');
-            if (mutationRecord.source_id === 'whatsapp.personal.messages') await dashboardMessaging?.cancelAndWait('whatsapp');
-          }
-          return await withDashboardGrantMutation(async () => {
+          return await withMessagingPairingHeld(mutationRecord, () => withDashboardGrantMutation(async () => {
           if (!sourceDashboard) {
             throw new EmailSourceWorkerError(
               501,
@@ -3113,7 +3111,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
               });
             },
           );
-          });
+          }));
         }
 
         // Importing an archive (archive-import/dashboard.ts): the upload of

@@ -552,7 +552,7 @@ import { ingestionTurn, startCpuSampleLog } from '../control-path-headroom.ts';
  */
 const SOURCE_STATUS_PUBLISH_MIN_INTERVAL_MS = 120_000;
 import { remoteAccessFromStatus, type DashboardAgentConnectionsBackend } from '../agent-connections.ts';
-import { createDashboardRemoteAccessControl, createGatewayRemoteAccessConfigWriter, createStandaloneRemoteAccessConfigWriter, createDashboardEngineRestart } from '../remote-access-control.ts';
+import { createDashboardRemoteAccessControl, createGatewayRemoteAccessConfigWriter, createStandaloneRemoteAccessControl, createDashboardEngineRestart } from '../remote-access-control.ts';
 
 const DROPBOX_SOURCE_ANSWER_SELF_HEAL_RETRY_AFTER_MS = 5_000;
 const DROPBOX_SOURCE_ANSWER_SELF_HEAL_PRIORITY = 1_000_000;
@@ -571,6 +571,8 @@ export function createWorkerMessagingCaptureOwnership(options: {
   revokeGrant?: (path: string) => void;
   shouldResumeCapture?: () => boolean;
   onResumeFailure?: (source: MessagingCaptureSource) => void;
+  /** A resume after a pause worked: a failure recorded earlier no longer holds (#687). */
+  onResumeSuccess?: (source: MessagingCaptureSource, status: MessagingCaptureStatus) => void;
 }): {
   captures: Partial<Record<MessagingCaptureSource, WorkerMessagingCaptureSupervisor>>;
   nativeOwners: Record<MessagingCaptureSource, boolean>;
@@ -649,8 +651,10 @@ export function createWorkerMessagingCaptureOwnership(options: {
         } finally {
           paused[source] -= 1;
           if (stopped && !paused[source] && (options.shouldResumeCapture?.() ?? true)) {
-            try { await capture.reconcile(); }
+            let resumed: MessagingCaptureStatus | undefined;
+            try { resumed = await capture.reconcile(); }
             catch { options.onResumeFailure?.(source); }
+            if (resumed) options.onResumeSuccess?.(source, resumed);
           }
         }
       });
@@ -2578,17 +2582,18 @@ export async function main(): Promise<void> {
   const packageRoot = olympusPackageRoot();
   let capturesClosed = false;
   const captureFailures: Partial<Record<'telegram' | 'whatsapp', true>> = {};
+  // What each supervisor last reported, for the dashboard. Absent for a source
+  // whose capture the native service owns: this worker runs nothing there.
+  const captureStatuses: Partial<Record<'telegram' | 'whatsapp', MessagingCaptureStatus>> = {};
   const captureOwnership = createWorkerMessagingCaptureOwnership({
     shouldResumeCapture: () => !capturesClosed,
     onResumeFailure: (source) => { captureFailures[source] = true; },
+    onResumeSuccess: (source, status) => { delete captureFailures[source]; captureStatuses[source] = status; },
     registryPath: connectedHandleRegistryPath!,
     packageRoot,
   });
   const captures = captureOwnership.captures;
   let captureReconcileRunning = false;
-  // What each supervisor last reported, for the dashboard. Absent for a source
-  // whose capture the native service owns: this worker runs nothing there.
-  const captureStatuses: Partial<Record<'telegram' | 'whatsapp', MessagingCaptureStatus>> = {};
   // Sources whose last reconcile threw: their old status is no fact about the helper.
   const captureEntries = () => Object.entries(captures) as Array<['telegram' | 'whatsapp', WorkerMessagingCaptureSupervisor]>;
   const reconcileCaptures = async () => {
@@ -6405,9 +6410,8 @@ export async function main(): Promise<void> {
       restart: () => { restartEngine({ quietWaitMs: 0 }); },
       failed: () => { remoteAccessRestartFailed = true; console.warn('[olympus] remote_access_restart_failed'); },
     });
-    dashboardRemoteAccessControl = createDashboardRemoteAccessControl({
-      setEnabled: remoteAccessHostKind === 'standalone'
-        ? createStandaloneRemoteAccessConfigWriter({
+    dashboardRemoteAccessControl = remoteAccessHostKind === 'standalone'
+      ? createStandaloneRemoteAccessControl({
             write: enabled => setEngineRemoteAccessEnabled(engineServicePaths().configPath, enabled),
             ...(process.platform !== 'darwin' ? { unsupportedReason: 'Changing remote access from this dashboard is not available on Linux yet. Copy the system report from Help and contact support.' } : {}),
             canRestart: () => {
@@ -6416,8 +6420,7 @@ export async function main(): Promise<void> {
             },
             requestRestart: () => { remoteAccessRestartFailed = false; return requestEngineRestart(); },
           })
-        : createGatewayRemoteAccessConfigWriter({ authToken, env: process.env }),
-    });
+      : createDashboardRemoteAccessControl({ setEnabled: createGatewayRemoteAccessConfigWriter({ authToken, env: process.env }) });
   }
   // A background connection: a live remote agent that is not ChatGPT (the
   // owner's ChatGPT is the owner's own work). An unknown id is not one.
@@ -6707,14 +6710,17 @@ export async function main(): Promise<void> {
     // holds the conversation), or named by the caller.
     const { consultChatgptFrontierModel, consultChatgptModelUnavailableMessage } = await import('../../core/consult-settings.ts');
     const chatgptModel = (): string => consultChatgptFrontierModel(readConsultSettings().settings);
+    // The funding date follows the policy file (`olympus zkapi funding-date`) without a restart.
+    const { zkapiFundingDateRefresher } = await import('../../core/zkapi-funding-date.ts');
+    const zkapiProfiles = zkapiFundingDateRefresher(sovereigntyEngine.source === 'file' ? sovereigntyEngine.path : undefined);
     const transport = (model: string) => resolveZkapiConsultTransport(
-      sovereigntyEngine.config.modelProfiles,
+      zkapiProfiles(sovereigntyEngine.config.modelProfiles),
       (secretRef) => resolveSecretRefValueSync(secretRef, { env: environmentWithWorkerSetupEnv() }),
       { env: process.env, model },
     );
     // The route's settings and today's record only: no key is resolved for this check.
     zkapiDailyLimitNow = () => {
-      const route = resolveZkapiConsultTransport(sovereigntyEngine.config.modelProfiles, () => undefined, { env: process.env });
+      const route = resolveZkapiConsultTransport(zkapiProfiles(sovereigntyEngine.config.modelProfiles), () => undefined, { env: process.env });
       return route ? zkapiDailyLimitState(route.settings, route.statePath ?? defaultZkapiStatePath(), new Date()) : 'unset';
     };
     // The owner's own writer model (consult.json `writer`) arrives as the Ask
@@ -7338,6 +7344,7 @@ export async function main(): Promise<void> {
         ...(snifferEnv.maxCallsPerDay !== undefined ? { maxCallsPerDay: snifferEnv.maxCallsPerDay } : snifferLane.kind === 'venice' && !judgeSpending.status().uncapped ? { maxCallsPerDay: Number.MAX_SAFE_INTEGER } : {}),
         // Its own parallel calls are not answers: only someone else's call holds it back.
         answersInFlight: () => snifferResource !== undefined && localModelActivity.busyExcept(snifferResource, 'tier_sniffer'),
+        ownerInFlight: () => snifferResource !== undefined && localModelActivity.ownerInFlight(snifferResource),
         // A ready Inbox question stops the pass, so its answer runs, then classification resumes.
         shouldYield: () => localPrivateAnswers?.overdue() ?? false,
         breakerOpen: () => secureAnalystPoolState.isBreakerOpen('secure_local', snifferLane.profileId),
@@ -8276,45 +8283,73 @@ export function parseConnectorStoreMountsFromEnv(
   return mountConnectorStoreDeclarations(compileConnectorStoreMountDeclarations(raw, options), options);
 }
 
-/** Compile fixed configuration once; only pending absent files need probes on reads. */
+/**
+ * Compile fixed configuration once; only pending absent files need probes on
+ * reads. A store whose file exists but fails to mount (an account mid-deletion,
+ * say) is retried on a bounded backoff, so it is found without a roster change
+ * or restart while repeated reads still skip the ownership scan. Each store's
+ * failure is logged once until its message changes or it mounts.
+ */
 export function createConnectorStoreMountDiscovery(raw: string | undefined, options: {
   stores(): readonly LocalConnectorStore[];
   registeredCorpora(): NonNullable<ConnectorStoreMountParsingOptions['registeredCorpora']>;
   storeOwner(): StoreFileOwner;
   reportFailure?(message: string): void;
+  now?(): number;
 }): () => ConnectorStoreMount[] {
-  const reported = new Set<string>();
+  // Local, not module-level: startup runs this factory while the module is
+  // paused at the entrypoint's top-level await, before later bindings exist.
+  const retryBaseMs = 5_000;
+  const retryMaxMs = 10 * 60_000;
+  const reported = new Map<string, string>();
   const reportFailure = (message: string): void => {
     const label = message.split(' skipped:')[0]!;
-    if (reported.has(label)) return;
-    reported.add(label);
+    if (reported.get(label) === message) return;
+    reported.set(label, message);
     (options.reportFailure ?? console.error)(message);
   };
+  const now = options.now ?? Date.now;
   const declarations = compileConnectorStoreMountDeclarations(raw, { reportFailure });
   const registeredCorpora = options.registeredCorpora();
   let previousStores: readonly LocalConnectorStore[] | undefined;
   let pending: readonly ValidatedConnectorStoreMountDeclaration[] = declarations;
+  const failed = new Map<ValidatedConnectorStoreMountDeclaration, { attempts: number; retryAt: number }>();
   return () => {
     const stores = options.stores();
     if (!previousStores || previousStores.length !== stores.length || stores.some((store, i) => store !== previousStores![i])) {
       pending = declarations;
       previousStores = [...stores];
     }
-    if (!pending.length) return [];
+    const time = now();
+    const due = [...failed].filter(([declaration, failure]) => failure.retryAt <= time && !pending.includes(declaration));
+    const candidates = due.length ? [...pending, ...due.map(([declaration]) => declaration)] : pending;
+    if (!candidates.length) return [];
     const byCorpus = new Map(stores.map(store => [store.corpusId, store]));
     const ready: ValidatedConnectorStoreMountDeclaration[] = [];
     const absent: ValidatedConnectorStoreMountDeclaration[] = [];
-    for (const declaration of pending) {
+    for (const declaration of candidates) {
       const placed = hasFolderLayout(storageAccountForCorpus(declaration, registeredCorpora).sourceId);
       if (byCorpus.has(declaration.corpusId) || (!placed && (!declaration.dbPath || existsSync(declaration.dbPath)))) ready.push(declaration);
       else absent.push(declaration);
     }
     pending = absent;
     if (!ready.length) return [];
-    return mountConnectorStoreDeclarations(ready, {
+    const mounts = mountConnectorStoreDeclarations(ready, {
       existingOnly: true, collidingStores: stores, registeredCorpora: options.registeredCorpora(),
       storeOwner: options.storeOwner(), reportFailure,
     });
+    const mounted = new Set(mounts.map(mount => mount.store.corpusId));
+    for (const declaration of ready) {
+      if (mounted.has(declaration.corpusId)) {
+        failed.delete(declaration);
+        reported.delete(`Connector-store mount ${declaration.corpusId}`);
+        continue;
+      }
+      const attempts = (failed.get(declaration)?.attempts ?? 0) + 1;
+      const delay = Math.min(retryBaseMs * 2 ** Math.min(attempts - 1, 30), retryMaxMs);
+      failed.set(declaration, { attempts, retryAt: time + delay });
+    }
+    return mounts;
   };
 }
 
