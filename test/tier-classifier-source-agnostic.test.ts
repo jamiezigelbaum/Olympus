@@ -28,6 +28,8 @@ const MODULES = [
   'src/workers/classification/sniffer-decision.ts',
   'src/workers/classification/sniffer-decision-mass.ts',
   'src/workers/classification/sniffer-resolver.ts',
+  // The question-matched raise (#1062): item identities only, scanned like the rest.
+  'src/workers/classification/judge-boost.ts',
   'src/workers/classification/embedding-prefilter.ts',
   'src/workers/classification/embedding-logistic.ts',
   'src/workers/classification/installed-tier-classification.ts',
@@ -75,6 +77,8 @@ const IMPORT_ALLOWLIST = new Set([
   './sniffer.ts',
   './sniffer-lane.ts',
   './sniffer-store.ts',
+  // Question-matched order only (#1062); imports only tier-ledger.
+  './judge-boost.ts',
   './embedding-prefilter.ts',
   './embedding-logistic.ts',
   '../control-path-headroom.ts',

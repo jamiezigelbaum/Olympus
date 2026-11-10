@@ -1,4 +1,5 @@
 import { adoptExistingCloudApproval, createJudgeSetup } from '../classification/judge-setup.ts';
+import { builtInRerankerFromEnv } from '../source-index/built-in-reranker.ts';
 import { JudgeSpending, withJudgeSpendingStop, judgeSpendingPath } from '../classification/judge-spending.ts';
 import { DEFAULT_VENICE_JUDGE_CONCURRENT_CALLS, JUDGE_PROMPT_CACHE_KEY, JudgeRateLimitPacer } from '../classification/judge-pacing.ts';
 import { createDecisionSnifferModel, type SnifferModel } from '../classification/sniffer-decision.ts';
@@ -10,7 +11,7 @@ import { withFirstRunPrivacyGate } from '../first-run-privacy-gate.ts';
 import { engineServicePaths, setEngineRemoteAccessEnabled, readEngineLogs, restartEngine, inspectEngine, waitForQuietEngine } from '../../core/engine-service.ts';
 import { privacyChoicePending } from '../../core/first-run-privacy.ts';
 import { LocalModelDiscovery, saveLocalAnswerModel } from '../../core/local-model-discovery.ts';
-import { saveFirstRunPrivacyChoice } from '../../core/first-run-privacy.ts';
+import { saveFirstRunPrivacyChoice, savePrivateAnswerMode } from '../../core/first-run-privacy.ts';
 import { createSpoolChangeSubscription } from '../messaging-spool-wake.ts';
 import { hasFolderLayout, resolvedRawPath, resolvedStorePath, retiredPathSettings } from '../../core/source-placement.ts';
 import { DASHBOARD_PRIVATE_ANSWERS_COPY as PRIVATE_ANSWERS_COPY } from '../dashboard/vocabulary.ts';
@@ -48,7 +49,7 @@ import { environmentWithWorkerSetupEnv, readWorkerSetupEnv } from '../../core/wo
 import { remoteOpenInstructions, resolveServerMode, resolveAgentApprovalHost } from '../../core/remote-open.ts';
 import { loadOrCreateDashboardSessionSecret } from '../../core/dashboard-session-secret.ts';
 import { execFile } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { dirname, isAbsolute, join } from 'node:path';
 import {
   createFileExtractionRuntime,
@@ -159,6 +160,7 @@ import {
   type LoadSovereigntyOptions,
   type SovereigntyModelProfile,
   type SovereigntyResolvedProfile,
+  validateSovereigntyConfig,
 } from '../../core/sovereignty.ts';
 import { createSourceCorpusRegistry } from '../../core/source-corpus-registry.ts';
 import {
@@ -337,6 +339,7 @@ import { createParentLabelResolver } from '../connector-store/parent-label.ts';
 import { createUnreadableLocators } from '../connector-store/unreadable-locators.ts';
 import { hiddenProbesByParentIdentity } from '../connector-store/child-visibility.ts';
 import { createReleaseTierCheck, createTierVisibilityGate, type TierVisibilityScope } from '../connector-store/tier-visibility.ts';
+import { judgeBoosts } from '../classification/judge-boost.ts';
 import { secretLocationsPathForStore, type SecretLocationsIndex } from '../classification/secret-locations.ts';
 import {
   enableSourceRegistryAdoption,
@@ -538,7 +541,7 @@ import { registerBuiltInPrivateModel, registeredBuiltInPrivateModel, resolveJudg
 import { createAnswerActivity, createLocalModelActivity, runBackgroundInference, runClassificationInference, localModelResourceKey, type LocalModelActivity } from '../answer-activity.ts';
 import { privacyOwnerContext } from '../classification/privacy-profile.ts';
 import { TierSnifferService, tierSnifferServiceEnv } from '../classification/sniffer-service.ts';
-import { SNIFFER_MAX_CONCURRENT_CALLS } from '../classification/sniffer-resolver.ts';
+import { SNIFFER_MAX_CONCURRENT_CALLS, completeAfterSlot } from '../classification/sniffer-resolver.ts';
 import { resolveClassificationLedgerPath, readClassificationLedger, isClassifierApproved } from '../classification-ledger.ts';
 import type { AnalystModel } from '../../core/analyst.ts';
 import { resolveTierMigrationPaths, tierMigrationStatusSummary } from '../classification/tier-migration.ts';
@@ -2733,6 +2736,18 @@ export async function main(): Promise<void> {
     return 'ready';
   };
   let requestModelReload: (request?: ModelKeyReloadRequest) => boolean = () => false;
+  let deferredReloads: ModelKeyReloadRequest[] | undefined;
+  /** Run `writes` with every reload they request held until they finish, then requested once (#1050). */
+  const withDeferredReloads = async <T>(writes: () => Promise<T>): Promise<T> => {
+    if (deferredReloads) return writes();
+    deferredReloads = [];
+    try { return await writes(); }
+    finally {
+      const held = deferredReloads;
+      deferredReloads = undefined;
+      for (const request of held) requestModelReload(request);
+    }
+  };
   // Set once the real reload is installed (after startup): until then a
   // request is a no-op, so Delete indexed data must refuse rather than leave
   // open handles serving deleted rows (PR #455 review).
@@ -3029,7 +3044,8 @@ export async function main(): Promise<void> {
     corpusIds: lane.corpusIds,
     stores: () => connectorStores.filter((store) => lane.corpusIds.has(store.corpusId)),
   }));
-  const tierVisibilityGate = createTierVisibilityGate(tierScopes);
+  // A query's matches still waiting for their privacy judgment are judged next (#1062).
+  const tierVisibilityGate = createTierVisibilityGate(tierScopes, (identities) => judgeBoosts.raise(identities));
   // A child item's parent: its names, judged against the ledger that governs its lane (answers and the unreadable list).
   const parentLabelResolver = createParentLabelResolver({
     stores: () => connectorStores,
@@ -4778,6 +4794,8 @@ export async function main(): Promise<void> {
       }
       const defaultLocalAnalyst = sovereigntyAnalysts.get('local-source-answer')?.analyst
         ?? createAnalyst(localSourceAnswerModel, { auditSuspiciousDrafts: true });
+      // Off unless the owner set OLYMPUS_SOURCE_RERANKER=built-in (issue #921).
+      const sourceReranker = builtInRerankerFromEnv();
       return createAnalystSourceIndexAnswerHandler({
         inferenceGuard: (pack, request, corpusIds) => guardSourceAnswerEvidence({ lanes: sourceAnswerLanes!, pack, request, corpusIds }),
         analyst: defaultLocalAnalyst,
@@ -4786,6 +4804,7 @@ export async function main(): Promise<void> {
           () => secureDerivativeDefault ?? 'allow',
         ),
         queryPlanner: createAnalystQueryPlanner(localSourceAnswerModel),
+        ...(sourceReranker ? { reranker: sourceReranker } : {}),
         ...(cloudAnalyst ? { cloudAnalyst } : {}),
         veniceAnalyst: (request) => {
           const requestedProvider = request.analyst_provider ?? (request.analyst_model ? 'venice' : 'default');
@@ -6096,6 +6115,9 @@ export async function main(): Promise<void> {
       tierScopes,
       () => secureDerivativeDefault ?? 'allow',
     ),
+    // Local callers read Private, so only items still waiting for their
+    // judgment (found by words, not yet by meaning) are counted for them.
+    pendingPrivacyItems: () => tierSnifferBacklog?.().pendingItems,
     // Asking for an import or a removal, and reading the list: nothing else (archive-import/agent.ts).
     archiveImportAgent: archiveImportDashboard.agent,
     // Bound late: the consult block below sets askAnonymouslyNow.
@@ -6197,6 +6219,20 @@ export async function main(): Promise<void> {
               if (!result.ok || !result.changed) return false;
               requestModelReload();
               return true;
+            },
+            deferReloads: withDeferredReloads,
+            savePrivateAnswerMode: (choice) => {
+              if (sovereigntyEngine.source !== 'file' || !sovereigntyEngine.path) return { ok: false, message: 'This Olympus has no policy file to change.' };
+              // The policy on disk, not the boot copy: an earlier change may already be saved.
+              let current;
+              try { current = validateSovereigntyConfig(JSON.parse(readFileSync(sovereigntyEngine.path, 'utf8'))); }
+              catch { return { ok: false, message: 'The privacy policy file cannot be read.' }; }
+              let result;
+              try { result = savePrivateAnswerMode(sovereigntyEngine.path, choice, current); }
+              catch (error) { return { ok: false, message: error instanceof Error ? error.message : 'The Private-answer mode could not be saved.' }; }
+              if (!result.ok) return { ok: false, message: 'The privacy policy changed while saving. Refresh and try again.' };
+              if (!result.changed) return { ok: true, message: 'Already in use.' };
+              return { ok: true, message: requestModelReload() ? 'Saved. Olympus is applying it.' : 'Saved. Restart Olympus to apply it.' };
             },
             connectModelKey,
             // The panel's tools on the computer; bound late (set up further
@@ -6843,7 +6879,13 @@ export async function main(): Promise<void> {
       // manifest against the tier ledgers and release rules as they are now
       // (core/remote-result.ts).
       releaseCheck: remoteReleaseCheck,
-      pendingPrivacyItems: () => tierSnifferBacklog?.().pendingItems,
+      // An agent outside this computer reads no Private store: an item
+      // waiting for its judgment, and one judged lower whose move out of
+      // Private is still queued, are both out of its reach until then.
+      pendingPrivacyItems: () => {
+        const backlog = tierSnifferBacklog?.();
+        return backlog ? backlog.pendingItems + backlog.lowerMovesQueued : undefined;
+      },
       // Summary-rule agents only: the ChatGPT surface records through its own path (chatgpt/mcp-surface.ts).
       ...(caller.connectionId ? { remotePrivatePart: remotePrivateParts.forConnection(caller.connectionId) } : {}),
     }),
@@ -7319,7 +7361,8 @@ export async function main(): Promise<void> {
           ...(snifferModel.prepareSniffer ? {
             prepareSniffer: (signal?: AbortSignal) => runClassificationInference(() => localModelActivity.track(snifferResource, snifferModel, { tag: 'tier_sniffer' }).prepareSniffer!(signal)),
           } : {}),
-          complete: request => runClassificationInference(() => localModelActivity.track(snifferResource, snifferModel, { concurrency: Math.min(SNIFFER_MAX_CONCURRENT_CALLS, snifferEnv.concurrentCalls ?? 1), tag: 'tier_sniffer' }).complete(request)),
+          // The completion says how long it waited for the model slot (#893).
+          complete: request => completeAfterSlot(snifferModel, timed => runClassificationInference(() => localModelActivity.track(snifferResource, timed, { concurrency: Math.min(SNIFFER_MAX_CONCURRENT_CALLS, snifferEnv.concurrentCalls ?? 1), tag: 'tier_sniffer' }).complete(request))),
         } : snifferModel,
         stores: () => connectorStores,
         classificationLedgerPath: resolveClassificationLedgerPath(process.env),
@@ -7410,11 +7453,17 @@ export async function main(): Promise<void> {
     // the kernel releases the lock when this process exits.
   };
   shutdownSignals.setShutdown(shutdown);
-  requestModelReload = shutdownSignals.modelReload({
+  const reloadNow = shutdownSignals.modelReload({
     managed: workerRestartsItself(workerLaunch, process.env),
     drain: async () => { await Promise.all(Object.values(captures).map((capture) => capture.stop())); await server.stop(true); },
     exit: (code) => process.exit(code),
   });
+  requestModelReload = (request) => {
+    // While a settings proposal is being applied, every writer's reload waits
+    // for the last write, so the restart cannot cut the batch short.
+    if (deferredReloads) { deferredReloads.push(request ?? {}); return workerRestartsItself(workerLaunch, process.env); }
+    return reloadNow(request);
+  };
   modelReloadInstalled = true;
   // After the reload handler, so a newer strongest model found at boot is
   // applied; then daily, so a long-running worker follows new releases too.
