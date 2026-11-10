@@ -153468,6 +153468,20 @@ function mountDashboardController(options) {
       options.navigate(href);
     }
   }
+  function applyOpenHash() {
+    const view4 = root.ownerDocument.defaultView;
+    const id = view4 ? view4.location.hash.slice(1) : "";
+    if (!view4 || !/^[A-Za-z0-9_-]+$/.test(id))
+      return;
+    const dialog = root.querySelector(`dialog[data-open-hash][id="${id}"]`);
+    if (!dialog || typeof dialog.showModal !== "function")
+      return;
+    try {
+      view4.history.replaceState(null, "", view4.location.pathname + view4.location.search);
+    } catch {}
+    if (!dialog.open)
+      dialog.showModal();
+  }
   function applyOpenTarget() {
     const view4 = root.ownerDocument.defaultView;
     if (!view4 || !view4.location.hash.startsWith("#olympus-open="))
@@ -153731,6 +153745,7 @@ function mountDashboardController(options) {
   root.addEventListener(redrawEvent, onRedrawRequest);
   applyWriteCapability();
   applyOpenTarget();
+  applyOpenHash();
   restartPoll();
   resumeMessaging();
   const dispose = () => {
@@ -165065,14 +165080,15 @@ function renderDashboardConnectPage(view3, options) {
   const rows = connected2.map((source) => connectedSourceRow(source, options?.messagingLocalSession === true, off)).concat(kept.map((source) => connectedSourceRow(source, false, off, true)));
   const tiles = setupable.filter((source) => !CONNECTED_STATES.has(source.connection.state)).map((source) => `<button class="srctile" type="button" data-source-pick="${escapeHtml2(source.source_id)}">${sourceLogoTile(source.source_id)}<span><b>${escapeHtml2(source.label)}</b><span class="pnote">${escapeHtml2(SOURCE_TILE_LINES[source.source_id] ?? "")}</span></span></button>`).join("");
   const panels = setupable.map((source) => `<div class="srcsetup" data-source-setup="${escapeHtml2(source.source_id)}" hidden><button class="btn plainlink" type="button" data-source-back>← All sources</button>` + renderSetupRow(source, view3, blocked, basePath, options?.messagingLocalSession === true) + sourceSupportBlock(source) + "</div>").join("");
-  const sheet = '<dialog class="srcsheet" id="add-source" data-add-source data-closable aria-labelledby="add-source-title">' + '<div class="adddialoghead"><h3 id="add-source-title">Add a source</h3><button class="btn iconbtn" type="button" data-dialog-close aria-label="Close">✕</button></div>' + `<div data-source-catalog><input class="keyfield srcsearch" type="search" data-source-search placeholder="Search sources…" aria-label="Search sources">` + (tiles ? `<div class="srctiles">${tiles}</div>` : `<p class="pnote">${escapeHtml2(W.connect.empty)}</p>`) + `<p class="pnote">Sources you've already connected aren't listed.</p></div>` + panels + "</dialog>";
+  const sheet = '<dialog class="srcsheet" id="add-source" data-add-source data-closable aria-labelledby="add-source-title">' + '<div class="adddialoghead"><h3 id="add-source-title">Add a source</h3><button class="btn iconbtn" type="button" data-dialog-close aria-label="Close">✕</button></div>' + `<div data-source-catalog><input class="keyfield srcsearch" type="search" data-source-search placeholder="Search sources…" aria-label="Search sources">` + (tiles ? `<div class="srctiles">${tiles}</div>` : `<p class="pnote">${escapeHtml2(W.connect.empty)}</p>`) + `<p class="pnote">Sources you've already connected aren't listed.</p><p class="pnote">Not listed? ${CONNECTOR_OPENER}</p></div>` + panels + "</dialog>";
   const body = [
     lockedGate2(options),
     renderModelSetupBlocker(view3.model_setup, { keysHref: dashboardLocalPageHref("keys", token) }),
     `<div class="srcrows" id="sources">${rows.map((entry) => entry.row).join("") || '<p class="pnote">No sources connected yet.</p>'}</div>`,
-    `<div class="srcbar"><button class="btn primary" type="button" data-dialog-open="add-source">+ Add a source</button><span class="pnote">Not listed? <a href="${escapeHtml2(dashboardLocalPageHref("connector", token))}">Build a connector</a></span></div>`,
+    `<div class="srcbar"><button class="btn primary" type="button" data-dialog-open="add-source">+ Add a source</button><span class="pnote">Not listed? ${CONNECTOR_OPENER}</span></div>`,
     rows.map((entry) => entry.dialogs).join(""),
-    sheet
+    sheet,
+    connectorDialog()
   ].filter((block) => block !== "").join(`
 `);
   return localShell({
@@ -165101,19 +165117,9 @@ function renderDashboardAgentsPage(options) {
 `);
   return localShell({ crumb: W.agents.title, tab: "settings", meta: "", body, styles: [AGENT_CONNECT_CSS], options });
 }
-function renderDashboardConnectorPage(options) {
-  const body = [
-    `<div class="sect">${escapeHtml2(CONNECTOR_SHEET_HEADING)}</div>`,
-    connectorSheet({
-      id: CONNECTOR_SHEET_ID,
-      heading: W.connector.line,
-      intro: CONNECTOR_SHEET_INTRO,
-      promptText: CONNECTOR_PROMPT,
-      copyButtonLabel: "Copy prompt"
-    }).replace('class="sheet"', 'class="sheet on"').replace('aria-hidden="true"', 'aria-hidden="false"')
-  ].join(`
-`);
-  return localShell({ crumb: W.connector.title, tab: "sources", meta: "", body, styles: [], options });
+function connectorDialog() {
+  const id = CONNECTOR_DIALOG_ID;
+  return `<dialog class="adddialog" id="${id}" data-closable data-open-hash aria-labelledby="${id}-title">` + `<div class="adddialoghead"><h3 id="${id}-title">${escapeHtml2(CONNECTOR_DIALOG_HEADING)}</h3><button class="btn iconbtn" type="button" data-dialog-close aria-label="Close">✕</button></div>` + `<p class="pnote">${escapeHtml2(CONNECTOR_DIALOG_INTRO)}</p>` + `<div class="promptbox" id="${id}-prompt">${escapeHtml2(CONNECTOR_PROMPT)}</div>` + `<div class="pickbar"><button class="btn primary" type="button" data-copy-target="#${id}-prompt">Copy prompt</button>` + '<button class="btn" type="button" data-dialog-close>Close</button>' + '<span class="copystatus" data-copy-status aria-live="polite"></span></div></dialog>';
 }
 function refusalNotice(source) {
   if (!source.connection.provider_refusal)
@@ -165335,7 +165341,7 @@ function renderJudgeChoice(view3, options) {
     <p>Venice uses your own account and API key, and you pay Venice; Olympus pays for nothing. An end-to-end encrypted option is not available yet.</p></details>
     </fieldset></form></section>`;
 }
-var CONNECTOR_SHEET_ID = "connector-sheet", CONNECTOR_SHEET_HEADING = "Build a connector with your agent", CONNECTOR_SHEET_INTRO, CONNECTOR_PROMPT, W, SYNC_ROUTE_SOURCES, SOURCE_TILE_LINES, CONNECTED_STATES, MESSAGING_SOURCES, SOURCES_CSS = `
+var CONNECTOR_DIALOG_ID = "build-connector", CONNECTOR_DIALOG_HEADING = "Build a connector with your agent", CONNECTOR_DIALOG_INTRO, CONNECTOR_PROMPT, W, SYNC_ROUTE_SOURCES, SOURCE_TILE_LINES, CONNECTED_STATES, MESSAGING_SOURCES, SOURCES_CSS = `
 .srcrows { display: grid; gap: 10px; max-width: 760px; }
 .srcrow { display: flex; align-items: center; gap: 14px; border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; }
 .srcmain { flex: 1; min-width: 0; }
@@ -165360,8 +165366,11 @@ var CONNECTOR_SHEET_ID = "connector-sheet", CONNECTOR_SHEET_HEADING = "Build a c
 .srctile[hidden] { display: none; }
 .srctiles + .pnote { margin-top: 14px; }
 .srcsetup .plainlink { margin: 8px 0 12px; }
+.linkbtn { font: inherit; color: var(--link); background: none; border: 0; padding: 0; text-decoration: underline; cursor: pointer; }
+#build-connector > .pnote { margin: 12px 0 0; }
+#build-connector .promptbox { margin: 12px 0 0; word-break: normal; overflow-wrap: anywhere; }
 @media (max-width: 640px) { .srctiles { grid-template-columns: 1fr; } .srcrow { flex-wrap: wrap; } }
-`, SETTINGS_SECTIONS, SETTINGS_CSS;
+`, CONNECTOR_OPENER, SETTINGS_SECTIONS, SETTINGS_CSS;
 var init_local = __esm(() => {
   init_judge_spending();
   init_source_failure();
@@ -165380,7 +165389,7 @@ var init_local = __esm(() => {
   init_model_setup2();
   init_outside_help();
   init_vocabulary();
-  CONNECTOR_SHEET_INTRO = "Copy this prompt, replace the source name, and paste it into your coding " + "agent. The connector playbook it names lives in an Olympus source checkout, not in the installed " + "package — CONTRIBUTING.md says how to get one. A finished connector appears in Olympus like any " + "built-in.";
+  CONNECTOR_DIALOG_INTRO = "For a source Olympus doesn't have yet. Copy this to your coding agent and " + "replace <SOURCE>. The connector guide is in an Olympus source checkout; CONTRIBUTING.md says how to get one.";
   CONNECTOR_PROMPT = [
     "I’m working in my Olympus checkout. I want to add a new source connector for <SOURCE>.",
     "",
@@ -165411,6 +165420,7 @@ var init_local = __esm(() => {
   };
   CONNECTED_STATES = new Set(["connected", "waiting_for_first_sync", "syncing", "synced", "reauth_required"]);
   MESSAGING_SOURCES = new Set(["telegram.messages", "whatsapp.personal.messages"]);
+  CONNECTOR_OPENER = `<button class="linkbtn" type="button" data-dialog-open="${CONNECTOR_DIALOG_ID}">Build a connector</button>`;
   SETTINGS_SECTIONS = [
     { id: "agents", label: "Agents and access" },
     { id: "models", label: "Models on this computer" },
@@ -165476,6 +165486,9 @@ function dashboardLegacyRedirect(url2) {
 function dashboardOutsideHelpRedirect(url2) {
   return `${dashboardLocalPageHref("settings", dashboardReadToken(url2))}#${DASHBOARD_SETTINGS_ZKAPI_ID}`;
 }
+function dashboardConnectorRedirect(url2) {
+  return `${dashboardLocalPageHref("connect", dashboardReadToken(url2))}#${CONNECTOR_DIALOG_ID}`;
+}
 function renderDashboardLocalPage(page2, input) {
   const options = { ...input.options, basePath: dashboardHomeHref(dashboardReadToken(input.url)) };
   switch (page2) {
@@ -165493,8 +165506,6 @@ function renderDashboardLocalPage(page2, input) {
       return renderDashboardAgentsPage(options);
     case "private_answers":
       return renderDashboardPrivateAnswersPage(options);
-    case "connector":
-      return renderDashboardConnectorPage(options);
     case "settings":
       return renderDashboardSettingsPage(options);
   }
@@ -171415,8 +171426,9 @@ function createEmailSourceWorker(options = {}) {
             }
             return json(await sourceDashboard.panelTools.call(DASHBOARD_TOOL_NAME, {}, dashboardPanelCallContext(url2, request)));
           }
-          if (page2 === "connector")
-            return html2(renderDashboardLocalPage("connector", { url: url2, options: { ...controlSessionCsrfToken ? { controlSessionCsrfToken } : {} } }));
+          if (page2 === "connector") {
+            return new Response(null, { status: 302, headers: { Location: dashboardConnectorRedirect(url2), "Cache-Control": "no-store" } });
+          }
           if (page2 === "agents") {
             return html2(renderDashboardLocalPage("agents", {
               url: url2,
