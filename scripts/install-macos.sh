@@ -514,6 +514,11 @@ main() {
     else
       say "Desktop, Documents, Downloads and iCloud need the Olympus helper. Retry: curl -fsSL https://olympusplugin.ai/install.sh | sh, or run olympus engine install-helper --from <signed app> if you have the app."
     fi
+  elif [ ! -L "$SUPPORT/Olympus Engine.app" ] && [ -x "$SUPPORT/Olympus Engine.app/Contents/MacOS/OlympusEngineHost" ] \
+    && "$BUN" "$RELEASE/dist/cli.js" engine status > "$WORK/helper-status" 2>> "$LOG" </dev/null 8>&- \
+    && tr -d '[:space:]' < "$WORK/helper-status" | grep -Fq '"helper":{"installed":true,"in_use":true'; then
+    # An earlier release installed the helper and the engine still starts through it.
+    say "This release has no new Olympus helper; the one already installed stays in use for Desktop, Documents, Downloads and iCloud."
   else
     say "Desktop, Documents, Downloads and iCloud are not available in this release."
   fi

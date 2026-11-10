@@ -1269,4 +1269,18 @@ describe('macOS helper installer', () => {
     expect(result.stdout).toContain('Desktop, Documents, Downloads and iCloud are not available in this release');
     expect(h.logLines().join('\n')).not.toContain('engine install-helper');
   }, 30_000);
+  shellTest('a release without a helper says an installed helper still in use keeps working (#694)', () => {
+    const h = harness();
+    expectSucceeded(h.run('1.0.0', {}, { helper: {} }));
+    const upgrade = h.run('1.1.0');
+    expectSucceeded(upgrade);
+    expect(upgrade.stdout).toContain('the one already installed stays in use for Desktop, Documents, Downloads and iCloud');
+    expect(upgrade.stdout).not.toContain('not available in this release');
+    expect(h.logLines().filter((line) => line.includes('engine install-helper'))).toHaveLength(1);
+    // A helper that is gone or not runnable is not claimed.
+    chmodSync(join(h.support, 'Olympus Engine.app/Contents/MacOS/OlympusEngineHost'), 0o644);
+    const broken = h.run('1.2.0');
+    expectSucceeded(broken);
+    expect(broken.stdout).toContain('not available in this release');
+  }, 30_000);
 });
