@@ -46199,7 +46199,7 @@ function dashboardImportLandingToken(sourceId) {
 function dashboardSourceLandingToken(sourceId) {
   return `${DASHBOARD_SOURCE_LANDING_PREFIX}${sourceId}`;
 }
-var OLYMPUS_URL_SCHEME = "olympus", OPEN_CONNECT_SOURCES, OPEN_FIX_SECTIONS, OPEN_UNREADABLE_SOURCES, OPEN_ARCHIVES_SOURCE_ID = "archive.imports", OPEN_URL_MAX_LENGTH = 128, OPEN_PAGE_BASE_URL = "https://olympusplugin.ai/open/", DASHBOARD_OPEN_FRAGMENT_KEY = "olympus-open", DASHBOARD_IMPORT_LANDING_PREFIX = "import.", DASHBOARD_SOURCE_LANDING_PREFIX = "source.", DASHBOARD_ALL_SOURCES_LANDING = "sources", DASHBOARD_ALL_SOURCES_ID = "all.sources", DASHBOARD_LAUNCH_OPEN_KEY = "olympus_open";
+var OLYMPUS_URL_SCHEME = "olympus", OPEN_CONNECT_SOURCES, OPEN_FIX_SECTIONS, OPEN_UNREADABLE_SOURCES, OPEN_ARCHIVES_SOURCE_ID = "archive.imports", OPEN_URL_MAX_LENGTH = 128, OPEN_PAGE_BASE_URL = "https://olympusplugin.ai/open/", DASHBOARD_OPEN_FRAGMENT_KEY = "olympus-open", DASHBOARD_IMPORT_LANDING_PREFIX = "import.", DASHBOARD_SOURCE_LANDING_PREFIX = "source.", DASHBOARD_ALL_SOURCES_LANDING = "sources", DASHBOARD_ALL_SOURCES_ID = "all.sources", DASHBOARD_PRIVACY_LANDING = "privacy", DASHBOARD_PRIVACY_LANDING_ID = "privacy.settings", DASHBOARD_LAUNCH_OPEN_KEY = "olympus_open";
 var init_open_targets = __esm(() => {
   OPEN_CONNECT_SOURCES = {
     x: { sourceId: "x.bookmarks", label: "X bookmarks" },
@@ -161707,6 +161707,7 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     unreadablePages: {},
     landing: "",
     landingImport: false,
+    landingPrivacy: false,
     landed: null,
     lastFailure: null
   };
@@ -161815,6 +161816,8 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     if (value2.kind === "computer" && landing && typeof landing.sourceId === "string" && /^[a-z0-9_.]{1,64}$/.test(landing.sourceId)) {
       if (landing.sourceId === config2.allSourcesId)
         state.open["home-all"] = true;
+      else if (landing.sourceId === config2.privacyLandingId)
+        state.landingPrivacy = true;
       else {
         state.landing = landing.sourceId;
         state.landingImport = landing.import === true;
@@ -163535,6 +163538,14 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
       add(list, sourceRow(source));
     return add(section, list);
   }
+  function applyPrivacyLanding() {
+    if (!state.data || state.relayDown || editorOpen() || compact2() || !onComputer())
+      return;
+    state.landingPrivacy = false;
+    if (globalReason())
+      return;
+    openPrivacy("privacy:edit");
+  }
   function openPrivacy(returnKey) {
     if (!privacy)
       return;
@@ -164172,6 +164183,8 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     reportHeight();
     if (state.landing && !picking && !privacyOpen)
       applyLanding();
+    if (state.landingPrivacy && !picking && !privacyOpen)
+      applyPrivacyLanding();
   }
   function reportHeight() {
     const height = Math.ceil(doc2.documentElement.scrollHeight || doc2.body.scrollHeight || 0);
@@ -168131,6 +168144,7 @@ function chatgptDashboardPageHtml(options = {}) {
     disconnectTool: DISCONNECT_SOURCE_TOOL_NAME,
     archivesSourceId: CHATGPT_ARCHIVES_SOURCE_ID,
     allSourcesId: DASHBOARD_ALL_SOURCES_ID,
+    privacyLandingId: DASHBOARD_PRIVACY_LANDING_ID,
     connection: DASHBOARD_CHATGPT_CONNECTION_COPY,
     page: DASHBOARD_CHATGPT_PAGE_COPY,
     statusTone: STATUS_TONE,
@@ -170691,6 +170705,8 @@ function hostProgram(input, bridge, mount) {
       landing = { sourceId: row };
     if (wanted === input.allSourcesLanding.token)
       landing = { sourceId: input.allSourcesLanding.id };
+    if (wanted === input.privacyLanding.token)
+      landing = { sourceId: input.privacyLanding.id };
   }
   function openLocalSession() {
     return fetch(input.localSessionPath, { method: "POST", cache: "no-store", credentials: "same-origin", headers: { "X-Olympus-CSRF": csrfToken } }).then((response) => response.ok ? response.json() : undefined).then((body) => {
@@ -170978,6 +170994,7 @@ function renderComputerHostPage(input) {
     importLanding: DASHBOARD_IMPORT_LANDING_PREFIX,
     sourceLanding: DASHBOARD_SOURCE_LANDING_PREFIX,
     allSourcesLanding: { token: DASHBOARD_ALL_SOURCES_LANDING, id: DASHBOARD_ALL_SOURCES_ID },
+    privacyLanding: { token: DASHBOARD_PRIVACY_LANDING, id: DASHBOARD_PRIVACY_LANDING_ID },
     hasReadToken: token !== undefined,
     toolsCallPath: DASHBOARD_TOOLS_CALL_PATH,
     uploadPath: DASHBOARD_ARCHIVE_UPLOAD_FILE_PATH,
@@ -175213,7 +175230,7 @@ function renderDashboardKeysPage(view4, options) {
   const body = [
     lockedGate2(options),
     dashboardPrivacyTabs("settings", token),
-    `<section id="whats-private"><h3 class="sect">${escapeHtml(DASHBOARD_PRIVACY_SETTINGS_COPY.whatsPrivate)}</h3><p class="pnote">${escapeHtml(DASHBOARD_PRIVACY_SETTINGS_COPY.intro)}</p>` + `<div class="srow nodot"><div class="smain"><b>${escapeHtml(DASHBOARD_PRIVACY_SETTINGS_COPY.wordsTitle)}</b><p class="pnote">${escapeHtml(DASHBOARD_PRIVACY_SETTINGS_COPY.wordsLine)}</p></div><div class="sact"><a class="btn" href="${escapeHtml(home2)}">${escapeHtml(DASHBOARD_PRIVACY_SETTINGS_COPY.wordsOpen)}</a></div></div></section>`,
+    `<section id="whats-private"><h3 class="sect">${escapeHtml(DASHBOARD_PRIVACY_SETTINGS_COPY.whatsPrivate)}</h3><p class="pnote">${escapeHtml(DASHBOARD_PRIVACY_SETTINGS_COPY.intro)}</p>` + `<div class="srow nodot"><div class="smain"><b>${escapeHtml(DASHBOARD_PRIVACY_SETTINGS_COPY.wordsTitle)}</b><p class="pnote">${escapeHtml(DASHBOARD_PRIVACY_SETTINGS_COPY.wordsLine)}</p></div><div class="sact"><a class="btn" href="${escapeHtml(`${home2}#${DASHBOARD_OPEN_FRAGMENT_KEY}=${DASHBOARD_PRIVACY_LANDING}`)}" data-privacy-open>${escapeHtml(DASHBOARD_PRIVACY_SETTINGS_COPY.wordsOpen)}</a></div></div></section>`,
     `<section id="private-routing"><h3 class="sect">${escapeHtml(DASHBOARD_PRIVACY_SETTINGS_COPY.answeredTitle)}</h3><p class="pnote">${escapeHtml(DASHBOARD_PRIVACY_SETTINGS_COPY.answeredIntro)}</p>` + (mode ? `<div class="srow nodot" data-answer-mode="${escapeHtml(mode.id)}"><div class="smain"><b>${escapeHtml(mode.label)}</b>${mode.id === "local-first" ? ` <span class="pnote">· ${escapeHtml(DASHBOARD_PRIVACY_SETTINGS_COPY.recommended)}</span>` : ""}</div><div class="sact"><a class="btn" href="${escapeHtml(home2)}">${escapeHtml(DASHBOARD_PRIVACY_SETTINGS_COPY.change)}</a></div></div>` : "") + renderModelSetupBlocker(view4.model_setup) + `<div${view4.model_setup?.cards.some((card) => card.id === "venice") ? ' id="venice-setup"' : ""}>${renderModelSetup(view4.model_setup, { heading: false })}</div>` + renderAnswerModelPickers(options?.modelChoices, unlocked(options)) + "</section>",
     renderZkapiPrivacy(options, token),
     view4.model_setup?.cards.some((card) => card.id === "venice") ? "" : `<section id="venice-setup"><h3 class="sect">${escapeHtml(DASHBOARD_PRIVATE_ANSWERS_COPY.setUpVenice)}</h3><p class="pnote">${escapeHtml(DASHBOARD_PRIVATE_ANSWERS_COPY.veniceSetupHelp)}</p><div class="modelaction"><form method="post" action="/dashboard/connect/api-key" data-connect-kind="api_key" data-model-provider="venice"><input type="hidden" name="source" value="venice"><input class="keyfield" type="password" name="api_key" required autocomplete="new-password" placeholder="${escapeHtml(DASHBOARD_PRIVATE_ANSWERS_COPY.veniceKey)}" aria-label="${escapeHtml(DASHBOARD_PRIVATE_ANSWERS_COPY.veniceKey)}"><button type="submit" class="btn primary">${escapeHtml(DASHBOARD_PRIVATE_ANSWERS_COPY.connectVenice)}</button><span data-action-message role="status"></span></form></div></section>`,

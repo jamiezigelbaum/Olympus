@@ -35,7 +35,7 @@ import type {
 } from '../../source-dashboard.ts';
 import { dashboardGuidedSessionAgentPrompt } from '../../source-dashboard.ts';
 import { renderMessagingCard } from '../messaging.ts';
-import { DASHBOARD_ALL_SOURCES_LANDING, DASHBOARD_OPEN_FRAGMENT_KEY, dashboardImportLandingToken, dashboardSourceLandingToken } from '../../../core/open-targets.ts';
+import { DASHBOARD_ALL_SOURCES_LANDING, DASHBOARD_PRIVACY_LANDING, DASHBOARD_OPEN_FRAGMENT_KEY, dashboardImportLandingToken, dashboardSourceLandingToken } from '../../../core/open-targets.ts';
 import { renderDashboardAgentsSection, type AgentConnectHost } from '../agents.ts';
 import {
   connectorSheet,
@@ -216,7 +216,7 @@ export function renderDashboardKeysPage(view: SourceDashboardViewModel, options?
     lockedGate(options),
     dashboardPrivacyTabs('settings', token),
     `<section id="whats-private"><h3 class="sect">${escapeHtml(S.whatsPrivate)}</h3><p class="pnote">${escapeHtml(S.intro)}</p>`
-      + `<div class="srow nodot"><div class="smain"><b>${escapeHtml(S.wordsTitle)}</b><p class="pnote">${escapeHtml(S.wordsLine)}</p></div><div class="sact"><a class="btn" href="${escapeHtml(home)}">${escapeHtml(S.wordsOpen)}</a></div></div></section>`,
+      + `<div class="srow nodot"><div class="smain"><b>${escapeHtml(S.wordsTitle)}</b><p class="pnote">${escapeHtml(S.wordsLine)}</p></div><div class="sact"><a class="btn" href="${escapeHtml(`${home}#${DASHBOARD_OPEN_FRAGMENT_KEY}=${DASHBOARD_PRIVACY_LANDING}`)}" data-privacy-open>${escapeHtml(S.wordsOpen)}</a></div></div></section>`,
     `<section id="private-routing"><h3 class="sect">${escapeHtml(S.answeredTitle)}</h3><p class="pnote">${escapeHtml(S.answeredIntro)}</p>`
       + (mode ? `<div class="srow nodot" data-answer-mode="${escapeHtml(mode.id)}"><div class="smain"><b>${escapeHtml(mode.label)}</b>${mode.id === 'local-first' ? ` <span class="pnote">· ${escapeHtml(S.recommended)}</span>` : ''}</div><div class="sact"><a class="btn" href="${escapeHtml(home)}">${escapeHtml(S.change)}</a></div></div>` : '')
       + renderModelSetupBlocker(view.model_setup)
