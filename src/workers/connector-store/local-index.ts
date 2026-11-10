@@ -14813,7 +14813,7 @@ async function hybridConnectorStoreSearch(
   const baselineKeywordLane = keywordAlternatives(request.query)?.size
     ? await withKeywordExpansionDisabled(() => connectorStoreKeywordLaneRows(store, request.query, laneLimit, accountScope, filters, {prefix:false}, request.deadlineAtMs))
     : undefined;
-  const keywordElapsedMs = Date.now() - keywordStartedAt;
+  let keywordElapsedMs = Date.now() - keywordStartedAt;
   const vectorStartedAt = Date.now();
   const vectorLane = await store.vectorSearchLane(
     request.query,
@@ -14848,7 +14848,10 @@ async function hybridConnectorStoreSearch(
       saturated:keywordLane.matchCount.saturated || baselineKeywordLane.matchCount.saturated,
     }};
   }
+  // The relaxed retry is keyword work too, so it counts toward the keyword lane's time.
+  const relaxStartedAt = Date.now();
   keywordLane = await relaxEmptyLocalKeywordLane(store, request.query, laneLimit, accountScope, filters, keywordLane, localKeywordFallback, {}, request.deadlineAtMs);
+  keywordElapsedMs += Date.now() - relaxStartedAt;
   // Every candidate is checked again after the last read, right before fusion emits hits and counts (#1079).
   keywordLane = revalidateKeywordLane(store, keywordLane);
   scoredVectorRows = store.stillVisibleSearchRows(scoredVectorRows);

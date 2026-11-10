@@ -35009,7 +35009,7 @@ async function hybridConnectorStoreSearch(store, provider, request, startedAt, a
   const keywordStartedAt = Date.now();
   let keywordLane = await connectorStoreKeywordLaneRows(store, request.query, laneLimit, accountScope, filters, { prefix: false }, request.deadlineAtMs);
   const baselineKeywordLane = keywordAlternatives(request.query)?.size ? await withKeywordExpansionDisabled(() => connectorStoreKeywordLaneRows(store, request.query, laneLimit, accountScope, filters, { prefix: false }, request.deadlineAtMs)) : undefined;
-  const keywordElapsedMs = Date.now() - keywordStartedAt;
+  let keywordElapsedMs = Date.now() - keywordStartedAt;
   const vectorStartedAt = Date.now();
   const vectorLane = await store.vectorSearchLane(request.query, provider, laneLimit, accountScope, filters, request.deadlineAtMs);
   const vectorElapsedMs = Date.now() - vectorStartedAt;
@@ -35028,7 +35028,9 @@ async function hybridConnectorStoreSearch(store, provider, request, startedAt, a
       saturated: keywordLane.matchCount.saturated || baselineKeywordLane.matchCount.saturated
     } };
   }
+  const relaxStartedAt = Date.now();
   keywordLane = await relaxEmptyLocalKeywordLane(store, request.query, laneLimit, accountScope, filters, keywordLane, localKeywordFallback, {}, request.deadlineAtMs);
+  keywordElapsedMs += Date.now() - relaxStartedAt;
   keywordLane = revalidateKeywordLane(store, keywordLane);
   scoredVectorRows = store.stillVisibleSearchRows(scoredVectorRows);
   vectorRows = store.stillVisibleSearchRows(vectorRows);
