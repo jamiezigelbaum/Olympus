@@ -166321,17 +166321,23 @@ function updateNoticeProgram(config2) {
   };
   function take(key2) {
     try {
-      if (window.location.hash !== "#" + key2)
+      const hash = window.location.hash;
+      if (hash !== "#" + key2 && !hash.startsWith("#" + key2 + "~"))
         return "";
-      window.history.replaceState(window.history.state, "", here());
+      const prior = hash.slice(key2.length + 2);
+      if (prior)
+        window.location.replace(here() + "#" + prior);
+      else
+        window.history.replaceState(window.history.state, "", here());
       return "1";
     } catch {
       return "";
     }
   }
   function keep(key2, _value) {
+    const prior = window.location.hash.replace(/^#/, "");
     try {
-      window.history.replaceState(window.history.state, "", here() + "#" + key2);
+      window.history.replaceState(window.history.state, "", here() + "#" + key2 + (prior ? "~" + prior : ""));
       return true;
     } catch {
       return false;

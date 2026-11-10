@@ -273,15 +273,21 @@ function updateNoticeProgram(config: {
     const rest = params.toString();
     return window.location.pathname + (rest ? '?' + rest : '');
   };
+  // A mark keeps the fragment it replaced (Settings shows its pane through the
+  // fragment, `#updates`), and taking the mark puts that fragment back.
   function take(key: string): string {
     try {
-      if (window.location.hash !== '#' + key) return '';
-      window.history.replaceState(window.history.state, '', here());
+      const hash = window.location.hash;
+      if (hash !== '#' + key && !hash.startsWith('#' + key + '~')) return '';
+      const prior = hash.slice(key.length + 2);
+      if (prior) window.location.replace(here() + '#' + prior);
+      else window.history.replaceState(window.history.state, '', here());
       return '1';
     } catch { return ''; }
   }
   function keep(key: string, _value: string): boolean {
-    try { window.history.replaceState(window.history.state, '', here() + '#' + key); return true; } catch { return false; }
+    const prior = window.location.hash.replace(/^#/, '');
+    try { window.history.replaceState(window.history.state, '', here() + '#' + key + (prior ? '~' + prior : '')); return true; } catch { return false; }
   }
   const resume = take(resumeKey);
   const followed = take(followKey);

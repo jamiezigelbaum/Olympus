@@ -488,6 +488,40 @@ describe('the notice on Home and Settings', () => {
     } finally { await window.happyDOM.close(); }
   });
 
+  test('the reload after Update now keeps the pane the click came from (Settings › Updates)', async () => {
+    const page = (csrfToken: string, localSession: boolean) => renderComputerHostPage({ panelHtml: '<p>panel</p>', origin: 'http://localhost', platform: 'darwin', updateAvailable: { version: '1.5.1' }, selfUpdate: true, csrfToken, localSession });
+    const starts: string[] = [];
+    const open = (url: string, html: string) => {
+      const window = new Window({ url, settings: { enableJavaScriptEvaluation: true } });
+      Object.defineProperty(window.location, 'reload', { value: () => {} });
+      Object.defineProperty(window, 'setInterval', { value: () => 1 });
+      Object.defineProperty(window, 'setTimeout', { value: () => 1 });
+      Object.defineProperty(window, 'fetch', { value: async (target: string) => {
+        if (target === '/v1/health') return new window.Response(JSON.stringify({ update_available: { version: '1.5.1' } }));
+        if (target === DASHBOARD_LOCAL_CONTROL_SESSION_PATH) return new window.Response(JSON.stringify({ csrf_token: 'local-c' }));
+        starts.push(target);
+        return new window.Response(JSON.stringify({ ok: true, update: { state: 'running', step: 1, from: '1.5.0', to: '1.5.1' } }));
+      } });
+      window.document.write(html); window.document.close();
+      return window;
+    };
+    const before = open('http://localhost/dashboard?settings&token=dash_t#updates', page('bearer-c', false));
+    let marked = '';
+    try {
+      (before.document.querySelector('[data-update-now]') as unknown as HTMLButtonElement).click();
+      await waitFor(() => before.location.hash.startsWith('#olympus-update-now'), { description: 'mark set' });
+      marked = before.location.hash;
+    } finally { await before.happyDOM.close(); }
+    expect(marked).toBe('#olympus-update-now~updates');
+    const after = open('http://localhost/dashboard?settings' + marked, page('local-c', true));
+    try {
+      await waitFor(() => starts.length === 1, { description: 'update started after the reload' });
+      // The Updates pane is shown again, so its progress and outcome are visible.
+      expect(after.location.hash).toBe('#updates');
+      expect(after.location.search).toMatch(/^\?settings=?$/);
+    } finally { await after.happyDOM.close(); }
+  });
+
   test('a refused update shows the reason beside the button', async () => {
     const html = renderComputerHostPage({ panelHtml: '<p>panel</p>', origin: 'http://localhost', platform: 'darwin', updateAvailable: { version: '1.5.1' }, selfUpdate: true, csrfToken: 'c', localSession: true });
     const window = new Window({ url: 'http://localhost', settings: { enableJavaScriptEvaluation: true } });
